@@ -1019,3 +1019,171 @@ fn parse_reads_the_answer() {
         ))
     );
 }
+
+#[derive(Default)]
+struct MediaCapture(Mutex<Vec<(String, Vec<Value>)>>);
+#[async_trait]
+impl compose::PinnedModel for MediaCapture {
+    async fn run(
+        &self,
+        _: &str,
+        _: &str,
+        _: std::time::Duration,
+    ) -> Result<steve_modules::GatewayOut, String> {
+        panic!("the image-aware composer must not call the text-only method")
+    }
+    async fn run_with_images(
+        &self,
+        _: &str,
+        prompt: &str,
+        images: &[Value],
+        _: std::time::Duration,
+    ) -> Result<steve_modules::GatewayOut, String> {
+        self.0
+            .lock()
+            .unwrap()
+            .push((prompt.into(), images.to_vec()));
+        Ok(steve_modules::GatewayOut {
+            text: REPLY.into(),
+            ..Default::default()
+        })
+    }
+}
+struct MessageMedia;
+#[async_trait]
+impl steve_channels::media_agent::MediaSource for MessageMedia {
+    async fn load(
+        &self,
+        _: &Channels,
+        _: &steve_channels::respond::Plan,
+        index: usize,
+    ) -> Result<steve_channels::media_agent::Resource, String> {
+        let bytes = if index == 0 {
+            b"\x89PNG\r\n\x1a\nknown-pixels".to_vec()
+        } else {
+            b"deployment error from attached log".to_vec()
+        };
+        Ok(steve_channels::media_agent::Resource {
+            bytes,
+            name: format!("attachment-{index}"),
+            mime: "application/octet-stream".into(),
+        })
+    }
+}
+#[tokio::test(flavor = "multi_thread")]
+async fn composer_receives_real_images_and_file_text_and_rejects_stale_source() {
+    let h = setup().await;
+    let c = h.oncall.clone();
+    let mut m = msg("C_OPS", "media-source", "ulilei", "看看图片和日志", false);
+    m.attachments = vec![
+        json!({"type":"image","key":"img_fixture"}),
+        json!({"type":"file","key":"file_fixture"}),
+    ];
+    let incoming = push(&h, &c, m).await;
+    exec(&h, "UPDATE bots SET model='fixture-model' WHERE id='ops'");
+    let plan =
+        h.ch.store()
+            .reader(|c| steve_channels::flow_actions::plan_of(c, WS, &incoming.message_id))
+            .unwrap();
+    let capture = Arc::new(MediaCapture::default());
+    let composer = compose::Composer::new()
+        .media(Arc::new(MessageMedia))
+        .pinned(capture.clone());
+    composer
+        .generate(&h.ch, &plan, &compose::ComposeOpts::default())
+        .await
+        .unwrap();
+    {
+        let seen = capture.0.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].1.len(), 1);
+        assert_eq!(seen[0].1[0]["source"]["media_type"], "image/png");
+        assert!(seen[0].0.contains("deployment error from attached log"));
+        assert!(seen[0].0.starts_with(H_SAFETY));
+    }
+    let mut other = plan.clone();
+    other.ws = "w2".into();
+    assert!(
+        composer
+            .generate(&h.ch, &other, &compose::ComposeOpts::default())
+            .await
+            .is_err()
+    );
+    let mut other = plan.clone();
+    other.external_id = "another-message".into();
+    assert!(
+        composer
+            .generate(&h.ch, &other, &compose::ComposeOpts::default())
+            .await
+            .is_err()
+    );
+    h.ch.store()
+        .transaction(|tx| -> steve_modules::ApiResult<()> {
+            tx.execute(
+                "UPDATE chan_messages SET purged=1 WHERE id=?",
+                [&plan.message_id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(
+        composer
+            .generate(&h.ch, &plan, &compose::ComposeOpts::default())
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        capture.0.lock().unwrap().len(),
+        1,
+        "no source change may reach a second model call"
+    );
+}
+
+struct PurgeDuringDownload;
+#[async_trait]
+impl steve_channels::media_agent::MediaSource for PurgeDuringDownload {
+    async fn load(
+        &self,
+        ch: &Channels,
+        plan: &steve_channels::respond::Plan,
+        _: usize,
+    ) -> Result<steve_channels::media_agent::Resource, String> {
+        ch.store()
+            .transaction(|tx| -> steve_modules::ApiResult<()> {
+                tx.execute(
+                    "UPDATE chan_messages SET text=NULL,attachments='[]',purged=1 WHERE id=?",
+                    [&plan.message_id],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        Ok(steve_channels::media_agent::Resource {
+            bytes: b"must not reach model".to_vec(),
+            name: "gone.txt".into(),
+            mime: "text/plain".into(),
+        })
+    }
+}
+#[tokio::test(flavor = "multi_thread")]
+async fn media_cleanup_during_download_never_reaches_the_model() {
+    let h = setup().await;
+    let mut m = msg("C_OPS", "media-race", "ulilei", "读取文件", false);
+    m.attachments = vec![json!({"type":"file","key":"file_fixture"})];
+    let incoming = push(&h, &h.oncall, m).await;
+    exec(&h, "UPDATE bots SET model='fixture-model' WHERE id='ops'");
+    let plan =
+        h.ch.store()
+            .reader(|c| steve_channels::flow_actions::plan_of(c, WS, &incoming.message_id))
+            .unwrap();
+    let capture = Arc::new(MediaCapture::default());
+    let composer = compose::Composer::new()
+        .media(Arc::new(PurgeDuringDownload))
+        .pinned(capture.clone());
+    assert!(
+        composer
+            .generate(&h.ch, &plan, &compose::ComposeOpts::default())
+            .await
+            .is_err()
+    );
+    assert!(capture.0.lock().unwrap().is_empty());
+}

@@ -958,6 +958,16 @@ pub struct SharedGateway(pub std::sync::Arc<dyn ModelGateway>);
 
 #[async_trait]
 impl steve_modules::Gateway for SharedGateway {
+    async fn run_with_images(
+        &self,
+        tier: steve_modules::Tier,
+        prompt: &str,
+        images: &[Value],
+        timeout: Duration,
+    ) -> std::result::Result<steve_modules::GatewayOut, String> {
+        with_images(images.to_vec(), self.run(tier, prompt, timeout)).await
+    }
+
     async fn run(
         &self,
         tier: steve_modules::Tier,
@@ -2248,5 +2258,29 @@ mod tests {
         assert!(p.contains("  ST-21: 改按钮 · run · \"帮我把按钮改了\""));
         assert!(p.contains("Steve is reading for an earlier question right now."));
         assert!(p.contains("  prj_a: prj_a —  · dev"));
+    }
+    #[tokio::test]
+    async fn shared_gateway_passes_images_and_clears_the_scope() {
+        struct Capture;
+        #[async_trait]
+        impl ModelGateway for Capture {
+            async fn call(&self, _: &str, _: Tier, _: Duration, _: &[String]) -> Result<Printed> {
+                let images = current_images().expect("image scope reaches actual model gateway");
+                assert_eq!(images[0]["source"]["data"], "aW1hZ2U=");
+                Ok(Printed::default())
+            }
+        }
+        use steve_modules::Gateway;
+        let g = SharedGateway(std::sync::Arc::new(Capture));
+        let image = json!({"type":"image","source":{"type":"base64","media_type":"image/png","data":"aW1hZ2U="}});
+        g.run_with_images(
+            steve_modules::Tier::Smart,
+            "read",
+            &[image],
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+        assert!(current_images().is_none());
     }
 }

@@ -48,6 +48,21 @@ pub trait Gateway: Send + Sync {
     /// what the user sees.
     async fn run(&self, tier: Tier, prompt: &str, timeout: Duration) -> Result<GatewayOut, String>;
 
+    /// Image-aware calls must never silently discard the supplied image blocks.
+    async fn run_with_images(
+        &self,
+        tier: Tier,
+        prompt: &str,
+        images: &[serde_json::Value],
+        timeout: Duration,
+    ) -> Result<GatewayOut, String> {
+        if images.is_empty() {
+            self.run(tier, prompt, timeout).await
+        } else {
+            Err("当前模型入口不支持读取图片".into())
+        }
+    }
+
     /// The smart tier's text only (the B0 call shape, kept for existing callers).
     async fn smart(&self, prompt: &str, timeout: Duration) -> Result<String, String> {
         self.run(Tier::Smart, prompt, timeout).await.map(|o| o.text)
@@ -158,5 +173,20 @@ mod tests {
             }
         );
         assert_eq!(current_tag(), CallTag::default());
+    }
+    #[tokio::test]
+    async fn text_only_gateway_never_silently_discards_images() {
+        let g = crate::testkit::FakeGateway::new();
+        let image = serde_json::json!({"type":"image"});
+        assert!(
+            g.run_with_images(Tier::Smart, "read", &[image], Duration::from_secs(1))
+                .await
+                .is_err()
+        );
+        assert!(g.prompts.lock().unwrap().is_empty());
+        g.run_with_images(Tier::Smart, "text", &[], Duration::from_secs(1))
+            .await
+            .unwrap();
+        assert_eq!(g.prompts.lock().unwrap().len(), 1);
     }
 }
