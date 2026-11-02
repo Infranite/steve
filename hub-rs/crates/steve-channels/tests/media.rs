@@ -11,6 +11,7 @@ use std::time::Duration;
 use axum::Router;
 use axum::body::Body;
 use axum::http::{HeaderMap, Request, header};
+use rusqlite::OptionalExtension;
 use serde_json::{Value, json};
 use steve_channels::Channels;
 use steve_channels::adapters::feishu::FeishuApp;
@@ -148,6 +149,25 @@ fn one(h: &H, s: &str) -> Value {
         .expect("query")
 }
 
+// The WebSocket ACK precedes asynchronous message persistence and its event link,
+// which is committed separately. Wait for both before inspecting resources or raw
+// events; an empty lookup is pending delivery, while other DB errors still fail.
+fn stored_message(h: &H, ext: &str) -> Option<String> {
+    h.env
+        .store()
+        .reader(|c| {
+            Ok::<_, steve_store::StoreError>(
+                c.query_row(
+                    "SELECT id FROM chan_messages WHERE external_id = ? AND direction = 'in' AND event_id IS NOT NULL",
+                    [ext],
+                    |r| r.get(0),
+                )
+                .optional()?,
+            )
+        })
+        .expect("message lookup")
+}
+
 /// Pushes an envelope over the long connection and waits for its message; its `cm_…` id.
 async fn push(h: &H, env: Value) -> String {
     let ext = env["event"]["message"]["message_id"]
@@ -158,16 +178,10 @@ async fn push(h: &H, env: Value) -> String {
     h.fake.ws_wait_acked(&id, T).await.expect("acked");
     let t0 = std::time::Instant::now();
     loop {
-        let v = one(
-            h,
-            &format!(
-                "SELECT id FROM chan_messages WHERE external_id = '{ext}' AND direction = 'in'"
-            ),
-        );
-        if let Some(s) = v.as_str() {
-            return s.to_string();
+        if let Some(id) = stored_message(h, &ext) {
+            return id;
         }
-        assert!(t0.elapsed() < T, "message {ext} never stored");
+        assert!(t0.elapsed() < T, "message {ext} never stored and linked");
         tokio::time::sleep(Duration::from_millis(30)).await;
     }
 }
@@ -258,6 +272,7 @@ fn add_resource(h: &H, msg: &str, key: &str, ct: &str, bytes: &[u8], name: Optio
 #[tokio::test(flavor = "multi_thread")]
 async fn an_image_is_shown_and_fetched_through_its_own_message_only() {
     let h = setup().await;
+    assert_eq!(stored_message(&h, IMG_MSG), None);
     let msg = push(&h, fixture("message_image").unwrap()).await;
     add_resource(&h, IMG_MSG, IMG_KEY, "image/png", PNG, None);
 
