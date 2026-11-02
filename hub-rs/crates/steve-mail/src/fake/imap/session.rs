@@ -322,6 +322,17 @@ impl Session {
             args = p.next().unwrap_or_default();
         }
         self.shared.record(log_line(&tag, &name, args));
+        let pause = {
+            let mut pauses = lock(&self.shared.pauses);
+            pauses
+                .iter()
+                .position(|(command, _, _)| command == &name)
+                .map(|i| pauses.remove(i))
+        };
+        if let Some((_, entered, release)) = pause {
+            let _ = entered.send(());
+            let _ = release.await;
+        }
         if let Some(resp) = self.shared.fail.take(&name) {
             if resp == "HOLD" {
                 // Read until the bounded client abandons this exchange. This models a hung

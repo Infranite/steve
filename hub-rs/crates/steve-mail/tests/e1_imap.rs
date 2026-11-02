@@ -67,14 +67,20 @@ async fn starttls_and_163_id() {
     assert!(id < ex, "ID before EXAMINE: {cmds:?}");
 }
 
+fn inbox_synced(h: &H, conn: &str) -> bool {
+    h.count("SELECT COUNT(*) FROM mail_folders WHERE connection_id = ? AND ext_id = 'INBOX' AND synced IS NOT NULL AND last_uid IS NOT NULL", conn) == 1
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn idle_wakes_the_runner_and_it_reconnects() {
     let h = setup().await;
     let conn = h.connect().await;
     h.mail.start(WS, &conn);
+    // Watch and initial sync run independently. Login/IDLE only prove the watcher is ready:
+    // injecting before the first sync commits makes the message historical backfill, not Ingest.
     assert!(
-        h.until(5, |h| !h.messages(&conn).is_empty() || h.imap.logins() >= 3)
-            .await
+        h.until(5, |h| inbox_synced(h, &conn)).await,
+        "initial inbox cursor must be committed before testing live IDLE ingestion"
     );
     // let the watcher enter IDLE
     assert!(
@@ -96,6 +102,86 @@ async fn idle_wakes_the_runner_and_it_reconnects() {
         "after the reconnect the missed mail arrives"
     );
     h.mail.stop(&conn);
+}
+
+/// Force the exact ordering that made the old login-count readiness check flaky on Linux.
+#[tokio::test(flavor = "multi_thread")]
+async fn idle_can_be_ready_while_initial_sync_is_still_backfilling() {
+    let h = setup().await;
+    let conn = h.connect().await;
+    let (search_entered, release_search) = h.imap.pause_next("UID SEARCH");
+    h.mail.start(WS, &conn);
+    tokio::time::timeout(Duration::from_secs(5), search_entered)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        h.until(5, |h| h.imap.commands().iter().any(|c| c.ends_with("IDLE")))
+            .await
+    );
+    assert!(
+        h.imap.logins() >= 3,
+        "the previous readiness heuristic is satisfied"
+    );
+    assert!(
+        !inbox_synced(&h, &conn),
+        "but the initial cursor has not committed"
+    );
+    h.inject("INBOX", fixtures::get("multipart-alternative.eml").unwrap());
+    release_search.send(()).unwrap();
+    assert!(
+        h.until(5, |h| inbox_synced(h, &conn)
+            && h.messages(&conn).len() == 1
+            && h.events.calls().len() == 1)
+            .await
+    );
+    assert_eq!(
+        h.events.calls().len(),
+        1,
+        "the message was synced, not lost"
+    );
+    assert!(
+        h.events.ingested().is_empty(),
+        "initial look-back stays backfill even with IDLE active"
+    );
+    // Once the real completion condition holds, live mail must be ingested without the poll.
+    h.inject("INBOX", fixtures::get("gbk.eml").unwrap());
+    assert!(h.until(5, |h| h.events.ingested().len() == 1).await);
+    h.mail.stop(&conn);
+}
+
+/// A notification arriving between EXAMINE and the IDLE continuation must not disappear.
+#[tokio::test(flavor = "multi_thread")]
+async fn idle_registration_window_keeps_arrivals() {
+    let h = setup().await;
+    let conn = h.connect().await;
+    h.sync(&conn).await;
+    assert!(inbox_synced(&h, &conn));
+    let (idle_entered, release_idle) = h.imap.pause_next("IDLE");
+    let (wake, mut rx) = tokio::sync::mpsc::channel(4);
+    let stop = tokio_util::sync::CancellationToken::new();
+    let adapter = h.mail.adapter("imap").unwrap();
+    let cx = h.conns.cx(WS, &conn).unwrap();
+    let token = stop.clone();
+    let watcher = tokio::spawn(async move { adapter.watch(&cx, token, wake).await });
+    tokio::time::timeout(Duration::from_secs(5), idle_entered)
+        .await
+        .unwrap()
+        .unwrap();
+    h.inject("INBOX", fixtures::get("multipart-alternative.eml").unwrap());
+    release_idle.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .expect("EXISTS after registration wakes the consumer")
+        .expect("watcher remains live");
+    h.sync(&conn).await;
+    assert_eq!(h.events.ingested().len(), 1);
+    stop.cancel();
+    tokio::time::timeout(Duration::from_secs(5), watcher)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]

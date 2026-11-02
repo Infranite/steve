@@ -254,6 +254,12 @@ impl State {
     }
 }
 
+type CommandPause = (
+    String,
+    tokio::sync::oneshot::Sender<()>,
+    tokio::sync::oneshot::Receiver<()>,
+);
+
 #[derive(Debug)]
 pub(crate) struct Shared {
     pub(crate) cfg: ImapConfig,
@@ -262,6 +268,8 @@ pub(crate) struct Shared {
     /// Bumped on every mailbox change; IDLE sessions wait on it.
     pub(crate) changes: watch::Sender<u64>,
     pub(crate) fail: FailRules,
+    /// One-shot protocol barriers for deterministic concurrency tests, never elapsed sleeps.
+    pub(crate) pauses: Mutex<Vec<CommandPause>>,
     pub(crate) log: Mutex<Vec<String>>,
     pub(crate) logins: Mutex<usize>,
 }
@@ -314,6 +322,7 @@ impl FakeImap {
             state: Mutex::new(state),
             changes: watch::channel(0).0,
             fail: FailRules::default(),
+            pauses: Mutex::new(Vec::new()),
             log: Mutex::new(Vec::new()),
             logins: Mutex::new(0),
         });
@@ -497,6 +506,22 @@ impl FakeImap {
         self.shared.fail.push(command, response);
     }
 
+    /// Pause the next matching command before it runs. The receiver signals arrival; sending or
+    /// dropping the returned sender releases it. Other connections continue normally. This lets
+    /// tests order initial sync and IDLE without relying on command logs as completion signals.
+    pub fn pause_next(
+        &self,
+        command: &str,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (entered, seen) = tokio::sync::oneshot::channel();
+        let (release, wait) = tokio::sync::oneshot::channel();
+        lock(&self.shared.pauses).push((command.to_ascii_uppercase(), entered, wait));
+        (seen, release)
+    }
+
     /// Messages of a folder in UID order.
     pub fn messages(&self, user: &str, folder: &str) -> Result<Vec<ImapMessage>, FakeError> {
         let s = lock(&self.shared.state);
@@ -565,6 +590,7 @@ impl FakeImap {
             Ok(())
         });
         self.shared.fail.clear();
+        lock(&self.shared.pauses).clear();
         lock(&self.shared.log).clear();
         *lock(&self.shared.logins) = 0;
         self.life.kill_connections();
