@@ -1,0 +1,462 @@
+//! The channel actions of the flow `action` node (channels-personas.md §4): `reply_as` (reply in the
+//! triggering message's space and thread, fixed text or generated per §2.8) and `send_to_space`
+//! (a fixed text to a given space). Both are outward nodes: effectful for the engine (dry runs skip
+//! them; a run asks before them unless a grant allows `msg.send`), and what they say goes through
+//! the [`crate::deliver::Outbound`] like every reply, with what let the run get here ([`Auth`]):
+//! your approval of this step, an `approve` node earlier on the path, or the grant.
+//!
+//! One approval, not two: when you approved exactly this step and its text was fixed (you saw it on
+//! the card), that is the approval — no second draft, also with `approve: true` and on your own
+//! account. A generated text you haven't seen is a draft when `approve` is set or on your own
+//! account; a grant alone never sends as you.
+//!
+//! The flow module is built before [`Channels`] (Channels needs it), so the actions reach the
+//! channel module through [`LateChannels`], bound once both exist:
+//! ```ignore
+//! let replies = Arc::new(steve_channels::Replies::new());
+//! let late = steve_channels::flow_actions::LateChannels::new();
+//! let setup = setup
+//!     .action(Arc::new(steve_channels::flow_actions::ReplyAs::new(replies.clone(), late.clone())))
+//!     .action(Arc::new(steve_channels::flow_actions::SendToSpace::new(replies.clone(), late.clone())));
+//! // … flow = setup.build(…); channels = Channels::builder(…).responder(replies).flow(flow).build();
+//! late.set(&channels);
+//! ```
+
+use std::sync::{Arc, OnceLock};
+
+use async_trait::async_trait;
+use rusqlite::{Connection, OptionalExtension};
+use serde_json::{Value, json};
+use steve_flow::nodes::action::Action;
+use steve_flow::nodes::{Grant, NodeOutcome, RunCx};
+use steve_modules::ApiError;
+
+use crate::compose::ComposeOpts;
+use crate::deliver::{Auth, Delivered, OutRequest, OutTarget, Purpose};
+use crate::replies::Replies;
+use crate::respond::{self, Plan};
+use crate::rules::Act;
+use crate::service::WeakChannels;
+use crate::spaces::{self, Mode};
+use crate::{ChannelResult, Channels, bindings, personas};
+
+/// The capability a grant names to let these actions run without asking each time.
+pub const CAPABILITY: &str = "msg.send";
+/// Text of a message, in characters (like `POST /spaces/:id/messages`).
+pub const TEXT_MAX: usize = 4000;
+
+/// [`Channels`] for actions registered before it exists. A weak reference, so the flow module
+/// (which `Channels` holds) does not keep the channel module alive.
+#[derive(Default)]
+pub struct LateChannels(OnceLock<WeakChannels>);
+
+impl LateChannels {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    /// Binds the channel module (once; later calls are ignored).
+    pub fn set(&self, ch: &Channels) {
+        let _ = self.0.set(ch.downgrade());
+    }
+
+    pub fn get(&self) -> Option<Channels> {
+        self.0.get().and_then(WeakChannels::upgrade)
+    }
+}
+
+fn opt_str<'v>(cfg: &'v Value, key: &str) -> Result<Option<&'v str>, String> {
+    match cfg.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) => Ok(Some(s.as_str())),
+        Some(_) => Err(format!("{key} 只能是文字")),
+    }
+}
+
+fn opt_bool(cfg: &Value, key: &str) -> Result<bool, String> {
+    match cfg.get(key) {
+        None | Some(Value::Null) => Ok(false),
+        Some(Value::Bool(b)) => Ok(*b),
+        Some(_) => Err(format!("{key} 只能是是或否")),
+    }
+}
+
+fn check_text(t: &str) -> Result<(), String> {
+    if t.chars().count() > TEXT_MAX {
+        return Err(format!("内容太长了（最多 {TEXT_MAX} 字）"));
+    }
+    steve_flow::expr::check_template(t)
+}
+
+/// The plan for answering a stored inbound message (what the rules would have built).
+pub fn plan_of(c: &Connection, ws: &str, message_id: &str) -> ChannelResult<Plan> {
+    type Row = (
+        String,
+        Option<String>,
+        Option<String>,
+        String,
+        Option<String>,
+        Option<String>,
+        String,
+    );
+    let row: Option<Row> = c
+        .query_row(
+            "SELECT m.space_id, m.external_id, m.thread_key, coalesce(m.text, ''), m.sender_account_id, m.sender_party_id,
+                    coalesce(nullif(a.display_name, ''), a.handle_display, p.name, '')
+               FROM chan_messages m LEFT JOIN accounts a ON a.id = m.sender_account_id LEFT JOIN parties p ON p.id = m.sender_party_id
+              WHERE m.id = ? AND m.workspace_id = ? AND m.direction = 'in'",
+            [message_id, ws],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
+        )
+        .optional()?;
+    let (space_id, ext, thread, text, account, party, name) =
+        row.ok_or_else(|| ApiError::not_found("消息"))?;
+    let space = spaces::get(c, &space_id)?.ok_or_else(|| ApiError::not_found("空间"))?;
+    let (_, mode) = bindings::connection_account(c, ws, &space.connection_id)?;
+    let set = spaces::settings(c, &space.id)?;
+    Ok(Plan {
+        ws: ws.into(),
+        connection_id: space.connection_id.clone(),
+        mode,
+        space_name: respond::space_label(&space),
+        space_id: space.id,
+        message_id: message_id.into(),
+        external_id: ext.unwrap_or_default(),
+        thread_key: thread,
+        text,
+        sender_account_id: account,
+        sender_party_id: party,
+        sender_name: name,
+        act: Act::Reply,
+        rule: None,
+        muted: set.muted,
+        trigger: None,
+    })
+}
+
+/// A persona named in a node's config, checked against the target account.
+fn check_persona(c: &Connection, ws: &str, mode: Mode, id: Option<&str>) -> Result<(), String> {
+    let Some(id) = id.filter(|s| !s.is_empty()) else {
+        return Ok(());
+    };
+    if mode == Mode::Own {
+        return Err(bindings::SELF_NO_PERSONA.into());
+    }
+    match personas::get(c, id) {
+        Ok(Some(p)) if p.workspace_id == ws && !p.deleted => Ok(()),
+        Ok(_) => Err("没有这个对外身份".into()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// What let the engine run this step: your approval of it (`gate`), an `approve` node earlier, or a
+/// live `msg.send` grant for `space` (`None` = only the grant check left to the outbound).
+fn step_auth(cx: &RunCx<'_>, space: Option<&str>) -> Auth {
+    let ctx = &cx.run.context;
+    let node = cx.node.id.as_str();
+    let gate = ctx["approved"][node] == json!(true)
+        || (ctx["resume"]["node"] == json!(node)
+            && ctx["resume"]["gate"] == json!(steve_flow::engine::GATE_YES));
+    if gate || ctx.get("approved_by").is_some_and(|v| !v.is_null()) {
+        return Auth::Step {
+            run_id: cx.run.id.clone(),
+            node_id: node.to_string(),
+            gate,
+        };
+    }
+    let now = cx.now();
+    let granted = cx
+        .flow
+        .store()
+        .reader(|c| {
+            c.query_row(
+                "SELECT EXISTS (SELECT 1 FROM grants WHERE workspace_id = ? AND subject_type = 'flow' AND subject_id = ?
+                    AND capability = ? AND resource_type = 'space' AND resource_id IN (?, '*') AND revoked IS NULL AND until > ?)",
+                rusqlite::params![cx.run.workspace_id, cx.run.flow_id, CAPABILITY, space.unwrap_or("*"), now],
+                |r| r.get::<_, bool>(0),
+            )
+            .map_err(steve_store::StoreError::from)
+        })
+        .unwrap_or(false);
+    if granted {
+        Auth::Grant {
+            flow_id: cx.run.flow_id.clone(),
+            run_id: cx.run.id.clone(),
+        }
+    } else {
+        Auth::None
+    }
+}
+
+/// Whether the step still needs a draft: `approve` or your own account, unless you approved exactly
+/// this step with its fixed text (one approval, not two).
+fn needs_draft(cfg_approve: bool, mode: Mode, auth: &Auth, fixed_text: bool) -> bool {
+    let approved_here = matches!(auth, Auth::Step { gate: true, .. }) && fixed_text;
+    (cfg_approve || mode == Mode::Own) && !approved_here
+}
+
+/// Hands the text to the outbound and records the run's outcome.
+async fn deliver(
+    cx: &mut RunCx<'_>,
+    replies: &Replies,
+    ch: &Channels,
+    req: OutRequest,
+) -> NodeOutcome {
+    match replies.outbound_ref().deliver(ch, &req).await {
+        Ok(d) => {
+            let status = match &d {
+                Delivered::Drafted { decision_id, .. } => {
+                    cx.effects.outcome = Some("need".into());
+                    cx.effects.label =
+                        Some(format!("起草，等你批准：发到「{}」", req.target.space_name));
+                    cx.effects.decision_id = Some(decision_id.clone());
+                    "draft"
+                }
+                Delivered::Sent { .. } => {
+                    cx.effects.label = Some(format!("已发到「{}」", req.target.space_name));
+                    "sent"
+                }
+                Delivered::Blocked { decision_id, .. } => {
+                    cx.effects.outcome = Some("need".into());
+                    cx.effects.label =
+                        Some(format!("有机密值，没有发到「{}」", req.target.space_name));
+                    cx.effects.decision_id = Some(decision_id.clone());
+                    "blocked"
+                }
+                Delivered::Failed { decision_id, .. } => {
+                    cx.effects.outcome = Some("need".into());
+                    cx.effects.label = Some(format!("没有发出去：「{}」", req.target.space_name));
+                    cx.effects.decision_id = Some(decision_id.clone());
+                    "failed"
+                }
+                Delivered::Skipped => "skipped",
+            };
+            NodeOutcome::next(json!({
+                "status": status,
+                "space_id": req.target.space_id,
+                "message_id": d.message_id(),
+                "decision_id": d.decision_id(),
+                "text": req.text,
+            }))
+        }
+        Err(e) => NodeOutcome::Fail(format!("消息没有交出去：{e}")),
+    }
+}
+
+fn unbound() -> NodeOutcome {
+    NodeOutcome::Fail("渠道模块还没有接上".into())
+}
+
+/// `action: reply_as` — `{persona_id?, text?, generate?: bool, approve?: bool}`.
+pub struct ReplyAs {
+    replies: Arc<Replies>,
+    late: Arc<LateChannels>,
+}
+
+impl ReplyAs {
+    pub fn new(replies: Arc<Replies>, late: Arc<LateChannels>) -> Self {
+        Self { replies, late }
+    }
+}
+
+#[async_trait]
+impl Action for ReplyAs {
+    fn name(&self) -> &'static str {
+        "reply_as"
+    }
+
+    fn effectful(&self, _: &Value) -> bool {
+        true
+    }
+
+    /// The triggering space is only known at run time: a grant for every space.
+    fn grant(&self, _: &Value) -> Option<Grant> {
+        Some(Grant::new(CAPABILITY, "space", "*"))
+    }
+
+    fn validate(&self, cfg: &Value) -> Result<(), String> {
+        opt_str(cfg, "persona_id")?;
+        let generate = opt_bool(cfg, "generate")?;
+        opt_bool(cfg, "approve")?;
+        let text = opt_str(cfg, "text")?.unwrap_or("");
+        if text.trim().is_empty() && !generate {
+            return Err("要填回复的内容，或者让 Steve 生成".into());
+        }
+        check_text(text)
+    }
+
+    fn outcome(&self) -> Option<&'static str> {
+        Some("need")
+    }
+
+    async fn run(&self, cx: &mut RunCx<'_>, cfg: &Value, input: &Value) -> NodeOutcome {
+        let Some(ch) = self.late.get() else {
+            return unbound();
+        };
+        let ws = cx.ws().to_string();
+        let Some(mid) = cx.event()["message_id"].as_str().map(String::from) else {
+            return NodeOutcome::Fail("这条流程不是由群消息触发的，没有可以回复的消息".into());
+        };
+        let persona = cfg["persona_id"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .map(String::from);
+        let plan = match ch.store().reader(|c| -> ChannelResult<_> {
+            let plan = plan_of(c, &ws, &mid)?;
+            check_persona(c, &ws, plan.mode, persona.as_deref()).map_err(ApiError::rule)?;
+            Ok(plan)
+        }) {
+            Ok(p) => p,
+            Err(e) => return NodeOutcome::Fail(e.to_string()),
+        };
+        let text = cfg["text"]
+            .as_str()
+            .map(|t| cx.render(t, input))
+            .unwrap_or_default();
+        let mut target = OutTarget::reply(&plan);
+        target.persona_id = persona.clone();
+        let auth = step_auth(cx, Some(&plan.space_id));
+        let generate = cfg["generate"] == json!(true);
+        let approve = needs_draft(cfg["approve"] == json!(true), plan.mode, &auth, !generate);
+        let req = if generate {
+            let opts = ComposeOpts {
+                persona_id: persona,
+                instruction: Some(text).filter(|t| !t.trim().is_empty()),
+                history: None,
+            };
+            match self
+                .replies
+                .composer_ref()
+                .generate(&ch, &plan, &opts)
+                .await
+            {
+                // a flow said to generate: only a reply goes out (a question or a skip doesn't)
+                Ok(r) if r.generation.outcome != crate::deliver::Outcome::Reply => {
+                    return NodeOutcome::next(json!({
+                        "sent": false,
+                        "outcome": r.generation.outcome.code(),
+                        "note": r.text,
+                    }));
+                }
+                Ok(r) => OutRequest {
+                    target,
+                    approve: approve || r.generation.needs_approval,
+                    text: r.text,
+                    purpose: Purpose::Flow,
+                    generation: Some(r.generation),
+                    auth,
+                },
+                // the model failed: worth another try later
+                Err(e) => return NodeOutcome::Retry(e.to_string()),
+            }
+        } else {
+            if text.trim().is_empty() {
+                return NodeOutcome::Fail("回复的内容是空的".into());
+            }
+            OutRequest {
+                target,
+                text,
+                purpose: Purpose::Flow,
+                approve,
+                generation: None,
+                auth,
+            }
+        };
+        deliver(cx, &self.replies, &ch, req).await
+    }
+}
+
+/// `action: send_to_space` — `{space_id, persona_id?, text, approve?: bool}`.
+pub struct SendToSpace {
+    replies: Arc<Replies>,
+    late: Arc<LateChannels>,
+}
+
+impl SendToSpace {
+    pub fn new(replies: Arc<Replies>, late: Arc<LateChannels>) -> Self {
+        Self { replies, late }
+    }
+}
+
+#[async_trait]
+impl Action for SendToSpace {
+    fn name(&self) -> &'static str {
+        "send_to_space"
+    }
+
+    fn effectful(&self, _: &Value) -> bool {
+        true
+    }
+
+    fn grant(&self, cfg: &Value) -> Option<Grant> {
+        cfg["space_id"]
+            .as_str()
+            .map(|s| Grant::new(CAPABILITY, "space", s))
+    }
+
+    fn validate(&self, cfg: &Value) -> Result<(), String> {
+        if opt_str(cfg, "space_id")?.is_none_or(|s| s.trim().is_empty()) {
+            return Err("要选一个空间".into());
+        }
+        opt_str(cfg, "persona_id")?;
+        opt_bool(cfg, "approve")?;
+        let text = opt_str(cfg, "text")?.unwrap_or("");
+        if text.trim().is_empty() {
+            return Err("要填发送的内容".into());
+        }
+        check_text(text)
+    }
+
+    fn outcome(&self) -> Option<&'static str> {
+        Some("need")
+    }
+
+    async fn run(&self, cx: &mut RunCx<'_>, cfg: &Value, input: &Value) -> NodeOutcome {
+        let Some(ch) = self.late.get() else {
+            return unbound();
+        };
+        let ws = cx.ws().to_string();
+        let space_id = cfg["space_id"].as_str().unwrap_or("").to_string();
+        let persona = cfg["persona_id"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .map(String::from);
+        let target = ch.store().reader(|c| -> ChannelResult<_> {
+            let s = spaces::get(c, &space_id)?
+                .filter(|s| s.workspace_id == ws && s.status == "active")
+                .ok_or_else(|| ApiError::not_found("空间"))?;
+            let (_, mode) = bindings::connection_account(c, &ws, &s.connection_id)?;
+            check_persona(c, &ws, mode, persona.as_deref()).map_err(ApiError::rule)?;
+            Ok(OutTarget {
+                ws: ws.clone(),
+                connection_id: s.connection_id.clone(),
+                mode,
+                space_name: respond::space_label(&s),
+                space_id: s.id,
+                reply_to: None,
+                thread_key: None,
+                persona_id: persona.clone(),
+                source_message_id: None,
+            })
+        });
+        let target = match target {
+            Ok(t) => t,
+            Err(e) => return NodeOutcome::Fail(e.to_string()),
+        };
+        let text = cx.render(cfg["text"].as_str().unwrap_or(""), input);
+        if text.trim().is_empty() {
+            return NodeOutcome::Fail("发送的内容是空的".into());
+        }
+        let auth = step_auth(cx, Some(&target.space_id));
+        let approve = needs_draft(cfg["approve"] == json!(true), target.mode, &auth, true);
+        let req = OutRequest {
+            target,
+            text,
+            purpose: Purpose::Flow,
+            approve,
+            generation: None,
+            auth,
+        };
+        deliver(cx, &self.replies, &ch, req).await
+    }
+}

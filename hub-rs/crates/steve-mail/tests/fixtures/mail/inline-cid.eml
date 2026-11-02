@@ -1,0 +1,22 @@
+Date: Fri, 30 Oct 2026 09:00:00 +0000
+From: Acme Design <design@acme.example>
+To: me@example.com
+Subject: New logo draft
+Message-ID: <logo-draft-3@acme.example>
+MIME-Version: 1.0
+Content-Type: multipart/related; boundary="rel-b1"; type="text/html"
+
+--rel-b1
+Content-Type: text/html; charset=utf-8
+Content-Transfer-Encoding: 7bit
+
+<html><body><p>Here is the new logo:</p><p><img src="cid:logo@acme.example" alt="logo"></p></body></html>
+--rel-b1
+Content-Type: image/png; name="logo.png"
+Content-Transfer-Encoding: base64
+Content-ID: <logo@acme.example>
+Content-Disposition: inline; filename="logo.png"
+
+iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLv
+AAAAAElFTkSuQmCC
+--rel-b1--

@@ -1,0 +1,3 @@
+-- 013 is reserved for the delivery queue (ST-15) and is empty until that lands. See db.rs: the runner numbers
+-- migrations by position, so this placeholder keeps 015 at version 15. Replace this text with the real
+-- migration before any database migrated past v12 by a build containing this placeholder reaches production.

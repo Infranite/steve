@@ -1,0 +1,494 @@
+//! The channel adapter seam (channels-personas.md §2.1) and the adapter-neutral inbound message
+//! every adapter turns its provider's payloads into before [`crate::Channels::on_inbound`].
+//!
+//! A [`ChannelAdapter`] extends the connection provider of the accounts module: the same object is
+//! registered with `Connections` (how Steve gets in) and with [`crate::ChannelsBuilder::adapter`]
+//! (what it receives and sends). Its `id()` is the `connections.adapter` it serves.
+
+use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use steve_flow::{AdapterError, PushRequest};
+use steve_modules::accounts::connections::{ConnCx, ConnectionProvider, ProviderError};
+
+/// What a channel can do; the UI and the rules degrade by it (no buttons → “回复 1/2”, no recall →
+/// no “撤销已发送”).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct ChannelFeatures {
+    pub multi_bot: bool,
+    pub as_user: bool,
+    pub cards: bool,
+    pub buttons: bool,
+    pub thread_reply: bool,
+    pub edit: bool,
+    pub recall: bool,
+    pub members: bool,
+    /// Emoji reactions on messages (the “收到 → 完成” lifecycle, [`ReactionKind`]).
+    pub reactions: bool,
+}
+
+/// The reactions Steve puts on a message it answers (channels-personas.md §2.11). Each adapter maps
+/// them to its own emoji ([`ChannelAdapter::reaction_emoji`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReactionKind {
+    /// Received, working on it.
+    Ack,
+    /// Answered.
+    Done,
+    /// Could not answer.
+    Failed,
+}
+
+impl ReactionKind {
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Ack => "ack",
+            Self::Done => "done",
+            Self::Failed => "failed",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "ack" => Self::Ack,
+            "done" => Self::Done,
+            "failed" => Self::Failed,
+            _ => return None,
+        })
+    }
+}
+
+/// `spaces.kind`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SpaceKind {
+    Group,
+    Dm,
+    /// A topic group (Feishu `chat_mode=topic`), a Slack channel.
+    Channel,
+    Thread,
+    MailThread,
+    Meeting,
+}
+
+impl SpaceKind {
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Group => "group",
+            Self::Dm => "dm",
+            Self::Channel => "channel",
+            Self::Thread => "thread",
+            Self::MailThread => "mail_thread",
+            Self::Meeting => "meeting",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "group" => Self::Group,
+            "dm" => Self::Dm,
+            "channel" => Self::Channel,
+            "thread" => Self::Thread,
+            "mail_thread" => Self::MailThread,
+            "meeting" => Self::Meeting,
+            _ => return None,
+        })
+    }
+
+    /// Several people talk here (a new one opens the “新群” decision).
+    pub fn is_group(self) -> bool {
+        matches!(self, Self::Group | Self::Channel | Self::Thread)
+    }
+}
+
+/// A handle as an adapter saw it: `system` is a `systems.id` (`feishu`, `feishu_app`, `slack`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HandleRef {
+    pub system: String,
+    pub handle: String,
+    /// More handles of the same identity, valid only under this connection (Feishu `open_id`).
+    pub extra: Vec<String>,
+}
+
+impl HandleRef {
+    pub fn new(system: impl Into<String>, handle: impl Into<String>) -> Self {
+        Self {
+            system: system.into(),
+            handle: handle.into(),
+            extra: Vec::new(),
+        }
+    }
+
+    pub fn with_extra(mut self, h: impl Into<String>) -> Self {
+        let h = h.into();
+        if !h.is_empty() && h != self.handle && !self.extra.contains(&h) {
+            self.extra.push(h);
+        }
+        self
+    }
+
+    /// The primary handle or one of the extra ones.
+    pub fn is(&self, h: &str) -> bool {
+        !h.is_empty() && (self.handle == h || self.extra.iter().any(|x| x == h))
+    }
+}
+
+/// `space_info`: what a new space row gets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpaceInfo {
+    pub name: String,
+    pub kind: SpaceKind,
+    pub member_count: i64,
+    pub has_external: bool,
+}
+
+/// One member of a space (`members`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemberInfo {
+    pub handle: HandleRef,
+    pub name: String,
+    /// `owner | admin | member | bot`
+    pub role: String,
+    /// Not of the connection's organization (another tenant).
+    pub external: bool,
+}
+
+/// Where an outbound message goes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SendTarget {
+    /// A new message in the space.
+    Space { ext_id: String },
+    /// A reply to one message, in its thread when `in_thread`.
+    Reply { ext_msg_id: String, in_thread: bool },
+}
+
+/// What is sent. Phase 1 is plain text. Build it with [`OutContent::text`] and set the rest, so
+/// fields added later don't break callers.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct OutContent {
+    pub text: String,
+    /// Idempotency key (the outbound `cm_…`): a retry does not send twice.
+    pub uuid: Option<String>,
+    /// People to @ at the start, as the provider's per-connection ids (Feishu `open_id`, found with
+    /// `adapters::feishu::send::at_handle`). C6 passes the person replied to in a group; empty in
+    /// DMs.
+    pub at: Vec<String>,
+    /// The space's provider id when known (for a reply: the space of the replied-to message). It
+    /// keys the per-space send rate; without it only the per-connection rate applies.
+    pub space_ext_id: Option<String>,
+}
+
+impl OutContent {
+    /// Plain text, nothing else set.
+    pub fn text(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            ..Self::default()
+        }
+    }
+}
+
+/// A change of a space or its members, as an adapter saw it (Feishu `im.chat.member.*`,
+/// `im.chat.updated_v1`, `im.chat.disbanded_v1`; feishu.md §3.2). [`crate::Channels::on_space_event`]
+/// applies it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SpaceEvent {
+    /// The connection's account was added to a space: create it and, for a group a bot is new in,
+    /// open the “新群” decision.
+    Joined {
+        space_ext_id: String,
+        /// What the event says, used when `space_info` fails.
+        name: Option<String>,
+        has_external: Option<bool>,
+    },
+    /// The account was removed (`status=left`) or the space was disbanded (`archived`).
+    Left {
+        space_ext_id: String,
+        archived: bool,
+    },
+    /// People joined; `has_external` is the provider's flag for the space when it sends one.
+    MembersAdded {
+        space_ext_id: String,
+        members: Vec<MemberInfo>,
+        has_external: Option<bool>,
+    },
+    /// People left.
+    MembersRemoved {
+        space_ext_id: String,
+        members: Vec<HandleRef>,
+        has_external: Option<bool>,
+    },
+    /// Name (or other settings) changed.
+    Updated {
+        space_ext_id: String,
+        name: Option<String>,
+        has_external: Option<bool>,
+    },
+}
+
+impl SpaceEvent {
+    pub fn space_ext_id(&self) -> &str {
+        match self {
+            Self::Joined { space_ext_id, .. }
+            | Self::Left { space_ext_id, .. }
+            | Self::MembersAdded { space_ext_id, .. }
+            | Self::MembersRemoved { space_ext_id, .. }
+            | Self::Updated { space_ext_id, .. } => space_ext_id,
+        }
+    }
+}
+
+/// What a webhook body turned out to be.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PushOutcome {
+    /// Answer this as JSON and write nothing (URL verification challenge).
+    Respond(Value),
+    /// Messages for the inbound pipeline.
+    Messages(Vec<InboundMessage>),
+    /// Valid but nothing to do (an event type Steve does not handle).
+    Ignored,
+}
+
+/// Who sent an inbound message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Sender {
+    pub handle: HandleRef,
+    /// Chat nickname, when the payload carries one (Feishu's does not: [`crate::Channels`] looks it
+    /// up in the members list).
+    pub display_name: Option<String>,
+    /// An app or bot, not a person.
+    pub is_bot: bool,
+    /// Of another organization (Feishu: another `tenant_key`).
+    pub external: bool,
+}
+
+/// Someone @-mentioned in a message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Mention {
+    /// `None` when the adapter knows no usable handle (another app's bot).
+    pub handle: Option<HandleRef>,
+    pub name: String,
+    /// The connection's own account (the bot, or you on a self connection).
+    pub is_connection: bool,
+}
+
+/// One message as an adapter saw it, before it is stored.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InboundMessage {
+    /// The space at the provider (Feishu `chat_id`).
+    pub space_ext_id: String,
+    /// What the payload says about the space, used when `space_info` is not available.
+    pub space_kind: Option<SpaceKind>,
+    pub space_name: Option<String>,
+    /// The message id at the provider (`om_…`); unique per space.
+    pub external_id: String,
+    /// The provider's delivery id (Feishu `header.event_id`), for logs.
+    pub event_id: Option<String>,
+    /// Same thread (`thread_id ?? root_id ?? message_id`).
+    pub thread_key: Option<String>,
+    /// The message replied to (`parent_id`).
+    pub reply_to: Option<String>,
+    /// The root of its thread (`root_id`).
+    pub root_id: Option<String>,
+    pub sender: Sender,
+    /// Plain text (mentions as `@名字`); may be empty for an image or file.
+    pub text: String,
+    /// `[{type:"image"|"file", key, name?}]`
+    pub attachments: Vec<Value>,
+    pub mentions: Vec<Mention>,
+    /// Unix ms at the provider.
+    pub created: i64,
+    /// `ws` (long connection), `poll`, `push` (webhook): the signals page shows the delay of polls.
+    pub via: Option<String>,
+    /// The provider's payload, kept as the event's original until the retention period ends.
+    pub raw: Value,
+}
+
+impl InboundMessage {
+    /// A text message with the required fields; the rest empty.
+    pub fn text(
+        space_ext_id: impl Into<String>,
+        external_id: impl Into<String>,
+        sender: HandleRef,
+        text: impl Into<String>,
+        created: i64,
+    ) -> Self {
+        Self {
+            space_ext_id: space_ext_id.into(),
+            space_kind: None,
+            space_name: None,
+            external_id: external_id.into(),
+            event_id: None,
+            thread_key: None,
+            reply_to: None,
+            root_id: None,
+            sender: Sender {
+                handle: sender,
+                display_name: None,
+                is_bot: false,
+                external: false,
+            },
+            text: text.into(),
+            attachments: Vec::new(),
+            mentions: Vec::new(),
+            created,
+            via: None,
+            raw: Value::Null,
+        }
+    }
+
+    /// The connection's account is @-mentioned.
+    pub fn mentions_connection(&self) -> bool {
+        self.mentions.iter().any(|m| m.is_connection)
+    }
+}
+
+/// A channel provider (§2.1). Only Feishu is real in phase 1; [`crate::fake::channel::FakeChannel`]
+/// is the scripted one for tests.
+#[async_trait]
+pub trait ChannelAdapter: ConnectionProvider {
+    fn features(&self) -> ChannelFeatures;
+
+    /// A webhook body: verify the signature and decrypt; answer URL challenges as they are. Phase 1
+    /// receives over the long connection, so the default refuses.
+    async fn parse_push(
+        &self,
+        cx: &ConnCx,
+        req: &PushRequest,
+    ) -> Result<PushOutcome, AdapterError> {
+        let _ = (cx, req);
+        Err(ProviderError::Unsupported.into())
+    }
+
+    /// Name, kind, member count, external members.
+    async fn space_info(&self, cx: &ConnCx, ext_id: &str) -> Result<SpaceInfo, AdapterError>;
+
+    async fn members(&self, cx: &ConnCx, ext_id: &str) -> Result<Vec<MemberInfo>, AdapterError>;
+
+    /// Sends and returns the provider's message id. Only `outbound::send` (C6) may call it.
+    async fn send(
+        &self,
+        cx: &ConnCx,
+        to: &SendTarget,
+        content: &OutContent,
+    ) -> Result<String, AdapterError>;
+
+    async fn recall(&self, cx: &ConnCx, ext_msg_id: &str) -> Result<(), AdapterError>;
+
+    /// The provider's emoji for a reaction kind (shown in the UI next to the message).
+    fn reaction_emoji(&self, kind: ReactionKind) -> &'static str {
+        match kind {
+            ReactionKind::Ack => "👀",
+            ReactionKind::Done => "✅",
+            ReactionKind::Failed => "❌",
+        }
+    }
+
+    /// Puts a reaction on a message as the connection's account; returns the provider's reaction
+    /// id (to remove it later). Best-effort for callers: [`crate::reactions`] never lets a failure
+    /// here stop a reply. Default: unsupported.
+    async fn add_reaction(
+        &self,
+        cx: &ConnCx,
+        ext_msg_id: &str,
+        kind: ReactionKind,
+    ) -> Result<String, AdapterError> {
+        let _ = (cx, ext_msg_id, kind);
+        Err(ProviderError::Unsupported.into())
+    }
+
+    /// Takes a reaction off again. Default: unsupported.
+    async fn remove_reaction(
+        &self,
+        cx: &ConnCx,
+        ext_msg_id: &str,
+        reaction_id: &str,
+    ) -> Result<(), AdapterError> {
+        let _ = (cx, ext_msg_id, reaction_id);
+        Err(ProviderError::Unsupported.into())
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Profiles: who is behind a handle (domain-model.md §2 “补全资料”).
+
+/// What to look up: people seen in a space (its member list names them all at once), or handles on
+/// their own (the provider's directory).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ProfileQuery {
+    /// The space at the provider (Feishu `chat_id`) whose members to list.
+    pub space_ext_id: Option<String>,
+    /// The handles still without a name; with a space, the list is read anyway and these are only
+    /// a hint.
+    pub handles: Vec<HandleRef>,
+    /// Also tell the identity's own organization (key and name), when the provider can.
+    pub want_tenant: bool,
+}
+
+/// One person as a provider describes them.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Profile {
+    /// Every handle of them the answer carried (Feishu: `union_id` primary, `open_id` extra).
+    pub handle: Option<HandleRef>,
+    pub name: String,
+    pub avatar_url: Option<String>,
+    pub email: Option<String>,
+    /// The provider's organization key (Feishu `tenant_key`).
+    pub tenant_key: Option<String>,
+    /// Found in the identity's own directory (not only in a chat).
+    pub directory: bool,
+    /// Directory department ids (to place them in the org chart).
+    pub department_ids: Vec<String>,
+}
+
+/// An identity's own organization.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TenantInfo {
+    pub key: String,
+    pub name: Option<String>,
+}
+
+/// What a lookup found, and which permissions stood in the way.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ProfileAnswer {
+    pub profiles: Vec<Profile>,
+    /// Provider permissions that would have answered more: `(scope, what it is for)`.
+    pub missing_scopes: Vec<(String, String)>,
+    /// Permissions a call just proved granted (a call that worked).
+    pub granted_scopes: Vec<String>,
+    pub tenant: Option<TenantInfo>,
+    /// The identity can't see that space (not a member): try the next identity.
+    pub not_in_space: bool,
+}
+
+impl ProfileAnswer {
+    pub fn missing(&mut self, scope: &str, purpose: &str) {
+        if !self.missing_scopes.iter().any(|(s, _)| s == scope) {
+            self.missing_scopes.push((scope.into(), purpose.into()));
+        }
+    }
+
+    pub fn granted(&mut self, scope: &str) {
+        if !self.granted_scopes.iter().any(|s| s == scope) {
+            self.granted_scopes.push(scope.into());
+        }
+    }
+}
+
+/// Looks people up through one identity (a connection): the bot of an app, or you. Registered with
+/// [`crate::ChannelsBuilder::profiles`] under the `connections.adapter` it serves; [`crate::names`]
+/// asks the identities of one installation in turn — yours first, then the bot's.
+#[async_trait]
+pub trait ProfileAdapter: Send + Sync {
+    /// The `connections.adapter` it serves.
+    fn adapter_id(&self) -> &str;
+
+    /// One lookup. Missing permissions are reported in the answer, not as an error; `Err` is for
+    /// the connection itself failing (token refused, network).
+    async fn resolve_profiles(
+        &self,
+        cx: &ConnCx,
+        q: &ProfileQuery,
+    ) -> Result<ProfileAnswer, AdapterError>;
+}

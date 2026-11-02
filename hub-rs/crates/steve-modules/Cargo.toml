@@ -1,0 +1,60 @@
+[package]
+name = "steve-modules"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+description = "Shared base of the new Hub modules (contacts, vault, flows, channels): errors, extractors, changeset engine, decision dispatch, SSE scoping"
+
+[dependencies]
+steve-store = { path = "../steve-store" }
+# V4: the session redactor and the paste guard.
+steve-vault = { path = "../steve-vault" }
+async-trait = "=0.1.92"
+chacha20poly1305 = "=0.11.0"
+data-encoding = "=2.11.1"
+getrandom = "=0.4.3"
+sha2 = "=0.11.1"
+subtle = "=2.6.1"
+zeroize = { version = "=1.9.1", features = ["serde"] }
+chrono = { version = "=0.4.45", default-features = false, features = ["clock"] }
+axum = { version = "=0.8.9", default-features = false, features = ["json", "query"] }
+regex = "=1.13.1"
+# Connections (A2): token endpoints of OAuth providers.
+reqwest = { version = "=0.12.28", default-features = false, features = ["json", "rustls-tls"] }
+url = "=2.5.8"
+rusqlite = { version = "=0.40.2", features = ["bundled"] }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = { version = "=1.0.154", features = ["preserve_order"] }
+serde_path_to_error = "=0.1.20"
+tempfile = "=3.27.0"
+thiserror = "=2.0.21"
+tokio = { version = "=1.54.1", features = ["rt", "sync", "time", "macros", "process", "io-util"] }
+# V4 injection: kill the whole process group of a command on timeout.
+libc = "=0.2.191"
+tower = { version = "=0.5.3", features = ["util"] }
+tracing = "=0.1.44"
+# Passkeys for local verification before a reveal (accounts-vault.md §4.2).
+webauthn-rs = "=0.6.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "=0.10.1"
+security-framework = "=3.7.0"
+
+# Linux desktops: the vault master key in the Secret Service keyring (pure Rust D-Bus, no libdbus).
+[target.'cfg(target_os = "linux")'.dependencies]
+secret-service = { version = "=5.2.0", features = ["rt-tokio-crypto-rust"] }
+# Only to tell a D-Bus AccessDenied apart; the version secret-service resolves to.
+zbus = { version = "=5.19.0", default-features = false, features = ["tokio"] }
+
+[dev-dependencies]
+# Software passkey for the V3 WebAuthn ceremonies.
+webauthn-authenticator-rs = { version = "=0.6.2", features = ["softpasskey"] }
+# The fake Feishu open platform, for the directory sync test through a Feishu-shaped adapter.
+steve-channels = { path = "../steve-channels", features = ["fake"] }
+# Connections (A2) tests: the fake Gmail/Graph OAuth, the fake GitHub App, JWTs for its installation tokens.
+steve-mail = { path = "../steve-mail", features = ["fake"] }
+steve-github = { path = "../steve-github", features = ["fake"] }
+jsonwebtoken = { version = "=11.1.0", default-features = false, features = ["rust_crypto", "use_pem"] }
+tracing-subscriber = { version = "=0.3.23", default-features = false, features = ["fmt"] }
+http-body-util = "=0.1.5"
+tokio = { version = "=1.54.1", features = ["rt", "rt-multi-thread", "sync", "time", "macros"] }

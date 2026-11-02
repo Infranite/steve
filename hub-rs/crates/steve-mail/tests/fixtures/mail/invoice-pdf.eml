@@ -1,0 +1,25 @@
+Date: Fri, 30 Oct 2026 14:00:00 +0800
+From: =?UTF-8?B?5LqR5Li75py66LSm5Y2V?= <billing@cloudhost.example>
+To: me@example.com
+Subject: =?UTF-8?B?5oKo55qEIDIwMjYg5bm0IDEwIOaciOi0puWNle+8iElOVi0yMDI2LTEwLTAwMDczMe+8iQ==?=
+Message-ID: <inv-2026-10-000731@billing.cloudhost.example>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="----=_Part_731_1761804000"
+
+------=_Part_731_1761804000
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: base64
+
+5bCK5pWs55qE55So5oi377yaDQoNCuaCqCAyMDI2IOW5tCAxMCDmnIjnmoTotKbljZXlt7LnlJ/m
+iJDjgIINCui0puWNleWPt++8mklOVi0yMDI2LTEwLTAwMDczMQ0K6YeR6aKd77yawqUgMSwyODYu
+NDANCuS7mOasvuaIquatou+8mjIwMjYtMTEtMTUNCg0K5Y+R56Wo6KeB6ZmE5Lu244CCDQo=
+------=_Part_731_1761804000
+Content-Type: application/pdf; name="=?UTF-8?B?5Y+R56WoLTIwMjYtMTAucGRm?="
+Content-Transfer-Encoding: base64
+Content-Disposition: attachment; filename*=UTF-8''%E5%8F%91%E7%A5%A8%2D%32%30%32%36%2D%31%30%2E%70%64%66
+
+JVBERi0xLjQKMSAwIG9iajw8L1R5cGUvQ2F0YWxvZy9QYWdlcyAyIDAgUj4+ZW5kb2JqCjIgMCBv
+Ymo8PC9UeXBlL1BhZ2VzL0tpZHNbMyAwIFJdL0NvdW50IDE+PmVuZG9iagozIDAgb2JqPDwvVHlw
+ZS9QYWdlL1BhcmVudCAyIDAgUi9NZWRpYUJveFswIDAgMjAwIDEwMF0+PmVuZG9iagp0cmFpbGVy
+PDwvUm9vdCAxIDAgUj4+CiUlRU9GCg==
+------=_Part_731_1761804000--

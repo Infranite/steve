@@ -1,0 +1,1334 @@
+//! Which harness and models Steve's own judgments use (设置 · 模型).
+//!
+//! Steve is a bot: every judgment (routing, chat answers, research, titles, extraction, disclosure,
+//! YOLO answers, drafts…) runs on the main Steve bot's harness and model, with its reasoning effort, as
+//! set on its Bot page. A purpose may override that ("高级"): another harness, an ordered fallback list
+//! of models, an effort. Overrides are stored per workspace in the settings table (`models.<purpose>`);
+//! both are read on every call, so a change takes effect without a restart.
+//!
+//! Every model call goes through [`Models::for_call`]: [`crate::ClaudeCli`] asks it with the call's
+//! [`crate::stats::CallTag`] (purpose and workspace). The agent-session default per harness
+//! (`models.agent.<harness>`) is unchanged.
+//!
+//! Upgrade: values stored before Steve became a bot (`{"models": [...], "effort": ...}`, no harness) ran
+//! on Claude Code, so they read as Claude Code overrides. [`Models::migrate`] adds once, per workspace,
+//! the recommended overrides of the cheap high-volume purposes (route, title, disclosure, flow on the
+//! fast list), which keeps today's behaviour and cost for them.
+
+use std::collections::BTreeMap;
+use std::sync::{Arc, LazyLock};
+
+use regex::Regex;
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value, json};
+use steve_store::Store;
+
+use crate::config::CoreConfig;
+use crate::gateway::Tier;
+
+/// One decision Steve makes with a model of its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Purpose {
+    /// The stats purpose (`usage_records.purpose`) and the setting's key suffix.
+    pub key: &'static str,
+    pub label: &'static str,
+    pub desc: &'static str,
+    /// The tier its calls used before Steve became a bot; fast purposes get a recommended override.
+    pub tier: Tier,
+}
+
+const fn p(key: &'static str, label: &'static str, desc: &'static str, tier: Tier) -> Purpose {
+    Purpose {
+        key,
+        label,
+        desc,
+        tier,
+    }
+}
+
+/// Every purpose, in the order the settings list them.
+pub const PURPOSES: [Purpose; 11] = [
+    p(
+        "route",
+        "分流",
+        "判断一条消息该聊天、研究还是建事项，也判断渠道规则的意图",
+        Tier::Fast,
+    ),
+    p("chat", "对话回答", "在对话里直接回答你", Tier::Smart),
+    p(
+        "research",
+        "就地研究",
+        "只读地翻项目和资料后回答，前一个模型失败才换下一个",
+        Tier::Smart,
+    ),
+    p("title", "起标题", "给新项目起名字、写一句说明", Tier::Fast),
+    p(
+        "extract",
+        "记忆提取",
+        "从对话和资料里提取值得记住的知识",
+        Tier::Smart,
+    ),
+    p(
+        "disclosure",
+        "披露检查",
+        "对外回复前检查有没有说出不该说的",
+        Tier::Fast,
+    ),
+    p(
+        "yolo",
+        "YOLO 代答",
+        "YOLO 打开时替你回答 Agent 的提问",
+        Tier::Smart,
+    ),
+    p(
+        "draft",
+        "草稿/配置",
+        "按你的一句话起草 Bot、流程和设置的改动",
+        Tier::Smart,
+    ),
+    p(
+        "flow",
+        "流程 Bot 节点",
+        "流程里 Bot 节点的判断和汇报",
+        Tier::Fast,
+    ),
+    p("mail", "邮件起草", "起草邮件回复", Tier::Smart),
+    p("compose", "渠道回复", "在渠道里替你写回复", Tier::Smart),
+];
+
+pub const CLAUDE_CODE: &str = "claude-code";
+pub const CODEX: &str = "codex";
+
+/// Harnesses Steve's judgments can run on, with their names. Claude Code runs `claude -p`, Codex runs
+/// `codex exec` (non-interactive, JSON events, read-only sandbox).
+pub const JUDGE_HARNESSES: [(&str, &str); 2] = [(CLAUDE_CODE, "Claude Code"), (CODEX, "Codex")];
+
+/// The display name of a harness id (`claude-code` → `Claude Code`); unknown ids as they are.
+pub fn harness_name(h: &str) -> &str {
+    JUDGE_HARNESSES
+        .iter()
+        .find(|(k, _)| *k == h)
+        .map_or(h, |(_, n)| n)
+}
+
+/// Is `h` a harness Steve's judgments can run on?
+pub fn judge_harness(h: &str) -> bool {
+    JUDGE_HARNESSES.iter().any(|(k, _)| *k == h)
+}
+
+/// Reasoning efforts `claude -p --effort` accepts (Claude Code 2.1), with their labels.
+pub const EFFORTS: [(&str, &str); 5] = [
+    ("low", "低"),
+    ("medium", "中"),
+    ("high", "高"),
+    ("xhigh", "很高"),
+    ("max", "最高"),
+];
+
+/// Reasoning efforts Codex accepts (`model_reasoning_effort`), with their labels.
+pub const CODEX_EFFORTS: [(&str, &str); 6] = [
+    ("none", "关闭"),
+    ("minimal", "最低"),
+    ("low", "低"),
+    ("medium", "中"),
+    ("high", "高"),
+    ("xhigh", "很高"),
+];
+
+/// The efforts of `harness`.
+pub fn efforts(harness: &str) -> &'static [(&'static str, &'static str)] {
+    if harness == CODEX {
+        &CODEX_EFFORTS
+    } else {
+        &EFFORTS
+    }
+}
+
+/// The label of an effort on any harness.
+pub fn effort_label(e: &str) -> Option<&'static str> {
+    EFFORTS
+        .iter()
+        .chain(CODEX_EFFORTS.iter())
+        .find(|(k, _)| *k == e)
+        .map(|(_, l)| *l)
+}
+
+/// Models the Claude Code harness offers when the user's model picker is not readable (also
+/// `GET /api/system/harnesses`).
+pub const CLAUDE_MODELS: [&str; 3] = ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"];
+/// Ids codex-acp offers in its "model" config option; the first is Codex's default.
+pub const CODEX_MODELS: [&str; 5] = [
+    "gpt-6.1-sol",
+    "gpt-6-astra",
+    "gpt-6-sol",
+    "gpt-6-luna",
+    "gpt-5.6-sol",
+];
+/// Harnesses whose agent-session default is editable, with their names and known models.
+pub const HARNESSES: [(&str, &str, &[&str]); 2] = [
+    ("claude-code", "Claude Code", &CLAUDE_MODELS),
+    ("codex", "Codex", &CODEX_MODELS),
+];
+
+/// The judgment model of a Claude Code Steve bot that names none.
+pub const STEVE_DEFAULT_CLAUDE: &str = "claude-sonnet-5-5";
+
+/// At most this many models in one fallback list.
+pub const MAX_MODELS: usize = 5;
+
+/// The setting purpose a stats purpose is chosen by: `intent` (channel rules) is a kind of routing;
+/// `digest` and `other` have no setting and follow Steve.
+pub fn purpose_of(tag: &str) -> Option<&'static Purpose> {
+    let k = match tag {
+        "intent" => "route",
+        k => k,
+    };
+    PURPOSES.iter().find(|p| p.key == k)
+}
+
+/// The settings key of a purpose's override.
+pub fn key(purpose: &str) -> String {
+    format!("models.{purpose}")
+}
+
+/// The settings key of a harness's agent default.
+pub fn agent_key(harness: &str) -> String {
+    format!("models.agent.{harness}")
+}
+
+/// Set once per workspace by [`Models::migrate`].
+pub const MIGRATED_KEY: &str = "models.v2";
+
+fn claude_code() -> String {
+    CLAUDE_CODE.into()
+}
+
+/// The harness to run on, the models to try in order (empty: the harness's own default) and the effort.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Choice {
+    /// Values stored before Steve became a bot have none: they ran on Claude Code.
+    #[serde(default = "claude_code")]
+    pub harness: String,
+    #[serde(default)]
+    pub models: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+}
+
+impl Default for Choice {
+    fn default() -> Self {
+        Choice {
+            harness: claude_code(),
+            models: vec![],
+            effort: None,
+        }
+    }
+}
+
+impl Choice {
+    /// A Claude Code choice (tests, the gateway without a resolver).
+    pub fn claude(models: Vec<String>) -> Choice {
+        Choice {
+            models,
+            ..Choice::default()
+        }
+    }
+
+    /// `Claude Code · claude-haiku-5-5 → claude-sonnet-5-5`
+    pub fn describe(&self) -> String {
+        let models = if self.models.is_empty() {
+            "默认模型".to_string()
+        } else {
+            self.models.join(" → ")
+        };
+        format!("{} · {models}", harness_name(&self.harness))
+    }
+}
+
+/// What the environment says (`STEVE_MODELS_*`, `STEVE_DEFAULT_MODEL_*`) and Codex's configured model.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Defaults {
+    pub fast: Vec<String>,
+    pub smart: Vec<String>,
+    /// `STEVE_MODELS_RESEARCH` (no longer a default: research follows Steve; kept for the config view).
+    pub research: Vec<String>,
+    /// `STEVE_MODELS_CHECK`: the recommended disclosure override; empty: the fast list.
+    pub check: Vec<String>,
+    /// Agent sessions per harness (`STEVE_DEFAULT_MODEL_CLAUDE`).
+    pub agent: BTreeMap<String, String>,
+    /// `model` of `~/.codex/config.toml`: what `codex exec` uses without `-m`.
+    pub codex: Option<String>,
+}
+
+impl Defaults {
+    pub fn of(c: &CoreConfig) -> Defaults {
+        Defaults {
+            fast: c.models_fast.clone(),
+            smart: c.models_smart.clone(),
+            research: c.models_research.clone(),
+            check: c.models_check.clone(),
+            agent: c
+                .default_models
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+            codex: c.codex_model.clone(),
+        }
+    }
+
+    /// The models of `harness` when nothing names one: Claude Code's smart list, Codex's configured
+    /// model (empty: `codex exec` picks).
+    fn harness_list(&self, harness: &str) -> Vec<String> {
+        match harness {
+            CODEX => self.codex.iter().cloned().collect(),
+            _ if self.smart.is_empty() => vec![STEVE_DEFAULT_CLAUDE.into()],
+            _ => self.smart.clone(),
+        }
+    }
+}
+
+/// The main Steve bot as the runner of Steve's judgments.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Steve {
+    pub bot_id: Option<String>,
+    pub name: String,
+    /// The bot's harness as set on its Bot page.
+    pub harness: String,
+    /// The bot's model as set (`None`: the harness default).
+    pub model: Option<String>,
+    /// The bot's reasoning effort as set.
+    pub bot_effort: Option<String>,
+    /// What its judgments run on: its harness, or Claude Code when that harness cannot judge.
+    pub runs_on: String,
+    /// The models its judgments try, in order (the bot's model first, then the harness's fallbacks).
+    pub models: Vec<String>,
+    /// The effort passed to the harness (the bot's, when the harness takes it).
+    pub effort: Option<String>,
+    /// Why `runs_on` differs from `harness`, when it does.
+    pub note: Option<String>,
+    /// Where the first model comes from when the bot names none (`来自 Codex 配置的默认`, …).
+    pub model_note: Option<String>,
+}
+
+/// The resolver. Cheap to clone.
+#[derive(Clone)]
+pub struct Models {
+    store: Store,
+    defaults: Arc<Defaults>,
+}
+
+/// A model id: what `--model` takes (`claude-opus-5-5`, `opus`, `us.anthropic.x-v1:0`, `x[1m]`, `kiro/x`).
+static MODEL_ID: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[A-Za-z0-9][A-Za-z0-9._:/@\[\]-]{0,99}$").expect("valid regex"));
+
+/// Is `m` something `--model` could take?
+pub fn valid_model(m: &str) -> bool {
+    MODEL_ID.is_match(m)
+}
+
+/// Codex's notes per purpose: what differs when the purpose runs on Codex.
+pub fn codex_note(purpose: &str) -> Option<&'static str> {
+    match purpose {
+        "chat" => Some("Codex 不逐字输出：回答写完后一次显示"),
+        "research" => Some(
+            "Codex 在只读沙箱里研究（不能写、不能联网），Hub 检查每条命令；没有 sandbox-exec 这一层，也不能接着上一轮的会话追问",
+        ),
+        _ => None,
+    }
+}
+
+impl Models {
+    pub fn new(store: Store, defaults: Defaults) -> Models {
+        Models {
+            store,
+            defaults: Arc::new(defaults),
+        }
+    }
+
+    pub fn defaults(&self) -> &Defaults {
+        &self.defaults
+    }
+
+    /// The workspace a call with no workspace is for: the only one there is, else none.
+    fn ws_of(&self, ws: &str) -> Option<String> {
+        if !ws.is_empty() {
+            return Some(ws.to_string());
+        }
+        match self.store.workspaces().ids() {
+            Ok(ids) if ids.len() == 1 => ids.into_iter().next(),
+            _ => None,
+        }
+    }
+
+    /// The main bot and what its judgments run on.
+    pub fn steve(&self) -> Steve {
+        let bot = match self.store.bots().main() {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!("models: main bot not read: {e}");
+                None
+            }
+        };
+        let (bot_id, name, harness, model, bot_effort) = match bot {
+            Some(b) => (
+                Some(b.id),
+                b.name,
+                b.harness,
+                b.model.filter(|m| valid_model(m)),
+                b.reasoning_effort.filter(|e| !e.is_empty()),
+            ),
+            None => (None, "Steve".into(), CLAUDE_CODE.to_string(), None, None),
+        };
+        let (runs_on, note) = if judge_harness(&harness) {
+            (harness.clone(), None)
+        } else {
+            (
+                CLAUDE_CODE.to_string(),
+                Some(format!(
+                    "Steve 的 harness「{harness}」还不能做判断，先用 Claude Code"
+                )),
+            )
+        };
+        let same = runs_on == harness;
+        let mut models: Vec<String> = vec![];
+        match (&model, runs_on.as_str()) {
+            (Some(m), _) if same => models.push(m.clone()),
+            (_, CODEX) => {}
+            _ => models.push(
+                self.defaults
+                    .smart
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| STEVE_DEFAULT_CLAUDE.into()),
+            ),
+        }
+        // Claude Code falls back down the smart list (a 503 on one model is common); Codex has one model
+        for m in self.defaults.harness_list(&runs_on) {
+            if runs_on == CLAUDE_CODE && !models.contains(&m) && models.len() < MAX_MODELS {
+                models.push(m);
+            }
+        }
+        if runs_on == CODEX && models.is_empty() {
+            models = self.defaults.harness_list(CODEX);
+        }
+        let effort = bot_effort
+            .clone()
+            .filter(|e| same && efforts(&runs_on).iter().any(|(k, _)| k == e));
+        let model_note = match (&model, runs_on.as_str()) {
+            (Some(_), _) if same => None,
+            (_, CODEX) if models.is_empty() => Some("Codex 自己的默认模型".to_string()),
+            (_, CODEX) => Some("来自 Codex 配置的默认".to_string()),
+            _ => Some("Bot 没选模型，判断用的默认".to_string()),
+        };
+        Steve {
+            bot_id,
+            name,
+            harness,
+            model,
+            bot_effort,
+            runs_on,
+            models,
+            effort,
+            note,
+            model_note,
+        }
+    }
+
+    /// The override of `purpose`, if one is stored (a broken value counts as none).
+    pub fn custom(&self, ws: &str, purpose: &str) -> Option<Choice> {
+        let ws = self.ws_of(ws)?;
+        let v: Option<Value> = match self.store.settings().get(&ws, &key(purpose), None) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!("models: setting {purpose} not read: {e}");
+                None
+            }
+        };
+        let c: Choice = serde_json::from_value(v?).ok()?;
+        if !judge_harness(&c.harness) {
+            return None;
+        }
+        let c = Choice {
+            models: c.models.into_iter().filter(|m| valid_model(m)).collect(),
+            effort: c
+                .effort
+                .filter(|e| efforts(&c.harness).iter().any(|(k, _)| k == e)),
+            harness: c.harness,
+        };
+        Some(c)
+    }
+
+    /// The recommended override of `purpose`: the fast list on Claude Code for the cheap high-volume
+    /// purposes (today's behaviour and cost), none for the others.
+    pub fn recommended(&self, purpose: &Purpose) -> Option<Choice> {
+        if purpose.tier != Tier::Fast {
+            return None;
+        }
+        let d = &self.defaults;
+        let models = if purpose.key == "disclosure" && !d.check.is_empty() {
+            d.check.clone()
+        } else {
+            d.fast.clone()
+        };
+        (!models.is_empty()).then(|| Choice::claude(models))
+    }
+
+    /// `models::for_purpose`: what a call for `purpose` of workspace `ws` uses.
+    pub fn for_purpose(&self, ws: &str, purpose: &str) -> Choice {
+        self.for_call(ws, purpose, Tier::Smart)
+    }
+
+    /// What one call uses: the purpose's override, else Steve's harness, models and effort. An override
+    /// with no models uses Steve's models when it is on Steve's harness, else that harness's defaults;
+    /// with no effort, Steve's effort on Steve's harness. `_tier` is the call site's old tier (unused:
+    /// Steve's model answers every call that is not overridden).
+    pub fn for_call(&self, ws: &str, purpose: &str, _tier: Tier) -> Choice {
+        let st = self.steve();
+        self.resolve(ws, purpose, &st)
+    }
+
+    fn resolve(&self, ws: &str, purpose: &str, st: &Steve) -> Choice {
+        match purpose_of(purpose).and_then(|p| self.custom(ws, p.key)) {
+            Some(c) => {
+                let same = c.harness == st.runs_on;
+                Choice {
+                    models: if !c.models.is_empty() {
+                        c.models
+                    } else if same {
+                        st.models.clone()
+                    } else {
+                        self.defaults.harness_list(&c.harness)
+                    },
+                    effort: c
+                        .effort
+                        .or_else(|| same.then(|| st.effort.clone()).flatten()),
+                    harness: c.harness,
+                }
+            }
+            None => Choice {
+                harness: st.runs_on.clone(),
+                models: st.models.clone(),
+                effort: st.effort.clone(),
+            },
+        }
+    }
+
+    /// Writes the recommended overrides once per workspace (`models.v2`), for purposes with nothing
+    /// stored. True when it wrote something.
+    pub fn migrate(&self, ws: &str) -> steve_store::Result<bool> {
+        let s = self.store.settings();
+        if s.get::<Option<Value>>(ws, MIGRATED_KEY, None)?.is_some() {
+            return Ok(false);
+        }
+        let mut values = Map::new();
+        for p in &PURPOSES {
+            let stored: Option<Value> = s.get(ws, &key(p.key), None)?;
+            if stored.is_some_and(|v| !v.is_null()) {
+                continue;
+            }
+            if let Some(r) = self.recommended(p) {
+                values.insert(key(p.key), serde_json::to_value(r)?);
+            }
+        }
+        values.insert(MIGRATED_KEY.into(), json!(2));
+        self.write(ws, &values, "steve", "settings.models.migrate")?;
+        Ok(values.len() > 1)
+    }
+
+    /// The model of a new agent session on `harness` for a bot that names none.
+    pub fn agent_model(&self, ws: &str, harness: &str) -> Option<String> {
+        let set = self.ws_of(ws).and_then(|ws| {
+            self.store
+                .settings()
+                .get::<Option<String>>(&ws, &agent_key(harness), None)
+                .ok()
+                .flatten()
+                .filter(|m| valid_model(m))
+        });
+        set.or_else(|| self.defaults.agent.get(harness).cloned())
+    }
+
+    /// What each purpose ran on recently (gateway and research calls since `since`): per purpose the
+    /// last call and the calls per harness and model, busiest first. `intent` counts as `route`.
+    pub fn recent(&self, ws: &str, since: i64) -> BTreeMap<String, Value> {
+        let rows = self
+            .store
+            .with_conn(|c| {
+                let mut st = c.prepare(
+                    "SELECT purpose, harness, model, count(*), max(ts), sum(CASE WHEN ok = 0 THEN 1 ELSE 0 END) FROM usage_records
+                     WHERE workspace_id = ? AND source = 'gateway' AND ts >= ? AND model != ''
+                     GROUP BY purpose, harness, model",
+                )?;
+                let v = st
+                    .query_map(rusqlite::params![ws, since], |r| {
+                        Ok((
+                            r.get::<_, String>(0)?,
+                            r.get::<_, String>(1)?,
+                            r.get::<_, String>(2)?,
+                            r.get::<_, i64>(3)?,
+                            r.get::<_, i64>(4)?,
+                            r.get::<_, i64>(5)?,
+                        ))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok(v)
+            })
+            .unwrap_or_default();
+        type Used = (String, String, i64, i64, i64);
+        let mut by: BTreeMap<String, Vec<Used>> = BTreeMap::new();
+        for (p, h, m, n, at, failed) in rows {
+            let p = purpose_of(&p).map_or(p, |x| x.key.to_string());
+            let h = gateway_harness(&h).to_string();
+            let list = by.entry(p).or_default();
+            match list.iter_mut().find(|x| x.0 == h && x.1 == m) {
+                Some(x) => {
+                    x.2 += n;
+                    x.3 = x.3.max(at);
+                    x.4 += failed;
+                }
+                None => list.push((h, m, n, at, failed)),
+            }
+        }
+        by.into_iter()
+            .map(|(p, mut list)| {
+                list.sort_by(|a, b| b.2.cmp(&a.2).then(b.3.cmp(&a.3)));
+                let last = list.iter().max_by_key(|x| x.3).cloned();
+                let v = json!({
+                    "last": last.map(|(h, m, _, at, _)| json!({"harness": h, "model": m, "at": at})),
+                    "used": list.iter().map(|(h, m, n, at, failed)| json!({"harness": h, "model": m, "calls": n, "failed": failed, "at": at})).collect::<Vec<_>>(),
+                });
+                (p, v)
+            })
+            .collect()
+    }
+
+    /// The models `harness` ran with since `since` (agent turns and Steve's own calls of workspace `ws`):
+    /// per model the calls, the last success and the last failure. A passive check of which models
+    /// currently answer: no model is asked anything.
+    pub fn used(&self, ws: &str, harness: &str, since: i64) -> BTreeMap<String, Value> {
+        let names: [&str; 2] = match harness {
+            CODEX => [CODEX, "codex-cli"],
+            _ => [CLAUDE_CODE, "claude-cli"],
+        };
+        self.store
+            .with_conn(|c| {
+                let mut st = c.prepare(
+                    "SELECT model, count(*), max(CASE WHEN ok = 1 THEN ts END), max(CASE WHEN ok = 0 THEN ts END) FROM usage_records
+                     WHERE workspace_id = ? AND harness IN (?, ?) AND ts >= ? AND model != '' GROUP BY model",
+                )?;
+                let v = st
+                    .query_map(rusqlite::params![ws, names[0], names[1], since], |r| {
+                        Ok((
+                            r.get::<_, String>(0)?,
+                            json!({"calls": r.get::<_, i64>(1)?, "ok_at": r.get::<_, Option<i64>>(2)?, "failed_at": r.get::<_, Option<i64>>(3)?}),
+                        ))
+                    })?
+                    .collect::<rusqlite::Result<BTreeMap<_, _>>>()?;
+                Ok(v)
+            })
+            .unwrap_or_default()
+    }
+
+    /// `GET /api/settings/models`: Steve's runtime, every purpose with its override, what it resolves
+    /// to and what it ran on recently, the agent defaults, the harnesses and their efforts.
+    pub fn view(&self, ws: &str) -> Value {
+        let st = self.steve();
+        let recent = self
+            .ws_of(ws)
+            .map(|w| self.recent(&w, steve_store::now() - 7 * 86_400_000))
+            .unwrap_or_default();
+        let purposes: Vec<Value> = PURPOSES
+            .iter()
+            .map(|p| {
+                let custom = self.custom(ws, p.key);
+                let effective = self.resolve(ws, p.key, &st);
+                json!({
+                    "key": p.key, "label": p.label, "desc": p.desc,
+                    "value": custom,
+                    "follows": custom.is_none(),
+                    "effective": effective,
+                    "recommended": self.recommended(p),
+                    "codex_note": codex_note(p.key),
+                    "recent": recent.get(p.key),
+                })
+            })
+            .collect();
+        let agents: Vec<Value> = HARNESSES
+            .iter()
+            .map(|(h, name, known)| {
+                let value = self.ws_of(ws).and_then(|w| {
+                    self.store
+                        .settings()
+                        .get::<Option<String>>(&w, &agent_key(h), None)
+                        .ok()
+                        .flatten()
+                });
+                json!({
+                    "harness": h, "name": name, "models": known,
+                    "default": self.defaults.agent.get(*h),
+                    "value": value,
+                })
+            })
+            .collect();
+        let harnesses: Vec<Value> = JUDGE_HARNESSES
+            .iter()
+            .map(|(h, name)| {
+                json!({
+                    "id": h, "name": name,
+                    "efforts": efforts(h).iter().map(|(k, l)| json!({"key": k, "label": l})).collect::<Vec<_>>(),
+                    "default_models": self.defaults.harness_list(h),
+                })
+            })
+            .collect();
+        json!({
+            "steve": st,
+            "purposes": purposes,
+            "agents": agents,
+            "harnesses": harnesses,
+            "known": CLAUDE_MODELS,
+            "efforts": EFFORTS.iter().map(|(k, l)| json!({"key": k, "label": l})).collect::<Vec<_>>(),
+            "max": MAX_MODELS,
+        })
+    }
+
+    /// The current stored value of every key `patch` touches (for undo and the audit's `before`).
+    pub fn stored(&self, ws: &str, patch: &Map<String, Value>) -> Map<String, Value> {
+        patch
+            .keys()
+            .map(|k| {
+                let v: Option<Value> = self.store.settings().get(ws, k, None).ok().flatten();
+                (k.clone(), v.unwrap_or(Value::Null))
+            })
+            .collect()
+    }
+
+    /// Validates `patch` ([`validate`]), stores it (a settings revision) and audits it. Returns the
+    /// settings keys written.
+    pub fn apply(
+        &self,
+        ws: &str,
+        patch: &Value,
+        actor: &str,
+    ) -> std::result::Result<Map<String, Value>, String> {
+        let values = validate(patch)?;
+        self.write(ws, &values, actor, "settings.models")
+            .map_err(|e| e.to_string())?;
+        Ok(values)
+    }
+
+    /// Stores settings keys already validated, with a revision and an audit row (`before` and `after`).
+    pub fn write(
+        &self,
+        ws: &str,
+        values: &Map<String, Value>,
+        actor: &str,
+        action: &str,
+    ) -> steve_store::Result<()> {
+        if values.is_empty() {
+            return Ok(());
+        }
+        let before = self.stored(ws, values);
+        self.store.settings().set(ws, values, actor)?;
+        self.store.audit(
+            actor,
+            action,
+            ws,
+            &json!({"before": before, "after": values}),
+            ws,
+        )
+    }
+}
+
+/// The judgment harness of a gateway usage row (`claude-cli` → `claude-code`, `codex-cli` → `codex`).
+pub fn gateway_harness(h: &str) -> &str {
+    match h {
+        "claude-cli" => CLAUDE_CODE,
+        "codex-cli" => CODEX,
+        h => h,
+    }
+}
+
+/// The top-level `model = "…"` of `<codex_home>/config.toml`: the model `codex exec` uses without
+/// `-m`. Only that one key is read (the file also names providers and their auth).
+pub fn codex_config_model(codex_home: &std::path::Path) -> Option<String> {
+    let text = std::fs::read_to_string(codex_home.join("config.toml")).ok()?;
+    for line in text.lines() {
+        let l = line.trim();
+        if l.starts_with('[') {
+            break;
+        }
+        let Some(rest) = l.strip_prefix("model") else {
+            continue;
+        };
+        let Some(v) = rest.trim_start().strip_prefix('=') else {
+            continue;
+        };
+        let v = v
+            .split('#')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .trim_matches('"')
+            .trim_matches('\'');
+        return valid_model(v).then(|| v.to_string());
+    }
+    None
+}
+
+/// Checks a `PATCH /api/settings/models` body and turns it into settings keys:
+/// `{"purposes": {"route": {"harness": "codex", "models": [...], "effort": "high"} | null}, "agents": {"codex": "id" | null}}`.
+/// `null` (or an empty object) puts a purpose back on Steve. A missing harness means Claude Code.
+pub fn validate(patch: &Value) -> std::result::Result<Map<String, Value>, String> {
+    let o = patch.as_object().ok_or("要一个对象")?;
+    let mut out = Map::new();
+    for k in o.keys() {
+        if k != "purposes" && k != "agents" {
+            return Err(format!("不认识的字段：{k}"));
+        }
+    }
+    if let Some(ps) = o.get("purposes") {
+        let ps = ps.as_object().ok_or("purposes 要是对象")?;
+        for (k, v) in ps {
+            let p = PURPOSES
+                .iter()
+                .find(|p| p.key == k)
+                .ok_or_else(|| format!("没有这个用途：{k}"))?;
+            out.insert(key(p.key), choice_value(p, v)?);
+        }
+    }
+    if let Some(ags) = o.get("agents") {
+        let ags = ags.as_object().ok_or("agents 要是对象")?;
+        for (h, v) in ags {
+            if !HARNESSES.iter().any(|(x, ..)| x == h) {
+                return Err(format!("没有这个 harness：{h}"));
+            }
+            let m = match v {
+                Value::Null => Value::Null,
+                Value::String(s) if s.trim().is_empty() => Value::Null,
+                Value::String(s) if valid_model(s.trim()) => json!(s.trim()),
+                _ => return Err(format!("{h} 的默认模型不对")),
+            };
+            out.insert(agent_key(h), m);
+        }
+    }
+    if out.is_empty() {
+        return Err("没有要改的".into());
+    }
+    Ok(out)
+}
+
+fn choice_value(p: &Purpose, v: &Value) -> std::result::Result<Value, String> {
+    let o = match v {
+        Value::Null => return Ok(Value::Null),
+        Value::Object(o) => o,
+        _ => return Err(format!("{} 要是对象或 null", p.label)),
+    };
+    let mut models: Vec<String> = vec![];
+    for (k, x) in o {
+        match k.as_str() {
+            "models" => {
+                let a = x
+                    .as_array()
+                    .ok_or_else(|| format!("{} 的模型要是列表", p.label))?;
+                for m in a {
+                    let m = m
+                        .as_str()
+                        .map(str::trim)
+                        .ok_or_else(|| format!("{} 的模型要是文字", p.label))?;
+                    if !valid_model(m) {
+                        return Err(format!("{} 的模型名不对：{m}", p.label));
+                    }
+                    if models.iter().any(|x| x == m) {
+                        return Err(format!("{} 的模型重复了：{m}", p.label));
+                    }
+                    models.push(m.to_string());
+                }
+                if models.len() > MAX_MODELS {
+                    return Err(format!("{} 最多 {MAX_MODELS} 个模型", p.label));
+                }
+            }
+            "effort" | "harness" => {}
+            _ => return Err(format!("{} 不认识的字段：{k}", p.label)),
+        }
+    }
+    let harness = match o.get("harness") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(h)) if judge_harness(h) => Some(h.clone()),
+        Some(_) => return Err(format!("{} 的 harness 不对", p.label)),
+    };
+    let h = harness.as_deref().unwrap_or(CLAUDE_CODE);
+    let effort = match o.get("effort") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(e)) if e.is_empty() => None,
+        Some(Value::String(e)) if efforts(h).iter().any(|(k, _)| k == e) => Some(e.clone()),
+        Some(_) => return Err(format!("{} 的推理强度不对", p.label)),
+    };
+    if harness.is_none() && models.is_empty() && effort.is_none() {
+        return Ok(Value::Null);
+    }
+    Ok(serde_json::to_value(Choice {
+        harness: h.to_string(),
+        models,
+        effort,
+    })
+    .unwrap_or(Value::Null))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use steve_store::{BotPatch, NewBot, NewUsage};
+
+    fn store(dir: &std::path::Path) -> Store {
+        let s = Store::open(dir.join("steve.sqlite3"), steve_store::FnPublisher(|_| {})).unwrap();
+        s.ensure_workspace().unwrap();
+        s
+    }
+
+    /// The main bot as `orchestrator::seed` makes it, on `harness` with `model`.
+    fn steve_bot(s: &Store, harness: &str, model: Option<&str>) {
+        s.bots()
+            .seed(
+                "steve",
+                true,
+                &NewBot {
+                    name: "Steve".into(),
+                    harness: harness.into(),
+                    model: model.map(String::from),
+                    ..NewBot::default()
+                },
+                "default",
+            )
+            .unwrap();
+    }
+
+    fn patch_bot(s: &Store, p: BotPatch) {
+        s.bots().patch("steve", &p, "me").unwrap();
+    }
+
+    fn defaults() -> Defaults {
+        Defaults {
+            fast: vec!["haiku".into(), "sonnet".into()],
+            smart: vec!["sonnet".into(), "opus".into()],
+            research: vec!["r1".into(), "r2".into()],
+            check: vec![],
+            agent: BTreeMap::from([("claude-code".into(), "opus".into())]),
+            codex: Some("gpt-cfg".into()),
+        }
+    }
+
+    fn l(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn ch(h: &str, m: &[&str], e: Option<&str>) -> Choice {
+        Choice {
+            harness: h.into(),
+            models: l(m),
+            effort: e.map(String::from),
+        }
+    }
+
+    #[test]
+    fn everything_follows_the_steve_bot() {
+        let d = tempfile::tempdir().unwrap();
+        let s = store(d.path());
+        let m = Models::new(s.clone(), defaults());
+        // no main bot at all: Claude Code on the smart list
+        assert_eq!(
+            m.for_purpose("default", "chat"),
+            ch(CLAUDE_CODE, &["sonnet", "opus"], None)
+        );
+
+        // a Claude Code Steve with no model: the smart list, for every purpose and any tier
+        steve_bot(&s, CLAUDE_CODE, None);
+        for p in [
+            "route",
+            "chat",
+            "research",
+            "title",
+            "disclosure",
+            "digest",
+            "other",
+            "intent",
+        ] {
+            assert_eq!(
+                m.for_call("default", p, Tier::Fast),
+                ch(CLAUDE_CODE, &["sonnet", "opus"], None),
+                "{p}"
+            );
+        }
+        // its model comes first, the smart list is the fallback; its effort is passed on
+        patch_bot(
+            &s,
+            BotPatch {
+                model: Some(Some("claude-opus-5-5".into())),
+                reasoning_effort: Some(Some("high".into())),
+                ..BotPatch::default()
+            },
+        );
+        assert_eq!(
+            m.for_purpose("", "chat"),
+            ch(
+                CLAUDE_CODE,
+                &["claude-opus-5-5", "sonnet", "opus"],
+                Some("high")
+            )
+        );
+        // Codex Steve: its model, no fallback list; an effort Codex does not take is dropped
+        patch_bot(
+            &s,
+            BotPatch {
+                harness: Some(CODEX.into()),
+                model: Some(Some("gpt-6-luna".into())),
+                reasoning_effort: Some(Some("minimal".into())),
+                ..BotPatch::default()
+            },
+        );
+        assert_eq!(
+            m.for_purpose("default", "route"),
+            ch(CODEX, &["gpt-6-luna"], Some("minimal"))
+        );
+        patch_bot(
+            &s,
+            BotPatch {
+                model: Some(None),
+                reasoning_effort: Some(Some("max".into())),
+                ..BotPatch::default()
+            },
+        );
+        // no model: Codex's configured one, shown as such
+        assert_eq!(
+            m.for_purpose("default", "chat"),
+            ch(CODEX, &["gpt-cfg"], None)
+        );
+        let st = m.steve();
+        assert_eq!(
+            (st.harness.as_str(), st.runs_on.as_str(), st.note),
+            (CODEX, CODEX, None)
+        );
+        assert_eq!(st.model_note.as_deref(), Some("来自 Codex 配置的默认"));
+        // a harness that cannot judge: Claude Code, said so
+        patch_bot(
+            &s,
+            BotPatch {
+                harness: Some("gemini".into()),
+                model: Some(Some("gemini-x".into())),
+                ..BotPatch::default()
+            },
+        );
+        let st = m.steve();
+        assert_eq!(st.runs_on, CLAUDE_CODE);
+        assert!(st.note.as_deref().is_some_and(|n| n.contains("gemini")));
+        assert_eq!(
+            m.for_purpose("default", "chat"),
+            ch(CLAUDE_CODE, &["sonnet", "opus"], None)
+        );
+    }
+
+    #[test]
+    fn an_override_wins_with_its_harness_models_and_effort() {
+        let d = tempfile::tempdir().unwrap();
+        let s = store(d.path());
+        steve_bot(&s, CLAUDE_CODE, Some("claude-sonnet-5-5"));
+        let m = Models::new(s.clone(), defaults());
+        m.apply(
+            "default",
+            &json!({"purposes": {
+                "route": {"harness": "claude-code", "models": ["opus", "haiku"], "effort": "low"},
+                "chat": {"harness": "codex", "models": ["gpt-6-sol"], "effort": "minimal"},
+                "draft": {"harness": "codex"},
+                "title": {"harness": "claude-code", "effort": "max"},
+            }}),
+            "me",
+        )
+        .unwrap();
+        assert_eq!(
+            m.for_call("default", "route", Tier::Fast),
+            ch(CLAUDE_CODE, &["opus", "haiku"], Some("low"))
+        );
+        // channel-rule intent is routing; a call with no workspace is for the only workspace
+        assert_eq!(
+            m.for_call("", "intent", Tier::Fast).models,
+            l(&["opus", "haiku"])
+        );
+        assert_eq!(
+            m.for_purpose("default", "chat"),
+            ch(CODEX, &["gpt-6-sol"], Some("minimal"))
+        );
+        // a harness alone: that harness's default model (not Steve's, which is another harness's)
+        assert_eq!(
+            m.for_purpose("default", "draft"),
+            ch(CODEX, &["gpt-cfg"], None)
+        );
+        // on Steve's harness with no models: Steve's models, the override's effort
+        assert_eq!(
+            m.for_purpose("default", "title"),
+            ch(
+                CLAUDE_CODE,
+                &["claude-sonnet-5-5", "sonnet", "opus"],
+                Some("max")
+            )
+        );
+        // null goes back to following Steve
+        m.apply("default", &json!({"purposes": {"route": null}}), "me")
+            .unwrap();
+        assert_eq!(
+            m.for_purpose("default", "route"),
+            ch(CLAUDE_CODE, &["claude-sonnet-5-5", "sonnet", "opus"], None)
+        );
+        // a value stored before Steve was a bot (no harness) ran on Claude Code and still does
+        s.settings()
+            .set(
+                "default",
+                json!({"models.yolo": {"models": ["opus"], "effort": "high"}})
+                    .as_object()
+                    .unwrap(),
+                "me",
+            )
+            .unwrap();
+        assert_eq!(
+            m.for_purpose("default", "yolo"),
+            ch(CLAUDE_CODE, &["opus"], Some("high"))
+        );
+        // agent defaults are unchanged
+        m.apply(
+            "default",
+            &json!({"agents": {"claude-code": "sonnet"}}),
+            "me",
+        )
+        .unwrap();
+        assert_eq!(
+            m.agent_model("default", "claude-code").as_deref(),
+            Some("sonnet")
+        );
+        m.apply("default", &json!({"agents": {"claude-code": ""}}), "me")
+            .unwrap();
+        assert_eq!(
+            m.agent_model("default", "claude-code").as_deref(),
+            Some("opus")
+        );
+        assert_eq!(m.agent_model("default", "codex"), None);
+    }
+
+    #[test]
+    fn migration_keeps_the_cheap_purposes_on_the_fast_list_once() {
+        let d = tempfile::tempdir().unwrap();
+        let s = store(d.path());
+        steve_bot(&s, CODEX, None);
+        let mut df = defaults();
+        df.check = l(&["check"]);
+        let m = Models::new(s.clone(), df);
+        // an override the user made before stays as it is
+        s.settings()
+            .set(
+                "default",
+                json!({"models.title": {"models": ["opus"]}})
+                    .as_object()
+                    .unwrap(),
+                "me",
+            )
+            .unwrap();
+        assert!(m.migrate("default").unwrap());
+        assert_eq!(
+            m.for_purpose("default", "route"),
+            ch(CLAUDE_CODE, &["haiku", "sonnet"], None)
+        );
+        assert_eq!(
+            m.for_purpose("default", "flow"),
+            ch(CLAUDE_CODE, &["haiku", "sonnet"], None)
+        );
+        assert_eq!(
+            m.for_purpose("default", "disclosure"),
+            ch(CLAUDE_CODE, &["check"], None)
+        );
+        assert_eq!(
+            m.for_purpose("default", "title"),
+            ch(CLAUDE_CODE, &["opus"], None)
+        );
+        // the rest follows Steve (Codex here)
+        for p in [
+            "chat", "research", "extract", "yolo", "draft", "mail", "compose",
+        ] {
+            assert_eq!(
+                m.for_purpose("default", p),
+                ch(CODEX, &["gpt-cfg"], None),
+                "{p}"
+            );
+            assert!(m.custom("default", p).is_none());
+        }
+        // once: removing an override afterwards is respected
+        m.apply("default", &json!({"purposes": {"route": null}}), "me")
+            .unwrap();
+        assert!(!m.migrate("default").unwrap());
+        assert_eq!(m.for_purpose("default", "route").harness, CODEX);
+        let v = m.view("default");
+        let route = v["purposes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["key"] == "route")
+            .unwrap();
+        assert_eq!(route["follows"], json!(true));
+        assert_eq!(
+            route["recommended"],
+            json!({"harness": "claude-code", "models": ["haiku", "sonnet"]})
+        );
+        assert_eq!(v["steve"]["runs_on"], json!("codex"));
+    }
+
+    #[test]
+    fn recent_usage_per_purpose() {
+        let d = tempfile::tempdir().unwrap();
+        let s = store(d.path());
+        let m = Models::new(s.clone(), defaults());
+        let add = |purpose: &str, harness: &str, model: &str, ok: bool, ts: i64| {
+            s.stats()
+                .usage_add(&NewUsage {
+                    workspace_id: "default".into(),
+                    ts,
+                    day: "2026-11-02".into(),
+                    source: "gateway".into(),
+                    purpose: purpose.into(),
+                    harness: harness.into(),
+                    turn_id: None,
+                    session_id: None,
+                    item_id: None,
+                    bot_id: None,
+                    project_id: None,
+                    usage: steve_store::ModelUsage {
+                        model: model.into(),
+                        ..Default::default()
+                    },
+                    duration_ms: None,
+                    ok,
+                    attempts: 1,
+                })
+                .unwrap();
+        };
+        let now = steve_store::now();
+        add("route", "claude-cli", "claude-haiku-5-5", true, now - 5000);
+        add("intent", "claude-cli", "claude-haiku-5-5", true, now - 4000);
+        add("route", "codex-cli", "gpt-6-luna", false, now - 1000);
+        add("chat", "claude-cli", "old", true, now - 30 * 86_400_000);
+        let r = m.recent("default", now - 7 * 86_400_000);
+        assert_eq!(
+            r["route"]["last"],
+            json!({"harness": "codex", "model": "gpt-6-luna", "at": now - 1000})
+        );
+        assert_eq!(r["route"]["used"][0]["calls"], json!(2));
+        assert_eq!(r["route"]["used"][0]["harness"], json!("claude-code"));
+        assert_eq!(r["route"]["used"][1]["failed"], json!(1));
+        assert!(!r.contains_key("chat"), "older than the window");
+    }
+
+    #[test]
+    fn codex_config_model_reads_only_the_top_level_model() {
+        let d = tempfile::tempdir().unwrap();
+        assert_eq!(codex_config_model(d.path()), None);
+        std::fs::write(
+            d.path().join("config.toml"),
+            "# x\nmodel_provider = \"p\"\nmodel = \"gpt-6-astra\" # comment\nmodel_reasoning_effort = \"medium\"\n[profiles.fast]\nmodel = \"other\"\n",
+        )
+        .unwrap();
+        assert_eq!(codex_config_model(d.path()).as_deref(), Some("gpt-6-astra"));
+        std::fs::write(d.path().join("config.toml"), "[a]\nmodel = \"x\"\n").unwrap();
+        assert_eq!(codex_config_model(d.path()), None);
+    }
+
+    #[test]
+    fn validation() {
+        let bad = [
+            json!([]),
+            json!({}),
+            json!({"x": 1}),
+            json!({"purposes": {"nope": null}}),
+            json!({"purposes": {"route": "haiku"}}),
+            json!({"purposes": {"route": {"models": "haiku"}}}),
+            json!({"purposes": {"route": {"models": ["a b"]}}}),
+            json!({"purposes": {"route": {"models": ["-x"]}}}),
+            json!({"purposes": {"route": {"models": ["a", "a"]}}}),
+            json!({"purposes": {"route": {"models": ["a", "b", "c", "d", "e", "f"]}}}),
+            json!({"purposes": {"route": {"models": ["a"], "effort": "huge"}}}),
+            json!({"purposes": {"route": {"models": ["a"], "tier": "fast"}}}),
+            json!({"purposes": {"route": {"harness": "gemini"}}}),
+            // effort of the other harness
+            json!({"purposes": {"route": {"harness": "codex", "effort": "max"}}}),
+            json!({"purposes": {"route": {"harness": "claude-code", "effort": "minimal"}}}),
+            json!({"agents": {"gemini": "x"}}),
+            json!({"agents": {"codex": 3}}),
+        ];
+        for b in bad {
+            assert!(validate(&b).is_err(), "{b}");
+        }
+        let ok = validate(&json!({"purposes": {
+            "research": {"models": [" claude-opus-5-5[1m] ", "us.anthropic.claude-x-v1:0"], "effort": "xhigh"},
+            "chat": {"models": []},
+            "route": {"harness": "codex", "effort": "minimal"},
+        }, "agents": {"codex": "gpt-6-sol"}}))
+        .unwrap();
+        assert_eq!(
+            Value::Object(ok),
+            json!({
+                "models.research": {"harness": "claude-code", "models": ["claude-opus-5-5[1m]", "us.anthropic.claude-x-v1:0"], "effort": "xhigh"},
+                "models.chat": null,
+                "models.route": {"harness": "codex", "models": [], "effort": "minimal"},
+                "models.agent.codex": "gpt-6-sol",
+            })
+        );
+    }
+
+    #[test]
+    fn changes_are_revisions_and_audited() {
+        let d = tempfile::tempdir().unwrap();
+        let s = store(d.path());
+        let m = Models::new(s.clone(), defaults());
+        m.apply(
+            "default",
+            &json!({"purposes": {"yolo": {"models": ["opus"]}}}),
+            "u1",
+        )
+        .unwrap();
+        m.apply(
+            "default",
+            &json!({"purposes": {"yolo": {"harness": "codex", "models": ["g"]}}}),
+            "u1",
+        )
+        .unwrap();
+        let (audits, revs): (Vec<String>, i64) = s
+            .with_conn(|c| {
+                let mut st = c.prepare(
+                    "SELECT detail FROM audit WHERE action = 'settings.models' AND actor = 'u1' ORDER BY id",
+                )?;
+                let a = st
+                    .query_map([], |r| r.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                let n = c.query_row(
+                    "SELECT count(*) FROM revisions WHERE object_type = 'settings' AND author = 'u1'",
+                    [],
+                    |r| r.get(0),
+                )?;
+                Ok((a, n))
+            })
+            .unwrap();
+        assert_eq!(revs, 2);
+        assert_eq!(audits.len(), 2);
+        let last: Value = serde_json::from_str(&audits[1]).unwrap();
+        assert_eq!(last["before"]["models.yolo"]["models"], json!(["opus"]));
+        assert_eq!(
+            last["after"]["models.yolo"],
+            json!({"harness": "codex", "models": ["g"]})
+        );
+        let v = m.view("default");
+        let y = v["purposes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["key"] == "yolo")
+            .unwrap();
+        assert_eq!(y["value"]["models"], json!(["g"]));
+        assert_eq!(y["effective"]["harness"], json!("codex"));
+        assert_eq!(v["purposes"].as_array().unwrap().len(), 11);
+        assert_eq!(v["harnesses"][1]["efforts"][0]["key"], json!("none"));
+    }
+}

@@ -1,0 +1,38 @@
+{
+  "schema": "2.0",
+  "header": {
+    "event_id": "8bd7528836247b46a0d3ec259da5090b",
+    "event_type": "im.chat.member.user.added_v1",
+    "create_time": "1761900010000",
+    "token": "fake-verification-token",
+    "app_id": "cli_a5fake0000000001",
+    "tenant_key": "2ca1d211f64f6438"
+  },
+  "event": {
+    "chat_id": "oc_external0000000000000000000001",
+    "operator_id": {
+      "union_id": "on_owner00000000000000000000000001",
+      "user_id": "u_owner",
+      "open_id": "ou_owner00000000000000000000000001"
+    },
+    "external": true,
+    "operator_tenant_key": "2ca1d211f64f6438",
+    "name": "客户对接群",
+    "i18n_names": {
+      "zh_cn": "客户对接群",
+      "en_us": "",
+      "ja_jp": ""
+    },
+    "users": [
+      {
+        "name": "孙采购",
+        "tenant_key": "736588c9260f175d",
+        "user_id": {
+          "union_id": "on_ext0000000000000000000000000002",
+          "user_id": "",
+          "open_id": "ou_ext0000000000000000000000000002"
+        }
+      }
+    ]
+  }
+}

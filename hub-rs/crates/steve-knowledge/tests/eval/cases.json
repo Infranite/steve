@@ -1,0 +1,494 @@
+[
+ {
+  "id": "q01",
+  "kind": "两字词",
+  "query": "续签",
+  "expect": [
+   "notes/acme-contract.md",
+   "mem:mm_16"
+  ]
+ },
+ {
+  "id": "q02",
+  "kind": "两字词",
+  "query": "回滚",
+  "expect": [
+   "notes/deploy-runbook.md"
+  ]
+ },
+ {
+  "id": "q03",
+  "kind": "两字词",
+  "query": "限流",
+  "expect": [
+   "notes/api-gateway.md"
+  ]
+ },
+ {
+  "id": "q04",
+  "kind": "两字词",
+  "query": "发票",
+  "expect": [
+   "items/ST-33.md",
+   "notes/travel-expense.md"
+  ]
+ },
+ {
+  "id": "q05",
+  "kind": "两字词",
+  "query": "复盘",
+  "expect": [
+   "notes/oncall.md"
+  ]
+ },
+ {
+  "id": "q06",
+  "kind": "两字词",
+  "query": "团建",
+  "expect": [
+   "mem:mm_44",
+   "notes/weekly-1024.md"
+  ]
+ },
+ {
+  "id": "q07",
+  "kind": "两字词",
+  "query": "乱码",
+  "expect": [
+   "notes/globex-migration.md",
+   "items/ST-15.md"
+  ]
+ },
+ {
+  "id": "q08",
+  "kind": "两字词",
+  "query": "咖啡",
+  "expect": [
+   "mem:mm_29"
+  ]
+ },
+ {
+  "id": "q09",
+  "kind": "长句",
+  "query": "Acme 的合同什么时候续签，需要提前多久提醒",
+  "expect": [
+   "notes/acme-contract.md",
+   "mem:mm_16"
+  ]
+ },
+ {
+  "id": "q10",
+  "kind": "长句",
+  "query": "部署失败了应该怎么回滚到上一个版本",
+  "expect": [
+   "notes/deploy-runbook.md"
+  ]
+ },
+ {
+  "id": "q11",
+  "kind": "长句",
+  "query": "登录一个小时后就被踢出去是什么原因",
+  "expect": [
+   "items/ST-12.md"
+  ]
+ },
+ {
+  "id": "q12",
+  "kind": "长句",
+  "query": "手机切换网络以后页面不更新了怎么办",
+  "expect": [
+   "items/ST-21.md"
+  ]
+ },
+ {
+  "id": "q13",
+  "kind": "长句",
+  "query": "Globex 迁移的停机窗口有多长",
+  "expect": [
+   "notes/globex-migration.md",
+   "mem:mm_19"
+  ]
+ },
+ {
+  "id": "q14",
+  "kind": "长句",
+  "query": "出差住酒店每晚最多能报多少钱",
+  "expect": [
+   "notes/travel-expense.md"
+  ]
+ },
+ {
+  "id": "q15",
+  "kind": "长句",
+  "query": "数据库备份保留多少天",
+  "expect": [
+   "notes/backup.md"
+  ]
+ },
+ {
+  "id": "q16",
+  "kind": "长句",
+  "query": "Steve 2.0 的第一个目标是什么",
+  "expect": [
+   "wiki/bootstrap-plan.md"
+  ]
+ },
+ {
+  "id": "q17",
+  "kind": "长句",
+  "query": "对外身份和 Bot 有什么区别",
+  "expect": [
+   "wiki/channel-design.md"
+  ]
+ },
+ {
+  "id": "q18",
+  "kind": "长句",
+  "query": "插件可以挂在事项流程的哪些钩子上",
+  "expect": [
+   "wiki/item-flow-plugins.md"
+  ]
+ },
+ {
+  "id": "q19",
+  "kind": "长句",
+  "query": "界面上的颜色用来表示什么状态",
+  "expect": [
+   "wiki/steve-visual-design.md"
+  ]
+ },
+ {
+  "id": "q20",
+  "kind": "长句",
+  "query": "可用性低于承诺时返还多少服务费",
+  "expect": [
+   "notes/acme-contract.md"
+  ]
+ },
+ {
+  "id": "q21",
+  "kind": "英文缩写",
+  "query": "SLA",
+  "expect": [
+   "notes/acme-contract.md"
+  ]
+ },
+ {
+  "id": "q22",
+  "kind": "英文缩写",
+  "query": "OIDC 续期",
+  "expect": [
+   "items/ST-12.md"
+  ]
+ },
+ {
+  "id": "q23",
+  "kind": "英文缩写",
+  "query": "LCP",
+  "expect": [
+   "items/ST-40.md",
+   "mem:mm_49"
+  ]
+ },
+ {
+  "id": "q24",
+  "kind": "英文缩写",
+  "query": "DPA",
+  "expect": [
+   "notes/english-qbr.md"
+  ]
+ },
+ {
+  "id": "q25",
+  "kind": "英文缩写",
+  "query": "RRF",
+  "expect": [
+   "notes/reading-notes.md"
+  ]
+ },
+ {
+  "id": "q26",
+  "kind": "英文缩写",
+  "query": "PDB",
+  "expect": [
+   "notes/kubernetes-upgrade.md"
+  ]
+ },
+ {
+  "id": "q27",
+  "kind": "英文缩写",
+  "query": "P0 告警",
+  "expect": [
+   "notes/oncall.md",
+   "mem:mm_39"
+  ]
+ },
+ {
+  "id": "q28",
+  "kind": "英文缩写",
+  "query": "rps",
+  "expect": [
+   "notes/api-gateway.md",
+   "mem:mm_18"
+  ]
+ },
+ {
+  "id": "q29",
+  "kind": "英文缩写",
+  "query": "K8s 升级",
+  "expect": [
+   "notes/kubernetes-upgrade.md"
+  ]
+ },
+ {
+  "id": "q30",
+  "kind": "同义说法",
+  "query": "发布新版本的步骤",
+  "expect": [
+   "notes/deploy-runbook.md"
+  ]
+ },
+ {
+  "id": "q31",
+  "kind": "同义说法",
+  "query": "会话过期被登出",
+  "expect": [
+   "items/ST-12.md"
+  ]
+ },
+ {
+  "id": "q32",
+  "kind": "同义说法",
+  "query": "断网后自动恢复",
+  "expect": [
+   "items/ST-21.md"
+  ]
+ },
+ {
+  "id": "q33",
+  "kind": "同义说法",
+  "query": "报表下载太慢超时",
+  "expect": [
+   "items/ST-15.md"
+  ]
+ },
+ {
+  "id": "q34",
+  "kind": "同义说法",
+  "query": "文件存储换成对象存储",
+  "expect": [
+   "items/ST-30.md"
+  ]
+ },
+ {
+  "id": "q35",
+  "kind": "同义说法",
+  "query": "灾难恢复演练",
+  "expect": [
+   "notes/backup.md"
+  ]
+ },
+ {
+  "id": "q36",
+  "kind": "同义说法",
+  "query": "工程师工资多少",
+  "expect": [
+   "notes/hiring.md"
+  ]
+ },
+ {
+  "id": "q37",
+  "kind": "同义说法",
+  "query": "陈静休假安排",
+  "expect": [
+   "mem:mm_14"
+  ]
+ },
+ {
+  "id": "q38",
+  "kind": "同义说法",
+  "query": "工资",
+  "expect": [
+   "notes/hiring.md"
+  ]
+ },
+ {
+  "id": "q39",
+  "kind": "同义说法",
+  "query": "请假",
+  "expect": [
+   "mem:mm_14"
+  ]
+ },
+ {
+  "id": "q40",
+  "kind": "人名",
+  "query": "Sarah 喜欢什么样的邮件",
+  "expect": [
+   "mem:mm_01"
+  ]
+ },
+ {
+  "id": "q41",
+  "kind": "人名",
+  "query": "Tom Becker 关心什么",
+  "expect": [
+   "mem:mm_04"
+  ]
+ },
+ {
+  "id": "q42",
+  "kind": "人名",
+  "query": "Raj Patel 的时区",
+  "expect": [
+   "mem:mm_06"
+  ]
+ },
+ {
+  "id": "q43",
+  "kind": "人名",
+  "query": "王磊负责什么",
+  "expect": [
+   "mem:mm_08"
+  ]
+ },
+ {
+  "id": "q44",
+  "kind": "人名",
+  "query": "李娜的专注时间",
+  "expect": [
+   "mem:mm_11"
+  ]
+ },
+ {
+  "id": "q45",
+  "kind": "人名",
+  "query": "周敏审核报价",
+  "expect": [
+   "mem:mm_17"
+  ]
+ },
+ {
+  "id": "q46",
+  "kind": "人名",
+  "query": "Michael Bolton",
+  "expect": [
+   "notes/english-qbr.md",
+   "mem:mm_07"
+  ]
+ },
+ {
+  "id": "q47",
+  "kind": "错别字",
+  "query": "合同续前",
+  "expect": [
+   "notes/acme-contract.md"
+  ]
+ },
+ {
+  "id": "q48",
+  "kind": "错别字",
+  "query": "部暑脚本",
+  "expect": [
+   "notes/deploy-runbook.md"
+  ]
+ },
+ {
+  "id": "q49",
+  "kind": "错别字",
+  "query": "值斑交接",
+  "expect": [
+   "notes/oncall.md",
+   "mem:mm_38"
+  ]
+ },
+ {
+  "id": "q50",
+  "kind": "错别字",
+  "query": "报消流程",
+  "expect": [
+   "notes/travel-expense.md"
+  ]
+ },
+ {
+  "id": "q51",
+  "kind": "错别字",
+  "query": "Globx 迁移",
+  "expect": [
+   "notes/globex-migration.md"
+  ]
+ },
+ {
+  "id": "q52",
+  "kind": "错别字",
+  "query": "备分保留多久",
+  "expect": [
+   "notes/backup.md"
+  ]
+ },
+ {
+  "id": "q53",
+  "kind": "英文",
+  "query": "how does BM25 rank documents",
+  "expect": [
+   "notes/reading-notes.md"
+  ]
+ },
+ {
+  "id": "q54",
+  "kind": "英文",
+  "query": "export timeout for long date ranges",
+  "expect": [
+   "notes/english-qbr.md"
+  ]
+ },
+ {
+  "id": "q55",
+  "kind": "英文",
+  "query": "single sign-on with Okta",
+  "expect": [
+   "notes/english-qbr.md",
+   "mem:mm_21"
+  ]
+ },
+ {
+  "id": "q56",
+  "kind": "文档",
+  "query": "保险箱参考 1Password 建模",
+  "expect": [
+   "wiki/domain-model.md"
+  ]
+ },
+ {
+  "id": "q57",
+  "kind": "文档",
+  "query": "邮箱前缀规则",
+  "expect": [
+   "wiki/object-model.md"
+  ]
+ },
+ {
+  "id": "q58",
+  "kind": "文档",
+  "query": "侧栏底部的视觉规范页",
+  "expect": [
+   "wiki/steve-visual-design.md"
+  ]
+ },
+ {
+  "id": "q59",
+  "kind": "文档",
+  "query": "贡献、把关、观察三种钩子",
+  "expect": [
+   "wiki/item-flow-plugins.md"
+  ]
+ },
+ {
+  "id": "q60",
+  "kind": "文档",
+  "query": "soul 和 agents 两层提示词",
+  "expect": [
+   "wiki/channel-design.md"
+  ]
+ }
+]

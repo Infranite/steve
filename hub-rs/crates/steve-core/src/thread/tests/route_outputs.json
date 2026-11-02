@@ -1,0 +1,212 @@
+{
+  "msg_14e157d71e85441b": {
+    "raw": "{\"kind\":\"item\",\"confidence\":0.75,\"signals\":[\"change\"],\"offer\":null,\"item\":null,\"options\":[],\"title\":\"对话提示无法关闭\",\"goal\":\"Steve 对话里的发布冲突提示在冲突已经处理完之后仍然显示，而且无法关闭。需要排查这个提示的状态来源，确保冲突解决后它会自动消失，并且用户可以手动关闭。参考截图：截图-20261101-175509.png、截图-20261101-175513.png。\",\"bot\":\"dev\",\"project\":\"prj_6fe63fe584364583\",\"tags\":[\"tag_52753841283d4d69\"],\"newTags\":[],\"reply\":\"好，我把这个无法关闭的对话提示交给开发 Bot 修，截图会作为参考一起带过去。标签：前端。\",\"why\":\"这是一个描述了现象和预期（冲突已处理后应消失、应能关闭）的 Bug 报告，属于需要改动的工作。\"}",
+    "model": "claude-haiku-5-5",
+    "ms": 8992
+  },
+  "msg_154750aef9a04371": {
+    "raw": "{\"kind\":\"item\",\"confidence\":0.85,\"signals\":[\"change\",\"deliverable\"],\"offer\":null,\"item\":null,\"options\":[],\"title\":\"事项完成状态应在彻底完成后才标记\",\"goal\":\"修复事项完成状态的逻辑：当前任务在收尾发布之前就被标记为完成，这不符合预期。应只有任务彻底完成（包括收尾发布）才能标记事项完成。只要事项还有追加的新消息，状态就应保持为进行中。请排查并修正事项状态流转，使其与此预期一致。\",\"bot\":\"dev\",\"project\":\"prj_6fe63fe584364583\",\"tags\":[\"tag_2b0cc8a1e54b4321\"],\"newTags\":[],\"reply\":\"这是事项状态流转的缺陷，已转为开发任务，由 dev 处理。标签：发布交付。\",\"why\":\"用户描述了症状（发布前就标记完成）并给出预期（彻底完成才算完成、有新消息保持进行中），属于需要修改的缺陷报告。\"}",
+    "model": "claude-haiku-5-5",
+    "ms": 6143
+  },
+  "msg_1af833826f7e444f": {
+    "raw": "{\"kind\":\"research\",\"confidence\":0.9,\"signals\":[\"question\",\"lookup\"],\"offer\":null,\"item\":null,\"options\":[],\"title\":\"讲解 Steve 知识系统运作\",\"goal\":\"阅读 Steve 项目的代码、文档和知识库相关实现，用中文讲解 Steve 的知识系统现在是怎么运作的：知识如何被存放、组织、检索和使用，以及它与对话、事项之间的关系。\",\"bot\":\"steve\",\"project\":\"prj_6fe63fe584364583\",\"tags\":[],\"newTags\":[],\"reply\":\"我去读一下 Steve 知识系统的实现，然后给你讲清楚它现在怎么运作。\",\"why\":\"这是对现状的提问，需要阅读项目代码和文档来回答，在对话中以只读方式研究即可，不需要建事项。\"}",
+    "model": "claude-haiku-5-5",
+    "ms": 6002
+  },
+  "msg_21ef0c7fae3f4f2b": {
+    "raw": "{\"kind\":\"item\",\"confidence\":0.85,\"signals\":[\"change\"],\"offer\":null,\"item\":null,\"options\":[],\"title\":\"事项关联项目缺失\",\"goal\":\"修复 Steve 不会为事项关联项目的问题：新建事项时应关联到对应项目，目前未关联，与预期不符。\",\"bot\":\"dev\",\"project\":\"prj_6fe63fe584364583\",\"tags\":[],\"newTags\":[],\"reply\":\"这是一个缺陷修复，已转为开发任务，由 dev 处理。\",\"why\":\"用户报告了现象并说明与预期不符，属于需要修复的工作。\"}",
+    "model": "claude-haiku-5-5",
+    "ms": 6129
+  },
+  "msg_28fb0c35382c4f8c": {
+    "raw": "{\"kind\":\"item\",\"confidence\":0.75,\"signals\":[\"explicit\",\"change\",\"deliverable\"],\"offer\":null,\"item\":null,\"options\":[],\"title\":\"Steve 界面视觉设计优化\",\"goal\":\"为 Steve 的 Web 界面做一套视觉设计方案并落地优化，解决当前 UI 太丑的问题。参考用户附带的两张截图（截图-20261101-022126.png、截图-20261101-022132.png）中的现状，先给出视觉设计方案（配色、字体、间距、组件样式等），再按方案改进界面。\",\"bot\":\"dev\",\"project\":\"prj_6fe63fe584364583\",\"tags\":[\"tag_52753841283d4d69\"],\"newTags\":[],\"reply\":\"好，我把它转成一个界面视觉优化事项，交给开发 Bot，参考你附的两张截图。\",\"why\":\"用户明确要求做视觉设计方案并优化 UI，是有改动动作和交付物的工作。\"}",
+    "model": "claude-haiku-5-5",
+    "ms": 8004
+  },
+  "msg_2d1e80ca64304b18": {
+    "raw": "{\"kind\":\"item\",\"confidence\":0.85,\"signals\":[\"deliverable\",\"change\"],\"offer\":null,\"item\":null,\"options\":[],\"title\":\"设计交付队列方案\",\"goal\":\"为 Steve 设计并实现「交付队列」功能，先输出一份方案文档。背景：现在每个卡片的发布都会单独发布一次，频繁发布不合理；MR 的提交和合并等交付动作也有同样问题。需求：用户可以把高频的、或短时间内针对同一项目或代码的统一改动放入队列，然后对队列内容进行统一发布和处理（统一发布、统一提交 MR、统一合并）。请先研究现有发布与 MR 交付流程的代码，给出方案，包括：队列的数据模型与生命周期、入队与出队的触发方式、合并同一项目改动的规则、与卡片和事项状态的关系、失败与重试处理、用户侧的交互入口，以及分阶段的实现计划。方案完成前不要改动代码。\",\"bot\":\"dev\",\"project\":\"prj_6fe63fe584364583\",\"tags\":[\"tag_2b0cc8a1e54b4321\"],\"newTags\":[],\"reply\":\"好，我把交付队列的方案整理成事项交给开发 Bot 了，先出方案再实现。\",\"why\":\"这是明确要求给出方案的工作项，属于交付流程相关的设计任务。\"}",
+    "model": "claude-haiku-5-5",
+    "ms": 6056
+  },
+  "msg_4229f0a520b94917": {
+    "raw": "{\"kind\":\"research\",\"confidence\":0.85,\"signals\":[\"question\",\"lookup\",\"vague\"],\"offer\":{\"title\":\"修评论的 markdown 渲染\",\"goal\":\"修复 st15 事项评论的排版问题：评论区应支持 markdown 渲染，当前评论内容排版很丑，需要按 markdown 正常渲染（参考用户附带的截图）。\"},\"item\":null,\"options\":[],\"title\":\"看 st15 评论的排版\",\"goal\":\"看一下 st15 这个事项的评论信息，排版很丑，确认评论是否支持 markdown 排版（附截图参考）。\",\"bot\":\"dev\",\"project\":\"prj_6fe63fe584364583\",\"tags\":[],\"newTags\":[],\"reply\":\"我去看一下 st15 的评论排版，确认评论是否支持 markdown。如果确实该渲染却没渲染，可以另建事项修它。\",\"why\":\"这是查看现状的问题，需要读项目代码才能回答；排版问题属于可能的缺陷，所以把修复放成可选的 offer，由你决定。\"}",
+    "model": "claude-haiku-5-5",
+    "ms": 5997
+  },
+  "msg_426db0af587b47e0": {
+    "raw": "{\"kind\":\"item\",\"confidence\":0.75,\"signals\":[\"change\",\"deliverable\"],\"offer\":null,\"item\":null,\"options\":[],\"title\":\"会话详情运行状态与输出渲染重构\",\"goal\":\"重构会话详情页的 UI：让用户能看出 agent 当前是否还在运行、正在做什么，并清晰呈现各类输出信息。参考 Codex App、Claude Code App 等 coding agent 的渲染方式做设计与实现。用户反馈当前界面太朴素，需要好好设计后重构。附截图作为现状参考。\",\"bot\":\"dev\",\"project\":\"prj_6fe63fe584364583\",\"tags\":[\"tag_52753841283d4d69\"],\"newTags\":[],\"reply\":\"好，我把会话详情的运行状态与输出渲染重构整理成事项交给开发 Bot，截图会作为现状参考一起带过去。标签：前端。\",\"why\":\"用户明确要求重构会话详情 UI，有清晰的改动对象和目标。\"}",
+    "model": "claude-haiku-5-5",
+    "ms": 11002
+  },
+  "msg_44f8726cdd7344e0": {
+    "raw": "{\"kind\":\"research\",\"confidence\":0.85,\"signals\":[\"question\",\"lookup\"],\"offer\":{\"title\":\"会话气泡与卡片支持 Markdown/Mermaid/HTML 预览\",\"goal\":\"让对话消息气泡、卡片详情等信息展示位置支持 Markdown 渲染,并支持 Mermaid 图表和 HTML 预览。优先调研并复用开源组件已有的能力。\"},\"item\":null,\"options\":[],\"title\":\"气泡与卡片 Markdown 渲染调研\",\"goal\":\"调研 Steve 对话消息气泡、卡片详情等展示位置当前不支持 Markdown 渲染的情况,并查找开源组件中可用于 Markdown、Mermaid、HTML 预览的能力。\",\"bot\":\"dev\",\"project\":\"prj_6fe63fe584364583\",\"tags\":[\"tag_52753841283d4d69\"],\"newTags\":[],\"reply\":\"这个我先查现状。联网搜索目前是关闭的,我会先看项目里的渲染实现;如果要做成事项,告诉我一声。\",\"why\":\"这是问现状和能力的问题,需要读项目代码;搜开源组件属于查询,做渲染支持是后续工作,所以放在 offer 里由你决定。\"}",
+    "model": "claude-haiku-5-5",
+    "ms": 7083
+  },
+  "msg_47cb3decce764d73": {
+    "raw": "{\"kind\":\"research\",\"confidence\":0.7,\"signals\":[\"question\",\"lookup\",\"change\"],\"offer\":{\"title\":\"头像随事件/鼠标/消息反应\",\"goal\":\"Steve 的头像目前是静态的，应该根据事件、鼠标移动、消息等状态有相应反应。查清头像组件为何不响应，并让它按这些事件做出反应。\"},\"item\":null,\"options\":[],\"title\":\"Steve 头像为何不动\",\"goal\":\"查一下 Steve 头像目前为什么是静态的，没有根据事件、鼠标移动、消息等做反应，并说明原因。\",\"bot\":\"dev\",\"project\":\"prj_6fe63fe584364583\",\"tags\":[\"tag_52753841283d4d69\"],\"newTags\":[],\"reply\":\"我先去看看头像现在为什么不动，查清楚再告诉你，要不要改我再问你。\",\"why\":\"这是一句症状加预期的吐槽，先查清原因；修不修由你决定，所以把修复作为提议。\"}",
+    "model": "claude-haiku-5-5",
+    "ms": 8128
+  },
+  "msg_482293b58f694824": {
+    "raw": "{\"kind\":\"research\",\"confidence\":0.88,\"signals\":[\"question\",\"lookup\"],\"offer\":{\"title\":\"输入框引用、bot、slash 加格式\",\"goal\":\"Steve 对话页输入框里，引用事项、引用 bot、使用 slash 命令时，目前都是普通文字，没有格式展示。请让这三类引用在输入框里有对应的格式展示（如标签/chip 样式），同时保证发送给 agent 的文本仍能被正确识别（事项 id、bot id、slash 命令名不丢失）。\"},\"item\":null,\"options\":[],\"title\":\"输入框引用的格式展示\",\"goal\":\"\",\"bot\":\"dev\",\"project\":\"prj_6fe63fe584364583\",\"tags\":[],\"newTags\":[],\"reply\":\"我先查引用在输入框和发送链路里的处理方式，再回答对 agent 感知有没有影响；要改格式的话可以另建事项。\",\"why\":\"这是问题加体验吐槽，先查代码回答是否影响 agent 感知，改格式作为可选的 offer 交给你决定。\"}",
+    "model": "claude-haiku-5-5",
+    "ms": 12082
+  },
+  "msg_4ec7b1a9baa146ee": {
+    "raw": "{\"kind\":\"suggest\",\"confidence\":0.8,\"signals\":[\"vague\",\"change\"],\"offer\":null,\"item\":null,\"options\":[],\"title\":\"优化事项页面信息密度\",\"goal\":\"优化事项页面的信息组织与密度：当前信息太散、信息密度太低。先设计方案（布局、信息分组、层级），再按方案实现。参考截图-20261101-175753.png。\",\"bot\":\"dev\",\"project\":\"prj_6fe63fe584364583\",\"tags\":[\"tag_52753841283d4d69\"],\"newTags\":[],\"reply\":\"事项页面信息比较散、密度偏低，我可以先出一个设计方案，或者直接建成事项交给开发 Bot。\",\"why\":\"说的是“看看怎么设计”，像是在讨论，范围也还没定，所以先给建议，不直接建事项。\"}",
+    "model": "claude-haiku-5-5",
+    "ms": 4986
+  },
+  "msg_694620fd53004132": {
+    "raw": "```json\n{\"kind\":\"item\",\"confidence\":0.9,\"signals\":[\"explicit\",\"change\"],\"offer\":null,\"item\":null,\"options\":[],\"title\":\"对话页右边栏与思考展示\",\"goal\":\"在 Steve 对话页做以下改动：\\n1. 主对话流展示思考过程：以折叠的「思考」块呈现，并展示分诊判断依据。\\n2. 主对话流展示工具调用信息：包括建卡片、关联项目等调用及其结果。\\n3. 对话页右侧新增右边栏：顶部为 Steve 头像，下方按时间排列放思考摘要和通知（如「已发布 xxx」「发布失败」「已回到 xxx」）；通知可点进对应事项，已读的可折叠。\\n4. 通知分流：成功类通知只进右边栏；需要处理的通知（如发布失败）在主对话流中保留一条提醒。\",\"bot\":\"dev\",\"project\":\"prj_6fe63fe584364583\",\"tags\":[\"tag_52753841283d4d69\"],\"newTags\":[],\"reply\":\"好的，我按建议建事项，交给开发 Bot 做对话页的思考展示、工具调用展示和右边栏。\",\"why\":\"用户确认了上一条回复中提出的改动方案，这是明确的改动工作，因此建事项。\"}\n```",
+    "model": "claude-haiku-5-5",
+    "ms": 10100
+  },
+  "msg_7b589e00e5774a4b": {
+    "raw": "{\"kind\":\"research\",\"confidence\":0.8,\"signals\":[\"question\",\"lookup\",\"change\"],\"offer\":{\"title\":\"对话页先思考再分诊\",\"goal\":\"调整 Steve 对话页的主 agent 处理逻辑：收到消息后先思考并直接回答可以在对话中完成的问题，只有明确需要跟踪的工作才创建卡片，而不是直接分诊创建卡片。\"},\"item\":null,\"options\":[],\"title\":\"\",\"goal\":\"\",\"bot\":\"dev\",\"project\":\"prj_6fe63fe584364583\",\"tags\":[],\"newTags\":[],\"reply\":\"我先查一下对话页消息的处理流程，确认它是不是直接分诊创建卡片、有没有先思考回答的环节。\",\"why\":\"这是对 Steve 当前行为的提问，需要读代码确认；发现的问题可以作为建议的改动提供给你决定。\"}",
+    "model": "claude-haiku-5-5",
+    "ms": 6017
+  },
+  "msg_7ba0b70132f346fd": {
+    "raw": "{\"kind\":\"item\",\"confidence\":0.8,\"signals\":[\"change\",\"long\"],\"offer\":null,\"item\":null,\"options\":[],\"title\":\"修卡片评论回复与截图粘贴\",\"goal\":\"修复 Steve 网页端两个问题：1) 对话主页面不能粘贴截图，需要支持。2) 卡片详情底部添加评论后，agent 的回复只出现在第一条评论的详情里（展开才能看到），没有回复到卡片详情主流里，事后不便追溯用户的对话情况。期望：回复之后新增的工作，应按照回复引用对应消息来展示。点击选项后 agent 在详情内继续追加对话内容的交互是正常的，保持不变。示例卡片：ST-1。\",\"bot\":\"dev\",\"project\":\"prj_6fe63fe584364583\",\"tags\":[\"tag_52753841283d4d69\"],\"newTags\":[],\"reply\":\"这是 Steve 界面的问题，我转给开发 Bot 修复：支持对话页粘贴截图，并让卡片评论的 agent 回复按引用对应消息展示。\",\"why\":\"描述了现象和期望行为（回复应引用对应消息展示），属于明确的缺陷修复，作为事项交给开发 Bot。\"}",
+    "model": "claude-haiku-5-5",
+    "ms": 6144
+  },
+  "msg_aa8bc29f7e984449": {
+    "raw": "{\"kind\":\"item\",\"confidence\":0.85,\"signals\":[\"change\",\"deliverable\"],\"offer\":null,\"item\":null,\"options\":[],\"title\":\"事项详情卡片与 todo 状态优化\",\"goal\":\"优化 Steve 事项详情卡片的 UI，并修正 todo 相关的展示与状态逻辑，具体包括三点：1. 详情卡片的 UI 需要再优化：默认显示全部内容，且不需要展开详情。2. 任务标记完成前，必须检查所有 todo 的状态是否都已完成；之前出现过卡片已完成但 todo 仍有未完成项的情况，需要修复。3. todo 可能会多次刷新，历史 todo 的状态需要展示并留存。两种情况需要设计并实现交互：历史 todo 被覆盖时，应折叠起来，并用划线标记为已废弃；历史 todo 已完成、又出现新一轮 todo 时，历史 todo 同样应折叠。附件截图（截图-20261101-144404.png）作为参考。\",\"bot\":\"dev\",\"project\":\"prj_6fe63fe584364583\",\"tags\":[\"tag_52753841283d4d69\"],\"newTags\":[],\"reply\":\"好，我把详情卡片优化和 todo 状态问题整理成事项交给开发 Bot 了，截图会作为参考一起带过去。 标签：前端。\",\"why\":\"这是明确的改动和交付需求：优化 UI、修复完成校验、设计并实现 todo 历史展示交互。\"}",
+    "model": "claude-haiku-5-5",
+    "ms": 8013
+  },
+  "msg_b64f3671c40f49e5": {
+    "raw": "{\"kind\":\"answer\",\"confidence\":0.9,\"signals\":[\"question\"],\"offer\":null,\"item\":null,\"options\":[],\"title\":\"\",\"goal\":\"\",\"bot\":\"steve\",\"project\":null,\"tags\":[],\"newTags\":[],\"reply\":\"这个问题我可以直接回答：我能读写代码，但是否能完整维护前后端，取决于当前的项目权限和运行环境。\",\"why\":\"这是关于 Steve 自身能力的问题，不需要读代码就能回答。\"}",
+    "model": "claude-haiku-5-5",
+    "ms": 4046
+  },
+  "msg_d393373ed5e64b34": {
+    "raw": "{\"kind\":\"research\",\"confidence\":0.8,\"signals\":[\"question\",\"lookup\",\"vague\"],\"offer\":{\"title\":\"对话页加右侧栏与工具调用展示\",\"goal\":\"Steve 的对话页面增加右侧栏：栏顶部是 Steve 头像，下方展示 Steve 的思考过程和通知（如「已发布新版本」）；对话流中展示工具调用信息；发布等通知从对话流中移到右侧栏。\"},\"item\":null,\"options\":[],\"title\":\"\",\"goal\":\"\",\"bot\":\"dev\",\"project\":\"prj_6fe63fe584364583\",\"tags\":[],\"newTags\":[],\"reply\":\"我先看一下对话页面现在的实现，回答你是不是纯分诊器，再说右侧栏的方案。\",\"why\":\"这是对现状的提问，需要先读代码回答；右侧栏和工具调用展示是设计建议，没有明确要求改动，所以作为可选的后续工作提出。\"}",
+    "model": "claude-haiku-5-5",
+    "ms": 7968
+  },
+  "msg_e30ed5f89ab9437b": {
+    "raw": "{\"kind\":\"item\",\"confidence\":0.75,\"signals\":[\"change\"],\"offer\":null,\"item\":null,\"options\":[],\"title\":\"对话输出改为流式显示\",\"goal\":\"修复对话页面的输出不是流式的问题：当前要等全部结果生成完才一次性显示，导致用户看到首个 token 的时间很晚，体验不好。改为边生成边流式输出，尽早显示首个 token。附带截图 截图-20261101-144100.png 作为参考。\",\"bot\":\"dev\",\"project\":\"prj_6fe63fe584364583\",\"tags\":[\"tag_52753841283d4d69\"],\"newTags\":[],\"reply\":\"好，我把对话页面改成流式输出整理成事项交给开发 Bot 了，截图会作为参考一起带过去。\",\"why\":\"这是一个症状加预期行为的 bug 描述（应该流式输出），需要改动，所以建成事项。\"}",
+    "model": "claude-haiku-5-5",
+    "ms": 11047
+  },
+  "msg_ed9fead976a34cec": {
+    "raw": "{\"kind\":\"item\",\"confidence\":0.8,\"signals\":[\"change\"],\"offer\":null,\"item\":null,\"options\":[],\"title\":\"修事项重复触发与待处理清理\",\"goal\":\"修复两个问题：1）已经生成过的事项（ST-8、ST-9）可以被反复触发，需要修好，已生成的事项不能再次触发。2）待处理里没用的事项没有撤销、忽略、取消或关闭之类的操作，提醒一直存在、清理不掉，需要补上这些处理方式，让用户能把不需要的待处理提醒清掉。\",\"bot\":\"dev\",\"project\":\"prj_6fe63fe584364583\",\"tags\":[],\"newTags\":[],\"reply\":\"两个问题都是明确的缺陷，我建成事项交给开发处理。\",\"why\":\"两条都描述了现象和期望的行为，且第一条明确说了「得修」，属于修改类工作。\"}",
+    "model": "claude-haiku-5-5",
+    "ms": 9044
+  },
+  "msg_f4ebb3a87a1444fb": {
+    "raw": "{\"kind\":\"answer\",\"confidence\":0.97,\"signals\":[],\"offer\":null,\"item\":null,\"options\":[],\"title\":\"\",\"goal\":\"\",\"bot\":\"steve\",\"project\":null,\"tags\":[],\"newTags\":[],\"reply\":\"你好！有什么我可以帮你的？\",\"why\":\"只是打招呼，直接回复即可。\"}",
+    "model": "claude-haiku-5-5",
+    "ms": 4211
+  },
+  "msg_fc7d9d5416614541": {
+    "raw": "{\"kind\":\"item\",\"confidence\":0.9,\"signals\":[\"change\",\"explicit\"],\"offer\":null,\"item\":null,\"options\":[],\"title\":\"删除视觉规范页面入口\",\"goal\":\"删除 Steve 菜单中的视觉规范页面入口，包括侧栏入口、手机端“我的”页面中的入口，以及 ⌘K 命令面板里的入口。\",\"bot\":\"dev\",\"project\":\"prj_6fe63fe584364583\",\"tags\":[\"tag_52753841283d4d69\"],\"newTags\":[],\"reply\":\"好的，我把删除视觉规范页面入口建成事项交给开发。\",\"why\":\"这是明确的删除改动，对象清楚（侧栏、手机端“我的”、⌘K 三处入口），应作为事项处理。\"}",
+    "model": "claude-haiku-5-5",
+    "ms": 4210
+  },
+  "syn_01": {
+    "raw": "{\"kind\":\"item\",\"confidence\":0.95,\"signals\":[\"change\"],\"offer\":null,\"item\":null,\"options\":[],\"title\":\"对话页发送按钮文字改为“发送给 Steve”\",\"goal\":\"在 Steve 项目的对话页中，把发送按钮的文字改成“发送给 Steve”。\",\"bot\":\"dev\",\"project\":\"prj_6fe63fe584364583\",\"tags\":[\"tag_52753841283d4d69\"],\"newTags\":[],\"reply\":\"好的，我把这个改动建成事项交给开发处理。\",\"why\":\"这是明确的修改指令：动词是“改”，对象是对话页的发送按钮文字。\"}",
+    "model": "claude-haiku-5-5",
+    "ms": 4002
+  },
+  "syn_02": {
+    "raw": "{\"kind\":\"answer\",\"confidence\":0.97,\"signals\":[],\"offer\":null,\"item\":null,\"options\":[],\"title\":\"\",\"goal\":\"\",\"bot\":\"steve\",\"project\":null,\"tags\":[],\"newTags\":[],\"reply\":\"在的，有什么需要我帮忙的？\",\"why\":\"这是打招呼，直接回复即可。\"}",
+    "model": "claude-haiku-5-5",
+    "ms": 2971
+  },
+  "syn_03": {
+    "raw": "{\"kind\":\"answer\",\"confidence\":0.9,\"signals\":[\"question\"],\"offer\":null,\"item\":null,\"options\":[],\"title\":\"Steve 能力介绍\",\"goal\":\"\",\"bot\":\"steve\",\"project\":null,\"tags\":[],\"newTags\":[],\"reply\":\"我是 Steve，你的个人助手：可以回答问题、查阅项目代码、文档和知识库来解答，也可以把需要改动或交付的工作建成事项分派给开发 Bot 跟进。\",\"why\":\"这是问 Steve 自身能力的问题，不需要读取任何内容即可直接回答。\"}",
+    "model": "claude-haiku-5-5",
+    "ms": 3001
+  },
+  "syn_04": {
+    "raw": "{\"kind\":\"research\",\"confidence\":0.9,\"signals\":[\"question\",\"lookup\"],\"offer\":null,\"item\":null,\"options\":[],\"title\":\"事项状态说明\",\"goal\":\"查看 Steve 项目代码与文档，列出事项（item）的所有状态，并逐一说明每种状态的含义。\",\"bot\":\"steve\",\"project\":\"prj_6fe63fe584364583\",\"tags\":[],\"newTags\":[],\"reply\":\"我去看一下 Steve 的代码和文档，把事项的各种状态及含义整理给你。\",\"why\":\"这是一个问题，需要读项目代码才能答准，不是要做的工作，所以在对话中直接研究。\"}",
+    "model": "claude-haiku-5-5",
+    "ms": 5009
+  },
+  "syn_05": {
+    "raw": "{\"kind\":\"research\",\"confidence\":0.9,\"signals\":[\"question\",\"lookup\"],\"offer\":null,\"item\":null,\"options\":[],\"title\":\"发布脚本回滚机制\",\"goal\":\"阅读 Steve 项目中发布与运维脚本的代码和文档，说明发布脚本是如何回滚的：触发条件、回滚步骤、涉及的版本或产物备份、以及失败时的处理方式。\",\"bot\":\"dev\",\"project\":\"prj_6fe63fe584364583\",\"tags\":[],\"newTags\":[],\"reply\":\"我去看一下发布脚本的代码，把回滚流程讲给你。\",\"why\":\"这是对现有发布脚本工作方式的提问，需要读代码来回答，不是新的工作。\"}",
+    "model": "claude-haiku-5-5",
+    "ms": 5008
+  },
+  "syn_06": {
+    "raw": "{\"kind\":\"research\",\"confidence\":0.8,\"signals\":[\"question\",\"lookup\"],\"offer\":null,\"item\":null,\"options\":[],\"title\":\"ST-15 发布失败原因\",\"goal\":\"查看 ST-15 的发布记录与日志，说明为什么发布失败。\",\"bot\":\"steve\",\"project\":\"prj_6fe63fe584364583\",\"tags\":[],\"newTags\":[],\"reply\":\"我先去查 ST-15 的发布记录，看看失败的原因。\",\"why\":\"这是在问原因，需要读取事项和发布记录来回答，不是新的工作。\"}",
+    "model": "claude-haiku-5-5",
+    "ms": 5013
+  },
+  "syn_07": {
+    "raw": "{\"kind\":\"item\",\"confidence\":0.9,\"signals\":[\"change\"],\"offer\":null,\"item\":null,\"options\":[],\"title\":\"Hub 加 /api/health 接口\",\"goal\":\"在 Steve 的 Hub 里新增一个 /api/health 接口，返回当前版本号。\",\"bot\":\"dev\",\"project\":\"prj_6fe63fe584364583\",\"tags\":[],\"newTags\":[],\"reply\":\"好的，我把它记成一个事项交给开发。\",\"why\":\"这是明确的改动请求：动词是“加”，对象是 Hub 里的一个接口。\"}",
+    "model": "claude-haiku-5-5",
+    "ms": 5008
+  },
+  "syn_08": {
+    "raw": "{\"kind\":\"item\",\"confidence\":0.85,\"signals\":[\"change\"],\"offer\":null,\"item\":null,\"options\":[],\"title\":\"调大对话页字体一号\",\"goal\":\"把 Steve Web 界面对话页的字体调大一号（比当前字号大一档），保持其余排版和样式不变。\",\"bot\":\"dev\",\"project\":\"prj_6fe63fe584364583\",\"tags\":[\"tag_52753841283d4d69\"],\"newTags\":[],\"reply\":\"好的，我把它记成一个事项，交给开发去调大对话页字体。\",\"why\":\"这是明确的修改请求：动词是“调大”，对象是对话页字体，属于 Steve 前端工作。\"}",
+    "model": "claude-haiku-5-5",
+    "ms": 5007
+  },
+  "syn_09": {
+    "raw": "{\"kind\":\"item\",\"confidence\":0.9,\"signals\":[\"explicit\",\"change\"],\"offer\":null,\"item\":null,\"options\":[],\"title\":\"整理知识库目录结构\",\"goal\":\"整理一下 Steve 知识库的目录结构\",\"bot\":\"dev\",\"project\":\"prj_6fe63fe584364583\",\"tags\":[],\"newTags\":[{\"name\":\"知识库\",\"cat\":\"领域\",\"description\":\"Steve 知识系统的目录结构、内容组织与维护相关的工作\"}],\"reply\":\"好的，已建立事项：整理知识库目录结构。\",\"why\":\"用户明确要求建事项，并给出了具体的改动对象。\"}",
+    "model": "claude-haiku-5-5",
+    "ms": 5055
+  },
+  "syn_10": {
+    "raw": "{\"kind\":\"item\",\"confidence\":0.85,\"signals\":[\"deliverable\"],\"offer\":null,\"item\":null,\"options\":[],\"title\":\"交付队列上线方案文档\",\"goal\":\"为 Steve 的交付队列编写一份上线方案文档，说明上线的范围、步骤、验证方式和回滚方案。\",\"bot\":\"dev\",\"project\":\"prj_6fe63fe584364583\",\"tags\":[\"tag_2b0cc8a1e54b4321\"],\"newTags\":[],\"reply\":\"好的，我把这件事建成事项，交给开发 Bot 来写上线方案文档。\",\"why\":\"用户明确要求写一份文档，这是有交付物的明确工作，且属于 Steve 项目的交付流程。\"}",
+    "model": "claude-haiku-5-5",
+    "ms": 5000
+  },
+  "syn_11": {
+    "raw": "{\"kind\":\"suggest\",\"confidence\":0.7,\"signals\":[\"vague\",\"question\"],\"offer\":null,\"item\":null,\"options\":[],\"title\":\"减少通知数量的方案\",\"goal\":\"用户反馈 Steve 的通知太多，希望看一下有什么办法减少通知。请结合 Steve 现有的通知机制（Hub、Web 界面）给出几种可行方案，并说明各自的取舍，由用户决定是否做成事项。\",\"bot\":\"steve\",\"project\":\"prj_6fe63fe584364583\",\"tags\":[\"tag_52753841283d4d69\"],\"newTags\":[],\"reply\":\"这像是想优化通知的讨论，我可以先给你几种减少通知的思路，你再决定要不要做成事项。\",\"why\":\"用户说“你看看有什么办法”，是征求思路而非明确要求改动，范围也未定，所以给出建议卡片。\"}",
+    "model": "claude-haiku-5-5",
+    "ms": 8002
+  },
+  "syn_12": {
+    "raw": "{\"kind\":\"ask\",\"confidence\":0.9,\"signals\":[\"vague\"],\"offer\":null,\"item\":null,\"options\":[\"对话页的按钮\",\"事项页的按钮\",\"其他页面（请告诉我是哪个）\"],\"title\":\"修改按钮\",\"goal\":\"把那个按钮改一下\",\"bot\":\"steve\",\"project\":null,\"tags\":[],\"newTags\":[],\"reply\":\"你说的是哪个页面的按钮？选一个或告诉我具体位置。\",\"why\":\"没有说明是哪个按钮，不同页面的理解差别很大，需要先确认。\"}",
+    "model": "claude-haiku-5-5",
+    "ms": 3993
+  },
+  "syn_13": {
+    "raw": "{\"kind\":\"config\",\"confidence\":0.8,\"signals\":[\"explicit\"],\"offer\":null,\"item\":null,\"options\":[],\"title\":\"默认自动验收\",\"goal\":\"以后新事项默认开启自动验收\",\"bot\":\"steve\",\"project\":\"prj_6fe63fe584364583\",\"tags\":[],\"newTags\":[],\"reply\":\"好的，之后新事项默认自动验收。\",\"why\":\"这是一条长期生效的默认设置，不是具体工作。\"}",
+    "model": "claude-haiku-5-5",
+    "ms": 4004
+  },
+  "syn_14": {
+    "raw": "{\"kind\":\"config\",\"confidence\":0.9,\"signals\":[\"change\"],\"offer\":null,\"item\":null,\"options\":[],\"title\":\"开发 Bot 换成 opus\",\"goal\":\"把开发 Bot（dev）的模型改为 opus\",\"bot\":\"dev\",\"project\":\"prj_6fe63fe584364583\",\"tags\":[],\"newTags\":[],\"reply\":\"好的，我把开发 Bot 的模型改为 opus。\",\"why\":\"这是修改 Bot 的长期设置，不是一项具体工作。\"}",
+    "model": "claude-haiku-5-5",
+    "ms": 4004
+  },
+  "syn_15": {
+    "raw": "{\"kind\":\"research\",\"confidence\":0.9,\"signals\":[\"question\",\"lookup\"],\"offer\":null,\"item\":null,\"options\":[],\"title\":\"检索用的分词器\",\"goal\":\"查看代码，确认检索功能当前使用的是什么分词器，并说明它在代码中的位置和用法。\",\"bot\":\"steve\",\"project\":\"prj_6fe63fe584364583\",\"tags\":[],\"newTags\":[],\"reply\":\"我去代码里查一下检索用的是什么分词。\",\"why\":\"这是问当前实现的问题，读代码就能回答，不需要建事项。\"}",
+    "model": "claude-haiku-5-5",
+    "ms": 3948
+  },
+  "syn_16": {
+    "raw": "{\"kind\":\"research\",\"confidence\":0.9,\"signals\":[\"question\",\"lookup\"],\"offer\":null,\"item\":null,\"options\":[],\"title\":\"Hub 限流现状\",\"goal\":\"查看 Steve Hub 的代码，确认当前是否实现了请求限流（rate limiting），说明具体机制和覆盖范围。\",\"bot\":\"steve\",\"project\":\"prj_6fe63fe584364583\",\"tags\":[],\"newTags\":[],\"reply\":\"我去看一下 Hub 的代码，确认现在有没有限流。\",\"why\":\"这是在问现状，需要读项目代码才能回答，属于研究而不是改动。\"}",
+    "model": "claude-haiku-5-5",
+    "ms": 4002
+  },
+  "syn_17": {
+    "raw": "{\"kind\":\"answer\",\"confidence\":0.8,\"signals\":[\"question\"],\"offer\":null,\"item\":null,\"options\":[],\"title\":\"展开第二点\",\"goal\":\"刚才说的第二点展开讲讲\",\"bot\":\"steve\",\"project\":null,\"tags\":[],\"newTags\":[],\"reply\":\"好的，我展开讲讲刚才的第二点。\",\"why\":\"这是对上一条回复的追问，只需要在对话里直接解释，不需要读取资料或建事项。\"}",
+    "model": "claude-haiku-5-5",
+    "ms": 4001
+  },
+  "syn_18": {
+    "raw": "{\"kind\":\"item\",\"confidence\":0.82,\"signals\":[\"change\",\"explicit\"],\"offer\":null,\"item\":null,\"options\":[],\"title\":\"修复手机端登录页按钮被遮挡\",\"goal\":\"修复登录页在手机端的按钮被遮挡、无法点击的问题。按钮应在手机屏幕上完全可见且可以点击，并在常见手机宽度下验证布局。\",\"bot\":\"dev\",\"project\":\"prj_6fe63fe584364583\",\"tags\":[\"tag_52753841283d4d69\"],\"newTags\":[],\"reply\":\"这是一个需要修复的问题，已作为事项交给开发处理。\",\"why\":\"用户描述了症状（手机上按钮被遮住、点不了）并明确说“得修”，属于带期望行为的 bug 修复事项。\"}",
+    "model": "claude-haiku-5-5",
+    "ms": 5059
+  },
+  "syn_19": {
+    "raw": "{\"kind\":\"research\",\"confidence\":0.7,\"signals\":[\"question\",\"lookup\"],\"offer\":null,\"item\":null,\"options\":[],\"title\":\"mermaid 渲染库选型\",\"goal\":\"查看 Steve 项目当前 mermaid 渲染的实现与所用库，结合其使用场景，给出渲染库选型的建议与理由。\",\"bot\":\"dev\",\"project\":\"prj_6fe63fe584364583\",\"tags\":[],\"newTags\":[],\"reply\":\"我先看一下 Steve 现在 mermaid 渲染用的是什么，再给你选型建议。\",\"why\":\"选哪个库需要先看项目里现在的用法和场景，属于只读查阅后的回答，不是要做的工作。\"}",
+    "model": "claude-haiku-5-5",
+    "ms": 6064
+  },
+  "syn_20": {
+    "raw": "{\"kind\":\"item\",\"confidence\":0.85,\"signals\":[\"change\"],\"offer\":null,\"item\":null,\"options\":[],\"title\":\"重构 thread 模块并拆出路由\",\"goal\":\"重构 thread 模块，把路由（routes）从中拆分出来，单独成文件或模块，保持现有行为不变。\",\"bot\":\"dev\",\"project\":\"prj_6fe63fe584364583\",\"tags\":[],\"newTags\":[],\"reply\":\"好的，我把它记成一个事项，交给开发去重构 thread 模块并拆出路由。\",\"why\":\"这是明确的改动请求：动词是“重构”，对象是 thread 模块的路由拆分。\"}",
+    "model": "claude-haiku-5-5",
+    "ms": 5072
+  }
+}

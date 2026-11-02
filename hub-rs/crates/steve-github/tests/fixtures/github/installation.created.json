@@ -1,0 +1,87 @@
+{
+  "action": "created",
+  "installation": {
+    "id": 4242,
+    "account": {
+      "login": "steve-test",
+      "id": 5001,
+      "node_id": "MDEyOk9yZ2FuaXphdGlvbjUwMDE=",
+      "avatar_url": "https://avatars.githubusercontent.com/u/5001?v=4",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/steve-test",
+      "html_url": "https://github.com/steve-test",
+      "followers_url": "https://api.github.com/users/steve-test/followers",
+      "following_url": "https://api.github.com/users/steve-test/following{/other_user}",
+      "gists_url": "https://api.github.com/users/steve-test/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/steve-test/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/steve-test/subscriptions",
+      "organizations_url": "https://api.github.com/users/steve-test/orgs",
+      "repos_url": "https://api.github.com/users/steve-test/repos",
+      "events_url": "https://api.github.com/users/steve-test/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/steve-test/received_events",
+      "type": "Organization",
+      "site_admin": false
+    },
+    "repository_selection": "selected",
+    "access_tokens_url": "https://api.github.com/app/installations/4242/access_tokens",
+    "repositories_url": "https://api.github.com/installation/repositories",
+    "html_url": "https://github.com/organizations/steve-test/settings/installations/4242",
+    "app_id": 1001,
+    "app_slug": "steve-test",
+    "target_id": 5001,
+    "target_type": "Organization",
+    "permissions": {
+      "actions": "read",
+      "checks": "read",
+      "contents": "write",
+      "issues": "write",
+      "metadata": "read",
+      "pull_requests": "write",
+      "statuses": "read"
+    },
+    "events": [
+      "check_run",
+      "check_suite",
+      "issue_comment",
+      "issues",
+      "pull_request",
+      "pull_request_review",
+      "push",
+      "workflow_run"
+    ],
+    "created_at": 1793437200,
+    "updated_at": 1793437200,
+    "single_file_name": null,
+    "suspended_at": null,
+    "suspended_by": null
+  },
+  "repositories": [
+    {
+      "id": 7001,
+      "node_id": "MDEwOlJlcG9zaXRvcnk3MDAx",
+      "name": "demo",
+      "full_name": "steve-test/demo",
+      "private": true
+    }
+  ],
+  "sender": {
+    "login": "lee-test",
+    "id": 6001,
+    "node_id": "MDQ6VXNlcjYwMDE=",
+    "avatar_url": "https://avatars.githubusercontent.com/u/6001?v=4",
+    "gravatar_id": "",
+    "url": "https://api.github.com/users/lee-test",
+    "html_url": "https://github.com/lee-test",
+    "followers_url": "https://api.github.com/users/lee-test/followers",
+    "following_url": "https://api.github.com/users/lee-test/following{/other_user}",
+    "gists_url": "https://api.github.com/users/lee-test/gists{/gist_id}",
+    "starred_url": "https://api.github.com/users/lee-test/starred{/owner}{/repo}",
+    "subscriptions_url": "https://api.github.com/users/lee-test/subscriptions",
+    "organizations_url": "https://api.github.com/users/lee-test/orgs",
+    "repos_url": "https://api.github.com/users/lee-test/repos",
+    "events_url": "https://api.github.com/users/lee-test/events{/privacy}",
+    "received_events_url": "https://api.github.com/users/lee-test/received_events",
+    "type": "User",
+    "site_admin": false
+  }
+}

@@ -1,0 +1,32 @@
+Date: Sat, 31 Oct 2026 07:00:00 +0000
+From: Rust Weekly <newsletter@rustweekly.example>
+To: me@example.com
+Subject: This Week in Rust 670
+Message-ID: <twir-670.20261031@mailer.rustweekly.example>
+List-Id: Rust Weekly <weekly.rustweekly.example>
+List-Unsubscribe: <mailto:unsubscribe@rustweekly.example?subject=unsubscribe>, <https://rustweekly.example/u/abc123>
+List-Unsubscribe-Post: List-Unsubscribe=One-Click
+Precedence: bulk
+Auto-Submitted: auto-generated
+Feedback-ID: 670:weekly:rustweekly
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary="nl-b"
+
+--nl-b
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: 7bit
+
+This Week in Rust 670
+
+* Rust 1.99 released
+* async closures everywhere
+
+Unsubscribe: https://rustweekly.example/u/abc123
+--nl-b
+Content-Type: text/html; charset=utf-8
+Content-Transfer-Encoding: 7bit
+
+<html><body><h1>This Week in Rust 670</h1><ul><li>Rust 1.99 released</li><li>async closures everywhere</li></ul>
+<p><a href="https://rustweekly.example/u/abc123">Unsubscribe</a></p>
+<img src="https://rustweekly.example/o/abc123.gif" width="1" height="1"></body></html>
+--nl-b--

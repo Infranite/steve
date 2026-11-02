@@ -1,0 +1,66 @@
+[package]
+name = "steve-channels"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+description = "Channels, external personas and the Feishu adapter"
+
+[features]
+# In-process fake of the Feishu open platform for tests (feishu.md §6); never used in the Hub binary.
+fake = ["axum/ws"]
+
+[[bin]]
+name = "steve-fake-feishu"
+path = "src/bin/steve-fake-feishu.rs"
+required-features = ["fake"]
+
+[dependencies]
+aes = "=0.9.3"
+base64 = "=0.23.1"
+cbc = { version = "=0.2.1", features = ["alloc", "block-padding"] }
+hex = "=0.4.3"
+serde_json = { version = "=1.0.154", features = ["preserve_order"] }
+sha2 = "=0.11.1"
+subtle = "=2.6.1"
+thiserror = "=2.0.21"
+
+futures-util = { version = "=0.3.34", default-features = false, features = ["sink", "std"] }
+# Frames of the long connection (pbbp2.proto), derived by hand; no protoc needed.
+prost = { version = "=0.13.5", default-features = false, features = ["derive", "std"] }
+rand = "=0.10.3"
+reqwest = { version = "=0.12.28", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "=1.0.229", features = ["derive"] }
+tokio = { version = "=1.54.1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "signal"] }
+tokio-tungstenite = { version = "=0.30.0", default-features = false, features = ["connect", "handshake", "rustls-tls-webpki-roots"] }
+tracing = "=0.1.44"
+
+# Connections framework (A2): the bot app and user providers plug into it (F1).
+steve-modules = { path = "../steve-modules" }
+# F6: the transaction type of identify / merge.
+steve-store = { path = "../steve-store" }
+async-trait = "=0.1.92"
+url = "=2.5.8"
+zeroize = "=1.9.1"
+axum = "=0.8.9"
+
+# C1 spaces and messages: the inbound pipeline writes its own tables and hands events to S1.
+steve-flow = { path = "../steve-flow" }
+# C4: layer 7 of the reply prompt (K4 `reply_hits`, `render_snippets`, `anchor_mems`).
+steve-knowledge = { path = "../steve-knowledge" }
+rusqlite = { version = "=0.40.2", features = ["bundled"] }
+# F8 self poller: quiet hours in the workspace time zone (same versions as steve-flow).
+chrono = { version = "=0.4.45", default-features = false, features = ["std"] }
+chrono-tz = "=0.10.4"
+# C5: the vault's guard and redactor masks; the rule check's patterns (same version as steve-modules).
+steve-vault = { path = "../steve-vault" }
+regex = "=1.13.1"
+
+[dev-dependencies]
+axum = "=0.8.9"
+reqwest = { version = "=0.12.28", default-features = false, features = ["json"] }
+tokio = { version = "=1.54.1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
+# Lets plain `cargo test -p steve-channels` build the fake for the integration tests.
+steve-channels = { path = ".", features = ["fake"] }
+# F1 tests: a store in a temp dir, the vault, the connection routes.
+tempfile = "=3.27.0"
+tower = { version = "=0.5.3", features = ["util"] }

@@ -1,0 +1,56 @@
+{
+  "schema": "2.0",
+  "header": {
+    "event_id": "db11a919a26b3ee88bfd8a3994b09cec",
+    "event_type": "im.message.receive_v1",
+    "create_time": "1761900004000",
+    "token": "fake-verification-token",
+    "app_id": "cli_a5fake0000000001",
+    "tenant_key": "2ca1d211f64f6438"
+  },
+  "event": {
+    "sender": {
+      "sender_id": {
+        "union_id": "on_alice00000000000000000000000001",
+        "user_id": "u_alice",
+        "open_id": "ou_alice00000000000000000000000001"
+      },
+      "sender_type": "user",
+      "tenant_key": "2ca1d211f64f6438"
+    },
+    "message": {
+      "message_id": "om_post000000000000000000000000001",
+      "create_time": "1761900004000",
+      "update_time": "1761900004000",
+      "chat_id": "oc_group000000000000000000000001",
+      "chat_type": "group",
+      "message_type": "post",
+      "content": "{\"title\":\"上线检查\",\"content\":[[{\"tag\":\"at\",\"user_id\":\"@_user_1\",\"user_name\":\"值班小运\",\"style\":[]},{\"tag\":\"text\",\"text\":\" 请按这份清单过一遍：\",\"style\":[\"bold\"]}],[{\"tag\":\"a\",\"href\":\"https://wiki.example.com/release-checklist\",\"text\":\"发布清单\",\"style\":[]},{\"tag\":\"text\",\"text\":\"，有问题 \",\"style\":[]},{\"tag\":\"at\",\"user_id\":\"@_user_2\",\"user_name\":\"李鹏翔\",\"style\":[]}]]}",
+      "mentions": [
+        {
+          "key": "@_user_1",
+          "id": {
+            "union_id": "",
+            "user_id": "",
+            "open_id": "ou_bot0000000000000000000000000001"
+          },
+          "mentioned_type": "bot",
+          "name": "值班小运",
+          "tenant_key": "2ca1d211f64f6438"
+        },
+        {
+          "key": "@_user_2",
+          "id": {
+            "union_id": "on_owner00000000000000000000000001",
+            "user_id": "u_owner",
+            "open_id": "ou_owner00000000000000000000000001"
+          },
+          "mentioned_type": "user",
+          "name": "李鹏翔",
+          "tenant_key": "2ca1d211f64f6438"
+        }
+      ],
+      "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Lark/7.30.8 LarkLocale/zh_CN ttnet SDK-Version/7.30.10"
+    }
+  }
+}

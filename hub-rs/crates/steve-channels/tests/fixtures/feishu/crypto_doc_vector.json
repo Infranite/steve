@@ -1,0 +1,6 @@
+{
+  "source": "https://open.feishu.cn/document/server-docs/event-subscription-guide/event-subscription-configure-/encrypt-key-encryption-configuration-case",
+  "encrypt_key": "test key",
+  "encrypt": "P37w+VZImNgPEO1RBhJ6RtKl7n6zymIbEG1pReEzghk=",
+  "plaintext": "hello world"
+}

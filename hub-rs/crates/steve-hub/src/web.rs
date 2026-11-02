@@ -1,0 +1,264 @@
+//! Static web app with SPA fallback (main.ts since the separate web release): `STEVE_WEB_DIR` is
+//! `web/current`, a symlink a web release switches while the Hub runs, so every request resolves it
+//! again (nothing is cached). Files are served like `@hono/node-server`'s `serveStatic` (Hono's MIME
+//! table, `Last-Modified`, directories → `index.html`); `/` and `*.html` get `cache-control: no-store`,
+//! `/assets/*` are immutable. Every other GET is `index.html` (no-store), except a missing `/assets/*`
+//! file (404: a tab on a pruned build must not get HTML as a script) and no web installed (503).
+//! `/release.json` is never served.
+
+use std::path::{Component, Path, PathBuf};
+
+use axum::body::Body;
+use axum::extract::Request;
+use axum::http::{Method, StatusCode, header};
+use axum::response::{IntoResponse, Response};
+
+use crate::config::Config;
+use crate::error::ApiError;
+
+/// Hono's `baseMimes` (hono/utils/mime).
+fn mime_of(path: &Path) -> &'static str {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default();
+    match ext.as_str() {
+        "aac" => "audio/aac",
+        "avi" => "video/x-msvideo",
+        "avif" => "image/avif",
+        "av1" => "video/av1",
+        "bmp" => "image/bmp",
+        "css" => "text/css; charset=utf-8",
+        "csv" => "text/csv; charset=utf-8",
+        "eot" => "application/vnd.ms-fontobject",
+        "epub" => "application/epub+zip",
+        "gif" => "image/gif",
+        "gz" => "application/gzip",
+        "htm" | "html" => "text/html; charset=utf-8",
+        "ico" => "image/x-icon",
+        "ics" => "text/calendar; charset=utf-8",
+        "jpeg" | "jpg" => "image/jpeg",
+        "js" | "mjs" => "text/javascript; charset=utf-8",
+        "json" | "map" => "application/json",
+        "jsonld" => "application/ld+json",
+        "mid" | "midi" => "audio/x-midi",
+        "mp3" => "audio/mpeg",
+        "mp4" => "video/mp4",
+        "mpeg" => "video/mpeg",
+        "oga" => "audio/ogg",
+        "ogv" => "video/ogg",
+        "ogx" => "application/ogg",
+        "opus" => "audio/opus",
+        "otf" => "font/otf",
+        "pdf" => "application/pdf",
+        "png" => "image/png",
+        "rtf" => "application/rtf",
+        "svg" => "image/svg+xml; charset=utf-8",
+        "tif" | "tiff" => "image/tiff",
+        "ts" => "video/mp2t",
+        "ttf" => "font/ttf",
+        "txt" => "text/plain; charset=utf-8",
+        "wasm" => "application/wasm",
+        "webm" => "video/webm",
+        "weba" => "audio/webm",
+        "webmanifest" => "application/manifest+json",
+        "webp" => "image/webp",
+        "woff" => "font/woff",
+        "woff2" => "font/woff2",
+        "xhtml" => "application/xhtml+xml; charset=utf-8",
+        "xml" => "application/xml; charset=utf-8",
+        "zip" => "application/zip",
+        "3gp" => "video/3gpp",
+        "3g2" => "video/3gpp2",
+        "gltf" => "model/gltf+json",
+        "glb" => "model/gltf-binary",
+        _ => "application/octet-stream",
+    }
+}
+
+/// The file under `root` a URL path names, or `None` for anything that would leave it.
+fn resolve(root: &Path, url_path: &str) -> Option<PathBuf> {
+    let decoded =
+        crate::files::decode_uri_component(url_path).unwrap_or_else(|| url_path.to_string());
+    let mut p = root.to_path_buf();
+    for c in Path::new(decoded.trim_start_matches('/')).components() {
+        match c {
+            Component::Normal(s) => p.push(s),
+            Component::CurDir => {}
+            _ => return None,
+        }
+    }
+    if p.is_dir() {
+        p.push("index.html");
+    }
+    p.is_file().then_some(p)
+}
+
+/// RFC 7231 date, like `Date.toUTCString()`.
+fn http_date(t: std::time::SystemTime) -> String {
+    let secs = t
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let (days, rem) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
+    let wd = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"][days.rem_euclid(7) as usize];
+    // civil from days (Howard Hinnant)
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    let mon = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ][(m - 1) as usize];
+    format!(
+        "{wd}, {d:02} {mon} {y} {:02}:{:02}:{:02} GMT",
+        rem / 3600,
+        rem % 3600 / 60,
+        rem % 60
+    )
+}
+
+async fn file(path: &Path, head: bool) -> Option<Response> {
+    let meta = tokio::fs::metadata(path).await.ok()?;
+    let body = if head {
+        Body::empty()
+    } else {
+        Body::from(tokio::fs::read(path).await.ok()?)
+    };
+    let mut res = (StatusCode::OK, body).into_response();
+    let h = res.headers_mut();
+    h.insert(
+        header::CONTENT_TYPE,
+        header::HeaderValue::from_static(mime_of(path)),
+    );
+    if let Ok(v) = meta.len().to_string().parse() {
+        h.insert(header::CONTENT_LENGTH, v);
+    }
+    if let Some(v) = meta
+        .modified()
+        .ok()
+        .map(http_date)
+        .and_then(|d| d.parse().ok())
+    {
+        h.insert(header::LAST_MODIFIED, v);
+    }
+    Some(res)
+}
+
+/// `release.json` of the web build being served (`""` without one), read on every call: a web
+/// release switches the link without restarting the Hub. `String(x.version ?? "")`.
+pub fn web_version(cfg: &Config) -> String {
+    let Ok(text) = std::fs::read_to_string(cfg.web_dir.join("release.json")) else {
+        return String::new();
+    };
+    match serde_json::from_str::<serde_json::Value>(&text) {
+        Ok(v) => match v.get("version") {
+            None | Some(serde_json::Value::Null) => String::new(),
+            Some(x) => crate::js::string(x),
+        },
+        Err(_) => String::new(),
+    }
+}
+
+/// `c.text("not found", 404)`.
+fn not_found() -> Response {
+    crate::error::text_response(404, "not found")
+}
+
+/// The cache header main.ts adds to a `200` static file without one.
+fn cache_for(url_path: &str) -> Option<&'static str> {
+    if url_path == "/" || url_path.ends_with(".html") {
+        Some("no-store")
+    } else if url_path.starts_with("/assets/") {
+        Some("public, max-age=31536000, immutable")
+    } else {
+        None
+    }
+}
+
+/// Serves an unmatched request: a static file, else the SPA index for GET/HEAD, else 404.
+pub async fn serve(cfg: &Config, req: Request) -> Response {
+    let get = matches!(*req.method(), Method::GET | Method::HEAD);
+    if !get {
+        return ApiError::no_route().into_response();
+    }
+    let path = req.uri().path();
+    if path == "/release.json" {
+        return not_found();
+    }
+    let head = *req.method() == Method::HEAD;
+    if let Some(p) = resolve(&cfg.web_dir, path)
+        && let Some(mut res) = file(&p, head).await
+    {
+        if let Some(c) = cache_for(path) {
+            res.headers_mut()
+                .insert(header::CACHE_CONTROL, header::HeaderValue::from_static(c));
+        }
+        return res;
+    }
+    if path.starts_with("/assets/") {
+        return not_found();
+    }
+    index(cfg, head).await
+}
+
+async fn index(cfg: &Config, head: bool) -> Response {
+    let Ok(html) = tokio::fs::read(cfg.web_dir.join("index.html")).await else {
+        // before the first web release there is no index.html yet
+        let mut r = crate::error::text_response(503, "Steve web is not installed");
+        r.headers_mut().insert(
+            header::CACHE_CONTROL,
+            header::HeaderValue::from_static("no-store"),
+        );
+        return r;
+    };
+    let body = if head {
+        Body::empty()
+    } else {
+        Body::from(html)
+    };
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "text/html; charset=UTF-8"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        body,
+    )
+        .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mime_and_paths() {
+        assert_eq!(
+            mime_of(Path::new("a/app.JS")),
+            "text/javascript; charset=utf-8"
+        );
+        assert_eq!(mime_of(Path::new("x")), "application/octet-stream");
+        let d = tempfile::tempdir().expect("tmp");
+        std::fs::write(d.path().join("index.html"), "x").expect("w");
+        assert_eq!(resolve(d.path(), "/"), Some(d.path().join("index.html")));
+        assert_eq!(resolve(d.path(), "/../etc/passwd"), None);
+        assert_eq!(resolve(d.path(), "/nope.js"), None);
+    }
+
+    #[test]
+    fn dates_like_js() {
+        let t = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_793_458_800);
+        assert_eq!(http_date(t), "Sat, 31 Oct 2026 15:00:00 GMT");
+        assert_eq!(
+            http_date(std::time::UNIX_EPOCH),
+            "Thu, 01 Jan 1970 00:00:00 GMT"
+        );
+    }
+}

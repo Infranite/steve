@@ -1,0 +1,52 @@
+{"id": "mm_01", "kind": "preference", "text": "喜欢简短的邮件，最好三段以内", "about": "Sarah Chen"}
+{"id": "mm_02", "kind": "preference", "text": "周一上午不安排会议", "about": "Sarah Chen"}
+{"id": "mm_03", "kind": "fact", "text": "10 月从 Acme 换到 Globex 做项目经理", "about": "Sarah Chen"}
+{"id": "mm_04", "kind": "fact", "text": "Acme 的技术负责人，关心数据导出和 API 限流", "about": "Tom Becker"}
+{"id": "mm_05", "kind": "preference", "text": "技术问题直接发英文邮件，不要拉群", "about": "Tom Becker"}
+{"id": "mm_06", "kind": "fact", "text": "Globex 的数据库负责人，时区是印度标准时间，比北京晚两个半小时", "about": "Raj Patel"}
+{"id": "mm_07", "kind": "fact", "text": "Initech 的 IT 总监，负责 Okta 单点登录项目", "about": "Michael Bolton"}
+{"id": "mm_08", "kind": "fact", "text": "后端负责人，熟悉 Rust 和 SQLite", "about": "王磊"}
+{"id": "mm_09", "kind": "preference", "text": "代码评审意见写在 PR 里，不要私聊", "about": "王磊"}
+{"id": "mm_10", "kind": "fact", "text": "负责设计和前端，知识库页面的交互稿由她出", "about": "李娜"}
+{"id": "mm_11", "kind": "preference", "text": "每天下午 2 点到 4 点是专注时间，不要打扰", "about": "李娜"}
+{"id": "mm_12", "kind": "fact", "text": "负责运维和值班系统，PagerDuty 的管理员", "about": "张伟"}
+{"id": "mm_13", "kind": "fact", "text": "负责 Globex 迁移的测试环境和数据校验", "about": "陈静"}
+{"id": "mm_14", "kind": "event", "text": "11 月 20 日到 27 日休年假", "about": "陈静"}
+{"id": "mm_15", "kind": "fact", "text": "法务，所有合同和 DPA 都要她过目", "about": "周敏"}
+{"id": "mm_16", "kind": "fact", "text": "合同每年 3 月续签，到期前 60 天发提醒", "about": "Acme"}
+{"id": "mm_17", "kind": "rule", "text": "给 Acme 的报价必须先经过法务周敏审核", "about": "Acme"}
+{"id": "mm_18", "kind": "fact", "text": "API 限流额度是 300 rps，高于默认的 100 rps", "about": "Acme"}
+{"id": "mm_19", "kind": "fact", "text": "正式切换定在 12 月 14 日周六凌晨，停机窗口 4 小时", "about": "Globex"}
+{"id": "mm_20", "kind": "rule", "text": "迁移期间任何对旧库的写操作都要先在群里报备", "about": "Globex"}
+{"id": "mm_21", "kind": "fact", "text": "使用 Okta 做单点登录，年底前要接入", "about": "Initech"}
+{"id": "mm_22", "kind": "event", "text": "下一次季度业务回顾定在 1 月下旬", "about": "Initech"}
+{"id": "mm_23", "kind": "preference", "text": "周五下午不安排部署", "about": "我"}
+{"id": "mm_24", "kind": "preference", "text": "会议尽量排在下午，上午留给写代码", "about": "我"}
+{"id": "mm_25", "kind": "rule", "text": "对外邮件不用感叹号", "about": "我"}
+{"id": "mm_26", "kind": "rule", "text": "涉及价格和合同的内容发出前先给法务看", "about": "我"}
+{"id": "mm_27", "kind": "preference", "text": "日报用中文，周报用英文", "about": "我"}
+{"id": "mm_28", "kind": "fact", "text": "主力机器是 Mac mini，Steve Hub 部署在上面", "about": "我"}
+{"id": "mm_29", "kind": "preference", "text": "咖啡只喝美式，不加糖", "about": "我"}
+{"id": "mm_30", "kind": "fact", "text": "家里的 NAS 是群晖 4 盘位，RAID 5", "about": "我"}
+{"id": "mm_31", "kind": "rule", "text": "Agent 产出的代码必须经过我验收才能合并到主分支", "about": "Steve"}
+{"id": "mm_32", "kind": "rule", "text": "生产库只能在备份副本上做实验", "about": "Steve"}
+{"id": "mm_33", "kind": "fact", "text": "Hub 空闲内存目标是不超过 20 MB", "about": "Steve"}
+{"id": "mm_34", "kind": "fact", "text": "中文检索用二元切分，不用 jieba 词典", "about": "Steve"}
+{"id": "mm_35", "kind": "preference", "text": "界面文案不用“主体”“实体”这类术语", "about": "Steve"}
+{"id": "mm_36", "kind": "rule", "text": "上线后要观察 30 分钟监控再离开", "about": "部署"}
+{"id": "mm_37", "kind": "rule", "text": "数据库迁移先在生产库的备份副本上跑一遍", "about": "部署"}
+{"id": "mm_38", "kind": "fact", "text": "值班每周一上午 10 点交接", "about": "值班"}
+{"id": "mm_39", "kind": "rule", "text": "P0 告警 15 分钟没人确认就升级给技术负责人", "about": "值班"}
+{"id": "mm_40", "kind": "rule", "text": "出差结束后 30 天内提交报销，过期不受理", "about": "报销"}
+{"id": "mm_41", "kind": "fact", "text": "报销款每月 10 日和 25 日打款", "about": "报销"}
+{"id": "mm_42", "kind": "rule", "text": "面试不问婚育、年龄、籍贯", "about": "招聘"}
+{"id": "mm_43", "kind": "fact", "text": "上次恢复演练在 9 月 20 日，耗时 38 分钟", "about": "备份"}
+{"id": "mm_44", "kind": "event", "text": "11 月团建在杭州，预算每人 800 元", "about": "团建"}
+{"id": "mm_45", "kind": "rule", "text": "WireGuard 配置文件里有私钥，不要转发也不要提交到仓库", "about": "VPN"}
+{"id": "mm_46", "kind": "fact", "text": "Okta 支持 OIDC，Steve 这边只需要提供测试租户", "about": "Okta"}
+{"id": "mm_47", "kind": "fact", "text": "Rust Hub 要和 TypeScript Hub 用同一个 SQLite 数据库，结构不变", "about": "Rust Hub"}
+{"id": "mm_48", "kind": "fact", "text": "评测集 recall@5 的门槛是 0.8", "about": "知识库"}
+{"id": "mm_49", "kind": "fact", "text": "首页 LCP 已从 4.3 秒优化到 1.6 秒", "about": "前端"}
+{"id": "mm_50", "kind": "fact", "text": "附件已迁到 MinIO，和 Hub 在同一台机器上，还是单点", "about": "MinIO"}
+{"id": "mm_51", "kind": "fact", "text": "公司全称是易人实验室（虚构），发票抬头要写全称"}
+{"id": "mm_52", "kind": "fact", "text": "杭州办公室在西湖区，周三有免费午餐"}

@@ -1,0 +1,27 @@
+{
+  "schema": "2.0",
+  "header": {
+    "event_id": "6e6ca6f882f5c0057ce03f9f0ed526cc",
+    "event_type": "im.chat.member.bot.added_v1",
+    "create_time": "1761900009000",
+    "token": "fake-verification-token",
+    "app_id": "cli_a5fake0000000001",
+    "tenant_key": "2ca1d211f64f6438"
+  },
+  "event": {
+    "chat_id": "oc_newgroup0000000000000000000001",
+    "operator_id": {
+      "union_id": "on_owner00000000000000000000000001",
+      "user_id": "u_owner",
+      "open_id": "ou_owner00000000000000000000000001"
+    },
+    "external": false,
+    "operator_tenant_key": "2ca1d211f64f6438",
+    "name": "新项目群",
+    "i18n_names": {
+      "zh_cn": "新项目群",
+      "en_us": "",
+      "ja_jp": ""
+    }
+  }
+}

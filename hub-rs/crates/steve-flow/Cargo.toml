@@ -1,0 +1,33 @@
+[package]
+name = "steve-flow"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+description = "Signals, automation flows and schedules"
+
+[dependencies]
+steve-modules = { path = "../steve-modules" }
+steve-store = { path = "../steve-store" }
+# Work's published facts: `work.item.done` starts item-triggered flows (outbox consumer).
+steve-work-api = { path = "../steve-work-api" }
+async-trait = "=0.1.92"
+axum = { version = "=0.8.9", default-features = false, features = ["json", "query"] }
+chrono = { version = "=0.4.45", default-features = false, features = ["std"] }
+chrono-tz = "=0.10.4"
+croner = "=4.0.2"
+regex = "=1.13.1"
+reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-tls"] }
+rquickjs = "=0.14.0"
+rusqlite = { version = "=0.40.2", features = ["bundled"] }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = { version = "=1.0.154", features = ["preserve_order"] }
+thiserror = "=2.0.21"
+tokio = { version = "=1.54.1", features = ["rt", "sync", "time", "macros", "net"] }
+tracing = "=0.1.44"
+url = "=2.5.8"
+zeroize = "=1.9.1"
+
+[dev-dependencies]
+tempfile = "=3.27.0"
+tokio = { version = "=1.54.1", features = ["rt", "rt-multi-thread", "sync", "time", "macros", "net", "io-util"] }
+tracing-subscriber = { version = "=0.3.23", default-features = false, features = ["fmt"] }

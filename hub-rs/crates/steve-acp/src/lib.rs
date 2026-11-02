@@ -1,0 +1,30 @@
+//! ACP client for the Steve Hub: runs harness adapters (Claude Code via claude-agent-acp, Codex via
+//! codex-acp) as child processes and talks JSON-RPC over their stdio. Port of `hub/src/acp.ts` and
+//! `hub/src/codex.ts`, plus the adapter resolution of `config.ts`.
+//!
+//! Independent of the database: the Hub implements [`Host`] to persist events, session status,
+//! queued prompts and permission decisions, and to receive turn ends.
+//!
+//! Hand-written rather than built on the `agent-client-protocol` crate: its schema has no
+//! `session/set_model`, and Steve stores raw update JSON and reads non-standard `_meta` fields.
+//! One intended difference from the TS: adapters run in their own process group and the whole group
+//! is signalled, so the `claude` child of claude-agent-acp does not outlive it.
+
+mod attachments;
+mod codex;
+mod config;
+mod rollout;
+mod rpc;
+mod runner;
+mod util;
+
+pub use attachments::{FileRef, INLINE_IMAGES, StoredFile, kb};
+pub use codex::{codex_args, codex_mode, sanitize_catalog};
+pub use config::{AcpConfig, default_claude_adapter, default_codex_adapter, npm_root};
+pub use rollout::turn_usage as codex_turn_usage;
+pub use rpc::RpcError;
+pub use runner::{
+    Acp, AcpError, AutonomousUsage, Host, McpEndpoint, Message, PermissionRequest, Prompted,
+    SessionInfo, TurnBegin, TurnEnd, TurnFinish, TurnUsage, Usage, auto_allow, permission_request,
+    steve_tool,
+};

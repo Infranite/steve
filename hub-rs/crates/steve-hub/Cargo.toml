@@ -1,0 +1,63 @@
+[package]
+name = "steve-hub"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+description = "Steve Hub binary: axum server, REST + SSE, static web, config, background jobs"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "steve-hub"
+path = "src/main.rs"
+
+[dependencies]
+steve-store = { path = "../steve-store" }
+steve-auth = { path = "../steve-auth" }
+steve-mcp = { path = "../steve-mcp" }
+steve-core = { path = "../steve-core" }
+steve-research = { path = "../steve-research" }
+steve-acp = { path = "../steve-acp" }
+steve-modules = { path = "../steve-modules" }
+steve-flow = { path = "../steve-flow" }
+steve-knowledge = { path = "../steve-knowledge" }
+steve-github = { path = "../steve-github" }
+steve-channels = { path = "../steve-channels" }
+steve-mail = { path = "../steve-mail" }
+steve-vault = { path = "../steve-vault" }
+steve-stats = { path = "../steve-stats" }
+anyhow = "=1.0.104"
+async-trait = "=0.1.92"
+axum = { version = "=0.8.9", features = ["http1", "json", "query", "tokio", "macros", "multipart"] }
+base64 = "=0.23.1"
+bytes = "=1.12.1"
+futures = "=0.3.34"
+regex = "=1.13.1"
+reqwest = { version = "=0.12.28", default-features = false, features = ["json", "rustls-tls", "stream"] }
+rusqlite = { version = "=0.40.2", features = ["bundled", "backup"] }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = { version = "=1.0.154", features = ["preserve_order"] }
+sha2 = "=0.11.1"
+hex = "=0.4.3"
+thiserror = "=2.0.21"
+tokio = { version = "=1.54.1", features = ["rt-multi-thread", "macros", "process", "signal", "time", "fs", "sync", "io-util", "net"] }
+tokio-stream = { version = "=0.1.19", features = ["sync"] }
+tower = { version = "=0.5.3", features = ["util"] }
+tracing = "=0.1.44"
+tracing-subscriber = { version = "=0.3.23", features = ["env-filter", "fmt"] }
+unicode-normalization = "=0.1.26"
+uuid = { version = "=1.29.0", features = ["v4"] }
+
+semver = "=1.0.28"
+flate2 = "=1.1.10"
+tar = "0.4"
+libc = "0.2"
+
+[dev-dependencies]
+reqwest = { version = "=0.12.28", default-features = false, features = ["json", "stream"] }
+tempfile = "=3.27.0"
+http-body-util = "=0.1.5"
+steve-mail = { path = "../steve-mail", features = ["fake"] }
+steve-vault = { path = "../steve-vault" }
+steve-channels = { path = "../steve-channels", features = ["fake"] }

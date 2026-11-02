@@ -1,0 +1,18 @@
+{
+  "encrypt_key": "fake-encrypt-key",
+  "verification_token": "fake-verification-token",
+  "headers": {
+    "X-Lark-Request-Timestamp": "1761900000",
+    "X-Lark-Request-Nonce": "b6f1c2d3",
+    "X-Lark-Signature": "70eb205c6ce36f27ab5fa9de0c15815cae894a249ee768b1ecc8159f4e353992"
+  },
+  "body": "{\"encrypt\":\"AAECAwQFBgcICQoLDA0OD4rlRUE/ZlM42GGM3HiRwAaxMdWvPRiKUEjy5hwVETTHqAQ7uyJfb8Llwux4xpGdLYfrMPaIproHlouylWpo777piNiJhq+3ZJh/eDI5v8c7fh4tw8Vv7K4kwKlEGnUReA==\"}",
+  "plaintext": {
+    "challenge": "ajls384kdjx98XX",
+    "token": "fake-verification-token",
+    "type": "url_verification"
+  },
+  "expected_response": {
+    "challenge": "ajls384kdjx98XX"
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "schema": "2.0",
+  "header": {
+    "event_id": "7977fc123554818da7aeeb00d38e621d",
+    "event_type": "im.message.receive_v1",
+    "create_time": "1761900005500",
+    "token": "fake-verification-token",
+    "app_id": "cli_a5fake0000000001",
+    "tenant_key": "2ca1d211f64f6438"
+  },
+  "event": {
+    "sender": {
+      "sender_id": {
+        "union_id": "on_alice00000000000000000000000001",
+        "user_id": "u_alice",
+        "open_id": "ou_alice00000000000000000000000001"
+      },
+      "sender_type": "user",
+      "tenant_key": "2ca1d211f64f6438"
+    },
+    "message": {
+      "message_id": "om_file000000000000000000000000001",
+      "create_time": "1761900005500",
+      "update_time": "1761900005500",
+      "chat_id": "oc_p2p00000000000000000000000001",
+      "chat_type": "p2p",
+      "message_type": "file",
+      "content": "{\"file_key\":\"file_v3_fake0000-0000-0000-0000-000000000001g\",\"file_name\":\"告警截图说明.txt\"}",
+      "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Lark/7.30.8 LarkLocale/zh_CN ttnet SDK-Version/7.30.10"
+    }
+  }
+}

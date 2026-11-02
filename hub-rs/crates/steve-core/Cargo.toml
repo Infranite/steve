@@ -1,0 +1,31 @@
+[package]
+name = "steve-core"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+description = "Steve Hub domain logic: item lifecycle, decisions, main thread routing, model gateway, conversational config"
+
+[dependencies]
+async-trait = "=0.1.92"
+base64 = "=0.23.1"
+chrono = "=0.4.45"
+rand = "=0.10.3"
+libc = "=0.2.191"
+regex = "=1.13.1"
+rusqlite = { version = "=0.40.2", features = ["bundled"] }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = { version = "=1.0.154", features = ["preserve_order"] }
+steve-store = { path = "../steve-store" }
+steve-modules = { path = "../steve-modules" }
+# Work's published facts (`work.item.done`), emitted in the transaction that finishes an item.
+steve-work-api = { path = "../steve-work-api" }
+steve-stats = { path = "../steve-stats" }
+sha2 = "=0.11.1"
+thiserror = "=2.0.21"
+tokio = { version = "=1.54.1", features = ["rt", "rt-multi-thread", "macros", "process", "time", "sync", "fs", "io-util"] }
+tracing = "=0.1.44"
+uuid = { version = "=1.29.0", features = ["v4"] }
+
+[dev-dependencies]
+proptest = "=1.12.0"
+tempfile = "=3.27.0"

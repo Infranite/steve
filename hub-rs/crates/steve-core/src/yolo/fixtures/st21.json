@@ -1,0 +1,274 @@
+[
+  {
+    "id": "synthetic-1",
+    "old": "synthetic",
+    "question": "允许执行：pwd",
+    "raw": {
+      "command": [
+        "/bin/zsh",
+        "-lc",
+        "pwd"
+      ],
+      "cwd": "{cwd}"
+    },
+    "options": [
+      "approved|Yes, proceed|allow_once",
+      "abort|No|reject_once"
+    ]
+  },
+  {
+    "id": "synthetic-2",
+    "old": "synthetic",
+    "question": "允许执行：ls",
+    "raw": {
+      "command": [
+        "/bin/zsh",
+        "-lc",
+        "ls"
+      ],
+      "cwd": "{cwd}"
+    },
+    "options": [
+      "approved|Yes, proceed|allow_once",
+      "abort|No|reject_once"
+    ]
+  },
+  {
+    "id": "synthetic-3",
+    "old": "synthetic",
+    "question": "允许执行：git status --short",
+    "raw": {
+      "command": [
+        "/bin/zsh",
+        "-lc",
+        "git status --short"
+      ],
+      "cwd": "{cwd}"
+    },
+    "options": [
+      "approved|Yes, proceed|allow_once",
+      "abort|No|reject_once"
+    ]
+  },
+  {
+    "id": "synthetic-4",
+    "old": "synthetic",
+    "question": "允许执行：git diff --stat",
+    "raw": {
+      "command": [
+        "/bin/zsh",
+        "-lc",
+        "git diff --stat"
+      ],
+      "cwd": "{cwd}"
+    },
+    "options": [
+      "approved|Yes, proceed|allow_once",
+      "abort|No|reject_once"
+    ]
+  },
+  {
+    "id": "synthetic-5",
+    "old": "synthetic",
+    "question": "允许执行：rg --files",
+    "raw": {
+      "command": [
+        "/bin/zsh",
+        "-lc",
+        "rg --files"
+      ],
+      "cwd": "{cwd}"
+    },
+    "options": [
+      "approved|Yes, proceed|allow_once",
+      "abort|No|reject_once"
+    ]
+  },
+  {
+    "id": "synthetic-6",
+    "old": "synthetic",
+    "question": "允许执行：cat Cargo.toml",
+    "raw": {
+      "command": [
+        "/bin/zsh",
+        "-lc",
+        "cat Cargo.toml"
+      ],
+      "cwd": "{cwd}"
+    },
+    "options": [
+      "approved|Yes, proceed|allow_once",
+      "abort|No|reject_once"
+    ]
+  },
+  {
+    "id": "synthetic-7",
+    "old": "synthetic",
+    "question": "允许执行：cargo test --no-run",
+    "raw": {
+      "command": [
+        "/bin/zsh",
+        "-lc",
+        "cargo test --no-run"
+      ],
+      "cwd": "{cwd}"
+    },
+    "options": [
+      "approved|Yes, proceed|allow_once",
+      "abort|No|reject_once"
+    ]
+  },
+  {
+    "id": "synthetic-8",
+    "old": "synthetic",
+    "question": "允许执行：npm run check",
+    "raw": {
+      "command": [
+        "/bin/zsh",
+        "-lc",
+        "npm run check"
+      ],
+      "cwd": "{cwd}"
+    },
+    "options": [
+      "approved|Yes, proceed|allow_once",
+      "abort|No|reject_once"
+    ]
+  },
+  {
+    "id": "synthetic-9",
+    "old": "synthetic",
+    "question": "允许执行：mkdir -p {tmp}/example",
+    "raw": {
+      "command": [
+        "/bin/zsh",
+        "-lc",
+        "mkdir -p {tmp}/example"
+      ],
+      "cwd": "{cwd}"
+    },
+    "options": [
+      "approved|Yes, proceed|allow_once",
+      "abort|No|reject_once"
+    ]
+  },
+  {
+    "id": "synthetic-10",
+    "old": "synthetic",
+    "question": "允许执行：printf hello > {tmp}/example.txt",
+    "raw": {
+      "command": [
+        "/bin/zsh",
+        "-lc",
+        "printf hello > {tmp}/example.txt"
+      ],
+      "cwd": "{cwd}"
+    },
+    "options": [
+      "approved|Yes, proceed|allow_once",
+      "abort|No|reject_once"
+    ]
+  },
+  {
+    "id": "synthetic-11",
+    "old": "synthetic",
+    "question": "允许执行：ls {cwd}/hub-rs",
+    "raw": {
+      "command": [
+        "/bin/zsh",
+        "-lc",
+        "ls {cwd}/hub-rs"
+      ],
+      "cwd": "{cwd}"
+    },
+    "options": [
+      "approved|Yes, proceed|allow_once",
+      "abort|No|reject_once"
+    ]
+  },
+  {
+    "id": "synthetic-12",
+    "old": "synthetic",
+    "question": "允许执行：git diff --name-only",
+    "raw": {
+      "command": [
+        "/bin/zsh",
+        "-lc",
+        "git diff --name-only"
+      ],
+      "cwd": "{cwd}"
+    },
+    "options": [
+      "approved|Yes, proceed|allow_once",
+      "abort|No|reject_once"
+    ]
+  },
+  {
+    "id": "synthetic-13",
+    "old": "synthetic",
+    "question": "允许执行：curl http://127.0.0.1:8123/healthz",
+    "raw": {
+      "command": [
+        "/bin/zsh",
+        "-lc",
+        "curl http://127.0.0.1:8123/healthz"
+      ],
+      "cwd": "{cwd}"
+    },
+    "options": [
+      "approved|Yes, proceed|allow_once",
+      "abort|No|reject_once"
+    ]
+  },
+  {
+    "id": "synthetic-14",
+    "old": "synthetic",
+    "question": "允许执行：kill 70563",
+    "raw": {
+      "command": [
+        "/bin/zsh",
+        "-lc",
+        "kill 70563"
+      ],
+      "cwd": "{cwd}"
+    },
+    "options": [
+      "approved|Yes, proceed|allow_once",
+      "abort|No|reject_once"
+    ]
+  },
+  {
+    "id": "synthetic-15",
+    "old": "synthetic",
+    "question": "允许执行：kill 88833",
+    "raw": {
+      "command": [
+        "/bin/zsh",
+        "-lc",
+        "kill 88833"
+      ],
+      "cwd": "{cwd}"
+    },
+    "options": [
+      "approved|Yes, proceed|allow_once",
+      "abort|No|reject_once"
+    ]
+  },
+  {
+    "id": "synthetic-16",
+    "old": "synthetic",
+    "question": "允许执行：git log -1 --oneline",
+    "raw": {
+      "command": [
+        "/bin/zsh",
+        "-lc",
+        "git log -1 --oneline"
+      ],
+      "cwd": "{cwd}"
+    },
+    "options": [
+      "approved|Yes, proceed|allow_once",
+      "abort|No|reject_once"
+    ]
+  }
+]

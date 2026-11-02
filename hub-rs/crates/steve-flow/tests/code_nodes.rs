@@ -1,0 +1,814 @@
+//! S3 acceptance (signals-automation.md §12): a script with an endless loop is stopped within 1 s
+//! and `fetch` is a ReferenceError; `http` to 127.0.0.1 (and localhost, private names, redirects to
+//! them) is refused; `{{secrets}}` values appear nowhere in `context`, step output, decisions or
+//! logs; an effect without a grant opens an approval, with one it runs (`http.effect`, `cmd.run`);
+//! a secret without a `secret.use` grant opens an approval.
+//!
+//! The HTTP server is a tiny one on 127.0.0.1, reached through the name `api.test` (a fake resolver)
+//! that the test puts in `http_allow_private`. Commands run only in temp dirs made here.
+
+use std::collections::HashMap;
+use std::io::Write;
+use std::net::IpAddr;
+use std::sync::{Arc, LazyLock, Mutex};
+use std::time::{Duration, Instant};
+
+use async_trait::async_trait;
+use rusqlite::params;
+use serde_json::{Value, json};
+use steve_flow::NodeKind;
+use steve_flow::nodes::cmd::Cmd;
+use steve_flow::nodes::http::{ALLOW_PRIVATE, Http, Lookup};
+use steve_flow::testkit::FlowEnv;
+use steve_modules::testkit::{ME, WS, call, caller};
+use steve_modules::vault::Vault;
+use steve_modules::vault::items::{NewField, NewItem};
+use steve_modules::vault::keystore::FileKeyStore;
+use tempfile::TempDir;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
+use zeroize::Zeroizing;
+
+const TOKEN: &str = "s3-SECRET-t0ken-9QxZ";
+
+/// Every log line of this test binary.
+static LOGS: LazyLock<Arc<Mutex<Vec<u8>>>> = LazyLock::new(|| {
+    let buf: Arc<Mutex<Vec<u8>>> = Arc::default();
+    let w = Capture(buf.clone());
+    tracing::subscriber::set_global_default(
+        tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_writer(move || w.clone())
+            .with_ansi(false)
+            .finish(),
+    )
+    .expect("subscriber");
+    buf
+});
+
+#[derive(Clone)]
+struct Capture(Arc<Mutex<Vec<u8>>>);
+
+impl Write for Capture {
+    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .extend_from_slice(b);
+        Ok(b.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// `api.test` and `rebind.test` → 127.0.0.1; anything else through the system.
+struct FakeDns;
+
+#[async_trait]
+impl Lookup for FakeDns {
+    async fn lookup(&self, host: &str) -> std::io::Result<Vec<IpAddr>> {
+        match host {
+            "api.test" | "rebind.test" | "other.test" => Ok(vec!["127.0.0.1".parse().unwrap()]),
+            "meta.test" => Ok(vec![
+                "93.184.216.34".parse().unwrap(),
+                "169.254.169.254".parse().unwrap(),
+            ]),
+            h => steve_flow::nodes::http::SystemLookup.lookup(h).await,
+        }
+    }
+}
+
+/// What the server got: `(method, path, headers, body)`.
+type Got = (String, String, HashMap<String, String>, String);
+
+/// A one-request-per-connection HTTP/1.1 server: `/echo` answers with what it got (so the secret
+/// comes back and must be redacted), `/to-ip` and `/to-name` redirect to internal targets,
+/// `/claims` returns a claim id.
+async fn server() -> (u16, Arc<Mutex<Vec<Got>>>) {
+    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = l.local_addr().unwrap().port();
+    let got: Arc<Mutex<Vec<Got>>> = Arc::default();
+    let g = got.clone();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut s, _)) = l.accept().await else {
+                return;
+            };
+            let g = g.clone();
+            tokio::spawn(async move {
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 4096];
+                let head_end = loop {
+                    let n = s.read(&mut tmp).await.unwrap_or(0);
+                    if n == 0 {
+                        return;
+                    }
+                    buf.extend_from_slice(&tmp[..n]);
+                    if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                        break i + 4;
+                    }
+                };
+                let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
+                let mut lines = head.split("\r\n");
+                let first: Vec<&str> = lines.next().unwrap_or("").split(' ').collect();
+                let mut headers = HashMap::new();
+                for l in lines.filter(|l| !l.is_empty()) {
+                    if let Some((k, v)) = l.split_once(':') {
+                        headers.insert(k.trim().to_ascii_lowercase(), v.trim().to_string());
+                    }
+                }
+                let len: usize = headers
+                    .get("content-length")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0);
+                while buf.len() < head_end + len {
+                    let n = s.read(&mut tmp).await.unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&tmp[..n]);
+                }
+                let body = String::from_utf8_lossy(&buf[head_end..]).to_string();
+                let (method, path) = (first[0].to_string(), first[1].to_string());
+                g.lock().unwrap().push((
+                    method.clone(),
+                    path.clone(),
+                    headers.clone(),
+                    body.clone(),
+                ));
+                let (status, extra, out) = match path.as_str() {
+                    "/to-ip" => (
+                        "302 Found",
+                        format!("Location: http://127.0.0.1:{port}/echo\r\n"),
+                        String::new(),
+                    ),
+                    "/to-name" => (
+                        "302 Found",
+                        format!("Location: http://rebind.test:{port}/echo\r\n"),
+                        String::new(),
+                    ),
+                    "/to-other" => (
+                        "302 Found",
+                        format!("Location: http://other.test:{port}/echo\r\n"),
+                        String::new(),
+                    ),
+                    "/claims" => (
+                        "201 Created",
+                        String::new(),
+                        json!({"claimId": "CL-1", "status": "submitted"}).to_string(),
+                    ),
+                    "/fail" => ("500 Internal Server Error", String::new(), "boom".into()),
+                    _ => (
+                        "200 OK",
+                        String::new(),
+                        json!({"method": method, "auth": headers.get("authorization"), "body": body})
+                            .to_string(),
+                    ),
+                };
+                let resp = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n{extra}\r\n{out}",
+                    out.len()
+                );
+                let _ = s.write_all(resp.as_bytes()).await;
+                let _ = s.shutdown().await;
+            });
+        }
+    });
+    (port, got)
+}
+
+struct Env {
+    e: FlowEnv,
+    vault: Vault,
+    item: String,
+    work: TempDir,
+    _keys: TempDir,
+}
+
+fn env() -> Env {
+    LazyLock::force(&LOGS);
+    // under STEVE_FORBID_REAL_HOSTS=1 the guard only knows loopback by name; these fake names are
+    // answered by FakeDns above (loopback, or for meta.test an internal address the resolver refuses),
+    // so none of them can reach a real host
+    steve_modules::net::allow_test_names(&["api.test", "rebind.test", "other.test", "meta.test"]);
+    // never the real keychain (WORKERS.md)
+    // SAFETY: set before any vault is opened; tests in this binary all want the same value.
+    unsafe { std::env::set_var("STEVE_VAULT_KEYSTORE", "file") };
+    let keys = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let slot: Arc<Mutex<Option<Vault>>> = Arc::default();
+    let kp = keys.path().to_path_buf();
+    let s2 = slot.clone();
+    let e = FlowEnv::with_late_nodes(Vec::new(), Vec::new(), move |env| {
+        let vault = Vault::new(
+            env.store().clone(),
+            Arc::new(FileKeyStore::open(&kp).unwrap()),
+        );
+        *s2.lock().unwrap() = Some(vault.clone());
+        let http: Arc<dyn NodeKind> = Arc::new(
+            Http::new(vault)
+                .with_lookup(Arc::new(FakeDns))
+                .with_timeout(Duration::from_secs(5)),
+        );
+        let cmd: Arc<dyn NodeKind> = Arc::new(Cmd::new(env.dir.path()));
+        vec![http, cmd]
+    });
+    let vault = slot.lock().unwrap().clone().unwrap();
+    vault.init(WS, ME).unwrap();
+    let shared = vault
+        .list_vaults(WS, ME)
+        .unwrap()
+        .into_iter()
+        .find(|v| v.scope == "shared")
+        .unwrap()
+        .id;
+    let field = |label: &str, kind: &str, value: &str| NewField {
+        label: label.into(),
+        kind: kind.into(),
+        secret: false,
+        value: Zeroizing::new(value.into()),
+    };
+    let item = vault
+        .create_item(
+            WS,
+            ME,
+            NewItem {
+                vault_id: shared,
+                template: "api_credential".into(),
+                title: "报销系统令牌".into(),
+                site: Some("api.test".into()),
+                account_id: None,
+                sensitivity: None,
+                fields: vec![
+                    field("名称", "text", "ci"),
+                    field("令牌", "password", TOKEN),
+                ],
+            },
+        )
+        .unwrap()
+        .id;
+    e.env
+        .store()
+        .with_conn(|c| {
+            c.execute(
+                "INSERT INTO settings (workspace_id, key, value, updated) VALUES (?, ?, ?, 1)",
+                params![WS, ALLOW_PRIVATE, json!(["api.test", "other.test"]).to_string()],
+            )?;
+            c.execute(
+                "INSERT INTO projects (id, workspace_id, name, path, created, updated) VALUES ('prj_t', ?, 'T', ?, 1, 1)",
+                params![WS, work.path().to_string_lossy()],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    Env {
+        e,
+        vault,
+        item,
+        work,
+        _keys: keys,
+    }
+}
+
+async fn api(e: &FlowEnv, method: &str, path: &str, body: Option<Value>) -> (u16, Value) {
+    call(
+        &e.router(),
+        Some(&caller(WS, ME)),
+        method,
+        path,
+        body.as_ref(),
+    )
+    .await
+}
+
+fn one_node(kind: &str, title: &str, config: Value) -> Value {
+    json!({
+        "nodes": [
+            {"id": "t", "kind": "trigger", "config": {"source": "manual"}},
+            {"id": "n", "kind": kind, "title": title, "config": config}
+        ],
+        "edges": [{"from": "t", "to": "n"}]
+    })
+}
+
+async fn create_flow(e: &FlowEnv, name: &str, graph: Value) -> String {
+    let (st, v) = api(
+        e,
+        "POST",
+        "/flows",
+        Some(json!({ "name": name, "graph": graph })),
+    )
+    .await;
+    assert_eq!(st, 200, "{v}");
+    v["id"].as_str().unwrap().to_string()
+}
+
+async fn start(e: &FlowEnv, flow: &str, input: Value) -> String {
+    let (st, v) = api(
+        e,
+        "POST",
+        &format!("/flows/{flow}/run"),
+        Some(json!({ "input": input })),
+    )
+    .await;
+    assert_eq!(st, 200, "{v}");
+    v["run_id"].as_str().unwrap().to_string()
+}
+
+fn q<T: rusqlite::types::FromSql>(e: &FlowEnv, sql: &str, p: impl rusqlite::Params) -> T {
+    e.env
+        .store()
+        .with_conn(|c| Ok(c.query_row(sql, p, |r| r.get(0))?))
+        .unwrap()
+}
+
+fn status(e: &FlowEnv, run: &str) -> String {
+    q(e, "SELECT status FROM flow_runs WHERE id = ?", [run])
+}
+
+async fn settled(e: &FlowEnv, run: &str) -> String {
+    for _ in 0..400 {
+        let s = status(e, run);
+        if s != "running" {
+            return s;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("run {run} never settled");
+}
+
+/// `(status, output, error)` of the node `n`'s last step.
+fn step(e: &FlowEnv, run: &str) -> (String, Value, Option<String>) {
+    e.env
+        .store()
+        .with_conn(|c| {
+            Ok(c.query_row(
+                "SELECT status, output, error FROM flow_run_steps WHERE run_id = ? AND node_id = 'n' ORDER BY seq DESC LIMIT 1",
+                [run],
+                |r| {
+                    let o: String = r.get(1)?;
+                    Ok((r.get(0)?, serde_json::from_str(&o).unwrap_or(Value::Null), r.get(2)?))
+                },
+            )?)
+        })
+        .unwrap()
+}
+
+fn open_gate(e: &FlowEnv, run: &str) -> Option<(String, String, String)> {
+    e.env
+        .store()
+        .with_conn(|c| {
+            Ok(rusqlite::OptionalExtension::optional(c.query_row(
+                "SELECT id, question, coalesce(draft, '') FROM decisions WHERE subject_type = 'flow_step' AND subject_id = ? AND status = 'open'",
+                [format!("{run}:n")],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            ))?)
+        })
+        .unwrap()
+}
+
+async fn answer(e: &FlowEnv, id: &str, choice: &str) {
+    steve_modules::decisions::dispatch(&e.env.modules, &caller(WS, ME), id, choice, "")
+        .expect("ours")
+        .expect("resolved");
+    e.flow.run_followups().await;
+}
+
+fn grant(e: &FlowEnv, flow: &str, capability: &str, rtype: &str, rid: &str) {
+    e.env
+        .store()
+        .with_conn(|c| Ok(c.execute(
+            "INSERT INTO grants (id, workspace_id, subject_type, subject_id, capability, resource_type, resource_id, until, created_by, created) VALUES (?, ?, 'flow', ?, ?, ?, ?, ?, ?, 1)",
+            params![steve_store::uid("gr"), WS, flow, capability, rtype, rid, i64::MAX, ME],
+        )?))
+        .unwrap();
+}
+
+/// Every text column of the tables a run, its decisions and the vault's use log write.
+fn all_rows_text(e: &FlowEnv) -> String {
+    let mut out = String::new();
+    e.env
+        .store()
+        .with_conn(|c| {
+            for t in [
+                "flow_runs",
+                "flow_run_steps",
+                "flow_waits",
+                "decisions",
+                "secret_uses",
+                "audit",
+            ] {
+                let Ok(mut st) = c.prepare(&format!("SELECT * FROM {t}")) else {
+                    continue;
+                };
+                let n = st.column_count();
+                let mut rows = st.query([])?;
+                while let Some(r) = rows.next()? {
+                    for i in 0..n {
+                        if let Ok(Some(s)) = r.get::<_, Option<String>>(i) {
+                            out.push_str(&s);
+                            out.push('\n');
+                        }
+                    }
+                }
+            }
+            Ok(())
+        })
+        .unwrap();
+    out
+}
+
+fn logs() -> String {
+    String::from_utf8_lossy(&LOGS.lock().unwrap()).into_owned()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn script_endless_loop_is_stopped_and_fetch_is_not_there() {
+    let Env { e, .. } = env();
+    let f = create_flow(
+        &e,
+        "死循环",
+        one_node(
+            "script",
+            "转圈",
+            json!({"code": "export const handler = async (input) => { while (true) {} }"}),
+        ),
+    )
+    .await;
+    let t = Instant::now();
+    let run = start(&e, &f, json!({})).await;
+    assert_eq!(settled(&e, &run).await, "failed");
+    assert!(
+        t.elapsed() < Duration::from_millis(1800),
+        "{:?}",
+        t.elapsed()
+    );
+    assert_eq!(
+        step(&e, &run).2.as_deref(),
+        Some(steve_flow::nodes::script::TIMED_OUT)
+    );
+
+    let f = create_flow(
+        &e,
+        "联网",
+        one_node(
+            "script",
+            "偷偷联网",
+            json!({"code": "export const handler = async () => await fetch('http://127.0.0.1:9/')"}),
+        ),
+    )
+    .await;
+    let run = start(&e, &f, json!({})).await;
+    assert_eq!(settled(&e, &run).await, "failed");
+    let err = step(&e, &run).2.unwrap();
+    assert!(
+        err.contains("ReferenceError") && err.contains("fetch"),
+        "{err}"
+    );
+
+    // a working script's return value is the step output
+    let f = create_flow(
+        &e,
+        "解析",
+        one_node(
+            "script",
+            "解析发票",
+            json!({"code": "export const handler = async (input) => ({ amount: input.amount * 2 })"}),
+        ),
+    )
+    .await;
+    let run = start(&e, &f, json!({"amount": 43.25})).await;
+    assert_eq!(settled(&e, &run).await, "done");
+    assert_eq!(step(&e, &run).1, json!({"amount": 86.5}));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn http_to_internal_addresses_is_refused() {
+    let Env { e, .. } = env();
+    let (port, got) = server().await;
+    for url in [
+        format!("http://127.0.0.1:{port}/echo"),
+        format!("http://localhost:{port}/echo"),
+        format!("http://[::1]:{port}/echo"),
+        format!("http://2130706433:{port}/echo"),
+        "http://169.254.169.254/latest/meta-data/".to_string(),
+        format!("http://rebind.test:{port}/echo"),
+        "http://meta.test/".to_string(),
+        // allowed host, but the redirect leads inside
+        format!("http://api.test:{port}/to-ip"),
+        format!("http://api.test:{port}/to-name"),
+    ] {
+        let f = create_flow(&e, "内网", one_node("http", "取数据", json!({"url": url}))).await;
+        let run = start(&e, &f, json!({})).await;
+        assert_eq!(settled(&e, &run).await, "failed", "{url}");
+        let err = step(&e, &run).2.unwrap();
+        assert!(err.starts_with("不能请求内网地址"), "{url}: {err}");
+    }
+    // only the two allowed first hops reached the server; nothing followed a redirect
+    let paths: Vec<String> = got.lock().unwrap().iter().map(|g| g.1.clone()).collect();
+    assert_eq!(paths, vec!["/to-ip", "/to-name"]);
+
+    // the allow-listed host itself works
+    let f = create_flow(
+        &e,
+        "允许",
+        one_node(
+            "http",
+            "取数据",
+            json!({"url": format!("http://api.test:{port}/echo")}),
+        ),
+    )
+    .await;
+    let run = start(&e, &f, json!({})).await;
+    assert_eq!(settled(&e, &run).await, "done");
+    let (_, out, _) = step(&e, &run);
+    assert_eq!(out["status"], 200);
+    assert_eq!(out["method"], "GET");
+
+    // a POST without effect is not even saved
+    let (st, v) = api(
+        &e,
+        "POST",
+        "/flows",
+        Some(json!({"name": "x", "graph": one_node("http", "提交", json!({"method": "POST", "url": "https://a.example/"}))})),
+    )
+    .await;
+    assert_eq!(st, 400, "{v}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn secrets_are_injected_but_never_stored_or_logged() {
+    let Env { e, item, vault, .. } = env();
+    let (port, got) = server().await;
+    let cfg = json!({
+        "url": format!("http://api.test:{port}/echo"),
+        "headers": {"Authorization": format!("Bearer {{{{secrets.{item}.令牌}}}}")},
+        "body": "note={{input.note}}",
+    });
+    let f = create_flow(&e, "查报销", one_node("http", "查询报销单", cfg)).await;
+    // event text that names the secret must stay text
+    let sneaky = format!("{{{{secrets.{item}.令牌}}}}");
+
+    // no secret.use grant: the run waits on an approval that names the item
+    let run = start(&e, &f, json!({"note": sneaky})).await;
+    assert_eq!(settled(&e, &run).await, "waiting");
+    assert!(
+        got.lock().unwrap().is_empty(),
+        "nothing sent before approval"
+    );
+    let (dec, question, draft) = open_gate(&e, &run).expect("an approval");
+    assert_eq!(
+        question,
+        "「查报销」的「查询报销单」要用保险箱里的「报销系统令牌」。要执行吗？"
+    );
+    assert!(draft.contains("令牌"), "{draft}");
+    answer(&e, &dec, "执行").await;
+    assert_eq!(settled(&e, &run).await, "done");
+
+    // the server got the value, and the event's template text unexpanded
+    let (_, _, headers, body) = got.lock().unwrap()[0].clone();
+    assert_eq!(headers["authorization"], format!("Bearer {TOKEN}"));
+    assert_eq!(body, format!("note={sneaky}"));
+
+    // the echo came back with the value: the step output has it masked
+    let (st, out, _) = step(&e, &run);
+    assert_eq!(st, "ok");
+    assert_eq!(out["auth"], "Bearer [已打码：令牌]", "{out}");
+
+    // a dry run neither asks for nor releases the secret
+    let (st, v) = api(
+        &e,
+        "POST",
+        &format!("/flows/{f}/dry-run"),
+        Some(json!({"sample": {}})),
+    )
+    .await;
+    assert_eq!(st, 200, "{v}");
+    let dry = v["id"].as_str().unwrap().to_string();
+    assert_eq!(
+        step(&e, &dry).1,
+        json!({"skipped": steve_flow::nodes::http::DRY_SECRET})
+    );
+    assert!(open_gate(&e, &dry).is_none());
+    assert_eq!(got.lock().unwrap().len(), 1);
+
+    // a grant for the flow: no approval the second time
+    e.env
+        .store()
+        .with_conn(|c| Ok(c.execute(
+            "INSERT INTO grants (id, workspace_id, subject_type, subject_id, capability, resource_type, resource_id, until, created_by, created) VALUES ('gr_s', ?, 'flow', ?, 'secret.use', 'vault_item', ?, ?, ?, 1)",
+            params![WS, f, item, i64::MAX, ME],
+        )?))
+        .unwrap();
+    let run2 = start(&e, &f, json!({"note": "hi"})).await;
+    assert_eq!(settled(&e, &run2).await, "done");
+    assert!(open_gate(&e, &run2).is_none());
+    assert_eq!(got.lock().unwrap().len(), 2);
+
+    // secret headers never follow a redirect to another host
+    let cfg = json!({
+        "url": format!("http://api.test:{port}/to-other"),
+        "headers": {"Authorization": format!("Bearer {{{{secrets.{item}.令牌}}}}")},
+    });
+    let f3 = create_flow(&e, "跳转", one_node("http", "查询报销单", cfg)).await;
+    e.env
+        .store()
+        .with_conn(|c| Ok(c.execute(
+            "INSERT INTO grants (id, workspace_id, subject_type, subject_id, capability, resource_type, resource_id, until, created_by, created) VALUES ('gr_r', ?, 'flow', ?, 'secret.use', 'vault_item', ?, ?, ?, 1)",
+            params![WS, f3, item, i64::MAX, ME],
+        )?))
+        .unwrap();
+    let run3 = start(&e, &f3, json!({})).await;
+    assert_eq!(settled(&e, &run3).await, "done");
+    assert_eq!(step(&e, &run3).1["status"], 302);
+    let paths: Vec<String> = got.lock().unwrap().iter().map(|g| g.1.clone()).collect();
+    assert_eq!(paths.last().map(String::as_str), Some("/to-other"));
+    assert_eq!(got.lock().unwrap().len(), 3);
+
+    // the use log: one row per release, the flow as the actor, the run linked, no value
+    let n: i64 = q(
+        &e,
+        "SELECT count(*) FROM secret_uses WHERE actor_type = 'flow' AND actor_id = ? AND status = 'ok' AND mode = 'internal' AND run_id IN (?, ?)",
+        params![f, run, run2],
+    );
+    assert_eq!(n, 2);
+    let g: Option<String> = q(
+        &e,
+        "SELECT grant_id FROM secret_uses WHERE run_id = ?",
+        [&run2],
+    );
+    assert_eq!(g.as_deref(), Some("gr_s"));
+
+    // the value is nowhere: context, steps, waits, decisions, use log, audit, logs
+    let rows = all_rows_text(&e);
+    assert!(rows.contains("[已打码：令牌]"), "the check reads the steps");
+    assert!(!rows.contains(TOKEN), "a secret value is in the database");
+    let ctx: String = q(&e, "SELECT context FROM flow_runs WHERE id = ?", [&run]);
+    assert!(ctx.contains("[已打码：令牌]") && !ctx.contains(TOKEN));
+    assert!(!logs().contains(TOKEN), "a secret value is in the logs");
+    drop(vault);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn effect_requests_need_approval_or_a_grant() {
+    let Env { e, work, .. } = env();
+    let (port, got) = server().await;
+    let url = format!("http://api.test:{port}/claims");
+    let f = create_flow(
+        &e,
+        "提交报销",
+        one_node(
+            "http",
+            "提交到报销系统",
+            json!({"method": "POST", "url": url, "effect": true, "body": {"amount": "{{input.amount}}"}}),
+        ),
+    )
+    .await;
+    let run = start(&e, &f, json!({"amount": 86})).await;
+    assert_eq!(settled(&e, &run).await, "waiting");
+    assert!(got.lock().unwrap().is_empty());
+    let (dec, question, _) = open_gate(&e, &run).expect("an approval");
+    assert_eq!(
+        question,
+        "「提交报销」要执行「提交到报销系统」，这是对外动作。要执行吗？"
+    );
+    answer(&e, &dec, "执行").await;
+    assert_eq!(settled(&e, &run).await, "done");
+    let (_, out, _) = step(&e, &run);
+    assert_eq!(out["claimId"], "CL-1");
+    assert_eq!(out["status"], 201);
+    let (m, _, h, body) = got.lock().unwrap()[0].clone();
+    assert_eq!(m, "POST");
+    assert_eq!(h["content-type"], "application/json");
+    assert_eq!(body, r#"{"amount":"86"}"#);
+
+    // 不执行: nothing sent
+    let run = start(&e, &f, json!({"amount": 1})).await;
+    settled(&e, &run).await;
+    let (dec, _, _) = open_gate(&e, &run).unwrap();
+    answer(&e, &dec, "不执行").await;
+    assert_eq!(status(&e, &run), "done");
+    assert_eq!(got.lock().unwrap().len(), 1);
+
+    // http.effect grant for the host: runs without asking
+    grant(&e, &f, "http.effect", "host", "api.test");
+    let run = start(&e, &f, json!({"amount": 2})).await;
+    assert_eq!(settled(&e, &run).await, "done");
+    assert_eq!(got.lock().unwrap().len(), 2);
+
+    // cmd: approval, then runs in the project dir; event text is one shell word
+    let f = create_flow(
+        &e,
+        "写文件",
+        one_node(
+            "cmd",
+            "写下名字",
+            json!({"command": "printf '%s' {{input.name}} > out.txt && echo ok", "project_id": "prj_t", "timeout_s": 10}),
+        ),
+    )
+    .await;
+    let name = "x'; touch pwned; echo '";
+    let run = start(&e, &f, json!({"name": name})).await;
+    assert_eq!(settled(&e, &run).await, "waiting");
+    assert!(!work.path().join("out.txt").exists());
+    let (dec, question, _) = open_gate(&e, &run).unwrap();
+    assert_eq!(
+        question,
+        "「写文件」要执行「写下名字」，这是对外动作。要执行吗？"
+    );
+    answer(&e, &dec, "执行").await;
+    assert_eq!(settled(&e, &run).await, "done");
+    assert_eq!(
+        std::fs::read_to_string(work.path().join("out.txt")).unwrap(),
+        name
+    );
+    assert!(!work.path().join("pwned").exists());
+    let (_, out, _) = step(&e, &run);
+    assert_eq!(out["exit_code"], 0);
+    assert_eq!(out["stdout"], "ok\n");
+
+    // cmd.run grant on the project: direct; a failing command fails the step with its stderr
+    grant(&e, &f, "cmd.run", "project", "prj_t");
+    let run = start(&e, &f, json!({"name": "again"})).await;
+    assert_eq!(settled(&e, &run).await, "done");
+    let f2 = create_flow(
+        &e,
+        "失败",
+        one_node(
+            "cmd",
+            "会失败",
+            json!({"command": "echo nope >&2; exit 3", "project_id": "prj_t"}),
+        ),
+    )
+    .await;
+    grant(&e, &f2, "cmd.run", "project", "*");
+    let run = start(&e, &f2, json!({})).await;
+    assert_eq!(settled(&e, &run).await, "failed");
+    assert_eq!(step(&e, &run).2.as_deref(), Some("命令退出码 3：nope"));
+
+    // a timeout kills it
+    let f3 = create_flow(
+        &e,
+        "太久",
+        one_node(
+            "cmd",
+            "睡觉",
+            json!({"command": "sleep 30", "project_id": "prj_t", "timeout_s": 1}),
+        ),
+    )
+    .await;
+    grant(&e, &f3, "cmd.run", "project", "prj_t");
+    let t = Instant::now();
+    let run = start(&e, &f3, json!({})).await;
+    assert_eq!(settled(&e, &run).await, "failed");
+    assert!(t.elapsed() < Duration::from_secs(5));
+    assert_eq!(step(&e, &run).2.as_deref(), Some("命令超过 1 秒，已停止"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn effect_approval_names_the_secrets_it_releases() {
+    let Env { e, item, .. } = env();
+    let (port, got) = server().await;
+    // 令牌 twice (header and body), 名称 once: template order, each once, the item's title
+    let cfg = json!({
+        "method": "POST",
+        "url": format!("http://api.test:{port}/claims"),
+        "effect": true,
+        "headers": {"Authorization": format!("Bearer {{{{secrets.{item}.令牌}}}}")},
+        "body": {"who": format!("{{{{secrets.{item}.名称}}}}"), "again": format!("{{{{ secrets.{item}.令牌 }}}}")},
+    });
+    let f = create_flow(&e, "提交报销", one_node("http", "提交到报销系统", cfg)).await;
+    let run = start(&e, &f, json!({})).await;
+    assert_eq!(settled(&e, &run).await, "waiting");
+    let (dec, question, _) = open_gate(&e, &run).expect("an approval");
+    assert_eq!(
+        question,
+        "「提交报销」要执行「提交到报销系统」，这是对外动作。要执行吗？会用到机密：报销系统令牌·令牌、报销系统令牌·名称"
+    );
+    // one approval covers the effect and the secrets: sent, no second card
+    answer(&e, &dec, "执行").await;
+    assert_eq!(settled(&e, &run).await, "done");
+    assert!(open_gate(&e, &run).is_none());
+    assert_eq!(got.lock().unwrap().len(), 1);
+    assert_eq!(
+        got.lock().unwrap()[0].2["authorization"],
+        format!("Bearer {TOKEN}")
+    );
+
+    // an item the flow can't read: the reference as written
+    let cfg = json!({
+        "method": "POST",
+        "url": format!("http://api.test:{port}/claims"),
+        "effect": true,
+        "headers": {"X-Key": "{{secrets.vi_missing.key}}"},
+    });
+    let f = create_flow(&e, "缺条目", one_node("http", "提交", cfg)).await;
+    let run = start(&e, &f, json!({})).await;
+    assert_eq!(settled(&e, &run).await, "waiting");
+    let (_, question, _) = open_gate(&e, &run).expect("an approval");
+    assert!(
+        question.ends_with("要执行吗？会用到机密：vi_missing·key"),
+        "{question}"
+    );
+}

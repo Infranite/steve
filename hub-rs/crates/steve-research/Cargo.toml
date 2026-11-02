@@ -1,0 +1,21 @@
+[package]
+name = "steve-research"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+description = "Inline read-only research runs for the main thread: harness allowlist, Hub guard, macOS sandbox, budgets"
+
+[dependencies]
+base64 = "=0.23.1"
+libc = "=0.2.191"
+regex = "=1.13.1"
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.154"
+thiserror = "=2.0.21"
+tokio = { version = "=1.54.1", features = ["rt", "macros", "process", "time", "sync", "io-util", "fs"] }
+tracing = "=0.1.44"
+uuid = { version = "=1.29.0", features = ["v4"] }
+
+[dev-dependencies]
+tempfile = "=3.27.0"
+tokio = { version = "=1.54.1", features = ["rt", "rt-multi-thread", "macros", "process", "time", "sync", "io-util", "fs"] }

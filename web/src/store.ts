@@ -1,0 +1,839 @@
+import { readEventPages } from "./event-pages"
+/* View model over the Hub API. Keeps the prototype's shapes (st.items, st.S, st.bots …) so the views stay as designed;
+ * everything here is filled from /api/state, item details and session events are loaded on demand, and every action
+ * calls the Hub — the SSE stream then refreshes what changed. */
+import { useEffect, useRef, useSyncExternalStore } from "react"
+import { toast as sonner } from "sonner"
+import { api, stream, Unauthenticated, type State, type RItem, type RItemDetail, type RSession, type RDecision, type RBot, type REvent, type RProject, type Proposal, type LocalSession, type HubEvent, type RNotice } from "./api"
+import { cue } from "./bus"
+import type { RFile, PlanStep, RHold, RQueued } from "./api"
+import type { Cite } from "./api/knowledge"
+import { yoloApi, type RYolo, type RYoloAction } from "./api/yolo"
+
+/* ───────── view types (from the prototype) ───────── */
+export type Ev = any[] // ['u',text,label?] ['q',string[]] ['th',text,secs] ['tool',kind,title,meta,detail,live?,add?,del?,failed?,tool?,desc?,input?,plan?] ['a',text] ['ho',text,toSid] ['hi',text] ['ask',text] ['sys',text] ['end',stopReason]
+export type Sess = { id: string; n: number; item: string | null; b: string | null; h?: string; m?: string; reasoningEffort?: string | null; contextKnown?: boolean; st: "run" | "wait" | "idle" | "ended"; title: string; dur: string; ctx: number; src: string; up: string; ev: Ev[]; seqs: number[]; ts: number[]; from?: string | null; fork?: { s: string; at: number }; queue: RQueued[]; ro?: boolean; device: string; loaded: boolean; busy: boolean }
+export type Wait = { type: "approve" | "ask" | "accept" | "propose" | "fail" | "confirm"; subjectId?: string; q: string; draft?: string; opts?: string[]; since: string; decision: string; subject: string; session: string | null; options: string[]; by: string; busy?: boolean }
+export type Done = { id: string; type: Wait["type"]; q: string; choice: string; tm: string; decision: string; canUndo: boolean; undone?: boolean; how: "chose" | "dismissed" | "expired"; rel?: Rel
+  /** answered by YOLO: its reason (modules/yolo.md §3.3 `decided_by: "yolo"`) */
+  yolo?: string }
+/** what became of an approved release (hub decision.result.outcome): the card says this, never a bare "approved" */
+export type Rel = { tone: "run" | "fail" | "ok"; text: string }
+/** an earlier plan: replaced (its open steps abandoned) or done (a new round followed) */
+export type PlanRound = { n: number; steps: [string, number][]; end: "done" | "replaced"; at: string }
+export type Item = {
+  id: string; t: string; b: string; st: "prop" | "run" | "wait" | "pause" | "done" | "drop" | "block"; deps?: string[]; src: [string, string]; ws: string; project: string | null; up: string; star?: boolean; acc: string
+  goals: string[]; now: string; plan?: [string, number][]; rounds: PlanRound[]; wait?: Wait; waits: Wait[]; ss: string[]; tl: any[]; outs: [string, string, string | null][]; q: RQueued[]; qs: string | null; parent?: { item: string; s?: string; at?: number } | null
+  due?: string; pri?: "高" | "中" | "低"; arch?: boolean; snooze?: string; tags?: string[]; branch: string | null; cwd: string | null; projNext?: boolean; detail: boolean; dependents: string[]; created: number; updated: number
+  /** the last approved release of this item and what became of it */
+  rel?: Rel
+}
+export type Tag = { id: string; name: string; cat: string; desc: string; by: "Steve" | "你"; created: string }
+export type Bot = { id: string; main?: boolean; n: string; a: string; role: string; pers: string; pro: number; h: string; harness: string; m: string; model: string | null; on: boolean; acc: string; ws: string; project: string | null; perm: string; permMode: string; rule: string; prompt: string | null
+  reasoningEffort?: string | null; mem: [string, string, string][]; memCount: number; memLoaded: boolean; routines: { t: string; d: string; m: string; on: boolean; last: string }[]; hue: string; color: string; round: number; skin: string | null; dev?: string; workspaces: string[] }
+export type Draft = { mid: string; thought: string; text: string }
+export type Msg = { id?: string; k: "me" | "steve" | "thinking" | "digest"; t?: string; item?: string; fresh?: boolean; chat?: string; files?: RFile[]; cfg?: any; created?: number; steps?: Steps; notice?: { kind: string; level: string; ref?: string }; cites?: Cite[]
+  /* thread routing (§3.4, §5.2): the offer under an answer, a suggestion card, ask options, a user message waiting in the
+   * queue, the message this one answers or quotes, flow-back from an item, a research cut off by a restart */
+  offer?: Offer; suggest?: Suggest; ask?: { options: string[] }; queued?: { run?: string | null }; replyTo?: string; origin?: string; answer?: string
+  update?: Update; updates?: Update[]; rerun?: string
+  /** an item's one living card (§5.2): on its announcement, on the acknowledgement of your latest message to it, or on its own
+   * message at the bottom when it needs you and the card was far up (`cardOnly`) */
+  card?: ItemCardState; cardOnly?: boolean; wasCard?: boolean }
+/** what an item made from the conversation has come to, kept on its card (hub `meta.card`) */
+export type ItemCardState = { item: string; state: string; at?: number; text?: string; decision?: string
+  delivery?: { text: string; full?: boolean; decision?: string; at?: number }; reply?: { text: string; ref?: string; at?: number }; released?: { version?: string; at?: number } }
+export type Offer = { title: string; goal: string; project?: string | null; bot?: string; state: "open" | "taken" | "dismissed"; item?: string; folded?: boolean }
+export type Suggest = { question: string; choices: { id: "here" | "item"; label: string; item?: string; title?: string }[]; state: "open" | "expired" | "chosen"; chosen?: string; item?: string }
+/** a key moment of an item made from the conversation, posted back to it (§5.2) */
+export type Update = { kind: "ask" | "reply" | "deliver" | "done" | "drop" | "fail"; item: string; text?: string; decision?: string; full?: boolean; ref?: string }
+/** what Steve did for one message (hub meta.steps): routing, the reasoning behind a direct answer, a research run, tools; times in ms */
+export type Steps = { route?: { kind: string; modelKind?: string; guard?: string | null; confidence?: number; title: string; bot: string; project: string | null; tags: string[]; newTags: string[]; why: string; model: string | null; fallback: boolean; ms: number; picked?: string }; answer?: { thought: string; model: string | null; ms: number; failed: boolean }
+  research?: { run: string; model: string | null; ms: number; turns: number; tools: number; stopped?: "user" | "budget" | "violation" | "restart" | "failed" }
+  tools: { name: string; args: Record<string, any>; result?: Record<string, any>; status: "ok" | "failed"; error?: string; ms: number }[]; ms?: number }
+/** a research run being read live (steve.tool), for the user message `mid` */
+export type LiveRun = { mid: string; run: string; t0: number; tools: { name: string; brief: string; ok: boolean }[] }
+/** an open decision with no item (a forked or imported session, or its item was deleted): shown with the same card */
+export type Orphan = { i: Item; w: Wait }
+export type Project = RProject
+
+export const PRO = ["只在必要时", "适中", "积极"]
+export const ST: Record<string, [string, "accent" | "orange" | "green" | "neutral" | "red"]> = {
+  prop: ["提议", "accent"], block: ["等前置", "neutral"], run: ["进行中", "accent"], wait: ["等你", "orange"], pause: ["已暂停", "neutral"], done: ["已完成", "green"], drop: ["已放弃", "neutral"],
+}
+export const SS: Record<string, [string, "accent" | "orange" | "green" | "neutral"]> = { run: ["运行中", "accent"], wait: ["等你", "orange"], idle: ["空闲", "neutral"], ended: ["已结束", "neutral"] }
+export const WT: Record<string, string> = { approve: "审批", ask: "问题", accept: "验收", propose: "提议", fail: "异常", confirm: "确认" }
+export const HARNESS: Record<string, string> = { "claude-code": "Claude Code", codex: "Codex" }
+export const ACC: Record<string, string> = { inherit: "跟随全局", manual: "需要你验收", auto: "自动验收" }
+export const PERM: Record<string, string> = { plan: "只读：只出方案，不改文件", default: "每次改文件或运行命令都问你", acceptEdits: "可以改项目目录里的文件，运行命令要问你", auto: "可以改文件、运行命令；对外操作仍需你批准" }
+const accKey = (label: string) => Object.keys(ACC).find((k) => ACC[k] === label) ?? "inherit"
+
+/* ───────── time labels ───────── */
+const pad = (n: number) => String(n).padStart(2, "0")
+export function tm(ts: number | null | undefined) {
+  if (!ts) return ""
+  const d = new Date(ts), now = new Date(), diff = now.getTime() - ts
+  if (diff < 60_000) return "刚刚"
+  const hm = `${pad(d.getHours())}:${pad(d.getMinutes())}`
+  const day = (x: Date) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime()
+  const days = Math.round((day(now) - day(d)) / 86400_000)
+  if (days === 0) return hm
+  if (days === 1) return "昨天 " + hm
+  if (days < 7) return "周" + "日一二三四五六"[d.getDay()]
+  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+}
+const since = (ts: number) => { const m = Math.max(1, Math.round((Date.now() - ts) / 60_000)); return m < 60 ? `${m} 分钟` : m < 1440 ? `${Math.round(m / 60)} 小时` : `${Math.round(m / 1440)} 天` }
+const dur = (a: number, b: number) => { const m = Math.max(0, Math.round((b - a) / 60_000)); return m < 1 ? "刚开始" : m < 60 ? `${m} 分钟` : `${Math.floor(m / 60)} 小时 ${m % 60} 分` }
+
+/** the web build this page was loaded from: ops/release-web.sh writes it into index.html; "dev" under vite */
+export const LOADED_WEB_VERSION = document.querySelector('meta[name="steve-web-version"]')?.getAttribute("content") || "dev"
+
+/* ───────── the store ───────── */
+export const st = {
+  ready: false, error: "" as string, login: null as string | null, version: "", webVersion: "",
+  workspace: null as State["workspace"] | null, workspaces: [] as State["workspaces"],
+  bots: {} as Record<string, Bot>, allBots: [] as State["allBots"], S: {} as Record<string, Sess>, items: [] as Item[], projects: [] as Project[],
+  thread: [] as Msg[], done: [] as Done[], tags: [] as Tag[], tagUses: {} as Record<string, number>,
+  cfg: {} as Record<string, any>, settings: {} as Record<string, string>, devices: [] as State["devices"], runtimes: [] as State["runtimes"],
+  /* YOLO (Rust Hub): the switch, and the current window's ledger by decision id; null where the Hub has none */
+  yolo: null as RYolo | null, yoloActs: {} as Record<string, RYoloAction>,
+  localSessions: [] as LocalSession[], hold: null as RHold | null, thinking: false, onboard: -1, prefix: "ST", noSeq: 0,
+  notices: [] as RNotice[], noticeSeen: 0, phase: "" as string, orphans: [] as Orphan[],
+  /* the chat answer being written (steve.draft), until the stored reply replaces it; `drafted` is that reply's id */
+  draft: null as Draft | null, drafted: "",
+  /* the research being read right now (steve.tool), the message being quoted, the item the conversation is talking to */
+  live: null as LiveRun | null, quote: null as string | null, focus: null as { item: string; until: number } | null,
+  /* modules that are not wired to a backend yet: always empty, never sample data */
+  SIG: [] as any[], rules: [] as any[], schedules: [] as any[], sources: [] as any[], plugins: [] as any[],
+  ch: { personas: [] as any[], spaces: [] as any[], accounts: [] as any[], providers: [] as any[], notify: { acc: "" }, disclosureDefaults: [] as any[] },
+  pp: { contacts: [] as any[], orgs: [] as any[], teams: [] as any[], vault: [] as any[], itemPeople: [] as any[], accounts: [] as any[] },
+  ver: 0,
+}
+const raw = { state: null as State | null, details: new Map<string, RItemDetail>(), events: new Map<string, REvent[]>(), loadingEv: new Set<string>(), loadingItem: new Set<string>() }
+;(window as any).__steve = st
+
+const ls = new Set<() => void>()
+export function emit() { st.ver++; ls.forEach((f) => f()) }
+export function useStore() { return useSyncExternalStore((cb) => { ls.add(cb); return () => ls.delete(cb) }, () => st.ver) }
+export function toast(t: string, opts?: Parameters<typeof sonner>[1]) { sonner(t, opts) }
+const fail = (e: unknown) => { if (e instanceof Unauthenticated) { st.login = e.login; emit(); return } toast((e as Error).message || "出错了") }
+/** run an API call; refresh afterwards; report errors as a toast */
+async function call<T>(p: Promise<T>, ok?: string): Promise<T | undefined> {
+  try { const r = await p; if (ok) toast(ok); await refresh(); return r } catch (e) { fail(e); return undefined }
+}
+/** Once the Hub accepts a message, a subsequent refresh failure must not invite a duplicate send. */
+async function sendMessage(p: Promise<unknown>, ok?: string): Promise<boolean> {
+  try { await p } catch (e) { fail(e); return false }
+  if (ok) toast(ok)
+  await refresh().catch(fail)
+  return true
+}
+
+/* ───────── mapping ───────── */
+function botOf(b: RBot): Bot {
+  const prev = st.bots[b.id], proj = raw.state?.projects.find((p) => p.id === b.default_project)
+  return { id: b.id, main: b.main, n: b.name, a: b.name[0] ?? "B", role: b.role, pers: b.persona, pro: b.proactive, h: HARNESS[b.harness] ?? b.harness, harness: b.harness, m: b.model ?? "默认模型", model: b.model, reasoningEffort: b.reasoning_effort,
+    on: b.enabled, acc: ACC[b.accept_mode] ?? "跟随全局", ws: proj?.name ?? "按事项推断", project: b.default_project, perm: PERM[b.perm_mode] ?? b.perm_mode, permMode: b.perm_mode, rule: b.rules, prompt: b.prompt,
+    mem: prev?.mem ?? [], memLoaded: prev?.memLoaded ?? false, memCount: b.memories, routines: [], hue: b.avatar.color ?? "#8e8e93", color: b.avatar.color ?? defaultColor(b.name), round: b.avatar.round ?? 60, skin: b.avatar.skin ?? null, dev: b.device ?? undefined, workspaces: b.workspaces }
+}
+export const AVATAR_COLORS: [string, string][] = [["#7aa7c7", "雾蓝"], ["#8c7ae6", "薰衣草"], ["#5fb39a", "青绿"], ["#e0a458", "琥珀"], ["#d9777f", "珊瑚"], ["#6c7a89", "石板灰"], ["#3d4a5c", "深蓝灰"], ["#b08968", "胡桃"]]
+const hash = (s: string) => { let h = 2166136261; for (const ch of s) { h ^= ch.codePointAt(0)!; h = Math.imul(h, 16777619) } return h >>> 0 }
+export const defaultColor = (name: string) => AVATAR_COLORS[hash(name) % AVATAR_COLORS.length][0]
+
+/** one line for a prompt Steve hands an agent (the task brief runs to pages: role, rules, retrieved knowledge) */
+export function briefHead(text: string): string {
+  const title = /^You are working for Steve\b[^\n]*?“(.+?)”/.exec(text)?.[1]
+  if (title) return "任务说明 · " + title
+  const line = text.split("\n").find((l) => l.trim())?.trim() ?? ""
+  return !line ? "任务说明" : line.length > 120 ? line.slice(0, 120) + "…" : line
+}
+const textOf = (content: any): string => (Array.isArray(content) ? content : [content]).map((c: any) => c?.type === "content" ? textOf(c.content) : c?.type === "text" ? c.text : c?.type === "diff" ? `--- ${c.path}` : "").filter(Boolean).join("\n")
+const STEVE_TOOL: Record<string, string> = { steve_update: "更新计划", steve_ask: "向你提问", steve_request_approval: "请求批准", steve_deliver: "交付", steve_publish: "申请发布" }
+const KIND: Record<string, string> = { read: "read", edit: "edit", search: "search", execute: "run", fetch: "search", think: "read", delete: "edit", move: "edit" }
+const lines = (t: unknown) => (typeof t === "string" && t ? t.split("\n").length : 0)
+const unfence = (t: string) => t.replace(/^```[a-z]*\n?/, "").replace(/\n?```\s*$/, "")
+/** what a tool call was given, for the transcript: the command, a short description, a diff from Edit/Write's own input */
+function toolInput(t: Ev, inp: any) {
+  if (!inp || typeof inp !== "object") return
+  if (typeof inp.description === "string" && inp.description) t[10] = inp.description
+  if (typeof inp.command === "string" && inp.command) t[11] = inp.command
+  else if (typeof inp.pattern === "string") t[11] = inp.pattern
+  else if (typeof inp.query === "string") t[11] = inp.query
+  else if (typeof inp.url === "string") t[11] = inp.url
+  if (typeof inp.now === "string") t[10] = inp.now
+  if (Array.isArray(inp.plan)) t[12] = inp.plan.map((x: any) => [String(x.step ?? ""), !!x.done])
+  if (typeof inp.summary === "string" && t[3] === "Steve") t[10] = inp.summary.split("\n")[0].slice(0, 160)
+  if (typeof inp.question === "string") t[10] = inp.question
+  const edits = Array.isArray(inp.edits) ? inp.edits : typeof inp.new_string === "string" ? [inp] : null
+  if (edits) {
+    t[6] = edits.reduce((n: number, x: any) => n + lines(x.new_string), 0); t[7] = edits.reduce((n: number, x: any) => n + lines(x.old_string), 0)
+    t[4] = edits.map((x: any) => [...String(x.old_string ?? "").split("\n").filter((l, _i, a) => a.length > 1 || l).slice(0, 40).map((l) => "- " + l), ...String(x.new_string ?? "").split("\n").slice(0, 60).map((l) => "+ " + l)].join("\n")).join("\n⋯\n")
+  } else if (typeof inp.content === "string" && inp.file_path) { t[6] = lines(inp.content); t[7] = 0; t[4] = inp.content.split("\n").slice(0, 80).map((l: string) => "+ " + l).join("\n") }
+  if (typeof inp.file_path === "string" && (!t[3] || t[3] === t[2])) t[3] = inp.file_path
+}
+/** ACP events → transcript tuples; seqs[i] is the event sequence where tuple i starts (used for fork), ts[i] its time */
+export function toEv(evs: REvent[], running: boolean): { ev: Ev[]; seqs: number[]; ts: number[] } {
+  const ev: Ev[] = [], seqs: number[] = [], ts: number[] = [], tools = new Map<string, Ev>()
+  let cur: REvent | undefined
+  const push = (e: Ev, seq: number) => { ev.push(e); seqs.push(seq); ts.push(cur?.ts ?? 0) }
+  for (const e of evs) {
+    const d = e.data ?? {}, last = ev[ev.length - 1]; cur = e
+    if (e.kind === "user") { if (d.via === "steve") push(["hi", briefHead(String(d.text ?? "")), d.files, String(d.text ?? "")], e.seq); else push(["u", d.text, d.via === "me" ? "" : d.via, d.files], e.seq); continue }
+    if (e.kind === "agent_message_chunk") { const t = d.content?.text ?? ""; if (last?.[0] === "a") last[1] += t; else push(["a", t], e.seq); continue }
+    if (e.kind === "agent_thought_chunk") { const t = d.content?.text ?? ""; if (last?.[0] === "th") last[1] += t; else push(["th", t, ""], e.seq); continue }
+    if (e.kind === "tool_call") {
+      const name = String(d.title ?? ""), m = name.match(/steve_(update|ask|request_approval|deliver|publish)/)
+      const loc = d.locations?.[0]?.path ?? ""
+      const t: Ev = m ? ["tool", "steve", STEVE_TOOL["steve_" + m[1]], "Steve", "", d.status === "completed" ? 0 : 1] : ["tool", KIND[d.kind] ?? "run", name.split(" ")[0] || "工具", loc || name.split(" ").slice(1).join(" ").slice(0, 80), textOf(d.content), d.status === "completed" || d.status === "failed" ? 0 : 1]
+      t[8] = d.status === "failed" ? 1 : 0; t[9] = d.tool ?? d._meta?.claudeCode?.toolName ?? d.name ?? ""; toolInput(t, d.rawInput)
+      tools.set(d.toolCallId, t); push(t, e.seq); continue
+    }
+    if (e.kind === "tool_call_update") {
+      const t = tools.get(d.toolCallId); if (!t) continue
+      if (d.status === "completed" || d.status === "failed") { t[5] = 0; t[8] = d.status === "failed" ? 1 : 0 }
+      toolInput(t, d.rawInput)
+      if (d.title && t[3] !== "Steve") { t[2] = String(d.title).split(" ")[0]; if (!t[3]) t[3] = String(d.title).split(" ").slice(1).join(" ").slice(0, 80) }
+      const o = textOf(d.content); if (o && !(t[1] === "edit" && t[6] != null)) t[4] = t[1] === "run" ? unfence(o) : o
+      const diff = (d.content ?? []).find((c: any) => c.type === "diff")
+      if (diff) { t[3] = diff.path; t[6] = String(diff.newText ?? "").split("\n").length; t[7] = diff.oldText ? String(diff.oldText).split("\n").length : 0; t[4] = (diff.oldText ? String(diff.oldText).split("\n").slice(0, 6).map((l: string) => "- " + l).join("\n") + "\n" : "") + String(diff.newText ?? "").split("\n").slice(0, 12).map((l: string) => "+ " + l).join("\n") }
+      if (d.rawOutput && (!t[4] || t[1] === "run")) t[4] = typeof d.rawOutput === "string" ? d.rawOutput.slice(0, 3000) : JSON.stringify(d.rawOutput).slice(0, 2000)
+      continue
+    }
+    if (e.kind === "system") { push(["sys", d.text], e.seq); continue }
+    if (e.kind === "permission") { push(["ask", String(d.title ?? "工具调用"), d.decision], e.seq); continue }
+    if (e.kind === "turn_end") { push(["end", d.stopReason ?? ""], e.seq); continue }
+    if (e.kind === "queued") { push(["sys", "已排队：" + briefHead(String(d.text ?? ""))], e.seq); continue }
+    if (e.kind === "queued_edited") { push(["sys", "改了排队的消息：" + briefHead(String(d.text ?? ""))], e.seq); continue }
+    if (e.kind === "queued_removed") { push(["sys", "撤回了排队的消息：" + briefHead(String(d.text ?? ""))], e.seq); continue }
+    if (e.kind === "queued_sent_now") { push(["sys", (d.interrupted ? "中断当前回合，立即发送：" : "立即发送：") + briefHead(String(d.text ?? ""))], e.seq); continue }
+  }
+  if (!running) ev.forEach((x) => { if (x[0] === "tool") x[5] = 0 })
+  return { ev, seqs, ts }
+}
+/* build() runs on every refresh and stream event: only a transcript whose events changed is mapped again */
+const convs = new Map<string, { xs: REvent[]; n: number; running: boolean; conv: ReturnType<typeof toEv> }>()
+function convOf(sid: string, xs: REvent[], running: boolean) {
+  const c = convs.get(sid); if (c && c.xs === xs && c.n === xs.length && c.running === running) return c.conv
+  const conv = toEv(xs, running); convs.set(sid, { xs, n: xs.length, running, conv }); return conv
+}
+function sessOf(s: RSession, openSessions: Set<string>): Sess {
+  const evs = raw.events.get(s.id), running = s.status === "running" || s.status === "starting"
+  const conv = evs ? convOf(s.id, evs, running) : { ev: [], seqs: [], ts: [] }
+  return { id: s.id, n: s.no, item: s.item_id, b: s.bot_id, h: HARNESS[s.harness] ?? s.harness, m: s.model ?? "默认模型", st: running ? "run" : s.status === "ended" ? "ended" : openSessions.has(s.id) ? "wait" : "idle",
+    title: s.title, dur: dur(s.created, s.updated), reasoningEffort: s.reasoning_effort, contextKnown: s.used != null && s.size != null && s.size > 0, ctx: s.used && s.size ? Math.round((s.used / s.size) * 100) : 0, src: s.source, up: tm(s.updated), ev: conv.ev, seqs: conv.seqs, ts: conv.ts, queue: s.queued,
+    ro: s.readonly, device: s.device_id, loaded: !!evs, busy: s.busy }
+}
+function waitOf(d: RDecision): Wait {
+  const opts = d.kind === "ask" ? d.options : undefined
+  return { type: d.kind, q: d.question, draft: d.draft, opts, since: since(d.created), decision: d.id, subject: d.subject_type, subjectId: d.subject_id, session: d.session_id, options: d.options, by: d.requested_by, busy: !!d.agent_busy }
+}
+/** Both pending and recent resolved decisions are returned by state, including orphan sessions. */
+export function permissionDecision(id?: string) {
+  if (!id) return undefined
+  return raw.state?.decisions.find((d) => d.id === id) ?? raw.state?.recent.find((d) => d.id === id)
+}
+/** a stand-in item for a decision without one: id "" marks it; the title and bot come from its session */
+function orphanOf(d: RDecision): Orphan {
+  const s = raw.state?.sessions.find((x) => x.id === d.session_id), w = waitOf(d)
+  const i = { id: "", t: s?.title || "未关联事项的会话", b: s?.bot_id ?? d.requested_by, st: "wait", waits: [w], wait: w, ss: s ? [s.id] : [], tags: [], deps: [], tl: [], outs: [], q: [], goals: [], rounds: [], now: "", src: ["会话", "session"], ws: "—", project: null, up: "", acc: "跟随全局", branch: null, cwd: null, detail: false, dependents: [], created: d.created, updated: d.created } as unknown as Item
+  return { i, w }
+}
+/* what was chosen on a module card (signals, flows, vault, connections); a flow_step choice is its own label */
+const MODULE_CHOICE_SUBJECTS = new Set(["signal", "flow_step", "flow_run", "secret_use", "connection", "mail_draft"])
+const MODULE_CHOICE: Record<string, string> = { done: "知道了", to_item: "转成事项", retry: "重试", drop: "放弃这次", continue_once: "预算翻倍，继续", stop: "停下", once: "批准这一次", grant_1h: "授权 1 小时", grant_8h: "授权 8 小时", grant_24h: "授权 24 小时", deny: "拒绝", pause: "暂停接收", reauth: "重新授权", send: "发送", no: "不发" }
+/** an approved release's outcome; undefined for anything else (and for approvals recorded before outcomes existed) */
+export function relOf(d: RDecision): Rel | undefined {
+  const r = d.result ?? {}
+  if (d.kind !== "approve" || d.subject_type !== "release" || d.status !== "resolved" || !r.approved) return undefined
+  const why = (x: string) => (x ? "：" + x : "")
+  switch (r.outcome) {
+    case "releasing": return { tone: "run", text: "已批准，正在发布，结果出来后会通知你" }
+    case "not_released": return { tone: "fail", text: "已批准，但没有发布" + why(r.reason ?? "") }
+    case "failed": return { tone: "fail", text: (r.hub_ok && !r.web_ok ? "已批准，Hub 已发布，前端发布失败" : "已批准，发布失败") + why([r.reason, r.note].filter(Boolean).join("，")) }
+    case "released": return { tone: "ok", text: `已发布${r.kind === "web" ? "前端" : r.kind === "hub+web" ? " Hub 和前端" : ""}${r.version ? " " + r.version : ""}` }
+  }
+  return undefined
+}
+/** the item's newest release decision, if it is settled and approved */
+function itemRel(id: string, ds: RDecision[]): Rel | undefined {
+  const last = ds.filter((d) => d.item_id === id && d.kind === "approve" && d.subject_type === "release").sort((a, b) => b.created - a.created)[0]
+  return last ? relOf(last) : undefined
+}
+function choiceLabel(d: RDecision) {
+  const r = d.result ?? {}
+  if (r.dismissed) return "撤回"
+  if (d.status === "expired") return String(r.superseded ?? (r.dropped ? "事项已放弃" : r.reassigned ? "换了 Bot" : "已过期"))
+  if (d.kind === "accept") return r.choice === "pass" ? "验收通过" : "返工：" + (r.text ?? "")
+  if (d.subject_type === "space") return (r.choice ?? r.answer) === "mute" ? "静默" : "去设置"
+  if (d.kind === "ask") return String(r.answer ?? "")
+  if (d.subject_type === "party_merge") return r.choice === "merge" ? "合并" : "不是同一个人"
+  if (d.kind === "confirm") return r.choice === "yes" ? "确认" : "不对"
+  if (d.kind === "propose") return r.choice === "yes" ? "开始" : "不需要"
+  if (MODULE_CHOICE_SUBJECTS.has(d.subject_type)) return MODULE_CHOICE[r.choice] ?? String(r.choice ?? "已处理")
+  if (d.kind === "fail") return ({ continue: "让它继续", delivered: "它其实做完了", look: "我来看看", tosteve: "换成 Steve", drop: "放弃" } as Record<string, string>)[r.choice] ?? r.choice
+  if (d.subject_type === "tool_call") return r.optionId ? "允许" : "拒绝"
+  if (d.subject_type === "release") return r.approved ? "批准发布" : "不发布"
+  return r.approved ? "批准" : "拒绝"
+}
+/* ── which agent turn answered a comment in the work log ──
+ * a comment (timeline kind "me") becomes a user prompt in one of the item's sessions: "补充信息：…", "用户的回答：…", a merged queue…
+ * the first unclaimed prompt sent at or after the comment that contains its text is the one; the reply is that turn */
+export type Reply = { s: string; from: number; to: number; text: string; tools: number; live: boolean }
+const NO_PROMPT = /^(添加标签|移除标签|稍后提醒|暂停|放弃|归档|恢复|撤销了决定|同意开始|不需要|批准发布|不发布)/
+function repliesOf(det: RItemDetail, sids: string[]): Map<number, Reply> {
+  const out = new Map<number, Reply>()
+  const prompts = sids.flatMap((sid) => (raw.events.get(sid) ?? []).filter((e) => e.kind === "user").map((e) => ({ sid, e })))
+    .sort((a, b) => a.e.ts - b.e.ts || a.e.seq - b.e.seq)
+  if (!prompts.length) return out
+  const used = new Set<number>()
+  for (const t of det.timeline) {
+    if (t.kind !== "me" || NO_PROMPT.test(t.text)) continue
+    const needle = t.text.replace(/^(回答|返工|批准|拒绝)：/, "").trim(); if (!needle) continue
+    const p = prompts.find(({ e }) => !used.has(e.seq) && e.ts >= t.ts - 1000 && String(e.data?.text ?? "").includes(needle))
+    if (!p) continue
+    used.add(p.e.seq)
+    const evs = raw.events.get(p.sid)!, S = st.S[p.sid]
+    /* prompts merged into one turn are consecutive user events: the reply starts after the last of them */
+    let k = evs.findIndex((e) => e.seq === p.e.seq)
+    while (evs[k + 1]?.kind === "user") k++
+    let end = k + 1
+    while (end < evs.length && evs[end].kind !== "user") end++
+    const turn = evs.slice(k + 1, end)
+    const text = turn.filter((e) => e.kind === "agent_message_chunk").map((e) => e.data?.content?.text ?? "").join("").trim()
+    const tools = turn.filter((e) => e.kind === "tool_call").length
+    const live = !!S && S.st === "run" && end === evs.length && !turn.some((e) => e.kind === "turn_end")
+    /* the transcript tuples of this turn, for the full view */
+    const firstSeq = evs[k + 1]?.seq ?? Infinity, endSeq = evs[end]?.seq ?? Infinity
+    const at = (seq: number) => { const n = S ? S.seqs.findIndex((q) => q >= seq) : -1; return n < 0 ? (S?.seqs.length ?? 0) : n }
+    out.set(t.id, { s: p.sid, from: at(firstSeq), to: at(endSeq), text, tools, live })
+  }
+  return out
+}
+/* a plan step as [text, state]: 0 open, 1 done, 2 left open when the item finished */
+const steps = (p: PlanStep[]) => p.map((x) => [x.step, x.done ? 1 : x.left ? 2 : 0] as [string, number])
+function itemOf(i: RItem, decs: RDecision[]): Item {
+  const det = raw.details.get(i.id), proj = raw.state?.projects.find((p) => p.id === i.project_id)
+  const open = decs.filter((d) => d.item_id === i.id)
+  const snoozed = i.snooze && i.snooze.until > Date.now() ? i.snooze.label : undefined
+  const act = raw.state?.sessions.filter((s) => s.item_id === i.id && s.status !== "ended").at(-1)
+  const replies = det ? repliesOf(det, i.sessionIds) : new Map<number, Reply>()
+  const tl = det ? det.timeline.flatMap((t) => t.kind === "session" && t.session_id && t.text.startsWith("开始会话") ? [["sys", `开始会话`, tm(t.ts)], ["sess", t.session_id]] : t.kind === "me" ? [["me", t.text, tm(t.ts), t.session_id ?? undefined, replies.get(t.id), t.files, t.via]] : [["sys", t.text, tm(t.ts)]]) : []
+  return {
+    id: i.id, t: i.title, b: i.bot_id ?? "steve", st: i.status, deps: i.deps, src: i.source, ws: proj?.name ?? "—", project: i.project_id, up: tm(i.updated), star: i.star, acc: ACC[i.accept_mode ?? "inherit"] ?? "跟随全局",
+    goals: det ? det.goalsList.map((g) => g.text) : [i.goal], now: i.now || "", plan: i.plan.length ? steps(i.plan) : undefined,
+    rounds: (det?.planRounds ?? []).map((r) => ({ n: r.round, steps: steps(r.steps), end: r.end, at: tm(r.created) })),
+    wait: open.length ? waitOf(open[0]) : undefined, waits: open.map(waitOf), ss: i.sessionIds, tl, outs: det ? det.artifacts.map((a) => [a.kind, a.title, a.location] as [string, string, string | null]) : [],
+    q: act?.queued ?? [], qs: act?.id ?? null,
+    parent: i.parent?.item ? { item: i.parent.item, s: i.parent.session ?? undefined, at: undefined } : null, due: i.due ?? undefined, pri: (i.priority as Item["pri"]) ?? "中", arch: i.archived, snooze: snoozed, tags: i.tags,
+    /* the hub clears cwd when the project changes; a session still running then is in the old directory */
+    branch: i.branch, cwd: i.cwd, projNext: !i.cwd && !!act, detail: !!det, dependents: det?.dependents ?? [], created: i.created, updated: i.updated,
+    /* an open release card wins (it is the newest); a settled one says what happened */
+    rel: open.some((d) => d.subject_type === "release") ? undefined : itemRel(i.id, [...(det?.decisions ?? []), ...(raw.state?.recent ?? [])]),
+  }
+}
+export function msgOf(m: State["thread"][number]): Msg {
+  const p: Proposal | undefined = m.meta?.proposal
+  const x = m.meta ?? {}
+  return { id: m.id, k: m.author, t: m.text, item: m.item_id ?? undefined, chat: x.chat, files: x.files, created: m.created, steps: x.steps, notice: x.notice, cites: x.cites, cfg: p ? proposalOf(p, x.applied ? "applied" : x.dropped ? "dropped" : "draft") : undefined,
+    offer: x.offer ?? undefined, suggest: x.suggest ?? undefined, ask: x.ask ?? undefined, queued: x.queued ?? undefined, replyTo: x.reply_to ?? undefined, origin: x.origin ?? undefined, answer: x.answer ?? undefined,
+    update: x.update ?? undefined, updates: Array.isArray(x.updates) ? x.updates : undefined, rerun: x.rerun ?? undefined,
+    card: x.card?.item ? x.card : undefined, cardOnly: !!x.card_only, wasCard: !!x.was_card }
+}
+const proposals = new Map<string, any>()
+/** a drafted change as the prototype's Proposal: apply/undo call the Hub */
+export function proposalOf(p: Proposal, state: "draft" | "applied" | "dropped" = "draft") {
+  const cur = proposals.get(p.id); if (cur) return cur
+  const x: any = { title: p.title, target: p.title, href: p.href, changes: p.changes, state, id: p.id }
+  x.apply = async () => { const r = await call(api.apply(p.id)); if (r) { x.state = "applied"; emit(); toast("已应用", { action: { label: "撤销", onClick: () => void call(api.undoConfig(p.id), "已撤销").then(() => { x.state = "draft"; emit() }) } }) } }
+  proposals.set(p.id, x); return x
+}
+
+function build() {
+  const s = raw.state; if (!s) return
+  st.hold = s.hold ?? null
+  st.version = s.version; st.webVersion = s.web_version ?? ""; st.workspace = s.workspace; st.workspaces = s.workspaces; st.prefix = s.workspace.item_prefix; st.projects = s.projects
+  st.noSeq = Math.max(0, ...s.items.map((i) => (i.id.startsWith(st.prefix + "-") ? i.no : 0)))
+  const openDec = s.decisions, openSess = new Set(openDec.map((d) => d.session_id).filter(Boolean) as string[])
+  st.bots = Object.fromEntries(s.bots.map((b) => [b.id, botOf(b)])); st.allBots = s.allBots
+  st.S = Object.fromEntries(s.sessions.map((x) => [x.id, sessOf(x, openSess)]))
+  st.items = s.items.map((i) => itemOf(i, openDec))
+  st.tags = s.tags.map((t) => ({ id: t.id, name: t.name, cat: t.cat, desc: t.description, by: t.created_by === "你" ? "你" : "Steve", created: tm(t.created) }))
+  st.tagUses = s.tagUses
+  st.thread = s.thread.map(msgOf)
+  if (st.draft) {
+    const at = s.thread.findIndex((m) => m.id === st.draft!.mid), reply = at < 0 ? undefined : s.thread.slice(at + 1).find((m) => m.author === "steve")
+    if (reply) { st.drafted = reply.id; st.draft = null }
+  }
+  /* a research run's answer is stored: its live line goes, and the thinking line with it */
+  if (st.live && s.thread.some((m) => m.author === "steve" && m.meta?.origin === st.live!.mid && m.meta?.steps?.research)) {
+    st.live = null; if (st.phase === "research" || st.phase === "answer") { st.thinking = false; st.phase = "" }
+  }
+  if (st.thinking || st.draft || st.live) st.thread.push({ k: "thinking" })
+  st.notices = s.notifications ?? []; st.noticeSeen = Math.max(st.noticeSeen, s.notifySeen ?? 0)
+  st.orphans = openDec.filter((d) => !d.item_id || !s.items.some((i) => i.id === d.item_id)).map(orphanOf)
+  st.done = s.recent.filter((d) => d.item_id).map((d) => ({ id: d.item_id!, type: d.kind, q: d.question, choice: choiceLabel(d), tm: tm(d.resolved), decision: d.id, canUndo: !!d.undo && !!d.resolved && Date.now() - d.resolved < 86400_000, rel: relOf(d),
+    how: d.result?.dismissed ? "dismissed" : d.status === "expired" ? "expired" : "chose", yolo: d.result?.decided_by === "yolo" ? String(d.result?.yolo_reason ?? "") : undefined }))
+  st.settings = s.settings; st.devices = s.devices; st.runtimes = s.runtimes
+  st.cfg = { ...s.settings, accDefault: ACC[s.settings.accDefault] ?? "需要你验收", harness: s.runtimes.map((r) => ({ id: r.id, n: r.name, ok: r.ok, ver: r.version, path: r.path, models: r.models, def: "默认模型", login: r.note })) }
+  if (st.onboard < 0 && !s.thread.length && !s.items.length && localStorage.getItem("steve-onboarded") !== "1") st.onboard = 0
+  st.ready = true
+}
+
+/* ───────── loading and live updates ───────── */
+let inflight: Promise<void> | null = null, again = false
+export function refresh(): Promise<void> {
+  if (inflight) { again = true; return inflight.then(() => inflight ?? undefined) } // resolve after the follow-up, so callers see state newer than their action
+  inflight = (async () => {
+    /* asked after Steve stopped, the state has the reply (stored before steve.thinking went off): the draft has served */
+    const settled = !st.thinking
+    try { raw.state = await api.state(); st.login = null; st.error = ""; build(); if (settled && st.draft) { st.draft = null; build() } emit() }
+    catch (e) { if (e instanceof Unauthenticated) st.login = e.login ?? "/auth/login"; else st.error = (e as Error).message; emit() }
+    finally { inflight = null; if (again) { again = false; void refresh() } }
+  })()
+  return inflight
+}
+/* debounced, but a steady event stream still refreshes at least once a second */
+let timer: any = null, due = 0
+const soon = () => { clearTimeout(timer); due ||= Date.now() + 1000; timer = setTimeout(() => { due = 0; void refresh().then(reloadOpen) }, Math.max(0, Math.min(120, due - Date.now()))) }
+const openItems = new Set<string>(), dirty = new Set<string>(), reloadAgain = new Set<string>(), missedEv = new Set<string>()
+/** refetch only the loaded item details an event touched */
+async function reloadOpen() { for (const id of [...dirty]) { dirty.delete(id); if (raw.details.has(id)) void loadItem(id, true) } }
+export async function loadItem(id: string, force = false) {
+  openItems.add(id)
+  if (raw.loadingItem.has(id)) { if (force) reloadAgain.add(id); return }
+  if (!force && raw.details.has(id)) return
+  raw.loadingItem.add(id)
+  try { raw.details.set(id, await api.item(id)); tries.delete("i:" + id); build(); emit() } catch (e) { if (!(e instanceof Unauthenticated)) { raw.details.delete(id); retry("i:" + id, e, () => { if (st.items.some((x) => x.id === id)) void loadItem(id, true) }) } } finally { raw.loadingItem.delete(id); if (reloadAgain.delete(id)) void loadItem(id, true) }
+}
+/* a view asks once, when it mounts: a load that failed (Hub restarting for a release, dropped connection) used to spin
+ * forever. Retry here, backing off to every 30 s, until it loads or the thing is gone */
+const tries = new Map<string, number>()
+function retry(key: string, e: unknown, f: () => unknown) {
+  const n = (tries.get(key) ?? 0) + 1; tries.set(key, n)
+  if (n === 3) toast("载入失败，正在重试：" + ((e as Error).message || "网络出错"))
+  setTimeout(f, 1000 * Math.min(30, 2 ** n))
+}
+/** Pages are limited by bytes as well as rows; only an empty page means EOF. */
+async function eventsAfter(sid: string, after: number) {
+  return readEventPages(after, (cursor) => api.events(sid, cursor))
+}
+export async function loadEvents(sid: string) {
+  if (raw.events.has(sid) || raw.loadingEv.has(sid)) return
+  raw.loadingEv.add(sid)
+  try { raw.events.set(sid, await eventsAfter(sid, 0)); tries.delete("e:" + sid); build(); emit() } catch (e) { if (e instanceof Unauthenticated) fail(e); else retry("e:" + sid, e, () => { if (st.S[sid]) void loadEvents(sid) }) } finally { raw.loadingEv.delete(sid); if (missedEv.delete(sid)) void catchUp(sid) }
+}
+/** fetch events a loaded transcript missed (arrived while it was loading, or while the stream was down) */
+async function catchUp(sid: string) {
+  const xs = raw.events.get(sid); if (!xs) return
+  try {
+    const more = await eventsAfter(sid, xs.reduce((m, x) => Math.max(m, x.seq), 0))
+    if (raw.events.get(sid) !== xs || !more.length) return
+    for (const e of more) if (!xs.some((x) => x.seq === e.seq)) xs.push(e)
+    xs.sort((a, b) => a.seq - b.seq); build(); emit()
+  } catch {}
+}
+/* streamed chunks arrive dozens a second per running agent: re-render the app at most every 80 ms, not per chunk */
+/* a chat answer streams in at up to ~20 updates a second: draw once per frame */
+let drawing = 0
+const drawDraft = () => { drawing ||= requestAnimationFrame(() => { drawing = 0; emit() }) }
+let painting: any = null
+const paint = () => { painting ??= setTimeout(() => { painting = null; build(); emit() }, 80) }
+/* The module SSE types (steve-modules `sse::MODULE_TYPES`, plus `kb`): ids only, scoped to the workspace; the module
+ * pages refetch what they show. They don't touch /api/state, so they never trigger a state refresh here. */
+export const MODULE_EVENTS = ["party", "mm", "changeset", "account", "connection", "vault", "signal", "flow", "run", "space", "chan_message", "persona", "channel", "gh", "mail", "kb", "yolo", "yolo_action", "stats"] as const
+export type ModuleEvent = { type: (typeof MODULE_EVENTS)[number]; id: string; ws?: string; flow_id?: string; space_id?: string }
+const moduleTypes = new Set<string>(MODULE_EVENTS)
+/** every stream event, for pages that keep their own data (contacts, knowledge, accounts, vault, signals, flows, GitHub …) */
+export const hubSubs = new Set<(e: HubEvent | ModuleEvent) => void>()
+/** call `f` (debounced by `ms`) whenever the stream reports a change of one of `types` */
+export function useHubEvents(types: readonly string[], f: () => void, ms = 300) {
+  const ref = useRef(f); ref.current = f
+  const key = types.join()
+  useEffect(() => {
+    let t: ReturnType<typeof setTimeout> | undefined
+    const h = (e: { type: string }) => { if (types.includes(e.type)) { clearTimeout(t); t = setTimeout(() => ref.current(), ms) } }
+    hubSubs.add(h); return () => { hubSubs.delete(h); clearTimeout(t) }
+  }, [key, ms]) // eslint-disable-line react-hooks/exhaustive-deps
+}
+/* ───────── YOLO: the switch and the current window's ledger, refetched on `yolo` / `yolo_action` ───────── */
+let yoloTimer: any = null
+export async function loadYolo() {
+  try {
+    const [y, d] = await Promise.all([yoloApi.status(), yoloApi.actions({ window: "current" })])
+    const acts: Record<string, RYoloAction> = {}
+    for (const w of d.windows) for (const g of w.items) for (const a of g.actions) if (a.decision_id) acts[a.decision_id] = a
+    st.yolo = y; st.yoloActs = acts
+  } catch { st.yolo = null; st.yoloActs = {} }
+  emit()
+}
+const yoloSoon = () => { clearTimeout(yoloTimer); yoloTimer = setTimeout(() => void loadYolo(), 250) }
+async function yoloCall<T>(p: Promise<T>, ok?: string): Promise<T | undefined> {
+  try { const r = await p; if (ok) toast(ok); await loadYolo(); return r } catch (e) { fail(e); return undefined }
+}
+const LEVEL_TOAST = { off: "已关闭，每个决定都等你", on: "YOLO 已打开", full: "完全放开已打开" } as const
+export const yoloSet = (mode: "off" | "on" | "full", includeOpen = false) => yoloCall(yoloApi.set(mode, includeOpen), LEVEL_TOAST[mode])
+export const yoloScope = (type: "project" | "item", id: string, mode: "on" | "off" | "inherit" | "full") => yoloCall(yoloApi.scope(type, id, mode), "已保存")
+export const yoloResume = () => yoloCall(yoloApi.resume(), "YOLO 已恢复")
+export const yoloUndo = (id: string, text?: string) => yoloCall(yoloApi.undo(id, text), "已撤销").then((r) => { void refresh(); return r })
+export const yoloNow = (id: string) => yoloCall(yoloApi.now(id)).then((r) => { void refresh(); return r })
+export const yoloCancel = (id: string) => yoloCall(yoloApi.cancel(id), "这张卡留给你")
+
+function onHub(e: HubEvent | ModuleEvent) {
+  hubSubs.forEach((f) => f(e))
+  if (e.type === "yolo" || e.type === "yolo_action") { yoloSoon(); return }
+  if (moduleTypes.has(e.type)) return
+  e = e as HubEvent
+  if (e.type === "release.hold") { st.hold = e.hold; emit(); return }
+  if (e.type === "steve.draft") { st.draft = { mid: e.mid, thought: e.thought, text: e.text }; if (!st.thread.some((m) => m.k === "thinking")) st.thread.push({ k: "thinking" }); drawDraft(); return }
+  if (e.type === "steve.tool") {
+    if (st.live?.run !== e.run) st.live = { mid: e.mid, run: e.run, t0: Date.now(), tools: [] }
+    st.live.tools.push({ name: e.name, brief: e.brief, ok: e.ok })
+    if (!st.thread.some((m) => m.k === "thinking")) st.thread.push({ k: "thinking" })
+    drawDraft(); return
+  }
+  if (e.type === "thread.run") { soon(); return }
+  if (e.type === "steve.thinking") { st.thinking = e.on; st.phase = e.on ? e.phase ?? "" : ""; cue(e.on ? "think" : "reply"); build(); emit(); if (!e.on) soon(); return }
+  if (e.type === "event") {
+    const xs = raw.events.get(e.session_id)
+    if (!xs && raw.loadingEv.has(e.session_id)) missedEv.add(e.session_id)
+    if (xs && !(xs.length && xs[xs.length - 1].seq >= e.seq && xs.some((x) => x.seq === e.seq))) { xs.push({ seq: e.seq, ts: Date.now(), kind: e.kind, data: e.data }); paint() }
+    if (["turn_end", "user", "permission", "system"].includes(e.kind)) soon()
+    return
+  }
+  if (e.type === "item") dirty.add(e.id); else if ((e.type === "decision" || e.type === "session") && e.item_id) dirty.add(e.item_id)
+  soon()
+}
+/* the stream is bound to the workspace it was opened in: reopen it after a switch */
+let closeStream = () => {}
+const connect = () => { closeStream(); closeStream = stream(onHub, () => { for (const sid of raw.events.keys()) void catchUp(sid); soon(); yoloSoon() }); yoloSoon() }
+export function start() {
+  void refresh(); connect()
+  return () => { closeStream(); closeStream = () => {} }
+}
+
+/* ───────── selectors ───────── */
+export const it = (id: string) => st.items.find((x) => x.id === id)!
+export const pending = () => st.items.filter((i) => (i.st === "wait" || i.st === "prop" || !!i.wait) && !!i.wait && !i.snooze && !i.arch)
+/** every open card, several per item when it has more than one */
+export const pendingCards = (): Orphan[] => [...pending().flatMap((i) => i.waits.map((w) => ({ i, w }))), ...st.orphans]
+/** the open cards a session is waiting on, with or without an item */
+export const sessionCards = (sid: string): Orphan[] => [...st.items.flatMap((i) => i.waits.filter((w) => w.session === sid).map((w) => ({ i, w }))), ...st.orphans.filter((o) => o.w.session === sid)]
+/** "" is the stand-in id of a card without an item */
+const cardOf = (id: string, decision?: string): { i?: Item; w?: Wait } => { if (!id) return st.orphans.find((o) => o.w.decision === decision) ?? {}; const i = it(id); return { i, w: decision ? i?.waits.find((x) => x.decision === decision) : i?.wait } }
+export const snoozed = () => st.items.filter((i) => !!i.wait && !!i.snooze)
+export const active = (i: Item) => i.ss.map((x) => st.S[x]).filter((s) => s && s.st !== "ended").pop()
+export const sidOf = (s: Sess) => s.id
+export const accOf = (i: Item) => (i.acc !== "跟随全局" ? i.acc : st.bots[i.b] && st.bots[i.b].acc !== "跟随全局" ? st.bots[i.b].acc : st.cfg.accDefault)
+export const botName = (k: string | null) => (!k ? "" : st.bots[k] ? (st.bots[k].main ? st.bots[k].n : st.bots[k].n + " Bot") : k === "agent" ? "Agent" : k)
+export const hm = (s: Sess) => `${s.h ?? "未知 harness"} · ${s.m ?? "默认模型"}`
+export const isThinking = () => st.thinking
+export const projectName = (id: string | null | undefined) => st.projects.find((p) => p.id === id)?.name ?? "无"
+export const depsOpen = (i: Item) => (i.deps || []).filter((d) => st.items.find((x) => x.id === d)?.st !== "done")
+export function stageOf(i: Item): string {
+  if (i.st === "prop") return "分流"; if (i.st === "block") return "规划"; if (i.st === "done" || i.st === "drop") return "收尾"
+  if (i.wait?.type === "accept") return "交付与验收"; if (i.wait?.type === "propose") return "规划"
+  if (/发布/.test(i.now)) return "收尾"
+  if (/^正在开始|刚开始/.test(i.now)) return "定义"; return "执行"
+}
+
+/* ───────── actions: conversation ───────── */
+/** how long the conversation keeps talking to an item after the last message sent to it (§5.3) */
+const FOCUS_MS = 10 * 60_000
+const ITEM_REF = /^#([A-Z]{1,6}-\d+)\b/
+export async function chatSend(v: string, files: string[] = [], refs: RFile[] = [], mentions: { kind: "party" | "bot"; id: string }[] = []) {
+  /* a quote of an item's message, or the focus bar, sends straight to that item; `#ST-n` does too and starts the focus */
+  const quoted = st.quote ? st.thread.find((m) => m.id === st.quote) : undefined
+  const focus = st.focus && st.focus.until > Date.now() ? st.focus.item : undefined
+  const item = quoted?.item ?? (quoted ? undefined : focus)
+  const toItem = item ?? ITEM_REF.exec(v)?.[1]
+  const to = { item, reply_to: quoted?.id }
+  st.quote = null; st.focus = toItem ? { item: toItem, until: Date.now() + FOCUS_MS } : st.focus
+  st.draft = null; st.thread.push({ k: "me", t: v, files: refs, replyTo: to.reply_to }, { k: "thinking" }); st.thinking = true; emit(); cue("think")
+  try { await api.say(v, files, mentions, to); return true } catch (e) { fail(e); st.thinking = false; build(); emit(); cue("failure"); return false }
+}
+export function stopReply() { if (st.live) void call(api.stopRun(st.live.run)); void call(api.stop()); cue("idle") }
+export function quoteMsg(id: string | null) { st.quote = id; emit(); requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>("[data-composer='chat'] textarea, textarea")?.focus()) }
+export function clearFocus() { st.focus = null; emit() }
+export const focusItem = () => (st.focus && st.focus.until > Date.now() ? st.focus.item : null)
+/* thread routing actions: a 409 (already handled) comes back as its message */
+export async function takeOffer(m: Msg, take: boolean) { if (!m.id) return; const r = await call(api.offer(m.id, take)); if (r?.item) toast("已做成 " + r.item.id) }
+export async function chooseSuggest(m: Msg, choice: "here" | "item") { if (!m.id) return; const r = await call(api.suggest(m.id, choice)); if (r?.item) toast("已建成 " + r.item.id) }
+export async function reroute(m: Msg, to: string) {
+  if (!m.id) return
+  const r = await call(api.reroute(m.id, to))
+  if (r) toast(to === "inline" ? "改成在这里回答" : r.item ? (to.startsWith("item:") ? "已送到 " : "已做成 ") + r.item.id : "已改")
+}
+/** 做成事项 on an answer: the old promote when it is a chat answer, else a correction to an item */
+export function makeItem(m: Msg) { if (m.chat) void promote(m); else void reroute(m, "item") }
+export function cancelQueued(run: string) { void call(api.cancelRun(run), "已撤回") }
+export function stopRun(run: string) { void call(api.stopRun(run)); cue("idle") }
+export async function threadFollow(item: string, follow: boolean) { await call(api.threadFollow(item, follow), follow ? "会在对话里跟进" : "不在对话里跟进了"); dirty.add(item); soon() }
+/** the raw thread info of an item's detail (§5), once loaded */
+export const itemThread = (id: string) => raw.details.get(id)?.thread ?? null
+/** a decision's full text (a delivery summary), from the open cards, item details or recent decisions */
+export function decisionDraft(id: string): string | undefined {
+  for (const d of raw.state?.decisions ?? []) if (d.id === id) return d.draft
+  for (const det of raw.details.values()) for (const d of det.decisions) if (d.id === id) return d.draft
+  return raw.state?.recent.find((d) => d.id === id)?.draft
+}
+/** notifications newer than the read cursor */
+export const unreadNotices = () => st.notices.filter((n) => n.created > st.noticeSeen)
+export function readNotices() {
+  const at = st.notices[0]?.created ?? 0; if (at <= st.noticeSeen) return
+  st.noticeSeen = at; emit(); void api.readNotifications(at).catch(fail)
+}
+/** close a failure notice: its line leaves the conversation and it is no longer pinned; the Hub remembers it */
+export function dismissNotice(id: string) {
+  st.thread = st.thread.filter((m) => m.notice?.ref !== id && m.id !== id)
+  st.notices = st.notices.map((n) => (n.id === id ? { ...n, closed: true } : n)); emit()
+  void call(api.dismissNotice(id))
+}
+/* a chat answer becomes one item: clicks while it is being made are ignored, and the hub returns the same item if asked again */
+const promoting = new Set<string>()
+export const isPromoting = (m: Msg) => !!m.id && promoting.has(m.id)
+export async function promote(m: Msg) {
+  if (!m.id || promoting.has(m.id)) return
+  promoting.add(m.id); emit(); cue("success")
+  try { const r = await call(api.promote(m.id)); if (r) toast("已做成 " + r.id) } finally { promoting.delete(m.id); emit() }
+}
+export function finishOnboarding() { localStorage.setItem("steve-onboarded", "1"); st.onboard = -1; emit() }
+
+/* ───────── actions: decisions ───────── */
+const SNOOZE: Record<string, () => number> = {
+  "1 小时后": () => Date.now() + 3600_000,
+  "今晚 20:00": () => { const d = new Date(); d.setHours(20, 0, 0, 0); if (d.getTime() < Date.now()) d.setDate(d.getDate() + 1); return d.getTime() },
+  "明天早上": () => { const d = new Date(); d.setDate(d.getDate() + 1); d.setHours(8, 30, 0, 0); return d.getTime() },
+}
+export function snooze(id: string, when: string) { void call(api.snooze(id, when, (SNOOZE[when] ?? SNOOZE["1 小时后"])()), `${when}再提醒你`) }
+export function unsnooze(id: string) { void call(api.snooze(id, null, null)) }
+/** resolve the item's open decision; `c` is the decision's own choice id */
+/* the toast after answering a card: per module subject first, then by choice; the plain fallbacks last */
+const DECIDED_BY_SUBJECT: Record<string, Record<string, string> | ((c: string) => string)> = {
+  signal: { done: "知道了", to_item: "已转成事项" },
+  flow_step: (c) => (c.startsWith("不") ? "已跳过这一步，流程继续" : `已选「${c}」，流程继续`),
+  flow_run: { retry: "已重试这次运行", drop: "已放弃这次运行", continue_once: "预算翻倍，流程继续", stop: "流程已停下" },
+  secret_use: { once: "已批准这一次", grant_1h: "已授权 1 小时", grant_8h: "已授权 8 小时", grant_24h: "已授权 24 小时", deny: "已拒绝，它拿不到这个机密" },
+  connection: { pause: "已暂停接收，恢复后也不补收" },
+  space: { open: "好，去设置这个群", mute: "已静默：这个群只记录，不发言" },
+  mem: { yes: "记住了", no: "不记这条" },
+  party_merge: { merge: "已合并，可以在联系人页拆回", not_same: "已记下：不是同一个人" },
+  release: { no: "没有批准发布" },
+}
+const DECIDED: Record<string, string> = { pass: "已验收，事项完成", rework: "已发回返工", yes: "已确认", no: "已处理", continue: "已让它继续", delivered: "已转成验收", look: "已暂停，等你处理", tosteve: "已交给 Steve", drop: "已放弃", deny: "已拒绝" }
+function decidedText(w: Wait, c: string, bot: string | null) {
+  const m = DECIDED_BY_SUBJECT[w.subject], x = typeof m === "function" ? m(c) : m?.[c]
+  if (x) return x
+  if (w.type === "confirm") return c === "yes" ? "已确认" : "已记下：不对"
+  return DECIDED[c] ?? (w.type === "ask" ? "已告诉" + botName(bot) : w.subject === "tool_call" ? "已允许" : "已处理")
+}
+/** accepted, but the project still has a release to go: the item is not finished yet */
+const releaseAhead = (i?: Item) => !!i?.branch && !!st.projects.find((p) => p.id === i.project)?.release
+export async function decide(id: string, c: string, text?: string, decision?: string) {
+  const { i, w } = cardOf(id, decision); if (!w) return
+  if (c === "pass") cue("success")
+  if (w.subject === "release" && c === "yes") {
+    /* the answer already says whether the release started; "已发布" only comes with the result */
+    const d = await call(api.decide(w.decision, c, text))
+    if (d) { const rel = relOf(d); toast(rel?.text ?? "已批准发布"); if (rel?.tone === "fail") cue("failure") }
+    return
+  }
+  if (c === "pass" && w.type === "accept" && text !== "no-release" && releaseAhead(i) && i) {
+    /* the Hub finishes an item with nothing on its branch right away: say so instead of waiting for a release */
+    if (!(await call(api.decide(w.decision, c, text)))) return
+    const after = await api.item(i.id).catch(() => null)
+    toast(after?.status === "done" ? "已验收，没有需要发布的改动，事项完成" : "已验收，等它申请发布")
+    return
+  }
+  await call(api.decide(w.decision, c, text), decidedText(w, c, i?.b ?? null))
+}
+/** take one card out of 待处理 without answering it (the item's first one unless `decision` says which);
+ *  undoable from the toast or from 已处理, except a tool permission, which this denies */
+export async function dismiss(id: string, decision?: string) {
+  const { w } = cardOf(id, decision); if (!w) return
+  const d = await call(api.dismiss(w.decision))
+  if (d) toast(w.subject === "tool_call" ? "已撤回，这次工具调用被拒绝" : "已撤回，不再提醒", w.subject === "tool_call" ? undefined : { action: { label: "撤销", onClick: () => void call(api.undo(w.decision), `已撤销，${id || "它"}回到待处理`) } })
+}
+export function undoDecision(n: number) { const d = st.done[n]; if (!d?.canUndo) return; void call(api.undo(d.decision), `已撤销，${d.id} 回到待处理`) }
+
+/* ───────── actions: items ───────── */
+export async function newItem(goal: string, bot?: string, project?: string | null, mode: "start" | "propose" = "start") {
+  const r = await call(api.newItem({ goal, bot, project, mode })); return r?.id
+}
+export async function supp(id: string, v: string, target: "auto" | "steer" | "new", files: string[] = []) {
+  const msg = target === "steer" ? "已插话" : target === "new" ? "已开新会话" : active(it(id))?.st === "run" ? "已排队，会话本回合结束后送达" : "已送达"
+  return sendMessage(api.supplement(id, v, target, files), msg)
+}
+export function deliver(id: string) { void call(api.deliver(id), "已送达") }
+export function withdraw(qid: string) { void call(api.dropQueued(qid), "已撤回") }
+/* ── queued messages of a session: each one can be edited, withdrawn or sent now ──
+ * A row a turn already took answers 409 (“已经发出”): the error is shown and the strip refreshes. */
+async function qCall<T>(p: Promise<T>): Promise<T | undefined> {
+  try { const r = await p; await refresh(); return r } catch (e) { fail(e); await refresh(); return undefined }
+}
+export async function qEdit(sid: string, qid: string, text: string) { const r = await qCall(api.queuedEdit(sid, qid, text)); if (r) toast("已修改排队的消息"); return !!r }
+/** back into the composer when it is empty; otherwise just removed, with an undo that queues it again */
+export async function qWithdraw(sid: string, qid: string, composer?: { empty: () => boolean; fill: (t: string, f: RFile[]) => void } | null, strip = (t: string) => t) {
+  const r = await qCall(api.queuedRemove(sid, qid)); if (!r) return
+  const files = r.files ?? []
+  if (composer?.empty()) { composer.fill(strip(r.text), files); toast("已撤回，放回输入框了"); return }
+  toast("已撤回", { action: { label: "撤销", onClick: () => void call(api.sessionSay(sid, r.text, "排队", files.map((f) => f.id))).then((x: any) => x && toast(x.result === "queued" ? "已放回队列" : "已发送")) } })
+}
+export async function qSendNow(sid: string, qid: string) {
+  const r = await qCall(api.queuedSendNow(sid, qid)); if (!r) return
+  toast(r.result === "interrupted" ? "已中断当前回合，排队的消息接着发送" : r.result === "sent" ? "已发送" : (r.reason ?? "暂时发不出去，排在最前面"))
+}
+export function saveGoal(id: string, v: string) { const i = it(id); if (!v || v === i.goals[i.goals.length - 1]) return; void call(api.goal(id, v), "目标已更新") }
+export function reassign(id: string, k: string) { if (k === it(id).b) return; void call(api.reassign(id, k), `已交给${botName(k)}`) }
+export function setSt(id: string, s: Item["st"]) {
+  const i = it(id), action = s === "pause" ? "pause" : s === "drop" ? "drop" : ["done", "drop"].includes(i.st) ? "reopen" : "resume"
+  void call(api.itemAction(id, action), ({ pause: "已暂停", drop: "已放弃", reopen: "已重新打开", resume: "继续处理" } as Record<string, string>)[action])
+}
+/** mark done right away; the toast can take it back (the Hub restores the item as it was) */
+export async function markDone(id: string) {
+  const r = await call(api.itemAction(id, "finish")); if (!r) return
+  toast(`已标记完成 ${id}`, { action: { label: "撤销", onClick: () => void call(api.itemAction(id, "unfinish"), `已撤销，${id} 回到之前的状态`) } })
+}
+export function star(id: string) { void call(api.patchItem(id, { star: !it(id).star })) }
+export function setAcc(id: string, v: string) { void call(api.patchItem(id, { accept_mode: accKey(v) })) }
+export function patchItem(id: string, p: Partial<Item>, _note?: string) {
+  const q: Parameters<typeof api.patchItem>[1] = {}
+  if (p.t !== undefined) q.title = p.t
+  if (p.pri !== undefined) q.priority = p.pri
+  if ("due" in p) q.due = p.due ?? null
+  if ("project" in p) q.project_id = p.project ?? null
+  void call(api.patchItem(id, q))
+}
+export function archive(ids: string[], v = true) { void call(Promise.all(ids.map((id) => api.itemAction(id, v ? "archive" : "unarchive"))), v ? `已归档 ${ids.length} 件` : `已恢复 ${ids.length} 件`) }
+export function deleteItem(id: string) { void call(api.deleteItem(id), `已删除 ${id}，编号不再使用；它的会话保留为未关联`) }
+export function bulk(ids: string[], op: "pause" | "run" | "drop" | "arch") {
+  if (op === "arch") return archive(ids)
+  void call(api.bulk(ids, op === "run" ? "resume" : op).then((r) => { toast(({ pause: "已暂停", run: "已继续", drop: "已放弃" } as Record<string, string>)[op] + ` ${r.n} 件`); return r }))
+}
+export function addDep(id: string, dep: string) { void call(api.addDep(id, dep), `已添加前置 ${dep}`) }
+export function rmDep(id: string, dep: string) { void call(api.rmDep(id, dep)) }
+
+/* ───────── actions: sessions ───────── */
+/** at = index into the session's transcript; the Hub forks at that event */
+export async function doFork(k: string, at: number, goal: string, asSess: boolean): Promise<string> {
+  const s = st.S[k], n = Math.min(at, s.seqs.length - 1)
+  /* fork after the whole tuple (an agent reply spans many chunk events), not at its first event */
+  const seq = s.seqs[n + 1] ? s.seqs[n + 1] - 1 : n >= 0 ? (raw.events.get(k)?.at(-1)?.seq ?? s.seqs[n]) : 0
+  const r = await call(api.fork(k, seq, goal, asSess), asSess ? "已派生新会话" : "已派生新事项")
+  return r?.item ? "#/items/" + r.item : r?.session ? "#/sessions/" + r.session : "#/sessions/" + k
+}
+export async function sessSend(k: string, v: string, mode: "插话" | "排队", files: string[] = []) { return sendMessage(api.sessionSay(k, v, mode, files), st.S[k].st === "run" && mode === "排队" ? "已排队，本回合结束后发送" : undefined) }
+export function interrupt(k: string) { void call(api.cancel(k), "已中断") }
+export function link(k: string, id: string) { void call(api.link(k, id), "已关联到「" + it(id).t + "」") }
+export function sessPatch(k: string, p: Partial<Sess>, msg?: string) {
+  if (p.title) void call(api.renameSession(k, p.title), msg)
+  if (p.st === "ended") void call(api.endSession(k), msg)
+}
+export function sessRemove(k: string) { const t = st.S[k]?.title; void call(api.removeSession(k), `已移除「${t}」，本机原始记录没有改动`) }
+export async function loadLocalSessions() { try { st.localSessions = await api.localSessions(); emit() } catch (e) { fail(e) } }
+export async function importSessions(keys: string[]) {
+  const r = await call(api.importSessions(keys)); if (!r) return
+  const bad = r.filter((x) => typeof x !== "string") as { error: string }[]
+  toast(bad.length ? `导入了 ${r.length - bad.length} 个，${bad.length} 个失败：${bad[0].error}` : `已导入 ${r.length} 个会话，导入的会话只读`)
+}
+
+/* ───────── actions: bots ───────── */
+export async function loadMemories(k: string) {
+  try { const xs = await api.memories(k); const b = st.bots[k]; if (b) { b.mem = xs.map((m) => [m.text, m.source, m.id]); b.memLoaded = true; emit() } } catch (e) { fail(e) }
+}
+export async function saveBot(k: string, p: { n?: string; role?: string; pers?: string; pro?: number; rule?: string; acc?: string; harness?: string; model?: string | null; reasoningEffort?: string | null; permMode?: string; project?: string | null; color?: string; round?: number; skin?: string | null; prompt?: string | null; on?: boolean; dev?: string | null }, msg = "已保存，对之后的回复和运行生效") {
+  const b = st.bots[k]
+  const q: Partial<RBot> = {}
+  if (p.reasoningEffort !== undefined) q.reasoning_effort = p.reasoningEffort
+  if (p.n !== undefined) q.name = p.n; if (p.role !== undefined) q.role = p.role; if (p.pers !== undefined) q.persona = p.pers; if (p.pro !== undefined) q.proactive = p.pro; if (p.rule !== undefined) q.rules = p.rule
+  if (p.acc !== undefined) q.accept_mode = accKey(p.acc); if (p.harness !== undefined) q.harness = p.harness; if (p.model !== undefined) q.model = p.model; if (p.permMode !== undefined) q.perm_mode = p.permMode
+  if (p.project !== undefined) q.default_project = p.project; if (p.prompt !== undefined) q.prompt = p.prompt; if (p.on !== undefined) q.enabled = p.on; if (p.dev !== undefined) q.device = p.dev
+  if (p.color !== undefined || p.round !== undefined || p.skin !== undefined) q.avatar = { color: p.color ?? b.color, round: p.round ?? b.round, skin: p.skin !== undefined ? p.skin : b.skin }
+  await call(api.patchBot(k, q), msg)
+}
+export async function makeBot(n: string, role: string, harness = "claude-code", model: string | null = null) { const r = await call(api.newBot({ name: n, role, harness, model }), "已创建，先设定性格和工作方式"); return r?.id }
+export async function draftBot(desc: string) { const r = await call(api.draftBot(desc), "Steve 起草好了，看看要不要改"); return r?.id }
+export async function deleteBot(k: string, to: string, mem: "删除" | "导出") {
+  const b = st.bots[k]; const r = await call(api.deleteBot(k, to, mem === "删除" ? "delete" : "export")); if (!r) return
+  if (mem === "导出" && r.memories.length) { const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([JSON.stringify(r.memories, null, 2)], { type: "application/json" })); a.download = `${b?.n ?? k}-记忆.json`; a.click() }
+  toast(`已删除 ${b?.n} Bot，${r.moved.length} 件事项交给${botName(to)}${mem === "导出" ? "，记忆已导出" : ""}`, { action: { label: "撤销", onClick: () => void call(api.restoreBot(k), `已恢复 ${b?.n} Bot；已交出去的事项不会自动收回`) } })
+}
+export async function dupBot(k: string) { const r = await call(api.dupBot(k), "已复制，默认停用，改好后再启用"); return r?.id }
+export function addMem(k: string, t: string) { void call(api.addMemory(k, t), "已添加记忆").then(() => loadMemories(k)) }
+export function editMem(k: string, id: string, t: string) { void call(api.editMemory(id, t)).then(() => loadMemories(k)) }
+export function delMem(k: string, id: string) { void call(api.deleteMemory(id), "已删除").then(() => loadMemories(k)) }
+export function setBotWorkspaces(k: string, ids: string[]) { void call(api.botWorkspaces(k, ids), "已更新这个 Bot 参与的工作空间") }
+
+/* ───────── actions: workspaces and projects ───────── */
+export async function switchWorkspace(id: string) {
+  try { await api.switchWs(id); raw.details.clear(); raw.events.clear(); convs.clear(); openItems.clear(); dirty.clear(); st.thinking = false; st.draft = null; connect(); await refresh(); location.hash = "#/"; toast("已切换到「" + (st.workspace?.name ?? "") + "」") } catch (e) { fail(e) }
+}
+export async function newWorkspace(name: string, description: string, item_prefix?: string) { const w = await call(api.newWs({ name, description, item_prefix })); if (w) await switchWorkspace(w.id) }
+export async function newProject(p: { name: string; path: string; description?: string; worktree?: boolean; default_bot?: string | null }) { const r = await call(api.newProject(p), `已添加项目「${p.name}」`); return r?.id }
+export function patchProject(id: string, p: Partial<RProject>, msg = "已保存") { void call(api.patchProject(id, p), msg) }
+
+/* ───────── tags ───────── */
+export const tag = (id: string) => st.tags.find((t) => t.id === id)
+export const tagName = (id: string) => tag(id)?.name ?? id
+export const tagUses = (id: string) => st.tagUses[id] ?? 0
+export const TAG_CATS = ["项目", "类型", "领域", "客户", "主题"]
+export function setTags(id: string, ids: string[]) { void call(api.patchItem(id, { tags: ids })) }
+export async function makeTag(t: { name: string; cat: string; desc: string }) { const r = await call(api.newTag({ name: t.name, cat: t.cat, description: t.desc })); return r?.id }
+export function saveTag(id: string, p: Partial<Tag>) { void call(api.patchTag(id, { name: p.name, cat: p.cat, description: p.desc }), "标签已保存") }
+export function deleteTag(id: string) { const n = tagUses(id), name = tagName(id); void call(api.deleteTag(id), `已删除标签「${name}」，${n} 件事项上的这个标签已移除`) }
+export function mergeTag(from: string, into: string) { const a = tagName(from); void call(api.mergeTag(from, into), `已把「${a}」合并到「${tagName(into)}」`) }
+
+/* ───────── settings ───────── */
+export function setSetting(p: Record<string, string>, msg = "已保存") { void call(api.settings(p), msg) }
+
+/* ───────── relation graph model ───────── */
+export type GNode = { id: string; k: "item" | "sess" | "proj"; title: string; st: string; n?: number; b?: string | null; project?: string | null }
+export type GEdge = [string, string, string]
+export function gBuild() {
+  const N: Record<string, GNode> = {}, E: GEdge[] = []
+  st.items.filter((i) => !i.arch).forEach((i) => {
+    N[i.id] = { id: i.id, k: "item", title: i.t, st: i.st, b: i.b, project: i.project }
+    let prev: string | null = null
+    i.ss.forEach((k) => {
+      const s = st.S[k]; if (!s) return
+      N[k] = { id: k, k: "sess", title: s.title, st: s.st, n: s.n, b: s.b }
+      E.push(prev ? [prev, k, "交接"] : [i.id, k, ""]); prev = k
+    })
+    ;(i.deps || []).forEach((d) => E.push([d, i.id, "依赖"]))
+    if (i.parent) E.push(i.parent.s && st.S[i.parent.s] ? [i.parent.s, i.id, "派生"] : [i.parent.item, i.id, "派生"])
+  })
+  Object.keys(st.S).forEach((k) => { const s = st.S[k]; if (!s.item) N[k] = { id: k, k: "sess", title: s.title, st: s.st, n: s.n, b: s.b } })
+  return { N, E: E.filter((e) => N[e[0]] && N[e[1]]) }
+}
+/** the projects of the shown items, as extra roots; kept out of gBuild so a project doesn't merge all its items into one component */
+export function gProjects(ids: string[], N: Record<string, GNode>) {
+  const P: Record<string, GNode> = {}, E: GEdge[] = []
+  for (const k of ids) {
+    const n = N[k], p = n?.k === "item" && n.project ? st.projects.find((x) => x.id === n.project) : undefined
+    if (!p) continue
+    P[p.id] ??= { id: p.id, k: "proj", title: p.name, st: "", n: st.items.filter((i) => i.project === p.id && !i.arch).length }
+    E.push([p.id, k, "项目"])
+  }
+  return { P, E }
+}
+export function gComps(N: Record<string, GNode>, E: GEdge[]) {
+  const p: Record<string, string> = {}; const f = (x: string): string => (p[x] === x ? x : (p[x] = f(p[x])))
+  Object.keys(N).forEach((k) => (p[k] = k)); E.forEach(([a, b]) => { p[f(a)] = f(b) })
+  const g: Record<string, string[]> = {}; Object.keys(N).forEach((k) => (g[f(k)] = g[f(k)] || []).push(k)); return Object.values(g)
+}
+export function gNear(f: string, E: GEdge[]) {
+  const up = new Set([f]); let ch = true
+  while (ch) { ch = false; E.forEach(([a, b]) => { if (up.has(b) && !up.has(a)) { up.add(a); ch = true } }) }
+  E.forEach(([a, b]) => { if (a === f) up.add(b) }); return [...up]
+}
+export function gRank(ids: string[], E: GEdge[]) {
+  const set = new Set(ids), es = E.filter((e) => set.has(e[0]) && set.has(e[1])), r: Record<string, number> = {}
+  ids.forEach((k) => (r[k] = 0))
+  for (let n = 0; n < ids.length; n++) es.forEach(([a, b]) => { if (r[b] < r[a] + 1) r[b] = r[a] + 1 })
+  const rows: string[][] = []; ids.forEach((k) => (rows[r[k]] = rows[r[k]] || []).push(k))
+  const ord: Record<string, number> = {}
+  rows.forEach((c, ri) => {
+    if (ri > 0) { const bc = (k: string) => { const ps = es.filter((e) => e[1] === k).map((e) => ord[e[0]]); return ps.length ? ps.reduce((a, b) => a + b) / ps.length : 99 }; c.sort((a, b) => bc(a) - bc(b)) }
+    c.forEach((k, o) => (ord[k] = o))
+  })
+  return { rows, es, ord }
+}

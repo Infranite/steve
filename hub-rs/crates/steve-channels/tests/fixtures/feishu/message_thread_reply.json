@@ -1,0 +1,48 @@
+{
+  "schema": "2.0",
+  "header": {
+    "event_id": "425047b81c05df8661132fd73970fea1",
+    "event_type": "im.message.receive_v1",
+    "create_time": "1761900006000",
+    "token": "fake-verification-token",
+    "app_id": "cli_a5fake0000000001",
+    "tenant_key": "2ca1d211f64f6438"
+  },
+  "event": {
+    "sender": {
+      "sender_id": {
+        "union_id": "on_alice00000000000000000000000001",
+        "user_id": "u_alice",
+        "open_id": "ou_alice00000000000000000000000001"
+      },
+      "sender_type": "user",
+      "tenant_key": "2ca1d211f64f6438"
+    },
+    "message": {
+      "message_id": "om_threadreply0000000000000000001",
+      "root_id": "om_topicroot000000000000000000001",
+      "parent_id": "om_topicroot000000000000000000001",
+      "create_time": "1761900006000",
+      "update_time": "1761900006000",
+      "chat_id": "oc_topic000000000000000000000001",
+      "thread_id": "omt_fake0000000001",
+      "chat_type": "group",
+      "message_type": "text",
+      "content": "{\"text\":\"@_user_1 这个需求下周能排上吗\"}",
+      "mentions": [
+        {
+          "key": "@_user_1",
+          "id": {
+            "union_id": "",
+            "user_id": "",
+            "open_id": "ou_bot0000000000000000000000000001"
+          },
+          "mentioned_type": "bot",
+          "name": "值班小运",
+          "tenant_key": "2ca1d211f64f6438"
+        }
+      ],
+      "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Lark/7.30.8 LarkLocale/zh_CN ttnet SDK-Version/7.30.10"
+    }
+  }
+}

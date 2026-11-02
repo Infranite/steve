@@ -1,0 +1,85 @@
+{
+  "schema": "2.0",
+  "header": {
+    "event_id": "c1744c704d3c3cdcaecd311be5dccab1",
+    "event_type": "contact.user.updated_v3",
+    "create_time": "1761900014500",
+    "token": "fake-verification-token",
+    "app_id": "cli_a5fake0000000001",
+    "tenant_key": "2ca1d211f64f6438"
+  },
+  "event": {
+    "object": {
+      "open_id": "ou_carol00000000000000000000000001",
+      "union_id": "on_carol00000000000000000000000001",
+      "user_id": "u_carol",
+      "name": "陈静",
+      "en_name": "Carol",
+      "nickname": "",
+      "email": "carol@example.com",
+      "enterprise_email": "carol@corp.example.com",
+      "job_title": "前端工程师",
+      "mobile": "",
+      "gender": 2,
+      "avatar": {
+        "avatar_72": "https://s1-imfile.feishucdn.com/static-resource/v1/fake-user-avatar~72x72",
+        "avatar_240": "https://s1-imfile.feishucdn.com/static-resource/v1/fake-user-avatar~240x240",
+        "avatar_640": "https://s1-imfile.feishucdn.com/static-resource/v1/fake-user-avatar~640x640",
+        "avatar_origin": "https://s1-imfile.feishucdn.com/static-resource/v1/fake-user-avatar~noop"
+      },
+      "status": {
+        "is_frozen": false,
+        "is_resigned": true,
+        "is_activated": false,
+        "is_exited": false,
+        "is_unjoin": false
+      },
+      "department_ids": [
+        "od-platform0000000000000000000001"
+      ],
+      "leader_user_id": "ou_alice00000000000000000000000001",
+      "city": "杭州",
+      "country": "CN",
+      "work_station": "",
+      "join_time": 1700000000,
+      "employee_no": "",
+      "employee_type": 1
+    },
+    "old_object": {
+      "open_id": "ou_carol00000000000000000000000001",
+      "union_id": "on_carol00000000000000000000000001",
+      "user_id": "u_carol",
+      "name": "陈静",
+      "en_name": "Carol",
+      "nickname": "",
+      "email": "carol@example.com",
+      "enterprise_email": "carol@corp.example.com",
+      "job_title": "前端工程师",
+      "mobile": "",
+      "gender": 2,
+      "avatar": {
+        "avatar_72": "https://s1-imfile.feishucdn.com/static-resource/v1/fake-user-avatar~72x72",
+        "avatar_240": "https://s1-imfile.feishucdn.com/static-resource/v1/fake-user-avatar~240x240",
+        "avatar_640": "https://s1-imfile.feishucdn.com/static-resource/v1/fake-user-avatar~640x640",
+        "avatar_origin": "https://s1-imfile.feishucdn.com/static-resource/v1/fake-user-avatar~noop"
+      },
+      "status": {
+        "is_frozen": false,
+        "is_resigned": false,
+        "is_activated": true,
+        "is_exited": false,
+        "is_unjoin": false
+      },
+      "department_ids": [
+        "od-platform0000000000000000000001"
+      ],
+      "leader_user_id": "ou_alice00000000000000000000000001",
+      "city": "杭州",
+      "country": "CN",
+      "work_station": "",
+      "join_time": 1700000000,
+      "employee_no": "",
+      "employee_type": 1
+    }
+  }
+}

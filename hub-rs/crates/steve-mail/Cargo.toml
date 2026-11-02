@@ -1,0 +1,56 @@
+[package]
+name = "steve-mail"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+description = "Email: accounts, sync, drafts and sending"
+
+[features]
+# Fake IMAP/SMTP/Gmail/Graph servers and fixture emails for tests (email.md §12).
+fake = ["dep:rcgen"]
+
+[dependencies]
+steve-modules = { path = "../steve-modules" }
+steve-store = { path = "../steve-store" }
+steve-knowledge = { path = "../steve-knowledge" }
+steve-flow = { path = "../steve-flow" }
+ammonia = "=4.2.4"
+async-imap = { version = "=0.12.0", default-features = false, features = ["runtime-tokio"] }
+async-trait = "=0.1.92"
+base64 = "=0.22.1"
+chrono = { version = "=0.4.45", default-features = false, features = ["clock", "std"] }
+futures = "=0.3.34"
+hex = "=0.4.3"
+html2text = "=0.17.4"
+lettre = { version = "=0.11.23", default-features = false, features = ["smtp-transport", "hostname", "tokio1-rustls", "ring", "rustls-native-certs"] }
+mail-builder = "=2.0.0"
+mail-parser = { version = "=1.0.0", features = ["full_encoding"] }
+rusqlite = { version = "=0.40.2", features = ["bundled"] }
+rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std", "logging", "tls12"] }
+rustls-native-certs = "=0.8.5"
+rustls-pki-types = "=1.15.1"
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = { version = "=1.0.154", features = ["preserve_order"] }
+sha2 = "=0.11.1"
+thiserror = "=2.0.21"
+tokio = { version = "=1.54.1", features = ["net", "io-util", "sync", "rt", "time", "macros"] }
+tokio-rustls = { version = "=0.26.6", default-features = false, features = ["ring", "logging", "tls12"] }
+tokio-util = "=0.7.20"
+tracing = "=0.1.44"
+zeroize = "=1.9.1"
+axum = { version = "=0.8.9", default-features = false, features = ["http1", "json", "query", "form", "tokio"] }
+# fake only
+rcgen = { version = "=0.14.10", optional = true }
+
+[dev-dependencies]
+# Integration tests use the fakes; this turns the feature on for `cargo test -p steve-mail`.
+steve-mail = { path = ".", features = ["fake"] }
+lettre = { version = "=0.11.23", default-features = false, features = ["smtp-transport", "builder", "hostname", "tokio1-rustls-tls"] }
+reqwest = { version = "=0.12.28", default-features = false, features = ["json"] }
+tempfile = "=3.27.0"
+tower = { version = "=0.5.3", features = ["util"] }
+tokio = { version = "=1.54.1", features = ["net", "io-util", "sync", "rt-multi-thread", "time", "macros"] }
+
+[[bin]]
+name = "steve-fake-mail"
+required-features = ["fake"]

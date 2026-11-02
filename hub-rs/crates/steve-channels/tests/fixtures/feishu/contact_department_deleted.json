@@ -1,0 +1,38 @@
+{
+  "schema": "2.0",
+  "header": {
+    "event_id": "eac822fb604e5dedd78f5e9d95298ea1",
+    "event_type": "contact.department.deleted_v3",
+    "create_time": "1761900015000",
+    "token": "fake-verification-token",
+    "app_id": "cli_a5fake0000000001",
+    "tenant_key": "2ca1d211f64f6438"
+  },
+  "event": {
+    "object": {
+      "name": "销售部",
+      "parent_department_id": "0",
+      "department_id": "D003",
+      "open_department_id": "od-sales00000000000000000000000001",
+      "leader_user_id": "ou_bob0000000000000000000000000001",
+      "chat_id": "",
+      "order": 300,
+      "status": {
+        "is_deleted": true
+      },
+      "leaders": [
+        {
+          "leaderType": 1,
+          "leaderID": "ou_bob0000000000000000000000000001"
+        }
+      ],
+      "department_hrbps": []
+    },
+    "old_object": {
+      "status": {
+        "is_deleted": false
+      },
+      "open_department_id": "od-sales00000000000000000000000001"
+    }
+  }
+}

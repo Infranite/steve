@@ -1,0 +1,12 @@
+# Steve Hub in Rust. Same REST/SSE API, SQLite schema and config as the TypeScript Hub in ../hub;
+# the contract is ~/Agents/steve-rs-plan/api-inventory.md and the e2e suite hub/test/e2e.sh.
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+publish = false
+
+[workspace.dependencies]

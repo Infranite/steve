@@ -1,0 +1,182 @@
+[
+  {
+    "name": "steve_update",
+    "description": "Tell Steve (and the user) what you are doing now and your current plan. Call it when you start, and whenever the plan or your current step changes.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "now": {
+          "type": "string",
+          "description": "one short sentence, in the user's language"
+        },
+        "plan": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "step": {
+                "type": "string"
+              },
+              "done": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "step",
+              "done"
+            ]
+          },
+          "description": "the whole plan, in order"
+        }
+      },
+      "required": [
+        "now",
+        "plan"
+      ]
+    }
+  },
+  {
+    "name": "steve_ask",
+    "description": "Ask the user a question you cannot answer yourself. Prefer concrete options. Do not ask in plain text; use this tool, then end your turn.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "question": {
+          "type": "string"
+        },
+        "options": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "2–4 choices; the user may also answer freely"
+        },
+        "recommended": {
+          "type": "string",
+          "description": "the option you would pick (one of options)"
+        },
+        "why": {
+          "type": "string",
+          "description": "one sentence: why you recommend it"
+        }
+      },
+      "required": [
+        "question",
+        "options"
+      ]
+    }
+  },
+  {
+    "name": "steve_request_approval",
+    "description": "Ask the user to approve an action with outside effects before doing it: deploying or releasing, sending a message or email, spending money, deleting data, pushing to a shared branch.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string",
+          "description": "what you want to do"
+        },
+        "detail": {
+          "type": "string",
+          "description": "exactly what will happen, so the user can decide"
+        }
+      },
+      "required": [
+        "action",
+        "detail"
+      ]
+    }
+  },
+  {
+    "name": "steve_deliver",
+    "description": "Deliver the finished work for the user's acceptance. Include what you produced and the checks you ran. Then end your turn.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "summary": {
+          "type": "string",
+          "description": "what was done and how it was verified, in the user's language"
+        },
+        "outputs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "description": "e.g. 分支, 提交, PR, 文件, 文档"
+              },
+              "title": {
+                "type": "string"
+              },
+              "location": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "title"
+            ]
+          }
+        },
+        "checks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "passed": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "name",
+              "passed"
+            ]
+          },
+          "description": "build, tests, manual checks you actually ran"
+        },
+        "unfinished": {
+          "description": "plan steps (exact text) you deliberately left open; every other step must already be done, or the delivery is refused",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "summary",
+        "outputs",
+        "checks"
+      ]
+    }
+  },
+  {
+    "name": "steve_publish",
+    "description": "Ask the user to release a new version of Steve from your branch, after the item was accepted. Steve rebases the branch onto main (a conflict comes back to you), fast-forwards main to it, waits for other running work to finish, builds, restarts itself and rolls back if the health check fails. Then end your turn; the result arrives later.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "branch": {
+          "type": "string",
+          "description": "the git branch to release, e.g. steve/st-12"
+        },
+        "summary": {
+          "type": "string",
+          "description": "what changes for the user, in Chinese"
+        }
+      },
+      "required": [
+        "branch",
+        "summary"
+      ]
+    }
+  }
+]

@@ -1,0 +1,81 @@
+[package]
+name = "steve-github"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+description = "GitHub: connections, repositories, pull requests and panels"
+
+[features]
+# In-process fake GitHub (REST subset + webhook sender) for tests and the
+# `steve-fake-github` binary. Never enabled in the Hub build.
+fake = [
+  "axum/tokio",
+  "axum/http1",
+  "tokio/net",
+  "tokio/process",
+  "tokio/rt-multi-thread",
+  "tokio/signal",
+]
+
+[dependencies]
+steve-flow = { path = "../steve-flow" }
+steve-modules = { path = "../steve-modules" }
+steve-store = { path = "../steve-store" }
+async-trait = "=0.1.92"
+base64 = "=0.23.1"
+axum = { version = "=0.8.9", default-features = false, features = ["json", "query"] }
+chrono = { version = "=0.4.45", default-features = false, features = ["clock"] }
+hex = "=0.4.3"
+hmac = "=0.13.0"
+jsonwebtoken = { version = "=11.1.0", default-features = false, features = ["rust_crypto", "use_pem"] }
+reqwest = { version = "=0.12.28", default-features = false, features = ["json"] }
+rusqlite = { version = "=0.40.2", features = ["bundled"] }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = { version = "=1.0.154", features = ["preserve_order"] }
+sha2 = "=0.11.1"
+thiserror = "=2.0.21"
+tokio = { version = "=1.54.1", features = ["rt", "sync", "time", "macros"] }
+tracing = "=0.1.44"
+url = "=2.5.8"
+zeroize = "=1.9.1"
+
+rand = "=0.10.3"
+regex = "=1.13.1"
+# The throwaway git dir a branch is pushed from (push.rs); the fake's bare remotes.
+tempfile = "=3.27.0"
+
+[dev-dependencies]
+axum = "=0.8.9"
+tempfile = "=3.27.0"
+tower = { version = "=0.5.3", features = ["util"] }
+tokio = { version = "=1.54.1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+
+[[bin]]
+name = "steve-fake-github"
+path = "src/bin/steve-fake-github.rs"
+required-features = ["fake"]
+
+[[test]]
+name = "fake_api"
+required-features = ["fake"]
+
+[[test]]
+name = "g1"
+required-features = ["fake"]
+
+
+[[test]]
+name = "g2"
+required-features = ["fake"]
+
+[[test]]
+name = "g3"
+required-features = ["fake"]
+
+[[test]]
+name = "g4"
+required-features = ["fake"]
+
+[[test]]
+name = "g5"
+required-features = ["fake"]

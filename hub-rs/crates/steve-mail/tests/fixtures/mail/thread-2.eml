@@ -1,0 +1,17 @@
+Date: Mon, 26 Oct 2026 09:30:00 +0000
+From: Me <me@example.com>
+To: Alice Zhou <alice@acme.example>
+Subject: =?UTF-8?B?UmU6IOmihOeul+WuoeaJuea1geeoiw==?=
+Message-ID: <thread-2.me@example.com>
+In-Reply-To: <thread-1.alice@acme.example>
+References: <thread-1.alice@acme.example>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: 8bit
+
+三步：部门负责人、财务、CFO。表格我稍后发你。
+
+On Mon, Oct 26, 2026 at 8:00 AM Alice Zhou <alice@acme.example> wrote:
+> 你好，预算审批要走哪几步？下周之前要提交。
+>
+> Alice

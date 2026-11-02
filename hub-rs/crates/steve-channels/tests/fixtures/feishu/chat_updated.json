@@ -1,0 +1,41 @@
+{
+  "schema": "2.0",
+  "header": {
+    "event_id": "0b5ba14c03c7d9091b301059f637cfa5",
+    "event_type": "im.chat.updated_v1",
+    "create_time": "1761900012000",
+    "token": "fake-verification-token",
+    "app_id": "cli_a5fake0000000001",
+    "tenant_key": "2ca1d211f64f6438"
+  },
+  "event": {
+    "chat_id": "oc_group000000000000000000000001",
+    "operator_id": {
+      "union_id": "on_owner00000000000000000000000001",
+      "user_id": "u_owner",
+      "open_id": "ou_owner00000000000000000000000001"
+    },
+    "external": false,
+    "operator_tenant_key": "2ca1d211f64f6438",
+    "after_change": {
+      "name": "平台值班群（夜班）",
+      "i18n_names": {
+        "zh_cn": "平台值班群（夜班）",
+        "en_us": "",
+        "ja_jp": ""
+      }
+    },
+    "before_change": {
+      "name": "平台值班群",
+      "i18n_names": {
+        "zh_cn": "平台值班群",
+        "en_us": "",
+        "ja_jp": ""
+      }
+    },
+    "moderator_list": {
+      "added_member_list": [],
+      "removed_member_list": []
+    }
+  }
+}

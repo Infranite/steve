@@ -1,0 +1,2 @@
+{ "name": "spike-acp-mcp", "private": true, "type": "module",
+  "dependencies": { "@agentclientprotocol/sdk": "latest", "@modelcontextprotocol/sdk": "latest", "zod": "^3.25.0" } }

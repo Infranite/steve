@@ -1,0 +1,17 @@
+Date: Mon, 26 Oct 2026 11:45:00 +0000
+From: Alice Zhou <alice@acme.example>
+To: me@example.com
+Cc: Bob Liu <bob@acme.example>
+Subject: =?UTF-8?B?UmU6IOmihOeul+WuoeaJuea1geeoiw==?=
+Message-ID: <thread-3.alice@acme.example>
+In-Reply-To: <thread-2.me@example.com>
+References: <thread-1.alice@acme.example>
+ <thread-2.me@example.com>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: 8bit
+
+收到，谢谢！我抄送了 Bob，他负责填表。
+
+在 2026年10月26日 周一 17:30，Me <me@example.com> 写道：
+> 三步：部门负责人、财务、CFO。表格我稍后发你。

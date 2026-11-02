@@ -1,0 +1,32 @@
+{
+  "schema": "2.0",
+  "header": {
+    "event_id": "1015425f672e7e926648a8a6afc95e97",
+    "event_type": "im.message.receive_v1",
+    "create_time": "1761900003000",
+    "token": "fake-verification-token",
+    "app_id": "cli_a5fake0000000001",
+    "tenant_key": "2ca1d211f64f6438"
+  },
+  "event": {
+    "sender": {
+      "sender_id": {
+        "union_id": "on_bob0000000000000000000000000001",
+        "user_id": "u_bob",
+        "open_id": "ou_bob0000000000000000000000000001"
+      },
+      "sender_type": "user",
+      "tenant_key": "2ca1d211f64f6438"
+    },
+    "message": {
+      "message_id": "om_groupplain000000000000000000001",
+      "create_time": "1761900003000",
+      "update_time": "1761900003000",
+      "chat_id": "oc_group000000000000000000000001",
+      "chat_type": "group",
+      "message_type": "text",
+      "content": "{\"text\":\"我先去吃饭，回来再看\"}",
+      "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Lark/7.30.8 LarkLocale/zh_CN ttnet SDK-Version/7.30.10"
+    }
+  }
+}

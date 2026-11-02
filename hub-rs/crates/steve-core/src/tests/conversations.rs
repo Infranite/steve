@@ -1,0 +1,188 @@
+//! Guest conversations (channels §2.12): an IM space's turns are routed like web chat in a conversation
+//! of their own (`chan:<space>`), answered in the host's voice, and never configure Steve or talk to
+//! items; follow-ups continue the same conversation; items made there flow back there.
+
+use crate::error::msg;
+use crate::repo::{Message, WS};
+use crate::testkit::Kit;
+use crate::thread::{Conv, ConvHost};
+use serde_json::{Value, json};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+const SPACE: &str = "chan:spc_ops";
+
+#[derive(Default)]
+struct Host {
+    answered: Mutex<Vec<String>>,
+    said: Mutex<Vec<(String, String)>>,
+}
+
+#[async_trait::async_trait]
+impl ConvHost for Host {
+    async fn answer(&self, _ws: &str, _space: &str, origin: &str) -> Result<String, String> {
+        self.answered.lock().unwrap().push(origin.into());
+        Ok("以值班小运的身份回答".into())
+    }
+    fn research_context(&self, _ws: &str, _space: &str) -> String {
+        "这次的问题来自渠道「运维群」".into()
+    }
+    fn said(&self, _ws: &str, space: &str, id: &str) {
+        self.said.lock().unwrap().push((space.into(), id.into()));
+    }
+}
+
+/// The router answers with `f(message)` and records the prompts it saw.
+fn router(
+    k: &Kit,
+    seen: Arc<Mutex<Vec<String>>>,
+    f: impl Fn(&str) -> Value + Send + Sync + 'static,
+) {
+    k.gw.set(move |p, _| {
+        if p.starts_with("You are the router") {
+            seen.lock().unwrap().push(p.to_string());
+            let m = p
+                .lines()
+                .rfind(|l| l.starts_with("User message: "))
+                .and_then(|l| serde_json::from_str::<String>(&l["User message: ".len()..]).ok())
+                .unwrap_or_default();
+            Ok(f(&m).to_string())
+        } else if p.starts_with("You are Steve") {
+            Ok(r#"{"thought":"想","answer":"主线的回答","offer":null}"#.into())
+        } else {
+            Err(msg("unexpected prompt"))
+        }
+    });
+}
+
+async fn settle(k: &Kit, space: &str, n: usize) -> Vec<Message> {
+    for _ in 0..500 {
+        let ms = k.db().messages_in(WS, space, 200).unwrap();
+        if ms.len() >= n {
+            return ms;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!(
+        "waited for {n}: {:#?}",
+        k.db().messages_in(WS, space, 200).unwrap()
+    );
+}
+
+fn guest(research: bool, items: bool) -> Conv {
+    Conv {
+        space: SPACE.into(),
+        research,
+        items,
+    }
+}
+
+fn turn(k: &Kit, text: &str, c: Conv) -> String {
+    k.core
+        .say_in(WS, c, text, &json!({"chan": {"message": "cm_x", "space_name": "运维群", "sender": "李雷", "provider": "飞书"}}))
+        .unwrap()
+}
+
+#[tokio::test]
+async fn guest_turns_are_routed_and_answered_in_their_own_conversation() {
+    let k = Kit::new();
+    let host = Arc::new(Host::default());
+    assert!(k.core.set_conv_host(host.clone()));
+    let seen = Arc::new(Mutex::new(vec![]));
+    router(&k, seen.clone(), |m| {
+        if m.contains("以后") {
+            json!({"kind": "config", "confidence": 0.9, "signals": [], "title": "", "goal": "", "bot": "steve"})
+        } else {
+            json!({"kind": "answer", "confidence": 0.9, "signals": ["question"], "title": "", "goal": "", "bot": "steve"})
+        }
+    });
+    let a = turn(&k, "部署挂了怎么办", guest(true, true));
+    let ms = settle(&k, SPACE, 2).await;
+    assert_eq!(ms[0].author, "me");
+    assert_eq!(ms[1].author, "steve");
+    assert_eq!(
+        ms[1].text, "以值班小运的身份回答",
+        "the host's voice, not the main bot's"
+    );
+    assert_eq!(ms[1].meta["origin"], json!(a));
+    assert_eq!(*host.answered.lock().unwrap(), std::slice::from_ref(&a));
+    assert_eq!(
+        *host.said.lock().unwrap(),
+        [(SPACE.to_string(), ms[1].id.clone())]
+    );
+    assert!(
+        k.db().messages(WS).unwrap().is_empty(),
+        "the web conversation is untouched"
+    );
+
+    // a follow-up continues the same conversation: the router sees the first exchange
+    let b = turn(&k, "以后都直接回滚吧", guest(true, true));
+    let ms = settle(&k, SPACE, 4).await;
+    let p = seen.lock().unwrap().last().cloned().unwrap();
+    assert!(
+        p.contains("部署挂了怎么办") && p.contains("以值班小运的身份回答"),
+        "{p}"
+    );
+    // configuration never comes from a chat
+    assert_eq!(ms[3].meta["steps"]["route"]["kind"], "answer");
+    assert_eq!(ms[3].meta["steps"]["route"]["guard"], "guest");
+    assert!(ms[3].meta.get("proposal").is_none());
+    assert_eq!(ms[3].meta["origin"], json!(b));
+
+    // “#ST-n …” and /汇报 are ordinary text there
+    turn(&k, "/汇报", guest(true, true));
+    let ms = settle(&k, SPACE, 6).await;
+    assert_eq!(ms[5].text, "以值班小运的身份回答");
+}
+
+#[tokio::test]
+async fn work_from_a_chat_becomes_an_item_only_when_the_host_allows_it() {
+    let k = Kit::new();
+    let host = Arc::new(Host::default());
+    k.core.set_conv_host(host.clone());
+    let seen = Arc::new(Mutex::new(vec![]));
+    router(
+        &k,
+        seen,
+        |_| json!({"kind": "item", "confidence": 0.95, "signals": ["explicit", "change"], "title": "修告警脚本", "goal": "把告警脚本的阈值修好", "bot": "steve", "reply": "好，交给它了。"}),
+    );
+    let before = k.db().items(WS).unwrap().len();
+    // a space with outside members: answered in place, the work offered to you in the conversation
+    turn(&k, "把告警脚本修一下", guest(false, false));
+    let ms = settle(&k, SPACE, 2).await;
+    assert_eq!(k.db().items(WS).unwrap().len(), before);
+    assert_eq!(ms[1].item_id, None);
+    assert_eq!(ms[1].meta["offer"]["title"], "修告警脚本");
+    assert_eq!(ms[1].meta["steps"]["route"]["guard"], "guest");
+
+    // an internal space: the item is made, its origin and announcement are in this conversation
+    let mid = turn(&k, "把告警脚本修一下", guest(true, true));
+    let ms = settle(&k, SPACE, 4).await;
+    let id = ms[3].item_id.clone().expect("an item");
+    let ti = k.db().store().thread().item(&id).unwrap().unwrap();
+    assert_eq!(ti.origin_msg, mid);
+    assert_eq!(ti.reply_msg.as_deref(), Some(ms[3].id.as_str()));
+    assert!(
+        host.said
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(s, m)| s == SPACE && *m == ms[3].id)
+    );
+    // flow-back goes to the chat's conversation, not the web's
+    crate::thread::flowback::flow(
+        k.db(),
+        &id,
+        crate::thread::flowback::Update {
+            kind: "done",
+            text: "ST 完成".into(),
+            decision: None,
+            reference: None,
+            full: false,
+        },
+    )
+    .unwrap();
+    assert!(k.db().messages(WS).unwrap().is_empty());
+    let ms = k.db().messages_in(WS, SPACE, 200).unwrap();
+    assert!(ms.iter().any(|m| m.meta["card"]["item"] == json!(id)));
+}

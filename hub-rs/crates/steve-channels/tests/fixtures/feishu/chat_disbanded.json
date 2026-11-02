@@ -1,0 +1,27 @@
+{
+  "schema": "2.0",
+  "header": {
+    "event_id": "c6de7a4a735497b76c4c4518989bddc2",
+    "event_type": "im.chat.disbanded_v1",
+    "create_time": "1761900013000",
+    "token": "fake-verification-token",
+    "app_id": "cli_a5fake0000000001",
+    "tenant_key": "2ca1d211f64f6438"
+  },
+  "event": {
+    "chat_id": "oc_topic000000000000000000000001",
+    "operator_id": {
+      "union_id": "on_owner00000000000000000000000001",
+      "user_id": "u_owner",
+      "open_id": "ou_owner00000000000000000000000001"
+    },
+    "external": false,
+    "operator_tenant_key": "2ca1d211f64f6438",
+    "name": "需求讨论",
+    "i18n_names": {
+      "zh_cn": "需求讨论",
+      "en_us": "",
+      "ja_jp": ""
+    }
+  }
+}

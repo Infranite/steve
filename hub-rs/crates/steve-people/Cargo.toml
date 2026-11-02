@@ -1,0 +1,8 @@
+[package]
+name = "steve-people"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+description = "Contacts, organizations, teams and their memories"
+
+[dependencies]

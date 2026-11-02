@@ -1,0 +1,9 @@
+node_modules/
+dist/
+data/
+*.log
+.DS_Store
+.claude/
+
+# Local runtime and QA artifacts must never be published.
+.steve/

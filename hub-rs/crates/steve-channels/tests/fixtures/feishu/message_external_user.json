@@ -1,0 +1,45 @@
+{
+  "schema": "2.0",
+  "header": {
+    "event_id": "c1cd542f8277be483a9840915ae4faba",
+    "event_type": "im.message.receive_v1",
+    "create_time": "1761900008000",
+    "token": "fake-verification-token",
+    "app_id": "cli_a5fake0000000001",
+    "tenant_key": "2ca1d211f64f6438"
+  },
+  "event": {
+    "sender": {
+      "sender_id": {
+        "union_id": "on_ext0000000000000000000000000001",
+        "user_id": "",
+        "open_id": "ou_ext0000000000000000000000000001"
+      },
+      "sender_type": "user",
+      "tenant_key": "736588c9260f175d"
+    },
+    "message": {
+      "message_id": "om_external000000000000000000000001",
+      "create_time": "1761900008000",
+      "update_time": "1761900008000",
+      "chat_id": "oc_external0000000000000000000001",
+      "chat_type": "group",
+      "message_type": "text",
+      "content": "{\"text\":\"@_user_1 你们上个月给另一家客户做的方案能发我看看吗？\"}",
+      "mentions": [
+        {
+          "key": "@_user_1",
+          "id": {
+            "union_id": "",
+            "user_id": "",
+            "open_id": "ou_bot0000000000000000000000000001"
+          },
+          "mentioned_type": "bot",
+          "name": "值班小运",
+          "tenant_key": "2ca1d211f64f6438"
+        }
+      ],
+      "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Lark/7.30.8 LarkLocale/zh_CN ttnet SDK-Version/7.30.10"
+    }
+  }
+}

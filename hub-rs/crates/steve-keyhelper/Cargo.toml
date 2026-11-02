@@ -1,0 +1,24 @@
+[package]
+name = "steve-keyhelper"
+# Not the workspace version or edition: every change to this crate changes the helper's cdhash, and with it the
+# keychain partition of the vault master key (ops/KEYHELPER.md). ops/release.sh rebuilds it only when the hash of
+# this file and src/ changes, and then migrates the key from the old helper to the new one.
+edition = "2024"
+version = "1.0.0"
+publish = false
+description = "macOS: the only process that touches the vault master key in the keychain, so its code signature stays fixed across Hub releases"
+
+[[bin]]
+name = "steve-keyhelper"
+path = "src/main.rs"
+
+[dependencies]
+data-encoding = "=2.11.1"
+zeroize = "=1.9.1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "=0.10.1"
+security-framework = "=3.7.0"
+
+[dev-dependencies]
+tempfile = "=3.27.0"

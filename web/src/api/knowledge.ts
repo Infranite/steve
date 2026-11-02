@@ -1,0 +1,66 @@
+/* Knowledge base API (knowledge.md §6). Only the Rust Hub serves it: on the TS Hub every /api/kb route falls through to
+ * the SPA's index.html (or a plain 404), which `NotWired` marks so the pages fall back to the "还没有接入" placeholder. */
+import { modReq as req, NotWired, qs } from "@/api"
+
+export type Level = "public" | "conclusion" | "reasoning" | "never"
+export type ObjRef = { type: string; id: string; name?: string }
+export type KbSource = {
+  id: string; kind: "notes" | "files" | "folder" | "items" | "chat" | "mems" | "bot_mems"; name: string; path?: string; include?: string[]; exclude?: string[]
+  visibility: string; level: Level; paused: boolean; status: "ok" | "syncing" | "error"; error: string | null
+  stats: { docs?: number; chunks?: number; skipped?: number; bytes?: number }; last_sync: number | null; builtin: boolean; revision: number
+}
+export type DocBrief = {
+  id: string; source: { id: string; kind: KbSource["kind"]; name: string }; title: string; ref: string; visibility: string; level: Level
+  inherited: { visibility: boolean; level: boolean }; status: string; chunks: number; updated: number
+}
+export type Doc = DocBrief & { body?: string; about: ObjRef[]; tags: string[]; preview: { seq: number; heading: string; text: string }[]; uses: number; error: string | null }
+export type Hit = { n: number; type: string; id: string; seq: number; title: string; heading?: string; text: string; label: string; source_kind: string; level: Level; visibility: string; score: number; href: string }
+export type Mem = { id: string; kind: string; text: string; source_label: string; level: Level; status: "candidate" | "confirmed" | "stale"; visibility: string; about: ObjRef[]; created: number }
+export type Candidate = { mem: Mem; origin: string; origin_label: string; evidence: string; supersedes: Mem | null; decision_id: string | null }
+/** one entry of `messages.meta.cites` */
+export type Cite = { n: number; label: string; href: string; level: Level }
+export type Use = { n: number; type: string; id: string; seq: number; level: Level; title: string; label: string; href: string; deleted: boolean; use_id: string; query: string; created: number }
+
+const get = <T>(p: string) => req<T>("GET", p)
+const enc = encodeURIComponent
+
+export const kb = {
+  search: (q: string, limit = 20) => get<{ hits: Hit[]; took_ms: number }>("/kb/search" + qs({ q, limit })),
+  sources: () => get<KbSource[]>("/kb/sources"),
+  addFolder: (p: { name: string; path: string; include?: string[]; exclude?: string[]; visibility?: string; level?: Level }) => req<KbSource>("POST", "/kb/sources", { kind: "folder", ...p }),
+  patchSource: (id: string, p: Partial<{ name: string; paused: boolean; visibility: string; level: Level; include: string[]; exclude: string[] }>) => req<KbSource>("PATCH", "/kb/sources/" + enc(id), p),
+  deleteSource: (id: string) => req<{ ok: true }>("DELETE", "/kb/sources/" + enc(id)),
+  sync: (id: string) => req<{ job_id: string }>("POST", `/kb/sources/${enc(id)}/sync`, {}),
+  addFile: (file_id: string, title?: string) => req<Doc>("POST", "/kb/files", { file_id, title }),
+  docs: (p: { source?: string; q?: string; limit?: number } = {}) => get<DocBrief[]>("/kb/docs" + qs({ limit: 200, ...p })),
+  doc: (id: string) => get<Doc>("/kb/docs/" + enc(id)),
+  patchDoc: (id: string, p: { visibility?: string | null; level?: Level | null; about?: ObjRef[] }) => req<Doc>("PATCH", "/kb/docs/" + enc(id), p),
+  deleteDoc: (id: string) => req<{ ok: true }>("DELETE", "/kb/docs/" + enc(id)),
+  newNote: (p: { title: string; body: string; visibility?: string; level?: Level }) => req<Doc>("POST", "/kb/notes", p),
+  saveNote: (id: string, p: { title?: string; body?: string }) => req<Doc>("PUT", "/kb/notes/" + enc(id), p),
+  mems: (p: { status?: string; kind?: string; q?: string } = {}) => get<Mem[]>("/kb/mems" + qs(p)),
+  addMem: (p: { text: string; kind?: string; level?: Level; visibility?: string }) => req<Mem>("POST", "/kb/mems", p),
+  /* single memories are edited through the contacts module's routes */
+  patchMem: (id: string, p: Partial<{ text: string; level: Level; status: "confirmed" | "stale"; visibility: string }>) => req<Mem>("PATCH", "/mems/" + enc(id), p),
+  deleteMem: (id: string) => req<{ ok: true }>("DELETE", "/mems/" + enc(id)),
+  candidates: () => get<Candidate[]>("/kb/candidates"),
+  resolve: (ids: string[], choice: "yes" | "no") => req<{ ok: true; done: number }>("POST", "/kb/candidates/resolve", { ids, choice }),
+  uses: (consumer_type: "session" | "chat", consumer_id: string) => get<{ hits: Use[] }>("/kb/uses" + qs({ consumer_type, consumer_id })),
+}
+
+/* ── is the module there? asked once per page load; any other failure is asked again next time ── */
+let probe: Promise<boolean> | null = null
+export function kbAvailable(): Promise<boolean> {
+  probe ??= kb.sources().then(() => true, (e) => { if (e instanceof NotWired) return false; probe = null; throw e })
+  return probe
+}
+
+export const LEVELS: [Level, string][] = [["public", "公开"], ["conclusion", "可转述结论"], ["reasoning", "仅用于推理"], ["never", "不可使用"]]
+export const levelLabel = (l: string) => LEVELS.find((x) => x[0] === l)?.[1] ?? l
+/** StatusDot colour per level: quotable green, conclusion blue, reasoning grey, never orange */
+export const LEVEL_DOT: Record<string, string> = { public: "done", conclusion: "prop", reasoning: "idle", never: "wait" }
+export const VIS: [string, string][] = [["private", "只有我"], ["workspace", "工作空间"]]
+export const visLabel = (v: string) => VIS.find((x) => x[0] === v)?.[1] ?? (v.startsWith("team:") ? "团队" : v.startsWith("space:") ? "群" : v)
+export const MEM_KINDS: [string, string][] = [["fact", "事实"], ["preference", "偏好"], ["rule", "规则"], ["event", "事件"], ["summary", "摘要"]]
+export const memKind = (k: string) => MEM_KINDS.find((x) => x[0] === k)?.[1] ?? k
+export const SOURCE_KIND: Record<string, string> = { notes: "笔记", files: "文件", folder: "文件夹", items: "事项", chat: "对话", mems: "记忆", bot_mems: "Bot 记忆" }
