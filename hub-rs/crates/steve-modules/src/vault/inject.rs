@@ -550,9 +550,16 @@ mod tests {
     async fn file_injection_is_private_and_deleted() {
         let home = tempfile::tempdir().unwrap();
         let w = tempfile::tempdir().unwrap();
+        let stat_mode = if cfg!(target_os = "macos") {
+            "stat -f '%Lp'"
+        } else {
+            "stat -c '%a'"
+        };
         let s = spec(
             w.path(),
-            "echo \"path=$KEYF\"; stat -f '%Lp' \"$KEYF\"; stat -f '%Lp' \"$(dirname \"$KEYF\")\"; cat \"$KEYF\"; cp \"$KEYF\" copied",
+            &format!(
+                "echo \"path=$KEYF\"; {stat_mode} \"$KEYF\"; {stat_mode} \"$(dirname \"$KEYF\")\"; cat \"$KEYF\"; cp \"$KEYF\" copied"
+            ),
             vec![Injection {
                 var: "KEYF".into(),
                 label: "私钥".into(),

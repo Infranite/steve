@@ -470,12 +470,17 @@ async fn files_and_stdin_temp_dir_gone_cwd_checked() {
     assert_eq!(code, 200, "{g}");
     assert_eq!(g["scope_label"], "项目 steve");
 
+    let stat_mode = if cfg!(target_os = "macos") {
+        "stat -f '%Lp'"
+    } else {
+        "stat -c '%a'"
+    };
     let out = e
         .tool(
             mcp::USE,
             json!({
                 "item": item, "purpose": "测试", "cwd": "sub",
-                "command": "pwd; echo \"f=$TOKF\"; stat -f '%Lp' \"$TOKF\"; cat \"$TOKF\"; echo; read -r x; echo \"in=$x\"; ls \"$(dirname \"$TOKF\")\"",
+                "command": format!("pwd; echo \"f=$TOKF\"; {stat_mode} \"$TOKF\"; cat \"$TOKF\"; echo; read -r x; echo \"in=$x\"; ls \"$(dirname \"$TOKF\")\""),
                 "files": {"TOKF": "令牌"}, "stdin": "令牌"
             }),
         )
