@@ -29,6 +29,32 @@ pub trait MediaSource: Send + Sync {
     async fn load(&self, ch: &Channels, plan: &Plan, index: usize) -> Result<Resource, String>;
 }
 
+/// Production source: the same bound, authenticated fetcher used by the resource HTTP endpoint.
+pub struct FeishuMediaSource;
+#[async_trait]
+impl MediaSource for FeishuMediaSource {
+    async fn load(&self, ch: &Channels, plan: &Plan, index: usize) -> Result<Resource, String> {
+        let fetched = crate::media::fetch_bound(
+            ch,
+            &plan.ws,
+            &plan.space_id,
+            &plan.message_id,
+            index,
+            crate::media::Limits {
+                max_bytes: MAX_BYTES as u64,
+                timeout: FETCH_TIMEOUT,
+            },
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+        Ok(Resource {
+            bytes: fetched.bytes,
+            name: fetched.name,
+            mime: fetched.mime.into(),
+        })
+    }
+}
+
 pub struct Resource {
     pub bytes: Vec<u8>,
     pub name: String,
@@ -77,7 +103,10 @@ fn indices(ch: &Channels, plan: &Plan) -> ChannelResult<Vec<usize>> {
         let Some((raw, purged)) = row else {
             return Err(ApiError::not_found("消息"));
         };
-        let attachments: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
+        // Reuse the same safe legacy-message projection as the UI and resource downloader.
+        let attachments = crate::media::present(c, &plan.message_id)
+            .map(|(_, attachments)| attachments)
+            .unwrap_or_else(|| serde_json::from_str(&raw).unwrap_or(Value::Null));
         let found: Vec<_> = attachments
             .as_array()
             .into_iter()

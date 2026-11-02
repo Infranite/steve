@@ -660,3 +660,148 @@ async fn member_and_chat_events_over_the_long_connection() {
     assert_eq!(at.as_deref(), Some(ids::ALICE.open_id));
     lc.stop().await.unwrap();
 }
+
+#[derive(Clone)]
+struct MediaProxy {
+    base: String,
+    requests: Arc<std::sync::Mutex<Vec<(String, String)>>>,
+    image: Vec<u8>,
+}
+async fn media_proxy(
+    axum::extract::State(s): axum::extract::State<MediaProxy>,
+    req: Request<Body>,
+) -> axum::response::Response {
+    let path = req.uri().path().to_string();
+    if path.contains("/resources/") {
+        assert!(
+            req.headers().get(header::AUTHORIZATION).is_some(),
+            "actual provider download must authenticate"
+        );
+        s.requests
+            .lock()
+            .unwrap()
+            .push((path.clone(), req.uri().query().unwrap_or("").into()));
+        let bytes = if path.ends_with("file_fixture") {
+            b"real provider log: deploy succeeded".to_vec()
+        } else {
+            s.image
+        };
+        return axum::response::Response::builder()
+            .header(header::CONTENT_TYPE, "application/octet-stream")
+            .body(Body::from(bytes))
+            .unwrap();
+    }
+    let url = format!("{}{}", s.base, req.uri());
+    let (parts, body) = req.into_parts();
+    let bytes = axum::body::to_bytes(body, 1024 * 1024).await.unwrap();
+    let response = reqwest::Client::new()
+        .request(parts.method, url)
+        .headers(parts.headers)
+        .body(bytes)
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = response.bytes().await.unwrap();
+    axum::response::Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(bytes))
+        .unwrap()
+}
+#[derive(Default)]
+struct ImageReplyCapture(std::sync::Mutex<Vec<(String, Vec<Value>)>>);
+#[async_trait::async_trait]
+impl steve_channels::compose::PinnedModel for ImageReplyCapture {
+    async fn run(
+        &self,
+        _: &str,
+        _: &str,
+        _: Duration,
+    ) -> Result<steve_modules::GatewayOut, String> {
+        panic!("image input must not be dropped")
+    }
+    async fn run_with_images(
+        &self,
+        _: &str,
+        prompt: &str,
+        images: &[Value],
+        _: Duration,
+    ) -> Result<steve_modules::GatewayOut, String> {
+        self.0
+            .lock()
+            .unwrap()
+            .push((prompt.into(), images.to_vec()));
+        Ok(steve_modules::GatewayOut {
+            text:
+                r#"{"outcome":"reply","text":"已读取附件","needs_approval":false,"why":"基于原件"}"#
+                    .into(),
+            ..Default::default()
+        })
+    }
+}
+#[tokio::test(flavor = "multi_thread")]
+async fn authenticated_provider_bytes_reach_the_channel_composer() {
+    use base64::Engine;
+    let h = setup().await;
+    let png=base64::engine::general_purpose::STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=").unwrap();
+    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let router = Router::new().fallback(media_proxy).with_state(MediaProxy {
+        base: h.fake.base_url().into(),
+        requests: requests.clone(),
+        image: png.clone(),
+    });
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    h.env.store().transaction(|tx|->steve_modules::ApiResult<()> {
+        tx.execute("UPDATE connections SET config=json_set(config,'$.api_base',?1) WHERE id=?2",rusqlite::params![base,h.con])?;
+        tx.execute_batch("INSERT INTO bots(id,workspace_id,name,main,harness,persona,role,rules,model,updated) VALUES('media_bot','default','Steve',1,'claude','','','','capture-model',1); INSERT INTO bot_workspaces(bot_id,workspace_id,created) VALUES('media_bot','default',1);")?;
+        Ok(())
+    }).unwrap();
+    let mut incoming = steve_channels::adapters::feishu::inbound::parse_receive(
+        &fixture("message_image").unwrap(),
+        "",
+    )
+    .unwrap()
+    .unwrap();
+    incoming
+        .attachments
+        .push(json!({"type":"file","key":"file_fixture","name":"log.txt","source":"message"}));
+    let written = h.ch.on_inbound(WS, &h.con, incoming).await.unwrap();
+    let plan =
+        h.ch.store()
+            .reader(|c| steve_channels::flow_actions::plan_of(c, WS, &written.message_id))
+            .unwrap();
+    let capture = Arc::new(ImageReplyCapture::default());
+    let composer = steve_channels::compose::Composer::new()
+        .media(Arc::new(steve_channels::media_agent::FeishuMediaSource))
+        .pinned(capture.clone());
+    composer
+        .generate(
+            &h.ch,
+            &plan,
+            &steve_channels::compose::ComposeOpts::default(),
+        )
+        .await
+        .unwrap();
+    {
+        let seen = capture.0.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].1.len(), 1);
+        assert!(seen[0].0.contains("real provider log: deploy succeeded"));
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(seen[0].1[0]["source"]["data"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(decoded, png);
+    }
+    let gets = requests.lock().unwrap();
+    assert_eq!(gets.len(), 2);
+    assert_eq!(gets[0].1, "type=image");
+    assert_eq!(gets[1].1, "type=file");
+    assert!(
+        gets.iter()
+            .all(|(path, _)| path.contains(&plan.external_id))
+    );
+    server.abort();
+}

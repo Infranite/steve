@@ -426,7 +426,14 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
         setup = setup.event_adapter(Arc::new(super::signals::GithubSource(p)));
     }
     // C4: replies (sent through C6's outbox) and the `reply_as` / `send_to_space` actions
-    let replies = Arc::new(steve_channels::Replies::new().outbound(outbox.clone()));
+    let replies = Arc::new(
+        steve_channels::Replies::new()
+            .outbound(outbox.clone())
+            .composer(
+                steve_channels::compose::Composer::new()
+                    .media(Arc::new(steve_channels::media_agent::FeishuMediaSource)),
+            ),
+    );
     let setup = setup
         .action(Arc::new(steve_channels::flow_actions::ReplyAs::new(
             replies.clone(),
