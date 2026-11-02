@@ -1477,6 +1477,21 @@ async fn get_resource(
         Ok(c) => c,
         Err(r) => return r,
     };
+    let (delay, answer) = {
+        let rt = sh.rt();
+        (rt.resource_delay, rt.resource_answer.clone())
+    };
+    if !delay.is_zero() {
+        tokio::time::sleep(delay).await;
+    }
+    if let Some((status, ct, body)) = answer {
+        let mut resp =
+            (StatusCode::from_u16(status).unwrap_or(StatusCode::OK), body).into_response();
+        if let Ok(v) = HeaderValue::from_str(&ct) {
+            resp.headers_mut().insert(header::CONTENT_TYPE, v);
+        }
+        return resp;
+    }
     let kind = q.get("type").cloned().unwrap_or_default();
     let found = {
         let w = sh.world();

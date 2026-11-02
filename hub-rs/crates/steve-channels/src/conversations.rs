@@ -577,8 +577,9 @@ pub fn list(
 }
 
 /// `GET /conversations/:space/messages`: the conversation (≤500, oldest first) and its badge.
-/// Inbound turns carry `reaction` (the state of their chat message's reaction), Steve's messages
-/// `chan_out.status` as it is now.
+/// Inbound turns carry `reaction` (the state of their chat message's reaction) and `channel_message`
+/// (that chat message as `/spaces/:id/messages` shows it, `null` when it is gone or not of this
+/// space), Steve's messages `chan_out.status` as it is now.
 pub fn messages_of(
     ch: &Channels,
     ws: &str,
@@ -596,10 +597,20 @@ pub fn messages_of(
     ch.store().reader(|c| -> ChannelResult<()> {
         for m in msgs {
             let mut v = serde_json::to_value(&m).map_err(steve_modules::ApiError::from)?;
-            if let Some(cm) = m.meta["chan"]["message"].as_str()
-                && let Some(r) = crate::reactions::get(c, cm)?
-            {
-                v["reaction"] = serde_json::to_value(r).map_err(steve_modules::ApiError::from)?;
+            if let Some(cm) = m.meta["chan"]["message"].as_str() {
+                if let Some(r) = crate::reactions::get(c, cm)? {
+                    v["reaction"] =
+                        serde_json::to_value(r).map_err(steve_modules::ApiError::from)?;
+                }
+                // the chat message itself (cards, images, files), only from this space
+                let src = messages::get(c, cm)
+                    .ok()
+                    .flatten()
+                    .filter(|x| x.space_id == id && in_ws(c, cm, ws));
+                v["channel_message"] = match src {
+                    Some(x) => serde_json::to_value(x).map_err(steve_modules::ApiError::from)?,
+                    None => Value::Null,
+                };
             }
             if let Some(out_id) = m.meta["chan_out"]["message"].as_str() {
                 let status: Option<String> = c
@@ -618,6 +629,16 @@ pub fn messages_of(
         Ok(())
     })?;
     Ok(json!({"conversation": b, "messages": out}))
+}
+
+/// Is chat message `id` in workspace `ws`?
+fn in_ws(c: &rusqlite::Connection, id: &str, ws: &str) -> bool {
+    c.query_row(
+        "SELECT EXISTS (SELECT 1 FROM chan_messages WHERE id = ? AND workspace_id = ?)",
+        params![id, ws],
+        |r| r.get(0),
+    )
+    .unwrap_or(false)
 }
 
 /// What a conversation message says in the space: its text, with the choices of a suggestion card

@@ -883,11 +883,13 @@ struct Stored {
     event_id: Option<String>,
     /// The names of the people mentioned (leading mentions are not part of trigger words).
     mention_names: Vec<String>,
+    /// `chan_messages.attachments` as stored.
+    attachments: Value,
 }
 
 fn stored(c: &rusqlite::Connection, id: &str) -> ChannelResult<Stored> {
     c.query_row(
-        "SELECT m.external_id, m.thread_key, coalesce(m.text, ''), coalesce(nullif(a.display_name, ''), a.handle_display, p.name, ''), m.event_id, m.mentions
+        "SELECT m.external_id, m.thread_key, coalesce(m.text, ''), coalesce(nullif(a.display_name, ''), a.handle_display, p.name, ''), m.event_id, m.mentions, m.attachments
            FROM chan_messages m LEFT JOIN accounts a ON a.id = m.sender_account_id LEFT JOIN parties p ON p.id = m.sender_party_id
           WHERE m.id = ?",
         [id],
@@ -905,6 +907,10 @@ fn stored(c: &rusqlite::Connection, id: &str) -> ChannelResult<Stored> {
                     .iter()
                     .filter_map(|m| m["name"].as_str().map(String::from))
                     .collect(),
+                attachments: r
+                    .get::<_, Option<String>>(6)?
+                    .and_then(|s| serde_json::from_str(&s).ok())
+                    .unwrap_or(Value::Null),
             })
         },
     )
@@ -998,7 +1004,8 @@ impl Channels {
             message_id: inbound.message_id.clone(),
             external_id: m.external_id.clone(),
             thread_key: m.thread_key.clone(),
-            text: m.text.clone(),
+            // what Steve cannot read of it is said, never left out (`[图片：未读取内容]`)
+            text: crate::media::with_unread_note(&m.text, &m.attachments),
             sender_account_id: inbound.sender_account_id.clone(),
             sender_party_id: inbound.sender_party_id.clone(),
             sender_name: m.sender_name.clone(),

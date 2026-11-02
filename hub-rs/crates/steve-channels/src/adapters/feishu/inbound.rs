@@ -163,17 +163,22 @@ fn text_of(content: &Value, mentions: &[(String, String)]) -> String {
     t
 }
 
-/// `post`: title, then each paragraph's `text`, `at`, `a` (and image markers) joined.
-fn post_text(content: &Value, mentions: &[(String, String)]) -> String {
-    // the receive event carries one language at the top; older payloads nest it (`zh_cn`)
-    let body = if content.get("content").is_some() {
+/// The language body of a `post`: the receive event carries one language at the top; older
+/// payloads (and the message API) nest it (`zh_cn`).
+fn post_body(content: &Value) -> &Value {
+    if content.get("content").is_some() {
         content
     } else {
         content
             .as_object()
             .and_then(|o| o.values().find(|v| v.get("content").is_some()))
             .unwrap_or(content)
-    };
+    }
+}
+
+/// `post`: title, then each paragraph's `text`, `at`, `a` (and image markers) joined.
+fn post_text(content: &Value, mentions: &[(String, String)]) -> String {
+    let body = post_body(content);
     let mut lines = Vec::new();
     if let Some(t) = opt(body, "title") {
         lines.push(t);
@@ -208,7 +213,14 @@ fn post_text(content: &Value, mentions: &[(String, String)]) -> String {
                     line.push_str(name);
                 }
                 "img" => line.push_str("[图片]"),
+                "media" => line.push_str("[视频]"),
                 "emotion" => line.push_str(&format!("[{}]", s(el, "emoji_type"))),
+                "hr" => line.push_str("---"),
+                "code_block" => line.push_str(&format!(
+                    "```{}\n{}\n```",
+                    s(el, "language").to_lowercase(),
+                    s(el, "text")
+                )),
                 _ => {}
             }
         }
@@ -217,38 +229,128 @@ fn post_text(content: &Value, mentions: &[(String, String)]) -> String {
     lines.join("\n")
 }
 
+/// Resources of a `post`, in document order: `img` → image, `media` → video file, then the
+/// attachment zone (`files[]`; a folder cannot be downloaded) (larksuite/cli `resource_extract.go`).
+fn post_attachments(content: &Value) -> Vec<Value> {
+    let mut out = Vec::new();
+    for para in post_body(content)
+        .get("content")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        for el in para.as_array().into_iter().flatten() {
+            match s(el, "tag") {
+                "img" => {
+                    out.push(json!({"type": "image", "source": "post", "key": s(el, "image_key")}))
+                }
+                "media" => out.push(json!({
+                    "type": "file", "kind": "video", "source": "post", "key": s(el, "file_key"),
+                    "name": opt(el, "file_name"),
+                })),
+                _ => {}
+            }
+        }
+    }
+    for f in content["files"].as_array().into_iter().flatten() {
+        let folder = f["is_folder"].as_bool().unwrap_or(false);
+        out.push(json!({
+            "type": "file", "kind": if folder { "folder" } else { "file" }, "source": "post",
+            "key": s(f, "file_key"), "name": opt(f, "file_name"),
+        }));
+    }
+    out
+}
+
+/// A standalone media message's attachment (`image`, `file`, `folder`, `audio`, `media`,
+/// `sticker`; message_content.md).
+fn media_attachment(msg_type: &str, c: &Value) -> Option<Value> {
+    let kind = match msg_type {
+        "image" => {
+            return Some(json!({"type": "image", "source": "message", "key": s(c, "image_key")}));
+        }
+        "file" => "file",
+        "folder" => "folder",
+        "audio" => "audio",
+        "media" => "video",
+        "sticker" => "sticker",
+        _ => return None,
+    };
+    let mut a = json!({
+        "type": "file", "kind": kind, "source": "message", "key": s(c, "file_key"),
+        "name": opt(c, "file_name"),
+    });
+    if let Some(d) = c["duration"].as_i64() {
+        a["duration_ms"] = json!(d);
+    }
+    Some(a)
+}
+
+/// The same key once (the first one keeps its place, so indices stay put).
+fn dedup(atts: Vec<Value>) -> Vec<Value> {
+    let mut seen = HashSet::new();
+    atts.into_iter()
+        .filter(|a| {
+            let k = s(a, "key");
+            k.is_empty() || seen.insert(k.to_string())
+        })
+        .collect()
+}
+
 fn ms(v: &Value, k: &str) -> Option<i64> {
     v.get(k)
         .and_then(|x| x.as_i64().or_else(|| x.as_str()?.parse().ok()))
 }
 
 /// Text and attachments of a message body (`content` as Feishu sends it, a JSON string): text with
-/// `@名字`, `post` flattened, image/file as attachments, other types “[<类型>消息]”. `mentions` are
-/// `(key, name)`. Shared by the long connection and the self poller (the message API's
-/// `body.content` has the same shape as the event's `content`).
+/// `@名字`; `post` flattened with its images, videos and attachment zone as attachments; image, file,
+/// folder, audio, video and sticker messages as one attachment and no text; a card as its readable
+/// text and a `card` attachment first ([`card`]); other types “[<类型>消息]”. `mentions` are
+/// `(key, name)`. Shared by the long connection, the self poller (the message API's `body.content`
+/// has the same shape as the event's `content`) and [`reparse`].
 pub(crate) fn body_of(
     msg_type: &str,
     content: &str,
     mentions: &[(String, String)],
 ) -> (String, Vec<Value>) {
+    if msg_type == "interactive" {
+        let c = super::card::parse(content, mentions);
+        return (c.text, vec![c.attachment]);
+    }
     let content: Value = serde_json::from_str(content).unwrap_or(Value::Null);
-    let mut attachments = Vec::new();
-    let text = match msg_type {
-        "text" => text_of(&content, mentions),
-        "post" => post_text(&content, mentions),
-        "image" => {
-            attachments.push(json!({"type": "image", "key": s(&content, "image_key")}));
-            String::new()
-        }
-        "file" => {
-            attachments.push(json!({
-                "type": "file", "key": s(&content, "file_key"), "name": s(&content, "file_name"),
-            }));
-            String::new()
-        }
-        other => format!("[{other}消息]"),
+    match msg_type {
+        "text" => (text_of(&content, mentions), Vec::new()),
+        "post" => (
+            post_text(&content, mentions),
+            dedup(post_attachments(&content)),
+        ),
+        t => match media_attachment(t, &content) {
+            Some(a) => (String::new(), vec![a]),
+            None => (format!("[{t}消息]"), Vec::new()),
+        },
+    }
+}
+
+/// A stored message read again from its raw payload (`ext_events.payload.raw`): the long
+/// connection's envelope (`event.message`) or the message API's item (`msg_type`, `body.content`).
+/// `None` when the payload is neither.
+pub(crate) fn reparse(raw: &Value) -> Option<(String, Vec<Value>)> {
+    let (ty, content, mentions) = if let Some(m) = raw["event"]["message"].as_object() {
+        (m.get("message_type")?, m.get("content")?, m.get("mentions"))
+    } else {
+        (
+            raw.get("msg_type")?,
+            raw["body"].get("content")?,
+            raw.get("mentions"),
+        )
     };
-    (text, attachments)
+    let keys: Vec<(String, String)> = mentions
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|x| (s(x, "key").to_string(), s(x, "name").to_string()))
+        .collect();
+    Some(body_of(ty.as_str()?, content.as_str()?, &keys))
 }
 
 /// Maps one `im.message.receive_v1` envelope (schema 2.0). `Ok(None)` for other event types;
@@ -696,9 +798,19 @@ mod tests {
         let mut env = fixture("message_p2p_text");
         env["event"]["message"]["message_type"] = json!("sticker");
         env["event"]["message"]["content"] = json!("{\"file_key\":\"x\"}");
+        let m = parse_receive(&env, BOT).unwrap().unwrap();
+        assert_eq!(m.text, "", "a sticker is an attachment, not text");
+        assert_eq!(
+            m.attachments,
+            [
+                json!({"type": "file", "kind": "sticker", "source": "message", "key": "x", "name": null})
+            ]
+        );
+        env["event"]["message"]["message_type"] = json!("location");
+        env["event"]["message"]["content"] = json!("{\"name\":\"x\"}");
         assert_eq!(
             parse_receive(&env, BOT).unwrap().unwrap().text,
-            "[sticker消息]"
+            "[location消息]"
         );
         env["event"]["message"]["chat_id"] = json!("");
         assert!(parse_receive(&env, BOT).is_err());

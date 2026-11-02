@@ -380,10 +380,16 @@ pub fn get(c: &Connection, id: &str) -> ChannelResult<Option<ChanMessage>> {
     }
 }
 
-/// The outbound message's basis (C5), for the interfaces only you see.
+/// The outbound message's basis (C5), for the interfaces only you see; attachments in their public
+/// form (no provider keys; `url` or `unavailable`) and an old card / post read again from its raw
+/// event ([`crate::media::present`]).
 fn with_basis(c: &Connection, m: &mut ChanMessage) -> ChannelResult<()> {
     if m.direction == "out" {
         m.basis = crate::basis::summary_of(c, &m.id)?;
+    }
+    if let Some((text, atts)) = crate::media::present(c, &m.id) {
+        m.text = text;
+        m.attachments = atts;
     }
     Ok(())
 }
@@ -413,8 +419,9 @@ pub fn page(
 /// How often `channels.retention` runs (§9).
 pub const RETENTION_EVERY: Duration = Duration::from_secs(3600);
 
-/// One pass at `now`: in every workspace, message text older than `keepRaw` days becomes NULL and
-/// `purged = now`. Returns the messages purged.
+/// One pass at `now`: in every workspace, message text and attachments (card blocks, file names,
+/// resource keys) older than `keepRaw` days are cleared and `purged = now`. Returns the messages
+/// purged.
 pub fn sweep(m: &Modules, now: i64) -> ApiResult<usize> {
     m.store.transaction(|tx| -> ApiResult<usize> {
         let wss: Vec<String> = {
@@ -424,11 +431,16 @@ pub fn sweep(m: &Modules, now: i64) -> ApiResult<usize> {
             st.query_map([], |r| r.get(0))?
                 .collect::<rusqlite::Result<_>>()?
         };
+        // what a sweep before attachments were cleared left behind
+        tx.execute(
+            "UPDATE chan_messages SET attachments = '[]' WHERE purged IS NOT NULL AND attachments <> '[]'",
+            [],
+        )?;
         let mut n = 0;
         for ws in wss {
             let cut = now - steve_flow::retention::keep_raw_days(tx, &ws)? * 24 * 3_600_000;
             n += tx.execute(
-                "UPDATE chan_messages SET text = NULL, purged = ?1 WHERE workspace_id = ?2 AND created < ?3 AND purged IS NULL",
+                "UPDATE chan_messages SET text = NULL, attachments = '[]', purged = ?1 WHERE workspace_id = ?2 AND created < ?3 AND purged IS NULL",
                 params![now, ws, cut],
             )?;
         }

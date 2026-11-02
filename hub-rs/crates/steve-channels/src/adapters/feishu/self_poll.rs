@@ -578,6 +578,8 @@ impl SelfPoller {
         let mut q = vec![
             ("container_id_type", k.kind.as_str()),
             ("container_id", k.container.as_str()),
+            // cards as they were sent (1.0 / 2.0 JSON) instead of the flattened default
+            ("card_msg_content_type", "user_card_content"),
         ];
         match &start {
             // the first read: only the newest message, for the cursor

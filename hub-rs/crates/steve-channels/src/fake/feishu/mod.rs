@@ -193,6 +193,10 @@ pub(crate) struct Runtime {
     pub pushed: HashMap<String, serde_json::Value>,
     pub ws: ws::WsRuntime,
     pub reg: registration::RegFake,
+    /// `messages/{id}/resources/{key}` waits this long before answering …
+    pub resource_delay: Duration,
+    /// … and answers this instead of the resource: `(status, content type, body)`.
+    pub resource_answer: Option<(u16, String, Vec<u8>)>,
 }
 
 impl Runtime {
@@ -225,6 +229,8 @@ impl Runtime {
             pushed: HashMap::new(),
             ws: ws::WsRuntime::new(),
             reg: registration::RegFake::default(),
+            resource_delay: Duration::ZERO,
+            resource_answer: None,
         }
     }
 
@@ -412,6 +418,16 @@ impl FakeFeishu {
     }
 
     /// `ep` answers with the missing-scope error, as when a permission isn't granted.
+    /// Resource downloads wait `d` before answering.
+    pub fn resource_delay(&self, d: Duration) {
+        self.shared.rt().resource_delay = d;
+    }
+
+    /// Resource downloads answer `(status, content type, body)` (`None`: the resource again).
+    pub fn resource_answer(&self, a: Option<(u16, &str, Vec<u8>)>) {
+        self.shared.rt().resource_answer = a.map(|(s, t, b)| (s, t.to_string(), b));
+    }
+
     pub fn deny(&self, ep: Endpoint) {
         self.shared.rt().denied.insert(ep);
     }

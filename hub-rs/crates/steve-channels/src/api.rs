@@ -8,9 +8,12 @@
 //! | `POST /spaces/:id/rules/to-flow` | the effective rules become a `kind=response` flow → `Space` (`flow_id`) |
 //! | `DELETE /spaces/:id/flow` | back to the rules (the flow is disabled, kept) → `Space` |
 //! | `GET /spaces/:id/messages?before=&limit=` | `ChanMessage[]` (limit ≤100; purged text is `null`) |
+//! | `GET /chan-messages/:id/resources/:n?download=1` | the bytes of attachment `n` (an image or file of an inbound message in a space you see; [`crate::media`]); errors `{error, reason}` |
 //! | `GET /chan-messages/:id/context` | what an outbound message answers, for its approval card: `{space, as_you, text, reply_to?, before[]}` |
 
 use axum::extract::{Path, Query};
+use axum::http::{HeaderValue, StatusCode, header};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Extension, Json, Router};
 use serde::Deserialize;
@@ -32,6 +35,7 @@ pub fn routes(ch: Channels) -> Router<Modules> {
         .route("/spaces/{id}/rules/to-flow", post(to_flow))
         .route("/spaces/{id}/flow", delete(back_to_rules))
         .route("/chan-messages/{id}/context", get(context))
+        .route("/chan-messages/{id}/resources/{n}", get(resource))
         .merge(crate::personas_api::routes())
         .layer(Extension(ch))
 }
@@ -281,4 +285,88 @@ async fn context(Extension(ch): Cx, who: Caller, Path(id): Path<String>) -> ApiR
         }))
     })?;
     Ok(Json(out))
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ResourceQ {
+    download: Option<String>,
+}
+
+/// `GET /chan-messages/:id/resources/:n`: inline only for the raster types a browser shows
+/// (png/jpeg/gif/webp, sniffed), else an `octet-stream` download; never cached, never sniffed,
+/// sandboxed.
+async fn resource(
+    Extension(ch): Cx,
+    who: Caller,
+    Path((id, n)): Path<(String, String)>,
+    Query(q): Query<ResourceQ>,
+) -> Response {
+    let v = match viewer(&ch, &who) {
+        Ok(v) => v,
+        Err(e) => return e.into_response(),
+    };
+    let fetched = match n.parse::<usize>() {
+        Ok(n) => {
+            crate::media::fetch_for_viewer(&ch, &v, &id, n, crate::media::Limits::default()).await
+        }
+        Err(_) => Err(crate::media::MediaError::NotFound),
+    };
+    match fetched {
+        Ok(f) => resource_response(f, q.download.is_some_and(|d| d != "0")),
+        Err(e) => {
+            let status = StatusCode::from_u16(e.status()).unwrap_or(StatusCode::BAD_GATEWAY);
+            let mut r = (
+                status,
+                Json(json!({"error": e.message(), "reason": e.reason()})),
+            )
+                .into_response();
+            r.headers_mut()
+                .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+            r
+        }
+    }
+}
+
+fn resource_response(f: crate::media::Fetched, download: bool) -> Response {
+    let inline = !download && f.mime.starts_with("image/");
+    let disposition = format!(
+        "{}; filename*=UTF-8''{}",
+        if inline { "inline" } else { "attachment" },
+        pct(&f.name)
+    );
+    let len = f.bytes.len();
+    let mut r = (StatusCode::OK, f.bytes).into_response();
+    let h = r.headers_mut();
+    h.insert(header::CONTENT_TYPE, HeaderValue::from_static(f.mime));
+    if let Ok(v) = HeaderValue::from_str(&disposition) {
+        h.insert(header::CONTENT_DISPOSITION, v);
+    }
+    h.insert(header::CONTENT_LENGTH, HeaderValue::from(len));
+    h.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    h.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static("default-src 'none'; sandbox"),
+    );
+    h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    h.insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
+    r
+}
+
+/// RFC 5987 percent-encoding of a file name.
+fn pct(s: &str) -> String {
+    let mut out = String::new();
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || b"-._~".contains(&b) {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
 }

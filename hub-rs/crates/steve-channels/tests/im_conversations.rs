@@ -922,3 +922,72 @@ async fn your_command_without_a_voice_goes_to_your_web_conversation() {
     assert_eq!(last.1.text, "记一下明天给李雷回电话");
     assert!(sent(&h).is_empty());
 }
+
+/// CONTRACT.md §4: an inbound turn carries its chat message (`channel_message`), read from the
+/// same space only; purged sources show nothing; the turn says what Steve did not read.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_turn_carries_its_chat_message_with_media() {
+    let h = setup(true).await;
+    let mut m = msg("C_OPS", "o1", "ulilei", "看下这张图", true, false);
+    m.attachments = vec![
+        json!({"type": "image", "source": "message", "key": "img_1"}),
+        json!({"type": "file", "kind": "folder", "source": "post", "key": "f1", "name": "资料"}),
+    ];
+    let a = push(&h, &h.bot.clone(), m).await;
+    let turns = h.thread.as_ref().unwrap().turns.lock().unwrap().clone();
+    assert_eq!(
+        turns[0].1.text, "看下这张图\n[图片：未读取内容] [文件夹 资料：无法读取]",
+        "nothing pretends the image was seen"
+    );
+    let ops = conversations::conv_space(&a.space_id);
+    let v = conversations::messages_of(&h.ch, WS, &Viewer::bare(WS, ME), &ops).unwrap();
+    let cm = &v["messages"][0]["channel_message"];
+    assert_eq!(cm["id"], json!(a.message_id));
+    assert_eq!(cm["text"], json!("看下这张图"));
+    // the fake channel has no resource API: said, not hidden; no keys either way
+    assert_eq!(cm["attachments"][0]["unavailable"], json!("unsupported"));
+    assert_eq!(cm["attachments"][1]["unavailable"], json!("folder"));
+    assert!(!cm.to_string().contains("img_1"));
+    assert!(v["messages"][0]["meta"].get("channel_message").is_none());
+
+    // a turn pointing at a message of another space gets null
+    let d = push(
+        &h,
+        &h.bot.clone(),
+        msg("D_LI", "d1", "ulilei", "在吗", false, false),
+    )
+    .await;
+    h.env
+        .store()
+        .messages()
+        .add(
+            WS,
+            "me",
+            "借来的",
+            None,
+            &json!({"chan": {"message": d.message_id}}),
+            &ops,
+        )
+        .unwrap();
+    let v = conversations::messages_of(&h.ch, WS, &Viewer::bare(WS, ME), &ops).unwrap();
+    let last = v["messages"].as_array().unwrap().last().unwrap().clone();
+    assert_eq!(last["text"], json!("借来的"));
+    assert_eq!(last["channel_message"], Value::Null);
+
+    // purged: text null, attachments empty, purged set
+    exec(
+        &h,
+        "UPDATE chan_messages SET text = NULL, purged = 9 WHERE id = ?",
+        &[&a.message_id],
+    );
+    let v = conversations::messages_of(&h.ch, WS, &Viewer::bare(WS, ME), &ops).unwrap();
+    let cm = &v["messages"][0]["channel_message"];
+    assert_eq!(
+        (
+            cm["text"].clone(),
+            cm["attachments"].clone(),
+            cm["purged"].clone()
+        ),
+        (Value::Null, json!([]), json!(9))
+    );
+}

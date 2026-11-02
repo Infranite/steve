@@ -19,6 +19,7 @@
 pub mod app_registration;
 pub mod as_user;
 pub mod auth;
+pub mod card;
 pub mod chats;
 pub mod client;
 pub mod crypto;
@@ -27,6 +28,7 @@ pub mod inbound;
 pub mod pbbp2;
 pub mod profiles;
 pub mod ratelimit;
+pub mod resource;
 pub mod runtime;
 pub mod self_poll;
 pub mod send;

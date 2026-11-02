@@ -108,6 +108,7 @@ pub mod drafts;
 pub mod fake;
 pub mod flow_actions;
 pub mod inbound;
+pub mod media;
 pub mod media_agent;
 pub mod members;
 pub mod membership;
