@@ -43,7 +43,7 @@ jobs:
       - run: npm ci
       - run: npm run check && npm run test:web && npm run build:web
       - name: Rust tests
-        run: cargo test --locked --manifest-path hub-rs/Cargo.toml --workspace
+        run: cargo test --locked --manifest-path hub-rs/Cargo.toml --workspace --no-fail-fast
       - name: Build Hub
         shell: bash
         run: STEVE_RELEASE_VERSION="${GITHUB_REF_NAME#v}" STEVE_RELEASE_COMMIT="$GITHUB_SHA" cargo build --locked --release --manifest-path hub-rs/Cargo.toml -p steve-hub
