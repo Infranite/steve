@@ -72,4 +72,4 @@ npm run check
 npm run test:web
 ```
 
-The boundary scripts require Python 3.11+. macOS keychain integration tests are explicitly opt-in and create temporary signing resources; ordinary development must not use production credentials. See [public distribution boundaries](docs/public-boundary.md), [UI design](web/DESIGN.md) and the `docs/` directory for implementation details. The TypeScript `hub/` workspace is retained for compatibility; the default managed backend is Rust.
+The full Rust test suite also requires `zsh` at `/bin/zsh` for the existing source-release fixtures (on Debian/Ubuntu, install the `zsh` package). The boundary scripts require Python 3.11+. macOS keychain integration tests are explicitly opt-in and create temporary signing resources; ordinary development must not use production credentials. See [public distribution boundaries](docs/public-boundary.md), [UI design](web/DESIGN.md) and the `docs/` directory for implementation details. The TypeScript `hub/` workspace is retained for compatibility; the default managed backend is Rust.

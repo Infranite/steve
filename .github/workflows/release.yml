@@ -32,6 +32,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec
         with:
           toolchain: 1.99.1
+      - name: Install Linux test prerequisites
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install --no-install-recommends -y zsh
       - name: Verify public boundary
         run: |
           python3 scripts/check-public-boundary.py --strict
