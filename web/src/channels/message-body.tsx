@@ -34,9 +34,9 @@ function Blocks({ blocks, depth = 0 }: { blocks: CardBlock[]; depth?: number }) 
           return actionable ? <Link key={n} url={a.url}>{a.text || "打开链接"}</Link> : <div key={n} className="max-w-full rounded border bg-muted/40 px-2.5 py-1.5 type-footnote" aria-disabled="true">
             <span className="break-words">{a.text || "操作"}</span><span className="ml-1 text-muted-foreground">（{a.disabled ? "已停用" : "请在飞书中操作"}）</span>
           </div>
-        })}</div>
+        })}{(b.items?.length ?? 0) > 50 && <p className="type-footnote text-muted-foreground">其余操作请在飞书中查看</p>}</div>
         case "columns": return <div key={i} className="grid min-w-0 grid-cols-1 gap-3 sm:grid-flow-col sm:auto-cols-fr" data-card-columns>
-          {(b.columns ?? []).slice(0, 8).map((col, n) => <div key={n} className="min-w-0"><Blocks blocks={Array.isArray(col) ? col : []} depth={depth + 1} /></div>)}</div>
+          {(b.columns ?? []).slice(0, 8).map((col, n) => <div key={n} className="min-w-0"><Blocks blocks={Array.isArray(col) ? col : []} depth={depth + 1} /></div>)}{(b.columns?.length ?? 0) > 8 && <p className="type-footnote text-muted-foreground">其余分栏请在飞书中查看</p>}</div>
         case "table": return <div key={i} className="max-w-full overflow-x-auto rounded border" tabIndex={0} role="region" aria-label="卡片表格" data-card-table>
           <table className="w-full text-left type-footnote"><thead><tr>{(b.columns ?? []).slice(0, 20).map((col, n) => <th key={n} className="border-b bg-muted px-2 py-1.5 font-medium">{typeof col === "string" ? col : ""}</th>)}</tr></thead>
             <tbody>{(b.rows ?? []).slice(0, 100).map((row, n) => <tr key={n}>{row.slice(0, 20).map((cell, j) => <td key={j} className="min-w-20 border-b px-2 py-1.5 align-top last:border-b-0"><Md text={String(cell)} /></td>)}</tr>)}</tbody></table>
