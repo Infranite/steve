@@ -1,3 +1,4 @@
+import { ChannelMessageBody } from "@/channels/message-body"
 import { Fragment, useEffect, useRef, useState, type ReactNode } from "react"
 import { cn } from "cn"
 import { BookOpenIcon, ChartNoAxesColumnIcon, ContactRoundIcon, KeyRoundIcon, UserRoundIcon,
@@ -255,7 +256,7 @@ export function ChatView({ conv }: { conv?: string } = {}) {
           {list.map((m, n) => {
             const prev = list[n - 1], day = m.created && (!prev?.created || new Date(prev.created).toDateString() !== new Date(m.created).toDateString())
             const dayLabel = day ? <Day key={"d" + n}>{new Date(m.created!).toDateString() === new Date().toDateString() ? "今天" : tm(m.created).split(" ")[0]}</Day> : null
-            if (m.k === "me" && conv) return <Fragment key={n}>{dayLabel}<div className="flex flex-col gap-1.5" data-msg={m.id} data-im-turn><SenderLine m={rawOf(m)} /><Me t={m.t!} files={m.files} /><QueuedNote m={m} /></div></Fragment>
+            if (m.k === "me" && conv) return <Fragment key={n}>{dayLabel}<div className="flex flex-col gap-1.5" data-msg={m.id} data-im-turn><SenderLine m={rawOf(m)} />{rawOf(m)?.channel_message ? <div className="w-full max-w-[600px] self-end"><ChannelMessageBody message={rawOf(m)!.channel_message!} /></div> : <Me t={m.t!} files={m.files} />}<QueuedNote m={m} /></div></Fragment>
             if (m.k === "me") return <Fragment key={n}>{dayLabel}<div className="group/me flex flex-col gap-1.5 transition-colors" data-msg={m.id}><QuoteHead id={m.replyTo} className="self-end" /><Me t={m.t!} files={m.files} /><QueuedNote m={m} /><MeActions m={m} /></div></Fragment>
             if (m.k === "thinking") return <div key={n} className="flex flex-col gap-2"><LiveSteps />{st.draft?.text && <SteveSays><Markdown text={st.draft.text} streaming /></SteveSays>}</div>
             if (m.notice) return <Fragment key={n}>{dayLabel}<NoticeLine m={m} onOpen={showNotices} /></Fragment>

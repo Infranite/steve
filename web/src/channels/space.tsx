@@ -1,3 +1,4 @@
+import { ChannelMessageBody } from "@/channels/message-body"
 /* 群和私聊 (channels-personas.md §2.2–§2.6, §8; prototype channels.tsx SpaceView): who speaks here, the duty, when to
  * respond, how far its content may travel, collaboration, members and the recent messages with their basis.
  * Route #/channels/space/:id. Changing settings never sends anything to the chat. */
@@ -135,7 +136,7 @@ function Msg({ m, bot, me }: { m: ChanMessage; bot?: string; me: boolean }) {
       {out ? <PersonaAvatar bot={me ? null : bot} size={24} /> : <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-muted text-[11px] text-muted-foreground" aria-hidden>{(m.sender.name || "?")[0]}</span>}
       <div className="min-w-0 flex-1">
         <div className="type-footnote text-muted-foreground">{m.sender.name || "未知"} · {tm(m.created)}{MSG_STATUS[m.status] && <span className={m.status === "failed" || m.status === "blocked" ? "text-destructive" : undefined}> · {MSG_STATUS[m.status]}</span>}{m.on_behalf === "proxy" && " · 由 Steve 代发"}</div>
-        <div className="whitespace-pre-wrap break-words type-body">{m.text === null ? <span className="text-muted-foreground">原文已过保留期限</span> : m.text || <span className="text-muted-foreground">{m.status === "draft" ? "（草稿还没有正文）" : "（没有文字）"}</span>}</div>
+        <ChannelMessageBody message={m} />
         {m.work_item_id && <button type="button" className="mt-1 type-footnote text-blue hover:underline" onClick={() => go("#/items/" + m.work_item_id)}>建成了事项 {m.work_item_id}</button>}
         {m.decision_id && m.status === "draft" && <button type="button" className="mt-1 block type-footnote text-blue hover:underline" onClick={() => go("#/inbox")}>在待处理里批准</button>}
         <BasisView b={m.basis} />

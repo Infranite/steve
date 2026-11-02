@@ -1,3 +1,4 @@
+import type { ChanMessage } from "@/api/channels"
 /* IM conversations (channels-personas.md §2.12): every space where Steve answers has one conversation,
  * `messages.space = "chan:<space>"`, routed like the web's. The Rust Hub's /api/conversations; the TS Hub has none
  * (`undefined`: the 对话 page then shows only your own conversation). Read-only here. */
@@ -8,7 +9,7 @@ export type ConvBadge = { space: string; space_id: string; name: string; kind: s
 export type ConvRow = ConvBadge & { count: number; last: number; last_text: string; last_author: "me" | "steve" }
 /** the “收到 → 完成” state of an inbound turn's chat message (§2.11) */
 export type Reaction = { state: "ack" | "done" | "failed" | "cleared"; emoji: string | null; as_user: boolean; error: string | null; updated: number }
-export type ConvMessage = RMessage & { reaction?: Reaction }
+export type ConvMessage = RMessage & { reaction?: Reaction; channel_message?: ChanMessage | null }
 
 const e = encodeURIComponent
 const optional = <T>(p: Promise<T>) => p.catch((x) => (isNotWired(x) ? undefined : Promise.reject(x)))

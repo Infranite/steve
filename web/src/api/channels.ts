@@ -1,3 +1,4 @@
+import type { ChannelAttachment } from "@/api/channel-content"
 /* Channels and external personas (channels-personas.md §5, feishu-lark-cli.md §2.4): the Rust Hub's /api/spaces,
  * /api/personas, /api/channels/feishu/* and the accounts module's /api/connections (with /connections/integrations
  * for which provider a connection belongs to and whether it can carry messages). The TS Hub has none of them;
@@ -45,6 +46,7 @@ export type Space = {
 export type BasisEntry = { source_type: string; source_id: string; source_label: string; level: Level; effective: Level; used: string; out: "verbatim" | "conclusion" | "reasoning" | "blocked" }
 export type Basis = { verdict: "pass" | "rewritten" | "drafted"; entries: BasisEntry[]; rewrites: { from: string; to: string; reason: string }[] }
 export type ChanMessage = {
+  attachments?: ChannelAttachment[]
   id: string; space_id: string; direction: "in" | "out"; sender: { name: string; party_id: string | null; account_id?: string | null }; persona_id: string | null; on_behalf: "none" | "persona" | "proxy"
   text: string | null; status: "received" | "draft" | "pending" | "sent" | "failed" | "recalled" | "blocked"; work_item_id: string | null; decision_id: string | null; created: number; sent: number | null; purged: number | null; basis: Basis | null
 }

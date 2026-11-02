@@ -2,7 +2,7 @@
  * own. The switcher above the conversation lists them with their badge (provider · space · 群聊/私聊); one opens at
  * #/c/<space> with the same message parts as yours, the sender above each turn, and the “收到 → 完成” state of the
  * chat message (§2.11). Read-only here: a note links to the space, where a message goes out through the checks. */
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { cn } from "cn"
 import { CheckIcon, LoaderIcon, MessageCircleIcon, UsersIcon, UserIcon, XIcon, ExternalLinkIcon } from "lucide-react"
 import { conversationsApi, type ConvBadge, type ConvMessage, type ConvRow, type Reaction } from "@/api/conversations"
@@ -22,14 +22,17 @@ export function useConversations() {
 /** one IM conversation, its messages as the chat renders them plus what only IM turns have */
 export function useConversation(space: string | undefined) {
   const [data, setData] = useState<{ badge: ConvBadge; msgs: Msg[]; raw: Map<string, ConvMessage> } | null | undefined>()
+  const request = useRef(0)
   const load = useCallback(() => {
+    const id = ++request.current
     if (!space) return
     conversationsApi.messages(space).then((r) => {
+      if (id !== request.current) return
       if (!r) { setData(null); return }
       setData({ badge: r.conversation, msgs: r.messages.map(msgOf), raw: new Map(r.messages.map((m) => [m.id, m])) })
-    }).catch(() => setData(null))
+    }).catch(() => { if (id === request.current) setData(null) })
   }, [space])
-  useEffect(load, [load])
+  useEffect(() => { setData(undefined); load(); return () => { request.current++ } }, [load])
   useHubEvents(["message", "chan_message"], load, 250)
   return data
 }
