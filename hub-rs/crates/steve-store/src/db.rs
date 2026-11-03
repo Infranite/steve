@@ -59,6 +59,7 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/023.sql"),
     // 24: durable restart intents and dispatch receipts.
     include_str!("../migrations/024.sql"),
+    // 25: provider lookup results and retry schedule.
     include_str!("../migrations/025.sql"),
     // 26: personal conversation-list preferences.
     include_str!("../migrations/026.sql"),

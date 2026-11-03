@@ -440,6 +440,9 @@ pub struct Profile {
     pub directory: bool,
     /// Directory department ids (to place them in the org chart).
     pub department_ids: Vec<String>,
+    /// Job title (Feishu `job_title`; given only with `contact:user.employee:readonly` or a broader
+    /// contact scope).
+    pub title: Option<String>,
 }
 
 /// An identity's own organization.

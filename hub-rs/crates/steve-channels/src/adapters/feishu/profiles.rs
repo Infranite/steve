@@ -162,6 +162,7 @@ fn user_profile(u: &Value) -> Option<Profile> {
         email: opt(u, "enterprise_email").or_else(|| opt(u, "email")),
         tenant_key: None,
         directory: true,
+        title: opt(u, "job_title"),
         department_ids: u
             .get("department_ids")
             .and_then(Value::as_array)
@@ -339,9 +340,10 @@ mod tests {
         let p = user_profile(&json!({
             "union_id": "on_1", "open_id": "ou_1", "name": " 张伟 ",
             "avatar": {"avatar_72": "https://x/a.png"}, "enterprise_email": "zw@acme.cn",
-            "department_ids": ["od_1"],
+            "department_ids": ["od_1"], "job_title": " 后端工程师 ",
         }))
         .expect("profile");
+        assert_eq!(p.title.as_deref(), Some("后端工程师"));
         assert_eq!(p.name, "张伟");
         assert_eq!(p.handle.as_ref().map(|h| h.handle.as_str()), Some("on_1"));
         assert!(p.handle.as_ref().is_some_and(|h| h.is("ou_1")));

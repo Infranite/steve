@@ -497,7 +497,7 @@ fn person(
         patch.contact_kind = Some("real".into());
     }
     // the sync's own contacts follow the directory; others only while their name is still a raw
-    // handle (identification fell back to `ou_…`) — a name you gave stays
+    // handle (identification fell back to `ou_…`) — a name you gave stays, also on the sync's own
     let raw = crate::accounts::looks_like_handle(&p.name)
         || p.name.trim() == u.id
         || u.extra_ids.iter().any(|x| x.trim() == p.name.trim());
@@ -505,7 +505,8 @@ fn person(
         && !p.is_me()
         && p.name != name
         && !crate::accounts::looks_like_handle(&name)
-        && (p.source == "sync" || raw)
+        && (raw || p.source == "sync")
+        && !crate::contacts::profile::name_edited(tx, ws, &p.id)?
     {
         before.insert("name".into(), json!(p.name));
         after.insert("name".into(), json!(name));
@@ -596,8 +597,15 @@ fn open_job(
             if !props.is_object() {
                 props = json!({});
             }
-            props["title"] = json!(title);
-            props["dept"] = json!(dept);
+            // a field you edited stays yours
+            let manual =
+                crate::contacts::profile::job_manual_fields(tx, ws, contact, org, &l.props)?;
+            if !manual.iter().any(|m| m == "title") {
+                props["title"] = json!(title);
+            }
+            if !manual.iter().any(|m| m == "dept") {
+                props["dept"] = json!(dept);
+            }
             if props == l.props {
                 return Ok(false);
             }
@@ -615,7 +623,20 @@ fn open_job(
                 o.remove("history");
             }
             history.push(past);
-            let props = json!({ "title": title, "dept": dept, "from": this_month(), "to": null, "history": history });
+            // back again: what you set on the job stays yours
+            let manual =
+                crate::contacts::profile::job_manual_fields(tx, ws, contact, org, &l.props)?;
+            let keep = |k: &str, synced: Option<&str>| {
+                if manual.iter().any(|m| m == k) {
+                    l.props[k].clone()
+                } else {
+                    json!(synced)
+                }
+            };
+            let mut props = json!({ "title": keep("title", title), "dept": keep("dept", dept), "from": this_month(), "to": null, "history": history });
+            if !manual.is_empty() {
+                props["manual"] = json!(manual);
+            }
             Ok(links::set_props(tx, ws, &key, &props)?)
         }
     }

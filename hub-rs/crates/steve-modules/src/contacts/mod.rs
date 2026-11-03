@@ -30,6 +30,7 @@ pub mod mentions;
 pub mod merge;
 pub mod ownership_mcp;
 pub mod people_repo;
+pub mod profile;
 pub mod repo;
 pub mod service;
 pub mod stewards;

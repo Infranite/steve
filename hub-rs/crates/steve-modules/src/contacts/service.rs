@@ -159,6 +159,8 @@ pub struct Contact {
     pub teams: Vec<repo::TeamRef>,
     pub reports_to: Vec<NameRef>,
     pub merges: Vec<MergeRef>,
+    /// What is known about them and why the rest is not ([`super::profile::contact_profile`]).
+    pub profile: super::profile::ContactProfile,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -182,6 +184,9 @@ pub struct Org {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub people: Option<Vec<OrgPerson>>,
     pub revision: i64,
+    /// Where the name comes from (`name_state`, `name_reason`, `name_scope`, `tenant`).
+    #[serde(flatten)]
+    pub naming: super::profile::OrgName,
 }
 
 /// `Contact | Org` (the answer of `POST /parties/:id/attrs`).
@@ -430,6 +435,7 @@ pub fn brief(
 
 pub fn contact(c: &rusqlite::Connection, viewer: &Viewer, p: &Party) -> ApiResult<Contact> {
     let js = jobs(c, viewer, &p.id)?;
+    let visible_orgs: Vec<String> = js.iter().map(|j| j.org_id.clone()).collect();
     let mut reports_to = Vec::new();
     for l in links::from(c, &viewer.ws, &pref(&p.id), Some("reports_to"))? {
         if let Some(b) = repo::get(c, &l.object_id)?.filter(|b| {
@@ -470,6 +476,7 @@ pub fn contact(c: &rusqlite::Connection, viewer: &Viewer, p: &Party) -> ApiResul
         teams: repo::teams_of(c, viewer, &p.id)?,
         reports_to,
         merges,
+        profile: super::profile::contact_profile(c, &viewer.ws, p, Some(&visible_orgs))?,
     })
 }
 
@@ -503,6 +510,7 @@ pub fn org(
             .collect(),
         people,
         revision: p.revision,
+        naming: super::profile::org_name(c, &viewer.ws, p)?,
     })
 }
 
@@ -942,6 +950,17 @@ pub fn add_job(m: &Modules, who: &Caller, id: &str, b: NewJob) -> ApiResult<Cont
                 }
                 history.push(past);
                 props["history"] = Value::Array(history);
+                // a synced job you add back by hand: what you entered (and edited before) stays yours
+                let mut manual =
+                    super::profile::job_manual_fields(tx, &who.ws, &p.id, &o.id, &old.props)?;
+                for (k, v) in [("title", &b.title), ("dept", &b.dept)] {
+                    if v.is_some() && !manual.iter().any(|m| m == k) {
+                        manual.push(k.to_string());
+                    }
+                }
+                if !manual.is_empty() {
+                    props["manual"] = json!(manual);
+                }
                 links::set_props(tx, &who.ws, &key, &props)?;
                 old.props
             }
@@ -1034,6 +1053,16 @@ pub fn patch_job(
             if let Some(v) = v {
                 props[k] = json!(v);
             }
+        }
+        // the fields you set: no sync writes them again
+        let mut manual = super::profile::manual_fields(&l.props);
+        for (k, v) in [("title", &b.title), ("dept", &b.dept)] {
+            if v.is_some() && !manual.iter().any(|m| m == k) {
+                manual.push(k.to_string());
+            }
+        }
+        if !manual.is_empty() {
+            props["manual"] = json!(manual);
         }
         if props != l.props {
             links::set_props(tx, &who.ws, &key, &props)?;

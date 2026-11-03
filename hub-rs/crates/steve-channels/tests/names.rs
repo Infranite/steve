@@ -345,8 +345,34 @@ async fn your_identity_names_members_first_and_tenants_become_organizations() {
         ("王小丽", "王小丽", "real")
     );
     // the own tenant is the own organization, renamed from the workspace's placeholder
+    // she is of the own organization: the address book is asked too, so the job is the directory's,
+    // with her title, and her work email is hers
     let (org, src) = employer(&h, &alice).expect("works somewhere");
-    assert_eq!((org.as_str(), src.as_str()), ("示例科技", "infer"));
+    assert_eq!((org.as_str(), src.as_str()), ("示例科技", "sync"));
+    assert_eq!(
+        q(
+            &h.env,
+            "SELECT json_extract(props, '$.title') FROM links WHERE subject_id = ? AND predicate = 'works_at'",
+            &alice
+        )[0][0],
+        "后端工程师"
+    );
+    assert_eq!(
+        q(
+            &h.env,
+            "SELECT handle FROM accounts WHERE party_id = ? AND family = 'email'",
+            &alice
+        )[0][0],
+        "alice@corp.example.com"
+    );
+    assert_eq!(
+        q(
+            &h.env,
+            "SELECT gaps FROM account_profiles ap JOIN accounts a ON a.id = ap.account_id WHERE a.party_id = ?",
+            &alice
+        )[0][0],
+        "{}"
+    );
     assert_eq!(
         q(
             &h.env,
@@ -360,6 +386,21 @@ async fn your_identity_names_members_first_and_tenants_become_organizations() {
     assert_eq!((name.as_str(), kind.as_str()), ("赵客户", "real"));
     let (org, _) = employer(&h, &ext).expect("external org");
     assert_eq!(org, "外部组织（客户对接群 里的成员）");
+    // their title and email: Feishu gives none for another organization's members; never retried
+    let row = &q(
+        &h.env,
+        "SELECT ap.gaps, ap.next_check, ap.source FROM account_profiles ap JOIN accounts a ON a.id = ap.account_id WHERE a.party_id = ?",
+        &ext,
+    )[0];
+    let gaps: Value = serde_json::from_str(&str_of(&row[0])).unwrap();
+    assert_eq!(
+        gaps,
+        json!({"title": {"reason": "external"}, "email": {"reason": "external"}})
+    );
+    assert_eq!(
+        (row[1].clone(), row[2].clone()),
+        (Value::Null, json!("chat"))
+    );
     assert_eq!(
         q(
             &h.env,
@@ -736,4 +777,56 @@ async fn the_directory_sync_reports_its_visibility_range_and_missing_permissions
         &h.bot_con,
     );
     assert!(str_of(&state[0][0]).contains("contact:department.base:readonly"));
+}
+
+/// Why someone stays unknown comes from the calls that actually asked about them: refused by every
+/// identity asked → the permission; a call skipped as cached is no new evidence; once an identity
+/// may search, the person is found.
+#[tokio::test(flavor = "multi_thread")]
+async fn missing_reasons_come_from_the_calls_that_asked() {
+    let h = setup().await;
+    // no member lists, and no identity may read the address book (you never were granted it)
+    h.fake.deny(Endpoint::ChatMembers);
+    h.fake.deny_bot(Endpoint::BatchUsers);
+    hear(
+        &h,
+        ids::GROUP_CHAT,
+        SpaceKind::Group,
+        "平台值班群",
+        "om_r1",
+        ids::BOB.open_id,
+        "在吗",
+    )
+    .await;
+    let r = h.ch.resolve_names(WS).await.expect("names");
+    assert_eq!(r.nameless, 1, "{r:?}");
+    let gaps_of = |h: &H| {
+        let row = q(
+            &h.env,
+            "SELECT ap.gaps, ap.checked FROM account_profiles ap JOIN account_handles x ON x.account_id = ap.account_id WHERE x.handle = ?",
+            ids::BOB.open_id,
+        );
+        (
+            serde_json::from_str::<Value>(&str_of(&row[0][0])).unwrap(),
+            row[0][1].clone(),
+        )
+    };
+    let (gaps, checked) = gaps_of(&h);
+    assert_eq!(
+        gaps["name"],
+        json!({"reason": "permission", "scope": CONTACT})
+    );
+
+    // again at once: every call is cached, so nothing is asked and nothing is judged anew
+    let before = h.fake.requests().len();
+    h.ch.resolve_names(WS).await.expect("names");
+    assert_eq!(h.fake.requests().len(), before);
+    assert_eq!(gaps_of(&h).1, checked);
+
+    // the bot may read the address book now (a connection changed: everything is asked again)
+    h.fake.allow(Endpoint::BatchUsers);
+    h.ch.kick_names(WS, true);
+    let r = h.ch.resolve_names(WS).await.expect("names");
+    assert_eq!(r.nameless, 0, "{r:?}");
+    assert_eq!(person(&h, ids::BOB.open_id).1, "张伟");
 }

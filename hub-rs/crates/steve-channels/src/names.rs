@@ -63,6 +63,11 @@ pub struct NameReport {
     pub nameless: usize,
     /// Lookups made (member lists + directory calls), for the log.
     pub lookups: usize,
+    /// Lookups that failed (network, token, provider error): their people are retried, not judged.
+    pub failed: usize,
+    /// The connections whose lookups failed.
+    #[serde(skip)]
+    pub failed_conns: Vec<String>,
     /// `(connection, scope)` found missing.
     pub missing: Vec<(String, String)>,
 }
@@ -75,6 +80,40 @@ struct Candidate {
     handle: HandleRef,
     /// Has a usable name already (only the person or the org may be open).
     named: bool,
+}
+
+/// What one call that actually ran with a candidate's handle showed about them (a call skipped as
+/// fresh in the cache is no evidence).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Outcome {
+    /// The call failed (network, token, provider error).
+    Failed,
+    /// That identity was refused the address book for the missing permission.
+    Refused,
+    /// That identity searched its address book.
+    Searched,
+    /// Only a chat's member list answered (no address-book search).
+    Members,
+}
+
+impl Outcome {
+    fn of(ans: Option<&ProfileAnswer>) -> Self {
+        let contact = crate::adapters::feishu::profiles::CONTACT_SCOPE;
+        match ans {
+            None => Self::Failed,
+            Some(a) if a.missing_scopes.iter().any(|(s, _)| s == contact) => Self::Refused,
+            Some(a) if a.granted_scopes.iter().any(|s| s == contact) => Self::Searched,
+            Some(_) => Self::Members,
+        }
+    }
+}
+
+/// The own organization keys of the installation whose identity answered for a candidate (or of
+/// every one), for [`Channels::note_lookup`].
+struct Evidence {
+    /// `(connection, outcome)` of every call that actually asked about them this run.
+    calls: Vec<(String, Outcome)>,
+    own_keys: Vec<String>,
 }
 
 /// An identity that can look people up.
@@ -163,8 +202,24 @@ impl Names {
     }
 }
 
-/// `SELECT … WHERE` the account or person still needs something.
-fn candidates(c: &Connection, ws: &str) -> ChannelResult<Vec<Candidate>> {
+/// Named people looked up per run for their missing organization, title or email at most.
+pub const MAX_PROFILE_CHECKS: usize = 200;
+
+/// Does the person still miss an organization, a job title or an email (contacts `profile`)?
+fn incomplete(c: &Connection, ws: &str, party: &str) -> ChannelResult<bool> {
+    let Some(p) = steve_modules::contacts::repo::get(c, party)? else {
+        return Ok(false);
+    };
+    let f = steve_modules::contacts::profile::contact_profile(c, ws, &p, None)?.fields;
+    Ok([f.org, f.title, f.email]
+        .iter()
+        .any(|x| x.state == "missing"))
+}
+
+/// `SELECT … WHERE` the account or person still needs something: no name, unconfirmed, or — for
+/// Feishu people due for a check ([`steve_modules::contacts::profile::due`]) — a missing
+/// organization, title or email (at most [`MAX_PROFILE_CHECKS`]).
+fn candidates(c: &Connection, ws: &str, now: i64) -> ChannelResult<Vec<Candidate>> {
     let mut st = c.prepare(
         "SELECT a.id, a.party_id, p.created_by, a.system_id, a.handle, a.display_name, p.name, p.contact_kind
            FROM accounts a JOIN parties p ON p.id = a.party_id
@@ -188,13 +243,21 @@ fn candidates(c: &Connection, ws: &str) -> ChannelResult<Vec<Candidate>> {
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let mut out = Vec::new();
-    for (acc, _party, actor, system, handle, display, pname, kind) in rows {
+    let mut checks = 0;
+    for (acc, party, actor, system, handle, display, pname, kind) in rows {
         let raw = |n: &str| looks_like_handle(n) || n.trim() == handle;
         let account_named = !raw(&display);
         let party_named = !raw(&pname);
         let unconfirmed = kind.as_deref() == Some("unconfirmed");
         if account_named && party_named && !unconfirmed {
-            continue;
+            if system != "feishu"
+                || checks >= MAX_PROFILE_CHECKS
+                || !steve_modules::contacts::profile::due(c, &acc, now)?
+                || !incomplete(c, ws, &party)?
+            {
+                continue;
+            }
+            checks += 1;
         }
         let mut h = HandleRef::new(system, handle);
         for (x, _) in accounts::repo::handles_of(c, &acc)? {
@@ -460,6 +523,15 @@ impl Channels {
 
     /// Kicks a run of `ws` soon (see [`Names::kick`]).
     pub fn kick_names(&self, ws: &str, fresh: bool) {
+        if fresh {
+            let now = self.now();
+            if let Err(e) = self
+                .store()
+                .transaction(|tx| steve_modules::contacts::profile::all_due(tx, ws, now))
+            {
+                tracing::warn!(ws, "names: retries not reset: {e}");
+            }
+        }
         self.names().kick(ws, self.now(), fresh);
     }
 
@@ -519,7 +591,8 @@ impl Channels {
     pub async fn resolve_names(&self, ws: &str) -> ChannelResult<NameReport> {
         let mut rep = NameReport::default();
         let store = self.store().clone();
-        let cands = store.reader(|c| candidates(c, ws))?;
+        let now = self.now();
+        let cands = store.reader(|c| candidates(c, ws, now))?;
         rep.candidates = cands.len();
 
         // 2. what Steve already has
@@ -559,7 +632,6 @@ impl Channels {
             store.reader(|c| identities(c, ws, &adapters))?
         };
         let mut tenants: HashMap<String, Vec<TenantInfo>> = HashMap::new(); // installation → own tenants
-        let now = self.now();
         // the organizations of the identities
         for i in &ids {
             let known = lock(&self.names().mem)
@@ -663,6 +735,8 @@ impl Channels {
             return Ok(rep);
         }
         let spaces = store.reader(|c| seen_spaces(c, ws, &open))?;
+        // account → (connection, outcome) of each call that actually asked about them
+        let mut asked: HashMap<String, Vec<(String, Outcome)>> = HashMap::new();
         let mut profiles: Vec<(Profile, Option<String>, String)> = Vec::new(); // (profile, seen in, installation)
 
         // members of the spaces the candidates were seen in
@@ -692,7 +766,7 @@ impl Channels {
                 if fresh {
                     continue;
                 }
-                let Some(ans) = self
+                let ans = self
                     .ask(
                         i,
                         ProfileQuery {
@@ -702,8 +776,15 @@ impl Channels {
                         },
                         &mut rep,
                     )
-                    .await
-                else {
+                    .await;
+                let o = Outcome::of(ans.as_ref());
+                for c in open.iter().filter(|c| sp.accounts.contains(&c.account_id)) {
+                    asked
+                        .entry(c.account_id.clone())
+                        .or_default()
+                        .push((i.id.clone(), o));
+                }
+                let Some(ans) = ans else {
                     continue;
                 };
                 lock(&self.names().mem).members.insert(key, now);
@@ -719,9 +800,17 @@ impl Channels {
 
         // the directory for whoever is still unnamed, per installation
         let mut by_inst: BTreeMap<String, Vec<HandleRef>> = BTreeMap::new();
+        let own_keys_all: Vec<String> = tenants.values().flatten().map(|t| t.key.clone()).collect();
         for cand in &open {
             let ps: Vec<Profile> = profiles.iter().map(|(p, _, _)| p.clone()).collect();
-            if match_profile(&ps, &cand.handle).is_some_and(|p| !p.name.is_empty()) {
+            // named by the directory, or of another organization (whose directory is not ours): done
+            if match_profile(&ps, &cand.handle).is_some_and(|p| {
+                !p.name.is_empty()
+                    && (p.directory
+                        || p.tenant_key
+                            .as_ref()
+                            .is_some_and(|k| !own_keys_all.is_empty() && !own_keys_all.contains(k)))
+            }) {
                 continue;
             }
             // the installation of where they were seen (or every one)
@@ -754,7 +843,7 @@ impl Channels {
                 if left.is_empty() {
                     break;
                 }
-                let Some(ans) = self
+                let ans = self
                     .ask(
                         i,
                         ProfileQuery {
@@ -764,8 +853,15 @@ impl Channels {
                         },
                         &mut rep,
                     )
-                    .await
-                else {
+                    .await;
+                let o = Outcome::of(ans.as_ref());
+                for c in open.iter().filter(|c| left.contains(&c.handle)) {
+                    asked
+                        .entry(c.account_id.clone())
+                        .or_default()
+                        .push((i.id.clone(), o));
+                }
+                let Some(ans) = ans else {
                     continue;
                 };
                 {
@@ -845,6 +941,7 @@ impl Channels {
                 avatar_url: p.avatar_url.clone(),
                 org_id,
                 dept: None,
+                title: p.title.clone(),
                 directory: p.directory,
             };
             if let Some(r) = self.apply(ws, cand, &e, &mut rep)
@@ -853,8 +950,117 @@ impl Channels {
                 rep.named_remote += 1;
             }
         }
+
+        // 5. what each of them still misses, and why — from this run's own calls about them only
+        for cand in &open {
+            let calls = asked.remove(&cand.account_id).unwrap_or_default();
+            if calls.is_empty() {
+                continue; // nothing asked about them this run (cached): their record stands
+            }
+            let hit = match_profile(&ps, &cand.handle);
+            let answered_by = hit.and_then(|p| {
+                profiles
+                    .iter()
+                    .find(|(x, _, _)| x == p)
+                    .map(|(_, _, i)| i.clone())
+            });
+            let ev = Evidence {
+                calls,
+                own_keys: match &answered_by {
+                    Some(i) => tenants
+                        .get(i)
+                        .into_iter()
+                        .flatten()
+                        .map(|t| t.key.clone())
+                        .collect(),
+                    None => own_keys_all.clone(),
+                },
+            };
+            if let Err(e) = self.note_lookup(ws, cand, hit, &ev, now) {
+                tracing::warn!(
+                    ws,
+                    account = cand.account_id,
+                    "names: lookup not noted: {e}"
+                );
+            }
+        }
         rep.nameless = self.count_nameless(ws)?;
         Ok(rep)
+    }
+
+    /// Records the lookup of `cand` ([`steve_modules::contacts::profile::record_lookup`]): the
+    /// fields still missing, each with the reason this run can tell.
+    fn note_lookup(
+        &self,
+        ws: &str,
+        cand: &Candidate,
+        p: Option<&Profile>,
+        ev: &Evidence,
+        now: i64,
+    ) -> ChannelResult<()> {
+        use steve_modules::contacts::profile::{self as prof, Gap};
+        let contact = crate::adapters::feishu::profiles::CONTACT_SCOPE;
+        self.store().transaction(|tx| -> ChannelResult<()> {
+            let Some(party) = accounts::repo::get(tx, &cand.account_id)?.and_then(|a| {
+                steve_modules::contacts::repo::get(tx, &a.party_id)
+                    .ok()
+                    .flatten()
+            }) else {
+                return Ok(());
+            };
+            let f = prof::contact_profile(tx, ws, &party, None)?.fields;
+            let external = p
+                .and_then(|p| p.tenant_key.as_ref())
+                .is_some_and(|k| !ev.own_keys.is_empty() && !ev.own_keys.contains(k));
+            // no answer named the field: what the calls about them show — a failure (retry), an
+            // address book searched without them, an address book refused for the permission (every
+            // identity asked), or no search at all (retry)
+            let has = |o: Outcome| ev.calls.iter().any(|(_, x)| *x == o);
+            let unanswered = || {
+                if has(Outcome::Failed) {
+                    Gap::new("pending")
+                } else if has(Outcome::Searched) {
+                    Gap::new("not_visible")
+                } else if has(Outcome::Refused) {
+                    Gap::scope("permission", contact)
+                } else {
+                    Gap::new("pending")
+                }
+            };
+            let mut gaps: Vec<(&str, Gap)> = Vec::new();
+            for (field, st) in [("name", &f.name), ("org", &f.org)] {
+                if st.state == "missing" {
+                    gaps.push((
+                        field,
+                        if p.is_some() {
+                            Gap::new("not_provided")
+                        } else {
+                            unanswered()
+                        },
+                    ));
+                }
+            }
+            for (field, st) in [("title", &f.title), ("email", &f.email)] {
+                if st.state != "missing" {
+                    continue;
+                }
+                // a field absent from an answer proves no missing permission: it is “not provided”
+                let g = match p {
+                    _ if external => Gap::new("external"),
+                    Some(p) if p.directory => Gap::new("not_provided"),
+                    _ => unanswered(),
+                };
+                gaps.push((field, g));
+            }
+            let source = match p {
+                Some(p) if p.directory => Some("directory"),
+                Some(_) => Some("chat"),
+                None if f.name.state == "known" => Some("local"),
+                None => None,
+            };
+            prof::record_lookup(tx, ws, &cand.account_id, now, source, &gaps)?;
+            Ok(())
+        })
     }
 
     /// One lookup through identity `i`; missing / granted permissions are written on it. `None`
@@ -900,6 +1106,10 @@ impl Channels {
             }
             Err(e) => {
                 tracing::debug!(conn = i.id, "names: lookup failed: {e}");
+                rep.failed += 1;
+                if !rep.failed_conns.contains(&i.id) {
+                    rep.failed_conns.push(i.id.clone());
+                }
                 None
             }
         }
@@ -934,7 +1144,8 @@ impl Channels {
 
     /// Accounts of people that still have no name.
     fn count_nameless(&self, ws: &str) -> ChannelResult<usize> {
-        let cands = self.store().reader(|c| candidates(c, ws))?;
+        let now = self.now();
+        let cands = self.store().reader(|c| candidates(c, ws, now))?;
         Ok(cands.iter().filter(|c| !c.named).count())
     }
 }

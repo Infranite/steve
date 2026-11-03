@@ -48,6 +48,8 @@ pub struct Enrichment {
     pub org_id: Option<String>,
     /// Department path at that organization (“基础架构 / 存储 / NoSQL”).
     pub dept: Option<String>,
+    /// Job title at that organization (Feishu `job_title`).
+    pub title: Option<String>,
     /// Found in the own organization's directory (`source = sync`); otherwise the name came from a
     /// chat (`source = chat`).
     pub directory: bool,
@@ -66,6 +68,10 @@ pub struct Enriched {
     pub merged_into: Option<String>,
     /// A `works_at` job was added.
     pub org_linked: bool,
+    /// An empty title or department of their job was filled.
+    pub job_filled: bool,
+    /// The email became one of their mail accounts.
+    pub email_added: bool,
     /// The current owner after all of it.
     pub party_id: String,
 }
@@ -236,6 +242,7 @@ pub fn enrich(
     if let Some(n) = &name
         && !party.is_me()
         && is_raw(tx, &party.name, &acc.id)?
+        && !crate::contacts::profile::name_edited(tx, ws, &party.id)?
     {
         before.insert("name".into(), json!(party.name));
         after.insert("name".into(), json!(n));
@@ -282,21 +289,94 @@ pub fn enrich(
             predicate: "works_at".into(),
             object: ObjRef::new(PARTY, org),
         };
-        if !open && links::get(tx, ws, &key)?.is_none() {
-            let mut l = NewLink::new(
-                key.subject,
-                "works_at",
-                key.object,
-                if e.directory { "sync" } else { "infer" },
-            );
-            l.props = json!({ "title": null, "dept": e.dept, "from": null, "to": null });
-            out.org_linked = links::add(tx, ws, &l)?;
+        let title = e
+            .title
+            .as_deref()
+            .map(|t| clip(t, 80))
+            .filter(|t| !t.is_empty());
+        let dept = e
+            .dept
+            .as_deref()
+            .map(|t| clip(t, 80))
+            .filter(|t| !t.is_empty());
+        match links::get(tx, ws, &key)? {
+            None if !open => {
+                let mut l = NewLink::new(
+                    key.subject,
+                    "works_at",
+                    key.object,
+                    if e.directory { "sync" } else { "infer" },
+                );
+                l.props = json!({ "title": title, "dept": dept, "from": null, "to": null });
+                out.org_linked = links::add(tx, ws, &l)?;
+            }
+            // a job Steve recorded there: fill what is empty, never what you set
+            Some(l) if l.source != "manual" && l.props.get("to").is_none_or(Value::is_null) => {
+                let manual =
+                    crate::contacts::profile::job_manual_fields(tx, ws, &party.id, org, &l.props)?;
+                let mut props = if l.props.is_object() {
+                    l.props.clone()
+                } else {
+                    json!({})
+                };
+                for (k, v) in [("title", &title), ("dept", &dept)] {
+                    let empty = props[k].as_str().is_none_or(|x| x.trim().is_empty());
+                    if let Some(v) = v
+                        && empty
+                        && !manual.iter().any(|m| m == k)
+                    {
+                        props[k] = json!(v);
+                    }
+                }
+                if props != l.props {
+                    out.job_filled = links::set_props(tx, ws, &key, &props)?;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // 5. the email, as one of their mail accounts, when nobody has it yet
+    if let Some(mail) = e
+        .email
+        .as_deref()
+        .map(str::trim)
+        .filter(|m| m.contains('@') && m.len() <= 254)
+        && out.merged_into.is_none()
+    {
+        let ms = own_system(tx, ws, "mail")?;
+        if let Some(h) = svc::normalize(&ms, mail)
+            && repo::by_handle(tx, ws, &ms.family, &h.handle)?.is_none()
+        {
+            svc::record_tx(
+                tx,
+                &viewer,
+                actor,
+                &Record {
+                    system_id: ms.id.clone(),
+                    party_id: party.id.clone(),
+                    kind: "work_email".into(),
+                    handle: mail.to_string(),
+                    // the person's name as of now (renamed just above, or as it was)
+                    display_name: name
+                        .clone()
+                        .filter(|_| out.renamed)
+                        .unwrap_or_else(|| party.name.clone()),
+                    verified: e.directory,
+                    confidence: if e.directory { 1.0 } else { 0.8 },
+                    source: "sync".into(),
+                    source_label: "飞书通讯录".into(),
+                },
+            )?;
+            out.email_added = true;
         }
     }
 
     if out.renamed
         || out.promoted
         || out.org_linked
+        || out.job_filled
+        || out.email_added
         || out.merged_into.is_some()
         || out.account_named
     {
@@ -429,17 +509,10 @@ pub fn tenant_org(tx: &Tx, ws: &str, actor: &str, t: &TenantHint) -> ApiResult<S
     Ok(org.id)
 }
 
-/// A name nobody chose: the own organization still named after the workspace and never edited, or an
-/// external one still called “外部组织…”.
+/// A name nobody chose: Steve's “外部组织…” placeholder or the own organization still named after the
+/// workspace — and never one a person set, whatever it says ([`crate::contacts::profile::org_name`]).
 fn placeholder(c: &rusqlite::Connection, ws: &str, p: &Party) -> ApiResult<bool> {
-    if p.name.starts_with(EXTERNAL_ORG) {
-        return Ok(true);
-    }
-    if p.is_self_org() {
-        let wn = people::workspace_name(c, ws)?.unwrap_or_else(|| "本公司".into());
-        return Ok(p.revision == 1 && (p.name == wn || p.name == "本公司"));
-    }
-    Ok(false)
+    crate::contacts::profile::org_name_replaceable(c, ws, p)
 }
 
 #[cfg(test)]
