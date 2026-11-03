@@ -1636,7 +1636,7 @@ async fn a_handoff_can_become_a_draft_reply() {
     let r = push(
         &h,
         &h.oncall.clone(),
-        msg("C_OPS", "o1", "ulilei", "老板在吗", false),
+        msg("C_OPS", "o1", "ulilei", "老板在吗", true),
     )
     .await
     .response

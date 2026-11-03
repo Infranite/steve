@@ -14,11 +14,13 @@ type Kind = When["kind"]
 export function whenLabel(k: Kind, self: boolean) {
   const L: Record<Kind, string> = {
     mention_or_dm: self ? "@你 或私聊你" : "被 @ 或私聊", mention: self ? "群里 @你" : "被 @", dm: self ? "私聊你" : "私聊", reply_to_me: "回复了它的消息",
-    keyword: "消息包含关键词", intent: "AI 判断符合", member: "指定成员发言", external: "外部成员发言", hours: "按工作时间", all: "全部消息", other_group: "其他群消息",
+    keyword: "消息包含关键词", intent: "AI 判断符合", member: "指定成员发言", external: "外部成员发言", hours: "按工作时间", all: "其余 @ 或私聊的消息", other_group: "其他群消息（不再生效）",
   }
   return L[k] ?? k
 }
-const KINDS: Kind[] = ["mention_or_dm", "mention", "dm", "reply_to_me", "keyword", "intent", "member", "external", "hours", "other_group", "all"]
+/* only messages that @ the account or are private chats with it are acted on (the Hub's gate); the conditions
+ * below refine those. `other_group` can't hold for such a message: offered only to show an old rule */
+const KINDS: Kind[] = ["mention_or_dm", "mention", "dm", "reply_to_me", "keyword", "intent", "member", "external", "hours", "all"]
 const ACT_LABEL: Record<Act, string> = { reply: "直接回复", draft: "起草，等你批准", record: "只记录", create_item: "建事项", handoff: "转给你" }
 const DAYS = ["一", "二", "三", "四", "五", "六", "日"]
 
@@ -110,7 +112,7 @@ export function Rules({ rules, onChange, self = false, note }: { rules: Rule[]; 
         <div key={n} className="flex flex-col gap-2 px-2 py-2" data-rule={n}>
           <div className="flex flex-wrap items-center gap-2">
             <span className="type-footnote text-muted-foreground">当</span>
-            <Select testId={"when-" + n} value={r.when.kind} onChange={(v) => set(n, { ...r, when: fresh(v as Kind, r.when) })} options={KINDS.map((k) => ({ v: k, l: whenLabel(k, self) }))} />
+            <Select testId={"when-" + n} value={r.when.kind} onChange={(v) => set(n, { ...r, when: fresh(v as Kind, r.when) })} options={(KINDS.includes(r.when.kind) ? KINDS : [...KINDS, r.when.kind]).map((k) => ({ v: k, l: whenLabel(k, self) }))} />
             <span className="type-footnote text-muted-foreground">就</span>
             <Select testId={"act-" + n} value={r.act} onChange={(v) => set(n, { when: r.when, act: v as Act, ...(v === "create_item" ? { mode: r.mode ?? "start" } : {}) })} options={acts.map((a) => ({ v: a, l: ACT_LABEL[a] }))} />
             {r.act === "create_item" && <Select testId={"mode-" + n} value={r.mode ?? "start"} onChange={(v) => set(n, { ...r, mode: v as "start" | "propose" })} options={[{ v: "start", l: "直接开始" }, { v: "propose", l: "先提给你" }]} />}
@@ -120,7 +122,7 @@ export function Rules({ rules, onChange, self = false, note }: { rules: Rule[]; 
           <Params w={r.when} onChange={(w) => set(n, { ...r, when: w })} />
         </div>))}</Group>}
       {rules.length < 20 && <Button size="xs" variant="ghost" className="self-start text-muted-foreground" onClick={() => onChange([...rules, { when: { kind: "mention_or_dm" }, act: self ? "draft" : "reply" }])} data-add-rule><PlusIcon />添加规则</Button>}
-      <div className="px-1 type-footnote text-tertiary">按顺序第一条命中的生效；都不命中就只记录。</div>
+      <div className="px-1 type-footnote text-tertiary">只处理 @ 它或私聊它的消息，其他消息只记录；规则按顺序第一条命中的生效，都不命中就只记录。</div>
     </div>
   )
 }

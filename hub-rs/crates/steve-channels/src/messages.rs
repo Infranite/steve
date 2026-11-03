@@ -271,15 +271,6 @@ pub fn is_ours_out(c: &Connection, space: &str, exts: &[&str]) -> ChannelResult<
     Ok(false)
 }
 
-/// Outbound messages Steve sent in a space since `since` (the loop guard's rate).
-pub fn sent_since(c: &Connection, space: &str, since: i64) -> ChannelResult<i64> {
-    Ok(c.query_row(
-        "SELECT count(*) FROM chan_messages WHERE space_id = ? AND direction = 'out' AND status = 'sent' AND coalesce(sent, created) >= ?",
-        params![space, since],
-        |r| r.get(0),
-    )?)
-}
-
 /// SSE `{type:"chan_message", id, space_id, ws}`.
 pub fn event(tx: &Tx, ws: &str, space: &str, id: &str) {
     tx.publish(ChangeEvent::ChanMessage {

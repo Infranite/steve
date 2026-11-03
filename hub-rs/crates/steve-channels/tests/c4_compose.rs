@@ -597,6 +597,15 @@ async fn a_failed_generation_still_reaches_you() {
 async fn create_item_answers_its_number_and_links_it() {
     let h = setup().await;
     let c = h.oncall.clone();
+    // an addressed message that needs hands-on work makes an item (the intent rule ahead of the reply)
+    set_rules(
+        &h,
+        &c,
+        json!([
+            {"when": {"kind": "intent", "text": "需要动手操作"}, "act": "create_item", "mode": "start"},
+            {"when": {"kind": "mention_or_dm"}, "act": "reply"}
+        ]),
+    );
     // history for the goal
     push(&h, &c, msg("C_OPS", "i0", "uhan", "db01 磁盘 95%", false)).await;
     h.env.gateway.script(
@@ -606,7 +615,7 @@ async fn create_item_answers_its_number_and_links_it() {
     let i = push(
         &h,
         &c,
-        msg("C_OPS", "i1", "ulilei", "帮忙清理一下 db01 的日志", false),
+        msg("C_OPS", "i1", "ulilei", "帮忙清理一下 db01 的日志", true),
     )
     .await;
     let r = i.response.clone().expect("response");
@@ -671,7 +680,12 @@ async fn create_item_answers_its_number_and_links_it() {
 
     // propose: “我整理成了一条需求…”
     let pm = h.pm.clone();
-    let i = push(&h, &pm, msg("C_REQ", "q1", "uhan", "希望能导出报表", false)).await;
+    let i = push(
+        &h,
+        &pm,
+        msg("C_REQ", "q1", "uhan", "@需求官 希望能导出报表", true),
+    )
+    .await;
     let r = i.response.clone().expect("response");
     let item = r.item_id.clone().expect("item");
     assert_eq!(r.label, format!("提了方案 {item}"));
@@ -690,7 +704,12 @@ async fn handoff_acknowledgements_are_not_drafted() {
     let h = setup().await;
     let c = h.oncall.clone();
     set_rules(&h, &c, json!([{"when": {"kind": "all"}, "act": "handoff"}]));
-    let i = push(&h, &c, msg("C_OPS", "h1", "ulilei", "找一下负责人", false)).await;
+    let i = push(
+        &h,
+        &c,
+        msg("C_OPS", "h1", "ulilei", "@值班小运 找一下负责人", true),
+    )
+    .await;
     let r = i.response.clone().expect("response");
     assert_eq!(r.act, Act::Handoff);
     let reqs = h.out.reqs.lock().unwrap().clone();

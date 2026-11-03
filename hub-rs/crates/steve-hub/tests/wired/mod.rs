@@ -818,13 +818,19 @@ async fn a_channel_round_trip_on_the_fake_feishu() {
     assert_eq!(s, 200, "{v}");
     let sent_before = fake.sent().len();
     use steve_channels::MessageSink;
-    let msg = steve_channels::InboundMessage::text(
+    let mut msg = steve_channels::InboundMessage::text(
         "oc_selfgroup0000000000000000001",
         "om_self_0001",
         steve_channels::HandleRef::new("feishu", "on_bob0000000000000000000000000001"),
         "周五的发布要不要推迟？",
         steve_store::now(),
     );
+    // it @s you: only addressed messages are acted on
+    msg.mentions.push(steve_channels::Mention {
+        handle: None,
+        name: "你".into(),
+        is_connection: true,
+    });
     let got = e
         .seams
         .channels

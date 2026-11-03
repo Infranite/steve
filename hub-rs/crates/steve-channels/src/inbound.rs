@@ -31,8 +31,7 @@ use serde_json::{Value, json};
 use steve_flow::{ActorRef, Ingested, RawEvent};
 use steve_modules::ApiError;
 use steve_modules::accounts::{ExtraHandle, Hints, Identified, identify};
-use steve_store::base::{self, DecisionKind};
-use steve_store::{NewDecision, Tx};
+use steve_store::Tx;
 
 use crate::channel::{HandleRef, InboundMessage, MemberInfo, SpaceInfo, SpaceKind};
 use crate::respond::{self, Plan, Response};
@@ -56,10 +55,6 @@ pub const LABEL_QUIET: &str = "不提醒，只记录";
 pub const LABEL_BLOCKED: &str = "已屏蔽，不处理";
 /// How long an outbound message without its provider id yet can come back as an echo.
 pub const ECHO_WINDOW_MS: i64 = 10 * 60_000;
-/// The loop guard: more than this many messages sent by Steve in one space …
-pub const RATE_MAX: i64 = 20;
-/// … within this window mutes the space.
-pub const RATE_WINDOW_MS: i64 = 10 * 60_000;
 
 /// What steps 4–7 do with the message.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,8 +93,6 @@ pub struct Inbound {
     /// S1's answer (`None` for a duplicate or when S1 failed: the message is stored regardless).
     pub event: Option<Ingested>,
     pub next: Next,
-    /// The loop guard muted the space just now.
-    pub muted_now: bool,
     /// What the conditions of the rules look at (not for duplicates).
     pub facts: Option<Facts>,
     /// Steps 4–7 ([`Channels::on_message`]; `None` from [`Channels::on_inbound`] and for
@@ -306,7 +299,6 @@ impl Channels {
                 type_key: String::new(),
                 event: None,
                 next: Next::Record(LABEL_BLOCKED),
-                muted_now: false,
                 facts: None,
                 response: None,
             });
@@ -677,7 +669,6 @@ impl Channels {
                     type_key: String::new(),
                     event: None,
                     next: Next::Record(label),
-                    muted_now: false,
                     facts: None,
                     response: None,
                 },
@@ -752,27 +743,6 @@ impl Channels {
             }
             n => n,
         };
-        let mut muted_now = false;
-        if !set.muted && messages::sent_since(tx, &space.id, now - RATE_WINDOW_MS)? > RATE_MAX {
-            muted_now = spaces::mute(tx, ws, &space.id, now)?;
-            if muted_now {
-                base::decisions::open(
-                    tx,
-                    &NewDecision {
-                        workspace_id: ws.into(),
-                        kind: DecisionKind::Fail.code().into(),
-                        subject_type: spaces::SUBJECT_SPACE.into(),
-                        subject_id: space.id.clone(),
-                        item_id: None,
-                        session_id: None,
-                        question: format!("{label} 里回复太多，已静默"),
-                        draft: None,
-                        options: None,
-                        requested_by: "steve".into(),
-                    },
-                )?;
-            }
-        }
         Ok(Written {
             inbound: Inbound {
                 message_id,
@@ -787,7 +757,6 @@ impl Channels {
                 type_key: type_key.into(),
                 event: None,
                 next,
-                muted_now,
                 facts: None,
                 response: None,
             },
@@ -1045,6 +1014,12 @@ impl Channels {
             // the conditions as the voice sees the message (another identity received it)
             facts.mentioned =
                 store.reader(|c| mentions_account(c, &inbound.message_id, &voice_account))?;
+        }
+
+        // only messages addressed to the speaking identity are acted on; the rest are recorded, and neither the
+        // space's flow nor any rule (nor an intent model) looks at them
+        if !rules::Gate::default().admits(&facts) {
+            return Ok(Response::skipped(rules::LABEL_UNADDRESSED));
         }
 
         // 5. the space's flow

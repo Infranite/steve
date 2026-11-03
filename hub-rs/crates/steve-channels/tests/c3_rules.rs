@@ -12,7 +12,7 @@ use axum::Router;
 use serde_json::{Value, json};
 use steve_channels::fake::channel::FakeChannel;
 use steve_channels::inbound::{LABEL_ELSEWHERE, LABEL_OWN};
-use steve_channels::respond::{HANDOFF_OPTIONS, SUBJECT_MESSAGE};
+use steve_channels::respond::SUBJECT_MESSAGE;
 use steve_channels::rules::{self, Act, INTENT_START, SELF_NO_REPLY};
 use steve_channels::{
     By, Channels, Inbound, InboundMessage, Mention, Next, Plan, Responder, SpaceKind, api,
@@ -341,6 +341,26 @@ fn expect(i: &Inbound, rule: Option<usize>, act: Act) -> steve_channels::Respons
     r
 }
 
+/// A message not addressed to the account (no @, not a private chat): only recorded by the gate, before
+/// any flow or rule, and no model is asked.
+fn unaddressed(h: &H, i: &Inbound, calls_before: usize) {
+    let r = expect(i, None, Act::Record);
+    assert_eq!(r.label, steve_channels::rules::LABEL_UNADDRESSED, "{r:?}");
+    assert!(
+        r.decision_id.is_none() && r.out_message_id.is_none(),
+        "{r:?}"
+    );
+    assert_eq!(
+        h.env.gateway.calls.lock().unwrap().len(),
+        calls_before,
+        "no model call"
+    );
+}
+
+fn calls(h: &H) -> usize {
+    h.env.gateway.calls.lock().unwrap().len()
+}
+
 fn nothing_sent(h: &H) {
     assert_eq!(
         count(
@@ -413,10 +433,10 @@ async fn your_account_drafts_records_and_takes_trigger_words() {
         ]
     );
 
-    // other group messages → only recorded
+    // other group messages → only recorded, by the gate
+    let n = calls(&h);
     let i = push(&h, &me, msg("C_DEV", "m2", "uhan", "我先下线了", false)).await;
-    let r = expect(&i, Some(1), Act::Record);
-    assert!(r.decision_id.is_none() && r.out_message_id.is_none());
+    unaddressed(&h, &i, n);
 
     // a private chat → draft
     let i = push(&h, &me, msg("C_MEDM", "m3", "ulilei", "在吗", false)).await;
@@ -452,8 +472,9 @@ async fn your_account_drafts_records_and_takes_trigger_words() {
     );
     assert_eq!(r.label, "触发语未接入，只记录");
     // someone else's trigger word is just a message
+    let n = calls(&h);
     let i = push(&h, &me, msg("C_DEV", "m6", "uhan", "/bot 帮我发", false)).await;
-    expect(&i, Some(1), Act::Record);
+    unaddressed(&h, &i, n);
 
     // your own account never replies by itself
     let err = h
@@ -474,7 +495,7 @@ async fn your_account_drafts_records_and_takes_trigger_words() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn oncall_replies_on_mention_and_keywords_and_makes_items_by_intent() {
+async fn oncall_replies_on_mention_and_records_the_rest() {
     let h = setup().await;
     let c = h.oncall.clone();
 
@@ -504,46 +525,17 @@ async fn oncall_replies_on_mention_and_keywords_and_makes_items_by_intent() {
     .remove(0);
     assert_eq!(p, vec![json!("persona"), json!("值班小运")]);
 
-    // keyword
-    let i = push(&h, &c, msg("C_OPS", "o2", "uwang", "今晚部署吗", false)).await;
-    assert_eq!(i.response.clone().expect("r").rule, Some(1));
-
-    // intent: the gateway says it needs hands-on work → create_item (until C4: handed to you)
-    h.env.gateway.reply("{\"match\": true}");
-    let calls = h.env.gateway.calls.lock().unwrap().len();
-    let i = push(
-        &h,
-        &c,
-        msg("C_OPS", "o3", "uhan", "db-2 磁盘满了，帮忙清一下", false),
-    )
-    .await;
-    let r = i.response.clone().expect("r");
-    assert_eq!(r.rule, Some(2));
-    assert_eq!(r.act, Act::Handoff, "{r:?}");
-    let d = decision(&h, r.decision_id.as_deref().expect("decision"));
-    assert_eq!(d[0], json!("ask"));
-    assert_eq!(d[3], json!(json!(HANDOFF_OPTIONS).to_string()));
-    let (n, (tier, prompt)) = {
-        let prompts = h.env.gateway.calls.lock().unwrap();
-        (prompts.len(), prompts.last().expect("prompt").clone())
-    };
-    assert_eq!(n, calls + 1, "one judgement");
-    assert_eq!(tier, steve_modules::Tier::Fast);
-    assert!(prompt.contains("条件：需要动手操作"), "{prompt}");
-    assert!(prompt.contains("db-2 磁盘满了"), "{prompt}");
-    // the context: earlier messages of the space, oldest first
-    let a = prompt.find("昨晚备份是不是又挂了").expect("context 1");
-    let b = prompt.find("今晚部署吗").expect("context 2");
-    assert!(a < b, "{prompt}");
-
-    // the gateway says no → nothing matches → record
-    h.env.gateway.reply("{\"match\": false}");
-    let i = push(&h, &c, msg("C_OPS", "o4", "uwang", "今天天气不错", false)).await;
-    expect(&i, None, Act::Record);
-    // the gateway fails → counts as no
-    h.env.gateway.fail("timeout");
-    let i = push(&h, &c, msg("C_OPS", "o5", "uwang", "重启一下 web-1", false)).await;
-    expect(&i, None, Act::Record);
+    // keyword and intent rules never see a message that does not address the account: recorded by the
+    // gate, and the intent model is not asked
+    for (id, text) in [
+        ("o2", "今晚部署吗"),
+        ("o3", "db-2 磁盘满了，帮忙清一下"),
+        ("o4", "今天天气不错"),
+    ] {
+        let n = calls(&h);
+        let i = push(&h, &c, msg("C_OPS", id, "uwang", text, false)).await;
+        unaddressed(&h, &i, n);
+    }
     nothing_sent(&h);
 }
 
@@ -552,7 +544,7 @@ async fn pm_handoff_reaches_the_inbox_while_muted() {
     let h = setup().await;
     let c = h.pm.clone();
 
-    // 产品需求群: @需求官 → reply; a plain idea → intent “是需求” (the gateway says no) → record
+    // 产品需求群: @需求官 → reply; a plain idea does not address it → recorded, no intent judgement
     let i = push(
         &h,
         &c,
@@ -566,8 +558,9 @@ async fn pm_handoff_reaches_the_inbox_while_muted() {
     )
     .await;
     assert_eq!(i.response.clone().expect("r").rule, Some(0));
+    let n = calls(&h);
     let i = push(&h, &c, msg("C_REQ", "p2", "uwang", "哈哈今天好热", false)).await;
-    expect(&i, None, Act::Record);
+    unaddressed(&h, &i, n);
 
     // Acme 客户群: muted, its own rules: 被 @ → 转给你, 全部消息 → 只记录 (the prototype lists the
     // two the other way round, where first-match would never reach the handoff)
@@ -619,8 +612,9 @@ async fn pm_handoff_reaches_the_inbox_while_muted() {
     assert!(h.rec.acks.lock().unwrap().is_empty(), "muted: says nothing");
 
     // plain messages there: recorded
+    let n = calls(&h);
     let i = push(&h, &c, msg("C_ACME", "p5", "usarah", "thanks", false)).await;
-    expect(&i, Some(1), Act::Record);
+    unaddressed(&h, &i, n);
 
     // muted turns a reply into record
     let (s, _) = call(
@@ -731,8 +725,13 @@ async fn unconfirmed_contacts_are_not_members() {
     .await;
     assert_eq!(s, 200, "{v}");
 
-    // 韩梅梅 is still unconfirmed: not a member
-    let i = push(&h, &c, msg("C_OPS", "u2", "uhan", "看下这个", false)).await;
+    // conditions refine messages addressed to the account; 韩梅梅 is still unconfirmed: not a member
+    let i = push(
+        &h,
+        &c,
+        msg("C_OPS", "u2", "uhan", "@值班小运 看下这个", true),
+    )
+    .await;
     expect(&i, Some(2), Act::Record);
 
     // confirmed: the first rule
@@ -746,8 +745,17 @@ async fn unconfirmed_contacts_are_not_members() {
             Ok(())
         })
         .expect("confirm");
-    let i = push(&h, &c, msg("C_OPS", "u3", "uhan", "看下这个", false)).await;
+    let i = push(
+        &h,
+        &c,
+        msg("C_OPS", "u3", "uhan", "@值班小运 看下这个", true),
+    )
+    .await;
     expect(&i, Some(0), Act::Handoff);
+    // without the @ the same member is only recorded
+    let n = calls(&h);
+    let i = push(&h, &c, msg("C_OPS", "u3b", "uhan", "看下这个", false)).await;
+    unaddressed(&h, &i, n);
 
     // a confirmed team member
     let other = push(&h, &c, msg("C_OPS", "u4", "uwang", "你好", false)).await;
@@ -762,7 +770,12 @@ async fn unconfirmed_contacts_are_not_members() {
             Ok(())
         })
         .expect("member");
-    let i = push(&h, &c, msg("C_OPS", "u5", "uwang", "部署好了", false)).await;
+    let i = push(
+        &h,
+        &c,
+        msg("C_OPS", "u5", "uwang", "@值班小运 部署好了", true),
+    )
+    .await;
     expect(&i, Some(1), Act::Draft);
 
     // references are checked
@@ -804,10 +817,17 @@ async fn replies_to_the_bot_and_rule_validation_over_rest() {
     )
     .await;
     assert_eq!(s, 200);
+    // a reply to the bot's message that does not @ it is not addressed to it: recorded
     let mut m = msg("C_OPS", "r2", "uhan", "谢谢", false);
     m.reply_to = Some("fm_1".into());
+    let n = calls(&h);
     let i = push(&h, &c, m).await;
     assert!(i.facts.as_ref().expect("facts").reply_to_me);
+    unaddressed(&h, &i, n);
+    // with the @ the reply_to_me rule decides
+    let mut m = msg("C_OPS", "r2b", "uhan", "@值班小运 谢谢", true);
+    m.reply_to = Some("fm_1".into());
+    let i = push(&h, &c, m).await;
     expect(&i, Some(0), Act::Draft);
     let i = push(&h, &c, msg("C_OPS", "r3", "uhan", "谢谢", false)).await;
     expect(&i, None, Act::Record);
@@ -1083,8 +1103,9 @@ async fn default_rules_of_a_new_own_account() {
     expect(&i, Some(0), Act::Draft);
     let i = push(&h, &con, msg("C_DEV", "d2", "ulilei", "@你 看下", true)).await;
     expect(&i, Some(1), Act::Draft);
+    let n = calls(&h);
     let i = push(&h, &con, msg("C_DEV", "d3", "ulilei", "闲聊", false)).await;
-    expect(&i, Some(2), Act::Record);
+    unaddressed(&h, &i, n);
     let s = h
         .env
         .store()
@@ -1140,4 +1161,83 @@ async fn without_send_as_you_your_account_only_records() {
             .reader(|c| spaces::can_send_as_you(c, &con))
             .is_ok_and(|ok| !ok)
     );
+}
+
+/// An intent condition still refines a message addressed to the account: the fast tier judges it with
+/// the space's earlier messages as context; a "no" falls through to the next rule.
+#[tokio::test(flavor = "multi_thread")]
+async fn intent_refines_an_addressed_message() {
+    let h = setup().await;
+    let c = h.oncall.clone();
+    let first = push(
+        &h,
+        &c,
+        msg(
+            "C_OPS",
+            "i0",
+            "uhan",
+            "@值班小运 昨晚备份是不是又挂了？",
+            true,
+        ),
+    )
+    .await;
+    let space = first.space_id.clone();
+    let (s, v) = call(
+        &h.api,
+        Some(&caller(WS, ME)),
+        "PATCH",
+        &format!("/spaces/{space}"),
+        Some(&json!({"rules": [
+            {"when": {"kind": "intent", "text": "需要动手操作"}, "act": "handoff"},
+            {"when": {"kind": "mention_or_dm"}, "act": "draft"}
+        ]})),
+    )
+    .await;
+    assert_eq!(s, 200, "{v}");
+    h.env.gateway.reply("{\"match\": true}");
+    let n = calls(&h);
+    let i = push(
+        &h,
+        &c,
+        msg(
+            "C_OPS",
+            "i1",
+            "uhan",
+            "@值班小运 db-2 磁盘满了，帮忙清一下",
+            true,
+        ),
+    )
+    .await;
+    expect(&i, Some(0), Act::Handoff);
+    let (k, (tier, prompt)) = {
+        let prompts = h.env.gateway.calls.lock().unwrap();
+        (prompts.len(), prompts.last().expect("prompt").clone())
+    };
+    assert_eq!(k, n + 1, "one judgement");
+    assert_eq!(tier, steve_modules::Tier::Fast);
+    assert!(
+        prompt.contains("条件：需要动手操作") && prompt.contains("db-2 磁盘满了"),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains("昨晚备份是不是又挂了"),
+        "earlier messages as context: {prompt}"
+    );
+    // the model says no, or fails: the next rule
+    h.env.gateway.reply("{\"match\": false}");
+    let i = push(
+        &h,
+        &c,
+        msg("C_OPS", "i2", "uhan", "@值班小运 今天天气不错", true),
+    )
+    .await;
+    expect(&i, Some(1), Act::Draft);
+    h.env.gateway.fail("timeout");
+    let i = push(
+        &h,
+        &c,
+        msg("C_OPS", "i3", "uhan", "@值班小运 重启一下 web-1", true),
+    )
+    .await;
+    expect(&i, Some(1), Act::Draft);
 }

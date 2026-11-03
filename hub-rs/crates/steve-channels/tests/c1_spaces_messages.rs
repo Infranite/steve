@@ -468,15 +468,17 @@ async fn types_mention_reply_and_mentions_column() {
     );
 }
 
+/// Many replies in a short time never silence a space by themselves (bots' messages are only recorded,
+/// and Steve answers only when addressed, so there is no loop to break).
 #[tokio::test(flavor = "multi_thread")]
-async fn too_many_replies_mute_the_space_with_a_fail_decision() {
+async fn many_replies_do_not_silence_the_space() {
     let h = setup();
     let r = push(&h, FakeChannel::message("G1", "m0", "ualice", "hi")).await;
     let now = h.ch.now();
     h.env
         .store()
         .with_conn(|c| {
-            for i in 0..21 {
+            for i in 0..50 {
                 c.execute(
                     "INSERT INTO chan_messages (id, workspace_id, space_id, external_id, direction, text, status, created, sent)
                      VALUES (?, 'default', ?, ?, 'out', 'x', 'sent', ?, ?)",
@@ -486,29 +488,22 @@ async fn too_many_replies_mute_the_space_with_a_fail_decision() {
             Ok(())
         })
         .unwrap();
-    let r2 = push(&h, FakeChannel::message("G1", "m1", "ualice", "再来")).await;
-    assert!(r2.muted_now);
+    push(&h, FakeChannel::message("G1", "m1", "ualice", "再来")).await;
     assert_eq!(
         one(
             &h,
-            "SELECT muted FROM space_settings WHERE space_id = ?",
+            "SELECT coalesce(max(muted), 0) FROM space_settings WHERE space_id = ?",
             &[&r.space_id]
         ),
-        vec![json!(1)]
+        vec![json!(0)]
     );
     assert_eq!(
         one(
             &h,
-            "SELECT kind, question FROM decisions WHERE subject_id = ? AND kind = 'fail'",
+            "SELECT count(*) FROM decisions WHERE subject_id = ? AND kind = 'fail'",
             &[&r.space_id]
         ),
-        vec![json!("fail"), json!("运维群 里回复太多，已静默")]
-    );
-    // once muted, no second decision
-    assert!(
-        !push(&h, FakeChannel::message("G1", "m2", "ualice", "还在吗"))
-            .await
-            .muted_now
+        vec![json!(0)]
     );
 }
 
