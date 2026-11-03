@@ -39,8 +39,13 @@ LABEL=${STEVE_LABEL:-io.github.infranite.steve} PORT=${STEVE_PORT:-8440} DRAIN_S
 REL=$HOME_DIR/releases WEB=$HOME_DIR/web LOGS=$HOME_DIR/logs/release HIST=$HOME_DIR/releases/history.jsonl
 CARGO_TARGET=${STEVE_CARGO_TARGET_DIR:-$HOME_DIR/build/cargo-target} HEALTH_TRIES=${STEVE_HEALTH_TRIES:-40} DB=$HOME_DIR/data/steve.sqlite3
 mkdir -p $REL $WEB $LOGS $HOME_DIR/backups
-PREV=$(basename "$(readlink $HOME_DIR/current 2>/dev/null)" 2>/dev/null) WEB_PREV=$(basename "$(readlink $WEB/current 2>/dev/null)" 2>/dev/null)
+WEB_PREV_TARGET=$(readlink $WEB/current 2>/dev/null)
+PREV=$(basename "$(readlink $HOME_DIR/current 2>/dev/null)" 2>/dev/null) WEB_PREV=$(basename "$WEB_PREV_TARGET" 2>/dev/null)
 [[ $PREV == . ]] && PREV=""; [[ $WEB_PREV == . ]] && WEB_PREV=""
+# Legacy web/current may point into a Hub release's web/dist without release.json.
+# Keep prev metadata compatible, but verify the restored page using its actual version tag.
+WEB_PREV_VERSION=$(json_field $WEB/current/release.json version)
+[[ -n $WEB_PREV_VERSION ]] || WEB_PREV_VERSION=$(sed -n 's/.*name="steve-web-version" content="\([^"]*\)".*/\1/p' $WEB/current/index.html 2>/dev/null | head -1)
 LOG=$LOGS/$(strftime '%Y%m%d-%H%M%S' $EPOCHSECONDS)-run-$$.log
 VER="" SHA="" COMMIT="" BASE="" KIND="" DO_HUB=0 DO_WEB=0 HUB_OK=0 WEB_OK=0 HUB_FILES=() WEB_FILES=()
 # the hub lines of history.jsonl also say which Hub ran before and after, the database backup and the schema around it
@@ -382,9 +387,13 @@ web_release() {
     if ! web_verify $VER; then
       err="新前端切换后检查没有通过"; rb=true
       step "web: roll back to ${WEB_PREV:-nothing}"
-      if [[ -n $WEB_PREV && -d $WEB/$WEB_PREV ]]; then
-        web_switch $WEB $WEB_PREV
-        web_verify $WEB_PREV || { err="新前端检查没有通过，切回 $WEB_PREV 后检查也没有通过"; print "   the previous build does not check out either" }
+      if web_restore "$WEB" "$WEB_PREV_TARGET"; then
+        web_verify "${WEB_PREV_VERSION:-$WEB_PREV}" || { err="新前端检查没有通过，切回 $WEB_PREV 后检查也没有通过"; print "   the previous build does not check out either" }
+      elif [[ -n $WEB_PREV_TARGET ]]; then
+        err="新前端检查没有通过，恢复旧前端链接失败"
+        print -r -- "   could not restore $WEB/current -> $WEB_PREV_TARGET"
+        # Keep the failed build while current still points at it.
+        history web false "$err" false $T_WEB "$WEB_PREV" $WEB_FILES; web_last false "$err" false; WEB_ERR=$err; return 1
       else
         rm -f -- $WEB/current; print "   no previous build: web/current removed"
       fi
@@ -404,10 +413,7 @@ web_release() {
   return 0
 }
 
-# what changed since <commit> (empty if it is unknown here), web/ and the root package files count for the web build
-changed_since() { # commit → the paths, one per line; "?" when the commit is unknown
-  if [[ -n $1 ]] && git -C $REPO cat-file -e "$1^{commit}" 2>/dev/null; then git -C $REPO diff --name-only $1 HEAD; else print "?"; fi
-}
+# web/ and the root package files count for the web build
 is_web() { [[ $1 == web/* || $1 == package.json || $1 == package-lock.json ]] }
 is_hub() { [[ $1 != web/* ]] }
 
@@ -440,9 +446,9 @@ main() {
   local hub_at web_at all
   hub_at=$(json_field $HOME_DIR/current/release.json commit) web_at=$(json_field $WEB/current/release.json commit)
   print -r -- "   hub deployed from ${hub_at:-unknown}, web deployed from ${web_at:-unknown}"
-  all=$(changed_since $hub_at); [[ $all == "?" ]] && { print "   hub commit unknown here: comparing with main before the merge"; all=$(git diff --name-only $BASE HEAD) }
+  all=$(changed_since "$hub_at"); [[ $all == "?" ]] && { print "   hub commit unknown here: comparing with main before the merge"; all=$(git diff --name-only $BASE HEAD) }
   for f in ${(f)all}; do is_hub $f && HUB_FILES+=$f; done
-  all=$(changed_since $web_at); [[ $all == "?" ]] && { print "   web commit unknown here: comparing with main before the merge"; all=$(git diff --name-only $BASE HEAD) }
+  all=$(changed_since "$web_at"); [[ $all == "?" ]] && { print "   web commit unknown here: comparing with main before the merge"; all=$(git diff --name-only $BASE HEAD) }
   for f in ${(f)all}; do is_web $f && WEB_FILES+=$f; done
   print -r -- "   hub files changed (${#HUB_FILES}):"; for f in $HUB_FILES; do print -r -- "     $f"; done
   print -r -- "   web files changed (${#WEB_FILES}):"; for f in $WEB_FILES; do print -r -- "     $f"; done

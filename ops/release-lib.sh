@@ -33,6 +33,16 @@ jbool() { (( $1 )) && print -n true || print -n false }
 # a field of a flat release.json
 json_field() { sed -n "s/.*\"$2\":\"\\([^\"]*\\)\".*/\\1/p" $1 2>/dev/null | head -1 }
 
+# Empty/unknown deployed commits are normal for legacy web builds.
+changed_since() { # commit → paths, or "?" when the commit is unknown
+  local commit=${1:-}
+  if [[ -n $commit ]] && git -C $REPO cat-file -e "$commit^{commit}" 2>/dev/null; then
+    git -C $REPO diff --name-only "$commit" HEAD
+  else
+    print "?"
+  fi
+}
+
 # install a built web/dist as web build <ver>: copy, tag index.html with the version, write release.json
 web_install() { # src dest ver commit branch
   local src=$1 dest=$2 ver=$3 commit=$4 branch=$5 f c
@@ -50,7 +60,17 @@ web_install() { # src dest ver commit branch
 }
 # point web/current at a build; ln -n replaces the link itself (BSD mv onto a symlinked directory would move into it)
 web_switch() { # webroot ver
+  web_switch_target "$1" "$1/$2"
+}
+web_switch_target() { # webroot symlink-target (preserve relative and legacy external targets)
   # a new link renamed over the old one: rename is atomic, so no request sees a missing web dir (mv -h: don't follow the old link)
-  ln -sfn $1/$2 $1/.current.new && mv -fh $1/.current.new $1/current || { print -r -- "✗ switching $1/current to $1/$2 failed"; return 1 }
+  ln -sfn "$2" "$1/.current.new" && mv -fh "$1/.current.new" "$1/current" || { print -r -- "✗ switching $1/current to $2 failed"; return 1 }
   print -r -- "   $1/current -> $(readlink $1/current)"
+}
+web_restore() { # webroot previous-raw-symlink-target
+  local root=$1 target=${2:-} resolved
+  [[ -n $target ]] || return 1
+  [[ $target == /* ]] && resolved=$target || resolved=$root/$target
+  [[ -d $resolved ]] || return 1
+  web_switch_target "$root" "$target"
 }

@@ -38,3 +38,16 @@ flowchart LR
 - 未推送、未发布，线上实际效果未验证。生产回复速度、模型与审批策略均未调整。
 
 复核入口：启动 Web 开发服务后访问 `/test/fixtures/chat-layout.html`，`?long` 查看长回复，`?empty` 查看空对话。fixture 跟随浏览器的浅深色偏好；浏览器测试通过 `PLAYWRIGHT_MODULE`、`PLAYWRIGHT_EXECUTABLE`、`STEVE_TEST_WEB` 和 `STEVE_TEST_SHOTS` 配置运行环境与截图目录。
+
+## 发布后续（2026-11-03）
+
+首次发布请求已执行但未上线：发布器将分支重新合并为 `fc7618e`，随后自动发布在 `steve-keyhelper` 身份校验处停止，主分支已由发布器恢复。实际回读服务仍为 `0.2.7`、`ab78f6a`，`ok=true`。
+
+排查同时发现两个前端发布兼容问题，已在任务分支修复：
+
+- 旧前端目录没有 `release.json` 时，空 commit 参数在 `set -u` 下触发错误，前端变更被误判为空。现在缺失、空值和未知 commit 均安全返回未知基线，由现有逻辑比较合并前的主分支。
+- 旧 `web/current` 指向 Hub 发布目录下的 `web/dist`，原脚本只保留 basename，验证失败时无法恢复真实路径。现在保留原始链接目标，并在回滚后验证旧页面的实际版本；支持绝对、相对和正常版本目录。若原目标已经消失，则保留当前构建并明确报告恢复失败，避免悬空链接。
+
+新增隔离测试 `ops/test-release-safety.sh` 覆盖上述情况，以及恢复失败和没有旧版本的分支，检查通过。完整 `bash ops/test-release.sh` 隔离发布集成测试的 75 项检查通过，包含前端切换、失败回滚、Hub/Web 分离、TS/Rust 切换和迁移幂等。复跑 `npm run check`、`npm test`（58 + 10 项）、`npm run build` 和三组浏览器测试均通过；新截图位于 `/private/tmp/st23-qa/rebase/`，发布测试日志为 `release-safety.log` 和 `release-integration.log`。
+
+继续发布应使用修复后的脚本显式 `--web steve/st-23 ST-23`，仅构建和切换前端，保留当前 Hub 和密钥配置，并保留现有旧构建。该步骤是新的生产发布，等待单次授权后执行；发布完成前不视为上线成功。`steve_publish` 当前没有模式参数，重复调用仍会走自动 Hub 发布路径。
