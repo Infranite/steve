@@ -1,7 +1,7 @@
 /* #/contacts/:id and #/contacts/me — one contact (prototype people.tsx ContactView) */
 import { useState } from "react"
 import { cn } from "cn"
-import { CheckIcon, ChevronRightIcon, EllipsisIcon, ListTodoIcon, MailIcon, MessageSquareIcon, CalendarIcon, PlusIcon, StarIcon, XIcon, ZapIcon } from "lucide-react"
+import { CheckIcon, ChevronRightIcon, EllipsisIcon, ListTodoIcon, MailIcon, PencilIcon, MessageSquareIcon, CalendarIcon, PlusIcon, StarIcon, XIcon, ZapIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Input } from "@/components/ui/input"
@@ -13,7 +13,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { st, tm } from "@/store"
 import { go, Page, Group, Row, Meta, Empty, Tags, ItemNo, Status } from "@/ui"
 import { AskSteve, type Ctx } from "@/config-ui"
-import { nameOf, people, type Attr, type Contact, type Level, type Mem } from "@/api/people"
+import { nameOf, people, type Attr, type Contact, type Level, type Mem, type ProfileField } from "@/api/people"
 import { ContactAvatar, ITEM_ROLE, KIND, LEVEL, LevelSel, Loading, MEM_KIND, PeopleGate, REL, ROLE, Section, TEAM_KIND, TOUCH, act, day, relLabel, useLoad, visLabel , SubMeta } from "@/people/common"
 import { orgLine } from "@/people/contacts"
 import { MergeDialog } from "@/people/pending"
@@ -29,15 +29,15 @@ const keyFor = (label: string) => { let h = 2166136261; for (const ch of label) 
 
 export function ContactView({ id }: { id: string }) { return <PeopleGate>{() => <ContactPage id={id} />}</PeopleGate> }
 function ContactPage({ id }: { id: string }) {
-  const { data: c, err } = useLoad(() => people.contact(id), [id])
+  const { data: c, err, reload } = useLoad(() => people.contact(id), [id])
   if (err) return <Page title="联系人" back={["#/contacts", "联系人"]}><Empty title={err.status === 404 ? "联系人不存在" : "联系人载入失败"} sub={err.status === 404 ? "可能已经被删除或合并。" : err.message} /></Page>
   if (!c) return <Page title="联系人" back={["#/contacts", "联系人"]}><Loading /></Page>
   if (c.status === "merged" && c.merged_into) return <Page title={c.name} back={["#/contacts", "联系人"]}><Empty title="已经合并" sub="这个联系人已经合并到另一个联系人。" /><div className="flex justify-center"><Button variant="outline" onClick={() => go("#/contacts/" + c.merged_into)}>去看合并后的联系人</Button></div></Page>
-  return <ContactBody c={c} />
+  return <ContactBody c={c} reload={() => void reload()} />
 }
 
-function ContactBody({ c }: { c: Contact }) {
-  const [del, setDel] = useState(false), [edit, setEdit] = useState(false), [merge, setMerge] = useState(false)
+function ContactBody({ c, reload }: { c: Contact; reload: () => void }) {
+  const [del, setDel] = useState(false), [edit, setEdit] = useState(false), [merge, setMerge] = useState(false), [job, setJob] = useState(false), [email, setEmail] = useState(false)
   const [newAttr, setNewAttr] = useState<{ key?: string; label: string } | null>(null)
   const items = useLoad(() => people.items(c.id), [c.id], ["party", "item"])
   const tl = useLoad(() => people.timeline(c.id), [c.id])
@@ -49,18 +49,19 @@ function ContactBody({ c }: { c: Contact }) {
   const mates = (org.data?.people ?? []).filter((x) => x.id !== c.id)
   const past = c.jobs.filter((j) => j.to), now = c.jobs.filter((j) => !j.to)
   const attrs = c.is_me ? [...ME_KEYS.flatMap(([k]) => c.attrs.filter((a) => a.key === k)), ...c.attrs.filter((a) => !ME_KEYS.some(([k]) => k === a.key))] : c.attrs
-  const missing = c.is_me ? ME_KEYS.filter(([k]) => !c.attrs.some((a) => a.key === k)) : []
+  const missing = c.is_me ? ME_KEYS.filter(([k]) => !c.attrs.some((a) => a.key === k)) : [["phone", "电话"], ["city", "城市"]].filter(([k]) => !c.attrs.some((a) => a.key === k))
   const setRels = (r: string) => void act(people.patchContact(c.id, { rels: c.rels.includes(r) ? c.rels.filter((x) => x !== r) : [...c.rels, r] }))
   return (
     <Page title={nameOf(c)} back={["#/contacts", "联系人"]} max={760}
       sub={<Meta>{orgLine(c) && (orgId ? <a href={"#/orgs/" + orgId} className="hover:text-foreground">{orgLine(c)}</a> : <span>{orgLine(c)}</span>)}{rels.length > 0 && <span>{rels.map(relLabel).join("、")}</span>}
         {c.kind && c.kind !== "real" && <span>{KIND[c.kind]}</span>}{c.aliases.length > 0 && <span>也叫 {c.aliases.join("、")}</span>}<span>{visLabel(c.visibility)}</span></Meta>}
       actions={<>
+        <Button size="sm" variant="outline" onClick={() => setEdit(true)}>编辑资料</Button>
         <Button variant="ghost" size="icon-sm" aria-label={c.important ? "取消重要" : "标为重要"} aria-pressed={c.important} className="text-muted-foreground" onClick={() => void act(people.patchContact(c.id, { important: !c.important }))} data-star-contact><StarIcon className={cn(c.important && "fill-current text-foreground")} /></Button>
         <DropdownMenu>
           <DropdownMenuTrigger render={<Button variant="ghost" size="icon-sm" aria-label="更多" className="text-muted-foreground" data-contact-more />}><EllipsisIcon /></DropdownMenuTrigger>
           <DropdownMenuContent align="end" className="min-w-44">
-            <DropdownMenuItem onClick={() => setEdit(true)} data-edit-contact>编辑名字和备注</DropdownMenuItem>
+            <DropdownMenuItem onClick={() => setEdit(true)} data-edit-contact>编辑资料</DropdownMenuItem>
             {!c.is_me && <DropdownMenuItem onClick={() => setMerge(true)} data-merge-contact>合并到另一个联系人…</DropdownMenuItem>}
             {!c.is_me && <><DropdownMenuSeparator /><DropdownMenuItem variant="destructive" onClick={() => setDel(true)} data-del-contact>删除</DropdownMenuItem></>}
           </DropdownMenuContent>
@@ -69,9 +70,12 @@ function ContactBody({ c }: { c: Contact }) {
         <AlertDialogHeader><AlertDialogTitle>删除 {c.name}？</AlertDialogTitle><AlertDialogDescription>{accts.data ? `${accts.data.length} 个账号、` : ""}{c.attrs.length} 个属性、{mems.data?.length ?? 0} 条记忆一起删除；事项和消息里的引用改为“已删除的联系人”。</AlertDialogDescription></AlertDialogHeader>
         <AlertDialogFooter><AlertDialogCancel>取消</AlertDialogCancel><AlertDialogAction variant="destructive" data-del-confirm onClick={async () => { if (await act(people.deleteContact(c.id), "已删除")) go("#/contacts") }}>删除</AlertDialogAction></AlertDialogFooter>
       </AlertDialogContent></AlertDialog>
-      {edit && <EditDialog c={c} onClose={() => setEdit(false)} />}
+      {edit && <EditDialog c={c} onClose={() => setEdit(false)} onSaved={() => { setEdit(false); reload() }} />}
+      {email && <EmailDialog id={c.id} onClose={() => setEmail(false)} onSaved={() => { setEmail(false); reload(); accts.reload() }} />}
+      {job && <JobDialog c={c} onClose={() => setJob(false)} onSaved={() => { setJob(false); reload() }} />}
       {merge && <MergeDialog from={c} onClose={() => setMerge(false)} />}
       <div className="flex flex-col gap-8">
+        {c.kind === "virtual" && <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border p-3 text-sm"><span>已忽略，作为虚拟账号管理。</span><Button size="sm" variant="outline" onClick={async () => { if (await act(people.patchContact(c.id, { kind: "real" }), "已恢复为联系人")) reload() }}>恢复为联系人</Button></div>}
         {unconfirmed && <div className="flex flex-wrap items-center gap-3 rounded-xl border px-4 py-3" data-unconfirmed-banner>
           <div className="min-w-0 flex-1"><div className="type-headline">未确认的联系人</div><div className="mt-0.5 type-callout text-muted-foreground">Steve 认不出这个账号的主人。照常处理消息，但不会被当作熟人对待。</div></div>
           <Button size="sm" variant="outline" onClick={() => setMerge(true)}>合并到…</Button>
@@ -80,15 +84,17 @@ function ContactBody({ c }: { c: Contact }) {
           {!c.is_me && <DropdownMenu><DropdownMenuTrigger render={<button type="button" className="type-footnote text-muted-foreground hover:text-foreground" data-rel-menu />}>{rels.length ? "改关系" : "+ 关系"}</DropdownMenuTrigger>
             <DropdownMenuContent align="start" className="min-w-36">{Object.keys(REL).filter((x) => x !== "me").map((x) => <DropdownMenuItem key={x} onClick={() => setRels(x)} data-rel-opt={x}>{c.rels.includes(x) ? <CheckIcon /> : <span className="size-4" />}{REL[x]}</DropdownMenuItem>)}</DropdownMenuContent></DropdownMenu>}</div></div></div>
         <AskSteve key={c.id} ctx={ctxOf("contact", c.id)} placeholder={c.is_me ? "告诉 Steve 关于你的事，例如：叫我小李；我在上海，说中文；邮件先给结论" : `告诉 Steve 关于 ${first(c.name)} 的事，例如：换到 Globex 做产品负责人了；电话是 …；以后叫她 Sarah`} />
+        {c.profile && Object.values(c.profile.fields).some((f) => f.state === "missing") && <Section label="资料完整性"><Group>{Object.entries(c.profile.fields).filter(([, f]) => f.state === "missing").map(([key, f]) => <Row key={key} title={({ name: "姓名", org: "组织", title: "职位", email: "邮箱" } as Record<string, string>)[key]} sub={profileReason(f)}><Button size="xs" variant="ghost" onClick={() => key === "name" ? setEdit(true) : key === "email" ? setEmail(true) : setJob(true)}>补充</Button></Row>)}</Group>{c.profile.next_check && <p className="mt-2 text-xs text-muted-foreground">下次自动补全：{new Date(c.profile.next_check).toLocaleString()}</p>}</Section>}
         <Section label="资料" right={<Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => setNewAttr({ label: "" })} data-add-attr><PlusIcon />添加</Button>}>
           <Group>
-            {!c.is_me && <Row title="组织与职位" sub={past.length ? "之前：" + past.map((p) => `${p.org_name}${p.title ? " · " + p.title : ""}（到 ${p.to}）`).join("；") : undefined}><span className="type-callout">{now.map((j) => [j.org_name, j.title].filter(Boolean).join(" · ")).join("；") || "—"}</span></Row>}
-            {attrs.map((a) => <AttrRow key={a.id} a={a} />)}
-            {missing.map(([k, l]) => <Row key={k} title={l} sub="还没填"><Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => setNewAttr({ key: k, label: l })} data-fill-attr={k}><PlusIcon />填写</Button></Row>)}
-            {newAttr && <NewAttr party={c.id} init={newAttr} onDone={() => setNewAttr(null)} />}
+            {!c.is_me && <Row title="组织与职位" sub={past.length ? "之前：" + past.map((p) => `${p.org_name}${p.title ? " · " + p.title : ""}（到 ${p.to}）`).join("；") : undefined}><span className="min-w-0 break-words type-callout">{now.map((j) => [j.org_name, j.dept, j.title].filter(Boolean).join(" · ")).join("；") || "尚未填写"}</span><Button size="xs" variant="ghost" onClick={() => setJob(true)}>编辑任职</Button></Row>}
+            {attrs.map((a) => <AttrRow key={a.id} a={a} onChanged={reload} />)}
+            {missing.map(([k, l]) => <Row key={k} title={l} sub="暂无资料，可手动补充"><Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => setNewAttr({ key: k, label: l })} data-fill-attr={k}><PlusIcon />填写</Button></Row>)}
+            {newAttr && <NewAttr party={c.id} init={newAttr} onDone={() => { setNewAttr(null); reload() }} />}
           </Group>
           <div className="mt-2 px-1 type-footnote text-muted-foreground">每项资料都有披露级别：在群里回复时，超出听众范围的资料不会被说出来。属性可以自己加，也可以在设置里统一定义。</div>
         </Section>
+        <Section label="关联账号" right={<Button size="xs" variant="ghost" onClick={() => setEmail(true)}>添加邮箱</Button>}>{accts.data?.length ? <Group>{accts.data.map((a) => <Row key={a.id} title={a.display_name || a.system.name} sub={`${a.system.name} · 来源：${a.source_label}`}><span className="max-w-[50%] break-all text-sm">{a.handle}</span></Row>)}</Group> : <Empty title="暂无关联账号资料" />}</Section>
         <HoldingsSection person={c.id} name={first(c.name)} isMe={c.is_me} isBot={c.kind === "bot"} />
         <Section label={`所在团队 · ${c.teams.length}`}>{c.teams.length ? <Group>{c.teams.map((g) => <Row key={g.id} icon={<ContactAvatar name={g.name} type="team" size={28} />} title={g.name} sub={`${TEAM_KIND[g.kind] ?? g.kind} · ${ROLE[g.role] ?? g.role}`} onClick={() => go("#/teams/" + g.id)} data-contact-team={g.name}><ChevronRightIcon className="size-4 text-tertiary" /></Row>)}</Group> : <Empty title="不在任何团队里" />}</Section>
         <Section label={`相关事项 · ${items.data?.length ?? 0}`}>
@@ -110,11 +116,14 @@ function ContactBody({ c }: { c: Contact }) {
   )
 }
 
-export function AttrRow({ a, readOnly }: { a: Attr; readOnly?: boolean }) {
+export function AttrRow({ a, readOnly, onChanged }: { a: Attr; readOnly?: boolean; onChanged?: () => void }) {
+  const [editing, setEditing] = useState(false), [value, setValue] = useState(a.value), [busy, setBusy] = useState(false)
+  const save = async () => { setBusy(true); const r = await act(people.patchAttr(a.id, { value: value.trim() })); setBusy(false); if (r) { setEditing(false); onChanged?.() } }
   return (
     <Row title={<span className="inline-flex items-center gap-2">{a.label}{a.status === "candidate" && <Badge variant="outline" className="font-normal text-attention">待确认</Badge>}{a.status === "stale" && <Badge variant="outline" className="font-normal text-muted-foreground">已过时</Badge>}</span>} sub={`来源：${a.source_label}`} data-attr={a.label}>
-      <span className="max-w-[34vw] truncate type-callout sm:max-w-[260px]">{a.value}</span>
+      {editing ? <div className="flex min-w-0 flex-wrap gap-1"><Input aria-label={"修改 " + a.label} value={value} maxLength={500} onChange={(e) => setValue(e.target.value)} /><Button size="xs" disabled={busy || !value.trim()} onClick={() => void save()}>保存</Button><Button size="xs" variant="ghost" disabled={busy} onClick={() => setEditing(false)}>取消</Button></div> : <span className="max-w-[34vw] break-words type-callout sm:max-w-[260px]">{a.value}</span>}
       {readOnly ? <span className="type-footnote text-muted-foreground">{LEVEL[a.level]}</span> : <>
+        <Button size="icon-xs" variant="ghost" aria-label={"编辑 " + a.label} disabled={busy} onClick={() => { setValue(a.value); setEditing(true) }}><PencilIcon /></Button>
         <LevelSel v={a.level} on={(l) => void act(people.patchAttr(a.id, { level: l }))} testId={"level-" + a.key} />
         <Button variant="ghost" size="icon-xs" aria-label={"删除 " + a.label} className="text-muted-foreground" onClick={() => void act(people.deleteAttr(a.id))} data-del-attr={a.label}><XIcon /></Button></>}
     </Row>
@@ -157,13 +166,13 @@ export function MemSection({ party, mems, label, editable = true }: { party: str
   )
 }
 
-function EditDialog({ c, onClose }: { c: Contact; onClose: () => void }) {
+function EditDialog({ c, onClose, onSaved }: { c: Contact; onClose: () => void; onSaved: () => void }) {
   const [n, setN] = useState(c.name), [al, setAl] = useState(c.aliases.join("、")), [note, setNote] = useState(c.note), [busy, setBusy] = useState(false)
   const save = async () => {
     setBusy(true)
     const aliases = al.split(/[、,，\s]+/).map((x) => x.trim()).filter(Boolean).slice(0, 10)
     const r = await act(people.patchContact(c.id, { name: n.trim(), aliases, note }))
-    setBusy(false); if (r) onClose()
+    setBusy(false); if (r) onSaved()
   }
   return (
     <Dialog open onOpenChange={(x) => !x && onClose()}>
@@ -178,4 +187,33 @@ function EditDialog({ c, onClose }: { c: Contact; onClose: () => void }) {
       </DialogContent>
     </Dialog>
   )
+}
+
+function JobDialog({ c, onClose, onSaved }: { c: Contact; onClose: () => void; onSaved: () => void }) {
+  const orgs = useLoad(() => people.orgs(), [])
+  const [orgId, setOrgId] = useState(c.jobs.find((j) => !j.to)?.org_id ?? ""), [title, setTitle] = useState(c.jobs.find((j) => !j.to)?.title ?? ""), [dept, setDept] = useState(c.jobs.find((j) => !j.to)?.dept ?? ""), [busy, setBusy] = useState(false)
+  const choose = (id: string) => { setOrgId(id); const j = c.jobs.find((x) => x.org_id === id); setTitle(j?.title ?? ""); setDept(j?.dept ?? "") }
+  const save = async () => {
+    setBusy(true)
+    const r = await act(c.jobs.some((j) => j.org_id === orgId) ? people.patchJob(c.id, orgId, { title: title.trim() || null, dept: dept.trim() || null, to: null }) : people.addJob(c.id, { org_id: orgId, title: title.trim(), dept: dept.trim() }), "任职资料已保存")
+    setBusy(false); if (r) onSaved()
+  }
+  return <Dialog open onOpenChange={(v) => !v && !busy && onClose()}><DialogContent>
+    <DialogHeader><DialogTitle>编辑组织与职位</DialogTitle><DialogDescription>选择组织并填写部门和职位。保存到所选组织，保留其他任职记录。</DialogDescription></DialogHeader>
+    <label className="text-sm">组织<select className="mt-1 block h-9 w-full rounded-md border bg-background px-2" aria-label="任职组织" value={orgId} onChange={(e) => choose(e.target.value)}><option value="">选择组织</option>{orgs.data?.map((o) => <option value={o.id} key={o.id}>{o.name}</option>)}</select></label>
+    {orgs.err && <p role="alert">组织载入失败：{orgs.err.message}</p>}
+    <label className="text-sm">部门<Input aria-label="部门" value={dept} onChange={(e) => setDept(e.target.value)} maxLength={80} /></label>
+    <label className="text-sm">职位<Input aria-label="职位" value={title} onChange={(e) => setTitle(e.target.value)} maxLength={80} /></label>
+    <DialogFooter><Button variant="outline" disabled={busy} onClick={onClose}>取消</Button><Button disabled={busy || !orgId} onClick={() => void save()}>保存</Button></DialogFooter>
+  </DialogContent></Dialog>
+}
+
+function profileReason(field: ProfileField) {
+  const reasons = { pending: "等待自动补全", external: "飞书不向应用提供外部联系人的此项资料", permission: "缺少读取权限", not_visible: "不在应用通讯录可见范围内", not_provided: "提供方未返回此项资料", no_source: "没有可用于自动查询的账号" }
+  return (field.reason ? reasons[field.reason] : "暂无资料") + (field.scope ? `（${field.scope}）` : "")
+}
+function EmailDialog({ id, onClose, onSaved }: { id: string; onClose: () => void; onSaved: () => void }) {
+  const [email, setEmail] = useState(""), [busy, setBusy] = useState(false)
+  const save = async () => { setBusy(true); const r = await act(people.addAccount({ system_id: "mail", party_id: id, kind: "personal", handle: email.trim() }), "邮箱已添加"); setBusy(false); if (r) onSaved() }
+  return <Dialog open onOpenChange={(v) => !v && !busy && onClose()}><DialogContent><DialogHeader><DialogTitle>添加邮箱</DialogTitle><DialogDescription>邮箱作为该联系人的账号保存，用来识别邮件往来。</DialogDescription></DialogHeader><form onSubmit={(e) => { e.preventDefault(); if (!busy) void save() }}><Input type="email" aria-label="邮箱地址" required value={email} onChange={(e) => setEmail(e.target.value)} /><DialogFooter className="mt-4"><Button type="button" variant="outline" disabled={busy} onClick={onClose}>取消</Button><Button type="submit" disabled={busy || !email.trim()}>保存</Button></DialogFooter></form></DialogContent></Dialog>
 }

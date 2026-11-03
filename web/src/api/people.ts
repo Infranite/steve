@@ -12,11 +12,14 @@ export type ContactBrief = Head & { accounts: number; items: number }
 export type Job = { org_id: string; org_name: string; title: string | null; dept: string | null; from: string | null; to: string | null; source: string }
 export type Attr = { id: string; key: string; label: string; value: string; source_label: string; level: Level; status: "confirmed" | "candidate" | "stale" | string }
 export type TeamRef = { id: string; name: string; kind: "chart" | "virtual"; role: "lead" | "member" }
+export type ProfileField = { state: "known" | "missing"; manual?: boolean; reason?: "pending" | "external" | "permission" | "not_visible" | "not_provided" | "no_source"; scope?: string }
+export type ContactProfile = { checked: number | null; next_check: number | null; source: string | null; fields: Record<"name" | "org" | "title" | "email", ProfileField> }
 export type Contact = Head & {
+  profile?: ContactProfile
   note: string; status: "active" | "merged" | "deleted"; merged_into: string | null; source: string; revision: number; created: number
   jobs: Job[]; attrs: Attr[]; teams: TeamRef[]; reports_to: { id: string; name: string }[]; merges: { id: string; from_name: string; created: number; splittable: boolean }[]
 }
-export type Org = { id: string; name: string; aliases: string[]; kind: string | null; domains: string[]; note: string; tags: string[]; attrs: Attr[]; people?: { id: string; name: string; title: string | null }[]; revision: number }
+export type Org = { name_state?: "manual" | "provider" | "placeholder" | "workspace"; name_reason?: "external_unavailable" | "permission" | null; name_scope?: string | null; tenant?: { key: string; own: boolean } | null; id: string; name: string; aliases: string[]; kind: string | null; domains: string[]; note: string; tags: string[]; attrs: Attr[]; people?: { id: string; name: string; title: string | null }[]; revision: number }
 export type TeamMember = { contact_id: string; name: string; role: "lead" | "member"; external: boolean; source: string }
 export type Team = {
   id: string; name: string; kind: "chart" | "virtual"; status: "active" | "dissolved"; parent_id: string | null; org_id: string | null; purpose: string; space_id: string | null
@@ -63,6 +66,7 @@ export const people = {
   attrDefs: () => get<{ id: string; key: string; label: string; applies: string; type: string; default_level: Level }[]>("/attr-defs"),
   orgs: () => get<Org[]>("/orgs"),
   org: (id: string) => get<Org>("/orgs/" + e(id)),
+  patchOrg: (id: string, b: Partial<{ name: string; kind: string; domains: string[]; aliases: string[]; note: string }>) => patch<Org>("/orgs/" + e(id), b),
   newOrg: (b: { name: string; kind?: string; domains?: string[]; aliases?: string[]; note?: string }) => post<Org>("/orgs", b),
   teams: () => get<TeamList>("/teams"),
   team: (id: string) => get<Team>("/teams/" + e(id)),

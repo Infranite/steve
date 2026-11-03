@@ -75,7 +75,7 @@ function OrgList() {
     <div className="flex flex-col gap-8">
       <Group>{data.map((o) => (
         <Row key={o.id} icon={<ContactAvatar name={o.name} type="org" size={36} />} onClick={() => go("#/orgs/" + o.id)} data-org-row={o.name} title={o.name}
-          sub={<SubMeta>{o.kind && <span>{ORG_KIND[o.kind] ?? o.kind}</span>}<span>{o.domains.join("、") || "无域名"}</span></SubMeta>}><ChevronRightIcon className="size-4 text-tertiary" /></Row>))}</Group>
+          sub={<SubMeta>{o.kind && <span>{ORG_KIND[o.kind] ?? o.kind}</span>}<span>{o.domains.join("、") || "无域名"}</span>{(o.name_state === "placeholder" || o.name_state === "workspace") && <span>名称待补充 · 点击命名</span>}</SubMeta>}><ChevronRightIcon className="size-4 text-tertiary" /></Row>))}</Group>
       {teams.data && (chart.length > 0 || (teams.data.directory?.length ?? 0) > 0) && <section data-dept-tree>
         <SectionLabel>{own ? `${own.name} 的部门` : "部门"} · {chart.length}</SectionLabel>
         <DirectoryNotes ds={teams.data.directory} />

@@ -21,39 +21,53 @@ import type { Wait } from "@/store"
 type Order = "活跃" | "空间"
 let corder: Order = "活跃"
 export function PendingContacts() {
-  const { data, err } = useLoad(() => people.pending(), [])
+  const { data, err, reload } = useLoad(() => people.pending(), [])
+  const [query, setQuery] = useState(""), [filter, setFilter] = useState("all"), [progress, setProgress] = useState(""), [failure, setFailure] = useState("")
+  const [retry, setRetry] = useState<{ ids: string[]; run: (id: string) => Promise<unknown>; ok: string } | null>(null)
   const [order, setOrder] = useState<Order>(corder), [sel, setSel] = useState<string[]>([]), [busy, setBusy] = useState(false)
   if (err) return <Empty title="待确认载入失败" sub={err.message} />
   if (!data) return <Loading />
   const ms = data.proposals, unk = data.unconfirmed, quiet = data.quiet ?? 0
   if (!ms.length && !unk.length) return <Empty title="没有需要你判断的人" sub={quiet ? `另有 ${quiet} 个只出现在不提醒或屏蔽的群里，没有列出。` : "认得出名字的人 Steve 会直接建好；认不出、拿不准的才放在这里。"} />
-  const named = unk.filter((c) => !isNameless(c))
+  const visible = unk.filter((c) => (filter === "all" || (filter === "nameless" ? isNameless(c) : !isNameless(c))) && [labelOf(c), c.name, orgLine(c), c.account?.system_name, ...(c.seen?.spaces.map((x) => x.name) ?? [])].join(" ").toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()))
+  const selected = sel.filter((id) => unk.some((c) => c.id === id))
+  const named = visible.filter((c) => !isNameless(c))
   const batch = async (ids: string[], f: (id: string) => Promise<unknown>, ok: string) => {
-    setBusy(true)
-    let n = 0
-    for (const id of ids) { try { await f(id); n++ } catch { /* the rest still run; the list refetches */ } }
-    setBusy(false); setSel([])
-    toast(n === ids.length ? ok.replace("N", String(n)) : `${n}/${ids.length} 个完成，其余没有成功`)
+    setBusy(true); setFailure(""); setRetry(null)
+    const failed: string[] = []; let n = 0, next = 0
+    // Bound concurrency so large directories do not flood the API.
+    await Promise.all(Array.from({ length: Math.min(4, ids.length) }, async () => {
+      while (next < ids.length) { const id = ids[next++]; try { await f(id) } catch { failed.push(id) }; setProgress(`${++n}/${ids.length}`) }
+    }))
+    setSel(failed); await reload(); setBusy(false); setProgress("")
+    if (failed.length) { setFailure(`${failed.length} 个操作失败，已保留选择，可重试。`); setRetry({ ids: failed, run: f, ok }) }
+    toast(failed.length ? `${ids.length - failed.length}/${ids.length} 个完成` : ok.replace("N", String(ids.length)))
   }
-  const confirmAll = () => batch(named.map((c) => c.id), (id) => people.confirm(id), "已确认 N 个联系人")
-  const ignore = (ids: string[]) => batch(ids, (id) => people.patchContact(id, { kind: "virtual" }), "已忽略 N 个（标为虚拟账号，可以在联系人页改回）")
-  const toggle = (id: string, on: boolean) => setSel(on ? [...sel, id] : sel.filter((x) => x !== id))
-  const groups: [string, PendingContact[]][] = order === "活跃" ? [["", unk]] : bySpace(unk)
+  const ignore = (ids: string[]) => batch(ids, (id) => people.patchContact(id, { kind: "virtual" }), "已忽略 N 个（可在联系人页的虚拟账号中恢复）")
+  const toggle = (id: string, on: boolean) => setSel((prev) => on ? [...new Set([...prev, id])] : prev.filter((x) => x !== id))
+  const groups: [string, PendingContact[]][] = order === "活跃" ? [["", visible]] : bySpace(visible)
   return (
     <div className="flex flex-col gap-6" data-pending>
       {ms.length > 0 && <section><SectionLabel>可能是同一个人 · {ms.length}</SectionLabel><div className="flex flex-col gap-3">{ms.map((m) => <ProposalCard key={m.id} m={m} />)}</div></section>}
       {unk.length > 0 && <section data-unknown-list>
         <SectionLabel right={<Segmented size="sm" value={order} onChange={(v) => { corder = v; setOrder(v) }} options={[["活跃", "按活跃"], ["空间", "按空间"]] as const} />}>需要你判断 · {unk.length}</SectionLabel>
-        <div className="mb-3 flex flex-wrap items-center gap-2" role="toolbar" aria-label="批量操作">
-          <Button size="sm" disabled={busy || !named.length} onClick={() => void confirmAll()} data-confirm-all>全部确认{named.length ? `（${named.length} 个有名字的）` : ""}</Button>
-          <Button size="sm" variant="outline" disabled={busy || !sel.length} onClick={() => void ignore(sel)} data-ignore-selected>忽略所选{sel.length ? `（${sel.length}）` : ""}</Button>
-          {sel.length > 0 && <Button size="sm" variant="ghost" className="text-muted-foreground" onClick={() => setSel([])}>取消选择</Button>}
-          <span className="type-footnote text-muted-foreground">机器人、通知账号可以选中后忽略。</span>
+        <div className="mb-3 flex flex-wrap items-center gap-2">
+          <Input className="min-w-40 flex-1" aria-label="搜索待确认联系人" placeholder="搜索名字、组织或空间" value={query} disabled={busy} onChange={(e) => setQuery(e.target.value)} />
+          <select className="h-9 rounded-md border bg-background px-2 text-sm" aria-label="联系人筛选" value={filter} disabled={busy} onChange={(e) => setFilter(e.target.value)}><option value="all">全部</option><option value="nameless">未知用户</option><option value="named">已有名字</option></select>
         </div>
+        <div className="mb-3 flex flex-wrap items-center gap-2" role="toolbar" aria-label="批量操作">
+          <Button size="sm" variant="outline" disabled={busy || !visible.length} onClick={() => setSel((prev) => [...new Set([...prev, ...visible.map((c) => c.id)])])}>全选筛选结果（{visible.length}）</Button>
+          <Button size="sm" disabled={busy || !named.length} onClick={() => void batch(named.map((c) => c.id), (id) => people.confirm(id), "已确认 N 个联系人")} data-confirm-all>确认有名字的（{named.length}）</Button>
+          <Button size="sm" variant="outline" disabled={busy || !selected.length} onClick={() => void ignore(selected)} data-ignore-selected>忽略所选（{selected.length}）</Button>
+          {selected.length > 0 && <Button size="sm" variant="ghost" disabled={busy} onClick={() => setSel([])}>取消选择</Button>}
+          <span className="type-footnote text-muted-foreground" role="status">{busy ? `处理中 ${progress}` : `已选 ${selected.length} 个（包含其他筛选下的选择）。忽略后可在虚拟账号中恢复。`}</span>
+        </div>
+        {failure && <div role="alert" className="mb-3 text-sm text-destructive">{failure}{retry && <Button size="sm" variant="outline" disabled={busy} onClick={() => void batch(retry.ids, retry.run, retry.ok)}>重试失败项</Button>}<Button size="sm" variant="ghost" disabled={busy} onClick={() => { setQuery(""); setFilter("all") }}>查看失败项</Button></div>}
+        {!visible.length && <Empty title="没有匹配的联系人" sub="试试其他关键词或筛选条件。" />}
         <div className="flex flex-col gap-4">{groups.map(([g, xs]) => (
           <div key={g || "all"} data-pending-group={g || undefined}>
             {g && <div className="mb-1.5 px-1 type-footnote font-medium text-muted-foreground">{g} · {xs.length}</div>}
-            <Group>{xs.map((c) => <UnknownRow key={c.id} c={c} checked={sel.includes(c.id)} onCheck={(v) => toggle(c.id, v)} busy={busy} />)}</Group>
+            <Group>{xs.map((c) => <UnknownRow key={c.id} c={c} checked={sel.includes(c.id)} onCheck={(v) => toggle(c.id, v)} busy={busy} onChanged={() => void reload()} />)}</Group>
           </div>))}</div>
         <div className="mt-2 px-1 type-footnote text-muted-foreground">未确认的人照常处理消息，但不会被当作熟人对待，例如不会套用“同事”的响应规则。{quiet > 0 && ` 另有 ${quiet} 个只出现在不提醒或屏蔽的群里，没有列出。`}</div>
       </section>}
@@ -70,13 +84,13 @@ function bySpace(xs: PendingContact[]): [string, PendingContact[]][] {
   return [...m.entries()].sort((a, b) => (a[0] === "没有见过消息" ? 1 : b[0] === "没有见过消息" ? -1 : b[1].length - a[1].length))
 }
 
-function UnknownRow({ c, checked, onCheck, busy }: { c: PendingContact; checked: boolean; onCheck: (v: boolean) => void; busy: boolean }) {
+function UnknownRow({ c, checked, onCheck, busy, onChanged }: { c: PendingContact; checked: boolean; onCheck: (v: boolean) => void; busy: boolean; onChanged: () => void }) {
   const [merge, setMerge] = useState(false)
   const nameless = isNameless(c), label = labelOf(c), seen = c.seen, url = (c.avatar as { url?: string } | null)?.url
   const where = seen?.spaces.map((x) => (x.kind === "dm" ? `和 ${x.name} 的私聊` : x.name)).join("、")
   return (
     <Row data-unconfirmed={label} data-nameless={nameless || undefined}
-      icon={<span className="flex items-center gap-2.5"><Checkbox aria-label={`选中 ${label}`} checked={checked} onCheckedChange={(v) => onCheck(!!v)} />
+      icon={<span className="flex items-center gap-2.5"><Checkbox aria-label={`选中 ${label}`} checked={checked} disabled={busy} onCheckedChange={(v) => onCheck(!!v)} />
         {url ? <img src={url} alt="" className="size-8 rounded-full object-cover" /> : <ContactAvatar name={nameless ? "?" : label} unconfirmed size={32} />}</span>}
       title={<span className="inline-flex min-w-0 items-center gap-1.5"><a href={"#/contacts/" + c.id} className="truncate hover:underline">{label}</a>{orgLine(c) && <span className="truncate type-footnote font-normal text-muted-foreground">{orgLine(c)}</span>}</span>}
       sub={<span className="flex min-w-0 flex-col gap-0.5">
@@ -85,9 +99,9 @@ function UnknownRow({ c, checked, onCheck, busy }: { c: PendingContact; checked:
       </span>}>
       {merge && <MergeDialog from={c} onClose={() => setMerge(false)} />}
       <span className="flex shrink-0 flex-wrap justify-end gap-1.5">
-        {!nameless && <Button size="xs" variant="outline" disabled={busy} onClick={() => void act(people.confirm(c.id), `已确认 ${label}`)} data-confirm-new={label}>确认</Button>}
+        {!nameless && <Button size="xs" variant="outline" disabled={busy} onClick={async () => { if (await act(people.confirm(c.id), `已确认 ${label}`)) onChanged() }} data-confirm-new={label}>确认</Button>}
         <Button size="xs" variant="ghost" disabled={busy} onClick={() => setMerge(true)} data-merge-into={label}>是谁…</Button>
-        <Button size="xs" variant="ghost" className="text-muted-foreground" disabled={busy} onClick={() => void act(people.patchContact(c.id, { kind: "virtual" }), `已忽略 ${label}`)} data-ignore={label}>忽略</Button>
+        <Button size="xs" variant="ghost" className="text-muted-foreground" disabled={busy} onClick={async () => { if (await act(people.patchContact(c.id, { kind: "virtual" }), `已忽略 ${label}`)) onChanged() }} data-ignore={label}>忽略</Button>
       </span>
     </Row>
   )
