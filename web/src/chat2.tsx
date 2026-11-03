@@ -50,8 +50,8 @@ export function StepsBlock({ m }: { m: Msg }) {
   const r = s.route, failed = s.tools.some((t) => t.status === "failed")
   const routeDesc = r && [KIND[r.kind] ?? r.kind, r.kind === "item" && botName(r.picked ?? r.bot), r.project && projectName(r.project), ...r.tags.map(tagName), ...r.newTags.map((t) => t + "（新建）")].filter(Boolean).join(" · ")
   return (
-    <TraceCollapsible open={open} onOpenChange={setOpen} id={"steps-" + m.id} className="-mb-1 max-w-[88%] self-start px-1" data-steps={m.id}>
-      <TraceCollapsibleTrigger data-steps-toggle>
+    <TraceCollapsible open={open} onOpenChange={setOpen} id={"steps-" + m.id} className="max-w-full self-start" data-steps={m.id}>
+      <TraceCollapsibleTrigger className="px-2 py-1 hover:bg-muted [&_[data-slot=trace-line]]:text-[12px] [&_[data-slot=trace-description]]:text-muted-foreground" data-steps-toggle>
         <TraceLine status={failed ? "error" : undefined}><TraceIcon><BrainIcon strokeWidth={1.5} /></TraceIcon><TraceTitle>{s.research ? "查了" : "思考"}</TraceTitle>
           <TraceDescription className="min-w-0 shrink truncate">{stepsSummary(s)}{s.ms != null && !s.research && <span className="ml-1.5">· {secs(s.ms)}</span>}</TraceDescription></TraceLine>
       </TraceCollapsibleTrigger>

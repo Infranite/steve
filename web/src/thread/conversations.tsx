@@ -95,7 +95,7 @@ export function ConvSwitcher({ current, badge }: { current?: string; badge?: Con
     finally { if (active()) setBusy(null) }
   }
   return <>
-    <nav aria-label="对话" className="mx-auto flex w-full max-w-[744px] shrink-0 items-center gap-2 px-4 pb-2 sm:px-8" data-conv-switcher>
+    <nav aria-label="对话" className="mx-auto flex w-full max-w-[800px] shrink-0 items-center gap-2 px-4 pb-2 pt-3 sm:px-8" data-conv-switcher>
       <Button variant={!current ? "secondary" : "ghost"} size="sm" onClick={() => go("#/")} aria-current={!current ? "page" : undefined} data-conv="steve"><MessageCircleIcon />你和 Steve</Button>
       {current && <div className="flex min-w-0 flex-1 items-center gap-1 rounded-lg border pl-2" data-current-conversation>
         <span className="truncate type-footnote" title={badge?.name}>{badge?.name || "当前对话"}</span>

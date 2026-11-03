@@ -71,7 +71,6 @@ function ProjectChip({ id, className, plain }: { id: string | null; className?: 
   if (plain) return <span className={cn("inline-flex min-w-0 items-center gap-1", className)} data-project-chip={p.id}><FolderIcon className="size-3.5 shrink-0" strokeWidth={1.75} /><span className="truncate">{p.name}</span></span>
   return <a href={"#/projects/" + p.id} onClick={(e) => e.stopPropagation()} className={cn("inline-flex items-center gap-1 text-foreground/80 hover:text-foreground hover:underline", className)} data-project-chip={p.id}><FolderIcon className="size-3.5" strokeWidth={1.75} />{p.name}</a>
 }
-const Day = ({ children }: { children: ReactNode }) => <div className="py-1 text-center type-footnote text-muted-foreground">{children}</div>
 export function Select({ value, options, onChange, align = "start", testId, quiet, className }: { value: string; options: { v: string; l: ReactNode }[]; onChange: (v: string) => void; align?: "start" | "end"; testId?: string; quiet?: boolean; className?: string }) {
   return (
     <UISelect items={Object.fromEntries(options.map((o) => [o.v, o.l]))} value={value} onValueChange={(v) => v != null && onChange(String(v))}>
@@ -82,9 +81,9 @@ export function Select({ value, options, onChange, align = "start", testId, quie
 }
 
 /* ═════════ 对话 ═════════ */
-/* Grok-style hero: one big avatar floats above the conversation and reacts; messages carry colour, not avatars */
+/* A steady, compact identity bar keeps the reading area still while scrolling. */
 const CUE_LABEL: Partial<Record<HeroCue, string>> = { input: "在听", think: "在想…", success: "交出去了", affirm: "收到", inspect: "在找你说的事项", wary: "", love: "♥", failure: "没发出去" }
-function Hero({ compact }: { compact: boolean }) {
+function Hero() {
   const S = st.bots.steve, p = pendingCards(), run = st.items.filter((i) => i.st === "run" && !i.arch)
   const [label, setLabel] = useState<string | null>(null)
   useEffect(() => {
@@ -94,15 +93,12 @@ function Hero({ compact }: { compact: boolean }) {
     return () => { off(); clearTimeout(t); clearTimeout(w) }
   }, [])
   const base = run.length + p.length ? `在跟 ${run.length + p.length} 件事${p.length ? ` · ${p.length} 件等你` : ""}` : "空闲"
-  const big = window.innerWidth < 640 ? 48 : 56, small = 28
   return (
-    <div className={cn("relative z-10 flex shrink-0 items-center justify-center transition-[height,padding] duration-300 ease-out", compact ? "h-12 flex-row gap-2.5 border-b bg-background/80 backdrop-blur-xl" : "h-[112px] flex-col gap-1 pt-3 md:h-[124px]")} data-hero={compact ? "compact" : "full"}>
-      <div className="flex items-center justify-center transition-[width,height] duration-300 ease-out" style={{ width: compact ? small : big, height: compact ? small : big }} onDoubleClick={() => cue("love")}>
-        <div className="origin-center transition-transform duration-300 ease-out" style={{ transform: `scale(${compact ? small / big : 1})` }}><Robot k="steve" size={big} live /></div>
-      </div>
-      <div className={cn("flex min-w-0 flex-col", compact ? "items-start" : "items-center")}>
-        <span className="type-headline">{S?.n ?? "Steve"}</span>
-        <span className={cn("type-footnote transition-colors", label ? "text-foreground" : "text-muted-foreground")} data-hero-label>{label || base}</span>
+    <div className="flex h-16 min-w-0 shrink-0 items-center gap-3" data-hero="compact">
+      <div className="shrink-0" onDoubleClick={() => cue("love")}><Robot k="steve" size={32} live /></div>
+      <div className="flex min-w-0 flex-col">
+        <span className="truncate type-headline">{S?.n ?? "Steve"}</span>
+        <span className={cn("truncate type-footnote transition-colors", label ? "text-foreground" : "text-muted-foreground")} data-hero-label>{label || base}</span>
       </div>
     </div>
   )
@@ -124,7 +120,7 @@ function MsgActions({ m }: { m: Msg }) {
   const fromChat = !!m.item && (m.steps?.route?.kind === "item" || !!m.updates?.length) && !m.update
   const canItem = !m.item && (!!m.chat || !!m.suggest || m.steps?.route?.kind === "research" || m.steps?.route?.kind === "answer")
   return (
-    <div className="-mb-3 -mt-2 flex gap-0.5 self-start pl-1 opacity-0 transition-opacity group-hover/sm:opacity-100 [@media(hover:none)]:opacity-100" data-msg-actions>
+    <div className="absolute -bottom-7 left-0 flex gap-0.5 pl-1 opacity-0 transition-opacity focus-within:opacity-100 group-hover/sm:opacity-100 group-focus-within/sm:opacity-100 [@media(hover:none)]:opacity-100" data-msg-actions>
       <Tooltip><TooltipTrigger render={<Button variant="ghost" size="icon-xs" aria-label="复制" className="text-muted-foreground" onClick={() => { navigator.clipboard?.writeText(m.t ?? "").catch(() => {}); toast("已复制") }} />}><CopyIcon /></TooltipTrigger><TooltipContent>复制</TooltipContent></Tooltip>
       {m.id && <Tooltip><TooltipTrigger render={<Button variant="ghost" size="icon-xs" aria-label="引用回复" className="text-muted-foreground" onClick={() => quoteMsg(m.id!)} data-quote-reply />}><MessageSquareReplyIcon /></TooltipTrigger><TooltipContent>{m.item ? `引用回复，送到 ${m.item}` : "引用回复"}</TooltipContent></Tooltip>}
       {canItem && <Tooltip><TooltipTrigger render={<Button variant="ghost" size="icon-xs" aria-label="做成事项" className="text-muted-foreground" disabled={isPromoting(m)} onClick={() => makeItem(m)} data-make-item />}><ListChecksIcon /></TooltipTrigger><TooltipContent>做成事项</TooltipContent></Tooltip>}
@@ -138,7 +134,7 @@ function MeActions({ m }: { m: Msg }) {
   if (!m.id) return null
   const send = () => { const v = id.trim().toUpperCase().replace(/^#/, ""); if (!/^[A-Z]{1,6}-\d+$/.test(v)) { toast("写一个事项编号，比如 ST-12"); return } setToItem(false); setId(""); void reroute(m, "item:" + v) }
   return (
-    <div className="-mt-1 flex items-center gap-0.5 self-end opacity-0 transition-opacity group-hover/me:opacity-100 [@media(hover:none)]:opacity-100" data-me-actions>
+    <div className="absolute -bottom-7 right-0 flex items-center gap-0.5 opacity-0 transition-opacity focus-within:opacity-100 group-hover/me:opacity-100 group-focus-within/me:opacity-100 [@media(hover:none)]:opacity-100" data-me-actions>
       <Tooltip><TooltipTrigger render={<Button variant="ghost" size="icon-xs" aria-label="引用回复" className="text-muted-foreground" onClick={() => quoteMsg(m.id!)} />}><MessageSquareReplyIcon /></TooltipTrigger><TooltipContent>引用回复</TooltipContent></Tooltip>
       <DropdownMenu>
         <DropdownMenuTrigger render={<Button variant="ghost" size="icon-xs" aria-label="重新分流" className="text-muted-foreground" data-reroute-menu />}><RouteIcon /></DropdownMenuTrigger>
@@ -229,7 +225,6 @@ export function ChatView({ conv }: { conv?: string } = {}) {
   const list: Msg[] = conv ? im?.msgs ?? [] : st.thread
   const rawOf = (m: Msg) => (m.id ? im?.raw.get(m.id) : undefined)
   const scroller = useRef<HTMLDivElement>(null)
-  const [compact, setCompact] = useState(false)
   useEffect(() => { const f = requestAnimationFrame(() => scroller.current?.scrollTo({ top: 1e9, behavior: "smooth" })); return () => cancelAnimationFrame(f) }, [list.length, list[list.length - 1]?.k])
   /* rendered Markdown and folded steps grow after the first scroll: stay at the bottom until the user scrolls away */
   useEffect(() => {
@@ -244,29 +239,34 @@ export function ChatView({ conv }: { conv?: string } = {}) {
     return () => { ro.disconnect(); el.removeEventListener("wheel", away); el.removeEventListener("touchmove", away); el.removeEventListener("scroll", near); window.removeEventListener("steve-open-steps", away); el.removeEventListener("click", unfold) }
   }, [])
   return (
-    <div className="flex h-full min-h-0"><div className="relative flex min-w-0 flex-1 flex-col">
-      <SidebarTrigger className="absolute left-3 top-2.5 z-20 hidden text-muted-foreground md:inline-flex" />
-      <RailToggle className="absolute right-3 top-2.5 z-20" />
-      <Hero compact={compact} />
+    <div className="flex h-full min-h-0 text-foreground" data-chat-page><div className="relative flex min-w-0 flex-1 flex-col">
+      <header className="flex shrink-0 items-center gap-3 border-b border-border/60 px-4 sm:px-6" data-chat-header>
+        <SidebarTrigger className="hidden shrink-0 text-muted-foreground md:inline-flex" />
+        <Hero />
+        <div className="flex-1" />
+        <RailToggle />
+      </header>
       <ConvSwitcher current={conv} badge={im?.badge} />
-      {conv && im && <div className="mx-auto flex w-full max-w-[744px] shrink-0 px-4 pb-1 sm:px-8"><ConvBadgeChip b={im.badge} /></div>}
-      <div ref={scroller} onScroll={(e) => { const el = e.currentTarget; setCompact(el.scrollHeight - el.scrollTop - el.clientHeight > 160) }} className="min-h-0 flex-1 overflow-y-auto [mask-image:linear-gradient(to_bottom,transparent,black_28px,black_calc(100%-16px),transparent)]" data-chat-scroll>
-        <div className="mx-auto flex w-full max-w-[744px] flex-col gap-6 px-4 pb-6 pt-2 sm:px-8">
+      {conv && im && <div className="mx-auto flex w-full max-w-[800px] shrink-0 px-4 pb-1 sm:px-8"><ConvBadgeChip b={im.badge} /></div>}
+      <div ref={scroller} className="min-h-0 flex-1 overflow-y-auto overscroll-contain" data-chat-scroll>
+        <div className="mx-auto flex w-full max-w-[800px] flex-col gap-8 px-4 pb-10 pt-5 sm:px-8" data-chat-messages>
           {conv && im === null && <div className="py-10 text-center type-callout text-muted-foreground" data-conv-missing>没有这个对话，或者你看不到它所在的空间。</div>}
           {list.map((m, n) => {
             const prev = list[n - 1], day = m.created && (!prev?.created || new Date(prev.created).toDateString() !== new Date(m.created).toDateString())
-            const dayLabel = day ? <Day key={"d" + n}>{new Date(m.created!).toDateString() === new Date().toDateString() ? "今天" : tm(m.created).split(" ")[0]}</Day> : null
+            const dayLabel = day ? <div className="flex items-center gap-4 type-footnote text-muted-foreground" key={"d" + n} data-chat-day><span className="h-px flex-1 bg-border/60" /><span>{new Date(m.created!).toDateString() === new Date().toDateString() ? "今天" : tm(m.created).split(" ")[0]}</span><span className="h-px flex-1 bg-border/60" /></div> : null
             if (m.k === "me" && conv) return <Fragment key={n}>{dayLabel}<div className="flex flex-col gap-1.5" data-msg={m.id} data-im-turn><SenderLine m={rawOf(m)} />{rawOf(m)?.channel_message ? <div className="w-full max-w-[600px] self-end"><ChannelMessageBody message={rawOf(m)!.channel_message!} /></div> : <Me t={m.t!} files={m.files} />}<QueuedNote m={m} /></div></Fragment>
-            if (m.k === "me") return <Fragment key={n}>{dayLabel}<div className="group/me flex flex-col gap-1.5 transition-colors" data-msg={m.id}><QuoteHead id={m.replyTo} className="self-end" /><Me t={m.t!} files={m.files} /><QueuedNote m={m} /><MeActions m={m} /></div></Fragment>
+            if (m.k === "me") return <Fragment key={n}>{dayLabel}<div className="group/me relative flex flex-col gap-1.5 transition-colors" data-msg={m.id}><QuoteHead id={m.replyTo} className="self-end" /><Me t={m.t!} files={m.files} /><QueuedNote m={m} /><MeActions m={m} /></div></Fragment>
             if (m.k === "thinking") return <div key={n} className="flex flex-col gap-2"><LiveSteps />{st.draft?.text && <SteveSays><Markdown text={st.draft.text} streaming /></SteveSays>}</div>
             if (m.notice) return <Fragment key={n}>{dayLabel}<NoticeLine m={m} onOpen={showNotices} /></Fragment>
-            return <Fragment key={n}>{dayLabel}<div className="group/sm flex flex-col gap-2 transition-colors" data-msg={m.id}><QuoteHead id={m.replyTo} /><StepsBlock m={m} /><SteveSays still={m.id === st.drafted}>{!m.update && !m.cardOnly && <Markdown text={linkCites(m.t ?? "", m.cites)} />}{m.item && !m.update && !m.card && (m.wasCard || list.some((x) => x.card?.item === m.item) ? <CardLink id={m.item} /> : <ItemRef id={m.item} />)}{m.card ? <ItemCard c={m.card} inText={!m.cardOnly && m.card.delivery?.text === m.t} /> : <Updates m={m} />}<OfferLine m={m} /><SuggestCard m={m} /><AskChips m={m} /><Rerun m={m} /></SteveSays>{m.cfg && <div className="-mt-1 self-start"><ProposalCard p={m.cfg} inChat /></div>}<Cites cites={m.cites} />{conv ? <ChanOutNote m={rawOf(m)} /> : <MsgActions m={m} />}</div></Fragment>
+            return <Fragment key={n}>{dayLabel}<div className="group/sm relative flex min-w-0 flex-col gap-2.5 transition-colors" data-msg={m.id}>
+              <div className="flex min-w-0 items-center gap-2 px-1 type-footnote text-muted-foreground" data-chat-author><span className="truncate font-medium text-foreground">{S?.n ?? "Steve"}</span>{m.created && <time className="shrink-0" dateTime={new Date(m.created).toISOString()}>{tm(m.created)}</time>}</div>
+              <QuoteHead id={m.replyTo} /><StepsBlock m={m} /><SteveSays still={m.id === st.drafted}>{!m.update && !m.cardOnly && <Markdown text={linkCites(m.t ?? "", m.cites)} />}{m.item && !m.update && !m.card && (m.wasCard || list.some((x) => x.card?.item === m.item) ? <CardLink id={m.item} /> : <ItemRef id={m.item} />)}{m.card ? <ItemCard c={m.card} inText={!m.cardOnly && m.card.delivery?.text === m.t} /> : <Updates m={m} />}<OfferLine m={m} /><SuggestCard m={m} /><AskChips m={m} /><Rerun m={m} /></SteveSays>{m.cfg && <div className="-mt-1 self-start"><ProposalCard p={m.cfg} inChat /></div>}<Cites cites={m.cites} />{conv ? <ChanOutNote m={rawOf(m)} /> : <MsgActions m={m} />}</div></Fragment>
           })}
           {!conv && away > 0 && <><SteveSays sub="离开期间汇报">你不在的时候：</SteveSays><Digest from={away} /></>}
           {!conv && <Onboarding />}
         </div>
       </div>
-      <div className="mx-auto w-full max-w-[744px] shrink-0 px-4 pb-[76px] sm:px-8 md:pb-5">
+      <div className="mx-auto w-full max-w-[800px] shrink-0 px-4 pb-[76px] pt-3 sm:px-8 md:pb-5" data-chat-input>
         {conv ? im && <ImReadOnly b={im.badge} /> : <>
         {p.length > 0 && (
           <button type="button" onClick={() => go("#/inbox")} data-pending-strip className="mb-2 flex w-full items-center gap-2.5 rounded-xl px-3 py-2 text-left type-callout transition-colors hover:bg-accent">
