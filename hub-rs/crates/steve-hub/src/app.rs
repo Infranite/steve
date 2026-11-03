@@ -216,7 +216,45 @@ pub fn app(
         .layer(middleware::from_fn_with_state(mcp, mcp_gate))
         .layer(middleware::from_fn_with_state(maintenance_state, maintenance_gate))
         .layer(compression())
+        .layer(middleware::from_fn(vary_encoding))
         .layer(middleware::from_fn(slow_requests))
+}
+
+/// Every compressible answer varies by `Accept-Encoding`, also the ones sent as is (a HEAD, a small body), so a
+/// cache never hands a gzip body to a client that can't read it or the other way round.
+async fn vary_encoding(req: Request, next: Next) -> Response {
+    let mut res = next.run(req).await;
+    let h = res.headers();
+    let varies = h.get_all(header::VARY).iter().any(|v| {
+        v.to_str()
+            .is_ok_and(|v| v.to_ascii_lowercase().contains("accept-encoding"))
+    });
+    if !varies && compressible(h) {
+        res.headers_mut().append(
+            header::VARY,
+            header::HeaderValue::from_static("accept-encoding"),
+        );
+    }
+    res
+}
+
+/// Content types worth gzipping (read whole, text-like).
+fn compressible(h: &axum::http::HeaderMap) -> bool {
+    let ct = h
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    matches!(
+        ct.split(';').next().unwrap_or("").trim(),
+        "application/json"
+            | "text/html"
+            | "text/css"
+            | "text/javascript"
+            | "application/javascript"
+            | "image/svg+xml"
+            | "application/wasm"
+            | "application/manifest+json"
+    )
 }
 
 /// A request slower than this (time to the response head) is logged with its route and status.
@@ -251,21 +289,7 @@ fn compression()
         h: &axum::http::HeaderMap,
         _: &axum::http::Extensions,
     ) -> bool {
-        let ct = h
-            .get(axum::http::header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-        matches!(
-            ct.split(';').next().unwrap_or("").trim(),
-            "application/json"
-                | "text/html"
-                | "text/css"
-                | "text/javascript"
-                | "application/javascript"
-                | "image/svg+xml"
-                | "application/wasm"
-                | "application/manifest+json"
-        )
+        compressible(h)
     }
     tower_http::compression::CompressionLayer::new()
         .gzip(true)
@@ -376,6 +400,7 @@ mod compression_tests {
                 get(|| async { ([(header::CONTENT_TYPE, "application/json")], "{}") }),
             )
             .layer(super::compression())
+            .layer(axum::middleware::from_fn(super::vary_encoding))
     }
 
     async fn get_gz(path: &str) -> (Option<String>, Vec<u8>) {
@@ -413,5 +438,38 @@ mod compression_tests {
             let (enc, _) = get_gz(p).await;
             assert_eq!(enc, None, "{p}");
         }
+        // a HEAD of the same script is sent as is but varies like the GET; a stream does not
+        for (p, vary) in [
+            ("/js", true),
+            ("/small", true),
+            ("/sse", false),
+            ("/png", false),
+        ] {
+            let r = router()
+                .oneshot(
+                    Request::head(p)
+                        .header(header::ACCEPT_ENCODING, "gzip")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let v: Vec<_> = r.headers().get_all(header::VARY).iter().collect();
+            assert_eq!(v.len(), usize::from(vary), "{p} {v:?}");
+        }
+        let r = router()
+            .oneshot(
+                Request::get("/js")
+                    .header(header::ACCEPT_ENCODING, "gzip")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            r.headers().get_all(header::VARY).iter().count(),
+            1,
+            "one Vary on a gzip answer"
+        );
     }
 }
