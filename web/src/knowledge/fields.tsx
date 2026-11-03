@@ -1,7 +1,7 @@
 /* Small shared controls of the knowledge pages: level and visibility pickers, the availability gate. */
 import { useEffect, useState, type ReactNode } from "react"
 import { Spinner } from "@/components/ui/spinner"
-import { Select } from "@/views"
+import { Select } from "@/view-shared"
 import { Unwired } from "@/unwired"
 import { Page, Empty } from "@/ui"
 import { kbAvailable, LEVELS, VIS, levelLabel, visLabel, type Level } from "@/api/knowledge"

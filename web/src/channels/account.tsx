@@ -12,7 +12,7 @@ import { Input } from "@/components/ui/input"
 import { Switch } from "@/components/ui/switch"
 import { Spinner } from "@/components/ui/spinner"
 import { go, Page, Group, Row, SectionLabel, Segmented, Meta, Empty, StatusDot } from "@/ui"
-import { Select } from "@/views"
+import { Select } from "@/view-shared"
 import { Unwired } from "@/unwired"
 import { tm, toast } from "@/store"
 import { useLoad, useBusy } from "@/accounts/load"
@@ -51,7 +51,7 @@ export function AccountView({ id }: { id: string }) {
       <div className="flex flex-col gap-8" data-channel-account={c.id}>
         <section><SectionLabel>状态</SectionLabel>
           <Group><Row title={<span className="inline-flex items-center gap-2"><StatusDot s={dot} />{st}</span>} data-conn-state
-            sub={[c.health.last_ok ? `上次正常 ${tm(c.health.last_ok)}` : "", c.status !== "ok" && c.health.last_error ? c.health.last_error : "", feishuBot ? "长连接接收事件" : c.adapter === FEISHU_USER ? "约 1 分钟轮询一次你的会话" : ""].filter(Boolean).join(" · ")}>
+            sub={[c.health.last_ok ? `上次正常 ${tm(c.health.last_ok)}` : "", c.status !== "ok" && c.health.last_error ? c.health.last_error : "", feishuBot ? "长连接接收事件" : c.adapter === FEISHU_USER ? "约 20 秒轮询一次你的会话" : ""].filter(Boolean).join(" · ")}>
             <Button size="xs" variant="ghost" className="text-muted-foreground" disabled={busy} onClick={() => void act(() => accountsApi.test(c.id)).then((r) => { if (r) { toast(r.status === "ok" ? "连接正常" : "检查没有通过"); void L.reload() } })} data-conn-test><RefreshCwIcon />检查</Button></Row>
             {(c.status === "reauth" || c.status === "error") && <Row title="要重新授权" sub="在账号页重新授权或重新填写凭据" onClick={() => go(`#/accounts/${a.account.id}/reauth`)}><ChevronRightIcon className="size-4 text-tertiary" /></Row>}
           </Group></section>
@@ -73,7 +73,7 @@ export function AccountView({ id }: { id: string }) {
         {feishuBot && <section><SectionLabel>你本人</SectionLabel>
           {self.length ? <Group>{self.map((s) => <Row key={s.id} icon={<PersonaAvatar bot={null} size={28} />} title="已授权你本人" sub={(CONN_STATUS[s.status]?.[0] ?? s.status) + " · Steve 替你看私聊，默认只起草"} onClick={() => go("#/channels/acc/" + s.id)}><ChevronRightIcon className="size-4 text-tertiary" /></Row>)}</Group>
             : <div className="flex flex-col gap-3 rounded-xl border px-4 py-3.5" data-self-auth>
-              <div className="type-callout text-muted-foreground">通过这个应用授权你本人：Steve 约 1 分钟读一次你的私聊和群消息，别人找你时起草回复等你批准。机器人看到你发的消息时，也会认出是你。</div>
+              <div className="type-callout text-muted-foreground">通过这个应用授权你本人：Steve 约 20 秒读一次你的私聊和群消息，别人找你时起草回复等你批准。机器人看到你发的消息时，也会认出是你。</div>
               <div className="flex flex-wrap justify-end gap-2"><SelfButtons app={c.id} /></div></div>}</section>}
         {!me && <section><SectionLabel>权限</SectionLabel>{a.permissions ? <PermissionList checks={a.permissions} /> : <div className="rounded-lg bg-muted/60 px-3 py-2 type-callout text-muted-foreground" data-permissions="none">这个 Hub 没有返回权限检查的结果，以平台的开发者后台为准。开通新权限后要在后台发布新版本，再点上面的“检查”。</div>}</section>}
         <section><SectionLabel>所在的群和私聊 · {a.spaces.length}</SectionLabel>

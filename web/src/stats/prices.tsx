@@ -8,7 +8,7 @@ import { Spinner } from "@/components/ui/spinner"
 import { stats, type Price } from "@/api/stats"
 import { toast } from "@/store"
 import { Group, Row, SectionLabel } from "@/ui"
-import { Select } from "@/views"
+import { Select } from "@/view-shared"
 import { fmtN, useStats } from "@/stats/format"
 
 export const STATS_CAT: [string, string, any, string] = ["stats", "统计", ChartNoAxesColumnIcon, "价格表、时区、重建"]

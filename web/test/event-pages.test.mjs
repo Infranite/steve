@@ -20,3 +20,22 @@ test("bad pagination fails instead of looping forever or accepting duplicates", 
     await assert.rejects(readEventPages(10, async () => page), /游标没有前进/)
   }
 })
+
+test("first page is delivered while the next page is still pending", async () => {
+  let finish
+  const next = new Promise((resolve) => { finish = resolve }), seen = []
+  const reading = readEventPages(0, async (after) => after ? next : [{ seq: 1 }], (page) => seen.push(...page))
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.deepEqual(seen, [{ seq: 1 }])
+  finish([])
+  assert.deepEqual(await reading, seen)
+})
+
+test("a later failure leaves earlier delivered pages available for cursor retry", async () => {
+  const seen = []
+  await assert.rejects(readEventPages(0, async (after) => {
+    if (after) throw new Error("offline")
+    return [{ seq: 4 }]
+  }, (page) => seen.push(...page)), /offline/)
+  assert.deepEqual(seen, [{ seq: 4 }])
+})

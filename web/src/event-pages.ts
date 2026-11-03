@@ -1,5 +1,5 @@
 /** A short page can be a byte-budget boundary. Only an empty page is EOF. */
-export async function readEventPages<T extends { seq: number }>(after: number, fetchPage: (after: number) => Promise<T[]>): Promise<T[]> {
+export async function readEventPages<T extends { seq: number }>(after: number, fetchPage: (after: number) => Promise<T[]>, onPage?: (page: T[]) => void): Promise<T[]> {
   const out: T[] = []
   for (;;) {
     const page = await fetchPage(after)
@@ -9,5 +9,6 @@ export async function readEventPages<T extends { seq: number }>(after: number, f
       after = event.seq
       out.push(event)
     }
+    onPage?.(page)
   }
 }

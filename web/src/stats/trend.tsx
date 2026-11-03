@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button"
 import { Spinner } from "@/components/ui/spinner"
 import { stats, type Filter, type Group, type Metric } from "@/api/stats"
 import { Segmented, SectionLabel } from "@/ui"
-import { Select } from "@/views"
+import { Select } from "@/view-shared"
 import { Chart, ChartTable, Swatch, type Kind } from "@/stats/chart"
 import { fmtMs, fmtN, fmtPct, fmtUsd, useStats } from "@/stats/format"
 

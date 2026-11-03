@@ -10,7 +10,7 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/component
 import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { go, SectionLabel } from "@/ui"
-import { Select, ChoiceCards } from "@/views"
+import { Select, ChoiceCards } from "@/view-shared"
 import { toast } from "@/store"
 import { HubError } from "@/api"
 import { useBusy, report } from "@/accounts/load"
@@ -127,7 +127,7 @@ export function FeishuConnectDialog({ bots, onClose, initial = "bot" }: { bots: 
       </form> : bots.length ? <FieldGroup className="gap-4">
         <Field orientation="horizontal" className="justify-between"><div><FieldLabel>通过哪个应用</FieldLabel><FieldDescription>用这个应用的 App ID 授权，你本人的令牌存进保险箱</FieldDescription></div>
           <Select align="end" testId="self-app" value={app} onChange={setApp} options={bots.map((a) => ({ v: a.id, l: a.name }))} /></Field>
-        <div className="type-footnote text-muted-foreground">你可以选择只读取和起草，或另外允许代发已批准回复。消息约 1 分钟同步一次。</div><details className="type-footnote text-muted-foreground"><summary className="cursor-pointer">查看可能申请的权限标识</summary>{USER_PERMS}</details>
+        <div className="type-footnote text-muted-foreground">你可以选择只读取和起草，或另外允许代发已批准回复。消息约 20 秒同步一次。</div><details className="type-footnote text-muted-foreground"><summary className="cursor-pointer">查看可能申请的权限标识</summary>{USER_PERMS}</details>
       </FieldGroup> : <div className="rounded-xl border border-dashed px-4 py-3.5 type-callout text-muted-foreground">先接入应用机器人：你本人通过同一个企业自建应用授权。</div>}
     </Modal>
   )

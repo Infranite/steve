@@ -1,56 +1,25 @@
 /* 工作空间与项目：工作空间是数据边界，切换后所有页面只显示这个空间的内容；一个工作空间管理多个项目，每个项目一个独立目录 */
-import { useEffect, useState } from "react"
-import { cn } from "cn"
-import { CheckIcon, ChevronRightIcon, ChevronsUpDownIcon, LayersIcon, FolderGit2Icon, FolderIcon, PlusIcon, SparklesIcon, ArchiveIcon, SettingsIcon } from "lucide-react"
-import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
-import { Textarea } from "@/components/ui/textarea"
-import { Switch } from "@/components/ui/switch"
-import { Spinner } from "@/components/ui/spinner"
-import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field"
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
-import { DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
-import { SidebarMenuButton, SidebarMenuItem } from "@/components/ui/sidebar"
-import { st, botName, newProject, patchProject, switchWorkspace, newWorkspace, toast } from "@/store"
-import { YoloProjectSelect } from "@/yolo/badges"
 import { api } from "@/api"
-import { go, Page, Group, Row, SectionLabel, Meta, Empty, BotName, closeSheet, openSheet } from "@/ui"
-import { Select, ItemRowExport as ItemRow } from "@/views"
+import { Button } from "@/components/ui/button"
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
+import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field"
+import { Input } from "@/components/ui/input"
+import { Spinner } from "@/components/ui/spinner"
+import { Switch } from "@/components/ui/switch"
+import { Textarea } from "@/components/ui/textarea"
 import { AskSteve } from "@/config-ui"
 import { GitHubLine } from "@/github/index"
 import { RecentStats } from "@/stats/drill"
+import { botName, newProject, newWorkspace, patchProject, st, toast } from "@/store"
+import { BotName, closeSheet, Empty, go, Group, Meta, openSheet, Page, Row, SectionLabel } from "@/ui"
+import { ItemRowExport as ItemRow, Select } from "@/view-shared"
+import { YoloProjectSelect } from "@/yolo/badges"
+import { cn } from "cn"
+import { ArchiveIcon, ChevronRightIcon, FolderGit2Icon, FolderIcon, PlusIcon, SparklesIcon } from "lucide-react"
+import { useEffect, useState } from "react"
 
 const home = (p: string) => p.replace(/^\/Users\/[^/]+/, "~")
 export const projectIcon = (kind: string) => (kind === "git" ? FolderGit2Icon : FolderIcon)
-
-/* ── sidebar: workspace switcher ── */
-export function WorkspaceSwitcher() {
-  const w = st.workspace
-  if (!w) return null
-  return (
-    <SidebarMenuItem>
-      <DropdownMenu>
-        <DropdownMenuTrigger render={<SidebarMenuButton tooltip={"工作空间 · " + w.name} className="text-muted-foreground" data-ws-switch />}>
-          <LayersIcon className="size-4! shrink-0" strokeWidth={1.5} />
-          <span className="min-w-0 flex-1 truncate text-foreground/85">{w.name}</span><ChevronsUpDownIcon className="size-3.5! opacity-60" />
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="start" className="min-w-56">
-          {/* a label must sit inside a group: outside one, Base UI throws and blanks the page */}
-          <DropdownMenuGroup>
-            <DropdownMenuLabel className="type-footnote text-muted-foreground">工作空间</DropdownMenuLabel>
-            {st.workspaces.map((x) => (
-              <DropdownMenuItem key={x.id} onClick={() => x.id !== w.id && void switchWorkspace(x.id)} data-ws-opt={x.name}>
-                <LayersIcon className="size-4 text-muted-foreground" strokeWidth={1.5} /><span className="flex-1">{x.name}</span>{x.id === w.id && <CheckIcon className="size-4 text-blue" />}
-              </DropdownMenuItem>))}
-          </DropdownMenuGroup>
-          <DropdownMenuSeparator />
-          <DropdownMenuItem onClick={() => openSheet("newWorkspace")} data-new-ws><PlusIcon />新建工作空间</DropdownMenuItem>
-          <DropdownMenuItem onClick={() => go("#/settings/workspace")}><SettingsIcon />管理这个工作空间</DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
-    </SidebarMenuItem>
-  )
-}
 export function NewWorkspaceDialog() {
   const [n, setN] = useState(""), [d, setD] = useState(""), [p, setP] = useState("")
   const prefix = p.trim().toUpperCase().replace(/[^A-Z]/g, "").slice(0, 6)
