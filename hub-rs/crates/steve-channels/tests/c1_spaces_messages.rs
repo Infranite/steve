@@ -405,9 +405,14 @@ async fn own_bot_messages_are_not_processed_other_bots_only_recorded() {
             .unwrap();
     };
     out("draft1", "draft");
+    out("pending1", "pending");
     let mut m = FakeChannel::message("G1", "m3b", "umonitor", "【监控】仍在恢复");
     m.sender.is_bot = true;
-    assert_eq!(push(&h, m).await.next, Next::Handle, "a draft is no answer");
+    assert_eq!(
+        push(&h, m).await.next,
+        Next::Handle,
+        "a draft, or a message not sent yet, is no answer"
+    );
     // a message Steve sent (here a flow's, no reply reference) is
     std::thread::sleep(std::time::Duration::from_millis(5));
     out("steve1", "sent");

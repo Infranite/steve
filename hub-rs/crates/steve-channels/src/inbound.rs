@@ -1085,7 +1085,8 @@ impl Channels {
 }
 
 /// Has Steve already answered `bot` in `space` since a person last spoke there: has anything Steve sends
-/// (pending, sent or recalled after sending; a draft or a failure is not an answer) gone out after the bot's first message since? A
+/// gone out (sent, also if recalled since; a draft, a message still waiting to go out or a failure is
+/// not) after the bot's first message since, by when it was sent? A
 /// bot gets one answer between two people's messages, however Steve answered (a reply, a flow's message)
 /// and however the bot speaks (a reply, a new @), so two bots never keep answering each other.
 fn answered_since_people(
@@ -1108,8 +1109,8 @@ fn answered_since_people(
          )
          SELECT EXISTS(
            SELECT 1 FROM chan_messages o, first_bot
-            WHERE o.space_id = ?1 AND o.direction = 'out' AND o.status IN ('pending', 'sent', 'recalled')
-              AND first_bot.at IS NOT NULL AND o.created >= first_bot.at)",
+            WHERE o.space_id = ?1 AND o.direction = 'out' AND o.status IN ('sent', 'recalled')
+              AND first_bot.at IS NOT NULL AND coalesce(o.sent, o.created) >= first_bot.at)",
         params![space, bot],
         |r| r.get(0),
     )?)
