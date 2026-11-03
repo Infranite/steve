@@ -1421,3 +1421,22 @@ async fn ready_routes_only_pending_jobs_matching_the_stored_message_identity() {
     }
     assert!(route_opt(&k, "missing-message").is_none());
 }
+
+#[tokio::test]
+async fn failed_research_tool_keeps_a_safe_diagnostic_in_reply_metadata() {
+    let k = Kit::new();
+    assert!(k.core.set_researcher(FakeResearch::new(vec![
+        Step::ToolFailure("mcp__steve__steve_item_read", "ST-23", "permission_denied"),
+        Step::Text("暂时无法查询。"),
+    ])));
+    router(
+        &k,
+        |_| json!({"kind":"research","confidence":0.9,"signals":["lookup"],"title":"查询事项"}),
+    );
+    k.core.say(WS, "查询 ST-23 的进展", &[]).unwrap();
+    let messages = settle(&k, 2).await;
+    let tool = &messages[1].meta["steps"]["tools"][0];
+    assert_eq!(tool["status"], "failed");
+    assert_eq!(tool["error"], "permission_denied");
+    assert_eq!(tool["args"], json!({"brief":"ST-23"}));
+}

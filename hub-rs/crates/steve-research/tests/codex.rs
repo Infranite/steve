@@ -270,3 +270,36 @@ async fn a_codex_run_gets_the_attachments_and_images() {
     assert_eq!(std::fs::read(e.root.join("seen.png")).unwrap(), b"\x89PNG");
     assert_eq!(out.tools[0].ok, Some(true));
 }
+
+#[tokio::test]
+async fn failed_mcp_diagnostics_are_classified_without_retaining_secrets() {
+    let e = env();
+    let body = emit(&[
+        json!({"type":"item.completed","item":{
+            "id":"i1","type":"mcp_tool_call","server":"steve","tool":"steve_item_read",
+            "arguments":{"id":"ST-23"},"status":"failed",
+            "error":{"message":"Permission denied: private-token-must-not-persist"}
+        }}),
+        msg("i2", "暂时无法查询。"),
+        done(),
+    ]);
+    let exe = codex(&e, &body);
+    let mut run = Researcher::new(cfg(&e, &exe))
+        .start(req(&e, &["gpt-6-luna"]))
+        .unwrap();
+    let mut events = vec![];
+    while let Some(event) = run.next_event().await {
+        events.push(event);
+    }
+    let out = run.finish().await;
+    assert_eq!(out.tools.len(), 1);
+    assert_eq!(out.tools[0].ok, Some(false));
+    assert_eq!(
+        out.tools[0].error,
+        Some(stream::ToolError::PermissionDenied)
+    );
+    let serialized = serde_json::to_string(&out.tools).unwrap();
+    assert!(serialized.contains("permission_denied"));
+    assert!(!serialized.contains("private-token-must-not-persist"));
+    assert!(!format!("{events:?}").contains("private-token-must-not-persist"));
+}

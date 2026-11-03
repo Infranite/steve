@@ -372,6 +372,7 @@ pub enum Step {
     Text(&'static str),
     /// a tool call finished
     Tool(&'static str, &'static str),
+    ToolFailure(&'static str, &'static str, &'static str),
     /// pause (lets drafts go out, lets a test act while it runs)
     Sleep(u64),
     /// wait until the test opens the gate (or the run is stopped)
@@ -427,7 +428,15 @@ impl crate::thread::Researcher for FakeResearch {
                     name: name.into(),
                     brief: brief.into(),
                     ok: true,
+                    error: None,
                     ms: 3,
+                }),
+                Step::ToolFailure(name, brief, error) => sink.tool(&crate::thread::ToolSeen {
+                    name: name.into(),
+                    brief: brief.into(),
+                    ok: false,
+                    error: Some(error.into()),
+                    ms: 1,
                 }),
                 Step::Sleep(ms) => tokio::time::sleep(Duration::from_millis(ms)).await,
                 Step::Gate => loop {

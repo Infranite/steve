@@ -4,6 +4,74 @@
 
 use serde_json::Value;
 
+/// Safe diagnostic category only: tool outputs may contain private data and are never retained.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolError {
+    PermissionDenied,
+    InvalidArguments,
+    Transport,
+    GuardViolation,
+    Unknown,
+}
+
+impl ToolError {
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::PermissionDenied => "permission_denied",
+            Self::InvalidArguments => "invalid_arguments",
+            Self::Transport => "transport",
+            Self::GuardViolation => "guard_violation",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+fn classify_error(v: &Value) -> ToolError {
+    // Examine only a failing tool's error payload, not successful search results or arguments.
+    let text = v.to_string().to_ascii_lowercase();
+    if [
+        "permission denied",
+        "access denied",
+        "not authorized",
+        "unauthorized",
+        "approval required",
+        "requires approval",
+        "rejected by policy",
+        "denied by policy",
+    ]
+    .iter()
+    .any(|s| text.contains(s))
+    {
+        ToolError::PermissionDenied
+    } else if [
+        "invalid arguments",
+        "input validation error",
+        "invalid params",
+        "-32602",
+    ]
+    .iter()
+    .any(|s| text.contains(s))
+    {
+        ToolError::InvalidArguments
+    } else if [
+        "connection refused",
+        "connection reset",
+        "connection closed",
+        "timed out",
+        "timeout",
+        "error sending request",
+        "transport error",
+    ]
+    .iter()
+    .any(|s| text.contains(s))
+    {
+        ToolError::Transport
+    } else {
+        ToolError::Unknown
+    }
+}
+
 /// One fact from one output line.
 #[derive(Debug, Clone, PartialEq)]
 pub enum StreamItem {
@@ -25,6 +93,7 @@ pub enum StreamItem {
         id: String,
         is_error: bool,
         len: usize,
+        error: Option<ToolError>,
     },
     /// The closing `result` object.
     Result(Value),
@@ -75,6 +144,10 @@ pub fn parse_line(l: &str) -> Vec<StreamItem> {
                 id: s(&b["tool_use_id"]),
                 is_error: b["is_error"].as_bool().unwrap_or(false),
                 len: content_len(&b["content"]),
+                error: b["is_error"]
+                    .as_bool()
+                    .unwrap_or(false)
+                    .then(|| classify_error(&b["content"])),
             })
             .collect(),
         _ => Vec::new(),
@@ -134,16 +207,26 @@ pub fn parse_codex_line(l: &str) -> Vec<StreamItem> {
             let Some(c) = call() else { return Vec::new() };
             let failed = item["status"] == "failed"
                 || item["exit_code"].as_i64().is_some_and(|c| c != 0)
-                || item.get("error").is_some_and(|e| !e.is_null());
+                || item.get("error").is_some_and(|e| !e.is_null())
+                || item.pointer("/result/isError").and_then(Value::as_bool) == Some(true);
             let len = item["aggregated_output"]
                 .as_str()
                 .map_or(0, |o| o.chars().count());
+            let error = failed.then(|| {
+                let payload = item
+                    .get("error")
+                    .filter(|e| !e.is_null())
+                    .or_else(|| item.pointer("/result/content"))
+                    .unwrap_or(&item["aggregated_output"]);
+                classify_error(payload)
+            });
             vec![
                 c,
                 StreamItem::ToolResult {
                     id,
                     is_error: failed,
                     len,
+                    error,
                 },
             ]
         }
@@ -183,6 +266,75 @@ mod tests {
     use super::*;
 
     #[test]
+    fn failures_keep_categories_not_private_error_text() {
+        for (message, expected) in [
+            (
+                "Permission denied: secret-token-123",
+                ToolError::PermissionDenied,
+            ),
+            (
+                "MCP tool call requires approval, but approval policy is never",
+                ToolError::PermissionDenied,
+            ),
+            (
+                "Input validation error: secret-token-123",
+                ToolError::InvalidArguments,
+            ),
+            ("connection refused: secret-token-123", ToolError::Transport),
+            ("could not search secret-token-123", ToolError::Unknown),
+        ] {
+            let claude = serde_json::json!({"type":"user","message":{"content":[{
+                "type":"tool_result","tool_use_id":"t1","is_error":true,"content":message
+            }]}});
+            let codex = serde_json::json!({"type":"item.completed","item":{
+                "type":"mcp_tool_call","id":"t1","server":"steve","tool":"steve_item_read",
+                "arguments":{"id":"ST-23"},"status":"failed","error":{"message":message}
+            }});
+            for parsed in [
+                parse_line(&claude.to_string()),
+                parse_codex_line(&codex.to_string()),
+            ] {
+                assert!(parsed.iter().any(|p| matches!(p, StreamItem::ToolResult { is_error:true, error:Some(e), .. } if *e == expected)));
+                assert!(!format!("{parsed:?}").contains("secret-token-123"));
+            }
+        }
+    }
+
+    #[test]
+    fn mcp_business_failure_is_not_a_successful_transport() {
+        let event = serde_json::json!({"type":"item.completed","item":{
+            "type":"mcp_tool_call","id":"t1","server":"steve","tool":"steve_item_read",
+            "arguments":{"id":"ST-23"},"status":"completed",
+            "result":{"isError":true,"content":[{"type":"text","text":"Invalid arguments: private"}]}
+        }});
+        assert!(matches!(
+            &parse_codex_line(&event.to_string())[..],
+            [
+                _,
+                StreamItem::ToolResult {
+                    is_error: true,
+                    error: Some(ToolError::InvalidArguments),
+                    ..
+                }
+            ]
+        ));
+        let mut successful = event;
+        successful["item"]["result"]["isError"] = serde_json::json!(false);
+        successful["item"]["result"]["content"][0]["text"] = serde_json::json!("permission denied");
+        assert!(matches!(
+            &parse_codex_line(&successful.to_string())[..],
+            [
+                _,
+                StreamItem::ToolResult {
+                    is_error: false,
+                    error: None,
+                    ..
+                }
+            ]
+        ));
+    }
+
+    #[test]
     fn parses_the_shapes_the_harness_prints() {
         let init = r#"{"type":"system","subtype":"init","cwd":"/p","session_id":"s1","tools":["Read"],"model":"claude-sonnet-5-5"}"#;
         assert_eq!(
@@ -210,7 +362,8 @@ mod tests {
             vec![StreamItem::ToolResult {
                 id: "t1".into(),
                 is_error: true,
-                len: 3
+                len: 3,
+                error: Some(ToolError::Unknown),
             }]
         );
         assert!(matches!(

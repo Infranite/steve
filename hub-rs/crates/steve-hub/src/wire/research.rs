@@ -191,6 +191,7 @@ impl steve_core::thread::Researcher for ResearchAdapter {
                         name: t.name,
                         brief: t.brief,
                         ok: t.ok.unwrap_or(true),
+                        error: t.error.map(|e| e.code().to_string()),
                         ms: t.ms as i64,
                     }),
                     Some(_) => {}

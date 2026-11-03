@@ -219,6 +219,8 @@ pub struct ToolSeen {
     pub brief: String,
     /// `None` while the harness has not answered it.
     pub ok: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<crate::stream::ToolError>,
     pub ms: u64,
 }
 
@@ -1015,6 +1017,7 @@ fn on_item(ctx: &Ctx<'_>, st: &mut State, item: StreamItem) -> Option<Kill> {
                     brief: guard::brief(&name, &input, &ctx.scope.cwd),
                     name,
                     ok: Some(false),
+                    error: Some(crate::stream::ToolError::GuardViolation),
                     ms: 0,
                 });
                 return Some(Kill::Violation(v));
@@ -1050,13 +1053,19 @@ fn on_item(ctx: &Ctx<'_>, st: &mut State, item: StreamItem) -> Option<Kill> {
                 brief: guard::brief(&name, &input, &ctx.scope.cwd),
                 name,
                 ok: None,
+                error: None,
                 ms: 0,
             };
             st.started.insert(id, Instant::now());
             st.tools.push(seen.clone());
             let _ = ctx.tx.send(ResearchEvent::ToolStarted(seen));
         }
-        StreamItem::ToolResult { id, is_error, .. } => {
+        StreamItem::ToolResult {
+            id,
+            is_error,
+            error,
+            ..
+        } => {
             let ms = st
                 .started
                 .remove(&id)
@@ -1070,6 +1079,7 @@ fn on_item(ctx: &Ctx<'_>, st: &mut State, item: StreamItem) -> Option<Kill> {
             }
             if let Some(t) = st.tools.iter_mut().find(|t| t.id == id) {
                 t.ok = Some(!is_error);
+                t.error = error;
                 t.ms = ms;
                 let _ = ctx.tx.send(ResearchEvent::ToolDone(t.clone()));
             }

@@ -31,6 +31,8 @@ pub struct ToolSeen {
     /// what it was about: a relative path with lines, a pattern, a query, an item id
     pub brief: String,
     pub ok: bool,
+    /// Stable diagnostic code; never a raw tool error or result.
+    pub error: Option<String>,
     pub ms: i64,
 }
 
@@ -266,12 +268,16 @@ impl ResearchSink for Sink<'_> {
         self.drafts.send("", text);
     }
     fn tool(&self, t: &ToolSeen) {
-        lock(self.steps).tools.push(json!({
+        let mut step = json!({
             "name": t.name,
             "args": {"brief": t.brief},
             "status": if t.ok { "ok" } else { "failed" },
             "ms": t.ms,
-        }));
+        });
+        if let Some(error) = &t.error {
+            step["error"] = json!(error);
+        }
+        lock(self.steps).tools.push(step);
         let d = &self.drafts;
         if d.quiet {
             return;
