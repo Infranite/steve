@@ -38,7 +38,7 @@ import { LOADED_WEB_VERSION, permissionDecision, useStore } from "@/store"
 import { st, emit, briefHead, pendingCards, ST, SS, WT, botName, decide, dismiss, setSt, snooze, tag, loadEvents, type Item, type Reply, type Rel, type Sess } from "@/store"
 import { YoloBadge } from "@/yolo/badges"
 import { YoloPill } from "@/yolo/switch"
-import { WorkspaceSwitcher } from "@/projects"
+import { WorkspaceSwitcher } from "@/workspace-switcher"
 import { useUploads, PendingList, AttachButton, Files } from "@/attach"
 import type { RFile } from "@/api"
 import { MemConfirm } from "@/knowledge/parts"
@@ -484,7 +484,7 @@ function ComposerInput({ placeholder, onSend, model, left, autoFocus, className,
           <span className="mr-1 hidden items-center gap-1 type-footnote text-tertiary lg:inline-flex">{chat && <><Kbd>#</Kbd>事项<Kbd>@</Kbd>Bot<Kbd>/</Kbd>命令</>}{!chat && <><Kbd>⏎</Kbd>发送<Kbd>⇧⏎</Kbd>换行</>}</span>
           {busy && onStop
             ? <InputGroupButton size="icon-sm" variant="default" aria-label="停止" data-stop onClick={onStop} className="rounded-full"><SquareIcon className="size-3 fill-current" /></InputGroupButton>
-            : <InputGroupButton size="icon-sm" variant="default" aria-label="发送" data-send onClick={() => void send()} disabled={sending || up.uploading || (!v.trim() && !up.ready.length) || disabled} className="rounded-full disabled:opacity-25"><ArrowUpIcon className="size-4" strokeWidth={2.25} /></InputGroupButton>}
+            : <InputGroupButton size="icon-sm" variant="default" aria-label={sending ? "提交中" : "发送"} data-send onClick={() => void send()} disabled={sending || up.uploading || (!v.trim() && !up.ready.length) || disabled} className="rounded-full disabled:opacity-25">{sending ? <Spinner className="size-4" /> : <ArrowUpIcon className="size-4" strokeWidth={2.25} />}</InputGroupButton>}
         </InputGroupAddon>
       </InputGroup>
     </div>
@@ -847,8 +847,9 @@ export function ReplyBlock({ r }: { r: Reply }) {
 /* ───────── decisions ───────── */
 const FAIL: Record<string, [string, "ghost" | "outline" | "default"]> = { look: ["我来看看", "ghost"], drop: ["放弃", "outline"], tosteve: ["换成 Steve", "outline"], delivered: ["它其实做完了", "outline"], continue: ["让它继续", "default"] }
 export function DecisionCard({ i, w = i.wait!, showItem = true }: { i: Item; w?: Item["wait"] & {}; showItem?: boolean }) {
-  const [rework, setRework] = useState(false), [txt, setTxt] = useState(""), [busy, setBusy] = useState(false), [free, setFree] = useState(false)
-  const act = async (c: string, t?: string) => { setBusy(true); try { await decide(i.id, c, t, w.decision) } finally { setBusy(false) } }
+  const [rework, setRework] = useState(false), [txt, setTxt] = useState(""), [localBusy, setBusy] = useState(false), [free, setFree] = useState(false)
+  const busy = localBusy || st.pendingActions.has("decision:" + w.decision)
+  const act = async (c: string, t?: string) => { if (busy) return; setBusy(true); try { await decide(i.id, c, t, w.decision) } finally { setBusy(false) } }
   const head = (title: ReactNode) => (
     <CardHeader className="flex min-w-0 flex-col gap-2 pt-3.5 pb-3">
       <div className="flex w-full min-w-0 flex-wrap items-center justify-between gap-x-3 gap-y-1">
@@ -940,7 +941,7 @@ export function DecisionCard({ i, w = i.wait!, showItem = true }: { i: Item; w?:
         : <QuestionnaireSubmit data-answer disabled={busy}>回答</QuestionnaireSubmit>}</QuestionnaireActions>
     </Questionnaire>
   </> }
-  return <Card size="sm" className="gap-0 py-0" data-decision={w.type} data-decision-wrap={i.id || w.decision}>{body}</Card>
+  return <Card size="sm" className="gap-0 py-0" data-decision={w.type} data-decision-wrap={i.id || w.decision} aria-busy={busy}>{busy && <div role="status" className="px-4 py-2 type-footnote text-muted-foreground">提交中…</div>}{body}</Card>
 }
 
 export function ItemRef({ id }: { id: string }) {

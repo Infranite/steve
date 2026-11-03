@@ -1,3 +1,5 @@
+import { lazyView } from "@/lazy"
+import { ChatView } from "@/chat-view"
 import { Toaster, toast as sonnerToast } from "sonner"
 import { useEffect, useState } from "react"
 import { TooltipProvider } from "@/components/ui/tooltip"
@@ -8,27 +10,52 @@ import { Command, CommandDialog, CommandEmpty, CommandGroup, CommandInput, Comma
 import { BookOpenIcon, BotIcon, ChartNoAxesColumnIcon, Building2Icon, ContactRoundIcon, FolderIcon, GitPullRequestIcon, KeyRoundIcon, LockIcon, UsersRoundIcon, WorkflowIcon, InboxIcon, ListTodoIcon, MessageCircleIcon, MessagesSquareIcon, MoonIcon, PlugIcon, PlusIcon, RadioIcon, ServerIcon, SettingsIcon, SquareTerminalIcon, SunIcon } from "lucide-react"
 import { st, useStore, start } from "@/store"
 import { useRoute, Sidebar, MobileTabs, getSheet, resolvedTheme, openSheet, closeSheet, go, setTheme, StatusDot, ItemNo } from "@/ui"
-import { ChatView, InboxView, ItemsView, ItemView, SessionsView, SessionView, MoreView, DesignView, ForkDialog, NewItemDialog, GraphDialog, LinkDialog, ImportDialog } from "@/views"
-import { BotsView, BotView, NewBotDialog, DeleteBotDialog, SettingsView, TagDialog } from "@/manage"
-import { DevicesView, DeviceView, PairDialog } from "@/devices"
-import { ProjectsView, ProjectView, NewProjectDialog, NewWorkspaceDialog } from "@/projects"
-import { Unwired } from "@/unwired"
-import { ChannelsRoute } from "@/channels/channels"
-import { IntegrationsRoute } from "@/integrations"
-import { GitHubView } from "@/github/index"
-import { KnowledgeView } from "@/knowledge"
-import { SignalsView } from "@/signals"
-import { AutoRoute } from "@/auto/automation"
-import { AccountsRoute } from "@/accounts"
-import { MailView } from "@/mail/list"; import { ThreadView } from "@/mail/thread"
-import { VaultRoute } from "@/vault"
-import { ContactsView, ContactView, MeView, OrgView, TeamView } from "@/people/routes"
+const InboxView = lazyView(() => import("@/views").then((m) => ({ default: m.InboxView })))
+const ItemsView = lazyView(() => import("@/views").then((m) => ({ default: m.ItemsView })))
+const ItemView = lazyView(() => import("@/views").then((m) => ({ default: m.ItemView })))
+const SessionsView = lazyView(() => import("@/views").then((m) => ({ default: m.SessionsView })))
+const SessionView = lazyView(() => import("@/views").then((m) => ({ default: m.SessionView })))
+const MoreView = lazyView(() => import("@/views").then((m) => ({ default: m.MoreView })))
+const DesignView = lazyView(() => import("@/views").then((m) => ({ default: m.DesignView })))
+const ForkDialog = lazyView(() => import("@/views").then((m) => ({ default: m.ForkDialog })))
+const NewItemDialog = lazyView(() => import("@/views").then((m) => ({ default: m.NewItemDialog })))
+const GraphDialog = lazyView(() => import("@/views").then((m) => ({ default: m.GraphDialog })))
+const LinkDialog = lazyView(() => import("@/views").then((m) => ({ default: m.LinkDialog })))
+const ImportDialog = lazyView(() => import("@/views").then((m) => ({ default: m.ImportDialog })))
+const BotsView = lazyView(() => import("@/manage").then((m) => ({ default: m.BotsView })))
+const BotView = lazyView(() => import("@/manage").then((m) => ({ default: m.BotView })))
+const NewBotDialog = lazyView(() => import("@/manage").then((m) => ({ default: m.NewBotDialog })))
+const DeleteBotDialog = lazyView(() => import("@/manage").then((m) => ({ default: m.DeleteBotDialog })))
+const SettingsView = lazyView(() => import("@/manage").then((m) => ({ default: m.SettingsView })))
+const TagDialog = lazyView(() => import("@/manage").then((m) => ({ default: m.TagDialog })))
+const DevicesView = lazyView(() => import("@/devices").then((m) => ({ default: m.DevicesView })))
+const DeviceView = lazyView(() => import("@/devices").then((m) => ({ default: m.DeviceView })))
+const PairDialog = lazyView(() => import("@/devices").then((m) => ({ default: m.PairDialog })))
+const ProjectsView = lazyView(() => import("@/projects").then((m) => ({ default: m.ProjectsView })))
+const ProjectView = lazyView(() => import("@/projects").then((m) => ({ default: m.ProjectView })))
+const NewProjectDialog = lazyView(() => import("@/projects").then((m) => ({ default: m.NewProjectDialog })))
+const NewWorkspaceDialog = lazyView(() => import("@/projects").then((m) => ({ default: m.NewWorkspaceDialog })))
+const Unwired = lazyView(() => import("@/unwired").then((m) => ({ default: m.Unwired })))
+const ChannelsRoute = lazyView(() => import("@/channels/channels").then((m) => ({ default: m.ChannelsRoute })))
+const IntegrationsRoute = lazyView(() => import("@/integrations").then((m) => ({ default: m.IntegrationsRoute })))
+const GitHubView = lazyView(() => import("@/github/index").then((m) => ({ default: m.GitHubView })))
+const KnowledgeView = lazyView(() => import("@/knowledge").then((m) => ({ default: m.KnowledgeView })))
+const SignalsView = lazyView(() => import("@/signals").then((m) => ({ default: m.SignalsView })))
+const AutoRoute = lazyView(() => import("@/auto/automation").then((m) => ({ default: m.AutoRoute })))
+const AccountsRoute = lazyView(() => import("@/accounts").then((m) => ({ default: m.AccountsRoute })))
+const MailView = lazyView(() => import("@/mail/list").then((m) => ({ default: m.MailView }))); const ThreadView = lazyView(() => import("@/mail/thread").then((m) => ({ default: m.ThreadView })))
+const VaultRoute = lazyView(() => import("@/vault").then((m) => ({ default: m.VaultRoute })))
+const ContactsView = lazyView(() => import("@/people/routes").then((m) => ({ default: m.ContactsView })))
+const ContactView = lazyView(() => import("@/people/routes").then((m) => ({ default: m.ContactView })))
+const MeView = lazyView(() => import("@/people/routes").then((m) => ({ default: m.MeView })))
+const OrgView = lazyView(() => import("@/people/routes").then((m) => ({ default: m.OrgView })))
+const TeamView = lazyView(() => import("@/people/routes").then((m) => ({ default: m.TeamView })))
 import { Robot } from "@/robot"
 import { HoldBanner } from "@/queue"
 import { YoloBanner } from "@/yolo/banner"
 import { YoloDialog } from "@/yolo/switch"
-import { YoloDigestView } from "@/yolo/digest"
-import { StatsRoute } from "@/stats/page"
+const YoloDigestView = lazyView(() => import("@/yolo/digest").then((m) => ({ default: m.YoloDigestView })))
+const StatsRoute = lazyView(() => import("@/stats/page").then((m) => ({ default: m.StatsRoute })))
 import { people, usePeopleOn, type PartyOption } from "@/api/people"
 
 /** ⌘K's 联系人 / 团队 group: the Hub's party search for the typed text (only where the contacts module is) */

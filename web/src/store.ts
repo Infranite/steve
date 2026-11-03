@@ -1,3 +1,4 @@
+import { debounceMax, bounded } from "./live-utils"
 import { readEventPages } from "./event-pages"
 /* View model over the Hub API. Keeps the prototype's shapes (st.items, st.S, st.bots …) so the views stay as designed;
  * everything here is filled from /api/state, item details and session events are loaded on demand, and every action
@@ -32,7 +33,7 @@ export type Tag = { id: string; name: string; cat: string; desc: string; by: "St
 export type Bot = { id: string; main?: boolean; n: string; a: string; role: string; pers: string; pro: number; h: string; harness: string; m: string; model: string | null; on: boolean; acc: string; ws: string; project: string | null; perm: string; permMode: string; rule: string; prompt: string | null
   reasoningEffort?: string | null; mem: [string, string, string][]; memCount: number; memLoaded: boolean; routines: { t: string; d: string; m: string; on: boolean; last: string }[]; hue: string; color: string; round: number; skin: string | null; dev?: string; workspaces: string[] }
 export type Draft = { mid: string; thought: string; text: string }
-export type Msg = { id?: string; k: "me" | "steve" | "thinking" | "digest"; t?: string; item?: string; fresh?: boolean; chat?: string; files?: RFile[]; cfg?: any; created?: number; steps?: Steps; notice?: { kind: string; level: string; ref?: string }; cites?: Cite[]
+export type Msg = { id?: string; clientId?: string; k: "me" | "steve" | "thinking" | "digest"; t?: string; item?: string; fresh?: boolean; chat?: string; files?: RFile[]; cfg?: any; created?: number; steps?: Steps; notice?: { kind: string; level: string; ref?: string }; cites?: Cite[]
   /* thread routing (§3.4, §5.2): the offer under an answer, a suggestion card, ask options, a user message waiting in the
    * queue, the message this one answers or quotes, flow-back from an item, a research cut off by a restart */
   offer?: Offer; suggest?: Suggest; ask?: { options: string[] }; queued?: { run?: string | null }; replyTo?: string; origin?: string; answer?: string
@@ -107,6 +108,7 @@ export const st = {
   SIG: [] as any[], rules: [] as any[], schedules: [] as any[], sources: [] as any[], plugins: [] as any[],
   ch: { personas: [] as any[], spaces: [] as any[], accounts: [] as any[], providers: [] as any[], notify: { acc: "" }, disclosureDefaults: [] as any[] },
   pp: { contacts: [] as any[], orgs: [] as any[], teams: [] as any[], vault: [] as any[], itemPeople: [] as any[], accounts: [] as any[] },
+  pendingActions: new Set<string>(),
   ver: 0,
 }
 const raw = { state: null as State | null, details: new Map<string, RItemDetail>(), events: new Map<string, REvent[]>(), loadingEv: new Set<string>(), loadingItem: new Set<string>() }
@@ -210,7 +212,7 @@ export function toEv(evs: REvent[], running: boolean): { ev: Ev[]; seqs: number[
   if (!running) ev.forEach((x) => { if (x[0] === "tool") x[5] = 0 })
   return { ev, seqs, ts }
 }
-/* build() runs on every refresh and stream event: only a transcript whose events changed is mapped again */
+/* Full snapshots and targeted event paints share this cache: only a transcript whose events changed is mapped again */
 const convs = new Map<string, { xs: REvent[]; n: number; running: boolean; conv: ReturnType<typeof toEv> }>()
 function convOf(sid: string, xs: REvent[], running: boolean) {
   const c = convs.get(sid); if (c && c.xs === xs && c.n === xs.length && c.running === running) return c.conv
@@ -311,11 +313,13 @@ function repliesOf(det: RItemDetail, sids: string[]): Map<number, Reply> {
 }
 /* a plan step as [text, state]: 0 open, 1 done, 2 left open when the item finished */
 const steps = (p: PlanStep[]) => p.map((x) => [x.step, x.done ? 1 : x.left ? 2 : 0] as [string, number])
-function itemOf(i: RItem, decs: RDecision[]): Item {
-  const det = raw.details.get(i.id), proj = raw.state?.projects.find((p) => p.id === i.project_id)
-  const open = decs.filter((d) => d.item_id === i.id)
+let sessionIndex = new Map<string, RSession>(), itemIndex = new Map<string, RItem>(), itemPosition = new Map<string, number>()
+let projectIndex = new Map<string, RProject>(), decisionIndex = new Map<string, RDecision[]>(), activeIndex = new Map<string, RSession>(), openSessionIds = new Set<string>()
+function itemOf(i: RItem): Item {
+  const det = raw.details.get(i.id), proj = projectIndex.get(i.project_id ?? "")
+  const open = decisionIndex.get(i.id) ?? []
   const snoozed = i.snooze && i.snooze.until > Date.now() ? i.snooze.label : undefined
-  const act = raw.state?.sessions.filter((s) => s.item_id === i.id && s.status !== "ended").at(-1)
+  const act = activeIndex.get(i.id)
   const replies = det ? repliesOf(det, i.sessionIds) : new Map<number, Reply>()
   const tl = det ? det.timeline.flatMap((t) => t.kind === "session" && t.session_id && t.text.startsWith("开始会话") ? [["sys", `开始会话`, tm(t.ts)], ["sess", t.session_id]] : t.kind === "me" ? [["me", t.text, tm(t.ts), t.session_id ?? undefined, replies.get(t.id), t.files, t.via]] : [["sys", t.text, tm(t.ts)]]) : []
   return {
@@ -354,9 +358,13 @@ function build() {
   st.version = s.version; st.webVersion = s.web_version ?? ""; st.workspace = s.workspace; st.workspaces = s.workspaces; st.prefix = s.workspace.item_prefix; st.projects = s.projects
   st.noSeq = Math.max(0, ...s.items.map((i) => (i.id.startsWith(st.prefix + "-") ? i.no : 0)))
   const openDec = s.decisions, openSess = new Set(openDec.map((d) => d.session_id).filter(Boolean) as string[])
+  sessionIndex = new Map(s.sessions.map((x) => [x.id, x])); itemIndex = new Map(s.items.map((x) => [x.id, x])); itemPosition = new Map(s.items.map((x, n) => [x.id, n]))
+  projectIndex = new Map(s.projects.map((x) => [x.id, x])); decisionIndex = new Map(); activeIndex = new Map(); openSessionIds = openSess
+  for (const d of openDec) { if (d.item_id) { const xs = decisionIndex.get(d.item_id) ?? []; xs.push(d); decisionIndex.set(d.item_id, xs) } }
+  for (const x of s.sessions) if (x.item_id && x.status !== "ended") activeIndex.set(x.item_id, x)
   st.bots = Object.fromEntries(s.bots.map((b) => [b.id, botOf(b)])); st.allBots = s.allBots
   st.S = Object.fromEntries(s.sessions.map((x) => [x.id, sessOf(x, openSess)]))
-  st.items = s.items.map((i) => itemOf(i, openDec))
+  st.items = s.items.map(itemOf)
   st.tags = s.tags.map((t) => ({ id: t.id, name: t.name, cat: t.cat, desc: t.description, by: t.created_by === "你" ? "你" : "Steve", created: tm(t.created) }))
   st.tagUses = s.tagUses
   st.thread = s.thread.map(msgOf)
@@ -380,14 +388,15 @@ function build() {
 }
 
 /* ───────── loading and live updates ───────── */
+let scopeEpoch = 0
 let inflight: Promise<void> | null = null, again = false
 export function refresh(): Promise<void> {
   if (inflight) { again = true; return inflight.then(() => inflight ?? undefined) } // resolve after the follow-up, so callers see state newer than their action
   inflight = (async () => {
     /* asked after Steve stopped, the state has the reply (stored before steve.thinking went off): the draft has served */
-    const settled = !st.thinking
-    try { raw.state = await api.state(); st.login = null; st.error = ""; build(); if (settled && st.draft) { st.draft = null; build() } emit() }
-    catch (e) { if (e instanceof Unauthenticated) st.login = e.login ?? "/auth/login"; else st.error = (e as Error).message; emit() }
+    const settled = !st.thinking, epoch = scopeEpoch
+    try { const state = await api.state(); if (epoch !== scopeEpoch) return; raw.state = state; st.login = null; st.error = ""; build(); if (settled && st.draft) { st.draft = null; build() } emit() }
+    catch (e) { if (epoch !== scopeEpoch) return; if (e instanceof Unauthenticated) st.login = e.login ?? "/auth/login"; else st.error = (e as Error).message; emit() }
     finally { inflight = null; if (again) { again = false; void refresh() } }
   })()
   return inflight
@@ -395,15 +404,17 @@ export function refresh(): Promise<void> {
 /* debounced, but a steady event stream still refreshes at least once a second */
 let timer: any = null, due = 0
 const soon = () => { clearTimeout(timer); due ||= Date.now() + 1000; timer = setTimeout(() => { due = 0; void refresh().then(reloadOpen) }, Math.max(0, Math.min(120, due - Date.now()))) }
+const replayFrom = new Map<string, number>()
 const openItems = new Set<string>(), dirty = new Set<string>(), reloadAgain = new Set<string>(), missedEv = new Set<string>()
 /** refetch only the loaded item details an event touched */
-async function reloadOpen() { for (const id of [...dirty]) { dirty.delete(id); if (raw.details.has(id)) void loadItem(id, true) } }
+async function reloadOpen() { const epoch = scopeEpoch, ids = [...dirty]; ids.forEach((id) => dirty.delete(id)); await bounded(ids, async (id) => { if (epoch === scopeEpoch && (raw.details.has(id) || raw.loadingItem.has(id))) await loadItem(id, true) }) }
 export async function loadItem(id: string, force = false) {
   openItems.add(id)
   if (raw.loadingItem.has(id)) { if (force) reloadAgain.add(id); return }
   if (!force && raw.details.has(id)) return
+  const epoch = scopeEpoch
   raw.loadingItem.add(id)
-  try { raw.details.set(id, await api.item(id)); tries.delete("i:" + id); build(); emit() } catch (e) { if (!(e instanceof Unauthenticated)) { raw.details.delete(id); retry("i:" + id, e, () => { if (st.items.some((x) => x.id === id)) void loadItem(id, true) }) } } finally { raw.loadingItem.delete(id); if (reloadAgain.delete(id)) void loadItem(id, true) }
+  try { const detail = await api.item(id); if (epoch !== scopeEpoch) return; raw.details.set(id, detail); tries.delete("i:" + id); build(); emit() } catch (e) { if (epoch !== scopeEpoch) return; if (!(e instanceof Unauthenticated)) { raw.details.delete(id); retry("i:" + id, e, () => { if (epoch === scopeEpoch && st.items.some((x) => x.id === id)) void loadItem(id, true) }) } } finally { if (epoch === scopeEpoch) { raw.loadingItem.delete(id); if (reloadAgain.delete(id)) void loadItem(id, true) } }
 }
 /* a view asks once, when it mounts: a load that failed (Hub restarting for a release, dropped connection) used to spin
  * forever. Retry here, backing off to every 30 s, until it loads or the thing is gone */
@@ -414,46 +425,76 @@ function retry(key: string, e: unknown, f: () => unknown) {
   setTimeout(f, 1000 * Math.min(30, 2 ** n))
 }
 /** Pages are limited by bytes as well as rows; only an empty page means EOF. */
-async function eventsAfter(sid: string, after: number) {
-  return readEventPages(after, (cursor) => api.events(sid, cursor))
+async function readEvents(sid: string, after: number, epoch: number) {
+  await readEventPages(after, async (cursor) => {
+    if (epoch !== scopeEpoch) return []
+    return api.events(sid, cursor)
+  }, (page) => {
+    if (epoch !== scopeEpoch) return
+    const xs = raw.events.get(sid) ?? []
+    const seen = new Set(xs.map((e) => e.seq))
+    for (const e of page) if (!seen.has(e.seq)) xs.push(e)
+    xs.sort((a, b) => a.seq - b.seq); raw.events.set(sid, xs); updateSession(sid); emit()
+  })
+  if (epoch === scopeEpoch && !raw.events.has(sid)) { raw.events.set(sid, []); updateSession(sid); emit() }
 }
 export async function loadEvents(sid: string) {
   if (raw.events.has(sid) || raw.loadingEv.has(sid)) return
-  raw.loadingEv.add(sid)
-  try { raw.events.set(sid, await eventsAfter(sid, 0)); tries.delete("e:" + sid); build(); emit() } catch (e) { if (e instanceof Unauthenticated) fail(e); else retry("e:" + sid, e, () => { if (st.S[sid]) void loadEvents(sid) }) } finally { raw.loadingEv.delete(sid); if (missedEv.delete(sid)) void catchUp(sid) }
+  await fetchEvents(sid)
 }
-/** fetch events a loaded transcript missed (arrived while it was loading, or while the stream was down) */
-async function catchUp(sid: string) {
-  const xs = raw.events.get(sid); if (!xs) return
+async function fetchEvents(sid: string) {
+  if (raw.loadingEv.has(sid)) { missedEv.add(sid); return }
+  const epoch = scopeEpoch
+  raw.loadingEv.add(sid)
+  const after = replayFrom.get(sid) ?? raw.events.get(sid)?.at(-1)?.seq ?? 0
+  replayFrom.delete(sid)
   try {
-    const more = await eventsAfter(sid, xs.reduce((m, x) => Math.max(m, x.seq), 0))
-    if (raw.events.get(sid) !== xs || !more.length) return
-    for (const e of more) if (!xs.some((x) => x.seq === e.seq)) xs.push(e)
-    xs.sort((a, b) => a.seq - b.seq); build(); emit()
-  } catch {}
+    await readEvents(sid, after, epoch)
+    if (epoch === scopeEpoch) tries.delete("e:" + sid)
+  } catch (e) {
+    if (epoch !== scopeEpoch) return
+    replayFrom.set(sid, Math.min(after, replayFrom.get(sid) ?? after)); missedEv.delete(sid)
+    if (e instanceof Unauthenticated) fail(e)
+    else retry("e:" + sid, e, () => { if (epoch === scopeEpoch && st.S[sid]) void fetchEvents(sid) })
+  } finally {
+    if (epoch === scopeEpoch) { raw.loadingEv.delete(sid); if (missedEv.delete(sid)) void catchUp(sid) }
+  }
+}
+/** Loading pages own the cursor; SSE during a fetch is caught up after EOF. */
+async function catchUp(sid: string) {
+  if (raw.loadingEv.has(sid)) { missedEv.add(sid); return }
+  if (raw.events.has(sid)) await fetchEvents(sid)
 }
 /* streamed chunks arrive dozens a second per running agent: re-render the app at most every 80 ms, not per chunk */
 /* a chat answer streams in at up to ~20 updates a second: draw once per frame */
 let drawing = 0
 const drawDraft = () => { drawing ||= requestAnimationFrame(() => { drawing = 0; emit() }) }
-let painting: any = null
-const paint = () => { painting ??= setTimeout(() => { painting = null; build(); emit() }, 80) }
+function updateSession(sid: string) {
+  const s = sessionIndex.get(sid); if (!s) return
+  st.S[sid] = sessOf(s, openSessionIds)
+  // The item's reply previews derive from this transcript too.
+  const item = s.item_id && itemIndex.get(s.item_id), pos = s.item_id && itemPosition.get(s.item_id)
+  if (item && typeof pos === "number" && raw.details.has(item.id)) st.items[pos] = itemOf(item)
+}
+let painting: ReturnType<typeof setTimeout> | null = null
+const painted = new Set<string>()
+const paint = (sid: string) => { painted.add(sid); painting ??= setTimeout(() => { painting = null; for (const id of painted) updateSession(id); painted.clear(); emit() }, 80) }
 /* The module SSE types (steve-modules `sse::MODULE_TYPES`, plus `kb`): ids only, scoped to the workspace; the module
  * pages refetch what they show. They don't touch /api/state, so they never trigger a state refresh here. */
 export const MODULE_EVENTS = ["party", "mm", "changeset", "account", "connection", "vault", "signal", "flow", "run", "space", "chan_message", "persona", "channel", "gh", "mail", "kb", "yolo", "yolo_action", "stats"] as const
-export type ModuleEvent = { type: (typeof MODULE_EVENTS)[number]; id: string; ws?: string; flow_id?: string; space_id?: string }
+export type ModuleEvent = { type: (typeof MODULE_EVENTS)[number] | "resync"; id: string; ws?: string; flow_id?: string; space_id?: string }
 const moduleTypes = new Set<string>(MODULE_EVENTS)
 /** every stream event, for pages that keep their own data (contacts, knowledge, accounts, vault, signals, flows, GitHub …) */
 export const hubSubs = new Set<(e: HubEvent | ModuleEvent) => void>()
 /** call `f` (debounced by `ms`) whenever the stream reports a change of one of `types` */
-export function useHubEvents(types: readonly string[], f: () => void, ms = 300) {
-  const ref = useRef(f); ref.current = f
-  const key = types.join()
+export function useHubEvents(types: readonly string[], f: () => void, ms = 300, options: { maxWait?: number; filter?: (e: HubEvent | ModuleEvent) => boolean } = {}) {
+  const ref = useRef({ f, filter: options.filter }); ref.current = { f, filter: options.filter }
+  const key = types.join(), maxWait = options.maxWait ?? 1000
   useEffect(() => {
-    let t: ReturnType<typeof setTimeout> | undefined
-    const h = (e: { type: string }) => { if (types.includes(e.type)) { clearTimeout(t); t = setTimeout(() => ref.current(), ms) } }
-    hubSubs.add(h); return () => { hubSubs.delete(h); clearTimeout(t) }
-  }, [key, ms]) // eslint-disable-line react-hooks/exhaustive-deps
+    const d = debounceMax(() => ref.current.f(), ms, maxWait)
+    const h = (e: HubEvent | ModuleEvent) => { if (e.type === "resync" || (types.includes(e.type) && (!ref.current.filter || ref.current.filter(e)))) d.schedule() }
+    hubSubs.add(h); return () => { hubSubs.delete(h); d.cancel() }
+  }, [key, ms, maxWait]) // eslint-disable-line react-hooks/exhaustive-deps
 }
 /* ───────── YOLO: the switch and the current window's ledger, refetched on `yolo` / `yolo_action` ───────── */
 let yoloTimer: any = null
@@ -483,6 +524,7 @@ function onHub(e: HubEvent | ModuleEvent) {
   if (e.type === "yolo" || e.type === "yolo_action") { yoloSoon(); return }
   if (moduleTypes.has(e.type)) return
   e = e as HubEvent
+  if (e.type === "workspace") { void resync(); return }
   if (e.type === "release.hold") { st.hold = e.hold; emit(); return }
   if (e.type === "steve.draft") { st.draft = { mid: e.mid, thought: e.thought, text: e.text }; if (!st.thread.some((m) => m.k === "thinking")) st.thread.push({ k: "thinking" }); drawDraft(); return }
   if (e.type === "steve.tool") {
@@ -495,9 +537,9 @@ function onHub(e: HubEvent | ModuleEvent) {
   if (e.type === "steve.thinking") { st.thinking = e.on; st.phase = e.on ? e.phase ?? "" : ""; cue(e.on ? "think" : "reply"); build(); emit(); if (!e.on) soon(); return }
   if (e.type === "event") {
     const xs = raw.events.get(e.session_id)
-    if (!xs && raw.loadingEv.has(e.session_id)) missedEv.add(e.session_id)
-    if (xs && !(xs.length && xs[xs.length - 1].seq >= e.seq && xs.some((x) => x.seq === e.seq))) { xs.push({ seq: e.seq, ts: Date.now(), kind: e.kind, data: e.data }); paint() }
     if (["turn_end", "user", "permission", "system"].includes(e.kind)) soon()
+    if (raw.loadingEv.has(e.session_id)) { missedEv.add(e.session_id); return }
+    if (xs && !(xs.length && xs[xs.length - 1].seq >= e.seq && xs.some((x) => x.seq === e.seq))) { xs.push({ seq: e.seq, ts: Date.now(), kind: e.kind, data: e.data }); if (xs.length > 1 && xs.at(-2)!.seq > e.seq) xs.sort((a, b) => a.seq - b.seq); paint(e.session_id) }
     return
   }
   if (e.type === "item") dirty.add(e.id); else if ((e.type === "decision" || e.type === "session") && e.item_id) dirty.add(e.item_id)
@@ -505,7 +547,28 @@ function onHub(e: HubEvent | ModuleEvent) {
 }
 /* the stream is bound to the workspace it was opened in: reopen it after a switch */
 let closeStream = () => {}
-const connect = () => { closeStream(); closeStream = stream(onHub, () => { for (const sid of raw.events.keys()) void catchUp(sid); soon(); yoloSoon() }); yoloSoon() }
+let resyncing: Promise<void> | null = null, resyncAgain = false
+function resync(): Promise<void> {
+  // Freeze the pre-gap cursors before newer SSE frames can advance the caches.
+  for (const [sid, xs] of raw.events) if (!replayFrom.has(sid)) replayFrom.set(sid, xs.at(-1)?.seq ?? 0)
+  if (resyncing) { resyncAgain = true; return resyncing }
+  resyncing = (async () => {
+    do {
+      resyncAgain = false
+      const epoch = scopeEpoch
+      for (const id of new Set([...raw.details.keys(), ...raw.loadingItem])) dirty.add(id)
+      hubSubs.forEach((f) => f({ type: "resync", id: "" }))
+      await refresh()
+      if (epoch !== scopeEpoch) return
+      await reloadOpen()
+      if (epoch !== scopeEpoch) return
+      await bounded([...new Set([...raw.events.keys(), ...raw.loadingEv])], catchUp)
+      yoloSoon()
+    } while (resyncAgain)
+  })().finally(() => { resyncing = null; if (resyncAgain) void resync() })
+  return resyncing
+}
+const connect = () => { closeStream(); closeStream = stream(onHub, () => void resync()); yoloSoon() }
 export function start() {
   void refresh(); connect()
   return () => { closeStream(); closeStream = () => {} }
@@ -548,7 +611,7 @@ export async function chatSend(v: string, files: string[] = [], refs: RFile[] = 
   const toItem = item ?? ITEM_REF.exec(v)?.[1]
   const to = { item, reply_to: quoted?.id }
   st.quote = null; st.focus = toItem ? { item: toItem, until: Date.now() + FOCUS_MS } : st.focus
-  st.draft = null; st.thread.push({ k: "me", t: v, files: refs, replyTo: to.reply_to }, { k: "thinking" }); st.thinking = true; emit(); cue("think")
+  st.draft = null; st.thread.push({ clientId: crypto.randomUUID(), k: "me", t: v, files: refs, replyTo: to.reply_to }, { k: "thinking" }); st.thinking = true; emit(); cue("think")
   try { await api.say(v, files, mentions, to); return true } catch (e) { fail(e); st.thinking = false; build(); emit(); cue("failure"); return false }
 }
 export function stopReply() { if (st.live) void call(api.stopRun(st.live.run)); void call(api.stop()); cue("idle") }
@@ -630,21 +693,27 @@ function decidedText(w: Wait, c: string, bot: string | null) {
 const releaseAhead = (i?: Item) => !!i?.branch && !!st.projects.find((p) => p.id === i.project)?.release
 export async function decide(id: string, c: string, text?: string, decision?: string) {
   const { i, w } = cardOf(id, decision); if (!w) return
-  if (c === "pass") cue("success")
-  if (w.subject === "release" && c === "yes") {
-    /* the answer already says whether the release started; "已发布" only comes with the result */
-    const d = await call(api.decide(w.decision, c, text))
-    if (d) { const rel = relOf(d); toast(rel?.text ?? "已批准发布"); if (rel?.tone === "fail") cue("failure") }
-    return
-  }
-  if (c === "pass" && w.type === "accept" && text !== "no-release" && releaseAhead(i) && i) {
-    /* the Hub finishes an item with nothing on its branch right away: say so instead of waiting for a release */
-    if (!(await call(api.decide(w.decision, c, text)))) return
-    const after = await api.item(i.id).catch(() => null)
-    toast(after?.status === "done" ? "已验收，没有需要发布的改动，事项完成" : "已验收，等它申请发布")
-    return
-  }
-  await call(api.decide(w.decision, c, text), decidedText(w, c, i?.b ?? null))
+  const key = "decision:" + w.decision
+  if (st.pendingActions.has(key)) return
+  st.pendingActions.add(key); emit()
+  try {
+    if (w.subject === "release" && c === "yes") {
+      /* the answer already says whether the release started; "已发布" only comes with the result */
+      const d = await call(api.decide(w.decision, c, text))
+      if (d) { const rel = relOf(d); toast(rel?.text ?? "已批准发布"); if (rel?.tone === "fail") cue("failure") }
+      return
+    }
+    if (c === "pass" && w.type === "accept" && text !== "no-release" && releaseAhead(i) && i) {
+      /* the Hub finishes an item with nothing on its branch right away: say so instead of waiting for a release */
+      if (!(await call(api.decide(w.decision, c, text)))) return
+      cue("success")
+      const after = await api.item(i.id).catch(() => null)
+      toast(after?.status === "done" ? "已验收，没有需要发布的改动，事项完成" : "已验收，等它申请发布")
+      return
+    }
+    const result = await call(api.decide(w.decision, c, text), decidedText(w, c, i?.b ?? null))
+    if (result && c === "pass") cue("success")
+  } finally { st.pendingActions.delete(key); emit() }
 }
 /** take one card out of 待处理 without answering it (the item's first one unless `decision` says which);
  *  undoable from the toast or from 已处理, except a tool permission, which this denies */
@@ -721,7 +790,13 @@ export async function doFork(k: string, at: number, goal: string, asSess: boolea
   const r = await call(api.fork(k, seq, goal, asSess), asSess ? "已派生新会话" : "已派生新事项")
   return r?.item ? "#/items/" + r.item : r?.session ? "#/sessions/" + r.session : "#/sessions/" + k
 }
-export async function sessSend(k: string, v: string, mode: "插话" | "排队", files: string[] = []) { return sendMessage(api.sessionSay(k, v, mode, files), st.S[k].st === "run" && mode === "排队" ? "已排队，本回合结束后发送" : undefined) }
+export async function sessSend(k: string, v: string, mode: "插话" | "排队", files: string[] = []) {
+  const key = "session:" + k
+  if (st.pendingActions.has(key)) return false
+  st.pendingActions.add(key); emit()
+  try { return await sendMessage(api.sessionSay(k, v, mode, files), st.S[k]?.st === "run" && mode === "排队" ? "已排队，本回合结束后发送" : undefined) }
+  finally { st.pendingActions.delete(key); emit() }
+}
 export function interrupt(k: string) { void call(api.cancel(k), "已中断") }
 export function link(k: string, id: string) { void call(api.link(k, id), "已关联到「" + it(id).t + "」") }
 export function sessPatch(k: string, p: Partial<Sess>, msg?: string) {
@@ -765,7 +840,7 @@ export function setBotWorkspaces(k: string, ids: string[]) { void call(api.botWo
 
 /* ───────── actions: workspaces and projects ───────── */
 export async function switchWorkspace(id: string) {
-  try { await api.switchWs(id); raw.details.clear(); raw.events.clear(); convs.clear(); openItems.clear(); dirty.clear(); st.thinking = false; st.draft = null; connect(); await refresh(); location.hash = "#/"; toast("已切换到「" + (st.workspace?.name ?? "") + "」") } catch (e) { fail(e) }
+  try { await api.switchWs(id); scopeEpoch++; replayFrom.clear(); painted.clear(); raw.loadingItem.clear(); raw.loadingEv.clear(); reloadAgain.clear(); missedEv.clear(); raw.details.clear(); raw.events.clear(); convs.clear(); openItems.clear(); dirty.clear(); st.thinking = false; st.draft = null; connect(); await refresh(); location.hash = "#/"; toast("已切换到「" + (st.workspace?.name ?? "") + "」") } catch (e) { fail(e) }
 }
 export async function newWorkspace(name: string, description: string, item_prefix?: string) { const w = await call(api.newWs({ name, description, item_prefix })); if (w) await switchWorkspace(w.id) }
 export async function newProject(p: { name: string; path: string; description?: string; worktree?: boolean; default_bot?: string | null }) { const r = await call(api.newProject(p), `已添加项目「${p.name}」`); return r?.id }

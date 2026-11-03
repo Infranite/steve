@@ -11,7 +11,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { st, toast } from "@/store"
 import { Unauthenticated } from "@/api"
 import { go, Page, Group, Row, SectionLabel, Meta, Empty, StatusDot } from "@/ui"
-import { Select } from "@/views"
+import { Select } from "@/view-shared"
 import { Unwired } from "@/unwired"
 import { gh, submitManifest, type GhOverview, type GhRepo, type GhAvailable } from "@/api/github"
 import { NotWired } from "@/api"

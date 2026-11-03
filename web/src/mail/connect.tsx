@@ -7,7 +7,7 @@ import { cn } from "cn"
 import { Input } from "@/components/ui/input"
 import { Field, FieldDescription, FieldLabel } from "@/components/ui/field"
 import { Chips } from "@/ui"
-import { Select } from "@/views"
+import { Select } from "@/view-shared"
 import { IMAP_PRESETS, type ImapPreset } from "@/api/mail"
 import type { RFieldDef } from "@/api/accounts"
 

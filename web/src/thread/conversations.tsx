@@ -7,6 +7,7 @@ import { cn } from "cn"
 import { CheckIcon, LoaderIcon, MessageCircleIcon, UsersIcon, UserIcon, XIcon, ExternalLinkIcon, ListIcon } from "lucide-react"
 import { conversationsApi, type ConvBadge, type ConvMessage, type ConvRow, type Reaction } from "@/api/conversations"
 import { st, msgOf, useHubEvents, type Msg } from "@/store"
+import { matchesSpace } from "@/live-utils"
 import { go } from "@/ui"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -26,7 +27,7 @@ export function useConversation(space: string | undefined) {
     }).catch(() => { if (id === request.current) setData(null) })
   }, [space])
   useEffect(() => { setData(undefined); load(); return () => { request.current++ } }, [load])
-  useHubEvents(["message", "chan_message"], load, 250)
+  useHubEvents(["message", "chan_message"], load, 250, { filter: (e) => matchesSpace(e as { space_id?: string }, space) })
   return data
 }
 

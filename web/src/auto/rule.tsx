@@ -13,7 +13,9 @@ import { tm, toast } from "@/store"
 import { Unwired } from "@/unwired"
 import { flowApi, useLoad, errText, sourceLabel, type Flow, type Graph, type Run } from "@/api/flow"
 import { HubError } from "@/api"
-import { FlowCanvas, traceOf } from "@/auto/canvas"
+import { traceOf } from "@/auto/trace"
+import { lazyView } from "@/lazy"
+const FlowCanvas = lazyView(() => import("@/auto/canvas").then((m) => ({ default: m.FlowCanvas })))
 import { Inspector, toYaml, kindOf } from "@/auto/nodes"
 import { Loading, Failed, Modal, Json, ms, RUN_STATUS } from "@/auto/common"
 

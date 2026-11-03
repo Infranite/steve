@@ -12,7 +12,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { st, tm } from "@/store"
 import { modReq as req } from "@/api"
 import { go, Page, Group, Row, SectionLabel, Empty, ItemNo, Status } from "@/ui"
-import { Select } from "@/views"
+import { Select } from "@/view-shared"
 import { AskSteve } from "@/config-ui"
 import { myContactId, people, type DirectoryStatus, type Team } from "@/api/people"
 import { ContactAvatar, ITEM_ROLE, Loading, PeopleGate, ROLE, Section, TEAM_KIND, act, useLoad, visLabel , SubMeta } from "@/people/common"

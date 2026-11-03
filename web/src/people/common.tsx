@@ -5,7 +5,7 @@ import { Spinner } from "@/components/ui/spinner"
 import { useHubEvents, toast, st, emit } from "@/store"
 import { Unauthenticated } from "@/api"
 import { SectionLabel } from "@/ui"
-import { Select } from "@/views"
+import { Select } from "@/view-shared"
 import { Unwired } from "@/unwired"
 import { usePeopleOn, type Level, type Visibility } from "@/api/people"
 export { usePeopleOn }

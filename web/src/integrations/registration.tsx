@@ -6,7 +6,7 @@ import { channelsApi, type FeishuRegistration } from "@/api/channels"
 import { vaultApi } from "@/api/vault"
 import { isNotWired } from "@/api"
 import { go } from "@/ui"
-import { Select } from "@/views"
+import { Select } from "@/view-shared"
 import { officialConfirmationUrl, registrationLabel, registrationPending, remainingSeconds } from "./registration-state"
 
 const errorText = (e: unknown) => e instanceof Error ? e.message : "暂时无法连接，请重试"

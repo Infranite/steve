@@ -5,7 +5,7 @@ import { PlusIcon, XIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Group } from "@/ui"
-import { Select } from "@/views"
+import { Select } from "@/view-shared"
 import { people, type PartyOption } from "@/api/people"
 import type { Act, Rule, When } from "@/api/channels"
 

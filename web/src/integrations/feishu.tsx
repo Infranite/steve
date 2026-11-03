@@ -10,7 +10,7 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/component
 import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { go, SectionLabel } from "@/ui"
-import { Select, ChoiceCards } from "@/views"
+import { Select, ChoiceCards } from "@/view-shared"
 import { toast } from "@/store"
 import { HubError } from "@/api"
 import { useBusy, report } from "@/accounts/load"
