@@ -325,46 +325,59 @@ fn managed_orphan_exit_kills_group_descendants() {
         .unwrap();
     let child_pid = process.id();
     let output = process.wait_with_output().unwrap();
-    if output.status.signal() != Some(libc::SIGKILL) {
+    // macOS can report the explicit fallback exit before delivering SIGKILL to the fixture itself.
+    // Neither status proves its workers died: observe the descendant before any parent cleanup.
+    let expected_status =
+        output.status.signal() == Some(libc::SIGKILL) || output.status.code() == Some(70);
+    let pid = fs::read_to_string(&pid_file)
+        .ok()
+        .and_then(|s| s.parse::<i32>().ok())
+        .filter(|pid| *pid > 0);
+    let mut descendant_dead = false;
+    if let Some(pid) = pid {
+        for _ in 0..40 {
+            if unsafe { libc::kill(pid, 0) } != 0
+                && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+            {
+                descendant_dead = true;
+                break;
+            }
+            // An exited orphan awaiting init reaping is also dead, not a surviving worker.
+            if let Ok(out) = std::process::Command::new("/bin/ps")
+                .args(["-o", "stat=", "-p", &pid.to_string()])
+                .output()
+            {
+                let state = String::from_utf8_lossy(&out.stdout);
+                if out.status.success() && state.trim().starts_with('Z') {
+                    descendant_dead = true;
+                    break;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+    }
+    // Preserve the observations above. Cleanup must never make a broken group kill pass this test.
+    if !expected_status || !descendant_dead {
         unsafe {
             libc::kill(-(child_pid as i32), libc::SIGKILL);
-        }
-        if let Ok(pid) = fs::read_to_string(&pid_file)
-            .unwrap_or_default()
-            .parse::<i32>()
-        {
-            unsafe {
+            if let Some(pid) = pid {
                 libc::kill(pid, libc::SIGKILL);
             }
         }
     }
-    assert_eq!(
-        output.status.signal(),
-        Some(libc::SIGKILL),
+    assert!(
+        descendant_dead,
+        "managed Hub descendant survived process-group shutdown (or its PID was unavailable): fixture={child_pid}, descendant={pid:?}, status={}; stdout={} stderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        expected_status,
         "orphan fixture pid={child_pid}, status={}, code={:?}; stdout={} stderr={}",
         output.status,
         output.status.code(),
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let pid: i32 = fs::read_to_string(pid_file).unwrap().parse().unwrap();
-    for _ in 0..40 {
-        if unsafe { libc::kill(pid, 0) } != 0 {
-            return;
-        }
-        // An exited orphan awaiting init reaping is also dead, not a surviving worker.
-        let out = std::process::Command::new("/bin/ps")
-            .args(["-o", "stat=", "-p", &pid.to_string()])
-            .output()
-            .unwrap();
-        let state = String::from_utf8_lossy(&out.stdout);
-        if state.trim().is_empty() || state.trim().starts_with('Z') {
-            return;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(25));
-    }
-    unsafe {
-        libc::kill(pid, libc::SIGKILL);
-    }
-    panic!("managed Hub descendant survived process-group shutdown");
 }
