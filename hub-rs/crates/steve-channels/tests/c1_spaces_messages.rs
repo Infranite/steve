@@ -388,19 +388,29 @@ async fn own_bot_messages_are_not_processed_other_bots_only_recorded() {
     assert_eq!(push(&h, m).await.next, Next::Handle);
     // … but between two people's messages a bot gets one answer: once Steve answered it, the bot's next
     // messages (a reply to Steve or a new @) are only recorded, so two bots never answer each other forever
+    // a draft waiting for approval is no answer yet
     std::thread::sleep(std::time::Duration::from_millis(5));
-    let at = steve_store::now();
-    h.env
-        .store()
-        .with_conn(|c| {
-            c.execute(
-                "INSERT INTO chan_messages (id, workspace_id, space_id, external_id, direction, text, status, reply_to, created, sent)
-                 VALUES ('cm_steve1', 'default', ?1, 'fm_steve1', 'out', '好的，已经恢复', 'sent', 'm3', ?2, ?2)",
-                params![other.space_id, at],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    let out = |id: &str, status: &str| {
+        let at = steve_store::now();
+        h.env
+            .store()
+            .with_conn(|c| {
+                c.execute(
+                    "INSERT INTO chan_messages (id, workspace_id, space_id, external_id, direction, text, status, created, sent)
+                     VALUES (?1, 'default', ?2, ?3, 'out', '好的', ?4, ?5, ?5)",
+                    params![id, other.space_id, format!("fm_{id}"), status, at],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+    };
+    out("draft1", "draft");
+    let mut m = FakeChannel::message("G1", "m3b", "umonitor", "【监控】仍在恢复");
+    m.sender.is_bot = true;
+    assert_eq!(push(&h, m).await.next, Next::Handle, "a draft is no answer");
+    // a message Steve sent (here a flow's, no reply reference) is
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    out("steve1", "sent");
     let answered = Next::Record(steve_channels::inbound::LABEL_BOT_ANSWERED);
     let mut m = FakeChannel::message("G1", "m4", "umonitor", "收到");
     m.sender.is_bot = true;

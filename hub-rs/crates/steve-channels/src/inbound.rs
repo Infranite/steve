@@ -1084,9 +1084,10 @@ impl Channels {
     }
 }
 
-/// Has Steve already answered `bot` in `space` since a person last spoke there? Between two people's
-/// messages a bot gets one answer: whether it replies to Steve or @s it anew, two bots never keep answering
-/// each other.
+/// Has Steve already answered `bot` in `space` since a person last spoke there: has anything Steve sends
+/// (pending, sent or recalled after sending; a draft or a failure is not an answer) gone out after the bot's first message since? A
+/// bot gets one answer between two people's messages, however Steve answered (a reply, a flow's message)
+/// and however the bot speaks (a reply, a new @), so two bots never keep answering each other.
 fn answered_since_people(
     c: &rusqlite::Connection,
     space: &str,
@@ -1096,14 +1097,19 @@ fn answered_since_people(
         return Ok(false);
     };
     Ok(c.query_row(
-        "SELECT EXISTS(
-           SELECT 1 FROM chan_messages o JOIN chan_messages i ON i.space_id = o.space_id AND i.external_id = o.reply_to
-            WHERE o.space_id = ?1 AND o.direction = 'out' AND i.direction = 'in' AND i.sender_account_id = ?2
-              AND o.created >= coalesce((
-                SELECT max(h.created) FROM chan_messages h
-                 WHERE h.space_id = ?1 AND h.direction = 'in' AND h.sender_account_id IS NOT NULL
-                   AND h.sender_account_id NOT IN (SELECT account_id FROM space_members WHERE space_id = ?1 AND role = 'bot')
-                   AND h.sender_account_id NOT IN (SELECT id FROM accounts WHERE kind = 'app_bot')), 0))",
+        "WITH people AS (
+           SELECT coalesce(max(h.created), 0) AS at FROM chan_messages h
+            WHERE h.space_id = ?1 AND h.direction = 'in' AND h.sender_account_id IS NOT NULL
+              AND h.sender_account_id NOT IN (SELECT account_id FROM space_members WHERE space_id = ?1 AND role = 'bot')
+              AND h.sender_account_id NOT IN (SELECT id FROM accounts WHERE kind = 'app_bot')
+         ), first_bot AS (
+           SELECT min(b.created) AS at FROM chan_messages b, people
+            WHERE b.space_id = ?1 AND b.direction = 'in' AND b.sender_account_id = ?2 AND b.created > people.at
+         )
+         SELECT EXISTS(
+           SELECT 1 FROM chan_messages o, first_bot
+            WHERE o.space_id = ?1 AND o.direction = 'out' AND o.status IN ('pending', 'sent', 'recalled')
+              AND first_bot.at IS NOT NULL AND o.created >= first_bot.at)",
         params![space, bot],
         |r| r.get(0),
     )?)
