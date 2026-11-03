@@ -34,6 +34,7 @@ export function PlanSummary({ plan, level }: { plan: CleanupPlan; level: Cleanup
   return (
     <div className="flex flex-col gap-2 rounded-lg border px-3 py-2.5 type-callout" data-cleanup-plan data-plan-spaces={plan.spaces} data-plan-messages={plan.messages} data-plan-contacts={plan.contacts} data-plan-kept={plan.kept_count}>
       <div>{gone.length && (plan.messages || plan.spaces || plan.contacts || plan.messages_purged || plan.decisions) ? <>将删除 {gone.join("、")}</> : "没有可以删除的记录"}{plan.kept_count > 0 && <>；保留 {plan.kept.length === plan.kept_count && keptBy.length ? keptBy.join("、") : `${plan.kept_count} 项`}{reasons.length ? `（${reasons.slice(0, 2).join("、")}）` : ""}</>}。</div>
+      {(plan.decisions ?? 0) > 0 && <div className="type-footnote text-muted-foreground" data-cleanup-undo-note>删除关联决定后，其自动操作将不能再撤销；自动操作历史仍会保留。</div>}
       {plan.kept.length > 0 && <details className="type-footnote text-muted-foreground"><summary className="cursor-pointer select-none">看保留了哪些</summary>
         <ul className="mt-1 flex max-h-40 flex-col gap-0.5 overflow-y-auto">{plan.kept.map((k) => <li key={k.kind + k.id}>{k.name || k.id} · {k.reason}</li>)}</ul></details>}
     </div>

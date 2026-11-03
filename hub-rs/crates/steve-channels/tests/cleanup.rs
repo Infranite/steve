@@ -652,3 +652,76 @@ async fn another_workspace_cannot_preview_or_delete() {
     }
     assert_eq!(h.n("SELECT count(*) FROM chan_messages WHERE id='m1'"), 1);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn completed_yolo_history_does_not_pin_channel_decisions() {
+    let (h, con, _) = setup().await;
+    h.seed("", &con, "");
+    // Production shape: resolved channel approve/fail decisions, with cancelled or
+    // decided YOLO history, sometimes carrying an unused undo description.
+    h.exec("INSERT INTO decisions (id, workspace_id, kind, subject_type, subject_id, question, status, requested_by, created, resolved) VALUES
+      ('d1','default','approve','chan_message','m1','send?','resolved','steve',1,2),
+      ('d2','default','fail','chan_message','m2','retry?','resolved','steve',1,2);
+      UPDATE chan_messages SET decision_id='d1' WHERE id='m1';
+      INSERT INTO yolo_actions (id,workspace_id,decision_id,kind,subject_type,rule,outcome,reason,undo,created) VALUES
+      ('ya1','default','d1','approve','chan_message','channel.send','decided','sent','{\"kind\":\"recall\"}',1),
+      ('ya2','default','d2','fail','chan_message','channel.retry','cancelled','cancelled','{\"kind\":\"decision\"}',1),
+      ('ya3','default','d2','fail','chan_message','channel.retry','decided','done',NULL,1);");
+    let mut req = json!({"connection_id":con,"level":"all","confirm":true});
+    let (st, preview) = h
+        .call("POST", "/channels/cleanup/preview", Some(req.clone()))
+        .await;
+    assert_eq!(st, 200, "{preview}");
+    assert_eq!(preview["decisions"], 2);
+    req["decision_ids"] = preview["decision_ids"].clone();
+    h.exec("CREATE TRIGGER fail_yolo_cleanup BEFORE DELETE ON decisions BEGIN SELECT RAISE(ABORT, 'rollback'); END;");
+    let (st, _) = h.call("POST", "/channels/cleanup", Some(req.clone())).await;
+    assert_ne!(st, 200);
+    assert_eq!(h.n("SELECT count(*) FROM yolo_actions WHERE id='ya1' AND decision_id='d1' AND undo IS NOT NULL"), 1);
+    h.exec("DROP TRIGGER fail_yolo_cleanup;");
+    let (st, result) = h.call("POST", "/channels/cleanup", Some(req)).await;
+    assert_eq!(st, 200, "{result}");
+    assert_eq!(
+        h.n("SELECT count(*) FROM decisions WHERE id IN ('d1','d2')"),
+        0
+    );
+    assert_eq!(
+        h.n("SELECT count(*) FROM yolo_actions WHERE id IN ('ya1','ya2','ya3')"),
+        3
+    );
+    assert_eq!(h.n("SELECT count(*) FROM yolo_actions WHERE id IN ('ya1','ya2','ya3') AND (decision_id IS NOT NULL OR undo IS NOT NULL)"), 0);
+    assert_eq!(
+        h.one("SELECT reason FROM yolo_actions WHERE id='ya1'"),
+        "sent"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn scheduled_yolo_action_and_new_execution_after_preview_are_protected() {
+    let (h, con, _) = setup().await;
+    h.seed("", &con, "");
+    h.exec("INSERT INTO decisions (id, workspace_id, kind, subject_type, subject_id, question, status, requested_by, created) VALUES
+      ('d1','default','approve','chan_message','m1','send?','open','steve',1);
+      INSERT INTO yolo_actions (id,workspace_id,decision_id,kind,subject_type,rule,outcome,reason,created) VALUES
+      ('ya1','default','d1','approve','chan_message','channel.send','scheduled','waiting',1);");
+    let mut req = json!({"connection_id":con,"level":"all","confirm":true});
+    let (_, blocked) = h
+        .call("POST", "/channels/cleanup/preview", Some(req.clone()))
+        .await;
+    assert_eq!(blocked["decisions"], 0);
+    h.exec("UPDATE yolo_actions SET outcome='cancelled' WHERE id='ya1';");
+    let (_, preview) = h
+        .call("POST", "/channels/cleanup/preview", Some(req.clone()))
+        .await;
+    assert_eq!(preview["decisions"], 1);
+    req["decision_ids"] = preview["decision_ids"].clone();
+    // Any nonterminal/unknown execution state must fail closed.
+    h.exec("UPDATE yolo_actions SET outcome='running' WHERE id='ya1';");
+    let (st, _) = h.call("POST", "/channels/cleanup", Some(req)).await;
+    assert_ne!(st, 200);
+    assert_eq!(
+        h.one("SELECT decision_id FROM yolo_actions WHERE id='ya1'"),
+        "d1"
+    );
+    assert_eq!(h.n("SELECT count(*) FROM decisions WHERE id='d1'"), 1);
+}

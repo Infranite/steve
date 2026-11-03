@@ -385,7 +385,6 @@ fn removable_decisions(c: &Connection, ws: &str, sid: &str) -> ChannelResult<Vec
         "mems",
         "attr_values",
         "merge_proposals",
-        "yolo_actions",
         "stewards",
         "mail_drafts",
     ] {
@@ -406,6 +405,13 @@ fn removable_decisions(c: &Connection, ws: &str, sid: &str) -> ChannelResult<Vec
             " AND NOT EXISTS (SELECT 1 FROM {table} x WHERE x.{ty} = 'decision' AND x.{id} = d.id)"
         ));
     }
+    // The YOLO ledger is historical, not an ownership reference. Explicit cleanup
+    // retires its undo capability, but may never detach scheduled/running actions.
+    sql.push_str(
+        " AND NOT EXISTS (SELECT 1 FROM yolo_actions x WHERE x.decision_id = d.id
+        AND (x.workspace_id <> ?1 OR x.item_id IS NOT NULL OR x.session_id IS NOT NULL
+          OR x.outcome NOT IN ('decided', 'declined', 'muted', 'cancelled', 'failed')))",
+    );
     sql.push_str(" ORDER BY d.id");
     strings(c, &sql, params![ws, sid])
 }
@@ -551,6 +557,12 @@ const SPACE_OWNED: [&str; 5] = [
 
 fn delete_all(tx: &Connection, p: &Plan, now: i64) -> ChannelResult<()> {
     let decisions = json_ids(&p.decisions);
+    // Preserve the historical ledger; deleting a decision explicitly ends its undo.
+    tx.execute(
+        "UPDATE yolo_actions SET decision_id = NULL, undo = NULL
+          WHERE decision_id IN (SELECT value FROM json_each(?1))",
+        [&decisions],
+    )?;
     for table in ["chan_messages", "ext_events"] {
         tx.execute(&format!("UPDATE {table} SET decision_id = NULL WHERE decision_id IN (SELECT value FROM json_each(?1))"), [&decisions])?;
     }
@@ -690,9 +702,15 @@ pub async fn run(
             if expected != actual {
                 return Err(ApiError::rule("关联决定已变化，请重新预览并确认清理"));
             }
+            let yolo_actions = strings(tx,
+                "SELECT id FROM yolo_actions WHERE decision_id IN (SELECT value FROM json_each(?1))",
+                [json_ids(&p.decisions)])?;
             match level {
                 Level::Text => purge_text(tx, &p.messages, now)?,
                 Level::All => delete_all(tx, &p, now)?,
+            }
+            for id in yolo_actions {
+                tx.publish(steve_store::ChangeEvent::YoloAction { id, decision_id: None, ws: v.ws.clone() });
             }
             for id in &p.decisions {
                 tx.publish(steve_store::ChangeEvent::Decision { id: id.clone(), item_id: Some(None) });

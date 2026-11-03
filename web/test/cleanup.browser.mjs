@@ -36,6 +36,7 @@ try {
     await page.goto(base + "/test/fixtures/cleanup.html?mode=" + mode)
     await page.locator('[data-cleanup-choice="all"]').click()
     await page.locator("[data-cleanup-plan]").filter({ hasText: mode === "multi" ? "3 个关联决定" : "2 个关联决定" }).waitFor()
+    assert.match(await page.locator("[data-cleanup-undo-note]").innerText(), /不能再撤销.*历史仍会保留/)
     assert.match(await page.locator("[data-cleanup-plan]").innerText(), /条保留消息的正文和附件/)
     const confirm = page.locator(mode === "multi" ? "[data-disconnect-confirm]" : "[data-cleanup-confirm]")
     assert.equal(await confirm.isDisabled(), true, "name confirmation remains required")
