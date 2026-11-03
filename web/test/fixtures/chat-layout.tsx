@@ -1,6 +1,6 @@
 import { createRoot } from "react-dom/client"
 import "../../src/index.css"
-import { ChatView } from "../../src/views"
+import { ChatView } from "../../src/chat-view"
 import { SidebarProvider } from "../../src/components/ui/sidebar"
 import { st, emit, useStore, type Msg, type Bot } from "../../src/store"
 

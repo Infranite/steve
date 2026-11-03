@@ -129,7 +129,7 @@ function Identity({ kind, c, p, chan, app, appConn, onLeave }: { kind: "steve" |
   const what = feishu
     ? kind === "steve"
       ? <>在它所在的群里被 @、或者有人私聊它时，Steve 以「{name}」的名义回答。群里看到的发送者是这个机器人。</>
-      : <>Steve 用你（{name}）的账号读你的私聊和群消息，大约 1 分钟一次。每个群可以设成只记录、起草等你批准，或直接回复（开头带 [AI]）。你在任何群里发 <code className="font-mono text-[12px]">/bot</code>，就是在给 Steve 下指令。</>
+      : <>Steve 用你（{name}）的账号读你的私聊和群消息，大约 20 秒一次。每个群可以设成只记录、起草等你批准，或直接回复（开头带 [AI]）。你在任何群里发 <code className="font-mono text-[12px]">/bot</code>，就是在给 Steve 下指令。</>
     : kind === "steve" ? <>Steve 以「{name}」的身份工作。</> : <>Steve 用你的账号「{name}」工作，只做你授权的事。</>
   return (
     <div className="flex flex-col gap-3 px-4 py-4" data-identity={kind} data-identity-state="on" data-conn={c.id}>

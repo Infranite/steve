@@ -1,7 +1,7 @@
 import { StrictMode, useEffect, useState } from "react"
 import { createRoot } from "react-dom/client"
 import "../../src/index.css"
-import { ChatView } from "../../src/views"
+import { ChatView } from "../../src/chat-view"
 import { SpaceView } from "../../src/channels/space"
 import { SidebarProvider } from "../../src/components/ui/sidebar"
 function Fixture() {
