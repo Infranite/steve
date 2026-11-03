@@ -1,7 +1,9 @@
 //! The reaction lifecycle on an inbound message Steve answers (channels-personas.md §2.11): an
 //! “acknowledged / working on it” reaction the moment Steve decides to respond, swapped for “done”
 //! once the answer is out (or the item it became has ended), or for “failed” when it could not be
-//! answered or sent. A draft you discard takes the acknowledgement off again.
+//! answered or sent. An answer that waits for your approval takes the acknowledgement off (nothing is
+//! being worked on meanwhile); once approved it still ends “done” or “failed”, and a draft you
+//! discard, or whose approval expires, stays without one.
 //!
 //! Reactions are best-effort: every provider call has a short timeout, a failure is logged and kept
 //! in `chan_reactions.error`, and nothing here ever stops or delays a reply beyond that timeout.
@@ -12,7 +14,8 @@
 //! [`Reactor`]), because the reply itself goes out as you and the bot may not be in that chat.
 //!
 //! State (`chan_reactions`, migration 020): `ack → done | failed | cleared`; `failed → done` when a
-//! retry gets the answer out. `answer_id` is the outbound row whose sending completes it.
+//! retry gets the answer out; `cleared → done | failed` when a discarded draft is taken back (undo)
+//! and then goes out or fails. `answer_id` is the outbound row whose sending completes it.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -320,6 +323,9 @@ impl Channels {
             (s, h) if s == h.state() => false,
             ("ack", _) => true,
             ("failed", Finish::Done) => true,
+            // a discarded draft taken back and sent after all (or failing then): the asker still
+            // learns how it ended
+            ("cleared", Finish::Done | Finish::Failed) => true,
             _ => false,
         };
         if !allowed {

@@ -309,6 +309,22 @@ fn place(
 }
 
 /// The knowledge a generated text was written with: layer 7's hits and the memories of layer 6.
+/// What the audience itself said in the message this one answers (`CheckCx::audience_said`): only an
+/// inbound message of the same workspace and space as the target, still holding its text. Anything
+/// else — no source, another space, a purged or outbound message — gives nothing.
+fn audience_said(c: &Connection, t: &OutTarget) -> ChannelResult<Option<String>> {
+    let Some(src) = &t.source_message_id else {
+        return Ok(None);
+    };
+    Ok(c.query_row(
+        "SELECT text FROM chan_messages WHERE id = ? AND workspace_id = ? AND space_id = ?
+            AND direction = 'in' AND purged IS NULL AND text IS NOT NULL AND trim(text) <> ''",
+        params![src, t.ws, t.space_id],
+        |r| r.get::<_, String>(0),
+    )
+    .optional()?)
+}
+
 fn knowledge_of(c: &Connection, g: Option<&Generation>) -> ChannelResult<Vec<KnowledgeUse>> {
     let Some(g) = g else {
         return Ok(Vec::new());
@@ -725,7 +741,7 @@ impl Outbox {
         if text.chars().count() > TEXT_MAX {
             text = text.chars().take(TEXT_MAX).collect();
         }
-        let (p, audience, knowledge) = ch.store().reader(|c| -> ChannelResult<_> {
+        let (p, audience, knowledge, said) = ch.store().reader(|c| -> ChannelResult<_> {
             let p = place(
                 c,
                 &t.ws,
@@ -735,7 +751,8 @@ impl Outbox {
             )?;
             let a = disclosure::space_audience(c, &p.space, &p.account, &p.owner_user)?;
             let k = knowledge_of(c, req.generation.as_ref())?;
-            Ok((p, a, k))
+            let said = audience_said(c, t)?;
+            Ok((p, a, k, said))
         })?;
         let draft_model = req
             .generation
@@ -750,6 +767,7 @@ impl Outbox {
                 (None, Mode::Bot) => "steve".into(),
             },
             draft_model: draft_model.clone(),
+            audience_said: said,
         };
 
         // 1. disclosure (and the rewrites)
@@ -896,6 +914,13 @@ impl Outbox {
             Ok((id, decision))
         })?;
         if let Some(d) = decision {
+            // waiting for your approval is not “working on it”: the acknowledgement comes off, and
+            // the answer's own end (sent ✅ / failed ❌, `cleared → done | failed`) shows later
+            if completes(req.purpose)
+                && let Some(src) = &t.source_message_id
+            {
+                ch.react_finish(src, crate::reactions::Finish::Clear).await;
+            }
             return Ok((
                 Delivered::Drafted {
                     message_id: id,
@@ -1684,6 +1709,33 @@ impl DecisionHandler for MessageDecisions {
             "ask" => self.handoff(tx, cx, d),
             _ => Err(ApiError::rule("不认识这种决定")),
         }
+    }
+
+    /// An approval nobody answered expired: its draft is not sent and counts as discarded, so the
+    /// message it answers loses its “收到” reaction instead of keeping it for good.
+    fn expire(&self, tx: &Tx, d: &Decision) -> ApiResult<()> {
+        if d.kind != "approve" {
+            return Ok(());
+        }
+        let Some(row) = out_row(tx, &d.subject_id)? else {
+            return Ok(());
+        };
+        if row.status == "draft" && row.decision_id.as_deref() == Some(d.id.as_str()) {
+            set_status(tx, &row.id, &["draft"], DISCARDED)?;
+            self.0.push(After::Discarded {
+                message_id: row.id.clone(),
+            });
+            base::audit(
+                tx,
+                &row.ws,
+                "steve",
+                "chan_message.expired",
+                &row.id,
+                &json!({"decision": d.id}),
+            )?;
+            messages::event(tx, &row.ws, &row.space_id, &row.id);
+        }
+        Ok(())
     }
 
     /// Undoing an approval within the delay puts the draft back; once it went out, `409`.

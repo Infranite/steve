@@ -76,6 +76,10 @@ pub struct CheckCx {
     pub actor: String,
     /// The model that wrote the text; the check uses a different one.
     pub draft_model: Option<String>,
+    /// What the audience itself just said to the sender (the message this text answers), as context
+    /// for the check only: it tells what they already know, it is not knowledge, grants no level and
+    /// changes no rule. `None` when the text answers nothing (email, comments, a new message).
+    pub audience_said: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

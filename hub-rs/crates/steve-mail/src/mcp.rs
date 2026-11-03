@@ -617,6 +617,7 @@ impl Mail {
                 ws: cx.ws.clone(),
                 actor: cx.bot_id.clone(),
                 draft_model: None,
+                audience_said: None,
             },
             &p.audience,
             &format!("{}\n\n{}", p.subject, p.body),

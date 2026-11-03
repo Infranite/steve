@@ -462,6 +462,7 @@ impl Mail {
                 ws: who.ws.clone(),
                 actor: g.author.clone(),
                 draft_model: Some(out.model.clone()),
+                audience_said: None,
             },
             &audience,
             &format!("{subject}\n\n{body}"),

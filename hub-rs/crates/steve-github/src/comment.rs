@@ -181,6 +181,7 @@ impl GitHub {
                 ws: ws.clone(),
                 actor: cx.bot_id.clone(),
                 draft_model: None,
+                audience_said: None,
             },
             &Audience {
                 external: true,

@@ -413,6 +413,7 @@ async fn the_registered_outbound_check_is_used() {
         ws: WS.into(),
         actor: "steve".into(),
         draft_model: None,
+        audience_said: None,
     };
     let ext = Audience {
         external: true,

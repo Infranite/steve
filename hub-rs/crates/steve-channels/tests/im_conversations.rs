@@ -402,7 +402,9 @@ async fn a_discarded_draft_takes_the_ack_off() {
     .await;
     let r = i.response.unwrap();
     assert_eq!(r.label, "等你确认回复");
-    assert_eq!(h.fake.reactions_on("d1"), [ReactionKind::Ack]);
+    // waiting for your approval is not “working on it”: no acknowledgement meanwhile
+    assert!(h.fake.reactions_on("d1").is_empty(), "{:?}", log(&h));
+    assert_eq!(state(&h, &i.message_id), "cleared");
     steve_modules::decisions::dispatch(
         &h.env.modules,
         &caller(WS, ME),
@@ -990,4 +992,110 @@ async fn a_turn_carries_its_chat_message_with_media() {
         ),
         (Value::Null, json!([]), json!(9))
     );
+}
+
+// ---------------------------------------------------------------- approvals and the reaction (disclosure-01)
+
+fn decide(h: &H, id: &str, choice: &str) {
+    steve_modules::decisions::dispatch(&h.env.modules, &caller(WS, ME), id, choice, "")
+        .expect("ours")
+        .expect("decided");
+}
+
+/// What steve-core's `undoDecision` does around the handler.
+fn undo(h: &H, id: &str) {
+    h.env
+        .store()
+        .transaction(|tx| -> ApiResult<()> {
+            let d = steve_store::base::decisions::get(tx, id)?.expect("decision");
+            h.env.modules.registry.before_undo(tx, &d)?;
+            tx.execute("UPDATE decisions SET status = 'open' WHERE id = ?", [id])?;
+            Ok(())
+        })
+        .expect("undo");
+}
+
+/// A draft for your approval: no acknowledgement while it waits; approved and sent → done; approved
+/// and failing → failed; discarded, taken back and approved → done after all.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_approved_draft_ends_done_or_failed_even_after_a_discard_was_undone() {
+    let h = setup(false).await;
+    let draft = |id: &'static str| {
+        let h = &h;
+        async move {
+            let i = push(
+                h,
+                &h.me.clone(),
+                msg("D_LI", id, "ulilei", "明天几点开会？", false, false),
+            )
+            .await;
+            let r = i.response.clone().unwrap();
+            assert!(h.fake.reactions_on(id).is_empty(), "{:?}", log(h));
+            (i.message_id, r.decision_id.unwrap())
+        }
+    };
+
+    // approved and sent: done
+    let (m1, d1) = draft("d1").await;
+    decide(&h, &d1, "yes");
+    h.env.clock.advance(11_000);
+    assert_eq!(h.outbox.send_due(&h.ch).await, 1);
+    assert_eq!(h.fake.reactions_on("d1"), [ReactionKind::Done]);
+    assert_eq!(state(&h, &m1), "done");
+
+    // discarded, the discard undone, approved: done after all
+    let (m2, d2) = draft("d2").await;
+    decide(&h, &d2, "no");
+    h.outbox.send_due(&h.ch).await;
+    assert_eq!(state(&h, &m2), "cleared");
+    undo(&h, &d2);
+    decide(&h, &d2, "yes");
+    h.env.clock.advance(11_000);
+    assert_eq!(h.outbox.send_due(&h.ch).await, 1);
+    assert_eq!(
+        h.fake.reactions_on("d2"),
+        [ReactionKind::Done],
+        "{:?}",
+        log(&h)
+    );
+    assert_eq!(state(&h, &m2), "done");
+
+    // approved but the provider refuses: failed (fault injected)
+    let (m3, d3) = draft("d3").await;
+    *h.fake.fail_send.lock().unwrap() = Some("飞书暂时不可用".into());
+    decide(&h, &d3, "yes");
+    h.env.clock.advance(11_000);
+    h.outbox.send_due(&h.ch).await;
+    assert_eq!(h.fake.reactions_on("d3"), [ReactionKind::Failed]);
+    assert_eq!(state(&h, &m3), "failed");
+}
+
+/// An approval nobody answered expires: the draft is discarded (never sent) and the message keeps
+/// no acknowledgement.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_expired_approval_discards_the_draft() {
+    let h = setup(false).await;
+    let i = push(
+        &h,
+        &h.me.clone(),
+        msg("D_LI", "d1", "ulilei", "明天几点开会？", false, false),
+    )
+    .await;
+    let r = i.response.unwrap();
+    let (out, d) = (r.out_message_id.unwrap(), r.decision_id.unwrap());
+    assert!(steve_modules::decisions::expire(&h.env.modules, &d).expect("expire"));
+    h.outbox.send_due(&h.ch).await;
+    assert_eq!(
+        one(&h, "SELECT status FROM chan_messages WHERE id = ?", &[&out]),
+        json!("discarded")
+    );
+    assert_eq!(
+        one(&h, "SELECT status FROM decisions WHERE id = ?", &[&d]),
+        json!("expired")
+    );
+    assert!(h.fake.reactions_on("d1").is_empty());
+    assert_eq!(state(&h, &i.message_id), "cleared");
+    h.env.clock.advance(60_000);
+    assert_eq!(h.outbox.send_due(&h.ch).await, 0, "never sent");
+    assert!(sent(&h).is_empty());
 }
