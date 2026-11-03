@@ -33,14 +33,23 @@ pub fn tools() -> Vec<Value> {
         .collect();
     v.push(json!({
         "name": ITEMS_SEARCH,
-        "description": "Search this workspace's items (tracked work) by words in their title, goal or current status. Returns id, title, status and what is happening now.",
+        "description": "Search this workspace's tracked work by ST item ID or words in title, goal or current status. Use this for task progress, not knowledge search. Returns id, title, status and what is happening now.",
         "inputSchema": schema(json!({"query": {"type": "string"}}), &["query"]),
     }));
     v.push(json!({
         "name": ITEM_READ,
-        "description": "Read one item of this workspace: goal, plan, the last 20 timeline entries and the latest delivery summary.",
+        "description": "Read the current progress of one workspace item by its ST number (for example ST-23): goal, status, plan, the last 20 timeline entries and the latest delivery summary. Prefer this when the user mentions an ST number.",
         "inputSchema": schema(json!({"id": {"type": "string", "description": "e.g. ST-20"}}), &["id"]),
     }));
+    // These four tools only retrieve information. Advertise that fact to MCP clients;
+    // authorization still comes from the live run token and the server allowlist.
+    for tool in &mut v {
+        tool["annotations"] = json!({
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "openWorldHint": false
+        });
+    }
     v
 }
 

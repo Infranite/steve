@@ -352,6 +352,10 @@ async fn research_runs_get_read_only_mcp() {
             "steve_item_read"
         ]
     );
+    for tool in v["result"]["tools"].as_array().unwrap() {
+        assert_eq!(tool["annotations"]["readOnlyHint"], true);
+        assert_eq!(tool["annotations"]["destructiveHint"], false);
+    }
     let (_, v) = rpc(json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "steve_deliver", "arguments": {"summary": "x", "outputs": [], "checks": []}}}), token).await;
     assert_eq!(v["result"]["isError"], true);
     assert_eq!(

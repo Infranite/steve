@@ -19,6 +19,13 @@ const KIND: Record<string, string> = { chat: "直接回答", answer: "直接回�
 const TOOL: Record<string, [string, any]> = { create_item: ["建事项", ListPlusIcon], draft_config: ["起草配置改动", SlidersHorizontalIcon], supplement: ["送到事项", SendIcon], digest: ["汇报进展", MegaphoneIcon] }
 const secs = (ms?: number) => (ms == null ? "" : ms < 1000 ? `${ms} 毫秒` : `${(ms / 1000).toFixed(1)} 秒`)
 const firstSentence = (t: string) => t.split(/(?<=[。！？.!?])\s*/)[0]?.slice(0, 80) ?? ""
+const RESEARCH_ERROR: Record<string, string> = {
+  permission_denied: "工具调用被权限或审批策略拒绝，查询未完成。",
+  invalid_arguments: "查询参数不正确，未能完成这次调用。",
+  transport: "查询服务连接失败，请稍后重试。",
+  guard_violation: "调用超出本次研究允许的范围，已停止。",
+  unknown: "这次查询未完成，未能确认具体原因。",
+}
 /** one line for the folded block and the rail */
 export function stepsSummary(s: Steps): string {
   const r = s.route
@@ -69,7 +76,7 @@ export function StepsBlock({ m }: { m: Msg }) {
                   <TraceDescription className="min-w-0 shrink truncate font-mono text-[12px]">{item ? <button type="button" className="hover:text-foreground hover:underline" onClick={() => go("#/items/" + item)}>{desc}</button> : desc}</TraceDescription>
                   <TraceDescription className="inline-flex items-center gap-1">{t.status === "ok" && <CheckIcon className="size-3.5" strokeWidth={1.75} />}{secs(t.ms)}</TraceDescription>
                 </TraceLine>
-                {t.error && <div className="pl-6 type-footnote text-destructive">{t.error}</div>}
+                {(t.error || (s.research && t.status === "failed")) && <div className="pl-6 type-footnote text-destructive">{s.research ? RESEARCH_ERROR[t.error ?? "unknown"] ?? RESEARCH_ERROR.unknown : t.error}</div>}
               </div>
             )
           })}

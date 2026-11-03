@@ -22,8 +22,11 @@ export function researchSummary(s: Steps): string {
   const ts = s.tools, r = s.research
   const files = new Set(ts.filter((t) => isRead(t.name)).map((t) => String(t.args?.brief ?? ""))).size
   const parts = [files && `读了 ${files} 个文件`, ts.filter((t) => isSearch(t.name)).length && `搜索 ${ts.filter((t) => isSearch(t.name)).length} 次`,
-    ts.filter((t) => isKb(t.name)).length && `知识库 ${ts.filter((t) => isKb(t.name)).length} 次`].filter(Boolean) as string[]
+    ts.filter((t) => isKb(t.name)).length && `知识库 ${ts.filter((t) => isKb(t.name)).length} 次`,
+    ts.filter((t) => t.name.includes("steve_item")).length && `查事项 ${ts.filter((t) => t.name.includes("steve_item")).length} 次`].filter(Boolean) as string[]
   if (!parts.length) parts.push("没有读文件")
+  const failures = ts.filter((t) => t.status === "failed").length
+  if (failures) parts.push(`${failures} 次调用失败`)
   if (r?.ms != null) parts.push(secs(r.ms))
   const stop = r?.stopped ? { user: "你停下了", budget: "没读完", violation: "越界停下", restart: "Hub 重启", failed: "失败" }[r.stopped] : ""
   return [...parts, stop].filter(Boolean).join(" · ")
