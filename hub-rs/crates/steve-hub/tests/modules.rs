@@ -1166,3 +1166,94 @@ async fn ownership_routes_and_tools() {
         "{out}"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn conversation_preferences_and_pagination_are_wired() {
+    let hub = start().await;
+    let c = Client::login(&hub).await;
+    let db = rusqlite::Connection::open(hub.home.path().join("steve/data/steve.sqlite3")).unwrap();
+    db.busy_timeout(Duration::from_secs(5)).unwrap();
+    db.execute_batch("INSERT INTO spaces (id, workspace_id, system_id, kind, external_id, name, created, updated) VALUES ('spc_pref', 'default', 'feishu', 'group', 'pref', 'Conversation preference test', 1, 1);
+        INSERT INTO messages (id, workspace_id, space, author, text, created) VALUES ('msg_pref', 'default', 'chan:spc_pref', 'me', 'keep this history', 1);").unwrap();
+    let path = "/api/conversations/chan%3Aspc_pref/preferences";
+    let anon = reqwest::Client::new()
+        .patch(format!("{}{path}", hub.base))
+        .json(&json!({"closed": true}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(anon.status().as_u16(), 401);
+    let (status, v) = c
+        .call(
+            "GET",
+            "/api/conversations?q=preference&state=open&limit=50&offset=0",
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(status, 200, "{v}");
+    assert_eq!(v["conversations"][0]["space"], "chan:spc_pref");
+    assert_eq!(v["conversations"][0]["closed"], false);
+    assert_eq!(
+        (v["total"].clone(), v["has_more"].clone()),
+        (json!(1), json!(false))
+    );
+    let (status, v) = c
+        .call("PATCH", path, Some(json!({"closed": true})), None)
+        .await;
+    assert_eq!(status, 200, "{v}");
+    assert_eq!(v["ok"], true);
+    let (_, v) = c
+        .call("GET", "/api/conversations?state=open&limit=50", None, None)
+        .await;
+    assert_eq!(v["conversations"], json!([]));
+    let (_, v) = c
+        .call(
+            "GET",
+            "/api/conversations?state=closed&limit=50",
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(v["conversations"][0]["closed"], true);
+    assert_eq!(
+        c.call("PATCH", path, Some(json!({"closed": false})), None)
+            .await
+            .0,
+        200
+    );
+    // Closed state remains a strict boolean; malformed input is rejected by the HTTP extractor.
+    assert_eq!(
+        c.call("PATCH", path, Some(json!({"closed": "true"})), None)
+            .await
+            .0,
+        422
+    );
+    assert_eq!(c.call("PATCH", path, Some(json!({})), None).await.0, 422);
+    assert_eq!(
+        c.call(
+            "PATCH",
+            "/api/conversations/chan%3Amissing/preferences",
+            Some(json!({"closed": true})),
+            None
+        )
+        .await
+        .0,
+        404
+    );
+    assert_eq!(
+        c.call("GET", "/api/conversations?limit=201", None, None)
+            .await
+            .0,
+        400
+    );
+    let (_, v) = c
+        .call(
+            "GET",
+            "/api/conversations/chan%3Aspc_pref/messages",
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(v["messages"][0]["text"], "keep this history");
+}

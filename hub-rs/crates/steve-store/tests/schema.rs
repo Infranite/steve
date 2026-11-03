@@ -123,8 +123,8 @@ fn fresh_database_is_ts_schema_plus_module_migrations() {
 
 #[test]
 fn migrations_are_the_ts_strings() {
-    assert_eq!(db::MIGRATIONS.len(), 24);
-    assert_eq!(db::SCHEMA_VERSION, 24);
+    assert_eq!(db::MIGRATIONS.len(), 26);
+    assert_eq!(db::SCHEMA_VERSION, 26);
     assert!(db::MIGRATIONS[0].starts_with("\n  CREATE TABLE workspaces (id TEXT PRIMARY KEY, name TEXT NOT NULL, created INTEGER NOT NULL);"));
     assert!(
         db::MIGRATIONS[1]

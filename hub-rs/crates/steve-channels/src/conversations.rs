@@ -531,49 +531,161 @@ fn badge(c: &rusqlite::Connection, space: &crate::spaces::SpaceRow) -> ChannelRe
     }))
 }
 
-/// `GET /conversations`: the IM conversations the viewer may see, newest first.
+/// Optional server-side search, state filter and pagination. No limit preserves the legacy list.
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct ListQuery {
+    pub q: Option<String>,
+    pub state: Option<String>,
+    pub offset: Option<i64>,
+    pub limit: Option<i64>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct ListPage {
+    pub conversations: Vec<Value>,
+    pub total: i64,
+    pub has_more: bool,
+    pub next_offset: Option<i64>,
+}
+
+fn member(
+    c: &rusqlite::Connection,
+    ws: &str,
+    viewer: &steve_store::base::Viewer,
+) -> ChannelResult<()> {
+    let allowed: bool = ws == viewer.ws && c.query_row(
+        "SELECT EXISTS (SELECT 1 FROM workspace_members WHERE workspace_id = ? AND user_id = ?)",
+        params![ws, viewer.user], |r| r.get(0),
+    )?;
+    if !allowed {
+        return Err(steve_modules::ApiError::not_found("对话"));
+    }
+    Ok(())
+}
+
+/// The IM conversations the viewer may see, newest first; no silently omitted older conversations.
 pub fn list(
     c: &rusqlite::Connection,
     ws: &str,
     viewer: &steve_store::base::Viewer,
 ) -> ChannelResult<Vec<Value>> {
-    let mut st = c.prepare_cached(
-        "SELECT space, count(*), max(created) FROM messages WHERE workspace_id = ? AND space LIKE 'chan:%'
-          GROUP BY space ORDER BY max(created) DESC LIMIT 200",
+    Ok(list_page(c, ws, viewer, &ListQuery::default())?.conversations)
+}
+
+pub fn list_page(
+    c: &rusqlite::Connection,
+    ws: &str,
+    viewer: &steve_store::base::Viewer,
+    query: &ListQuery,
+) -> ChannelResult<ListPage> {
+    member(c, ws, viewer)?;
+    let state = match query.state.as_deref().unwrap_or("all") {
+        "all" => -1,
+        "open" => 0,
+        "closed" => 1,
+        _ => return Err(steve_modules::ApiError::invalid("state")),
+    };
+    let offset = query.offset.unwrap_or(0);
+    if offset < 0 || query.limit.is_some_and(|n| !(1..=200).contains(&n)) {
+        return Err(steve_modules::ApiError::invalid("pagination"));
+    }
+    let q = query.q.as_deref().unwrap_or("").trim();
+    if q.chars().count() > 200 {
+        return Err(steve_modules::ApiError::invalid("q"));
+    }
+    // Visibility and preferences are applied before pagination. Search is literal, not LIKE wildcards.
+    let cte = format!(
+        "WITH grouped AS (
+          SELECT space, count(*) AS n, max(created) AS last FROM messages
+          WHERE workspace_id = ?1 AND space LIKE 'chan:%' GROUP BY space
+        ), visible AS (
+          SELECT g.*, s.id, s.name, s.system_id, coalesce(p.closed, 0) AS closed,
+            coalesce((SELECT nullif(name, '') FROM systems WHERE id = CASE WHEN s.system_id LIKE '%_app'
+              THEN substr(s.system_id, 1, length(s.system_id)-4) ELSE s.system_id END),
+              (SELECT nullif(name, '') FROM systems WHERE id = s.system_id), s.system_id) AS provider,
+            (SELECT text FROM messages WHERE workspace_id = ?1 AND space = g.space
+              ORDER BY created DESC, rowid DESC LIMIT 1) AS last_text
+          FROM grouped g JOIN spaces s ON g.space = 'chan:' || s.id
+          LEFT JOIN conversation_preferences p ON p.workspace_id = ?1 AND p.user_id = ?2 AND p.space_id = s.id
+          WHERE s.workspace_id = ?1 AND {visibility}
+        ), filtered AS (
+          SELECT * FROM visible WHERE (?3 = -1 OR closed = ?3)
+          AND (?4 = '' OR instr(lower(coalesce(name, '') || ' ' || system_id || ' ' || provider || ' ' || last_text), lower(?4)) > 0)
+        )", visibility = spaces::visible_sql("?2"));
+    let total: i64 = c.query_row(
+        &format!("{cte} SELECT count(*) FROM filtered"),
+        params![ws, viewer.user, state, q],
+        |r| r.get(0),
     )?;
+    let mut st = c.prepare(&format!("{cte} SELECT id, space, n, last, closed, last_text FROM filtered ORDER BY last DESC, space ASC LIMIT ?5 OFFSET ?6"))?;
     let rows = st
-        .query_map([ws], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, i64>(1)?,
-                r.get::<_, i64>(2)?,
-            ))
-        })?
+        .query_map(
+            params![ws, viewer.user, state, q, query.limit.unwrap_or(-1), offset],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, bool>(4)?,
+                    r.get::<_, String>(5)?,
+                ))
+            },
+        )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let mut out = Vec::new();
-    for (conv, n, last) in rows {
-        let Some(id) = space_of_conv(&conv) else {
-            continue;
-        };
-        if !spaces::visible(c, viewer, id)? {
-            continue;
-        }
-        let Some(space) = spaces::get(c, id)? else {
+    for (id, conv, n, last, closed, text) in rows {
+        let Some(space) = spaces::get(c, &id)? else {
             continue;
         };
         let mut b = badge(c, &space)?;
-        let (author, text): (String, String) = c.query_row(
-            "SELECT author, text FROM messages WHERE workspace_id = ? AND space = ? ORDER BY created DESC, rowid DESC LIMIT 1",
-            params![ws, conv],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+        let author: String = c.query_row(
+            "SELECT author FROM messages WHERE workspace_id = ? AND space = ? ORDER BY created DESC, rowid DESC LIMIT 1",
+            params![ws, conv], |r| r.get(0),
         )?;
         b["count"] = json!(n);
         b["last"] = json!(last);
         b["last_text"] = json!(text.chars().take(80).collect::<String>());
         b["last_author"] = json!(author);
+        b["closed"] = json!(closed);
         out.push(b);
     }
-    Ok(out)
+    let next = offset.saturating_add(out.len() as i64);
+    let has_more = next < total;
+    Ok(ListPage {
+        conversations: out,
+        total,
+        has_more,
+        next_offset: has_more.then_some(next),
+    })
+}
+
+/// Personal list preference only: leaves message history and channel processing untouched.
+/// The caller runs this inside a store transaction so visibility and mutation share one snapshot.
+pub fn set_closed(
+    c: &rusqlite::Connection,
+    ws: &str,
+    viewer: &steve_store::base::Viewer,
+    conv: &str,
+    closed: bool,
+) -> ChannelResult<()> {
+    member(c, ws, viewer)?;
+    let id = space_of_conv(conv).ok_or_else(|| steve_modules::ApiError::not_found("对话"))?;
+    spaces::own(c, viewer, id).map_err(|_| steve_modules::ApiError::not_found("对话"))?;
+    let exists: bool = c.query_row(
+        "SELECT EXISTS (SELECT 1 FROM messages WHERE workspace_id = ? AND space = ?)",
+        params![ws, conv],
+        |r| r.get(0),
+    )?;
+    if !exists {
+        return Err(steve_modules::ApiError::not_found("对话"));
+    }
+    c.execute(
+        "INSERT INTO conversation_preferences (workspace_id, user_id, space_id, closed) VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(workspace_id, user_id, space_id) DO UPDATE SET closed = excluded.closed",
+        params![ws, viewer.user, id, closed],
+    )?;
+    Ok(())
 }
 
 /// `GET /conversations/:space/messages`: the conversation (≤500, oldest first) and its badge.

@@ -4,8 +4,8 @@
 
 use std::sync::Arc;
 
-use axum::extract::{Extension, Path};
-use axum::routing::{get, post};
+use axum::extract::{Extension, Path, Query};
+use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use rusqlite::OptionalExtension;
 use serde_json::{Value, json};
@@ -17,6 +17,10 @@ pub fn routes(ch: Channels, outbox: Arc<Outbox>) -> Router<Modules> {
         .route("/chan-messages/{id}/recall", post(recall))
         .route("/chan-messages/{id}/basis", get(basis))
         .route("/conversations", get(conversations))
+        .route(
+            "/conversations/{space}/preferences",
+            patch(conversation_preferences),
+        )
         .route(
             "/conversations/{space}/messages",
             get(conversation_messages),
@@ -118,15 +122,45 @@ impl steve_core::thread::ConvHost for ChanConvHost {
 
 /// `GET /conversations`: the IM conversations of the caller's workspace (spaces they can see),
 /// newest first, with their badge (provider, space, group or DM).
-async fn conversations(Extension(ch): Extension<Channels>, who: Caller) -> ApiResult<Json<Value>> {
+async fn conversations(
+    Extension(ch): Extension<Channels>,
+    who: Caller,
+    Query(query): Query<steve_channels::conversations::ListQuery>,
+) -> ApiResult<Json<Value>> {
     let c2 = ch.clone();
     ch.modules()
         .blocking(move |_| {
             let viewer = c2.modules().viewer(&who)?;
-            let list = c2
-                .store()
-                .reader(|c| steve_channels::conversations::list(c, &who.ws, &viewer))?;
-            Ok(Json(json!({ "conversations": list })))
+            let list = c2.store().reader(|c| {
+                steve_channels::conversations::list_page(c, &who.ws, &viewer, &query)
+            })?;
+            Ok(Json(serde_json::to_value(list).map_err(ApiError::from)?))
+        })
+        .await
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConversationPreferences {
+    closed: bool,
+}
+
+async fn conversation_preferences(
+    Extension(ch): Extension<Channels>,
+    who: Caller,
+    Path(space): Path<String>,
+    Json(body): Json<ConversationPreferences>,
+) -> ApiResult<Json<Value>> {
+    let c2 = ch.clone();
+    ch.modules()
+        .blocking(move |_| {
+            let viewer = c2.modules().viewer(&who)?;
+            c2.store().transaction(|tx| {
+                steve_channels::conversations::set_closed(tx, &who.ws, &viewer, &space, body.closed)
+            })?;
+            Ok(Json(
+                json!({"ok": true, "space": space, "closed": body.closed}),
+            ))
         })
         .await
 }
