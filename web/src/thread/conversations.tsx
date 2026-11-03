@@ -4,20 +4,13 @@
  * chat message (§2.11). Read-only here: a note links to the space, where a message goes out through the checks. */
 import { useCallback, useEffect, useRef, useState } from "react"
 import { cn } from "cn"
-import { CheckIcon, LoaderIcon, MessageCircleIcon, UsersIcon, UserIcon, XIcon, ExternalLinkIcon } from "lucide-react"
+import { CheckIcon, LoaderIcon, MessageCircleIcon, UsersIcon, UserIcon, XIcon, ExternalLinkIcon, ListIcon } from "lucide-react"
 import { conversationsApi, type ConvBadge, type ConvMessage, type ConvRow, type Reaction } from "@/api/conversations"
 import { msgOf, useHubEvents, type Msg } from "@/store"
 import { go } from "@/ui"
 import { Button } from "@/components/ui/button"
-
-/** the IM conversations (undefined: this Hub has none) */
-export function useConversations() {
-  const [rows, setRows] = useState<ConvRow[] | undefined>()
-  const load = useCallback(() => { conversationsApi.list().then(setRows).catch(() => setRows(undefined)) }, [])
-  useEffect(load, [load])
-  useHubEvents(["message", "chan_message", "space"], load, 600)
-  return rows
-}
+import { Input } from "@/components/ui/input"
+import { Dialog, DialogContent, DialogTitle, DialogDescription } from "@/components/ui/dialog"
 
 /** one IM conversation, its messages as the chat renders them plus what only IM turns have */
 export function useConversation(space: string | undefined) {
@@ -53,25 +46,84 @@ export function ConvBadgeChip({ b, className }: { b: ConvBadge; className?: stri
   )
 }
 
-/** your conversation and the IM ones, as a row of chips above the conversation (scrolls sideways on a phone) */
-export function ConvSwitcher({ current }: { current?: string }) {
-  const rows = useConversations()
-  if (!rows?.length) return null
-  const chip = (on: boolean) => cn("flex h-8 shrink-0 items-center gap-1.5 rounded-full border px-3 type-footnote transition-colors", on ? "border-foreground/20 bg-accent text-foreground" : "text-muted-foreground hover:bg-accent/60")
-  return (
-    <nav aria-label="对话" className="mx-auto flex w-full max-w-[744px] shrink-0 gap-1.5 overflow-x-auto px-4 pb-2 [scrollbar-width:none] sm:px-8" data-conv-switcher>
-      <button type="button" className={chip(!current)} aria-current={!current ? "page" : undefined} onClick={() => go("#/")} data-conv="steve">
-        <MessageCircleIcon className="size-3.5" strokeWidth={1.75} />你和 Steve
-      </button>
-      {rows.map((r) => (
-        <button key={r.space} type="button" className={chip(current === r.space)} aria-current={current === r.space ? "page" : undefined} onClick={() => go("#/c/" + r.space)} data-conv={r.space} title={`${r.provider} · ${r.name} · ${kindLabel(r)}`}>
-          {r.dm ? <UserIcon className="size-3.5" strokeWidth={1.75} /> : <UsersIcon className="size-3.5" strokeWidth={1.75} />}
-          <span className="max-w-32 truncate">{r.name}</span>
-          <span className="text-muted-foreground/70">{r.provider}</span>
-        </button>
-      ))}
+/** A bounded navigator; closing only changes this user's list, never the channel. */
+export function ConvSwitcher({ current, badge }: { current?: string; badge?: ConvBadge }) {
+  const [open, setOpen] = useState(false)
+  const [query, setQuery] = useState("")
+  const [state, setState] = useState<"open" | "closed" | "all">("open")
+  const [rows, setRows] = useState<ConvRow[]>([])
+  const [next, setNext] = useState<number | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState("")
+  const [busy, setBusy] = useState<string | null>(null)
+  const request = useRef(0)
+  const load = useCallback((offset = 0) => {
+    const id = ++request.current
+    setLoading(true); setError("")
+    conversationsApi.page(query, state, offset).then(r => {
+      if (id !== request.current) return
+      setRows(old => offset ? [...old, ...r.conversations.filter(x => !old.some(y => y.space === x.space))] : r.conversations)
+      setNext(r.has_more ? r.next_offset ?? offset + r.conversations.length : null)
+    }).catch(e => { if (id === request.current) setError(e.message || "对话载入失败") })
+      .finally(() => { if (id === request.current) setLoading(false) })
+  }, [query, state])
+  useEffect(() => {
+    request.current++; setRows([]); setNext(null)
+    if (!open) return
+    setLoading(true)
+    const timer = setTimeout(() => load(), 180)
+    return () => { clearTimeout(timer); request.current++ }
+  }, [open, load])
+  const refresh = useCallback(() => { if (open) load() }, [open, load])
+  useHubEvents(["message", "chan_message", "space"], refresh, 600)
+  const change = async (space: string, closed: boolean) => {
+    setBusy(space); setError("")
+    try {
+      await conversationsApi.preference(space, closed)
+      if (closed && current === space) go("#/")
+      if (open) load()
+    } catch (e) { setError(e instanceof Error ? e.message : "保存失败，请重试") }
+    finally { setBusy(null) }
+  }
+  return <>
+    <nav aria-label="对话" className="mx-auto flex w-full max-w-[744px] shrink-0 items-center gap-2 px-4 pb-2 sm:px-8" data-conv-switcher>
+      <Button variant={!current ? "secondary" : "ghost"} size="sm" onClick={() => go("#/")} aria-current={!current ? "page" : undefined} data-conv="steve"><MessageCircleIcon />你和 Steve</Button>
+      {current && <div className="flex min-w-0 flex-1 items-center gap-1 rounded-lg border pl-2" data-current-conversation>
+        <span className="truncate type-footnote" title={badge?.name}>{badge?.name || "当前对话"}</span>
+        <Button variant="ghost" size="icon-sm" className="ml-auto shrink-0" aria-label="关闭当前对话" disabled={busy !== null} onClick={() => void change(current, true)}><XIcon /></Button>
+      </div>}
+      <Button variant="outline" size="sm" className="ml-auto shrink-0" onClick={() => setOpen(true)}><ListIcon />会话列表</Button>
     </nav>
-  )
+    {!open && error && <p role="alert" className="mx-auto px-4 text-destructive type-footnote">{error}</p>}
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogContent className="max-h-[85dvh] gap-3 sm:max-w-xl" data-conversation-manager>
+        <DialogTitle>会话列表</DialogTitle>
+        <DialogDescription>关闭只收起你列表中的会话，消息和渠道继续保留。可在“已关闭”中恢复。</DialogDescription>
+        <Input aria-label="搜索会话" placeholder="搜索名称、渠道或最近消息" value={query} onChange={e => setQuery(e.target.value)} />
+        <div className="flex gap-2" aria-label="会话状态">{([['open','进行中'],['closed','已关闭'],['all','全部']] as const).map(([key,label]) => <Button key={key} size="sm" variant={state === key ? "secondary" : "ghost"} aria-pressed={state === key} onClick={() => setState(key)}>{label}</Button>)}</div>
+        {error && <div role="alert" className="flex items-center gap-2 text-destructive">{error}<Button size="sm" variant="outline" onClick={() => load()}>重试</Button></div>}
+        <div className="min-h-24 overflow-y-auto overscroll-contain" style={{ maxHeight: "48dvh" }} aria-busy={loading}>
+          {rows.map(r => <div key={r.space} className="flex min-w-0 items-center gap-2 border-b py-2" data-conversation-row={r.space}>
+            <button type="button" className="min-w-0 flex-1 rounded-md p-2 text-left hover:bg-accent disabled:opacity-50" disabled={busy !== null} onClick={async () => {
+              if (r.closed) {
+                setBusy(r.space); setError("")
+                try { await conversationsApi.preference(r.space, false) } catch (e) { setError(e instanceof Error ? e.message : "恢复失败"); return } finally { setBusy(null) }
+              }
+              go("#/c/" + r.space); setOpen(false)
+            }} aria-label={(r.closed ? "恢复并打开：" : "打开：") + r.name}>
+              <div className="truncate font-medium">{r.name}</div>
+              <div className="truncate type-footnote text-muted-foreground">{r.provider} · {kindLabel(r)}{r.closed ? " · 已关闭" : ""}</div>
+              <div className="truncate type-footnote text-muted-foreground">{r.last_text || "暂无消息摘要"}</div>
+            </button>
+            <Button size="sm" variant="ghost" disabled={busy !== null} onClick={() => void change(r.space, !r.closed)} aria-label={(r.closed ? "恢复：" : "关闭：") + r.name}>{busy === r.space ? "保存中…" : r.closed ? "恢复" : "关闭"}</Button>
+          </div>)}
+          {!rows.length && !loading && !error && <p className="py-8 text-center text-muted-foreground">{query ? "没有匹配的会话" : state === "closed" ? "没有已关闭的会话" : "暂无会话"}</p>}
+          {loading && <p role="status" className="py-3 text-center text-muted-foreground">正在载入…</p>}
+          {next !== null && <Button className="mt-3 w-full" variant="outline" disabled={loading} onClick={() => load(next)}>加载更多</Button>}
+        </div>
+      </DialogContent>
+    </Dialog>
+  </>
 }
 
 const REACT: Record<Reaction["state"], [string, typeof CheckIcon | null, string] | null> = {

@@ -248,7 +248,7 @@ export function ChatView({ conv }: { conv?: string } = {}) {
       <SidebarTrigger className="absolute left-3 top-2.5 z-20 hidden text-muted-foreground md:inline-flex" />
       <RailToggle className="absolute right-3 top-2.5 z-20" />
       <Hero compact={compact} />
-      <ConvSwitcher current={conv} />
+      <ConvSwitcher current={conv} badge={im?.badge} />
       {conv && im && <div className="mx-auto flex w-full max-w-[744px] shrink-0 px-4 pb-1 sm:px-8"><ConvBadgeChip b={im.badge} /></div>}
       <div ref={scroller} onScroll={(e) => { const el = e.currentTarget; setCompact(el.scrollHeight - el.scrollTop - el.clientHeight > 160) }} className="min-h-0 flex-1 overflow-y-auto [mask-image:linear-gradient(to_bottom,transparent,black_28px,black_calc(100%-16px),transparent)]" data-chat-scroll>
         <div className="mx-auto flex w-full max-w-[744px] flex-col gap-6 px-4 pb-6 pt-2 sm:px-8">
