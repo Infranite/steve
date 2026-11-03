@@ -1348,7 +1348,21 @@ impl Outbox {
                 return Ok(None);
             };
             let plan = plan_of(c, &item.workspace_id, &msg)?;
+            // the chat's own message was handed to Steve by a reply rule (its conversation turn says so): the
+            // report goes where that answer went
+            let replied: bool = c.query_row(
+                "SELECT EXISTS(SELECT 1 FROM messages WHERE workspace_id = ? AND space = ? AND author = 'me'
+                   AND json_extract(meta, '$.chan.message') = ? AND json_extract(meta, '$.chan.act') = ?)",
+                params![
+                    &plan.ws,
+                    crate::conversations::conv_space(&plan.space_id),
+                    &plan.message_id,
+                    Act::Reply.code()
+                ],
+                |r| r.get(0),
+            )?;
             let mine = plan.mode == Mode::Bot
+                && replied
                 && match spaces::get(c, &plan.space_id)? {
                     Some(s) => {
                         crate::conversations::owner_only(c, &plan.ws, &s, &plan.connection_id)?

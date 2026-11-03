@@ -164,12 +164,31 @@ pub fn sessions_list(store: &Store, ws: &str, all: bool) -> Result<String, Strin
 }
 
 /// Only the owner reads the answer to message `origin`: Steve's own conversation, or a chat the channel
-/// marked `owner_only`.
+/// marked `owner_only` that still is one now (its members are read again, not taken from the mark).
 fn own_reader(store: &Store, origin: &str) -> Result<bool, String> {
-    let m = store.messages().get(origin).map_err(|e| e.to_string())?;
-    Ok(m.is_some_and(|m| {
-        !m.space.starts_with("chan:") || m.meta["chan"]["owner_only"] == json!(true)
-    }))
+    let Some(m) = store.messages().get(origin).map_err(|e| e.to_string())? else {
+        return Ok(false);
+    };
+    if m.space == steve_core::thread::MAIN {
+        return Ok(true);
+    }
+    let Some(space_id) = m.space.strip_prefix("chan:") else {
+        return Ok(false);
+    };
+    if m.meta["chan"]["owner_only"] != json!(true) {
+        return Ok(false);
+    }
+    let conn = m.meta["chan"]["connection"].as_str().unwrap_or_default();
+    store
+        .reader(|c| -> steve_channels::ChannelResult<bool> {
+            match steve_channels::spaces::get(c, space_id)? {
+                Some(space) => {
+                    steve_channels::conversations::owner_only(c, &m.workspace_id, &space, conn)
+                }
+                None => Ok(false),
+            }
+        })
+        .map_err(|e| e.to_string())
 }
 
 /// `steve_item_read`: one item of this workspace.

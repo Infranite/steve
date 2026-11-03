@@ -1121,3 +1121,22 @@ async fn your_private_chat_with_the_bot_is_owner_only() {
     assert_eq!(turns.len(), 1, "{turns:?}");
     assert!(turns[0].1.owner_only && turns[0].1.research);
 }
+
+/// A group whose member list could not be read looks like "the bot and you": it is still not your private
+/// chat (only a one-to-one chat is).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_group_with_only_you_recorded_is_not_owner_only() {
+    let h = setup(true).await;
+    let t = h.thread.clone().unwrap();
+    h.fake
+        .space("G_ME", "新群", SpaceKind::Group, false, &[("upx", "我")]);
+    push(
+        &h,
+        &h.bot.clone(),
+        msg("G_ME", "g1", "upx", "大家看下进度", true, false),
+    )
+    .await;
+    let turns = t.turns.lock().unwrap().clone();
+    assert_eq!(turns.len(), 1, "{turns:?}");
+    assert!(!turns[0].1.owner_only);
+}

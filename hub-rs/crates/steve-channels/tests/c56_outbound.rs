@@ -1201,6 +1201,14 @@ async fn a_finished_item_from_your_private_chat_is_reported_at_once() {
     h.fake
         .space("D_ME", "", SpaceKind::Dm, false, &[("upx", "我")]);
     let plan = recorded(&h, &h.oncall.clone(), "D_ME", "m1", "upx", "告警脚本坏了").await;
+    // a reply rule handed it to Steve's conversation (as the channel does with a conversation port)
+    exec(
+        &h,
+        &format!(
+            "INSERT INTO messages (id, workspace_id, space, author, text, created, meta) VALUES ('msg_t1', 'default', 'chan:{}', 'me', '告警脚本坏了', 1, '{{\"chan\": {{\"message\": \"{}\", \"act\": \"reply\"}}}}')",
+            plan.space_id, plan.message_id
+        ),
+    );
     item_from(&h, "ST-1", &plan.message_id);
     let item = h.env.store().items().get("ST-1").unwrap().unwrap();
     let approvals = || {
@@ -1238,6 +1246,32 @@ async fn a_finished_item_from_your_private_chat_is_reported_at_once() {
             .all(|p| !p.starts_with(CHECK_HEAD)),
         "no check model for a chat only you read"
     );
+}
+
+/// Only a chat whose own message a reply rule answered reports there at once: a message the rules only
+/// recorded (here: an account rule "record" ahead of any reply) keeps the report as a draft.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_report_where_the_rules_did_not_reply_waits_as_a_draft() {
+    let h = setup().await;
+    h.fake
+        .space("D_ME", "", SpaceKind::Dm, false, &[("upx", "我")]);
+    set_rules(
+        &h,
+        &h.oncall.clone(),
+        json!([{"when": {"kind": "all"}, "act": "record"}, {"when": {"kind": "mention_or_dm"}, "act": "reply"}]),
+    );
+    let plan = recorded(&h, &h.oncall.clone(), "D_ME", "m1", "upx", "记一下").await;
+    item_from(&h, "ST-1", &plan.message_id);
+    let item = h.env.store().items().get("ST-1").unwrap().unwrap();
+    let before = sent(&h).len();
+    let d = h
+        .outbox
+        .on_item_finished(&h.ch, &item)
+        .await
+        .unwrap()
+        .expect("from a chat");
+    assert!(matches!(d, Delivered::Drafted { .. }), "{d:?}");
+    assert_eq!(sent(&h).len(), before);
 }
 
 #[tokio::test(flavor = "multi_thread")]

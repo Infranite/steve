@@ -806,9 +806,19 @@ fn private(a: &Audience) -> bool {
 
 // ---------------------------------------------------------------- audiences of spaces
 
+/// `user` is an owner of workspace `ws`.
+fn workspace_owner(c: &Connection, ws: &str, user: &str) -> rusqlite::Result<bool> {
+    c.query_row(
+        "SELECT EXISTS(SELECT 1 FROM workspace_members WHERE workspace_id = ? AND user_id = ? AND role = 'owner')",
+        params![ws, user],
+        |r| r.get(0),
+    )
+}
+
 /// The audience of a space: the owners of its member accounts (minus the sending account), whether
 /// it has outside members, and the scopes it is entirely inside (`space:<id>`; `workspace` when
-/// every member is a user of the workspace; `private` when the only reader is `owner`).
+/// every member is a user of the workspace; `private` when it is `owner`'s one-to-one chat and `owner`
+/// owns the workspace).
 pub fn space_audience(
     c: &Connection,
     space: &crate::spaces::SpaceRow,
@@ -847,7 +857,13 @@ pub fn space_audience(
     }
     if !rows.is_empty() && !a.external && rows.iter().all(|r| r.2.is_some()) {
         a.scopes.push("workspace".into());
-        if rows.iter().all(|r| r.2.as_deref() == Some(owner)) {
+        // private: a one-to-one chat whose one other member is `owner` and `owner` owns the workspace. A group
+        // whose member list could not be read (only the bot and its sender recorded) is never private.
+        if space.kind == "dm"
+            && rows.len() == 1
+            && rows[0].2.as_deref() == Some(owner)
+            && workspace_owner(c, &space.workspace_id, owner)?
+        {
             a.scopes.push("private".into());
         }
     }
