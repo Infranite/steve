@@ -86,6 +86,7 @@ impl steve_channels::conversations::Thread for CoreThread {
             space: turn.space,
             research: turn.research,
             items: turn.items,
+            owner_only: turn.owner_only,
         };
         self.0
             .say_in(ws, conv, &turn.text, &turn.meta)

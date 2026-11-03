@@ -51,6 +51,20 @@ pub fn for_guest(d: Decision, r: &Route, research: bool, items: bool) -> Decisio
     }
 }
 
+/// A chat only the owner reads: no tool-less answer there, Steve answers with its read-only tools at hand
+/// (an answer could only say what it can't see; the run costs about the same). Decided by the user on
+/// 2026-11-03 (`guard = "owner"`).
+pub fn for_owner(d: Decision, owner: bool) -> Decision {
+    if !owner || d.kind != "answer" {
+        return d;
+    }
+    Decision {
+        kind: "research".into(),
+        guard: Some("owner"),
+        ..d
+    }
+}
+
 /// What the guards know besides the route and the text.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DecideCtx {
@@ -326,6 +340,21 @@ mod tests {
             assert_eq!(d.kind, "answer", "{k}");
             assert_eq!(d.guard, Some("guest"));
         }
+    }
+
+    #[test]
+    fn the_owners_chat_answers_with_tools() {
+        let r = route("answer", 0.9, &[]);
+        let d = decide(&r, "你能看见我电脑在干嘛吗", DecideCtx::default());
+        assert_eq!(for_owner(d.clone(), true).kind, "research");
+        assert_eq!(for_owner(d.clone(), true).guard, Some("owner"));
+        assert_eq!(for_owner(d, false).kind, "answer");
+        let item = decide(
+            &route("item", 0.9, &["explicit"]),
+            "建个事项",
+            DecideCtx::default(),
+        );
+        assert_eq!(for_owner(item, true).kind, "item");
     }
 
     #[test]

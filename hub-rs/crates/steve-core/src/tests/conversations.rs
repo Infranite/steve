@@ -71,6 +71,7 @@ async fn settle(k: &Kit, space: &str, n: usize) -> Vec<Message> {
 
 fn guest(research: bool, items: bool) -> Conv {
     Conv {
+        owner_only: false,
         space: SPACE.into(),
         research,
         items,
@@ -185,4 +186,71 @@ async fn work_from_a_chat_becomes_an_item_only_when_the_host_allows_it() {
     assert!(k.db().messages(WS).unwrap().is_empty());
     let ms = k.db().messages_in(WS, SPACE, 200).unwrap();
     assert!(ms.iter().any(|m| m.meta["card"]["item"] == json!(id)));
+}
+
+#[tokio::test]
+async fn the_owners_private_chat_answers_with_tools() {
+    use crate::testkit::{FakeResearch, Step};
+    let k = Kit::new();
+    let host = Arc::new(Host::default());
+    assert!(k.core.set_conv_host(host.clone()));
+    let fr = FakeResearch::new(vec![Step::Text("在跑 2 个会话。")]);
+    assert!(k.core.set_researcher(fr.clone()));
+    router(
+        &k,
+        Arc::new(Mutex::new(vec![])),
+        |_| json!({"kind": "answer", "confidence": 0.9, "signals": ["question"], "title": "", "goal": "", "bot": "steve"}),
+    );
+    let item = k.item("run", "执行", None);
+    let mine = Conv {
+        owner_only: true,
+        ..guest(true, true)
+    };
+    k.core
+        .say_in(
+            WS,
+            mine,
+            &format!("{item} 现在怎么样"),
+            &json!({"chan": {"message": "cm_me", "owner_only": true}}),
+        )
+        .unwrap();
+    let ms = settle(&k, SPACE, 2).await;
+    assert_eq!(ms[1].meta["steps"]["route"]["kind"], "research");
+    assert_eq!(ms[1].meta["steps"]["route"]["guard"], "owner");
+    assert!(
+        host.answered.lock().unwrap().is_empty(),
+        "no tool-less answer"
+    );
+    let seen = fr.seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 1, "a run with tools");
+    assert!(
+        seen[0].context.contains("对话提到的事项（已读取）"),
+        "{}",
+        seen[0].context
+    );
+}
+
+#[tokio::test]
+async fn a_shared_chat_gets_no_items_read_up_front() {
+    use crate::testkit::{FakeResearch, Step};
+    let k = Kit::new();
+    let host = Arc::new(Host::default());
+    assert!(k.core.set_conv_host(host.clone()));
+    let fr = FakeResearch::new(vec![Step::Text("查不到。")]);
+    assert!(k.core.set_researcher(fr.clone()));
+    router(
+        &k,
+        Arc::new(Mutex::new(vec![])),
+        |_| json!({"kind": "research", "confidence": 0.9, "signals": ["lookup"], "title": "", "goal": "", "bot": "steve"}),
+    );
+    let item = k.item("run", "执行", None);
+    turn(&k, &format!("{item} 现在怎么样"), guest(true, true));
+    let ms = settle(&k, SPACE, 2).await;
+    assert_eq!(ms[1].meta["steps"]["route"]["kind"], "research");
+    let seen = fr.seen.lock().unwrap().clone();
+    assert!(
+        !seen[0].context.contains("对话提到的事项"),
+        "{}",
+        seen[0].context
+    );
 }

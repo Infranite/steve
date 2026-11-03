@@ -867,6 +867,43 @@ async fn the_check_model_sees_the_whole_reply_and_its_failure_is_a_leak() {
     nothing_sent(&h);
 }
 
+/// A check model that gave no answer found nothing to fix: the reply waits for the owner unchanged, no
+/// rewrite rounds are spent on it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_check_is_not_rewritten() {
+    let h = setup().await;
+    let plan = recorded(&h, &h.oncall.clone(), "C_OPS", "o1", "ulilei", "周几发布").await;
+    let text = "我们一般周四发布。";
+    let d = h
+        .outbox
+        .deliver(
+            &h.ch,
+            &out(&plan, text, rule(&plan), Some(Generation::default())),
+        )
+        .await
+        .unwrap();
+    let Delivered::Drafted { message_id, .. } = d else {
+        panic!("{d:?}")
+    };
+    let m = row(
+        &h,
+        "SELECT text FROM chan_messages WHERE id = ?",
+        &[&message_id],
+    );
+    assert_eq!(m[0], text, "unchanged");
+    assert!(
+        h.env
+            .gateway
+            .prompts
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|p| !p.starts_with(REWRITE_HEAD)),
+        "no rewrite"
+    );
+    nothing_sent(&h);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_secret_is_blocked_not_rewritten() {
     let h = setup().await;
@@ -1154,6 +1191,52 @@ async fn a_finished_item_answers_in_its_thread_as_a_draft() {
     assert_eq!(
         h.outbox.on_item_finished(&h.ch, &other).await.unwrap(),
         None
+    );
+}
+
+/// In your private chat with the bot the completion notice is Steve reporting to you: it goes out, no draft.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_finished_item_from_your_private_chat_is_reported_at_once() {
+    let h = setup().await;
+    h.fake
+        .space("D_ME", "", SpaceKind::Dm, false, &[("upx", "我")]);
+    let plan = recorded(&h, &h.oncall.clone(), "D_ME", "m1", "upx", "告警脚本坏了").await;
+    item_from(&h, "ST-1", &plan.message_id);
+    let item = h.env.store().items().get("ST-1").unwrap().unwrap();
+    let approvals = || {
+        count(
+            &h,
+            "SELECT count(*) FROM decisions WHERE kind = 'approve'",
+            &[],
+        )
+    };
+    let before = (approvals(), sent(&h).len());
+    let d = h
+        .outbox
+        .on_item_finished(&h.ch, &item)
+        .await
+        .unwrap()
+        .expect("from a chat");
+    let Delivered::Sent { message_id, .. } = d else {
+        panic!("{d:?}")
+    };
+    assert_eq!(approvals(), before.0, "nothing waits for approval");
+    assert_eq!(sent(&h).len(), before.1 + 1);
+    let m = row(
+        &h,
+        "SELECT text FROM chan_messages WHERE id = ?",
+        &[&message_id],
+    );
+    assert!(m[0].as_str().unwrap().starts_with("ST-1 已完成"), "{m:?}");
+    assert!(
+        h.env
+            .gateway
+            .prompts
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|p| !p.starts_with(CHECK_HEAD)),
+        "no check model for a chat only you read"
     );
 }
 
@@ -2481,4 +2564,81 @@ async fn an_unexplained_leak_still_drafts_and_a_basis_is_shown() {
         .unwrap();
     assert_eq!(r.unwrap().spans[0].reason, "内部路径（依据：内部细节）");
     nothing_sent(&h);
+}
+
+// ---------------------------------------------------------------- only you read it
+
+/// Your private chat with Steve: nobody else hears it, so the check model is not asked and nothing is
+/// rewritten (it reworded "Steve 运行在你的电脑上" for 20 s); secrets and never-level knowledge still count,
+/// and a chat with a colleague is checked as before.
+#[tokio::test(flavor = "multi_thread")]
+async fn only_you_reading_skips_the_model_check_but_not_secrets() {
+    use steve_modules::outbound::{Audience, CheckCx, KnowledgeUse, OutboundCheck, Verdict};
+    let h = setup().await;
+    h.env.gateway.script(
+        CHECK_HEAD,
+        r#"{"verdict": "leak", "spans": [{"text": "运行在你的电脑上", "reason": "内部细节", "basis": "internal_detail"}]}"#,
+    );
+    let d = Disclosure::with_models(Vec::new());
+    d.bind(h.env.store().clone(), h.env.gateway.clone());
+    let cx = CheckCx {
+        ws: WS.into(),
+        actor: "steve".into(),
+        draft_model: None,
+        audience_said: Some("你不是在我的设备上吗".into()),
+    };
+    let you = Audience {
+        scopes: vec!["space:spc_me".into(), "workspace".into(), "private".into()],
+        description: "你本人".into(),
+        ..Audience::default()
+    };
+    let asked = || {
+        h.env
+            .gateway
+            .prompts
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|p| p.starts_with(CHECK_HEAD))
+            .count()
+    };
+    let r = d
+        .check(&cx, &you, "是的，Steve 运行在你的电脑上。", &[])
+        .await;
+    assert_eq!(r.verdict, Verdict::Pass, "{r:?}");
+    assert!(r.check_model.is_none() && r.spans.is_empty(), "{r:?}");
+    assert_eq!(asked(), 0, "the check model is not asked");
+    // a secret is still blocked
+    let r = d
+        .check(
+            &cx,
+            &you,
+            "给你：ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+            &[],
+        )
+        .await;
+    assert_eq!(r.verdict, Verdict::Blocked);
+    // knowledge marked never to be used is still a leak
+    let never = KnowledgeUse {
+        source_type: "memory".into(),
+        source_id: "m1".into(),
+        source_label: "薪资表".into(),
+        level: steve_store::base::Level::Never,
+        visibility: "private".into(),
+        text: "张三月薪五万".into(),
+    };
+    let r = d.check(&cx, &you, "张三月薪五万。", &[never]).await;
+    assert_eq!(r.verdict, Verdict::Leak, "{r:?}");
+    assert_eq!(asked(), 0);
+    // a colleague reads along: checked as before
+    let team = Audience {
+        scopes: vec!["space:spc_dev".into(), "workspace".into()],
+        description: "李雷".into(),
+        ..Audience::default()
+    };
+    let r = d
+        .check(&cx, &team, "是的，Steve 运行在你的电脑上。", &[])
+        .await;
+    assert_eq!(r.verdict, Verdict::Leak, "{r:?}");
+    assert_eq!(asked(), 1);
 }

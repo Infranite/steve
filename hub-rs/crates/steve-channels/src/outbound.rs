@@ -773,7 +773,13 @@ impl Outbox {
         // 1. disclosure (and the rewrites)
         let mut res = b1::check(ch.modules(), &cx, &audience, &text, &knowledge).await;
         let mut rewrites: Vec<Rewrite> = Vec::new();
-        if res.verdict == Verdict::Leak && req.generation.is_some() {
+        // a check that could not run found nothing to rewrite: the text waits for the owner as it is
+        let unchecked = |r: &steve_modules::outbound::CheckResult| {
+            r.spans.iter().any(|s| {
+                s.reason == disclosure::R_MODEL_FAILED || s.reason == disclosure::R_UNBOUND
+            })
+        };
+        if res.verdict == Verdict::Leak && req.generation.is_some() && !unchecked(&res) {
             for _ in 0..MAX_REWRITES {
                 let Some(new) = self
                     .rewrite(
@@ -799,7 +805,7 @@ impl Outbox {
                 });
                 text = new;
                 res = b1::check(ch.modules(), &cx, &audience, &text, &knowledge).await;
-                if res.verdict != Verdict::Leak {
+                if res.verdict != Verdict::Leak || unchecked(&res) {
                     break;
                 }
             }
@@ -1342,18 +1348,34 @@ impl Outbox {
                 return Ok(None);
             };
             let plan = plan_of(c, &item.workspace_id, &msg)?;
-            Ok(Some((plan, delivery_summary(c, item)?)))
+            let mine = plan.mode == Mode::Bot
+                && match spaces::get(c, &plan.space_id)? {
+                    Some(s) => {
+                        crate::conversations::owner_only(c, &plan.ws, &s, &plan.connection_id)?
+                    }
+                    None => false,
+                };
+            Ok(Some((plan, delivery_summary(c, item)?, mine)))
         })?;
-        let Some((plan, summary)) = found else {
+        let Some((plan, summary, mine)) = found else {
             return Ok(None);
         };
+        // in the owner's private chat with the bot it is Steve reporting to them: sent like a reply there (the
+        // reply rule still has to allow it), not held as a draft; anywhere else it waits for the owner
         let req = OutRequest {
             target: OutTarget::reply(&plan),
             text: done_text(&item.id, &summary),
             purpose: Purpose::Done,
-            approve: true,
+            approve: !mine,
             generation: None,
-            auth: Auth::None,
+            auth: if mine {
+                Auth::Rule {
+                    source: plan.message_id.clone(),
+                    act: Act::Reply,
+                }
+            } else {
+                Auth::None
+            },
         };
         Ok(Some(self.deliver_checked(ch, &req).await?.0))
     }

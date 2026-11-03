@@ -94,6 +94,8 @@ pub struct Conv {
     pub research: bool,
     /// a turn may become an item here
     pub items: bool,
+    /// only the workspace's owner reads it (their private chat with Steve)
+    pub owner_only: bool,
 }
 
 impl Default for Conv {
@@ -108,6 +110,7 @@ impl Conv {
             space: MAIN.into(),
             research: true,
             items: true,
+            owner_only: false,
         }
     }
     /// A conversation whose turns are not the user's own (an IM space).

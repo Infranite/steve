@@ -163,6 +163,15 @@ pub fn sessions_list(store: &Store, ws: &str, all: bool) -> Result<String, Strin
     Ok(out)
 }
 
+/// Only the owner reads the answer to message `origin`: Steve's own conversation, or a chat the channel
+/// marked `owner_only`.
+fn own_reader(store: &Store, origin: &str) -> Result<bool, String> {
+    let m = store.messages().get(origin).map_err(|e| e.to_string())?;
+    Ok(m.is_some_and(|m| {
+        !m.space.starts_with("chan:") || m.meta["chan"]["owner_only"] == json!(true)
+    }))
+}
+
 /// `steve_item_read`: one item of this workspace.
 pub fn item_read(store: &Store, ws: &str, id: &str) -> Result<String, String> {
     let Some(i) = store
@@ -284,9 +293,16 @@ pub async fn handle(x: &Extra, run: ThreadRun, msg: Value, owner: String) -> Res
                 }
                 SESSIONS_LIST => {
                     let (store, all) = (x.store.clone(), args["all"].as_bool().unwrap_or(false));
-                    tokio::task::spawn_blocking(move || sessions_list(&store, &ws, all))
-                        .await
-                        .unwrap_or_else(|e| Err(e.to_string()))
+                    let origin = run.message_id.clone();
+                    tokio::task::spawn_blocking(move || {
+                        // your agents' sessions are yours: not for a run answering someone else
+                        if !own_reader(&store, &origin)? {
+                            return Err(REFUSED.to_string());
+                        }
+                        sessions_list(&store, &ws, all)
+                    })
+                    .await
+                    .unwrap_or_else(|e| Err(e.to_string()))
                 }
                 _ => Err(REFUSED.into()),
             };

@@ -56,6 +56,22 @@ pub fn failure_note(owner: &str) -> String {
     format!("抱歉，这次没能答上来，我请 {owner} 来看。")
 }
 
+/// Only the user whose view connection `conn` speaks with reads `space`: their private chat with Steve.
+pub fn owner_only(
+    c: &rusqlite::Connection,
+    ws: &str,
+    space: &spaces::SpaceRow,
+    conn: &str,
+) -> ChannelResult<bool> {
+    if space.has_external {
+        return Ok(false);
+    }
+    let (account, _) = crate::bindings::connection_account(c, ws, conn)?;
+    let owner = crate::compose::owner_user(c, ws, conn)?;
+    let a = crate::disclosure::space_audience(c, space, &account, &owner)?;
+    Ok(!a.external && a.scopes.iter().any(|s| s == "private"))
+}
+
 /// One turn posted into a conversation and routed like web chat.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Turn {
@@ -68,6 +84,8 @@ pub struct Turn {
     pub research: bool,
     /// It may become an item.
     pub items: bool,
+    /// Only the workspace's owner reads the conversation (their private chat with Steve).
+    pub owner_only: bool,
 }
 
 /// Steve's conversation, as the channel module needs it (the hub implements it over steve-core).
@@ -136,7 +154,15 @@ impl Channels {
         })?;
         // drafts as you, and spaces with outside members, answer in place only
         let open = !has_external && (plan.mode == Mode::Bot || command);
-        let meta = json!({ "chan": chan_meta(self, plan, command)? });
+        let owner_only = open
+            && self.store().reader(|c| -> ChannelResult<bool> {
+                match spaces::get(c, &plan.space_id)? {
+                    Some(space) => owner_only(c, &plan.ws, &space, &plan.connection_id),
+                    None => Ok(false),
+                }
+            })?;
+        let mut meta = json!({ "chan": chan_meta(self, plan, command)? });
+        meta["chan"]["owner_only"] = json!(owner_only);
         let text = match (&plan.trigger, command) {
             (Some(i), true) if !i.trim().is_empty() => i.clone(),
             _ => plan.text.clone(),
@@ -152,6 +178,7 @@ impl Channels {
             meta,
             research: open,
             items: open,
+            owner_only,
         };
         let ws = plan.ws.clone();
         let id = tokio::task::spawn_blocking(move || thread.say(&ws, turn))
@@ -182,6 +209,7 @@ impl Channels {
             meta: json!({ "chan": meta }),
             research: true,
             items: true,
+            owner_only: false,
         };
         let ws = plan.ws.clone();
         let id = tokio::task::spawn_blocking(move || thread.say(&ws, turn))
@@ -258,6 +286,13 @@ impl Channels {
                 Some(e) => format!("以对外身份「{}」说话", e.persona.name),
                 None => "以你本人的名义起草".to_string(),
             };
+            if owner_only(c, ws, &space, &space.connection_id)? {
+                return Ok(format!(
+                    "这次的问题来自你和 {} 的私聊（{}），只有你本人能看到，回答会发回那里。需要时直接查事项、会话、知识和代码，照实回答。",
+                    personas::owner_name(c, ws)?,
+                    crate::respond::space_label(&space),
+                ));
+            }
             let owner = personas::owner_name(c, ws)?;
             Ok(format!(
                 "这次的问题来自渠道「{}」（{where_}{}）。你{who}，回答会发回那里，发出前要过披露检查：\

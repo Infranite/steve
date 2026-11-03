@@ -714,6 +714,35 @@ impl OutboundCheck for Disclosure {
             );
         }
 
+        // Only the workspace's owner reads it (their private chat with Steve). Nobody else hears anything, so
+        // there is nothing to disclose: no names rule, no model check, no rewrite (it held or reworded answers
+        // to the owner for seconds). Secrets above and never-level knowledge still count. Decided by the user
+        // on 2026-11-03.
+        if private(audience) {
+            let mut spans = Vec::new();
+            let mut flagged = vec![false; knowledge.len()];
+            for (i, k) in knowledge.iter().enumerate() {
+                if k.level == Level::Never && overlaps(text, &k.text, &[]) {
+                    flagged[i] = true;
+                    spans.push(Span {
+                        text: k.source_label.clone(),
+                        reason: format!("用到了不可使用的知识（{}）", k.source_label),
+                    });
+                }
+            }
+            let verdict = if spans.is_empty() {
+                Verdict::Pass
+            } else {
+                Verdict::Leak
+            };
+            return result(
+                verdict,
+                entries(text, audience, knowledge, &names, &flagged),
+                spans,
+                None,
+            );
+        }
+
         // 1–2. the rule check (with every entry, never included: quoting one is a leak)
         let (mut spans, mut flagged) = rule_check(text, audience, knowledge, &names);
         for (i, k) in knowledge.iter().enumerate() {
@@ -768,6 +797,11 @@ impl OutboundCheck for Disclosure {
             model,
         )
     }
+}
+
+/// The only reader is the workspace's owner ([`space_audience`] adds `private` then) and nobody is outside.
+fn private(a: &Audience) -> bool {
+    !a.external && a.scopes.iter().any(|s| s == "private")
 }
 
 // ---------------------------------------------------------------- audiences of spaces

@@ -758,6 +758,10 @@ async fn each_space_has_one_conversation_that_continues() {
         !turns[3].1.research && !turns[3].1.items,
         "outside members: answered in place only"
     );
+    assert!(
+        turns.iter().all(|(_, t)| !t.owner_only),
+        "colleagues read these"
+    );
     assert_eq!(c.space_id, turns[3].1.space.trim_start_matches("chan:"));
 
     // steve-core answers the first turn with the channel's composer and stores the reply there
@@ -1098,4 +1102,22 @@ async fn an_expired_approval_discards_the_draft() {
     h.env.clock.advance(60_000);
     assert_eq!(h.outbox.send_due(&h.ch).await, 0, "never sent");
     assert!(sent(&h).is_empty());
+}
+
+/// Your private chat with the bot: only you read it, the turn says so (Steve answers there with its tools).
+#[tokio::test(flavor = "multi_thread")]
+async fn your_private_chat_with_the_bot_is_owner_only() {
+    let h = setup(true).await;
+    let t = h.thread.clone().unwrap();
+    h.fake
+        .space("D_ME", "", SpaceKind::Dm, false, &[("upx", "我")]);
+    push(
+        &h,
+        &h.bot.clone(),
+        msg("D_ME", "m1", "upx", "你能看见我电脑在干嘛吗", false, false),
+    )
+    .await;
+    let turns = t.turns.lock().unwrap().clone();
+    assert_eq!(turns.len(), 1, "{turns:?}");
+    assert!(turns[0].1.owner_only && turns[0].1.research);
 }

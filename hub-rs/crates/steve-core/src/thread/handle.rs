@@ -295,6 +295,7 @@ impl Core {
         if guest {
             d = decide::for_guest(d, &r, conv.research, conv.items);
         }
+        d = decide::for_owner(d, conv.owner_only && conv.research);
         lock(steps).route = Some(route_step(&r, Some(&d), ms));
         self.store().store().thread().route_add(&NewRouteLog {
             workspace_id: ws.into(),

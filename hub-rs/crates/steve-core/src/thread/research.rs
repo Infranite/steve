@@ -777,7 +777,12 @@ impl Core {
             format!("{guest_frame}\n\n{context}")
         };
         let history = self.history_before(ws, &j.origin)?;
-        let named = mentioned_items(db, ws, &j.question, &history)?;
+        /* items are read up front only where the owner alone reads the answer; a shared chat asks the tool */
+        let named = if own_reader(db, &j.space, &j.origin)? {
+            mentioned_items(db, ws, &j.question, &history)?
+        } else {
+            String::new()
+        };
         let context = if named.is_empty() {
             context
         } else {
@@ -950,6 +955,17 @@ fn mentioned_items(
     } else {
         format!("对话提到的事项（已读取）：\n{out}")
     })
+}
+
+/// Only the owner reads the answer to `origin`: Steve's own conversation, or a chat the channel marked
+/// `owner_only` (the owner's private chat with Steve).
+pub(crate) fn own_reader(db: &crate::repo::Db, space: &str, origin: &str) -> Result<bool> {
+    if space == super::MAIN {
+        return Ok(true);
+    }
+    Ok(db
+        .message(origin)?
+        .is_some_and(|m| m.meta["chan"]["owner_only"] == json!(true)))
 }
 
 /// `PREFIX-<digits>` references in `t` (any case), normalised to upper case.
