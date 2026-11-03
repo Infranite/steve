@@ -436,6 +436,17 @@ pub fn due(c: &Connection, account: &str, now: i64) -> ApiResult<bool> {
     })
 }
 
+/// Is a recorded retry of `account` due at `now` (a lookup left gaps and its `next_check` has come)?
+/// Such a retry is what the contact page promised: it is made even when a lookup cache says the
+/// last answer is still fresh. A person never looked up has no promise to keep.
+pub fn retry_due(c: &Connection, account: &str, now: i64) -> ApiResult<bool> {
+    Ok(c.query_row(
+        "SELECT EXISTS (SELECT 1 FROM account_profiles WHERE account_id = ? AND next_check IS NOT NULL AND next_check <= ?)",
+        params![account, now],
+        |r| r.get(0),
+    )?)
+}
+
 /// Everyone of `ws` with gaps is due now (a connection changed: a permission may have been granted).
 pub fn all_due(tx: &Tx, ws: &str, now: i64) -> ApiResult<usize> {
     Ok(tx.execute(

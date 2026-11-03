@@ -830,3 +830,177 @@ async fn missing_reasons_come_from_the_calls_that_asked() {
     assert_eq!(r.nameless, 0, "{r:?}");
     assert_eq!(person(&h, ids::BOB.open_id).1, "张伟");
 }
+
+/// The `next_check` the contact page shows is kept: a due retry is asked even while the lookup caches
+/// (6 h member lists, 24 h address book) still call the last answer fresh; before it is due nothing
+/// is asked; a profile that became complete is not retried.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_due_retry_is_made_and_nothing_else() {
+    let h = setup().await;
+    // you may list members, nobody may read the address book: 张伟 gets a name and an organization,
+    // his title and email stay open for the missing permission
+    h.fake.grant_user_scopes(ids::OWNER.open_id, &[MEMBERS]);
+    h.fake.deny_bot(Endpoint::ChatMembers);
+    h.fake.deny_bot(Endpoint::BatchUsers);
+    hear(
+        &h,
+        ids::GROUP_CHAT,
+        SpaceKind::Group,
+        "平台值班群",
+        "om_t1",
+        ids::BOB.open_id,
+        "报价发了",
+    )
+    .await;
+    h.ch.resolve_names(WS).await.expect("names");
+    let (_, name, _, bob) = person(&h, ids::BOB.open_id);
+    assert_eq!(name, "张伟");
+    let record = |h: &H| {
+        let r = q(
+            &h.env,
+            "SELECT ap.checked, ap.next_check, ap.gaps FROM account_profiles ap JOIN accounts a ON a.id = ap.account_id WHERE a.party_id = ?",
+            &bob,
+        );
+        (
+            r[0][0].as_i64(),
+            r[0][1].as_i64(),
+            serde_json::from_str::<Value>(&str_of(&r[0][2])).unwrap(),
+        )
+    };
+    let (checked, next, gaps) = record(&h);
+    let t0 = checked.expect("checked");
+    assert_eq!(next, Some(t0 + 3_600_000), "retried in an hour");
+    assert_eq!(
+        gaps["title"],
+        json!({"reason": "permission", "scope": CONTACT})
+    );
+    let calls = |h: &H| requests(h, Endpoint::BatchUsers) + requests(h, Endpoint::ChatMembers);
+    // your member-list reads (user token): the cache that answered first and is fresh for 6 h
+    let yours = |h: &H| {
+        h.fake
+            .requests_to(Endpoint::ChatMembers)
+            .iter()
+            .filter(|r| r.token.as_deref().is_some_and(|t| t.starts_with("u-")))
+            .count()
+    };
+    let yours0 = yours(&h);
+    assert_eq!(yours0, 1);
+
+    // not due yet: nothing is asked, nothing recorded
+    let before = calls(&h);
+    h.env.clock.advance(30 * 60_000);
+    h.ch.resolve_names(WS).await.expect("names");
+    assert_eq!(calls(&h), before);
+    assert_eq!(record(&h).0, Some(t0));
+
+    // due (both caches still fresh): asked, recorded, next one 6 h on
+    let t1 = h.env.clock.advance(31 * 60_000);
+    h.ch.resolve_names(WS).await.expect("names");
+    assert!(calls(&h) > before, "the due retry was made");
+    assert_eq!(yours(&h), yours0 + 1, "through the fresh cache too");
+    let (checked, next, _) = record(&h);
+    assert_eq!((checked, next), (Some(t1), Some(t1 + 6 * 3_600_000)));
+
+    // the bot may read the address book now (no reconnect): at the next due retry he is complete …
+    h.fake.allow(Endpoint::BatchUsers);
+    let before = calls(&h);
+    h.env.clock.advance(3 * 3_600_000);
+    h.ch.resolve_names(WS).await.expect("names");
+    assert_eq!(calls(&h), before, "not due before the 6 h");
+    h.env.clock.advance(3 * 3_600_000 + 60_000);
+    h.ch.resolve_names(WS).await.expect("names");
+    let (_, next, gaps) = record(&h);
+    assert_eq!((next, gaps), (None, json!({})), "complete: no retry");
+    assert_eq!(
+        q(
+            &h.env,
+            "SELECT json_extract(props, '$.title') FROM links WHERE subject_id = ? AND predicate = 'works_at'",
+            &bob
+        )[0][0],
+        "销售"
+    );
+    // … and never asked about again
+    let before = calls(&h);
+    h.env.clock.advance(7 * 24 * 3_600_000);
+    h.ch.resolve_names(WS).await.expect("names");
+    assert_eq!(calls(&h), before);
+}
+
+/// The address book answers but without a title or email (not filled in, or not opened to the app):
+/// “not provided”, retried in an hour — and that retry asks the address book again although its
+/// answer is cached for 24 h; before it is due, nothing is asked.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_due_retry_asks_the_address_book_through_its_cache() {
+    let h = setup().await;
+    // the bot reads the address book, where 张伟 has no title and no email
+    h.fake.world(|w| {
+        let u = w
+            .users
+            .iter_mut()
+            .find(|u| u.ids.open_id == ids::BOB.open_id)
+            .unwrap();
+        u.job_title.clear();
+        u.email.clear();
+        u.enterprise_email.clear();
+    });
+    hear(
+        &h,
+        ids::GROUP_CHAT,
+        SpaceKind::Group,
+        "平台值班群",
+        "om_c1",
+        ids::BOB.open_id,
+        "在",
+    )
+    .await;
+    // the group is no longer active, so no member list is read: he is looked up by id in the address
+    // book alone, whose answer is what the 24 h handle cache keeps
+    h.env
+        .store()
+        .transaction(|tx| -> Result<(), steve_store::StoreError> {
+            tx.execute(
+                "UPDATE spaces SET status = 'left' WHERE external_id = ?",
+                [ids::GROUP_CHAT],
+            )?;
+            Ok(())
+        })
+        .expect("space left");
+    // the bot's address-book reads (tenant token) that found him
+    let bots = |h: &H| {
+        h.fake
+            .requests_to(Endpoint::BatchUsers)
+            .iter()
+            .filter(|r| r.code == 0 && r.token.as_deref().is_some_and(|t| t.starts_with("t-")))
+            .count()
+    };
+    h.ch.resolve_names(WS).await.expect("names");
+    let (_, name, _, bob) = person(&h, ids::BOB.open_id);
+    assert_eq!(name, "张伟");
+    assert_eq!(bots(&h), 1, "answered: the 24 h cache is written");
+    let r = q(
+        &h.env,
+        "SELECT ap.checked, ap.next_check, ap.gaps, ap.source FROM account_profiles ap JOIN accounts a ON a.id = ap.account_id WHERE a.party_id = ?",
+        &bob,
+    );
+    let t0 = r[0][0].as_i64().unwrap();
+    assert_eq!(r[0][1].as_i64(), Some(t0 + 3_600_000));
+    assert_eq!(
+        serde_json::from_str::<Value>(&str_of(&r[0][2])).unwrap(),
+        json!({"title": {"reason": "not_provided"}, "email": {"reason": "not_provided"}})
+    );
+    assert_eq!(r[0][3], "directory");
+
+    // not due: not asked
+    h.env.clock.advance(59 * 60_000);
+    h.ch.resolve_names(WS).await.expect("names");
+    assert_eq!(bots(&h), 1);
+    // due, the cached answer 1 h old: asked again
+    h.env.clock.advance(2 * 60_000);
+    h.ch.resolve_names(WS).await.expect("names");
+    assert_eq!(bots(&h), 2, "the due retry went through the cache");
+    assert_eq!(
+        requests(&h, Endpoint::ChatMembers),
+        0,
+        "only the address book was asked"
+    );
+}

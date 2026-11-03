@@ -80,6 +80,8 @@ struct Candidate {
     handle: HandleRef,
     /// Has a usable name already (only the person or the org may be open).
     named: bool,
+    /// A recorded retry is due: asked again even where a lookup cache is still fresh.
+    retry: bool,
 }
 
 /// What one call that actually ran with a candidate's handle showed about them (a call skipped as
@@ -264,6 +266,7 @@ fn candidates(c: &Connection, ws: &str, now: i64) -> ChannelResult<Vec<Candidate
             h = h.with_extra(x);
         }
         out.push(Candidate {
+            retry: steve_modules::contacts::profile::retry_due(c, &acc, now)?,
             account_id: acc,
             actor,
             handle: h,
@@ -720,6 +723,7 @@ impl Channels {
                     actor,
                     handle: HandleRef::new("", ""),
                     named: true,
+                    retry: false,
                 };
                 let e = Enrichment {
                     org_id: Some(org),
@@ -763,7 +767,10 @@ impl Channels {
                     .members
                     .get(&key)
                     .is_some_and(|at| now - at < MEMBERS_TTL_MS);
-                if fresh {
+                let retry = open
+                    .iter()
+                    .any(|c| c.retry && sp.accounts.contains(&c.account_id));
+                if fresh && !retry {
                     continue;
                 }
                 let ans = self
@@ -835,10 +842,12 @@ impl Channels {
             let mut left = handles;
             for i in of_installation(&ids, &inst) {
                 left.retain(|h| {
+                    let retry = open.iter().any(|c| c.retry && c.handle == *h);
                     let m = lock(&self.names().mem);
-                    m.handles
-                        .get(&(i.id.clone(), h.handle.clone()))
-                        .is_none_or(|at| now - at >= HANDLE_TTL_MS)
+                    retry
+                        || m.handles
+                            .get(&(i.id.clone(), h.handle.clone()))
+                            .is_none_or(|at| now - at >= HANDLE_TTL_MS)
                 });
                 if left.is_empty() {
                     break;
