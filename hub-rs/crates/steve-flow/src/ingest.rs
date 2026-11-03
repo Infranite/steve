@@ -425,7 +425,11 @@ pub(crate) fn store_in(
         // an executor that can't resumes after the commit
         let mut waits = Vec::new();
         let mut woken = Vec::new();
-        let matched = matching_waits(tx, ws, ev)?;
+        let matched = if ev.wake {
+            matching_waits(tx, ws, ev)?
+        } else {
+            Vec::new()
+        };
         if !matched.is_empty() {
             let event = event_json(tx, &id)?;
             for (run, node) in matched {

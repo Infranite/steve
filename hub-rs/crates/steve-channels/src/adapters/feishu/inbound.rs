@@ -405,7 +405,12 @@ pub fn parse_receive(env: &Value, bot_open_id: &str) -> Result<Option<InboundMes
         .unwrap_or_else(|| message_id.to_string());
     Ok(Some(InboundMessage {
         space_ext_id: chat_id.into(),
-        space_kind: (s(m, "chat_type") == "p2p").then_some(SpaceKind::Dm),
+        space_kind: match s(m, "chat_type") {
+            "p2p" => Some(SpaceKind::Dm),
+            "group" => Some(SpaceKind::Group),
+            "topic_group" => Some(SpaceKind::Channel),
+            _ => None,
+        },
         space_name: None,
         external_id: message_id.into(),
         event_id: opt(header, "event_id"),
@@ -737,7 +742,7 @@ mod tests {
             ["ou_alice00000000000000000000000001"]
         );
         assert!(!m.sender.is_bot && !m.sender.external);
-        assert_eq!(m.space_kind, None);
+        assert_eq!(m.space_kind, Some(SpaceKind::Group));
         assert_eq!(
             m.thread_key.as_deref(),
             Some("om_groupat00000000000000000000001")

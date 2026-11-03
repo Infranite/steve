@@ -177,6 +177,9 @@ pub struct RawEvent {
     pub record_only: Option<String>,
     /// Flows this event must not start (an item a flow made finishing does not re-trigger that flow).
     pub skip_flows: Vec<String>,
+    /// It may wake a flow waiting for such an event (default). `false` for what must never drive a
+    /// flow on (a bot's message the loop guard stopped).
+    pub wake: bool,
 }
 
 impl RawEvent {
@@ -204,6 +207,7 @@ impl RawEvent {
             payload: Value::Null,
             record_only: None,
             skip_flows: Vec::new(),
+            wake: true,
         }
     }
 

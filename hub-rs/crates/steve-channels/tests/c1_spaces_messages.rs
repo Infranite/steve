@@ -386,29 +386,39 @@ async fn own_bot_messages_are_not_processed_other_bots_only_recorded() {
     let mut m = FakeChannel::message("G1", "m3", "umonitor", "【监控】恢复");
     m.sender.is_bot = true;
     assert_eq!(push(&h, m).await.next, Next::Handle);
-    // … but a bot answering what Steve said there is only recorded: an exchange with a bot ends after one
-    // round, so two bots never answer each other forever
+    // … but between two people's messages a bot gets one answer: once Steve answered it, the bot's next
+    // messages (a reply to Steve or a new @) are only recorded, so two bots never answer each other forever
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    let at = steve_store::now();
     h.env
         .store()
         .with_conn(|c| {
             c.execute(
-                "INSERT INTO chan_messages (id, workspace_id, space_id, external_id, direction, text, status, created, sent)
-                 VALUES ('cm_steve1', 'default', ?, 'fm_steve1', 'out', '好的，已经恢复', 'sent', 1, 1)",
-                params![other.space_id],
+                "INSERT INTO chan_messages (id, workspace_id, space_id, external_id, direction, text, status, reply_to, created, sent)
+                 VALUES ('cm_steve1', 'default', ?1, 'fm_steve1', 'out', '好的，已经恢复', 'sent', 'm3', ?2, ?2)",
+                params![other.space_id, at],
             )?;
             Ok(())
         })
         .unwrap();
+    let answered = Next::Record(steve_channels::inbound::LABEL_BOT_ANSWERED);
     let mut m = FakeChannel::message("G1", "m4", "umonitor", "收到");
     m.sender.is_bot = true;
     m.reply_to = Some("fm_steve1".into());
+    assert_eq!(push(&h, m).await.next, answered);
+    let mut m = FakeChannel::message("G1", "m5", "umonitor", "【监控】又告警了");
+    m.sender.is_bot = true;
     assert_eq!(
         push(&h, m).await.next,
-        Next::Record(steve_channels::inbound::LABEL_BOT_REPLY)
+        answered,
+        "a new message, no reply: still one answer"
     );
-    // a person answering Steve is handled as usual
-    let mut m = FakeChannel::message("G1", "m5", "ualice", "谢谢");
-    m.reply_to = Some("fm_steve1".into());
+    // a person speaks: the bot may be answered again
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    let p = push(&h, FakeChannel::message("G1", "m6", "ualice", "看下")).await;
+    assert_eq!(p.next, Next::Handle);
+    let mut m = FakeChannel::message("G1", "m7", "umonitor", "【监控】恢复");
+    m.sender.is_bot = true;
     assert_eq!(push(&h, m).await.next, Next::Handle);
 }
 
@@ -911,4 +921,14 @@ async fn the_messages_own_chat_type_decides_a_private_chat() {
     m.space_kind = Some(steve_channels::SpaceKind::Dm);
     let i = push(&h, m).await;
     assert!(i.facts.as_ref().expect("facts").dm);
+    assert_eq!(i.type_key, "im.dm", "the event says so too");
+    // and the other way round: a group message in a space stored as a private chat is a group message
+    let mut m = FakeChannel::message("D9", "k3", "ualice", "在吗");
+    m.space_kind = Some(steve_channels::SpaceKind::Dm);
+    push(&h, m).await;
+    let mut m = FakeChannel::message("D9", "k4", "ualice", "大家好");
+    m.space_kind = Some(steve_channels::SpaceKind::Group);
+    let i = push(&h, m).await;
+    assert!(!i.facts.as_ref().expect("facts").dm);
+    assert_eq!(i.type_key, "im.message");
 }

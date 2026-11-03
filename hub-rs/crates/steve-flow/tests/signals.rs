@@ -649,6 +649,13 @@ async fn waiting_event_nodes_are_found() {
             Ok(())
         })
         .unwrap();
+    // an event that must not drive a flow on (a bot the channel's loop guard stopped) wakes nothing
+    let mut quiet = FakeEventAdapter::event("mail.reply", "m0", "INBOX", "回复");
+    quiet.actor = None;
+    quiet.wake = false;
+    ingest::ingest(&flow, WS, Some(&con), quiet).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(spy.0.lock().unwrap().is_empty(), "not woken");
     // `flow` has no adapters: the type defaults are “on”
     let mut ev = FakeEventAdapter::event("mail.reply", "m", "INBOX", "回复");
     ev.actor = None;
