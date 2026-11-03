@@ -19,21 +19,21 @@ export type Leaving = { id: string; label: string; stops: string }
 type Choice = "keep" | CleanupLevel
 
 function sum(plans: CleanupPlan[]): CleanupPlan {
-  return plans.reduce((a, p) => ({ ...a, spaces: a.spaces + p.spaces, messages: a.messages + p.messages, contacts: a.contacts + p.contacts, accounts: a.accounts + p.accounts, kept: [...a.kept, ...p.kept], kept_count: a.kept_count + p.kept_count }),
-    { name: plans[0]?.name ?? "", spaces: 0, messages: 0, contacts: 0, accounts: 0, kept: [], kept_count: 0 })
+  return plans.reduce((a, p) => ({ ...a, messages_purged: (a.messages_purged ?? 0) + (p.messages_purged ?? 0), decisions: (a.decisions ?? 0) + (p.decisions ?? 0), decision_ids: [...(a.decision_ids ?? []), ...(p.decision_ids ?? [])], spaces: a.spaces + p.spaces, messages: a.messages + p.messages, contacts: a.contacts + p.contacts, accounts: a.accounts + p.accounts, kept: [...a.kept, ...p.kept], kept_count: a.kept_count + p.kept_count }),
+    { previews: plans, name: plans[0]?.name ?? "", spaces: 0, messages: 0, contacts: 0, accounts: 0, kept: [], kept_count: 0 })
 }
 
 /** “将删除 N 个群、M 条消息、K 个联系人；保留 X 个（…）” */
 export function PlanSummary({ plan, level }: { plan: CleanupPlan; level: CleanupLevel }) {
   const gone = level === "text"
     ? [`${plan.messages} 条消息的正文和附件`]
-    : [`${plan.spaces} 个群`, `${plan.messages} 条消息`, `${plan.contacts} 个自动识别出的联系人`].filter((s) => !s.startsWith("0 "))
+    : [`${plan.spaces} 个群`, `${plan.messages} 条消息`, `${plan.contacts} 个自动识别出的联系人`, `${plan.decisions ?? 0} 个关联决定`, `${plan.messages_purged ?? 0} 条保留消息的正文和附件`].filter((s) => !s.startsWith("0 "))
   const KIND: Record<string, [string, string]> = { space: ["个群", "群"], message: ["条消息", "消息"], contact: ["个联系人", "联系人"] }
   const keptBy = Object.entries(plan.kept.reduce<Record<string, number>>((m, k) => ({ ...m, [k.kind]: (m[k.kind] ?? 0) + 1 }), {})).map(([k, n]) => `${n} ${KIND[k]?.[0] ?? "项"}`)
   const reasons = [...new Set(plan.kept.map((k) => k.reason))]
   return (
     <div className="flex flex-col gap-2 rounded-lg border px-3 py-2.5 type-callout" data-cleanup-plan data-plan-spaces={plan.spaces} data-plan-messages={plan.messages} data-plan-contacts={plan.contacts} data-plan-kept={plan.kept_count}>
-      <div>{gone.length && (plan.messages || plan.spaces || plan.contacts) ? <>将删除 {gone.join("、")}</> : "没有可以删除的记录"}{plan.kept_count > 0 && <>；保留 {plan.kept.length === plan.kept_count && keptBy.length ? keptBy.join("、") : `${plan.kept_count} 项`}{reasons.length ? `（${reasons.slice(0, 2).join("、")}）` : ""}</>}。</div>
+      <div>{gone.length && (plan.messages || plan.spaces || plan.contacts || plan.messages_purged || plan.decisions) ? <>将删除 {gone.join("、")}</> : "没有可以删除的记录"}{plan.kept_count > 0 && <>；保留 {plan.kept.length === plan.kept_count && keptBy.length ? keptBy.join("、") : `${plan.kept_count} 项`}{reasons.length ? `（${reasons.slice(0, 2).join("、")}）` : ""}</>}。</div>
       {plan.kept.length > 0 && <details className="type-footnote text-muted-foreground"><summary className="cursor-pointer select-none">看保留了哪些</summary>
         <ul className="mt-1 flex max-h-40 flex-col gap-0.5 overflow-y-auto">{plan.kept.map((k) => <li key={k.kind + k.id}>{k.name || k.id} · {k.reason}</li>)}</ul></details>}
     </div>
@@ -81,7 +81,7 @@ export function DisconnectDialog({ title, name, leaving, keptNote, onClose, onDo
   const go = async () => {
     setBusy(true)
     try {
-      if (choice !== "keep") for (const t of targets) await cleanupApi.run(t, choice)
+      if (choice !== "keep") for (const [i, t] of targets.entries()) await cleanupApi.run(t, choice, plan?.previews?.[i]?.decision_ids)
       for (const l of [...leaving].reverse()) await accountsApi.disconnect(l.id)
       toast(choice === "keep" ? "已断开" : "已断开，并清理了记录"); onDone()
     } catch (e) { report(e) } finally { setBusy(false) }
@@ -122,10 +122,10 @@ export function CleanupDialog({ target, name, onClose, onDone }: { target: Clean
   const [choice, setChoice] = useState<Choice>("text"), [typed, setTyped] = useState(""), [busy, setBusy] = useState(false)
   const plan = usePlan([target], choice)
   const level = choice as CleanupLevel, ok = level !== "all" || typed.trim() === name.trim()
-  const empty = !!plan && !plan.messages && !plan.spaces && !plan.contacts
+  const empty = !!plan && !plan.messages && !plan.spaces && !plan.contacts && !plan.messages_purged && !plan.decisions
   const go = async () => {
     setBusy(true)
-    try { const r = await cleanupApi.run(target, level); toast(r.backup ? "已清理，清理前的数据库已备份" : "已清理"); onDone() } catch (e) { report(e) } finally { setBusy(false) }
+    try { const r = await cleanupApi.run(target, level, plan?.decision_ids); toast(r.backup ? "已清理，清理前的数据库已备份" : "已清理"); onDone() } catch (e) { report(e) } finally { setBusy(false) }
   }
   return (
     <Dialog open onOpenChange={(o) => !o && !busy && onClose()}>

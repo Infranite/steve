@@ -7,17 +7,17 @@ export type CleanupLevel = "text" | "all"
 /** a live identity (`connection_id`) or one already disconnected (`account_id`) */
 export type CleanupTarget = { connection_id: string } | { account_id: string }
 export type CleanupKept = { kind: "space" | "message" | "contact" | string; id: string; name: string; reason: string }
-export type CleanupPlan = { level?: CleanupLevel; name: string; spaces: number; messages: number; messages_purged?: number; contacts: number; accounts: number; kept: CleanupKept[]; kept_count: number; backup?: string }
+export type CleanupPlan = { level?: CleanupLevel; name: string; spaces: number; messages: number; messages_purged?: number; contacts: number; accounts: number; decisions?: number; decision_ids?: string[]; previews?: CleanupPlan[]; kept: CleanupKept[]; kept_count: number; backup?: string }
 export type Leftover = { account_id: string; name: string; system_id: string; spaces: number; messages: number }
 
 export const cleanupApi = {
   preview: (t: CleanupTarget, level: CleanupLevel) => modReq<CleanupPlan>("POST", "/channels/cleanup/preview", { ...t, level }),
-  run: (t: CleanupTarget, level: CleanupLevel) => modReq<CleanupPlan>("POST", "/channels/cleanup", { ...t, level, confirm: true }),
+  run: (t: CleanupTarget, level: CleanupLevel, decision_ids: string[] = []) => modReq<CleanupPlan>("POST", "/channels/cleanup", { ...t, level, confirm: true, decision_ids }),
   leftovers: () => modReq<Leftover[]>("GET", "/channels/cleanup/leftovers"),
 }
 
 export const LEVEL_TEXT: Record<"keep" | CleanupLevel, [string, string]> = {
   keep: ["保留全部", "群、消息和联系人都留着，以后还能搜到"],
   text: ["删除消息正文", "只删正文和附件，保留谁在什么时候发过消息，事项和决定里的链接不会断"],
-  all: ["删除群、消息和自动识别出的联系人", "只删只经过这个身份看到的；被事项、知识或记忆引用的，和你确认或改过的联系人都保留"],
+  all: ["删除群、消息和自动识别出的联系人", "同时删除这些群和消息独有的决定；只删只经过这个身份看到的；被事项、知识或记忆引用的，和你确认或改过的联系人都保留"],
 }

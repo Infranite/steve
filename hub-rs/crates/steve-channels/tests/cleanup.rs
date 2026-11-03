@@ -102,6 +102,16 @@ async fn setup() -> (H, String, String) {
 
 impl H {
     async fn call(&self, method: &str, path: &str, body: Option<Value>) -> (u16, Value) {
+        self.call_in_workspace(method, path, body, WS).await
+    }
+
+    async fn call_in_workspace(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<Value>,
+        ws: &str,
+    ) -> (u16, Value) {
         let mut req = Request::builder()
             .method(method)
             .uri(path)
@@ -115,7 +125,7 @@ impl H {
                 None => Body::empty(),
             })
             .expect("request");
-        req.extensions_mut().insert(caller(WS, ME));
+        req.extensions_mut().insert(caller(ws, ME));
         let res = self.api.clone().oneshot(req).await.expect("infallible");
         let status = res.status().as_u16();
         let bytes = axum::body::to_bytes(res.into_body(), 1 << 20)
@@ -524,4 +534,121 @@ async fn only_spaces_no_other_live_identity_sees() {
         0
     );
     assert_eq!(h.n("SELECT count(*) FROM spaces WHERE id = 'sp_a'"), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn standalone_decisions_are_previewed_and_deleted_atomically() {
+    let (h, con, _) = setup().await;
+    h.seed("", &con, "");
+    h.exec("INSERT INTO decisions (id, workspace_id, kind, subject_type, subject_id, question, status, requested_by, created) VALUES
+      ('d1','default','reply','chan_message','m1','reply?','open','usr_dev',1),
+      ('d2','default','reply','chan_message','m2','reply?','resolved','usr_dev',1);
+      UPDATE chan_messages SET decision_id='d1' WHERE id='m1';
+      UPDATE ext_events SET decision_id='d1' WHERE message_id='m1';");
+    let req = json!({"connection_id":con,"level":"all"});
+    let (st, preview) = h
+        .call("POST", "/channels/cleanup/preview", Some(req.clone()))
+        .await;
+    assert_eq!(st, 200, "{preview}");
+    assert_eq!(preview["decisions"], 2);
+    let mut run = req.clone();
+    run["confirm"] = json!(true);
+    let (st, _) = h.call("POST", "/channels/cleanup", Some(run.clone())).await;
+    assert_ne!(st, 200);
+    assert_eq!(
+        h.n("SELECT count(*) FROM decisions WHERE id IN ('d1','d2')"),
+        2
+    );
+    run["decision_ids"] = preview["decision_ids"].clone();
+    h.exec("CREATE TRIGGER fail_cleanup BEFORE DELETE ON spaces BEGIN SELECT RAISE(ABORT, 'test rollback'); END;");
+    let (st, _) = h.call("POST", "/channels/cleanup", Some(run.clone())).await;
+    assert_ne!(st, 200);
+    assert_eq!(
+        h.n("SELECT count(*) FROM decisions WHERE id IN ('d1','d2')"),
+        2
+    );
+    assert_eq!(
+        h.one("SELECT decision_id FROM chan_messages WHERE id='m1'"),
+        "d1"
+    );
+    h.exec("DROP TRIGGER fail_cleanup;");
+    let (st, result) = h.call("POST", "/channels/cleanup", Some(run)).await;
+    assert_eq!(st, 200, "{result}");
+    assert_eq!(result["decisions"], 2);
+    assert_eq!(
+        h.n("SELECT count(*) FROM decisions WHERE id IN ('d1','d2')"),
+        0
+    );
+    assert_eq!(
+        h.n("SELECT count(*) FROM chan_messages WHERE decision_id IN ('d1','d2')"),
+        0
+    );
+    assert_eq!(
+        h.n("SELECT count(*) FROM ext_events WHERE decision_id IN ('d1','d2')"),
+        0
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn shared_decision_and_changed_preview_are_not_deleted() {
+    let (h, con, _) = setup().await;
+    h.seed("", &con, "");
+    h.exec("INSERT INTO decisions (id, workspace_id, kind, subject_type, subject_id, question, status, requested_by, created) VALUES
+      ('shared','default','reply','chan_message','m1','reply?','open','usr_dev',1);
+      UPDATE chan_messages SET decision_id='shared' WHERE id IN ('m1','m3');");
+    let req = json!({"connection_id":con,"level":"all"});
+    let (_, preview) = h
+        .call("POST", "/channels/cleanup/preview", Some(req.clone()))
+        .await;
+    assert_eq!(preview["decisions"], 0);
+    h.exec("UPDATE chan_messages SET decision_id=NULL WHERE id='m3';");
+    let mut run = req;
+    run["confirm"] = json!(true);
+    run["decision_ids"] = preview["decision_ids"].clone();
+    let (st, _) = h.call("POST", "/channels/cleanup", Some(run)).await;
+    assert_ne!(st, 200);
+    assert_eq!(h.n("SELECT count(*) FROM decisions WHERE id='shared'"), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn foreign_workspace_and_item_decisions_remain() {
+    let (h, con, _) = setup().await;
+    h.seed("", &con, "");
+    h.exec("INSERT INTO decisions (id, workspace_id, kind, subject_type, subject_id, item_id, question, status, requested_by, created) VALUES
+      ('foreign','other','reply','chan_message','m1',NULL,'reply?','open','usr_dev',1),
+      ('item_decision','default','reply','space','sp_c','it_1','reply?','open','usr_dev',1);");
+    let req = json!({"connection_id":con,"level":"all","confirm":true});
+    let (st, preview) = h
+        .call("POST", "/channels/cleanup/preview", Some(req.clone()))
+        .await;
+    assert_eq!(st, 200, "{preview}");
+    assert_eq!(preview["decisions"], 0);
+    let (st, result) = h.call("POST", "/channels/cleanup", Some(req)).await;
+    assert_eq!(st, 200, "{result}");
+    assert_eq!(
+        h.n("SELECT count(*) FROM decisions WHERE id IN ('foreign','item_decision')"),
+        2
+    );
+    assert_eq!(
+        h.n("SELECT count(*) FROM spaces WHERE id IN ('sp_a','sp_c')"),
+        2
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn another_workspace_cannot_preview_or_delete() {
+    let (h, con, _) = setup().await;
+    h.seed("", &con, "");
+    for path in ["/channels/cleanup/preview", "/channels/cleanup"] {
+        let (st, _) = h
+            .call_in_workspace(
+                "POST",
+                path,
+                Some(json!({"connection_id":con,"level":"all","confirm":true})),
+                "other",
+            )
+            .await;
+        assert_ne!(st, 200);
+    }
+    assert_eq!(h.n("SELECT count(*) FROM chan_messages WHERE id='m1'"), 1);
 }

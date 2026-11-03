@@ -18,7 +18,7 @@
 //!   the contacts `identify` created for their people that nobody confirmed, edited or used.
 //!
 //! Kept, always, with the reason in `kept`: a message an item, decision, thread, memory or link
-//! refers to (its text too); a space with such a message, or one a memory, knowledge doc, team,
+//! refers to (its text too), except standalone channel decisions removed together in `all`; a space with such a message, or one a memory, knowledge doc, team,
 //! 负责人, link or an item's decision refers to (its other messages lose their text); a contact you
 //! confirmed or edited, “我”, one with accounts from elsewhere, seen in other spaces or mail, or
 //! referenced by items, memories, knowledge, 负责人, teams, merges or merge proposals.
@@ -48,6 +48,8 @@ pub struct Request {
     pub level: Level,
     #[serde(default)]
     pub confirm: bool,
+    #[serde(default)]
+    pub decision_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -85,10 +87,14 @@ pub struct Summary {
     pub contacts: usize,
     /// Accounts deleted with them (`all` only).
     pub accounts: usize,
+    /// Standalone decisions removed together with their channel records (`all` only).
+    pub decisions: usize,
+    /// Echo these IDs on execution; a changed set requires a fresh preview.
+    pub decision_ids: Vec<String>,
     /// At most 200 of the kept things; `kept_count` is all of them.
     pub kept: Vec<Kept>,
     pub kept_count: usize,
-    /// The backup file name taken before a real cleanup (`pre-purge-<ms>.sqlite3`).
+    /// The backup file name taken before a real cleanup (`pre-purge-<ms>-<id>.sqlite3`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub backup: Option<String>,
 }
@@ -134,7 +140,7 @@ async fn run_route(
     }
     let v = ch.modules().viewer(&who)?;
     let t = target(&ch, &who, &r)?;
-    Ok(Json(run(&ch, &v, &t, r.level).await?))
+    Ok(Json(run(&ch, &v, &t, r.level, r.decision_ids).await?))
 }
 
 async fn leftovers_route(
@@ -237,11 +243,11 @@ fn target_spaces(c: &Connection, v: &Viewer, t: &Target) -> ChannelResult<Vec<(S
 /// Why message `m` must stay, or NULL.
 const MESSAGE_REF: &str = "CASE
   WHEN m.work_item_id IS NOT NULL THEN '被事项引用'
-  WHEN m.decision_id IS NOT NULL THEN '有相关的决定'
+  WHEN m.decision_id IS NOT NULL AND m.decision_id NOT IN (SELECT value FROM json_each(?2)) THEN '有相关的决定'
   WHEN EXISTS (SELECT 1 FROM ext_events e WHERE e.message_id = m.id AND e.work_item_id IS NOT NULL) THEN '被事项引用'
-  WHEN EXISTS (SELECT 1 FROM ext_events e WHERE e.message_id = m.id AND e.decision_id IS NOT NULL) THEN '有相关的决定'
+  WHEN EXISTS (SELECT 1 FROM ext_events e WHERE e.message_id = m.id AND e.decision_id IS NOT NULL AND e.decision_id NOT IN (SELECT value FROM json_each(?2))) THEN '有相关的决定'
   WHEN EXISTS (SELECT 1 FROM thread_items t WHERE t.origin_msg = m.id OR t.reply_msg = m.id) THEN '被事项引用'
-  WHEN EXISTS (SELECT 1 FROM decisions d WHERE d.subject_type = 'chan_message' AND d.subject_id = m.id) THEN '有相关的决定'
+  WHEN EXISTS (SELECT 1 FROM decisions d WHERE d.subject_type = 'chan_message' AND d.subject_id = m.id AND d.id NOT IN (SELECT value FROM json_each(?2))) THEN '有相关的决定'
   WHEN EXISTS (SELECT 1 FROM mems x WHERE x.source_type = 'chan_message' AND x.source_id = m.id) THEN '记忆引用了它'
   WHEN EXISTS (SELECT 1 FROM links l WHERE l.workspace_id = m.workspace_id
         AND ((l.subject_type = 'chan_message' AND l.subject_id = m.id) OR (l.object_type = 'chan_message' AND l.object_id = m.id))) THEN '被其他对象关联'
@@ -302,6 +308,7 @@ struct Plan {
     purge_in_kept: Vec<String>,
     contacts: Vec<String>,
     accounts: Vec<String>,
+    decisions: Vec<String>,
     kept: Vec<Kept>,
 }
 
@@ -315,6 +322,8 @@ impl Plan {
             messages_purged: self.purge_in_kept.len(),
             contacts: self.contacts.len(),
             accounts: self.accounts.len(),
+            decisions: self.decisions.len(),
+            decision_ids: self.decisions.clone(),
             kept: self.kept.iter().take(200).cloned().collect(),
             kept_count: self.kept.len(),
             backup: None,
@@ -336,6 +345,7 @@ fn messages_of(
     c: &Connection,
     sid: &str,
     only_unpurged: bool,
+    decisions: &[String],
 ) -> ChannelResult<Vec<(String, Option<String>)>> {
     let filter = if only_unpurged {
         "AND (m.text IS NOT NULL OR m.attachments <> '[]')"
@@ -343,19 +353,73 @@ fn messages_of(
         ""
     };
     let mut st = c.prepare(&format!(
-        "SELECT m.id, {MESSAGE_REF} FROM chan_messages m WHERE m.space_id = ? {filter} ORDER BY m.created, m.id"
+        "SELECT m.id, {MESSAGE_REF} FROM chan_messages m WHERE m.space_id = ?1 {filter} ORDER BY m.created, m.id"
     ))?;
     let rows = st
-        .query_map([sid], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .query_map(params![sid, json_ids(decisions)], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
+}
+
+/// Only standalone channel decisions whose references all belong to this visible space.
+fn removable_decisions(c: &Connection, ws: &str, sid: &str) -> ChannelResult<Vec<String>> {
+    let mut sql = String::from(
+        "SELECT d.id FROM decisions d WHERE d.workspace_id = ?1
+      AND d.item_id IS NULL AND d.session_id IS NULL
+      AND ((d.subject_type = 'space' AND d.subject_id = ?2)
+        OR (d.subject_type = 'chan_message' AND EXISTS (SELECT 1 FROM chan_messages m
+          WHERE m.id = d.subject_id AND m.space_id = ?2 AND m.workspace_id = ?1)))
+      AND NOT EXISTS (SELECT 1 FROM chan_messages m WHERE m.decision_id = d.id
+        AND (m.space_id <> ?2 OR m.workspace_id <> ?1 OR m.work_item_id IS NOT NULL))
+      AND NOT EXISTS (SELECT 1 FROM ext_events e WHERE e.decision_id = d.id
+        AND (e.space_id IS NOT ?2 OR e.workspace_id <> ?1 OR e.work_item_id IS NOT NULL
+          OR (e.message_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM chan_messages em
+            WHERE em.id = e.message_id AND em.space_id = ?2 AND em.workspace_id = ?1))))",
+    );
+    for table in [
+        "flow_waits",
+        "grants",
+        "secret_uses",
+        "mems",
+        "attr_values",
+        "merge_proposals",
+        "yolo_actions",
+        "stewards",
+        "mail_drafts",
+    ] {
+        sql.push_str(&format!(
+            " AND NOT EXISTS (SELECT 1 FROM {table} x WHERE x.decision_id = d.id)"
+        ));
+    }
+    for (table, ty, id) in [
+        ("links", "subject_type", "subject_id"),
+        ("links", "object_type", "object_id"),
+        ("mem_about", "object_type", "object_id"),
+        ("kb_doc_about", "object_type", "object_id"),
+        ("entity_tags", "object_type", "object_id"),
+        ("mems", "source_type", "source_id"),
+        ("decisions", "subject_type", "subject_id"),
+    ] {
+        sql.push_str(&format!(
+            " AND NOT EXISTS (SELECT 1 FROM {table} x WHERE x.{ty} = 'decision' AND x.{id} = d.id)"
+        ));
+    }
+    sql.push_str(" ORDER BY d.id");
+    strings(c, &sql, params![ws, sid])
 }
 
 fn plan(c: &Connection, v: &Viewer, t: &Target, level: Level) -> ChannelResult<Plan> {
     let mut p = Plan::default();
     let list = target_spaces(c, v, t)?;
     for (sid, name) in &list {
-        let msgs = messages_of(c, sid, level == Level::Text)?;
+        let decisions = if level == Level::All {
+            removable_decisions(c, &v.ws, sid)?
+        } else {
+            vec![]
+        };
+        let msgs = messages_of(c, sid, level == Level::Text, &decisions)?;
         let refd: Vec<&(String, Option<String>)> = msgs.iter().filter(|m| m.1.is_some()).collect();
         for (mid, why) in &refd {
             p.kept.push(Kept {
@@ -380,6 +444,12 @@ fn plan(c: &Connection, v: &Viewer, t: &Target, level: Level) -> ChannelResult<P
                     [sid],
                     |r| r.get(0),
                 )?;
+                let protected_decisions: i64 = c.query_row(
+                    "SELECT count(*) FROM decisions WHERE subject_type = 'space' AND subject_id = ?1 AND id NOT IN (SELECT value FROM json_each(?2))",
+                    params![sid, json_ids(&decisions)], |r| r.get(0))?;
+                let why = why.or_else(|| {
+                    (protected_decisions > 0).then(|| "决定仍被其他对象引用".to_string())
+                });
                 let why =
                     why.or_else(|| (!refd.is_empty()).then(|| "里面有被引用的消息".to_string()));
                 match why {
@@ -390,13 +460,14 @@ fn plan(c: &Connection, v: &Viewer, t: &Target, level: Level) -> ChannelResult<P
                             name: name.clone(),
                             reason,
                         });
-                        let text = messages_of(c, sid, true)?;
+                        let text = messages_of(c, sid, true, &[])?;
                         p.purge_in_kept
                             .extend(text.into_iter().filter(|m| m.1.is_none()).map(|m| m.0));
                     }
                     None => {
                         p.spaces.push(sid.clone());
                         p.messages.extend(free);
+                        p.decisions.extend(decisions);
                     }
                 }
             }
@@ -479,6 +550,14 @@ const SPACE_OWNED: [&str; 5] = [
 ];
 
 fn delete_all(tx: &Connection, p: &Plan, now: i64) -> ChannelResult<()> {
+    let decisions = json_ids(&p.decisions);
+    for table in ["chan_messages", "ext_events"] {
+        tx.execute(&format!("UPDATE {table} SET decision_id = NULL WHERE decision_id IN (SELECT value FROM json_each(?1))"), [&decisions])?;
+    }
+    tx.execute(
+        "DELETE FROM decisions WHERE id IN (SELECT value FROM json_each(?1))",
+        [&decisions],
+    )?;
     let spaces = json_ids(&p.spaces);
     let msgs = json_ids(&p.messages);
     // signals of the deleted messages / spaces: gone unless something still points at them
@@ -507,12 +586,6 @@ fn delete_all(tx: &Connection, p: &Plan, now: i64) -> ChannelResult<()> {
     tx.execute(
         "DELETE FROM chan_messages WHERE id IN (SELECT value FROM json_each(?1))",
         [&msgs],
-    )?;
-    // a space keeps only referenced messages, so nothing else is left in a deleted one
-    tx.execute(
-        "DELETE FROM decisions WHERE subject_type = 'space' AND item_id IS NULL
-            AND subject_id IN (SELECT value FROM json_each(?1))",
-        [&spaces],
     )?;
     for table in SPACE_OWNED {
         tx.execute(
@@ -582,7 +655,7 @@ fn backup(ch: &Channels, now: i64) -> ApiResult<String> {
     let dir = backup_dir(ch.store().path());
     std::fs::create_dir_all(&dir)
         .map_err(|e| ApiError::Internal(format!("备份目录建不了：{e}")))?;
-    let name = format!("pre-purge-{now}.sqlite3");
+    let name = format!("pre-purge-{now}-{}.sqlite3", steve_store::uid("backup"));
     let file = dir.join(&name);
     let path = file
         .to_str()
@@ -596,7 +669,13 @@ fn backup(ch: &Channels, now: i64) -> ApiResult<String> {
 }
 
 /// Backup, then the cleanup in one transaction, audited.
-pub async fn run(ch: &Channels, v: &Viewer, t: &Target, level: Level) -> ApiResult<Summary> {
+pub async fn run(
+    ch: &Channels,
+    v: &Viewer,
+    t: &Target,
+    level: Level,
+    decision_ids: Vec<String>,
+) -> ApiResult<Summary> {
     let (ch2, v2, t2) = (ch.clone(), v.clone(), t.clone());
     tokio::task::spawn_blocking(move || -> ApiResult<Summary> {
         let (ch, v, t) = (ch2, v2, t2);
@@ -606,9 +685,17 @@ pub async fn run(ch: &Channels, v: &Viewer, t: &Target, level: Level) -> ApiResu
         let file = backup(&ch, now)?;
         let mut out = ch.store().transaction(|tx| -> ApiResult<Summary> {
             let p = plan(tx, &v, &t, level)?;
+            let mut expected = decision_ids.clone(); expected.sort(); expected.dedup();
+            let mut actual = p.decisions.clone(); actual.sort();
+            if expected != actual {
+                return Err(ApiError::rule("关联决定已变化，请重新预览并确认清理"));
+            }
             match level {
                 Level::Text => purge_text(tx, &p.messages, now)?,
                 Level::All => delete_all(tx, &p, now)?,
+            }
+            for id in &p.decisions {
+                tx.publish(steve_store::ChangeEvent::Decision { id: id.clone(), item_id: Some(None) });
             }
             let s = p.summary(level, &t.name);
             base::audit(
@@ -620,7 +707,7 @@ pub async fn run(ch: &Channels, v: &Viewer, t: &Target, level: Level) -> ApiResu
                 &json!({
                     "level": level, "account": t.account_id, "spaces": s.spaces,
                     "messages": s.messages, "messages_purged": s.messages_purged,
-                    "contacts": s.contacts, "accounts": s.accounts, "kept": s.kept_count,
+                    "decisions": s.decisions, "contacts": s.contacts, "accounts": s.accounts, "kept": s.kept_count,
                     "backup": file,
                 }),
             )?;
