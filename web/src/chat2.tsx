@@ -26,6 +26,7 @@ const RESEARCH_ERROR: Record<string, string> = {
   guard_violation: "调用超出本次研究允许的范围，已停止。",
   unknown: "这次查询未完成，未能确认具体原因。",
 }
+const researchError = (code?: string) => code && Object.hasOwn(RESEARCH_ERROR, code) ? RESEARCH_ERROR[code] : RESEARCH_ERROR.unknown
 /** one line for the folded block and the rail */
 export function stepsSummary(s: Steps): string {
   const r = s.route
@@ -76,7 +77,7 @@ export function StepsBlock({ m }: { m: Msg }) {
                   <TraceDescription className="min-w-0 shrink truncate font-mono text-[12px]">{item ? <button type="button" className="hover:text-foreground hover:underline" onClick={() => go("#/items/" + item)}>{desc}</button> : desc}</TraceDescription>
                   <TraceDescription className="inline-flex items-center gap-1">{t.status === "ok" && <CheckIcon className="size-3.5" strokeWidth={1.75} />}{secs(t.ms)}</TraceDescription>
                 </TraceLine>
-                {(t.error || (s.research && t.status === "failed")) && <div className="pl-6 type-footnote text-destructive">{s.research ? RESEARCH_ERROR[t.error ?? "unknown"] ?? RESEARCH_ERROR.unknown : t.error}</div>}
+                {(t.error || (s.research && t.status === "failed")) && <div className="pl-6 type-footnote text-destructive">{s.research ? researchError(t.error) : t.error}</div>}
               </div>
             )
           })}
