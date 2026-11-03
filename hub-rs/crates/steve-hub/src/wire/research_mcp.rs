@@ -1,6 +1,7 @@
-//! Steve's `/mcp` for a research run's token (thread-routing §7.4): only the four read-only tools exist —
-//! the knowledge base (`steve_knowledge_search`, `steve_knowledge_read`) and this workspace's items
-//! (`steve_items_search`, `steve_item_read`). Anything else is refused. The token is the run's own
+//! Steve's `/mcp` for a research run's token (thread-routing §7.4): only read-only tools exist — the
+//! knowledge base (`steve_knowledge_search`, `steve_knowledge_read`), this workspace's items
+//! (`steve_items_search`, `steve_item_read`) and its agent sessions (`steve_sessions_list`). Anything
+//! else is refused. The token is the run's own
 //! (`thread_runs.token_hash`), valid while the run is `running`.
 
 use axum::http::StatusCode;
@@ -12,6 +13,7 @@ use super::mcp_extra::Extra;
 
 pub const ITEMS_SEARCH: &str = "steve_items_search";
 pub const ITEM_READ: &str = "steve_item_read";
+pub const SESSIONS_LIST: &str = "steve_sessions_list";
 /// The answer to any other tool.
 pub const REFUSED: &str = "This tool is not available in a read-only research run.";
 
@@ -41,7 +43,12 @@ pub fn tools() -> Vec<Value> {
         "description": "Read the current progress of one workspace item by its ST number (for example ST-23): goal, status, plan, the last 20 timeline entries and the latest delivery summary. Prefer this when the user mentions an ST number.",
         "inputSchema": schema(json!({"id": {"type": "string", "description": "e.g. ST-20"}}), &["id"]),
     }));
-    // These four tools only retrieve information. Advertise that fact to MCP clients;
+    v.push(json!({
+        "name": SESSIONS_LIST,
+        "description": "List this workspace's agent sessions (Claude Code, Codex …) Steve runs or imported: how many are running, idle or failed, and for each its harness, model, bot, item and title. Use this for questions like how many sessions are running or what the agents are doing now. `all: true` also lists ended ones.",
+        "inputSchema": schema(json!({"all": {"type": "boolean"}}), &[]),
+    }));
+    // These tools only retrieve information. Advertise that fact to MCP clients;
     // authorization still comes from the live run token and the server allowlist.
     for tool in &mut v {
         tool["annotations"] = json!({
@@ -91,6 +98,69 @@ pub fn items_search(store: &Store, ws: &str, query: &str) -> Result<String, Stri
     } else {
         out.join("\n")
     })
+}
+
+fn session_label(s: &str) -> &str {
+    match s {
+        "running" => "运行中",
+        "starting" => "启动中",
+        "idle" => "空闲",
+        "error" => "出错",
+        "ended" => "已结束",
+        o => o,
+    }
+}
+
+/// `steve_sessions_list`: the workspace's sessions by status, then up to 40 of them, newest first
+/// (ended ones only with `all`).
+pub fn sessions_list(store: &Store, ws: &str, all: bool) -> Result<String, String> {
+    let list = store.sessions().list(Some(ws)).map_err(|e| e.to_string())?;
+    let mut counts: Vec<(String, usize)> = vec![];
+    for s in &list {
+        match counts.iter_mut().find(|(k, _)| *k == s.status) {
+            Some((_, n)) => *n += 1,
+            None => counts.push((s.status.clone(), 1)),
+        }
+    }
+    let busy = list
+        .iter()
+        .filter(|s| matches!(s.status.as_str(), "running" | "starting"))
+        .count();
+    let mut out = format!(
+        "共 {} 个会话，正在运行 {busy} 个（{}）。\n",
+        list.len(),
+        counts
+            .iter()
+            .map(|(k, n)| format!("{} {n}", session_label(k)))
+            .collect::<Vec<_>>()
+            .join("，")
+    );
+    let shown: Vec<_> = list
+        .iter()
+        .filter(|s| all || s.status != "ended")
+        .take(40)
+        .collect();
+    if shown.is_empty() {
+        out.push_str("没有未结束的会话。\n");
+    }
+    for s in shown {
+        out.push_str(&format!(
+            "{} · {} · {} · {} · bot {} · 事项 {} · {}{}\n",
+            s.id,
+            s.harness,
+            s.model.as_deref().unwrap_or("默认模型"),
+            session_label(&s.status),
+            s.bot_id.as_deref().unwrap_or("-"),
+            s.item_id.as_deref().unwrap_or("-"),
+            s.title,
+            if s.source.is_empty() || s.source == "steve" {
+                String::new()
+            } else {
+                format!(" · 来源 {}", s.source)
+            }
+        ));
+    }
+    Ok(out)
 }
 
 /// `steve_item_read`: one item of this workspace.
@@ -209,6 +279,12 @@ pub async fn handle(x: &Extra, run: ThreadRun, msg: Value, owner: String) -> Res
                 ITEM_READ => {
                     let (store, i) = (x.store.clone(), args["id"].as_str().unwrap_or("").to_string());
                     tokio::task::spawn_blocking(move || item_read(&store, &ws, &i))
+                        .await
+                        .unwrap_or_else(|e| Err(e.to_string()))
+                }
+                SESSIONS_LIST => {
+                    let (store, all) = (x.store.clone(), args["all"].as_bool().unwrap_or(false));
+                    tokio::task::spawn_blocking(move || sessions_list(&store, &ws, all))
                         .await
                         .unwrap_or_else(|e| Err(e.to_string()))
                 }

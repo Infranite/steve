@@ -1440,3 +1440,39 @@ async fn failed_research_tool_keeps_a_safe_diagnostic_in_reply_metadata() {
     assert_eq!(tool["error"], "permission_denied");
     assert_eq!(tool["args"], json!({"brief":"ST-23"}));
 }
+
+#[tokio::test]
+async fn research_reads_the_items_the_conversation_names_up_front() {
+    let k = Kit::new();
+    let item = k.item("run", "执行", None);
+    k.db()
+        .item_patch(&item, crate::patch![now: "正在改对话页样式"])
+        .unwrap();
+    let fr = FakeResearch::new(vec![Step::Text("在改样式。"), Step::Text("对。")]);
+    assert!(k.core.set_researcher(fr.clone()));
+    router(
+        &k,
+        |_| json!({"kind":"research","confidence":0.9,"signals":["lookup"],"title":"查询事项"}),
+    );
+    k.core
+        .say(WS, &format!("查一下 {} 的进展", item.to_lowercase()), &[])
+        .unwrap();
+    settle(&k, 2).await;
+    // a follow-up that names nothing still gets the item from the turn before
+    k.core.say(WS, "是的", &[]).unwrap();
+    settle(&k, 4).await;
+    let seen = fr.seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 2);
+    for r in &seen {
+        assert!(
+            r.context.contains("对话提到的事项（已读取）"),
+            "{}",
+            r.context
+        );
+        assert!(
+            r.context.contains(&item) && r.context.contains("正在改对话页样式"),
+            "{}",
+            r.context
+        );
+    }
+}

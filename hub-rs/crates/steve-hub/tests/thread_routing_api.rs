@@ -349,7 +349,8 @@ async fn research_runs_get_read_only_mcp() {
             "steve_knowledge_search",
             "steve_knowledge_read",
             "steve_items_search",
-            "steve_item_read"
+            "steve_item_read",
+            "steve_sessions_list"
         ]
     );
     for tool in v["result"]["tools"].as_array().unwrap() {
@@ -380,6 +381,10 @@ async fn research_runs_get_read_only_mcp() {
     );
     let (_, v) = rpc(json!({"jsonrpc": "2.0", "id": 6, "method": "tools/call", "params": {"name": "steve_item_read", "arguments": {"id": "ST-999"}}}), token).await;
     assert_eq!(v["result"]["isError"], true);
+    let (_, v) = rpc(json!({"jsonrpc": "2.0", "id": 8, "method": "tools/call", "params": {"name": "steve_sessions_list", "arguments": {}}}), token).await;
+    let t = v["result"]["content"][0]["text"].as_str().unwrap_or_default();
+    assert!(v["result"]["isError"].is_null(), "{v}");
+    assert!(t.starts_with("共 ") && t.contains("正在运行"), "{t}");
     /* the run ended: the token is dead */
     th.run_patch(
         &run.id,

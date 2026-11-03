@@ -279,7 +279,7 @@ mod tests {
         assert!(a.starts_with("exec --json --ephemeral --skip-git-repo-check -s read-only -C /w/proj -m gpt-6-luna -c web_search=\"disabled\" -c mcp_servers={} --disable hooks"), "{a}");
         assert!(a.contains("--disable unified_exec"));
         assert!(a.contains("-c mcp_servers.steve.url=\"http://127.0.0.1:1/mcp\""));
-        assert!(a.contains("mcp_servers.steve.enabled_tools=[\"steve_knowledge_search\",\"steve_knowledge_read\",\"steve_items_search\",\"steve_item_read\"]"));
+        assert!(a.contains("mcp_servers.steve.enabled_tools=[\"steve_knowledge_search\",\"steve_knowledge_read\",\"steve_items_search\",\"steve_item_read\",\"steve_sessions_list\"]"));
         assert!(
             a.ends_with("-c model_reasoning_effort=\"low\" -i /f/a.png -- Q"),
             "{a}"
@@ -354,7 +354,7 @@ mod tests {
             "none",
             "--tools=Read,Grep,Glob",
             "--disallowedTools=Bash,Edit,Write,MultiEdit,NotebookEdit,WebFetch,WebSearch,Task,Agent,KillShell,TodoWrite,PowerShell",
-            "--allowedTools=mcp__steve__steve_knowledge_search,mcp__steve__steve_knowledge_read,mcp__steve__steve_items_search,mcp__steve__steve_item_read",
+            "--allowedTools=mcp__steve__steve_knowledge_search,mcp__steve__steve_knowledge_read,mcp__steve__steve_items_search,mcp__steve__steve_item_read,mcp__steve__steve_sessions_list",
             "--settings=/s/research/tr_1/settings.json",
             "--strict-mcp-config",
             "--mcp-config=/s/research/tr_1/mcp.json",

@@ -776,13 +776,20 @@ impl Core {
         } else {
             format!("{guest_frame}\n\n{context}")
         };
+        let history = self.history_before(ws, &j.origin)?;
+        let named = mentioned_items(db, ws, &j.question, &history)?;
+        let context = if named.is_empty() {
+            context
+        } else {
+            format!("{context}\n\n{named}")
+        };
         let req = ResearchRequest {
             run: run.clone(),
             ws: ws.into(),
             mid: j.origin.clone(),
             user: j.user.clone(),
             question: j.question.clone(),
-            history: self.history_before(ws, &j.origin)?,
+            history,
             main: db.main_bot()?,
             context,
             project,
@@ -888,5 +895,92 @@ impl Core {
             tracing::error!("chat context of {id}: {e}");
         }
         Ok(())
+    }
+}
+
+/// The items the question or the last turns name (`ST-23`), at most 3, read up front for the research
+/// prompt: a follow-up like "是的" after "查一下 ST-23" names nothing itself, and the model skips the item
+/// tool often enough. The same reading `steve_item_read` gives, shorter.
+fn mentioned_items(
+    db: &crate::repo::Db,
+    ws: &str,
+    question: &str,
+    history: &[Said],
+) -> Result<String> {
+    let Some(w) = db.workspace(ws)? else {
+        return Ok(String::new());
+    };
+    let prefix = w.item_prefix.to_uppercase();
+    let texts =
+        std::iter::once(question).chain(history.iter().rev().take(6).map(|h| h.text.as_str()));
+    let mut ids: Vec<String> = vec![];
+    for t in texts {
+        for id in item_refs(t, &prefix) {
+            if !ids.contains(&id) && ids.len() < 3 {
+                ids.push(id);
+            }
+        }
+    }
+    let mut out = String::new();
+    for id in ids {
+        let Some(i) = db.item(&id)?.filter(|i| i.workspace_id == ws) else {
+            continue;
+        };
+        let goal = db.goal(&i.id).unwrap_or_default();
+        out.push_str(&format!(
+            "{} {}\n状态：{} · {}\n现在：{}\n目标：{}\n",
+            i.id,
+            i.title,
+            i.status,
+            i.stage,
+            i.now,
+            js_head(&goal, 300)
+        ));
+        if !i.plan.is_empty() {
+            let done = i.plan.iter().filter(|p| p.done).count();
+            out.push_str(&format!("计划：完成 {done}/{}\n", i.plan.len()));
+        }
+        let tl = db.timeline(&i.id)?;
+        for t in tl.iter().rev().take(5).rev() {
+            out.push_str(&format!("  {} {}\n", t.actor, js_head(&t.text, 160)));
+        }
+    }
+    Ok(if out.is_empty() {
+        out
+    } else {
+        format!("对话提到的事项（已读取）：\n{out}")
+    })
+}
+
+/// `PREFIX-<digits>` references in `t` (any case), normalised to upper case.
+fn item_refs(t: &str, prefix: &str) -> Vec<String> {
+    let up = t.to_uppercase();
+    let pat = format!("{prefix}-");
+    let mut out = vec![];
+    let mut from = 0;
+    while let Some(at) = up[from..].find(&pat) {
+        let start = from + at;
+        let before = up[..start].chars().next_back();
+        let digits: String = up[start + pat.len()..]
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        if !digits.is_empty() && !before.is_some_and(|c| c.is_ascii_alphanumeric()) {
+            out.push(format!("{prefix}-{digits}"));
+        }
+        from = start + pat.len();
+    }
+    out
+}
+
+#[cfg(test)]
+mod mention_tests {
+    #[test]
+    fn item_refs_are_found_in_any_case_and_not_inside_words() {
+        assert_eq!(
+            super::item_refs("查一下 st-23 和 ST-7，还有 XST-9", "ST"),
+            ["ST-23", "ST-7"]
+        );
+        assert!(super::item_refs("ST- 和 ST-x", "ST").is_empty());
     }
 }
