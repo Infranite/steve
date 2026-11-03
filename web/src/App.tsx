@@ -137,7 +137,7 @@ export default function App() {
     <TooltipProvider delay={400}>
       <SidebarProvider className="h-[100dvh] min-h-0! bg-background text-foreground [--sidebar-width:15rem]">
         <Sidebar route={a} />
-        <SidebarInset className="relative min-w-0 overflow-hidden" key={a + "/" + (b ?? "") + "/" + (c ?? "")}><YoloBanner /><HoldBanner /><div className="min-h-0 flex-1 anim-page">{view}</div></SidebarInset>
+        <SidebarInset className="relative min-w-0 overflow-hidden" key={(st.workspace?.id ?? "") + "/" + a + "/" + (b ?? "") + "/" + (c ?? "")}><YoloBanner /><HoldBanner /><div className="min-h-0 flex-1 anim-page">{view}</div></SidebarInset>
         <MobileTabs route={a} />
         {sh?.kind === "fork" && <ForkDialog k={sh.payload.k} at={sh.payload.at} />}
         {sh?.kind === "newItem" && <NewItemDialog project={sh.payload?.project} />}

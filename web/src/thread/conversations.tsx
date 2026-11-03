@@ -6,7 +6,7 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import { cn } from "cn"
 import { CheckIcon, LoaderIcon, MessageCircleIcon, UsersIcon, UserIcon, XIcon, ExternalLinkIcon, ListIcon } from "lucide-react"
 import { conversationsApi, type ConvBadge, type ConvMessage, type ConvRow, type Reaction } from "@/api/conversations"
-import { msgOf, useHubEvents, type Msg } from "@/store"
+import { st, msgOf, useHubEvents, type Msg } from "@/store"
 import { go } from "@/ui"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -54,19 +54,26 @@ export function ConvSwitcher({ current, badge }: { current?: string; badge?: Con
   const [rows, setRows] = useState<ConvRow[]>([])
   const [next, setNext] = useState<number | null>(null)
   const [loading, setLoading] = useState(false)
+  const [updates, setUpdates] = useState(false)
   const [error, setError] = useState("")
   const [busy, setBusy] = useState<string | null>(null)
   const request = useRef(0)
+  const alive = useRef(false)
+  const scope = st.workspace?.id
+  const active = () => alive.current && st.workspace?.id === scope
+  const latest = useRef({ load: (_offset = 0) => {}, open })
+  useEffect(() => { alive.current = true; return () => { alive.current = false; request.current++ } }, [])
   const load = useCallback((offset = 0) => {
     const id = ++request.current
-    setLoading(true); setError("")
+    setLoading(true); setError(""); setUpdates(false)
     conversationsApi.page(query, state, offset).then(r => {
-      if (id !== request.current) return
+      if (id !== request.current || !alive.current || st.workspace?.id !== scope) return
       setRows(old => offset ? [...old, ...r.conversations.filter(x => !old.some(y => y.space === x.space))] : r.conversations)
       setNext(r.has_more ? r.next_offset ?? offset + r.conversations.length : null)
-    }).catch(e => { if (id === request.current) setError(e.message || "对话载入失败") })
-      .finally(() => { if (id === request.current) setLoading(false) })
-  }, [query, state])
+    }).catch(e => { if (id === request.current && alive.current && st.workspace?.id === scope) setError(e.message || "对话载入失败") })
+      .finally(() => { if (id === request.current && alive.current && st.workspace?.id === scope) setLoading(false) })
+  }, [query, state, scope])
+  latest.current = { load, open }
   useEffect(() => {
     request.current++; setRows([]); setNext(null)
     if (!open) return
@@ -74,16 +81,18 @@ export function ConvSwitcher({ current, badge }: { current?: string; badge?: Con
     const timer = setTimeout(() => load(), 180)
     return () => { clearTimeout(timer); request.current++ }
   }, [open, load])
-  const refresh = useCallback(() => { if (open) load() }, [open, load])
+  const refresh = useCallback(() => { if (open) setUpdates(true) }, [open])
   useHubEvents(["message", "chan_message", "space"], refresh, 600)
   const change = async (space: string, closed: boolean) => {
+    const hash = location.hash
     setBusy(space); setError("")
     try {
       await conversationsApi.preference(space, closed)
-      if (closed && current === space) go("#/")
-      if (open) load()
-    } catch (e) { setError(e instanceof Error ? e.message : "保存失败，请重试") }
-    finally { setBusy(null) }
+      if (!active()) return
+      if (closed && current === space && location.hash === hash) go("#/")
+      if (latest.current.open) latest.current.load()
+    } catch (e) { if (active()) setError(e instanceof Error ? e.message : "保存失败，请重试") }
+    finally { if (active()) setBusy(null) }
   }
   return <>
     <nav aria-label="对话" className="mx-auto flex w-full max-w-[744px] shrink-0 items-center gap-2 px-4 pb-2 sm:px-8" data-conv-switcher>
@@ -101,14 +110,17 @@ export function ConvSwitcher({ current, badge }: { current?: string; badge?: Con
         <DialogDescription>关闭只收起你列表中的会话，消息和渠道继续保留。可在“已关闭”中恢复。</DialogDescription>
         <Input aria-label="搜索会话" placeholder="搜索名称、渠道或最近消息" value={query} onChange={e => setQuery(e.target.value)} />
         <div className="flex gap-2" aria-label="会话状态">{([['open','进行中'],['closed','已关闭'],['all','全部']] as const).map(([key,label]) => <Button key={key} size="sm" variant={state === key ? "secondary" : "ghost"} aria-pressed={state === key} onClick={() => setState(key)}>{label}</Button>)}</div>
+        {updates && <Button size="sm" variant="outline" onClick={() => load()}>会话有更新，刷新列表</Button>}
         {error && <div role="alert" className="flex items-center gap-2 text-destructive">{error}<Button size="sm" variant="outline" onClick={() => load()}>重试</Button></div>}
         <div className="min-h-24 overflow-y-auto overscroll-contain" style={{ maxHeight: "48dvh" }} aria-busy={loading}>
           {rows.map(r => <div key={r.space} className="flex min-w-0 items-center gap-2 border-b py-2" data-conversation-row={r.space}>
             <button type="button" className="min-w-0 flex-1 rounded-md p-2 text-left hover:bg-accent disabled:opacity-50" disabled={busy !== null} onClick={async () => {
+              const hash = location.hash
               if (r.closed) {
                 setBusy(r.space); setError("")
-                try { await conversationsApi.preference(r.space, false) } catch (e) { setError(e instanceof Error ? e.message : "恢复失败"); return } finally { setBusy(null) }
+                try { await conversationsApi.preference(r.space, false) } catch (e) { if (active()) setError(e instanceof Error ? e.message : "恢复失败"); return } finally { if (active()) setBusy(null) }
               }
+              if (!active() || !latest.current.open || location.hash !== hash) return
               go("#/c/" + r.space); setOpen(false)
             }} aria-label={(r.closed ? "恢复并打开：" : "打开：") + r.name}>
               <div className="truncate font-medium">{r.name}</div>
