@@ -227,7 +227,7 @@ async fn pushed_message_creates_space_identifies_sender_and_records_event() {
             json!(party),
             json!(h.con),
             json!("王小丽：昨晚的告警是怎么回事"),
-            json!("没有流程，只记录"),
+            json!(steve_channels::rules::LABEL_UNADDRESSED),
         ]
     );
 
@@ -385,6 +385,30 @@ async fn own_bot_messages_are_not_processed_other_bots_only_recorded() {
     assert_eq!(s, 200, "{v}");
     let mut m = FakeChannel::message("G1", "m3", "umonitor", "【监控】恢复");
     m.sender.is_bot = true;
+    assert_eq!(push(&h, m).await.next, Next::Handle);
+    // … but a bot answering what Steve said there is only recorded: an exchange with a bot ends after one
+    // round, so two bots never answer each other forever
+    h.env
+        .store()
+        .with_conn(|c| {
+            c.execute(
+                "INSERT INTO chan_messages (id, workspace_id, space_id, external_id, direction, text, status, created, sent)
+                 VALUES ('cm_steve1', 'default', ?, 'fm_steve1', 'out', '好的，已经恢复', 'sent', 1, 1)",
+                params![other.space_id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let mut m = FakeChannel::message("G1", "m4", "umonitor", "收到");
+    m.sender.is_bot = true;
+    m.reply_to = Some("fm_steve1".into());
+    assert_eq!(
+        push(&h, m).await.next,
+        Next::Record(steve_channels::inbound::LABEL_BOT_REPLY)
+    );
+    // a person answering Steve is handled as usual
+    let mut m = FakeChannel::message("G1", "m5", "ualice", "谢谢");
+    m.reply_to = Some("fm_steve1".into());
     assert_eq!(push(&h, m).await.next, Next::Handle);
 }
 
@@ -871,4 +895,20 @@ async fn spaces_of_a_personal_connection_are_private_to_its_owner() {
         .await
         .unwrap();
     assert_eq!(own.next, Next::Own);
+}
+
+/// A message says what kind of chat it came from (Feishu's chat_type on every event): that wins over
+/// what its space was stored as, so a private chat is never mistaken for a group by the gate.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_messages_own_chat_type_decides_a_private_chat() {
+    let h = setup();
+    let first = push(&h, FakeChannel::message("G1", "k1", "ualice", "hi")).await;
+    assert!(
+        !first.facts.as_ref().expect("facts").dm,
+        "a group by default"
+    );
+    let mut m = FakeChannel::message("G1", "k2", "ualice", "在吗");
+    m.space_kind = Some(steve_channels::SpaceKind::Dm);
+    let i = push(&h, m).await;
+    assert!(i.facts.as_ref().expect("facts").dm);
 }

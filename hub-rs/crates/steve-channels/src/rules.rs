@@ -503,9 +503,11 @@ pub fn holds(when: &When, f: &Facts) -> Option<bool> {
 /// `Response` label of a message the [`Gate`] does not admit.
 pub const LABEL_UNADDRESSED: &str = "没有 @ 也不是私聊，只记录";
 
-/// Which messages Steve acts on at all (reply, draft, create an item, hand off): the rest are only
-/// recorded. One gate for every account and space, ahead of flows and rules, so rules only choose how
-/// to answer an addressed message. Answering beyond @ and private chats is deliberately not offered yet
+/// Which messages Steve acts on at all (reply, draft, create an item, hand off, start a flow): the rest
+/// are only recorded. One gate for every account and space, ahead of flows and rules, so rules only choose
+/// how to answer an addressed message. Your own trigger word (`/bot …` on your account) addresses Steve
+/// too: it is handled before this gate as your explicit command. A flow already waiting for an answer in
+/// the conversation is still woken by the answer (it asked). Answering beyond @ and private chats is deliberately not offered yet
 /// (decided 2026-11-03); opening it later is a new variant here, not edits across the rules.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Gate {

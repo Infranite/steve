@@ -45,6 +45,9 @@ pub const SOURCE: &str = "im";
 pub const LABEL_OWN: &str = "自己发出的消息";
 /// `outcome_label` of a message from another bot (no `collab`).
 pub const LABEL_BOT: &str = "来自机器人，只记录";
+/// `outcome_label` of a bot's (or another identity of ours) reply to what Steve said in a `collab` space:
+/// a bot may ask Steve, Steve does not answer an answer to its own answer, so an exchange ends there.
+pub const LABEL_BOT_REPLY: &str = "机器人在回复 Steve 的消息，只记录";
 /// `outcome_label` of a message stored before through another connection.
 pub const LABEL_ELSEWHERE: &str = "已从另一个连接收到";
 /// `outcome_label` of Steve's own outbound message read back in.
@@ -407,8 +410,13 @@ impl Channels {
             "raw": msg.raw,
             "facts": rf.to_value(),
         });
+        // the gate holds for flows too: a message addressed to none of Steve's identities here starts no flow
+        // (a flow already waiting for an answer in this conversation is still woken: it asked)
+        let addressed = rules::Gate::default().admits(&rf)
+            || store.reader(|c| mentions_ours(c, ws, &inbound.message_id))?;
         inbound.facts = Some(rf);
         ev.record_only = match &inbound.next {
+            Next::Handle if !addressed => Some(rules::LABEL_UNADDRESSED.into()),
             Next::Handle => None,
             Next::Own => Some(LABEL_OWN.into()),
             Next::Record(l) => Some((*l).into()),
@@ -725,6 +733,8 @@ impl Channels {
             Next::Record(LABEL_QUIET)
         } else if (msg.sender.is_bot || sender_is_ours) && !set.collab {
             Next::Record(LABEL_BOT)
+        } else if (msg.sender.is_bot || sender_is_ours) && replies_to_steve(tx, &space.id, msg)? {
+            Next::Record(LABEL_BOT_REPLY)
         } else {
             Next::Handle
         };
@@ -797,7 +807,10 @@ fn rule_facts(
     msg: &InboundMessage,
 ) -> ChannelResult<Facts> {
     let space = spaces::get(c, &inbound.space_id)?.ok_or_else(|| ApiError::not_found("空间"))?;
-    let kind = SpaceKind::parse(&space.kind).unwrap_or(SpaceKind::Group);
+    // the message's own chat type (Feishu's chat_type on every event) wins over what the space was stored as
+    let kind = msg
+        .space_kind
+        .unwrap_or_else(|| SpaceKind::parse(&space.kind).unwrap_or(SpaceKind::Group));
     let exts: Vec<&str> = [msg.reply_to.as_deref(), msg.root_id.as_deref()]
         .into_iter()
         .flatten()
@@ -1067,6 +1080,44 @@ impl Channels {
         tracing::debug!(space = space.id, act = r.act.code(), rule = ?r.rule, "channel rules");
         Ok(r)
     }
+}
+
+/// Is `msg` a reply to (or in a thread started by) a message Steve sent in `space`?
+fn replies_to_steve(
+    c: &rusqlite::Connection,
+    space: &str,
+    msg: &InboundMessage,
+) -> ChannelResult<bool> {
+    let exts: Vec<&str> = [msg.reply_to.as_deref(), msg.root_id.as_deref()]
+        .into_iter()
+        .flatten()
+        .filter(|e| *e != msg.external_id)
+        .collect();
+    Ok(!exts.is_empty() && messages::is_ours_out(c, space, &exts)?)
+}
+
+/// Does inbound message `id` @-mention any account a connection of workspace `ws` speaks with?
+fn mentions_ours(c: &rusqlite::Connection, ws: &str, id: &str) -> ChannelResult<bool> {
+    let raw: String = c.query_row(
+        "SELECT mentions FROM chan_messages WHERE id = ?",
+        [id],
+        |r| r.get(0),
+    )?;
+    let v: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
+    let Some(ms) = v.as_array() else {
+        return Ok(false);
+    };
+    let mut st = c.prepare_cached(
+        "SELECT EXISTS(SELECT 1 FROM connections WHERE workspace_id = ? AND account_id = ?)",
+    )?;
+    for m in ms {
+        if let Some(a) = m["account_id"].as_str()
+            && st.query_row(rusqlite::params![ws, a], |r| r.get::<_, bool>(0))?
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Does inbound message `id` @-mention `account`?

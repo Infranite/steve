@@ -980,6 +980,30 @@ async fn to_flow_hands_messages_to_the_flow_and_back_restores_the_rules() {
     );
     let payload: Value = serde_json::from_str(ev[0][0].as_str().expect("p")).expect("payload");
     assert_eq!(payload["facts"]["mentioned"], json!(true));
+    // a message that does not address the account starts no run of the space's flow
+    let n = calls(&h);
+    let i = push(&h, &c, msg("C_OPS", "f2b", "uhan", "大家早", false)).await;
+    unaddressed(&h, &i, n);
+    assert_eq!(
+        count(
+            &h,
+            "SELECT count(*) FROM flow_runs r JOIN chan_messages m ON m.event_id = r.event_id WHERE m.id = ?",
+            &[&i.message_id]
+        ),
+        0,
+        "no flow run for an unaddressed message"
+    );
+    assert_eq!(
+        rows(
+            &h,
+            "SELECT e.outcome, e.outcome_label FROM ext_events e JOIN chan_messages m ON m.event_id = e.id WHERE m.id = ?",
+            &[&i.message_id]
+        )[0],
+        vec![
+            json!("recorded"),
+            json!(steve_channels::rules::LABEL_UNADDRESSED)
+        ]
+    );
 
     // back to the rules: the flow is disabled (kept), the rules decide again
     let (s, v) = call(
@@ -1194,6 +1218,8 @@ async fn intent_refines_an_addressed_message() {
     )
     .await;
     assert_eq!(s, 200, "{v}");
+    // a later message of the space, not addressed: still context for the judgement
+    push(&h, &c, msg("C_OPS", "i0b", "uwang", "今晚部署吗", false)).await;
     h.env.gateway.reply("{\"match\": true}");
     let n = calls(&h);
     let i = push(
@@ -1219,10 +1245,10 @@ async fn intent_refines_an_addressed_message() {
         prompt.contains("条件：需要动手操作") && prompt.contains("db-2 磁盘满了"),
         "{prompt}"
     );
-    assert!(
-        prompt.contains("昨晚备份是不是又挂了"),
-        "earlier messages as context: {prompt}"
-    );
+    // the context: earlier messages of the space, oldest first
+    let a = prompt.find("昨晚备份是不是又挂了").expect("context 1");
+    let b = prompt.find("今晚部署吗").expect("context 2");
+    assert!(a < b, "{prompt}");
     // the model says no, or fails: the next rule
     h.env.gateway.reply("{\"match\": false}");
     let i = push(
