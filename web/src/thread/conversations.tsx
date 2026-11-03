@@ -109,7 +109,7 @@ export function ConvSwitcher({ current, badge }: { current?: string; badge?: Con
         <DialogTitle>会话列表</DialogTitle>
         <DialogDescription>关闭只收起你列表中的会话，消息和渠道继续保留。可在“已关闭”中恢复。</DialogDescription>
         <Input aria-label="搜索会话" placeholder="搜索名称、渠道或最近消息" value={query} onChange={e => setQuery(e.target.value)} />
-        <div className="flex gap-2" aria-label="会话状态">{([['open','进行中'],['closed','已关闭'],['all','全部']] as const).map(([key,label]) => <Button key={key} size="sm" variant={state === key ? "secondary" : "ghost"} aria-pressed={state === key} onClick={() => setState(key)}>{label}</Button>)}</div>
+        <div className="flex gap-2" aria-label="会话状态">{([['open','未关闭'],['closed','已关闭'],['all','全部']] as const).map(([key,label]) => <Button key={key} size="sm" variant={state === key ? "secondary" : "ghost"} aria-pressed={state === key} onClick={() => setState(key)}>{label}</Button>)}</div>
         {updates && <Button size="sm" variant="outline" onClick={() => load()}>会话有更新，刷新列表</Button>}
         {error && <div role="alert" className="flex items-center gap-2 text-destructive">{error}<Button size="sm" variant="outline" onClick={() => load()}>重试</Button></div>}
         <div className="min-h-24 overflow-y-auto overscroll-contain" style={{ maxHeight: "48dvh" }} aria-busy={loading}>

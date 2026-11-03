@@ -58,7 +58,7 @@ try {
     assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth))
     // A write started under the old filter must refresh the current filter.
     await page.getByRole("button", { name: "会话列表", exact: true }).click()
-    await page.getByRole("button", { name: "进行中", exact: true }).click()
+    await page.getByRole("button", { name: "未关闭", exact: true }).click()
     await page.getByRole("textbox", { name: "搜索会话" }).fill("项目群 0")
     await page.getByRole("button", { name: "关闭：项目群 0", exact: true }).waitFor()
     delayed = true
