@@ -16,58 +16,54 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt};
 use tokio::sync::{mpsc, watch};
 use tokio::time::Instant;
 
-/// Hard ceiling of a run's wall time, whatever the setting says.
-pub const HARD_TIME_CAP: Duration = Duration::from_secs(240);
-/// Hard ceiling of a run's tool calls, whatever the setting says.
-pub const HARD_TOOLS_CAP: u32 = 60;
+/// A run whose harness says nothing (no text, no tool call, no event at all) for this long is stuck and is
+/// ended. This is not a limit on how long a conversation may take: a run that keeps working never ends by
+/// time. Setting `thread.research.idle_seconds` overrides it.
+pub const DEFAULT_IDLE: Duration = Duration::from_secs(600);
 /// Default research models (`STEVE_MODELS_RESEARCH`), non-kiro.
 pub const DEFAULT_MODELS: &str = "claude-sonnet-5-5,claude-opus-5-5";
 
-/// Limits of one run (setting `thread.research`). Values above the hard caps are cut to them.
+/// Limits of one run (setting `thread.research`). By default a run is bounded by nothing but its own end,
+/// the user's stop and the stall detector; the wall time, turns and tool calls are only limited when the
+/// setting names a limit (decided by the user on 2026-11-04: conversations must not be cut off).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Budget {
-    /// Wall time; at the limit the process is killed.
-    pub hard: Duration,
-    /// After this the thread shows "还在读…" ([`ResearchEvent::StillReading`]).
+    /// Wall time; at the limit the process is killed. `None`: none.
+    pub hard: Option<Duration>,
+    /// After this the thread shows "还在读…" ([`ResearchEvent::StillReading`]); only a notice.
     pub soft: Duration,
-    /// Model turns (`--max-turns`, and counted by the Hub too).
-    pub max_turns: u32,
-    /// Tool calls counted by the Hub.
-    pub max_tools: u32,
+    /// Model turns (`--max-turns`, and counted by the Hub too). `None`: none.
+    pub max_turns: Option<u32>,
+    /// Tool calls counted by the Hub. `None`: none.
+    pub max_tools: Option<u32>,
+    /// No output from the harness for this long: stuck, ended.
+    pub idle: Duration,
 }
 
 impl Default for Budget {
     fn default() -> Self {
         Budget {
-            hard: HARD_TIME_CAP,
+            hard: None,
             soft: Duration::from_secs(90),
-            max_turns: 24,
-            max_tools: 40,
+            max_turns: None,
+            max_tools: None,
+            idle: DEFAULT_IDLE,
         }
     }
 }
 
 impl Budget {
-    /// From the `thread.research` setting (`{"seconds","soft_seconds","turns","tools"}`), defaults for the rest.
+    /// From the `thread.research` setting (`{"seconds","soft_seconds","turns","tools","idle_seconds"}`),
+    /// defaults for the rest.
     pub fn from_setting(v: &Value) -> Self {
         let d = Budget::default();
-        let n = |k: &str| v.get(k).and_then(Value::as_u64);
+        let n = |k: &str| v.get(k).and_then(Value::as_u64).filter(|x| *x > 0);
         Budget {
-            hard: n("seconds").map_or(d.hard, Duration::from_secs),
+            hard: n("seconds").map(Duration::from_secs).or(d.hard),
             soft: n("soft_seconds").map_or(d.soft, Duration::from_secs),
-            max_turns: n("turns").map_or(d.max_turns, |x| x as u32),
-            max_tools: n("tools").map_or(d.max_tools, |x| x as u32),
-        }
-        .clamped()
-    }
-
-    /// Cut to the hard caps.
-    pub fn clamped(self) -> Self {
-        Budget {
-            hard: self.hard.min(HARD_TIME_CAP),
-            soft: self.soft.min(HARD_TIME_CAP),
-            max_turns: self.max_turns.max(1),
-            max_tools: self.max_tools.min(HARD_TOOLS_CAP),
+            max_turns: n("turns").map(|x| x as u32).or(d.max_turns),
+            max_tools: n("tools").map(|x| x as u32).or(d.max_tools),
+            idle: n("idle_seconds").map_or(d.idle, Duration::from_secs),
         }
     }
 }
@@ -247,6 +243,8 @@ pub enum BudgetHit {
     Time,
     Turns,
     Tools,
+    /// The harness said nothing for [`Budget::idle`]: stuck.
+    Idle,
 }
 
 /// How a run ended (`thread_runs.status`).
@@ -585,7 +583,8 @@ struct Ctx<'a> {
     budget: Budget,
     scope: Scope,
     tx: mpsc::UnboundedSender<ResearchEvent>,
-    deadline: Instant,
+    /// The wall-time limit, when the setting names one.
+    deadline: Option<Instant>,
     soft: Instant,
 }
 
@@ -598,7 +597,7 @@ async fn execute(
     processes: Arc<crate::processes::Processes>,
 ) -> ResearchOutcome {
     let t0 = Instant::now();
-    let budget = req.budget.unwrap_or(cfg.budget).clamped();
+    let budget = req.budget.unwrap_or(cfg.budget);
     let run_dir = cfg.scratch.join(&run_id);
     if let Err(e) = tokio::fs::create_dir_all(run_dir.join("tmp")).await {
         return failed_outcome(run_id, format!("research dir: {e}"));
@@ -674,7 +673,7 @@ async fn execute(
         budget,
         scope,
         tx,
-        deadline: t0 + budget.hard,
+        deadline: budget.hard.map(|h| t0 + h),
         soft: t0 + budget.soft,
     };
     // (model, --resume session, prompt) in the order to try.
@@ -885,6 +884,7 @@ async fn attempt(
     let _ = ctx.tx.send(ResearchEvent::Started { model });
     let mut lines = tokio::io::BufReader::new(stdout).lines();
     let mut stop_open = true;
+    let mut quiet_until = Instant::now() + ctx.budget.idle;
     loop {
         tokio::select! {
             biased;
@@ -895,8 +895,14 @@ async fn attempt(
                     Err(_) => stop_open = false,
                 }
             }
-            _ = tokio::time::sleep_until(ctx.deadline) => {
+            // without a wall-time limit the branch is off (its instant is then never awaited)
+            _ = tokio::time::sleep_until(ctx.deadline.unwrap_or(quiet_until)), if ctx.deadline.is_some() => {
                 st.kill = Some(Kill::Budget(BudgetHit::Time));
+                break;
+            }
+            _ = tokio::time::sleep_until(quiet_until) => {
+                tracing::warn!(idle = ?ctx.budget.idle, "research: the harness said nothing for too long");
+                st.kill = Some(Kill::Budget(BudgetHit::Idle));
                 break;
             }
             _ = tokio::time::sleep_until(ctx.soft), if !*soft_sent => {
@@ -905,6 +911,7 @@ async fn attempt(
             }
             l = lines.next_line() => match l {
                 Ok(Some(l)) => {
+                    quiet_until = Instant::now() + ctx.budget.idle;
                     for item in parse(&l) {
                         if let Some(k) = on_item(ctx, st, item) {
                             st.kill = Some(k);
@@ -922,7 +929,12 @@ async fn attempt(
         kill_tree(&mut child, pid).await;
         return Ok(());
     }
-    let status = match tokio::time::timeout_at(ctx.deadline, child.wait()).await {
+    // its output is closed: it is ending; a process that does not is as stuck as a silent one
+    let wait_until = match ctx.deadline {
+        Some(d) => d.min(Instant::now() + ctx.budget.idle),
+        None => Instant::now() + ctx.budget.idle,
+    };
+    let status = match tokio::time::timeout_at(wait_until, child.wait()).await {
         Ok(Ok(s)) => s,
         Ok(Err(e)) => return Err(e.to_string()),
         Err(_) => {
@@ -983,7 +995,11 @@ fn on_item(ctx: &Ctx<'_>, st: &mut State, item: StreamItem) -> Option<Kill> {
                 st.text.clear();
             }
             st.turns.insert(id);
-            if st.turns.len() as u32 > ctx.budget.max_turns {
+            if ctx
+                .budget
+                .max_turns
+                .is_some_and(|m| st.turns.len() as u32 > m)
+            {
                 return Some(Kill::Budget(BudgetHit::Turns));
             }
         }
@@ -1022,7 +1038,11 @@ fn on_item(ctx: &Ctx<'_>, st: &mut State, item: StreamItem) -> Option<Kill> {
                 });
                 return Some(Kill::Violation(v));
             }
-            if st.tools.len() as u32 >= ctx.budget.max_tools {
+            if ctx
+                .budget
+                .max_tools
+                .is_some_and(|m| st.tools.len() as u32 >= m)
+            {
                 return Some(Kill::Budget(BudgetHit::Tools));
             }
             if name == "Read"
@@ -1159,13 +1179,18 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn budget_setting_and_caps() {
-        let b = Budget::from_setting(&json!({"seconds": 999, "tools": 500, "turns": 10}));
-        assert_eq!(b.hard, HARD_TIME_CAP);
-        assert_eq!(b.max_tools, HARD_TOOLS_CAP);
-        assert_eq!(b.max_turns, 10);
-        assert_eq!(Budget::default().max_tools, 40);
-        assert_eq!(Budget::default().max_turns, 24);
-        assert_eq!(Budget::from_setting(&json!({})), Budget::default());
+    fn no_limit_unless_the_setting_names_one() {
+        // by default a run is not cut off by time, turns or tool calls; only the stall detector is on
+        let d = Budget::default();
+        assert_eq!((d.hard, d.max_turns, d.max_tools), (None, None, None));
+        assert_eq!(d.idle, DEFAULT_IDLE);
+        assert_eq!(Budget::from_setting(&json!({})), d);
+        // a limit in the setting is honoured as given, there is no ceiling above it
+        let b = Budget::from_setting(
+            &json!({"seconds": 999, "tools": 500, "turns": 10, "idle_seconds": 30}),
+        );
+        assert_eq!(b.hard, Some(Duration::from_secs(999)));
+        assert_eq!((b.max_tools, b.max_turns), (Some(500), Some(10)));
+        assert_eq!(b.idle, Duration::from_secs(30));
     }
 }

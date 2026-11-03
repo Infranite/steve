@@ -245,7 +245,7 @@ async fn time_budget_keeps_partial_and_offers() {
     );
     let exe = harness(&e, &body);
     let mut c = cfg(&e, &exe);
-    c.budget.hard = Duration::from_millis(800);
+    c.budget.hard = Some(Duration::from_millis(800));
     c.budget.soft = Duration::from_millis(300);
     let r = Researcher::new(c);
     let t0 = Instant::now();
@@ -262,6 +262,74 @@ async fn time_budget_keeps_partial_and_offers() {
     assert!(out.offer.unwrap().title.starts_with("继续深入："));
 }
 
+/// No limit by default: a run that keeps working goes on past any window (here several times the stall
+/// window) and ends with its answer.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_run_that_keeps_working_is_never_cut_off() {
+    let e = env();
+    let mut body = emit(&[init(), start("m1")]);
+    for i in 0..6 {
+        body.push_str(&format!(
+            "\nsleep 0.3\n{}",
+            emit(&[text(&format!("第{i}段。"))])
+        ));
+    }
+    body.push_str(&format!(
+        "\n{}",
+        emit(&[result("第0段。第1段。第2段。第3段。第4段。第5段。")])
+    ));
+    let exe = harness(&e, &body);
+    let mut c = cfg(&e, &exe);
+    assert_eq!(
+        (c.budget.hard, c.budget.max_turns, c.budget.max_tools),
+        (None, None, None)
+    );
+    c.budget.idle = Duration::from_millis(700);
+    let t0 = Instant::now();
+    let out = Researcher::new(c)
+        .start(req(&e, "ws"))
+        .unwrap()
+        .finish()
+        .await;
+    assert!(
+        t0.elapsed() > Duration::from_millis(1500),
+        "longer than the stall window"
+    );
+    assert_eq!(out.status, RunStatus::Done, "{:?}", out.answer);
+    assert!(
+        out.answer.starts_with("第0段。") && out.answer.contains("第5段。"),
+        "{}",
+        out.answer
+    );
+}
+
+/// A harness that says nothing at all for the stall window is stuck: ended, what it wrote is kept.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_silent_harness_is_ended_as_stuck() {
+    let e = env();
+    let exe = harness(
+        &e,
+        &format!(
+            "{}\nsleep 30",
+            emit(&[init(), start("m1"), text("写到一半")])
+        ),
+    );
+    let mut c = cfg(&e, &exe);
+    c.budget.idle = Duration::from_secs(2);
+    let t0 = Instant::now();
+    let out = Researcher::new(c)
+        .start(req(&e, "ws"))
+        .unwrap()
+        .finish()
+        .await;
+    assert!(
+        t0.elapsed() < Duration::from_secs(15),
+        "ended long before the 30 s sleep"
+    );
+    assert_eq!(out.status, RunStatus::Budget(BudgetHit::Idle));
+    assert!(out.answer.starts_with("写到一半"), "{}", out.answer);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn tool_budget_stops_at_the_limit() {
     let e = env();
@@ -276,7 +344,7 @@ async fn tool_budget_stops_at_the_limit() {
     }
     let exe = harness(&e, &format!("{}\nsleep 30", emit(&lines)));
     let mut c = cfg(&e, &exe);
-    c.budget.max_tools = 4;
+    c.budget.max_tools = Some(4);
     let out = Researcher::new(c)
         .start(req(&e, "ws"))
         .unwrap()
@@ -294,7 +362,7 @@ async fn turn_budget_stops_at_the_limit() {
     let lines = vec![init(), start("m1"), text("一"), start("m2"), start("m3")];
     let exe = harness(&e, &format!("{}\nsleep 30", emit(&lines)));
     let mut c = cfg(&e, &exe);
-    c.budget.max_turns = 2;
+    c.budget.max_turns = Some(2);
     let out = Researcher::new(c)
         .start(req(&e, "ws"))
         .unwrap()

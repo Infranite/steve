@@ -21,7 +21,7 @@ fn claude() -> PathBuf {
 fn base_cfg(root: &Path) -> ResearchConfig {
     let mut c = ResearchConfig::new(claude(), root.join("scratch"));
     c.models = vec![MODEL.into()];
-    c.budget.hard = Duration::from_secs(180);
+    c.budget.hard = Some(Duration::from_secs(180));
     c
 }
 
@@ -301,7 +301,7 @@ async fn real_research_sees_attachments() {
     let before = snapshot(&proj);
     let mut c = ResearchConfig::new(claude(), home.join(".steve/scratch/research"));
     c.models = vec![MODEL.into()];
-    c.budget.hard = Duration::from_secs(180);
+    c.budget.hard = Some(Duration::from_secs(180));
     c.home = home.clone();
     c.files_root = root.join("files");
     let mut q = ResearchRequest::new(

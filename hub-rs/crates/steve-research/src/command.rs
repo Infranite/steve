@@ -24,7 +24,8 @@ pub struct CommandPlan<'a> {
     /// The prompt (with images) goes to stdin as one stream-json user message instead of `-p <prompt>`.
     pub stdin_input: bool,
     pub model: &'a str,
-    pub max_turns: u32,
+    /// `--max-turns`, only when a limit is set.
+    pub max_turns: Option<u32>,
     pub cwd: &'a Path,
     pub add_dirs: &'a [PathBuf],
     pub run_dir: &'a Path,
@@ -88,8 +89,11 @@ pub fn invocation(p: &CommandPlan<'_>) -> Invocation {
         "--include-partial-messages".into(),
         "--model".into(),
         p.model.into(),
-        "--max-turns".into(),
-        p.max_turns.to_string(),
+    ]);
+    if let Some(n) = p.max_turns {
+        args.extend(["--max-turns".into(), n.to_string()]);
+    }
+    args.extend([
         // user settings carry the gateway login; project/local ones (an untrusted repo's hooks or allow
         // rules) are not loaded.
         "--setting-sources".into(),
@@ -316,7 +320,7 @@ mod tests {
             prompt: "Q",
             stdin_input: false,
             model: "claude-sonnet-5-5",
-            max_turns: 24,
+            max_turns: Some(24),
             cwd: Path::new("/w/proj"),
             add_dirs: &dirs,
             run_dir: Path::new("/s/research/tr_1"),
@@ -382,6 +386,12 @@ mod tests {
         );
         assert!(bare.env.is_empty());
         assert!(!bare.args.iter().any(|a| a == "--effort"));
+        // no turn limit set: no --max-turns at all
+        let open = invocation(&CommandPlan {
+            max_turns: None,
+            ..plan
+        });
+        assert!(!open.args.iter().any(|a| a == "--max-turns"));
 
         let piped = invocation(&CommandPlan {
             stdin_input: true,
