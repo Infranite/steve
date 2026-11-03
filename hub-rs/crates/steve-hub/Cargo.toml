@@ -44,6 +44,8 @@ thiserror = "=2.0.21"
 tokio = { version = "=1.54.1", features = ["rt-multi-thread", "macros", "process", "signal", "time", "fs", "sync", "io-util", "net"] }
 tokio-stream = { version = "=0.1.19", features = ["sync"] }
 tower = { version = "=0.5.3", features = ["util"] }
+# gzip for the web assets and JSON answers (SSE is never compressed: its default predicate excludes event streams)
+tower-http = { version = "=0.6.11", features = ["compression-gzip"] }
 tracing = "=0.1.44"
 tracing-subscriber = { version = "=0.3.23", features = ["env-filter", "fmt"] }
 unicode-normalization = "=0.1.26"

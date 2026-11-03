@@ -1,5 +1,5 @@
 //! You: the self poller (F8, feishu-lark-cli.md §2.3). Feishu pushes nothing a user receives, so the
-//! `feishu_user` connection reads your chats with your user token about once a minute and feeds
+//! `feishu_user` connection reads your chats with your user token every 20 s and feeds
 //! what is new into C1's inbound pipeline with `via=poll`.
 //!
 //! One round:
@@ -15,8 +15,8 @@
 //! Cursors (`chan_cursors`, migration 011) hold the largest `create_time` read and the ids at
 //! exactly that millisecond (`start_time` is in seconds, so a second is read again).
 //!
-//! Pace ([`SelfPoller::next_delay`]): `self_poll.interval` (30–300 s, default 60); 5 minutes in
-//! the workspace's quiet hours (setting `quiet`, default “23:00 – 08:00”); 15 s for 5 minutes after
+//! Pace ([`SelfPoller::next_delay`]): `self_poll.interval` (10–300 s, default 20); 2 minutes in
+//! the workspace's quiet hours (setting `quiet`, default “23:00 – 08:00”); 10 s for 5 minutes after
 //! a round that read a new private message from someone (this wins over quiet hours: someone is
 //! talking to you right now). A rate-limited request ends the round: the wait is the
 //! `x-ogw-ratelimit-reset` header's (at least one interval) and the chats not read yet go first
@@ -42,15 +42,17 @@ use crate::inbound::Next;
 use crate::service::MessageSink;
 use crate::{ChannelResult, Channels};
 
-/// `InboundMessage.via` of polled messages (the signals page shows “轮询，约 1 分钟延迟”).
+/// `InboundMessage.via` of polled messages.
 pub const VIA: &str = "poll";
-pub const DEFAULT_INTERVAL: Duration = Duration::from_secs(60);
-pub const MIN_INTERVAL: Duration = Duration::from_secs(30);
+/// What you see in Feishu should show up here within seconds, not a minute: a round is one chat list plus
+/// ≤ 10 chats and ≤ 5 threads, so 20 s is ~50 requests a minute (10 s in a burst ~100), well inside the quota.
+pub const DEFAULT_INTERVAL: Duration = Duration::from_secs(20);
+pub const MIN_INTERVAL: Duration = Duration::from_secs(10);
 pub const MAX_INTERVAL: Duration = Duration::from_secs(300);
 /// The pace in quiet hours.
-pub const QUIET_INTERVAL: Duration = Duration::from_secs(300);
+pub const QUIET_INTERVAL: Duration = Duration::from_secs(120);
 /// The pace after a new private message …
-pub const BURST_INTERVAL: Duration = Duration::from_secs(15);
+pub const BURST_INTERVAL: Duration = Duration::from_secs(10);
 /// … for this long.
 pub const BURST_FOR_MS: i64 = 5 * 60_000;
 pub const DEFAULT_TOP_N: usize = 10;
@@ -102,7 +104,7 @@ impl Default for PollSettings {
 }
 
 impl PollSettings {
-    /// Reads and clamps (interval 30–300 s, top_n 1–20).
+    /// Reads and clamps (interval 10–300 s, top_n 1–20).
     pub fn from_config(config: &Value) -> Self {
         let p = &config["self_poll"];
         let interval = p["interval"]
@@ -800,17 +802,39 @@ fn facts(
     Ok((enabled, ids))
 }
 
-/// Chats a running bot connection has an active space for: its long connection covers them.
+/// Chats a bot connection's long connection really covers: an active space of a healthy (`ok`) bot whose
+/// last permission check found `im:message.group_msg` granted. Without that scope a bot receives only the
+/// messages that @ it, so a group it merely sits in is still read here (what the bot did store is skipped
+/// message by message, [`bot_has`]); a bot in `error` may be offline. Unknown counts as not covered.
 fn bot_spaces(c: &rusqlite::Connection, ws: &str) -> ChannelResult<HashSet<String>> {
     let mut st = c.prepare(
-        "SELECT s.external_id FROM spaces s JOIN space_identities i ON i.space_id = s.id AND i.left_at IS NULL
+        "SELECT s.external_id, c.config FROM spaces s JOIN space_identities i ON i.space_id = s.id AND i.left_at IS NULL
            JOIN connections c ON c.id = i.connection_id
-          WHERE s.workspace_id = ? AND c.adapter = ? AND c.status IN ('ok', 'error') AND s.status = 'active'",
+          WHERE s.workspace_id = ? AND c.adapter = ? AND c.status = 'ok' AND s.status = 'active'",
     )?;
     let rows = st
-        .query_map(params![ws, APP_ADAPTER], |r| r.get::<_, String>(0))?
-        .collect::<rusqlite::Result<HashSet<_>>>()?;
-    Ok(rows)
+        .query_map(params![ws, APP_ADAPTER], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows
+        .into_iter()
+        .filter(|(_, config)| all_group_messages(config))
+        .map(|(chat, _)| chat)
+        .collect())
+}
+
+/// The bot's recorded permission check says it receives every group message (`im:message.group_msg`).
+fn all_group_messages(config: &str) -> bool {
+    serde_json::from_str::<Value>(config)
+        .ok()
+        .and_then(|v| v.get("permissions").and_then(Value::as_array).cloned())
+        .is_some_and(|ps| {
+            ps.iter().any(|p| {
+                p.get("scope").and_then(Value::as_str) == Some("im:message.group_msg")
+                    && p.get("status").and_then(Value::as_str) == Some("granted")
+            })
+        })
 }
 
 /// The long connection already stored message `ext` of chat `chat`.

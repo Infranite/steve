@@ -540,6 +540,71 @@ async fn the_long_connections_part_is_not_processed_twice() {
     );
 }
 
+/// A bot without `im:message.group_msg` only hears the messages that @ it: sitting in a group does not
+/// cover it, so the group is still read for the rest, and what the bot stored is not taken twice.
+#[tokio::test]
+async fn a_group_the_bot_only_hears_mentions_in_is_still_read() {
+    let h = setup().await;
+    h.env
+        .modules
+        .store
+        .with_conn(|c| {
+            let n = c.execute(
+                "UPDATE connections SET config = json_set(config, '$.permissions', json('[{\"scope\":\"im:message.group_msg\",\"status\":\"missing\"}]')) WHERE id = ?",
+                [&h.bot_con],
+            )?;
+            assert_eq!(n, 1);
+            Ok(())
+        })
+        .unwrap();
+    let mut p = poller(&h);
+    p.round().await;
+    // someone @-mentions the bot: the long connection gets that one
+    bot_received(
+        &h,
+        ids::GROUP_CHAT,
+        SpaceKind::Group,
+        "om_f8at",
+        ids::ALICE.open_id,
+    )
+    .await;
+    add(
+        &h,
+        "om_f8at",
+        ids::GROUP_CHAT,
+        ids::ALICE.open_id,
+        "@bot 看看",
+        2,
+        None,
+        None,
+    );
+    // and writes on without a mention: only the poller can see it
+    add(
+        &h,
+        "om_f8plain",
+        ids::GROUP_CHAT,
+        ids::ALICE.open_id,
+        "顺便说一下",
+        3,
+        None,
+        None,
+    );
+    let r = p.round().await;
+    assert_eq!(r.skipped_bot, 0, "{r:?}");
+    assert_eq!((r.by_bot, r.new_messages), (1, 1), "{r:?}");
+    for id in ["om_f8at", "om_f8plain"] {
+        assert_eq!(
+            count(
+                &h,
+                "SELECT count(*) FROM chan_messages WHERE external_id = ?",
+                id
+            ),
+            1,
+            "{id}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn a_rate_limit_ends_the_round_and_carries_the_rest_over() {
     let h = setup().await;

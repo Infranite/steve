@@ -215,6 +215,61 @@ pub fn app(
         })
         .layer(middleware::from_fn_with_state(mcp, mcp_gate))
         .layer(middleware::from_fn_with_state(maintenance_state, maintenance_gate))
+        .layer(compression())
+        .layer(middleware::from_fn(slow_requests))
+}
+
+/// A request slower than this (time to the response head) is logged with its route and status.
+const SLOW_MS: u128 = 300;
+
+/// Logs API calls that answer slowly, so "Steve feels slow" can be traced to a route without a profiler.
+/// Streams count until their head is sent; assets are not timed.
+async fn slow_requests(req: Request, next: Next) -> Response {
+    let path = req.uri().path().to_string();
+    if !path.starts_with("/api/") && !path.starts_with("/auth/") {
+        return next.run(req).await;
+    }
+    let method = req.method().clone();
+    let t0 = std::time::Instant::now();
+    let res = next.run(req).await;
+    let ms = t0.elapsed().as_millis();
+    if ms >= SLOW_MS {
+        tracing::warn!(%method, path = %path, status = res.status().as_u16(), ms, "slow request");
+    }
+    res
+}
+
+/// gzip for what compresses well and is read whole: the web build (scripts, styles, html, svg, wasm) and JSON
+/// answers above 1 KiB. Event streams, media and file downloads are left alone (opt-in by content type), so SSE
+/// stays unbuffered and ranges keep working. The bundle goes from ~1.8 MB to ~0.56 MB on the wire.
+fn compression()
+-> tower_http::compression::CompressionLayer<impl tower_http::compression::Predicate> {
+    use tower_http::compression::predicate::{Predicate, SizeAbove};
+    fn text(
+        _: axum::http::StatusCode,
+        _: axum::http::Version,
+        h: &axum::http::HeaderMap,
+        _: &axum::http::Extensions,
+    ) -> bool {
+        let ct = h
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        matches!(
+            ct.split(';').next().unwrap_or("").trim(),
+            "application/json"
+                | "text/html"
+                | "text/css"
+                | "text/javascript"
+                | "application/javascript"
+                | "image/svg+xml"
+                | "application/wasm"
+                | "application/manifest+json"
+        )
+    }
+    tower_http::compression::CompressionLayer::new()
+        .gzip(true)
+        .compress_when(SizeAbove::new(1024).and(text as fn(_, _, &_, &_) -> bool))
 }
 
 /// A boot step whose backend method the integrator hasn't wired yet is skipped with a warning; any other
@@ -279,4 +334,84 @@ pub async fn boot(st: &AppState) -> anyhow::Result<()> {
         rt.runtimes.get(false).await;
     });
     Ok(())
+}
+
+#[cfg(test)]
+mod compression_tests {
+    use axum::Router;
+    use axum::body::Body;
+    use axum::http::{Request, header};
+    use axum::routing::get;
+    use http_body_util::BodyExt;
+    use std::io::Read;
+    use tower::ServiceExt;
+
+    fn router() -> Router {
+        let big = "x".repeat(4096);
+        let (a, b, c, d) = (big.clone(), big.clone(), big.clone(), big);
+        Router::new()
+            .route(
+                "/json",
+                get(move || async move { ([(header::CONTENT_TYPE, "application/json")], a) }),
+            )
+            .route(
+                "/js",
+                get(move || async move {
+                    (
+                        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+                        b,
+                    )
+                }),
+            )
+            .route(
+                "/sse",
+                get(move || async move { ([(header::CONTENT_TYPE, "text/event-stream")], c) }),
+            )
+            .route(
+                "/png",
+                get(move || async move { ([(header::CONTENT_TYPE, "image/png")], d) }),
+            )
+            .route(
+                "/small",
+                get(|| async { ([(header::CONTENT_TYPE, "application/json")], "{}") }),
+            )
+            .layer(super::compression())
+    }
+
+    async fn get_gz(path: &str) -> (Option<String>, Vec<u8>) {
+        let r = router()
+            .oneshot(
+                Request::get(path)
+                    .header(header::ACCEPT_ENCODING, "gzip, br")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let enc = r
+            .headers()
+            .get(header::CONTENT_ENCODING)
+            .map(|v| v.to_str().unwrap().to_string());
+        (
+            enc,
+            r.into_body().collect().await.unwrap().to_bytes().to_vec(),
+        )
+    }
+
+    #[tokio::test]
+    async fn text_is_gzipped_streams_and_media_are_not() {
+        for p in ["/json", "/js"] {
+            let (enc, body) = get_gz(p).await;
+            assert_eq!(enc.as_deref(), Some("gzip"), "{p}");
+            let mut out = String::new();
+            flate2::read::GzDecoder::new(&body[..])
+                .read_to_string(&mut out)
+                .unwrap();
+            assert_eq!(out, "x".repeat(4096));
+        }
+        for p in ["/sse", "/png", "/small"] {
+            let (enc, _) = get_gz(p).await;
+            assert_eq!(enc, None, "{p}");
+        }
+    }
 }
