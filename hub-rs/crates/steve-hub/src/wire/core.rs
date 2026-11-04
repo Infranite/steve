@@ -369,6 +369,19 @@ impl Host for HubHost {
             }
         }
     }
+    fn permissions_expired(&self, session_id: &str, decision_ids: &[String]) {
+        for id in decision_ids {
+            match self.store.decisions().resolve(
+                id,
+                &serde_json::json!({"superseded": "这一轮已经结束，授权不再需要"}),
+                "expired",
+                &serde_json::Value::Null,
+            ) {
+                Ok(_) => {}
+                Err(e) => tracing::warn!("expire permission {id} of {session_id}: {e}"),
+            }
+        }
+    }
     fn turn_end(&self, t: steve_acp::TurnEnd) {
         let Some(core) = self.core.get() else { return };
         let t = steve_core::TurnEnd {

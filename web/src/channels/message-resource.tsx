@@ -3,6 +3,7 @@ import { DownloadIcon, FileIcon, ImageIcon, RefreshCwIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog"
 import { Spinner } from "@/components/ui/spinner"
+import { wsHeaders } from "@/api"
 
 const IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"])
 const MAX_BYTES = 25 * 1024 * 1024
@@ -22,7 +23,7 @@ const REASONS: Record<string, [string, boolean]> = {
 }
 
 async function readResource(url: string, signal: AbortSignal, image: boolean): Promise<Blob> {
-  const r = await fetch(url, { credentials: "same-origin", cache: "no-store", signal })
+  const r = await fetch(url, { headers: wsHeaders(), credentials: "same-origin", cache: "no-store", signal })
   if (!r.ok) {
     const message = r.status === 401 ? "登录已失效，请重新登录" : r.status === 403 ? "没有读取此资源的权限" : r.status === 404 || r.status === 410 ? "资源已不可用或已过保留期限" : "暂时无法读取资源，请重试"
     const body = await r.json().catch(() => ({}))

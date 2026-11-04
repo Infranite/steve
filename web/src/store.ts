@@ -5,7 +5,7 @@ import { readEventPages } from "./event-pages"
  * calls the Hub — the SSE stream then refreshes what changed. */
 import { useEffect, useRef, useSyncExternalStore } from "react"
 import { toast as sonner } from "sonner"
-import { api, stream, Unauthenticated, type State, type RItem, type RItemDetail, type RSession, type RDecision, type RBot, type REvent, type RProject, type Proposal, type LocalSession, type HubEvent, type RNotice } from "./api"
+import { api, setPageWorkspace, stream, Unauthenticated, type State, type RItem, type RItemDetail, type RSession, type RDecision, type RBot, type REvent, type RProject, type Proposal, type LocalSession, type HubEvent, type RNotice } from "./api"
 import { cue } from "./bus"
 import type { RFile, PlanStep, RHold, RQueued } from "./api"
 import type { Cite } from "./api/knowledge"
@@ -395,7 +395,7 @@ export function refresh(): Promise<void> {
   inflight = (async () => {
     /* asked after Steve stopped, the state has the reply (stored before steve.thinking went off): the draft has served */
     const settled = !st.thinking, epoch = scopeEpoch
-    try { const state = await api.state(); if (epoch !== scopeEpoch) return; raw.state = state; st.login = null; st.error = ""; build(); if (settled && st.draft) { st.draft = null; build() } emit() }
+    try { const state = await api.state(); if (epoch !== scopeEpoch) return; raw.state = state; setPageWorkspace(state.workspace?.id ?? ""); st.login = null; st.error = ""; build(); if (settled && st.draft) { st.draft = null; build() } emit() }
     catch (e) { if (epoch !== scopeEpoch) return; if (e instanceof Unauthenticated) st.login = e.login ?? "/auth/login"; else st.error = (e as Error).message; emit() }
     finally { inflight = null; if (again) { again = false; void refresh() } }
   })()
@@ -840,7 +840,7 @@ export function setBotWorkspaces(k: string, ids: string[]) { void call(api.botWo
 
 /* ───────── actions: workspaces and projects ───────── */
 export async function switchWorkspace(id: string) {
-  try { await api.switchWs(id); scopeEpoch++; replayFrom.clear(); painted.clear(); raw.loadingItem.clear(); raw.loadingEv.clear(); reloadAgain.clear(); missedEv.clear(); raw.details.clear(); raw.events.clear(); convs.clear(); openItems.clear(); dirty.clear(); st.thinking = false; st.draft = null; connect(); await refresh(); location.hash = "#/"; toast("已切换到「" + (st.workspace?.name ?? "") + "」") } catch (e) { fail(e) }
+  try { await api.switchWs(id); setPageWorkspace(id); scopeEpoch++; replayFrom.clear(); painted.clear(); raw.loadingItem.clear(); raw.loadingEv.clear(); reloadAgain.clear(); missedEv.clear(); raw.details.clear(); raw.events.clear(); convs.clear(); openItems.clear(); dirty.clear(); st.thinking = false; st.draft = null; connect(); await refresh(); location.hash = "#/"; toast("已切换到「" + (st.workspace?.name ?? "") + "」") } catch (e) { fail(e) }
 }
 export async function newWorkspace(name: string, description: string, item_prefix?: string) { const w = await call(api.newWs({ name, description, item_prefix })); if (w) await switchWorkspace(w.id) }
 export async function newProject(p: { name: string; path: string; description?: string; worktree?: boolean; default_bot?: string | null }) { const r = await call(api.newProject(p), `已添加项目「${p.name}」`); return r?.id }

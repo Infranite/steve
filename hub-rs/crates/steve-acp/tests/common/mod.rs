@@ -22,6 +22,8 @@ pub struct Rec {
     pub queue: HashMap<String, Vec<Message>>,
     pub usage: Option<Usage>,
     pub decisions: Vec<(String, PermissionRequest)>,
+    /// permission cards the runner closed (their turn ended, their adapter is gone)
+    pub expired: Vec<String>,
     pub turn_ends: Vec<TurnEnd>,
     pub files: HashMap<String, StoredFile>,
     pub begun: Vec<TurnBegin>,
@@ -165,6 +167,9 @@ impl Host for MemHost {
         let id = format!("d{}", r.decisions.len() + 1);
         r.decisions.push((id.clone(), req));
         Some(id)
+    }
+    fn permissions_expired(&self, _: &str, ids: &[String]) {
+        self.0.lock().unwrap().expired.extend(ids.iter().cloned());
     }
     fn turn_end(&self, t: TurnEnd) {
         self.0.lock().unwrap().turn_ends.push(t);

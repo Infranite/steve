@@ -257,16 +257,23 @@ async fn timed<T>(f: impl std::future::Future<Output = Result<T, String>>) -> Re
 
 impl Channels {
     /// “收到”: Steve decided to respond to inbound `message_id`. Once per message; a failure of the
-    /// provider is recorded (state `ack` without a reaction id) and does not stop anything.
+    /// provider is recorded (state `ack` without a reaction id) and does not stop anything. Returns as
+    /// soon as the message's reaction lock is held: the provider call runs in the background holding it,
+    /// so the answer is never kept waiting on it, and a finish of the same message waits for the
+    /// acknowledgement to be on before it takes it off.
     pub async fn react_ack(&self, message_id: &str) {
-        if let Err(e) = self.react_ack_inner(message_id).await {
-            tracing::warn!(message = message_id, "ack reaction: {e}");
-        }
+        let guard = self.reaction_locks().of(message_id).lock_owned().await;
+        let (ch, id) = (self.clone(), message_id.to_string());
+        tokio::spawn(async move {
+            let _g = guard;
+            if let Err(e) = ch.react_ack_locked(&id).await {
+                tracing::warn!(message = id, "ack reaction: {e}");
+            }
+        });
     }
 
-    async fn react_ack_inner(&self, message_id: &str) -> ChannelResult<()> {
-        let lock = self.reaction_locks().of(message_id);
-        let _g = lock.lock().await;
+    /// [`Self::react_ack`] with the message's reaction lock held by the caller.
+    async fn react_ack_locked(&self, message_id: &str) -> ChannelResult<()> {
         let (t, row) = self.store().reader(|c| {
             Ok::<_, crate::ChannelError>((target(c, message_id)?, get(c, message_id)?))
         })?;

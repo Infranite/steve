@@ -25,6 +25,6 @@ pub use rollout::turn_usage as codex_turn_usage;
 pub use rpc::RpcError;
 pub use runner::{
     Acp, AcpError, AutonomousUsage, Host, McpEndpoint, Message, PermissionRequest, Prompted,
-    SessionInfo, TurnBegin, TurnEnd, TurnFinish, TurnUsage, Usage, auto_allow, permission_request,
-    steve_tool,
+    RESUME_AFTER_TOOLS, SessionInfo, TurnBegin, TurnEnd, TurnFinish, TurnUsage, Usage, auto_allow,
+    permission_request, steve_tool,
 };

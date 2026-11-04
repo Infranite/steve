@@ -270,7 +270,7 @@ async fn a_run_that_keeps_working_is_never_cut_off() {
     let mut body = emit(&[init(), start("m1")]);
     for i in 0..6 {
         body.push_str(&format!(
-            "\nsleep 0.3\n{}",
+            "\nsleep 0.8\n{}",
             emit(&[text(&format!("第{i}段。"))])
         ));
     }
@@ -284,7 +284,7 @@ async fn a_run_that_keeps_working_is_never_cut_off() {
         (c.budget.hard, c.budget.max_turns, c.budget.max_tools),
         (None, None, None)
     );
-    c.budget.idle = Duration::from_millis(700);
+    c.budget.idle = Duration::from_secs(2);
     let t0 = Instant::now();
     let out = Researcher::new(c)
         .start(req(&e, "ws"))
@@ -292,7 +292,7 @@ async fn a_run_that_keeps_working_is_never_cut_off() {
         .finish()
         .await;
     assert!(
-        t0.elapsed() > Duration::from_millis(1500),
+        t0.elapsed() > Duration::from_secs(4),
         "longer than the stall window"
     );
     assert_eq!(out.status, RunStatus::Done, "{:?}", out.answer);

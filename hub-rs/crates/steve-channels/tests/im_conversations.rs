@@ -1140,3 +1140,36 @@ async fn a_group_with_only_you_recorded_is_not_owner_only() {
     assert_eq!(turns.len(), 1, "{turns:?}");
     assert!(!turns[0].1.owner_only);
 }
+
+/// "收到" goes on in the background: a slow reaction API never keeps the message from reaching the
+/// conversation, and the acknowledgement still lands (in order, before anything takes it off).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_slow_reaction_api_does_not_hold_the_answer() {
+    let h = setup(true).await;
+    let t = h.thread.clone().unwrap();
+    *h.fake.reaction_delay.lock().unwrap() = Some(std::time::Duration::from_secs(2));
+    let t0 = std::time::Instant::now();
+    push(
+        &h,
+        &h.bot.clone(),
+        msg("C_OPS", "s1", "ulilei", "部署挂了怎么办", true, false),
+    )
+    .await;
+    assert!(
+        t0.elapsed() < std::time::Duration::from_secs(1),
+        "{:?}",
+        t0.elapsed()
+    );
+    assert_eq!(
+        t.turns.lock().unwrap().len(),
+        1,
+        "handed to the conversation at once"
+    );
+    for _ in 0..50 {
+        if h.fake.reactions_on("s1") == [ReactionKind::Ack] {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(h.fake.reactions_on("s1"), [ReactionKind::Ack]);
+}

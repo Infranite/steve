@@ -87,7 +87,8 @@ export const steps = [
   P("POST", "/api/workspaces/${ws2}/switch"),
   P("POST", "/api/workspaces/nope/switch", undefined, { label: "not a member" }),
   P("GET", "/api/me", undefined, { label: "x-steve-ws", ws: "ws2" }),
-  P("GET", "/api/me", undefined, { label: "foreign x-steve-ws falls back", headers: { "x-steve-ws": "ws_ffffffffffffffff" } }),
+  // a foreign x-steve-ws: the TS Hub falls back to another workspace, the Rust Hub refuses it (409) on purpose
+  // since v0.2.13 — tested in tests/item_actions.rs, not compared here
   P("GET", "/api/me", undefined, { label: "steve_ws cookie", headers: {}, cookieWs: true }),
 
   // ── notifications ──

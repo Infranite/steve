@@ -232,6 +232,25 @@ async fn cancel_while_starting_goes_after_the_prompt_and_the_queue_runs_next() {
     acp.shutdown(Duration::from_secs(2)).await;
 }
 
+/// A gateway error after the turn already ran tools: their effects happened, so the retry asks the agent
+/// to check what is done and go on, instead of sending the same message to be acted on again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_retry_after_tools_ran_goes_on_instead_of_starting_over() {
+    let f = Fake::new(&[]);
+    let h = host();
+    h.with(f.session("s1", "claude-code"));
+    let acp = Acp::new(f.config(), h.clone());
+    let first = "@tool edit Edit @fail 1 API Error: 529 overloaded @say ok";
+    acp.prompt("s1", first, "me").await.unwrap();
+    wait_for("turn end", 10, || turn_ends(&h) == 1).await;
+    assert_eq!(
+        f.prompts(),
+        [first, steve_acp::RESUME_AFTER_TOOLS],
+        "the retry continues, it does not repeat the message"
+    );
+    acp.shutdown(Duration::from_secs(2)).await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn transient_gateway_errors_retry_then_succeed() {
     let f = Fake::new(&[]);
@@ -446,6 +465,27 @@ async fn steve_tools_are_auto_allowed_others_become_decisions() {
     assert!(acp.answer_permission("d2", None));
     wait_for("turn end", 10, || turn_ends(&h) == 2).await;
     assert!(h.said().ends_with("perm:cancelled:"));
+    acp.shutdown(Duration::from_secs(2)).await;
+}
+
+/// A permission card lives as long as its turn: once the turn ends (here, cancelled while it waits) the card
+/// is closed and an answer to it reaches nobody.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_permission_card_ends_with_its_turn() {
+    let f = Fake::new(&[]);
+    let h = host();
+    h.with(f.session("s1", "claude-code"));
+    let acp = Acp::new(f.config(), h.clone());
+    acp.prompt("s1", "@perm Bash", "me").await.unwrap();
+    wait_for("decision", 10, || h.rec(|r| r.decisions.len()) == 1).await;
+    assert!(h.rec(|r| r.expired.is_empty()));
+    assert!(acp.cancel("s1"));
+    wait_for("turn end", 10, || turn_ends(&h) == 1).await;
+    assert_eq!(h.rec(|r| r.expired.clone()), ["d1"], "closed with its turn");
+    assert!(
+        !acp.answer_permission("d1", Some("once")),
+        "nobody waits for it"
+    );
     acp.shutdown(Duration::from_secs(2)).await;
 }
 

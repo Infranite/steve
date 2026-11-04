@@ -221,6 +221,9 @@ pub trait Host: Send + Sync + 'static {
     fn mcp_endpoint(&self, session: &SessionInfo) -> McpEndpoint;
     /// Create the approval decision; returns its id, or `None` if it could not be created.
     fn permission_decision(&self, session_id: &str, req: PermissionRequest) -> Option<String>;
+    /// Permission cards that can no longer be answered (their turn ended, or the adapter that asked
+    /// is gone): close them, so nobody answers a question nobody is waiting for.
+    fn permissions_expired(&self, _session_id: &str, _decision_ids: &[String]) {}
     fn turn_end(&self, t: TurnEnd);
     /// A prompt is about to be sent; returns the turn id to finish it with, `None` to not record it.
     fn turn_begin(&self, _b: TurnBegin) -> Option<String> {
@@ -348,7 +351,8 @@ struct State {
     turning: HashSet<String>,
     retrying: HashMap<String, u64>,
     /// decision id → (session id, rpc id). Like the TS, entries outlive the process that asked.
-    waits: HashMap<String, (String, Value)>,
+    /// decision id → (session, the asking request's rpc id, the adapter process generation that asked)
+    waits: HashMap<String, (String, Value, u64)>,
     /// every spawned adapter, including ones still starting, so shutdown leaves no orphans
     procs: HashMap<u64, Arc<Conn>>,
     drain_groups: HashSet<u32>,
@@ -398,6 +402,10 @@ static DEAD_AGENT: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)process exited unexpectedly|start a new session|resource not found|agent process died")
         .expect("static regex")
 });
+
+/// What a gateway retry sends instead of the same message when the failed attempt had already run tools:
+/// their effects happened, so the agent picks up where it stopped instead of doing the work again.
+pub const RESUME_AFTER_TOOLS: &str = "刚才推理网关中断了，这一轮你已经调用过工具，那些操作已经生效。请先核对已经完成的部分，再从中断的地方继续，不要重复已经做过的操作。";
 
 static TRANSIENT: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
@@ -810,6 +818,8 @@ impl Acp {
             let retry = error
                 .as_deref()
                 .is_some_and(|e| TRANSIENT.is_match(e) && attempt < self.0.cfg.retry_delays.len());
+            // tools already ran in this attempt: their effects happened, the message must not be acted on again
+            let acted = self.st().tallies.get(&sid).is_some_and(|t| t.tools > 0);
             // codex-acp reports no tokens; Codex's own rollout file has them
             let resp = match resp {
                 Some(r) if r.get("usage").is_some_and(Value::is_object) => Some(r),
@@ -894,6 +904,13 @@ impl Acp {
                 if !mine {
                     return; // cancelled while waiting; cancel() finished the turn
                 }
+                if acted {
+                    msgs = vec![Message {
+                        text: RESUME_AFTER_TOOLS.into(),
+                        via: "retry".into(),
+                        files: vec![],
+                    }];
+                }
                 attempt += 1;
                 continue;
             }
@@ -948,12 +965,34 @@ impl Acp {
             if held {
                 return;
             }
+            self.expire_waits(&sid, None);
             self.host().turn_end(TurnEnd {
                 session_id: sid,
                 stop_reason,
                 error,
             });
             return;
+        }
+    }
+
+    /// Closes the permission cards of `sid` still waiting (of adapter `generation` only, when given):
+    /// their turn is over or their adapter is gone. The host is told without the lock held.
+    fn expire_waits(&self, sid: &str, generation: Option<u64>) {
+        let gone: Vec<String> = {
+            let mut st = self.st();
+            let ids: Vec<String> = st
+                .waits
+                .iter()
+                .filter(|(_, (s, _, g))| s == sid && generation.is_none_or(|x| x == *g))
+                .map(|(d, _)| d.clone())
+                .collect();
+            for d in &ids {
+                st.waits.remove(d);
+            }
+            ids
+        };
+        if !gone.is_empty() {
+            self.host().permissions_expired(sid, &gone);
         }
     }
 
@@ -1241,15 +1280,19 @@ impl Acp {
             },
             move || {
                 if let Some(i) = weak.upgrade() {
-                    let mut st = i.st.lock().unwrap_or_else(|e| e.into_inner());
-                    st.procs.remove(&generation);
-                    if st
-                        .live
-                        .get(&sid2)
-                        .is_some_and(|l| l.generation == generation)
                     {
-                        st.live.remove(&sid2);
+                        let mut st = i.st.lock().unwrap_or_else(|e| e.into_inner());
+                        st.procs.remove(&generation);
+                        if st
+                            .live
+                            .get(&sid2)
+                            .is_some_and(|l| l.generation == generation)
+                        {
+                            st.live.remove(&sid2);
+                        }
                     }
+                    // the questions that adapter asked can't be answered any more
+                    Acp(i).expire_waits(&sid2, Some(generation));
                 }
             },
         )
@@ -1567,9 +1610,17 @@ impl Acp {
         let Some(dec) = self.host().permission_decision(sid, req) else {
             return;
         };
-        self.st()
-            .waits
-            .insert(dec.clone(), (sid.to_owned(), rpc_id));
+        {
+            let mut st = self.st();
+            let Some(generation) = st.live.get(sid).map(|l| l.generation) else {
+                drop(st);
+                self.host()
+                    .permissions_expired(sid, std::slice::from_ref(&dec));
+                return;
+            };
+            st.waits
+                .insert(dec.clone(), (sid.to_owned(), rpc_id, generation));
+        }
         self.host().add_event(
             sid,
             "permission",
@@ -1580,10 +1631,11 @@ impl Acp {
     /// Answer a pending tool permission (`None` = deny); false when the adapter that asked is gone.
     pub fn answer_permission(&self, decision_id: &str, option_id: Option<&str>) -> bool {
         let mut st = self.st();
-        let Some((sid, rpc_id)) = st.waits.remove(decision_id) else {
+        let Some((sid, rpc_id, generation)) = st.waits.remove(decision_id) else {
             return false;
         };
-        let Some(l) = st.live.get(&sid) else {
+        // only the adapter process that asked: a restarted one numbers its requests anew
+        let Some(l) = st.live.get(&sid).filter(|l| l.generation == generation) else {
             return false;
         };
         let result = match option_id {
@@ -1630,16 +1682,35 @@ impl Acp {
             }
             return true;
         }
+        let mut answered = Vec::new();
         match st.live.get(session_id).filter(|l| l.busy && l.prompting) {
-            Some(l) => l
-                .conn
-                .notify("session/cancel", json!({ "sessionId": l.acp_id })),
+            Some(l) => {
+                let (conn, generation) = (l.conn.clone(), l.generation);
+                conn.notify("session/cancel", json!({ "sessionId": l.acp_id }));
+                // ACP: a cancelling client answers every permission request still pending with
+                // `cancelled`, so the agent can end the turn
+                let pending: Vec<String> = st
+                    .waits
+                    .iter()
+                    .filter(|(_, (s, _, g))| s == session_id && *g == generation)
+                    .map(|(d, _)| d.clone())
+                    .collect();
+                for d in pending {
+                    if let Some((_, rpc_id, _)) = st.waits.remove(&d) {
+                        conn.respond(rpc_id, json!({ "outcome": { "outcome": "cancelled" } }));
+                        answered.push(d);
+                    }
+                }
+            }
             None if st.turning.contains(session_id) => {
                 st.cancel_pending.insert(session_id.to_owned());
             }
             None => return false,
         }
         drop(st);
+        if !answered.is_empty() {
+            self.host().permissions_expired(session_id, &answered);
+        }
         self.host()
             .add_event(session_id, "system", json!({ "text": "你中断了当前回合" }));
         true

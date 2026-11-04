@@ -667,6 +667,28 @@ pub fn user_message(text: &str, images: &[Value]) -> String {
 /// The system prompt of a gateway call whose prompt has no stable head of its own.
 pub const GATEWAY_SYSTEM: &str = "You are a component of Steve, a personal assistant app. Follow the instructions in the user message exactly and reply with only what they ask for.";
 
+/// The CLI arguments of a chat answer: none without readable attachments (no tools at all), else
+/// [`ATTACHMENT_TOOLS`].
+pub fn answer_tools(files: &ChatFiles) -> Vec<String> {
+    if files.readable {
+        ATTACHMENT_TOOLS.iter().map(|a| a.to_string()).collect()
+    } else {
+        vec![]
+    }
+}
+
+/// The CLI arguments of a chat answer that reads its attachments: Read is the only tool there is (not
+/// merely allowed: no shell, no writes, whatever the user's own allow rules say), and only user settings
+/// load (the gateway login), not a project's or local ones.
+pub const ATTACHMENT_TOOLS: [&str; 6] = [
+    "--tools",
+    "Read",
+    "--allowedTools",
+    "Read",
+    "--setting-sources",
+    "user",
+];
+
 /// The message for `-p` and the arguments that lay a `claude -p` call out for the prompt cache.
 ///
 /// Claude Code's own system prompt, tool list and per-machine context came to ~16k tokens per call and
@@ -1635,11 +1657,7 @@ pub async fn answer(
     context: &str,
     on_draft: OnDraft<'_>,
 ) -> Answer {
-    let extra: Vec<String> = if files.readable {
-        vec!["--allowedTools".into(), "Read".into()]
-    } else {
-        vec![]
-    };
+    let extra = answer_tools(files);
     let timeout = Duration::from_secs(if files.count > 0 { 150 } else { 90 });
     let on_text = |raw: &str| {
         let (t, a) = draft_of(raw);
@@ -1913,6 +1931,21 @@ mod tests {
             split_static(&route_prompt(&c, "别的", &[], true)).0,
             Some(head)
         );
+    }
+
+    #[test]
+    fn an_answer_reading_attachments_has_read_and_nothing_else() {
+        let none = ChatFiles::default();
+        assert!(answer_tools(&none).is_empty(), "no attachments: no tools");
+        let files = ChatFiles {
+            readable: true,
+            count: 1,
+            ..ChatFiles::default()
+        };
+        let a = answer_tools(&files);
+        let after = |f: &str| a.iter().position(|x| x == f).map(|i| a[i + 1].as_str());
+        assert_eq!(after("--tools"), Some("Read"), "the only tool there is");
+        assert_eq!(after("--setting-sources"), Some("user"));
     }
 
     #[test]

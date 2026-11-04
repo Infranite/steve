@@ -13,12 +13,12 @@ const session = (id) => ({ id, no: 1, item_id: null, status: "running", created:
 function harness() {
   const state = { workspace: { id: "ws", item_prefix: "ST" }, workspaces: [], items: [], bots: [], allBots: [], projects: [], sessions: [session("a"), session("b")], decisions: [], recent: [], thread: [], tags: [], tagUses: {}, settings: {}, devices: [], runtimes: [] }
   let onEvent, onOpen
-  const timers = [], cues = [], notices = []
+  const timers = [], cues = [], notices = [], pageWs = []
   const api = { state: async () => structuredClone(state), events: async () => [], switchWs: async () => {} }
   const exports = {}
   runInNewContext(code, {
     exports, require: (id) => {
-      if (id === "./api") return { api, stream: (event, open) => { onEvent = event; onOpen = open; return () => {} }, Unauthenticated: class extends Error {} }
+      if (id === "./api") return { api, setPageWorkspace: (ws) => { pageWs.push(ws) }, stream: (event, open) => { onEvent = event; onOpen = open; return () => {} }, Unauthenticated: class extends Error {} }
       if (id === "./event-pages") return pages
       if (id === "./live-utils") return live
       if (id === "./bus") return { cue: (x) => cues.push(x) }
@@ -30,7 +30,7 @@ function harness() {
     setTimeout: (f, ms) => { const timer = { f, ms }; timers.push(timer); return timer }, clearTimeout: (timer) => { if (timer) timer.cancelled = true },
     requestAnimationFrame: (f) => { timers.push({ f, ms: 0 }); return 1 }, crypto: { randomUUID: () => "client-1" },
   })
-  return { store: exports, api, state, cues, notices, event: (e) => onEvent(e), reconnect: () => onOpen(), tick: async (ms) => {
+  return { store: exports, api, state, cues, notices, pageWs, event: (e) => onEvent(e), reconnect: () => onOpen(), tick: async (ms) => {
     const due = timers.splice(0); for (const t of due) { if (t.cancelled) continue; if (t.ms <= ms) t.f(); else timers.push(t) } await flush()
   } }
 }
@@ -135,4 +135,13 @@ test("resync transcript fetches never exceed three concurrent requests", async (
   h.reconnect()
   for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r))
   assert.equal(calls, 9); assert.equal(peak, 3)
+})
+
+test("the page names its workspace from the state it shows, and the one it switched to", async () => {
+  const h = harness(), s = h.store
+  s.start(); await flush()
+  assert.deepEqual(h.pageWs, ["ws"])
+  h.state.workspace = { id: "ws2", item_prefix: "WB" }
+  await s.switchWorkspace("ws2"); await flush()
+  assert.equal(h.pageWs.at(-1), "ws2")
 })

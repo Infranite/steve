@@ -43,11 +43,17 @@ export type HubEvent = { type: "item" | "bot" | "project" | "tag" | "workspace" 
 export type RFile = { id: string; name: string; mime: string; size: number }
 export const fileUrl = (id: string, download = false) => `/api/files/${encodeURIComponent(id)}${download ? "?download=1" : ""}`
 
+/* the workspace this page shows, sent with every request: the workspace cookie is shared by all tabs, so a tab
+ * switching workspace must never redirect another page's requests (the Hub refuses a browser write without it) */
+let pageWs = ""
+export const setPageWorkspace = (id: string) => { pageWs = id }
+export const wsHeaders = (h: Record<string, string> = {}): Record<string, string> => (pageWs ? { ...h, "x-steve-ws": pageWs } : h)
+
 export class Unauthenticated extends Error { login: string | null; constructor(login: string | null) { super("unauthenticated"); this.login = login } }
 const CUT = {}
 async function req<T>(method: string, path: string, body?: unknown): Promise<T> {
   /* a read that stalls (proxy, dropped connection) must fail, not leave a view loading forever */
-  const r = await fetch("/api" + path, { method, headers: body !== undefined ? { "content-type": "application/json" } : undefined, body: body !== undefined ? JSON.stringify(body) : undefined, credentials: "same-origin", signal: method === "GET" ? AbortSignal.timeout(30_000) : undefined })
+  const r = await fetch("/api" + path, { method, headers: wsHeaders(body !== undefined ? { "content-type": "application/json" } : {}), body: body !== undefined ? JSON.stringify(body) : undefined, credentials: "same-origin", signal: method === "GET" ? AbortSignal.timeout(30_000) : undefined })
   if (r.status === 401) { const j = await r.json().catch(() => ({})); throw new Unauthenticated(j.login ?? null) }
   const j = await r.json().catch(() => (r.ok && method === "GET" ? CUT : {}))
   if (j === CUT) throw new Error("响应不完整，稍后重试") // a cut-off body used to come back as {} and break the caller silently
@@ -68,7 +74,7 @@ export const isNotWired = (e: unknown): e is NotWired => e instanceof NotWired
 export async function modReq<T>(method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
   let r: Response
   try {
-    r = await fetch("/api" + path, { method, headers: body !== undefined ? { "content-type": "application/json" } : undefined, body: body !== undefined ? JSON.stringify(body) : undefined, credentials: "same-origin", cache: "no-store", signal: signal ?? (method === "GET" ? AbortSignal.timeout(30_000) : undefined) })
+    r = await fetch("/api" + path, { method, headers: wsHeaders(body !== undefined ? { "content-type": "application/json" } : {}), body: body !== undefined ? JSON.stringify(body) : undefined, credentials: "same-origin", cache: "no-store", signal: signal ?? (method === "GET" ? AbortSignal.timeout(30_000) : undefined) })
   } catch { throw new NotWired() }
   const json = (r.headers.get("content-type") ?? "").includes("application/json")
   const j: any = json ? await r.json().catch(() => undefined) : undefined
@@ -133,7 +139,7 @@ export const api = {
   devices: (fresh = false) => get<{ devices: RDevice[]; runtimes: RRuntime[] }>("/devices" + (fresh ? "?fresh=1" : "")), patchDevice: (id: string, p: { name?: string; status?: string; max_sessions?: number }) => patch("/devices/" + id, p),
   /* the raw bytes as the body; the Hub decides the type from the content */
   upload: async (f: Blob, name: string): Promise<RFile> => {
-    const r = await fetch("/api/files?name=" + encodeURIComponent(name), { method: "POST", body: f, headers: { "content-type": "application/octet-stream" }, credentials: "same-origin" })
+    const r = await fetch("/api/files?name=" + encodeURIComponent(name), { method: "POST", body: f, headers: wsHeaders({ "content-type": "application/octet-stream" }), credentials: "same-origin" })
     if (r.status === 401) { const j = await r.json().catch(() => ({})); throw new Unauthenticated(j.login ?? null) }
     const j = await r.json().catch(() => ({})); if (!r.ok) throw new Error(j.error ?? `上传失败（${r.status}）`); return j as RFile
   },

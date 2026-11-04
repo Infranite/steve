@@ -163,34 +163,71 @@ fn percent_decode(s: &str) -> String {
     String::from_utf8(out).unwrap_or_else(|_| s.to_string())
 }
 
-/// The signed-in user of a request and their workspace: `ws` = the wanted workspace if the user is a
-/// member, else their first workspace, else `"default"` (清单 §1.3, copied as is).
-async fn lookup_user(st: &AppState, headers: &HeaderMap) -> Result<Option<Ctx>, ApiError> {
+/// Who a request is from, and in which workspace.
+enum Who {
+    Anonymous,
+    User(Ctx),
+    /// Signed in, but the workspace it is for can't be told or isn't theirs: refused with this status
+    /// and message, never quietly run in another workspace.
+    Refused(u16, &'static str),
+}
+
+/// The page named a workspace the user is not (or no longer) a member of.
+pub const WS_GONE: &str = "这个页面所在的空间已经不可用了，请刷新页面";
+/// A write from a browser page that does not say its workspace (a page loaded before the Hub required it).
+pub const WS_RELOAD: &str = "页面需要刷新后才能继续操作";
+/// The user belongs to no workspace.
+pub const WS_NONE: &str = "你还没有加入任何空间";
+
+/// The signed-in user of a request and the workspace it runs in. The page says which (`x-steve-ws`): a
+/// workspace the user is not a member of is refused. Without the header the `steve_ws` cookie decides, else
+/// the user's first workspace; a write from a browser (Fetch Metadata `sec-fetch-site`) without the header
+/// is refused, so a page loaded earlier never writes into the workspace another tab switched to. A user
+/// with no workspace is refused, never put into `default`.
+async fn lookup_user(st: &AppState, headers: &HeaderMap, write: bool) -> Result<Who, ApiError> {
     let token = cookie(headers, "steve_session");
-    let want = headers
+    let named = headers
         .get("x-steve-ws")
         .and_then(|v| v.to_str().ok())
         .map(str::to_string)
-        .or_else(|| cookie(headers, "steve_ws"));
+        .filter(|s| !s.is_empty());
+    let browser = headers.contains_key("sec-fetch-site");
+    let remembered = cookie(headers, "steve_ws");
     st.read(move |r| {
-        let Some(t) = token else { return Ok(None) };
+        let Some(t) = token else {
+            return Ok(Who::Anonymous);
+        };
         let Some(user) = r.user_by_session(&t)? else {
-            return Ok(None);
+            return Ok(Who::Anonymous);
         };
         let me = str_of(&user, "id");
         let mine = r.workspaces_of_user(&me)?;
-        let ws = mine
-            .iter()
-            .find(|w| {
-                want.as_deref()
-                    .is_some_and(|x| w.get("id").and_then(Value::as_str) == Some(x))
-            })
-            .or(mine.first())
-            .map(|w| str_of(w, "id"))
-            .unwrap_or_else(|| "default".into());
-        Ok(Some(Ctx { user, me, ws }))
+        let is_mine = |id: &str| {
+            mine.iter()
+                .any(|w| w.get("id").and_then(Value::as_str) == Some(id))
+        };
+        let ws = match named {
+            Some(n) if is_mine(&n) => n,
+            Some(_) => return Ok(Who::Refused(409, WS_GONE)),
+            None if write && browser => return Ok(Who::Refused(409, WS_RELOAD)),
+            None => match remembered.filter(|c| is_mine(c)) {
+                Some(c) => c,
+                None => match mine.first() {
+                    Some(w) => str_of(w, "id"),
+                    None => return Ok(Who::Refused(403, WS_NONE)),
+                },
+            },
+        };
+        Ok(Who::User(Ctx { user, me, ws }))
     })
     .await
+}
+
+fn writes(req: &Request) -> bool {
+    !matches!(
+        *req.method(),
+        axum::http::Method::GET | axum::http::Method::HEAD | axum::http::Method::OPTIONS
+    )
 }
 
 fn insert_caller(req: &mut Request, ctx: Ctx) {
@@ -213,9 +250,9 @@ fn session_optional(req: &Request) -> bool {
 /// Inserts the caller when signed in, and lets the request through either way (routes that answer a
 /// missing login themselves, like `/auth/connect/callback`).
 pub async fn optional_user(State(st): State<AppState>, mut req: Request, next: Next) -> Response {
-    match lookup_user(&st, req.headers()).await {
-        Ok(Some(ctx)) => insert_caller(&mut req, ctx),
-        Ok(None) => {}
+    match lookup_user(&st, req.headers(), writes(&req)).await {
+        Ok(Who::User(ctx)) => insert_caller(&mut req, ctx),
+        Ok(Who::Anonymous | Who::Refused(..)) => {}
         Err(e) => tracing::warn!("optional_user: {e}"),
     }
     next.run(req).await
@@ -223,13 +260,14 @@ pub async fn optional_user(State(st): State<AppState>, mut req: Request, next: N
 
 /// `requireUser` + the workspace middleware: 401 without a live session (except [`session_optional`]).
 async fn require_user(State(st): State<AppState>, mut req: Request, next: Next) -> Response {
-    match lookup_user(&st, req.headers()).await {
-        Ok(Some(ctx)) => {
+    match lookup_user(&st, req.headers(), writes(&req)).await {
+        Ok(Who::User(ctx)) => {
             insert_caller(&mut req, ctx);
             next.run(req).await
         }
-        Ok(None) if session_optional(&req) => next.run(req).await,
-        Ok(None) => {
+        Ok(Who::Refused(status, error)) => json_response(status, &json!({ "error": error })),
+        Ok(Who::Anonymous) if session_optional(&req) => next.run(req).await,
+        Ok(Who::Anonymous) => {
             let login = if st.cfg.oidc.issuer.is_some() {
                 json!("/auth/login")
             } else if st.cfg.dev_login {

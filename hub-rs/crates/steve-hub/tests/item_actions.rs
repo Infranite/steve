@@ -284,4 +284,82 @@ async fn pause_finish_undo_drop_and_reopen() {
         texts.contains(&"标记完成") && texts.contains(&"撤销了标记完成"),
         "{texts:?}"
     );
+
+    workspace_is_named_never_guessed(&e).await;
+}
+
+/// The page says which workspace a request is for (`x-steve-ws`). A workspace the user is not a member of
+/// is refused, never swapped for another; a browser write without it (a page loaded before) is refused
+/// with "refresh"; a script without the header keeps the cookie's workspace.
+async fn workspace_is_named_never_guessed(e: &Env) {
+    let send = |method: &'static str, headers: Vec<(&'static str, String)>| {
+        let http = e.http.clone();
+        let path = if method == "GET" {
+            "/api/me"
+        } else {
+            "/api/tags"
+        };
+        let (url, cookie) = (format!("{}{path}", e.base), e.cookie.clone());
+        async move {
+            let m = reqwest::Method::from_bytes(method.as_bytes()).unwrap();
+            let mut r = http.request(m, url).header("cookie", cookie);
+            if method == "POST" {
+                r = r.json(&json!({"name": format!("t{}", rand_suffix()), "cat": "主题", "description": "测试"}));
+            }
+            for (k, v) in headers {
+                r = r.header(k, v);
+            }
+            let res = r.send().await.expect("request");
+            let s = res.status().as_u16();
+            (s, res.json::<Value>().await.unwrap_or(Value::Null))
+        }
+    };
+    let (_, me) = e.call("GET", "/api/me", None).await;
+    let ws = me["workspace"]["id"]
+        .as_str()
+        .or_else(|| me["ws"].as_str())
+        .unwrap_or("default")
+        .to_string();
+    // named and a member: fine, read or write
+    let (s, v) = send("GET", vec![("x-steve-ws", ws.clone())]).await;
+    assert_eq!(s, 200, "{v}");
+    let (s, v) = send(
+        "POST",
+        vec![
+            ("x-steve-ws", ws.clone()),
+            ("sec-fetch-site", "same-origin".into()),
+        ],
+    )
+    .await;
+    assert_eq!(s, 200, "{v}");
+    // a workspace that is not theirs: refused, not another one
+    let (s, v) = send("GET", vec![("x-steve-ws", "ws_ffffffffffffffff".into())]).await;
+    assert_eq!(
+        (s, v["error"].as_str()),
+        (409, Some(steve_hub::api::WS_GONE)),
+        "{v}"
+    );
+    // a browser page that doesn't say: may read, may not write
+    let (s, _) = send("GET", vec![("sec-fetch-site", "same-origin".into())]).await;
+    assert_eq!(s, 200);
+    let (s, v) = send("POST", vec![("sec-fetch-site", "same-origin".into())]).await;
+    assert_eq!(
+        (s, v["error"].as_str()),
+        (409, Some(steve_hub::api::WS_RELOAD)),
+        "{v}"
+    );
+    // a script (no Fetch Metadata) keeps the cookie's workspace
+    let (s, v) = send("POST", vec![]).await;
+    assert_eq!(s, 200, "{v}");
+}
+
+fn rand_suffix() -> String {
+    format!(
+        "{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+            % 1_000_000
+    )
 }
