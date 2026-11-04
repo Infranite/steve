@@ -335,10 +335,13 @@ def deploy(args):
     helper = HOME / "bin/steve-keyhelper"
     helper_sha = sha256(helper) if helper.exists() else None
 
-    phase = "drain"
-    stopped = switched = False
+    old_manifest = json.loads((old_hub / "release.json").read_text())
+    # what has been changed so far, so a failure before the new version starts undoes exactly that
+    done = dict(drain=False, stopped=False, probed=False, hub_link=False, web_link=False, started=False)
+    phase, backup = "drain", None
     try:
         log("drain")
+        done["drain"] = True
         control("POST")
         until, st = time.monotonic() + args.drain_s, {}
         while time.monotonic() < until:
@@ -351,7 +354,7 @@ def deploy(args):
         log(f"drained: {st}")
 
         phase = "backup"
-        stopped = True  # even a bootout that fails halfway may have stopped it
+        done["stopped"] = True  # even a bootout that fails halfway may have stopped it
         launchd("stop", ident)
         backup = HOME / f"backups/pre-{candidate.name}-{stamp}.sqlite3"
         backup.parent.mkdir(parents=True, exist_ok=True)
@@ -369,23 +372,16 @@ def deploy(args):
         log(f"backup {backup}")
 
         phase = "probe"
-        try:
-            log(f"probe passed: {probe(candidate, version)}")
-        except BaseException:
-            # the candidate may have migrated the database; nothing external happened (drained, maintenance)
-            failed = HOME / f"backups/failed-probe-{candidate.name}-{stamp}"
-            failed.mkdir(parents=True, exist_ok=True)
-            for f in DB.parent.glob("steve.sqlite3*"):
-                shutil.move(str(f), str(failed / f.name))
-            shutil.copy2(backup, DB)
-            save(probe_db=str(failed))
-            log(f"the backup is back; the probed database is in {failed}")
-            raise
+        done["probed"] = True  # from here the database may be migrated
+        log(f"probe passed: {probe(candidate, version)}")
 
         phase = "switch"
+        # a link is replaced atomically: it changed only once link() returned
         link(HOME / "current", candidate)
+        done["hub_link"] = True
         link(HOME / "web/current", candidate / "web/dist")
-        switched = True
+        done["web_link"] = True
+        done["started"] = True  # the new version may run business from here: no going back
         launchd("start", ident)
         if not wait_health(lambda h: h.get("version") == version and h.get("build_commit") == manifest["commit"], 60):
             raise RuntimeError(f"{version} did not answer /healthz")
@@ -395,26 +391,63 @@ def deploy(args):
         if not h:
             raise RuntimeError(f"{version} answers but is not ready: {health()}")
     except BaseException as e:
-        if switched:
-            err = (f"{version} 切换后没有正常起来（{e}）；数据库可能已迁移（{schema_gate.state(DB)}），没有回滚，新版本保留，"
-                   f"排空可能仍开着。发布前的备份在 {result.get('backup')}")
+        if done["started"]:
+            err = (f"{version} 启动后没有正常起来（{e}）；数据库可能已迁移（{schema_gate.state(DB)}），没有回滚，新版本保留，"
+                   f"排空可能仍开着。发布前的备份在 {backup}")
             save(ok=False, degraded=True, phase=phase, error=err, db_after=schema_gate.state(DB))
             log(err)
             return 3
-        # before the switch: the old version comes back as it was, drain lifted
-        if stopped:
-            launchd("start", ident)
-        if wait_health(lambda h: h.get("version") is not None, 60):
-            lift()
-        save(ok=False, phase=phase, error=f"{type(e).__name__}: {e}")
-        log(f"✗ {phase}: {e}; {old_hub.name} runs as before")
-        return 1
+        recovered, steps = restore(done, old_hub, old_web, old_manifest, backup, candidate, stamp, ident)
+        save(ok=False, phase=phase, error=f"{type(e).__name__}: {e}", recovered=recovered, recovery=steps)
+        if recovered:
+            log(f"✗ {phase}: {e}; {old_hub.name} runs as before ({'; '.join(steps)})")
+            return 1
+        log(f"✗ {phase}: {e}; and the old version did not come back: {'; '.join(steps)}")
+        return 2
     if helper_sha and sha256(helper) != helper_sha:
         log("warning: steve-keyhelper changed during the deploy")
     save(ok=True, health=h, db_after=schema_gate.state(DB), finished=time.strftime("%Y%m%d-%H%M%S"))
     log(f"live: {h}")
     print(json.dumps(result, ensure_ascii=False))
     return 0
+
+
+def restore(done, old_hub, old_web, old_manifest, backup, candidate, stamp, ident):
+    """Undo what a deploy changed before the new version started: links, the database (the backup: nothing external
+    happened, everything was drained and the probe ran in maintenance), the service, the drain. Every step is tried
+    and reported; the old version counts as back only when it answers as itself with the drain off."""
+    steps, ok = [], True
+
+    def step(what, fn):
+        nonlocal ok
+        try:
+            fn()
+            steps.append(what)
+        except BaseException as e:  # keep going: the next steps may still bring it back
+            ok = False
+            steps.append(f"{what} failed: {e}")
+
+    if done["web_link"]:
+        step("web/current back", lambda: link(HOME / "web/current", old_web))
+    if done["hub_link"]:
+        step("current back", lambda: link(HOME / "current", old_hub))
+    if done["probed"]:
+        def database():
+            failed = HOME / f"backups/failed-probe-{candidate.name}-{stamp}"
+            failed.mkdir(parents=True, exist_ok=True)
+            for f in DB.parent.glob("steve.sqlite3*"):
+                shutil.move(str(f), str(failed / f.name))
+            shutil.copy2(backup, DB)
+        step(f"the backup is back (the probed database is kept apart)", database)
+    if done["stopped"] and not health():
+        step("service started", lambda: launchd("start", ident))
+    back = wait_health(lambda h: h.get("version") == old_manifest["version"]
+                       and h.get("build_commit") in (None, old_manifest.get("commit")), 60)
+    if not back:
+        return False, steps + [f"{old_hub.name} does not answer /healthz"]
+    if done["drain"]:
+        step("drain lifted", lift)
+    return ok, steps
 
 
 def lift():

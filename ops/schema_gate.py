@@ -6,8 +6,9 @@ schema a build must know to open it (a database from before 0.2.14 has no stamp:
 build opens it only if it knows that schema. Builds from 0.2.14 on refuse to start otherwise; older builds
 (and the TS Hub) don't check, so a switch to one must be refused here.
 
-A release's schema is `schema.target` in its release.json, else what `bin/steve-hub --build-info` says. A
-release that tells neither (a TS-only release) is refused: nobody can show it reads the database.
+A release's schema is `schema.target` in its release.json (release.sh and package-release.py write it from the
+binary at build time). A release that doesn't say (a TS-only release, a release.sh release from before 0.2.14)
+is refused: nobody can show it reads the database. The Hub applies the same rule (`Core::rollback_refusal`).
 
     schema_gate.py state <db>               the database's {"schema", "min_reader"} as JSON
     schema_gate.py check <db> <release dir> exit 0 if the release can open it, 1 (with the reason) if not
@@ -15,7 +16,6 @@ release that tells neither (a TS-only release) is refused: nobody can show it re
 import json
 import pathlib
 import sqlite3
-import subprocess
 import sys
 
 
@@ -33,24 +33,12 @@ def state(db):
 
 
 def release_schema(release):
-    """The schema the release's Hub knows, or None when it doesn't say."""
-    release = pathlib.Path(release)
+    """The schema the release's Hub knows (`schema.target` in its release.json), or None when it doesn't say."""
     try:
-        target = json.loads((release / "release.json").read_text()).get("schema", {}).get("target")
-        if isinstance(target, int):
-            return target
+        target = json.loads((pathlib.Path(release) / "release.json").read_text()).get("schema", {}).get("target")
     except (OSError, ValueError, AttributeError):
-        pass
-    binary = release / "bin/steve-hub"
-    if binary.is_file():
-        try:
-            out = subprocess.run([str(binary), "--build-info"], capture_output=True, text=True, timeout=10)
-            schema = json.loads(out.stdout).get("schema")
-            if isinstance(schema, int):
-                return schema
-        except (OSError, ValueError, subprocess.TimeoutExpired):
-            pass
-    return None
+        return None
+    return target if isinstance(target, int) else None
 
 
 def check(db, release):
@@ -60,7 +48,7 @@ def check(db, release):
     if s["min_reader"] == 0:
         return None
     if knows is None:
-        return f"{name} 说不清自己认识哪个 schema（没有 release.json 的 schema，也没有 bin/steve-hub），不能打开 schema v{s['schema']} 的数据库"
+        return f"{name} 说不清自己认识哪个 schema（release.json 里没有），不能打开 schema v{s['schema']} 的数据库"
     if knows < s["min_reader"]:
         return f"{name} 只认识到 schema v{knows}，数据库（v{s['schema']}）需要至少 v{s['min_reader']}"
     return None

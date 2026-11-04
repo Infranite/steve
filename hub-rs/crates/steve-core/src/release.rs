@@ -70,11 +70,13 @@ impl Core {
     }
 
     /// `release.sh --rollback <target>` for the release of `item` (YOLO's undo); returns the log path.
-    pub fn rollback_release(&self, item: &str, target: &str) -> Result<String> {
+    /// `action`: the YOLO undo that asked for it, marked undone once the rollback went through
+    /// (`report_release` reads `releases/rollback.json`).
+    pub fn rollback_release(&self, item: &str, target: &str, action: &str) -> Result<String> {
         if let Some(why) = self.rollback_refusal(target) {
             return Err(crate::error::msg(format!("不能回滚到 {target}：{why}")));
         }
-        self.tx().start_rollback(item, target)
+        self.tx().start_rollback(item, target, action)
     }
 
     /// Why the installed release `target` can't run on this Hub's database, if it can't. The rule of
@@ -114,16 +116,20 @@ impl Core {
         }
     }
 
-    /// Read `releases/last.json` and report a final result once (boot, file watcher, tests).
+    /// Read `releases/last.json` and `releases/rollback.json` and report each final result once (boot, file
+    /// watcher, tests).
     pub fn report_release(&self) -> Result<()> {
-        self.tx().report_release()
+        let mut t = self.tx();
+        t.report_release()?;
+        t.report_rollback()
     }
 
     /// Poll `releases/last.json` every 3 s and report when it changes (`fs.watchFile`). Runs forever.
     pub async fn watch_releases(self) {
         let f = self.config().releases_last();
-        let stamp = |f: &Path| std::fs::metadata(f).and_then(|m| m.modified()).ok();
-        let mut last: Option<SystemTime> = stamp(&f);
+        let one = |f: &Path| std::fs::metadata(f).and_then(|m| m.modified()).ok();
+        let stamp = |f: &Path| (one(f), one(&f.with_file_name("rollback.json")));
+        let mut last: (Option<SystemTime>, Option<SystemTime>) = stamp(&f);
         let mut tick = tokio::time::interval(Duration::from_secs(3));
         loop {
             tick.tick().await;
@@ -442,7 +448,12 @@ impl Tx<'_> {
     /// Rolls the user's Steve back to `target` with the project's release script
     /// (`release.sh --rollback <target>`): same lock, drain and restart as a release. Used to undo a
     /// release YOLO approved; returns the log path.
-    pub(crate) fn start_rollback(&mut self, item_id: &str, target: &str) -> Result<String> {
+    pub(crate) fn start_rollback(
+        &mut self,
+        item_id: &str,
+        target: &str,
+        action: &str,
+    ) -> Result<String> {
         if self.db().store().maintenance() {
             return Err(crate::error::msg(
                 "正在准备二进制升级，暂不启动源码发布或回滚",
@@ -479,7 +490,7 @@ impl Tx<'_> {
         ] {
             cmd.env_remove(key);
         }
-        cmd.args([script.as_str(), "--rollback", target, item_id])
+        cmd.args([script.as_str(), "--rollback", target, item_id, action])
             .stdin(std::process::Stdio::null())
             .stdout(out.try_clone()?)
             .stderr(out)
@@ -615,6 +626,66 @@ impl Tx<'_> {
         self.flush_queued()
     }
 
+    /// `releases/rollback.json` (ops/release.sh `--rollback`), once: noted on the item it undid and as a
+    /// notification; when it went through, the YOLO undo that asked for it becomes undone. A rollback is
+    /// never the item's release: nothing about the item's state changes.
+    pub(crate) fn report_rollback(&mut self) -> Result<()> {
+        let f = self.cfg().home.join("releases/rollback.json");
+        let Ok(raw) = std::fs::read_to_string(&f) else {
+            return Ok(());
+        };
+        let Ok(mut r) = serde_json::from_str::<Value>(&raw) else {
+            return Ok(());
+        };
+        if r.get("reported").is_some_and(truthy) {
+            return Ok(());
+        }
+        if let Some(o) = r.as_object_mut() {
+            o.insert("reported".into(), Value::Bool(true));
+        }
+        std::fs::write(&f, pretty1(&r))?;
+        let s = |k: &str| r.get(k).and_then(Value::as_str).unwrap_or_default();
+        let ok = r.get("ok").is_some_and(truthy);
+        let text = if ok {
+            format!("已回滚到 {}（之前是 {}）", s("version"), s("prev"))
+        } else {
+            format!(
+                "回滚到 {} 没有成功：{}",
+                s("version"),
+                Some(s("error"))
+                    .filter(|e| !e.is_empty())
+                    .unwrap_or("健康检查没有通过")
+            )
+        };
+        let item = Some(s("item"))
+            .filter(|i| !i.is_empty())
+            .map(|i| self.db().item(i))
+            .transpose()?
+            .flatten();
+        if let Some(i) = &item {
+            self.db().timeline_add(&i.id, "steve", "sys", &text, None)?;
+        }
+        if ok && !s("action").is_empty() {
+            self.db().exec(
+                "UPDATE yolo_actions SET undone = ? WHERE id = ? AND undone IS NULL",
+                &[&now(), &s("action")],
+            )?;
+        }
+        let ws = item
+            .as_ref()
+            .map(|i| i.workspace_id.clone())
+            .unwrap_or_else(|| WS.into());
+        crate::notify::notify(
+            self.db(),
+            &ws,
+            "release",
+            if ok { "success" } else { "fail" },
+            &text,
+            item.as_ref().map(|i| i.id.as_str()),
+        )?;
+        Ok(())
+    }
+
     pub(crate) fn report_release(&mut self) -> Result<()> {
         let f = self.cfg().releases_last();
         let Ok(raw) = std::fs::read_to_string(&f) else {
@@ -674,21 +745,7 @@ impl Tx<'_> {
         } else {
             format!("已回到 {}", or_falsy("prev", "上一个版本"))
         };
-        let text = if kind == "rollback" && !abandoned {
-            if r.get("ok").is_some_and(truthy) {
-                format!(
-                    "已回滚到 {}（之前是 {}）",
-                    or("version", ""),
-                    or_falsy("prev", "上一个版本")
-                )
-            } else {
-                format!(
-                    "回滚到 {} 没有成功：{}",
-                    or("version", ""),
-                    or("error", "健康检查没有通过")
-                )
-            }
-        } else if abandoned {
+        let text = if abandoned {
             /* nobody knows which version is live now: don't claim a rollback */
             format!(
                 "发布{what} {} 失败：{NO_RESULT}，不确定现在是哪个版本；请看发布日志 {}",
@@ -718,10 +775,7 @@ impl Tx<'_> {
             None => None,
         };
         let version = r.get("version").filter(|v| truthy(v)).map(jstr);
-        if let Some(i) = &item.as_ref().filter(|_| kind == "rollback") {
-            /* a rollback (YOLO's undo) is not the item's release: only noted on it */
-            self.db().timeline_add(&i.id, "steve", "sys", &text, None)?;
-        } else if let Some(i) = &item {
+        if let Some(i) = &item {
             if r.get("ok").is_some_and(truthy) {
                 self.db().timeline_add(&i.id, "steve", "sys", &text, None)?;
                 /* `prev`: what a rollback of this release goes back to (YOLO's undo) */

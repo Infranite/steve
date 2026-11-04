@@ -16,9 +16,12 @@ database a newer one migrated. A database from before 0.2.14 has no record, so i
 - The Hub (0.2.14 on) checks this when it opens the database, before it writes anything. It refuses to start otherwise
   (`数据库（schema vN）需要至少认识 schema vM 的版本才能打开…` in the log). Older Hubs don't check.
 - So every script that switches `current` asks `ops/schema_gate.py check <db> <release dir>` first. A release's schema is
-  `schema.target` in its release.json, or `bin/steve-hub --build-info`. A release that tells neither is refused:
+  `schema.target` in its release.json (written from the binary when the release is built). A release that doesn't say is
+  refused:
   - `release.sh --rollback [<version>]` refuses before it drains anything. The YOLO undo uses it, and the Hub applies the
-    same rule (`Core::rollback_refusal`, release.json only) before it offers or starts one, so a refused undo is never shown;
+    same rule (`Core::rollback_refusal`) before it offers or starts one, so a refused undo is never shown. The result goes to
+    `releases/rollback.json`, not last.json (a Hub from before 0.2.14 would read that as a release); the Hub notes it on
+    the item and marks the undo done only when the rollback went through;
   - `release.sh` after a failed health check switches back only if the previous release can still open the database. If the
     new Hub migrated it past that, `current` stays on the failed release (exit 3; `degraded` in last.json and history; the
     Hub reports it as such, and YOLO leaves it to you), and the error names the pre-release backup;

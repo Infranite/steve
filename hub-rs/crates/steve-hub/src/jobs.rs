@@ -125,8 +125,10 @@ fn stamp(p: &Path) -> Option<(SystemTime, u64)> {
     Some((m.modified().ok()?, m.len()))
 }
 
-/// Polls `last.json` every 3 s and calls `reportRelease` on every change (create, rewrite, delete).
+/// Polls `last.json` (and the `rollback.json` next to it) every 3 s and calls `reportRelease` on every
+/// change (create, rewrite, delete).
 pub fn spawn_release_watcher(st: AppState, file: PathBuf) {
+    let stamp = |f: &Path| (stamp(f), stamp(&f.with_file_name("rollback.json")));
     tokio::spawn(async move {
         let mut last = stamp(&file);
         let mut tick = tokio::time::interval(RELEASE_POLL);
@@ -136,7 +138,7 @@ pub fn spawn_release_watcher(st: AppState, file: PathBuf) {
             let f = file.clone();
             let now = tokio::task::spawn_blocking(move || stamp(&f))
                 .await
-                .unwrap_or(None);
+                .unwrap_or((None, None));
             if now != last {
                 last = now;
                 if let Err(e) = st.domain.report_release().await {

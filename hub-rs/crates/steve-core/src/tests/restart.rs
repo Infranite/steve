@@ -504,6 +504,6 @@ fn upgrade_maintenance_refuses_source_release_and_rollback() {
     let i = k.item("run", "执行", None);
     k.db().store().maintenance_set(true).unwrap();
     assert!(k.core.tx().start_release("steve/test", &i).is_err());
-    assert!(k.core.tx().start_rollback(&i, "previous").is_err());
+    assert!(k.core.tx().start_rollback(&i, "previous", "").is_err());
     assert!(!k.core.source_release_busy());
 }

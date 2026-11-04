@@ -13,7 +13,7 @@
 # On a failure main is reset to where it was, so main stays what is deployed.
 # Writes $STEVE_HOME/releases/last.json for the Hub, web/last.json, releases/history.jsonl, logs/release/<ver>.log.
 # Usage: release.sh [--web|--hub] <branch|main> [item-id]          (ops/release-web.sh = release.sh --web)
-#        release.sh --rollback [<version>] [item-id]   switch `current` back to an installed release (default: the one before
+#        release.sh --rollback [<version>] [item-id] [yolo-action-id]   switch `current` back to an installed release (default: the one before
 #        current), restart, health-check; main and the web build are left alone. Refused when that release can't open
 #        the database (ops/schema_gate.py): an older Hub on a database a newer one migrated is what this must never do
 # Env: STEVE_HOME, STEVE_REPO, STEVE_PORT; STEVE_DRAIN_TOKEN (given by the Hub), STEVE_DRAIN_S (default 120: the Hub resumes turns a restart cut off, once within 30 min);
@@ -36,7 +36,7 @@ for a in "$@"; do
     *) ARGS+=$a ;;
   esac
 done
-BRANCH=${ARGS[1]:-main} ITEM=${ARGS[2]:-} HOME_DIR=${STEVE_HOME:-$HOME/.steve} REPO=${STEVE_REPO:-${OPS:h}}
+BRANCH=${ARGS[1]:-main} ITEM=${ARGS[2]:-} ACTION=${ARGS[3]:-} HOME_DIR=${STEVE_HOME:-$HOME/.steve} REPO=${STEVE_REPO:-${OPS:h}}
 LABEL=${STEVE_LABEL:-io.github.infranite.steve} PORT=${STEVE_PORT:-8440} DRAIN_S=${STEVE_DRAIN_S:-120} WEB_KEEP=${STEVE_WEB_KEEP:-10}
 REL=$HOME_DIR/releases WEB=$HOME_DIR/web LOGS=$HOME_DIR/logs/release HIST=$HOME_DIR/releases/history.jsonl
 CARGO_TARGET=${STEVE_CARGO_TARGET_DIR:-$HOME_DIR/build/cargo-target} HEALTH_TRIES=${STEVE_HEALTH_TRIES:-40} DB=$HOME_DIR/data/steve.sqlite3
@@ -62,6 +62,11 @@ history() { # kind ok error rolled_back started prev files...   (DEGRADED=true: 
   [[ $kind == hub || $kind == rollback ]] && hx=",\"degraded\":${DEGRADED:-false},\"hub\":$(js "$HUB_IMPL"),\"prev_hub\":$(js "$PREV_IMPL"),\"backup\":$(js "$BACKUP"),\"schema_before\":$(js "$SCHEMA_BEFORE"),\"schema_after\":$(js "$SCHEMA_AFTER")"
   print -r -- "{\"kind\":$(js "$kind"),\"version\":$(js "$VER"),\"prev\":$(js "$prev"),\"commit\":$(js "$COMMIT"),\"branch\":$(js "$BRANCH"),\"item\":$(js "$ITEM"),\"files_changed\":$(jarr "$@"),\"started\":$(js "$(iso $t)"),\"finished\":$(js "$(iso)"),\"duration_s\":$(( EPOCHSECONDS - t )),\"ok\":$ok,\"error\":$(js "$err"),\"rolled_back\":$rb,\"log\":$(js "$LOG")$hx}" >>$HIST
   print -r -- "   history: $kind $VER ok=$ok${err:+ error=$err} rolled_back=$rb${hx:+ hub=$PREV_IMPL->$HUB_IMPL backup=${BACKUP:-none} schema=${SCHEMA_BEFORE:-?}->${SCHEMA_AFTER:-?}}"
+}
+# a rollback's result: its own file, so a Hub from before 0.2.14 (which would read last.json as the item's release) never
+# sees it; the Hub notes it on the item and, when it went through, marks the YOLO undo that asked for it done
+rollback_result() { # ok error
+  print -r -- "{\"ok\":$1,\"version\":$(js "$VER"),\"prev\":$(js "$PREV"),\"item\":$(js "$ITEM"),\"action\":$(js "$ACTION"),\"error\":$(js "$2"),\"log\":$(js "$LOG"),\"at\":$EPOCHSECONDS}" >$REL/rollback.json
 }
 web_last() { # ok error rolled_back
   print -r -- "{\"ok\":$1,\"version\":$(js "$VER"),\"prev\":$(js "$WEB_PREV"),\"commit\":$(js "$COMMIT"),\"branch\":$(js "$BRANCH"),\"item\":$(js "$ITEM"),\"error\":$(js "$2"),\"rolled_back\":$3,\"log\":$(js "$LOG"),\"at\":$EPOCHSECONDS}" >$WEB/last.json
@@ -313,13 +318,13 @@ rollback_main() { # [version]
   T0=$EPOCHSECONDS T_HUB=$EPOCHSECONDS KIND=rollback
   step "rollback ${target:-to the previous release}"
   print -r -- "   home=$HOME_DIR port=$PORT current=${cur:-none}; restart: ${STEVE_RESTART_CMD:-launchctl kickstart -k gui/$(id -u)/$LABEL}"
-  touch $REL/.release.lock; zsystem flock -t 0 $REL/.release.lock 2>/dev/null || { print "✗ 另一个发布正在进行"; finish 1 }
+  touch $REL/.release.lock; zsystem flock -t 0 $REL/.release.lock 2>/dev/null || { print "✗ 另一个发布正在进行"; VER=$target; rollback_result false "另一个发布正在进行"; finish 1 }
   print "   installed:"; for d in $REL/2*(N/On); do print -r -- "     ${d:t} ($(impl_of $d))$([[ ${d:t} == $cur ]] && print ' <- current')"; done
   if [[ -z $target ]]; then
     for d in $REL/2*(N/On); do [[ ${d:t} < $cur ]] && { target=${d:t}; break }; done
   fi
-  [[ -n $target && -f $REL/$target/release.json ]] || { print -r -- "✗ no release to roll back to (${target:-none found})"; finish 1 }
-  [[ $target != $cur ]] || { print -r -- "✗ $target is already current"; finish 1 }
+  [[ -n $target && -f $REL/$target/release.json ]] || { print -r -- "✗ no release to roll back to (${target:-none found})"; VER=$target; rollback_result false "没有可以回滚到的版本（${target:-无}）"; finish 1 }
+  [[ $target != $cur ]] || { print -r -- "✗ $target is already current"; VER=$target; rollback_result false "$target 已经是当前版本"; finish 1 }
   VER=$target COMMIT=$(json_field $REL/$target/release.json commit) BRANCH=$(json_field $REL/$target/release.json branch)
   HUB_IMPL=$(impl_of $REL/$target) PREV_IMPL=$([[ -n $cur ]] && impl_of $REL/$cur)
   name_log rollback-$target-$(strftime '%H%M%S' $EPOCHSECONDS)
@@ -330,7 +335,7 @@ rollback_main() { # [version]
     err="不能回滚到 $target：$why；当前版本保留"
     print -r -- "✗ $err"
     SCHEMA_BEFORE=$(schema) SCHEMA_AFTER=$SCHEMA_BEFORE
-    history rollback false "$err" false $T_HUB "$cur"; last false "$err"
+    history rollback false "$err" false $T_HUB "$cur"; rollback_result false "$err"
     finish 1
   fi
   print -r -- "   yes: $(python3 $OPS/schema_gate.py state $DB)"
@@ -341,7 +346,7 @@ rollback_main() { # [version]
     BACKUP=$HOME_DIR/backups/rollback-$(strftime '%Y%m%d-%H%M%S' $EPOCHSECONDS).sqlite3
     if ! run sqlite3 $DB ".backup '$BACKUP'"; then
       err="回滚前数据库备份失败，没有切换"; print -r -- "✗ $err"
-      SCHEMA_AFTER=$SCHEMA_BEFORE; history rollback false "$err" false $T_HUB "$cur"; last false "$err"; finish 1
+      SCHEMA_AFTER=$SCHEMA_BEFORE; history rollback false "$err" false $T_HUB "$cur"; rollback_result false "$err"; finish 1
     fi
   fi
   step "rollback: switch to $target and restart"
@@ -357,7 +362,7 @@ rollback_main() { # [version]
   fi
   SCHEMA_AFTER=$(schema)
   history rollback $ok "$err" false $T_HUB "$cur"
-  last $ok "$err"
+  rollback_result $ok "$err"
   finish $([[ $ok == true ]] && print 0 || print 1)
 }
 

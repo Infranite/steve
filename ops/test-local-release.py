@@ -6,7 +6,8 @@
 The service is this script (`__service start|stop`, through STEVE_SERVICE_CMD) instead of launchd. Cases:
   - a deploy drains the running Hub, switches, and leaves no drain behind (business answers, /healthz drain false);
   - a release that can't open the database is refused before anything stops;
-  - a release whose probe fails gets the backup put back, the old version restarted, the drain lifted.
+  - a release whose probe fails gets the backup put back, the old version restarted, the drain lifted;
+  - a switch that fails halfway (the web link) puts the links and the database back, restarts and lifts the drain.
 Never touches ~/.steve, launchd or port 8440.
 """
 import json
@@ -187,6 +188,23 @@ with tempfile.TemporaryDirectory(prefix="steve-local-release-") as tmp:
             assert c.execute("SELECT v FROM local_release_evidence").fetchone()[0] == "kept"
         assert list((home / "backups").glob("failed-probe-0.9.0-badweb-*"))
         ok("probe failed: b runs again on the restored database, drain lifted, the probed database kept apart")
+
+        print("── the web link fails after the probe and the Hub link: everything goes back")
+        before = pid()
+        (home / "web").chmod(0o555)  # web/current can't be replaced
+        try:
+            r = deploy(bundle("0.9.0-c"))
+        finally:
+            (home / "web").chmod(0o755)
+        assert r.returncode == 1, r.stdout + r.stderr
+        assert (home / "current").resolve() == b.resolve(), (home / "current").resolve()
+        assert (home / "web/current").resolve() == (b / "web/dist").resolve()
+        h = wait(lambda: (health() or {}).get("drain") is False and health(), "b back without the drain")
+        assert business() != 503 and pid() != before
+        res = json.loads(sorted((home / "logs/release").glob("local-*.json"))[-1].read_text())
+        assert res["recovered"] is True and res["phase"] == "switch", res
+        assert any("current back" in x for x in res["recovery"]) and any("backup is back" in x for x in res["recovery"]), res
+        ok("current and the database put back, b restarted, drain lifted, recorded as recovered")
     except BaseException:
         print((home / "hub.log").read_text()[-6000:], file=sys.stderr)
         raise

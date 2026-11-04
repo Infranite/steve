@@ -133,7 +133,7 @@ impl Engine {
                     .ok_or_else(|| ApiError::rule(CANNOT))?;
                 let prev = d.result["prev"].as_str().unwrap_or_default().to_string();
                 let item = d.item_id.clone().ok_or_else(|| ApiError::rule(CANNOT))?;
-                let log = core.rollback_release(&item, &prev).map_err(ce)?;
+                let log = core.rollback_release(&item, &prev, &a.id).map_err(ce)?;
                 detail["prev"] = json!(prev);
                 detail["log"] = json!(log);
             }
@@ -186,7 +186,10 @@ impl Engine {
             )?;
             Ok::<_, ApiError>(())
         })?;
-        self.yolo().undone(ws, &a.id)?;
+        // a rollback is undone once it went through (the target Hub marks it from releases/rollback.json)
+        if kind != "rollback" {
+            self.yolo().undone(ws, &a.id)?;
+        }
         self.yolo()
             .store()
             .reader(|c| repo::action_get(c, &a.id))?
