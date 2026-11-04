@@ -5,6 +5,7 @@
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use steve_modules::accounts::connections::WAITING;
 use steve_store::Tx;
 
 use crate::adapter::{FolderInfo, FolderState, ScopeMode};
@@ -826,11 +827,16 @@ pub fn thread_drafts(c: &Connection, thread: &str) -> MailResult<Vec<DraftRow>> 
         .collect::<rusqlite::Result<_>>()?)
 }
 
-/// Approved drafts whose delay is over (the send queue), oldest first.
+/// Approved drafts whose delay is over (the send queue), oldest first; those of a connection that
+/// waits ([`WAITING`]: paused, to be authorized again) stay approved and aren't listed.
 pub fn due_drafts(c: &Connection, now: i64, limit: i64) -> MailResult<Vec<(String, String)>> {
-    let mut st = c.prepare_cached(
-        "SELECT id, workspace_id FROM mail_drafts WHERE status = 'approved' AND send_at <= ? ORDER BY send_at LIMIT ?",
-    )?;
+    let waiting = WAITING.map(|s| format!("'{s}'")).join(", ");
+    let mut st = c.prepare_cached(&format!(
+        "SELECT d.id, d.workspace_id FROM mail_drafts d
+          WHERE d.status = 'approved' AND d.send_at <= ?
+            AND NOT EXISTS (SELECT 1 FROM connections c WHERE c.id = d.connection_id AND c.status IN ({waiting}))
+          ORDER BY d.send_at LIMIT ?"
+    ))?;
     Ok(st
         .query_map(params![now, limit], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<rusqlite::Result<_>>()?)

@@ -184,6 +184,9 @@ pub enum Fault {
     BadCredentials,
     /// Any status with a GitHub-style `{message}` body.
     Status { status: u16, message: String },
+    /// The request is carried out, but its answer is lost: `502` instead (a write that happened
+    /// although the caller can't tell).
+    LostAnswer,
 }
 
 #[derive(Debug, Clone)]

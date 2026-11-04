@@ -1,7 +1,8 @@
 //! The outbox dispatcher (steve-store [`outbox`]): Work's and Automation's consumers of
-//! `work.item.done`, registered while the Hub is wired (before anything can finish an item), and run
-//! as a job once the flow scheduler recovered interrupted runs, woken by each commit that emitted an
-//! event and every [`FALLBACK`] in case a wake-up was missed.
+//! `work.item.done`, Mail's of `mail.event.ready` and GitHub's of `github.after`, registered while
+//! the Hub is wired (before anything can finish an item), and run as a job once the flow scheduler
+//! recovered interrupted runs, woken by each commit that emitted an event and every [`FALLBACK`]
+//! in case a wake-up was missed.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -15,14 +16,17 @@ pub const FALLBACK: Duration = Duration::from_secs(60);
 pub const PRUNE_EVERY: Duration = Duration::from_secs(3600);
 
 /// The consumers of this Hub, registered: those new to the database start at the beginning of their
-/// topic, so nothing this version emitted before is skipped.
+/// topic, so nothing this version emitted before is skipped. `modules`: the other modules' consumers
+/// (a stored mail's event).
 pub fn dispatcher(
     store: &Store,
     core: &steve_core::Core,
     flow: &Arc<steve_flow::FlowCx>,
+    modules: Vec<Arc<dyn outbox::Consumer>>,
 ) -> Result<Arc<Dispatcher>, steve_store::StoreError> {
     let mut consumers = core.outbox_consumers();
     consumers.push(steve_flow::ItemTrigger::new(flow.clone()));
+    consumers.extend(modules);
     let d = Arc::new(Dispatcher::new(consumers));
     d.register(store)?;
     Ok(d)

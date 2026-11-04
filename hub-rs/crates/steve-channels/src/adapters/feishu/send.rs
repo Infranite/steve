@@ -29,6 +29,8 @@ pub const MAX_TEXT: usize = 4000;
 pub const TRUNCATED: &str = "（太长，已截断）";
 /// Feishu's limit on `uuid`.
 pub const MAX_UUID: usize = 50;
+/// How long Feishu drops a repeat of a send with the same `uuid` (its API documents one hour).
+pub const UUID_DEDUP: std::time::Duration = std::time::Duration::from_secs(3600);
 
 /// What Feishu accepted.
 #[derive(Debug, Clone, PartialEq, Eq)]

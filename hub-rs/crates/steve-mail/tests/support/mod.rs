@@ -38,6 +38,7 @@ pub struct H {
     pub mail: Mail,
     pub cfg: MailConfig,
     pub events: Arc<RecordingEvents>,
+    pub dispatcher: Arc<steve_store::outbox::Dispatcher>,
     pub notified: Arc<Mutex<Vec<String>>>,
     pub imap: FakeImap,
     pub smtp: FakeSmtp,
@@ -138,7 +139,12 @@ pub async fn setup_with(o: Opts) -> H {
             n.lock().unwrap().push(id.to_string())
         })))
         .build();
+    let dispatcher = Arc::new(steve_store::outbox::Dispatcher::new(vec![
+        steve_mail::outbox::MailEventsOut::new(mail.clone()),
+    ]));
+    dispatcher.register(env.store()).expect("register");
     H {
+        dispatcher,
         env,
         link,
         _keys: keys,
@@ -200,8 +206,19 @@ impl H {
             .id
     }
 
+    /// Syncs, then delivers what the sync put in the outbox (the Hub's dispatcher does it there).
     pub async fn sync(&self, conn: &str) -> steve_mail::SyncReport {
-        self.mail.sync_now(WS, conn).await.expect("sync")
+        let r = self.mail.sync_now(WS, conn).await.expect("sync");
+        self.deliver().await;
+        r
+    }
+
+    /// One pass of an outbox dispatcher with the mail's consumer, on a blocking thread as in the Hub.
+    pub async fn deliver(&self) -> steve_store::outbox::Pumped {
+        let (d, store) = (self.dispatcher.clone(), self.env.store().clone());
+        tokio::task::spawn_blocking(move || d.pump(&store, steve_store::now()).expect("pump"))
+            .await
+            .expect("pump task")
     }
 
     pub fn inject(&self, folder: &str, eml: &[u8]) -> u32 {
@@ -270,14 +287,18 @@ impl H {
     }
 
     /// Waits until `f` holds (up to `secs`).
+    /// Polls `f` for up to `secs`; between polls the outbox is delivered, as the Hub's dispatcher
+    /// would (the background runners only put the events there).
     pub async fn until(&self, secs: u64, mut f: impl FnMut(&H) -> bool) -> bool {
         let end = tokio::time::Instant::now() + Duration::from_secs(secs);
         while tokio::time::Instant::now() < end {
+            self.deliver().await;
             if f(self) {
                 return true;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
+        self.deliver().await;
         f(self)
     }
 }

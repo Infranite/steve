@@ -2676,3 +2676,219 @@ async fn only_you_reading_skips_the_model_check_but_not_secrets() {
     assert_eq!(r.verdict, Verdict::Leak, "{r:?}");
     assert_eq!(asked(), 1);
 }
+
+/// Y4: the connection is checked when the message goes out, not when it was approved: approved
+/// while it worked, paused before the delay ended → nothing reaches the adapter; it waits, and goes
+/// out once the connection is resumed.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_approved_message_is_not_sent_on_a_paused_connection() {
+    let h = setup().await;
+    checks_pass(&h);
+    h.env.gateway.script(H_SAFETY, REPLY);
+    let me = h.me.clone();
+    let r = push(
+        &h,
+        &me,
+        msg("C_DEV", "d1", "ulilei", "@你 周四能上线吗", true),
+    )
+    .await
+    .response
+    .expect("response");
+    let m = r.out_message_id.expect("draft");
+    decide(&h, &r.decision_id.expect("decision"), "yes", "").expect("approve");
+    exec(
+        &h,
+        &format!("UPDATE connections SET status = 'paused' WHERE id = '{me}'"),
+    );
+    h.env.clock.advance(11_000);
+    h.outbox.send_due(&h.ch).await;
+    nothing_sent(&h);
+    assert_eq!(status(&h, &m), "pending", "waits");
+    exec(
+        &h,
+        &format!("UPDATE connections SET status = 'ok' WHERE id = '{me}'"),
+    );
+    h.outbox.send_due(&h.ch).await;
+    assert_eq!(sent(&h).len(), 1);
+    assert_eq!(status(&h, &m), "sent");
+}
+
+/// Y4: approved in your name, then sending as you turned off before it went out → not sent as
+/// you, and the card says which switch.
+#[tokio::test(flavor = "multi_thread")]
+async fn sending_as_you_turned_off_after_approval_stops_the_message() {
+    let h = setup().await;
+    checks_pass(&h);
+    h.env.gateway.script(H_SAFETY, REPLY);
+    let me = h.me.clone();
+    let r = push(
+        &h,
+        &me,
+        msg("C_DEV", "d1", "ulilei", "@你 周四能上线吗", true),
+    )
+    .await
+    .response
+    .expect("response");
+    let m = r.out_message_id.expect("draft");
+    decide(&h, &r.decision_id.expect("decision"), "yes", "").expect("approve");
+    exec(
+        &h,
+        &format!("UPDATE connections SET caps = '[\"msg.receive\"]' WHERE id = '{me}'"),
+    );
+    h.env.clock.advance(11_000);
+    h.outbox.send_due(&h.ch).await;
+    nothing_sent(&h);
+    assert_eq!(status(&h, &m), "failed");
+    let q = row(
+        &h,
+        "SELECT question FROM decisions WHERE id = ?",
+        &[&decision_of(&h, &m)],
+    );
+    assert!(q[0].as_str().unwrap().contains("msg.send_as_user"), "{q:?}");
+}
+
+// ---------------------------------------------------------------- F07 / F08: unknown and recovery
+
+/// F08: the reply went out but its answer was lost: `unknown`, not failed, no retry card, no ❌.
+/// The queue sends it again within the dedupe window with the same uuid and text: one message in
+/// the chat, `sent`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reply_whose_answer_was_lost_is_sent_again_under_its_uuid() {
+    let h = setup().await;
+    checks_pass(&h);
+    h.env.gateway.script(H_SAFETY, REPLY);
+    *h.fake.lose_answer.lock().unwrap() = true;
+    let r = push(
+        &h,
+        &h.oncall.clone(),
+        msg("C_OPS", "o1", "ulilei", "部署挂了", true),
+    )
+    .await
+    .response
+    .unwrap();
+    let m = r.out_message_id.unwrap();
+    assert_eq!(status(&h, &m), "unknown");
+    assert!(
+        row(
+            &h,
+            "SELECT decision_id FROM chan_messages WHERE id = ?",
+            &[&m]
+        )[0]
+        .is_null(),
+        "no retry card"
+    );
+    assert_eq!(sent(&h).len(), 1, "it is out");
+    h.outbox.send_due(&h.ch).await;
+    assert_eq!(status(&h, &m), "sent");
+    assert_eq!(sent(&h).len(), 1, "the repeat was dropped (same uuid)");
+}
+
+/// F08: past the dedupe window, an unknown message is not sent again by itself: a card asks, and
+/// “sent” settles it.
+#[tokio::test(flavor = "multi_thread")]
+async fn past_the_window_an_unknown_message_is_asked_about() {
+    let h = setup().await;
+    checks_pass(&h);
+    h.env.gateway.script(H_SAFETY, REPLY);
+    *h.fake.lose_answer.lock().unwrap() = true;
+    let r = push(
+        &h,
+        &h.oncall.clone(),
+        msg("C_OPS", "o1", "ulilei", "部署挂了", true),
+    )
+    .await
+    .response
+    .unwrap();
+    let m = r.out_message_id.unwrap();
+    h.env.clock.advance(steve_channels::outbound::LATE_MS + 1);
+    h.outbox.send_due(&h.ch).await;
+    assert_eq!(sent(&h).len(), 1, "not sent again");
+    let d = decision_of(&h, &m);
+    let q = row(
+        &h,
+        "SELECT question, options FROM decisions WHERE id = ?",
+        &[&d],
+    );
+    assert!(q[0].as_str().unwrap().contains("可能已经发出"), "{q:?}");
+    assert_eq!(q[1], json!(r#"["sent","retry","discard"]"#));
+    h.outbox.send_due(&h.ch).await;
+    assert_eq!(
+        count(
+            &h,
+            "SELECT count(*) FROM decisions WHERE subject_id = ? AND status = 'open'",
+            &[&m]
+        ),
+        1,
+        "asked once"
+    );
+    decide(&h, &d, "sent", "").expect("sent");
+    assert_eq!(status(&h, &m), "sent");
+}
+
+/// F07: a rule's reply (no decision) that the Hub could not send when it was made (maintenance
+/// here, a restart in life) is found again and sent under the authorization it was stored with.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_direct_reply_cut_off_before_its_send_is_sent_by_the_queue() {
+    let h = setup().await;
+    checks_pass(&h);
+    h.env.gateway.script(H_SAFETY, REPLY);
+    h.env.store().maintenance_set(true).unwrap();
+    let r = push(
+        &h,
+        &h.oncall.clone(),
+        msg("C_OPS", "o1", "ulilei", "部署挂了", true),
+    )
+    .await
+    .response
+    .unwrap();
+    let m = r.out_message_id.unwrap();
+    nothing_sent(&h);
+    assert_eq!(status(&h, &m), "pending");
+    h.env.store().maintenance_set(false).unwrap();
+    h.outbox.send_due(&h.ch).await;
+    nothing_sent(&h); // not yet: an inline send may still be claiming it
+    h.env
+        .clock
+        .advance(steve_channels::outbound::UNCLAIMED_MS + 1);
+    h.outbox.send_due(&h.ch).await;
+    assert_eq!(sent(&h).len(), 1);
+    assert_eq!(status(&h, &m), "sent");
+}
+
+/// F08 (Codex E5 review): a message tried before never goes out again past its dedupe window,
+/// whatever path brings it back (here: back to pending, as an interrupted resend would leave it);
+/// it is unknown and you are asked.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_tried_message_is_not_sent_again_past_its_window_by_any_path() {
+    let h = setup().await;
+    checks_pass(&h);
+    h.env.gateway.script(H_SAFETY, REPLY);
+    *h.fake.lose_answer.lock().unwrap() = true;
+    let r = push(
+        &h,
+        &h.oncall.clone(),
+        msg("C_OPS", "o1", "ulilei", "部署挂了", true),
+    )
+    .await
+    .response
+    .unwrap();
+    let m = r.out_message_id.unwrap();
+    h.env.clock.advance(3_600_000 + 1);
+    exec(
+        &h,
+        &format!(
+            "UPDATE chan_messages SET status = 'pending', sent = NULL, created = 0 WHERE id = '{m}'"
+        ),
+    );
+    h.outbox.send_due(&h.ch).await;
+    h.outbox.send_due(&h.ch).await;
+    let sends = h.fake.sent.lock().unwrap().len();
+    assert_eq!(sends, 1, "not sent again");
+    assert_eq!(status(&h, &m), "unknown");
+    let q = row(
+        &h,
+        "SELECT options FROM decisions WHERE id = ?",
+        &[&decision_of(&h, &m)],
+    );
+    assert_eq!(q[0], json!(r#"["sent","retry","discard"]"#));
+}

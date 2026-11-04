@@ -870,3 +870,131 @@ async fn draft_false_and_no() {
     let n = n.as_i64().expect("PR opened") as u64;
     assert!(!h.fake.pull(REPO, n).expect("PR").draft);
 }
+
+/// Y4: a write is checked when it happens: a paused connection or `repo.write` turned off refuses
+/// the comment with the reason, and nothing reaches GitHub; resumed, it goes through.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_comment_is_refused_while_the_connection_cannot_write() {
+    let h = setup().await;
+    let id = item(&h, 1, Some(PROJECT), Some(BRANCH));
+    let (n, _) = pr_with_failure(&h, "ok\n").await;
+    let pr = q(&h, "SELECT id FROM gh_prs WHERE item_id = ?", &[&id]);
+    let conn = q(&h, "SELECT connection_id FROM gh_repos LIMIT 1", &[]);
+    let conn = conn.as_str().expect("connection").to_string();
+    let me = caller(WS, ME);
+    let set = |status: &str, caps: &str| {
+        h.env
+            .store()
+            .transaction(|tx| {
+                tx.execute(
+                    "UPDATE connections SET status = ?, caps = ? WHERE id = ?",
+                    rusqlite::params![status, caps, conn],
+                )?;
+                Ok::<_, steve_store::StoreError>(())
+            })
+            .expect("set");
+    };
+    for (status, caps, why) in [
+        ("paused", r#"["repo.read","repo.write","events"]"#, "已暂停"),
+        ("ok", r#"["repo.read","events"]"#, "repo.write"),
+    ] {
+        set(status, caps);
+        let (s, v) = call(
+            &h.api,
+            Some(&me),
+            "POST",
+            "/github/comments",
+            Some(&json!({"target": "pr", "id": pr, "body": "看起来不错"})),
+        )
+        .await;
+        assert_ne!(s, 200, "{status}: {v}");
+        assert!(v.to_string().contains(why), "{status}: {v}");
+        assert!(h.fake.comments(REPO, n).is_empty(), "{status}");
+    }
+    set("ok", r#"["repo.read","repo.write","events"]"#);
+    let (s, v) = call(
+        &h.api,
+        Some(&me),
+        "POST",
+        "/github/comments",
+        Some(&json!({"target": "pr", "id": pr, "body": "看起来不错"})),
+    )
+    .await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(h.fake.comments(REPO, n), ["看起来不错"]);
+}
+
+/// Y2: GitHub posted the approved comment but the answer was lost: unknown, and the session hears
+/// it may be out; the next run finds that comment (same body, no other effect's) and does not post
+/// it again.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_posted_comment_whose_answer_was_lost_is_found_not_posted_twice() {
+    let h = setup().await;
+    let id = item(&h, 1, Some(PROJECT), Some(BRANCH));
+    let (n, _) = pr_with_failure(&h, "ok\n").await;
+    let c = cx(Some(&id), BOT);
+    tool(&h, &c, mcp::COMMENT, json!({"body": "修好了"}))
+        .await
+        .expect("comment");
+    let (dec, _, _) = open_decision(&h, comment::COMMENT).expect("asked");
+    h.fake
+        .fail_next_on("/comments", steve_github::fake::Fault::LostAnswer);
+    answer(&h, &dec, "yes", "").await;
+    assert_eq!(h.fake.comments(REPO, n).len(), 1, "it went out");
+    assert_eq!(
+        q(
+            &h,
+            "SELECT state FROM gh_effects WHERE decision_id = ?",
+            &[&dec]
+        ),
+        json!("unknown")
+    );
+    h.env.clock.advance(steve_store::outbox::backoff(1) + 1);
+    h.gh.settle().await;
+    assert_eq!(
+        q(
+            &h,
+            "SELECT state FROM gh_effects WHERE decision_id = ?",
+            &[&dec]
+        ),
+        json!("done")
+    );
+    assert_eq!(h.fake.comments(REPO, n).len(), 1, "not posted twice");
+}
+
+/// Y2 (Codex E4 review): a comment that may have been posted and is not on GitHub (it failed, or
+/// someone deleted it) is not posted again by itself: stuck, and the session hears why.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_comment_not_found_after_a_failure_is_not_posted_again() {
+    let h = setup().await;
+    let id = item(&h, 1, Some(PROJECT), Some(BRANCH));
+    let (n, _) = pr_with_failure(&h, "ok\n").await;
+    let c = cx(Some(&id), BOT);
+    tool(&h, &c, mcp::COMMENT, json!({"body": "修好了"}))
+        .await
+        .expect("comment");
+    let (dec, _, _) = open_decision(&h, comment::COMMENT).expect("asked");
+    h.fake.fail_next_on(
+        "/comments",
+        steve_github::fake::Fault::Status {
+            status: 502,
+            message: "Bad Gateway".into(),
+        },
+    );
+    answer(&h, &dec, "yes", "").await;
+    assert!(h.fake.comments(REPO, n).is_empty());
+    h.env.clock.advance(steve_store::outbox::backoff(1) + 1);
+    h.gh.settle().await;
+    assert!(
+        h.fake.comments(REPO, n).is_empty(),
+        "not posted again by itself"
+    );
+    assert_eq!(
+        q(
+            &h,
+            "SELECT state || '|' || (next_at IS NULL) FROM gh_effects WHERE decision_id = ?",
+            &[&dec]
+        ),
+        json!("unknown|1")
+    );
+}

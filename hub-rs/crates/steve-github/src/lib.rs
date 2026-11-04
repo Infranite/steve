@@ -78,11 +78,13 @@
 
 pub mod accept;
 pub mod adapters;
+pub mod after;
 pub mod api;
 pub mod auth;
 pub mod comment;
 pub mod config;
 pub mod core;
+pub mod effects;
 pub mod events;
 pub mod flow;
 pub mod hooks;
@@ -195,7 +197,8 @@ struct Inner {
     available: repos::AvailableCache,
     core: RwLock<Arc<dyn ItemCore>>,
     flow: RwLock<Option<Arc<steve_flow::FlowCx>>>,
-    effects: accept::EffectQueue,
+    /// Wakes the effect runner ([`effects`]) after an answer queued a write.
+    effect_wake: Arc<tokio::sync::Notify>,
     sessions: RwLock<Option<Arc<dyn SessionSink>>>,
 }
 
@@ -214,7 +217,7 @@ impl GitHub {
             available: Default::default(),
             core: RwLock::new(Arc::new(NoCore)),
             flow: RwLock::new(None),
-            effects: Default::default(),
+            effect_wake: Default::default(),
             sessions: RwLock::new(None),
         }))
     }
@@ -268,7 +271,7 @@ impl GitHub {
         *self.0.notifier.write().unwrap_or_else(|e| e.into_inner()) = n;
     }
 
-    fn sink(&self) -> Arc<dyn EventSink> {
+    pub(crate) fn sink(&self) -> Arc<dyn EventSink> {
         self.0
             .sink
             .read()
@@ -312,7 +315,20 @@ impl GitHub {
 
     /// The API client of a GitHub connection in `ws` (404 when it isn't one).
     pub fn conn(&self, ws: &str, connection_id: &str) -> VaultResult<GhConn> {
-        let cx = self.0.conns.cx(ws, connection_id)?;
+        self.gh_conn(self.0.conns.cx(ws, connection_id)?)
+    }
+
+    /// The client for a write (push, PR, merge, comment, rerun), checked when it happens: refused
+    /// while the connection is paused, to be authorized again or revoked, or `repo.write` is off.
+    pub fn conn_for_write(&self, ws: &str, connection_id: &str) -> VaultResult<GhConn> {
+        self.gh_conn(
+            self.0
+                .conns
+                .cx_for(ws, connection_id, Some(adapters::WRITE_CAP))?,
+        )
+    }
+
+    fn gh_conn(&self, cx: steve_modules::accounts::connections::ConnCx) -> VaultResult<GhConn> {
         if cx.adapter() != adapters::github_app::ID && cx.adapter() != adapters::github_pat::ID {
             return Err(steve_modules::ApiError::not_found("连接").into());
         }

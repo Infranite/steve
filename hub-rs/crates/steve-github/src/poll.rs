@@ -97,7 +97,7 @@ impl GitHub {
             if let Err(e) = gh.poll_repo(&repo_id).await {
                 tracing::warn!(repo = %repo_id, error = %e, "github sync failed");
             }
-            gh.done_one();
+            gh.settled_one();
         });
     }
 
@@ -144,7 +144,7 @@ impl GitHub {
                 let payload =
                     json!({"action": "poll", "pull_request": pr, "repository": repository});
                 self.poll_change(&r, &key, "pull_request", &payload, &mut rep)
-                    .await;
+                    .await?;
             }
         }
 
@@ -189,7 +189,7 @@ impl GitHub {
             let key = format!("poll:{}:checks:{sha}:{}", r.id, &digest[..16]);
             let payload = json!({"sha": sha, "check_runs": runs, "statuses": statuses, "repository": repository});
             self.poll_change(&r, &key, "poll_checks", &payload, &mut rep)
-                .await;
+                .await?;
         }
 
         // 3. Issues, every 10 minutes.
@@ -221,7 +221,7 @@ impl GitHub {
                 let key = format!("poll:{}:issue:{n}:{u}", r.id);
                 let payload = json!({"action": "poll", "issue": i, "repository": repository});
                 self.poll_change(&r, &key, "issues", &payload, &mut rep)
-                    .await;
+                    .await?;
             }
         }
 
@@ -249,7 +249,8 @@ impl GitHub {
         Ok(rep)
     }
 
-    /// Applies one polled view unless its synthetic delivery is known.
+    /// Applies one polled view unless its synthetic delivery is known. `Err`: it could not even be
+    /// recorded, so the poll must not move past it (its cursors stay).
     async fn poll_change(
         &self,
         r: &RepoRow,
@@ -257,48 +258,44 @@ impl GitHub {
         event: &str,
         payload: &Value,
         rep: &mut PollReport,
-    ) {
+    ) -> Result<(), String> {
         let row = DeliveryRow {
             delivery_id: key.into(),
             workspace_id: Some(r.workspace_id.clone()),
             repo_id: Some(r.id.clone()),
             event: event.into(),
             action: Some("poll".into()),
-            status: "ok".into(),
+            status: repo::RECEIVED.into(),
             error: None,
             received: self.now(),
         };
+        let source = Source::Poll {
+            repo_id: r.id.clone(),
+        };
+        let src = serde_json::to_string(&source).unwrap_or_default();
+        let body = payload.to_string();
         match self
             .store()
-            .transaction(|tx| repo::insert_delivery(tx, &row).map_err(ApiError::from))
+            .transaction(|tx| repo::insert_delivery(tx, &row, &src, &body).map_err(ApiError::from))
         {
             Ok(true) => {}
             Ok(false) => {
                 rep.seen += 1;
-                return;
+                return Ok(());
             }
             Err(e) => {
                 tracing::error!(error = %e, "github poll delivery not recorded");
-                return;
+                return Err(format!("轮询到的变化没有记下：{e}"));
             }
         }
         rep.applied += 1;
-        let out = self
-            .apply(
-                &Source::Poll {
-                    repo_id: r.id.clone(),
-                },
-                event,
-                payload,
-            )
-            .await;
-        let res = self.store().transaction(|tx| {
-            repo::set_delivery_result(tx, key, None, None, out.status, out.error.as_deref())
-                .map_err(ApiError::from)
-        });
-        if let Err(e) = res {
-            tracing::error!(error = %e, "github poll result not recorded");
+        if !self.take_delivery(key) {
+            return Ok(());
         }
+        let out = self.apply(&source, event, payload).await;
+        self.delivered(key, event, &out);
+        self.release_delivery(key);
+        Ok(())
     }
 
     /// Drops deliveries older than [`DELIVERY_KEEP_MS`].
@@ -309,7 +306,8 @@ impl GitHub {
             .unwrap_or(0)
     }
 
-    /// The background job: polls what is due every 30 seconds, prunes deliveries hourly. Holds
+    /// The background job: queues deliveries left `received` (on start: the first tick is at once),
+    /// polls what is due every 30 seconds, prunes deliveries hourly. Holds
     /// only a weak reference; stops when the service is dropped.
     pub fn spawn_jobs(&self) -> tokio::task::JoinHandle<()> {
         let weak: Weak<Inner> = std::sync::Arc::downgrade(&self.0);
@@ -321,6 +319,8 @@ impl GitHub {
                 tick.tick().await;
                 let Some(inner) = weak.upgrade() else { break };
                 let gh = GitHub(inner);
+                // first what a restart left accepted but unprocessed, then the poll
+                gh.recover_deliveries();
                 gh.poll_due().await;
                 if n.is_multiple_of(120) {
                     gh.prune_deliveries();

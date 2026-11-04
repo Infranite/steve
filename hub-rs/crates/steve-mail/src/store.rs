@@ -10,12 +10,13 @@ use std::path::{Path, PathBuf};
 
 use chrono::TimeZone;
 use rusqlite::{Connection, OptionalExtension};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use steve_modules::accounts::identify::{Hints, identify};
 use steve_modules::accounts::repo as arepo;
 use steve_modules::accounts::service::current_party;
 use steve_modules::contacts::repo as people;
-use steve_store::{Store, Tx, uid};
+use steve_store::{Store, Tx, outbox, uid};
 
 use crate::adapter::{FetchedMessage, MailSink, ScopeMode};
 use crate::error::{MailError, MailResult};
@@ -117,22 +118,29 @@ pub(crate) fn write_raw(home: &Path, rel: &str, bytes: &[u8]) -> MailResult<()> 
     Ok(())
 }
 
-/// An event to send once the sync's writes are committed.
-#[derive(Debug, Clone)]
+/// The outbox topic of a stored mail's event: emitted in the transaction that stores the mail,
+/// delivered to the signals pipeline by [`crate::outbox::MailEventsOut`] after the commit, at least
+/// once (a crash between storing and delivering loses nothing).
+pub const EVENT_TOPIC: &str = "mail.event.ready";
+pub const EVENT_V: i64 = 1;
+
+/// The payload of [`EVENT_TOPIC`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PendingEvent {
     pub message_id: String,
+    pub connection_id: String,
     pub event: MailEvent,
     pub how: Delivery,
 }
 
-/// The sink of one sync run. Collects the threads it changed (one SSE each) and the events.
+/// The sink of one sync run. Collects the threads it changed (one SSE each); each new mail's event
+/// goes to the outbox with it.
 pub struct StoreSink<'a> {
     store: &'a Store,
     home: &'a Path,
     now: i64,
     mailbox: &'a Mailbox,
     pub changed: BTreeSet<String>,
-    pub events: Vec<PendingEvent>,
     pub stored: usize,
 }
 
@@ -144,7 +152,6 @@ impl<'a> StoreSink<'a> {
             now,
             mailbox,
             changed: BTreeSet::new(),
-            events: Vec::new(),
             stored: 0,
         }
     }
@@ -317,7 +324,7 @@ impl StoreSink<'_> {
         });
         let out = mb.is_mine(&from.addr);
         let store = self.store;
-        let res = store.transaction(|tx| -> MailResult<(String, Option<PendingEvent>)> {
+        let res = store.transaction(|tx| -> MailResult<String> {
             // identification (§3.5 step 4)
             let (from_acc, from_party, to, cc) = if out {
                 let (fa, fp) = lookup(tx, &mb.ws, &from.addr)?;
@@ -409,7 +416,7 @@ impl StoreSink<'_> {
                 _ => {}
             }
             if out || m.mode != ScopeMode::Receive {
-                return Ok((thread.id, None));
+                return Ok(thread.id);
             }
             let how = if m.backfill {
                 Delivery::backfill()
@@ -428,20 +435,21 @@ impl StoreSink<'_> {
                 &cc,
                 attachments.iter().any(|a| !a.inline),
             )?;
-            Ok((
-                thread.id,
-                Some(PendingEvent {
-                    message_id: id.clone(),
-                    event: ev,
-                    how,
-                }),
-            ))
+            let pending = PendingEvent {
+                message_id: id.clone(),
+                connection_id: mb.connection_id.clone(),
+                event: ev,
+                how,
+            };
+            let payload =
+                serde_json::to_value(&pending).map_err(|e| MailError::Other(e.to_string()))?;
+            outbox::emit(tx, &mb.ws, EVENT_TOPIC, EVENT_V, &payload)?;
+            Ok(thread.id)
         });
         match res {
-            Ok((thread, ev)) => {
+            Ok(thread) => {
                 self.stored += 1;
                 self.changed.insert(thread);
-                self.events.extend(ev);
                 Ok(())
             }
             Err(e) => {

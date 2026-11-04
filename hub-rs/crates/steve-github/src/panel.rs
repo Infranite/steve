@@ -229,10 +229,12 @@ impl ItemPanel for GhPanels {
         if pr.state != "open" || runs.is_empty() {
             return Err(ApiError::conflict("没有失败的检查可以重跑"));
         }
-        let conn = gh.conn(&ws, &r.connection_id).map_err(|e| match e {
-            steve_modules::vault::VaultError::Api(a) => a,
-            e => ApiError::rule(e.to_string()),
-        })?;
+        let conn = gh
+            .conn_for_write(&ws, &r.connection_id)
+            .map_err(|e| match e {
+                steve_modules::vault::VaultError::Api(a) => a,
+                e => ApiError::rule(e.to_string()),
+            })?;
         let mut done = 0;
         for run in &runs {
             let path = format!(

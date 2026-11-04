@@ -16,7 +16,7 @@ import { useOverview, Health, Loading, Failed, errMsg, type Load } from "@/githu
 
 const CHECKS: Record<string, [string, string]> = { success: ["done", "检查通过"], failure: ["fail", "检查失败"], pending: ["run", "检查进行中"], none: ["idle", "没有检查"] }
 const REVIEW: Record<string, string> = { requested: "等待评审", approved: "已批准", changes_requested: "要求修改", commented: "有评审意见" }
-const DELIVERY: Record<string, [string, string]> = { ok: ["done", "已处理"], ignored: ["idle", "忽略"], failed: ["fail", "失败"] }
+const DELIVERY: Record<string, [string, string]> = { received: ["run", "处理中"], ok: ["done", "已处理"], ignored: ["idle", "忽略"], failed: ["fail", "失败"] }
 
 export function RepoView({ id }: { id: string }) {
   const [ov, load] = useOverview()

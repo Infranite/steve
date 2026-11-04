@@ -7,11 +7,11 @@
 use std::sync::Mutex;
 
 use async_trait::async_trait;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// The sender of an event, already identified by the mail store.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Actor {
     /// Handle family (`email`).
     pub family: String,
@@ -23,7 +23,7 @@ pub struct Actor {
 }
 
 /// One event (S1 `RawEvent` plus `also`).
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MailEvent {
     /// `mail.reply` > `mail.vip` > `mail.attachment` > `mail.new`.
     pub type_key: String,
@@ -47,7 +47,7 @@ pub struct MailEvent {
 }
 
 /// How an event enters the signals pipeline.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "lowercase")]
 pub enum Delivery {
     /// `steve_flow::ingest`: triggers flows.
@@ -112,15 +112,20 @@ pub struct Delivered {
     pub id: String,
 }
 
-/// Records every event and answers a fresh `evt_…` id.
+/// Records every event and answers a fresh `evt_…` id; [`RecordingEvents::fail_next`] makes the
+/// next delivery fail (nothing recorded).
 #[derive(Debug, Default)]
 pub struct RecordingEvents {
     calls: Mutex<Vec<Delivered>>,
+    fail: Mutex<Option<String>>,
 }
 
 impl RecordingEvents {
     pub fn new() -> Self {
         Self::default()
+    }
+    pub fn fail_next(&self, error: &str) {
+        *self.fail.lock().unwrap_or_else(|e| e.into_inner()) = Some(error.into());
     }
     pub fn calls(&self) -> Vec<Delivered> {
         self.calls.lock().unwrap_or_else(|e| e.into_inner()).clone()
@@ -143,6 +148,9 @@ impl MailEvents for RecordingEvents {
         ev: MailEvent,
         how: Delivery,
     ) -> Result<Option<String>, String> {
+        if let Some(e) = self.fail.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            return Err(e);
+        }
         let id = steve_store::uid("evt");
         self.calls
             .lock()

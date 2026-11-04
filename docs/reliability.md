@@ -49,6 +49,29 @@ A known SMTP rejection is a failure; lost confirmation, cancellation and local p
 
 Confirmed submission is stored before the optional sent-folder copy. The copy has its own deadline and cannot turn a confirmed send into an unknown result. Missing unknown-result decision cards are repaired idempotently; explicitly discarded drafts are not revived. This implementation assumes one Hub owns sending for a database.
 
+## Other outside effects
+
+```text
+ GitHub write you approved           channel send
+ (open PR, merge, agent comment)     (reply, approved or by a rule)
+
+ pending -> running -> done          pending -> sent
+                    -> failed                -> failed  (refused)
+                    -> unknown               -> unknown (no answer)
+ restart: running -> unknown         unknown: same uuid again within the
+ unknown: reconcile, then decide              provider's dedupe window, else ask
+```
+
+The connection is checked when a write goes out, not when it was approved: paused or to be authorized again, the write waits; revoked, or its capability turned off (`mail.send`, `repo.write`, `msg.send_as_user`), it is refused. A connection in `error` may write.
+
+An approved GitHub write is a `gh_effects` row from the answer's transaction. A run that sent its write and heard nothing reconciles before writing again, without comparing clocks: the PR GitHub has from the approved commit (written down before the first send; a branch that moved is refused), a merged PR of the approved head, the one identical comment no other effect claimed. No evidence either way (a comment not found, several candidates) stops it: it stays unknown and you are told. Items finish through the outbox (`github.after`).
+
+A channel message keeps its authorization, first send time, text and mentions (`chan_send_state`). A direct reply cut off before its send is sent by the queue under that authorization; one older than an hour is asked about instead. A transient adapter error is unknown, not failed: within the provider's dedupe window (Feishu: one hour from the first try) it is sent again as it was; after it, you are asked, once. A message tried before is never sent again past its window, whatever path brings it back. Results are fenced by the claim.
+
+Incoming data is recorded before it counts as handled. A GitHub delivery is `received` with its source and payload until processed; a failure is retried after a back-off and kept when it fails for good; a delivery processed late does not apply a view older than the stored PR. A stored mail's event goes to the outbox with the mail (`mail.event.ready`). A poll that cannot store an event keeps its cursor; a malformed event is skipped.
+
+Not covered yet: the reply text and its send task in one transaction (conversation redesign, stage four), Core completion hooks beyond `item.done`, a total time budget per GitHub operation, and Git subprocess timeouts.
+
 ## Event storage and compatibility
 
 Schema 22 normalizes large tool-event strings into session-owned unique payloads in the same SQLite database. References are stored in a separate table, not interpreted from user-supplied JSON objects. Events, payloads and references commit together. Full reads hydrate transparently; searches include normalized text, and deletion removes unreferenced payloads. A single consistent database backup retains the full transcript.

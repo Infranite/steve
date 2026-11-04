@@ -28,6 +28,9 @@ pub enum PushError {
     WrongRemote { expected: String },
     #[error("分支 {0} 不存在")]
     NoBranch(String),
+    /// The branch is not at the commit it must be at.
+    #[error("分支 {branch} 在批准后有了新的提交（现在是 {now}），需要重新确认")]
+    Moved { branch: String, now: String },
     #[error("git 失败：{0}")]
     Git(String),
     /// Refused by the test guard (`STEVE_FORBID_REAL_HOSTS=1`), nothing pushed.
@@ -46,6 +49,9 @@ pub struct PushSpec<'a> {
     pub git_base: &'a str,
     /// Installation token or PAT.
     pub token: &'a str,
+    /// The commit the branch must be at (what was approved, or pushed by an earlier try): a
+    /// branch that moved since is not pushed.
+    pub expect: Option<&'a str>,
 }
 
 /// Branch names Steve pushes: `steve/st-12` and the like. No `..`, no leading `-`, no spaces or
@@ -157,6 +163,21 @@ fn check_git_base(base: &str) -> Result<(), PushError> {
     steve_modules::net::check_url(base).map_err(|e| PushError::HostForbidden(e.to_string()))
 }
 
+/// The commit `branch` is at in the worktree `cwd`.
+pub fn head_of(cwd: &Path, branch: &str) -> Result<String, PushError> {
+    if !branch_ok(branch) {
+        return Err(PushError::BadBranch(branch.into()));
+    }
+    let mut c = git(cwd);
+    c.args([
+        "rev-parse",
+        "--verify",
+        "--quiet",
+        &format!("refs/heads/{branch}^{{commit}}"),
+    ]);
+    run(c).map_err(|_| PushError::NoBranch(branch.into()))
+}
+
 /// Pushes `refs/heads/<branch>` to the same branch of the repo; returns the pushed sha.
 pub fn push(s: &PushSpec) -> Result<String, PushError> {
     if !branch_ok(s.branch) {
@@ -172,6 +193,14 @@ pub fn push(s: &PushSpec) -> Result<String, PushError> {
         &format!("refs/heads/{}^{{commit}}", s.branch),
     ]);
     let sha = run(c).map_err(|_| PushError::NoBranch(s.branch.into()))?;
+    if let Some(e) = s.expect
+        && e != sha
+    {
+        return Err(PushError::Moved {
+            branch: s.branch.into(),
+            now: sha.chars().take(7).collect(),
+        });
+    }
     let objects = objects_dir(s.cwd)?;
 
     let tmp = tempfile::Builder::new()

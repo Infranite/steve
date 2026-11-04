@@ -50,7 +50,11 @@ pub async fn layer(State(s): State<AppState>, req: Request, next: Next) -> Respo
         (fault, w.rate.remaining == 0 && !uncounted(&path))
     };
 
-    let mut resp = if let Some(f) = fault {
+    let mut resp = if let Some(Fault::LostAnswer) = fault {
+        next.run(Request::from_parts(parts, Body::from(bytes.clone())))
+            .await;
+        StatusCode::BAD_GATEWAY.into_response()
+    } else if let Some(f) = fault {
         fault_response(&s, f)
     } else if exhausted {
         fault_response(&s, Fault::RateLimited)
@@ -163,5 +167,7 @@ fn fault_response(s: &AppState, f: Fault) -> Response {
             let code = StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             (code, axum::Json(body(status, &message))).into_response()
         }
+        // carried out by the caller, which only uses this for the status
+        Fault::LostAnswer => StatusCode::BAD_GATEWAY.into_response(),
     }
 }

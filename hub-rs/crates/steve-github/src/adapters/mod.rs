@@ -8,7 +8,9 @@ pub use github_app::GitHubApp;
 pub use github_pat::GitHubPat;
 
 /// Capabilities of both (§1.1 step 3).
-pub const CAPS: [&str; 3] = ["repo.read", "repo.write", "events"];
+pub const CAPS: [&str; 3] = ["repo.read", WRITE_CAP, "events"];
+/// What a write to a repo needs (push, PR, merge, comment, rerun).
+pub const WRITE_CAP: &str = "repo.write";
 
 /// Both GitHub connections on the 接入 page: provider `github`, one area, 代码仓库.
 pub fn integration(identity: &str) -> steve_modules::accounts::connections::Integration {
@@ -18,7 +20,7 @@ pub fn integration(identity: &str) -> steve_modules::accounts::connections::Inte
         provider_name: "GitHub".into(),
         identity: identity.into(),
         capabilities: vec![
-            CapSpec::supported("repo", &["repo.read", "repo.write"])
+            CapSpec::supported("repo", &["repo.read", WRITE_CAP])
                 .with_note("关联仓库、开 PR、接收检查和评论事件"),
         ],
     }

@@ -122,6 +122,7 @@ pub mod replies;
 pub mod respond;
 pub mod rules;
 pub mod seen;
+pub mod send_state;
 mod service;
 pub mod space_decisions;
 pub mod spaces;

@@ -299,7 +299,7 @@ impl Mail {
         if todo.is_empty() {
             return Ok(0);
         }
-        let (adapter, cx) = self.adapter_of(ws, &conn)?;
+        let (adapter, cx) = self.adapter_for_write(ws, &conn)?;
         let ch = FlagChange {
             archive: true,
             ..Default::default()
@@ -339,7 +339,7 @@ impl Mail {
         if m.flags.iter().any(|f| f == "seen") {
             return Ok(false);
         }
-        let (adapter, cx) = self.adapter_of(ws, &m.connection_id)?;
+        let (adapter, cx) = self.adapter_for_write(ws, &m.connection_id)?;
         adapter
             .set_flags(
                 &cx,

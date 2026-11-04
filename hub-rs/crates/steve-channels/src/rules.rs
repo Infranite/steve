@@ -84,7 +84,7 @@ pub enum When {
 }
 
 /// `item.mode` of `create_item`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ItemMode {
     Start,
     Propose,
@@ -100,7 +100,7 @@ impl ItemMode {
 }
 
 /// `act`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Act {
     /// Reply right away (bot accounts only).
     Reply,

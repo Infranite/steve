@@ -1,6 +1,7 @@
 //! The sync job (email.md §3.2): one sync at a time per mailbox; folders and their scope modes
 //! (`source_settings.scopes`, new folders get the defaults); the adapter fills a [`StoreSink`]; folder
-//! state, cursor and health are written back; then the events go out and one SSE per changed thread.
+//! state, cursor and health are written back; then one SSE per changed thread. Each new mail's event
+//! was put in the outbox with the mail ([`crate::outbox`]).
 //!
 //! In the background ([`Mail::spawn_jobs`]) every mailbox has a runner: a watcher (IMAP IDLE) that
 //! wakes the sync on new mail, and the sync loop itself polling every 2 minutes. Failures back off
@@ -71,6 +72,20 @@ impl Mail {
         Ok((a, cx))
     }
 
+    /// [`Mail::adapter_of`] for a change on the server (archive, flags), checked now: refused while
+    /// the connection is paused, to be authorized again or revoked.
+    pub(crate) fn adapter_for_write(
+        &self,
+        ws: &str,
+        id: &str,
+    ) -> MailResult<(Arc<dyn MailAdapter>, ConnCx)> {
+        let cx = self.0.conns.cx_for(ws, id, None).map_err(MailError::from)?;
+        let a = self
+            .adapter(cx.adapter())
+            .ok_or_else(|| MailError::Other(format!("no mail adapter {}", cx.adapter())))?;
+        Ok((a, cx))
+    }
+
     /// Syncs one mailbox now and sends its events. Errors also go to the connection's health.
     pub async fn sync_now(&self, ws: &str, connection_id: &str) -> MailResult<SyncReport> {
         let l = self.conn_lock(connection_id);
@@ -102,10 +117,7 @@ impl Mail {
         let store = self.0.m.store.clone();
         let mut sink = StoreSink::new(&store, &home, &mailbox, now);
         let res = adapter.sync(&cx, &mut state, &mut sink).await;
-        let (changed, pending) = (
-            std::mem::take(&mut sink.changed),
-            std::mem::take(&mut sink.events),
-        );
+        let changed = std::mem::take(&mut sink.changed);
         drop(sink);
         // what got stored is kept, also after an error midway
         {
@@ -122,7 +134,6 @@ impl Mail {
             }
             repo::set_cursor(tx, connection_id, state.cursor.as_deref())
         })?;
-        self.deliver(ws, connection_id, pending).await;
         for t in &changed {
             self.0.notify.thread(ws, t);
         }
@@ -203,25 +214,6 @@ impl Mail {
                 mailbox,
             )))
         })
-    }
-
-    async fn deliver(&self, ws: &str, conn: &str, pending: Vec<crate::store::PendingEvent>) {
-        for p in pending {
-            match self.0.events.deliver(ws, conn, p.event, p.how).await {
-                Ok(Some(id)) => {
-                    if let Err(e) = self
-                        .0
-                        .m
-                        .store
-                        .transaction(|tx| repo::set_event(tx, &p.message_id, &id))
-                    {
-                        tracing::warn!(error = %e, "could not link the mail to its event");
-                    }
-                }
-                Ok(None) => {}
-                Err(e) => tracing::warn!(connection = conn, error = %e, "mail event not delivered"),
-            }
-        }
     }
 
     /// Wakes a mailbox's runner (`POST /mail/accounts/:id/sync`); without a runner, syncs in a task.

@@ -24,7 +24,8 @@ use steve_store::base::{self, DecisionKind, decisions as base_decisions};
 use steve_store::{Decision, NewDecision, Tx};
 
 use crate::GitHub;
-use crate::accept::{Effect, Slot};
+use crate::accept::Slot;
+use crate::effects::{self, Fail, Ran};
 use crate::repo::{self, RepoRow};
 
 /// `subject_type` of “may this bot post this comment” (subject = the `ghp_…` or `ghi_…`).
@@ -104,27 +105,86 @@ pub fn posted_message(t: &Target, url: &str, granted: bool) -> String {
 }
 
 impl GitHub {
-    /// `POST /repos/{o}/{r}/issues/{n}/comments` (PRs are issues here); the comment's URL.
+    /// `POST /repos/{o}/{r}/issues/{n}/comments` (PRs are issues here); the comment's URL and id.
     pub(crate) async fn post_comment(
         &self,
         ws: &str,
         t: &Target,
         body: &str,
-    ) -> Result<String, String> {
-        if !t.repo.enabled {
-            return Err("GitHub App 不再能访问这个仓库".into());
-        }
-        let conn = self
-            .conn(ws, &t.repo.connection_id)
-            .map_err(|e| e.to_string())?;
+    ) -> Result<(String, i64), Fail> {
+        let conn = self.comment_conn(ws, t, false)?;
+        self.post_on(&conn, t, body).await
+    }
+
+    async fn post_on(
+        &self,
+        conn: &crate::api::GhConn,
+        t: &Target,
+        body: &str,
+    ) -> Result<(String, i64), Fail> {
         let v = conn
             .post(
                 &format!("/repos/{}/issues/{}/comments", t.repo.full_name, t.number),
                 &json!({ "body": body }),
             )
-            .await
-            .map_err(|e| e.to_string())?;
-        Ok(v["html_url"].as_str().unwrap_or_default().to_string())
+            .await?;
+        match comment_ref(&v) {
+            // GitHub said yes without a comment id in it: it may be there
+            (_, 0) => Err(Fail::unknown("GitHub 的回答里没有评论编号")),
+            r => Ok(r),
+        }
+    }
+
+    /// `effect`: for an approved write, a connection that waits is [`effects::Why::Wait`].
+    fn comment_conn(&self, ws: &str, t: &Target, effect: bool) -> Result<crate::api::GhConn, Fail> {
+        if !t.repo.enabled {
+            return Err(Fail::definite("GitHub App 不再能访问这个仓库"));
+        }
+        if effect {
+            return self.effect_conn(ws, &t.repo.connection_id);
+        }
+        self.conn_for_write(ws, &t.repo.connection_id)
+            .map_err(|e| Fail::definite(e.to_string()))
+    }
+
+    /// The comment an earlier try posted: exactly `body`, not another effect's (two approvals of
+    /// the same text are two comments), and the only such one. None found is no evidence (it may
+    /// have been deleted), and neither are several: stuck, not posted again by itself.
+    async fn posted_before(
+        &self,
+        conn: &crate::api::GhConn,
+        t: &Target,
+        body: &str,
+    ) -> Result<(String, i64), Fail> {
+        let all = conn
+            .get_all_complete(
+                &format!(
+                    "/repos/{}/issues/{}/comments?per_page=100",
+                    t.repo.full_name, t.number
+                ),
+                None,
+            )
+            .await?;
+        let mut found = Vec::new();
+        for c in all.iter().filter(|c| c["body"].as_str() == Some(body)) {
+            let (url, id) = comment_ref(c);
+            let claimed = self
+                .store()
+                .reader(|db| repo::comment_claimed(db, id).map_err(ApiError::from))
+                .map_err(|e| Fail::unknown(e.to_string()))?;
+            if !claimed {
+                found.push((url, id));
+            }
+        }
+        match found.len() {
+            1 => Ok(found.remove(0)),
+            0 => Err(Fail::stuck(
+                "GitHub 上没有找到这条评论：可能没发出，也可能被删掉了；不会自动重发",
+            )),
+            n => Err(Fail::stuck(format!(
+                "GitHub 上有 {n} 条一样的评论，不知道哪条是这次发的"
+            ))),
+        }
     }
 
     /// `audit(github.comment)`: who, where, how it was allowed. Never the body.
@@ -156,10 +216,10 @@ impl GitHub {
             .filter(|t| t.is_pr == (kind == "pr"))
             .ok_or_else(|| ApiError::not_found(noun))?;
         let body = clean(None, body);
-        let url = self
+        let (url, _) = self
             .post_comment(&who.ws, &t, &body)
             .await
-            .map_err(|e| ApiError::rule(format!("评论没有发出：{e}")))?;
+            .map_err(|e| ApiError::rule(not_posted(&e)))?;
         self.audit_comment(&who.ws, &who.me, &t, json!({"by": "me"}));
         self.notifier().gh(&who.ws, &t.subject);
         Ok(json!({ "url": url }))
@@ -209,7 +269,10 @@ impl GitHub {
             })
             .map_err(|e| e.to_string())?;
         if let Some(g) = grant.filter(|_| check.verdict != Verdict::Leak) {
-            let url = self.post_comment(&ws, &t, &body).await?;
+            let (url, _) = self
+                .post_comment(&ws, &t, &body)
+                .await
+                .map_err(|e| not_posted(&e))?;
             self.audit_comment(&ws, &cx.bot_id, &t, json!({"by": "bot", "grant": g}));
             return Ok(ToolOut {
                 text: format!("Commented: {url}"),
@@ -247,19 +310,20 @@ impl GitHub {
     }
 
     /// After a `gh_comment` answer: post (yes, grant_8h) or not (no), and tell the session.
-    pub(crate) async fn comment_answered(&self, d: &Decision) {
+    /// `reconcile`: an earlier try may have posted it, so GitHub is asked first.
+    pub(crate) async fn comment_answered(&self, d: &Decision, reconcile: bool) -> Ran {
         let ws = d.workspace_id.clone();
         let (item, session) = (d.item_id.as_deref(), d.session_id.as_deref());
         if d.result["choice"] == "no" {
             self.tell_session(&ws, item, session, DENIED).await;
-            return;
+            return Ran::Done(json!({}));
         }
         let t = match self.store().reader(|c| target(c, &ws, &d.subject_id)) {
             Ok(Some(t)) => t,
             _ => {
-                self.tell_session(&ws, item, session, "评论没有发出：PR 或 Issue 不在了")
-                    .await;
-                return;
+                let m = "评论没有发出：PR 或 Issue 不在了";
+                self.tell_session(&ws, item, session, m).await;
+                return Ran::Failed(m.into());
             }
         };
         let text = d.result["text"]
@@ -268,8 +332,26 @@ impl GitHub {
             .unwrap_or(&d.draft);
         let body = clean(session, text);
         let granted = d.result.get("grant").is_some();
-        match self.post_comment(&ws, &t, &body).await {
-            Ok(url) => {
+        let conn = match self.comment_conn(&ws, &t, true) {
+            Ok(c) => c,
+            Err(f) => {
+                if let Some(r) = f.ran() {
+                    return r;
+                }
+                self.tell_session(&ws, item, session, &not_posted(&f)).await;
+                return Ran::Failed(f.message);
+            }
+        };
+        let posted = if reconcile {
+            self.posted_before(&conn, &t, &body).await
+        } else {
+            match self.effect_sending(&d.id) {
+                Ok(()) => self.post_on(&conn, &t, &body).await,
+                Err(f) => Err(f),
+            }
+        };
+        match posted {
+            Ok((url, id)) => {
                 self.audit_comment(
                     &ws,
                     &d.requested_by,
@@ -278,13 +360,34 @@ impl GitHub {
                 );
                 self.tell_session(&ws, item, session, &posted_message(&t, &url, granted))
                     .await;
+                Ran::Done(json!({ "comment": id }))
             }
-            Err(e) => {
-                tracing::warn!(decision = %d.id, error = %e, "github comment not posted");
-                self.tell_session(&ws, item, session, &format!("评论没有发出：{e}"))
-                    .await;
-            }
+            Err(f) => match f.ran() {
+                Some(r) => r,
+                None => {
+                    tracing::warn!(decision = %d.id, error = %f, "github comment not posted");
+                    self.tell_session(&ws, item, session, &not_posted(&f)).await;
+                    Ran::Failed(f.message)
+                }
+            },
         }
+    }
+}
+
+/// `(html_url, id)` of a comment.
+fn comment_ref(v: &Value) -> (String, i64) {
+    (
+        v["html_url"].as_str().unwrap_or_default().to_string(),
+        v["id"].as_i64().unwrap_or_default(),
+    )
+}
+
+/// What to say when a comment did not (certainly) go out.
+fn not_posted(f: &Fail) -> String {
+    if f.maybe() {
+        format!("GitHub 没有回应，评论可能已经发出，先到 GitHub 上看一下再决定是否重发：{f}")
+    } else {
+        format!("评论没有发出：{f}")
     }
 }
 
@@ -322,9 +425,7 @@ impl DecisionHandler for CommentDecisions {
             )?;
             out["grant"] = json!(id);
         }
-        gh.enqueue_effect(Effect::Comment {
-            decision: d.id.clone(),
-        })?;
+        effects::queue(tx, &gh, cx.ws, &d.id, effects::COMMENT)?;
         Ok(out)
     }
 

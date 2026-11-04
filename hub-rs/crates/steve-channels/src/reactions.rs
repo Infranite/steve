@@ -98,7 +98,10 @@ impl Reactor for AdapterReactor {
         if !a.features().reactions {
             return Err("这个渠道不支持表情回复".into());
         }
-        let cx = ch.connections().cx(ws, conn).map_err(|e| e.to_string())?;
+        let cx = ch
+            .connections()
+            .cx_for(ws, conn, None)
+            .map_err(|e| e.to_string())?;
         let id = a
             .add_reaction(&cx, ext_msg_id, kind)
             .await
@@ -123,7 +126,10 @@ impl Reactor for AdapterReactor {
         let a = ch
             .adapter(&adapter)
             .ok_or_else(|| "这个渠道不支持表情回复".to_string())?;
-        let cx = ch.connections().cx(ws, conn).map_err(|e| e.to_string())?;
+        let cx = ch
+            .connections()
+            .cx_for(ws, conn, None)
+            .map_err(|e| e.to_string())?;
         a.remove_reaction(&cx, ext_msg_id, reaction_id)
             .await
             .map_err(|e| e.to_string())

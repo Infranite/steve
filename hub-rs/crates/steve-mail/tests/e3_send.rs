@@ -1068,8 +1068,9 @@ async fn preparation_and_failure_record_errors_do_not_leave_live_claim_stuck() {
     h.mail.send_draft(&me(), &d.id).unwrap();
     h.env.clock.advance(10_000);
     h.env.store().with_conn(|c| {
-        // The approval is still valid, but the connection is no longer in this workspace.
-        c.execute("UPDATE connections SET workspace_id = ? WHERE id = ?", [WS2, conn.as_str()])?;
+        // The approval and the connection are still valid (so the draft is claimed), but its adapter
+        // is gone, so preparing the submission fails after the claim.
+        c.execute("UPDATE connections SET adapter = 'gone' WHERE id = ?", [conn.as_str()])?;
         c.execute_batch("CREATE TRIGGER reject_failure BEFORE UPDATE OF status ON mail_drafts WHEN NEW.status = 'failed' BEGIN SELECT RAISE(ABORT, 'test failure record fault'); END")?;
         Ok(())
     }).unwrap();
@@ -1220,4 +1221,77 @@ async fn dismissed_unknown_card_is_recreated_even_without_item_or_thread() {
             .is_empty()
     );
     assert_eq!(h.smtp.sent().len(), 1);
+}
+
+fn set_connection(h: &H, conn: &str, status: &str, caps: &[&str]) {
+    let caps = serde_json::to_string(caps).unwrap();
+    h.env
+        .store()
+        .transaction(|tx| {
+            tx.execute(
+                "UPDATE connections SET status = ?, caps = ? WHERE id = ?",
+                rusqlite::params![status, caps, conn],
+            )?;
+            Ok::<_, steve_store::StoreError>(())
+        })
+        .unwrap();
+}
+
+/// Y4: the connection is checked when the mail goes out, not when it was approved. Paused: the
+/// approved draft waits and goes out once resumed; nothing reaches SMTP meanwhile.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_paused_connection_holds_an_approved_mail_until_resumed() {
+    let h = setup().await;
+    let (conn, thread) = with_thread(&h).await;
+    let d = h
+        .mail
+        .create_draft(&me(), my_draft(&conn, Some(&thread), None, "hi"))
+        .unwrap();
+    h.mail.send_draft(&me(), &d.id).unwrap();
+    set_connection(&h, &conn, "paused", &["mail.read", "mail.send"]);
+    h.env.clock.advance(10_000);
+    let out = h.mail.send_due().await.unwrap();
+    assert!(out.is_empty(), "{out:?}");
+    // also when it is executed directly
+    let o = h.mail.execute(&d.id).await.unwrap();
+    assert!(matches!(o, SendOutcome::Skipped), "{o:?}");
+    assert_eq!(draft(&h, &d.id).status, "approved");
+    assert!(h.smtp.sent().is_empty());
+    set_connection(&h, &conn, "ok", &["mail.read", "mail.send"]);
+    let out = h.mail.send_due().await.unwrap();
+    assert!(matches!(out[0].1, SendOutcome::Sent { .. }), "{out:?}");
+    assert_eq!(h.smtp.sent().len(), 1);
+}
+
+/// Y4: `mail.send` turned off (or the connection revoked) after the approval: refused with the
+/// reason, nothing reaches SMTP.
+#[tokio::test(flavor = "multi_thread")]
+async fn sending_turned_off_after_approval_refuses_the_mail() {
+    for (status, caps) in [
+        ("ok", &["mail.read"][..]),
+        ("revoked", &["mail.read", "mail.send"][..]),
+    ] {
+        let h = setup().await;
+        let (conn, thread) = with_thread(&h).await;
+        let d = h
+            .mail
+            .create_draft(&me(), my_draft(&conn, Some(&thread), None, "hi"))
+            .unwrap();
+        h.mail.send_draft(&me(), &d.id).unwrap();
+        set_connection(&h, &conn, status, caps);
+        h.env.clock.advance(10_000);
+        let out = h.mail.send_due().await.unwrap();
+        assert!(
+            matches!(out[0].1, SendOutcome::Blocked { .. }),
+            "{status}: {out:?}"
+        );
+        let row = draft(&h, &d.id);
+        assert_eq!(row.status, "failed", "{status}");
+        assert!(row.error.is_some(), "{status}");
+        assert_eq!(
+            audits(&h, "mail.send.blocked").last().unwrap()["reason"],
+            "connection"
+        );
+        assert!(h.smtp.sent().is_empty(), "{status}");
+    }
 }

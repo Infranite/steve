@@ -65,6 +65,12 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/026.sql"),
     // 27: the item lifecycle (phase, cycle, revision, closing intent, outcome) and its closed cycles.
     include_str!("../migrations/027.sql"),
+    // 28: GitHub deliveries `received` until processed, with their source and payload.
+    include_str!("../migrations/028.sql"),
+    // 29: approved GitHub writes as rows, with an unknown state.
+    include_str!("../migrations/029.sql"),
+    // 30: what a channel send needs to be retried and accounted for.
+    include_str!("../migrations/030.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).

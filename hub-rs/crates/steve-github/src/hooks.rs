@@ -9,8 +9,10 @@
 //! 3. `X-GitHub-Event` / `X-GitHub-Delivery` / JSON body present, else `400`;
 //! 4. ≤ 120 deliveries per connection per minute, else `429`;
 //! 5. a known `X-GitHub-Delivery` → `200` (redelivery, not processed again);
-//! 6. `gh_deliveries(status=ok)` and onto the queue → `202`. The work happens off the request
-//!    (GitHub wants an answer within 10 seconds); its result lands on the delivery row.
+//! 6. `gh_deliveries(status=received)` with its source and payload, committed, and onto the queue →
+//!    `202`. The work happens off the request (GitHub wants an answer within 10 seconds); its result
+//!    lands on the delivery row. What a restart interrupted is still `received`: the recovery
+//!    ([`GitHub::recover_deliveries`], on start and with every poll tick) queues it again.
 //!
 //! Before the signature is checked only reads happen: the App comes from the
 //! `X-GitHub-Hook-Installation-Target-ID` header (or the payload's installation), the secret from
@@ -19,7 +21,7 @@
 //! The vault's daily “used by Steve” row is written only after a signature verified with it, so a
 //! forged request leaves every table as it was, cold cache or not.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
@@ -34,6 +36,8 @@ use steve_modules::ApiError;
 use tokio::sync::{Notify, mpsc};
 use zeroize::Zeroizing;
 
+use steve_store::outbox;
+
 use crate::adapters::github_app::WEBHOOK_SECRET;
 use crate::repo::{self, AppRow, DeliveryRow};
 use crate::sync::Source;
@@ -41,6 +45,8 @@ use crate::{GitHub, Inner, signature};
 
 /// Largest body accepted.
 pub const BODY_LIMIT: usize = 1024 * 1024;
+/// Deliveries the recovery queues per pass.
+pub const RECOVER_BATCH: i64 = 200;
 /// Deliveries per connection per minute (same as signals).
 pub const RATE_PER_MINUTE: usize = 120;
 /// The vault field of a repository hook's secret item.
@@ -118,6 +124,8 @@ struct Job {
     delivery_id: String,
     event: String,
     payload: Value,
+    /// Queued by the recovery: processed after it was received.
+    late: bool,
 }
 
 /// The delivery queue: one worker per service, started on first use, holding only a weak
@@ -127,6 +135,8 @@ pub(crate) struct Queue {
     tx: Mutex<Option<mpsc::UnboundedSender<Job>>>,
     pub(crate) pending: AtomicUsize,
     idle: Notify,
+    /// Delivery ids queued or being processed, so the recovery doesn't queue one twice.
+    queued: Mutex<HashSet<String>>,
 }
 
 /// Sliding one-minute windows per key.
@@ -337,21 +347,33 @@ impl GitHub {
             Source::App { ws } | Source::Conn { ws, .. } => Some(ws.clone()),
             Source::Poll { .. } => None,
         };
+        // the linked repo, so the repo's 投递记录 shows it while it waits (set again once processed)
+        let repo_id = match (&ws, payload["repository"]["id"].as_i64()) {
+            (Some(w), Some(gh_id)) => self
+                .store()
+                .reader(|c| repo::repo_by_gh(c, w, gh_id).map_err(ApiError::from))
+                .ok()
+                .flatten()
+                .map(|r| r.id),
+            _ => None,
+        };
         let row = DeliveryRow {
             delivery_id: delivery.into(),
             workspace_id: ws,
-            repo_id: None,
+            repo_id,
             event: event.into(),
             action: payload["action"]
                 .as_str()
                 .map(|a| a.chars().take(64).collect()),
-            status: "ok".into(),
+            status: repo::RECEIVED.into(),
             error: None,
             received: now,
         };
+        let src = serde_json::to_string(&source).unwrap_or_default();
+        let body = payload.to_string();
         let fresh = match self
             .store()
-            .transaction(|tx| repo::insert_delivery(tx, &row).map_err(ApiError::from))
+            .transaction(|tx| repo::insert_delivery(tx, &row, &src, &body).map_err(ApiError::from))
         {
             Ok(f) => f,
             Err(e) => {
@@ -367,12 +389,16 @@ impl GitHub {
             delivery_id: row.delivery_id,
             event: row.event,
             payload,
+            late: false,
         });
         empty(StatusCode::ACCEPTED)
     }
 
     fn enqueue(&self, job: Job) {
         let q = &self.0.queue;
+        if !lock(&q.queued).insert(job.delivery_id.clone()) {
+            return;
+        }
         q.pending.fetch_add(1, Ordering::SeqCst);
         let mut tx = q.tx.lock().unwrap_or_else(|e| e.into_inner());
         if tx.as_ref().is_none_or(|t| t.is_closed()) {
@@ -384,43 +410,160 @@ impl GitHub {
             && let Err(e) = t.send(job)
         {
             tracing::error!(delivery = %e.0.delivery_id, "github queue closed");
-            self.done_one();
+            self.done_one(&e.0.delivery_id);
         }
     }
 
-    pub(crate) fn done_one(&self) {
+    /// Marks a delivery as being processed right here (a poll applies its own inline), so the
+    /// recovery doesn't queue it meanwhile. `false`: it is already queued or being processed.
+    pub(crate) fn take_delivery(&self, delivery: &str) -> bool {
+        lock(&self.0.queue.queued).insert(delivery.to_string())
+    }
+
+    /// The end of [`GitHub::take_delivery`].
+    pub(crate) fn release_delivery(&self, delivery: &str) {
+        lock(&self.0.queue.queued).remove(delivery);
+    }
+
+    fn done_one(&self, delivery: &str) {
+        lock(&self.0.queue.queued).remove(delivery);
+        self.settled_one();
+    }
+
+    /// One piece of work counted by [`GitHub::settle`] is over.
+    pub(crate) fn settled_one(&self) {
         let q = &self.0.queue;
         if q.pending.fetch_sub(1, Ordering::SeqCst) == 1 {
             q.idle.notify_waiters();
         }
     }
 
-    /// Waits until every accepted delivery and every queued effect (opening, merging a PR) has
-    /// been processed (tests, shutdown).
+    /// Queues the deliveries still `received` (accepted, not processed: a restart came between)
+    /// that aren't queued already. On start and with every poll tick. Returns how many.
+    pub fn recover_deliveries(&self) -> usize {
+        let rows = match self.store().reader(|c| {
+            repo::received_deliveries(c, self.now(), RECOVER_BATCH).map_err(ApiError::from)
+        }) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!(error = %e, "github: received deliveries not read");
+                return 0;
+            }
+        };
+        let mut n = 0;
+        for (delivery_id, event, source, payload) in rows {
+            let (Ok(source), Ok(payload)) = (
+                serde_json::from_str::<Source>(&source),
+                serde_json::from_str::<Value>(&payload),
+            ) else {
+                // never readable: recorded as failed rather than tried forever
+                let r = self.store().transaction(|tx| {
+                    repo::set_delivery_result(
+                        tx,
+                        &delivery_id,
+                        None,
+                        None,
+                        "failed",
+                        Some("存下的内容读不出来"),
+                    )
+                    .map_err(ApiError::from)
+                });
+                if let Err(e) = r {
+                    tracing::error!(error = %e, "github: unreadable delivery not recorded");
+                }
+                continue;
+            };
+            if lock(&self.0.queue.queued).contains(&delivery_id) {
+                continue;
+            }
+            self.enqueue(Job {
+                source,
+                delivery_id,
+                event,
+                payload,
+                late: true,
+            });
+            n += 1;
+        }
+        n
+    }
+
+    /// Waits until every accepted delivery has been processed, runs the due effects (opening,
+    /// merging a PR, a comment) and delivers what they put in the outbox ([`crate::after`]) as the
+    /// Hub's runners would (tests).
     pub async fn settle(&self) {
         loop {
-            let n = self.0.queue.idle.notified();
-            let e = self.0.effects.idle.notified();
-            let deliveries = self.0.queue.pending.load(Ordering::SeqCst);
-            let effects = self.0.effects.pending.load(Ordering::SeqCst);
-            match (deliveries, effects) {
-                (0, 0) => return,
-                (0, _) => e.await,
-                _ => n.await,
+            loop {
+                let n = self.0.queue.idle.notified();
+                if self.0.queue.pending.load(Ordering::SeqCst) == 0 {
+                    break;
+                }
+                n.await;
+            }
+            let ran = self.run_effects().await;
+            let d = Arc::new(steve_store::outbox::Dispatcher::new(vec![
+                self.outbox_consumer(),
+            ]));
+            let store = self.store().clone();
+            let pumped = tokio::task::spawn_blocking(move || {
+                d.register(&store)?;
+                d.pump(&store, steve_store::now())
+            })
+            .await;
+            match pumped {
+                // finishing an item may queue more work
+                Ok(Ok(p)) if p.any() || ran > 0 => continue,
+                Ok(Ok(_)) => return,
+                Ok(Err(e)) => {
+                    tracing::error!(error = %e, "github: outbox not delivered");
+                    return;
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "github: outbox pass panicked");
+                    return;
+                }
             }
         }
     }
 
-    /// Processes one delivery and records how it went.
+    /// Processes one delivery and records how it went ([`GitHub::delivered`]).
     async fn run_job(&self, job: Job) {
-        let out = self.apply(&job.source, &job.event, &job.payload).await;
-        if out.status == "failed" {
-            tracing::warn!(delivery = %job.delivery_id, event = %job.event, error = ?out.error, "github delivery failed");
+        // queued by the recovery while a worker finished it: nothing left to do
+        let still = self
+            .store()
+            .reader(|c| repo::delivery(c, &job.delivery_id).map_err(ApiError::from))
+            .ok()
+            .flatten()
+            .is_some_and(|d| d.status == repo::RECEIVED);
+        if !still {
+            return;
         }
+        let out = self
+            .apply_as(&job.source, &job.event, &job.payload, job.late)
+            .await;
+        self.delivered(&job.delivery_id, &job.event, &out);
+    }
+
+    /// Records how processing a delivery went. A failure stays `received` and is tried again
+    /// after a back-off ([`outbox::backoff`], by the recovery); after [`outbox::MAX_ATTEMPTS`] it
+    /// is `failed` for good, its input kept to look at.
+    pub(crate) fn delivered(&self, delivery: &str, event: &str, out: &crate::sync::Outcome) {
+        if out.status == "failed" {
+            tracing::warn!(delivery, event, error = ?out.error, "github delivery failed");
+        }
+        let now = self.now();
         let r = self.store().transaction(|tx| {
+            if out.status == "failed" {
+                let n = repo::delivery_attempts(tx, delivery)? + 1;
+                if n < outbox::MAX_ATTEMPTS {
+                    let why = out.error.as_deref().unwrap_or("处理失败");
+                    repo::delivery_retry(tx, delivery, why, now + outbox::backoff(n))?;
+                    return Ok(());
+                }
+            }
             repo::set_delivery_result(
                 tx,
-                &job.delivery_id,
+                delivery,
                 out.ws.as_deref(),
                 out.repo_id.as_deref(),
                 out.status,
@@ -528,9 +671,14 @@ async fn worker(inner: Weak<Inner>, mut rx: mpsc::UnboundedReceiver<Job>) {
             break;
         };
         let gh = GitHub(inner);
+        let id = job.delivery_id.clone();
         gh.run_job(job).await;
-        gh.done_one();
+        gh.done_one(&id);
     }
+}
+
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 #[cfg(test)]

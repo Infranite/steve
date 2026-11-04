@@ -366,6 +366,13 @@ pub trait ChannelAdapter: ConnectionProvider {
 
     async fn members(&self, cx: &ConnCx, ext_id: &str) -> Result<Vec<MemberInfo>, AdapterError>;
 
+    /// How long the provider drops a repeat of a send with the same dedupe key
+    /// ([`OutContent::uuid`]): within it, a send whose answer was lost may be sent again as is.
+    /// `None`: no such guarantee, a lost answer is never sent again by itself.
+    fn send_dedup(&self) -> Option<std::time::Duration> {
+        None
+    }
+
     /// Sends and returns the provider's message id. Only `outbound::send` (C6) may call it.
     async fn send(
         &self,

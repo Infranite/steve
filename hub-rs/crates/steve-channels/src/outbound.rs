@@ -43,6 +43,8 @@ use async_trait::async_trait;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use steve_flow::AdapterError;
+use steve_modules::accounts::connections::{ProviderError, WriteRefusal, may_write_in};
 use steve_modules::decisions::{DecisionCx, DecisionHandler, choice_result};
 use steve_modules::hooks::ItemHooks;
 use steve_modules::outbound::{self as b1, Audience, CheckCx, CheckResult, KnowledgeUse, Verdict};
@@ -62,7 +64,7 @@ use crate::personas::{self, PersonaRow};
 use crate::respond::{self, DRAFT_OPTIONS, SUBJECT_MESSAGE};
 use crate::rules::{self, Act, ItemMode, Trigger};
 use crate::spaces::{self, Mode, SpaceRow};
-use crate::{ChannelResult, Channels, bindings, compose, messages};
+use crate::{ChannelResult, Channels, bindings, compose, messages, send_state};
 
 /// How long an approved message waits before it goes out (undo window).
 pub const SEND_DELAY_MS: i64 = 10_000;
@@ -71,6 +73,14 @@ pub const QUEUE_EVERY: Duration = Duration::from_secs(2);
 /// A claim older than this is considered abandoned (the Hub stopped mid-send) and retried; the
 /// `uuid` keeps the provider from posting it twice.
 pub const CLAIM_STALE_MS: i64 = 10 * 60 * 1000;
+/// A direct message (no decision) not claimed this long after it was stored was cut off before its
+/// send began (a restart, or it waits for its connection): the queue sends it. Longer than an
+/// inline send takes to claim it.
+pub const UNCLAIMED_MS: i64 = 30 * 1000;
+/// A reply that could not go out within this long is not sent late by itself: you are asked.
+pub const LATE_MS: i64 = 60 * 60 * 1000;
+/// The choices on a message that may be out (sent, no answer, past the provider's dedupe window).
+pub const UNKNOWN_OPTIONS: [&str; 3] = ["sent", "retry", "discard"];
 /// Options of the decision after a failed send (§2.7).
 pub const FAIL_OPTIONS: [&str; 2] = ["retry", "discard"];
 /// Options of the decision after a blocked one.
@@ -647,7 +657,12 @@ pub enum SendOutcome {
         error: String,
         decision_id: String,
     },
-    /// Not pending, already claimed, gone.
+    /// Sent without an answer: `unknown`, it may be out (sent again under the same dedupe key
+    /// while the provider drops repeats, else you are asked).
+    Unknown {
+        error: String,
+    },
+    /// Not pending, already claimed, gone, or waiting for its connection.
     Skipped,
 }
 
@@ -888,6 +903,10 @@ impl Outbox {
                 },
                 now,
             )?;
+            // a direct one is found again under this authorization if the Hub stops before it is out
+            if direct {
+                send_state::keep(tx, &id, &req.auth)?;
+            }
             if completes(req.purpose)
                 && let Some(src) = &t.source_message_id
             {
@@ -951,7 +970,9 @@ impl Outbox {
                 message_id: id,
                 decision_id,
             },
-            SendOutcome::Skipped => Delivered::Skipped,
+            SendOutcome::Unknown { .. } | SendOutcome::Skipped => {
+                Delivered::Queued { message_id: id }
+            }
         };
         Ok((d, Some(res)))
     }
@@ -982,6 +1003,21 @@ impl Outbox {
     /// `auth` against the store, claims the message once, scans the final text for secrets, sends
     /// with `uuid = cm_…`, records the result.
     pub async fn send(&self, ch: &Channels, id: &str, auth: &Auth) -> ChannelResult<SendOutcome> {
+        self.send_as(ch, id, auth, false).await
+    }
+
+    /// [`Outbox::send`]; `again`: an `unknown` message sent again under its dedupe key (only
+    /// [`Outbox::settle_unknown`]). A message tried before goes out again only within the
+    /// provider's dedupe window, counted from its first try; after it, it is `unknown` and you are
+    /// asked. The claim (`sent` = now) fences the result: a late answer of a claim another took
+    /// over changes nothing.
+    async fn send_as(
+        &self,
+        ch: &Channels,
+        id: &str,
+        auth: &Auth,
+        again: bool,
+    ) -> ChannelResult<SendOutcome> {
         let Some(_activity) = ch.store().try_activity("channel_send") else {
             return Ok(SendOutcome::Skipped);
         };
@@ -993,8 +1029,32 @@ impl Outbox {
                 return Ok(Err(SendOutcome::Skipped));
             };
             let stale = row.sent.is_some_and(|t| t < now - CLAIM_STALE_MS);
-            if row.status != "pending" || (row.sent.is_some() && !stale) {
+            let pending = row.status == "pending" && (row.sent.is_none() || stale);
+            if !(pending || (again && row.status == "unknown")) {
                 return Ok(Err(SendOutcome::Skipped));
+            }
+            // tried before: again only while the provider drops repeats
+            let tried = send_state::get(tx, &row.id)?.and_then(|s| s.first_at);
+            if let Some(first) = tried {
+                let adapter: Option<String> = tx
+                    .query_row(
+                        "SELECT c.adapter FROM spaces s JOIN connections c ON c.id = s.connection_id WHERE s.id = ?",
+                        [&row.space_id],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                let window = adapter
+                    .and_then(|a| ch.adapter(&a))
+                    .and_then(|a| a.send_dedup())
+                    .map(|d| d.as_millis() as i64);
+                if !window.is_some_and(|w| now < first + w) {
+                    tx.execute(
+                        "UPDATE chan_messages SET status = 'unknown', sent = NULL WHERE id = ? AND status IN ('pending', 'unknown')",
+                        [&row.id],
+                    )?;
+                    messages::event(tx, &row.ws, &row.space_id, &row.id);
+                    return Ok(Err(SendOutcome::Skipped));
+                }
             }
             // its space has no live connection any more (disconnected, cleaned up): it can never be
             // sent, so it fails once instead of being picked up by the queue forever
@@ -1031,8 +1091,19 @@ impl Outbox {
                 return Ok(Err(SendOutcome::Skipped));
             }
             if let Err(why) = verify(tx, &row, auth, now)? {
+                // tried before and may be out: not a draft to approve again (a new text under the
+                // same dedupe key would be dropped), it stays unknown and you are asked
+                if tried.is_some() {
+                    tx.execute(
+                        "UPDATE chan_messages SET status = 'unknown', sent = NULL WHERE id = ? AND status IN ('pending', 'unknown')",
+                        [&row.id],
+                    )?;
+                    messages::event(tx, &row.ws, &row.space_id, &row.id);
+                    return Ok(Err(SendOutcome::Skipped));
+                }
                 // not authorized after all: back to a draft, nothing leaves
-                set_status(tx, &row.id, &["pending"], "draft")?;
+                set_status(tx, &row.id, &["pending", "unknown"], "draft")?;
+                send_state::forget(tx, &row.id)?;
                 let space = spaces::get(tx, &row.space_id)?.ok_or_else(|| ApiError::not_found("空间"))?;
                 let speaker = place(tx, &row.ws, &space.connection_id, &row.space_id, row.persona_id.as_deref())?.speaker;
                 let d = match base::decisions::open_for(tx, &row.ws, SUBJECT_MESSAGE, &row.id)? {
@@ -1051,8 +1122,9 @@ impl Outbox {
                 return Ok(Err(SendOutcome::Drafted { decision_id: d }));
             }
             let n = tx.execute(
-                "UPDATE chan_messages SET sent = ? WHERE id = ? AND status = 'pending' AND (sent IS NULL OR sent < ?)",
-                params![now, row.id, now - CLAIM_STALE_MS],
+                "UPDATE chan_messages SET status = 'pending', sent = ?1 WHERE id = ?2
+                   AND ((status = 'pending' AND (sent IS NULL OR sent < ?3)) OR (status = 'unknown' AND ?4))",
+                params![now, row.id, now - CLAIM_STALE_MS, again],
             )?;
             Ok(if n == 1 { Ok(row) } else { Err(SendOutcome::Skipped) })
         })?;
@@ -1060,6 +1132,8 @@ impl Outbox {
             Ok(r) => r,
             Err(o) => return Ok(o),
         };
+        // the claim's mark (`sent`): what a result must still find to be ours
+        let claim = now;
 
         // what goes out, and whether it may
         let prep = ch.store().reader(|c| -> ChannelResult<_> {
@@ -1107,7 +1181,7 @@ impl Outbox {
         });
         let (space, mode, adapter, text, kind, at) = match prep {
             Ok(x) => x,
-            Err(e) => return self.failed(ch, &row, &e.to_string()),
+            Err(e) => return self.failed(ch, &row, &e.to_string(), claim),
         };
         let secrets = disclosure::secret_spans(self.secrets.as_ref(), &row.ws, &text);
         if !secrets.is_empty() {
@@ -1141,13 +1215,39 @@ impl Outbox {
             return Ok(SendOutcome::Blocked { decision_id: d });
         }
 
-        // the adapter
-        let cx = match ch.connections().cx(&row.ws, &space.connection_id) {
+        // the adapter, on the connection as it is now: paused, to be authorized again or revoked, or
+        // (in your name) sending as you turned off since the approval → not sent
+        let cap = (mode == Mode::Own).then_some(spaces::SEND_AS_USER_CAP);
+        // paused or to be authorized again: it waits (unclaimed) and goes out once resumed
+        let waits = ch
+            .store()
+            .reader(|c| may_write_in(c, &row.ws, &space.connection_id, cap))
+            .ok()
+            .is_some_and(|r| matches!(r, Err(WriteRefusal::Later(_))));
+        if waits {
+            ch.store().transaction(|tx| -> ChannelResult<()> {
+                tx.execute(
+                    "UPDATE chan_messages SET sent = NULL WHERE id = ? AND status = 'pending'",
+                    [&row.id],
+                )?;
+                Ok(())
+            })?;
+            return Ok(SendOutcome::Skipped);
+        }
+        let cx = match ch.connections().cx_for(&row.ws, &space.connection_id, cap) {
             Ok(cx) => cx,
-            Err(e) => return self.failed(ch, &row, &e.to_string()),
+            Err(e) => {
+                ch.store()
+                    .transaction(|tx| send_state::forget(tx, &row.id))?;
+                return self.failed(ch, &row, &e.to_string(), claim);
+            }
         };
+        // the first try's text and mentions, kept: a repeat under the same dedupe key is the same
+        let (text, at) = ch
+            .store()
+            .transaction(|tx| send_state::attempt(tx, &row.id, auth, &text, &at, now))?;
         let in_thread = reply_in_thread(kind, row.thread_key.as_deref());
-        let sent: Result<String, String> = match (mode, self.as_user.get(&adapter)) {
+        let sent: Result<String, ProviderError> = match (mode, self.as_user.get(&adapter)) {
             (Mode::Own, Some(u)) => {
                 let mut m = UserMessage::text(text.clone());
                 m.uuid = Some(row.id.clone());
@@ -1156,7 +1256,7 @@ impl Outbox {
                     None => u.send_as_user(&cx, &space.external_id, &m).await,
                 }
                 .map(|s| s.message_id)
-                .map_err(|e| e.to_string())
+                .map_err(ProviderError::from)
             }
             _ => match ch.adapter(&adapter) {
                 Some(a) => {
@@ -1173,19 +1273,27 @@ impl Outbox {
                     content.uuid = Some(row.id.clone());
                     content.at = at;
                     content.space_ext_id = Some(space.external_id.clone());
-                    a.send(&cx, &to, &content).await.map_err(|e| e.to_string())
+                    a.send(&cx, &to, &content).await.map_err(|e| match e {
+                        AdapterError::Provider(p) => p,
+                        e => ProviderError::Rejected(e.to_string()),
+                    })
                 }
-                None => Err("这个渠道还不能发送消息".into()),
+                None => Err(ProviderError::Rejected("这个渠道还不能发送消息".into())),
             },
         };
         match sent {
             Ok(ext) => {
                 let now = ch.now();
-                ch.store().transaction(|tx| -> ChannelResult<()> {
-                    tx.execute(
-                        "UPDATE chan_messages SET status = 'sent', external_id = ?, text = ?, sent = ? WHERE id = ?",
-                        params![ext, text, now, row.id],
-                    )?;
+                let ours = ch.store().transaction(|tx| -> ChannelResult<bool> {
+                    if tx.execute(
+                        "UPDATE chan_messages SET status = 'sent', external_id = ?, text = ?, sent = ?
+                          WHERE id = ? AND status = 'pending' AND sent = ?",
+                        params![ext, text, now, row.id, claim],
+                    )? == 0
+                    {
+                        return Ok(false);
+                    }
+                    send_state::forget(tx, &row.id)?;
                     base::audit(
                         tx,
                         &row.ws,
@@ -1195,29 +1303,83 @@ impl Outbox {
                         &json!({"auth": auth.code(), "space": row.space_id, "on_behalf": row.on_behalf}),
                     )?;
                     messages::event(tx, &row.ws, &row.space_id, &row.id);
-                    Ok(())
+                    Ok(true)
                 })?;
+                if !ours {
+                    tracing::info!(message = %row.id, "channel send answered after its claim was taken over");
+                    return Ok(SendOutcome::Skipped);
+                }
                 ch.react_answered(&row.id, true).await;
                 Ok(SendOutcome::Sent { external_id: ext })
             }
+            // sent, no (readable) answer: it may be out. Not failed, not offered for a retry; the
+            // queue sends it again under the same dedupe key while the provider drops repeats, or
+            // asks you after
+            Err(ProviderError::Transient(e)) => self.unknown(ch, &row, &e, claim),
             Err(e) => {
-                let r = self.failed(ch, &row, &e);
+                ch.store()
+                    .transaction(|tx| send_state::forget(tx, &row.id))?;
+                let r = self.failed(ch, &row, &e.to_string(), claim);
                 ch.react_answered(&row.id, false).await;
                 r
             }
         }
     }
 
+    /// A send without an answer: `unknown`, the try kept ([`send_state`]).
+    fn unknown(
+        &self,
+        ch: &Channels,
+        row: &OutRow,
+        error: &str,
+        claim: i64,
+    ) -> ChannelResult<SendOutcome> {
+        tracing::info!(message = %row.id, error, "channel message: no answer, may be out");
+        ch.store().transaction(|tx| -> ChannelResult<()> {
+            if tx.execute(
+                "UPDATE chan_messages SET status = 'unknown', sent = NULL WHERE id = ? AND status = 'pending' AND sent = ?",
+                params![row.id, claim],
+            )? == 0
+            {
+                return Ok(());
+            }
+            send_state::error(tx, &row.id, error)?;
+            base::audit(
+                tx,
+                &row.ws,
+                "steve",
+                "chan_message.send.unknown",
+                &row.id,
+                &json!({"space": row.space_id}),
+            )?;
+            messages::event(tx, &row.ws, &row.space_id, &row.id);
+            Ok(())
+        })?;
+        Ok(SendOutcome::Unknown {
+            error: error.into(),
+        })
+    }
+
     /// The provider failed: `failed`, a `fail` decision (retry / discard). A missing permission
     /// can't be fixed by retrying (nor by YOLO): only discard, and the question says where to grant it.
-    fn failed(&self, ch: &Channels, row: &OutRow, error: &str) -> ChannelResult<SendOutcome> {
+    fn failed(
+        &self,
+        ch: &Channels,
+        row: &OutRow,
+        error: &str,
+        claim: i64,
+    ) -> ChannelResult<SendOutcome> {
         let permanent = missing_permission(error);
         tracing::info!(message = %row.id, error, "channel message not sent");
-        let d = ch.store().transaction(|tx| -> ChannelResult<String> {
-            tx.execute(
-                "UPDATE chan_messages SET status = 'failed', sent = NULL WHERE id = ?",
-                [&row.id],
-            )?;
+        let d = ch.store().transaction(|tx| -> ChannelResult<Option<String>> {
+            // only on our claim: a late answer of one another took over changes nothing
+            if tx.execute(
+                "UPDATE chan_messages SET status = 'failed', sent = NULL WHERE id = ? AND status = 'pending' AND sent = ?",
+                params![row.id, claim],
+            )? == 0
+            {
+                return Ok(None);
+            }
             let space =
                 spaces::get(tx, &row.space_id)?.ok_or_else(|| ApiError::not_found("空间"))?;
             let d = if permanent {
@@ -1247,11 +1409,14 @@ impl Outbox {
                 &json!({"space": row.space_id}),
             )?;
             messages::event(tx, &row.ws, &row.space_id, &row.id);
-            Ok(d)
+            Ok(Some(d))
         })?;
-        Ok(SendOutcome::Failed {
-            error: error.into(),
-            decision_id: d,
+        Ok(match d {
+            Some(decision_id) => SendOutcome::Failed {
+                error: error.into(),
+                decision_id,
+            },
+            None => SendOutcome::Skipped,
         })
     }
 
@@ -1316,7 +1481,170 @@ impl Outbox {
                 Err(e) => tracing::warn!(message = m, "channel send failed: {e}"),
             }
         }
+        n + self.resume_direct(ch, now).await + self.settle_unknown(ch, now).await
+    }
+
+    /// Direct messages (a rule's or a trigger's reply, no decision) whose send was cut off before
+    /// it began, or that waited for their connection: sent under the authorization they were stored
+    /// with (checked again by [`Outbox::send`]). One older than [`LATE_MS`] is asked about instead.
+    async fn resume_direct(&self, ch: &Channels, now: i64) -> usize {
+        let rows = ch.store().reader(|c| -> ChannelResult<Vec<(String, i64, Option<i64>)>> {
+            let mut st = c.prepare_cached(
+                "SELECT m.id, m.created, s.first_at FROM chan_messages m JOIN chan_send_state s ON s.message_id = m.id
+                  WHERE m.direction = 'out' AND m.status = 'pending' AND m.decision_id IS NULL
+                    AND ((m.sent IS NULL AND m.created < ?1) OR m.sent < ?2)
+                  ORDER BY m.created LIMIT 50",
+            )?;
+            let v = st
+                .query_map(params![now - UNCLAIMED_MS, now - CLAIM_STALE_MS], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(v)
+        });
+        let rows = match rows {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!("channel send queue (direct): {e}");
+                return 0;
+            }
+        };
+        let mut n = 0;
+        for (m, created, tried) in rows {
+            let now = ch.now();
+            // tried before (the Hub stopped during its send): it may be out, so it is unknown,
+            // not late; [`Outbox::settle_unknown`] takes it from there
+            if tried.is_some() {
+                let r = ch.store().transaction(|tx| -> ChannelResult<()> {
+                    tx.execute(
+                        "UPDATE chan_messages SET status = 'unknown', sent = NULL WHERE id = ? AND status = 'pending'",
+                        [&m],
+                    )?;
+                    Ok(())
+                });
+                if let Err(e) = r {
+                    tracing::warn!(message = m, "interrupted send not marked unknown: {e}");
+                }
+                continue;
+            }
+            if created < now - LATE_MS {
+                if let Err(e) = self.ask_late(ch, &m) {
+                    tracing::warn!(message = m, "late reply not asked about: {e}");
+                }
+                continue;
+            }
+            let Ok(Some(st)) = ch.store().reader(|c| send_state::get(c, &m)) else {
+                continue;
+            };
+            match self.send(ch, &m, &st.auth).await {
+                Ok(SendOutcome::Sent { .. }) => n += 1,
+                Ok(_) => {}
+                Err(e) => tracing::warn!(message = m, "channel send failed: {e}"),
+            }
+        }
         n
+    }
+
+    /// A direct reply that did not go out in time: `failed`, with the usual retry / discard card.
+    fn ask_late(&self, ch: &Channels, id: &str) -> ChannelResult<()> {
+        ch.store().transaction(|tx| -> ChannelResult<()> {
+            let Some(row) = out_row(tx, id)? else {
+                return Ok(());
+            };
+            if tx.execute(
+                "UPDATE chan_messages SET status = 'failed', sent = NULL WHERE id = ? AND status = 'pending'",
+                [id],
+            )? == 0
+            {
+                return Ok(());
+            }
+            send_state::forget(tx, id)?;
+            let space = spaces::get(tx, &row.space_id)?.ok_or_else(|| ApiError::not_found("空间"))?;
+            open_fail(
+                tx,
+                &row,
+                format!("发到「{}」的回复中途被打断，没有及时发出；现在还要发吗", space_name(&space)),
+                &FAIL_OPTIONS,
+            )?;
+            messages::event(tx, &row.ws, &row.space_id, id);
+            Ok(())
+        })
+    }
+
+    /// `unknown` messages: within the provider's dedupe window ([`ChannelAdapter::send_dedup`],
+    /// counted from the first try) sent again as they were, so a repeat is dropped; after it, or
+    /// without one, you are asked whether it went out ([`UNKNOWN_OPTIONS`]), once.
+    async fn settle_unknown(&self, ch: &Channels, now: i64) -> usize {
+        let rows = ch.store().reader(|c| -> ChannelResult<Vec<(String, String, Option<i64>)>> {
+            let mut st = c.prepare_cached(
+                "SELECT m.id, c.adapter, s.first_at FROM chan_messages m
+                   JOIN spaces sp ON sp.id = m.space_id JOIN connections c ON c.id = sp.connection_id
+                   LEFT JOIN chan_send_state s ON s.message_id = m.id
+                  WHERE m.direction = 'out' AND m.status = 'unknown'
+                    AND NOT EXISTS (SELECT 1 FROM decisions d WHERE d.subject_type = ?1
+                                      AND d.subject_id = m.id AND d.status = 'open')
+                  ORDER BY m.created LIMIT 50",
+            )?;
+            let v = st
+                .query_map([SUBJECT_MESSAGE], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(v)
+        });
+        let rows = match rows {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!("channel send queue (unknown): {e}");
+                return 0;
+            }
+        };
+        let mut n = 0;
+        for (m, adapter, first_at) in rows {
+            let window = ch
+                .adapter(&adapter)
+                .and_then(|a| a.send_dedup())
+                .map(|d| d.as_millis() as i64);
+            let st = ch.store().reader(|c| send_state::get(c, &m)).ok().flatten();
+            let resend = match (window, first_at, &st) {
+                (Some(w), Some(t), Some(_)) => now < t + w,
+                _ => false,
+            };
+            if !resend {
+                if let Err(e) = self.ask_unknown(ch, &m) {
+                    tracing::warn!(message = m, "unknown send not asked about: {e}");
+                }
+                continue;
+            }
+            let Some(st) = st else { continue };
+            // the window is checked again where it is claimed
+            match self.send_as(ch, &m, &st.auth, true).await {
+                Ok(SendOutcome::Sent { .. }) => n += 1,
+                Ok(_) => {}
+                Err(e) => tracing::warn!(message = m, "channel send failed: {e}"),
+            }
+        }
+        n
+    }
+
+    /// A message that may be out: a `fail` card with [`UNKNOWN_OPTIONS`].
+    fn ask_unknown(&self, ch: &Channels, id: &str) -> ChannelResult<()> {
+        ch.store().transaction(|tx| -> ChannelResult<()> {
+            let Some(row) = out_row(tx, id)? else {
+                return Ok(());
+            };
+            let space =
+                spaces::get(tx, &row.space_id)?.ok_or_else(|| ApiError::not_found("空间"))?;
+            open_fail(
+                tx,
+                &row,
+                format!(
+                    "发到「{}」的消息可能已经发出（没有收到对方的确认），请到那边看一下",
+                    space_name(&space)
+                ),
+                &UNKNOWN_OPTIONS,
+            )?;
+            messages::event(tx, &row.ws, &row.space_id, id);
+            Ok(())
+        })
     }
 
     /// Runs [`Outbox::send_due`] every [`QUEUE_EVERY`] until the channel module is gone.
@@ -1438,6 +1766,9 @@ impl Outbox {
                 ),
                 None => SRC_DRAFTED.into(),
             },
+            Delivered::Queued { .. } => {
+                "Not confirmed yet: it is on its way and will be checked.".into()
+            }
             Delivered::Skipped => SRC_DRAFTED.into(),
         })
     }
@@ -1482,7 +1813,7 @@ impl Outbox {
         let ext = ext.ok_or_else(|| ApiError::conflict("这条消息没有发出，不能撤回"))?;
         let cx = ch
             .connections()
-            .cx(ws, &space.connection_id)
+            .cx_for(ws, &space.connection_id, None)
             .map_err(|e| ApiError::rule(e.to_string()))?;
         a.recall(&cx, &ext)
             .await
@@ -1697,6 +2028,23 @@ impl MessageDecisions {
             ("discard", "failed") => {
                 set_status(tx, &row.id, &["failed"], DISCARDED)?;
             }
+            // may be out (no answer): you looked
+            ("sent", "unknown") => {
+                set_status(tx, &row.id, &["unknown"], "sent")?;
+                send_state::forget(tx, &row.id)?;
+            }
+            ("retry", "unknown") => {
+                tx.execute(
+                    "UPDATE chan_messages SET status = 'pending', sent = NULL WHERE id = ? AND status = 'unknown'",
+                    [&row.id],
+                )?;
+                result["hash"] = json!(text_hash(&row.text));
+                result["send_at"] = json!(now);
+            }
+            ("discard", "unknown") => {
+                set_status(tx, &row.id, &["unknown"], DISCARDED)?;
+                send_state::forget(tx, &row.id)?;
+            }
             // a blocked message stays blocked; “discard” only closes the card
             ("discard", "blocked") => {}
             _ => return Err(ApiError::conflict(MSG_HANDLED)),
@@ -1833,7 +2181,10 @@ impl crate::reactions::Reactor for Outbox {
         let adapter = crate::reactions::adapter_of(ch, ws, conn)?;
         match self.as_user.get(&adapter) {
             Some(u) => {
-                let cx = ch.connections().cx(ws, conn).map_err(|e| e.to_string())?;
+                let cx = ch
+                    .connections()
+                    .cx_for(ws, conn, None)
+                    .map_err(|e| e.to_string())?;
                 let emoji = crate::adapters::feishu::send::emoji_type(kind);
                 let id = u
                     .react_as_user(&cx, ext_msg_id, emoji)
@@ -1865,7 +2216,10 @@ impl crate::reactions::Reactor for Outbox {
         let adapter = crate::reactions::adapter_of(ch, ws, conn)?;
         match (as_user, self.as_user.get(&adapter)) {
             (true, Some(u)) => {
-                let cx = ch.connections().cx(ws, conn).map_err(|e| e.to_string())?;
+                let cx = ch
+                    .connections()
+                    .cx_for(ws, conn, None)
+                    .map_err(|e| e.to_string())?;
                 u.unreact_as_user(&cx, ext_msg_id, reaction_id)
                     .await
                     .map_err(|e| e.to_string())

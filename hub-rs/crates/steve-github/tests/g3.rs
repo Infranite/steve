@@ -402,6 +402,7 @@ async fn a_pr_is_linked_by_branch_and_by_reference() {
         .open_pr(REPO, "chore/y", &sha, "整理代码", "", defaults::USER)
         .expect("pr");
     h.gh.poll_repo(&h.repo).await.expect("poll");
+    h.gh.settle().await;
     let link = |n: u64| {
         q(
             &h,
@@ -439,6 +440,7 @@ async fn a_pr_is_linked_by_branch_and_by_reference() {
     );
     // seeing it again changes nothing
     h.gh.poll_repo(&h.repo).await.expect("poll");
+    h.gh.settle().await;
     assert_eq!(
         q(
             &h,
@@ -483,6 +485,7 @@ async fn a_pr_is_linked_by_branch_and_by_reference() {
     .await;
     assert_eq!(s, 200, "{v}");
     h.gh.poll_repo(&h.repo).await.expect("poll");
+    h.gh.settle().await;
     assert_eq!(link(n1), json!("-|manual"));
     let (s, _) = call(
         &h.api,
@@ -691,15 +694,19 @@ async fn finish_on_merged_asks_to_merge_when_green_and_409s_a_new_head() {
     // pending, then failing: not asked
     h.fake.set_check(REPO, &sha, "build", None);
     h.gh.poll_repo(&h.repo).await.expect("poll");
+    h.gh.settle().await;
     assert!(open_decision(&h, accept::PR_MERGE).is_none());
     h.fake.set_check(REPO, &sha, "build", Some("failure"));
     h.gh.poll_repo(&h.repo).await.expect("poll");
+    h.gh.settle().await;
     h.gh.settle().await;
     assert!(open_decision(&h, accept::PR_MERGE).is_none());
     // green: asked, once
     h.fake.set_check(REPO, &sha, "build", Some("success"));
     h.gh.poll_repo(&h.repo).await.expect("poll");
+    h.gh.settle().await;
     h.gh.poll_repo(&h.repo).await.expect("poll");
+    h.gh.settle().await;
     let (merge, question, draft) = open_decision(&h, accept::PR_MERGE).expect("asked to merge");
     assert_eq!(question, format!("合并 PR #{n}（{REPO}）？"));
     assert_eq!(
@@ -742,6 +749,7 @@ async fn finish_on_merged_asks_to_merge_when_green_and_409s_a_new_head() {
     // green again on the new head: the same open question; yes merges and deletes the branch
     h.fake.set_check(REPO, new_sha, "build", Some("success"));
     h.gh.poll_repo(&h.repo).await.expect("poll");
+    h.gh.settle().await;
     assert_eq!(
         q(
             &h,
@@ -823,6 +831,7 @@ async fn a_failed_check_supplements_the_item_through_the_template() {
     h.fake.set_check(REPO, &sha, "build", Some("failure"));
     h.gh.poll_repo(&h.repo).await.expect("poll");
     h.gh.settle().await;
+    h.gh.settle().await;
     let want = format!(
         "PR #{n} 的检查失败：build。用 steve_github_ci_log 读日志后修复，修完推送到同一分支。"
     );
@@ -869,4 +878,180 @@ async fn a_worktree_whose_origin_is_elsewhere_is_not_pushed() {
             why: format!("开 PR 失败：工作目录的 origin 不是 github.com/{REPO}")
         })
     );
+}
+
+fn effect(h: &H, dec: &str) -> (String, i64) {
+    let v = q(
+        h,
+        "SELECT state || '|' || attempts FROM gh_effects WHERE decision_id = ?",
+        &[&dec],
+    );
+    let s = v.as_str().expect("effect").to_string();
+    let (st, n) = s.split_once('|').expect("pair");
+    (st.to_string(), n.parse().expect("attempts"))
+}
+
+/// Y2: GitHub opened the PR but its answer was lost: the write is `unknown`, not failed, and the
+/// item is not failed. The next run (after the back-off) finds the PR from the branch and takes it:
+/// one PR on GitHub, the item finished as usual.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_opened_pr_whose_answer_was_lost_is_found_not_opened_twice() {
+    let h = setup().await;
+    let id = item(&h, 1, Some(BRANCH));
+    assert!(accepted(&h, &id).await);
+    let (dec, _, _) = open_decision(&h, accept::PR_OPEN).expect("asked");
+    h.fake
+        .fail_next_on("/pulls", steve_github::fake::Fault::LostAnswer);
+    answer(&h, &dec, "yes", "fix: 保留 return_to\n登录后回到原页面。")
+        .await
+        .expect("yes");
+    assert_eq!(effect(&h, &dec), ("unknown".into(), 1));
+    assert!(
+        !h.core
+            .calls()
+            .iter()
+            .any(|c| matches!(c, CoreCall::Fail { .. })),
+        "not failed: it may have happened"
+    );
+    assert_eq!(h.fake.pulls_of(REPO, BRANCH), 1, "it did happen on GitHub");
+    h.env.clock.advance(steve_store::outbox::backoff(1) + 1);
+    h.gh.settle().await;
+    assert_eq!(effect(&h, &dec), ("done".into(), 2));
+    assert_eq!(h.fake.pulls_of(REPO, BRANCH), 1, "not opened twice");
+    let n = steve_pr(&h);
+    assert_eq!(
+        h.core.calls().last(),
+        Some(&CoreCall::Finish {
+            item: id.clone(),
+            now: format!("已验收，PR #{n} 已开")
+        })
+    );
+}
+
+/// Y2: a restart while the write was running: it is unknown, reconciled, done once.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_write_a_restart_interrupted_is_reconciled() {
+    let h = setup().await;
+    let id = item(&h, 1, Some(BRANCH));
+    assert!(accepted(&h, &id).await);
+    let (dec, _, _) = open_decision(&h, accept::PR_OPEN).expect("asked");
+    answer(&h, &dec, "yes", "fix: 保留 return_to\n登录后回到原页面。")
+        .await
+        .expect("yes");
+    assert_eq!(effect(&h, &dec).0, "done");
+    // as if the Hub had stopped after GitHub opened it and before the row said so
+    h.env
+        .store()
+        .with_conn(|c| {
+            c.execute(
+                "UPDATE gh_effects SET state = 'running' WHERE decision_id = ?",
+                [&dec],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(h.gh.recover_effects(), 1);
+    assert_eq!(effect(&h, &dec).0, "unknown");
+    h.gh.settle().await;
+    assert_eq!(
+        effect(&h, &dec).0,
+        "unknown",
+        "not before a cut-off request could have landed"
+    );
+    h.env
+        .clock
+        .advance(steve_github::api::REQUEST_TIMEOUT.as_millis() as i64 + 1);
+    h.gh.settle().await;
+    assert_eq!(effect(&h, &dec).0, "done");
+    assert_eq!(h.fake.pulls_of(REPO, BRANCH), 1, "found, not opened again");
+}
+
+/// An answer rolled back (or never given) leaves no write behind.
+#[tokio::test(flavor = "multi_thread")]
+async fn no_answer_no_write() {
+    let h = setup().await;
+    let id = item(&h, 1, Some(BRANCH));
+    assert!(accepted(&h, &id).await);
+    let (dec, _, _) = open_decision(&h, accept::PR_OPEN).expect("asked");
+    h.gh.settle().await;
+    assert_eq!(
+        q(
+            &h,
+            "SELECT count(*) FROM gh_effects WHERE decision_id = ?",
+            &[&dec]
+        ),
+        json!(0)
+    );
+    assert_eq!(h.fake.pulls_of(REPO, BRANCH), 0);
+}
+
+/// Y2 (Codex E4 review): the commit is held to. GitHub failed (no PR made, but it may have been);
+/// the branch got a new commit after the approval; the next run finds no PR from the approved
+/// commit and does not push the new one: refused, the item failed with the reason.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_branch_that_moved_after_the_approval_is_not_pushed() {
+    let h = setup().await;
+    let id = item(&h, 1, Some(BRANCH));
+    assert!(accepted(&h, &id).await);
+    let (dec, _, _) = open_decision(&h, accept::PR_OPEN).expect("asked");
+    h.fake.fail_next_on(
+        "/pulls",
+        steve_github::fake::Fault::Status {
+            status: 502,
+            message: "Bad Gateway".into(),
+        },
+    );
+    answer(&h, &dec, "yes", "fix: 保留 return_to\n登录后回到原页面。")
+        .await
+        .expect("yes");
+    assert_eq!(effect(&h, &dec), ("unknown".into(), 1));
+    git(h.work.path(), &["checkout", "-q", BRANCH]);
+    commit(h.work.path(), "later.txt", "not approved");
+    h.env.clock.advance(steve_store::outbox::backoff(1) + 1);
+    h.gh.settle().await;
+    assert_eq!(effect(&h, &dec).0, "failed");
+    assert_eq!(h.fake.pulls_of(REPO, BRANCH), 0);
+    assert!(
+        h.core
+            .calls()
+            .iter()
+            .any(|c| matches!(c, CoreCall::Fail { why, .. } if why.contains("新的提交"))),
+        "{:?}",
+        h.core.calls()
+    );
+}
+
+/// A paused connection holds an approved write: nothing sent, it stays pending and goes out once
+/// the connection is resumed.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_approved_write_waits_for_a_paused_connection() {
+    let h = setup().await;
+    let id = item(&h, 1, Some(BRANCH));
+    assert!(accepted(&h, &id).await);
+    let (dec, _, _) = open_decision(&h, accept::PR_OPEN).expect("asked");
+    let conn = q(&h, "SELECT connection_id FROM gh_repos LIMIT 1", &[]);
+    let conn = conn.as_str().expect("connection").to_string();
+    let set = |status: &str| {
+        h.env
+            .store()
+            .with_conn(|c| {
+                c.execute(
+                    "UPDATE connections SET status = ? WHERE id = ?",
+                    [status, &conn],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+    };
+    set("paused");
+    answer(&h, &dec, "yes", "fix: 保留 return_to\n登录后回到原页面。")
+        .await
+        .expect("yes");
+    assert_eq!(effect(&h, &dec).0, "pending");
+    assert_eq!(h.fake.pulls_of(REPO, BRANCH), 0);
+    set("ok");
+    h.env.clock.advance(steve_store::outbox::backoff(1) + 1);
+    h.gh.settle().await;
+    assert_eq!(effect(&h, &dec).0, "done");
+    assert_eq!(h.fake.pulls_of(REPO, BRANCH), 1);
 }

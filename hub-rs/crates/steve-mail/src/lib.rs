@@ -43,6 +43,7 @@ pub mod items;
 pub mod knowledge;
 pub mod mcp;
 pub mod nodes;
+pub mod outbox;
 pub mod parse;
 pub mod repo;
 pub mod retention;

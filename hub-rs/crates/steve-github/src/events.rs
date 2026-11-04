@@ -6,11 +6,12 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// One event for the signals pipeline. Field for field `steve_flow::RawEvent` with
 /// `source = "github"`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SignalEvent {
     /// `github.check_failed`, `github.pr_merged`, …
     pub type_key: String,
@@ -33,7 +34,7 @@ pub struct SignalEvent {
 }
 
 /// A GitHub account, to be identified by S1 (`family=github_user`; bots become `virtual`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Actor {
     pub login: String,
     /// `User`, `Bot`, `Organization`.

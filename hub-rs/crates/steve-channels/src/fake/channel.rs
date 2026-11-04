@@ -37,6 +37,8 @@ pub struct FakeChannel {
     pub fail_info: Mutex<bool>,
     /// `send` fails with this text while set (C6 tests).
     pub fail_send: Mutex<Option<String>>,
+    /// The next send goes out, but its answer is lost (a transient error back): `unknown`.
+    pub lose_answer: Mutex<bool>,
     /// Calls of `space_info` and `members`.
     pub info_calls: Mutex<u32>,
     pub member_calls: Mutex<u32>,
@@ -200,6 +202,11 @@ impl ChannelAdapter for FakeChannel {
         }
     }
 
+    /// Like Feishu's `uuid`: an hour.
+    fn send_dedup(&self) -> Option<std::time::Duration> {
+        Some(std::time::Duration::from_secs(3600))
+    }
+
     async fn space_info(&self, _: &ConnCx, ext_id: &str) -> Result<SpaceInfo, AdapterError> {
         *lock(&self.info_calls) += 1;
         Ok(self.info(ext_id)?.0)
@@ -216,8 +223,9 @@ impl ChannelAdapter for FakeChannel {
         to: &SendTarget,
         content: &OutContent,
     ) -> Result<String, AdapterError> {
+        // the provider refused it: nothing went out
         if let Some(e) = lock(&self.fail_send).clone() {
-            return Err(ProviderError::Transient(e).into());
+            return Err(ProviderError::Rejected(e).into());
         }
         let mut sent = lock(&self.sent);
         // the same uuid twice sends once, like Feishu
@@ -228,6 +236,9 @@ impl ChannelAdapter for FakeChannel {
         }
         let id = format!("fm_{}", sent.len() + 1);
         sent.push((to.clone(), content.clone(), id.clone()));
+        if std::mem::take(&mut *lock(&self.lose_answer)) {
+            return Err(ProviderError::Transient("没有收到回应".into()).into());
+        }
         Ok(id)
     }
 

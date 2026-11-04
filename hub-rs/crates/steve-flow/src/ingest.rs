@@ -311,6 +311,20 @@ pub(crate) fn store_in(
     now: i64,
 ) -> FlowResult<Step> {
     {
+        // a known event first: a repeated delivery (the outbox's at-least-once) gets the event it
+        // stored, also after the source was paused or the type turned off meanwhile
+        let dedupe = format!("{}:{}", conn.unwrap_or(&ev.source), ev.external_id);
+        if let Some(id) = tx
+            .query_row(
+                "SELECT id FROM ext_events WHERE workspace_id = ? AND dedupe_key = ?",
+                params![ws, dedupe],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?
+        {
+            return Ok(Step::Done(Ingested::Duplicate { id }));
+        }
+
         let info = conn.map(|id| conn_info(tx, ws, id)).transpose()?;
         let mut recorded: Option<String> = ev.record_only.clone();
         if let (Some(id), Some(info)) = (conn, &info) {
@@ -336,18 +350,6 @@ pub(crate) fn store_in(
                 cx.drops.add(now, id, &ev.type_key);
                 return Ok(Step::Done(Ingested::Dropped(r)));
             }
-        }
-
-        let dedupe = format!("{}:{}", conn.unwrap_or(&ev.source), ev.external_id);
-        if let Some(id) = tx
-            .query_row(
-                "SELECT id FROM ext_events WHERE workspace_id = ? AND dedupe_key = ?",
-                params![ws, dedupe],
-                |r| r.get::<_, String>(0),
-            )
-            .optional()?
-        {
-            return Ok(Step::Done(Ingested::Duplicate { id }));
         }
 
         let on_behalf = info.as_ref().map(|i| i.created_by.as_str());
@@ -526,8 +528,10 @@ fn adapter_of(
 }
 
 /// Polls one connection once: `poll(cursor)` → `ingest` each → store the new cursor and
-/// `last_sync`. Polling goes on while the source is paused, so nothing piles up to be caught up on
-/// resume. Returns the events stored.
+/// `last_sync`. A malformed event is skipped; one that can't be stored stops the pass before the cursor moves: the next
+/// poll reads the batch again from the old cursor, and what was stored before it comes back as a
+/// duplicate (same connection and `external_id`). Polling goes on while the source is paused, so
+/// nothing piles up to be caught up on resume. Returns the events stored.
 pub async fn poll_connection(
     cx: &Arc<FlowCx>,
     ws: &str,
@@ -552,10 +556,20 @@ pub async fn poll_connection(
     };
     let mut stored = 0;
     for ev in batch.events {
+        // malformed never becomes valid: skipped, or it would hold the source at this cursor forever
+        if let Err(e) = check(&ev) {
+            tracing::warn!(conn, external_id = %ev.external_id, "flow.poll: malformed event skipped: {e}");
+            continue;
+        }
         match ingest(cx, ws, Some(conn), ev).await {
             Ok(Ingested::Stored { .. }) => stored += 1,
             Ok(_) => {}
-            Err(e) => tracing::warn!(conn, "flow.poll: event not ingested: {e}"),
+            Err(e) => {
+                tracing::warn!(conn, "flow.poll: event not ingested, cursor kept: {e}");
+                return Err(AdapterError::Malformed(format!(
+                    "事件没有存下，下次从原位置重读：{e}"
+                )));
+            }
         }
     }
     let now = cx.now();

@@ -34,7 +34,7 @@ pub enum Purpose {
 
 /// What lets a message go out without a draft (§10: “授权（规则或决定）”). The outbound verifies it
 /// against the store again right before the adapter is called; anything else becomes a draft.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum Auth {
     /// Nothing: a draft for your approval.
     #[default]
@@ -186,6 +186,9 @@ pub enum Delivered {
         message_id: String,
         decision_id: String,
     },
+    /// On its way, not confirmed: waiting for its connection (paused), or sent without an answer
+    /// (`unknown`; the queue sends it again while the provider drops repeats, else asks you).
+    Queued { message_id: String },
     /// Not said at all (a handoff acknowledgement while drafts are all there is).
     Skipped,
 }
@@ -196,7 +199,8 @@ impl Delivered {
             Self::Drafted { message_id, .. }
             | Self::Sent { message_id }
             | Self::Blocked { message_id, .. }
-            | Self::Failed { message_id, .. } => Some(message_id),
+            | Self::Failed { message_id, .. }
+            | Self::Queued { message_id } => Some(message_id),
             Self::Skipped => None,
         }
     }

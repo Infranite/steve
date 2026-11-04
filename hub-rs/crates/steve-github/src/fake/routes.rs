@@ -288,6 +288,7 @@ pub fn router(state: AppState) -> Router {
         .route("/repos/{o}/{r}/pulls/{n}", get(get_pull))
         .route("/repos/{o}/{r}/pulls/{n}/merge", put(merge_pull))
         .route("/repos/{o}/{r}/git/refs/heads/{*b}", delete(delete_ref))
+        .route("/repos/{o}/{r}/git/ref/heads/{*b}", get(get_ref))
         .route("/repos/{o}/{r}/issues", get(list_issues))
         .route("/repos/{o}/{r}/issues/{n}", get(get_issue))
         .route(
@@ -475,6 +476,24 @@ async fn get_branch(
         .cloned()
         .ok_or_else(|| ApiError::new(404, "Branch not found"))?;
     ok(200, branch_json(&w, &full, &b, &sha))
+}
+
+/// `GET /repos/{o}/{r}/git/ref/heads/{branch}`: one branch and its commit.
+async fn get_ref(
+    State(s): State<AppState>,
+    h: HeaderMap,
+    Path((o, r, b)): Path<(String, String, String)>,
+) -> R {
+    let w = s.lock();
+    let p = principal(&s, &w, &h)?;
+    let full = repo(&w, &p, &o, &r)?.full_name();
+    let Some(sha) = w.branches(&full).get(&b).cloned() else {
+        return Err(ApiError::not_found());
+    };
+    ok(
+        200,
+        json!({"ref": format!("refs/heads/{b}"), "object": {"type": "commit", "sha": sha}}),
+    )
 }
 
 async fn delete_ref(

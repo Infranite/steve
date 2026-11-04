@@ -16,6 +16,7 @@ use mail_builder::headers::address::Address;
 use rusqlite::Connection;
 use serde::Serialize;
 use serde_json::{Value, json};
+use steve_modules::accounts::connections::{WriteRefusal, may_write_in};
 use steve_modules::accounts::service::current_party;
 use steve_modules::contacts::people_repo;
 use steve_modules::decisions::{DecisionCx, DecisionHandler, choice_result};
@@ -44,6 +45,8 @@ pub const ERR_UNKNOWN: &str =
     "发送结果不明，可能已经发出。请核实已发送邮件或询问收件人，确认未发送后才重试";
 pub const UNKNOWN_OPTIONS: [&str; 2] = ["confirmed_not_sent", "discard"];
 
+/// The capability a connection needs to send mail.
+pub const SEND_CAP: &str = "mail.send";
 pub const ERR_NO_APPROVAL: &str = "没有有效的批准";
 pub const ERR_SECRET: &str = "正文里有保险箱里的机密，已拦下";
 
@@ -485,6 +488,17 @@ impl Mail {
             }
             if d.send_at.is_some_and(|t| t > now) {
                 return Ok(Err(SendOutcome::Skipped));
+            }
+            // the connection as it is now, not as it was when you approved
+            match may_write_in(tx, &d.workspace_id, &d.connection_id, Some(SEND_CAP))? {
+                Ok(()) => {}
+                Err(WriteRefusal::Later(_)) => return Ok(Err(SendOutcome::Skipped)),
+                Err(WriteRefusal::Never(why)) => {
+                    repo::draft_transition(tx, id, &["approved"], "failed", now)?;
+                    repo::set_draft_error(tx, id, Some(&why))?;
+                    self.blocked(tx, &d, "connection", json!({"why": why}))?;
+                    return Ok(Err(SendOutcome::Blocked { reason: why }));
+                }
             }
             if !repo::draft_transition(tx, id, &["approved"], "sending", now)? {
                 return Ok(Err(SendOutcome::Skipped));

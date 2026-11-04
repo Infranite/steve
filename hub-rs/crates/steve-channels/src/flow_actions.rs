@@ -229,6 +229,10 @@ async fn deliver(
                     cx.effects.decision_id = Some(decision_id.clone());
                     "failed"
                 }
+                Delivered::Queued { .. } => {
+                    cx.effects.label = Some(format!("正在发到「{}」", req.target.space_name));
+                    "pending"
+                }
                 Delivered::Skipped => "skipped",
             };
             NodeOutcome::next(json!({

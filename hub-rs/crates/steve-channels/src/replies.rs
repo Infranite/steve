@@ -394,6 +394,7 @@ fn acted(d: &Delivered, item: Option<String>, label: Option<String>) -> Acted {
             Delivered::Sent { .. } => "已回复".into(),
             Delivered::Blocked { .. } => "回复里有机密值，已拦下".into(),
             Delivered::Failed { .. } => "回复没有发出去".into(),
+            Delivered::Queued { .. } => "回复正在发出".into(),
             Delivered::Skipped => String::new(),
         }),
         decision_id: d.decision_id().map(String::from),

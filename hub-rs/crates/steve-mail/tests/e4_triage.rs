@@ -47,6 +47,7 @@ struct H {
     hooks: MailHooks,
     imap: FakeImap,
     smtp: FakeSmtp,
+    dispatcher: Arc<steve_store::outbox::Dispatcher>,
 }
 
 async fn setup() -> H {
@@ -130,7 +131,12 @@ async fn setup() -> H {
     let flow = nodes::register(fsetup, &mail).build(env.modules.clone(), Arc::new(GraphEngine));
     events.bind(&flow);
     hooks.bind(&mail);
+    let dispatcher = Arc::new(steve_store::outbox::Dispatcher::new(vec![
+        steve_mail::outbox::MailEventsOut::new(mail.clone()),
+    ]));
+    dispatcher.register(env.store()).expect("register");
     H {
+        dispatcher,
         env,
         _keys: keys,
         _ca_dir: ca_dir,
@@ -149,6 +155,15 @@ fn me() -> Caller {
 }
 
 impl H {
+    /// Syncs, then delivers what the sync put in the outbox (the Hub's dispatcher does it there).
+    async fn sync(&self, conn: &str) {
+        self.mail.sync_now(WS, conn).await.expect("sync");
+        let (d, store) = (self.dispatcher.clone(), self.env.store().clone());
+        tokio::task::spawn_blocking(move || d.pump(&store, steve_store::now()).expect("pump"))
+            .await
+            .expect("pump task");
+    }
+
     /// Connects the fake mailbox, syncs once (the look-back: no events) and installs the template.
     async fn connect(&self) -> String {
         let mut f = std::collections::BTreeMap::new();
@@ -169,7 +184,7 @@ impl H {
             .await
             .expect("connect")
             .id;
-        self.mail.sync_now(WS, &conn).await.expect("first sync");
+        self.sync(&conn).await;
         let id = template::install(&self.flow, WS, &conn, ME).expect("install");
         assert!(id.is_some(), "installed on the first mailbox");
         conn
@@ -179,7 +194,7 @@ impl H {
     async fn receive(&self, conn: &str, eml: &[u8]) -> Value {
         self.imap.inject(ADDR, "INBOX", eml).expect("inject");
         let before = self.event_ids().len();
-        self.mail.sync_now(WS, conn).await.expect("sync");
+        self.sync(conn).await;
         let mut ev = Value::Null;
         for _ in 0..200 {
             let ids = self.event_ids();
@@ -696,4 +711,42 @@ async fn a_finished_item_archives_its_thread_when_asked() {
     assert!(done, "archived after the item finished");
     assert_eq!(h.imap.messages(ADDR, "Archive").unwrap().len(), 1);
     let _ = &h.hooks;
+}
+
+/// Y1 with the real signals pipeline: the delivery went through but its receipt was lost (the Hub
+/// stopped between the two), so the outbox delivers it again: the same event comes back, no second
+/// event or run, and the mail keeps its link, also when the source was paused meanwhile.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_repeated_mail_delivery_changes_nothing_also_after_a_pause() {
+    let h = setup().await;
+    let conn = h.connect().await;
+    let ev = h.receive(&conn, &noreply_eml()).await;
+    let id = ev["id"].as_str().unwrap().to_string();
+    let events = h.event_ids().len();
+    let runs = h.count("SELECT COUNT(*) FROM flow_runs WHERE event_id = ?", &id);
+    // as if only the effect had happened: no receipt, no link
+    h.env
+        .store()
+        .with_conn(|c| {
+            c.execute_batch(
+                "DELETE FROM outbox_receipts WHERE consumer_id = 'mail.events';
+                 DELETE FROM outbox_leases WHERE consumer_id = 'mail.events';
+                 UPDATE mail_messages SET event_id = NULL;
+                 UPDATE source_settings SET paused = 1;",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    h.sync(&conn).await;
+    assert_eq!(h.event_ids().len(), events, "no second event");
+    assert_eq!(
+        h.count("SELECT COUNT(*) FROM flow_runs WHERE event_id = ?", &id),
+        runs,
+        "no second run"
+    );
+    assert_eq!(
+        h.count("SELECT COUNT(*) FROM mail_messages WHERE event_id = ?", &id),
+        1,
+        "linked again, though the source is paused now"
+    );
 }

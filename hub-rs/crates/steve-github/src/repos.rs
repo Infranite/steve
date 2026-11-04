@@ -526,6 +526,10 @@ impl GitHub {
         connection: &str,
         a: &Available,
     ) -> Result<(i64, String), String> {
+        // checked before the secret item exists, so a refusal leaves nothing behind
+        let conn = self
+            .conn_for_write(ws, connection)
+            .map_err(|e| e.to_string())?;
         let bytes: [u8; 32] = rand::rng().random();
         let secret = Zeroizing::new(hex::encode(bytes));
         let (gh, w, m, title, s) = (
@@ -547,7 +551,6 @@ impl GitHub {
         .await
         .map_err(|e| e.to_string())?
         .map_err(|e| e.to_string())?;
-        let conn = self.conn(ws, connection).map_err(|e| e.to_string())?;
         let body = json!({
             "name": "web", "active": true, "events": REPO_HOOK_EVENTS,
             "config": {
@@ -594,7 +597,7 @@ impl GitHub {
     /// Deletes a repo's hook on GitHub (best effort) and its secret.
     async fn remove_hook(&self, ws: &str, me: &str, r: &RepoRow, item: Option<&str>) {
         if let Some(h) = r.hook_id
-            && let Ok(conn) = self.conn(ws, &r.connection_id)
+            && let Ok(conn) = self.conn_for_write(ws, &r.connection_id)
         {
             match conn
                 .delete(&format!("/repos/{}/hooks/{h}", r.full_name))

@@ -4,13 +4,10 @@
 //! `yes`, never from the hook or the sync.
 //!
 //! Decision handlers run inside the answer's transaction and cannot reach GitHub, so they only
-//! check the answer and queue an [`Effect`]. The effect worker runs after the commit and reads the
-//! decision back: nothing is pushed or opened unless the database says it was resolved `yes` (a
-//! rolled-back answer stays `open` and is dropped after a short wait).
+//! check the answer and record the write ([`crate::effects`]); the runner does it after the commit,
+//! reconciling first when an earlier try may have happened.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, Weak};
-use std::time::Duration;
+use std::sync::{Arc, OnceLock, Weak};
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -20,9 +17,9 @@ use steve_modules::{ApiError, ApiResult, Registry};
 use steve_store::base::DecisionKind;
 use steve_store::base::decisions as base_decisions;
 use steve_store::{Decision, Item, NewDecision, Tx};
-use tokio::sync::{Notify, mpsc};
 
 use crate::api::GhError;
+use crate::effects::{self, Fail, Ran};
 use crate::push::{self, PushSpec};
 use crate::repo::{self, PrRow, RepoRow};
 use crate::repos::{Settings, check_state};
@@ -105,39 +102,6 @@ fn wants_draft(d: &Decision, settings: &Settings) -> bool {
     }
 }
 
-/// Work after an answer's commit.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Effect {
-    /// A `gh_pr_open` was answered.
-    Open { decision: String },
-    /// A `gh_pr_merge` was answered `yes`.
-    Merge { decision: String },
-    /// A `gh_comment` was answered.
-    Comment { decision: String },
-}
-
-/// The effect queue: one worker per service, started on first use, holding the service weakly.
-#[derive(Default)]
-pub(crate) struct EffectQueue {
-    tx: Mutex<Option<mpsc::UnboundedSender<Effect>>>,
-    pub(crate) pending: AtomicUsize,
-    pub(crate) idle: Notify,
-}
-
-async fn worker(inner: Weak<Inner>, mut rx: mpsc::UnboundedReceiver<Effect>) {
-    while let Some(e) = rx.recv().await {
-        let Some(inner) = inner.upgrade() else {
-            break;
-        };
-        let gh = GitHub(inner);
-        gh.run_effect(e).await;
-        let q = &gh.0.effects;
-        if q.pending.fetch_sub(1, Ordering::SeqCst) == 1 {
-            q.idle.notify_waiters();
-        }
-    }
-}
-
 /// `Item` hooks of this module.
 struct GhItemHooks(Slot);
 
@@ -201,42 +165,26 @@ fn check_lines(c: &rusqlite::Connection, repo: &RepoRow, pr: &PrRow) -> rusqlite
 }
 
 impl GitHub {
-    /// Queues an effect; the worker starts on first use. Needs a runtime (decision handlers run on
-    /// a blocking thread of the Hub's runtime).
-    pub(crate) fn enqueue_effect(&self, e: Effect) -> ApiResult<()> {
-        let rt = tokio::runtime::Handle::try_current()
-            .map_err(|_| ApiError::Internal("没有运行时".into()))?;
-        let q = &self.0.effects;
-        let mut tx = q.tx.lock().unwrap_or_else(|e| e.into_inner());
-        if tx.as_ref().is_none_or(|t| t.is_closed()) {
-            let (t, rx) = mpsc::unbounded_channel();
-            rt.spawn(worker(Arc::downgrade(&self.0), rx));
-            *tx = Some(t);
-        }
-        q.pending.fetch_add(1, Ordering::SeqCst);
-        if let Some(t) = tx.as_ref()
-            && t.send(e).is_err()
-        {
-            q.pending.fetch_sub(1, Ordering::SeqCst);
-            return Err(ApiError::Internal("GitHub 的任务队列关了".into()));
-        }
-        Ok(())
-    }
-
-    /// `finish(item, now)` unless it is finished already (the merge effect and the webhook that
-    /// reports the merge can both get here).
-    pub(crate) async fn finish_item(&self, ws: &str, item: &str, now: &str) {
+    /// `finish(item, now)` unless it is finished already (the merge, the webhook that reports it
+    /// and a repeated outbox delivery can all get here); `Err` when finishing failed (the outbox
+    /// tries again).
+    pub(crate) async fn finish_item_checked(
+        &self,
+        ws: &str,
+        item: &str,
+        now: &str,
+    ) -> Result<(), String> {
         let status = self
             .store()
             .reader(|c| repo::item_status(c, ws, item).map_err(ApiError::from))
-            .ok()
-            .flatten();
+            .map_err(|e| e.to_string())?;
         if !matches!(status.as_deref(), Some(s) if s != "done" && s != "drop") {
-            return;
+            return Ok(());
         }
-        if let Err(e) = self.core().finish(ws, item, now).await {
-            tracing::warn!(item = %item, error = %e, "github: item not finished");
-        }
+        self.core()
+            .finish(ws, item, now)
+            .await
+            .map_err(|e| e.to_string())
     }
 
     fn timeline(&self, item: &str, text: &str) {
@@ -334,63 +282,34 @@ impl GitHub {
         Ok(true)
     }
 
-    /// The decision once its answer is committed (the handler queued us inside that transaction).
-    /// `None` if it is still open after a while (the answer was rolled back) or gone.
-    async fn answered(&self, id: &str) -> Option<Decision> {
-        for _ in 0..100 {
-            let d = self
-                .store()
-                .reader(|c| base_decisions::get(c, id).map_err(ApiError::from))
-                .ok()
-                .flatten()?;
-            if d.status != "open" {
-                return (d.status == "resolved").then_some(d);
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-        None
-    }
-
-    async fn run_effect(&self, e: Effect) {
-        match e {
-            Effect::Open { decision } => {
-                if let Some(d) = self.answered(&decision).await {
-                    self.open_pr(&d).await;
-                }
-            }
-            Effect::Merge { decision } => {
-                if let Some(d) = self.answered(&decision).await {
-                    self.merge_pr(&d).await;
-                }
-            }
-            Effect::Comment { decision } => {
-                if let Some(d) = self.answered(&decision).await {
-                    self.comment_answered(&d).await;
-                }
-            }
-        }
-    }
-
     /// After a `gh_pr_open` answer: `yes` pushes the branch and opens the PR; `no` finishes the
-    /// item (when Steve asked on acceptance).
-    async fn open_pr(&self, d: &Decision) {
+    /// item (when Steve asked on acceptance). A later run of `e` (after unknown) reconciles first.
+    pub(crate) async fn open_pr(
+        &self,
+        d: &Decision,
+        e: &crate::repo::EffectRow,
+        reconcile: bool,
+    ) -> Ran {
         let ws = d.workspace_id.clone();
         let Some(item_id) = d.item_id.clone() else {
-            return;
+            return Ran::Failed("决定没有事项".into());
         };
         let by_steve = d.requested_by == STEVE;
         let session = d.session_id.as_deref();
         if d.result["choice"] != "yes" {
             if by_steve {
-                self.finish_item(&ws, &item_id, "已验收，没有开 PR").await;
+                if let Err(f) = self.finish_later(&ws, &item_id, "已验收，没有开 PR") {
+                    return Ran::Unknown(f.message);
+                }
             } else {
                 self.tell_session(&ws, Some(&item_id), session, PR_DENIED)
                     .await;
             }
-            return;
+            return Ran::Done(json!({}));
         }
-        match self.push_and_open(d, &item_id).await {
+        match self.push_and_open(d, &item_id, e, reconcile).await {
             Ok((pr, settings)) => {
+                let done = Ran::Done(effects::pr_result(pr.number));
                 if !by_steve {
                     let kind = if pr.draft { "草稿 PR" } else { "PR" };
                     let text = format!(
@@ -398,20 +317,26 @@ impl GitHub {
                         pr.number, pr.url
                     );
                     self.tell_session(&ws, Some(&item_id), session, &text).await;
-                    return;
+                    return done;
                 }
                 if settings.finish_on == "merged" {
                     let now = format!("PR #{} 等检查", pr.number);
                     if let Err(e) = self.core().progress(&ws, &item_id, "收尾", &now).await {
                         tracing::warn!(item = %item_id, error = %e, "github: item progress not set");
                     }
-                } else {
-                    self.finish_item(&ws, &item_id, &format!("已验收，PR #{} 已开", pr.number))
-                        .await;
+                } else if let Err(f) =
+                    self.finish_later(&ws, &item_id, &format!("已验收，PR #{} 已开", pr.number))
+                {
+                    // the PR is open; finishing is what is left: the next run finds the PR
+                    return Ran::Unknown(f.message);
                 }
+                done
             }
-            Err(why) => {
-                let text = format!("开 PR 失败：{why}");
+            Err(f) => {
+                if let Some(r) = f.ran() {
+                    return r;
+                }
+                let text = format!("开 PR 失败：{f}");
                 tracing::warn!(item = %item_id, "{text}");
                 if by_steve {
                     if let Err(e) = self.core().fail(&ws, &item_id, &text).await {
@@ -421,17 +346,23 @@ impl GitHub {
                     self.timeline(&item_id, &text);
                     self.tell_session(&ws, Some(&item_id), session, &text).await;
                 }
+                Ran::Failed(f.message)
             }
         }
     }
 
     /// Pushes the item's branch and opens the PR; the stored PR row (linked `steve`) and the
-    /// repo's settings.
+    /// repo's settings. The commit is the branch's when the first run starts, written down
+    /// before anything is sent ([`GitHub::effect_intent`]): a later run pushes that one or
+    /// nothing (a branch that moved is a refusal), and first looks for a PR GitHub has from it
+    /// ([`GitHub::pr_from`]).
     async fn push_and_open(
         &self,
         d: &Decision,
         item_id: &str,
-    ) -> Result<(PrRow, Settings), String> {
+        e: &crate::repo::EffectRow,
+        reconcile: bool,
+    ) -> Result<(PrRow, Settings), Fail> {
         let ws = d.workspace_id.clone();
         let item = self
             .store()
@@ -439,13 +370,16 @@ impl GitHub {
             .get(item_id)
             .map_err(|e| e.to_string())?
             .filter(|i| i.workspace_id == ws)
-            .ok_or("事项不在了")?;
+            .ok_or("事项不在了".to_string())?;
         let branch = item
             .branch
             .clone()
             .filter(|b| !b.is_empty())
-            .ok_or("事项没有分支")?;
-        let project = item.project_id.clone().ok_or("事项不属于项目")?;
+            .ok_or("事项没有分支".to_string())?;
+        let project = item
+            .project_id
+            .clone()
+            .ok_or("事项不属于项目".to_string())?;
         let (r, path) = self
             .store()
             .reader(|c| {
@@ -454,44 +388,86 @@ impl GitHub {
                 Ok::<_, ApiError>((r, p))
             })
             .map_err(|e| e.to_string())?;
-        let r = r.filter(|r| r.enabled).ok_or("项目没有关联可用的仓库")?;
+        let r = r
+            .filter(|r| r.enabled)
+            .ok_or("项目没有关联可用的仓库".to_string())?;
         let cwd = item
             .cwd
             .clone()
             .filter(|c| !c.is_empty())
             .or(path)
-            .ok_or("事项没有工作目录")?;
+            .ok_or("事项没有工作目录".to_string())?;
         let settings = Settings::of(&r.settings);
-        let conn = self
-            .conn(&ws, &r.connection_id)
-            .map_err(|e| e.to_string())?;
-        let token = conn.cx().access_token().await.map_err(|e| e.to_string())?;
-        let (full, git_base, b) = (
-            r.full_name.clone(),
-            self.env().git_base.clone(),
-            branch.clone(),
-        );
-        tokio::task::spawn_blocking(move || {
-            push::push(&PushSpec {
-                cwd: std::path::Path::new(&cwd),
-                branch: &b,
-                full_name: &full,
-                git_base: &git_base,
-                token: token.expose(),
-            })
-        })
-        .await
-        .map_err(|e| e.to_string())?
-        .map_err(|e| e.to_string())?;
-        let (title, body) = title_body(d);
-        let draft = wants_draft(d, &settings);
-        let resp = conn
-            .post(
-                &format!("/repos/{}/pulls", r.full_name),
-                &json!({"title": title, "head": branch, "base": r.default_branch, "body": body, "draft": draft}),
-            )
-            .await
-            .map_err(|e| e.to_string())?;
+        let conn = self.effect_conn(&ws, &r.connection_id)?;
+        let sha = match e.result["sha"].as_str() {
+            Some(s) => s.to_string(),
+            None => {
+                let (c, b) = (cwd.clone(), branch.clone());
+                let head = tokio::task::spawn_blocking(move || {
+                    push::head_of(std::path::Path::new(&c), &b)
+                })
+                .await
+                .map_err(|e| e.to_string())?
+                .map_err(|e| e.to_string())?;
+                self.effect_intent(&d.id, &json!({"sha": head, "branch": branch}))?;
+                head
+            }
+        };
+        let existing = if reconcile {
+            self.pr_from(&conn, &r, &branch, &sha).await?
+        } else {
+            None
+        };
+        let resp = match existing {
+            Some(pr) => pr,
+            None => {
+                let token = conn.cx().access_token().await.map_err(|e| e.to_string())?;
+                let (full, git_base, b, want) = (
+                    r.full_name.clone(),
+                    self.env().git_base.clone(),
+                    branch.clone(),
+                    sha.clone(),
+                );
+                // the approved commit, or nothing; pushing it again is harmless
+                tokio::task::spawn_blocking(move || {
+                    push::push(&PushSpec {
+                        cwd: std::path::Path::new(&cwd),
+                        branch: &b,
+                        full_name: &full,
+                        git_base: &git_base,
+                        token: token.expose(),
+                        expect: Some(&want),
+                    })
+                })
+                .await
+                .map_err(|e| e.to_string())?
+                .map_err(|e| e.to_string())?;
+                let (title, body) = title_body(d);
+                let draft = wants_draft(d, &settings);
+                self.effect_sending(&d.id)?;
+                let opened = conn
+                    .post(
+                        &format!("/repos/{}/pulls", r.full_name),
+                        &json!({"title": title, "head": branch, "base": r.default_branch, "body": body, "draft": draft}),
+                    )
+                    .await;
+                match opened {
+                    Ok(v) if v["number"].as_i64().is_some() => v,
+                    // GitHub said yes without a PR in it: it may be open
+                    Ok(_) => return Err(Fail::unknown("GitHub 的回答里没有 PR 编号")),
+                    // one is open from the branch (an earlier try's after all, or another): only
+                    // the one from this commit is ours
+                    Err(GhError::Status { status: 422, .. }) => self
+                        .pr_from(&conn, &r, &branch, &sha)
+                        .await?
+                        .ok_or_else(|| {
+                            Fail::definite("GitHub 拒绝开 PR（422），这个提交也没有 PR")
+                        })?,
+                    Err(e) => return Err(e.into()),
+                }
+            }
+        };
+        // GitHub has it from here on: a local failure is unknown, the next run finds the PR
         let now = self.now();
         let res = self.store().transaction(|tx| {
             let mut fx = Effects::default();
@@ -509,12 +485,45 @@ impl GitHub {
                 )?
                 .ok_or_else(|| ApiError::Internal("GitHub 没有给出 PR 编号".into()))?;
             self.ask_merges(tx, &r, &fx)?;
+            crate::after::emit(tx, &r.workspace_id, &r.connection_id, &mut fx)?;
             Ok::<_, ApiError>((pr, fx))
         });
-        let (pr, fx) = res.map_err(|e| e.to_string())?;
+        let (pr, fx) = res.map_err(|e| Fail::unknown(e.to_string()))?;
         self.after_commit(&ws, &r.connection_id, fx).await;
         tracing::info!(repo = %r.full_name, number = pr.number, item = %item_id, "github PR opened");
         Ok((pr, settings))
+    }
+
+    /// The PR GitHub has from `branch` at `sha` (any state: a PR can't be deleted, so none means
+    /// none was opened). Several, or a list too long to read whole, is no evidence: stuck.
+    async fn pr_from(
+        &self,
+        conn: &crate::api::GhConn,
+        r: &RepoRow,
+        branch: &str,
+        sha: &str,
+    ) -> Result<Option<Value>, Fail> {
+        let owner = r.full_name.split('/').next().unwrap_or_default();
+        let list = conn
+            .get_all_complete(
+                &format!(
+                    "/repos/{}/pulls?state=all&head={owner}:{branch}&base={}&per_page=100",
+                    r.full_name, r.default_branch
+                ),
+                None,
+            )
+            .await?;
+        let mut from: Vec<Value> = list
+            .into_iter()
+            .filter(|p| p["head"]["sha"].as_str() == Some(sha))
+            .collect();
+        match from.len() {
+            0 => Ok(None),
+            1 => Ok(from.pop()),
+            n => Err(Fail::stuck(format!(
+                "GitHub 上这个提交有 {n} 个 PR，不知道哪个是这次开的"
+            ))),
+        }
     }
 
     /// Does the item wait for its PR to merge: `finish_on=merged`, Steve's PR was approved on
@@ -582,10 +591,12 @@ impl GitHub {
     }
 
     /// After a `gh_pr_merge` `yes`: merge at the approved head, delete the branch, finish.
-    async fn merge_pr(&self, d: &Decision) {
+    /// `reconcile`: an earlier try may have merged it, so GitHub is asked first; only a merge of
+    /// the approved head counts.
+    pub(crate) async fn merge_pr(&self, d: &Decision, reconcile: bool) -> Ran {
         let ws = d.workspace_id.clone();
         let Some(sha) = d.result["sha"].as_str().map(String::from) else {
-            return;
+            return Ran::Failed("批准里没有要合并的提交".into());
         };
         let loaded = self.store().reader(|c| {
             let pr = repo::pr_get(c, &d.subject_id)?.filter(|p| p.workspace_id == ws);
@@ -595,50 +606,100 @@ impl GitHub {
             };
             Ok::<_, ApiError>(pr.zip(r))
         });
-        let Ok(Some((pr, r))) = loaded else {
-            return;
+        let (pr, r) = match loaded {
+            Ok(Some(x)) => x,
+            Ok(None) => return Ran::Failed("PR 不在了".into()),
+            Err(e) => return Ran::Unknown(e.to_string()),
         };
         let item = pr.item_id.clone().or(d.item_id.clone());
         let note = |text: String| {
             if let Some(i) = &item {
                 self.timeline(i, &text);
             }
+            Ran::Failed(text)
         };
-        let conn = match self.conn(&ws, &r.connection_id) {
+        let conn = match self.effect_conn(&ws, &r.connection_id) {
             Ok(c) => c,
-            Err(e) => return note(format!("合并 PR #{} 失败：{e}", pr.number)),
+            Err(f) => {
+                return f
+                    .ran()
+                    .unwrap_or_else(|| note(format!("合并 PR #{} 失败：{f}", pr.number)));
+            }
         };
         let s = Settings::of(&r.settings);
-        let res = conn
-            .put(
-                &format!("/repos/{}/pulls/{}/merge", r.full_name, pr.number),
-                &json!({"merge_method": s.merge_method, "sha": sha}),
-            )
-            .await;
-        match res {
-            Ok(_) => {}
-            Err(GhError::Status { status: 409, .. }) => {
-                return note(format!(
-                    "没有合并 PR #{}：PR 有新的提交，等检查重新通过",
-                    pr.number
-                ));
+        let path = format!("/repos/{}/pulls/{}", r.full_name, pr.number);
+        let merged_before = if reconcile {
+            match conn.get_if_changed(&path, None).await {
+                Ok(v) if v.body["merged"].as_bool() == Some(true) => {
+                    if v.body["head"]["sha"].as_str() != Some(sha.as_str()) {
+                        return note(format!(
+                            "PR #{} 已经合并，但合并的不是批准的那个提交",
+                            pr.number
+                        ));
+                    }
+                    true
+                }
+                Ok(_) => false,
+                Err(e) => return Ran::Unknown(e.to_string()),
             }
-            Err(e) => return note(format!("合并 PR #{} 失败：{e}", pr.number)),
+        } else {
+            false
+        };
+        if !merged_before {
+            if let Err(f) = self.effect_sending(&d.id) {
+                return f.ran().unwrap_or(Ran::Unknown(f.message));
+            }
+            let res = conn
+                .put(
+                    &format!("{path}/merge"),
+                    &json!({"merge_method": s.merge_method, "sha": sha}),
+                )
+                .await;
+            match res {
+                Ok(v) if v["merged"].as_bool() == Some(true) => {}
+                Ok(_) => return Ran::Unknown("GitHub 的回答没有说已经合并".into()),
+                Err(GhError::Status { status: 409, .. }) => {
+                    return note(format!(
+                        "没有合并 PR #{}：PR 有新的提交，等检查重新通过",
+                        pr.number
+                    ));
+                }
+                Err(e) => {
+                    let f = Fail::from(e);
+                    return f
+                        .ran()
+                        .unwrap_or_else(|| note(format!("合并 PR #{} 失败：{f}", pr.number)));
+                }
+            }
         }
+        // the branch only if it is still at the merged commit (not reused since)
         if s.delete_branch && push::branch_ok(&pr.head_ref) {
-            let path = format!("/repos/{}/git/refs/heads/{}", r.full_name, pr.head_ref);
-            if let Err(e) = conn.delete(&path).await {
-                tracing::warn!(repo = %r.full_name, error = %e, "github branch not deleted");
+            let one = format!("/repos/{}/git/ref/heads/{}", r.full_name, pr.head_ref);
+            let refs = format!("/repos/{}/git/refs/heads/{}", r.full_name, pr.head_ref);
+            match conn.get_if_changed(&one, None).await {
+                Ok(v) if v.body["object"]["sha"].as_str() == Some(sha.as_str()) => {
+                    if let Err(e) = conn.delete(&refs).await {
+                        tracing::warn!(repo = %r.full_name, error = %e, "github branch not deleted");
+                    }
+                }
+                Ok(_) => {
+                    tracing::info!(repo = %r.full_name, branch = %pr.head_ref, "github branch moved since the merge: kept");
+                }
+                Err(e) => {
+                    tracing::warn!(repo = %r.full_name, error = %e, "github branch not checked")
+                }
             }
         }
-        // The merged state now, rather than when the webhook comes.
-        if let Ok(v) = conn
-            .get_if_changed(&format!("/repos/{}/pulls/{}", r.full_name, pr.number), None)
-            .await
-        {
-            let now = self.now();
-            let fx = self.store().transaction(|tx| {
-                let mut fx = Effects::default();
+        // the merged state now, rather than when the webhook comes; the item finishes through
+        // the outbox in the same transaction
+        let finish = item
+            .as_ref()
+            .map(|i| (i.clone(), format!("PR #{} 已合并", pr.number)));
+        let fresh = conn.get_if_changed(&path, None).await.ok();
+        let now = self.now();
+        let fx = self.store().transaction(|tx| {
+            let mut fx = Effects::default();
+            if let Some(v) = &fresh {
                 self.sync_pr(
                     tx,
                     &r,
@@ -650,17 +711,17 @@ impl GitHub {
                     now,
                     &mut fx,
                 )?;
-                Ok::<_, ApiError>(fx)
-            });
-            match fx {
-                Ok(fx) => self.after_commit(&ws, &r.connection_id, fx).await,
-                Err(e) => tracing::warn!(error = %e, "github merged PR not synced"),
             }
+            fx.finish.extend(finish.clone());
+            crate::after::emit(tx, &r.workspace_id, &r.connection_id, &mut fx)?;
+            Ok::<_, ApiError>(fx)
+        });
+        match fx {
+            Ok(fx) => self.after_commit(&ws, &r.connection_id, fx).await,
+            // merged on GitHub; what is left is ours: the next run sees it merged and does it
+            Err(e) => return Ran::Unknown(e.to_string()),
         }
-        if let Some(i) = &item {
-            self.finish_item(&ws, i, &format!("PR #{} 已合并", pr.number))
-                .await;
-        }
+        Ran::Done(json!({ "merged": sha }))
     }
 }
 
@@ -677,9 +738,7 @@ impl DecisionHandler for PrOpenDecisions {
         if cx.choice == "yes" && repo::item_status(tx, cx.ws, item)?.is_none() {
             return Err(ApiError::not_found("事项"));
         }
-        gh.enqueue_effect(Effect::Open {
-            decision: d.id.clone(),
-        })?;
+        effects::queue(tx, &gh, cx.ws, &d.id, effects::OPEN)?;
         Ok(choice_result(cx))
     }
 
@@ -708,9 +767,7 @@ impl DecisionHandler for PrMergeDecisions {
         let mut out = choice_result(cx);
         out["sha"] = json!(pr.head_sha);
         if cx.choice == "yes" {
-            gh.enqueue_effect(Effect::Merge {
-                decision: d.id.clone(),
-            })?;
+            effects::queue(tx, &gh, cx.ws, &d.id, effects::MERGE)?;
         }
         Ok(out)
     }

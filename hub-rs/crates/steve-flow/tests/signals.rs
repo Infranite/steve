@@ -858,3 +858,44 @@ async fn ingest_rules_without_a_connection() {
         .unwrap_err();
     assert_eq!(err.to_string(), "参数不对：type_key");
 }
+
+/// Y1: an event that can't be stored stops the pass before the cursor moves; the next poll reads
+/// the batch again, what was stored before it is a duplicate, nothing is lost. A malformed event is
+/// skipped instead (it would hold the source forever).
+#[tokio::test]
+async fn a_failed_event_keeps_the_cursor_and_the_next_poll_reads_it_again() {
+    let (e, fake) = polling();
+    let con = e.connection(WS, FakeEventAdapter::ID, None, ME);
+    assert_eq!(ingest::poll_connection(&e.flow, WS, &con).await.unwrap(), 0);
+    e.env
+        .store()
+        .with_conn(|c| {
+            c.execute_batch(
+                "CREATE TRIGGER no_b BEFORE INSERT ON ext_events WHEN NEW.external_id = 'b'
+                 BEGIN SELECT RAISE(ABORT, 'test store fault'); END",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    for id in ["a", "b", "c"] {
+        fake.emit(FakeEventAdapter::event("mail.new", id, "INBOX", id));
+    }
+    fake.emit(FakeEventAdapter::event("", "bad", "INBOX", "没有类型"));
+    assert!(ingest::poll_connection(&e.flow, WS, &con).await.is_err());
+    let ids = |e: &FlowEnv| -> Vec<String> { events(e).into_iter().map(|r| r.0).collect() };
+    assert_eq!(ids(&e), ["a"], "stopped at b, c not read past it");
+    e.env
+        .store()
+        .with_conn(|c| {
+            c.execute_batch("DROP TRIGGER no_b")?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(ingest::poll_connection(&e.flow, WS, &con).await.unwrap(), 2);
+    assert_eq!(
+        ids(&e),
+        ["a", "b", "c"],
+        "a again is a duplicate, the malformed one skipped"
+    );
+    assert_eq!(ingest::poll_connection(&e.flow, WS, &con).await.unwrap(), 0);
+}

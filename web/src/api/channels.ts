@@ -48,7 +48,7 @@ export type Basis = { verdict: "pass" | "rewritten" | "drafted"; entries: BasisE
 export type ChanMessage = {
   attachments?: ChannelAttachment[]
   id: string; space_id: string; direction: "in" | "out"; sender: { name: string; party_id: string | null; account_id?: string | null }; persona_id: string | null; on_behalf: "none" | "persona" | "proxy"
-  text: string | null; status: "received" | "draft" | "pending" | "sent" | "failed" | "recalled" | "blocked"; work_item_id: string | null; decision_id: string | null; created: number; sent: number | null; purged: number | null; basis: Basis | null
+  text: string | null; status: "received" | "draft" | "pending" | "sent" | "failed" | "unknown" | "recalled" | "blocked"; work_item_id: string | null; decision_id: string | null; created: number; sent: number | null; purged: number | null; basis: Basis | null
 }
 export type SpaceDetail = Space & { recent: ChanMessage[] }
 export type Reveal = { name: boolean; role: boolean; ai: boolean; steve: boolean; owner: boolean }
@@ -183,7 +183,7 @@ export const isDm = (s: Pick<Space, "kind">) => s.kind === "dm" || s.kind === "s
 /** what a list or header calls the space: a DM after the other party, your chat with yourself 你自己 */
 export const spaceTitle = (s: Pick<Space, "title" | "name" | "kind" | "self_chat">) => s.title || (s.self_chat || s.kind === "self_dm" ? "你自己" : s.name || (isDm(s) ? "私聊" : "群"))
 export const TRIGGER_EVERYWHERE = "*", TRIGGER_ALL_DMS = "dm:*"
-export const MSG_STATUS: Partial<Record<ChanMessage["status"], string>> = { draft: "草稿，等你批准", pending: "发送中", failed: "没发出去", recalled: "已撤回", blocked: "已拦下" }
+export const MSG_STATUS: Partial<Record<ChanMessage["status"], string>> = { draft: "草稿，等你批准", pending: "发送中", failed: "没发出去", unknown: "可能已发出，正在核对", recalled: "已撤回", blocked: "已拦下" }
 
 /* ───────── what an outbound message answers (its approval card) ───────── */
 export type ROutContext = {

@@ -522,6 +522,7 @@ async fn webhook_and_poll_seeing_the_same_change_give_one_event() {
     );
     h.gh.settle().await;
     let rep = h.gh.poll_repo(&repo).await.expect("poll");
+    h.gh.settle().await;
     assert!(rep.applied >= 1, "{rep:?}");
     assert_eq!(types(&h), ["github.pr_merged"]);
     assert!(
@@ -538,6 +539,7 @@ async fn webhook_and_poll_seeing_the_same_change_give_one_event() {
     assert_eq!(ev.summary, format!("{REPO} · PR #{n} 已合并：fix: five"));
     // A second poll: GitHub answers 304, nothing new.
     let rep = h.gh.poll_repo(&repo).await.expect("poll");
+    h.gh.settle().await;
     assert!(rep.pulls_unchanged, "{rep:?}");
 
     // The other way round: the poll sees failing checks first, then the webhook arrives.
@@ -553,6 +555,7 @@ async fn webhook_and_poll_seeing_the_same_change_give_one_event() {
         )
         .expect("pr");
     h.gh.poll_repo(&repo).await.expect("poll");
+    h.gh.settle().await;
     h.sink.clear();
     let job = h.fake.set_check(
         REPO,
@@ -561,6 +564,7 @@ async fn webhook_and_poll_seeing_the_same_change_give_one_event() {
         Some("failure"),
     );
     h.gh.poll_repo(&repo).await.expect("poll");
+    h.gh.settle().await;
     assert_eq!(types(&h), ["github.check_failed"]);
     let ev = h.sink.events()[0].2.clone();
     assert_eq!(ev.summary, format!("{REPO} · PR #{m} 检查失败：build"));
@@ -590,6 +594,7 @@ async fn webhook_and_poll_seeing_the_same_change_give_one_event() {
     );
     h.gh.settle().await;
     h.gh.poll_repo(&repo).await.expect("poll");
+    h.gh.settle().await;
     assert_eq!(types(&h), ["github.check_failed"], "still one");
     assert!(h.sink.duplicates().is_empty());
 }
@@ -605,10 +610,12 @@ async fn checks_state_and_signals_follow_the_spec() {
     h.fake.set_check(REPO, PR_SHA, "build", None);
     h.fake.set_check(REPO, PR_SHA, "e2e", None);
     h.gh.poll_repo(&repo).await.expect("poll");
+    h.gh.settle().await;
     assert_eq!(state(&h), json!("pending"));
     // build fails while e2e still runs: failure, but no signal until everything is done.
     h.fake.set_check(REPO, PR_SHA, "build", Some("failure"));
     h.gh.poll_repo(&repo).await.expect("poll");
+    h.gh.settle().await;
     assert_eq!(state(&h), json!("failure"));
     assert!(types(&h).is_empty(), "{:?}", types(&h));
     // The suite completes (webhook): the runs are fetched, one event with both failures.
@@ -638,9 +645,11 @@ async fn checks_state_and_signals_follow_the_spec() {
     h.fake.set_check(REPO, PR_SHA, "build", Some("success"));
     h.fake.set_check(REPO, PR_SHA, "e2e", Some("skipped"));
     h.gh.poll_repo(&repo).await.expect("poll");
+    h.gh.settle().await;
     assert_eq!(state(&h), json!("success"));
     assert_eq!(emit(&h, "check_suite.completed.success").await, 202);
     h.gh.poll_repo(&repo).await.expect("poll");
+    h.gh.settle().await;
     assert_eq!(types(&h), ["github.check_passed"]);
     assert_eq!(h.sink.events()[0].2.summary, "PR #12 检查通过");
 
@@ -1301,4 +1310,243 @@ async fn a_cold_secret_cache_logs_the_vault_use_only_after_the_signature_verifie
         202
     );
     assert_eq!(uses(&h), 1, "cached from then on");
+}
+
+/// Y1: a delivery accepted (202, the row `received` with its source and payload committed) but not
+/// processed before a restart is processed by the recovery, once; the payload is dropped after.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_accepted_delivery_a_restart_interrupted_is_processed_by_the_recovery() {
+    let (h, app, _repo) = ready().await;
+    // the PR exists on GitHub; its delivery was accepted, not processed
+    let n = h
+        .fake
+        .open_pr(
+            REPO,
+            "steve/st-6",
+            "6666666666666666666666666666666666666666",
+            "fix: six",
+            "",
+            "someone",
+        )
+        .expect("pr");
+    let payload = pr_payload(&h, &app, n, "opened").await;
+    assert_eq!(q(&h, "SELECT count(*) FROM gh_prs", &[]), json!(0));
+    // what `accept` committed before the worker got to it
+    let row = steve_github::repo::DeliveryRow {
+        delivery_id: "d-interrupted".into(),
+        workspace_id: Some(WS.into()),
+        repo_id: None,
+        event: "pull_request".into(),
+        action: Some("opened".into()),
+        status: steve_github::repo::RECEIVED.into(),
+        error: None,
+        received: steve_store::now(),
+    };
+    let source = serde_json::to_string(&steve_github::sync::Source::App { ws: WS.into() }).unwrap();
+    h.env
+        .store()
+        .transaction(|tx| {
+            steve_github::repo::insert_delivery(tx, &row, &source, &payload.to_string())
+                .map_err(steve_modules::ApiError::from)
+        })
+        .expect("insert");
+    // GitHub redelivers it meanwhile: known, 200, not processed on the request
+    assert_eq!(h.gh.recover_deliveries(), 1);
+    assert_eq!(h.gh.recover_deliveries(), 0, "queued once");
+    h.gh.settle().await;
+    assert_eq!(q(&h, "SELECT count(*) FROM gh_prs", &[]), json!(1));
+    assert_eq!(
+        q(
+            &h,
+            "SELECT status || '|' || (SELECT count(*) FROM gh_delivery_inputs WHERE delivery_id = 'd-interrupted') FROM gh_deliveries WHERE delivery_id = 'd-interrupted'",
+            &[]
+        ),
+        json!("ok|0")
+    );
+    assert_eq!(h.gh.recover_deliveries(), 0, "processed: nothing left");
+}
+
+/// A delivery still `received` is not pruned with the old ones.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unprocessed_delivery_outlives_the_retention() {
+    let (h, _app, _repo) = ready().await;
+    let row = steve_github::repo::DeliveryRow {
+        delivery_id: "d-old".into(),
+        workspace_id: Some(WS.into()),
+        repo_id: None,
+        event: "ping".into(),
+        action: None,
+        status: steve_github::repo::RECEIVED.into(),
+        error: None,
+        received: 1,
+    };
+    h.env
+        .store()
+        .transaction(|tx| {
+            steve_github::repo::insert_delivery(tx, &row, "{\"app\":{\"ws\":\"default\"}}", "{}")
+                .map_err(steve_modules::ApiError::from)
+        })
+        .expect("insert");
+    h.gh.prune_deliveries();
+    assert_eq!(
+        q(
+            &h,
+            "SELECT count(*) FROM gh_deliveries WHERE delivery_id = 'd-old'",
+            &[]
+        ),
+        json!(1)
+    );
+}
+
+/// Y1: a signal follows a committed state change through the outbox: processed but not yet
+/// delivered when the Hub stops, a later dispatcher (the restarted Hub) delivers it. Before, it went
+/// out in memory after the commit, and processing the change again finds nothing left to signal.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_signal_is_delivered_after_a_restart_between_its_commit_and_its_delivery() {
+    let (h, _app, repo) = ready().await;
+    let sha = "7777777777777777777777777777777777777777";
+    h.fake
+        .open_pr(REPO, "steve/st-7", sha, "fix: seven", "", "someone")
+        .expect("pr");
+    h.gh.poll_repo(&repo).await.expect("poll");
+    h.gh.settle().await;
+    h.sink.clear();
+    h.fake.set_check(REPO, sha, "build", Some("failure"));
+    h.gh.poll_repo(&repo).await.expect("poll"); // committed; the Hub "stops" before delivering
+    assert!(types(&h).is_empty(), "nothing delivered yet");
+    h.gh.poll_repo(&repo).await.expect("poll"); // seen again: no change, no second signal
+    let restarted = Arc::new(steve_store::outbox::Dispatcher::new(vec![
+        h.gh.outbox_consumer(),
+    ]));
+    let store = h.env.store().clone();
+    let d = restarted.clone();
+    tokio::task::spawn_blocking(move || {
+        d.register(&store).unwrap();
+        d.pump(&store, steve_store::now()).unwrap()
+    })
+    .await
+    .unwrap();
+    assert_eq!(types(&h), ["github.check_failed"]);
+}
+
+/// A delivery processed late (the recovery, a retry) carries an older view than the one stored
+/// meanwhile: it changes nothing. GitHub's `updated_at` orders them.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_older_view_processed_late_does_not_undo_a_newer_one() {
+    let (h, app, _repo) = ready().await;
+    let n = h
+        .fake
+        .open_pr(
+            REPO,
+            "steve/st-8",
+            "8888888888888888888888888888888888888888",
+            "fix: eight",
+            "",
+            "someone",
+        )
+        .expect("pr");
+    let mut opened = pr_payload(&h, &app, n, "opened").await;
+    opened["pull_request"]["updated_at"] = json!("2026-01-01T00:00:00Z");
+    let mut closed = opened.clone();
+    closed["action"] = json!("closed");
+    closed["pull_request"]["state"] = json!("closed");
+    closed["pull_request"]["updated_at"] = json!("2026-01-02T00:00:00Z");
+    // the opened delivery was accepted first but not processed before a restart ...
+    let row = steve_github::repo::DeliveryRow {
+        delivery_id: "d-late".into(),
+        workspace_id: Some(WS.into()),
+        repo_id: None,
+        event: "pull_request".into(),
+        action: Some("opened".into()),
+        status: steve_github::repo::RECEIVED.into(),
+        error: None,
+        received: 1,
+    };
+    let source = serde_json::to_string(&steve_github::sync::Source::App { ws: WS.into() }).unwrap();
+    h.env
+        .store()
+        .transaction(|tx| {
+            steve_github::repo::insert_delivery(tx, &row, &source, &opened.to_string())
+                .map_err(steve_modules::ApiError::from)
+        })
+        .expect("insert");
+    // ... the closed one came after and was processed at once
+    assert_eq!(
+        h.fake
+            .emit("pull_request", &closed)
+            .await
+            .expect("emit")
+            .status,
+        202
+    );
+    h.gh.settle().await;
+    assert_eq!(h.gh.recover_deliveries(), 1);
+    h.gh.settle().await;
+    assert_eq!(
+        q(
+            &h,
+            "SELECT state FROM gh_prs WHERE number = ?",
+            &[&(n as i64)]
+        ),
+        json!("closed")
+    );
+    assert_eq!(
+        q(
+            &h,
+            "SELECT status FROM gh_deliveries WHERE delivery_id = 'd-late'",
+            &[]
+        ),
+        json!("ok")
+    );
+}
+
+/// Y1: a processing that fails (here the store refuses) keeps the delivery `received` with its
+/// input; the recovery tries it again after the back-off and it goes through.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_processing_is_tried_again() {
+    let (h, _app, _repo) = ready().await;
+    h.env
+        .store()
+        .with_conn(|c| {
+            c.execute_batch(
+                "CREATE TRIGGER no_prs BEFORE INSERT ON gh_prs BEGIN SELECT RAISE(ABORT, 'test store fault'); END",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let d = h
+        .fake
+        .emit_fixture("pull_request.opened")
+        .await
+        .expect("emit");
+    assert_eq!(d.status, 202);
+    h.gh.settle().await;
+    assert_eq!(
+        q(
+            &h,
+            "SELECT d.status || '|' || i.attempts FROM gh_deliveries d JOIN gh_delivery_inputs i USING (delivery_id) WHERE delivery_id = ?",
+            &[&d.id]
+        ),
+        json!("received|1")
+    );
+    assert_eq!(h.gh.recover_deliveries(), 0, "backing off");
+    h.env
+        .store()
+        .with_conn(|c| {
+            c.execute_batch("DROP TRIGGER no_prs")?;
+            Ok(())
+        })
+        .unwrap();
+    h.env.clock.advance(steve_store::outbox::backoff(1) + 1);
+    assert_eq!(h.gh.recover_deliveries(), 1);
+    h.gh.settle().await;
+    assert_eq!(q(&h, "SELECT count(*) FROM gh_prs", &[]), json!(1));
+    assert_eq!(
+        q(
+            &h,
+            "SELECT status FROM gh_deliveries WHERE delivery_id = ?",
+            &[&d.id]
+        ),
+        json!("ok")
+    );
 }

@@ -111,7 +111,7 @@ pub fn our_echo(
     let mut st = c.prepare_cached(
         "SELECT m.id, m.space_id, coalesce(m.text, '') FROM chan_messages m JOIN spaces s ON s.id = m.space_id
           WHERE s.workspace_id = ?1 AND s.external_id = ?2 AND m.direction = 'out'
-            AND m.status IN ('pending', 'sent') AND m.external_id IS NULL AND coalesce(m.sent, m.created) >= ?3
+            AND m.status IN ('pending', 'sent', 'unknown') AND m.external_id IS NULL AND coalesce(m.sent, m.created) >= ?3
           ORDER BY m.created DESC, m.id",
     )?;
     let rows = st

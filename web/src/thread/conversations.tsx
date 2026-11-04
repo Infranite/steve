@@ -163,7 +163,7 @@ export function ReactionChip({ r }: { r?: Reaction }) {
 export function ChanOutNote({ m }: { m?: ConvMessage }) {
   const s = m?.meta?.chan_out?.status as string | undefined
   if (!s || s === "skipped") return null
-  const t: Record<string, string> = { sent: "已发出", pending: "正在发出", draft: "等你批准后发出", blocked: "有机密值，已拦下", failed: "没有发出去", discarded: "你没有发出" }
+  const t: Record<string, string> = { sent: "已发出", pending: "正在发出", draft: "等你批准后发出", blocked: "有机密值，已拦下", failed: "没有发出去", unknown: "可能已经发出，正在核对", discarded: "你没有发出" }
   return <div className={cn("type-footnote", s === "failed" || s === "blocked" ? "text-destructive" : "text-muted-foreground")} data-chan-out={s}>{t[s] ?? s}</div>
 }
 

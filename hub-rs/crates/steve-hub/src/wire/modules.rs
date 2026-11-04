@@ -462,6 +462,8 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
     gh.set_flow(flow.clone());
     gh.set_notifier(Arc::new(notices));
     drop(gh.spawn_jobs());
+    // approved GitHub writes: running ones a restart cut off become unknown first
+    drop(gh.spawn_effects());
     drop(mail.spawn_jobs());
     drop(mail.spawn_send_queue());
 
@@ -549,8 +551,16 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
     // `vault.token_refresh` (5 min) and `vault.health` (15 min)
     drop(conns.spawn_jobs());
     // registered now, before boot resumes sessions or the API listens: no finish happens earlier
-    let dispatcher = super::outbox::dispatcher(store, core, &flow)
-        .map_err(|e| BackendError::msg(format!("outbox: {e}")))?;
+    let dispatcher = super::outbox::dispatcher(
+        store,
+        core,
+        &flow,
+        vec![
+            steve_mail::outbox::MailEventsOut::new(mail.clone()),
+            gh.outbox_consumer(),
+        ],
+    )
+    .map_err(|e| BackendError::msg(format!("outbox: {e}")))?;
     let mut jobs: Vec<Job> = vec![
         Box::pin(super::outbox::run(dispatcher, store.clone(), flow.clone())),
         Box::pin(steve_flow::Scheduler::new(flow.clone()).run()),

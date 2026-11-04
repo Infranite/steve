@@ -19,6 +19,11 @@ pub const DEFAULT_API_BASE: &str = "https://api.github.com";
 pub const USER_AGENT: &str = "steve-hub";
 /// Longest rate-limit wait done in place; beyond it the caller gets [`GhError::RateLimited`].
 pub const MAX_WAIT: Duration = Duration::from_secs(60);
+/// The longest one API request may take, answer included (GitHub answers in well under a few
+/// seconds; this bounds a hanging connection, not a slow but working one).
+pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// The longest a log download ([`GhConn::get_text`]) may take: a large log is many megabytes.
+pub const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// What went wrong talking to GitHub. Messages are Chinese and never carry a token.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -32,7 +37,11 @@ pub enum GhError {
     /// Any other non-2xx answer, with GitHub's `message`.
     #[error("GitHub 返回 {status}：{message}")]
     Status { status: u16, message: String },
+    /// The connection could not be opened: nothing was sent.
     #[error("连不上 GitHub")]
+    Unreachable,
+    /// Sent, but no (complete) answer: timed out or cut off. For a write, it may have happened.
+    #[error("GitHub 没有回应")]
     Network,
     /// Refused by the test guard (`STEVE_FORBID_REAL_HOSTS=1`), nothing sent.
     #[error("{0}")]
@@ -155,7 +164,15 @@ impl GhClient {
             if let Some(b) = body {
                 req = req.json(b);
             }
-            let res = req.send().await.map_err(|_| GhError::Network)?;
+            // a hanging request must not hold the module's queues: answered, or Network
+            req = req.timeout(REQUEST_TIMEOUT);
+            let res = req.send().await.map_err(|e| {
+                if e.is_connect() {
+                    GhError::Unreachable
+                } else {
+                    GhError::Network
+                }
+            })?;
             let status = res.status().as_u16();
             let headers = res.headers().clone();
             if let Some(wait) = rate_wait(status, &headers) {
@@ -410,7 +427,27 @@ impl GhConn {
 
     /// Every page of a list (`per_page=100` added when missing). `key`: the array's field for
     /// wrapped lists (`repositories` of `/installation/repositories`), `None` for plain arrays.
+    /// [`GhConn::get_all`], but a list longer than its page limit is an error rather than cut:
+    /// for deciding something is not there.
+    pub async fn get_all_complete(
+        &self,
+        path: &str,
+        key: Option<&str>,
+    ) -> Result<Vec<Value>, GhError> {
+        let (out, complete) = self.pages(path, key).await?;
+        if complete {
+            Ok(out)
+        } else {
+            Err(GhError::Decode)
+        }
+    }
+
     pub async fn get_all(&self, path: &str, key: Option<&str>) -> Result<Vec<Value>, GhError> {
+        Ok(self.pages(path, key).await?.0)
+    }
+
+    /// Every page of a list; `true` when the last page was reached.
+    async fn pages(&self, path: &str, key: Option<&str>) -> Result<(Vec<Value>, bool), GhError> {
         let mut url = if path.contains("per_page=") {
             path.to_string()
         } else if path.contains('?') {
@@ -432,10 +469,10 @@ impl GhConn {
             }
             match r.next {
                 Some(n) => url = n,
-                None => break,
+                None => return Ok((out, true)),
             }
         }
-        Ok(out)
+        Ok((out, false))
     }
 
     pub async fn post(&self, path: &str, body: &Value) -> Result<Value, GhError> {
@@ -477,6 +514,7 @@ impl GhConn {
                 .header("X-GitHub-Api-Version", API_VERSION)
                 .header(header::USER_AGENT, USER_AGENT)
                 .header(header::AUTHORIZATION, token.bearer().as_str())
+                .timeout(DOWNLOAD_TIMEOUT)
                 .send()
                 .await
                 .map_err(|_| GhError::Network)?;
@@ -503,6 +541,7 @@ impl GhConn {
                     .http
                     .get(loc)
                     .header(header::USER_AGENT, USER_AGENT)
+                    .timeout(DOWNLOAD_TIMEOUT)
                     .send()
                     .await
                     .map_err(|_| GhError::Network)?;

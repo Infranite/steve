@@ -712,18 +712,21 @@ pub fn issues(
 // ---- gh_deliveries ----------------------------------------------------------
 
 /// A `gh_deliveries` row.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DeliveryRow {
     pub delivery_id: String,
     pub workspace_id: Option<String>,
     pub repo_id: Option<String>,
     pub event: String,
     pub action: Option<String>,
-    /// `ok|ignored|failed`.
+    /// `received` (not processed yet) | `ok|ignored|failed`.
     pub status: String,
     pub error: Option<String>,
     pub received: i64,
 }
+
+/// Not processed yet: the worker (and the recovery on start) takes these.
+pub const RECEIVED: &str = "received";
 
 const DELIVERY_COLS: &str =
     "delivery_id, workspace_id, repo_id, event, action, status, error, received";
@@ -741,8 +744,14 @@ fn delivery_row(r: &Row) -> Result<DeliveryRow> {
     })
 }
 
-/// Inserts unless the id is known. `false`: a redelivery.
-pub fn insert_delivery(c: &Connection, d: &DeliveryRow) -> Result<bool> {
+/// Inserts unless the id is known, with what processing it needs (`source`, `payload`: JSON).
+/// `false`: a redelivery.
+pub fn insert_delivery(
+    c: &Connection,
+    d: &DeliveryRow,
+    source: &str,
+    payload: &str,
+) -> Result<bool> {
     let n = c
         .prepare_cached(&format!(
             "INSERT INTO gh_deliveries ({DELIVERY_COLS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -758,7 +767,52 @@ pub fn insert_delivery(c: &Connection, d: &DeliveryRow) -> Result<bool> {
             d.error,
             d.received
         ])?;
+    if n == 1 {
+        c.prepare_cached(
+            "INSERT INTO gh_delivery_inputs (delivery_id, source, payload) VALUES (?, ?, ?)",
+        )?
+        .execute(params![d.delivery_id, source, payload])?;
+    }
     Ok(n == 1)
+}
+
+/// The deliveries still `received` and due at `now`, oldest first: `(id, event, source, payload)`.
+pub fn received_deliveries(
+    c: &Connection,
+    now: i64,
+    limit: i64,
+) -> Result<Vec<(String, String, String, String)>> {
+    c.prepare_cached(
+        "SELECT d.delivery_id, d.event, i.source, i.payload
+           FROM gh_deliveries d JOIN gh_delivery_inputs i ON i.delivery_id = d.delivery_id
+          WHERE d.status = 'received' AND i.next_at <= ?
+          ORDER BY d.received, d.rowid LIMIT ?",
+    )?
+    .query_map(params![now, limit], |r| {
+        Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+    })?
+    .collect()
+}
+
+/// Failed processings of a delivery so far.
+pub fn delivery_attempts(c: &Connection, id: &str) -> Result<i64> {
+    Ok(
+        c.prepare_cached("SELECT attempts FROM gh_delivery_inputs WHERE delivery_id = ?")?
+            .query_row(params![id], |r| r.get(0))
+            .optional()?
+            .unwrap_or(0),
+    )
+}
+
+/// A processing failed and will be tried again from `next_at`: still `received`, the error kept.
+pub fn delivery_retry(c: &Connection, id: &str, error: &str, next_at: i64) -> Result<()> {
+    c.prepare_cached(
+        "UPDATE gh_delivery_inputs SET attempts = attempts + 1, next_at = ? WHERE delivery_id = ?",
+    )?
+    .execute(params![next_at, id])?;
+    c.prepare_cached("UPDATE gh_deliveries SET error = ? WHERE delivery_id = ?")?
+        .execute(params![error, id])?;
+    Ok(())
 }
 
 pub fn delivery_exists(c: &Connection, id: &str) -> Result<bool> {
@@ -779,6 +833,11 @@ pub fn set_delivery_result(
            status = ?, error = ? WHERE delivery_id = ?",
     )?
     .execute(params![ws, repo, status, error, id])?;
+    // processed: its input is not needed any more (one that failed for good is kept to look at)
+    if status != "failed" {
+        c.prepare_cached("DELETE FROM gh_delivery_inputs WHERE delivery_id = ?")?
+            .execute(params![id])?;
+    }
     Ok(())
 }
 
@@ -805,10 +864,14 @@ pub fn delivery(c: &Connection, id: &str) -> Result<Option<DeliveryRow>> {
     .optional()
 }
 
-/// Drops deliveries received before `before` (their dedupe window is over).
+/// Drops deliveries received before `before` (their dedupe window is over); one still `received`
+/// stays until it was processed.
 pub fn prune_deliveries(c: &Connection, before: i64) -> Result<usize> {
-    c.prepare_cached("DELETE FROM gh_deliveries WHERE received < ?")?
-        .execute(params![before])
+    c.prepare_cached(
+        "DELETE FROM gh_deliveries WHERE received < ? AND status != 'received'
+           AND delivery_id NOT IN (SELECT delivery_id FROM gh_delivery_inputs)",
+    )?
+    .execute(params![before])
 }
 
 /// `(title, status)` of an item in a workspace.
@@ -1018,4 +1081,123 @@ pub fn insert_comment_grant(
     )?
     .execute(params![id, ws, bot, repo, until, created_by, decision_id, now])?;
     Ok(())
+}
+
+// ---- gh_effects ------------------------------------------------------------
+
+/// A `gh_effects` row (migration 29).
+#[derive(Debug, Clone, PartialEq)]
+pub struct EffectRow {
+    pub id: String,
+    pub workspace_id: String,
+    pub decision_id: String,
+    /// `open|merge|comment`.
+    pub kind: String,
+    /// `pending|running|done|failed|unknown`.
+    pub state: String,
+    pub attempts: i64,
+    pub next_at: Option<i64>,
+    pub last_error: Option<String>,
+    pub result: Value,
+}
+
+const EFFECT_COLS: &str =
+    "id, workspace_id, decision_id, kind, state, attempts, next_at, last_error, result";
+
+fn effect_row(r: &Row) -> Result<EffectRow> {
+    Ok(EffectRow {
+        id: r.get(0)?,
+        workspace_id: r.get(1)?,
+        decision_id: r.get(2)?,
+        kind: r.get(3)?,
+        state: r.get(4)?,
+        attempts: r.get(5)?,
+        next_at: r.get(6)?,
+        last_error: r.get(7)?,
+        result: serde_json::from_str(&r.get::<_, String>(8)?).unwrap_or(Value::Null),
+    })
+}
+
+/// A pending effect for `decision`, once (an answer given twice is still one write).
+pub fn insert_effect(c: &Connection, ws: &str, decision: &str, kind: &str, now: i64) -> Result<()> {
+    c.prepare_cached(
+        "INSERT INTO gh_effects (id, workspace_id, decision_id, kind, state, next_at, created, updated)
+         VALUES (?, ?, ?, ?, 'pending', ?, ?, ?) ON CONFLICT(decision_id) DO NOTHING",
+    )?
+    .execute(params![steve_store::uid("ghe"), ws, decision, kind, now, now, now])?;
+    Ok(())
+}
+
+pub fn effect_of(c: &Connection, decision: &str) -> Result<Option<EffectRow>> {
+    c.prepare_cached(&format!(
+        "SELECT {EFFECT_COLS} FROM gh_effects WHERE decision_id = ?"
+    ))?
+    .query_row(params![decision], effect_row)
+    .optional()
+}
+
+/// The effects to try now: pending or unknown, due, oldest first.
+pub fn due_effects(c: &Connection, now: i64, limit: i64) -> Result<Vec<EffectRow>> {
+    c.prepare_cached(&format!(
+        "SELECT {EFFECT_COLS} FROM gh_effects
+          WHERE state IN ('pending', 'unknown') AND next_at IS NOT NULL AND next_at <= ?
+          ORDER BY next_at, created LIMIT ?"
+    ))?
+    .query_map(params![now, limit], effect_row)?
+    .collect()
+}
+
+/// `pending|unknown → running` if it is still as read (`attempts`) and due; `false`: another took
+/// it, or it changed meanwhile.
+pub fn claim_effect(c: &Connection, id: &str, attempts: i64, now: i64) -> Result<bool> {
+    Ok(c.prepare_cached(
+        "UPDATE gh_effects SET state = 'running', attempts = attempts + 1, updated = ?1
+          WHERE id = ?2 AND state IN ('pending', 'unknown') AND attempts = ?3
+            AND next_at IS NOT NULL AND next_at <= ?1",
+    )?
+    .execute(params![now, id, attempts])?
+        == 1)
+}
+
+/// What a run is about, merged into `result` (the commit to push).
+pub fn effect_intent(c: &Connection, decision: &str, intent: &Value) -> Result<()> {
+    c.prepare_cached("UPDATE gh_effects SET result = json_patch(result, ?) WHERE decision_id = ?")?
+        .execute(params![intent.to_string(), decision])?;
+    Ok(())
+}
+
+/// How a run of an effect ended.
+pub fn settle_effect(
+    c: &Connection,
+    id: &str,
+    state: &str,
+    next_at: Option<i64>,
+    error: Option<&str>,
+    result: &Value,
+    now: i64,
+) -> Result<()> {
+    c.prepare_cached(
+        "UPDATE gh_effects SET state = ?, next_at = ?, last_error = ?, result = ?, updated = ? WHERE id = ?",
+    )?
+    .execute(params![state, next_at, error, result.to_string(), now, id])?;
+    Ok(())
+}
+
+/// After a restart: what was running may or may not have happened on GitHub.
+/// Reconciled from `next_at` on: after a request the restart cut off could still have landed.
+pub fn interrupted_effects(c: &Connection, now: i64, next_at: i64) -> Result<usize> {
+    c.prepare_cached(
+        "UPDATE gh_effects SET state = 'unknown', next_at = ?, last_error = '重启时还在进行', updated = ?
+          WHERE state = 'running'",
+    )?
+    .execute(params![next_at, now])
+}
+
+/// Whether a comment id is already the result of another effect (reconciling a comment).
+pub fn comment_claimed(c: &Connection, comment_id: i64) -> Result<bool> {
+    c.prepare_cached(
+        "SELECT EXISTS (SELECT 1 FROM gh_effects WHERE kind = 'comment' AND state = 'done'
+          AND json_extract(result, '$.comment') = ?)",
+    )?
+    .query_row(params![comment_id], |r| r.get(0))
 }

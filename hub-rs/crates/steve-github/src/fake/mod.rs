@@ -179,6 +179,16 @@ impl FakeGitHub {
         })
     }
 
+    /// How many PRs (any state) there are from `head_ref` in `repo`.
+    pub fn pulls_of(&self, repo: &str, head_ref: &str) -> usize {
+        self.with(|w| {
+            w.pulls
+                .iter()
+                .filter(|p| p.repo == repo && p.head_ref == head_ref)
+                .count()
+        })
+    }
+
     /// Comment bodies on an issue or PR, oldest first.
     pub fn comments(&self, repo: &str, number: u64) -> Vec<String> {
         self.with(|w| {

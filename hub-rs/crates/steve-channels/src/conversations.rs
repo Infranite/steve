@@ -447,6 +447,7 @@ impl Channels {
             Delivered::Drafted { .. } => "draft",
             Delivered::Blocked { .. } => "blocked",
             Delivered::Failed { .. } => "failed",
+            Delivered::Queued { .. } => "pending",
             Delivered::Skipped => "skipped",
         };
         let mut meta: Map<String, Value> = m.meta.as_object().cloned().unwrap_or_default();

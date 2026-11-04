@@ -1539,6 +1539,9 @@ impl steve_modules::contacts::SpacePort for Spaces {
     }
 }
 
+/// The capability for sending as you.
+pub const SEND_AS_USER_CAP: &str = "msg.send_as_user";
+
 /// Whether `connection` may send as you: its enabled caps include `msg.send_as_user` (the grant
 /// allows it; feishu `available_caps`). Not a provider call.
 pub fn can_send_as_you(c: &rusqlite::Connection, connection: &str) -> ChannelResult<bool> {
@@ -1551,5 +1554,5 @@ pub fn can_send_as_you(c: &rusqlite::Connection, connection: &str) -> ChannelRes
         .optional()?;
     Ok(caps
         .and_then(|c| serde_json::from_str::<Vec<String>>(&c).ok())
-        .is_some_and(|c| c.iter().any(|x| x == "msg.send_as_user")))
+        .is_some_and(|c| c.iter().any(|x| x == SEND_AS_USER_CAP)))
 }

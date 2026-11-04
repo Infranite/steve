@@ -13,7 +13,7 @@ use std::sync::{Arc, OnceLock, Weak};
 
 use async_trait::async_trait;
 use rusqlite::params;
-use steve_flow::{ActorRef, FlowCx, Ingested, RawEvent};
+use steve_flow::{ActorRef, FlowCx, RawEvent};
 
 use crate::events::{Delivery, MailEvent, MailEvents};
 
@@ -73,14 +73,16 @@ impl MailEvents for FlowEvents {
         let got = steve_flow::ingest(&flow, ws, Some(connection_id), raw)
             .await
             .map_err(|e| e.to_string())?;
-        // `record_only` stores `recorded`; a muted thread's mail is `ignored`
-        if let (Delivery::Fixed { outcome, .. }, Ingested::Stored { id, .. }) = (&how, &got)
+        // `record_only` stores `recorded`; a muted thread's mail is `ignored`. Also on a duplicate:
+        // a repeated delivery (the outbox's at-least-once) completes what a crash cut short.
+        if let (Delivery::Fixed { outcome, .. }, Some(id)) = (&how, got.id())
             && outcome != "recorded"
         {
             flow.store()
                 .with_conn(|c| {
+                    // only over the stored default: what happened to the event since stays
                     c.execute(
-                        "UPDATE ext_events SET outcome = ? WHERE id = ?",
+                        "UPDATE ext_events SET outcome = ? WHERE id = ? AND outcome = 'recorded'",
                         params![outcome, id],
                     )?;
                     Ok(())

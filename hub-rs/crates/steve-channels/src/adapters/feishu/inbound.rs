@@ -69,6 +69,10 @@ impl ChannelAdapter for FeishuApp {
         }
     }
 
+    fn send_dedup(&self) -> Option<std::time::Duration> {
+        Some(super::send::UUID_DEDUP)
+    }
+
     async fn space_info(&self, cx: &ConnCx, ext_id: &str) -> Result<SpaceInfo, AdapterError> {
         chats::space_info(cx, ext_id)
             .await

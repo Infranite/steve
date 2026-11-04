@@ -214,11 +214,14 @@ impl ConnectionsBuilder {
     }
 
     pub fn build(self) -> Connections {
+        // a connect timeout only: what a whole request may take is each caller's (Feishu sets its
+        // own; GitHub `api::REQUEST_TIMEOUT`), so a long download is not cut by a default
         let http = reqwest::Client::builder()
             .user_agent("steve-hub")
             .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(CONNECT_TIMEOUT)
             .build()
-            .unwrap_or_default();
+            .expect("the HTTP client (TLS backend) could not be built");
         Connections(Arc::new(Inner {
             m: self.m,
             vault: self.vault,
@@ -261,6 +264,71 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 /// A provider failure as an API error (400 with its message; vault trouble keeps its own code).
+/// Why a connection may not write to the outside now (see [`Connections::cx_for`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WriteRefusal {
+    /// Paused or waiting for a new authorization: the write waits and goes out once it is resumed.
+    Later(String),
+    /// Revoked, or the capability is turned off: the write can't go out until you change that.
+    Never(String),
+}
+
+impl WriteRefusal {
+    pub fn message(&self) -> &str {
+        match self {
+            Self::Later(m) | Self::Never(m) => m,
+        }
+    }
+}
+
+impl From<WriteRefusal> for ApiError {
+    fn from(r: WriteRefusal) -> Self {
+        ApiError::rule(r.message())
+    }
+}
+
+/// How long a connection to a provider may take to open (the shared client).
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The statuses in which a write waits rather than fails: it goes out once the connection is resumed
+/// or authorized again. Queues skip these connections so they don't hold up others.
+pub const WAITING: [&str; 2] = ["paused", "reauth"];
+
+/// May `r` write to the outside now, needing `cap` (if given)? A connection in `error` may: its
+/// health only says recent calls failed, and the write itself reports how it went.
+pub fn may_write(r: &ConnRow, cap: Option<&str>) -> Result<(), WriteRefusal> {
+    match r.status.as_str() {
+        "ok" | "error" => {}
+        "paused" => return Err(WriteRefusal::Later("这个连接已暂停，恢复后再发出".into())),
+        "reauth" => {
+            return Err(WriteRefusal::Later(
+                "这个连接需要重新授权，授权后再发出".into(),
+            ));
+        }
+        "revoked" => return Err(WriteRefusal::Never("这个连接已经断开".into())),
+        s => return Err(WriteRefusal::Never(format!("这个连接现在不能发出（{s}）"))),
+    }
+    match cap {
+        Some(c) if !r.caps.iter().any(|x| x == c) => Err(WriteRefusal::Never(format!(
+            "这个连接没有开启「{c}」，在“接入”里打开后才能发出"
+        ))),
+        _ => Ok(()),
+    }
+}
+
+/// [`may_write`] for connection `id` of `ws`, read in the caller's transaction.
+pub fn may_write_in(
+    c: &rusqlite::Connection,
+    ws: &str,
+    id: &str,
+    cap: Option<&str>,
+) -> Result<Result<(), WriteRefusal>, ApiError> {
+    let r = repo::get(c, id)?
+        .filter(|r| r.workspace_id == ws)
+        .ok_or_else(|| ApiError::not_found("连接"))?;
+    Ok(may_write(&r, cap))
+}
+
 fn perr(e: ProviderError) -> VaultError {
     ApiError::rule(e.to_string()).into()
 }
@@ -552,6 +620,22 @@ impl Connections {
             .reader(|c| repo::get(c, id))?
             .filter(|r| r.workspace_id == ws)
             .ok_or_else(|| ApiError::not_found("连接"))?;
+        Ok(self.cx_of(&r))
+    }
+
+    /// The context for a write to the outside (sending, posting, merging), checked when the write
+    /// happens, not when it was approved: refused while the connection is paused, revoked or needs a
+    /// new authorization, and when `cap` (if given) is turned off for it. A connection in `error` may
+    /// still write: its health only says recent calls failed.
+    pub fn cx_for(&self, ws: &str, id: &str, cap: Option<&str>) -> VaultResult<ConnCx> {
+        let r = self
+            .0
+            .m
+            .store
+            .reader(|c| repo::get(c, id))?
+            .filter(|r| r.workspace_id == ws)
+            .ok_or_else(|| ApiError::not_found("连接"))?;
+        may_write(&r, cap).map_err(ApiError::from)?;
         Ok(self.cx_of(&r))
     }
 
@@ -2060,6 +2144,56 @@ impl Connections {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn conn(status: &str, caps: &[&str]) -> ConnRow {
+        ConnRow {
+            id: "con_1".into(),
+            workspace_id: "default".into(),
+            account_id: "acc_1".into(),
+            adapter: "fake".into(),
+            auth: "none".into(),
+            granted_scopes: vec![],
+            caps: caps.iter().map(|c| c.to_string()).collect(),
+            credential_item: None,
+            status: status.into(),
+            health: HealthState::default(),
+            config: Value::Null,
+            last_sync: None,
+            created_by: "usr_1".into(),
+            revision: 1,
+            created: 0,
+            updated: 0,
+        }
+    }
+
+    #[test]
+    fn a_write_waits_while_paused_and_never_goes_out_revoked_or_without_its_capability() {
+        let send = Some("mail.send");
+        assert_eq!(may_write(&conn("ok", &["mail.send"]), send), Ok(()));
+        assert_eq!(
+            may_write(&conn("error", &["mail.send"]), send),
+            Ok(()),
+            "health only"
+        );
+        assert_eq!(may_write(&conn("ok", &[]), None), Ok(()));
+        for s in WAITING {
+            assert!(
+                matches!(
+                    may_write(&conn(s, &["mail.send"]), send),
+                    Err(WriteRefusal::Later(_))
+                ),
+                "{s}"
+            );
+        }
+        assert!(matches!(
+            may_write(&conn("revoked", &["mail.send"]), send),
+            Err(WriteRefusal::Never(_))
+        ));
+        assert!(matches!(
+            may_write(&conn("ok", &["mail.read"]), send),
+            Err(WriteRefusal::Never(_))
+        ));
+    }
 
     #[test]
     fn backoff_doubles_and_caps() {

@@ -9,6 +9,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use steve_modules::ApiError;
 use steve_modules::accounts::connections::Health;
@@ -20,8 +21,9 @@ use crate::link;
 use crate::repo::{self, CheckRow, IssueRow, PrRow, RepoRow};
 use crate::repos::Settings;
 
-/// Where a change came from.
-#[derive(Debug, Clone)]
+/// Where a change came from (stored with a delivery as JSON: `{"app":{"ws":…}}`, …).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Source {
     /// `/hooks/github`: an App delivery; `ws` is the App's workspace.
     App { ws: String },
@@ -77,6 +79,9 @@ pub(crate) struct Effects {
     pub(crate) note: Option<String>,
     /// Items to finish after the commit: `(item, now)` (a PR merged, `finish_on=merged`).
     pub(crate) finish: Vec<(String, String)>,
+    /// Processed late (a retry, the recovery after a restart): its view may be older than what is
+    /// stored meanwhile, which then stays.
+    pub(crate) late: bool,
 }
 
 /// Checks whose conclusion makes the commit fail (§3.3).
@@ -296,6 +301,18 @@ struct Fetched {
 impl GitHub {
     /// Applies one change. Never panics on odd payloads: what cannot be read is `ignored`.
     pub async fn apply(&self, src: &Source, event: &str, payload: &Value) -> Outcome {
+        self.apply_as(src, event, payload, false).await
+    }
+
+    /// [`GitHub::apply`]; `late`: processed after it was received (a retry, the recovery), so an
+    /// older view than the stored one is not applied.
+    pub(crate) async fn apply_as(
+        &self,
+        src: &Source,
+        event: &str,
+        payload: &Value,
+        late: bool,
+    ) -> Outcome {
         // Which connection, and in which workspace.
         let resolved = match src {
             Source::App { ws } => {
@@ -358,13 +375,18 @@ impl GitHub {
             return Outcome::ignored(Some(&ws), Some(&repo.id), "这个仓库已停用");
         }
         let from_hook = !matches!(src, Source::Poll { .. });
-        let fetched = self.fetch(&repo, event, payload).await;
-        let note = fetched.as_ref().err().cloned();
+        let fetched = match self.fetch(&repo, event, payload).await {
+            // tried again later rather than applied without it
+            Err((e, true)) => return Outcome::failed(Some(&ws), Some(&repo.id), e),
+            f => f,
+        };
+        let note = fetched.as_ref().err().map(|(e, _)| e.clone());
         let fetched = fetched.unwrap_or_default();
         let now = self.now();
         let res = self.store().transaction(|tx| {
             let mut fx = Effects {
                 note: note.clone(),
+                late,
                 ..Default::default()
             };
             if from_hook {
@@ -372,6 +394,7 @@ impl GitHub {
             }
             self.dispatch(tx, &repo, event, payload, fetched, now, &mut fx)?;
             self.ask_merges(tx, &repo, &fx)?;
+            crate::after::emit(tx, &repo.workspace_id, &repo.connection_id, &mut fx)?;
             Ok::<_, ApiError>(fx)
         });
         match res {
@@ -385,22 +408,12 @@ impl GitHub {
         }
     }
 
-    /// Publishes the `gh` notices, finishes the items whose PR merged, and hands the signals to S1,
-    /// in order.
-    pub(crate) async fn after_commit(&self, ws: &str, connection: &str, fx: Effects) {
-        for (item, now) in &fx.finish {
-            self.finish_item(ws, item, now).await;
-        }
+    /// Publishes the `gh` notices. The items to finish and the signals went to the outbox in the
+    /// transaction ([`crate::after`]).
+    pub(crate) async fn after_commit(&self, ws: &str, _connection: &str, fx: Effects) {
         let notifier = self.notifier();
         for id in &fx.gh {
             notifier.gh(ws, id);
-        }
-        let sink = self.sink();
-        for ev in fx.signals {
-            let t = ev.type_key.clone();
-            if let Err(e) = sink.ingest(ws, connection, ev).await {
-                tracing::warn!(error = %e, r#type = %t, "github signal not ingested");
-            }
         }
     }
 
@@ -508,6 +521,8 @@ impl GitHub {
                     fx.gh.insert(r.id.clone());
                 }
             }
+            let first = conns.first().map(String::as_str).unwrap_or_default();
+            crate::after::emit(tx, ws, first, &mut fx)?;
             Ok::<_, ApiError>(fx)
         });
         match res {
@@ -534,7 +549,14 @@ impl GitHub {
 
     /// Lists GitHub has to give for a check event: the check runs of a completed suite, the jobs of
     /// a workflow run. Errors are kept on the delivery; the payload's own data is still applied.
-    async fn fetch(&self, repo: &RepoRow, event: &str, payload: &Value) -> Result<Fetched, String> {
+    /// `Err((message, transient))`: `transient` when GitHub did not answer or failed itself, so the
+    /// delivery is tried again; otherwise the change is applied without what could not be read.
+    async fn fetch(
+        &self,
+        repo: &RepoRow,
+        event: &str,
+        payload: &Value,
+    ) -> Result<Fetched, (String, bool)> {
         let mut f = Fetched::default();
         let path = match event {
             "check_suite" if payload["check_suite"]["status"] == "completed" => {
@@ -554,13 +576,22 @@ impl GitHub {
         };
         let conn = self
             .conn(&repo.workspace_id, &repo.connection_id)
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| (e.to_string(), false))?;
         let now = self.now();
+        let transient = |e: &crate::api::GhError| {
+            matches!(
+                e,
+                crate::api::GhError::Network
+                    | crate::api::GhError::Unreachable
+                    | crate::api::GhError::RateLimited { .. }
+                    | crate::api::GhError::Status { status: 500.., .. }
+            )
+        };
         if event == "check_suite" {
             let list = conn
                 .get_all(&path, Some("check_runs"))
                 .await
-                .map_err(|e| format!("没取到检查列表：{e}"))?;
+                .map_err(|e| (format!("没取到检查列表：{e}"), transient(&e)))?;
             f.checks = list
                 .iter()
                 .filter_map(|v| check_from_run(repo, v, now))
@@ -569,7 +600,7 @@ impl GitHub {
             let list = conn
                 .get_all(&path, Some("jobs"))
                 .await
-                .map_err(|e| format!("没取到工作流的 job：{e}"))?;
+                .map_err(|e| (format!("没取到工作流的 job：{e}"), transient(&e)))?;
             f.checks = list
                 .iter()
                 .filter_map(|v| check_from_job(repo, v, now))
@@ -729,6 +760,14 @@ impl GitHub {
             return Ok(None);
         };
         let prev = repo::pr_by_number(tx, &repo.id, number)?;
+        // processed late, an older view than the one stored (a newer delivery came first) changes
+        // nothing: GitHub's `updated_at` orders them
+        if fx.late
+            && let (Some(p), Some(t)) = (&prev, ts(&v["updated_at"]))
+            && t < p.updated
+        {
+            return Ok(Some(p.clone()));
+        }
         let head_sha = s(&v["head"]["sha"]);
         let merged = v["merged"].as_bool() == Some(true) || !v["merged_at"].is_null();
         let state = match v["state"].as_str() {
