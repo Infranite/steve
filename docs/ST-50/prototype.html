@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ST-50 主线对话原型</title>
+<!-- 静态原型：?v=desktop | desktop-latest | mobile | mobile-history。只用来看布局和交互位置，不连 Hub。 -->
+<style>
+  :root { --bg:#161618; --side:#1e1e21; --muted:#26262a; --fg:#f5f5f7; --fg2:#98989d; --fg3:#7c7c80; --line:#2e2e32; --blue:#0a84ff; --orange:#ff9f0a; --green:#30d158; }
+  * { box-sizing: border-box; margin: 0; }
+  body { background: var(--bg); color: var(--fg); font: 14px/22px -apple-system, "SF Pro Text", "PingFang SC", system-ui, sans-serif; height: 100dvh; overflow: hidden; }
+  .app { display: flex; height: 100dvh; }
+  .nav { width: 220px; background: var(--side); border-right: 1px solid var(--line); padding: 14px 10px; display: flex; flex-direction: column; gap: 2px; }
+  .nav b { font-weight: 600; padding: 4px 10px 12px; }
+  .nav a { color: var(--fg2); padding: 6px 10px; border-radius: 8px; text-decoration: none; }
+  .nav a.on { background: var(--muted); color: var(--fg); }
+  .main { flex: 1; display: flex; min-width: 0; }
+  .col { flex: 1; display: flex; flex-direction: column; min-width: 0; position: relative; }
+  header { height: 52px; flex: none; display: flex; align-items: center; gap: 10px; padding: 0 20px; border-bottom: 1px solid color-mix(in srgb, var(--line) 60%, transparent); }
+  .ava { width: 26px; height: 26px; border-radius: 50%; background: #8b9eac; display: grid; place-items: center; font-size: 11px; color: #161618; font-weight: 600; flex: none; }
+  .who { font-weight: 600; }
+  .state { color: var(--fg2); font-size: 12px; display: inline-flex; align-items: center; gap: 6px; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--blue); display: inline-block; }
+  .sp { flex: 1; }
+  .tb { color: var(--fg2); background: none; border: 0; font: inherit; font-size: 13px; padding: 5px 10px; border-radius: 8px; display: inline-flex; align-items: center; gap: 6px; }
+  .tb.on { background: var(--muted); color: var(--fg); }
+  .tb .n { color: var(--fg); font-variant-numeric: tabular-nums; }
+  .tb .w { width: 6px; height: 6px; border-radius: 50%; background: var(--orange); }
+  .scroll { flex: 1; overflow: hidden; }
+  .msgs { max-width: 800px; margin: 0 auto; padding: 18px 32px 40px; display: flex; flex-direction: column; gap: 28px; }
+  .day { display: flex; align-items: center; gap: 14px; color: var(--fg2); font-size: 12px; }
+  .day i { flex: 1; height: 1px; background: color-mix(in srgb, var(--line) 60%, transparent); }
+  .topic { color: var(--fg3); font-size: 12px; margin-bottom: -14px; }
+  .me { align-self: flex-end; max-width: 80%; background: var(--muted); border-radius: 20px; padding: 9px 16px; font-size: 15px; line-height: 26px; }
+  .st { font-size: 15px; line-height: 26px; }
+  .meta { color: var(--fg2); font-size: 12px; margin-bottom: 4px; } .meta b { color: var(--fg); font-weight: 500; margin-right: 8px; }
+  .trace { color: var(--fg2); font-size: 13px; display: flex; gap: 8px; align-items: center; margin-bottom: 6px; }
+  .card { border: 1px solid var(--line); border-radius: 12px; padding: 10px 14px; margin-top: 10px; display: flex; gap: 10px; align-items: center; font-size: 13px; }
+  .id { font-family: ui-monospace, "SF Mono", monospace; font-size: 12px; color: var(--fg2); }
+  .flash { background: color-mix(in srgb, var(--blue) 10%, transparent); border-radius: 12px; box-shadow: 0 0 0 8px color-mix(in srgb, var(--blue) 10%, transparent); }
+  .float { position: absolute; left: 50%; transform: translateX(-50%); bottom: 150px; display: flex; gap: 2px; background: var(--side); border: 1px solid var(--line); border-radius: 999px; padding: 3px; box-shadow: 0 6px 20px rgba(0,0,0,.35); font-size: 13px; }
+  .float span { padding: 4px 12px; border-radius: 999px; color: var(--fg); white-space: nowrap; }
+  .float span + span { color: var(--fg2); }
+  .input { max-width: 800px; width: 100%; margin: 0 auto; padding: 10px 32px 20px; }
+  .live { color: var(--fg2); font-size: 13px; display: flex; gap: 8px; align-items: center; margin: 0 4px 8px; }
+  .live .t { margin-left: auto; font-variant-numeric: tabular-nums; }
+  .box { border: 1px solid var(--line); border-radius: 20px; padding: 12px 16px 10px; background: var(--bg); }
+  .box p { color: var(--fg3); font-size: 15px; } .box .row { display: flex; justify-content: space-between; color: var(--fg3); margin-top: 18px; font-size: 13px; }
+  .send { width: 28px; height: 28px; border-radius: 50%; background: var(--fg); }
+  aside { width: 340px; flex: none; background: var(--side); border-left: 1px solid var(--line); display: flex; flex-direction: column; }
+  .ah { height: 52px; display: flex; align-items: center; padding: 0 16px; gap: 8px; border-bottom: 1px solid var(--line); font-weight: 600; }
+  .search { margin: 12px 16px 6px; background: var(--muted); border-radius: 8px; padding: 6px 10px; color: var(--fg); display: flex; gap: 8px; align-items: center; }
+  .search em { color: var(--fg3); font-style: normal; }
+  .tabs { display: flex; gap: 4px; margin: 4px 16px 6px; } .tabs span { font-size: 12px; padding: 2px 10px; border-radius: 999px; color: var(--fg2); } .tabs span.on { background: var(--muted); color: var(--fg); }
+  .grp { color: var(--fg2); font-size: 12px; font-weight: 500; padding: 10px 16px 4px; }
+  .hit { padding: 7px 16px; display: flex; flex-direction: column; gap: 1px; }
+  .hit.on { background: var(--muted); }
+  .hit .h { font-size: 13px; display: flex; gap: 8px; } .hit .h b { font-weight: 500; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; flex: 1; }
+  .hit .h small { color: var(--fg2); font-size: 12px; } .hit .s { color: var(--fg2); font-size: 12px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  mark { background: color-mix(in srgb, var(--orange) 28%, transparent); color: var(--fg); border-radius: 3px; padding: 0 1px; }
+  .foot { margin-top: auto; border-top: 1px solid var(--line); padding: 10px 16px; color: var(--fg2); font-size: 13px; display: flex; justify-content: space-between; }
+  .note { position: fixed; left: 12px; bottom: 8px; color: var(--fg3); font-size: 11px; } .m .note { display: none; }
+  /* mobile */
+  .m .nav, .m aside { display: none; }
+  .m header { padding: 0 12px; height: 48px; }
+  .m .msgs { padding: 14px 16px 30px; gap: 22px; }
+  .m .input { padding: 8px 12px 72px; }
+  .m .tabbar { position: fixed; bottom: 0; left: 0; right: 0; height: 60px; border-top: 1px solid var(--line); background: color-mix(in srgb, var(--bg) 90%, transparent); display: flex; }
+  .m .tabbar span { flex: 1; display: grid; place-items: center; color: var(--fg2); font-size: 11px; } .m .tabbar span.on { color: var(--fg); }
+  .m .float { bottom: 200px; }
+  .tabbar { display: none; }
+  .scrim { position: fixed; inset: 0; background: rgba(0,0,0,.5); display: none; }
+  .drawer { position: fixed; top: 0; right: 0; bottom: 0; width: 88vw; background: var(--side); display: none; flex-direction: column; border-left: 1px solid var(--line); }
+  .mh .scrim, .mh .drawer { display: flex; }
+</style>
+</head>
+<body>
+<div class="app" id="app">
+  <nav class="nav"><b>Steve</b><a class="on">对话</a><a>待处理</a><a>事项</a><a>项目</a><a>会话</a><a>知识</a></nav>
+  <div class="main">
+    <div class="col">
+      <header>
+        <div class="ava">St</div><span class="who">Steve</span><span class="state"><span class="dot"></span>正在回复</span>
+        <span class="sp"></span>
+        <button class="tb hist">⌕ 历史</button>
+        <button class="tb">事项 <span class="n">8</span><span class="w"></span></button>
+      </header>
+      <div class="scroll"><div class="msgs">
+        <div class="day"><i></i>11月4日<i></i></div>
+        <div class="topic">话题 · 对话页历史怎么找</div>
+        <div class="me">对话页切换消息不好用，能不能参考一下 cindy、persona？</div>
+        <div class="st flash" id="target"><div class="meta"><b>Steve</b>11月4日 01:30</div>我建议把这页设计成“与 Steve 持续沟通的主线”：正文负责聊天，<mark>历史</mark>按话题找回，事项承接执行进展。
+          <div class="card"><span class="id">ST-50</span><span>重新设计主线对话页与消息历史导航</span><span class="sp"></span><span class="state"><span class="dot"></span>进行中</span></div></div>
+        <div class="day"><i></i>今天<i></i></div>
+        <div class="topic">话题 · 执行进度重复</div>
+        <div class="me">重复展示了，而且计时也不一致</div>
+        <div class="st"><div class="meta"><b>Steve</b>01:18</div><div class="trace">◌ 思考 · 外层进度和展开后的执行过程各算了一次时间 · 1.8 秒 ›</div>是的，同一段执行进度重复显示了两次。执行状态只显示一处：折叠时显示摘要，展开后显示详细过程。</div>
+      </div></div>
+      <div class="float"><span>↩ 返回刚才位置</span><span>回到最新 ↓</span></div>
+      <div class="input">
+        <div class="live"><span class="dot"></span>正在查 · 读取 chat-view.tsx<span class="t">0:42</span></div>
+        <div class="box"><p>和 Steve 说…</p><div class="row"><span>＋ 附件</span><span class="send"></span></div></div>
+      </div>
+      <div class="tabbar"><span class="on">对话</span><span>待处理</span><span>事项</span><span>我的</span></div>
+    </div>
+    <aside>
+      <div class="ah">历史<span class="sp"></span><span class="tb">✕</span></div>
+      <div class="search">⌕ <span>历史</span><span class="sp"></span><em>12 条</em></div>
+      <div class="tabs"><span class="on">主线</span><span>群聊和私聊</span></div>
+      <div class="grp">今天</div>
+      <div class="hit"><div class="h"><b>你：对话页面左右一滑动，总能显示白线</b><small>01:18</small></div><div class="s">…上下其实有时候也显示，不符合预期</div></div>
+      <div class="grp">11月4日</div>
+      <div class="hit on"><div class="h"><b>Steve：<mark>历史</mark>按话题找回，事项承接执行进展</b><small>01:30</small></div><div class="s">我建议把这页设计成“与 Steve 持续沟通的主线”…</div></div>
+      <div class="hit"><div class="h"><b>你：“会话列表”改为“<mark>历史</mark>”</b><small>01:28</small></div><div class="s">这地方的ui得好好设计设计，有点丑…</div></div>
+      <div class="grp">话题（未搜索时）</div>
+      <div class="hit"><div class="h"><b>执行进度重复</b><small>今天 01:17</small></div><div class="s">6 条 · ST-48</div></div>
+      <div class="hit"><div class="h"><b>对话页历史怎么找</b><small>11月4日 01:28</small></div><div class="s">4 条 · ST-50</div></div>
+      <div class="foot"><span>更早的消息</span><span>加载更早 ›</span></div>
+    </aside>
+  </div>
+</div>
+<div class="scrim"></div>
+<div class="drawer" id="drawer"></div>
+<div class="note">ST-50 原型 · 静态示意</div>
+<script>
+  const v = new URLSearchParams(location.search).get("v") || "desktop"
+  const app = document.getElementById("app")
+  if (v.startsWith("mobile")) document.body.classList.add("m")
+  if (v === "mobile-history") { document.body.classList.add("mh"); const d = document.getElementById("drawer"); d.innerHTML = document.querySelector("aside").innerHTML }
+  if (v === "desktop-latest" || v === "mobile") { document.querySelector("aside").remove(); document.querySelector(".float").remove(); document.getElementById("target").classList.remove("flash") }
+  if (v === "desktop") document.querySelector(".hist").classList.add("on")
+</script>
+</body>
+</html>

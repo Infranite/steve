@@ -492,6 +492,21 @@ pub trait Repo {
     fn messages_in(&self, ws: &str, space: &str, limit: i64) -> BResult<Vec<Obj>> {
         todo_backend!("messages_in")
     }
+    /// Up to `limit` messages of a space created in `[after, before)`, the newest of them, oldest first.
+    fn messages_before(
+        &self,
+        ws: &str,
+        space: &str,
+        before: i64,
+        after: i64,
+        limit: i64,
+    ) -> BResult<Vec<Obj>> {
+        todo_backend!("messages_before")
+    }
+    /// Messages of a space whose text contains `q` or whose item is `q`, newest first.
+    fn messages_search(&self, ws: &str, space: &str, q: &str, limit: i64) -> BResult<Vec<Obj>> {
+        todo_backend!("messages_search")
+    }
     /// `messages.add`: `meta` stored only when truthy; publishes `message`. Returns the id.
     fn message_add(
         &self,

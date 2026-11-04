@@ -327,6 +327,8 @@ pub fn router(st: AppState, modules: Router) -> Router {
         // conversation
         .route("/thread", post(misc::thread_say))
         .route("/thread/stop", post(misc::thread_stop))
+        .route("/thread/history", get(misc::thread_history))
+        .route("/thread/search", get(misc::thread_search))
         .route(
             "/thread/queued/{id}",
             patch(misc::thread_queued_edit).delete(misc::thread_queued_withdraw),

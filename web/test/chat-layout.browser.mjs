@@ -59,7 +59,7 @@ try {
     if (shots) await page.screenshot({ path: `${shots}/chat-long-${width}-${theme}.png`, animations: "disabled" })
     // At the bottom, new messages follow, even after a wheel that could not scroll any further down.
     const atBottom = () => scroller.evaluate(el => el.scrollHeight - el.scrollTop - el.clientHeight < 2)
-    const newMsg = page.getByRole("button", { name: "新消息 ↓" })
+    const newMsg = page.locator("[data-new-messages]")
     await page.mouse.move(width / 2, 300)
     await page.mouse.wheel(0, 400)
     await page.waitForTimeout(200)
@@ -82,6 +82,7 @@ try {
     await page.locator('[data-msg="reply-2"]').waitFor()
     await page.waitForTimeout(300)
     assert.equal(await scroller.evaluate(el => el.scrollTop), top)
+    assert.equal((await newMsg.textContent()).trim(), "1 条新消息")
     if (shots) await page.screenshot({ path: `${shots}/chat-unread-${width}-${theme}.png`, animations: "disabled" })
     await newMsg.click()
     await page.waitForTimeout(200)

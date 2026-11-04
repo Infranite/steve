@@ -660,6 +660,24 @@ impl Repo for StoreBackend {
     fn messages_in(&self, ws: &str, space: &str, limit: i64) -> BResult<Vec<Obj>> {
         objs(self.0.messages().list(ws, space, limit).map_err(err)?)
     }
+    fn messages_before(
+        &self,
+        ws: &str,
+        space: &str,
+        before: i64,
+        after: i64,
+        limit: i64,
+    ) -> BResult<Vec<Obj>> {
+        objs(
+            self.0
+                .messages()
+                .list_before(ws, space, before, after, limit)
+                .map_err(err)?,
+        )
+    }
+    fn messages_search(&self, ws: &str, space: &str, q: &str, limit: i64) -> BResult<Vec<Obj>> {
+        objs(self.0.messages().search(ws, space, q, limit).map_err(err)?)
+    }
     fn message_add(
         &self,
         ws: &str,

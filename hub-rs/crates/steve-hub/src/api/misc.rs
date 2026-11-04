@@ -335,6 +335,59 @@ pub async fn thread_stop(State(st): State<AppState>, Extension(c): Extension<Ctx
     ok(json!({ "ok": st.domain.stop(&c.ws).await? }))
 }
 
+#[derive(serde::Deserialize)]
+pub struct HistoryQuery {
+    before: Option<i64>,
+    after: Option<i64>,
+    limit: Option<i64>,
+}
+
+/// `GET /api/thread/history?before=<ms>[&after=<ms>][&limit=n]`: the conversation before what `/api/state` carries,
+/// oldest first. With `after` it fills the gap down to an older message (a search hit); `has_more` says paging
+/// back can go on.
+pub async fn thread_history(
+    State(st): State<AppState>,
+    Extension(c): Extension<Ctx>,
+    Query(q): Query<HistoryQuery>,
+) -> ApiResult {
+    let before = q.before.unwrap_or(i64::MAX);
+    let after = q.after.unwrap_or(0).max(0);
+    let limit = q.limit.unwrap_or(100).clamp(1, 2000);
+    st.read(move |r| {
+        let raw = r.messages_before(&c.ws, "steve", before, after, limit)?;
+        let more = raw.len() as i64 == limit
+            || (after > 0 && !r.messages_before(&c.ws, "steve", after, 0, 1)?.is_empty());
+        let oldest = raw.first().and_then(|m| m.get("created")).cloned();
+        let list = crate::notify::thread_before(r, &c.ws, before, after, limit)?;
+        ok(json!({ "messages": objs(list), "has_more": more, "oldest": oldest }))
+    })
+    .await
+}
+
+#[derive(serde::Deserialize)]
+pub struct SearchQuery {
+    q: Option<String>,
+    limit: Option<i64>,
+}
+
+/// `GET /api/thread/search?q=…`: messages of the conversation that mention `q` or belong to item `q`, newest first.
+pub async fn thread_search(
+    State(st): State<AppState>,
+    Extension(c): Extension<Ctx>,
+    Query(q): Query<SearchQuery>,
+) -> ApiResult {
+    let text = q.q.unwrap_or_default().trim().to_string();
+    if text.is_empty() || text.chars().count() > 200 {
+        return Err(ApiError::bad_request("参数不对：q"));
+    }
+    let limit = q.limit.unwrap_or(50).clamp(1, 200);
+    st.read(move |r| {
+        let list = crate::notify::thread_search(r, &c.ws, &text, limit)?;
+        ok(json!({ "messages": objs(list) }))
+    })
+    .await
+}
+
 /// The answer when a queued message has already gone to Steve.
 const QUEUED_GONE: &str = "这条消息已经发给 Steve 了，不能再改或撤回";
 

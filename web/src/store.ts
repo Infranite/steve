@@ -400,6 +400,8 @@ function itemOf(i: RItem): Item {
     rel: open.some((d) => d.subject_type === "release") ? undefined : liveRel(i, itemRel(i.id, [...(det?.decisions ?? []), ...(raw.state?.recent ?? [])])),
   }
 }
+/** every message of the conversation this page has seen, older ones included (thread/history.ts loads those) */
+export const knownMsgs = new Map<string, Msg>()
 export function msgOf(m: State["thread"][number]): Msg {
   const x = m.meta ?? {}
   /* one drafted change (`proposal`) or several (`proposals`); `cfg_state` is what became of each */
@@ -683,7 +685,7 @@ const FOCUS_MS = 10 * 60_000
 const ITEM_REF = /^#([A-Z]{1,6}-\d+)\b/
 export async function chatSend(v: string, files: string[] = [], refs: RFile[] = [], mentions: { kind: "party" | "bot"; id: string }[] = []) {
   /* a quote of an item's message, or the focus bar, sends straight to that item; `#ST-n` does too and starts the focus */
-  const quoted = st.quote ? st.thread.find((m) => m.id === st.quote) : undefined
+  const quoted = st.quote ? st.thread.find((m) => m.id === st.quote) ?? knownMsgs.get(st.quote) : undefined
   const focus = st.focus && st.focus.until > Date.now() ? st.focus.item : undefined
   const item = quoted?.item ?? (quoted ? undefined : focus)
   const toItem = item ?? ITEM_REF.exec(v)?.[1]

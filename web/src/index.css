@@ -160,6 +160,8 @@
 @layer base {
   * { @apply border-border outline-ring/50; }
   html { @apply font-sans; -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; text-rendering: optimizeLegibility; }
+  /* a sideways swipe must not pull the page past its edge (ST-50: a light seam showed beside the conversation) */
+  html, body { overflow-x: clip; overscroll-behavior-x: none; }
   body { @apply bg-background text-foreground; font-size: 14px; line-height: 22px; font-feature-settings: "kern"; }
   ::selection { background: color-mix(in srgb, var(--blue) 22%, transparent); }
   h1, h2, h3 { text-wrap: balance; }

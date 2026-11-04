@@ -11,6 +11,7 @@ import { Markdown } from "@/components/markdown"
 import { Textarea } from "@/components/ui/textarea"
 import { st, tm, emit, chatSend, takeOffer, chooseSuggest, cancelQueued, stopRun, clearFocus, focusItem, quoteMsg, decisionDraft, decide, botName, alertClosed, closeAlerts, type Msg, type SuggestChoice, type Steps, type Update, type Item, type ItemCardState } from "@/store"
 import { ItemRef, DecisionCard, ItemNo, StatusDot, AlertClose, go } from "@/ui"
+import { jumpToMsg, threadMsg } from "@/thread/history"
 
 /* ───────── research ───────── */
 const isRead = (n: string) => n === "Read"
@@ -122,17 +123,13 @@ export function QueuedNote({ m }: { m: Msg }) {
   return <div className="flex items-center gap-2 self-end type-footnote text-muted-foreground" data-queued={m.id}><Spinner className="size-3" />排队中{run && <button type="button" className="hover:text-foreground hover:underline" onClick={() => cancelQueued(run)} data-queued-cancel>取消</button>}</div>
 }
 
-/** scroll to a message and flash it */
-export function jumpTo(id: string) {
-  const el = document.querySelector<HTMLElement>(`[data-msg="${CSS.escape(id)}"]`); if (!el) return
-  el.scrollIntoView({ behavior: "smooth", block: "center" })
-  el.classList.add("bg-blue/5", "rounded-xl"); setTimeout(() => el.classList.remove("bg-blue/5", "rounded-xl"), 1600)
-}
+/** scroll to a message and flash it; the conversation offers the way back (ST-50) */
+export function jumpTo(id: string) { jumpToMsg(id, threadMsg(id)?.created) }
 const clip = (t: string, n = 24) => { const x = t.replace(/\s+/g, " ").trim(); return x.length > n ? x.slice(0, n) + "…" : x }
 /** "↳ 你 18:09 说的「…」": the message this one answers or quotes */
 export function QuoteHead({ id, className }: { id?: string; className?: string }) {
   if (!id) return null
-  const q = st.thread.find((m) => m.id === id)
+  const q = threadMsg(id)
   if (!q) return null
   return (
     <button type="button" onClick={() => jumpTo(id)} className={cn("flex max-w-full items-center gap-1 self-start truncate type-footnote text-muted-foreground hover:text-foreground", className)} data-quote={id}>
@@ -276,7 +273,7 @@ export function CardLink({ id }: { id: string }) {
 /* ───────── above the composer ───────── */
 /** the quoted message and the item the conversation is talking to */
 export function ComposerBars() {
-  const q = st.quote ? st.thread.find((m) => m.id === st.quote) : undefined, f = focusItem()
+  const q = st.quote ? threadMsg(st.quote) : undefined, f = focusItem()
   const [, tick] = useState(0)
   useEffect(() => { if (!st.focus) return; const t = setInterval(() => { tick((x) => x + 1); if (st.focus && st.focus.until <= Date.now()) { st.focus = null; emit() } }, 30_000); return () => clearInterval(t) }, [st.focus?.item])
   if (!q && !f) return null
