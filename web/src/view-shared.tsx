@@ -1,9 +1,10 @@
+import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Field, FieldContent, FieldDescription, FieldLabel, FieldTitle } from "@/components/ui/field"
 import { Progress } from "@/components/ui/progress"
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
 import { SelectContent, SelectItem, SelectTrigger, SelectValue, Select as UISelect } from "@/components/ui/select"
-import { botName, closeRel, depsOpen, kindOf, st, type Item } from "@/store"
+import { botName, closeRel, depsOpen, kindOf, st, WACT, waitLine, type Item } from "@/store"
 import { BotAvatar, go, ItemNo, KindTag, Meta, RelNote, StatusDot, Tags } from "@/ui"
 import { cn } from "cn"
 import { FolderIcon, GitBranchIcon, StarIcon } from "lucide-react"
@@ -40,7 +41,7 @@ export function PlanBar({ i, warn }: { i: Item; warn?: boolean }) {
  *  bot, time), then what it is doing now. Finished and dropped items fold into one line, their outcome after the title.
  *  `proj` / `bot` off: the list is already about one project or bot, so the row doesn't repeat it */
 export function ItemRow({ i, pick, proj = true, bot = true }: { i: Item; pick?: () => void; proj?: boolean; bot?: boolean }) {
-  const on = selected.has(i.id), closed = i.st === "done" || i.st === "drop"
+  const on = selected.has(i.id), closed = i.st === "done" || i.st === "drop", w = i.wait
   const planOpen = !!i.plan?.length && i.plan.some((x) => x[1] !== 1)
   const extra = [
     i.ss.length > 1 && <span key="ss">{i.ss.length} 个会话</span>,
@@ -73,7 +74,14 @@ export function ItemRow({ i, pick, proj = true, bot = true }: { i: Item; pick?: 
           {closed && i.now && <span className="hidden min-w-0 shrink-[2] truncate type-footnote text-muted-foreground sm:block" data-item-now>{i.now}</span>}
           {side}
         </div>
-        {!closed && (i.now || extra.length > 0) && (
+        {/* a card waiting on you says what it asks and takes you to it; otherwise the row says what is going on now */}
+        {!closed && w && (
+          <div className="mt-0.5 flex min-w-0 items-center gap-2 pl-14">
+            <Meta className="flex-nowrap [&>*:first-child]:min-w-0 [&>*:first-child]:truncate"><span className="type-callout text-foreground/80" data-item-wait={w.type}>{waitLine(w)}{i.waits.length > 1 && <span className="text-muted-foreground"> 等 {i.waits.length} 件</span>}</span>{extra}</Meta>
+            {!pick && <Button size="xs" variant="outline" className="shrink-0" onClick={(e) => { e.stopPropagation(); go("#/items/" + i.id) }} data-item-wait-go={i.id}>去{WACT[w.type] ?? "处理"}</Button>}
+          </div>
+        )}
+        {!closed && !w && (i.now || extra.length > 0) && (
           <Meta className="mt-0.5 flex-nowrap pl-14 [&>*:first-child]:min-w-0 [&>*:first-child]:truncate"><span className="type-callout" data-item-now>{i.now || "—"}</span>{extra}</Meta>
         )}
         {i.rel && i.rel.tone !== "ok" && <RelNote rel={i.rel} className="mt-1 pl-14" onClose={i.rel.tone === "fail" ? () => closeRel(i) : undefined} />}

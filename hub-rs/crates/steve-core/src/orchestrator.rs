@@ -1174,6 +1174,10 @@ impl Tx<'_> {
                 .plan_round_add(&i.workspace_id, item, &i.plan, end, &Self::by(s))?;
         }
         self.db().item_patch(item, patch![now: now, plan: plan])?;
+        /* the bot reports progress, so it is working: a wait without a card (a new cycle it took up) is over */
+        if i.status == "wait" {
+            settle(self.db(), item)?;
+        }
         let steps = |p: &[PlanStep]| p.iter().map(|x| x.step.clone()).collect::<Vec<_>>();
         let note = match turn {
             Some("done") => "上一轮计划已完成，开始新一轮计划".to_string(),
@@ -2777,11 +2781,28 @@ impl Tx<'_> {
             return Ok(());
         };
         self.lc_new_input(&i.id)?;
-        if i.phase == crate::cycle::READY {
+        let fresh = i.phase == crate::cycle::READY;
+        if fresh {
             self.lc_start(&i.id)?;
         }
         let i = self.item(&i.id)?;
         if !i.is_settled() {
+            /* a new cycle waiting for its first word, or a wait whose cards are all answered: the bot takes
+             * it up now. A card still open keeps it waiting on you. */
+            let open = self
+                .db()
+                .decisions_of_item(&i.id)?
+                .iter()
+                .any(|d| d.status == "open");
+            if i.status == "wait" && !open {
+                let now = if fresh {
+                    "新周期，收到新消息，开始处理"
+                } else {
+                    "收到新消息，继续处理"
+                };
+                self.db()
+                    .item_patch(&i.id, patch![status: "run", stage: "执行", now: now])?;
+            }
             return Ok(());
         }
         self.ensure_cwd(&i.id)?;

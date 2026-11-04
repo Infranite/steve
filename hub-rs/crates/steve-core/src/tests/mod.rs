@@ -13,6 +13,7 @@ mod lifecycle;
 mod models;
 mod module_undo;
 mod modules;
+mod new_cycle;
 mod outbox;
 mod queued;
 mod release_cleanup;

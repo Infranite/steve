@@ -17,7 +17,7 @@ import { draftKey } from "@/composer-draft"
 import { ProposalCard } from "@/config-ui"
 import { Cites, linkCites } from "@/knowledge/parts"
 import { Robot } from "@/robot"
-import { chatBusy, chatSend, emit, finishOnboarding, focusItem, isPromoting, isThinking, makeItem, pending, pendingCards, quoteMsg, reroute, st, stopReply, tm, toast, WT, type Item, type Msg } from "@/store"
+import { chatBusy, chatSend, emit, finishOnboarding, focusItem, isPromoting, isThinking, makeItem, pending, pendingCards, quoteMsg, reroute, st, stopReply, tm, toast, WACT, WT, type Item, type Msg } from "@/store"
 import { ChatQueue } from "@/queue"
 import { ChanOutNote, ConvBadgeChip, ConvSwitcher, ImReadOnly, SenderLine, useConversation } from "@/thread/conversations"
 import { AskChips, CardLink, ComposerBars, ItemCard, OfferLine, QueuedNote, QuoteHead, Rerun, SuggestCard, Updates } from "@/thread/parts"
@@ -133,7 +133,6 @@ function Onboarding() {
 }
 
 /* away digest — modelled on iOS notification summaries: one headline, then short sections with the top three rows each */
-const ACT: Record<string, string> = { accept: "验收", approve: "审批", ask: "回答", propose: "决定", fail: "查看" }
 
 function DigestSection({ title, items, row, id }: { title: string; items: Item[]; row: (i: Item) => ReactNode; id: string }) {
   const [all, setAll] = useState(false)
@@ -161,7 +160,7 @@ function Digest({ from }: { from: number }) {
       </div>
       <DigestSection id="need" title="需要你" items={p} row={(i) => <>
         <StatusDot s="wait" /><ItemNo id={i.id} /><span className="min-w-0 flex-1 truncate type-callout">{i.t}</span>
-        <Button size="xs" variant="outline" onClick={(e) => { e.stopPropagation(); go("#/inbox") }}>{ACT[i.wait!.type]}</Button></>} />
+        <Button size="xs" variant="outline" onClick={(e) => { e.stopPropagation(); go("#/inbox") }}>{WACT[i.wait!.type]}</Button></>} />
       <DigestSection id="done" title="已完成" items={done} row={(i) => <>
         <CircleCheckIcon className="size-4 shrink-0 text-success" strokeWidth={1.75} /><ItemNo id={i.id} /><span className="min-w-0 flex-1 truncate type-callout">{i.t}</span><span className="type-footnote text-muted-foreground">{i.now}</span></>} />
       <DigestSection id="run" title="进行中" items={run} row={(i) => <>
