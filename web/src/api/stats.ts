@@ -3,7 +3,8 @@
 import { modReq as req, qs } from "@/api"
 
 export type RangeKind = "today" | "7d" | "30d" | "custom"
-export type Filter = { range: RangeKind; from?: string; to?: string; project?: string; bot?: string; model?: string; source?: string }
+/** `hour` (0–23): one local hour of a one-day range — the drill-down of an hourly bar (items, usage) */
+export type Filter = { range: RangeKind; from?: string; to?: string; project?: string; bot?: string; model?: string; source?: string; hour?: number }
 export type P = { p50: number | null; p85: number | null; avg: number | null; sum: number; n: number }
 export type UsageTotals = {
   input: number; output: number; cache_read: number; cache_write: number; reasoning: number; total: number; hit_rate: number | null
@@ -27,7 +28,9 @@ export type Summary = {
 }
 export type Metric = "tokens" | "cost" | "done" | "created" | "wip" | "lead" | "hit_rate" | "turns" | "decisions"
 export type Group = "none" | "model" | "bot" | "project" | "source" | "purpose" | "token_type"
-export type Series = { buckets: string[]; series: { key: string; label: string; values: (number | null)[] }[] }
+/** `bucket: "hour"` (a one-day range, ST-43): buckets `YYYY-MM-DDTHH:00` in the stats zone `tz`, `spans` their [start, end) in ms,
+ *  `current` the hour that holds now (still running); hours after it are `null` — not yet, not 0 */
+export type Series = { bucket?: "day" | "hour"; buckets: string[]; series: { key: string; label: string; values: (number | null)[] }[]; spans?: [number, number][]; current?: number; tz?: string }
 /** `models`: by purpose only, the models the purpose actually ran on (calls, busiest first) */
 export type UsageRow = UsageTotals & { key: string; label: string; priced?: boolean; price_source?: PriceSource | null; models?: { harness?: string; model: string; calls: number }[] }
 export type CountRow = { key: string; label: string; count: number; dim?: "kind" | "tool" | "mcp"; response?: P; subjects?: Record<string, number> }
@@ -64,13 +67,14 @@ export type Prices = {
   tz: string | null; hub_tz: string | null
 }
 
-const f = (x: Filter) => qs({ range: x.range, from: x.range === "custom" ? x.from : undefined, to: x.range === "custom" ? x.to : undefined, project: x.project, bot: x.bot, model: x.model, source: x.source })
+const f = (x: Filter) => qs({ range: x.range, from: x.range === "custom" ? x.from : undefined, to: x.range === "custom" ? x.to : undefined, project: x.project, bot: x.bot, model: x.model, source: x.source, hour: x.hour })
 /** the filter (it always has `range`) plus more parameters */
 const and = (x: Filter, o: Record<string, string | number | undefined>) => { const a = qs(o); return f(x) + (a ? "&" + a.slice(1) : "") }
 
 export const stats = {
   summary: (x: Filter) => req<Summary>("GET", "/stats/summary" + f(x)),
-  series: (x: Filter, metric: Metric, group: Group) => req<Series>("GET", "/stats/series" + and(x, { metric, group })),
+  /** `hourly`: per local hour (only for a one-day range) */
+  series: (x: Filter, metric: Metric, group: Group, hourly = false) => req<Series>("GET", "/stats/series" + and({ ...x, hour: undefined }, { metric, group, bucket: hourly ? "hour" : undefined })),
   usage: (x: Filter, by: "model" | "bot" | "project" | "source" | "purpose" | "harness") => req<{ by: string; rows: UsageRow[] }>("GET", "/stats/breakdown" + and(x, { by })),
   counts: (x: Filter, by: "tool" | "decision_kind" | "fail_reason") => req<{ by: string; rows: CountRow[] }>("GET", "/stats/breakdown" + and(x, { by })),
   /** `only`: just the items behind `throughput.done` / `throughput.created` (the drill-down lists) */

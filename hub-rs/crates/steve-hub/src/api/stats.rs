@@ -13,7 +13,7 @@ use axum::{Extension, Router};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 use steve_stats::metrics::{self, By, Query as StatsQuery};
-use steve_stats::views::{self, Metric};
+use steve_stats::views::{self, Bucket, Metric};
 use steve_stats::{Price, catalog, default_prices};
 use steve_store::{Store, StoreError, now, stats_changed};
 
@@ -183,6 +183,28 @@ fn query(c: &Connection, ws: &str, p: &Params) -> Result<StatsQuery, ApiError> {
     })
 }
 
+/// `hour=0..23`: one local hour of a one-day range (ST-43), the bucket of an hourly series.
+fn hour_of(p: &Params, q: &StatsQuery) -> Result<Option<u32>, ApiError> {
+    match p.get("hour").filter(|v| !v.is_empty()) {
+        None => Ok(None),
+        Some(h) => h
+            .parse::<u32>()
+            .ok()
+            .filter(|h| *h < 24 && q.from == q.to)
+            .map(Some)
+            .ok_or_else(|| invalid("hour")),
+    }
+}
+
+/// The zone days are cut in, by name: `stats.tz`, else the Hub's own, else `local`.
+fn zone_name(c: &Connection, ws: &str) -> Result<String, ApiError> {
+    let tz = steve_stats::refresh::tz_of(c, ws).map_err(serr)?;
+    Ok(tz
+        .map(|z| z.name().to_string())
+        .or_else(hub_tz)
+        .unwrap_or_else(|| "local".into()))
+}
+
 fn key(ws: &str, what: &str, p: &Params) -> String {
     let sorted: BTreeMap<&String, &String> = p.iter().collect();
     format!("{ws}\u{1}{what}\u{1}{sorted:?}")
@@ -195,7 +217,8 @@ fn summary_json(c: &Connection, q: &StatsQuery) -> Result<Value, ApiError> {
         .ok_or_else(|| invalid("from"))?;
     let mut v = serde_json::to_value(&s).map_err(|e| ApiError::internal(e.to_string()))?;
     if let Some(o) = v.as_object_mut() {
-        let range = json!({ "from": o.remove("from"), "to": o.remove("to"), "tz": o.remove("tz") });
+        let range = json!({ "from": o.remove("from"), "to": o.remove("to"), "tz": zone_name(c, &q.workspace_id)? });
+        o.remove("tz");
         o.insert("range".into(), range);
     }
     Ok(v)
@@ -256,14 +279,29 @@ async fn series(
     if !GROUPS.contains(&group.as_str()) || !metric.allows(&group) {
         return Err(invalid("group"));
     }
-    if p.get("bucket").is_some_and(|b| b != "day") {
-        return Err(invalid("bucket"));
-    }
+    let hourly = match p.get("bucket").map(String::as_str) {
+        None | Some("" | "day") => false,
+        Some("hour") => true,
+        Some(_) => return Err(invalid("bucket")),
+    };
     let k = key(&c.ws, "series", &p);
     api.cached(k, move |db| {
         let q = query(db, &c.ws, &p)?;
-        let s = views::series(db, &q, metric, &group).map_err(serr)?;
-        serde_json::to_value(s).map_err(|e| ApiError::internal(e.to_string()))
+        // hours: only a one-day range (今天, or one picked day)
+        if hourly && q.from != q.to {
+            return Err(invalid("bucket"));
+        }
+        let bucket = if hourly {
+            Bucket::Hour { now: now() }
+        } else {
+            Bucket::Day
+        };
+        let s = views::series(db, &q, metric, &group, bucket).map_err(serr)?;
+        let mut v = serde_json::to_value(s).map_err(|e| ApiError::internal(e.to_string()))?;
+        if let Some(o) = v.as_object_mut() {
+            o.insert("tz".into(), json!(zone_name(db, &c.ws)?));
+        }
+        Ok(v)
     })
     .await
 }
@@ -281,11 +319,21 @@ async fn breakdown(
     let k = key(&c.ws, "breakdown", &p);
     api.cached(k, move |db| {
         let q = query(db, &c.ws, &p)?;
+        let hour = hour_of(&p, &q)?;
         let rows = match tokens {
             Some(b) => {
                 let names = views::Names::load(db, &c.ws).map_err(serr)?;
                 let prices = metrics::book_of(db, &c.ws).map_err(serr)?;
-                let daily = metrics::daily(db, &q).map_err(serr)?;
+                let daily = match hour {
+                    // one hour of the day: the hourly cells of that bucket, as the hourly series has them
+                    Some(h) => {
+                        let b = format!("{}T{h:02}:00", q.from);
+                        let mut v = metrics::hourly(db, &q).map_err(serr)?;
+                        v.retain(|d| d.day == b);
+                        v
+                    }
+                    None => metrics::daily(db, &q).map_err(serr)?,
+                };
                 /* by purpose: also the models each purpose actually ran on */
                 let used = (b == By::Purpose).then(|| metrics::models_by_purpose(&daily));
                 metrics::breakdown(&daily, b, &prices)
@@ -318,6 +366,8 @@ async fn breakdown(
                     })
                     .collect()
             }
+            // the counts come from the summary, which has no hours
+            None if hour.is_some() => return Err(invalid("hour")),
             None => {
                 let s = metrics::summary(db, &q)
                     .map_err(serr)?
@@ -361,7 +411,9 @@ async fn items(
     let k = key(&c.ws, "items", &p);
     api.cached(k, move |db| {
         let q = query(db, &c.ws, &p)?;
-        let page = views::items(db, &q, &sort, only.as_deref(), limit, cursor).map_err(serr)?;
+        let hour = hour_of(&p, &q)?;
+        let page =
+            views::items(db, &q, &sort, only.as_deref(), hour, limit, cursor).map_err(serr)?;
         serde_json::to_value(page).map_err(|e| ApiError::internal(e.to_string()))
     })
     .await

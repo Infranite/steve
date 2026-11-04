@@ -195,6 +195,116 @@ pub fn daily(c: &Connection, q: &Query) -> Result<Vec<Daily>> {
         .collect::<rusqlite::Result<_>>()?)
 }
 
+/// The cube rows of a one-day query (`from == to`) cut by local hour (ST-43): the same measures, read from
+/// the detail rows the cube is built from (`usage_records` by their `day`, `agent_turns` by the day they
+/// ended, as `refresh::rebuild_in` does), with `day` set to the [`crate::day::hour`] bucket. So the hours of
+/// a day add up to that day's cube rows. Rows of hours outside the day (a stale `day`) are left out.
+pub fn hourly(c: &Connection, q: &Query) -> Result<Vec<Daily>> {
+    let tz = tz_of(c, &q.workspace_id)?;
+    let Some((lo, hi)) = bounds(&q.from, &q.to, tz) else {
+        return Ok(vec![]);
+    };
+    let hour = |ts: i64| {
+        let h = crate::day::hour(ts, tz);
+        h.starts_with(q.from.as_str()).then_some(h)
+    };
+    let keep = |source: &str, model: &str| {
+        q.source.as_deref().is_none_or(|s| s == source)
+            && q.model.as_deref().is_none_or(|m| m == model)
+    };
+    type Key = (String, String, String, String, String, String, String);
+    fn cell(cells: &mut BTreeMap<Key, Daily>, k: Key) -> &mut Daily {
+        cells.entry(k.clone()).or_insert_with(|| Daily {
+            day: k.0,
+            source: k.1,
+            purpose: k.2,
+            harness: k.3,
+            model: k.4,
+            bot_id: k.5,
+            project_id: k.6,
+            ..Daily::default()
+        })
+    }
+    let mut cells: BTreeMap<Key, Daily> = BTreeMap::new();
+    // a turn is booked under the model of its first token record (ts = the turn's end, so in this day)
+    let mut first_model: BTreeMap<String, String> = BTreeMap::new();
+    {
+        let mut st = c.prepare_cached(
+            "SELECT ts, source, purpose, harness, model, turn_id, COALESCE(bot_id, ''), COALESCE(project_id, ''), input, output,
+                    cache_read, cache_write, reasoning, cost_reported, ok
+             FROM usage_records WHERE workspace_id = ?1 AND day >= ?2 AND day <= ?3
+               AND (?4 IS NULL OR project_id = ?4) AND (?5 IS NULL OR bot_id = ?5) ORDER BY id",
+        )?;
+        let mut rows = st.query(params![q.workspace_id, q.from, q.to, q.project, q.bot])?;
+        while let Some(r) = rows.next()? {
+            let model: String = r.get(4)?;
+            if let Some(turn) = r.get::<_, Option<String>>(5)? {
+                first_model.entry(turn).or_insert_with(|| model.clone());
+            }
+            let source: String = r.get(1)?;
+            let Some(h) = hour(r.get(0)?).filter(|_| keep(&source, &model)) else {
+                continue;
+            };
+            let k = (h, source, r.get(2)?, r.get(3)?, model, r.get(6)?, r.get(7)?);
+            let d = cell(&mut cells, k);
+            let tok = |i: usize| r.get::<_, Option<i64>>(i);
+            let (input, cache_read, cache_write) = (tok(8)?, tok(10)?, tok(11)?);
+            d.input += input.unwrap_or(0);
+            d.output += tok(9)?.unwrap_or(0);
+            d.cache_read += cache_read.unwrap_or(0);
+            d.cache_write += cache_write.unwrap_or(0);
+            d.reasoning += tok(12)?.unwrap_or(0);
+            if let (Some(i), Some(cr)) = (input, cache_read) {
+                d.hit_base += i + cr + cache_write.unwrap_or(0);
+            }
+            d.cost_reported += r.get::<_, Option<f64>>(13)?.unwrap_or(0.0);
+            d.calls += 1;
+            d.failed_calls += i64::from(!r.get::<_, bool>(14)?);
+        }
+    }
+    let mut st = c.prepare_cached(
+        "SELECT t.id, t.harness, COALESCE(t.bot_id, ''), COALESCE(t.project_id, ''), t.attempt, t.started, t.ended, t.stop_reason,
+                t.transient, t.tools, t.tool_errors, t.tool_kinds, COALESCE(NULLIF(s.model, ''), NULLIF(b.model, ''), '')
+         FROM agent_turns t LEFT JOIN sessions s ON s.id = t.session_id LEFT JOIN bots b ON b.id = t.bot_id
+         WHERE t.workspace_id = ?1 AND t.started < ?3 AND t.ended >= ?2 AND t.ended < ?3
+           AND (?4 IS NULL OR t.project_id = ?4) AND (?5 IS NULL OR t.bot_id = ?5)",
+    )?;
+    let mut rows = st.query(params![q.workspace_id, lo, hi, q.project, q.bot])?;
+    while let Some(r) = rows.next()? {
+        let id: String = r.get(0)?;
+        let ended: i64 = r.get(6)?;
+        let model = first_model.get(&id).cloned().unwrap_or(r.get(12)?);
+        let Some(h) = hour(ended).filter(|_| keep("agent", &model)) else {
+            continue;
+        };
+        let k = (
+            h,
+            "agent".into(),
+            "turn".into(),
+            r.get(1)?,
+            model,
+            r.get(2)?,
+            r.get(3)?,
+        );
+        let d = cell(&mut cells, k);
+        let reason: Option<String> = r.get(7)?;
+        let transient: bool = r.get(8)?;
+        d.turns += i64::from(r.get::<_, i64>(4)? == 0);
+        d.turn_ms += (ended - r.get::<_, i64>(5)?).max(0);
+        d.turn_errors += i64::from(reason.as_deref() == Some("error") && !transient);
+        d.retries += i64::from(transient);
+        d.interrupted += i64::from(reason.as_deref() == Some("interrupted"));
+        d.tools += r.get::<_, i64>(9)?;
+        d.tool_errors += r.get::<_, i64>(10)?;
+        let kinds: BTreeMap<String, i64> =
+            serde_json::from_str(&r.get::<_, String>(11)?).unwrap_or_default();
+        for (k, n) in kinds {
+            *d.tool_kinds.entry(k).or_default() += n;
+        }
+    }
+    Ok(cells.into_values().collect())
+}
+
 /// Token and spend totals of a set of cube rows.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct UsageTotals {
@@ -1020,6 +1130,28 @@ pub fn wip_by_day(c: &Connection, q: &Query) -> Result<Vec<(String, i64)>> {
     let Some(_) = bounds(&q.from, &q.to, tz) else {
         return Ok(vec![]);
     };
+    let mut ends = Vec::new();
+    let mut day = NaiveDate::parse_from_str(&q.from, "%Y-%m-%d").ok();
+    let last = NaiveDate::parse_from_str(&q.to, "%Y-%m-%d").ok();
+    while let (Some(d), Some(l)) = (day, last) {
+        if d > l {
+            break;
+        }
+        let Some(end) = d
+            .checked_add_days(Days::new(1))
+            .and_then(|n| day_start(&n.format("%Y-%m-%d").to_string(), tz))
+        else {
+            break;
+        };
+        ends.push((d.format("%Y-%m-%d").to_string(), end));
+        day = d.checked_add_days(Days::new(1));
+    }
+    wip_at(c, q, ends)
+}
+
+/// WIP just before each `(bucket, end)` instant (ascending), replaying status marks: [`wip_by_day`] and the
+/// hours of a day.
+pub fn wip_at(c: &Connection, q: &Query, ends: Vec<(String, i64)>) -> Result<Vec<(String, i64)>> {
     let marks: Vec<(String, i64, String)> = c
         .prepare_cached(
             "SELECT m.item_id, m.ts, COALESCE(m.to_v, '') FROM item_marks m JOIN items i ON i.id = m.item_id
@@ -1030,33 +1162,21 @@ pub fn wip_by_day(c: &Connection, q: &Query) -> Result<Vec<(String, i64)>> {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?))
         })?
         .collect::<rusqlite::Result<_>>()?;
-    let mut out = Vec::new();
-    let mut day = NaiveDate::parse_from_str(&q.from, "%Y-%m-%d").ok();
-    let last = NaiveDate::parse_from_str(&q.to, "%Y-%m-%d").ok();
     let mut state: BTreeMap<&str, &str> = BTreeMap::new();
     let mut k = 0;
-    while let (Some(d), Some(l)) = (day, last) {
-        if d > l {
-            break;
-        }
-        let name = d.format("%Y-%m-%d").to_string();
-        let Some(end) = d
-            .checked_add_days(Days::new(1))
-            .and_then(|n| day_start(&n.format("%Y-%m-%d").to_string(), tz))
-        else {
-            break;
-        };
-        while k < marks.len() && marks[k].1 < end {
-            state.insert(&marks[k].0, &marks[k].2);
-            k += 1;
-        }
-        out.push((
-            name,
-            state.values().filter(|s| WIP.contains(s)).count() as i64,
-        ));
-        day = d.checked_add_days(Days::new(1));
-    }
-    Ok(out)
+    Ok(ends
+        .into_iter()
+        .map(|(name, end)| {
+            while k < marks.len() && marks[k].1 < end {
+                state.insert(&marks[k].0, &marks[k].2);
+                k += 1;
+            }
+            (
+                name,
+                state.values().filter(|s| WIP.contains(s)).count() as i64,
+            )
+        })
+        .collect())
 }
 
 #[cfg(test)]

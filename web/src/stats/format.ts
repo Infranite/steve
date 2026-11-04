@@ -2,6 +2,7 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { NotWired, Unauthenticated } from "@/api"
 import { useHubEvents } from "@/store"
+import type { Filter } from "@/api/stats"
 
 export const fmtN = (n: number | null | undefined) => {
   if (n == null || !isFinite(n)) return "—"
@@ -34,6 +35,18 @@ export const delta = (now: number | null | undefined, before: number | null | un
 export const time = (ts: number) => { const d = new Date(ts); return `${d.getMonth() + 1}月${d.getDate()}日 ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}` }
 export const hhmm = (ts: number) => { const d = new Date(ts); return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}` }
 export const shortDay = (d: string) => { const [, m, x] = d.split("-"); return `${Number(m)}/${Number(x)}` }
+/* 小时（ST-43）：单日范围（今天，或选的某一天）的趋势按统计时区的整点小时，bucket 是 `YYYY-MM-DDTHH:00` */
+/** the range is one day, so its charts go by hour */
+export const oneDay = (f: Filter) => f.range === "today" || (f.range === "custom" && !!f.from && f.from === f.to)
+export const isHour = (b: string) => b.length > 10 && b[10] === "T"
+/** “14:00–15:00” (the last one “23:00–24:00”) */
+export const hourSpan = (b: string) => { const h = Number(b.slice(11, 13)); return `${String(h).padStart(2, "0")}:00–${String(h + 1).padStart(2, "0")}:00` }
+/** a bucket, said in full: “11月5日 14:00–15:00”, or the day “11月5日” */
+export const bucketName = (b: string) => isHour(b) ? `${fmtRange(b.slice(0, 10), b.slice(0, 10))} ${hourSpan(b)}` : fmtRange(b, b)
+/** the bucket under the axis: “14:00”, or the day “11/5” */
+export const bucketTick = (b: string) => (isHour(b) ? b.slice(11, 16) : shortDay(b))
+/** the zone an hourly chart is cut in, for its subtitle: “北京时间” for Asia/Shanghai, else the IANA name */
+export const zoneName = (tz?: string | null) => (!tz || tz === "local" ? "Hub 所在时区" : tz === "Asia/Shanghai" ? "北京时间" : tz)
 
 export type Load<T> = { s: "loading" } | { s: "absent" } | { s: "error"; msg: string } | { s: "ok"; v: T; at: number }
 /** loads `f` now, whenever `deps` change and on every `stats` stream event (`live` = only while it can matter) */

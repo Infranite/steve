@@ -455,7 +455,7 @@ fn backfilled_metrics_match_the_hand_count() {
     // the drill-down lists hold exactly the items behind the counts
     let ids = |only: &str| -> Vec<String> {
         let mut v: Vec<String> = s
-            .with_conn(|c| views::items(c, &day_query(), "est", Some(only), 100, 0))
+            .with_conn(|c| views::items(c, &day_query(), "est", Some(only), None, 100, 0))
             .unwrap()
             .rows
             .into_iter()

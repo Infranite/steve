@@ -10,7 +10,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use steve_store::{Result, Tokens};
 
-use crate::day::day;
+use crate::day::{day, hour, hours};
 use crate::items::{self, ItemFacts};
 use crate::metrics::{self, Daily, P, Query, Summary, bounds, item_est, percentile};
 use crate::prices::PriceBook;
@@ -219,8 +219,25 @@ pub struct Line {
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Series {
+    /// `day` (`YYYY-MM-DD`) or `hour` (`YYYY-MM-DDTHH:00`, the local hours of a one-day range).
+    pub bucket: &'static str,
     pub buckets: Vec<String>,
     pub series: Vec<Line>,
+    /// Hours only: each bucket's `[start, end)` in Unix ms (a skipped hour is empty, a repeated one 2 h long).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spans: Option<Vec<[i64; 2]>>,
+    /// Hours only: the bucket that holds now, still running; the ones after it are `null` (not yet), not 0.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current: Option<usize>,
+}
+
+/// How a series is cut.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Bucket {
+    /// One bucket per local day of the range.
+    Day,
+    /// The 24 local hours of a one-day range, as they stand at `now` (Unix ms).
+    Hour { now: i64 },
 }
 
 /// Lines kept before the rest are folded into “其他”.
@@ -304,17 +321,71 @@ fn token_parts(d: &Daily) -> [i64; 4] {
     [d.input, d.output, d.cache_read, d.cache_write]
 }
 
-/// `GET /stats/series`: one value per local day of `q`. The caller checks `metric.allows(group)`.
-pub fn series(c: &Connection, q: &Query, metric: Metric, group: &str) -> Result<Series> {
-    let buckets = days(&q.from, &q.to);
+/// `GET /stats/series`: one value per local day of `q`, or per local hour when `bucket` is [`Bucket::Hour`]
+/// (the caller checks `q.from == q.to`). Hours count the same events as days, by the hour they happened in,
+/// so a day's hours add up to the day. The caller checks `metric.allows(group)`.
+pub fn series(
+    c: &Connection,
+    q: &Query,
+    metric: Metric,
+    group: &str,
+    bucket: Bucket,
+) -> Result<Series> {
+    let tz = tz_of(c, &q.workspace_id)?;
+    let spans = match bucket {
+        Bucket::Day => None,
+        Bucket::Hour { .. } => Some(hours(&q.from, tz).unwrap_or_default()),
+    };
+    let buckets: Vec<String> = match &spans {
+        Some(h) => h.iter().map(|x| x.0.clone()).collect(),
+        None => days(&q.from, &q.to),
+    };
+    let mut series = lines(c, q, metric, group, &buckets, spans.as_deref(), tz)?;
+    let mut current = None;
+    if let (Bucket::Hour { now }, Some(h)) = (bucket, &spans) {
+        for (i, (_, start, end)) in h.iter().enumerate() {
+            if *start > now {
+                for l in &mut series {
+                    l.values[i] = None;
+                }
+            } else if now < *end {
+                current = Some(i);
+            }
+        }
+    }
+    Ok(Series {
+        bucket: if spans.is_some() { "hour" } else { "day" },
+        buckets,
+        series,
+        spans: spans.map(|h| h.iter().map(|x| [x.1, x.2]).collect()),
+        current,
+    })
+}
+
+/// The lines of [`series`] over `buckets` (the days, or the hours with their `spans`).
+fn lines(
+    c: &Connection,
+    q: &Query,
+    metric: Metric,
+    group: &str,
+    buckets: &[String],
+    spans: Option<&[(String, i64, i64)]>,
+    tz: Option<chrono_tz::Tz>,
+) -> Result<Vec<Line>> {
     let n = buckets.len();
     let index: HashMap<&str, usize> = buckets
         .iter()
         .enumerate()
         .map(|(i, d)| (d.as_str(), i))
         .collect();
+    let bucket_of = |ts: i64| {
+        if spans.is_some() {
+            hour(ts, tz)
+        } else {
+            day(ts, tz)
+        }
+    };
     let names = Names::load(c, &q.workspace_id)?;
-    let tz = tz_of(c, &q.workspace_id)?;
     let mut acc = Acc::default();
     let total_label = |m: Metric| match m {
         Metric::Tokens => "tokens",
@@ -332,7 +403,12 @@ pub fn series(c: &Connection, q: &Query, metric: Metric, group: &str) -> Result<
     match metric {
         Metric::Tokens | Metric::Cost | Metric::HitRate | Metric::Turns => {
             let prices = metrics::book_of(c, &q.workspace_id)?;
-            for d in metrics::daily(c, q)? {
+            let rows = if spans.is_some() {
+                metrics::hourly(c, q)?
+            } else {
+                metrics::daily(c, q)?
+            };
+            for d in rows {
                 let Some(&i) = index.get(d.day.as_str()) else {
                     continue;
                 };
@@ -379,10 +455,7 @@ pub fn series(c: &Connection, q: &Query, metric: Metric, group: &str) -> Result<
         }
         Metric::Done | Metric::Created => {
             let Some((lo, hi)) = bounds(&q.from, &q.to, tz) else {
-                return Ok(Series {
-                    buckets,
-                    series: vec![],
-                });
+                return Ok(vec![]);
             };
             let sql = if metric == Metric::Done {
                 "SELECT DISTINCT m.item_id, m.ts, COALESCE(i.bot_id, ''), COALESCE(i.project_id, '') FROM item_marks m JOIN items i ON i.id = m.item_id
@@ -399,10 +472,10 @@ pub fn series(c: &Connection, q: &Query, metric: Metric, group: &str) -> Result<
                     Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
                 })?
                 .collect::<rusqlite::Result<_>>()?;
-            // done: an item counts once per day
+            // done: an item counts once per day (per hour)
             let mut seen = std::collections::HashSet::new();
             for (id, ts, bot, project) in rows {
-                let dd = day(ts, tz);
+                let dd = bucket_of(ts);
                 let Some(&i) = index.get(dd.as_str()) else {
                     continue;
                 };
@@ -418,7 +491,11 @@ pub fn series(c: &Connection, q: &Query, metric: Metric, group: &str) -> Result<
             }
         }
         Metric::Wip => {
-            for (d, v) in metrics::wip_by_day(c, q)? {
+            let wip = match spans {
+                Some(h) => metrics::wip_at(c, q, h.iter().map(|x| (x.0.clone(), x.2)).collect())?,
+                None => metrics::wip_by_day(c, q)?,
+            };
+            for (d, v) in wip {
                 if let Some(&i) = index.get(d.as_str()) {
                     acc.add("total", i, n, v as f64, 0.0);
                 }
@@ -426,10 +503,7 @@ pub fn series(c: &Connection, q: &Query, metric: Metric, group: &str) -> Result<
         }
         Metric::Decisions => {
             let Some((lo, hi)) = bounds(&q.from, &q.to, tz) else {
-                return Ok(Series {
-                    buckets,
-                    series: vec![],
-                });
+                return Ok(vec![]);
             };
             let filtered = q.project.is_some() || q.bot.is_some();
             let sql = if filtered {
@@ -445,17 +519,14 @@ pub fn series(c: &Connection, q: &Query, metric: Metric, group: &str) -> Result<
                 })?
                 .collect::<rusqlite::Result<_>>()?;
             for t in ts {
-                if let Some(&i) = index.get(day(t, tz).as_str()) {
+                if let Some(&i) = index.get(bucket_of(t).as_str()) {
                     acc.add("total", i, n, 1.0, 0.0);
                 }
             }
         }
         Metric::Lead => {
             let Some((lo, hi)) = bounds(&q.from, &q.to, tz) else {
-                return Ok(Series {
-                    buckets,
-                    series: vec![],
-                });
+                return Ok(vec![]);
             };
             let rows: Vec<(i64, i64)> = c
                 .prepare_cached(
@@ -467,7 +538,7 @@ pub fn series(c: &Connection, q: &Query, metric: Metric, group: &str) -> Result<
                 .collect::<rusqlite::Result<_>>()?;
             let mut per: Vec<Vec<i64>> = vec![vec![]; n];
             for (at, lead) in rows {
-                if let Some(&i) = index.get(day(at, tz).as_str()) {
+                if let Some(&i) = index.get(bucket_of(at).as_str()) {
                     per[i].push(lead);
                 }
             }
@@ -479,10 +550,7 @@ pub fn series(c: &Connection, q: &Query, metric: Metric, group: &str) -> Result<
                     .map(|v| percentile(v, q).map(|x| x as f64))
                     .collect(),
             };
-            return Ok(Series {
-                series: vec![line("p50", "中位数", 0.5), line("p85", "p85", 0.85)],
-                buckets,
-            });
+            return Ok(vec![line("p50", "中位数", 0.5), line("p85", "p85", 0.85)]);
         }
     }
     let dim = if group == "none" { "total" } else { group };
@@ -499,7 +567,7 @@ pub fn series(c: &Connection, q: &Query, metric: Metric, group: &str) -> Result<
             l.label = total_label(metric).into();
         }
     }
-    Ok(Series { buckets, series })
+    Ok(series)
 }
 
 /* ── items ── */
@@ -543,17 +611,19 @@ pub struct ItemPage {
 
 /// Items done in the range or with activity in it (created, a turn, a mark), sorted descending by `sort`
 /// (missing values last), `limit` from `cursor` (an offset). `only` (one of [`ITEM_ONLY`]) narrows them to
-/// the items done (a status mark to `done`) or created in the range.
+/// the items done (a status mark to `done`) or created in the range. `hour` (0–23, a one-day range) narrows
+/// the range to that local hour, the span the hourly series counts in.
 pub fn items(
     c: &Connection,
     q: &Query,
     sort: &str,
     only: Option<&str>,
+    hour: Option<u32>,
     limit: usize,
     cursor: usize,
 ) -> Result<ItemPage> {
     let tz = tz_of(c, &q.workspace_id)?;
-    let Some((lo, hi)) = bounds(&q.from, &q.to, tz) else {
+    let Some((lo, hi)) = window(q, hour, tz) else {
         return Ok(ItemPage {
             rows: vec![],
             total: 0,
@@ -629,6 +699,15 @@ pub fn items(
         total,
         next: (end < total).then(|| end.to_string()),
     })
+}
+
+/// The `[lo, hi)` of a query in Unix ms, or of one local hour of its (one) day.
+pub fn window(q: &Query, hour: Option<u32>, tz: Option<chrono_tz::Tz>) -> Option<(i64, i64)> {
+    match hour {
+        None => bounds(&q.from, &q.to, tz),
+        Some(h) if q.from == q.to => hours(&q.from, tz)?.get(h as usize).map(|x| (x.1, x.2)),
+        Some(_) => None,
+    }
 }
 
 /// Token figures with their estimate.

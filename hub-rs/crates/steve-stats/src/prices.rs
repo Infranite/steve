@@ -266,6 +266,8 @@ impl<'c> PriceBook<'c> {
     /// `model`'s price on `day` (`YYYY-MM-DD`): a table row of its own, else the catalog's, else, for a
     /// `kiro/<model>`, the price of `<model>`. `None` = unpriced.
     pub fn quote(&self, model: &str, day: &str) -> Option<Quote> {
+        // an hourly cell (`YYYY-MM-DDTHH:00`, ST-43) is priced as its day, so the hours add up to the day
+        let day = day.get(..10).unwrap_or(day);
         let m = base_model(model);
         if m.is_empty() {
             return None;
@@ -485,6 +487,9 @@ mod tests {
         };
         assert_eq!(b.cost("gpt-5", "2026-11-01", &t), Some(1.0));
         assert_eq!(b.cost("gpt-5", "2026-11-05", &t), Some(1.0));
+        // an hour of that day is priced as the day (ST-43), so the hours add up to it
+        assert_eq!(b.cost("gpt-5", "2026-11-05T00:00", &t), Some(1.0));
+        assert_eq!(b.cost("gpt-5", "2026-11-05T23:00", &t), Some(1.0));
         assert_eq!(b.cost("gpt-5", "2026-11-06", &t), Some(2.0));
         assert_eq!(b.quote("gpt-5", "2026-11-06").unwrap().since, seen);
     }

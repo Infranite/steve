@@ -2,7 +2,7 @@
  * 拿不到（TS Hub）时显示“还没有接入”，不显示示例数据。费用处处标“估”。
  * ST-40 起的层级：运行状态（原顶部横栏）→ 核心指标与下钻 → 事项（新建与完成、状态分布）→ 耗时 → 用量与费用 → 质量与介入 → Agent → 事项明细。
  * 每张图都写明单位和时间范围；时间范围、项目、Bot 只在页头选一次，下面所有数字跟着变。 */
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import { CalendarIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -20,7 +20,7 @@ import { ItemsTable } from "@/stats/items"
 import { CoreKpis, DrillPanel, FlowChart, StatusBars, type Drill } from "@/stats/overview"
 import { RunState } from "@/yolo/status"
 import { StatsItemView } from "@/stats/drill"
-import { fmtN, fmtRange, fmtUsd, hhmm, time, useStats } from "@/stats/format"
+import { fmtN, fmtRange, fmtUsd, hhmm, oneDay, time, zoneName, useStats } from "@/stats/format"
 
 export function StatsRoute({ b, c }: { b?: string; c?: string }) {
   if (b === "items" && c) return <StatsItemView key={c} id={c} />
@@ -60,9 +60,18 @@ export function StatsView() {
   const setF = (x: Filter) => { saved = x; setF0(x) }
   const [picked, setPicked] = useState<string | null>(null)
   const [drill, setDrill] = useState<Drill | null>(null)
-  const fkey = JSON.stringify(f)
   /* the page follows live changes only while its range includes today */
   const live = f.range !== "custom" || (f.to ?? "") >= localDay()
+  /* by hour (今天): reload at each quarter hour, so the running hour moves on without a statistics change
+     (every zone's hours start on a quarter hour), and the day turns over at midnight */
+  const [tick, setTick] = useState(0)
+  const ticking = live && oneDay(f)
+  useEffect(() => {
+    if (!ticking) return
+    const t = setTimeout(() => setTick((x) => x + 1), 900000 - (Date.now() % 900000) + 1500)
+    return () => clearTimeout(t)
+  }, [ticking, tick])
+  const fkey = JSON.stringify(f) + (ticking ? "#" + tick : "")
   const [s] = useStats(() => stats.summary(f), [fkey], live)
   if (s.s === "absent") return <Unwired id="stats" />
   const bots = Object.keys(st.bots)
@@ -76,7 +85,7 @@ export function StatsView() {
     </div>
   )
   return (
-    <Page title="统计" sub={s.s === "ok" ? `${NAME[f.range]} · ${fmtRange(s.v.range.from, s.v.range.to)} · 费用为估算` : "费用为估算"} max={1040} toolbar={toolbar}>
+    <Page title="统计" sub={s.s === "ok" ? `${NAME[f.range]} · ${fmtRange(s.v.range.from, s.v.range.to)}${oneDay(f) ? ` · 按小时，${zoneName(s.v.range.tz)}` : ""} · 费用为估算` : "费用为估算"} max={1040} toolbar={toolbar}>
       {s.s === "loading" ? <div className="flex justify-center py-24" role="status" aria-label="加载中"><Spinner className="size-5 text-muted-foreground" /></div>
         : s.s === "error" ? <Empty title="读不到统计" sub={s.msg} />
         : <StatsBody s={s.v} f={f} fkey={fkey} live={live} picked={picked} setPicked={setPicked} drill={drill} setDrill={setDrill} />}
@@ -96,7 +105,7 @@ function StatsBody({ s, f, fkey, live, picked, setPicked, drill, setDrill }: { s
         <CoreKpis s={s} f={f} prevName={PREV[f.range]} rangeName={rangeName} drill={drill} setDrill={setDrill} />
         {drill && <DrillPanel key={drill} d={drill} f={f} fkey={fkey} live={live} rangeName={rangeName} close={() => setDrill(null)} />}
       </div>
-      <Section k="items" title="事项" meta={`趋势按天 · ${range}；状态分布是现在`}>
+      <Section k="items" title="事项" meta={`趋势按${oneDay(f) ? "小时" : "天"} · ${range}；状态分布是现在`}>
         <div className="grid grid-cols-1 gap-10 md:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
           <FlowChart s={s} f={f} fkey={fkey} live={live} drill={drill} setDrill={setDrill} />
           <StatusBars f={f} drill={drill} setDrill={setDrill} />
@@ -107,7 +116,7 @@ function StatsBody({ s, f, fkey, live, picked, setPicked, drill, setDrill }: { s
         <Section k="usage" title="用量与费用" meta={range}>
           <UsageKpis s={s} prevName={PREV[f.range]} bySource={src.s === "ok" ? src.v.rows : undefined} />
           <PriceNote spend={s.spend} />
-          <Trend f={f} fkey={fkey} live={live} range={[s.range.from, s.range.to]} picked={picked} onPick={setPicked} />
+          <Trend f={f} fkey={fkey} live={live} range={[s.range.from, s.range.to]} tz={s.range.tz} picked={picked} onPick={setPicked} />
           <UsageSection f={f} fkey={fkey} live={live} picked={picked} />
         </Section>
         <QualityHuman s={s} f={f} fkey={fkey} live={live} range={range} prevName={PREV[f.range]} />
