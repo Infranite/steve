@@ -489,7 +489,10 @@ async fn a_permission_card_ends_with_its_turn() {
     // the cancel was of that prompt only: the next one asks and is asked
     acp.prompt("s1", "@perm Bash", "me").await.unwrap();
     wait_for("second decision", 10, || h.rec(|r| r.decisions.len()) == 2).await;
-    assert!(acp.answer_permission("d2", Some("once")), "the new card is live");
+    assert!(
+        acp.answer_permission("d2", Some("once")),
+        "the new card is live"
+    );
     wait_for("second turn end", 10, || turn_ends(&h) == 2).await;
     acp.shutdown(Duration::from_secs(2)).await;
 }

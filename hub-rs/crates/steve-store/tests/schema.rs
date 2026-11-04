@@ -67,6 +67,9 @@ fn fresh_database_is_ts_schema_plus_module_migrations() {
     for m in &db::MIGRATIONS[..TS_MIGRATIONS] {
         ts.execute_batch(m).unwrap();
     }
+    // the runner's own bookkeeping besides schema_version: the reader gate (`db::compat`)
+    ts.execute_batch("CREATE TABLE IF NOT EXISTS schema_compat (min_reader INTEGER NOT NULL)")
+        .unwrap();
     ts.execute_batch("ALTER TABLE bots ADD COLUMN reasoning_effort TEXT; ALTER TABLE sessions ADD COLUMN reasoning_effort TEXT;").unwrap();
     // what the module migrations alone create (they only add objects), on stubs of the tables they touch
     const STUBS: [&str; 7] = [

@@ -21,8 +21,8 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/001.sql"),
     include_str!("../migrations/002.sql"),
     include_str!("../migrations/003.sql"),
-    // From here on the migrations belong to the new modules and exist only in the Rust Hub (TS Hubs open
-    // such a database unchanged, see `migrate`). Numbering (modules/build-plan.md §0): 4 shared base +
+    // From here on the migrations belong to the new modules and exist only in the Rust Hub (no TS Hub may
+    // open such a database, see `migrate` and ops/CUTOVER.md). Numbering (modules/build-plan.md §0): 4 shared base +
     // contacts, 5 accounts & vault, 6 signals & automation + schedules, 7 channels + Feishu, 8 knowledge,
     // 9 email, 10 GitHub, 11 channel poll cursors, 12 spaces outlive their connection. 4–11 are
     // `IF NOT EXISTS` and alter nothing existing; 12 rebuilds `spaces` (see `migrate`). Once these
@@ -68,6 +68,61 @@ pub const MIGRATIONS: &[&str] = &[
 /// The schema version this build writes (`MIGRATIONS.length`).
 pub const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64;
 
+/// Migrations that builds older than them may still read and write: `(migration, oldest schema that
+/// can)`. Every migration not listed needs a build that knows it. Listing one is a claim about every
+/// older build from that schema on (it neither breaks on the new shape nor writes rows the new one
+/// misreads), so it comes with a test that runs such a build's statements on the migrated database.
+pub const OLDER_READERS: &[(i64, i64)] = &[];
+
+/// The oldest schema a build must know to open a database at `version`: what its migrations demand.
+pub fn min_reader(version: i64) -> i64 {
+    (1..=version)
+        .map(|m| {
+            OLDER_READERS
+                .iter()
+                .find(|(n, _)| *n == m)
+                .map_or(m, |(_, from)| *from)
+        })
+        .max()
+        .unwrap_or(0)
+}
+
+/// Where a database stands: its schema and the oldest schema a build must know to open it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Compat {
+    pub schema: i64,
+    pub min_reader: i64,
+}
+
+/// Read [`Compat`] off a connection. A database no build stamped yet (before 0.2.14) is readable only by
+/// builds that know its schema.
+pub fn compat(c: &Connection) -> Result<Compat> {
+    let has = |t: &str| -> Result<bool> {
+        Ok(c.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?)",
+            [t],
+            |r| r.get(0),
+        )?)
+    };
+    let schema: i64 = if has("schema_version")? {
+        c.query_row("SELECT v FROM schema_version", [], |r| r.get(0))
+            .optional()?
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    let stamped: Option<i64> = if has("schema_compat")? {
+        c.query_row("SELECT min_reader FROM schema_compat", [], |r| r.get(0))
+            .optional()?
+    } else {
+        None
+    };
+    Ok(Compat {
+        schema,
+        min_reader: stamped.unwrap_or(schema),
+    })
+}
+
 /// Prepared statements kept per connection.
 const STATEMENT_CACHE: usize = 512;
 
@@ -104,21 +159,33 @@ pub(crate) fn open_writer(path: &Path) -> Result<Connection> {
 /// The db.ts runner verbatim: read the first `schema_version` row (0 if none), run the missing migrations
 /// and record the new version, all in one transaction. Like TS, the UPDATE runs on every open.
 ///
-/// A database newer than this build (e.g. after a release rollback) is opened as is, with a warning:
-/// migrations are additive, and writing the version down would make the newer build rerun one.
+/// A database is opened only when this build knows the schema its migrations demand (`schema_compat`,
+/// see [`min_reader`]): one a newer build migrated past that is refused, before anything is written, so
+/// an old binary (a rollback) can't misread or damage it. A newer database whose migrations older builds
+/// may use is opened as is: writing the version down would make the newer build rerun one.
 ///
 /// Pending migrations run with `foreign_keys` off, because a table rebuild (012) drops a table other
 /// tables reference; `foreign_key_check` must then be empty before the transaction commits. The
 /// pragma cannot change inside a transaction, so it is switched around it and always restored.
 pub fn migrate(c: &Connection) -> Result<()> {
-    c.execute_batch("CREATE TABLE IF NOT EXISTS schema_version (v INTEGER NOT NULL)")?;
-    let cur: i64 = c
-        .query_row("SELECT v FROM schema_version", [], |r| r.get(0))
-        .optional()?
-        .unwrap_or(0);
+    let Compat {
+        schema: cur,
+        min_reader: needs,
+    } = compat(c)?;
+    if needs > SCHEMA_VERSION {
+        return Err(StoreError::Incompatible {
+            schema: cur,
+            min_reader: needs,
+            ours: SCHEMA_VERSION,
+        });
+    }
+    c.execute_batch(
+        "CREATE TABLE IF NOT EXISTS schema_version (v INTEGER NOT NULL);
+         CREATE TABLE IF NOT EXISTS schema_compat (min_reader INTEGER NOT NULL);",
+    )?;
     if cur > SCHEMA_VERSION {
         tracing::warn!(
-            "database schema v{cur} is newer than this Hub (v{SCHEMA_VERSION}); opening it unchanged"
+            "database schema v{cur} is newer than this Hub (v{SCHEMA_VERSION}); its migrations let builds from v{needs} on use it, opening it unchanged"
         );
         return Ok(());
     }
@@ -173,6 +240,10 @@ fn run_pending(c: &Connection, cur: i64) -> Result<()> {
     } else {
         tx.execute("UPDATE schema_version SET v = ?", [SCHEMA_VERSION])?;
     }
+    // the stamp only ever rises: a build that opened the database must not let an older one in again
+    let stamp = compat(&tx)?.min_reader.max(min_reader(SCHEMA_VERSION));
+    tx.execute("DELETE FROM schema_compat", [])?;
+    tx.execute("INSERT INTO schema_compat (min_reader) VALUES (?)", [stamp])?;
     tx.commit()?;
     Ok(())
 }

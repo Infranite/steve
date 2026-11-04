@@ -1,10 +1,12 @@
 //! A stand-in for the Rust Hub in ops/test-release.sh: /healthz, the web build from STEVE_WEB_DIR, and a schema
-//! migration (schema_version → 11 plus a table, like the real Hub's 004-011). mode.txt: ok | fail-start | bad-health.
+//! migration (schema_version → SCHEMA plus a table, like the real Hub's 004-011), `--build-info` with that schema.
+//! mode.txt: ok | fail-start | bad-health; schema.txt: the schema it knows and migrates to.
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
 use std::path::Path;
 
 const MODE: &str = include_str!("../mode.txt");
+const SCHEMA: &str = include_str!("../schema.txt");
 
 fn field(json: &str, k: &str) -> String {
     let pat = format!("\"{k}\":\"");
@@ -13,6 +15,11 @@ fn field(json: &str, k: &str) -> String {
 
 fn main() {
     let mode = MODE.trim();
+    let schema: u32 = SCHEMA.trim().parse().unwrap_or(11);
+    if std::env::args().any(|a| a == "--build-info") {
+        println!("{{\"version\":\"fake\",\"commit\":\"fake\",\"target\":\"fake\",\"schema\":{schema}}}");
+        return;
+    }
     eprintln!("fake steve-hub ({mode}) starting");
     if mode == "fail-start" {
         eprintln!("fake steve-hub: failing at start on purpose");
@@ -24,7 +31,7 @@ fn main() {
     let db = format!("{home}/data/steve.sqlite3");
     if Path::new(&db).exists() {
         let ok = std::process::Command::new("sqlite3")
-            .args([&db, "CREATE TABLE IF NOT EXISTS fake_rust_only (id TEXT PRIMARY KEY); UPDATE schema_version SET v = 11 WHERE v < 11;"])
+            .args([&db, &format!("CREATE TABLE IF NOT EXISTS fake_rust_only (id TEXT PRIMARY KEY); UPDATE schema_version SET v = {schema} WHERE v < {schema};")])
             .status()
             .is_ok_and(|s| s.success());
         eprintln!("fake steve-hub: migrated {db}: {ok}");

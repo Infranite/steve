@@ -2,9 +2,10 @@
 # Release Steve from a branch. The Hub (hub/, ops/, everything outside web/) and the web build (web/) are released on
 # their own:
 #   hub  build a new release dir, let the running Hub drain (no new turns; wait for running ones, bounded), back up the
-#        database, switch `current`, restart, health-check; roll back to the previous release on failure. The release dir
-#        always has the TS Hub (hub/dist); with hub-rs/ in the tree it also has the Rust Hub (bin/steve-hub, cargo build in
-#        a target dir shared by all releases), which ops/run.sh then starts instead (STEVE_HUB_IMPL=ts: TS only)
+#        database, switch `current`, restart, health-check; on failure back to the previous release, but only if it can
+#        still open the database (ops/schema_gate.py): when the new Hub migrated it past what the previous one knows, the
+#        new release stays (degraded, exit 3) and the backup is named. The release dir has the Rust Hub (bin/steve-hub,
+#        cargo build in a target dir shared by all releases, signed); a tree without hub-rs/ builds the TS Hub (hub/dist)
 #   web  build only web/ into $STEVE_HOME/web/<ver>, switch the `web/current` link the Hub serves from (no drain, no
 #        restart), check that / serves the new index.html and one of its hashed assets; switch back on failure
 # What runs is decided from what changed since the deployed commits (current/release.json, web/current/release.json):
@@ -12,13 +13,14 @@
 # On a failure main is reset to where it was, so main stays what is deployed.
 # Writes $STEVE_HOME/releases/last.json for the Hub, web/last.json, releases/history.jsonl, logs/release/<ver>.log.
 # Usage: release.sh [--web|--hub] <branch|main> [item-id]          (ops/release-web.sh = release.sh --web)
-#        release.sh --rollback [<version>|ts]   switch `current` back to an installed release (default: the one before
-#        current; ts: the newest TS-only one), restart, health-check; main and the web build are left alone
+#        release.sh --rollback [<version>]   switch `current` back to an installed release (default: the one before
+#        current), restart, health-check; main and the web build are left alone. Refused when that release can't open
+#        the database (ops/schema_gate.py): an older Hub on a database a newer one migrated is what this must never do
 # Env: STEVE_HOME, STEVE_REPO, STEVE_PORT; STEVE_DRAIN_TOKEN (given by the Hub), STEVE_DRAIN_S (default 120: the Hub resumes turns a restart cut off, once within 30 min);
 #      STEVE_LABEL (launchd job) or STEVE_RESTART_CMD (restarts the Hub instead of launchctl, for tests);
 #      STEVE_WEB_KEEP (web builds kept besides the previous one, default 10); STEVE_FIRST=1 (bootstrap: nothing runs yet);
-#      STEVE_HUB_IMPL=ts (env or steve.env: don't build the Rust Hub); STEVE_CARGO (cargo to use), STEVE_CARGO_TARGET_DIR
-#      (default $STEVE_HOME/build/cargo-target); STEVE_HEALTH_TRIES (default 40, 1.5 s apart)
+#      STEVE_CARGO (cargo to use), STEVE_CARGO_TARGET_DIR (default $STEVE_HOME/build/cargo-target); STEVE_HEALTH_TRIES
+#      (default 40, 1.5 s apart); STEVE_UNSIGNED=1 (test homes only: no signing keychain, the binary stays ad-hoc signed)
 set -u
 SELF=${0:A} OPS=${0:A:h}
 source $OPS/release-lib.sh
@@ -30,7 +32,7 @@ for a in "$@"; do
     --web) MODE=web ;;
     --hub) MODE=hub ;;
     --rollback) MODE=rollback ;;
-    -h|--help) sed -n '2,23p' $SELF; exit 0 ;;
+    -h|--help) sed -n '2,25p' $SELF; exit 0 ;;
     *) ARGS+=$a ;;
   esac
 done
@@ -120,12 +122,9 @@ impl_of() { # dir
   [[ -n $h ]] && { print -r -- $h; return }
   [[ -x $1/bin/steve-hub ]] && print rust || print ts
 }
-# STEVE_HUB_IMPL from the environment (the Hub passes its own, read from steve.env by run.sh) or steve.env (a manual run)
-impl_wanted() {
-  local v=${STEVE_HUB_IMPL:-$(sed -n 's/^STEVE_HUB_IMPL=//p' $HOME_DIR/steve.env 2>/dev/null | tail -1)}
-  print -r -- ${${v//\"/}//\'/}
-}
 schema() { [[ -f $DB ]] && sqlite3 $DB "SELECT v FROM schema_version" 2>/dev/null | head -1 }
+# can the release open the database as it is now? (prints why not)
+can_open() { python3 $OPS/schema_gate.py check $DB $1 }
 
 # ── the Rust Hub ──
 # cargo: launchd's PATH is short and Homebrew's links have vanished for minutes at a time, so look in every usual
@@ -151,7 +150,7 @@ find_cargo() {
 }
 # Sign the Hub with the stable local identity (ops/sign-setup.sh), so the vault's keychain entry, whose access
 # control is "identifier io.github.infranite.steve.hub and this certificate", keeps trusting every release.
-# Without the signing keychain (test homes) the binary stays ad-hoc signed and a warning is logged.
+# Without the signing keychain the release fails: an ad-hoc signed Hub can't read the vault. Test homes say STEVE_UNSIGNED=1.
 SIGN_ID=${STEVE_SIGN_IDENTITY:-Steve Hub} SIGN_IDENT=${STEVE_KEYHELPER_HUB_IDENTIFIER:-io.github.infranite.steve.hub}
 export STEVE_KEYHELPER_HUB_IDENTIFIER=$SIGN_IDENT
 export STEVE_KEYHELPER_IDENTIFIER=${STEVE_KEYHELPER_IDENTIFIER:-io.github.infranite.steve.keyhelper}
@@ -165,8 +164,9 @@ sign_hub() {
     return 0
   fi
   if [[ ! -f $SIGN_KC || ! -f ${SIGN_KC:h}/keychain-pass ]]; then
-    print -r -- "   WARN: no signing keychain at $SIGN_KC: steve-hub stays ad-hoc signed and the vault keychain entry will not trust it (run ops/sign-setup.sh)"
-    return 0
+    [[ ${STEVE_UNSIGNED:-} == 1 ]] && { print -r -- "   STEVE_UNSIGNED=1: no signing keychain, steve-hub stays ad-hoc signed"; return 0 }
+    print -r -- "   no signing keychain at $SIGN_KC: an ad-hoc signed Hub can't read the vault (run ops/sign-setup.sh)"
+    return 1
   fi
   security unlock-keychain -p "$(<${SIGN_KC:h}/keychain-pass)" $SIGN_KC || { print -r -- "   cannot unlock $SIGN_KC"; return 1 }
   run codesign -f -s "$SIGN_ID" --keychain $SIGN_KC -i $SIGN_IDENT $bin || { print -r -- "   codesign failed"; return 1 }
@@ -192,7 +192,8 @@ keyhelper_install() { # release dir
   src=$dir/hub-rs/crates/steve-keyhelper
   [[ -d $src ]] || return 0
   if [[ ! -f $SIGN_KC || ! -f ${SIGN_KC:h}/keychain-pass ]]; then
-    print -r -- "   WARN: no signing keychain: steve-keyhelper not installed (run ops/sign-setup.sh)"; return 0
+    [[ ${STEVE_UNSIGNED:-} == 1 ]] && { print "   STEVE_UNSIGNED=1: no signing keychain, steve-keyhelper not installed"; return 0 }
+    print "   no signing keychain: steve-keyhelper can't be installed (run ops/sign-setup.sh)"; return 1
   fi
   want=$( (cd $src && find Cargo.toml src -type f | LC_ALL=C sort | xargs shasum -a 256) | shasum -a 256 | cut -d' ' -f1)
   want=$(print -r -- "$want|$STEVE_KEYHELPER_SERVICE|$STEVE_KEYHELPER_HUB_IDENTIFIER|$STEVE_KEYHELPER_IDENTIFIER" | shasum -a 256 | cut -d' ' -f1)
@@ -227,30 +228,33 @@ hub_release() {
   step "hub: export $COMMIT to $DIR"
   mkdir -p $DIR && git -C $REPO archive HEAD | tar -x -C $DIR || hub_fail "导出代码失败"
   cd $DIR
-  step "hub: npm ci"
-  run npm ci --no-audit --no-fund || hub_fail "安装依赖失败，见 $LOG"
-  # the TS Hub is built in every release: rollback target, and what STEVE_HUB_IMPL=ts runs from a Rust release
-  step "hub: build"
-  run npm run build:hub || hub_fail "Hub 构建失败，见 $LOG"
-  HUB_IMPL=ts want=$(impl_wanted)
-  if [[ -f $DIR/hub-rs/Cargo.toml && $want != ts ]]; then
+  local known=""
+  if [[ -f $DIR/hub-rs/Cargo.toml ]]; then
     step "hub: cargo build (Rust Hub)"
     HUB_IMPL=rust
     rust_build $DIR || hub_fail "Rust Hub 构建失败，见 $LOG"
     step "hub: steve-keyhelper"
     keyhelper_install $DIR || hub_fail "steve-keyhelper 安装或密钥迁移失败，见 $LOG"
-  elif [[ -f $DIR/hub-rs/Cargo.toml ]]; then
-    print "   STEVE_HUB_IMPL=ts: not building the Rust Hub"
+    # the schema this Hub knows, for every later switch to this release (ops/schema_gate.py)
+    known=$(python3 -c 'import json,sys; print(json.loads(sys.stdin.read())["schema"])' <<<"$($DIR/bin/steve-hub --build-info 2>/dev/null)" 2>/dev/null)
+    [[ $known == <-> ]] || hub_fail "Rust Hub 说不出自己的 schema（--build-info），见 $LOG"
+  else
+    # a tree without hub-rs/: the TS Hub
+    step "hub: npm ci"
+    run npm ci --no-audit --no-fund || hub_fail "安装依赖失败，见 $LOG"
+    step "hub: build"
+    HUB_IMPL=ts
+    run npm run build:hub || hub_fail "Hub 构建失败，见 $LOG"
   fi
-  print -r -- "   hub: ${PREV_IMPL:-none} -> $HUB_IMPL"
-  print -r -- "{\"version\":$(js "$VER"),\"commit\":$(js "$COMMIT"),\"branch\":$(js "$BRANCH"),\"built_at\":$(js "$(iso)"),\"hub\":$(js $HUB_IMPL)${RUST_SHA:+,\"hub_sha256\":$(js $RUST_SHA)}}" >$DIR/release.json
+  print -r -- "   hub: ${PREV_IMPL:-none} -> $HUB_IMPL${known:+ (schema v$known)}"
+  print -r -- "{\"version\":$(js "$VER"),\"commit\":$(js "$COMMIT"),\"branch\":$(js "$BRANCH"),\"built_at\":$(js "$(iso)"),\"hub\":$(js $HUB_IMPL)${RUST_SHA:+,\"hub_sha256\":$(js $RUST_SHA)}${known:+,\"schema\":{\"target\":$known\}}}" >$DIR/release.json
   if [[ -n ${STEVE_FIRST:-} ]]; then
     step "hub: first release, nothing to restart"; ln -sfn $DIR $HOME_DIR/current; HUB_OK=1; history hub true "" false $T_HUB "" $HUB_FILES; return 0
   fi
   step "hub: drain"
   drain
   step "hub: backup the database"
-  SCHEMA_BEFORE=$(schema)
+  SCHEMA_BEFORE=$(schema) COMPAT_BEFORE=$(python3 $OPS/schema_gate.py state $DB)
   if [[ -f $DB ]]; then
     # the first switch to the Rust Hub migrates the schema forward (3 → 11+): its backup is kept apart from the rotation
     if [[ $HUB_IMPL == rust && $PREV_IMPL != rust ]]; then BACKUP=$HOME_DIR/backups/pre-rust-$VER.sqlite3; else BACKUP=$HOME_DIR/backups/pre-$VER.sqlite3; fi
@@ -258,8 +262,7 @@ hub_release() {
     if run sqlite3 $DB ".backup '$BACKUP'" && [[ $(sqlite3 $BACKUP "PRAGMA quick_check" 2>&1) == ok ]]; then
       print -r -- "   backup ok ($(du -h $BACKUP | cut -f1))"
     else
-      [[ $BACKUP == */pre-rust-* ]] && hub_fail "切换到 Rust Hub 前数据库备份失败，没有切换"
-      print "   backup failed, releasing anyway"; BACKUP=""
+      hub_fail "发布前数据库备份失败，没有切换"
     fi
   else print "   no database yet"; fi
   # keep the newest 10 pre-release backups (pre-rust-* stay)
@@ -272,14 +275,22 @@ hub_release() {
     SCHEMA_AFTER=$(schema)
     HUB_OK=1; print -r -- "✓ hub $VER is live ($HUB_IMPL, schema v${SCHEMA_BEFORE:-?} -> v${SCHEMA_AFTER:-?})"; history hub true "" false $T_HUB "$PREV" $HUB_FILES
     step "hub: prune old releases"
-    # keep the newest 3, the previous one and the newest TS-only one (the rollback target from a Rust Hub)
-    local ts_keep="" old
-    for old in $REL/2*(N/On); do [[ $(impl_of $old) == ts ]] && { ts_keep=${old:t}; break }; done
-    for old in $REL/2*(N/om[4,-1]); do [[ ${old:t} != $PREV && ${old:t} != $ts_keep ]] && { print -r -- "   remove $old"; rm -rf -- $old }; done
+    # keep the newest 3 and the previous one
+    local old
+    for old in $REL/2*(N/om[4,-1]); do [[ ${old:t} != $PREV ]] && { print -r -- "   remove $old"; rm -rf -- $old }; done
     return 0
   fi
   SCHEMA_AFTER=$(schema)
-  local err="新版本启动后健康检查没有通过"
+  local err="新版本启动后健康检查没有通过" why=""
+  # the previous release ran on the database as it was; if the new Hub moved it past what that one knows, going
+  # back would put an old binary on a database it can't read: the new release stays, degraded
+  if [[ -n $PREV && $(python3 $OPS/schema_gate.py state $DB) != $COMPAT_BEFORE ]] && ! why=$(can_open $REL/$PREV); then
+    err="新版本健康检查没有通过；数据库已被新版本迁移，$why，所以没有切回 $PREV，新版本保留（降级运行）${BACKUP:+；发布前的备份在 $BACKUP}"
+    print -r -- "✗ $err"
+    history hub false "$err" false $T_HUB "$PREV" $HUB_FILES
+    last false "$err"
+    finish 3
+  fi
   step "hub: roll back to ${PREV:-nothing}"
   if [[ -n $PREV ]]; then
     switch_to $PREV
@@ -293,16 +304,14 @@ hub_release() {
 }
 
 # ── rollback: back to an installed release by hand (no build, no git, web untouched) ──
-rollback_main() { # [version|ts]
+rollback_main() { # [version]
   local target=${1:-} cur=$PREV d err="" ok=true
   T0=$EPOCHSECONDS T_HUB=$EPOCHSECONDS KIND=rollback
   step "rollback ${target:-to the previous release}"
   print -r -- "   home=$HOME_DIR port=$PORT current=${cur:-none}; restart: ${STEVE_RESTART_CMD:-launchctl kickstart -k gui/$(id -u)/$LABEL}"
   touch $REL/.release.lock; zsystem flock -t 0 $REL/.release.lock 2>/dev/null || { print "✗ 另一个发布正在进行"; finish 1 }
   print "   installed:"; for d in $REL/2*(N/On); do print -r -- "     ${d:t} ($(impl_of $d))$([[ ${d:t} == $cur ]] && print ' <- current')"; done
-  if [[ $target == ts ]]; then
-    target=""; for d in $REL/2*(N/On); do [[ ${d:t} != $cur && $(impl_of $d) == ts ]] && { target=${d:t}; break }; done
-  elif [[ -z $target ]]; then
+  if [[ -z $target ]]; then
     for d in $REL/2*(N/On); do [[ ${d:t} < $cur ]] && { target=${d:t}; break }; done
   fi
   [[ -n $target && -f $REL/$target/release.json ]] || { print -r -- "✗ no release to roll back to (${target:-none found})"; finish 1 }
@@ -311,19 +320,31 @@ rollback_main() { # [version|ts]
   HUB_IMPL=$(impl_of $REL/$target) PREV_IMPL=$([[ -n $cur ]] && impl_of $REL/$cur)
   name_log rollback-$target-$(strftime '%H%M%S' $EPOCHSECONDS)
   print -r -- "   ${cur:-none} ($PREV_IMPL) -> $target ($HUB_IMPL)"
+  step "rollback: can $target open the database"
+  local why
+  if ! why=$(can_open $REL/$target); then
+    err="不能回滚到 $target：$why；当前版本保留"
+    print -r -- "✗ $err"
+    SCHEMA_BEFORE=$(schema) SCHEMA_AFTER=$SCHEMA_BEFORE
+    history rollback false "$err" false $T_HUB "$cur"
+    finish 1
+  fi
+  print -r -- "   yes: $(python3 $OPS/schema_gate.py state $DB)"
   step "rollback: drain"; drain
   step "rollback: backup the database"
   SCHEMA_BEFORE=$(schema)
   if [[ -f $DB ]]; then
     BACKUP=$HOME_DIR/backups/rollback-$(strftime '%Y%m%d-%H%M%S' $EPOCHSECONDS).sqlite3
-    run sqlite3 $DB ".backup '$BACKUP'" || { print "   backup failed, rolling back anyway"; BACKUP="" }
+    if ! run sqlite3 $DB ".backup '$BACKUP'"; then
+      err="回滚前数据库备份失败，没有切换"; print -r -- "✗ $err"
+      SCHEMA_AFTER=$SCHEMA_BEFORE; history rollback false "$err" false $T_HUB "$cur"; finish 1
+    fi
   fi
   step "rollback: switch to $target and restart"
   switch_to $target
   step "rollback: health check"
   if healthy $target; then
     print -r -- "✓ rolled back to $target ($HUB_IMPL)"
-    [[ $HUB_IMPL == ts && $PREV_IMPL == rust ]] && print "   note: main still has hub-rs/, so the next release builds the Rust Hub again unless STEVE_HUB_IMPL=ts is in steve.env"
   else
     ok=false err="回滚到 $target 后健康检查没有通过"
     if [[ -n $cur && -d $REL/$cur ]]; then

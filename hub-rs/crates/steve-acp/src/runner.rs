@@ -1704,8 +1704,10 @@ impl Acp {
             let mut st = self.st();
             // still the prompt it was asked in: one that ended meanwhile took its waits already
             if current(&st) == Some(prompt) {
-                st.waits
-                    .insert(dec.clone(), (sid.to_owned(), rpc_id.clone(), generation, prompt));
+                st.waits.insert(
+                    dec.clone(),
+                    (sid.to_owned(), rpc_id.clone(), generation, prompt),
+                );
                 true
             } else {
                 false

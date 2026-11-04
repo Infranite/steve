@@ -5,12 +5,14 @@
 # adapters /usr/bin/false, file vault keystore, no real hosts) started like launchd does, through the release's
 # ops/run.sh, which release.sh restarts through STEVE_RESTART_CMD. The fixture's TS Hub is this checkout's, via tsx.
 # Cases: bootstrap, web-only (no restart), broken web build, failed web check (rollback), hub only, hub+web, --web, dirty
-# main; Rust Hub failing its health check and failing to start (both: back to TS, which serves the migrated database),
-# the cutover (backup, history), hub+web and web-only on the Rust Hub, --rollback ts, STEVE_HUB_IMPL=ts (release and
-# run.sh), forward again; history.jsonl and the logs; then ops/migrate-web-split.sh on a pre-split home.
+# main; the schema gate (ops/schema_gate.py): a Rust Hub failing to start leaves the database alone (back to TS), one
+# that migrated and then fails its health check stays (degraded, TS can't read v11); the cutover, hub+web and web-only
+# on the Rust Hub; --rollback refused onto TS and onto an older schema, allowed onto the same schema; history.jsonl and
+# the logs; then ops/migrate-web-split.sh on a pre-split home.
 # --real: instead, the real thing from this checkout's HEAD (commit first): bootstrap main (TS), release HEAD (real npm ci,
 # web build and `cargo build --release -p steve-hub`), check login / API / SSE / drain on the Rust Hub, a second Rust
-# release (incremental cargo), --rollback ts onto the migrated database, and forward again. Takes minutes.
+# release (incremental cargo), --rollback onto TS refused and onto the first Rust release allowed, forward again. Takes
+# minutes.
 # Usage: ops/test-release.sh [-k] [--real]   (-k keeps the temp dir)
 set -euo pipefail
 self="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"; ROOT=$(cd "$(dirname "$self")/.." && pwd); cd "$ROOT"
@@ -32,8 +34,8 @@ for a in "$@"; do case $a in -k) KEEP=1 ;; --real) REAL=1 ;; *) echo "usage: $0 
 T=$(mktemp -d -t steve-test-release)
 export STEVE_HOME=$T/home STEVE_REPO=$T/repo STEVE_NO_RESUME=1 TEST_ROOT=$ROOT
 export STEVE_ADAPTER_CLAUDE=/usr/bin/false STEVE_ADAPTER_CODEX=/usr/bin/false CLAUDE_CODE_EXECUTABLE=/usr/bin/false
-export STEVE_VAULT_KEYSTORE=file STEVE_FORBID_REAL_HOSTS=1 STEVE_DEV_LOGIN=1 STEVE_HEALTH_TRIES=12
-unset STEVE_HUB_IMPL STEVE_CARGO_TARGET_DIR
+export STEVE_VAULT_KEYSTORE=file STEVE_FORBID_REAL_HOSTS=1 STEVE_DEV_LOGIN=1 STEVE_HEALTH_TRIES=12 STEVE_UNSIGNED=1
+unset STEVE_CARGO_TARGET_DIR
 export STEVE_PORT; STEVE_PORT=$(node -e 'const s=require("net").createServer().listen(0,"127.0.0.1",()=>{console.log(s.address().port);s.close()})')
 [ "$STEVE_PORT" != 8440 ] || { echo "refusing port 8440"; exit 1; }
 export STEVE_RESTART_CMD="bash $self __restart" STEVE_LABEL=io.github.infranite.steve-test-unused STEVE_WEB_KEEP=2
@@ -184,46 +186,55 @@ G checkout -q -- hub/src.txt
 check 'lastline | grep -q "\"kind\":\"preflight\".*\"ok\":false.*未提交"' "history: preflight failure"
 
 # ── the Rust Hub: hub-rs/ appears in the tree ──
-# a branch off main that adds or changes hub-rs/ (the stand-in Rust Hub, mode ok | bad-health | fail-start), plus files
-rust_branch() { local b=$1 mode=$2; shift 2; G checkout -q -b "$b" main
-  rm -rf "$STEVE_REPO/hub-rs"; cp -R "$ROOT/ops/test-fixtures/hub-rs" "$STEVE_REPO/hub-rs"; echo "$mode" >"$STEVE_REPO/hub-rs/crates/steve-hub/mode.txt"
+# a branch off main that adds or changes hub-rs/ (the stand-in Rust Hub, mode ok | bad-health | fail-start, and the
+# schema it knows and migrates to), plus files
+rust_branch() { local b=$1 mode=$2 sv=$3; shift 3; G checkout -q -b "$b" main
+  rm -rf "$STEVE_REPO/hub-rs"; cp -R "$ROOT/ops/test-fixtures/hub-rs" "$STEVE_REPO/hub-rs"
+  echo "$mode" >"$STEVE_REPO/hub-rs/crates/steve-hub/mode.txt"; echo "$sv" >"$STEVE_REPO/hub-rs/crates/steve-hub/schema.txt"
   echo "// $b $RANDOM" >>"$STEVE_REPO/hub-rs/crates/steve-hub/src/main.rs"
   for f in "$@"; do echo "$b $RANDOM" >>"$STEVE_REPO/$f"; done; G add -A; G commit -q -m "$b"; G checkout -q main; }
 TSV=$(hubcur) M2=$(G rev-parse main)
 check '[ "$(schema)" = 3 ] && is_ts' "before: the TS Hub $TSV on schema v3"
 
-echo "── Rust Hub fails its health check: rolled back, the TS release keeps serving the migrated database"
-rust_branch rbad bad-health
-if $REL rbad >"$T/out-rbad.txt" 2>&1; then cat "$T/out-rbad.txt"; no "a Rust Hub with a bad health check released"; fi
-F=$(lastline | sed -n 's/.*"log":"\([^"]*\)".*/\1/p')
-check '[ "$(hubcur)" = "$TSV" ] && [ "$(hzf version)" = "$TSV" ] && is_ts' "back on the TS release $TSV, a TS Hub answers"
-check '[ "$(G rev-parse main)" = "$M2" ] && [ "$(ls -d "$STEVE_HOME"/releases/2* | grep -c . )" -le 4 ] && ! ls "$STEVE_HOME"/releases/*/bin/steve-hub >/dev/null 2>&1' "main reset, the failed release dir removed"
-check 'lastline | grep -q "\"kind\":\"hub\".*\"ok\":false.*\"rolled_back\":true.*\"hub\":\"rust\",\"prev_hub\":\"ts\"" && [ "$(hfield schema_before)" = 3 ] && [ "$(hfield schema_after)" = 11 ]' "history: hub ts → rust failed, rolled back, schema 3 → 11"
-B=$(hfield backup)
-check '[[ $B == */backups/pre-rust-2*.sqlite3 ]] && [ -f "$B" ] && [ "$(sqlite3 "$B" "SELECT v FROM schema_version")" = 3 ]' "the pre-migration backup is in the history line and has schema v3 ($(basename "$B"))"
-check 'grep -q "cargo: .*(cargo " "$F" && grep -q "target dir $STEVE_HOME/build/cargo-target" "$F" && grep -q "Compiling steve-hub" "$F" && grep -q "Finished .release. profile" "$F"' "the release log has which cargo, the target dir and the full cargo output"
-check 'grep -q "not healthy as" "$F" && grep -q "the database stays at schema v11" "$F"' "the log shows the failed check and the schema left behind"
-check 'grep -q "database schema v11 is newer than this Hub" "$STEVE_HOME/hub.log" && api_ok' "the TS Hub opened the v11 database with a warning; login and /api/state work"
-
-echo "── Rust Hub fails to start: rolled back, the TS release keeps serving"
-rust_branch rfail fail-start
+echo "── Rust Hub fails to start, the database untouched: back to the TS release"
+rust_branch rfail fail-start 11
 if $REL rfail >"$T/out-rfail.txt" 2>&1; then cat "$T/out-rfail.txt"; no "a Rust Hub that does not start released"; fi
-check '[ "$(hubcur)" = "$TSV" ] && [ "$(hzf version)" = "$TSV" ] && is_ts && api_ok' "back on $TSV, TS serving, login works"
+check '[ "$(hubcur)" = "$TSV" ] && [ "$(hzf version)" = "$TSV" ] && is_ts && api_ok && [ "$(schema)" = 3 ]' "back on $TSV, TS serving schema v3, login works"
 check 'grep -q "failing at start on purpose" "$STEVE_HOME/hub.log" && lastline | grep -q "\"ok\":false.*\"rolled_back\":true.*\"hub\":\"rust\"" && [ "$(G rev-parse main)" = "$M2" ]' "the binary's exit is in the hub log; history rolled back; main reset"
+check '! ls "$STEVE_HOME"/releases/*/bin/steve-hub >/dev/null 2>&1' "the failed release dir removed"
 
-echo "── cutover: the Rust Hub goes live"
-rust_branch r1 ok
+echo "── Rust Hub migrates, then fails its health check: the TS release can't read v11, the new one stays (degraded)"
+rust_branch rbad bad-health 11
+set +e; $REL rbad >"$T/out-rbad.txt" 2>&1; rc=$?; set -e
+RB=$(hubcur) F=$(lastline | sed -n 's/.*"log":"\([^"]*\)".*/\1/p')
+check '[ $rc = 3 ] && [ "$RB" != "$TSV" ] && [ -x "$STEVE_HOME/current/bin/steve-hub" ] && is_rust' "exit 3, $RB stays current (the Rust Hub runs)"
+check '[ "$(schema)" = 11 ] && [ "$(G rev-parse main)" = "$(G rev-parse rbad)" ]' "the database is v11; main keeps the live commit"
+check 'lastline | grep -q "\"kind\":\"hub\".*\"ok\":false,\"error\":\"[^\"]*降级[^\"]*\".*\"rolled_back\":false.*\"hub\":\"rust\",\"prev_hub\":\"ts\"" && [ "$(hfield schema_before)" = 3 ] && [ "$(hfield schema_after)" = 11 ]' "history: failed, not rolled back, degraded, schema 3 → 11"
+B=$(hfield backup)
+check '[[ $B == */backups/pre-rust-$RB.sqlite3 ]] && [ "$(sqlite3 "$B" "SELECT v FROM schema_version")" = 3 ] && grep -q "$B" "$STEVE_HOME/releases/last.json"' "the error names the v3 backup ($(basename "$B"))"
+check 'grep -q "说不清自己认识哪个 schema" "$F" && grep -q "not healthy as" "$F"' "the log: the failed check and why the TS release can't take over"
+
+PB=$(pid)
+echo "── --rollback to the TS release: refused, nothing switched"
+if $REL --rollback "$TSV" >"$T/out-rbts.txt" 2>&1; then cat "$T/out-rbts.txt"; no "rolled back onto a database the TS Hub can't read"; fi
+check '[ "$(hubcur)" = "$RB" ] && [ "$(pid)" = "$PB" ] && [ "$(schema)" = 11 ]' "still $RB (same pid), the database untouched"
+check 'lastline | grep -q "\"kind\":\"rollback\",\"version\":\"$TSV\".*\"ok\":false,\"error\":\"不能回滚到 $TSV" && ! grep -q "rollback: drain" "$T/out-rbts.txt"' "history: refused before any drain"
+if $REL --rollback ts >"$T/out-rbts2.txt" 2>&1; then no "--rollback ts still does something"; fi
+check '[ "$(hubcur)" = "$RB" ] && grep -q "no release to roll back to (ts)" "$T/out-rbts2.txt"' "--rollback ts is no longer a target"
+
+echo "── cutover: a good Rust Hub goes live"
+rust_branch r1 ok 11
 $REL r1 ST-11 >"$T/out-r1.txt" 2>&1 || { cat "$T/out-r1.txt"; no "the Rust release failed"; }
 R1=$(hubcur)
-check '[ "$R1" != "$TSV" ] && [ "$(hzf version)" = "$R1" ] && is_rust && grep -q "run.sh: Rust Hub $R1" "$STEVE_HOME/hub.log"' "run.sh started the Rust Hub $R1"
-check '[ "$(field "$STEVE_HOME/current/release.json" hub)" = rust ] && [ "$(field "$STEVE_HOME/current/release.json" hub_sha256)" = "$(shasum -a 256 "$STEVE_HOME/current/bin/steve-hub" | cut -d" " -f1)" ] && [ -f "$STEVE_HOME/current/hub/dist/main.js" ]' "release.json: hub rust, the binary's sha256; the TS Hub is built too"
-check 'lastline | grep -q "\"kind\":\"hub\".*\"prev\":\"$TSV\".*\"ok\":true.*\"hub\":\"rust\",\"prev_hub\":\"ts\"" && [[ $(hfield backup) == */pre-rust-$R1.sqlite3 ]] && [ -f "$(hfield backup)" ]' "history: ts → rust, the pre-migration backup pre-rust-$R1"
+check '[ "$R1" != "$RB" ] && [ "$(hzf version)" = "$R1" ] && is_rust && grep -q "run.sh: Rust Hub $R1" "$STEVE_HOME/hub.log"' "run.sh started the Rust Hub $R1"
+check '[ "$(field "$STEVE_HOME/current/release.json" hub)" = rust ] && [ "$(field "$STEVE_HOME/current/release.json" hub_sha256)" = "$(shasum -a 256 "$STEVE_HOME/current/bin/steve-hub" | cut -d" " -f1)" ] && grep -q "\"schema\":{\"target\":11}" "$STEVE_HOME/current/release.json" && [ ! -e "$STEVE_HOME/current/hub/dist" ]' "release.json: hub rust, its sha256 and schema 11; no TS Hub built"
+check 'lastline | grep -q "\"kind\":\"hub\".*\"prev\":\"$RB\".*\"ok\":true.*\"hub\":\"rust\",\"prev_hub\":\"rust\"" && [[ $(hfield backup) == */pre-$R1.sqlite3 ]] && [ -f "$(hfield backup)" ]' "history: rust → rust with its backup"
 check '[ "$(served "")" = "$W4" ] && [ "$(hzf web_version)" = "$W4" ] && [ "$(webcur)" = "$W4" ]' "the Rust Hub serves the web build $W4"
-check '[ -x "$STEVE_HOME/build/cargo-target/release/steve-hub" ]' "the cargo target dir is $STEVE_HOME/build/cargo-target"
+check '[ -x "$STEVE_HOME/build/cargo-target/release/steve-hub" ] && grep -q "cargo: .*(cargo " "$STEVE_HOME/logs/release/$R1.log" && grep -q "STEVE_UNSIGNED=1: no signing keychain" "$STEVE_HOME/logs/release/$R1.log"' "cargo target dir, which cargo, and the test-only unsigned build in the log"
 check 'grep -qE "\"ok\": ?true" "$STEVE_HOME/releases/last.json" && [ "$(field "$STEVE_HOME/releases/last.json" item)" = ST-11 ]' "last.json: ok, item ST-11"
 
 echo "── hub+web on the Rust Hub"
-rust_branch r2 ok web/src.txt
+rust_branch r2 ok 11 web/src.txt
 P3=$(pid)
 $REL r2 >"$T/out-r2.txt" 2>&1 || { cat "$T/out-r2.txt"; no "hub+web on Rust failed"; }
 R2=$(hubcur) W5=$(webcur)
@@ -236,30 +247,21 @@ P4=$(pid)
 $REL rw >"$T/out-rw.txt" 2>&1 || { cat "$T/out-rw.txt"; no "web-only on Rust failed"; }
 W6=$(webcur)
 check '[ "$W6" != "$W5" ] && [ "$(served "")" = "$W6" ] && [ "$(pid)" = "$P4" ] && [ "$(hzf version)" = "$R2" ]' "web $W6 served by the same Rust Hub (pid $P4)"
-M3=$(G rev-parse main)
+M3=$(G rev-parse main) n=$(hist)
 
-echo "── release.sh --rollback ts: back to the TS Hub on the migrated database"
-$REL --rollback ts >"$T/out-rb.txt" 2>&1 || { cat "$T/out-rb.txt"; no "--rollback ts failed"; }
-check '[ "$(hubcur)" = "$TSV" ] && [ "$(hzf version)" = "$TSV" ] && is_ts && [ "$(served "")" = "$W6" ]' "TS Hub $TSV serving web $W6 again"
-check '[ "$(schema)" = 11 ] && api_ok' "the database stays v11; login and /api/state work on TS"
-check 'lastline | grep -q "\"kind\":\"rollback\",\"version\":\"$TSV\",\"prev\":\"$R2\".*\"ok\":true.*\"hub\":\"ts\",\"prev_hub\":\"rust\",\"backup\":\"[^\"]*/rollback-[0-9-]*.sqlite3\""' "history: a rollback line rust → ts with its backup"
-check '[ "$(G rev-parse main)" = "$M3" ] && grep -q "next release builds the Rust Hub again unless STEVE_HUB_IMPL=ts" "$T/out-rb.txt"' "main untouched; the note about STEVE_HUB_IMPL"
+echo "── --rollback to the previous Rust release (same schema): allowed"
+$REL --rollback >"$T/out-rb.txt" 2>&1 || { cat "$T/out-rb.txt"; no "--rollback to the previous Rust release failed"; }
+check '[ "$(hubcur)" = "$R1" ] && [ "$(hzf version)" = "$R1" ] && is_rust && [ "$(served "")" = "$W6" ]' "Rust Hub $R1 serving web $W6"
+check 'lastline | grep -q "\"kind\":\"rollback\",\"version\":\"$R1\",\"prev\":\"$R2\".*\"ok\":true.*\"backup\":\"[^\"]*/rollback-[0-9-]*.sqlite3\"" && [ "$(G rev-parse main)" = "$M3" ]' "history: a rollback line with its backup; main untouched"
 
-echo "── STEVE_HUB_IMPL=ts: a release with hub-rs/ stays on TS"
-STEVE_HUB_IMPL=ts $REL --hub main >"$T/out-ts.txt" 2>&1 || { cat "$T/out-ts.txt"; no "STEVE_HUB_IMPL=ts release failed"; }
-H4=$(hubcur)
-check '[ "$H4" != "$TSV" ] && [ "$(hzf version)" = "$H4" ] && is_ts && [ ! -e "$STEVE_HOME/current/bin/steve-hub" ] && [ "$(field "$STEVE_HOME/current/release.json" hub)" = ts ]' "TS Hub $H4, no binary built"
-check 'grep -q "STEVE_HUB_IMPL=ts: not building the Rust Hub" "$STEVE_HOME/logs/release/$H4.log" && ! grep -q "cargo build" "$STEVE_HOME/logs/release/$H4.log"' "the log says so, no cargo run"
-
-echo "── forward again, then STEVE_HUB_IMPL=ts at run time"
-$REL --hub main >"$T/out-fw.txt" 2>&1 || { cat "$T/out-fw.txt"; no "forward release failed"; }
-R3=$(hubcur)
-check '[ "$(hzf version)" = "$R3" ] && is_rust && [[ $(hfield backup) == */pre-rust-$R3.sqlite3 ]]' "Rust Hub $R3 again (ts → rust: a pre-rust backup again)"
-STEVE_HUB_IMPL=ts bash "$self" __restart; waitup
-check 'is_ts && [ "$(hzf version)" = "$R3" ] && grep -q "STEVE_HUB_IMPL=ts: the TS Hub of a release that has the Rust Hub" "$STEVE_HOME/hub.log"' "run.sh with STEVE_HUB_IMPL=ts runs the TS Hub of $R3"
-bash "$self" __restart; waitup
-check 'is_rust' "and the Rust Hub without it"
-check '[ -d "$STEVE_HOME/releases/$H4" ] && [ "$(ls -d "$STEVE_HOME"/releases/2* | grep -c .)" -le 5 ]' "pruning keeps the newest TS-only release ($H4)"
+echo "── a Rust Hub that migrates to v12, then --rollback to v11: refused"
+rust_branch r12 ok 12
+$REL r12 >"$T/out-r12.txt" 2>&1 || { cat "$T/out-r12.txt"; no "the v12 release failed"; }
+R12=$(hubcur) P5=$(pid)
+check '[ "$(schema)" = 12 ] && [ "$(hzf version)" = "$R12" ]' "$R12 live on schema v12"
+if $REL --rollback "$R1" >"$T/out-rb12.txt" 2>&1; then cat "$T/out-rb12.txt"; no "rolled back a v11 Hub onto v12"; fi
+check '[ "$(hubcur)" = "$R12" ] && [ "$(pid)" = "$P5" ] && grep -q "只认识到 schema v11，数据库（v12）需要至少 v12" "$T/out-rb12.txt"' "still $R12; the reason names both schemas"
+check '[ "$(ls -d "$STEVE_HOME"/releases/2* | grep -c .)" -le 4 ]' "pruning keeps the newest 3 and the previous one"
 
 echo "── history.jsonl and logs"
 node -e '

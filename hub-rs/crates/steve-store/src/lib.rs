@@ -58,6 +58,15 @@ pub enum StoreError {
     /// A migration left the database inconsistent; it was rolled back.
     #[error("{0}")]
     Migration(String),
+    /// The database needs a newer build: opening it is refused, nothing was written.
+    #[error(
+        "数据库（schema v{schema}）需要至少认识 schema v{min_reader} 的版本才能打开，这个版本只认识到 v{ours}；没有打开，也没有改动它"
+    )]
+    Incompatible {
+        schema: i64,
+        min_reader: i64,
+        ours: i64,
+    },
 }
 
 /// Runs inside the transaction that deletes an item: `(tx, workspace_id, item_id)`.
