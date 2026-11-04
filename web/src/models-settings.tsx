@@ -1,11 +1,13 @@
-/* 设置 · 模型：Steve 是一个 Bot。它自己的判断（分流、对话回答、研究、起标题……）都用 Steve 这个 Bot 的 harness、模型和
- * 推理强度，在 Bot 页改。「高级」里可以给某一类判断单独指定 harness 和模型（默认收起，每行都写明现在用的是什么、最近实际用了什么）。
- * 最下面是新会话在每个 harness 上的默认模型。 */
-import { useEffect, useState } from "react"
+/* 设置 · 模型：Steve 是一个 Bot。它自己的判断（分流、对话回答、研究、起标题……）默认都用 Steve 这个 Bot 的 harness、模型和
+ * 思考强度（在 Bot 页改）。页面只铺开「默认配置」和少数单独配置的用途；跟随默认的收起，编辑在侧栏里做，备用模型放进高级选项。
+ * 最近 7 天实际调用了什么在「运行记录」里看，跟当前配置分开。最下面是新会话在每个 harness 上的默认模型。 */
+import { useEffect, useRef, useState, type ReactNode, type Ref } from "react"
 import { cn } from "cn"
-import { ArrowDownIcon, ArrowUpIcon, ChevronDownIcon, ChevronRightIcon, CpuIcon, TriangleAlertIcon, XIcon } from "lucide-react"
+import { ArrowDownIcon, ArrowUpIcon, ChevronDownIcon, ChevronRightIcon, CpuIcon, PlusIcon, TriangleAlertIcon, XIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Spinner } from "@/components/ui/spinner"
+import { Sheet, SheetContent, SheetDescription, SheetFooter, SheetHeader, SheetTitle } from "@/components/ui/sheet"
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { modReq, isNotWired } from "@/api"
 import { st, toast, useStore } from "@/store"
 import { Group, Row, SectionLabel, Segmented } from "@/ui"
@@ -31,37 +33,40 @@ const api = {
 }
 const short = (m: string) => m.replace(/^claude-/, "")
 const EFFORT: Record<string, string> = { none: "关闭", minimal: "最低", low: "低", medium: "中", high: "高", xhigh: "很高", max: "最高" }
-/** `Claude Code · claude-haiku-5-5 → claude-sonnet-5-5` */
+const effortName = (e?: string | null) => e ? EFFORT[e] ?? e : "跟随模型默认"
+/** `Claude Code · claude-haiku-5-5 → claude-sonnet-5-5 · 思考高` */
 export function ChoiceLine({ c, className, wrap }: { c: Choice; className?: string; wrap?: boolean }) {
   return (
     <span className={cn("block min-w-0", wrap ? "break-words" : "truncate", className)} data-choice>
       <span className="font-medium text-foreground">{harnessName(c.harness)}</span>
       <span className="text-muted-foreground"> · </span>
       <span className="font-mono text-[12.5px] text-foreground/85">{c.models.length ? c.models.join(" → ") : "默认模型"}</span>
-      {c.effort && <span className="text-muted-foreground"> · 推理{EFFORT[c.effort] ?? c.effort}</span>}
+      {c.effort && <span className="text-muted-foreground"> · 思考{effortName(c.effort)}</span>}
+    </span>
+  )
+}
+/** one line for a list row: `Claude Code · haiku-5-5 · 备用 1 个 · 思考高` (the fallbacks are an advanced detail) */
+function Brief({ c }: { c: Choice }) {
+  return (
+    <span className="block min-w-0 truncate" data-brief title={`${harnessName(c.harness)} · ${c.models.join(" → ") || "默认模型"}`}>
+      {harnessName(c.harness)} · <span className="font-mono text-[12.5px]">{c.models[0] ? short(c.models[0]) : "默认模型"}</span>
+      {c.models.length > 1 && ` · 备用 ${c.models.length - 1} 个`}{c.effort && ` · 思考${effortName(c.effort)}`}
     </span>
   )
 }
 const same = (a: Choice | null, b: Choice | null) => !!a && !!b && a.harness === b.harness && a.models.join() === b.models.join() && (a.effort ?? null) === (b.effort ?? null)
 const ago = (t: number) => { const m = Math.round((Date.now() - t) / 60000); return m < 60 ? `${Math.max(m, 1)} 分钟前` : m < 1440 ? `${Math.round(m / 60)} 小时前` : `${Math.round(m / 1440)} 天前` }
-
-/** what a purpose actually ran on this past week */
-function RecentLine({ r }: { r: Recent | null }) {
-  if (!r?.used.length) return <span className="block type-footnote font-normal text-tertiary" data-recent="none">最近 7 天没有调用</span>
-  return (
-    <span className="block min-w-0 break-words type-footnote font-normal text-muted-foreground" data-recent title={r.used.map((u) => `${harnessName(u.harness)} · ${u.model} ×${u.calls}${u.failed ? `（失败 ${u.failed}）` : ""}`).join("，")}>
-      最近 7 天实际用：{r.used.slice(0, 2).map((u, i) => <span key={i}>{i > 0 && "，"}{harnessName(u.harness)} · <span className="font-mono">{short(u.model)}</span> ×{u.calls}{u.failed ? <span className="text-attention">（失败 {u.failed}）</span> : null}</span>)}
-      {r.used.length > 2 && ` 等 ${r.used.length} 种`}{r.last && ` · ${ago(r.last.at)}`}
-    </span>
-  )
-}
+const failedOf = (p: Purpose) => p.recent?.used.reduce((n, u) => n + u.failed, 0) ?? 0
+const callsOf = (p: Purpose) => p.recent?.used.reduce((n, u) => n + u.calls, 0) ?? 0
 
 export function ModelsSettingsPane() {
   useStore()
   const [v, setV] = useState<View | null>(null)
   const [err, setErr] = useState<string | null>(null)
-  const [adv, setAdv] = useState(() => location.hash.includes("advanced"))
-  const [open, setOpen] = useState<string | null>(null)
+  const [more, setMore] = useState(() => location.hash.includes("advanced"))
+  const [log, setLog] = useState(false)
+  const [edit, setEdit] = useState<{ key: string; own: boolean } | null>(null)
+  const logRef = useRef<HTMLElement>(null)
   /* a change made elsewhere (the Bot page, a Steve draft, another tab) arrives as a settings or bot event */
   const b = st.bots.steve
   const stamp = JSON.stringify([Object.entries(st.settings ?? {}).filter(([k]) => k.startsWith("models.")), b?.harness, b?.model, b?.reasoningEffort])
@@ -74,71 +79,56 @@ export function ModelsSettingsPane() {
   }
   const s = v.steve
   const own = v.purposes.filter((p) => !p.follows)
+  const rest = v.purposes.filter((p) => p.follows)
   const steveChoice: Choice = { harness: s.runs_on, models: s.models, effort: s.effort }
+  const failing = v.purposes.filter((p) => failedOf(p) > 0)
+  const failed = failing.reduce((n, p) => n + failedOf(p), 0)
+  const editing = edit && v.purposes.find((p) => p.key === edit.key)
+  const showLog = () => { setLog(true); requestAnimationFrame(() => logRef.current?.scrollIntoView({ behavior: "smooth", block: "start" })) }
   return (
     <div className="flex flex-col gap-10" data-models-settings>
-      <section data-steve-runtime>
-        <SectionLabel>Steve 自己的判断</SectionLabel>
-        <div className="rounded-xl border bg-card px-4 py-3.5">
-          <div className="flex items-start gap-3">
-            <Robot k={s.bot_id ?? "steve"} size={40} className="mt-0.5 shrink-0" />
-            <div className="min-w-0 flex-1">
-              <p className="type-body text-foreground" data-steve-says>Steve 自己的判断都由 Steve 这个 Bot 来做，用它的 harness 和模型。</p>
-              <p className="mt-1 type-callout text-muted-foreground" data-steve-now>判断现在用：<span className="font-medium text-foreground">{harnessName(s.runs_on)}</span> · <span className="font-mono text-[12.5px] text-foreground">{s.models[0] ?? "默认模型"}</span>{s.model_note && `（${s.model_note}）`}</p>
-              <div className="mt-2 grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 type-callout">
-                <span className="text-muted-foreground">Harness</span><span className="font-medium" data-steve-harness>{harnessName(s.runs_on)}</span>
-                <span className="text-muted-foreground">模型</span>
-                <span className="min-w-0" data-steve-model>
-                  <span className="block break-words font-mono text-[12.5px]">{s.models.length ? s.models.join(" → ") : `${harnessName(s.runs_on)} 默认模型`}</span>
-                  {s.model_note && <span className="block type-footnote text-muted-foreground" data-model-note>{s.model_note}{s.harness === "codex" && !s.model ? "；要固定模型，在 Bot 页选一个" : ""}</span>}
-                  {s.models.length > 1 && <span className="block type-footnote text-muted-foreground">前一个出错或超时才换下一个</span>}
-                </span>
-                <span className="text-muted-foreground">推理强度</span><span>{s.effort ? EFFORT[s.effort] ?? s.effort : "跟随模型默认"}</span>
-              </div>
-              {s.note && <div className="mt-2 flex items-start gap-1.5 type-footnote text-attention" role="note"><TriangleAlertIcon className="mt-0.5 size-3.5 shrink-0" />{s.note}</div>}
-            </div>
+      <section data-models-default>
+        <SectionLabel>默认配置</SectionLabel>
+        <div className="flex items-start gap-3 rounded-xl border bg-card px-4 py-3.5">
+          <Robot k={s.bot_id ?? "steve"} size={36} className="mt-0.5 shrink-0" />
+          <div className="min-w-0 flex-1">
+            <p className="type-callout text-muted-foreground">没有单独配置的用途都用 {s.name} 的</p>
+            <ChoiceLine c={{ ...steveChoice, effort: null }} wrap className="mt-0.5 type-body" />
+            <p className="mt-0.5 type-footnote text-muted-foreground" data-steve-effort>思考强度：{effortName(s.effort)}{s.model_note && ` · ${s.model_note}`}{s.models.length > 1 && " · 前一个模型出错或超时才换下一个"}</p>
+            {s.note && <div className="mt-1.5 flex items-start gap-1.5 type-footnote text-attention" role="note"><TriangleAlertIcon className="mt-0.5 size-3.5 shrink-0" />{s.note}</div>}
           </div>
-          <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t pt-3">
-            <span className="type-footnote text-muted-foreground">在 Steve 的 Bot 页改 harness、模型和推理强度，跟其他 Bot 一样。</span>
-            <Button size="sm" variant="outline" onClick={() => editBot(s.bot_id ?? "steve")} data-edit-steve>在 Bot 页修改<ChevronRightIcon /></Button>
-          </div>
+          <Button size="sm" variant="outline" className="shrink-0" onClick={() => editBot(s.bot_id ?? "steve")} data-edit-steve>修改</Button>
         </div>
       </section>
 
-      <section data-models-advanced={adv ? "open" : "closed"}>
-        <button type="button" className="mb-2 flex w-full items-center justify-between gap-2 rounded-lg py-1 text-left" onClick={() => { setAdv(!adv); setOpen(null) }} aria-expanded={adv} data-advanced-toggle>
-          <span className="flex min-w-0 flex-col">
-            <span className="type-label text-muted-foreground">高级 · 按用途单独指定</span>
-            <span className="type-footnote text-muted-foreground" data-advanced-summary>
-              {own.length ? `${v.purposes.length - own.length} 类跟随 Steve，${own.length} 类单独指定（${own.map((p) => p.label).join("、")}）` : `${v.purposes.length} 类判断都跟随 Steve`}
-            </span>
-          </span>
-          <ChevronDownIcon className={cn("size-4 shrink-0 text-tertiary transition-transform", adv && "rotate-180")} />
-        </button>
-        {adv && <>
-          <p className="mb-3 type-callout text-muted-foreground">没单独指定的跟随 Steve（{harnessName(s.runs_on)} · <span className="font-mono text-[12.5px]">{s.models[0] ?? "默认模型"}</span>）。单独指定的可以换 harness、按顺序回退几个模型、设推理强度；改了下一次调用就生效。</p>
-          <Group>{v.purposes.map((p) => {
-            const on = open === p.key
-            const rec = !p.follows && same(p.value, p.recommended)
-            return (
-              <div key={p.key} data-purpose={p.key}>
-                <Row title={<span className="block min-w-0">
-                  <span className="flex items-center gap-2">{p.label}
-                    {p.follows ? <span className="rounded bg-muted px-1.5 py-px text-[11px] text-muted-foreground" data-follows>跟随 Steve</span>
-                      : <span className="rounded bg-blue/10 px-1.5 py-px text-[11px] font-medium text-blue" data-custom>{rec ? "单独指定 · 推荐" : "单独指定"}</span>}
-                  </span>
-                  <span className="block type-footnote font-normal text-muted-foreground">{p.desc}</span>
-                  <ChoiceLine c={p.effective} wrap className="mt-1 type-callout" />
-                  <RecentLine r={p.recent} />
-                </span>}
-                  onClick={() => setOpen(on ? null : p.key)} aria-expanded={on}>
-                  <ChevronDownIcon className={cn("size-4 text-tertiary transition-transform", on && "rotate-180")} />
-                </Row>
-                {on && <Editor p={p} v={v} steve={steveChoice} onSave={async (c, ok) => { if (await save({ purposes: { [p.key]: c } }, ok)) setOpen(null) }} onCancel={() => setOpen(null)} />}
-              </div>
-            )
-          })}</Group>
-        </>}
+      <section data-models-overrides>
+        <SectionLabel right={rest.length > 0 && (
+          <DropdownMenu>
+            <DropdownMenuTrigger render={<Button size="xs" variant="ghost" className="text-muted-foreground" data-add-override />}><PlusIcon />添加单独配置</DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="min-w-40">{rest.map((p) => <DropdownMenuItem key={p.key} onClick={() => setEdit({ key: p.key, own: true })} data-add-purpose={p.key}>{p.label}</DropdownMenuItem>)}</DropdownMenuContent>
+          </DropdownMenu>
+        )}>单独配置</SectionLabel>
+        {own.length ? <Group>{own.map((p) => (
+          <Row key={p.key} data-purpose={p.key} data-custom title={p.label} sub={<Brief c={p.effective} />} onClick={() => setEdit({ key: p.key, own: true })} aria-label={`编辑${p.label}`}>
+            <span className="type-footnote text-muted-foreground">编辑</span><ChevronRightIcon className="size-4 text-tertiary" />
+          </Row>
+        ))}</Group> : <p className="type-callout text-muted-foreground" data-no-overrides>所有用途都跟随默认配置。</p>}
+        {rest.length > 0 && <div className="mt-2" data-models-follows={more ? "open" : "closed"}>
+          <button type="button" className="-mx-2 flex w-[calc(100%+1rem)] items-center gap-2 rounded-lg px-2 py-2 text-left type-callout text-muted-foreground hover:bg-accent" onClick={() => setMore(!more)} aria-expanded={more} data-follows-toggle>
+            <ChevronRightIcon className={cn("size-4 shrink-0 text-tertiary transition-transform", more && "rotate-90")} />
+            <span className="min-w-0 flex-1">其余 {rest.length} 项跟随默认</span>
+          </button>
+          {more && <Group className="mt-1">{rest.map((p) => (
+            <Row key={p.key} data-purpose={p.key} data-follows title={p.label} sub={p.desc} onClick={() => setEdit({ key: p.key, own: false })} aria-label={`配置${p.label}`}>
+              <span className="type-footnote text-tertiary">跟随默认</span><ChevronRightIcon className="size-4 text-tertiary" />
+            </Row>
+          ))}</Group>}
+        </div>}
+        {failed > 0 && <button type="button" className="mt-3 flex w-full items-start gap-2 rounded-lg border border-attention/30 bg-attention/5 px-3 py-2 text-left type-footnote text-attention hover:bg-attention/10" onClick={showLog} data-models-failures>
+          <TriangleAlertIcon className="mt-0.5 size-3.5 shrink-0" />
+          <span className="min-w-0 flex-1">最近 7 天有 {failed} 次调用失败（{failing.map((p) => `${p.label} ${failedOf(p)}`).join("、")}）</span>
+          <span className="shrink-0 whitespace-nowrap underline-offset-2 hover:underline">查看记录</span>
+        </button>}
       </section>
 
       <section>
@@ -153,63 +143,138 @@ export function ModelsSettingsPane() {
           </div>
         ))}</Group>
       </section>
+
+      <RunLog v={v} open={log} setOpen={setLog} ref={logRef} />
+
+      <Sheet open={!!editing} onOpenChange={(o) => { if (!o) setEdit(null) }}>
+        <SheetContent side="right" className="w-[92vw] max-w-[420px]! gap-0 overflow-y-auto" data-models-sheet={editing?.key}>
+          {editing && <Editor key={editing.key} p={editing} v={v} steve={steveChoice} startOwn={edit!.own}
+            onSave={async (c, ok) => { if (await save({ purposes: { [editing.key]: c } }, ok)) setEdit(null) }} onCancel={() => setEdit(null)} />}
+        </SheetContent>
+      </Sheet>
     </div>
   )
 }
 
-function Editor({ p, v, steve, onSave, onCancel }: { p: Purpose; v: View; steve: Choice; onSave: (c: Choice | null, ok: string) => void; onCancel: () => void }) {
-  const [mode, setMode] = useState<"follow" | "own">(p.follows ? "follow" : "own")
-  const [harness, setHarness] = useState(p.value?.harness ?? p.effective.harness)
-  const [list, setList] = useState<string[]>(p.value?.models.length ? p.value.models : p.effective.models)
+/** 运行记录: what each purpose actually ran on in the past 7 days, kept apart from the configuration.
+ *  A call on a harness or model the purpose no longer uses is marked, so history is not read as config. */
+function RunLog({ v, open, setOpen, ref }: { v: View; open: boolean; setOpen: (o: boolean) => void; ref: Ref<HTMLElement> }) {
+  const used = v.purposes.filter((p) => p.recent?.used.length)
+  const idle = v.purposes.filter((p) => !p.recent?.used.length)
+  const calls = v.purposes.reduce((n, p) => n + callsOf(p), 0)
+  const failed = v.purposes.reduce((n, p) => n + failedOf(p), 0)
+  const current = (p: Purpose, u: UsedRow) => u.harness === p.effective.harness && (!p.effective.models.length || p.effective.models.some((m) => short(m) === short(u.model)))
+  return (
+    <section ref={ref} className="scroll-mt-4" data-models-log={open ? "open" : "closed"}>
+      <button type="button" className="mb-2 flex w-full items-center justify-between gap-2 rounded-lg py-1 text-left" onClick={() => setOpen(!open)} aria-expanded={open} data-log-toggle>
+        <span className="flex min-w-0 flex-col">
+          <span className="type-label text-muted-foreground">运行记录</span>
+          <span className="type-footnote text-muted-foreground" data-log-summary>最近 7 天 {calls} 次调用{failed > 0 && <span className="text-attention"> · 失败 {failed} 次</span>}</span>
+        </span>
+        <ChevronDownIcon className={cn("size-4 shrink-0 text-tertiary transition-transform", open && "rotate-180")} />
+      </button>
+      {open && <>
+        <p className="mb-3 type-footnote text-muted-foreground">这里是已经发生的调用，用的是当时的配置；与现在配置不同的标为「非当前配置」。按用途的完整用量见<a href="#/stats" className="ml-0.5 whitespace-nowrap text-blue hover:underline">统计</a>。</p>
+        {used.length ? <Group>{used.map((p) => (
+          <div key={p.key} className="px-2 py-2.5" data-log-purpose={p.key}>
+            <div className="flex items-baseline justify-between gap-3">
+              <span className="type-body">{p.label}</span>
+              <span className="shrink-0 type-footnote text-muted-foreground">{p.recent?.last && ago(p.recent.last.at)}</span>
+            </div>
+            <ul className="mt-1 flex flex-col gap-0.5">{p.recent!.used.map((u, i) => (
+              <li key={i} className="flex min-w-0 flex-wrap items-baseline gap-x-2 type-footnote text-muted-foreground" data-log-used={u.model}>
+                <span className="min-w-0 break-words">{harnessName(u.harness)} · <span className="font-mono">{short(u.model)}</span> ×{u.calls}</span>
+                {u.failed > 0 && <span className="text-attention">失败 {u.failed}</span>}
+                {!current(p, u) && <span className="rounded bg-muted px-1.5 py-px text-[11px]" data-log-stale>非当前配置</span>}
+              </li>
+            ))}</ul>
+          </div>
+        ))}</Group> : <p className="type-callout text-muted-foreground">最近 7 天没有调用。</p>}
+        {used.length > 0 && idle.length > 0 && <p className="mt-2 type-footnote text-tertiary" data-log-idle>没有调用：{idle.map((p) => p.label).join("、")}</p>}
+      </>}
+    </section>
+  )
+}
+
+/** The side-panel editor of one purpose: follow the default, or its own harness, model and effort; the
+ *  fallback models and the recommended choice sit under 高级选项. */
+function Editor({ p, v, steve, startOwn, onSave, onCancel }: { p: Purpose; v: View; steve: Choice; startOwn: boolean; onSave: (c: Choice | null, ok: string) => Promise<void>; onCancel: () => void }) {
+  const [mode, setMode] = useState<"follow" | "own">(!p.follows || startOwn ? "own" : "follow")
+  const [harness, setHarness] = useState(p.value?.harness ?? steve.harness)
+  const [list, setList] = useState<string[]>(p.value?.models ?? [])
   const [effort, setEffort] = useState<string>(p.value?.effort ?? "")
+  const [adv, setAdv] = useState(false)
   const [busy, setBusy] = useState(false)
   const h = v.harnesses.find((x) => x.id === harness)
-  const switchHarness = (x: string) => {
-    setHarness(x); setEffort("")
-    setList(x === steve.harness ? steve.models : v.harnesses.find((y) => y.id === x)?.default_models ?? [])
-  }
-  const move = (i: number, d: number) => { const n = [...list]; const [x] = n.splice(i, 1); n.splice(i + d, 0, x); setList(n) }
+  const onSteve = harness === steve.harness
+  const switchHarness = (x: string) => { setHarness(x); setEffort(""); setList([]) }
+  const primary = list[0] ?? ""
+  const backups = list.slice(1)
+  const setPrimary = (m: string) => setList(m ? [m, ...backups.filter((x) => x !== m)] : [])
+  const move = (i: number, d: number) => { const n = [...backups]; const [x] = n.splice(i, 1); n.splice(i + d, 0, x); setList([primary, ...n]) }
   const next: Choice | null = mode === "follow" ? null : { harness, models: list, effort: effort || null }
-  const dirty = mode === "follow" ? !p.follows : !same(next, p.value)
+  const dirty = mode === "follow" ? !p.follows : p.follows || !same(next, p.value)
   const run = async (c: Choice | null, ok: string) => { setBusy(true); await onSave(c, ok); setBusy(false) }
+  const inherited = onSteve ? `跟随默认（${steve.models[0] ?? "默认模型"}）` : `${harnessName(harness)} 默认（${h?.default_models[0] ?? "它自己的"}）`
   return (
-    <div className="mx-2 mb-3 mt-1 flex flex-col gap-4 rounded-xl border bg-card px-3.5 py-3.5" data-models-editor={p.key}>
-      <Segmented size="sm" value={mode} onChange={setMode} options={[["follow", "跟随 Steve"], ["own", "单独指定"]] as const} />
-      {mode === "follow" ? (
-        <div className="type-callout text-muted-foreground">用 Steve 的：<ChoiceLine c={steve} className="inline" /></div>
-      ) : <>
-        <div className="grid gap-3 sm:grid-cols-[140px_minmax(0,1fr)] sm:items-center">
-          <span className="type-footnote text-muted-foreground">Harness</span>
-          <Select value={harness} testId={`harness-${p.key}`} onChange={switchHarness} options={v.harnesses.map((x) => ({ v: x.id, l: x.name }))} />
-        </div>
-        {harness === "codex" && p.codex_note && <div className="flex items-start gap-1.5 type-footnote text-muted-foreground" data-codex-note><TriangleAlertIcon className="mt-0.5 size-3.5 shrink-0" />{p.codex_note}</div>}
-        <div>
-          <div className="mb-1.5 type-footnote text-muted-foreground">模型（按顺序，前一个出错或超时才换下一个，最多 {v.max} 个）</div>
-          {list.length > 0 ? <ol className="flex flex-col gap-1">{list.map((m, i) => (
-            <li key={m} className="flex items-center gap-2 rounded-lg bg-muted/60 py-1 pl-2.5 pr-1" data-model-item={m}>
-              <span className="w-4 shrink-0 text-right type-footnote tabular-nums text-muted-foreground">{i + 1}</span>
-              <span className="min-w-0 flex-1 truncate font-mono text-[13px]" title={m}>{m}</span>
-              <Button size="icon-xs" variant="ghost" aria-label={`上移 ${m}`} disabled={i === 0} onClick={() => move(i, -1)}><ArrowUpIcon /></Button>
-              <Button size="icon-xs" variant="ghost" aria-label={`下移 ${m}`} disabled={i === list.length - 1} onClick={() => move(i, 1)}><ArrowDownIcon /></Button>
-              <Button size="icon-xs" variant="ghost" aria-label={`移除 ${m}`} onClick={() => setList(list.filter((x) => x !== m))}><XIcon /></Button>
-            </li>))}
-          </ol> : <div className="rounded-lg bg-muted/60 px-2.5 py-1.5 type-callout text-muted-foreground">{harnessName(harness)} 的默认模型</div>}
-          {list.length < v.max && <div className="mt-2 max-w-sm"><ModelPicker harness={harness} value="" placeholder="添加模型…" exclude={list} testId={`add-${p.key}`} onChange={(m) => m && !list.includes(m) && setList([...list, m])} /></div>}
-        </div>
-        <div className="grid gap-3 sm:grid-cols-[140px_minmax(0,1fr)] sm:items-center">
-          <span className="type-footnote text-muted-foreground">推理强度</span>
-          <Select value={effort || "default"} testId={`effort-${p.key}`} onChange={(x) => setEffort(x === "default" ? "" : x)} options={[{ v: "default", l: harnessName(harness) === harnessName(steve.harness) && steve.effort ? `跟随 Steve（${EFFORT[steve.effort] ?? steve.effort}）` : "跟随模型默认" }, ...(h?.efforts ?? []).map((e) => ({ v: e.key, l: e.label }))]} />
-        </div>
-      </>}
-      <div className="flex flex-wrap items-center gap-2 border-t pt-3">
-        <span className="min-w-0 flex-1 type-footnote text-muted-foreground">{p.recommended && <>推荐：<ChoiceLine c={p.recommended} className="inline" /></>}</span>
-        {p.recommended && !same(p.value, p.recommended) && <Button size="sm" variant="ghost" className="text-muted-foreground" disabled={busy} onClick={() => void run(p.recommended, `${p.label}改用推荐`)} data-models-recommended>用推荐</Button>}
-        <Button size="sm" variant="ghost" onClick={onCancel}>取消</Button>
-        <Button size="sm" disabled={busy || !dirty || (mode === "own" && !harness)} onClick={() => void run(next, next ? `${p.label}改好了，下一次就用` : `${p.label}跟随 Steve`)} data-models-save>{busy && <Spinner />}保存</Button>
+    <div className="flex min-h-full flex-col" data-models-editor={p.key}>
+      <SheetHeader className="gap-1 px-5 pb-4 pt-5 pr-14">
+        <SheetTitle className="type-title">{p.label}</SheetTitle>
+        <SheetDescription className="type-footnote">{p.desc}</SheetDescription>
+      </SheetHeader>
+      <div className="flex flex-col gap-5 px-5">
+        <Segmented size="sm" value={mode} onChange={setMode} options={[["follow", "跟随默认"], ["own", "单独配置"]] as const} />
+        {mode === "follow" ? (
+          <div className="rounded-lg bg-muted/60 px-3 py-2.5 type-callout" data-follow-preview>
+            <span className="block type-footnote text-muted-foreground">用默认配置，默认改了这里跟着变</span>
+            <ChoiceLine c={steve} wrap className="mt-0.5" />
+          </div>
+        ) : <>
+          <Field label="Harness"><Select className="w-full" value={harness} testId={`harness-${p.key}`} onChange={switchHarness} options={v.harnesses.map((x) => ({ v: x.id, l: x.name }))} /></Field>
+          {harness === "codex" && p.codex_note && <div className="-mt-3 flex items-start gap-1.5 type-footnote text-muted-foreground" data-codex-note><TriangleAlertIcon className="mt-0.5 size-3.5 shrink-0" />{p.codex_note}</div>}
+          <Field label="模型"><ModelPicker harness={harness} value={primary} allowDefault defaultLabel={inherited} testId={`model-${p.key}`} onChange={setPrimary} /></Field>
+          <Field label="思考强度"><Select className="w-full" value={effort || "default"} testId={`effort-${p.key}`} onChange={(x) => setEffort(x === "default" ? "" : x)}
+            options={[{ v: "default", l: onSteve && steve.effort ? `跟随默认（${effortName(steve.effort)}）` : "跟随模型默认" }, ...(h?.efforts ?? []).map((e) => ({ v: e.key, l: e.label }))]} /></Field>
+          <div className="border-t pt-3" data-models-adv={adv ? "open" : "closed"}>
+            <button type="button" className="flex w-full items-center gap-1.5 py-1 text-left type-callout text-muted-foreground hover:text-foreground" onClick={() => setAdv(!adv)} aria-expanded={adv} data-adv-toggle>
+              <ChevronRightIcon className={cn("size-4 shrink-0 transition-transform", adv && "rotate-90")} />
+              <span className="min-w-0 flex-1">高级选项</span>
+              {!adv && backups.length > 0 && <span className="type-footnote">备用 {backups.length} 个</span>}
+            </button>
+            {adv && <div className="mt-2 flex flex-col gap-4">
+              <div>
+                <div className="mb-1.5 type-footnote text-muted-foreground">备用模型：主模型出错或超时时，按顺序换下一个（最多 {v.max - 1} 个）</div>
+                {!primary ? <div className="rounded-lg bg-muted/60 px-2.5 py-1.5 type-footnote text-muted-foreground">先选一个模型，才能加备用模型</div> : <>
+                  {backups.length > 0 && <ol className="flex flex-col gap-1">{backups.map((m, i) => (
+                    <li key={m} className="flex items-center gap-2 rounded-lg bg-muted/60 py-1 pl-2.5 pr-1" data-model-item={m}>
+                      <span className="w-4 shrink-0 text-right type-footnote tabular-nums text-muted-foreground">{i + 1}</span>
+                      <span className="min-w-0 flex-1 truncate font-mono text-[13px]" title={m}>{m}</span>
+                      <Button size="icon-xs" variant="ghost" aria-label={`上移 ${m}`} disabled={i === 0} onClick={() => move(i, -1)}><ArrowUpIcon /></Button>
+                      <Button size="icon-xs" variant="ghost" aria-label={`下移 ${m}`} disabled={i === backups.length - 1} onClick={() => move(i, 1)}><ArrowDownIcon /></Button>
+                      <Button size="icon-xs" variant="ghost" aria-label={`移除 ${m}`} onClick={() => setList(list.filter((x) => x !== m))}><XIcon /></Button>
+                    </li>))}
+                  </ol>}
+                  {list.length < v.max && <div className={cn(backups.length > 0 && "mt-2")}><ModelPicker harness={harness} value="" placeholder="添加备用模型…" exclude={list} testId={`add-${p.key}`} onChange={(m) => m && !list.includes(m) && setList([...list, m])} /></div>}
+                </>}
+              </div>
+              {p.recommended && <div className="flex flex-wrap items-center gap-2 type-footnote text-muted-foreground" data-models-recommended-line>
+                <span className="min-w-0 flex-1">推荐：<ChoiceLine c={p.recommended} wrap className="inline" /></span>
+                {!same(next, p.recommended) && <Button size="xs" variant="outline" onClick={() => { setHarness(p.recommended!.harness); setList(p.recommended!.models); setEffort(p.recommended!.effort ?? "") }} data-models-recommended>填入推荐</Button>}
+              </div>}
+            </div>}
+          </div>
+        </>}
       </div>
+      <SheetFooter className="mt-auto flex-row justify-end gap-2 border-t px-5 py-3">
+        <Button size="sm" variant="ghost" onClick={onCancel}>取消</Button>
+        <Button size="sm" disabled={busy || !dirty || (mode === "own" && !harness)} onClick={() => void run(next, next ? `${p.label}改好了，下一次调用就用` : `${p.label}改回跟随默认`)} data-models-save>{busy && <Spinner />}保存</Button>
+      </SheetFooter>
     </div>
   )
 }
+const Field = ({ label, children }: { label: string; children: ReactNode }) => (
+  <div className="flex flex-col gap-1.5" data-field={label}><span className="type-footnote text-muted-foreground">{label}</span>{children}</div>
+)
 
 /** On Steve's Bot page: the judgments run on this bot; what they use now, and which purposes are set apart. */
 export function SteveJudges({ harness, model }: { harness: string; model: string }) {
@@ -227,8 +292,8 @@ export function SteveJudges({ harness, model }: { harness: string; model: string
       </div>}
       {harness === "codex" && <div className="mt-1.5 type-footnote text-muted-foreground">Codex 通过 codex exec 做判断：回答写完后一次显示；研究在只读沙箱里进行。</div>}
       {v && <div className="mt-1.5 type-footnote text-muted-foreground">
-        {own.length ? `${own.map((p) => p.label).join("、")}单独指定了，不跟随这里。` : "所有判断都跟随这里。"}
-        <a href="#/settings/models/advanced" className="ml-1 text-blue hover:underline" data-goto-advanced>设置 · 模型 · 高级</a>
+        {own.length ? `${own.map((p) => p.label).join("、")}单独配置了，不跟随这里。` : "所有判断都跟随这里。"}
+        <a href="#/settings/models" className="ml-1 text-blue hover:underline" data-goto-advanced>设置 · 模型</a>
       </div>}
     </div>
   )
