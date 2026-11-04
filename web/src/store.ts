@@ -6,6 +6,7 @@ import { readEventPages } from "./event-pages"
 import { useEffect, useRef, useSyncExternalStore } from "react"
 import { toast as sonner } from "sonner"
 import { promptNeedle, withDecisionNotes } from "./decision-notes"
+import { blockSlots, type FeedRow } from "./feed-order"
 import { api, setPageWorkspace, stream, Unauthenticated, type State, type RItem, type RItemDetail, type RSession, type RDecision, type RBot, type REvent, type RProject, type Proposal, type LocalSession, type HubEvent, type RNotice } from "./api"
 import { cue } from "./bus"
 import type { RFile, PlanStep, RHold, RQueued, RKindReview } from "./api"
@@ -328,7 +329,7 @@ function choiceLabel(d: RDecision) {
 /* ── which agent turn answered a comment in the work log ──
  * a comment (timeline kind "me") becomes a user prompt in one of the item's sessions: "补充信息：…", "用户的回答：…", a merged queue…
  * the first unclaimed prompt sent at or after the comment that contains its text is the one; the reply is that turn */
-export type Reply = { s: string; from: number; to: number; text: string; tools: number; live: boolean }
+export type Reply = { s: string; from: number; to: number; text: string; tools: number; live: boolean; /** when the turn ended; Infinity while it runs */ end: number }
 function repliesOf(timeline: RItemDetail["timeline"], sids: string[]): Map<number, Reply> {
   const out = new Map<number, Reply>()
   const prompts = sids.flatMap((sid) => (raw.events.get(sid) ?? []).filter((e) => e.kind === "user").map((e) => ({ sid, e })))
@@ -354,7 +355,7 @@ function repliesOf(timeline: RItemDetail["timeline"], sids: string[]): Map<numbe
     /* the transcript tuples of this turn, for the full view */
     const firstSeq = evs[k + 1]?.seq ?? Infinity, endSeq = evs[end]?.seq ?? Infinity
     const at = (seq: number) => { const n = S ? S.seqs.findIndex((q) => q >= seq) : -1; return n < 0 ? (S?.seqs.length ?? 0) : n }
-    out.set(t.id, { s: p.sid, from: at(firstSeq), to: at(endSeq), text, tools, live })
+    out.set(t.id, { s: p.sid, from: at(firstSeq), to: at(endSeq), text, tools, live, end: live ? Infinity : (turn.at(-1)?.ts ?? p.e.ts) })
   }
   return out
 }
@@ -369,7 +370,20 @@ function itemOf(i: RItem): Item {
   const act = activeIndex.get(i.id)
   const lines = det ? withDecisionNotes(det.timeline, det.decisions) : []
   const replies = det ? repliesOf(lines, i.sessionIds) : new Map<number, Reply>()
-  const tl = det ? lines.flatMap((t) => t.kind === "session" && t.session_id && t.text.startsWith("开始会话") ? [["sys", `开始会话`, tm(t.ts)], ["sess", t.session_id]] : t.kind === "me" ? [["me", t.text, tm(t.ts), t.session_id ?? undefined, replies.get(t.id), t.files, t.via]] : [["sys", t.text, tm(t.ts)]]) : []
+  /* a session and a comment's reply show below the lines written while they ran (ST-42) */
+  const started = (t: (typeof lines)[number]) => t.kind === "session" && t.session_id && t.text.startsWith("开始会话") ? t.session_id : null
+  const rows = lines.map((t): FeedRow => {
+    const sid = started(t), r = t.kind === "me" ? replies.get(t.id) : undefined
+    if (sid) { const S = st.S[sid]; return { ts: t.ts, until: S?.st === "run" || S?.st === "wait" ? Infinity : sessionIndex.get(sid)?.updated ?? t.ts } }
+    return { ts: t.ts, until: r?.end, fence: t.kind === "me" }
+  })
+  const after = new Map(blockSlots(rows).flatMap((at, k) => at < 0 ? [] : [[at, k] as const])), tl: any[] = []
+  lines.forEach((t, n) => {
+    const sid = started(t)
+    tl.push(sid ? ["sys", `开始会话`, tm(t.ts)] : t.kind === "me" ? ["me", t.text, tm(t.ts), t.session_id ?? undefined, replies.get(t.id), t.files, t.via] : ["sys", t.text, tm(t.ts)])
+    const k = after.get(n); if (k == null) return
+    const sk = started(lines[k]); tl.push(sk ? ["sess", sk] : ["reply", replies.get(lines[k].id)])
+  })
   return {
     id: i.id, t: i.title, b: i.bot_id ?? "steve", st: i.status, deps: i.deps, src: i.source, ws: proj?.name ?? "—", project: i.project_id, up: tm(i.updated), star: i.star, acc: ACC[i.accept_mode ?? "inherit"] ?? "跟随全局",
     goals: det ? det.goalsList.map((g) => g.text) : [i.goal], now: i.now || "", plan: i.plan.length ? steps(i.plan) : undefined,
