@@ -6,6 +6,7 @@ CREATE TABLE IF NOT EXISTS lanes (
   id TEXT PRIMARY KEY,                          -- ln_…
   upstream TEXT NOT NULL, branch TEXT NOT NULL,
   window_ms INTEGER, max_members INTEGER,       -- NULL: the default (lane::batch::Policy)
+  checks TEXT NOT NULL DEFAULT '[]',            -- commands a batch must pass before it merges (you set them)
   state TEXT NOT NULL DEFAULT '{}',             -- lane::batch::Lane, serialized
   created INTEGER NOT NULL, updated INTEGER NOT NULL,
   UNIQUE (upstream, branch));

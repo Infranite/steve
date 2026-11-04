@@ -162,6 +162,13 @@ pub fn fetch(dir: &Path) -> Result<(), String> {
     git_net(dir, &["fetch", "--quiet", "--tags", "origin"]).map(|_| ())
 }
 
+/// Pushes `HEAD` of `dir` to `origin` as `branch`, fast-forward only (a target that moved meanwhile is a
+/// rejection, never overwritten), with the network deadline. Never under the core's lock.
+pub fn push_head(dir: &Path, branch: &str) -> Result<(), String> {
+    let refspec = format!("HEAD:refs/heads/{branch}");
+    git_net(dir, &["push", "--quiet", "origin", &refspec]).map(|_| ())
+}
+
 /// `git args…` with a deadline (network calls). The output is drained while the command runs.
 fn git_net(dir: &Path, args: &[&str]) -> Result<String, String> {
     let mut child = Command::new("git")

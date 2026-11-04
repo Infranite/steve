@@ -14,6 +14,8 @@ pub struct LaneRow {
     pub branch: String,
     pub window_ms: Option<i64>,
     pub max_members: Option<i64>,
+    /// Commands a batch must pass before it merges (JSON list of strings), as you set them.
+    pub checks: String,
     /// The state machine's snapshot (JSON).
     pub state: String,
     pub created: i64,
@@ -57,6 +59,7 @@ fn lane(r: &rusqlite::Row<'_>) -> rusqlite::Result<LaneRow> {
         branch: r.get("branch")?,
         window_ms: r.get("window_ms")?,
         max_members: r.get("max_members")?,
+        checks: r.get("checks")?,
         state: r.get("state")?,
         created: r.get("created")?,
         updated: r.get("updated")?,
@@ -207,6 +210,15 @@ pub fn request_set(
         "UPDATE lane_requests SET state = ?, unit = coalesce(?, unit), released_in = coalesce(?, released_in),
             reason = coalesce(?, reason), updated = ? WHERE id = ?",
         params![state, unit, released_in, reason, now(), id],
+    )?;
+    Ok(())
+}
+
+/// The commands a lane's batches must pass (empty: none).
+pub fn lane_checks_set(c: &Connection, id: &str, checks: &[String]) -> Result<()> {
+    c.execute(
+        "UPDATE lanes SET checks = ?, updated = ? WHERE id = ?",
+        params![serde_json::to_string(checks)?, now(), id],
     )?;
     Ok(())
 }
