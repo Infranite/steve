@@ -525,28 +525,68 @@ fn what_can_not_be_read_is_unknown_never_none() {
     g(&r, &["checkout", "-q", "main"]);
     land(&r);
     let bare = t.path().join("origin.git");
-    g(&r, &["remote", "set-url", "origin", "git@github.com:Acme/App.git"]);
-    g(&r, &["config", &format!("url.{}.insteadOf", bare.to_string_lossy()), "git@github.com:Acme/App.git"]);
+    g(
+        &r,
+        &["remote", "set-url", "origin", "git@github.com:Acme/App.git"],
+    );
+    g(
+        &r,
+        &[
+            "config",
+            &format!("url.{}.insteadOf", bare.to_string_lossy()),
+            "git@github.com:Acme/App.git",
+        ],
+    );
 
     /* rulesets only: `protected`, and no classic protection to read */
     let gh = fake_gh(
         t.path(),
         &[
-            ("repos/acme/app/rules/branches/main", r#"[{"type":"pull_request"}]"#),
+            (
+                "repos/acme/app/rules/branches/main",
+                r#"[{"type":"pull_request"}]"#,
+            ),
             ("repos/acme/app/branches/main", r#"{"protected":true}"#),
             ("graphql", r#"{"data":{"repository":{"mergeQueue":null}}}"#),
         ],
     );
     let p = profile(&r, None, None, &gh).unwrap();
-    assert_eq!((p.merge.value, &p.merge.how), (Merge::HostPr, &How::Found), "{:?}", p.merge);
-    let flow = p.checks.value.iter().find(|c| c.from == "workflow").unwrap();
-    assert_eq!((flow.name.as_str(), flow.on.clone()), (".github/workflows/检查.yml", vec!["pull_request".to_string()]));
-    assert!(matches!(&p.checks.how, How::Unknown { why } if why.contains("odd.yml")), "{:?}", p.checks);
+    assert_eq!(
+        (p.merge.value, &p.merge.how),
+        (Merge::HostPr, &How::Found),
+        "{:?}",
+        p.merge
+    );
+    let flow = p
+        .checks
+        .value
+        .iter()
+        .find(|c| c.from == "workflow")
+        .unwrap();
+    assert_eq!(
+        (flow.name.as_str(), flow.on.clone()),
+        (
+            ".github/workflows/检查.yml",
+            vec!["pull_request".to_string()]
+        )
+    );
+    assert!(
+        matches!(&p.checks.how, How::Unknown { why } if why.contains("odd.yml")),
+        "{:?}",
+        p.checks
+    );
     assert_eq!(p.ship.value, Ship::Merge);
-    assert!(matches!(&p.ship.how, How::Unknown { why } if why.contains("odd.yml")), "{:?}", p.ship);
+    assert!(
+        matches!(&p.ship.how, How::Unknown { why } if why.contains("odd.yml")),
+        "{:?}",
+        p.ship
+    );
     let mig = p.numbered.iter().find(|n| n.kind == "migrations").unwrap();
     assert!(mig.evidence.contains("最新 10_add.sql"), "{mig:?}");
-    assert_eq!(p.pace.releases, 0, "a tag on another branch is not this branch's release");
+    assert_eq!(
+        p.pace.releases, 0,
+        "a tag on another branch is not this branch's release"
+    );
 
     /* classic protection we may not read: what was read stands, the rest is unknown */
     let gh = fake_gh(
@@ -565,7 +605,11 @@ fn what_can_not_be_read_is_unknown_never_none() {
     )
     .unwrap();
     let p = profile(&r, None, None, &gh).unwrap();
-    assert!(matches!(&p.merge.how, How::Unknown { why } if why.contains("管理员")), "{:?}", p.merge);
+    assert!(
+        matches!(&p.merge.how, How::Unknown { why } if why.contains("管理员")),
+        "{:?}",
+        p.merge
+    );
     assert!(matches!(p.checks.how, How::Unknown { .. }));
 
     /* a merge queue set up in classic protection: only GraphQL tells */
@@ -574,10 +618,16 @@ fn what_can_not_be_read_is_unknown_never_none() {
         &[
             ("repos/acme/app/rules/branches/main", "[]"),
             ("repos/acme/app/branches/main", r#"{"protected":false}"#),
-            ("graphql", r#"{"data":{"repository":{"mergeQueue":{"id":"MQ_1"}}}}"#),
+            (
+                "graphql",
+                r#"{"data":{"repository":{"mergeQueue":{"id":"MQ_1"}}}}"#,
+            ),
         ],
     );
-    assert_eq!(profile(&r, None, None, &gh).unwrap().merge.value, Merge::HostQueue);
+    assert_eq!(
+        profile(&r, None, None, &gh).unwrap().merge.value,
+        Merge::HostQueue
+    );
 
     /* a branch name with `#` and `/` reaches GitHub as one segment */
     g(&r, &["checkout", "-q", "-b", "rel/1#2"]);
@@ -586,16 +636,44 @@ fn what_can_not_be_read_is_unknown_never_none() {
     let gh = fake_gh(
         t.path(),
         &[
-            ("repos/acme/app/rules/branches/rel%2F1%232", r#"[{"type":"merge_queue"}]"#),
-            ("repos/acme/app/branches/rel%2F1%232", r#"{"protected":false}"#),
+            (
+                "repos/acme/app/rules/branches/rel%2F1%232",
+                r#"[{"type":"merge_queue"}]"#,
+            ),
+            (
+                "repos/acme/app/branches/rel%2F1%232",
+                r#"{"protected":false}"#,
+            ),
         ],
     );
-    assert_eq!(profile(&r, Some("rel/1#2"), None, &gh).unwrap().merge.value, Merge::HostQueue);
+    assert_eq!(
+        profile(&r, Some("rel/1#2"), None, &gh).unwrap().merge.value,
+        Merge::HostQueue
+    );
 
     /* a host this reader doesn't know: checks unknown, not "none" */
-    g(&r, &["remote", "set-url", "origin", "git@gitlab.example.com:acme/app.git"]);
-    g(&r, &["config", &format!("url.{}.insteadOf", bare.to_string_lossy()), "git@gitlab.example.com:acme/app.git"]);
+    g(
+        &r,
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            "git@gitlab.example.com:acme/app.git",
+        ],
+    );
+    g(
+        &r,
+        &[
+            "config",
+            &format!("url.{}.insteadOf", bare.to_string_lossy()),
+            "git@gitlab.example.com:acme/app.git",
+        ],
+    );
     let p = profile(&r, Some("main"), None, &gh).unwrap();
     assert!(matches!(&p.merge.how, How::Unknown { .. }));
-    assert!(matches!(&p.checks.how, How::Unknown { why } if why.contains("gitlab.example.com")), "{:?}", p.checks);
+    assert!(
+        matches!(&p.checks.how, How::Unknown { why } if why.contains("gitlab.example.com")),
+        "{:?}",
+        p.checks
+    );
 }

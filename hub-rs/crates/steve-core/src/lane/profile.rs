@@ -506,9 +506,7 @@ fn triggers(yaml: &str) -> Option<BTreeMap<String, Vec<String>>> {
         .map(|l| (l.len() - l.trim_start().len(), l.trim_end()))
         .collect();
     let at = lines.iter().position(|(i, l)| {
-        *i == 0
-            && key_value(l)
-                .is_some_and(|(k, _)| k == "on" || k == "true")
+        *i == 0 && key_value(l).is_some_and(|(k, _)| k == "on" || k == "true")
     })?;
     let (_, rest) = key_value(lines[at].1)?;
     if !rest.is_empty() {
@@ -595,7 +593,9 @@ fn key_value(l: &str) -> Option<(String, &str)> {
         let end = l[1..].find(q)? + 1;
         (&l[1..end], l[end + 1..].trim_start().strip_prefix(':')?)
     } else {
-        let n = l.find(": ").or_else(|| l.ends_with(':').then(|| l.len() - 1))?;
+        let n = l
+            .find(": ")
+            .or_else(|| l.ends_with(':').then(|| l.len() - 1))?;
         (&l[..n], &l[n + 1..])
     };
     let v = v.trim();
@@ -698,7 +698,9 @@ fn flow_scalar(c: &[char], pos: &mut usize, key: bool) -> Option<Flow> {
     }
     let start = *pos;
     while let Some(x) = c.get(*pos) {
-        if matches!(x, ',' | ']' | '}' | '[' | '{') || (*x == ':' && (key || c.get(*pos + 1).is_none_or(|n| n.is_whitespace()))) {
+        if matches!(x, ',' | ']' | '}' | '[' | '{')
+            || (*x == ':' && (key || c.get(*pos + 1).is_none_or(|n| n.is_whitespace())))
+        {
             break;
         }
         *pos += 1;
@@ -1039,8 +1041,14 @@ fn run(mut cmd: Command, deadline: Duration) -> Result<(bool, String, String), S
     };
     let (tx, rx) = mpsc::channel();
     let pipes: [Option<Box<dyn Read + Send>>; 2] = [
-        child.stdout.take().map(|o| Box::new(o) as Box<dyn Read + Send>),
-        child.stderr.take().map(|o| Box::new(o) as Box<dyn Read + Send>),
+        child
+            .stdout
+            .take()
+            .map(|o| Box::new(o) as Box<dyn Read + Send>),
+        child
+            .stderr
+            .take()
+            .map(|o| Box::new(o) as Box<dyn Read + Send>),
     ];
     for (n, pipe) in pipes.into_iter().enumerate() {
         let tx = tx.clone();
@@ -1131,19 +1139,32 @@ mod tests {
         /* nested flow maps, unindented lists, comments, quoted keys */
         assert_eq!(
             keys("on: {push: {tags: ['v*']}, pull_request: {}}\n"),
-            vec![("pull_request".into(), vec![]), ("push".into(), vec!["tags".into()])]
+            vec![
+                ("pull_request".into(), vec![]),
+                ("push".into(), vec!["tags".into()])
+            ]
         );
         assert_eq!(
             keys("on:\n- pull_request # CI\n- 'merge_group'\njobs: {}\n"),
-            vec![("merge_group".into(), vec![]), ("pull_request".into(), vec![])]
+            vec![
+                ("merge_group".into(), vec![]),
+                ("pull_request".into(), vec![])
+            ]
         );
         assert_eq!(
-            keys("on: # events\n  push:\n    'tags': ['v*'] # releases\n    paths-ignore:\n      - docs/**\n"),
+            keys(
+                "on: # events\n  push:\n    'tags': ['v*'] # releases\n    paths-ignore:\n      - docs/**\n"
+            ),
             vec![("push".into(), vec!["tags".into(), "paths-ignore".into()])]
         );
         assert_eq!(
-            keys("on:\n  pull_request:\n    types: [opened, 'synchronize']\n    branches:\n      - main\n      - 'release/**'\n"),
-            vec![("pull_request".into(), vec!["types".into(), "branches".into()])]
+            keys(
+                "on:\n  pull_request:\n    types: [opened, 'synchronize']\n    branches:\n      - main\n      - 'release/**'\n"
+            ),
+            vec![(
+                "pull_request".into(),
+                vec!["types".into(), "branches".into()]
+            )]
         );
         assert_eq!(keys("on: \"push\" # all\n"), vec![("push".into(), vec![])]);
         assert_eq!(keys("'on': [push]\n"), vec![("push".into(), vec![])]);
@@ -1166,10 +1187,17 @@ mod tests {
             cmd.args(["-c", &script]);
             let t = Instant::now();
             assert!(run(cmd, Duration::from_millis(300)).is_err(), "{script}");
-            assert!(t.elapsed() < Duration::from_secs(3), "{script}: {:?}", t.elapsed());
+            assert!(
+                t.elapsed() < Duration::from_secs(3),
+                "{script}: {:?}",
+                t.elapsed()
+            );
         }
         std::thread::sleep(Duration::from_secs(6));
-        assert!(!alive.exists(), "what the command started was killed with it");
+        assert!(
+            !alive.exists(),
+            "what the command started was killed with it"
+        );
         let mut ok = Command::new("/bin/sh");
         ok.args(["-c", "echo out; echo err >&2; exit 3"]);
         assert_eq!(
