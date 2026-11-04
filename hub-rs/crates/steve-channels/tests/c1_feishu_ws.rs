@@ -177,6 +177,13 @@ async fn group_mention_over_the_long_connection() {
     let d = h.fake.ws_wait_acked(&id, T).await.expect("acked");
     assert_eq!(d.ack.expect("ack").code, 200);
     until(&h, MSGS, 1).await;
+    // the message is stored before it is linked to its event: wait for the link too
+    until(
+        &h,
+        "SELECT count(*) FROM chan_messages WHERE ?1 = ?1 AND direction = 'in' AND event_id IS NOT NULL",
+        1,
+    )
+    .await;
 
     // the space, from GET chats/{id}
     let s = &q(

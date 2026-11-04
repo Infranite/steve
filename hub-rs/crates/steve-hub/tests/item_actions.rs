@@ -14,6 +14,8 @@ use steve_hub::bus::Bus;
 use steve_hub::config::Config;
 
 struct Env {
+    /// one Hub at a time in this process: the fake agent's log path is a process env var (see [`start`])
+    _one: tokio::sync::MutexGuard<'static, ()>,
     _home: tempfile::TempDir,
     base: String,
     http: reqwest::Client,
@@ -79,7 +81,10 @@ async fn until<F: std::future::Future<Output = bool>>(secs: u64, mut f: impl FnM
     false
 }
 
+static ONE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 async fn start() -> Env {
+    let one = ONE.lock().await;
     steve_modules::net::forbid_in_this_process();
     let home = tempfile::tempdir().expect("tmp");
     let h = home.path().to_path_buf();
@@ -91,7 +96,7 @@ async fn start() -> Env {
     let fake = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../steve-acp/tests/fake-acp.js");
     let log = h.join("acp.log");
     // the adapter inherits the process env: the log path goes there
-    // SAFETY: this file has one test, so one Hub per process sets it, before any adapter starts
+    // SAFETY: the tests here take `ONE` first, so one Hub per process sets it, before any adapter starts
     unsafe { std::env::set_var("FAKE_ACP_LOG", &log) };
     let mut vars: HashMap<String, String> = HashMap::new();
     for (k, v) in [
@@ -157,6 +162,7 @@ async fn start() -> Env {
         .map(|c| c.split(';').next().unwrap_or_default().to_string())
         .expect("session cookie");
     Env {
+        _one: one,
         _home: home,
         base,
         http,
@@ -348,7 +354,12 @@ async fn pause_finish_drop_and_new_cycles() {
     let l = lifecycle(&e, &iid).await;
     assert_eq!(l["phase"], "ready", "{l}");
     let (s, v) = act(&e, &iid, "drop").await;
-    assert_eq!((s, v["status"].as_str()), (200, Some("drop")), "{v}");
+    /* dropped at once, or (a turn still winding down under load) closing as a cancel */
+    assert_eq!(s, 200, "{v}");
+    assert!(
+        v["status"] == "drop" || (v["phase"] == "closing" && v["closing"]["kind"] == "cancel"),
+        "{v}"
+    );
     // it closes once nothing of it runs (a turn still winding down under load is waited for)
     assert!(
         until(10, || async {

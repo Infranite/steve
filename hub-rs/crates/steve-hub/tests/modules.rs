@@ -109,6 +109,11 @@ fn spawn_hub(
         .env_remove("CODEX_HOME")
         .env("STEVE_WEB_DIR", web_dir)
         .env_remove("STEVE_OIDC_ISSUER")
+        // the machine's own knowledge store (STEVE_KB_STORE=openviking on a Steve host) is not the test's
+        .env_remove("STEVE_KB_STORE")
+        .env_remove("STEVE_OPENVIKING_KEY_FILE")
+        .env_remove("STEVE_OPENVIKING_URL")
+        .env_remove("STEVE_OPENVIKING_ACCOUNT")
         .stdout(std::fs::File::create(out).expect("out"))
         .stderr(std::fs::File::create(log).expect("log"))
         .spawn()

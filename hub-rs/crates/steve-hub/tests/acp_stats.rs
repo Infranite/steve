@@ -265,6 +265,9 @@ async fn turns_and_tokens_land_in_the_stats_tables() {
         )
         .unwrap();
     assert_eq!((tin, tcr, turns_n), (16, 40, 2));
-    let dirty = e.count("SELECT count(*) FROM item_stats WHERE dirty = 1");
-    assert_eq!(dirty, 1);
+    // the turns flagged the item's stats; the Hub's refresher (every 2 s) may already have recomputed them
+    let flagged = e.count(
+        "SELECT count(*) FROM item_stats WHERE dirty = 1 OR updated >= (SELECT max(ended) FROM agent_turns)",
+    );
+    assert_eq!(flagged, 1);
 }
