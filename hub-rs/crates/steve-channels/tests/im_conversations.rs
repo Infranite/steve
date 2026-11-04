@@ -1121,8 +1121,17 @@ async fn your_private_chat_with_the_bot_is_owner_only() {
     assert_eq!(turns.len(), 1, "{turns:?}");
     assert!(turns[0].1.owner_only && turns[0].1.research);
     // a one-to-one chat whose member count the provider never gave is still complete: one person
-    exec(&h, "UPDATE spaces SET member_count = 0 WHERE external_id = 'D_ME'", &[]);
-    push(&h, &h.bot.clone(), msg("D_ME", "m2", "upx", "现在呢", false, false)).await;
+    exec(
+        &h,
+        "UPDATE spaces SET member_count = 0 WHERE external_id = 'D_ME'",
+        &[],
+    );
+    push(
+        &h,
+        &h.bot.clone(),
+        msg("D_ME", "m2", "upx", "现在呢", false, false),
+    )
+    .await;
     let turns = t.turns.lock().unwrap().clone();
     assert_eq!(turns.len(), 2, "{turns:?}");
     assert!(turns[1].1.owner_only, "still only you");
@@ -1397,6 +1406,25 @@ async fn the_conversation_card_says_who_asks_and_who_listens() {
         "{theirs}"
     );
     assert!(theirs.contains("只能作为提议"), "{theirs}");
+    // an organization not everyone in the workspace may see is not named
+    exec(
+        &h,
+        "UPDATE parties SET visibility = 'private' WHERE id = 'org_acme'",
+        &[],
+    );
+    let hidden = card(&turns[1].0);
+    assert!(
+        hidden.contains("提问的人：李雷（外部）") && !hidden.contains("ACME"),
+        "{hidden}"
+    );
+    // a job that ended says nothing about now
+    exec(
+        &h,
+        "UPDATE links SET props = '{\"to\":\"2025-01\"}' WHERE object_id = 'org_acme'",
+        &[],
+    );
+    let ended = card(&turns[1].0);
+    assert!(ended.contains("提问的人：李雷（身份未知）"), "{ended}");
     // the provider counts more members than are recorded: they are said to be unknown
     exec(
         &h,
@@ -1464,4 +1492,54 @@ async fn an_incomplete_member_list_widens_nothing() {
         !scopes(&h).contains(&"workspace".to_string()),
         "two members nobody recorded"
     );
+}
+
+/// A group a chat-list sync found has no member count; the first message there fills it in (and its
+/// members), so the chat can be judged complete.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_group_without_a_member_count_gets_one_from_its_next_message() {
+    let h = setup(true).await;
+    h.fake.space(
+        "G_S",
+        "同步来的群",
+        SpaceKind::Group,
+        false,
+        &[("upx", "我"), ("uli", "李雷")],
+    );
+    push(
+        &h,
+        &h.bot.clone(),
+        msg("G_S", "s1", "upx", "在吗", false, false),
+    )
+    .await;
+    exec(
+        &h,
+        "UPDATE spaces SET member_count = 0 WHERE external_id = 'G_S'",
+        &[],
+    );
+    exec(
+        &h,
+        "DELETE FROM space_members WHERE space_id = (SELECT id FROM spaces WHERE external_id = 'G_S') AND account_id <> (SELECT account_id FROM connections WHERE id = ?)",
+        &[&h.bot],
+    );
+    push(
+        &h,
+        &h.bot.clone(),
+        msg("G_S", "s2", "upx", "在吗", false, false),
+    )
+    .await;
+    assert_eq!(
+        one(
+            &h,
+            "SELECT member_count FROM spaces WHERE external_id = ?",
+            &["G_S"]
+        ),
+        json!(2)
+    );
+    let n = one(
+        &h,
+        "SELECT count(*) FROM space_members WHERE space_id = (SELECT id FROM spaces WHERE external_id = ?)",
+        &["G_S"],
+    );
+    assert!(n.as_i64().unwrap() >= 3, "the bot and both people: {n}");
 }

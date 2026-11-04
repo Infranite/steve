@@ -20,8 +20,8 @@ pub enum Relation {
     Owner,
     /// A member of the workspace, or someone who works at the workspace's own organization.
     Colleague,
-    /// Someone who works at another organization.
-    External { org: String },
+    /// Someone who works at another organization (named when the whole workspace may see it).
+    External { org: Option<String> },
     /// Nothing recorded says who they are.
     Unknown,
 }
@@ -31,7 +31,8 @@ impl Relation {
         match self {
             Self::Owner => "所有者本人".into(),
             Self::Colleague => "同事".into(),
-            Self::External { org } => format!("外部，{org}"),
+            Self::External { org: Some(org) } => format!("外部，{org}"),
+            Self::External { org: None } => "外部".into(),
             Self::Unknown => "身份未知".into(),
         }
     }
@@ -82,20 +83,25 @@ pub fn relation(c: &Connection, ws: &str, party: Option<&str>) -> rusqlite::Resu
         Some(_) => return Ok(Relation::Colleague),
         None => {}
     }
-    // a job: the workspace's own organization makes a colleague, another one an outsider
-    let job: Option<(String, Option<String>)> = c
+    // a current job (one that ended says nothing about now): the workspace's own organization makes a
+    // colleague, another one an outsider, named only when the whole workspace may see that organization
+    let job: Option<(String, Option<String>, String)> = c
         .query_row(
-            "SELECT o.name, o.org_kind FROM links l JOIN parties o ON o.id = l.object_id AND o.workspace_id = l.workspace_id
+            "SELECT o.name, o.org_kind, o.visibility FROM links l
+               JOIN parties o ON o.id = l.object_id AND o.workspace_id = l.workspace_id
               WHERE l.workspace_id = ?1 AND l.subject_type = 'party' AND l.subject_id = ?2
                 AND l.predicate = 'works_at' AND l.object_type = 'party' AND o.status = 'active'
+                AND json_extract(l.props, '$.to') IS NULL
               ORDER BY l.created DESC LIMIT 1",
             params![ws, party],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .optional()?;
     Ok(match job {
-        Some((_, Some(kind))) if kind == "self" => Relation::Colleague,
-        Some((org, _)) => Relation::External { org },
+        Some((_, Some(kind), _)) if kind == "self" => Relation::Colleague,
+        Some((org, _, vis)) => Relation::External {
+            org: (vis == "workspace").then_some(org),
+        },
         None => Relation::Unknown,
     })
 }

@@ -321,9 +321,15 @@ impl Channels {
             });
         let mut info: Option<SpaceInfo> = None;
         let mut members: Vec<MemberInfo> = Vec::new();
-        let need_members = existing.is_none() || (msg.sender.display_name.is_none() && !known);
+        // a group known without its member count (found by a chat list sync, which has none) is looked
+        // at once more: who is in it decides what may be said there
+        let refresh = existing
+            .as_ref()
+            .is_some_and(|s| s.kind != "dm" && s.member_count == 0);
+        let need_members =
+            existing.is_none() || refresh || (msg.sender.display_name.is_none() && !known);
         if let (Some(a), Some(cx)) = (&adapter, &cx) {
-            if existing.is_none() {
+            if existing.is_none() || refresh {
                 match a.space_info(cx, &msg.space_ext_id).await {
                     Ok(i) => info = Some(i),
                     Err(e) => tracing::warn!(conn, "channel inbound: space_info failed: {e}"),
@@ -510,7 +516,16 @@ impl Channels {
         };
         let actor = facts.owner_user.as_deref().unwrap_or(&facts.created_by);
         let mut decision_id = None;
-        if created {
+        // a group seen before without its member count: now that it is known, record it and its members
+        let filled = !created && space.member_count == 0 && info.member_count > 0;
+        if filled {
+            tx.execute(
+                "UPDATE spaces SET member_count = ?1, has_external = max(has_external, ?2), updated = ?3
+                  WHERE id = ?4 AND member_count = 0",
+                rusqlite::params![info.member_count, info.has_external as i64, now, space.id],
+            )?;
+        }
+        if created || filled {
             spaces::add_member(tx, ws, &space.id, &facts.account_id, "bot", now)?;
             for m in members {
                 if let Some(id) = identify_handle_as(
@@ -527,7 +542,7 @@ impl Channels {
                     spaces::add_member(tx, ws, &space.id, &id.account_id, &m.role, now)?;
                 }
             }
-            if mode == Mode::Bot && info.kind.is_group() {
+            if created && mode == Mode::Bot && info.kind.is_group() {
                 decision_id = Some(spaces::open_new_space_decision(
                     tx,
                     ws,
