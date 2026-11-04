@@ -62,15 +62,15 @@ def log(msg):
 
 
 def env_file():
-    """steve.env as a dict (KEY=VALUE lines)."""
-    out = {}
+    """What steve.env sets, read the way run.sh reads it (sourced by the shell: $HOME and quotes expand)."""
     p = HOME / "steve.env"
-    if p.exists():
-        for line in p.read_text().splitlines():
-            if "=" in line and not line.lstrip().startswith("#"):
-                k, v = line.split("=", 1)
-                out[k.strip()] = v.strip().strip("'\"")
-    return out
+    if not p.exists():
+        return {}
+    clean = {k: os.environ[k] for k in ("HOME", "PATH", "USER", "TMPDIR") if k in os.environ}
+    out = subprocess.run(["/bin/zsh", "-fc", 'set -a; source "$1"; env -0', "zsh", str(p)],
+                         env=clean, capture_output=True, check=True).stdout
+    sourced = dict(kv.split("=", 1) for kv in out.decode().split("\0") if "=" in kv)
+    return {k: v for k, v in sourced.items() if clean.get(k) != v and k not in ("PWD", "OLDPWD", "SHLVL", "_")}
 
 
 def port():
