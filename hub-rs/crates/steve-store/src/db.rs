@@ -71,6 +71,8 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/029.sql"),
     // 30: what a channel send needs to be retried and accounted for.
     include_str!("../migrations/030.sql"),
+    // 31: merge lanes: one per target, their requests and units (the merge window).
+    include_str!("../migrations/031.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).

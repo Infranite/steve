@@ -14,4 +14,5 @@
 pub mod batch;
 pub mod precheck;
 pub mod profile;
+pub mod store;
 pub mod target;

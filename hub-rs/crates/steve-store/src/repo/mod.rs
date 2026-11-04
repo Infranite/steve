@@ -8,6 +8,7 @@ mod decisions;
 mod files;
 mod items;
 pub mod kinds;
+pub mod lanes;
 mod sessions;
 mod stats;
 mod thread;

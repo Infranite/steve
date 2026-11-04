@@ -15,8 +15,10 @@
 
 use std::collections::VecDeque;
 
+use serde::{Deserialize, Serialize};
+
 /// A lane's limits. Both come from the lane's settings (falling back to the workspace's).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Policy {
     /// How long a batch collects, from its first request.
     pub window_ms: i64,
@@ -34,7 +36,7 @@ impl Default for Policy {
 }
 
 /// A batch (a straight-through request is a batch of one).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Unit {
     pub id: u64,
     /// The requests it merges, in arrival order.
@@ -84,7 +86,7 @@ pub enum Action {
 }
 
 /// One lane's state.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Lane {
     pub policy: Policy,
     /// The unit in flight (merging or releasing).
@@ -93,6 +95,7 @@ pub struct Lane {
     pub collecting: Option<Unit>,
     /// Requests waiting for the next batch, with when they arrived.
     pub queue: VecDeque<(String, i64)>,
+    #[serde(default)]
     next: u64,
 }
 
