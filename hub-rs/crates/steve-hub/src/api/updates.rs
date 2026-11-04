@@ -26,7 +26,11 @@ pub async fn status(
     let u = service(&st)?;
     let mut v = u.status().map_err(err)?;
     v["capability"]["can_execute"] = json!(u.execution_reason().is_none() && owner(&cx).is_ok());
+    v["install"] = json!(u.install(&st.cfg.steve_repo));
     if owner(&cx).is_err() {
+        // paths on this machine are the instance manager's
+        v["install"] = json!({"kind": v["install"]["kind"]});
+        v["backup"] = Value::Null;
         v["capability"]["reason"] = json!("仅实例管理员可批准和执行升级");
         if v["operation"].is_object() {
             v["operation"]["previous"] = Value::Null;

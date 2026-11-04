@@ -12,10 +12,13 @@ const check = status => ({ status, checked_at: Date.now(), version: "v1.2.0", re
 let state = { repository: "Infranite/steve", current: { hub: "v1.1.0", web: "v1.1.0" }, capability: { managed: false, can_execute: false, reason: "source checkout" }, check: null, operation: null }
 let denyExecute = false, unrecordedPost = false, failCheck = false, hangStatus = false
 let disconnected = false, dropPost = false, checkStatus = "available", approvals = 0, rejections = 0, gets = 0
+// what the restarted Hub answers on /healthz; the fixture page itself loads as "dev" unless ?web= names a version
+let health = { ok: true, version: "v1.2.0", web_version: "v1.2.0", drain: false, recovery: { state: "ok" } }, healthDown = false
 const operation = (phase = "staging") => ({ id: "up_fixture", idempotency_key: "agent-request", version: "v1.2.0", phase, requested_by: "test-agent", created_at: Date.now(), updated_at: Date.now(), error: null, previous: "v1.1.0", target: "v1.2.0" })
 await page.route("**/*", async route => {
   const req = route.request(), u = new URL(req.url())
   if (u.origin !== base) return route.abort("blockedbyclient")
+  if (u.pathname === "/healthz") return healthDown ? route.abort("connectionfailed") : route.fulfill({ contentType: "application/json", body: JSON.stringify(health) })
   if (!u.pathname.startsWith("/api/")) return route.continue()
   let data
   if (u.pathname === "/api/updates" && req.method() === "GET") { gets++; if (hangStatus) return; if (disconnected) return route.abort("connectionfailed"); data = state }
@@ -152,7 +155,70 @@ try {
   await page.reload(); await page.locator('[data-upgrade-check-status="ahead"]').waitFor()
   assert.equal(await page.locator("[data-upgrade-repair]").count(), 0, "pair mismatch cannot bypass check semantics")
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false)
+
+  // Installations Steve doesn't switch itself: this machine's commands instead of a button, then a read-back.
+  const home = "/Users/me/.steve", repo = "/Users/me/Agents/steve"
+  state = { ...state, current: { hub: "v1.1.0", web: "v1.1.0" }, capability: { managed: false, can_execute: false, reason: "当前安装未使用 managed supervisor" }, install: { kind: "local_release", home, release: "1.1.0-local-51826fc", repo }, check: check("available"), operation: null, backup: null }
+  await page.reload(); await page.locator('[data-upgrade-guide="local_release"]').waitFor()
+  assert.equal(await page.locator("[data-upgrade-execute]").count(), 0)
+  assert.match(await page.locator("[data-upgrade-capability]").innerText(), /^本机签名构建：/)
+  assert.equal(await page.getByText("当前安装未使用 managed supervisor").count(), 0, "the raw supervisor reason gives way to the installation")
+  const commands = await page.locator("[data-upgrade-command] pre").allInnerTexts()
+  assert.deepEqual(commands.map(c => c.trim()).slice(1), [`python3 ${repo}/ops/local-release.py build v1.2.0`, `python3 ${repo}/ops/local-release.py deploy ${home}/releases/1.2.0-local-*`])
+  assert.match(await page.locator("[data-upgrade-backup]").innerText(), /\/Users\/me\/\.steve\/backups/)
+  assert.match(await page.locator("[data-upgrade-recovery]").innerText(), /deploy \/Users\/me\/\.steve\/releases\/1\.1\.0-local-51826fc/)
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false, "commands wrap on a phone")
+  if (process.env.STEVE_TEST_ARTIFACTS) await page.screenshot({ path: process.env.STEVE_TEST_ARTIFACTS + "/upgrade-guide-mobile.png", fullPage: true })
+  // not restarted yet: the read-back keeps trying and never says upgraded
+  health = { ...health, version: "v1.1.0", web_version: "v1.1.0" }
+  await page.locator("[data-upgrade-verify-start]").click()
+  await page.locator('[data-verify-item="hub"][data-ok="false"]').waitFor()
+  assert.equal(await page.locator('[data-upgrade-verify="passed"]').count(), 0)
+  healthDown = true
+  await page.getByText("暂时连不上服务").waitFor({ timeout: 8000 })
+  healthDown = false; health = { ...health, version: "v1.2.0", web_version: "v1.2.0" }
+  await page.locator('[data-verify-item="hub"][data-ok="true"]').waitFor({ timeout: 8000 })
+  await page.locator("[data-upgrade-refresh]").waitFor()
+  assert.match(await page.locator("[data-upgrade-verify]").innerText(), /重新载入页面后完成核对/, "an old page is never called upgraded")
+  // someone else only learns who upgrades; no paths, no commands
+  state.install = { kind: "local_release" }
+  await page.reload(); await page.getByText("本机签名构建：升级需由实例管理员在这台机器上完成。").waitFor()
+  assert.equal(await page.locator("[data-upgrade-guide]").count(), 0)
+  for (const kind of ["release_script", "source", "external"]) {
+    state.install = { kind, home, repo }; await page.reload()
+    await page.locator(`[data-upgrade-guide="${kind}"]`).waitFor()
+    assert.ok(!(await page.locator(`[data-upgrade-guide="${kind}"]`).innerText()).includes("local-release.py"), kind)
+  }
+
+  // Managed: steps while it runs, the backup it took, how a failure was recovered.
+  state = { ...state, capability: { managed: true, can_execute: true, reason: "managed supervisor" }, install: { kind: "managed", home }, check: check("available") }
+  state.operation = { ...operation("backing_up"), id: "up_progress", idempotency_key: "progress" }
+  await page.reload(); await page.locator("[data-upgrade-progress]").waitFor()
+  assert.equal(await page.locator('[data-upgrade-progress] [data-stage="done"]').count(), 3)
+  assert.equal((await page.locator('[data-upgrade-progress] [data-stage="current"]').innerText()).trim(), "备份数据库")
+  assert.equal(await page.locator("[data-upgrade-guide]").count(), 0, "a managed install upgrades from the button")
+  state.backup = { database: `${home}/updates/up_progress.sqlite3`, dir: `${home}/updates` }
+  state.operation = { ...state.operation, phase: "rolled_back", error: "Hub health verification timed out", previous: `${home}/releases/1.1.0` }
+  await phase("rolled_back")
+  const rolled = await page.locator('[data-upgrade-recovery="rolled_back"]').innerText()
+  assert.match(rolled, /up_progress\.sqlite3/); assert.match(rolled, /已自动恢复/); assert.match(rolled, /releases\/1\.1\.0/)
+  state.operation = { ...state.operation, phase: "failed", error: "升级已提交，业务启动失败；保留新数据库，禁止自动回滚：boom" }
+  await page.locator('[data-upgrade-recovery="failed"]').filter({ hasText: "按设计不自动回退" }).waitFor()
+  state.operation = { ...state.operation, phase: "failed", error: "维护排空超时；当前版本保留，尚未停止或切换" }; state.backup = { database: null, dir: `${home}/updates` }
+  await page.locator('[data-upgrade-recovery="failed"]').filter({ hasText: "旧版本和数据库没有改动" }).waitFor()
+  // success is only claimed once the Hub, the served web, this page and health agree
+  state.operation = { ...state.operation, phase: "succeeded", error: null }; state.current = { hub: "v1.2.0", web: "v1.2.0" }; state.check = check("up_to_date")
+  health = { ok: true, version: "v1.2.0", web_version: "v1.2.0", drain: true, recovery: { state: "ok" } }
+  await page.goto(base + "/test/fixtures/updates.html?web=1.2.0"); await phase("succeeded")
+  await page.locator('[data-upgrade-progress] [data-stage="current"]').waitFor()
+  await page.locator('[data-verify-item="health"][data-ok="false"]').waitFor()
+  assert.equal(await page.locator('[data-upgrade-verify="passed"]').count(), 0, "maintenance still on is not upgraded")
+  health.drain = false
+  await page.locator('[data-upgrade-verify="passed"]').waitFor({ timeout: 8000 })
+  assert.match(await page.locator("[data-upgrade-verify]").innerText(), /已升级到 1\.2\.0/)
+  assert.equal(await page.locator("[data-upgrade-refresh]").count(), 0)
+  assert.equal(await page.locator('[data-upgrade-progress] [data-stage="done"]').count(), 7, "the last step completes with the read-back")
   if (process.env.STEVE_TEST_ARTIFACTS) await page.screenshot({ path: process.env.STEVE_TEST_ARTIFACTS + "/upgrade-mobile.png", fullPage: true })
   assert.deepEqual(errors, [])
-  console.log(JSON.stringify({ passed: true, scenarios: ["source check only", "owner capability", "agent approve and reject", "ambiguous POST recovery", "restart disconnect", "reload without POST", "stable version key", "manual refresh preserves draft", "rollback and explicit retry", "ahead and unknown versions", "390px layout", "keychain capability reason", "drain and rollback health phases", "unrelated receipt cannot clear errors", "definite 4xx", "8s status timeout recovery", "same-version paired repair after old success", "stable repair intent", "repair refresh never POSTs", "later explicit repair gets fresh key"], gets, writes: writes.length, approvals, rejections }))
+  console.log(JSON.stringify({ passed: true, scenarios: ["source check only", "owner capability", "agent approve and reject", "ambiguous POST recovery", "restart disconnect", "reload without POST", "stable version key", "manual refresh preserves draft", "rollback and explicit retry", "ahead and unknown versions", "390px layout", "keychain capability reason", "drain and rollback health phases", "unrelated receipt cannot clear errors", "definite 4xx", "8s status timeout recovery", "same-version paired repair after old success", "stable repair intent", "repair refresh never POSTs", "later explicit repair gets fresh key", "local-release commands with this machine's paths", "read-back retries through restart and outage", "old page needs reload", "non-owner gets no paths", "per-install guides", "managed progress steps", "rollback backup and recovery", "committed failure keeps new database", "pre-switch failure untouched", "upgraded only after health and versions agree"], gets, writes: writes.length, approvals, rejections }))
 } catch (e) { console.error(await page.locator("body").innerText(), errors); throw e } finally { await browser.close() }

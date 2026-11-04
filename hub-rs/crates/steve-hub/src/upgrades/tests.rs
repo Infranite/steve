@@ -381,3 +381,32 @@ fn managed_orphan_exit_kills_group_descendants() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[test]
+fn status_names_the_backup_a_failed_upgrade_recovers_from() {
+    let dir = tempfile::tempdir().unwrap();
+    let u = Updates {
+        home: dir.path().into(),
+        repository: "Infranite/steve".into(),
+        current_hub: "0.1.0".into(),
+        current_web: "0.1.0".into(),
+        managed: true,
+        blocked_reason: None,
+        client: reqwest::Client::new(),
+        api_base: String::new(),
+    };
+    assert!(u.status().unwrap()["backup"].is_null());
+    let op = u.request("0.2.0", "one", "owner", true).unwrap();
+    let status = u.status().unwrap();
+    assert!(
+        status["backup"]["database"].is_null(),
+        "no backup before the supervisor made one"
+    );
+    assert_eq!(status["backup"]["dir"], u.dir().to_string_lossy().as_ref());
+    let saved = u.dir().join(format!("{}.sqlite3", op.id));
+    fs::write(&saved, b"verified copy").unwrap();
+    assert_eq!(
+        u.status().unwrap()["backup"]["database"],
+        saved.to_string_lossy().as_ref()
+    );
+}
