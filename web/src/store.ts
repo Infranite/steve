@@ -81,6 +81,10 @@ export const ST: Record<string, [string, "accent" | "orange" | "green" | "neutra
 }
 export const SS: Record<string, [string, "accent" | "orange" | "green" | "neutral"]> = { run: ["运行中", "accent"], wait: ["等你", "orange"], idle: ["空闲", "neutral"], ended: ["已结束", "neutral"] }
 export const WT: Record<string, string> = { approve: "审批", ask: "问题", accept: "验收", propose: "提议", fail: "异常", confirm: "确认" }
+/** what you do about a card of this type: the button that takes you to it */
+export const WACT: Record<string, string> = { accept: "验收", approve: "审批", ask: "回答", propose: "决定", fail: "查看", confirm: "确认" }
+/** what a card asks of you, in a line: `审批：推送到 main` */
+export const waitLine = (w: Wait) => `${w.subject === "tool_call" ? "权限" : w.subject === "release" ? "发布" : WT[w.type] ?? "待处理"}：${w.q}`
 export const HARNESS: Record<string, string> = { "claude-code": "Claude Code", codex: "Codex" }
 export const ACC: Record<string, string> = { inherit: "跟随全局", manual: "需要你验收", auto: "自动验收" }
 export const PERM: Record<string, string> = { plan: "只读：只出方案，不改文件", default: "每次改文件或运行命令都问你", acceptEdits: "可以改项目目录里的文件，运行命令要问你", auto: "可以改文件、运行命令；对外操作仍需你批准" }

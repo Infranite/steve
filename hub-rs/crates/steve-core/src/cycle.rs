@@ -663,6 +663,18 @@ impl Tx<'_> {
                 .map_err(steve_store::StoreError::from)?;
             Ok(())
         })?;
+        /* the plan was the cycle before's: it is kept as an earlier round, the new cycle starts without one */
+        if !i.plan.is_empty() {
+            let end = if i.plan.iter().all(|p| p.done) {
+                "done"
+            } else {
+                "replaced"
+            };
+            self.db()
+                .plan_round_add(&i.workspace_id, item_id, &i.plan, end, by)?;
+            self.db()
+                .item_patch(item_id, crate::patch![plan: Vec::<PlanStep>::new()])?;
+        }
         self.db().timeline_add(
             item_id,
             by,
