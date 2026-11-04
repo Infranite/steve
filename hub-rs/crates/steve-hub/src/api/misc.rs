@@ -470,7 +470,7 @@ pub async fn thread_offer(
     thread_result(st.domain.offer(&c.ws, &id, take).await?)
 }
 
-/// `POST /api/thread/:id/suggest {choice: "here" | "item"}` (§3.4).
+/// `POST /api/thread/:id/suggest {choice: "here" | "item" | "new"}` (§3.4).
 pub async fn thread_suggest(
     State(st): State<AppState>,
     Extension(c): Extension<Ctx>,
@@ -479,7 +479,7 @@ pub async fn thread_suggest(
 ) -> ApiResult {
     let v = body(&b)?;
     let mut k = Check::object(&v);
-    let choice = k.enum_("choice", &["here", "item"]);
+    let choice = k.enum_("choice", &["here", "item", "new"]);
     k.finish()?;
     thread_result(st.domain.suggest(&c.ws, &id, &choice).await?)
 }
