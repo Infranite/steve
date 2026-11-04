@@ -9,7 +9,7 @@ import { promptNeedle, withDecisionNotes } from "./decision-notes"
 import { blockSlots, type FeedRow } from "./feed-order"
 import { api, setPageWorkspace, stream, Unauthenticated, type State, type RItem, type RItemDetail, type RSession, type RDecision, type RBot, type REvent, type RProject, type Proposal, type LocalSession, type HubEvent, type RNotice } from "./api"
 import { cue } from "./bus"
-import type { RFile, PlanStep, RHold, RQueued, RKindReview, SuggestChoice } from "./api"
+import type { RFile, PlanStep, RHold, RQueued, RKindReview, SuggestChoice, A2uiRecord, A2uiSubmit } from "./api"
 import type { Cite } from "./api/knowledge"
 import { yoloApi, type RYolo, type RYoloAction } from "./api/yolo"
 
@@ -47,7 +47,9 @@ export type Msg = { id?: string; clientId?: string; k: "me" | "steve" | "thinkin
   update?: Update; updates?: Update[]; rerun?: string
   /** an item's one living card (§5.2): on its announcement, on the acknowledgement of your latest message to it, or on its own
    * message at the bottom when it needs you and the card was far up (`cardOnly`) */
-  card?: ItemCardState; cardOnly?: boolean; wasCard?: boolean }
+  card?: ItemCardState; cardOnly?: boolean; wasCard?: boolean
+  /** A2UI (ST-46): on a reply, what its interfaces submitted, by `block:surface`; on the user message an action made, that action */
+  a2ui?: Record<string, A2uiRecord>; a2uiAction?: A2uiRecord & { ref: string } }
 /** what an item made from the conversation has come to, kept on its card (hub `meta.card`) */
 export type ItemCardState = { item: string; state: string; at?: number; text?: string; decision?: string
   delivery?: { text: string; full?: boolean; decision?: string; at?: number }; reply?: { text: string; ref?: string; at?: number }; released?: { version?: string; at?: number }
@@ -407,7 +409,8 @@ export function msgOf(m: State["thread"][number]): Msg {
     held: !!x.held || undefined, stopped: !!x.stopped || undefined,
     offer: x.offer ?? undefined, suggest: x.suggest ?? undefined, ask: x.ask ?? undefined, queued: x.queued ?? undefined, replyTo: x.reply_to ?? undefined, origin: x.origin ?? undefined, answer: x.answer ?? undefined,
     update: x.update ?? undefined, updates: Array.isArray(x.updates) ? x.updates : undefined, rerun: x.rerun ?? undefined,
-    card: x.card?.item ? itemCard(x.card) : undefined, cardOnly: !!x.card_only, wasCard: !!x.was_card }
+    card: x.card?.item ? itemCard(x.card) : undefined, cardOnly: !!x.card_only, wasCard: !!x.was_card,
+    a2ui: x.a2ui && typeof x.a2ui === "object" ? x.a2ui : undefined, a2uiAction: x.a2ui_action?.name ? x.a2ui_action : undefined }
 }
 const proposals = new Map<string, any>()
 /** a drafted change as the prototype's Proposal: apply/undo/drop call the Hub. The Hub keeps what became of a
@@ -721,6 +724,12 @@ export function clearFocus() { st.focus = null; emit() }
 export const focusItem = () => (st.focus && st.focus.until > Date.now() ? st.focus.item : null)
 /* thread routing actions: a 409 (already handled) comes back as its message */
 export async function takeOffer(m: Msg, take: boolean) { if (!m.id) return; const r = await call(api.offer(m.id, take)); if (r?.item) toast("已做成 " + r.item.id) }
+/** an A2UI button pressed in a reply: `already` when this surface had been submitted (another tab, a double click that got through) */
+export async function a2uiSubmit(msg: string, a: A2uiSubmit): Promise<{ already: boolean }> {
+  const r = await api.a2ui(msg, a)
+  await refresh().catch(fail)
+  return { already: r.already }
+}
 export async function chooseSuggest(m: Msg, choice: SuggestChoice) {
   if (!m.id) return
   const append = !!m.suggest?.choices.find((c) => c.id === choice)?.item

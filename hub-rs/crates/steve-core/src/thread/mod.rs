@@ -6,6 +6,7 @@
 //! ([`research`]), so the lane is free for the next message. Items are made only for real work, a
 //! suggestion card asks when it is unclear, and the user can correct the routing both ways ([`reroute`]).
 
+mod a2ui;
 pub mod decide;
 #[cfg(test)]
 mod eval;
@@ -16,6 +17,7 @@ mod reroute;
 pub mod research;
 mod suggest;
 
+pub use a2ui::{A2uiActed, A2uiAction};
 pub use offer::Handled;
 
 pub use reroute::RerouteTo;
@@ -386,7 +388,21 @@ impl Core {
         mentions: &[Mention],
         to: SayTo,
     ) -> Result<String> {
-        let mut meta = Map::new();
+        self.say_with(ws, user, text, files, mentions, to, Map::new())
+    }
+
+    /// [`Core::say_to`] with more on the message's meta (an A2UI action says what it was).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn say_with(
+        &self,
+        ws: &str,
+        user: Option<&str>,
+        text: &str,
+        files: &[FileRef],
+        mentions: &[Mention],
+        to: SayTo,
+        mut meta: Map<String, Value>,
+    ) -> Result<String> {
         if !files.is_empty() {
             meta.insert("files".into(), json!(files));
         }

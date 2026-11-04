@@ -984,6 +984,22 @@ impl Domain for CoreDomain {
         );
         handled(blocking(move || c.suggest(&ws, &m, &ch)).await?)
     }
+    async fn a2ui_action(
+        &self,
+        ws: &str,
+        user: &str,
+        message: &str,
+        action: steve_core::thread::A2uiAction,
+    ) -> BResult<Obj> {
+        let (c, ws, user, m) = (
+            self.core.clone(),
+            ws.to_string(),
+            user.to_string(),
+            message.to_string(),
+        );
+        let r = blocking(move || c.a2ui_action(&ws, Some(&user), &m, action)).await?;
+        to_obj(json!(r))
+    }
     async fn stop_run(&self, ws: &str, run: &str) -> BResult<bool> {
         let (c, ws, r) = (self.core.clone(), ws.to_string(), run.to_string());
         blocking(move || c.stop_run(&ws, &r)).await

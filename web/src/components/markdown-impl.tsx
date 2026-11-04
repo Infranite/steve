@@ -1,9 +1,13 @@
-import { useEffect, useRef, useState, type ComponentProps, type ReactNode } from "react"
+import { lazy, Suspense, useEffect, useRef, useState, type ComponentProps, type ReactNode } from "react"
 import { Streamdown, defaultComponents, defaultRehypePlugins, defaultRemarkPlugins, useIsCodeFenceIncomplete, type Components, type DefaultComponents, type DiagramPlugin } from "streamdown"
 import { code } from "@streamdown/code"
 import remarkBreaks from "remark-breaks"
 import { cn } from "cn"
 import { st } from "@/store"
+import { A2uiPending, useA2uiNested } from "@/a2ui/host"
+
+/* A2UI blocks (ST-46) draw with the app's controls and the stats chart: loaded the first time a reply carries one */
+const A2uiBlock = lazy(() => import("@/a2ui/render").then((m) => ({ default: m.A2uiBlock })))
 
 /* mermaid is ~1 MB — load it the first time a diagram shows up, not with the app */
 type Cfg = NonNullable<Parameters<DiagramPlugin["getMermaid"]>[0]>
@@ -88,12 +92,42 @@ function HtmlBlock(props: CodeProps) {
   )
 }
 
+/* tables open to their full height in the page's own scroll; only a wide table scrolls, sideways. Streamdown's default
+   frames them with a toolbar and caps them at 300px with a scrollbar inside, which nests scrolling in the message.
+   A very long table shows its first rows and a button for the rest */
+const TABLE_FOLD = 30, TABLE_SHOW = 20
+function Table({ node, children, className, ...rest }: ComponentProps<DefaultComponents["table"]>) {
+  const rows = countRows(node), [open, setOpen] = useState(false), fold = rows > TABLE_FOLD && !open
+  return (
+    <div className="my-3" data-md-table>
+      <div className="overflow-x-auto" data-folded={fold || undefined}>
+        <table {...rest} className={className}>{children}</table>
+      </div>
+      {fold && <button type="button" onClick={() => setOpen(true)} className="mt-1 rounded-md px-2 py-1 type-footnote text-muted-foreground hover:bg-muted hover:text-foreground">展开其余 {rows - TABLE_SHOW} 行</button>}
+    </div>
+  )
+}
+type Hast = { type: string; tagName?: string; children?: Hast[] }
+const countRows = (n?: Hast): number => !n ? 0 : n.tagName === "tbody" ? (n.children ?? []).filter((c) => c.tagName === "tr").length
+  : (n.children ?? []).reduce((s, c) => s + countRows(c), 0)
+
+/** a ```a2ui block: the interface it describes (a placeholder while it is written); inside an interface, just code */
+function A2uiCode(props: CodeProps) {
+  const streaming = useIsCodeFenceIncomplete(), nested = useA2uiNested()
+  const code = <defaultComponents.code {...props} />
+  if (nested) return code
+  return <Suspense fallback={<A2uiPending />}><A2uiBlock src={text(props.children)} streaming={streaming} code={code} /></Suspense>
+}
+
 const components: Components = {
+  table: Table,
   /* in-app links (item refs) stay in this tab: drop the target/rel rehype-harden adds to every link */
   a: ({ href, children, node: _n, target: _t, rel: _r, ...rest }) => href?.startsWith("#/")
     ? <a {...rest} href={href} onClick={(e) => e.stopPropagation()} className="font-medium tabular-nums text-blue hover:underline" data-ref={/^#\/items\/(.+)/.exec(href)?.[1]}>{children}</a>
     : <defaultComponents.a {...rest} href={href}>{children}</defaultComponents.a>,
-  code: (props) => "data-block" in props && /\blanguage-html\b/.test(props.className ?? "") ? <HtmlBlock {...props} /> : <defaultComponents.code {...props} />,
+  code: (props) => !("data-block" in props) ? <defaultComponents.code {...props} />
+    : /\blanguage-html\b/.test(props.className ?? "") ? <HtmlBlock {...props} />
+    : /\blanguage-a2ui\b/.test(props.className ?? "") ? <A2uiCode {...props} /> : <defaultComponents.code {...props} />,
 }
 const plugins = { code, mermaid }
 const remarkPlugins = [...Object.values(defaultRemarkPlugins), remarkBreaks, remarkHtmlAsText, remarkItemRefs]
@@ -104,7 +138,7 @@ const rehypePlugins = [defaultRehypePlugins.sanitize, defaultRehypePlugins.harde
 export default function MarkdownImpl({ text, className, streaming }: { text: string; className?: string; streaming?: boolean }) {
   return (
     <Streamdown className={cn("md", className)} plugins={plugins} components={components} remarkPlugins={remarkPlugins} rehypePlugins={rehypePlugins}
-      shikiTheme={["github-light", "github-dark"]} controls={{ mermaid: { panZoom: false } }}
+      shikiTheme={["github-light", "github-dark"]} controls={{ mermaid: { panZoom: false }, table: false }} tableMaxHeight="none"
       isAnimating={!!streaming} caret={streaming ? "circle" : undefined}>{String(text ?? "")}</Streamdown>
   )
 }

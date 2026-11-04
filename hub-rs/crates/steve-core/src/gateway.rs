@@ -1600,6 +1600,10 @@ pub struct ChatFiles {
     pub images: Vec<Value>,
 }
 
+/// How Steve may draw an interface in an answer of the main conversation (ST-46, docs/ST-46-a2ui.md): the chat
+/// answer and in-place research of the web conversation get it; an IM conversation's answers never do.
+pub const A2UI_HINT: &str = include_str!("a2ui_hint.txt");
+
 /// The chat-answer prompt (gateway.ts, with the “做成事项” hint replaced by an offer, thread-routing §6.1). `extra` is module context (B1 `PromptContext::chat`),
 /// inserted after the main bot's part and before the history; `""` leaves the prompt as in TS.
 pub fn answer_prompt(
@@ -1639,8 +1643,11 @@ pub fn answer_prompt(
     // the bot and the reply format are the cached head; module context and the conversation change
     with_static(
         &format!(
-            "You are {}, the user's assistant. {} {}\nAnswer in the user's language, briefly. You answer in the conversation: you don't change anything, change settings or start work from this reply, so never claim you did. Steve can change its own settings when the user says the change itself in the conversation (e.g. “把免打扰改成 22:00 – 09:00”, “停用写作 Bot”, “开 YOLO”): it drafts the change as a card the user applies with one click and can undo. Asked whether or how settings can be changed, say so and give an example sentence; never claim it is impossible. When the user asks for a change or reports a problem, give a concrete plan right away; never ask whether to plan here or make it an item. If the answer leads to a change worth making, put it in \"offer\" (the user can make it a tracked item with one click); otherwise leave offer null.\nReply with ONLY one JSON object: {{\"thought\":\"2-4 short sentences in the user's language: what the user is asking and how you approach the answer\",\"answer\":\"the answer itself (markdown allowed)\",\"offer\":{{\"title\":\"<= 24 chars\",\"goal\":\"the work, self-contained\"}} or null}}",
-            main.name, main.persona, main.rules
+            "You are {}, the user's assistant. {} {}\nAnswer in the user's language, briefly. You answer in the conversation: you don't change anything, change settings or start work from this reply, so never claim you did. Steve can change its own settings when the user says the change itself in the conversation (e.g. “把免打扰改成 22:00 – 09:00”, “停用写作 Bot”, “开 YOLO”): it drafts the change as a card the user applies with one click and can undo. Asked whether or how settings can be changed, say so and give an example sentence; never claim it is impossible. When the user asks for a change or reports a problem, give a concrete plan right away; never ask whether to plan here or make it an item. If the answer leads to a change worth making, put it in \"offer\" (the user can make it a tracked item with one click); otherwise leave offer null.\n{}\nReply with ONLY one JSON object: {{\"thought\":\"2-4 short sentences in the user's language: what the user is asking and how you approach the answer\",\"answer\":\"the answer itself (markdown allowed)\",\"offer\":{{\"title\":\"<= 24 chars\",\"goal\":\"the work, self-contained\"}} or null}}",
+            main.name,
+            main.persona,
+            main.rules,
+            A2UI_HINT.trim_end()
         ),
         &format!(
             "{read}{extra}Recent conversation:\n{ctx}\n\nUser: {text}{}",

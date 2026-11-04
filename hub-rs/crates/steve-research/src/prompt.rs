@@ -22,6 +22,8 @@ pub struct PromptInput {
     /// The last messages of the thread, oldest first: (who, text).
     pub recent: Vec<(String, String)>,
     pub question: String,
+    /// how to draw an interface in the answer (the web's main conversation only), or empty
+    pub ui: String,
 }
 
 const TEMPLATE: &str = include_str!("research_prompt.txt");
@@ -65,6 +67,7 @@ pub fn render(p: &PromptInput) -> String {
         .replace("{{context}}", &or_none(p.context.clone()))
         .replace("{{recent}}", &or_none(recent))
         .replace("{{question}}", p.question.trim())
+        .replace("{{ui}}", p.ui.trim())
 }
 
 #[cfg(test)]
@@ -84,8 +87,11 @@ mod tests {
             }],
             recent: vec![("用户".into(), "你好".into())],
             question: "知识系统怎么运作？".into(),
+            ui: "界面：```a2ui".into(),
         });
         assert!(!s.contains("{{"));
+        assert!(s.trim_end().ends_with("界面：```a2ui"));
+        assert!(!render(&PromptInput::default()).contains("{{ui}}"));
         assert!(s.contains("- steve：/w/steve（Hub）"));
         assert!(s.contains("用户：你好"));
         assert!(s.contains("OFFER:"));

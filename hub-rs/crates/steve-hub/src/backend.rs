@@ -832,6 +832,16 @@ pub trait Domain: Send + Sync + 'static {
     async fn suggest(&self, ws: &str, message: &str, choice: &str) -> BResult<(Obj, bool)> {
         todo_backend!("suggest")
     }
+    /// An A2UI button in Steve's reply `message` (ST-46): `{already, message_id?, action}`.
+    async fn a2ui_action(
+        &self,
+        ws: &str,
+        user: &str,
+        message: &str,
+        action: steve_core::thread::A2uiAction,
+    ) -> BResult<Obj> {
+        todo_backend!("a2ui_action")
+    }
     /// Stop a running research run, or take a queued one off the queue.
     async fn stop_run(&self, ws: &str, run: &str) -> BResult<bool> {
         todo_backend!("stop_run")

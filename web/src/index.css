@@ -205,5 +205,20 @@
 .md [data-streamdown="code-block"] > .absolute { top: 2px; right: 6px; }
 .md :not(pre) > code { padding: 1px 5px; border-radius: 5px; background: var(--muted); font-size: 0.9em; }
 .md table { font-size: 13px; }
+/* tables sit in the text, no frame or toolbar: rules between rows, the header in secondary weight */
+/* as wide as its content up to the column; wider content scrolls sideways */
+.md [data-md-table] table { width: auto; border-collapse: collapse; }
+.md [data-md-table] :is(th, td) { padding: 7px 12px 7px 0; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; line-height: 20px; }
+.md [data-md-table] :is(th, td):last-child { padding-right: 0; }
+.md [data-md-table] th { font-weight: 600; color: var(--muted-foreground); white-space: nowrap; }
+.md [data-md-table] tbody tr:last-child > td { border-bottom: 0; }
+/* a column never squeezes below a few characters: on a narrow screen a many-column table scrolls sideways instead */
+.md [data-md-table] td { min-width: 6em; overflow-wrap: break-word; }
+.md [data-md-table] [data-folded] tbody tr:nth-child(n + 21) { display: none; } /* TABLE_SHOW = 20 */
+.md [data-md-table] thead { background: transparent; }
+/* native date, time and range controls inside an interface follow the theme */
+.dark [data-a2ui] input { color-scheme: dark; }
+/* an A2UI interface lays itself out: headings and rules of the surrounding text don't reach in */
+.md [data-a2ui] :is(h1, h2, h3, h4, h5, h6) { margin: 0; }
 .md li:has(> input[type="checkbox"]) { list-style: none; margin-left: -18px; }
 .md blockquote { border-left: 2px solid var(--border); padding-left: 12px; color: var(--muted-foreground); font-style: normal; }

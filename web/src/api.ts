@@ -58,6 +58,10 @@ export type RHold = { item: string; running: number; since: number }
 export type RNotice = { id: string; kind: "release" | "archive" | "system"; level: "info" | "success" | "fail"; text: string; item_id: string | null; created: number; closed?: boolean }
 export type HubEvent = { type: "item" | "bot" | "project" | "tag" | "workspace" | "settings" | "device" | "message"; id: string } | { type: "decision" | "session"; id: string; item_id?: string | null } | { type: "event"; session_id: string; seq: number; kind: string; data: unknown } | { type: "steve.thinking"; on: boolean; phase?: "route" | "answer" | "config" | "item" | "supplement" | "research" } | { type: "steve.tool"; ws: string; mid: string; run: string; name: string; brief: string; ok: boolean } | { type: "thread.run"; id: string; ws: string } | { type: "steve.draft"; ws: string; mid: string; thought: string; text: string } | { type: "release.hold"; hold: RHold | null }
 
+/** an A2UI action as the page sends it (A2UI v0.9.1 `action` plus where it came from); `data`: the surface's data model then */
+export type A2uiSubmit = { block: string; surfaceId: string; sourceComponentId: string; name: string; label: string; context: Record<string, unknown>; data: unknown; timestamp: string }
+/** what the Hub kept of it on the reply (`meta.a2ui[block:surface]`) */
+export type A2uiRecord = { name: string; label?: string; sourceComponentId: string; context: Record<string, unknown>; data?: unknown; at: number; message?: string }
 /** an uploaded attachment, as messages, comments and session events carry it */
 export type RFile = { id: string; name: string; mime: string; size: number }
 /** what an item's output holds (`/items/:id/artifacts/:art/preview`); `path` is an entry inside a folder output */
@@ -141,6 +145,8 @@ export const api = {
   /* thread routing (§3.4–3.5, §7.2): offers, suggestion cards, corrections, research runs */
   offer: (msg: string, take: boolean) => post<{ message_id: string; item?: RItem }>(`/thread/${msg}/offer`, { take }),
   suggest: (msg: string, choice: SuggestChoice) => post<{ message_id: string; item?: RItem }>(`/thread/${msg}/suggest`, { choice }),
+  /* an A2UI button in a reply (ST-46): the Hub keeps one submission per surface and says it in the conversation */
+  a2ui: (msg: string, a: A2uiSubmit) => post<{ already: boolean; message_id?: string; action: A2uiRecord }>(`/thread/${msg}/a2ui`, a),
   reroute: (msg: string, to: string) => post<{ message_id: string; item?: RItem }>(`/thread/${msg}/reroute`, { to }),
   stopRun: (run: string) => post<{ ok: boolean }>(`/thread/runs/${run}/stop`), cancelRun: (run: string) => del<{ ok: boolean }>(`/thread/runs/${run}`),
   threadFollow: (item: string, follow: boolean) => patch(`/items/${item}/thread`, { follow }),

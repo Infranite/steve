@@ -104,6 +104,8 @@ pub struct ResearchRequest {
     pub mcp: Option<crate::McpEndpoint>,
     /// 设置 · 模型 · 就地研究: the models to try in order and the effort (`models::for_purpose`)
     pub models: crate::models::Choice,
+    /// answered in the web's main conversation: the answer may draw an A2UI interface ([`crate::gateway::A2UI_HINT`])
+    pub ui: bool,
 }
 
 /// A follow-up within [`RESUME_WINDOW`] of a research answer continues that run's harness session.
@@ -824,6 +826,7 @@ impl Core {
                 token,
             }),
             models: self.models().for_purpose(ws, "research"),
+            ui: j.space == super::MAIN,
         };
         let steps = Mutex::new(Steps {
             route: j.route.clone(),

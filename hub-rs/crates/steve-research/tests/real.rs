@@ -181,6 +181,7 @@ async fn real_research_on_a_repo_copy() {
         }],
         recent: Vec::new(),
         question: question.into(),
+        ui: String::new(),
     });
     let mut q = ResearchRequest::new("ws", question, prompt);
     q.cwd = Some(proj.clone());
