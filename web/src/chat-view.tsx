@@ -191,12 +191,17 @@ export function ChatView({ conv }: { conv?: string } = {}) {
   useEffect(() => {
     const el = scroller.current, inner = el?.firstElementChild; if (!el || !inner) return
     const away = () => { stuck.current = false }, near = () => { stuck.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40; if (stuck.current) setUnread(false) }
-    el.addEventListener("wheel", away, { passive: true }); el.addEventListener("touchmove", away, { passive: true }); el.addEventListener("scroll", near, { passive: true })
+    /* only scrolling up leaves the bottom: a wheel or swipe that cannot move further down fires no scroll event to undo it */
+    let y = 0
+    const wheel = (e: WheelEvent) => { if (e.deltaY < 0) away() }, touch = (e: TouchEvent) => { y = e.touches[0]?.clientY ?? 0 }
+    const swipe = (e: TouchEvent) => { const t = e.touches[0]?.clientY ?? y; if (t > y) away(); y = t }
+    el.addEventListener("wheel", wheel, { passive: true }); el.addEventListener("touchstart", touch, { passive: true }); el.addEventListener("touchmove", swipe, { passive: true }); el.addEventListener("scroll", near, { passive: true })
     window.addEventListener("steve-open-steps", away)
     /* unfolding something you are reading must not jump you to the bottom */
     const unfold = (e: Event) => { if ((e.target as HTMLElement).closest?.("[data-steps-toggle]")) away() }; el.addEventListener("click", unfold)
-    const ro = new ResizeObserver(() => { if (stuck.current) el.scrollTop = el.scrollHeight }); ro.observe(inner)
-    return () => { ro.disconnect(); el.removeEventListener("wheel", away); el.removeEventListener("touchmove", away); el.removeEventListener("scroll", near); window.removeEventListener("steve-open-steps", away); el.removeEventListener("click", unfold) }
+    /* the list grows, or the composer and queue above it grow and shrink the viewport */
+    const ro = new ResizeObserver(() => { if (stuck.current) el.scrollTop = el.scrollHeight }); ro.observe(inner); ro.observe(el)
+    return () => { ro.disconnect(); el.removeEventListener("wheel", wheel); el.removeEventListener("touchstart", touch); el.removeEventListener("touchmove", swipe); el.removeEventListener("scroll", near); window.removeEventListener("steve-open-steps", away); el.removeEventListener("click", unfold) }
   }, [])
   return (
     <div className="flex h-full min-h-0 text-foreground" data-chat-page><div className="relative flex min-w-0 flex-1 flex-col">
@@ -208,7 +213,7 @@ export function ChatView({ conv }: { conv?: string } = {}) {
       </header>
       <ConvSwitcher current={conv} badge={im?.badge} />
       {conv && im && <div className="mx-auto flex w-full max-w-[800px] shrink-0 px-4 pb-1 sm:px-8"><ConvBadgeChip b={im.badge} /></div>}
-      <div ref={scroller} className="min-h-0 flex-1 overflow-y-auto overscroll-contain" data-chat-scroll>
+      <div className="relative flex min-h-0 flex-1 flex-col"><div ref={scroller} className="min-h-0 flex-1 overflow-y-auto overscroll-contain" data-chat-scroll>
         <div className="mx-auto flex w-full max-w-[800px] flex-col gap-8 px-4 pb-10 pt-5 sm:px-8" data-chat-messages>
           {conv && im === null && <div className="py-10 text-center type-callout text-muted-foreground" data-conv-missing>没有这个对话，或者你看不到它所在的空间。</div>}
           {list.map((m, n) => {
@@ -227,7 +232,8 @@ export function ChatView({ conv }: { conv?: string } = {}) {
           {!conv && <Onboarding />}
         </div>
       </div>
-      {unread && <Button className="absolute bottom-36 left-1/2 -translate-x-1/2" size="sm" onClick={bottom}>新消息 ↓</Button>}
+      {/* pinned to the list, not the page: the composer's height differs between phone and desktop and grows with the queue */}
+      {unread && <Button className="absolute bottom-3 left-1/2 -translate-x-1/2" size="sm" onClick={bottom}>新消息 ↓</Button>}</div>
       <div className="mx-auto w-full max-w-[800px] shrink-0 px-4 pb-[76px] pt-3 sm:px-8 md:pb-5" data-chat-input>
         {conv ? im && <ImReadOnly b={im.badge} /> : <>
         {p.length > 0 && (
@@ -239,7 +245,7 @@ export function ChatView({ conv }: { conv?: string } = {}) {
         )}
         <ChatQueue composer={composer} />
         <ComposerBars />
-        <Composer draftKey={draftKey(st.workspace?.id, "chat")} handle={composer} placeholder={focusItem() ? `补充给 ${focusItem()}…` : chatBusy() ? `${S?.n ?? "Steve"} 还在忙，可以接着说，本回合结束后发出…` : `和 ${S?.n ?? "Steve"} 说…`} testId="chat" onSend={(t, files, refs, mentions) => chatSend(t, files, refs, mentions)} busy={working} onStop={stopReply}
+        <Composer draftKey={draftKey(st.workspace?.id, "chat")} handle={composer} placeholder={focusItem() ? `补充给 ${focusItem()}…` : chatBusy() ? `${S?.n ?? "Steve"} 还在忙，可以接着说，本回合结束后发出…` : `和 ${S?.n ?? "Steve"} 说…`} testId="chat" onSend={(t, files, refs, mentions) => { bottom(); return chatSend(t, files, refs, mentions) }} busy={working} onStop={stopReply}
           onCommand={(c) => { if (c === "digest") { void chatSend("/汇报"); return } openSheet(c) }} />
         </>}
       </div>

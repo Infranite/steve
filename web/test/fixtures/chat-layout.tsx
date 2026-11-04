@@ -18,6 +18,8 @@ const steve: Bot = { id: "steve", main: true, n: "Steve", a: "", role: "你的�
 st.bots = { steve }
 st.thread = location.search.includes("empty") ? [] : location.search.includes("long") ? [...short, long] : short
 st.notices = []
+let replies = 0
+window.addEventListener("fixture-reply", () => { replies++; st.thread = [...st.thread, { id: "reply-" + replies, k: "steve", created: Date.now(), t: "新到的一条回复。\n\n- 第一点\n- 第二点\n- 第三点" }]; emit() })
 window.addEventListener("fixture-thinking", () => { st.thread = [...short, { k: "thinking" }]; st.thinking = true; st.phase = "answer"; emit() })
 function Fixture() {
   useStore()
