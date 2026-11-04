@@ -1,6 +1,7 @@
 //! The metrics of stats.md §3 over a range of local days. Usage, spend and agent counters read the
 //! daily cube (`stat_daily`); flow, time and quality read `item_stats`, `item_marks` and `decisions`
-//! through their indexes. Costs are estimated here, from tokens and the current price table.
+//! through their indexes. Costs are estimated here, from tokens and the prices of each day
+//! ([`PriceBook`]: the table, then Models.dev as it was that day).
 //!
 //! Filters: `project` and `bot` apply to everything (through the item, turn or record); `model` and
 //! `source` only to the token and turn figures, which are the only ones that have them.
@@ -14,8 +15,9 @@ use serde::Serialize;
 use serde_json::Value;
 use steve_store::{Result, Tokens};
 
+use crate::catalog::{self, SyncState};
 use crate::items::ATTEMPTED;
-use crate::prices::{Price, default_prices, lookup};
+use crate::prices::{Price, PriceBook, PriceSource, default_prices};
 use crate::refresh::tz_of;
 
 /// WIP statuses (T4).
@@ -48,6 +50,11 @@ pub fn prices_of(c: &Connection, ws: &str) -> Result<Vec<Price>> {
         .ok();
     Ok(v.and_then(|v| serde_json::from_str::<Vec<Price>>(&v).ok())
         .unwrap_or_else(default_prices))
+}
+
+/// The prices in force for a read of `ws`: its table and the Models.dev catalog, days cut in its zone.
+pub fn book_of<'c>(c: &'c Connection, ws: &str) -> Result<PriceBook<'c>> {
+    Ok(PriceBook::new(prices_of(c, ws)?).with_catalog(c, tz_of(c, ws)?))
 }
 
 /// Unix ms of local midnight starting `day` in `tz` (the Hub's zone for `None`); `None` for a bad date.
@@ -221,7 +228,7 @@ pub struct UsageTotals {
 }
 
 impl UsageTotals {
-    fn add(&mut self, d: &Daily, prices: &[Price]) {
+    fn add(&mut self, d: &Daily, prices: &PriceBook) {
         self.input += d.input;
         self.output += d.output;
         self.cache_read += d.cache_read;
@@ -231,7 +238,7 @@ impl UsageTotals {
         self.hit_base += d.hit_base;
         self.hit_rate = (self.hit_base > 0).then(|| self.cache_read as f64 / self.hit_base as f64);
         self.reported += d.cost_reported;
-        match lookup(prices, &d.model) {
+        match prices.quote(&d.model, &d.day) {
             Some(p) => {
                 self.est += p.price.cost(&d.tokens());
                 self.saved_by_cache +=
@@ -250,7 +257,7 @@ impl UsageTotals {
         self.tool_errors += d.tool_errors;
     }
 
-    fn of<'a>(rows: impl IntoIterator<Item = &'a Daily>, prices: &[Price]) -> Self {
+    fn of<'a>(rows: impl IntoIterator<Item = &'a Daily>, prices: &PriceBook) -> Self {
         let mut t = UsageTotals::default();
         for d in rows {
             t.add(d, prices);
@@ -307,7 +314,7 @@ pub struct Row {
 
 /// Usage and spend per value of `by` (S/U/A metrics grouped), most expensive first; the rows add up
 /// to [`summary`]'s usage for the same query.
-pub fn breakdown(rows: &[Daily], by: By, prices: &[Price]) -> Vec<Row> {
+pub fn breakdown(rows: &[Daily], by: By, prices: &PriceBook) -> Vec<Row> {
     let mut groups: BTreeMap<&str, Vec<&Daily>> = BTreeMap::new();
     for d in rows {
         groups.entry(by.key(d)).or_default().push(d);
@@ -395,6 +402,10 @@ pub struct Spend {
     pub by_source: BTreeMap<String, f64>,
     /// S5: the gateway estimate per purpose.
     pub gateway_by_purpose: BTreeMap<String, f64>,
+    /// Priced tokens per price source (`table`, `models_dev`).
+    pub priced_by: BTreeMap<String, i64>,
+    /// The Models.dev sync behind the catalog prices.
+    pub catalog: SyncState,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
@@ -550,19 +561,23 @@ type MarkHit = (String, i64, Option<String>, Option<String>);
 /// `(item filter SQL, …)`: `?2`/`?3` are the bounds, `?4` project, `?5` bot on alias `i`.
 const ITEM_FILTER: &str = "(?4 IS NULL OR i.project_id = ?4) AND (?5 IS NULL OR i.bot_id = ?5)";
 
-/// The estimated dollars of an item's `{model: [in, out, cr, cw]}`.
-pub fn item_est(models: &BTreeMap<String, [i64; 4]>, prices: &[Price]) -> f64 {
+/// The estimated dollars of an item's `{model: [in, out, cr, cw]}`, priced as on `day` (the day it
+/// was done, or today: the per-model sums do not keep their days).
+pub fn item_est(models: &BTreeMap<String, [i64; 4]>, prices: &PriceBook, day: &str) -> f64 {
     models
         .iter()
         .filter_map(|(m, n)| {
-            let p = lookup(prices, m)?;
-            Some(p.price.cost(&Tokens {
-                input: Some(n[0]),
-                output: Some(n[1]),
-                cache_read: Some(n[2]),
-                cache_write: Some(n[3]),
-                reasoning: None,
-            }))
+            prices.cost(
+                m,
+                day,
+                &Tokens {
+                    input: Some(n[0]),
+                    output: Some(n[1]),
+                    cache_read: Some(n[2]),
+                    cache_write: Some(n[3]),
+                    reasoning: None,
+                },
+            )
         })
         .sum()
 }
@@ -573,7 +588,7 @@ pub fn summary(c: &Connection, q: &Query) -> Result<Option<Summary>> {
     let Some((lo, hi)) = bounds(&q.from, &q.to, tz) else {
         return Ok(None);
     };
-    let prices = prices_of(c, &q.workspace_id)?;
+    let prices = book_of(c, &q.workspace_id)?;
     let rows = daily(c, q)?;
     let ws = &q.workspace_id;
     let p = params![ws, lo, hi, q.project, q.bot];
@@ -594,10 +609,20 @@ pub fn summary(c: &Connection, q: &Query) -> Result<Option<Summary>> {
     sp.reported = s.usage.reported;
     sp.unpriced_tokens = s.usage.unpriced_tokens;
     sp.saved_by_cache = s.usage.saved_by_cache;
+    sp.catalog = catalog::state(c, catalog::SOURCE)?;
     for d in &rows {
-        let est = lookup(&prices, &d.model).map_or(0.0, |p| p.price.cost(&d.tokens()));
-        if lookup(&prices, &d.model).is_none() && d.total() > 0 {
-            *sp.unpriced.entry(d.model.clone()).or_default() += d.total();
+        let quote = prices.quote(&d.model, &d.day);
+        let est = quote.as_ref().map_or(0.0, |p| p.price.cost(&d.tokens()));
+        match &quote {
+            None if d.total() > 0 => *sp.unpriced.entry(d.model.clone()).or_default() += d.total(),
+            Some(q) if d.total() > 0 => {
+                let k = match q.source {
+                    PriceSource::Table => "table",
+                    PriceSource::ModelsDev => "models_dev",
+                };
+                *sp.priced_by.entry(k.into()).or_default() += d.total();
+            }
+            _ => {}
         }
         *sp.by_source.entry(d.source.clone()).or_default() += est;
         if d.source == "gateway" {
@@ -674,11 +699,12 @@ pub fn summary(c: &Connection, q: &Query) -> Result<Option<Summary>> {
         accepted: Option<i64>,
         tokens: i64,
         models: BTreeMap<String, [i64; 4]>,
+        done_at: i64,
     }
     let done: Vec<Done> = c
         .prepare_cached(&format!(
             "SELECT s.item_id, s.lead_ms, s.cycle_ms, s.first_deliver - s.first_turn, s.wait_ms, s.agent_ms, s.accepted,
-                    s.input + s.output + s.cache_read + s.cache_write, s.models
+                    s.input + s.output + s.cache_read + s.cache_write, s.models, s.done_at
              FROM item_stats s JOIN items i ON i.id = s.item_id
              WHERE s.workspace_id = ?1 AND s.done_at >= ?2 AND s.done_at < ?3 AND {ITEM_FILTER}"
         ))?
@@ -693,6 +719,7 @@ pub fn summary(c: &Connection, q: &Query) -> Result<Option<Summary>> {
                 accepted: r.get(6)?,
                 tokens: r.get(7)?,
                 models: serde_json::from_str(&r.get::<_, String>(8)?).unwrap_or_default(),
+                done_at: r.get(9)?,
             })
         })?
         .collect::<rusqlite::Result<_>>()?;
@@ -734,7 +761,10 @@ pub fn summary(c: &Connection, q: &Query) -> Result<Option<Summary>> {
     s.per_item.tokens = P::of(&done.iter().map(|d| d.tokens).collect::<Vec<_>>());
     let mut ests: Vec<(String, f64)> = done
         .iter()
-        .map(|d| (d.id.clone(), item_est(&d.models, &prices)))
+        .map(|d| {
+            let day = crate::day(d.done_at, tz);
+            (d.id.clone(), item_est(&d.models, &prices, &day))
+        })
         .collect();
     if !ests.is_empty() {
         let mut v: Vec<f64> = ests.iter().map(|e| e.1).collect();
@@ -1097,7 +1127,7 @@ mod tests {
 
     #[test]
     fn breakdown_adds_up_and_prices_linearly() {
-        let prices = default_prices();
+        let prices = PriceBook::new(default_prices());
         let rows = vec![
             row("claude-opus-5-5", "agent", 1_000_000, 100_000, 9_000_000),
             row("kiro/claude-opus-5-5", "agent", 10, 10, 0),
@@ -1120,6 +1150,7 @@ mod tests {
         assert_eq!(opus.hit_rate, Some(0.9));
         // doubling every price doubles the estimate
         let double: Vec<Price> = prices
+            .table()
             .iter()
             .map(|p| Price {
                 input: p.input * 2.0,
@@ -1129,6 +1160,7 @@ mod tests {
                 ..p.clone()
             })
             .collect();
+        let double = PriceBook::new(double);
         assert!((UsageTotals::of(&rows, &double).est - 2.0 * all.est).abs() < 1e-9);
     }
 }

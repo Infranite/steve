@@ -13,7 +13,7 @@ use steve_store::{Result, Tokens};
 use crate::day::day;
 use crate::items::{self, ItemFacts};
 use crate::metrics::{self, Daily, P, Query, Summary, bounds, item_est, percentile};
-use crate::prices::{Price, lookup};
+use crate::prices::PriceBook;
 use crate::refresh::tz_of;
 
 /* ── ranges ── */
@@ -331,7 +331,7 @@ pub fn series(c: &Connection, q: &Query, metric: Metric, group: &str) -> Result<
     let mut order: &[&str] = &[];
     match metric {
         Metric::Tokens | Metric::Cost | Metric::HitRate | Metric::Turns => {
-            let prices = metrics::prices_of(c, &q.workspace_id)?;
+            let prices = metrics::book_of(c, &q.workspace_id)?;
             for d in metrics::daily(c, q)? {
                 let Some(&i) = index.get(d.day.as_str()) else {
                     continue;
@@ -345,7 +345,7 @@ pub fn series(c: &Connection, q: &Query, metric: Metric, group: &str) -> Result<
                     }
                     Metric::Tokens => acc.add(key, i, n, d.total() as f64, 0.0),
                     Metric::Cost => {
-                        let Some(p) = lookup(&prices, &d.model) else {
+                        let Some(p) = prices.quote(&d.model, &d.day) else {
                             continue;
                         };
                         if group == "token_type" {
@@ -560,7 +560,7 @@ pub fn items(
             next: None,
         });
     };
-    let prices = metrics::prices_of(c, &q.workspace_id)?;
+    let prices = metrics::book_of(c, &q.workspace_id)?;
     let mut rows: Vec<ItemRow> = c
         .prepare_cached(
             "SELECT i.id, i.no, i.title, i.status, i.bot_id, i.project_id, i.created, s.done_at, s.lead_ms, s.cycle_ms, s.wait_ms,
@@ -577,6 +577,8 @@ pub fn items(
         .query_map(params![q.workspace_id, lo, hi, q.project, q.bot, only], |r| {
             let models: BTreeMap<String, [i64; 4]> =
                 serde_json::from_str(&r.get::<_, String>(16)?).unwrap_or_default();
+            let done_at: Option<i64> = r.get(7)?;
+            let as_of = done_at.map_or_else(|| prices.today().to_string(), |t| day(t, tz));
             Ok(ItemRow {
                 item_id: r.get(0)?,
                 no: r.get(1)?,
@@ -594,7 +596,7 @@ pub fn items(
                 reworks: r.get(13)?,
                 first_pass: r.get(14)?,
                 tokens: r.get(15)?,
-                est: item_est(&models, &prices),
+                est: item_est(&models, &prices, &as_of),
                 reported: r.get(17)?,
             })
         })?
@@ -648,7 +650,7 @@ pub struct Usage {
 
 impl Usage {
     /// Adds one model's tokens; the caller sets `hit_rate` once all are in.
-    fn add(&mut self, model: &str, t: &Tokens, reported: f64, prices: &[Price]) {
+    fn add(&mut self, model: &str, day: &str, t: &Tokens, reported: f64, prices: &PriceBook) {
         let n = |v: Option<i64>| v.unwrap_or(0);
         let total = n(t.input) + n(t.output) + n(t.cache_read) + n(t.cache_write);
         self.input += n(t.input);
@@ -657,7 +659,7 @@ impl Usage {
         self.cache_write += n(t.cache_write);
         self.total += total;
         self.reported += reported;
-        match lookup(prices, model) {
+        match prices.quote(model, day) {
             Some(p) => {
                 self.est += p.price.cost(t);
                 self.rough |= p.via.is_some();
@@ -741,31 +743,32 @@ pub struct ItemDetail {
 /// Most turns in a drill-down.
 pub const MAX_TURNS: i64 = 500;
 
-type TokenRow = (String, Tokens, i64, f64, String);
+type TokenRow = (String, String, Tokens, i64, f64, String);
 
 /// The item's token records summed per (turn, model): `(turn or "", (model, tokens, hit base, reported, source))`.
 fn item_tokens(c: &Connection, item_id: &str) -> Result<Vec<(String, TokenRow)>> {
     Ok(c.prepare_cached(
-        "SELECT COALESCE(turn_id, ''), model, SUM(input), SUM(output), SUM(cache_read), SUM(cache_write),
+        "SELECT COALESCE(turn_id, ''), model, day, SUM(input), SUM(output), SUM(cache_read), SUM(cache_write),
                 COALESCE(SUM(CASE WHEN input IS NOT NULL AND cache_read IS NOT NULL THEN input + cache_read + COALESCE(cache_write, 0) END), 0),
                 COALESCE(SUM(cost_reported), 0), MIN(source)
-         FROM usage_records WHERE item_id = ? GROUP BY turn_id, model",
+         FROM usage_records WHERE item_id = ? GROUP BY turn_id, model, day",
     )?
     .query_map([item_id], |r| {
         Ok((
             r.get(0)?,
             (
                 r.get(1)?,
+                r.get(2)?,
                 Tokens {
-                    input: r.get(2)?,
-                    output: r.get(3)?,
-                    cache_read: r.get(4)?,
-                    cache_write: r.get(5)?,
+                    input: r.get(3)?,
+                    output: r.get(4)?,
+                    cache_read: r.get(5)?,
+                    cache_write: r.get(6)?,
                     reasoning: None,
                 },
-                r.get(6)?,
                 r.get(7)?,
                 r.get(8)?,
+                r.get(9)?,
             ),
         ))
     })?
@@ -793,23 +796,23 @@ pub fn item_detail(
         return Ok(None);
     };
     let facts = items::compute(&input, now);
-    let prices = metrics::prices_of(c, &ws)?;
+    let prices = metrics::book_of(c, &ws)?;
     let tokens = item_tokens(c, item_id)?;
     let mut usage = Usage::default();
     let mut base = 0;
     let mut per_model: BTreeMap<String, (Usage, i64)> = BTreeMap::new();
     let mut per_turn: HashMap<String, (Usage, i64)> = HashMap::new();
     let mut backfill_only = !tokens.is_empty();
-    for (turn, (model, t, hb, rep, source)) in &tokens {
+    for (turn, (model, day, t, hb, rep, source)) in &tokens {
         backfill_only &= source == "backfill";
-        usage.add(model, t, *rep, &prices);
+        usage.add(model, day, t, *rep, &prices);
         base += hb;
         let m = per_model.entry(model.clone()).or_default();
-        m.0.add(model, t, *rep, &prices);
+        m.0.add(model, day, t, *rep, &prices);
         m.1 += hb;
         if !turn.is_empty() {
             let x = per_turn.entry(turn.clone()).or_default();
-            x.0.add(model, t, *rep, &prices);
+            x.0.add(model, day, t, *rep, &prices);
             x.1 += hb;
         }
     }
@@ -934,34 +937,35 @@ pub fn session(c: &Connection, session_id: &str) -> Result<Option<(String, Sessi
         .query_row([session_id], |r| r.get(0))
         .optional()?;
     let Some(ws) = ws else { return Ok(None) };
-    let prices = metrics::prices_of(c, &ws)?;
+    let prices = metrics::book_of(c, &ws)?;
     let rows: Vec<TokenRow> = c
         .prepare_cached(
-            "SELECT model, SUM(input), SUM(output), SUM(cache_read), SUM(cache_write),
+            "SELECT model, day, SUM(input), SUM(output), SUM(cache_read), SUM(cache_write),
                     COALESCE(SUM(CASE WHEN input IS NOT NULL AND cache_read IS NOT NULL THEN input + cache_read + COALESCE(cache_write, 0) END), 0),
                     COALESCE(SUM(cost_reported), 0), MIN(source)
-             FROM usage_records WHERE session_id = ? GROUP BY model",
+             FROM usage_records WHERE session_id = ? GROUP BY model, day",
         )?
         .query_map([session_id], |r| {
             Ok((
                 r.get(0)?,
+                r.get(1)?,
                 Tokens {
-                    input: r.get(1)?,
-                    output: r.get(2)?,
-                    cache_read: r.get(3)?,
-                    cache_write: r.get(4)?,
+                    input: r.get(2)?,
+                    output: r.get(3)?,
+                    cache_read: r.get(4)?,
+                    cache_write: r.get(5)?,
                     reasoning: None,
                 },
-                r.get(5)?,
                 r.get(6)?,
                 r.get(7)?,
+                r.get(8)?,
             ))
         })?
         .collect::<rusqlite::Result<_>>()?;
     let mut usage = Usage::default();
     let mut base = 0;
-    for (model, t, hb, rep, _) in &rows {
-        usage.add(model, t, *rep, &prices);
+    for (model, day, t, hb, rep, _) in &rows {
+        usage.add(model, day, t, *rep, &prices);
         base += hb;
     }
     usage.hit_rate = (base > 0).then(|| usage.cache_read as f64 / base as f64);

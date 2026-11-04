@@ -1,5 +1,5 @@
 //! `/api/stats/*` (modules/stats.md §4): the summary, trends, breakdowns, the per-item table and
-//! drill-down, a session's totals, the price table and time zone, and the rebuild. Reads go to the
+//! drill-down, a session's totals, the price table, the Models.dev price sync and time zone, and the rebuild. Reads go to the
 //! store's read pool; summaries are cached per query until the next statistics change (at most 5 s).
 
 use std::collections::{BTreeMap, HashMap};
@@ -14,7 +14,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 use steve_stats::metrics::{self, By, Query as StatsQuery};
 use steve_stats::views::{self, Metric};
-use steve_stats::{Price, default_prices};
+use steve_stats::{Price, catalog, default_prices};
 use steve_store::{Store, StoreError, now, stats_changed};
 
 use super::{ApiResult, Ctx, blocking, body, ok};
@@ -42,15 +42,18 @@ pub struct StatsApi(Arc<Inner>);
 struct Inner {
     store: Store,
     bus: Bus,
+    /// The Models.dev catalog URL, `None` when the sync is turned off.
+    price_url: Option<String>,
     /// key → (stats generation, computed at, answer)
     cache: Mutex<HashMap<String, (u64, Instant, Value)>>,
 }
 
 impl StatsApi {
-    pub fn new(store: Store, bus: Bus) -> Self {
+    pub fn new(store: Store, bus: Bus, price_url: Option<String>) -> Self {
         StatsApi(Arc::new(Inner {
             store,
             bus,
+            price_url,
             cache: Mutex::default(),
         }))
     }
@@ -110,6 +113,7 @@ pub fn routes(api: StatsApi) -> Router {
         .route("/stats/items/{id}", get(item))
         .route("/stats/sessions/{id}", get(session))
         .route("/stats/prices", get(prices_get).put(prices_put))
+        .route("/stats/prices/sync", post(prices_sync))
         .route("/stats/tz", put(tz_put))
         .route("/stats/rebuild", post(rebuild))
         .with_state(api)
@@ -280,7 +284,7 @@ async fn breakdown(
         let rows = match tokens {
             Some(b) => {
                 let names = views::Names::load(db, &c.ws).map_err(serr)?;
-                let prices = metrics::prices_of(db, &c.ws).map_err(serr)?;
+                let prices = metrics::book_of(db, &c.ws).map_err(serr)?;
                 let daily = metrics::daily(db, &q).map_err(serr)?;
                 /* by purpose: also the models each purpose actually ran on */
                 let used = (b == By::Purpose).then(|| metrics::models_by_purpose(&daily));
@@ -288,12 +292,15 @@ async fn breakdown(
                     .into_iter()
                     .map(|r| {
                         let mut v = serde_json::to_value(&r).unwrap_or(Value::Null);
-                        let priced =
-                            r.key.is_empty() || steve_stats::lookup(&prices, &r.key).is_some();
                         if let Some(o) = v.as_object_mut() {
                             o.insert("label".into(), json!(names.label(&by, &r.key)));
                             if b == By::Model {
-                                o.insert("priced".into(), json!(priced && !r.key.is_empty()));
+                                let quote = prices.quote(&r.key, prices.today());
+                                o.insert(
+                                    "priced".into(),
+                                    json!(!r.key.is_empty() && r.usage.unpriced_tokens == 0),
+                                );
+                                o.insert("price_source".into(), json!(quote.map(|q| q.source)));
                             }
                             if let Some(u) = &used {
                                 let ms = u.get(&r.key).map(Vec::as_slice).unwrap_or_default();
@@ -430,10 +437,21 @@ fn hub_tz() -> Option<String> {
     steve_stats::tz(Some(name)).map(|_| name.to_string())
 }
 
+/// Where a model's price comes from today, as the settings page lists it.
+fn quote_json(q: &steve_stats::Quote) -> Value {
+    json!({
+        "source": q.source, "match": q.price.pattern, "via": q.via, "since": q.since,
+        "input": q.price.input, "output": q.price.output,
+        "cache_read": q.price.cache_read, "cache_write": q.price.cache_write, "note": q.price.note,
+    })
+}
+
 async fn prices_get(State(api): State<StatsApi>, Extension(c): Extension<Ctx>) -> ApiResult {
+    let enabled = api.0.price_url.is_some();
     api.read(move |db| {
         let custom = stored_prices(db, &c.ws)?;
         let prices = custom.clone().unwrap_or_else(default_prices);
+        let book = metrics::book_of(db, &c.ws).map_err(serr)?;
         // tokens of models no row prices, over everything recorded
         let mut unpriced: BTreeMap<String, i64> = BTreeMap::new();
         let mut st = db
@@ -447,21 +465,30 @@ async fn prices_get(State(api): State<StatsApi>, Extension(c): Extension<Ctx>) -
         let mut models = vec![];
         for r in rows {
             let (m, n) = r.map_err(sql)?;
-            let priced = steve_stats::lookup(&prices, &m);
-            if priced.is_none() && n > 0 {
+            let quote = book.quote(&m, book.today());
+            if quote.is_none() && n > 0 {
                 *unpriced.entry(m.clone()).or_default() += n;
             }
             models.push(json!({
                 "model": m, "tokens": n,
-                "match": priced.map(|p| p.price.pattern.clone()), "via": priced.and_then(|p| p.via),
+                "match": quote.as_ref().map(|q| q.price.pattern.clone()), "via": quote.as_ref().and_then(|q| q.via),
+                "price": quote.as_ref().map(quote_json),
             }));
         }
+        models.sort_by_key(|m| std::cmp::Reverse(m["tokens"].as_i64().unwrap_or(0)));
+        let sync = catalog::state(db, catalog::SOURCE).map_err(serr)?;
         ok(json!({
             "prices": prices,
             "custom": custom.is_some(),
             "defaults": default_prices(),
             "unpriced": unpriced.into_iter().map(|(model, tokens)| json!({"model": model, "tokens": tokens})).collect::<Vec<_>>(),
             "models": models,
+            "catalog": {
+                "source": "Models.dev",
+                "url": catalog::URL,
+                "enabled": enabled,
+                "synced": sync.synced, "tried": sync.tried, "error": sync.error, "models": sync.models,
+            },
             "tz": stored_tz(db, &c.ws)?,
             "hub_tz": hub_tz(),
         }))
@@ -593,6 +620,33 @@ async fn prices_put(
     .await?;
     api.forget();
     ok(json!({ "ok": true, "prices": prices.unwrap_or_else(default_prices) }))
+}
+
+/// `POST /stats/prices/sync`: syncs the Models.dev prices now and answers with the outcome (`409` while
+/// a sync is running). A failure keeps the prices of the last sync.
+async fn prices_sync(State(api): State<StatsApi>) -> ApiResult {
+    static RUNNING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let Some(url) = api.0.price_url.clone() else {
+        return Ok(json_response(
+            409,
+            &json!({ "error": "价格同步已关闭（STEVE_PRICE_CATALOG_URL=off）" }),
+        ));
+    };
+    let Ok(_running) = RUNNING.try_lock() else {
+        return Ok(json_response(409, &json!({ "error": "正在同步，稍等" })));
+    };
+    let r = crate::price_sync::sync_once(&api.0.store, &crate::price_sync::client(), &url).await;
+    api.forget();
+    match r {
+        Ok(crate::price_sync::Synced::Fetched { models, changed }) => {
+            ok(json!({ "ok": true, "models": models, "changed": changed }))
+        }
+        Ok(crate::price_sync::Synced::Unchanged) => ok(json!({ "ok": true, "unchanged": true })),
+        Err(e) => Ok(json_response(
+            502,
+            &json!({ "error": format!("{e}；继续使用上次同步的价格") }),
+        )),
+    }
 }
 
 /// `PUT /stats/tz {tz}`: the zone days are cut in (an IANA name, `null` = the Hub's); the cube is

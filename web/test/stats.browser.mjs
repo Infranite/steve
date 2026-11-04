@@ -17,7 +17,7 @@ const H = 3600000
 const usage = { input: 1_200_000, output: 300_000, cache_read: 4_100_000, cache_write: 400_000, reasoning: 0, total: 6_000_000, hit_rate: 0.72, est: 18.4, reported: 0, unpriced_tokens: 0, saved_by_cache: 9.1, calls: 40, failed_calls: 1, turns: 120, turn_ms: 0, turn_errors: 2, retries: 1, interrupted: 0, tools: 900, tool_errors: 12 }
 const core = {
   usage,
-  spend: { est: 18.4, reported: 0, unpriced_tokens: 0, unpriced: {}, saved_by_cache: 9.1, by_source: { agent: 16, gateway: 2.4 }, gateway_by_purpose: {} },
+  spend: { est: 18.4, reported: 0, unpriced_tokens: 500, unpriced: { "mystery-1": 500 }, saved_by_cache: 9.1, by_source: { agent: 16, gateway: 2.4 }, gateway_by_purpose: {}, priced_by: { table: 4_000_000, models_dev: 1_999_500 }, catalog: { synced: Date.now() - 3600000, tried: Date.now() - 600000, error: "连接 Models.dev 超时", models: 8536 } },
   throughput: { created: sum(created), created_by_source: {}, done: sum(done), dropped: 1, drop_rate: 0.14, wip: 7, delivered: 7, delivered_auto: 2, delivered_manual: 5, net: 2 },
   time: { lead: P(5 * H, 20 * H), cycle: P(3 * H, 9 * H), first_deliver: P(2 * H, 6 * H), wait: P(1.5 * H, 8 * H), agent: P(2 * H, 5 * H), other: P(1 * H, 3 * H), releases: 4, released: 3, release_success_rate: 0.75, not_released: 0, accept_to_release: P(H / 4, H) },
   quality: { first_pass: 0.66, first_pass_n: 6, reworks: 2, reworks_per_done: 0.33, fails: { stall: 1, error: 2, restart: 0, release: 1, other: 0 }, stalled_then_done: 0, rollbacks: 0, release_unknown: 0, turn_error_rate: 0.017, reopened: 0 },
@@ -114,6 +114,11 @@ try {
       await page.getByRole("option", { name: "按模型" }).click()
       await page.waitForFunction(() => document.querySelector('[data-chart-head="usage"] [data-legend]')?.textContent?.includes("其他 3 项"))
     }
+    // spend: unpriced models make it incomplete (not free), and the unit prices name their source
+    const note = (await page.locator("[data-price-note]").innerText()).replace(/\s+/g, " ")
+    assert.match(note, /费用未完整估算：1 个模型没有价格（mystery-1），500 tokens 未计入/)
+    assert.match(note, /单价来自价格表和 Models\.dev（\d+月\d+日 \d\d:\d\d 同步），最近一次同步失败，用的是上次的价格。管理价格/)
+    assert.equal(await page.locator("[data-price-note] a").getAttribute("href"), "#/settings/stats")
     assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "no horizontal overflow")
     // nothing on the page runs past the right edge either (the scroller hides it, so measure the pieces)
     const wide = await page.evaluate(() => [...document.querySelectorAll("[data-chart] svg, [data-hbar], [data-kpi], [data-chart-head], [data-run-state]")].filter((e) => e.getBoundingClientRect().right > innerWidth + 1).map((e) => e.outerHTML.slice(0, 80)))
