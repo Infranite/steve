@@ -178,12 +178,32 @@ pub async fn patch_one(
     if let Some(x) = k.opt_bool("archived") {
         p.insert("archived".into(), json!(x));
     }
+    // what counts as finished for an accepted result (`merge` | `tag` | none: a release by the
+    // project's own command). Only this part of the release settings: the command stays as set up
+    let done_when = k.opt_nullable_str("done_when", Str::ANY);
     k.finish()?;
+    if let Some(Some(v)) = &done_when
+        && ![steve_store::DONE_MERGE, steve_store::DONE_TAG].contains(&v.as_str())
+    {
+        return Err(ApiError::Invalid(vec!["done_when".into()]));
+    }
     st.write(move |r| {
         if let Some(Value::String(bot)) = p.get("default_bot")
             && !bot.is_empty()
         {
             own_bot(r, bot, &c.ws)?;
+        }
+        if let Some(dw) = done_when {
+            let mut release: steve_store::Release = r
+                .project_get(&id)?
+                .and_then(|o| o.get("release").cloned())
+                .filter(|v| !v.is_null())
+                .and_then(|v| serde_json::from_value(v).ok())
+                .ok_or_else(|| {
+                    ApiError::bad_request("这个项目没有设置发布方式，完成条件无从说起")
+                })?;
+            release.done_when = dw;
+            p.insert("release".into(), json!(release));
         }
         ok(Value::Object(r.project_patch(&id, &p, &c.me)?))
     })

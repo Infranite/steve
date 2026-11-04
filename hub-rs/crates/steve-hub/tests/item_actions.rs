@@ -594,3 +594,72 @@ fn rand_suffix() -> String {
             % 1_000_000
     )
 }
+
+/// A project's completion rule (`done_when`) is set through the API: only that part of its release
+/// settings (the command stays as set up), only to `merge` or `tag` (or cleared), and only where a
+/// release is set up at all.
+#[tokio::test]
+async fn a_projects_completion_rule_is_set_through_the_api() {
+    let e = start().await;
+    let dir = e._home.path().join("proj-done-when");
+    std::fs::create_dir_all(&dir).unwrap();
+    let (s, p) = e
+        .call(
+            "POST",
+            "/api/projects",
+            Some(json!({"name": "rel", "path": dir})),
+        )
+        .await;
+    assert_eq!(s, 200, "{p}");
+    let pid = p["id"].as_str().unwrap().to_string();
+    let path = format!("/api/projects/{pid}");
+    let patch = |v: Value| e.call("PATCH", &path, Some(v));
+    // no release set up: nothing to say when it is finished
+    let (s, v) = patch(json!({"done_when": "tag"})).await;
+    assert_eq!(s, 400, "{v}");
+    let store = steve_store::Store::open(
+        e._home.path().join("steve/data/steve.sqlite3"),
+        steve_store::NoPublisher,
+    )
+    .unwrap();
+    store
+        .projects()
+        .patch(
+            &pid,
+            &steve_store::ProjectPatch {
+                release: Some(Some(steve_store::Release {
+                    kind: "script".into(),
+                    cmd: "/bin/true".into(),
+                    done_when: None,
+                })),
+                ..Default::default()
+            },
+            "test",
+        )
+        .unwrap();
+    let (s, v) = patch(json!({"done_when": "tag"})).await;
+    assert_eq!(s, 200, "{v}");
+    let rel = store
+        .projects()
+        .get(&pid)
+        .unwrap()
+        .unwrap()
+        .release
+        .unwrap();
+    assert_eq!(
+        (rel.cmd.as_str(), rel.done_when.as_deref()),
+        ("/bin/true", Some("tag"))
+    );
+    let (s, _) = patch(json!({"done_when": "deployed"})).await;
+    assert_eq!(s, 400, "only merge or tag");
+    let (s, _) = patch(json!({"done_when": null})).await;
+    assert_eq!(s, 200);
+    let rel = store
+        .projects()
+        .get(&pid)
+        .unwrap()
+        .unwrap()
+        .release
+        .unwrap();
+    assert_eq!((rel.cmd.as_str(), rel.done_when), ("/bin/true", None));
+}

@@ -453,12 +453,21 @@ def restore(done, old_hub, old_web, old_manifest, backup, candidate, stamp, iden
     return ok, steps
 
 
-def lift():
-    """End the drain and check it is off (DELETE, then GET says maintenance false)."""
-    control("DELETE")
-    st = control("GET")
-    if st.get("maintenance"):
-        raise RuntimeError(f"the drain is still on after lifting it: {st}")
+def lift(seconds=120):
+    """End the drain and check it is off (DELETE, then GET says maintenance false). A Hub that just started
+    may be busy (recovery, an index to copy): a call that times out is tried again until `seconds` pass."""
+    until, last = time.monotonic() + seconds, None
+    while time.monotonic() < until:
+        try:
+            control("DELETE")
+            st = control("GET")
+            if not st.get("maintenance"):
+                return
+            last = f"still on: {st}"
+        except (OSError, ValueError) as e:
+            last = f"{type(e).__name__}: {e}"
+        time.sleep(2)
+    raise RuntimeError(f"the drain could not be lifted in {seconds}s ({last})")
 
 
 def main():
