@@ -246,6 +246,169 @@ async fn config_requests_are_drafted() {
     assert_eq!(k.db().setting(WS, "archDays", "30").unwrap(), "7");
 }
 
+#[tokio::test]
+async fn one_message_drafts_several_settings_and_their_cards_remember_what_happened() {
+    let k = Kit::new();
+    k.gw.set(|p, _| {
+        if p.starts_with("You are the router") {
+            Ok(r#"{"kind":"config","title":"x"}"#.into())
+        } else if p.starts_with("Which Steve configuration") {
+            assert!(p.contains("settings:notify — 免打扰时段、每天汇报时间"));
+            Ok(r#"{"targets":["settings:notify","bot:dev","bot:dev","nope:x"]}"#.into())
+        } else if p.contains("Steve settings · notify") {
+            Ok(r#"{"changes":[{"key":"quiet","value":"22:00 – 09:00"}]}"#.into())
+        } else {
+            Ok(r#"{"changes":[{"key":"reasoning_effort","value":"high"}]}"#.into())
+        }
+    });
+    k.core
+        .say(
+            WS,
+            "免打扰改成 22 点到 9 点，开发 Bot 思考强度调到 high",
+            &[],
+        )
+        .unwrap();
+    let ms = settle(&k, 2).await;
+    assert_eq!(
+        ms[1].text,
+        "这是配置改动，我起草好了 2 处，确认后分别应用："
+    );
+    let ps = ms[1].meta["proposals"].as_array().unwrap().clone();
+    assert_eq!(ps.len(), 2, "a target named twice is drafted once");
+    assert_eq!(
+        ps[0]["changes"],
+        json!([{"label": "免打扰", "from": "23:00 – 08:00", "to": "22:00 – 09:00"}])
+    );
+    assert_eq!(ps[1]["target"], json!({"kind": "bot", "id": "dev"}));
+    let (a, b) = (ps[0]["id"].as_str().unwrap(), ps[1]["id"].as_str().unwrap());
+    k.core.apply(a, "me", WS).unwrap();
+    k.core.drop_draft(b, WS).unwrap();
+    let m = k.db().message(&ms[1].id).unwrap().unwrap();
+    assert_eq!(m.meta["cfg_state"], json!({a: "applied", b: "dropped"}));
+    assert!(
+        k.core.apply(b, "me", WS).is_err(),
+        "a dropped draft is gone"
+    );
+    k.core.undo(a, "me", WS).unwrap();
+    let m = k.db().message(&ms[1].id).unwrap().unwrap();
+    assert_eq!(m.meta["cfg_state"], json!({b: "dropped"}));
+    assert_eq!(k.db().setting(WS, "quiet", "x").unwrap(), "23:00 – 08:00");
+}
+
+#[tokio::test]
+async fn asking_how_a_setting_is_set_shows_it_without_drafting() {
+    let k = Kit::new();
+    k.gw.set(|p, _| {
+        if p.starts_with("You are the router") {
+            Ok(r#"{"kind":"config","title":"x"}"#.into())
+        } else if p.starts_with("Which Steve configuration") {
+            Ok(r#"{"targets":["settings:notify"],"ask":true}"#.into())
+        } else {
+            Err(msg("no draft when only asking"))
+        }
+    });
+    k.core.say(WS, "现在免打扰是几点？", &[]).unwrap();
+    let ms = settle(&k, 2).await;
+    assert_eq!(
+        ms[1].text,
+        "「设置 · 通知」现在是：\n- 免打扰：23:00 – 08:00\n- 每天汇报：08:30\n\n要改的话直接说改成什么，我起草好给你确认。"
+    );
+    assert!(ms[1].meta.get("proposal").is_none());
+}
+
+#[tokio::test]
+async fn a_request_that_changes_nothing_says_how_it_is_set() {
+    let k = Kit::new();
+    k.gw.set(|p, _| {
+        if p.starts_with("You are the router") {
+            Ok(r#"{"kind":"config","title":"x"}"#.into())
+        } else if p.starts_with("Which Steve configuration") {
+            Ok(r#"{"target":"settings:look"}"#.into())
+        } else {
+            Ok(r#"{"changes":[]}"#.into())
+        }
+    });
+    k.core.say(WS, "字体弄好看点", &[]).unwrap();
+    let ms = settle(&k, 2).await;
+    assert_eq!(
+        ms[1].text,
+        "我没看出要改「设置 · 外观」的哪一项，换个说法试试？现在是：\n- 字号：标准\n- 减弱动态效果：关"
+    );
+    assert!(ms[1].meta.get("proposal").is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn module_settings_are_drafted_from_the_conversation() {
+    let k = Kit::new();
+    k.db()
+        .store()
+        .with_conn(|c| {
+            c.execute_batch(
+                "INSERT OR IGNORE INTO users (id, workspace_id, subject, name, role, created) VALUES ('usr_dev', 'default', 'dev', 'Dev', 'owner', 1);
+                 INSERT OR IGNORE INTO workspace_members (workspace_id, user_id, role, created) VALUES ('default', 'usr_dev', 'owner', 1);",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let mut r = steve_modules::Registry::new();
+    crate::yolo::draft::register(&mut r, None);
+    let m = steve_modules::Modules::new(k.db().store().clone(), k.core.module_gateway(), r);
+    k.core.attach_modules(m.clone());
+    k.gw.set(|p, _| {
+        if p.starts_with("You are the router") {
+            Ok(r#"{"kind":"config","title":"x"}"#.into())
+        } else if p.starts_with("Which Steve configuration") {
+            assert!(p.contains("yolo:default — YOLO 模式"));
+            Ok(r#"{"targets":["yolo:default"]}"#.into())
+        } else if p.starts_with("You configure YOLO mode") {
+            Ok(r#"{"ops":[{"op":"yolo.set","on":true}]}"#.into())
+        } else {
+            Err(msg("unexpected prompt"))
+        }
+    });
+    k.core
+        .say_as(WS, Some("usr_dev"), "开 YOLO", &[], &[])
+        .unwrap();
+    let ms = settle(&k, 2).await;
+    assert_eq!(
+        ms[1].text, "这是配置改动，我起草好了，确认后应用到「YOLO 模式」：",
+        "{:?}",
+        ms[1]
+    );
+    let p = &ms[1].meta["proposal"];
+    assert_eq!(p["target"], json!({"kind": "yolo", "id": "default"}));
+    assert_eq!(p["changes"][0]["to"], "开");
+    let caller = steve_modules::Caller {
+        ws: WS.into(),
+        me: "usr_dev".into(),
+    };
+    let id = p["id"].as_str().unwrap();
+    steve_modules::changes::apply(&m, &caller, id)
+        .unwrap()
+        .unwrap();
+    k.core.mark_proposal(WS, id, Some("applied"));
+    let msg = k.db().message(&ms[1].id).unwrap().unwrap();
+    assert_eq!(msg.meta["cfg_state"][id], "applied");
+    /* without a known user the modules are not offered */
+    k.gw.set(|p, _| {
+        if p.starts_with("You are the router") {
+            Ok(r#"{"kind":"config","title":"x"}"#.into())
+        } else if p.starts_with("Which Steve configuration") {
+            assert!(!p.contains("yolo:"));
+            Ok(r#"{"targets":["yolo:default"]}"#.into())
+        } else {
+            Ok(r#"{"changes":[]}"#.into())
+        }
+    });
+    k.core.say(WS, "关 YOLO", &[]).unwrap();
+    let ms = settle(&k, 4).await;
+    assert!(
+        ms[3].text.starts_with("我没看出要改「设置 · 通用」"),
+        "{}",
+        ms[3].text
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn stop_suppresses_the_reply() {
     let k = Kit::new();

@@ -33,7 +33,7 @@ export type Tag = { id: string; name: string; cat: string; desc: string; by: "St
 export type Bot = { id: string; main?: boolean; n: string; a: string; role: string; pers: string; pro: number; h: string; harness: string; m: string; model: string | null; on: boolean; acc: string; ws: string; project: string | null; perm: string; permMode: string; rule: string; prompt: string | null
   reasoningEffort?: string | null; mem: [string, string, string][]; memCount: number; memLoaded: boolean; routines: { t: string; d: string; m: string; on: boolean; last: string }[]; hue: string; color: string; round: number; skin: string | null; dev?: string; workspaces: string[] }
 export type Draft = { mid: string; thought: string; text: string }
-export type Msg = { id?: string; clientId?: string; k: "me" | "steve" | "thinking" | "digest"; t?: string; item?: string; fresh?: boolean; chat?: string; files?: RFile[]; cfg?: any; created?: number; steps?: Steps; notice?: { kind: string; level: string; ref?: string }; cites?: Cite[]
+export type Msg = { id?: string; clientId?: string; k: "me" | "steve" | "thinking" | "digest"; t?: string; item?: string; fresh?: boolean; chat?: string; files?: RFile[]; cfgs?: any[]; created?: number; steps?: Steps; notice?: { kind: string; level: string; ref?: string }; cites?: Cite[]
   /* thread routing (§3.4, §5.2): the offer under an answer, a suggestion card, ask options, a user message waiting in the
    * queue, the message this one answers or quotes, flow-back from an item, a research cut off by a restart */
   offer?: Offer; suggest?: Suggest; ask?: { options: string[] }; queued?: { run?: string | null }; replyTo?: string; origin?: string; answer?: string
@@ -336,19 +336,26 @@ function itemOf(i: RItem): Item {
   }
 }
 export function msgOf(m: State["thread"][number]): Msg {
-  const p: Proposal | undefined = m.meta?.proposal
   const x = m.meta ?? {}
-  return { id: m.id, k: m.author, t: m.text, item: m.item_id ?? undefined, chat: x.chat, files: x.files, created: m.created, steps: x.steps, notice: x.notice, cites: x.cites, cfg: p ? proposalOf(p, x.applied ? "applied" : x.dropped ? "dropped" : "draft") : undefined,
+  /* one drafted change (`proposal`) or several (`proposals`); `cfg_state` is what became of each */
+  const ps: Proposal[] = Array.isArray(x.proposals) ? x.proposals : x.proposal ? [x.proposal] : []
+  const cfgs = ps.map((p) => proposalOf(p, x.cfg_state?.[p.id] ?? (x.applied ? "applied" : x.dropped ? "dropped" : "draft")))
+  return { id: m.id, k: m.author, t: m.text, item: m.item_id ?? undefined, chat: x.chat, files: x.files, created: m.created, steps: x.steps, notice: x.notice, cites: x.cites, cfgs: cfgs.length ? cfgs : undefined,
     offer: x.offer ?? undefined, suggest: x.suggest ?? undefined, ask: x.ask ?? undefined, queued: x.queued ?? undefined, replyTo: x.reply_to ?? undefined, origin: x.origin ?? undefined, answer: x.answer ?? undefined,
     update: x.update ?? undefined, updates: Array.isArray(x.updates) ? x.updates : undefined, rerun: x.rerun ?? undefined,
     card: x.card?.item ? x.card : undefined, cardOnly: !!x.card_only, wasCard: !!x.was_card }
 }
 const proposals = new Map<string, any>()
-/** a drafted change as the prototype's Proposal: apply/undo call the Hub */
+/** a drafted change as the prototype's Proposal: apply/undo/drop call the Hub. The Hub keeps what became of a
+ * conversation card (`state`); until it says so, what this page just did stands. */
 export function proposalOf(p: Proposal, state: "draft" | "applied" | "dropped" = "draft") {
-  const cur = proposals.get(p.id); if (cur) return cur
-  const x: any = { title: p.title, target: p.title, href: p.href, changes: p.changes, state, id: p.id }
-  x.apply = async () => { const r = await call(api.apply(p.id)); if (r) { x.state = "applied"; emit(); toast("已应用", { action: { label: "撤销", onClick: () => void call(api.undoConfig(p.id), "已撤销").then(() => { x.state = "draft"; emit() }) } }) } }
+  const cur = proposals.get(p.id)
+  if (cur) { if (!cur.touched || state === cur.state) { cur.state = state; cur.touched = false } return cur }
+  const x: any = { title: p.title, target: p.title, href: p.href, changes: p.changes, state, id: p.id, touched: false }
+  const set = (s: typeof state) => { x.state = s; x.touched = true; emit() }
+  x.undo = async () => { if (await call(api.undoConfig(p.id), "已撤销")) set("draft") }
+  x.apply = async () => { const r = await call(api.apply(p.id)); if (r) { set("applied"); toast("已应用", { action: { label: "撤销", onClick: () => void x.undo() } }) } }
+  x.drop = async () => { if (await call(api.dropConfig(p.id))) set("dropped") }
   proposals.set(p.id, x); return x
 }
 

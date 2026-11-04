@@ -435,6 +435,7 @@ pub fn router(st: AppState, modules: Router) -> Router {
         .route("/config/draft", post(misc::config_draft))
         .route("/config/{id}/apply", post(misc::config_apply))
         .route("/config/{id}/undo", post(misc::config_undo))
+        .route("/config/{id}/drop", post(misc::config_drop))
         // devices
         .route("/devices", get(misc::devices))
         .route("/devices/{id}", patch(misc::device_patch))

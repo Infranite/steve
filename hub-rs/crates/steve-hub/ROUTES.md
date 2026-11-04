@@ -82,6 +82,7 @@ Contract = steps identical in `tests/contract/contract.mjs --a ts --b rust` (las
 | `POST /api/config/draft` | done | ✓ 3/3 |  |  |
 | `POST /api/config/:id/apply` | done | ✓ 3/3 |  |  |
 | `POST /api/config/:id/undo` | done | ✓ 2/2 |  |  |
+| `POST /api/config/:id/drop` | done |  |  | Rust only (ST-25): throws a draft away (core or module changeset) and marks its conversation card `dropped` |
 | `POST /api/files` | done | ✓ 10/10 | ✓ |  |
 | `GET /api/files/:id` | done | ✓ 5/5 | ✓ |  |
 | `GET /api/devices` | done | ✓ 2/2 |  |  |

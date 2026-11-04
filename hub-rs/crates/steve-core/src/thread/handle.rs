@@ -343,7 +343,7 @@ impl Core {
                 }
                 Logged { item: None }
             }
-            "config" => self.on_config(ws, text, reply, steps).await?,
+            "config" => self.on_config(ws, text, user, reply, steps).await?,
             "suggest" => {
                 let (q, card) = suggest::card(&r, &d);
                 reply(&q, None, Some(json!({"suggest": card})));
@@ -392,10 +392,15 @@ impl Core {
         Ok(())
     }
 
+    /// A standing setting said in words (router kind `config`): every configuration it touches is
+    /// drafted as a card to apply — Steve's own settings, bots, projects and tags, and with a known user
+    /// the modules' (YOLO, schedules, flows, knowledge sources, mailboxes…) — or, when the user only asks,
+    /// shown as it is now.
     async fn on_config(
         &self,
         ws: &str,
         text: &str,
+        user: Option<&str>,
         reply: Reply<'_>,
         steps: &Mutex<Steps>,
     ) -> Result<Logged> {
@@ -405,35 +410,19 @@ impl Core {
             "draft_config",
             json!({"request": js_head(text, 200)}),
         );
-        let res = self
-            .draft(
-                ws,
-                crate::changes::Target {
-                    kind: "global".into(),
-                    id: None,
-                },
-                text,
-            )
-            .await;
-        let p = Steps::end(
-            steps,
-            i,
-            res,
-            |p| json!({"target": p.title, "changes": p.changes.len()}),
-        )?;
-        if p.changes.is_empty() {
-            reply(
-                &format!("我没看出要改「{}」的哪一项，换个说法试试？", p.title),
-                None,
-                None,
-            );
-        } else {
-            reply(
-                &format!("这是配置改动，我起草好了，确认后应用到「{}」：", p.title),
-                None,
-                Some(json!({"proposal": p})),
-            );
-        }
+        let res = self.config_request(ws, text, user).await;
+        let (ask, ds) = Steps::end(steps, i, res, |(_, ds)| {
+            json!({
+                "targets": ds.iter().map(|d| d.title.clone()).collect::<Vec<_>>(),
+                "changes": ds
+                    .iter()
+                    .filter_map(|d| d.proposal.as_ref())
+                    .map(|p| p["changes"].as_array().map_or(0, Vec::len))
+                    .sum::<usize>(),
+            })
+        })?;
+        let (text, meta) = config_reply(ask, &ds);
+        reply(&text, None, meta);
         Ok(Logged { item: None })
     }
 
@@ -645,4 +634,78 @@ impl Core {
             item: Some(item.id),
         })
     }
+}
+
+/// How it is set now, a line per field (at most 20).
+fn listed(d: &crate::changes::Drafted) -> String {
+    let mut lines: Vec<String> = d
+        .current
+        .iter()
+        .take(20)
+        .map(|(k, v)| format!("- {k}：{v}"))
+        .collect();
+    if d.current.len() > 20 {
+        lines.push(format!("- ……还有 {} 项", d.current.len() - 20));
+    }
+    lines.join("\n")
+}
+
+/// The reply to a configuration request: the drafted cards (`meta.proposal`, or `meta.proposals` when
+/// there are several), and how the rest is set now.
+fn config_reply(ask: bool, ds: &[crate::changes::Drafted]) -> (String, Option<Value>) {
+    if ask {
+        let parts: Vec<String> = ds
+            .iter()
+            .map(|d| format!("「{}」现在是：\n{}", d.title, listed(d)))
+            .collect();
+        return (
+            format!(
+                "{}\n\n要改的话直接说改成什么，我起草好给你确认。",
+                parts.join("\n\n")
+            ),
+            None,
+        );
+    }
+    let drafted: Vec<&Value> = ds.iter().filter_map(|d| d.proposal.as_ref()).collect();
+    let unchanged: Vec<String> = ds
+        .iter()
+        .filter(|d| d.proposal.is_none())
+        .map(|d| {
+            let now = listed(d);
+            if now.is_empty() {
+                format!("我没看出要改「{}」的哪一项，换个说法试试？", d.title)
+            } else {
+                format!(
+                    "我没看出要改「{}」的哪一项，换个说法试试？现在是：\n{now}",
+                    d.title
+                )
+            }
+        })
+        .collect();
+    let head = match drafted.as_slice() {
+        [] => String::new(),
+        [_] => {
+            let t = ds
+                .iter()
+                .find(|d| d.proposal.is_some())
+                .map(|d| d.title.as_str())
+                .unwrap_or_default();
+            format!("这是配置改动，我起草好了，确认后应用到「{t}」：")
+        }
+        many => format!(
+            "这是配置改动，我起草好了 {} 处，确认后分别应用：",
+            many.len()
+        ),
+    };
+    let text = std::iter::once(head)
+        .chain(unchanged)
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let meta = match drafted.as_slice() {
+        [] => None,
+        [p] => Some(json!({"proposal": p})),
+        many => Some(json!({"proposals": many})),
+    };
+    (text, meta)
 }

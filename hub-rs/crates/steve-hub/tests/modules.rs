@@ -500,6 +500,27 @@ async fn module_config_drafts_go_to_the_modules() {
         .call("POST", &format!("/api/config/{id}/apply"), None, None)
         .await;
     assert!(s == 200 || s == 409 || s == 400, "{s} {v}");
+    // a module draft is dropped once; a core draft id is dropped even when it is already gone
+    let (s, d) = c
+        .call(
+            "POST",
+            "/api/config/draft",
+            Some(json!({ "target": { "kind": "schedule" }, "text": "每天早上九点给我汇报" })),
+            None,
+        )
+        .await;
+    assert_eq!(s, 200, "{d}");
+    let drop = format!("/api/config/{}/drop", d["id"].as_str().expect("draft id"));
+    assert_eq!(
+        c.call("POST", &drop, None, None).await,
+        (200, json!({ "ok": true }))
+    );
+    assert_eq!(c.call("POST", &drop, None, None).await.0, 409);
+    assert_eq!(
+        c.call("POST", "/api/config/chg_0000000000000000/drop", None, None)
+            .await,
+        (200, json!({ "ok": true }))
+    );
     // TS kinds still go to the core
     let (s, v) = c
         .call("POST", "/api/config/chg_0000000000000000/apply", None, None)
