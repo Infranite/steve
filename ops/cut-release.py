@@ -46,8 +46,11 @@ class Raced(Exception):
 
 
 def git(*args, cwd, check=True, timeout=None):
-    r = subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True, timeout=timeout,
-                       env=dict(os.environ, GIT_TERMINAL_PROMPT="0"))
+    try:
+        r = subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True, timeout=timeout,
+                           env=dict(os.environ, GIT_TERMINAL_PROMPT="0"))
+    except subprocess.TimeoutExpired:
+        raise Refused(f"git {args[0]} timed out after {timeout}s")
     if check and r.returncode != 0:
         raise Refused(f"git {' '.join(args)}: {(r.stderr or r.stdout).strip()[:400]}")
     return r
@@ -123,6 +126,8 @@ def cut_once(repo, branch, version_arg, minor, dry):
         raise Refused("can't fetch origin")
     version = version_arg or next_version(repo, minor)
     if tuple(int(x) for x in version.split(".")) in remote_versions(repo):
+        if not version_arg:
+            raise Raced(f"v{version} was released meanwhile")
         raise Refused(f"v{version} is already on origin")
     with tempfile.TemporaryDirectory(prefix="steve-cut-") as tmp:
         wt = Path(tmp, "wt")
@@ -143,18 +148,49 @@ def cut_once(repo, branch, version_arg, minor, dry):
             git("add", "--", str(notes.relative_to(wt)), cwd=wt)
             git("commit", "--quiet", "-m", f"Release notes {version}", cwd=wt)
             git("tag", "-a", f"v{version}", "-m", f"Steve v{version}", cwd=wt)
-            r = git("push", "--atomic", "--porcelain", "origin", f"HEAD:refs/heads/{branch}",
-                    f"refs/tags/v{version}", cwd=wt, check=False, timeout=NET_TIMEOUT)
-            if r.returncode != 0:
-                git("tag", "-d", f"v{version}", cwd=repo, check=False)
-                rejected = "[rejected]" in r.stdout or "[remote rejected]" in r.stdout
-                if rejected:
-                    raise Raced((r.stdout + r.stderr).strip()[:300])
-                raise Refused(f"push failed: {(r.stderr or r.stdout).strip()[:300]}")
+            try:
+                push(wt, branch, version)
+            except BaseException:
+                # the tag stays only if origin has it: a push that timed out may have landed
+                if not landed(repo, branch, version, wt):
+                    git("tag", "-d", f"v{version}", cwd=repo, check=False)
+                    raise
         finally:
             git("worktree", "remove", "--force", str(wt), cwd=repo, check=False)
-    git("fetch", "--quiet", "--tags", "origin", cwd=repo, check=False, timeout=NET_TIMEOUT)
+    try:
+        git("fetch", "--quiet", "--tags", "origin", cwd=repo, check=False, timeout=NET_TIMEOUT)
+    except Refused:
+        pass  # released; the next fetch brings it here
     return version
+
+
+def push(wt, branch, version):
+    try:
+        r = subprocess.run(["git", "-C", str(wt), "push", "--atomic", "--porcelain", "origin",
+                            f"HEAD:refs/heads/{branch}", f"refs/tags/v{version}"], capture_output=True,
+                           text=True, timeout=NET_TIMEOUT, env=dict(os.environ, GIT_TERMINAL_PROMPT="0"))
+    except subprocess.TimeoutExpired:
+        raise Refused(f"pushing v{version} timed out")
+    if r.returncode != 0:
+        if "[rejected]" in r.stdout or "[remote rejected]" in r.stdout:
+            raise Raced((r.stdout + r.stderr).strip()[:300])
+        raise Refused(f"push failed: {(r.stderr or r.stdout).strip()[:300]}")
+
+
+def landed(repo, branch, version, wt):
+    """origin has this release: its tag is our tag and its branch our commit. Unknown counts as no:
+    the tag is then removed here, and the next run finds the version taken if it did land."""
+    try:
+        r = git("ls-remote", "origin", f"refs/tags/v{version}", f"refs/heads/{branch}", cwd=repo,
+                check=False, timeout=NET_TIMEOUT)
+    except Refused:
+        return False
+    if r.returncode != 0:
+        return False
+    refs = dict(reversed(l.split("\t", 1)) for l in r.stdout.splitlines() if "\t" in l)
+    tag = git("rev-parse", f"refs/tags/v{version}", cwd=wt, check=False).stdout.strip()
+    head = git("rev-parse", "HEAD", cwd=wt, check=False).stdout.strip()
+    return refs.get(f"refs/tags/v{version}") == tag and refs.get(f"refs/heads/{branch}") == head
 
 
 def cut(repo, branch, version_arg, minor, dry):

@@ -16,7 +16,8 @@ pub use crate::upstream::{Presence, fetch};
 /// How one request's change relates to another's (`this` against `other`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Overlap {
-    /// The two bring the same: equal patch ids of their own changes, or each adds nothing to the other.
+    /// The two bring the same: the same own diff (whitespace included, wherever it applies), or each
+    /// adds nothing to the other.
     Same,
     /// This one adds nothing on top of the other: merging it onto the other gives the other's tree.
     InOther,
@@ -93,6 +94,8 @@ fn overlap_of(
         git(dir, &["merge-base", this, target])?,
         git(dir, &["merge-base", other, target])?,
     );
+    /* equal patch ids only make two changes candidates (`--stable` ignores whitespace, which can be
+    meaning); the same diff, whitespace and all, line numbers aside, makes them the same */
     let own = |base: &str, head: &str| -> Result<Option<String>, String> {
         Ok(
             crate::upstream::patch_ids(dir, &["diff-tree", "-p", "--no-color", base, head])?
@@ -103,6 +106,7 @@ fn overlap_of(
     };
     if let (Some(a), Some(b)) = (own(&base_a, this)?, own(&base_b, other)?)
         && a == b
+        && exact_diff(dir, &base_a, this)? == exact_diff(dir, &base_b, other)?
     {
         return Ok(Some(Overlap::Same));
     }
@@ -147,7 +151,12 @@ fn overlap_of(
                 f,
             ],
         )?;
-        let theirs = git(dir, &["show", &format!("{other}:{f}")]).unwrap_or_default();
+        /* a file the other one removed has nothing of this one; one git can't read is not known */
+        let theirs = if git(dir, &["ls-tree", "--name-only", other, "--", f])?.is_empty() {
+            String::new()
+        } else {
+            git(dir, &["show", &format!("{other}:{f}")])?
+        };
         let theirs: HashSet<&str> = theirs.lines().map(str::trim).collect();
         for l in diff.lines() {
             let Some(l) = l.strip_prefix('+') else {
@@ -167,6 +176,31 @@ fn overlap_of(
         present,
         added,
     }))
+}
+
+/// The diff from `base` to `head` without what depends on where it applies (blob ids, line numbers).
+fn exact_diff(dir: &Path, base: &str, head: &str) -> Result<String, String> {
+    let d = git(
+        dir,
+        &[
+            "diff",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-renames",
+            base,
+            head,
+        ],
+    )?;
+    Ok(d.lines()
+        .filter(|l| !l.starts_with("index "))
+        .map(
+            |l| match l.strip_prefix("@@ ").and_then(|r| r.split_once(" @@")) {
+                Some((_, rest)) => format!("@@{rest}"),
+                None => l.to_string(),
+            },
+        )
+        .collect::<Vec<_>>()
+        .join("\n"))
 }
 
 /// The tree `git merge-tree` makes of `ours` and `theirs`: `None` when they conflict.

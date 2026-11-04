@@ -119,6 +119,40 @@ fn every_spelling_clone_and_worktree_of_a_repository_is_one_target() {
         "{s:?}"
     );
     assert_eq!(s.branch, "main");
+
+    /* a clone of that checkout merges into the same repository */
+    let of_solo = t.path().join("of-solo");
+    g(
+        t.path(),
+        &[
+            "clone",
+            "-q",
+            &solo.to_string_lossy(),
+            &of_solo.to_string_lossy(),
+        ],
+    );
+    assert_eq!(target_of(&of_solo, None).unwrap().upstream, s.upstream);
+
+    /* an `insteadOf` shorthand is the repository it expands to … */
+    g(
+        &other,
+        &["config", "url.https://github.com/.insteadOf", "gh:"],
+    );
+    g(&other, &["remote", "set-url", "origin", "gh:Acme/App.git"]);
+    assert_eq!(target_of(&other, Some("release")).unwrap(), a);
+    /* … but a network remote served from a copy on this machine is still that remote */
+    g(
+        &r,
+        &[
+            "config",
+            &format!(
+                "url.{}.insteadOf",
+                t.path().join("origin.git").to_string_lossy()
+            ),
+            "git@github.com:Acme/App.git",
+        ],
+    );
+    assert_eq!(target_of(&r, Some("release")).unwrap(), a);
 }
 
 #[test]
@@ -236,6 +270,16 @@ fn overlapping_requests_are_told_apart_only_on_exact_evidence() {
             added: 3
         })
     );
+
+    /* indentation is meaning: equal `--stable` patch ids are not the same change */
+    g(&r, &["checkout", "-q", "-b", "i1", &base]);
+    let i1 = commit(&r, "f.py", "if x:\n    return 1\n", "indent 4");
+    g(&r, &["checkout", "-q", "-b", "i2", &base]);
+    let i2 = commit(&r, "f.py", "if x:\n        return 1\n", "indent 8");
+    assert!(matches!(
+        overlap(&r, &up, &i2, &i1),
+        Some(Overlap::Partial { .. })
+    ));
 
     /* precheck lists only the requests that overlap, and keeps the order */
     let p = precheck(

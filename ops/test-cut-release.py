@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """cut-release.py on throwaway repositories: no network, no real remote."""
+import importlib.util
 import os
 import subprocess
 import sys
@@ -136,6 +137,44 @@ def main():
         r = cut(a, "lint")
         assert r.returncode == 1 and "docs/releases/0.2.29.md" in r.stderr, r
         ok("lint refuses a branch that picks its own version")
+
+        # in process: the version is taken between choosing it and checking it, and a push that fails
+        spec = importlib.util.spec_from_file_location("cut_release", CUT)
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        commit(b, {"docs/releases/unreleased/ST-7.md": "- Seventh.\n"}, "seven")
+        subprocess.run(["git", "-C", str(b), "pull", "-q", "--rebase", "origin", "main"], check=True, env=ENV)
+        git(b, "push", "-q", "origin", "main")
+        real, calls = m.remote_versions, []
+
+        def taken_once(repo):
+            have = real(repo)
+            calls.append(1)
+            if len(calls) == 2:  # the check right after choosing: someone else took it
+                have = have | {(0, 2, 29)}
+            return have
+        m.remote_versions = taken_once
+        os.environ.update({k: v for k, v in ENV.items() if k.startswith("GIT_")})
+        assert m.cut(b, "main", None, False, False) == "0.2.29"
+        assert git(origin, "tag", "-l", "v0.2.29") == "v0.2.29" and len(calls) >= 3
+        m.remote_versions = real
+        ok("a version taken meanwhile means the next one, not a refusal")
+
+        commit(b, {"docs/releases/unreleased/ST-8.md": "- Eighth.\n"}, "eight")
+        subprocess.run(["git", "-C", str(b), "pull", "-q", "--rebase", "origin", "main"], check=True, env=ENV)
+        git(b, "push", "-q", "origin", "main")
+
+        def lost(*a):
+            raise m.Refused("pushing timed out")
+        m.push = lost
+        try:
+            m.cut(b, "main", None, False, False)
+            raise AssertionError("released without a push")
+        except m.Refused:
+            pass
+        assert git(b, "tag", "-l", "v0.2.30") == "" and git(origin, "tag", "-l", "v0.2.30") == ""
+        assert len(git(b, "worktree", "list").splitlines()) == 1, git(b, "worktree", "list")
+        ok("a push that did not land leaves no tag and no worktree behind")
 
         # origin unreachable: an error, not "no tags"
         git(a, "remote", "set-url", "origin", str(Path(tmp, "gone.git")))
