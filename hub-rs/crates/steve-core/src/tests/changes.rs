@@ -270,7 +270,9 @@ async fn tags_are_renamed_moved_and_removed_only_when_unused_then_undone() {
     k.db().tag_create(WS, "旧", "主题", "不用了", "你").unwrap();
     let used = k.db().tag_create(WS, "在用", "领域", "", "你").unwrap();
     let item = k.item("run", "x", None);
-    k.db().set_item_tags(&item, std::slice::from_ref(&used.id)).unwrap();
+    k.db()
+        .set_item_tags(&item, std::slice::from_ref(&used.id))
+        .unwrap();
     k.gw.set(|_, _| {
         Ok(r#"{"edit":[{"name":"UI","newName":"前端","cat":"类型"},{"name":"在用","newName":"旧"}],"remove":["旧","在用","没有"]}"#.into())
     });
