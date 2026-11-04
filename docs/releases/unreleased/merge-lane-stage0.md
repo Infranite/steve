@@ -1,2 +1,0 @@
-- **Versions are chosen when releasing, not ahead.** A change describes itself in a release-note fragment; `ops/cut-release.py cut` gives the release the next free number, joins the fragments and pushes `main` with the tag in one step, so two releases can no longer take the same number or write each other's notes. A branch that writes `docs/releases/X.Y.Z.md` itself is refused by `ops/cut-release.py lint`.
-- Checking whether an item's change is on the remote now tells "not merged yet" apart from "couldn't check", instead of reporting a failed check as not merged.
