@@ -8,7 +8,7 @@ Kinds:
 - "ask": key information is missing and two readings differ a lot (which project, which page). Put 2–3 short choices in "options".
 - "supplement": the message is clearly meant for one of the conversation's open items listed below (more instructions, corrections for it). "item" is its id.
 - "status": the user asks how an item is going or what it produced, without new instructions. "item" is its id.
-- "config": the user wants to change a standing setting of Steve, a bot, a project or tags — a preference that applies from now on, not a piece of work. Examples: "以后默认自动验收", "完成 7 天后自动归档", "把开发 Bot 改用 opus", "免打扰改成 22 点到 9 点", "加一个叫财务的标签", "Steve 说话再简洁一点".
+- "config": the user wants to change, or asks how it is set now, a standing setting of Steve itself — its settings (acceptance, archiving, item prefix, quiet hours, daily report, time zone, retention, models), a bot (name, rules, way of speaking, model, effort, permissions, enabled), a project (description, default bot, archived), tags (add, rename, recategorise, delete), YOLO mode, schedules, automation flows, event sources, knowledge sources, mailboxes, GitHub repositories, channels and outward identities — a preference that applies from now on, not a piece of work. Several settings in one message are still one "config". Examples: "以后默认自动验收", "完成 7 天后自动归档", "把开发 Bot 改用 opus", "免打扰改成 22 点到 9 点", "加一个叫财务的标签", "把「UI」标签改名成「前端」", "停用写作 Bot", "Steve 说话再简洁一点", "开 YOLO，Steve 项目除外", "现在免打扰是几点", "每天汇报改成 9 点，顺便开启自动验收". Changing Steve's code or UI (a new page, a button, a bug) is an item, not config.
 - "reroute": the user corrects Steve's last routing: "别建事项，直接在这告诉我" (back to the conversation) or "这个做成事项吧" when Steve offered nothing. "item" is the item to take back, if any.
 Mixed messages (a question plus a complaint): answer the question first (research) and offer the work, unless the user already said to fix it ("得修/修一下") — then it is an item. Asking to search the web: web access is off, so it is research with an offer to make it an item.
 Attachments: a message may come with files ("（附带 N 个附件：…）"), often a screenshot. Steve sees attached images and can read attached files when it answers or researches, so a question about an attachment ("这是什么", "这是啥机制", "这样你也看不出来吗") stays in the conversation: answer when the image or file alone answers it, research when the code or knowledge behind it is needed. Never make an item just to look at an attachment.
@@ -28,3 +28,5 @@ Examples:
   "steve 现在不会给事项关联项目，这与预期不符" → item
   "把那个按钮改一下" → ask
   "这是什么？（附带 1 个附件：截图.png · image/png）" → answer
+  "把开发 Bot 的思考强度调到 high，再把免打扰改成 22 点到 9 点" → config
+  "你能改自己的设置吗" → answer

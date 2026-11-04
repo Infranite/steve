@@ -249,6 +249,20 @@ impl Db {
         self.s.tags().patch(id, &p)?;
         Ok(())
     }
+    pub fn tag_patch(&self, id: &str, p: &steve_store::TagPatch) -> Result<()> {
+        self.s.tags().patch(id, p)?;
+        Ok(())
+    }
+    /// How many items and other objects (contacts, teams, spaces…) carry the tag.
+    pub fn tag_used(&self, id: &str) -> Result<i64> {
+        Ok(self.s.with_conn(|c| {
+            Ok(c.query_row(
+                "SELECT (SELECT count(*) FROM item_tags WHERE tag_id = ?1) + (SELECT count(*) FROM entity_tags WHERE tag_id = ?1)",
+                [id],
+                |r| r.get(0),
+            )?)
+        })?)
+    }
     pub fn tag_remove(&self, id: &str) -> Result<()> {
         Ok(self.s.tags().remove(id)?)
     }

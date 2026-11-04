@@ -511,6 +511,26 @@ pub fn drop_draft(m: &Modules, caller: &Caller, id: &str) -> Option<ApiResult<Va
     })())
 }
 
+/// A module target as it is now (fields with their current values), after the ownership check; no
+/// model call and nothing stored. For a request that only asks how something is set.
+pub async fn prepared(
+    m: &Modules,
+    caller: &Caller,
+    kind: &str,
+    id: Option<&str>,
+) -> ApiResult<Prepared> {
+    if !m.registry.targets.contains_key(kind) {
+        return Err(ApiError::invalid("target.kind"));
+    }
+    let (kind, id, caller) = (kind.to_string(), id.map(String::from), caller.clone());
+    m.blocking(move |m| {
+        let viewer = m.viewer(&caller)?;
+        let t = &m.registry.targets[&kind];
+        m.store.reader(|c| t.prepare(c, &viewer, id.as_deref()))
+    })
+    .await
+}
+
 /// Every registered target's `global` candidates, for steve-core's `pickTarget` option list.
 pub fn candidates(m: &Modules, caller: &Caller) -> ApiResult<Vec<Candidate>> {
     let viewer = m.viewer(caller)?;

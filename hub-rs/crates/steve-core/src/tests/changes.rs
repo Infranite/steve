@@ -262,3 +262,122 @@ async fn a_models_draft_sets_lists_effort_and_agent_defaults_and_undoes() {
         .unwrap();
     assert_eq!(n, 2, "apply and undo are both audited");
 }
+
+#[tokio::test]
+async fn tags_are_renamed_moved_and_removed_only_when_unused_then_undone() {
+    let k = Kit::new();
+    let ui = k.db().tag_create(WS, "UI", "领域", "界面", "你").unwrap();
+    k.db().tag_create(WS, "旧", "主题", "不用了", "你").unwrap();
+    let used = k.db().tag_create(WS, "在用", "领域", "", "你").unwrap();
+    let item = k.item("run", "x", None);
+    k.db().set_item_tags(&item, std::slice::from_ref(&used.id)).unwrap();
+    k.gw.set(|_, _| {
+        Ok(r#"{"edit":[{"name":"UI","newName":"前端","cat":"类型"},{"name":"在用","newName":"旧"}],"remove":["旧","在用","没有"]}"#.into())
+    });
+    let p = k
+        .core
+        .draft(
+            WS,
+            target("tags", None),
+            "UI 改名前端放到类型里，删掉旧的和在用的",
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&p.changes).unwrap(),
+        json!([
+            {"label": "改名 · UI", "from": "UI", "to": "前端"},
+            {"label": "分类 · UI", "from": "领域", "to": "类型"},
+            {"label": "删除标签", "from": "旧", "to": "—"},
+            {"label": "删除 · 在用", "from": "在用", "to": "（没有删：还有 1 处在用，可以在标签页合并到别的标签）"}
+        ]),
+        "a rename onto an existing name is left out; a tag in use is not removed"
+    );
+    k.core.apply(&p.id, "me", WS).unwrap();
+    let t = k.db().tag(&ui.id).unwrap().unwrap();
+    assert_eq!((t.name.as_str(), t.cat.as_str()), ("前端", "类型"));
+    assert!(k.db().tag_by_name(WS, "旧").unwrap().is_none());
+    assert!(k.db().tag(&used.id).unwrap().is_some());
+    k.core.undo(&p.id, "me", WS).unwrap();
+    let t = k.db().tag(&ui.id).unwrap().unwrap();
+    assert_eq!((t.name.as_str(), t.cat.as_str()), ("UI", "领域"));
+    let back = k.db().tag_by_name(WS, "旧").unwrap().unwrap();
+    assert_eq!(
+        (back.cat.as_str(), back.description.as_str()),
+        ("主题", "不用了")
+    );
+}
+
+#[tokio::test]
+async fn a_bot_is_switched_off_and_a_project_archived() {
+    let k = Kit::new();
+    let pr = k
+        .db()
+        .project_create(WS, "Web", "", "/tmp", "git", false, None, None)
+        .unwrap();
+    k.gw.set(|p, _| {
+        if p.contains("the bot") {
+            assert!(p.contains("  enabled · 启用状态 · enum · 启用|停用 · \"启用\""));
+            Ok(r#"{"changes":[{"key":"enabled","value":"停用"}]}"#.into())
+        } else {
+            assert!(p.contains("  archived · 状态（归档后不再出现在项目列表和分派选项里） · enum · 使用中|已归档 · \"使用中\""));
+            Ok(r#"{"changes":[{"key":"archived","value":"已归档"}]}"#.into())
+        }
+    });
+    let b = k
+        .core
+        .draft(WS, target("bot", Some("dev")), "停用开发 Bot")
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&b.changes).unwrap(),
+        json!([{"label": "启用状态", "from": "启用", "to": "停用"}])
+    );
+    k.core.apply(&b.id, "me", WS).unwrap();
+    assert!(!k.db().bot("dev").unwrap().unwrap().enabled);
+    let p = k
+        .core
+        .draft(WS, target("project", Some(&pr.id)), "归档 Web")
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&p.changes).unwrap(),
+        json!([{"label": "状态", "from": "使用中", "to": "已归档"}])
+    );
+    k.core.apply(&p.id, "me", WS).unwrap();
+    assert!(k.db().project(Some(&pr.id)).unwrap().unwrap().archived);
+    k.core.undo(&p.id, "me", WS).unwrap();
+    assert!(!k.db().project(Some(&pr.id)).unwrap().unwrap().archived);
+    /* the main bot has no switch */
+    let (_, _, now) = k.core.describe(WS, &target("bot", Some("steve"))).unwrap();
+    assert!(!now.iter().any(|(l, _)| l == "启用状态"));
+}
+
+#[tokio::test]
+async fn describe_shows_settings_as_the_user_sees_them() {
+    let k = Kit::new();
+    let (title, href, now) = k
+        .core
+        .describe(WS, &target("settings", Some("items")))
+        .unwrap();
+    assert_eq!(
+        (title.as_str(), href.as_str()),
+        ("设置 · 事项与验收", "#/settings/items")
+    );
+    assert_eq!(
+        now,
+        [
+            ("默认验收方式", "需要你验收"),
+            ("前置完成后", "自动开始"),
+            ("交接阈值", "80%"),
+            ("完成后自动归档", "30 天"),
+            ("事项编号前缀", "ST"),
+        ]
+        .map(|(a, b)| (a.to_string(), b.to_string()))
+    );
+    assert!(
+        k.core
+            .describe(WS, &target("settings", Some("nope")))
+            .is_err()
+    );
+}

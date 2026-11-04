@@ -766,32 +766,49 @@ pub async fn config_draft(
     ))
 }
 
-/// A stored module changeset first (apply or undo); `None` = not one, use the in-memory drafts.
+/// What to do with a stored module changeset.
+#[derive(Clone, Copy)]
+enum Act {
+    Apply,
+    Undo,
+    Drop,
+}
+
+/// A stored module changeset first (apply, undo or drop); `None` = not one, use the in-memory drafts.
+/// A change that went through updates its card in the conversation.
 async fn module_change(
     st: &AppState,
     c: &Ctx,
     id: &str,
-    undo: bool,
+    act: Act,
 ) -> Option<axum::response::Response> {
     let m = st.modules.clone()?;
-    let (caller, id) = (
+    let (caller, cid) = (
         steve_modules::Caller {
             ws: c.ws.clone(),
             me: c.me.clone(),
         },
         id.to_string(),
     );
-    let r = tokio::task::spawn_blocking(move || {
-        if undo {
-            steve_modules::changes::undo(&m, &caller, &id)
-        } else {
-            steve_modules::changes::apply(&m, &caller, &id)
-        }
+    let r = tokio::task::spawn_blocking(move || match act {
+        Act::Apply => steve_modules::changes::apply(&m, &caller, &cid),
+        Act::Undo => steve_modules::changes::undo(&m, &caller, &cid),
+        Act::Drop => steve_modules::changes::drop_draft(&m, &caller, &cid),
     })
     .await
     .ok()??;
     Some(match r {
-        Ok(v) => crate::error::json_response(200, &v),
+        Ok(v) => {
+            let state = match act {
+                Act::Apply => Some("applied"),
+                Act::Undo => None,
+                Act::Drop => Some("dropped"),
+            };
+            if let Err(e) = st.domain.config_mark(&c.ws, id, state).await {
+                tracing::warn!("config card {id}: {e}");
+            }
+            crate::error::json_response(200, &v)
+        }
         Err(e) => e.into_response(),
     })
 }
@@ -801,7 +818,7 @@ pub async fn config_apply(
     Extension(c): Extension<Ctx>,
     Path(id): Path<String>,
 ) -> ApiResult {
-    if let Some(r) = module_change(&st, &c, &id, false).await {
+    if let Some(r) = module_change(&st, &c, &id, Act::Apply).await {
         return Ok(r);
     }
     ok(Value::Object(
@@ -814,12 +831,23 @@ pub async fn config_undo(
     Extension(c): Extension<Ctx>,
     Path(id): Path<String>,
 ) -> ApiResult {
-    if let Some(r) = module_change(&st, &c, &id, true).await {
+    if let Some(r) = module_change(&st, &c, &id, Act::Undo).await {
         return Ok(r);
     }
     ok(Value::Object(
         st.domain.config_undo(&id, &c.me, &c.ws).await?,
     ))
+}
+
+pub async fn config_drop(
+    State(st): State<AppState>,
+    Extension(c): Extension<Ctx>,
+    Path(id): Path<String>,
+) -> ApiResult {
+    if let Some(r) = module_change(&st, &c, &id, Act::Drop).await {
+        return Ok(r);
+    }
+    ok(Value::Object(st.domain.config_drop(&id, &c.ws).await?))
 }
 
 // ── models a harness offers ──

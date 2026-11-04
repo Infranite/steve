@@ -6,7 +6,7 @@ import { SparklesIcon, ArrowRightIcon, CheckIcon, ArrowUpIcon } from "lucide-rea
 import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
 import { Spinner } from "@/components/ui/spinner"
-import { emit, proposalOf, toast } from "@/store"
+import { proposalOf, toast } from "@/store"
 import { api } from "@/api"
 import { go } from "@/ui"
 
@@ -15,6 +15,7 @@ export type Ctx = { kind: "bot" | "project" | "settings" | "models" | "tags" | "
 export function ProposalCard({ p, inChat = false }: { p: any; inChat?: boolean }) {
   const [busy, setBusy] = useState(false)
   const done = p.state === "applied", dropped = p.state === "dropped"
+  const run = async (f: () => Promise<void>) => { setBusy(true); try { await f() } finally { setBusy(false) } }
   return (
     <Card size="sm" className={cn("gap-0 py-0", inChat ? "w-[min(520px,88vw)]" : "", dropped && "opacity-60")} data-proposal={p.state}>
       <div className="flex items-center gap-2 px-4 pb-1.5 pt-3 type-footnote text-muted-foreground"><SparklesIcon className="size-3.5" />Steve 起草的改动 · {p.title}
@@ -25,9 +26,9 @@ export function ProposalCard({ p, inChat = false }: { p: any; inChat?: boolean }
           <span className="text-muted-foreground line-through decoration-tertiary">{c.from}</span><ArrowRightIcon className="size-3 shrink-0 self-center text-tertiary" /><span className="text-foreground">{c.to}</span>
         </div>))}</div>
       <div className="flex items-center justify-end gap-2 border-t px-3 py-2.5">
-        {done ? <span className="mr-auto inline-flex items-center gap-1.5 type-footnote text-muted-foreground"><CheckIcon className="size-3.5 text-success" />已应用，提示里可以撤销</span>
+        {done ? <><span className="mr-auto inline-flex items-center gap-1.5 type-footnote text-muted-foreground"><CheckIcon className="size-3.5 text-success" />已应用</span><Button variant="ghost" disabled={busy} onClick={() => run(p.undo)} data-undo>撤销</Button></>
           : dropped ? <span className="mr-auto type-footnote text-muted-foreground">已放弃</span>
-          : <><Button variant="ghost" onClick={() => { p.state = "dropped"; emit() }}>放弃</Button><Button disabled={busy} onClick={async () => { setBusy(true); await p.apply(); setBusy(false) }} data-apply>{busy && <Spinner className="size-3.5" />}应用</Button></>}
+          : <><Button variant="ghost" disabled={busy} onClick={() => run(p.drop)} data-drop>放弃</Button><Button disabled={busy} onClick={() => run(p.apply)} data-apply>{busy && <Spinner className="size-3.5" />}应用</Button></>}
       </div>
     </Card>
   )

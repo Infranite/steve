@@ -128,6 +128,9 @@ pub struct Proposal {
     pub changes: Vec<Change>,
     pub patch: Map<String, Value>,
     pub created: i64,
+    /// How the target was set when drafted (for the conversation when nothing changes); not sent.
+    #[serde(skip)]
+    pub current: Vec<Current>,
 }
 
 #[derive(Debug, Clone)]
@@ -189,7 +192,7 @@ fn bot_fields(b: &Bot, projects: &[crate::repo::Project]) -> Vec<BotField> {
     let ps2 = ps.clone();
     let ps3 = ps.clone();
     let perm_keep = b.perm_mode.clone();
-    vec![
+    let mut fs = vec![
         text_field("name", "名字", &b.name),
         text_field("role", "职责", &b.role),
         text_field("persona", "说话方式", &b.persona),
@@ -314,7 +317,28 @@ fn bot_fields(b: &Bot, projects: &[crate::repo::Project]) -> Vec<BotField> {
                 )
             })),
         },
-    ]
+    ];
+    /* the main bot is always on */
+    if !b.main {
+        fs.push(BotField {
+            spec: FieldSpec {
+                key: "enabled".into(),
+                label: "启用状态".into(),
+                ty: "enum",
+                values: Some(vec!["启用".into(), "停用".into()]),
+                current: json!(if b.enabled { "启用" } else { "停用" }),
+            },
+            enc: Some(Box::new(|v| json!(jstr(v) != "停用"))),
+            dec: Some(Box::new(|v| {
+                json!(if v.as_bool() == Some(false) {
+                    "停用"
+                } else {
+                    "启用"
+                })
+            })),
+        });
+    }
+    fs
 }
 
 /// The choice of a purpose that has no override.
@@ -527,29 +551,282 @@ fn model_patch(
     (changes, patch)
 }
 
+/// A line of how a configuration is set now: the field and its value as the user sees it.
+pub type Current = (String, String);
+
+/// A field label without its notes (“免打扰（值：…）”, “模型（opus、sonnet…）” → the name only).
+fn short_label(l: &str) -> String {
+    l.split('（')
+        .next()
+        .unwrap_or(l)
+        .split(" · 模型，")
+        .next()
+        .unwrap_or(l)
+        .trim()
+        .to_string()
+}
+
+/// A change line's label without the value table the model sees (“免打扰（值：…）” → “免打扰”).
+fn plain_label(l: &str) -> String {
+    match l.find("（值：") {
+        Some(i) if l.ends_with('）') => l[..i].to_string(),
+        _ => l.to_string(),
+    }
+}
+
+/// The project fields a draft may change.
+fn project_fields(p: &crate::repo::Project, bs: &[Bot]) -> Vec<FieldSpec> {
+    vec![
+        FieldSpec {
+            key: "name".into(),
+            label: "名称".into(),
+            ty: "text",
+            values: None,
+            current: json!(p.name),
+        },
+        FieldSpec {
+            key: "description".into(),
+            label: "说明".into(),
+            ty: "text",
+            values: None,
+            current: json!(p.description),
+        },
+        FieldSpec {
+            key: "default_bot".into(),
+            label: "默认 Bot".into(),
+            ty: "enum",
+            values: Some(
+                std::iter::once("无".to_string())
+                    .chain(bs.iter().map(|b| b.name.clone()))
+                    .collect(),
+            ),
+            current: json!(
+                bs.iter()
+                    .find(|b| Some(&b.id) == p.default_bot.as_ref())
+                    .map(|b| b.name.as_str())
+                    .unwrap_or("无")
+            ),
+        },
+        FieldSpec {
+            key: "worktree".into(),
+            label: "每个事项单独开 worktree 分支".into(),
+            ty: "enum",
+            values: Some(vec!["开".into(), "关".into()]),
+            current: json!(if p.worktree { "开" } else { "关" }),
+        },
+        FieldSpec {
+            key: "archived".into(),
+            label: "状态（归档后不再出现在项目列表和分派选项里）".into(),
+            ty: "enum",
+            values: Some(vec!["使用中".into(), "已归档".into()]),
+            current: json!(if p.archived { "已归档" } else { "使用中" }),
+        },
+    ]
+}
+
+/// A setting's value as the user sees it (`archDays` “30” → “30 天”).
+fn setting_shown(specs: &[Value], k: &str, v: &Value) -> Value {
+    specs
+        .iter()
+        .find(|s| s["key"] == k)
+        .and_then(|s| s.get("labels"))
+        .and_then(|l| l.get(jstr(v)))
+        .cloned()
+        .unwrap_or_else(|| json!(jstr(v)))
+}
+
+/// What a configuration request in the conversation is about (see [`Core::pick_targets`]).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Picked {
+    /// at most three, in the order the request names them
+    pub targets: Vec<Target>,
+    /// the request only asks how they are set now
+    pub ask: bool,
+}
+
+/// One configuration a conversation request touched (see [`Core::config_request`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Drafted {
+    pub title: String,
+    pub href: String,
+    /// The draft to apply, as `meta.proposal` carries it; `None` when there is nothing to change.
+    pub proposal: Option<Value>,
+    /// How it is set now.
+    pub current: Vec<Current>,
+}
+
+/// The draft targets steve-core owns itself; the rest belong to the modules.
+const CORE_KINDS: [&str; 5] = ["bot", "project", "settings", "models", "tags"];
+
+/// The option lines of the core targets after the bots and projects.
+const CORE_OPTIONS: [&str; 7] = [
+    "settings:general — 语言、启动页、离开期间汇报、时区",
+    "settings:items — 默认验收方式（自动验收）、事项编号前缀、前置完成后、交接阈值、完成后自动归档",
+    "settings:notify — 免打扰时段、每天汇报时间",
+    "settings:look — 字号、动态效果",
+    "settings:data — 会话记录、事件原文、邮件正文的保留期限",
+    "models — Steve 自己做判断用的模型和推理强度，新会话的默认模型",
+    "tags — 事项标签：新建、改名、改分类、改描述、删除",
+];
+
 impl Core {
     /// Draft a change of `target` from a request in plain words (`kind: global` lets the model pick the target).
     pub async fn draft(&self, ws: &str, target: Target, request: &str) -> Result<Proposal> {
         crate::stats::tagged("draft", ws, self.draft_untagged(ws, target, request)).await
     }
 
-    async fn draft_untagged(&self, ws: &str, target: Target, request: &str) -> Result<Proposal> {
-        let target = if target.kind == "global" {
-            self.pick_target(ws, request).await?
-        } else {
-            target
-        };
+    /// The settings of category `cat` as draft fields, and their schema entries (for value labels).
+    fn settings_fields(&self, ws: &str, cat: &str) -> Result<(Vec<Value>, Vec<FieldSpec>)> {
         let db = self.store();
-        let gw = self.gw();
-        let (mut title, mut href, mut changes, mut patch) =
-            (String::new(), String::new(), vec![], Map::new());
-        match target.kind.as_str() {
+        let specs: Vec<Value> = SETTINGS
+            .get(cat)
+            .and_then(Value::as_array)
+            .cloned()
+            .ok_or_else(|| msg("没有这类设置"))?;
+        let mut cur = setting_defaults();
+        cur.extend(db.settings_all(ws)?);
+        let w = db.workspace(ws)?.ok_or_else(|| msg("没有这个工作空间"))?;
+        let mut fs: Vec<FieldSpec> = specs
+            .iter()
+            .map(|s| {
+                let labels = s.get("labels").and_then(Value::as_object).map(|l| {
+                    format!(
+                        "（值：{}）",
+                        l.iter()
+                            .map(|(k, v)| format!("{k}={}", jstr(v)))
+                            .collect::<Vec<_>>()
+                            .join("，")
+                    )
+                });
+                let key = s["key"].as_str().unwrap_or_default().to_string();
+                FieldSpec {
+                    label: format!("{}{}", jstr(&s["label"]), labels.unwrap_or_default()),
+                    ty: "enum",
+                    values: s["values"]
+                        .as_array()
+                        .map(|vs| vs.iter().map(jstr).collect()),
+                    current: cur.get(&key).cloned().unwrap_or(Value::Null),
+                    key,
+                }
+            })
+            .collect();
+        if cat == "items" {
+            fs.push(FieldSpec {
+                key: "item_prefix".into(),
+                label: "事项编号前缀（大写字母）".into(),
+                ty: "text",
+                values: None,
+                current: json!(w.item_prefix),
+            });
+        }
+        Ok((specs, fs))
+    }
+
+    /// How a core `target` is set now, without a model call: its card title, link and current values.
+    pub fn describe(&self, ws: &str, target: &Target) -> Result<(String, String, Vec<Current>)> {
+        let db = self.store();
+        let tid = target.id.clone().unwrap_or_default();
+        let listed = |fs: &[FieldSpec]| -> Vec<Current> {
+            fs.iter()
+                .map(|f| (short_label(&f.label), show(&f.current)))
+                .collect()
+        };
+        Ok(match target.kind.as_str() {
             "bot" => {
-                let id = target.id.clone().unwrap_or_default();
-                let b = match db.bot(&id)? {
+                let b = match db.bot(&tid)? {
                     Some(b) if db.bot_in_workspace(&b.id, ws)? => b,
                     _ => return Err(msg("没有这个 Bot")),
                 };
+                let fs: Vec<FieldSpec> = bot_fields(&b, &db.projects(ws)?)
+                    .into_iter()
+                    .map(|f| f.spec)
+                    .collect();
+                (
+                    format!("{} 的设置", b.display()),
+                    format!("#/bots/{}", b.id),
+                    listed(&fs),
+                )
+            }
+            "project" => {
+                let p = db
+                    .project(Some(&tid))?
+                    .filter(|p| p.workspace_id == ws)
+                    .ok_or_else(|| msg("没有这个项目"))?;
+                let fs = project_fields(&p, &db.bots(ws)?);
+                (
+                    format!("项目 {}", p.name),
+                    format!("#/projects/{}", p.id),
+                    listed(&fs),
+                )
+            }
+            "settings" => {
+                let cat = target.id.clone().unwrap_or_else(|| "general".into());
+                let (specs, fs) = self.settings_fields(ws, &cat)?;
+                let cur = fs
+                    .iter()
+                    .map(|f| {
+                        (
+                            short_label(&f.label),
+                            show(&setting_shown(&specs, &f.key, &f.current)),
+                        )
+                    })
+                    .collect();
+                (
+                    format!("设置 · {}", cat_title(&cat)),
+                    format!("#/settings/{cat}"),
+                    cur,
+                )
+            }
+            "tags" => (
+                "标签".into(),
+                "#/settings/tags".into(),
+                db.tags(ws)?
+                    .into_iter()
+                    .map(|t| {
+                        let d = if t.description.trim().is_empty() {
+                            String::new()
+                        } else {
+                            format!(" · {}", js_head(t.description.trim(), 40))
+                        };
+                        (t.name, format!("{}{d}", t.cat))
+                    })
+                    .collect(),
+            ),
+            "models" => (
+                "设置 · 模型".into(),
+                "#/settings/models".into(),
+                model_fields(self.models(), ws)
+                    .iter()
+                    .filter(|f| !f.current.as_str().is_some_and(str::is_empty))
+                    .map(|f| (short_label(&f.label), show(&f.current)))
+                    .collect(),
+            ),
+            _ => return Err(msg("没有这项设置")),
+        })
+    }
+
+    async fn draft_untagged(&self, ws: &str, target: Target, request: &str) -> Result<Proposal> {
+        let target = if target.kind == "global" {
+            self.pick_targets(ws, request, None)
+                .await?
+                .targets
+                .into_iter()
+                .next()
+                .unwrap_or(Target {
+                    kind: "settings".into(),
+                    id: Some("general".into()),
+                })
+        } else {
+            target
+        };
+        let (title, href, current) = self.describe(ws, &target)?;
+        let db = self.store();
+        let gw = self.gw();
+        let (mut changes, mut patch) = (vec![], Map::new());
+        match target.kind.as_str() {
+            "bot" => {
+                let id = target.id.clone().unwrap_or_default();
+                let b = db.bot(&id)?.ok_or_else(|| msg("没有这个 Bot"))?;
                 let fs = bot_fields(&b, &db.projects(ws)?);
                 let specs: Vec<FieldSpec> = fs.iter().map(|f| f.spec.clone()).collect();
                 let bv = serde_json::to_value(&b)?;
@@ -571,55 +848,12 @@ impl Core {
                     });
                     patch.insert(k, v);
                 }
-                title = format!("{} 的设置", b.display());
-                href = format!("#/bots/{}", b.id);
             }
             "project" => {
                 let id = target.id.clone().unwrap_or_default();
-                let p = db
-                    .project(Some(&id))?
-                    .filter(|p| p.workspace_id == ws)
-                    .ok_or_else(|| msg("没有这个项目"))?;
+                let p = db.project(Some(&id))?.ok_or_else(|| msg("没有这个项目"))?;
                 let bs = db.bots(ws)?;
-                let fs = vec![
-                    FieldSpec {
-                        key: "name".into(),
-                        label: "名称".into(),
-                        ty: "text",
-                        values: None,
-                        current: json!(p.name),
-                    },
-                    FieldSpec {
-                        key: "description".into(),
-                        label: "说明".into(),
-                        ty: "text",
-                        values: None,
-                        current: json!(p.description),
-                    },
-                    FieldSpec {
-                        key: "default_bot".into(),
-                        label: "默认 Bot".into(),
-                        ty: "enum",
-                        values: Some(
-                            std::iter::once("无".to_string())
-                                .chain(bs.iter().map(|b| b.name.clone()))
-                                .collect(),
-                        ),
-                        current: json!(
-                            bs.iter()
-                                .find(|b| Some(&b.id) == p.default_bot.as_ref())
-                                .map(|b| b.name.as_str())
-                                .unwrap_or("无")
-                        ),
-                    },
-                    FieldSpec {
-                        key: "worktree".into(),
-                        label: "每个事项单独开 worktree 分支".into(),
-                        ty: "enum",
-                        values: Some(vec!["开".into(), "关".into()]),
-                        current: json!(if p.worktree { "开" } else { "关" }),
-                    },
-                ];
+                let fs = project_fields(&p, &bs);
                 let pv = serde_json::to_value(&p)?;
                 for (k, value) in
                     draft_fields(gw, &format!("the project \"{}\"", p.name), &fs, request).await?
@@ -634,73 +868,27 @@ impl Core {
                             .map(|b| json!(b.id))
                             .unwrap_or(Value::Null),
                         "worktree" => json!(value.as_str() == Some("开")),
+                        "archived" => match value.as_str() {
+                            Some("已归档") => json!(true),
+                            Some("使用中") => json!(false),
+                            _ => continue,
+                        },
                         _ => value.clone(),
                     };
                     if pv.get(&k).unwrap_or(&Value::Null) == &v {
                         continue;
                     }
                     changes.push(Change {
-                        label: f.label.clone(),
+                        label: short_label(&f.label),
                         from: show(&f.current),
                         to: show(&value),
                     });
                     patch.insert(k, v);
                 }
-                title = format!("项目 {}", p.name);
-                href = format!("#/projects/{}", p.id);
             }
             "settings" => {
                 let cat = target.id.clone().unwrap_or_else(|| "general".into());
-                let specs: Vec<Value> = SETTINGS
-                    .get(&cat)
-                    .and_then(Value::as_array)
-                    .cloned()
-                    .unwrap_or_default();
-                let mut cur = setting_defaults();
-                cur.extend(db.settings_all(ws)?);
-                let w = db.workspace(ws)?.ok_or_else(|| msg("没有这个工作空间"))?;
-                let lab = |k: &str, v: &Value| -> Value {
-                    specs
-                        .iter()
-                        .find(|s| s["key"] == k)
-                        .and_then(|s| s.get("labels"))
-                        .and_then(|l| l.get(jstr(v)))
-                        .cloned()
-                        .unwrap_or_else(|| json!(jstr(v)))
-                };
-                let mut fs: Vec<FieldSpec> = specs
-                    .iter()
-                    .map(|s| {
-                        let labels = s.get("labels").and_then(Value::as_object).map(|l| {
-                            format!(
-                                "（值：{}）",
-                                l.iter()
-                                    .map(|(k, v)| format!("{k}={}", jstr(v)))
-                                    .collect::<Vec<_>>()
-                                    .join("，")
-                            )
-                        });
-                        let key = s["key"].as_str().unwrap_or_default().to_string();
-                        FieldSpec {
-                            label: format!("{}{}", jstr(&s["label"]), labels.unwrap_or_default()),
-                            ty: "enum",
-                            values: s["values"]
-                                .as_array()
-                                .map(|vs| vs.iter().map(jstr).collect()),
-                            current: cur.get(&key).cloned().unwrap_or(Value::Null),
-                            key,
-                        }
-                    })
-                    .collect();
-                if cat == "items" {
-                    fs.push(FieldSpec {
-                        key: "item_prefix".into(),
-                        label: "事项编号前缀（大写字母）".into(),
-                        ty: "text",
-                        values: None,
-                        current: json!(w.item_prefix),
-                    });
-                }
+                let (specs, fs) = self.settings_fields(ws, &cat)?;
                 for (k, value) in
                     draft_fields(gw, &format!("Steve settings · {cat}"), &fs, request).await?
                 {
@@ -723,104 +911,19 @@ impl Core {
                     if v.is_empty() || v == jstr(&f.current) {
                         continue;
                     }
-                    let label = match f.label.find("（值：") {
-                        Some(i) if f.label.ends_with('）') => f.label[..i].to_string(),
-                        _ => f.label.clone(),
-                    };
                     changes.push(Change {
-                        label,
-                        from: show(&lab(&k, &f.current)),
-                        to: show(&lab(&k, &json!(v))),
+                        label: plain_label(&f.label),
+                        from: show(&setting_shown(&specs, &k, &f.current)),
+                        to: show(&setting_shown(&specs, &k, &json!(v))),
                     });
                     patch.insert(k, json!(v));
                 }
-                title = format!("设置 · {}", cat_title(&cat));
-                href = format!("#/settings/{cat}");
             }
-            "tags" => {
-                let ts = db.tags(ws)?;
-                let mut lines = vec![
-                    "Manage item tags in Steve. Existing tags (name · category · description):"
-                        .to_string(),
-                ];
-                lines.extend(
-                    ts.iter()
-                        .map(|t| format!("  {} · {} · {}", t.name, t.cat, t.description)),
-                );
-                lines.push(format!("Categories: {}.", TAG_CATS.join("/")));
-                lines.push("Reply with ONLY JSON: {\"create\":[{\"name\":\"\",\"cat\":\"\",\"description\":\"\"}],\"edit\":[{\"name\":\"<existing name>\",\"description\":\"<new description>\"}]}".into());
-                let prompt = crate::gateway::with_static(
-                    &lines.join("\n"),
-                    &format!("Request: {}", serde_json::to_string(request)?),
-                );
-                let r = first_json(
-                    &gw.print(&prompt, Tier::Smart, Duration::from_secs(90))
-                        .await?,
-                )?
-                .unwrap_or(json!({}));
-                let arr = |k: &str| {
-                    r.get(k)
-                        .and_then(Value::as_array)
-                        .cloned()
-                        .unwrap_or_default()
-                };
-                let create: Vec<Value> = arr("create")
-                    .into_iter()
-                    .filter(|t| {
-                        t.get("name").is_some_and(truthy)
-                            && t.get("cat")
-                                .and_then(Value::as_str)
-                                .is_some_and(|c| TAG_CATS.contains(&c))
-                            && !ts
-                                .iter()
-                                .any(|x| t.get("name").and_then(Value::as_str) == Some(&x.name))
-                    })
-                    .collect();
-                let edit: Vec<Value> = arr("edit")
-                    .into_iter()
-                    .filter(|e| {
-                        ts.iter()
-                            .any(|x| e.get("name").and_then(Value::as_str) == Some(&x.name))
-                            && e.get("description").is_some_and(truthy)
-                    })
-                    .collect();
-                for t in &create {
-                    changes.push(Change {
-                        label: format!("新建标签 · {}", jstr(&t["cat"])),
-                        from: "—".into(),
-                        to: format!(
-                            "{}：{}",
-                            jstr(&t["name"]),
-                            t.get("description")
-                                .map(jstr)
-                                .unwrap_or_else(|| "undefined".into())
-                        ),
-                    });
-                }
-                for e in &edit {
-                    let name = jstr(&e["name"]);
-                    let old = ts
-                        .iter()
-                        .find(|x| x.name == name)
-                        .map(|x| x.description.clone())
-                        .unwrap_or_default();
-                    changes.push(Change {
-                        label: format!("描述 · {name}"),
-                        from: show(&json!(old)),
-                        to: show(&e["description"]),
-                    });
-                }
-                patch.insert("create".into(), json!(create));
-                patch.insert("edit".into(), json!(edit));
-                title = "标签".into();
-                href = "#/settings/tags".into();
-            }
+            "tags" => (changes, patch) = self.draft_tags(ws, request).await?,
             "models" => {
                 let fs = model_fields(self.models(), ws);
                 let said = draft_fields(gw, "Steve settings · models", &fs, request).await?;
                 (changes, patch) = model_patch(self.models(), ws, &fs, &said);
-                title = "设置 · 模型".into();
-                href = "#/settings/models".into();
             }
             _ => {}
         }
@@ -833,38 +936,215 @@ impl Core {
             changes,
             patch,
             created: now(),
+            current,
         };
         self.tx().st.drafts.insert(p.id.clone(), p.clone());
         Ok(p)
     }
 
-    async fn pick_target(&self, ws: &str, request: &str) -> Result<Target> {
+    /// The tags draft: new tags, and existing ones renamed, moved to another category, described anew or
+    /// removed. Only a tag nothing uses is removed (its undo makes it again); one in use stays, and the
+    /// preview says why.
+    async fn draft_tags(
+        &self,
+        ws: &str,
+        request: &str,
+    ) -> Result<(Vec<Change>, Map<String, Value>)> {
+        let db = self.store();
+        let ts = db.tags(ws)?;
+        let mut lines = vec![
+            "Manage item tags in Steve. Existing tags (name · category · description):".to_string(),
+        ];
+        lines.extend(
+            ts.iter()
+                .map(|t| format!("  {} · {} · {}", t.name, t.cat, t.description)),
+        );
+        lines.push(format!("Categories: {}.", TAG_CATS.join("/")));
+        lines.push("Change only what the request asks for. In \"edit\", give only the keys that change: newName renames, cat moves it to another category, description replaces it. \"remove\" lists existing tag names to delete.".into());
+        lines.push("Reply with ONLY JSON: {\"create\":[{\"name\":\"\",\"cat\":\"\",\"description\":\"\"}],\"edit\":[{\"name\":\"<existing name>\",\"newName\":\"\",\"cat\":\"\",\"description\":\"\"}],\"remove\":[\"<existing name>\"]}".into());
+        let prompt = crate::gateway::with_static(
+            &lines.join("\n"),
+            &format!("Request: {}", serde_json::to_string(request)?),
+        );
+        let r = first_json(
+            &self
+                .gw()
+                .print(&prompt, Tier::Smart, Duration::from_secs(90))
+                .await?,
+        )?
+        .unwrap_or(json!({}));
+        let arr = |k: &str| {
+            r.get(k)
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default()
+        };
+        let named = |v: &Value| -> Option<&crate::repo::Tag> {
+            let n = v.as_str()?;
+            ts.iter().find(|x| x.name == n)
+        };
+        let (mut changes, mut patch) = (vec![], Map::new());
+        let create: Vec<Value> = arr("create")
+            .into_iter()
+            .filter(|t| {
+                t.get("name").is_some_and(truthy)
+                    && t.get("cat")
+                        .and_then(Value::as_str)
+                        .is_some_and(|c| TAG_CATS.contains(&c))
+                    && t.get("name").and_then(named).is_none()
+            })
+            .collect();
+        for t in &create {
+            changes.push(Change {
+                label: format!("新建标签 · {}", jstr(&t["cat"])),
+                from: "—".into(),
+                to: format!(
+                    "{}：{}",
+                    jstr(&t["name"]),
+                    t.get("description")
+                        .map(jstr)
+                        .unwrap_or_else(|| "undefined".into())
+                ),
+            });
+        }
+        let mut edit: Vec<Value> = vec![];
+        for e in arr("edit") {
+            let Some(t) = e.get("name").and_then(named) else {
+                continue;
+            };
+            let mut keep = Map::new();
+            keep.insert("name".into(), json!(t.name));
+            let new_name = e
+                .get("newName")
+                .filter(|v| truthy(v))
+                .map(|v| jstr(v).trim().to_string())
+                .filter(|n| *n != t.name && !ts.iter().any(|x| x.name == *n));
+            if let Some(n) = new_name {
+                changes.push(Change {
+                    label: format!("改名 · {}", t.name),
+                    from: t.name.clone(),
+                    to: n.clone(),
+                });
+                keep.insert("newName".into(), json!(n));
+            }
+            let cat = e
+                .get("cat")
+                .and_then(Value::as_str)
+                .filter(|c| TAG_CATS.contains(c) && *c != t.cat);
+            if let Some(c) = cat {
+                changes.push(Change {
+                    label: format!("分类 · {}", t.name),
+                    from: t.cat.clone(),
+                    to: c.into(),
+                });
+                keep.insert("cat".into(), json!(c));
+            }
+            let d = e
+                .get("description")
+                .filter(|v| truthy(v))
+                .map(jstr)
+                .filter(|d| *d != t.description);
+            if let Some(d) = d {
+                changes.push(Change {
+                    label: format!("描述 · {}", t.name),
+                    from: show(&json!(t.description)),
+                    to: show(&json!(d)),
+                });
+                keep.insert("description".into(), json!(d));
+            }
+            if keep.len() > 1 {
+                edit.push(Value::Object(keep));
+            }
+        }
+        let mut remove: Vec<Value> = vec![];
+        for n in arr("remove") {
+            let Some(t) = named(&n) else { continue };
+            if remove.contains(&json!(t.name)) {
+                continue;
+            }
+            let used = db.tag_used(&t.id)?;
+            if used > 0 {
+                changes.push(Change {
+                    label: format!("删除 · {}", t.name),
+                    from: t.name.clone(),
+                    to: format!("（没有删：还有 {used} 处在用，可以在标签页合并到别的标签）"),
+                });
+                continue;
+            }
+            changes.push(Change {
+                label: "删除标签".into(),
+                from: t.name.clone(),
+                to: "—".into(),
+            });
+            remove.push(json!(t.name));
+        }
+        /* a line that changes nothing (a tag in use) is not a change to apply */
+        if create.is_empty() && edit.is_empty() && remove.is_empty() {
+            changes.clear();
+        }
+        patch.insert("create".into(), json!(create));
+        patch.insert("edit".into(), json!(edit));
+        patch.insert("remove".into(), json!(remove));
+        Ok((changes, patch))
+    }
+
+    /// Which configurations a request is about (at most three) and whether it only asks how they are
+    /// set. `who` (the user who said it) adds the modules' targets — YOLO, schedules, flows, knowledge
+    /// sources, mailboxes, repositories, channels… — to the options.
+    pub async fn pick_targets(&self, ws: &str, request: &str, who: Option<&str>) -> Result<Picked> {
         let db = self.store();
         let mut opts: Vec<String> = db
             .bots(ws)?
             .iter()
-            .map(|b| format!("bot:{} — {}（{}）", b.id, b.name, b.role))
+            .map(|b| {
+                format!(
+                    "bot:{} — {}（{}）{}",
+                    b.id,
+                    b.name,
+                    b.role,
+                    if b.enabled { "" } else { "·已停用" }
+                )
+            })
             .collect();
-        opts.extend(
-            db.projects(ws)?
+        opts.extend(db.store().projects().list(ws, true)?.iter().map(|p| {
+            format!(
+                "project:{} — 项目 {}{}",
+                p.id,
+                p.name,
+                if p.archived { "（已归档）" } else { "" }
+            )
+        }));
+        opts.extend(CORE_OPTIONS.map(String::from));
+        let modules = self.modules().zip(who);
+        let mut module_kinds: Vec<String> = vec![];
+        if let Some((m, me)) = modules {
+            let caller = steve_modules::Caller {
+                ws: ws.into(),
+                me: me.into(),
+            };
+            module_kinds = m
+                .registry
+                .target_kinds()
                 .iter()
-                .map(|p| format!("project:{} — 项目 {}", p.id, p.name)),
-        );
-        opts.extend(
-            [
-                "settings:general — 语言、启动页、汇报",
-                "settings:items — 验收、编号、前置、交接、归档",
-                "settings:notify — 通知、免打扰",
-                "settings:look — 字号、动态效果",
-                "settings:data — 保留期限",
-                "models — Steve 自己做判断用的模型、推理强度，新会话的默认模型",
-                "tags — 事项标签",
-            ]
-            .map(String::from),
-        );
+                .map(|k| k.to_string())
+                .collect();
+            match steve_modules::changes::candidates(m, &caller) {
+                Ok(cs) => opts.extend(
+                    cs.iter()
+                        /* people only when the request names them: there can be hundreds */
+                        .filter(|c| {
+                            !c.code.starts_with("contact:")
+                                || request.contains(c.label.split('（').next().unwrap_or(&c.label))
+                        })
+                        .take(80)
+                        .map(|c| c.line()),
+                ),
+                Err(e) => tracing::warn!("config candidates of {ws}: {e:?}"),
+            }
+        }
         let prompt = crate::gateway::with_static(
             &format!(
-                "Which Steve configuration does this request change? Options:\n{}\nReply with ONLY JSON {{\"target\":\"<option before the dash>\"}}",
+                "Which Steve configurations does this request change or ask about? Options:\n{}\nReply with ONLY JSON {{\"targets\":[\"<option before the dash>\"],\"ask\":false}}: every option the request changes, in its order (usually one, at most 3). \"ask\": true when the request only asks how they are set now and changes nothing.",
                 opts.join("\n")
             ),
             &format!("Request: {}", serde_json::to_string(request)?),
@@ -874,24 +1154,225 @@ impl Core {
             .print(&prompt, Tier::Fast, Duration::from_secs(60))
             .await
             .unwrap_or_else(|_| "{}".into());
-        let r = first_json(&raw)?;
-        let t = match r.as_ref().and_then(|r| r.get("target")) {
-            None | Some(Value::Null) => "settings:general".to_string(),
-            Some(v) => jstr(v),
+        let r = first_json(&raw)?.unwrap_or(json!({}));
+        let named: Vec<String> = match (r.get("targets"), r.get("target")) {
+            (Some(Value::Array(a)), _) => a.iter().map(jstr).collect(),
+            (_, Some(v)) if !v.is_null() => vec![jstr(v)],
+            _ => vec![],
         };
-        let t = t.trim();
-        let mut parts = t.split(':');
-        let kind = parts.next().unwrap_or_default().to_string();
-        let id = parts.next().map(String::from);
-        Ok(if kind == "tags" || kind == "models" {
-            Target { kind, id: None }
-        } else {
-            Target { kind, id }
+        let mut targets: Vec<Target> = vec![];
+        for t in named {
+            let t = t.trim();
+            let (kind, id) = match t.split_once(':') {
+                Some((k, i)) => (k.trim().to_string(), Some(i.trim().to_string())),
+                None => (t.to_string(), None),
+            };
+            let target = match kind.as_str() {
+                "tags" | "models" => Target { kind, id: None },
+                "settings" => Target {
+                    id: Some(id.unwrap_or_else(|| "general".into())),
+                    kind,
+                },
+                k if CORE_KINDS.contains(&k) || module_kinds.iter().any(|m| m == k) => {
+                    Target { kind, id }
+                }
+                _ => continue,
+            };
+            if !targets.contains(&target) {
+                targets.push(target);
+            }
+        }
+        targets.truncate(3);
+        if targets.is_empty() {
+            targets.push(Target {
+                kind: "settings".into(),
+                id: Some("general".into()),
+            });
+        }
+        Ok(Picked {
+            targets,
+            ask: r.get("ask").is_some_and(truthy),
         })
     }
 
+    /// A configuration request said in the conversation (router kind `config`): every configuration it
+    /// touches is drafted — the core's and, with `who`, the modules' — or, when it only asks, shown as it
+    /// is now. A target that fails is left out; when all fail, the first error.
+    pub async fn config_request(
+        &self,
+        ws: &str,
+        request: &str,
+        who: Option<&str>,
+    ) -> Result<(bool, Vec<Drafted>)> {
+        let picked = self.pick_targets(ws, request, who).await?;
+        let mut out = vec![];
+        let mut first_err = None;
+        for t in &picked.targets {
+            let r = if CORE_KINDS.contains(&t.kind.as_str()) {
+                self.core_drafted(ws, t, request, picked.ask).await
+            } else {
+                self.module_drafted(ws, t, request, who, picked.ask).await
+            };
+            match r {
+                Ok(d) => out.push(d),
+                Err(e) => {
+                    tracing::warn!("config draft {}:{:?} in {ws}: {e}", t.kind, t.id);
+                    first_err.get_or_insert(e);
+                }
+            }
+        }
+        match (out.is_empty(), first_err) {
+            (true, Some(e)) => Err(e),
+            _ => Ok((picked.ask, out)),
+        }
+    }
+
+    async fn core_drafted(
+        &self,
+        ws: &str,
+        t: &Target,
+        request: &str,
+        ask: bool,
+    ) -> Result<Drafted> {
+        if ask {
+            let (title, href, current) = self.describe(ws, t)?;
+            return Ok(Drafted {
+                title,
+                href,
+                proposal: None,
+                current,
+            });
+        }
+        let p = self.draft(ws, t.clone(), request).await?;
+        let proposal = if p.changes.is_empty() {
+            self.tx().st.drafts.remove(&p.id);
+            None
+        } else {
+            Some(serde_json::to_value(&p)?)
+        };
+        Ok(Drafted {
+            title: p.title,
+            href: p.href,
+            proposal,
+            current: p.current,
+        })
+    }
+
+    async fn module_drafted(
+        &self,
+        ws: &str,
+        t: &Target,
+        request: &str,
+        who: Option<&str>,
+        ask: bool,
+    ) -> Result<Drafted> {
+        let (Some(m), Some(me)) = (self.modules(), who) else {
+            return Err(msg("没有这项设置"));
+        };
+        let caller = steve_modules::Caller {
+            ws: ws.into(),
+            me: me.into(),
+        };
+        let module = |e: steve_modules::ApiError| msg(format!("{e:?}"));
+        let now_set = |p: &steve_modules::changes::Prepared| -> Vec<Current> {
+            p.fields
+                .iter()
+                .map(|f| (short_label(&f.label), show(&f.current)))
+                .collect()
+        };
+        if !ask {
+            let p = steve_modules::changes::draft(
+                m,
+                &caller,
+                &t.kind,
+                t.id.as_deref(),
+                request,
+                Default::default(),
+            )
+            .await
+            .map_err(module)?;
+            if !p.changes.is_empty() {
+                return Ok(Drafted {
+                    title: p.title.clone(),
+                    href: p.href.clone(),
+                    proposal: Some(serde_json::to_value(&p)?),
+                    current: vec![],
+                });
+            }
+            /* nothing to change: no draft left behind */
+            let _ = steve_modules::changes::drop_draft(m, &caller, &p.id);
+        }
+        let p = steve_modules::changes::prepared(m, &caller, &t.kind, t.id.as_deref())
+            .await
+            .map_err(module)?;
+        Ok(Drafted {
+            current: now_set(&p),
+            title: p.title,
+            href: p.href,
+            proposal: None,
+        })
+    }
     /// Apply a draft of this workspace; returns the id to undo it with.
     pub fn apply(&self, id: &str, actor: &str, ws: &str) -> Result<Value> {
+        let r = self.apply_draft(id, actor, ws)?;
+        self.mark_proposal(ws, id, Some("applied"));
+        Ok(r)
+    }
+
+    /// Throws a draft of this workspace away; its conversation card says so. A draft already gone (the
+    /// Hub restarted) is dropped all the same.
+    pub fn drop_draft(&self, id: &str, ws: &str) -> Result<Value> {
+        {
+            let mut t = self.tx();
+            if t.st.drafts.get(id).is_some_and(|p| p.ws == ws) {
+                t.st.drafts.remove(id);
+            }
+        }
+        self.mark_proposal(ws, id, Some("dropped"));
+        Ok(json!({"ok": true}))
+    }
+
+    /// The conversation card of draft `id` is now `state` (`applied`, `dropped`; `None`: a draft again
+    /// after an undo), kept in its message's `meta.cfg_state` so it shows so after a reload. Draft ids
+    /// are the core's (`chg_…`) or a module changeset's; a draft made outside the conversation has no card.
+    pub fn mark_proposal(&self, ws: &str, id: &str, state: Option<&str>) {
+        let db = self.store();
+        let holds = |meta: &Value| {
+            meta.get("proposal").and_then(|p| p.get("id")) == Some(&json!(id))
+                || meta
+                    .get("proposals")
+                    .and_then(Value::as_array)
+                    .is_some_and(|ps| ps.iter().any(|p| p.get("id") == Some(&json!(id))))
+        };
+        let found = match db.messages(ws) {
+            Ok(ms) => ms.into_iter().rev().find(|m| holds(&m.meta)),
+            Err(e) => {
+                tracing::warn!("proposal {id}: {e}");
+                return;
+            }
+        };
+        let Some(m) = found else { return };
+        let mut meta = m.meta.clone();
+        let Some(o) = meta.as_object_mut() else {
+            return;
+        };
+        let states = o.entry("cfg_state").or_insert_with(|| json!({}));
+        if let Some(s) = states.as_object_mut() {
+            match state {
+                Some(st) => {
+                    s.insert(id.into(), json!(st));
+                }
+                None => {
+                    s.remove(id);
+                }
+            }
+        }
+        if let Err(e) = db.message_patch_meta(&m.id, &meta) {
+            tracing::warn!("proposal {id} on {}: {e}", m.id);
+        }
+    }
+
+    fn apply_draft(&self, id: &str, actor: &str, ws: &str) -> Result<Value> {
         let mut t = self.tx();
         let p = match t.st.drafts.get(id) {
             Some(p) if p.ws == ws => p.clone(),
@@ -968,11 +1449,41 @@ impl Core {
                     let Some(tag) = db.tag_by_name(&p.ws, &jstr(&e["name"]))? else {
                         continue;
                     };
-                    edits.insert(tag.id.clone(), json!(tag.description));
-                    db.tag_set_description(&tag.id, &jstr(&e["description"]))?;
+                    let s = |k: &str| e.get(k).filter(|v| truthy(v)).map(jstr);
+                    let to = steve_store::TagPatch {
+                        name: s("newName"),
+                        cat: s("cat"),
+                        description: s("description"),
+                    };
+                    edits.insert(
+                        tag.id.clone(),
+                        json!({"name": tag.name, "cat": tag.cat, "description": tag.description}),
+                    );
+                    db.tag_patch(&tag.id, &to)?;
+                }
+                let mut removed = vec![];
+                for n in p
+                    .patch
+                    .get("remove")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                {
+                    /* used since the draft: kept */
+                    let Some(tag) = db.tag_by_name(&p.ws, &jstr(n))? else {
+                        continue;
+                    };
+                    if db.tag_used(&tag.id)? > 0 {
+                        continue;
+                    }
+                    removed.push(
+                        json!({"name": tag.name, "cat": tag.cat, "description": tag.description}),
+                    );
+                    db.tag_remove(&tag.id)?;
                 }
                 before.insert("made".into(), json!(made));
                 before.insert("edits".into(), Value::Object(edits));
+                before.insert("removed".into(), json!(removed));
             }
             "models" => {
                 before = self.models().stored(&p.ws, &p.patch);
@@ -1001,6 +1512,12 @@ impl Core {
 
     /// Undo an applied draft of this workspace.
     pub fn undo(&self, id: &str, actor: &str, ws: &str) -> Result<Value> {
+        let r = self.undo_applied(id, actor, ws)?;
+        self.mark_proposal(ws, id, None);
+        Ok(r)
+    }
+
+    fn undo_applied(&self, id: &str, actor: &str, ws: &str) -> Result<Value> {
         let mut t = self.tx();
         let a = match t.st.applied.get(id) {
             Some(a) if a.ws == ws => a.clone(),
@@ -1032,14 +1549,34 @@ impl Core {
                 {
                     db.tag_remove(&jstr(m))?;
                 }
-                for (tag, d) in a
+                for (tag, was) in a
                     .before
                     .get("edits")
                     .and_then(Value::as_object)
                     .into_iter()
                     .flatten()
                 {
-                    db.tag_set_description(tag, &jstr(d))?;
+                    let back = steve_store::TagPatch {
+                        name: was.get("name").map(jstr),
+                        cat: was.get("cat").map(jstr),
+                        description: was.get("description").map(jstr),
+                    };
+                    db.tag_patch(tag, &back)?;
+                }
+                for t in a
+                    .before
+                    .get("removed")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                {
+                    db.tag_create(
+                        &a.ws,
+                        &jstr(&t["name"]),
+                        &jstr(&t["cat"]),
+                        &jstr(&t["description"]),
+                        actor,
+                    )?;
                 }
             }
             "models" => self

@@ -137,7 +137,7 @@ export const api = {
   describeProject: (path: string) => post<{ name: string; description: string; git: boolean }>("/projects/describe", { path }), dirs: (path: string) => get<string[]>(`/fs/dirs?path=${encodeURIComponent(path)}`),
   newTag: (p: { name: string; cat: string; description: string }) => post<RTag>("/tags", p), patchTag: (id: string, p: Partial<RTag>) => patch("/tags/" + id, p), deleteTag: (id: string) => del("/tags/" + id), mergeTag: (id: string, into: string) => post(`/tags/${id}/merge`, { into }),
   settings: (p: Record<string, string>) => patch("/settings", p),
-  draft: (target: { kind: string; id?: string }, text: string) => post<Proposal>("/config/draft", { target, text }), apply: (id: string) => post(`/config/${id}/apply`), undoConfig: (id: string) => post(`/config/${id}/undo`),
+  draft: (target: { kind: string; id?: string }, text: string) => post<Proposal>("/config/draft", { target, text }), apply: (id: string) => post(`/config/${id}/apply`), undoConfig: (id: string) => post(`/config/${id}/undo`), dropConfig: (id: string) => post(`/config/${id}/drop`),
   devices: (fresh = false) => get<{ devices: RDevice[]; runtimes: RRuntime[] }>("/devices" + (fresh ? "?fresh=1" : "")), patchDevice: (id: string, p: { name?: string; status?: string; max_sessions?: number }) => patch("/devices/" + id, p),
   /* the raw bytes as the body; the Hub decides the type from the content */
   upload: async (f: Blob, name: string): Promise<RFile> => {

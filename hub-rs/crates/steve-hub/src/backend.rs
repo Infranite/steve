@@ -853,6 +853,15 @@ pub trait Domain: Send + Sync + 'static {
     async fn config_undo(&self, id: &str, actor: &str, ws: &str) -> BResult<Obj> {
         todo_backend!("config_undo")
     }
+    /// Throws an in-memory draft away; its conversation card shows it dropped.
+    async fn config_drop(&self, id: &str, ws: &str) -> BResult<Obj> {
+        todo_backend!("config_drop")
+    }
+    /// A module changeset was applied (`applied`), dropped (`dropped`) or undone (`None`): its
+    /// conversation card, if it has one, shows so.
+    async fn config_mark(&self, ws: &str, id: &str, state: Option<&str>) -> BResult<()> {
+        todo_backend!("config_mark")
+    }
 }
 
 /// A domain with nothing wired: every operation reports "not implemented". Lets the binary boot (healthz,

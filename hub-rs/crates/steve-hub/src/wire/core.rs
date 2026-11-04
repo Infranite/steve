@@ -1029,6 +1029,23 @@ impl Domain for CoreDomain {
         );
         to_obj(blocking(move || c.undo(&id, &actor, &ws)).await?)
     }
+    async fn config_drop(&self, id: &str, ws: &str) -> BResult<Obj> {
+        let (c, id, ws) = (self.core.clone(), id.to_string(), ws.to_string());
+        to_obj(blocking(move || c.drop_draft(&id, &ws)).await?)
+    }
+    async fn config_mark(&self, ws: &str, id: &str, state: Option<&str>) -> BResult<()> {
+        let (c, id, ws, state) = (
+            self.core.clone(),
+            id.to_string(),
+            ws.to_string(),
+            state.map(str::to_string),
+        );
+        blocking(move || {
+            c.mark_proposal(&ws, &id, state.as_deref());
+            Ok(())
+        })
+        .await
+    }
 }
 
 // ── steve-mcp backend ──
