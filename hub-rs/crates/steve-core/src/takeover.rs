@@ -521,7 +521,7 @@ impl Tx<'_> {
                 self.db(),
                 item,
                 Update {
-                    kind: "release",
+                    kind: "build",
                     text: format!("{item} {line}。事项已按约定完成，构建需要你看一下。"),
                     ..Default::default()
                 },
