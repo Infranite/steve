@@ -162,6 +162,33 @@ pub fn fetch(dir: &Path) -> Result<(), String> {
     git_net(dir, &["fetch", "--quiet", "--tags", "origin"]).map(|_| ())
 }
 
+/// The `vX.Y.Z` tags on `origin` and the commits they point at (annotated tags peeled), with the network
+/// deadline: what was released, as the remote says (a tag only made locally is not a release).
+pub fn remote_tags(dir: &Path) -> Result<Vec<(String, String)>, String> {
+    let out = git_net(dir, &["ls-remote", "--tags", "origin", "v*"])?;
+    let mut tags: Vec<(String, String)> = vec![];
+    for line in out.lines() {
+        let Some((sha, r)) = line.split_once('\t') else {
+            continue;
+        };
+        let Some(name) = r.strip_prefix("refs/tags/") else {
+            continue;
+        };
+        match name.strip_suffix("^{}") {
+            // the commit an annotated tag points at replaces the tag object's own id
+            Some(n) => match tags.iter_mut().find(|(t, _)| t == n) {
+                Some(t) => t.1 = sha.to_string(),
+                None => tags.push((n.to_string(), sha.to_string())),
+            },
+            None if !tags.iter().any(|(t, _)| t == name) => {
+                tags.push((name.to_string(), sha.to_string()))
+            }
+            None => {}
+        }
+    }
+    Ok(tags)
+}
+
 /// Pushes `HEAD` of `dir` to `origin` as `branch`, fast-forward only (a target that moved meanwhile is a
 /// rejection, never overwritten), with the network deadline. Never under the core's lock.
 pub fn push_head(dir: &Path, branch: &str) -> Result<(), String> {

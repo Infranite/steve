@@ -82,7 +82,7 @@ fn an_item_released_through_its_lane_merges_after_one_card_for_the_batch() {
     let (origin, clone, wt) = repos(&k, branch);
     let rel = Release {
         kind: "script".into(),
-        cmd: "/bin/false".into(),
+        cmd: String::new(),              // the lane runs no command of its own
         done_when: Some("merge".into()), // merged is released (tag needs the repository's cut-release)
     };
     let p = k
@@ -161,7 +161,7 @@ fn a_batch_you_turn_down_sends_its_members_back() {
     let (origin, clone, wt) = repos(&k, branch);
     let rel = Release {
         kind: "script".into(),
-        cmd: "/bin/false".into(),
+        cmd: String::new(), // the lane runs no command of its own
         done_when: Some("merge".into()),
     };
     let p = k
@@ -222,7 +222,7 @@ fn publishing_twice_is_one_request_in_the_lane() {
     let (_origin, clone, wt) = repos(&k, branch);
     let rel = Release {
         kind: "script".into(),
-        cmd: "/bin/false".into(),
+        cmd: String::new(), // the lane runs no command of its own
         done_when: Some("merge".into()),
     };
     let p = k
@@ -267,4 +267,108 @@ fn publishing_twice_is_one_request_in_the_lane() {
         .filter(|d| d.subject_type == "delivery_batch")
         .count();
     assert_eq!(cards, 1, "one card");
+}
+
+/// A project on the lane with one item that published: (kit, item, its request id, origin).
+fn published(branch: &str) -> (Kit, String, String, PathBuf) {
+    let k = Kit::new();
+    let (origin, clone, wt) = repos(&k, branch);
+    let rel = Release {
+        kind: "script".into(),
+        cmd: String::new(),
+        done_when: Some("merge".into()),
+    };
+    let p = k
+        .db()
+        .project_create(
+            WS,
+            "R",
+            "",
+            &clone.to_string_lossy(),
+            "git",
+            true,
+            None,
+            Some(&rel),
+        )
+        .unwrap()
+        .id;
+    let i = k.item("run", "收尾", Some(&p));
+    k.db()
+        .item_patch(
+            &i,
+            patch![branch: branch, cwd: wt.to_string_lossy().as_ref()],
+        )
+        .unwrap();
+    let sid = k.session(&i, "idle");
+    let s = k.db().session(&sid).unwrap().unwrap();
+    k.core.tool_publish(&s, branch, "改了 a").unwrap();
+    let req = k
+        .db()
+        .store()
+        .reader(|c| lanes::request_of_item(c, &i))
+        .unwrap()
+        .unwrap();
+    (k, i, req.id, origin)
+}
+
+#[test]
+fn a_turn_down_recorded_before_a_restart_is_acted_on_after_it() {
+    let (k, i, _, _) = published("steve/st-4");
+    let card = k
+        .db()
+        .decisions_open(WS)
+        .unwrap()
+        .into_iter()
+        .find(|d| d.subject_type == "delivery_batch")
+        .unwrap();
+    // the answer is recorded, the process stops before acting on it
+    k.db()
+        .decision_resolve(
+            &card.id,
+            serde_json::json!({"approved": false}),
+            "resolved",
+            None,
+        )
+        .unwrap();
+    k.core.lane_recover();
+    assert!(
+        k.wait(|| k
+            .db()
+            .store()
+            .reader(|c| lanes::request_of_item(c, &i))
+            .unwrap()
+            .is_none()),
+        "{:?}",
+        timeline(&k, &i)
+    );
+}
+
+#[test]
+fn a_failed_release_without_its_card_gets_one_after_a_restart() {
+    let (k, _, req, _) = published("steve/st-5");
+    let lane = k
+        .db()
+        .store()
+        .reader(|c| lanes::request_get(c, &req))
+        .unwrap()
+        .unwrap()
+        .lane_id;
+    // failed, recorded, and the process stopped before the card
+    crate::lane::store::release_failed(k.db().store(), &lane, 1, "推送被拒").unwrap();
+    k.core.lane_recover();
+    let open = k.db().decisions_open(WS).unwrap();
+    let card = open
+        .iter()
+        .find(|d| d.subject_type == "delivery_batch" && d.kind == "fail")
+        .expect("the fail card");
+    assert_eq!(card.draft, "推送被拒");
+    k.core.lane_recover();
+    let n = k
+        .db()
+        .decisions_open(WS)
+        .unwrap()
+        .iter()
+        .filter(|d| d.subject_type == "delivery_batch" && d.kind == "fail")
+        .count();
+    assert_eq!(n, 1, "one card, however often it recovers");
 }

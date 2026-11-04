@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS lane_requests (
   workspace_id TEXT, item_id TEXT,              -- an item's request; NULL for an outside one
   source TEXT NOT NULL,                         -- item | external
   dir TEXT NOT NULL, branch TEXT NOT NULL, head TEXT NOT NULL,
+  repo TEXT,                                    -- the project's repository: used when `dir` is gone
   arrived INTEGER NOT NULL,
   unit INTEGER,                                 -- the unit it merges in (NULL while queued)
   released_in INTEGER,                          -- the unit its release goes out with

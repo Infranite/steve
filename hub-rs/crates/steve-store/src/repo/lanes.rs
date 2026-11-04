@@ -32,6 +32,7 @@ pub struct LaneRequest {
     pub dir: String,
     pub branch: String,
     pub head: String,
+    pub repo: Option<String>,
     pub arrived: i64,
     pub unit: Option<i64>,
     pub released_in: Option<i64>,
@@ -76,6 +77,7 @@ fn request(r: &rusqlite::Row<'_>) -> rusqlite::Result<LaneRequest> {
         dir: r.get("dir")?,
         branch: r.get("branch")?,
         head: r.get("head")?,
+        repo: r.get("repo")?,
         arrived: r.get("arrived")?,
         unit: r.get("unit")?,
         released_in: r.get("released_in")?,
@@ -154,14 +156,15 @@ pub struct NewRequest<'a> {
     pub dir: &'a str,
     pub branch: &'a str,
     pub head: &'a str,
+    pub repo: Option<&'a str>,
 }
 
 pub fn request_add(c: &Connection, r: &NewRequest<'_>) -> Result<LaneRequest> {
     let (id, t) = (uid("lr"), now());
     c.execute(
-        "INSERT INTO lane_requests (id, lane_id, workspace_id, item_id, source, dir, branch, head, arrived, state, updated)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?)",
-        params![id, r.lane_id, r.workspace_id, r.item_id, r.source, r.dir, r.branch, r.head, t, t],
+        "INSERT INTO lane_requests (id, lane_id, workspace_id, item_id, source, dir, branch, head, repo, arrived, state, updated)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?)",
+        params![id, r.lane_id, r.workspace_id, r.item_id, r.source, r.dir, r.branch, r.head, r.repo, t, t],
     )?;
     Ok(c.query_row("SELECT * FROM lane_requests WHERE id = ?", [&id], request)?)
 }
@@ -259,15 +262,21 @@ pub fn unit_set(
     Ok(())
 }
 
-/// The newest approval card of a batch (`subject`: `lane:<lane>:<unit>`): its status and whether it
-/// was approved.
-pub fn approval_of(c: &Connection, subject: &str) -> Result<Option<(String, bool)>> {
+/// The newest card of `kind` about a batch (`subject`: `lane:<lane>:<unit>`): its status and result.
+pub fn batch_card(
+    c: &Connection,
+    subject: &str,
+    kind: &str,
+) -> Result<Option<(String, serde_json::Value)>> {
     Ok(c
         .query_row(
-            "SELECT status, coalesce(json_extract(result, '$.approved'), 0) FROM decisions
-              WHERE subject_type = 'delivery_batch' AND subject_id = ? ORDER BY created DESC LIMIT 1",
-            [subject],
-            |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? == 1)),
+            "SELECT status, coalesce(result, 'null') FROM decisions
+              WHERE subject_type = 'delivery_batch' AND subject_id = ? AND kind = ? ORDER BY created DESC LIMIT 1",
+            params![subject, kind],
+            |r| {
+                let raw: String = r.get(1)?;
+                Ok((r.get::<_, String>(0)?, serde_json::from_str(&raw).unwrap_or(serde_json::Value::Null)))
+            },
         )
         .optional()?)
 }

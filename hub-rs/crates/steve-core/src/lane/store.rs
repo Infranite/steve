@@ -300,6 +300,7 @@ mod tests {
             dir: "/tmp/x",
             branch: id,
             head: "abc",
+            repo: None,
         }
     }
 

@@ -27,13 +27,14 @@ const MOVED_RETRIES: usize = 2;
 /// again meanwhile (a tick, a restart's recovery, a second answer).
 static BUSY: std::sync::Mutex<Vec<(String, u64)>> = std::sync::Mutex::new(Vec::new());
 
-/// Holds a unit for one thread; `None` when another thread has it.
+/// Holds a unit's merge or its release (`phase`) for one thread; `None` when another thread has it.
+/// Merging and releasing hold apart: a merge that just ended starts its unit's release while holding.
 struct Hold((String, u64));
 
 impl Hold {
-    fn take(lane: &str, unit: u64) -> Option<Self> {
+    fn take(phase: &str, lane: &str, unit: u64) -> Option<Self> {
         let mut b = BUSY.lock().unwrap_or_else(|e| e.into_inner());
-        let k = (lane.to_string(), unit);
+        let k = (format!("{phase}:{lane}"), unit);
         if b.contains(&k) {
             return None;
         }
@@ -106,6 +107,7 @@ impl Core {
                 dir: cwd,
                 branch: &branch,
                 head: &head,
+                repo: Some(repo),
             },
         )?;
         let unit = req
@@ -249,7 +251,7 @@ impl Core {
 
     /// Merge unit `unit` of `lane` (off the lock).
     fn lane_merge(&self, lane: &str, unit: u64) {
-        let Some(_hold) = Hold::take(lane, unit) else {
+        let Some(_hold) = Hold::take("merge", lane, unit) else {
             return;
         };
         let s = self.store().store();
@@ -264,7 +266,9 @@ impl Core {
             .collect();
         let Some(repo) = reqs
             .iter()
-            .map(|r| PathBuf::from(&r.dir))
+            .flat_map(|r| [Some(r.dir.clone()), r.repo.clone()])
+            .flatten()
+            .map(PathBuf::from)
             .find(|d| d.is_dir())
         else {
             for r in &reqs {
@@ -356,7 +360,7 @@ impl Core {
 
     /// Release unit `unit` of `lane` (off the lock).
     fn lane_release(&self, lane: &str, unit: u64, ids: &[String]) {
-        let Some(_hold) = Hold::take(lane, unit) else {
+        let Some(_hold) = Hold::take("release", lane, unit) else {
             return;
         };
         let s = self.store().store();
@@ -369,14 +373,17 @@ impl Core {
             Some(wt)
         } else {
             reqs.iter()
-                .map(|r| PathBuf::from(&r.dir))
+                .flat_map(|r| [Some(r.dir.clone()), r.repo.clone()])
+                .flatten()
+                .map(PathBuf::from)
                 .find(|d| d.is_dir())
         };
         // released already (a restart came between the release and its record): not again
         let heads: Vec<String> = reqs.iter().map(|r| r.head.clone()).collect();
         let done = dir.as_deref().and_then(|d| {
-            let _ = crate::upstream::fetch(d);
-            exec::already_released(d, &heads)
+            crate::upstream::fetch(d).ok()?;
+            let tags = crate::upstream::remote_tags(d).ok()?;
+            exec::already_released(d, &heads, &tags)
         });
         let result = match done {
             Some(v) => Some(Ok(Some(v))),
@@ -412,8 +419,23 @@ impl Core {
 
     /// A request left its lane: the item is reopened with a card saying why, as for a failed release.
     fn lane_sent_back(&self, item: &str, why: &str) -> Result<()> {
-        self.tx()
-            .release_failed(item, "合并通道退回", why, serde_json::json!({"lane": true}))
+        let mut t = self.tx();
+        t.release_outcome(item, "failed", serde_json::json!({"lane": true}))?;
+        // the accepted result is void: back to work (the acceptance expires), its session told why
+        if !t.lc_invalidate(item, why)? {
+            return t.release_failed(item, "合并通道退回", why, serde_json::json!({"lane": true}));
+        }
+        match t.active_session(item)? {
+            Some(s) => {
+                t.prompt(
+                    &s.id,
+                    &format!("合并通道退回：{why}。请处理后重新交付，通过后会再进合并通道。"),
+                    "steve",
+                );
+                Ok(())
+            }
+            None => t.fail(item, why),
+        }
     }
 
     /// A unit's release failed: its members wait with it, a card asks whether to try again or give up.
@@ -425,6 +447,11 @@ impl Core {
         if let Err(e) = store::release_failed(self.store().store(), lane, unit, why) {
             tracing::warn!(lane, unit, "lane: release failed: {e}");
         }
+        self.lane_fail_card(lane, unit, reqs, why);
+    }
+
+    /// The card asking what next for a unit whose release failed: retry, or give up.
+    fn lane_fail_card(&self, lane: &str, unit: u64, reqs: &[LaneRequest], why: &str) {
         let ws = reqs
             .iter()
             .find_map(|r| r.workspace_id.clone())
@@ -489,15 +516,17 @@ impl Core {
                 match u.state.as_str() {
                     "merging" => {
                         let card = s
-                            .reader(|c| lanes::approval_of(c, &subject(&l.id, no)))
+                            .reader(|c| lanes::batch_card(c, &subject(&l.id, no), "approve"))
                             .ok()
                             .flatten();
                         match card {
-                            Some((status, true)) if status == "resolved" => {
+                            // answered, maybe not acted on before the restart: act on it again
+                            Some((status, result)) if status == "resolved" => {
+                                let yes = result["approved"].as_bool() == Some(true);
                                 let (c, lane) = (self.clone(), l.id.clone());
-                                detach(move || c.lane_merge(&lane, no));
+                                detach(move || c.lane_answered(&lane, no, yes));
                             }
-                            Some(_) => {} // waits for you, or was turned down (handled then)
+                            Some(_) => {} // waits for you
                             None => {
                                 let ids: Vec<String> = reqs
                                     .iter()
@@ -524,6 +553,29 @@ impl Core {
                             .collect();
                         let (c, lane) = (self.clone(), l.id.clone());
                         detach(move || c.lane_release(&lane, no, &ids));
+                    }
+                    "release_failed" => {
+                        let card = s
+                            .reader(|c| lanes::batch_card(c, &subject(&l.id, no), "fail"))
+                            .ok()
+                            .flatten();
+                        match card {
+                            Some((status, result)) if status == "resolved" => {
+                                let retry = result["choice"].as_str() == Some("retry");
+                                let (c, lane) = (self.clone(), l.id.clone());
+                                detach(move || c.lane_release_answered(&lane, no, retry));
+                            }
+                            Some(_) => {} // waits for you
+                            None => {
+                                let mine: Vec<LaneRequest> = reqs
+                                    .iter()
+                                    .filter(|r| r.released_in == Some(u.no))
+                                    .cloned()
+                                    .collect();
+                                let why = u.outcome.as_deref().unwrap_or("发布失败");
+                                self.lane_fail_card(&l.id, no, &mine, why);
+                            }
+                        }
                     }
                     _ => {}
                 }

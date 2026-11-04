@@ -1459,9 +1459,14 @@ impl Tx<'_> {
          * there, not one release card per item here), when the lane can release it that way: merged is
          * released, or the repository cuts its own tagged releases (ops/cut-release.py) */
         let rule = p.release.as_ref().and_then(|r| r.done_when.as_deref());
+        let cmd = p.release.as_ref().map(|r| r.cmd.trim()).unwrap_or_default();
+        let cut = Path::new(&p.path).join("ops/cut-release.py");
+        /* the lane runs no release command of the project's own: one it would skip keeps the old path */
         let lane_can = match rule {
-            Some(steve_store::DONE_MERGE) => true,
-            Some(steve_store::DONE_TAG) => Path::new(&p.path).join("ops/cut-release.py").is_file(),
+            Some(steve_store::DONE_MERGE) => cmd.is_empty(),
+            Some(steve_store::DONE_TAG) => {
+                cut.is_file() && (cmd.is_empty() || Path::new(cmd).ends_with("ops/cut-release.py"))
+            }
             _ => false,
         };
         if lane_can {

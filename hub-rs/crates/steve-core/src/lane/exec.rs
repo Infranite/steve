@@ -191,27 +191,28 @@ pub fn release(wt: &Path, branch: &str) -> Result<Option<String>, String> {
         .find_map(|l| l.trim().strip_prefix("released v").map(str::to_string)))
 }
 
-/// The version a release of `heads` already went out as: the oldest `vX.Y.Z` tag containing every one
-/// of them, or `None` when one of them is in no tag yet. Asked before releasing again (after a
-/// restart): a release step never runs twice for the same commits.
-pub fn already_released(dir: &Path, heads: &[String]) -> Option<String> {
-    let mut newest: Option<(Vec<u64>, String)> = None;
-    for h in heads {
-        let tags = git(
-            dir,
-            &["tag", "--contains", h, "--list", "v*", "--sort=v:refname"],
-        )
-        .ok()?;
-        let first = tags.lines().find_map(|t| {
-            let v = t.strip_prefix('v')?;
+/// The version a release of `heads` already went out as: the oldest of the remote's `vX.Y.Z` tags
+/// (`tags`: name → commit, [`crate::upstream::remote_tags`]) whose commit contains every one of them;
+/// `None` when no single tag does. Asked before releasing again (after a restart): a release step never
+/// runs twice for the same commits.
+pub fn already_released(dir: &Path, heads: &[String], tags: &[(String, String)]) -> Option<String> {
+    let mut versions: Vec<(Vec<u64>, &str, &str)> = tags
+        .iter()
+        .filter_map(|(name, sha)| {
+            let v = name.strip_prefix('v')?;
             let parts: Option<Vec<u64>> = v.split('.').map(|p| p.parse().ok()).collect();
-            parts.filter(|p| p.len() == 3).map(|p| (p, v.to_string()))
-        })?;
-        if newest.as_ref().is_none_or(|n| first.0 > n.0) {
-            newest = Some(first);
-        }
-    }
-    newest.map(|n| n.1)
+            parts.filter(|p| p.len() == 3).map(|p| (p, v, sha.as_str()))
+        })
+        .collect();
+    versions.sort();
+    versions
+        .into_iter()
+        .find(|(_, _, sha)| {
+            heads
+                .iter()
+                .all(|h| git(dir, &["merge-base", "--is-ancestor", h, sha]).is_ok())
+        })
+        .map(|(_, v, _)| v.to_string())
 }
 
 #[cfg(test)]
@@ -356,5 +357,35 @@ mod tests {
     fn a_repository_without_its_own_release_step_is_released_by_the_merge() {
         let t = tempfile::tempdir().unwrap();
         assert_eq!(release(t.path(), "main"), Ok(None));
+    }
+
+    #[test]
+    fn released_means_one_pushed_tag_holds_every_head() {
+        let (_t, _origin, clone) = repos();
+        let a = branch(&clone, "a", "a.txt", "ONE\ntwo\nthree\n");
+        run(&clone, &["tag", "-a", "-m", "v1", "v1.0.0", &a]);
+        let b = branch(&clone, "b", "a.txt", "one\ntwo\nTHREE\n");
+        run(&clone, &["tag", "v1.0.1", &b]); // b only: a is not in it
+        run(&clone, &["push", "--quiet", "origin", "v1.0.0", "v1.0.1"]);
+        run(&clone, &["checkout", "--quiet", "a"]);
+        run(&clone, &["merge", "--quiet", "--no-edit", "b"]);
+        run(&clone, &["tag", "v1.0.2"]); // both, but never pushed
+        let heads = [a.clone(), b.clone()];
+        let tags = crate::upstream::remote_tags(&clone).unwrap();
+        assert_eq!(
+            already_released(&clone, &heads[..1], &tags).as_deref(),
+            Some("1.0.0")
+        );
+        assert_eq!(
+            already_released(&clone, &heads, &tags),
+            None,
+            "no pushed tag holds both"
+        );
+        run(&clone, &["push", "--quiet", "origin", "v1.0.2"]);
+        let tags = crate::upstream::remote_tags(&clone).unwrap();
+        assert_eq!(
+            already_released(&clone, &heads, &tags).as_deref(),
+            Some("1.0.2")
+        );
     }
 }
