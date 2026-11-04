@@ -2,7 +2,7 @@ import { createRoot } from "react-dom/client"
 import "../../src/index.css"
 import { ChatView } from "../../src/chat-view"
 import { SidebarProvider } from "../../src/components/ui/sidebar"
-import { st, useStore, type Msg, type Bot } from "../../src/store"
+import { st, useStore, hubSubs, type Msg, type Bot } from "../../src/store"
 
 /* `?main`: your own conversation with a follow-up question; otherwise the IM conversation `chan:sp1` from the mocked API */
 document.documentElement.classList.toggle("dark", location.search.includes("dark"))
@@ -14,6 +14,8 @@ const main: Msg[] = [
 st.bots = { steve: { id: "steve", main: true, n: "Steve", a: "", role: "你的助手" } as Bot }
 st.thread = location.search.includes("main") ? main : []
 st.notices = []
+/* the Hub saying a chat message of the space changed, as its event stream would */
+window.addEventListener("fixture-reload", () => hubSubs.forEach((f) => f({ type: "chan_message", id: "cm_out", space_id: "sp1" })))
 function Fixture() {
   useStore()
   return <SidebarProvider><main style={{ height: "100dvh", width: "100%", minWidth: 0 }}>{location.search.includes("main") ? <ChatView /> : <ChatView conv="chan:sp1" />}</main></SidebarProvider>

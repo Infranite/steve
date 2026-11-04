@@ -753,13 +753,13 @@ export async function decide(id: string, c: string, text?: string, decision?: st
     if (result && c === "pass") cue("success")
   } finally { st.pendingActions.delete(key); emit() }
 }
-/** a reply drafted in an IM conversation, answered in that conversation: `yes` sends it, `no` closes it for good;
+/** a reply drafted in an IM conversation, closed in that conversation: not sent, for good (undo from 已处理);
  *  one answer at a time, a second click while it is on its way does nothing */
-export async function decideOut(decision: string, c: "yes" | "no") {
+export async function discardOut(decision: string) {
   const key = "decision:" + decision
   if (st.pendingActions.has(key)) return false
   st.pendingActions.add(key); emit()
-  try { return !!(await call(api.decide(decision, c), c === "yes" ? "已批准，稍后发出" : "不发出，这条已关闭")) }
+  try { return !!(await call(api.decide(decision, "no"), "不发出，这条已关闭")) }
   finally { st.pendingActions.delete(key); emit() }
 }
 /** take one card out of 待处理 without answering it (the item's first one unless `decision` says which);
