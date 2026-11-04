@@ -34,6 +34,33 @@ pub fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
     }
 }
 
+/// A yes/no question git answers with its exit status (`merge-base --is-ancestor`, `rev-parse --verify
+/// --quiet`): 0 is yes, 1 is no; anything else, or no git at all, is an error, never a no.
+pub fn git_test(dir: &Path, args: &[&str]) -> Result<bool, String> {
+    let out = Command::new("git")
+        .env_remove("STEVE_UPGRADE_CONTROL_TOKEN")
+        .env_remove("STEVE_SUPERVISOR_PID")
+        .env_remove("STEVE_UPGRADE_ID")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| e.to_string())?;
+    match out.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => {
+            let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            Err(if err.is_empty() {
+                format!("git {} failed", args.join(" "))
+            } else {
+                js_head(&err, 300).to_string()
+            })
+        }
+    }
+}
+
 fn succeeds(dir: &Path, args: &[&str]) -> bool {
     git(dir, args).is_ok()
 }

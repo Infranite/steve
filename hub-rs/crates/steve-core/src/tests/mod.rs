@@ -7,6 +7,7 @@ mod cycle;
 mod flows;
 mod inbox;
 mod kinds;
+mod lane;
 mod lifecycle;
 mod models;
 mod module_undo;
