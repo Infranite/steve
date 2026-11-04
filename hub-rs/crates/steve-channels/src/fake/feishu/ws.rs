@@ -34,6 +34,8 @@ use crate::adapters::feishu::pbbp2::{self, Frame, code, header, kind};
 pub const MAX_CONNECTIONS: usize = 50;
 /// Feishu's ack deadline.
 pub const ACK_TIMEOUT: Duration = Duration::from_secs(3);
+/// How long a push waits for an upgraded connection to register.
+const UPGRADE_WAIT: Duration = Duration::from_secs(2);
 
 /// `ClientConfig` the fake hands out, in seconds as on the wire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -139,6 +141,9 @@ pub(crate) struct WsRuntime {
     /// ticket → (device id, service id), single use.
     tickets: HashMap<String, (String, i32)>,
     conns: BTreeMap<String, Conn>,
+    /// Upgrades answered with 101 whose connection is not registered yet: the client already counts
+    /// itself connected, as with Feishu, so a push meanwhile waits for them (see [`attempt`]).
+    upgrading: usize,
     connects_total: u64,
     silent: bool,
     ack_timeout: Duration,
@@ -172,6 +177,7 @@ impl WsRuntime {
             max_conns: MAX_CONNECTIONS,
             tickets: HashMap::new(),
             conns: BTreeMap::new(),
+            upgrading: 0,
             connects_total: 0,
             silent: false,
             ack_timeout: ACK_TIMEOUT,
@@ -311,7 +317,13 @@ pub(crate) async fn upgrade(
         Ok(ids) => ids,
         Err(r) => return refuse(&r),
     };
-    ws.on_upgrade(move |socket| serve(sh, socket, device_id, service_id))
+    sh.rt().ws.upgrading += 1;
+    let failed = sh.clone();
+    ws.on_failed_upgrade(move |_| {
+        let mut rt = failed.rt();
+        rt.ws.upgrading = rt.ws.upgrading.saturating_sub(1);
+    })
+    .on_upgrade(move |socket| serve(sh, socket, device_id, service_id))
 }
 
 /// One connection: registers it, writes queued frames, reads pings and acks.
@@ -319,6 +331,7 @@ async fn serve(sh: Arc<Shared>, socket: WebSocket, conn_id: String, service_id: 
     let (tx, mut rx) = mpsc::unbounded_channel::<Out>();
     {
         let mut rt = sh.rt();
+        rt.ws.upgrading = rt.ws.upgrading.saturating_sub(1);
         rt.ws.connects_total += 1;
         rt.ws.conns.insert(
             conn_id.clone(),
@@ -467,6 +480,19 @@ fn data_frames(service: i32, msg_id: &str, payload: &[u8], parts: usize) -> Vec<
 
 /// One attempt: picks a random connection, sends, waits for the ack. Returns the ack code.
 async fn attempt(sh: &Arc<Shared>, event_id: &str, attempt: u32) -> Option<i64> {
+    // A connection the client already counts as up is registered by now (bounded: an upgrade whose
+    // socket never arrives must not hold deliveries).
+    let end = Instant::now() + UPGRADE_WAIT;
+    while Instant::now() < end {
+        let ready = {
+            let rt = sh.rt();
+            rt.ws.upgrading == 0 || !rt.ws.conns.is_empty()
+        };
+        if ready {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     // World before runtime: the lock order used everywhere else.
     let app = sh.world().app.clone();
     let (rx, timeout) = {
