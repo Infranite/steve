@@ -13,7 +13,7 @@
 # On a failure main is reset to where it was, so main stays what is deployed.
 # Writes $STEVE_HOME/releases/last.json for the Hub, web/last.json, releases/history.jsonl, logs/release/<ver>.log.
 # Usage: release.sh [--web|--hub] <branch|main> [item-id]          (ops/release-web.sh = release.sh --web)
-#        release.sh --rollback [<version>]   switch `current` back to an installed release (default: the one before
+#        release.sh --rollback [<version>] [item-id]   switch `current` back to an installed release (default: the one before
 #        current), restart, health-check; main and the web build are left alone. Refused when that release can't open
 #        the database (ops/schema_gate.py): an older Hub on a database a newer one migrated is what this must never do
 # Env: STEVE_HOME, STEVE_REPO, STEVE_PORT; STEVE_DRAIN_TOKEN (given by the Hub), STEVE_DRAIN_S (default 120: the Hub resumes turns a restart cut off, once within 30 min);
@@ -54,12 +54,12 @@ VER="" SHA="" COMMIT="" BASE="" KIND="" DO_HUB=0 DO_WEB=0 HUB_OK=0 WEB_OK=0 HUB_
 HUB_IMPL="" PREV_IMPL="" BACKUP="" SCHEMA_BEFORE="" SCHEMA_AFTER=""
 
 # ── results: last.json (what the Hub reports to the item), web/last.json, history.jsonl ──
-last() { # ok error [pending]
-  print -r -- "{\"ok\":$1,\"pending\":${3:-false},\"kind\":$(js ${KIND:-hub}),\"version\":$(js "$VER"),\"prev\":$(js "$([[ $KIND == web ]] && print -r -- $WEB_PREV || print -r -- $PREV)"),\"web_prev\":$(js "$WEB_PREV"),\"hub_ok\":$(jbool $HUB_OK),\"web_ok\":$(jbool $WEB_OK),\"item\":$(js "$ITEM"),\"branch\":$(js "$BRANCH"),\"commit\":$(js "$COMMIT"),\"error\":$(js "$2"),\"log\":$(js "$LOG"),\"at\":$EPOCHSECONDS}" >$REL/last.json
+last() { # ok error [pending] [degraded]
+  print -r -- "{\"ok\":$1,\"pending\":${3:-false},\"degraded\":${4:-false},\"kind\":$(js ${KIND:-hub}),\"version\":$(js "$VER"),\"prev\":$(js "$([[ $KIND == web ]] && print -r -- $WEB_PREV || print -r -- $PREV)"),\"web_prev\":$(js "$WEB_PREV"),\"hub_ok\":$(jbool $HUB_OK),\"web_ok\":$(jbool $WEB_OK),\"item\":$(js "$ITEM"),\"branch\":$(js "$BRANCH"),\"commit\":$(js "$COMMIT"),\"error\":$(js "$2"),\"log\":$(js "$LOG"),\"at\":$EPOCHSECONDS}" >$REL/last.json
 }
-history() { # kind ok error rolled_back started prev files...
+history() { # kind ok error rolled_back started prev files...   (DEGRADED=true: the failed release stays)
   local kind=$1 ok=$2 err=$3 rb=$4 t=$5 prev=$6 hx=""; shift 6
-  [[ $kind == hub || $kind == rollback ]] && hx=",\"hub\":$(js "$HUB_IMPL"),\"prev_hub\":$(js "$PREV_IMPL"),\"backup\":$(js "$BACKUP"),\"schema_before\":$(js "$SCHEMA_BEFORE"),\"schema_after\":$(js "$SCHEMA_AFTER")"
+  [[ $kind == hub || $kind == rollback ]] && hx=",\"degraded\":${DEGRADED:-false},\"hub\":$(js "$HUB_IMPL"),\"prev_hub\":$(js "$PREV_IMPL"),\"backup\":$(js "$BACKUP"),\"schema_before\":$(js "$SCHEMA_BEFORE"),\"schema_after\":$(js "$SCHEMA_AFTER")"
   print -r -- "{\"kind\":$(js "$kind"),\"version\":$(js "$VER"),\"prev\":$(js "$prev"),\"commit\":$(js "$COMMIT"),\"branch\":$(js "$BRANCH"),\"item\":$(js "$ITEM"),\"files_changed\":$(jarr "$@"),\"started\":$(js "$(iso $t)"),\"finished\":$(js "$(iso)"),\"duration_s\":$(( EPOCHSECONDS - t )),\"ok\":$ok,\"error\":$(js "$err"),\"rolled_back\":$rb,\"log\":$(js "$LOG")$hx}" >>$HIST
   print -r -- "   history: $kind $VER ok=$ok${err:+ error=$err} rolled_back=$rb${hx:+ hub=$PREV_IMPL->$HUB_IMPL backup=${BACKUP:-none} schema=${SCHEMA_BEFORE:-?}->${SCHEMA_AFTER:-?}}"
 }
@@ -103,12 +103,15 @@ drain() {
   done
   print -r -- "   still running after ${DRAIN_S}s ($r), restarting anyway"
 }
-healthy() { # version
-  local i v r
+healthy() { # version [commit]   the version answers, from that commit when the Hub says, and its recovery did not fail
+  local i v c r
   for i in {1..$HEALTH_TRIES}; do
     sleep 1.5
     r=$(curl -s -m 2 http://127.0.0.1:$PORT/healthz); v=$(print -r -- $r | sed -n 's/.*"version":"\([^"]*\)".*/\1/p')
-    [[ $v == $1 ]] && { print -r -- "   healthy after try $i: $r"; return 0 }
+    c=$(print -r -- $r | sed -n 's/.*"build_commit":"\([^"]*\)".*/\1/p')
+    if [[ $v == $1 && ( -z ${2:-} || -z $c || $c == $2 ) && $r != *'"recovery":{"state":"failed"'* ]]; then
+      print -r -- "   healthy after try $i: $r"; return 0
+    fi
     (( i % 5 == 0 )) && print -r -- "   try $i: ${r:-no answer}"
   done
   print -r -- "   not healthy as $1 after $HEALTH_TRIES tries (last answer: ${r:-none})"; return 1
@@ -271,7 +274,7 @@ hub_release() {
   last false "发布进行中" true
   switch_to $VER
   step "hub: health check"
-  if healthy $VER; then
+  if healthy $VER $COMMIT; then
     SCHEMA_AFTER=$(schema)
     HUB_OK=1; print -r -- "✓ hub $VER is live ($HUB_IMPL, schema v${SCHEMA_BEFORE:-?} -> v${SCHEMA_AFTER:-?})"; history hub true "" false $T_HUB "$PREV" $HUB_FILES
     step "hub: prune old releases"
@@ -287,14 +290,15 @@ hub_release() {
   if [[ -n $PREV && $(python3 $OPS/schema_gate.py state $DB) != $COMPAT_BEFORE ]] && ! why=$(can_open $REL/$PREV); then
     err="新版本健康检查没有通过；数据库已被新版本迁移，$why，所以没有切回 $PREV，新版本保留（降级运行）${BACKUP:+；发布前的备份在 $BACKUP}"
     print -r -- "✗ $err"
+    DEGRADED=true
     history hub false "$err" false $T_HUB "$PREV" $HUB_FILES
-    last false "$err"
+    last false "$err" false true
     finish 3
   fi
   step "hub: roll back to ${PREV:-nothing}"
   if [[ -n $PREV ]]; then
     switch_to $PREV
-    healthy $PREV || err="新版本健康检查没有通过，回滚后旧版本也没有起来"
+    healthy $PREV "$(json_field $REL/$PREV/release.json commit)" || err="新版本健康检查没有通过，回滚后旧版本也没有起来"
   fi
   [[ $SCHEMA_AFTER != $SCHEMA_BEFORE ]] && print -r -- "   the database stays at schema v$SCHEMA_AFTER (was v$SCHEMA_BEFORE; backup $BACKUP)"
   rm -rf -- $DIR
@@ -326,7 +330,7 @@ rollback_main() { # [version]
     err="不能回滚到 $target：$why；当前版本保留"
     print -r -- "✗ $err"
     SCHEMA_BEFORE=$(schema) SCHEMA_AFTER=$SCHEMA_BEFORE
-    history rollback false "$err" false $T_HUB "$cur"
+    history rollback false "$err" false $T_HUB "$cur"; last false "$err"
     finish 1
   fi
   print -r -- "   yes: $(python3 $OPS/schema_gate.py state $DB)"
@@ -337,22 +341,23 @@ rollback_main() { # [version]
     BACKUP=$HOME_DIR/backups/rollback-$(strftime '%Y%m%d-%H%M%S' $EPOCHSECONDS).sqlite3
     if ! run sqlite3 $DB ".backup '$BACKUP'"; then
       err="回滚前数据库备份失败，没有切换"; print -r -- "✗ $err"
-      SCHEMA_AFTER=$SCHEMA_BEFORE; history rollback false "$err" false $T_HUB "$cur"; finish 1
+      SCHEMA_AFTER=$SCHEMA_BEFORE; history rollback false "$err" false $T_HUB "$cur"; last false "$err"; finish 1
     fi
   fi
   step "rollback: switch to $target and restart"
   switch_to $target
   step "rollback: health check"
-  if healthy $target; then
+  if healthy $target $COMMIT; then
     print -r -- "✓ rolled back to $target ($HUB_IMPL)"
   else
     ok=false err="回滚到 $target 后健康检查没有通过"
     if [[ -n $cur && -d $REL/$cur ]]; then
-      step "rollback: back to $cur"; switch_to $cur; healthy $cur || err="回滚到 $target 和切回 $cur 后健康检查都没有通过"
+      step "rollback: back to $cur"; switch_to $cur; healthy $cur "$(json_field $REL/$cur/release.json commit)" || err="回滚到 $target 和切回 $cur 后健康检查都没有通过"
     fi
   fi
   SCHEMA_AFTER=$(schema)
   history rollback $ok "$err" false $T_HUB "$cur"
+  last $ok "$err"
   finish $([[ $ok == true ]] && print 0 || print 1)
 }
 

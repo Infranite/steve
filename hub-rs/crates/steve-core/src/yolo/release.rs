@@ -91,6 +91,10 @@ impl Engine {
             // nobody knows which version is live: not something to hand back to the bot
             return Ok(StallCause::Other);
         }
+        if last.result.get("degraded").and_then(Value::as_bool) == Some(true) {
+            // the failed version stays on a migrated database: yours to decide, not the bot's to retry
+            return Ok(StallCause::Other);
+        }
         let window_start = self.window_start(&d.workspace_id)?;
         let nth = releases
             .iter()

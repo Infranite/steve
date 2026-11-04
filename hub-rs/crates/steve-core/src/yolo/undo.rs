@@ -56,7 +56,14 @@ impl Engine {
                 d.status == "resolved"
                     && d.resolved.is_some_and(|r| self.yolo().now() - r <= DAY_MS)
             }),
-            "rollback" => d.as_ref().is_some_and(|d| self.last_release(d)),
+            // only a rollback the database allows: release.sh would refuse the rest
+            "rollback" => d.as_ref().is_some_and(|d| {
+                self.last_release(d)
+                    && self
+                        .core()
+                        .rollback_refusal(d.result["prev"].as_str().unwrap_or_default())
+                        .is_none()
+            }),
             "recall" => self.recall_slot().get().is_some() && d.is_some(),
             "reanswer" => a.item_id.is_some() || a.session_id.is_some(),
             "pause" => a

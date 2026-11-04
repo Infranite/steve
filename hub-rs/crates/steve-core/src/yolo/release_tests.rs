@@ -186,6 +186,30 @@ fn nothing_is_approved_while_a_release_runs() {
 }
 
 #[test]
+fn a_degraded_release_is_not_handed_back_to_the_bot() {
+    let t = t();
+    let own = project(&t, &t.kit.home().join("ops"), "Steve");
+    let r = json!({ "ok": false, "degraded": true, "item": "ITEM", "version": "v2", "prev": "v1", "kind": "hub",
+                    "error": "新版本健康检查没有通过；数据库已被新版本迁移，没有切回 v1，新版本保留（降级运行）",
+                    "log": "/tmp/release.log" });
+    std::fs::write(t.kit.home().join("result.json"), r.to_string()).unwrap();
+    let (item, sid, d) = releasing_item(&t, &own);
+    t.kit.core.resolve(&d, "yes", "", "me").unwrap();
+    assert!(t.kit.wait(|| open_fail(&t, &item).is_some()));
+    let f = open_fail(&t, &item).unwrap();
+    let prompts = t.kit.rt.prompts_of(&sid).len();
+    t.clock.advance(181_000);
+    let a = t.engine.consider(&f).unwrap();
+    assert!(a.as_ref().is_none_or(|a| a.outcome != "decided"), "{a:?}");
+    assert_eq!(
+        t.kit.rt.prompts_of(&sid).len(),
+        prompts,
+        "nothing sent to the bot"
+    );
+    assert_eq!(t.decision(&f).status, "open", "the card waits for you");
+}
+
+#[test]
 fn a_failed_release_goes_back_once_and_two_yolo_failures_trip_b1() {
     let t = t();
     let own = project(&t, &t.kit.home().join("ops"), "Steve");

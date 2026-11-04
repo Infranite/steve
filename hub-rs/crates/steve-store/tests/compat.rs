@@ -23,7 +23,7 @@ fn a_migrated_database_records_the_schema_it_needs() {
         db::compat(&c).unwrap(),
         db::Compat {
             schema: db::SCHEMA_VERSION,
-            min_reader: db::min_reader(db::SCHEMA_VERSION),
+            min_reader: db::SCHEMA_VERSION,
         }
     );
     assert_eq!(one(&c, "SELECT count(*) FROM schema_compat"), 1);
@@ -33,22 +33,6 @@ fn a_migrated_database_records_the_schema_it_needs() {
         1,
         "one row, every open"
     );
-}
-
-#[test]
-fn every_migration_needs_a_build_that_knows_it_unless_declared() {
-    for v in 1..=db::SCHEMA_VERSION {
-        let declared = db::OLDER_READERS.iter().find(|(m, _)| *m == v);
-        if declared.is_none() {
-            assert!(db::min_reader(v) >= v, "v{v} needs a build that knows v{v}");
-        }
-    }
-    for (m, from) in db::OLDER_READERS {
-        assert!(
-            from < m && *m <= db::SCHEMA_VERSION,
-            "({m}, {from}) is a real migration and an older reader"
-        );
-    }
 }
 
 #[test]
@@ -106,12 +90,12 @@ fn an_older_unstamped_database_is_migrated_and_stamped() {
     db::migrate(&c).unwrap();
     assert_eq!(
         one(&c, "SELECT min_reader FROM schema_compat"),
-        db::min_reader(db::SCHEMA_VERSION)
+        db::SCHEMA_VERSION
     );
 }
 
 #[test]
-fn a_newer_database_its_migrations_allow_is_opened_unchanged() {
+fn a_newer_database_that_asks_only_for_this_schema_is_opened_unchanged() {
     let c = fresh();
     let ahead = db::SCHEMA_VERSION + 1;
     c.execute_batch(&format!("UPDATE schema_version SET v = {ahead}"))
@@ -124,7 +108,7 @@ fn a_newer_database_its_migrations_allow_is_opened_unchanged() {
     );
     assert_eq!(
         one(&c, "SELECT min_reader FROM schema_compat"),
-        db::min_reader(db::SCHEMA_VERSION)
+        db::SCHEMA_VERSION
     );
 }
 

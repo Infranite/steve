@@ -71,7 +71,47 @@ impl Core {
 
     /// `release.sh --rollback <target>` for the release of `item` (YOLO's undo); returns the log path.
     pub fn rollback_release(&self, item: &str, target: &str) -> Result<String> {
+        if let Some(why) = self.rollback_refusal(target) {
+            return Err(crate::error::msg(format!("不能回滚到 {target}：{why}")));
+        }
         self.tx().start_rollback(item, target)
+    }
+
+    /// Why the installed release `target` can't run on this Hub's database, if it can't. The rule of
+    /// ops/schema_gate.py, which `release.sh --rollback` applies again: the database records the oldest
+    /// schema a Hub must know (`steve_store::db::compat`), the release's `release.json` the schema its Hub
+    /// knows (`schema.target`). A release that doesn't say is refused. Asked before a rollback is offered
+    /// or started, so a refused one is neither shown as possible nor counted as undone.
+    pub fn rollback_refusal(&self, target: &str) -> Option<String> {
+        if target.is_empty() || target.contains('/') || target.starts_with('.') {
+            return Some("不是一个已安装的版本".into());
+        }
+        let manifest = self
+            .config()
+            .home
+            .join("releases")
+            .join(target)
+            .join("release.json");
+        let knows = std::fs::read(&manifest)
+            .ok()
+            .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+            .and_then(|m| m.pointer("/schema/target").and_then(Value::as_i64));
+        let db = match self.store().store().with_conn(steve_store::db::compat) {
+            Ok(c) => c,
+            Err(e) => return Some(format!("读不到数据库的 schema（{e}）")),
+        };
+        match knows {
+            _ if db.min_reader == 0 => None,
+            None => Some(format!(
+                "它说不清自己认识哪个 schema（release.json 里没有），不能打开 schema v{} 的数据库",
+                db.schema
+            )),
+            Some(k) if k < db.min_reader => Some(format!(
+                "它只认识到 schema v{k}，数据库（v{}）需要至少 v{}",
+                db.schema, db.min_reader
+            )),
+            Some(_) => None,
+        }
     }
 
     /// Read `releases/last.json` and report a final result once (boot, file watcher, tests).
@@ -439,7 +479,7 @@ impl Tx<'_> {
         ] {
             cmd.env_remove(key);
         }
-        cmd.args([script.as_str(), "--rollback", target])
+        cmd.args([script.as_str(), "--rollback", target, item_id])
             .stdin(std::process::Stdio::null())
             .stdout(out.try_clone()?)
             .stderr(out)
@@ -622,7 +662,11 @@ impl Tx<'_> {
             "hub+web" => "Hub 和前端",
             _ => "",
         };
-        let back = if kind == "hub+web" && r.get("hub_ok").is_some_and(truthy) {
+        /* degraded: the new Hub migrated the database past what the previous one reads, so it stays */
+        let degraded = r.get("degraded").is_some_and(truthy);
+        let back = if degraded {
+            "没有回滚，新版本保留（降级运行）".to_string()
+        } else if kind == "hub+web" && r.get("hub_ok").is_some_and(truthy) {
             format!(
                 "Hub 已是新版本，前端仍是 {}",
                 or_falsy("web_prev", "上一个版本")
@@ -630,7 +674,21 @@ impl Tx<'_> {
         } else {
             format!("已回到 {}", or_falsy("prev", "上一个版本"))
         };
-        let text = if abandoned {
+        let text = if kind == "rollback" && !abandoned {
+            if r.get("ok").is_some_and(truthy) {
+                format!(
+                    "已回滚到 {}（之前是 {}）",
+                    or("version", ""),
+                    or_falsy("prev", "上一个版本")
+                )
+            } else {
+                format!(
+                    "回滚到 {} 没有成功：{}",
+                    or("version", ""),
+                    or("error", "健康检查没有通过")
+                )
+            }
+        } else if abandoned {
             /* nobody knows which version is live now: don't claim a rollback */
             format!(
                 "发布{what} {} 失败：{NO_RESULT}，不确定现在是哪个版本；请看发布日志 {}",
@@ -660,7 +718,10 @@ impl Tx<'_> {
             None => None,
         };
         let version = r.get("version").filter(|v| truthy(v)).map(jstr);
-        if let Some(i) = &item {
+        if let Some(i) = &item.as_ref().filter(|_| kind == "rollback") {
+            /* a rollback (YOLO's undo) is not the item's release: only noted on it */
+            self.db().timeline_add(&i.id, "steve", "sys", &text, None)?;
+        } else if let Some(i) = &item {
             if r.get("ok").is_some_and(truthy) {
                 self.db().timeline_add(&i.id, "steve", "sys", &text, None)?;
                 /* `prev`: what a rollback of this release goes back to (YOLO's undo) */
@@ -689,8 +750,11 @@ impl Tx<'_> {
                     "kind": kind,
                     "hub_ok": r.get("hub_ok").is_some_and(truthy),
                     "web_ok": r.get("web_ok").is_some_and(truthy),
+                    "degraded": degraded,
                 });
-                let now_text = if hub_only {
+                let now_text = if degraded {
+                    "发布失败，新版本降级运行"
+                } else if hub_only {
                     "Hub 已发布，前端发布失败"
                 } else {
                     "发布失败"

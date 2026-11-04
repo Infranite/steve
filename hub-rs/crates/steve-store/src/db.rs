@@ -68,25 +68,6 @@ pub const MIGRATIONS: &[&str] = &[
 /// The schema version this build writes (`MIGRATIONS.length`).
 pub const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64;
 
-/// Migrations that builds older than them may still read and write: `(migration, oldest schema that
-/// can)`. Every migration not listed needs a build that knows it. Listing one is a claim about every
-/// older build from that schema on (it neither breaks on the new shape nor writes rows the new one
-/// misreads), so it comes with a test that runs such a build's statements on the migrated database.
-pub const OLDER_READERS: &[(i64, i64)] = &[];
-
-/// The oldest schema a build must know to open a database at `version`: what its migrations demand.
-pub fn min_reader(version: i64) -> i64 {
-    (1..=version)
-        .map(|m| {
-            OLDER_READERS
-                .iter()
-                .find(|(n, _)| *n == m)
-                .map_or(m, |(_, from)| *from)
-        })
-        .max()
-        .unwrap_or(0)
-}
-
 /// Where a database stands: its schema and the oldest schema a build must know to open it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Compat {
@@ -159,10 +140,11 @@ pub(crate) fn open_writer(path: &Path) -> Result<Connection> {
 /// The db.ts runner verbatim: read the first `schema_version` row (0 if none), run the missing migrations
 /// and record the new version, all in one transaction. Like TS, the UPDATE runs on every open.
 ///
-/// A database is opened only when this build knows the schema its migrations demand (`schema_compat`,
-/// see [`min_reader`]): one a newer build migrated past that is refused, before anything is written, so
-/// an old binary (a rollback) can't misread or damage it. A newer database whose migrations older builds
-/// may use is opened as is: writing the version down would make the newer build rerun one.
+/// A database is opened only when this build knows the schema recorded in `schema_compat` (the newest
+/// any build that opened it knew): one a newer build migrated is refused before anything is written, so an
+/// old binary (a rollback) can't misread or damage it. A database whose recorded schema is newer than its
+/// `schema_version` (none so far) is opened as is: writing the version down would make the newer build
+/// rerun a migration.
 ///
 /// Pending migrations run with `foreign_keys` off, because a table rebuild (012) drops a table other
 /// tables reference; `foreign_key_check` must then be empty before the transaction commits. The
@@ -185,7 +167,7 @@ pub fn migrate(c: &Connection) -> Result<()> {
     )?;
     if cur > SCHEMA_VERSION {
         tracing::warn!(
-            "database schema v{cur} is newer than this Hub (v{SCHEMA_VERSION}); its migrations let builds from v{needs} on use it, opening it unchanged"
+            "database schema v{cur} is newer than this Hub (v{SCHEMA_VERSION}) but asks only for v{needs}; opening it unchanged"
         );
         return Ok(());
     }
@@ -240,8 +222,9 @@ fn run_pending(c: &Connection, cur: i64) -> Result<()> {
     } else {
         tx.execute("UPDATE schema_version SET v = ?", [SCHEMA_VERSION])?;
     }
-    // the stamp only ever rises: a build that opened the database must not let an older one in again
-    let stamp = compat(&tx)?.min_reader.max(min_reader(SCHEMA_VERSION));
+    // every migration needs a build that knows it (letting older builds use one would also need a record
+    // of what they wrote since, which nothing keeps); the stamp only ever rises
+    let stamp = compat(&tx)?.min_reader.max(SCHEMA_VERSION);
     tx.execute("DELETE FROM schema_compat", [])?;
     tx.execute("INSERT INTO schema_compat (min_reader) VALUES (?)", [stamp])?;
     tx.commit()?;

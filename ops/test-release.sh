@@ -213,12 +213,14 @@ check 'lastline | grep -q "\"kind\":\"hub\".*\"ok\":false,\"error\":\"[^\"]*降�
 B=$(hfield backup)
 check '[[ $B == */backups/pre-rust-$RB.sqlite3 ]] && [ "$(sqlite3 "$B" "SELECT v FROM schema_version")" = 3 ] && grep -q "$B" "$STEVE_HOME/releases/last.json"' "the error names the v3 backup ($(basename "$B"))"
 check 'grep -q "说不清自己认识哪个 schema" "$F" && grep -q "not healthy as" "$F"' "the log: the failed check and why the TS release can't take over"
+check 'grep -qE "\"degraded\": ?true" "$STEVE_HOME/releases/last.json" && lastline | grep -q "\"degraded\":true"' "last.json and history say degraded (the Hub must not report a rollback)"
 
 PB=$(pid)
 echo "── --rollback to the TS release: refused, nothing switched"
 if $REL --rollback "$TSV" >"$T/out-rbts.txt" 2>&1; then cat "$T/out-rbts.txt"; no "rolled back onto a database the TS Hub can't read"; fi
 check '[ "$(hubcur)" = "$RB" ] && [ "$(pid)" = "$PB" ] && [ "$(schema)" = 11 ]' "still $RB (same pid), the database untouched"
 check 'lastline | grep -q "\"kind\":\"rollback\",\"version\":\"$TSV\".*\"ok\":false,\"error\":\"不能回滚到 $TSV" && ! grep -q "rollback: drain" "$T/out-rbts.txt"' "history: refused before any drain"
+check '[ "$(field "$STEVE_HOME/releases/last.json" kind)" = rollback ] && grep -q "不能回滚到 $TSV" "$STEVE_HOME/releases/last.json"' "last.json: the refused rollback, for the Hub to note"
 if $REL --rollback ts >"$T/out-rbts2.txt" 2>&1; then no "--rollback ts still does something"; fi
 check '[ "$(hubcur)" = "$RB" ] && grep -q "no release to roll back to (ts)" "$T/out-rbts2.txt"' "--rollback ts is no longer a target"
 
@@ -253,6 +255,7 @@ echo "── --rollback to the previous Rust release (same schema): allowed"
 $REL --rollback >"$T/out-rb.txt" 2>&1 || { cat "$T/out-rb.txt"; no "--rollback to the previous Rust release failed"; }
 check '[ "$(hubcur)" = "$R1" ] && [ "$(hzf version)" = "$R1" ] && is_rust && [ "$(served "")" = "$W6" ]' "Rust Hub $R1 serving web $W6"
 check 'lastline | grep -q "\"kind\":\"rollback\",\"version\":\"$R1\",\"prev\":\"$R2\".*\"ok\":true.*\"backup\":\"[^\"]*/rollback-[0-9-]*.sqlite3\"" && [ "$(G rev-parse main)" = "$M3" ]' "history: a rollback line with its backup; main untouched"
+check '[ "$(field "$STEVE_HOME/releases/last.json" kind)" = rollback ] && grep -qE "\"ok\": ?true" "$STEVE_HOME/releases/last.json" && [ "$(field "$STEVE_HOME/releases/last.json" version)" = "$R1" ]' "last.json: the rollback went through"
 
 echo "── a Rust Hub that migrates to v12, then --rollback to v11: refused"
 rust_branch r12 ok 12

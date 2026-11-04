@@ -215,17 +215,25 @@ def wait_health(ok, seconds):
 
 
 def launchd(action, ident):
+    """Start or stop the service: launchd, or STEVE_SERVICE_CMD <start|stop> (ops/test-local-release.py)."""
     domain = f"gui/{os.getuid()}"
     plist = PLIST_DIR / f"{ident['label']}.plist"
+    custom = os.environ.get("STEVE_SERVICE_CMD")
     if action == "stop":
-        subprocess.run(["launchctl", "bootout", f"{domain}/{ident['label']}"], check=True)
+        if custom:
+            subprocess.run([*custom.split(), "stop"], check=True)
+        else:
+            subprocess.run(["launchctl", "bootout", f"{domain}/{ident['label']}"], check=True)
         for _ in range(150):
             with socket.socket() as s:
                 if s.connect_ex(("127.0.0.1", port())) != 0:
                     return
             time.sleep(0.1)
         raise RuntimeError("the old Hub still listens after bootout")
-    subprocess.run(["launchctl", "bootstrap", domain, str(plist)], check=True)
+    if custom:
+        subprocess.run([*custom.split(), "start"], check=True)
+    else:
+        subprocess.run(["launchctl", "bootstrap", domain, str(plist)], check=True)
 
 
 def link(path, target):
@@ -248,10 +256,15 @@ def probe(candidate, version):
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         p_port = s.getsockname()[1]
+    # the production environment (what run.sh gives the Hub), then only what keeps the probe private: its own
+    # port, the upgrade gate, no resumed work, no agent that could start
     env = {k: os.environ[k] for k in ("HOME", "PATH", "TMPDIR") if k in os.environ}
+    env.update(env_file())
     env.update(STEVE_HOME=str(HOME), STEVE_PORT=str(p_port), STEVE_HOST="127.0.0.1", STEVE_WEB_DIR=str(candidate / "web/dist"),
-               STEVE_VAULT_KEYSTORE="keychain", STEVE_KEYHELPER=str(HOME / "bin/steve-keyhelper"), STEVE_UPGRADE_ID=ident,
-               STEVE_NO_RESUME="1", STEVE_REPO=str(HOME / "probe-unused-repo"))
+               STEVE_UPGRADE_ID=ident, STEVE_NO_RESUME="1", STEVE_REPO=str(HOME / "probe-unused-repo"),
+               STEVE_ADAPTER_CLAUDE="/usr/bin/false", STEVE_ADAPTER_CODEX="/usr/bin/false",
+               CLAUDE_CODE_EXECUTABLE="/usr/bin/false")
+    env.setdefault("STEVE_KEYHELPER", str(HOME / "bin/steve-keyhelper"))
     logf = HOME / f"logs/release/probe-{version}-{ident[:8]}.log"
     logf.parent.mkdir(parents=True, exist_ok=True)
     with logf.open("w") as out:
@@ -322,71 +335,94 @@ def deploy(args):
     helper = HOME / "bin/steve-keyhelper"
     helper_sha = sha256(helper) if helper.exists() else None
 
-    log("drain")
-    control("POST")
-    until, st = time.monotonic() + args.drain_s, {}
-    while time.monotonic() < until:
-        st = control("GET")
-        if st.get("ready"):
-            break
-        time.sleep(1)
-    else:
-        control("DELETE")
-        save(ok=False, error=f"not drained in {args.drain_s}s: {st}")
-        raise Refused(f"the Hub did not drain in {args.drain_s}s ({st}); maintenance lifted, nothing changed")
-    log(f"drained: {st}")
-
-    launchd("stop", ident)
-    backup = HOME / f"backups/pre-{candidate.name}-{stamp}.sqlite3"
-    backup.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(DB) as src, sqlite3.connect(backup) as dst:
-        src.backup(dst)
-        check = dst.execute("PRAGMA quick_check").fetchone()[0]
-    os.chmod(backup, 0o600)
-    if check != "ok":
-        launchd("start", ident)
-        wait_health(lambda h: True, 40) and control("DELETE")
-        save(ok=False, error=f"backup quick_check: {check}")
-        raise Refused(f"the backup does not check out ({check}); the old version was restarted")
-    save(backup=str(backup))
-    log(f"backup {backup}")
-
+    phase = "drain"
+    stopped = switched = False
     try:
-        h = probe(candidate, version)
-        log(f"probe passed: {h}")
-    except BaseException as e:
-        failed = HOME / f"backups/failed-probe-{candidate.name}-{stamp}"
-        failed.mkdir(parents=True, exist_ok=True)
-        for p in DB.parent.glob("steve.sqlite3*"):
-            shutil.move(str(p), str(failed / p.name))
-        shutil.copy2(backup, DB)
-        launchd("start", ident)
-        if wait_health(lambda h: True, 40):
-            control("DELETE")
-        save(ok=False, error=f"probe: {e}", probe_db=str(failed))
-        log(f"probe failed ({e}); the backup is back and {old_hub.name} restarted; the probed database is in {failed}")
-        return 1
+        log("drain")
+        control("POST")
+        until, st = time.monotonic() + args.drain_s, {}
+        while time.monotonic() < until:
+            st = control("GET")
+            if st.get("ready"):
+                break
+            time.sleep(1)
+        else:
+            raise Refused(f"the Hub did not drain in {args.drain_s}s ({st})")
+        log(f"drained: {st}")
 
-    link(HOME / "current", candidate)
-    link(HOME / "web/current", candidate / "web/dist")
-    launchd("start", ident)
-    up = wait_health(lambda h: h.get("version") == version, 60)
-    if up and up.get("maintenance"):
-        control("DELETE")
-    h = wait_health(lambda h: h.get("version") == h.get("web_version") == version and not h.get("maintenance")
-                    and h.get("build_commit") == manifest["commit"], 60)
-    if not h:
-        err = (f"{version} 切换后没有正常起来；数据库可能已迁移（{schema_gate.state(DB)}），没有回滚，新版本保留。"
-               f"发布前的备份在 {backup}")
-        save(ok=False, degraded=True, error=err, db_after=schema_gate.state(DB))
-        log(err)
-        return 3
+        phase = "backup"
+        stopped = True  # even a bootout that fails halfway may have stopped it
+        launchd("stop", ident)
+        backup = HOME / f"backups/pre-{candidate.name}-{stamp}.sqlite3"
+        backup.parent.mkdir(parents=True, exist_ok=True)
+        src, dst = sqlite3.connect(DB), sqlite3.connect(backup)
+        try:
+            src.backup(dst)
+            check = dst.execute("PRAGMA quick_check").fetchone()[0]
+        finally:
+            dst.close()
+            src.close()
+        os.chmod(backup, 0o600)
+        if check != "ok":
+            raise Refused(f"the backup does not check out ({check})")
+        save(backup=str(backup))
+        log(f"backup {backup}")
+
+        phase = "probe"
+        try:
+            log(f"probe passed: {probe(candidate, version)}")
+        except BaseException:
+            # the candidate may have migrated the database; nothing external happened (drained, maintenance)
+            failed = HOME / f"backups/failed-probe-{candidate.name}-{stamp}"
+            failed.mkdir(parents=True, exist_ok=True)
+            for f in DB.parent.glob("steve.sqlite3*"):
+                shutil.move(str(f), str(failed / f.name))
+            shutil.copy2(backup, DB)
+            save(probe_db=str(failed))
+            log(f"the backup is back; the probed database is in {failed}")
+            raise
+
+        phase = "switch"
+        link(HOME / "current", candidate)
+        link(HOME / "web/current", candidate / "web/dist")
+        switched = True
+        launchd("start", ident)
+        if not wait_health(lambda h: h.get("version") == version and h.get("build_commit") == manifest["commit"], 60):
+            raise RuntimeError(f"{version} did not answer /healthz")
+        lift()
+        h = wait_health(lambda h: h.get("version") == h.get("web_version") == version and h.get("drain") is not True
+                        and (h.get("recovery") or {}).get("state") != "failed", 60)
+        if not h:
+            raise RuntimeError(f"{version} answers but is not ready: {health()}")
+    except BaseException as e:
+        if switched:
+            err = (f"{version} 切换后没有正常起来（{e}）；数据库可能已迁移（{schema_gate.state(DB)}），没有回滚，新版本保留，"
+                   f"排空可能仍开着。发布前的备份在 {result.get('backup')}")
+            save(ok=False, degraded=True, phase=phase, error=err, db_after=schema_gate.state(DB))
+            log(err)
+            return 3
+        # before the switch: the old version comes back as it was, drain lifted
+        if stopped:
+            launchd("start", ident)
+        if wait_health(lambda h: h.get("version") is not None, 60):
+            lift()
+        save(ok=False, phase=phase, error=f"{type(e).__name__}: {e}")
+        log(f"✗ {phase}: {e}; {old_hub.name} runs as before")
+        return 1
     if helper_sha and sha256(helper) != helper_sha:
         log("warning: steve-keyhelper changed during the deploy")
     save(ok=True, health=h, db_after=schema_gate.state(DB), finished=time.strftime("%Y%m%d-%H%M%S"))
     log(f"live: {h}")
     print(json.dumps(result, ensure_ascii=False))
     return 0
+
+
+def lift():
+    """End the drain and check it is off (DELETE, then GET says maintenance false)."""
+    control("DELETE")
+    st = control("GET")
+    if st.get("maintenance"):
+        raise RuntimeError(f"the drain is still on after lifting it: {st}")
 
 
 def main():

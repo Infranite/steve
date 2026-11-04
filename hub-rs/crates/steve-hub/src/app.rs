@@ -180,7 +180,10 @@ pub fn app(
             let cfg = st.cfg.clone();
             let store = st.modules.as_ref().map(|m| m.store.clone());
             move || async move {
-                // the outbox (owed / dead deliveries) is information; `ok` stays the liveness answer
+                // the outbox (owed / dead deliveries) is information; `ok` stays the liveness answer.
+                // `drain`: the durable maintenance drain is on (business answers 503) and a release script
+                // must lift it. Not `maintenance`, which only the supervisor's candidate gate reports
+                let drain = store.as_ref().map(|s| s.maintenance());
                 let outbox = match store {
                     Some(s) => tokio::task::spawn_blocking(move || {
                         s.reader(steve_store::outbox::stats).ok()
@@ -190,7 +193,7 @@ pub fn app(
                     .flatten(),
                     None => None,
                 };
-                json_response(200, &json!({ "ok": true, "version": version, "build_commit": crate::build_identity().map(|(_, commit)| commit), "web_version": crate::web::web_version(&cfg), "outbox": outbox, "recovery": crate::recovery::status() }))
+                json_response(200, &json!({ "ok": true, "version": version, "build_commit": crate::build_identity().map(|(_, commit)| commit), "web_version": crate::web::web_version(&cfg), "drain": drain, "outbox": outbox, "recovery": crate::recovery::status() }))
             }
         }))
         .nest("/auth", auth)

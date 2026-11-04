@@ -360,6 +360,84 @@ fn a_health_check_rollback_after_restart_fails_the_release() {
     std::fs::write(k.home().join("go"), "").unwrap();
 }
 
+#[test]
+fn a_degraded_release_says_it_stayed_and_is_not_handed_back() {
+    let k = Kit::new();
+    let p = project(&k, k.home());
+    let (i, _, d) = asking(&k, &p, "steve/x", None);
+    k.core.resolve(&d, "yes", "", "me").unwrap();
+    k.core.tx().st.releasing = None;
+    std::fs::create_dir_all(k.home().join("releases")).unwrap();
+    std::fs::write(
+        k.home().join("releases/last.json"),
+        json!({"ok": false, "degraded": true, "kind": "hub", "version": "v4", "prev": "v3", "item": i,
+               "error": "新版本健康检查没有通过；数据库已被新版本迁移，……没有切回 v3，新版本保留（降级运行）"}).to_string(),
+    )
+    .unwrap();
+    k.core.report_release().unwrap();
+    let r = result(&k, &d);
+    assert_eq!(
+        (r["outcome"].as_str(), r["degraded"].as_bool()),
+        (Some("failed"), Some(true))
+    );
+    let notice = fail_notices(&k).pop().unwrap();
+    assert!(
+        notice.contains("没有回滚") && !notice.contains("已回到"),
+        "{notice}"
+    );
+    assert_eq!(k.status(&i).2, "发布失败，新版本降级运行");
+}
+
+#[test]
+fn a_rollback_result_is_noted_on_the_item_not_taken_for_its_release() {
+    let k = Kit::new();
+    let i = k.item("done", "完成", None);
+    std::fs::create_dir_all(k.home().join("releases")).unwrap();
+    let last = k.home().join("releases/last.json");
+    let note = |k: &Kit| {
+        k.db()
+            .timeline(&i)
+            .unwrap()
+            .into_iter()
+            .map(|t| t.text)
+            .collect::<Vec<_>>()
+    };
+    std::fs::write(
+        &last,
+        json!({"ok": false, "kind": "rollback", "version": "v3", "prev": "v4", "item": i,
+        "error": "不能回滚到 v3：它只认识到 schema v25，数据库（v26）需要至少 v26；当前版本保留"})
+        .to_string(),
+    )
+    .unwrap();
+    k.core.report_release().unwrap();
+    assert!(
+        note(&k)
+            .iter()
+            .any(|t| t.starts_with("回滚到 v3 没有成功：不能回滚")),
+        "{:?}",
+        note(&k)
+    );
+    assert!(
+        fail_notices(&k)
+            .iter()
+            .any(|n| n.contains("回滚到 v3 没有成功"))
+    );
+    assert_eq!(k.status(&i).0, "done", "the item is not reopened");
+    std::fs::write(
+        &last,
+        json!({"ok": true, "kind": "rollback", "version": "v3", "prev": "v4", "item": i})
+            .to_string(),
+    )
+    .unwrap();
+    k.core.report_release().unwrap();
+    assert!(
+        note(&k).iter().any(|t| t == "已回滚到 v3（之前是 v4）"),
+        "{:?}",
+        note(&k)
+    );
+    assert_eq!(k.status(&i).0, "done");
+}
+
 /// Hold `releases/.release.lock` the way ops/release.sh does (`zsystem flock`) until killed.
 fn hold_release_lock(k: &Kit) -> std::process::Child {
     let rel = k.home().join("releases");
