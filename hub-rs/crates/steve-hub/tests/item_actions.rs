@@ -332,7 +332,10 @@ async fn pause_finish_drop_and_new_cycles() {
     assert_eq!((s, v["status"].as_str()), (200, Some("pause")), "{v}");
     let (s, _) = act(&e, &iid, "resume").await;
     assert_eq!(s, 200);
-    assert_eq!(lifecycle(&e, &iid).await["phase"], "ready");
+    // no timing here: a rejected or phase-keeping command leaves it ready at once; the whole lifecycle
+    // is printed if not, to see what moved it
+    let l = lifecycle(&e, &iid).await;
+    assert_eq!(l["phase"], "ready", "{l}");
 
     // fail needs a reason; drop is a cancel: nothing runs, it closes at once
     let (s, v) = command(
@@ -342,7 +345,8 @@ async fn pause_finish_drop_and_new_cycles() {
     )
     .await;
     assert_eq!(s, 400, "{v}");
-    assert_eq!(lifecycle(&e, &iid).await["phase"], "ready");
+    let l = lifecycle(&e, &iid).await;
+    assert_eq!(l["phase"], "ready", "{l}");
     let (s, v) = act(&e, &iid, "drop").await;
     assert_eq!((s, v["status"].as_str()), (200, Some("drop")), "{v}");
     // it closes once nothing of it runs (a turn still winding down under load is waited for)
