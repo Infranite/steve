@@ -8,7 +8,8 @@
 //! - [`batch`]: the window of a lane (straight through when idle, batched when concurrent), as a pure
 //!   state machine.
 //!
-//! Both are local git: fetch first ([`precheck::fetch`]), off the core's lock.
+//! `target` and `precheck` are local git: fetch first ([`precheck::fetch`]), off the core's lock; `batch` touches
+//! nothing outside itself.
 
 pub mod batch;
 pub mod precheck;
