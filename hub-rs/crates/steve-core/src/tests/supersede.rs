@@ -104,6 +104,17 @@ fn a_turn_a_deploy_cut_resumes_even_right_after_another_resume() {
     // resumed after that cut: an interruption now (no new cut) is a crash again
     note(&k, json!({"text": "Hub 重启，自动继续。", "resumed": true}));
     assert!(!may_resume(k.db(), &s, now()).unwrap());
+    // a called-off drain that continued its cut uses the cut up as well
+    note(
+        &k,
+        json!({"text": "为了升级暂停了这一回合", "drain_cut": true}),
+    );
+    assert!(crate::lifecycle::drain_cut(k.db(), &s).unwrap());
+    note(
+        &k,
+        json!({"text": "升级没有进行，这一回合接着做。", "drain_resumed": true}),
+    );
+    assert!(!crate::lifecycle::drain_cut(k.db(), &s).unwrap(), "used up");
 }
 
 #[test]

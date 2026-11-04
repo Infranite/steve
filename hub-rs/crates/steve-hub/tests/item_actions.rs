@@ -345,6 +345,15 @@ async fn pause_finish_drop_and_new_cycles() {
     assert_eq!(lifecycle(&e, &iid).await["phase"], "ready");
     let (s, v) = act(&e, &iid, "drop").await;
     assert_eq!((s, v["status"].as_str()), (200, Some("drop")), "{v}");
+    // it closes once nothing of it runs (a turn still winding down under load is waited for)
+    assert!(
+        until(10, || async {
+            lifecycle(&e, &iid).await["phase"] == "closed"
+        })
+        .await,
+        "{}",
+        lifecycle(&e, &iid).await
+    );
     let l = lifecycle(&e, &iid).await;
     assert_eq!(
         (l["phase"].as_str(), l["outcome"].as_str()),

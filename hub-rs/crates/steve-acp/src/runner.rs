@@ -2004,8 +2004,14 @@ impl Acp {
         st.cut.drain().collect()
     }
 
-    /// Continue a turn a called-off drain cut.
+    /// Continue a turn a called-off drain cut. The cut is used up (`drain_resumed`): a later restart
+    /// judges the session as any other.
     pub fn continue_cut(&self, sid: &str) -> bool {
+        self.host().add_event(
+            sid,
+            "system",
+            json!({ "text": "升级没有进行，这一回合接着做。", "drain_resumed": true }),
+        );
         self.flush(
             sid,
             Some(Message {
