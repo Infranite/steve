@@ -2,7 +2,7 @@
 """Isolated actual-Hub smoke test. Usage: python3 ops/test-upgrade-runtime.py /absolute/steve-hub
 Uses a disposable home/key directory and loopback port; never touches a running installation.
 """
-import fcntl, json, os, pathlib, shutil, signal, socket, sqlite3, subprocess, sys, tempfile, time, urllib.request, uuid
+import fcntl, json, os, pathlib, shutil, signal, socket, sqlite3, subprocess, sys, tempfile, time, urllib.error, urllib.request, uuid
 
 binary = pathlib.Path(sys.argv[1]).resolve(strict=True)
 
@@ -23,7 +23,7 @@ def eventually(fn, label, timeout=90):
 with tempfile.TemporaryDirectory(prefix='steve-upgrade-smoke-') as temp:
     root=pathlib.Path(temp); home=root/'home'; home.mkdir(); keys=root/'keys'; keys.mkdir(mode=0o700)
     sock=socket.socket();sock.bind(('127.0.0.1',0));port=sock.getsockname()[1];sock.close()
-    env={**os.environ,'STEVE_HOME':str(home),'STEVE_HOST':'127.0.0.1','STEVE_PORT':str(port),'STEVE_PUBLIC_URL':f'http://127.0.0.1:{port}', 'STEVE_VAULT_KEYSTORE':'dir','STEVE_VAULT_KEY_DIR':str(keys),'STEVE_NO_RESUME':'1','STEVE_ADAPTER_CLAUDE':'/nonexistent','STEVE_ADAPTER_CODEX':'/nonexistent','CODEX_HOME':str(root/'codex'),'STEVE_REPO':str(root/'repo')}
+    env={**os.environ,'STEVE_HOME':str(home),'STEVE_HOST':'127.0.0.1','STEVE_PORT':str(port),'STEVE_PUBLIC_URL':f'http://127.0.0.1:{port}', 'STEVE_VAULT_KEYSTORE':'dir','STEVE_VAULT_KEY_DIR':str(keys),'STEVE_NO_RESUME':'1','STEVE_ADAPTER_CLAUDE':'/nonexistent','STEVE_ADAPTER_CODEX':'/nonexistent','CODEX_HOME':str(root/'codex'),'STEVE_REPO':str(root/'repo'),'STEVE_DEV_LOGIN':'1'}
     # Avoid inherited production auth/channels/external integrations in this isolated fixture.
     for key in list(env):
         if key.startswith(('STEVE_OIDC_', 'LARK_', 'FEISHU_', 'GITHUB_', 'STEVE_UPGRADE_', 'STEVE_KEYHELPER')): env.pop(key)
@@ -45,6 +45,17 @@ with tempfile.TemporaryDirectory(prefix='steve-upgrade-smoke-') as temp:
         ident=str(uuid.uuid4());now=int(time.time()*1000)
         op=dict(id=ident,idempotency_key='smoke:'+ident,version=version,phase='ready',created_at=now,updated_at=now,requested_by='smoke-owner',error=None,previous=None,target=str(target))
         path=home/'updates/operations'/f'{ident}.json';atomic(path,op);atomic(home/'updates/active.json',{'id':ident});return path
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self,*args): return None
+    cookie=None
+    def settings():
+        # what Settings · 关于 reads, as the instance owner (the first local login owns the instance)
+        jar=cookie
+        if not jar:
+            try: urllib.request.build_opener(NoRedirect).open(f'http://127.0.0.1:{port}/auth/dev',timeout=5)
+            except urllib.error.HTTPError as e: jar=e.headers['Set-Cookie'].split(';')[0]
+        req=urllib.request.Request(f'http://127.0.0.1:{port}/api/updates',headers={'Cookie':jar})
+        with urllib.request.urlopen(req,timeout=5) as r: return jar,json.load(r)
     def phase(path,wanted):
         value=json.loads(path.read_text());return value if value['phase'] in wanted else None
     def kill_group():
@@ -60,13 +71,21 @@ with tempfile.TemporaryDirectory(prefix='steve-upgrade-smoke-') as temp:
         result=eventually(lambda:phase(job,['succeeded','failed','rolled_back']),'successful upgrade')
         assert result['phase']=='succeeded',result
         assert health('0.2.0');assert (home/'current').resolve()==new.resolve()
-        print('PASS actual Hub paired upgrade and post-commit health')
+        cookie,seen=settings()
+        assert seen['install']['kind']=='managed' and seen['install']['home']==str(home),seen['install']
+        assert seen['current']=={'hub':'0.2.0','web':'0.2.0'} and seen['operation']['phase']=='succeeded',seen
+        assert seen['backup']['database'] and pathlib.Path(seen['backup']['database']).exists(),seen['backup']
+        print('PASS actual Hub paired upgrade and post-commit health; settings read back managed install, both versions and the verified backup')
         bad=bundle('0.3.0',schema+100);job=operation('0.3.0',bad)
         result=eventually(lambda:phase(job,['rolled_back','failed']),'schema gate rollback')
         assert result['phase']=='rolled_back',result
         eventually(lambda:health('0.2.0'),'rollback actual Hub ready')
         with sqlite3.connect(db) as conn: assert conn.execute('SELECT value FROM upgrade_smoke_evidence').fetchone()[0]=='preserve'
-        print('PASS actual Hub incompatible-schema gate rejects; old database and paired bundle restored')
+        cookie,seen=settings()
+        assert seen['operation']['phase']=='rolled_back' and seen['current']=={'hub':'0.2.0','web':'0.2.0'},seen
+        assert pathlib.Path(seen['backup']['database']).name==result['id']+'.sqlite3',seen['backup']
+        assert list((home/'updates').glob(result['id']+'.failed.*.sqlite3')),'the failed database is kept as evidence'
+        print('PASS actual Hub incompatible-schema gate rejects; old database and paired bundle restored; settings name the backup and the kept failed database')
         # Kill the complete isolated process group inside the persisted pre-commit window.
         job=operation('0.3.0',bad);eventually(lambda:phase(job,['verifying']),'pre-commit crash window',10);kill_group()
         def instance_available():

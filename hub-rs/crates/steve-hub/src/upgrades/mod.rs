@@ -1,5 +1,6 @@
 //! Instance updates. The journal is deliberately outside SQLite: rollback must not erase its receipt.
 mod client;
+pub mod install;
 pub mod supervisor;
 #[cfg(test)]
 mod tests;
@@ -239,9 +240,28 @@ impl Updates {
         self.save(op)
     }
     pub fn status(&self) -> Result<Value> {
+        let operation = self.active()?;
+        let backup = operation.as_ref().map(|op| self.backup(op));
         Ok(
-            json!({"repository":self.repository,"current":{"hub":self.current_hub,"web":self.current_web},"capability":{"managed":self.managed,"reason":self.execution_reason().unwrap_or_else(||"managed supervisor".into())},"check":self.cached_check().map(|cached|cached.result),"operation":self.active()?}),
+            json!({"repository":self.repository,"current":{"hub":self.current_hub,"web":self.current_web},"capability":{"managed":self.managed,"reason":self.execution_reason().unwrap_or_else(||"managed supervisor".into())},"check":self.cached_check().map(|cached|cached.result),"operation":operation,"backup":backup}),
         )
+    }
+    /// Where the supervisor keeps what a failed upgrade is recovered from: the verified database copy
+    /// taken before the switch (`null` until it exists) and the journal directory.
+    fn backup(&self, op: &Operation) -> Value {
+        let database = self.dir().join(format!("{}.sqlite3", op.id));
+        json!({"database": database.exists().then(|| database.to_string_lossy().into_owned()), "dir": self.dir().to_string_lossy()})
+    }
+    /// `repo`: STEVE_REPO, where release scripts run from.
+    pub fn install(&self, repo: &Path) -> install::Install {
+        install::detect(&install::Probe {
+            managed: self.managed,
+            blocked: self.blocked_reason.is_some(),
+            home: &self.home,
+            exe: std::env::current_exe().ok(),
+            repo,
+            forced: std::env::var("STEVE_INSTALL_KIND").ok(),
+        })
     }
     fn cached_check(&self) -> Option<CachedCheck> {
         read::<CachedCheck>(&self.dir().join("check.json"))
