@@ -5,15 +5,48 @@
 //! These run synchronously like `execFileSync` in TS, inside the critical section whose result they decide.
 
 use crate::util::js_head;
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Mutex, OnceLock};
+
+/// The git Steve runs: `STEVE_GIT` when set (a pinned build Steve manages), else `git` on `PATH`. Every git
+/// call of the domain layer goes through it, so one setting moves them all.
+pub fn program() -> &'static Path {
+    static GIT: OnceLock<PathBuf> = OnceLock::new();
+    GIT.get_or_init(|| {
+        std::env::var_os("STEVE_GIT")
+            .filter(|g| !g.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| "git".into())
+    })
+}
+
+/// `git` as a command, without Steve's upgrade secrets in its environment.
+pub fn command() -> Command {
+    let mut c = Command::new(program());
+    c.env_remove("STEVE_UPGRADE_CONTROL_TOKEN")
+        .env_remove("STEVE_SUPERVISOR_PID")
+        .env_remove("STEVE_UPGRADE_ID");
+    c
+}
+
+/// `git --version`'s `(major, minor)`; `None` when there is no git to run.
+pub fn version() -> Option<(u32, u32)> {
+    let out = command()
+        .arg("--version")
+        .stdin(Stdio::null())
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let v = text.split_whitespace().nth(2)?;
+    let mut n = v.split('.').map(|x| x.parse::<u32>().ok());
+    Some((n.next()??, n.next()??))
+}
 
 /// `git -C dir args…`: trimmed stdout, or the trimmed stderr (≤300 chars) as the error.
 pub fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
-    let out = Command::new("git")
-        .env_remove("STEVE_UPGRADE_CONTROL_TOKEN")
-        .env_remove("STEVE_SUPERVISOR_PID")
-        .env_remove("STEVE_UPGRADE_ID")
+    let out = command()
         .arg("-C")
         .arg(dir)
         .args(args)
@@ -37,10 +70,7 @@ pub fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
 /// A yes/no question git answers with its exit status (`merge-base --is-ancestor`, `rev-parse --verify
 /// --quiet`): 0 is yes, 1 is no; anything else, or no git at all, is an error, never a no.
 pub fn git_test(dir: &Path, args: &[&str]) -> Result<bool, String> {
-    let out = Command::new("git")
-        .env_remove("STEVE_UPGRADE_CONTROL_TOKEN")
-        .env_remove("STEVE_SUPERVISOR_PID")
-        .env_remove("STEVE_UPGRADE_ID")
+    let out = command()
         .arg("-C")
         .arg(dir)
         .args(args)
@@ -64,10 +94,7 @@ pub fn git_test(dir: &Path, args: &[&str]) -> Result<bool, String> {
 /// The merge base of `a` and `b`: `None` when they share no history (git says so with exit 1),
 /// an error when git fails.
 pub fn merge_base(dir: &Path, a: &str, b: &str) -> Result<Option<String>, String> {
-    let out = Command::new("git")
-        .env_remove("STEVE_UPGRADE_CONTROL_TOKEN")
-        .env_remove("STEVE_SUPERVISOR_PID")
-        .env_remove("STEVE_UPGRADE_ID")
+    let out = command()
         .arg("-C")
         .arg(dir)
         .args(["merge-base", a, b])
@@ -181,6 +208,37 @@ pub fn has_changes(repo: &Path, worktree: Option<&Path>, branch: &str, base: &st
     }
 }
 
+/// Whether the work on `branch` is in `base`: merged, or landed rebased or squashed
+/// ([`crate::upstream::presence`]). Remembered per pair of tips, since comparing the patches of an old branch
+/// can take seconds and the hub asks again on every pass; a git error is a no and is not remembered.
+pub fn landed(repo: &Path, branch: &str, base: &str) -> bool {
+    type Memo = HashMap<(PathBuf, String, String), bool>;
+    static MEMO: OnceLock<Mutex<Memo>> = OnceLock::new();
+    let head = format!("refs/heads/{branch}");
+    let (Ok(tip), Ok(at)) = (
+        git(repo, &["rev-parse", "--verify", "--quiet", &head]),
+        git(repo, &["rev-parse", "--verify", "--quiet", base]),
+    ) else {
+        return false;
+    };
+    let key = (repo.to_path_buf(), tip, at);
+    let memo = MEMO.get_or_init(Default::default);
+    if let Some(v) = memo.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
+        return *v;
+    }
+    let v = match crate::upstream::presence(repo, &head, base) {
+        crate::upstream::Presence::Landed { .. } => true,
+        crate::upstream::Presence::Absent => false,
+        crate::upstream::Presence::Unknown(_) => return false,
+    };
+    let mut m = memo.lock().unwrap_or_else(|e| e.into_inner());
+    if m.len() > 4096 {
+        m.clear();
+    }
+    m.insert(key, v);
+    v
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorktreeTidy {
     Removed,
@@ -196,7 +254,12 @@ pub enum BranchTidy {
 }
 
 /// After an item is done or dropped: remove its worktree when it is clean (and, if `only_merged`, when the
-/// branch is merged), and delete the branch when it is fully merged into `base`. Unmerged work is never deleted.
+/// branch's work is in `base`), and delete the branch when it is fully merged into `base`. Unmerged work is
+/// never deleted.
+///
+/// "In `base`" also counts a branch that landed rebased or squashed (a PR merged by rebase gives its commits
+/// new ids, so `merge-base --is-ancestor` alone kept such worktrees forever); its branch stays, since
+/// `branch -d` only deletes what is an ancestor of `base`, and the worktree can be made again from it.
 pub fn tidy_worktree(
     repo: &Path,
     worktree: &Path,
@@ -223,10 +286,11 @@ pub fn tidy_worktree(
                 base,
             ],
         );
+    let landed = merged || (exists && landed(repo, branch, base));
     let mut wt = WorktreeTidy::Absent;
     if worktree.exists() {
         /* `git worktree remove` without --force refuses modified or untracked files */
-        wt = if only_merged && !merged {
+        wt = if only_merged && !landed {
             WorktreeTidy::Unmerged
         } else if succeeds(repo, &["worktree", "remove", &worktree.to_string_lossy()]) {
             WorktreeTidy::Removed

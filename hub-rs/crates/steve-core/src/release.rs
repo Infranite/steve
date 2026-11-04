@@ -1044,7 +1044,7 @@ pub(crate) fn release_contains(
     let Some(cwd) = i.cwd.as_deref().filter(|c| Path::new(c).exists()) else {
         return false;
     };
-    std::process::Command::new("git")
+    crate::git::command()
         .args(["-C", cwd, "merge-base", "--is-ancestor", head, commit])
         .output()
         .is_ok_and(|o| o.status.success())

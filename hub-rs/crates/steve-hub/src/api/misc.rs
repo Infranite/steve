@@ -955,6 +955,36 @@ pub async fn system_models(
     ok(crate::catalog::with_usage(list, &used))
 }
 
+// ── task workspaces (ST-45) ──
+
+/// Paths and sizes on this machine are the instance manager's.
+fn instance_owner(c: &Ctx) -> Result<(), ApiError> {
+    if c.user.get("role").and_then(Value::as_str) == Some("owner") {
+        Ok(())
+    } else {
+        Err(ApiError::Json(403, "仅实例管理员可查看和回收工作区".into()))
+    }
+}
+
+/// `GET /api/system/workspaces`: every item's worktree with its size and caches, the disk's free space and
+/// thresholds, folders no item points at. Walks the worktrees: seconds for a hundred GB.
+pub async fn system_workspaces(
+    State(st): State<AppState>,
+    Extension(c): Extension<Ctx>,
+) -> ApiResult {
+    instance_owner(&c)?;
+    ok(st.domain.disk_report().await?)
+}
+
+/// `POST /api/system/workspaces/reclaim`: one reclaim pass now (what the ten-minute watcher does).
+pub async fn system_workspaces_reclaim(
+    State(st): State<AppState>,
+    Extension(c): Extension<Ctx>,
+) -> ApiResult {
+    instance_owner(&c)?;
+    ok(st.domain.reclaim_workspaces().await?)
+}
+
 // ── devices ──
 
 #[derive(serde::Deserialize)]

@@ -47,6 +47,8 @@ pub struct CoreConfig {
     pub takeover_continues: u32,
     /// `STEVE_GH`: the GitHub CLI that follows Release builds.
     pub gh: PathBuf,
+    /// Disk thresholds for the worktrees' volume (`workspace`).
+    pub disk: crate::workspace::DiskPolicy,
 }
 
 /// The GitHub CLI: `STEVE_GH`, else the first of the usual places that exists, else `gh` on `PATH`.
@@ -117,6 +119,7 @@ impl CoreConfig {
             .unwrap_or_else(|_| Path::new(&home_dir).join("Agents/steve"));
         c.no_resume = std::env::var("STEVE_NO_RESUME").is_ok_and(|v| v == "1");
         c.debug_route = std::env::var("STEVE_DEBUG_ROUTE").is_ok_and(|v| !v.is_empty());
+        c.disk = crate::workspace::DiskPolicy::from_env();
         c
     }
 
@@ -145,6 +148,7 @@ impl CoreConfig {
             no_resume: false,
             takeover_continues: 2,
             gh: gh_cli(),
+            disk: Default::default(),
         }
     }
 

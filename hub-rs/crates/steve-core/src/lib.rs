@@ -35,6 +35,7 @@ pub mod takeover;
 pub mod thread;
 pub mod upstream;
 pub mod util;
+pub mod workspace;
 pub mod yolo;
 
 #[cfg(test)]
@@ -76,6 +77,8 @@ pub(crate) struct Inner {
     yolo_sessions: yolo::agent::Sessions,
     /// What Steve has to tell a session with its next message (a delivery that went void meanwhile).
     steve_notes: Mutex<HashMap<String, String>>,
+    /// A reclaim pass or trash purge is running (`workspace`): one at a time.
+    reclaiming: std::sync::atomic::AtomicBool,
 }
 
 /// What a session's last Steve tool call left behind, consumed at its turn end.
@@ -151,6 +154,7 @@ impl Core {
             yolo: OnceLock::new(),
             yolo_sessions: Default::default(),
             steve_notes: Default::default(),
+            reclaiming: Default::default(),
         }))
     }
 

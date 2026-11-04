@@ -1007,7 +1007,7 @@ fn gh_api(gh: &Path, args: &[&str]) -> Result<Value, GhError> {
 /// `git args…` that stays on this machine: never fetches a missing object (a partial clone would,
 /// without a deadline), paths unquoted, within [`DEADLINE`].
 fn local_git(dir: &Path, args: &[&str]) -> Result<String, String> {
-    let mut cmd = Command::new("git");
+    let mut cmd = crate::git::command();
     cmd.arg("-C")
         .arg(dir)
         .args(["-c", "core.quotePath=false"])

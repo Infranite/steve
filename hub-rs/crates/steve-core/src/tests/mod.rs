@@ -24,6 +24,7 @@ mod stats_marks;
 mod supersede;
 mod takeover;
 mod thread;
+mod workspace;
 
 use crate::repo::{NewDecision, NewItem, NewSession, Release, WS};
 use crate::testkit::Kit;

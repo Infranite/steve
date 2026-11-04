@@ -9,7 +9,7 @@
 
 use std::io::Read;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use crate::git::git;
@@ -33,7 +33,7 @@ const BASES: &[&str] = &[
 /// commit)`; the commit is all zeros for a plain diff). Empty when there is no change; an error when
 /// either git fails, which is not the same as no change.
 pub(crate) fn patch_ids(dir: &Path, args: &[&str]) -> Result<Vec<(String, String)>, String> {
-    let mut src = Command::new("git")
+    let mut src = crate::git::command()
         .arg("-C")
         .arg(dir)
         .args(args)
@@ -46,7 +46,7 @@ pub(crate) fn patch_ids(dir: &Path, args: &[&str]) -> Result<Vec<(String, String
         let _ = src.wait();
         return Err("git 没有输出".into());
     };
-    let ids = Command::new("git")
+    let ids = crate::git::command()
         .arg("-C")
         .arg(dir)
         .args(["patch-id", "--stable"])
@@ -198,7 +198,7 @@ pub fn push_head(dir: &Path, branch: &str) -> Result<(), String> {
 
 /// `git args…` with a deadline (network calls). The output is drained while the command runs.
 fn git_net(dir: &Path, args: &[&str]) -> Result<String, String> {
-    let mut child = Command::new("git")
+    let mut child = crate::git::command()
         .arg("-C")
         .arg(dir)
         .args(args)

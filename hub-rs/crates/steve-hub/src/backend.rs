@@ -756,6 +756,14 @@ pub trait Domain: Send + Sync + 'static {
     async fn tidy_branch(&self, item: &str) -> BResult<()> {
         todo_backend!("tidy_branch")
     }
+    /// The items' worktrees, their sizes and the disk they are on (`steve_core::workspace::DiskReport`).
+    async fn disk_report(&self) -> BResult<Value> {
+        todo_backend!("disk_report")
+    }
+    /// One reclaim pass now (`steve_core::workspace::Reclaimed`).
+    async fn reclaim_workspaces(&self) -> BResult<Value> {
+        todo_backend!("reclaim_workspaces")
+    }
 
     // ── bots ──
     /// `botPrompt(b, ws)`; the caller already set `prompt` to null for the generated variant.
