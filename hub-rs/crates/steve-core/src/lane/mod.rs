@@ -9,4 +9,5 @@
 //! Both are local git: fetch first ([`precheck::fetch`]), off the core's lock.
 
 pub mod precheck;
+pub mod profile;
 pub mod target;

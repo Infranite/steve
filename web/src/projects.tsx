@@ -9,6 +9,7 @@ import { Switch } from "@/components/ui/switch"
 import { Textarea } from "@/components/ui/textarea"
 import { AskSteve } from "@/config-ui"
 import { GitHubLine } from "@/github/index"
+import { LaneSection } from "@/lane"
 import { RecentStats } from "@/stats/drill"
 import { botName, newProject, newWorkspace, patchProject, st, toast } from "@/store"
 import { BotName, closeSheet, Empty, go, Group, Meta, openSheet, Page, Row, SectionLabel } from "@/ui"
@@ -70,6 +71,7 @@ export function ProjectView({ id }: { id: string }) {
         <AskSteve key={p.id} ctx={{ kind: "project", id: p.id }} placeholder="例如：默认交给开发 Bot；说明里加上“前端用 shadcn”" />
         <section><SectionLabel>进行中的事项 · {mine.length}</SectionLabel>{mine.length ? <Group>{mine.map((i) => <ItemRow key={i.id} i={i} proj={false} />)}</Group> : <Empty title="没有进行中的事项" />}</section>
         <GitHubLine project={p.id} />
+        {p.kind === "git" && <LaneSection project={p.id} />}
         {done.length > 0 && <section><SectionLabel>最近完成</SectionLabel><Group>{done.map((i) => <ItemRow key={i.id} i={i} proj={false} />)}</Group></section>}
         <section className="flex flex-col gap-4"><SectionLabel className="mb-0">设置</SectionLabel>
           <FieldGroup className="gap-4">

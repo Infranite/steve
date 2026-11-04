@@ -307,3 +307,197 @@ fn overlapping_requests_are_told_apart_only_on_exact_evidence() {
         Some(Overlap::Unknown(_))
     ));
 }
+
+/// A `gh` that answers `gh api <path>` from `answers` (path → JSON), 404 for anything else.
+fn fake_gh(home: &Path, answers: &[(&str, &str)]) -> PathBuf {
+    let mut s = String::from("#!/bin/sh\ncase \"$4\" in\n");
+    for (path, json) in answers {
+        s.push_str(&format!("  '{path}') printf '%s' '{json}' ;;\n"));
+    }
+    s.push_str("  *) echo 'gh: Not Found (HTTP 404)' >&2; exit 1 ;;\nesac\n");
+    let p = home.join("gh");
+    std::fs::write(&p, s).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    p
+}
+
+#[test]
+fn a_target_is_recognized_from_its_repository_and_host_with_evidence() {
+    use crate::lane::profile::{How, Merge, Ship, profile};
+    let t = tempfile::tempdir().unwrap();
+    let r = repo(t.path());
+    std::fs::create_dir_all(r.join(".github/workflows")).unwrap();
+    std::fs::create_dir_all(r.join("docs/releases/unreleased")).unwrap();
+    std::fs::create_dir_all(r.join("db/migrations")).unwrap();
+    std::fs::create_dir_all(r.join("web")).unwrap();
+    write(
+        &r,
+        ".github/workflows/ci.yml",
+        "name: CI\non:\n  pull_request:\n  merge_group:\njobs: {}\n",
+    );
+    write(
+        &r,
+        ".github/workflows/release.yml",
+        "on:\n  push:\n    tags: ['v*']\njobs: {}\n",
+    );
+    write(&r, "docs/releases/0.1.0.md", "# 0.1.0\n");
+    write(&r, "docs/releases/unreleased/ST-1.md", "- one\n");
+    write(&r, "db/migrations/001.sql", "");
+    write(&r, "db/migrations/002.sql", "");
+    write(&r, "db/migrations/LOCK", "");
+    write(&r, "Cargo.toml", "[workspace]\nmembers = []\n");
+    write(&r, "Cargo.lock", "");
+    write(
+        &r,
+        "web/package.json",
+        r#"{"scripts":{"check":"tsc","test":"node --test"}}"#,
+    );
+    commit(&r, "ops.txt", "", "layout");
+    g(&r, &["tag", "-a", "v0.1.0", "-m", "v0.1.0"]);
+    land(&r);
+    g(
+        &r,
+        &["remote", "set-url", "origin", "git@github.com:Acme/App.git"],
+    );
+    g(
+        &r,
+        &[
+            "config",
+            &format!(
+                "url.{}.insteadOf",
+                t.path().join("origin.git").to_string_lossy()
+            ),
+            "git@github.com:Acme/App.git",
+        ],
+    );
+
+    /* GitHub: a ruleset with a merge queue and a required check */
+    let gh = fake_gh(
+        t.path(),
+        &[
+            (
+                "repos/acme/app/rules/branches/main",
+                r#"[{"type":"merge_queue"},{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"test"}]}}]"#,
+            ),
+            ("repos/acme/app/branches/main", r#"{"protected":false}"#),
+        ],
+    );
+    let p = profile(&r, None, None, &gh).unwrap();
+    assert_eq!(p.target.key(), "github.com/acme/app#main");
+    assert!(p.reads.starts_with("origin/main "), "{}", p.reads);
+    assert_eq!(
+        (p.merge.value, &p.merge.how),
+        (Merge::HostQueue, &How::Found)
+    );
+    let checks: Vec<(&str, &str)> = p
+        .checks
+        .value
+        .iter()
+        .map(|c| (c.name.as_str(), c.from))
+        .collect();
+    assert_eq!(
+        checks,
+        vec![
+            ("test", "required"),
+            (".github/workflows/ci.yml", "workflow"),
+            ("cargo test --workspace", "suggested"),
+            ("npm --prefix web run check", "suggested"),
+            ("npm --prefix web test", "suggested"),
+        ]
+    );
+    assert_eq!((p.ship.value, &p.ship.how), (Ship::Tag, &How::Found));
+    let kinds: Vec<(&str, &str)> = p
+        .numbered
+        .iter()
+        .map(|n| (n.kind, n.path.as_str()))
+        .collect();
+    assert_eq!(
+        kinds,
+        vec![
+            ("version", "tag vX.Y.Z"),
+            ("notes", "docs/releases/"),
+            ("migrations", "db/migrations/"),
+            ("lockfile", "Cargo.lock"),
+        ]
+    );
+    assert!(
+        p.numbered[1].handling.contains("unreleased"),
+        "{:?}",
+        p.numbered[1]
+    );
+    assert!(
+        p.numbered[2].evidence.contains("最新 002.sql，有 LOCK"),
+        "{:?}",
+        p.numbered[2]
+    );
+    assert!(
+        p.pace.landed >= 2 && p.pace.releases == 1 && p.pace.authors == 1,
+        "{:?}",
+        p.pace
+    );
+
+    /* the project's own rule outranks what the repository suggests */
+    let rel = crate::repo::Release {
+        kind: "script".into(),
+        cmd: "ops/release.sh".into(),
+        done_when: None,
+    };
+    assert_eq!(
+        profile(&r, None, Some(&rel), &gh).unwrap().ship.value,
+        Ship::Script
+    );
+
+    /* GitHub can't be read: the safe default, and why, never "nothing there" */
+    let down = t.path().join("no-gh");
+    let p = profile(&r, None, None, &down).unwrap();
+    assert_eq!(p.merge.value, Merge::Push);
+    assert!(matches!(p.merge.how, How::Unknown { .. }), "{:?}", p.merge);
+    assert!(
+        matches!(p.checks.how, How::Unknown { .. }),
+        "{:?}",
+        p.checks
+    );
+    assert_eq!(p.checks.value[0].name, ".github/workflows/ci.yml");
+
+    /* classic protection that requires a PR */
+    let gh = fake_gh(
+        t.path(),
+        &[
+            ("repos/acme/app/rules/branches/main", "[]"),
+            ("repos/acme/app/branches/main", r#"{"protected":true}"#),
+            (
+                "repos/acme/app/branches/main/protection",
+                r#"{"required_pull_request_reviews":{},"required_status_checks":{"contexts":["build"]}}"#,
+            ),
+        ],
+    );
+    let p = profile(&r, None, None, &gh).unwrap();
+    assert_eq!(p.merge.value, Merge::HostPr);
+    assert_eq!(p.checks.value[0].name, "build");
+
+    /* only on this machine: pushed, and nothing asked of a host */
+    g(
+        &r,
+        &[
+            "config",
+            "--unset",
+            &format!(
+                "url.{}.insteadOf",
+                t.path().join("origin.git").to_string_lossy()
+            ),
+        ],
+    );
+    g(
+        &r,
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            &t.path().join("origin.git").to_string_lossy(),
+        ],
+    );
+    let p = profile(&r, None, None, &down).unwrap();
+    assert_eq!((p.merge.value, &p.merge.how), (Merge::Push, &How::Found));
+    assert_eq!(p.checks.how, How::Found);
+}

@@ -73,6 +73,7 @@ Contract = steps identical in `tests/contract/contract.mjs --a ts --b rust` (las
 | `POST /api/projects` | done | ✓ 8/8 | ✓ |  |
 | `POST /api/projects/describe` | done | ✓ 3/3 |  |  |
 | `PATCH /api/projects/:id` | done | ✓ 3/3 |  |  |
+| `GET /api/projects/:id/lane` | done |  |  | Rust only (merge lanes, stage 1): read-only profile of the target; `tests/lane_api.rs` |
 | `GET /api/fs/dirs` | done | ✓ 4/4 |  |  |
 | `POST /api/tags` | done | ✓ 5/5 |  |  |
 | `PATCH /api/tags/:id` | done | ✓ 4/4 |  |  |

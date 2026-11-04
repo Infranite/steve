@@ -50,7 +50,7 @@ pub struct CoreConfig {
 }
 
 /// The GitHub CLI: `STEVE_GH`, else the first of the usual places that exists, else `gh` on `PATH`.
-fn gh_cli() -> PathBuf {
+pub fn gh_cli() -> PathBuf {
     if let Ok(g) = std::env::var("STEVE_GH")
         && !g.is_empty()
     {

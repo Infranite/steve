@@ -5,7 +5,7 @@ use std::path::Path;
 
 use crate::git::git;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize)]
 pub struct Target {
     /// `host/path` of the remote (`github.com/infranite/steve`), or `file:` and the real path of the
     /// repository when it is only on this machine.

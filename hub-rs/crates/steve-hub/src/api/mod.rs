@@ -425,6 +425,7 @@ pub fn router(st: AppState, modules: Router) -> Router {
         .route("/projects", post(projects::create))
         .route("/projects/describe", post(projects::describe))
         .route("/projects/{id}", patch(projects::patch_one))
+        .route("/projects/{id}/lane", get(projects::lane))
         .route("/fs/dirs", get(projects::dirs))
         // tags
         .route("/tags", post(misc::tag_create))

@@ -210,6 +210,46 @@ pub async fn patch_one(
     .await
 }
 
+/// `GET /api/projects/:id/lane`: what Steve recognizes about the target the project merges into (a
+/// read-only profile with its evidence). Fetches first; a fetch that fails is said and the profile
+/// is of the branch as last fetched.
+pub async fn lane(
+    State(st): State<AppState>,
+    Extension(c): Extension<Ctx>,
+    Path(id): Path<String>,
+) -> ApiResult {
+    let ws = c.ws.clone();
+    let p = st
+        .read(move |r| Ok(own(r.project_get(&id)?, &ws, "项目")?))
+        .await?;
+    if p.get("kind").and_then(Value::as_str) != Some("git") {
+        return Err(ApiError::bad_request("只有 git 项目有合并通道"));
+    }
+    let path = p
+        .get("path")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let release: Option<steve_store::Release> = p
+        .get("release")
+        .filter(|v| !v.is_null())
+        .and_then(|v| serde_json::from_value(v.clone()).ok());
+    let gh = st.cfg.gh.clone().unwrap_or_else(steve_core::config::gh_cli);
+    blocking(move || {
+        let dir = FsPath::new(&path);
+        if !dir.is_dir() {
+            return Err(ApiError::bad_request(format!("项目目录不存在：{path}")));
+        }
+        let fetch = steve_core::lane::precheck::fetch(dir).err();
+        let prof = steve_core::lane::profile::profile(dir, None, release.as_ref(), &gh)
+            .map_err(ApiError::bad_request)?;
+        let mut v = json!(prof);
+        v["fetch_error"] = json!(fetch);
+        ok(v)
+    })
+    .await
+}
+
 /// What `describe` shows the model: the file list and the start of the usual readme files.
 fn describe_input(path: &str) -> Result<(String, String), ApiError> {
     let mut names: Vec<String> = std::fs::read_dir(path)
