@@ -354,6 +354,19 @@ pub async fn queued_send_now(
     ok(json!(st.domain.queued_send_now(&id, &qid).await?))
 }
 
+/// `GET /api/sessions/:id/resume`: the harness's own session id, the command that resumes it there, the
+/// working directory, and whether the harness's transcript of that id is on this machine.
+pub async fn resume(
+    State(st): State<AppState>,
+    Extension(c): Extension<Ctx>,
+    Path(id): Path<String>,
+) -> ApiResult {
+    let s = own_session(&st, &c.ws, &id).await?;
+    let homes = crate::resume::Homes::of(&st.cfg);
+    let v = blocking(move || Ok(crate::resume::info(&homes, &s))).await?;
+    ok(v)
+}
+
 pub async fn local(State(st): State<AppState>) -> ApiResult {
     let home = st.cfg.home.clone();
     let files = blocking(move || Ok(crate::system::local_candidates(&home, 60))).await?;

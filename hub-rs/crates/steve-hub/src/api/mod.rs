@@ -378,6 +378,7 @@ pub fn router(st: AppState, modules: Router) -> Router {
         .route("/sessions/{id}/fork", post(sessions::fork))
         .route("/sessions/{id}/link", post(sessions::link))
         .route("/sessions/{id}/queued", get(sessions::queued_list))
+        .route("/sessions/{id}/resume", get(sessions::resume))
         .route(
             "/sessions/{id}/queued/{qid}",
             patch(sessions::queued_edit).delete(sessions::queued_remove),
@@ -572,7 +573,8 @@ pub(crate) fn summaries(r: &dyn Repo, ws: &str) -> BResult<Vec<Obj>> {
     }
 }
 
-/// `sessOut`: the raw row without `token_hash`/`import_key`, `readonly` as a boolean, plus `busy` and `queued`.
+/// `sessOut`: the raw row without `token_hash`/`import_key`, `readonly` as a boolean, plus `busy` and `queued`,
+/// and the harness's own session id (`harness_session_id`, also for an imported session).
 pub(crate) fn sess_out(r: &dyn Repo, d: &dyn Domain, s: Obj) -> BResult<Obj> {
     let q = r.queued_list(&str_of(&s, "id"))?;
     Ok(sess_out_with(d, s, q))
@@ -580,6 +582,7 @@ pub(crate) fn sess_out(r: &dyn Repo, d: &dyn Domain, s: Obj) -> BResult<Obj> {
 
 pub(crate) fn sess_out_with(d: &dyn Domain, mut s: Obj, queued: Vec<Obj>) -> Obj {
     let id = str_of(&s, "id");
+    let native = crate::resume::native_id(&s);
     // shift_remove keeps the column order of the remaining keys
     s.shift_remove("token_hash");
     s.shift_remove("import_key");
@@ -587,6 +590,7 @@ pub(crate) fn sess_out_with(d: &dyn Domain, mut s: Obj, queued: Vec<Obj>) -> Obj
     s.insert("readonly".into(), json!(ro));
     s.insert("busy".into(), json!(d.is_busy(&id)));
     s.insert("queued".into(), objs(queued));
+    s.insert("harness_session_id".into(), json!(native));
     s
 }
 

@@ -126,7 +126,8 @@ fn window(ticks: &[Tick], started: i64, ended: i64) -> Option<Counts> {
     })
 }
 
-fn find(codex_home: &Path, session_id: &str) -> Option<PathBuf> {
+/// The rollout file of a Codex session, newest day first; remembered once found.
+pub fn find(codex_home: &Path, session_id: &str) -> Option<PathBuf> {
     if let Some(p) = PATHS
         .lock()
         .ok()?

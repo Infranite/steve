@@ -13,7 +13,7 @@ import { yoloApi, type RYolo, type RYoloAction } from "./api/yolo"
 
 /* ───────── view types (from the prototype) ───────── */
 export type Ev = any[] // ['u',text,label?] ['q',string[]] ['th',text,secs] ['tool',kind,title,meta,detail,live?,add?,del?,failed?,tool?,desc?,input?,plan?] ['a',text] ['ho',text,toSid] ['hi',text] ['ask',text] ['sys',text] ['end',stopReason]
-export type Sess = { id: string; n: number; item: string | null; b: string | null; h?: string; m?: string; reasoningEffort?: string | null; contextKnown?: boolean; st: "run" | "wait" | "idle" | "ended"; title: string; dur: string; ctx: number; src: string; up: string; ev: Ev[]; seqs: number[]; ts: number[]; from?: string | null; fork?: { s: string; at: number }; queue: RQueued[]; ro?: boolean; device: string; loaded: boolean; busy: boolean }
+export type Sess = { id: string; n: number; item: string | null; b: string | null; h?: string; harness?: string; nativeId?: string | null; cwd?: string; m?: string; reasoningEffort?: string | null; contextKnown?: boolean; st: "run" | "wait" | "idle" | "ended"; title: string; dur: string; ctx: number; src: string; up: string; ev: Ev[]; seqs: number[]; ts: number[]; from?: string | null; fork?: { s: string; at: number }; queue: RQueued[]; ro?: boolean; device: string; loaded: boolean; busy: boolean }
 export type Wait = { type: "approve" | "ask" | "accept" | "propose" | "fail" | "confirm"; subjectId?: string; q: string; draft?: string; opts?: string[]; since: string; decision: string; subject: string; session: string | null; options: string[]; by: string; busy?: boolean }
 export type Done = { id: string; type: Wait["type"]; q: string; choice: string; tm: string; decision: string; canUndo: boolean; undone?: boolean; how: "chose" | "dismissed" | "expired"; rel?: Rel
   /** answered by YOLO: its reason (modules/yolo.md §3.3 `decided_by: "yolo"`) */
@@ -221,7 +221,7 @@ function convOf(sid: string, xs: REvent[], running: boolean) {
 function sessOf(s: RSession, openSessions: Set<string>): Sess {
   const evs = raw.events.get(s.id), running = s.status === "running" || s.status === "starting"
   const conv = evs ? convOf(s.id, evs, running) : { ev: [], seqs: [], ts: [] }
-  return { id: s.id, n: s.no, item: s.item_id, b: s.bot_id, h: HARNESS[s.harness] ?? s.harness, m: s.model ?? "默认模型", st: running ? "run" : s.status === "ended" ? "ended" : openSessions.has(s.id) ? "wait" : "idle",
+  return { id: s.id, n: s.no, item: s.item_id, b: s.bot_id, h: HARNESS[s.harness] ?? s.harness, harness: s.harness, nativeId: s.harness_session_id ?? null, cwd: s.cwd, m: s.model ?? "默认模型", st: running ? "run" : s.status === "ended" ? "ended" : openSessions.has(s.id) ? "wait" : "idle",
     title: s.title, dur: dur(s.created, s.updated), reasoningEffort: s.reasoning_effort, contextKnown: s.used != null && s.size != null && s.size > 0, ctx: s.used && s.size ? Math.round((s.used / s.size) * 100) : 0, src: s.source, up: tm(s.updated), ev: conv.ev, seqs: conv.seqs, ts: conv.ts, queue: s.queued,
     ro: s.readonly, device: s.device_id, loaded: !!evs, busy: s.busy }
 }

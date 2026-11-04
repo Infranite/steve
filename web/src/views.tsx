@@ -25,6 +25,7 @@ import { SessionKnowledge } from "@/knowledge/parts"
 import { lazyView } from "@/lazy"
 import { ItemPeopleProp } from "@/people/item-people"
 import { queueNote, QueueStrip } from "@/queue"
+import { NativeIdLine, ResumeCard } from "@/resume"
 import { ItemStatsRows, SessionStats } from "@/stats/drill"
 import { accOf, active, addDep, archive, bulk, closeRel, deleteItem, depsOpen, doFork, gBuild, gComps, hm, importSessions, interrupt, it, itemThread, link, loadEvents, loadItem, loadLocalSessions, markDone, newItem, patchItem, pending, pendingCards, reassign, rmDep, saveGoal, sessPatch, sessRemove, sessSend, setAcc, setSt, setTags, snoozed, st, stageOf, star, supp, tag, TAG_CATS, threadFollow, tm, toast, undoDecision, unsnooze, WT, type Item, type PlanRound } from "@/store"
 import { BotAvatar, BotName, Chips, closeSheet, Composer, DecisionCard, Empty, go, Group, ItemNo, Meta, openSheet, Page, RelNote, ReplyBlock, Row, RunBar, SectionLabel, Segmented, SessionBlock, Status, StatusDot, Tags, ThemeSwitch, Transcript, type ComposerHandle } from "@/ui"
@@ -471,7 +472,9 @@ export function ItemView({ id }: { id: string }) {
               </div>
             </Prop>
             {dependents.length > 0 && <Prop label="后续"><div className="flex flex-col gap-1 pt-1">{dependents.map((x) => <a key={x.id} href={"#/items/" + x.id} className="flex items-center gap-2 hover:underline"><StatusDot s={x.st} /><span className="min-w-0 truncate"><span className="font-mono text-[12px] tabular-nums text-muted-foreground">{x.id}</span> {x.t}</span></a>)}</div></Prop>}
-            <Prop label="会话"><div className="flex flex-col gap-1 pt-1">{i.ss.filter((k) => st.S[k]).length ? i.ss.filter((k) => st.S[k]).map((k) => <a key={k} href={"#/sessions/" + k} className="flex items-center gap-2 hover:underline"><span>#{st.S[k].n}</span><Status s={st.S[k].st} sess /><span className="ml-auto type-footnote tabular-nums text-muted-foreground">{st.S[k].ctx ? st.S[k].ctx + "%" : ""}</span></a>) : <span className="text-muted-foreground">暂无</span>}</div></Prop>
+            <Prop label="会话"><div className="flex flex-col gap-2 pt-1">{i.ss.filter((k) => st.S[k]).length ? i.ss.filter((k) => st.S[k]).map((k) => <div key={k} className="flex min-w-0 flex-col gap-0.5" data-item-session={k}>
+              <a href={"#/sessions/" + k} className="flex items-center gap-2 hover:underline"><span>#{st.S[k].n}</span><Status s={st.S[k].st} sess /><span className="min-w-0 truncate type-footnote text-muted-foreground">{st.S[k].h}</span><span className="ml-auto type-footnote tabular-nums text-muted-foreground">{st.S[k].ctx ? st.S[k].ctx + "%" : ""}</span></a>
+              <NativeIdLine k={k} label="ID" /></div>) : <span className="text-muted-foreground">暂无</span>}</div></Prop>
             <ItemStatsRows id={i.id} render={(u, t, href) => <><Prop label="用量"><a href={href} className="block pt-1 hover:underline" data-item-usage>{u}</a></Prop><Prop label="用时"><a href={href} className="block pt-1 hover:underline" data-item-time>{t}</a></Prop></>} />
             <Prop label="项目"><Select quiet testId="project" value={i.project ?? "none"} onChange={(v) => patchItem(i.id, { project: v === "none" ? null : v })} options={[{ v: "none", l: "无" }, ...st.projects.map((p) => ({ v: p.id, l: p.name }))]} />
               {i.projNext && <div className="pl-2 type-footnote text-muted-foreground">下一个会话起生效</div>}</Prop>
@@ -561,6 +564,7 @@ export function SessionView({ k }: { k: string }) {
       <div><SectionLabel right={<Button variant="ghost" size="xs" className="text-muted-foreground" onClick={() => openSheet("graph", { k })}>放大</Button>}>上游与直接下游</SectionLabel>
         <RelationGraph key={k} focus={k} scope="near" height={260} minimal onOpen={openNode} /></div>
       <SessionKnowledge id={k} />
+      <div data-session-resume><SectionLabel>在 harness 中恢复</SectionLabel><ResumeCard k={k} /></div>
       <div><SectionLabel>会话信息</SectionLabel><div className="flex flex-col gap-1 px-1 type-callout text-muted-foreground"><BotName k={s.b} className="text-foreground" /><span>{hm(s)}</span><span>思考强度：{s.reasoningEffort ?? "跟随 harness"}</span><a href={"#/devices/" + s.device} className="hover:text-foreground">运行在 {st.devices.find((d) => d.id === s.device)?.name ?? "Hub"}</a><span>来源：{s.src}</span><span>用时 {s.dur} · 上下文 {s.contextKnown ? `${s.ctx}%` : "未上报"}</span></div></div>
     </div>
   )
@@ -574,6 +578,7 @@ export function SessionView({ k }: { k: string }) {
             <div className="mx-auto w-full max-w-[784px] shrink-0 px-4 pb-[76px] sm:px-8 lg:pb-5">
               <div className="flex flex-wrap items-center gap-x-4 gap-y-1 py-2 type-footnote text-muted-foreground" data-session-runtime>
                 <span>Harness <span className="text-foreground">{s.h ?? "未知"}</span></span>
+                <NativeIdLine k={k} label="会话 ID" className="w-auto" />
                 <span className="break-all">模型 <span className="text-foreground">{s.m ?? "默认模型"}</span></span>
                 <span>思考强度 <span className="text-foreground">{s.reasoningEffort ?? "跟随 harness"}</span></span>
                 <span className={s.ctx >= 80 ? "text-attention" : ""}>上下文 {s.contextKnown ? `${s.ctx}%` : "未上报"}</span>
