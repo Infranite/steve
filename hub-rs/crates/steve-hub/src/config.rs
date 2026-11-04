@@ -62,6 +62,8 @@ pub struct Config {
     pub codex_home: PathBuf,
     /// Node used to run `.js` adapters (TS used its own `process.execPath`).
     pub node: String,
+    /// Where knowledge is stored and found (`STEVE_KB_STORE`): `None` = the Hub's own index only.
+    pub openviking: Option<steve_knowledge::openviking::OpenVikingConfig>,
 }
 
 /// Errors that stop the Hub at boot, like the TS module-level throws.
@@ -265,6 +267,39 @@ impl Config {
             None => get("STEVE_OIDC_CLIENT_SECRET"),
         };
 
+        // `STEVE_KB_STORE=openviking`: the OpenViking server on loopback (ops/openviking), its root
+        // key from `STEVE_OPENVIKING_KEY_FILE`
+        let openviking = match get("STEVE_KB_STORE").as_deref() {
+            None | Some("") | Some("sqlite") => None,
+            Some("openviking") => {
+                let path = get("STEVE_OPENVIKING_KEY_FILE")
+                    .filter(|p| !p.is_empty())
+                    .ok_or(ConfigError::Invalid {
+                        var: "STEVE_OPENVIKING_KEY_FILE",
+                        msg: "required with STEVE_KB_STORE=openviking".into(),
+                    })?;
+                let key = std::fs::read_to_string(&path)
+                    .map_err(|source| ConfigError::SecretFile {
+                        var: "STEVE_OPENVIKING_KEY_FILE",
+                        path: path.clone(),
+                        source,
+                    })?
+                    .trim()
+                    .to_string();
+                Some(steve_knowledge::openviking::OpenVikingConfig {
+                    url: env("STEVE_OPENVIKING_URL", "http://127.0.0.1:18933"),
+                    key,
+                    account: env("STEVE_OPENVIKING_ACCOUNT", "steve"),
+                })
+            }
+            Some(other) => {
+                return Err(ConfigError::Invalid {
+                    var: "STEVE_KB_STORE",
+                    msg: format!("sqlite or openviking, not {other}"),
+                });
+            }
+        };
+
         // npm root -g only when an adapter default is actually needed
         let mut root: Option<String> = None;
         let mut npm = || root.get_or_insert_with(npm_root).clone();
@@ -345,6 +380,7 @@ impl Config {
                 .map(PathBuf::from)
                 .unwrap_or_else(|| home_dir().join(".codex")),
             node: env("STEVE_NODE", "node"),
+            openviking,
             home,
         })
     }

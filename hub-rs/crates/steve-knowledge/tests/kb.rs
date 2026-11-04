@@ -788,7 +788,7 @@ impl steve_knowledge::port::KnowledgeStore for Leaky {
         pass: steve_knowledge::port::Pass,
         _: usize,
     ) -> steve_store::Result<Vec<steve_knowledge::port::Candidate>> {
-        if pass == steve_knowledge::port::Pass::Relaxed {
+        if pass != steve_knowledge::port::Pass::Strict {
             return Ok(Vec::new());
         }
         use steve_store::base::{Level, Visibility};

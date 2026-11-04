@@ -224,6 +224,8 @@ pub struct Env<'a> {
     pub vars: &'a super::Vars,
     /// Why YOLO is off by force, if it is (the `yolo` draft target refuses to switch it on).
     pub yolo_forced: Option<steve_core::yolo::Forced>,
+    /// The OpenViking server knowledge is stored in (`None`: the Hub's own index only).
+    pub openviking: Option<steve_knowledge::openviking::OpenVikingConfig>,
 }
 
 /// Registers every module, builds [`Modules`] and the flow context, and collects the routes.
@@ -238,6 +240,7 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
         bus,
         vars,
         yolo_forced,
+        openviking,
     } = env;
     use super::ports::{self as hp, VaultGuard};
     let guard = Arc::new(VaultGuard);
@@ -268,8 +271,16 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
     // knowledge (K1–K5): candidate decisions, item documents on finish, prompt context, drafts
     let kb = knowledge(steve_home, data_dir, bus, guard.clone());
     // one knowledge store for every reader (knowledge tools, prompt context, mail and channel replies)
-    let kstore: Arc<dyn steve_knowledge::port::KnowledgeStore> =
-        Arc::new(steve_knowledge::port::SqliteStore);
+    // OpenViking (user decision 2026-11-04): keywords from the Hub's index, meaning from it; the
+    // index is mirrored to it through the outbox (`kb.openviking`)
+    let ov = openviking.map(steve_knowledge::openviking::OpenViking::new);
+    let kstore: Arc<dyn steve_knowledge::port::KnowledgeStore> = match &ov {
+        Some(ov) => Arc::new(steve_knowledge::openviking::Hybrid {
+            keywords: steve_knowledge::port::SqliteStore,
+            meaning: ov.clone(),
+        }),
+        None => Arc::new(steve_knowledge::port::SqliteStore),
+    };
     kb.set_store(kstore.clone());
     let kb_hooks = steve_knowledge::sources::items::KnowledgeHooks::new(kb.clone());
     registry.decision(
@@ -556,16 +567,35 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
     // `vault.token_refresh` (5 min) and `vault.health` (15 min)
     drop(conns.spawn_jobs());
     // registered now, before boot resumes sessions or the API listens: no finish happens earlier
-    let dispatcher = super::outbox::dispatcher(
-        store,
-        core,
-        &flow,
-        vec![
-            steve_mail::outbox::MailEventsOut::new(mail.clone()),
-            gh.outbox_consumer(),
-        ],
-    )
-    .map_err(|e| BackendError::msg(format!("outbox: {e}")))?;
+    let mut module_consumers: Vec<Arc<dyn steve_store::outbox::Consumer>> = vec![
+        steve_mail::outbox::MailEventsOut::new(mail.clone()),
+        gh.outbox_consumer(),
+    ];
+    let mirror = steve_knowledge::openviking::Mirror::ID;
+    let mirrored_before = store
+        .reader(|c| steve_store::outbox::is_registered(c, mirror))
+        .map_err(|e| BackendError::msg(format!("outbox: {e}")))?;
+    match &ov {
+        Some(ov) => module_consumers.push(Arc::new(steve_knowledge::openviking::Mirror {
+            ov: ov.clone(),
+            store: store.clone(),
+        })),
+        // no longer mirrored: what it owed is dropped; switching back on mirrors everything again
+        None if mirrored_before => {
+            steve_store::outbox::unregister(store, mirror)
+                .map_err(|e| BackendError::msg(format!("outbox: {e}")))?;
+            tracing::info!("knowledge: no longer mirrored to OpenViking");
+        }
+        None => {}
+    }
+    let dispatcher = super::outbox::dispatcher(store, core, &flow, module_consumers)
+        .map_err(|e| BackendError::msg(format!("outbox: {e}")))?;
+    // the first time: everything indexed before is mirrored too
+    if ov.is_some() && !mirrored_before {
+        let n = steve_knowledge::openviking::backfill(store)
+            .map_err(|e| BackendError::msg(format!("knowledge backfill: {e}")))?;
+        tracing::info!(objects = n, "knowledge: mirroring the index to OpenViking");
+    }
     let mut jobs: Vec<Job> = vec![
         Box::pin(super::outbox::run(dispatcher, store.clone(), flow.clone())),
         Box::pin(steve_flow::Scheduler::new(flow.clone()).run()),

@@ -199,11 +199,9 @@ pub fn retrieve(c: &Connection, q: &Query) -> Result<Vec<Hit>> {
             .filter(|x| scope.admits(x))
             .collect())
     };
-    let first = found(Pass::Strict)?;
-    let docs: HashSet<&str> = first.iter().map(|x| x.obj_id.as_str()).collect();
-    let short = docs.len() < FALLBACK_BELOW;
-    let mut tiers = vec![first];
-    if short {
+    let mut tiers = vec![found(Pass::Strict)?, found(Pass::Semantic)?];
+    let docs: HashSet<&str> = tiers.iter().flatten().map(|x| x.obj_id.as_str()).collect();
+    if docs.len() < FALLBACK_BELOW {
         tiers.push(found(Pass::Relaxed)?);
     }
 

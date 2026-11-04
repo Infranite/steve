@@ -45,7 +45,8 @@ pub struct ChunkMeta<'a> {
 
 /// Replaces all index rows of one object with `chunks`. Returns how many were written.
 pub fn replace(tx: &Tx, m: &ChunkMeta, chunks: &[Chunk]) -> Result<usize> {
-    remove(tx, m.obj_type, m.obj_id)?;
+    remove_rows(tx, m.obj_type, m.obj_id)?;
+    crate::openviking::changed(tx, m.ws, m.obj_type, m.obj_id)?;
     let title = seg(m.title);
     let mut ins = tx.prepare_cached(
         "INSERT INTO kb_chunks (workspace_id, obj_type, obj_id, seq, heading, text, start_at, end_at, visibility, level, created_by, source_kind, label, updated)
@@ -76,8 +77,28 @@ pub fn replace(tx: &Tx, m: &ChunkMeta, chunks: &[Chunk]) -> Result<usize> {
     Ok(chunks.len())
 }
 
-/// Deletes the index rows of one object (FTS entries first: `contentless_delete` deletes by rowid).
+/// The workspace of an object's index rows (none: not indexed).
+fn ws_of(tx: &Tx, obj_type: &str, obj_id: &str) -> Result<Option<String>> {
+    use rusqlite::OptionalExtension;
+    Ok(tx
+        .prepare_cached(
+            "SELECT workspace_id FROM kb_chunks WHERE obj_type = ? AND obj_id = ? LIMIT 1",
+        )?
+        .query_row([obj_type, obj_id], |r| r.get(0))
+        .optional()?)
+}
+
+/// Deletes the index rows of one object; a store mirroring the index follows
+/// ([`crate::openviking::changed`]).
 pub fn remove(tx: &Tx, obj_type: &str, obj_id: &str) -> Result<usize> {
+    if let Some(ws) = ws_of(tx, obj_type, obj_id)? {
+        crate::openviking::changed(tx, &ws, obj_type, obj_id)?;
+    }
+    remove_rows(tx, obj_type, obj_id)
+}
+
+/// FTS entries first: `contentless_delete` deletes by rowid.
+fn remove_rows(tx: &Tx, obj_type: &str, obj_id: &str) -> Result<usize> {
     tx.prepare_cached(
         "DELETE FROM kb_fts WHERE rowid IN (SELECT id FROM kb_chunks WHERE obj_type = ?1 AND obj_id = ?2)",
     )?
@@ -99,11 +120,18 @@ pub fn rescope(
     visibility: &Visibility,
     level: Level,
 ) -> Result<usize> {
-    Ok(tx
+    let n = tx
         .prepare_cached(
-            "UPDATE kb_chunks SET visibility = ?, level = ? WHERE obj_type = ? AND obj_id = ?",
+            "UPDATE kb_chunks SET visibility = ?1, level = ?2 WHERE obj_type = ?3 AND obj_id = ?4
+               AND (visibility <> ?1 OR level <> ?2)",
         )?
-        .execute(params![visibility.code(), level.code(), obj_type, obj_id])?)
+        .execute(params![visibility.code(), level.code(), obj_type, obj_id])?;
+    if n > 0
+        && let Some(ws) = ws_of(tx, obj_type, obj_id)?
+    {
+        crate::openviking::changed(tx, &ws, obj_type, obj_id)?;
+    }
+    Ok(n)
 }
 
 /// Rewrites the scope of every document that follows `source` (after the source's visibility or
@@ -114,15 +142,29 @@ pub fn rescope_source(tx: &Tx, source: &SourceRow) -> Result<usize> {
         return Ok(0);
     }
     if source.kind == "bot_mems" {
-        return Ok(tx
+        let n = tx
             .prepare_cached(
-                "UPDATE kb_chunks SET visibility = ?, level = ? WHERE workspace_id = ? AND obj_type = 'bot_mem'",
+                "UPDATE kb_chunks SET visibility = ?1, level = ?2 WHERE workspace_id = ?3 AND obj_type = 'bot_mem'
+                   AND (visibility <> ?1 OR level <> ?2)",
             )?
             .execute(params![
                 source.visibility.code(),
                 source.level.code(),
                 source.workspace_id
-            ])?);
+            ])?;
+        let ids: Vec<String> = {
+            let mut st = tx.prepare_cached(
+                "SELECT DISTINCT obj_id FROM kb_chunks WHERE workspace_id = ? AND obj_type = 'bot_mem'",
+            )?;
+            st.query_map([&source.workspace_id], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?
+        };
+        if n > 0 {
+            for id in ids {
+                crate::openviking::changed(tx, &source.workspace_id, "bot_mem", &id)?;
+            }
+        }
+        return Ok(n);
     }
     let mut n = 0;
     let docs: Vec<DocRow> = {
@@ -185,11 +227,14 @@ pub fn index_doc(
         updated: now,
     };
     if !force && doc.indexed.is_some() && doc.sha256 == hash && doc.status == "active" {
-        tx.prepare_cached(
-            "UPDATE kb_chunks SET label = ? WHERE obj_type = 'chunk' AND obj_id = ?",
-        )?
-        .execute(params![label, doc.id])?;
-        rescope(tx, "chunk", &doc.id, meta.visibility, meta.level)?;
+        let relabeled = tx
+            .prepare_cached(
+                "UPDATE kb_chunks SET label = ?1 WHERE obj_type = 'chunk' AND obj_id = ?2 AND label <> ?1",
+            )?
+            .execute(params![label, doc.id])?;
+        if rescope(tx, "chunk", &doc.id, meta.visibility, meta.level)? == 0 && relabeled > 0 {
+            crate::openviking::changed(tx, &doc.workspace_id, "chunk", &doc.id)?;
+        }
         return Ok(doc.chunks as usize);
     }
     let mut chunked = chunk(&text, ex.kind);

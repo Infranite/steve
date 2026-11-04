@@ -473,6 +473,26 @@ pub fn stats(c: &Connection) -> Result<Stats> {
 
 /// Deletes events older than `keep_ms` that every registered consumer of their topic (paused ones
 /// included) has a receipt for, with those receipts. Owed, leased or dead deliveries are never removed.
+/// Whether consumer `id` was ever registered (and not unregistered).
+pub fn is_registered(c: &Connection, id: &str) -> Result<bool> {
+    Ok(c.query_row(
+        "SELECT EXISTS (SELECT 1 FROM outbox_consumers WHERE id = ?)",
+        [id],
+        |r| r.get(0),
+    )?)
+}
+
+/// Removes consumer `id` with everything it owed and its receipts: a consumer the Hub no longer
+/// runs, whose backlog would otherwise be kept forever. Registering it again starts it afresh.
+pub fn unregister(store: &Store, id: &str) -> Result<()> {
+    store.transaction(|tx| {
+        tx.execute("DELETE FROM outbox_leases WHERE consumer_id = ?", [id])?;
+        tx.execute("DELETE FROM outbox_receipts WHERE consumer_id = ?", [id])?;
+        tx.execute("DELETE FROM outbox_consumers WHERE id = ?", [id])?;
+        Ok(())
+    })
+}
+
 pub fn prune(store: &Store, now: i64, keep_ms: i64) -> Result<usize> {
     // an event is done when no registered consumer of its topic still owes it and nothing is leased
     const DONE: &str = "e.created < ?1

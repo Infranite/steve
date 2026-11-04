@@ -154,10 +154,13 @@ pub struct Candidate {
     pub doc_ref: Option<String>,
 }
 
-/// Which query: the strict one first; the relaxed one fills in when it found few documents.
+/// Which query. Keyword matching first (precise, what the retrieval eval tunes); meaning next,
+/// from a store that has it (it adds what other words find); the relaxed keywords fill in last when
+/// still few documents were found. Scores only compare within one pass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pass {
     Strict,
+    Semantic,
     Relaxed,
 }
 
@@ -168,7 +171,7 @@ pub trait KnowledgeStore: Send + Sync {
 
     /// At most `limit` candidates for `text` inside `scope` (nothing outside it). `c` is the
     /// Hub's connection: a store in the Hub's database reads through it, one elsewhere ignores it.
-    /// A store that has no relaxed query answers [`Pass::Relaxed`] with nothing.
+    /// A store without a pass (no meaning, no relaxed keywords) answers it with nothing.
     fn search(
         &self,
         c: &Connection,
@@ -214,6 +217,34 @@ fn candidate(r: &rusqlite::Row, base: Option<f64>) -> rusqlite::Result<Candidate
     })
 }
 
+impl SqliteStore {
+    /// One chunk, if it is inside `scope` (a store that found it elsewhere reads it back here).
+    pub fn chunk_in_scope(
+        c: &Connection,
+        scope: &Scope,
+        obj_type: &str,
+        obj_id: &str,
+        seq: i64,
+    ) -> Result<Option<Candidate>> {
+        let tail = scope.sql();
+        let sql = format!(
+            "SELECT {COLS}, d.title, d.ref FROM kb_chunks c
+               LEFT JOIN kb_docs d ON c.obj_type = 'chunk' AND d.id = c.obj_id
+              WHERE c.obj_type = ? AND c.obj_id = ? AND c.seq = ? AND {} LIMIT 1",
+            tail.0
+        );
+        let mut p = vec![
+            Sql::Text(obj_type.into()),
+            Sql::Text(obj_id.into()),
+            Sql::Integer(seq),
+        ];
+        p.extend(tail.1);
+        let mut st = c.prepare(&sql)?;
+        let mut rows = st.query_map(bind(p), |r| candidate(r, Some(0.0)))?;
+        Ok(rows.next().transpose()?)
+    }
+}
+
 impl KnowledgeStore for SqliteStore {
     fn id(&self) -> &'static str {
         "sqlite"
@@ -227,6 +258,9 @@ impl KnowledgeStore for SqliteStore {
         pass: Pass,
         limit: usize,
     ) -> Result<Vec<Candidate>> {
+        if pass == Pass::Semantic {
+            return Ok(Vec::new());
+        }
         let tail = scope.sql();
         let limit = limit.min(CANDIDATES) as i64;
         if is_single_cjk(text) {
@@ -249,6 +283,7 @@ impl KnowledgeStore for SqliteStore {
         }
         let expr = match pass {
             Pass::Strict => fts_query(text),
+            Pass::Semantic => None,
             // only when it differs from the strict one
             Pass::Relaxed => {
                 fts_query(text).and_then(|s| fts_query_relaxed(text).filter(|r| *r != s))

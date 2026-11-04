@@ -14,6 +14,7 @@ mod testdata;
 pub mod api;
 pub mod index;
 pub mod notes;
+pub mod openviking;
 pub mod port;
 pub mod repo;
 pub mod retrieve;

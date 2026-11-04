@@ -24,8 +24,12 @@ thiserror = "=2.0.21"
 tokio = { version = "=1.54.1", features = ["rt", "sync", "time"] }
 tracing = "=0.1.44"
 unicode-normalization = "=0.1.26"
+# the OpenViking store: synchronous HTTP on loopback (no TLS, no runtime)
+ureq = { version = "=3.5.1", default-features = false, features = ["json"] }
 zip = { version = "=9.2.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 [dev-dependencies]
 tempfile = "=3.27.0"
-tokio = { version = "=1.54.1", features = ["rt", "rt-multi-thread", "sync", "time", "macros"] }
+tokio = { version = "=1.54.1", features = ["rt", "rt-multi-thread", "sync", "time", "macros", "net"] }
+# the fake OpenViking server of tests/openviking.rs
+axum = { version = "=0.8.9", default-features = false, features = ["json", "query", "tokio", "http1"] }
