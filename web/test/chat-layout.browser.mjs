@@ -57,6 +57,36 @@ try {
     await scroller.evaluate(el => { el.scrollTop = el.scrollHeight })
     await page.waitForTimeout(350)
     if (shots) await page.screenshot({ path: `${shots}/chat-long-${width}-${theme}.png`, animations: "disabled" })
+    // At the bottom, new messages follow, even after a wheel that could not scroll any further down.
+    const atBottom = () => scroller.evaluate(el => el.scrollHeight - el.scrollTop - el.clientHeight < 2)
+    const newMsg = page.getByRole("button", { name: "新消息 ↓" })
+    await page.mouse.move(width / 2, 300)
+    await page.mouse.wheel(0, 400)
+    await page.waitForTimeout(200)
+    await page.evaluate(() => window.dispatchEvent(new Event("fixture-reply")))
+    await page.locator('[data-msg="reply-1"]').waitFor()
+    await page.waitForTimeout(300)
+    assert.ok(await atBottom())
+    assert.equal(await newMsg.count(), 0)
+    if (shots) await page.screenshot({ path: `${shots}/chat-follow-${width}-${theme}.png`, animations: "disabled" })
+    // The composer growing shrinks the list; the latest message stays in view.
+    await page.locator("[data-chat-input]").evaluate(el => { el.style.paddingTop = "160px" })
+    await page.waitForTimeout(200)
+    assert.ok(await atBottom())
+    await page.locator("[data-chat-input]").evaluate(el => { el.style.paddingTop = "" })
+    // Scrolled up to read: the view stays put and offers the way down.
+    await page.mouse.wheel(0, -500)
+    await page.waitForTimeout(300)
+    const top = await scroller.evaluate(el => el.scrollTop)
+    await page.evaluate(() => window.dispatchEvent(new Event("fixture-reply")))
+    await page.locator('[data-msg="reply-2"]').waitFor()
+    await page.waitForTimeout(300)
+    assert.equal(await scroller.evaluate(el => el.scrollTop), top)
+    if (shots) await page.screenshot({ path: `${shots}/chat-unread-${width}-${theme}.png`, animations: "disabled" })
+    await newMsg.click()
+    await page.waitForTimeout(200)
+    assert.ok(await atBottom())
+    assert.equal(await newMsg.count(), 0)
     if (width === 390) {
       await page.locator("[data-rail-toggle]").click()
       await page.locator('[data-rail="sheet"]').waitFor()
@@ -75,5 +105,5 @@ try {
     await page.close()
   }
   assert.deepEqual(errors, [])
-  console.log(JSON.stringify({ passed: true, scenarios: ["1440/390px × light/dark", "keyboard actions", "steps disclosure", "draft reload", "slash menu", "steady header", "long Markdown overflow", "rail/sheet", "thinking and stop", "empty conversation"] }))
+  console.log(JSON.stringify({ passed: true, scenarios: ["1440/390px × light/dark", "keyboard actions", "steps disclosure", "draft reload", "slash menu", "steady header", "long Markdown overflow", "follow new messages at the bottom", "rail/sheet", "thinking and stop", "empty conversation"] }))
 } finally { await browser.close() }
