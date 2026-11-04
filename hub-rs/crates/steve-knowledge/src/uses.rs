@@ -105,7 +105,7 @@ pub fn current(c: &Connection, viewer: &Viewer, h: &UseHit) -> Result<Option<Cur
     };
     let (title, href) = match h.obj_type.as_str() {
         "mem" => (
-            label.strip_prefix("记忆 · ").unwrap_or(&label).to_string(),
+            crate::sync::mem_title(&label).to_string(),
             format!("#/knowledge?mem={}", h.obj_id),
         ),
         "bot_mem" => {

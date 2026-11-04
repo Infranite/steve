@@ -430,7 +430,7 @@ async fn remember_writes_a_candidate_with_a_decision() {
                 "SELECT d.kind || '|' || d.subject_type || '|' || d.question || '|' || d.requested_by || '|' || d.options FROM decisions d JOIN mems m ON m.decision_id = d.id WHERE m.id = '{mm}'"
             )
         ),
-        "confirm|mem|记住这条吗？周五不开会|bot_dev|[\"yes\",\"no\"]"
+        "confirm|mem|存为知识条目吗？周五不开会|bot_dev|[\"yes\",\"no\"]"
     );
     // a candidate is not confirmed knowledge: find does not show it
     let found = mcp::call_sync(m(&t), &p, &cx(ME), mcp::FIND, &json!({"query": "Sarah"})).unwrap();

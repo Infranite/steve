@@ -1,6 +1,7 @@
 /* Knowledge pieces that live on other pages (W15): the "依据" fold under Steve's answers, a session's
  * "用到的知识", and the confirm/mem card in 待处理. Kept free of views.tsx imports: ui.tsx uses this file. */
 import { useEffect, useState } from "react"
+import { cn } from "cn"
 import { BookOpenIcon, ChevronRightIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { CardContent, CardFooter } from "@/components/ui/card"
@@ -59,24 +60,28 @@ export function SessionKnowledge({ id }: { id: string }) {
   )
 }
 
-const ASK = "记住这条吗？"
-/** the body of a confirm/mem decision: where it came from, the words it was based on, what it replaces, and
- *  the wording you can fix before confirming (sent as the decision's text) */
+/** a candidate's question names what it would become (ST-41): “存为长期记忆吗？…” or “存为知识条目吗？…”;
+ *  decisions opened earlier ask “记住这条吗？…” */
+const ASK = /^(存为长期记忆吗？|存为知识条目吗？|记住这条吗？)/
+export const memAsk = (q: string) => q.match(ASK)?.[1] ?? "存为长期记忆吗？"
+/** the body of a confirm/mem decision: what it would become and why it is worth keeping, where it came from,
+ *  the words it was based on, what it replaces, and the wording you can fix before confirming (sent as the
+ *  decision's text) */
 export function MemConfirm({ q, draft, busy, act }: { q: string; draft?: string; busy: boolean; act: (c: string, t?: string) => void }) {
-  const orig = q.startsWith(ASK) ? q.slice(ASK.length) : q
+  const orig = q.replace(ASK, "")
   const [txt, setTxt] = useState(orig), [edit, setEdit] = useState(false)
   const lines = (draft ?? "").split("\n").filter(Boolean)
   const t = txt.trim()
   return <>
     <CardContent className="flex flex-col gap-2 pb-4" data-mem-confirm>
-      {edit ? <Textarea autoFocus aria-label="记忆的措辞" className="min-h-16 rounded-lg" value={txt} onChange={(e) => setTxt(e.target.value)} data-mem-text />
+      {edit ? <Textarea autoFocus aria-label="这条的措辞" className="min-h-16 rounded-lg" value={txt} onChange={(e) => setTxt(e.target.value)} data-mem-text />
         : <div className="type-body">{t || orig}</div>}
-      {lines.length > 0 && <div className="flex flex-col gap-0.5 type-footnote text-muted-foreground">{lines.map((l, n) => <div key={n} className="break-words">{l}</div>)}</div>}
+      {lines.length > 0 && <div className="flex flex-col gap-0.5 type-footnote text-muted-foreground">{lines.map((l, n) => <div key={n} className={cn("break-words", l.startsWith("为什么值得保留：") && "text-foreground/80")}>{l}</div>)}</div>}
     </CardContent>
     <CardFooter className="flex-wrap justify-end gap-2 border-t px-3 py-2.5!">
       {!edit && <Button variant="ghost" className="mr-auto text-muted-foreground" onClick={() => setEdit(true)} data-mem-edit>改措辞</Button>}
-      <Button variant="outline" disabled={busy} onClick={() => act("no")} data-mem-no>不对</Button>
-      <Button disabled={busy || !t} onClick={() => act("yes", t !== orig ? t : undefined)} data-mem-yes>确认</Button>
+      <Button variant="outline" disabled={busy} onClick={() => act("no")} data-mem-no>不保存</Button>
+      <Button disabled={busy || !t} onClick={() => act("yes", t !== orig ? t : undefined)} data-mem-yes>保存</Button>
     </CardFooter>
   </>
 }

@@ -41,7 +41,7 @@ import { YoloPill } from "@/yolo/switch"
 import { WorkspaceSwitcher } from "@/workspace-switcher"
 import { useUploads, PendingList, AttachButton, Files } from "@/attach"
 import type { RFile } from "@/api"
-import { MemConfirm } from "@/knowledge/parts"
+import { MemConfirm, memAsk } from "@/knowledge/parts"
 import { FLOW_SUBJECTS, FlowDecisionBody } from "@/auto/decision"
 import { MODULE_CARDS } from "@/vault/decisions"
 import { OutContext } from "@/channels/out-context"
@@ -941,7 +941,7 @@ export function DecisionCard({ i, w = i.wait!, showItem = true }: { i: Item; w?:
     {w.draft ? <div className="max-h-72 overflow-auto break-words type-body text-muted-foreground"><Markdown text={w.draft} /></div> : null}</>
   let body: ReactNode = null
   if (FLOW_SUBJECTS.includes(w.subject)) body = <FlowDecisionBody w={w} act={(c) => void act(c)} busy={busy} head={head} foot={foot} />
-  else if (w.type === "confirm" && w.subject === "mem") body = <>{head("记住这条吗？")}<MemConfirm q={w.q} draft={w.draft} busy={busy} act={(c, t) => void act(c, t)} /></>
+  else if (w.type === "confirm" && w.subject === "mem") body = <>{head(memAsk(w.q))}<MemConfirm q={w.q} draft={w.draft} busy={busy} act={(c, t) => void act(c, t)} /></>
   else if (isPeopleDecision(w)) body = <>{head(w.q)}<PeopleDecisionBody w={w} busy={busy} act={(c) => void act(c)} /></>
   else if (w.subject === "mail_draft") body = <MailDraftCard w={w} act={act} busy={busy} head={head} foot={foot} />
   else if (MODULE_CARDS[w.subject]) body = MODULE_CARDS[w.subject]({ w, act, busy, head, foot })

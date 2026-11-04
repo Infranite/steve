@@ -780,7 +780,7 @@ const DECIDED_BY_SUBJECT: Record<string, Record<string, string> | ((c: string) =
   secret_use: { once: "已批准这一次", grant_1h: "已授权 1 小时", grant_8h: "已授权 8 小时", grant_24h: "已授权 24 小时", deny: "已拒绝，它拿不到这个机密" },
   connection: { pause: "已暂停接收，恢复后也不补收" },
   space: { open: "好，去设置这个群", mute: "已静默：这个群只记录，不发言" },
-  mem: { yes: "记住了", no: "不记这条" },
+  mem: { yes: "已保存", no: "不保存，留在原记录里" },
   party_merge: { merge: "已合并，可以在联系人页拆回", not_same: "已记下：不是同一个人" },
   release: { no: "没有批准发布" },
   chan_message: { yes: "已批准，稍后发出", no: "不发出，这条已关闭" },
