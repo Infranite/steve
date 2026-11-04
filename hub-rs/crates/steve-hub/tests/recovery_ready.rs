@@ -148,6 +148,11 @@ fn spawn(h: &Home, upgrade: Option<&str>) -> Hub {
         .env_remove("STEVE_UPGRADE_ID")
         .env_remove("CLAUDE_CONFIG_DIR")
         .env_remove("CODEX_HOME")
+        // the machine's own knowledge store (STEVE_KB_STORE=openviking on a Steve host) is not the test's
+        .env_remove("STEVE_KB_STORE")
+        .env_remove("STEVE_OPENVIKING_KEY_FILE")
+        .env_remove("STEVE_OPENVIKING_URL")
+        .env_remove("STEVE_OPENVIKING_ACCOUNT")
         .env_remove("STEVE_OIDC_ISSUER")
         .stdout(Stdio::null())
         .stderr(Stdio::null())

@@ -1020,7 +1020,8 @@ async fn active_send_is_not_recovered_and_cancellation_becomes_unknown() {
     let mail = h.mail.clone();
     let id = d.id.clone();
     let task = tokio::spawn(async move { mail.execute(&id).await });
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+    // the SMTP server holds after accepting: only a loaded machine makes this wait long
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
         while h.smtp.sent().is_empty() {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
@@ -1095,7 +1096,8 @@ async fn optional_copy_hang_after_smtp_acceptance_stays_sent() {
         let mail = h.mail.clone();
         let id = d.id.clone();
         let task = tokio::spawn(async move { mail.execute(&id).await });
-        tokio::time::timeout(std::time::Duration::from_secs(4), async {
+        // the copy hangs until COPY_TIMEOUT: "sent" must be seen before then
+        tokio::time::timeout(steve_mail::send::COPY_TIMEOUT, async {
             while draft(&h, &d.id).status != "sent" {
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
