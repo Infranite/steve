@@ -9,7 +9,7 @@ import { promptNeedle, withDecisionNotes } from "./decision-notes"
 import { blockSlots, type FeedRow } from "./feed-order"
 import { api, setPageWorkspace, stream, Unauthenticated, type State, type RItem, type RItemDetail, type RSession, type RDecision, type RBot, type REvent, type RProject, type Proposal, type LocalSession, type HubEvent, type RNotice } from "./api"
 import { cue } from "./bus"
-import type { RFile, PlanStep, RHold, RQueued, RKindReview } from "./api"
+import type { RFile, PlanStep, RHold, RQueued, RKindReview, SuggestChoice } from "./api"
 import type { Cite } from "./api/knowledge"
 import { yoloApi, type RYolo, type RYoloAction } from "./api/yolo"
 
@@ -61,7 +61,8 @@ function itemCard(c: ItemCardState): ItemCardState {
   return { ...rest, build: c.build ?? { text: v, at: c.released?.at } }
 }
 export type Offer = { title: string; goal: string; project?: string | null; bot?: string; state: "open" | "taken" | "dismissed"; item?: string; folded?: boolean }
-export type Suggest = { question: string; choices: { id: "here" | "item"; label: string; item?: string; title?: string }[]; state: "open" | "expired" | "chosen"; chosen?: string; item?: string }
+export type { SuggestChoice }
+export type Suggest = { question: string; choices: { id: SuggestChoice; label: string; item?: string; title?: string; recommended?: boolean }[]; state: "open" | "expired" | "chosen"; chosen?: string; item?: string }
 /** a key moment of an item made from the conversation, posted back to it (§5.2) */
 export type Update = { kind: "ask" | "reply" | "deliver" | "done" | "drop" | "fail"; item: string; text?: string; decision?: string; full?: boolean; ref?: string }
 /** what Steve did for one message (hub meta.steps): routing, the reasoning behind a direct answer, a research run, tools; times in ms */
@@ -720,7 +721,12 @@ export function clearFocus() { st.focus = null; emit() }
 export const focusItem = () => (st.focus && st.focus.until > Date.now() ? st.focus.item : null)
 /* thread routing actions: a 409 (already handled) comes back as its message */
 export async function takeOffer(m: Msg, take: boolean) { if (!m.id) return; const r = await call(api.offer(m.id, take)); if (r?.item) toast("已做成 " + r.item.id) }
-export async function chooseSuggest(m: Msg, choice: "here" | "item") { if (!m.id) return; const r = await call(api.suggest(m.id, choice)); if (r?.item) toast("已建成 " + r.item.id) }
+export async function chooseSuggest(m: Msg, choice: SuggestChoice) {
+  if (!m.id) return
+  const append = !!m.suggest?.choices.find((c) => c.id === choice)?.item
+  const r = await call(api.suggest(m.id, choice))
+  if (r?.item) toast((append ? "已追加到 " : "已建成 ") + r.item.id)
+}
 export async function reroute(m: Msg, to: string) {
   if (!m.id) return
   const r = await call(api.reroute(m.id, to))
@@ -774,7 +780,7 @@ const DECIDED_BY_SUBJECT: Record<string, Record<string, string> | ((c: string) =
   secret_use: { once: "已批准这一次", grant_1h: "已授权 1 小时", grant_8h: "已授权 8 小时", grant_24h: "已授权 24 小时", deny: "已拒绝，它拿不到这个机密" },
   connection: { pause: "已暂停接收，恢复后也不补收" },
   space: { open: "好，去设置这个群", mute: "已静默：这个群只记录，不发言" },
-  mem: { yes: "记住了", no: "不记这条" },
+  mem: { yes: "已保存", no: "不保存，留在原记录里" },
   party_merge: { merge: "已合并，可以在联系人页拆回", not_same: "已记下：不是同一个人" },
   release: { no: "没有批准发布" },
   chan_message: { yes: "已批准，稍后发出", no: "不发出，这条已关闭" },

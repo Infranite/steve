@@ -534,7 +534,11 @@ async fn status_and_supplement_and_unsure_supplement() {
     assert_eq!(k.rt.prompts_of(&s).len(), 1);
     k.core.say(WS, "标题再短一点", &[]).unwrap();
     let ms = settle(&k, 6).await;
-    assert_eq!(ms[5].text, format!("这是给 {i} 的吗？"));
+    assert!(
+        ms[5].text.contains(&format!("建议追加到 {i}「t」")),
+        "{}",
+        ms[5].text
+    );
     k.core.suggest(WS, &ms[5].id, "item").unwrap();
     /* the session is busy with the first one: the second waits in its queue */
     let sent = |k: &Kit| k.rt.prompts_of(&s).len() + k.db().queued(&s).unwrap().len();
@@ -550,6 +554,82 @@ async fn status_and_supplement_and_unsure_supplement() {
         route_log(&k, &ms[4].id).override_.as_deref(),
         Some("to_supplement")
     );
+}
+
+/// ST-44: the screenshot of 2026-11-05 — “统计信息如果维度是今天，那里面的统计数据粒度应该是小时级的”
+/// while ST-40 (the statistics page) was open, answered with “这是给 ST-40 的吗？ [送到 ST-40] [在这里回答]”.
+/// Now the card says why it belongs there, recommends appending, and asks “追加 / 单独建项”; a message that
+/// names the item is not asked about.
+#[tokio::test]
+async fn an_unsure_supplement_explains_and_asks_append_or_new() {
+    let k = Kit::new();
+    let i = k.item("run", "执行", None);
+    k.db()
+        .exec(
+            "UPDATE items SET title = '统计页优化' WHERE id = ?",
+            &[&i as &dyn rusqlite::ToSql],
+        )
+        .unwrap();
+    let s = k.session(&i, "idle");
+    let item = i.clone();
+    router(&k, move |_| {
+        json!({"kind": "supplement", "item": item, "confidence": 0.6,
+               "title": "今日统计按小时展示", "goal": "统计维度选今天时按小时汇总",
+               "why": format!("这条也是统计页的展示要求，和 {item} 改的是同一个页面。")})
+    });
+    k.core
+        .say(
+            WS,
+            "统计信息如果维度是今天，那里面的统计数据粒度应该是小时级的",
+            &[],
+        )
+        .unwrap();
+    let ms = settle(&k, 2).await;
+    let card = &ms[1];
+    assert_eq!(
+        card.text,
+        format!(
+            "这条也是统计页的展示要求，和 {i} 改的是同一个页面，可以和它一起实现和验收。建议追加到 {i}「统计页优化」，你想追加进去，还是单独建一个事项？"
+        )
+    );
+    assert!(!card.text.contains("这是给"));
+    let choices = card.meta["suggest"]["choices"].as_array().unwrap();
+    let labels: Vec<&str> = choices
+        .iter()
+        .map(|c| c["label"].as_str().unwrap())
+        .collect();
+    assert_eq!(labels, [format!("追加到 {i}").as_str(), "单独建项"]);
+    assert_eq!(choices[0]["recommended"], true);
+    assert!(
+        k.core.suggest(WS, &card.id, "here").is_err(),
+        "“在这里回答” is not a choice of this card"
+    );
+    /* 单独建项: an item of its own, done by the bot of the item it was close to */
+    let before = items(&k);
+    let h = k.core.suggest(WS, &card.id, "new").unwrap();
+    let made = h.item.expect("an item of its own");
+    assert_ne!(made.id, i);
+    assert_eq!(made.title, "今日统计按小时展示");
+    assert_eq!(made.bot_id.as_deref(), Some("dev"));
+    assert_eq!(items(&k), before + 1);
+    assert!(k.rt.prompts_of(&s).is_empty(), "ST-40 is not disturbed");
+    /* the user names the item: appended without asking */
+    k.core
+        .say(WS, &format!("追加到 {i}：小时粒度的悬浮提示写清区间"), &[])
+        .unwrap();
+    let n = k.db().messages(WS).unwrap().len();
+    let ms = settle(&k, n + 1).await;
+    assert_eq!(ms.last().unwrap().text, format!("已作为补充送到 {i}。"));
+    assert_eq!(k.rt.prompts_of(&s).len(), 1);
+    /* 追加到 ST-40 on the card */
+    k.core.say(WS, "跨日边界也要检查", &[]).unwrap();
+    let ms = settle(&k, ms.len() + 2).await;
+    let card = ms.last().unwrap();
+    assert!(card.meta.get("suggest").is_some(), "{}", card.text);
+    let h = k.core.suggest(WS, &card.id, "item").unwrap();
+    assert_eq!(h.item.unwrap().id, i);
+    let sent = k.rt.prompts_of(&s).len() + k.db().queued(&s).unwrap().len();
+    assert_eq!(sent, 2);
 }
 
 #[tokio::test]

@@ -134,7 +134,9 @@ pub fn facts(c: &Connection, id: &str) -> ApiResult<Option<ItemFacts>> {
             }
             "accept" => {
                 f.summary = draft;
+                // a rework Steve sent back on its own (YOLO) is its check, not something you said
                 if s("choice").as_deref() == Some("rework")
+                    && s("decided_by").as_deref() != Some("yolo")
                     && let Some(t) = s("text")
                 {
                     f.reviews.push(t);
@@ -218,9 +220,13 @@ pub fn doc_text(f: &ItemFacts) -> String {
 }
 
 /// The extraction input (§5.1): goal versions, what you said, answered questions, review notes and the
-/// delivery summary; at most 12000 characters.
+/// delivery summary; at most 12000 characters. The goals are marked as this item's own business: the
+/// model is told restating them is no memory, and [`extract::check`] drops what does.
 pub fn extract_text(f: &ItemFacts) -> String {
     let mut s = format!("事项 {}：{}\n", f.id, f.title);
+    if !f.goals.is_empty() {
+        s.push_str("\n（下面的目标是这件事要做的事，属于事项记录）\n");
+    }
     for (i, g) in f.goals.iter().enumerate() {
         s.push_str(&format!("\n目标 v{}：{g}\n", i + 1));
     }
@@ -334,7 +340,11 @@ pub async fn finished(m: &Modules, kb: &Knowledge, item_id: &str) -> ApiResult<V
         item_id: Some(f.id.clone()),
         session_id: None,
     };
-    extract::run(m, kb, &origin, &extract_text(&f), Some(&f.id)).await
+    let task = extract::Task {
+        goals: &f.goals,
+        events: false,
+    };
+    extract::run(m, kb, &origin, &extract_text(&f), Some(&f.id), task).await
 }
 
 /// The item was deleted: its document and index rows go (§2.1).

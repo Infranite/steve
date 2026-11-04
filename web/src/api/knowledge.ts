@@ -16,7 +16,8 @@ export type DocBrief = {
 export type Doc = DocBrief & { body?: string; about: ObjRef[]; tags: string[]; preview: { seq: number; heading: string; text: string }[]; uses: number; error: string | null }
 export type Hit = { n: number; type: string; id: string; seq: number; title: string; heading?: string; text: string; label: string; source_kind: string; level: Level; visibility: string; score: number; href: string }
 export type Mem = { id: string; kind: string; text: string; source_label: string; level: Level; status: "candidate" | "confirmed" | "stale"; visibility: string; about: ObjRef[]; created: number }
-export type Candidate = { mem: Mem; origin: string; origin_label: string; evidence: string; supersedes: Mem | null; decision_id: string | null }
+/** `record`, `why`, `scope`: what it would become and why it is worth keeping (ST-41; absent on older Hubs) */
+export type Candidate = { mem: Mem; origin: string; origin_label: string; evidence: string; supersedes: Mem | null; decision_id: string | null; record?: string; why?: string; scope?: string }
 /** one entry of `messages.meta.cites` */
 export type Cite = { n: number; label: string; href: string; level: Level }
 export type Use = { n: number; type: string; id: string; seq: number; level: Level; title: string; label: string; href: string; deleted: boolean; use_id: string; query: string; created: number }
@@ -63,4 +64,9 @@ export const VIS: [string, string][] = [["private", "只有我"], ["workspace", 
 export const visLabel = (v: string) => VIS.find((x) => x[0] === v)?.[1] ?? (v.startsWith("team:") ? "团队" : v.startsWith("space:") ? "群" : v)
 export const MEM_KINDS: [string, string][] = [["fact", "事实"], ["preference", "偏好"], ["rule", "规则"], ["event", "事件"], ["summary", "摘要"]]
 export const memKind = (k: string) => MEM_KINDS.find((x) => x[0] === k)?.[1] ?? k
-export const SOURCE_KIND: Record<string, string> = { notes: "笔记", files: "文件", folder: "文件夹", items: "事项", chat: "对话", mems: "记忆", bot_mems: "Bot 记忆" }
+/** the four kinds of record (ST-41): an item's record and the conversation record are kept where they are and
+ *  searchable; only 长期记忆 (preferences, rules you said hold from now on) and 知识条目 (verified facts reusable
+ *  elsewhere) are distilled from them, and both wait for your confirmation */
+export const LONG_TERM = ["preference", "rule"]
+export const recordOf = (kind: string) => (LONG_TERM.includes(kind) ? "长期记忆" : "知识条目")
+export const SOURCE_KIND: Record<string, string> = { notes: "笔记", files: "文件", folder: "文件夹", items: "事项记录", chat: "会话记录", mems: "长期记忆与知识条目", bot_mems: "Bot 记忆" }

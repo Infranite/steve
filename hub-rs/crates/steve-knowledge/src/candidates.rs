@@ -13,7 +13,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use steve_modules::contacts::mcp::McpCx;
-use steve_modules::contacts::memory::MAX_OPEN_CONFIRMS;
+use steve_modules::contacts::memory::{MAX_OPEN_CONFIRMS, confirm_question, record_name};
 use steve_modules::contacts::people_repo::open_mem_confirms;
 use steve_modules::decisions::{self, DecisionCx, DecisionHandler};
 use steve_modules::{ApiError, ApiResult, Body, Caller, Check, Modules};
@@ -28,8 +28,9 @@ use crate::sync;
 
 /// `subject_type` of memory confirm decisions.
 pub const SUBJECT: &str = "mem";
-/// Candidates kept per origin (one item completion, one day of chat, one mail thread …).
-pub const MAX_PER_ORIGIN: usize = 5;
+/// Candidates kept per origin (one item completion, one day of chat, one mail thread …): few, so
+/// each is worth a look; most origins give none.
+pub const MAX_PER_ORIGIN: usize = 3;
 /// Unanswered candidates expire after this long (§5.2).
 pub const EXPIRE_AFTER_MS: i64 = 30 * 24 * 3600 * 1000;
 /// How often the expiry job runs (§10 `kb.candidates_expire`).
@@ -107,6 +108,10 @@ pub struct NewCandidate {
     pub evidence: String,
     /// A confirmed memory this one replaces once confirmed.
     pub supersedes: Option<String>,
+    /// Why it is worth keeping, for the card (empty from `steve_remember`).
+    pub why: String,
+    /// Where it applies, for the card.
+    pub scope: String,
 }
 
 fn cut(s: &str, n: usize) -> String {
@@ -156,7 +161,13 @@ pub fn propose(tx: &Tx, o: &Origin, c: &NewCandidate) -> ApiResult<Mem> {
     ])?;
     let mut mem = mem;
     if open_mem_confirms(tx, &o.ws)? < MAX_OPEN_CONFIRMS {
-        let mut draft = format!("来源：{}", o.label);
+        let mut draft = format!("类型：{} · {}", record_name(&c.kind), kind_name(&c.kind));
+        for (head, v) in [(WHY, &c.why), (SCOPE, &c.scope)] {
+            if !v.trim().is_empty() {
+                draft.push_str(&format!("\n{head}{}", v.trim()));
+            }
+        }
+        draft.push_str(&format!("\n来源：{}", o.label));
         if !evidence.is_empty() {
             draft.push_str(&format!("\n原话：{evidence}"));
         }
@@ -169,7 +180,7 @@ pub fn propose(tx: &Tx, o: &Origin, c: &NewCandidate) -> ApiResult<Mem> {
             &o.ws,
             SUBJECT,
             &mem.id,
-            &format!("记住这条吗？{}", c.text),
+            &confirm_question(&c.kind, &c.text),
             &o.writer,
         );
         nd.draft = Some(draft);
@@ -194,6 +205,38 @@ pub fn propose(tx: &Tx, o: &Origin, c: &NewCandidate) -> ApiResult<Mem> {
         &json!({"origin": o.kind.code(), "origin_id": o.id, "kind": c.kind}),
     )?;
     Ok(mem)
+}
+
+/// Line heads of the confirm card's draft; the 待确认 list reads them back.
+const WHY: &str = "为什么值得保留：";
+const SCOPE: &str = "适用：";
+
+fn kind_name(kind: &str) -> &'static str {
+    match kind {
+        "preference" => "偏好",
+        "rule" => "规则",
+        "event" => "事件",
+        "summary" => "摘要",
+        _ => "事实",
+    }
+}
+
+/// `(why, scope)` written on a candidate's decision (empty without one, or from before ST-41).
+fn reasons(c: &Connection, decision: Option<&str>) -> ApiResult<(String, String)> {
+    let Some(d) = decision else {
+        return Ok(Default::default());
+    };
+    let draft = base::decisions::get(c, d)?
+        .map(|d| d.draft)
+        .unwrap_or_default();
+    let line = |head: &str| {
+        draft
+            .lines()
+            .find_map(|l| l.strip_prefix(head))
+            .unwrap_or_default()
+            .to_string()
+    };
+    Ok((line(WHY), line(SCOPE)))
 }
 
 /// A `mem_candidates` row: `(origin, origin_label, evidence, supersedes)`.
@@ -403,8 +446,12 @@ fn candidates_of(c: &Connection, viewer: &Viewer) -> ApiResult<Vec<Value>> {
             Some(s) => mems::visible(c, viewer, &s)?.map(|o| mem_json(c, &o)),
             None => None,
         };
+        let (why, scope) = reasons(c, mem.decision_id.as_deref())?;
         out.push(json!({
             "mem": mem_json(c, &mem),
+            "record": record_name(&mem.kind),
+            "why": why,
+            "scope": scope,
             "origin": origin,
             "origin_label": label,
             "evidence": evidence,
@@ -535,7 +582,7 @@ const TOOL_KINDS: [&str; 3] = ["fact", "preference", "rule"];
 pub fn remember_tool() -> Value {
     json!({
         "name": REMEMBER,
-        "description": "Save a fact, preference or rule you learned that will matter in later work. It becomes a candidate the user confirms.",
+        "description": "Save something that will matter beyond this task: a rule or preference the user said holds from now on (\"以后…\", \"每次…\"), or a verified fact reusable in other work. Not this task's requirements, progress, decisions or results — those stay in the item. It becomes a candidate the user confirms.",
         "inputSchema": {
             "$schema": "http://json-schema.org/draft-07/schema#",
             "type": "object",
@@ -633,6 +680,8 @@ pub fn remember(m: &Modules, kb: &Knowledge, cx: &McpCx, args: &Value) -> Result
                     level: Level::Conclusion,
                     evidence: String::new(),
                     supersedes: None,
+                    why: String::new(),
+                    scope: String::new(),
                 },
             )
         })

@@ -22,6 +22,7 @@ use steve_store::{Result, Tx, uid};
 
 use crate::port::{Candidate, KnowledgeStore, Pass, Scope};
 use crate::repo;
+use crate::sync;
 use crate::sync::about_names;
 
 /// FTS candidates per pass (§3.3 step 1).
@@ -158,11 +159,7 @@ fn href(c: &Candidate, about: &[ObjRef]) -> String {
 fn title(c: &Candidate) -> String {
     match c.obj_type.as_str() {
         "chunk" => c.title.clone().unwrap_or_default(),
-        "mem" => c
-            .label
-            .strip_prefix("记忆 · ")
-            .unwrap_or(&c.label)
-            .to_string(),
+        "mem" => sync::mem_title(&c.label).to_string(),
         _ => c.label.clone(),
     }
 }
@@ -311,22 +308,14 @@ pub fn anchor_mems(
             continue;
         };
         let names = about_names(c, &m.about)?;
-        let label = if names.is_empty() {
-            "记忆".to_string()
-        } else {
-            format!("记忆 · {names}")
-        };
+        let label = sync::mem_label(&m.kind, &names);
         hits.push(Hit {
             n: hits.len() + 1,
             obj_type: "mem".into(),
             href: format!("#/knowledge?mem={}", m.id),
             obj_id: m.id,
             seq: 0,
-            title: if names.is_empty() {
-                "记忆".into()
-            } else {
-                names.clone()
-            },
+            title: sync::mem_title(&label).to_string(),
             heading: String::new(),
             text: if names.is_empty() {
                 m.text

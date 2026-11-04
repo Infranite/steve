@@ -1,4 +1,6 @@
-/* 知识 (knowledge.md §9): search, memories, notes and documents, sources, and candidates waiting for you.
+/* 知识 (knowledge.md §9): search, long-term memories, knowledge entries, notes and documents, sources, and
+ * candidates waiting for you. The four kinds of record (ST-41): 事项记录 and 会话记录 are documents kept as
+ * they are; 长期记忆 (preference, rule) and 知识条目 (fact, event) are what Steve distils from them, one tab each.
  * Every list is the Hub's; on a Hub without /api/kb the whole page is the "还没有接入" placeholder. */
 import { useHubEvents } from "@/store"
 import { Fragment, useCallback, useEffect, useRef, useState, type ReactNode } from "react"
@@ -16,12 +18,13 @@ import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui
 import { Page, SectionLabel, Group, Row, Segmented, Chips, Empty, StatusDot, go } from "@/ui"
 import { toast, tm } from "@/store"
 import { useUploads } from "@/attach"
-import { kb, levelLabel, visLabel, memKind, MEM_KINDS, SOURCE_KIND, LEVEL_DOT, type Candidate, type DocBrief, type Hit, type KbSource, type Mem } from "@/api/knowledge"
+import { kb, levelLabel, visLabel, memKind, recordOf, MEM_KINDS, SOURCE_KIND, LEVEL_DOT, type Candidate, type DocBrief, type Hit, type KbSource, type Mem } from "@/api/knowledge"
 import { KbGate, LevelSel, VisSel, errMsg } from "@/knowledge/fields"
 import { DocView, NoteView } from "@/knowledge/doc"
 
-type Tab = "搜索" | "记忆" | "笔记与文档" | "来源" | "待确认"
-let tab: Tab = "记忆", query = ""
+type Tab = "搜索" | "长期记忆" | "知识条目" | "笔记与文档" | "来源" | "待确认"
+type RecordName = "长期记忆" | "知识条目"
+let tab: Tab = "长期记忆", query = ""
 
 /** `#/knowledge`, `#/knowledge?mem=…`, `#/knowledge/doc/:id?seq=`, `#/knowledge/note/:id` */
 export function KnowledgeView({ sub, id }: { sub?: string; id?: string }) {
@@ -34,13 +37,13 @@ const hashParam = (k: string) => new URLSearchParams(location.hash.split("?")[1]
 function KnowledgeHome() {
   const [, f] = useState(0), r = () => f((x) => x + 1)
   const focusMem = hashParam("mem")
-  if (focusMem && tab !== "记忆") tab = "记忆"
+  if (focusMem && tab !== "长期记忆" && tab !== "知识条目") tab = "长期记忆"
   const [pend, setPend] = useState(0)
   const loadPend = useCallback(() => { kb.candidates().then((xs) => setPend(xs.length), () => {}) }, [])
   useEffect(loadPend, [loadPend])
   useHubEvents(["mm", "kb"], loadPend)
   const setTab = (t: Tab) => { tab = t; r() }
-  const opts = [["搜索", "搜索"], ["记忆", "记忆"], ["笔记与文档", "笔记与文档"], ["来源", "来源"],
+  const opts = [["搜索", "搜索"], ["长期记忆", "长期记忆"], ["知识条目", "知识条目"], ["笔记与文档", "笔记与文档"], ["来源", "来源"],
     ["待确认", <span key="p" className="inline-flex items-center gap-1">待确认{pend > 0 && <span className="rounded-full bg-attention px-1.5 text-[10px] font-semibold text-white" data-pending-count>{pend}</span>}</span>, "待确认"]] as const
   return (
     <Page title="知识" sub="Steve 记得的事和能查到的资料" max={760}>
@@ -49,7 +52,7 @@ function KnowledgeHome() {
         <div className="-mx-1 overflow-x-auto px-1 pb-0.5 [scrollbar-width:none]"><Segmented value={tab} onChange={setTab} options={opts} /></div>
         <div data-kb-tab={tab}>
           {tab === "搜索" && <SearchTab q={query} />}
-          {tab === "记忆" && <MemsTab focus={focusMem} />}
+          {(tab === "长期记忆" || tab === "知识条目") && <MemsTab key={tab} record={tab} focus={focusMem} onRecord={setTab} />}
           {tab === "笔记与文档" && <DocsTab />}
           {tab === "来源" && <SourcesTab />}
           {tab === "待确认" && <CandidatesTab onChange={setPend} />}
@@ -66,7 +69,7 @@ function SearchBox({ onQuery }: { onQuery: (q: string) => void }) {
     <div role="search" className="flex items-center gap-2 rounded-xl border bg-card px-3 focus-within:border-blue/60">
       <SearchIcon className="size-4 shrink-0 text-muted-foreground" strokeWidth={1.75} />
       <input type="search" aria-label="搜索知识库" value={v} onChange={(e) => set(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") { clearTimeout(t.current); onQuery(v.trim()) } }}
-        placeholder="搜索记忆、笔记和文档" maxLength={200} className="h-10 min-w-0 flex-1 bg-transparent text-[14px] outline-none placeholder:text-tertiary [&::-webkit-search-cancel-button]:hidden" data-kb-search />
+        placeholder="搜索长期记忆、知识、笔记和文档" maxLength={200} className="h-10 min-w-0 flex-1 bg-transparent text-[14px] outline-none placeholder:text-tertiary [&::-webkit-search-cancel-button]:hidden" data-kb-search />
       {v && <Button variant="ghost" size="icon-xs" aria-label="清除" className="text-muted-foreground" onClick={() => { setV(""); onQuery("") }}><XIcon /></Button>}
     </div>
   )
@@ -90,7 +93,7 @@ function SearchTab({ q }: { q: string }) {
     kb.search(q).then((x) => on && setRes({ q, hits: x.hits, ms: x.took_ms }), (e) => on && setErr(errMsg(e)))
     return () => { on = false }
   }, [q])
-  if (!q) return <Empty icon={<SearchIcon />} title="在知识库里找" sub="记忆、笔记、文件夹和事项里的内容都能搜到。" />
+  if (!q) return <Empty icon={<SearchIcon />} title="在知识库里找" sub="长期记忆、知识条目、笔记、文件夹、事项记录和会话记录都能搜到。" />
   if (err) return <Empty title="搜索失败" sub={err} />
   if (!res || res.q !== q) return <div className="flex justify-center py-12" role="status" aria-label="正在搜索"><Spinner className="size-5 text-muted-foreground" /></div>
   if (!res.hits.length) return <Empty title="没有找到" sub={`知识库里没有和“${q}”相关的内容。`} />
@@ -106,35 +109,46 @@ function SearchTab({ q }: { q: string }) {
   )
 }
 
-/* ───────── 记忆 ───────── */
+/* ───────── 长期记忆 / 知识条目 ───────── */
+const RECORD: Record<RecordName, { kind: string; hint: string; empty: string; note: string }> = {
+  长期记忆: { kind: "rule", hint: "添加一条长期规则，例如：周五下午不安排部署", empty: "你明确说过以后都要这样的偏好和规则，确认后记在这里，每次相关的事都会带上。",
+    note: "长期记忆是你明确表达、以后都适用的偏好和规则。某件事里的一次性要求留在那件事的记录里，不会记成长期记忆。" },
+  知识条目: { kind: "fact", hint: "添加一条知识，例如：Acme 的合同每年 3 月续签", empty: "做事过程中确认过、以后别的事也用得上的事实和做法，确认后记在这里。",
+    note: "知识条目是确认过、能在别的事里复用的事实和做法。“这次改了什么”属于事项记录，可以直接搜到，不另记成知识。" },
+}
 const aboutKey = (m: Mem) => m.about.map((a) => a.type + ":" + a.id).sort().join(",")
 const aboutLabel = (m: Mem) => (m.about.length ? "关于 " + m.about.map((a) => a.name ?? (a.type === "party" ? "联系人 " : a.type === "item" ? "事项 " : "") + a.id).join("、") : "通用")
 
-function MemsTab({ focus }: { focus: string | null }) {
+function MemsTab({ record, focus, onRecord }: { record: RecordName; focus: string | null; onRecord: (r: RecordName) => void }) {
+  const R = RECORD[record]
   const [xs, setXs] = useState<Mem[] | null>(null), [err, setErr] = useState(""), [kind, setKind] = useState("全部"), [v, setV] = useState(""), [busy, setBusy] = useState(false)
   const load = useCallback(() => kb.mems().then(setXs, (e) => setErr(errMsg(e))), [])
   useEffect(() => { void load() }, [load])
   useHubEvents(["mm"], () => void load())
+  /* a linked memory opens on the tab it belongs to */
+  const focused = focus ? xs?.find((m) => m.id === focus) : undefined
+  useEffect(() => { if (focused && recordOf(focused.kind) !== record) onRecord(recordOf(focused.kind) as RecordName) }, [focused, record, onRecord])
   useEffect(() => { if (focus && xs) document.querySelector(`[data-mem="${CSS.escape(focus)}"]`)?.scrollIntoView({ block: "center" }) }, [focus, xs])
   const add = async () => {
     const t = v.trim(); if (!t || busy) return
     setBusy(true)
-    try { await kb.addMem({ text: t }); setV(""); toast("已记下"); await load() } catch (e) { toast(errMsg(e)) } finally { setBusy(false) }
+    try { await kb.addMem({ text: t, kind: R.kind }); setV(""); toast("已记下"); await load() } catch (e) { toast(errMsg(e)) } finally { setBusy(false) }
   }
   const patch = async (m: Mem, p: Parameters<typeof kb.patchMem>[1]) => { try { const n = await kb.patchMem(m.id, p); setXs((a) => a?.map((x) => (x.id === m.id ? { ...x, ...n } : x)) ?? null) } catch (e) { toast(errMsg(e)) } }
   const remove = async (m: Mem) => { try { await kb.deleteMem(m.id); setXs((a) => a?.filter((x) => x.id !== m.id) ?? null); toast("已删除") } catch (e) { toast(errMsg(e)) } }
-  const kinds = ["全部", ...MEM_KINDS.filter(([k]) => xs?.some((m) => m.kind === k)).map(([, l]) => l)]
-  const shown = (xs ?? []).filter((m) => kind === "全部" || memKind(m.kind) === kind)
+  const mine = (xs ?? []).filter((m) => recordOf(m.kind) === record)
+  const kinds = ["全部", ...MEM_KINDS.filter(([k]) => mine.some((m) => m.kind === k)).map(([, l]) => l)]
+  const shown = mine.filter((m) => kind === "全部" || memKind(m.kind) === kind)
   const groups = new Map<string, Mem[]>(); for (const m of shown) { const k = aboutKey(m); groups.set(k, [...(groups.get(k) ?? []), m]) }
   return (
     <div className="flex flex-col gap-6">
       <div className="flex items-center gap-2 rounded-xl border bg-card py-1 pl-3 pr-1 focus-within:border-blue/60">
-        <input aria-label="添加一条记忆" value={v} onChange={(e) => setV(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && !e.nativeEvent.isComposing) void add() }} maxLength={2000}
-          placeholder="添加一条记忆，例如：周五下午不安排部署" className="h-8 min-w-0 flex-1 bg-transparent text-[14px] outline-none placeholder:text-tertiary" data-mem-input />
+        <input aria-label={"添加一条" + record} value={v} onChange={(e) => setV(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && !e.nativeEvent.isComposing) void add() }} maxLength={2000}
+          placeholder={R.hint} className="h-8 min-w-0 flex-1 bg-transparent text-[14px] outline-none placeholder:text-tertiary" data-mem-input />
         <Button size="sm" disabled={!v.trim() || busy} onClick={() => void add()} data-mem-add>{busy ? <Spinner className="size-3.5" /> : <PlusIcon />}添加</Button>
       </div>
       {kinds.length > 2 && <Chips value={kinds.includes(kind) ? kind : "全部"} onChange={setKind} options={kinds} />}
-      {err ? <Empty title="记忆打不开" sub={err} /> : !xs ? <Loading /> : !shown.length ? <Empty title="还没有记忆" sub="你说的、Steve 从事项和对话里学到并经你确认的事，都记在这里。" /> :
+      {err ? <Empty title={record + "打不开"} sub={err} /> : !xs ? <Loading /> : !shown.length ? <Empty title={"还没有" + record} sub={R.empty} /> :
         [...groups.entries()].map(([k, ms]) => (
           <section key={k}><SectionLabel>{aboutLabel(ms[0])} · {ms.length}</SectionLabel>
             <Group>{ms.map((m) => (
@@ -148,7 +162,7 @@ function MemsTab({ focus }: { focus: string | null }) {
                 </span>
               </Row>))}</Group>
           </section>))}
-      <div className="-mt-2 px-1 type-footnote text-muted-foreground">披露级别决定回复里能说到什么程度：“仅用于推理”只帮 Steve 判断，不会被说出来；“不可使用”的不会进入任何回答。</div>
+      <div className="-mt-2 px-1 type-footnote text-muted-foreground">{R.note}披露级别决定回复里能说到什么程度：“仅用于推理”只帮 Steve 判断，不会被说出来；“不可使用”的不会进入任何回答。</div>
     </div>
   )
 }
@@ -317,7 +331,7 @@ function CandidatesTab({ onChange }: { onChange: (n: number) => void }) {
   }
   if (err) return <Empty title="待确认打不开" sub={err} />
   if (!xs) return <Loading />
-  if (!xs.length) return <Empty title="没有待确认的记忆" sub="Steve 从事项和对话里学到的事，会先放在这里等你确认。" />
+  if (!xs.length) return <Empty title="没有待确认的条目" sub="Steve 从事项和对话里发现值得长期保留的规则或知识时，会先放在这里等你确认。大多数事项和对话不会产生新条目。" />
   /* the batch call takes at most 50 ids */
   const ids = xs.slice(0, 50).map((c) => c.mem.id)
   return (
@@ -326,14 +340,14 @@ function CandidatesTab({ onChange }: { onChange: (n: number) => void }) {
         待确认 · {xs.length}</SectionLabel>
       <Group>{xs.map((c) => (
         <Row key={c.mem.id} data-candidate={c.mem.id} className={STACK}
-          title={<span className="inline-flex flex-wrap items-center gap-2">{c.mem.text}<Badge variant="outline" className="font-normal text-attention">待确认</Badge></span>}
-          sub={<span className="flex flex-col gap-0.5"><span>{memKind(c.mem.kind)} · 来源：{c.origin_label || c.mem.source_label}</span>{c.evidence && <span className="break-words">原话：{c.evidence}</span>}{c.supersedes && <span className="break-words">会替换：{c.supersedes.text}</span>}</span>}>
+          title={<span className="inline-flex flex-wrap items-center gap-2">{c.mem.text}<Badge variant="outline" className="font-normal text-muted-foreground" data-cand-record>{c.record ?? recordOf(c.mem.kind)}</Badge></span>}
+          sub={<span className="flex flex-col gap-0.5"><span>{memKind(c.mem.kind)} · 来源：{c.origin_label || c.mem.source_label}</span>{c.why && <span className="break-words text-foreground/80" data-cand-why>为什么值得保留：{c.why}</span>}{c.scope && <span className="break-words">适用：{c.scope}</span>}{c.evidence && <span className="break-words">原话：{c.evidence}</span>}{c.supersedes && <span className="break-words">会替换：{c.supersedes.text}</span>}</span>}>
           <span className="flex items-center gap-1">
-            <Button size="xs" variant="ghost" className="text-muted-foreground" disabled={busy} onClick={() => void resolve([c.mem.id], "no")} data-cand-no>不对</Button>
-            <Button size="xs" variant="outline" disabled={busy} onClick={() => void resolve([c.mem.id], "yes")} data-cand-yes>确认</Button>
+            <Button size="xs" variant="ghost" className="text-muted-foreground" disabled={busy} onClick={() => void resolve([c.mem.id], "no")} data-cand-no>不保存</Button>
+            <Button size="xs" variant="outline" disabled={busy} onClick={() => void resolve([c.mem.id], "yes")} data-cand-yes>保存</Button>
           </span>
         </Row>))}</Group>
-      <div className="mt-2 px-1 type-footnote text-muted-foreground">确认后才会用到；30 天没处理的会自动过期。</div>
+      <div className="mt-2 px-1 type-footnote text-muted-foreground">确认后才会用到；30 天没处理的会自动过期。只是这件事的要求、复述目标或单次反馈的，选“不保存”即可，事项记录里仍然保留。</div>
     </section>
   )
 }

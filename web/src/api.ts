@@ -13,6 +13,8 @@ export type RItemDetail = RItem & { goalsList: { version: number; text: string; 
 export type RSession = { id: string; workspace_id: string; item_id: string | null; no: number; bot_id: string | null; harness: string; model: string | null; reasoning_effort?: string | null; cwd: string; harness_session_id?: string | null; status: "starting" | "running" | "idle" | "ended" | "error"; used: number | null; size: number | null; cost: number | null; title: string; device_id: string; source: string; readonly: boolean; busy: boolean; queued: RQueued[]; created: number; updated: number }
 /** a message waiting for the session's next turn */
 export type RQueued = { id: string; session_id?: string; text: string; via: string; created: number; files?: RFile[] }
+/** a suggestion card's choice: `here` answers in place, `item` makes the item (or, carrying `item`, appends to that one), `new` makes an item of its own */
+export type SuggestChoice = "here" | "item" | "new"
 export type SendNowResult = { result: "interrupted" | "sent" | "waiting"; reason?: string }
 export type RDecision = { id: string; kind: "accept" | "ask" | "approve" | "fail" | "propose" | "confirm"; subject_type: string; subject_id: string; item_id: string | null; session_id: string | null; question: string; draft: string; options: string[]; status: "open" | "resolved" | "expired"; result: any; requested_by: string; created: number; resolved: number | null; undo: any
   /** opened from inside a turn that is still going: the answer reaches the agent once it stops */
@@ -138,7 +140,7 @@ export const api = {
   promote: (msg: string) => post<RItem>(`/thread/${msg}/promote`),
   /* thread routing (§3.4–3.5, §7.2): offers, suggestion cards, corrections, research runs */
   offer: (msg: string, take: boolean) => post<{ message_id: string; item?: RItem }>(`/thread/${msg}/offer`, { take }),
-  suggest: (msg: string, choice: "here" | "item") => post<{ message_id: string; item?: RItem }>(`/thread/${msg}/suggest`, { choice }),
+  suggest: (msg: string, choice: SuggestChoice) => post<{ message_id: string; item?: RItem }>(`/thread/${msg}/suggest`, { choice }),
   reroute: (msg: string, to: string) => post<{ message_id: string; item?: RItem }>(`/thread/${msg}/reroute`, { to }),
   stopRun: (run: string) => post<{ ok: boolean }>(`/thread/runs/${run}/stop`), cancelRun: (run: string) => del<{ ok: boolean }>(`/thread/runs/${run}`),
   threadFollow: (item: string, follow: boolean) => patch(`/items/${item}/thread`, { follow }),

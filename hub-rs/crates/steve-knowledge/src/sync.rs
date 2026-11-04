@@ -17,6 +17,7 @@ use crate::chunk::Chunk;
 use crate::index::{self, ChunkMeta};
 use crate::repo;
 use crate::sources;
+use steve_modules::contacts::memory::record_name;
 
 /// How often the sweep runs (§10).
 pub const SWEEP_EVERY: Duration = Duration::from_secs(5 * 60);
@@ -32,6 +33,55 @@ pub fn about_names(c: &Connection, about: &[ObjRef]) -> Result<String> {
         }
     }
     Ok(names.join("、"))
+}
+
+/// The citation label of a memory: what it is (长期记忆 or 知识条目, ST-41), then whom it is about.
+pub fn mem_label(kind: &str, names: &str) -> String {
+    let what = record_name(kind);
+    if names.is_empty() {
+        what.to_string()
+    } else {
+        format!("{what} · {names}")
+    }
+}
+
+/// What a memory's citation label says after what it is: the names, or the label itself without any.
+/// Labels written before ST-41 start with “记忆”.
+pub fn mem_title(label: &str) -> &str {
+    ["长期记忆 · ", "知识条目 · ", "记忆 · "]
+        .iter()
+        .find_map(|p| label.strip_prefix(p))
+        .unwrap_or(label)
+}
+
+/// Once per workspace (ST-41): index labels written before the four kinds of record were named —
+/// “事项 · ”, “对话 · ”, “记忆” — get the names the pages use now. Labels are not searched, so the
+/// rows are updated in place. Returns how many changed.
+pub fn relabel_once(tx: &Tx, ws: &str, now: i64) -> Result<usize> {
+    const MARK: &str = "relabel:records";
+    if repo::mark(tx, ws, MARK)?.is_some() {
+        return Ok(0);
+    }
+    let mut n = 0;
+    for (kind, old, new) in [("items", "事项", "事项记录"), ("chat", "对话", "会话记录")]
+    {
+        n += tx
+            .prepare_cached(
+                "UPDATE kb_chunks SET label = ?3 || substr(label, 3)
+                  WHERE workspace_id = ?1 AND source_kind = ?2 AND obj_type = 'chunk' AND label LIKE ?4",
+            )?
+            .execute(params![ws, kind, new, format!("{old} · %")])?;
+    }
+    n += tx
+        .prepare_cached(
+            "UPDATE kb_chunks SET label = (SELECT CASE WHEN m.kind IN ('preference', 'rule') THEN '长期记忆' ELSE '知识条目' END
+                                             FROM mems m WHERE m.id = kb_chunks.obj_id) || substr(label, 3)
+              WHERE workspace_id = ?1 AND obj_type = 'mem' AND (label = '记忆' OR label LIKE '记忆 · %')
+                AND EXISTS (SELECT 1 FROM mems m WHERE m.id = kb_chunks.obj_id)",
+        )?
+        .execute([ws])?;
+    repo::set_mark(tx, ws, MARK, "done", now)?;
+    Ok(n)
 }
 
 /// Does this memory belong in the index? Confirmed, not `never`, not expired.
@@ -55,11 +105,7 @@ pub fn sync_mem(tx: &Tx, id: &str, now: i64) -> Result<bool> {
     } else {
         format!("{names}：{}", m.text)
     };
-    let label = if names.is_empty() {
-        "记忆".to_string()
-    } else {
-        format!("记忆 · {names}")
-    };
+    let label = mem_label(&m.kind, &names);
     let len = text.chars().count();
     let c = Chunk {
         seq: 0,
@@ -89,6 +135,7 @@ pub fn sync_mem(tx: &Tx, id: &str, now: i64) -> Result<bool> {
 
 /// Memories of `ws` changed since the last sweep, plus index entries whose memory is gone or expired.
 pub fn sweep_mems(tx: &Tx, ws: &str, now: i64) -> Result<usize> {
+    relabel_once(tx, ws, now)?;
     let since: i64 = repo::mark(tx, ws, "sync:mems")?
         .and_then(|v| v.parse().ok())
         .unwrap_or(-1);

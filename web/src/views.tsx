@@ -28,7 +28,7 @@ import { ItemPeopleProp } from "@/people/item-people"
 import { QueuedComment, queuedComments, queueNote, QueueStrip } from "@/queue"
 import { NativeIdLine, ResumeCard } from "@/resume"
 import { ItemStatsRows, SessionStats } from "@/stats/drill"
-import { accOf, active, addDep, archive, bulk, closeRel, deleteItem, depsOpen, doFork, gBuild, gComps, hm, importSessions, interrupt, it, itemThread, link, loadEvents, loadItem, loadLocalSessions, markDone, newItem, patchItem, pending, pendingCards, reassign, rmDep, saveGoal, sessPatch, sessRemove, sessSend, setAcc, setSt, setTags, setKind, kindOf, kindTags, isKind, DOMAIN_CATS, snoozed, st, stageOf, star, supp, tag, threadFollow, tm, toast, undoDecision, unsnooze, WT, type Item, type Out, type PlanRound } from "@/store"
+import { accOf, active, addDep, archive, bulk, closeRel, deleteItem, depsOpen, doFork, gBuild, gComps, hm, importSessions, interrupt, it, itemThread, link, loadEvents, loadItem, loadLocalSessions, markDone, newItem, patchItem, pending, pendingCards, reassign, rmDep, saveGoal, sessPatch, sessRemove, sessSend, setAcc, setSt, setTags, setKind, kindOf, kindTags, isKind, DOMAIN_CATS, snoozed, st, stageOf, star, supp, tag, threadFollow, tm, toast, undoDecision, unsnooze, WT, type Item, type Out, type PlanRound, type Reply } from "@/store"
 import { BotAvatar, BotName, Chips, closeSheet, Composer, DecisionCard, Empty, go, Group, ItemNo, KindTag, Meta, openSheet, Page, RelNote, ReplyBlock, Row, RunBar, SectionLabel, Segmented, SessionBlock, Status, StatusDot, Tags, ThemeSwitch, Transcript, type ComposerHandle } from "@/ui"
 import { ChoiceCards, ItemRow, PlanBar, ProjectChip, Select, selected } from "@/view-shared"
 import { choiceText, YoloItemSwitch, YoloMark } from "@/yolo/badges"
@@ -366,9 +366,10 @@ export function ItemView({ id }: { id: string }) {
       </Popover>
     </div>
   )
+  const replies: Reply[] = i.tl.flatMap((e) => e[0] === "reply" && e[1] ? [e[1]] : [])
   const entry = ({ e, n }: { e: any[]; n: number }) => {
-    if (e[0] === "sess") return <SessionBlock key={e[1]} k={e[1]} defaultOpen={false} />
-    if (e[0] === "reply") return <ReplyBlock key={n} r={e[1]} />
+    if (e[0] === "sess") return <SessionBlock key={e[1]} k={e[1]} defaultOpen={false} replies={replies} />
+    if (e[0] === "reply") return <ReplyBlock key={"reply:" + e[1].s + ":" + e[1].from} r={e[1]} />
     const q = e[0] === "me" && queued.byComment.get(n)
     if (q) return (
       <div key={n} className="flex items-start gap-2 py-1.5" data-comment><span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-muted text-[10px] font-medium text-muted-foreground">我</span>

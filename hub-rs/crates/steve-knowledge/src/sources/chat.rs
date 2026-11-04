@@ -180,7 +180,15 @@ pub async fn extract_day(m: &Modules, kb: &Knowledge, ws: &str, day: &str) -> Ap
         item_id: None,
         session_id: None,
     };
-    extract::run(m, kb, &origin, &clip(&text, MAX_INPUT), None).await
+    extract::run(
+        m,
+        kb,
+        &origin,
+        &clip(&text, MAX_INPUT),
+        None,
+        extract::Task::default(),
+    )
+    .await
 }
 
 /// One run of the job at `now`: today's document of every workspace (when `today` is set), and after

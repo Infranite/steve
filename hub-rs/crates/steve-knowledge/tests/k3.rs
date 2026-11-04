@@ -9,7 +9,7 @@ use std::sync::Arc;
 use axum::Router;
 use serde_json::{Value, json};
 use steve_knowledge::candidates::{
-    self, EXPIRE_AFTER_MS, MemDecisions, NewCandidate, Origin, OriginKind, SAVED,
+    self, EXPIRE_AFTER_MS, MAX_PER_ORIGIN, MemDecisions, NewCandidate, Origin, OriginKind, SAVED,
 };
 use steve_knowledge::extract::PROMPT_HEAD;
 use steve_knowledge::retrieve::{Purpose, Query, retrieve};
@@ -44,7 +44,7 @@ fn setup() -> Env {
                  INSERT INTO item_goals (item_id, version, text, created) VALUES
                    ('ST-12', 1, '给 Acme 写续签邮件', 1), ('ST-12', 2, '给 Acme 写续签邮件，抄送 Sarah', 2);
                  INSERT INTO timeline (item_id, ts, actor, kind, text) VALUES
-                   ('ST-12', 3, 'usr_dev', 'me', 'Sarah 喜欢简短的邮件，别超过五行'),
+                   ('ST-12', 3, 'usr_dev', 'me', 'Sarah 一直喜欢简短的邮件，别超过五行'),
                    ('ST-12', 4, 'usr_dev', 'me', '验收通过');
                  INSERT INTO decisions (id, workspace_id, kind, subject_type, subject_id, item_id, question, draft, options, status, result, requested_by, created) VALUES
                    ('dec_ask', 'default', 'ask', 'question', 'ses_1', 'ST-12', '用中文还是英文？', '', '[]', 'resolved', '{\"answer\":\"Acme 的邮件一律用英文\"}', 'bot', 5),
@@ -115,6 +115,8 @@ impl Env {
                                 level: Level::Conclusion,
                                 evidence: String::new(),
                                 supersedes: None,
+                                why: String::new(),
+                                scope: String::new(),
                             },
                         )
                     })
@@ -126,14 +128,16 @@ impl Env {
 
 fn item_json(extra: Value) -> String {
     let mut items = vec![
-        json!({"kind":"preference","text":"Sarah 喜欢简短的邮件，不超过五行","about":["Sarah Chen"],"level":"conclusion","evidence":"Sarah 喜欢简短的邮件，别超过五行","dup_of":null,"conflicts":null,"why":"以后写信用"}),
-        json!({"kind":"rule","text":"给 Acme 的邮件一律用英文","about":["Acme"],"level":"public","evidence":"Acme 的邮件一律用英文","dup_of":null,"conflicts":null}),
-        json!({"kind":"fact","text":"重复的一条","about":[],"dup_of":"mm_whatever"}),
-        json!({"kind":"fact","text":"王五负责 Acme 的采购","about":["王五"]}),
-        json!({"kind":"fact","text":"关于 Sarah 和王五","about":["Sarah","王五"],"level":"reasoning"}),
+        json!({"kind":"preference","text":"Sarah 喜欢简短的邮件，不超过五行","about":["Sarah Chen"],"level":"conclusion","evidence":"Sarah 一直喜欢简短的邮件，别超过五行","basis":"explicit","dup_of":null,"conflicts":null,"why":"以后写信用","scope":"给 Sarah 写邮件时"}),
+        json!({"kind":"rule","text":"给 Acme 的邮件一律用英文","about":["Acme"],"level":"public","evidence":["Acme 的邮件一律用英文"],"basis":"explicit","dup_of":null,"conflicts":null}),
+        json!({"kind":"fact","text":"重复的一条","about":[],"evidence":"五行以内","dup_of":"mm_whatever"}),
+        json!({"kind":"preference","text":"用户希望续签邮件抄送 Sarah","about":[],"evidence":"给 Acme 写续签邮件，抄送 Sarah","basis":"explicit"}),
+        json!({"kind":"fact","text":"没有原话的一条","about":[]}),
+        json!({"kind":"fact","text":"王五负责 Acme 的采购","about":["王五"],"evidence":"五行以内"}),
+        json!({"kind":"fact","text":"关于 Sarah 和王五","about":["Sarah","王五"],"level":"reasoning","evidence":"写好了续签邮件草稿"}),
     ];
     for i in 0..5 {
-        items.push(json!({"kind":"fact","text":format!("额外的第 {i} 条"),"about":[]}));
+        items.push(json!({"kind":"fact","text":format!("额外的第 {i} 条"),"about":[],"evidence":"五行以内"}));
     }
     if let Value::Array(x) = extra {
         items.splice(0..0, x);
@@ -142,17 +146,20 @@ fn item_json(extra: Value) -> String {
 }
 
 #[tokio::test]
-async fn item_completion_yields_at_most_five_filtered_candidates() {
+async fn item_completion_yields_at_most_three_filtered_candidates() {
     let e = setup();
     e.env.gateway.script(PROMPT_HEAD, item_json(json!([])));
     let got = items::finished(&e.env.modules, &e.kb, "ST-12")
         .await
         .unwrap();
 
-    // ≤5, the dup and the unresolvable “关于” dropped, the partly-resolved one kept with what resolved.
-    assert_eq!(got.len(), 5, "{got:#?}");
+    // ≤3; the dup, the one-off request that restates the goal, the one without a quote and the
+    // unresolvable “关于” dropped; the partly-resolved one kept with what resolved.
+    assert_eq!(got.len(), MAX_PER_ORIGIN, "{got:#?}");
     let texts: Vec<&str> = got.iter().map(|m| m.text.as_str()).collect();
     assert!(!texts.contains(&"重复的一条"));
+    assert!(!texts.contains(&"用户希望续签邮件抄送 Sarah"));
+    assert!(!texts.contains(&"没有原话的一条"));
     assert!(!texts.contains(&"王五负责 Acme 的采购"));
     assert_eq!(texts[0], "Sarah 喜欢简短的邮件，不超过五行");
     assert_eq!(got[0].about, vec![ObjRef::new("party", "ct_sarah")]);
@@ -176,21 +183,45 @@ async fn item_completion_yields_at_most_five_filtered_candidates() {
         assert_eq!(d.kind, "confirm");
         assert_eq!(d.subject_type, "mem");
         assert_eq!(d.status, "open");
-        assert_eq!(d.question, format!("记住这条吗？{}", m.text));
-        assert!(d.draft.starts_with("来源：ST-12 交付时"), "{}", d.draft);
+        let what = if m.kind == "fact" {
+            "知识条目"
+        } else {
+            "长期记忆"
+        };
+        assert_eq!(d.question, format!("存为{what}吗？{}", m.text));
+        assert!(d.draft.starts_with(&format!("类型：{what}")), "{}", d.draft);
+        assert!(d.draft.contains("\n来源：ST-12 交付时"), "{}", d.draft);
     }
+    let first = e.decision(got[0].decision_id.as_deref().unwrap()).draft;
     assert!(
-        e.decision(got[0].decision_id.as_deref().unwrap())
-            .draft
-            .contains("\n原话：Sarah 喜欢简短的邮件，别超过五行")
+        first.contains("\n原话：Sarah 一直喜欢简短的邮件，别超过五行"),
+        "{first}"
     );
+    assert!(
+        first.starts_with(
+            "类型：长期记忆 · 偏好\n为什么值得保留：以后写信用\n适用：给 Sarah 写邮件时\n"
+        ),
+        "{first}"
+    );
+    // The 待确认 list says what each one is and why it is worth keeping.
+    let (_, list) = e.me("GET", "/kb/candidates", None).await;
+    let row = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["mem"]["id"] == got[0].id.as_str())
+        .unwrap();
+    assert_eq!(row["record"], "长期记忆");
+    assert_eq!(row["why"], "以后写信用");
+    assert_eq!(row["scope"], "给 Sarah 写邮件时");
 
     // The prompt had the goals, what you said, the answer, the summary and the names.
     let p = e.env.gateway.last_prompt().unwrap();
     for s in [
         "ST-12 交付时",
         "目标 v2：给 Acme 写续签邮件，抄送 Sarah",
-        "你补充：Sarah 喜欢简短的邮件",
+        "属于事项记录",
+        "你补充：Sarah 一直喜欢简短的邮件",
         "你的回答：Acme 的邮件一律用英文",
         "交付摘要：写好了续签邮件草稿",
         "- Sarah Chen（联系人）",
@@ -243,8 +274,19 @@ async fn item_completion_yields_at_most_five_filtered_candidates() {
     let again = items::finished(&e.env.modules, &e.kb, "ST-12")
         .await
         .unwrap();
-    assert_eq!(again.len(), 5);
+    // …but what is already waiting is not proposed twice: the pending ones are shown to the model
+    // and the server drops what repeats them (the extra facts behind them move up).
+    assert!(!again.is_empty());
+    assert!(
+        again.iter().all(|m| got.iter().all(|g| g.text != m.text)),
+        "{again:#?}"
+    );
     assert_eq!(e.env.gateway.prompts.lock().unwrap().len(), calls + 1);
+    let p = e.env.gateway.last_prompt().unwrap();
+    assert!(
+        p.contains(&format!("[{}]（待确认） Sarah 喜欢简短的邮件", got[0].id)),
+        "{p}"
+    );
 }
 
 #[tokio::test]
@@ -303,8 +345,8 @@ async fn confirming_with_supersedes_makes_the_old_memory_stale() {
     e.env.gateway.script(
         PROMPT_HEAD,
         json!({"items": [{"kind": "preference", "text": "Sarah 喜欢简短的邮件", "about": ["Sarah Chen"],
-            "evidence": "Sarah 喜欢简短的邮件，别超过五行", "dup_of": null, "conflicts": old_id},
-            {"kind": "fact", "text": "冲突对象不存在", "conflicts": "mm_nope"}]})
+            "evidence": "Sarah 一直喜欢简短的邮件，别超过五行", "dup_of": null, "conflicts": old_id},
+            {"kind": "fact", "text": "冲突对象不存在", "evidence": "五行以内", "conflicts": "mm_nope"}]})
         .to_string(),
     );
     let got = items::finished(&e.env.modules, &e.kb, "ST-12")
@@ -589,9 +631,36 @@ async fn chat_days_are_documents_and_extracted_once() {
         .unwrap();
     assert_eq!(hits.len(), 1, "{hits:#?}");
     assert_eq!(hits[0].obj_id, doc);
-    assert_eq!(hits[0].label, "对话 · 2026-10-31 的对话");
+    assert_eq!(hits[0].label, "会话记录 · 2026-10-31 的对话");
     assert!(hits[0].text.contains("我（10:00）：以后周五下午不安排部署"));
     assert!(!hits[0].text.contains("别的空间"));
+
+    // Labels written before ST-41 get the new names once, in place.
+    let label = |c: &rusqlite::Connection| -> String {
+        c.query_row(
+            "SELECT label FROM kb_chunks WHERE obj_id = ?",
+            [&doc],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    let relabeled = e
+        .env
+        .store()
+        .transaction(|tx| {
+            tx.execute(
+                "UPDATE kb_chunks SET label = '对话 · 2026-10-31 的对话' WHERE obj_id = ?",
+                [&doc],
+            )?;
+            let n = steve_knowledge::sync::relabel_once(tx, WS, 1)?;
+            let again = steve_knowledge::sync::relabel_once(tx, WS, 2)?;
+            Ok::<_, steve_store::StoreError>((n, again, label(tx)))
+        })
+        .unwrap();
+    assert_eq!(
+        relabeled,
+        (1, 0, "会话记录 · 2026-10-31 的对话".to_string())
+    );
 
     e.env.gateway.script(
         PROMPT_HEAD,

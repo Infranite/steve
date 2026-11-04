@@ -13,7 +13,7 @@ pub struct Decision {
     pub guard: Option<&'static str>,
     /// work to offer after research or an answer (rule 4 keeps the model's item here)
     pub offer: Option<Offer>,
-    /// a suggestion card about an existing item (rule 5: “这是给 ST-n 的吗？”)
+    /// a suggestion card about an existing item (rule 5: “……建议追加到 ST-n，追加还是单独建项？”)
     pub for_item: Option<String>,
 }
 
@@ -37,7 +37,7 @@ pub fn for_guest(d: Decision, r: &Route, research: bool, items: bool) -> Decisio
     let inline = if research { "research" } else { "answer" };
     let (kind, offer) = match d.kind.as_str() {
         "config" | "supplement" | "status" | "reroute" => ("answer", d.offer.clone()),
-        // “这是给 ST-n 的吗？” would name an item to the chat
+        // “追加到 ST-n？” would name an item to the chat
         "suggest" if d.for_item.is_some() => ("answer", None),
         "research" if !research => ("answer", d.offer.clone()),
         "item" | "suggest" if !items => (inline, offer()),
@@ -67,7 +67,7 @@ pub fn for_owner(d: Decision, owner: bool) -> Decision {
 
 /// Your own conversation: work that is not clearly an item is answered in place with a plan, and
 /// offered as an item — Steve no longer asks “在这里出方案，还是建成事项？” first. Decided by the user
-/// on 2026-11-04 (ST-33, `guard = "plan"`). “这是给 ST-n 的吗？” still asks: it is about which item.
+/// on 2026-11-04 (ST-33, `guard = "plan"`). “追加到 ST-n，还是单独建项？” still asks: it is about which item.
 pub fn for_main(d: Decision, r: &Route) -> Decision {
     if d.kind != "suggest" || d.for_item.is_some() {
         return d;
@@ -122,6 +122,23 @@ pub fn explicit_item(text: &str) -> bool {
     EXPLICIT.is_match(text)
 }
 
+/// The message names item `id` itself (“追加到 ST-40”, “st40 也加上”): case, “-” and “#” ignored, and
+/// “ST-4” is not named by “ST-40”.
+pub fn names_item(text: &str, id: &str) -> bool {
+    let norm = |s: &str| -> String {
+        s.chars()
+            .filter(|c| !matches!(c, '-' | '#' | ' '))
+            .flat_map(char::to_uppercase)
+            .collect()
+    };
+    let (t, id) = (norm(text), norm(id));
+    !id.is_empty()
+        && t.match_indices(&id).any(|(at, _)| {
+            !t[at + id.len()..].starts_with(|c: char| c.is_ascii_digit())
+                && !t[..at].ends_with(|c: char| c.is_ascii_alphabetic())
+        })
+}
+
 /// A pure question: ends with ？/吗/呢 or asks with a question word, and asks for no change.
 pub fn pure_question(text: &str) -> bool {
     let t = text.trim().trim_end_matches(|c: char| {
@@ -173,8 +190,12 @@ pub fn decide(r: &Route, text: &str, cx: DecideCtx) -> Decision {
             };
         }
     }
-    /* 5: a supplement the model is not sure about becomes a card “这是给 ST-n 的吗？” */
-    if model == "supplement" && r.confidence < 0.8 {
+    /* 5: a supplement the model is not sure about becomes a card “追加到 ST-n，还是单独建项？” — unless
+    the user named the item: then it is theirs to say, and asked already */
+    if model == "supplement"
+        && r.confidence < 0.8
+        && !r.item.as_deref().is_some_and(|i| names_item(text, i))
+    {
         return Decision {
             for_item: r.item.clone(),
             ..d("suggest", Some("5"))
@@ -365,6 +386,22 @@ mod tests {
             go("supplement", 0.85, &[], "先别改列表页"),
             ("supplement".into(), None)
         );
+        /* the user named the item: no asking again */
+        for t in [
+            "追加到 ST-3：统计按小时",
+            "这个也给st3加上",
+            "#st-3 再补一条",
+        ] {
+            assert_eq!(
+                go("supplement", 0.5, &[], t),
+                ("supplement".into(), None),
+                "{t}"
+            );
+        }
+        /* another item, or one whose id only starts the same, still asks */
+        for t in ["追加到 ST-30", "追加到 ST-4", "TEST-3 那边也改"] {
+            assert_eq!(go("supplement", 0.5, &[], t).0, "suggest", "{t}");
+        }
     }
 
     #[test]

@@ -23,6 +23,21 @@ const KINDS: [&str; 4] = ["fact", "preference", "rule", "event"];
 /// Open memory decisions per workspace before new candidates stop opening one (knowledge.md §5.2).
 pub const MAX_OPEN_CONFIRMS: i64 = 20;
 
+/// What a memory of `kind` is called on screen (ST-41): preferences and rules are 长期记忆, facts,
+/// events and summaries are 知识条目.
+pub fn record_name(kind: &str) -> &'static str {
+    match kind {
+        "preference" | "rule" => "长期记忆",
+        _ => "知识条目",
+    }
+}
+
+/// The question of a candidate's `confirm` decision: “存为长期记忆吗？<text>” or “存为知识条目吗？<text>”.
+/// Decisions opened before ST-41 say “记住这条吗？”.
+pub fn confirm_question(kind: &str, text: &str) -> String {
+    format!("存为{}吗？{text}", record_name(kind))
+}
+
 /// The `Mem` shape of §3.1 (also what the knowledge module's `Candidate.mem` embeds).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct MemOut {
@@ -270,7 +285,7 @@ pub struct Proposal {
 }
 
 /// Writes `p` as a private `candidate` of `viewer.user` plus its `confirm` decision (`subject_type =
-/// "mem"`, question `记住这条吗？<text>`), unless 20 memory decisions are already open; then it waits on
+/// "mem"`, question [`confirm_question`]), unless 20 memory decisions are already open; then it waits on
 /// the knowledge page without a decision. Returns the memory.
 pub fn propose(tx: &Tx, viewer: &Viewer, p: &Proposal) -> ApiResult<Mem> {
     let ws = viewer.ws.as_str();
@@ -318,7 +333,7 @@ pub fn propose(tx: &Tx, viewer: &Viewer, p: &Proposal) -> ApiResult<Mem> {
             ws,
             "mem",
             &mem.id,
-            &format!("记住这条吗？{}", p.text),
+            &confirm_question(&p.kind, &p.text),
             &p.bot_id,
         );
         nd.draft = Some(format!("来源：{}", p.origin_label));
