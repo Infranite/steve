@@ -213,7 +213,9 @@ export function ChatView({ conv }: { conv?: string } = {}) {
       </header>
       <ConvSwitcher current={conv} badge={im?.badge} />
       {conv && im && <div className="mx-auto flex w-full max-w-[800px] shrink-0 px-4 pb-1 sm:px-8"><ConvBadgeChip b={im.badge} /></div>}
-      <div className="relative flex min-h-0 flex-1 flex-col"><div ref={scroller} className="min-h-0 flex-1 overflow-y-auto overscroll-contain" data-chat-scroll>
+      {/* the conversation never scrolls sideways: wide code and tables scroll in their own box, and a pixel too wide here
+       * put a horizontal scrollbar line under the messages on every swipe */}
+      <div className="relative flex min-h-0 flex-1 flex-col"><div ref={scroller} className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain" data-chat-scroll>
         <div className="mx-auto flex w-full max-w-[800px] flex-col gap-8 px-4 pb-10 pt-5 sm:px-8" data-chat-messages>
           {conv && im === null && <div className="py-10 text-center type-callout text-muted-foreground" data-conv-missing>没有这个对话，或者你看不到它所在的空间。</div>}
           {list.map((m, n) => {

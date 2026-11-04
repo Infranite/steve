@@ -107,7 +107,7 @@ export function NoticeLine({ m, onOpen }: { m: Msg; onOpen: () => void }) {
   return (
     <div className="flex max-w-[88%] items-start gap-2.5 self-start px-1 type-callout anim-in" data-notice-line={m.notice?.ref ?? m.id}>
       <CircleAlertIcon className="mt-0.5 size-4 shrink-0 text-destructive" strokeWidth={1.75} />
-      <div className="min-w-0 flex-1"><span className="text-foreground">{m.t}</span>
+      <div className="min-w-0 flex-1 wrap-anywhere"><span className="text-foreground">{m.t}</span>
         <span className="ml-2 inline-flex gap-2 type-footnote text-muted-foreground">{m.item && <button type="button" className="hover:text-foreground hover:underline" onClick={() => go("#/items/" + m.item)}>去 {m.item}</button>}<button type="button" className="hover:text-foreground hover:underline" onClick={onOpen}>通知</button></span></div>
       <Tooltip>
         <TooltipTrigger render={<Button variant="ghost" size="icon-xs" aria-label="关闭这条提示" className="-my-0.5 shrink-0 text-muted-foreground" onClick={() => dismissNotice(m.notice?.ref ?? m.id!)} data-notice-dismiss />}><XIcon /></TooltipTrigger>
@@ -147,10 +147,10 @@ export function ChatRail() {
   useRail()
   const [isWide, setWide] = useState(wide)
   useEffect(() => { const q = window.matchMedia("(min-width: 1024px)"), h = () => setWide(q.matches); q.addEventListener("change", h); return () => q.removeEventListener("change", h) }, [])
-  if (isWide) return railOpen ? <aside className="flex w-[300px] shrink-0 flex-col overflow-y-auto border-l border-sidebar-border bg-sidebar px-4 pb-6 pt-3" data-rail="aside"><RailBody /></aside> : null
+  if (isWide) return railOpen ? <aside className="flex w-[300px] shrink-0 flex-col overflow-y-auto overflow-x-hidden border-l border-sidebar-border bg-sidebar px-4 pb-6 pt-3" data-rail="aside"><RailBody /></aside> : null
   return (
     <Sheet open={sheetOpen} onOpenChange={(o) => { sheetOpen = o; bump() }}>
-      <SheetContent side="right" className="w-[88vw] max-w-[360px]! overflow-y-auto px-4 pb-8 pt-3" data-rail="sheet"><SheetTitle className="sr-only">通知和摘要</SheetTitle><RailBody /></SheetContent>
+      <SheetContent side="right" className="w-[88vw] max-w-[360px]! overflow-y-auto overflow-x-hidden px-4 pb-8 pt-3" data-rail="sheet"><SheetTitle className="sr-only">通知和摘要</SheetTitle><RailBody /></SheetContent>
     </Sheet>
   )
 }
