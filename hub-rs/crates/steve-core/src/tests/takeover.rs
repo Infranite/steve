@@ -392,7 +392,10 @@ fn stopped_before_the_merge_it_is_continued_with_what_steve_found() {
     let x = remote(&k, upstream::DONE_MERGE, false);
     k.core.tx().lc_invalidate(&x.item, "有新的交付").unwrap();
     stop(&k, &x.session, "分支推上去了。");
-    assert!(k.wait(|| !steve_lines(&k, &x.item).is_empty()));
+    // the line and the prompt are written one after the other: wait for both
+    assert!(k.wait(|| {
+        !steve_lines(&k, &x.item).is_empty() && !k.rt.prompts_of(&x.session).is_empty()
+    }));
     let p = k.rt.prompts_of(&x.session).pop().unwrap();
     assert!(
         p.contains("Steve 刚核对过远端：提交还不在 origin/main 上（PR 还没合并）"),
