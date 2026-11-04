@@ -152,7 +152,7 @@ pub fn build(
         group,
         asker,
         others,
-        unrecorded: (space.member_count - recorded).max(0),
+        unrecorded: (space.people() - recorded).max(0),
         external: space.has_external,
         speaker: speaker.into(),
         owner_only,

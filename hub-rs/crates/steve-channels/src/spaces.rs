@@ -309,6 +309,18 @@ pub struct SpaceRow {
     pub via: String,
 }
 
+impl SpaceRow {
+    /// How many people the chat has, as far as anyone can tell: a one-to-one chat has one besides
+    /// Steve by definition; a group what the provider counts (0: unknown).
+    pub fn people(&self) -> i64 {
+        if self.kind == "dm" {
+            1
+        } else {
+            self.member_count
+        }
+    }
+}
+
 /// The installation of a connection ([`installation_key`] over its `config`; the connection itself
 /// when it is unknown or gone).
 ///

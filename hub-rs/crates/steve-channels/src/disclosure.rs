@@ -864,7 +864,7 @@ pub fn space_audience(
         [&space.id],
         |r| r.get(0),
     )?;
-    let complete = space.member_count > 0 && recorded >= space.member_count;
+    let complete = space.people() > 0 && recorded >= space.people();
     if complete && !rows.is_empty() && !a.external && rows.iter().all(|r| r.2.is_some()) {
         a.scopes.push("workspace".into());
         // private: a one-to-one chat whose one other member is `owner` and `owner` owns the workspace. A group

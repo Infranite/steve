@@ -1120,6 +1120,12 @@ async fn your_private_chat_with_the_bot_is_owner_only() {
     let turns = t.turns.lock().unwrap().clone();
     assert_eq!(turns.len(), 1, "{turns:?}");
     assert!(turns[0].1.owner_only && turns[0].1.research);
+    // a one-to-one chat whose member count the provider never gave is still complete: one person
+    exec(&h, "UPDATE spaces SET member_count = 0 WHERE external_id = 'D_ME'", &[]);
+    push(&h, &h.bot.clone(), msg("D_ME", "m2", "upx", "现在呢", false, false)).await;
+    let turns = t.turns.lock().unwrap().clone();
+    assert_eq!(turns.len(), 2, "{turns:?}");
+    assert!(turns[1].1.owner_only, "still only you");
 }
 
 /// A group whose member list could not be read looks like "the bot and you": it is still not your private
