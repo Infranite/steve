@@ -9,7 +9,7 @@ import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet"
 import { Button } from "@/components/ui/button"
 import { Spinner } from "@/components/ui/spinner"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
-import { st, tm, botName, projectName, tagName, pendingCards, sessionCards, unreadNotices, readNotices, dismissNotice, WT, type Msg, type Steps } from "@/store"
+import { st, tm, botName, projectName, tagName, pendingCards, sessionCards, unreadNotices, readNotices, dismissNotice, closeRel, WT, type Msg, type Steps } from "@/store"
 import { go, StatusDot, ItemNo, DecisionCard, SectionLabel, RelNote } from "@/ui"
 import type { RNotice } from "@/api"
 import { ResearchLive, researchSummary, researchIcon, researchToolLabel } from "@/thread/parts"
@@ -215,7 +215,7 @@ function RailBody() {
 export function SessionCards({ k }: { k: string }) {
   const cards = sessionCards(k)
   /* after the release card is answered, what became of it stays under the conversation */
-  const item = st.S[k]?.item, rel = item ? st.items.find((x) => x.id === item)?.rel : undefined
+  const item = st.S[k]?.item, it = item ? st.items.find((x) => x.id === item) : undefined, rel = it?.rel
   if (!cards.length && !rel) return null
-  return <div className="mt-6 flex flex-col gap-3" data-session-cards={k}>{rel && <RelNote rel={rel} box={rel.tone !== "ok"} />}{cards.map(({ i, w }) => <DecisionCard key={w.decision} i={i} w={w} showItem={!!i.id} />)}</div>
+  return <div className="mt-6 flex flex-col gap-3" data-session-cards={k}>{rel && <RelNote rel={rel} box={rel.tone !== "ok"} onClose={rel.tone === "fail" && it ? () => closeRel(it) : undefined} />}{cards.map(({ i, w }) => <DecisionCard key={w.decision} i={i} w={w} showItem={!!i.id} />)}</div>
 }

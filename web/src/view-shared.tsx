@@ -3,7 +3,7 @@ import { Field, FieldContent, FieldDescription, FieldLabel, FieldTitle } from "@
 import { Progress } from "@/components/ui/progress"
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
 import { SelectContent, SelectItem, SelectTrigger, SelectValue, Select as UISelect } from "@/components/ui/select"
-import { botName, depsOpen, st, type Item } from "@/store"
+import { botName, closeRel, depsOpen, st, type Item } from "@/store"
 import { BotAvatar, go, ItemNo, Meta, RelNote, StatusDot, Tags } from "@/ui"
 import { cn } from "cn"
 import { FolderIcon, GitBranchIcon, StarIcon } from "lucide-react"
@@ -74,7 +74,7 @@ export function ItemRow({ i, pick, proj = true, bot = true }: { i: Item; pick?: 
         {!closed && (i.now || extra.length > 0) && (
           <Meta className="mt-0.5 flex-nowrap pl-14 [&>*:first-child]:min-w-0 [&>*:first-child]:truncate"><span className="type-callout" data-item-now>{i.now || "—"}</span>{extra}</Meta>
         )}
-        {i.rel && i.rel.tone !== "ok" && <RelNote rel={i.rel} className="mt-1 pl-14" />}
+        {i.rel && i.rel.tone !== "ok" && <RelNote rel={i.rel} className="mt-1 pl-14" onClose={i.rel.tone === "fail" ? () => closeRel(i) : undefined} />}
       </div>
     </div>
   )

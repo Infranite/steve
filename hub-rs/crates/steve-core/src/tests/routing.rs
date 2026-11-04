@@ -1487,3 +1487,66 @@ async fn research_reads_the_items_the_conversation_names_up_front() {
         );
     }
 }
+
+/// A failure on the card is over once the item works again: going on from the card, resuming it, the bot
+/// reporting progress. The card goes back to running in place; the failure stays in the timeline.
+#[tokio::test]
+async fn a_failure_on_the_card_clears_when_the_item_goes_on() {
+    let k = Kit::new();
+    router(
+        &k,
+        |_| json!({"kind": "item", "confidence": 0.95, "signals": ["change"], "title": "改按钮", "bot": "steve"}),
+    );
+    k.core.say(WS, "把按钮改一下", &[]).unwrap();
+    let ms = settle(&k, 2).await;
+    let id = ms[1].item_id.clone().unwrap();
+    let s = k.db().sessions_of_item(&id).unwrap().pop().unwrap();
+    let card = |k: &Kit| {
+        k.db()
+            .messages(WS)
+            .unwrap()
+            .into_iter()
+            .rfind(|m| !crate::thread::hidden(m) && m.meta["card"]["item"] == json!(id))
+            .unwrap()
+            .meta["card"]
+            .clone()
+    };
+    let stop = |k: &Kit| {
+        k.rt.say(&s.id, "测试都通过了");
+        k.rt.end_turn(&k.core, &s.id, "end_turn", None);
+        let c = card(k);
+        assert_eq!(c["state"], "fail");
+        assert!(c["text"].as_str().unwrap().contains("Agent 停下来了"));
+        c["decision"].as_str().unwrap().to_string()
+    };
+
+    /* went on from the card */
+    let d = stop(&k);
+    k.core.resolve(&d, "continue", "", "me").unwrap();
+    let c = card(&k);
+    assert_eq!(c["state"], "run");
+    assert!(c.get("text").is_none() && c.get("decision").is_none());
+
+    /* looked at, then resumed: the line stays while it is paused */
+    let d = stop(&k);
+    k.core.resolve(&d, "look", "", "me").unwrap();
+    assert_eq!(card(&k)["state"], "fail");
+    k.core
+        .item_action(&id, crate::ItemAction::Resume, "me")
+        .unwrap();
+    assert_eq!(card(&k)["state"], "run");
+
+    /* the bot reports progress */
+    stop(&k);
+    k.core.tool_update(&s, "继续改", &[]).unwrap();
+    assert_eq!(card(&k)["state"], "run");
+
+    /* the failures stay in the item's history */
+    let tl = k.db().timeline(&id).unwrap();
+    assert_eq!(
+        tl.iter()
+            .filter(|t| t.text.starts_with("Agent 停下来了"))
+            .count(),
+        3
+    );
+}
