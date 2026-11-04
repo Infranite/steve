@@ -87,6 +87,20 @@ try {
     await page.waitForTimeout(200)
     assert.ok(await atBottom())
     assert.equal(await newMsg.count(), 0)
+    // A sideways swipe never scrolls the conversation or the rail, even when something in them is a little too wide.
+    await page.goto(base + "/test/fixtures/chat-layout.html?rich")
+    await page.locator('[data-item-card="ST-47"]').waitFor()
+    await page.waitForTimeout(400)
+    if (shots) await page.screenshot({ path: `${shots}/chat-rich-${width}-${theme}.png`, animations: "disabled" })
+    assert.ok(await page.locator("[data-notice-line]").evaluate(el => el.scrollWidth <= el.clientWidth), "a long link in a notice wraps")
+    for (const sel of ["[data-chat-scroll]", ...(width === 1440 ? ['[data-rail="aside"]'] : [])]) {
+      const pane = page.locator(sel)
+      await pane.evaluate(el => { const w = document.createElement("div"); w.style.width = el.clientWidth + 40 + "px"; w.style.height = "1px"; el.firstElementChild.append(w) })
+      await pane.hover()
+      await page.mouse.wheel(120, 0)
+      await page.waitForTimeout(150)
+      assert.equal(await pane.evaluate(el => el.scrollLeft), 0, sel)
+    }
     if (width === 390) {
       await page.locator("[data-rail-toggle]").click()
       await page.locator('[data-rail="sheet"]').waitFor()
@@ -105,5 +119,5 @@ try {
     await page.close()
   }
   assert.deepEqual(errors, [])
-  console.log(JSON.stringify({ passed: true, scenarios: ["1440/390px × light/dark", "keyboard actions", "steps disclosure", "draft reload", "slash menu", "steady header", "long Markdown overflow", "follow new messages at the bottom", "rail/sheet", "thinking and stop", "empty conversation"] }))
+  console.log(JSON.stringify({ passed: true, scenarios: ["1440/390px × light/dark", "keyboard actions", "steps disclosure", "draft reload", "slash menu", "steady header", "long Markdown overflow", "follow new messages at the bottom", "no sideways scroll", "rail/sheet", "thinking and stop", "empty conversation"] }))
 } finally { await browser.close() }
