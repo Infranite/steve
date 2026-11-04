@@ -348,6 +348,15 @@ async fn workspace_is_named_never_guessed(e: &Env) {
         (409, Some(steve_hub::api::WS_RELOAD)),
         "{v}"
     );
+    // what can't send a header (an EventSource, an <img>) names it as ?ws=, under the same rule
+    let (s, _) = e.call("GET", &format!("/api/me?ws={ws}"), None).await;
+    assert_eq!(s, 200);
+    let (s, v) = e.call("GET", "/api/me?ws=ws_ffffffffffffffff", None).await;
+    assert_eq!(
+        (s, v["error"].as_str()),
+        (409, Some(steve_hub::api::WS_GONE)),
+        "{v}"
+    );
     // a script (no Fetch Metadata) keeps the cookie's workspace
     let (s, v) = send("POST", vec![]).await;
     assert_eq!(s, 200, "{v}");

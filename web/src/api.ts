@@ -41,13 +41,15 @@ export type HubEvent = { type: "item" | "bot" | "project" | "tag" | "workspace" 
 
 /** an uploaded attachment, as messages, comments and session events carry it */
 export type RFile = { id: string; name: string; mime: string; size: number }
-export const fileUrl = (id: string, download = false) => `/api/files/${encodeURIComponent(id)}${download ? "?download=1" : ""}`
+export const fileUrl = (id: string, download = false) => withWs(`/api/files/${encodeURIComponent(id)}${download ? "?download=1" : ""}`)
 
 /* the workspace this page shows, sent with every request: the workspace cookie is shared by all tabs, so a tab
  * switching workspace must never redirect another page's requests (the Hub refuses a browser write without it) */
 let pageWs = ""
 export const setPageWorkspace = (id: string) => { pageWs = id }
 export const wsHeaders = (h: Record<string, string> = {}): Record<string, string> => (pageWs ? { ...h, "x-steve-ws": pageWs } : h)
+/** the same for what can't carry a header (an EventSource, an <img>, a download link): `?ws=` */
+export const withWs = (url: string) => (pageWs ? `${url}${url.includes("?") ? "&" : "?"}ws=${encodeURIComponent(pageWs)}` : url)
 
 export class Unauthenticated extends Error { login: string | null; constructor(login: string | null) { super("unauthenticated"); this.login = login } }
 const CUT = {}
@@ -149,7 +151,7 @@ export function stream(on: (e: HubEvent) => void, onOpen: () => void) {
   let es: EventSource | null = null, retry = 1000, closed = false
   const open = () => {
     if (closed) return // a retry scheduled before close must not reopen
-    es = new EventSource("/api/stream")
+    es = new EventSource(withWs("/api/stream")) // the workspace at each (re)connect
     es.onopen = () => { retry = 1000; onOpen() }
     es.onmessage = (m) => { try { on(JSON.parse(m.data)) } catch {} }
     es.onerror = () => { es?.close(); if (!closed) setTimeout(open, retry = Math.min(retry * 2, 15000)) }

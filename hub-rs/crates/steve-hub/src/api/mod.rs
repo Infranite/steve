@@ -179,17 +179,33 @@ pub const WS_RELOAD: &str = "页面需要刷新后才能继续操作";
 /// The user belongs to no workspace.
 pub const WS_NONE: &str = "你还没有加入任何空间";
 
-/// The signed-in user of a request and the workspace it runs in. The page says which (`x-steve-ws`): a
+/// The value of query parameter `name` (percent-decoded).
+fn query_param(query: Option<&str>, name: &str) -> Option<String> {
+    query?.split('&').find_map(|kv| {
+        let (k, v) = kv.split_once('=').unwrap_or((kv, ""));
+        (k == name).then(|| percent_decode(v))
+    })
+}
+
+/// The signed-in user of a request and the workspace it runs in. The page says which (`x-steve-ws`, or
+/// `?ws=` where a header can't be set): a
 /// workspace the user is not a member of is refused. Without the header the `steve_ws` cookie decides, else
 /// the user's first workspace; a write from a browser (Fetch Metadata `sec-fetch-site`) without the header
 /// is refused, so a page loaded earlier never writes into the workspace another tab switched to. A user
 /// with no workspace is refused, never put into `default`.
-async fn lookup_user(st: &AppState, headers: &HeaderMap, write: bool) -> Result<Who, ApiError> {
+async fn lookup_user(
+    st: &AppState,
+    headers: &HeaderMap,
+    query: Option<&str>,
+    write: bool,
+) -> Result<Who, ApiError> {
     let token = cookie(headers, "steve_session");
+    // what can't carry a header (an EventSource, an <img>, a download link) names it as `?ws=`
     let named = headers
         .get("x-steve-ws")
         .and_then(|v| v.to_str().ok())
         .map(str::to_string)
+        .or_else(|| query_param(query, "ws"))
         .filter(|s| !s.is_empty());
     let browser = headers.contains_key("sec-fetch-site");
     let remembered = cookie(headers, "steve_ws");
@@ -250,7 +266,7 @@ fn session_optional(req: &Request) -> bool {
 /// Inserts the caller when signed in, and lets the request through either way (routes that answer a
 /// missing login themselves, like `/auth/connect/callback`).
 pub async fn optional_user(State(st): State<AppState>, mut req: Request, next: Next) -> Response {
-    match lookup_user(&st, req.headers(), writes(&req)).await {
+    match lookup_user(&st, req.headers(), req.uri().query(), writes(&req)).await {
         Ok(Who::User(ctx)) => insert_caller(&mut req, ctx),
         Ok(Who::Anonymous | Who::Refused(..)) => {}
         Err(e) => tracing::warn!("optional_user: {e}"),
@@ -260,7 +276,7 @@ pub async fn optional_user(State(st): State<AppState>, mut req: Request, next: N
 
 /// `requireUser` + the workspace middleware: 401 without a live session (except [`session_optional`]).
 async fn require_user(State(st): State<AppState>, mut req: Request, next: Next) -> Response {
-    match lookup_user(&st, req.headers(), writes(&req)).await {
+    match lookup_user(&st, req.headers(), req.uri().query(), writes(&req)).await {
         Ok(Who::User(ctx)) => {
             insert_caller(&mut req, ctx);
             next.run(req).await

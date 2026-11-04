@@ -1173,3 +1173,30 @@ async fn a_slow_reaction_api_does_not_hold_the_answer() {
     }
     assert_eq!(h.fake.reactions_on("s1"), [ReactionKind::Ack]);
 }
+
+/// The answer may go out before the provider has put "收到" on: it is still bound to the message, and
+/// once the acknowledgement is on it is swapped for "done" (never left at "收到").
+#[tokio::test(flavor = "multi_thread")]
+async fn an_answer_before_the_slow_ack_still_ends_done() {
+    let h = setup(false).await;
+    *h.fake.reaction_delay.lock().unwrap() = Some(std::time::Duration::from_millis(1500));
+    let i = push(
+        &h,
+        &h.bot.clone(),
+        msg("C_OPS", "s2", "ulilei", "部署挂了怎么办", true, false),
+    )
+    .await;
+    assert_eq!(
+        sent(&h).len(),
+        1,
+        "answered without waiting for the reaction"
+    );
+    for _ in 0..60 {
+        if h.fake.reactions_on("s2") == [ReactionKind::Done] {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(h.fake.reactions_on("s2"), [ReactionKind::Done]);
+    assert_eq!(state(&h, &i.message_id), "done");
+}

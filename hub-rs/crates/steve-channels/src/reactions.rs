@@ -263,24 +263,52 @@ impl Channels {
     /// acknowledgement to be on before it takes it off.
     pub async fn react_ack(&self, message_id: &str) {
         let guard = self.reaction_locks().of(message_id).lock_owned().await;
+        // the record first, now: the answer may be bound to it (`expect_answer`) before the provider replies
+        let t = match self.ack_record(message_id) {
+            Ok(Some(t)) => t,
+            Ok(None) => return,
+            Err(e) => {
+                tracing::warn!(message = message_id, "ack reaction: {e}");
+                return;
+            }
+        };
         let (ch, id) = (self.clone(), message_id.to_string());
         tokio::spawn(async move {
             let _g = guard;
-            if let Err(e) = ch.react_ack_locked(&id).await {
+            if let Err(e) = ch.ack_provider(&id, &t).await {
                 tracing::warn!(message = id, "ack reaction: {e}");
             }
         });
     }
 
-    /// [`Self::react_ack`] with the message's reaction lock held by the caller.
-    async fn react_ack_locked(&self, message_id: &str) -> ChannelResult<()> {
+    /// Records state `ack` for `message_id` (no reaction id yet); `None` when there is nothing to
+    /// acknowledge (no target, or acknowledged already). The caller holds the message's reaction lock.
+    fn ack_record(&self, message_id: &str) -> ChannelResult<Option<Target>> {
         let (t, row) = self.store().reader(|c| {
             Ok::<_, crate::ChannelError>((target(c, message_id)?, get(c, message_id)?))
         })?;
-        let Some(t) = t else { return Ok(()) };
+        let Some(t) = t else { return Ok(None) };
         if row.is_some_and(|r| r.state != "cleared") {
-            return Ok(());
+            return Ok(None);
         }
+        let now = self.now();
+        self.store().transaction(|tx| -> ChannelResult<()> {
+            tx.execute(
+                "INSERT INTO chan_reactions (message_id, workspace_id, state, reaction_id, emoji, as_user, error, updated)
+                 VALUES (?, ?, 'ack', NULL, NULL, 0, NULL, ?)
+                 ON CONFLICT (message_id) DO UPDATE SET state = 'ack', reaction_id = NULL, emoji = NULL, as_user = 0,
+                   answer_id = NULL, error = NULL, updated = excluded.updated",
+                params![message_id, t.ws, now],
+            )?;
+            messages::event(tx, &t.ws, &t.space, message_id);
+            Ok(())
+        })?;
+        Ok(Some(t))
+    }
+
+    /// Puts the acknowledgement on at the provider and records its id (or the failure). The caller holds
+    /// the message's reaction lock, so nothing takes it off before it is on.
+    async fn ack_provider(&self, message_id: &str, t: &Target) -> ChannelResult<()> {
         let added = timed(
             self.reactor()
                 .add(self, &t.ws, &t.conn, &t.ext, ReactionKind::Ack),
@@ -296,12 +324,9 @@ impl Channels {
                 Err(e) => (None, None, false, Some(e.clone())),
             };
             tx.execute(
-                "INSERT INTO chan_reactions (message_id, workspace_id, state, reaction_id, emoji, as_user, error, updated)
-                 VALUES (?, ?, 'ack', ?, ?, ?, ?, ?)
-                 ON CONFLICT (message_id) DO UPDATE SET state = 'ack', reaction_id = excluded.reaction_id,
-                   emoji = excluded.emoji, as_user = excluded.as_user, answer_id = NULL, error = excluded.error,
-                   updated = excluded.updated",
-                params![message_id, t.ws, id, emoji, as_user as i64, err, now],
+                "UPDATE chan_reactions SET reaction_id = ?, emoji = ?, as_user = ?, error = ?, updated = ?
+                  WHERE message_id = ? AND state = 'ack'",
+                params![id, emoji, as_user as i64, err, now, message_id],
             )?;
             messages::event(tx, &t.ws, &t.space, message_id);
             Ok(())

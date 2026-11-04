@@ -362,6 +362,9 @@ struct State {
     holding: bool,
     /// cancels that came before the turn's prompt was written (adapter still starting): sent right after it
     cancel_pending: HashSet<String>,
+    /// (session, adapter generation) whose running prompt was cancelled: a permission request that
+    /// arrives until the prompt returns is answered `cancelled` at once
+    cancelled: HashSet<(String, u64)>,
     /// per session, the counters of the turn being run (stats)
     tallies: HashMap<String, Tally>,
     /// per session, the live adapter's cost total (stats)
@@ -815,6 +818,9 @@ impl Acp {
                     ("error".to_owned(), Some(e.message), None)
                 }
             };
+            // the prompt returned: whatever it still waited on can't be answered, a cancel of it is over
+            self.st().cancelled.remove(&(sid.clone(), generation));
+            self.expire_waits(&sid, Some(generation));
             let retry = error
                 .as_deref()
                 .is_some_and(|e| TRANSIENT.is_match(e) && attempt < self.0.cfg.retry_delays.len());
@@ -1540,7 +1546,7 @@ impl Acp {
             }
             Incoming::Notification { .. } => {}
             Incoming::Request { id, method, params } if method == "session/request_permission" => {
-                self.on_permission(sid, conn, id, &params);
+                self.on_permission(sid, generation, conn, id, &params);
             }
             Incoming::Request { id, method, .. } => {
                 conn.respond_error(id, -32601, &format!("{method} not supported by Steve"));
@@ -1593,9 +1599,32 @@ impl Acp {
         }
     }
 
-    fn on_permission(&self, sid: &str, conn: &Conn, rpc_id: Value, params: &Value) {
-        if !self.st().live.contains_key(sid) {
-            return; // asked during start: left unanswered, as in the TS
+    /// A permission request of adapter process `generation`. It waits as a card only while that process
+    /// runs the session's prompt and the prompt is not being cancelled; otherwise it is answered
+    /// `cancelled` at once (ACP), also when that changes while the card is being made.
+    fn on_permission(
+        &self,
+        sid: &str,
+        generation: u64,
+        conn: &Conn,
+        rpc_id: Value,
+        params: &Value,
+    ) {
+        let cancelled = json!({ "outcome": { "outcome": "cancelled" } });
+        let current = |st: &State| {
+            st.live.get(sid).is_some_and(|l| l.generation == generation)
+                && !st.cancelled.contains(&(sid.to_owned(), generation))
+        };
+        {
+            let st = self.st();
+            if !st.live.contains_key(sid) {
+                return; // asked during start: left unanswered, as in the TS
+            }
+            if !current(&st) {
+                drop(st);
+                conn.respond(rpc_id, cancelled);
+                return;
+            }
         }
         // Steve's own tools are always allowed, once per call
         if let Some(opt) = auto_allow(params) {
@@ -1610,16 +1639,21 @@ impl Acp {
         let Some(dec) = self.host().permission_decision(sid, req) else {
             return;
         };
-        {
+        let waiting = {
             let mut st = self.st();
-            let Some(generation) = st.live.get(sid).map(|l| l.generation) else {
-                drop(st);
-                self.host()
-                    .permissions_expired(sid, std::slice::from_ref(&dec));
-                return;
-            };
-            st.waits
-                .insert(dec.clone(), (sid.to_owned(), rpc_id, generation));
+            if current(&st) {
+                st.waits
+                    .insert(dec.clone(), (sid.to_owned(), rpc_id.clone(), generation));
+                true
+            } else {
+                false
+            }
+        };
+        if !waiting {
+            conn.respond(rpc_id, cancelled);
+            self.host()
+                .permissions_expired(sid, std::slice::from_ref(&dec));
+            return;
         }
         self.host().add_event(
             sid,
@@ -1652,6 +1686,18 @@ impl Acp {
     pub fn cancel(&self, session_id: &str) -> bool {
         let mut st = self.st();
         if st.retrying.remove(session_id).is_some() {
+            let stale: Vec<String> = st
+                .waits
+                .iter()
+                .filter(|(_, (s, _, _))| s == session_id)
+                .map(|(d, _)| d.clone())
+                .collect();
+            for d in &stale {
+                st.waits.remove(d);
+            }
+            if !stale.is_empty() {
+                self.host().permissions_expired(session_id, &stale);
+            }
             self.host().dispatch_finished(session_id, "cancelled");
             // like a cancelled live turn: whatever was queued behind it goes next
             let next = if st.holding || self.host().maintenance() {
@@ -1687,6 +1733,7 @@ impl Acp {
             Some(l) => {
                 let (conn, generation) = (l.conn.clone(), l.generation);
                 conn.notify("session/cancel", json!({ "sessionId": l.acp_id }));
+                st.cancelled.insert((session_id.to_owned(), generation));
                 // ACP: a cancelling client answers every permission request still pending with
                 // `cancelled`, so the agent can end the turn
                 let pending: Vec<String> = st
