@@ -23,11 +23,12 @@ import { draftKey } from "@/composer-draft"
 import { GitHubMoreRow } from "@/github/index"
 import { SessionKnowledge } from "@/knowledge/parts"
 import { lazyView } from "@/lazy"
+import { OutPreview } from "@/outputs"
 import { ItemPeopleProp } from "@/people/item-people"
 import { queueNote, QueueStrip } from "@/queue"
 import { NativeIdLine, ResumeCard } from "@/resume"
 import { ItemStatsRows, SessionStats } from "@/stats/drill"
-import { accOf, active, addDep, archive, bulk, closeRel, deleteItem, depsOpen, doFork, gBuild, gComps, hm, importSessions, interrupt, it, itemThread, link, loadEvents, loadItem, loadLocalSessions, markDone, newItem, patchItem, pending, pendingCards, reassign, rmDep, saveGoal, sessPatch, sessRemove, sessSend, setAcc, setSt, setTags, snoozed, st, stageOf, star, supp, tag, TAG_CATS, threadFollow, tm, toast, undoDecision, unsnooze, WT, type Item, type PlanRound } from "@/store"
+import { accOf, active, addDep, archive, bulk, closeRel, deleteItem, depsOpen, doFork, gBuild, gComps, hm, importSessions, interrupt, it, itemThread, link, loadEvents, loadItem, loadLocalSessions, markDone, newItem, patchItem, pending, pendingCards, reassign, rmDep, saveGoal, sessPatch, sessRemove, sessSend, setAcc, setSt, setTags, snoozed, st, stageOf, star, supp, tag, TAG_CATS, threadFollow, tm, toast, undoDecision, unsnooze, WT, type Item, type Out, type PlanRound } from "@/store"
 import { BotAvatar, BotName, Chips, closeSheet, Composer, DecisionCard, Empty, go, Group, ItemNo, Meta, openSheet, Page, RelNote, ReplyBlock, Row, RunBar, SectionLabel, Segmented, SessionBlock, Status, StatusDot, Tags, ThemeSwitch, Transcript, type ComposerHandle } from "@/ui"
 import { ChoiceCards, ItemRow, PlanBar, ProjectChip, Select, selected } from "@/view-shared"
 import { choiceText, YoloItemSwitch, YoloMark } from "@/yolo/badges"
@@ -259,18 +260,6 @@ function TagPicker({ i }: { i: Item }) {
     </DropdownMenu>
   )
 }
-function OutPreview({ o }: { o: [string, string, string | null] }) {
-  const [k, v, loc] = o
-  const url = loc && /^https?:\/\//.test(loc)
-  return (
-    <div className="flex flex-col gap-3" data-out-preview>
-      <dl className="grid grid-cols-[56px_1fr] gap-x-3 gap-y-1.5 type-callout"><dt className="text-muted-foreground">种类</dt><dd>{k}</dd><dt className="text-muted-foreground">名称</dt><dd className="break-words">{v}</dd>
-        {loc && <><dt className="text-muted-foreground">位置</dt><dd className="break-all font-mono text-[12.5px]">{loc}</dd></>}</dl>
-      {loc && <div className="flex gap-2">{url && <Button variant="outline" size="sm" onClick={() => window.open(loc, "_blank", "noopener")}>打开</Button>}
-        <Button variant="ghost" size="sm" onClick={() => { navigator.clipboard?.writeText(loc).catch(() => {}); toast("已复制位置") }}><CopyIcon />复制位置</Button></div>}
-    </div>
-  )
-}
 /* the plan: earlier rounds folded above the current one; a replaced round is struck through, its open steps abandoned */
 function PlanSteps({ steps, run, old }: { steps: [string, number][]; run?: boolean; old?: PlanRound["end"] }) {
   const next = old ? -1 : steps.findIndex((x) => !x[1])
@@ -319,7 +308,7 @@ export function ItemView({ id }: { id: string }) {
   const [confirmDrop, setConfirmDrop] = useState(false), [confirmDel, setConfirmDel] = useState(false)
   const [doneBusy, setDoneBusy] = useState(false)
   const itemComposer = useRef<ComposerHandle | null>(null)
-  const [older, setOlder] = useState(false), [titleEdit, setTitleEdit] = useState(false), [preview, setPreview] = useState<[string, string, string | null] | null>(null)
+  const [older, setOlder] = useState(false), [titleEdit, setTitleEdit] = useState(false), [preview, setPreview] = useState<Out | null>(null)
   if (lastItem !== id) { lastItem = id; dtab = "动态" }
   useEffect(() => { void loadItem(id, true) }, [id])
   const i = st.items.find((x) => x.id === id)
@@ -395,9 +384,9 @@ export function ItemView({ id }: { id: string }) {
         </AlertDialogContent>
       </AlertDialog>
       <Dialog open={!!preview} onOpenChange={(o) => !o && setPreview(null)}>
-        <DialogContent className="gap-3 rounded-2xl sm:max-w-[640px]" data-preview>
-          <DialogHeader><DialogTitle className="type-headline">{preview?.[1]}</DialogTitle><DialogDescription className="type-callout">{preview?.[0]} · 来自 {i.id}</DialogDescription></DialogHeader>
-          {preview && <OutPreview o={preview} />}
+        <DialogContent className="flex max-h-[90vh] flex-col gap-3 rounded-2xl sm:max-w-[960px]" data-preview>
+          <DialogHeader><DialogTitle className="type-headline break-words pr-6">{preview?.[1]}</DialogTitle><DialogDescription className="type-callout">{preview?.[0]} · 来自 {i.id}</DialogDescription></DialogHeader>
+          {preview && <OutPreview key={preview[3]} o={preview} item={i.id} />}
         </DialogContent>
       </Dialog>
       {i.arch && <div className="mb-6 flex items-center gap-3 rounded-xl border px-4 py-2.5 type-callout" data-arch-banner><ArchiveIcon className="size-4 text-muted-foreground" /><span className="flex-1">这个事项已归档</span><Button size="sm" variant="ghost" onClick={() => archive([i.id], false)}>恢复</Button></div>}
