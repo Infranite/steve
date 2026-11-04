@@ -738,13 +738,25 @@ const SegView = memo(function SegView({ k, g, live }: { k: string; g: Seg; live:
       <button type="button" onClick={() => go("#/sessions/" + e[2])} className="inline-flex items-center gap-1 text-blue hover:underline">{e[1]}<ArrowUpRightIcon className="size-3" /></button><span className="h-px flex-1 bg-border" /></div>
   )
   if (g.t === "ask") return <TranscriptPermission e={e} />
+  if (g.t === "away") return <div className="flex items-center gap-2 type-footnote text-muted-foreground" data-away><CornerDownRightIcon className="size-3.5 shrink-0" strokeWidth={1.5} />这一回合回复的是下方的评论，过程显示在那里</div>
   if (g.t === "sys") return <div className="flex items-center gap-3 type-footnote text-muted-foreground"><span className="h-px flex-1 bg-border/70" /><span className="max-w-[80%] text-center">{e[1]}</span><span className="h-px flex-1 bg-border/70" /></div>
   return null
 }, (a, b) => a.k === b.k && a.live === b.live && a.g.idx === b.g.idx && a.g.t === b.g.t && a.g.t1 === b.g.t1 && a.g.end === b.g.end && a.g.files?.length === b.g.files?.length && sameEvs(a.g.evs, b.g.evs))
-/** tuples → turns: the message, the work (folded), the answer, the files changed */
-function segsOf(s: Sess, range?: [number, number]): Seg[] {
+const PROMPT = ["u", "hi", "q"]
+/** when the turn holding tuple `at` started: its prompt's time; 0 when no prompt opened it (the work's first step stands in) */
+function turnStart(s: Sess, at: number) {
+  for (let i = at - 1; i >= 0; i--) {
+    if (PROMPT.includes(s.ev[i][0])) return s.ts?.[i] ?? 0
+    if (s.ev[i][0] === "end") return 0
+  }
+  return 0
+}
+/** tuples → turns: the message, the work (folded), the answer, the files changed.
+ * `skip`: turns shown elsewhere on the page (a comment's reply in the item feed) — one pointer stands in for each */
+function segsOf(s: Sess, range?: [number, number], skip?: [number, number][]): Seg[] {
   const segs: Seg[] = [], ts = s.ts ?? []
-  let buf: [any[], number][] = [], t0 = 0, work: Seg | null = null, files = new Map<string, [string, number, number]>()
+  /* a range cut after its prompt still times from the prompt, like the whole transcript and the run bar do */
+  let buf: [any[], number][] = [], t0 = range ? turnStart(s, range[0]) : 0, work: Seg | null = null, files = new Map<string, [string, number, number]>()
   const flush = (end?: [string, number]) => {
     if (!buf.length) return
     const ans = buf[buf.length - 1][0][0] === "a" ? buf.pop()! : null
@@ -759,32 +771,37 @@ function segsOf(s: Sess, range?: [number, number]): Seg[] {
   const turnDone = (idx: number) => { if (files.size) segs.push({ t: "files", evs: [], idx, files: [...files.values()] }); files = new Map() }
   s.ev.forEach((e, idx) => {
     if (range && (idx < range[0] || idx >= range[1])) return
+    const away = skip?.find(([a, b]) => idx >= a && idx < b)
+    if (away) { if (idx === away[0]) { flush(); turnDone(idx); segs.push({ t: "away", evs: [], idx }); t0 = 0; work = null } return }
     if (e[0] === "th" || e[0] === "tool" || e[0] === "a") { buf.push([e, idx]); return }
     if (e[0] === "end") {
       /* the turn's work may already be closed (a line from the Hub came before its end): the end still belongs to it */
       if (!buf.length && work && !work.end) Object.assign(work, { end: e[1], t1: ts[idx] })
       flush([e[1], ts[idx]]); turnDone(idx); t0 = 0; work = null; return
     }
-    if (e[0] === "u" || e[0] === "hi" || e[0] === "q") { flush(); turnDone(idx); segs.push({ t: e[0], evs: [e], idx }); t0 = ts[idx] ?? 0; work = null; return }
-    flush(); segs.push({ t: e[0], evs: [e], idx })
+    if (PROMPT.includes(e[0])) { flush(); turnDone(idx); segs.push({ t: e[0], evs: [e], idx }); t0 = ts[idx] ?? 0; work = null; return }
+    /* a line inside the turn (a permission asked, a message queued) splits the work: what follows times from its own first step */
+    const split = buf.length > 0
+    flush(); segs.push({ t: e[0], evs: [e], idx }); if (split) t0 = 0
   })
   flush()
   if (s.st !== "run") turnDone(s.ev.length)
   return segs
 }
-type TP = { k: string; compact?: boolean; tail?: number; range?: [number, number] }
+type TP = { k: string; compact?: boolean; tail?: number; range?: [number, number]; skip?: [number, number][] }
 /* the whole app re-renders on every store change: a transcript (hundreds of steps, markdown) only when its own events or status did */
 export function Transcript(p: TP) { const s = st.S[p.k]; return <TranscriptOf {...p} ev={s?.ev} st={s?.st} loaded={s?.loaded} /> }
-const TranscriptOf = memo(TranscriptImpl, (a, b) => a.k === b.k && a.ev === b.ev && a.st === b.st && a.loaded === b.loaded && a.compact === b.compact && a.tail === b.tail && a.range?.[0] === b.range?.[0] && a.range?.[1] === b.range?.[1])
-function TranscriptImpl({ k, tail, range }: TP & { ev?: unknown; st?: string; loaded?: boolean }) {
+const TranscriptOf = memo(TranscriptImpl, (a, b) => a.k === b.k && a.ev === b.ev && a.st === b.st && a.loaded === b.loaded && a.compact === b.compact && a.tail === b.tail && a.range?.[0] === b.range?.[0] && a.range?.[1] === b.range?.[1] && String(a.skip ?? "") === String(b.skip ?? ""))
+function TranscriptImpl({ k, tail, range, skip }: TP & { ev?: unknown; st?: string; loaded?: boolean }) {
   const s = st.S[k]
   const [full, setFull] = useState(false)
   useEffect(() => { if (s && !s.loaded) void loadEvents(k) }, [k, s?.loaded])
   if (!s) return null
   if (!s.loaded) return <div className="flex items-center gap-2 type-callout text-muted-foreground"><Spinner className="size-3.5" />载入会话</div>
   if (!s.ev.length && !range) return <div className="type-callout text-muted-foreground">{s.st === "run" ? "正在开始…" : "这个会话还没有内容"}</div>
-  const segs = segsOf(s, range)
-  const last = segs[segs.length - 1], tailOpen = !range || range[1] >= s.ev.length
+  const segs = segsOf(s, range, skip)
+  /* the turn running now may be shown elsewhere (skipped): then its progress is there, not here */
+  const last = segs[segs.length - 1], tailOpen = (!range || range[1] >= s.ev.length) && last?.t !== "away"
   const liveIdx = s.st === "run" && tailOpen && last?.t === "work" && !last.end ? segs.length - 1 : -1
   const from = tail && !full && segs.length > tail ? segs.length - tail : 0
   return (
@@ -825,10 +842,12 @@ export function RunBar({ k, onStop }: { k: string; onStop?: () => void }) {
 
 /* a session as a block inside the item's work log */
 const expanded = new Set<string>(), collapsedLive = new Set<string>()
-export function SessionBlock({ k, defaultOpen }: { k: string; defaultOpen?: boolean }) {
+export function SessionBlock({ k, defaultOpen, replies }: { k: string; defaultOpen?: boolean; /** comments' replies the feed shows on their own */ replies?: Reply[] }) {
   const [, f] = useState(0)
   const s = st.S[k]
   if (!s) return null
+  /* a turn answering a comment is shown under that comment, with its prompt; here it would be the same work a second time (ST-48) */
+  const skip = replies?.filter((r) => r.s === k).map((r): [number, number] => { let a = r.from; while (a > 0 && PROMPT.includes(s.ev[a - 1]?.[0])) a--; return [a, r.to] })
   const live = s.st === "run" || s.st === "wait"
   const open = expanded.has(k) ? true : collapsedLive.has(k) ? false : (defaultOpen ?? live)
   const toggle = () => { if (open) { expanded.delete(k); collapsedLive.add(k) } else { expanded.add(k); collapsedLive.delete(k) } f((x) => x + 1) }
@@ -845,25 +864,33 @@ export function SessionBlock({ k, defaultOpen }: { k: string; defaultOpen?: bool
         </button>
         <Tooltip><TooltipTrigger render={<Button variant="ghost" size="icon-xs" onClick={() => go("#/sessions/" + k)} data-enter-session={k} aria-label="进入会话" className="text-muted-foreground" />}><ArrowUpRightIcon /></TooltipTrigger><TooltipContent>进入会话</TooltipContent></Tooltip>
       </div>
-      {open && <div className="mb-2 ml-[9px] mt-1 border-l pl-[19px]"><Transcript k={k} compact={!live} tail={4} /></div>}
+      {open && <div className="mb-2 ml-[9px] mt-1 border-l pl-[19px]"><Transcript k={k} compact={!live} tail={4} skip={skip?.length ? skip : undefined} /></div>}
     </div>
   )
 }
 
-/* the agent's answer to one comment, right under the comment; opens to that turn of the session */
+/* the agent's answer to one comment, right under the comment; opens to that turn of the session.
+ * Folded, its header sums the work up; open, the work block inside does, so the header says only whose reply it is.
+ * Whether it is open outlives a remount: lines written while it runs shift its place in the feed */
+const replyOpen = new Set<string>()
 export function ReplyBlock({ r }: { r: Reply }) {
-  const [open, setOpen] = useState(false)
+  const key = r.s + ":" + r.from
+  const [open, setOpenS] = useState(() => replyOpen.has(key))
+  const setOpen = (v: boolean) => { if (v) replyOpen.add(key); else replyOpen.delete(key); setOpenS(v) }
   const s = st.S[r.s]
   if (!s) return null
   const who = s.b ?? "agent"
   if (!r.text && !r.tools) return r.live ? <div className="ml-7 flex items-center gap-2 py-1 type-footnote text-muted-foreground" data-reply-live><Spinner className="size-3" /><span className="shimmer">{botName(who)} 正在回复</span></div> : null
+  /* counted as the work block counts them: commands, files changed */
+  const stats = open ? [] : workStats(s.ev.slice(r.from, r.to))
   return (
     <div className="mb-1.5 ml-[9px] border-l pl-[19px]" data-reply={r.s}>
-      <div className="flex min-h-7 items-center gap-1.5 type-footnote text-muted-foreground">
-        <BotAvatar k={who} size={16} /><span className="font-medium text-foreground/80">{botName(who)}</span>
-        <span>· 会话 #{s.n}{r.tools ? ` · 调用工具 ${r.tools} 次` : ""}</span>
-        {r.live && <Spinner className="size-3" />}
-        <button type="button" onClick={() => setOpen(!open)} aria-expanded={open} className="ml-auto hover:text-foreground" data-reply-toggle>{open ? "收起过程" : "展开过程"}</button>
+      <div className="flex min-h-7 min-w-0 items-center gap-1.5 type-footnote text-muted-foreground">
+        <BotAvatar k={who} size={16} /><span className="shrink-0 font-medium text-foreground/80">{botName(who)}</span>
+        <span className="shrink-0">· 会话 #{s.n}</span>
+        {stats.length > 0 && <span className="min-w-0 truncate" data-reply-stats>· {stats.join(" · ")}</span>}
+        {r.live && !open && <Spinner className="size-3 shrink-0" />}
+        <button type="button" onClick={() => setOpen(!open)} aria-expanded={open} className="ml-auto shrink-0 hover:text-foreground" data-reply-toggle>{open ? "收起过程" : "展开过程"}</button>
         <Tooltip><TooltipTrigger render={<Button variant="ghost" size="icon-xs" onClick={() => go("#/sessions/" + r.s)} aria-label="进入会话" className="text-muted-foreground" />}><ArrowUpRightIcon /></TooltipTrigger><TooltipContent>进入会话</TooltipContent></Tooltip>
       </div>
       {open ? <div className="pb-2 pt-1"><Transcript k={r.s} compact={!r.live} range={[r.from, r.to]} /></div>
