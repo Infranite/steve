@@ -1,0 +1,1 @@
+- An item branch that shares no history with the main branch (an old line) is reported as not merged, instead of "can't tell", and no longer clutters other items' overlap checks.

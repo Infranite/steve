@@ -61,6 +61,35 @@ pub fn git_test(dir: &Path, args: &[&str]) -> Result<bool, String> {
     }
 }
 
+/// The merge base of `a` and `b`: `None` when they share no history (git says so with exit 1),
+/// an error when git fails.
+pub fn merge_base(dir: &Path, a: &str, b: &str) -> Result<Option<String>, String> {
+    let out = Command::new("git")
+        .env_remove("STEVE_UPGRADE_CONTROL_TOKEN")
+        .env_remove("STEVE_SUPERVISOR_PID")
+        .env_remove("STEVE_UPGRADE_ID")
+        .arg("-C")
+        .arg(dir)
+        .args(["merge-base", a, b])
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| e.to_string())?;
+    match out.status.code() {
+        Some(0) => Ok(Some(
+            String::from_utf8_lossy(&out.stdout).trim().to_string(),
+        )),
+        Some(1) if out.stderr.is_empty() => Ok(None),
+        _ => {
+            let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            Err(if err.is_empty() {
+                format!("git merge-base {a} {b} failed")
+            } else {
+                js_head(&err, 300).to_string()
+            })
+        }
+    }
+}
+
 fn succeeds(dir: &Path, args: &[&str]) -> bool {
     git(dir, args).is_ok()
 }

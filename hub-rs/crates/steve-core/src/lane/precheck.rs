@@ -90,10 +90,13 @@ fn overlap_of(
     this: &str,
     other: &str,
 ) -> Result<Option<Overlap>, String> {
-    let (base_a, base_b) = (
-        git(dir, &["merge-base", this, target])?,
-        git(dir, &["merge-base", other, target])?,
-    );
+    /* one of them shares no history with the target: it can't merge there, so it overlaps nothing */
+    let (Some(base_a), Some(base_b)) = (
+        crate::git::merge_base(dir, this, target)?,
+        crate::git::merge_base(dir, other, target)?,
+    ) else {
+        return Ok(None);
+    };
     /* equal patch ids only make two changes candidates (`--stable` ignores whitespace, which can be
     meaning); the same diff, whitespace and all, line numbers aside, makes them the same */
     let own = |base: &str, head: &str| -> Result<Option<String>, String> {

@@ -207,6 +207,22 @@ fn a_change_already_on_the_target_is_found_however_it_was_merged() {
         Presence::Landed { commit: squash }
     );
 
+    /* a branch with no history in common with the target (an old line): definitely not on it */
+    g(&r, &["checkout", "-q", "--orphan", "old"]);
+    let old = commit(&r, "old.txt", "old\n", "old line");
+    assert_eq!(precheck(&r, UP, &old, &[]).presence, Presence::Absent);
+    let p = precheck(
+        &r,
+        UP,
+        &three,
+        &[Request {
+            id: "ST-old",
+            head: &old,
+        }],
+    );
+    assert!(p.overlaps.is_empty(), "{:?}", p.overlaps);
+    g(&r, &["checkout", "-q", "main"]);
+
     /* git can't tell: not "absent" */
     assert!(matches!(
         precheck(&r, UP, "0123456789abcdef0123456789abcdef01234567", &[]).presence,

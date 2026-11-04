@@ -392,7 +392,10 @@ fn landed(dir: &Path, head: &str, up: &str) -> Result<Option<String>, String> {
     if crate::git::git_test(dir, &["merge-base", "--is-ancestor", head, up])? {
         return Ok(Some(head.into()));
     }
-    let mb = git(dir, &["merge-base", head, up])?;
+    /* no shared history: it can't be on `up` */
+    let Some(mb) = crate::git::merge_base(dir, head, up)? else {
+        return Ok(None);
+    };
     let range = format!("{mb}..{up}");
     let upstream = patch_ids(dir, &["log", "--no-merges", "-p", "--no-color", &range])?;
     let find = |pid: &str| {
