@@ -561,11 +561,20 @@ fn approvals_and_permissions() {
         k.rt.prompts_of(&s.id).last().unwrap(),
         "用户拒绝了：推送到 main。原因：太早。不要执行这个操作。"
     );
+    /* the conversation line says what the agent was told, reason included (ST-32) */
+    assert!(
+        k.timeline_texts(&i.id)
+            .contains(&"拒绝：推送到 main。原因：太早".to_string())
+    );
     k.rt.end_turn(&k.core, &s.id, "end_turn", None);
     k.core.tool_request_approval(&s, "发邮件", "x").unwrap();
     let d = k.db().decisions_of_item(&i.id).unwrap().pop().unwrap();
     k.core.resolve(&d.id, "yes", "", "me").unwrap();
     assert_eq!(k.rt.prompts_of(&s.id).last().unwrap(), "用户批准了：发邮件");
+    assert!(
+        k.timeline_texts(&i.id)
+            .contains(&"批准：发邮件".to_string())
+    );
 
     /* a live permission is answered; a stale one expires and the agent is told */
     let p = k.decision(
