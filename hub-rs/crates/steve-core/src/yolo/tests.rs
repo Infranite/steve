@@ -914,6 +914,7 @@ fn every_row_of_the_table() {
                 no_progress,
                 attempts: 0,
                 asked: None,
+                steve_tried: false,
             }),
         )
     };
@@ -1043,6 +1044,17 @@ fn every_row_of_the_table() {
             "stall stuck",
             stall(StallCause::Stopped, 3),
             "continue.stuck",
+        ),
+        (
+            "stall after Steve continued it",
+            {
+                let mut f = stall(StallCause::Stopped, 0);
+                if let Subject::Stall(s) = &mut f.subject {
+                    s.steve_tried = true;
+                }
+                f
+            },
+            "continue.steve",
         ),
         (
             "session error",
@@ -1458,6 +1470,7 @@ fn delays_texts_and_undo() {
             no_progress: 0,
             attempts: 0,
             asked: None,
+            steve_tried: false,
         }),
     );
     let Verdict::Auto { text, .. } = run(&f, &pl) else {
@@ -1476,6 +1489,7 @@ fn delays_texts_and_undo() {
             no_progress: 0,
             attempts: 1,
             asked: None,
+            steve_tried: false,
         }),
     );
     let Verdict::Auto { text, delay_s, .. } = run(&f, &pl) else {
@@ -2117,7 +2131,7 @@ proptest! {
         }
         // fail cards offer `delivered` and `tosteve`; flows offer `continue_once`; none of them is chosen
         for (subject, opts) in [
-            (Subject::Stall(Stall { cause: StallCause::Other, no_progress: 0, attempts: 0, asked: None }), vec!["delivered", "tosteve"]),
+            (Subject::Stall(Stall { cause: StallCause::Other, no_progress: 0, attempts: 0, asked: None, steve_tried: false }), vec!["delivered", "tosteve"]),
             (Subject::FlowRun { over_budget: false }, vec!["continue_once"]),
             (Subject::SecretUse { template: "api_key".into(), sensitivity: "normal".into() }, vec!["grant_8h", "allow"]),
         ] {

@@ -857,6 +857,17 @@ impl Items<'_> {
             )
         })
     }
+    /// Every operation of `kind` in `status`, any item, oldest first.
+    pub fn operations_with(&self, kind: &str, status: &str) -> Result<Vec<ItemOperation>> {
+        self.0.read(|c| {
+            all(
+                c,
+                "SELECT * FROM item_operations WHERE kind = ? AND status = ? ORDER BY created, id",
+                params![kind, status],
+                op_row,
+            )
+        })
+    }
     /// Every operation of an item, any cycle, oldest first.
     pub fn operations_all(&self, item_id: &str) -> Result<Vec<ItemOperation>> {
         self.0.read(|c| {

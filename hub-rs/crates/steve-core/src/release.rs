@@ -1059,6 +1059,10 @@ impl Tx<'_> {
         if !self.release_pending(i)? {
             return Ok(());
         }
+        /* the project's own completion rule (merged, tagged) stands for the release on this machine */
+        if let Some(rule) = self.done_rule(i)? {
+            return self.contract_requirement(i, &rule);
+        }
         let head = c.fingerprint.as_deref().map(fingerprint_head);
         let proof = self
             .db()

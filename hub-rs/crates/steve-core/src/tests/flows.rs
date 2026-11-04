@@ -216,6 +216,7 @@ fn a_git_project_gets_a_worktree_on_the_item_branch() {
     let rel = crate::repo::Release {
         kind: "script".into(),
         cmd: "/x".into(),
+        done_when: None,
     };
     let p = k
         .db()

@@ -19,6 +19,7 @@ mod routing;
 mod stall;
 mod stats_marks;
 mod supersede;
+mod takeover;
 mod thread;
 
 use crate::repo::{NewDecision, NewItem, NewSession, Release, WS};
@@ -45,6 +46,7 @@ impl Kit {
         let rel = Release {
             kind: "script".into(),
             cmd: script.to_string_lossy().into(),
+            done_when: None,
         };
         match self
             .db()

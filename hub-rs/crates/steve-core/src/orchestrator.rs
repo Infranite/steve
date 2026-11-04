@@ -235,6 +235,7 @@ impl Core {
                         .join("current/ops/release.sh")
                         .to_string_lossy()
                         .into(),
+                    done_when: None,
                 }
             });
             steve_project = Some(db.project_create(
@@ -677,7 +678,8 @@ impl Tx<'_> {
         via: &str,
         files: &[FileRef],
     ) -> Result<Prompted> {
-        let text = self.c.with_yolo_note(sid, text);
+        let text = self.c.with_steve_note(sid, text);
+        let text = self.c.with_yolo_note(sid, &text);
         self.rt().prompt(sid, &text, via, files)
     }
 
@@ -839,6 +841,22 @@ impl Tx<'_> {
                 l.push_str(crate::yolo::agent::PUBLISH);
             }
             lines.push(l);
+            /* the project's own rule of done (ST-31): what finishes the item, and what does not hold it */
+            if let Some(rule) = p
+                .as_ref()
+                .and_then(|p| p.release.as_ref())
+                .and_then(|r| r.done_when.as_deref())
+                .filter(|r| *r == crate::upstream::DONE_MERGE || *r == crate::upstream::DONE_TAG)
+            {
+                lines.push(format!(
+                    "- Done in this project means: {}. Once the user accepted your delivery, that is all that is left; a CI or Release build it starts is followed by Steve on its own — do not wait for it, end your turn. Steve checks the remote itself; never merge, tag or push again what already is there.",
+                    if rule == crate::upstream::DONE_TAG {
+                        "your commits are merged into the remote's default branch (the PR is merged) and a tag containing them is pushed"
+                    } else {
+                        "your commits are merged into the remote's default branch (the PR is merged)"
+                    }
+                ));
+            }
         }
         lines.push("Do the work yourself; do not stop to ask for confirmation you don't need. Reply to the user in Chinese.".into());
         lines.retain(|l| !l.is_empty());
@@ -1053,6 +1071,26 @@ impl Tx<'_> {
 
     pub(crate) fn fail(&mut self, item_id: &str, why: &str) -> Result<()> {
         let i = self.item(item_id)?;
+        /* one card per trouble: the same one still open is not asked again; an older stop card gives way
+         * to the new one (a card about an effect nobody knows stays, it waits on you) */
+        let open = self.db().decisions_of_item(item_id)?;
+        if open
+            .iter()
+            .any(|d| d.status == "open" && d.kind == "fail" && d.question == why)
+        {
+            return settle(self.db(), item_id);
+        }
+        crate::lifecycle::supersede_where(
+            self.db(),
+            item_id,
+            |d| {
+                d.kind == "fail"
+                    && matches!(d.subject_type.as_str(), "item" | crate::stall::STALL)
+                    && !crate::cycle::unknown_effect_card(d)
+                    && !d.options.iter().any(|o| o.starts_with("release_"))
+            },
+            "有了新的情况",
+        )?;
         let mut opts: Vec<String> = vec!["continue".into(), "delivered".into(), "look".into()];
         if i.bot_id.as_deref() != Some("steve") {
             opts.push("tosteve".into());
@@ -1491,6 +1529,8 @@ impl Tx<'_> {
         };
         /* a closing waits for this turn (among others): look at it again, nothing else to judge */
         if item.phase == crate::cycle::CLOSING {
+            /* the turn may have merged or tagged: a completion rule is looked up afresh */
+            self.st.probed.remove(item_id);
             self.lc_try_close(item_id)?;
             return Ok(());
         }
@@ -1524,7 +1564,13 @@ impl Tx<'_> {
                 } else {
                     format!("：{}", js_head(&last, 160))
                 };
-                format!("Agent 停下来了，没有交付也没有提问{tail}")
+                let why = format!("Agent 停下来了，没有交付也没有提问{tail}");
+                /* Steve looks first: done by the project's rule, or worth another go */
+                let stop = crate::takeover::Stop::Stopped { why, last };
+                match self.takeover(item_id, &session.id, stop)? {
+                    Some(why) => why,
+                    None => return Ok(()),
+                }
             }
         };
         self.fail(item_id, &why)

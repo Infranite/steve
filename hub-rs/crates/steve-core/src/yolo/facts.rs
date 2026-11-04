@@ -218,6 +218,7 @@ impl Engine {
                     no_progress: streak.no_progress,
                     attempts: streak.errors,
                     asked,
+                    steve_tried: d.question.contains(crate::takeover::STEVE_TRIED),
                 })
             }
             ("approve", "release") => {

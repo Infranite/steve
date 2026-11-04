@@ -29,7 +29,9 @@ pub mod repo;
 pub mod runtime;
 pub mod stall;
 pub mod stats;
+pub mod takeover;
 pub mod thread;
+pub mod upstream;
 pub mod util;
 pub mod yolo;
 
@@ -70,6 +72,8 @@ pub(crate) struct Inner {
     yolo: OnceLock<yolo::Yolo>,
     /// What running sessions were told about YOLO.
     yolo_sessions: yolo::agent::Sessions,
+    /// What Steve has to tell a session with its next message (a delivery that went void meanwhile).
+    steve_notes: Mutex<HashMap<String, String>>,
 }
 
 /// What a session's last Steve tool call left behind, consumed at its turn end.
@@ -110,6 +114,12 @@ pub(crate) struct State {
     /// Turns to cancel once the lock is gone `(session, item)`: a cancel can call back into the core
     /// (the gateway-retry wait ends with a turn end), so a lifecycle stop never cancels under the lock.
     cancels: Vec<(String, String)>,
+    /// Items whose completion rule is being checked against the remote now, since when (`takeover`).
+    probing: HashMap<String, i64>,
+    /// The last completion probe of each item.
+    probed: HashMap<String, takeover::Probed>,
+    /// Followed builds: when each was last looked at.
+    build_checked: HashMap<String, i64>,
 }
 
 /// One critical section: the core plus the held state lock.
@@ -138,7 +148,35 @@ impl Core {
             hook_queue: OnceLock::new(),
             yolo: OnceLock::new(),
             yolo_sessions: Default::default(),
+            steve_notes: Default::default(),
         }))
+    }
+
+    /// Puts `note` in front of the next message session `sid` gets (several notes: in order).
+    pub(crate) fn steve_note(&self, sid: &str, note: &str) {
+        let mut n = self.0.steve_notes.lock().unwrap_or_else(|e| e.into_inner());
+        n.entry(sid.into())
+            .and_modify(|x| {
+                if !x.contains(note) {
+                    x.push_str("\n\n");
+                    x.push_str(note);
+                }
+            })
+            .or_insert_with(|| note.into());
+    }
+
+    /// The text for session `sid` with Steve's waiting note in front of it (once).
+    pub(crate) fn with_steve_note(&self, sid: &str, text: &str) -> String {
+        let n = self
+            .0
+            .steve_notes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(sid);
+        match n {
+            Some(n) => format!("{n}\n\n{text}"),
+            None => text.to_string(),
+        }
     }
 
     /// Wires the YOLO switch in (once).

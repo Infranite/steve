@@ -40,6 +40,13 @@ impl Core {
                 Err(e) => tracing::error!("stall check task {e}"),
                 Ok(Ok(_)) => {}
             }
+            /* the Release builds Steve follows (network calls, outside the lock) */
+            let c = self.clone();
+            match tokio::task::spawn_blocking(move || c.check_builds()).await {
+                Ok(Err(e)) => tracing::warn!("build check {e}"),
+                Err(e) => tracing::warn!("build check task {e}"),
+                Ok(Ok(_)) => {}
+            }
         }
     }
 }
@@ -80,7 +87,17 @@ impl Tx<'_> {
                     .last_system_text(&s.id)?
                     .filter(|t| !t.trim().is_empty())
                     .unwrap_or_else(|| "会话空闲，没有在运行，也没有交付或提问".into());
-                let question = format!("它停下了：{}", js_head(&why, 200));
+                let mut question = format!("它停下了：{}", js_head(&why, 200));
+                /* Steve looks first, unless it was you who stopped it */
+                if !why.starts_with("你中断了") {
+                    let stop = crate::takeover::Stop::Idle {
+                        why: question.clone(),
+                    };
+                    match self.takeover(&i.id, &s.id, stop)? {
+                        Some(q) => question = q,
+                        None => continue,
+                    }
+                }
                 let d = self.db().decision_create(NewDecision {
                     workspace_id: i.workspace_id.clone(),
                     kind: "fail".into(),
