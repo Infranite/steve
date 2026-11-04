@@ -23,12 +23,13 @@ import { draftKey } from "@/composer-draft"
 import { GitHubMoreRow } from "@/github/index"
 import { SessionKnowledge } from "@/knowledge/parts"
 import { lazyView } from "@/lazy"
-import { OutPreview } from "@/outputs"
+import { AnnRefs } from "@/annotate"
+import { OutDialog, OutList, type OutOpen } from "@/item-outputs"
 import { ItemPeopleProp } from "@/people/item-people"
 import { QueuedComment, queuedComments, queueNote, QueueStrip } from "@/queue"
 import { NativeIdLine, ResumeCard } from "@/resume"
 import { ItemStatsRows, SessionStats } from "@/stats/drill"
-import { accOf, active, addDep, archive, bulk, closeRel, deleteItem, depsOpen, doFork, gBuild, gComps, hm, importSessions, interrupt, it, itemThread, link, loadEvents, loadItem, loadLocalSessions, markDone, newItem, patchItem, pending, pendingCards, reassign, rmDep, saveGoal, sessPatch, sessRemove, sessSend, setAcc, setSt, setTags, setKind, kindOf, kindTags, isKind, DOMAIN_CATS, snoozed, st, stageOf, star, supp, tag, threadFollow, tm, toast, undoDecision, unsnooze, WT, type Item, type Out, type PlanRound, type Reply } from "@/store"
+import { accOf, active, addDep, archive, bulk, closeRel, deleteItem, depsOpen, doFork, gBuild, gComps, hm, importSessions, interrupt, it, itemThread, link, loadEvents, loadItem, loadLocalSessions, markDone, newItem, patchItem, pending, pendingCards, reassign, rmDep, saveGoal, sessPatch, sessRemove, sessSend, setAcc, setSt, setTags, setKind, kindOf, kindTags, isKind, DOMAIN_CATS, snoozed, st, stageOf, star, supp, tag, threadFollow, tm, toast, undoDecision, unsnooze, WT, type Item, type PlanRound, type Reply } from "@/store"
 import { BotAvatar, BotName, Chips, closeSheet, Composer, DecisionCard, Empty, go, Group, ItemNo, KindTag, Meta, openSheet, Page, RelNote, ReplyBlock, Row, RunBar, SectionLabel, Segmented, SessionBlock, Status, StatusDot, Tags, ThemeSwitch, Transcript, type ComposerHandle } from "@/ui"
 import { ChoiceCards, ItemRow, PlanBar, ProjectChip, Select, selected } from "@/view-shared"
 import { choiceText, YoloItemSwitch, YoloMark } from "@/yolo/badges"
@@ -314,7 +315,7 @@ export function ItemView({ id }: { id: string }) {
   const [confirmDrop, setConfirmDrop] = useState(false), [confirmDel, setConfirmDel] = useState(false)
   const [doneBusy, setDoneBusy] = useState(false)
   const itemComposer = useRef<ComposerHandle | null>(null)
-  const [older, setOlder] = useState(false), [titleEdit, setTitleEdit] = useState(false), [preview, setPreview] = useState<Out | null>(null)
+  const [older, setOlder] = useState(false), [titleEdit, setTitleEdit] = useState(false), [preview, setPreview] = useState<OutOpen | null>(null)
   if (lastItem !== id) { lastItem = id; dtab = "动态" }
   useEffect(() => { void loadItem(id, true) }, [id])
   const i = st.items.find((x) => x.id === id)
@@ -375,9 +376,12 @@ export function ItemView({ id }: { id: string }) {
       <div key={n} className="flex items-start gap-2 py-1.5" data-comment><span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-muted text-[10px] font-medium text-muted-foreground">我</span>
         <QueuedComment sid={i.qs!} q={q} prefix="补充信息：" composer={itemComposer} note={qNote} at={e[2]} body={(t) => <div className="type-body"><Markdown text={t} /></div>} /></div>
     )
+    /* notes sent from an output show what they mark and open the output there */
+    const notes = e[0] === "me" && e[7] != null ? i.anns.filter((x) => x.timeline_id === e[7]) : []
     if (e[0] === "me") return (
       <div key={n} className="flex items-start gap-2 py-1.5" data-comment><span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-muted text-[10px] font-medium text-muted-foreground">我</span>
-        <div className="min-w-0">{(e[1] !== "（附件）" || !e[5]?.length) && <div className="type-body"><Markdown text={e[1]} /></div>}<Files files={e[5]} className="my-1" /><div className="type-footnote text-muted-foreground">{e[2]}{e[3] && st.S[e[3]] ? ` · 已送达会话 #${st.S[e[3]].n}` : ""}{e[6] === "thread" && <a href="#/" className="ml-1.5 rounded bg-muted px-1.5 hover:text-foreground" data-from-thread>来自对话</a>}</div></div></div>
+        <div className="min-w-0 flex-1">{notes.length ? <div data-comment-notes><div className="type-body">对产出的批注（{notes.length} 条）</div><AnnRefs item={i.id} anns={notes} outs={i.outs} open={(o, ann) => setPreview({ o, focus: ann })} /></div>
+          : (e[1] !== "（附件）" || !e[5]?.length) && <div className="type-body"><Markdown text={e[1]} /></div>}<Files files={e[5]} className="my-1" /><div className="type-footnote text-muted-foreground">{e[2]}{e[3] && st.S[e[3]] ? ` · 已送达会话 #${st.S[e[3]].n}` : ""}{e[6] === "thread" && <a href="#/" className="ml-1.5 rounded bg-muted px-1.5 hover:text-foreground" data-from-thread>来自对话</a>}</div></div></div>
     )
     const yolo = typeof e[1] === "string" && e[1].startsWith("YOLO")
     return <div key={n} className="flex items-center gap-2 py-1 type-footnote text-muted-foreground" data-yolo-line={yolo ? "" : undefined}><span className="flex size-5 shrink-0 items-center justify-center"><span className="size-1 rounded-full bg-tertiary" /></span>{yolo && <YoloMark />}<span className="min-w-0 truncate">{yolo ? e[1].replace(/^YOLO[：:]\s*/, "") : e[1]}</span><span className="shrink-0 text-tertiary">{e[2]}</span></div>
@@ -399,12 +403,7 @@ export function ItemView({ id }: { id: string }) {
           <AlertDialogFooter><AlertDialogCancel>取消</AlertDialogCancel><AlertDialogAction variant="destructive" onClick={() => { go("#/items"); deleteItem(i.id) }}>删除</AlertDialogAction></AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
-      <Dialog open={!!preview} onOpenChange={(o) => !o && setPreview(null)}>
-        <DialogContent className="flex max-h-[90vh] flex-col gap-3 rounded-2xl sm:max-w-[960px]" data-preview>
-          <DialogHeader><DialogTitle className="type-headline break-words pr-6">{preview?.[1]}</DialogTitle><DialogDescription className="type-callout">{preview?.[0]} · 来自 {i.id}</DialogDescription></DialogHeader>
-          {preview && <OutPreview key={preview[3]} o={preview} item={i.id} />}
-        </DialogContent>
-      </Dialog>
+      <OutDialog item={i.id} outs={i.outs} anns={i.anns} view={preview} setView={setPreview} />
       {i.arch && <div className="mb-6 flex items-center gap-3 rounded-xl border px-4 py-2.5 type-callout" data-arch-banner><ArchiveIcon className="size-4 text-muted-foreground" /><span className="flex-1">这个事项已归档</span><Button size="sm" variant="ghost" onClick={() => archive([i.id], false)}>恢复</Button></div>}
       <div className="grid gap-12 lg:grid-cols-[minmax(0,1fr)_248px]">
         <div className="flex min-w-0 flex-col gap-10">
@@ -447,7 +446,7 @@ export function ItemView({ id }: { id: string }) {
                 {feed.slice(hidden).map(entry)}
               </div>
             )}
-            {dtab === "产出" && (i.outs.length ? <Group>{i.outs.map((o, n) => <Row key={n} title={<span className="break-words font-mono text-[13px]">{o[1]}</span>} sub={o[2] ?? undefined} onClick={() => setPreview(o)} data-out={n}><span className="type-footnote text-muted-foreground">{o[0]}</span><ChevronRightIcon className="size-4 text-tertiary" /></Row>)}</Group> : <Empty title="还没有产出" sub="Bot 交付时附上的分支、提交、文件和文档会出现在这里。" />)}
+            {dtab === "产出" && <OutList outs={i.outs} anns={i.anns} open={(o) => setPreview({ o })} />}
             {dtab === "关系图" && <div className="flex flex-col gap-3"><GraphLegend /><RelationGraph key={id} focus={id} scope="comp" height={460} onOpen={openNode} /></div>}
           </section>
         </div>

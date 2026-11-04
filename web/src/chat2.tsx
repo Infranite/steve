@@ -1,6 +1,7 @@
 /* Chat page, second pass (ST-6): what Steve did for each message, folded like an agent transcript; notifications and a
  * compact summary in a right rail (a sheet on narrow screens); failures also leave one short line in the conversation.
  * Also: the open cards a session waits on, shown inside the session page. */
+import { Markdown } from "@/components/markdown"
 import { useEffect, useState, type ReactNode } from "react"
 import { cn } from "cn"
 import { ArchiveIcon, BrainIcon, CheckIcon, CircleAlertIcon, CircleCheckIcon, InfoIcon, ListPlusIcon, ListTodoIcon, MegaphoneIcon, RouteIcon, SendIcon, SlidersHorizontalIcon, XIcon } from "lucide-react"
@@ -63,7 +64,7 @@ export function StepsBlock({ m }: { m: Msg }) {
           </div>}
           {s.answer?.thought && <div className="flex flex-col gap-0.5" data-step-thought>
             <TraceLine><TraceIcon><BrainIcon strokeWidth={1.5} /></TraceIcon><TraceTitle className="text-foreground/80">怎么回答</TraceTitle><TraceDescription>{secs(s.answer.ms)}</TraceDescription></TraceLine>
-            <div className="whitespace-pre-wrap pl-6 type-callout text-muted-foreground">{s.answer.thought}</div>
+            <div className="min-w-0 break-words pl-6 text-muted-foreground"><Markdown text={s.answer.thought} className="type-callout" /></div>
           </div>}
           {s.tools.map((t, n) => {
             const brief = typeof t.args?.brief === "string" ? t.args.brief : undefined

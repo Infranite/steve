@@ -1349,8 +1349,13 @@ impl Tx<'_> {
             self.db().item_patch(item_id, patch![plan: plan])?;
         }
         for o in outputs {
-            self.db()
-                .artifact_add(item_id, &o.kind, &o.title, o.location.as_deref())?;
+            self.db().artifact_add(
+                item_id,
+                &o.kind,
+                &o.title,
+                o.location.as_deref(),
+                o.role.as_deref(),
+            )?;
         }
         let check_text = if checks.is_empty() {
             String::new()

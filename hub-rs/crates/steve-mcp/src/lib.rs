@@ -59,6 +59,10 @@ pub struct Output {
     pub title: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub location: Option<String>,
+    /// `record`: documents the work (a self-check screenshot, a log, an intermediate file) rather than
+    /// being its result; shown with the item's work record instead of its outputs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
 }
 
 /// What the agent leans towards on a `steve_ask` (both optional; YOLO may pick `recommended`).

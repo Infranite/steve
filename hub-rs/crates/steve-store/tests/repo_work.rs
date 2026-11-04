@@ -1156,3 +1156,90 @@ async fn sealed_drain_refuses_late_running_tokens_until_explicit_cancel() {
     t.store.maintenance_set(true).unwrap();
     assert!(t.store.continuing_activity("new_drain", || true).is_some());
 }
+
+#[test]
+fn records_and_annotations_drafts_one_send_per_key_and_removal() {
+    let t = with_steve();
+    let s = &t.store;
+    let a = new_item(s, WS, "a");
+    s.artifacts()
+        .add_as(&a.id, "文件", "截图", Some("/tmp/shots"), Some("record"))
+        .unwrap();
+    s.artifacts()
+        .add_as(&a.id, "文档", "方案", Some("docs/a.md"), Some("result"))
+        .unwrap();
+    let arts = s.artifacts().list(&a.id).unwrap();
+    assert_eq!(
+        s.artifacts().roles(&a.id).unwrap(),
+        [
+            (arts[0].id.clone(), "record".to_string()),
+            (arts[1].id.clone(), "result".to_string())
+        ],
+        "what the agent said"
+    );
+    s.artifacts()
+        .add_as(&a.id, "文件", "x", None, Some("other"))
+        .unwrap();
+    assert_eq!(
+        s.artifacts().roles(&a.id).unwrap().len(),
+        2,
+        "only known roles"
+    );
+
+    let n = s.annotations();
+    let region = json!({"type": "region", "x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4});
+    let one = n.add(&a.id, &arts[1].id, "", &region, "改一下").unwrap();
+    let two = n
+        .add(
+            &a.id,
+            &arts[0].id,
+            "a.png",
+            &json!({"type": "file"}),
+            "偏暗",
+        )
+        .unwrap();
+    assert_eq!((one.status.as_str(), one.anchor.clone()), ("draft", region));
+    assert_eq!(
+        n.edit(&a.id, &one.id, "改成这样").unwrap().unwrap().note,
+        "改成这样"
+    );
+    assert!(
+        n.edit("other", &one.id, "x").unwrap().is_none(),
+        "scoped to the item"
+    );
+
+    let ids = vec![one.id.clone(), two.id.clone()];
+    let c = n.claim(&a.id, &ids, "k1").unwrap();
+    assert_eq!((c.again, c.taken.len()), (false, 2));
+    assert!(
+        n.edit(&a.id, &one.id, "x").unwrap().is_none(),
+        "a draft being sent is not edited"
+    );
+    assert!(!n.remove(&a.id, &one.id).unwrap());
+    // the same send again takes nothing new; another send finds nothing left
+    let again = n.claim(&a.id, &ids, "k1").unwrap();
+    assert_eq!((again.again, again.taken.len()), (true, 2));
+    assert!(n.claim(&a.id, &ids, "k2").unwrap().taken.is_empty());
+
+    // a failed send gives the drafts back
+    n.settle(&a.id, "k1", false, None).unwrap();
+    assert!(
+        n.list(&a.id)
+            .unwrap()
+            .iter()
+            .all(|x| x.status == "draft" && x.send_key.is_none())
+    );
+    let c = n.claim(&a.id, &ids, "k3").unwrap();
+    assert_eq!(c.taken.len(), 2);
+    n.settle(&a.id, "k3", true, Some(7)).unwrap();
+    let l = n.list(&a.id).unwrap();
+    assert!(
+        l.iter()
+            .all(|x| x.status == "sent" && x.timeline_id == Some(7) && x.sent.is_some())
+    );
+    assert!(!n.remove(&a.id, &two.id).unwrap(), "what was sent stays");
+
+    s.items().remove(&a.id).unwrap();
+    assert!(n.list(&a.id).unwrap().is_empty());
+    assert!(s.artifacts().roles(&a.id).unwrap().is_empty());
+}

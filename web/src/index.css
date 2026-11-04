@@ -224,3 +224,5 @@
 .md [data-a2ui] :is(h1, h2, h3, h4, h5, h6) { margin: 0; }
 .md li:has(> input[type="checkbox"]) { list-style: none; margin-left: -18px; }
 .md blockquote { border-left: 2px solid var(--border); padding-left: 12px; color: var(--muted-foreground); font-style: normal; }
+/* where a note on selected text is (ST-38), found again when the note is located */
+::highlight(steve-ann) { background-color: color-mix(in oklab, var(--attention) 35%, transparent); color: inherit; }

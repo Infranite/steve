@@ -208,10 +208,15 @@ impl Items<'_> {
                 "UPDATE sessions SET item_id = NULL, no = 0 WHERE item_id = ?",
                 [id],
             )?;
+            tx.run(
+                "DELETE FROM artifact_roles WHERE artifact_id IN (SELECT id FROM artifacts WHERE item_id = ?)",
+                [id],
+            )?;
             for t in [
                 "item_tags",
                 "item_goals",
                 "timeline",
+                "annotations",
                 "artifacts",
                 "thread_items",
             ] {
@@ -439,13 +444,48 @@ impl Artifacts<'_> {
         title: &str,
         location: Option<&str>,
     ) -> Result<()> {
+        self.add_as(item_id, kind, title, location, None)
+    }
+
+    /// `role`: `record` for an output that documents the work (a self-check screenshot, a log) rather than
+    /// being its result, `result` for one said to be the result; one the agent said nothing about gets no row
+    /// (the page then judges it by its title, as it does outputs from before roles).
+    pub fn add_as(
+        &self,
+        item_id: &str,
+        kind: &str,
+        title: &str,
+        location: Option<&str>,
+        role: Option<&str>,
+    ) -> Result<()> {
         self.0.write(|w| {
-            w.c.run(
+            let tx = w.c.unchecked_transaction()?;
+            let id = uid("art");
+            tx.run(
                 "INSERT INTO artifacts (id, item_id, kind, title, location, created) VALUES (?, ?, ?, ?, ?, ?)",
-                params![uid("art"), item_id, kind, title, location, now()],
+                params![id, item_id, kind, title, location, now()],
             )?;
+            if let Some(role) = role.filter(|r| ["record", "result"].contains(r)) {
+                tx.run(
+                    "INSERT INTO artifact_roles (artifact_id, role) VALUES (?, ?)",
+                    [&id, role],
+                )?;
+            }
+            tx.commit()?;
             w.publish(ChangeEvent::Item { id: item_id.into() });
             Ok(())
+        })
+    }
+
+    /// `(artifact id, role)` of the item's outputs the agent said a role for.
+    pub fn roles(&self, item_id: &str) -> Result<Vec<(String, String)>> {
+        self.0.read(|c| {
+            all(
+                c,
+                "SELECT r.artifact_id, r.role FROM artifact_roles r JOIN artifacts a ON a.id = r.artifact_id WHERE a.item_id = ? ORDER BY a.created, a.rowid",
+                [item_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
         })
     }
 
@@ -453,7 +493,7 @@ impl Artifacts<'_> {
         self.0.read(|c| {
             all(
                 c,
-                "SELECT * FROM artifacts WHERE item_id = ? ORDER BY created",
+                "SELECT * FROM artifacts WHERE item_id = ? ORDER BY created, rowid",
                 [item_id],
                 |r| {
                     Ok(Artifact {

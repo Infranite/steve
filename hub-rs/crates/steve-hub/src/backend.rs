@@ -405,6 +405,50 @@ pub trait Repo {
     fn artifacts_list(&self, item: &str) -> BResult<Vec<Obj>> {
         todo_backend!("artifacts_list")
     }
+    /// `{artifact id: "record" | "result"}` of the outputs the agent said a role for.
+    fn artifact_roles(&self, item: &str) -> BResult<Obj> {
+        todo_backend!("artifact_roles")
+    }
+    /// The user's notes on the item's outputs, drafts and sent (ST-38).
+    fn annotations_list(&self, item: &str) -> BResult<Vec<Obj>> {
+        todo_backend!("annotations_list")
+    }
+    fn annotation_add(
+        &self,
+        item: &str,
+        art: &str,
+        path: &str,
+        anchor: &Value,
+        note: &str,
+    ) -> BResult<Obj> {
+        todo_backend!("annotation_add")
+    }
+    /// `None`: no such draft.
+    fn annotation_edit(&self, item: &str, id: &str, note: &str) -> BResult<Option<Obj>> {
+        todo_backend!("annotation_edit")
+    }
+    /// false: no such draft.
+    fn annotation_remove(&self, item: &str, id: &str) -> BResult<bool> {
+        todo_backend!("annotation_remove")
+    }
+    /// The drafts `ids` taken for the send `key`; `(true, taken then)` when the key was seen before.
+    fn annotations_claim(
+        &self,
+        item: &str,
+        ids: &[String],
+        key: &str,
+    ) -> BResult<(bool, Vec<Obj>)> {
+        todo_backend!("annotations_claim")
+    }
+    fn annotations_settle(
+        &self,
+        item: &str,
+        key: &str,
+        sent: bool,
+        timeline_id: Option<i64>,
+    ) -> BResult<()> {
+        todo_backend!("annotations_settle")
+    }
 
     // ── sessions, events, queue ──
     /// Raw session row (no conversion; `readonly` stays 0/1).

@@ -1,6 +1,7 @@
 //! REST + SSE for the web app (api.ts). Thin: validation here, behaviour in steve-core.
 //! Every request runs in one workspace (header `x-steve-ws` or cookie `steve_ws`, checked against membership).
 
+mod annotations;
 mod bots;
 mod files;
 mod items;
@@ -366,6 +367,12 @@ pub fn router(st: AppState, modules: Router) -> Router {
         .route("/items/{id}/snooze", post(items::snooze))
         .route("/items/{id}/artifacts/{art}/preview", get(outputs::preview))
         .route("/items/{id}/artifacts/{art}/raw", get(outputs::raw))
+        .route("/items/{id}/annotations", post(annotations::add))
+        .route("/items/{id}/annotations/send", post(annotations::send))
+        .route(
+            "/items/{id}/annotations/{ann}",
+            patch(annotations::edit).delete(annotations::remove),
+        )
         // item sidebar panels of the modules (B1)
         .route("/items/{id}/panels", get(items::panels))
         .route(

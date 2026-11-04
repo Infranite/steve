@@ -373,8 +373,12 @@ impl Db {
         kind: &str,
         title: &str,
         location: Option<&str>,
+        role: Option<&str>,
     ) -> Result<()> {
-        Ok(self.s.artifacts().add(item, kind, title, location)?)
+        Ok(self
+            .s
+            .artifacts()
+            .add_as(item, kind, title, location, role)?)
     }
 
     /* ── sessions, events, queue ── */

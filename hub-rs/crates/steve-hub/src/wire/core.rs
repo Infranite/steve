@@ -1205,6 +1205,7 @@ impl steve_mcp::Backend for CoreMcp {
                 kind: o.kind,
                 title: o.title,
                 location: o.location,
+                role: o.role,
             })
             .collect();
         let checks: Vec<steve_core::Check> = checks
