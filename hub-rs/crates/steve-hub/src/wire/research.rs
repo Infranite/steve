@@ -52,6 +52,11 @@ impl ResearchAdapter {
                 })
                 .collect(),
             question: q.question.clone(),
+            ui: if q.ui {
+                steve_core::gateway::A2UI_HINT.to_string()
+            } else {
+                String::new()
+            },
         });
         let cwd = q.project.as_ref().map(|p| PathBuf::from(&p.path));
         /* a follow-up continues the earlier session: the question alone is the prompt */
@@ -364,6 +369,7 @@ mod tests {
             stop: Arc::new(AtomicBool::new(false)),
             mcp: None,
             models,
+            ui: true,
         };
         let out = a.research(req("tr_1", Default::default()), &seen).await;
         assert_eq!(out.end, RunEnd::Done, "{out:?}");

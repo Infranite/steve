@@ -30,3 +30,4 @@ Examples:
   "这是什么？（附带 1 个附件：截图.png · image/png）" → answer
   "把开发 Bot 的思考强度调到 high，再把免打扰改成 22 点到 9 点" → config
   "你能改自己的设置吗" → answer
+  "[A2UI action] 提交「确认发布」 {…}" → answer (the user's answer through an interface in Steve's last reply; research when answering it needs reading)

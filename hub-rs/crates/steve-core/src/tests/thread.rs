@@ -684,3 +684,65 @@ async fn real_model_print_and_route() {
     .await;
     assert!(!a.failed && a.text.contains('2'), "{a:?}");
 }
+
+/// ST-46: a button of an interface in Steve's reply is said as the user's A2UI action, once per surface.
+#[tokio::test]
+async fn an_a2ui_action_is_said_once_per_surface() {
+    use crate::thread::A2uiAction;
+    let k = Kit::new();
+    router(
+        &k,
+        json!({"kind": "chat", "title": "选方案"}),
+        "选一个：\n```a2ui\n{\"version\":\"v0.9.1\",\"createSurface\":{\"surfaceId\":\"pick\",\"catalogId\":\"steve:catalog/v1\"}}\n```",
+    );
+    k.core.say(WS, "给我两个方案选", &[]).unwrap();
+    let ms = settle(&k, 2).await;
+    let reply = ms[1].id.clone();
+    let calls = k.gw.calls.lock().unwrap().clone();
+    assert!(
+        calls
+            .iter()
+            .any(|p| p.starts_with("You are Steve") && p.contains("steve:catalog/v1")),
+        "the main conversation's answer knows how to draw an interface"
+    );
+    let act = |surface: &str| A2uiAction {
+        block: "k1".into(),
+        surface: surface.into(),
+        component: "ok".into(),
+        name: "submit".into(),
+        label: "就用 A".into(),
+        context: json!({"plan": "A"}),
+        data: json!({"form": {"plan": ["A"]}}),
+        timestamp: "2026-11-05T01:00:00Z".into(),
+    };
+    let first = k.core.a2ui_action(WS, None, &reply, act("pick")).unwrap();
+    assert!(!first.already);
+    let said = first.message_id.clone().unwrap();
+    let again = k.core.a2ui_action(WS, None, &reply, act("pick")).unwrap();
+    assert!(again.already, "a second click gets the record back");
+    assert_eq!(again.message_id.as_deref(), Some(said.as_str()));
+    let m = k.db().message(&said).unwrap().unwrap();
+    assert_eq!(m.author, "me");
+    assert!(m.text.starts_with("[A2UI action] 提交「就用 A」\n"));
+    let sent: serde_json::Value = serde_json::from_str(m.text.lines().nth(1).unwrap()).unwrap();
+    assert_eq!(sent["action"]["surfaceId"], "pick");
+    assert_eq!(sent["action"]["context"], json!({"plan": "A"}));
+    assert_eq!(m.meta["a2ui_action"]["ref"], json!(reply));
+    assert_eq!(m.meta["a2ui_action"]["label"], "就用 A");
+    let r = k.db().message(&reply).unwrap().unwrap();
+    assert_eq!(
+        r.meta["a2ui"]["k1:pick"]["data"],
+        json!({"form": {"plan": ["A"]}})
+    );
+    assert_eq!(r.meta["a2ui"]["k1:pick"]["message"], json!(said));
+    /* a surface the reply doesn't draw, or a message that isn't Steve's reply, is refused */
+    assert!(k.core.a2ui_action(WS, None, &reply, act("other")).is_err());
+    assert!(k.core.a2ui_action(WS, None, &said, act("pick")).is_err());
+    assert!(
+        k.core
+            .a2ui_action("elsewhere", None, &reply, act("pick"))
+            .is_err()
+    );
+    /* the action is a turn like any message: Steve answers it */
+    settle(&k, 4).await;
+}

@@ -69,7 +69,7 @@ const bar = (xl: number, w: number, y0: number, h: number, r: number) => {
   return `M${xl},${y0}V${yt + r}Q${xl},${yt} ${xl + r},${yt}H${xl + w - r}Q${xl + w},${yt} ${xl + w},${yt + r}V${y0}Z`
 }
 
-export function Chart({ data, kind, fmt, picked, onPick, label, colors, height = H, int = false, unit = 1, tipFmt }: {
+export function Chart({ data, kind, fmt, picked, onPick, label, colors, height = H, int = false, unit = 1, tipFmt, xFmt = shortDay }: {
   data: Series; kind: Kind; fmt: (v: number) => string; picked?: string | null; onPick?: (day: string | null) => void; label: string
   /** one colour per series (defaults to the identity order) */
   colors?: string[]; height?: number
@@ -77,6 +77,8 @@ export function Chart({ data, kind, fmt, picked, onPick, label, colors, height =
   int?: boolean; unit?: number
   /** the tooltip's format, when it should be finer than the axis */
   tipFmt?: (v: number) => string
+  /** a bucket as the axis writes it (days by default) */
+  xFmt?: (bucket: string) => string
 }) {
   const box = useRef<HTMLDivElement>(null)
   const [w, setW] = useState(640)
@@ -140,7 +142,7 @@ export function Chart({ data, kind, fmt, picked, onPick, label, colors, height =
             <text x={PAD.l - 8} y={y(t)} dy="0.32em" textAnchor="end" className="fill-muted-foreground text-[11px] tabular-nums">{fmt(t)}</text>
           </g>
         ))}
-        {data.buckets.map((d, i) => i % every === 0 && <text key={d} x={x(i)} y={height - 8} textAnchor="middle" className={cn("text-[11px] tabular-nums", d === picked ? "fill-foreground font-medium" : "fill-muted-foreground")}>{shortDay(d)}</text>)}
+        {data.buckets.map((d, i) => i % every === 0 && <text key={d} x={x(i)} y={height - 8} textAnchor="middle" className={cn("text-[11px] tabular-nums", d === picked ? "fill-foreground font-medium" : "fill-muted-foreground")}>{xFmt(d)}</text>)}
         {at >= 0 && at < n && kind !== "stack" && kind !== "group" && <line x1={x(at)} x2={x(at)} y1={PAD.t} y2={PAD.t + ih} stroke="var(--border)" strokeWidth={1} />}
         {kind === "stack" && data.buckets.map((d, i) => {
           let base = 0

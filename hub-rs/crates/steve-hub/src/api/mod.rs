@@ -340,6 +340,7 @@ pub fn router(st: AppState, modules: Router) -> Router {
         .route("/thread/{id}/reroute", post(misc::thread_reroute))
         .route("/thread/{id}/offer", post(misc::thread_offer))
         .route("/thread/{id}/suggest", post(misc::thread_suggest))
+        .route("/thread/{id}/a2ui", post(misc::thread_a2ui))
         .route("/thread/runs/{id}/stop", post(misc::thread_run_stop))
         .route("/thread/runs/{id}", delete(misc::thread_run_stop))
         .route("/items/{id}/thread", patch(misc::item_thread_follow))

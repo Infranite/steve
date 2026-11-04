@@ -484,6 +484,40 @@ pub async fn thread_suggest(
     thread_result(st.domain.suggest(&c.ws, &id, &choice).await?)
 }
 
+/// `POST /api/thread/:id/a2ui` (ST-46): a button of an A2UI interface in Steve's reply. Answers the record
+/// with `already: true` when that surface had been submitted, so a second click is harmless.
+pub async fn thread_a2ui(
+    State(st): State<AppState>,
+    Extension(c): Extension<Ctx>,
+    Path(id): Path<String>,
+    b: Bytes,
+) -> ApiResult {
+    let v = body(&b)?;
+    let mut k = Check::object(&v);
+    let block = k.str("block", Str::len(1, 16));
+    let surface = k.str("surfaceId", Str::len(1, 120));
+    let component = k.str("sourceComponentId", Str::len(1, 120));
+    let name = k.str("name", Str::len(1, 64));
+    let label = k.opt_str("label", Str::ANY);
+    let timestamp = k.opt_str("timestamp", Str::len(0, 40));
+    let context = k.raw("context").cloned();
+    let data = k.raw("data").cloned();
+    k.finish()?;
+    let action = steve_core::thread::A2uiAction {
+        block,
+        surface,
+        component,
+        name,
+        label: label.unwrap_or_default(),
+        context: context.unwrap_or_else(|| json!({})),
+        data: data.unwrap_or(Value::Null),
+        timestamp: timestamp.unwrap_or_default(),
+    };
+    ok(Value::Object(
+        st.domain.a2ui_action(&c.ws, &c.me, &id, action).await?,
+    ))
+}
+
 /// `POST /api/thread/runs/:id/stop` and `DELETE /api/thread/runs/:id` (§7.2): stop a research run or take
 /// a queued one off the queue.
 pub async fn thread_run_stop(
