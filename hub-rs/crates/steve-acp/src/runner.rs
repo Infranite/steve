@@ -351,8 +351,9 @@ struct State {
     turning: HashSet<String>,
     retrying: HashMap<String, u64>,
     /// decision id → (session id, rpc id). Like the TS, entries outlive the process that asked.
-    /// decision id → (session, the asking request's rpc id, the adapter process generation that asked)
-    waits: HashMap<String, (String, Value, u64)>,
+    /// decision id → (session, the asking request's rpc id, the adapter process generation that asked,
+    /// the prompt it asked in)
+    waits: HashMap<String, (String, Value, u64, u64)>,
     /// every spawned adapter, including ones still starting, so shutdown leaves no orphans
     procs: HashMap<u64, Arc<Conn>>,
     drain_groups: HashSet<u32>,
@@ -362,9 +363,11 @@ struct State {
     holding: bool,
     /// cancels that came before the turn's prompt was written (adapter still starting): sent right after it
     cancel_pending: HashSet<String>,
-    /// (session, adapter generation) whose running prompt was cancelled: a permission request that
-    /// arrives until the prompt returns is answered `cancelled` at once
-    cancelled: HashSet<(String, u64)>,
+    /// the prompt each session is running now (a token per `session/prompt`, set before it is written,
+    /// gone once it returned): permission cards belong to one prompt
+    prompts: HashMap<String, u64>,
+    /// prompts being cancelled: a permission request of one is answered `cancelled` at once
+    cancelled: HashSet<u64>,
     /// per session, the counters of the turn being run (stats)
     tallies: HashMap<String, Tally>,
     /// per session, the live adapter's cost total (stats)
@@ -771,6 +774,12 @@ impl Acp {
                 );
                 return;
             }
+            let ptoken = {
+                let mut st = self.st();
+                let t = st.token();
+                st.prompts.insert(sid.clone(), t);
+                t
+            };
             let req = conn.request(
                 "session/prompt",
                 json!({ "sessionId": acp_id, "prompt": prompt }),
@@ -791,7 +800,11 @@ impl Acp {
                 if let Some(l) = st.live.get_mut(&sid).filter(|l| l.generation == generation) {
                     l.prompting = true;
                 }
-                st.cancel_pending.remove(&sid)
+                let deferred = st.cancel_pending.remove(&sid);
+                if deferred {
+                    st.cancelled.insert(ptoken);
+                }
+                deferred
             };
             if deferred {
                 conn.notify("session/cancel", json!({ "sessionId": acp_id }));
@@ -819,8 +832,26 @@ impl Acp {
                 }
             };
             // the prompt returned: whatever it still waited on can't be answered, a cancel of it is over
-            self.st().cancelled.remove(&(sid.clone(), generation));
-            self.expire_waits(&sid, Some(generation));
+            let stale: Vec<String> = {
+                let mut st = self.st();
+                if st.prompts.get(&sid) == Some(&ptoken) {
+                    st.prompts.remove(&sid);
+                }
+                st.cancelled.remove(&ptoken);
+                let ids: Vec<String> = st
+                    .waits
+                    .iter()
+                    .filter(|(_, w)| w.3 == ptoken)
+                    .map(|(d, _)| d.clone())
+                    .collect();
+                for d in &ids {
+                    st.waits.remove(d);
+                }
+                ids
+            };
+            if !stale.is_empty() {
+                self.host().permissions_expired(&sid, &stale);
+            }
             let retry = error
                 .as_deref()
                 .is_some_and(|e| TRANSIENT.is_match(e) && attempt < self.0.cfg.retry_delays.len());
@@ -989,7 +1020,7 @@ impl Acp {
             let ids: Vec<String> = st
                 .waits
                 .iter()
-                .filter(|(_, (s, _, g))| s == sid && generation.is_none_or(|x| x == *g))
+                .filter(|(_, (s, _, g, _))| s == sid && generation.is_none_or(|x| x == *g))
                 .map(|(d, _)| d.clone())
                 .collect();
             for d in &ids {
@@ -1611,16 +1642,20 @@ impl Acp {
         params: &Value,
     ) {
         let cancelled = json!({ "outcome": { "outcome": "cancelled" } });
+        // the prompt it belongs to: the one this process runs now, unless that is being cancelled
         let current = |st: &State| {
-            st.live.get(sid).is_some_and(|l| l.generation == generation)
-                && !st.cancelled.contains(&(sid.to_owned(), generation))
+            st.live
+                .get(sid)
+                .filter(|l| l.generation == generation)
+                .and_then(|_| st.prompts.get(sid).copied())
+                .filter(|t| !st.cancelled.contains(t))
         };
         {
             let st = self.st();
             if !st.live.contains_key(sid) {
                 return; // asked during start: left unanswered, as in the TS
             }
-            if !current(&st) {
+            if current(&st).is_none() {
                 drop(st);
                 conn.respond(rpc_id, cancelled);
                 return;
@@ -1641,12 +1676,13 @@ impl Acp {
         };
         let waiting = {
             let mut st = self.st();
-            if current(&st) {
-                st.waits
-                    .insert(dec.clone(), (sid.to_owned(), rpc_id.clone(), generation));
-                true
-            } else {
-                false
+            match current(&st) {
+                Some(t) => {
+                    st.waits
+                        .insert(dec.clone(), (sid.to_owned(), rpc_id.clone(), generation, t));
+                    true
+                }
+                None => false,
             }
         };
         if !waiting {
@@ -1665,7 +1701,7 @@ impl Acp {
     /// Answer a pending tool permission (`None` = deny); false when the adapter that asked is gone.
     pub fn answer_permission(&self, decision_id: &str, option_id: Option<&str>) -> bool {
         let mut st = self.st();
-        let Some((sid, rpc_id, generation)) = st.waits.remove(decision_id) else {
+        let Some((sid, rpc_id, generation, _)) = st.waits.remove(decision_id) else {
             return false;
         };
         // only the adapter process that asked: a restarted one numbers its requests anew
@@ -1689,14 +1725,11 @@ impl Acp {
             let stale: Vec<String> = st
                 .waits
                 .iter()
-                .filter(|(_, (s, _, _))| s == session_id)
+                .filter(|(_, (s, _, _, _))| s == session_id)
                 .map(|(d, _)| d.clone())
                 .collect();
             for d in &stale {
                 st.waits.remove(d);
-            }
-            if !stale.is_empty() {
-                self.host().permissions_expired(session_id, &stale);
             }
             self.host().dispatch_finished(session_id, "cancelled");
             // like a cancelled live turn: whatever was queued behind it goes next
@@ -1710,6 +1743,9 @@ impl Acp {
             }
             drop(st);
             let h = self.host();
+            if !stale.is_empty() {
+                h.permissions_expired(session_id, &stale);
+            }
             h.set_status(session_id, "idle");
             h.add_event(
                 session_id,
@@ -1733,17 +1769,22 @@ impl Acp {
             Some(l) => {
                 let (conn, generation) = (l.conn.clone(), l.generation);
                 conn.notify("session/cancel", json!({ "sessionId": l.acp_id }));
-                st.cancelled.insert((session_id.to_owned(), generation));
+                let prompt = st.prompts.get(session_id).copied();
+                if let Some(t) = prompt {
+                    st.cancelled.insert(t);
+                }
                 // ACP: a cancelling client answers every permission request still pending with
                 // `cancelled`, so the agent can end the turn
                 let pending: Vec<String> = st
                     .waits
                     .iter()
-                    .filter(|(_, (s, _, g))| s == session_id && *g == generation)
+                    .filter(|(_, (s, _, g, t))| {
+                        s == session_id && *g == generation && Some(*t) == prompt
+                    })
                     .map(|(d, _)| d.clone())
                     .collect();
                 for d in pending {
-                    if let Some((_, rpc_id, _)) = st.waits.remove(&d) {
+                    if let Some((_, rpc_id, _, _)) = st.waits.remove(&d) {
                         conn.respond(rpc_id, json!({ "outcome": { "outcome": "cancelled" } }));
                         answered.push(d);
                     }
