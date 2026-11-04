@@ -195,6 +195,46 @@ impl Messages<'_> {
         })
     }
 
+    /// Older history, oldest first: messages created before `before` and from `after` on (inclusive), the newest
+    /// `limit` of them. Paging back is `after = 0`; filling the gap down to a message is `after = its created`.
+    pub fn list_before(
+        &self,
+        ws: &str,
+        space: &str,
+        before: i64,
+        after: i64,
+        limit: i64,
+    ) -> Result<Vec<Message>> {
+        self.0.read(|c| {
+            let mut v = all(
+                c,
+                "SELECT * FROM messages WHERE workspace_id = ? AND space = ? AND created < ? AND created >= ? ORDER BY created DESC LIMIT ?",
+                params![ws, space, before, after, limit],
+                Message::from_row,
+            )?;
+            v.reverse();
+            Ok(v)
+        })
+    }
+
+    /// Messages whose text contains `q` (ASCII case-insensitive) or that belong to item `q`, newest first.
+    pub fn search(&self, ws: &str, space: &str, q: &str, limit: i64) -> Result<Vec<Message>> {
+        let like = format!(
+            "%{}%",
+            q.replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_")
+        );
+        self.0.read(|c| {
+            all(
+                c,
+                "SELECT * FROM messages WHERE workspace_id = ? AND space = ? AND (text LIKE ? ESCAPE '\\' OR upper(coalesce(item_id, '')) = upper(?)) ORDER BY created DESC LIMIT ?",
+                params![ws, space, like, q, limit],
+                Message::from_row,
+            )
+        })
+    }
+
     /// The answer an item was taken from (its offer, marked `promoted` with the item), if any.
     pub fn promoted_to(&self, ws: &str, item: &str) -> Result<Option<Message>> {
         self.0.read(|c| {

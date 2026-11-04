@@ -4,7 +4,7 @@
  * chat message (§2.11). Read-only here: a note links to the space, where a message goes out through the checks. */
 import { useCallback, useEffect, useRef, useState } from "react"
 import { cn } from "cn"
-import { CheckIcon, LoaderIcon, MessageCircleIcon, UsersIcon, UserIcon, XIcon, ExternalLinkIcon, ListIcon } from "lucide-react"
+import { ArrowLeftIcon, CheckIcon, LoaderIcon, UsersIcon, UserIcon, XIcon, ExternalLinkIcon, ListIcon } from "lucide-react"
 import { conversationsApi, type ConvBadge, type ConvMessage, type ConvRow, type Reaction } from "@/api/conversations"
 import { st, msgOf, discardOut, useHubEvents, type Msg } from "@/store"
 import { matchesSpace } from "@/live-utils"
@@ -48,9 +48,15 @@ export function ConvBadgeChip({ b, className }: { b: ConvBadge; className?: stri
   )
 }
 
-/** A bounded navigator; closing only changes this user's list, never the channel. */
+const OPEN_EV = "steve-open-conversations"
+/** the list of IM conversations, from the history panel (ST-50: the main conversation is not one of them) */
+export function openConversations() { window.dispatchEvent(new Event(OPEN_EV)) }
+
+/** A bounded navigator; closing only changes this user's list, never the channel. Inside an IM conversation a bar
+ *  leads back to the main conversation; otherwise only the list (opened from 历史) */
 export function ConvSwitcher({ current, badge }: { current?: string; badge?: ConvBadge }) {
   const [open, setOpen] = useState(false)
+  useEffect(() => { const h = () => setOpen(true); window.addEventListener(OPEN_EV, h); return () => window.removeEventListener(OPEN_EV, h) }, [])
   const [query, setQuery] = useState("")
   const [state, setState] = useState<"open" | "closed" | "all">("open")
   const [rows, setRows] = useState<ConvRow[]>([])
@@ -97,18 +103,18 @@ export function ConvSwitcher({ current, badge }: { current?: string; badge?: Con
     finally { if (active()) setBusy(null) }
   }
   return <>
-    <nav aria-label="对话" className="mx-auto flex w-full max-w-[800px] shrink-0 items-center gap-2 px-4 pb-2 pt-3 sm:px-8" data-conv-switcher>
-      <Button variant={!current ? "secondary" : "ghost"} size="sm" onClick={() => go("#/")} aria-current={!current ? "page" : undefined} data-conv="steve"><MessageCircleIcon />你和 Steve</Button>
-      {current && <div className="flex min-w-0 flex-1 items-center gap-1 rounded-lg border pl-2" data-current-conversation>
+    {current && <nav aria-label="对话" className="mx-auto flex w-full max-w-[800px] shrink-0 items-center gap-2 px-4 pb-1 pt-2 sm:px-8" data-conv-switcher>
+      <Button variant="ghost" size="sm" className="-ml-2 text-muted-foreground" onClick={() => go("#/")} data-conv="steve"><ArrowLeftIcon />主线</Button>
+      <div className="flex min-w-0 flex-1 items-center gap-1" data-current-conversation>
         <span className="truncate type-footnote" title={badge?.name}>{badge?.name || "当前对话"}</span>
-        <Button variant="ghost" size="icon-sm" className="ml-auto shrink-0" aria-label="关闭当前对话" disabled={busy !== null} onClick={() => void change(current, true)}><XIcon /></Button>
-      </div>}
-      <Button variant="outline" size="sm" className="ml-auto shrink-0" onClick={() => setOpen(true)}><ListIcon />会话列表</Button>
-    </nav>
+        <Button variant="ghost" size="icon-sm" className="shrink-0 text-muted-foreground" aria-label="关闭当前对话" disabled={busy !== null} onClick={() => void change(current, true)}><XIcon /></Button>
+      </div>
+      <Button variant="ghost" size="sm" className="ml-auto shrink-0 text-muted-foreground" onClick={() => setOpen(true)}><ListIcon />群聊和私聊</Button>
+    </nav>}
     {!open && error && <p role="alert" className="mx-auto px-4 text-destructive type-footnote">{error}</p>}
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogContent className="max-h-[85dvh] gap-3 sm:max-w-xl" data-conversation-manager>
-        <DialogTitle>会话列表</DialogTitle>
+        <DialogTitle>群聊和私聊</DialogTitle>
         <DialogDescription>关闭只收起你列表中的会话，消息和渠道继续保留。可在“已关闭”中恢复。</DialogDescription>
         <Input aria-label="搜索会话" placeholder="搜索名称、渠道或最近消息" value={query} onChange={e => setQuery(e.target.value)} />
         <div className="flex gap-2" aria-label="会话状态">{([['open','未关闭'],['closed','已关闭'],['all','全部']] as const).map(([key,label]) => <Button key={key} size="sm" variant={state === key ? "secondary" : "ghost"} aria-pressed={state === key} onClick={() => setState(key)}>{label}</Button>)}</div>

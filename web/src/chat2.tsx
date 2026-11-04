@@ -3,7 +3,7 @@
  * Also: the open cards a session waits on, shown inside the session page. */
 import { useEffect, useState, type ReactNode } from "react"
 import { cn } from "cn"
-import { ArchiveIcon, BellIcon, BrainIcon, CheckIcon, CircleAlertIcon, CircleCheckIcon, InfoIcon, ListPlusIcon, MegaphoneIcon, PanelRightIcon, RouteIcon, SendIcon, SlidersHorizontalIcon, XIcon } from "lucide-react"
+import { ArchiveIcon, BrainIcon, CheckIcon, CircleAlertIcon, CircleCheckIcon, InfoIcon, ListPlusIcon, ListTodoIcon, MegaphoneIcon, RouteIcon, SendIcon, SlidersHorizontalIcon, XIcon } from "lucide-react"
 import { Trace, TraceLine, TraceIcon, TraceTitle, TraceDescription, TraceCollapsible, TraceCollapsibleTrigger, TraceCollapsibleContent } from "@/components/ui/trace"
 import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet"
 import { Button } from "@/components/ui/button"
@@ -120,33 +120,46 @@ export function NoticeLine({ m, onOpen }: { m: Msg; onOpen: () => void }) {
 /* ───────── right rail ───────── */
 const RAIL = "steve-chat-rail"
 const railPref = () => { const v = localStorage.getItem(RAIL); return v ? v === "1" : window.innerWidth >= 1280 }
-let railOpen = railPref(), sheetOpen = false
+/* one panel beside the conversation at a time on wide screens: the rail (事项 and notices) or the history (ST-50); opening
+ * the history hides the rail without forgetting that you keep it open */
+let railOpen = railPref(), sheetOpen = false, historyOpen = false
 const listeners = new Set<() => void>()
 const bump = () => listeners.forEach((f) => f())
-function useRail() { const [, f] = useState(0); useEffect(() => { const h = () => f((x) => x + 1); listeners.add(h); return () => { listeners.delete(h) } }, []); return { railOpen, sheetOpen } }
-const wide = () => window.matchMedia("(min-width: 1024px)").matches
+export function useRail() { const [, f] = useState(0); useEffect(() => { const h = () => f((x) => x + 1); listeners.add(h); return () => { listeners.delete(h) } }, []); return { railOpen: railOpen && !(historyOpen && wide()), sheetOpen, historyOpen } }
+export const wide = () => window.matchMedia("(min-width: 1024px)").matches
+export function useWide() {
+  const [isWide, setWide] = useState(wide)
+  useEffect(() => { const q = window.matchMedia("(min-width: 1024px)"), h = () => setWide(q.matches); q.addEventListener("change", h); return () => q.removeEventListener("change", h) }, [])
+  return isWide
+}
 /** desktop: show or hide the rail (remembered); narrow screens: open the sheet */
-export function toggleRail() { if (wide()) { railOpen = !railOpen; localStorage.setItem(RAIL, railOpen ? "1" : "0") } else sheetOpen = !sheetOpen; bump() }
-export function showNotices() { if (wide()) { if (!railOpen) toggleRail() } else { sheetOpen = true; bump() } setTimeout(() => document.querySelector("[data-rail-notices]")?.scrollIntoView({ behavior: "smooth", block: "start" }), 50) }
+export function toggleRail() {
+  if (wide()) { if (historyOpen) { historyOpen = false; railOpen = true } else railOpen = !railOpen; localStorage.setItem(RAIL, railOpen ? "1" : "0") } else sheetOpen = !sheetOpen
+  bump()
+}
+export function setHistory(open: boolean) { historyOpen = open; if (open && !wide()) sheetOpen = false; bump() }
+export function showNotices() { if (wide()) { historyOpen = false; if (!railOpen) toggleRail(); else bump() } else { sheetOpen = true; bump() } setTimeout(() => document.querySelector("[data-rail-notices]")?.scrollIntoView({ behavior: "smooth", block: "start" }), 50) }
 
+/** 事项: what Steve is following for you (running, waiting on you) and the notices, in the rail */
 export function RailToggle({ className }: { className?: string }) {
-  useRail()
-  const n = unreadNotices().length
+  const { railOpen: open } = useRail()
+  const n = unreadNotices().length, waiting = pendingCards().length, run = st.items.filter((i) => i.st === "run" && !i.arch).length
+  const label = [`事项，${run} 件进行中`, waiting && `${waiting} 件等你`, n && `${n} 条未读通知`].filter(Boolean).join("，")
   return (
     <Tooltip>
-      <TooltipTrigger render={<Button variant="ghost" size="sm" aria-label={n ? `通知和摘要，${n} 条未读` : "通知和摘要"} onClick={toggleRail} className={cn("gap-1.5 px-2 text-muted-foreground", className)} data-rail-toggle />}>
-        {n ? <BellIcon /> : <PanelRightIcon />}{n > 0 && <span className="min-w-4.5 rounded-full bg-foreground/10 px-1.5 text-[11px] font-medium leading-[18px] tabular-nums text-foreground" data-unread>{n}</span>}
+      <TooltipTrigger render={<Button variant="ghost" size="sm" aria-label={label} aria-pressed={open && wide()} onClick={toggleRail} className={cn("gap-1.5 px-2 text-muted-foreground aria-pressed:bg-muted aria-pressed:text-foreground", className)} data-rail-toggle />}>
+        <ListTodoIcon /><span className="max-sm:sr-only">事项</span>{run + waiting > 0 && <span className="tabular-nums text-foreground" data-rail-count>{run + waiting}</span>}
+        {waiting > 0 ? <span className="size-1.5 rounded-full bg-attention" aria-hidden data-rail-waiting /> : n > 0 && <span className="size-1.5 rounded-full bg-blue" aria-hidden data-unread />}
       </TooltipTrigger>
-      <TooltipContent>{railOpen && wide() ? "收起右栏" : "通知和摘要"}</TooltipContent>
+      <TooltipContent>{open && wide() ? "收起事项栏" : "在办事项、等你决定的和通知"}</TooltipContent>
     </Tooltip>
   )
 }
 
 /** the rail beside the conversation: inline on wide screens, a sheet otherwise */
 export function ChatRail() {
-  useRail()
-  const [isWide, setWide] = useState(wide)
-  useEffect(() => { const q = window.matchMedia("(min-width: 1024px)"), h = () => setWide(q.matches); q.addEventListener("change", h); return () => q.removeEventListener("change", h) }, [])
+  const { railOpen } = useRail()
+  const isWide = useWide()
   if (isWide) return railOpen ? <aside className="flex w-[300px] shrink-0 flex-col overflow-y-auto overflow-x-hidden border-l border-sidebar-border bg-sidebar px-4 pb-6 pt-3" data-rail="aside"><RailBody /></aside> : null
   return (
     <Sheet open={sheetOpen} onOpenChange={(o) => { sheetOpen = o; bump() }}>
@@ -166,7 +179,7 @@ function RailBody() {
   const unread = unreadNotices()
   /* what is on screen counts as read, after a moment so the new ones are seen highlighted */
   useEffect(() => { if (!unread.length) return; const t = setTimeout(readNotices, 2500); return () => clearTimeout(t) }, [unread.length])
-  const thinking = st.thinking, run = st.items.filter((i) => i.st === "run" && !i.arch), cards = pendingCards()
+  const run = st.items.filter((i) => i.st === "run" && !i.arch), cards = pendingCards()
   const delivered = st.items.filter((i) => i.st === "done" && !i.arch && Date.now() - i.updated < 7 * DAY).sort((a, b) => b.updated - a.updated).slice(0, 5)
   const thoughts = st.thread.filter((m) => m.k === "steve" && m.steps && (m.steps.route || m.steps.tools.length)).slice(-5).reverse()
   const waiting = (n: RNotice) => !!n.item_id && !!st.items.find((i) => i.id === n.item_id)?.wait
@@ -175,7 +188,6 @@ function RailBody() {
   const rest = st.notices.filter((n) => !pinned.includes(n)), fresh = rest.filter((n) => n.created > st.noticeSeen), seen = rest.filter((n) => n.created <= st.noticeSeen)
   /* read ones fold away once there is something new; with nothing new the latest few stay visible */
   const shownSeen = older ? 50 : pinned.length || fresh.length ? 0 : 5
-  const status = thinking ? ["run", "思考中"] : run.length ? ["run", `执行中 · ${run.length} 件`] : ["idle", "空闲"]
   const notice = (n: RNotice) => {
     const I = n.level === "fail" ? CircleAlertIcon : n.level === "success" ? CircleCheckIcon : NI[n.kind] ?? InfoIcon, isNew = n.created > st.noticeSeen
     return (
@@ -189,8 +201,7 @@ function RailBody() {
   }
   return (
     <div className="flex flex-col gap-6" data-rail-body>
-      {/* the hero above the conversation already shows Steve: the rail keeps only his state */}
-      <div className="flex h-7 items-center gap-2 type-callout text-muted-foreground" data-rail-steve><StatusDot s={status[0]} /><span className="text-foreground">{st.bots.steve?.n ?? "Steve"}</span>{status[1]}</div>
+      {/* the bar above the conversation already says what Steve is doing: the rail starts with what waits on you */}
       {cards.length > 0 && <section data-rail-wait><SectionLabel>等你 · {cards.length}</SectionLabel>
         {cards.slice(0, 5).map(({ i, w }) => <Line key={w.decision} onClick={() => go(i.id ? "#/inbox" : "#/sessions/" + w.session)} test={"wait-" + w.decision}><StatusDot s="wait" />{i.id && <ItemNo id={i.id} />}<span className="min-w-0 flex-1 truncate type-callout">{i.id ? i.t : "会话 " + i.t}</span><span className="shrink-0 type-footnote text-muted-foreground">{w.subject === "tool_call" ? "权限" : WT[w.type]}</span></Line>)}
         {cards.length > 5 && <Line onClick={() => go("#/inbox")}><span className="type-footnote text-muted-foreground">还有 {cards.length - 5} 件，去待处理</span></Line>}</section>}

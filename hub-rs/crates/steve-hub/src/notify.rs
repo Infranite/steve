@@ -167,8 +167,31 @@ pub fn list(r: &dyn Repo, ws: &str, limit: i64) -> BResult<Vec<Value>> {
 /// The conversation without the notices that used to be written into it (successful releases) and without
 /// the lines of closed failures.
 pub fn thread(r: &dyn Repo, ws: &str) -> BResult<Vec<Obj>> {
+    let msgs = r.messages_list(ws)?;
+    visible(r, ws, msgs)
+}
+
+/// Older history of the conversation (`GET /api/thread/history`), as the conversation shows it.
+pub fn thread_before(
+    r: &dyn Repo,
+    ws: &str,
+    before: i64,
+    after: i64,
+    limit: i64,
+) -> BResult<Vec<Obj>> {
+    let msgs = r.messages_before(ws, "steve", before, after, limit)?;
+    visible(r, ws, msgs)
+}
+
+/// What the conversation said about `q` (`GET /api/thread/search`), newest first.
+pub fn thread_search(r: &dyn Repo, ws: &str, q: &str, limit: i64) -> BResult<Vec<Obj>> {
+    let msgs = r.messages_search(ws, "steve", q, limit)?;
+    visible(r, ws, msgs)
+}
+
+fn visible(r: &dyn Repo, ws: &str, msgs: Vec<Obj>) -> BResult<Vec<Obj>> {
     let shut = closed(r, ws, &r.messages_in(ws, SPACE, WINDOW)?)?;
-    Ok(r.messages_list(ws)?
+    Ok(msgs
         .into_iter()
         .filter(|m| !(legacy(m) && LEGACY_OK.is_match(text(m))))
         .filter(|m| !notice_of(m, "ref").is_some_and(|id| shut.contains(id)))

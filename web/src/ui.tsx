@@ -525,10 +525,18 @@ function ComposerInput({ placeholder, onSend, model, left, autoFocus, className,
 const base = (p: string) => String(p || "").split("/").filter(Boolean).pop() ?? ""
 export const fmtDur = (ms: number) => { const s = Math.max(0, Math.round(ms / 1000)); return s < 60 ? `${s} 秒` : s < 3600 ? `${Math.floor(s / 60)} 分 ${s % 60} 秒` : `${Math.floor(s / 3600)} 小时 ${Math.floor((s % 3600) / 60)} 分` }
 const clock = (ms: number) => { const s = Math.max(0, Math.floor(ms / 1000)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}` }
+/* one clock for every running timer on the page: two views of the same run tick together and never disagree */
+const ticking = new Set<(n: number) => void>()
+let tickAt = 0, tickTimer: ReturnType<typeof setInterval> | undefined
 /** the current time, ticking every second while `on` */
-function useNow(on: boolean) {
+export function useNow(on: boolean) {
   const [n, setN] = useState(Date.now)
-  useEffect(() => { if (!on) return; setN(Date.now()); const t = setInterval(() => setN(Date.now()), 1000); return () => clearInterval(t) }, [on])
+  useEffect(() => {
+    if (!on) return
+    if (!tickTimer) { tickAt = Date.now(); tickTimer = setInterval(() => { tickAt = Date.now(); ticking.forEach((f) => f(tickAt)) }, 1000) }
+    setN(tickAt); ticking.add(setN)
+    return () => { ticking.delete(setN); if (!ticking.size) { clearInterval(tickTimer); tickTimer = undefined } }
+  }, [on])
   return n
 }
 const TOOLN: Record<string, string> = { ToolSearch: "加载工具", TodoWrite: "更新待办", Task: "子任务", Agent: "子任务", Skill: "技能" }
@@ -650,7 +658,7 @@ function WorkBlock({ k, g, live }: { k: string; g: Seg; live: boolean }) {
         {live ? <span className="relative flex size-4 shrink-0 items-center justify-center"><span className="absolute size-2 rounded-full bg-blue dot-running" /></span>
           : cancelled ? <CircleSlashIcon className="size-4 shrink-0 text-muted-foreground" strokeWidth={1.75} /> : <CircleCheckIcon className="size-4 shrink-0 text-success" strokeWidth={1.75} />}
         <span className={cn("shrink-0 font-medium", live ? "text-blue" : "text-foreground/85")}>{live ? <span className="shimmer">正在工作</span> : cancelled ? "已中断" : "已处理"}</span>
-        {(ms > 0 || live) && <span className="shrink-0 tabular-nums text-muted-foreground">{live ? clock(ms) : fmtDur(ms)}</span>}
+        {(ms > 0 || live) && <span className="shrink-0 tabular-nums text-muted-foreground" data-work-clock>{live ? clock(ms) : fmtDur(ms)}</span>}
         {stats.length > 0 && <span className="min-w-0 truncate text-muted-foreground">· {stats.join(" · ")}</span>}
         <ChevronRightIcon className="ml-auto size-4 shrink-0 text-muted-foreground transition group-aria-expanded/work:rotate-90" />
       </CollapsibleTrigger>
