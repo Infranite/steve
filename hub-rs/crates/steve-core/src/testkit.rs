@@ -218,6 +218,8 @@ pub struct FakeGateway {
     pub extras: Mutex<Vec<Vec<String>>>,
     /// the image blocks of each call ([`crate::gateway::with_images`])
     pub images: Mutex<Vec<Vec<serde_json::Value>>>,
+    /// how long a call whose prompt starts with the text takes (awaited, so a stop can cut it short)
+    pub slow: Mutex<Option<(&'static str, Duration)>>,
 }
 impl FakeGateway {
     pub fn set(&self, f: impl Fn(&str, Tier) -> Result<String> + Send + Sync + 'static) {
@@ -235,6 +237,10 @@ impl ModelGateway for FakeGateway {
     ) -> Result<crate::gateway::Printed> {
         self.calls.lock().unwrap().push(prompt.into());
         self.extras.lock().unwrap().push(extra.to_vec());
+        let slow = *self.slow.lock().unwrap();
+        if let Some((_, d)) = slow.filter(|(head, _)| prompt.starts_with(head)) {
+            tokio::time::sleep(d).await;
+        }
         self.images.lock().unwrap().push(
             crate::gateway::current_images()
                 .map(|i| i.to_vec())
@@ -293,6 +299,7 @@ impl Kit {
             calls: Mutex::new(vec![]),
             extras: Mutex::new(vec![]),
             images: Mutex::new(vec![]),
+            slow: Mutex::new(None),
         });
         let core = Core::new(store, rt.clone(), gw.clone(), cfg);
         core.seed().unwrap();

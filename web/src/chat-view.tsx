@@ -15,13 +15,14 @@ import { draftKey } from "@/composer-draft"
 import { ProposalCard } from "@/config-ui"
 import { Cites, linkCites } from "@/knowledge/parts"
 import { Robot } from "@/robot"
-import { chatSend, emit, finishOnboarding, focusItem, isPromoting, isThinking, makeItem, pending, pendingCards, quoteMsg, reroute, st, stopReply, tm, toast, WT, type Item, type Msg } from "@/store"
+import { chatBusy, chatSend, emit, finishOnboarding, focusItem, isPromoting, isThinking, makeItem, pending, pendingCards, quoteMsg, reroute, st, stopReply, tm, toast, WT, type Item, type Msg } from "@/store"
+import { ChatQueue } from "@/queue"
 import { ChanOutNote, ConvBadgeChip, ConvSwitcher, ImReadOnly, SenderLine, useConversation } from "@/thread/conversations"
 import { AskChips, CardLink, ComposerBars, ItemCard, OfferLine, QueuedNote, QuoteHead, Rerun, SuggestCard, Updates } from "@/thread/parts"
-import { Composer, go, ItemNo, ItemRef, openSheet, StatusDot } from "@/ui"
+import { Composer, go, ItemNo, ItemRef, openSheet, StatusDot, type ComposerHandle } from "@/ui"
 import { PlanBar } from "@/view-shared"
 import { cn } from "cn"
-import { ChevronRightIcon, CircleCheckIcon, CopyIcon, ListChecksIcon, MessageCircleIcon, MessageSquareReplyIcon, RouteIcon } from "lucide-react"
+import { ChevronRightIcon, CircleCheckIcon, CircleStopIcon, CopyIcon, ListChecksIcon, MessageCircleIcon, MessageSquareReplyIcon, RouteIcon } from "lucide-react"
 import { Fragment, useEffect, useRef, useState, type ReactNode } from "react"
 
 
@@ -181,7 +182,8 @@ export function ChatView({ conv }: { conv?: string } = {}) {
   const im = useConversation(conv)
   const list: Msg[] = conv ? im?.msgs ?? [] : st.thread
   const rawOf = (m: Msg) => (m.id ? im?.raw.get(m.id) : undefined)
-  const scroller = useRef<HTMLDivElement>(null)
+  const scroller = useRef<HTMLDivElement>(null), composer = useRef<ComposerHandle | null>(null)
+  const working = isThinking() || !!st.live
   const stuck = useRef(true), [unread, setUnread] = useState(false)
   const bottom = () => { stuck.current = true; setUnread(false); scroller.current?.scrollTo({ top: 1e9 }) }
   useEffect(() => { if (stuck.current) bottom(); else setUnread(true) }, [list.length, list.at(-1)?.id, list.at(-1)?.t, st.draft?.text])
@@ -219,7 +221,7 @@ export function ChatView({ conv }: { conv?: string } = {}) {
             if (m.notice) return <Fragment key={key}>{dayLabel}<NoticeLine m={m} onOpen={showNotices} /></Fragment>
             return <Fragment key={key}>{dayLabel}<div className="group/sm relative flex min-w-0 flex-col gap-2.5 transition-colors" data-msg={m.id}>
               <div className="flex min-w-0 items-center gap-2 px-1 type-footnote text-muted-foreground" data-chat-author><span className="truncate font-medium text-foreground">{S?.n ?? "Steve"}</span>{m.created && <time className="shrink-0" dateTime={new Date(m.created).toISOString()}>{tm(m.created)}</time>}</div>
-              <QuoteHead id={m.replyTo} /><StepsBlock m={m} /><SteveSays still={m.id === st.drafted}>{!m.update && !m.cardOnly && <Markdown text={linkCites(m.t ?? "", m.cites)} />}{m.item && !m.update && !m.card && (m.wasCard || list.some((x) => x.card?.item === m.item) ? <CardLink id={m.item} /> : <ItemRef id={m.item} />)}{m.card ? <ItemCard c={m.card} inText={!m.cardOnly && m.card.delivery?.text === m.t} /> : <Updates m={m} />}<OfferLine m={m} /><SuggestCard m={m} /><AskChips m={m} conv={!!conv} /><Rerun m={m} conv={!!conv} /></SteveSays>{m.cfgs && <div className="-mt-1 flex flex-col gap-2 self-start">{m.cfgs.map((p) => <ProposalCard key={p.id} p={p} inChat />)}</div>}<Cites cites={m.cites} />{conv ? <ChanOutNote m={rawOf(m)} /> : <MsgActions m={m} />}</div></Fragment>
+              <QuoteHead id={m.replyTo} /><StepsBlock m={m} /><SteveSays still={m.id === st.drafted}>{!m.update && !m.cardOnly && <Markdown text={linkCites(m.t ?? "", m.cites)} />}{m.item && !m.update && !m.card && (m.wasCard || list.some((x) => x.card?.item === m.item) ? <CardLink id={m.item} /> : <ItemRef id={m.item} />)}{m.card ? <ItemCard c={m.card} inText={!m.cardOnly && m.card.delivery?.text === m.t} /> : <Updates m={m} />}{m.stopped && <div className="mt-2 flex items-center gap-1.5 type-footnote text-muted-foreground" data-stopped><CircleStopIcon className="size-3.5" aria-hidden />你停下了这次回答</div>}<OfferLine m={m} /><SuggestCard m={m} /><AskChips m={m} conv={!!conv} /><Rerun m={m} conv={!!conv} /></SteveSays>{m.cfgs && <div className="-mt-1 flex flex-col gap-2 self-start">{m.cfgs.map((p) => <ProposalCard key={p.id} p={p} inChat />)}</div>}<Cites cites={m.cites} />{conv ? <ChanOutNote m={rawOf(m)} /> : <MsgActions m={m} />}</div></Fragment>
           })}
           {!conv && away > 0 && <><SteveSays sub="离开期间汇报">你不在的时候：</SteveSays><Digest from={away} /></>}
           {!conv && <Onboarding />}
@@ -235,8 +237,9 @@ export function ChatView({ conv }: { conv?: string } = {}) {
             <ChevronRightIcon className="size-4 text-muted-foreground" />
           </button>
         )}
+        <ChatQueue composer={composer} />
         <ComposerBars />
-        <Composer draftKey={draftKey(st.workspace?.id, "chat")} placeholder={focusItem() ? `补充给 ${focusItem()}…` : `和 ${S?.n ?? "Steve"} 说…`} testId="chat" onSend={(t, files, refs, mentions) => chatSend(t, files, refs, mentions)} busy={isThinking() || !!st.live} onStop={stopReply}
+        <Composer draftKey={draftKey(st.workspace?.id, "chat")} handle={composer} placeholder={focusItem() ? `补充给 ${focusItem()}…` : chatBusy() ? `${S?.n ?? "Steve"} 还在忙，可以接着说，本回合结束后发出…` : `和 ${S?.n ?? "Steve"} 说…`} testId="chat" onSend={(t, files, refs, mentions) => chatSend(t, files, refs, mentions)} busy={working} onStop={stopReply}
           onCommand={(c) => { if (c === "digest") { void chatSend("/汇报"); return } openSheet(c) }} />
         </>}
       </div>

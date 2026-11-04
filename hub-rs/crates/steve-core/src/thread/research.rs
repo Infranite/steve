@@ -5,7 +5,7 @@
 //! One answer or research run at a time per workspace; while one runs, up to [`MAX_WAITING`] more wait
 //! (the user's message shows “排队中”), the next is refused with a sentence.
 
-use super::{DRAFT_EVERY, Steps, lock, meta_of};
+use super::{DRAFT_EVERY, Steps, lane_key, lock, meta_of};
 use crate::Core;
 use crate::error::Result;
 use crate::gateway::{self, Offer, Said};
@@ -197,14 +197,6 @@ pub(crate) struct InlineJob {
 
 /// The inline queue of a conversation: the web's is keyed by the workspace (as before), a guest
 /// conversation's has its own, so a chat's question never waits behind your research.
-fn lane_key(ws: &str, space: &str) -> String {
-    if space == super::MAIN {
-        ws.to_string()
-    } else {
-        format!("{ws}\u{1f}{space}")
-    }
-}
-
 struct Active {
     run: Option<String>,
     kind: Inline,
@@ -332,6 +324,14 @@ impl Core {
                 .running
                 .as_ref()
                 .is_some_and(|a| a.kind == Inline::Research)
+        })
+    }
+
+    /// Whether the main conversation has an answer or research running or waiting.
+    pub(crate) fn inline_busy(&self, ws: &str) -> bool {
+        lock(&self.0.thread.inline).get(ws).is_some_and(|l| {
+            let st = lock(&l.st);
+            st.running.is_some() || !st.waiting.is_empty()
         })
     }
 
@@ -649,30 +649,40 @@ impl Core {
             quiet: false,
         };
         let on_draft = |thought: &str, t: &str| drafts.send(thought, t);
-        let a = crate::stats::tagged(
-            "chat",
-            ws,
-            gateway::answer(
-                self.gw(),
-                &main,
-                &j.question,
-                &history,
-                &cf,
-                extra,
-                &on_draft,
-            ),
-        )
-        .await;
-        if j.stop.load(Ordering::SeqCst) {
+        /* a stop ends the call right away (its harness is killed), not after the whole answer is written */
+        let a = tokio::select! {
+            a = crate::stats::tagged(
+                "chat",
+                ws,
+                gateway::answer(
+                    self.gw(),
+                    &main,
+                    &j.question,
+                    &history,
+                    &cf,
+                    extra,
+                    &on_draft,
+                ),
+            ) => Some(a),
+            _ = super::until_stopped(&j.stop) => None,
+        };
+        let Some(a) = a.filter(|_| !j.stop.load(Ordering::SeqCst)) else {
+            /* what was written so far stays, marked as stopped */
+            let partial = lock(&drafts.last).2.trim().to_string();
+            let text = if partial.is_empty() {
+                "好，停下了。要我换个方式就直接说。".to_string()
+            } else {
+                format!("{partial}\n\n（已停下）")
+            };
             self.post(
                 ws,
                 &j.space,
-                "好，停下了。要我换个方式就直接说。",
+                &text,
                 None,
                 Some(&json!({"origin": j.origin, "stopped": true})),
             )?;
             return Ok(());
-        }
+        };
         let steps = Steps {
             route: j.route.clone(),
             answer: Some(

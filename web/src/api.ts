@@ -34,6 +34,8 @@ export type State = {
   projects: RProject[]; tags: RTag[]; tagUses: Record<string, number>; thread: RMessage[]; settings: Record<string, string>; sessions: RSession[]; devices: RDevice[]; runtimes: RRuntime[]
   /* notifications (release results, auto-archive, system notices), newest first; notifySeen = read cursor (ms) */
   notifications?: RNotice[]; notifySeen?: number
+  /* Steve is on a turn in the main conversation (routing, answering, or messages waiting their turn) */
+  thinking?: boolean
   /** the Hub holds new turns for a release (Rust Hub): the releasing item, turns it still waits for, since (ms) */
   hold?: RHold | null
 }
@@ -116,7 +118,11 @@ export const api = {
   me: () => get<{ user: { id: string; name: string; email: string | null; role: string }; version: string; web_version: string }>("/me"),
   switchWs: (id: string) => post(`/workspaces/${id}/switch`), newWs: (p: { name: string; description?: string; item_prefix?: string }) => post<RWorkspace>("/workspaces", p), patchWs: (id: string, p: Partial<RWorkspace>) => patch(`/workspaces/${id}`, p),
   say: (text: string, files: string[] = [], mentions: { kind: "party" | "bot"; id: string }[] = [], to: { item?: string; reply_to?: string } = {}) => post("/thread", { text, files, ...(mentions.length ? { mentions } : {}), ...(to.item ? { item: to.item } : {}), ...(to.reply_to ? { reply_to: to.reply_to } : {}) }),
-  stop: () => post("/thread/stop"), promote: (msg: string) => post<RItem>(`/thread/${msg}/promote`),
+  stop: () => post("/thread/stop"),
+  /* a message said while Steve was on a turn waits for it; until then it can be changed or withdrawn (409 once it went) */
+  threadQueuedEdit: (msg: string, text: string) => patch<{ ok: boolean }>(`/thread/queued/${msg}`, { text }),
+  threadQueuedWithdraw: (msg: string) => del<{ text: string; files: RFile[] }>(`/thread/queued/${msg}`),
+  promote: (msg: string) => post<RItem>(`/thread/${msg}/promote`),
   /* thread routing (§3.4–3.5, §7.2): offers, suggestion cards, corrections, research runs */
   offer: (msg: string, take: boolean) => post<{ message_id: string; item?: RItem }>(`/thread/${msg}/offer`, { take }),
   suggest: (msg: string, choice: "here" | "item") => post<{ message_id: string; item?: RItem }>(`/thread/${msg}/suggest`, { choice }),

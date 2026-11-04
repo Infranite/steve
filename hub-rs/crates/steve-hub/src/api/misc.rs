@@ -93,6 +93,7 @@ async fn compute_state(st: &AppState, c: Ctx) -> Result<Value, ApiError> {
     let domain = st.domain.clone();
     let hold = domain.hold_status().await?;
     let lifecycles = domain.lifecycle_views(&c.ws).await?;
+    let thinking = domain.thread_busy(&c.ws).await?;
     // the read cursor is written on the first look, so it goes through the writer first
     let ws = c.ws.clone();
     let seen = st.write(move |r| Ok(crate::notify::seen(r, &ws)?)).await?;
@@ -134,6 +135,7 @@ async fn compute_state(st: &AppState, c: Ctx) -> Result<Value, ApiError> {
         out.insert("tags".into(), objs(r.tags_list(w)?));
         out.insert("tagUses".into(), Value::Object(r.tag_uses(w)?));
         out.insert("thread".into(), objs(crate::notify::thread(r, w)?));
+        out.insert("thinking".into(), json!(thinking));
         out.insert(
             "notifications".into(),
             Value::Array(crate::notify::list(r, w, 100)?),
@@ -331,6 +333,49 @@ pub async fn thread_say(
 
 pub async fn thread_stop(State(st): State<AppState>, Extension(c): Extension<Ctx>) -> ApiResult {
     ok(json!({ "ok": st.domain.stop(&c.ws).await? }))
+}
+
+/// The answer when a queued message has already gone to Steve.
+const QUEUED_GONE: &str = "这条消息已经发给 Steve 了，不能再改或撤回";
+
+/// `PATCH /api/thread/queued/:id {text}`: rewrite a message still waiting for the turn before it.
+pub async fn thread_queued_edit(
+    State(st): State<AppState>,
+    Extension(c): Extension<Ctx>,
+    Path(id): Path<String>,
+    b: Bytes,
+) -> ApiResult {
+    let v = body(&b)?;
+    let mut k = Check::object(&v);
+    let text = k.str("text", Str::len(1, 20000));
+    k.finish()?;
+    let text = text.trim().to_string();
+    if text.is_empty() {
+        return Err(ApiError::bad_request("参数不对：text"));
+    }
+    // V4 paste guard: what is sent is guarded, so is what it is changed to
+    if steve_vault::guard::intercept(&text).blocked {
+        return Err(ApiError::bad_request(
+            "里面像有密码或令牌，不能这样改；撤回后重新发送",
+        ));
+    }
+    if !st.domain.thread_queued_edit(&c.ws, &id, &text).await? {
+        return Err(ApiError::Json(409, QUEUED_GONE.into()));
+    }
+    ok_true()
+}
+
+/// `DELETE /api/thread/queued/:id` → `{text, files}`: withdraw a message still waiting for the turn
+/// before it (the composer takes it back).
+pub async fn thread_queued_withdraw(
+    State(st): State<AppState>,
+    Extension(c): Extension<Ctx>,
+    Path(id): Path<String>,
+) -> ApiResult {
+    match st.domain.thread_queued_withdraw(&c.ws, &id).await? {
+        Some(m) => ok(Value::Object(m)),
+        None => Err(ApiError::Json(409, QUEUED_GONE.into())),
+    }
 }
 
 /// Notifications: everything up to `at` (default now) counts as read.

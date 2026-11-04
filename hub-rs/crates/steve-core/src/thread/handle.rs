@@ -62,8 +62,9 @@ impl Core {
             j.user.as_deref(),
         );
         let space = j.conv.space.as_str();
+        let lane = super::lane_key(ws, space);
         let flag = Arc::new(AtomicBool::new(false));
-        lock(&self.0.thread.inflight).insert(ws.into(), flag.clone());
+        lock(&self.0.thread.inflight).insert(lane.clone(), flag.clone());
         /* the web's “thinking” line is about your conversation only */
         let quiet = j.conv.guest();
         if !quiet {
@@ -129,7 +130,7 @@ impl Core {
                 Some(json!({"error": true})),
             );
         }
-        lock(&self.0.thread.inflight).remove(ws);
+        lock(&self.0.thread.inflight).remove(&lane);
         if !quiet {
             self.store().publish(HubEvent::SteveThinking {
                 on: false,
@@ -271,7 +272,11 @@ impl Core {
             self.phase(ws, "route");
         }
         let r0 = now();
-        let r = self.route_in(ws, &routed, &history, false, guest).await?;
+        /* stopping does not wait for the router: nothing has happened yet */
+        let r = tokio::select! {
+            r = self.route_in(ws, &routed, &history, false, guest) => r?,
+            _ = super::until_stopped(flag) => return Ok(()),
+        };
         let ms = now() - r0;
         if flag.load(Ordering::SeqCst) {
             return Ok(());
@@ -294,6 +299,8 @@ impl Core {
         );
         if guest {
             d = decide::for_guest(d, &r, conv.research, conv.items);
+        } else {
+            d = decide::for_main(d, &r);
         }
         d = decide::for_owner(d, conv.owner_only && conv.research);
         lock(steps).route = Some(route_step(&r, Some(&d), ms));

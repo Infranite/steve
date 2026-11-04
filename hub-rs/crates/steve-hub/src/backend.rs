@@ -792,6 +792,18 @@ pub trait Domain: Send + Sync + 'static {
     async fn stop(&self, ws: &str) -> BResult<bool> {
         todo_backend!("stop")
     }
+    /// Whether Steve is on a turn in the main conversation (the page's stop button after a reload).
+    async fn thread_busy(&self, ws: &str) -> BResult<bool> {
+        Ok(false)
+    }
+    /// Rewrites a main-conversation message still waiting its turn; `false` once it is being handled.
+    async fn thread_queued_edit(&self, ws: &str, message: &str, text: &str) -> BResult<bool> {
+        todo_backend!("thread_queued_edit")
+    }
+    /// Withdraws a message still waiting its turn: `{text, files}` as it was, `None` once it is being handled.
+    async fn thread_queued_withdraw(&self, ws: &str, message: &str) -> BResult<Option<Obj>> {
+        todo_backend!("thread_queued_withdraw")
+    }
     async fn promote(&self, ws: &str, message: &str) -> BResult<Obj> {
         todo_backend!("promote")
     }

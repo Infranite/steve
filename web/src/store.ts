@@ -40,6 +40,9 @@ export type Msg = { id?: string; clientId?: string; k: "me" | "steve" | "thinkin
   /* thread routing (§3.4, §5.2): the offer under an answer, a suggestion card, ask options, a user message waiting in the
    * queue, the message this one answers or quotes, flow-back from an item, a research cut off by a restart */
   offer?: Offer; suggest?: Suggest; ask?: { options: string[] }; queued?: { run?: string | null }; replyTo?: string; origin?: string; answer?: string
+  /* said while Steve was on a turn: waits in the queue above the composer (editable, withdrawable) until the turn ends;
+   * `stopped`: a reply the user stopped */
+  held?: boolean; stopped?: boolean
   update?: Update; updates?: Update[]; rerun?: string
   /** an item's one living card (§5.2): on its announcement, on the acknowledgement of your latest message to it, or on its own
    * message at the bottom when it needs you and the card was far up (`cardOnly`) */
@@ -97,7 +100,7 @@ export const st = {
   ready: false, error: "" as string, login: null as string | null, version: "", webVersion: "",
   workspace: null as State["workspace"] | null, workspaces: [] as State["workspaces"],
   bots: {} as Record<string, Bot>, allBots: [] as State["allBots"], S: {} as Record<string, Sess>, items: [] as Item[], projects: [] as Project[],
-  thread: [] as Msg[], done: [] as Done[], tags: [] as Tag[], tagUses: {} as Record<string, number>,
+  thread: [] as Msg[], queue: [] as Msg[], done: [] as Done[], tags: [] as Tag[], tagUses: {} as Record<string, number>,
   cfg: {} as Record<string, any>, settings: {} as Record<string, string>, devices: [] as State["devices"], runtimes: [] as State["runtimes"],
   /* YOLO (Rust Hub): the switch, and the current window's ledger by decision id; null where the Hub has none */
   yolo: null as RYolo | null, yoloActs: {} as Record<string, RYoloAction>,
@@ -377,6 +380,7 @@ export function msgOf(m: State["thread"][number]): Msg {
   const ps: Proposal[] = Array.isArray(x.proposals) ? x.proposals : x.proposal ? [x.proposal] : []
   const cfgs = ps.map((p) => proposalOf(p, x.cfg_state?.[p.id] ?? (x.applied ? "applied" : x.dropped ? "dropped" : "draft")))
   return { id: m.id, k: m.author, t: m.text, item: m.item_id ?? undefined, chat: x.chat, files: x.files, created: m.created, steps: x.steps, notice: x.notice, cites: x.cites, cfgs: cfgs.length ? cfgs : undefined,
+    held: !!x.held || undefined, stopped: !!x.stopped || undefined,
     offer: x.offer ?? undefined, suggest: x.suggest ?? undefined, ask: x.ask ?? undefined, queued: x.queued ?? undefined, replyTo: x.reply_to ?? undefined, origin: x.origin ?? undefined, answer: x.answer ?? undefined,
     update: x.update ?? undefined, updates: Array.isArray(x.updates) ? x.updates : undefined, rerun: x.rerun ?? undefined,
     card: x.card?.item ? x.card : undefined, cardOnly: !!x.card_only, wasCard: !!x.was_card }
@@ -411,7 +415,10 @@ function build() {
   st.tags = s.tags.map((t) => ({ id: t.id, name: t.name, cat: t.cat, desc: t.description, by: t.created_by === "你" ? "你" : "Steve", created: tm(t.created) }))
   st.tagUses = s.tagUses
   /* a failure line of a finished item is history: the notifications keep it */
-  st.thread = s.thread.filter((m) => !(m.meta?.notice && m.item_id && finished(itemIndex.get(m.item_id)?.status))).map(msgOf)
+  const msgs = s.thread.filter((m) => !(m.meta?.notice && m.item_id && finished(itemIndex.get(m.item_id)?.status))).map(msgOf)
+  st.thread = msgs.filter((m) => !m.held); st.queue = [...msgs.filter((m) => m.held), ...sendingHeld]
+  /* after a reload, whether Steve is still on a turn (afterwards the steve.thinking events say so) */
+  if (!st.ready && s.thinking) st.thinking = true
   if (st.draft) {
     const at = s.thread.findIndex((m) => m.id === st.draft!.mid), reply = at < 0 ? undefined : s.thread.slice(at + 1).find((m) => m.author === "steve")
     if (reply) { st.drafted = reply.id; st.draft = null }
@@ -655,10 +662,36 @@ export async function chatSend(v: string, files: string[] = [], refs: RFile[] = 
   const toItem = item ?? ITEM_REF.exec(v)?.[1]
   const to = { item, reply_to: quoted?.id }
   st.quote = null; st.focus = toItem ? { item: toItem, until: Date.now() + FOCUS_MS } : st.focus
+  /* Steve is on a turn: the message waits in the queue above the composer and goes when the turn ends (the Hub decides) */
+  if (chatBusy()) {
+    const m: Msg = { clientId: crypto.randomUUID(), k: "me", t: v, files: refs, replyTo: to.reply_to, held: true }
+    sendingHeld.push(m); st.queue = [...st.queue, m]; emit()
+    const done = () => { const n = sendingHeld.indexOf(m); if (n >= 0) sendingHeld.splice(n, 1) }
+    try { await api.say(v, files, mentions, to); done(); await refresh(); return true } catch (e) { done(); fail(e); build(); emit(); cue("failure"); return false }
+  }
   st.draft = null; st.thread.push({ clientId: crypto.randomUUID(), k: "me", t: v, files: refs, replyTo: to.reply_to }, { k: "thinking" }); st.thinking = true; emit(); cue("think")
   try { await api.say(v, files, mentions, to); return true } catch (e) { fail(e); st.thinking = false; build(); emit(); cue("failure"); return false }
 }
-export function stopReply() { if (st.live) void call(api.stopRun(st.live.run)); void call(api.stop()); cue("idle") }
+/** queued messages still being sent: shown in the queue until the Hub has them */
+const sendingHeld: Msg[] = []
+/** Steve is on a turn, or messages wait for one: what is sent now queues */
+export const chatBusy = () => st.thinking || !!st.live || st.queue.length > 0
+/** stop the turn Steve is on; what waits in the queue goes next, the composer keeps what is being typed */
+export async function stopReply() {
+  const r = await Promise.all([st.live ? call(api.stopRun(st.live.run)) : undefined, call(api.stop())])
+  cue("idle")
+  /* nothing was running any more (the turn ended meanwhile, or a reload missed its end): the page stops waiting */
+  if (r[1] && !(r[1] as { ok?: boolean }).ok && !r[0]?.ok) { st.thinking = false; st.live = null; build(); emit(); soon() }
+}
+/* ── the main conversation's queue: a message waiting for the turn can be changed or withdrawn until it goes ── */
+export async function threadQueuedEdit(id: string, text: string) { const r = await qCall(api.threadQueuedEdit(id, text)); if (r) toast("已修改排队的消息"); return !!r }
+/** back into the composer when it is empty; otherwise removed, with an undo that queues it again */
+export async function threadQueuedWithdraw(id: string, composer?: { empty: () => boolean; fill: (t: string, f: RFile[]) => void } | null) {
+  const r = await qCall(api.threadQueuedWithdraw(id)); if (!r) return
+  const files = r.files ?? []
+  if (composer?.empty()) { composer.fill(r.text, files); toast("已撤回，放回输入框了"); return }
+  toast("已撤回", { action: { label: "撤销", onClick: () => void chatSend(r.text, files.map((f) => f.id), files) } })
+}
 export function quoteMsg(id: string | null) { st.quote = id; emit(); requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>("[data-composer='chat'] textarea, textarea")?.focus()) }
 export function clearFocus() { st.focus = null; emit() }
 export const focusItem = () => (st.focus && st.focus.until > Date.now() ? st.focus.item : null)
