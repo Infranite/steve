@@ -531,7 +531,9 @@ impl Domain for CoreDomain {
         }
         let active = store.maintenance();
         let running = store.activities();
-        let acp = self.acp.running_turns();
+        // a turn that only waits for your permission answer doesn't hold a drain: it is cut, the
+        // restart resumes it (it asks again)
+        let acp = self.acp.working_turns();
         let source_release_busy = self.core.source_release_busy();
         let quiet =
             active && running.values().sum::<usize>() == 0 && acp == 0 && !source_release_busy;
@@ -550,7 +552,7 @@ impl Domain for CoreDomain {
             })
             .map_err(|e| BackendError::msg(e.to_string()))?;
         let sealed =
-            quiet && adapters_stopped && self.acp.running_turns() == 0 && store.maintenance_seal();
+            quiet && adapters_stopped && self.acp.working_turns() == 0 && store.maintenance_seal();
         Ok(json!({"maintenance":active,"ready":sealed,"running":running,"acp":acp,"adapters_stopped":adapters_stopped,"unknown_mail":unknown,"source_release_busy":source_release_busy}).as_object().unwrap().clone())
     }
     /// Never fails the Hub: what could not be resumed is logged and reported on `/healthz`

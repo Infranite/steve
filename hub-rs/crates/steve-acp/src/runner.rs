@@ -357,6 +357,11 @@ struct State {
     /// every spawned adapter, including ones still starting, so shutdown leaves no orphans
     procs: HashMap<u64, Arc<Conn>>,
     drain_groups: HashSet<u32>,
+    /// Sessions whose turn a drain cut while it only waited for a permission answer: their prompt
+    /// returns with nothing reported (no error, no turn end), the restart resumes them. Kept after the
+    /// prompt returned (`cut`) until the restart, or a cancelled drain, continues them.
+    suspended: HashSet<String>,
+    cut: HashSet<String>,
     next_token: u64,
     closed: bool,
     /// a release is about to restart the Hub (see [`Acp::hold`])
@@ -426,6 +431,18 @@ static DEAD_AGENT: LazyLock<Regex> = LazyLock::new(|| {
 
 /// What a gateway retry sends instead of the same message when the failed attempt had already run tools:
 /// their effects happened, so the agent picks up where it stopped instead of doing the work again.
+/// The turn of `sid` only waits for a permission answer: its running prompt asked and the question is
+/// open, and it is not between retries.
+fn waiting_only(st: &State, sid: &str) -> bool {
+    let Some(prompt) = st.prompts.get(sid) else {
+        return false;
+    };
+    !st.retrying.contains_key(sid) && st.waits.values().any(|w| w.0 == sid && w.3 == *prompt)
+}
+
+/// What a turn the drain cut is continued with when the drain is called off (no restart came).
+pub const RESUME_AFTER_DRAIN: &str = "刚才为了升级暂停了这一回合，升级没有进行。请从中断处继续；刚才在等的授权如果还需要，再请求一次。";
+
 pub const RESUME_AFTER_TOOLS: &str = "刚才推理网关中断了，这一轮你已经调用过工具，那些操作已经生效。请先核对已经完成的部分，再从中断的地方继续，不要重复已经做过的操作。";
 
 static TRANSIENT: LazyLock<Regex> = LazyLock::new(|| {
@@ -675,6 +692,17 @@ impl Acp {
         self.st().turning.len()
     }
 
+    /// Turns doing work now: in flight, and not just waiting for a permission answer. A turn whose agent
+    /// asked and nobody answered yet may be cut by a drain (the user decided 2026-11-04): the restart
+    /// resumes it and it asks again.
+    pub fn working_turns(&self) -> usize {
+        let st = self.st();
+        st.turning
+            .iter()
+            .filter(|s| !waiting_only(&st, s) && !st.suspended.contains(*s))
+            .count()
+    }
+
     /// Run what is queued for a session as one turn, optionally led by Steve's own message;
     /// identical messages (text and attachment ids) are sent once. False when a turn is running, while holding, or with nothing to run.
     pub fn flush(&self, session_id: &str, lead: Option<Message>) -> bool {
@@ -836,6 +864,23 @@ impl Acp {
                 Some(r) => r,
                 None => req.await,
             };
+            // cut by a drain while it only waited for a permission: nothing to report, the session stays
+            // "running" for the restart to resume (or a called-off drain to continue)
+            if self.st().suspended.remove(&sid) {
+                let mut st = self.st();
+                if st.prompts.get(&sid) == Some(&ptoken) {
+                    st.prompts.remove(&sid);
+                }
+                st.cancelled.remove(&ptoken);
+                st.turning.remove(&sid);
+                st.tallies.remove(&sid);
+                st.cut.insert(sid.clone());
+                if let Some(l) = st.live.get_mut(&sid).filter(|l| l.generation == generation) {
+                    l.busy = false;
+                    l.prompting = false;
+                }
+                return;
+            }
             let (stop_reason, error, resp) = match r {
                 Ok(r) => (
                     r.get("stopReason")
@@ -1880,9 +1925,12 @@ impl Acp {
         {
             let mut st = self.st();
             st.holding = true;
-            if !st.turning.is_empty() {
+            if st.turning.iter().any(|s| !waiting_only(&st, s)) {
                 return false;
             }
+            // what is left only waits for a permission answer: cut it, the restart resumes it
+            let waiting: Vec<String> = st.turning.iter().cloned().collect();
+            st.suspended.extend(waiting);
             let pids: Vec<_> = st.procs.values().map(|c| c.pid()).collect();
             st.drain_groups.extend(pids);
         }
@@ -1910,12 +1958,27 @@ impl Acp {
         false
     }
     pub fn reopen(&self) -> bool {
-        let mut st = self.st();
-        if !st.drain_groups.is_empty() {
-            return false;
+        let cut: Vec<String> = {
+            let mut st = self.st();
+            if !st.drain_groups.is_empty() {
+                return false;
+            }
+            st.closed = false;
+            st.holding = false;
+            st.suspended.clear();
+            st.cut.drain().collect()
+        };
+        // the drain was called off: no restart will resume what it cut, so it goes on now
+        for sid in cut {
+            self.flush(
+                &sid,
+                Some(Message {
+                    text: RESUME_AFTER_DRAIN.into(),
+                    via: "steve".into(),
+                    files: vec![],
+                }),
+            );
         }
-        st.closed = false;
-        st.holding = false;
         true
     }
 

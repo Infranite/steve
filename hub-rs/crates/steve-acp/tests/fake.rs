@@ -1117,3 +1117,49 @@ async fn upgrade_quiesce_stops_adapter_groups_and_is_reversible() {
     assert_eq!(f.prompts(), ["@say before", "@say after"]);
     acp.shutdown(Duration::from_secs(2)).await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_turn_waiting_for_permission_does_not_hold_a_drain() {
+    let f = Fake::new(&[]);
+    let h = host();
+    h.with(f.session("s1", "claude-code"));
+    let acp = Acp::new(f.config(), h.clone());
+    acp.prompt("s1", "@perm Bash", "me").await.unwrap();
+    wait_for("decision", 10, || h.rec(|r| r.decisions.len()) == 1).await;
+    assert_eq!(
+        (acp.running_turns(), acp.working_turns()),
+        (1, 0),
+        "it only waits for you"
+    );
+    let statuses = h.rec(|r| r.statuses.len());
+    // the drain cuts it: nothing reported, the session stays as it was for the restart to resume
+    assert!(acp.quiesce().await, "a waiting turn doesn't hold the drain");
+    wait_for("cut", 10, || acp.running_turns() == 0).await;
+    assert_eq!(turn_ends(&h), 0, "no turn end");
+    assert_eq!(h.rec(|r| r.statuses.len()), statuses, "no status change");
+    // the drain is called off: the turn goes on now (no restart will resume it)
+    let before = f.prompts().len();
+    assert!(acp.reopen());
+    wait_for("continued", 10, || f.prompts().len() > before).await;
+    assert!(
+        f.prompts().last().unwrap().contains("升级没有进行"),
+        "{:?}",
+        f.prompts().last()
+    );
+    acp.shutdown(Duration::from_secs(2)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_working_turn_still_holds_a_drain() {
+    let f = Fake::new(&[]);
+    let h = host();
+    h.with(f.session("s1", "claude-code"));
+    let acp = Acp::new(f.config(), h.clone());
+    acp.prompt("s1", "@sleep 2000", "me").await.unwrap();
+    wait_for("running", 10, || acp.running_turns() == 1).await;
+    assert_eq!(acp.working_turns(), 1);
+    assert!(!acp.quiesce().await, "a working turn is waited for");
+    assert!(acp.reopen());
+    wait_for("turn end", 10, || turn_ends(&h) == 1).await;
+    acp.shutdown(Duration::from_secs(2)).await;
+}
