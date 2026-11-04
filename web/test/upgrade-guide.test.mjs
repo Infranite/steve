@@ -2,7 +2,7 @@ import assert from "node:assert/strict"
 import { test } from "node:test"
 import { stageIndex, upgradeGuide, upgradeStages, verifyUpgrade } from "../src/upgrade-guide.ts"
 
-const home = "/Users/me/.steve", repo = "/Users/me/Agents/steve"
+const home = "/Users/example/.steve", repo = "/Users/example/Agents/steve"
 
 test("a signed local build is told to build the Release tag here and deploy it, with this machine's paths", () => {
   const g = upgradeGuide({ kind: "local_release", home, release: "0.2.17-local-51826fc", repo }, "v0.2.20")
@@ -12,8 +12,8 @@ test("a signed local build is told to build the Release tag here and deploy it, 
     `python3 ${repo}/ops/local-release.py build v0.2.20`,
     `python3 ${repo}/ops/local-release.py deploy ${home}/releases/0.2.20-local-*`,
   ])
-  assert.match(g.backup, /\/Users\/me\/\.steve\/backups/)
-  assert.match(g.recovery.join("\n"), /deploy \/Users\/me\/\.steve\/releases\/0\.2\.17-local-51826fc/, "the way back names the release running now")
+  assert.match(g.backup, /\/Users\/example\/\.steve\/backups/)
+  assert.match(g.recovery.join("\n"), /deploy \/Users\/example\/\.steve\/releases\/0\.2\.17-local-51826fc/, "the way back names the release running now")
   assert.equal(g.steps.at(-1).title, "回到本页核对")
 })
 
@@ -23,7 +23,7 @@ test("each other installation gets its own way, never another's script", () => {
   assert.match(script.recovery.join("\n"), /release\.sh --rollback/)
   const source = upgradeGuide({ kind: "source", home, repo }, "0.2.20")
   assert.match(source.steps[0].command, /sqlite3 .*\.backup .*before-0\.2\.20\.sqlite3/, "source runs back up before anything else")
-  assert.ok(source.steps.some(s => s.command?.includes("git -C /Users/me/Agents/steve checkout v0.2.20")))
+  assert.ok(source.steps.some(s => s.command?.includes("git -C /Users/example/Agents/steve checkout v0.2.20")))
   const external = upgradeGuide({ kind: "external", home }, "0.2.20")
   assert.equal(external.steps.filter(s => s.command).length, 0, "nothing to run when Steve can't tell who owns the files")
   for (const g of [script, source, external]) assert.ok(!JSON.stringify(g).includes("local-release.py"))

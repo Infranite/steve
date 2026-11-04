@@ -7,7 +7,7 @@ import "../../src/manage"
 import { ProjectView } from "../../src/projects"
 import { st, useStore } from "../../src/store"
 document.documentElement.classList.toggle("dark", matchMedia("(prefers-color-scheme: dark)").matches)
-const p: RProject = { id: "prj_1", workspace_id: "default", name: "Steve", description: "Steve 自己的代码：Hub、Web 界面、发布与运维脚本", device_id: "hub", path: "/Users/me/Agents/steve", kind: "git", worktree: true, default_bot: null, release: { kind: "script", cmd: "/Users/me/.steve/current/ops/release.sh" }, archived: false, created: 0, updated: 0 }
+const p: RProject = { id: "prj_1", workspace_id: "default", name: "Steve", description: "Steve 自己的代码：Hub、Web 界面、发布与运维脚本", device_id: "hub", path: "/Users/example/Agents/steve", kind: "git", worktree: true, default_bot: null, release: { kind: "script", cmd: "/Users/example/.steve/current/ops/release.sh" }, archived: false, created: 0, updated: 0 }
 st.ready = true
 st.projects = [p]
 st.devices = [{ id: "hub", name: "Hub" } as (typeof st.devices)[number]]

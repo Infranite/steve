@@ -157,7 +157,7 @@ try {
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false)
 
   // Installations Steve doesn't switch itself: this machine's commands instead of a button, then a read-back.
-  const home = "/Users/me/.steve", repo = "/Users/me/Agents/steve"
+  const home = "/Users/example/.steve", repo = "/Users/example/Agents/steve"
   state = { ...state, current: { hub: "v1.1.0", web: "v1.1.0" }, capability: { managed: false, can_execute: false, reason: "当前安装未使用 managed supervisor" }, install: { kind: "local_release", home, release: "1.1.0-local-51826fc", repo }, check: check("available"), operation: null, backup: null }
   await page.reload(); await page.locator('[data-upgrade-guide="local_release"]').waitFor()
   assert.equal(await page.locator("[data-upgrade-execute]").count(), 0)
@@ -165,8 +165,8 @@ try {
   assert.equal(await page.getByText("当前安装未使用 managed supervisor").count(), 0, "the raw supervisor reason gives way to the installation")
   const commands = await page.locator("[data-upgrade-command] pre").allInnerTexts()
   assert.deepEqual(commands.map(c => c.trim()).slice(1), [`python3 ${repo}/ops/local-release.py build v1.2.0`, `python3 ${repo}/ops/local-release.py deploy ${home}/releases/1.2.0-local-*`])
-  assert.match(await page.locator("[data-upgrade-backup]").innerText(), /\/Users\/me\/\.steve\/backups/)
-  assert.match(await page.locator("[data-upgrade-recovery]").innerText(), /deploy \/Users\/me\/\.steve\/releases\/1\.1\.0-local-51826fc/)
+  assert.match(await page.locator("[data-upgrade-backup]").innerText(), /\/Users\/example\/\.steve\/backups/)
+  assert.match(await page.locator("[data-upgrade-recovery]").innerText(), /deploy \/Users\/example\/\.steve\/releases\/1\.1\.0-local-51826fc/)
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false, "commands wrap on a phone")
   if (process.env.STEVE_TEST_ARTIFACTS) await page.screenshot({ path: process.env.STEVE_TEST_ARTIFACTS + "/upgrade-guide-mobile.png", fullPage: true })
   // not restarted yet: the read-back keeps trying and never says upgraded
