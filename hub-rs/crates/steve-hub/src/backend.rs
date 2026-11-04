@@ -828,7 +828,7 @@ pub trait Domain: Send + Sync + 'static {
     async fn offer(&self, ws: &str, message: &str, take: bool) -> BResult<(Obj, bool)> {
         todo_backend!("offer")
     }
-    /// `choice`: `here` | `item`.
+    /// `choice`: `here` | `item` | `new`.
     async fn suggest(&self, ws: &str, message: &str, choice: &str) -> BResult<(Obj, bool)> {
         todo_backend!("suggest")
     }

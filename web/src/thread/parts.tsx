@@ -9,7 +9,7 @@ import { Spinner } from "@/components/ui/spinner"
 import { TraceLine, TraceIcon, TraceTitle, TraceDescription } from "@/components/ui/trace"
 import { Markdown } from "@/components/markdown"
 import { Textarea } from "@/components/ui/textarea"
-import { st, tm, emit, chatSend, takeOffer, chooseSuggest, cancelQueued, stopRun, clearFocus, focusItem, quoteMsg, decisionDraft, decide, botName, alertClosed, closeAlerts, type Msg, type Steps, type Update, type Item, type ItemCardState } from "@/store"
+import { st, tm, emit, chatSend, takeOffer, chooseSuggest, cancelQueued, stopRun, clearFocus, focusItem, quoteMsg, decisionDraft, decide, botName, alertClosed, closeAlerts, type Msg, type SuggestChoice, type Steps, type Update, type Item, type ItemCardState } from "@/store"
 import { ItemRef, DecisionCard, ItemNo, StatusDot, AlertClose, go } from "@/ui"
 
 /* ───────── research ───────── */
@@ -76,12 +76,12 @@ export function SuggestCard({ m }: { m: Msg }) {
   const s = m.suggest, [busy, setBusy] = useState(false)
   if (!s) return null
   const chosen = s.state === "chosen"
-  const act = async (c: "here" | "item") => { setBusy(true); try { await chooseSuggest(m, c) } finally { setBusy(false) } }
+  const act = async (c: SuggestChoice) => { setBusy(true); try { await chooseSuggest(m, c) } finally { setBusy(false) } }
   return (
     <div className={cn("mt-3 flex flex-col gap-2", s.state === "expired" && "opacity-60")} data-suggest={m.id} data-suggest-state={s.state}>
       {chosen ? <div className="type-footnote text-muted-foreground">{s.chosen === "here" ? "你选了在这里回答" : s.item ? "" : "你选了建成事项"}</div>
         : <div className="flex flex-wrap gap-2">{s.choices.map((c) => (
-          <Button key={c.id} size="sm" variant={c.id === "item" ? "outline" : "default"} className="max-w-full rounded-full" disabled={busy} onClick={() => void act(c.id)} data-suggest-choice={c.id}><span className="truncate">{c.label}</span></Button>))}
+          <Button key={c.id} size="sm" variant={(s.choices.some((x) => x.recommended) ? c.recommended : c.id === "here") ? "default" : "outline"} className="max-w-full rounded-full" disabled={busy} onClick={() => void act(c.id)} data-suggest-choice={c.id}><span className="truncate">{c.label}</span></Button>))}
           {s.state === "expired" && <span className="self-center type-footnote text-muted-foreground">过了 24 小时，仍可点</span>}</div>}
       {s.item && (st.thread.some((x) => x.card?.item === s.item) ? <CardLink id={s.item} /> : <ItemRef id={s.item} />)}
     </div>

@@ -352,7 +352,11 @@ impl Core {
             }
             "config" => self.on_config(ws, text, user, reply, steps).await?,
             "suggest" => {
-                let (q, card) = suggest::card(&r, &d);
+                let item = match &d.for_item {
+                    Some(i) => self.store().item(i)?,
+                    None => None,
+                };
+                let (q, card) = suggest::card(&r, &d, item.as_ref());
                 reply(&q, None, Some(json!({"suggest": card})));
                 Logged { item: None }
             }

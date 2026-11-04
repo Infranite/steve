@@ -8,7 +8,7 @@ use super::{decide::Decision, lock, meta_of};
 use crate::Core;
 use crate::error::{CoreError, Result};
 use crate::gateway::Route;
-use crate::repo::FileRef;
+use crate::repo::{FileRef, Item};
 use crate::util::now;
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -17,16 +17,48 @@ use std::sync::atomic::AtomicBool;
 /// After this long an unanswered card is `expired` (§3.4).
 const EXPIRES: i64 = 24 * 3600 * 1000;
 
-/// The card's text and `meta.suggest` for a route the guards turned into a suggestion.
-pub(crate) fn card(r: &Route, d: &Decision) -> (String, Value) {
+/// The card's text and `meta.suggest` for a route the guards turned into a suggestion. About an existing
+/// item (`item`, the one the model named): why the message belongs there, the recommendation, and the
+/// decision that is actually open — append it to that item, or make an item of its own (decided by the
+/// user on 2026-11-05, ST-44; no longer “这是给 ST-n 的吗？ 送到 ST-n / 在这里回答”).
+pub(crate) fn card(r: &Route, d: &Decision, item: Option<&Item>) -> (String, Value) {
     if let Some(id) = &d.for_item {
+        let name = item
+            .map(|i| format!("{id}「{}」", i.title))
+            .unwrap_or_else(|| id.clone());
+        let why = r
+            .why
+            .trim()
+            .trim_end_matches(['。', '.', '；', ';', '，', ',']);
+        let because = if why.is_empty() {
+            format!("这条和 {name} 是同一件事的补充")
+        } else {
+            why.to_string()
+        };
+        let q = format!(
+            "{because}，可以和它一起实现和验收。建议追加到 {name}，你想追加进去，还是单独建一个事项？"
+        );
+        /* an item of its own goes where the item it was close to went, unless the router said otherwise */
+        let title = Some(r.title.trim()).filter(|t| !t.is_empty());
+        let goal = Some(r.goal.trim()).filter(|g| !g.is_empty());
+        let project = r
+            .project
+            .clone()
+            .or_else(|| item.and_then(|i| i.project_id.clone()));
+        let bot = Some(r.bot.clone())
+            .filter(|b| b != "steve" || r.bot_from_project)
+            .or_else(|| {
+                item.filter(|i| i.project_id == project)
+                    .and_then(|i| i.bot_id.clone())
+            });
         return (
-            format!("这是给 {id} 的吗？"),
+            q.clone(),
             json!({
-                "question": format!("这是给 {id} 的吗？"),
+                "question": q,
                 "choices": [
-                    {"id": "item", "label": format!("送到 {id}"), "item": id},
-                    {"id": "here", "label": "在这里回答"},
+                    {"id": "item", "label": format!("追加到 {id}"), "item": id, "recommended": true},
+                    {"id": "new", "label": "单独建项", "title": title, "goal": goal,
+                     "project": project, "bot": bot, "tags": r.tag_ids},
                 ],
                 "state": "open",
             }),
@@ -70,10 +102,11 @@ impl Core {
     }
 
     /// The user picked on a suggestion card (`POST /api/thread/:id/suggest`): `here` answers the original
-    /// message in place (the answer continues this card), `item` makes the item, or sends the message to
-    /// the item a “这是给 ST-n 的吗？” card asks about.
+    /// message in place (the answer continues this card), `item` makes the item, or appends the message to
+    /// the item a card about an existing item recommends; `new` (that card's other choice) makes an item
+    /// of its own.
     pub fn suggest(&self, ws: &str, msg_id: &str, choice: &str) -> Result<Handled> {
-        if !matches!(choice, "here" | "item") {
+        if !matches!(choice, "here" | "item" | "new") {
             return Err(CoreError::Status(400, "参数不对：choice".into()));
         }
         let _one = lock(&self.0.thread.acting);
@@ -108,7 +141,7 @@ impl Core {
             .as_array()
             .and_then(|cs| cs.iter().find(|c| c["id"] == choice))
             .cloned()
-            .unwrap_or(Value::Null);
+            .ok_or_else(|| CoreError::Status(400, "这张建议卡没有这个选项".into()))?;
         let mut meta = meta_of(&m);
         meta["suggest"]["state"] = json!("chosen");
         meta["suggest"]["chosen"] = json!(choice);
