@@ -88,15 +88,28 @@ export function SuggestCard({ m }: { m: Msg }) {
   )
 }
 
-/** the options of a follow-up question: one click sends it */
-export function AskChips({ m }: { m: Msg }) {
+/** questions answered from this page and still on their way: a second click sends nothing */
+const answering = new Set<string>()
+/** the options of a follow-up question: one click sends it, once; answered (you said something after it) they are gone.
+ *  `conv`: an IM conversation, where the question is for the people in the chat — the options are what they can reply,
+ *  not buttons that would speak in your own conversation */
+export function AskChips({ m, conv }: { m: Msg; conv?: boolean }) {
   if (!m.ask?.options?.length) return null
-  return <div className="mt-3 flex flex-wrap gap-2" data-ask={m.id}>{m.ask.options.map((o) => <Button key={o} size="sm" variant="outline" className="rounded-full" onClick={() => void chatSend(o)} data-ask-opt={o}>{o}</Button>)}</div>
+  if (conv) return <div className="mt-2 type-footnote text-muted-foreground" data-ask={m.id} data-ask-readonly>可以回复：{m.ask.options.join(" / ")}</div>
+  const at = st.thread.findIndex((x) => x === m || (!!m.id && x.id === m.id))
+  if (at >= 0 && st.thread.slice(at + 1).some((x) => x.k === "me")) return null
+  const key = m.id ?? ""
+  const send = async (o: string) => {
+    if (answering.has(key)) return
+    answering.add(key)
+    try { await chatSend(o) } finally { answering.delete(key) }
+  }
+  return <div className="mt-3 flex flex-wrap gap-2" data-ask={m.id}>{m.ask.options.map((o) => <Button key={o} size="sm" variant="outline" className="rounded-full" onClick={() => void send(o)} data-ask-opt={o}>{o}</Button>)}</div>
 }
 
-/** "（Hub 重启，没答完）": ask the question again */
-export function Rerun({ m }: { m: Msg }) {
-  if (!m.rerun) return null
+/** "（Hub 重启，没答完）": ask the question again (your own conversation only: an IM turn is asked in its chat) */
+export function Rerun({ m, conv }: { m: Msg; conv?: boolean }) {
+  if (!m.rerun || conv) return null
   const q = st.thread.find((x) => x.id === m.rerun)
   return q?.t ? <div className="mt-3"><Button size="sm" variant="outline" className="rounded-full" onClick={() => void chatSend(q.t!)} data-rerun><RotateCcwIcon />重新回答</Button></div> : null
 }

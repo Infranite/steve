@@ -524,8 +524,38 @@ pub async fn decision_dismiss(
     Path(id): Path<String>,
 ) -> ApiResult {
     let (i, ws) = (id.clone(), c.ws.clone());
-    st.read(move |r| Ok(own(r.decision_get(&i)?, &ws, "决定")?))
+    let d = st
+        .read(move |r| Ok(own(r.decision_get(&i)?, &ws, "决定")?))
         .await?;
+    // a reply waiting for your approval that no longer needs handling is not sent: its draft is
+    // discarded like 不发出, so the conversation it belongs to stops waiting (and undo puts it back)
+    let field = |k: &str| d.get(k).and_then(Value::as_str);
+    if field("subject_type") == Some(steve_channels::respond::SUBJECT_MESSAGE)
+        && field("kind") == Some("approve")
+        && let Some(m) = st.modules.clone()
+    {
+        let (caller, id2) = (
+            steve_modules::Caller {
+                ws: c.ws.clone(),
+                me: c.me.clone(),
+            },
+            id.clone(),
+        );
+        let r = tokio::task::spawn_blocking(move || {
+            steve_modules::decisions::dispatch(&m, &caller, &id2, "no", "")
+        })
+        .await
+        .ok()
+        .flatten();
+        if let Some(r) = r {
+            return Ok(match r {
+                Ok(d) => super::ok(
+                    serde_json::to_value(d).map_err(|e| ApiError::internal(e.to_string()))?,
+                )?,
+                Err(e) => e.into_response(),
+            });
+        }
+    }
     ok(Value::Object(st.domain.dismiss_decision(&id, &c.me).await?))
 }
 

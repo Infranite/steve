@@ -718,6 +718,7 @@ const DECIDED_BY_SUBJECT: Record<string, Record<string, string> | ((c: string) =
   mem: { yes: "记住了", no: "不记这条" },
   party_merge: { merge: "已合并，可以在联系人页拆回", not_same: "已记下：不是同一个人" },
   release: { no: "没有批准发布" },
+  chan_message: { yes: "已批准，稍后发出", no: "不发出，这条已关闭" },
 }
 const DECIDED: Record<string, string> = { pass: "已验收，事项完成", rework: "已发回返工", yes: "已确认", no: "已处理", continue: "已让它继续", delivered: "已转成验收", look: "已暂停，等你处理", tosteve: "已交给 Steve", drop: "已放弃", deny: "已拒绝" }
 function decidedText(w: Wait, c: string, bot: string | null) {
@@ -752,12 +753,21 @@ export async function decide(id: string, c: string, text?: string, decision?: st
     if (result && c === "pass") cue("success")
   } finally { st.pendingActions.delete(key); emit() }
 }
+/** a reply drafted in an IM conversation, answered in that conversation: `yes` sends it, `no` closes it for good;
+ *  one answer at a time, a second click while it is on its way does nothing */
+export async function decideOut(decision: string, c: "yes" | "no") {
+  const key = "decision:" + decision
+  if (st.pendingActions.has(key)) return false
+  st.pendingActions.add(key); emit()
+  try { return !!(await call(api.decide(decision, c), c === "yes" ? "已批准，稍后发出" : "不发出，这条已关闭")) }
+  finally { st.pendingActions.delete(key); emit() }
+}
 /** take one card out of 待处理 without answering it (the item's first one unless `decision` says which);
  *  undoable from the toast or from 已处理, except a tool permission, which this denies */
 export async function dismiss(id: string, decision?: string) {
   const { w } = cardOf(id, decision); if (!w) return
   const d = await call(api.dismiss(w.decision))
-  if (d) toast(w.subject === "tool_call" ? "已撤回，这次工具调用被拒绝" : "已撤回，不再提醒", w.subject === "tool_call" ? undefined : { action: { label: "撤销", onClick: () => void call(api.undo(w.decision), `已撤销，${id || "它"}回到待处理`) } })
+  if (d) toast(w.subject === "tool_call" ? "已撤回，这次工具调用被拒绝" : w.subject === "chan_message" && w.type === "approve" ? "已撤回，这条回复不发出" : "已撤回，不再提醒", w.subject === "tool_call" ? undefined : { action: { label: "撤销", onClick: () => void call(api.undo(w.decision), `已撤销，${id || "它"}回到待处理`) } })
 }
 export function undoDecision(n: number) { const d = st.done[n]; if (!d?.canUndo) return; void call(api.undo(d.decision), `已撤销，${d.id} 回到待处理`) }
 

@@ -49,6 +49,12 @@ impl Env {
         c.query_row(sql, [], |r| r.get(0)).expect("sql")
     }
 
+    fn one_text(&self, sql: &str) -> String {
+        let c = rusqlite::Connection::open(&self.db).expect("db");
+        c.busy_timeout(Duration::from_secs(5)).expect("timeout");
+        c.query_row(sql, [], |r| r.get(0)).expect("sql")
+    }
+
     fn exec(&self, sql: &str, p: &[&dyn rusqlite::ToSql]) {
         let c = rusqlite::Connection::open(&self.db).expect("db");
         c.busy_timeout(Duration::from_secs(5)).expect("timeout");
@@ -297,4 +303,33 @@ async fn upgrade_drain_blocks_new_mutations_and_waits_for_existing_external_work
     e.domain.upgrade_drain("cancel").await.unwrap();
     assert!(!e.store.maintenance());
     assert!(e.store.try_activity("mail_send").is_some());
+}
+
+/// Taking a drafted reply out of 待处理 discards the draft (it would otherwise wait in its
+/// conversation for good); undo puts it back; a second dismissal is refused.
+#[tokio::test(flavor = "multi_thread")]
+async fn dismissing_a_draft_reply_discards_it() {
+    let e = start().await;
+    // a draft of a space this test does not set up: rows only, without their references
+    let c = rusqlite::Connection::open(&e.db).expect("db");
+    c.busy_timeout(Duration::from_secs(5)).expect("timeout");
+    c.execute_batch(
+        "PRAGMA foreign_keys = OFF;
+         INSERT INTO chan_messages (id, workspace_id, space_id, direction, text, status, decision_id, created)
+         VALUES ('cm_d1', 'default', 'sp_x', 'out', '要我处理吗？', 'draft', 'dc_d1', 1);
+         INSERT INTO decisions (id, workspace_id, kind, subject_type, subject_id, question, options, status, requested_by, created)
+         VALUES ('dc_d1', 'default', 'approve', 'chan_message', 'cm_d1', '以机器人发到「群」', '[\"yes\",\"no\"]', 'open', 'steve', 1);",
+    )
+    .expect("rows");
+    drop(c);
+    let status = || e.one_text("SELECT status FROM chan_messages WHERE id = 'cm_d1'");
+    let (s, v) = e.call("POST", "/api/decisions/dc_d1/dismiss", None).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["result"]["choice"], "no", "{v}");
+    assert_eq!(status(), "discarded");
+    let (s, v) = e.call("POST", "/api/decisions/dc_d1/dismiss", None).await;
+    assert_eq!(s, 409, "{v}");
+    let (s, v) = e.call("POST", "/api/decisions/dc_d1/undo", None).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(status(), "draft");
 }
