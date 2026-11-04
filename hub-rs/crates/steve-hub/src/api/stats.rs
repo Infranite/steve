@@ -344,10 +344,17 @@ async fn items(
         None => 0,
         Some(v) => v.parse::<usize>().map_err(|_| invalid("cursor"))?,
     };
+    let only = p.get("only").filter(|v| !v.is_empty()).cloned();
+    if only
+        .as_deref()
+        .is_some_and(|v| !views::ITEM_ONLY.contains(&v))
+    {
+        return Err(invalid("only"));
+    }
     let k = key(&c.ws, "items", &p);
     api.cached(k, move |db| {
         let q = query(db, &c.ws, &p)?;
-        let page = views::items(db, &q, &sort, limit, cursor).map_err(serr)?;
+        let page = views::items(db, &q, &sort, only.as_deref(), limit, cursor).map_err(serr)?;
         serde_json::to_value(page).map_err(|e| ApiError::internal(e.to_string()))
     })
     .await

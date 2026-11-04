@@ -53,3 +53,10 @@ export function useStats<T>(f: () => Promise<T>, deps: unknown[], live = true): 
   useHubEvents(["stats"], () => { if (live) load() }, 200)
   return [v, load]
 }
+/** the range a chart covers, said the same way on every chart: “11月1日 – 11月7日”, one day as “11月5日” */
+export const fmtRange = (from: string, to: string) => {
+  const d = (x: string) => { const [, m, day] = x.split("-"); return `${Number(m)}月${Number(day)}日` }
+  return from === to ? d(from) : `${d(from)} – ${d(to)}`
+}
+/** a duration axis in one unit chosen by the largest value, so the ticks read “2 小时”, not “1 小时 57 分” */
+export const durUnit = (maxMs: number): [string, number] => (maxMs >= 2 * 86400000 ? ["天", 86400000] : maxMs >= 2 * 3600000 ? ["小时", 3600000] : ["分钟", 60000])

@@ -1,26 +1,82 @@
-/* 趋势图（stats.md §6.2–6.3）：单一纵轴；默认正文灰的明度梯度，悬停/选中的那一天用 accent 蓝；
- * 堆叠柱（按天）、折线（命中率）、中位数折线带 p85 浅带（前置时间）。十字线 + 提示框；点一天回调；每个图可切表格。 */
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react"
+/* 统计图（stats.md §6.2–6.3，ST-40 重整）：单一纵轴；颜色分两种用途，整页一致——
+ * 状态（新建、进行中、等你、完成、失败……）用 STATE，和事项列表的状态点同色；“谁”（模型、Bot、项目、token 类型）用 SERIES，
+ * 按顺序取，第 6 个起并入“其他”。堆叠柱 / 并列柱（按天）、折线（命中率）、中位数折线带 p85 浅带（耗时）、横向条形（分布）。
+ * 十字线 + 提示框，键盘左右键同样能看；点一天回调；每个图可切表格。 */
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react"
 import { cn } from "cn"
 import type { Series } from "@/api/stats"
 import { shortDay } from "@/stats/format"
 
-/** grey steps of the text colour, darkest first: series are told apart by position, legend and labels, not hue */
-export const GREYS = [0.82, 0.52, 0.32, 0.18, 0.66, 0.42]
-const grey = (i: number) => `color-mix(in oklab, var(--foreground) ${Math.round(GREYS[i % GREYS.length] * 100)}%, var(--background))`
-export const Swatch = ({ i, line }: { i: number; line?: boolean }) => <span aria-hidden className={cn("inline-block shrink-0", line ? "h-0.5 w-3 rounded-full" : "size-2.5 rounded-[3px]")} style={{ background: grey(i) }} />
+/** identity colours, in order (index.css `--series-*`, validated light and dark) */
+export const SERIES = [1, 2, 3, 4, 5].map((n) => `var(--series-${n})`)
+export const OTHER = "var(--series-other)"
+/** state colours: one state, one colour, on every chart of the page and as its status dot */
+export const STATE = {
+  created: "color-mix(in oklab, var(--foreground) 45%, var(--background))",
+  run: "var(--blue)", wait: "var(--attention)", done: "var(--success)", fail: "var(--destructive)",
+  idle: "var(--tertiary)", band: "color-mix(in oklab, var(--foreground) 10%, var(--background))",
+} as const
+export const seriesColor = (i: number, key?: string) => (key === "other" ? OTHER : SERIES[i] ?? OTHER)
 
-export type Kind = "stack" | "line" | "band"
-const H = 220, PAD = { l: 44, r: 12, t: 12, b: 26 }
+/** a legend key: a square for bars and areas, a short stroke for lines */
+export const Swatch = ({ c, line }: { c: string; line?: boolean }) => <span aria-hidden className={cn("inline-block shrink-0", line ? "h-0.5 w-3 rounded-full" : "size-2.5 rounded-[3px]")} style={{ background: c }} />
+export type LegendEntry = { label: ReactNode; c: string; line?: boolean }
+export function Legend({ items, className }: { items: LegendEntry[]; className?: string }) {
+  return (
+    <div className={cn("flex flex-wrap gap-x-4 gap-y-1 type-footnote text-muted-foreground", className)} data-legend>
+      {items.map((x, i) => <span key={i} className="inline-flex min-w-0 items-center gap-1.5"><Swatch c={x.c} line={x.line} /><span className="truncate">{x.label}</span></span>)}
+    </div>
+  )
+}
 
-function niceMax(v: number) {
+/** a chart's head: title, then “单位 · 时间范围” in grey, the legend under it; `right` holds the chart's own switches */
+export function ChartHead({ title, meta, legend, right, k }: { title: ReactNode; meta?: ReactNode; legend?: LegendEntry[]; right?: ReactNode; k?: string }) {
+  return (
+    <div className="mb-3" data-chart-head={k}>
+      <div className="flex flex-wrap items-start justify-between gap-x-3 gap-y-2">
+        <div className="min-w-0">
+          <h3 className="type-headline text-foreground">{title}</h3>
+          {meta && <div className="mt-0.5 type-footnote text-muted-foreground" data-chart-meta>{meta}</div>}
+        </div>
+        {right && <div className="flex flex-wrap items-center gap-2">{right}</div>}
+      </div>
+      {legend && legend.length > 0 && <Legend items={legend} className="mt-2" />}
+    </div>
+  )
+}
+
+/** at most 5 identity series; the rest summed into “其他” (stacks only: a rate can't be summed) */
+export function fold(d: Series, max = 5): Series {
+  if (d.series.length <= max) return d
+  const keep = d.series.slice(0, max - 1), rest = d.series.slice(max - 1)
+  const other = { key: "other", label: `其他 ${rest.length} 项`, values: d.buckets.map((_, i) => rest.reduce<number | null>((s, l) => (l.values[i] == null ? s : (s ?? 0) + l.values[i]!), null)) }
+  return { ...d, series: [...keep, other] }
+}
+
+export type Kind = "stack" | "group" | "line" | "band"
+const H = 220, PAD = { l: 48, r: 12, t: 12, b: 26 }
+
+/** the top of the axis: 1 / 2 / 2.5 / 5 × 10ⁿ; counts get an even whole number so the middle tick is whole too */
+function niceMax(v: number, int = false): number {
+  if (int) return v <= 10 ? Math.max(2, Math.ceil(v / 2) * 2) : Math.ceil(niceMax(v) / 2) * 2
   if (v <= 0) return 1
   const p = 10 ** Math.floor(Math.log10(v)), m = v / p
   return (m <= 1 ? 1 : m <= 2 ? 2 : m <= 2.5 ? 2.5 : m <= 5 ? 5 : 10) * p
 }
+/** a bar with 4px rounded data end, anchored on the baseline */
+const bar = (xl: number, w: number, y0: number, h: number, r: number) => {
+  const yt = y0 - h
+  return `M${xl},${y0}V${yt + r}Q${xl},${yt} ${xl + r},${yt}H${xl + w - r}Q${xl + w},${yt} ${xl + w},${yt + r}V${y0}Z`
+}
 
-export function Chart({ data, kind, fmt, picked, onPick, label }: {
+export function Chart({ data, kind, fmt, picked, onPick, label, colors, height = H, int = false, unit = 1, tipFmt }: {
   data: Series; kind: Kind; fmt: (v: number) => string; picked?: string | null; onPick?: (day: string | null) => void; label: string
+  /** one colour per series (defaults to the identity order) */
+  colors?: string[]; height?: number
+  /** whole numbers (counts): whole ticks; `unit`: the axis' unit in data units (3600000 for hours), so its ticks are round in it */
+  int?: boolean; unit?: number
+  /** the tooltip's format, when it should be finer than the axis */
+  tipFmt?: (v: number) => string
 }) {
   const box = useRef<HTMLDivElement>(null)
   const [w, setW] = useState(640)
@@ -31,33 +87,50 @@ export function Chart({ data, kind, fmt, picked, onPick, label }: {
     return () => ro.disconnect()
   }, [])
   const n = data.buckets.length, lines = data.series
-  const iw = Math.max(1, w - PAD.l - PAD.r), ih = H - PAD.t - PAD.b, slot = iw / Math.max(1, n)
+  const color = (k: number) => colors?.[k] ?? seriesColor(k, lines[k]?.key)
+  const iw = Math.max(1, w - PAD.l - PAD.r), ih = height - PAD.t - PAD.b, slot = iw / Math.max(1, n)
   const stackTop = useMemo(() => data.buckets.map((_, i) => lines.reduce((s, l) => s + (l.values[i] ?? 0), 0)), [data, lines])
-  const max = niceMax(kind === "stack" ? Math.max(0, ...stackTop) : Math.max(0, ...lines.flatMap((l) => l.values.map((v) => v ?? 0))))
+  const max = niceMax((kind === "stack" ? Math.max(0, ...stackTop) : Math.max(0, ...lines.flatMap((l) => l.values.map((v) => v ?? 0)))) / unit, int) * unit
+  const tf = tipFmt ?? fmt
   const y = (v: number) => PAD.t + ih - (v / max) * ih
   const x = (i: number) => PAD.l + slot * i + slot / 2
   const ticks = [0, 0.5, 1].map((t) => t * max)
   const every = Math.max(1, Math.ceil(n / Math.max(2, Math.floor(iw / 56))))
-  const bw = Math.min(24, Math.max(3, slot * 0.62))
+  const bw = Math.min(kind === "group" ? 28 : 24, Math.max(3, slot * 0.62))
+  const gw = kind === "group" ? Math.max(2, (bw - 2 * (lines.length - 1)) / Math.max(1, lines.length)) : bw
   const at = hover ?? (picked ? data.buckets.indexOf(picked) : -1)
+  const dim = (i: number) => (at >= 0 && i !== at ? 0.45 : 1)
+  /* a band chart joins the days that have a value (as its band does); a plain line breaks at a missing day */
   const path = (vals: (number | null)[]) => {
     let d = "", pen = false
-    vals.forEach((v, i) => { if (v == null) { pen = false; return } d += (pen ? "L" : "M") + x(i).toFixed(1) + "," + y(v).toFixed(1); pen = true })
+    vals.forEach((v, i) => { if (v == null) { if (kind !== "band") pen = false; return } d += (pen ? "L" : "M") + x(i).toFixed(1) + "," + y(v).toFixed(1); pen = true })
     return d
   }
+  const lone = (vals: (number | null)[], i: number) => (i === 0 || vals[i - 1] == null) && (i === vals.length - 1 || vals[i + 1] == null)
+  const key = (e: KeyboardEvent) => {
+    if (!n) return
+    const right = e.key === "ArrowRight"
+    if (right || e.key === "ArrowLeft") { e.preventDefault(); setHover(at < 0 ? (right ? 0 : n - 1) : Math.min(n - 1, Math.max(0, at + (right ? 1 : -1)))) }
+    else if ((e.key === "Enter" || e.key === " ") && at >= 0) { e.preventDefault(); onPick?.(data.buckets[at] !== picked ? data.buckets[at] : null) }
+    else if (e.key === "Escape") setHover(null)
+  }
   const tip: ReactNode = at >= 0 && at < n && (
-    <div role="status" className="pointer-events-none absolute top-1 z-10 min-w-36 rounded-lg border bg-popover px-3 py-2 text-popover-foreground shadow-md"
-      style={{ left: Math.min(Math.max(0, x(at) + 12), Math.max(0, w - 180)) }} data-chart-tip>
+    <div role="status" className="pointer-events-none absolute top-1 z-10 min-w-36 max-w-60 rounded-lg border bg-popover px-3 py-2 text-popover-foreground shadow-md"
+      style={{ left: Math.min(Math.max(0, x(at) + 12), Math.max(0, w - 200)) }} data-chart-tip>
       <div className="type-label text-muted-foreground">{data.buckets[at]}</div>
-      {lines.map((l, i) => (
-        <div key={l.key} className="mt-1 flex items-center gap-2 type-footnote"><Swatch i={i} line={kind !== "stack"} /><span className="min-w-0 flex-1 truncate">{l.label}</span><span className="tabular-nums">{l.values[at] == null ? "—" : fmt(l.values[at]!)}</span></div>
+      {lines.map((l, i) => (kind !== "band" || i === 0 || lines.length < 2) ? (
+        <div key={l.key} className="mt-1 flex items-center gap-2 type-footnote"><Swatch c={color(i)} line /><span className="min-w-0 flex-1 truncate text-muted-foreground">{l.label}</span><span className="font-medium tabular-nums text-foreground">{l.values[at] == null ? "—" : tf(l.values[at]!)}</span></div>
+      ) : (
+        <div key={l.key} className="mt-1 flex items-center gap-2 type-footnote"><Swatch c={STATE.band} /><span className="min-w-0 flex-1 truncate text-muted-foreground">{l.label}</span><span className="font-medium tabular-nums text-foreground">{l.values[at] == null ? "—" : tf(l.values[at]!)}</span></div>
       ))}
-      {kind === "stack" && lines.length > 1 && <div className="mt-1 flex justify-between border-t pt-1 type-footnote"><span>合计</span><span className="tabular-nums">{fmt(stackTop[at])}</span></div>}
+      {kind === "stack" && lines.length > 1 && <div className="mt-1 flex justify-between border-t pt-1 type-footnote"><span className="text-muted-foreground">合计</span><span className="font-medium tabular-nums">{tf(stackTop[at])}</span></div>}
+      {onPick && <div className="mt-1 type-footnote text-tertiary">{data.buckets[at] === picked ? "点击取消" : "点击看这一天的明细"}</div>}
     </div>
   )
   return (
     <div ref={box} className="relative w-full select-none" data-chart={kind}>
-      <svg width={w} height={H} role="img" aria-label={label} className="block overflow-visible"
+      <svg width={w} height={height} role="img" aria-label={label} tabIndex={0} onKeyDown={key} onBlur={() => setHover(null)}
+        className={cn("block overflow-visible rounded-md outline-none focus-visible:ring-2 focus-visible:ring-ring", onPick && "cursor-pointer")}
         onMouseLeave={() => setHover(null)}
         onMouseMove={(e) => { const r = e.currentTarget.getBoundingClientRect(); const i = Math.floor((e.clientX - r.left - PAD.l) / slot); setHover(i >= 0 && i < n ? i : null) }}
         onClick={() => onPick?.(hover != null && data.buckets[hover] !== picked ? data.buckets[hover] : null)}>
@@ -67,39 +140,45 @@ export function Chart({ data, kind, fmt, picked, onPick, label }: {
             <text x={PAD.l - 8} y={y(t)} dy="0.32em" textAnchor="end" className="fill-muted-foreground text-[11px] tabular-nums">{fmt(t)}</text>
           </g>
         ))}
-        {data.buckets.map((d, i) => i % every === 0 && <text key={d} x={x(i)} y={H - 8} textAnchor="middle" className="fill-muted-foreground text-[11px] tabular-nums">{shortDay(d)}</text>)}
-        {at >= 0 && at < n && <line x1={x(at)} x2={x(at)} y1={PAD.t} y2={PAD.t + ih} stroke="var(--border)" strokeWidth={1} />}
+        {data.buckets.map((d, i) => i % every === 0 && <text key={d} x={x(i)} y={height - 8} textAnchor="middle" className={cn("text-[11px] tabular-nums", d === picked ? "fill-foreground font-medium" : "fill-muted-foreground")}>{shortDay(d)}</text>)}
+        {at >= 0 && at < n && kind !== "stack" && kind !== "group" && <line x1={x(at)} x2={x(at)} y1={PAD.t} y2={PAD.t + ih} stroke="var(--border)" strokeWidth={1} />}
         {kind === "stack" && data.buckets.map((d, i) => {
           let base = 0
-          const on = i === at
           return (
-            <g key={d} data-bar={d}>
+            <g key={d} data-bar={d} opacity={dim(i)}>
               {lines.map((l, k) => {
                 const v = l.values[i] ?? 0
                 if (v <= 0) return null
-                const y0 = y(base), y1 = y(base + v); base += v
+                const y0 = y(base); base += v
                 const top = lines.slice(k + 1).every((m) => (m.values[i] ?? 0) <= 0)
-                const h = Math.max(1, y0 - y1 - (top ? 0 : 2)) // a 2px surface gap between segments
-                const r = top ? Math.min(4, h / 2, bw / 2) : 0
-                const xl = x(i) - bw / 2, yt = y0 - h
-                return <path key={l.key} fill={on ? (k === 0 ? "var(--blue)" : `color-mix(in oklab, var(--blue) ${Math.round(GREYS[k % GREYS.length] * 100)}%, var(--background))`) : grey(k)}
-                  d={`M${xl},${y0}V${yt + r}Q${xl},${yt} ${xl + r},${yt}H${xl + bw - r}Q${xl + bw},${yt} ${xl + bw},${yt + r}V${y0}Z`} />
+                const h = Math.max(1, y0 - y(base) - (top ? 0 : 2)) // a 2px surface gap between segments
+                return <path key={l.key} fill={color(k)} d={bar(x(i) - bw / 2, bw, y0, h, top ? Math.min(4, h / 2, bw / 2) : 0)} />
               })}
             </g>
           )
         })}
+        {kind === "group" && data.buckets.map((d, i) => (
+          <g key={d} data-bar={d} opacity={dim(i)}>
+            {lines.map((l, k) => {
+              const v = l.values[i] ?? 0
+              if (v <= 0) return null
+              const h = Math.max(1, y(0) - y(v))
+              return <path key={l.key} fill={color(k)} d={bar(x(i) - bw / 2 + k * (gw + 2), gw, y(0), h, Math.min(4, h / 2, gw / 2))} />
+            })}
+          </g>
+        ))}
         {kind === "band" && lines.length >= 2 && (() => {
           const lo = lines[0].values, hi = lines[1].values
           const pts = data.buckets.map((_, i) => i).filter((i) => lo[i] != null && hi[i] != null)
           if (!pts.length) return null
           const d = pts.map((i, k) => (k ? "L" : "M") + x(i) + "," + y(hi[i]!)).join("") + pts.slice().reverse().map((i) => "L" + x(i) + "," + y(lo[i]!)).join("") + "Z"
-          return <path d={d} fill="var(--foreground)" opacity={0.08} />
+          return <path d={d} fill={STATE.band} />
         })()}
-        {kind !== "stack" && lines.slice(0, kind === "band" ? 1 : undefined).map((l, k) => (
+        {(kind === "line" || kind === "band") && lines.slice(0, kind === "band" ? 1 : undefined).map((l, k) => (
           <g key={l.key}>
-            <path d={path(l.values)} fill="none" stroke={grey(k)} strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" />
-            {l.values.map((v, i) => v != null && (i === at || l.values.filter((z) => z != null).length === 1) && (
-              <circle key={i} cx={x(i)} cy={y(v)} r={4} fill={i === at ? "var(--blue)" : grey(k)} stroke="var(--background)" strokeWidth={2} />
+            <path d={path(l.values)} fill="none" stroke={color(k)} strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" />
+            {l.values.map((v, i) => v != null && (i === at || kind === "band" || lone(l.values, i)) && (
+              <circle key={i} cx={x(i)} cy={y(v)} r={i === at ? 4.5 : 3.5} fill={color(k)} stroke="var(--background)" strokeWidth={2} />
             ))}
           </g>
         ))}
@@ -112,11 +191,11 @@ export function Chart({ data, kind, fmt, picked, onPick, label }: {
 /** the same numbers as a table (每个图可切“表格”) */
 export function ChartTable({ data, fmt, picked, onPick }: { data: Series; fmt: (v: number) => string; picked?: string | null; onPick?: (d: string | null) => void }) {
   return (
-    <div className="overflow-x-auto" data-chart-table>
+    <div className="max-h-80 overflow-auto" data-chart-table>
       <table className="w-full type-footnote tabular-nums">
-        <thead><tr className="text-muted-foreground"><th className="py-1.5 pr-3 text-left font-medium">日期</th>{data.series.map((l) => <th key={l.key} className="py-1.5 pl-3 text-right font-medium">{l.label}</th>)}</tr></thead>
+        <thead className="sticky top-0 bg-background"><tr className="text-muted-foreground"><th className="py-1.5 pr-3 text-left font-medium">日期</th>{data.series.map((l) => <th key={l.key} className="py-1.5 pl-3 text-right font-medium">{l.label}</th>)}</tr></thead>
         <tbody>{data.buckets.map((d, i) => (
-          <tr key={d} className={cn("cursor-pointer border-t hover:bg-accent", picked === d && "bg-accent")} onClick={() => onPick?.(picked === d ? null : d)}>
+          <tr key={d} className={cn("border-t", onPick && "cursor-pointer hover:bg-accent", picked === d && "bg-accent")} onClick={() => onPick?.(picked === d ? null : d)}>
             <td className="py-1.5 pr-3">{d}</td>{data.series.map((l) => <td key={l.key} className="py-1.5 pl-3 text-right">{l.values[i] == null ? "—" : fmt(l.values[i]!)}</td>)}
           </tr>))}</tbody>
       </table>
@@ -124,17 +203,38 @@ export function ChartTable({ data, fmt, picked, onPick }: { data: Series; fmt: (
   )
 }
 
+export type BarRow = { key: string; label: ReactNode; value: number; c: string; sub?: ReactNode; title?: string }
+/** a distribution as horizontal bars: label, bar, value — every bar is labelled, so colour is never the only key.
+ *  `onPick` makes each row a button (下钻); `total` sets the 100% (defaults to the largest bar). */
+export function HBars({ rows, fmt = String, onPick, picked, label, total, k, vw = "w-14" }: {
+  rows: BarRow[]; fmt?: (v: number) => string; onPick?: (key: string) => void; picked?: string | null; label: string; total?: number; k?: string
+  /** the width of the value column */
+  vw?: string
+}) {
+  const max = Math.max(1, total ?? Math.max(0, ...rows.map((r) => r.value)))
+  return (
+    <div role={onPick ? "group" : "list"} aria-label={label} className="flex flex-col" data-hbars={k}>
+      {rows.map((r) => {
+        const body = <>
+          <span className="w-[5.5rem] shrink-0 truncate text-left type-callout sm:w-28" title={r.title}>{r.label}</span>
+          <span className="relative h-2.5 min-w-0 flex-1 overflow-hidden rounded-r-[4px] bg-muted/60" aria-hidden>
+            {r.value > 0 && <span className="absolute inset-y-0 left-0 rounded-r-[4px]" style={{ width: `${Math.max(1.5, (r.value / max) * 100)}%`, background: r.c }} />}
+          </span>
+          <span className={cn(vw, "shrink-0 text-right")}>
+            <span className="block type-headline tabular-nums">{fmt(r.value)}</span>
+            {r.sub != null && <span className="block truncate type-footnote tabular-nums text-muted-foreground">{r.sub}</span>}
+          </span>
+        </>
+        const cls = "flex w-full items-center gap-3 rounded-md px-1.5 py-1.5"
+        return onPick
+          ? <button key={r.key} type="button" onClick={() => onPick(r.key)} aria-pressed={picked === r.key} className={cn(cls, "text-left transition-colors hover:bg-muted/60 focus-visible:bg-muted/60 focus-visible:outline-none", picked === r.key && "bg-muted")} data-hbar={r.key}>{body}</button>
+          : <div key={r.key} role="listitem" className={cls} data-hbar={r.key}>{body}</div>
+      })}
+    </div>
+  )
+}
+
 /** a thin share bar in a table cell (4px, grey) */
 export function Share({ r }: { r: number }) {
   return <span className="block h-1 w-full min-w-10 overflow-hidden rounded-full bg-muted" aria-hidden><span className="block h-full rounded-full bg-foreground/40" style={{ width: `${Math.max(0, Math.min(1, r)) * 100}%` }} /></span>
-}
-
-/** a few tiny columns for a flow figure (迷你柱) */
-export function Spark({ values }: { values: number[] }) {
-  const m = Math.max(1, ...values)
-  return (
-    <span className="inline-flex h-5 items-end gap-[2px]" aria-hidden>
-      {values.map((v, i) => <span key={i} className={cn("w-[3px] rounded-t-[1px]", i === values.length - 1 ? "bg-foreground/60" : "bg-foreground/20")} style={{ height: `${Math.max(1, (v / m) * 20)}px` }} />)}
-    </span>
-  )
 }

@@ -529,6 +529,9 @@ pub struct ItemRow {
 
 /// `sort` of `GET /stats/items`.
 pub const ITEM_SORTS: &[&str] = &["est", "tokens", "lead", "wait", "reworks", "done_at"];
+/// `only` of `GET /stats/items`: the items behind `throughput.done` / `throughput.created`, for the drill-down
+/// lists of the stats page (the same marks and the same `created` window, so the counts agree).
+pub const ITEM_ONLY: &[&str] = &["done", "created"];
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ItemPage {
@@ -539,11 +542,13 @@ pub struct ItemPage {
 }
 
 /// Items done in the range or with activity in it (created, a turn, a mark), sorted descending by `sort`
-/// (missing values last), `limit` from `cursor` (an offset).
+/// (missing values last), `limit` from `cursor` (an offset). `only` (one of [`ITEM_ONLY`]) narrows them to
+/// the items done (a status mark to `done`) or created in the range.
 pub fn items(
     c: &Connection,
     q: &Query,
     sort: &str,
+    only: Option<&str>,
     limit: usize,
     cursor: usize,
 ) -> Result<ItemPage> {
@@ -564,9 +569,12 @@ pub fn items(
              WHERE s.workspace_id = ?1 AND i.kind = 'task' AND (?4 IS NULL OR i.project_id = ?4) AND (?5 IS NULL OR i.bot_id = ?5)
                AND ((s.done_at >= ?2 AND s.done_at < ?3) OR (i.created >= ?2 AND i.created < ?3)
                  OR EXISTS (SELECT 1 FROM agent_turns t WHERE t.item_id = i.id AND t.started >= ?2 AND t.started < ?3)
-                 OR EXISTS (SELECT 1 FROM item_marks m WHERE m.item_id = i.id AND m.ts >= ?2 AND m.ts < ?3))",
+                 OR EXISTS (SELECT 1 FROM item_marks m WHERE m.item_id = i.id AND m.ts >= ?2 AND m.ts < ?3))
+               AND (?6 IS NULL
+                 OR (?6 = 'done' AND EXISTS (SELECT 1 FROM item_marks m WHERE m.item_id = i.id AND m.kind = 'status' AND m.to_v = 'done' AND m.ts >= ?2 AND m.ts < ?3))
+                 OR (?6 = 'created' AND i.created >= ?2 AND i.created < ?3))",
         )?
-        .query_map(params![q.workspace_id, lo, hi, q.project, q.bot], |r| {
+        .query_map(params![q.workspace_id, lo, hi, q.project, q.bot, only], |r| {
             let models: BTreeMap<String, [i64; 4]> =
                 serde_json::from_str(&r.get::<_, String>(16)?).unwrap_or_default();
             Ok(ItemRow {

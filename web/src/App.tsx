@@ -52,7 +52,6 @@ const OrgView = lazyView(() => import("@/people/routes").then((m) => ({ default:
 const TeamView = lazyView(() => import("@/people/routes").then((m) => ({ default: m.TeamView })))
 import { Robot } from "@/robot"
 import { HoldBanner } from "@/queue"
-import { YoloBanner } from "@/yolo/banner"
 import { YoloDialog } from "@/yolo/switch"
 const YoloDigestView = lazyView(() => import("@/yolo/digest").then((m) => ({ default: m.YoloDigestView })))
 const StatsRoute = lazyView(() => import("@/stats/page").then((m) => ({ default: m.StatsRoute })))
@@ -164,7 +163,7 @@ export default function App() {
     <TooltipProvider delay={400}>
       <SidebarProvider className="h-[100dvh] min-h-0! bg-background text-foreground [--sidebar-width:15rem]">
         <Sidebar route={a} />
-        <SidebarInset className="relative min-w-0 overflow-hidden" key={(st.workspace?.id ?? "") + "/" + a + "/" + (b ?? "") + "/" + (c ?? "")}><YoloBanner /><HoldBanner /><div className="min-h-0 flex-1 anim-page">{view}</div></SidebarInset>
+        <SidebarInset className="relative min-w-0 overflow-hidden" key={(st.workspace?.id ?? "") + "/" + a + "/" + (b ?? "") + "/" + (c ?? "")}><HoldBanner /><div className="min-h-0 flex-1 anim-page">{view}</div></SidebarInset>
         <MobileTabs route={a} />
         {sh?.kind === "fork" && <ForkDialog k={sh.payload.k} at={sh.payload.at} />}
         {sh?.kind === "newItem" && <NewItemDialog project={sh.payload?.project} />}

@@ -32,13 +32,18 @@ export const levelOf = (y: RYolo | null): YoloLevel => (!y || !y.on ? "off" : y.
 
 /** the dot's colour: blue for YOLO, orange for full access, red only for a tripped breaker */
 export const DOT: Record<YoloState, string> = { on: "bg-blue", full: "bg-attention", off: "bg-tertiary/60", paused: "bg-destructive", forced: "bg-tertiary/60" }
-const LABEL: Record<YoloState, string> = { on: "YOLO", full: "完全放开", off: "YOLO 关", paused: "YOLO 已暂停", forced: "YOLO 不可用" }
+export const LABEL: Record<YoloState, string> = { on: "YOLO", full: "完全放开", off: "YOLO 关", paused: "YOLO 已暂停", forced: "YOLO 不可用" }
 
 export const LEVELS: { m: YoloLevel; title: string; sub: string }[] = [
   { m: "off", title: "关", sub: "每个决定都等你。" },
   { m: "on", title: "YOLO 替你审批", sub: "Steve 替你做能撤回的决定：工作区里的命令、检查全过的交付、Agent 的提问。每件都记账，能一键撤销。" },
   { m: "full", title: "完全放开", sub: "在 YOLO 之上，Agent 不再请求权限，想做什么就直接做。只在你信得过这段时间的所有事项时打开。" },
 ]
+
+/** the YOLO record opened on one of its filters (统计页的“替你做了 / 留给你”下钻到这里) */
+let digestStart: "全部" | "替你做的" | "留给你的" = "全部"
+export const openDigest = (f: typeof digestStart) => { digestStart = f; go("#/yolo") }
+export const takeDigestStart = () => { const f = digestStart; digestStart = "全部"; return f }
 
 export function Dot({ s, className }: { s: YoloState; className?: string }) {
   return <span className={cn("size-1.5 shrink-0 rounded-full", DOT[s], className)} aria-hidden />

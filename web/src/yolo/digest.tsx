@@ -12,7 +12,7 @@ import { NotWired } from "@/api"
 import { yoloApi, type RYoloAction, type RYoloDigest, type RYoloWindow, type UndoKind } from "@/api/yolo"
 import { tm, useHubEvents, yoloUndo } from "@/store"
 import { Chips, Empty, ItemNo, Page } from "@/ui"
-import { YoloPill } from "@/yolo/switch"
+import { takeDigestStart, YoloPill } from "@/yolo/switch"
 import { choiceText, YoloMark } from "@/yolo/badges"
 
 const UNDO: Record<UndoKind, string> = { decision: "撤销", rollback: "回滚", recall: "撤回消息", reanswer: "改答", pause: "暂停这件" }
@@ -108,7 +108,7 @@ function WindowBlock({ w, open, reload, filter }: { w: RYoloWindow; open: boolea
 }
 
 export function YoloDigestView({ window }: { window?: string }) {
-  const [d, setD] = useState<RYoloDigest | null>(null), [err, setErr] = useState(""), [filter, setFilter] = useState<Filter>("全部")
+  const [d, setD] = useState<RYoloDigest | null>(null), [err, setErr] = useState(""), [filter, setFilter] = useState<Filter>(takeDigestStart)
   const load = () => yoloApi.actions().then((x) => { setD(x); setErr("") }).catch((e) => setErr(e instanceof NotWired ? "这台 Hub 没有 YOLO" : (e as Error).message))
   useEffect(() => { void load() }, [])
   useHubEvents(["yolo", "yolo_action"], () => void load())

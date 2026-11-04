@@ -4,7 +4,7 @@
 //! All times are minutes after 2026-11-01 00:00 UTC; the workspace's `stats.tz` is UTC.
 
 use steve_stats::metrics::{By, Query, breakdown, daily, prices_of, summary, wip_by_day};
-use steve_stats::{backfill, refresh};
+use steve_stats::{backfill, refresh, views};
 use steve_store::{NewBot, NoPublisher, Store, WS};
 
 const T0: i64 = 1_793_491_200_000;
@@ -451,6 +451,22 @@ fn backfilled_metrics_match_the_hand_count() {
     // WIP at the end of the day: only ST-5
     let wip = s.with_conn(|c| wip_by_day(c, &day_query())).unwrap();
     assert_eq!(wip, [("2026-11-01".to_string(), 1)]);
+
+    // the drill-down lists hold exactly the items behind the counts
+    let ids = |only: &str| -> Vec<String> {
+        let mut v: Vec<String> = s
+            .with_conn(|c| views::items(c, &day_query(), "est", Some(only), 100, 0))
+            .unwrap()
+            .rows
+            .into_iter()
+            .map(|r| r.item_id)
+            .collect();
+        v.sort();
+        v
+    };
+    assert_eq!(ids("done").len() as i64, th.done);
+    assert_eq!(ids("created").len() as i64, th.created);
+    assert_eq!(ids("done"), ["ST-1", "ST-2", "ST-3"]);
 }
 
 #[test]

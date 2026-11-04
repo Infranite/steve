@@ -1,19 +1,33 @@
-/* 统计页的明细（stats.md §6.3 第 4–7 条）：用量明细、流程与时间、质量与介入、Agent。
- * 不加卡片框，靠字号、留白和细分隔线分层；数字 tabular-nums；红色只用于失败、回滚、出错的状态点。 */
+/* 统计页的分节（stats.md §6.3 第 4–7 条，ST-40 重整）：耗时、用量明细、质量与介入、Agent。
+ * 不加卡片框，靠字号、留白和细分隔线分层；分布用横向条形（HBars），趋势用图；数字 tabular-nums。
+ * 颜色同概览：完成绿、等你橙、失败红、Agent 工作蓝，其余灰；“谁”的分组用 SERIES。 */
 import { useState, type ReactNode } from "react"
 import { cn } from "cn"
 import { ChevronDownIcon, ChevronRightIcon } from "lucide-react"
 import { stats, type CountRow, type Filter, type Summary, type UsageRow } from "@/api/stats"
-import { Segmented, SectionLabel } from "@/ui"
+import { Segmented } from "@/ui"
 import { Spinner } from "@/components/ui/spinner"
-import { Share, Spark } from "@/stats/chart"
-import { Est } from "@/stats/kpi"
-import { ItemsTable } from "@/stats/items"
-import { fmtMs, fmtN, fmtPct, fmtUsd, useStats } from "@/stats/format"
+import { Chart, ChartHead, ChartTable, HBars, Legend, Share, STATE, SERIES } from "@/stats/chart"
+import { Est, Kpi } from "@/stats/kpi"
+import { Loading, ModeSwitch } from "@/stats/overview"
+import { durUnit, fmtMs, fmtN, fmtPct, fmtUsd, useStats } from "@/stats/format"
 import { harnessName } from "@/model-picker"
 
 export const th = "py-2 font-medium text-muted-foreground"
 export const num = "py-2 pl-4 text-right tabular-nums"
+
+/** a part of the page: its title, what it covers, then its charts */
+export function Section({ title, meta, children, k, right }: { title: ReactNode; meta?: ReactNode; children: ReactNode; k: string; right?: ReactNode }) {
+  return (
+    <section className="flex flex-col gap-6" data-section={k}>
+      <div className="flex items-end justify-between gap-3 border-b pb-2">
+        <div className="min-w-0"><h2 className="text-[17px] font-semibold leading-6 tracking-[-0.01em]">{title}</h2>{meta && <div className="type-footnote text-muted-foreground">{meta}</div>}</div>
+        {right}
+      </div>
+      {children}
+    </section>
+  )
+}
 
 /** a hairline table that scrolls sideways on a phone */
 export function Table({ head, children, label, min = 560 }: { head: ReactNode; children: ReactNode; label: string; min?: number }) {
@@ -27,7 +41,7 @@ export function Table({ head, children, label, min = 560 }: { head: ReactNode; c
   )
 }
 
-const USAGE_TABS = [["model", "模型"], ["bot", "Bot"], ["project", "项目"], ["purpose", "用途"], ["items", "事项"]] as const
+const USAGE_TABS = [["model", "模型"], ["bot", "Bot"], ["project", "项目"], ["purpose", "用途"]] as const
 type UsageTab = (typeof USAGE_TABS)[number][0]
 
 /** 用量明细: one table per dimension, or the item table */
@@ -36,14 +50,13 @@ export function UsageSection({ f, fkey, live, picked }: { f: Filter; fkey: strin
   const g: Filter = picked ? { ...f, range: "custom", from: picked, to: picked } : f
   return (
     <section data-usage>
-      <SectionLabel right={picked ? <span className="type-footnote text-blue">只看 {picked}</span> : undefined}>用量明细</SectionLabel>
-      <Segmented size="sm" className="mb-3" value={tab} onChange={setTab} options={USAGE_TABS} />
-      {tab === "items" ? <ItemsTable f={g} fkey={fkey + picked} live={live} /> : <UsageTable f={g} by={tab} fkey={fkey + picked} live={live} />}
+      <ChartHead k="usage-table" title="用量明细" meta={picked ? <span className="text-blue">只看 {picked}</span> : "按维度拆开，占比按估算费用"} right={<Segmented size="sm" value={tab} onChange={setTab} options={USAGE_TABS} />} />
+      <UsageTable f={g} by={tab} fkey={fkey + picked} live={live} />
     </section>
   )
 }
 
-function UsageTable({ f, by, fkey, live }: { f: Filter; by: Exclude<UsageTab, "items">; fkey: string; live: boolean }) {
+function UsageTable({ f, by, fkey, live }: { f: Filter; by: UsageTab; fkey: string; live: boolean }) {
   const [d] = useStats(() => stats.usage(f, by), [fkey, by], live)
   if (d.s === "loading") return <div className="flex h-24 items-center justify-center"><Spinner className="size-4 text-muted-foreground" /></div>
   if (d.s !== "ok") return <div className="py-6 type-callout text-muted-foreground" role="alert">{d.s === "error" ? d.msg : "读不到用量"}</div>
@@ -68,98 +81,98 @@ function UsageTable({ f, by, fkey, live }: { f: Filter; by: Exclude<UsageTab, "i
 }
 
 /** label + number lines */
-function Line({ l, v, sub, spark, k }: { l: ReactNode; v: ReactNode; sub?: ReactNode; spark?: number[]; k: string }) {
+function Line({ l, v, sub, k }: { l: ReactNode; v: ReactNode; sub?: ReactNode; k: string }) {
   return (
-    <div className="flex items-center gap-3 border-b py-2.5 last:border-0" data-line={k}>
+    <div className="flex items-center gap-3 border-b py-2 last:border-0" data-line={k}>
       <span className="min-w-0 flex-1 type-callout">{l}{sub && <span className="ml-1.5 type-footnote text-muted-foreground">{sub}</span>}</span>
-      {spark && <Spark values={spark} />}
       <span className="w-20 text-right type-headline tabular-nums">{v}</span>
     </div>
   )
 }
 
-/** 流程与时间: throughput on the left, times on the right, and where the time went */
-export function FlowTime({ s, f, fkey, live }: { s: Summary; f: Filter; fkey: string; live: boolean }) {
-  const [cr] = useStats(() => stats.series(f, "created", "none"), [fkey], live)
-  const [dn] = useStats(() => stats.series(f, "done", "none"), [fkey], live)
-  const [wp] = useStats(() => stats.series(f, "wip", "none"), [fkey], live)
-  const sp = (x: typeof cr) => (x.s === "ok" && x.v.buckets.length > 1 ? (x.v.series[0]?.values ?? []).map((v) => v ?? 0) : undefined)
-  const t = s.time, th_ = s.throughput
-  const parts: [string, number, string][] = [["Agent 工作", t.agent.sum, "bg-foreground/60"], ["等你", t.wait.sum, "bg-foreground/30"], ["其他", t.other.sum, "bg-foreground/12"]]
+/** 耗时: how long finished items took, as a trend; where the time went; each kind of time side by side */
+export function TimeSection({ s, f, fkey, live, range }: { s: Summary; f: Filter; fkey: string; live: boolean; range: string }) {
+  const [lead] = useStats(() => stats.series(f, "lead", "none"), [fkey], live)
+  const [table, setTable] = useState(false)
+  const t = s.time
+  const max = lead.s === "ok" ? Math.max(0, ...lead.v.series.flatMap((l) => l.values.map((v) => v ?? 0))) : 0
+  const [unit, div] = durUnit(max)
+  const fmt = (v: number) => { const x = v / div; return (x === 0 ? "0" : x < 10 ? x.toFixed(1).replace(/\.0$/, "") : Math.round(x)) + " " + unit }
+  const d = lead.s === "ok" ? { ...lead.v, series: lead.v.series.map((l, i) => ({ ...l, label: i === 0 ? "中位数" : "p85" })) } : null
+  const parts: [string, number, string][] = [["Agent 工作", t.agent.sum, STATE.run], ["等你", t.wait.sum, STATE.wait], ["其他", t.other.sum, STATE.idle]]
   const all = parts.reduce((a, p) => a + p[1], 0)
+  const times = ([["lead", "前置时间", t.lead, "新建到完成"], ["cycle", "周期时间", t.cycle, "第一个回合到被接受的交付"], ["first", "首次交付", t.first_deliver, "第一个回合到第一次交付"], ["wait", "等你", t.wait, "需要你处理的卡片挂着的时间"], ["agent", "Agent 工作", t.agent, "回合时间的并集"]] as const)
   return (
-    <section className="grid gap-10 md:grid-cols-2" data-flow>
-      <div>
-        <SectionLabel>吞吐</SectionLabel>
-        <Line k="created" l="新建" v={th_.created} spark={sp(cr)} />
-        <Line k="done" l="完成" v={th_.done} spark={sp(dn)} />
-        <Line k="dropped" l="放弃" sub={th_.drop_rate != null ? `放弃率 ${fmtPct(th_.drop_rate)}` : undefined} v={th_.dropped} />
-        <Line k="delivered" l="交付" sub={th_.delivered ? `自动验收 ${th_.delivered_auto} · 人工 ${th_.delivered_manual}` : undefined} v={th_.delivered} />
-        <Line k="wip" l="当前进行中" v={th_.wip} spark={sp(wp)} />
-      </div>
-      <div>
-        <SectionLabel>时间 <span className="font-normal">中位数 / p85</span></SectionLabel>
-        {([["前置时间", t.lead, "新建到完成"], ["周期时间", t.cycle, "第一个回合到被接受的交付"], ["首次交付", t.first_deliver, "第一个回合到第一次交付"], ["等你", t.wait, "需要你处理的卡片挂着的时间"], ["Agent 工作", t.agent, "回合时间的并集"]] as const).map(([l, p, d]) => (
-          <div key={l} className="flex items-center gap-3 border-b py-2.5 last:border-0" title={d} data-time={l}>
-            <span className="min-w-0 flex-1 type-callout">{l}</span>
-            <span className="type-headline tabular-nums">{fmtMs(p.p50)}</span><span className="w-24 text-right type-footnote tabular-nums text-muted-foreground">{fmtMs(p.p85)}</span>
+    <Section k="time" title="耗时" meta={`区间内完成的 ${t.lead.n} 件事项 · ${range}`}>
+      <div className="grid grid-cols-1 gap-10 md:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
+        <div data-lead-chart>
+          <ChartHead k="lead" title="完成耗时（前置时间）" meta={`${unit} · 每天完成的事项，线是中位数 · ${range}`}
+            legend={[{ label: "中位数", c: SERIES[0], line: true }, { label: "中位数到 p85", c: STATE.band }]} right={<ModeSwitch table={table} set={setTable} />} />
+          {!d ? <Loading err={lead.s === "error" ? lead.msg : null} /> : table ? <ChartTable data={d} fmt={fmtMs} /> : <Chart data={d} kind="band" fmt={fmt} tipFmt={fmtMs} unit={div} colors={[SERIES[0], STATE.band]} label="每天完成事项的前置时间" height={200} />}
+          {d && d.series.every((l) => l.values.every((v) => v == null)) && <div className="mt-2 type-footnote text-muted-foreground">这段时间还没有完成的事项。</div>}
+          {t.lead.n > 0 && <div className="mt-2 type-footnote text-muted-foreground" data-lead-sum>平均 {fmtMs(t.lead.avg)} · 中位 {fmtMs(t.lead.p50)} · p85 {fmtMs(t.lead.p85)}</div>}
+        </div>
+        <div className="flex flex-col gap-8">
+          <div data-time-split>
+            <ChartHead k="split" title="时间花在哪" meta="完成事项合计" />
+            {all > 0 ? <>
+              <div className="flex h-3 gap-[2px] overflow-hidden rounded-[4px]" role="img" aria-label={parts.map(([l, v]) => `${l} ${fmtPct(v / all)}`).join("，")}>
+                {parts.map(([l, v, c]) => v > 0 && <span key={l} style={{ width: `${(v / all) * 100}%`, background: c }} />)}
+              </div>
+              <Legend className="mt-2" items={parts.map(([l, v, c]) => ({ label: `${l} ${fmtPct(v / all)} · ${fmtMs(v)}`, c }))} />
+            </> : <div className="type-callout text-muted-foreground">还没有完成的事项。</div>}
           </div>
-        ))}
-        {all > 0 && (
-          <div className="mt-4" data-time-split>
-            <div className="mb-1.5 type-footnote text-muted-foreground">时间都花在哪（完成事项合计）</div>
-            <div className="flex h-2.5 gap-[2px] overflow-hidden rounded-full" role="img" aria-label={parts.map(([l, v]) => `${l} ${fmtPct(v / all)}`).join("，")}>
-              {parts.map(([l, v, c]) => v > 0 && <span key={l} className={c} style={{ width: `${(v / all) * 100}%` }} />)}
-            </div>
-            <div className="mt-1.5 flex flex-wrap gap-x-4 gap-y-1 type-footnote text-muted-foreground">
-              {parts.map(([l, v, c]) => <span key={l} className="inline-flex items-center gap-1.5"><span className={cn("size-2.5 rounded-[3px]", c)} />{l} {fmtPct(v / all)} · {fmtMs(v)}</span>)}
-            </div>
+          <div>
+            <ChartHead k="times" title="各段耗时" meta="中位数；下面灰字是 p85" />
+            <HBars k="times" label="各段耗时的中位数" fmt={fmtMs} vw="w-24" rows={times.map(([k, l, p, def]) => ({ key: k, label: l, title: def, value: p.p50 ?? 0, c: k === "wait" ? STATE.wait : k === "agent" ? STATE.run : STATE.created, sub: p.p85 != null ? `p85 ${fmtMs(p.p85)}` : "—" }))} />
           </div>
-        )}
-        {t.releases + t.not_released > 0 && <div className="mt-4 type-footnote text-muted-foreground" data-releases>发布 {t.releases} 次，成功率 {fmtPct(t.release_success_rate)}{t.not_released ? ` · 未开始就被拒 ${t.not_released} 次` : ""}{t.accept_to_release.p50 != null ? ` · 验收到上线中位 ${fmtMs(t.accept_to_release.p50)}` : ""}</div>}
+        </div>
       </div>
-    </section>
+      {t.releases + t.not_released > 0 && <div className="type-footnote text-muted-foreground" data-releases>发布 {t.releases} 次，成功率 {fmtPct(t.release_success_rate)}{t.not_released ? ` · 未开始就被拒 ${t.not_released} 次` : ""}{t.accept_to_release.p50 != null ? ` · 验收到上线中位 ${fmtMs(t.accept_to_release.p50)}` : ""}</div>}
+    </Section>
+  )
+}
+
+const FAIL_LABEL: Record<string, string> = { stall: "停滞", error: "会话出错", restart: "Hub 重启", release: "发布失败", other: "其他" }
+
+/** 质量与介入 */
+export function QualityHuman({ s, f, fkey, live, range, prevName }: { s: Summary; f: Filter; fkey: string; live: boolean; range: string; prevName: string }) {
+  const [dk] = useStats(() => stats.counts(f, "decision_kind"), [fkey], live)
+  const q = s.quality, h = s.human
+  const fails = Object.entries(q.fails).filter(([, n]) => n > 0).sort((a, b) => b[1] - a[1])
+  const failN = fails.reduce((a, [, n]) => a + n, 0)
+  return (
+    <Section k="quality" title="质量与介入" meta={range}>
+      <div className="grid grid-cols-2 gap-x-6 gap-y-5 sm:grid-cols-4" data-quality-kpis>
+        <Kpi small k="first_pass" label="首次通过率" value={fmtPct(q.first_pass)} foot={q.first_pass_n ? `${q.first_pass_n} 件已裁决` : "还没有裁决的交付"} def="第一次交付就验收通过（人工通过或自动验收）的事项比例；被新交付取代的那次不算裁决。" />
+        <Kpi small k="reworks" label="返工" value={q.reworks} foot={q.reworks_per_done != null ? `每件完成事项 ${q.reworks_per_done.toFixed(1)} 次` : `${prevName} ${s.prev?.quality.reworks ?? "—"} 次`} def="交付被打回、重新做的次数。" />
+        <Kpi small k="turn_errors" label="回合出错率" value={fmtPct(q.turn_error_rate, 1)} foot={`${fmtN(s.agents.turns)} 个回合`} def="出错结束的 Agent 回合 ÷ 全部回合。" />
+        <Kpi small k="rollbacks" label="回滚" value={q.rollbacks} foot={q.release_unknown ? `不知道现在版本 ${q.release_unknown}` : q.reopened ? `重开 ${q.reopened}` : "　"} def="发布后被回滚的次数；“重开”是完成后又重新打开的事项。" />
+      </div>
+      <div className="grid grid-cols-1 gap-10 md:grid-cols-2">
+        <div data-fails>
+          <ChartHead k="fails" title="失败卡 · 按原因" meta={`张 · 共 ${failN} 张`} />
+          {failN === 0 ? <div className="py-4 type-callout text-muted-foreground">这段时间没有失败卡。</div>
+            : <HBars k="fails" label="失败卡按原因" rows={fails.map(([k, n]) => ({ key: k, label: FAIL_LABEL[k] ?? k, value: n, c: STATE.fail }))} />}
+        </div>
+        <div data-human>
+          <ChartHead k="decisions" title="需要你决定的事 · 按种类" meta={`个 · 共 ${h.decisions} 个；数字下面是你的响应中位时间`} />
+          {dk.s !== "ok" ? <Loading h={96} err={dk.s === "loading" ? null : "读不到决定"} /> : dk.v.rows.length === 0 ? <div className="py-4 type-callout text-muted-foreground">这段时间没有需要你决定的事。</div>
+            : <HBars k="decisions" label="决定按种类" rows={dk.v.rows.map((r: CountRow) => ({ key: r.key, label: r.label, value: r.count, c: STATE.wait, sub: r.response?.p50 != null ? fmtMs(r.response.p50) : "—", title: r.response?.p85 != null ? `p85 ${fmtMs(r.response.p85)}` : undefined }))} />}
+          <div className="mt-3 type-footnote text-muted-foreground">
+            响应中位 {fmtMs(h.response.p50)} · p85 {fmtMs(h.response.p85)}{h.expired ? ` · 过期或作废 ${h.expired}` : ""} · 你补充的消息 {h.messages}{h.per_done != null ? ` · 每件完成事项介入 ${h.per_done.toFixed(1)} 次` : ""}
+            {h.yolo && ` · YOLO 代办 ${h.yolo.decided}，留给你 ${h.yolo.declined}，撤销 ${h.yolo.undone}`}
+          </div>
+        </div>
+      </div>
+    </Section>
   )
 }
 
 const RED = ({ on }: { on: boolean }) => <span aria-hidden className={cn("inline-block size-2 shrink-0 rounded-full", on ? "bg-destructive" : "bg-tertiary/50")} />
-const FAIL_LABEL: Record<string, string> = { stall: "停滞", error: "会话出错", restart: "Hub 重启", release: "发布失败", other: "其他" }
-
-/** 质量与介入 */
-export function QualityHuman({ s, f, fkey, live }: { s: Summary; f: Filter; fkey: string; live: boolean }) {
-  const [dk] = useStats(() => stats.counts(f, "decision_kind"), [fkey], live)
-  const q = s.quality, h = s.human
-  const fails = Object.entries(q.fails)
-  return (
-    <section className="grid gap-10 md:grid-cols-2" data-quality>
-      <div>
-        <SectionLabel>质量</SectionLabel>
-        <Line k="reworks" l="返工" sub={q.reworks_per_done != null ? `每件完成事项 ${q.reworks_per_done.toFixed(1)} 次` : undefined} v={q.reworks} />
-        {fails.map(([k, n]) => <Line key={k} k={"fail-" + k} l={<span className="inline-flex items-center gap-2"><RED on={n > 0} />失败卡 · {FAIL_LABEL[k] ?? k}</span>} v={n} />)}
-        <Line k="rollbacks" l={<span className="inline-flex items-center gap-2"><RED on={q.rollbacks > 0} />回滚</span>} sub={q.release_unknown ? `不知道现在版本 ${q.release_unknown}` : undefined} v={q.rollbacks} />
-        <Line k="turn_errors" l={<span className="inline-flex items-center gap-2"><RED on={(q.turn_error_rate ?? 0) > 0} />回合出错率</span>} v={fmtPct(q.turn_error_rate, 1)} />
-        {q.reopened > 0 && <Line k="reopened" l="重开" v={q.reopened} />}
-      </div>
-      <div>
-        <SectionLabel>人的介入</SectionLabel>
-        {dk.s !== "ok" ? <div className="py-6 type-callout text-muted-foreground">{dk.s === "loading" ? "…" : "读不到决定"}</div> : dk.v.rows.length === 0 ? <div className="py-4 type-callout text-muted-foreground">这段时间没有需要你决定的事。</div> : (
-          <Table label="决定" min={320} head={<tr><th className={th}>种类</th><th className={cn(th, "pl-4 text-right")}>数量</th><th className={cn(th, "pl-4 text-right")}>响应中位</th><th className={cn(th, "pl-4 text-right")}>p85</th></tr>}>
-            {dk.v.rows.map((r: CountRow) => (
-              <tr key={r.key} data-decision-kind={r.key}><td className="py-2">{r.label}</td><td className={num}>{r.count}</td><td className={num}>{fmtMs(r.response?.p50)}</td><td className={num}>{fmtMs(r.response?.p85)}</td></tr>
-            ))}
-          </Table>
-        )}
-        <div className="mt-3 type-footnote text-muted-foreground" data-human>
-          共 {h.decisions} 个决定 · 响应中位 {fmtMs(h.response.p50)} · p85 {fmtMs(h.response.p85)}{h.expired ? ` · 过期或作废 ${h.expired}` : ""} · 你补充的消息 {h.messages}{h.per_done != null ? ` · 每件完成事项介入 ${h.per_done.toFixed(1)} 次` : ""}
-          {h.yolo && ` · YOLO 代办 ${h.yolo.decided}，拒绝代办 ${h.yolo.declined}，撤销 ${h.yolo.undone}`}
-        </div>
-      </div>
-    </section>
-  )
-}
 
 /** Agent */
-export function AgentSection({ s, f, fkey, live }: { s: Summary; f: Filter; fkey: string; live: boolean }) {
+export function AgentSection({ s, f, fkey, live, range }: { s: Summary; f: Filter; fkey: string; live: boolean; range: string }) {
   const [tk] = useStats(() => stats.counts(f, "tool"), [fkey], live)
   const [open, setOpen] = useState(false)
   const a = s.agents
@@ -167,34 +180,32 @@ export function AgentSection({ s, f, fkey, live }: { s: Summary; f: Filter; fkey
   const kinds = rows.filter((r) => r.dim !== "tool"), names = rows.filter((r) => r.dim === "tool").slice(0, 10)
   const total = kinds.reduce((x, r) => x + r.count, 0)
   return (
-    <section className="grid gap-10 md:grid-cols-2" data-agents>
-      <div>
-        <SectionLabel>Agent</SectionLabel>
-        <Line k="turns" l="回合" sub={a.tokens_per_turn != null ? `每回合 ${fmtN(a.tokens_per_turn)} tokens` : undefined} v={fmtN(a.turns)} />
-        <Line k="turn_ms" l="回合时长" sub={`p85 ${fmtMs(a.turn_ms.p85)}`} v={fmtMs(a.turn_ms.p50)} />
-        <Line k="tools" l="工具调用" sub={a.tools_per_turn != null ? `每回合 ${a.tools_per_turn.toFixed(1)} 次` : undefined} v={fmtN(a.tools)} />
-        <Line k="tool_errors" l={<span className="inline-flex items-center gap-2"><RED on={(a.tool_error_rate ?? 0) > 0} />工具失败率</span>} v={fmtPct(a.tool_error_rate, 1)} />
-        <Line k="retries" l="网关 503 重试" sub={a.retry_success != null ? `重试后成功 ${fmtPct(a.retry_success)}` : undefined} v={a.retries} />
-        <Line k="fallbacks" l="网关回退" sub={a.gateway_failed ? `失败 ${a.gateway_failed}` : undefined} v={a.gateway_fallbacks} />
-        <Line k="interrupted" l="中断" sub={`Hub 重启 ${a.interrupted} · 你中断 ${a.cancelled}`} v={a.interrupted + a.cancelled} />
-        <Line k="permissions" l="权限请求" v={a.permissions} />
+    <Section k="agents" title="Agent" meta={range}>
+      <div className="grid grid-cols-1 gap-10 md:grid-cols-2">
+        <div>
+          <Line k="turns" l="回合" sub={a.tokens_per_turn != null ? `每回合 ${fmtN(a.tokens_per_turn)} tokens` : undefined} v={fmtN(a.turns)} />
+          <Line k="turn_ms" l="回合时长 · 中位" sub={`p85 ${fmtMs(a.turn_ms.p85)}`} v={fmtMs(a.turn_ms.p50)} />
+          <Line k="tools" l="工具调用" sub={a.tools_per_turn != null ? `每回合 ${a.tools_per_turn.toFixed(1)} 次` : undefined} v={fmtN(a.tools)} />
+          <Line k="tool_errors" l={<span className="inline-flex items-center gap-2"><RED on={(a.tool_error_rate ?? 0) > 0} />工具失败率</span>} v={fmtPct(a.tool_error_rate, 1)} />
+          <Line k="retries" l="网关 503 重试" sub={a.retry_success != null ? `重试后成功 ${fmtPct(a.retry_success)}` : undefined} v={a.retries} />
+          <Line k="fallbacks" l="网关回退" sub={a.gateway_failed ? `失败 ${a.gateway_failed}` : undefined} v={a.gateway_fallbacks} />
+          <Line k="interrupted" l="中断" sub={`Hub 重启 ${a.interrupted} · 你中断 ${a.cancelled}`} v={a.interrupted + a.cancelled} />
+          <Line k="permissions" l="权限请求" v={a.permissions} />
+        </div>
+        <div>
+          <ChartHead k="tools" title="工具调用 · 按种类" meta={`次 · 共 ${fmtN(total)} 次`} />
+          {!kinds.length ? <div className="py-4 type-callout text-muted-foreground">这段时间没有工具调用。</div>
+            : <HBars k="tools" label="工具调用按种类" fmt={fmtN} rows={kinds.map((r) => ({ key: r.key, label: r.dim === "mcp" ? `Steve · ${r.label}` : r.label, title: r.label, value: r.count, c: SERIES[0], sub: total ? fmtPct(r.count / total) : undefined }))} />}
+          {names.length > 0 && (
+            <div className="mt-3">
+              <button type="button" className="inline-flex items-center gap-1 type-footnote text-muted-foreground hover:text-foreground" onClick={() => setOpen(!open)} aria-expanded={open} data-tool-names>
+                {open ? <ChevronDownIcon className="size-3.5" /> : <ChevronRightIcon className="size-3.5" />}按工具名 Top {names.length}（与上图是同一批调用）
+              </button>
+              {open && <div className="mt-2">{names.map((r) => <div key={r.key} className="flex justify-between border-b py-1.5 type-callout last:border-0"><span className="font-mono text-[12.5px]">{r.label}</span><span className="tabular-nums">{r.count}</span></div>)}</div>}
+            </div>
+          )}
+        </div>
       </div>
-      <div>
-        <SectionLabel>工具调用 <span className="font-normal">按种类</span></SectionLabel>
-        {!kinds.length ? <div className="py-4 type-callout text-muted-foreground">这段时间没有工具调用。</div> : (
-          <Table label="工具调用" min={300} head={<tr><th className={th}>种类</th><th className={cn(th, "pl-4 text-right")}>次数</th><th className={cn(th, "w-24 pl-4")}>占比</th></tr>}>
-            {kinds.map((r) => <tr key={r.key} data-tool={r.key}><td className="py-2">{r.dim === "mcp" ? `Steve · ${r.label}` : r.label}</td><td className={num}>{r.count}</td><td className="py-2 pl-4"><Share r={total ? r.count / total : 0} /></td></tr>)}
-          </Table>
-        )}
-        {names.length > 0 && (
-          <div className="mt-3">
-            <button type="button" className="inline-flex items-center gap-1 type-footnote text-muted-foreground hover:text-foreground" onClick={() => setOpen(!open)} aria-expanded={open} data-tool-names>
-              {open ? <ChevronDownIcon className="size-3.5" /> : <ChevronRightIcon className="size-3.5" />}按工具名 Top {names.length}（与上表是同一批调用）
-            </button>
-            {open && <div className="mt-2">{names.map((r) => <div key={r.key} className="flex justify-between border-b py-1.5 type-callout last:border-0"><span className="font-mono text-[12.5px]">{r.label}</span><span className="tabular-nums">{r.count}</span></div>)}</div>}
-          </div>
-        )}
-      </div>
-    </section>
+    </Section>
   )
 }
