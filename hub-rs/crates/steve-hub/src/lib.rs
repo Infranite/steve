@@ -15,6 +15,7 @@ pub mod jobs;
 pub mod js;
 pub mod notify;
 pub mod recovery;
+pub mod resume;
 pub mod settings;
 pub mod system;
 pub mod validate;

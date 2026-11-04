@@ -21,6 +21,7 @@ mod util;
 pub use attachments::{FileRef, INLINE_IMAGES, StoredFile, kb};
 pub use codex::{codex_args, codex_mode, sanitize_catalog};
 pub use config::{AcpConfig, default_claude_adapter, default_codex_adapter, npm_root};
+pub use rollout::find as codex_rollout;
 pub use rollout::turn_usage as codex_turn_usage;
 pub use rpc::RpcError;
 pub use runner::{

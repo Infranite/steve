@@ -10,7 +10,7 @@ export type RItem = {
 export type RItemDetail = RItem & { goalsList: { version: number; text: string; created: number }[]; planRounds?: { round: number; steps: PlanStep[]; end: "done" | "replaced"; created: number }[]; timeline: { id: number; ts: number; actor: string; kind: string; text: string; session_id: string | null; files?: RFile[]; via?: string }[]; artifacts: { id: string; kind: string; title: string; location: string | null; created: number }[]; decisions: RDecision[]; dependents: string[]
   /** the item came from the main conversation (thread-routing §5): whether it reports back there */
   thread?: { follow: boolean; origin_msg: string } | null }
-export type RSession = { id: string; workspace_id: string; item_id: string | null; no: number; bot_id: string | null; harness: string; model: string | null; reasoning_effort?: string | null; cwd: string; status: "starting" | "running" | "idle" | "ended" | "error"; used: number | null; size: number | null; cost: number | null; title: string; device_id: string; source: string; readonly: boolean; busy: boolean; queued: RQueued[]; created: number; updated: number }
+export type RSession = { id: string; workspace_id: string; item_id: string | null; no: number; bot_id: string | null; harness: string; model: string | null; reasoning_effort?: string | null; cwd: string; harness_session_id?: string | null; status: "starting" | "running" | "idle" | "ended" | "error"; used: number | null; size: number | null; cost: number | null; title: string; device_id: string; source: string; readonly: boolean; busy: boolean; queued: RQueued[]; created: number; updated: number }
 /** a message waiting for the session's next turn */
 export type RQueued = { id: string; session_id?: string; text: string; via: string; created: number; files?: RFile[] }
 export type SendNowResult = { result: "interrupted" | "sent" | "waiting"; reason?: string }
@@ -18,6 +18,8 @@ export type RDecision = { id: string; kind: "accept" | "ask" | "approve" | "fail
   /** opened from inside a turn that is still going: the answer reaches the agent once it stops */
   agent_busy?: boolean }
 export type RBot = { id: string; name: string; role: string; main: boolean; harness: string; model: string | null; reasoning_effort?: string | null; rules: string; persona: string; proactive: number; accept_mode: string; perm_mode: string; avatar: { color?: string; skin?: string | null; round?: number }; default_project: string | null; prompt: string | null; device: string | null; enabled: boolean; revision: number; updated: number; workspaces: string[]; memories: number }
+/** GET /sessions/:id/resume: the harness's own session, how to resume it there, and whether its transcript is on the Hub's machine */
+export type RResume = { harness: string; id: string | null; cwd: string; cwd_exists: boolean; command: string | null; transcript: { path: string; updated: number | null; id: string | null; cwd: string | null; matches: boolean } | null }
 export type RProject = { id: string; workspace_id: string; name: string; description: string; device_id: string; path: string; kind: "git" | "dir"; worktree: boolean; default_bot: string | null; release: { kind: string; cmd: string } | null; archived: boolean; created: number; updated: number }
 export type RWorkspace = { id: string; name: string; description: string; item_prefix: string; sort: number; created: number; role?: string }
 export type RTag = { id: string; name: string; cat: string; description: string; created_by: string; created: number }
@@ -122,7 +124,7 @@ export const api = {
   events: (id: string, after = 0) => get<REvent[]>(`/sessions/${id}/events?after=${after}&page=bounded`), searchSessions: (q: string) => get<string[]>(`/sessions/search?q=${encodeURIComponent(q)}`),
   sessionSay: (id: string, text: string, mode: "插话" | "排队", files: string[] = []) => post(`/sessions/${id}/messages`, { text, mode, files }), cancel: (id: string) => post(`/sessions/${id}/cancel`), endSession: (id: string) => post(`/sessions/${id}/end`),
   renameSession: (id: string, title: string) => patch(`/sessions/${id}`, { title }), removeSession: (id: string) => del(`/sessions/${id}`), dropQueued: (id: string) => del("/queued/" + id),
-  queued: (sid: string) => get<RQueued[]>(`/sessions/${sid}/queued`),
+  queued: (sid: string) => get<RQueued[]>(`/sessions/${sid}/queued`), resumeInfo: (sid: string) => get<RResume>(`/sessions/${sid}/resume`),
   queuedEdit: (sid: string, qid: string, text: string) => patch<RQueued>(`/sessions/${sid}/queued/${qid}`, { text }),
   queuedRemove: (sid: string, qid: string) => del<RQueued>(`/sessions/${sid}/queued/${qid}`),
   queuedSendNow: (sid: string, qid: string) => post<SendNowResult>(`/sessions/${sid}/queued/${qid}/send-now`),

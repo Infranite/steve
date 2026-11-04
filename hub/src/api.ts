@@ -15,6 +15,7 @@ import * as notices from "./notify.js"
 import * as acp from "./acp.js"
 import * as changes from "./changes.js"
 import { runtimes, localSessions, importLocal, removeImported } from "./system.js"
+import { nativeId, resumeInfo } from "./resume.js"
 import { claudePrint, firstJson, route } from "./gateway.js"
 import { config, webVersion } from "./config.js"
 import { db } from "./db.js"
@@ -47,7 +48,7 @@ const summary = (i: Item) => {
   return { ...i, goal: items.goal(i.id), goals: items.goals(i.id).length, tags: tags.ofItem(i.id), deps: deps.of(i.id), sessionIds: ss.map((s) => s.id), open: open.map((d) => d.id),
     queued: act ? queued.list(act.id).length : 0, live: ss.some((s) => s.status === "running" || s.status === "starting") }
 }
-const sessOut = (s: any) => ({ ...s, token_hash: undefined, import_key: undefined, readonly: !!s.readonly, busy: acp.isBusy(s.id), queued: queued.list(s.id) })
+const sessOut = (s: any) => ({ ...s, token_hash: undefined, import_key: undefined, readonly: !!s.readonly, busy: acp.isBusy(s.id), queued: queued.list(s.id), harness_session_id: nativeId(s) })
 /* what the web shows of an event: screenshots (base64) and huge tool output stay in the database (fork and handoff read
  * them there), so one screenshot no longer ships 300 KB to every client and into every transcript rebuild */
 const slim = (v: any, k = ""): any => typeof v === "string" ? (v.length > 4000 && k !== "newText" && k !== "oldText" ? v.slice(0, 4000) + "…" : v)
@@ -188,6 +189,7 @@ api.post("/sessions/:id/messages", async (c) => {
   const s = own(c, sessions.get(c.req.param("id")), "会话"); if ((s as any).readonly) return c.json({ error: "导入的会话是只读的" }, 400)
   const p = await body(c, z.object({ text: z.string().min(1), mode: z.enum(["插话", "排队"]).default("排队"), files: Files })); return c.json({ result: await orch.sessionMessage(s.id, p.text, p.mode, att.refs(ws(c), p.files)) })
 })
+api.get("/sessions/:id/resume", (c) => c.json(resumeInfo(own(c, sessions.get(c.req.param("id")), "会话") as any)))
 api.post("/sessions/:id/cancel", (c) => { own(c, sessions.get(c.req.param("id")), "会话"); return c.json({ ok: acp.cancel(c.req.param("id")) }) })
 api.post("/sessions/:id/end", (c) => { own(c, sessions.get(c.req.param("id")), "会话"); orch.endSession(c.req.param("id")); return c.json({ ok: true }) })
 api.patch("/sessions/:id", async (c) => { own(c, sessions.get(c.req.param("id")), "会话"); const p = await body(c, z.object({ title: z.string().min(1).max(80) })); sessions.patch(c.req.param("id"), p); return c.json({ ok: true }) })
