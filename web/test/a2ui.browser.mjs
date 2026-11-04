@@ -118,7 +118,8 @@ try {
 
     /* while the block is written: a placeholder, never half a JSON */
     await page.goto(url + "?stream")
-    await page.locator("[data-a2ui-pending]").waitFor()
+    await page.locator('[data-a2ui-surface="release"]').waitFor()
+    await page.locator("[data-a2ui-pending]").waitFor() // only the reply being written
     assert.equal(await page.getByText("createSurface").count(), 0)
     await page.close()
   }

@@ -14,9 +14,9 @@ export function A2uiHost({ msg, records, readonly, children }: { msg?: string; r
 export const Nested = createContext(false)
 export const useA2uiNested = () => useContext(Nested)
 
-/** while the block is still being written, or the renderer is loading */
-export const A2uiPending = () => (
-  <div className="my-3 flex items-center gap-2 rounded-xl border border-dashed px-4 py-3 type-callout text-muted-foreground" data-a2ui-pending>
-    <span className="size-1.5 animate-pulse rounded-full bg-muted-foreground" aria-hidden />正在生成界面…
+/** while the block is still being written, or (`loading`) a finished one waits for the renderer */
+export const A2uiPending = ({ loading }: { loading?: boolean }) => (
+  <div className="my-3 flex items-center gap-2 rounded-xl border border-dashed px-4 py-3 type-callout text-muted-foreground" data-a2ui-pending={loading ? undefined : true} data-a2ui-loading={loading || undefined}>
+    <span className="size-1.5 animate-pulse rounded-full bg-muted-foreground" aria-hidden />{loading ? "正在加载界面…" : "正在生成界面…"}
   </div>
 )

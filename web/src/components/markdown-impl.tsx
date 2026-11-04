@@ -116,7 +116,7 @@ function A2uiCode(props: CodeProps) {
   const streaming = useIsCodeFenceIncomplete(), nested = useA2uiNested()
   const code = <defaultComponents.code {...props} />
   if (nested) return code
-  return <Suspense fallback={<A2uiPending />}><A2uiBlock src={text(props.children)} streaming={streaming} code={code} /></Suspense>
+  return <Suspense fallback={<A2uiPending loading={!streaming} />}><A2uiBlock src={text(props.children)} streaming={streaming} code={code} /></Suspense>
 }
 
 const components: Components = {
