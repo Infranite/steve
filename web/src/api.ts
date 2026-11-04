@@ -43,6 +43,20 @@ export type HubEvent = { type: "item" | "bot" | "project" | "tag" | "workspace" 
 
 /** an uploaded attachment, as messages, comments and session events carry it */
 export type RFile = { id: string; name: string; mime: string; size: number }
+/** what an item's output holds (`/items/:id/artifacts/:art/preview`); `path` is an entry inside a folder output */
+export type ROutFile = { name: string; path: string; size?: number; modified?: number | null }
+export type ROutCommit = { hash: string; subject: string; author: string; at: number | null }
+export type ROutPreview =
+  | ({ type: "text"; lang: string; text: string; truncated: boolean; from?: string } & ROutFile)
+  | ({ type: "image" | "pdf" | "video" | "audio"; mime: string; large: boolean } & ROutFile)
+  | ({ type: "binary" } & ROutFile)
+  | { type: "dir"; path: string; truncated: boolean; entries: { name: string; dir: boolean; size: number | null; modified: number | null; form: "image" | "pdf" | "video" | "audio" | null }[] }
+  | { type: "commit"; hash: string; author: string; at: number | null; message: string; stat: string; diff: string; truncated: boolean }
+  | { type: "branch"; branch: string; base: string | null; worktree: string | null; commits: ROutCommit[]; stat: string; diff: string; truncated: boolean }
+  | { type: "link"; url: string }
+  | { type: "missing"; reason: string }
+export const outRawUrl = (item: string, art: string, path?: string, download = false) =>
+  withWs(`/api/items/${encodeURIComponent(item)}/artifacts/${encodeURIComponent(art)}/raw${qs({ path, download: download ? 1 : undefined })}`)
 export const fileUrl = (id: string, download = false) => withWs(`/api/files/${encodeURIComponent(id)}${download ? "?download=1" : ""}`)
 
 /* the workspace this page shows, sent with every request: the workspace cookie is shared by all tabs, so a tab
@@ -112,6 +126,7 @@ export const api = {
   readNotifications: (at?: number) => post<{ seen: number }>("/notifications/read", { at }),
   dismissNotice: (id: string) => post<{ ok: true }>(`/notifications/${encodeURIComponent(id)}/dismiss`, {}),
   item: (id: string) => get<RItemDetail>("/items/" + id),
+  outPreview: (id: string, art: string, path?: string) => get<ROutPreview>(`/items/${encodeURIComponent(id)}/artifacts/${encodeURIComponent(art)}/preview${qs({ path })}`),
   newItem: (p: { goal: string; bot?: string; project?: string | null; mode?: "start" | "propose" }) => post<RItem>("/items", p),
   itemAction: (id: string, action: string) => post(`/items/${id}/actions`, { action }), bulk: (ids: string[], op: string) => post<{ n: number }>("/items/bulk", { ids, op }),
   goal: (id: string, text: string) => post(`/items/${id}/goal`, { text }),

@@ -5,6 +5,7 @@ mod bots;
 mod files;
 mod items;
 mod misc;
+mod outputs;
 mod projects;
 mod sessions;
 pub mod slim;
@@ -356,6 +357,8 @@ pub fn router(st: AppState, modules: Router) -> Router {
         .route("/items/{id}/deps", post(items::add_dep))
         .route("/items/{id}/deps/{dep}", delete(items::rm_dep))
         .route("/items/{id}/snooze", post(items::snooze))
+        .route("/items/{id}/artifacts/{art}/preview", get(outputs::preview))
+        .route("/items/{id}/artifacts/{art}/raw", get(outputs::raw))
         // item sidebar panels of the modules (B1)
         .route("/items/{id}/panels", get(items::panels))
         .route(
