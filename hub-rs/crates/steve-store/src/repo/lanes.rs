@@ -259,6 +259,19 @@ pub fn unit_set(
     Ok(())
 }
 
+/// The newest approval card of a batch (`subject`: `lane:<lane>:<unit>`): its status and whether it
+/// was approved.
+pub fn approval_of(c: &Connection, subject: &str) -> Result<Option<(String, bool)>> {
+    Ok(c
+        .query_row(
+            "SELECT status, coalesce(json_extract(result, '$.approved'), 0) FROM decisions
+              WHERE subject_type = 'delivery_batch' AND subject_id = ? ORDER BY created DESC LIMIT 1",
+            [subject],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? == 1)),
+        )
+        .optional()?)
+}
+
 pub fn units_of(c: &Connection, lane: &str) -> Result<Vec<LaneUnit>> {
     let mut st = c.prepare_cached("SELECT * FROM lane_units WHERE lane_id = ? ORDER BY no")?;
     let v = st

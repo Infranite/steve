@@ -199,12 +199,65 @@ pub fn left(
 ) -> Result<Vec<Work>, StoreError> {
     store.transaction(|tx| {
         lanes::request_set(tx, request, "left", None, None, Some(why))?;
-        apply_in(
+        let work = apply_in(
             tx,
             lane,
             Event::Left {
                 unit,
                 id: request.into(),
+                at: steve_store::now(),
+            },
+        )?;
+        // a unit the lane no longer holds (every member left, nothing to release) is over
+        let row = lanes::lane_get(tx, lane)?.ok_or(StoreError::NotFound("合并通道"))?;
+        let l = load(&row)?;
+        let held = |u: &Option<super::batch::Unit>| u.as_ref().is_some_and(|u| u.id == unit);
+        if !held(&l.running) && !held(&l.collecting) {
+            lanes::unit_set(tx, lane, unit as i64, "done", None, None, Some("emptied"))?;
+        }
+        Ok(work)
+    })
+}
+
+/// A unit's release failed: its requests stay with it (merged, waiting), the unit says so; nothing
+/// moves on until you retry or give up ([`gave_up`]).
+pub fn release_failed(store: &Store, lane: &str, unit: u64, why: &str) -> Result<(), StoreError> {
+    store.transaction(|tx| {
+        lanes::unit_set(
+            tx,
+            lane,
+            unit as i64,
+            "release_failed",
+            None,
+            None,
+            Some(why),
+        )?;
+        Ok(())
+    })
+}
+
+/// You gave up on a unit's failed release: its requests leave (merged, not released), the lane moves on.
+pub fn gave_up(store: &Store, lane: &str, unit: u64) -> Result<Vec<Work>, StoreError> {
+    store.transaction(|tx| {
+        for r in lanes::requests_of(tx, lane, true)?
+            .into_iter()
+            .filter(|r| r.released_in == Some(unit as i64))
+        {
+            lanes::request_set(
+                tx,
+                &r.id,
+                "left",
+                None,
+                None,
+                Some("发布失败，你放弃了这次发布"),
+            )?;
+        }
+        lanes::unit_set(tx, lane, unit as i64, "done", None, None, Some("failed"))?;
+        apply_in(
+            tx,
+            lane,
+            Event::Released {
+                unit,
                 at: steve_store::now(),
             },
         )

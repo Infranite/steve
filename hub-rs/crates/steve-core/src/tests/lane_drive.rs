@@ -83,7 +83,7 @@ fn an_item_released_through_its_lane_merges_after_one_card_for_the_batch() {
     let rel = Release {
         kind: "script".into(),
         cmd: "/bin/false".into(),
-        done_when: Some("tag".into()),
+        done_when: Some("merge".into()), // merged is released (tag needs the repository's cut-release)
     };
     let p = k
         .db()
@@ -213,4 +213,58 @@ fn a_batch_you_turn_down_sends_its_members_back() {
         main_before,
         "nothing merged"
     );
+}
+
+#[test]
+fn publishing_twice_is_one_request_in_the_lane() {
+    let k = Kit::new();
+    let branch = "steve/st-3";
+    let (_origin, clone, wt) = repos(&k, branch);
+    let rel = Release {
+        kind: "script".into(),
+        cmd: "/bin/false".into(),
+        done_when: Some("merge".into()),
+    };
+    let p = k
+        .db()
+        .project_create(
+            WS,
+            "R",
+            "",
+            &clone.to_string_lossy(),
+            "git",
+            true,
+            None,
+            Some(&rel),
+        )
+        .unwrap()
+        .id;
+    let i = k.item("run", "收尾", Some(&p));
+    k.db()
+        .item_patch(
+            &i,
+            patch![branch: branch, cwd: wt.to_string_lossy().as_ref()],
+        )
+        .unwrap();
+    let sid = k.session(&i, "idle");
+    let s = k.db().session(&sid).unwrap().unwrap();
+    k.core.tool_publish(&s, branch, "改了 a").unwrap();
+    k.core.tool_publish(&s, branch, "改了 a").unwrap();
+    let all = k
+        .db()
+        .store()
+        .reader(|c| {
+            let l = lanes::lanes_all(c)?;
+            lanes::requests_of(c, &l[0].id, false)
+        })
+        .unwrap();
+    assert_eq!(all.len(), 1, "one request");
+    let cards = k
+        .db()
+        .decisions_open(WS)
+        .unwrap()
+        .into_iter()
+        .filter(|d| d.subject_type == "delivery_batch")
+        .count();
+    assert_eq!(cards, 1, "one card");
 }

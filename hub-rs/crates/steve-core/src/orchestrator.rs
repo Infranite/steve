@@ -646,6 +646,10 @@ impl Core {
         if let Err(e) = self.lifecycle_tick() {
             tracing::warn!("closing check after boot: {e}");
         }
+        /* merges and releases a restart cut off */
+        if !self.store().store().maintenance() {
+            self.lane_recover();
+        }
     }
     pub fn maintenance_hold(&self, on: bool) -> Result<()> {
         self.tx().rt().hold(on);
@@ -1451,10 +1455,17 @@ impl Tx<'_> {
         if self.nothing_to_release(&item)? {
             return self.publish_nothing(&item, s);
         }
-        /* a project finished by its completion rule (merged / tagged) merges through its target's lane:
-         * one card per batch there, not one release card per item here */
-        if p.release.as_ref().is_some_and(|r| r.done_when.is_some()) {
-            let req = self.c.lane_enqueue_item(&item)?;
+        /* a project finished by its completion rule merges through its target's lane (one card per batch
+         * there, not one release card per item here), when the lane can release it that way: merged is
+         * released, or the repository cuts its own tagged releases (ops/cut-release.py) */
+        let rule = p.release.as_ref().and_then(|r| r.done_when.as_deref());
+        let lane_can = match rule {
+            Some(steve_store::DONE_MERGE) => true,
+            Some(steve_store::DONE_TAG) => Path::new(&p.path).join("ops/cut-release.py").is_file(),
+            _ => false,
+        };
+        if lane_can {
+            let req = self.c.lane_enqueue_item(&item, &p.path)?;
             let where_ = req
                 .unit
                 .map(|u| format!("MQ-{u}"))
@@ -2424,6 +2435,16 @@ impl Tx<'_> {
                 /* git and checks run off the lock; the answer is the batch's, not one item's */
                 let c = self.c.clone();
                 crate::detach(move || c.lane_answered(&lane, unit, yes));
+            }
+            ("fail", "delivery_batch")
+                if crate::lane::drive::parse_subject(&d.subject_id).is_some() =>
+            {
+                let (lane, unit) =
+                    crate::lane::drive::parse_subject(&d.subject_id).expect("checked");
+                let retry = choice == "retry";
+                db.decision_resolve(id, json!({"choice": choice}), "resolved", None)?;
+                let c = self.c.clone();
+                crate::detach(move || c.lane_release_answered(&lane, unit, retry));
             }
             ("approve", "tool_call") => {
                 let opt = (choice != "deny").then_some(choice);

@@ -18,6 +18,10 @@ pub struct Member {
     pub id: String,
     pub head: String,
     pub label: String,
+    /// Where its commit is (its worktree or clone) and on which branch: fetched from there when the
+    /// batch's repository doesn't have it (members of one lane may come from different clones).
+    pub dir: String,
+    pub branch: String,
 }
 
 /// What integrating a unit came to.
@@ -63,6 +67,17 @@ pub fn integrate(
     let mut merged = vec![];
     let mut left = vec![];
     for m in members {
+        let commit = format!("{}^{{commit}}", m.head);
+        if git(wt, &["cat-file", "-e", &commit]).is_err()
+            && !m.dir.is_empty()
+            && !m.branch.is_empty()
+        {
+            let _ = git(wt, &["fetch", "--quiet", &m.dir, &m.branch]);
+        }
+        if git(wt, &["cat-file", "-e", &commit]).is_err() {
+            left.push((m.id.clone(), format!("拿不到这个提交（{}）", m.head)));
+            continue;
+        }
         let msg = format!("Merge {} into {branch}", m.label);
         let r = git(
             wt,
@@ -102,6 +117,18 @@ pub fn integrate(
         ));
     }
     let tip = git(wt, &["rev-parse", "HEAD"])?;
+    // a member that "left" but whose commit a later member brought in anyway is in: say so, it is true
+    let (inside, left): (Vec<_>, Vec<_>) = left.into_iter().partition(|(id, _)| {
+        members
+            .iter()
+            .find(|m| &m.id == id)
+            .is_some_and(|m| git(wt, &["merge-base", "--is-ancestor", &m.head, &tip]).is_ok())
+    });
+    let merged = members
+        .iter()
+        .filter(|m| merged.contains(&m.id) || inside.iter().any(|(id, _)| *id == m.id))
+        .map(|m| m.id.clone())
+        .collect();
     Ok(Integrated { tip, merged, left })
 }
 
@@ -164,6 +191,29 @@ pub fn release(wt: &Path, branch: &str) -> Result<Option<String>, String> {
         .find_map(|l| l.trim().strip_prefix("released v").map(str::to_string)))
 }
 
+/// The version a release of `heads` already went out as: the oldest `vX.Y.Z` tag containing every one
+/// of them, or `None` when one of them is in no tag yet. Asked before releasing again (after a
+/// restart): a release step never runs twice for the same commits.
+pub fn already_released(dir: &Path, heads: &[String]) -> Option<String> {
+    let mut newest: Option<(Vec<u64>, String)> = None;
+    for h in heads {
+        let tags = git(
+            dir,
+            &["tag", "--contains", h, "--list", "v*", "--sort=v:refname"],
+        )
+        .ok()?;
+        let first = tags.lines().find_map(|t| {
+            let v = t.strip_prefix('v')?;
+            let parts: Option<Vec<u64>> = v.split('.').map(|p| p.parse().ok()).collect();
+            parts.filter(|p| p.len() == 3).map(|p| (p, v.to_string()))
+        })?;
+        if newest.as_ref().is_none_or(|n| first.0 > n.0) {
+            newest = Some(first);
+        }
+    }
+    newest.map(|n| n.1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -220,6 +270,8 @@ mod tests {
             id: id.into(),
             head: head.into(),
             label: id.into(),
+            dir: String::new(),
+            branch: String::new(),
         }
     }
 

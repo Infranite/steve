@@ -306,7 +306,7 @@ impl Tx<'_> {
     }
 
     /// A release that started but ended without going live: reopen the item with a fail card.
-    fn release_failed(
+    pub(crate) fn release_failed(
         &mut self,
         item_id: &str,
         now_text: &str,

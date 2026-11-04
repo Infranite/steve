@@ -136,6 +136,8 @@ impl Lane {
                 if self.holds(&id) {
                     return out;
                 }
+                // a window that ran out before this request is closed first: it doesn't take it
+                self.close_if_due(at, &mut out);
                 if self.running.is_none() && self.collecting.is_none() {
                     let u = self.unit(id, at);
                     out.push(Action::Merge {
@@ -221,10 +223,14 @@ impl Lane {
                                     members: r.deferred,
                                 });
                             }
-                            None => out.push(Action::Release {
-                                unit: r.id,
-                                members: r.deferred,
-                            }),
+                            None => {
+                                out.push(Action::Release {
+                                    unit: r.id,
+                                    members: r.deferred.clone(),
+                                });
+                                // releasing: the lane is in flight until that release ends
+                                self.running = Some(Unit { merged: true, ..r });
+                            }
                         }
                     }
                 }
@@ -280,10 +286,14 @@ impl Lane {
                     unit: u.id,
                     id: first,
                 });
-                while u.members.len() < self.policy.max_members {
-                    let Some((id, _)) = self.queue.pop_front() else {
-                        break;
-                    };
+                // the ones that came within that request's window, up to the limit
+                while u.members.len() < self.policy.max_members
+                    && self
+                        .queue
+                        .front()
+                        .is_some_and(|(_, a)| a - t < self.policy.window_ms)
+                {
+                    let (id, _) = self.queue.pop_front().expect("front");
                     u.members.push(id.clone());
                     out.push(Action::Join { unit: u.id, id });
                 }
@@ -504,7 +514,76 @@ mod tests {
                 members: ids(&["A"])
             }]
         );
+        // the lane stays in flight while that release runs
+        assert!(l.running.as_ref().is_some_and(|r| r.id == 2 && r.merged));
+        l.apply(Event::Released {
+            unit: 2,
+            at: 2 * H + 9,
+        });
         assert!(l.running.is_none() && l.collecting.is_none());
+    }
+
+    #[test]
+    fn a_request_after_the_window_ran_out_waits_for_the_next_batch() {
+        let mut l = lane();
+        arrive(&mut l, "A", 0);
+        arrive(&mut l, "B", 1);
+        // no tick came; C arrives after B's window: B's batch closes, C waits
+        assert_eq!(
+            arrive(&mut l, "C", 1 + 2 * H),
+            [Action::Close { unit: 2 }, Action::Queue { id: "C".into() }]
+        );
+        assert_eq!(l.collecting.as_ref().unwrap().members, ids(&["B"]));
+    }
+
+    #[test]
+    fn a_queue_spanning_windows_makes_one_batch_per_window() {
+        let mut l = Lane::new(Policy {
+            window_ms: 2 * H,
+            max_members: 2,
+        });
+        arrive(&mut l, "A", 0);
+        arrive(&mut l, "B", 1);
+        arrive(&mut l, "C", 2); // closes B's batch (2 members)
+        arrive(&mut l, "D", 3); // queued
+        arrive(&mut l, "E", 3 * H); // queued, outside D's window
+        l.apply(Event::Merged {
+            unit: 1,
+            at: 3 * H + 1,
+        });
+        // B and C start; D alone opens the next batch: E came after D's window
+        assert_eq!(l.collecting.as_ref().unwrap().members, ids(&["D"]));
+        assert_eq!(
+            l.queue.iter().map(|(i, _)| i.as_str()).collect::<Vec<_>>(),
+            ["E"]
+        );
+    }
+
+    #[test]
+    fn an_emptied_unit_releasing_what_it_carried_keeps_the_lane_until_that_release_ends() {
+        let mut l = lane();
+        arrive(&mut l, "A", 0);
+        arrive(&mut l, "B", 1);
+        l.apply(Event::Merged { unit: 1, at: 2 });
+        l.apply(Event::Tick { at: 1 + 2 * H });
+        l.apply(Event::Left {
+            unit: 2,
+            id: "B".into(),
+            at: 2 * H + 5,
+        });
+        // A's release goes out from unit 2; C waits for it instead of merging alongside
+        assert_eq!(
+            arrive(&mut l, "C", 2 * H + 6),
+            [Action::Join {
+                unit: 3,
+                id: "C".into()
+            }]
+        );
+        l.apply(Event::Released {
+            unit: 2,
+            at: 2 * H + 7,
+        });
+        assert!(l.running.is_none());
     }
 
     #[test]
