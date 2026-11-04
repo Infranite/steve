@@ -225,6 +225,16 @@ impl Channels {
         let Some(thread) = self.thread().cloned() else {
             return Ok(None);
         };
+        // your web conversation acts with all your powers (settings, items, rerouting): only your own
+        // command goes there; any other workspace user's is recorded where it was said
+        if !self
+            .store()
+            .reader(|c| sender_is_owner(c, &plan.ws, plan.sender_party_id.as_deref()))?
+        {
+            return Err(steve_modules::ApiError::forbidden(
+                "只有你本人的 /bot 指令会转到你的网页对话",
+            ));
+        }
         let mut meta = chan_meta(self, plan, true)?;
         meta["web"] = json!(true);
         let turn = Turn {
@@ -238,10 +248,7 @@ impl Channels {
             research: true,
             items: true,
             owner_only: false,
-            // a /bot command from any workspace user lands here: it starts work only when the owner sent it
-            start: self
-                .store()
-                .reader(|c| sender_is_owner(c, &plan.ws, plan.sender_party_id.as_deref()))?,
+            start: true, // only the owner's command gets here (above)
         };
         let ws = plan.ws.clone();
         let id = tokio::task::spawn_blocking(move || thread.say(&ws, turn))

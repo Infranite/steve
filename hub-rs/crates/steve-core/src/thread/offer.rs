@@ -179,20 +179,39 @@ impl Core {
     }
 
     /// What an item made from the conversation starts with, rebuilt from where it came from: the
-    /// conversation up to its origin message and that message's files. A proposal starts with it once
+    /// conversation up to its origin message (and the answer it was taken from), and the origin's files. A proposal starts with it once
     /// you said yes; `None` for an item that didn't come from a conversation.
     pub(crate) fn thread_start(&self, item: &Item) -> Result<Option<(String, Vec<FileRef>)>> {
         let Some(ti) = self.store().store().thread().item(&item.id)? else {
             return Ok(None);
         };
         let goal = self.store().goal(&item.id).unwrap_or_default();
-        let opening = self.opening_for(&item.workspace_id, &ti.origin_msg, &goal, None)?;
-        let files = self
-            .store()
-            .message(&ti.origin_msg)?
-            .and_then(|m| m.meta.get("files").cloned())
-            .and_then(|v| serde_json::from_value(v).ok())
-            .unwrap_or_default();
+        // an offer taken from an answer grew out of that answer (marked `promoted` with the item)
+        let answer = self
+            .conv_messages(&item.workspace_id, &self.conv_of(&ti.origin_msg))?
+            .into_iter()
+            .find(|m| m.meta.get("promoted").and_then(Value::as_str) == Some(item.id.as_str()));
+        let opening =
+            self.opening_for(&item.workspace_id, &ti.origin_msg, &goal, answer.as_ref())?;
+        let refs = |m: &Message, key: &str| -> Vec<FileRef> {
+            m.meta
+                .get(key)
+                .cloned()
+                .and_then(|v| serde_json::from_value(v).ok())
+                .unwrap_or_default()
+        };
+        // the origin's own files, or (an offer) the files the answer read
+        let mut files = match self.store().message(&ti.origin_msg)? {
+            Some(m) => refs(&m, "files"),
+            None => vec![],
+        };
+        if let Some(a) = &answer {
+            for f in refs(a, "chatFiles") {
+                if !files.iter().any(|x| x.id == f.id) {
+                    files.push(f);
+                }
+            }
+        }
         Ok(Some((opening, files)))
     }
 

@@ -1266,3 +1266,65 @@ async fn only_the_owner_starts_work_from_a_chat() {
     assert_eq!(turns.len(), 3, "{turns:?}");
     assert!(!turns[2].1.start, "a member is not the owner");
 }
+
+/// A `/bot` command from a workspace member who is not the owner: answered in the chat like any turn,
+/// but it doesn't start work (it may become a proposal), and it never reaches your web conversation.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_members_bot_command_does_not_start_work() {
+    let h = setup(true).await;
+    let t = h.thread.clone().unwrap();
+    let (_, self_space) = both_see_ops(&h).await;
+    exec(
+        &h,
+        "UPDATE channel_settings SET trigger = ? WHERE connection_id = ?",
+        &[
+            &json!({"on": true, "words": ["/bot"], "where": [self_space], "mark": true})
+                .to_string(),
+            &h.me,
+        ],
+    );
+    // 李雷 has said something before (Steve knows their contact) and is a member of the workspace
+    push(
+        &h,
+        &h.bot.clone(),
+        msg("C_OPS", "o1", "ulilei", "大家好", false, false),
+    )
+    .await;
+    exec(
+        &h,
+        "INSERT INTO users (id, workspace_id, subject, name, role, created) VALUES ('u_li', ?, 'li', '李雷', 'member', 1)",
+        &[WS],
+    );
+    exec(
+        &h,
+        "INSERT INTO workspace_members (workspace_id, user_id, role, created) VALUES (?, 'u_li', 'member', 1)",
+        &[WS],
+    );
+    exec(
+        &h,
+        "UPDATE parties SET user_id = 'u_li' WHERE id = (SELECT sender_party_id FROM chan_messages WHERE external_id = 'o1')",
+        &[],
+    );
+    assert_eq!(
+        one(
+            &h,
+            "SELECT count(*) FROM parties WHERE user_id = ?",
+            &["u_li"]
+        ),
+        json!(1)
+    );
+    let before = t.turns.lock().unwrap().len();
+    push(
+        &h,
+        &h.bot.clone(),
+        msg("C_OPS", "o2", "ulilei", "/bot 把脚本改一下", false, false),
+    )
+    .await;
+    let turns = t.turns.lock().unwrap().clone();
+    assert!(
+        turns.iter().all(|(_, x)| x.space != "steve"),
+        "not your web conversation: {turns:?}"
+    );
+    assert!(turns.len() > before, "the command was taken: {turns:?}");
+    assert!(turns[before..].iter().all(|(_, x)| !x.start), "{turns:?}");
+}
