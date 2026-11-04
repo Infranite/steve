@@ -874,10 +874,17 @@ impl Acp {
                 st.cancelled.remove(&ptoken);
                 st.turning.remove(&sid);
                 st.tallies.remove(&sid);
-                st.cut.insert(sid.clone());
                 if let Some(l) = st.live.get_mut(&sid).filter(|l| l.generation == generation) {
                     l.busy = false;
                     l.prompting = false;
+                }
+                // the drain may have been called off already: then nothing will resume it, it goes on now
+                let holding = st.holding;
+                drop(st);
+                if holding || self.host().maintenance() {
+                    self.st().cut.insert(sid.clone());
+                } else {
+                    self.continue_cut(&sid);
                 }
                 return;
             }
@@ -1922,17 +1929,31 @@ impl Acp {
     /// Reversible upgrade drain. Only idle adapters may be stopped; verify their independent
     /// process groups disappeared, not just their leaders. A failed verification is not readiness.
     pub async fn quiesce(&self) -> bool {
-        {
+        let cut: Vec<String> = {
             let mut st = self.st();
             st.holding = true;
             if st.turning.iter().any(|s| !waiting_only(&st, s)) {
                 return false;
             }
             // what is left only waits for a permission answer: cut it, the restart resumes it
-            let waiting: Vec<String> = st.turning.iter().cloned().collect();
-            st.suspended.extend(waiting);
+            let waiting: Vec<String> = st
+                .turning
+                .iter()
+                .filter(|s| !st.suspended.contains(*s))
+                .cloned()
+                .collect();
+            st.suspended.extend(waiting.iter().cloned());
             let pids: Vec<_> = st.procs.values().map(|c| c.pid()).collect();
             st.drain_groups.extend(pids);
+            waiting
+        };
+        // said, and persisted: a resume after a drain's cut is not the "once in half an hour" of a crash
+        for sid in &cut {
+            self.host().add_event(
+                sid,
+                "system",
+                json!({ "text": "为了升级暂停了这一回合，升级后接着做；刚才在等的授权会再请求一次。", "drain_cut": true }),
+            );
         }
         self.shutdown(Duration::from_millis(500)).await;
         for _ in 0..20 {
@@ -1958,28 +1979,31 @@ impl Acp {
         false
     }
     pub fn reopen(&self) -> bool {
-        let cut: Vec<String> = {
-            let mut st = self.st();
-            if !st.drain_groups.is_empty() {
-                return false;
-            }
-            st.closed = false;
-            st.holding = false;
-            st.suspended.clear();
-            st.cut.drain().collect()
-        };
-        // the drain was called off: no restart will resume what it cut, so it goes on now
-        for sid in cut {
-            self.flush(
-                &sid,
-                Some(Message {
-                    text: RESUME_AFTER_DRAIN.into(),
-                    via: "steve".into(),
-                    files: vec![],
-                }),
-            );
+        let mut st = self.st();
+        if !st.drain_groups.is_empty() {
+            return false;
         }
+        st.closed = false;
+        st.holding = false;
         true
+    }
+
+    /// The turns a called-off drain cut, for the host to continue once maintenance is lifted (no
+    /// restart will resume them). A cut turn whose prompt returns after that continues by itself.
+    pub fn take_cut(&self) -> Vec<String> {
+        self.st().cut.drain().collect()
+    }
+
+    /// Continue a turn a called-off drain cut.
+    pub fn continue_cut(&self, sid: &str) -> bool {
+        self.flush(
+            sid,
+            Some(Message {
+                text: RESUME_AFTER_DRAIN.into(),
+                via: "steve".into(),
+                files: vec![],
+            }),
+        )
     }
 
     /// SIGTERM every adapter's process group (live or still starting), wait up to `grace`, then

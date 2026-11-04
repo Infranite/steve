@@ -78,7 +78,21 @@ pub const RESUME_WINDOW_MS: i64 = 30 * 60_000;
 
 /// No automatic resume of this session in the window before `at`.
 pub fn may_resume(db: &Store, session: &str, at: i64) -> Result<bool> {
-    Ok(!db.events_after(session, 0)?.iter().any(|e| {
+    let events = db.events_after(session, 0)?;
+    let marked = |k: &str| {
+        events
+            .iter()
+            .filter(|e| e.kind == "system" && e.data.get(k).is_some_and(crate::gateway::truthy))
+            .map(|e| e.ts)
+            .max()
+    };
+    // a drain cut it on purpose (a deploy) since it was last resumed: not a crash loop, it resumes
+    if let Some(cut) = marked("drain_cut")
+        && marked("resumed").is_none_or(|r| cut > r)
+    {
+        return Ok(true);
+    }
+    Ok(!events.iter().any(|e| {
         e.kind == "system"
             && e.data.get("resumed").is_some_and(crate::gateway::truthy)
             && at - e.ts < RESUME_WINDOW_MS

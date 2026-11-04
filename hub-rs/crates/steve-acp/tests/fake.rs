@@ -1137,9 +1137,16 @@ async fn a_turn_waiting_for_permission_does_not_hold_a_drain() {
     wait_for("cut", 10, || acp.running_turns() == 0).await;
     assert_eq!(turn_ends(&h), 0, "no turn end");
     assert_eq!(h.rec(|r| r.statuses.len()), statuses, "no status change");
-    // the drain is called off: the turn goes on now (no restart will resume it)
+    assert!(
+        h.rec(|r| r.events.iter().any(|e| e.1["drain_cut"] == true)),
+        "the cut is recorded"
+    );
+    // the drain is called off: the host continues it once maintenance is lifted (no restart will)
     let before = f.prompts().len();
     assert!(acp.reopen());
+    let cut = acp.take_cut();
+    assert_eq!(cut, ["s1"]);
+    assert!(acp.continue_cut("s1"));
     wait_for("continued", 10, || f.prompts().len() > before).await;
     assert!(
         f.prompts().last().unwrap().contains("升级没有进行"),
@@ -1161,5 +1168,43 @@ async fn a_working_turn_still_holds_a_drain() {
     assert!(!acp.quiesce().await, "a working turn is waited for");
     assert!(acp.reopen());
     wait_for("turn end", 10, || turn_ends(&h) == 1).await;
+    acp.shutdown(Duration::from_secs(2)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cut_turn_whose_prompt_returns_after_the_drain_ended_goes_on_by_itself() {
+    let f = Fake::new(&[]);
+    let h = host();
+    h.with(f.session("s1", "claude-code"));
+    let acp = Acp::new(f.config(), h.clone());
+    acp.prompt("s1", "@perm Bash", "me").await.unwrap();
+    wait_for("decision", 10, || h.rec(|r| r.decisions.len()) == 1).await;
+    let before = f.prompts().len();
+    // the drain is called off right after it cut the turn: whichever comes first (its prompt coming
+    // back, or the host collecting what was cut), the turn goes on and nothing reports a failure
+    assert!(acp.quiesce().await);
+    assert!(acp.reopen());
+    for sid in acp.take_cut() {
+        assert!(acp.continue_cut(&sid));
+    }
+    wait_for("continued", 10, || {
+        for sid in acp.take_cut() {
+            acp.continue_cut(&sid);
+        }
+        f.prompts().len() > before
+    })
+    .await;
+    // the only turn end is the continued turn's own, and nothing failed
+    assert!(
+        h.rec(|r| r
+            .turn_ends
+            .iter()
+            .all(|t| t.error.is_none() && t.stop_reason != "error")),
+        "never reported as a failed turn"
+    );
+    assert!(
+        !h.rec(|r| r.statuses.iter().any(|s| s == "error")),
+        "never an error"
+    );
     acp.shutdown(Duration::from_secs(2)).await;
 }

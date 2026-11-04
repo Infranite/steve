@@ -527,6 +527,12 @@ impl Domain for CoreDomain {
             self.core
                 .maintenance_hold(false)
                 .map_err(|e| BackendError::msg(e.to_string()))?;
+            // turns the drain cut while they waited for a permission: no restart came to resume them
+            for sid in self.acp.take_cut() {
+                if !self.acp.continue_cut(&sid) {
+                    tracing::warn!(session = %sid, "a turn the drain cut could not be continued");
+                }
+            }
             self.ready().await?;
         }
         let active = store.maintenance();

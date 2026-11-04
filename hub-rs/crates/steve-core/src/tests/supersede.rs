@@ -82,6 +82,31 @@ fn a_restart_interrupted_turn_resumes_once_per_window() {
 }
 
 #[test]
+fn a_turn_a_deploy_cut_resumes_even_right_after_another_resume() {
+    let k = Kit::new();
+    let i = k.item("run", "定义", None);
+    let s = k.session(&i, "idle");
+    let note = |k: &Kit, v: serde_json::Value| {
+        k.db().event_add(&s, "system", v).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    };
+    note(&k, json!({"text": "Hub 重启，自动继续。", "resumed": true}));
+    assert!(
+        !may_resume(k.db(), &s, now()).unwrap(),
+        "a crash right after: not again"
+    );
+    // a deploy cut it on purpose (it was waiting for a permission): not a crash loop
+    note(
+        &k,
+        json!({"text": "为了升级暂停了这一回合", "drain_cut": true}),
+    );
+    assert!(may_resume(k.db(), &s, now()).unwrap());
+    // resumed after that cut: an interruption now (no new cut) is a crash again
+    note(&k, json!({"text": "Hub 重启，自动继续。", "resumed": true}));
+    assert!(!may_resume(k.db(), &s, now()).unwrap());
+}
+
+#[test]
 fn tidy_expires_questions_older_than_a_delivery_and_keeps_the_delivery() {
     let k = Kit::new();
     let i = k.item("run", "定义", None);
