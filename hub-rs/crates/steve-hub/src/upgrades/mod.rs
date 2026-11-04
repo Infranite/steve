@@ -12,9 +12,13 @@ use std::{
     fs::{self, File, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 pub use supervisor::{run as supervise, startup_gate};
+
+/// How long a version check waits for `check.lock` (tries × wait) before it says another check runs.
+const CHECK_LOCK_TRIES: u32 = 40;
+const CHECK_LOCK_WAIT: Duration = Duration::from_millis(50);
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Asset {
@@ -276,7 +280,16 @@ impl Updates {
             .read(true)
             .write(true)
             .open(self.dir().join("check.lock"))?;
-        if guard.try_lock().is_err() {
+        // A busy lock is usually another check, but it can also be a child process forked while a
+        // check held it: the child keeps a copy of the descriptor, and so the lock, until it execs. So
+        // wait a little before saying a check is running (then its fresh result is in the cache).
+        let mut tries = 0;
+        while guard.try_lock().is_err() {
+            tries += 1;
+            if tries < CHECK_LOCK_TRIES {
+                tokio::time::sleep(CHECK_LOCK_WAIT).await;
+                continue;
+            }
             return self
                 .cached_check()
                 .map(|cached| cached.result)
