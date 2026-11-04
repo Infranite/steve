@@ -383,6 +383,21 @@ impl State {
 }
 
 impl State {
+    /// Mark a prompt cancelled and take the permission requests it still waits on: ACP has the
+    /// cancelling client answer each of them `cancelled`, so the agent can end the turn.
+    fn cancel_prompt(&mut self, prompt: u64) -> Vec<(String, Value)> {
+        self.cancelled.insert(prompt);
+        let ids: Vec<String> = self
+            .waits
+            .iter()
+            .filter(|(_, w)| w.3 == prompt)
+            .map(|(d, _)| d.clone())
+            .collect();
+        ids.into_iter()
+            .filter_map(|d| self.waits.remove(&d).map(|w| (d, w.1)))
+            .collect()
+    }
+
     fn token(&mut self) -> u64 {
         self.next_token += 1;
         self.next_token
@@ -800,14 +815,22 @@ impl Acp {
                 if let Some(l) = st.live.get_mut(&sid).filter(|l| l.generation == generation) {
                     l.prompting = true;
                 }
-                let deferred = st.cancel_pending.remove(&sid);
-                if deferred {
-                    st.cancelled.insert(ptoken);
-                }
-                deferred
+                st.cancel_pending
+                    .remove(&sid)
+                    .then(|| st.cancel_prompt(ptoken))
             };
-            if deferred {
+            if let Some(waits) = deferred {
                 conn.notify("session/cancel", json!({ "sessionId": acp_id }));
+                let ids: Vec<String> = waits
+                    .into_iter()
+                    .map(|(d, rpc_id)| {
+                        conn.respond(rpc_id, json!({ "outcome": { "outcome": "cancelled" } }));
+                        d
+                    })
+                    .collect();
+                if !ids.is_empty() {
+                    self.host().permissions_expired(&sid, &ids);
+                }
             }
             let r = match early {
                 Some(r) => r,
@@ -1650,17 +1673,20 @@ impl Acp {
                 .and_then(|_| st.prompts.get(sid).copied())
                 .filter(|t| !st.cancelled.contains(t))
         };
-        {
+        let prompt = {
             let st = self.st();
             if !st.live.contains_key(sid) {
                 return; // asked during start: left unanswered, as in the TS
             }
-            if current(&st).is_none() {
-                drop(st);
-                conn.respond(rpc_id, cancelled);
-                return;
+            match current(&st) {
+                Some(t) => t,
+                None => {
+                    drop(st);
+                    conn.respond(rpc_id, cancelled);
+                    return;
+                }
             }
-        }
+        };
         // Steve's own tools are always allowed, once per call
         if let Some(opt) = auto_allow(params) {
             conn.respond(rpc_id, selected(&opt));
@@ -1676,13 +1702,13 @@ impl Acp {
         };
         let waiting = {
             let mut st = self.st();
-            match current(&st) {
-                Some(t) => {
-                    st.waits
-                        .insert(dec.clone(), (sid.to_owned(), rpc_id.clone(), generation, t));
-                    true
-                }
-                None => false,
+            // still the prompt it was asked in: one that ended meanwhile took its waits already
+            if current(&st) == Some(prompt) {
+                st.waits
+                    .insert(dec.clone(), (sid.to_owned(), rpc_id.clone(), generation, prompt));
+                true
+            } else {
+                false
             }
         };
         if !waiting {
@@ -1767,24 +1793,10 @@ impl Acp {
         let mut answered = Vec::new();
         match st.live.get(session_id).filter(|l| l.busy && l.prompting) {
             Some(l) => {
-                let (conn, generation) = (l.conn.clone(), l.generation);
+                let conn = l.conn.clone();
                 conn.notify("session/cancel", json!({ "sessionId": l.acp_id }));
-                let prompt = st.prompts.get(session_id).copied();
-                if let Some(t) = prompt {
-                    st.cancelled.insert(t);
-                }
-                // ACP: a cancelling client answers every permission request still pending with
-                // `cancelled`, so the agent can end the turn
-                let pending: Vec<String> = st
-                    .waits
-                    .iter()
-                    .filter(|(_, (s, _, g, t))| {
-                        s == session_id && *g == generation && Some(*t) == prompt
-                    })
-                    .map(|(d, _)| d.clone())
-                    .collect();
-                for d in pending {
-                    if let Some((_, rpc_id, _, _)) = st.waits.remove(&d) {
+                if let Some(t) = st.prompts.get(session_id).copied() {
+                    for (d, rpc_id) in st.cancel_prompt(t) {
                         conn.respond(rpc_id, json!({ "outcome": { "outcome": "cancelled" } }));
                         answered.push(d);
                     }
