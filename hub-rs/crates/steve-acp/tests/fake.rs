@@ -1184,16 +1184,11 @@ async fn a_cut_turn_whose_prompt_returns_after_the_drain_ended_goes_on_by_itself
     // back, or the host collecting what was cut), the turn goes on and nothing reports a failure
     assert!(acp.quiesce().await);
     assert!(acp.reopen());
+    // collected once, as the host does after lifting maintenance
     for sid in acp.take_cut() {
         assert!(acp.continue_cut(&sid));
     }
-    wait_for("continued", 10, || {
-        for sid in acp.take_cut() {
-            acp.continue_cut(&sid);
-        }
-        f.prompts().len() > before
-    })
-    .await;
+    wait_for("continued", 10, || f.prompts().len() > before).await;
     // the only turn end is the continued turn's own, and nothing failed
     assert!(
         h.rec(|r| r

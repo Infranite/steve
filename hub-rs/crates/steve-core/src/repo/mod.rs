@@ -413,6 +413,20 @@ impl Db {
     pub fn events_up_to(&self, session: &str, seq: i64) -> Result<Vec<Event>> {
         Ok(self.s.events().up_to(session, seq)?)
     }
+    /// `ts` of the session's newest system event carrying `marker` (e.g. `resumed`, `drain_cut`): looked
+    /// up directly, however many events the session has.
+    pub fn last_marker_ts(&self, session: &str, marker: &str) -> Result<Option<i64>> {
+        let path = format!("$.{marker}");
+        Ok(self.s.with_conn(|c| {
+            Ok(c.query_row(
+                "SELECT ts FROM events WHERE session_id = ? AND kind = 'system' AND json_extract(data, ?) = 1
+                  ORDER BY seq DESC LIMIT 1",
+                rusqlite::params![session, path],
+                |r| r.get(0),
+            )
+            .optional()?)
+        })?)
+    }
     /// `ts` of the session's newest event.
     pub fn last_event_ts(&self, session: &str) -> Result<Option<i64>> {
         Ok(self.s.with_conn(|c| {

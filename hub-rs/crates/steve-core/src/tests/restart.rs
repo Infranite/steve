@@ -517,3 +517,42 @@ fn upgrade_maintenance_refuses_source_release_and_rollback() {
     assert!(k.core.tx().start_rollback(&i, "previous", "").is_err());
     assert!(!k.core.source_release_busy());
 }
+
+/// A deploy cut a turn that only waited for a permission answer: the restart resumes it even though
+/// another card waits on the item and it was resumed a moment ago (a deploy is not a crash loop);
+/// without the cut, the same item would wait for you.
+#[test]
+fn a_turn_a_deploy_cut_resumes_past_other_cards_and_the_half_hour_limit() {
+    let k = Kit::new();
+    let i = k.item("run", "执行", None);
+    let s = k.session(&i, "running");
+    k.decision(&i, Some(&s), "ask", "question", &["a", "b"]);
+    k.db()
+        .event_add(
+            &s,
+            "system",
+            serde_json::json!({"text": "自动继续", "resumed": true}),
+        )
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    k.db()
+        .event_add(
+            &s,
+            "system",
+            serde_json::json!({"text": "为了升级暂停了这一回合", "drain_cut": true}),
+        )
+        .unwrap();
+    k.core.recover().unwrap();
+    k.core.ready();
+    assert_eq!(k.rt.prompts_of(&s), vec![RESUME], "resumed by the restart");
+    // the same state without the cut: it waits on the item's card
+    let i2 = k.item("run", "执行", None);
+    let s2 = k.session(&i2, "running");
+    k.decision(&i2, Some(&s2), "ask", "question", &["a", "b"]);
+    k.core.recover().unwrap();
+    k.core.ready();
+    assert!(
+        k.rt.prompts_of(&s2).is_empty(),
+        "an item waiting on you is not poked"
+    );
+}

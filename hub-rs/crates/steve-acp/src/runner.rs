@@ -362,6 +362,9 @@ struct State {
     /// prompt returned (`cut`) until the restart, or a cancelled drain, continues them.
     suspended: HashSet<String>,
     cut: HashSet<String>,
+    /// A drain cut turns and the host has not collected them yet ([`Acp::take_cut`]): a cut turn whose
+    /// prompt comes back now waits in `cut`; after the collection it continues by itself.
+    cut_open: bool,
     next_token: u64,
     closed: bool,
     /// a release is about to restart the Hub (see [`Acp::hold`])
@@ -878,12 +881,14 @@ impl Acp {
                     l.busy = false;
                     l.prompting = false;
                 }
-                // the drain may have been called off already: then nothing will resume it, it goes on now
-                let holding = st.holding;
+                // decided under the lock: before the host collected the cut turns (or a restart) it waits
+                // with them; after, nothing will resume it, so it goes on now
+                let wait = st.cut_open;
+                if wait {
+                    st.cut.insert(sid.clone());
+                }
                 drop(st);
-                if holding || self.host().maintenance() {
-                    self.st().cut.insert(sid.clone());
-                } else {
+                if !wait {
                     self.continue_cut(&sid);
                 }
                 return;
@@ -1943,6 +1948,9 @@ impl Acp {
                 .cloned()
                 .collect();
             st.suspended.extend(waiting.iter().cloned());
+            if !waiting.is_empty() {
+                st.cut_open = true;
+            }
             let pids: Vec<_> = st.procs.values().map(|c| c.pid()).collect();
             st.drain_groups.extend(pids);
             waiting
@@ -1991,7 +1999,9 @@ impl Acp {
     /// The turns a called-off drain cut, for the host to continue once maintenance is lifted (no
     /// restart will resume them). A cut turn whose prompt returns after that continues by itself.
     pub fn take_cut(&self) -> Vec<String> {
-        self.st().cut.drain().collect()
+        let mut st = self.st();
+        st.cut_open = false;
+        st.cut.drain().collect()
     }
 
     /// Continue a turn a called-off drain cut.

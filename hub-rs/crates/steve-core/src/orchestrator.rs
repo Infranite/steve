@@ -3462,7 +3462,9 @@ impl Tx<'_> {
                 sys(self, "Hub 重启，这一回合被中断。事项已暂停，继续时接着做。")?;
                 continue;
             }
-            if self.waits_on_user(s.item_id.as_deref())? {
+            if !crate::lifecycle::drain_cut(self.db(), &s.id)?
+                && self.waits_on_user(s.item_id.as_deref())?
+            {
                 sys(
                     self,
                     "Hub 重启，这一回合被中断。事项在等你处理，之后再继续。",
@@ -3557,7 +3559,8 @@ impl Tx<'_> {
                     .item_id
                     .as_deref()
                     .and_then(|i| self.db().item(i).ok().flatten());
-                !self.waits_on_user(s.item_id.as_deref()).unwrap_or(true)
+                (crate::lifecycle::drain_cut(self.db(), &s.id).unwrap_or(false)
+                    || !self.waits_on_user(s.item_id.as_deref()).unwrap_or(true))
                     && s.status != "ended"
                     && !item
                         .as_ref()
