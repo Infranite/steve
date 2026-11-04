@@ -1543,3 +1543,98 @@ async fn a_group_without_a_member_count_gets_one_from_its_next_message() {
     );
     assert!(n.as_i64().unwrap() >= 3, "the bot and both people: {n}");
 }
+
+/// A reply drafted for your approval waits in its own conversation with the approval to answer
+/// there; 不发出 closes it for good (a reload still reads it discarded), and a draft whose approval
+/// was closed without discarding it (dismissed before) no longer reads as waiting.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_drafted_answer_is_closed_in_its_own_conversation() {
+    let h = setup(true).await;
+    set_rules(
+        &h,
+        &h.bot.clone(),
+        json!([{"when": {"kind": "mention_or_dm"}, "act": "draft"}]),
+    );
+    let t = h.thread.clone().unwrap();
+    let draft = |id: &'static str| {
+        let (h, t) = (&h, t.clone());
+        async move {
+            let a = push(
+                h,
+                &h.bot.clone(),
+                msg("C_OPS", id, "ulilei", "@李鹏翔 明天", true, false),
+            )
+            .await;
+            let ops = conversations::conv_space(&a.space_id);
+            let (turn, _) = t.turns.lock().unwrap().last().cloned().expect("a turn");
+            let reply = h
+                .env
+                .store()
+                .messages()
+                .add(
+                    WS,
+                    "steve",
+                    "这条看起来是发给李鹏翔的，要我处理吗？",
+                    None,
+                    &json!({"origin": turn, "ask": {"options": ["不用处理", "请补充完整"]}}),
+                    &ops,
+                )
+                .unwrap();
+            let d =
+                h.ch.conv_deliver(WS, &reply)
+                    .await
+                    .unwrap()
+                    .expect("drafted");
+            let Delivered::Drafted { decision_id, .. } = d else {
+                panic!("{d:?}")
+            };
+            (ops, reply, decision_id)
+        }
+    };
+    let out_of = |ops: &str, reply: &str| {
+        let v = conversations::messages_of(&h.ch, WS, &Viewer::bare(WS, ME), ops).unwrap();
+        v["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["id"] == json!(reply))
+            .expect("the reply")["meta"]["chan_out"]
+            .clone()
+    };
+
+    let (ops, r1, d1) = draft("q1").await;
+    let o = out_of(&ops, &r1);
+    assert_eq!(
+        (o["status"].clone(), o["decision"].clone()),
+        (json!("draft"), json!(d1))
+    );
+    decide(&h, &d1, "no");
+    h.outbox.send_due(&h.ch).await;
+    let o = out_of(&ops, &r1);
+    assert_eq!(
+        (o["status"].clone(), o["decision"].clone()),
+        (json!("discarded"), Value::Null)
+    );
+    h.env.clock.advance(60_000);
+    assert_eq!(h.outbox.send_due(&h.ch).await, 0, "never sent");
+    assert!(sent(&h).is_empty());
+    // answered once: a second 不发出 is refused, nothing changes
+    assert!(
+        steve_modules::decisions::dispatch(&h.env.modules, &caller(WS, ME), &d1, "no", "")
+            .expect("ours")
+            .is_err()
+    );
+
+    // a draft whose approval was taken out of 待处理 without discarding it
+    let (ops, r2, d2) = draft("q2").await;
+    exec(
+        &h,
+        "UPDATE decisions SET status = 'resolved', result = '{\"dismissed\":true}' WHERE id = ?",
+        &[&d2],
+    );
+    let o = out_of(&ops, &r2);
+    assert_eq!(
+        (o["status"].clone(), o["decision"].clone()),
+        (json!("discarded"), Value::Null)
+    );
+}

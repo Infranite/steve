@@ -6,7 +6,7 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import { cn } from "cn"
 import { CheckIcon, LoaderIcon, MessageCircleIcon, UsersIcon, UserIcon, XIcon, ExternalLinkIcon, ListIcon } from "lucide-react"
 import { conversationsApi, type ConvBadge, type ConvMessage, type ConvRow, type Reaction } from "@/api/conversations"
-import { st, msgOf, useHubEvents, type Msg } from "@/store"
+import { st, msgOf, decideOut, useHubEvents, type Msg } from "@/store"
 import { matchesSpace } from "@/live-utils"
 import { go } from "@/ui"
 import { Button } from "@/components/ui/button"
@@ -27,7 +27,8 @@ export function useConversation(space: string | undefined) {
     }).catch(() => { if (id === request.current) setData(null) })
   }, [space])
   useEffect(() => { setData(undefined); load(); return () => { request.current++ } }, [load])
-  useHubEvents(["message", "chan_message"], load, 250, { filter: (e) => matchesSpace(e as { space_id?: string }, space) })
+  /* a chat message's event names its space (`sp_…`), the conversation is `chan:sp_…` */
+  useHubEvents(["message", "chan_message"], load, 250, { filter: (e) => matchesSpace(e as { space_id?: string }, space?.replace(/^chan:/, "")) })
   return data
 }
 
@@ -159,12 +160,26 @@ export function ReactionChip({ r }: { r?: Reaction }) {
   )
 }
 
-/** what became of Steve's message in the space */
+/** what became of Steve's message in the space; a draft is approved or closed right here, in its own conversation */
 export function ChanOutNote({ m }: { m?: ConvMessage }) {
-  const s = m?.meta?.chan_out?.status as string | undefined
+  const [answered, setAnswered] = useState<"yes" | "no" | null>(null)
+  const s = m?.meta?.chan_out?.status as string | undefined, decision = m?.meta?.chan_out?.decision as string | undefined
+  /* a new state from the Hub replaces what this click assumed */
+  useEffect(() => setAnswered(null), [s, decision])
   if (!s || s === "skipped") return null
   const t: Record<string, string> = { sent: "已发出", pending: "正在发出", draft: "等你批准后发出", blocked: "有机密值，已拦下", failed: "没有发出去", unknown: "可能已经发出，正在核对", discarded: "你没有发出" }
-  return <div className={cn("type-footnote", s === "failed" || s === "blocked" ? "text-destructive" : "text-muted-foreground")} data-chan-out={s}>{t[s] ?? s}</div>
+  const shown = answered === "no" ? "discarded" : answered === "yes" ? "pending" : s
+  const note = <div className={cn("type-footnote", shown === "failed" || shown === "blocked" ? "text-destructive" : "text-muted-foreground")} data-chan-out={shown}>{t[shown] ?? shown}</div>
+  if (shown !== "draft" || !decision) return note
+  const busy = st.pendingActions.has("decision:" + decision)
+  const act = async (c: "yes" | "no") => { if (await decideOut(decision, c)) setAnswered(c) }
+  return (
+    <div className="flex flex-wrap items-center gap-2" data-chan-out-decision={decision}>
+      {note}
+      <Button size="xs" variant="ghost" className="text-muted-foreground" disabled={busy} onClick={() => void act("no")} data-chan-out-discard>不发出</Button>
+      <Button size="xs" variant="outline" disabled={busy} onClick={() => void act("yes")} data-chan-out-send>发出</Button>
+    </div>
+  )
 }
 
 /** whose turn it is: the sender's name over the bubble */

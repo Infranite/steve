@@ -25,7 +25,7 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 use serde_json::{Map, Value, json};
 use steve_store::base::ObjRef;
 use steve_store::base::links::{self, NewLink};
@@ -813,23 +813,41 @@ pub fn messages_of(
                     None => Value::Null,
                 };
             }
-            if let Some(out_id) = m.meta["chan_out"]["message"].as_str() {
-                let status: Option<String> = c
-                    .query_row(
-                        "SELECT status FROM chan_messages WHERE id = ?",
-                        [out_id],
-                        |r| r.get(0),
-                    )
-                    .ok();
-                if let Some(st) = status {
-                    v["meta"]["chan_out"]["status"] = json!(st);
-                }
+            if let Some(out_id) = m.meta["chan_out"]["message"].as_str()
+                && let Some((st, decision)) = out_state(c, ws, out_id)?
+            {
+                v["meta"]["chan_out"]["status"] = json!(st);
+                v["meta"]["chan_out"]["decision"] = json!(decision);
             }
             out.push(v);
         }
         Ok(())
     })?;
     Ok(json!({"conversation": b, "messages": out}))
+}
+
+/// What became of Steve's message `id` in the space, and the open approval a draft waits on (the
+/// conversation answers it in place). A draft whose approval is no longer open (dismissed before
+/// that discarded it) never goes out as it stands: it reads `discarded`.
+fn out_state(
+    c: &rusqlite::Connection,
+    ws: &str,
+    id: &str,
+) -> ChannelResult<Option<(String, Option<String>)>> {
+    let row: Option<(String, Option<String>)> = c
+        .query_row(
+            "SELECT m.status, d.id FROM chan_messages m
+               LEFT JOIN decisions d ON d.id = m.decision_id AND d.status = 'open'
+              WHERE m.id = ? AND m.workspace_id = ?",
+            params![id, ws],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    Ok(row.map(|(st, open)| match (st.as_str(), open) {
+        ("draft", Some(d)) => (st, Some(d)),
+        ("draft", None) => (crate::outbound::DISCARDED.to_string(), None),
+        _ => (st, None),
+    }))
 }
 
 /// Is chat message `id` in workspace `ws`?
