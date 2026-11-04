@@ -311,14 +311,16 @@ export function resolve(id: string, choice: string, text = "", actor = "me"): De
     else { decisions.resolve(id, { expired: true }, "expired"); send("你之前请求权限的那次工具调用已经失效（会话被重启过）。如果还需要，请重新执行。") }
   } else if (d.kind === "approve" && d.subject_type === "release") {
     const yes = choice === "yes"
-    decisions.resolve(id, { approved: yes, text }); timeline.add(itemId!, actor, "me", (yes ? "批准发布 " : "不发布 ") + d.subject_id, s?.id ?? null)
+    decisions.resolve(id, { approved: yes, text }); timeline.add(itemId!, actor, "me", (yes ? "批准发布 " : "不发布 ") + d.subject_id + (!yes && text ? "：" + text : ""), s?.id ?? null)
     if (yes) { if (rebaseForRelease(itemId!, d.subject_id, send)) { items.patch(itemId!, { now: "正在发布" }); startRelease(d.subject_id, itemId!) } }
     else if (text) send(`用户没有批准发布：${text}。`)
     else { finish(itemId!, "已验收，未发布"); return decisions.get(id) }
   } else if (d.kind === "approve") {
     const yes = choice === "yes"
-    decisions.resolve(id, { approved: yes, text }); timeline.add(itemId!, actor, "me", (yes ? "批准：" : "拒绝：") + d.question, s?.id ?? null)
-    send(yes ? `用户批准了：${d.question}${text ? "。补充：" + text : ""}` : `用户拒绝了：${d.question}${text ? "。原因：" + text : ""}。不要执行这个操作。`)
+    /* the conversation line is the agent's message minus its framing, note included */
+    const said = d.question + (text ? (yes ? "。补充：" : "。原因：") + text : "")
+    decisions.resolve(id, { approved: yes, text }); timeline.add(itemId!, actor, "me", (yes ? "批准：" : "拒绝：") + said, s?.id ?? null)
+    send(yes ? `用户批准了：${said}` : `用户拒绝了：${said}。不要执行这个操作。`)
   } else if (d.kind === "propose") {
     const before = items.get(itemId!)
     if (choice === "yes") { decisions.resolve(id, { choice }); timeline.add(itemId!, actor, "me", "同意开始"); items.patch(itemId!, { status: "run" }); const a = activeSession(itemId!); if (a) void acp.prompt(a.id, "用户同意了，开始做。", "steve"); else void startSession(itemId!).catch((e) => fail(itemId!, `开不了会话：${e.message}`)) }

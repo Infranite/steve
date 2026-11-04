@@ -153,6 +153,11 @@ fn release_declined_with_a_reason_goes_back_to_the_agent() {
         k.rt.prompts_of(&x.session).last().unwrap(),
         "用户没有批准发布：先别发。"
     );
+    /* the conversation shows the choice with the note the agent got (ST-32) */
+    assert!(
+        k.timeline_texts(&x.id)
+            .contains(&format!("不发布 {}：先别发", x.session))
+    );
     assert_ne!(k.status(&x.id).0, "done");
 }
 

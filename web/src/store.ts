@@ -5,6 +5,7 @@ import { readEventPages } from "./event-pages"
  * calls the Hub — the SSE stream then refreshes what changed. */
 import { useEffect, useRef, useSyncExternalStore } from "react"
 import { toast as sonner } from "sonner"
+import { promptNeedle, withDecisionNotes } from "./decision-notes"
 import { api, setPageWorkspace, stream, Unauthenticated, type State, type RItem, type RItemDetail, type RSession, type RDecision, type RBot, type REvent, type RProject, type Proposal, type LocalSession, type HubEvent, type RNotice } from "./api"
 import { cue } from "./bus"
 import type { RFile, PlanStep, RHold, RQueued } from "./api"
@@ -314,16 +315,15 @@ function choiceLabel(d: RDecision) {
  * a comment (timeline kind "me") becomes a user prompt in one of the item's sessions: "补充信息：…", "用户的回答：…", a merged queue…
  * the first unclaimed prompt sent at or after the comment that contains its text is the one; the reply is that turn */
 export type Reply = { s: string; from: number; to: number; text: string; tools: number; live: boolean }
-const NO_PROMPT = /^(添加标签|移除标签|稍后提醒|暂停|放弃|归档|恢复|撤销了决定|同意开始|不需要|批准发布|不发布)/
-function repliesOf(det: RItemDetail, sids: string[]): Map<number, Reply> {
+function repliesOf(timeline: RItemDetail["timeline"], sids: string[]): Map<number, Reply> {
   const out = new Map<number, Reply>()
   const prompts = sids.flatMap((sid) => (raw.events.get(sid) ?? []).filter((e) => e.kind === "user").map((e) => ({ sid, e })))
     .sort((a, b) => a.e.ts - b.e.ts || a.e.seq - b.e.seq)
   if (!prompts.length) return out
   const used = new Set<number>()
-  for (const t of det.timeline) {
-    if (t.kind !== "me" || NO_PROMPT.test(t.text)) continue
-    const needle = t.text.replace(/^(回答|返工|批准|拒绝)：/, "").trim(); if (!needle) continue
+  for (const t of timeline) {
+    if (t.kind !== "me") continue
+    const needle = promptNeedle(t.text); if (!needle) continue
     const p = prompts.find(({ e }) => !used.has(e.seq) && e.ts >= t.ts - 1000 && String(e.data?.text ?? "").includes(needle))
     if (!p) continue
     used.add(p.e.seq)
@@ -353,8 +353,9 @@ function itemOf(i: RItem): Item {
   const open = decisionIndex.get(i.id) ?? []
   const snoozed = i.snooze && i.snooze.until > Date.now() ? i.snooze.label : undefined
   const act = activeIndex.get(i.id)
-  const replies = det ? repliesOf(det, i.sessionIds) : new Map<number, Reply>()
-  const tl = det ? det.timeline.flatMap((t) => t.kind === "session" && t.session_id && t.text.startsWith("开始会话") ? [["sys", `开始会话`, tm(t.ts)], ["sess", t.session_id]] : t.kind === "me" ? [["me", t.text, tm(t.ts), t.session_id ?? undefined, replies.get(t.id), t.files, t.via]] : [["sys", t.text, tm(t.ts)]]) : []
+  const lines = det ? withDecisionNotes(det.timeline, det.decisions) : []
+  const replies = det ? repliesOf(lines, i.sessionIds) : new Map<number, Reply>()
+  const tl = det ? lines.flatMap((t) => t.kind === "session" && t.session_id && t.text.startsWith("开始会话") ? [["sys", `开始会话`, tm(t.ts)], ["sess", t.session_id]] : t.kind === "me" ? [["me", t.text, tm(t.ts), t.session_id ?? undefined, replies.get(t.id), t.files, t.via]] : [["sys", t.text, tm(t.ts)]]) : []
   return {
     id: i.id, t: i.title, b: i.bot_id ?? "steve", st: i.status, deps: i.deps, src: i.source, ws: proj?.name ?? "—", project: i.project_id, up: tm(i.updated), star: i.star, acc: ACC[i.accept_mode ?? "inherit"] ?? "跟随全局",
     goals: det ? det.goalsList.map((g) => g.text) : [i.goal], now: i.now || "", plan: i.plan.length ? steps(i.plan) : undefined,

@@ -5,6 +5,7 @@ import { runInNewContext } from "node:vm"
 import ts from "../node_modules/typescript/lib/typescript.js"
 import * as pages from "../src/event-pages.ts"
 import * as live from "../src/live-utils.ts"
+import * as notes from "../src/decision-notes.ts"
 
 const code = ts.transpileModule(readFileSync(new URL("../src/store.ts", import.meta.url), "utf8"), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2023 } }).outputText
 const flush = async () => { for (let i = 0; i < 40; i++) await Promise.resolve() }
@@ -21,6 +22,7 @@ function harness() {
       if (id === "./api") return { api, setPageWorkspace: (ws) => { pageWs.push(ws) }, stream: (event, open) => { onEvent = event; onOpen = open; return () => {} }, Unauthenticated: class extends Error {} }
       if (id === "./event-pages") return pages
       if (id === "./live-utils") return live
+      if (id === "./decision-notes") return notes
       if (id === "./bus") return { cue: (x) => cues.push(x) }
       if (id === "sonner") return { toast: (x) => notices.push(x) }
       if (id === "react") return {}

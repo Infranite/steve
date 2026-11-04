@@ -1992,14 +1992,15 @@ impl Tx<'_> {
                     "resolved",
                     None,
                 )?;
+                /* the note goes into the conversation exactly when it goes to the agent: with a "no" */
                 tl(
                     self,
                     &i,
-                    &format!(
-                        "{}{}",
-                        if yes { "批准发布 " } else { "不发布 " },
-                        d.subject_id
-                    ),
+                    &match (yes, text) {
+                        (true, _) => format!("批准发布 {}", d.subject_id),
+                        (false, "") => format!("不发布 {}", d.subject_id),
+                        (false, t) => format!("不发布 {}：{t}", d.subject_id),
+                    },
                 )?;
                 if yes {
                     if self.rebase_for_release(&i, &d.subject_id, &to)? {
@@ -2022,31 +2023,21 @@ impl Tx<'_> {
                     "resolved",
                     None,
                 )?;
+                /* the conversation line is the agent's message minus its framing, note included */
+                let said = match (yes, text) {
+                    (_, "") => d.question.clone(),
+                    (true, t) => format!("{}。补充：{t}", d.question),
+                    (false, t) => format!("{}。原因：{t}", d.question),
+                };
                 tl(
                     self,
                     &i,
-                    &format!("{}{}", if yes { "批准：" } else { "拒绝：" }, d.question),
+                    &format!("{}{said}", if yes { "批准：" } else { "拒绝：" }),
                 )?;
                 let m = if yes {
-                    format!(
-                        "用户批准了：{}{}",
-                        d.question,
-                        if text.is_empty() {
-                            String::new()
-                        } else {
-                            format!("。补充：{text}")
-                        }
-                    )
+                    format!("用户批准了：{said}")
                 } else {
-                    format!(
-                        "用户拒绝了：{}{}。不要执行这个操作。",
-                        d.question,
-                        if text.is_empty() {
-                            String::new()
-                        } else {
-                            format!("。原因：{text}")
-                        }
-                    )
+                    format!("用户拒绝了：{said}。不要执行这个操作。")
                 };
                 self.send(&to, &m)?;
             }
