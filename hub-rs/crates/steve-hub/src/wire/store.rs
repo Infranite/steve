@@ -566,6 +566,60 @@ impl Repo for StoreBackend {
     fn artifacts_list(&self, item: &str) -> BResult<Vec<Obj>> {
         objs(self.0.artifacts().list(item).map_err(err)?)
     }
+    fn artifact_roles(&self, item: &str) -> BResult<Obj> {
+        Ok(self
+            .0
+            .artifacts()
+            .roles(item)
+            .map_err(err)?
+            .into_iter()
+            .map(|(id, role)| (id, Value::String(role)))
+            .collect())
+    }
+    fn annotations_list(&self, item: &str) -> BResult<Vec<Obj>> {
+        objs(self.0.annotations().list(item).map_err(err)?)
+    }
+    fn annotation_add(
+        &self,
+        item: &str,
+        art: &str,
+        path: &str,
+        anchor: &Value,
+        note: &str,
+    ) -> BResult<Obj> {
+        obj(self
+            .0
+            .annotations()
+            .add(item, art, path, anchor, note)
+            .map_err(err)?)
+    }
+    fn annotation_edit(&self, item: &str, id: &str, note: &str) -> BResult<Option<Obj>> {
+        opt(self.0.annotations().edit(item, id, note).map_err(err)?)
+    }
+    fn annotation_remove(&self, item: &str, id: &str) -> BResult<bool> {
+        self.0.annotations().remove(item, id).map_err(err)
+    }
+    fn annotations_claim(
+        &self,
+        item: &str,
+        ids: &[String],
+        key: &str,
+    ) -> BResult<(bool, Vec<Obj>)> {
+        let c = self.0.annotations().claim(item, ids, key).map_err(err)?;
+        Ok((c.again, objs(c.taken)?))
+    }
+    fn annotations_settle(
+        &self,
+        item: &str,
+        key: &str,
+        sent: bool,
+        timeline_id: Option<i64>,
+    ) -> BResult<()> {
+        self.0
+            .annotations()
+            .settle(item, key, sent, timeline_id)
+            .map_err(err)
+    }
 
     fn session_get(&self, id: &str) -> BResult<Option<Obj>> {
         opt(self.0.sessions().get(id).map_err(err)?)

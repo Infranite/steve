@@ -374,6 +374,19 @@ pub(crate) fn media(name: &str) -> (Option<&'static str>, &'static str) {
         "m4a" => (Some("audio"), "audio/mp4"),
         "ogg" | "oga" => (Some("audio"), "audio/ogg"),
         "flac" => (Some("audio"), "audio/flac"),
+        // Office Open XML: the page unzips and renders them itself
+        "docx" => (
+            Some("office"),
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        ),
+        "xlsx" => (
+            Some("office"),
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        ),
+        "pptx" => (
+            Some("office"),
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        ),
         _ => (None, "application/octet-stream"),
     }
 }
@@ -417,6 +430,17 @@ fn lang(name: &str) -> &'static str {
         "xml" | "plist" => "xml",
         "diff" | "patch" => "diff",
         "mermaid" | "mmd" => "mermaid",
+        "php" => "php",
+        "lua" => "lua",
+        "r" => "r",
+        "scala" => "scala",
+        "dart" => "dart",
+        "vue" => "vue",
+        "svelte" => "svelte",
+        "graphql" | "gql" => "graphql",
+        "proto" => "proto",
+        "ini" | "cfg" | "conf" => "ini",
+        "tex" => "latex",
         _ => "text",
     }
 }
@@ -712,6 +736,17 @@ mod tests {
         assert_eq!(describe(&d, Some("../说明.md"))["type"], "missing");
         assert_eq!(describe(&d, Some("/etc/hosts"))["type"], "missing");
         assert!(matches!(locate(&d, Some("a.png")), Ok(Found::Disk(p, _)) if p.ends_with("a.png")));
+        // Word, Excel and PowerPoint files go to the page as they are, to be rendered there
+        std::fs::write(w.join("docs/报告.docx"), [b'P', b'K', 3, 4, 0]).unwrap();
+        let v = describe(&out("文档", "报告", Some("docs/报告.docx"), &w, None), None);
+        assert_eq!(
+            (v["type"].as_str(), v["name"].as_str()),
+            (Some("office"), Some("报告.docx")),
+            "{v}"
+        );
+        assert_eq!(media("a.XLSX").0, Some("office"));
+        assert_eq!(media("a.pptx").0, Some("office"));
+        assert_eq!(media("a.doc").0, None);
     }
 
     #[test]

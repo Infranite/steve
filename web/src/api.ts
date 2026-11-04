@@ -8,6 +8,10 @@ export type RItem = {
   goal: string; goals: number; tags: string[]; deps: string[]; sessionIds: string[]; open: string[]; queued: number; live: boolean
 }
 export type RItemDetail = RItem & { goalsList: { version: number; text: string; created: number }[]; planRounds?: { round: number; steps: PlanStep[]; end: "done" | "replaced"; created: number }[]; timeline: { id: number; ts: number; actor: string; kind: string; text: string; session_id: string | null; files?: RFile[]; via?: string }[]; artifacts: { id: string; kind: string; title: string; location: string | null; created: number }[]; decisions: RDecision[]; dependents: string[]
+  /** outputs delivered as records of the work (self-check screenshots, logs): `{artifact id: "record"}` */
+  artifactRoles?: Record<string, string>
+  /** the user's notes on the outputs, drafts and sent (ST-38) */
+  annotations?: RAnnotation[]
   /** the item came from the main conversation (thread-routing §5): whether it reports back there */
   thread?: { follow: boolean; origin_msg: string } | null }
 export type RSession = { id: string; workspace_id: string; item_id: string | null; no: number; bot_id: string | null; harness: string; model: string | null; reasoning_effort?: string | null; cwd: string; harness_session_id?: string | null; status: "starting" | "running" | "idle" | "ended" | "error"; used: number | null; size: number | null; cost: number | null; title: string; device_id: string; source: string; readonly: boolean; busy: boolean; queued: RQueued[]; created: number; updated: number }
@@ -64,6 +68,11 @@ export type A2uiSubmit = { block: string; surfaceId: string; sourceComponentId: 
 export type A2uiRecord = { name: string; label?: string; sourceComponentId: string; context: Record<string, unknown>; data?: unknown; at: number; message?: string }
 /** an uploaded attachment, as messages, comments and session events carry it */
 export type RFile = { id: string; name: string; mime: string; size: number }
+/** where on an output a note is: a region of an image (fractions of it), selected text, a PDF page, or the whole file;
+ * `at` names the part it is in (a sheet, a slide) */
+export type RAnchor = ({ type: "region"; x: number; y: number; w: number; h: number } | { type: "text"; quote: string; prefix?: string; suffix?: string; line?: number } | { type: "page"; page: number } | { type: "file" }) & { at?: string }
+/** a note on one output as delivered (`artifact_id` is its version); `path`: a file inside a folder output */
+export type RAnnotation = { id: string; item_id: string; artifact_id: string; path: string; anchor: RAnchor; note: string; status: "draft" | "sending" | "sent"; send_key: string | null; timeline_id: number | null; created: number; updated: number; sent: number | null }
 /** what an item's output holds (`/items/:id/artifacts/:art/preview`); `path` is an entry inside a folder output */
 export type ROutFile = { name: string; path: string; size?: number; modified?: number | null }
 export type ROutCommit = { hash: string; subject: string; author: string; at: number | null }
@@ -71,6 +80,7 @@ export type ROutPreview =
   | ({ type: "text"; lang: string; text: string; truncated: boolean; from?: string } & ROutFile)
   | ({ type: "image" | "pdf" | "video" | "audio"; mime: string; large: boolean } & ROutFile)
   | ({ type: "binary" } & ROutFile)
+  | ({ type: "office"; mime: string; large: boolean } & ROutFile)
   | { type: "dir"; path: string; truncated: boolean; entries: { name: string; dir: boolean; size: number | null; modified: number | null; form: "image" | "pdf" | "video" | "audio" | null }[] }
   | { type: "commit"; hash: string; author: string; at: number | null; message: string; stat: string; diff: string; truncated: boolean }
   | { type: "branch"; branch: string; base: string | null; worktree: string | null; commits: ROutCommit[]; stat: string; diff: string; truncated: boolean }
@@ -154,6 +164,11 @@ export const api = {
   dismissNotice: (id: string) => post<{ ok: true }>(`/notifications/${encodeURIComponent(id)}/dismiss`, {}),
   item: (id: string) => get<RItemDetail>("/items/" + id),
   outPreview: (id: string, art: string, path?: string) => get<ROutPreview>(`/items/${encodeURIComponent(id)}/artifacts/${encodeURIComponent(art)}/preview${qs({ path })}`),
+  annAdd: (id: string, p: { art: string; path?: string; anchor: RAnchor; note: string }) => post<RAnnotation>(`/items/${encodeURIComponent(id)}/annotations`, p),
+  annEdit: (id: string, ann: string, note: string) => patch<RAnnotation>(`/items/${encodeURIComponent(id)}/annotations/${encodeURIComponent(ann)}`, { note }),
+  annRemove: (id: string, ann: string) => del<{ ok: boolean }>(`/items/${encodeURIComponent(id)}/annotations/${encodeURIComponent(ann)}`),
+  /* one send per key: the same key again (a second click, a retry) is answered `again` and sends nothing */
+  annSend: (id: string, ids: string[], key: string) => post<{ ok: boolean; again: boolean; pending?: boolean; sent: number; timeline_id?: number | null; warning?: string }>(`/items/${encodeURIComponent(id)}/annotations/send`, { ids, key }),
   newItem: (p: { goal: string; bot?: string; project?: string | null; mode?: "start" | "propose" }) => post<RItem>("/items", p),
   itemAction: (id: string, action: string) => post(`/items/${id}/actions`, { action }), bulk: (ids: string[], op: string) => post<{ n: number }>("/items/bulk", { ids, op }),
   goal: (id: string, text: string) => post(`/items/${id}/goal`, { text }),

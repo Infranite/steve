@@ -1,4 +1,5 @@
-import { api, outRawUrl, type ROutPreview } from "@/api"
+import { api, outRawUrl, type RAnnotation, type ROutPreview } from "@/api"
+import { AnnBar, AnnImage, clearMark, markText, useSelection, type Pending } from "@/annotate"
 import { size } from "@/attach"
 import { Markdown } from "@/components/markdown"
 import { Button } from "@/components/ui/button"
@@ -7,8 +8,9 @@ import { Spinner } from "@/components/ui/spinner"
 import { tm, toast, type Out } from "@/store"
 import { Segmented } from "@/ui"
 import { cn } from "cn"
-import { ChevronRightIcon, CopyIcon, DownloadIcon, ExternalLinkIcon, FileIcon, FileTextIcon, FolderIcon, GitBranchIcon } from "lucide-react"
-import { useEffect, useState, type ReactNode } from "react"
+import { OfficeView } from "@/office"
+import { ChevronLeftIcon, ChevronRightIcon, CopyIcon, DownloadIcon, ExternalLinkIcon, FileIcon, FileTextIcon, FolderIcon, GalleryVerticalIcon, GitBranchIcon, ZoomInIcon, ZoomOutIcon } from "lucide-react"
+import { useEffect, useRef, useState, type ReactNode } from "react"
 
 /* what an item's output holds, shown as itself: documents rendered, code highlighted, tables as tables, images,
  * PDFs and media in place, folders browsable, branches and commits as their commits and diff */
@@ -113,12 +115,13 @@ function Diff({ diff, truncated }: { diff: string; truncated: boolean }) {
 const statLast = (stat: string) => stat.trim().split("\n").pop() ?? ""
 
 /** `base`: the path walked below the output so far; an entry opens as `base/name` */
-function Folder({ p, item, art, base, open }: { p: Extract<ROutPreview, { type: "dir" }>; item: string; art: string; base: string; open: (sub: string) => void }) {
+function Folder({ p, item, art, base, open, browse }: { p: Extract<ROutPreview, { type: "dir" }>; item: string; art: string; base: string; open: (sub: string) => void; browse: () => void }) {
   const at = (n: string) => (base ? base + "/" : "") + n
   const pics = p.entries.filter((e) => e.form === "image"), rest = p.entries.filter((e) => e.form !== "image")
   if (!p.entries.length) return <Missing reason="文件夹是空的" />
   return (
     <div className="flex flex-col gap-3" data-out-dir>
+      {pics.length > 1 && <Button size="sm" variant="outline" className="self-start" onClick={browse} data-out-browse><GalleryVerticalIcon />连续浏览 {pics.length} 张图片</Button>}
       {pics.length > 0 && <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">{pics.map((e) => (
         <button key={e.name} type="button" onClick={() => open(at(e.name))} className="group flex flex-col gap-1 text-left" data-out-entry={e.name}>
           <img src={outRawUrl(item, art, at(e.name))} alt={e.name} loading="lazy" className="aspect-[4/3] w-full rounded-lg border bg-muted object-cover object-top transition-opacity group-hover:opacity-85" />
@@ -135,12 +138,82 @@ function Folder({ p, item, art, base, open }: { p: Extract<ROutPreview, { type: 
     </div>
   )
 }
-function Media({ p, url }: { p: Extract<ROutPreview, { type: "image" | "pdf" | "video" | "audio" }>; url: string }) {
+function Media({ p, url, page }: { p: Extract<ROutPreview, { type: "image" | "pdf" | "video" | "audio" }>; url: string; page?: number }) {
   if (p.large) return <Missing reason={`文件太大（${size(p.size ?? 0)}），请下载后查看`} />
-  return p.type === "image" ? <a href={url} target="_blank" rel="noopener" className="block"><img src={url} alt={p.name} className="mx-auto max-h-[65vh] max-w-full rounded-lg border object-contain" data-out-image /></a>
-    : p.type === "pdf" ? <iframe title={p.name} src={url} className="block h-[65vh] w-full rounded-xl border" data-out-pdf />
+  return p.type === "pdf" ? <iframe key={page ?? 0} title={p.name} src={page ? `${url}#page=${page}` : url} className="block h-[65vh] w-full rounded-xl border" data-out-pdf />
     : p.type === "video" ? <video src={url} controls className="max-h-[65vh] w-full rounded-xl bg-black" data-out-video />
     : <audio src={url} controls className="w-full" data-out-audio />
+}
+
+/** one picture of a set: where it is in the output, and how to show and fetch it */
+type Pic = { key: string; name: string; art: string; path: string; src: string; out?: Out }
+/** pictures one after another: a swipe, the arrow keys or the buttons move between them; the strip below jumps.
+ * 连续 shows them all, one under another. While regions are drawn or the picture is zoomed, dragging belongs to the picture. */
+function Gallery({ pics, at, go, notesOf, drawing, onDraw, focus, mode, setMode }: { pics: Pic[]; at: number; go: (n: number) => void; notesOf: (p: Pic) => { a: RAnnotation; n: number }[]
+  drawing: boolean; onDraw: (p: Pic, b: { x: number; y: number; w: number; h: number }) => void; focus?: string; mode: "逐张" | "连续"; setMode: (m: "逐张" | "连续") => void }) {
+  const [zoom, setZoom] = useState(false)
+  const start = useRef<{ x: number; y: number } | null>(null), strip = useRef<HTMLDivElement>(null)
+  const cur = pics[at], many = pics.length > 1
+  useEffect(() => { setZoom(false) }, [at])
+  useEffect(() => { strip.current?.querySelector<HTMLElement>(`[data-pic-thumb="${at}"]`)?.scrollIntoView({ block: "nearest", inline: "center" }) }, [at])
+  useEffect(() => {
+    if (!many || mode !== "逐张") return
+    const k = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLElement && e.target.closest("input, textarea, [contenteditable], [role=tablist]")) return
+      if (e.key === "ArrowLeft" && at > 0) { e.preventDefault(); go(at - 1) }
+      if (e.key === "ArrowRight" && at < pics.length - 1) { e.preventDefault(); go(at + 1) }
+    }
+    /* the dialog keeps its keys to itself: listen before it does */
+    document.addEventListener("keydown", k, true)
+    return () => document.removeEventListener("keydown", k, true)
+  }, [many, mode, at, pics.length, go])
+  if (!cur) return null
+  const bar = (
+    <div className="flex items-center gap-2" data-gallery-bar>
+      {many && <Segmented size="sm" value={mode} onChange={setMode} options={["逐张", "连续"] as const} />}
+      {many && mode === "逐张" && <span className="type-footnote tabular-nums text-muted-foreground" data-gallery-count>{at + 1} / {pics.length}</span>}
+      <span className="min-w-0 flex-1 truncate type-footnote text-muted-foreground">{mode === "逐张" ? cur.name : `共 ${pics.length} 张，上下滑动浏览`}</span>
+      {mode === "逐张" && <Button size="sm" variant="ghost" aria-pressed={zoom} onClick={() => setZoom(!zoom)} data-gallery-zoom>{zoom ? <ZoomOutIcon /> : <ZoomInIcon />}{zoom ? "还原" : "放大"}</Button>}
+    </div>
+  )
+  if (mode === "连续") return (
+    <div className="flex flex-col gap-3" data-gallery="连续">
+      {bar}
+      <div className="flex flex-col gap-5" data-gallery-scroll>
+        {pics.map((p, n) => <figure key={p.key} className="flex flex-col items-center gap-1.5" data-pic={n}>
+          <AnnImage src={p.src} alt={p.name} notes={notesOf(p)} drawing={drawing} onDraw={(b) => onDraw(p, b)} focus={focus} />
+          <figcaption className="type-footnote text-muted-foreground"><span className="tabular-nums">{n + 1} / {pics.length}</span> · {p.name}</figcaption>
+        </figure>)}
+      </div>
+    </div>
+  )
+  const free = !drawing && !zoom
+  return (
+    <div className="flex min-w-0 flex-col gap-2" data-gallery="逐张">
+      {bar}
+      <div className={cn("relative flex min-h-40 justify-center rounded-xl bg-muted/40", zoom ? "max-h-[65vh] justify-start overflow-auto" : "items-center", free && "touch-pan-y")} data-gallery-stage
+        onPointerDown={free ? (e) => { start.current = { x: e.clientX, y: e.clientY } } : undefined}
+        onPointerUp={free ? (e) => {
+          const s = start.current; start.current = null
+          if (!s) return
+          const dx = e.clientX - s.x, dy = e.clientY - s.y
+          if (Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy) * 1.5) { if (dx < 0 && at < pics.length - 1) go(at + 1); if (dx > 0 && at > 0) go(at - 1) }
+        } : undefined}
+        onDoubleClick={() => !drawing && setZoom(!zoom)}>
+        <AnnImage key={cur.key} src={cur.src} alt={cur.name} notes={notesOf(cur)} drawing={drawing} onDraw={(b) => onDraw(cur, b)} focus={focus}
+          className={cn(zoom && "max-w-none")} imgClass={zoom ? "max-w-none w-[200%]" : "max-h-[55vh] max-sm:max-h-[45vh]"} />
+        {many && !zoom && <>
+          <Button size="icon" variant="outline" aria-label="上一张" disabled={at === 0} onClick={() => go(at - 1)} className="absolute left-2 top-1/2 -translate-y-1/2 rounded-full bg-background/85 backdrop-blur disabled:opacity-0" data-gallery-prev><ChevronLeftIcon /></Button>
+          <Button size="icon" variant="outline" aria-label="下一张" disabled={at === pics.length - 1} onClick={() => go(at + 1)} className="absolute right-2 top-1/2 -translate-y-1/2 rounded-full bg-background/85 backdrop-blur disabled:opacity-0" data-gallery-next><ChevronRightIcon /></Button>
+        </>}
+      </div>
+      {many && <div ref={strip} className="flex gap-1.5 overflow-x-auto pb-1" data-gallery-strip>
+        {pics.map((p, n) => <button key={p.key} type="button" aria-label={`第 ${n + 1} 张：${p.name}`} aria-current={n === at} onClick={() => go(n)} data-pic-thumb={n}
+          className={cn("h-12 w-16 shrink-0 overflow-hidden rounded-md border-2 transition-opacity", n === at ? "border-blue" : "border-transparent opacity-60 hover:opacity-100")}>
+          <img src={p.src} alt="" loading="lazy" className="size-full object-cover object-top" /></button>)}
+      </div>}
+    </div>
+  )
 }
 
 function Commits({ cs }: { cs: { hash: string; subject: string; author: string; at: number | null }[] }) {
@@ -153,31 +226,87 @@ function Commits({ cs }: { cs: { hash: string; subject: string; author: string; 
   )
 }
 
-/** the body of the output dialog; `loc` and the kind come from the row, the rest from the Hub */
-export function OutPreview({ o, item }: { o: Out; item: string }) {
+const IMG = /\.(png|jpe?g|gif|webp|avif|bmp|svg)$/i
+/** how pictures were last looked at, kept while moving between outputs */
+let lastMode: "逐张" | "连续" = "逐张"
+type Entry = Extract<ROutPreview, { type: "dir" }>["entries"][number]
+
+/** the body of the output dialog; `loc` and the kind come from the row, the rest from the Hub. `siblings`: the other
+ * pictures delivered with this one, to move between; `focus`: a note to show where it is; `anns`: the item's notes */
+export function OutPreview({ o, item, anns = [], focus: focus0, siblings = [], outs = [], onOpen }: { o: Out; item: string; anns?: RAnnotation[]; focus?: string; siblings?: Out[]; outs?: Out[]; onOpen?: (o: Out, focus?: string) => void }) {
   const [k, , loc, art] = o
-  const [path, setPath] = useState<string[]>([])
+  const start = anns.find((a) => a.id === focus0 && a.artifact_id === art)
+  const [path, setPath] = useState<string[]>(start?.path ? start.path.split("/") : [])
   const [p, setP] = useState<ROutPreview | null>(null), [err, setErr] = useState("")
-  const at = path.join("/")
+  const [dirs, setDirs] = useState<Record<string, Entry[]>>({})
+  const [mode, setMode0] = useState(lastMode)
+  const setMode = (m: "逐张" | "连续") => { lastMode = m; setMode0(m) }
+  const [drawing, setDrawing] = useState(false), [pending, setPending] = useState<Pending | null>(null)
+  const [focus, setFocus] = useState(focus0)
+  const box = useRef<HTMLDivElement>(null)
+  const [sel, setSel] = useSelection(box, p?.type === "text" ? p.text : undefined)
+  const at = path.join("/"), parent = path.slice(0, -1).join("/")
   useEffect(() => {
-    let live = true; setP(null); setErr("")
-    api.outPreview(item, art, at || undefined).then((v) => live && setP(v), (e: Error) => live && setErr(e.message))
+    let live = true; setP(null); setErr(""); setSel(null)
+    api.outPreview(item, art, at || undefined).then((v) => { if (!live) return; setP(v); if (v.type === "dir") setDirs((d) => ({ ...d, [at]: v.entries })) }, (e: Error) => live && setErr(e.message))
     return () => { live = false }
-  }, [item, art, at])
-  const media = !!p && ["image", "pdf", "video", "audio"].includes(p.type)
+  }, [item, art, at, setSel])
+  /* a picture inside a folder moves between the folder's pictures: the folder is listed once */
+  const inFolder = p?.type === "image" && path.length > 0
+  useEffect(() => {
+    if (!inFolder || dirs[parent]) return
+    let live = true
+    api.outPreview(item, art, parent || undefined).then((v) => live && v.type === "dir" && setDirs((d) => ({ ...d, [parent]: v.entries })), () => {})
+    return () => { live = false }
+  }, [inFolder, parent, dirs, item, art])
+  const pics: Pic[] = p?.type !== "image" ? []
+    : inFolder ? (dirs[parent] ?? []).filter((e) => e.form === "image").map((e) => { const sub = parent ? `${parent}/${e.name}` : e.name; return { key: `${art}/${sub}`, name: e.name, art, path: sub, src: outRawUrl(item, art, sub) } })
+    : [o, ...siblings.filter((x) => x[3] !== art)].filter((x) => x[3] === art || (x[2] && IMG.test(x[2].trim()))).sort((a, b) => siblings.findIndex((s) => s[3] === a[3]) - siblings.findIndex((s) => s[3] === b[3]))
+      .map((x) => ({ key: x[3], name: x[1], art: x[3], path: "", src: outRawUrl(item, x[3]), out: x }))
+  const cur = Math.max(0, pics.findIndex((x) => x.art === art && x.path === at))
+  const goPic = (n: number) => { const x = pics[n]; if (!x) return; if (x.out && x.art !== art) onOpen?.(x.out); else setPath(x.path ? x.path.split("/") : []) }
+
+  /* the notes on what is shown, numbered as they were written */
+  const here = (a: RAnnotation) => mode === "连续" && pics.length > 1 ? pics.some((x) => x.art === a.artifact_id && x.path === a.path)
+    : a.artifact_id === art && (p?.type === "dir" ? true : a.path === at)
+  const notes = anns.filter(here).sort((a, b) => a.created - b.created).map((a, n) => ({ a, n: n + 1 }))
+  const notesOf = (x: Pic) => notes.filter(({ a }) => a.artifact_id === x.art && a.path === x.path)
+  /* a send the Hub was stopped in the middle of frees its drafts after five minutes */
+  const drafts = anns.filter((a) => a.status === "draft" || (a.status === "sending" && Date.now() - a.updated > 300_000))
+  const focused = anns.find((a) => a.id === focus)
+  const page = focused?.artifact_id === art && focused.anchor.type === "page" ? focused.anchor.page : undefined
+  /* show where the focused note is once its text has rendered (documents, sheets and slides render after loading) */
+  useEffect(() => {
+    clearMark()
+    if (!p || !focused || focused.artifact_id !== art || focused.path !== at || focused.anchor.type !== "text") return
+    const quote = focused.anchor.quote
+    let n = 0, t = 0
+    const tick = () => { if (box.current && markText(box.current, quote)) return; if (++n < 20) t = window.setTimeout(tick, 200) }
+    tick()
+    return () => { window.clearTimeout(t); clearMark() }
+  }, [p, focused, art, at])
+  const locate = (a: RAnnotation) => {
+    setFocus(a.id)
+    if (a.artifact_id !== art) { const x = outs.find((s) => s[3] === a.artifact_id); if (x) onOpen?.(x, a.id); return }
+    if (a.path !== at && !(mode === "连续" && pics.length > 1)) setPath(a.path ? a.path.split("/") : [])
+  }
+
+  const media = !!p && ["image", "pdf", "video", "audio", "office"].includes(p.type)
   /* a text git still had (its worktree is gone) has no file to download */
   const file = media || p?.type === "binary" || (p?.type === "text" && !p.from)
   const raw = (dl = false) => outRawUrl(item, art, at || undefined, dl)
   const where = p && "path" in p ? p.path : loc
   /* what a branch or commit is known by, to paste into git */
   const ref = p?.type === "commit" ? p.hash : p?.type === "branch" ? p.branch : null
+  const legacy = p?.type === "binary" && /\.(doc|xls|ppt|pages|numbers|key|odt|ods|odp)$/i.test(p.name)
   const body = err ? <Missing reason={err} />
     : !p ? <div className="flex justify-center py-16"><Spinner className="size-5 text-muted-foreground" /></div>
     : p.type === "missing" ? <Missing reason={p.reason} />
     : p.type === "link" ? <div className="flex flex-col items-start gap-3 py-2"><span className="break-all font-mono text-[12.5px]">{p.url}</span><Button size="sm" onClick={() => window.open(p.url, "_blank", "noopener")}><ExternalLinkIcon />打开链接</Button></div>
     : p.type === "text" ? <TextView key={at} p={p} />
-    : p.type === "binary" ? <Missing reason={`${p.name} 不是文本、图片或媒体文件（${size(p.size ?? 0)}），可以下载后用本地应用打开`} />
-    : p.type === "dir" ? <Folder p={p} item={item} art={art} base={at} open={(s) => setPath(s.split("/"))} />
+    : p.type === "binary" ? <Missing reason={legacy ? `${p.name} 是旧版 Office 或 iWork 格式，不能直接预览：可以下载后打开，或让 Bot 另存为 PDF、docx、xlsx、pptx` : `${p.name} 不是文本、图片或媒体文件（${size(p.size ?? 0)}），可以下载后用本地应用打开`} />
+    : p.type === "office" ? (p.large ? <Missing reason={`文件太大（${size(p.size ?? 0)}），请下载后查看`} /> : <OfficeView url={raw()} name={p.name} fallback={(r) => <Missing reason={r} />} />)
+    : p.type === "dir" ? <Folder p={p} item={item} art={art} base={at} open={(s) => setPath(s.split("/"))} browse={() => { const e = p.entries.find((x) => x.form === "image"); if (e) { setMode("连续"); setPath([...path, e.name]) } }} />
     : p.type === "commit" ? <div className="flex flex-col gap-3" data-out-commit>
         <div className="flex flex-col gap-1"><div className="type-callout whitespace-pre-wrap break-words">{p.message}</div><div className="type-footnote text-muted-foreground"><span className="font-mono">{p.hash.slice(0, 10)}</span> · {p.author}{p.at && ` · ${tm(p.at)}`} · {statLast(p.stat)}</div></div>
         <Diff diff={p.diff} truncated={p.truncated} /></div>
@@ -187,14 +316,19 @@ export function OutPreview({ o, item }: { o: Out; item: string }) {
         {p.base && !p.commits.length && <Note>这个分支的改动已经都在 {p.base} 上了</Note>}
         {p.commits.length > 0 && <Commits cs={p.commits} />}
         <Diff diff={p.diff} truncated={p.truncated} /></div>
-    : <Media p={p} url={raw()} />
+    : p.type === "image" ? (p.large ? <Missing reason={`文件太大（${size(p.size ?? 0)}），请下载后查看`} />
+        : <Gallery pics={pics} at={cur} go={goPic} notesOf={notesOf} drawing={drawing} focus={focus} mode={mode} setMode={setMode}
+            onDraw={(x, b) => setPending({ art: x.art, path: x.path, anchor: { type: "region", ...b } })} />)
+    : <Media p={p} url={raw()} page={page} />
   return (
-    <div className="flex min-h-0 min-w-0 flex-col gap-3" data-out-preview={p?.type ?? "loading"} data-kind={k}>
+    <div className="flex min-h-0 min-w-0 flex-col gap-3 overflow-y-auto" data-out-preview={p?.type ?? "loading"} data-kind={k}>
       {path.length > 0 && <nav className="flex flex-wrap items-center gap-1 type-footnote text-muted-foreground" data-out-crumbs>
         <button type="button" className="hover:text-foreground" onClick={() => setPath([])}>{(loc ?? "").replace(/\/$/, "").split("/").pop() || "产出"}</button>
         {path.map((s, n) => <span key={n} className="flex items-center gap-1"><ChevronRightIcon className="size-3" /><button type="button" className={cn(n === path.length - 1 ? "text-foreground" : "hover:text-foreground")} onClick={() => setPath(path.slice(0, n + 1))}>{s}</button></span>)}
       </nav>}
-      <div className="min-h-0 min-w-0 overflow-auto">{body}</div>
+      <div ref={box} className="min-w-0 shrink-0" data-out-body>{body}</div>
+      {p && !err && p.type !== "missing" && <AnnBar item={item} art={art} path={at} notes={notes} allDrafts={drafts} pending={pending} setPending={setPending} sel={sel} clearSel={() => setSel(null)}
+        canDraw={p.type === "image" && !p.large} drawing={drawing} setDrawing={setDrawing} pdf={p.type === "pdf"} onLocate={locate} />}
       {(where || file || ref) && <div className="flex flex-wrap items-center gap-2 border-t pt-3">
         {where && <span className="mr-auto min-w-0 truncate font-mono text-[12px] text-muted-foreground" title={where}>{where}{p && "size" in p && p.size != null ? ` · ${size(p.size)}` : ""}</span>}
         {file && <Button variant="ghost" size="sm" onClick={() => { location.href = raw(true) }}><DownloadIcon />下载</Button>}

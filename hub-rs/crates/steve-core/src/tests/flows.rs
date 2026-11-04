@@ -619,6 +619,7 @@ fn deliver_records_outputs_and_rework_goes_back() {
                 kind: "文件".into(),
                 title: "a.txt".into(),
                 location: Some("/tmp/a.txt".into()),
+                role: None,
             }],
             &[],
             &[],
@@ -650,6 +651,34 @@ fn deliver_records_outputs_and_rework_goes_back() {
     assert_eq!(
         k.db().decision(&d.id).unwrap().unwrap().result,
         json!({"choice": "rework", "text": ""})
+    );
+}
+
+#[test]
+fn deliver_keeps_records_apart_from_results() {
+    let k = Kit::new();
+    let i = new_item(&k, "g");
+    let s = only_session(&k, &i.id);
+    let out = |title: &str, role: Option<&str>| Output {
+        kind: "文件".into(),
+        title: title.into(),
+        location: Some(format!("/tmp/{title}")),
+        role: role.map(str::to_string),
+    };
+    k.core
+        .tool_deliver(
+            &s,
+            "做好了",
+            &[out("report.md", None), out("shots", Some("record"))],
+            &[],
+            &[],
+        )
+        .unwrap();
+    let arts = k.db().store().artifacts().list(&i.id).unwrap();
+    assert_eq!(arts.len(), 2);
+    assert_eq!(
+        k.db().store().artifacts().roles(&i.id).unwrap(),
+        [(arts[1].id.clone(), "record".to_string())]
     );
 }
 

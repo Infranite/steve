@@ -75,6 +75,8 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/031.sql"),
     // 32: model prices synced from Models.dev and the state of the sync.
     include_str!("../migrations/032.sql"),
+    // 33: outputs delivered as records of the work, and the user's notes on outputs (ST-38).
+    include_str!("../migrations/033.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).

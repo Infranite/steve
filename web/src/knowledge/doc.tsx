@@ -68,7 +68,7 @@ function Chunks({ d }: { d: Doc }) {
       <div className="flex flex-col gap-2">{d.preview.map((c) => (
         <div key={c.seq} data-seq={c.seq} aria-current={c.seq === seq ? "true" : undefined} className={cn("scroll-mt-24 rounded-xl border px-4 py-3", c.seq === seq && "border-blue/50 bg-blue/5 ring-2 ring-blue/20")}>
           {c.heading && <div className="mb-1 type-footnote font-medium text-muted-foreground">{c.heading}</div>}
-          <div className="whitespace-pre-wrap break-words type-callout">{c.text}</div>
+          <div className="min-w-0 break-words" data-chunk-text><Markdown text={c.text} className="type-callout" /></div>
         </div>))}</div>
     </section>
   )

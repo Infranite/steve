@@ -10,6 +10,7 @@ import { Spinner } from "@/components/ui/spinner"
 import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
 import { Files } from "@/attach"
+import { Markdown } from "@/components/markdown"
 import type { RQueued } from "@/api"
 import { chatBusy, qEdit, qSendNow, qWithdraw, st, threadQueuedEdit, threadQueuedWithdraw, type Sess } from "@/store"
 import { Brief, type ComposerHandle } from "@/ui"
@@ -114,7 +115,7 @@ function Row({ q, shown, ops }: { q: QRow; shown: string; ops: QOps }) {
       <div className="min-w-0 flex-1">
         {!resumed && e.edit !== null ? <EditBox e={e} />
           : via === "steve" ? <Brief text={shown} label="Steve 交代" className="type-callout text-muted-foreground" />
-          : (shown !== "（附件）" || !q.files?.length) && <div className="line-clamp-4 whitespace-pre-wrap break-words type-callout" data-queued-text>{shown}</div>}
+          : (shown !== "（附件）" || !q.files?.length) && <div className="line-clamp-4 break-words" data-queued-text><Markdown text={shown} className="type-callout" /></div>}
         {resumed && <p className="mt-1 type-footnote text-muted-foreground" data-queued-recovery-note>重启前已送达，正在核对进度 / 等待续做</p>}
         <Files files={q.files} className="mt-1.5" />
       </div>

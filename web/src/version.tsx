@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react"
 import { updates, updateActive, updateKey, repairKey, sameReleaseVersion, updatePhaseLabel, type UpdateBackup, type UpdateState, type UpdateOperation } from "@/updates"
 import { installLabel, stageIndex, upgradeGuide, upgradeStages, verifyUpgrade, type Health, type Install } from "@/upgrade-guide"
 import { CheckIcon, CircleAlertIcon, CopyIcon, LoaderCircleIcon, RefreshCwIcon } from "lucide-react"
+import { Markdown } from "@/components/markdown"
 import { Button } from "@/components/ui/button"
 import { CodeBlock, CodeBlockContent, CodeBlockCopyButton } from "@/components/ui/code-block"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
@@ -141,7 +142,7 @@ export function UpgradeSettings() {
         {check.error && <p className="mt-1 text-destructive">{check.error}</p>}
         <p className="mt-1 type-footnote text-muted-foreground">检查时间：{new Date(check.checked_at).toLocaleString()}</p>
         {releaseURL && <a className="underline underline-offset-4" href={releaseURL} target="_blank" rel="noopener noreferrer">查看 Release 说明</a>}
-        {check.notes && <details className="mt-2"><summary className="cursor-pointer">更新内容</summary><p className="mt-2 whitespace-pre-wrap break-words text-muted-foreground">{check.notes}</p></details>}
+        {check.notes && <details className="mt-2"><summary className="cursor-pointer">更新内容</summary><div className="mt-2 max-h-[60vh] overflow-auto break-words text-muted-foreground" data-release-notes><Markdown text={check.notes} className="type-callout [&_h1]:mt-0 [&_h1]:text-[17px] [&_h2]:text-[15px] [&_h3]:text-[14px]" /></div></details>}
         {canExecute && repair && !active && <Button className="mt-3" size="sm" disabled={busy || !!connection} onClick={() => void action("repair")} data-upgrade-repair>重新安装 {check.version}，对齐前后端并重启</Button>}
         {canExecute && !repair && check.status === "available" && check.version && !active && op?.version !== check.version && <Button className="mt-3" size="sm" disabled={busy || !!connection} onClick={() => void action("execute")} data-upgrade-execute>升级到 {check.version} 并重启</Button>}
       </div>}

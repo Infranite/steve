@@ -104,6 +104,11 @@ pub async fn get_one(
         out.insert("planRounds".into(), objs(r.item_plan_rounds(&id)?));
         out.insert("timeline".into(), objs(r.timeline_list(&id)?));
         out.insert("artifacts".into(), objs(r.artifacts_list(&id)?));
+        out.insert(
+            "artifactRoles".into(),
+            Value::Object(r.artifact_roles(&id)?),
+        );
+        out.insert("annotations".into(), objs(r.annotations_list(&id)?));
         out.insert("decisions".into(), objs(r.decisions_of_item(&id)?));
         out.insert("dependents".into(), json!(r.deps_dependents(&id)?));
         out.insert("thread".into(), r.thread_item(&id)?.unwrap_or(Value::Null));

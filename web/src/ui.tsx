@@ -608,7 +608,7 @@ function Step({ e, live, last }: { e: any[]; live: boolean; last: boolean }) {
           <span className="min-w-0 truncate italic">{preview}</span>
           <ChevronRightIcon className="size-3.5 shrink-0 opacity-0 transition group-hover/step:opacity-100 group-aria-expanded/step:rotate-90 group-aria-expanded/step:opacity-100" />
         </CollapsibleTrigger>
-        <CollapsibleContent><div className="mb-1.5 ml-[7px] whitespace-pre-wrap border-l-2 pl-4 type-callout italic text-muted-foreground">{e[1]}</div></CollapsibleContent>
+        <CollapsibleContent><div className="mb-1.5 ml-[7px] min-w-0 break-words border-l-2 pl-4 text-muted-foreground" data-thought-body><Markdown text={e[1]} className="type-callout" /></div></CollapsibleContent>
       </Collapsible>
     )
   }
@@ -701,7 +701,7 @@ export function Brief({ text, label, className }: { text: string; label?: string
       <CollapsibleTrigger className="group/brief flex max-w-full items-center gap-1 text-left hover:text-foreground">
         <span className="min-w-0 truncate">{who}{head}</span><ChevronRightIcon className="size-3.5 shrink-0 transition-transform group-data-[panel-open]/brief:rotate-90" />
       </CollapsibleTrigger>
-      <CollapsibleContent><div className="mt-1.5 max-h-80 overflow-auto whitespace-pre-wrap break-words rounded-lg border px-3 py-2 type-footnote text-muted-foreground">{text}</div></CollapsibleContent>
+      <CollapsibleContent><div className="mt-1.5 max-h-80 overflow-auto break-words rounded-lg border px-3 py-2 text-muted-foreground" data-brief-body><Markdown text={text} className="type-footnote" /></div></CollapsibleContent>
     </Collapsible>
   )
 }

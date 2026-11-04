@@ -8,7 +8,7 @@ const errors = [], writes = []
 let navigations = 0
 page.on("framenavigated", frame => { if (frame === page.mainFrame()) navigations++ })
 page.on("pageerror", e => errors.push(e.message))
-const check = status => ({ status, checked_at: Date.now(), version: "v1.2.0", release_url: "https://github.com/Infranite/steve/releases/tag/v1.2.0", notes: "测试更新说明", error: null })
+const check = status => ({ status, checked_at: Date.now(), version: "v1.2.0", release_url: "https://github.com/Infranite/steve/releases/tag/v1.2.0", notes: "# Steve v1.2.0\n\n测试更新说明\n\n- **加粗的要点** 和 `GET /api/x`", error: null })
 let state = { repository: "Infranite/steve", current: { hub: "v1.1.0", web: "v1.1.0" }, capability: { managed: false, can_execute: false, reason: "source checkout" }, check: null, operation: null }
 let denyExecute = false, unrecordedPost = false, failCheck = false, hangStatus = false
 let disconnected = false, dropPost = false, checkStatus = "available", approvals = 0, rejections = 0, gets = 0
@@ -155,6 +155,12 @@ try {
   await page.reload(); await page.locator('[data-upgrade-check-status="ahead"]').waitFor()
   assert.equal(await page.locator("[data-upgrade-repair]").count(), 0, "pair mismatch cannot bypass check semantics")
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false)
+  // the release notes are Markdown: rendered, not shown as their source
+  await page.getByText("更新内容").click()
+  await page.locator("[data-release-notes] li .font-semibold").waitFor()
+  assert.equal(await page.locator("[data-release-notes] code").first().innerText(), "GET /api/x")
+  assert.doesNotMatch(await page.locator("[data-release-notes]").innerText(), /\*\*|^# /m)
+  if (process.env.STEVE_TEST_SHOTS) await page.locator("[data-release-notes]").screenshot({ path: `${process.env.STEVE_TEST_SHOTS}/updates-release-notes.png` })
 
   // Installations Steve doesn't switch itself: this machine's commands instead of a button, then a read-back.
   const home = "/Users/example/.steve", repo = "/Users/example/Agents/steve"

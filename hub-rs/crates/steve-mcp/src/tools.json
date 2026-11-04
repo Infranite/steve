@@ -115,13 +115,22 @@
               },
               "location": {
                 "type": "string"
+              },
+              "role": {
+                "type": "string",
+                "enum": [
+                  "result",
+                  "record"
+                ],
+                "description": "result (default): what the goal asked for. record: evidence of the work, not the result itself, such as self-check screenshots, logs, test reports or intermediate files; the item shows them in its work record instead of its outputs"
               }
             },
             "required": [
               "kind",
               "title"
             ]
-          }
+          },
+          "description": "the final deliverables; a newer delivery replaces the outputs of an earlier one, so list everything that is still current"
         },
         "checks": {
           "type": "array",
