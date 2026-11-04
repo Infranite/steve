@@ -578,7 +578,12 @@ impl Core {
     }
     /// Commits every closing whose gate holds now (the periodic tick and after boot).
     pub fn lifecycle_tick(&self) -> Result<usize> {
-        self.tx().lc_tick()
+        let n = self.tx().lc_tick()?;
+        /* the merge lanes' windows close on time too (outside the core's lock) */
+        if let Err(e) = self.lane_tick() {
+            tracing::warn!("lane tick: {e}");
+        }
+        Ok(n)
     }
     /// The lifecycle projection of an item (API-CONTRACT.txt §1).
     pub fn lifecycle_view(&self, item: &str) -> Result<Value> {
@@ -1445,6 +1450,23 @@ impl Tx<'_> {
         };
         if self.nothing_to_release(&item)? {
             return self.publish_nothing(&item, s);
+        }
+        /* a project finished by its completion rule (merged / tagged) merges through its target's lane:
+         * one card per batch there, not one release card per item here */
+        if p.release.as_ref().is_some_and(|r| r.done_when.is_some()) {
+            let req = self.c.lane_enqueue_item(&item)?;
+            let where_ = req
+                .unit
+                .map(|u| format!("MQ-{u}"))
+                .unwrap_or_else(|| "下一批".into());
+            self.db().event_add(
+                &s.id,
+                "system",
+                json!({"text": format!("已进入合并通道（{where_}）：Steve 会和同一目标的其他改动一起合并、检查、发布，完成后这件事项自动结束。结束这一回合即可。")}),
+            )?;
+            self.db()
+                .item_patch(item_id, patch![now: format!("在合并通道里（{where_}）")])?;
+            return settle(self.db(), item_id);
         }
         self.db().decision_create(NewDecision {
             workspace_id: s.workspace_id.clone(),
@@ -2392,6 +2414,17 @@ impl Tx<'_> {
             }
         };
         match (d.kind.as_str(), d.subject_type.as_str()) {
+            ("approve", "delivery_batch")
+                if crate::lane::drive::parse_subject(&d.subject_id).is_some() =>
+            {
+                let (lane, unit) =
+                    crate::lane::drive::parse_subject(&d.subject_id).expect("checked");
+                let yes = choice == "yes";
+                db.decision_resolve(id, json!({"approved": yes}), "resolved", None)?;
+                /* git and checks run off the lock; the answer is the batch's, not one item's */
+                let c = self.c.clone();
+                crate::detach(move || c.lane_answered(&lane, unit, yes));
+            }
             ("approve", "tool_call") => {
                 let opt = (choice != "deny").then_some(choice);
                 if self.rt().answer_permission(id, opt) {

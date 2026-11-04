@@ -12,6 +12,7 @@
 //! nothing outside itself.
 
 pub mod batch;
+pub mod drive;
 pub mod exec;
 pub mod precheck;
 pub mod profile;
