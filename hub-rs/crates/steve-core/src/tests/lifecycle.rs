@@ -148,17 +148,209 @@ fn release_declined_with_a_reason_goes_back_to_the_agent() {
         "release",
         &["yes", "no"],
     );
-    k.core.resolve(&r, "no", "先别发", "me").unwrap();
-    assert_eq!(
-        k.rt.prompts_of(&x.session).last().unwrap(),
-        "用户没有批准发布：先别发。"
+    k.core
+        .resolve(&r, "no", "走 PR 合进去就行，不用发布", "me")
+        .unwrap();
+    assert!(
+        k.rt.prompts_of(&x.session)
+            .last()
+            .unwrap()
+            .starts_with("用户没有批准发布：走 PR 合进去就行，不用发布。这个周期不再发布")
     );
     /* the conversation shows the choice with the note the agent got (ST-32) */
     assert!(
         k.timeline_texts(&x.id)
-            .contains(&format!("不发布 {}：先别发", x.session))
+            .contains(&format!("不发布 {}：走 PR 合进去就行，不用发布", x.session))
     );
+    // the agent does what you said instead first: the close waits for that turn
     assert_ne!(k.status(&x.id).0, "done");
+    k.rt.end_turn(&k.core, &x.session, "end_turn", None);
+    let i = k.db().item(&x.id).unwrap().unwrap();
+    assert_eq!((i.status.as_str(), i.phase.as_str()), ("done", "closed"));
+    let ops = k.db().store().items().operations(&x.id, 1).unwrap();
+    let rel = ops.iter().find(|o| o.kind == "release").unwrap();
+    assert_eq!(rel.status, "waived");
+    assert_eq!(rel.evidence["reason"], "走 PR 合进去就行，不用发布");
+    assert!(
+        k.timeline_texts(&x.id)
+            .contains(&"你选择了不发布，发布这一步不再等".to_string())
+    );
+}
+
+/// The user said no to the release; the agent's follow-up work (a PR merged) made a new result, and
+/// accepting it again — or the user marking it done — must not wait for a release again (ST-27).
+#[test]
+fn a_no_to_the_release_holds_for_every_later_result_of_the_cycle() {
+    for by_user in [false, true] {
+        let k = Kit::new();
+        let x = k.delivered(true);
+        k.core.resolve(&x.decision, "pass", "", "me").unwrap();
+        let r = k.decision(
+            &x.id,
+            Some(&x.session),
+            "approve",
+            "release",
+            &["yes", "no"],
+        );
+        k.core
+            .resolve(&r, "no", "走 PR 合并，不用发布", "me")
+            .unwrap();
+        // the agent's follow-up starts a new round of the plan: the frozen result is void
+        k.core
+            .tx()
+            .lc_invalidate(&x.id, "计划里又有没做完的步骤")
+            .unwrap();
+        k.rt.end_turn(&k.core, &x.session, "end_turn", None);
+        assert_eq!(k.phase(&x.id), "active");
+        let before = k.rt.prompts_of(&x.session).len();
+        if by_user {
+            k.finish(&x.id).unwrap();
+            // marking done stops the turn still at work; its end commits the close
+            k.rt.end_turn(&k.core, &x.session, "cancelled", None);
+        } else {
+            let s = k.db().session(&x.session).unwrap().unwrap();
+            k.db()
+                .item_patch(&x.id, patch![accept_mode: "auto"])
+                .unwrap();
+            k.core
+                .tool_deliver(
+                    &s,
+                    "PR 已合并",
+                    &[],
+                    &[Check {
+                        name: "tests".into(),
+                        passed: true,
+                    }],
+                    &[],
+                )
+                .unwrap();
+            k.rt.end_turn(&k.core, &x.session, "end_turn", None);
+        }
+        let i = k.db().item(&x.id).unwrap().unwrap();
+        assert_eq!(
+            (i.status.as_str(), i.phase.as_str(), i.revision),
+            ("done", "closed", 2),
+            "by_user={by_user}"
+        );
+        assert!(
+            k.rt.prompts_of(&x.session)[before..]
+                .iter()
+                .all(|p| !p.contains("steve_publish")),
+            "nobody is asked to publish again"
+        );
+        let ops = k.db().store().items().operations(&x.id, 1).unwrap();
+        let rel = ops
+            .iter()
+            .find(|o| o.kind == "release" && o.revision == 2)
+            .unwrap();
+        assert_eq!(rel.status, "waived");
+        assert_eq!(rel.evidence["reason"], "走 PR 合并，不用发布");
+    }
+}
+
+#[test]
+fn an_approval_after_the_no_takes_it_back() {
+    let k = Kit::new();
+    let x = k.delivered(true);
+    k.core.resolve(&x.decision, "pass", "", "me").unwrap();
+    k.rt.end_turn(&k.core, &x.session, "end_turn", None);
+    let no = k.decision(
+        &x.id,
+        Some(&x.session),
+        "approve",
+        "release",
+        &["yes", "no"],
+    );
+    k.db()
+        .decision_resolve(
+            &no,
+            json!({"approved": false, "text": "先别发"}),
+            "resolved",
+            None,
+        )
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    let yes = k.decision(
+        &x.id,
+        Some(&x.session),
+        "approve",
+        "release",
+        &["yes", "no"],
+    );
+    k.db()
+        .decision_resolve(
+            &yes,
+            json!({"approved": true, "text": ""}),
+            "resolved",
+            None,
+        )
+        .unwrap();
+    let i = k.db().item(&x.id).unwrap().unwrap();
+    assert_eq!(k.core.tx().release_declined(&i).unwrap(), None);
+    k.core.tx().lc_try_close(&x.id).unwrap();
+    assert_eq!(k.phase(&x.id), "closing", "it still waits for the release");
+}
+
+/// The agent asked about the release after the acceptance (instead of publishing); the answer is handled
+/// first, then the close is judged again: only the release is left and nobody requested it, so you are
+/// asked instead of the item waiting in silence.
+#[test]
+fn a_question_after_the_acceptance_is_answered_before_the_close_is_judged_again() {
+    let k = Kit::new();
+    let x = k.delivered(true);
+    k.core.resolve(&x.decision, "pass", "", "me").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    let q = k.decision(&x.id, Some(&x.session), "ask", "question", &[]);
+    k.rt.end_turn(&k.core, &x.session, "end_turn", None);
+    let i = k.db().item(&x.id).unwrap().unwrap();
+    let c = crate::cycle::closing_of(&i).unwrap();
+    assert!(
+        k.core.tx().lc_gate(&i, &c).unwrap().decision,
+        "the open question holds the close"
+    );
+    assert!(
+        k.open_fails(&x.id).is_empty(),
+        "nothing else is asked while it is open"
+    );
+    k.core
+        .resolve(&q, "answer", "不发布，保持现状", "me")
+        .unwrap();
+    assert_eq!(k.status(&x.id).2, "收到回答，继续");
+    k.rt.end_turn(&k.core, &x.session, "end_turn", None);
+    let (status, _, now) = k.status(&x.id);
+    assert_ne!(status, "done");
+    assert_eq!(now, "只差发布，等你决定是否还要发布");
+    let card = k
+        .db()
+        .decisions_of_item(&x.id)
+        .unwrap()
+        .into_iter()
+        .find(|d| d.status == "open" && d.kind == "fail")
+        .expect("a card asks");
+    assert_eq!(card.options, ["release_waive", "continue", "look"]);
+    k.core.resolve(&card.id, "release_waive", "", "me").unwrap();
+    assert_eq!(k.status(&x.id).0, "done");
+}
+
+#[test]
+fn continuing_when_only_the_release_is_left_asks_the_agent_to_publish() {
+    let k = Kit::new();
+    let x = k.delivered(true);
+    k.core.resolve(&x.decision, "pass", "", "me").unwrap();
+    k.rt.end_turn(&k.core, &x.session, "end_turn", None);
+    let card = k
+        .db()
+        .decisions_of_item(&x.id)
+        .unwrap()
+        .into_iter()
+        .find(|d| d.status == "open" && d.kind == "fail")
+        .expect("a card asks");
+    k.core.resolve(&card.id, "continue", "", "me").unwrap();
+    assert_eq!(
+        k.rt.prompts_of(&x.session).last().unwrap(),
+        "验收已经通过，只差发布。确认改动都已提交到 steve/x 后，用 steve_publish 请求发布。"
+    );
+    assert_eq!(k.phase(&x.id), "closing");
 }
 
 #[test]
@@ -848,4 +1040,37 @@ fn publish_with_nothing_before_acceptance_refuses_and_leaves_the_item() {
     assert_ne!(k.status(&x.id).0, "done");
     assert_eq!(release_decisions(&k, &x.id), 0);
     assert_eq!(k.open_kinds(&x.id), vec!["accept".to_string()]);
+}
+
+/// Items left by the old code (ST-27, ST-30, ST-35): accepted, a release card answered no with a
+/// reason, the release still pending, the agent idle. The periodic check closes them by that no.
+#[test]
+fn a_closing_left_waiting_despite_a_recorded_no_closes_on_the_next_check() {
+    let k = Kit::new();
+    let x = k.delivered(true);
+    k.core.resolve(&x.decision, "pass", "", "me").unwrap();
+    let r = k.decision(
+        &x.id,
+        Some(&x.session),
+        "approve",
+        "release",
+        &["yes", "no"],
+    );
+    // recorded the way the old code left it: the answer, nothing waived
+    k.db()
+        .decision_resolve(
+            &r,
+            json!({"approved": false, "text": "合pr到master"}),
+            "resolved",
+            None,
+        )
+        .unwrap();
+    k.rt.st().turning.clear();
+    k.db()
+        .session_patch(&x.session, patch![status: "idle"])
+        .unwrap();
+    assert_eq!(k.phase(&x.id), "closing");
+    assert_eq!(k.core.tx().lc_tick().unwrap(), 1);
+    let i = k.db().item(&x.id).unwrap().unwrap();
+    assert_eq!((i.status.as_str(), i.phase.as_str()), ("done", "closed"));
 }

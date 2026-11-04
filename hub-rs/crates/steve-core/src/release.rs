@@ -1054,7 +1054,9 @@ impl Tx<'_> {
     /// The release adapter of the closing gate. A release project: the accepted result must be live. Satisfied by a release of this cycle whose
     /// commit contains the frozen `HEAD` (the agent may have released it already); otherwise a pending
     /// requirement, and the agent is asked to publish. A branch with nothing to release is not proof of
-    /// a deployment: without such a release it stays a requirement you can waive.
+    /// a deployment: without such a release it stays a requirement you can waive. Once you said no to
+    /// releasing in this cycle (and nothing since said yes), every later result of it is waived too:
+    /// your no holds for the cycle, not just for the revision it was asked about.
     pub(crate) fn release_requirement(&mut self, i: &Item, c: &Closing) -> Result<()> {
         if !self.release_pending(i)? {
             return Ok(());
@@ -1089,7 +1091,8 @@ impl Tx<'_> {
                 )?;
             }
             None => {
-                let (_, new) = self.lc_op_add(
+                let declined = self.release_declined(i)?;
+                let (op, new) = self.lc_op_add(
                     i,
                     OP_RELEASE,
                     Some(&key),
@@ -1098,6 +1101,26 @@ impl Tx<'_> {
                     "发布上线",
                     json!({}),
                 )?;
+                if let Some(reason) = declined {
+                    if op.status == "pending" {
+                        /* set here, not through lc_op_set: the gate that called this checks right after */
+                        let mut e = json!({"note": "你选择不发布"});
+                        if !reason.is_empty() {
+                            e["reason"] = json!(reason);
+                        }
+                        self.db().store().transaction(|tx| {
+                            steve_store::operation_set_in(tx, &op.id, "waived", &e)
+                        })?;
+                        self.db().timeline_add(
+                            &i.id,
+                            "steve",
+                            "sys",
+                            "你选择了不发布，发布这一步不再等",
+                            None,
+                        )?;
+                    }
+                    return Ok(());
+                }
                 if new {
                     if self.nothing_to_release(i)? {
                         self.release_unproven(&i.id)?;
@@ -1108,6 +1131,42 @@ impl Tx<'_> {
             }
         }
         Ok(())
+    }
+
+    /// Your last word on releasing in the item's current cycle, when it was no: the reason you gave (may
+    /// be empty). A release card you declined or a check you answered with "no release needed"; a later
+    /// approval, or asking for the release again, takes it back.
+    pub(crate) fn release_declined(&self, i: &Item) -> Result<Option<String>> {
+        let since = self
+            .db()
+            .store()
+            .items()
+            .cycles(&i.id)?
+            .iter()
+            .filter(|c| c.cycle < i.cycle)
+            .map(|c| c.closed)
+            .max()
+            .unwrap_or(0);
+        let last = self
+            .db()
+            .decisions_of_item(&i.id)?
+            .into_iter()
+            .filter(|d| d.status == "resolved" && d.created >= since)
+            .filter_map(|d| {
+                let no = match (d.kind.as_str(), d.subject_type.as_str()) {
+                    ("approve", "release") => d.result["approved"] == false,
+                    ("fail", _) => match d.result["choice"].as_str() {
+                        Some("release_waive") => true,
+                        Some("release_retry") => false,
+                        _ => return None,
+                    },
+                    _ => return None,
+                };
+                let reason = d.result["text"].as_str().unwrap_or("").trim().to_string();
+                Some((d.resolved.unwrap_or(d.created), no, reason))
+            })
+            .max_by_key(|(at, _, _)| *at);
+        Ok(last.filter(|(_, no, _)| *no).map(|(_, _, r)| r))
     }
 
     /// A release whose result nobody knows: the requirement waits for you to check, nothing retries it.

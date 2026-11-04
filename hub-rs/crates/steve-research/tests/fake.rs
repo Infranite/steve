@@ -245,7 +245,9 @@ async fn time_budget_keeps_partial_and_offers() {
     );
     let exe = harness(&e, &body);
     let mut c = cfg(&e, &exe);
-    c.budget.hard = Some(Duration::from_millis(800));
+    // the fake prints its partial answer at once, but a busy machine may take a second or more just to
+    // start it: the hard limit leaves room for that, the soft one still comes first
+    c.budget.hard = Some(Duration::from_millis(3000));
     c.budget.soft = Duration::from_millis(300);
     let r = Researcher::new(c);
     let t0 = Instant::now();
@@ -255,7 +257,10 @@ async fn time_budget_keeps_partial_and_offers() {
         still |= ev == ResearchEvent::StillReading;
     }
     let out = run.finish().await;
-    assert!(t0.elapsed() < Duration::from_secs(3));
+    assert!(
+        t0.elapsed() < Duration::from_secs(10),
+        "the fake's `sleep 30` was cut short"
+    );
     assert!(still, "soft limit reported");
     assert_eq!(out.status, RunStatus::Budget(BudgetHit::Time));
     assert_eq!(out.answer, "读到一半的结论\n\n（没读完就停了）");

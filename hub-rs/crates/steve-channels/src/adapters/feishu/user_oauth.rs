@@ -32,6 +32,7 @@ use steve_modules::accounts::identify::{ExtraHandle, Hints, Identified, identify
 use steve_modules::accounts::{repo as arepo, service as asvc};
 use steve_modules::contacts::PartyHooks;
 use steve_modules::contacts::merge::merge_tx;
+use steve_modules::contacts::profile;
 use steve_modules::contacts::repo::Party;
 use steve_modules::vault::VaultResult;
 use steve_modules::{ApiError, ApiResult, Caller, Modules};
@@ -130,13 +131,21 @@ pub fn identify_sender(
     identify(tx, ws, actor, USER_SYSTEM, handle, &hints)
 }
 
-/// May an account on `p` be claimed for “我” without asking: an active, `unconfirmed` contact
-/// (made by `identify`, never confirmed by anyone).
-fn claimable(p: &Party) -> bool {
-    p.kind == "contact"
-        && p.status == "active"
-        && p.contact_kind.as_deref() == Some("unconfirmed")
-        && !p.is_me()
+/// May an account on `p` be claimed for “我” without asking: an active contact nobody confirmed by
+/// hand — `unconfirmed` (made by `identify`), or made `real` only by the names run on the provider's
+/// name (`source` chat / sync, no kind or name a person set). The names run promotes the contact
+/// the bot made for you some 20 s after your first message, long before you authorize.
+fn claimable(tx: &Tx, ws: &str, p: &Party) -> ApiResult<bool> {
+    if p.kind != "contact" || p.status != "active" || p.is_me() {
+        return Ok(false);
+    }
+    Ok(match p.contact_kind.as_deref() {
+        Some("unconfirmed") => true,
+        Some("real") if matches!(p.source.as_str(), "chat" | "sync") => {
+            !profile::kind_edited(tx, ws, &p.id)? && !profile::name_edited(tx, ws, &p.id)?
+        }
+        _ => false,
+    })
 }
 
 /// Before the OAuth-proven Feishu identity `ids` is attached to `me` (“我” of `actor`): merges the
@@ -166,7 +175,7 @@ pub fn claim_self(
         let Some(p) = asvc::current_party(tx, &a.party_id)? else {
             continue;
         };
-        if p.id == me.id || !claimable(&p) || !viewer.sees(&p.visibility, &p.created_by) {
+        if p.id == me.id || !claimable(tx, ws, &p)? || !viewer.sees(&p.visibility, &p.created_by) {
             continue;
         }
         let id = merge_tx(tx, hooks, viewer, actor, &p.id, &me.id)?;

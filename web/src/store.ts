@@ -311,7 +311,7 @@ function choiceLabel(d: RDecision) {
   if (d.kind === "confirm") return r.choice === "yes" ? "确认" : "不对"
   if (d.kind === "propose") return r.choice === "yes" ? "开始" : "不需要"
   if (MODULE_CHOICE_SUBJECTS.has(d.subject_type)) return MODULE_CHOICE[r.choice] ?? String(r.choice ?? "已处理")
-  if (d.kind === "fail") return ({ continue: "让它继续", delivered: "它其实做完了", look: "我来看看", tosteve: "换成 Steve", drop: "放弃" } as Record<string, string>)[r.choice] ?? r.choice
+  if (d.kind === "fail") return ({ continue: "让它继续", delivered: "它其实做完了", look: "我来看看", tosteve: "换成 Steve", drop: "放弃", release_waive: "不需要发布", release_retry: "需要发布", release_live: "已经上线" } as Record<string, string>)[r.choice] ?? r.choice
   if (d.subject_type === "tool_call") return r.optionId ? "允许" : "拒绝"
   if (d.subject_type === "release") return r.approved ? "批准发布" : "不发布"
   return r.approved ? "批准" : "拒绝"

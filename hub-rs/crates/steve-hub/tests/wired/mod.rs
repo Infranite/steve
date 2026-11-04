@@ -791,6 +791,14 @@ async fn a_channel_round_trip_on_the_fake_feishu() {
         .await
         .expect("callback");
     assert_eq!(r.status().as_u16(), 302);
+    let to = r.headers()["location"]
+        .to_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        to.starts_with("/#/accounts/") && !to.contains("error"),
+        "{to}"
+    );
     let me: String = one(
         &e.db,
         "SELECT id FROM connections WHERE adapter = 'feishu_user'",

@@ -1530,11 +1530,13 @@ impl Tx<'_> {
         let Some(item) = self.db().item(item_id)? else {
             return Ok(());
         };
-        /* a closing waits for this turn (among others): look at it again, nothing else to judge */
+        /* a closing waits for this turn (among others): look at it again; what it still waits on is said */
         if item.phase == crate::cycle::CLOSING {
             /* the turn may have merged or tagged: a completion rule is looked up afresh */
             self.st.probed.remove(item_id);
-            self.lc_try_close(item_id)?;
+            if !self.lc_try_close(item_id)? {
+                self.release_not_requested(item_id)?;
+            }
             return Ok(());
         }
         if item.is_settled() {
@@ -1633,6 +1635,55 @@ impl Tx<'_> {
         Ok(())
     }
 
+    /// The agent's turn ended and the accepted result still waits only for its release, which nobody
+    /// requested (no release card, no release running, nothing queued for the agent): nothing would ever
+    /// move it, so a card asks you whether it is still needed instead of the item waiting in silence.
+    pub(crate) fn release_not_requested(&mut self, item_id: &str) -> Result<()> {
+        let i = self.item(item_id)?;
+        let Some(c) = crate::cycle::closing_of(&i)
+            .filter(|c| i.phase == crate::cycle::CLOSING && c.kind == crate::cycle::COMPLETE)
+        else {
+            return Ok(());
+        };
+        let Some(op) = self.lc_open_op(item_id, crate::cycle::OP_RELEASE)? else {
+            return Ok(());
+        };
+        if op.status != "pending" || self.st.releasing.as_ref().is_some_and(|r| r.item == i.id) {
+            return Ok(());
+        }
+        let g = self.lc_gate(&i, &c)?;
+        if g.turn || g.input || g.decision || g.acceptance || g.changed {
+            return Ok(());
+        }
+        if self
+            .db()
+            .decisions_of_item(item_id)?
+            .iter()
+            .any(|d| d.status == "open")
+        {
+            return Ok(());
+        }
+        self.db().decision_create(NewDecision {
+            workspace_id: i.workspace_id.clone(),
+            kind: "fail".into(),
+            subject_type: "item".into(),
+            subject_id: item_id.into(),
+            item_id: Some(item_id.into()),
+            question: "验收已经通过，只差发布，但 Agent 结束了这一回合也没有请求发布：还要发布吗？"
+                .into(),
+            options: Some(vec![
+                "release_waive".into(),
+                "continue".into(),
+                "look".into(),
+            ]),
+            requested_by: "steve".into(),
+            ..Default::default()
+        })?;
+        self.db()
+            .item_patch(item_id, patch![now: "只差发布，等你决定是否还要发布"])?;
+        Ok(())
+    }
+
     /// A project with a release action: accepted is not finished; the item stays open until the release is live.
     pub(crate) fn release_pending(&self, i: &Item) -> Result<bool> {
         Ok(i.branch.as_deref().is_some_and(|b| !b.is_empty())
@@ -1650,7 +1701,7 @@ impl Tx<'_> {
         self.send(
             to,
             &format!(
-                "验收通过。确认改动都已提交到 {} 后，用 steve_publish 请求发布。",
+                "验收通过。确认改动都已提交到 {} 后，用 steve_publish 请求发布。如果用户说过不发布，不用再问，直接结束这一回合，Steve 会请用户确认。",
                 i.branch.unwrap_or_default()
             ),
         )
@@ -2056,7 +2107,8 @@ impl Tx<'_> {
                         self.start_release(&d.subject_id, &i)?;
                     }
                 } else if !text.is_empty() {
-                    self.send(&to, &format!("用户没有批准发布：{text}。"))?;
+                    /* your no stands for this cycle (release_requirement); the agent first does what you said instead */
+                    self.send(&to, &format!("用户没有批准发布：{text}。这个周期不再发布；按用户的意思还要做的（比如合并 PR）做完就结束这一回合，改了代码就用 steve_deliver 重新交付。"))?;
                 } else if let Some(op) = self.lc_open_op(&i, crate::cycle::OP_RELEASE)? {
                     /* you decided this result needs no release: the requirement is waived, said so */
                     self.lc_op_set(&op.id, "waived", json!({"note": "你选择不发布"}))?;
@@ -2140,13 +2192,18 @@ impl Tx<'_> {
                         if actor == YOLO_ACTOR {
                             self.answer_line(&i, actor, "让它继续", sid.as_deref())?;
                         }
-                        self.send(
-                            &to,
-                            or(
-                                text,
-                                "请继续。完成后用 steve_deliver 交付；需要决定时用 steve_ask。",
-                            ),
-                        )?;
+                        /* accepted and only the release left (release_not_requested): continuing is publishing */
+                        let publish = before.phase == crate::cycle::CLOSING
+                            && self.lc_open_op(&i, crate::cycle::OP_RELEASE)?.is_some();
+                        let next = if publish {
+                            format!(
+                                "验收已经通过，只差发布。确认改动都已提交到 {} 后，用 steve_publish 请求发布。",
+                                before.branch.as_deref().unwrap_or_default()
+                            )
+                        } else {
+                            "请继续。完成后用 steve_deliver 交付；需要决定时用 steve_ask。".into()
+                        };
+                        self.send(&to, or(text, &next))?;
                     }
                     "delivered" => {
                         self.db().decision_resolve(

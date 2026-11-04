@@ -873,7 +873,7 @@ export function ReplyBlock({ r }: { r: Reply }) {
 }
 
 /* ───────── decisions ───────── */
-const FAIL: Record<string, [string, "ghost" | "outline" | "default"]> = { look: ["我来看看", "ghost"], drop: ["放弃", "outline"], tosteve: ["换成 Steve", "outline"], delivered: ["它其实做完了", "outline"], continue: ["让它继续", "default"] }
+const FAIL: Record<string, [string, "ghost" | "outline" | "default"]> = { look: ["我来看看", "ghost"], drop: ["放弃", "outline"], tosteve: ["换成 Steve", "outline"], delivered: ["它其实做完了", "outline"], release_waive: ["不需要发布", "outline"], release_retry: ["需要发布", "outline"], release_live: ["已经上线", "default"], continue: ["让它继续", "default"] }
 export function DecisionCard({ i, w = i.wait!, showItem = true }: { i: Item; w?: Item["wait"] & {}; showItem?: boolean }) {
   const [rework, setRework] = useState(false), [txt, setTxt] = useState(""), [localBusy, setBusy] = useState(false), [free, setFree] = useState(false)
   const busy = localBusy || st.pendingActions.has("decision:" + w.decision)

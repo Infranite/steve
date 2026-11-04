@@ -3,7 +3,7 @@
 //! binary on a temp STEVE_HOME (file keystore, fake claude CLI, no agents).
 
 use std::net::TcpListener;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command};
 use std::time::Duration;
 
 use futures::StreamExt;
@@ -40,13 +40,57 @@ async fn start() -> Hub {
 
 #[allow(clippy::zombie_processes)] // Hub::drop kills and waits
 async fn start_in(home: tempfile::TempDir, web_dir: &std::path::Path) -> Hub {
-    let port = free_port();
-    assert_ne!(port, 8440);
+    // a free port can be taken by another test's Hub before this one binds it: that Hub would answer
+    // our requests. Ours prints its address once it has bound; a Hub that could not bind exits, and
+    // the start is tried again on another port.
+    let mut last = String::new();
+    for _ in 0..5 {
+        let port = free_port();
+        assert_ne!(port, 8440);
+        let (out, log) = (home.path().join("hub.out"), home.path().join("hub.log"));
+        let mut child = spawn_hub(&home, web_dir, port, &out, &log);
+        let base = format!("http://127.0.0.1:{port}");
+        let bound = format!("on {base}");
+        // 30 s: a loaded machine (load average ~100) has taken more than 10
+        for _ in 0..600 {
+            if child.try_wait().ok().flatten().is_some() {
+                break;
+            }
+            if std::fs::read_to_string(&out).is_ok_and(|o| o.contains(&bound))
+                && reqwest::get(format!("{base}/healthz"))
+                    .await
+                    .is_ok_and(|r| r.status().is_success())
+            {
+                return Hub { child, base, home };
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        last = std::fs::read_to_string(&log).unwrap_or_default();
+        if !last.contains("Address already in use") {
+            break;
+        }
+    }
+    let tail: Vec<&str> = last.lines().rev().take(40).collect();
+    panic!(
+        "hub did not start; its log ends:\n{}",
+        tail.into_iter().rev().collect::<Vec<_>>().join("\n")
+    );
+}
+
+fn spawn_hub(
+    home: &tempfile::TempDir,
+    web_dir: &std::path::Path,
+    port: u16,
+    out: &std::path::Path,
+    log: &std::path::Path,
+) -> Child {
     let fake = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/contract/fake-claude.mjs"
     );
-    let child = Command::new(env!("CARGO_BIN_EXE_steve-hub"))
+    Command::new(env!("CARGO_BIN_EXE_steve-hub"))
         .env("HOME", home.path())
         .env("STEVE_HOME", home.path().join("steve"))
         .env("STEVE_PORT", port.to_string())
@@ -65,22 +109,10 @@ async fn start_in(home: tempfile::TempDir, web_dir: &std::path::Path) -> Hub {
         .env_remove("CODEX_HOME")
         .env("STEVE_WEB_DIR", web_dir)
         .env_remove("STEVE_OIDC_ISSUER")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(std::fs::File::create(out).expect("out"))
+        .stderr(std::fs::File::create(log).expect("log"))
         .spawn()
-        .expect("spawn hub");
-    let base = format!("http://127.0.0.1:{port}");
-    // 30 s: a loaded machine (load average ~100) has taken more than 10
-    for _ in 0..600 {
-        if reqwest::get(format!("{base}/healthz"))
-            .await
-            .is_ok_and(|r| r.status().is_success())
-        {
-            return Hub { child, base, home };
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    panic!("hub did not start");
+        .expect("spawn hub")
 }
 
 struct Client {
@@ -810,7 +842,9 @@ async fn knowledge_note_is_found_over_http_and_mcp() {
     );
 }
 
-/// Steve's reply to the `n`-th user message (counting from 1), from `/api/state`.
+/// Steve's reply to the `n`-th user message (counting from 1), from `/api/state`. The item's own
+/// cards (卡住了, 完成 …) are posts of their own, not replies: the fake adapter fails at once, and on a
+/// busy machine its card can land before the reply.
 async fn steve_reply(c: &Client, n: usize) -> Value {
     for _ in 0..200 {
         let (_, st) = c.call("GET", "/api/state", None, None).await;
@@ -818,7 +852,9 @@ async fn steve_reply(c: &Client, n: usize) -> Value {
             .as_array()
             .into_iter()
             .flatten()
-            .filter(|m| m["author"] == "steve" && !m["item_id"].is_null())
+            .filter(|m| {
+                m["author"] == "steve" && !m["item_id"].is_null() && m["meta"]["card_only"] != true
+            })
             .cloned()
             .collect();
         if replies.len() >= n {

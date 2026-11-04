@@ -38,6 +38,19 @@ pub fn name_edited(c: &Connection, ws: &str, party: &str) -> ApiResult<bool> {
     )?)
 }
 
+/// A person set the party's kind (confirmed it as real, virtual …): a revision of `kind` that no
+/// sync or enrichment wrote. An unconfirmed contact the names run promoted on a provider's name was
+/// confirmed by nobody.
+pub fn kind_edited(c: &Connection, ws: &str, party: &str) -> ApiResult<bool> {
+    Ok(c.query_row(
+        "SELECT EXISTS (SELECT 1 FROM revisions WHERE workspace_id = ?1 AND object_type = ?2 AND object_id = ?3
+            AND json_valid(patch) AND json_type(patch, '$.after.kind') IS NOT NULL
+            AND coalesce(json_extract(patch, '$.after.source'), '') <> 'sync')",
+        params![ws, PARTY, party],
+        |r| r.get(0),
+    )?)
+}
+
 /// The job fields a person edited (`props.manual`), which no sync overwrites.
 pub fn manual_fields(props: &Value) -> Vec<String> {
     props["manual"]

@@ -317,6 +317,99 @@ async fn bot_first_then_oauth_merges_the_unconfirmed_contact_into_me() {
     );
 }
 
+/// The names run promotes the contact the bot made (it has your Feishu name) some 20 s after your first
+/// message, well before you authorize: promoted by nobody, it is still yours to claim. A kind a person
+/// set is not.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_contact_the_names_run_made_real_is_still_merged_but_not_one_you_confirmed() {
+    let h = setup().await;
+    let bot = connect_bot(&h).await;
+    let first = bot_sees(&h, &bot, &owner_ids());
+    let promoted = h
+        .env
+        .store()
+        .transaction(|tx| {
+            steve_modules::accounts::enrich(
+                tx,
+                &[],
+                WS,
+                ME,
+                &first.account_id,
+                &steve_modules::accounts::Enrichment {
+                    name: Some("李鹏翔".into()),
+                    ..Default::default()
+                },
+            )
+        })
+        .expect("enrich");
+    assert!(promoted.promoted);
+    let k = row(
+        &h,
+        "SELECT contact_kind, source FROM parties WHERE id = ?",
+        &first.party_id,
+    );
+    assert_eq!(k, vec![json!("real"), json!("chat")]);
+    let (acc, _) = authorize_me(&h, &bot).await;
+    assert_eq!(acc, first.account_id);
+    assert_eq!(
+        s(&row(&h, "SELECT party_id FROM accounts WHERE id = ?", &acc)[0]),
+        me_party(&h)
+    );
+    assert_eq!(
+        s(&row(
+            &h,
+            "SELECT status FROM parties WHERE id = ?",
+            &first.party_id
+        )[0]),
+        "merged"
+    );
+
+    // the same contact, its kind set by a person (a revision that is not a sync): it stays
+    let h = setup().await;
+    let bot = connect_bot(&h).await;
+    let first = bot_sees(&h, &bot, &owner_ids());
+    // confirmed by a person the way the contacts page does it: a revision of `kind` that is no sync
+    h.env
+        .store()
+        .transaction(|tx| {
+            use steve_modules::contacts::{repo, service};
+            let p = repo::get(tx, &first.party_id)?.expect("party");
+            service::revise_as(
+                tx,
+                &p,
+                &repo::PartyPatch {
+                    contact_kind: Some("real".into()),
+                    ..Default::default()
+                },
+                json!({"kind": "unconfirmed"}),
+                json!({"kind": "real"}),
+                ME,
+            )?;
+            tx.run(
+                "UPDATE parties SET source = 'chat' WHERE id = ?",
+                [&first.party_id],
+            )?;
+            Ok::<_, ApiError>(())
+        })
+        .expect("confirm");
+    let loc = oauth_via(
+        &h,
+        &caller(WS, ME),
+        "/channels/feishu/user/oauth/start",
+        json!({"app_connection": bot}),
+    )
+    .await;
+    assert!(loc.starts_with("/#/accounts?error="), "{loc}");
+    assert_eq!(
+        s(&row(
+            &h,
+            "SELECT status FROM parties WHERE id = ?",
+            &first.party_id
+        )[0]),
+        "active"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn bot_first_then_device_code_merges_too() {
     let h = setup().await;

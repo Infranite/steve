@@ -16,7 +16,10 @@
 //!    `starting`, a resume intent, or messages queued for a session;
 //! 2. no required operation of this cycle and revision is still open ([`steve_store::ItemOperation`]);
 //! 3. (completion) the frozen result is unchanged — same revision, same worktree fingerprint;
-//! 4. (completion) the acceptance is decided: human, automatic or waived.
+//! 4. (completion) the acceptance is decided: human, automatic or waived;
+//! 5. (completion) no question or approval raised after the request is still open: an answer may
+//!    change what is left to do, so the close is judged again once it was handled (cards older than the
+//!    request are the acceptor's to override; the close clears them).
 //!
 //! The gate is checked again whenever something it waits on may have changed (a turn ended, a
 //! decision was answered, an operation reported) and by a periodic tick (queued turns and the release
@@ -191,6 +194,8 @@ pub struct Gate {
     pub input: bool,
     pub operation: bool,
     pub acceptance: bool,
+    /// A question or an approval raised after the closing request waits for an answer.
+    pub decision: bool,
     /// The frozen result changed: the closing is void.
     pub changed: bool,
 }
@@ -210,10 +215,18 @@ impl Gate {
         if self.input {
             v.push("input");
         }
+        if self.decision {
+            v.push("decision");
+        }
         v
     }
     fn clear(&self) -> bool {
-        !(self.turn || self.input || self.operation || self.acceptance || self.changed)
+        !(self.turn
+            || self.input
+            || self.operation
+            || self.acceptance
+            || self.decision
+            || self.changed)
     }
 }
 
@@ -715,6 +728,12 @@ impl Tx<'_> {
             if !c.accepted {
                 g.acceptance = true;
             }
+            /* a permission is part of a running turn; the acceptance card is the acceptance above */
+            g.decision = self.db().decisions_of_item(&i.id)?.iter().any(|d| {
+                d.status == "open"
+                    && d.created > c.at
+                    && (d.kind == "ask" || (d.kind == "approve" && d.subject_type != "tool_call"))
+            });
             if c.frozen_revision != i.revision
                 || result_moved(i.cwd.as_deref(), c.fingerprint.as_deref())
             {
