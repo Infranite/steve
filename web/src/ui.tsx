@@ -35,7 +35,7 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/component
 import { Markdown } from "@/components/markdown"
 import { PermissionDetails, PermissionRecord } from "@/components/permission"
 import { LOADED_WEB_VERSION, permissionDecision, useStore } from "@/store"
-import { st, emit, briefHead, pendingCards, ST, SS, WT, botName, decide, dismiss, setSt, snooze, tag, loadEvents, type Item, type Reply, type Rel, type Sess } from "@/store"
+import { st, emit, briefHead, pendingCards, ST, SS, WT, botName, decide, dismiss, setSt, snooze, tag, isKind, kindColor, sortTags, loadEvents, type Item, type Reply, type Rel, type Sess } from "@/store"
 import { YoloBadge } from "@/yolo/badges"
 import { YoloPill } from "@/yolo/switch"
 import { WorkspaceSwitcher } from "@/workspace-switcher"
@@ -117,18 +117,27 @@ export function BotName({ k, className }: { k: string | null; className?: string
   if (!k) return null
   return <span className={cn("inline-flex items-center gap-1.5 whitespace-nowrap", className)}><BotAvatar k={k} size={16} />{botName(k)}</span>
 }
-/** tags: quiet grey pills; the category shows on hover */
+/** an item's category: an outline pill with its own muted dot, always first and never removable on its own */
+export function KindTag({ id, className }: { id: string; className?: string }) {
+  const t = tag(id)
+  if (!t) return null
+  return <span title={`分类 · ${t.desc}`} className={cn("inline-flex h-5 shrink-0 items-center gap-1 rounded-full border border-border bg-background px-1.5 font-mono text-[11px] leading-none text-foreground", className)} data-kind={t.name}>
+    <span aria-hidden className="size-1.5 rounded-full" style={{ background: kindColor(t.name) }} />{t.name}</span>
+}
+/** tags: the category first (see KindTag), then quiet grey pills; the tag category shows on hover */
 export function Tags({ ids, className, onRemove, max }: { ids?: string[]; className?: string; onRemove?: (id: string) => void; max?: number }) {
-  const xs = (ids ?? []).map(tag).filter(Boolean) as NonNullable<ReturnType<typeof tag>>[]
+  const xs = sortTags(ids).map(tag).filter(Boolean) as NonNullable<ReturnType<typeof tag>>[]
   if (!xs.length) return null
-  const shown = max ? xs.slice(0, max) : xs
+  const kinds = xs.filter(isKind), rest = xs.filter((t) => !isKind(t))
+  const shown = max ? rest.slice(0, max) : rest
   return (
     <span className={cn("inline-flex flex-wrap items-center gap-1", className)} data-tags>
+      {kinds.map((t) => <KindTag key={t.id} id={t.id} />)}
       {shown.map((t) => (
         <span key={t.id} title={`${t.cat} · ${t.desc}`} className="inline-flex h-5 items-center gap-0.5 rounded-full bg-muted px-2 text-[11.5px] leading-none text-muted-foreground" data-tag={t.name}>
           {t.name}{onRemove && <button type="button" aria-label={"移除标签 " + t.name} onClick={(e) => { e.stopPropagation(); onRemove(t.id) }} className="-mr-1 ml-0.5 flex size-4 items-center justify-center rounded-full hover:bg-background hover:text-foreground"><XIcon className="size-3" /></button>}
         </span>))}
-      {max && xs.length > max && <span className="text-[11.5px] text-muted-foreground">+{xs.length - max}</span>}
+      {max && rest.length > max && <span className="text-[11.5px] text-muted-foreground">+{rest.length - max}</span>}
     </span>
   )
 }

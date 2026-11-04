@@ -6,6 +6,7 @@ mod conversations;
 mod cycle;
 mod flows;
 mod inbox;
+mod kinds;
 mod lifecycle;
 mod models;
 mod module_undo;

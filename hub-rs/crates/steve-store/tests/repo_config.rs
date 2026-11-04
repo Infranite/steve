@@ -150,9 +150,17 @@ fn workspaces_users_auth() {
         )
         .unwrap();
     assert_eq!((w.sort, w.item_prefix.as_str()), (1, "WK"));
+    // a new workspace comes with the six item categories (ST-34)
+    let ev = t.events.take();
     assert_eq!(
-        t.events.take(),
-        vec![ChangeEvent::Workspace { id: w.id.clone() }]
+        ev.last(),
+        Some(&ChangeEvent::Workspace { id: w.id.clone() })
+    );
+    assert_eq!(
+        ev.iter()
+            .filter(|e| matches!(e, ChangeEvent::Tag { .. }))
+            .count(),
+        6
     );
     let mine = s.workspaces().of_user(&me).unwrap();
     assert_eq!(
@@ -558,6 +566,7 @@ fn tags() {
             .id
     };
     let (i1, i2) = (item("a"), item("b"));
+    let feat = s.tags().kinds(WS).unwrap()[1].id.clone();
     let nt = |n: &str| NewTag {
         name: n.into(),
         cat: "主题".into(),
@@ -569,9 +578,11 @@ fn tags() {
     let b = s.tags().create(WS, &nt("界面"), "me").unwrap();
     t.events.take();
     s.tags()
-        .set_item(&i1, &[a.id.clone(), b.id.clone()])
+        .set_item(&i1, &[a.id.clone(), b.id.clone(), feat.clone()])
         .unwrap();
-    s.tags().set_item(&i2, &[b.id.clone()]).unwrap();
+    s.tags()
+        .set_item(&i2, &[b.id.clone(), feat.clone()])
+        .unwrap();
     assert_eq!(
         t.events.take(),
         vec![
@@ -583,7 +594,7 @@ fn tags() {
     s.tags().merge(&b.id, &a.id).unwrap();
     assert_eq!(t.events.take(), vec![ChangeEvent::Tag { id: a.id.clone() }]);
     assert!(s.tags().get(&b.id).unwrap().is_none());
-    assert_eq!(s.tags().of_item(&i2).unwrap(), [a.id.clone()]);
+    assert_eq!(s.tags().of_item(&i2).unwrap(), [feat.clone(), a.id.clone()]);
     assert_eq!(s.tags().uses(WS).unwrap()[&a.id], 2);
     let renamed = s
         .tags()
@@ -598,7 +609,9 @@ fn tags() {
         .unwrap();
     assert_eq!(renamed.name, "Web");
     s.tags().remove(&a.id).unwrap();
-    assert!(s.tags().of_item(&i1).unwrap().is_empty() && s.tags().list(WS).unwrap().is_empty());
+    // the category stays: it cannot be removed, and only it is left
+    assert_eq!(s.tags().of_item(&i1).unwrap(), [feat.clone()]);
+    assert!(s.tags().list(WS).unwrap().iter().all(|t| t.cat == "类型"));
 }
 
 #[test]

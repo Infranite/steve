@@ -7,6 +7,7 @@ mod core;
 mod decisions;
 mod files;
 mod items;
+pub mod kinds;
 mod sessions;
 mod stats;
 mod thread;

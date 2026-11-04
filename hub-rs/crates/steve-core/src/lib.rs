@@ -17,6 +17,7 @@ pub mod error;
 pub mod gateway;
 pub mod git;
 pub mod housekeeping;
+pub mod kinds;
 pub mod lifecycle;
 mod marks;
 pub mod models;

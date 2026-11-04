@@ -1089,7 +1089,8 @@ pub fn partial_str(t: &str, key: &str) -> Option<String> {
     decode(body).or_else(|| decode(&body[..body.rfind("\\u")?]))
 }
 
-pub const TAG_CATS: [&str; 5] = ["项目", "类型", "领域", "客户", "主题"];
+/// The tag categories a new tag may have; `类型` holds only the six item categories (ST-34).
+pub const TAG_CATS: [&str; 4] = ["项目", "领域", "客户", "主题"];
 
 /// The routing results (thread-routing §3.1). `chat` from older routers reads as `answer`.
 pub const KINDS: [&str; 9] = [
@@ -1294,12 +1295,24 @@ pub fn route_prompt(c: &RouteCtx, text: &str, history: &[Said], promote: bool) -
     if let Some(s) = &c.steve_project {
         head.push(format!("Anything about Steve itself — its chat page, web UI, cards, Hub, bots, knowledge system, releases, design — is in project {s}."));
     }
+    let (kinds, domains): (Vec<&Tag>, Vec<&Tag>) = c
+        .tags
+        .iter()
+        .partition(|t| t.cat == steve_store::kinds::KIND_CAT);
+    if !kinds.is_empty() {
+        head.push("Item category, required for an item: exactly ONE of these tag ids, first in tags, chosen by the item's main acceptance goal (a fix is bug, new or better behaviour is feat, a plan or explanation is doc, deploying or configuring is ops; chore only for upkeep, never as a default):".into());
+        head.extend(
+            kinds
+                .iter()
+                .map(|t| format!("  {}: {} · {}", t.id, t.name, t.description)),
+        );
+    }
     head.push(format!(
-        "Tags (id: name · category · description), for items only. Choose existing tags that fit; only if none of the non-project tags fits, propose ONE new tag with category in {} and a concrete description:",
+        "Domain tags (id: name · category · description), for items only, added after the category. Choose existing tags that fit; only if none of the non-project tags fits, propose ONE new tag with category in {} and a concrete description:",
         TAG_CATS.join("/")
     ));
     head.extend(
-        c.tags
+        domains
             .iter()
             .map(|t| format!("  {}: {} · {} · {}", t.id, t.name, t.cat, t.description)),
     );
@@ -1430,12 +1443,27 @@ pub fn parse_route(c: &RouteCtx, text: &str, raw: &str, promote: bool) -> Option
     };
     let tag_ids = match r.get("tags") {
         None | Some(Value::Null) => vec![],
-        Some(Value::Array(a)) => a
-            .iter()
-            .filter_map(Value::as_str)
-            .filter(|x| c.tags.iter().any(|t| t.id == *x))
-            .map(String::from)
-            .collect(),
+        Some(Value::Array(a)) => {
+            /* known tags once each, and one category at most: the first named */
+            let mut v: Vec<String> = vec![];
+            let mut kind = false;
+            for x in a.iter().filter_map(Value::as_str) {
+                let Some(t) = c.tags.iter().find(|t| t.id == x) else {
+                    continue;
+                };
+                let is_kind = t.cat == steve_store::kinds::KIND_CAT;
+                if v.iter().any(|y| y == x) || (is_kind && kind) {
+                    continue;
+                }
+                kind |= is_kind;
+                if is_kind {
+                    v.insert(0, x.into());
+                } else {
+                    v.push(x.into());
+                }
+            }
+            v
+        }
         Some(_) => return None,
     };
     let new_tags = match r.get("newTags") {
@@ -1835,15 +1863,35 @@ mod tests {
         RouteCtx {
             bots: vec![bot("steve"), bot("dev"), bot("writer")],
             projects: vec![project("prj_a", Some("dev")), project("prj_b", None)],
-            tags: vec![Tag {
-                id: "tag_1".into(),
-                workspace_id: "default".into(),
-                name: "t".into(),
-                cat: "类型".into(),
-                description: "d".into(),
-                created_by: "你".into(),
-                created: 0,
-            }],
+            tags: vec![
+                Tag {
+                    id: "tag_1".into(),
+                    workspace_id: "default".into(),
+                    name: "t".into(),
+                    cat: "领域".into(),
+                    description: "d".into(),
+                    created_by: "你".into(),
+                    created: 0,
+                },
+                Tag {
+                    id: "tag_bug".into(),
+                    workspace_id: "default".into(),
+                    name: "bug".into(),
+                    cat: "类型".into(),
+                    description: "修复".into(),
+                    created_by: "Steve".into(),
+                    created: 0,
+                },
+                Tag {
+                    id: "tag_feat".into(),
+                    workspace_id: "default".into(),
+                    name: "feat".into(),
+                    cat: "类型".into(),
+                    description: "新增".into(),
+                    created_by: "Steve".into(),
+                    created: 0,
+                },
+            ],
             steve_project: Some("prj_a".into()),
             ..Default::default()
         }
@@ -1862,13 +1910,26 @@ mod tests {
     #[test]
     fn route_validates_against_what_exists() {
         let c = ctx();
-        let r = parse_route(&c, "做个东西", r#"{"kind":"item","title":"","bot":"ghost","project":"prj_x","tags":["tag_1","tag_9"],"newTags":[{"name":"n","cat":"类型","description":"d"},{"name":"m","cat":"类型","description":"d"}],"reply":"好"}"#, false).unwrap();
+        let r = parse_route(&c, "做个东西", r#"{"kind":"item","title":"","bot":"ghost","project":"prj_x","tags":["tag_1","tag_9"],"newTags":[{"name":"x","cat":"类型","description":"d"},{"name":"n","cat":"领域","description":"d"},{"name":"m","cat":"领域","description":"d"}],"reply":"好"}"#, false).unwrap();
         assert_eq!(r.bot, "steve");
         assert_eq!(r.project, None);
         assert_eq!(r.title, "做个东西");
         assert_eq!(r.goal, "做个东西");
         assert_eq!(r.tag_ids, vec!["tag_1"]);
-        assert_eq!(r.new_tags.len(), 1);
+        // a new tag never goes under 类型: the first one that may is taken
+        assert_eq!(
+            r.new_tags.iter().map(|t| &*t.name).collect::<Vec<_>>(),
+            ["n"]
+        );
+        // one category at most, the first named, put first
+        let r = parse_route(
+            &c,
+            "修",
+            r#"{"kind":"item","tags":["tag_1","tag_bug","tag_feat","tag_1"]}"#,
+            false,
+        )
+        .unwrap();
+        assert_eq!(r.tag_ids, vec!["tag_bug", "tag_1"]);
         assert!(parse_route(&c, "x", r#"{"kind":"nope"}"#, false).is_none());
         assert!(parse_route(&c, "x", "no json", false).is_none());
     }

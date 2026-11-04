@@ -8,7 +8,7 @@ import { toast as sonner } from "sonner"
 import { promptNeedle, withDecisionNotes } from "./decision-notes"
 import { api, setPageWorkspace, stream, Unauthenticated, type State, type RItem, type RItemDetail, type RSession, type RDecision, type RBot, type REvent, type RProject, type Proposal, type LocalSession, type HubEvent, type RNotice } from "./api"
 import { cue } from "./bus"
-import type { RFile, PlanStep, RHold, RQueued } from "./api"
+import type { RFile, PlanStep, RHold, RQueued, RKindReview } from "./api"
 import type { Cite } from "./api/knowledge"
 import { yoloApi, type RYolo, type RYoloAction } from "./api/yolo"
 
@@ -934,7 +934,27 @@ export const tag = (id: string) => st.tags.find((t) => t.id === id)
 export const tagName = (id: string) => tag(id)?.name ?? id
 export const tagUses = (id: string) => st.tagUses[id] ?? 0
 export const TAG_CATS = ["项目", "类型", "领域", "客户", "主题"]
+/* item categories (ST-34): every item has exactly one of these six tags of category 类型, the Hub refuses
+   anything else; the other categories are domain tags, as many as fit */
+export const KIND_CAT = "类型"
+export const KINDS: [string, string, string][] = [["bug", "修复", "#d9777f"], ["feat", "功能", "#7aa7c7"], ["doc", "文档", "#8c7ae6"], ["refactor", "重构", "#e0a458"], ["ops", "运维", "#5fb39a"], ["chore", "杂项", "#6c7a89"]]
+/** categories a new or edited domain tag may have */
+export const DOMAIN_CATS = TAG_CATS.filter((c) => c !== KIND_CAT)
+export const isKind = (t?: Tag) => t?.cat === KIND_CAT
+export const kindTags = () => KINDS.map(([n]) => st.tags.find((t) => isKind(t) && t.name === n)).filter(Boolean) as Tag[]
+export const kindColor = (name: string) => KINDS.find(([n]) => n === name)?.[2] ?? "currentColor"
+/** the item's category tag id; the Hub keeps exactly one */
+export const kindOf = (i: Pick<Item, "tags">) => (i.tags ?? []).find((x) => isKind(tag(x)))
+/** the category first, then the domain tags as they were added */
+export const sortTags = (ids: string[] = []) => [...ids].sort((a, b) => +isKind(tag(b)) - +isKind(tag(a)))
 export function setTags(id: string, ids: string[]) { void call(api.patchItem(id, { tags: ids })) }
+/** switch the category in one write: the old one goes as the new one comes, never none in between */
+export const loadKindsReview = () => api.kindsReview().catch(() => [] as RKindReview[])
+/** the user looked at these filled-in categories (kept or changed); returns what is left */
+export const kindsReviewed = (ids: string[]) => call(api.kindsReviewed(ids))
+/** fill in the items without exactly one category; already filled ones are left alone */
+export async function kindsBackfill() { const r = await call(api.kindsBackfill()); if (r) toast(r.filled.length ? `补齐了 ${r.filled.length} 件事项的分类，${r.filled.filter((f) => f.uncertain).length} 件拿不准` : `${r.checked} 件事项都已有分类`); return r }
+export function setKind(id: string, kind: string) { const i = it(id); if (kindOf(i) === kind) return; setTags(id, [kind, ...(i.tags ?? []).filter((x) => !isKind(tag(x)))]) }
 export async function makeTag(t: { name: string; cat: string; desc: string }) { const r = await call(api.newTag({ name: t.name, cat: t.cat, description: t.desc })); return r?.id }
 export function saveTag(id: string, p: Partial<Tag>) { void call(api.patchTag(id, { name: p.name, cat: p.cat, description: p.desc }), "标签已保存") }
 export function deleteTag(id: string) { const n = tagUses(id), name = tagName(id); void call(api.deleteTag(id), `已删除标签「${name}」，${n} 件事项上的这个标签已移除`) }

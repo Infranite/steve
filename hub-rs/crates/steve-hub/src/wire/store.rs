@@ -18,7 +18,14 @@ use crate::files::NewFile;
 
 /// Store errors keep their user-facing text (`没有这个 Bot`, SQLite's `UNIQUE constraint failed: …`) as a 500.
 fn err(e: s::StoreError) -> BackendError {
-    BackendError::msg(e.to_string())
+    match e {
+        // a refused write (an item without its one category, a category deleted): the user's conflict
+        s::StoreError::Conflict(message) => BackendError {
+            status: 409,
+            message,
+        },
+        e => BackendError::msg(e.to_string()),
+    }
 }
 
 fn obj<T: Serialize>(x: T) -> BResult<Obj> {
@@ -141,7 +148,7 @@ impl Repo for StoreBackend {
                 x.goals += 1;
                 Ok(())
             })?;
-            each(c, &format!("SELECT item_id, tag_id FROM item_tags WHERE item_id IN ({ITEMS}) ORDER BY item_id, tag_id"), ws, |r| {
+            each(c, &format!("SELECT it.item_id, it.tag_id FROM item_tags it LEFT JOIN tags t ON t.id = it.tag_id WHERE it.item_id IN ({ITEMS}) ORDER BY it.item_id, coalesce(t.cat = '类型', 0) DESC, it.rowid"), ws, |r| {
                 m.entry(r.get(0)?).or_default().tags.push(r.get(1)?);
                 Ok(())
             })?;
@@ -495,7 +502,7 @@ impl Repo for StoreBackend {
     fn tags_of_item(&self, item: &str) -> BResult<Vec<String>> {
         self.0.tags().of_item(item).map_err(err)
     }
-    fn tags_set_item(&self, item: &str, tags: &[String]) -> BResult<()> {
+    fn tags_set_item(&self, item: &str, tags: &[String]) -> BResult<Vec<String>> {
         self.0.tags().set_item(item, tags).map_err(err)
     }
 

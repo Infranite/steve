@@ -3,11 +3,11 @@
 use super::Cached;
 use std::collections::BTreeMap;
 
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::{Sets, all, must, one, revision, to_json};
+use super::{Sets, all, kinds, must, one, revision, to_json};
 use crate::types::double;
 use crate::{
     ChangeEvent, Device, Link, Project, Release, Result, Store, StoreError, Tag, now, uid,
@@ -170,6 +170,28 @@ pub struct Tags<'a>(&'a Store);
 
 const TAG: &str = "SELECT * FROM tags WHERE id = ?";
 const TAG_BY_NAME: &str = "SELECT * FROM tags WHERE workspace_id = ? AND name = ?";
+/// An item's tag ids, its category first, the rest as they were added.
+pub(crate) const ITEM_TAGS: &str = "SELECT it.tag_id FROM item_tags it LEFT JOIN tags t ON t.id = it.tag_id WHERE it.item_id = ? ORDER BY coalesce(t.cat = '类型', 0) DESC, it.rowid";
+
+fn not_a_kind() -> StoreError {
+    StoreError::Conflict(format!(
+        "“{}”只放 {} 六个分类标签；新标签请选领域、主题等类别",
+        kinds::KIND_CAT,
+        kinds::names()
+    ))
+}
+
+/// Writes an item's tags as given (already [`kinds::checked`]).
+pub(crate) fn put_item_tags(c: &rusqlite::Connection, item: &str, ids: &[String]) -> Result<()> {
+    c.run("DELETE FROM item_tags WHERE item_id = ?", [item])?;
+    for t in ids {
+        c.run(
+            "INSERT OR IGNORE INTO item_tags (item_id, tag_id) VALUES (?, ?)",
+            [item, t],
+        )?;
+    }
+    Ok(())
+}
 
 impl Tags<'_> {
     pub fn list(&self, ws: &str) -> Result<Vec<Tag>> {
@@ -192,11 +214,21 @@ impl Tags<'_> {
             .read(|c| one(c, TAG_BY_NAME, [ws, name], Tag::from_row))
     }
 
+    /// The six item categories of `ws` (seeded on first use), in [`kinds::KINDS`] order.
+    pub fn kinds(&self, ws: &str) -> Result<Vec<Tag>> {
+        self.0.write(|w| kinds::ensure(w, ws))
+    }
+
     /// Returns the existing tag of that name unchanged (and without an event) if there is one.
+    /// [`kinds::KIND_CAT`] holds only the six categories.
     pub fn create(&self, ws: &str, p: &NewTag, by: &str) -> Result<Tag> {
         self.0.write(|w| {
+            kinds::ensure(w, ws)?;
             if let Some(ex) = one(w.c, TAG_BY_NAME, [ws, &p.name], Tag::from_row)? {
                 return Ok(ex);
+            }
+            if p.cat == kinds::KIND_CAT {
+                return Err(not_a_kind());
             }
             let id = uid("tag");
             w.c.run(
@@ -208,8 +240,27 @@ impl Tags<'_> {
         })
     }
 
+    /// A category keeps its name and category (its description may change); no other tag joins them.
     pub fn patch(&self, id: &str, p: &TagPatch) -> Result<Option<Tag>> {
         self.0.write(|w| {
+            if let Some(t) = one(w.c, TAG, [id], Tag::from_row)? {
+                let kind = t.cat == kinds::KIND_CAT;
+                if kind && p.name.as_ref().is_some_and(|n| *n != t.name) {
+                    return Err(StoreError::Conflict("分类标签不能改名".into()));
+                }
+                if kind && p.cat.as_ref().is_some_and(|c| c != kinds::KIND_CAT) {
+                    return Err(StoreError::Conflict("分类标签不能改类别".into()));
+                }
+                if !kind && p.cat.as_deref() == Some(kinds::KIND_CAT) {
+                    return Err(not_a_kind());
+                }
+                if !kind && p.name.as_deref().is_some_and(kinds::is_kind) {
+                    return Err(StoreError::Conflict(format!(
+                        "{} 是分类标签的名字",
+                        p.name.as_deref().unwrap_or_default()
+                    )));
+                }
+            }
             let mut s = Sets::default();
             s.val("name", p.name.clone())
                 .val("cat", p.cat.clone())
@@ -225,8 +276,12 @@ impl Tags<'_> {
         })
     }
 
+    /// A category is never removed: items would be left without one.
     pub fn remove(&self, id: &str) -> Result<()> {
         self.0.write(|w| {
+            if kinds::is_kind_tag(w.c, id)? {
+                return Err(StoreError::Conflict("分类标签不能删除".into()));
+            }
             let tx = w.c.unchecked_transaction()?;
             tx.run("DELETE FROM item_tags WHERE tag_id = ?", [id])?;
             // migration 4: tags on contacts, teams, … reference the tag too
@@ -239,8 +294,12 @@ impl Tags<'_> {
     }
 
     /// Moves every use of `from` (items and, since migration 4, other objects) onto `into`, then deletes `from`.
+    /// Categories take no part: merging could leave an item with none or with two.
     pub fn merge(&self, from: &str, into: &str) -> Result<()> {
         self.0.write(|w| {
+            if kinds::is_kind_tag(w.c, from)? || kinds::is_kind_tag(w.c, into)? {
+                return Err(StoreError::Conflict("分类标签不能合并".into()));
+            }
             let tx = w.c.unchecked_transaction()?;
             tx.run("INSERT OR IGNORE INTO item_tags (item_id, tag_id) SELECT item_id, ? FROM item_tags WHERE tag_id = ?", [into, from])?;
             tx.run("DELETE FROM item_tags WHERE tag_id = ?", [from])?;
@@ -266,31 +325,35 @@ impl Tags<'_> {
         })
     }
 
+    /// The item's tag ids, its category first.
     pub fn of_item(&self, item: &str) -> Result<Vec<String>> {
-        self.0.read(|c| {
-            all(
-                c,
-                "SELECT tag_id FROM item_tags WHERE item_id = ?",
-                [item],
-                |r| r.get(0),
-            )
-        })
+        self.0.read(|c| all(c, ITEM_TAGS, [item], |r| r.get(0)))
     }
 
-    /// Replaces the item's tags; publishes `item`.
-    pub fn set_item(&self, item: &str, ids: &[String]) -> Result<()> {
+    /// Replaces the item's tags; publishes `item`. A task item's set must hold exactly one category
+    /// ([`kinds::checked`]: `Conflict` otherwise, nothing written); ids of other workspaces are dropped.
+    /// Returns the ids kept, the category first.
+    pub fn set_item(&self, item: &str, ids: &[String]) -> Result<Vec<String>> {
         self.0.write(|w| {
+            let (ws, kind): (String, String) =
+                w.c.row(
+                    "SELECT workspace_id, kind FROM items WHERE id = ?",
+                    [item],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?
+                .ok_or(StoreError::NotFound("没有这个事项"))?;
+            let ids = if kind == "task" {
+                kinds::ensure(w, &ws)?;
+                kinds::checked(w.c, &ws, ids)?
+            } else {
+                ids.to_vec()
+            };
             let tx = w.c.unchecked_transaction()?;
-            tx.run("DELETE FROM item_tags WHERE item_id = ?", [item])?;
-            for t in ids {
-                tx.run(
-                    "INSERT OR IGNORE INTO item_tags (item_id, tag_id) VALUES (?, ?)",
-                    [item, t],
-                )?;
-            }
+            put_item_tags(&tx, item, &ids)?;
             tx.commit()?;
             w.publish(ChangeEvent::Item { id: item.into() });
-            Ok(())
+            Ok(ids)
         })
     }
 }

@@ -269,8 +269,13 @@ impl Db {
     pub fn tags_of_item(&self, item: &str) -> Result<Vec<String>> {
         Ok(self.s.tags().of_item(item)?)
     }
-    pub fn set_item_tags(&self, item: &str, ids: &[String]) -> Result<()> {
+    /// Replaces an item's tags; a task item's must hold exactly one category. Returns the ids kept.
+    pub fn set_item_tags(&self, item: &str, ids: &[String]) -> Result<Vec<String>> {
         Ok(self.s.tags().set_item(item, ids)?)
+    }
+    /// The six item categories of `ws` (seeded on first use).
+    pub fn kinds(&self, ws: &str) -> Result<Vec<Tag>> {
+        Ok(self.s.tags().kinds(ws)?)
     }
 
     /* ── items ── */

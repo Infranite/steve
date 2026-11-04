@@ -56,6 +56,7 @@ impl Store {
                 )?;
                 c.run("DELETE FROM counters WHERE workspace_id = ? AND name = 'item'", [WS])?;
             }
+            super::kinds::ensure(w, WS)?;
             Ok(())
         })
     }
@@ -146,6 +147,7 @@ impl Workspaces<'_> {
                 "INSERT INTO workspace_members (workspace_id, user_id, role, created) VALUES (?, ?, 'owner', ?)",
                 params![id, owner_id, t],
             )?;
+            super::kinds::ensure(w, &id)?;
             w.publish(ChangeEvent::Workspace { id: id.clone() });
             must(one(w.c, "SELECT * FROM workspaces WHERE id = ?", [&id], Workspace::from_row)?)
         })

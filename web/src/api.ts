@@ -23,6 +23,9 @@ export type RResume = { harness: string; id: string | null; cwd: string; cwd_exi
 export type RProject = { id: string; workspace_id: string; name: string; description: string; device_id: string; path: string; kind: "git" | "dir"; worktree: boolean; default_bot: string | null; release: { kind: string; cmd: string; done_when?: "merge" | "tag" } | null; archived: boolean; created: number; updated: number }
 export type RWorkspace = { id: string; name: string; description: string; item_prefix: string; sort: number; created: number; role?: string }
 export type RTag = { id: string; name: string; cat: string; description: string; created_by: string; created: number }
+/** an item whose category Steve filled in unsure (ST-34) */
+export type RKindReview = { id: string; kind: string; why: string }
+export type RKindBackfill = { checked: number; kept: number; dry: boolean; filled: { id: string; title: string; kind: string; by: "model" | "rule"; confidence: number; uncertain: boolean; why: string; had?: string[] }[] }
 export type RMessage = { id: string; author: "me" | "steve"; text: string; item_id: string | null; meta: any; created: number }
 export type RDevice = { id: string; name: string; roles: string[]; os: string; version: string; status: string; max_sessions: number; seen: number; created: number }
 export type RRuntime = { id: string; name: string; ok: boolean; version: string; path: string; models: string[]; note: string }
@@ -159,6 +162,8 @@ export const api = {
   newProject: (p: { name: string; path: string; description?: string; worktree?: boolean; default_bot?: string | null }) => post<RProject>("/projects", p), patchProject: (id: string, p: Partial<RProject>) => patch<RProject>("/projects/" + id, p),
   describeProject: (path: string) => post<{ name: string; description: string; git: boolean }>("/projects/describe", { path }), dirs: (path: string) => get<string[]>(`/fs/dirs?path=${encodeURIComponent(path)}`),
   newTag: (p: { name: string; cat: string; description: string }) => post<RTag>("/tags", p), patchTag: (id: string, p: Partial<RTag>) => patch("/tags/" + id, p), deleteTag: (id: string) => del("/tags/" + id), mergeTag: (id: string, into: string) => post(`/tags/${id}/merge`, { into }),
+  kindsReview: () => get<RKindReview[]>("/tags/kinds/review"), kindsReviewed: (ids: string[]) => post<RKindReview[]>("/tags/kinds/review", { ids }),
+  kindsBackfill: (dry = false) => post<RKindBackfill>("/tags/kinds/backfill", { dry }),
   settings: (p: Record<string, string>) => patch("/settings", p),
   draft: (target: { kind: string; id?: string }, text: string) => post<Proposal>("/config/draft", { target, text }), apply: (id: string) => post(`/config/${id}/apply`), undoConfig: (id: string) => post(`/config/${id}/undo`), dropConfig: (id: string) => post(`/config/${id}/drop`),
   devices: (fresh = false) => get<{ devices: RDevice[]; runtimes: RRuntime[] }>("/devices" + (fresh ? "?fresh=1" : "")), patchDevice: (id: string, p: { name?: string; status?: string; max_sessions?: number }) => patch("/devices/" + id, p),

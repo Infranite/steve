@@ -582,6 +582,8 @@ impl Domain for CoreDomain {
         tokio::spawn(self.core.clone().watch_releases());
         tokio::spawn(self.core.clone().run_housekeeping());
         tokio::spawn(self.core.clone().run_stall_watch());
+        // ST-34: items made before the categories, or left without one, get theirs
+        tokio::spawn(self.core.clone().backfill_kinds_all());
         true
     }
 
@@ -603,6 +605,20 @@ impl Domain for CoreDomain {
             actor: Some(p.actor),
         };
         to_obj(blocking(move || c.create_item(n)).await?)
+    }
+    async fn kinds_backfill(&self, ws: &str, dry: bool) -> BResult<Value> {
+        let r = self.core.backfill_kinds(ws, dry).await.map_err(cerr)?;
+        serde_json::to_value(r).map_err(|e| BackendError::msg(e.to_string()))
+    }
+    async fn kinds_review(&self, ws: &str) -> BResult<Value> {
+        let (c, ws) = (self.core.clone(), ws.to_string());
+        let r = blocking(move || c.kinds_review(&ws)).await?;
+        serde_json::to_value(r).map_err(|e| BackendError::msg(e.to_string()))
+    }
+    async fn kinds_reviewed(&self, ws: &str, ids: Vec<String>) -> BResult<Value> {
+        let (c, ws) = (self.core.clone(), ws.to_string());
+        let r = blocking(move || c.kinds_reviewed(&ws, &ids)).await?;
+        serde_json::to_value(r).map_err(|e| BackendError::msg(e.to_string()))
     }
     async fn route(&self, ws: &str, text: &str) -> BResult<Route> {
         let r = self.core.route(ws, text, &[], false).await.map_err(cerr)?;

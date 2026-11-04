@@ -901,6 +901,8 @@ impl Tx<'_> {
             None => db.project(bot.default_project.as_deref())?,
         };
         let project = project.filter(|p| p.workspace_id == ws);
+        /* exactly one category, in the same write as the item: Steve's pick if nobody named one */
+        let (tags, guessed) = crate::kinds::settle(db, ws, &n.tag_ids, &n.title, &n.goal)?;
         let item = db.item_create(
             ws,
             &NewItem {
@@ -913,20 +915,21 @@ impl Tx<'_> {
                 stage: Some(if n.propose { "规划" } else { "定义" }.into()),
                 source: n.source.clone(),
                 parent: n.parent.clone(),
+                tags,
             },
         )?;
-        if !n.tag_ids.is_empty() {
-            db.set_item_tags(&item.id, &n.tag_ids)?;
-        }
         let where_ = project
             .as_ref()
             .map(|p| format!("，项目 {}", p.name))
+            .unwrap_or_default();
+        let kind = guessed
+            .map(|g| format!("，按目标归为 {}", g.kind))
             .unwrap_or_default();
         db.timeline_add(
             &item.id,
             "steve",
             "sys",
-            &format!("Steve 建立事项，交给{}{where_}", bot.display()),
+            &format!("Steve 建立事项，交给{}{where_}{kind}", bot.display()),
             None,
         )?;
         let mut detail = json!({"bot": bot.id, "project": item.project_id});

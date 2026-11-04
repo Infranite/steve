@@ -15,11 +15,11 @@ import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, 
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Robot, Face, AVATAR_COLORS } from "@/robot"
 import {
-  st, botName, PRO, ACC, PERM, HARNESS, saveBot, makeBot, draftBot, deleteBot, dupBot, addMem, editMem, delMem, loadMemories, setBotWorkspaces, tag, tagUses, TAG_CATS, makeTag, saveTag, deleteTag, mergeTag, setTags, it,
+  st, botName, PRO, ACC, PERM, HARNESS, saveBot, makeBot, draftBot, deleteBot, dupBot, addMem, editMem, delMem, loadMemories, setBotWorkspaces, tag, tagUses, TAG_CATS, KIND_CAT, DOMAIN_CATS, isKind, kindOf, kindTags, setKind, loadKindsReview, kindsReviewed, kindsBackfill, makeTag, saveTag, deleteTag, mergeTag, setTags, it,
   setSetting, toast, finishOnboarding, emit,
 } from "@/store"
-import { api } from "@/api"
-import { go, Page, BotAvatar, Group, Row, SectionLabel, Segmented, Meta, Empty, openSheet, closeSheet, ThemeSwitch, useRoute } from "@/ui"
+import { api, type RKindReview } from "@/api"
+import { go, Page, BotAvatar, Group, ItemNo, KindTag, Row, SectionLabel, Segmented, Meta, Empty, openSheet, closeSheet, ThemeSwitch, useRoute } from "@/ui"
 import { PersonasSection } from "@/channels/persona"
 import { OwnerChip } from "@/people/owner-chip"
 import { Select, ChoiceCards, ItemRowExport as ItemRow } from "@/view-shared"
@@ -397,25 +397,47 @@ function DangerBtn({ label, what, onOk }: { label: string; what: string; onOk: (
 
 /* ═════════ 标签 ═════════ */
 let tagCat = "全部"
+/* the items whose category Steve filled in unsure: switch it or confirm it, then they leave the list */
+function KindsReview() {
+  const [xs, setXs] = useState<RKindReview[] | null>(null), [busy, setBusy] = useState(false)
+  useEffect(() => { void loadKindsReview().then(setXs) }, [])
+  const done = async (ids: string[]) => { const left = await kindsReviewed(ids); if (left) setXs(left) }
+  const rows = (xs ?? []).filter((x) => st.items.some((i) => i.id === x.id))
+  return <section data-kinds-review>
+    <SectionLabel right={<Button size="xs" variant="ghost" className="text-muted-foreground" disabled={busy} onClick={async () => { setBusy(true); await kindsBackfill(); setXs(await loadKindsReview()); setBusy(false) }} data-kinds-backfill>检查历史事项</Button>}>
+      {rows.length ? `待确认的分类 · ${rows.length}` : "分类补齐"}</SectionLabel>
+    {rows.length ? <>
+      <p className="mb-2 type-footnote text-muted-foreground">这些事项的分类是 Steve 补的，没有把握。改一个分类或点“没问题”，它就离开这个列表。</p>
+      <Group>{rows.map((x) => { const i = it(x.id); return (
+        <Row key={x.id} title={<span className="inline-flex min-w-0 items-center gap-2"><ItemNo id={i.id} /><span className="truncate">{i.t}</span></span>} sub={x.why || undefined} data-kind-review={x.id}>
+          <Select quiet testId={"review-kind-" + x.id} value={kindOf(i) ?? ""} onChange={(k) => { setKind(i.id, k); void done([x.id]) }} options={kindTags().map((t) => ({ v: t.id, l: <KindTag id={t.id} className="border-0 bg-transparent px-0" /> }))} />
+          <Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => void done([x.id])} data-kind-ok={x.id}>没问题</Button>
+        </Row>) })}</Group>
+      {rows.length > 1 && <div className="mt-2 flex justify-end"><Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => void done(rows.map((x) => x.id))} data-kind-ok-all>全部没问题</Button></div>}
+    </> : <p className="type-footnote text-muted-foreground">{xs ? "所有事项都有一个分类，没有待确认的。" : "正在读取…"}</p>}
+  </section>
+}
 function TagsPane() {
   const [, f] = useState(0); const r = () => f((x) => x + 1)
   const [del, setDel] = useState<string | null>(null), [merge, setMerge] = useState<string | null>(null), [into, setInto] = useState("")
   const cats = ["全部", ...TAG_CATS.filter((c) => st.tags.some((t) => t.cat === c))]
   const d = del ? tag(del) : null, m = merge ? tag(merge) : null
+  const domain = st.tags.filter((x) => !isKind(x))
   return <div className="flex flex-col gap-6" data-tags-pane>
-    <p className="type-callout text-muted-foreground">建事项时，Steve 会把事项目标和这里所有标签的名称、分类、描述一起交给模型，先从已有标签里选；都不合适才新建一个，并写好分类和描述。描述写得越具体，归类越准。标签按工作空间分开。</p>
+    <p className="type-callout text-muted-foreground">每件事项恰好有一个分类：bug、feat、doc、refactor、ops、chore。它们是内置的，不能删除、改名或合并；切换分类在事项详情里一步完成。其他标签（领域、项目、客户、主题）可以加多个。建事项时，Steve 把目标和这里的标签一起交给模型，选出分类和合适的标签；都不合适才新建一个，并写好类别和描述。描述写得越具体，归类越准。标签按工作空间分开。</p>
+    <KindsReview />
     <div className="flex flex-wrap items-center gap-2"><Segmented size="sm" value={cats.includes(tagCat) ? tagCat : "全部"} onChange={(v) => { tagCat = v; r() }} options={cats} /><span className="flex-1" /><Button size="sm" onClick={() => openSheet("tag", {})} data-new-tag-btn><PlusIcon />新建标签</Button></div>
     {!st.tags.length && <Empty title="还没有标签" sub="建事项时 Steve 会按需要新建，也可以自己先建几个。" />}
-    {TAG_CATS.filter((c) => tagCat === "全部" || c === tagCat).map((c) => { const xs = st.tags.filter((t) => t.cat === c); return xs.length ? (
-      <section key={c}><SectionLabel>{c} · {xs.length}</SectionLabel>
+    {TAG_CATS.filter((c) => tagCat === "全部" || c === tagCat).map((c) => { const kind = c === KIND_CAT; const xs = kind ? kindTags() : st.tags.filter((t) => t.cat === c); return xs.length ? (
+      <section key={c}><SectionLabel>{kind ? "分类（每件事项一个）" : c} · {xs.length}</SectionLabel>
         <Group>{xs.map((t) => (
-          <Row key={t.id} title={<span className="inline-flex items-center gap-2">{t.name}<span className="type-footnote text-muted-foreground">{tagUses(t.id)} 件事项</span>{t.by === "Steve" && <span className="type-footnote text-tertiary">Steve 建的 · {t.created}</span>}</span>} sub={t.desc} data-tag-row={t.name}>
+          <Row key={t.id} title={<span className="inline-flex items-center gap-2">{kind ? <KindTag id={t.id} /> : t.name}<span className="type-footnote text-muted-foreground">{tagUses(t.id)} 件事项</span>{kind ? <span className="type-footnote text-tertiary">内置</span> : t.by === "Steve" && <span className="type-footnote text-tertiary">Steve 建的 · {t.created}</span>}</span>} sub={t.desc} data-tag-row={t.name}>
             <DropdownMenu><DropdownMenuTrigger render={<Button variant="ghost" size="icon-sm" aria-label="更多" className="text-muted-foreground" data-tag-menu={t.name} />}><MoreHorizontalIcon /></DropdownMenuTrigger>
               <DropdownMenuContent align="end" className="min-w-40">
                 <DropdownMenuItem onClick={() => showTag(t.id)} data-show-tag>查看事项</DropdownMenuItem>
-                <DropdownMenuItem onClick={() => openSheet("tag", { id: t.id })} data-edit-tag><PencilIcon />编辑</DropdownMenuItem>
-                {st.tags.length > 1 && <DropdownMenuItem onClick={() => { setMerge(t.id); setInto(st.tags.find((x) => x.id !== t.id && x.cat === t.cat)?.id ?? st.tags.find((x) => x.id !== t.id)!.id) }} data-merge-tag>合并到…</DropdownMenuItem>}
-                <DropdownMenuSeparator /><DropdownMenuItem variant="destructive" onClick={() => setDel(t.id)} data-del-tag><TrashIcon />删除</DropdownMenuItem>
+                <DropdownMenuItem onClick={() => openSheet("tag", { id: t.id })} data-edit-tag><PencilIcon />{kind ? "编辑描述" : "编辑"}</DropdownMenuItem>
+                {!kind && domain.length > 1 && <DropdownMenuItem onClick={() => { setMerge(t.id); setInto(domain.find((x) => x.id !== t.id && x.cat === t.cat)?.id ?? domain.find((x) => x.id !== t.id)!.id) }} data-merge-tag>合并到…</DropdownMenuItem>}
+                {!kind && <><DropdownMenuSeparator /><DropdownMenuItem variant="destructive" onClick={() => setDel(t.id)} data-del-tag><TrashIcon />删除</DropdownMenuItem></>}
               </DropdownMenuContent></DropdownMenu>
           </Row>))}</Group></section>) : null })}
     <AlertDialog open={!!d} onOpenChange={(o) => !o && setDel(null)}><AlertDialogContent>
@@ -424,7 +446,7 @@ function TagsPane() {
     </AlertDialogContent></AlertDialog>
     <AlertDialog open={!!m} onOpenChange={(o) => !o && setMerge(null)}><AlertDialogContent>
       <AlertDialogHeader><AlertDialogTitle>把「{m?.name}」合并到…</AlertDialogTitle><AlertDialogDescription>{merge ? tagUses(merge) : 0} 件事项会改用目标标签，「{m?.name}」随后删除。</AlertDialogDescription></AlertDialogHeader>
-      <Select testId="merge-into" value={into} onChange={setInto} options={st.tags.filter((x) => x.id !== merge).map((x) => ({ v: x.id, l: `${x.name} · ${x.cat}` }))} />
+      <Select testId="merge-into" value={into} onChange={setInto} options={domain.filter((x) => x.id !== merge).map((x) => ({ v: x.id, l: `${x.name} · ${x.cat}` }))} />
       <AlertDialogFooter><AlertDialogCancel>取消</AlertDialogCancel><AlertDialogAction onClick={() => { mergeTag(merge!, into); setMerge(null) }} data-merge-confirm>合并</AlertDialogAction></AlertDialogFooter>
     </AlertDialogContent></AlertDialog>
   </div>
@@ -432,22 +454,23 @@ function TagsPane() {
 /** create or edit a tag; from an item's picker the new tag is attached to that item */
 export function TagDialog({ id, item, name }: { id?: string; item?: string; name?: string }) {
   const t = id ? tag(id) : undefined
-  const [n, setN] = useState(t?.name ?? name ?? ""), [c, setC] = useState(t?.cat ?? "类型"), [d, setD] = useState(t?.desc ?? "")
+  const kind = isKind(t)
+  const [n, setN] = useState(t?.name ?? name ?? ""), [c, setC] = useState(t?.cat ?? "领域"), [d, setD] = useState(t?.desc ?? "")
   const dup = st.tags.find((x) => x.name === n.trim() && x.id !== id)
   const ok = n.trim() && d.trim() && !dup
   const save = async () => {
     if (!ok) return
-    if (t) saveTag(t.id, { name: n.trim(), cat: c, desc: d.trim() })
+    if (t) saveTag(t.id, kind ? { desc: d.trim() } : { name: n.trim(), cat: c, desc: d.trim() })
     else { const nid = await makeTag({ name: n.trim(), cat: c, desc: d.trim() }); if (nid && item) setTags(item, [...(it(item).tags ?? []), nid]); if (nid) toast(`已新建标签「${n.trim()}」`) }
     closeSheet()
   }
   return (
     <Dialog open onOpenChange={(o) => !o && closeSheet()}>
       <DialogContent className="gap-4 rounded-2xl sm:max-w-[480px]" data-tag-dialog>
-        <DialogHeader><DialogTitle className="type-headline">{t ? "编辑标签" : "新建标签"}</DialogTitle><DialogDescription className="type-callout">分类和描述给 Steve 归类用：写清这个标签包括什么、不包括什么。</DialogDescription></DialogHeader>
+        <DialogHeader><DialogTitle className="type-headline">{t ? "编辑标签" : "新建标签"}</DialogTitle><DialogDescription className="type-callout">类别和描述给 Steve 归类用：写清这个标签包括什么、不包括什么。</DialogDescription></DialogHeader>
         <FieldGroup className="gap-4">
-          <F label="名称" htmlFor="tag-name" hint={dup ? `已有同名标签（${dup.cat}）` : undefined}><Input id="tag-name" autoFocus className="rounded-lg" value={n} onChange={(e) => setN(e.target.value)} placeholder="例如：财务" /></F>
-          <F label="分类"><div><Select testId="tag-cat" value={c} onChange={setC} options={TAG_CATS.map((x) => ({ v: x, l: x }))} /></div></F>
+          <F label="名称" htmlFor="tag-name" hint={dup ? `已有同名标签（${dup.cat}）` : undefined}><Input id="tag-name" autoFocus={!kind} disabled={kind} className="rounded-lg" value={n} onChange={(e) => setN(e.target.value)} placeholder="例如：财务" /></F>
+          <F label="类别" hint={kind ? "内置分类，只能改描述" : undefined}><div>{kind ? <span className="type-callout text-muted-foreground">分类</span> : <Select testId="tag-cat" value={c} onChange={setC} options={DOMAIN_CATS.map((x) => ({ v: x, l: x }))} />}</div></F>
           <F label="描述" htmlFor="tag-desc"><Textarea id="tag-desc" className="min-h-20 rounded-lg" value={d} onChange={(e) => setD(e.target.value)} placeholder="例如：报销、发票、账单、费用和预算；不包括合同" data-tag-desc /></F>
         </FieldGroup>
         <DialogFooter className="gap-2"><Button variant="outline" onClick={closeSheet}>取消</Button><Button disabled={!ok} onClick={() => void save()} data-testid="tag-go">{t ? "保存" : "新建"}</Button></DialogFooter>

@@ -78,6 +78,9 @@ Contract = steps identical in `tests/contract/contract.mjs --a ts --b rust` (las
 | `PATCH /api/tags/:id` | done | ✓ 4/4 |  |  |
 | `DELETE /api/tags/:id` | done | ✓ 2/2 |  |  |
 | `POST /api/tags/:id/merge` | done | ✓ 2/2 |  |  |
+| `POST /api/tags/kinds/backfill` | done | Rust only |  | ST-34: `{dry?}` → `{checked, kept, filled[], dry}` |
+| `GET /api/tags/kinds/review` | done | Rust only |  | ST-34: filled-in categories to look at |
+| `POST /api/tags/kinds/review` | done | Rust only |  | ST-34: `{ids}` looked at → what is left |
 | `GET /api/settings/schema` | done | ✓ 1/1 |  |  |
 | `PATCH /api/settings` | done | ✓ 5/5 |  |  |
 | `POST /api/config/draft` | done | ✓ 3/3 |  |  |

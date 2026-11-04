@@ -56,7 +56,7 @@ fn create_item_starts_a_session_in_a_scratch_dir_with_the_protocol() {
     assert!(!p.contains("\n\n"));
     assert_eq!(
         k.timeline_texts(&i.id),
-        vec!["Steve 建立事项，交给Steve", "开始会话 #1"]
+        vec!["Steve 建立事项，交给Steve，按目标归为 feat", "开始会话 #1"]
     );
     /* an MCP token was minted for the session and matches its hash */
     let ep = k.core.mcp_endpoint(&s.id).unwrap();
@@ -97,7 +97,8 @@ fn create_item_with_project_bot_and_tags() {
             None,
         )
         .unwrap();
-    let t = k.db().tag_create(WS, "t", "类型", "d", "你").unwrap();
+    let t = k.db().tag_create(WS, "t", "领域", "d", "你").unwrap();
+    let bug = kind_id(&k, "bug");
     let i = k
         .core
         .create_item(CreateItem {
@@ -106,14 +107,15 @@ fn create_item_with_project_bot_and_tags() {
             title: "x".into(),
             bot: Some("dev".into()),
             project: Some(Some(p.id.clone())),
-            tag_ids: vec![t.id.clone()],
+            tag_ids: vec![t.id.clone(), bug.clone()],
             ..Default::default()
         })
         .unwrap();
     assert_eq!(i.bot_id.as_deref(), Some("dev"));
     assert_eq!(i.cwd.as_deref(), Some(&*k.home().to_string_lossy()));
     assert_eq!(i.branch, None);
-    assert_eq!(k.db().tags_of_item(&i.id).unwrap(), vec![t.id]);
+    // the named category is kept (and comes first): no guess, no note
+    assert_eq!(k.db().tags_of_item(&i.id).unwrap(), vec![bug, t.id]);
     assert_eq!(
         k.timeline_texts(&i.id)[0],
         "Steve 建立事项，交给Steve 开发 Bot，项目 Proj"
@@ -1014,7 +1016,8 @@ fn session_messages_and_ending() {
 #[test]
 fn fork_into_an_item_or_a_session_with_the_transcript() {
     let k = Kit::new();
-    let t = k.db().tag_create(WS, "t", "类型", "d", "你").unwrap();
+    let t = k.db().tag_create(WS, "t", "领域", "d", "你").unwrap();
+    let doc = kind_id(&k, "doc");
     let i = k
         .core
         .create_item(CreateItem {
@@ -1022,7 +1025,7 @@ fn fork_into_an_item_or_a_session_with_the_transcript() {
             goal: "g".into(),
             title: "x".into(),
             bot: Some("dev".into()),
-            tag_ids: vec![t.id.clone()],
+            tag_ids: vec![t.id.clone(), doc.clone()],
             ..Default::default()
         })
         .unwrap();
@@ -1048,7 +1051,8 @@ fn fork_into_an_item_or_a_session_with_the_transcript() {
         Some(json!({"item": i.id, "session": s.id, "at": seq}))
             .map(|v| serde_json::from_value::<crate::repo::Parent>(v).unwrap())
     );
-    assert_eq!(k.db().tags_of_item(&nid).unwrap(), vec![t.id]);
+    // the fork takes its parent's category and tags
+    assert_eq!(k.db().tags_of_item(&nid).unwrap(), vec![doc, t.id]);
     let opening = &k.rt.prompts_of(&only_session(&k, &nid).id)[0];
     assert!(opening.contains(
         "这是从另一个会话派生出来的。派生点之前的对话：\n\nSteve：You are working for Steve"
@@ -1374,4 +1378,15 @@ fn attachments_for_an_agent_inline_small_images_only() {
     )));
     let b = crate::attachments::for_agent(k.db(), &cfg.data_dir, &cwd, &[img], false).unwrap();
     assert!(b.images.is_empty() && !b.note.contains("图片也直接附在"));
+}
+
+/// The id of one of the six item categories.
+pub(super) fn kind_id(k: &Kit, name: &str) -> String {
+    k.db()
+        .kinds(WS)
+        .unwrap()
+        .into_iter()
+        .find(|t| t.name == name)
+        .unwrap()
+        .id
 }

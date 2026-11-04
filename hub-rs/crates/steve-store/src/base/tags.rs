@@ -26,7 +26,7 @@ pub fn objects(c: &Connection, ws: &str, tag_id: &str, object_type: &str) -> Res
 }
 
 /// Replaces the tags of an object. Ids that are not tags of this workspace are dropped silently
-/// (“`tags` 过滤为本工作空间的标签”), duplicates once. Returns the ids kept, in the given order.
+/// (“`tags` 过滤为本工作空间的标签”), and so are the item categories (items only); duplicates once. Returns the ids kept, in the given order.
 /// Tags that stay keep their original `created`, so the order of [`of`] is stable across edits.
 pub fn set(tx: &Tx, ws: &str, object: &ObjRef, tag_ids: &[String]) -> Result<Vec<String>> {
     let mut kept: Vec<String> = Vec::new();
@@ -35,8 +35,8 @@ pub fn set(tx: &Tx, ws: &str, object: &ObjRef, tag_ids: &[String]) -> Result<Vec
             continue;
         }
         let ok = tx
-            .prepare_cached("SELECT 1 FROM tags WHERE id = ? AND workspace_id = ?")?
-            .exists(params![id, ws])?;
+            .prepare_cached("SELECT 1 FROM tags WHERE id = ? AND workspace_id = ? AND cat != ?")?
+            .exists(params![id, ws, crate::kinds::KIND_CAT])?;
         if ok {
             kept.push(id.clone());
         }

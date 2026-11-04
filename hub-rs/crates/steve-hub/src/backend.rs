@@ -336,7 +336,8 @@ pub trait Repo {
     fn tags_of_item(&self, item: &str) -> BResult<Vec<String>> {
         todo_backend!("tags_of_item")
     }
-    fn tags_set_item(&self, item: &str, tags: &[String]) -> BResult<()> {
+    /// A task item's set must hold exactly one category (409 otherwise); returns the ids kept.
+    fn tags_set_item(&self, item: &str, tags: &[String]) -> BResult<Vec<String>> {
         todo_backend!("tags_set_item")
     }
 
@@ -621,6 +622,18 @@ pub trait Domain: Send + Sync + 'static {
     }
     async fn route(&self, ws: &str, text: &str) -> BResult<Route> {
         todo_backend!("route")
+    }
+    /// Gives the items without exactly one category theirs (`dry`: only says what it would do).
+    async fn kinds_backfill(&self, ws: &str, dry: bool) -> BResult<Value> {
+        todo_backend!("kinds_backfill")
+    }
+    /// The filled-in categories the user should look at.
+    async fn kinds_review(&self, ws: &str) -> BResult<Value> {
+        todo_backend!("kinds_review")
+    }
+    /// The user looked at these; returns what is left.
+    async fn kinds_reviewed(&self, ws: &str, ids: Vec<String>) -> BResult<Value> {
+        todo_backend!("kinds_reviewed")
     }
     async fn item_action(&self, id: &str, action: &str, actor: &str) -> BResult<Obj> {
         todo_backend!("item_action")

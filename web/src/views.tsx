@@ -28,8 +28,8 @@ import { ItemPeopleProp } from "@/people/item-people"
 import { queueNote, QueueStrip } from "@/queue"
 import { NativeIdLine, ResumeCard } from "@/resume"
 import { ItemStatsRows, SessionStats } from "@/stats/drill"
-import { accOf, active, addDep, archive, bulk, closeRel, deleteItem, depsOpen, doFork, gBuild, gComps, hm, importSessions, interrupt, it, itemThread, link, loadEvents, loadItem, loadLocalSessions, markDone, newItem, patchItem, pending, pendingCards, reassign, rmDep, saveGoal, sessPatch, sessRemove, sessSend, setAcc, setSt, setTags, snoozed, st, stageOf, star, supp, tag, TAG_CATS, threadFollow, tm, toast, undoDecision, unsnooze, WT, type Item, type Out, type PlanRound } from "@/store"
-import { BotAvatar, BotName, Chips, closeSheet, Composer, DecisionCard, Empty, go, Group, ItemNo, Meta, openSheet, Page, RelNote, ReplyBlock, Row, RunBar, SectionLabel, Segmented, SessionBlock, Status, StatusDot, Tags, ThemeSwitch, Transcript, type ComposerHandle } from "@/ui"
+import { accOf, active, addDep, archive, bulk, closeRel, deleteItem, depsOpen, doFork, gBuild, gComps, hm, importSessions, interrupt, it, itemThread, link, loadEvents, loadItem, loadLocalSessions, markDone, newItem, patchItem, pending, pendingCards, reassign, rmDep, saveGoal, sessPatch, sessRemove, sessSend, setAcc, setSt, setTags, setKind, kindOf, kindTags, isKind, DOMAIN_CATS, snoozed, st, stageOf, star, supp, tag, threadFollow, tm, toast, undoDecision, unsnooze, WT, type Item, type Out, type PlanRound } from "@/store"
+import { BotAvatar, BotName, Chips, closeSheet, Composer, DecisionCard, Empty, go, Group, ItemNo, KindTag, Meta, openSheet, Page, RelNote, ReplyBlock, Row, RunBar, SectionLabel, Segmented, SessionBlock, Status, StatusDot, Tags, ThemeSwitch, Transcript, type ComposerHandle } from "@/ui"
 import { ChoiceCards, ItemRow, PlanBar, ProjectChip, Select, selected } from "@/view-shared"
 import { choiceText, YoloItemSwitch, YoloMark } from "@/yolo/badges"
 import { YoloPill, yoloState } from "@/yolo/switch"
@@ -82,19 +82,19 @@ export function InboxView() {
 }
 
 /* ═════════ 事项 ═════════ */
-let itemsView: "列表" | "看板" | "关系图" = "列表"; let filt = "全部", q = "", showAll = false, botF = "all", sortBy = "更新时间", tagF = "all", projF = "all"
+let itemsView: "列表" | "看板" | "关系图" = "列表"; let filt = "全部", q = "", showAll = false, botF = "all", sortBy = "更新时间", tagF = "all", kindF = "all", projF = "all"
 /** finished and dropped items shown before “显示全部”; the rest are a click away */
 const CLOSED_SHOWN = 8
 /** a filter select in the toolbar: compact, and muted until it narrows the list */
 const FILTER = (set: boolean) => cn("h-7 px-2 text-[12.5px] [&>svg]:opacity-60", set ? "text-foreground" : "text-muted-foreground"); const openGroups = new Set<string>()
-export const showTag = (id: string) => { tagF = id; filt = "全部"; itemsView = "列表"; go("#/items") }
+export const showTag = (id: string) => { if (isKind(tag(id))) kindF = id; else tagF = id; filt = "全部"; itemsView = "列表"; go("#/items") }
 const PRI_ORDER: Record<string, number> = { 高: 0, 中: 1, 低: 2 }
 export function ItemsView() {
   const [, f] = useState(0); const r = () => f((x) => x + 1)
   const [confirmDel, setConfirmDel] = useState<string | null>(null)
   const arch = filt === "已归档"
   let xs = st.items.filter((i) => (arch ? i.arch : !i.arch) && (arch || filt === "全部" || (filt === "等你" && ["wait", "prop"].includes(i.st)) || (filt === "进行中" && i.st === "run") || (filt === "关注" && i.star))
-    && (botF === "all" || i.b === botF) && (tagF === "all" || !!i.tags?.includes(tagF)) && (projF === "all" || (projF === "none" ? !i.project : i.project === projF)) && (!q || i.t.includes(q) || i.id.toLowerCase().includes(q.toLowerCase())))
+    && (botF === "all" || i.b === botF) && (tagF === "all" || !!i.tags?.includes(tagF)) && (kindF === "all" || !!i.tags?.includes(kindF)) && (projF === "all" || (projF === "none" ? !i.project : i.project === projF)) && (!q || i.t.includes(q) || i.id.toLowerCase().includes(q.toLowerCase())))
   if (sortBy === "截止时间") xs = [...xs].sort((a, b) => (a.due ? 0 : 1) - (b.due ? 0 : 1))
   if (sortBy === "优先级") xs = [...xs].sort((a, b) => PRI_ORDER[a.pri ?? "中"] - PRI_ORDER[b.pri ?? "中"])
   if (sortBy === "编号") xs = [...xs].sort((a, b) => +b.id.split("-")[1] - +a.id.split("-")[1])
@@ -125,7 +125,8 @@ export function ItemsView() {
       <div className="mb-4 flex flex-wrap items-center gap-1.5 border-b pb-3" data-items-toolbar>
         <Chips value={filt} onChange={(v) => { filt = v; done() }} options={["全部", "等你", "进行中", "关注", "已归档"]} />
         <span className="flex-1" />
-        <Select quiet className={FILTER(tagF !== "all")} testId="tag-filter" value={tag(tagF) ? tagF : "all"} onChange={(v) => { tagF = v; r() }} options={[{ v: "all", l: "全部标签" }, ...TAG_CATS.flatMap((c) => st.tags.filter((t) => t.cat === c).map((t) => ({ v: t.id, l: <span>{t.name} <span className="text-muted-foreground">· {c}</span></span> })))]} />
+        <Select quiet className={FILTER(kindF !== "all")} testId="kind-filter" value={tag(kindF) ? kindF : "all"} onChange={(v) => { kindF = v; r() }} options={[{ v: "all", l: "全部分类" }, ...kindTags().map((t) => ({ v: t.id, l: <KindTag id={t.id} className="border-0 bg-transparent px-0" /> }))]} />
+        <Select quiet className={FILTER(tagF !== "all")} testId="tag-filter" value={tag(tagF) ? tagF : "all"} onChange={(v) => { tagF = v; r() }} options={[{ v: "all", l: "全部标签" }, ...DOMAIN_CATS.flatMap((c) => st.tags.filter((t) => t.cat === c).map((t) => ({ v: t.id, l: <span>{t.name} <span className="text-muted-foreground">· {c}</span></span> })))]} />
         <Select quiet className={FILTER(projF !== "all")} testId="project-filter" value={st.projects.some((p) => p.id === projF) || projF === "none" ? projF : "all"} onChange={(v) => { projF = v; r() }} options={[{ v: "all", l: "全部项目" }, ...st.projects.map((p) => ({ v: p.id, l: p.name })), { v: "none", l: "没有项目" }]} />
         <Select quiet className={FILTER(botF !== "all")} testId="bot-filter" value={botF} onChange={(v) => { botF = v; r() }} options={[{ v: "all", l: "全部 Bot" }, ...Object.keys(st.bots).map((k) => ({ v: k, l: <BotName k={k} /> }))]} />
         {itemsView === "列表" && <Select quiet className={FILTER(sortBy !== "更新时间")} testId="sort" value={sortBy} onChange={(v) => { sortBy = v; r() }} options={["更新时间", "截止时间", "优先级", "编号"].map((v) => ({ v, l: "按" + v }))} />}
@@ -245,13 +246,14 @@ function Prop({ label, children, top }: { label: string; children: ReactNode; to
 function TagPicker({ i }: { i: Item }) {
   const [q, setQ] = useState("")
   const has = new Set(i.tags ?? [])
-  const xs = st.tags.filter((t) => !has.has(t.id) && (!q || [t.name, t.cat, t.desc].some((v) => v.toLowerCase().includes(q.toLowerCase()))))
+  const xs = st.tags.filter((t) => !isKind(t) && !has.has(t.id) && (!q || [t.name, t.cat, t.desc].some((v) => v.toLowerCase().includes(q.toLowerCase()))))
+  const domain = (i.tags ?? []).filter((x) => !isKind(tag(x)))
   return (
     <DropdownMenu onOpenChange={(o) => !o && setQ("")}>
-      <DropdownMenuTrigger render={<button type="button" className="self-start type-footnote text-muted-foreground hover:text-foreground" data-add-tag />}>{(i.tags ?? []).length ? "+ 添加" : "无 · 添加"}</DropdownMenuTrigger>
+      <DropdownMenuTrigger render={<button type="button" className="self-start type-footnote text-muted-foreground hover:text-foreground" data-add-tag />}>{domain.length ? "+ 添加" : "无 · 添加"}</DropdownMenuTrigger>
       <DropdownMenuContent align="start" className="max-h-80 w-72">
         <div className="p-1"><Input autoFocus className="h-8 rounded-md text-[13px]" placeholder="搜索名称、分类或描述" value={q} onChange={(e) => setQ(e.target.value)} onKeyDown={(e) => e.stopPropagation()} data-tag-search /></div>
-        {TAG_CATS.map((c) => { const g = xs.filter((t) => t.cat === c); return g.length ? <div key={c}><div className="px-2 pb-0.5 pt-2 type-footnote text-muted-foreground">{c}</div>
+        {DOMAIN_CATS.map((c) => { const g = xs.filter((t) => t.cat === c); return g.length ? <div key={c}><div className="px-2 pb-0.5 pt-2 type-footnote text-muted-foreground">{c}</div>
           {g.map((t) => <DropdownMenuItem key={t.id} onClick={() => setTags(i.id, [...(i.tags ?? []), t.id])} data-tag-opt={t.name} className="flex-col items-start gap-0"><span className="type-callout">{t.name}</span><span className="line-clamp-1 type-footnote text-muted-foreground">{t.desc}</span></DropdownMenuItem>)}</div> : null })}
         {!xs.length && <div className="px-2 py-2 type-footnote text-muted-foreground">没有匹配的标签</div>}
         <DropdownMenuSeparator />
@@ -440,8 +442,9 @@ export function ItemView({ id }: { id: string }) {
           <dl className="grid grid-cols-[64px_minmax(0,1fr)] items-start gap-x-3 gap-y-2.5">
             <Prop label="执行"><Select quiet testId="bot" value={i.b} onChange={(k) => reassign(i.id, k)} options={Object.keys(st.bots).filter((k) => st.bots[k].on || k === i.b).map((k) => ({ v: k, l: <BotName k={k} /> }))} />{B && <div className="pl-2 type-footnote text-muted-foreground">{B.h} · {B.m}</div>}</Prop>
             <ItemPeopleProp id={i.id} Prop={Prop} />
+            <Prop label="分类"><Select quiet testId="kind" value={kindOf(i) ?? ""} onChange={(k) => setKind(i.id, k)} options={kindTags().map((t) => ({ v: t.id, l: <KindTag id={t.id} className="border-0 bg-transparent px-0" /> }))} />{kindOf(i) && <div className="pl-2 type-footnote text-muted-foreground">{tag(kindOf(i)!)?.desc}</div>}</Prop>
             <Prop label="标签"><div className="flex flex-col gap-1.5 pt-1" data-item-tags>
-              <Tags ids={i.tags} onRemove={(t) => setTags(i.id, (i.tags ?? []).filter((x) => x !== t))} />
+              <Tags ids={(i.tags ?? []).filter((x) => !isKind(tag(x)))} onRemove={(t) => setTags(i.id, (i.tags ?? []).filter((x) => x !== t))} />
               <TagPicker i={i} /></div></Prop>
             <Prop label="优先级"><Select quiet testId="pri" value={i.pri ?? "中"} onChange={(v) => patchItem(i.id, { pri: v as Item["pri"] })} options={["高", "中", "低"].map((v) => ({ v, l: v }))} /></Prop>
             <Prop label="截止"><Select quiet testId="due" value={i.due ?? "无"} onChange={(v) => patchItem(i.id, { due: v === "无" ? undefined : v }, v === "无" ? "移除截止时间" : "截止时间设为 " + v)} options={[...new Set(["无", i.due ?? "无", "今天 18:00", "明天", "周五", "下周一"])].map((v) => ({ v, l: v }))} /></Prop>

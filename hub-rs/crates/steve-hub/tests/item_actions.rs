@@ -387,6 +387,127 @@ async fn pause_finish_drop_and_new_cycles() {
     assert_eq!(cycles, [(1, "completed"), (2, "cancelled")]);
 
     workspace_is_named_never_guessed(&e).await;
+    an_item_keeps_exactly_one_category(&e).await;
+}
+
+/// ST-34 over HTTP: an item made through the API has one category; no write leaves it with none or two;
+/// the categories themselves cannot be deleted, merged or joined; a backfill finds nothing to do.
+async fn an_item_keeps_exactly_one_category(e: &Env) {
+    let (_, state) = e.call("GET", "/api/state", None).await;
+    let tags = state["tags"].as_array().expect("tags").clone();
+    let kind = |n: &str| {
+        tags.iter()
+            .find(|t| t["cat"] == "类型" && t["name"] == n)
+            .and_then(|t| t["id"].as_str())
+            .unwrap_or_else(|| panic!("no category {n} in {tags:?}"))
+            .to_string()
+    };
+    let (bug, feat) = (kind("bug"), kind("feat"));
+    assert_eq!(tags.iter().filter(|t| t["cat"] == "类型").count(), 6);
+    let (s, web) = e
+        .call(
+            "POST",
+            "/api/tags",
+            Some(json!({"name": "前端", "cat": "领域", "description": "界面"})),
+        )
+        .await;
+    assert_eq!(s, 200, "{web}");
+    let web = web["id"].as_str().unwrap().to_string();
+    let bot = state["bots"][0]["id"].as_str().unwrap().to_string();
+    let (s, i) = e
+        .call("POST", "/api/items", Some(json!({"goal": "做一个新页面", "title": "新页面", "bot": bot, "project": null, "mode": "propose"})))
+        .await;
+    assert_eq!(s, 200, "{i}");
+    let iid = i["id"].as_str().unwrap().to_string();
+    let tags_of = |v: &Value| -> Vec<String> {
+        v["tags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t.as_str().unwrap().to_string())
+            .collect()
+    };
+    let (_, v) = e.call("GET", &format!("/api/items/{iid}"), None).await;
+    assert_eq!(
+        tags_of(&v),
+        std::slice::from_ref(&feat),
+        "Steve gave it one: {v}"
+    );
+
+    let path = format!("/api/items/{iid}");
+    for (bad, why) in [
+        (json!([]), "必须"),
+        (json!([web]), "必须"),
+        (json!([bug, feat, web]), "只能有一个"),
+    ] {
+        let (s, v) = e
+            .call("PATCH", &path, Some(json!({"tags": bad, "title": "改了"})))
+            .await;
+        assert_eq!(s, 409, "{bad} → {v}");
+        assert!(v["error"].as_str().unwrap().contains(why), "{v}");
+    }
+    let (_, v) = e.call("GET", &path, None).await;
+    assert_eq!(
+        (tags_of(&v), v["title"].as_str()),
+        (vec![feat.clone()], Some("新页面")),
+        "nothing written"
+    );
+    // switching is one write, the category first
+    let (s, v) = e
+        .call("PATCH", &path, Some(json!({"tags": [web, bug]})))
+        .await;
+    assert_eq!(s, 200, "{v}");
+    let (_, v) = e.call("GET", &path, None).await;
+    assert_eq!(tags_of(&v), [bug.clone(), web.clone()]);
+    let texts: Vec<&str> = v["timeline"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|t| t["text"].as_str())
+        .collect();
+    assert!(
+        texts.contains(&"分类改为 bug（原来是 feat）") && texts.contains(&"添加标签：前端"),
+        "{texts:?}"
+    );
+
+    let (s, _) = e.call("DELETE", &format!("/api/tags/{bug}"), None).await;
+    assert_eq!(s, 409);
+    let (s, _) = e
+        .call(
+            "POST",
+            &format!("/api/tags/{web}/merge"),
+            Some(json!({"into": bug})),
+        )
+        .await;
+    assert_eq!(s, 409);
+    let (s, _) = e
+        .call(
+            "PATCH",
+            &format!("/api/tags/{bug}"),
+            Some(json!({"name": "fix"})),
+        )
+        .await;
+    assert_eq!(s, 409);
+    let (s, _) = e
+        .call(
+            "POST",
+            "/api/tags",
+            Some(json!({"name": "需求", "cat": "类型", "description": "x"})),
+        )
+        .await;
+    assert_eq!(s, 409);
+
+    // every item already has one: the backfill touches nothing, however often it runs
+    for _ in 0..2 {
+        let (s, r) = e
+            .call("POST", "/api/tags/kinds/backfill", Some(json!({})))
+            .await;
+        assert_eq!(s, 200, "{r}");
+        assert_eq!(r["filled"], json!([]), "{r}");
+        assert_eq!(r["checked"], r["kept"], "{r}");
+    }
+    let (s, r) = e.call("GET", "/api/tags/kinds/review", None).await;
+    assert_eq!((s, r), (200, json!([])));
 }
 
 /// The page says which workspace a request is for (`x-steve-ws`). A workspace the user is not a member of

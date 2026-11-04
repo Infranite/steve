@@ -1004,3 +1004,33 @@ pub async fn device_patch(
 /// gateway tiers by name, for the route modules.
 pub(crate) const SMART: Tier = Tier::Smart;
 pub(crate) const FAST: Tier = Tier::Fast;
+
+// ── item categories (ST-34) ──
+
+pub async fn kinds_backfill(
+    State(st): State<AppState>,
+    Extension(c): Extension<Ctx>,
+    b: Bytes,
+) -> ApiResult {
+    let v = if b.is_empty() { json!({}) } else { body(&b)? };
+    let mut k = Check::object(&v);
+    let dry = k.opt_bool("dry").unwrap_or(false);
+    k.finish()?;
+    ok(st.domain.kinds_backfill(&c.ws, dry).await?)
+}
+
+pub async fn kinds_review(State(st): State<AppState>, Extension(c): Extension<Ctx>) -> ApiResult {
+    ok(st.domain.kinds_review(&c.ws).await?)
+}
+
+pub async fn kinds_reviewed(
+    State(st): State<AppState>,
+    Extension(c): Extension<Ctx>,
+    b: Bytes,
+) -> ApiResult {
+    let v = body(&b)?;
+    let mut k = Check::object(&v);
+    let ids = k.opt_str_array("ids", None, None).unwrap_or_default();
+    k.finish()?;
+    ok(st.domain.kinds_reviewed(&c.ws, ids).await?)
+}

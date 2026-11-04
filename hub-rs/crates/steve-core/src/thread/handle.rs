@@ -602,6 +602,8 @@ impl Core {
             res,
             |i| json!({"item": i.id, "bot": i.bot_id, "project": i.project_id}),
         )?;
+        /* what the item got: the category first, Steve's own pick when the router named none */
+        let tag_ids = db.tags_of_item(&item.id)?;
         let tag_text = if tag_ids.is_empty() {
             String::new()
         } else {

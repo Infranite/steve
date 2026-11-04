@@ -227,6 +227,15 @@ pub async fn patch_one(
         {
             own(r.project_get(p)?, &c.ws, "项目")?;
         }
+        // tags first, before anything is written: the store drops other workspaces' tags and refuses
+        // (409) a set without exactly one category, so removing the only one or adding a second fails
+        let tags = match tags {
+            Some(t) => {
+                let before = r.tags_of_item(&id)?;
+                Some((before, r.tags_set_item(&id, &t)?))
+            }
+            None => None,
+        };
         if let Some(Value::String(t)) = rest.get("title")
             && i.get("title").and_then(Value::as_str) != Some(t)
         {
@@ -260,55 +269,46 @@ pub async fn patch_one(
                 None,
             )?;
         }
-        if let Some(t) = tags {
-            let before = r.tags_of_item(&id)?;
-            let add: Vec<&String> = t.iter().filter(|x| !before.contains(x)).collect();
-            let rm: Vec<&String> = before.iter().filter(|x| !t.contains(x)).collect();
-            let mut keep = vec![];
-            for x in &t {
-                if r.tag_get(x)?
-                    .and_then(|g| {
-                        g.get("workspace_id")
-                            .and_then(Value::as_str)
-                            .map(str::to_string)
-                    })
-                    .as_deref()
-                    == Some(c.ws.as_str())
-                {
-                    keep.push(x.clone());
+        if let Some((before, kept)) = &tags {
+            // name and whether it is the category (`类型`); a missing name reads as ""
+            let tag = |x: &String| -> Result<(String, bool), ApiError> {
+                Ok(r.tag_get(x)?
+                    .map(|g| (str_of(&g, "name"), str_of(&g, "cat") == "类型"))
+                    .unwrap_or_default())
+            };
+            let mut add = vec![];
+            let mut rm = vec![];
+            let (mut kind_from, mut kind_to) = (None, None);
+            for x in kept.iter().filter(|x| !before.contains(x)) {
+                match tag(x)? {
+                    (n, true) => kind_to = Some(n),
+                    (n, false) => add.push(n),
                 }
             }
-            r.tags_set_item(&id, &keep)?;
-            // Array.join turns a missing name (undefined) into ""
-            let name = |x: &String| -> Result<Option<String>, ApiError> {
-                Ok(r.tag_get(x)?
-                    .and_then(|g| g.get("name").and_then(Value::as_str).map(str::to_string)))
-            };
+            for x in before.iter().filter(|x| !kept.contains(x)) {
+                match tag(x)? {
+                    (n, true) => kind_from = Some(n),
+                    (n, false) => rm.push(n),
+                }
+            }
+            if let Some(to) = kind_to {
+                let text = match kind_from {
+                    Some(from) => format!("分类改为 {to}（原来是 {from}）"),
+                    None => format!("分类设为 {to}"),
+                };
+                r.timeline_add(&id, me, "me", &text, None)?;
+            }
             if !add.is_empty() {
-                let names = add
-                    .iter()
-                    .map(|x| Ok(name(x)?.unwrap_or_default()))
-                    .collect::<Result<Vec<_>, ApiError>>()?;
                 r.timeline_add(
                     &id,
                     me,
                     "me",
-                    &format!("添加标签：{}", names.join("、")),
+                    &format!("添加标签：{}", add.join("、")),
                     None,
                 )?;
             }
             if !rm.is_empty() {
-                let names = rm
-                    .iter()
-                    .map(|x| Ok(name(x)?.unwrap_or_else(|| (*x).clone())))
-                    .collect::<Result<Vec<_>, ApiError>>()?;
-                r.timeline_add(
-                    &id,
-                    me,
-                    "me",
-                    &format!("移除标签：{}", names.join("、")),
-                    None,
-                )?;
+                r.timeline_add(&id, me, "me", &format!("移除标签：{}", rm.join("、")), None)?;
             }
         }
         // a different project only applies from the next session: forget the old directory

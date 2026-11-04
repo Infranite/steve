@@ -3,8 +3,8 @@ import { Field, FieldContent, FieldDescription, FieldLabel, FieldTitle } from "@
 import { Progress } from "@/components/ui/progress"
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
 import { SelectContent, SelectItem, SelectTrigger, SelectValue, Select as UISelect } from "@/components/ui/select"
-import { botName, closeRel, depsOpen, st, type Item } from "@/store"
-import { BotAvatar, go, ItemNo, Meta, RelNote, StatusDot, Tags } from "@/ui"
+import { botName, closeRel, depsOpen, kindOf, st, type Item } from "@/store"
+import { BotAvatar, go, ItemNo, KindTag, Meta, RelNote, StatusDot, Tags } from "@/ui"
 import { cn } from "cn"
 import { FolderIcon, GitBranchIcon, StarIcon } from "lucide-react"
 import { type ReactNode } from "react"
@@ -51,6 +51,8 @@ export function ItemRow({ i, pick, proj = true, bot = true }: { i: Item; pick?: 
   const side = (
     <span className="ml-auto flex shrink-0 items-center gap-2.5 pl-2 type-footnote text-muted-foreground">
       <Tags ids={i.tags} max={2} className="hidden flex-nowrap sm:inline-flex" />
+      {/* a phone row has room for the category only */}
+      {kindOf(i) && <KindTag id={kindOf(i)!} className="sm:hidden" />}
       {i.pri === "高" && !closed && <span className="rounded bg-attention/12 px-1.5 text-attention">高</span>}
       {i.due && !closed && <span className={cn("whitespace-nowrap", /今天/.test(i.due) && "text-foreground/80")}>截止 {i.due}</span>}
       {proj && i.project && <span className="hidden max-w-28 md:inline-flex"><ProjectChip id={i.project} plain /></span>}

@@ -238,8 +238,8 @@ async fn a2_a_clear_change_becomes_an_item() {
     assert_eq!(items(&k), before + 1);
     let id = ms[1].item_id.clone().unwrap();
     assert_eq!(
-        ms[1].text, "好，交给它了。",
-        "the router's tag note is dropped"
+        ms[1].text, "好，交给它了。 标签：feat。",
+        "the router's tag note is dropped; the code adds the item's own, its category first"
     );
     let ti = k.db().store().thread().item(&id).unwrap().unwrap();
     assert_eq!(ti.origin_msg, mid);

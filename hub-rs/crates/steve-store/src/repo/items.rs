@@ -38,6 +38,10 @@ pub struct NewItem {
     pub stage: Option<String>,
     pub source: Option<(String, String)>,
     pub parent: Option<Parent>,
+    /// Written in the same transaction; for a task item they must hold exactly one category
+    /// ([`super::kinds::checked`]). The domain layer always gives them; empty writes none.
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 /// Patchable item fields. Deserializable so a stored decision `undo` (`{status, now, stage}`) can be applied.
@@ -138,6 +142,13 @@ impl Items<'_> {
                 .map(|w| w.item_prefix)
                 .unwrap_or_else(|| "ST".into());
             let task = kind == "task";
+            /* checked before anything is written: a refused set leaves no item behind */
+            let tags = if task && !p.tags.is_empty() {
+                super::kinds::ensure(w, ws)?;
+                super::kinds::checked(w.c, ws, &p.tags)?
+            } else {
+                p.tags.clone()
+            };
             let no = if task { next_counter(w.c, &format!("item:{prefix}"))? } else { 0 };
             let id = if task { format!("{prefix}-{no}") } else { uid("chat") };
             let t = now();
@@ -164,6 +175,7 @@ impl Items<'_> {
                     t
                 ],
             )?;
+            super::put_item_tags(w.c, &id, &tags)?;
             w.c.run("INSERT INTO item_goals (item_id, version, text, created) VALUES (?, 1, ?, ?)", params![id, p.goal, t])?;
             if task {
                 // stats: the item's first status (modules/stats.md §2.5)

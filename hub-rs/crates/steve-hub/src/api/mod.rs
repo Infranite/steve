@@ -433,6 +433,11 @@ pub fn router(st: AppState, modules: Router) -> Router {
             patch(misc::tag_patch).delete(misc::tag_remove),
         )
         .route("/tags/{id}/merge", post(misc::tag_merge))
+        .route("/tags/kinds/backfill", post(misc::kinds_backfill))
+        .route(
+            "/tags/kinds/review",
+            get(misc::kinds_review).post(misc::kinds_reviewed),
+        )
         // settings and conversational configuration
         .route("/settings/schema", get(misc::settings_schema))
         .route(
