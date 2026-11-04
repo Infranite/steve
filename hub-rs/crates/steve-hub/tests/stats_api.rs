@@ -304,6 +304,53 @@ async fn stats_routes() {
         let (s, _) = e.call("GET", &format!("/api/stats/series?{q}"), None).await;
         assert_eq!(s, 400, "{q}");
     }
+    /* hours of a one-day range (ST-43) */
+    let (s, v) = e
+        .call(
+            "GET",
+            "/api/stats/series?metric=done&range=today&bucket=hour",
+            None,
+        )
+        .await;
+    assert_eq!((s, &v["bucket"]), (200, &json!("hour")), "{v}");
+    assert_eq!(v["buckets"][0], json!(format!("{today}T00:00")));
+    assert_eq!(v["buckets"][23], json!(format!("{today}T23:00")));
+    assert_eq!(v["spans"].as_array().map(Vec::len), Some(24));
+    assert!(v["tz"].as_str().is_some_and(|z| !z.is_empty()), "{v}");
+    let cur = v["current"].as_u64().expect("now is in today") as usize;
+    let vals = v["series"][0]["values"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(vals[..=cur].iter().all(|x| x == &json!(0.0)), "{v}");
+    assert!(vals[cur + 1..].iter().all(Value::is_null), "{v}");
+    let (_, v) = e.call("GET", "/api/stats/series?metric=done", None).await;
+    assert_eq!(
+        (&v["bucket"], v.get("spans"), v.get("current")),
+        (&json!("day"), None, None)
+    );
+    for (q, field) in [
+        ("series?metric=done&bucket=hour", "bucket"),
+        ("series?metric=done&range=today&bucket=minute", "bucket"),
+        ("items?hour=3", "hour"),
+        ("items?range=today&hour=24", "hour"),
+        ("breakdown?by=tool&range=today&hour=3", "hour"),
+    ] {
+        let (s, v) = e.call("GET", &format!("/api/stats/{q}"), None).await;
+        assert_eq!(
+            (s, v),
+            (400, json!({"error": format!("参数不对：{field}")})),
+            "{q}"
+        );
+    }
+    for q in [
+        "items?range=today&hour=3&only=done",
+        "breakdown?by=model&range=today&hour=3",
+        "series?metric=tokens&group=model&range=custom&from=2026-11-01&to=2026-11-01&bucket=hour",
+    ] {
+        let (s, v) = e.call("GET", &format!("/api/stats/{q}"), None).await;
+        assert_eq!(s, 200, "{q}: {v}");
+    }
     let (s, v) = e.call("GET", "/api/stats/items?limit=101", None).await;
     assert_eq!((s, v), (400, json!({"error": "参数不对：limit"})));
     let (s, v) = e.call("GET", "/api/stats/items", None).await;

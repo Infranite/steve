@@ -1,6 +1,7 @@
 /* 统计页的概览（ST-40）：运行状态（原来顶部的 YOLO 横栏，见 yolo/status.tsx）、四个核心指标、新建与完成的趋势、进行中事项的状态分布，
  * 以及它们共用的下钻明细。“现在”的数字取自事项列表本身，下钻列表用同一个筛选，数字和列表天然一致；
- * “区间”的数字取自统计接口，下钻用 `only=done|created` 取同一批事项（steve-stats views::items）。 */
+ * “区间”的数字取自统计接口，下钻用 `only=done|created` 取同一批事项（steve-stats views::items）。
+ * 单日范围（今天）按小时（ST-43）：点一个小时，下钻用 `hour` 取那个小时里完成或新建的事项，和柱子同一个区间。 */
 import { useState, type ReactNode } from "react"
 import { cn } from "cn"
 import { ChartColumnIcon, TableIcon, XIcon } from "lucide-react"
@@ -12,7 +13,7 @@ import { go, ItemNo, Segmented, StatusDot } from "@/ui"
 import { stats, type Filter, type Series, type Summary } from "@/api/stats"
 import { Chart, ChartHead, ChartTable, HBars, STATE, type BarRow } from "@/stats/chart"
 import { ItemsTable } from "@/stats/items"
-import { delta, fmtRange, shortDay, useStats } from "@/stats/format"
+import { bucketName, delta, fmtRange, isHour, oneDay, zoneName, useStats } from "@/stats/format"
 
 const link = "font-medium text-foreground/80 underline-offset-2 hover:text-foreground hover:underline"
 
@@ -67,16 +68,23 @@ export function CoreKpis({ s, f, prevName, rangeName, drill, setDrill }: { s: Su
   )
 }
 
-/** 新建与完成, per day, side by side */
+/** the meta line of a chart over the page's range: “件 / 天 · 11月1日 – 11月7日”, or by hour “件 / 小时 · 11月5日 00:00–24:00 · 北京时间” */
+export const rangeMeta = (unit: string, s: Summary, hourly: boolean) =>
+  hourly ? `${unit} / 小时 · ${fmtRange(s.range.from, s.range.to)} 00:00–24:00 · ${zoneName(s.range.tz)}` : `${unit} / 天 · ${fmtRange(s.range.from, s.range.to)}`
+
+/** 新建与完成, per day (per hour for one day), side by side */
 export function FlowChart({ s, f, fkey, live, drill, setDrill }: { s: Summary; f: Filter; fkey: string; live: boolean; drill: Drill | null; setDrill: (d: Drill | null) => void }) {
-  const [cr] = useStats(() => stats.series(f, "created", "none"), [fkey], live)
-  const [dn] = useStats(() => stats.series(f, "done", "none"), [fkey], live)
+  const hourly = oneDay(f)
+  const [cr] = useStats(() => stats.series(f, "created", "none", hourly), [fkey], live)
+  const [dn] = useStats(() => stats.series(f, "done", "none", hourly), [fkey], live)
   const [table, setTable] = useState(false)
+  /* null stays null: an hour not yet come is empty, not 0 */
+  const val = (v: number | null | undefined) => (v === null ? null : v ?? 0)
   const data: Series | null = cr.s === "ok" && dn.s === "ok" ? {
-    buckets: cr.v.buckets,
+    ...cr.v,
     series: [
-      { key: "created", label: "新建", values: cr.v.buckets.map((_, i) => cr.v.series[0]?.values[i] ?? 0) },
-      { key: "done", label: "完成", values: cr.v.buckets.map((b) => { const j = dn.v.buckets.indexOf(b); return j < 0 ? 0 : dn.v.series[0]?.values[j] ?? 0 }) },
+      { key: "created", label: "新建", values: cr.v.buckets.map((_, i) => val(cr.v.series[0]?.values[i])) },
+      { key: "done", label: "完成", values: cr.v.buckets.map((b) => { const j = dn.v.buckets.indexOf(b); return j < 0 ? 0 : val(dn.v.series[0]?.values[j]) }) },
     ],
   } : null
   const picked = drill?.startsWith("day:") ? drill.slice(4) : null
@@ -84,11 +92,11 @@ export function FlowChart({ s, f, fkey, live, drill, setDrill }: { s: Summary; f
   const err = cr.s === "error" ? cr.msg : dn.s === "error" ? dn.msg : null
   return (
     <section data-flow-chart>
-      <ChartHead k="flow" title="新建与完成" meta={`件 / 天 · ${fmtRange(s.range.from, s.range.to)}`}
-        legend={[{ label: `新建 ${s.throughput.created} 件`, c: STATE.created }, { label: `完成 ${s.throughput.done} 件`, c: STATE.done }]}
+      <ChartHead k="flow" title="新建与完成" meta={rangeMeta("件", s, hourly)}
+        legend={[{ label: `新建 ${s.throughput.created} 件`, c: STATE.created }, { label: `完成 ${s.throughput.done} 件`, c: STATE.done }, ...(hourly && data?.current != null ? [{ label: "浅色：当前小时，未结束", c: "var(--muted)" }] : [])]}
         right={<ModeSwitch table={table} set={setTable} />} />
       {!data ? <Loading err={err} /> : table ? <ChartTable data={data} fmt={(v) => String(Math.round(v))} picked={picked} onPick={pick} />
-        : <Chart data={data} kind="group" int fmt={(v) => String(Math.round(v))} colors={[STATE.created, STATE.done]} picked={picked} onPick={pick} label="每天新建与完成的事项数" height={200} />}
+        : <Chart data={data} kind="group" int fmt={(v) => String(Math.round(v))} colors={[STATE.created, STATE.done]} picked={picked} onPick={pick} label={hourly ? "每小时新建与完成的事项数" : "每天新建与完成的事项数"} height={200} />}
       {data && data.series.every((l) => l.values.every((v) => !v)) && <div className="mt-2 type-footnote text-muted-foreground">这段时间没有新建或完成的事项。</div>}
     </section>
   )
@@ -154,8 +162,10 @@ export function DrillPanel({ d, f, fkey, live, rangeName, close }: { d: Drill; f
   } else if (d === "done") {
     title = `已完成 · ${rangeName}`; body = <ItemsTable f={f} fkey={fkey + "done"} live={live} only="done" sort0="done_at" />
   } else {
-    const day = d.slice(4), g: Filter = { ...f, range: "custom", from: day, to: day }
-    title = <span className="inline-flex flex-wrap items-center gap-3">{shortDay(day)} 的事项<Segmented size="sm" value={dayTab} onChange={setDayTab} options={[["done", "完成"], ["created", "新建"]] as const} /></span>
+    /* a day, or an hour of the day (`YYYY-MM-DDTHH:00`): the same span its bar counts */
+    const b = d.slice(4), day = b.slice(0, 10)
+    const g: Filter = { ...f, range: "custom", from: day, to: day, hour: isHour(b) ? Number(b.slice(11, 13)) : undefined }
+    title = <span className="inline-flex flex-wrap items-center gap-3">{bucketName(b)} 的事项<Segmented size="sm" value={dayTab} onChange={setDayTab} options={[["done", "完成"], ["created", "新建"]] as const} /></span>
     body = <ItemsTable key={dayTab} f={g} fkey={fkey + d + dayTab} live={live} only={dayTab} sort0={dayTab === "done" ? "done_at" : "est"} />
   }
   return (

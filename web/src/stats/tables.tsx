@@ -10,7 +10,7 @@ import { Spinner } from "@/components/ui/spinner"
 import { Chart, ChartHead, ChartTable, HBars, Legend, Share, STATE, SERIES } from "@/stats/chart"
 import { Est, Kpi } from "@/stats/kpi"
 import { Loading, ModeSwitch } from "@/stats/overview"
-import { durUnit, fmtMs, fmtN, fmtPct, fmtUsd, useStats } from "@/stats/format"
+import { bucketName, durUnit, fmtMs, fmtN, fmtPct, fmtUsd, isHour, oneDay, zoneName, useStats } from "@/stats/format"
 import { harnessName } from "@/model-picker"
 
 export const th = "py-2 font-medium text-muted-foreground"
@@ -47,10 +47,12 @@ type UsageTab = (typeof USAGE_TABS)[number][0]
 /** 用量明细: one table per dimension, or the item table */
 export function UsageSection({ f, fkey, live, picked }: { f: Filter; fkey: string; live: boolean; picked: string | null }) {
   const [tab, setTab] = useState<UsageTab>("model")
-  const g: Filter = picked ? { ...f, range: "custom", from: picked, to: picked } : f
+  /* a picked day, or a picked hour of the day (ST-43) */
+  const day = picked?.slice(0, 10)
+  const g: Filter = picked ? { ...f, range: "custom", from: day, to: day, hour: isHour(picked) ? Number(picked.slice(11, 13)) : undefined } : f
   return (
     <section data-usage>
-      <ChartHead k="usage-table" title="用量明细" meta={picked ? <span className="text-blue">只看 {picked}</span> : "按维度拆开，占比按估算费用"} right={<Segmented size="sm" value={tab} onChange={setTab} options={USAGE_TABS} />} />
+      <ChartHead k="usage-table" title="用量明细" meta={picked ? <span className="text-blue">只看 {bucketName(picked)}</span> : "按维度拆开，占比按估算费用"} right={<Segmented size="sm" value={tab} onChange={setTab} options={USAGE_TABS} />} />
       <UsageTable f={g} by={tab} fkey={fkey + picked} live={live} />
     </section>
   )
@@ -92,7 +94,8 @@ function Line({ l, v, sub, k }: { l: ReactNode; v: ReactNode; sub?: ReactNode; k
 
 /** 耗时: how long finished items took, as a trend; where the time went; each kind of time side by side */
 export function TimeSection({ s, f, fkey, live, range }: { s: Summary; f: Filter; fkey: string; live: boolean; range: string }) {
-  const [lead] = useStats(() => stats.series(f, "lead", "none"), [fkey], live)
+  const hourly = oneDay(f)
+  const [lead] = useStats(() => stats.series(f, "lead", "none", hourly), [fkey], live)
   const [table, setTable] = useState(false)
   const t = s.time
   const max = lead.s === "ok" ? Math.max(0, ...lead.v.series.flatMap((l) => l.values.map((v) => v ?? 0))) : 0
@@ -106,9 +109,9 @@ export function TimeSection({ s, f, fkey, live, range }: { s: Summary; f: Filter
     <Section k="time" title="耗时" meta={`区间内完成的 ${t.lead.n} 件事项 · ${range}`}>
       <div className="grid grid-cols-1 gap-10 md:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
         <div data-lead-chart>
-          <ChartHead k="lead" title="完成耗时（前置时间）" meta={`${unit} · 每天完成的事项，线是中位数 · ${range}`}
+          <ChartHead k="lead" title="完成耗时（前置时间）" meta={hourly ? `${unit} · 每小时完成的事项，线是中位数 · ${range} 00:00–24:00 · ${zoneName(s.range.tz)}` : `${unit} · 每天完成的事项，线是中位数 · ${range}`}
             legend={[{ label: "中位数", c: SERIES[0], line: true }, { label: "中位数到 p85", c: STATE.band }]} right={<ModeSwitch table={table} set={setTable} />} />
-          {!d ? <Loading err={lead.s === "error" ? lead.msg : null} /> : table ? <ChartTable data={d} fmt={fmtMs} /> : <Chart data={d} kind="band" fmt={fmt} tipFmt={fmtMs} unit={div} colors={[SERIES[0], STATE.band]} label="每天完成事项的前置时间" height={200} />}
+          {!d ? <Loading err={lead.s === "error" ? lead.msg : null} /> : table ? <ChartTable data={d} fmt={fmtMs} /> : <Chart data={d} kind="band" fmt={fmt} tipFmt={fmtMs} unit={div} colors={[SERIES[0], STATE.band]} label={hourly ? "每小时完成事项的前置时间" : "每天完成事项的前置时间"} height={200} />}
           {d && d.series.every((l) => l.values.every((v) => v == null)) && <div className="mt-2 type-footnote text-muted-foreground">这段时间还没有完成的事项。</div>}
           {t.lead.n > 0 && <div className="mt-2 type-footnote text-muted-foreground" data-lead-sum>平均 {fmtMs(t.lead.avg)} · 中位 {fmtMs(t.lead.p50)} · p85 {fmtMs(t.lead.p85)}</div>}
         </div>
