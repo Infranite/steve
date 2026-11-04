@@ -19,6 +19,7 @@ Contract = steps identical in `tests/contract/contract.mjs --a ts --b rust` (las
 | `POST /api/workspaces/:id/switch` | done | ✓ 2/2 |  |  |
 | `POST /api/thread` | done | ✓ 7/7 | ✓ |  |
 | `POST /api/thread/stop` | done | ✓ 1/1 |  |  |
+| `PATCH /api/thread/queued/:id`, `DELETE /api/thread/queued/:id` | done (ST-33) | `thread_routing_api` |  |  |
 | `POST /api/notifications/read` | done | ✓ 5/5 |  |  |
 | `POST /api/thread/:id/promote` | done | ✓ 3/3 |  |  |
 | `POST /api/thread/:id/reroute` | done (thread-routing R3) | `thread_routing_api` |  |  |

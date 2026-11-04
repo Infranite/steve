@@ -366,7 +366,9 @@ type ComposerProps = {
   handle?: { current: ComposerHandle | null }
   draftKey?: string
   placeholder: string; onSend: (t: string, files: string[], refs: RFile[], mentions: { kind: "party" | "bot"; id: string }[]) => void | boolean | Promise<void | boolean>; model?: string; onModel?: (m: string) => void; left?: ReactNode; autoFocus?: boolean; className?: string; testId?: string; disabled?: boolean
-  busy?: boolean; onStop?: () => void; onCommand?: (c: string) => void
+  /** `busy`: the other side is working. With `onStop` there is a stop button beside send (and Esc), and sending still
+   * works: the page queues what is sent meanwhile */
+  busy?: boolean; onStop?: () => void | Promise<void>; onCommand?: (c: string) => void
 }
 export function Composer(props: ComposerProps) {
   return <ComposerInput key={props.draftKey} {...props} />
@@ -375,6 +377,12 @@ function ComposerInput({ placeholder, onSend, model, left, autoFocus, className,
   const [initial] = useState(() => readDraft(draftKey))
   const [v, setV] = useState(initial.text)
   const [sending, setSending] = useState(false)
+  /* stop was pressed and the turn has not ended yet; a stop that never lands frees the button again */
+  const [stopping, setStopping] = useState(false)
+  useEffect(() => { if (!busy) setStopping(false) }, [busy])
+  useEffect(() => { if (!stopping) return; const t = setTimeout(() => setStopping(false), 10_000); return () => clearTimeout(t) }, [stopping])
+  const stop = () => { if (!onStop || stopping) return; setStopping(true); void Promise.resolve(onStop()).catch(() => setStopping(false)) }
+  const queues = !!busy && !!onStop
   const inFlight = useRef(false)
   const up = useUploads(initial.files, draftKey, (files) => {
     const draft = readDraft(draftKey)
@@ -396,7 +404,7 @@ function ComposerInput({ placeholder, onSend, model, left, autoFocus, className,
   }, [handle])
   const send = async () => {
     const t = v.trim()
-    if (disabled || busy || inFlight.current || up.uploading || (!t && !up.ready.length)) return
+    if (disabled || (busy && !onStop) || inFlight.current || up.uploading || (!t && !up.ready.length)) return
     const sentDraft = { text: v, files: up.ready, mentions: men.snapshot() }
     saveDraft(draftKey, sentDraft)
     inFlight.current = true; setSending(true)
@@ -483,7 +491,8 @@ function ComposerInput({ placeholder, onSend, model, left, autoFocus, className,
               if (e.key === "Enter" || e.key === "Tab") { e.preventDefault(); insert(opts[sel]); return }
               if (e.key === "Escape") { setMenu(null); return }
             }
-            if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); if (!busy) send() }
+            if (e.key === "Escape" && queues && !e.nativeEvent.isComposing) { e.preventDefault(); stop(); return }
+            if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); if (!busy || onStop) send() }
           }} />
         </div>
         <InputGroupAddon align="block-end" className="gap-1 px-2.5 pb-2.5">
@@ -492,9 +501,9 @@ function ComposerInput({ placeholder, onSend, model, left, autoFocus, className,
           {left}
           <span className="flex-1" />
           <span className="mr-1 hidden items-center gap-1 type-footnote text-tertiary lg:inline-flex">{chat && <><Kbd>#</Kbd>事项<Kbd>@</Kbd>Bot<Kbd>/</Kbd>命令</>}{!chat && <><Kbd>⏎</Kbd>发送<Kbd>⇧⏎</Kbd>换行</>}</span>
-          {busy && onStop
-            ? <InputGroupButton size="icon-sm" variant="default" aria-label="停止" data-stop onClick={onStop} className="rounded-full"><SquareIcon className="size-3 fill-current" /></InputGroupButton>
-            : <InputGroupButton size="icon-sm" variant="default" aria-label={sending ? "提交中" : "发送"} data-send onClick={() => void send()} disabled={sending || up.uploading || (!v.trim() && !up.ready.length) || disabled} className="rounded-full disabled:opacity-25">{sending ? <Spinner className="size-4" /> : <ArrowUpIcon className="size-4" strokeWidth={2.25} />}</InputGroupButton>}
+          {queues && <Tooltip><TooltipTrigger render={<InputGroupButton size="icon-sm" variant="outline" aria-label={stopping ? "正在停止" : "停止"} data-stop data-stopping={stopping || undefined} onClick={stop} disabled={stopping} className="rounded-full" />}>
+            {stopping ? <Spinner className="size-4" /> : <SquareIcon className="size-3 fill-current" />}</TooltipTrigger><TooltipContent>{stopping ? "正在停止…" : <>停止这次回答 <Kbd>Esc</Kbd></>}</TooltipContent></Tooltip>}
+          <InputGroupButton size="icon-sm" variant="default" aria-label={sending ? "提交中" : queues ? "排队发送" : "发送"} title={queues ? "排队发送：本回合结束后发出" : undefined} data-send data-send-queues={queues || undefined} onClick={() => void send()} disabled={sending || up.uploading || (!v.trim() && !up.ready.length) || disabled} className="rounded-full disabled:opacity-25">{sending ? <Spinner className="size-4" /> : <ArrowUpIcon className="size-4" strokeWidth={2.25} />}</InputGroupButton>
         </InputGroupAddon>
       </InputGroup>
     </div>

@@ -72,6 +72,8 @@ all="$*"
 case "$all" in
   *"You are the router"*'User message: "帮我把'*|*'User message: "帮我把'*"You are the router"*) r='{item}' ;;
   *"You are the router"*) r='{answer}' ;;
+  *"排队"*) r='{reply}' ;;
+  *"慢慢说"*) sleep 20; r='{reply}' ;;
   *) r='{reply}' ;;
 esac
 printf '{{"type":"result","is_error":false,"result":"%s"}}\n' "$r"
@@ -283,6 +285,76 @@ async fn thread_routing_api() {
 }
 
 /// A research run's token sees only the four read-only tools (§7.4); a session token or none gets nothing.
+/// While Steve answers, what is said waits (`meta.held`), can be changed or withdrawn, and goes after the
+/// turn; stop ends the answer at once and says so (ST-33).
+#[tokio::test]
+async fn messages_wait_for_the_turn_and_stop_ends_it() {
+    let e = start().await;
+    let (s, _) = e
+        .call("POST", "/api/thread", Some(json!({"text": "慢慢说"})))
+        .await;
+    assert_eq!(s, 200);
+    let mut busy = false;
+    for _ in 0..100 {
+        let (_, st) = e.call("GET", "/api/state", None).await;
+        if st["thinking"] == true {
+            busy = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(busy, "the page knows Steve is on a turn");
+    for t in ["排队一", "排队二"] {
+        let (s, _) = e
+            .call("POST", "/api/thread", Some(json!({"text": t})))
+            .await;
+        assert_eq!(s, 200);
+    }
+    let t = e.settle(3).await;
+    let held: Vec<&Value> = t.iter().filter(|m| m["meta"]["held"] == true).collect();
+    assert_eq!(held.len(), 2, "{t:#?}");
+    let (one, two) = (
+        held[0]["id"].as_str().unwrap().to_string(),
+        held[1]["id"].as_str().unwrap().to_string(),
+    );
+    let (s, _) = e
+        .call(
+            "PATCH",
+            &format!("/api/thread/queued/{one}"),
+            Some(json!({"text": " "})),
+        )
+        .await;
+    assert_eq!(s, 400);
+    let (s, _) = e
+        .call(
+            "PATCH",
+            &format!("/api/thread/queued/{one}"),
+            Some(json!({"text": "排队一改过"})),
+        )
+        .await;
+    assert_eq!(s, 200);
+    let (s, v) = e
+        .call("DELETE", &format!("/api/thread/queued/{two}"), None)
+        .await;
+    assert_eq!((s, v["text"].as_str()), (200, Some("排队二")));
+    let (s, v) = e.call("POST", "/api/thread/stop", None).await;
+    assert_eq!((s, v["ok"].as_bool()), (200, Some(true)));
+    let t = e.settle(4).await;
+    let texts: Vec<&str> = t.iter().map(|m| m["text"].as_str().unwrap()).collect();
+    assert_eq!(
+        texts[..3],
+        ["慢慢说", "好，停下了。要我换个方式就直接说。", "排队一改过"],
+        "{t:#?}"
+    );
+    assert_eq!(t[1]["meta"]["stopped"], true);
+    assert!(t[2]["meta"]["held"].is_null());
+    assert!(!texts.contains(&"排队二"));
+    let (s, _) = e
+        .call("DELETE", &format!("/api/thread/queued/{one}"), None)
+        .await;
+    assert_eq!(s, 409, "gone once it went");
+}
+
 #[tokio::test]
 async fn research_runs_get_read_only_mcp() {
     let e = start().await;

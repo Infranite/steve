@@ -223,11 +223,33 @@ fn route_step(r: &Route, d: Option<&decide::Decision>, ms: i64) -> Value {
     })
 }
 
-/// Per-workspace lanes, the reply being prepared, inline queues and promotions in flight.
+/// The lane of conversation `space` in workspace `ws`: the main conversation's is the workspace id.
+pub(crate) fn lane_key(ws: &str, space: &str) -> String {
+    if space == MAIN {
+        ws.to_string()
+    } else {
+        format!("{ws}\u{1f}{space}")
+    }
+}
+
+/// How often a message waiting for the turn before it to end looks again, in ms.
+const TURN_POLL: u64 = 100;
+
+/// Resolves once `flag` is set: raced against a model call, the user's stop ends it at once (the
+/// harness process is killed with the dropped call) instead of after the whole reply is written.
+pub(crate) async fn until_stopped(flag: &AtomicBool) {
+    while !flag.load(Ordering::SeqCst) {
+        tokio::time::sleep(std::time::Duration::from_millis(TURN_POLL)).await;
+    }
+}
+
+/// Per-conversation lanes, the reply being prepared, inline queues and promotions in flight.
 #[derive(Default)]
 pub(crate) struct Lanes {
+    /// routing, one message at a time per conversation ([`lane_key`])
     lanes: Mutex<HashMap<String, mpsc::UnboundedSender<Job>>>,
     admitted: Mutex<HashSet<String>>,
+    /// the message being routed, per [`lane_key`]; its flag stops it
     inflight: Mutex<HashMap<String, Arc<AtomicBool>>>,
     promoting: Mutex<HashMap<String, Promotion>>,
     /// answers and research runs, one at a time per workspace (§4.6)
@@ -374,6 +396,10 @@ impl Core {
         if let Some(i) = &to.item {
             meta.insert("to".into(), json!(i));
         }
+        /* said while Steve is still on a turn: it waits, visibly, and can be edited or withdrawn until then */
+        if self.main_busy(ws)? {
+            meta.insert("held".into(), json!(true));
+        }
         let meta = (!meta.is_empty()).then_some(Value::Object(meta));
         let mid = self
             .store()
@@ -393,7 +419,149 @@ impl Core {
         Ok(mid)
     }
 
-    /// Queues a stored message on its workspace's routing lane.
+    /// Whether the main conversation is on a turn: a message being routed, an answer or research
+    /// running or waiting, or messages still waiting their turn on the lane.
+    pub fn main_busy(&self, ws: &str) -> Result<bool> {
+        if lock(&self.0.thread.inflight).contains_key(ws) || self.inline_busy(ws) {
+            return Ok(true);
+        }
+        Ok(self.store().store().with_conn(|c| {
+            Ok(c.query_row(
+                "SELECT EXISTS(SELECT 1 FROM settings WHERE workspace_id=? AND key LIKE 'thread.pending.%'
+                   AND json_valid(value) AND json_extract(value,'$.conv.space')=?)",
+                rusqlite::params![ws, MAIN],
+                |r| r.get::<_, bool>(0),
+            )?)
+        })?)
+    }
+
+    /// Waits until the main conversation's answer or research (and those queued behind it) is done:
+    /// a message said meanwhile is routed after the turn, with its reply in the history.
+    async fn turn_done(&self, ws: &str) {
+        while self.inline_busy(ws) {
+            tokio::time::sleep(std::time::Duration::from_millis(TURN_POLL)).await;
+        }
+    }
+
+    /// Takes a waiting message off the lane's durable queue, as it is now (edited while it waited);
+    /// `None` when it was withdrawn. A held message moves to now: it comes after the turn it waited on.
+    fn claim(&self, ws: &str, mid: &str) -> Result<Option<Job>> {
+        let key = format!("thread.pending.{mid}");
+        let job = self.store().store().with_conn(|c| {
+            let tx = c.unchecked_transaction()?;
+            let raw: Option<String> = tx
+                .query_row(
+                    "SELECT value FROM settings WHERE workspace_id=? AND key=?",
+                    rusqlite::params![ws, key],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let Some(raw) = raw else { return Ok(None) };
+            tx.execute(
+                "DELETE FROM settings WHERE workspace_id=? AND key=?",
+                rusqlite::params![ws, key],
+            )?;
+            let released = tx.execute(
+                "UPDATE messages SET created=?, meta=json_remove(meta,'$.held')
+                  WHERE id=? AND json_valid(meta) AND json_extract(meta,'$.held')=1",
+                rusqlite::params![now(), mid],
+            )?;
+            tx.commit()?;
+            Ok(Some((raw, released > 0)))
+        })?;
+        let Some((raw, released)) = job else {
+            return Ok(None);
+        };
+        if released {
+            self.store()
+                .store()
+                .publish(steve_store::ChangeEvent::Message { id: mid.into() });
+        }
+        Ok(Some(serde_json::from_str(&raw)?))
+    }
+
+    /// Rewrites a message still waiting its turn (`PATCH /api/thread/queued/:id`); `false` once it is
+    /// being handled (or gone).
+    pub fn thread_queued_edit(&self, ws: &str, mid: &str, text: &str) -> Result<bool> {
+        let key = format!("thread.pending.{mid}");
+        let done = self.store().store().with_conn(|c| {
+            let tx = c.unchecked_transaction()?;
+            let raw: Option<String> = tx
+                .query_row(
+                    "SELECT value FROM settings WHERE workspace_id=? AND key=?",
+                    rusqlite::params![ws, key],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let Some(mut job) = raw.and_then(|r| serde_json::from_str::<Job>(&r).ok()) else {
+                return Ok(false);
+            };
+            if job.conv.space != MAIN {
+                return Ok(false);
+            }
+            job.text = text.to_string();
+            /* `updated` stays when it was said: the queue keeps its order across a restart */
+            tx.execute(
+                "UPDATE settings SET value=? WHERE workspace_id=? AND key=?",
+                rusqlite::params![serde_json::to_string(&job)?, ws, key],
+            )?;
+            tx.execute(
+                "UPDATE messages SET text=? WHERE id=? AND workspace_id=?",
+                rusqlite::params![text, mid, ws],
+            )?;
+            tx.commit()?;
+            Ok(true)
+        })?;
+        if done {
+            self.store()
+                .store()
+                .publish(steve_store::ChangeEvent::Message { id: mid.into() });
+        }
+        Ok(done)
+    }
+
+    /// Withdraws a message still waiting its turn (`DELETE /api/thread/queued/:id`): it is deleted and
+    /// never routed. Its text and files, to put back in the composer; `None` once it is being handled.
+    pub fn thread_queued_withdraw(
+        &self,
+        ws: &str,
+        mid: &str,
+    ) -> Result<Option<(String, Vec<FileRef>)>> {
+        let key = format!("thread.pending.{mid}");
+        let job = self.store().store().with_conn(|c| {
+            let tx = c.unchecked_transaction()?;
+            let raw: Option<String> = tx
+                .query_row(
+                    "SELECT value FROM settings WHERE workspace_id=? AND key=?",
+                    rusqlite::params![ws, key],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let Some(job) = raw.and_then(|r| serde_json::from_str::<Job>(&r).ok()) else {
+                return Ok(None);
+            };
+            if job.conv.space != MAIN {
+                return Ok(None);
+            }
+            tx.execute(
+                "DELETE FROM settings WHERE workspace_id=? AND key=?",
+                rusqlite::params![ws, key],
+            )?;
+            tx.execute(
+                "DELETE FROM messages WHERE id=? AND workspace_id=?",
+                rusqlite::params![mid, ws],
+            )?;
+            tx.commit()?;
+            Ok(Some(job))
+        })?;
+        let Some(job) = job else { return Ok(None) };
+        self.store()
+            .store()
+            .publish(steve_store::ChangeEvent::Message { id: mid.into() });
+        Ok(Some((job.text, job.files)))
+    }
+
+    /// Queues a stored message on its conversation's routing lane.
     fn enqueue(&self, ws: &str, job: Job) {
         // Persist only the waiting routing work. Once routing starts, its outcome can be
         // effectful; a crash must not blindly replay it. Planned drain waits for that permit.
@@ -413,31 +581,37 @@ impl Core {
             return;
         }
         let mut lanes = lock(&self.0.thread.lanes);
-        let tx = lanes.entry(ws.to_string()).or_insert_with(|| {
-            let (tx, mut rx) = mpsc::unbounded_channel::<Job>();
-            let core = self.clone();
-            let w = ws.to_string();
-            tokio::spawn(async move {
-                while let Some(j) = rx.recv().await {
-                    let _activity = core.store().store().activity("thread_router").await;
-                    let key = format!("thread.pending.{}", j.mid);
-                    let removed = core.store().store().with_conn(|c| {
-                        c.execute(
-                            "DELETE FROM settings WHERE workspace_id=? AND key=?",
-                            rusqlite::params![w, key],
-                        )?;
-                        Ok(())
-                    });
-                    if let Err(e) = removed {
-                        tracing::error!("thread queue claim: {e}");
-                        continue;
+        let tx = lanes
+            .entry(lane_key(ws, &job.conv.space))
+            .or_insert_with(|| {
+                let (tx, mut rx) = mpsc::unbounded_channel::<Job>();
+                let core = self.clone();
+                let w = ws.to_string();
+                tokio::spawn(async move {
+                    while let Some(j) = rx.recv().await {
+                        if !j.conv.guest() {
+                            core.turn_done(&w).await;
+                        }
+                        let _activity = core.store().store().activity("thread_router").await;
+                        let j = match core.claim(&w, &j.mid) {
+                            Ok(Some(job)) => job,
+                            Ok(None) => {
+                                /* withdrawn while it waited */
+                                lock(&core.0.thread.admitted).remove(&j.mid);
+                                continue;
+                            }
+                            Err(e) => {
+                                tracing::error!("thread queue claim: {e}");
+                                lock(&core.0.thread.admitted).remove(&j.mid);
+                                continue;
+                            }
+                        };
+                        core.store().store().admitted(core.handle(&w, &j)).await;
+                        lock(&core.0.thread.admitted).remove(&j.mid);
                     }
-                    core.store().store().admitted(core.handle(&w, &j)).await;
-                    lock(&core.0.thread.admitted).remove(&j.mid);
-                }
+                });
+                tx
             });
-            tx
-        });
         if tx.send(job).is_err() {
             tracing::error!("thread lane of {ws} is gone");
         }
@@ -733,7 +907,7 @@ impl Core {
     }
 
     /// Stop what Steve is preparing in this workspace: the reply being routed and the answer or research
-    /// being written (its partial text is kept). Queued questions stay.
+    /// being written (its partial text is kept). Messages waiting their turn stay, and go next.
     pub fn stop(&self, ws: &str) -> Result<bool> {
         let routing = lock(&self.0.thread.inflight).get(ws).cloned();
         let inline = self.stop_inline(ws);
@@ -749,7 +923,7 @@ impl Core {
                 "steve",
                 "好，停下了。要我换个方式就直接说。",
                 None,
-                None,
+                Some(&json!({"stopped": true})),
             )?;
         }
         Ok(true)
@@ -833,6 +1007,19 @@ impl Core {
         if self.config().no_resume || self.store().store().maintenance() {
             return Ok(out);
         }
+        /* interrupted answers first: messages that waited on them are routed after, as before the restart */
+        let th = self.store().store().thread();
+        for (r, attempts) in th.runs_to_resume(now() - crate::orchestrator::RESUME_MAX_AGE_MS)? {
+            // one run's trouble never stops the others, nor the Hub: its intent stays for later
+            match self.resume_run(&r, attempts) {
+                Ok(true) => out.resumed += 1,
+                Ok(false) => out.held += 1,
+                Err(e) => {
+                    tracing::error!(run = %r.id, "main conversation resume: {e}");
+                    out.failed += 1;
+                }
+            }
+        }
         let pending: Vec<(String, String, String)> = self.store().store().with_conn(|c| {
             let mut q = c.prepare("SELECT workspace_id,key,value FROM settings WHERE key LIKE 'thread.pending.%' ORDER BY updated")?;
             Ok(q.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect::<rusqlite::Result<_>>()?)
@@ -854,18 +1041,6 @@ impl Core {
                 }
                 Err(e) => {
                     tracing::error!("invalid persisted thread job: {e}");
-                    out.failed += 1;
-                }
-            }
-        }
-        let th = self.store().store().thread();
-        for (r, attempts) in th.runs_to_resume(now() - crate::orchestrator::RESUME_MAX_AGE_MS)? {
-            // one run's trouble never stops the others, nor the Hub: its intent stays for later
-            match self.resume_run(&r, attempts) {
-                Ok(true) => out.resumed += 1,
-                Ok(false) => out.held += 1,
-                Err(e) => {
-                    tracing::error!(run = %r.id, "main conversation resume: {e}");
                     out.failed += 1;
                 }
             }

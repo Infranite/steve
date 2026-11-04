@@ -85,7 +85,8 @@ async fn maintenance_gate(State(st): State<AppState>, req: Request, next: Next) 
         || (path.starts_with("/api/sessions/") && path.ends_with("/messages"))
         || path.ends_with("/stop")
         || (path.starts_with("/api/sessions/") && path.ends_with("/cancel"))
-        || (*req.method() == axum::http::Method::DELETE && path.starts_with("/api/thread/runs/"));
+        || (*req.method() == axum::http::Method::DELETE && path.starts_with("/api/thread/runs/"))
+        || path.starts_with("/api/thread/queued/");
     if read || queues || path.starts_with("/internal/") {
         return next.run(req).await;
     }

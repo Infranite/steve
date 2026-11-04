@@ -251,8 +251,10 @@ async fn a2_a_clear_change_becomes_an_item() {
     );
 }
 
+/// Your own conversation no longer asks “在这里出方案，还是建成事项？” (ST-33): an unclear request is
+/// answered here with a plan, and the work is offered as an item.
 #[tokio::test]
-async fn a3_an_unclear_request_gets_a_card_and_no_item() {
+async fn a3_an_unclear_request_is_planned_here_and_offered() {
     let k = Kit::new();
     k.core.set_researcher(a1_research());
     router(
@@ -262,52 +264,21 @@ async fn a3_an_unclear_request_gets_a_card_and_no_item() {
     let before = items(&k);
     let mid = k.core.say(WS, A3, &[]).unwrap();
     let ms = settle(&k, 2).await;
-    let card = &ms[1];
+    let a = &ms[1];
     assert_eq!(items(&k), before, "no item");
-    assert_eq!(card.meta["suggest"]["state"], "open");
-    assert_eq!(
-        card.meta["suggest"]["choices"][1]["label"],
-        "建成事项：事项页布局优化"
-    );
+    assert!(a.meta.get("suggest").is_none(), "no card asking first");
+    assert!(a.text.starts_with("知识系统分三层"), "researched in place");
+    assert_eq!(a.meta["offer"]["title"], "事项页布局优化");
+    assert_eq!(a.meta["offer"]["state"], "open");
     let l = route_log(&k, &mid);
     assert_eq!(
         (l.kind.as_str(), l.guard.as_deref()),
-        ("suggest", Some("3"))
+        ("research", Some("plan"))
     );
-    /* item */
-    let h = k.core.suggest(WS, &card.id, "item").unwrap();
-    let item = h.item.unwrap();
-    assert_eq!(item.title, "事项页布局优化");
+    /* the offer makes the item in one click */
+    let h = k.core.offer(WS, &a.id, true).unwrap();
+    assert_eq!(h.item.unwrap().title, "事项页布局优化");
     assert_eq!(items(&k), before + 1);
-    let l = route_log(&k, &mid);
-    assert_eq!(l.outcome.as_deref(), Some("suggest_item"));
-    assert_eq!(l.override_, None, "a choice on a card is not a correction");
-    assert!(k.core.suggest(WS, &card.id, "here").unwrap().already);
-
-    /* another time: here — research continues under the same card */
-    let mid2 = k.core.say(WS, A3, &[]).unwrap();
-    let ms = settle(&k, 5).await;
-    let card2 = ms
-        .iter()
-        .rfind(|m| m.meta.get("suggest").is_some())
-        .unwrap()
-        .clone();
-    assert_ne!(card2.id, card.id);
-    let n = items(&k);
-    k.core.suggest(WS, &card2.id, "here").unwrap();
-    let ms = settle(&k, 6).await;
-    let ans = ms.last().unwrap();
-    assert_eq!(ans.meta["reply_to"], json!(card2.id));
-    assert_eq!(ans.meta["origin"], json!(mid2));
-    assert!(ans.text.starts_with("知识系统分三层"));
-    assert_eq!(items(&k), n);
-    let card2 = k.db().message(&card2.id).unwrap().unwrap();
-    assert_eq!(card2.meta["suggest"]["chosen"], "here");
-    assert_eq!(card2.meta["answer"], json!(ans.id));
-    assert_eq!(
-        route_log(&k, &mid2).outcome.as_deref(),
-        Some("suggest_here")
-    );
 }
 
 #[tokio::test]
@@ -397,65 +368,47 @@ async fn a_failing_router_never_makes_an_item() {
     assert_eq!(items(&k), before);
 }
 
+/// What is said while Steve is on a turn waits for it (ST-33): held, visible, editable and withdrawable until
+/// the turn ends; a stop ends the turn at once with the partial answer, and the queue goes next, in order,
+/// after the reply it waited on — each message once.
 #[tokio::test(flavor = "multi_thread")]
-async fn while_research_runs_items_go_ahead_questions_queue_and_the_fourth_is_refused() {
+async fn while_research_runs_messages_wait_and_can_be_changed_or_withdrawn() {
     let k = Kit::new();
     let fr = FakeResearch::new(vec![Step::Text("部分"), Step::Gate, Step::Text("回答")]);
     k.core.set_researcher(fr.clone());
     router(&k, |m| {
         if m.starts_with("修") {
             json!({"kind": "item", "confidence": 0.9, "signals": ["change"], "title": m})
-        } else if m.contains("别建事项") {
-            json!({"kind": "reroute", "confidence": 0.9})
         } else {
             json!({"kind": "research", "confidence": 0.9, "signals": ["question"]})
         }
     });
     let q1 = k.core.say(WS, "问题一是什么？", &[]).unwrap();
     until(|| k.core.researching(WS)).await;
+    assert!(k.core.main_busy(WS).unwrap());
     let before = items(&k);
-    k.core.say(WS, "修登录页", &[]).unwrap();
-    until(|| items(&k) == before + 1).await;
-    let mut queued = vec![];
-    for t in ["问题二？", "问题三？", "问题四？"] {
-        let m = k.core.say(WS, t, &[]).unwrap();
-        until(|| route_opt(&k, &m).is_some_and(|l| l.kind == "research")).await;
-        queued.push(m);
+    let fix = k.core.say(WS, "修登录页", &[]).unwrap();
+    let q2 = k.core.say(WS, "问题二？", &[]).unwrap();
+    let q3 = k.core.say(WS, "问题三？", &[]).unwrap();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    for m in [&fix, &q2, &q3] {
+        assert_eq!(k.db().message(m).unwrap().unwrap().meta["held"], true);
+        assert!(route_opt(&k, m).is_none(), "not routed while the turn runs");
     }
-    until(|| {
-        queued.iter().all(|m| {
-            k.db()
-                .message(m)
-                .unwrap()
-                .unwrap()
-                .meta
-                .get("queued")
-                .is_some()
-        })
-    })
-    .await;
-    let m5 = k.core.say(WS, "问题五？", &[]).unwrap();
-    until(|| route_opt(&k, &m5).is_some_and(|l| l.reply_id.is_some())).await;
-    let r5 = route_log(&k, &m5).reply_id.unwrap();
-    assert_eq!(
-        k.db().message(&r5).unwrap().unwrap().text,
-        crate::thread::research::QUEUE_FULL
+    assert_eq!(items(&k), before, "work waits too");
+    /* changed while it waits: the new words are what gets routed */
+    assert!(
+        k.core
+            .thread_queued_edit(WS, &q2, "问题二改过了？")
+            .unwrap()
     );
-    /* “别建事项，直接告诉我” takes back the item made a moment ago */
-    let item = k.db().store().thread().items(WS).unwrap()[0]
-        .item_id
-        .clone();
-    let m6 = k.core.say(WS, "别建事项，直接在这告诉我", &[]).unwrap();
-    until(|| route_opt(&k, &m6).is_some_and(|l| l.reply_id.is_some())).await;
-    for s in k.db().sessions_of_item(&item).unwrap() {
-        if k.rt.st().turning.contains(&s.id) {
-            until(|| k.rt.st().cancelled.contains(&s.id)).await;
-            k.rt.end_turn(&k.core, &s.id, "cancelled", None);
-        }
-    }
-    k.core.lifecycle_tick().unwrap();
-    assert_eq!(k.db().item(&item).unwrap().unwrap().status, "drop");
-    /* stop the running one: its partial answer stays, marked */
+    assert_eq!(k.db().message(&q2).unwrap().unwrap().text, "问题二改过了？");
+    /* withdrawn: gone, with its words back */
+    let (t, _) = k.core.thread_queued_withdraw(WS, &q3).unwrap().unwrap();
+    assert_eq!(t, "问题三？");
+    assert!(k.db().message(&q3).unwrap().is_none());
+    assert!(k.core.thread_queued_withdraw(WS, &q3).unwrap().is_none());
+    /* stop the running one: its partial answer stays, marked; the queue goes next */
     assert!(k.core.stop(WS).unwrap());
     until(|| {
         k.db()
@@ -472,25 +425,50 @@ async fn while_research_runs_items_go_ahead_questions_queue_and_the_fourth_is_re
         k.db().message(&r1).unwrap().unwrap().text,
         "部分\n\n（已停下）"
     );
-    /* the queued ones run in order, one at a time */
     fr.open(10);
-    until(|| {
-        queued
-            .iter()
-            .all(|m| route_opt(&k, m).is_some_and(|l| l.reply_id.is_some()))
-    })
-    .await;
-    for m in &queued {
+    until(|| items(&k) == before + 1).await;
+    until(|| route_opt(&k, &q2).is_some_and(|l| l.reply_id.is_some())).await;
+    /* gone once it went: no more changes */
+    assert!(!k.core.thread_queued_edit(WS, &q2, "太晚了").unwrap());
+    assert!(k.core.thread_queued_withdraw(WS, &q2).unwrap().is_none());
+    let ms = k.db().messages(WS).unwrap();
+    let at = |id: &str| ms.iter().position(|m| m.id == id).unwrap();
+    assert!(
+        at(&r1) < at(&fix) && at(&fix) < at(&q2),
+        "after the reply they waited on, in order"
+    );
+    for m in [&fix, &q2] {
         assert!(
             k.db()
                 .message(m)
                 .unwrap()
                 .unwrap()
                 .meta
-                .get("queued")
+                .get("held")
                 .is_none()
         );
     }
+    let routed: Vec<String> =
+        k.gw.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|p| p.starts_with("You are the router"))
+            .filter_map(|p| {
+                p.lines()
+                    .rfind(|l| l.starts_with("User message: "))
+                    .map(String::from)
+            })
+            .collect();
+    assert_eq!(
+        routed,
+        vec![
+            "User message: \"问题一是什么？\"",
+            "User message: \"修登录页\"",
+            "User message: \"问题二改过了？\"",
+        ],
+        "each once, as changed, the withdrawn one never"
+    );
 }
 
 #[tokio::test]

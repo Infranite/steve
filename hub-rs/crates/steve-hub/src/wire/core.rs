@@ -917,6 +917,26 @@ impl Domain for CoreDomain {
         let (c, ws) = (self.core.clone(), ws.to_string());
         blocking(move || c.stop(&ws)).await
     }
+    async fn thread_busy(&self, ws: &str) -> BResult<bool> {
+        let (c, ws) = (self.core.clone(), ws.to_string());
+        blocking(move || c.main_busy(&ws)).await
+    }
+    async fn thread_queued_edit(&self, ws: &str, message: &str, text: &str) -> BResult<bool> {
+        let (c, ws, m, t) = (
+            self.core.clone(),
+            ws.to_string(),
+            message.to_string(),
+            text.to_string(),
+        );
+        blocking(move || c.thread_queued_edit(&ws, &m, &t)).await
+    }
+    async fn thread_queued_withdraw(&self, ws: &str, message: &str) -> BResult<Option<Obj>> {
+        let (c, ws, m) = (self.core.clone(), ws.to_string(), message.to_string());
+        match blocking(move || c.thread_queued_withdraw(&ws, &m)).await? {
+            Some((text, files)) => Ok(Some(to_obj(json!({"text": text, "files": files}))?)),
+            None => Ok(None),
+        }
+    }
     async fn promote(&self, ws: &str, message: &str) -> BResult<Obj> {
         to_obj(self.core.promote(ws, message).await.map_err(cerr)?)
     }

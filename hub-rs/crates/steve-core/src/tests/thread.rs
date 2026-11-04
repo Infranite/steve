@@ -428,6 +428,34 @@ async fn stop_suppresses_the_reply() {
     assert!(!k.core.stop(WS).unwrap());
 }
 
+/// Stopping a direct answer ends it at once (the harness call is dropped, which kills it), not when
+/// the whole answer has been written; Steve says so, and a message waiting for the turn goes next.
+#[tokio::test(flavor = "multi_thread")]
+async fn stop_ends_an_answer_at_once_and_the_queue_goes_next() {
+    let k = Kit::new();
+    router(&k, json!({"kind": "answer", "confidence": 0.9}), "答好了");
+    *k.gw.slow.lock().unwrap() = Some((
+        "You are Steve, the user's assistant.",
+        Duration::from_secs(30),
+    ));
+    k.core.say(WS, "慢慢答", &[]).unwrap();
+    assert!(k.wait(|| k.core.inline_busy(WS)));
+    let next = k.core.say(WS, "然后呢", &[]).unwrap();
+    assert_eq!(k.db().message(&next).unwrap().unwrap().meta["held"], true);
+    let t0 = std::time::Instant::now();
+    assert!(k.core.stop(WS).unwrap());
+    *k.gw.slow.lock().unwrap() = None;
+    let ms = settle(&k, 4).await;
+    assert!(t0.elapsed() < Duration::from_secs(5), "{:?}", t0.elapsed());
+    assert_eq!(ms[1].text, "好，停下了。要我换个方式就直接说。");
+    assert_eq!(ms[1].meta["stopped"], true);
+    assert_eq!(
+        (ms[2].id.as_str(), ms[3].text.as_str()),
+        (next.as_str(), "答好了")
+    );
+    assert!(!k.core.main_busy(WS).unwrap());
+}
+
 #[tokio::test]
 async fn messages_are_handled_in_order() {
     let k = Kit::new();

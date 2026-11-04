@@ -65,6 +65,31 @@ pub fn for_owner(d: Decision, owner: bool) -> Decision {
     }
 }
 
+/// Your own conversation: work that is not clearly an item is answered in place with a plan, and
+/// offered as an item — Steve no longer asks “在这里出方案，还是建成事项？” first. Decided by the user
+/// on 2026-11-04 (ST-33, `guard = "plan"`). “这是给 ST-n 的吗？” still asks: it is about which item.
+pub fn for_main(d: Decision, r: &Route) -> Decision {
+    if d.kind != "suggest" || d.for_item.is_some() {
+        return d;
+    }
+    let offer = d.offer.clone().or_else(|| {
+        (!r.title.trim().is_empty()).then(|| Offer {
+            title: r.title.clone(),
+            goal: if r.goal.trim().is_empty() {
+                r.title.clone()
+            } else {
+                r.goal.clone()
+            },
+        })
+    });
+    Decision {
+        kind: "research".into(),
+        guard: Some("plan"),
+        offer,
+        for_item: None,
+    }
+}
+
 /// What the guards know besides the route and the text.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DecideCtx {
@@ -176,6 +201,41 @@ mod tests {
     fn go(kind: &str, conf: f64, signals: &[&str], text: &str) -> (String, Option<&'static str>) {
         let d = decide(&route(kind, conf, signals), text, DecideCtx::default());
         (d.kind, d.guard)
+    }
+
+    #[test]
+    fn your_conversation_plans_instead_of_asking() {
+        for (kind, conf, signals) in [("suggest", 0.9, vec![]), ("item", 0.6, vec!["change"])] {
+            let r = route(kind, conf, &signals);
+            let d = for_main(
+                decide(
+                    &r,
+                    "事项页面信息太散了，你看看怎么设计",
+                    DecideCtx::default(),
+                ),
+                &r,
+            );
+            assert_eq!(
+                (d.kind.as_str(), d.guard),
+                ("research", Some("plan")),
+                "{kind}"
+            );
+            let o = d.offer.expect("the work is offered");
+            assert_eq!((o.title.as_str(), o.goal.as_str()), ("标题", "目标"));
+        }
+        /* which item it is for still asks */
+        let r = route("supplement", 0.5, &[]);
+        let d = for_main(decide(&r, "再加一个按钮", DecideCtx::default()), &r);
+        assert_eq!(
+            (d.kind.as_str(), d.for_item.as_deref()),
+            ("suggest", Some("ST-3"))
+        );
+        /* the rest is left alone */
+        let r = route("item", 0.9, &["change"]);
+        assert_eq!(
+            for_main(decide(&r, "把按钮改成蓝色", DecideCtx::default()), &r).kind,
+            "item"
+        );
     }
 
     #[test]
