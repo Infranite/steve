@@ -53,7 +53,8 @@ impl Tx<'_> {
         let mut out = vec![];
         for ws in self.db().workspace_ids()? {
             for i in self.db().items_all(&ws)? {
-                if i.status != "run" || i.archived {
+                /* only work in progress stalls; a closing waits on its own gate */
+                if i.status != "run" || i.archived || i.phase != crate::cycle::ACTIVE {
                     continue;
                 }
                 let Some(s) = self.active_session(&i.id)? else {

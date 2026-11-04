@@ -67,6 +67,10 @@ pub enum StoreError {
         min_reader: i64,
         ours: i64,
     },
+    /// The write contradicts the item's lifecycle (a terminal status outside the lifecycle, a status
+    /// change on a closed item); the message is user-facing.
+    #[error("{0}")]
+    Conflict(String),
 }
 
 /// Runs inside the transaction that deletes an item: `(tx, workspace_id, item_id)`.

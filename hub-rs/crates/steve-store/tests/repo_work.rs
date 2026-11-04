@@ -132,7 +132,9 @@ fn item_json_shape() {
             "id": "ST-1", "workspace_id": "default", "no": 1, "kind": "task", "title": "派生", "status": "wait", "stage": "规划",
             "bot_id": "steve", "project_dir": null, "cwd": null, "branch": null, "plan": [], "now": "", "accept_mode": null,
             "priority": "中", "archived": false, "created": i.created, "updated": i.updated, "project_id": null, "star": false,
-            "due": null, "snooze": null, "source": ["派生", "fork"], "parent": {"item": null, "session": "ses_1", "at": 12}
+            "due": null, "snooze": null, "source": ["派生", "fork"], "parent": {"item": null, "session": "ses_1", "at": 12},
+            "phase": "active", "cycle": 1, "revision": 0, "outcome": null, "acceptance": null, "closing": null,
+            "closed_at": null, "closed_reason": null
         })
     );
     s.with_conn(|c| {

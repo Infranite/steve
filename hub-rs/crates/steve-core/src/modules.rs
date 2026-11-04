@@ -8,9 +8,9 @@
 //! committed and without the lock. An acceptance that would finish the item asks the hooks first when
 //! any are registered: the finish then happens in the worker, unless a hook takes over the wrap-up.
 
-use crate::error::{Result, msg};
+use crate::error::Result;
 use crate::gateway::SharedGateway;
-use crate::repo::{Decision, Item, ItemExt};
+use crate::repo::{Decision, Item};
 use crate::{Core, Inner, Tx};
 use std::sync::{Arc, Weak};
 use steve_modules::Modules;
@@ -21,12 +21,13 @@ use tokio::sync::mpsc;
 #[derive(Debug, Clone)]
 pub(crate) enum HookEvent {
     Created(Item),
-    /// Accepted (by the user's `pass`, or automatically); `finish` with `now` unless a hook takes over.
-    /// `decision`: the acceptance decision, which must still be resolved (not undone) when finishing.
+    /// The acceptance was decided: the hooks are asked whether one takes over the wrap-up. `op` is the
+    /// required operation (`hooks.accepted`) of the cycle that records the answer: `running` while a
+    /// module owns the wrap-up (it reports through `Core::module_done`), `succeeded` when none does —
+    /// the closing gate waits for it either way, and a restart asks again while it is `pending`.
     Accepted {
         item: Item,
-        decision: Option<String>,
-        now: &'static str,
+        op: String,
     },
     Finished(Item),
     Dropped(Item),
@@ -159,24 +160,24 @@ impl Core {
             HookEvent::Created(i) => hooks.created(&i).await,
             HookEvent::Finished(i) => hooks.finished(&i).await,
             HookEvent::Dropped(i) => hooks.dropped(&i).await,
-            HookEvent::Accepted {
-                item,
-                decision,
-                now,
-            } => {
-                if hooks.accepted(&item).await.is_some() {
-                    return;
-                }
+            HookEvent::Accepted { item, op } => {
+                let took = hooks.accepted(&item).await.is_some();
                 let core = self.clone();
                 let id = item.id.clone();
                 let done = tokio::task::spawn_blocking(move || {
-                    core.tx().finish_accepted(&id, decision.as_deref(), now)
+                    let (status, note) = if took {
+                        ("running", "由收尾模块接手")
+                    } else {
+                        ("succeeded", "没有模块接手收尾")
+                    };
+                    core.tx()
+                        .lc_op_set(&op, status, serde_json::json!({ "note": note }))
                 })
                 .await;
                 match done {
-                    Ok(Ok(())) => {}
-                    Ok(Err(e)) => tracing::error!("finish {} after acceptance: {e}", item.id),
-                    Err(e) => tracing::error!("finish {} after acceptance: {e}", item.id),
+                    Ok(Ok(_)) => {}
+                    Ok(Err(e)) => tracing::error!("acceptance hooks of {id}: {e}"),
+                    Err(e) => tracing::error!("acceptance hooks of {id}: {e}"),
                 }
             }
         }
@@ -191,7 +192,14 @@ fn worker(rt: &tokio::runtime::Handle, inner: Weak<Inner>) -> mpsc::UnboundedSen
             let Some(inner) = inner.upgrade() else {
                 return;
             };
-            Core(inner).run_hook(e).await;
+            /* each event in its own task: a hook that panics loses its own call, never the worker. An
+             * acceptance consultation that dies leaves its operation pending (not confirmed); the close
+             * waits for it and the next boot asks again. */
+            let core = Core(inner);
+            let run = tokio::spawn(async move { core.run_hook(e).await });
+            if let Err(err) = run.await {
+                tracing::error!("item hook: {err}");
+            }
         }
     });
     tx
@@ -221,54 +229,6 @@ impl Tx<'_> {
         Ok(())
     }
 
-    /// An acceptance that finishes the item: right away without hooks (as before), otherwise after the
-    /// hooks were asked whether one takes over the wrap-up.
-    pub(crate) fn accept_finish(
-        &mut self,
-        item_id: &str,
-        decision: Option<&str>,
-        now: &'static str,
-    ) -> Result<()> {
-        if !self.hooked() {
-            return self.finish(item_id, now);
-        }
-        let item = self
-            .db()
-            .item(item_id)?
-            .ok_or_else(|| msg("没有这个事项"))?;
-        self.st.hooks.push(HookEvent::Accepted {
-            item,
-            decision: decision.map(String::from),
-            now,
-        });
-        Ok(())
-    }
-
-    /// The deferred finish of an acceptance no hook took over; skipped when the item was finished or
-    /// dropped meanwhile, or the acceptance was undone.
-    pub(crate) fn finish_accepted(
-        &mut self,
-        item_id: &str,
-        decision: Option<&str>,
-        now: &'static str,
-    ) -> Result<()> {
-        let Some(i) = self.db().item(item_id)? else {
-            return Ok(());
-        };
-        if i.is_finished() {
-            return Ok(());
-        }
-        if let Some(d) = decision
-            && self
-                .db()
-                .decision(d)?
-                .is_none_or(|d| d.status != "resolved")
-        {
-            return Ok(());
-        }
-        self.finish(item_id, now)
-    }
-
     /// `undoDecision` of a decision whose `subject_type` a module handles: the module's `before_undo`,
     /// the reopen and the audit in one transaction ([`steve_modules::decisions::undo`]); a refusal rolls
     /// it back and comes out as [`crate::CoreError::Module`] with its own status. Returns the decision as
@@ -295,6 +255,34 @@ impl Tx<'_> {
 impl Drop for Tx<'_> {
     /// Hands the section's hook events to the worker (in order, after the section's writes).
     fn drop(&mut self) {
+        /* lifecycle stops: cancel outside the lock, then look at the closing again */
+        let cancels = std::mem::take(&mut self.st.cancels);
+        if !cancels.is_empty() {
+            let core = self.c.clone();
+            let run = move || {
+                let mut items = vec![];
+                for (sid, item) in cancels {
+                    core.0.runtime.cancel(&sid);
+                    if !items.contains(&item) {
+                        items.push(item);
+                    }
+                }
+                for item in items {
+                    if let Err(e) = core.tx().lc_try_close(&item) {
+                        tracing::warn!(item, "closing after cancel: {e}");
+                    }
+                }
+            };
+            match tokio::runtime::Handle::try_current() {
+                Ok(rt) => {
+                    rt.spawn_blocking(run);
+                }
+                // not joined: the thread waits for the lock this section still holds
+                Err(_) => {
+                    std::thread::spawn(run);
+                }
+            }
+        }
         if self.st.hooks.is_empty() {
             return;
         }

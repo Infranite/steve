@@ -520,6 +520,9 @@ impl Repo for StoreBackend {
     fn item_plan_rounds(&self, id: &str) -> BResult<Vec<Obj>> {
         objs(self.0.items().plan_rounds(id).map_err(err)?)
     }
+    fn item_cycles(&self, id: &str) -> BResult<Vec<Obj>> {
+        objs(self.0.items().cycles(id).map_err(err)?)
+    }
     fn item_goal(&self, id: &str) -> BResult<String> {
         self.0.items().goal(id).map_err(err)
     }

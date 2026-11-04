@@ -91,9 +91,15 @@ pub async fn get_one(
     Extension(c): Extension<Ctx>,
     Path(id): Path<String>,
 ) -> ApiResult {
+    own_item(&st, &c.ws, &id).await?;
+    let lifecycle = st.domain.lifecycle_view(&id).await?;
     st.read(move |r| {
         let i = own(r.item_get(&id)?, &c.ws, "事项")?;
         let mut out = summary(r, i)?;
+        if let Some(l) = lifecycle {
+            out.insert("lifecycle".into(), l);
+        }
+        out.insert("cycles".into(), objs(r.item_cycles(&id)?));
         out.insert("goalsList".into(), objs(r.item_goals(&id)?));
         out.insert("planRounds".into(), objs(r.item_plan_rounds(&id)?));
         out.insert("timeline".into(), objs(r.timeline_list(&id)?));
@@ -202,7 +208,7 @@ pub async fn patch_one(
     if let Some(s) = k.opt_bool("star") {
         rest.insert("star".into(), json!(s));
     }
-    if let Some(a) = k.opt_enum("accept_mode", &["inherit", "manual", "auto"]) {
+    if let Some(a) = k.opt_enum("accept_mode", &["inherit", "manual", "auto", "waived"]) {
         rest.insert("accept_mode".into(), json!(a));
     }
     if let Some(p) = k.opt_nullable_str("project_id", Str::ANY) {
@@ -485,4 +491,55 @@ pub async fn panel_action(
             Err(e) => axum::response::IntoResponse::into_response(e),
         },
     )
+}
+
+/// `POST /items/:id/lifecycle {command, expected_cycle, expected_revision, reason?, goal?}`
+/// (API-CONTRACT.txt §2): `200 {item}`; `409 {error, lifecycle}` when the item changed or the phase
+/// does not allow the command.
+pub async fn lifecycle(
+    State(st): State<AppState>,
+    Extension(c): Extension<Ctx>,
+    Path(id): Path<String>,
+    b: Bytes,
+) -> ApiResult {
+    own_item(&st, &c.ws, &id).await?;
+    let v = body(&b)?;
+    let mut k = Check::object(&v);
+    let command = k.enum_("command", &["accept", "cancel", "fail", "new_cycle"]);
+    let int = |min: f64| Num {
+        int: true,
+        min: Some(min),
+        max: None,
+        gt: None,
+    };
+    let cycle = k.num("expected_cycle", int(1.0)) as i64;
+    let revision = k.num("expected_revision", int(0.0)) as i64;
+    let reason = k.opt_str("reason", Str::ANY);
+    let goal = k.opt_str("goal", Str::ANY);
+    k.finish()?;
+    match st
+        .domain
+        .lifecycle_command(&id, &command, cycle, revision, reason, goal, &c.me)
+        .await
+    {
+        Ok(_) => {}
+        Err(e) if e.status == 409 => {
+            let l = st.domain.lifecycle_view(&id).await?.unwrap_or(Value::Null);
+            return Ok(crate::error::json_response(
+                409,
+                &json!({"error": e.message, "lifecycle": l}),
+            ));
+        }
+        Err(e) => return Err(e.into()),
+    }
+    let lifecycle = st.domain.lifecycle_view(&id).await?;
+    st.read(move |r| {
+        let i = own(r.item_get(&id)?, &c.ws, "事项")?;
+        let mut out = summary(r, i)?;
+        if let Some(l) = lifecycle {
+            out.insert("lifecycle".into(), l);
+        }
+        ok(json!({ "item": Value::Object(out) }))
+    })
+    .await
 }

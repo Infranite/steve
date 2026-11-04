@@ -27,17 +27,18 @@ macro_rules! patch {
 
 /// Status shorthands of repo.ts call sites.
 pub trait ItemExt {
-    /// done, dropped or paused: nothing runs by itself.
+    /// closed or paused: nothing runs by itself.
     fn is_settled(&self) -> bool;
-    /// done or dropped.
+    /// closed (any outcome).
     fn is_finished(&self) -> bool;
 }
 impl ItemExt for Item {
     fn is_settled(&self) -> bool {
-        matches!(self.status.as_str(), "done" | "drop" | "pause")
+        self.is_finished() || self.status == "pause"
     }
+    /// The lifecycle's phase decides, not the legacy `status`.
     fn is_finished(&self) -> bool {
-        matches!(self.status.as_str(), "done" | "drop")
+        self.phase == crate::cycle::CLOSED
     }
 }
 
@@ -283,38 +284,6 @@ impl Db {
         }
         self.s.items().patch(id, &decode(p)?)?;
         Ok(())
-    }
-    /// Finishing an item in one store transaction: the note about
-    /// steps left open, the patch to `done`, its open decisions expired, and the `work.item.done`
-    /// fact in the outbox. Either all of it commits or none; nothing here runs a subprocess or calls
-    /// another store method (the write lock is held). Returns the item as finished, or `None` when it
-    /// already was `done` (checked in the transaction): a retried finish changes nothing and emits no
-    /// second fact; an item reopened and finished again does.
-    pub fn finish_in_one_tx(
-        &self,
-        id: &str,
-        note: Option<&str>,
-        p: Map<String, Value>,
-    ) -> Result<Option<Item>> {
-        let p: steve_store::ItemPatch = decode(p)?;
-        self.s.transaction(|tx| -> Result<Option<Item>> {
-            let status: Option<String> = tx
-                .query_row("SELECT status FROM items WHERE id = ?", [id], |r| r.get(0))
-                .optional()?;
-            match status.as_deref() {
-                None => return Err(crate::error::msg("没有这个事项")),
-                Some("done") => return Ok(None),
-                Some(_) => {}
-            }
-            if let Some(n) = note {
-                steve_store::timeline_add_in(tx, id, "steve", "sys", n, None)?;
-            }
-            let item = steve_store::item_patch_in(tx, id, &p)?
-                .ok_or_else(|| crate::error::msg("没有这个事项"))?;
-            steve_store::decisions_expire_open_in(tx, id, &serde_json::json!({"finished": true}))?;
-            crate::outbox_work::emit_item_done(tx, &item)?;
-            Ok(Some(item))
-        })
     }
     /// Keeps a plan the agent is replacing; returns its round number.
     pub fn plan_round_add(

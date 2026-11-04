@@ -1,7 +1,7 @@
-//! Finishing on the durable outbox: the state change, its timeline note, the
-//! expired decisions and `work.item.done` commit together or not at all; a retried finish emits nothing;
-//! `work.tidy` runs after the commit; acknowledged events are not replayed.
-//! A crash before acknowledgement may repeat the idempotent external effect.
+//! Closing on the durable outbox: the state change, its timeline note, the expired decisions and
+//! `work.item.done` commit together or not at all; a cycle closes once (a repeated finish is refused, a
+//! new cycle closes again with its own fact); `work.tidy` runs after the commit; acknowledged events
+//! are not replayed. A crash before acknowledgement may repeat the idempotent external effect.
 
 use serde_json::Value;
 
@@ -35,7 +35,7 @@ fn status(k: &Kit, item: &str) -> String {
 fn finishing_emits_one_fact_with_the_item_as_finished() {
     let k = Kit::new();
     let id = k.item("run", "执行", None);
-    k.core.finish_item(&id, "做完了").unwrap();
+    k.finish(&id).unwrap();
     assert_eq!(status(&k, &id), "done");
     let evs = events(&k, &id);
     assert_eq!(evs.len(), 1);
@@ -59,22 +59,34 @@ fn finishing_emits_one_fact_with_the_item_as_finished() {
 }
 
 #[test]
-fn a_retried_finish_emits_nothing_and_a_reopened_item_emits_again() {
+fn a_cycle_closes_once_and_a_new_cycle_emits_its_own_fact() {
     let k = Kit::new();
     let id = k.item("run", "执行", None);
-    k.core.finish_item(&id, "做完了").unwrap();
-    // e.g. the caller retries after a failure that came after the commit
-    k.core.finish_item(&id, "做完了").unwrap();
+    k.finish(&id).unwrap();
+    // e.g. the caller retries after a failure that came after the commit: refused, nothing emitted
+    assert!(k.finish(&id).is_err());
     assert_eq!(
         events(&k, &id).len(),
         1,
-        "no second fact for the same finish"
+        "no second fact for the same cycle"
     );
-    k.db()
-        .item_patch(&id, crate::patch![status: "run"])
+    // a legacy status write cannot reopen it any more
+    assert!(
+        k.db()
+            .item_patch(&id, crate::patch![status: "run"])
+            .is_err()
+    );
+    // only an explicit new cycle does; its close is a new fact, keyed by its cycle
+    k.core
+        .lifecycle_command(&id, "new_cycle", 1, 1, None, None, "me")
         .unwrap();
-    k.core.finish_item(&id, "又做完了").unwrap();
-    assert_eq!(events(&k, &id).len(), 2, "a new finish is a new fact");
+    k.finish(&id).unwrap();
+    let evs = events(&k, &id);
+    assert_eq!(evs.len(), 2, "a new cycle's close is a new fact");
+    assert_eq!(
+        (evs[0].1["cycle"].as_i64(), evs[1].1["cycle"].as_i64()),
+        (Some(1), Some(2))
+    );
 }
 
 #[test]
@@ -97,9 +109,17 @@ fn a_failing_finish_leaves_nothing_behind() {
             Ok(c.execute_batch("ALTER TABLE outbox_events RENAME TO outbox_events_gone")?)
         })
         .unwrap();
-    assert!(k.core.finish_item(&id, "做完了").is_err());
+    assert!(k.finish(&id).is_err());
     assert_eq!(status(&k, &id), "run", "the status change rolled back");
-    assert_eq!(k.timeline_texts(&id).len(), before, "the note rolled back");
+    assert_eq!(k.phase(&id), "active", "the lifecycle rolled back");
+    // your own “标记完成” line stays (it happened); nothing of the close was written
+    assert_eq!(k.timeline_texts(&id).len(), before + 1);
+    assert!(
+        !k.timeline_texts(&id)
+            .iter()
+            .any(|t| t.contains("还有 1 步没做")),
+        "the note rolled back"
+    );
     let open: String = k
         .db()
         .store()
@@ -119,7 +139,7 @@ fn a_failing_finish_leaves_nothing_behind() {
             Ok(c.execute_batch("ALTER TABLE outbox_events_gone RENAME TO outbox_events")?)
         })
         .unwrap();
-    k.core.finish_item(&id, "做完了").unwrap();
+    k.finish(&id).unwrap();
     assert_eq!(status(&k, &id), "done");
     assert!(
         k.timeline_texts(&id)
@@ -133,7 +153,7 @@ fn a_failing_finish_leaves_nothing_behind() {
 fn work_tidy_takes_each_event_once() {
     let k = Kit::new();
     let id = k.item("run", "执行", None);
-    k.core.finish_item(&id, "做完了").unwrap();
+    k.finish(&id).unwrap();
     let p = k.pump_outbox();
     assert_eq!((p.done, p.retried, p.dead), (1, 0, 0));
     assert_eq!(k.pump_outbox().done, 0, "received: never again");
@@ -175,19 +195,17 @@ fn work_tidy_retries_while_a_session_is_busy() {
     k.db()
         .item_patch(&id, crate::patch![project_id: gp.id.as_str(), cwd: wt.to_string_lossy().to_string(), branch: name.as_str()])
         .unwrap();
-    let s = k.session(&id, "running");
+    let s = k.session(&id, "idle");
     k.rt.st().turning.insert(s.clone());
-    k.core.finish_item(&id, "做完了").unwrap();
-    let p = k.pump_outbox();
-    assert_eq!(
-        (p.done, p.retried),
-        (0, 1),
-        "busy: try again later, not acknowledged"
-    );
+    k.finish(&id).unwrap();
+    // the close itself waits for the turn: no fact, nothing to tidy yet
+    assert_eq!(k.phase(&id), "closing");
+    assert_eq!(k.pump_outbox().done, 0);
     assert!(wt.exists(), "nothing touched while busy");
     k.rt.st().turning.remove(&s);
-    assert_eq!(k.pump_outbox().done, 0, "backing off");
-    let p = k.pump_outbox_at(steve_store::now() + steve_store::outbox::backoff(1) + 1);
+    k.core.lifecycle_tick().unwrap();
+    assert_eq!(k.phase(&id), "closed", "closed once the turn ended");
+    let p = k.pump_outbox();
     assert_eq!(p.done, 1);
     assert!(!wt.exists(), "given back once the session is idle");
 }

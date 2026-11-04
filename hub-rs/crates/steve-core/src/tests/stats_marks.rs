@@ -66,6 +66,10 @@ fn every_status_change_leaves_one_mark() {
     k.core.item_action(&i, ItemAction::Pause, "me").unwrap();
     k.core.item_action(&i, ItemAction::Resume, "me").unwrap();
     k.core.item_action(&i, ItemAction::Drop, "me").unwrap();
+    // the resumed turn is stopped; the cancel commits when it ended
+    let sid = k.db().sessions_of_item(&i).unwrap()[0].id.clone();
+    k.rt.end_turn(&k.core, &sid, "cancelled", None);
+    assert_eq!(k.status(&i).0, "drop");
     k.core.item_action(&i, ItemAction::Reopen, "me").unwrap();
     let chain = assert_chain(&k, &i);
     assert_eq!(chain.first().map(String::as_str), Some("run"));
@@ -229,7 +233,7 @@ fn release_outcomes_are_marked_once_each() {
 }
 
 #[test]
-fn a_reported_release_marks_released_and_done() {
+fn a_reported_release_marks_released_without_finishing_the_item() {
     let k = Kit::new();
     let (i, d) = approved(&k);
     k.core
@@ -247,7 +251,8 @@ fn a_reported_release_marks_released_and_done() {
         of_kind(&k, &i, "release"),
         [(Some("released".into()), Some(d))]
     );
-    assert_eq!(
+    // a release is a fact about the item, never its completion
+    assert_ne!(
         assert_chain(&k, &i).last().map(String::as_str),
         Some("done")
     );

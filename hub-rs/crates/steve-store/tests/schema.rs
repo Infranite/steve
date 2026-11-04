@@ -71,6 +71,10 @@ fn fresh_database_is_ts_schema_plus_module_migrations() {
     ts.execute_batch("CREATE TABLE IF NOT EXISTS schema_compat (min_reader INTEGER NOT NULL)")
         .unwrap();
     ts.execute_batch("ALTER TABLE bots ADD COLUMN reasoning_effort TEXT; ALTER TABLE sessions ADD COLUMN reasoning_effort TEXT;").unwrap();
+    // 027's item columns, added to the TS table the same way (the backfill finds nothing here)
+    ts.execute_batch("CREATE TABLE item_cycles (item_id TEXT, cycle INTEGER, revision INTEGER, outcome TEXT, acceptance TEXT, reason TEXT, closed INTEGER, source TEXT)").unwrap();
+    ts.execute_batch(db::ITEM_LIFECYCLE).unwrap();
+    ts.execute_batch("DROP TABLE item_cycles; CREATE INDEX items_closing ON items(phase) WHERE phase = 'closing';").unwrap();
     // what the module migrations alone create (they only add objects), on stubs of the tables they touch
     const STUBS: [&str; 7] = [
         "workspaces",
@@ -126,8 +130,8 @@ fn fresh_database_is_ts_schema_plus_module_migrations() {
 
 #[test]
 fn migrations_are_the_ts_strings() {
-    assert_eq!(db::MIGRATIONS.len(), 26);
-    assert_eq!(db::SCHEMA_VERSION, 26);
+    assert_eq!(db::MIGRATIONS.len(), 27);
+    assert_eq!(db::SCHEMA_VERSION, 27);
     assert!(db::MIGRATIONS[0].starts_with("\n  CREATE TABLE workspaces (id TEXT PRIMARY KEY, name TEXT NOT NULL, created INTEGER NOT NULL);"));
     assert!(
         db::MIGRATIONS[1]

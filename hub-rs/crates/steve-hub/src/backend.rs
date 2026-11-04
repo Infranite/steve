@@ -368,6 +368,10 @@ pub trait Repo {
     fn item_plan_rounds(&self, id: &str) -> BResult<Vec<Obj>> {
         todo_backend!("item_plan_rounds")
     }
+    /// Ended cycles `[{cycle, revision, outcome, acceptance, reason, closed, source}]`, oldest first.
+    fn item_cycles(&self, id: &str) -> BResult<Vec<Obj>> {
+        Ok(vec![])
+    }
     /// Latest goal text, `""` when none.
     fn item_goal(&self, id: &str) -> BResult<String> {
         todo_backend!("item_goal")
@@ -620,6 +624,33 @@ pub trait Domain: Send + Sync + 'static {
     }
     async fn item_action(&self, id: &str, action: &str, actor: &str) -> BResult<Obj> {
         todo_backend!("item_action")
+    }
+    /// The lifecycle commands (`accept` | `cancel` | `fail` | `new_cycle`), checked against the cycle
+    /// and revision the caller saw; returns the item.
+    #[allow(clippy::too_many_arguments)]
+    async fn lifecycle_command(
+        &self,
+        id: &str,
+        command: &str,
+        expected_cycle: i64,
+        expected_revision: i64,
+        reason: Option<String>,
+        goal: Option<String>,
+        actor: &str,
+    ) -> BResult<Obj> {
+        todo_backend!("lifecycle_command")
+    }
+    /// The lifecycle projection of one item (`None` without a lifecycle-aware domain).
+    async fn lifecycle_view(&self, id: &str) -> BResult<Option<Value>> {
+        Ok(None)
+    }
+    /// The lifecycle projections of the task items of `ws`, keyed by item id.
+    async fn lifecycle_views(&self, ws: &str) -> BResult<std::collections::HashMap<String, Value>> {
+        Ok(Default::default())
+    }
+    /// Commits the closings whose gate holds now (the periodic tick).
+    async fn lifecycle_tick(&self) -> BResult<usize> {
+        Ok(0)
     }
     async fn revise_goal(&self, id: &str, text: &str) -> BResult<()> {
         todo_backend!("revise_goal")

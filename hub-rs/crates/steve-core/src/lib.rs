@@ -12,6 +12,7 @@
 pub mod attachments;
 pub mod changes;
 pub mod config;
+pub mod cycle;
 pub mod error;
 pub mod gateway;
 pub mod git;
@@ -106,6 +107,9 @@ pub(crate) struct State {
     hooks: Vec<modules::HookEvent>,
     /// Items the user marked done, with what to restore if they undo it from the toast.
     marked_done: HashMap<String, orchestrator::MarkedDone>,
+    /// Turns to cancel once the lock is gone `(session, item)`: a cancel can call back into the core
+    /// (the gateway-retry wait ends with a turn end), so a lifecycle stop never cancels under the lock.
+    cancels: Vec<(String, String)>,
 }
 
 /// One critical section: the core plus the held state lock.

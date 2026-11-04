@@ -47,8 +47,9 @@ pub fn housekeeping(r: &dyn Repo, now: i64, exists: impl Fn(&str) -> bool) -> BR
             .unwrap_or_default();
         let mut archived: Vec<String> = vec![];
         for i in r.items_all(&ws)? {
-            let status = i.get("status").and_then(Value::as_str).unwrap_or_default();
-            if status != "done" && status != "drop" {
+            // the lifecycle decides what is over (completed, failed, cancelled, superseded alike)
+            let phase = i.get("phase").and_then(Value::as_str).unwrap_or_default();
+            if phase != "closed" {
                 continue;
             }
             let id = i
@@ -123,6 +124,26 @@ pub fn spawn_housekeeping(st: AppState) {
 fn stamp(p: &Path) -> Option<(SystemTime, u64)> {
     let m = std::fs::metadata(p).ok()?;
     Some((m.modified().ok()?, m.len()))
+}
+
+/// How often the closings that wait for something are looked at again (a queued turn or the release
+/// hold may end without a turn-end callback).
+pub const LIFECYCLE_TICK: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Commits the closings whose gate holds now, every [`LIFECYCLE_TICK`].
+pub fn spawn_lifecycle_tick(st: AppState) {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(LIFECYCLE_TICK);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tick.tick().await;
+            match st.domain.lifecycle_tick().await {
+                Ok(0) => {}
+                Ok(n) => tracing::info!(closed = n, "lifecycle tick"),
+                Err(e) => tracing::warn!("lifecycle tick: {}", e.message),
+            }
+        }
+    });
 }
 
 /// Polls `last.json` (and the `rollback.json` next to it) every 3 s and calls `reportRelease` on every

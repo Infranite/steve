@@ -41,10 +41,20 @@ pub fn settle(db: &Store, item: &str) -> Result<()> {
 /// Questions and failure cards only matter until the conversation goes on without them: the user writes to
 /// the session anyway, or the bot keeps working, asks again or delivers.
 pub fn supersede(db: &Store, item: &str, kinds: &[&str], why: &str) -> Result<usize> {
+    supersede_where(db, item, |d| kinds.contains(&d.kind.as_str()), why)
+}
+
+/// [`supersede`] for the open cards of `item` that `pick` picks.
+pub fn supersede_where(
+    db: &Store,
+    item: &str,
+    pick: impl Fn(&steve_store::Decision) -> bool,
+    why: &str,
+) -> Result<usize> {
     let xs: Vec<_> = db
         .decisions_of_item(item)?
         .into_iter()
-        .filter(|d| d.status == "open" && kinds.contains(&d.kind.as_str()))
+        .filter(|d| d.status == "open" && pick(d))
         .collect();
     for d in &xs {
         db.decision_resolve(&d.id, json!({"superseded": why}), "expired", None)?;

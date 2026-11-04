@@ -63,7 +63,12 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/025.sql"),
     // 26: personal conversation-list preferences.
     include_str!("../migrations/026.sql"),
+    // 27: the item lifecycle (phase, cycle, revision, closing intent, outcome) and its closed cycles.
+    include_str!("../migrations/027.sql"),
 ];
+
+/// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).
+pub const ITEM_LIFECYCLE: &str = include_str!("../migrations/027_items.sql");
 
 /// The schema version this build writes (`MIGRATIONS.length`).
 pub const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64;
@@ -200,6 +205,25 @@ fn run_pending(c: &Connection, cur: i64) -> Result<()> {
                 "ALTER TABLE {table} ADD COLUMN reasoning_effort TEXT"
             ))?;
         }
+    }
+    /* 027's item columns: once, where there are items without them (a module-only schema has no items) */
+    let items: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'items')",
+        [],
+        |r| r.get(0),
+    )?;
+    if items {
+        let phase: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('items') WHERE name = 'phase')",
+            [],
+            |r| r.get(0),
+        )?;
+        if !phase {
+            tx.execute_batch(ITEM_LIFECYCLE)?;
+        }
+        tx.execute_batch(
+            "CREATE INDEX IF NOT EXISTS items_closing ON items(phase) WHERE phase = 'closing'",
+        )?;
     }
     let broken: Vec<String> = if cur == SCHEMA_VERSION {
         Vec::new()

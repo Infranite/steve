@@ -34,6 +34,11 @@ fn cerr(e: CoreError) -> BackendError {
             },
         },
         CoreError::Status(status, message) => BackendError { status, message },
+        // the store refused a write that contradicts the lifecycle: the user's conflict, not a crash
+        CoreError::Store(steve_store::StoreError::Conflict(message)) => BackendError {
+            status: 409,
+            message,
+        },
         e => BackendError::msg(e.to_string()),
     }
 }
@@ -624,6 +629,49 @@ impl Domain for CoreDomain {
             .ok_or_else(|| BackendError::msg(format!("unknown action {action}")))?;
         let (c, id, actor) = (self.core.clone(), id.to_string(), actor.to_string());
         to_obj(blocking(move || c.item_action(&id, a, &actor)).await?)
+    }
+    async fn lifecycle_command(
+        &self,
+        id: &str,
+        command: &str,
+        expected_cycle: i64,
+        expected_revision: i64,
+        reason: Option<String>,
+        goal: Option<String>,
+        actor: &str,
+    ) -> BResult<Obj> {
+        let (c, id, command, actor) = (
+            self.core.clone(),
+            id.to_string(),
+            command.to_string(),
+            actor.to_string(),
+        );
+        to_obj(
+            blocking(move || {
+                c.lifecycle_command(
+                    &id,
+                    &command,
+                    expected_cycle,
+                    expected_revision,
+                    reason.as_deref(),
+                    goal.as_deref(),
+                    &actor,
+                )
+            })
+            .await?,
+        )
+    }
+    async fn lifecycle_view(&self, id: &str) -> BResult<Option<Value>> {
+        let (c, id) = (self.core.clone(), id.to_string());
+        blocking(move || c.lifecycle_view(&id).map(Some)).await
+    }
+    async fn lifecycle_views(&self, ws: &str) -> BResult<std::collections::HashMap<String, Value>> {
+        let (c, ws) = (self.core.clone(), ws.to_string());
+        blocking(move || c.lifecycle_views_ws(&ws)).await
+    }
+    async fn lifecycle_tick(&self) -> BResult<usize> {
+        let c = self.core.clone();
+        blocking(move || c.lifecycle_tick()).await
     }
     async fn revise_goal(&self, id: &str, text: &str) -> BResult<()> {
         let (c, id, text) = (self.core.clone(), id.to_string(), text.to_string());

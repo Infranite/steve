@@ -156,6 +156,18 @@ fn finishing_an_item_clears_reminders_still_open_on_it() {
     let k = Kit::new();
     let (i, _) = waiting(&k, "ask");
     let acc = k.decision(&i, None, "accept", "item", &["pass", "rework"]);
+    k.core
+        .tx()
+        .lc_request_complete(
+            &i,
+            "dev",
+            crate::cycle::Policy::Human,
+            false,
+            "交付",
+            Some(acc.clone()),
+            vec![],
+        )
+        .unwrap();
     k.core.resolve(&acc, "pass", "", "me").unwrap();
     assert_eq!(k.status(&i).0, "done");
     assert!(k.open_kinds(&i).is_empty());
@@ -165,7 +177,13 @@ fn finishing_an_item_clears_reminders_still_open_on_it() {
 fn on_boot_reminders_left_on_finished_or_dropped_items_are_cleared() {
     let k = Kit::new();
     let (i, _) = waiting(&k, "fail");
-    k.db().item_patch(&i, patch![status: "drop"]).unwrap();
+    // dropped before the lifecycle existed (as migration 027 leaves such an item), its card still open
+    k.db()
+        .exec(
+            "UPDATE items SET status = 'drop', phase = 'closed', outcome = 'cancelled' WHERE id = ?",
+            &[&i as &dyn rusqlite::ToSql],
+        )
+        .unwrap();
     k.core.recover().unwrap();
     assert!(k.open_kinds(&i).is_empty());
     let d = k.db().decisions_of_item(&i).unwrap().pop().unwrap();

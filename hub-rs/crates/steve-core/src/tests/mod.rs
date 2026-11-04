@@ -3,6 +3,7 @@
 
 mod changes;
 mod conversations;
+mod cycle;
 mod flows;
 mod inbox;
 mod lifecycle;
@@ -70,7 +71,8 @@ impl Kit {
     }
 
     pub fn item(&self, status: &str, stage: &str, project: Option<&str>) -> String {
-        self.db()
+        let id = self
+            .db()
             .item_create(
                 WS,
                 &NewItem {
@@ -84,7 +86,22 @@ impl Kit {
                 },
             )
             .unwrap()
-            .id
+            .id;
+        // an item made already finished is closed, as migration 027 records old ones
+        let outcome = match status {
+            "done" => Some("completed"),
+            "drop" => Some("cancelled"),
+            _ => None,
+        };
+        if let Some(o) = outcome {
+            self.db()
+                .exec(
+                    "UPDATE items SET phase = 'closed', outcome = ?, closed_at = updated WHERE id = ?",
+                    &[&o as &dyn rusqlite::ToSql, &id],
+                )
+                .unwrap();
+        }
+        id
     }
 
     pub fn session(&self, item: &str, status: &str) -> String {
@@ -145,11 +162,33 @@ impl Kit {
             .unwrap();
         let session = self.session(&id, "idle");
         let decision = self.decision(&id, Some(&session), "accept", "item", &["pass", "rework"]);
+        // delivered = a completion request waiting for this acceptance, as `steve_deliver` leaves it
+        self.core
+            .tx()
+            .lc_request_complete(
+                &id,
+                "dev",
+                crate::cycle::Policy::Human,
+                false,
+                "交付，等你验收",
+                Some(decision.clone()),
+                vec![],
+            )
+            .unwrap();
         Delivered {
             id,
             session,
             decision,
         }
+    }
+
+    /// The user marks the item done (the human acceptance of a completion request).
+    pub fn finish(&self, item: &str) -> crate::Result<crate::repo::Item> {
+        self.core.item_action(item, crate::ItemAction::Finish, "me")
+    }
+
+    pub fn phase(&self, item: &str) -> String {
+        self.db().item(item).unwrap().unwrap().phase
     }
 
     pub fn status(&self, item: &str) -> (String, String, String) {

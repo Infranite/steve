@@ -355,6 +355,8 @@ pub async fn boot(st: &AppState) -> anyhow::Result<()> {
         crate::jobs::spawn_release_watcher(st.clone(), st.cfg.release_file());
         crate::jobs::spawn_housekeeping(st.clone());
     }
+    // closings waiting for something the turn-end callback may never report (queued turns, the hold)
+    crate::jobs::spawn_lifecycle_tick(st.clone());
     // warm the runtimes cache so the first /api/state doesn't wait for `claude --version`
     let rt = st.clone();
     tokio::spawn(async move {

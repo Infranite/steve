@@ -125,10 +125,17 @@ fn a_rebase_conflict_records_not_released_and_keeps_the_item_open() {
     )
     .unwrap();
     std::fs::write(k.home().join("go"), "").unwrap();
-    assert!(k.wait(|| k.status(&i0).0 == "done"));
-    assert_eq!(result(&k, &d2)["outcome"], "released");
+    assert!(k.wait(|| result(&k, &d2)["outcome"] == "released"));
     assert_eq!(result(&k, &d2)["version"], "v9");
     assert_eq!(result(&k, &d)["outcome"], "not_released");
+    // released while the item was still being worked on (nothing delivered or accepted yet): the
+    // release is recorded as an attempt of the cycle, it does not finish the item (ST-23)
+    assert_ne!(k.phase(&i0), "closed");
+    let ops = k.db().store().items().operations(&i0, 1).unwrap();
+    assert!(
+        ops.iter()
+            .any(|o| o.kind == "release" && o.status == "succeeded" && !o.required)
+    );
 }
 
 #[test]
@@ -485,7 +492,8 @@ fn hold_release_lock(k: &Kit) -> std::process::Child {
     child
 }
 
-/// After a restart last.json still says pending, but no script holds the lock: it will never report — failed.
+/// After a restart last.json still says pending, but no script holds the lock: it will never report — its
+/// result is unknown (not a failure), and you are asked to check.
 #[test]
 fn a_pending_release_whose_script_is_gone_fails_after_a_restart() {
     let k = Kit::new();
@@ -505,18 +513,27 @@ fn a_pending_release_whose_script_is_gone_fails_after_a_restart() {
     lock.wait().unwrap();
     assert!(crate::release::lock_holder(&k.home().join("releases/.release.lock")).is_none());
     k.core.report_release().unwrap();
+    // nobody knows what is live: not a failure but a result to check, never retried by itself
     let res = result(&k, &d);
-    assert_eq!(res["outcome"], "failed");
+    assert_eq!(res["outcome"], "unknown");
     assert_eq!(res["reason"], "发布脚本没有报告结果就退出了");
-    let (status, stage, now) = k.status(&i);
-    assert_eq!(
-        (status.as_str(), stage.as_str(), now.as_str()),
-        ("wait", "收尾", "发布失败")
-    );
+    let (status, _, now) = k.status(&i);
+    assert_ne!(status, "done");
+    assert_eq!(now, "发布结果未知，等你核对");
     let why =
         "发布 v5 失败：发布脚本没有报告结果就退出了，不确定现在是哪个版本；请看发布日志 /tmp/r.log";
-    assert_eq!(k.open_fails(&i), vec![why]);
+    assert_eq!(
+        k.open_fails(&i),
+        vec![format!(
+            "{why}。请核对线上版本：已经上线，还是需要重新发布？"
+        )]
+    );
     assert_eq!(fail_notices(&k), vec![why]);
+    let ops = k.db().store().items().operations(&i, 1).unwrap();
+    assert!(
+        ops.iter()
+            .any(|o| o.kind == "release" && o.status == "unknown")
+    );
     let r: Value = serde_json::from_str(&std::fs::read_to_string(&last).unwrap()).unwrap();
     assert_eq!(
         (r["reported"].clone(), r["pending"].clone()),
@@ -544,7 +561,7 @@ fn a_pending_release_times_out_after_30_minutes() {
     )
     .unwrap();
     k.core.report_release().unwrap();
-    assert_eq!(result(&k, &d)["outcome"], "failed");
+    assert_eq!(result(&k, &d)["outcome"], "unknown");
     assert_eq!(result(&k, &d)["reason"], "发布脚本没有报告结果就退出了");
     assert_ne!(k.status(&i).0, "done");
     assert_eq!(k.open_kinds(&i), vec!["fail"]);

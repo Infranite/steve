@@ -479,9 +479,16 @@ fn a_finish_between_boot_and_ready_blocks_the_resume() {
     let i = k.item("run", "执行", None);
     let s = k.session(&i, "running");
     k.core.recover().unwrap();
-    k.db().item_patch(&i, patch![status: "done"]).unwrap();
+    // you mark it done before the listener is up: the interrupted turn is not resumed, the close follows
+    k.finish(&i).unwrap();
+    assert_eq!(
+        k.phase(&i),
+        "closing",
+        "the resume intent still counts as work"
+    );
     k.core.ready();
     assert!(k.rt.prompts_of(&s).is_empty());
+    assert_eq!(k.phase(&i), "closed");
 }
 
 #[test]

@@ -42,6 +42,23 @@ pub trait ItemHooks: Send + Sync {
     }
 }
 
+/// Runs one observer: a panic is logged and stops only that hook's call, never the others or the
+/// lifecycle step it observes. (Acceptance is no observer: a consultation that dies is not an answer.)
+async fn observe(hook: &str, point: &str, f: impl std::future::Future<Output = ()>) {
+    let mut f = std::pin::pin!(f);
+    let r = std::future::poll_fn(|cx| {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f.as_mut().poll(cx))) {
+            Ok(std::task::Poll::Pending) => std::task::Poll::Pending,
+            Ok(std::task::Poll::Ready(())) => std::task::Poll::Ready(Ok(())),
+            Err(_) => std::task::Poll::Ready(Err(())),
+        }
+    })
+    .await;
+    if r.is_err() {
+        tracing::error!(hook, point, "item hook panicked");
+    }
+}
+
 /// The registered hooks, called in registration order.
 #[derive(Default)]
 pub struct ItemHookList(Vec<Box<dyn ItemHooks>>);
@@ -62,7 +79,7 @@ impl ItemHookList {
 
     pub async fn created(&self, item: &Item) {
         for h in &self.0 {
-            h.on_created(item).await;
+            observe(h.name(), "created", h.on_created(item)).await;
         }
     }
 
@@ -80,13 +97,13 @@ impl ItemHookList {
 
     pub async fn finished(&self, item: &Item) {
         for h in &self.0 {
-            h.on_finished(item).await;
+            observe(h.name(), "finished", h.on_finished(item)).await;
         }
     }
 
     pub async fn dropped(&self, item: &Item) {
         for h in &self.0 {
-            h.on_dropped(item).await;
+            observe(h.name(), "dropped", h.on_dropped(item)).await;
         }
     }
 }

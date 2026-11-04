@@ -4,6 +4,7 @@
 //! Hand-off: the script builds first, then asks this Hub over loopback (with a one-off token) to drain — no new
 //! turns, new prompts queue — and polls until the running turns have ended (bounded by the script), then restarts.
 
+use crate::cycle::{Closing, OP_RELEASE, fingerprint_head};
 use crate::error::Result;
 use crate::gateway::{jstr, truthy};
 use crate::git::{self, Rebase};
@@ -166,22 +167,6 @@ impl Tx<'_> {
         Ok(git::has_changes(Path::new(&p.path), wt, branch, "main") == Some(false))
     }
 
-    /// Finish an accepted item that has nothing to release, saying so in the timeline.
-    pub(crate) fn finish_unreleased(
-        &mut self,
-        item_id: &str,
-        decision: Option<&str>,
-    ) -> Result<()> {
-        self.db().timeline_add(
-            item_id,
-            "steve",
-            "sys",
-            "分支上没有需要发布的改动，不用发布，事项直接完成",
-            None,
-        )?;
-        self.accept_finish(item_id, decision, NOTHING_TO_RELEASE)
-    }
-
     /// Rebase the item's branch onto main in its worktree; on any problem the agent is sent back and nothing is released.
     pub(crate) fn rebase_for_release(
         &mut self,
@@ -329,9 +314,17 @@ impl Tx<'_> {
         extra: Value,
     ) -> Result<()> {
         self.release_outcome(item_id, "failed", extra)?;
-        /* a failed release reopens the item, whatever state it was in */
+        let i = self.item(item_id)?;
+        if i.phase == crate::cycle::CLOSED {
+            /* a release after the cycle closed is a fact of its own: the cycle stays as it closed */
+            return Ok(());
+        }
+        /* the requirement is still open: a fail card asks what next (retry, rework, give up) */
+        if let Some(op) = self.lc_open_op(item_id, crate::cycle::OP_RELEASE)? {
+            self.lc_op_set(&op.id, "pending", json!({"last_failure": why}))?;
+        }
         self.db()
-            .item_patch(item_id, patch![status: "run", stage: "收尾", now: now_text])?;
+            .item_patch(item_id, patch![stage: "收尾", now: now_text])?;
         self.fail(item_id, why)
     }
 
@@ -433,6 +426,13 @@ impl Tx<'_> {
             }
         }
         self.release_outcome(item_id, RELEASING, json!({"log": log.to_string_lossy()}))?;
+        if let Some(op) = self.lc_open_op(item_id, crate::cycle::OP_RELEASE)? {
+            self.lc_op_set(
+                &op.id,
+                "running",
+                json!({"log": log.to_string_lossy(), "branch": branch}),
+            )?;
+        }
         self.db()
             .item_patch(item_id, patch![stage: "收尾", now: "正在发布"])?;
         self.db().timeline_add(
@@ -706,15 +706,13 @@ impl Tx<'_> {
                 return Ok(());
             }
         }
-        if let Some(o) = r.as_object_mut() {
-            o.insert("reported".into(), Value::Bool(true));
-            if abandoned {
-                o.insert("ok".into(), Value::Bool(false));
-                o.insert("pending".into(), Value::Bool(false));
-                o.insert("error".into(), NO_RESULT.into());
-            }
+        if let Some(o) = r.as_object_mut()
+            && abandoned
+        {
+            o.insert("ok".into(), Value::Bool(false));
+            o.insert("pending".into(), Value::Bool(false));
+            o.insert("error".into(), NO_RESULT.into());
         }
-        std::fs::write(&f, pretty1(&r))?;
         /* JS template literals: undefined → "undefined", `??` falls back on null and undefined */
         let tpl = |k: &str| r.get(k).map(jstr).unwrap_or_else(|| "undefined".into());
         let or = |k: &str, d: &str| match r.get(k) {
@@ -775,8 +773,55 @@ impl Tx<'_> {
             None => None,
         };
         let version = r.get("version").filter(|v| truthy(v)).map(jstr);
+        let ok = r.get("ok").is_some_and(truthy);
+        /* one attempt per result, keyed by the result and the release it answers (the item's newest approved
+         * release card): a result reported again (a crash between the database and the file) is recognised and
+         * told nobody twice, while a later release that leaves an identical file is still its own attempt */
+        let card = match &item {
+            Some(i) => self
+                .db()
+                .decisions_of_item(&i.id)?
+                .into_iter()
+                .rev()
+                .find(|d| {
+                    d.kind == "approve"
+                        && d.subject_type == "release"
+                        && d.result.get("approved").is_some_and(truthy)
+                })
+                .map(|d| d.id),
+            None => None,
+        };
+        let effect = format!(
+            "{}:{}:{}:{}",
+            card.unwrap_or_default(),
+            version.clone().unwrap_or_default(),
+            r.get("at").map(jstr).unwrap_or_default(),
+            kind
+        );
+        let mut fresh = true;
         if let Some(i) = &item {
-            if r.get("ok").is_some_and(truthy) {
+            let status = if abandoned {
+                "unknown"
+            } else if ok {
+                "succeeded"
+            } else {
+                "failed"
+            };
+            let (_, new) = self.lc_op_add(
+                i,
+                crate::cycle::OP_RELEASE,
+                Some(&format!("attempt:{effect}")),
+                false,
+                status,
+                "发布",
+                json!({"version": version, "kind": kind, "commit": r.get("commit"), "prev": r.get("prev"),
+                       "error": r.get("error"), "log": r.get("log")}),
+            )?;
+            fresh = new;
+        }
+        if let (Some(i), true) = (&item, fresh) {
+            let required = self.lc_open_op(&i.id, crate::cycle::OP_RELEASE)?;
+            if ok {
                 self.db().timeline_add(&i.id, "steve", "sys", &text, None)?;
                 /* `prev`: what a rollback of this release goes back to (YOLO's undo) */
                 let prev = r.get("prev").filter(|v| truthy(v)).map(jstr);
@@ -794,12 +839,48 @@ impl Tx<'_> {
                         ..Default::default()
                     },
                 );
-                self.finish(&i.id, "已发布")?;
+                /* a release is evidence for the closing gate, never a close by itself */
+                if let Some(op) = required {
+                    let head = crate::cycle::closing_of(i)
+                        .and_then(|c| c.fingerprint)
+                        .map(|f| crate::cycle::fingerprint_head(&f).to_string());
+                    let attempt = steve_store::ItemOperation {
+                        evidence: json!({"commit": r.get("commit")}),
+                        ..op.clone()
+                    };
+                    if release_contains(i, &attempt, head.as_deref()) {
+                        self.lc_op_set(
+                            &op.id,
+                            "succeeded",
+                            json!({"version": version, "commit": r.get("commit"), "kind": kind}),
+                        )?;
+                    } else {
+                        self.lc_op_set(
+                            &op.id,
+                            "pending",
+                            json!({"last_failure": "发布的版本不包含验收的结果"}),
+                        )?;
+                        self.fail(&i.id, "发布的版本不包含验收的结果，需要重新发布")?;
+                    }
+                }
+            } else if abandoned {
+                /* nobody knows what is live: not a failure, a result to check */
+                self.release_outcome(
+                    &i.id,
+                    "unknown",
+                    json!({"reason": NO_RESULT, "version": version, "kind": kind}),
+                )?;
+                if let Some(op) = required {
+                    self.lc_op_set(&op.id, "unknown", json!({"note": NO_RESULT}))?;
+                }
+                if i.phase != crate::cycle::CLOSED {
+                    self.release_unknown(&i.id, &text)?;
+                }
             } else {
                 let hub_only = kind == "hub+web" && r.get("hub_ok").is_some_and(truthy);
                 let extra = json!({
                     "reason": or("error", "健康检查没有通过"),
-                    "note": if abandoned { String::new() } else { back },
+                    "note": back,
                     "version": version,
                     "kind": kind,
                     "hub_ok": r.get("hub_ok").is_some_and(truthy),
@@ -816,23 +897,26 @@ impl Tx<'_> {
                 self.release_failed(&i.id, now_text, &text, extra)?;
             }
         }
-        let ws = item
-            .as_ref()
-            .map(|i| i.workspace_id.clone())
-            .unwrap_or_else(|| WS.into());
-        let level = if r.get("ok").is_some_and(truthy) {
-            "success"
-        } else {
-            "fail"
-        };
-        crate::notify::notify(
-            self.db(),
-            &ws,
-            "release",
-            level,
-            &text,
-            item.as_ref().map(|i| i.id.as_str()),
-        )?;
+        if fresh {
+            let ws = item
+                .as_ref()
+                .map(|i| i.workspace_id.clone())
+                .unwrap_or_else(|| WS.into());
+            let level = if ok { "success" } else { "fail" };
+            crate::notify::notify(
+                self.db(),
+                &ws,
+                "release",
+                level,
+                &text,
+                item.as_ref().map(|i| i.id.as_str()),
+            )?;
+        }
+        /* only now the file says it was reported: a crash before this reports it again, harmlessly */
+        if let Some(o) = r.as_object_mut() {
+            o.insert("reported".into(), Value::Bool(true));
+        }
+        std::fs::write(&f, pretty1(&r))?;
         Ok(())
     }
 }
@@ -938,6 +1022,127 @@ impl Core {
                 tracing::error!("release done {e}");
             }
         }
+    }
+}
+
+/// Does a succeeded release `op` (its `evidence.commit`) contain the frozen `head`? Without a frozen
+/// head (no worktree) any release of the cycle counts; without a commit to compare, none does.
+pub(crate) fn release_contains(
+    i: &Item,
+    op: &steve_store::ItemOperation,
+    head: Option<&str>,
+) -> bool {
+    let Some(head) = head.filter(|h| !h.is_empty()) else {
+        return true;
+    };
+    let Some(commit) = op.evidence["commit"].as_str().filter(|c| !c.is_empty()) else {
+        return false;
+    };
+    if commit.starts_with(head) || head.starts_with(commit) {
+        return true;
+    }
+    let Some(cwd) = i.cwd.as_deref().filter(|c| Path::new(c).exists()) else {
+        return false;
+    };
+    std::process::Command::new("git")
+        .args(["-C", cwd, "merge-base", "--is-ancestor", head, commit])
+        .output()
+        .is_ok_and(|o| o.status.success())
+}
+
+impl Tx<'_> {
+    /// The release adapter of the closing gate. A release project: the accepted result must be live. Satisfied by a release of this cycle whose
+    /// commit contains the frozen `HEAD` (the agent may have released it already); otherwise a pending
+    /// requirement, and the agent is asked to publish. A branch with nothing to release is not proof of
+    /// a deployment: without such a release it stays a requirement you can waive.
+    pub(crate) fn release_requirement(&mut self, i: &Item, c: &Closing) -> Result<()> {
+        if !self.release_pending(i)? {
+            return Ok(());
+        }
+        let head = c.fingerprint.as_deref().map(fingerprint_head);
+        let proof = self
+            .db()
+            .store()
+            .items()
+            .operations(&i.id, i.cycle)?
+            .into_iter()
+            .find(|o| {
+                o.kind == OP_RELEASE
+                    && o.status == "succeeded"
+                    && crate::release::release_contains(i, o, head)
+            });
+        let key = format!("{}:{}:{}", OP_RELEASE, i.cycle, i.revision);
+        match proof {
+            Some(p) => {
+                self.lc_op_add(
+                    i,
+                    OP_RELEASE,
+                    Some(&key),
+                    true,
+                    "succeeded",
+                    "发布上线",
+                    json!({"proof": p.id, "version": p.evidence["version"], "note": "本周期已经发布过包含这个结果的版本"}),
+                )?;
+            }
+            None => {
+                let (_, new) = self.lc_op_add(
+                    i,
+                    OP_RELEASE,
+                    Some(&key),
+                    true,
+                    "pending",
+                    "发布上线",
+                    json!({}),
+                )?;
+                if new {
+                    if self.nothing_to_release(i)? {
+                        self.release_unproven(&i.id)?;
+                    } else {
+                        self.await_release_for(&i.id)?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// A release whose result nobody knows: the requirement waits for you to check, nothing retries it.
+    pub(crate) fn release_unknown(&mut self, item_id: &str, text: &str) -> Result<()> {
+        let i = self.item(item_id)?;
+        crate::lifecycle::supersede(self.db(), item_id, &["fail"], "发布结果未知")?;
+        self.db().decision_create(crate::repo::NewDecision {
+            workspace_id: i.workspace_id.clone(),
+            kind: "fail".into(),
+            subject_type: "item".into(),
+            subject_id: item_id.into(),
+            item_id: Some(item_id.into()),
+            question: format!("{text}。请核对线上版本：已经上线，还是需要重新发布？"),
+            options: Some(vec![
+                "release_live".into(),
+                "release_retry".into(),
+                "look".into(),
+            ]),
+            requested_by: "steve".into(),
+            ..Default::default()
+        })?;
+        self.db()
+            .item_patch(item_id, patch![now: "发布结果未知，等你核对"])?;
+        Ok(())
+    }
+
+    /// Asks the agent of the item to publish (the required release of an accepted result).
+    pub(crate) fn await_release_for(&mut self, item_id: &str) -> Result<()> {
+        let to = match self
+            .active_session(item_id)?
+            .filter(|s| s.status != "ended")
+        {
+            Some(s) => To::Session(s.id),
+            None => To::Decision {
+                live: None,
+                item: Some(item_id.into()),
+            },
+        };
+        self.await_release(item_id, &to)
     }
 }
 

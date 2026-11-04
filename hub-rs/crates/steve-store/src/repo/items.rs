@@ -517,6 +517,22 @@ fn patch_on(c: &rusqlite::Connection, id: &str, p: &ItemPatch) -> Result<bool> {
     if s.is_empty() {
         return Ok(false);
     }
+    // the lifecycle owns the terminal statuses and what a closed item is: nobody patches those
+    if let Some(st) = p.status.as_deref() {
+        if matches!(st, "done" | "drop" | "fail") {
+            return Err(crate::StoreError::Conflict(format!(
+                "事项的结束只能由生命周期提交（{st}）"
+            )));
+        }
+        let phase: Option<String> = one(c, "SELECT phase FROM items WHERE id = ?", [id], |r| {
+            r.get(0)
+        })?;
+        if phase.as_deref() == Some("closed") {
+            return Err(crate::StoreError::Conflict(
+                "这个事项已经结束了，需要时先新建周期".into(),
+            ));
+        }
+    }
     let before: Option<(String, String, String)> = match &p.status {
         Some(_) => one(
             c,
@@ -571,4 +587,285 @@ fn timeline_on(
     c.prepare_cached("INSERT INTO timeline (item_id, ts, actor, kind, text, session_id, files) VALUES (?, ?, ?, ?, ?, ?, ?)")?
         .execute(params![item_id, now(), actor, kind, text.as_ref(), session_id, file_refs(files)?])?;
     Ok(())
+}
+
+/// What the core's lifecycle writes in one step: the phase and its fields, and the legacy projection
+/// (`status`, `stage`, `now`) that follows from them. The only writer of these columns.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct LifecycleWrite {
+    pub phase: String,
+    pub cycle: i64,
+    pub revision: i64,
+    pub outcome: Option<String>,
+    pub acceptance: Option<String>,
+    pub closing: Option<serde_json::Value>,
+    pub closed_at: Option<i64>,
+    pub closed_reason: Option<String>,
+    /// Legacy projection; `None` leaves the column as it is.
+    pub status: Option<String>,
+    pub stage: Option<String>,
+    pub now: Option<String>,
+}
+
+/// Writes one lifecycle step of `id` inside the caller's transaction (stats mark a status change as
+/// [`Items::patch`] does). Returns the item as written.
+pub fn lifecycle_write_in(tx: &crate::Tx, id: &str, w: &LifecycleWrite) -> Result<Option<Item>> {
+    let before: Option<(String, String, String)> = one(
+        tx,
+        "SELECT workspace_id, kind, status FROM items WHERE id = ?",
+        [id],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )?;
+    let Some((ws, kind, old)) = before else {
+        return Ok(None);
+    };
+    let closing = w.closing.as_ref().map(to_json).transpose()?;
+    let t = now();
+    tx.run(
+        "UPDATE items SET phase = ?, cycle = ?, revision = ?, outcome = ?, acceptance = ?, closing = ?,
+            closed_at = ?, closed_reason = ?, status = coalesce(?, status), stage = coalesce(?, stage),
+            now = coalesce(?, now), updated = ? WHERE id = ?",
+        params![
+            w.phase,
+            w.cycle,
+            w.revision,
+            w.outcome,
+            w.acceptance,
+            closing,
+            w.closed_at,
+            w.closed_reason,
+            w.status,
+            w.stage,
+            w.now,
+            t,
+            id
+        ],
+    )?;
+    if let Some(new) = w.status.as_deref()
+        && kind == "task"
+        && old != new
+    {
+        status_mark(tx, &ws, id, t, Some(&old), new)?;
+    }
+    tx.publish(ChangeEvent::Item { id: id.into() });
+    one(tx, ITEM, [id], Item::from_row)
+}
+
+/// Records a cycle that ended; `false` when this cycle was already recorded (a cycle closes once).
+#[allow(clippy::too_many_arguments)]
+pub fn item_cycle_add_in(
+    tx: &crate::Tx,
+    item_id: &str,
+    cycle: i64,
+    revision: i64,
+    outcome: &str,
+    acceptance: Option<&str>,
+    reason: Option<&str>,
+    closed: i64,
+) -> Result<bool> {
+    let n = tx.prepare_cached(
+        "INSERT OR IGNORE INTO item_cycles (item_id, cycle, revision, outcome, acceptance, reason, closed, source)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'live')",
+    )?
+    .execute(params![item_id, cycle, revision, outcome, acceptance, reason, closed])?;
+    Ok(n == 1)
+}
+
+/// One ended cycle of an item.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ItemCycle {
+    pub cycle: i64,
+    pub revision: i64,
+    pub outcome: String,
+    pub acceptance: Option<String>,
+    pub reason: Option<String>,
+    pub closed: i64,
+    pub source: String,
+}
+
+impl Items<'_> {
+    /// The ended cycles of an item, oldest first.
+    pub fn cycles(&self, id: &str) -> Result<Vec<ItemCycle>> {
+        self.0.read(|c| {
+            all(
+                c,
+                "SELECT cycle, revision, outcome, acceptance, reason, closed, source FROM item_cycles WHERE item_id = ? ORDER BY cycle",
+                [id],
+                |r| {
+                    Ok(ItemCycle {
+                        cycle: r.get(0)?,
+                        revision: r.get(1)?,
+                        outcome: r.get(2)?,
+                        acceptance: r.get(3)?,
+                        reason: r.get(4)?,
+                        closed: r.get(5)?,
+                        source: r.get(6)?,
+                    })
+                },
+            )
+        })
+    }
+
+    /// Items of every workspace whose closing waits to be committed.
+    pub fn closing_ids(&self) -> Result<Vec<String>> {
+        self.0.read(|c| {
+            all(
+                c,
+                "SELECT id FROM items WHERE phase = 'closing' ORDER BY updated",
+                [],
+                |r| r.get(0),
+            )
+        })
+    }
+}
+
+/// One operation of an item's cycle (see migration 027).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ItemOperation {
+    pub id: String,
+    pub item_id: String,
+    pub cycle: i64,
+    pub revision: i64,
+    pub kind: String,
+    pub effect_id: Option<String>,
+    pub required: bool,
+    /// `pending` | `running` | `succeeded` | `failed` | `unknown` | `waived`
+    pub status: String,
+    pub label: String,
+    pub evidence: serde_json::Value,
+    pub created: i64,
+    pub updated: i64,
+}
+
+fn op_row(r: &rusqlite::Row) -> rusqlite::Result<ItemOperation> {
+    Ok(ItemOperation {
+        id: r.get("id")?,
+        item_id: r.get("item_id")?,
+        cycle: r.get("cycle")?,
+        revision: r.get("revision")?,
+        kind: r.get("kind")?,
+        effect_id: r.get("effect_id")?,
+        required: r.get::<_, i64>("required")? != 0,
+        status: r.get("status")?,
+        label: r.get("label")?,
+        evidence: json_or(
+            r.get("evidence")?,
+            serde_json::Value::Object(Default::default()),
+        ),
+        created: r.get("created")?,
+        updated: r.get("updated")?,
+    })
+}
+
+/// A new operation; with an `effect_id` already recorded for (item, kind) the existing one is returned
+/// instead (a repeated report of the same effect).
+#[allow(clippy::too_many_arguments)]
+pub fn operation_add_in(
+    tx: &crate::Tx,
+    item_id: &str,
+    cycle: i64,
+    revision: i64,
+    kind: &str,
+    effect_id: Option<&str>,
+    required: bool,
+    status: &str,
+    label: &str,
+    evidence: &serde_json::Value,
+) -> Result<(ItemOperation, bool)> {
+    if let Some(e) = effect_id
+        && let Some(op) = one(
+            tx,
+            "SELECT * FROM item_operations WHERE item_id = ? AND kind = ? AND effect_id = ?",
+            params![item_id, kind, e],
+            op_row,
+        )?
+    {
+        return Ok((op, false));
+    }
+    let id = uid("op");
+    let t = now();
+    tx.run(
+        "INSERT INTO item_operations (id, item_id, cycle, revision, kind, effect_id, required, status, label, evidence, created, updated)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        params![id, item_id, cycle, revision, kind, effect_id, required as i64, status, label, to_json(evidence)?, t, t],
+    )?;
+    tx.publish(ChangeEvent::Item { id: item_id.into() });
+    let op = one(
+        tx,
+        "SELECT * FROM item_operations WHERE id = ?",
+        [&id],
+        op_row,
+    )?
+    .ok_or(crate::StoreError::NotFound("没有这个操作"))?;
+    Ok((op, true))
+}
+
+/// Sets an operation's status (and merges `evidence` into what it had); `false` when there is no such
+/// operation or it already ended (a terminal status is never overwritten).
+pub fn operation_set_in(
+    tx: &crate::Tx,
+    id: &str,
+    status: &str,
+    evidence: &serde_json::Value,
+) -> Result<bool> {
+    let Some(op) = one(
+        tx,
+        "SELECT * FROM item_operations WHERE id = ?",
+        [id],
+        op_row,
+    )?
+    else {
+        return Ok(false);
+    };
+    if matches!(op.status.as_str(), "succeeded" | "failed" | "waived") {
+        return Ok(false);
+    }
+    let mut ev = op.evidence.clone();
+    if let (Some(o), Some(x)) = (ev.as_object_mut(), evidence.as_object()) {
+        for (k, v) in x {
+            o.insert(k.clone(), v.clone());
+        }
+    }
+    tx.run(
+        "UPDATE item_operations SET status = ?, evidence = ?, updated = ? WHERE id = ?",
+        params![status, to_json(&ev)?, now(), id],
+    )?;
+    tx.publish(ChangeEvent::Item { id: op.item_id });
+    Ok(true)
+}
+
+impl Items<'_> {
+    /// The operations of one cycle of an item, oldest first.
+    pub fn operations(&self, item_id: &str, cycle: i64) -> Result<Vec<ItemOperation>> {
+        self.0.read(|c| {
+            all(
+                c,
+                "SELECT * FROM item_operations WHERE item_id = ? AND cycle = ? ORDER BY created, id",
+                params![item_id, cycle],
+                op_row,
+            )
+        })
+    }
+    /// One operation by id.
+    pub fn operation(&self, id: &str) -> Result<Option<ItemOperation>> {
+        self.0.read(|c| {
+            one(
+                c,
+                "SELECT * FROM item_operations WHERE id = ?",
+                [id],
+                op_row,
+            )
+        })
+    }
+    /// Every operation of an item, any cycle, oldest first.
+    pub fn operations_all(&self, item_id: &str) -> Result<Vec<ItemOperation>> {
+        self.0.read(|c| {
+            all(
+                c,
+                "SELECT * FROM item_operations WHERE item_id = ? ORDER BY created, id",
+                [item_id],
+                op_row,
+            )
+        })
+    }
 }

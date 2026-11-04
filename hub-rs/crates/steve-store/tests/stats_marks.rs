@@ -3,7 +3,7 @@
 mod common;
 
 use common::*;
-use steve_store::{ItemPatch, NewBot, NewItem, WS};
+use steve_store::{ItemPatch, LifecycleWrite, NewBot, NewItem, StoreError, WS};
 
 fn status_marks(t: &T, item: &str) -> Vec<(Option<String>, Option<String>)> {
     t.store
@@ -67,7 +67,34 @@ fn create_and_each_status_change_leave_one_mark() {
     set(Some("wait"), None); // unchanged
     set(None, Some("y")); // no status
     set(Some("run"), None);
-    set(Some("done"), Some("z"));
+    // a finish is a lifecycle step only: a plain patch to done is refused and leaves no mark
+    let refused = t.store.items().patch(
+        &i,
+        &ItemPatch {
+            status: Some("done".into()),
+            ..Default::default()
+        },
+    );
+    assert!(
+        matches!(refused, Err(StoreError::Conflict(_))),
+        "{refused:?}"
+    );
+    set(None, Some("z"));
+    t.store
+        .transaction(|tx| {
+            steve_store::lifecycle_write_in(
+                tx,
+                &i,
+                &LifecycleWrite {
+                    phase: "closed".into(),
+                    cycle: 1,
+                    outcome: Some("completed".into()),
+                    status: Some("done".into()),
+                    ..Default::default()
+                },
+            )
+        })
+        .unwrap();
     assert_eq!(
         status_marks(&t, &i),
         [

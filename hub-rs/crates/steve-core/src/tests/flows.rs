@@ -874,10 +874,22 @@ fn item_actions() {
         .item_action(&i.id, ItemAction::Unarchive, "me")
         .unwrap();
     k.core.item_action(&i.id, ItemAction::Drop, "me").unwrap();
+    // a cancel is a request: the running turn is stopped, the close follows its end
+    assert!(k.wait(|| k.rt.st().cancelled.contains(&s.id)));
+    k.rt.end_turn(&k.core, &s.id, "cancelled", None);
+    assert_eq!(k.phase(&i.id), "closed");
     assert_eq!(k.db().session(&s.id).unwrap().unwrap().status, "ended");
     assert!(k.rt.st().released.contains(&s.id));
+    // reopening a closed item is an explicit new cycle, waiting for what to do
     k.core.item_action(&i.id, ItemAction::Reopen, "me").unwrap();
-    assert_eq!(k.status(&i.id).0, "run");
+    assert_eq!(k.phase(&i.id), "ready");
+    assert_eq!(k.db().item(&i.id).unwrap().unwrap().cycle, 2);
+    assert_eq!(last_session(&k, &i.id).no, 1, "nothing starts by itself");
+    // your next message starts the cycle, in a new session
+    k.core
+        .supplement(&i.id, "接着做", crate::SupplementMode::Auto, &[])
+        .unwrap();
+    assert_eq!(k.phase(&i.id), "active");
     assert_eq!(
         last_session(&k, &i.id).no,
         2,
@@ -1093,6 +1105,9 @@ fn dependencies_block_and_start_when_done() {
     k.core.tool_deliver(&sa, "好", &[], &[], &[]).unwrap();
     let acc = k.db().decisions_of_item(&a.id).unwrap().pop().unwrap();
     k.core.resolve(&acc.id, "pass", "", "me").unwrap();
+    // the close waits for the turn that delivered
+    assert_eq!(k.status(&b.id).0, "block");
+    k.rt.end_turn(&k.core, &sa.id, "end_turn", None);
     assert_eq!(k.status(&b.id).0, "run");
     let sb = only_session(&k, &b.id);
     assert!(k.rt.prompts_of(&sb.id)[0].ends_with(&format!(

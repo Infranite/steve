@@ -129,14 +129,10 @@ impl steve_mail::DraftHooks for MailDraftHooks {
         let (c, id) = (self.0.clone(), item_id.to_string());
         let run = move || {
             // “草稿即交付”: only an item that is still open is finished by its mail
-            let open = c
-                .store()
-                .item(&id)
-                .ok()
-                .flatten()
-                .is_some_and(|i| !matches!(i.status.as_str(), "done" | "drop"));
-            if open && let Err(e) = c.finish_item(&id, "邮件已发出") {
-                tracing::warn!(item = %id, "mail sent, finish: {e}");
+            // the mail going out is the item's result: a completion request with it as the evidence
+            // (the lifecycle ignores it for a closed item and still waits for the item's turns)
+            if let Err(e) = c.module_complete(&id, "邮件已发出") {
+                tracing::warn!(item = %id, "mail sent, completion: {e}");
             }
         };
         match tokio::runtime::Handle::try_current() {
@@ -188,7 +184,8 @@ impl steve_github::core::ItemCore for GhItems {
     }
     async fn finish(&self, _ws: &str, item_id: &str, now: &str) -> Result<(), String> {
         let (c, id, now) = (self.0.clone(), item_id.to_string(), now.to_string());
-        blocking(move || c.finish_item(&id, &now).map_err(|e| e.to_string())).await
+        // the module's wrap-up of an accepted result is done (never a close by itself)
+        blocking(move || c.module_done(&id, &now).map_err(|e| e.to_string())).await
     }
     async fn fail(&self, _ws: &str, item_id: &str, why: &str) -> Result<(), String> {
         let (c, id, why) = (self.0.clone(), item_id.to_string(), why.to_string());

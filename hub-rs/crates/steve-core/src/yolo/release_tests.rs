@@ -122,9 +122,14 @@ fn own_steve_is_released_after_the_cool_down_elsewhere_stays_with_you() {
     assert_eq!(t.decision(&d).result["approved"], true);
     assert_eq!(t.decision(&d).result["decided_by"], "yolo");
     assert!(t.kit.wait(|| outcome(&t, &d) == "released"));
+    // a release is evidence for a closing, never a close by itself: no delivery is waiting here
+    let i = t.kit.db().item(&item).unwrap().unwrap();
+    assert_eq!((i.phase.as_str(), i.status.as_str()), ("active", "run"));
+    let ops = t.kit.db().store().items().operations(&item, 1).unwrap();
     assert!(
-        t.kit
-            .wait(|| t.kit.db().item(&item).unwrap().unwrap().status == "done")
+        ops.iter()
+            .any(|o| o.kind == "release" && !o.required && o.status == "succeeded"),
+        "{ops:?}"
     );
 
     let other = tempfile::tempdir().unwrap();
@@ -274,8 +279,19 @@ fn a_failed_release_goes_back_once_and_two_yolo_failures_trip_b1() {
         t.clock.advance(181_000);
         t.engine.tick();
         assert_eq!(t.decision(&d).result["decided_by"], "yolo", "release {n}");
-        assert!(t.kit.wait(|| open_fail(&t, &item).is_some()));
-        t.engine.consider(&open_fail(&t, &item).unwrap()).unwrap();
+        // the failure card may already be taken up by the same tick that started the release
+        let any_fail = || {
+            t.kit
+                .db()
+                .decisions_of_item(&item)
+                .unwrap()
+                .into_iter()
+                .any(|d| d.kind == "fail")
+        };
+        assert!(t.kit.wait(any_fail));
+        if let Some(f) = open_fail(&t, &item) {
+            t.engine.consider(&f).unwrap();
+        }
     }
     let p = t.paused().expect("B1 tripped");
     assert_eq!(p["code"], "B1");

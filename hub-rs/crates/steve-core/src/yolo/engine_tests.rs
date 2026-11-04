@@ -255,6 +255,20 @@ fn an_accept_with_passing_checks_passes_and_without_checks_is_reworked() {
         "改好了\n\n检查：✓ cargo test；✓ cargo clippy",
         &["pass", "rework"],
     );
+    // the card answers a delivery: the result is frozen and waits for this acceptance
+    t.kit
+        .core
+        .tx()
+        .lc_request_complete(
+            &item,
+            "bot",
+            crate::cycle::Policy::Human,
+            false,
+            "做完了，请验收",
+            Some(d.clone()),
+            vec![],
+        )
+        .unwrap();
     let a = t.engine.consider(&d).unwrap().unwrap();
     assert_eq!(
         (a.outcome.as_str(), a.rule.as_str()),

@@ -27,6 +27,9 @@ pub fn emit_item_done(
         bot_id: item.bot_id.clone(),
         project_id: item.project_id.clone(),
         source: serde_json::to_value(&item.source)?,
+        cycle: Some(item.cycle),
+        revision: Some(item.revision),
+        acceptance: item.acceptance.clone(),
     };
     Ok(outbox::emit(
         tx,

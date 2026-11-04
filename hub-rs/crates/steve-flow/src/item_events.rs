@@ -134,6 +134,9 @@ fn build(
         bot_id: bot,
         project_id: project,
         source,
+        cycle: None,
+        revision: None,
+        acceptance: None,
     };
     describe(
         c,

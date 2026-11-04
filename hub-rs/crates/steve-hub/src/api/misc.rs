@@ -92,6 +92,7 @@ async fn compute_state(st: &AppState, c: Ctx) -> Result<Value, ApiError> {
     let web_version = crate::web::web_version(&st.cfg);
     let domain = st.domain.clone();
     let hold = domain.hold_status().await?;
+    let lifecycles = domain.lifecycle_views(&c.ws).await?;
     // the read cursor is written on the first look, so it goes through the writer first
     let ws = c.ws.clone();
     let seen = st.write(move |r| Ok(crate::notify::seen(r, &ws)?)).await?;
@@ -106,7 +107,17 @@ async fn compute_state(st: &AppState, c: Ctx) -> Result<Value, ApiError> {
         }
         out.insert("workspaces".into(), objs(r.workspaces_of_user(&c.me)?));
         let t0 = std::time::Instant::now();
-        out.insert("items".into(), objs(super::summaries(r, w)?));
+        let mut items = super::summaries(r, w)?;
+        for i in &mut items {
+            if let Some(l) = i
+                .get("id")
+                .and_then(Value::as_str)
+                .and_then(|id| lifecycles.get(id))
+            {
+                i.insert("lifecycle".into(), l.clone());
+            }
+        }
+        out.insert("items".into(), objs(items));
         let t_items = t0.elapsed();
         out.insert(
             "decisions".into(),

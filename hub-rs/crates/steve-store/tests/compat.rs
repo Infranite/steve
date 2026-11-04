@@ -145,10 +145,15 @@ fn released_migrations_are_frozen() {
         .filter(|n| n.ends_with(".sql"))
         .collect();
     files.sort();
+    // one NNN.sql per migration; parts of one (027_items.sql) are locked too
+    let numbered = files
+        .iter()
+        .filter(|f| f.len() == "000.sql".len() && f[..3].bytes().all(|b| b.is_ascii_digit()))
+        .count();
     assert_eq!(
-        files.len() as i64,
+        numbered as i64,
         db::SCHEMA_VERSION,
-        "one file per migration"
+        "one NNN.sql per migration"
     );
     assert_eq!(
         locked.iter().map(|(f, _)| *f).collect::<Vec<_>>(),

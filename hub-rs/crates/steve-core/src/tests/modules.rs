@@ -112,6 +112,10 @@ async fn created_and_dropped_reach_every_hook_in_registration_order() {
         ["a created ST-1 run", "b created ST-1 run"]
     );
     k.core.item_action(&i.id, ItemAction::Drop, "me").unwrap();
+    // the cancel stops the running turn; the close (and the hooks) follow its end
+    let sid = k.db().sessions_of_item(&i.id).unwrap()[0].id.clone();
+    assert!(k.wait(|| k.rt.st().cancelled.contains(&sid)));
+    k.rt.end_turn(&k.core, &sid, "cancelled", None);
     assert_eq!(
         until(&log, 4).await[2..],
         ["a dropped ST-1 drop", "b dropped ST-1 drop"]
@@ -513,17 +517,32 @@ fn undo_asks_the_module_of_the_decision_first_and_its_refusal_changes_nothing() 
     let id = k.item("run", "交付与验收", None);
     let s = k.session(&id, "idle");
     let d = k.decision(&id, Some(&s), "accept", "mod_x", &["pass", "rework"]);
+    k.core
+        .tx()
+        .lc_request_complete(
+            &id,
+            "dev",
+            crate::cycle::Policy::Human,
+            false,
+            "交付",
+            Some(d.clone()),
+            vec![],
+        )
+        .unwrap();
+    // the delivering turn still runs, so the accepted result waits and its acceptance can be undone
+    k.rt.st().turning.insert(s.clone());
     k.core.resolve(&d, "pass", "", "me").unwrap();
-    assert_eq!(k.status(&id).0, "done");
+    assert_eq!(k.phase(&id), "closing");
     let e = k.core.undo_decision(&d, "me").unwrap_err();
     assert_eq!(e.to_string(), "已经发出去了，撤不回");
-    assert_eq!(k.status(&id).0, "done");
+    assert_eq!(k.phase(&id), "closing");
     assert_eq!(k.db().decision(&d).unwrap().unwrap().status, "resolved");
     assert!(!k.timeline_texts(&id).contains(&"撤销了决定".to_string()));
     h.refuse.store(false, Ordering::SeqCst);
     k.core.undo_decision(&d, "me").unwrap();
     assert_eq!(k.status(&id).0, "wait");
     assert_eq!(k.db().decision(&d).unwrap().unwrap().status, "open");
+    k.rt.st().turning.remove(&s);
     assert_eq!(
         logged(&log),
         [
@@ -533,6 +552,7 @@ fn undo_asks_the_module_of_the_decision_first_and_its_refusal_changes_nothing() 
     );
     /* a decision of another subject type is not the module's */
     let x = k.delivered(false);
+    k.rt.st().turning.insert(x.session.clone());
     k.core.resolve(&x.decision, "pass", "", "me").unwrap();
     k.core.undo_decision(&x.decision, "me").unwrap();
     assert_eq!(logged(&log).len(), 2);
@@ -632,4 +652,121 @@ async fn claude_cli_falls_back_down_the_tier_and_reports_total_cost() {
         .await
         .unwrap_err();
     assert_eq!(e, "没有可用的模型");
+}
+
+struct Boom {
+    on: &'static str,
+}
+
+#[async_trait]
+impl ItemHooks for Boom {
+    fn name(&self) -> &'static str {
+        "boom"
+    }
+    async fn on_accepted(&self, _: &Item) -> Option<Takeover> {
+        assert_ne!(self.on, "accepted", "boom");
+        None
+    }
+    async fn on_finished(&self, _: &Item) {
+        assert_ne!(self.on, "finished", "boom");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_observer_that_fails_changes_no_outcome_and_stops_no_other_hook() {
+    let k = Kit::new();
+    let log = Log::default();
+    attach(&k, |r| {
+        r.item_hooks(Box::new(Boom { on: "finished" }))
+            .item_hooks(Hook::new("b", false, &log));
+    });
+    let x = k.delivered(false);
+    k.core.resolve(&x.decision, "pass", "", "me").unwrap();
+    let got = until(&log, 2).await;
+    assert_eq!(
+        got,
+        [
+            format!("b accepted {} run", x.id),
+            format!("b finished {} done", x.id)
+        ]
+    );
+    let i = k.db().item(&x.id).unwrap().unwrap();
+    assert_eq!(
+        (
+            i.phase.as_str(),
+            i.outcome.as_deref(),
+            i.acceptance.as_deref()
+        ),
+        ("closed", Some("completed"), Some("human"))
+    );
+    // the worker lives on: the next item's hooks still run
+    let y = k.delivered(false);
+    k.core.resolve(&y.decision, "pass", "", "me").unwrap();
+    assert_eq!(until(&log, 4).await.len(), 4);
+    assert_eq!(k.phase(&y.id), "closed");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_consultation_that_dies_is_no_confirmation() {
+    let k = Kit::new();
+    let log = Log::default();
+    attach(&k, |r| {
+        r.item_hooks(Box::new(Boom { on: "accepted" }))
+            .item_hooks(Hook::new("b", false, &log));
+    });
+    let x = k.delivered(false);
+    k.core.resolve(&x.decision, "pass", "", "me").unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(k.phase(&x.id), "closing");
+    let ops = k.db().store().items().operations(&x.id, 1).unwrap();
+    assert_eq!(
+        ops.iter()
+            .map(|o| (o.kind.as_str(), o.status.as_str()))
+            .collect::<Vec<_>>(),
+        [("hooks.accepted", "pending")]
+    );
+    assert_eq!(
+        k.core.lifecycle_view(&x.id).unwrap()["closing"]["waiting"],
+        json!(["operation"])
+    );
+    // the hook worker survived it
+    let y = new_item(&k, "下一件");
+    assert_eq!(until(&log, 1).await, [format!("b created {} run", y.id)]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn after_a_crash_before_the_hooks_were_recorded_they_are_asked_before_the_close() {
+    let k = Kit::new();
+    let log = Log::default();
+    attach(&k, |r| {
+        r.item_hooks(Hook::new("gh", true, &log));
+    });
+    let x = k.delivered(false);
+    // the accepted closing was written, then the Hub died before the consultation was recorded
+    let i = k.db().item(&x.id).unwrap().unwrap();
+    let mut c = crate::cycle::closing_of(&i).unwrap();
+    c.accepted = true;
+    k.db()
+        .exec(
+            "UPDATE items SET closing = ? WHERE id = ?",
+            &[
+                &serde_json::to_string(&c).unwrap() as &dyn rusqlite::ToSql,
+                &x.id,
+            ],
+        )
+        .unwrap();
+    k.core.recover().unwrap();
+    assert_eq!(
+        k.core.lifecycle_tick().unwrap(),
+        0,
+        "never closed over the missing consultation"
+    );
+    assert_eq!(until(&log, 1).await, [format!("gh accepted {} run", x.id)]);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    // gh took the wrap-up over: closed once it says so
+    assert_eq!(k.phase(&x.id), "closing");
+    k.core.lifecycle_tick().unwrap();
+    assert_eq!(logged(&log).len(), 1, "asked once");
+    k.core.module_done(&x.id, "PR 已合并").unwrap();
+    assert_eq!(k.phase(&x.id), "closed");
 }

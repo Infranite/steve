@@ -211,79 +211,178 @@ async fn item_of(e: &Env, sid: &str) -> String {
         .to_string()
 }
 
+async fn lifecycle(e: &Env, iid: &str) -> Value {
+    let (s, v) = e.call("GET", &format!("/api/items/{iid}"), None).await;
+    assert_eq!(s, 200, "{v}");
+    v["lifecycle"].clone()
+}
+
+async fn command(e: &Env, iid: &str, body: Value) -> (u16, Value) {
+    e.call("POST", &format!("/api/items/{iid}/lifecycle"), Some(body))
+        .await
+}
+
 #[tokio::test(flavor = "multi_thread")]
-async fn pause_finish_undo_drop_and_reopen() {
+async fn pause_finish_drop_and_new_cycles() {
     let e = start().await;
     let sid = item(&e, "慢慢做 @sleep 20000").await;
     let iid = item_of(&e, &sid).await;
+    assert_eq!(lifecycle(&e, &iid).await["phase"], "active");
 
-    // mark done in the middle of a turn: the turn stops, the item is done
+    // mark done in the middle of a turn: the request returns at once, the turn is stopped outside the
+    // lock, and the close commits once it stopped
     let (s, v) = act(&e, &iid, "finish").await;
     assert_eq!(s, 200, "{v}");
-    assert_eq!(
-        (v["status"].as_str(), v["now"].as_str()),
-        (Some("done"), Some("你标记了完成"))
-    );
     assert!(
         until(10, || async { e.session(&sid).await["busy"] == false }).await,
         "the running turn is cancelled"
     );
-    let (s, v) = act(&e, &iid, "finish").await;
-    assert_eq!(s, 409, "a finished item can't be finished again: {v}");
-
-    // the toast's undo: back in progress, the cut-off turn continues
-    let before = e.prompts().len();
-    let (s, v) = act(&e, &iid, "unfinish").await;
-    assert_eq!(s, 200, "{v}");
-    assert_eq!(v["status"], "run", "{v}");
     assert!(
-        until(10, || async { e.prompts().len() > before }).await,
-        "the agent is told to go on"
+        until(15, || async {
+            lifecycle(&e, &iid).await["phase"] == "closed"
+        })
+        .await,
+        "closed once the turn stopped: {}",
+        lifecycle(&e, &iid).await
     );
-    assert!(e.prompts().last().unwrap().contains("继续这个事项。"));
-    let (s, v) = act(&e, &iid, "unfinish").await;
-    assert_eq!(s, 409, "only right after a finish: {v}");
-
-    // pause and resume
-    let (s, v) = act(&e, &iid, "pause").await;
-    assert_eq!((s, v["status"].as_str()), (200, Some("pause")), "{v}");
-    let (s, v) = act(&e, &iid, "resume").await;
-    assert_eq!((s, v["status"].as_str()), (200, Some("run")), "{v}");
-
-    // drop, then reopen
-    let (s, v) = act(&e, &iid, "drop").await;
-    assert_eq!((s, v["status"].as_str()), (200, Some("drop")), "{v}");
-    let (s, v) = act(&e, &iid, "finish").await;
-    assert_eq!(s, 409, "a dropped item can't be marked done: {v}");
-    let before = e.prompts().len();
-    let (s, v) = act(&e, &iid, "reopen").await;
-    assert_eq!((s, v["status"].as_str()), (200, Some("run")), "{v}");
-
-    assert!(
-        until(10, || async { e.prompts().len() > before }).await,
-        "reopening goes on"
+    let l = lifecycle(&e, &iid).await;
+    assert_eq!(
+        (
+            l["outcome"].as_str(),
+            l["acceptance"].as_str(),
+            l["cycle"].as_i64()
+        ),
+        (Some("completed"), Some("human"), Some(1)),
+        "{l}"
     );
+    let (_, v) = e.call("GET", &format!("/api/items/{iid}"), None).await;
+    assert_eq!(
+        (v["status"].as_str(), v["now"].as_str()),
+        (Some("done"), Some("你标记了完成"))
+    );
+    assert_eq!(v["cycles"].as_array().map(Vec::len), Some(1), "{v}");
+    let (_, state) = e.call("GET", "/api/state", None).await;
+    let row = state["items"]
+        .as_array()
+        .and_then(|xs| xs.iter().find(|x| x["id"] == iid.as_str()))
+        .expect("item in state");
+    assert_eq!(row["lifecycle"]["phase"], "closed", "{row}");
 
-    // a paused item marked done comes back paused on undo, without prodding the agent
-    let (_, _) = act(&e, &iid, "pause").await;
+    // a closed cycle: no second finish, no undo, no resume, no message, no supplement
+    for a in ["finish", "unfinish", "resume"] {
+        let (s, v) = act(&e, &iid, a).await;
+        assert_eq!(s, 409, "{a} on a closed item: {v}");
+    }
+    let (s, v) = e
+        .call(
+            "POST",
+            &format!("/api/sessions/{sid}/messages"),
+            Some(json!({"text": "还有一件"})),
+        )
+        .await;
+    assert_eq!(s, 409, "{v}");
+    assert_eq!(v["error"], "这个事项已经结束了，需要时先新建周期", "{v}");
+    let (s, v) = e
+        .call(
+            "POST",
+            &format!("/api/items/{iid}/supplement"),
+            Some(json!({"text": "补充"})),
+        )
+        .await;
+    assert_eq!(s, 409, "{v}");
+
+    // the command API: version checked, the answer carries the lifecycle to refresh from
+    let (s, v) = command(
+        &e,
+        &iid,
+        json!({"command": "new_cycle", "expected_cycle": 1, "expected_revision": 9}),
+    )
+    .await;
+    assert_eq!(s, 409, "{v}");
+    assert_eq!(v["lifecycle"]["phase"], "closed", "{v}");
+    let (s, v) = command(&e, &iid, json!({"command": "new_cycle"})).await;
+    assert_eq!(s, 400, "versions are required: {v}");
+    let rev = l["revision"].as_i64().unwrap();
     let n = e.prompts().len();
-    let (s, v) = act(&e, &iid, "finish").await;
-    assert_eq!((s, v["status"].as_str()), (200, Some("done")), "{v}");
-    let (s, v) = act(&e, &iid, "unfinish").await;
-    assert_eq!((s, v["status"].as_str()), (200, Some("pause")), "{v}");
+    let (s, v) = command(
+        &e,
+        &iid,
+        json!({"command": "new_cycle", "expected_cycle": 1, "expected_revision": rev}),
+    )
+    .await;
+    assert_eq!(s, 200, "{v}");
+    let l = &v["item"]["lifecycle"];
+    assert_eq!(
+        (
+            l["phase"].as_str(),
+            l["cycle"].as_i64(),
+            l["revision"].as_i64()
+        ),
+        (Some("ready"), Some(2), Some(0)),
+        "{v}"
+    );
+    // without a goal it waits for you: nothing is sent to the agent
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(e.prompts().len(), n);
-    let (_, tl) = e.call("GET", &format!("/api/items/{iid}"), None).await;
-    let texts: Vec<&str> = tl["timeline"]
+
+    // pause and resume keep the phase
+    let (s, v) = act(&e, &iid, "pause").await;
+    assert_eq!((s, v["status"].as_str()), (200, Some("pause")), "{v}");
+    let (s, _) = act(&e, &iid, "resume").await;
+    assert_eq!(s, 200);
+    assert_eq!(lifecycle(&e, &iid).await["phase"], "ready");
+
+    // fail needs a reason; drop is a cancel: nothing runs, it closes at once
+    let (s, v) = command(
+        &e,
+        &iid,
+        json!({"command": "fail", "expected_cycle": 2, "expected_revision": 0}),
+    )
+    .await;
+    assert_eq!(s, 400, "{v}");
+    assert_eq!(lifecycle(&e, &iid).await["phase"], "ready");
+    let (s, v) = act(&e, &iid, "drop").await;
+    assert_eq!((s, v["status"].as_str()), (200, Some("drop")), "{v}");
+    let l = lifecycle(&e, &iid).await;
+    assert_eq!(
+        (l["phase"].as_str(), l["outcome"].as_str()),
+        (Some("closed"), Some("cancelled")),
+        "{l}"
+    );
+    let (s, v) = act(&e, &iid, "finish").await;
+    assert_eq!(s, 409, "a dropped item can't be marked done: {v}");
+
+    // reopen is a new cycle with a goal from the same rules; the earlier cycles stay as they closed
+    let (s, v) = command(
+        &e,
+        &iid,
+        json!({"command": "new_cycle", "expected_cycle": 2, "expected_revision": 0, "goal": "再做一次"}),
+    )
+    .await;
+    assert_eq!(s, 200, "{v}");
+    assert!(
+        until(10, || async {
+            e.prompts().iter().any(|p| p.contains("再做一次"))
+        })
+        .await,
+        "a new cycle with a goal starts the work"
+    );
+    assert!(
+        until(10, || async {
+            lifecycle(&e, &iid).await["phase"] == "active"
+        })
+        .await,
+        "{}",
+        lifecycle(&e, &iid).await
+    );
+    let (_, v) = e.call("GET", &format!("/api/items/{iid}"), None).await;
+    let cycles: Vec<(i64, &str)> = v["cycles"]
         .as_array()
         .unwrap()
         .iter()
-        .filter_map(|t| t["text"].as_str())
+        .map(|c| (c["cycle"].as_i64().unwrap(), c["outcome"].as_str().unwrap()))
         .collect();
-    assert!(
-        texts.contains(&"标记完成") && texts.contains(&"撤销了标记完成"),
-        "{texts:?}"
-    );
+    assert_eq!(cycles, [(1, "completed"), (2, "cancelled")]);
 
     workspace_is_named_never_guessed(&e).await;
 }

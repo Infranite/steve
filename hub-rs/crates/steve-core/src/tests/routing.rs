@@ -327,7 +327,11 @@ async fn a4a_an_item_goes_back_into_the_conversation() {
         .reroute(WS, &ms[1].id, RerouteTo::Inline)
         .await
         .unwrap();
-    assert_eq!(h.item.as_ref().unwrap().status, "drop");
+    // the item is being cancelled: its running turn is stopped, the close follows the turn's end
+    assert_eq!(h.item.as_ref().unwrap().phase, "closing");
+    until(|| k.rt.st().cancelled.contains(&s.id)).await;
+    k.rt.end_turn(&k.core, &s.id, "cancelled", None);
+    assert_eq!(k.db().item(&id).unwrap().unwrap().status, "drop");
     assert!(k.rt.st().released.contains(&s.id) || k.rt.st().cancelled.contains(&s.id));
     assert!(
         k.timeline_texts(&id)
@@ -443,6 +447,13 @@ async fn while_research_runs_items_go_ahead_questions_queue_and_the_fourth_is_re
         .clone();
     let m6 = k.core.say(WS, "别建事项，直接在这告诉我", &[]).unwrap();
     until(|| route_opt(&k, &m6).is_some_and(|l| l.reply_id.is_some())).await;
+    for s in k.db().sessions_of_item(&item).unwrap() {
+        if k.rt.st().turning.contains(&s.id) {
+            until(|| k.rt.st().cancelled.contains(&s.id)).await;
+            k.rt.end_turn(&k.core, &s.id, "cancelled", None);
+        }
+    }
+    k.core.lifecycle_tick().unwrap();
     assert_eq!(k.db().item(&item).unwrap().unwrap().status, "drop");
     /* stop the running one: its partial answer stays, marked */
     assert!(k.core.stop(WS).unwrap());

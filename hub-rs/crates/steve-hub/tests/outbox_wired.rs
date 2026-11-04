@@ -196,7 +196,15 @@ async fn finishing_through_the_api_runs_an_item_flow_once_through_the_outbox() {
         )
         .await;
     assert_eq!(s, 200, "{v}");
-    assert_eq!(v["status"], "done", "{v}");
+    // the request returns at once; with the modules' hooks wired the close commits once they answered
+    assert_eq!(v["phase"], "closing", "{v}");
+    assert!(
+        until(10, || e.one(
+            "SELECT count(*) FROM items WHERE id = 'ST-90' AND phase = 'closed' AND status = 'done'"
+        ) == 1)
+        .await,
+        "closed"
+    );
     assert_eq!(
         e.one("SELECT count(*) FROM outbox_events WHERE topic = 'work.item.done'"),
         1

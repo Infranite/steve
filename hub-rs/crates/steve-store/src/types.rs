@@ -346,6 +346,20 @@ pub struct Item {
     pub snooze: Option<Snooze>,
     pub source: (String, String),
     pub parent: Option<Parent>,
+    /// The lifecycle (migration 027): `ready` | `active` | `closing` | `closed`. Written only by the
+    /// core's lifecycle ([`crate::lifecycle_write_in`]); `status` is its legacy projection.
+    pub phase: String,
+    pub cycle: i64,
+    /// The result revision within the cycle (0: nothing delivered yet).
+    pub revision: i64,
+    /// `completed` | `failed` | `cancelled` | `superseded` once closed.
+    pub outcome: Option<String>,
+    /// `human` | `automatic` | `waived` once closed completed (`None` for migrated history).
+    pub acceptance: Option<String>,
+    /// The closing intent while `phase = closing`.
+    pub closing: Option<serde_json::Value>,
+    pub closed_at: Option<i64>,
+    pub closed_reason: Option<String>,
 }
 
 impl Item {
@@ -375,6 +389,14 @@ impl Item {
             snooze: json_col(r, "snooze", None)?,
             source: json_col(r, "source", default_source())?,
             parent: json_col(r, "parent", None)?,
+            phase: r.get("phase")?,
+            cycle: r.get("cycle")?,
+            revision: r.get("revision")?,
+            outcome: r.get("outcome")?,
+            acceptance: r.get("acceptance")?,
+            closing: json_col(r, "closing", None)?,
+            closed_at: r.get("closed_at")?,
+            closed_reason: r.get("closed_reason")?,
         })
     }
 }
