@@ -281,6 +281,18 @@ pub fn batch_card(
         .optional()?)
 }
 
+/// Marks the newest resolved card of a batch (`subject`, `kind`) as acted on: recovery after a
+/// restart redoes only answers not acted on yet.
+pub fn batch_card_acted(c: &Connection, subject: &str, kind: &str) -> Result<()> {
+    c.execute(
+        "UPDATE decisions SET result = json_set(coalesce(result, '{}'), '$.acted', json('true'))
+          WHERE id = (SELECT id FROM decisions WHERE subject_type = 'delivery_batch' AND subject_id = ?
+                       AND kind = ? AND status = 'resolved' ORDER BY created DESC LIMIT 1)",
+        params![subject, kind],
+    )?;
+    Ok(())
+}
+
 pub fn units_of(c: &Connection, lane: &str) -> Result<Vec<LaneUnit>> {
     let mut st = c.prepare_cached("SELECT * FROM lane_units WHERE lane_id = ? ORDER BY no")?;
     let v = st

@@ -372,3 +372,53 @@ fn a_failed_release_without_its_card_gets_one_after_a_restart() {
         .count();
     assert_eq!(n, 1, "one card, however often it recovers");
 }
+
+#[test]
+fn a_retry_that_failed_again_before_a_restart_asks_again_instead_of_retrying() {
+    let (k, _, req, _) = published("steve/st-6");
+    let lane = k
+        .db()
+        .store()
+        .reader(|c| lanes::request_get(c, &req))
+        .unwrap()
+        .unwrap()
+        .lane_id;
+    let fails = |k: &Kit| {
+        k.db()
+            .decisions_open(WS)
+            .unwrap()
+            .into_iter()
+            .filter(|d| d.subject_type == "delivery_batch" && d.kind == "fail")
+            .collect::<Vec<_>>()
+    };
+    crate::lane::store::release_failed(k.db().store(), &lane, 1, "第一次").unwrap();
+    k.core.lane_recover();
+    let first = fails(&k).pop().expect("the first card");
+    // you said retry, the retry ran (the answer used up) and failed again, then the process stopped
+    k.db()
+        .decision_resolve(
+            &first.id,
+            serde_json::json!({"choice": "retry"}),
+            "resolved",
+            None,
+        )
+        .unwrap();
+    k.db()
+        .store()
+        .transaction(|tx| lanes::batch_card_acted(tx, &format!("lane:{lane}:1"), "fail"))
+        .unwrap();
+    crate::lane::store::release_failed(k.db().store(), &lane, 1, "第二次").unwrap();
+    k.core.lane_recover();
+    let open = fails(&k);
+    assert_eq!(open.len(), 1, "a new card for the new failure");
+    assert_eq!(open[0].draft, "第二次");
+    let unit = k
+        .db()
+        .store()
+        .reader(|c| lanes::units_of(c, &lane))
+        .unwrap()
+        .into_iter()
+        .find(|u| u.no == 1)
+        .unwrap();
+    assert_eq!(unit.state, "release_failed", "not retried without you");
+}

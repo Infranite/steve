@@ -1464,8 +1464,17 @@ impl Tx<'_> {
         /* the lane runs no release command of the project's own: one it would skip keeps the old path */
         let lane_can = match rule {
             Some(steve_store::DONE_MERGE) => cmd.is_empty(),
+            /* the repository's own cut-release, the one the lane runs in its batch: the same file, not
+             * one that only looks like it */
             Some(steve_store::DONE_TAG) => {
-                cut.is_file() && (cmd.is_empty() || Path::new(cmd).ends_with("ops/cut-release.py"))
+                let same = |c: &str| {
+                    let c = Path::new(&p.path).join(c);
+                    c.canonicalize()
+                        .ok()
+                        .zip(cut.canonicalize().ok())
+                        .is_some_and(|(a, b)| a == b)
+                };
+                cut.is_file() && (cmd.is_empty() || same(cmd))
             }
             _ => false,
         };

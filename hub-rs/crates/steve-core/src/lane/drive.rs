@@ -302,7 +302,13 @@ impl Core {
                     id: r.id.clone(),
                     head: r.head.clone(),
                     label: label(r),
-                    dir: r.dir.clone(),
+                    // its worktree, else its project's repository: the branch and commit live in both
+                    dir: [Some(&r.dir), r.repo.as_ref()]
+                        .into_iter()
+                        .flatten()
+                        .find(|d| Path::new(d).is_dir())
+                        .cloned()
+                        .unwrap_or_default(),
                     branch: r.branch.clone(),
                 })
                 .collect();
@@ -483,8 +489,10 @@ impl Core {
             .map(|r| r.id)
             .collect();
         if retry {
+            // the answer is used up with the step it allows: a restart after this does not retry again
             let _ = self.store().store().transaction(|tx| {
-                lanes::unit_set(tx, lane, unit as i64, "releasing", None, None, None)
+                lanes::unit_set(tx, lane, unit as i64, "releasing", None, None, None)?;
+                lanes::batch_card_acted(tx, &subject(lane, unit), "fail")
             });
             self.lane_release(lane, unit, &ids);
             return;
@@ -560,13 +568,18 @@ impl Core {
                             .ok()
                             .flatten();
                         match card {
-                            Some((status, result)) if status == "resolved" => {
+                            // answered and not yet acted on (an acted retry failed again: a new card)
+                            Some((status, result))
+                                if status == "resolved"
+                                    && result["acted"].as_bool() != Some(true) =>
+                            {
                                 let retry = result["choice"].as_str() == Some("retry");
                                 let (c, lane) = (self.clone(), l.id.clone());
                                 detach(move || c.lane_release_answered(&lane, no, retry));
                             }
-                            Some(_) => {} // waits for you
-                            None => {
+                            Some((status, _)) if status == "open" => {} // waits for you
+                            // none yet, or the last answer was used up by a retry that failed again
+                            _ => {
                                 let mine: Vec<LaneRequest> = reqs
                                     .iter()
                                     .filter(|r| r.released_in == Some(u.no))
