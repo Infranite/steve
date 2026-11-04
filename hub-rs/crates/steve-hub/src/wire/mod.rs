@@ -254,11 +254,17 @@ pub fn wire_with(cfg: &Arc<Config>, bus: &Bus, vars: Vars) -> Result<Wired, Back
         acp_stats::repair_codex(&stats_db, &codex_home).await;
     }));
     jobs.push(Box::pin(steve_stats::Refresher::new().run(db.clone())));
+    let price_url = crate::price_sync::url(vars("STEVE_PRICE_CATALOG_URL").as_deref());
+    jobs.push(Box::pin(crate::price_sync::run(
+        db.clone(),
+        price_url.clone(),
+    )));
     let module_routes = built
         .routes
         .merge(crate::api::stats::routes(crate::api::stats::StatsApi::new(
             db.clone(),
             bus.clone(),
+            price_url,
         )))
         .merge(crate::api::yolo::routes(engine.clone()));
     Ok(Wired {

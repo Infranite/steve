@@ -14,6 +14,7 @@ pub mod files;
 pub mod jobs;
 pub mod js;
 pub mod notify;
+pub mod price_sync;
 pub mod recovery;
 pub mod resume;
 pub mod settings;

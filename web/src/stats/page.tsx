@@ -12,7 +12,7 @@ import { st } from "@/store"
 import { Page, Segmented, Empty } from "@/ui"
 import { Select } from "@/view-shared"
 import { Unwired } from "@/unwired"
-import { stats, type Filter, type RangeKind } from "@/api/stats"
+import { stats, type Filter, type RangeKind, type Summary } from "@/api/stats"
 import { UsageKpis } from "@/stats/kpi"
 import { Trend } from "@/stats/trend"
 import { AgentSection, QualityHuman, Section, TimeSection, UsageSection } from "@/stats/tables"
@@ -20,7 +20,7 @@ import { ItemsTable } from "@/stats/items"
 import { CoreKpis, DrillPanel, FlowChart, StatusBars, type Drill } from "@/stats/overview"
 import { RunState } from "@/yolo/status"
 import { StatsItemView } from "@/stats/drill"
-import { fmtRange, fmtUsd, hhmm, useStats } from "@/stats/format"
+import { fmtN, fmtRange, fmtUsd, hhmm, time, useStats } from "@/stats/format"
 
 export function StatsRoute({ b, c }: { b?: string; c?: string }) {
   if (b === "items" && c) return <StatsItemView key={c} id={c} />
@@ -106,11 +106,7 @@ function StatsBody({ s, f, fkey, live, picked, setPicked, drill, setDrill }: { s
         <TimeSection s={s} f={f} fkey={fkey} live={live} range={range} />
         <Section k="usage" title="用量与费用" meta={range}>
           <UsageKpis s={s} prevName={PREV[f.range]} bySource={src.s === "ok" ? src.v.rows : undefined} />
-          {s.spend.unpriced_tokens > 0 && (
-            <div className="-mt-3 type-footnote text-muted-foreground" data-unpriced-note>
-              另有 {Object.keys(s.spend.unpriced).length} 个模型没有价格（{Object.keys(s.spend.unpriced).join("、") || "未知模型"}），它们的 tokens 不计入估算。<a href="#/settings/stats" className="text-blue hover:underline">去设置价格</a>
-            </div>
-          )}
+          <PriceNote spend={s.spend} />
           <Trend f={f} fkey={fkey} live={live} range={[s.range.from, s.range.to]} picked={picked} onPick={setPicked} />
           <UsageSection f={f} fkey={fkey} live={live} picked={picked} />
         </Section>
@@ -121,8 +117,30 @@ function StatsBody({ s, f, fkey, live, picked, setPicked, drill, setDrill }: { s
         </Section>
       </>}
       <footer className="border-t pt-4 type-footnote text-muted-foreground" data-stats-foot>
-        费用 = tokens × 价格表，是估算，不是账单；Kiro 和推理网关的实际计费未知。{since ? `token 明细从 ${since} 起记录` : "还没有 token 明细"}，之前只有会话级的适配器报价（下限{s.spend.by_source.backfill != null || s.usage.reported ? `，这段时间合计 ${fmtUsd(s.usage.reported)}` : ""}）。{s.since.gateway ? `网关调用从 ${s.since.gateway} 起记录。` : "网关调用从统计上线起记录。"}改价格后，历史估算随之变化。
+        费用 = tokens × 单价（先用价格表，表里没有的用 Models.dev），是估算，不是账单，实际以服务商账单为准；Kiro 和推理网关的实际计费未知。{since ? `token 明细从 ${since} 起记录` : "还没有 token 明细"}，之前只有会话级的适配器报价（下限{s.spend.by_source.backfill != null || s.usage.reported ? `，这段时间合计 ${fmtUsd(s.usage.reported)}` : ""}）。{s.since.gateway ? `网关调用从 ${s.since.gateway} 起记录。` : "网关调用从统计上线起记录。"}改价格表会重算历史估算；Models.dev 的价格变动从同步后的第二天起生效，已经统计的日子不变。
       </footer>
+    </div>
+  )
+}
+
+/** 费用下面一行：没有价格的模型（费用不完整，未计入的 tokens），以及单价来自哪里 */
+function PriceNote({ spend }: { spend: Summary["spend"] }) {
+  const unpriced = Object.keys(spend.unpriced)
+  const by = spend.priced_by ?? {}, c = spend.catalog
+  const md = by.models_dev ? `Models.dev${c?.synced ? `（${time(c.synced)} 同步）` : ""}` : ""
+  const from = by.table && md ? `价格表和 ${md}` : by.table ? "价格表" : md ? ` ${md}` : ""
+  if (!spend.unpriced_tokens && !from) return null
+  return (
+    <div className="-mt-3 flex flex-col gap-0.5 type-footnote text-muted-foreground" data-price-note>
+      {spend.unpriced_tokens > 0 && (
+        <div data-unpriced-note>
+          <span className="text-attention">费用未完整估算</span>：{unpriced.length} 个模型没有价格（{unpriced.join("、") || "未知模型"}），{fmtN(spend.unpriced_tokens)} tokens 未计入。
+        </div>
+      )}
+      <div data-price-source>
+        {from && <>单价来自{from}{md && c?.error ? "，最近一次同步失败，用的是上次的价格" : ""}。</>}
+        <a href="#/settings/stats" className="text-blue hover:underline">管理价格</a>
+      </div>
     </div>
   )
 }

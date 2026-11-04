@@ -566,7 +566,7 @@ fn invariants_hold() {
         By::Harness,
         By::Day,
     ] {
-        let parts = breakdown(&rows, by, &prices);
+        let parts = breakdown(&rows, by, &steve_stats::PriceBook::new(prices.clone()));
         assert_eq!(
             parts.iter().map(|r| r.usage.total).sum::<i64>(),
             sm.usage.total

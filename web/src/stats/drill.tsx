@@ -38,7 +38,7 @@ function Drill({ d }: { d: ItemDetail }) {
     <div className="flex flex-col gap-12" data-drill>
       <div className="grid grid-cols-2 gap-6 sm:grid-cols-3 lg:grid-cols-6">
         <Kpi k="tokens" label="tokens" value={fmtN(u.total)} foot={u.hit_rate != null ? `缓存命中 ${fmtPct(u.hit_rate)}` : d.backfill_only ? "只有会话级报价" : ""} def="这件事项全生命周期的输入 + 输出 + 缓存读 + 缓存写。" />
-        <Kpi k="est" label="估算费用" badge={<Est />} value={u.total ? fmtUsd(u.est) : u.reported ? "≥" + fmtUsd(u.reported) : "—"} foot={u.unpriced_tokens ? `${fmtN(u.unpriced_tokens)} tokens 未定价` : u.reported ? `适配器报价 ${fmtUsd(u.reported)}` : ""} def="tokens × 价格表，是估算；回填的事项只有会话级的适配器报价（下限）。" />
+        <Kpi k="est" label="估算费用" badge={<Est />} value={u.total ? fmtUsd(u.est) : u.reported ? "≥" + fmtUsd(u.reported) : "—"} foot={u.unpriced_tokens ? `不完整：${fmtN(u.unpriced_tokens)} tokens 未定价` : u.reported ? `适配器报价 ${fmtUsd(u.reported)}` : ""} def="tokens × 单价（先价格表，再 Models.dev），是估算；未定价的 tokens 不计入；回填的事项只有会话级的适配器报价（下限）。" />
         <Kpi k="lead" label="前置" value={fmtMs(f.lead_ms ?? d.age_ms)} foot={f.lead_ms != null ? "新建到完成" : "还没完成，已经过去"} def="从新建到完成的时间；没完成时是到现在为止。" />
         <Kpi k="agent" label="Agent 工作" value={fmtMs(f.agent_ms)} foot={`${f.turns} 个回合`} def="这件事项所有回合时间的并集。" />
         <Kpi k="wait" label="等你" value={fmtMs(f.wait_ms)} foot={`${f.decisions} 个决定`} def="需要你处理的卡片挂着的时间的并集（YOLO 代办的不算）。" />

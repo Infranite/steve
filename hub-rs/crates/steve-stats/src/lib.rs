@@ -2,7 +2,8 @@
 //!
 //! The detail rows and the daily cube are written by `steve_store::Stats` (migration 15); this crate holds
 //! the pure parts every writer and reader shares: how adapters' token figures are brought to one
-//! convention ([`normalize`]), the price table and model matching ([`prices`]), and which local day a
+//! convention ([`normalize`]), the price table and model matching ([`prices`]) with the prices synced
+//! from Models.dev ([`catalog`]), and which local day a
 //! timestamp belongs to ([`day`]). On top of the stored rows: the per-item facts ([`items`]), their
 //! refresh and the cube rebuild ([`refresh`]), the one-off backfill from the older tables ([`backfill`])
 //! and every metric of stats.md §3 ([`metrics`]).
@@ -12,6 +13,7 @@
 //! `metrics::breakdown` on a read connection.
 
 pub mod backfill;
+pub mod catalog;
 pub mod day;
 pub mod items;
 pub mod metrics;
@@ -22,6 +24,8 @@ pub mod views;
 
 pub use day::{day, tz};
 pub use normalize::{RawUsage, normalize};
-pub use prices::{Price, Priced, base_model, default_prices, lookup, validate};
+pub use prices::{
+    Price, PriceBook, PriceSource, Priced, Quote, base_model, default_prices, lookup, validate,
+};
 pub use refresh::{Refresher, rebuild};
 pub use steve_store::Tokens;

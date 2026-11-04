@@ -1,6 +1,7 @@
 //! `/api/stats/*` on the wired Hub (stats.md ST5): parameter checks, the previous range, the price
 //! table (validation, audit, revisions), breakdowns adding up to the summary, and the coalesced
-//! `stats` SSE frames. Temp STEVE_HOME, adapters `/usr/bin/false`, no real host.
+//! `stats` SSE frames, and the Models.dev price sync against a catalog served on loopback. Temp
+//! STEVE_HOME, adapters `/usr/bin/false`, no real host.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -48,6 +49,10 @@ impl Env {
 }
 
 async fn start() -> Env {
+    start_with(&[]).await
+}
+
+async fn start_with(extra: &[(&str, String)]) -> Env {
     steve_modules::net::forbid_in_this_process();
     let home = tempfile::tempdir().expect("tmp");
     let h = home.path().to_path_buf();
@@ -74,6 +79,9 @@ async fn start() -> Env {
         ("STEVE_WEB_DIR", h.join("no-web").display().to_string()),
     ] {
         vars.insert(k.into(), v);
+    }
+    for (k, v) in extra {
+        vars.insert((*k).into(), v.clone());
     }
     let vars = Arc::new(vars);
     let get = {
@@ -399,4 +407,217 @@ async fn stats_routes() {
             .all(|w| w[1] - w[0] >= Duration::from_millis(4500)),
         "{at:?}"
     );
+}
+
+/// A Models.dev stand-in on loopback. `mode` 0 serves v1 (etag `"v1"`), 1 answers 500, 2 serves v2
+/// (GPT-5 input 1.25 → 3); a request carrying the current etag gets 304. Returns the URL and the
+/// `If-None-Match` values seen.
+async fn catalog_server(
+    mode: Arc<std::sync::atomic::AtomicUsize>,
+) -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
+    use axum::http::{HeaderMap, StatusCode, header};
+    use axum::response::IntoResponse;
+    let seen: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+    let s2 = seen.clone();
+    let app = axum::Router::new().route(
+        "/api.json",
+        axum::routing::get(move |h: HeaderMap| {
+            let (mode, seen) = (mode.clone(), s2.clone());
+            async move {
+                let inm = h
+                    .get(header::IF_NONE_MATCH)
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or_default()
+                    .to_string();
+                seen.lock().unwrap().push(inm.clone());
+                let (etag, gpt) = match mode.load(std::sync::atomic::Ordering::SeqCst) {
+                    1 => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+                    2 => ("\"v2\"", 3.0),
+                    _ => ("\"v1\"", 1.25),
+                };
+                if inm == etag {
+                    return StatusCode::NOT_MODIFIED.into_response();
+                }
+                let body = json!({
+                    "openai": {"id": "openai", "models": {
+                        "gpt-5": {"name": "GPT-5", "cost": {"input": gpt, "output": 10, "cache_read": 0.125}}
+                    }},
+                    "anthropic": {"id": "anthropic", "models": {
+                        "claude-opus-5-5": {"name": "Claude Opus 5.5", "cost": {"input": 99, "output": 99, "cache_read": 9, "cache_write": 9}}
+                    }}
+                });
+                ([(header::ETAG, etag)], axum::Json(body)).into_response()
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (format!("http://127.0.0.1:{port}/api.json"), seen)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn models_dev_prices() {
+    let mode = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (url, seen) = catalog_server(mode.clone()).await;
+    let e = start_with(&[("STEVE_PRICE_CATALOG_URL", url)]).await;
+    let now = steve_store::now();
+    let today = steve_stats::day(now, None);
+    let yesterday = steve_stats::day(now - 86_400_000, None);
+    let tomorrow = steve_stats::day(now + 86_400_000, None);
+    // 1M GPT-5 input yesterday and today, 1M Opus input today (the table has it: $4), an unknown model
+    {
+        let c = e.db();
+        c.execute_batch(&format!(
+            "INSERT INTO stat_daily (workspace_id, day, source, purpose, harness, model, input, output, cache_read, cache_write, hit_base, calls, turns, turn_ms, tools, tool_kinds)
+             VALUES ('default', '{yesterday}', 'agent', 'turn', 'codex', 'gpt-5', 1000000, 0, 0, 0, 0, 1, 1, 0, 0, '{{}}'),
+                    ('default', '{today}', 'agent', 'turn', 'codex', 'gpt-5', 1000000, 0, 0, 0, 0, 1, 1, 0, 0, '{{}}'),
+                    ('default', '{today}', 'agent', 'turn', 'claude-code', 'claude-opus-5-5', 1000000, 0, 0, 0, 0, 1, 1, 0, 0, '{{}}'),
+                    ('default', '{today}', 'agent', 'turn', 'claude-code', 'mystery-1', 500, 0, 0, 0, 0, 1, 1, 0, 0, '{{}}');"
+        ))
+        .expect("seed");
+    }
+    let est = |v: &Value| v["usage"]["est"].as_f64().unwrap_or(-1.0);
+
+    /* before any sync: GPT-5 is unpriced, not free */
+    let (_, v) = e.call("GET", "/api/stats/summary", None).await;
+    assert!((est(&v) - 4.0).abs() < 1e-9, "{}", v["spend"]);
+    assert_eq!(
+        v["spend"]["unpriced"],
+        json!({"gpt-5": 2_000_000, "mystery-1": 500})
+    );
+    let (_, p) = e.call("GET", "/api/stats/prices", None).await;
+    assert_eq!(
+        (&p["catalog"]["enabled"], &p["catalog"]["synced"]),
+        (&json!(true), &Value::Null)
+    );
+
+    /* the first sync prices GPT-5 on every day; the table keeps Opus at its own price */
+    let (s, r) = e
+        .call("POST", "/api/stats/prices/sync", Some(json!({})))
+        .await;
+    assert_eq!(
+        (s, &r["models"], &r["changed"]),
+        (200, &json!(2), &json!(2)),
+        "{r}"
+    );
+    let (_, v) = e.call("GET", "/api/stats/summary", None).await;
+    assert!((est(&v) - (4.0 + 2.5)).abs() < 1e-9, "{}", v["spend"]);
+    assert_eq!(v["spend"]["unpriced"], json!({"mystery-1": 500}));
+    assert_eq!(
+        v["spend"]["priced_by"],
+        json!({"models_dev": 2_000_000, "table": 1_000_000})
+    );
+    assert!(v["spend"]["catalog"]["synced"].as_i64().is_some());
+    let (_, p) = e.call("GET", "/api/stats/prices", None).await;
+    let model = |p: &Value, m: &str| {
+        p["models"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|x| x["model"] == m)
+            .cloned()
+            .unwrap_or(Value::Null)
+    };
+    let gpt = model(&p, "gpt-5");
+    assert_eq!(gpt["price"]["source"], "models_dev");
+    assert_eq!(gpt["price"]["match"], "openai/gpt-5");
+    // cache writes are not listed: priced as input, never as free
+    assert_eq!(gpt["price"]["cache_write"], json!(1.25));
+    assert_eq!(model(&p, "claude-opus-5-5")["price"]["source"], "table");
+    assert_eq!(
+        p["unpriced"],
+        json!([{"model": "mystery-1", "tokens": 500}])
+    );
+    let (_, b) = e.call("GET", "/api/stats/breakdown?by=model", None).await;
+    let row = |key: &str| {
+        b["rows"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|r| r["key"] == key)
+            .cloned()
+            .unwrap_or(Value::Null)
+    };
+    assert_eq!(
+        (&row("gpt-5")["priced"], &row("gpt-5")["price_source"]),
+        (&json!(true), &json!("models_dev"))
+    );
+    assert_eq!(row("mystery-1")["priced"], json!(false));
+
+    /* a failed sync keeps the last prices and says why */
+    mode.store(1, std::sync::atomic::Ordering::SeqCst);
+    let (s, r) = e
+        .call("POST", "/api/stats/prices/sync", Some(json!({})))
+        .await;
+    assert_eq!(s, 502, "{r}");
+    assert!(
+        r["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("继续使用上次同步的价格"),
+        "{r}"
+    );
+    let (_, p) = e.call("GET", "/api/stats/prices", None).await;
+    assert!(
+        p["catalog"]["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("500"),
+        "{p}"
+    );
+    assert!(p["catalog"]["synced"].as_i64().is_some());
+    let (_, v) = e.call("GET", "/api/stats/summary", None).await;
+    assert!((est(&v) - 6.5).abs() < 1e-9, "{}", v["spend"]);
+
+    /* unchanged upstream: a 304 on the stored etag, the error is cleared */
+    mode.store(0, std::sync::atomic::Ordering::SeqCst);
+    let (s, r) = e
+        .call("POST", "/api/stats/prices/sync", Some(json!({})))
+        .await;
+    assert_eq!((s, &r["unchanged"]), (200, &json!(true)), "{r}");
+    assert_eq!(
+        seen.lock().unwrap().last().map(String::as_str),
+        Some("\"v1\"")
+    );
+    let (_, p) = e.call("GET", "/api/stats/prices", None).await;
+    assert_eq!(p["catalog"]["error"], Value::Null);
+
+    /* a price change applies from tomorrow: the days already counted keep their estimate */
+    mode.store(2, std::sync::atomic::Ordering::SeqCst);
+    let (s, r) = e
+        .call("POST", "/api/stats/prices/sync", Some(json!({})))
+        .await;
+    assert_eq!((s, &r["changed"]), (200, &json!(1)), "{r}");
+    let (_, v) = e.call("GET", "/api/stats/summary", None).await;
+    assert!((est(&v) - 6.5).abs() < 1e-9, "{}", v["spend"]);
+    {
+        let c = e.db();
+        let book = steve_stats::PriceBook::new(vec![]).with_catalog(&c, None);
+        let at = |d: &str| book.quote("gpt-5", d).map(|q| q.price.input);
+        assert_eq!(
+            (at(&yesterday), at(&today), at(&tomorrow)),
+            (Some(1.25), Some(1.25), Some(3.0))
+        );
+    }
+
+    /* a row of the table overrides the catalog, on every day */
+    let (s, _) = e
+        .call(
+            "PUT",
+            "/api/stats/prices",
+            Some(json!({"prices": [
+                {"match": "claude-opus-5-5", "input": 4, "output": 20, "cache_read": 0.2, "cache_write": 5},
+                {"match": "gpt-5", "input": 0.5, "output": 4, "cache_read": 0.05, "cache_write": 0.5, "note": "代理折扣"}
+            ]})),
+        )
+        .await;
+    assert_eq!(s, 200);
+    let (_, v) = e.call("GET", "/api/stats/summary", None).await;
+    assert!((est(&v) - (4.0 + 1.0)).abs() < 1e-9, "{}", v["spend"]);
+    assert_eq!(v["spend"]["priced_by"], json!({"table": 3_000_000}));
 }
