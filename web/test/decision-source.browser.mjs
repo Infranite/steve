@@ -8,7 +8,7 @@ const base = process.env.STEVE_TEST_WEB || "http://127.0.0.1:5193"
 const shots = process.env.STEVE_TEST_SHOTS
 if (shots) mkdirSync(shots, { recursive: true })
 const badge = { space: "chan:sp1", space_id: "sp1", name: "地狱焚诀 Agent 交流群", kind: "group", dm: false, system: "feishu", provider: "飞书", has_external: false, member_count: 0, mode: "bot" }
-let out = "draft", decided = [], said = [], gate = null
+let out = "draft", decided = [], said = [], gate = null, late = false
 const messages = () => [
   { id: "m1", author: "me", text: "@李鹏翔 明天", item_id: null, meta: { chan: { message: "cm_in", sender: "李昊元" } }, created: Date.now() - 60000, reaction: out === "draft" ? { state: "ack", emoji: null, as_user: false, error: null, updated: 1 } : { state: "cleared", emoji: null, as_user: false, error: null, updated: 2 }, channel_message: null },
   { id: "m2", author: "steve", text: "这条消息看起来是发给李鹏翔的，而且没写完，你是想让我帮忙处理吗？", item_id: null, created: Date.now() - 50000,
@@ -28,8 +28,9 @@ try {
       if (u.pathname === "/api/decisions/dc1" && m === "POST") {
         decided.push(route.request().postDataJSON().choice)
         if (gate) await gate
+        if (late) return route.fulfill({ json: { id: "dc1", status: "resolved", result: { choice: "no" } } })
         if (out !== "draft") return route.fulfill({ status: 409, json: { error: "这个决定已经处理过了" } })
-        out = "discarded"
+        out = "discarded"; late = false
         return route.fulfill({ json: { id: "dc1", status: "resolved", result: { choice: "no" } } })
       }
       if (u.pathname === "/api/thread" && m === "POST") { said.push(route.request().postDataJSON().text); return route.fulfill({ json: { id: "u" + said.length } }) }
@@ -42,6 +43,9 @@ try {
     // the question's options are what the chat can reply, not buttons that speak in your conversation
     assert.equal(await page.locator("[data-ask-opt]").count(), 0)
     await page.locator("[data-ask-readonly]").getByText("这条是发给李鹏翔的，我不用处理", { exact: false }).waitFor()
+    // sending is approved on the 待处理 card, which shows the text that would go out and any warning
+    assert.equal(await page.locator("[data-chan-out-send]").count(), 0)
+    await page.locator("[data-chan-out-review]").waitFor()
     if (shots) await page.screenshot({ path: `${shots}/conv-draft-${width}-${theme}.png` })
     // 不发出, clicked twice while the first is on its way: one answer
     let unblock; gate = new Promise((r) => { unblock = r })
@@ -61,6 +65,19 @@ try {
     assert.equal(await page.locator("[data-chan-out-decision]").count(), 0)
     assert.equal(await page.getByText("你没有发出", { exact: true }).count(), 1)
     assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "no sideways overflow")
+    // a click answered late does not cover what the Hub says now
+    out = "draft"; decided = []
+    await page.reload()
+    let unblock2; gate = new Promise((r) => { unblock2 = r }); late = true
+    await page.locator("[data-chan-out-discard]").click()
+    out = "sent"
+    await page.evaluate(() => window.dispatchEvent(new Event("fixture-reload")))
+    await page.locator("[data-chan-out='sent']").waitFor()
+    unblock2(); gate = null
+    await page.waitForFunction(() => document.querySelector("[data-chan-out]") && !document.querySelector("[data-chan-out-discard]"))
+    await page.waitForTimeout(300)
+    assert.equal(await page.locator("[data-chan-out='sent']").count(), 1, "the Hub's 已发出 stays")
+    out = "discarded"; late = false
 
     // your own conversation: one click answers once, the options are gone afterwards
     await page.goto(base + "/test/fixtures/decision-source.html?main" + (q ? "&dark" : ""))

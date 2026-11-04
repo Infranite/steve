@@ -6,7 +6,7 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import { cn } from "cn"
 import { CheckIcon, LoaderIcon, MessageCircleIcon, UsersIcon, UserIcon, XIcon, ExternalLinkIcon, ListIcon } from "lucide-react"
 import { conversationsApi, type ConvBadge, type ConvMessage, type ConvRow, type Reaction } from "@/api/conversations"
-import { st, msgOf, decideOut, useHubEvents, type Msg } from "@/store"
+import { st, msgOf, discardOut, useHubEvents, type Msg } from "@/store"
 import { matchesSpace } from "@/live-utils"
 import { go } from "@/ui"
 import { Button } from "@/components/ui/button"
@@ -160,24 +160,26 @@ export function ReactionChip({ r }: { r?: Reaction }) {
   )
 }
 
-/** what became of Steve's message in the space; a draft is approved or closed right here, in its own conversation */
+/** what became of Steve's message in the space. A draft is closed right here, in its own conversation; sending it is
+ *  approved on its card in 待处理, which shows the text that would actually go out and any disclosure warning */
 export function ChanOutNote({ m }: { m?: ConvMessage }) {
-  const [answered, setAnswered] = useState<"yes" | "no" | null>(null)
+  const [closed, setClosed] = useState(false)
   const s = m?.meta?.chan_out?.status as string | undefined, decision = m?.meta?.chan_out?.decision as string | undefined
   /* a new state from the Hub replaces what this click assumed */
-  useEffect(() => setAnswered(null), [s, decision])
+  useEffect(() => setClosed(false), [s, decision])
   if (!s || s === "skipped") return null
   const t: Record<string, string> = { sent: "已发出", pending: "正在发出", draft: "等你批准后发出", blocked: "有机密值，已拦下", failed: "没有发出去", unknown: "可能已经发出，正在核对", discarded: "你没有发出" }
-  const shown = answered === "no" ? "discarded" : answered === "yes" ? "pending" : s
+  /* only a draft can be assumed closed: whatever the Hub says past it wins over a late click */
+  const shown = closed && s === "draft" ? "discarded" : s
   const note = <div className={cn("type-footnote", shown === "failed" || shown === "blocked" ? "text-destructive" : "text-muted-foreground")} data-chan-out={shown}>{t[shown] ?? shown}</div>
   if (shown !== "draft" || !decision) return note
   const busy = st.pendingActions.has("decision:" + decision)
-  const act = async (c: "yes" | "no") => { if (await decideOut(decision, c)) setAnswered(c) }
+  const discard = async () => { if (await discardOut(decision)) setClosed(true) }
   return (
     <div className="flex flex-wrap items-center gap-2" data-chan-out-decision={decision}>
       {note}
-      <Button size="xs" variant="ghost" className="text-muted-foreground" disabled={busy} onClick={() => void act("no")} data-chan-out-discard>不发出</Button>
-      <Button size="xs" variant="outline" disabled={busy} onClick={() => void act("yes")} data-chan-out-send>发出</Button>
+      <Button size="xs" variant="ghost" className="text-muted-foreground" disabled={busy} onClick={() => void discard()} data-chan-out-discard>不发出</Button>
+      <Button size="xs" variant="outline" disabled={busy} onClick={() => go("#/inbox")} data-chan-out-review>去批准…</Button>
     </div>
   )
 }
