@@ -855,7 +855,17 @@ pub fn space_audience(
         }
         names.push(name.clone());
     }
-    if !rows.is_empty() && !a.external && rows.iter().all(|r| r.2.is_some()) {
+    // everyone recorded is a user of the workspace, and everyone is recorded: the provider's member count
+    // is known and no more than the members on record (members nobody recorded could be anyone)
+    // the provider counts people (Feishu `user_count`), not bots
+    let recorded: i64 = c.query_row(
+        "SELECT count(*) FROM space_members sm JOIN accounts a ON a.id = sm.account_id
+          WHERE sm.space_id = ? AND a.kind NOT IN ('app_bot', 'bot')",
+        [&space.id],
+        |r| r.get(0),
+    )?;
+    let complete = space.member_count > 0 && recorded >= space.member_count;
+    if complete && !rows.is_empty() && !a.external && rows.iter().all(|r| r.2.is_some()) {
         a.scopes.push("workspace".into());
         // private: a one-to-one chat whose one other member is `owner` and `owner` owns the workspace. A group
         // whose member list could not be read (only the bot and its sender recorded) is never private.

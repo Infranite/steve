@@ -135,7 +135,9 @@ pub trait ConvHost: Send + Sync {
         origin: &str,
     ) -> std::result::Result<String, String>;
     /// What research in this conversation must know about its audience.
-    fn research_context(&self, ws: &str, space: &str) -> String;
+    /// What research answering message `origin` in `space` is told about where it answers (the
+    /// conversation card and the rules of the place).
+    fn research_context(&self, ws: &str, space: &str, origin: &str) -> String;
     /// Steve stored message `id` in guest conversation `space`.
     fn said(&self, ws: &str, space: &str, id: &str);
 }

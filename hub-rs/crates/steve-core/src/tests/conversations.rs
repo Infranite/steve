@@ -24,7 +24,7 @@ impl ConvHost for Host {
         self.answered.lock().unwrap().push(origin.into());
         Ok("以值班小运的身份回答".into())
     }
-    fn research_context(&self, _ws: &str, _space: &str) -> String {
+    fn research_context(&self, _ws: &str, _space: &str, _origin: &str) -> String {
         "这次的问题来自渠道「运维群」".into()
     }
     fn said(&self, _ws: &str, space: &str, id: &str) {

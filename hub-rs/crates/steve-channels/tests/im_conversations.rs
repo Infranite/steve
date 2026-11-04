@@ -1328,3 +1328,134 @@ async fn a_members_bot_command_does_not_start_work() {
     assert!(turns.len() > before, "the command was taken: {turns:?}");
     assert!(turns[before..].iter().all(|(_, x)| !x.start), "{turns:?}");
 }
+
+/// The conversation card comes from records: who asks and how they relate, who else reads the answer,
+/// how complete that list is, what the asker may make Steve do. Nothing unrecorded is guessed.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_conversation_card_says_who_asks_and_who_listens() {
+    let h = setup(true).await;
+    let t = h.thread.clone().unwrap();
+    h.fake.space(
+        "G_C",
+        "客户群",
+        SpaceKind::Group,
+        false,
+        &[("upx", "我"), ("uli", "李雷")],
+    );
+    push(
+        &h,
+        &h.bot.clone(),
+        msg("G_C", "c1", "upx", "进展如何", true, false),
+    )
+    .await;
+    push(
+        &h,
+        &h.bot.clone(),
+        msg("G_C", "c2", "uli", "进展如何", true, false),
+    )
+    .await;
+    let turns = t.turns.lock().unwrap().clone();
+    assert_eq!(turns.len(), 2, "{turns:?}");
+    let space = turns[0].1.space.clone();
+    let card = |origin: &str| h.ch.conv_research_context(WS, &space, origin);
+    // the owner asks: may start; 李雷 is unknown to Steve's records
+    let mine = card(&turns[0].0);
+    assert!(mine.contains("【对话卡】"), "{mine}");
+    assert!(mine.contains("提问的人：Dev（所有者本人）"), "{mine}");
+    assert!(mine.contains("李雷（身份未知）"), "{mine}");
+    assert!(mine.contains("可以直接做成事项开工"), "{mine}");
+    // 李雷 asks: only a proposal; 李雷 works at a customer, recorded as a job
+    let party = one(
+        &h,
+        "SELECT sender_party_id FROM chan_messages WHERE external_id = ?",
+        &["c2"],
+    );
+    let party = party.as_str().unwrap().to_string();
+    exec(
+        &h,
+        "INSERT INTO parties (id, workspace_id, type, name, org_kind, created_by, created, updated) VALUES ('org_acme', ?, 'org', 'ACME 客户', 'customer', 'u', 1, 1)",
+        &[WS],
+    );
+    exec(
+        &h,
+        "INSERT INTO links (workspace_id, subject_type, subject_id, predicate, object_type, object_id, source, created) VALUES (?, 'party', ?, 'works_at', 'party', 'org_acme', 'manual', 1)",
+        &[WS, &party],
+    );
+    let theirs = card(&turns[1].0);
+    assert!(
+        theirs.contains("提问的人：李雷（外部，ACME 客户）"),
+        "{theirs}"
+    );
+    assert!(
+        theirs.contains("其他会看到回答的人：") && theirs.contains("（所有者本人）"),
+        "{theirs}"
+    );
+    assert!(theirs.contains("只能作为提议"), "{theirs}");
+    // the provider counts more members than are recorded: they are said to be unknown
+    exec(
+        &h,
+        "UPDATE spaces SET member_count = member_count + 3 WHERE external_id = 'G_C'",
+        &[],
+    );
+    let wider = card(&turns[1].0);
+    assert!(wider.contains("另有 3 位没有记录，身份未知"), "{wider}");
+}
+
+/// "Everyone here is one of us" needs everyone to be recorded: while the provider counts members nobody
+/// recorded, the chat isn't taken for an internal one (they could be anyone).
+#[tokio::test(flavor = "multi_thread")]
+async fn an_incomplete_member_list_widens_nothing() {
+    let h = setup(true).await;
+    h.fake.space(
+        "G_I",
+        "内部群",
+        SpaceKind::Group,
+        false,
+        &[("upx", "我"), ("uli", "李雷")],
+    );
+    push(
+        &h,
+        &h.bot.clone(),
+        msg("G_I", "i1", "uli", "大家好", false, false),
+    )
+    .await;
+    exec(
+        &h,
+        "INSERT INTO users (id, workspace_id, subject, name, role, created) VALUES ('u_li', ?, 'li', '李雷', 'member', 1)",
+        &[WS],
+    );
+    exec(
+        &h,
+        "INSERT INTO workspace_members (workspace_id, user_id, role, created) VALUES (?, 'u_li', 'member', 1)",
+        &[WS],
+    );
+    exec(
+        &h,
+        "UPDATE parties SET user_id = 'u_li' WHERE id = (SELECT sender_party_id FROM chan_messages WHERE external_id = 'i1')",
+        &[],
+    );
+    let id = one(&h, "SELECT id FROM spaces WHERE external_id = ?", &["G_I"]);
+    let id = id.as_str().unwrap().to_string();
+    let scopes = |h: &H| -> Vec<String> {
+        h.ch.store()
+            .reader(|c| -> steve_channels::ChannelResult<Vec<String>> {
+                let space = spaces::get(c, &id)?.expect("space");
+                let (bot, _) = steve_channels::bindings::connection_account(c, WS, &h.bot)?;
+                Ok(steve_channels::disclosure::space_audience(c, &space, &bot, ME)?.scopes)
+            })
+            .unwrap()
+    };
+    assert!(
+        scopes(&h).contains(&"workspace".to_string()),
+        "everyone recorded, all of us"
+    );
+    exec(
+        &h,
+        "UPDATE spaces SET member_count = member_count + 2 WHERE external_id = 'G_I'",
+        &[],
+    );
+    assert!(
+        !scopes(&h).contains(&"workspace".to_string()),
+        "two members nobody recorded"
+    );
+}

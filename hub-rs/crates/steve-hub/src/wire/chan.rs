@@ -108,10 +108,10 @@ impl steve_core::thread::ConvHost for ChanConvHost {
         ch.conv_answer(ws, origin).await
     }
 
-    fn research_context(&self, ws: &str, space: &str) -> String {
+    fn research_context(&self, ws: &str, space: &str, origin: &str) -> String {
         self.0
             .upgrade()
-            .map(|ch| ch.conv_research_context(ws, space))
+            .map(|ch| ch.conv_research_context(ws, space, origin))
             .unwrap_or_default()
     }
 

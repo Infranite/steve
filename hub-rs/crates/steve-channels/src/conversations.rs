@@ -312,10 +312,11 @@ impl Channels {
     }
 
     /// What research in a conversation is told about where its answer goes.
-    pub fn conv_research_context(&self, ws: &str, conv: &str) -> String {
+    pub fn conv_research_context(&self, ws: &str, conv: &str, origin: &str) -> String {
         let Some(space_id) = space_of_conv(conv) else {
             return String::new();
         };
+        let turn = self.store().messages().get(origin).ok().flatten();
         let r = self.store().reader(|c| -> ChannelResult<String> {
             let Some(space) = spaces::get(c, space_id)? else {
                 return Ok(String::new());
@@ -325,16 +326,29 @@ impl Channels {
                 Some(e) => format!("以对外身份「{}」说话", e.persona.name),
                 None => "以你本人的名义起草".to_string(),
             };
-            if owner_only(c, ws, &space, &space.connection_id)? {
+            // members are read again now; the turn says who asked
+            let own = owner_only(c, ws, &space, &space.connection_id)?;
+            let chan = turn.as_ref().map(|m| &m.meta["chan"]);
+            let card = crate::conversation_card::build(
+                c,
+                ws,
+                &space,
+                chan.and_then(|m| m["party"].as_str()),
+                chan.and_then(|m| m["sender"].as_str()).unwrap_or_default(),
+                &who,
+                own,
+            )?
+            .render();
+            if own {
                 return Ok(format!(
-                    "这次的问题来自你和 {} 的私聊（{}），只有你本人能看到，回答会发回那里。需要时直接查事项、会话、知识和代码，照实回答。",
+                    "{card}\n\n这次的问题来自你和 {} 的私聊（{}），只有你本人能看到，回答会发回那里。需要时直接查事项、会话、知识和代码，照实回答。",
                     personas::owner_name(c, ws)?,
                     crate::respond::space_label(&space),
                 ));
             }
             let owner = personas::owner_name(c, ws)?;
             Ok(format!(
-                "这次的问题来自渠道「{}」（{where_}{}）。你{who}，回答会发回那里，发出前要过披露检查：\
+                "{card}\n\n这次的问题来自渠道「{}」（{where_}{}）。你{who}，回答会发回那里，发出前要过披露检查：\
                  只说结论，不提其他群、其他客户、内部事项编号、文件路径和代码细节；对方这次自己提到的事项编号或说法可以照着提、用来澄清，但它不代表能说这件事的内容，内容仍只按能说的部分说；拿不准能不能说的，就当不知道，或者说会请 {owner} 来看。查不到、查询失败或没有权限时，笼统地说明即可，不说是什么权限、哪里报错。",
                 crate::respond::space_label(&space),
                 if space.has_external { "，有外部成员" } else { "" },

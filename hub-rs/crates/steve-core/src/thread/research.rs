@@ -773,7 +773,7 @@ impl Core {
         let cx = self.chat_context(ws, j.user.as_deref().filter(|_| own), &j.question);
         /* a chat's research knows who hears its answer */
         let guest_frame = match (j.space != super::MAIN, self.conv_host()) {
-            (true, Some(h)) => h.research_context(ws, &j.space),
+            (true, Some(h)) => h.research_context(ws, &j.space, &j.origin),
             _ => String::new(),
         };
         let context = cx.as_ref().map(|(_, c)| c.text.clone()).unwrap_or_default();

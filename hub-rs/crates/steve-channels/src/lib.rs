@@ -100,6 +100,7 @@ pub mod channel_accounts;
 pub mod channels_api;
 pub mod cleanup;
 pub mod compose;
+pub mod conversation_card;
 pub mod conversations;
 pub mod deliver;
 pub mod disclosure;
