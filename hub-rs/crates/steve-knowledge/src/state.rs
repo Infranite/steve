@@ -81,6 +81,8 @@ pub struct Knowledge(Arc<Inner>);
 
 pub struct Inner {
     pub guard: Arc<dyn Guard>,
+    /// Where knowledge is found ([`crate::port`]); the Hub's FTS index unless another is set.
+    store: OnceLock<Arc<dyn crate::port::KnowledgeStore>>,
     notify: Arc<Notify>,
     pub(crate) loaders: Vec<Arc<dyn DocLoader>>,
     pub(crate) queue: OnceLock<mpsc::UnboundedSender<String>>,
@@ -114,6 +116,7 @@ impl Knowledge {
         loaders.insert(1, Arc::new(crate::sources::folder::FolderLoader));
         Self(Arc::new(Inner {
             guard,
+            store: OnceLock::new(),
             notify: Arc::new(notify),
             loaders,
             queue: OnceLock::new(),
@@ -121,6 +124,20 @@ impl Knowledge {
             scan_requests: Mutex::new(Vec::new()),
             scan_wake: tokio::sync::Notify::new(),
         }))
+    }
+
+    /// Sets the knowledge store (once, while the Hub is wired, before anything searches).
+    pub fn set_store(&self, store: Arc<dyn crate::port::KnowledgeStore>) {
+        if self.store.set(store).is_err() {
+            tracing::warn!("knowledge store already set");
+        }
+    }
+
+    /// Where knowledge is searched.
+    pub fn store(&self) -> &dyn crate::port::KnowledgeStore {
+        self.store
+            .get_or_init(|| Arc::new(crate::port::SqliteStore))
+            .as_ref()
     }
 
     /// Asks the `kb.folder_scan` job ([`crate::spawn_scans`]) to scan a folder source now. Safe to

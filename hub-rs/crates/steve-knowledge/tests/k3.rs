@@ -205,7 +205,17 @@ async fn item_completion_yields_at_most_five_filtered_candidates() {
     let hits = e
         .env
         .store()
-        .reader(|c| retrieve(c, &Query::new(&viewer, "续签邮件", Purpose::Search)))
+        .reader(|c| {
+            retrieve(
+                c,
+                &Query::new(
+                    &steve_knowledge::port::SqliteStore,
+                    &viewer,
+                    "续签邮件",
+                    Purpose::Search,
+                ),
+            )
+        })
         .unwrap();
     assert!(
         hits.iter()
@@ -356,7 +366,17 @@ async fn confirming_with_supersedes_makes_the_old_memory_stale() {
     let hits = e
         .env
         .store()
-        .reader(|c| retrieve(c, &Query::new(&viewer, "邮件", Purpose::Search)))
+        .reader(|c| {
+            retrieve(
+                c,
+                &Query::new(
+                    &steve_knowledge::port::SqliteStore,
+                    &viewer,
+                    "邮件",
+                    Purpose::Search,
+                ),
+            )
+        })
         .unwrap();
     assert!(hits.iter().any(|h| h.obj_id == new.id));
     assert!(!hits.iter().any(|h| h.obj_id == old_id));
@@ -555,7 +575,17 @@ async fn chat_days_are_documents_and_extracted_once() {
     let hits = e
         .env
         .store()
-        .reader(|c| retrieve(c, &Query::new(&viewer, "部署", Purpose::Search)))
+        .reader(|c| {
+            retrieve(
+                c,
+                &Query::new(
+                    &steve_knowledge::port::SqliteStore,
+                    &viewer,
+                    "部署",
+                    Purpose::Search,
+                ),
+            )
+        })
         .unwrap();
     assert_eq!(hits.len(), 1, "{hits:#?}");
     assert_eq!(hits[0].obj_id, doc);

@@ -65,7 +65,12 @@ fn search(h: &H, user: &str, text: &str) -> Vec<steve_knowledge::Hit> {
         .store()
         .reader(|c| {
             let viewer = Viewer::load(c, WS, user)?;
-            let q = Query::new(&viewer, text, Purpose::Search);
+            let q = Query::new(
+                &steve_knowledge::port::SqliteStore,
+                &viewer,
+                text,
+                Purpose::Search,
+            );
             retrieve(c, &q)
         })
         .expect("search")

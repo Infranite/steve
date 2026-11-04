@@ -128,7 +128,12 @@ fn retrieve_on_eval_corpus() {
         let hits = env
             .store()
             .reader(|c| {
-                let mut query = Query::new(&viewer, q, Purpose::Search);
+                let mut query = Query::new(
+                    &steve_knowledge::port::SqliteStore,
+                    &viewer,
+                    q,
+                    Purpose::Search,
+                );
                 query.k = 20;
                 retrieve(c, &query)
             })

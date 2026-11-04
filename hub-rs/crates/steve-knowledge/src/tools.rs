@@ -217,7 +217,7 @@ pub fn search(
     let text = scrub_query(kb.guard.as_ref(), q);
     let now = m.clock.now();
     let hits = m.store.reader(|c| {
-        let mut query = Query::new(&viewer, &text, Purpose::Agent);
+        let mut query = Query::new(kb.store(), &viewer, &text, Purpose::Agent);
         query.k = k;
         query.now = now;
         let mut hits = retrieve(c, &query)?;

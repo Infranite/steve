@@ -248,7 +248,17 @@ async fn private_notes_are_invisible_to_others() {
     let hits = e
         .env
         .store()
-        .reader(|c| retrieve(c, &Query::new(&viewer, "部署", Purpose::Chat)))
+        .reader(|c| {
+            retrieve(
+                c,
+                &Query::new(
+                    &steve_knowledge::port::SqliteStore,
+                    &viewer,
+                    "部署",
+                    Purpose::Chat,
+                ),
+            )
+        })
         .unwrap();
     assert_eq!(
         hits.iter().map(|h| h.obj_id.as_str()).collect::<Vec<_>>(),
@@ -265,7 +275,17 @@ async fn private_notes_are_invisible_to_others() {
     let hits = e
         .env
         .store()
-        .reader(|c| retrieve(c, &Query::new(&viewer, "部署", Purpose::Chat)))
+        .reader(|c| {
+            retrieve(
+                c,
+                &Query::new(
+                    &steve_knowledge::port::SqliteStore,
+                    &viewer,
+                    "部署",
+                    Purpose::Chat,
+                ),
+            )
+        })
         .unwrap();
     assert_eq!(hits.len(), 2);
 }
@@ -419,7 +439,12 @@ async fn memories_name_what_they_are_about_and_anchors_rank_higher() {
         .env
         .store()
         .reader(|c| {
-            let mut q = Query::new(&viewer, "结论 邮件", Purpose::Reply);
+            let mut q = Query::new(
+                &steve_knowledge::port::SqliteStore,
+                &viewer,
+                "结论 邮件",
+                Purpose::Reply,
+            );
             q.anchors = &anchors;
             retrieve(c, &q)
         })
@@ -745,4 +770,64 @@ fn mem_rows_follow_their_memory_scope() {
         })
         .unwrap();
     assert_eq!((vis.as_str(), level.as_str()), ("workspace", "reasoning"));
+}
+
+/// A store that answers with anything (a broken or foreign store): the Hub's second filter keeps
+/// only what the viewer may read, and never `never`.
+struct Leaky;
+
+impl steve_knowledge::port::KnowledgeStore for Leaky {
+    fn id(&self) -> &'static str {
+        "leaky"
+    }
+    fn search(
+        &self,
+        _: &rusqlite::Connection,
+        _: &steve_knowledge::port::Scope,
+        _: &str,
+        pass: steve_knowledge::port::Pass,
+        _: usize,
+    ) -> steve_store::Result<Vec<steve_knowledge::port::Candidate>> {
+        if pass == steve_knowledge::port::Pass::Relaxed {
+            return Ok(Vec::new());
+        }
+        use steve_store::base::{Level, Visibility};
+        let c =
+            |id: &str, vis: Visibility, by: &str, level: Level| steve_knowledge::port::Candidate {
+                obj_type: "mem".into(),
+                obj_id: id.into(),
+                seq: 0,
+                heading: String::new(),
+                text: format!("部署 {id}"),
+                source_kind: "mems".into(),
+                label: String::new(),
+                level,
+                visibility: vis,
+                created_by: by.into(),
+                updated: 0,
+                base: 1.0,
+                title: None,
+                doc_ref: None,
+            };
+        Ok(vec![
+            c("ok_ws", Visibility::Workspace, OTHER, Level::Public),
+            c("mine", Visibility::Private, ME, Level::Public),
+            c("theirs", Visibility::Private, OTHER, Level::Public),
+            c("secret", Visibility::Workspace, ME, Level::Never),
+        ])
+    }
+}
+
+#[tokio::test]
+async fn what_a_store_returns_outside_the_scope_is_dropped() {
+    let e = setup();
+    let viewer = Viewer::bare(WS, ME);
+    let hits = e
+        .env
+        .store()
+        .reader(|c| retrieve(c, &Query::new(&Leaky, &viewer, "部署", Purpose::Search)))
+        .unwrap();
+    let mut ids: Vec<_> = hits.iter().map(|h| h.obj_id.as_str()).collect();
+    ids.sort();
+    assert_eq!(ids, ["mine", "ok_ws"]);
 }

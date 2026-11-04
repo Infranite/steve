@@ -53,6 +53,8 @@ struct Inner {
     profiles: BTreeMap<String, Arc<dyn ProfileAdapter>>,
     party_hooks: Vec<Arc<dyn PartyHooks>>,
     names: Names,
+    /// Where replies' knowledge is searched (the Hub sets the workspace's store; SQLite until then).
+    knowledge: std::sync::OnceLock<Arc<dyn steve_knowledge::port::KnowledgeStore>>,
 }
 
 /// Events of a connection that are not messages (Feishu address book changes → the directory
@@ -162,6 +164,7 @@ impl ChannelsBuilder {
             profiles: self.profiles,
             party_hooks: self.party_hooks,
             names: Names::default(),
+            knowledge: std::sync::OnceLock::new(),
         }))
     }
 }
@@ -236,6 +239,20 @@ impl Channels {
 
     pub fn guard(&self) -> &dyn Guard {
         self.0.guard.as_ref()
+    }
+
+    /// Sets the knowledge store replies search (the same one as the knowledge module's).
+    pub fn set_knowledge_store(&self, store: Arc<dyn steve_knowledge::port::KnowledgeStore>) {
+        if self.0.knowledge.set(store).is_err() {
+            tracing::warn!("channels: knowledge store already set");
+        }
+    }
+
+    pub fn knowledge_store(&self) -> &dyn steve_knowledge::port::KnowledgeStore {
+        self.0
+            .knowledge
+            .get_or_init(|| Arc::new(steve_knowledge::port::SqliteStore))
+            .as_ref()
     }
 
     pub(crate) fn reactor(&self) -> &dyn Reactor {

@@ -199,7 +199,7 @@ pub struct SessionCtx {
 /// k=8, Agent)`; all as the item's user sees them. ≤[`SESSION_MAX`] characters.
 pub fn session_context(
     c: &Connection,
-    guard: &dyn Guard,
+    kb: &Knowledge,
     item: &Item,
     now: i64,
 ) -> ApiResult<SessionCtx> {
@@ -215,10 +215,10 @@ pub fn session_context(
     let rules = anchor_mems(c, &viewer, &anchors, ANCHOR_MEMS, now)?;
 
     let query = scrub_query(
-        guard,
+        kb.guard.as_ref(),
         &format!("{} {}", item.title, latest_goal(c, &item.id)?),
     );
-    let mut q = Query::new(&viewer, &query, Purpose::Agent);
+    let mut q = Query::new(kb.store(), &viewer, &query, Purpose::Agent);
     q.anchors = &anchors;
     q.k = SESSION_K;
     q.now = now;
@@ -282,12 +282,12 @@ pub fn cite_of(h: &Hit) -> Cite {
 /// one member only workspace-visible knowledge is used (§3.3). `None` = nothing found.
 pub fn chat_context(
     c: &Connection,
-    guard: &dyn Guard,
+    kb: &Knowledge,
     viewer: &Viewer,
     text: &str,
     now: i64,
 ) -> ApiResult<Option<ChatKnowledge>> {
-    let query = scrub_query(guard, text);
+    let query = scrub_query(kb.guard.as_ref(), text);
     let mut rules = Vec::new();
     if !viewer.user.is_empty()
         && let Some(me) = contacts::repo::me_of(c, &viewer.ws, &viewer.user)?
@@ -298,7 +298,7 @@ pub fn chat_context(
             rules.retain(|h| h.visibility == steve_store::base::Visibility::Workspace);
         }
     }
-    let mut q = Query::new(viewer, &query, Purpose::Chat);
+    let mut q = Query::new(kb.store(), viewer, &query, Purpose::Chat);
     q.k = CHAT_K;
     q.now = now;
     let hits = merge(rules, retrieve(c, &q)?);
@@ -334,8 +334,10 @@ pub fn chat_finish(answer: &str, cx: &ChatCtx) -> ChatDone {
 /// Layer 7 of a channel reply (§4.1): `retrieve(message + the last 3 messages, k=10, Reply)` for the
 /// account owner's user. Layer 6 (cards, space summary) stays with C4; render the hits with
 /// [`render_snippets`] and record them in `reply_basis`.
+#[allow(clippy::too_many_arguments)]
 pub fn reply_hits(
     c: &Connection,
+    store: &dyn crate::port::KnowledgeStore,
     guard: &dyn Guard,
     viewer: &Viewer,
     message: &str,
@@ -350,7 +352,7 @@ pub fn reply_hits(
         text.push_str(r);
     }
     let query = scrub_query(guard, &text);
-    let mut q = Query::new(viewer, &query, Purpose::Reply);
+    let mut q = Query::new(store, viewer, &query, Purpose::Reply);
     q.anchors = anchors;
     q.k = REPLY_K;
     q.now = now;
@@ -380,10 +382,6 @@ impl KnowledgeContext {
         }
     }
 
-    fn guard(&self) -> &dyn Guard {
-        self.kb.guard.as_ref()
-    }
-
     fn pending(&self) -> std::sync::MutexGuard<'_, VecDeque<(String, String, Vec<Hit>)>> {
         self.pending.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -400,7 +398,7 @@ impl KnowledgeContext {
 
 impl PromptContext for KnowledgeContext {
     fn session(&self, c: &Connection, _ws: &str, item: &Item) -> Option<String> {
-        let cx = session_context(c, self.guard(), item, steve_store::now())
+        let cx = session_context(c, &self.kb, item, steve_store::now())
             .map_err(|e: ApiError| tracing::warn!(item = %item.id, "session knowledge: {e}"))
             .ok()?;
         if !cx.hits.is_empty() {
@@ -416,7 +414,7 @@ impl PromptContext for KnowledgeContext {
     }
 
     fn chat(&self, c: &Connection, _ws: &str, viewer: &Viewer, text: &str) -> Option<ChatCtx> {
-        let k = chat_context(c, self.guard(), viewer, text, steve_store::now())
+        let k = chat_context(c, &self.kb, viewer, text, steve_store::now())
             .map_err(|e| tracing::warn!(ws = %viewer.ws, "chat knowledge: {e}"))
             .ok()??;
         let mut p = self.pending();

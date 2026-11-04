@@ -232,6 +232,11 @@ impl Mail {
         let mailbox = self.own_mailbox(who, &thread.connection_id)?;
         let now = self.now();
         let guard = self.0.guard.clone();
+        let sqlite = steve_knowledge::port::SqliteStore;
+        let store: &dyn steve_knowledge::port::KnowledgeStore = match &self.0.kb {
+            Some(kb) => kb.store(),
+            None => &sqlite,
+        };
         self.0.m.store.reader(|c| -> MailResult<Gathered> {
             let orig = match &q.message_id {
                 Some(id) => repo::message(c, id)?
@@ -308,7 +313,7 @@ impl Mail {
                     orig.body_new.as_deref().unwrap_or(&orig.snippet)
                 ),
             );
-            let mut rq = Query::new(&viewer, &query, Purpose::Draft);
+            let mut rq = Query::new(store, &viewer, &query, Purpose::Draft);
             rq.anchors = &anchors;
             rq.k = DRAFT_K;
             rq.now = now;

@@ -439,6 +439,7 @@ impl steve_knowledge::Guard for KbGuard<'_> {
 pub fn gather(
     c: &Connection,
     guard: &dyn Guard,
+    store: &dyn steve_knowledge::port::KnowledgeStore,
     plan: &Plan,
     opts: &ComposeOpts,
     now: i64,
@@ -556,7 +557,7 @@ pub fn gather(
 
     // 7: retrieval as the owner, the sender and the space as anchors
     let kg = KbGuard(guard);
-    let hits = reply_hits(c, &kg, &viewer, &plan.text, &recent, &objs, now)
+    let hits = reply_hits(c, store, &kg, &viewer, &plan.text, &recent, &objs, now)
         .map_err(|e| ApiError::Internal(e.to_string()))?
         .into_iter()
         .filter(|h| !anchor_ids.contains(&format!("{}:{}", h.obj_type, h.obj_id)))
@@ -689,7 +690,7 @@ impl Composer {
         let now = ch.now();
         let layers = ch
             .store()
-            .reader(|c| gather(c, ch.guard(), plan, opts, now))?;
+            .reader(|c| gather(c, ch.guard(), ch.knowledge_store(), plan, opts, now))?;
         let media = crate::media_agent::prepare(ch, plan, self.media.as_deref()).await?;
         let mut p = prompt(&layers);
         if !media.text.is_empty() {

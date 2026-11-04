@@ -303,7 +303,7 @@ pub async fn run(
         let names = Names::load(c, &viewer, item)?;
         let q_text = clip(&text, SIMILAR_QUERY_CHARS);
         let kinds = ["mems"];
-        let mut q = Query::new(&viewer, &q_text, Purpose::Agent);
+        let mut q = Query::new(kb.store(), &viewer, &q_text, Purpose::Agent);
         q.kinds = Some(&kinds);
         q.k = SIMILAR_K;
         q.now = now;

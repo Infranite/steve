@@ -267,6 +267,10 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
     steve_core::yolo::draft::register(&mut registry, yolo_forced);
     // knowledge (K1–K5): candidate decisions, item documents on finish, prompt context, drafts
     let kb = knowledge(steve_home, data_dir, bus, guard.clone());
+    // one knowledge store for every reader (knowledge tools, prompt context, mail and channel replies)
+    let kstore: Arc<dyn steve_knowledge::port::KnowledgeStore> =
+        Arc::new(steve_knowledge::port::SqliteStore);
+    kb.set_store(kstore.clone());
     let kb_hooks = steve_knowledge::sources::items::KnowledgeHooks::new(kb.clone());
     registry.decision(
         steve_knowledge::candidates::SUBJECT,
@@ -493,6 +497,7 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
         // IM spaces converse through steve-core's thread (channels §2.12)
         .thread(Arc::new(super::chan::CoreThread(core.clone())))
         .build();
+    channels.set_knowledge_store(kstore.clone());
     late.set(&channels);
     core.set_conv_host(Arc::new(super::chan::ChanConvHost(channels.downgrade())));
     drop(outbox.clone().spawn_queue(&channels));

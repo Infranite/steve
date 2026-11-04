@@ -20,8 +20,8 @@ use steve_store::base::mems;
 use steve_store::base::{Level, ObjRef, Viewer, Visibility, bind};
 use steve_store::{Result, Tx, uid};
 
+use crate::port::{Candidate, KnowledgeStore, Pass, Scope};
 use crate::repo;
-use crate::seg::{fts_query, fts_query_relaxed, is_single_cjk};
 use crate::sync::about_names;
 
 /// FTS candidates per pass (§3.3 step 1).
@@ -51,9 +51,11 @@ pub enum Purpose {
 }
 
 /// One retrieval request.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Query<'a> {
-    /// Workspace and user the results are filtered for.
+    /// Where to search (the workspace's knowledge store, [`crate::Knowledge::store`]).
+    pub store: &'a dyn KnowledgeStore,
+    /// Workspace and user the results are filtered for ([`Scope::for_viewer`]).
     pub viewer: &'a Viewer,
     pub text: &'a str,
     /// Sender, space, item, project …: hits about them rank higher.
@@ -69,8 +71,14 @@ pub struct Query<'a> {
 
 impl<'a> Query<'a> {
     /// No anchors, all kinds, `k = 10`, now.
-    pub fn new(viewer: &'a Viewer, text: &'a str, purpose: Purpose) -> Self {
+    pub fn new(
+        store: &'a dyn KnowledgeStore,
+        viewer: &'a Viewer,
+        text: &'a str,
+        purpose: Purpose,
+    ) -> Self {
         Self {
+            store,
             viewer,
             text,
             anchors: &[],
@@ -104,123 +112,6 @@ pub struct Hit {
     pub about: Vec<ObjRef>,
 }
 
-/// A candidate row before ranking.
-#[derive(Debug, Clone)]
-struct Cand {
-    obj_type: String,
-    obj_id: String,
-    seq: i64,
-    heading: String,
-    text: String,
-    source_kind: String,
-    label: String,
-    level: Level,
-    visibility: Visibility,
-    updated: i64,
-    base: f64,
-    title: Option<String>,
-    doc_ref: Option<String>,
-}
-
-const COLS: &str = "c.obj_type, c.obj_id, c.seq, c.heading, c.text, c.source_kind, c.label, c.level, c.visibility, c.updated";
-
-fn cand(r: &rusqlite::Row, base: Option<f64>) -> rusqlite::Result<Cand> {
-    Ok(Cand {
-        obj_type: r.get(0)?,
-        obj_id: r.get(1)?,
-        seq: r.get(2)?,
-        heading: r.get(3)?,
-        text: r.get(4)?,
-        source_kind: r.get(5)?,
-        label: r.get(6)?,
-        level: Level::from_db(&r.get::<_, String>(7)?),
-        visibility: Visibility::from_db(&r.get::<_, String>(8)?),
-        updated: r.get(9)?,
-        title: r.get(10)?,
-        doc_ref: r.get(11)?,
-        // bm25 is negative, smaller = better
-        base: match base {
-            Some(b) => b,
-            None => -r.get::<_, f64>(12)?,
-        },
-    })
-}
-
-/// The shared `WHERE` tail on `kb_chunks c`: workspace, never, visibility, purpose, kinds, paused.
-fn filters(c: &Connection, q: &Query) -> Result<(String, Vec<Sql>)> {
-    let v = q.viewer;
-    let scope = v.sql("c");
-    let mut sql = format!(
-        "c.workspace_id = ? AND c.level <> 'never' AND {}",
-        scope.sql
-    );
-    let mut p = vec![Sql::Text(v.ws.clone())];
-    p.extend(scope.params);
-    if q.purpose == Purpose::Chat && repo::member_count(c, &v.ws)? > 1 {
-        sql.push_str(" AND c.visibility = 'workspace'");
-    }
-    if let Some(kinds) = q.kinds {
-        if kinds.is_empty() {
-            sql.push_str(" AND 0");
-        } else {
-            sql.push_str(&format!(
-                " AND c.source_kind IN ({})",
-                vec!["?"; kinds.len()].join(", ")
-            ));
-            p.extend(kinds.iter().map(|k| Sql::Text((*k).into())));
-        }
-    }
-    let paused = repo::paused(c, &v.ws)?;
-    let mut docs = Vec::new();
-    for (id, kind) in paused {
-        match kind.as_str() {
-            "mems" => sql.push_str(" AND c.obj_type <> 'mem'"),
-            "bot_mems" => sql.push_str(" AND c.obj_type <> 'bot_mem'"),
-            _ => docs.push(id),
-        }
-    }
-    if !docs.is_empty() {
-        sql.push_str(&format!(
-            " AND NOT (c.obj_type = 'chunk' AND c.obj_id IN (SELECT id FROM kb_docs WHERE source_id IN ({})))",
-            vec!["?"; docs.len()].join(", ")
-        ));
-        p.extend(docs.into_iter().map(Sql::Text));
-    }
-    Ok((sql, p))
-}
-
-fn fts(c: &Connection, expr: &str, tail: &(String, Vec<Sql>)) -> Result<Vec<Cand>> {
-    let sql = format!(
-        "SELECT {COLS}, d.title, d.ref, bm25(kb_fts, 1.0, 2.0) AS r
-           FROM kb_fts JOIN kb_chunks c ON c.id = kb_fts.rowid
-           LEFT JOIN kb_docs d ON c.obj_type = 'chunk' AND d.id = c.obj_id
-          WHERE kb_fts MATCH ? AND {} ORDER BY r LIMIT {CANDIDATES}",
-        tail.0
-    );
-    let mut p = vec![Sql::Text(expr.into())];
-    p.extend(tail.1.iter().cloned());
-    let mut st = c.prepare(&sql)?;
-    let rows = st.query_map(bind(p), |r| cand(r, None))?;
-    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
-}
-
-/// A one-character query: `LIKE`-style match on document titles and memory text (§3.2).
-fn like(c: &Connection, ch: &str, tail: &(String, Vec<Sql>)) -> Result<Vec<Cand>> {
-    let sql = format!(
-        "SELECT {COLS}, d.title, d.ref FROM kb_chunks c
-           LEFT JOIN kb_docs d ON c.obj_type = 'chunk' AND d.id = c.obj_id
-          WHERE ((c.obj_type IN ('mem', 'bot_mem') AND instr(c.text, ?) > 0)
-              OR (c.obj_type = 'chunk' AND c.seq = 0 AND instr(d.title, ?) > 0))
-            AND {} ORDER BY c.updated DESC LIMIT {CANDIDATES}",
-        tail.0
-    );
-    let mut p = vec![Sql::Text(ch.into()), Sql::Text(ch.into())];
-    p.extend(tail.1.iter().cloned());
-    let mut st = c.prepare(&sql)?;
-    let rows = st.query_map(bind(p), |r| cand(r, Some(1.0)))?;
-    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
-}
-
 /// `about` objects of an index entry.
 fn about_of(c: &Connection, obj_type: &str, obj_id: &str) -> Result<Vec<ObjRef>> {
     match obj_type {
@@ -250,7 +141,7 @@ fn about_of(c: &Connection, obj_type: &str, obj_id: &str) -> Result<Vec<ObjRef>>
     }
 }
 
-fn href(c: &Cand, about: &[ObjRef]) -> String {
+fn href(c: &Candidate, about: &[ObjRef]) -> String {
     match c.obj_type.as_str() {
         "mem" => format!("#/knowledge?mem={}", c.obj_id),
         "bot_mem" => match about.iter().find(|a| a.kind == "bot") {
@@ -264,7 +155,7 @@ fn href(c: &Cand, about: &[ObjRef]) -> String {
     }
 }
 
-fn title(c: &Cand) -> String {
+fn title(c: &Candidate) -> String {
     match c.obj_type.as_str() {
         "chunk" => c.title.clone().unwrap_or_default(),
         "mem" => c
@@ -277,7 +168,7 @@ fn title(c: &Cand) -> String {
 }
 
 /// Boosted score of a candidate (§3.3 step 3).
-fn boosted(c: &Cand, about: &[ObjRef], q: &Query) -> f64 {
+fn boosted(c: &Candidate, about: &[ObjRef], q: &Query) -> f64 {
     let mut s = c.base;
     if !q.anchors.is_empty() && about.iter().any(|a| q.anchors.contains(a)) {
         s *= ANCHOR_BOOST;
@@ -299,26 +190,26 @@ pub fn retrieve(c: &Connection, q: &Query) -> Result<Vec<Hit>> {
     if text.is_empty() {
         return Ok(Vec::new());
     }
-    let tail = filters(c, q)?;
-    let mut tiers: Vec<Vec<Cand>> = Vec::new();
-    if is_single_cjk(text) {
-        tiers.push(like(c, text, &tail)?);
-    } else {
-        let Some(strict) = fts_query(text) else {
-            return Ok(Vec::new());
-        };
-        let first = fts(c, &strict, &tail)?;
-        let docs: HashSet<&str> = first.iter().map(|x| x.obj_id.as_str()).collect();
-        let short = docs.len() < FALLBACK_BELOW;
-        tiers.push(first);
-        if short && let Some(relaxed) = fts_query_relaxed(text).filter(|r| *r != strict) {
-            tiers.push(fts(c, &relaxed, &tail)?);
-        }
+    let scope = Scope::for_viewer(c, q.viewer, q.purpose, q.kinds)?;
+    let found = |pass| -> Result<Vec<Candidate>> {
+        Ok(q.store
+            .search(c, &scope, text, pass, CANDIDATES)?
+            .into_iter()
+            // the Hub's own check of what a store returned
+            .filter(|x| scope.admits(x))
+            .collect())
+    };
+    let first = found(Pass::Strict)?;
+    let docs: HashSet<&str> = first.iter().map(|x| x.obj_id.as_str()).collect();
+    let short = docs.len() < FALLBACK_BELOW;
+    let mut tiers = vec![first];
+    if short {
+        tiers.push(found(Pass::Relaxed)?);
     }
 
     // Rank each tier on its own (bm25 values of different queries do not compare), then concatenate.
     let mut about_cache: HashMap<(String, String), Vec<ObjRef>> = HashMap::new();
-    let mut ranked: Vec<(Cand, f64)> = Vec::new();
+    let mut ranked: Vec<(Candidate, f64)> = Vec::new();
     let mut seen_rows: HashSet<(String, String, i64)> = HashSet::new();
     for tier in tiers {
         let mut scored = Vec::new();

@@ -102,7 +102,7 @@ pub fn search(m: &Modules, kb: &Knowledge, who: &Caller, p: SearchParams) -> Api
         let kinds_ref: Option<Vec<&str>> = kinds
             .as_ref()
             .map(|v| v.iter().map(String::as_str).collect());
-        let mut query = Query::new(&viewer, &q, Purpose::Search);
+        let mut query = Query::new(kb.store(), &viewer, &q, Purpose::Search);
         query.k = limit;
         query.now = now;
         query.kinds = kinds_ref.as_deref();
