@@ -889,6 +889,10 @@ impl Tx<'_> {
         }
         let branch = format!("steve/{}", item.id.to_lowercase());
         let wt: PathBuf = self.cfg().worktrees.join(&item.id);
+        /* a new item waits for disk space; one that had a worktree gets its sources back (megabytes) */
+        if !wt.exists() && item.cwd.as_deref().is_none_or(str::is_empty) {
+            self.c.disk_floor()?;
+        }
         git::add_worktree(path, &wt, &branch)
             .map_err(|e| msg(format!("Command failed: git worktree add\n{e}")))?;
         Ok((wt.to_string_lossy().into(), Some(branch)))
@@ -1787,16 +1791,33 @@ impl Tx<'_> {
         for s in &ss {
             self.rt().release(&s.id);
         }
+        /* the caches go to the trash first (a rename): removing the worktree under the lock is then quick,
+         * and they are deleted outside it */
+        let shed = self.shed_closed_caches(item_id, Path::new(cwd));
+        if !shed.is_empty() {
+            self.c.purge_soon();
+        }
+        /* an archived item gives back a clean worktree even when its branch is not in main: the branch
+         * stays, and the worktree can be made again from it */
         let (wt, br) = git::tidy_worktree(
             Path::new(&p.path),
             Path::new(cwd),
             branch,
-            i.status == "done",
+            i.status == "done" && !i.archived,
             "main",
         );
         let mut said = vec![];
         if wt == git::WorktreeTidy::Removed {
-            said.push(format!("删除了工作区 {cwd}"));
+            let head = git::git(
+                Path::new(&p.path),
+                &["rev-parse", "--short", &format!("refs/heads/{branch}")],
+            );
+            said.push(match (br, head) {
+                (git::BranchTidy::Kept, Ok(h)) => {
+                    format!("删除了工作区 {cwd}（分支 {branch} 保留在 {h}，继续时从分支重建）")
+                }
+                _ => format!("删除了工作区 {cwd}"),
+            });
         }
         if br == git::BranchTidy::Deleted {
             said.push(format!("删除了已合并的分支 {branch}"));

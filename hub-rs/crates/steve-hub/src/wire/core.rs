@@ -589,6 +589,7 @@ impl Domain for CoreDomain {
     fn spawn_background(&self) -> bool {
         tokio::spawn(self.core.clone().watch_releases());
         tokio::spawn(self.core.clone().run_housekeeping());
+        tokio::spawn(self.core.clone().run_workspace_watch());
         tokio::spawn(self.core.clone().run_stall_watch());
         // ST-34: items made before the categories, or left without one, get theirs
         tokio::spawn(self.core.clone().backfill_kinds_all());
@@ -616,6 +617,16 @@ impl Domain for CoreDomain {
     }
     async fn kinds_backfill(&self, ws: &str, dry: bool) -> BResult<Value> {
         let r = self.core.backfill_kinds(ws, dry).await.map_err(cerr)?;
+        serde_json::to_value(r).map_err(|e| BackendError::msg(e.to_string()))
+    }
+    async fn disk_report(&self) -> BResult<Value> {
+        let c = self.core.clone();
+        let r = blocking(move || c.disk_report()).await?;
+        serde_json::to_value(r).map_err(|e| BackendError::msg(e.to_string()))
+    }
+    async fn reclaim_workspaces(&self) -> BResult<Value> {
+        let c = self.core.clone();
+        let r = blocking(move || c.reclaim_workspaces()).await?;
         serde_json::to_value(r).map_err(|e| BackendError::msg(e.to_string()))
     }
     async fn kinds_review(&self, ws: &str) -> BResult<Value> {

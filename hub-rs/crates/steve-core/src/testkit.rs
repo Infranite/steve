@@ -276,6 +276,12 @@ impl Kit {
         /* a stopped agent reaches the card at once unless a test lets Steve continue it (`takeover`) */
         cfg.takeover_continues = 0;
         cfg.gh = "/nonexistent/gh".into();
+        /* the machine's free space decides nothing unless a test sets thresholds (`workspace`) */
+        cfg.disk = crate::workspace::DiskPolicy {
+            floor: 0,
+            low: 0,
+            idle_ms: i64::MAX,
+        };
         f(&mut cfg);
         for d in [&cfg.worktrees, &cfg.scratch] {
             std::fs::create_dir_all(d).unwrap();

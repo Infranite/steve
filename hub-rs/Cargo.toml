@@ -10,3 +10,8 @@ version = "0.1.0"
 publish = false
 
 [workspace.dependencies]
+
+# Debug and test builds keep line tables (file:line in backtraces) but not full debug info: every task
+# worktree builds its own `target/`, and a test build of the workspace is about 19% smaller (ST-45).
+[profile.dev]
+debug = "line-tables-only"

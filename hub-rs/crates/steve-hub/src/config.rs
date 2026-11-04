@@ -47,6 +47,8 @@ pub struct Config {
     /// `STEVE_TAKEOVER_CONTINUES`: how often Steve continues a stopped agent before the user hears of it
     /// (`None`: the core's default).
     pub takeover_continues: Option<u32>,
+    /// `STEVE_DISK_FLOOR_GB`, `STEVE_DISK_LOW_GB`, `STEVE_WORKTREE_IDLE_HOURS` (task workspaces).
+    pub disk: steve_core::workspace::DiskPolicy,
     /// `STEVE_GH`: the GitHub CLI that follows Release builds (`None`: looked up by the core).
     pub gh: Option<PathBuf>,
     pub claude_executable: String,
@@ -346,6 +348,7 @@ impl Config {
             dev_login: get("STEVE_DEV_LOGIN").as_deref() == Some("1"),
             no_resume: get("STEVE_NO_RESUME").as_deref() == Some("1"),
             takeover_continues: get("STEVE_TAKEOVER_CONTINUES").and_then(|v| v.parse().ok()),
+            disk: steve_core::workspace::DiskPolicy::from_vars(&get),
             gh: get("STEVE_GH").filter(|v| !v.is_empty()).map(PathBuf::from),
             claude_executable: env("CLAUDE_CODE_EXECUTABLE", "/opt/homebrew/bin/claude"),
             codex_executable: get("CODEX_EXECUTABLE").unwrap_or_else(|| {

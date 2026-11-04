@@ -1,4 +1,5 @@
 /* Bot 菜单与设置：Bot 是独立菜单；设置是分类页。所有改动都写到 Hub，也都可以直接告诉 Steve。 */
+import { WorkspaceDisk } from "@/disk-settings"
 import { useEffect, useState, type ReactNode } from "react"
 import { cn } from "cn"
 import { ChevronRightIcon, PlusIcon, MoreHorizontalIcon, CopyIcon, TrashIcon, SparklesIcon, SlidersHorizontalIcon, ListChecksIcon, TagIcon, BellIcon, SunMoonIcon, DatabaseIcon, InfoIcon, PencilIcon, CheckIcon, LayersIcon, FolderIcon } from "lucide-react"
@@ -347,6 +348,7 @@ function Pane({ id }: { id: string }) {
     <section><SectionLabel>Hub 上的数据</SectionLabel><Group>
       <Row title="数据位置" sub={<span className="font-mono">~/.steve/data/steve.sqlite3</span>} />
       <Row title="备份" sub="每天 03:30 备份到 ~/.steve/backups，保留 14 天；每次发布前也会备份一次" /></Group></section>
+    <WorkspaceDisk />
     <section><SectionLabel>保留期限</SectionLabel><Group>
       <Row title={<>会话记录<span className="ml-1.5 rounded bg-muted px-1.5 py-px text-[11px] font-normal text-muted-foreground">清理任务还没做</span></>}><Sel v={c.keepSess} o={["90 天", "1 年", "永久"].map((x) => [x, x])} on={(v) => setSetting({ keepSess: v })} /></Row></Group></section>
     <section><SectionLabel>清理</SectionLabel><Group>

@@ -8,7 +8,7 @@
 
 use std::collections::HashSet;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use crate::git::git;
 pub use crate::upstream::{Presence, fetch};
@@ -208,7 +208,7 @@ fn exact_diff(dir: &Path, base: &str, head: &str) -> Result<String, String> {
 
 /// The tree `git merge-tree` makes of `ours` and `theirs`: `None` when they conflict.
 fn merges_to(dir: &Path, ours: &str, theirs: &str) -> Result<Option<String>, String> {
-    let out = Command::new("git")
+    let out = crate::git::command()
         .arg("-C")
         .arg(dir)
         .args(["merge-tree", "--write-tree", "--no-messages", ours, theirs])

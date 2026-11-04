@@ -130,7 +130,7 @@ pub(crate) fn fingerprint(cwd: Option<&str>) -> Option<String> {
 
 fn fingerprint_with(cwd: &str, index: &Path) -> Option<String> {
     let run = |args: &[&str]| -> Option<String> {
-        let o = std::process::Command::new("git")
+        let o = crate::git::command()
             .arg("-C")
             .arg(cwd)
             .args(args)
@@ -143,7 +143,7 @@ fn fingerprint_with(cwd: &str, index: &Path) -> Option<String> {
     };
     let head = run(&["rev-parse", "HEAD"])?;
     /* start from the item's index (its stat cache keeps this fast), then take in the worktree */
-    let real = std::process::Command::new("git")
+    let real = crate::git::command()
         .arg("-C")
         .arg(cwd)
         .args(["rev-parse", "--path-format=absolute", "--git-path", "index"])
