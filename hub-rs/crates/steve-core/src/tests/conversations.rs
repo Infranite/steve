@@ -181,7 +181,13 @@ async fn work_from_a_chat_becomes_an_item_only_when_the_host_allows_it() {
         .filter(|d| d.kind == "propose" && d.status == "open")
         .collect();
     assert_eq!(open.len(), 1, "a card asks you first");
-    // your yes starts it with what it would have started with: the conversation it came from
+    // your yes, however much was said since, starts it with what it would have started with: the
+    // conversation it came from
+    for n in 0..210 {
+        k.db()
+            .message_add_in(WS, SPACE, "me", &format!("闲聊 {n}"), None, &json!({}))
+            .unwrap();
+    }
     k.core.resolve(&open[0].id, "yes", "", "me").unwrap();
     let ses = k.db().store().sessions().of_item(&id).unwrap();
     assert_eq!(ses.len(), 1, "it runs now");
@@ -203,8 +209,26 @@ async fn work_from_a_chat_becomes_an_item_only_when_the_host_allows_it() {
             ..guest(true, true)
         },
     );
-    let ms = settle(&k, SPACE, 6).await;
-    let own = ms[5].item_id.clone().expect("your item");
+    let mut own = None;
+    for _ in 0..300 {
+        own = k
+            .db()
+            .store()
+            .with_conn(|c| {
+                Ok(c.query_row(
+                    "SELECT item_id FROM thread_items WHERE origin_msg = ?",
+                    [&mine],
+                    |r| r.get::<_, String>(0),
+                )
+                .ok())
+            })
+            .unwrap();
+        if own.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let own = own.expect("your item");
     assert_ne!(own, id);
     assert_eq!(k.db().item(&own).unwrap().unwrap().source.1, "chat");
     assert!(

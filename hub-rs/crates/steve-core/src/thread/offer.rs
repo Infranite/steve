@@ -115,7 +115,17 @@ impl Core {
         goal: &str,
         answer: Option<&Message>,
     ) -> Result<String> {
-        let all = self.conv_messages(ws, &self.conv_of(origin))?;
+        /* what was said up to the origin (or the answer), however much was said since */
+        let all = match self.store().message(origin)? {
+            Some(o) => {
+                let upto = answer.map_or(o.created, |a| a.created.max(o.created));
+                self.store()
+                    .store()
+                    .messages()
+                    .list_until(ws, &o.space, upto, 200)?
+            }
+            None => vec![],
+        };
         let Some(at) = all.iter().position(|m| m.id == origin) else {
             return Ok(format!("这件事来自你和用户的主线对话。\n目标：{goal}"));
         };
@@ -188,9 +198,10 @@ impl Core {
         let goal = self.store().goal(&item.id).unwrap_or_default();
         // an offer taken from an answer grew out of that answer (marked `promoted` with the item)
         let answer = self
-            .conv_messages(&item.workspace_id, &self.conv_of(&ti.origin_msg))?
-            .into_iter()
-            .find(|m| m.meta.get("promoted").and_then(Value::as_str) == Some(item.id.as_str()));
+            .store()
+            .store()
+            .messages()
+            .promoted_to(&item.workspace_id, &item.id)?;
         let opening =
             self.opening_for(&item.workspace_id, &ti.origin_msg, &goal, answer.as_ref())?;
         let refs = |m: &Message, key: &str| -> Vec<FileRef> {

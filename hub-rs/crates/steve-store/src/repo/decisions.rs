@@ -174,6 +174,39 @@ impl Messages<'_> {
         })
     }
 
+    /// The newest `limit` messages of a conversation up to `until` (created, inclusive), oldest first:
+    /// what was said around a message however much was said after it.
+    pub fn list_until(
+        &self,
+        ws: &str,
+        space: &str,
+        until: i64,
+        limit: i64,
+    ) -> Result<Vec<Message>> {
+        self.0.read(|c| {
+            let mut v = all(
+                c,
+                "SELECT * FROM messages WHERE workspace_id = ? AND space = ? AND created <= ? ORDER BY created DESC LIMIT ?",
+                params![ws, space, until, limit],
+                Message::from_row,
+            )?;
+            v.reverse();
+            Ok(v)
+        })
+    }
+
+    /// The answer an item was taken from (its offer, marked `promoted` with the item), if any.
+    pub fn promoted_to(&self, ws: &str, item: &str) -> Result<Option<Message>> {
+        self.0.read(|c| {
+            one(
+                c,
+                "SELECT * FROM messages WHERE workspace_id = ? AND json_extract(meta, '$.promoted') = ? ORDER BY created LIMIT 1",
+                params![ws, item],
+                Message::from_row,
+            )
+        })
+    }
+
     /// Returns the id. `meta` is stored only if truthy (TS defaults: no item, meta null, space `steve`).
     pub fn add(
         &self,
