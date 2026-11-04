@@ -25,6 +25,7 @@ fn project(t: &T, dir: &std::path::Path, name: &str) -> String {
     let rel = Release {
         kind: "script".into(),
         cmd: script.to_string_lossy().into(),
+        done_when: None,
     };
     t.kit
         .db()

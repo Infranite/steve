@@ -49,6 +49,8 @@ pub const CLOSED_MSG: &str = "这个事项已经结束了，需要时先新建�
 /// Operation kinds the core knows. Modules' wrap-ups (a PR merge) run as `hooks.accepted`.
 pub const OP_RELEASE: &str = "release";
 pub const OP_HOOKS: &str = "hooks.accepted";
+/// A build the completion tag triggered (a GitHub Release): followed on its own, never holds a close.
+pub const OP_BUILD: &str = "release.build";
 
 /// A closing intent while `phase = closing`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -153,12 +155,33 @@ fn fingerprint_with(cwd: &str, index: &Path) -> Option<String> {
     }
     run(&["add", "--all"])?;
     let tree = run(&["write-tree"])?;
-    Some(format!("{head}:{tree}"))
+    Some(
+        match crate::upstream::own_change(Path::new(cwd), &head, &tree) {
+            Some((base, patch)) => format!("{head}:{tree}:{base}:{patch}"),
+            None => format!("{head}:{tree}"),
+        },
+    )
 }
 
 /// `HEAD` of a fingerprint.
 pub(crate) fn fingerprint_head(f: &str) -> &str {
     f.split(':').next().unwrap_or("")
+}
+
+/// The frozen result is still what the worktree holds (`now` its fingerprint now): the same content,
+/// or the same own change on another base (a rebase onto a newer main). A new `HEAD` over the same
+/// content — a reset onto the merged commit, an amended message — is the same result.
+pub(crate) fn same_result(frozen: &str, now: &str) -> bool {
+    let (a, b) = (crate::upstream::parse(frozen), crate::upstream::parse(now));
+    if !a.tree.is_empty() && a.tree == b.tree {
+        return true;
+    }
+    matches!((a.own, b.own), (Some((_, x)), Some((_, y))) if x == y)
+}
+
+/// The worktree moved away from the frozen fingerprint `frozen` (no frozen fingerprint: never).
+pub(crate) fn result_moved(cwd: Option<&str>, frozen: Option<&str>) -> bool {
+    frozen.is_some_and(|f| !fingerprint(cwd).is_some_and(|n| same_result(f, &n)))
 }
 
 /// What blocks a closing commit, for the projection (`closing.waiting`) and the logs.
@@ -673,6 +696,9 @@ impl Tx<'_> {
             g.operation = true;
         }
         for o in self.db().store().items().operations(&i.id, i.cycle)? {
+            if o.kind == OP_BUILD {
+                continue;
+            }
             /* any effect of this cycle still in flight or of unknown result holds every kind of closing, whatever
              * revision it was for and whether or not it was required: it is settled (or checked by you) first,
              * an unknown effect is never closed over. A completion also needs each of its own requirements done. */
@@ -690,7 +716,7 @@ impl Tx<'_> {
                 g.acceptance = true;
             }
             if c.frozen_revision != i.revision
-                || (c.fingerprint.is_some() && fingerprint(i.cwd.as_deref()) != c.fingerprint)
+                || result_moved(i.cwd.as_deref(), c.fingerprint.as_deref())
             {
                 g.changed = true;
             }
@@ -714,8 +740,20 @@ impl Tx<'_> {
         }
         let g = self.lc_gate(&i, &c)?;
         if g.changed && !g.turn {
-            /* the frozen result moved after it was frozen (and nothing is still at work on it) */
-            self.lc_invalidate(item_id, "冻结之后结果又变了，需要重新交付")?;
+            /* the frozen result moved after it was frozen (and nothing is still at work on it): say what
+             * moved, and tell the agent, which may well believe its delivery still stands */
+            let what = match (&c.fingerprint, fingerprint(i.cwd.as_deref())) {
+                (Some(f), Some(n)) => crate::upstream::describe_change(
+                    Path::new(i.cwd.as_deref().unwrap_or("")),
+                    f,
+                    &n,
+                ),
+                (Some(_), None) => "工作区不见了".into(),
+                _ => "交付的版本变了".into(),
+            };
+            let why = format!("冻结之后结果又变了：{what}，需要重新交付");
+            self.lc_invalidate(item_id, &why)?;
+            self.takeover_invalidated(item_id, &why)?;
             return Ok(false);
         }
         if g.input && !g.turn {
@@ -1013,6 +1051,7 @@ pub(crate) fn lifecycle_view(t: &Tx, i: &Item) -> Result<Value> {
         }
         for o in t.db().store().items().operations(&i.id, i.cycle)? {
             match o.status.as_str() {
+                "running" if o.kind == OP_BUILD => {}
                 "running" => active += 1,
                 "unknown" => push("unknown_effect", format!("{}：结果未知，待核对", o.label)),
                 "failed" if o.required && o.revision == i.revision && i.phase == CLOSING => {

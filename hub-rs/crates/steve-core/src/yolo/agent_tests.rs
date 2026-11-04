@@ -52,6 +52,7 @@ fn started(k: &Kit, script: &std::path::Path) -> (String, String) {
     let rel = Release {
         kind: "script".into(),
         cmd: script.to_string_lossy().into(),
+        done_when: None,
     };
     let p = k
         .db()

@@ -267,6 +267,9 @@ impl Kit {
         let mut cfg = CoreConfig::for_home(dir.path());
         /* the boot resume runs when a test says so (`core.fire_resume()`), not on a clock */
         cfg.resume_delay = Duration::from_secs(3600);
+        /* a stopped agent reaches the card at once unless a test lets Steve continue it (`takeover`) */
+        cfg.takeover_continues = 0;
+        cfg.gh = "/nonexistent/gh".into();
         f(&mut cfg);
         for d in [&cfg.worktrees, &cfg.scratch] {
             std::fs::create_dir_all(d).unwrap();

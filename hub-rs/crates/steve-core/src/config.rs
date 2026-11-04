@@ -42,6 +42,25 @@ pub struct CoreConfig {
     /// `STEVE_NO_RESUME=1`: never run agents at boot (no automatic resume, no flushing of held prompts).
     /// Always set when a Hub opens a copy of the production database.
     pub no_resume: bool,
+    /// How many times in a row Steve continues an agent that stopped without delivering or asking
+    /// before the user hears of it (`takeover`); anything the user does on the item starts over.
+    pub takeover_continues: u32,
+    /// `STEVE_GH`: the GitHub CLI that follows Release builds.
+    pub gh: PathBuf,
+}
+
+/// The GitHub CLI: `STEVE_GH`, else the first of the usual places that exists, else `gh` on `PATH`.
+fn gh_cli() -> PathBuf {
+    if let Ok(g) = std::env::var("STEVE_GH")
+        && !g.is_empty()
+    {
+        return g.into();
+    }
+    ["/opt/homebrew/bin/gh", "/usr/local/bin/gh", "/usr/bin/gh"]
+        .iter()
+        .map(PathBuf::from)
+        .find(|p| p.exists())
+        .unwrap_or_else(|| "gh".into())
 }
 
 fn env(k: &str, d: &str) -> String {
@@ -124,6 +143,8 @@ impl CoreConfig {
             debug_route: false,
             resume_delay: Duration::from_secs(3),
             no_resume: false,
+            takeover_continues: 2,
+            gh: gh_cli(),
         }
     }
 

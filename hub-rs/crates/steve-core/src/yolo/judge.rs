@@ -329,6 +329,8 @@ pub struct Stall {
     pub attempts: u32,
     /// The agent's last words look like a question; the answer comes from [`Ask`].
     pub asked: Option<Ask>,
+    /// Steve already continued it on its own (`crate::takeover`) and it still stopped.
+    pub steve_tried: bool,
 }
 
 /// The model's answer for the user (§2.4 step 2).
@@ -749,6 +751,12 @@ fn stall(s: &Stall, p: &Policy, env: &Env) -> Verdict {
     }
     if s.no_progress >= 3 {
         return decline("continue.stuck", "连续 3 次自动继续没有进展");
+    }
+    if s.steve_tried {
+        return decline(
+            "continue.steve",
+            "Steve 已经让它继续过，仍然没有交付，留给你看",
+        );
     }
     match &s.cause {
         StallCause::Stopped => {

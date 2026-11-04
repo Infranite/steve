@@ -44,6 +44,11 @@ pub struct Config {
     pub dev_login: bool,
     /// Don't resume interrupted turns or send held prompts at boot (set when running on a copy of a real database).
     pub no_resume: bool,
+    /// `STEVE_TAKEOVER_CONTINUES`: how often Steve continues a stopped agent before the user hears of it
+    /// (`None`: the core's default).
+    pub takeover_continues: Option<u32>,
+    /// `STEVE_GH`: the GitHub CLI that follows Release builds (`None`: looked up by the core).
+    pub gh: Option<PathBuf>,
     pub claude_executable: String,
     /// `CODEX_EXECUTABLE`: `codex exec` for Steve's judgments when they run on Codex.
     pub codex_executable: String,
@@ -340,6 +345,8 @@ impl Config {
             },
             dev_login: get("STEVE_DEV_LOGIN").as_deref() == Some("1"),
             no_resume: get("STEVE_NO_RESUME").as_deref() == Some("1"),
+            takeover_continues: get("STEVE_TAKEOVER_CONTINUES").and_then(|v| v.parse().ok()),
+            gh: get("STEVE_GH").filter(|v| !v.is_empty()).map(PathBuf::from),
             claude_executable: env("CLAUDE_CODE_EXECUTABLE", "/opt/homebrew/bin/claude"),
             codex_executable: get("CODEX_EXECUTABLE").unwrap_or_else(|| {
                 ["/opt/homebrew/bin/codex", "/usr/local/bin/codex"]

@@ -38,6 +38,7 @@ fn a_release_script_does_not_outlive_its_test_kit() {
     let rel = Release {
         kind: "script".into(),
         cmd: script.to_string_lossy().into(),
+        done_when: None,
     };
     let p = k
         .db()

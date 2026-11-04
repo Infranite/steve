@@ -93,6 +93,8 @@ async fn start() -> Env {
         ("STEVE_HOST", "127.0.0.1".into()),
         ("STEVE_PUBLIC_URL", format!("http://127.0.0.1:{port}")),
         ("STEVE_DEV_LOGIN", "1".into()),
+        // the fake agent's stops reach the card as they did; Steve's own continues are tested in steve-core
+        ("STEVE_TAKEOVER_CONTINUES", "0".into()),
         ("STEVE_REPO", "/nonexistent".into()),
         ("STEVE_VAULT_KEYSTORE", "file".into()),
         ("STEVE_FORBID_REAL_HOSTS", "1".into()),

@@ -106,11 +106,20 @@ pub struct Avatar {
     pub round: Option<Number>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Release {
     pub kind: String,
     pub cmd: String,
+    /// What counts as finished for an accepted result, instead of a release by `cmd` on this machine:
+    /// `merge` (its commits are on the remote default branch) or `tag` (merged, and a pushed tag
+    /// contains them). A build the tag triggers is followed on its own and never holds the close.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub done_when: Option<String>,
 }
+
+/// [`Release::done_when`] values.
+pub const DONE_MERGE: &str = "merge";
+pub const DONE_TAG: &str = "tag";
 
 fn default_source() -> (String, String) {
     ("对话".into(), "chat".into())

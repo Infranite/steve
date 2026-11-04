@@ -80,6 +80,7 @@ fn release_project(k: &Kit) -> String {
     let rel = Release {
         kind: "script".into(),
         cmd: script.to_string_lossy().into(),
+        done_when: None,
     };
     k.db()
         .project_create(
@@ -216,6 +217,7 @@ fn a_missing_release_script_fails_the_item() {
     let rel = Release {
         kind: "script".into(),
         cmd: "/nonexistent/release.sh".into(),
+        done_when: None,
     };
     let p = k
         .db()
@@ -246,6 +248,7 @@ fn a_conflicting_rebase_before_a_release_goes_back_to_the_agent() {
     let rel = Release {
         kind: "script".into(),
         cmd: k.home().join("release.sh").to_string_lossy().into(),
+        done_when: None,
     };
     let p = k
         .db()

@@ -83,6 +83,11 @@ export function ProjectView({ id }: { id: string }) {
             {p.kind === "git" && <Row title="每个事项单独开分支" sub={`在 worktree 里干活，分支名 steve/<编号>，不直接改当前分支`}><Switch checked={p.worktree} onCheckedChange={(v) => patchProject(p.id, { worktree: v })} data-proj-worktree /></Row>}
             {st.yolo && <Row title="YOLO 模式" sub={p.kind === "git" && p.worktree ? "这个项目的事项：跟随全局，或单独设成关、YOLO、完全放开" : "没有 worktree，Agent 直接改真实目录，默认关"} data-proj-yolo><YoloProjectSelect id={p.id} realDir={p.kind !== "git" || !p.worktree} /></Row>}
             <Row title="发布" sub={p.release ? <span>验收通过后可以申请发布：<span className="font-mono">{home(p.release.cmd)}</span></span> : "没有配置发布动作；事项验收后就结束"} />
+            {p.release && p.kind === "git" && p.worktree && <Row title="完成标准" data-proj-done
+              sub={p.release.done_when ? "核对远端后自动收尾，构建另行跟踪" : "验收后在本机发布上线才结束"}>
+              <Select align="end" testId="proj-done" value={p.release.done_when ?? "local"}
+                onChange={(v) => { const r = p.release!; patchProject(p.id, { release: v === "local" ? { kind: r.kind, cmd: r.cmd } : { ...r, done_when: v as "merge" | "tag" } }) }}
+                options={[{ v: "local", l: "本机发布上线" }, { v: "merge", l: "PR 合并" }, { v: "tag", l: "PR 合并并推送 tag" }]} /></Row>}
           </Group>
         </section>
       </div>

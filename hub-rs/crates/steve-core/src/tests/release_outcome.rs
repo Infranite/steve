@@ -20,6 +20,7 @@ fn project(k: &Kit, path: &std::path::Path) -> String {
     let rel = Release {
         kind: "script".into(),
         cmd: script.to_string_lossy().into(),
+        done_when: None,
     };
     k.db()
         .project_create(
@@ -197,6 +198,7 @@ fn a_missing_script_records_not_released_with_a_fail_card() {
     let rel = Release {
         kind: "script".into(),
         cmd: "/nonexistent/release.sh".into(),
+        done_when: None,
     };
     let p = k
         .db()

@@ -80,6 +80,12 @@ fn core_config(cfg: &Config) -> steve_core::CoreConfig {
     c.steve_repo = cfg.steve_repo.clone();
     c.no_resume = cfg.no_resume;
     c.debug_route = cfg.debug_route;
+    if let Some(n) = cfg.takeover_continues {
+        c.takeover_continues = n;
+    }
+    if let Some(g) = &cfg.gh {
+        c.gh = g.clone();
+    }
     c
 }
 

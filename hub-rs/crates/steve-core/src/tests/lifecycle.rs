@@ -697,6 +697,7 @@ pub(super) fn delivered_in_git(k: &Kit, commit: bool) -> (super::Delivered, std:
     let rel = crate::repo::Release {
         kind: "script".into(),
         cmd: k.home().join("release.sh").to_string_lossy().into(),
+        done_when: None,
     };
     let gp = k
         .db()
