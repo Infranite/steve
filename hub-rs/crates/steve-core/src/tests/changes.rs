@@ -4,6 +4,7 @@ use crate::changes::Target;
 use crate::error::msg;
 use crate::repo::WS;
 use crate::testkit::Kit;
+use crate::tests::flows::kind_id;
 use serde_json::json;
 
 fn target(kind: &str, id: Option<&str>) -> Target {
@@ -270,18 +271,19 @@ async fn tags_are_renamed_moved_and_removed_only_when_unused_then_undone() {
     k.db().tag_create(WS, "旧", "主题", "不用了", "你").unwrap();
     let used = k.db().tag_create(WS, "在用", "领域", "", "你").unwrap();
     let item = k.item("run", "x", None);
+    // every item keeps exactly one category tag next to the others
     k.db()
-        .set_item_tags(&item, std::slice::from_ref(&used.id))
+        .set_item_tags(&item, &[used.id.clone(), kind_id(&k, "feat")])
         .unwrap();
     k.gw.set(|_, _| {
-        Ok(r#"{"edit":[{"name":"UI","newName":"前端","cat":"类型"},{"name":"在用","newName":"旧"}],"remove":["旧","在用","没有"]}"#.into())
+        Ok(r#"{"edit":[{"name":"UI","newName":"前端","cat":"主题"},{"name":"在用","newName":"旧"}],"remove":["旧","在用","没有"]}"#.into())
     });
     let p = k
         .core
         .draft(
             WS,
             target("tags", None),
-            "UI 改名前端放到类型里，删掉旧的和在用的",
+            "UI 改名前端放到主题里，删掉旧的和在用的",
         )
         .await
         .unwrap();
@@ -289,7 +291,7 @@ async fn tags_are_renamed_moved_and_removed_only_when_unused_then_undone() {
         serde_json::to_value(&p.changes).unwrap(),
         json!([
             {"label": "改名 · UI", "from": "UI", "to": "前端"},
-            {"label": "分类 · UI", "from": "领域", "to": "类型"},
+            {"label": "分类 · UI", "from": "领域", "to": "主题"},
             {"label": "删除标签", "from": "旧", "to": "—"},
             {"label": "删除 · 在用", "from": "在用", "to": "（没有删：还有 1 处在用，可以在标签页合并到别的标签）"}
         ]),
@@ -297,7 +299,7 @@ async fn tags_are_renamed_moved_and_removed_only_when_unused_then_undone() {
     );
     k.core.apply(&p.id, "me", WS).unwrap();
     let t = k.db().tag(&ui.id).unwrap().unwrap();
-    assert_eq!((t.name.as_str(), t.cat.as_str()), ("前端", "类型"));
+    assert_eq!((t.name.as_str(), t.cat.as_str()), ("前端", "主题"));
     assert!(k.db().tag_by_name(WS, "旧").unwrap().is_none());
     assert!(k.db().tag(&used.id).unwrap().is_some());
     k.core.undo(&p.id, "me", WS).unwrap();
