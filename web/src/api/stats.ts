@@ -35,6 +35,7 @@ export type ItemRow = {
   lead_ms: number | null; cycle_ms: number | null; wait_ms: number | null; agent_ms: number | null; turns: number; reworks: number; first_pass: boolean | null; tokens: number; est: number; reported: number
 }
 export type ItemSort = "est" | "tokens" | "lead" | "wait" | "reworks" | "done_at"
+export type ItemOnly = "done" | "created"
 export type Usage = { input: number; output: number; cache_read: number; cache_write: number; total: number; hit_rate: number | null; est: number; reported: number; unpriced_tokens: number; rough: boolean }
 export type ItemFacts = {
   created: number; first_turn: number | null; first_deliver: number | null; last_deliver: number | null; accepted: number | null; done_at: number | null; dropped_at: number | null
@@ -61,7 +62,8 @@ export const stats = {
   series: (x: Filter, metric: Metric, group: Group) => req<Series>("GET", "/stats/series" + and(x, { metric, group })),
   usage: (x: Filter, by: "model" | "bot" | "project" | "source" | "purpose" | "harness") => req<{ by: string; rows: UsageRow[] }>("GET", "/stats/breakdown" + and(x, { by })),
   counts: (x: Filter, by: "tool" | "decision_kind" | "fail_reason") => req<{ by: string; rows: CountRow[] }>("GET", "/stats/breakdown" + and(x, { by })),
-  items: (x: Filter, sort: ItemSort, cursor?: string, limit = 50) => req<{ rows: ItemRow[]; total: number; next: string | null }>("GET", "/stats/items" + and(x, { sort, cursor, limit })),
+  /** `only`: just the items behind `throughput.done` / `throughput.created` (the drill-down lists) */
+  items: (x: Filter, sort: ItemSort, cursor?: string, limit = 50, only?: ItemOnly) => req<{ rows: ItemRow[]; total: number; next: string | null }>("GET", "/stats/items" + and(x, { sort, cursor, limit, only })),
   item: (id: string, brief = false) => req<ItemDetail>("GET", `/stats/items/${encodeURIComponent(id)}` + (brief ? "?brief=1" : "")),
   session: (id: string) => req<SessionTotals>("GET", `/stats/sessions/${encodeURIComponent(id)}`),
   prices: () => req<Prices>("GET", "/stats/prices"),

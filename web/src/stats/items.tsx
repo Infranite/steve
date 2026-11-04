@@ -1,10 +1,10 @@
 /* 事项表（stats.md §6.3 第 8 条）：事项号、标题、状态点、前置、Agent、等你、返工、tokens、估算费用；
- * 默认按费用降序，50 行一页；点一行进下钻 #/stats/items/:id。 */
+ * 默认按费用降序，50 行一页；点一行进下钻 #/stats/items/:id。`only` 是概览的下钻（ST-40）：只列区间内完成或新建的那批。 */
 import { useState } from "react"
 import { cn } from "cn"
 import { Button } from "@/components/ui/button"
 import { Spinner } from "@/components/ui/spinner"
-import { stats, type Filter, type ItemSort } from "@/api/stats"
+import { stats, type Filter, type ItemOnly, type ItemSort } from "@/api/stats"
 import { go, ItemNo, StatusDot } from "@/ui"
 import { Select } from "@/view-shared"
 import { Est } from "@/stats/kpi"
@@ -13,20 +13,20 @@ import { fmtMs, fmtN, fmtUsd, useStats } from "@/stats/format"
 
 const SORTS: [ItemSort, string][] = [["est", "按估算费用"], ["tokens", "按 tokens"], ["lead", "按前置时间"], ["wait", "按等你的时间"], ["reworks", "按返工次数"], ["done_at", "按完成时间"]]
 
-export function ItemsTable({ f, fkey, live }: { f: Filter; fkey: string; live: boolean }) {
-  const [sort, setSort] = useState<ItemSort>("est")
+export function ItemsTable({ f, fkey, live, only, sort0 = "est" }: { f: Filter; fkey: string; live: boolean; only?: ItemOnly; sort0?: ItemSort }) {
+  const [sort, setSort] = useState<ItemSort>(sort0)
   const [cursor, setCursor] = useState<string[]>([])
   const at = cursor[cursor.length - 1]
-  const [d] = useStats(() => stats.items(f, sort, at), [fkey, sort, at], live)
+  const [d] = useStats(() => stats.items(f, sort, at, 50, only), [fkey, sort, at, only], live)
   return (
     <div data-items-table>
       <div className="mb-2 flex items-center gap-2">
         <Select value={sort} onChange={(v) => { setSort(v as ItemSort); setCursor([]) }} options={SORTS.map(([v, l]) => ({ v, l }))} testId="items-sort" />
-        {d.s === "ok" && <span className="type-footnote text-muted-foreground">共 {d.v.total} 件（区间内完成或有活动）</span>}
+        {d.s === "ok" && <span className="type-footnote text-muted-foreground" data-items-total={d.v.total}>共 {d.v.total} 件（{only === "done" ? "区间内完成" : only === "created" ? "区间内新建" : "区间内完成或有活动"}）</span>}
       </div>
       {d.s === "loading" ? <div className="flex h-24 items-center justify-center"><Spinner className="size-4 text-muted-foreground" /></div>
         : d.s !== "ok" ? <div className="py-6 type-callout text-muted-foreground" role="alert">{d.s === "error" ? d.msg : "读不到事项"}</div>
-        : !d.v.rows.length ? <div className="py-6 type-callout text-muted-foreground">这段时间没有事项在动。</div>
+        : !d.v.rows.length ? <div className="py-6 type-callout text-muted-foreground">{only === "done" ? "这段时间没有完成的事项。" : only === "created" ? "这段时间没有新建的事项。" : "这段时间没有事项在动。"}</div>
         : <>
           <Table label="事项" min={760} head={<tr><th className={cn(th, "w-20")}>事项</th><th className={th}>标题</th><th className={cn(th, "pl-4 text-right")}>前置</th><th className={cn(th, "pl-4 text-right")}>Agent</th><th className={cn(th, "pl-4 text-right")}>等你</th><th className={cn(th, "pl-4 text-right")}>返工</th><th className={cn(th, "pl-4 text-right")}>tokens</th><th className={cn(th, "pl-4 text-right")}><span className="inline-flex items-center gap-1">估算费用<Est /></span></th></tr>}>
             {d.v.rows.map((r) => (

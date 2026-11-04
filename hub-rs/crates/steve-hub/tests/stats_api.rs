@@ -300,6 +300,10 @@ async fn stats_routes() {
     assert_eq!((s, v), (400, json!({"error": "参数不对：limit"})));
     let (s, v) = e.call("GET", "/api/stats/items", None).await;
     assert_eq!((s, &v["total"]), (200, &json!(0)), "{v}");
+    let (s, v) = e.call("GET", "/api/stats/items?only=nope", None).await;
+    assert_eq!((s, v), (400, json!({"error": "参数不对：only"})));
+    let (s, v) = e.call("GET", "/api/stats/items?only=done", None).await;
+    assert_eq!((s, &v["total"]), (200, &json!(0)), "{v}");
 
     /* the price table */
     let (s, v) = e.call("GET", "/api/stats/prices", None).await;

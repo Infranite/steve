@@ -33,6 +33,7 @@ import { BotAvatar, BotName, Chips, closeSheet, Composer, DecisionCard, Empty, g
 import { ChoiceCards, ItemRow, PlanBar, ProjectChip, Select, selected } from "@/view-shared"
 import { choiceText, YoloItemSwitch, YoloMark } from "@/yolo/badges"
 import { YoloPill, yoloState } from "@/yolo/switch"
+import { RunState } from "@/yolo/status"
 import { cn } from "cn"
 import { ArchiveIcon, BanIcon, BookOpenIcon, BotIcon, CalendarIcon, ChartNoAxesColumnIcon, CheckIcon, ChevronDownIcon, ChevronRightIcon, CircleCheckIcon, ContactRoundIcon, CopyIcon, DownloadIcon, FolderIcon, GitPullRequestIcon, KeyRoundIcon, LinkIcon, ListIcon, LockIcon, MailIcon, MessageSquareIcon, MessagesSquareIcon, MinusIcon, MoreHorizontalIcon, PauseIcon, PencilIcon, PlayIcon, PlugIcon, PlusIcon, RadioIcon, RotateCcwIcon, SearchIcon, SettingsIcon, SquareIcon, SquareTerminalIcon, StarIcon, TrashIcon, UploadIcon, UserRoundIcon, WorkflowIcon, XIcon, ZapIcon } from "lucide-react"
 import { Fragment, useEffect, useRef, useState, type ReactNode } from "react"
@@ -55,8 +56,9 @@ export function InboxView() {
   const xs = p.filter((c) => ibType === "全部" || WT[c.w.type] === ibType)
   return (
     <Page title="待处理" sub={p.length ? `${p.length} 件需要你决定` : "没有事卡在你这里"} max={640}
-      toolbar={<><YoloPill className="max-sm:hidden" /><Segmented value={ibTab} onChange={(v) => { ibTab = v; r() }} options={["待处理", "已处理"] as const} /></>}>
+      toolbar={<><YoloPill className="max-sm:hidden" /><YoloPill short className="sm:hidden" /><Segmented value={ibTab} onChange={(v) => { ibTab = v; r() }} options={["待处理", "已处理"] as const} /></>}>
       {ibTab === "待处理" && <>
+        {yoloState(st.yolo) === "paused" && <RunState className="mb-6 rounded-lg bg-destructive/5 px-3 py-2" />}
         {p.length > 0 && <Chips className="mb-6" value={typeOpts.includes(ibType) ? ibType : "全部"} onChange={(v) => { ibType = v; r() }} options={typeOpts} />}
         {p.length === 0 && <Empty title="都处理完了" sub="新的决定会出现在这里，也会推送到手机。" />}
         <div className="flex flex-col gap-8">
@@ -87,6 +89,8 @@ let itemsView: "列表" | "看板" | "关系图" = "列表"; let filt = "全部"
 const CLOSED_SHOWN = 8
 /** a filter select in the toolbar: compact, and muted until it narrows the list */
 const FILTER = (set: boolean) => cn("h-7 px-2 text-[12.5px] [&>svg]:opacity-60", set ? "text-foreground" : "text-muted-foreground"); const openGroups = new Set<string>()
+/** the list, filtered: the stats page's drill-downs land here (“在事项页查看”) */
+export const showItems = (f: "全部" | "等你" | "进行中", project?: string, bot?: string) => { filt = f; projF = project ?? "all"; botF = bot ?? "all"; tagF = "all"; kindF = "all"; q = ""; itemsView = "列表"; go("#/items") }
 export const showTag = (id: string) => { if (isKind(tag(id))) kindF = id; else tagF = id; filt = "全部"; itemsView = "列表"; go("#/items") }
 const PRI_ORDER: Record<string, number> = { 高: 0, 中: 1, 低: 2 }
 export function ItemsView() {
