@@ -25,7 +25,7 @@ export type RLaneFact<T> = { value: T; how: { state: "found" } | { state: "defau
 export type RLane = {
   target: { upstream: string; branch: string }; reads: string; fetch_error: string | null
   merge: RLaneFact<"host_queue" | "host_pr" | "push">
-  checks: RLaneFact<{ name: string; from: "required" | "workflow" | "suggested" }[]>
+  checks: RLaneFact<{ name: string; from: "required" | "workflow" | "suggested"; on?: string[] }[]>
   ship: RLaneFact<"tag" | "script" | "merge">
   numbered: { kind: "version" | "notes" | "migrations" | "lockfile"; path: string; evidence: string; handling: string }[]
   pace: { days: number; landed: number; releases: number; authors: number }

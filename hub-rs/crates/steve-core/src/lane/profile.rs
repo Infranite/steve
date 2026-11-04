@@ -21,8 +21,8 @@ use super::target::{Target, target_of};
 use crate::git::git;
 use crate::repo::Release;
 
-/// How long one `gh api` call may take.
-const GH_DEADLINE: Duration = Duration::from_secs(20);
+/// How long one `gh api` call or one read of the repository may take.
+const DEADLINE: Duration = Duration::from_secs(20);
 /// The days [`Pace`] counts.
 const PACE_DAYS: i64 = 7;
 
@@ -75,6 +75,9 @@ pub struct Check {
     /// `required` (the host won't merge without it), `workflow` (runs on pull requests or the merge
     /// queue) or `suggested` (a command the repository has; not run until the user says so).
     pub from: &'static str,
+    /// The events a `workflow` runs on (`pull_request`, `merge_group` …).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub on: Vec<String>,
 }
 
 /// Files every change edits in a way that collides, and how a batch settles them.
@@ -92,7 +95,7 @@ pub struct Pace {
     pub days: i64,
     /// Changes that reached the branch (first-parent commits).
     pub landed: usize,
-    /// Version tags created.
+    /// Version tags created on this branch (reachable from it).
     pub releases: usize,
     pub authors: usize,
 }
@@ -134,11 +137,12 @@ pub fn profile(
             .trim_start_matches("refs/heads/"),
         &commit[..commit.len().min(7)]
     );
-    let files: Vec<String> = git(dir, &["ls-tree", "-r", "--name-only", &commit])?
-        .lines()
+    let files: Vec<String> = local_git(dir, &["ls-tree", "-r", "-z", "--name-only", &commit])?
+        .split('\0')
+        .filter(|f| !f.is_empty())
         .map(String::from)
         .collect();
-    let show = |f: &str| git(dir, &["show", &format!("{commit}:{f}")]);
+    let show = |f: &str| local_git(dir, &["show", &format!("{commit}:{f}")]);
 
     let host = host_of(&target);
     let rules = match &host {
@@ -149,7 +153,7 @@ pub fn profile(
 
     Ok(Profile {
         merge: merge_fact(&host, rules.as_ref()),
-        checks: checks_fact(rules.as_ref(), &workflows, &files, &show),
+        checks: checks_fact(&host, rules.as_ref(), &workflows, &files, &show),
         ship: ship_fact(release, &workflows),
         numbered: numbered(dir, &files),
         pace: pace(dir, &commit)?,
@@ -177,19 +181,22 @@ fn host_of(t: &Target) -> Host {
     }
 }
 
-/// What GitHub says about the branch.
+/// What GitHub says about the branch. `partial`: a part that couldn't be read (classic protection
+/// without admin rights, the merge-queue query): what was read stands, the rest is not known.
 #[derive(Debug, Default)]
 struct Rules {
     queue: bool,
     pr: bool,
     required: BTreeSet<String>,
     evidence: Vec<String>,
+    partial: Vec<String>,
 }
 
 fn github_rules(gh: &Path, slug: &str, branch: &str) -> Result<Rules, String> {
     let mut r = Rules::default();
-    /* rulesets (the only place a merge queue is set up) */
-    let rules = gh_api(gh, &format!("repos/{slug}/rules/branches/{branch}"))
+    let b = encode(branch);
+    /* rulesets */
+    let rules = gh_api(gh, &[&format!("repos/{slug}/rules/branches/{b}")])
         .map_err(|e| format!("读不到 GitHub 上 {branch} 的规则：{}", e.text()))?;
     for x in rules.as_array().into_iter().flatten() {
         match x["type"].as_str() {
@@ -209,11 +216,12 @@ fn github_rules(gh: &Path, slug: &str, branch: &str) -> Result<Rules, String> {
             _ => {}
         }
     }
-    /* classic branch protection */
-    let b = gh_api(gh, &format!("repos/{slug}/branches/{branch}"))
+    /* classic branch protection: `protected` is also true for rulesets alone, whose branch then has
+    no classic protection to read (404) */
+    let br = gh_api(gh, &[&format!("repos/{slug}/branches/{b}")])
         .map_err(|e| format!("读不到 GitHub 上的 {branch} 分支：{}", e.text()))?;
-    if b["protected"].as_bool() == Some(true) {
-        match gh_api(gh, &format!("repos/{slug}/branches/{branch}/protection")) {
+    if br["protected"].as_bool() == Some(true) {
+        match gh_api(gh, &[&format!("repos/{slug}/branches/{b}/protection")]) {
             Ok(p) => {
                 if p.get("required_pull_request_reviews").is_some() {
                     r.pr = true;
@@ -228,12 +236,39 @@ fn github_rules(gh: &Path, slug: &str, branch: &str) -> Result<Rules, String> {
                     }
                 }
             }
-            Err(e) => {
-                return Err(format!(
-                    "{branch} 有分支保护，但读不到细节（需要仓库管理员权限）：{}",
-                    e.text()
-                ));
+            Err(GhError::NotFound(_)) => {}
+            Err(GhError::Other(e)) => r.partial.push(format!(
+                "{branch} 的经典分支保护读不到细节（需要仓库管理员权限）：{e}"
+            )),
+        }
+    }
+    /* a merge queue may be set up either way; GraphQL tells for both */
+    if !r.queue {
+        let (owner, name) = slug.split_once('/').unwrap_or((slug, ""));
+        match gh_api(
+            gh,
+            &[
+                "graphql",
+                "-f",
+                "query=query($o:String!,$n:String!,$b:String!){repository(owner:$o,name:$n){mergeQueue(branch:$b){id}}}",
+                "-f",
+                &format!("o={owner}"),
+                "-f",
+                &format!("n={name}"),
+                "-f",
+                &format!("b={branch}"),
+            ],
+        ) {
+            Ok(v) if v["data"]["repository"].is_object() => {
+                r.queue = v["data"]["repository"]["mergeQueue"].is_object();
             }
+            Ok(v) => r.partial.push(format!(
+                "查不到 {branch} 有没有合并队列：{}",
+                crate::util::js_head(&v.to_string(), 200)
+            )),
+            Err(e) => r
+                .partial
+                .push(format!("查不到 {branch} 有没有合并队列：{}", e.text())),
         }
     }
     if r.queue {
@@ -243,11 +278,23 @@ fn github_rules(gh: &Path, slug: &str, branch: &str) -> Result<Rules, String> {
         r.evidence
             .push(format!("GitHub：{branch} 要求经过 PR 合并"));
     }
-    if !r.queue && !r.pr {
+    if !r.queue && !r.pr && r.partial.is_empty() {
         r.evidence
             .push(format!("GitHub：{branch} 没有要求 PR，也没有合并队列"));
     }
     Ok(r)
+}
+
+/// A branch name as one path segment of a URL.
+fn encode(s: &str) -> String {
+    s.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
 }
 
 fn merge_fact(host: &Host, rules: Option<&Result<Rules, String>>) -> Fact<Merge> {
@@ -265,7 +312,14 @@ fn merge_fact(host: &Host, rules: Option<&Result<Rules, String>>) -> Fact<Merge>
             } else {
                 Merge::Push
             },
-            how: How::Found,
+            /* a queue is the strongest answer; anything less may be missing what couldn't be read */
+            how: if r.queue || r.partial.is_empty() {
+                How::Found
+            } else {
+                How::Unknown {
+                    why: r.partial.join("；"),
+                }
+            },
             evidence: r.evidence.clone(),
         },
         (_, Some(Err(e))) => unknown(Merge::Push, e.clone()),
@@ -306,6 +360,7 @@ fn workflows(files: &[String], show: &dyn Fn(&str) -> Result<String, String>) ->
 }
 
 fn checks_fact(
+    host: &Host,
     rules: Option<&Result<Rules, String>>,
     workflows: &[Workflow],
     files: &[String],
@@ -318,34 +373,35 @@ fn checks_fact(
             value.push(Check {
                 name: n.clone(),
                 from: "required",
+                on: vec![],
             });
         }
         if !r.required.is_empty() {
             evidence.push(format!("GitHub 要求通过：{}", join(&r.required)));
         }
     }
+    let mut unread = vec![];
     for w in workflows {
         match &w.on {
-            Some(on)
-                if on.contains_key("pull_request")
-                    || on.contains_key("pull_request_target")
-                    || on.contains_key("merge_group") =>
-            {
-                value.push(Check {
-                    name: w.file.clone(),
-                    from: "workflow",
-                });
-                evidence.push(format!(
-                    "{} 在 {} 时运行",
-                    w.file,
-                    join(
-                        on.keys()
-                            .filter(|k| k.starts_with("pull_request") || *k == "merge_group")
-                    )
-                ));
+            Some(on) => {
+                let events: Vec<String> = on
+                    .keys()
+                    .filter(|k| k.starts_with("pull_request") || *k == "merge_group")
+                    .cloned()
+                    .collect();
+                if !events.is_empty() {
+                    evidence.push(format!("{} 在 {} 时运行", w.file, events.join("、")));
+                    value.push(Check {
+                        name: w.file.clone(),
+                        from: "workflow",
+                        on: events,
+                    });
+                }
             }
-            Some(_) => {}
-            None => evidence.push(format!("认不出 {} 的触发条件", w.file)),
+            None => {
+                evidence.push(format!("认不出 {} 的触发条件", w.file));
+                unread.push(w.file.as_str());
+            }
         }
     }
     let found = !value.is_empty();
@@ -353,11 +409,21 @@ fn checks_fact(
         value.push(Check {
             name: cmd,
             from: "suggested",
+            on: vec![],
         });
         evidence.push(why);
     }
-    let how = match rules {
-        Some(Err(e)) => How::Unknown { why: e.clone() },
+    let how = match (host, rules) {
+        (_, Some(Err(e))) => How::Unknown { why: e.clone() },
+        (_, Some(Ok(r))) if !r.partial.is_empty() => How::Unknown {
+            why: r.partial.join("；"),
+        },
+        (Host::Other(h), _) => How::Unknown {
+            why: format!("还认不出 {h} 上合并前要过的检查"),
+        },
+        _ if !unread.is_empty() => How::Unknown {
+            why: format!("认不出 {} 的触发条件", unread.join("、")),
+        },
         _ if found => How::Found,
         _ => How::Default,
     };
@@ -428,75 +494,239 @@ fn suggested(
     out
 }
 
-/// The events of a GitHub workflow's `on:`, with the keys under each (`push: tags:` …). A small reader
-/// for the three forms GitHub accepts (a name, a list, a mapping); `None` when there is no `on:` it
-/// can read.
+/// The events of a GitHub workflow's `on:`, with the keys under each (`push` → `tags`, `branches` …).
+/// Reads the forms GitHub accepts — a name, a flow list or map (`[push]`, `{push: {tags: […]}}`), a
+/// block list (indented or not) or a block map — with comments and quotes. `None` when there is no
+/// `on:` or it uses anything else (anchors, multi-line scalars …): unread, never "no events".
 fn triggers(yaml: &str) -> Option<BTreeMap<String, Vec<String>>> {
-    let indent = |l: &str| l.len() - l.trim_start().len();
-    let lines: Vec<&str> = yaml
+    let lines: Vec<(usize, &str)> = yaml
         .lines()
-        .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'))
+        .map(strip_comment)
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| (l.len() - l.trim_start().len(), l.trim_end()))
         .collect();
-    let at = lines.iter().position(|l| {
-        indent(l) == 0
-            && ["on:", "\"on\":", "'on':", "true:"]
-                .iter()
-                .any(|k| l.starts_with(k))
+    let at = lines.iter().position(|(i, l)| {
+        *i == 0
+            && key_value(l)
+                .is_some_and(|(k, _)| k == "on" || k == "true")
     })?;
-    let rest = lines[at].split_once(':')?.1;
-    let rest = rest.split(" #").next().unwrap_or("").trim();
-    let mut out = BTreeMap::new();
-    let names = |s: &str| -> Vec<String> {
-        s.trim_matches(|c| c == '[' || c == ']' || c == '{' || c == '}')
-            .split(',')
-            .map(|x| {
-                x.split(':')
-                    .next()
-                    .unwrap_or("")
-                    .trim()
-                    .trim_matches(['"', '\''])
-                    .to_string()
-            })
-            .filter(|x| !x.is_empty())
-            .collect()
-    };
+    let (_, rest) = key_value(lines[at].1)?;
     if !rest.is_empty() {
-        for n in names(rest) {
-            out.insert(n, vec![]);
+        return events(&parse_flow(rest)?);
+    }
+    let block: Vec<(usize, &str)> = lines[at + 1..]
+        .iter()
+        .take_while(|(i, l)| *i > 0 || l.trim_start().starts_with("- "))
+        .copied()
+        .collect();
+    let (first, l0) = *block.first()?;
+    let mut out = BTreeMap::new();
+    if l0.trim_start().starts_with("- ") {
+        for (i, l) in &block {
+            let item = l.trim_start().strip_prefix("- ")?;
+            if *i != first {
+                return None;
+            }
+            match parse_flow(item)? {
+                Flow::Scalar(n) => {
+                    out.insert(n, vec![]);
+                }
+                _ => return None,
+            }
         }
         return Some(out);
     }
-    let block: Vec<&str> = lines[at + 1..]
-        .iter()
-        .take_while(|l| indent(l) > 0)
-        .copied()
-        .collect();
-    let first = indent(block.first()?);
     let mut current: Option<String> = None;
-    for l in block {
-        let t = l.trim();
-        if indent(l) == first {
-            if let Some(item) = t.strip_prefix("- ") {
-                out.insert(item.trim().trim_matches(['"', '\'']).to_string(), vec![]);
-                current = None;
-                continue;
-            }
-            let (k, v) = t.split_once(':')?;
-            let k = k.trim().trim_matches(['"', '\'']).to_string();
-            let v = v.split(" #").next().unwrap_or("").trim();
-            let subs = if v.starts_with('{') { names(v) } else { vec![] };
+    let mut sub_indent: Option<usize> = None;
+    for (i, l) in &block {
+        let t = l.trim_start();
+        if *i < first {
+            return None;
+        }
+        if *i == first {
+            let (k, v) = key_value(t)?;
+            let subs = if v.is_empty() {
+                vec![]
+            } else {
+                match parse_flow(v)? {
+                    Flow::Map(kv) => kv.into_iter().map(|(k, _)| k).collect(),
+                    _ => vec![],
+                }
+            };
             out.insert(k.clone(), subs);
             current = Some(k);
-        } else if let Some(k) = &current
-            && let Some((sub, _)) = t.split_once(':')
-            && !t.starts_with("- ")
-            && indent(l) > first
-        {
+            sub_indent = None;
+            continue;
+        }
+        /* deeper: the keys right under the current event; anything further down is theirs */
+        let Some(k) = &current else { return None };
+        let level = *sub_indent.get_or_insert(*i);
+        if *i == level && !t.starts_with("- ") {
+            let (sub, _) = key_value(t)?;
             let subs = out.entry(k.clone()).or_default();
-            let sub = sub.trim().to_string();
-            /* only the first level under the event */
-            if !subs.contains(&sub) && !sub.contains(' ') {
+            if !subs.contains(&sub) {
                 subs.push(sub);
+            }
+        }
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+/// `l` without a `#` comment (one at the start or after a space, outside quotes).
+fn strip_comment(l: &str) -> &str {
+    let (mut single, mut double, mut prev) = (false, false, ' ');
+    for (n, c) in l.char_indices() {
+        match c {
+            '\'' if !double => single = !single,
+            '"' if !single => double = !double,
+            '#' if !single && !double && prev.is_whitespace() => return &l[..n],
+            _ => {}
+        }
+        prev = c;
+    }
+    l
+}
+
+/// `key: value` of a block mapping line (the key unquoted, the value trimmed), `None` otherwise or
+/// for what this reader does not take (anchors, aliases, merge keys, multi-line scalars).
+fn key_value(l: &str) -> Option<(String, &str)> {
+    let l = l.trim();
+    let (k, v) = if let Some(q) = l.chars().next().filter(|c| *c == '"' || *c == '\'') {
+        let end = l[1..].find(q)? + 1;
+        (&l[1..end], l[end + 1..].trim_start().strip_prefix(':')?)
+    } else {
+        let n = l.find(": ").or_else(|| l.ends_with(':').then(|| l.len() - 1))?;
+        (&l[..n], &l[n + 1..])
+    };
+    let v = v.trim();
+    if k.is_empty() || k.starts_with(['&', '*', '?', '<']) || v.starts_with(['&', '*', '|', '>']) {
+        return None;
+    }
+    Some((k.trim().to_string(), v))
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum Flow {
+    Scalar(String),
+    Seq(Vec<Flow>),
+    Map(Vec<(String, Flow)>),
+}
+
+/// A flow value: a scalar (plain or quoted), `[…]` or `{…}`, nested. `None` for anything else.
+fn parse_flow(s: &str) -> Option<Flow> {
+    let chars: Vec<char> = s.trim().chars().collect();
+    let mut pos = 0;
+    let v = flow_value(&chars, &mut pos)?;
+    skip_ws(&chars, &mut pos);
+    (pos == chars.len()).then_some(v)
+}
+
+fn skip_ws(c: &[char], pos: &mut usize) {
+    while *pos < c.len() && c[*pos].is_whitespace() {
+        *pos += 1;
+    }
+}
+
+fn flow_value(c: &[char], pos: &mut usize) -> Option<Flow> {
+    skip_ws(c, pos);
+    match c.get(*pos)? {
+        '[' => {
+            *pos += 1;
+            let mut xs = vec![];
+            loop {
+                skip_ws(c, pos);
+                if c.get(*pos) == Some(&']') {
+                    *pos += 1;
+                    return Some(Flow::Seq(xs));
+                }
+                xs.push(flow_value(c, pos)?);
+                skip_ws(c, pos);
+                match c.get(*pos)? {
+                    ',' => *pos += 1,
+                    ']' => {}
+                    _ => return None,
+                }
+            }
+        }
+        '{' => {
+            *pos += 1;
+            let mut kv = vec![];
+            loop {
+                skip_ws(c, pos);
+                if c.get(*pos) == Some(&'}') {
+                    *pos += 1;
+                    return Some(Flow::Map(kv));
+                }
+                let Flow::Scalar(k) = flow_scalar(c, pos, true)? else {
+                    return None;
+                };
+                skip_ws(c, pos);
+                let v = if c.get(*pos) == Some(&':') {
+                    *pos += 1;
+                    skip_ws(c, pos);
+                    if matches!(c.get(*pos), Some(',') | Some('}')) {
+                        Flow::Scalar(String::new())
+                    } else {
+                        flow_value(c, pos)?
+                    }
+                } else {
+                    Flow::Scalar(String::new())
+                };
+                kv.push((k, v));
+                skip_ws(c, pos);
+                match c.get(*pos)? {
+                    ',' => *pos += 1,
+                    '}' => {}
+                    _ => return None,
+                }
+            }
+        }
+        '&' | '*' | '|' | '>' | '!' => None,
+        _ => flow_scalar(c, pos, false),
+    }
+}
+
+/// A quoted scalar, or a plain one up to `,` `]` `}` (and `:` for a key).
+fn flow_scalar(c: &[char], pos: &mut usize, key: bool) -> Option<Flow> {
+    skip_ws(c, pos);
+    let q = *c.get(*pos)?;
+    if q == '"' || q == '\'' {
+        let start = *pos + 1;
+        let end = start + c[start..].iter().position(|x| *x == q)?;
+        *pos = end + 1;
+        return Some(Flow::Scalar(c[start..end].iter().collect()));
+    }
+    let start = *pos;
+    while let Some(x) = c.get(*pos) {
+        if matches!(x, ',' | ']' | '}' | '[' | '{') || (*x == ':' && (key || c.get(*pos + 1).is_none_or(|n| n.is_whitespace()))) {
+            break;
+        }
+        *pos += 1;
+    }
+    let v: String = c[start..*pos].iter().collect::<String>().trim().to_string();
+    (!v.is_empty()).then_some(Flow::Scalar(v))
+}
+
+/// The events a parsed `on:` value names, and the keys under each.
+fn events(f: &Flow) -> Option<BTreeMap<String, Vec<String>>> {
+    let mut out = BTreeMap::new();
+    match f {
+        Flow::Scalar(n) => {
+            out.insert(n.clone(), vec![]);
+        }
+        Flow::Seq(xs) => {
+            for x in xs {
+                let Flow::Scalar(n) = x else { return None };
+                out.insert(n.clone(), vec![]);
+            }
+        }
+        Flow::Map(kv) => {
+            for (k, v) in kv {
+                let subs = match v {
+                    Flow::Map(m) => m.iter().map(|(k, _)| k.clone()).collect(),
+                    _ => vec![],
+                };
+                out.insert(k.clone(), subs);
             }
         }
     }
@@ -535,6 +765,23 @@ fn ship_fact(release: Option<&Release>, workflows: &[Workflow]) -> Fact<Ship> {
             Ship::Script
         }
         _ if !tag_flows.is_empty() => Ship::Tag,
+        _ if workflows.iter().any(|w| w.on.is_none()) => {
+            let unread: Vec<&str> = workflows
+                .iter()
+                .filter(|w| w.on.is_none())
+                .map(|w| w.file.as_str())
+                .collect();
+            return Fact {
+                value: Ship::Merge,
+                how: How::Unknown {
+                    why: format!(
+                        "认不出 {} 的触发条件，不知道是不是按 tag 发布",
+                        unread.join("、")
+                    ),
+                },
+                evidence: vec![],
+            };
+        }
         _ => {
             return Fact {
                 value: Ship::Merge,
@@ -626,7 +873,15 @@ fn numbered(dir: &Path, files: &[String]) -> Vec<Numbered> {
         }
     }
     for (d, mut names) in migs {
-        names.sort();
+        /* by number: `10_add` comes after `9_init` */
+        let number = |n: &String| -> u64 {
+            n.chars()
+                .take_while(char::is_ascii_digit)
+                .collect::<String>()
+                .parse()
+                .unwrap_or(0)
+        };
+        names.sort_by(|a, b| number(a).cmp(&number(b)).then_with(|| a.cmp(b)));
         let lock = has(&format!("{d}/LOCK"));
         out.push(Numbered {
             kind: "migrations",
@@ -692,6 +947,7 @@ fn pace(dir: &Path, commit: &str) -> Result<Pace, String> {
         dir,
         &[
             "for-each-ref",
+            &format!("--merged={commit}"),
             "--format=%(creatordate:unix) %(refname:short)",
             "refs/tags",
         ],
@@ -726,58 +982,15 @@ impl GhError {
     }
 }
 
-/// `gh api path` as JSON, with [`GH_DEADLINE`]; output drained while it runs.
-fn gh_api(gh: &Path, path: &str) -> Result<Value, GhError> {
-    let mut child = Command::new(gh)
-        .args(["api", "-H", "Accept: application/vnd.github+json", path])
-        .env("GH_PROMPT_DISABLED", "1")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| GhError::Other(format!("gh 不可用：{e}")))?;
-    let drain = |r: Option<Box<dyn Read + Send>>| {
-        std::thread::spawn(move || {
-            let mut s = String::new();
-            if let Some(mut r) = r {
-                let _ = r.read_to_string(&mut s);
-            }
-            s
-        })
-    };
-    let out = drain(
-        child
-            .stdout
-            .take()
-            .map(|o| Box::new(o) as Box<dyn Read + Send>),
-    );
-    let err = drain(
-        child
-            .stderr
-            .take()
-            .map(|o| Box::new(o) as Box<dyn Read + Send>),
-    );
-    let end = Instant::now() + GH_DEADLINE;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(s)) => break Some(s),
-            Ok(None) if Instant::now() < end => std::thread::sleep(Duration::from_millis(50)),
-            _ => {
-                let _ = child.kill();
-                let _ = child.wait();
-                break None;
-            }
-        }
-    };
-    let (out, err) = (
-        out.join().unwrap_or_default(),
-        err.join().unwrap_or_default(),
-    );
-    match status {
-        Some(s) if s.success() => {
-            serde_json::from_str(&out).map_err(|e| GhError::Other(e.to_string()))
-        }
-        Some(_) => {
+/// `gh api args…` as JSON, within [`DEADLINE`].
+fn gh_api(gh: &Path, args: &[&str]) -> Result<Value, GhError> {
+    let mut cmd = Command::new(gh);
+    cmd.args(["api", "-H", "Accept: application/vnd.github+json"])
+        .args(args)
+        .env("GH_PROMPT_DISABLED", "1");
+    match run(cmd, DEADLINE) {
+        Ok((true, out, _)) => serde_json::from_str(&out).map_err(|e| GhError::Other(e.to_string())),
+        Ok((false, _, err)) => {
             let msg = crate::util::js_head(err.trim(), 200).to_string();
             Err(if err.contains("HTTP 404") {
                 GhError::NotFound(msg)
@@ -785,7 +998,90 @@ fn gh_api(gh: &Path, path: &str) -> Result<Value, GhError> {
                 GhError::Other(msg)
             })
         }
-        None => Err(GhError::Other("gh 超时".into())),
+        Err(e) => Err(GhError::Other(format!("gh：{e}"))),
+    }
+}
+
+/// `git args…` that stays on this machine: never fetches a missing object (a partial clone would,
+/// without a deadline), paths unquoted, within [`DEADLINE`].
+fn local_git(dir: &Path, args: &[&str]) -> Result<String, String> {
+    let mut cmd = Command::new("git");
+    cmd.arg("-C")
+        .arg(dir)
+        .args(["-c", "core.quotePath=false"])
+        .args(args)
+        .env("GIT_NO_LAZY_FETCH", "1")
+        .env("GIT_TERMINAL_PROMPT", "0");
+    match run(cmd, DEADLINE)? {
+        (true, out, _) => Ok(out.trim().to_string()),
+        (false, _, err) => Err(crate::util::js_head(err.trim(), 300).to_string()),
+    }
+}
+
+/// Runs `cmd` in a process group of its own and reads its output meanwhile: `(succeeded, stdout,
+/// stderr)`. At `deadline` the whole group is killed (a wrapper's children too), and output still
+/// held open by something it left behind is not waited for.
+fn run(mut cmd: Command, deadline: Duration) -> Result<(bool, String, String), String> {
+    use std::os::unix::process::CommandExt;
+    use std::sync::mpsc;
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0)
+        .spawn()
+        .map_err(|e| format!("启动不了：{e}"))?;
+    let group = child.id() as i32;
+    let kill_group = || {
+        // SAFETY: a plain kill(2) of the group this child leads; while any member lives the id is
+        // the group's and can't be another process's
+        unsafe { libc::kill(-group, libc::SIGKILL) };
+    };
+    let (tx, rx) = mpsc::channel();
+    let pipes: [Option<Box<dyn Read + Send>>; 2] = [
+        child.stdout.take().map(|o| Box::new(o) as Box<dyn Read + Send>),
+        child.stderr.take().map(|o| Box::new(o) as Box<dyn Read + Send>),
+    ];
+    for (n, pipe) in pipes.into_iter().enumerate() {
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            let mut s = String::new();
+            if let Some(mut r) = pipe {
+                let _ = r.read_to_string(&mut s);
+            }
+            let _ = tx.send((n, s));
+        });
+    }
+    drop(tx);
+    let end = Instant::now() + deadline;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(s)) => break Some(s),
+            Ok(None) if Instant::now() < end => std::thread::sleep(Duration::from_millis(20)),
+            _ => {
+                kill_group();
+                let _ = child.wait();
+                break None;
+            }
+        }
+    };
+    let mut out = [String::new(), String::new()];
+    for _ in 0..2 {
+        let left = end
+            .saturating_duration_since(Instant::now())
+            .max(Duration::from_millis(500));
+        match rx.recv_timeout(left) {
+            Ok((n, s)) => out[n] = s,
+            Err(_) => {
+                kill_group();
+                return Err("超时：输出一直没有结束".into());
+            }
+        }
+    }
+    let [o, e] = out;
+    match status {
+        Some(s) => Ok((s.success(), o, e)),
+        None => Err(format!("超时（{} 秒）", deadline.as_secs())),
     }
 }
 
@@ -832,6 +1128,62 @@ mod tests {
             vec![("push".into(), vec!["tags".into()])]
         );
         assert_eq!(triggers("name: x\njobs:\n  a:\n"), None);
+        /* nested flow maps, unindented lists, comments, quoted keys */
+        assert_eq!(
+            keys("on: {push: {tags: ['v*']}, pull_request: {}}\n"),
+            vec![("pull_request".into(), vec![]), ("push".into(), vec!["tags".into()])]
+        );
+        assert_eq!(
+            keys("on:\n- pull_request # CI\n- 'merge_group'\njobs: {}\n"),
+            vec![("merge_group".into(), vec![]), ("pull_request".into(), vec![])]
+        );
+        assert_eq!(
+            keys("on: # events\n  push:\n    'tags': ['v*'] # releases\n    paths-ignore:\n      - docs/**\n"),
+            vec![("push".into(), vec!["tags".into(), "paths-ignore".into()])]
+        );
+        assert_eq!(
+            keys("on:\n  pull_request:\n    types: [opened, 'synchronize']\n    branches:\n      - main\n      - 'release/**'\n"),
+            vec![("pull_request".into(), vec!["types".into(), "branches".into()])]
+        );
+        assert_eq!(keys("on: \"push\" # all\n"), vec![("push".into(), vec![])]);
+        assert_eq!(keys("'on': [push]\n"), vec![("push".into(), vec![])]);
+        /* what it doesn't read is unread, not "no events" */
+        assert_eq!(triggers("on: &events\n  push:\n"), None);
+        assert_eq!(triggers("on:\n  - {push: x}\n"), None);
+        assert_eq!(triggers("on: [push\n"), None);
+    }
+
+    #[test]
+    fn a_command_and_what_it_started_end_at_the_deadline() {
+        let mark = tempfile::tempdir().unwrap();
+        let alive = mark.path().join("alive");
+        /* a wrapper that leaves a child holding its output open, and one that hangs itself */
+        for script in [
+            format!("(sleep 5; touch {}) & echo started", alive.display()),
+            format!("sleep 5; touch {}", alive.display()),
+        ] {
+            let mut cmd = Command::new("/bin/sh");
+            cmd.args(["-c", &script]);
+            let t = Instant::now();
+            assert!(run(cmd, Duration::from_millis(300)).is_err(), "{script}");
+            assert!(t.elapsed() < Duration::from_secs(3), "{script}: {:?}", t.elapsed());
+        }
+        std::thread::sleep(Duration::from_secs(6));
+        assert!(!alive.exists(), "what the command started was killed with it");
+        let mut ok = Command::new("/bin/sh");
+        ok.args(["-c", "echo out; echo err >&2; exit 3"]);
+        assert_eq!(
+            run(ok, Duration::from_secs(5)).unwrap(),
+            (false, "out\n".into(), "err\n".into())
+        );
+    }
+
+    #[test]
+    fn branch_names_are_one_path_segment() {
+        assert_eq!(encode("main"), "main");
+        assert_eq!(encode("release/1.x"), "release%2F1.x");
+        assert_eq!(encode("release#1"), "release%231");
+        assert_eq!(encode("发布"), "%E5%8F%91%E5%B8%83");
     }
 
     #[test]
