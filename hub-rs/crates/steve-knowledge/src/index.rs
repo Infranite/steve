@@ -188,13 +188,14 @@ pub fn rescope_source(tx: &Tx, source: &SourceRow) -> Result<usize> {
     Ok(n)
 }
 
-/// `"<prefix> · <title>"`, the citation label of a document (§1, “笔记 · Acme 合同说明”).
+/// `"<prefix> · <title>"`, the citation label of a document (§1, “笔记 · Acme 合同说明”); an item's
+/// document is its 事项记录, a day of the main thread its 会话记录 (ST-41).
 pub fn doc_label(source: &SourceRow, title: &str) -> String {
     let prefix = match source.kind.as_str() {
         "notes" => "笔记",
         "files" => "文件",
-        "items" => "事项",
-        "chat" => "对话",
+        "items" => "事项记录",
+        "chat" => "会话记录",
         _ => source.name.as_str(),
     };
     format!("{prefix} · {title}")
