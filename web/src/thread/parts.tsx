@@ -206,6 +206,12 @@ function DeliveryBlock({ d, open: open0 = false }: { d: NonNullable<ItemCardStat
   )
 }
 
+/** plain text whose URLs are links; a URL is ASCII, so the Chinese right after one stays text */
+function Linked({ text }: { text: string }) {
+  return <>{text.split(/(https?:\/\/[\w\-.~:/?#[\]@!$&'()*+,;=%]*[\w/#=&%-])/).map((p, n) => n % 2
+    ? <a key={n} href={p} target="_blank" rel="noreferrer" className="text-foreground underline underline-offset-2 hover:text-blue">{p}</a> : p)}</>
+}
+
 /** accept or send back right on the card: the summary above is what was delivered */
 function AcceptRow({ i, decision }: { i: Item; decision: string }) {
   const [rework, setRework] = useState(false), [txt, setTxt] = useState(""), [busy, setBusy] = useState(false)
@@ -241,11 +247,13 @@ export function ItemCard({ c, inText = false }: { c: ItemCardState; inText?: boo
           <span className="truncate type-body font-medium">{i.t}</span>
           <span className="truncate type-footnote text-muted-foreground"><span className="font-mono tabular-nums">{i.id}</span> · {botName(i.b)}{look.tone === "run" && i.now ? " · " + i.now : ""}</span>
         </span>
-        <span className={cn("shrink-0 whitespace-nowrap pt-0.5 type-footnote font-medium", TONE[look.tone])} data-card-status>{look.tone === "done" && c.released ? <RocketIcon className="mr-1 inline size-3.5 align-[-2px]" /> : null}{look.label}{look.version && <span className="hidden font-normal sm:inline"> {look.version}</span>}</span>
+        <span className={cn("shrink-0 whitespace-nowrap pt-0.5 type-footnote font-medium", TONE[look.tone])} data-card-status>{look.tone === "done" && c.released ? <RocketIcon className="mr-1 inline size-3.5 align-[-2px]" /> : null}{look.label}{look.version && <span className="ml-1 hidden max-w-32 truncate align-bottom font-normal sm:inline-block">{look.version}</span>}</span>
       </button>
       {d && !inText && <DeliveryBlock key={d.decision ?? d.text} d={d} open={!!d.full} />}
       {reply && <div className="flex min-w-0 flex-col gap-1 border-l-2 border-border pl-3" data-card-reply>
         <div className="type-footnote text-muted-foreground">它的回复</div><div className="line-clamp-4 min-w-0 break-words"><Markdown text={reply.text} className="type-callout" /></div></div>}
+      {c.build && <div className="flex items-start gap-2 type-callout text-muted-foreground" data-card-build><CircleAlertIcon className="mt-0.5 size-4 shrink-0 text-attention" strokeWidth={1.75} />
+        <span className="min-w-0 flex-1 [overflow-wrap:anywhere]"><Linked text={c.build.text.replace(new RegExp(`^${i.id}\\s+`), "")} /></span></div>}
       {failLine && <div className="flex items-start gap-2 type-callout text-muted-foreground" data-card-fail><CircleAlertIcon className="mt-0.5 size-4 shrink-0 text-destructive" strokeWidth={1.75} /><span className="min-w-0 flex-1">{failLine}</span>
         {c.decision && <AlertClose onClose={() => closeAlerts([c.decision!])} className="-my-0.5" />}</div>}
       {accept ? <AcceptRow i={i} decision={accept.decision} /> : w ? <div className="-mx-1.5 [&_[data-decision-wrap]]:bg-muted/40 [&_[data-decision-wrap]]:shadow-none [&_[data-decision-wrap]]:ring-0">

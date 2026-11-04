@@ -772,6 +772,27 @@ async fn r4_an_item_from_the_conversation_reports_back() {
         (Some("done"), Some("v9"))
     );
     assert!(c.get("decision").is_none());
+
+    /* a failed build afterwards is its own line: the version stays a version */
+    crate::thread::flowback::flow(
+        k.db(),
+        &id,
+        crate::thread::flowback::Update {
+            kind: "build",
+            text: format!("{id} v9 的 Release 构建失败（failure）：https://ci/1。"),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(k.db().messages(WS).unwrap().len(), n0);
+    let c = &card(&k)[0].meta["card"];
+    assert_eq!(c["released"]["version"], "v9");
+    assert!(
+        c["build"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Release 构建失败")
+    );
 }
 
 /// The one-time cleanup: flow-back written one message per event is hidden (not deleted) and the

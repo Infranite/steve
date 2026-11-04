@@ -11,7 +11,8 @@
 //! the item's only card-only message (a later move hides it and posts the next one), so the
 //! conversation never fills with one message per event.
 //!
-//! Release results belong to the notifications; the card only shows “已发布”.
+//! Release results belong to the notifications; the card only shows “已发布”. A failed Release build
+//! after the item is done is a line of its own on the card (`build`), never a version.
 //!
 //! Called from the orchestrator's state-changing paths (inside its critical section): only the store is
 //! touched, never the core lock.
@@ -32,7 +33,7 @@ pub const CLEANUP_KEY: &str = "thread.cards";
 /// What happened to the item.
 #[derive(Debug, Clone, Default)]
 pub struct Update<'a> {
-    /// ask | reply | deliver | done | drop | fail | release
+    /// ask | reply | deliver | done | drop | fail | release | build
     pub kind: &'a str,
     pub text: String,
     /// the decision to answer here (ask, approval, fail, acceptance)
@@ -85,6 +86,7 @@ fn merged(c: Option<&Value>, item: &str, u: &Update<'_>, at: i64) -> Value {
         }
         "reply" => c["reply"] = json!({"text": u.text, "ref": u.reference, "at": at}),
         "release" => c["released"] = json!({"version": u.text, "at": at}),
+        "build" => c["build"] = json!({"text": u.text, "at": at}),
         _ => {}
     }
     /* the line of what is going on now (a question, a failure); a later event clears it */
@@ -141,6 +143,7 @@ fn headline(item: &str, card: &Value) -> String {
             card["delivery"]["text"].as_str().unwrap_or("")
         ),
         "ask" | "fail" => s("text").to_string(),
+        "build" => card["build"]["text"].as_str().unwrap_or(item).to_string(),
         _ => item.to_string(),
     }
 }

@@ -49,7 +49,16 @@ export type Msg = { id?: string; clientId?: string; k: "me" | "steve" | "thinkin
   card?: ItemCardState; cardOnly?: boolean; wasCard?: boolean }
 /** what an item made from the conversation has come to, kept on its card (hub `meta.card`) */
 export type ItemCardState = { item: string; state: string; at?: number; text?: string; decision?: string
-  delivery?: { text: string; full?: boolean; decision?: string; at?: number }; reply?: { text: string; ref?: string; at?: number }; released?: { version?: string; at?: number } }
+  delivery?: { text: string; full?: boolean; decision?: string; at?: number }; reply?: { text: string; ref?: string; at?: number }; released?: { version?: string; at?: number }
+  /** a Release build that failed after the item was done */
+  build?: { text: string; at?: number } }
+/** a card as the hub kept it; older hubs filed a failed build's sentence as the released version: it is the build line */
+function itemCard(c: ItemCardState): ItemCardState {
+  const v = c.released?.version
+  if (!v || !/\s/.test(v)) return c
+  const { released: _, ...rest } = c
+  return { ...rest, build: c.build ?? { text: v, at: c.released?.at } }
+}
 export type Offer = { title: string; goal: string; project?: string | null; bot?: string; state: "open" | "taken" | "dismissed"; item?: string; folded?: boolean }
 export type Suggest = { question: string; choices: { id: "here" | "item"; label: string; item?: string; title?: string }[]; state: "open" | "expired" | "chosen"; chosen?: string; item?: string }
 /** a key moment of an item made from the conversation, posted back to it (§5.2) */
@@ -383,7 +392,7 @@ export function msgOf(m: State["thread"][number]): Msg {
     held: !!x.held || undefined, stopped: !!x.stopped || undefined,
     offer: x.offer ?? undefined, suggest: x.suggest ?? undefined, ask: x.ask ?? undefined, queued: x.queued ?? undefined, replyTo: x.reply_to ?? undefined, origin: x.origin ?? undefined, answer: x.answer ?? undefined,
     update: x.update ?? undefined, updates: Array.isArray(x.updates) ? x.updates : undefined, rerun: x.rerun ?? undefined,
-    card: x.card?.item ? x.card : undefined, cardOnly: !!x.card_only, wasCard: !!x.was_card }
+    card: x.card?.item ? itemCard(x.card) : undefined, cardOnly: !!x.card_only, wasCard: !!x.was_card }
 }
 const proposals = new Map<string, any>()
 /** a drafted change as the prototype's Proposal: apply/undo/drop call the Hub. The Hub keeps what became of a
