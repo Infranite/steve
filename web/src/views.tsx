@@ -25,7 +25,7 @@ import { SessionKnowledge } from "@/knowledge/parts"
 import { lazyView } from "@/lazy"
 import { OutPreview } from "@/outputs"
 import { ItemPeopleProp } from "@/people/item-people"
-import { queueNote, QueueStrip } from "@/queue"
+import { QueuedComment, queuedComments, queueNote, QueueStrip } from "@/queue"
 import { NativeIdLine, ResumeCard } from "@/resume"
 import { ItemStatsRows, SessionStats } from "@/stats/drill"
 import { accOf, active, addDep, archive, bulk, closeRel, deleteItem, depsOpen, doFork, gBuild, gComps, hm, importSessions, interrupt, it, itemThread, link, loadEvents, loadItem, loadLocalSessions, markDone, newItem, patchItem, pending, pendingCards, reassign, rmDep, saveGoal, sessPatch, sessRemove, sessSend, setAcc, setSt, setTags, setKind, kindOf, kindTags, isKind, DOMAIN_CATS, snoozed, st, stageOf, star, supp, tag, threadFollow, tm, toast, undoDecision, unsnooze, WT, type Item, type Out, type PlanRound } from "@/store"
@@ -321,9 +321,13 @@ export function ItemView({ id }: { id: string }) {
   const dependents = st.items.filter((x) => i.dependents.includes(x.id) || (x.deps || []).includes(i.id))
   const a = active(i), B = st.bots[i.b]
   const targets = (a && a.st === "run" ? ["自动排队", "插话", "新会话"] : ["自动排队", "新会话"]) as ("自动排队" | "插话" | "新会话")[]
-  /* activity feed: filter, then fold everything but the latest four entries */
+  /* queued supplements show on their comments; the strip above the composer keeps only rows no comment claims */
+  const queued = queuedComments(i.tl, i.qs, i.q, "补充信息：")
+  const qNote = a ? queueNote(st.S[i.qs ?? ""] ?? null) : "将开新会话送达"
+  /* activity feed: filter, then fold everything but the latest four entries (a queued comment is never folded) */
   const feed = i.tl.map((e, n) => ({ e, n })).filter(({ e }) => feedMode === "全部" || e[0] !== "sys" || KEY_SYS.test(e[1]))
-  const KEEP = 4, hidden = feedMode === "重要" && !older ? Math.max(0, feed.length - KEEP) : 0
+  const firstQueued = feed.findIndex(({ n }) => queued.byComment.has(n))
+  const KEEP = 4, hidden = feedMode === "重要" && !older ? Math.max(0, Math.min(feed.length - KEEP, firstQueued < 0 ? Infinity : firstQueued)) : 0
   const actions = <>
     <Tooltip><TooltipTrigger render={<Button variant="ghost" size="icon-sm" aria-label="关注" data-star onClick={() => star(i.id)} className="text-muted-foreground" />}><StarIcon className={cn(i.star && "fill-current text-foreground")} /></TooltipTrigger><TooltipContent>{i.star ? "取消关注" : "关注"}</TooltipContent></Tooltip>
     <DropdownMenu>
@@ -360,6 +364,11 @@ export function ItemView({ id }: { id: string }) {
   )
   const entry = ({ e, n }: { e: any[]; n: number }) => {
     if (e[0] === "sess") return <SessionBlock key={e[1]} k={e[1]} defaultOpen={false} />
+    const q = e[0] === "me" && queued.byComment.get(n)
+    if (q) return (
+      <div key={n} className="flex items-start gap-2 py-1.5" data-comment><span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-muted text-[10px] font-medium text-muted-foreground">我</span>
+        <QueuedComment sid={i.qs!} q={q} prefix="补充信息：" composer={itemComposer} note={qNote} at={e[2]} body={(t) => <div className="type-body"><Markdown text={t} /></div>} /></div>
+    )
     if (e[0] === "me") return (
       <Fragment key={n}><div className="flex items-start gap-2 py-1.5" data-comment><span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-muted text-[10px] font-medium text-muted-foreground">我</span>
         <div className="min-w-0">{(e[1] !== "（附件）" || !e[5]?.length) && <div className="type-body"><Markdown text={e[1]} /></div>}<Files files={e[5]} className="my-1" /><div className="type-footnote text-muted-foreground">{e[2]}{e[3] && st.S[e[3]] ? ` · 已送达会话 #${st.S[e[3]].n}` : ""}{e[6] === "thread" && <a href="#/" className="ml-1.5 rounded bg-muted px-1.5 hover:text-foreground" data-from-thread>来自对话</a>}</div></div></div>
@@ -373,7 +382,7 @@ export function ItemView({ id }: { id: string }) {
         onBlur={(e) => { const v = e.target.value.trim(); if (v && v !== i.t) patchItem(i.id, { t: v }, "标题改为「" + v + "」"); setTitleEdit(false) }} onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); if (e.key === "Escape") setTitleEdit(false) }} />
       : <span className="cursor-text" onDoubleClick={() => setTitleEdit(true)} data-title>{i.t}</span>} back={["#/items", "事项"]} actions={actions} toolbar={quick} toolbarTop max={1080}
       footer={<div className="w-full shrink-0 border-t bg-background/85 backdrop-blur-xl"><div className="mx-auto w-full px-4 pb-[76px] pt-3 sm:px-8 md:pb-4" style={{ maxWidth: 1080 + 64 }}><div className="lg:pr-[296px]">
-        {i.qs && <QueueStrip sid={i.qs} rows={i.q} prefix="补充信息：" composer={itemComposer} note={a ? queueNote(st.S[i.qs] ?? null) : "将开新会话送达"} />}
+        {i.qs && <QueueStrip sid={i.qs} rows={queued.rest} prefix="补充信息：" composer={itemComposer} note={qNote} />}
         <Composer draftKey={draftKey(st.workspace?.id, "item", i.id)} handle={itemComposer} placeholder={`补充给 ${i.id}…  输入 # 引用其他事项`} testId="item" onSend={(t, files) => supp(i.id, t, target === "插话" ? "steer" : target === "新会话" ? "new" : "auto", files)}
           left={<Segmented size="sm" value={targets.includes(target) ? target : "自动排队"} onChange={setTarget} options={targets} />} />
       </div></div></div>}
