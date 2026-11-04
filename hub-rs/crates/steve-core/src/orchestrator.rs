@@ -2058,7 +2058,17 @@ impl Tx<'_> {
                     self.db().item_patch(&i, patch![status: "run"])?;
                     match self.active_session(&i)? {
                         Some(a) => self.prompt(&a.id, "用户同意了，开始做。", "steve"),
-                        None => self.start_or_fail(&i, None, None)?,
+                        // from a conversation: with what it would have started with right away
+                        None => match self.c.thread_start(&before)? {
+                            Some((opening, files)) => {
+                                if let Err(e) =
+                                    self.start_session_files(&i, Some(&opening), None, &files)
+                                {
+                                    self.fail(&i, &format!("开不了会话：{e}"))?;
+                                }
+                            }
+                            None => self.start_or_fail(&i, None, None)?,
+                        },
                     }
                 } else {
                     self.db().decision_resolve(

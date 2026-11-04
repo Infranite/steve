@@ -86,6 +86,28 @@ pub struct Turn {
     pub items: bool,
     /// Only the workspace's owner reads the conversation (their private chat with Steve).
     pub owner_only: bool,
+    /// The sender is the workspace's owner: what they ask for may start. Anyone else's request
+    /// becomes a proposal the owner says yes to first.
+    pub start: bool,
+}
+
+/// The sender (`party`) is the workspace's owner: a contact linked to the user who owns it. A sender
+/// Steve can't place is not the owner.
+pub fn sender_is_owner(
+    c: &rusqlite::Connection,
+    ws: &str,
+    party: Option<&str>,
+) -> ChannelResult<bool> {
+    let Some(party) = party.filter(|p| !p.is_empty()) else {
+        return Ok(false);
+    };
+    Ok(c.query_row(
+        "SELECT EXISTS(SELECT 1 FROM parties p JOIN workspace_members wm
+            ON wm.user_id = p.user_id AND wm.workspace_id = ?1 AND wm.role = 'owner'
+          WHERE p.id = ?2 AND p.workspace_id = ?1)",
+        rusqlite::params![ws, party],
+        |r| r.get(0),
+    )?)
 }
 
 /// Steve's conversation, as the channel module needs it (the hub implements it over steve-core).
@@ -161,8 +183,13 @@ impl Channels {
                     None => Ok(false),
                 }
             })?;
+        // work starts only when the owner sent it, a /bot command too (any workspace user may send one)
+        let start = self
+            .store()
+            .reader(|c| sender_is_owner(c, &plan.ws, plan.sender_party_id.as_deref()))?;
         let mut meta = json!({ "chan": chan_meta(self, plan, command)? });
         meta["chan"]["owner_only"] = json!(owner_only);
+        meta["chan"]["start"] = json!(start);
         let text = match (&plan.trigger, command) {
             (Some(i), true) if !i.trim().is_empty() => i.clone(),
             _ => plan.text.clone(),
@@ -179,6 +206,7 @@ impl Channels {
             research: open,
             items: open,
             owner_only,
+            start,
         };
         let ws = plan.ws.clone();
         let id = tokio::task::spawn_blocking(move || thread.say(&ws, turn))
@@ -210,6 +238,10 @@ impl Channels {
             research: true,
             items: true,
             owner_only: false,
+            // a /bot command from any workspace user lands here: it starts work only when the owner sent it
+            start: self
+                .store()
+                .reader(|c| sender_is_owner(c, &plan.ws, plan.sender_party_id.as_deref()))?,
         };
         let ws = plan.ws.clone();
         let id = tokio::task::spawn_blocking(move || thread.say(&ws, turn))

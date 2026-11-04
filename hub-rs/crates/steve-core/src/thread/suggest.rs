@@ -188,6 +188,7 @@ impl Core {
             files,
             from_question: super::decide::pure_question(&om.text),
             answer: Some(&m),
+            start: true, // your action in the web
         })?;
         meta["suggest"]["item"] = json!(item.id);
         self.store()

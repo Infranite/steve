@@ -72,22 +72,73 @@ fn status_label(s: &str) -> &str {
     }
 }
 
-/// `steve_items_search`: up to 20 items whose title, goal or “now” contain every word of the query.
-pub fn items_search(store: &Store, ws: &str, query: &str) -> Result<String, String> {
+/// Which items a run's item tools see. Only the owner reads the answer: the workspace's items, all of
+/// them. Anyone else reads it too: only the items this conversation itself produced (its `thread_items`),
+/// and of those only what came from it (title, status, goal); no plan, timeline, delivery or “now”.
+/// Until the conversation card knows each listener's rights (phase 2), nothing wider is safe to say.
+pub enum ItemScope {
+    All,
+    Conversation(std::collections::HashSet<String>),
+}
+
+impl ItemScope {
+    /// For the run answering message `origin`, decided again on every call (members change).
+    pub fn of(store: &Store, origin: &str) -> Result<Self, String> {
+        if own_reader(store, origin)? {
+            return Ok(Self::All);
+        }
+        let Some(m) = store.messages().get(origin).map_err(|e| e.to_string())? else {
+            return Ok(Self::Conversation(Default::default()));
+        };
+        let ids = store
+            .reader(|c| -> steve_store::Result<Vec<String>> {
+                let mut st = c.prepare_cached(
+                    "SELECT ti.item_id FROM thread_items ti JOIN messages m ON m.id = ti.origin_msg
+                      WHERE m.space = ?1 AND m.workspace_id = ?2 AND ti.workspace_id = ?2",
+                )?;
+                let rows = st.query_map([&m.space, &m.workspace_id], |r| r.get(0))?;
+                Ok(rows.collect::<rusqlite::Result<_>>()?)
+            })
+            .map_err(|e| e.to_string())?;
+        Ok(Self::Conversation(ids.into_iter().collect()))
+    }
+
+    fn sees(&self, item: &str) -> bool {
+        match self {
+            Self::All => true,
+            Self::Conversation(ids) => ids.contains(item),
+        }
+    }
+}
+
+/// `steve_items_search`: up to 20 items whose title, goal or “now” contain every word of the query
+/// (in a conversation scope: title and goal, among its own items).
+pub fn items_search(
+    store: &Store,
+    ws: &str,
+    scope: &ItemScope,
+    query: &str,
+) -> Result<String, String> {
     let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
     let items = store.items().all(ws).map_err(|e| e.to_string())?;
+    let all = matches!(scope, ItemScope::All);
     let mut out = vec![];
-    for i in items {
+    for i in items.into_iter().filter(|i| scope.sees(&i.id)) {
         let goal = store.items().goal(&i.id).unwrap_or_default();
-        let hay = format!("{} {} {} {}", i.id, i.title, goal, i.now).to_lowercase();
+        let now = if all { i.now.as_str() } else { "" };
+        let hay = format!("{} {} {} {}", i.id, i.title, goal, now).to_lowercase();
         if words.iter().all(|w| hay.contains(w)) {
-            out.push(format!(
-                "{} · {} · {} · 现在：{}",
-                i.id,
-                i.title,
-                status_label(&i.status),
-                i.now
-            ));
+            out.push(if all {
+                format!(
+                    "{} · {} · {} · 现在：{}",
+                    i.id,
+                    i.title,
+                    status_label(&i.status),
+                    i.now
+                )
+            } else {
+                format!("{} · {} · {}", i.id, i.title, status_label(&i.status))
+            });
         }
         if out.len() >= 20 {
             break;
@@ -191,17 +242,26 @@ fn own_reader(store: &Store, origin: &str) -> Result<bool, String> {
         .map_err(|e| e.to_string())
 }
 
-/// `steve_item_read`: one item of this workspace.
-pub fn item_read(store: &Store, ws: &str, id: &str) -> Result<String, String> {
+/// `steve_item_read`: one item of this workspace (in a conversation scope: one of its own items, title,
+/// status and goal only; any other reads as missing).
+pub fn item_read(store: &Store, ws: &str, scope: &ItemScope, id: &str) -> Result<String, String> {
     let Some(i) = store
         .items()
         .get(id.trim())
         .map_err(|e| e.to_string())?
-        .filter(|i| i.workspace_id == ws)
+        .filter(|i| i.workspace_id == ws && scope.sees(&i.id))
     else {
         return Err(format!("No item {id} in this workspace."));
     };
     let goal = store.items().goal(&i.id).unwrap_or_default();
+    if !matches!(scope, ItemScope::All) {
+        return Ok(format!(
+            "{} {}\n状态：{}\n目标：{goal}\n",
+            i.id,
+            i.title,
+            status_label(&i.status)
+        ));
+    }
     let mut s = format!(
         "{} {}\n状态：{}\n现在：{}\n目标：{goal}\n",
         i.id,
@@ -289,9 +349,20 @@ pub async fn handle(x: &Extra, run: ThreadRun, msg: Value, owner: String) -> Res
             let ws = run.workspace_id.clone();
             let out = match name.as_str() {
                 steve_knowledge::tools::SEARCH | steve_knowledge::tools::READ => {
+                    // a user's view only when only the owner reads the answer; with anyone else
+                    // listening, what the whole workspace may see (no one's private knowledge)
+                    let (store, origin) = (x.store.clone(), run.message_id.clone());
+                    let own = tokio::task::spawn_blocking(move || own_reader(&store, &origin))
+                        .await
+                        .unwrap_or_else(|e| Err(e.to_string()));
+                    let user = match own {
+                        Ok(true) => run.user_id.clone().unwrap_or(owner),
+                        Ok(false) => String::new(),
+                        Err(e) => return text_result(&id, Err(e)),
+                    };
                     let cx = steve_modules::contacts::mcp::McpCx {
                         ws,
-                        user: run.user_id.clone().unwrap_or(owner),
+                        user,
                         bot_id: "steve".into(),
                         item_id: None,
                         session_id: None,
@@ -300,13 +371,19 @@ pub async fn handle(x: &Extra, run: ThreadRun, msg: Value, owner: String) -> Res
                 }
                 ITEMS_SEARCH => {
                     let (store, q) = (x.store.clone(), args["query"].as_str().unwrap_or("").to_string());
-                    tokio::task::spawn_blocking(move || items_search(&store, &ws, &q))
+                    let origin = run.message_id.clone();
+                    tokio::task::spawn_blocking(move || {
+                        items_search(&store, &ws, &ItemScope::of(&store, &origin)?, &q)
+                    })
                         .await
                         .unwrap_or_else(|e| Err(e.to_string()))
                 }
                 ITEM_READ => {
                     let (store, i) = (x.store.clone(), args["id"].as_str().unwrap_or("").to_string());
-                    tokio::task::spawn_blocking(move || item_read(&store, &ws, &i))
+                    let origin = run.message_id.clone();
+                    tokio::task::spawn_blocking(move || {
+                        item_read(&store, &ws, &ItemScope::of(&store, &origin)?, &i)
+                    })
                         .await
                         .unwrap_or_else(|e| Err(e.to_string()))
                 }

@@ -406,6 +406,62 @@ async fn research_runs_get_read_only_mcp() {
     assert!(t.starts_with("共 ") && t.contains("正在运行"), "{t}");
     let (_, v) = rpc(json!({"jsonrpc": "2.0", "id": 9, "method": "tools/call", "params": {"name": "steve_sessions_list", "arguments": {}}}), "research-token-2").await;
     assert_eq!(v["result"]["isError"], true, "{v}");
+    /* someone else listens: the item tools see only what this conversation produced */
+    let text = |v: &Value| {
+        v["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    };
+    let (_, v) = rpc(json!({"jsonrpc": "2.0", "id": 10, "method": "tools/call", "params": {"name": "steve_items_search", "arguments": {"query": "改"}}}), "research-token-2").await;
+    assert_eq!(
+        text(&v),
+        "No items match.",
+        "an item of another conversation is not there"
+    );
+    let (_, v) = rpc(json!({"jsonrpc": "2.0", "id": 11, "method": "tools/call", "params": {"name": "steve_item_read", "arguments": {"id": item}}}), "research-token-2").await;
+    assert_eq!(v["result"]["isError"], true, "{v}");
+    // the item came from a group chat; a run answering in that chat sees it, title, status and goal only
+    store
+        .with_conn(|c| {
+            c.execute_batch(&format!(
+                "INSERT INTO messages (id, workspace_id, space, author, text, created) VALUES
+                   ('msg_grp_1', 'default', 'chan:spc_t', 'u', '帮我把 X 改成 Y', 1),
+                   ('msg_grp_2', 'default', 'chan:spc_t', 'u', '进展如何', 2);
+                 UPDATE thread_items SET origin_msg = 'msg_grp_1' WHERE item_id = '{item}';"
+            ))?;
+            Ok(())
+        })
+        .unwrap();
+    let grp = th
+        .run_add(&steve_store::NewThreadRun {
+            workspace_id: "default".into(),
+            message_id: "msg_grp_2".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    th.run_patch(
+        &grp.id,
+        &steve_store::RunPatch {
+            status: Some("running".into()),
+            token_hash: Some(Some(steve_store::sha("research-token-3"))),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let (_, v) = rpc(json!({"jsonrpc": "2.0", "id": 12, "method": "tools/call", "params": {"name": "steve_items_search", "arguments": {"query": "改"}}}), "research-token-3").await;
+    assert!(
+        text(&v).contains(&item) && !text(&v).contains("现在："),
+        "{v}"
+    );
+    let (_, v) = rpc(json!({"jsonrpc": "2.0", "id": 13, "method": "tools/call", "params": {"name": "steve_item_read", "arguments": {"id": item}}}), "research-token-3").await;
+    let t = text(&v);
+    assert!(
+        t.contains("目标：把 X 改成 Y") && !t.contains("现在：") && !t.contains("时间线"),
+        "{t}"
+    );
+    let (_, v) = rpc(json!({"jsonrpc": "2.0", "id": 14, "method": "tools/call", "params": {"name": "steve_items_search", "arguments": {"query": "改"}}}), "research-token-2").await;
+    assert_eq!(text(&v), "No items match.", "still not for a run elsewhere");
     /* the run ended: the token is dead */
     th.run_patch(
         &run.id,

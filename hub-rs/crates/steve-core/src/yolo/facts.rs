@@ -248,6 +248,8 @@ impl Engine {
             )?),
             ("propose", "item") if !d.question.starts_with("前置事项都已完成") => {
                 Subject::ProposeCreate {
+                    // only what you asked for in a conversation; what someone else asked for there
+                    // (`chat_proposal`) waits for your own yes
                     from_chat: item.as_ref().is_some_and(|i| i.source.1 == "chat"),
                 }
             }

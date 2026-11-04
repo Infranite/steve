@@ -1200,3 +1200,69 @@ async fn an_answer_before_the_slow_ack_still_ends_done() {
     assert_eq!(h.fake.reactions_on("s2"), [ReactionKind::Done]);
     assert_eq!(state(&h, &i.message_id), "done");
 }
+
+/// Work starts only when the owner asks: the owner's turn may start, anyone else's (a workspace member
+/// too) waits as a proposal. Decided from the sender's contact, not from the chat being internal.
+#[tokio::test(flavor = "multi_thread")]
+async fn only_the_owner_starts_work_from_a_chat() {
+    let h = setup(true).await;
+    let t = h.thread.clone().unwrap();
+    h.fake.space(
+        "G_W",
+        "工作群",
+        SpaceKind::Group,
+        false,
+        &[("upx", "我"), ("uli", "李雷")],
+    );
+    push(
+        &h,
+        &h.bot.clone(),
+        msg("G_W", "w1", "upx", "把脚本改一下", true, false),
+    )
+    .await;
+    push(
+        &h,
+        &h.bot.clone(),
+        msg("G_W", "w2", "uli", "把脚本改一下", true, false),
+    )
+    .await;
+    let turns = t.turns.lock().unwrap().clone();
+    assert_eq!(turns.len(), 2, "{turns:?}");
+    assert!(turns[0].1.start, "the owner");
+    assert!(!turns[1].1.start, "someone else");
+    assert_eq!(turns[1].1.meta["chan"]["start"], json!(false));
+    // 李雷 becomes a member of the workspace (not its owner): still a proposal
+    exec(
+        &h,
+        "INSERT INTO users (id, workspace_id, subject, name, role, created) VALUES ('u_li', ?, 'li', '李雷', 'member', 1)",
+        &[WS],
+    );
+    exec(
+        &h,
+        "INSERT INTO workspace_members (workspace_id, user_id, role, created) VALUES (?, 'u_li', 'member', 1)",
+        &[WS],
+    );
+    exec(
+        &h,
+        "UPDATE parties SET user_id = 'u_li' WHERE id = (SELECT sender_party_id FROM chan_messages WHERE external_id = 'w2')",
+        &[],
+    );
+    assert_eq!(
+        one(
+            &h,
+            "SELECT count(*) FROM parties WHERE user_id = ?",
+            &["u_li"]
+        ),
+        json!(1),
+        "李雷's contact is linked to the member"
+    );
+    push(
+        &h,
+        &h.bot.clone(),
+        msg("G_W", "w3", "uli", "把脚本改一下", true, false),
+    )
+    .await;
+    let turns = t.turns.lock().unwrap().clone();
+    assert_eq!(turns.len(), 3, "{turns:?}");
+    assert!(!turns[2].1.start, "a member is not the owner");
+}

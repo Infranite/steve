@@ -117,7 +117,8 @@ impl Sessions<'_> {
         self.0.read(|c| {
             one(
                 c,
-                "SELECT * FROM sessions WHERE token_hash = ?",
+                // an ended session's token opens nothing: whatever still holds it is a leftover
+                "SELECT * FROM sessions WHERE token_hash = ? AND status <> 'ended'",
                 [sha(token)],
                 Session::from_row,
             )

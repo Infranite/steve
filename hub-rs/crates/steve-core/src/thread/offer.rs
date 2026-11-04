@@ -56,6 +56,9 @@ pub(crate) struct ThreadItem<'a> {
     pub from_question: bool,
     /// the answer it grows out of: the conversation up to it goes into the opening
     pub answer: Option<&'a Message>,
+    /// the owner asked for it: work starts. Anyone else: a proposal the owner says yes to first, from a
+    /// source of its own (`chat_proposal`) so that nothing (YOLO included) takes it for the owner's
+    pub start: bool,
 }
 
 fn hm(t: i64) -> String {
@@ -175,6 +178,24 @@ impl Core {
         ))
     }
 
+    /// What an item made from the conversation starts with, rebuilt from where it came from: the
+    /// conversation up to its origin message and that message's files. A proposal starts with it once
+    /// you said yes; `None` for an item that didn't come from a conversation.
+    pub(crate) fn thread_start(&self, item: &Item) -> Result<Option<(String, Vec<FileRef>)>> {
+        let Some(ti) = self.store().store().thread().item(&item.id)? else {
+            return Ok(None);
+        };
+        let goal = self.store().goal(&item.id).unwrap_or_default();
+        let opening = self.opening_for(&item.workspace_id, &ti.origin_msg, &goal, None)?;
+        let files = self
+            .store()
+            .message(&ti.origin_msg)?
+            .and_then(|m| m.meta.get("files").cloned())
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_default();
+        Ok(Some((opening, files)))
+    }
+
     /// Make an item from the conversation and remember where it came from (`thread_items`).
     pub(crate) fn thread_item(&self, n: ThreadItem<'_>) -> Result<Item> {
         let opening = Some(self.opening_for(n.ws, n.origin, &n.goal, n.answer)?);
@@ -184,10 +205,15 @@ impl Core {
             title: n.title,
             bot: n.bot,
             project: Some(n.project),
-            source: Some(("对话".into(), "chat".into())),
+            source: Some(if n.start {
+                ("对话".into(), "chat".into())
+            } else {
+                ("对话里别人的提议".into(), "chat_proposal".into())
+            }),
             tag_ids: n.tags,
             opening,
             files: n.files,
+            propose: !n.start,
             ..Default::default()
         })?;
         self.store()
@@ -249,7 +275,19 @@ impl Core {
     }
 
     /// Take (`take: true`) or dismiss an offer on Steve's answer `msg_id` (`POST /api/thread/:id/offer`).
+    /// Taken by you (the web's button): an item that starts.
     pub fn offer(&self, ws: &str, msg_id: &str, take: bool) -> Result<Handled> {
+        self.offer_as(ws, msg_id, take, true)
+    }
+
+    /// `start`: the one taking the offer may start work (see [`ThreadItem::start`]).
+    pub(crate) fn offer_as(
+        &self,
+        ws: &str,
+        msg_id: &str,
+        take: bool,
+        start: bool,
+    ) -> Result<Handled> {
         let _one = lock(&self.0.thread.acting);
         let m = self
             .store()
@@ -308,6 +346,7 @@ impl Core {
                 .and_then(|v| serde_json::from_value(v).ok())
                 .unwrap_or_default(),
             from_question,
+            start,
             answer: Some(&m),
         })?;
         meta["offer"]["state"] = json!("taken");

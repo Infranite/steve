@@ -69,12 +69,14 @@ async fn settle(k: &Kit, space: &str, n: usize) -> Vec<Message> {
     );
 }
 
+/// Someone else speaking in a group (not the owner: what they ask for waits for the owner's yes).
 fn guest(research: bool, items: bool) -> Conv {
     Conv {
         owner_only: false,
         space: SPACE.into(),
         research,
         items,
+        start: false,
     }
 }
 
@@ -162,6 +164,68 @@ async fn work_from_a_chat_becomes_an_item_only_when_the_host_allows_it() {
     let id = ms[3].item_id.clone().expect("an item");
     let ti = k.db().store().thread().item(&id).unwrap().unwrap();
     assert_eq!(ti.origin_msg, mid);
+    // someone else asked: a proposal that waits for you, from a source YOLO doesn't take for yours
+    let it = k.db().item(&id).unwrap().unwrap();
+    assert_eq!(it.source.1, "chat_proposal");
+    assert!(
+        k.db().store().sessions().of_item(&id).unwrap().is_empty(),
+        "nothing runs"
+    );
+    let open: Vec<_> = k
+        .db()
+        .store()
+        .decisions()
+        .of_item(&id)
+        .unwrap()
+        .into_iter()
+        .filter(|d| d.kind == "propose" && d.status == "open")
+        .collect();
+    assert_eq!(open.len(), 1, "a card asks you first");
+    // your yes starts it with what it would have started with: the conversation it came from
+    k.core.resolve(&open[0].id, "yes", "", "me").unwrap();
+    let ses = k.db().store().sessions().of_item(&id).unwrap();
+    assert_eq!(ses.len(), 1, "it runs now");
+    let first =
+        k.rt.prompts_of(&ses[0].id)
+            .first()
+            .cloned()
+            .unwrap_or_default();
+    assert!(
+        first.contains("把告警脚本修一下") && first.contains("运维群"),
+        "{first}"
+    );
+    // you asking in the same group: the work starts
+    let mine = turn(
+        &k,
+        "把告警脚本也改一下",
+        Conv {
+            start: true,
+            ..guest(true, true)
+        },
+    );
+    let ms = settle(&k, SPACE, 6).await;
+    let own = ms[5].item_id.clone().expect("your item");
+    assert_ne!(own, id);
+    assert_eq!(k.db().item(&own).unwrap().unwrap().source.1, "chat");
+    assert!(
+        k.db()
+            .store()
+            .decisions()
+            .of_item(&own)
+            .unwrap()
+            .iter()
+            .all(|d| d.kind != "propose")
+    );
+    assert_eq!(
+        k.db()
+            .store()
+            .thread()
+            .item(&own)
+            .unwrap()
+            .unwrap()
+            .origin_msg,
+        mine
+    );
     assert_eq!(ti.reply_msg.as_deref(), Some(ms[3].id.as_str()));
     assert!(
         host.said

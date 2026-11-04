@@ -752,11 +752,17 @@ impl Core {
         if j.space == super::MAIN {
             self.phase(ws, "research");
         }
-        let projects: Vec<Project> = db
-            .projects(ws)?
-            .into_iter()
-            .filter(|p| !p.archived && matches!(p.kind.as_str(), "git" | "dir"))
-            .collect();
+        /* where anyone besides the owner reads the answer, the run gets no project directory and no one's
+         * personal view: what it may say there it finds through its tools, which check every call */
+        let own = own_reader(db, &j.space, &j.origin)?;
+        let projects: Vec<Project> = if own {
+            db.projects(ws)?
+                .into_iter()
+                .filter(|p| !p.archived && matches!(p.kind.as_str(), "git" | "dir"))
+                .collect()
+        } else {
+            vec![]
+        };
         let repo = self.config().steve_repo.to_string_lossy().to_string();
         let project = j
             .project
@@ -764,7 +770,7 @@ impl Core {
             .and_then(|id| projects.iter().find(|p| p.id == id))
             .or_else(|| projects.iter().find(|p| p.path == repo))
             .cloned();
-        let cx = self.chat_context(ws, j.user.as_deref(), &j.question);
+        let cx = self.chat_context(ws, j.user.as_deref().filter(|_| own), &j.question);
         /* a chat's research knows who hears its answer */
         let guest_frame = match (j.space != super::MAIN, self.conv_host()) {
             (true, Some(h)) => h.research_context(ws, &j.space),
@@ -778,7 +784,7 @@ impl Core {
         };
         let history = self.history_before(ws, &j.origin)?;
         /* items are read up front only where the owner alone reads the answer; a shared chat asks the tool */
-        let named = if own_reader(db, &j.space, &j.origin)? {
+        let named = if own {
             mentioned_items(db, ws, &j.question, &history)?
         } else {
             String::new()

@@ -289,6 +289,7 @@ impl Core {
             files: files_of(&om, "files"),
             from_question: super::decide::pure_question(&om.text),
             answer: None,
+            start: true, // your action in the web
         })?;
         th.route_override(origin, "to_item", Some(&item.id))?;
         let text = format!("好，做成事项 {} 交给{}了。", item.id, self.bot_name(&item));
@@ -382,6 +383,7 @@ impl Core {
             files: files_of(m, "chatFiles"),
             from_question: super::decide::pure_question(&q),
             answer: Some(m),
+            start: true, // your action in the web
         })?;
         let mut meta = meta_of(m);
         meta.remove("chat");

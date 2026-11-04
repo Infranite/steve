@@ -377,7 +377,7 @@ impl Core {
             }
             "reroute" => self.spoken_reroute(ws, mid, text, &r, reply).await?,
             _ => self.on_item(
-                ws, mid, text, files, user, mentions, &r, named, reply, steps,
+                ws, mid, text, files, user, mentions, &r, named, conv.start, reply, steps,
             )?,
         };
         if let Some(i) = logged.item {
@@ -531,6 +531,7 @@ impl Core {
         mentions: &[Mention],
         r: &Route,
         named: Option<crate::repo::Bot>,
+        start: bool,
         reply: Reply<'_>,
         steps: &Mutex<Steps>,
     ) -> Result<Logged> {
@@ -540,7 +541,7 @@ impl Core {
             && confirms(text)
             && let Some(m) = self.open_offer_before(ws, mid)?
         {
-            let h = self.offer(ws, &m.id, true)?;
+            let h = self.offer_as(ws, &m.id, true, start)?;
             if let Some(rs) = lock(steps).route.as_mut() {
                 rs["offer"] = json!(m.id);
             }
@@ -597,6 +598,7 @@ impl Core {
             files: files.to_vec(),
             from_question: r.signals.iter().any(|s| s == "question"),
             answer: None,
+            start,
         });
         let item = Steps::end(
             steps,

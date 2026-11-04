@@ -378,6 +378,22 @@ fn sessions() {
     s.sessions().rotate_token(&s1.id, "new").unwrap();
     assert_eq!(s.sessions().by_token("new").unwrap().unwrap().id, s1.id);
     assert!(s.sessions().by_token("t1").unwrap().is_none());
+    // an ended session's token opens nothing; a session that runs again is reachable again
+    let end = |status: &str| {
+        s.sessions()
+            .patch(
+                &s1.id,
+                &SessionPatch {
+                    status: Some(status.into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+    };
+    end("ended");
+    assert!(s.sessions().by_token("new").unwrap().is_none());
+    end("idle");
+    assert_eq!(s.sessions().by_token("new").unwrap().unwrap().id, s1.id);
     assert_eq!(s.sessions().list(Some(WS)).unwrap().len(), 3);
     assert_eq!(s.sessions().list(None).unwrap().len(), 3);
 }

@@ -96,6 +96,9 @@ pub struct Conv {
     pub items: bool,
     /// only the workspace's owner reads it (their private chat with Steve)
     pub owner_only: bool,
+    /// the person speaking may start work: the workspace's owner. What anyone else asks for becomes an
+    /// item that waits for the owner's yes (a proposal), never work that runs on its own
+    pub start: bool,
 }
 
 impl Default for Conv {
@@ -111,6 +114,7 @@ impl Conv {
             research: true,
             items: true,
             owner_only: false,
+            start: true,
         }
     }
     /// A conversation whose turns are not the user's own (an IM space).
