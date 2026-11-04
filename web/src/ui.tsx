@@ -75,15 +75,25 @@ export function ThemeSwitch({ className, labels = false }: { className?: string;
 const DOT: Record<string, string> = { fail: "bg-destructive", block: "border-[1.5px] border-dashed border-tertiary", run: "bg-blue dot-running", prop: "bg-blue", wait: "bg-attention", pause: "bg-tertiary", done: "bg-success", drop: "bg-tertiary", idle: "bg-tertiary", ended: "ring-[1.5px] ring-inset ring-tertiary" }
 /** what became of an approved release, in its own color: a failure is never shown as a plain "approved".
  *  `box` is the prominent form for the item page */
-export function RelNote({ rel, box, className }: { rel: Rel; box?: boolean; className?: string }) {
+export function RelNote({ rel, box, className, onClose }: { rel: Rel; box?: boolean; className?: string; onClose?: () => void }) {
   const I = rel.tone === "fail" ? RelFailIcon : rel.tone === "ok" ? RelOkIcon : RelRunIcon
   const color = rel.tone === "fail" ? "text-destructive" : rel.tone === "ok" ? "text-success" : "text-blue"
   return (
     <div role={rel.tone === "fail" ? "alert" : "status"} data-rel={rel.tone}
       className={cn("flex min-w-0 items-start gap-1.5", box ? "rounded-lg border px-3 py-2 type-callout" : "type-footnote", box && rel.tone === "fail" && "border-destructive/40", className)}>
       <I className={cn("mt-[2px] size-3.5 shrink-0", box && "size-4", color)} strokeWidth={2} />
-      <span className={cn("min-w-0", box ? "text-foreground" : color, !box && "truncate")} title={rel.text}>{rel.text}</span>
+      <span className={cn("min-w-0", box ? "flex-1 text-foreground" : color, !box && "truncate")} title={rel.text}>{rel.text}</span>
+      {onClose && <AlertClose onClose={onClose} className={box ? "-my-0.5" : "-my-1"} />}
     </div>
+  )
+}
+/** closes a failure that is no longer worth showing; it stays in the timeline and the notifications */
+export function AlertClose({ onClose, className }: { onClose: () => void; className?: string }) {
+  return (
+    <Tooltip>
+      <TooltipTrigger render={<Button variant="ghost" size="icon-xs" aria-label="关闭这条提示" className={cn("shrink-0 text-muted-foreground", className)} onClick={(e) => { e.stopPropagation(); onClose() }} onKeyDown={(e) => e.stopPropagation()} data-alert-close />}><XIcon /></TooltipTrigger>
+      <TooltipContent>关闭，时间线和通知里仍可查到</TooltipContent>
+    </Tooltip>
   )
 }
 export function StatusDot({ s, className }: { s: string; className?: string }) {

@@ -216,6 +216,53 @@ pub fn flow_quiet(db: &Db, item: &str, u: Update<'_>) {
     }
 }
 
+/// The item is working again (it went on, was resumed, or handed to Steve): a failure its card still
+/// shows is over. The card goes back to running in place, never moves, and is left alone in any other
+/// state; the failure itself stays in the item's timeline. No-op for items not made from the conversation.
+pub fn recover(db: &Db, item: &str) -> Result<()> {
+    let Some(ti) = db.store().thread().item(item)? else {
+        return Ok(());
+    };
+    let visible: Vec<Message> = db
+        .messages_in(&ti.workspace_id, &conv_of(db, &ti.origin_msg), 200)?
+        .into_iter()
+        .filter(|m| !hidden(m))
+        .collect();
+    let Some(m) = host(&visible, item, ti.reply_msg.as_deref()).map(|i| &visible[i]) else {
+        return Ok(());
+    };
+    let Some(c) = card_of(m).filter(|c| c["state"] == "fail") else {
+        return Ok(());
+    };
+    let card = merged(
+        Some(c),
+        item,
+        &Update {
+            kind: "run",
+            ..Default::default()
+        },
+        now(),
+    );
+    let meta = with_meta(m, |o| {
+        o.insert("card".into(), card.clone());
+    });
+    if card_only(m) {
+        db.store()
+            .messages()
+            .patch_text_meta(&m.id, &headline(item, &card), &meta)?;
+        Ok(())
+    } else {
+        db.message_patch_meta(&m.id, &meta)
+    }
+}
+
+/// [`recover`] that only logs a failure.
+pub fn recover_quiet(db: &Db, item: &str) {
+    if let Err(e) = recover(db, item) {
+        tracing::warn!(item, "thread card: {e}");
+    }
+}
+
 /// The card goes on `msg` (Steve's announcement of the item, or its acknowledgement of the user's latest
 /// message to it): the card it had elsewhere comes along, that message lets it go. No-op for items not
 /// made from the conversation.

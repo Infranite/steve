@@ -26,7 +26,7 @@ import { lazyView } from "@/lazy"
 import { ItemPeopleProp } from "@/people/item-people"
 import { queueNote, QueueStrip } from "@/queue"
 import { ItemStatsRows, SessionStats } from "@/stats/drill"
-import { accOf, active, addDep, archive, bulk, deleteItem, depsOpen, doFork, gBuild, gComps, hm, importSessions, interrupt, it, itemThread, link, loadEvents, loadItem, loadLocalSessions, markDone, newItem, patchItem, pending, pendingCards, reassign, rmDep, saveGoal, sessPatch, sessRemove, sessSend, setAcc, setSt, setTags, snoozed, st, stageOf, star, supp, tag, TAG_CATS, threadFollow, tm, toast, undoDecision, unsnooze, WT, type Item, type PlanRound } from "@/store"
+import { accOf, active, addDep, archive, bulk, closeRel, deleteItem, depsOpen, doFork, gBuild, gComps, hm, importSessions, interrupt, it, itemThread, link, loadEvents, loadItem, loadLocalSessions, markDone, newItem, patchItem, pending, pendingCards, reassign, rmDep, saveGoal, sessPatch, sessRemove, sessSend, setAcc, setSt, setTags, snoozed, st, stageOf, star, supp, tag, TAG_CATS, threadFollow, tm, toast, undoDecision, unsnooze, WT, type Item, type PlanRound } from "@/store"
 import { BotAvatar, BotName, Chips, closeSheet, Composer, DecisionCard, Empty, go, Group, ItemNo, Meta, openSheet, Page, RelNote, ReplyBlock, Row, RunBar, SectionLabel, Segmented, SessionBlock, Status, StatusDot, Tags, ThemeSwitch, Transcript, type ComposerHandle } from "@/ui"
 import { ChoiceCards, ItemRow, PlanBar, ProjectChip, Select, selected } from "@/view-shared"
 import { choiceText, YoloItemSwitch, YoloMark } from "@/yolo/badges"
@@ -426,7 +426,7 @@ export function ItemView({ id }: { id: string }) {
                 <span key={g} className="inline-flex items-center gap-1"><span className={cn(me === cur ? "font-medium text-foreground" : me < cur ? "text-muted-foreground" : "text-tertiary")}>{g}</span>{n < arr.length - 1 && <ChevronRightIcon className="size-3 text-tertiary" />}</span>) })}
             </div>
             <div className="flex items-center gap-2"><StatusDot s={i.st} /><span className={cn("type-headline", i.st === "run" && "shimmer shimmer-once")}>{i.now}</span></div>
-            {i.rel && <RelNote rel={i.rel} box={i.rel.tone !== "ok"} className="mt-2" />}
+            {i.rel && <RelNote rel={i.rel} box={i.rel.tone !== "ok"} className="mt-2" onClose={i.rel.tone === "fail" ? () => closeRel(i) : undefined} />}
             {(i.plan || i.rounds.length > 0) && <Plan i={i} />}
           </section>
           {/* 3 — activity, newest at the bottom, older entries folded */}

@@ -9,8 +9,8 @@ import { Spinner } from "@/components/ui/spinner"
 import { TraceLine, TraceIcon, TraceTitle, TraceDescription } from "@/components/ui/trace"
 import { Markdown } from "@/components/markdown"
 import { Textarea } from "@/components/ui/textarea"
-import { st, tm, emit, chatSend, takeOffer, chooseSuggest, cancelQueued, stopRun, clearFocus, focusItem, quoteMsg, decisionDraft, decide, botName, type Msg, type Steps, type Update, type Item, type ItemCardState } from "@/store"
-import { ItemRef, DecisionCard, ItemNo, StatusDot, go } from "@/ui"
+import { st, tm, emit, chatSend, takeOffer, chooseSuggest, cancelQueued, stopRun, clearFocus, focusItem, quoteMsg, decisionDraft, decide, botName, alertClosed, closeAlerts, type Msg, type Steps, type Update, type Item, type ItemCardState } from "@/store"
+import { ItemRef, DecisionCard, ItemNo, StatusDot, AlertClose, go } from "@/ui"
 
 /* ───────── research ───────── */
 const isRead = (n: string) => n === "Read"
@@ -217,7 +217,9 @@ export function ItemCard({ c, inText = false }: { c: ItemCardState; inText?: boo
   /* the delivery the open acceptance is about, else the latest one */
   const d = c.delivery ? { ...c.delivery, decision: accept?.decision ?? c.delivery.decision } : accept ? { text: (accept.draft ?? "").split("\n\n")[0], decision: accept.decision } : undefined
   const reply = c.reply && (!c.delivery?.at || (c.reply.at ?? 0) > c.delivery.at) ? c.reply : undefined
-  const failLine = !w && c.state === "fail" && i.st !== "done" && i.st !== "drop" ? c.text : undefined
+  /* the failure is current only while the item stays stopped on it (you chose to look, it is paused): going on, being
+   * resumed or finishing ends it — the Hub then sets the card back to running, cards from before that are read the same way */
+  const failLine = !w && c.state === "fail" && i.st === "pause" && !alertClosed(c.decision) ? c.text : undefined
   return (
     <div className="mt-3 flex w-full max-w-[560px] flex-col gap-3 rounded-xl border bg-card p-3.5 anim-in" data-item-card={i.id} data-card-state={look.tone}>
       <button type="button" onClick={() => go("#/items/" + i.id)} className="-m-1 flex min-w-0 items-start gap-2.5 rounded-lg p-1 text-left hover:bg-accent/60" data-item-ref={i.id}>
@@ -231,7 +233,8 @@ export function ItemCard({ c, inText = false }: { c: ItemCardState; inText?: boo
       {d && !inText && <DeliveryBlock key={d.decision ?? d.text} d={d} open={!!d.full} />}
       {reply && <div className="flex min-w-0 flex-col gap-1 border-l-2 border-border pl-3" data-card-reply>
         <div className="type-footnote text-muted-foreground">它的回复</div><div className="line-clamp-4 min-w-0 break-words"><Markdown text={reply.text} className="type-callout" /></div></div>}
-      {failLine && <div className="flex items-start gap-2 type-callout text-muted-foreground"><CircleAlertIcon className="mt-0.5 size-4 shrink-0 text-destructive" strokeWidth={1.75} />{failLine}</div>}
+      {failLine && <div className="flex items-start gap-2 type-callout text-muted-foreground" data-card-fail><CircleAlertIcon className="mt-0.5 size-4 shrink-0 text-destructive" strokeWidth={1.75} /><span className="min-w-0 flex-1">{failLine}</span>
+        {c.decision && <AlertClose onClose={() => closeAlerts([c.decision!])} className="-my-0.5" />}</div>}
       {accept ? <AcceptRow i={i} decision={accept.decision} /> : w ? <div className="-mx-1.5 [&_[data-decision-wrap]]:bg-muted/40 [&_[data-decision-wrap]]:shadow-none [&_[data-decision-wrap]]:ring-0">
         <DecisionCard i={i} w={w} showItem={false} /></div> : null}
     </div>

@@ -11,7 +11,7 @@ use crate::repo::{
     PlanStep, Queued, Session, WS,
 };
 use crate::runtime::{Check, McpEndpoint, Output, Prompted, TurnEnd};
-use crate::thread::flowback::{Update, flow_quiet};
+use crate::thread::flowback::{Update, flow_quiet, recover_quiet};
 use crate::util::{js_head, js_len, js_tail, now, or, token};
 use crate::{Core, Mark, Tx};
 use serde::Serialize;
@@ -1104,6 +1104,7 @@ impl Tx<'_> {
             return Ok(());
         }
         supersede(self.db(), item, &["fail"], "Bot 继续工作了")?;
+        recover_quiet(self.db(), item);
         let i = self.item(item)?;
         let plan: Vec<PlanStep> = plan
             .iter()
@@ -1783,6 +1784,7 @@ impl Tx<'_> {
             To::Decision { live, item } => {
                 if let Some(i) = item {
                     supersede(self.db(), i, &["ask", "fail"], "你已经回复，会话继续")?;
+                    recover_quiet(self.db(), i);
                 }
                 match (live, item) {
                     (Some(s), _) => self.prompt(s, m, "steve"),
@@ -2094,6 +2096,7 @@ impl Tx<'_> {
                             None,
                         )?;
                         self.db().item_patch(&i, patch![now: "让它继续"])?;
+                        recover_quiet(self.db(), &i);
                         if actor == YOLO_ACTOR {
                             self.answer_line(&i, actor, "让它继续", sid.as_deref())?;
                         }
@@ -2218,6 +2221,7 @@ impl Tx<'_> {
                             "resolved",
                             None,
                         )?;
+                        recover_quiet(self.db(), &i);
                         self.reassign(&i, "steve", actor)?;
                     }
                     // the stall card (crate::stall): give the item up
@@ -2620,6 +2624,7 @@ impl Tx<'_> {
             files,
         )?;
         supersede(self.db(), item_id, &["ask", "fail"], "你直接补充了信息")?;
+        recover_quiet(self.db(), item_id);
         self.reactivate(Some(item_id))?;
         let s = match s {
             Some(s) if mode != SupplementMode::New => s,
@@ -2797,6 +2802,7 @@ impl Tx<'_> {
                     return Err(crate::cycle::conflict("这个事项正在取消或标记失败"));
                 }
                 supersede(self.db(), id, &["fail"], "你让它继续了")?;
+                recover_quiet(self.db(), id);
                 self.ensure_cwd(id)?;
                 if !deps_open(self.db(), id)?.is_empty() {
                     self.db()
@@ -2917,6 +2923,7 @@ impl Tx<'_> {
             self.db()
                 .timeline_add_files(i, "me", "me", text, Some(&s.id), files)?;
             supersede(self.db(), i, &["ask", "fail"], "你直接在会话里发了消息")?;
+            recover_quiet(self.db(), i);
             self.reactivate(Some(i))?;
         }
         if s.status == "ended" {

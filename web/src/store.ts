@@ -19,7 +19,7 @@ export type Done = { id: string; type: Wait["type"]; q: string; choice: string; 
   /** answered by YOLO: its reason (modules/yolo.md §3.3 `decided_by: "yolo"`) */
   yolo?: string }
 /** what became of an approved release (hub decision.result.outcome): the card says this, never a bare "approved" */
-export type Rel = { tone: "run" | "fail" | "ok"; text: string }
+export type Rel = { tone: "run" | "fail" | "ok"; text: string; /** the release decision it comes from */ key?: string }
 /** an earlier plan: replaced (its open steps abandoned) or done (a new round followed) */
 export type PlanRound = { n: number; steps: [string, number][]; end: "done" | "replaced"; at: string }
 export type Item = {
@@ -259,7 +259,40 @@ export function relOf(d: RDecision): Rel | undefined {
 /** the item's newest release decision, if it is settled and approved */
 function itemRel(id: string, ds: RDecision[]): Rel | undefined {
   const last = ds.filter((d) => d.item_id === id && d.kind === "approve" && d.subject_type === "release").sort((a, b) => b.created - a.created)[0]
-  return last ? relOf(last) : undefined
+  const r = last ? relOf(last) : undefined
+  return r && { ...r, key: last.id }
+}
+/* ── alerts that are over ──
+ * a failure asks for attention only while it is current: a later release took its place (only the newest counts), the item
+ * went on or finished, or you closed it. Closed ones are remembered by the Hub with the closed notifications (setting
+ * noticeDismissed: notification ids and decision ids), so a refresh or another device does not bring them back.
+ * The failure itself stays in the item's timeline and in the notifications. */
+const finished = (s?: string) => s === "done" || s === "drop"
+export function alertClosed(key?: string) {
+  const xs = raw.state?.settings.noticeDismissed as unknown
+  return !!key && Array.isArray(xs) && xs.includes(key)
+}
+/** the failed release still worth showing on the item, or undefined */
+function liveRel(i: RItem, r?: Rel): Rel | undefined {
+  if (r?.tone !== "fail") return r
+  if (finished(i.status) || alertClosed(r.key)) return undefined
+  /* closed from the notifications: the item's newest release notice (they come newest first) */
+  const n = raw.state?.notifications?.find((x) => x.item_id === i.id && x.kind === "release")
+  return n?.level === "fail" && n.closed ? undefined : r
+}
+/** close alerts by hand: decision ids, notification ids or their lines in the conversation */
+export function closeAlerts(keys: string[]) {
+  const s = raw.state, xs = keys.filter(Boolean); if (!s || !xs.length) return
+  const was = Array.isArray(s.settings.noticeDismissed as unknown) ? (s.settings.noticeDismissed as unknown as string[]) : []
+  s.settings = { ...s.settings, noticeDismissed: [...was, ...xs] as unknown as string }
+  s.thread = s.thread.filter((m) => !xs.includes(m.meta?.notice?.ref) && !xs.includes(m.id))
+  s.notifications = s.notifications?.map((n) => (xs.includes(n.id) ? { ...n, closed: true } : n))
+  build(); emit()
+  void call(Promise.all(xs.map((x) => api.dismissNotice(x))))
+}
+/** close an item's failed release: the decision, and its notifications still open */
+export function closeRel(i: Item) {
+  closeAlerts([i.rel?.key ?? "", ...st.notices.filter((n) => n.item_id === i.id && n.kind === "release" && n.level === "fail" && !n.closed).map((n) => n.id)])
 }
 function choiceLabel(d: RDecision) {
   const r = d.result ?? {}
@@ -332,7 +365,7 @@ function itemOf(i: RItem): Item {
     /* the hub clears cwd when the project changes; a session still running then is in the old directory */
     branch: i.branch, cwd: i.cwd, projNext: !i.cwd && !!act, detail: !!det, dependents: det?.dependents ?? [], created: i.created, updated: i.updated,
     /* an open release card wins (it is the newest); a settled one says what happened */
-    rel: open.some((d) => d.subject_type === "release") ? undefined : itemRel(i.id, [...(det?.decisions ?? []), ...(raw.state?.recent ?? [])]),
+    rel: open.some((d) => d.subject_type === "release") ? undefined : liveRel(i, itemRel(i.id, [...(det?.decisions ?? []), ...(raw.state?.recent ?? [])])),
   }
 }
 export function msgOf(m: State["thread"][number]): Msg {
@@ -374,7 +407,8 @@ function build() {
   st.items = s.items.map(itemOf)
   st.tags = s.tags.map((t) => ({ id: t.id, name: t.name, cat: t.cat, desc: t.description, by: t.created_by === "你" ? "你" : "Steve", created: tm(t.created) }))
   st.tagUses = s.tagUses
-  st.thread = s.thread.map(msgOf)
+  /* a failure line of a finished item is history: the notifications keep it */
+  st.thread = s.thread.filter((m) => !(m.meta?.notice && m.item_id && finished(itemIndex.get(m.item_id)?.status))).map(msgOf)
   if (st.draft) {
     const at = s.thread.findIndex((m) => m.id === st.draft!.mid), reply = at < 0 ? undefined : s.thread.slice(at + 1).find((m) => m.author === "steve")
     if (reply) { st.drafted = reply.id; st.draft = null }
@@ -384,7 +418,7 @@ function build() {
     st.live = null; if (st.phase === "research" || st.phase === "answer") { st.thinking = false; st.phase = "" }
   }
   if (st.thinking || st.draft || st.live) st.thread.push({ k: "thinking" })
-  st.notices = s.notifications ?? []; st.noticeSeen = Math.max(st.noticeSeen, s.notifySeen ?? 0)
+  st.notices = (s.notifications ?? []).map((n) => (n.level === "fail" && !n.closed && n.item_id && finished(itemIndex.get(n.item_id)?.status) ? { ...n, closed: true } : n)); st.noticeSeen = Math.max(st.noticeSeen, s.notifySeen ?? 0)
   st.orphans = openDec.filter((d) => !d.item_id || !s.items.some((i) => i.id === d.item_id)).map(orphanOf)
   st.done = s.recent.filter((d) => d.item_id).map((d) => ({ id: d.item_id!, type: d.kind, q: d.question, choice: choiceLabel(d), tm: tm(d.resolved), decision: d.id, canUndo: !!d.undo && !!d.resolved && Date.now() - d.resolved < 86400_000, rel: relOf(d),
     how: d.result?.dismissed ? "dismissed" : d.status === "expired" ? "expired" : "chose", yolo: d.result?.decided_by === "yolo" ? String(d.result?.yolo_reason ?? "") : undefined }))
@@ -653,11 +687,7 @@ export function readNotices() {
   st.noticeSeen = at; emit(); void api.readNotifications(at).catch(fail)
 }
 /** close a failure notice: its line leaves the conversation and it is no longer pinned; the Hub remembers it */
-export function dismissNotice(id: string) {
-  st.thread = st.thread.filter((m) => m.notice?.ref !== id && m.id !== id)
-  st.notices = st.notices.map((n) => (n.id === id ? { ...n, closed: true } : n)); emit()
-  void call(api.dismissNotice(id))
-}
+export function dismissNotice(id: string) { closeAlerts([id]) }
 /* a chat answer becomes one item: clicks while it is being made are ignored, and the hub returns the same item if asked again */
 const promoting = new Set<string>()
 export const isPromoting = (m: Msg) => !!m.id && promoting.has(m.id)
