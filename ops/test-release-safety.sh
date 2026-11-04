@@ -83,4 +83,26 @@ if web_release; then fail "no previous version accepted a failed verification"; 
 [[ $HISTORY_ARGS[2] == false && $HISTORY_ARGS[4] == true && $LAST_ARGS[1] == false && $LAST_ARGS[3] == true ]] || fail "rollback to no previous version was not recorded"
 [[ $HISTORY_ARGS[6] == "" && ${(j:,:)VERIFIED} == new-version ]] || fail "no previous version invented a rollback target"
 pass "no previous version removes failed current/build and records rollback to empty state"
+# An existing deployment's identity comes from signing/identity.json; the environment still wins.
+ID=$T/identity
+mkdir -p "$ID/signing"
+print '{"label": "dev.example.steve", "hub_identifier": "dev.example.steve.hub", "keyhelper_identifier": "dev.example.steve.keyhelper", "vault_service": "dev.example.steve.vault", "other": "x"}' >"$ID/signing/identity.json"
+(
+  unset STEVE_LABEL STEVE_KEYHELPER_HUB_IDENTIFIER STEVE_KEYHELPER_IDENTIFIER STEVE_KEYHELPER_SERVICE
+  export STEVE_KEYHELPER_SERVICE=env.wins.vault
+  machine_identity "$ID"
+  [[ $STEVE_LABEL == dev.example.steve && $STEVE_KEYHELPER_HUB_IDENTIFIER == dev.example.steve.hub ]] || fail "identity.json label/hub not read"
+  [[ $STEVE_KEYHELPER_IDENTIFIER == dev.example.steve.keyhelper ]] || fail "identity.json keyhelper not read"
+  [[ $STEVE_KEYHELPER_SERVICE == env.wins.vault ]] || fail "identity.json overrode the environment"
+  [[ $(zsh -c 'print -r -- $STEVE_KEYHELPER_IDENTIFIER') == dev.example.steve.keyhelper ]] || fail "identity not exported to the build"
+) || exit 1
+(
+  unset STEVE_LABEL STEVE_KEYHELPER_HUB_IDENTIFIER STEVE_KEYHELPER_IDENTIFIER STEVE_KEYHELPER_SERVICE
+  machine_identity "$T/no-such-home"
+  [[ -z ${STEVE_LABEL:-} && -z ${STEVE_KEYHELPER_IDENTIFIER:-} ]] || fail "no identity.json invented values"
+  print '{"label": "bad; rm -rf /", "hub_identifier": 3}' >"$ID/signing/identity.json"
+  machine_identity "$ID"
+  [[ -z ${STEVE_LABEL:-} && -z ${STEVE_KEYHELPER_HUB_IDENTIFIER:-} ]] || fail "malformed identity values accepted"
+) || exit 1
+pass "build identity comes from signing/identity.json unless the environment sets it"
 print "All release safety checks passed"

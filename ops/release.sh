@@ -17,7 +17,7 @@
 #        current), restart, health-check; main and the web build are left alone. Refused when that release can't open
 #        the database (ops/schema_gate.py): an older Hub on a database a newer one migrated is what this must never do
 # Env: STEVE_HOME, STEVE_REPO, STEVE_PORT; STEVE_DRAIN_TOKEN (given by the Hub), STEVE_DRAIN_S (default 120: the Hub resumes turns a restart cut off, once within 30 min);
-#      STEVE_LABEL (launchd job) or STEVE_RESTART_CMD (restarts the Hub instead of launchctl, for tests);
+#      STEVE_LABEL (launchd job; default from $STEVE_HOME/signing/identity.json, see machine_identity) or STEVE_RESTART_CMD (restarts the Hub instead of launchctl, for tests);
 #      STEVE_WEB_KEEP (web builds kept besides the previous one, default 10); STEVE_FIRST=1 (bootstrap: nothing runs yet);
 #      STEVE_CARGO (cargo to use), STEVE_CARGO_TARGET_DIR (default $STEVE_HOME/build/cargo-target); STEVE_HEALTH_TRIES
 #      (default 40, 1.5 s apart); STEVE_UNSIGNED=1 (test homes only: no signing keychain, the binary stays ad-hoc signed)
@@ -37,6 +37,7 @@ for a in "$@"; do
   esac
 done
 BRANCH=${ARGS[1]:-main} ITEM=${ARGS[2]:-} ACTION=${ARGS[3]:-} HOME_DIR=${STEVE_HOME:-$HOME/.steve} REPO=${STEVE_REPO:-${OPS:h}}
+machine_identity $HOME_DIR
 LABEL=${STEVE_LABEL:-io.github.infranite.steve} PORT=${STEVE_PORT:-8440} DRAIN_S=${STEVE_DRAIN_S:-120} WEB_KEEP=${STEVE_WEB_KEEP:-10}
 REL=$HOME_DIR/releases WEB=$HOME_DIR/web LOGS=$HOME_DIR/logs/release HIST=$HOME_DIR/releases/history.jsonl
 CARGO_TARGET=${STEVE_CARGO_TARGET_DIR:-$HOME_DIR/build/cargo-target} HEALTH_TRIES=${STEVE_HEALTH_TRIES:-40} DB=$HOME_DIR/data/steve.sqlite3

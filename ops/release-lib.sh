@@ -32,6 +32,20 @@ jarr() { local out="" x; for x in "$@"; do out+="${out:+,}$(js "$x")"; done; pri
 jbool() { (( $1 )) && print -n true || print -n false }
 # a field of a flat release.json
 json_field() { sed -n "s/.*\"$2\":\"\\([^\"]*\\)\".*/\\1/p" $1 2>/dev/null | head -1 }
+# This machine's build identity, $STEVE_HOME/signing/identity.json (written once per machine, also read by
+# ops/local-release.py): an existing deployment keeps its launchd label, signing identifiers and keychain service
+# across releases instead of the public defaults. What the environment sets wins; a missing file or field leaves
+# the defaults. Only these four names are read, nothing else in the file.
+machine_identity() { # home dir
+  local f=$1/signing/identity.json v k var
+  [[ -f $f ]] || return 0
+  for k var in label STEVE_LABEL hub_identifier STEVE_KEYHELPER_HUB_IDENTIFIER keyhelper_identifier STEVE_KEYHELPER_IDENTIFIER vault_service STEVE_KEYHELPER_SERVICE; do
+    [[ -n ${(P)var:-} ]] && continue
+    v=$(python3 -c 'import json,sys; v=json.load(open(sys.argv[1])).get(sys.argv[2]); print(v if isinstance(v, str) else "")' $f $k 2>/dev/null) || v=""
+    [[ $v =~ ^[A-Za-z0-9][A-Za-z0-9.-]*$ ]] && export $var=$v
+  done
+  return 0
+}
 
 # Empty/unknown deployed commits are normal for legacy web builds.
 changed_since() { # commit → paths, or "?" when the commit is unknown
