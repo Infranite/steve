@@ -4,10 +4,13 @@
 //!
 //! - [`target`]: which target a working copy merges into, the same for every clone, remote spelling and
 //!   worktree of the repository;
-//! - [`precheck`]: what a request brings that the target, or another request, doesn't have already.
+//! - [`precheck`]: what a request brings that the target, or another request, doesn't have already;
+//! - [`batch`]: the window of a lane (straight through when idle, batched when concurrent), as a pure
+//!   state machine.
 //!
 //! Both are local git: fetch first ([`precheck::fetch`]), off the core's lock.
 
+pub mod batch;
 pub mod precheck;
 pub mod profile;
 pub mod target;
