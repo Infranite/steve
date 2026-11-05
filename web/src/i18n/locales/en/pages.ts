@@ -168,8 +168,8 @@ export default {
   guide: {
     install: { managed: "Managed install", local_release: "Locally signed build", release_script: "Release script deploy", source: "Run from source", external: "External deploy" },
     enable: {
-      local_release: "To upgrade here with one click later: first move the vault key from Keychain to a separate dir store (STEVE_VAULT_KEYSTORE=dir), then switch the service to run ops/run-managed.sh. The key migration needs its own plan, see ops/UPGRADES.md; until then, upgrade with a local build.",
-      release_script: "To upgrade here with one click later: switch the service to run ops/run-managed.sh (managed install); on macOS, also move the key from Keychain to a separate dir store first. See ops/UPGRADES.md.",
+      local_release: "To upgrade here with one click later: first move the vault key from Keychain to a separate dir store (STEVE_VAULT_KEYSTORE=dir), then switch the service to run ops/run-managed.sh. The key migration needs its own plan, see “Managed Release bundles and automatic upgrades” in the README; until then, upgrade with a local build.",
+      release_script: "To upgrade here with one click later: switch the service to run ops/run-managed.sh (managed install); on macOS, also move the key from Keychain to a separate dir store first. See “Managed Release bundles and automatic upgrades” in the README.",
     },
     repoPlaceholder: "<Steve source dir>",
     commitPlaceholder: "<first 7 of commit>",

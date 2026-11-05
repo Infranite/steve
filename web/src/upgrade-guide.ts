@@ -10,7 +10,7 @@ export type Guide = { label: string; summary: string; steps: GuideStep[]; backup
 /** the name of an installation kind, in the UI language */
 export const installLabel = (kind: InstallKind) => t(`pages:guide.install.${kind}`)
 
-/** What it takes before Settings · 关于 can upgrade this installation itself (ops/UPGRADES.md). */
+/** What it takes before Settings · 关于 can upgrade this installation itself. */
 export const enableOneClick = (kind: InstallKind): string | undefined =>
   kind === "local_release" || kind === "release_script" ? t(`pages:guide.enable.${kind}`) : undefined
 
