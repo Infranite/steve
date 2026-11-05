@@ -622,7 +622,8 @@ impl Tx<'_> {
     /// Drops what finished operations no longer need: the body of one whose final state the Hub
     /// has taken, the answer of one that finished. The final state is on the operation's stream
     /// (`OperationChanged`) or, for an execution, on its session's or job's (`AttemptEnded`); it is
-    /// taken once every event of those streams is acknowledged. An operation that is not finished
+    /// taken once every event of those streams is acknowledged (one that finished without any
+    /// stream, like a cancel, has nothing to deliver and is taken at once). An operation that is not finished
     /// (running or unknown) keeps its body for recovery; the ops rows (id, digest, receipt) stay
     /// for idempotency.
     fn compact(&self) -> ApiResult<()> {
@@ -644,7 +645,8 @@ impl Tx<'_> {
                     from(&e).map_err(internal)?,
                 )));
             }
-            let mut any = false;
+            // A stream that does not exist has nothing left to deliver: an operation finished at
+            // accept without events (a cancel) is taken as soon as it is finished.
             for stream in streams {
                 let taken: Option<bool> = self
                     .c()
@@ -655,17 +657,13 @@ impl Tx<'_> {
                     )
                     .optional()
                     .map_err(internal)?;
-                match taken {
-                    Some(false) => continue 'specs,
-                    Some(true) => any = true,
-                    None => {}
+                if taken == Some(false) {
+                    continue 'specs;
                 }
             }
-            if any {
-                self.c()
-                    .execute("DELETE FROM command_specs WHERE op = ?1", [&op])
-                    .map_err(internal)?;
-            }
+            self.c()
+                .execute("DELETE FROM command_specs WHERE op = ?1", [&op])
+                .map_err(internal)?;
         }
         let answers: Vec<(String, String)> = self.rows(
             "SELECT o.id, o.receipt FROM answers a JOIN ops o ON o.id = a.op",

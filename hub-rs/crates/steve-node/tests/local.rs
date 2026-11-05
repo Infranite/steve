@@ -2092,8 +2092,9 @@ async fn the_ack_compacts_the_journal_under_low_water_and_work_is_taken_again() 
     t.sink.set_failing(false);
     all_acknowledged(&n).await;
     let specs = spec_ops(&db);
+    // the cancel finished at accept with no stream of its own: its body goes too
     assert!(
-        !specs.iter().any(|s| s.starts_with("op_t")),
+        specs.is_empty(),
         "finished and acknowledged bodies are compacted: {specs:?}"
     );
     // the limit is used * 9/8 now, so low water (80%) is 0.9 * used
