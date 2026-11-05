@@ -1105,3 +1105,18 @@ async fn shutdown_cancels_a_hanging_fetch_instead_of_waiting_for_its_deadline() 
     let again = LocalNode::open(t.config()).unwrap();
     again.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn handshake_permission_is_answered_without_a_live_session() {
+    let t = T::new(&[("FAKE_ACP_OPEN_PERMISSION", "1")]);
+    let n = t.node();
+    tokio::time::timeout(Duration::from_secs(5), ready(&n, "s_1"))
+        .await
+        .unwrap();
+    assert!(
+        std::fs::read_to_string(&t.log)
+            .unwrap()
+            .contains("cancelled")
+    );
+    n.shutdown().await;
+}

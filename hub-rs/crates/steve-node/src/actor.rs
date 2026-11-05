@@ -71,6 +71,13 @@ pub(crate) enum Msg {
         token: u64,
         result: ApiResult<Value>,
     },
+    Bound {
+        generation: u64,
+        token: u64,
+        rpc_id: Value,
+        asked: Box<Asked>,
+        result: ApiResult<PermissionRequest>,
+    },
     Checked {
         op: OperationId,
         result: ApiResult<()>,
@@ -273,6 +280,15 @@ impl Actor {
             Msg::Start { op, spec, exec } => self.start(op, spec, exec).await,
             Msg::Cancel { target } => self.cancel(&target),
             Msg::Answer { op } => self.answer(op),
+            Msg::Bound {
+                generation,
+                token,
+                rpc_id,
+                asked,
+                result,
+            } => {
+                self.permission_bound(generation, token, rpc_id, *asked, result);
+            }
             Msg::Checked { op, result } => self.answer_checked(op, result),
             Msg::AnswerSent {
                 op,
@@ -980,6 +996,58 @@ impl Actor {
             run.op.clone(),
             run.spec.run.limits.deadline,
         );
+        let context = crate::permission_context(&self.inner, &self.session);
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let copy = asked.clone();
+            let rpc = rpc_id.clone();
+            let result = match context {
+                Ok(context) => match tokio::time::timeout(
+                    Duration::from_secs(5),
+                    tokio::task::spawn_blocking(move || {
+                        crate::bind_permission(&context, &exec, &op, &rpc, &copy, deadline)
+                    }),
+                )
+                .await
+                {
+                    Ok(Ok(result)) => result,
+                    _ => Err(internal("permission binding timed out")),
+                },
+                Err(e) => Err(e),
+            };
+            let _ = tx.send(Msg::Bound {
+                generation,
+                token,
+                rpc_id,
+                asked: Box::new(asked),
+                result,
+            });
+        });
+    }
+
+    fn permission_bound(
+        &mut self,
+        generation: u64,
+        token: u64,
+        rpc_id: Value,
+        asked: Asked,
+        result: ApiResult<PermissionRequest>,
+    ) {
+        let cancelled = json!({"outcome": {"outcome": "cancelled"}});
+        let Some(conn) = self
+            .live
+            .as_ref()
+            .filter(|l| l.generation == generation)
+            .map(|l| l.conn.clone())
+        else {
+            return;
+        };
+        if !self.attributed(generation, token) || self.persisted_cancel() {
+            conn.respond(rpc_id, cancelled);
+            return;
+        }
+        let run = self.run.as_mut().expect("attributed");
+        let (exec, op) = (run.exec.clone(), run.op.clone());
         let mut evs: Vec<(Subject, EventBody)> = vec![];
         for f in &asked.updates {
             if let Fact::Event(e) = f {
@@ -1000,21 +1068,9 @@ impl Actor {
             );
             return;
         }
-        let req = match crate::bind_permission(
-            &self.inner,
-            &self.session,
-            &exec,
-            &op,
-            &rpc_id,
-            &asked,
-            deadline,
-        ) {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!("permission of {}: {e}", self.session);
-                if !evs.is_empty() {
-                    let _ = self.tx(|t| crate::emit_all(&self.inner, t, evs));
-                }
+        let req = match result {
+            Ok(req) => req,
+            Err(_) => {
                 conn.respond(rpc_id, cancelled);
                 return;
             }
@@ -1062,7 +1118,7 @@ impl Actor {
                 )),
             );
         };
-        let inner = self.inner.clone();
+        let context = crate::permission_context(&self.inner, &self.session);
         let tx = self.tx.clone();
         let pre = req.preconditions.clone();
         let check = res.decision == PermissionDecision::AllowOnce;
@@ -1070,7 +1126,7 @@ impl Actor {
             let result = if check {
                 match tokio::time::timeout(
                     Duration::from_secs(10),
-                    tokio::task::spawn_blocking(move || crate::preconditions_hold(&inner, &pre)),
+                    tokio::task::spawn_blocking(move || crate::preconditions_hold(&context?, &pre)),
                 )
                 .await
                 {
@@ -1469,6 +1525,10 @@ async fn open_harness(
                 Incoming::Request { id, method, params }
                     if method == "session/request_permission" =>
                 {
+                    if token == 0 {
+                        c.respond(id, json!({"outcome": {"outcome": "cancelled"}}));
+                        return;
+                    }
                     let _ = tx1.send(Msg::Permission {
                         generation,
                         token,

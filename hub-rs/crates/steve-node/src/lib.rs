@@ -31,7 +31,7 @@ use steve_node_api::*;
 use tokio::sync::mpsc;
 
 use actor::{Actor, Msg};
-use journal::{Journal, Op, SessionRow, Tx, WorkspaceRow};
+use journal::{Journal, Op, SessionRow, Tx, WorkspaceRow, internal};
 pub use workspace::Root;
 
 /// What this Node is and where it keeps its things.
@@ -377,7 +377,25 @@ fn head_of(dir: &Path) -> ApiResult<Option<String>> {
         .current_dir(dir)
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .output();
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(3);
+            loop {
+                if child.try_wait()?.is_some() {
+                    return child.wait_with_output();
+                }
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "git HEAD timeout",
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        });
     match o {
         Ok(o) if o.status.success() => {
             Ok(Some(String::from_utf8_lossy(&o.stdout).trim().to_string()))
@@ -395,17 +413,41 @@ fn head_of(dir: &Path) -> ApiResult<Option<String>> {
 fn file_version(p: &Path) -> ApiResult<Option<Revision>> {
     use std::os::unix::fs::MetadataExt;
     match std::fs::symlink_metadata(p) {
-        Ok(m) => Ok(Some(
-            Revision::new(format!(
-                "v{}.{}.{}.{}.{}",
-                m.len(),
-                m.mtime(),
-                m.mtime_nsec(),
-                m.ctime_nsec() + m.ctime() * 1_000_000_000,
-                m.ino()
+        Ok(m) => {
+            let resolved = p.canonicalize().map_err(internal)?;
+            let target = std::fs::metadata(&resolved).map_err(internal)?;
+            let signature = format!(
+                "{:?}:{:?}:{:?}",
+                resolved,
+                (
+                    m.dev(),
+                    m.ino(),
+                    m.len(),
+                    m.mtime(),
+                    m.mtime_nsec(),
+                    m.ctime(),
+                    m.ctime_nsec()
+                ),
+                (
+                    target.dev(),
+                    target.ino(),
+                    target.len(),
+                    target.mtime(),
+                    target.mtime_nsec(),
+                    target.ctime(),
+                    target.ctime_nsec()
+                )
+            );
+            Ok(Some(
+                Revision::new(format!(
+                    "v{}",
+                    Digest::sha256(signature.as_bytes())
+                        .as_str()
+                        .replace(':', "_")
+                ))
+                .map_err(internal)?,
             ))
-            .map_err(|e| ApiError::new(ErrorCode::Internal, e.to_string()))?,
-        )),
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(ApiError::new(
             ErrorCode::Internal,
@@ -436,25 +478,30 @@ fn inside(dir: &Path, w: &WorkspaceRef, p: &str) -> Option<(PathRef, PathBuf)> {
     } else {
         path.to_path_buf()
     };
-    if rel
-        .components()
-        .any(|c| !matches!(c, std::path::Component::Normal(_)))
-    {
+    if rel.components().any(|c| {
+        !matches!(
+            c,
+            std::path::Component::Normal(_) | std::path::Component::CurDir
+        )
+    }) {
         return None;
     }
     let abs = dir.join(&rel);
     let real_dir = dir.canonicalize().ok()?;
-    let mut probe = abs.clone();
-    let real = loop {
-        if let Ok(r) = probe.canonicalize() {
-            break r;
+    let mut probe = dir.to_path_buf();
+    for component in rel.components() {
+        probe.push(component);
+        match std::fs::symlink_metadata(&probe) {
+            Ok(_) => {
+                // Existing links must resolve, including the final component. A dangling link
+                // is not a nonexistent ordinary file and cannot be approved as one.
+                if !probe.canonicalize().ok()?.starts_with(&real_dir) {
+                    return None;
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return None,
         }
-        if !probe.pop() {
-            return None;
-        }
-    };
-    if !real.starts_with(&real_dir) {
-        return None;
     }
     Some((
         PathRef {
@@ -465,13 +512,46 @@ fn inside(dir: &Path, w: &WorkspaceRef, p: &str) -> Option<(PathRef, PathBuf)> {
     ))
 }
 
+/// Owned read-only binding inputs. Blocking filesystem probes never retain the Node/home lock.
+pub(crate) struct PermissionContext {
+    workspace: WorkspaceRef,
+    row: WorkspaceRow,
+    roots: Vec<Root>,
+}
+impl PermissionContext {
+    fn dir(&self) -> ApiResult<PathBuf> {
+        workspace::still_valid(
+            Path::new(&self.row.path),
+            &self.roots,
+            matches!(self.row.kind, PrepareKind::Existing { .. }),
+        )
+    }
+}
+pub(crate) fn permission_context(
+    inner: &Inner,
+    session: &SessionId,
+) -> ApiResult<PermissionContext> {
+    inner.j.read(|t| {
+        let session = t
+            .session(session)?
+            .ok_or_else(|| internal("session gone"))?;
+        let row = t
+            .workspace(&session.open.workspace.id)?
+            .ok_or_else(|| internal("workspace gone"))?;
+        Ok(PermissionContext {
+            workspace: session.open.workspace,
+            row,
+            roots: inner.cfg.roots.clone(),
+        })
+    })
+}
+
 /// A harness's permission request as Steve's: its facts bound to this execution and workspace
 /// (paths inside it are typed, anything outside it or not fully known is said so: an explicit
 /// unknown), with what must still hold when the answer is used (the workspace's revision, HEAD of
 /// its repository, each target file's version).
 pub(crate) fn bind_permission(
-    inner: &Inner,
-    session: &SessionId,
+    context: &PermissionContext,
     exec: &ExecutionRef,
     op: &OperationId,
     rpc_id: &Value,
@@ -479,17 +559,8 @@ pub(crate) fn bind_permission(
     deadline: Timestamp,
 ) -> ApiResult<PermissionRequest> {
     use steve_acp::normalize::CommandFact;
-    let (row, wrow) = inner.j.read(|t| {
-        let row = t
-            .session(session)?
-            .ok_or_else(|| ApiError::new(ErrorCode::Invalid, "no such session"))?;
-        let w = t
-            .workspace(&row.open.workspace.id)?
-            .ok_or_else(|| ApiError::new(ErrorCode::Invalid, "no such workspace"))?;
-        Ok((row, w))
-    })?;
-    let w = row.open.workspace.clone();
-    let dir = workspace_dir(inner, &w)?;
+    let w = context.workspace.clone();
+    let dir = context.dir()?;
     let fact = &asked.fact;
     let bound: Vec<Option<(PathRef, PathBuf)>> =
         fact.paths.iter().map(|p| inside(&dir, &w, p)).collect();
@@ -568,14 +639,34 @@ pub(crate) fn bind_permission(
     };
     let mut pre = vec![Precondition::Workspace {
         workspace: w.clone(),
-        revision: wrow.view.revision.clone(),
+        revision: context.row.view.revision.clone(),
     }];
-    if matches!(action, Action::Write { .. } | Action::Delete { .. }) {
-        for (r, abs) in bound.iter().flatten() {
-            pre.push(Precondition::File {
-                path: r.clone(),
-                version: file_version(abs)?,
-            });
+    // Bind every path, its parent chain and the workspace root, including Read and Exec.cwd.
+    // Absence is bound to its existing parents, so replacing a parent invalidates approval.
+    let mut paths: Vec<PathRef> = refs;
+    if let Action::Exec { cwd, .. } = &action {
+        paths.push(cwd.clone().unwrap_or(PathRef {
+            workspace: w.clone(),
+            rel: RelPath::new("").map_err(internal)?,
+        }));
+    }
+    let mut seen = std::collections::HashSet::new();
+    for path in paths {
+        let mut rel = PathBuf::from(path.rel.as_str());
+        loop {
+            let text = rel.to_string_lossy().to_string();
+            if seen.insert(text.clone()) {
+                pre.push(Precondition::File {
+                    path: PathRef {
+                        workspace: w.clone(),
+                        rel: RelPath::new(text).map_err(internal)?,
+                    },
+                    version: file_version(&dir.join(&rel))?,
+                });
+            }
+            if !rel.pop() {
+                break;
+            }
         }
     }
     if matches!(
@@ -607,22 +698,25 @@ pub(crate) fn bind_permission(
 /// The preconditions of a request still hold (checked off the journal right before an approval is
 /// given to the harness). Files can change between this check and the harness's own write: a
 /// window no lock of the Node closes, as the protocol says.
-pub(crate) fn preconditions_hold(inner: &Inner, pre: &[Precondition]) -> ApiResult<()> {
+pub(crate) fn preconditions_hold(
+    context: &PermissionContext,
+    pre: &[Precondition],
+) -> ApiResult<()> {
     for p in pre {
         let ok = match p {
             Precondition::Workspace {
                 workspace,
                 revision,
-            } => inner
-                .j
-                .read(|t| t.workspace(&workspace.id))?
-                .is_some_and(|w| w.view.revision == *revision),
+            } => context.workspace == *workspace && context.row.view.revision == *revision,
             Precondition::Head { workspace, commit } => {
-                head_of(&workspace_dir(inner, workspace)?)?.as_deref() == Some(commit.as_str())
+                context.workspace == *workspace
+                    && head_of(&context.dir()?)?.as_deref() == Some(commit.as_str())
             }
             Precondition::File { path, version } => {
-                let dir = workspace_dir(inner, &path.workspace)?;
-                file_version(&dir.join(path.rel.as_str()))? == *version
+                let dir = context.dir()?;
+                context.workspace == path.workspace
+                    && inside(&dir, &path.workspace, path.rel.as_str()).is_some()
+                    && file_version(&dir.join(path.rel.as_str()))? == *version
             }
         };
         if !ok {
@@ -1874,5 +1968,34 @@ impl Discovery for LocalNode {
 impl Node for LocalNode {
     fn id(&self) -> &NodeId {
         &self.0.cfg.node
+    }
+}
+
+#[cfg(test)]
+mod binding_tests {
+    use super::*;
+    use std::os::unix::fs::symlink;
+
+    #[test]
+    fn dangling_and_retargeted_links_fail_closed() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let w = WorkspaceRef {
+            node: NodeId::new("n").unwrap(),
+            id: WorkspaceId::new("w").unwrap(),
+        };
+        symlink(outside.path().join("missing"), root.path().join("dangling")).unwrap();
+        assert!(inside(root.path(), &w, "dangling").is_none());
+        assert!(inside(root.path(), &w, "ordinary-new/file").is_some());
+        std::fs::create_dir(root.path().join("a")).unwrap();
+        std::fs::create_dir(root.path().join("b")).unwrap();
+        symlink("a", root.path().join("parent")).unwrap();
+        let before = file_version(&root.path().join("parent")).unwrap();
+        std::fs::remove_file(root.path().join("parent")).unwrap();
+        symlink("b", root.path().join("parent")).unwrap();
+        assert_ne!(before, file_version(&root.path().join("parent")).unwrap());
+        std::fs::remove_file(root.path().join("parent")).unwrap();
+        symlink(outside.path(), root.path().join("parent")).unwrap();
+        assert!(inside(root.path(), &w, "parent/new").is_none());
     }
 }
