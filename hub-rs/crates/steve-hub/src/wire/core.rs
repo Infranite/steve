@@ -729,6 +729,18 @@ pub struct RoutedRuntime {
     pub store: steve_store::Store,
 }
 
+/// Whether boot recovery leaves `session` to a Node that is not enabled here: only when its
+/// binding was read; on a read error it keeps the legacy recovery (intent kept, notice written).
+fn parked_for_recovery(store: &steve_store::Store, session: &str) -> bool {
+    super::node_runtime::bound_strict(store, session).unwrap_or_else(|e| {
+        tracing::warn!(
+            session,
+            "binding unreadable at recovery: {e}; recovered as legacy"
+        );
+        false
+    })
+}
+
 /// Which backend a session goes to.
 enum Backend<'a> {
     Legacy,
@@ -871,8 +883,13 @@ impl steve_core::AgentRuntime for RoutedRuntime {
         self.node_for(session_id)
             .is_some_and(|n| n.is_uncertain(session_id))
     }
+    /// Not `route()`: its park-on-doubt suits messages (undone by a later call), but here a yes
+    /// drops the session's resume intent for good, so an unreadable binding counts as legacy.
     fn recovers_itself(&self, session_id: &str) -> bool {
-        matches!(self.route(session_id), Backend::Node(_) | Backend::Parked)
+        match self.node.as_deref() {
+            Some(n) => n.owns(session_id),
+            None => parked_for_recovery(&self.store, session_id),
+        }
     }
     fn running_turns(&self) -> usize {
         self.legacy.running_turns() + self.node.as_ref().map_or(0, |n| n.running_turns())
@@ -1693,6 +1710,29 @@ impl steve_mcp::Backend for CoreMcp {
     ) -> ToolResult {
         let (c, s) = (self.core.clone(), s.clone());
         tool(move || c.tool_publish(&s, &branch, &summary)).await
+    }
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use steve_store::{NoPublisher, Store};
+
+    /// A binding that cannot be read parks messages (undoable) but never makes boot recovery
+    /// drop a legacy session's resume intent.
+    #[test]
+    fn an_unreadable_binding_is_not_parked_for_recovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("hub.sqlite3"), NoPublisher).unwrap();
+        assert!(!super::parked_for_recovery(&store, "s1"));
+        store
+            .with_conn(|c| Ok(c.execute_batch("DROP TABLE runtime_sessions")?))
+            .unwrap();
+        assert!(super::super::node_runtime::bound_strict(&store, "s1").is_err());
+        assert!(
+            super::super::node_runtime::bound(&store, "s1"),
+            "messages still park on doubt"
+        );
+        assert!(!super::parked_for_recovery(&store, "s1"));
     }
 }
 

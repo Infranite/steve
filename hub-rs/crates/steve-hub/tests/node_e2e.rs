@@ -610,7 +610,10 @@ fn restart_notices(h: &Home, sid: &str) -> i64 {
 #[tokio::test(flavor = "multi_thread")]
 async fn an_idle_node_session_is_not_resumed_after_a_restart() {
     let h = Home::new();
-    let mut hub = spawn(&h, true, &[]);
+    // the turn ends without a delivery: Steve's takeover would continue it later, on its own
+    // clock (a prompt that is no resume); with no continues it opens its card once, settled below
+    let quiet = [("STEVE_TAKEOVER_CONTINUES", "0")];
+    let mut hub = spawn(&h, true, &quiet);
     serving(&h).await;
     let c = Client::login(&h).await;
     let sid = c.item(&h, "重启验收 @say idle-node-3R").await;
@@ -626,10 +629,15 @@ async fn an_idle_node_session_is_not_resumed_after_a_restart() {
             &sid,
         )
     };
+    assert!(
+        wait(10, || fails() == 1).await,
+        "the takeover's card; log:\n{}",
+        hub_log(&h)
+    );
     let (before, fails_before) = (h.prompts().len(), fails());
     for round in 0..2 {
         hub.kill();
-        hub = spawn(&h, true, &[]);
+        hub = spawn(&h, true, &quiet);
         serving(&h).await;
         // ready() has run once the Hub serves; give a wrong resume time to show up
         tokio::time::sleep(Duration::from_secs(3)).await;
