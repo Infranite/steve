@@ -40,15 +40,16 @@ payload
 | Hub→Node | `job.start` / `cancel` / `inspect` | kind 为 `think` 或 `research`；带 attempt_id、limits、可读范围、continuation |
 | Hub→Node | `permission.resolve` | 绑定 `permission_id + attempt_id + action_digest + decision_revision`，带 Steve 决定（`allow_once` / `reject`）。Node 只对还在等待的原请求生效，由 Node 映射成 ACP optionId。过期或不匹配时返回 `stale`，Hub 据此关闭卡片。同样的答复重复发送是幂等的；冲突的答复被拒绝。参数、目标 HEAD 或资源一变，旧授权即失效 |
 | Hub→Node | `workspace.prepare` / `inspect` / `tidy` | 工作区句柄 + revision |
-| Hub→Node | `git.inspect` / `git.apply` | 粒度较粗的事实查询，一次返回 refs、status、merge-base、冲突，并带上观察到的 revision。写操作带前置条件（`expected_head`、`expected_ref`），apply 时再校验一次。不开放任意 git argv。Node 只回事实和证据，不做业务决定：不选 merge 还是 rebase，不自动解决冲突，不决定删分支或发布版本。多个 worktree 共享一个 repo 时，写操作按 repo 协调 |
-| Hub→Node | `exec.start` / `cancel` / `inspect` | 流程 cmd 节点、带密钥执行、项目发布脚本。密钥走短期投递，不进入持久化的命令体 |
-| Hub→Node | `fs.list` / `describe` / `read` | 分页、范围、大小上限。Node 负责 realpath、symlink 和根目录约束，每次打开文件时都重新检查 |
-| Hub→Node | `tree.scan` / `scan.page` | 知识库文件夹源用。manifest 是带版本的扫描结果，不是文件系统的原子快照。`read` 带期望的版本，文件变了就返回 `conflict`，调用方重新读取。文件地址是 `FileAddress`：工作区内的路径，或允许的根目录下的路径（知识库文件夹只读读取，不会为此建工作区）。只有声明了完整、且 source revision 仍然匹配的扫描，才能拿来对账"文件已删除" |
-| Hub→Node | `harness.probe`、`history.list` / `import` / `locate` | `import` 返回标准事件，不在 Node 上建 Hub 的业务行 |
+| Hub→Node | `git.inspect` / `git.apply` | 粒度较粗的事实查询，一次返回 refs、status、merge-base、冲突，并带上观察到的 revision。只读查询是固定的几类（`show`、`log`、`diff`、`is_ancestor`、`status`、`fingerprint`、`tracked_ignored`），每个答案带上它所依据的提交。写操作带前置条件（`expected_head`、`expected_ref`），apply 时再校验一次；push 推到规范 URL，带 `origin_must_be` 和 `expected_local`，凭据以 HTTP header 方式交给 git。不开放任意 git argv。Node 只回事实和证据，不做业务决定：不选 merge 还是 rebase，不自动解决冲突，不决定删分支或发布版本。多个 worktree 共享一个 repo 时，写操作按 repo 协调 |
+| Hub→Node | `exec.start` / `cancel` / `inspect` | 流程 cmd 节点、带密钥执行、项目发布脚本。带非密钥的 env，deadline 用 `limits.deadline`。密钥走短期投递，不进入持久化的命令体；写临时文件的方式只有声明了 `secret-file` 能力的 Node（目前只有 Hub 本机）才提供 |
+| Hub→Node | `fs.list` / `describe` / `read` | 分页、范围、大小上限。Node 负责 realpath、symlink 和根目录约束，每次打开文件时都重新检查。根目录分读写和只读：只读根目录可以列出、读取、扫描，不能在里面建工作区、执行命令或做 git 写操作 |
+| Hub→Node | `tree.scan` / `scan.page` | 知识库文件夹源用。manifest 是带版本的扫描结果，不是文件系统的原子快照。`read` 带期望的版本，文件变了就返回 `conflict`，调用方重新读取。文件地址是 `FileAddress`：工作区内的路径，或允许的根目录下的路径（知识库文件夹只读读取，不会为此建工作区）。只有声明了完整、且 source revision 仍然匹配的扫描，才能拿来对账"文件已删除"。扫描带 `max_files` / `max_file_bytes` 上限；超大的文件照样列出并标 `too_big`。问题是有类型的（读不了、超过数量上限、拒绝的链接、拒绝的路径、被打断），只要有一个，扫描就不算完整；完整只出现在最后一页 |
+| Hub→Node | `harness.probe`、`history.list` / `import` / `locate` | `import` 返回标准事件，不在 Node 上建 Hub 的业务行。`locate` 只认 Node 自己列出过的 key，客户端编造的 key 返回 `invalid` |
 | Hub→Node | `node.drain` / `node.resume` | "停止接新活"和"取消在跑的任务"是两回事 |
 | Node→Hub | `events.batch` / `execution.snapshot` / `node.status` | 只报事实。快照包含活动执行、等待中的权限和终态回执 |
 | Hub→Node | `events.ack` / `replay.request` / `flow.credit` | 落库之后才 ack 连续水位；发现缺口时请求重放 |
 | Node→Hub | `tool.catalog` / `tool.call` / `tool.inspect` / `tool.cancel` | 按执行授权；`tool_call_id` 保持稳定 |
+| Node→Hub | `secret.take` | Node 用命令自己的 operation id 取一次密钥。一次性、短期：再取或操作结束后取返回 `stale`，别的操作的密钥返回 `denied`。两端都不写日志、不进日志表、不进事件和结果 |
 | 双向 | `blob.begin` / `chunk` / `finish` / `abort` | transfer_id、hash、size、offset。双向都支持：Node 拉附件，Node 把要长期保存的产物上传到 Hub。finish 时校验 hash 后才算提交。传输的恢复和任务的恢复相互独立。密钥不走 blob，用单独的、不持久化的投递通道 |
 
 ## 3. 状态机
@@ -92,7 +93,7 @@ Hub 持久队列 → dispatch outbox → Node 已接受 → running ⇄ waiting(
 
 ## 5. 版本与错误
 
-- **版本协商**：`hello` 带上协议的 min/max、事件 schema 版本、能力、编码和帧上限，`welcome` 从中选定交集。major 不兼容就拒绝连接；minor 只做可选的新增。未知的必需能力只拒绝对应的操作。未知的枚举值永远不能映射成 allow。
+- **版本协商**：`hello` 带上协议的 min/max、事件 schema 版本、能力、编码和帧上限，`welcome` 从中选定交集。major 不兼容就拒绝连接；minor 只做可选的新增。未知的必需能力只拒绝对应的操作。未知的方法和未知的枚举值（较新一端的新类型）都回 `unsupported`，连接保持；未知的枚举值永远不能映射成 allow。
 - **错误**：字段为 `code, retry, operation, state, safe_detail`。错误码有 `offline`、`busy`、`unsupported`、`denied`、`expired`、`stale`、`conflict`、`exhausted`、`invalid`、`outcome_unknown`、`gap`、`internal`。
   - 接受之前就被拒绝的（`ApiError::new`）：什么都没执行。其中 offline、busy、exhausted 可以原样重发同一条命令（同一个 operation id），但绝不能换一个新 attempt。
   - 可能已经被接受的（`ApiError::uncertain`，比如回复丢了、发送后连接断了）：先查询 operation，再决定下一步。

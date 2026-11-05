@@ -144,6 +144,7 @@ face!(Discovery {
     query probe(fresh: bool) -> Capabilities;
     query history(page: PageRequest) -> Page<HistoryEntry>;
     query import_page(import: OperationId, page: PageRequest) -> ImportedPage;
+    query locate(source: HistoryRef) -> HistoryLocation;
 });
 
 impl Node for Faulty {

@@ -34,6 +34,6 @@ pub use tools::*;
 pub use workspace::*;
 
 /// Major.minor of this contract. A major change refuses the connection; a minor one only adds.
-pub const PROTOCOL: (u16, u16) = (0, 1);
+pub const PROTOCOL: (u16, u16) = (0, 2);
 /// Version of [`events::NodeEvent`] bodies, separate from the transport.
 pub const EVENT_SCHEMA: u16 = 1;

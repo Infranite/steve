@@ -106,6 +106,7 @@ rpc_table! {
     HISTORY_LIST = "history.list": HubToNode Control Read false;
     HISTORY_IMPORT = "history.import": HubToNode Control Command true;
     IMPORT_PAGE = "import.page": HubToNode Control Read false;
+    HISTORY_LOCATE = "history.locate": HubToNode Control Read false;
     // EventSink
     EVENTS_COMMIT = "events.commit": NodeToHub Bulk Commit false;
     // HubTools
@@ -120,6 +121,8 @@ rpc_table! {
     BLOB_STATUS = "blob.status": NodeToHub Control Read false;
     BLOB_FINISH = "blob.finish": NodeToHub Control Blob false;
     BLOB_ABORT = "blob.abort": NodeToHub Control Blob false;
+    // HubSecrets: one-shot, so a lost answer is not asked again (the operation fails instead)
+    SECRET_TAKE = "secret.take": NodeToHub Control Read false;
 }
 
 pub fn spec(name: &str) -> Option<&'static Spec> {
@@ -155,6 +158,12 @@ pub struct PagesArgs {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProbeArgs {
     pub fresh: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SecretArgs {
+    pub operation: OperationId,
+    pub id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

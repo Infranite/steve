@@ -493,6 +493,15 @@ pub(crate) fn to_value<T: serde::Serialize>(v: &T) -> ApiResult<Value> {
     serde_json::to_value(v).map_err(|e| ApiError::new(ErrorCode::Internal, format!("encode: {e}")))
 }
 
-pub(crate) fn from_value<T: serde::de::DeserializeOwned>(v: Value) -> ApiResult<T> {
-    serde_json::from_value(v).map_err(|e| ApiError::new(ErrorCode::Invalid, format!("decode: {e}")))
+/// A kind this end does not know (a newer peer's variant) is `unsupported`, like an unknown
+/// method: the peer may do without it. Any other bad payload is `invalid`.
+pub fn from_value<T: serde::de::DeserializeOwned>(v: Value) -> ApiResult<T> {
+    serde_json::from_value(v).map_err(|e| {
+        let code = if e.to_string().starts_with("unknown variant") {
+            ErrorCode::Unsupported
+        } else {
+            ErrorCode::Invalid
+        };
+        ApiError::new(code, format!("decode: {e}"))
+    })
 }

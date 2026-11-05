@@ -257,6 +257,8 @@ impl Discovery for RemoteNode {
             .await?;
         c.capacity.jobs = 0;
         c.capacity.execs = 0;
+        // secrets are never written to a remote Node's disk
+        c.features.retain(|f| f != FEATURE_SECRET_FILE);
         Ok(c)
     }
     async fn history(&self, page: PageRequest) -> ApiResult<Page<HistoryEntry>> {
@@ -271,6 +273,9 @@ impl Discovery for RemoteNode {
             page,
         };
         self.go(IMPORT_PAGE, &a, None, false).await
+    }
+    async fn locate(&self, source: HistoryRef) -> ApiResult<HistoryLocation> {
+        self.go(HISTORY_LOCATE, &source, None, false).await
     }
 }
 

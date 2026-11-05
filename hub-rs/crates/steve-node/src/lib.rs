@@ -2290,9 +2290,11 @@ impl Discovery for LocalNode {
                 .map(|r| RootInfo {
                     id: r.id.clone(),
                     display: r.display.clone(),
+                    access: RootAccess::ReadWrite,
                 })
                 .collect(),
             capacity: self.0.cfg.capacity.clone(),
+            features: vec![],
         })
     }
     async fn history(&self, _p: PageRequest) -> ApiResult<Page<HistoryEntry>> {
@@ -2302,6 +2304,9 @@ impl Discovery for LocalNode {
         unsupported("history")
     }
     async fn import_page(&self, _i: OperationId, _p: PageRequest) -> ApiResult<ImportedPage> {
+        unsupported("history")
+    }
+    async fn locate(&self, _source: HistoryRef) -> ApiResult<HistoryLocation> {
         unsupported("history")
     }
 }

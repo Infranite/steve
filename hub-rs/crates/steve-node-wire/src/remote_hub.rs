@@ -1,4 +1,4 @@
-//! The Node's handles on the Hub (events, Steve's tools, blobs), over whatever link the Node has
+//! The Node's handles on the Hub (events, Steve's tools, blobs, secrets), over whatever link the Node has
 //! right now. The Node connects them once ([`steve_node_api`] ports); the dial loop swaps the link
 //! underneath on every reconnect. Without a link a call is `offline`: the Node's journal keeps the
 //! events and delivers them again, deduplicated by the Hub per (node, stream, epoch, seq).
@@ -56,6 +56,7 @@ impl HubLink {
 pub struct RemoteSink(pub Arc<HubLink>);
 pub struct RemoteTools(pub Arc<HubLink>);
 pub struct RemoteFiles(pub Arc<HubLink>);
+pub struct RemoteSecrets(pub Arc<HubLink>);
 
 /// Cuts a batch into contiguous runs whose encoded events stay within [`BULK_CAP`]. A single event
 /// over the cap goes alone (and is refused by the frame limit if it really is too big).
@@ -173,5 +174,15 @@ impl HubFiles for RemoteFiles {
     }
     async fn abort_upload(&self, transfer: TransferId) -> ApiResult<TransferState> {
         self.0.go(BLOB_ABORT, &transfer, None).await
+    }
+}
+
+#[async_trait]
+impl HubSecrets for RemoteSecrets {
+    /// Never resent: a lost answer may have used the secret up.
+    async fn take(&self, operation: OperationId, id: String) -> ApiResult<SecretBytes> {
+        self.0
+            .go(SECRET_TAKE, &SecretArgs { operation, id }, None)
+            .await
     }
 }
