@@ -9,6 +9,10 @@
 //! exits without running the command. A Node that dies after leaves a recorded group, which a
 //! restart reports as `unknown` (never run again) and [`steve_node_api::ExecutionControl::recover`]
 //! stops.
+//!
+//! Secrets the command was given ([`Run::secret_env`], [`Run::stdin`]) are only in memory: put in
+//! its environment, or written to its stdin after the go line. What it prints is masked
+//! ([`Run::mask`]) before it leaves here.
 
 use std::io::Read;
 use std::os::fd::AsRawFd;
@@ -20,6 +24,8 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use steve_node_api::OperationId;
+use steve_vault::redact::Redactor;
+use zeroize::Zeroizing;
 
 use crate::procs::{self, Stopped};
 
@@ -41,6 +47,12 @@ pub(crate) struct Run {
     pub deadline: i64,
     /// Bytes kept per stream.
     pub cap: usize,
+    /// Secret values for its environment.
+    pub secret_env: Vec<(String, Zeroizing<Vec<u8>>)>,
+    /// A secret for its stdin (else stdin is `/dev/null`).
+    pub stdin: Option<Zeroizing<Vec<u8>>>,
+    /// What to mask in its output: the secrets it was given, and their temp files' directory.
+    pub mask: Option<Redactor>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,24 +82,32 @@ pub(crate) fn run(inner: &Arc<crate::Inner>, op: &OperationId, r: &Run) -> Resul
         return Err("node shutting down".into());
     }
     let mut cmd = Command::new("/bin/sh");
-    cmd.args([
-        "-c",
-        "IFS= read -r go || exit 125; exec /bin/sh -c \"$1\" </dev/null",
-        "steve-exec",
-        &r.command,
-    ])
-    .current_dir(&r.dir)
-    .process_group(0)
-    .stdin(Stdio::piped())
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped());
+    // `read` takes the go line a byte at a time, so a secret written after it is the command's stdin
+    let wrapper = if r.stdin.is_some() {
+        "IFS= read -r go || exit 125; exec /bin/sh -c \"$1\""
+    } else {
+        "IFS= read -r go || exit 125; exec /bin/sh -c \"$1\" </dev/null"
+    };
+    cmd.args(["-c", wrapper, "steve-exec", &r.command])
+        .current_dir(&r.dir)
+        .process_group(0)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     for (k, v) in &r.env {
         cmd.env(k, v);
+    }
+    for (k, v) in &r.secret_env {
+        use std::os::unix::ffi::OsStrExt;
+        cmd.env(k, std::ffi::OsStr::from_bytes(v));
     }
     for k in HUB_ONLY {
         cmd.env_remove(k);
     }
-    let mut child = cmd.spawn().map_err(|e| e.to_string())?;
+    let spawned = cmd.spawn().map_err(|e| e.to_string());
+    // the builder holds copies of the environment's values: gone as soon as the child runs
+    drop(cmd);
+    let mut child = spawned?;
     let pid = child.id() as i64;
     let started = procs::start_time(pid);
     if let Err(e) = inner
@@ -123,13 +143,21 @@ pub(crate) fn run(inner: &Arc<crate::Inner>, op: &OperationId, r: &Run) -> Resul
             };
         }
     }
-    {
+    let feeder = {
         use std::io::Write;
         let mut go = child.stdin.take().expect("pipe");
         let _ = go.write_all(b"go\n");
-    }
-    let mut stdout = Capped::new(r.cap);
-    let mut stderr = Capped::new(r.cap);
+        // a command that never reads its stdin must not hold this up: written on the side
+        r.stdin.clone().map(|bytes| {
+            std::thread::spawn(move || {
+                let _ = go.write_all(&bytes);
+            })
+        })
+    };
+    // a secret cut at the bound would not be recognized: keep enough past it to mask, then cut
+    let longest = r.mask.as_ref().map_or(0, Redactor::longest);
+    let mut stdout = Capped::new(r.cap + longest);
+    let mut stderr = Capped::new(r.cap + longest);
     let deadline = Instant::now()
         + Duration::from_millis(r.deadline.saturating_sub(crate::now()).max(0) as u64);
     let ended = loop {
@@ -157,11 +185,17 @@ pub(crate) fn run(inner: &Arc<crate::Inner>, op: &OperationId, r: &Run) -> Resul
         std::thread::sleep(Duration::from_millis(10));
     }
     let gone = settle(inner, &session, pid, started);
+    // the group is gone, so its end of the stdin pipe is: the writer ends
+    if let Some(f) = feeder {
+        let _ = f.join();
+    }
+    let (out, out_cut) = stdout.text(r.mask.as_ref(), r.cap);
+    let (err, err_cut) = stderr.text(r.mask.as_ref(), r.cap);
     Ok(Ran {
         ended,
-        truncated: stdout.truncated || stderr.truncated,
-        stdout: stdout.text(),
-        stderr: stderr.text(),
+        truncated: stdout.truncated || stderr.truncated || out_cut || err_cut,
+        stdout: out,
+        stderr: err,
         gone,
     })
 }
@@ -265,16 +299,20 @@ impl Capped {
         }
     }
 
-    /// As text, cut on a character boundary.
-    fn text(&self) -> String {
-        let s = String::from_utf8_lossy(&self.kept);
-        if s.len() <= self.cap {
-            return s.into_owned();
+    /// As text, masked, cut to `cap` bytes on a character boundary; and whether it was cut.
+    fn text(&self, mask: Option<&Redactor>, cap: usize) -> (String, bool) {
+        let kept = match mask {
+            Some(m) => m.scrub_bytes(&self.kept),
+            None => std::borrow::Cow::Borrowed(&self.kept[..]),
+        };
+        let s = String::from_utf8_lossy(&kept);
+        if s.len() <= cap {
+            return (s.into_owned(), false);
         }
-        let mut end = self.cap;
+        let mut end = cap;
         while !s.is_char_boundary(end) {
             end -= 1;
         }
-        s[..end].to_string()
+        (s[..end].to_string(), true)
     }
 }

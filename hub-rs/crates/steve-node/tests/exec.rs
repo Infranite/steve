@@ -361,6 +361,220 @@ async fn what_the_node_cannot_do_is_refused_before_it_is_taken() {
     n.shutdown().await;
 }
 
+// ── secrets (N0e-E7) ──
+
+const TOKEN: &str = "inj-T0ken-value-5521";
+
+fn secret(id: &str, how: SecretDelivery) -> SecretRef {
+    SecretRef { id: id.into(), how }
+}
+
+/// Every byte under `dir` (the journal, its WAL, whatever else), for the leak check.
+fn all_bytes(dir: &Path) -> Vec<u8> {
+    let mut out = vec![];
+    for e in std::fs::read_dir(dir).unwrap().flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            out.extend(all_bytes(&p));
+        } else if let Ok(b) = std::fs::read(&p) {
+            out.extend(b);
+        }
+    }
+    out
+}
+
+fn contains(hay: &[u8], needle: &[u8]) -> bool {
+    hay.windows(needle.len()).any(|w| w == needle)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn secrets_reach_the_command_masked_and_leave_nothing_behind() {
+    let t = T::new();
+    let n = t.node();
+    let hub = Arc::new(steve_node_api::testkit::FakeSecrets::default());
+    n.connect_secrets(hub.clone());
+    let w = workspace(&n).await;
+    let caps = n.probe(false).await.unwrap();
+    assert!(caps.features.iter().any(|f| f == FEATURE_SECRET_FILE));
+
+    // env, in every form it may be printed in; stderr too
+    hub.give("op_e1", "令牌", TOKEN.as_bytes());
+    let mut s = spec(
+        &w,
+        "echo \"t=$TOK\"; printf %s \"$TOK\" | base64; printf %s \"$TOK\" | xxd -p; echo err \"$TOK\" >&2",
+        Duration::from_secs(10),
+    );
+    s.secrets = vec![secret("令牌", SecretDelivery::Env { name: "TOK".into() })];
+    let (o, r) = run(&n, "op_e1", s).await;
+    assert_eq!((o, r.exit_code), (Outcome::Succeeded, Some(0)), "{r:?}");
+    assert_eq!(
+        r.stdout,
+        "t=[已打码：令牌]\n[已打码：令牌]\n[已打码：令牌]\n"
+    );
+    assert_eq!(r.stderr, "err [已打码：令牌]\n");
+
+    // stdin, and the same secret in env as well: taken once
+    hub.give("op_e2", "密码", TOKEN.as_bytes());
+    let mut s = spec(
+        &w,
+        "read -r x; [ \"$x\" = \"$EXPECT\" ] && echo same; echo \"$x\"",
+        Duration::from_secs(10),
+    );
+    s.secrets = vec![
+        secret("密码", SecretDelivery::Stdin),
+        secret(
+            "密码",
+            SecretDelivery::Env {
+                name: "EXPECT".into(),
+            },
+        ),
+    ];
+    let (_, r) = run(&n, "op_e2", s).await;
+    assert_eq!(r.stdout, "same\n[已打码：密码]\n", "{r:?}");
+
+    // a file: private, its path masked, gone once the command ended
+    let stat_mode = if cfg!(target_os = "macos") {
+        "stat -f '%Lp'"
+    } else {
+        "stat -c '%a'"
+    };
+    hub.give("op_e3", "私钥", TOKEN.as_bytes());
+    let mut s = spec(
+        &w,
+        &format!(
+            "echo \"path=$KEYF\"; {stat_mode} \"$KEYF\"; {stat_mode} \"$(dirname \"$KEYF\")\"; cat \"$KEYF\"; echo; dirname \"$KEYF\" > '{}'",
+            t.root.join("where").display()
+        ),
+        Duration::from_secs(10),
+    );
+    s.secrets = vec![secret("私钥", SecretDelivery::File { env: "KEYF".into() })];
+    let (_, r) = run(&n, "op_e3", s).await;
+    let lines: Vec<&str> = r.stdout.lines().collect();
+    assert_eq!(
+        lines,
+        [
+            "path=[已打码：临时文件]/KEYF",
+            "600",
+            "700",
+            "[已打码：私钥]"
+        ],
+        "{r:?}"
+    );
+    let dir = std::fs::read_to_string(t.root.join("where")).unwrap();
+    assert!(
+        !Path::new(dir.trim()).exists(),
+        "the temp directory is gone"
+    );
+
+    // the deadline: the file goes with the command
+    hub.give("op_e4", "k", TOKEN.as_bytes());
+    let mut s = spec(
+        &w,
+        &format!(
+            "dirname \"$F\" > '{}'; sleep 30",
+            t.root.join("where2").display()
+        ),
+        Duration::from_millis(600),
+    );
+    s.secrets = vec![secret("k", SecretDelivery::File { env: "F".into() })];
+    let (o, _) = run(&n, "op_e4", s).await;
+    assert_eq!(o, Outcome::TimedOut);
+    let dir = std::fs::read_to_string(t.root.join("where2")).unwrap();
+    assert!(!Path::new(dir.trim()).exists());
+
+    n.shutdown().await;
+    drop(n);
+    // no value is in the journal, its WAL or anything else the Node keeps
+    let kept = all_bytes(&t.root.join("node"));
+    assert!(!kept.is_empty());
+    assert!(
+        !contains(&kept, TOKEN.as_bytes()),
+        "a secret in the Node's home"
+    );
+    assert!(!contains(&kept, hex::encode(TOKEN).as_bytes()));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_secret_is_taken_once_for_its_own_command() {
+    let t = T::new();
+    let n = t.node();
+    let w = workspace(&n).await;
+    let ran = t.root.join("ran");
+    let cmd = format!("echo ran >> '{}'", ran.display());
+    let with = |op: &str| {
+        let mut s = spec(&w, &cmd, Duration::from_secs(10));
+        s.secrets = vec![secret("令牌", SecretDelivery::Env { name: "T".into() })];
+        (op.to_string(), s)
+    };
+    let failed = |st: Observed| match st {
+        Observed::Finished {
+            outcome: Outcome::Failed,
+            error: Some(e),
+            ..
+        } => e,
+        other => panic!("{other:?}"),
+    };
+    // no channel to the Hub: it fails, and nothing runs
+    let (op, s) = with("op_t0");
+    n.exec(now_cmd(&op, s)).await.unwrap();
+    failed(finished(&n, &op).await);
+
+    let hub = Arc::new(steve_node_api::testkit::FakeSecrets::default());
+    n.connect_secrets(hub.clone());
+    hub.give("op_t1", "令牌", TOKEN.as_bytes());
+    // another command naming it: denied, not run
+    let (op, s) = with("op_t2");
+    n.exec(now_cmd(&op, s)).await.unwrap();
+    assert_eq!(failed(finished(&n, &op).await).code, ErrorCode::Invalid);
+    // its own command: taken, run
+    let (op, s) = with("op_t1");
+    let c = now_cmd(&op, s);
+    n.exec(c.clone()).await.unwrap();
+    assert!(matches!(
+        finished(&n, &op).await,
+        Observed::Finished {
+            outcome: Outcome::Succeeded,
+            ..
+        }
+    ));
+    // sent again: its receipt, no second take, no second run
+    assert!(n.exec(c).await.unwrap().state.is_finished());
+    assert_eq!(hub.taken().len(), 1);
+    // a replay under a new command: already taken
+    let (op, s) = with("op_t3");
+    n.exec(now_cmd(&op, s)).await.unwrap();
+    let e = failed(finished(&n, &op).await);
+    assert!(e.to_string().contains("already taken"), "{e}");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(std::fs::read_to_string(&ran).unwrap(), "ran\n");
+
+    // a header is a push's; names must be variables, used once
+    for bad in [
+        vec![secret(
+            "x",
+            SecretDelivery::Header {
+                name: "Authorization".into(),
+            },
+        )],
+        vec![secret("x", SecretDelivery::Env { name: "A=B".into() })],
+        vec![secret("x", SecretDelivery::File { env: "../x".into() })],
+        vec![
+            secret("x", SecretDelivery::Env { name: "A".into() }),
+            secret("y", SecretDelivery::File { env: "A".into() }),
+        ],
+        vec![
+            secret("x", SecretDelivery::Stdin),
+            secret("y", SecretDelivery::Stdin),
+        ],
+    ] {
+        let mut s = spec(&w, "true", Duration::from_secs(10));
+        s.secrets = bad;
+        let e = n.exec(now_cmd("op_bad", s)).await.unwrap_err();
+        assert_eq!(e.code, ErrorCode::Invalid, "{e}");
+    }
+    n.shutdown().await;
+}
+
 // ── a real crash: the Node is a child process killed with SIGKILL ──
 
 /// Runs in a child process (see `a_node_that_dies_while_a_command_runs_never_runs_it_again`).

@@ -50,4 +50,6 @@ pub use service::{
     KeyStoreInfo, Keychain, NewItemKey, RewrapReport, Rotation, Status, Vault, ensure_active,
 };
 pub use steve_vault::{guard, redact};
-pub use r#use::{SecretUses, SessionSink, UseCx, UseOutcome, UseRequest};
+pub use r#use::{
+    NodePlace, NodeUse, SecretUses, SessionSink, UseCx, UseNodes, UseOutcome, UseRequest, UseValues,
+};

@@ -241,6 +241,7 @@
   "modules.connections.revoked": "这个连接已经断开了",
   "modules.vault.grant_high": "高密条目不允许授权，每次都要你批准",
   "modules.vault.cwd_outside": "目录不在这个会话的工作区里",
+  "modules.vault.files_remote": "这个会话在另一台设备上运行，机密不能以文件方式交给它；请改用 env 或 stdin",
   "modules.vault.need_passkey": "先在这台设备上登记 Touch ID 或通行密钥",
   "modules.webauthn.challenge_gone": "本机验证已过期，请重新验证",
   "modules.webauthn.not_verified": "本机验证没有通过",

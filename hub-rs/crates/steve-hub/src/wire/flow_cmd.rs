@@ -57,12 +57,17 @@ fn op_of(prefix: &str, req: &CmdRequest, rerun: u32) -> String {
 /// The workspace resource of `project` at `dir`: the directory is part of it, so a project whose
 /// path changed gets a workspace of its new directory, never a conflict with the old one.
 fn resource_of(project: &str, dir: &RootPath) -> String {
-    use sha2::Digest as _;
-    let h = sha2::Sha256::digest(format!("{}\0{}", dir.root.as_str(), dir.rel.as_str()));
-    format!("project:{project}:{}", &hex::encode(h)[..16])
+    format!("project:{project}:{}", dir_digest(dir))
 }
 
-fn command<B>(op: &str, body: B, within: Duration) -> Result<Command<B>, String> {
+/// A short digest of a directory, for a workspace resource that changes with it.
+pub(super) fn dir_digest(dir: &RootPath) -> String {
+    use sha2::Digest as _;
+    let h = sha2::Sha256::digest(format!("{}\0{}", dir.root.as_str(), dir.rel.as_str()));
+    hex::encode(h)[..16].to_string()
+}
+
+pub(super) fn command<B>(op: &str, body: B, within: Duration) -> Result<Command<B>, String> {
     Ok(Command {
         id: OperationId::new(op).map_err(|e| e.to_string())?,
         issued_at: Timestamp(wall()),
@@ -123,12 +128,23 @@ impl FlowCmd {
         req: &CmdRequest,
         dir: RootPath,
     ) -> Result<WorkspaceRef, String> {
+        prepare_dir(node, resource_of(&req.project_id, &dir), dir).await
+    }
+}
+
+/// `dir` as the workspace `resource` on `node` (an existing directory, worked in as it is).
+pub(super) async fn prepare_dir(
+    node: &Arc<dyn Node>,
+    resource: String,
+    dir: RootPath,
+) -> Result<WorkspaceRef, String> {
+    {
         // a prepare of the same resource and directory is the workspace there is: a fresh id each
         // time is safe (it changes nothing)
         let c = command(
             &steve_store::uid("op_fprep"),
             Prepare {
-                resource: resource_of(&req.project_id, &dir),
+                resource,
                 kind: PrepareKind::Existing { dir },
             },
             PREPARE_WAIT,

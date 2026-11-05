@@ -5281,9 +5281,11 @@ dependencies = [
  "sha2 0.11.1",
  "steve-acp",
  "steve-node-api",
+ "steve-vault",
  "tempfile",
  "tokio",
  "tracing",
+ "zeroize",
 ]
 
 [[package]]
@@ -5297,6 +5299,7 @@ dependencies = [
  "sha2 0.11.1",
  "steve-node-api",
  "tokio",
+ "zeroize",
 ]
 
 [[package]]

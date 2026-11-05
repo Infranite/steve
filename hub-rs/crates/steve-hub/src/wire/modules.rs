@@ -228,6 +228,8 @@ pub struct Env<'a> {
     pub openviking: Option<steve_knowledge::openviking::OpenVikingConfig>,
     /// Where `cmd` flow steps run when the project is on a Node (`None`: on the Hub, as before).
     pub cmd_node: Option<Arc<dyn steve_flow::nodes::cmd::CmdNode>>,
+    /// Where a session's secret uses run when it works on a Node (`None`: on the Hub, as before).
+    pub use_nodes: Option<Arc<dyn steve_modules::vault::UseNodes>>,
 }
 
 /// Registers every module, builds [`Modules`] and the flow context, and collects the routes.
@@ -244,6 +246,7 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
         yolo_forced,
         openviking,
         cmd_node,
+        use_nodes,
     } = env;
     use super::ports::{self as hp, VaultGuard};
     let guard = Arc::new(VaultGuard);
@@ -305,6 +308,9 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
         steve_home,
         Arc::new(hp::CoreSessions(core.clone())),
     );
+    if let Some(n) = use_nodes {
+        uses.set_nodes(n);
+    }
     registry.decision(
         steve_modules::vault::r#use::SUBJECT,
         uses.decision_handler(),

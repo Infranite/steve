@@ -292,7 +292,7 @@ pub enum SecretDelivery {
 }
 
 /// The bytes of a secret on their way to the one operation that uses them. Never printed: `Debug`
-/// shows its length only.
+/// shows its length only; wiped on drop.
 #[derive(PartialEq, Eq, Serialize, Deserialize)]
 pub struct SecretBytes(#[serde(with = "crate::blob::hexbytes")] Vec<u8>);
 
@@ -302,6 +302,13 @@ impl SecretBytes {
     }
     pub fn expose(&self) -> &[u8] {
         &self.0
+    }
+}
+
+/// The bytes are wiped when it goes.
+impl Drop for SecretBytes {
+    fn drop(&mut self) {
+        zeroize::Zeroize::zeroize(&mut self.0);
     }
 }
 

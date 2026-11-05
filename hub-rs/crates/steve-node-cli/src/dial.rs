@@ -11,7 +11,8 @@ use steve_node_wire::handshake::{self, NodeIntro};
 use steve_node_wire::identity::{self, Identity};
 use steve_node_wire::tls::{self, Trust};
 use steve_node_wire::{
-    Conn, ConnOptions, HubLink, NodeServer, RemoteFiles, RemoteSink, RemoteTools, close,
+    Conn, ConnOptions, HubLink, NodeServer, RemoteFiles, RemoteSecrets, RemoteSink, RemoteTools,
+    close,
 };
 
 use crate::config::{Home, Pairing, loopback_plaintext_allowed, ws_url};
@@ -116,6 +117,7 @@ pub async fn serve(node: LocalNode, p: &Pairing, id: &Identity, trust: &Trust) -
         Arc::new(RemoteSink(link.clone())),
         Some(Arc::new(RemoteFiles(link.clone()))),
     );
+    node.connect_secrets(Arc::new(RemoteSecrets(link.clone())));
     node.connect_tools(Arc::new(RemoteTools(link.clone())))
         .await
         .context("tool endpoint")?;

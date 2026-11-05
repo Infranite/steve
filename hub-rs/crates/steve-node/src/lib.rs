@@ -15,6 +15,7 @@ mod actor;
 mod exec;
 mod journal;
 mod procs;
+mod secrets;
 mod tools;
 pub mod workspace;
 
@@ -143,6 +144,8 @@ pub(crate) struct Inner {
     actors: Mutex<HashMap<SessionId, mpsc::UnboundedSender<Msg>>>,
     sink: Mutex<Option<Arc<dyn EventSink>>>,
     files: Mutex<Option<Arc<dyn HubFiles>>>,
+    /// Where a command's secrets come from (the Hub).
+    secrets: Mutex<Option<Arc<dyn HubSecrets>>>,
     wake: tokio::sync::Notify,
     delivering: AtomicBool,
     closed: AtomicBool,
@@ -953,6 +956,8 @@ impl LocalNode {
         std::fs::create_dir_all(&cfg.home)
             .map_err(|e| ApiError::new(ErrorCode::Internal, format!("node home: {e}")))?;
         let lock = HomeLock::take(&cfg.home)?;
+        // a command's secret files a crash left behind
+        secrets::cleanup(&cfg.home);
         let (j, incarnation) = Journal::open(&cfg.home.join("node.sqlite3"))?;
         // a group of the old incarnation that is surely gone holds nothing
         j.tx(|t| {
@@ -973,6 +978,7 @@ impl LocalNode {
             actors: Mutex::new(HashMap::new()),
             sink: Mutex::new(None),
             files: Mutex::new(None),
+            secrets: Mutex::new(None),
             wake: tokio::sync::Notify::new(),
             delivering: AtomicBool::new(false),
             closed: AtomicBool::new(false),
@@ -1009,6 +1015,12 @@ impl LocalNode {
             self.spawn_owned(deliver_loop(Arc::downgrade(&self.0)));
         }
         self.0.wake.notify_one();
+    }
+
+    /// Where commands' secrets come from ([`HubSecrets`], bound to this Node). Without it a command
+    /// that needs one fails without running.
+    pub fn connect_secrets(&self, secrets: Arc<dyn HubSecrets>) {
+        *self.0.secrets.lock().unwrap() = Some(secrets);
     }
 
     /// Serve Steve's tools to this Node's harnesses, answered by `hub`. Sessions started after this
@@ -2387,9 +2399,7 @@ impl WorkspaceExecutor for LocalNode {
         if self.0.cfg.capacity.execs == 0 {
             return unsupported("commands");
         }
-        if !c.body.secrets.is_empty() {
-            return unsupported("secrets for a command");
-        }
+        secrets::check(&c.body.secrets, &c.body.env).map_err(|e| e.on(&c.id))?;
         Self::check_policy(&c.body.policy)?;
         Self::check_limits(&c.body.limits)?;
         if c.body.command.trim().is_empty() || c.body.command.contains('\0') {
@@ -2436,20 +2446,40 @@ impl WorkspaceExecutor for LocalNode {
         };
         let me = self.clone();
         let op = c.id.clone();
-        let run = exec::Run {
+        let mut run = exec::Run {
             dir,
             command: c.body.command.clone(),
             env: c.body.env.clone(),
             deadline: c.body.limits.deadline.0,
             cap: (c.body.limits.max_output_bytes as usize).min(1 << 20),
+            secret_env: vec![],
+            stdin: None,
+            mask: None,
         };
+        let refs = c.body.secrets.clone();
         let spawned = self.spawn_owned(async move {
             let inner = me.0.clone();
             let op2 = op.clone();
-            let ran = tokio::task::spawn_blocking(move || exec::run(&inner, &op2, &run))
-                .await
-                .map_err(|e| e.to_string())
-                .and_then(|r| r);
+            // taken now, under this operation, once: a resend was answered by its receipt above
+            let hub = me.0.secrets.lock().unwrap().clone();
+            let ran = match secrets::take(hub, &me.0.cfg.home, &op, &refs).await {
+                Err(e) => Err(e),
+                Ok(given) => {
+                    run.secret_env = given.env;
+                    run.stdin = given.stdin;
+                    run.mask = given.mask;
+                    let temp = given.temp;
+                    tokio::task::spawn_blocking(move || {
+                        let ran = exec::run(&inner, &op2, &run);
+                        // the files go once the command (and its whole group) is done
+                        drop(temp);
+                        ran
+                    })
+                    .await
+                    .map_err(|e| e.to_string())
+                    .and_then(|r| r)
+                }
+            };
             let state = match ran {
                 Err(e) => failed(ApiError::new(
                     ErrorCode::Invalid,
@@ -2541,7 +2571,8 @@ impl Discovery for LocalNode {
                 })
                 .collect(),
             capacity: self.0.cfg.capacity.clone(),
-            features: vec![],
+            // a command's secret as a temp file on this machine
+            features: vec![FEATURE_SECRET_FILE.into()],
         })
     }
     async fn history(&self, _p: PageRequest) -> ApiResult<Page<HistoryEntry>> {

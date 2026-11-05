@@ -852,3 +852,208 @@ async fn hourly_cleanup_expires_day_old_requests_and_year_old_rows() {
     let r = decisions::dispatch(&e.modules, &caller(WS, ME), &d, "once", "").unwrap();
     assert_eq!(r.unwrap_err().status(), 409);
 }
+
+/// A use a Node was asked to run, and the values it took (label, bytes).
+type NodeRan = (steve_modules::vault::NodeUse, Vec<(String, Vec<u8>)>);
+
+/// A session's Node, as the integrator would give it (N0e-E7): it records what it was asked to run
+/// and takes the values as a Node does.
+struct FakeNodes {
+    files: bool,
+    /// Never answers (the Hub stops while it runs).
+    hang: bool,
+    ran: Mutex<Vec<NodeRan>>,
+}
+
+#[async_trait]
+impl steve_modules::vault::UseNodes for FakeNodes {
+    async fn place(
+        &self,
+        _ws: &str,
+        _session: &str,
+    ) -> steve_modules::vault::VaultResult<Option<steve_modules::vault::NodePlace>> {
+        Ok(Some(steve_modules::vault::NodePlace {
+            device: "n_far".into(),
+            files: self.files,
+        }))
+    }
+    async fn run(
+        &self,
+        u: steve_modules::vault::NodeUse,
+        values: Arc<dyn steve_modules::vault::UseValues>,
+    ) -> steve_modules::vault::inject::RunOutput {
+        let mut got = vec![];
+        for i in &u.injections {
+            got.push((
+                i.label.clone(),
+                values.value(&i.label).unwrap().expose().to_vec(),
+            ));
+        }
+        // a field the use did not name is not given
+        assert!(values.value("名称").is_err());
+        self.ran.lock().unwrap().push((u, got));
+        if self.hang {
+            std::future::pending::<()>().await;
+        }
+        steve_modules::vault::inject::RunOutput {
+            exit_code: Some(0),
+            timed_out: false,
+            stdout: "on the node [已打码：令牌]\n".into(),
+            stderr: String::new(),
+            error: None,
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_session_on_a_node_runs_there_and_a_remote_one_gets_no_files() {
+    let e = Env::new();
+    let item = e.token_item();
+    let nodes = Arc::new(FakeNodes {
+        files: false,
+        hang: false,
+        ran: Mutex::default(),
+    });
+    e.uses.set_nodes(nodes.clone());
+    let count = |e: &Env| -> (i64, i64) {
+        (
+            e.q("SELECT COUNT(*) FROM secret_uses", []),
+            e.q(
+                "SELECT COUNT(*) FROM decisions WHERE subject_type = 'secret_use'",
+                [],
+            ),
+        )
+    };
+    // `files` on a Node that may not write them: refused before anything is asked or recorded
+    let err = e
+        .tool(
+            mcp::USE,
+            json!({"item": item, "purpose": "x", "command": "true", "files": {"F": "令牌"}}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err,
+        "这个会话在另一台设备上运行，机密不能以文件方式交给它；请改用 env 或 stdin"
+    );
+    assert_eq!(count(&e), (0, 0));
+    // a directory leaving the workspace, relative or absolute
+    for bad in ["..", "sub/../..", "/tmp", "/"] {
+        let err = e
+            .tool(mcp::USE, json!({"item": item, "purpose": "x", "command": "true", "cwd": bad, "env": {"T": "令牌"}}))
+            .await
+            .unwrap_err();
+        assert_eq!(err, CWD_OUTSIDE, "{bad}");
+    }
+    assert_eq!(count(&e), (0, 0));
+
+    // env and stdin: asked as before, then run on the Node
+    let work = e.work.path().to_string_lossy().into_owned();
+    let out = e
+        .tool(
+            mcp::USE,
+            json!({"item": item, "purpose": "推送", "command": "push", "cwd": format!("{work}/sub/."),
+                   "env": {"GH_TOKEN": "令牌"}, "stdin": "令牌"}),
+        )
+        .await
+        .unwrap();
+    assert!(out.awaiting_approval);
+    let su = e.last_use();
+    let d = e.open_decision(&su);
+    assert_eq!(
+        d.draft,
+        format!("命令：push\n目录：{work}/sub\n注入：GH_TOKEN ← 令牌、标准输入 ← 令牌")
+    );
+    let device: String = e.q("SELECT device_id FROM secret_uses WHERE id = ?", [&su]);
+    assert_eq!(device, "n_far");
+    e.answer(&su, "once").unwrap();
+    let msgs = e.sink.wait(1).await;
+    assert_eq!(
+        msgs[0],
+        "用户批准了使用「GitHub 令牌」。命令已执行，退出码 0。输出（机密已打码）：\non the node [已打码：令牌]\n"
+    );
+    let ran = nodes.ran.lock().unwrap().clone();
+    assert_eq!(ran.len(), 1);
+    let (u, got) = &ran[0];
+    assert_eq!(
+        (u.use_id.as_str(), u.session.as_str()),
+        (su.as_str(), SESSION)
+    );
+    assert_eq!(u.cwd.as_deref(), Some("sub"));
+    assert_eq!(u.command, "push");
+    assert_eq!(
+        got,
+        &vec![
+            ("令牌".to_string(), TOKEN.as_bytes().to_vec()),
+            ("令牌".to_string(), TOKEN.as_bytes().to_vec()),
+        ]
+    );
+    let status: String = e.q("SELECT status FROM secret_uses WHERE id = ?", [&su]);
+    assert_eq!(status, "ok");
+    // the values taken are known to the session redactor
+    assert_eq!(
+        redact::scrub_text(SESSION, &format!("x {TOKEN}")),
+        "x [已打码：令牌]"
+    );
+    // no temp file on the Hub for a Node's use
+    assert!(dir_empty(&e.temp_root()));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_node_that_may_write_files_gets_them() {
+    let e = Env::new();
+    let item = e.token_item();
+    let nodes = Arc::new(FakeNodes {
+        files: true,
+        hang: false,
+        ran: Mutex::default(),
+    });
+    e.uses.set_nodes(nodes.clone());
+    let out = e
+        .tool(
+            mcp::USE,
+            json!({"item": item, "purpose": "x", "command": "true", "files": {"F": "令牌"}}),
+        )
+        .await
+        .unwrap();
+    assert!(out.awaiting_approval);
+    e.answer(&e.last_use(), "once").unwrap();
+    e.sink.wait(1).await;
+    let ran = nodes.ran.lock().unwrap().clone();
+    assert_eq!(ran[0].0.cwd, None);
+    assert_eq!(
+        ran[0].0.injections[0].how,
+        steve_modules::vault::inject::How::File
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restart_while_a_node_runs_a_use_fails_it_and_never_runs_it_again() {
+    let e = Env::new();
+    let item = e.token_item();
+    let nodes = Arc::new(FakeNodes {
+        files: false,
+        hang: true,
+        ran: Mutex::default(),
+    });
+    e.uses.set_nodes(nodes.clone());
+    e.tool(mcp::USE, use_args(&item, "push")).await.unwrap();
+    let su = e.last_use();
+    e.answer(&su, "once").unwrap();
+    for _ in 0..100 {
+        if !nodes.ran.lock().unwrap().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let status: String = e.q("SELECT status FROM secret_uses WHERE id = ?", [&su]);
+    assert_eq!(status, "running");
+    // "restart": a new service over the same store, with the same Nodes
+    let again = SecretUses::new(e.vault.clone(), e.home.path(), Arc::new(Sink::default()));
+    again.set_nodes(nodes.clone());
+    again.start();
+    let status: String = e.q("SELECT status FROM secret_uses WHERE id = ?", [&su]);
+    assert_eq!(status, "failed");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(nodes.ran.lock().unwrap().len(), 1, "never run again");
+}

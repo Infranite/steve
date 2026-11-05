@@ -556,15 +556,32 @@ mod host_tests {
         let off: Vars = Arc::new(|_| None);
         let mut jobs = vec![];
         assert!(
-            super::super::node_runtime(&cfg, &store, Arc::new(Ends), &off, &mut jobs)
-                .unwrap()
-                .is_none()
+            super::super::node_runtime(
+                &cfg,
+                &store,
+                Arc::new(Ends),
+                &off,
+                &super::super::node_secrets::NodeSecrets::new(),
+                &mut jobs
+            )
+            .unwrap()
+            .is_none()
         );
         assert!(jobs.is_empty());
         assert!(!cfg.data_dir.join("node").exists());
         let on: Vars = Arc::new(|k| (k == "STEVE_NODE_MODE").then(|| "local".into()));
         cfg.no_resume = true;
-        assert!(super::super::node_runtime(&cfg, &store, Arc::new(Ends), &on, &mut jobs).is_err());
+        assert!(
+            super::super::node_runtime(
+                &cfg,
+                &store,
+                Arc::new(Ends),
+                &on,
+                &super::super::node_secrets::NodeSecrets::new(),
+                &mut jobs
+            )
+            .is_err()
+        );
         cfg.no_resume = false;
         let fake = Path::new(env!("CARGO_MANIFEST_DIR")).join("../steve-acp/tests/fake-acp.js");
         cfg.adapters = std::collections::BTreeMap::from([(
@@ -580,9 +597,16 @@ mod host_tests {
             runtime: rt,
             tools,
             node,
-        } = super::super::node_runtime(&cfg, &store, Arc::new(Ends), &on, &mut jobs)
-            .unwrap()
-            .unwrap();
+        } = super::super::node_runtime(
+            &cfg,
+            &store,
+            Arc::new(Ends),
+            &on,
+            &super::super::node_secrets::NodeSecrets::new(),
+            &mut jobs,
+        )
+        .unwrap()
+        .unwrap();
         tools.install(Arc::new(NoTools)).unwrap();
         for job in jobs {
             job.await;
@@ -659,9 +683,16 @@ mod host_tests {
             runtime: rt,
             tools,
             node,
-        } = super::super::node_runtime(&cfg, &store, Arc::new(Ends), &on, &mut jobs)
-            .unwrap()
-            .unwrap();
+        } = super::super::node_runtime(
+            &cfg,
+            &store,
+            Arc::new(Ends),
+            &on,
+            &super::super::node_secrets::NodeSecrets::new(),
+            &mut jobs,
+        )
+        .unwrap()
+        .unwrap();
         tools.install(Arc::new(NoTools)).unwrap();
         for job in jobs {
             job.await;

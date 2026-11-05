@@ -16,6 +16,7 @@ pub mod modules;
 pub mod node_binding;
 pub mod node_files;
 pub mod node_runtime;
+pub mod node_secrets;
 pub mod node_tools;
 pub mod outbox;
 pub mod ports;
@@ -148,6 +149,7 @@ fn node_runtime(
     store: &steve_store::Store,
     domain: Arc<dyn node_runtime::NodeDomain>,
     vars: &Vars,
+    secrets: &Arc<node_secrets::NodeSecrets>,
     jobs: &mut Vec<modules::Job>,
 ) -> Result<Option<NodeHost>, BackendError> {
     if !local_node_mode(vars) {
@@ -187,6 +189,8 @@ fn node_runtime(
     if let Some(ms) = turn_limit(vars) {
         runtime.set_turn_limit(ms);
     }
+    // vault uses' values, for this Node's commands only (N0e-E7)
+    node.connect_secrets(secrets.for_node(node_id.clone()));
     node.connect(
         Arc::new(node_runtime::Sink(Arc::downgrade(&runtime))),
         Some(Arc::new(node_files::NodeFiles::new(
@@ -371,11 +375,15 @@ pub fn wire_with(cfg: &Arc<Config>, bus: &Bus, vars: Vars) -> Result<Wired, Back
         db.clone(),
     ));
     let mut node_jobs = vec![];
-    let node_host = node_runtime(cfg, &db, host.clone(), &vars, &mut node_jobs)?;
+    let secrets = node_secrets::NodeSecrets::new();
+    let node_host = node_runtime(cfg, &db, host.clone(), &vars, &secrets, &mut node_jobs)?;
     if let Some(h) = &node_host {
         let _ = host.local_node.set(h.node.clone());
     }
     let (nodes, bind_remote) = remote_nodes(cfg, &db, host.clone(), &vars);
+    if let Some(s) = &nodes {
+        let _ = s.secrets.set(secrets.clone());
+    }
     let fleet = nodes.as_ref().map(|s| s.fleet.clone());
     let workspaces = workspaces::Workspaces::new(
         db.clone(),
@@ -441,6 +449,11 @@ pub fn wire_with(cfg: &Arc<Config>, bus: &Bus, vars: Vars) -> Result<Wired, Back
         cmd_node: node_host.as_ref().map(|_| {
             flow_cmd::FlowCmd::new(db.clone(), workspaces.clone())
                 as Arc<dyn steve_flow::nodes::cmd::CmdNode>
+        }),
+        // and secret uses on the Node the session works on
+        use_nodes: node_host.as_ref().map(|_| {
+            node_secrets::VaultNodes::new(db.clone(), workspaces.clone(), secrets.clone())
+                as Arc<dyn steve_modules::vault::UseNodes>
         }),
     })?;
     let _ = host.flow.set(built.flow.clone());

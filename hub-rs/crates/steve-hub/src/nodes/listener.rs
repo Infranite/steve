@@ -165,8 +165,8 @@ pub async fn serve(svc: Arc<NodeService>, mut sink: FrameSink, mut stream: Frame
             sink: Arc::new(GuardedSink(ctx.clone())),
             tools: Arc::new(GuardedTools(ctx.clone())),
             files: Some(Arc::new(GuardedFiles(ctx.clone()))),
-            // remote Nodes get no secrets yet (pushes and vault execs stay on the Hub)
-            secrets: None,
+            // only what was given to this Node's own commands (vault uses, N0e-E7)
+            secrets: svc.secrets.get().map(|s| s.for_node(node.clone())),
         },
         ctx,
     });
