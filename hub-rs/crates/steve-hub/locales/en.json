@@ -86,5 +86,9 @@
   "hub.import.gone": "The local record no longer exists",
   "hub.import.already": "Already imported",
   "hub.import.unreadable": "Can't read this conversation",
-  "hub.import.only_imported": "Only imported conversations can be removed"
+  "hub.import.only_imported": "Only imported conversations can be removed",
+  "hub.workspaces.offline": "Device offline",
+  "hub.workspaces.local_off": "This machine's Node is not on",
+  "hub.workspaces.no_workspace": "No workspace yet",
+  "hub.not_found.kb_source": "No such knowledge source"
 }

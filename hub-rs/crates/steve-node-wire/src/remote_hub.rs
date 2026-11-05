@@ -1,4 +1,4 @@
-//! The Node's handles on the Hub (events, Steve's tools, blobs), over whatever link the Node has
+//! The Node's handles on the Hub (events, Steve's tools, blobs, secrets), over whatever link the Node has
 //! right now. The Node connects them once ([`steve_node_api`] ports); the dial loop swaps the link
 //! underneath on every reconnect. Without a link a call is `offline`: the Node's journal keeps the
 //! events and delivers them again, deduplicated by the Hub per (node, stream, epoch, seq).
@@ -12,7 +12,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use steve_node_api::*;
 
-use crate::conn::{Conn, from_value, to_value};
+use crate::conn::{Conn, answer_of, to_value};
 use crate::envelope::BULK_CAP;
 use crate::methods::{self, *};
 
@@ -49,13 +49,14 @@ impl HubLink {
         op: Option<&OperationId>,
     ) -> ApiResult<R> {
         let v = self.conn()?.call(method, to_value(args)?, op).await?;
-        from_value(v)
+        answer_of(method, v, op)
     }
 }
 
 pub struct RemoteSink(pub Arc<HubLink>);
 pub struct RemoteTools(pub Arc<HubLink>);
 pub struct RemoteFiles(pub Arc<HubLink>);
+pub struct RemoteSecrets(pub Arc<HubLink>);
 
 /// Cuts a batch into contiguous runs whose encoded events stay within [`BULK_CAP`]. A single event
 /// over the cap goes alone (and is refused by the frame limit if it really is too big).
@@ -123,7 +124,12 @@ impl HubTools for RemoteTools {
             .call_with(TOOL_CALL, to_value(&q)?, Lane::Control, deadline, Some(&op))
             .await
         {
-            Ok(v) => from_value(v),
+            Ok(v) => match answer_of(TOOL_CALL, v, Some(&op)) {
+                Err(e) if e.code == ErrorCode::OutcomeUnknown => {
+                    Ok(ToolResult::Unknown { operation: op })
+                }
+                r => r,
+            },
             Err(e) if e.code == ErrorCode::OutcomeUnknown => {
                 Ok(ToolResult::Unknown { operation: op })
             }
@@ -173,5 +179,26 @@ impl HubFiles for RemoteFiles {
     }
     async fn abort_upload(&self, transfer: TransferId) -> ApiResult<TransferState> {
         self.0.go(BLOB_ABORT, &transfer, None).await
+    }
+}
+
+#[async_trait]
+impl HubSecrets for RemoteSecrets {
+    /// Never resent: a lost answer may have used the secret up. Lost after it was written, the
+    /// take is `stale` with no retry, so the command that needed it fails instead of being sent
+    /// again into a second take; never sent at all (`offline`), it may be retried as is.
+    async fn take(&self, operation: OperationId, id: String) -> ApiResult<SecretBytes> {
+        let op = operation.clone();
+        match self
+            .0
+            .go(SECRET_TAKE, &SecretArgs { operation, id }, Some(&op))
+            .await
+        {
+            Err(e) if e.code == ErrorCode::OutcomeUnknown => Err(ApiError::new(
+                ErrorCode::Stale,
+                "secret.take: the answer was lost, the secret may be used up",
+            )),
+            r => r,
+        }
     }
 }

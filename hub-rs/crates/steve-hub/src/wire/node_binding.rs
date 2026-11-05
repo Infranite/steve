@@ -52,6 +52,13 @@ pub fn binding_for(
     if item.workspace_id != s.workspace_id {
         return None;
     }
+    // an archived project's directories are no roots any more ([`roots`]), its items' included
+    if let Some(pid) = &item.project_id
+        && let Ok(Some(p)) = store.projects().get(pid)
+        && p.archived
+    {
+        return None;
+    }
     let bot = match s.bot_id.as_deref() {
         Some(id) => Some(store.bots().get(id).ok()??),
         None => None,
@@ -157,14 +164,7 @@ pub fn remote_binding_for(
     }
     let ok = store
         .reader(|c| {
-            let state = steve_store::nodes::get(c, node.as_str())?.map(|n| n.state);
-            // the user who paired the Node owns the session's workspace
-            let owned: bool = c.query_row(
-                "SELECT EXISTS(SELECT 1 FROM nodes n JOIN workspace_members m ON m.user_id=n.owner
-                  WHERE n.node_id=?1 AND m.workspace_id=?2 AND m.role='owner')",
-                rusqlite::params![node.as_str(), s.workspace_id],
-                |r| r.get(0),
-            )?;
+            let takes = node_takes(c, node.as_str(), &s.workspace_id)?;
             // earlier sessions of the item that are not on this Node (on the Hub, or elsewhere)
             let elsewhere: bool = c.query_row(
                 "SELECT EXISTS(SELECT 1 FROM sessions x LEFT JOIN runtime_sessions r ON r.session_id=x.id
@@ -172,7 +172,7 @@ pub fn remote_binding_for(
                 rusqlite::params![item.id, session, node.as_str()],
                 |r| r.get(0),
             )?;
-            Ok::<_, StoreError>(state.as_deref() == Some("active") && owned && !elsewhere)
+            Ok::<_, StoreError>(takes && !elsewhere)
         })
         .ok()?;
     if !ok {
@@ -182,32 +182,66 @@ pub fn remote_binding_for(
     Some(b)
 }
 
-/// Boot-time allowlist: explicit configured roots plus project and local session directories. No
-/// filesystem traversal and never `/`. A project path added later is not among them: its sessions
-/// plan no binding (see `LocalNode::allows`) and stay legacy until the host restarts.
-pub(crate) fn roots(
-    store: &Store,
-    cfg: &crate::config::Config,
-) -> Result<Vec<steve_node::Root>, StoreError> {
-    let paths = store.reader(|c| {
-        let mut q = c.prepare("SELECT path FROM projects WHERE archived=0 AND device_id='hub' UNION SELECT cwd FROM sessions WHERE status<>'ended' AND readonly=0 AND source='Steve' AND device_id='hub' UNION SELECT cwd FROM items WHERE cwd IS NOT NULL")?;
-        let paths = q.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
-        Ok::<_, StoreError>(paths)
+/// Whether the paired remote Node `node` may get `workspace`'s work: it is active (a paused or
+/// revoked Node takes none), and the user who paired it owns the workspace. Any signed-in user can
+/// pair a Node, and a member's own machine never gets others' work.
+pub(crate) fn node_takes(
+    c: &rusqlite::Connection,
+    node: &str,
+    workspace: &str,
+) -> Result<bool, StoreError> {
+    Ok(c.query_row(
+        "SELECT EXISTS(SELECT 1 FROM nodes n JOIN workspace_members m ON m.user_id=n.owner
+          WHERE n.node_id=?1 AND n.state='active' AND m.workspace_id=?2 AND m.role='owner')",
+        rusqlite::params![node, workspace],
+        |r| r.get(0),
+    )?)
+}
+
+/// The local Node's allowlist: explicit configured roots (`extra`: the scratch and worktree
+/// directories) plus project and local session directories, read-write, and knowledge folders,
+/// read-only. No filesystem traversal and never `/`. A path that is both stays read-write. Built at
+/// boot and again whenever projects or knowledge sources change ([`super::workspaces`]), so a
+/// project added after boot binds without a restart and an archived one is refused (with the
+/// directories of its items and their sessions).
+pub(crate) fn roots(store: &Store, extra: &[PathBuf]) -> Result<Vec<steve_node::Root>, StoreError> {
+    let (rw, ro) = store.reader(|c| {
+        let mut q = c.prepare("SELECT path FROM projects WHERE archived=0 AND device_id='hub'
+             UNION SELECT s.cwd FROM sessions s LEFT JOIN items i ON i.id=s.item_id LEFT JOIN projects p ON p.id=i.project_id
+              WHERE s.status<>'ended' AND s.readonly=0 AND s.source='Steve' AND s.device_id='hub' AND (p.id IS NULL OR p.archived=0)
+             UNION SELECT i.cwd FROM items i LEFT JOIN projects p ON p.id=i.project_id
+              WHERE i.cwd IS NOT NULL AND (p.id IS NULL OR p.archived=0)")?;
+        let rw = q.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+        let mut q = c.prepare("SELECT json_extract(config,'$.path') FROM kb_sources WHERE kind='folder' AND json_type(config,'$.path')='text'")?;
+        let ro = q.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+        Ok::<_, StoreError>((rw, ro))
     })?;
-    let mut paths: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
-    paths.extend([cfg.scratch.clone(), cfg.worktrees.clone()]);
-    paths.sort();
-    paths.dedup();
-    Ok(paths
-        .into_iter()
-        .filter(|p| p != Path::new("/"))
-        .filter_map(|path| {
-            Some(steve_node::Root {
-                id: root_id(&path)?,
-                display: "local workspace".into(),
-                path,
-            })
+    let mut rw: Vec<PathBuf> = rw.into_iter().map(PathBuf::from).collect();
+    rw.extend(extra.iter().cloned());
+    rw.sort();
+    rw.dedup();
+    let mut ro: Vec<PathBuf> = ro.into_iter().map(PathBuf::from).collect();
+    ro.sort();
+    ro.dedup();
+    ro.retain(|p| rw.binary_search(p).is_err());
+    let root = |path: PathBuf, access: RootAccess| {
+        Some(steve_node::Root {
+            id: root_id(&path)?,
+            display: if access == RootAccess::ReadOnly {
+                "knowledge folder".into()
+            } else {
+                "local workspace".into()
+            },
+            path,
+            access,
         })
+    };
+    Ok(rw
+        .into_iter()
+        .map(|p| (p, RootAccess::ReadWrite))
+        .chain(ro.into_iter().map(|p| (p, RootAccess::ReadOnly)))
+        .filter(|(p, _)| p != Path::new("/"))
+        .filter_map(|(p, a)| root(p, a))
         .collect())
 }
 
@@ -653,6 +687,9 @@ mod host_tests {
             bind_remote: None,
             store: store.clone(),
             host,
+            // no local face: the roots are not built again before a bind, so a directory added
+            // after boot is still outside them (what `allows` guards)
+            workspaces: super::super::workspaces::Workspaces::new(store.clone(), None, None, vec![]),
         };
         let bound = |sid: &str| -> i64 {
             store

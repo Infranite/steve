@@ -76,6 +76,7 @@ impl<N: Node + ?Sized + 'static> Handler for NodeServer<N> {
                 let a: PagesArgs = de(p)?;
                 en(&n.import_page(a.operation, a.page).await?)
             }
+            HISTORY_LOCATE => en(&n.locate(de(p)?).await?),
             other => Err(unsupported(other)),
         }
     }

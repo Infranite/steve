@@ -115,6 +115,7 @@ fn local_config(root: &Path, node: &NodeId) -> (NodeConfig, PathBuf) {
                 id: RootId::new("work").unwrap(),
                 path: root.join("work"),
                 display: "~/work".into(),
+                access: RootAccess::ReadWrite,
             }],
             capacity: Capacity {
                 sessions: 4,

@@ -165,6 +165,8 @@ pub async fn serve(svc: Arc<NodeService>, mut sink: FrameSink, mut stream: Frame
             sink: Arc::new(GuardedSink(ctx.clone())),
             tools: Arc::new(GuardedTools(ctx.clone())),
             files: Some(Arc::new(GuardedFiles(ctx.clone()))),
+            // remote Nodes get no secrets yet (pushes and vault execs stay on the Hub)
+            secrets: None,
         },
         ctx,
     });
@@ -177,6 +179,8 @@ pub async fn serve(svc: Arc<NodeService>, mut sink: FrameSink, mut stream: Frame
             heartbeat: Duration::from_secs(10),
             dead_after: Duration::from_secs(30),
             side: "h",
+            // what the Node said it speaks: requests newer than it are refused, not sent
+            peer: hello.proto,
         },
     );
     let previous = admit.previous.lock().unwrap().take().flatten();

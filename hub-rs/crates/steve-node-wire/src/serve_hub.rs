@@ -1,5 +1,6 @@
 //! The Hub's side of the Node→Hub methods: events, Steve's tools and blobs, handed to whatever the
-//! Hub bound to this one authenticated Node (in the Hub, always the guarded ports).
+//! Hub bound to this one authenticated Node (in the Hub, always the guarded ports). A Hub with no
+//! secrets for this Node answers `secret.take` `unsupported`.
 
 use std::sync::Arc;
 
@@ -14,6 +15,7 @@ pub struct ServeHub {
     pub sink: Arc<dyn EventSink>,
     pub tools: Arc<dyn HubTools>,
     pub files: Option<Arc<dyn HubFiles>>,
+    pub secrets: Option<Arc<dyn HubSecrets>>,
 }
 
 impl ServeHub {
@@ -42,6 +44,13 @@ impl Handler for ServeHub {
             BLOB_STATUS => en(&self.files()?.upload_status(de(p)?).await?),
             BLOB_FINISH => en(&self.files()?.finish_upload(de(p)?).await?),
             BLOB_ABORT => en(&self.files()?.abort_upload(de(p)?).await?),
+            SECRET_TAKE => {
+                let a: SecretArgs = de(p)?;
+                let s = self.secrets.as_ref().ok_or_else(|| {
+                    ApiError::new(ErrorCode::Unsupported, "no secrets on this hub")
+                })?;
+                en(&s.take(a.operation, a.id).await?)
+            }
             other => Err(unsupported(other)),
         }
     }

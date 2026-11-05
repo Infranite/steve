@@ -69,7 +69,7 @@ pub enum FileAccess {
 
 /// Bytes as hex in JSON, twice their size: a chunk is cut so that its encoded message stays within
 /// the frame limit. A binary codec will need its own bytes representation.
-mod hexbytes {
+pub(crate) mod hexbytes {
     use serde::{Deserialize, Deserializer, Serializer};
 
     pub fn serialize<S: Serializer>(v: &[u8], s: S) -> Result<S::Ok, S::Error> {

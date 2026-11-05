@@ -40,6 +40,7 @@ pub struct NodeConfig {
     /// The journal, scratch directories, worktrees and the attachment cache live here.
     pub home: PathBuf,
     pub acp: AcpConfig,
+    /// The roots at open; [`LocalNode::set_roots`] replaces them.
     pub roots: Vec<Root>,
     pub capacity: Capacity,
     pub storage: Storage,
@@ -132,6 +133,8 @@ impl HomeLock {
 
 pub(crate) struct Inner {
     cfg: NodeConfig,
+    /// The roots allowed now (set at open, replaced by the host).
+    roots: std::sync::RwLock<Arc<Vec<Root>>>,
     j: Journal,
     incarnation: u64,
     _lock: HomeLock,
@@ -160,6 +163,9 @@ pub(crate) struct Inner {
 }
 
 impl Inner {
+    pub(crate) fn roots(&self) -> Arc<Vec<Root>> {
+        self.roots.read().unwrap().clone()
+    }
     pub(crate) fn fault(&self) {
         self.faulted.store(true, Ordering::SeqCst);
     }
@@ -295,7 +301,7 @@ pub(crate) fn workspace_dir(inner: &Inner, w: &WorkspaceRef) -> ApiResult<PathBu
         .ok_or_else(|| ApiError::new(ErrorCode::Invalid, "no such workspace"))?;
     workspace::still_valid(
         Path::new(&row.path),
-        &inner.cfg.roots,
+        &inner.roots(),
         matches!(row.kind, PrepareKind::Existing { .. }),
     )
 }
@@ -654,7 +660,7 @@ fn inside(dir: &Path, w: &WorkspaceRef, p: &str) -> Option<(PathRef, PathBuf)> {
 pub(crate) struct PermissionContext {
     workspace: WorkspaceRef,
     row: WorkspaceRow,
-    roots: Vec<Root>,
+    roots: Arc<Vec<Root>>,
     /// The session's harness process group, to tell which processes it started.
     proc: Option<journal::Proc>,
 }
@@ -682,7 +688,7 @@ pub(crate) fn permission_context(
         Ok(PermissionContext {
             workspace: session.open.workspace,
             row,
-            roots: inner.cfg.roots.clone(),
+            roots: inner.roots(),
             proc,
         })
     })
@@ -955,6 +961,7 @@ impl LocalNode {
             Ok(())
         })?;
         Ok(LocalNode(Arc::new_cyclic(|weak| Inner {
+            roots: std::sync::RwLock::new(Arc::new(cfg.roots.clone())),
             cfg,
             j,
             incarnation,
@@ -1064,19 +1071,26 @@ impl LocalNode {
         self.mine(w).ok()?;
         let row = self.0.j.read(|t| t.workspace(&w.id)).ok()??;
         let existing = matches!(row.kind, PrepareKind::Existing { .. });
-        let path =
-            workspace::still_valid(Path::new(&row.path), &self.0.cfg.roots, existing).ok()?;
+        let path = workspace::still_valid(Path::new(&row.path), &self.0.roots(), existing).ok()?;
         Some(LocalDir {
             path,
             owned: !existing,
         })
     }
 
-    /// Host bridge: whether a prepare of `at` would pass the roots check now (a root this Node was
-    /// started with, the directory there and inside it), so the Hub plans no session it would
-    /// refuse. Reads the filesystem, creates nothing.
+    /// Host bridge: whether a prepare of `at` would pass the roots check now (a read-write root
+    /// this Node has now, the directory there and inside it), so the Hub plans no session it
+    /// would refuse. Reads the filesystem, creates nothing.
     pub fn allows(&self, at: &RootPath) -> bool {
-        workspace::resolve(&self.0.cfg.roots, at).is_ok()
+        workspace::resolve(&self.0.roots(), at, true).is_ok()
+    }
+
+    /// Host bridge, like [`Self::local_dir`]: replaces the roots the Hub may name, for a Node on the
+    /// Hub's own machine whose roots follow the Hub's projects and knowledge folders. Never sent over
+    /// the transport (a remote Node's owner configures its roots). Takes effect for the next
+    /// command; a workspace prepared under a root that is gone now is refused when it is used.
+    pub fn set_roots(&self, roots: Vec<Root>) {
+        *self.0.roots.write().unwrap() = Arc::new(roots);
     }
 
     fn mine(&self, w: &WorkspaceRef) -> ApiResult<()> {
@@ -1379,6 +1393,13 @@ impl SessionExecutor for LocalNode {
     /// Accepted now; finished once the harness started with this configuration and confirmed it.
     async fn open_session(&self, c: Command<OpenSession>) -> ApiResult<Receipt> {
         self.mine(&c.body.workspace)?;
+        // a Node opened for its workspace faces only runs no harness
+        if self.0.cfg.capacity.sessions == 0 {
+            return Err(ApiError::new(
+                ErrorCode::Unsupported,
+                "this node runs no sessions",
+            ));
+        }
         let (r, fresh) = self.accept("open_session", &c, |t| {
             let o = &c.body;
             self.check_harness(&o.choice.harness)?;
@@ -2030,10 +2051,10 @@ impl WorkspaceExecutor for LocalNode {
             // the roots are checked before anything is made
             match &c.body.kind {
                 PrepareKind::Existing { dir } => {
-                    workspace::resolve(&self.0.cfg.roots, dir)?;
+                    workspace::resolve(&self.0.roots(), dir, true)?;
                 }
                 PrepareKind::Worktree { repository, .. } => {
-                    workspace::resolve(&self.0.cfg.roots, repository)?;
+                    workspace::resolve(&self.0.roots(), repository, true)?;
                 }
                 PrepareKind::Scratch => {}
             }
@@ -2057,13 +2078,13 @@ impl WorkspaceExecutor for LocalNode {
                         .map_err(|e| ApiError::new(ErrorCode::Internal, e.to_string()))
                 }
                 PrepareKind::Existing { dir } => {
-                    workspace::resolve(&me.0.cfg.roots, dir).map(|p| (p, None, None))
+                    workspace::resolve(&me.0.roots(), dir, true).map(|p| (p, None, None))
                 }
                 PrepareKind::Worktree {
                     repository,
                     branch,
                     base,
-                } => match workspace::resolve(&me.0.cfg.roots, repository) {
+                } => match workspace::resolve(&me.0.roots(), repository, true) {
                     Ok(repo) => {
                         let lock = me.repo_lock(&repo);
                         let _g = lock.lock().await;
@@ -2394,15 +2415,16 @@ impl Discovery for LocalNode {
             harnesses,
             roots: self
                 .0
-                .cfg
-                .roots
+                .roots()
                 .iter()
                 .map(|r| RootInfo {
                     id: r.id.clone(),
                     display: r.display.clone(),
+                    access: r.access,
                 })
                 .collect(),
             capacity: self.0.cfg.capacity.clone(),
+            features: vec![],
         })
     }
     async fn history(&self, _p: PageRequest) -> ApiResult<Page<HistoryEntry>> {
@@ -2412,6 +2434,9 @@ impl Discovery for LocalNode {
         unsupported("history")
     }
     async fn import_page(&self, _i: OperationId, _p: PageRequest) -> ApiResult<ImportedPage> {
+        unsupported("history")
+    }
+    async fn locate(&self, _source: HistoryRef) -> ApiResult<HistoryLocation> {
         unsupported("history")
     }
 }

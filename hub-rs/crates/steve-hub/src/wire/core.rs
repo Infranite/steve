@@ -800,6 +800,8 @@ pub struct RoutedRuntime {
     /// The legacy runner's host: a binding starts in the mode it would start the session in, and
     /// in a directory the local Node takes.
     pub host: Arc<HubHost>,
+    /// The local Node's roots, built again before a session is bound to it.
+    pub workspaces: Arc<super::workspaces::Workspaces>,
 }
 
 /// Whether boot recovery leaves `session` to a Node that is not enabled here: only when its
@@ -958,6 +960,10 @@ impl steve_core::AgentRuntime for RoutedRuntime {
             return;
         }
         let Some(n) = &self.node else { return };
+        // a project added a moment ago is a root before its first session is prepared
+        if let Err(e) = self.workspaces.refresh_roots() {
+            tracing::error!("local Node roots before binding {session_id}: {e}");
+        }
         let perm = self.perm_mode(session_id);
         let local = self.host.local_node.get();
         let allows = |at: &steve_node_api::RootPath| local.is_some_and(|l| l.allows(at));
@@ -2061,6 +2067,7 @@ mod routed_tests {
             node: None,
             fleet: None,
             bind_remote: None,
+            workspaces: super::super::workspaces::Workspaces::new(store.clone(), None, None, vec![]),
             store,
         }
     }

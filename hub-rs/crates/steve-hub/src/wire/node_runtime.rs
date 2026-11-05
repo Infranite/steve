@@ -37,6 +37,7 @@ use steve_store::{FileRef, Store, StoreError, Tx};
 
 mod config;
 mod heads;
+mod ledger;
 mod perm;
 mod recover;
 
@@ -44,6 +45,7 @@ pub use config::{ConfigChange, Configured};
 pub use heads::{
     CaughtUp, NodeSnapshot, Pull, Receive, ReplayCheck, catch_up_streams, read_snapshot,
 };
+pub use ledger::LedgerEntry;
 
 /// Retries of a turn after a passing failure (gateway 5xx) with no tool run, and their waits.
 const RETRY_DELAYS_MS: [i64; 2] = [20_000, 60_000];
@@ -1674,6 +1676,7 @@ impl NodeRuntime {
             "resolve_permission" => n.resolve_permission(parse(&l.request)?).await,
             "abandon" => n.abandon(parse(&l.request)?).await,
             "recover" => n.recover(parse(&l.request)?).await,
+            m if ledger::LEDGER_METHODS.contains(&m) => self.send_ledger(l).await,
             other => Err(ApiError::new(
                 ErrorCode::Unsupported,
                 format!("the coordinator does not send {other}"),

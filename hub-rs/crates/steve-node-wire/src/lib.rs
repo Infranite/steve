@@ -30,7 +30,7 @@ pub use envelope::{Envelope, Frame, FrameSink, FrameStream, Kind};
 pub use handshake::{Admission, Admitted, Hello, Welcome};
 pub use identity::Identity;
 pub use node_server::NodeServer;
-pub use remote_hub::{HubLink, RemoteFiles, RemoteSink, RemoteTools};
+pub use remote_hub::{HubLink, RemoteFiles, RemoteSecrets, RemoteSink, RemoteTools};
 pub use remote_node::RemoteNode;
 pub use serve_hub::ServeHub;
 

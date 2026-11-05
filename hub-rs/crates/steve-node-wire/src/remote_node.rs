@@ -13,7 +13,7 @@ use serde::de::DeserializeOwned;
 use steve_node_api::*;
 use tokio::sync::watch;
 
-use crate::conn::{Conn, from_value, to_value};
+use crate::conn::{Conn, answer_of, to_value};
 use crate::methods::{self as m, *};
 
 struct Link {
@@ -115,6 +115,21 @@ impl RemoteNode {
         }
     }
 
+    /// A request that uses what protocol 0.`minor` added goes only to a peer that speaks it: an
+    /// older one would ignore the new fields (no struct refuses unknown ones) and act without
+    /// them, a merge left conflicted or a push without its origin check. Refused here, nothing
+    /// sent, so `unsupported` truly means nothing ran.
+    fn needs(&self, minor: u16, what: &str) -> ApiResult<()> {
+        let have = self.conn(false)?.peer_minor();
+        if have < minor {
+            return Err(ApiError::new(
+                ErrorCode::Unsupported,
+                format!("{what}: the node speaks protocol {}.{have}", PROTOCOL.0),
+            ));
+        }
+        Ok(())
+    }
+
     async fn go<A: Serialize, R: DeserializeOwned>(
         &self,
         method: &str,
@@ -124,7 +139,7 @@ impl RemoteNode {
     ) -> ApiResult<R> {
         let conn = self.conn(new_work)?;
         let v = conn.call(method, to_value(args)?, op).await?;
-        from_value(v)
+        answer_of(method, v, op)
     }
 
     async fn cmd<T: Serialize + Send + Sync>(
@@ -212,9 +227,18 @@ impl WorkspaceExecutor for RemoteNode {
         self.cmd(WORKSPACE_TIDY, &c, false).await
     }
     async fn git_facts(&self, q: GitQuery) -> ApiResult<GitFacts> {
+        if !q.reads.is_empty() {
+            self.needs(2, "git reads")?;
+        }
         self.go(GIT_INSPECT, &q, None, false).await
     }
     async fn git_apply(&self, c: Command<GitApply>) -> ApiResult<Receipt> {
+        match &c.body.action {
+            GitAction::Rebase { .. } => {}
+            // a merge's message and back-out, a push's url, origin and local guards: 0.2
+            GitAction::Merge { .. } => self.needs(2, "merge")?,
+            GitAction::Push { .. } => self.needs(2, "push")?,
+        }
         self.cmd(GIT_APPLY, &c, false).await
     }
     /// N2: no execs on a remote Node either (see `start_job`); nothing is sent.
@@ -236,6 +260,9 @@ impl WorkspaceExecutor for RemoteNode {
         self.go(FS_READ, &q, None, false).await
     }
     async fn scan(&self, c: Command<ScanSpec>) -> ApiResult<Receipt> {
+        if c.body.limits != ScanLimits::default() {
+            self.needs(2, "scan limits")?;
+        }
         self.cmd(TREE_SCAN, &c, false).await
     }
     async fn scan_page(&self, scan: OperationId, page: PageRequest) -> ApiResult<ScanPage> {
@@ -257,6 +284,8 @@ impl Discovery for RemoteNode {
             .await?;
         c.capacity.jobs = 0;
         c.capacity.execs = 0;
+        // secrets are never written to a remote Node's disk
+        c.features.retain(|f| f != FEATURE_SECRET_FILE);
         Ok(c)
     }
     async fn history(&self, page: PageRequest) -> ApiResult<Page<HistoryEntry>> {
@@ -271,6 +300,10 @@ impl Discovery for RemoteNode {
             page,
         };
         self.go(IMPORT_PAGE, &a, None, false).await
+    }
+    async fn locate(&self, source: HistoryRef) -> ApiResult<HistoryLocation> {
+        self.needs(2, "history.locate")?;
+        self.go(HISTORY_LOCATE, &source, None, false).await
     }
 }
 
