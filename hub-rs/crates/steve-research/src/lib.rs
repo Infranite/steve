@@ -44,8 +44,8 @@ pub use attach::Attachment;
 pub use guard::{Scope, Violation, research_guard};
 pub use prompt::{DirInfo, PromptInput};
 pub use run::{
-    Budget, BudgetHit, DEFAULT_IDLE, DEFAULT_MODELS, McpAccess, ResearchConfig, ResearchError,
-    ResearchEvent, ResearchOutcome, ResearchRequest, ResearchRun, Researcher, Resume, RunStatus,
-    StopHandle, ToolSeen, models_from_env,
+    AttemptPlan, AttemptRunner, Attempted, Budget, BudgetHit, DEFAULT_IDLE, DEFAULT_MODELS,
+    McpAccess, ResearchConfig, ResearchError, ResearchEvent, ResearchOutcome, ResearchRequest,
+    ResearchRun, Researcher, Resume, RunStatus, StopHandle, ToolSeen, drive, models_from_env, plan,
 };
 pub use sandbox::SandboxMode;
