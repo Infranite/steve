@@ -28,7 +28,7 @@ use steve_acp::permission::{self, Asked};
 use steve_acp::rpc::{Conn, Incoming, RpcError, Spawn};
 use steve_acp::session::{self as acp_session, OpenConfig, Reports, Strictness};
 use steve_node_api::*;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::journal::{Tx, internal};
 use crate::procs::{self, Stopped};
@@ -182,6 +182,8 @@ pub(crate) struct Actor {
     waits: HashMap<PermissionId, (Value, Asked)>,
     tokens: u64,
     retry_armed: bool,
+    stage_cancel: Option<watch::Sender<bool>>,
+    stage_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl Actor {
@@ -199,6 +201,8 @@ impl Actor {
             waits: HashMap::new(),
             tokens: 0,
             retry_armed: false,
+            stage_cancel: None,
+            stage_task: None,
         };
         tokio::spawn(a.run_loop());
         tx
@@ -211,6 +215,8 @@ impl Actor {
                 m = self.rx.recv() => {
                     let Some(m) = m else { return };
                     if let Msg::Shutdown { done } = m {
+                        if let Some(cancel) = self.stage_cancel.take() { let _ = cancel.send(true); }
+                        if let Some(task) = self.stage_task.take() { let _ = task.await; }
                         self.stop_process().await;
                         let _ = done.send(());
                         return;
@@ -332,10 +338,12 @@ impl Actor {
         let session = self.session.clone();
         let tx = self.tx.clone();
         let gate = self.gate.clone();
-        tokio::spawn(async move {
-            let result = open_harness(&inner, &session, tx.clone(), gate).await;
+        let (cancel, cancelled) = watch::channel(false);
+        self.stage_cancel = Some(cancel);
+        self.stage_task = Some(tokio::spawn(async move {
+            let result = open_harness(&inner, &session, tx.clone(), gate, cancelled).await;
             let _ = tx.send(Msg::Opened { token, result });
-        });
+        }));
     }
 
     /// Stops the session's harness (the live one, or a group recorded from before) and says what
@@ -426,6 +434,8 @@ impl Actor {
     }
 
     async fn opened(&mut self, token: u64, result: ApiResult<LiveNew>) {
+        self.stage_cancel = None;
+        self.stage_task = None;
         let purpose = match self.opening.take() {
             Some((t, p)) if t == token => p,
             other => {
@@ -495,6 +505,23 @@ impl Actor {
                         && procs::stop(l.pgid, l.started).await.gone()
                     {
                         let _ = self.tx(|t| t.drop_proc(&self.session, l.pgid));
+                    }
+                    return;
+                }
+                if self.persisted_cancel() {
+                    if let Ok(l) = result {
+                        self.live = Some(l.into());
+                    }
+                    if self.stop_process().await.gone() {
+                        let completion = self
+                            .run
+                            .as_ref()
+                            .and_then(|r| r.stopped.clone())
+                            .map(|(o, e)| failure(o, e, false))
+                            .unwrap_or_else(cancelled);
+                        self.end(completion);
+                    } else {
+                        self.unknown_end("cancelled startup did not stop");
                     }
                     return;
                 }
@@ -617,22 +644,18 @@ impl Actor {
         );
         let deadline = run.spec.run.limits.deadline;
         let tx = self.tx.clone();
-        tokio::spawn(async move {
+        let (cancel, mut cancelled) = watch::channel(false);
+        self.stage_cancel = Some(cancel);
+        self.stage_task = Some(tokio::spawn(async move {
             let left = Duration::from_millis((deadline.0 - now()).max(0) as u64);
-            let result = match tokio::time::timeout(
-                left,
-                crate::prompt(&inner, &exec, &root, &parts, image),
-            )
-            .await
-            {
-                Ok(r) => r,
-                Err(_) => Err(ApiError::new(
-                    ErrorCode::Expired,
-                    "past its deadline while fetching attachments",
-                )),
+            let result = tokio::select! {
+                _ = cancelled.changed() => Err(ApiError::new(ErrorCode::Expired, "preparation cancelled")),
+                result = tokio::time::timeout(left, crate::prompt(&inner, &exec, &root, &parts, image)) => {
+                    result.unwrap_or_else(|_| Err(ApiError::new(ErrorCode::Expired, "past deadline preparing attachments")))
+                }
             };
             let _ = tx.send(Msg::Prepared { token, result });
-        });
+        }));
     }
 
     async fn prepared(&mut self, token: u64, result: ApiResult<Value>) {
@@ -642,6 +665,17 @@ impl Actor {
             .is_some_and(|r| r.token == token && r.phase == Phase::Preparing)
         {
             return;
+        }
+        self.stage_cancel = None;
+        self.stage_task = None;
+        if self.persisted_cancel() {
+            let completion = self
+                .run
+                .as_ref()
+                .and_then(|r| r.stopped.clone())
+                .map(|(o, e)| failure(o, e, false))
+                .unwrap_or_else(cancelled);
+            return self.end(completion);
         }
         let prompt = match result {
             Ok(p) => p,
@@ -716,14 +750,12 @@ impl Actor {
                 }
                 self.expire_waits();
             }
-            // not prompted yet: it ends without a prompt (a start under way is not waited for)
+            // Keep occupancy until the stage task has acknowledged cancellation. Dropping its
+            // result alone cannot stop attachment writes or a concurrent spawn.
             Phase::Starting | Phase::Preparing => {
-                let stopped = run.stopped.clone();
-                let acted = run.acted;
-                self.end(match stopped {
-                    Some((o, e)) => failure(o, e, acted),
-                    None => cancelled(),
-                });
+                if let Some(cancel) = &self.stage_cancel {
+                    let _ = cancel.send(true);
+                }
             }
         }
     }
@@ -1306,7 +1338,11 @@ async fn open_harness(
     session: &SessionId,
     tx: mpsc::UnboundedSender<Msg>,
     gate: Arc<Gate>,
+    mut cancelled: watch::Receiver<bool>,
 ) -> ApiResult<LiveNew> {
+    if *cancelled.borrow() {
+        return Err(internal("startup cancelled"));
+    }
     let row = inner
         .j
         .read(|t| t.session(session))?
@@ -1402,21 +1438,25 @@ async fn open_harness(
         }
     }
     let seen = Seen::default();
-    let opened = acp_session::open(
+    let mode = crate::mode(&harness, row.open.policy.permissions);
+    let handshake = acp_session::open(
         &conn,
         OpenConfig {
             client_version: &inner.cfg.acp.version,
             cwd: &cwd,
             resume: row.acp_id.as_deref(),
             mcp_servers: crate::mcp_servers(inner, session),
-            mode: crate::mode(&harness, row.open.policy.permissions),
+            mode,
             model: row.open.choice.model.as_deref(),
             effort: row.open.choice.effort.as_deref(),
         },
         &seen,
         Strictness::Strict,
-    )
-    .await;
+    );
+    let opened = tokio::select! {
+        _ = cancelled.changed() => Err(RpcError {message: "startup cancelled".into(), data: None}),
+        result = handshake => result,
+    };
     let opened = match opened {
         Ok(o) => o,
         Err(e) => {

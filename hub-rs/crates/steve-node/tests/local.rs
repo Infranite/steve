@@ -1043,3 +1043,65 @@ async fn opening_reserves_session_and_workspace_until_handshake_finishes() {
     assert!(ok(&finished(&n, "open").await));
     n.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shutdown_joins_an_inflight_handshake_before_releasing_home() {
+    let t = T::new(&[("FAKE_ACP_OPEN_DELAY", "10000")]);
+    let n = t.node();
+    n.prepare_workspace(now_cmd("prep", prepare_proj()))
+        .await
+        .unwrap();
+    assert!(ok(&finished(&n, "prep").await));
+    n.open_session(now_cmd("open", open_body("s")))
+        .await
+        .unwrap();
+    t.until("inflight handshake", |t| t.sent("session/new") == 1)
+        .await;
+    tokio::time::timeout(Duration::from_secs(3), n.shutdown())
+        .await
+        .unwrap();
+    assert!(matches!(
+        n.operation(OperationId::new("open").unwrap())
+            .await
+            .unwrap()
+            .state,
+        Observed::Unknown { .. }
+    ));
+    assert_eq!(
+        n.open_session(now_cmd("late", open_body("late")))
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::Offline
+    );
+    drop(n);
+    let again = LocalNode::open(t.config()).unwrap();
+    again.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shutdown_cancels_a_hanging_fetch_instead_of_waiting_for_its_deadline() {
+    let t = T::new(&[]);
+    let n = LocalNode::open(t.config()).unwrap();
+    n.connect(t.sink.clone(), Some(Arc::new(Hanging)));
+    ready(&n, "s").await;
+    let mut tr = turn("s", "t", "a", "@say never");
+    tr.run.prompt.push(Part::File {
+        artifact: ArtifactRef {
+            id: ArtifactId::new("f").unwrap(),
+            sha256: Digest::sha256(b"x"),
+            size: 1,
+            mime: "text/plain".into(),
+        },
+        name: "x.txt".into(),
+    });
+    n.start_turn(now_cmd("run", tr)).await.unwrap();
+    tokio::task::yield_now().await;
+    tokio::time::timeout(Duration::from_secs(3), n.shutdown())
+        .await
+        .unwrap();
+    assert_eq!(t.sent("session/prompt"), 0);
+    drop(n);
+    let again = LocalNode::open(t.config()).unwrap();
+    again.shutdown().await;
+}

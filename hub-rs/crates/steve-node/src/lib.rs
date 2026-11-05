@@ -110,6 +110,7 @@ pub(crate) struct Inner {
     repos: Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>,
     snapshots: Mutex<HashMap<u64, Snapshot>>,
     cache_n: AtomicU64,
+    tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
 
 impl Inner {
@@ -717,6 +718,7 @@ impl LocalNode {
             repos: Mutex::new(HashMap::new()),
             snapshots: Mutex::new(HashMap::new()),
             cache_n: AtomicU64::new(0),
+            tasks: Mutex::new(Vec::new()),
         })))
     }
 
@@ -749,6 +751,10 @@ impl LocalNode {
     /// home is free once the last handle is dropped.
     pub async fn shutdown(&self) {
         self.0.closed.store(true, Ordering::SeqCst);
+        let tasks = std::mem::take(&mut *self.0.tasks.lock().unwrap());
+        for task in tasks {
+            let _ = task.await;
+        }
         let actors: Vec<_> = self.0.actors.lock().unwrap().drain().collect();
         for (_, tx) in actors {
             let (done, wait) = tokio::sync::oneshot::channel();
@@ -756,11 +762,27 @@ impl LocalNode {
                 let _ = wait.await;
             }
         }
+        // All effects have quiesced. Preserve unresolved outcomes for explicit Hub recovery.
+        let _ = self.0.j.tx(|t| t.mark_unknown());
         self.0.wake.notify_one();
+    }
+
+    fn spawn_owned(&self, work: impl std::future::Future<Output = ()> + Send + 'static) {
+        let mut tasks = self.0.tasks.lock().unwrap();
+        if self.0.closed.load(Ordering::SeqCst) {
+            return;
+        }
+        tasks.retain(|task| !task.is_finished());
+        tasks.push(tokio::spawn(work));
     }
 
     fn actor(&self, session: &SessionId) -> mpsc::UnboundedSender<Msg> {
         let mut a = self.0.actors.lock().unwrap();
+        if self.0.closed.load(Ordering::SeqCst) {
+            let (tx, rx) = mpsc::unbounded_channel();
+            drop(rx);
+            return tx;
+        }
         if let Some(tx) = a.get(session).filter(|t| !t.is_closed()) {
             return tx.clone();
         }
@@ -1309,7 +1331,7 @@ impl ExecutionControl for LocalNode {
         if fresh && let Some(s) = session {
             let me = self.clone();
             let op = c.id.clone();
-            tokio::spawn(async move {
+            self.spawn_owned(async move {
                 let (tx, rx) = tokio::sync::oneshot::channel();
                 let _ = me.actor(&s).send(Msg::Stop {
                     op: None,
@@ -1546,7 +1568,7 @@ impl WorkspaceExecutor for LocalNode {
         let me = self.clone();
         let op = c.id.clone();
         let body = c.body.clone();
-        tokio::spawn(async move {
+        self.spawn_owned(async move {
             let name = workspace::dir_name(&body.resource);
             let home = me.0.cfg.home.clone();
             let made: ApiResult<(PathBuf, Option<PathBuf>, Option<String>)> = match &body.kind {
@@ -1693,7 +1715,7 @@ impl WorkspaceExecutor for LocalNode {
         let op = c.id.clone();
         let keep = c.body.keep_branch;
         let expected = c.body.expected.clone();
-        tokio::spawn(async move {
+        self.spawn_owned(async move {
             // the harnesses first, confirmed
             for s in &sessions {
                 let (tx, rx) = tokio::sync::oneshot::channel();

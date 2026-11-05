@@ -199,7 +199,7 @@ impl Tx<'_> {
         Ok(v as u64)
     }
 
-    fn mark_unknown(&self) -> ApiResult<()> {
+    pub(crate) fn mark_unknown(&self) -> ApiResult<()> {
         let rows: Vec<(String, String)> = self.rows("SELECT id, receipt FROM ops", [], |r| {
             Ok((r.get(0)?, r.get(1)?))
         })?;
