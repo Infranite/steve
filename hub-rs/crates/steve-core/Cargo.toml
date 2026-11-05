@@ -20,6 +20,8 @@ steve-modules = { path = "../steve-modules" }
 # Work's published facts (`work.item.done`), emitted in the transaction that finishes an item.
 steve-work-api = { path = "../steve-work-api" }
 steve-stats = { path = "../steve-stats" }
+# One model run of claude -p / codex exec; the gateway keeps model choice and fallback.
+steve-print = { path = "../steve-print" }
 steve-transcript = { path = "../steve-transcript" }
 sha2 = "=0.11.1"
 thiserror = "=2.0.21"

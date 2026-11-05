@@ -1900,6 +1900,7 @@ fn final_usage(run: &Run, resp: &Value) -> Vec<(Subject, EventBody)> {
             .or_else(|| u.get("cachedInputTokens"))
             .and_then(Value::as_u64),
         cache_write: u.get("cachedWriteTokens").and_then(Value::as_u64),
+        reasoning: None,
     };
     let mut reports = vec![];
     if let Some(u) = resp.get("usage").filter(|u| u.is_object()) {
