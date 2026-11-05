@@ -148,6 +148,23 @@ async fn settle(h: &H, id: &str, while_in: &[&str]) -> Value {
 
 const ACTIVE: &[&str] = &["pending", "credentials_saved", "verifying"];
 
+/// Waits until the saved credential has been checked: the row reaches `credentials_saved` without an
+/// error before the check claims it, so that alone is not the end of the check.
+async fn checked(h: &H, id: &str) -> Value {
+    let path = format!("/channels/feishu/registrations/{id}");
+    let mut last = Value::Null;
+    for _ in 0..300 {
+        last = send(&h.api, &me(), "GET", &path, None).await.1;
+        let st = last["state"].as_str().unwrap_or_default();
+        let unchecked = st == "credentials_saved" && last["error_kind"].is_null();
+        if !["pending", "verifying"].contains(&st) && !unchecked {
+            return last;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("still {last}");
+}
+
 fn no_secrets(v: &Value) {
     let t = v.to_string();
     for bad in [
@@ -451,7 +468,7 @@ async fn a_failed_check_keeps_the_credential_and_retry_binds_once() {
     h.fake.reg_polls(vec![h.fake.reg_issued("feishu")]);
     let v = begin(&h, "feishu").await;
     let id = s(&v["id"]);
-    let saved = settle(&h, &id, &["pending", "verifying"]).await;
+    let saved = checked(&h, &id).await;
     assert_eq!(saved["state"], "credentials_saved", "{saved}");
     assert!(
         saved["error"].is_string() && saved["error_kind"].is_string(),
@@ -511,7 +528,7 @@ async fn cancelling_a_saved_credential_destroys_it() {
     h.fake.deny(Endpoint::BotInfo);
     h.fake.reg_polls(vec![h.fake.reg_issued("feishu")]);
     let id = s(&begin(&h, "feishu").await["id"]);
-    settle(&h, &id, &["pending", "verifying"]).await;
+    checked(&h, &id).await;
     let (_, c) = send(
         &h.api,
         &me(),
@@ -571,7 +588,7 @@ async fn an_app_already_connected_is_not_replaced() {
         .expect("row");
     h.fake.reg_polls(vec![h.fake.reg_issued("feishu")]);
     let id = s(&begin(&h, "feishu").await["id"]);
-    let r = settle(&h, &id, &["pending", "verifying"]).await;
+    let r = checked(&h, &id).await;
     assert_eq!(
         (r["state"].as_str(), r["error_kind"].as_str()),
         (Some("credentials_saved"), Some("conflict")),
@@ -1001,7 +1018,7 @@ async fn a_check_that_died_is_picked_up_again() {
     h.fake.deny(Endpoint::BotInfo);
     h.fake.reg_polls(vec![h.fake.reg_issued("feishu")]);
     let id = s(&begin(&h, "feishu").await["id"]);
-    settle(&h, &id, &["pending", "verifying"]).await;
+    checked(&h, &id).await;
     // as if a check had stopped half-way: verifying, no worker
     h.env.store().with_conn(|c| Ok(c.execute("UPDATE chan_app_registrations SET state = 'verifying', error = NULL, error_kind = NULL WHERE id = ?", [&id])?)).expect("stuck");
     h.fake.allow(Endpoint::BotInfo);

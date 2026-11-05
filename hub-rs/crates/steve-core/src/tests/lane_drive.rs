@@ -202,12 +202,16 @@ fn a_batch_you_turn_down_sends_its_members_back() {
             .iter()
             .any(|x| x.contains("你没有批准这一批"))
     }));
-    let r = k
-        .db()
-        .store()
-        .reader(|c| lanes::request_of_item(c, &i))
-        .unwrap();
-    assert!(r.is_none(), "nothing of it left in the lane");
+    // the note comes first, the request leaves the lane right after it
+    assert!(
+        k.wait(|| k
+            .db()
+            .store()
+            .reader(|c| lanes::request_of_item(c, &i))
+            .unwrap()
+            .is_none()),
+        "nothing of it left in the lane"
+    );
     assert_eq!(
         run(&origin, &["rev-parse", "main"]),
         main_before,
