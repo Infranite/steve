@@ -7,7 +7,7 @@ use std::time::Duration;
 use steve_hub::wire::node_runtime::{Binding, NodeDomain, NodeRuntime, Planned, Sink};
 use steve_node_api::testkit::{FakeNode, build};
 use steve_node_api::*;
-use steve_store::{FnPublisher, Store, StoreError};
+use steve_store::{ChangeEvent, FileRef, FnPublisher, Store, StoreError};
 
 #[derive(Default)]
 struct Ends(Mutex<Vec<(String, String, Option<String>)>>);
@@ -28,6 +28,7 @@ struct H {
     rt: Arc<NodeRuntime>,
     ends: Arc<Ends>,
     seen: Arc<Tee>,
+    published: Arc<Mutex<Vec<ChangeEvent>>>,
 }
 
 /// Forwards to the Hub and keeps what went through, to send it again.
@@ -58,7 +59,13 @@ const S: &str = "s1";
 
 fn hub() -> H {
     let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(dir.path().join("steve.sqlite3"), FnPublisher(|_| {})).unwrap();
+    let published = Arc::new(Mutex::new(vec![]));
+    let p = published.clone();
+    let store = Store::open(
+        dir.path().join("steve.sqlite3"),
+        FnPublisher(move |e| p.lock().unwrap().push(e)),
+    )
+    .unwrap();
     store.ensure_workspace().unwrap();
     store
         .transaction::<_, StoreError>(|tx| {
@@ -85,6 +92,7 @@ fn hub() -> H {
         rt,
         ends,
         seen,
+        published,
     }
 }
 
@@ -338,4 +346,56 @@ async fn a_busy_node_gets_the_very_same_command_again() {
         "exhausted is sent again, never a new attempt"
     );
     assert_eq!(h.attempts().len(), 1);
+}
+
+#[tokio::test]
+async fn steves_lead_goes_first_once_and_attachments_go_by_hash() {
+    let h = hub();
+    h.store
+        .transaction::<_, StoreError>(|tx| {
+            tx.execute(
+                "INSERT INTO files(id,workspace_id,sha256,name,mime,size,created_by,created) VALUES ('f1','default',?,'a.txt','text/plain',3,'u',1)",
+                ["a".repeat(64)],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    h.bind();
+    let f = FileRef {
+        id: "f1".into(),
+        name: "a.txt".into(),
+        mime: "text/plain".into(),
+        size: 3,
+    };
+    h.rt.prompt(S, "look", "user", std::slice::from_ref(&f))
+        .unwrap();
+    // the open is not done yet: the lead joins the queue in front, once
+    until("opened", || {
+        h.methods().contains(&"start_turn") || h.phase() == "ready"
+    })
+    .await;
+    let _ = h.rt.flush(S, Some(("lead", "steve")));
+    let _ = h.rt.flush(S, Some(("lead", "steve")));
+    until("attempt", || h.attempts().len() == 1).await;
+    let spec: String = h.q("SELECT spec FROM runtime_attempts");
+    let spec: TurnSpec = serde_json::from_str(&spec).unwrap();
+    let Part::Text { text } = &spec.run.prompt[0] else {
+        panic!("text first")
+    };
+    assert!(text == "look" || text == "lead\n\nlook", "{text}");
+    assert!(
+        spec.run
+            .prompt
+            .iter()
+            .any(|p| matches!(p, Part::File { name, .. } if name == "a.txt"))
+    );
+    let users: i64 = h.q("SELECT COUNT(*) FROM events WHERE kind='user' AND format='steve.v1'");
+    assert!(users >= 1);
+    let published = h.published.lock().unwrap();
+    assert!(
+        published
+            .iter()
+            .any(|e| matches!(e, ChangeEvent::Event { kind, .. } if kind == "user")),
+        "the browser hears the turn's messages"
+    );
 }

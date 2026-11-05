@@ -7,7 +7,7 @@
 //! - [`CoreMcp`]: steve-mcp's backend, the five tools → `core.tool_*`.
 
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -474,6 +474,120 @@ impl steve_core::AgentRuntime for AcpRuntime {
     }
     fn agent_pid(&self, session_id: &str) -> Option<u32> {
         self.0.adapter_pid(session_id).filter(|p| *p > 1)
+    }
+}
+
+/// Turn ends of Node sessions reach the core the same way the ACP runner's do.
+impl super::node_runtime::NodeDomain for HubHost {
+    fn turn_ended(&self, session: &str, stop_reason: &str, error: Option<String>) {
+        let Some(core) = self.core.get() else { return };
+        let t = steve_core::TurnEnd {
+            session_id: session.into(),
+            stop_reason: stop_reason.into(),
+            error,
+        };
+        if let Err(e) = block_here(|| core.on_turn_end(t)) {
+            tracing::error!("turn end: {e}");
+        }
+    }
+}
+
+/// Each session runs on one backend, fixed when it is bound: the ones bound to a Node go to the
+/// coordinator, every other one to the ACP runner. Holds and counts cover both.
+pub struct RoutedRuntime {
+    pub legacy: AcpRuntime,
+    pub node: Option<Arc<super::node_runtime::NodeRuntime>>,
+}
+
+impl RoutedRuntime {
+    fn node_for(&self, session_id: &str) -> Option<&super::node_runtime::NodeRuntime> {
+        self.node.as_deref().filter(|n| n.owns(session_id))
+    }
+}
+
+impl steve_core::AgentRuntime for RoutedRuntime {
+    fn prompt(
+        &self,
+        session_id: &str,
+        text: &str,
+        via: &str,
+        files: &[steve_core::repo::FileRef],
+    ) -> steve_core::Result<steve_core::Prompted> {
+        let Some(n) = self.node_for(session_id) else {
+            return self.legacy.prompt(session_id, text, via, files);
+        };
+        let files: Vec<steve_store::FileRef> = files
+            .iter()
+            .map(|f| steve_store::FileRef {
+                id: f.id.clone(),
+                name: f.name.clone(),
+                mime: f.mime.clone(),
+                size: f.size,
+            })
+            .collect();
+        match n.prompt(session_id, text, via, &files) {
+            Ok(super::node_runtime::Planned::Created) => Ok(steve_core::Prompted::Sent),
+            Ok(_) => Ok(steve_core::Prompted::Queued),
+            Err(e) => Err(CoreError::Msg(e.to_string())),
+        }
+    }
+    fn cancel(&self, session_id: &str) -> bool {
+        match self.node_for(session_id) {
+            Some(n) => n.cancel(session_id).unwrap_or_else(|e| {
+                tracing::error!("cancel {session_id}: {e}");
+                false
+            }),
+            None => self.legacy.cancel(session_id),
+        }
+    }
+    fn is_busy(&self, session_id: &str) -> bool {
+        match self.node_for(session_id) {
+            Some(n) => n.is_busy(session_id),
+            None => self.legacy.is_busy(session_id),
+        }
+    }
+    fn release(&self, session_id: &str) {
+        // a Node session's harness is released by the coordinator's own chain (not yet)
+        if self.node_for(session_id).is_none() {
+            self.legacy.release(session_id)
+        }
+    }
+    fn answer_permission(&self, decision_id: &str, option_id: Option<&str>) -> bool {
+        // Node permissions are answered as operations of their own (not yet): only the runner's here
+        self.legacy.answer_permission(decision_id, option_id)
+    }
+    fn hold(&self, on: bool) {
+        self.legacy.hold(on);
+        if let Some(n) = &self.node {
+            n.hold(on);
+        }
+    }
+    fn is_holding(&self) -> bool {
+        self.legacy.is_holding() || self.node.as_ref().is_some_and(|n| n.is_holding())
+    }
+    fn running_turns(&self) -> usize {
+        self.legacy.running_turns() + self.node.as_ref().map_or(0, |n| n.running_turns())
+    }
+    fn flush(&self, session_id: &str, lead: Option<(&str, &str)>) -> bool {
+        match self.node_for(session_id) {
+            Some(n) => n
+                .flush(session_id, lead)
+                .inspect_err(|e| tracing::error!("flush {session_id}: {e}"))
+                .is_ok_and(|p| p == super::node_runtime::Planned::Created),
+            None => self.legacy.flush(session_id, lead),
+        }
+    }
+    fn set_mode(&self, session_id: &str, mode: &str) -> bool {
+        match self.node_for(session_id) {
+            Some(_) => false,
+            None => self.legacy.set_mode(session_id, mode),
+        }
+    }
+    fn agent_pid(&self, session_id: &str) -> Option<u32> {
+        match self.node_for(session_id) {
+            Some(_) => None,
+            None => self.legacy.agent_pid(session_id),
+        }
     }
 }
 

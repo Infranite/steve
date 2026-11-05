@@ -566,3 +566,55 @@ pub fn command_in(tx: &Tx<'_>, operation: &str) -> Result<Option<CommandRecord>>
     )
     .transpose()
 }
+
+/// Where a session event came from on a Node: its stream position is its identity.
+#[derive(Debug, Clone, Copy)]
+pub struct EventSource<'a> {
+    pub node: &'a str,
+    pub stream: &'a str,
+    pub epoch: &'a str,
+    pub seq: i64,
+}
+
+/// [`crate::Events::add`] inside the caller's transaction, for a given `format`: scrubbed, split into
+/// payloads, published after the commit. With a source, the same Node event again is a no-op
+/// (`None`).
+pub fn add_event_in(
+    tx: &Tx<'_>,
+    session: &str,
+    kind: &str,
+    mut data: Value,
+    format: &str,
+    source: Option<EventSource<'_>>,
+    now: i64,
+) -> Result<Option<i64>> {
+    steve_vault::redact::scrub(session, &mut data);
+    let (stored, payloads) = crate::event_payload::split(kind, &data)?;
+    let stored = to_json(&stored)?;
+    let inserted = tx.execute(
+        "INSERT OR IGNORE INTO events (session_id, ts, kind, data, format, source_node, source_stream, source_epoch, source_seq) VALUES (?,?,?,?,?,?,?,?,?)",
+        params![
+            session,
+            now,
+            kind,
+            stored,
+            format,
+            source.map(|s| s.node),
+            source.map(|s| s.stream),
+            source.map(|s| s.epoch),
+            source.map(|s| s.seq)
+        ],
+    )?;
+    if inserted == 0 {
+        return Ok(None);
+    }
+    let seq = tx.last_insert_rowid();
+    crate::event_payload::save(tx, session, seq, &payloads)?;
+    tx.publish(crate::ChangeEvent::Event {
+        session_id: session.into(),
+        seq,
+        kind: kind.into(),
+        data,
+    });
+    Ok(Some(seq))
+}

@@ -176,7 +176,11 @@ pub fn wire_with(cfg: &Arc<Config>, bus: &Bus, vars: Vars) -> Result<Wired, Back
     ));
     let core = steve_core::Core::new(
         steve_core::repo::Db::new(db.clone()),
-        Arc::new(core::AcpRuntime(acp.clone())),
+        Arc::new(core::RoutedRuntime {
+            legacy: core::AcpRuntime(acp.clone()),
+            // no session is bound to a Node until the switch (D5)
+            node: None,
+        }),
         gateway,
         core_cfg,
     );

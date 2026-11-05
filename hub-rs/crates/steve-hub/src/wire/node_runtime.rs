@@ -28,7 +28,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use steve_node_api::*;
 use steve_store::runtime::{self as rt, ReceiptState, StreamKey};
-use steve_store::{Store, StoreError, Tx};
+use steve_store::{FileRef, Store, StoreError, Tx};
 
 /// Retries of a turn after a passing failure (gateway 5xx) with no tool run, and their waits.
 const RETRY_DELAYS_MS: [i64; 2] = [20_000, 60_000];
@@ -254,18 +254,10 @@ impl NodeRuntime {
         session: &str,
         text: &str,
         via: &str,
-        files: &[FileRefLite],
+        files: &[FileRef],
     ) -> Result<Planned, StoreError> {
         let planned = self.tx(|tx| {
-            let files = serde_json::to_string(files).map_err(conflict)?;
-            tx.execute(
-                "INSERT INTO queued (id, session_id, text, via, created, files) VALUES (?, ?, ?, ?, ?, ?)",
-                rusqlite::params![uid("q"), session, text, via, now(), files],
-            )?;
-            tx.execute(
-                "INSERT INTO events (session_id, ts, kind, data, format) VALUES (?, ?, 'queued', ?, 'steve.v1')",
-                rusqlite::params![session, now(), json!({"text": text, "via": via}).to_string()],
-            )?;
+            queue_in(tx, session, text, via, files, now())?;
             self.plan_in(tx, session)
         })?;
         if planned == Planned::Created {
@@ -274,17 +266,34 @@ impl NodeRuntime {
         Ok(planned)
     }
 
-    /// Plans a turn from what is queued, if the session can take one (T1); otherwise nothing.
-    pub fn flush(&self, session: &str) -> Result<Planned, StoreError> {
-        let planned = self.tx(|tx| self.plan_in(tx, session))?;
+    /// Plans a turn from what is queued, if the session can take one (T1), led by Steve's own
+    /// message when there is one (identical texts go once); otherwise nothing changes.
+    pub fn flush(&self, session: &str, lead: Option<(&str, &str)>) -> Result<Planned, StoreError> {
+        let planned = self.tx(|tx| {
+            let p = self.plan_state_in(tx, session)?;
+            if matches!(p, Planned::Busy | Planned::Held) {
+                return Ok(p);
+            }
+            if let Some((text, via)) = lead {
+                let (first, waiting): (Option<i64>, bool) = tx.query_row(
+                    "SELECT MIN(created), EXISTS(SELECT 1 FROM queued WHERE session_id=?1 AND text=?2) FROM queued WHERE session_id=?1",
+                    rusqlite::params![session, text],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )?;
+                if !waiting {
+                    queue_in(tx, session, text, via, &[], first.map_or(now(), |t| t - 1))?;
+                }
+            }
+            self.plan_in(tx, session)
+        })?;
         if planned == Planned::Created {
             self.wake_send.notify_one();
         }
         Ok(planned)
     }
 
-    /// T1 inside `tx`: claim, attempt, reservation, command.
-    fn plan_in(&self, tx: &Tx, session: &str) -> Result<Planned, StoreError> {
+    /// What [`Self::plan_in`] would answer, without planning.
+    fn plan_state_in(&self, tx: &Tx, session: &str) -> Result<Planned, StoreError> {
         if self.holding.load(Ordering::SeqCst) {
             return Ok(Planned::Held);
         }
@@ -296,24 +305,69 @@ impl NodeRuntime {
         if phase != "ready" || active.is_some() {
             return Ok(Planned::Busy);
         }
+        let any: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM queued WHERE session_id=?)",
+            [session],
+            |r| r.get(0),
+        )?;
+        Ok(if any {
+            Planned::Created
+        } else {
+            Planned::Empty
+        })
+    }
+
+    /// T1 inside `tx`: claim, attempt, reservation, command.
+    fn plan_in(&self, tx: &Tx, session: &str) -> Result<Planned, StoreError> {
+        let p = self.plan_state_in(tx, session)?;
+        if p != Planned::Created {
+            return Ok(p);
+        }
         let turn = uid("t");
         let msgs = rt::claim_in(tx, session, &turn, now())?;
         if msgs.is_empty() {
             return Ok(Planned::Empty);
         }
-        let text = msgs
-            .iter()
-            .map(|m| m.text.clone())
-            .collect::<Vec<_>>()
-            .join("\n\n");
+        let mut prompt = vec![Part::Text {
+            text: msgs
+                .iter()
+                .map(|m| m.text.clone())
+                .collect::<Vec<_>>()
+                .join("\n\n"),
+        }];
         for m in &msgs {
-            tx.execute(
-                "INSERT INTO events (session_id, ts, kind, data, format) VALUES (?, ?, 'user', ?, 'steve.v1')",
-                rusqlite::params![session, now(), json!({"text": m.text, "via": m.via}).to_string()],
+            rt::add_event_in(
+                tx,
+                session,
+                "user",
+                message_event(&m.text, &m.via, &m.files),
+                V1,
+                None,
+                now(),
             )?;
+            for f in &m.files {
+                prompt.push(file_part(tx, f)?);
+            }
         }
-        self.attempt_in(tx, session, &turn, 0, vec![Part::Text { text }])?;
+        self.attempt_in(tx, session, &turn, 0, prompt)?;
         Ok(Planned::Created)
+    }
+
+    /// [`Self::plan_in`] while applying a Node fact: a turn that cannot be planned (a bad
+    /// attachment, say) must not keep the fact from being applied. Its messages stay queued.
+    fn plan_after_in(&self, tx: &Tx, session: &str) -> Result<Planned, StoreError> {
+        tx.execute_batch("SAVEPOINT plan")?;
+        match self.plan_in(tx, session) {
+            Ok(p) => {
+                tx.execute_batch("RELEASE plan")?;
+                Ok(p)
+            }
+            Err(e) => {
+                tracing::error!("plan a turn of {session}: {e}");
+                tx.execute_batch("ROLLBACK TO plan; RELEASE plan")?;
+                Ok(Planned::Empty)
+            }
+        }
     }
 
     /// A new attempt of `turn` with its own frozen request and its `start_turn` command.
@@ -608,7 +662,7 @@ impl NodeRuntime {
                 now(),
             )?;
             if success {
-                self.plan_in(tx, &s)?;
+                self.plan_after_in(tx, &s)?;
             }
         }
         Ok(())
@@ -840,19 +894,19 @@ impl NodeRuntime {
             .as_str()
             .unwrap_or("diagnostic")
             .to_string();
-        tx.execute(
-            "INSERT OR IGNORE INTO events (session_id, ts, kind, data, format, source_node, source_stream, source_epoch, source_seq)
-             VALUES (?, ?, ?, ?, 'steve.v1', ?, ?, ?, ?)",
-            rusqlite::params![
-                session,
-                ev.at.0,
-                kind,
-                serde_json::to_string(ev).map_err(conflict)?,
-                self.node_id.as_str(),
-                ev.cursor.stream.as_str(),
-                ev.cursor.epoch.as_str(),
-                ev.cursor.seq as i64
-            ],
+        rt::add_event_in(
+            tx,
+            session,
+            &kind,
+            serde_json::to_value(ev).map_err(conflict)?,
+            V1,
+            Some(rt::EventSource {
+                node: self.node_id.as_str(),
+                stream: ev.cursor.stream.as_str(),
+                epoch: ev.cursor.epoch.as_str(),
+                seq: ev.cursor.seq as i64,
+            }),
+            ev.at.0,
         )?;
         Ok(())
     }
@@ -903,15 +957,25 @@ impl NodeRuntime {
                 "UPDATE node_commands SET retry_at=? WHERE target_attempt=(SELECT active_attempt FROM runtime_turns WHERE turn_id=?) AND method='start_turn'",
                 rusqlite::params![now() + delay, turn],
             )?;
-            tx.execute(
-                "INSERT INTO events (session_id, ts, kind, data, format) VALUES (?, ?, 'system', ?, 'steve.v1')",
-                rusqlite::params![session, now(), json!({"text": format!("推理网关暂时不可用，{} 秒后自动重试（第 {} 次）", delay / 1000, ordinal + 1)}).to_string()],
+            let text = format!(
+                "推理网关暂时不可用，{} 秒后自动重试（第 {} 次）",
+                delay / 1000,
+                ordinal + 1
+            );
+            rt::add_event_in(
+                tx,
+                session,
+                "system",
+                json!({ "text": text }),
+                V1,
+                None,
+                now(),
             )?;
             return Ok(None);
         }
         self.turn_over_in(tx, session, turn, c)?;
         // what is queued meanwhile goes next; only when nothing does is the turn over for the item
-        if self.plan_in(tx, session)? == Planned::Created {
+        if self.plan_after_in(tx, session)? == Planned::Created {
             return Ok(None);
         }
         let stop = c.stop_reason.clone();
@@ -985,13 +1049,74 @@ pub enum Planned {
     Empty,
 }
 
-/// A queued attachment as the core hands it over (kept with the message).
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct FileRefLite {
-    pub id: String,
-    pub name: String,
-    pub mime: String,
-    pub size: i64,
+/// The format of the events this coordinator writes: Steve's own, never a harness protocol.
+const V1: &str = "steve.v1";
+
+/// Queues a message (with its `queued` event) at `created`.
+fn queue_in(
+    tx: &Tx,
+    session: &str,
+    text: &str,
+    via: &str,
+    files: &[FileRef],
+    created: i64,
+) -> Result<(), StoreError> {
+    tx.execute(
+        "INSERT INTO queued (id, session_id, text, via, created, files) VALUES (?, ?, ?, ?, ?, ?)",
+        rusqlite::params![
+            uid("q"),
+            session,
+            text,
+            via,
+            created,
+            serde_json::to_string(files)?
+        ],
+    )?;
+    rt::add_event_in(
+        tx,
+        session,
+        "queued",
+        message_event(text, via, files),
+        V1,
+        None,
+        now(),
+    )?;
+    tx.publish(steve_store::ChangeEvent::Session {
+        id: session.into(),
+        item_id: None,
+    });
+    Ok(())
+}
+
+/// A message as the session's events show it (the same shape on every backend).
+fn message_event(text: &str, via: &str, files: &[FileRef]) -> Value {
+    let mut v = json!({ "text": text, "via": via });
+    if !files.is_empty() {
+        v["files"] = json!(files);
+    }
+    v
+}
+
+/// An attachment for the Node to fetch from the Hub by hash.
+fn file_part(tx: &Tx, f: &FileRef) -> Result<Part, StoreError> {
+    let (sha, size, mime): (String, i64, String) = tx.query_row(
+        "SELECT sha256, size, mime FROM files WHERE id=?",
+        [&f.id],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )?;
+    Ok(Part::File {
+        artifact: ArtifactRef {
+            id: idv(f.id.clone())?,
+            sha256: idv(if sha.starts_with("sha256:") {
+                sha
+            } else {
+                format!("sha256:{sha}")
+            })?,
+            size: size.max(0) as u64,
+            mime,
+        },
+        name: f.name.clone(),
+    })
 }
 
 fn receipt_state(s: &Observed) -> (ReceiptState, bool) {
