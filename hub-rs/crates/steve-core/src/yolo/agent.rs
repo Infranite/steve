@@ -120,14 +120,14 @@ impl Sessions {
     pub(crate) fn take_note(&self, sid: &str) -> Option<&'static str> {
         lock(&self.notes).remove(sid).map(|(_, n)| n)
     }
-    /// Records the level; true when it differs from what the session was told (unknown = off, the
-    /// protocol of a session started before YOLO).
-    fn changed(&self, sid: &str, level: Level) -> bool {
+    /// Records the level; the level the session was told before when it differs (unknown = off,
+    /// the protocol of a session started before YOLO).
+    fn changed(&self, sid: &str, level: Level) -> Option<Level> {
         let was = lock(&self.told)
             .insert(sid.into(), level)
             .unwrap_or(Level::Off);
         if was == level {
-            return false;
+            return None;
         }
         let mut notes = lock(&self.notes);
         // the note compares with what the session last heard (on then off again before it heard of
@@ -136,7 +136,12 @@ impl Sessions {
         if let Some(n) = note(heard, level) {
             notes.insert(sid.into(), (heard, n));
         }
-        true
+        Some(was)
+    }
+    /// The change to `level` did not reach the session: it counts as told `was` again, so the next
+    /// sync tries once more (the note stays; it is made again from what the session last heard).
+    fn unmark(&self, sid: &str, was: Level) {
+        lock(&self.told).insert(sid.into(), was);
     }
 }
 
@@ -228,17 +233,22 @@ impl Core {
                 continue;
             };
             let level = self.yolo_level(&item);
-            if !self.0.yolo_sessions.changed(&s.id, level) {
+            let Some(was) = self.0.yolo_sessions.changed(&s.id, level) else {
                 continue;
-            }
+            };
             let bot = s
                 .bot_id
                 .as_deref()
                 .and_then(|b| self.store().bot(b).ok().flatten())
                 .map(|b| b.perm_mode);
             let own = y.own_dir(item.cwd.as_deref()).is_some();
-            if let Some(mode) = harness_mode(bot.as_deref(), level, own) {
-                self.0.runtime.set_mode(&s.id, &mode);
+            if let Some(mode) = harness_mode(bot.as_deref(), level, own)
+                && let Err(e) = self.0.runtime.set_mode(&s.id, &mode)
+            {
+                // not lost: still marked as changed for the next sync
+                tracing::warn!(session = %s.id, mode, "yolo sync: set mode: {e}");
+                self.0.yolo_sessions.unmark(&s.id, was);
+                continue;
             }
             out.push(s.id);
         }
@@ -300,24 +310,24 @@ mod tests {
         use Level::*;
         let s = Sessions::default();
         s.started("a", Off);
-        assert!(!s.changed("a", Off));
-        assert!(s.changed("a", On));
+        assert_eq!(s.changed("a", Off), None);
+        assert_eq!(s.changed("a", On), Some(Off));
         assert_eq!(s.take_note("a"), Some(NOTE_ON));
         assert_eq!(s.take_note("a"), None);
-        assert!(s.changed("a", Off));
-        assert!(s.changed("a", On));
+        assert_eq!(s.changed("a", Off), Some(On));
+        assert_eq!(s.changed("a", On), Some(Off));
         assert_eq!(
             s.take_note("a"),
             None,
             "off then on again before any message"
         );
         // full access: told once, and stepping back down says so
-        assert!(s.changed("a", Full));
+        assert_eq!(s.changed("a", Full), Some(On));
         assert_eq!(s.take_note("a"), Some(NOTE_FULL));
-        assert!(s.changed("a", On));
+        assert_eq!(s.changed("a", On), Some(Full));
         assert_eq!(s.take_note("a"), Some(NOTE_FULL_OFF));
-        assert!(s.changed("a", Full));
-        assert!(s.changed("a", Off));
+        assert_eq!(s.changed("a", Full), Some(On));
+        assert_eq!(s.changed("a", Off), Some(Full));
         assert_eq!(s.take_note("a"), Some(NOTE_OFF), "on → full → off: off");
     }
 }

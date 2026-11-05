@@ -536,8 +536,16 @@ impl steve_core::AgentRuntime for AcpRuntime {
     fn release(&self, session_id: &str) {
         self.0.release(session_id)
     }
-    fn answer_permission(&self, decision_id: &str, option_id: Option<&str>) -> bool {
-        self.0.answer_permission(decision_id, option_id)
+    fn answer_permission(
+        &self,
+        decision_id: &str,
+        option_id: Option<&str>,
+    ) -> steve_core::Result<steve_core::Answered> {
+        Ok(if self.0.answer_permission(decision_id, option_id) {
+            steve_core::Answered::Applied
+        } else {
+            steve_core::Answered::Gone
+        })
     }
     fn hold(&self, on: bool) {
         self.0.hold(on)
@@ -564,8 +572,12 @@ impl steve_core::AgentRuntime for AcpRuntime {
             steve_acp::Flushed::Empty => steve_core::Flushed::Empty,
         }
     }
-    fn set_mode(&self, session_id: &str, mode: &str) -> bool {
-        self.0.set_mode(session_id, mode)
+    fn set_mode(&self, session_id: &str, mode: &str) -> steve_core::Result<steve_core::Configured> {
+        Ok(if self.0.set_mode(session_id, mode) {
+            steve_core::Configured::Applied
+        } else {
+            steve_core::Configured::NotRunning
+        })
     }
     fn agent_pid(&self, session_id: &str) -> Option<u32> {
         self.0.adapter_pid(session_id).filter(|p| *p > 1)
@@ -979,18 +991,24 @@ impl steve_core::AgentRuntime for RoutedRuntime {
             Backend::Legacy => self.legacy.release(session_id),
         }
     }
-    fn answer_permission(&self, decision_id: &str, option_id: Option<&str>) -> bool {
+    /// A Node session's answer is a queued command ([`steve_core::Answered::Pending`]); a store
+    /// error is returned, so the card stays open and the Node keeps waiting for a real answer.
+    fn answer_permission(
+        &self,
+        decision_id: &str,
+        option_id: Option<&str>,
+    ) -> steve_core::Result<steve_core::Answered> {
         if let Some(sid) = super::node_runtime::decision_session(&self.store, decision_id) {
             match self.route(&sid) {
                 Backend::Node(n) => {
-                    return n
-                        .answer_permission(decision_id, option_id)
-                        .unwrap_or_else(|e| {
-                            tracing::error!("answer {decision_id}: {e}");
-                            false
-                        });
+                    let queued = n.answer_permission(decision_id, option_id)?;
+                    return Ok(if queued {
+                        steve_core::Answered::Pending
+                    } else {
+                        steve_core::Answered::Gone
+                    });
                 }
-                Backend::Parked => return false,
+                Backend::Parked => return Ok(steve_core::Answered::Gone),
                 Backend::Legacy => {}
             }
         }
@@ -1067,26 +1085,32 @@ impl steve_core::AgentRuntime for RoutedRuntime {
             _ => false,
         }
     }
-    fn set_mode(&self, session_id: &str, mode: &str) -> bool {
+    fn set_mode(&self, session_id: &str, mode: &str) -> steve_core::Result<steve_core::Configured> {
+        use super::node_runtime::Configured as Node;
+        use steve_core::Configured;
         match self.node_for(session_id) {
             // through the Node's configure, at the session's next idle boundary
             Some(n) => match super::node_binding::permission_mode(mode) {
-                Some(p) => n
-                    .configure(
+                Some(p) => Ok(
+                    match n.configure(
                         session_id,
                         &super::node_runtime::ConfigChange {
                             permissions: Some(p),
                             ..Default::default()
                         },
-                    )
-                    .inspect_err(|e| tracing::error!("set_mode {session_id}: {e}"))
-                    .is_ok(),
-                None => {
-                    tracing::warn!(session = %session_id, mode, "a mode the Node path cannot express: unchanged");
-                    false
-                }
+                    )? {
+                        Node::Unchanged => Configured::Applied,
+                        Node::Sent | Node::Pending => Configured::Pending,
+                        Node::OnReopen => Configured::NotRunning,
+                    },
+                ),
+                None => Err(CoreError::Msg(format!(
+                    "set_mode {session_id}: the Node path cannot express {mode}: unchanged"
+                ))),
             },
-            None if self.parked(session_id) => false,
+            None if self.parked(session_id) => Err(CoreError::Msg(format!(
+                "set_mode {session_id}: its Node is away: unchanged"
+            ))),
             None => self.legacy.set_mode(session_id, mode),
         }
     }

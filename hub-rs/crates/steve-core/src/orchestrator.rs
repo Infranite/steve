@@ -10,7 +10,7 @@ use crate::repo::{
     Bot, BotExt, Decision, FileRef, Item, ItemExt, NewDecision, NewItem, NewSession, Parent,
     PlanStep, Queued, Session, WS,
 };
-use crate::runtime::{Check, Flushed, McpEndpoint, Output, Prompted, Running, TurnEnd};
+use crate::runtime::{Answered, Check, Flushed, McpEndpoint, Output, Prompted, Running, TurnEnd};
 use crate::thread::flowback::{Update, flow_quiet, recover_quiet};
 use crate::util::{js_head, js_len, js_tail, now, or, token};
 use crate::{Core, Mark, Tx};
@@ -2234,8 +2234,9 @@ impl Tx<'_> {
             }
             ("approve", "tool_call") => {
                 let opt = (choice != "deny").then_some(choice);
-                /* answer first: resolve() only touches open decisions, so marking it resolved first would hide the expiry */
-                if self.rt().answer_permission(id, opt) {
+                /* answer first: resolve() only touches open decisions, so marking it resolved first would hide the expiry;
+                 * an error leaves the card open for another try */
+                if self.rt().answer_permission(id, opt)? != Answered::Gone {
                     self.db()
                         .decision_resolve(id, json!({"optionId": opt}), "resolved", None)?;
                 } else {
@@ -2572,7 +2573,7 @@ impl Tx<'_> {
             }
             ("approve", "tool_call") => {
                 let opt = (choice != "deny").then_some(choice);
-                if self.rt().answer_permission(id, opt) {
+                if self.rt().answer_permission(id, opt)? != Answered::Gone {
                     db.decision_resolve(id, json!({"optionId": opt}), "resolved", None)?;
                 } else {
                     db.decision_resolve(id, json!({"expired": true}), "expired", None)?;
@@ -2817,7 +2818,7 @@ impl Tx<'_> {
             None => None,
         };
         if d.kind == "approve" && d.subject_type == "tool_call" {
-            self.rt().answer_permission(id, None);
+            self.rt().answer_permission(id, None)?;
             self.db()
                 .decision_resolve(id, json!({"dismissed": true}), "resolved", None)?;
         } else {

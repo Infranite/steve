@@ -60,6 +60,29 @@ impl Flushed {
     }
 }
 
+/// What [`AgentRuntime::answer_permission`] did with an answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Answered {
+    /// The adapter that asked has it.
+    Applied,
+    /// It is on its way to the Node that asked (a queued answer command); the Node's receipt later
+    /// marks it applied, or closes the card unapplied.
+    Pending,
+    /// Nobody waits for it any more (the adapter is gone, the request answered or expired).
+    Gone,
+}
+
+/// What [`AgentRuntime::set_mode`] did with a permission mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Configured {
+    /// The live session has it (or had it already).
+    Applied,
+    /// It is on its way, or waits for the session's next idle boundary.
+    Pending,
+    /// No adapter runs for the session: its next start applies the mode anyway.
+    NotRunning,
+}
+
 /// A finished turn, as acp.ts hands it to the orchestrator's turn-end handler.
 #[derive(Debug, Clone)]
 pub struct TurnEnd {
@@ -105,8 +128,9 @@ pub trait AgentRuntime: Send + Sync {
     fn is_busy(&self, session_id: &str) -> bool;
     /// Stop the adapter process if it is idle; the next prompt starts it again with `session/load`.
     fn release(&self, session_id: &str);
-    /// Answer a pending tool permission (`None` = cancelled); false when the adapter that asked is gone.
-    fn answer_permission(&self, decision_id: &str, option_id: Option<&str>) -> bool;
+    /// Answer a pending tool permission (`None` = cancelled). Errors when the backend cannot tell
+    /// (its store failed): the answer was not taken and the card stays open.
+    fn answer_permission(&self, decision_id: &str, option_id: Option<&str>) -> Result<Answered>;
     /// Release hand-off: while holding, no new turn starts and prompts queue (they survive a restart).
     fn hold(&self, on: bool);
     fn is_holding(&self) -> bool;
@@ -119,11 +143,11 @@ pub trait AgentRuntime: Send + Sync {
     fn same_turn(&self, a: &Running, b: &Running) -> bool {
         a == b
     }
-    /// Switch a live session's permission mode (`session/set_mode`); false when no adapter runs (the
-    /// next start applies the mode anyway).
-    fn set_mode(&self, session_id: &str, mode: &str) -> bool {
+    /// Switch a live session's permission mode (`session/set_mode`). Errors when the change could
+    /// not be taken (a store error, a Node away, a mode it cannot express): nothing changed.
+    fn set_mode(&self, session_id: &str, mode: &str) -> Result<Configured> {
         let _ = (session_id, mode);
-        false
+        Ok(Configured::NotRunning)
     }
     /// The session's last attempt has an outcome nobody can tell yet (reconciliation decides).
     fn uncertain(&self, session_id: &str) -> bool {

@@ -53,7 +53,8 @@ pub use orchestrator::{
     CreateItem, Forked, ItemAction, RESUMED_NOTE, SendNow, SupplementMode, resumed_text,
 };
 pub use runtime::{
-    AgentRuntime, Check, Flushed, McpEndpoint, Output, Prompted, Running, Stop, TurnEnd,
+    AgentRuntime, Answered, Check, Configured, Flushed, McpEndpoint, Output, Prompted, Running,
+    Stop, TurnEnd,
 };
 
 use repo::Db;

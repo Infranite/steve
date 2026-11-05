@@ -202,6 +202,25 @@ fn a_running_session_hears_of_a_switch_with_its_next_message_and_its_mode_change
     assert_eq!(say(&k, &sid, "好"), format!("{}\n\n好", agent::NOTE_OFF));
 }
 
+/// A mode switch that fails is not lost: the session stays marked and the next sync tries again.
+#[test]
+fn a_failed_mode_switch_is_tried_again_by_the_next_sync() {
+    let k = Kit::new();
+    let y = yolo(&k);
+    switch(&y, false);
+    let (_, sid) = started(&k, &k.home().join("ops/release.sh"));
+    switch(&y, true);
+    k.rt.st().mode_error = true;
+    assert!(k.core.yolo_sync(WS).is_empty(), "not switched");
+    assert!(k.core.yolo_sync(WS).is_empty(), "still failing");
+    assert!(k.rt.st().modes.is_empty());
+    k.rt.st().mode_error = false;
+    assert_eq!(k.core.yolo_sync(WS), vec![sid.clone()]);
+    assert_eq!(k.rt.st().modes, vec![(sid.clone(), "auto".to_string())]);
+    assert!(k.core.yolo_sync(WS).is_empty(), "told once");
+    assert_eq!(say(&k, &sid, "继续"), format!("{}\n\n继续", agent::NOTE_ON));
+}
+
 fn full(y: &Yolo) {
     y.put(
         WS,

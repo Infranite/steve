@@ -4,7 +4,9 @@
 use crate::error::{Result, msg};
 use crate::gateway::{ModelGateway, Tier};
 use crate::repo::{Db as Store, HubEvent};
-use crate::runtime::{AgentRuntime, Flushed, Prompted, Running, Stop, TurnEnd};
+use crate::runtime::{
+    AgentRuntime, Answered, Configured, Flushed, Prompted, Running, Stop, TurnEnd,
+};
 use crate::{Core, CoreConfig};
 use async_trait::async_trait;
 use serde_json::json;
@@ -27,10 +29,16 @@ pub struct FakeState {
     pub released: Vec<String>,
     /// decision id → still answerable
     pub permissions: HashSet<String>,
+    /// decision id → answerable through a queued command (a Node's): answers are [`Answered::Pending`]
+    pub pending_permissions: HashSet<String>,
+    /// Every answer fails (the backend's store, say).
+    pub answer_error: bool,
     pub answered: Vec<(String, Option<String>)>,
     pub holding: bool,
     /// `set_mode` calls: (session, mode)
     pub modes: Vec<(String, String)>,
+    /// Every `set_mode` fails (not recorded in `modes`).
+    pub mode_error: bool,
     /// (session, files) of every prompt sent right away
     pub files: Vec<(String, Vec<crate::repo::FileRef>)>,
     /// Per `flush`: whether it ran inside a tokio runtime (the real runtime spawns the turn there).
@@ -202,18 +210,31 @@ impl AgentRuntime for FakeRuntime {
     fn release(&self, sid: &str) {
         self.st().released.push(sid.into());
     }
-    fn answer_permission(&self, decision: &str, option: Option<&str>) -> bool {
+    fn answer_permission(&self, decision: &str, option: Option<&str>) -> Result<Answered> {
         let mut st = self.st();
+        if st.answer_error {
+            return Err(msg("store unavailable"));
+        }
         st.answered
             .push((decision.into(), option.map(String::from)));
-        st.permissions.remove(decision)
+        Ok(if st.permissions.remove(decision) {
+            Answered::Applied
+        } else if st.pending_permissions.remove(decision) {
+            Answered::Pending
+        } else {
+            Answered::Gone
+        })
     }
     fn hold(&self, on: bool) {
         self.st().holding = on;
     }
-    fn set_mode(&self, sid: &str, mode: &str) -> bool {
-        self.st().modes.push((sid.into(), mode.into()));
-        true
+    fn set_mode(&self, sid: &str, mode: &str) -> Result<Configured> {
+        let mut st = self.st();
+        if st.mode_error {
+            return Err(msg("store unavailable"));
+        }
+        st.modes.push((sid.into(), mode.into()));
+        Ok(Configured::Applied)
     }
     fn is_holding(&self) -> bool {
         self.st().holding

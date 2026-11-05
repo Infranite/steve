@@ -606,6 +606,56 @@ fn approvals_and_permissions() {
     );
 }
 
+/// The runtime says what became of an answer: one on its way to a Node resolves the card (no
+/// expiry note to the agent), a gone request takes the expired path, and an error leaves the card
+/// open with the error returned.
+#[test]
+fn a_permission_answer_follows_the_runtime_outcome() {
+    let k = Kit::new();
+    let i = new_item(&k, "g");
+    let s = only_session(&k, &i.id);
+    // idle: whatever goes to the agent starts a turn of its own
+    k.rt.end_turn(&k.core, &s.id, "end_turn", None);
+    let opts = ["ok|允许|allow_once", "no|拒绝|reject_once"];
+    let expired = |k: &Kit| {
+        k.rt.prompts_of(&s.id)
+            .iter()
+            .filter(|p| p.starts_with("你之前请求权限的那次工具调用已经失效"))
+            .count()
+    };
+
+    let p = k.decision(&i.id, Some(&s.id), "approve", "tool_call", &opts);
+    k.rt.st().pending_permissions.insert(p.clone());
+    k.core.resolve(&p, "ok", "", "me").unwrap();
+    let d = k.db().decision(&p).unwrap().unwrap();
+    assert_eq!(
+        (d.status.as_str(), d.result),
+        ("resolved", json!({"optionId": "ok"}))
+    );
+    assert_eq!(expired(&k), 0, "a pending answer is no expiry");
+
+    let p = k.decision(&i.id, Some(&s.id), "approve", "tool_call", &opts);
+    k.rt.st().answer_error = true;
+    assert!(k.core.resolve(&p, "ok", "", "me").is_err());
+    assert_eq!(k.db().decision(&p).unwrap().unwrap().status, "open");
+    assert!(
+        k.core.dismiss_decision(&p, "me").is_err(),
+        "a dismiss that cannot deny keeps the card"
+    );
+    assert_eq!(k.db().decision(&p).unwrap().unwrap().status, "open");
+    assert_eq!(expired(&k), 0);
+
+    k.rt.st().answer_error = false;
+    k.rt.st().pending_permissions.insert(p.clone());
+    k.core.resolve(&p, "no", "", "me").unwrap();
+    assert_eq!(k.db().decision(&p).unwrap().unwrap().status, "resolved");
+
+    let p = k.decision(&i.id, Some(&s.id), "approve", "tool_call", &opts);
+    k.core.resolve(&p, "ok", "", "me").unwrap();
+    assert_eq!(k.db().decision(&p).unwrap().unwrap().status, "expired");
+    assert_eq!(expired(&k), 1, "a gone request is today's expired path");
+}
+
 #[test]
 fn deliver_records_outputs_and_rework_goes_back() {
     let k = Kit::new();
