@@ -12,6 +12,7 @@ pub mod core;
 pub mod mcp;
 pub mod mcp_extra;
 pub mod modules;
+pub mod node_runtime;
 pub mod outbox;
 pub mod ports;
 pub mod research;
