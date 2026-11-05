@@ -127,7 +127,7 @@ fn addrs_of(v: &Value) -> Vec<Rcpt> {
         .collect()
 }
 
-/// §5.2: `reply` → the original's `Reply-To` ?? `From`; `reply_all` → also its To and Cc. Every address
+/// `reply` → the original's `Reply-To` ?? `From`; `reply_all` → also its To and Cc. Every address
 /// of mine is dropped, duplicates removed. Returns `(to, cc)`.
 pub fn reply_recipients(orig: &MessageRow, all: bool, mine: &[String]) -> (Vec<Rcpt>, Vec<Rcpt>) {
     let is_mine = |a: &str| mine.iter().any(|m| m.eq_ignore_ascii_case(a.trim()));
@@ -202,7 +202,7 @@ pub fn reply_target(c: &Connection, thread: &str) -> MailResult<Option<MessageRo
         .cloned())
 }
 
-// ---------------------------------------------------------------- output (§9 Draft)
+// ---------------------------------------------------------------- output
 
 /// One recipient as the card shows it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -214,7 +214,7 @@ pub struct RcptOut {
     pub external: bool,
 }
 
-/// `Draft` of §9.
+/// `Draft`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct DraftOut {
     pub id: String,

@@ -339,7 +339,7 @@ fn starter(ev: &Ev) -> Graph {
     g
 }
 
-/// §2.5. `remind`/`ignore` → applied changeset; `to_item` → item.
+/// Applies a correction. `remind`/`ignore` → applied changeset; `to_item` → item.
 pub async fn correct(
     cx: &Arc<FlowCx>,
     who: &Caller,

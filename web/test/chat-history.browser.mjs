@@ -1,4 +1,4 @@
-/* ST-50 acceptance in the browser (docs/ST-50-主线对话.md A1–A9, A12): one compact bar; history search and topics;
+/* Main conversation history in the browser: one compact bar; history search and topics;
  * a jump lands on the message (loading what lies between) and the way back returns to the same place; older messages
  * come in above without moving what you read; the reading position and the draft survive a reload. */
 import assert from "node:assert/strict"

@@ -23,7 +23,7 @@ use crate::cite;
 use crate::retrieve::{Hit, Purpose, Query, anchor_mems, record_use, retrieve};
 use crate::state::{Guard, Knowledge};
 
-/// Retrieved hits per scene (§4.1 layer 7).
+/// Retrieved hits per scene.
 pub const SESSION_K: usize = 8;
 pub const CHAT_K: usize = 6;
 pub const REPLY_K: usize = 10;
@@ -36,11 +36,11 @@ pub const SNIPPET_MAX: usize = 600;
 /// The search text built from an item or a message, in characters.
 pub const QUERY_MAX: usize = 500;
 
-/// §4.2, verbatim.
+/// The block head, verbatim.
 pub const SESSION_HEAD: &str =
     "相关知识（Steve 按这件事检索到的，可能不全；需要更多时调用 steve_knowledge_search）：";
 pub const SESSION_RULES: &str = "使用规则：“仅用于推理”的内容不要原样写进任何会发给别人的东西（邮件、群消息、PR 评论）；“可转述结论”只说结论，不提来源和细节；用到哪条就在句末标 [K1]。";
-/// §4.3: footnote-style numbers, cite only what was used, never invent a source.
+/// Footnote-style numbers, cite only what was used, never invent a source.
 pub const CHAT_HEAD: &str = "相关知识（Steve 按你的问题检索到的，可能不全）：";
 pub const CHAT_RULES: &str = "使用规则：用到知识时在句末标 [n]，没用到就不标；知识里没有的不要编造来源。“仅用于推理”的内容不要原样写出；“可转述结论”只说结论，不提来源和细节。";
 /// Heading of the contact cards in a session (layer 6).
@@ -73,7 +73,7 @@ pub fn snippet_line(prefix: &str, h: &Hit) -> String {
     )
 }
 
-/// The §4.2 block: head, one line per hit, rules. `""` without hits.
+/// The block: head, one line per hit, rules. `""` without hits.
 pub fn render_snippets(head: &str, rules: &str, prefix: &str, hits: &[Hit]) -> String {
     if hits.is_empty() {
         return String::new();

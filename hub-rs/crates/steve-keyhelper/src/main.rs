@@ -1,7 +1,5 @@
 //! `steve-keyhelper`: on macOS, the only process that reads or writes the vault master keys (KEKs) in the
-//! keychain (service `io.github.infranite.steve.vault`). A binary without an Apple Team ID is recorded in the
-//! keychain partition by its cdhash, so a rebuilt Hub could not read its own keys; this helper is rebuilt only
-//! when its own source changes and stands in for the Hub.
+//! keychain (service `io.github.infranite.steve.vault`). See ops/KEYHELPER.md.
 //!
 //! Why a separate binary: a keychain item remembers the code that created it. Code without an Apple Team ID gets
 //! the partition `cdhash:<hash of that binary>`, so an item the Hub created was refused to every rebuilt Hub. The

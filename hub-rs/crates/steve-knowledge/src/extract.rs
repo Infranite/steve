@@ -41,7 +41,7 @@ const SIMILAR_QUERY_CHARS: usize = 1000;
 pub const PROMPT_HEAD: &str = "你在帮用户整理以后还会用到的记忆。";
 const KINDS: [&str; 4] = ["fact", "preference", "rule", "event"];
 
-/// At most two extraction calls run at a time (§10 `kb.extract`).
+/// At most two extraction calls run at a time.
 static SLOTS: Semaphore = Semaphore::const_new(2);
 
 // ---------------------------------------------------------------- names
@@ -387,7 +387,7 @@ pub enum Dropped {
     RestatesGoal,
 }
 
-/// The server's rules over one raw item (ST-41 on top of §5.1). `source` is the text the model saw,
+/// The server's rules over one raw item. `source` is the text the model saw,
 /// `known` the texts of the user's confirmed and pending memories. `Ok` = the evidence quotes kept.
 pub fn check(r: &Raw, source: &str, task: Task, known: &[String]) -> Result<Vec<String>, Dropped> {
     let kinds: &[&str] = if task.events { &KINDS } else { &KINDS[..3] };
@@ -636,7 +636,7 @@ pub async fn run(
     .await
 }
 
-/// The entry point for other modules (§5.1 “其他模块”): mail threads (`OriginKind::Mail`, default
+/// The entry point for other modules: mail threads (`OriginKind::Mail`, default
 /// `reasoning`), channel spaces (`OriginKind::Space`); both may propose events. `user` = the workspace user the text is for;
 /// `None` = the workspace owner.
 #[allow(clippy::too_many_arguments)]

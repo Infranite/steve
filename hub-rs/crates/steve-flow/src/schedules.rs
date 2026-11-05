@@ -229,7 +229,7 @@ pub fn bot_of(c: &Connection, ws: &str, id: &str) -> FlowResult<Option<(String, 
     .optional()?)
 }
 
-/// The ownership checks of §8: `bot`, `project_id` and `tags` belong to the workspace.
+/// The ownership checks: `bot`, `project_id` and `tags` belong to the workspace.
 pub fn check_refs(c: &Connection, ws: &str, s: &Spec) -> FlowResult<()> {
     if bot_of(c, ws, &s.bot)?.is_none() {
         return Err(ApiError::not_found("Bot"));

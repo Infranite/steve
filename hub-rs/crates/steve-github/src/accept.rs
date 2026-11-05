@@ -199,7 +199,7 @@ impl GitHub {
         }
     }
 
-    /// §4.1 `on_item_accepted`: offers a PR (and takes the wrap-up over) when the item's project is
+    /// `on_item_accepted`: offers a PR (and takes the wrap-up over) when the item's project is
     /// linked, `after_accept=ask_pr`, the item has a branch with commits the base lacks, the project
     /// has no release action, and no PR from that branch is open. Opens the `gh_pr_open` decision;
     /// pushes nothing.
@@ -542,7 +542,7 @@ impl GitHub {
         Ok(open && repo::wrap_up_by_pr(c, &repo.workspace_id, item)?)
     }
 
-    /// §4.2: for every PR this transaction touched, ask to merge when it is ready (checks green,
+    /// For every PR this transaction touched, ask to merge when it is ready (checks green,
     /// no changes requested, mergeable) and its item waits for it; once per head commit.
     pub(crate) fn ask_merges(&self, tx: &Tx, repo: &RepoRow, fx: &Effects) -> Result<(), ApiError> {
         for id in fx.gh.iter().filter(|i| i.starts_with("ghp_")) {

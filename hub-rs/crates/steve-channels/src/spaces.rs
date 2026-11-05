@@ -805,7 +805,7 @@ fn item_defaults(v: &Value) -> Value {
     })
 }
 
-/// The `Space` shape of §5.1. `persona` is `{id, name, inherited}`, `null` for your own accounts.
+/// The `Space` shape. `persona` is `{id, name, inherited}`, `null` for your own accounts.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SpaceOut {
     pub id: String,
@@ -1470,8 +1470,8 @@ fn patched_fields(p: &SpacePatch) -> Vec<&'static str> {
     .collect()
 }
 
-/// Sets the default rules of an account (`PATCH /channels/:connection_id` `rules`): validated by
-/// §2.4 (your own account cannot `reply`), a revision of `channel`, audit `channel.patch`. A
+/// Sets the default rules of an account (`PATCH /channels/:connection_id` `rules`): validated
+/// (your own account cannot `reply`), a revision of `channel`, audit `channel.patch`. A
 /// personal connection of someone else is `404 没有这个连接`.
 pub fn set_account_rules(
     tx: &Tx,

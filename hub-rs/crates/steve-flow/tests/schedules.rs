@@ -1,4 +1,4 @@
-//! S7 acceptance plus the REST rules of §8, on a temp store with a fake clock,
+//! S7 acceptance plus the REST rules, on a temp store with a fake clock,
 //! a fake model gateway and a fake steve-core.
 
 use chrono::{TimeZone, Utc};

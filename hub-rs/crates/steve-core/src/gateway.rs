@@ -1377,7 +1377,7 @@ pub fn offer_of(o: &Value) -> Option<Offer> {
     })
 }
 
-/// The answer without its closing `OFFER: {…}` line (research prompt §4.1), and the offer it names.
+/// The answer without its closing `OFFER: {…}` line, and the offer it names.
 pub fn split_offer(text: &str) -> (String, Option<Offer>) {
     let t = text.trim_end();
     let Some(at) = t.rfind("OFFER:") else {

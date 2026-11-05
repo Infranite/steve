@@ -5,7 +5,7 @@
 //!
 //! Rules only decide what happens next; nothing here sends anything.
 //!
-//! Besides the conditions of §2.4, `mention` (only @) and `dm` (only private chats) are accepted:
+//! Besides the documented conditions, `mention` (only @) and `dm` (only private chats) are accepted:
 //! the prototype's accounts use “被 @” and “私聊” on their own, and your own account's default
 //! rules split “私聊你” from “群里 @你”.
 
@@ -542,7 +542,7 @@ pub struct Verdict {
     pub muted: bool,
 }
 
-/// §2.4: the first rule that holds decides; none = `record`. Muted: everything but `handoff`
+/// The first rule that holds decides; none = `record`. Muted: everything but `handoff`
 /// becomes `record`. `intent` rules ask `judge`, only when reached.
 pub async fn evaluate(rules: &[Rule], f: &Facts, muted: bool, judge: &dyn IntentJudge) -> Verdict {
     for (i, r) in rules.iter().enumerate() {

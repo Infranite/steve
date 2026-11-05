@@ -88,7 +88,7 @@ pub struct ProjectLayer {
     /// The stored row; `None` = never set.
     pub mode: Option<Mode>,
     /// The project's cwd is the real directory (`kind=dir`, or git without worktrees): without a row it
-    /// counts as `off` (§1.1 推荐默认), so the user has to turn it on explicitly.
+    /// counts as `off`, so the user has to turn it on explicitly.
     pub real_dir: bool,
 }
 

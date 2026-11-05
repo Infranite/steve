@@ -381,7 +381,7 @@ impl Mail {
 
 // ---------------------------------------------------------------- items made from mail
 
-/// `item.create` / `item.link` as built in, plus the mail links of §4 when the event is a mail:
+/// `item.create` / `item.link` as built in, plus the mail links when the event is a mail:
 /// `links(item,'from','mail_message',ml)` and `links(item,'about','mail_thread',mt)`. Other events
 /// go through unchanged.
 pub struct WithMailLinks<A>(pub A);

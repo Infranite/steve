@@ -117,7 +117,7 @@ impl Violation {
     }
 }
 
-/// `research_guard(name, input)` of §4.3: Ok when the call is a read inside `scope`.
+/// `research_guard(name, input)`: Ok when the call is a read inside `scope`.
 pub fn research_guard(name: &str, input: &Value, scope: &Scope) -> Result<(), Violation> {
     let tool = || name.to_string();
     match name {

@@ -590,7 +590,7 @@ pub struct UsedBy {
     pub spaces: Vec<UsedSpace>,
 }
 
-/// The `Persona` shape of §5.1.
+/// The `Persona` shape.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct PersonaOut {
     pub id: String,

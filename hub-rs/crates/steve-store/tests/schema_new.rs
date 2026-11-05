@@ -304,7 +304,7 @@ fn migration_15_does_not_need_13_or_14() {
     }
 }
 
-/// 18 backfills §3 once: “我” owns the live bots (in every workspace they serve), the
+/// 18 backfills stewards once: “我” owns the live bots (in every workspace they serve), the
 /// personas, the Hub device and the connections of their own accounts; objects that already have a
 /// steward, deleted bots and other devices are left alone, and running it again adds nothing.
 #[test]

@@ -1,4 +1,4 @@
-//! Hard limits (with the user's decision of 2026-11-01 §2): what YOLO never does,
+//! Hard limits: what YOLO never does,
 //! whatever the settings say. Nothing here reads a setting; [`check`] runs before every other rule.
 //!
 //! 1. money: bank cards, an over-budget flow, payment words anywhere in the card or command;
@@ -54,7 +54,7 @@ static MONEY: LazyLock<Regex> = LazyLock::new(|| {
 static GIT_CHECKOUT: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\bgit(\s+-\S+(\s+\S+)?)*\s+checkout\b").expect("valid regex")
 });
-/// What `steve_request_approval` must not be about (§2.2 the `action` row).
+/// What `steve_request_approval` must not be about.
 static OUTWARD: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)推送|发布|发送|付款|删除|部署|生产|上线|\bpush\b|\bpublish|\bdeploy|\brelease\b|\bsend\b|\bprod(uction)?\b|\bdelete\b|\bemail\b|\bupload\b")
         .expect("valid regex")

@@ -37,7 +37,7 @@ pub struct ProviderOut {
     pub adapter_installed: bool,
 }
 
-/// The `ChannelAccount` shape of §5.1, plus the connection's permission check (`verify`):
+/// The `ChannelAccount` shape, plus the connection's permission check (`verify`):
 /// `permissions` (rows `{scope, purpose, level, status}`), `missing_permissions` (scopes) and
 /// `self_built` (`true` when the app is a 企业自建应用, `null` when unknown).
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -387,7 +387,7 @@ impl ChannelPatch {
 
 /// Applies a patch in one revision of `channel` (`{persona_id, duty, rules, trigger}` before and
 /// after), audit `channel.patch`, SSE `channel`. Your own account with `persona_id` → `400`; a bot
-/// with `trigger` → `400`; rules by §2.4 (your own account cannot `reply`); trigger words
+/// with `trigger` → `400`; rules validated (your own account cannot `reply`); trigger words
 /// `/^\/[A-Za-z0-9_]{1,20}$/` (≤10), `where` = `*`, `dm:*` or spaces of this account (none = `*`).
 pub fn patch(
     ch: &Channels,

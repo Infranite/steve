@@ -617,7 +617,7 @@ pub async fn decision_resolve(
     let choice = k.str("choice", Str::ANY);
     let text = k.opt_str("text", Str::ANY);
     k.finish()?;
-    // decisions a module opened go to that module's handler (steve-modules B0 §0.1)
+    // decisions a module opened go to that module's handler
     if let Some(m) = st.modules.clone() {
         let (caller, id2, ch, tx) = (
             steve_modules::Caller {

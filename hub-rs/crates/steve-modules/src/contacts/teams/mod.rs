@@ -1,4 +1,4 @@
-//! Teams (slice P2, §2.4 and the team rows of §3.2): virtual teams you
+//! Teams: virtual teams you
 //! build and edit, org-chart teams that follow the directory sync (only `purpose`, `space_id` and tags are
 //! local), headcounts over the sub-tree, and `team:<id>` as a visibility scope (the scope itself is
 //! [`steve_store::base::Viewer::load`]).

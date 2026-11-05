@@ -290,7 +290,7 @@ pub struct SenderOut {
     pub account_id: Option<String>,
 }
 
-/// The `ChanMessage` shape of §5.1. `basis` is `null` for inbound messages and messages without one.
+/// The `ChanMessage` shape. `basis` is `null` for inbound messages and messages without one.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ChanMessage {
     pub id: String,

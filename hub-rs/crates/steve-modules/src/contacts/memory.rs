@@ -38,7 +38,7 @@ pub fn confirm_question(kind: &str, text: &str) -> String {
     format!("存为{}吗？{text}", record_name(kind))
 }
 
-/// The `Mem` shape of §3.1 (also what the knowledge module's `Candidate.mem` embeds).
+/// The `Mem` shape (also what the knowledge module's `Candidate.mem` embeds).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct MemOut {
     pub id: String,

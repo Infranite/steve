@@ -839,7 +839,7 @@ impl GitHub {
             merged_at: ts(&v["merged_at"]),
             closed_at: ts(&v["closed_at"]),
         };
-        // §3.2: Steve's own PR, else a match for one nobody linked (or unlinked) yet.
+        // Steve's own PR, else a match for one nobody linked (or unlinked) yet.
         let linked = match steve {
             Some(item) => Some((item.to_string(), "steve")),
             None if row.item_id.is_none() && row.link_source.is_none() => {

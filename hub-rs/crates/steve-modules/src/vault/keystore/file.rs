@@ -44,7 +44,7 @@ impl FileKeyStore {
         &self.dir
     }
 
-    /// The §3.3 store at `<steve_home>/vault-keys`. Refuses (before touching the disk) when
+    /// The store at `<steve_home>/vault-keys`. Refuses (before touching the disk) when
     /// `steve_home` is `<user_home>/.steve`, or when the user home is unknown.
     pub fn for_steve_home(
         steve_home: &Path,

@@ -4,7 +4,7 @@
 //! - `kb_source:<id>`: fields `name`, `paused`, `visibility`, `level` and, for folders, `include` /
 //!   `exclude`; planned into one `kb.source.patch`. A built-in source's visibility or level is only
 //!   changed by the workspace owner (the same rule as `PATCH /kb/sources/:id`).
-//! - `kb_source:new` and `knowledge:new`: `kb_source.create` (folder path checked by §2.2 while
+//! - `kb_source:new` and `knowledge:new`: `kb_source.create` (folder path checked while
 //!   planning: a refused path gives exactly one line with the reason and no operation), and on
 //!   `knowledge` also `mem.add` (the user said it, so it is `confirmed`), `note.create`,
 //!   `doc.patch` (document by exact title).

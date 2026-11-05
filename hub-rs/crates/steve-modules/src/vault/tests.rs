@@ -1,4 +1,4 @@
-//! V1 acceptance tests: lifecycle, rotation, the key store guard, API. §10 rule 1
+//! V1 acceptance tests: lifecycle, rotation, the key store guard, API. The no-leak rule
 //! (no secret in logs, errors, the database file) is `tests/vault_secrets.rs`, a binary of its own so its
 //! log capture sees every callsite. Key stores are files in temp dirs; the
 //! real keychain is only used by the ignored test in `keystore/keychain.rs`.
@@ -569,7 +569,7 @@ async fn api_status_init_recover_rotate() {
         "hunter2"
     );
 
-    // locked keychain: 503 with the §3.4 message
+    // locked keychain: 503 with the message
     e.ks.locked.store(true, Ordering::SeqCst);
     let r2: Router = routes(e.restart());
     let (s, _, b) = send(&r2, "GET", "/vault/status", None).await;

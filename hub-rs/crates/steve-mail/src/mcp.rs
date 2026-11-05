@@ -561,7 +561,7 @@ impl Mail {
             let cwd = cwd_of(self, cx)?;
             self.files_from_workdir(&cx.ws, &cx.bot_id, &cwd, &a.attachments)?
         };
-        // §5.3: who reads it
+        // Who reads it
         let audience = self
             .0
             .m

@@ -4,7 +4,7 @@
 //! The Hub runs under launchd with nobody at the screen, so every call runs with keychain user
 //! interaction disabled: a locked keychain or a missing ACL entry fails fast (`Locked` / `Denied`)
 //! instead of waiting forever on a dialog. Making releases not prompt at all needs the stable code
-//! signature of §3.4 (manual step on the Mac mini).
+//! signature (manual step on the Mac mini).
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;

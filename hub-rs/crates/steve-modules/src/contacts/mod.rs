@@ -54,7 +54,7 @@ pub use item_people::{
 };
 pub use teams::{Seen, SeenMessage, SeenSpace, SpacePort, TeamSync};
 
-/// Callbacks into other modules when a contact goes away or is merged (§0.1 point 8). Every method runs
+/// Callbacks into other modules when a contact goes away or is merged. Every method runs
 /// inside the contacts transaction; an error rolls the whole operation back.
 pub trait PartyHooks: Send + Sync {
     /// The key under which [`PartyHooks::on_merge`]'s result is kept in `merges.moved.hooks`.

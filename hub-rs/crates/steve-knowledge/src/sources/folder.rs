@@ -6,7 +6,7 @@
 //!   the changed ones through [`index::run_batch`] (which compares `sha256` after reading);
 //! - [`FolderLoader`]: reads one file for the index, re-checking that it is still inside the root;
 //! - [`spawn_scans`]: the `kb.folder_scan` job, started by the integrator;
-//! - the source writes of §6.2 (`POST/PATCH/DELETE /kb/sources`, `POST /kb/sources/:id/sync`).
+//! - the source writes (`POST/PATCH/DELETE /kb/sources`, `POST /kb/sources/:id/sync`).
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
@@ -72,7 +72,7 @@ impl FolderPolicy {
     }
 }
 
-/// The path rules of §2.2. Returns the canonical directory, or the Chinese reason it is refused.
+/// The path rules. Returns the canonical directory, or the Chinese reason it is refused.
 /// Overlap with existing folder sources is [`overlap`].
 pub fn check_path(policy: &FolderPolicy, raw: &str) -> std::result::Result<PathBuf, String> {
     let p = Path::new(raw.trim());
@@ -765,7 +765,7 @@ pub fn insert_folder(tx: &Tx, ws: &str, me: &str, f: &NewFolder, now: i64) -> Ap
     repo::source(tx, &id)?.ok_or_else(|| ApiError::not_found(NOUN_SOURCE))
 }
 
-/// Creates a folder source after the §2.2 checks. The caller then starts its first scan.
+/// Creates a folder source after the checks. The caller then starts its first scan.
 pub fn create(m: &Modules, kb: &Knowledge, who: &Caller, b: SourceBody) -> ApiResult<SourceRow> {
     let f = check_new(kb.folder_policy(), &b)?;
     service::prepare(m, who)?;
@@ -847,7 +847,7 @@ pub fn check_patch(b: &SourcePatch) -> ApiResult<()> {
     ck.done()
 }
 
-/// Is `b` refused for `old` by the owner rule (§6.2 tightening)?
+/// Is `b` refused for `old` by the owner rule?
 pub fn owner_refuses(
     c: &Connection,
     who: &Caller,

@@ -2,8 +2,7 @@
 //! (`ConnectionUsage`): how many spaces it has, and what goes when it is disconnected.
 //!
 //! `channel_settings` and `chan_cursors` reference the connection and hold no history: they are
-//! deleted with it. Spaces and their messages are kept (§2.2 “移除接入账号：…空间 `status=left`，空间
-//! 设置删除；消息和事项保留”): they become `left` (archived ones stay archived), remember the account (`spaces.account_id`, so a
+//! deleted with it. Spaces and their messages are kept: they become `left` (archived ones stay archived), remember the account (`spaces.account_id`, so a
 //! personal account's spaces stay private), lose their settings, and the connection row's delete
 //! sets `spaces.connection_id` to NULL (migration 012).
 //!

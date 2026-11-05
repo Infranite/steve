@@ -12,7 +12,7 @@
 //!                           └ 其他           → o digest
 //! ```
 //! The `item.link` step is how later mail of the same thread reaches the item made from the first
-//! one (§4 “同一往来后续的邮件由 item.link(by=thread) 补充到事项”) without asking the model again.
+//! one without asking the model again.
 //!
 //! Integrator: call [`install`] after a mailbox connection is created (with the connection's id and
 //! creator). It is a no-op once the workspace has (or had, deleted) a flow of this origin.

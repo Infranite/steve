@@ -95,7 +95,7 @@ fn recall_on_eval_corpus() {
         eprintln!("strict: recall@{k}={:.3} hit@{k}={:.3}", r.recall, r.hit);
     }
     let r5 = evaluate(&cases, 5, strict);
-    eprintln!("strict (§3.2): {r5}");
+    eprintln!("strict: {r5}");
     let f5 = evaluate(&cases, 5, with_fallback);
     eprintln!("strict + relaxed fallback: {f5}");
     assert!(

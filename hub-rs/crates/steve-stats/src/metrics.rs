@@ -692,7 +692,7 @@ pub fn item_est(models: &BTreeMap<String, [i64; 4]>, prices: &PriceBook, day: &s
         .sum()
 }
 
-/// Every metric of §3 for `q`, `None` for a malformed day.
+/// Every metric for `q`, `None` for a malformed day.
 pub fn summary(c: &Connection, q: &Query) -> Result<Option<Summary>> {
     let tz = tz_of(c, &q.workspace_id)?;
     let Some((lo, hi)) = bounds(&q.from, &q.to, tz) else {

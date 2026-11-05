@@ -472,7 +472,7 @@ impl Mail {
         Ok(())
     }
 
-    /// Step 1 of §5.4: `approved → sending` (conditional, so a mail goes out once) and the approval
+    /// Step 1: `approved → sending` (conditional, so a mail goes out once) and the approval
     /// checked again — a resolved `send` decision about this draft for exactly this content.
     fn claim(&self, id: &str, now: i64) -> MailResult<Result<(DraftRow, String), SendOutcome>> {
         self.0.m.store.transaction(|tx| {

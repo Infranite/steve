@@ -4,7 +4,7 @@
 //! operation that is `PATCH /mail/accounts/:connection_id` inside the changeset's transaction and
 //! undoes to the settings the mailbox had.
 //!
-//! The operation is called `mail.account.patch` (§10 writes `mail_account.patch`): every op of the
+//! The operation is called `mail.account.patch`: every op of the
 //! mail module starts with `mail.`, so it cannot collide in `Registry::op`.
 //! Flow-like requests (“GitHub 的通知邮件以后都忽略”) stay with the `flow` target of steve-flow.
 
