@@ -34,12 +34,6 @@ const REPLAY_BYTES: u32 = steve_node_wire::envelope::BULK_CAP as u32;
 /// reconcile completes for the rest.
 pub(super) const APPLY_WAIT: Duration = Duration::from_secs(30);
 
-/// What a gap leaves on the session.
-const GAP: &str = "Hub 保存的 Node 事件少于 Node 已确认送达的部分（Hub 的数据可能回到了较早的状态），缺失的事件已无法取回；该会话暂停应用 Node 事件，等待处理，期间不会重新运行";
-/// What a rolled-back Node journal leaves on the session.
-const AHEAD: &str = "Hub 保存的 Node 事件多于 Node 现有的记录（Node 的记录可能回到了较早的状态）；该会话暂停应用 Node 事件，等待处理，期间不会重新运行";
-/// What a stream whose events were not applied in time leaves on its session.
-const LAGGING: &str = "Hub 未能及时应用这个会话在 Node 上的事件；该会话暂停，不会发出新的指令，这些事件应用完毕后自动继续";
 
 /// The Node's ledger and stream heads, as of the one moment of one snapshot (all its pages).
 pub struct NodeSnapshot {
@@ -399,8 +393,10 @@ fn fault_in(
         epoch: h.epoch.as_str(),
     };
     let note = match fault {
-        rt::Fault::Ahead => AHEAD,
-        _ => GAP,
+        // a rolled-back Node journal
+        rt::Fault::Ahead => steve_i18n::t!("hub.node.ahead"),
+        // a gap
+        _ => steve_i18n::t!("hub.node.gap"),
     };
     let fresh = rt::stream_fault_in(tx, k, fault)?;
     if fresh {
@@ -412,7 +408,7 @@ fn fault_in(
             h.acknowledged
         );
         if let Some(session) = stream_session_in(tx, node, k.stream)? {
-            system_in(tx, &session, note)?;
+            system_in(tx, &session, &note)?;
         }
     }
     Ok(fresh)
@@ -482,7 +478,7 @@ impl NodeRuntime {
             for (lag, _) in &behind {
                 if let Some(session) = stream_session_in(tx, &self.node_id, &lag.0)? {
                     if !was.contains_key(&session) {
-                        system_in(tx, &session, LAGGING)?;
+                        system_in(tx, &session, &steve_i18n::t!("hub.node.lagging"))?;
                     }
                     m.insert(session, lag.clone());
                 }

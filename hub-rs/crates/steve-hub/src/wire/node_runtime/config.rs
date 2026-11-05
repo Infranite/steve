@@ -508,7 +508,7 @@ impl NodeRuntime {
                 system_in(
                     tx,
                     &session,
-                    "配置切换结果未知，等待对账，不会自动重发；点停止可撤回这个操作",
+                    &steve_i18n::t!("hub.node.config_unknown"),
                 )?;
             }
             _ => {}

@@ -29,19 +29,16 @@ const RECOVERABLE: [&str; 6] = [
 /// SQL, for a command aliased `c`: a recover of it finished with success.
 pub(super) const RETIRED: &str = "EXISTS(SELECT 1 FROM node_commands r WHERE r.method='recover' AND r.node_id=c.node_id AND json_extract(r.request,'$.body.target')=c.operation_id AND r.state='finished' AND json_extract(r.receipt,'$.success')=1)";
 
-/// What a session reads when a recover did not prove anything.
-const UNPROVEN: &str = "需要人工核验 Node 状态";
-
 /// How a control reads in a session note.
-fn what(method: &str) -> &'static str {
+pub(super) fn what(method: &str) -> String {
     match method {
-        "open_session" => "打开会话",
-        "release_session" => "释放会话",
-        "configure_session" => "配置切换",
-        "prepare_workspace" => "工作区准备",
-        "abandon" => "放弃操作",
-        "resolve_permission" => "授权回复",
-        _ => "操作",
+        "open_session" => steve_i18n::t!("hub.node.what.open_session"),
+        "release_session" => steve_i18n::t!("hub.node.what.release_session"),
+        "configure_session" => steve_i18n::t!("hub.node.what.configure_session"),
+        "prepare_workspace" => steve_i18n::t!("hub.node.what.prepare_workspace"),
+        "abandon" => steve_i18n::t!("hub.node.what.abandon"),
+        "resolve_permission" => steve_i18n::t!("hub.node.what.resolve_permission"),
+        _ => steve_i18n::t!("hub.node.what.other"),
     }
 }
 
@@ -206,9 +203,7 @@ impl NodeRuntime {
         system_in(
             tx,
             &session,
-            &format!(
-                "撤回结果未知的操作没有成功（{detail}），{UNPROVEN}；会话仍然暂停，可以再点一次停止重试。"
-            ),
+            &steve_i18n::t!("hub.node.recover_failed", detail = detail),
         )
     }
 
@@ -248,9 +243,7 @@ impl NodeRuntime {
                 system_in(
                     tx,
                     &session,
-                    &format!(
-                        "已撤回结果未知的{what}；它在 Node 上的实际效果仍无法确定（不算成功）。会话已释放，下一条消息会重新打开。"
-                    ),
+                    &steve_i18n::t!("hub.node.recovered_released", what = what),
                 )?;
                 // what waits for the session (queued, or a turn that waited for an open) opens it
                 let waiting: bool = tx.query_row(
@@ -284,9 +277,7 @@ impl NodeRuntime {
                 system_in(
                     tx,
                     &session,
-                    &format!(
-                        "已撤回结果未知的{what}；它在 Node 上的实际效果仍无法确定（不算成功），会重新准备工作区再打开会话。"
-                    ),
+                    &steve_i18n::t!("hub.node.recovered_prepare", what = what),
                 )?;
                 if !opens.is_empty() {
                     let req: String = tx.query_row(
@@ -317,18 +308,16 @@ impl NodeRuntime {
             "abandon" => system_in(
                 tx,
                 &session,
-                &format!(
-                    "已撤回结果未知的{what}；这次执行的结果仍然未知，可以再点一次停止放弃它。"
-                ),
+                &steve_i18n::t!("hub.node.recovered_abandon", what = what),
             )?,
             "resolve_permission" => {
                 if let Some(row) = rt::permission_of_answer_in(tx, &target)? {
-                    self.close_in(tx, &row, "结果未知")?;
+                    self.close_in(tx, &row, &steve_i18n::t!("hub.node.outcome_unknown"))?;
                 }
                 system_in(
                     tx,
                     &session,
-                    &format!("已撤回结果未知的{what}；这次授权是否生效仍无法确定。"),
+                    &steve_i18n::t!("hub.node.recovered_permission", what = what),
                 )?;
             }
             _ => {}

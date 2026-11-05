@@ -203,8 +203,6 @@ pub struct NodeRuntime {
     fallbacks: std::sync::atomic::AtomicU64,
 }
 
-/// What a session with Node work the Hub has no record of reads.
-const STRANGER: &str = "Node 上有这个会话尚未结束的工作，但 Hub 没有它的记录（Hub 的数据可能回到了较早的状态）；该会话暂停，不会发出新的指令，那项工作也不会被自动放弃";
 /// How long applied Node events stay in the inbox (what is still needed stays longer).
 const INBOX_KEEP_MS: i64 = 7 * 24 * 3600 * 1000;
 /// How often the apply worker prunes, and how many rows at most per transaction.
@@ -1798,13 +1796,10 @@ impl NodeRuntime {
                 system_in(
                     tx,
                     &s,
-                    &format!(
-                        "Node 无法确定{}是否完成（{detail}），会话等待对账，不会自动重发。点停止可撤回这个操作。",
-                        if method == "open_session" {
-                            "打开会话"
-                        } else {
-                            "释放会话"
-                        }
+                    &steve_i18n::t!(
+                        "hub.node.control_unknown",
+                        what = recover::what(&method),
+                        detail = detail
                     ),
                 )?;
             }
@@ -1814,13 +1809,14 @@ impl NodeRuntime {
                     system_in(
                         tx,
                         &s,
-                        &format!(
-                            "Node 无法确定{}是否完成（{detail}），会话等待对账，不会自动重发。点停止可撤回这个操作。",
-                            if method == "abandon" {
-                                "放弃这次执行"
+                        &steve_i18n::t!(
+                            "hub.node.control_unknown",
+                            what = if method == "abandon" {
+                                steve_i18n::t!("hub.node.what.abandon_run")
                             } else {
-                                "工作区准备"
-                            }
+                                recover::what(&method)
+                            },
+                            detail = detail
                         ),
                     )?;
                 }
@@ -1898,7 +1894,7 @@ impl NodeRuntime {
                 system_in(
                     tx,
                     &next,
-                    "上一个会话还没能在 Node 上释放，这个会话等它释放后再打开，正在重试",
+                    &steve_i18n::t!("hub.node.release_retry"),
                 )?;
             }
         }
@@ -2381,7 +2377,7 @@ impl NodeRuntime {
                         |r| r.get(0),
                     )?;
                     if ours && held.insert(session.clone()) && !was.contains(&session) {
-                        system_in(tx, &session, STRANGER)?;
+                        system_in(tx, &session, &steve_i18n::t!("hub.node.stranger"))?;
                         changed += 1;
                     }
                 }
@@ -2525,7 +2521,7 @@ impl NodeRuntime {
             system_in(
                 tx,
                 &session,
-                "Node 发来的事件与已保存的记录冲突，已隔离保存；该会话暂停应用 Node 事件，等待对账，期间不会重新运行",
+                &steve_i18n::t!("hub.node.quarantined"),
             )?;
         }
         Ok(())
