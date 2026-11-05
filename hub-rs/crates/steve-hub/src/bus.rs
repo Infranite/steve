@@ -1,6 +1,7 @@
 //! In-process domain events (bus.ts). Store writes and the orchestrator publish here; every SSE stream subscribes.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use bytes::Bytes;
@@ -105,6 +106,9 @@ pub struct Frame {
     /// `data: <json>\n\n`
     pub bytes: Bytes,
     pub scope: Scope,
+    /// Position in the change log ([`Bus::replay`]), assigned by the dispatcher in send order; `None` for
+    /// frames that are not kept (see [`TRANSIENT`]) and frames nobody may see.
+    pub id: Option<u64>,
 }
 
 impl Frame {
@@ -122,6 +126,99 @@ impl Frame {
 /// tool calls (the stored reply publishes `message`), and statistics (counted by their own generation).
 const STATELESS: &[&str] = &["event", "steve.draft", "steve.tool", "stats"];
 
+/// Frames the change log doesn't keep: transcript chunks (the per-session events API is their cursor) and a
+/// chat answer being written (each one carries the full text so far).
+const TRANSIENT: &[&str] = &["event", "steve.draft"];
+
+/// The change log keeps at most this many frames ...
+pub const RING_FRAMES: usize = 16_384;
+/// ... and at most this many bytes of them (the oldest go first).
+pub const RING_BYTES: usize = 32 << 20;
+
+/// A position in the change log: the Bus's epoch (random per process, so a Hub restart never matches) and
+/// the id of the last frame seen. On the wire it is `<epoch>:<n>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Cursor {
+    pub epoch: String,
+    pub n: u64,
+}
+
+impl Cursor {
+    /// `<epoch>:<n>`; `None` when malformed.
+    pub fn parse(s: &str) -> Option<Cursor> {
+        let (epoch, n) = s.trim().rsplit_once(':')?;
+        if epoch.is_empty() || n.is_empty() || !n.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        Some(Cursor {
+            epoch: epoch.to_string(),
+            n: n.parse().ok()?,
+        })
+    }
+}
+
+impl std::fmt::Display for Cursor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}", self.epoch, self.n)
+    }
+}
+
+/// What [`Bus::replay`] found after a cursor.
+#[derive(Debug)]
+pub enum Replay {
+    /// Every kept frame after the cursor, oldest first (unfiltered: the caller applies `visible_to`), up to
+    /// `head`.
+    Frames { frames: Vec<Arc<Frame>>, head: u64 },
+    /// The cursor can't be continued (another epoch, ahead of the log, or older than what is retained): the
+    /// client has to refetch everything; `head` is where it continues from.
+    Reset { head: u64 },
+}
+
+/// The retained tail of the change log. Ids are contiguous: only kept frames take one.
+#[derive(Debug)]
+struct Ring {
+    frames: VecDeque<Arc<Frame>>,
+    bytes: usize,
+    /// the highest id evicted so far (0: none)
+    dropped: u64,
+    max_frames: usize,
+    max_bytes: usize,
+}
+
+impl Ring {
+    fn new(max_frames: usize, max_bytes: usize) -> Self {
+        Ring {
+            frames: VecDeque::new(),
+            bytes: 0,
+            dropped: 0,
+            max_frames: max_frames.max(1),
+            max_bytes,
+        }
+    }
+
+    fn push(&mut self, f: Arc<Frame>) {
+        self.bytes += f.bytes.len();
+        self.frames.push_back(f);
+        // the newest frame always stays, however large
+        while self.frames.len() > 1
+            && (self.frames.len() > self.max_frames || self.bytes > self.max_bytes)
+        {
+            if let Some(old) = self.frames.pop_front() {
+                self.bytes -= old.bytes.len();
+                self.dropped = old.id.unwrap_or(self.dropped);
+            }
+        }
+    }
+}
+
+/// The change log shared by the Bus and its dispatcher.
+struct Log {
+    epoch: String,
+    ring: Mutex<Ring>,
+    /// the id of the last kept frame, stored after it is in the ring and before it is broadcast
+    head: AtomicU64,
+}
+
 type Resolver = Box<dyn Fn(&str) -> Option<String> + Send + Sync>;
 type Taps = Arc<Mutex<Vec<(Vec<String>, tokio::sync::mpsc::UnboundedSender<Value>)>>>;
 
@@ -135,12 +232,20 @@ struct Inner {
     out: broadcast::Sender<Arc<Frame>>,
     taps: Taps,
     resolver: Arc<OnceLock<Resolver>>,
+    log: Arc<Log>,
 }
 
 /// Fan-out of bus events. Publishing is synchronous and never blocks (it can run under the store's write
 /// lock); one dispatcher thread, in publish order, resolves a session event's workspace (cached; sessions
 /// never move), slims its data (`evOut`), serializes once and broadcasts the bytes. A subscriber that falls
 /// more than [`Bus::CAPACITY`] frames behind is told it lagged (the SSE layer asks the web to refetch).
+///
+/// The dispatcher also numbers the frames it sends and keeps the last [`RING_FRAMES`] / [`RING_BYTES`] of
+/// them in memory (the change log: [`Bus::cursor`], [`Bus::replay`]), except the [`TRANSIENT`] ones and those
+/// nobody may see. Ids increase in send order, which is not publish order: a held `stats` frame gets its id
+/// when it goes out. The log is only sound because every store write publishes after its commit
+/// (steve-store `tx.rs`): a frame describes a change that a read made after it can already see. A
+/// publisher that published before committing could have a snapshot whose cursor covers a change it misses.
 #[derive(Clone)]
 pub struct Bus(Arc<Inner>);
 
@@ -154,14 +259,24 @@ impl Bus {
     pub const CAPACITY: usize = 4096;
 
     pub fn new() -> Self {
+        Self::with_window(RING_FRAMES, RING_BYTES)
+    }
+
+    /// A Bus whose change log keeps at most `frames` frames and `bytes` bytes.
+    pub(crate) fn with_window(frames: usize, bytes: usize) -> Self {
         let (tx, rx) = std::sync::mpsc::channel::<Value>();
         let out = broadcast::channel(Self::CAPACITY).0;
         let resolver: Arc<OnceLock<Resolver>> = Arc::new(OnceLock::new());
         let taps: Taps = Arc::default();
-        let (o, r, t) = (out.clone(), resolver.clone(), taps.clone());
+        let log = Arc::new(Log {
+            epoch: steve_store::uid("ep"),
+            ring: Mutex::new(Ring::new(frames, bytes)),
+            head: AtomicU64::new(0),
+        });
+        let (o, r, t, l) = (out.clone(), resolver.clone(), taps.clone(), log.clone());
         let spawned = std::thread::Builder::new()
             .name("steve-bus".into())
-            .spawn(move || dispatch(rx, o, r, t));
+            .spawn(move || dispatch(rx, o, r, t, l));
         if let Err(e) = spawned {
             tracing::error!("bus dispatcher: {e}");
         }
@@ -172,6 +287,7 @@ impl Bus {
             out,
             taps,
             resolver,
+            log,
         }))
     }
 
@@ -230,6 +346,46 @@ impl Bus {
     pub fn subscribe(&self) -> broadcast::Receiver<Arc<Frame>> {
         self.0.out.subscribe()
     }
+
+    /// This process's change-log epoch.
+    pub fn epoch(&self) -> &str {
+        &self.0.log.epoch
+    }
+
+    /// The change log's head: every kept frame up to it has been broadcast.
+    pub fn cursor(&self) -> Cursor {
+        Cursor {
+            epoch: self.0.log.epoch.clone(),
+            n: self.0.log.head.load(Ordering::SeqCst),
+        }
+    }
+
+    /// The kept frames after `after`, or a reset when they can't all be given.
+    pub fn replay(&self, after: &Cursor) -> Replay {
+        let ring = self.0.log.ring.lock().unwrap_or_else(|e| e.into_inner());
+        let head = self.0.log.head.load(Ordering::SeqCst);
+        if after.epoch != self.0.log.epoch || after.n > head || after.n < ring.dropped {
+            return Replay::Reset { head };
+        }
+        // ids are contiguous, so the first one after the cursor is found by position; only Arcs are copied
+        let from = ring
+            .frames
+            .partition_point(|f| f.id.is_some_and(|id| id <= after.n));
+        Replay::Frames {
+            frames: ring.frames.range(from..).cloned().collect(),
+            head,
+        }
+    }
+
+    /// [`Bus::replay`] after a cursor as sent on the wire; a malformed one is a reset.
+    pub fn replay_from(&self, after: &str) -> Replay {
+        match Cursor::parse(after) {
+            Some(c) => self.replay(&c),
+            None => Replay::Reset {
+                head: self.0.log.head.load(Ordering::SeqCst),
+            },
+        }
+    }
 }
 
 fn dispatch(
@@ -237,7 +393,13 @@ fn dispatch(
     out: broadcast::Sender<Arc<Frame>>,
     resolver: Arc<OnceLock<Resolver>>,
     taps: Taps,
+    log: Arc<Log>,
 ) {
+    let mut out = Sender {
+        out,
+        log,
+        next_id: 0,
+    };
     let mut seen: HashMap<String, String> = HashMap::new();
     let mut stats = StatsThrottle::default();
     loop {
@@ -251,7 +413,7 @@ fn dispatch(
             Ok(v) => v,
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                 for v in stats.due(std::time::Instant::now()) {
-                    send(&out, &v, Scope::Ws(ws_of(&v)));
+                    out.send(&v, Scope::Ws(ws_of(&v)));
                 }
                 continue;
             }
@@ -270,7 +432,7 @@ fn dispatch(
         if ty == "stats" {
             // at most one per workspace every 5 s: the first at once, the rest merged into one at the window's end
             if let Some(v) = stats.offer(v, std::time::Instant::now()) {
-                send(&out, &v, Scope::Ws(ws_of(&v)));
+                out.send(&v, Scope::Ws(ws_of(&v)));
             }
             continue;
         }
@@ -307,16 +469,39 @@ fn dispatch(
                 None => Scope::All,
             }
         };
-        send(&out, &v, scope);
+        out.send(&v, scope);
     }
 }
 
-fn send(out: &broadcast::Sender<Arc<Frame>>, v: &Value, scope: Scope) {
-    let json = serde_json::to_string(v).unwrap_or_default();
-    let _ = out.send(Arc::new(Frame {
-        bytes: Bytes::from(format!("data: {json}\n\n")),
-        scope,
-    }));
+/// The dispatcher's end: numbers, logs and broadcasts frames. Only the dispatcher thread holds it, so ids
+/// follow send order.
+struct Sender {
+    out: broadcast::Sender<Arc<Frame>>,
+    log: Arc<Log>,
+    next_id: u64,
+}
+
+impl Sender {
+    fn send(&mut self, v: &Value, scope: Scope) {
+        let json = serde_json::to_string(v).unwrap_or_default();
+        let ty = v.get("type").and_then(Value::as_str).unwrap_or_default();
+        let kept = scope != Scope::Nobody && !TRANSIENT.contains(&ty);
+        let id = kept.then(|| {
+            self.next_id += 1;
+            self.next_id
+        });
+        let frame = Arc::new(Frame {
+            bytes: Bytes::from(format!("data: {json}\n\n")),
+            scope,
+            id,
+        });
+        if let Some(id) = id {
+            let mut ring = self.log.ring.lock().unwrap_or_else(|e| e.into_inner());
+            ring.push(frame.clone());
+            self.log.head.store(id, Ordering::SeqCst);
+        }
+        let _ = self.out.send(frame);
+    }
 }
 
 fn ws_of(v: &Value) -> String {
@@ -596,6 +781,205 @@ mod scope_regression {
         ] {
             bus.publish_value(ev);
             assert_eq!(rx.recv().await.unwrap().scope, Scope::Nobody);
+        }
+    }
+}
+
+#[cfg(test)]
+mod change_log {
+    use super::*;
+    use serde_json::json;
+    use std::time::Duration;
+
+    async fn next(rx: &mut broadcast::Receiver<Arc<Frame>>) -> Arc<Frame> {
+        tokio::time::timeout(Duration::from_secs(10), rx.recv())
+            .await
+            .expect("in time")
+            .expect("frame")
+    }
+
+    fn frames(r: Replay) -> (Vec<Arc<Frame>>, u64) {
+        match r {
+            Replay::Frames { frames, head } => (frames, head),
+            Replay::Reset { head } => panic!("reset at {head}"),
+        }
+    }
+
+    fn reset(r: Replay) -> u64 {
+        match r {
+            Replay::Reset { head } => head,
+            Replay::Frames { frames, .. } => panic!("{} frames, not a reset", frames.len()),
+        }
+    }
+
+    fn ids(f: &[Arc<Frame>]) -> Vec<u64> {
+        f.iter().filter_map(|f| f.id).collect()
+    }
+
+    #[tokio::test]
+    async fn ids_follow_send_order_even_for_held_stats() {
+        let bus = Bus::new();
+        let mut rx = bus.subscribe();
+        let start = bus.cursor();
+        bus.publish_value(json!({"type": "stats", "ws": "w1", "n": 1}));
+        bus.publish_value(json!({"type": "stats", "ws": "w1", "n": 2}));
+        bus.publish(HubEvent::Item { id: "ST-1".into() });
+        let a = next(&mut rx).await;
+        let b = next(&mut rx).await;
+        // the held stats frame goes out after the item published later, and its id is the larger one
+        let c = tokio::time::timeout(Duration::from_secs(7), rx.recv())
+            .await
+            .expect("trailing stats")
+            .expect("frame");
+        assert!(a.bytes.starts_with(b"data: {\"type\":\"stats\""));
+        assert!(b.bytes.starts_with(b"data: {\"type\":\"item\""));
+        assert!(c.bytes.ends_with(b"\"n\":2}\n\n"));
+        let (a, b, c) = (a.id.unwrap(), b.id.unwrap(), c.id.unwrap());
+        assert!(a < b && b < c, "{a} {b} {c}");
+        let (log, head) = frames(bus.replay(&start));
+        assert_eq!(ids(&log), vec![a, b, c]);
+        assert_eq!(head, c);
+    }
+
+    #[tokio::test]
+    async fn transient_and_invisible_frames_are_not_kept() {
+        let bus = Bus::new();
+        bus.set_session_workspace(|sid| (sid == "s1").then(|| "w1".to_string()));
+        let mut rx = bus.subscribe();
+        let start = bus.cursor();
+        bus.publish(HubEvent::Event {
+            session_id: "s1".into(),
+            seq: 1,
+            kind: "x".into(),
+            data: json!({}),
+        });
+        bus.publish_value(json!({"type": "steve.draft", "ws": "w1", "mid": "m", "text": "x"}));
+        bus.publish_value(json!({"type": "steve.tool"}));
+        bus.publish(HubEvent::Session {
+            id: "s1".into(),
+            item_id: None,
+        });
+        for _ in 0..3 {
+            assert_eq!(next(&mut rx).await.id, None);
+        }
+        let kept = next(&mut rx).await;
+        assert_eq!(kept.id, Some(start.n + 1));
+        let (log, head) = frames(bus.replay(&start));
+        assert_eq!(ids(&log), vec![start.n + 1]);
+        assert_eq!(&log[0].bytes[..], &kept.bytes[..]);
+        assert_eq!(head, start.n + 1);
+    }
+
+    async fn publish_items(bus: &Bus, rx: &mut broadcast::Receiver<Arc<Frame>>, n: usize) {
+        for i in 0..n {
+            bus.publish(HubEvent::Item {
+                id: format!("ST-{i:03}"),
+            });
+        }
+        for _ in 0..n {
+            next(rx).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn eviction_by_count_resets_older_cursors() {
+        let bus = Bus::with_window(3, usize::MAX);
+        let mut rx = bus.subscribe();
+        let epoch = bus.epoch().to_string();
+        publish_items(&bus, &mut rx, 5).await;
+        let at = |n| Cursor {
+            epoch: epoch.clone(),
+            n,
+        };
+        // ids 3..=5 are kept: a cursor at 2 continues, one at 1 has lost frame 2
+        assert_eq!(ids(&frames(bus.replay(&at(2))).0), vec![3, 4, 5]);
+        assert_eq!(ids(&frames(bus.replay(&at(4))).0), vec![5]);
+        assert_eq!(reset(bus.replay(&at(1))), 5);
+        assert_eq!(reset(bus.replay(&at(0))), 5);
+    }
+
+    #[tokio::test]
+    async fn eviction_by_bytes_resets_older_cursors() {
+        // every item frame here is `data: {"type":"item","id":"ST-00i"}\n\n`
+        let one = b"data: {\"type\":\"item\",\"id\":\"ST-000\"}\n\n".len();
+        let bus = Bus::with_window(1000, 2 * one + 1);
+        let mut rx = bus.subscribe();
+        publish_items(&bus, &mut rx, 4).await;
+        let at = |n| Cursor {
+            epoch: bus.epoch().to_string(),
+            n,
+        };
+        assert_eq!(ids(&frames(bus.replay(&at(2))).0), vec![3, 4]);
+        assert_eq!(reset(bus.replay(&at(1))), 4);
+        // a frame larger than the whole window is still kept on its own
+        let bus = Bus::with_window(1000, 1);
+        let mut rx = bus.subscribe();
+        publish_items(&bus, &mut rx, 2).await;
+        let at = |n| Cursor {
+            epoch: bus.epoch().to_string(),
+            n,
+        };
+        assert_eq!(ids(&frames(bus.replay(&at(1))).0), vec![2]);
+        assert_eq!(reset(bus.replay(&at(0))), 2);
+    }
+
+    #[tokio::test]
+    async fn foreign_future_or_malformed_cursors_reset() {
+        let bus = Bus::new();
+        let mut rx = bus.subscribe();
+        publish_items(&bus, &mut rx, 2).await;
+        let other = Bus::new();
+        assert_ne!(bus.epoch(), other.epoch());
+        assert_eq!(reset(bus.replay(&other.cursor())), 2);
+        let ahead = Cursor {
+            epoch: bus.epoch().to_string(),
+            n: 3,
+        };
+        assert_eq!(reset(bus.replay(&ahead)), 2);
+        for bad in [
+            "",
+            "nonsense",
+            ":1",
+            &format!("{}:", bus.epoch()),
+            &format!("{}:-1", bus.epoch()),
+            &format!("{}:1x", bus.epoch()),
+            &format!("{}:99999999999999999999999", bus.epoch()),
+        ] {
+            assert_eq!(Cursor::parse(bad), None, "{bad}");
+            assert_eq!(reset(bus.replay_from(bad)), 2, "{bad}");
+        }
+        let c = bus.cursor();
+        assert_eq!(Cursor::parse(&c.to_string()), Some(c.clone()));
+        assert_eq!(
+            ids(&frames(bus.replay_from(&format!("{}:1", c.epoch))).0),
+            vec![2]
+        );
+    }
+
+    #[tokio::test]
+    async fn replay_at_head_is_empty() {
+        let bus = Bus::new();
+        let (log, head) = frames(bus.replay(&bus.cursor()));
+        assert!(log.is_empty());
+        assert_eq!(head, 0);
+        let mut rx = bus.subscribe();
+        publish_items(&bus, &mut rx, 3).await;
+        let (log, head) = frames(bus.replay(&bus.cursor()));
+        assert!(log.is_empty());
+        assert_eq!(head, 3);
+    }
+
+    #[tokio::test]
+    async fn cursor_after_dispatch_is_the_last_frame_id() {
+        let bus = Bus::new();
+        let mut rx = bus.subscribe();
+        for i in 0..20 {
+            bus.publish(HubEvent::Item { id: format!("{i}") });
+            bus.publish_value(json!({"type": "steve.draft", "ws": "w1", "text": "x"}));
+            let f = next(&mut rx).await;
+            next(&mut rx).await;
+            assert_eq!(bus.cursor().n, f.id.expect("id"));
+            assert_eq!(bus.cursor().epoch, bus.epoch());
         }
     }
 }
