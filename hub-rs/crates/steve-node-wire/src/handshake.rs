@@ -257,6 +257,17 @@ pub async fn dial(
     stream: &mut FrameStream,
     intro: NodeIntro<'_>,
 ) -> Result<(Challenge, Welcome), Refused> {
+    dial_as(sink, stream, intro, PROTOCOL).await
+}
+
+/// [`dial`] saying `proto` in the hello: a test's stand-in for a Node of an earlier release.
+#[doc(hidden)]
+pub async fn dial_as(
+    sink: &mut FrameSink,
+    stream: &mut FrameStream,
+    intro: NodeIntro<'_>,
+    proto: (u16, u16),
+) -> Result<(Challenge, Welcome), Refused> {
     let run = async {
         let p = recv_ctl(stream, "challenge").await?;
         let challenge: Challenge =
@@ -266,13 +277,13 @@ pub async fn dial(
         {
             return Err(refused(DENIED, "not the hub this node paired with"));
         }
-        if challenge.proto.max.0 < PROTOCOL.0 || challenge.proto.min.0 > PROTOCOL.0 {
+        if challenge.proto.max.0 < proto.0 || challenge.proto.min.0 > proto.0 {
             return Err(refused("unsupported", "no common protocol"));
         }
         let mut hello = Hello {
             node_id: intro.node.clone(),
             incarnation: intro.incarnation,
-            proto: PROTOCOL,
+            proto,
             codecs: vec!["json".into()],
             heads: intro.heads,
             caps: intro.caps,
@@ -288,7 +299,7 @@ pub async fn dial(
         let p = recv_ctl(stream, "welcome").await?;
         let welcome: Welcome =
             serde_json::from_value(p).map_err(|_| refused("invalid", "malformed welcome"))?;
-        if welcome.proto.0 != PROTOCOL.0 {
+        if welcome.proto.0 != proto.0 {
             return Err(refused("unsupported", "no common protocol"));
         }
         Ok((challenge, welcome))

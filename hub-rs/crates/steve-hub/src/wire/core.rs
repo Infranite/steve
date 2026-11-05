@@ -819,13 +819,35 @@ impl RoutedRuntime {
         matches!(self.route(session_id), Backend::Parked)
     }
 
+    /// Whether the Node `session_id` is bound to can be told [`steve_node_api::PermissionMode::Auto`]:
+    /// the local Node always (it is this build), a remote one once its link said
+    /// [`steve_node_api::AUTO_MODE`]. An older Node cannot decode it and would refuse the configure.
+    fn speaks_auto(&self, session_id: &str) -> bool {
+        let Some(node) = node_of(&self.store, session_id) else {
+            return false;
+        };
+        if self
+            .node
+            .as_ref()
+            .is_some_and(|n| n.node_id().as_str() == node)
+        {
+            return true;
+        }
+        match (&self.fleet, steve_node_api::NodeId::new(node)) {
+            (Some(f), Ok(id)) => f.speaks(&id, steve_node_api::AUTO_MODE),
+            _ => false,
+        }
+    }
+
     /// Binds a new session to the configured remote Node when it can run there. False: it was not
     /// (not configured, not possible for this session, or the bind failed), nothing changed.
     fn bind_remote(&self, session_id: &str) -> bool {
         let (Some(f), Some(target)) = (&self.fleet, &self.bind_remote) else {
             return false;
         };
-        let Some(b) = super::node_binding::remote_binding_for(&self.store, session_id, target)
+        let auto = f.speaks(target, steve_node_api::AUTO_MODE);
+        let Some(b) =
+            super::node_binding::remote_binding_for(&self.store, session_id, target, auto)
         else {
             tracing::info!("{session_id}: not bound to the remote Node {target}");
             return false;
@@ -986,7 +1008,9 @@ impl steve_core::AgentRuntime for RoutedRuntime {
     fn set_mode(&self, session_id: &str, mode: &str) -> bool {
         match self.node_for(session_id) {
             // through the Node's configure, at the session's next idle boundary
-            Some(n) => match super::node_binding::permission_mode(mode) {
+            Some(n) => match super::node_binding::permission_mode(mode).filter(|p| {
+                *p != steve_node_api::PermissionMode::Auto || self.speaks_auto(session_id)
+            }) {
                 Some(p) => n
                     .configure(
                         session_id,
