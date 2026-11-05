@@ -333,6 +333,7 @@
   "core.release.no_script_rollback": "This project's release script does not exist, so it cannot roll back",
   "core.release.busy_rollback": "Another release (%{item}) is running; roll back once it ends",
   "core.release.rollback_not_started": "The rollback script did not start (%{error})",
+  "core.release.remote_rollback": "This project is on device %{device}; a release script only runs on the Hub's own device, so it cannot roll back",
   "core.workspace.disk_low": "Low disk space: the disk with the workspaces has only %{free} left, below the %{floor} needed to start. Steve is reclaiming build caches of finished and idle items; try again later, or free up some disk space first.",
   "core.a2ui.main_only": "Only Steve's replies in the main conversation can submit an interface",
   "core.a2ui.no_surface": "This reply has no such interface",

@@ -108,3 +108,72 @@ fn a_fake_release_script_stops_when_its_home_is_gone() {
     }
     assert_eq!(status.unwrap().code(), Some(1));
 }
+
+/// The release script is a Hub-host operation (D12): a project on a remote Node is refused with a fail card,
+/// and neither its release nor a rollback starts a process, even when a script exists at its path here.
+#[test]
+fn a_project_on_a_remote_device_is_refused_and_starts_no_script() {
+    let k = Kit::new();
+    let script = k.home().join("release.sh");
+    std::fs::write(&script, super::fake_release_script("exit 0\n")).unwrap();
+    let rel = Release {
+        kind: "script".into(),
+        cmd: script.to_string_lossy().into(),
+        done_when: None,
+    };
+    let p = k
+        .db()
+        .project_create(
+            WS,
+            "R",
+            "",
+            &k.home().to_string_lossy(),
+            "dir",
+            false,
+            None,
+            Some(&rel),
+        )
+        .unwrap()
+        .id;
+    k.db()
+        .exec(
+            "UPDATE projects SET device_id = 'mac-2' WHERE id = ?",
+            &[&p],
+        )
+        .unwrap();
+    let i = k.item("wait", "收尾", Some(&p));
+    k.db().item_patch(&i, patch![branch: "steve/x"]).unwrap();
+    let s = k.session(&i, "idle");
+    let r = k.decision(&i, Some(&s), "approve", "release", &["yes", "no"]);
+    k.db()
+        .exec(
+            "UPDATE decisions SET subject_id = 'steve/x' WHERE id = ?",
+            &[&r],
+        )
+        .unwrap();
+    k.core.resolve(&r, "yes", "", "me").unwrap();
+
+    assert!(test_spawned::of(k.home()).is_empty(), "no script started");
+    assert!(!k.core.release_busy());
+    let res = k.db().decision(&r).unwrap().unwrap().result;
+    assert_eq!(res["outcome"], "not_released");
+    assert_eq!(
+        res["reason"],
+        "项目在设备 mac-2 上，发布脚本只能在 Hub 所在的设备上运行"
+    );
+    let (status, stage, now) = k.status(&i);
+    assert_eq!(
+        (status.as_str(), stage.as_str(), now.as_str()),
+        ("wait", "收尾", "没有发布")
+    );
+    assert_eq!(k.open_kinds(&i), vec!["fail"]);
+    assert_eq!(
+        k.open_fails(&i),
+        vec!["这个项目在设备 mac-2 上；发布脚本只能在 Hub 所在的设备上运行，无法发布"]
+    );
+
+    let e = k.core.tx().start_rollback(&i, "previous", "").unwrap_err();
+    assert!(e.to_string().contains("mac-2"), "{e}");
+    assert!(test_spawned::of(k.home()).is_empty(), "no rollback started");
+    assert!(!k.core.release_busy());
+}
