@@ -24,6 +24,7 @@ mod marks;
 pub mod models;
 mod modules;
 pub mod notify;
+mod occupancy;
 mod orchestrator;
 pub mod outbox_work;
 pub mod release;
@@ -125,6 +126,8 @@ pub(crate) struct State {
     probed: HashMap<String, takeover::Probed>,
     /// Followed builds: when each was last looked at.
     build_checked: HashMap<String, i64>,
+    /// Why new turns wait now (`occupancy`).
+    holds: std::collections::BTreeSet<occupancy::Hold>,
 }
 
 /// One critical section: the core plus the held state lock.

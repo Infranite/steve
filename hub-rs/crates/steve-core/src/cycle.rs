@@ -707,7 +707,7 @@ impl Tx<'_> {
             if s.status == "ended" {
                 continue;
             }
-            if self.rt().is_busy(&s.id)
+            if self.busy(&s.id)
                 || matches!(s.status.as_str(), "running" | "starting")
                 || resume.contains(&s.id)
             {
@@ -1075,7 +1075,7 @@ pub(crate) fn lifecycle_view(t: &Tx, i: &Item) -> Result<Value> {
         }
         for s in t.db().sessions_of_item(&i.id)? {
             if s.status != "ended"
-                && (t.rt().is_busy(&s.id) || matches!(s.status.as_str(), "running" | "starting"))
+                && (t.busy(&s.id) || matches!(s.status.as_str(), "running" | "starting"))
             {
                 active += 1;
             }

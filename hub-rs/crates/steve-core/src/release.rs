@@ -8,6 +8,7 @@ use crate::cycle::{Closing, OP_RELEASE, fingerprint_head};
 use crate::error::Result;
 use crate::gateway::{jstr, truthy};
 use crate::git::{self, Rebase};
+use crate::occupancy::Hold;
 use crate::orchestrator::To;
 use crate::patch;
 use crate::repo::{Decision, Item, WS};
@@ -53,7 +54,7 @@ impl Core {
     /// A release is running or the Hub holds new turns for one (YOLO waits with release cards).
     pub fn release_busy(&self) -> bool {
         let t = self.tx();
-        t.st.releasing.is_some() || t.rt().is_holding()
+        t.st.releasing.is_some() || t.holding()
     }
 
     /// The release script's drain call (`/internal/release/drain`): start holding (once, if `start`) and report
@@ -537,13 +538,13 @@ impl Tx<'_> {
         if tok.is_empty() || tok != r.token {
             return Ok(None);
         }
-        if start && !self.rt().is_holding() {
-            self.rt().hold(true);
+        if start && !self.held_by(Hold::Release) {
+            self.set_hold(Hold::Release, true);
             if let Some(r) = self.st.releasing.as_mut() {
                 r.hold_since = Some(now());
             }
             self.publish_hold();
-            let n = self.rt().running_turns();
+            let n = self.running_turns();
             let note = if n > 0 {
                 format!(
                     "新版本已构建好，等 {n} 个正在进行的回合结束后重启；新消息先排队，重启后送达"
@@ -589,7 +590,7 @@ impl Tx<'_> {
                 }
             });
         }
-        let n = self.rt().running_turns();
+        let n = self.running_turns();
         Ok(Some(DrainStatus {
             idle: n == 0,
             running: n,
@@ -598,12 +599,12 @@ impl Tx<'_> {
 
     pub(crate) fn hold_status(&self) -> Option<HoldStatus> {
         let r = self.st.releasing.as_ref()?;
-        if !self.rt().is_holding() {
+        if !self.held_by(Hold::Release) {
             return None;
         }
         Some(HoldStatus {
             item: r.item.clone(),
-            running: self.rt().running_turns(),
+            running: self.running_turns(),
             since: r.hold_since.unwrap_or_else(now),
         })
     }
@@ -618,10 +619,10 @@ impl Tx<'_> {
     }
 
     pub(crate) fn end_hold(&mut self) -> Result<()> {
-        if !self.rt().is_holding() {
+        if !self.held_by(Hold::Release) {
             return Ok(());
         }
-        self.rt().hold(false);
+        self.set_hold(Hold::Release, false);
         self.publish_hold();
         self.flush_queued()
     }

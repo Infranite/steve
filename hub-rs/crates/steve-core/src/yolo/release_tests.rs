@@ -10,7 +10,6 @@ use super::engine_tests::{T, t};
 use super::judge::RELEASE_AGAIN;
 use crate::patch;
 use crate::repo::{Release, WS};
-use crate::runtime::AgentRuntime;
 
 /// A project whose release script (under `dir`) writes `last.json` from `$STEVE_HOME/result.json`
 /// (none: it reports nothing) and exits.
@@ -148,23 +147,35 @@ fn nothing_is_approved_while_a_release_runs() {
     let t = t();
     let own = project(&t, &t.kit.home().join("ops"), "Steve");
     let (_, _, d) = releasing_item(&t, &own);
-    t.kit.rt.hold(true);
+    t.kit
+        .core
+        .tx()
+        .set_hold(crate::occupancy::Hold::Release, true);
     assert!(
         t.engine.consider(&d).unwrap().is_none(),
         "waits, records nothing"
     );
-    t.kit.rt.hold(false);
+    t.kit
+        .core
+        .tx()
+        .set_hold(crate::occupancy::Hold::Release, false);
     assert_eq!(t.engine.consider(&d).unwrap().unwrap().outcome, "scheduled");
 
     // scheduled, then a release starts: still scheduled, later, never a refused-release card
-    t.kit.rt.hold(true);
+    t.kit
+        .core
+        .tx()
+        .set_hold(crate::occupancy::Hold::Release, true);
     t.clock.advance(181_000);
     t.engine.tick();
     let rows = t.actions(&d);
     assert_eq!(rows[0].outcome, "scheduled");
     assert!(rows[0].due_at.unwrap() > t.yolo.now());
     assert_eq!(t.decision(&d).status, "open");
-    t.kit.rt.hold(false);
+    t.kit
+        .core
+        .tx()
+        .set_hold(crate::occupancy::Hold::Release, false);
 
     // a second card waits for the first scheduled one
     let (_, _, d2) = releasing_item(&t, &own);
@@ -181,9 +192,15 @@ fn nothing_is_approved_while_a_release_runs() {
         "",
         &["continue", "delivered", "look"],
     );
-    t.kit.rt.hold(true);
+    t.kit
+        .core
+        .tx()
+        .set_hold(crate::occupancy::Hold::Release, true);
     assert!(t.engine.consider(&f).unwrap().is_none());
-    t.kit.rt.hold(false);
+    t.kit
+        .core
+        .tx()
+        .set_hold(crate::occupancy::Hold::Release, false);
     let a = t.engine.consider(&f).unwrap().unwrap();
     assert_eq!(
         (a.outcome.as_str(), a.text.as_deref()),

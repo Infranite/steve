@@ -5,6 +5,7 @@ mod changes;
 mod conversations;
 mod cycle;
 mod flows;
+mod holds;
 mod inbox;
 mod kinds;
 mod lane;

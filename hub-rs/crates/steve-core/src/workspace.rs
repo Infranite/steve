@@ -698,7 +698,7 @@ impl Tx<'_> {
                         .db()
                         .sessions_of_item(&i.id)?
                         .iter()
-                        .any(|s| self.rt().is_busy(&s.id))
+                        .any(|s| self.busy(&s.id))
                 {
                     continue;
                 }
@@ -732,7 +732,7 @@ impl Tx<'_> {
                     .db()
                     .sessions_of_item(&i.id)?
                     .iter()
-                    .any(|s| self.rt().is_busy(&s.id));
+                    .any(|s| self.busy(&s.id));
                 out.push(Entry {
                     item: i.id.clone(),
                     workspace: ws.clone(),
@@ -783,7 +783,7 @@ impl Tx<'_> {
                 .db()
                 .sessions_of_item(item)?
                 .iter()
-                .any(|s| self.rt().is_busy(&s.id))
+                .any(|s| self.busy(&s.id))
         {
             return Ok(false);
         }

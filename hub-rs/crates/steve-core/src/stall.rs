@@ -54,7 +54,7 @@ impl Core {
 impl Tx<'_> {
     pub(crate) fn check_stalls(&mut self, at: i64) -> Result<Vec<String>> {
         // a release in flight explains an idle item (and no turn may start anyway)
-        if self.rt().is_holding() || self.st.releasing.is_some() {
+        if self.holding() || self.st.releasing.is_some() {
             return Ok(vec![]);
         }
         let mut out = vec![];
@@ -67,7 +67,7 @@ impl Tx<'_> {
                 let Some(s) = self.active_session(&i.id)? else {
                     continue;
                 };
-                if self.rt().is_busy(&s.id)
+                if self.busy(&s.id)
                     || self.st.resumes.iter().any(|(_, ids)| ids.contains(&s.id))
                     || !self.db().queued(&s.id)?.is_empty()
                     || self

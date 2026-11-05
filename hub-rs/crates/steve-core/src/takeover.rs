@@ -155,7 +155,7 @@ impl Tx<'_> {
             .decisions_of_item(item_id)?
             .iter()
             .any(|d| d.status == "open" && matches!(d.kind.as_str(), "approve" | "ask"));
-        if waiting || self.rt().is_busy(&s.id) || !self.db().queued(&s.id)?.is_empty() {
+        if waiting || self.busy(&s.id) || !self.db().queued(&s.id)?.is_empty() {
             self.c.steve_note(&s.id, &text);
             return Ok(());
         }
@@ -196,7 +196,7 @@ impl Tx<'_> {
             return Ok(Some(why.into()));
         };
         /* the stop was answered already: a turn runs or a message waits for the session */
-        if self.rt().is_busy(&s.id) || !self.db().queued(&s.id)?.is_empty() {
+        if self.busy(&s.id) || !self.db().queued(&s.id)?.is_empty() {
             return Ok(None);
         }
         let n = self.takeover_count(&i.id)?;
@@ -309,7 +309,7 @@ impl Tx<'_> {
                 /* something happened while Steve looked: it is not the stop that was looked at any more */
                 if i.phase != ACTIVE
                     || i.is_settled()
-                    || self.rt().is_busy(&session)
+                    || self.busy(&session)
                     || !self.db().queued(&session)?.is_empty()
                     || self
                         .db()

@@ -75,9 +75,9 @@ fn busy_queued_waiting_paused_or_releasing_items_are_not_stalled() {
     // while the Hub holds for a release nothing is flagged
     let idle = k.item("run", "执行", None);
     k.session(&idle, "idle");
-    k.rt.st().holding = true;
+    k.core.tx().set_hold(crate::occupancy::Hold::Release, true);
     assert!(k.core.tx().check_stalls(later()).unwrap().is_empty());
-    k.rt.st().holding = false;
+    k.core.tx().set_hold(crate::occupancy::Hold::Release, false);
     assert_eq!(k.core.tx().check_stalls(later()).unwrap(), [idle]);
 }
 

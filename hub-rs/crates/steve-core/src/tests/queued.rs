@@ -155,7 +155,7 @@ fn send_now_while_holding_for_a_release_waits_and_says_why() {
     let k = Kit::new();
     let (_, sid) = started(&k);
     let q = queue(&k, &sid, &["一", "二"]);
-    k.rt.st().holding = true;
+    k.core.tx().set_hold(crate::occupancy::Hold::Release, true);
     assert_eq!(
         k.core.queued_send_now(&sid, &q[1]).unwrap(),
         SendNow::Waiting("Hub 正在准备发布，发布后发送".into())

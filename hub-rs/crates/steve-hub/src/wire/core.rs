@@ -513,7 +513,9 @@ impl Domain for CoreDomain {
             store
                 .maintenance_set(true)
                 .map_err(|e| BackendError::msg(e.to_string()))?;
-            self.acp.hold(true);
+            self.core
+                .maintenance_hold(true)
+                .map_err(|e| BackendError::msg(e.to_string()))?;
         } else if action == "cancel" {
             // If adapters were already quiesced, their groups must really be gone before reopen.
             if !self.acp.reopen() && (!self.acp.quiesce().await || !self.acp.reopen()) {
@@ -795,7 +797,7 @@ impl Domain for CoreDomain {
         )
     }
     fn is_busy(&self, session: &str) -> bool {
-        self.acp.is_busy(session)
+        self.core.is_busy(session)
     }
     async fn end_session(&self, session: &str) -> BResult<()> {
         let (c, sid) = (self.core.clone(), session.to_string());

@@ -651,12 +651,19 @@ impl Core {
             self.lane_recover();
         }
     }
+    /// Hold new turns for an upgrade drain, or stop holding for it (a release's hold stays).
     pub fn maintenance_hold(&self, on: bool) -> Result<()> {
-        self.tx().rt().hold(on);
+        let mut t = self.tx();
+        t.set_hold(crate::occupancy::Hold::Maintenance, on);
         if !on {
-            self.tx().flush_queued()?;
+            t.flush_queued()?;
         }
         Ok(())
+    }
+
+    /// A turn of the session is in flight (the HTTP layer's view is the core's).
+    pub fn is_busy(&self, sid: &str) -> bool {
+        self.tx().busy(sid)
     }
 
     /// Give back a finished item's worktree and merged branch (housekeeping, finish, drop).
@@ -1794,7 +1801,7 @@ impl Tx<'_> {
             return Ok(true);
         }
         let ss = self.db().sessions_of_item(item_id)?;
-        if ss.iter().any(|s| self.rt().is_busy(&s.id)) {
+        if ss.iter().any(|s| self.busy(&s.id)) {
             return Ok(false);
         }
         for s in &ss {
@@ -1938,7 +1945,7 @@ impl Tx<'_> {
         let i = self.item(item_id)?;
         let busy = self
             .active_session(item_id)?
-            .is_some_and(|s| self.rt().is_busy(&s.id));
+            .is_some_and(|s| self.busy(&s.id));
         if self.item(dep)?.status != "done" && status_in(&i, &["run", "prop", "pause"]) && !busy {
             self.db().item_patch(
                 item_id,
@@ -2678,7 +2685,7 @@ impl Tx<'_> {
             }
             let mut ran = false;
             for s in self.db().sessions_of_item(&dep_id)? {
-                if self.rt().is_busy(&s.id) || self.db().has_events_since(&s.id, since)? {
+                if self.busy(&s.id) || self.db().has_events_since(&s.id, since)? {
                     ran = true;
                     break;
                 }
@@ -2756,7 +2763,7 @@ impl Tx<'_> {
             )?;
             let busy = self
                 .active_session(&i.id)?
-                .is_some_and(|s| self.rt().is_busy(&s.id));
+                .is_some_and(|s| self.busy(&s.id));
             let open = self
                 .db()
                 .decisions_of_item(&i.id)?
@@ -2861,7 +2868,7 @@ impl Tx<'_> {
             .unwrap_or(f64::NAN);
         if let (Some(used), Some(size)) = (s.used.filter(|u| *u != 0), s.size.filter(|z| *z != 0)) {
             let ratio = used as f64 / size as f64 * 100.0;
-            if ratio >= limit && !self.rt().is_busy(&s.id) {
+            if ratio >= limit && !self.busy(&s.id) {
                 let pct = ratio.round() as i64;
                 let last = self.last_agent_text(&s.id)?;
                 let last = js_head(&last, 800);
@@ -2883,7 +2890,7 @@ impl Tx<'_> {
                 return Ok(());
             }
         }
-        if mode == SupplementMode::Steer && self.rt().is_busy(&s.id) {
+        if mode == SupplementMode::Steer && self.busy(&s.id) {
             self.rt().cancel(&s.id);
         }
         self.rt_prompt(&s.id, &format!("补充信息：{text}"), "me", files)?;
@@ -2898,8 +2905,7 @@ impl Tx<'_> {
         let Some(s) = self.active_session(item_id)? else {
             return Ok(());
         };
-        if self.db().queued(&s.id)?.is_empty() || self.rt().is_holding() || self.rt().is_busy(&s.id)
-        {
+        if self.db().queued(&s.id)?.is_empty() || self.holding() || self.busy(&s.id) {
             return Ok(());
         }
         self.reactivate(Some(item_id))?;
@@ -2948,7 +2954,7 @@ impl Tx<'_> {
                 if crate::cycle::stopping(&i) {
                     return Err(crate::cycle::conflict("这个事项正在取消或标记失败"));
                 }
-                let busy = s.as_ref().is_some_and(|s| self.rt().is_busy(&s.id));
+                let busy = s.as_ref().is_some_and(|s| self.busy(&s.id));
                 self.st.marked_done.insert(id.into(), MarkedDone { busy });
                 self.db()
                     .timeline_add(id, actor, "me", action.label(), None)?;
@@ -3141,7 +3147,7 @@ impl Tx<'_> {
         if s.status == "ended" {
             self.db().session_patch(sid, patch![status: "idle"])?;
         }
-        if interrupt && self.rt().is_busy(sid) {
+        if interrupt && self.busy(sid) {
             self.rt().cancel(sid);
         }
         self.rt_prompt(sid, text, "me", files)
@@ -3193,13 +3199,13 @@ impl Tx<'_> {
             self.lc_guard_open(i)?;
         }
         let q = self.db().queue_front(sid, qid)?.ok_or_else(already_sent)?;
-        if self.rt().is_holding() {
+        if self.holding() {
             return Ok(SendNow::Waiting("Hub 正在准备发布，发布后发送".into()));
         }
         let ev = |interrupted: bool| json!({"id": qid, "text": q.text, "interrupted": interrupted});
         // a cancel while the adapter is still starting goes right after its prompt; false means the
         // turn ended just now (and took the queue, or left it for the flush below)
-        if self.rt().is_busy(sid) && self.rt().cancel(sid) {
+        if self.busy(sid) && self.rt().cancel(sid) {
             self.db().event_add(sid, "queued_sent_now", ev(true))?;
             self.reactivate(s.item_id.as_deref())?;
             return Ok(SendNow::Interrupted);
