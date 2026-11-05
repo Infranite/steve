@@ -19,22 +19,7 @@ import { channelsApi, type Persona, type Reveal } from "@/api/channels"
 import { PersonaAvatar } from "@/channels/basis"
 import { OwnerChip } from "@/people/owner-chip"
 import { t, useT } from "@/i18n"
-
-const NOTHING = "（不透露身份，只回答问题本身）"
-/** the answer to “你是谁？” — the Hub's `intro_of` (and its NOTHING_REVEALED), ported so the preview follows every keystroke.
- *  It is what the persona says in the chat, in the Hub's words, so it is not translated. */
-export function introOf(p: { name: string; intro: string; reveal: Reveal }, owner: string) {
-  const r = p.reveal, bits: string[] = []
-  if (r.name) bits.push(`我是${p.name}`)
-  if (r.role) bits.push(p.intro.replace(/^我是[^，,。]*[，,]?/, "").replace(/。$/, ""))
-  if (r.ai) bits.push("我是 AI 助手")
-  if (r.steve) bits.push("由 Steve 驱动")
-  if (r.owner) bits.push(`归 ${owner} 管理`)
-  const xs = bits.filter(Boolean)
-  return bits.length ? xs.join("，") + "。" : NOTHING
-}
-/** how the Hub names the owner (`<主人称呼>`), read back from its own preview */
-const ownerOf = (p: Persona) => /归 (.+?) 管理/.exec(p.intro_preview)?.[1] ?? "你"
+import { introOf, newPersonaDefaults, ownerOf } from "@/channels/persona-intro"
 
 const usedText = (p: Persona) => {
   const a = p.used_by.accounts.length, s = p.used_by.spaces.length
@@ -51,7 +36,7 @@ export function PersonasSection({ bot }: { bot?: string }) {
   if (L.s === "error") return <Empty title={L.err} />
   const xs = bot ? L.data.filter((p) => p.bot_id === bot) : L.data
   const create = async () => {
-    const p = await act(() => channelsApi.newPersona({ name: t("channels:persona.newName"), bot_id: bot ?? "steve", intro: t("channels:persona.newIntro"), reveal: { name: true, role: true, ai: true, steve: false, owner: false } }))
+    const p = await act(() => channelsApi.newPersona({ ...newPersonaDefaults(), bot_id: bot ?? "steve" }))
     if (p) go("#/channels/personas/" + p.id)
   }
   return (

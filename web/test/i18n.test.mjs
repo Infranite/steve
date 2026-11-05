@@ -134,13 +134,13 @@ const ALLOW = {
   "auto/nodes.tsx": [["，、"], "separators accepted when splitting a typed list"],
   "people/contact.tsx": [["、", "，"], "separators accepted when splitting typed aliases"],
   "people/org.tsx": [["、", "，"], "separators accepted when splitting typed names"],
-  "chat2.tsx": [["。！？", "没有发布"], "sentence ends for clipping user text; the Hub's release failure text"],
+  "chat2.tsx": [["。！？"], "sentence ends for clipping user text"],
   "mail/thread.tsx": [["回复", "答复", "："], "reply prefixes in incoming subjects, so Re: is not doubled"],
   "api.ts": [["插话", "排队"], `message modes: ${HUB}`],
   "api/vault.ts": [["先在这台设备上登记", "或通行密钥"], "the Hub's NEED_PASSKEY error, matched to open the passkey dialog"],
   "auto/decision.tsx": [["不执行", "不"], `decision option values: ${HUB}`],
   "auto/schedules.tsx": [["每天", "每周五", "每月", "日", "每周一", "运维", "邮件"], "schedule phrases the Hub's rule parser reads; Bot names matched to pick a template's Bot"],
-  "channels/persona.tsx": [["（不透露身份，只回答问题本身）", "我是", "，", "。", "助手", "由", "驱动", "归", "管理", "你"], "the Hub's intro_of, ported for the live preview: what the persona says in chats"],
+  "channels/persona-intro.ts": [["（不透露身份，只回答问题本身）", "我是", "，", "。", "助手", "由", "驱动", "归", "管理", "你"], "the Hub's intro_of, ported for the live preview: what the persona says in chats"],
   "chat-view.tsx": [["（附件）", "汇报"], `attachment-only placeholder and the /汇报 command: ${HUB}`],
   "queue.tsx": [["（附件）"], `attachment-only placeholder: ${HUB}`],
   "thread/topics.ts": [["（附件）"], `attachment-only placeholder: ${HUB}`],
@@ -220,4 +220,12 @@ test("every {{var}} in zh-CN is used by en", () => {
     }
   }
   assert.deepEqual(bad, [])
+})
+
+test("a new persona's defaults introduce it coherently in the Hub's words, whatever the UI language", async () => {
+  const { introOf, newPersonaDefaults } = await import("../src/channels/persona-intro.ts")
+  for (const l of ["zh-CN", "en"]) await inLang(l, () => {
+    const p = newPersonaDefaults()
+    assert.equal(introOf(p, "你"), "我是新身份，我是 AI 助手。", l)
+  })
 })
