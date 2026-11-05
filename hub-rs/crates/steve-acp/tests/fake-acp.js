@@ -41,10 +41,13 @@ let toolN = 0
 async function turn(text) {
   const n = (failures.get(text) ?? 0) + 1; failures.set(text, n)
   const out = { stopReason: "end_turn" }
-  for (const [, cmd, arg] of text.matchAll(/@(sleep|say|usage|tally|quota|tool|later|fail|crash|perm|permtool|codexperm|fsread)\b([^@\n]*)/g)) {
+  for (const [, cmd, arg] of text.matchAll(/@(flood|bigperm|bigreply|sleep|say|usage|tally|quota|tool|later|fail|crash|perm|permtool|codexperm|fsread)\b([^@\n]*)/g)) {
     const a = arg.trim()
     if (cmd === "sleep" && (await sleep(Number(a) || 1000))) return { ...out, stopReason: "cancelled" }
     if (cmd === "say") say(a)
+    if (cmd === "flood") for (let i = 0; i < 2000; i++) say("x".repeat(4096))
+    if (cmd === "bigreply") out.padding = "x".repeat(2 << 20)
+    if (cmd === "bigperm") await ask("session/request_permission", {sessionId: sid, options, toolCall: {toolCallId:"large", rawInput:{data:"x".repeat(2 << 20)}}})
     if (cmd === "usage") {
       const [used, size, cost, model, origin] = a.split(" ")
       const meta = { ...(model ? { "_claude/model": model } : {}), ...(origin ? { "_claude/origin": origin } : {}) }

@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -92,6 +92,7 @@ type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, RpcError>>>>
 /// A live adapter process.
 pub struct Conn {
     pid: u32,
+    reader_failed: AtomicBool,
     out: mpsc::UnboundedSender<Outbound>,
     pending: Pending,
     next_id: AtomicU64,
@@ -104,6 +105,49 @@ impl Conn {
     /// `on_incoming` runs on the reader task, in stdout order; `on_exit` runs once after exit.
     pub fn spawn(
         sp: Spawn,
+        on_incoming: impl Fn(&Conn, Incoming) + Send + Sync + 'static,
+        on_exit: impl FnOnce() + Send + 'static,
+    ) -> Result<Arc<Conn>, RpcError> {
+        Self::spawn_bounded(sp, usize::MAX, |_| true, on_incoming, on_exit)
+    }
+
+    /// Spawn a waiting shell, record its process identity, then let it exec the adapter. If the
+    /// registrar fails (or Node crashes first), EOF closes the gate without executing the adapter.
+    /// `registered` is synchronous and must durably record ownership before returning success.
+    pub fn spawn_registered(
+        mut sp: Spawn,
+        max_frame_bytes: usize,
+        admit: impl Fn(usize) -> bool + Send + Sync + 'static,
+        registered: impl FnOnce(u32) -> Result<(), RpcError>,
+        on_incoming: impl Fn(&Conn, Incoming) + Send + Sync + 'static,
+        on_exit: impl FnOnce() + Send + 'static,
+    ) -> Result<Arc<Conn>, RpcError> {
+        let mut args: Vec<OsString> = vec![
+            "-c".into(),
+            "IFS= read -r go || exit 125; exec \"$@\"".into(),
+            "steve-harness".into(),
+            sp.program.into_os_string(),
+        ];
+        args.extend(sp.args);
+        sp.program = "/bin/sh".into();
+        sp.args = args;
+        let conn = Self::spawn_bounded(sp, max_frame_bytes, admit, on_incoming, on_exit)?;
+        registered(conn.pid())?;
+        conn.out
+            .send(Outbound {
+                line: "go\n".into(),
+                written: None,
+            })
+            .map_err(|_| RpcError::msg("registered adapter gate closed"))?;
+        Ok(conn)
+    }
+
+    /// Node driver ingress boundary. Called on the reader before JSON parsing, including replies
+    /// and permission requests. Legacy spawn retains its original framing and admission behavior.
+    pub fn spawn_bounded(
+        sp: Spawn,
+        max_frame_bytes: usize,
+        admit: impl Fn(usize) -> bool + Send + Sync + 'static,
         on_incoming: impl Fn(&Conn, Incoming) + Send + Sync + 'static,
         on_exit: impl FnOnce() + Send + 'static,
     ) -> Result<Arc<Conn>, RpcError> {
@@ -137,6 +181,7 @@ impl Conn {
         let (exit_tx, exited) = watch::channel(false);
         let conn = Arc::new(Conn {
             pid,
+            reader_failed: AtomicBool::new(false),
             out,
             pending: Arc::default(),
             next_id: AtomicU64::new(0),
@@ -171,11 +216,27 @@ impl Conn {
             let mut line = Vec::new();
             loop {
                 line.clear();
-                match rd.read_until(b'\n', &mut line).await {
+                let read = if max_frame_bytes == usize::MAX {
+                    rd.read_until(b'\n', &mut line).await
+                } else {
+                    (&mut rd)
+                        .take(max_frame_bytes as u64 + 1)
+                        .read_until(b'\n', &mut line)
+                        .await
+                };
+                match read {
                     Ok(0) | Err(_) => break,
                     Ok(_) => {}
                 }
                 let Some(c) = weak.upgrade() else { break };
+                let admitted = admit(line.len());
+                if line.len() > max_frame_bytes || !admitted {
+                    c.reader_failed.store(true, Ordering::SeqCst);
+                    for (_, tx) in c.pending.lock().unwrap().drain() {
+                        let _ = tx.send(Err(RpcError::msg("adapter exited: frame limit")));
+                    }
+                    break;
+                }
                 c.dispatch(&String::from_utf8_lossy(&line), &on_incoming);
             }
         });
@@ -257,6 +318,9 @@ impl Conn {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
         let (tx, rx) = oneshot::channel();
         if let Ok(mut p) = self.pending.lock() {
+            if self.reader_failed.load(Ordering::SeqCst) {
+                return Err(RpcError::msg("adapter exited: reader failed"));
+            }
             p.insert(id, tx);
         }
         let mut m = serde_json::Map::new();
@@ -325,7 +389,7 @@ impl Conn {
     }
 
     pub fn has_exited(&self) -> bool {
-        *self.exited.borrow()
+        *self.exited.borrow() || self.reader_failed.load(Ordering::SeqCst)
     }
 
     /// Signals the adapter's whole process group. Errors (group already gone) are ignored.
