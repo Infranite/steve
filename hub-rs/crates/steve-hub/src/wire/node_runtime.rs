@@ -1453,6 +1453,7 @@ impl NodeRuntime {
             continuation: None,
             transient: false,
             acted: false,
+            job: None,
         };
         self.settle_in(tx, session, attempt, &completion)?;
         Ok(true)
@@ -1971,6 +1972,7 @@ impl NodeRuntime {
                 continuation: None,
                 transient: false,
                 acted: false,
+                job: None,
             };
             self.turn_over_in(tx, s, &turn, &c)?;
             end = Some(End {
@@ -2040,6 +2042,7 @@ impl NodeRuntime {
                 continuation: None,
                 transient: false,
                 acted: false,
+                job: None,
             };
             self.settle_in(tx, &s, &attempt, &completion)?;
             system_in(
@@ -2097,6 +2100,7 @@ impl NodeRuntime {
             continuation: None,
             transient: false,
             acted: false,
+            job: None,
         };
         rt::attempt_cas_in(
             tx,
@@ -3867,6 +3871,7 @@ mod tests {
             continuation: None,
             transient: false,
             acted: false,
+            job: None,
         };
         rt.tx(|tx| {
             rt.settle_in(tx, S, &attempt, &completion)?;

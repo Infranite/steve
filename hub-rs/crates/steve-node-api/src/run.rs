@@ -217,6 +217,7 @@ impl TurnSpec {
     }
 }
 
+/// Which kind of job a [`JobWork`] is (for records and capacity; the work itself carries its fields).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum JobKind {
@@ -226,11 +227,217 @@ pub enum JobKind {
     Research,
 }
 
+/// One attempt of a job: one model, in a scratch directory the Node makes for it. The Hub keeps the
+/// fallback (another model is another attempt) and builds the prompt. A job never reads through
+/// `run.policy.readable`: what it may read is in its work.
+///
+/// While it runs, its draft arrives as `MessageStarted`/`TextDelta` (a new message replaces the
+/// draft so far) and its tool calls as `ToolChanged`; its answer is the completion's `result` text.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JobSpec {
     pub job: JobId,
-    pub kind: JobKind,
     pub run: RunSpec,
+    pub work: JobWork,
+}
+
+/// What a job does, by kind (never a kind plus optional fields).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum JobWork {
+    Think(ThinkJob),
+    Research(ResearchJob),
+}
+
+/// One Steve model call. It never continues a harness session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThinkJob {
+    /// The stable head of the prompt, kept apart so the harness can cache it (a system prompt, an
+    /// instructions file). `None`: the whole prompt is the message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
+    pub tools: ThinkToolMode,
+}
+
+/// The harness's own tools in a think job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThinkToolMode {
+    /// No tool at all.
+    None,
+    /// Read only, for the prompt's [`Part::File`]s (placed at their `name` in the scratch directory,
+    /// always `.steve/attachments/<file>`).
+    ReadAttached,
+}
+
+/// A read-only research run over directories under the Node's roots. Its sandbox is
+/// `run.policy.sandbox`, its hard time limit `run.limits.deadline` (one for all attempts of a run),
+/// and `run.continuation` resumes an earlier run of the same model.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResearchJob {
+    /// Where the harness runs; `None`: in the job's scratch directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<crate::workspace::RootPath>,
+    /// The other directories it may read (never write).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub readable: Vec<crate::workspace::RootPath>,
+    pub budget: ResearchBudget,
+    /// Steve's read-only tools (the grant `run.policy.tools`) are offered to the harness.
+    #[serde(default)]
+    pub steve_tools: bool,
+}
+
+/// Limits of one research attempt besides the deadline. `None`: no limit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResearchBudget {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_turns: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tools: Option<u32>,
+    /// No output from the harness for this long: it is stuck and is ended.
+    pub idle_ms: u64,
+}
+
+impl JobWork {
+    pub fn kind(&self) -> JobKind {
+        match self {
+            JobWork::Think(_) => JobKind::Think,
+            JobWork::Research(_) => JobKind::Research,
+        }
+    }
+}
+
+impl JobSpec {
+    /// The shape every Node checks before it accepts a job (what it can enforce it checks after).
+    pub fn check(&self) -> crate::common::ApiResult<()> {
+        use crate::common::{ApiError, ErrorCode};
+        let bad = |why: &str| Err(ApiError::new(ErrorCode::Invalid, why));
+        let run = &self.run;
+        if run.directory != RunDirectory::Scratch {
+            return bad("a job runs in its own scratch directory");
+        }
+        if !run.policy.readable.is_empty() {
+            return bad("a job names what it reads in its work");
+        }
+        let mut files = std::collections::HashSet::new();
+        for p in &run.prompt {
+            match p {
+                Part::Text { .. } | Part::Image { .. } => {}
+                Part::File { name, .. } => {
+                    if !is_attachment_name(name) {
+                        return bad("a file part is named .steve/attachments/<file>");
+                    }
+                    if !files.insert(name.as_str()) {
+                        return bad("two file parts have the same name");
+                    }
+                }
+                Part::Diff { .. } => return bad("a job prompt has no diff"),
+            }
+        }
+        match &self.work {
+            JobWork::Think(t) => {
+                if run.continuation.is_some() {
+                    return bad("a think job does not continue a session");
+                }
+                if !files.is_empty() && t.tools == ThinkToolMode::None {
+                    return bad("files in a think job need read_attached");
+                }
+            }
+            JobWork::Research(r) => {
+                let b = &r.budget;
+                if b.idle_ms == 0 || b.max_turns == Some(0) || b.max_tools == Some(0) {
+                    return bad("a research budget limit is never zero");
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Where a job's files go in its scratch directory: `.steve/attachments/<file>`, one plain segment.
+/// Keeping them there means a file can never be (or overwrite) the harness's own configuration
+/// (`.claude/settings.json`, `.mcp.json`, `CLAUDE.md`) in the directory the harness runs from.
+pub const ATTACHMENTS_DIR: &str = ".steve/attachments/";
+
+fn is_attachment_name(name: &str) -> bool {
+    name.strip_prefix(ATTACHMENTS_DIR).is_some_and(|f| {
+        !f.is_empty() && f != "." && !f.contains('/') && RelPath::new(name).is_ok()
+    })
+}
+
+/// How a research attempt ended, besides its [`crate::common::Outcome`] (in `Completion::job`).
+/// Every finished research attempt carries one, a failed one too, so its turns and reads are kept.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JobReport {
+    pub end: JobEnd,
+    #[serde(default)]
+    pub turns: u32,
+    /// Files it read, relative to its cwd when inside it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files_read: Vec<String>,
+    /// It ran under an OS sandbox.
+    #[serde(default)]
+    pub sandboxed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum JobEnd {
+    /// It finished with an answer (outcome `succeeded`).
+    Done,
+    /// The harness reported an error or ended without a result (outcome `failed`; the error is in
+    /// `Completion::error`).
+    Failed,
+    /// Stopped by a cancel; the answer is what was written until then.
+    Stopped,
+    Budget {
+        hit: BudgetHit,
+    },
+    /// A tool call broke the read-only rules and the run was killed.
+    Violated {
+        rule: ViolationRule,
+        tool: String,
+        /// The path it tried, when the rule is about one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<String>,
+    },
+}
+
+impl JobEnd {
+    /// The end does not contradict the attempt's outcome: `done` comes only with success and
+    /// `failed` only with failure (the other ends say why it stopped and leave the outcome to the
+    /// Node).
+    pub fn fits(&self, outcome: crate::common::Outcome) -> bool {
+        use crate::common::Outcome as O;
+        match self {
+            JobEnd::Done => outcome == O::Succeeded,
+            JobEnd::Failed => outcome == O::Failed,
+            _ => true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BudgetHit {
+    /// The deadline.
+    Time,
+    Turns,
+    Tools,
+    /// Silent for `idle_ms`.
+    Idle,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ViolationRule {
+    /// A tool not on the read-only allowlist.
+    Tool,
+    /// A path outside the readable directories.
+    OutOfScope,
+    /// A secret (keys, credentials, `.env`).
+    Sensitive,
+    /// A file tool without a usable path.
+    BadInput,
 }
 
 /// Change a session's model or policy between attempts. Applies only while idle (or at a boundary the

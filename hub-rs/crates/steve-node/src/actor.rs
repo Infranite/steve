@@ -1446,6 +1446,7 @@ impl Actor {
                         continuation: None,
                         transient: false,
                         acted,
+                        job: None,
                     },
                 }
             }
@@ -1471,6 +1472,7 @@ impl Actor {
                         error: Some(ApiError::new(ErrorCode::Internal, e.message)),
                         result: vec![],
                         continuation: None,
+                        job: None,
                     },
                 }
             }
@@ -1984,6 +1986,7 @@ fn cancelled() -> Completion {
         continuation: None,
         transient: false,
         acted: false,
+        job: None,
     }
 }
 
@@ -1996,5 +1999,6 @@ fn failure(outcome: Outcome, e: ApiError, acted: bool) -> Completion {
         error: Some(e),
         result: vec![],
         continuation: None,
+        job: None,
     }
 }
