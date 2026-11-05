@@ -159,8 +159,8 @@ pub(crate) struct Inner {
     /// Workspace work on one repository goes one at a time.
     repos: Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>,
     snapshots: Mutex<HashMap<u64, Snapshot>>,
-    /// The manifests of the last scans, newest last: read page by page, gone after a restart.
-    scans: Mutex<std::collections::VecDeque<(OperationId, Arc<scan::Manifest>)>>,
+    /// The manifests of finished scans, read page by page, gone after a restart.
+    scans: Mutex<scan::Scans>,
     cache_n: AtomicU64,
     tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
@@ -984,7 +984,7 @@ impl LocalNode {
             tools_url: Mutex::new(None),
             repos: Mutex::new(HashMap::new()),
             snapshots: Mutex::new(HashMap::new()),
-            scans: Mutex::new(std::collections::VecDeque::new()),
+            scans: Mutex::new(scan::Scans::default()),
             cache_n: AtomicU64::new(0),
             tasks: Mutex::new(Vec::new()),
         })))
@@ -2399,23 +2399,37 @@ impl WorkspaceExecutor for LocalNode {
     /// A bounded chunk of a file in a workspace or under a root. The root (or the workspace) is
     /// checked on every call, after resolving links: nothing outside it is read.
     async fn read_file(&self, q: FileRead) -> ApiResult<ReadChunk> {
-        let real = match &q.path {
+        enum At {
+            Workspace(PathBuf, RelPath),
+            Root(Arc<Vec<Root>>, RootPath),
+        }
+        let at = match &q.path {
             FileAddress::Workspace(p) => {
                 self.mine(&p.workspace)?;
-                let base = workspace_dir(&self.0, &p.workspace)?;
-                let rel = p.rel.clone();
-                blocking(move || scan::inside(&base, &rel)).await?
+                At::Workspace(workspace_dir(&self.0, &p.workspace)?, p.rel.clone())
             }
-            FileAddress::Root(at) => {
-                let (roots, at) = (self.0.roots(), at.clone());
-                blocking(move || workspace::resolve(&roots, &at, false)).await?
-            }
+            FileAddress::Root(at) => At::Root(self.0.roots(), at.clone()),
         };
-        blocking(move || scan::read(&real, q.expected.as_ref(), q.offset, q.max)).await
+        // resolved, checked and opened in one go; the opened file is checked again (`scan::read`)
+        blocking(move || {
+            let (base, real) = match at {
+                At::Workspace(base, rel) => {
+                    let real = scan::inside(&base, &rel)?;
+                    (base, real)
+                }
+                At::Root(roots, at) => (
+                    workspace::resolve(&roots, &root_of(&at), false)?,
+                    workspace::resolve(&roots, &at, false)?,
+                ),
+            };
+            scan::read(&base, &real, q.expected.as_ref(), q.offset, q.max)
+        })
+        .await
     }
 
     /// Accepted now; finished once the tree is walked, its manifest kept for [`Self::scan_page`]
-    /// (the last few scans, until a restart: then scan again).
+    /// (until a restart: then scan again). `busy` while too many scans are being read: one being
+    /// read is never dropped for a new one.
     async fn scan(&self, c: Command<ScanSpec>) -> ApiResult<Receipt> {
         let spec = c.body.clone();
         if spec
@@ -2433,9 +2447,14 @@ impl WorkspaceExecutor for LocalNode {
             ));
         }
         let roots = self.0.roots();
+        // a place among the kept scans, taken for a new scan only (a resend is answered as it was)
+        let mut place: Option<ScanPlace> = None;
         let (r, fresh) = self.accept("scan", &c, |_| {
             if !workspace::resolve(&roots, &spec.root, false)?.is_dir() {
                 return Err(ApiError::new(ErrorCode::Invalid, "not a directory"));
+            }
+            if place.is_none() {
+                place = Some(ScanPlace::take(&self.0)?);
             }
             Ok(Decided::accepted())
         })?;
@@ -2445,6 +2464,7 @@ impl WorkspaceExecutor for LocalNode {
         let me = self.clone();
         let op = c.id.clone();
         self.spawn_owned(async move {
+            let place = place;
             let inner = me.0.clone();
             let walked = blocking(move || {
                 // the roots as they are now: one taken away since is not walked
@@ -2455,13 +2475,12 @@ impl WorkspaceExecutor for LocalNode {
                     .map_err(not_listed)
             })
             .await;
-            let state = match walked {
-                Ok(m) => {
-                    let mut scans = me.0.scans.lock().unwrap();
-                    if scans.len() >= 8 {
-                        scans.pop_front();
-                    }
-                    scans.push_back((op.clone(), Arc::new(m)));
+            drop(place);
+            let state = match walked.and_then(|m| {
+                let now = std::time::Instant::now();
+                me.0.scans.lock().unwrap().keep(op.clone(), m, now)
+            }) {
+                Ok(()) => {
                     Decided::done(OperationResult::Pages {
                         operation: op.clone(),
                     })
@@ -2475,15 +2494,13 @@ impl WorkspaceExecutor for LocalNode {
     }
 
     async fn scan_page(&self, s: OperationId, page: PageRequest) -> ApiResult<ScanPage> {
-        let m = {
-            let scans = self.0.scans.lock().unwrap();
-            scans
-                .iter()
-                .find(|(id, _)| *id == s)
-                .map(|(_, m)| m.clone())
-        };
+        let m = (self.0.scans.lock().unwrap()).get(&s, std::time::Instant::now());
         if let Some(m) = m {
-            return scan::page(&m, &s, &page);
+            let p = scan::page(&m, &s, &page)?;
+            if p.next.is_none() {
+                self.0.scans.lock().unwrap().read_out(&s);
+            }
+            return Ok(p);
         }
         match self.0.j.read(|t| t.op(&s))? {
             Some(o) if o.method == "scan" && o.receipt.state.is_finished() => Err(ApiError::new(
@@ -2501,6 +2518,23 @@ impl WorkspaceExecutor for LocalNode {
             }
             _ => Err(ApiError::new(ErrorCode::Invalid, "no such scan").on(&s)),
         }
+    }
+}
+
+/// A scan's place among the kept scans while it walks: given back when dropped.
+struct ScanPlace(Arc<Inner>);
+
+impl ScanPlace {
+    fn take(inner: &Arc<Inner>) -> ApiResult<ScanPlace> {
+        let now = std::time::Instant::now();
+        inner.scans.lock().unwrap().reserve(now)?;
+        Ok(ScanPlace(inner.clone()))
+    }
+}
+
+impl Drop for ScanPlace {
+    fn drop(&mut self) {
+        self.0.scans.lock().unwrap().release();
     }
 }
 

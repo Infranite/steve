@@ -2615,6 +2615,51 @@ async fn a_scan_keeps_its_manifest_while_files_change() {
     assert_eq!(n.scan_page(scan, page(2)).await.unwrap(), pages[0]);
 }
 
+/// More scans than a few at once, all accepted before any is read and paged in turns: none pushes
+/// another's manifest out while it is read.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn many_scans_paged_at_once_all_finish() {
+    let t = T::new(&[]);
+    let n = t.node();
+    let kb = with_kb(&t, &n);
+    for i in 0..5 {
+        put(&kb, &format!("d/{i}.md"), b"x");
+    }
+    let ops: Vec<String> = (0..12).map(|i| format!("op_many{i}")).collect();
+    for op in &ops {
+        n.scan(now_cmd(op, kb_scan("", &[], ScanLimits::default())))
+            .await
+            .unwrap();
+    }
+    for op in &ops {
+        assert!(ok(&finished(&n, op).await));
+    }
+    let mut cursors: Vec<Option<Cursor>> = vec![None; ops.len()];
+    let mut seen = vec![0usize; ops.len()];
+    let mut done = vec![false; ops.len()];
+    while done.iter().any(|d| !d) {
+        for (i, op) in ops.iter().enumerate() {
+            if done[i] {
+                continue;
+            }
+            let p = n
+                .scan_page(
+                    OperationId::new(op).unwrap(),
+                    PageRequest {
+                        cursor: cursors[i].clone(),
+                        limit: 1,
+                    },
+                )
+                .await
+                .unwrap();
+            seen[i] += p.entries.len();
+            cursors[i] = p.next.clone();
+            done[i] = p.next.is_none();
+        }
+    }
+    assert!(seen.iter().all(|n| *n == 5), "{seen:?}");
+}
+
 fn page(limit: u32) -> PageRequest {
     PageRequest {
         cursor: None,

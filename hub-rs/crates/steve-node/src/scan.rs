@@ -9,7 +9,8 @@ use std::fs;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::time::UNIX_EPOCH;
+use std::sync::Arc;
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use sha2::Digest as _;
 use steve_node_api::glob::{Rules, never_entered};
@@ -397,7 +398,12 @@ pub(crate) fn inside(base: &Path, rel: &RelPath) -> ApiResult<PathBuf> {
 
 /// Up to `max` bytes (at most [`MAX_READ`]) of the file at `real` from `offset`. A file that is not
 /// at `expected` any more is a `conflict`: read it again from the start.
+///
+/// `real` was checked against `base` (canonical) before, but a directory on the way can be swapped
+/// for a link out between that check and the open: the file opened is checked again, by where its
+/// descriptor really is, before a byte of it is read.
 pub(crate) fn read(
+    base: &Path,
     real: &Path,
     expected: Option<&Revision>,
     offset: u64,
@@ -405,6 +411,9 @@ pub(crate) fn read(
 ) -> ApiResult<ReadChunk> {
     let io = |e: io::Error| ApiError::new(ErrorCode::Invalid, format!("cannot read: {e}"));
     let mut f = fs::File::open(real).map_err(io)?;
+    if !opened_path(&f).map_err(io)?.starts_with(base) {
+        return Err(ApiError::new(ErrorCode::Denied, "outside the root"));
+    }
     let meta = f.metadata().map_err(io)?;
     if !meta.is_file() {
         return Err(ApiError::new(ErrorCode::Invalid, "not a file"));
@@ -423,6 +432,127 @@ pub(crate) fn read(
         eof: offset + bytes.len() as u64 >= meta.len(),
         bytes,
     })
+}
+
+/// Where the file open as `f` really is, links resolved: what the kernel says of the descriptor,
+/// not of the path it was opened by.
+#[cfg(target_os = "macos")]
+fn opened_path(f: &fs::File) -> io::Result<PathBuf> {
+    use std::ffi::CStr;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStrExt;
+    let mut buf = vec![0u8; libc::PATH_MAX as usize + 1];
+    // SAFETY: F_GETPATH writes a NUL-terminated path of at most PATH_MAX bytes into `buf`.
+    if unsafe { libc::fcntl(f.as_raw_fd(), libc::F_GETPATH, buf.as_mut_ptr()) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    let path = CStr::from_bytes_until_nul(&buf).map_err(io::Error::other)?;
+    Ok(PathBuf::from(std::ffi::OsStr::from_bytes(path.to_bytes())))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn opened_path(f: &fs::File) -> io::Result<PathBuf> {
+    use std::os::fd::AsRawFd;
+    fs::read_link(format!("/proc/self/fd/{}", f.as_raw_fd()))
+}
+
+/// Scans kept in memory at most, read or not.
+pub(crate) const MAX_KEPT_SCANS: usize = 32;
+/// Entries kept over all scans at most (a scan lists at most [`MAX_SCAN_FILES`]).
+const MAX_KEPT_ENTRIES: usize = 500_000;
+/// A scan whose last page was served stays this long, for a page asked again.
+const READ_GRACE: Duration = Duration::from_secs(60);
+/// A scan not paged for this long is given up on.
+const IDLE: Duration = Duration::from_secs(15 * 60);
+
+/// The manifests of finished scans, until a restart. One still being read is never dropped for
+/// another: a scan that would need that is refused as `busy` instead, so scans read at the same
+/// time cannot keep pushing each other out.
+#[derive(Default)]
+pub(crate) struct Scans {
+    kept: Vec<Kept>,
+    /// Scans accepted and still walking: each holds a place.
+    walking: usize,
+}
+
+struct Kept {
+    id: OperationId,
+    m: Arc<Manifest>,
+    used: Instant,
+    read_out: bool,
+}
+
+impl Kept {
+    fn droppable(&self, now: Instant) -> bool {
+        let idle = now.saturating_duration_since(self.used);
+        (self.read_out && idle >= READ_GRACE) || idle >= IDLE
+    }
+}
+
+impl Scans {
+    /// A place for a scan about to walk, or `busy` while every place is taken by a scan being read
+    /// or walked.
+    pub(crate) fn reserve(&mut self, now: Instant) -> ApiResult<()> {
+        let held = self.kept.iter().filter(|k| !k.droppable(now)).count();
+        if held + self.walking >= MAX_KEPT_SCANS {
+            return Err(busy());
+        }
+        self.walking += 1;
+        Ok(())
+    }
+
+    /// The place of a scan that is not walking any more.
+    pub(crate) fn release(&mut self) {
+        self.walking = self.walking.saturating_sub(1);
+    }
+
+    /// Keeps `m` as the manifest of `id`, dropping only scans read out or given up on (the least
+    /// recently paged first); `busy` if it does not fit without dropping one still being read.
+    pub(crate) fn keep(&mut self, id: OperationId, m: Manifest, now: Instant) -> ApiResult<()> {
+        self.kept.retain(|k| k.id != id);
+        let total = |kept: &[Kept]| kept.iter().map(|k| k.m.entries.len()).sum::<usize>();
+        while self.kept.len() >= MAX_KEPT_SCANS
+            || total(&self.kept) + m.entries.len() > MAX_KEPT_ENTRIES
+        {
+            let oldest = self
+                .kept
+                .iter()
+                .enumerate()
+                .filter(|(_, k)| k.droppable(now))
+                .min_by_key(|(_, k)| k.used)
+                .map(|(i, _)| i)
+                .ok_or_else(busy)?;
+            self.kept.swap_remove(oldest);
+        }
+        self.kept.push(Kept {
+            id,
+            m: Arc::new(m),
+            used: now,
+            read_out: false,
+        });
+        Ok(())
+    }
+
+    /// The manifest of `id`, if kept: paged now.
+    pub(crate) fn get(&mut self, id: &OperationId, now: Instant) -> Option<Arc<Manifest>> {
+        let k = self.kept.iter_mut().find(|k| k.id == *id)?;
+        k.used = now;
+        Some(k.m.clone())
+    }
+
+    /// The last page of `id` was served.
+    pub(crate) fn read_out(&mut self, id: &OperationId) {
+        if let Some(k) = self.kept.iter_mut().find(|k| k.id == *id) {
+            k.read_out = true;
+        }
+    }
+}
+
+fn busy() -> ApiError {
+    ApiError::new(
+        ErrorCode::Busy,
+        "too many scans are being read: scan again later",
+    )
 }
 
 #[cfg(test)]
@@ -488,5 +618,98 @@ mod tests {
             assert!(p.issues.is_empty());
         }
         assert_eq!(seen, entries);
+    }
+
+    fn manifest(n: usize) -> Manifest {
+        Manifest {
+            revision: Revision::new("m1").unwrap(),
+            entries: (0..n)
+                .map(|i| FileInfo {
+                    path: RelPath::new(format!("{i}.md")).unwrap(),
+                    is_dir: false,
+                    size: 1,
+                    version: Revision::new("v1").unwrap(),
+                    mtime: None,
+                    too_big: false,
+                })
+                .collect(),
+            issues: vec![],
+        }
+    }
+
+    fn op(i: usize) -> OperationId {
+        OperationId::new(format!("op_{i}")).unwrap()
+    }
+
+    /// Scans being read are never dropped for a new one: past the limit a new scan is `busy`, and
+    /// only scans read out (after a grace) or given up on make room, the least recently paged first.
+    #[test]
+    fn kept_scans_being_read_are_never_dropped() {
+        let t0 = Instant::now();
+        let mut s = Scans::default();
+        for i in 0..MAX_KEPT_SCANS {
+            s.reserve(t0).unwrap();
+            s.release();
+            s.keep(op(i), manifest(1), t0).unwrap();
+        }
+        assert_eq!(s.reserve(t0).unwrap_err().code, ErrorCode::Busy);
+        assert_eq!(
+            s.keep(op(99), manifest(1), t0).unwrap_err().code,
+            ErrorCode::Busy
+        );
+        assert!((0..MAX_KEPT_SCANS).all(|i| s.get(&op(i), t0).is_some()));
+        // a scan read out stays for its grace, then makes room
+        s.read_out(&op(3));
+        assert!(s.reserve(t0 + READ_GRACE / 2).is_err());
+        let later = t0 + READ_GRACE;
+        s.reserve(later).unwrap();
+        s.release();
+        s.keep(op(99), manifest(1), later).unwrap();
+        assert!(s.get(&op(3), later).is_none());
+        assert!(s.get(&op(4), later).is_some());
+        // scans walking hold their places too
+        assert!(s.reserve(later).is_err());
+        // scans not paged for long are given up on, the least recently paged first
+        let idle = t0 + IDLE;
+        s.get(&op(0), later);
+        s.keep(op(100), manifest(1), idle).unwrap();
+        assert!(s.get(&op(1), idle).is_none());
+        assert!(s.get(&op(0), idle).is_some());
+    }
+
+    /// Entries are bounded over all kept scans, not only their count.
+    #[test]
+    fn kept_scans_are_bounded_by_entries() {
+        let t0 = Instant::now();
+        let mut s = Scans::default();
+        let big = MAX_KEPT_ENTRIES / 2;
+        s.keep(op(1), manifest(big), t0).unwrap();
+        s.keep(op(2), manifest(big), t0).unwrap();
+        let e = s.keep(op(3), manifest(1), t0).unwrap_err();
+        assert_eq!(e.code, ErrorCode::Busy);
+        s.read_out(&op(1));
+        s.keep(op(3), manifest(1), t0 + READ_GRACE).unwrap();
+        assert!(s.get(&op(1), t0 + READ_GRACE).is_none());
+        assert!(s.get(&op(2), t0 + READ_GRACE).is_some());
+    }
+
+    /// A directory swapped for a link out between the check of the path and the open: the file
+    /// opened is outside the root, and not a byte of it is read.
+    #[test]
+    fn a_read_checks_the_file_it_opened() {
+        let d = tempfile::tempdir().unwrap();
+        let top = d.path().canonicalize().unwrap();
+        let (base, out) = (top.join("root"), top.join("out"));
+        fs::create_dir_all(base.join("d")).unwrap();
+        fs::create_dir_all(&out).unwrap();
+        fs::write(base.join("d/f.md"), b"inside").unwrap();
+        fs::write(out.join("f.md"), b"secret").unwrap();
+        let real = inside(&base, &RelPath::new("d/f.md").unwrap()).unwrap();
+        assert_eq!(read(&base, &real, None, 0, 100).unwrap().bytes, b"inside");
+        // the swap, after `inside` checked the path
+        fs::rename(base.join("d"), top.join("old")).unwrap();
+        std::os::unix::fs::symlink(&out, base.join("d")).unwrap();
+        let e = read(&base, &real, None, 0, 100).unwrap_err();
+        assert_eq!(e.code, ErrorCode::Denied);
     }
 }
