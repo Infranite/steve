@@ -186,7 +186,7 @@ pub(crate) fn emit_all(inner: &Inner, t: &Tx, evs: Vec<(Subject, EventBody)>) ->
             Subject::Operation { operation } => derived_id("op", operation.as_str()),
         })?;
         let n = t.bump("event")?;
-        let event_id: EventId = id(format!("ev_{}_{n}", inner.incarnation))?;
+        let event_id: EventId = id(format!("ev_{}_{}_{n}", inner.j.id(), inner.incarnation))?;
         t.record(&stream, |cursor| NodeEvent {
             schema: EVENT_SCHEMA,
             id: event_id,

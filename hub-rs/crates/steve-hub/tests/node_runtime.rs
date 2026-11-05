@@ -2521,6 +2521,64 @@ async fn an_attempt_the_node_has_no_record_of_ends_on_stop() {
     assert!(h.rt.cancel(S).is_ok_and(|x| !x), "nothing left to stop");
 }
 
+/// N1-3: the Node's journal is made again mid-session (its home deleted). What the Hub sent is no
+/// record there, so reconciling makes the running attempt unknown and never sends it again; the
+/// new journal's events on the same session stream come in a new epoch with new ids, so the Hub
+/// takes them beside the old ones without a conflict and the Node's delivery drains.
+#[tokio::test]
+async fn a_new_node_journal_mid_session_is_taken_in_without_a_conflict() {
+    let mut h = hub();
+    h.bind();
+    h.one_turn("hello").await;
+    h.rt.prompt(S, "second", "user", &[]).unwrap();
+    until("running", || {
+        h.q::<i64>("SELECT COUNT(*) FROM runtime_attempts WHERE state='running'") == 1
+    })
+    .await;
+    let old_epochs: Vec<String> = h
+        .store
+        .reader(|c| {
+            let mut st = c.prepare("SELECT DISTINCT epoch FROM node_event_inbox")?;
+            let v = st
+                .query_map([], |r| r.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok::<_, StoreError>(v)
+        })
+        .unwrap();
+    assert_eq!(old_epochs, ["e1"]);
+
+    h.node.reset_journal();
+    h.restart_hub().await;
+    assert_eq!(
+        h.q::<String>(
+            "SELECT state FROM runtime_attempts ORDER BY created DESC, rowid DESC LIMIT 1"
+        ),
+        "unknown",
+        "the Node has no record of the running attempt"
+    );
+    assert!(h.rt.is_busy(S));
+
+    // the new journal speaks on the same session stream again, from seq 1
+    let failures = h.node.delivery_failures();
+    build::ready(&h.node, S).await;
+    until("delivered", || h.node.unacked() == 0).await;
+    assert_eq!(h.node.delivery_failures(), failures, "no batch was refused");
+    let stream = derived_id("session", S);
+    let fresh: i64 = h.q(&format!(
+        "SELECT COUNT(*) FROM node_event_inbox WHERE stream='{stream}' AND epoch='j1' AND seq=1"
+    ));
+    assert_eq!(fresh, 1, "the new epoch is taken in");
+    let old: i64 = h.q(&format!(
+        "SELECT COUNT(*) FROM node_event_inbox WHERE stream='{stream}' AND epoch='e1' AND seq=1"
+    ));
+    assert_eq!(old, 1, "beside the old one");
+    assert_eq!(
+        h.count("start_turn"),
+        2,
+        "the unknown attempt is never sent again"
+    );
+}
+
 /// Issue: an AttemptStarted applied after reconciliation made the attempt unknown leaves it
 /// unknown (Stop still abandons it).
 #[tokio::test]
