@@ -5,13 +5,15 @@
 //! protocols end here: the ACP driver (`steve_acp::session`, `normalize`, `permission`) speaks to the
 //! adapter, and only Steve's events leave.
 //!
-//! A command is accepted in one journal transaction (the command, its state and its events), then
-//! handed to its session's [`actor`], which does the process work in order and journals what came
-//! of it. A restart turns what was running into `unknown`; the Hub decides what happens to it
-//! ([`ExecutionControl::abandon`]), and nothing is freed before its processes are confirmed gone.
+//! A command is accepted in one journal transaction (the command, its state, its reservations and
+//! its events), then handed to its session's [`actor`], which does the process work in order and
+//! journals what came of it. A restart turns what was running into `unknown`; the Hub decides what
+//! happens to it ([`ExecutionControl::abandon`]), and nothing is freed before its processes are
+//! confirmed gone ([`procs`]).
 
 mod actor;
 mod journal;
+mod procs;
 mod tools;
 pub mod workspace;
 
@@ -42,6 +44,12 @@ pub struct NodeConfig {
     pub capacity: Capacity,
 }
 
+/// Events the Hub has not taken yet, at most (bytes): past it the Node takes no new work.
+const JOURNAL_QUOTA: u64 = 256 << 20;
+/// How long a delivery may take, and how often an idle Node checks the Hub is there.
+const HUB_TIMEOUT: Duration = Duration::from_secs(15);
+const HEARTBEAT: Duration = Duration::from_secs(10);
+
 pub(crate) fn now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -54,29 +62,6 @@ where
     T::Error: std::fmt::Display,
 {
     T::try_from(s.into()).map_err(|e| ApiError::new(ErrorCode::Internal, e.to_string()))
-}
-
-/// The process group is gone (or now stopped: TERM, then KILL). False: something in it still runs.
-pub(crate) async fn stop_group(pgid: i64) -> bool {
-    let alive = |p: i64| unsafe { libc::kill(-(p as libc::pid_t), 0) } == 0;
-    if pgid <= 1 || !alive(pgid) {
-        return true;
-    }
-    unsafe { libc::kill(-(pgid as libc::pid_t), libc::SIGTERM) };
-    for _ in 0..30 {
-        if !alive(pgid) {
-            return true;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    unsafe { libc::kill(-(pgid as libc::pid_t), libc::SIGKILL) };
-    for _ in 0..20 {
-        if !alive(pgid) {
-            return true;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    !alive(pgid)
 }
 
 /// The exclusive hold on a Node's home: one Node per journal.
@@ -112,13 +97,45 @@ pub(crate) struct Inner {
     files: Mutex<Option<Arc<dyn HubFiles>>>,
     wake: tokio::sync::Notify,
     delivering: AtomicBool,
+    closed: AtomicBool,
+    /// The journal failed: no new work until a restart.
+    faulted: AtomicBool,
     /// Since when the Hub does not take events (for the offline lease).
     hub_down_since: Mutex<Option<i64>>,
+    /// What each session's harness sent during its running attempt (bytes, as it arrived).
+    output: Mutex<HashMap<SessionId, Arc<AtomicU64>>>,
     tools: Arc<tools::Endpoint>,
     tools_url: Mutex<Option<String>>,
     /// Workspace work on one repository goes one at a time.
     repos: Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>,
     snapshots: Mutex<HashMap<u64, Snapshot>>,
+    cache_n: AtomicU64,
+}
+
+impl Inner {
+    pub(crate) fn fault(&self) {
+        self.faulted.store(true, Ordering::SeqCst);
+    }
+    pub(crate) fn faulted(&self) -> bool {
+        self.faulted.load(Ordering::SeqCst)
+    }
+    pub(crate) fn hub_down_since(&self) -> Option<i64> {
+        *self.hub_down_since.lock().unwrap()
+    }
+    pub(crate) fn output_counter(&self, session: &SessionId) -> Arc<AtomicU64> {
+        self.output
+            .lock()
+            .unwrap()
+            .entry(session.clone())
+            .or_default()
+            .clone()
+    }
+    pub(crate) fn output(&self, session: &SessionId) -> u64 {
+        self.output_counter(session).load(Ordering::SeqCst)
+    }
+    pub(crate) fn reset_output(&self, session: &SessionId) {
+        self.output_counter(session).store(0, Ordering::SeqCst);
+    }
 }
 
 /// Which attempt a session runs now, for the tool endpoint (from the journal).
@@ -265,9 +282,10 @@ pub(crate) async fn prompt(
 }
 
 /// An attachment's bytes, from the cache (checked) or the Hub (for this execution; size, progress
-/// and hash checked; written whole or not at all).
+/// and hash checked; written to a file of its own, then published whole).
 async fn fetch(inner: &Arc<Inner>, exec: &ExecutionRef, a: &ArtifactRef) -> ApiResult<PathBuf> {
     use sha2::Digest as _;
+    let internal = |e: std::io::Error| ApiError::new(ErrorCode::Internal, e.to_string());
     let dir = inner.cfg.home.join("blobs");
     let path = dir.join(a.sha256.as_str().trim_start_matches("sha256:"));
     if let Ok(bytes) = std::fs::read(&path)
@@ -326,41 +344,73 @@ async fn fetch(inner: &Arc<Inner>, exec: &ExecutionRef, a: &ArtifactRef) -> ApiR
             "attachment hash or size mismatch",
         ));
     }
-    std::fs::create_dir_all(&dir).map_err(|e| ApiError::new(ErrorCode::Internal, e.to_string()))?;
+    std::fs::create_dir_all(&dir).map_err(internal)?;
+    // a temporary file of this call only, then published in one rename
+    let n = inner.cache_n.fetch_add(1, Ordering::SeqCst);
     let tmp = dir.join(format!(
-        ".{}.{}",
+        ".{}.{}.{n}.{}",
         path.file_name().unwrap_or_default().to_string_lossy(),
-        now()
+        inner.incarnation,
+        std::process::id()
     ));
-    std::fs::write(&tmp, &bytes).map_err(|e| ApiError::new(ErrorCode::Internal, e.to_string()))?;
-    std::fs::rename(&tmp, &path).map_err(|e| ApiError::new(ErrorCode::Internal, e.to_string()))?;
+    {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+            .map_err(internal)?;
+        f.write_all(&bytes).map_err(internal)?;
+        f.sync_all().map_err(internal)?;
+    }
+    std::fs::rename(&tmp, &path).map_err(internal)?;
     Ok(path)
 }
 
-/// HEAD of the workspace's repository, if it is one.
-fn head_of(dir: &Path) -> Option<String> {
+/// HEAD of the workspace's repository: `Ok(None)` when it is no repository, an error when it is one
+/// and git cannot tell.
+fn head_of(dir: &Path) -> ApiResult<Option<String>> {
+    let is_repo = dir.join(".git").exists();
     let o = std::process::Command::new("git")
         .args(["rev-parse", "HEAD"])
         .current_dir(dir)
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .output()
-        .ok()?;
-    o.status
-        .success()
-        .then(|| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .output();
+    match o {
+        Ok(o) if o.status.success() => {
+            Ok(Some(String::from_utf8_lossy(&o.stdout).trim().to_string()))
+        }
+        _ if !is_repo => Ok(None),
+        _ => Err(ApiError::new(
+            ErrorCode::Internal,
+            "the workspace's HEAD cannot be read",
+        )),
+    }
 }
 
-/// A file's version as the Node sees it (size and mtime), `None` when it does not exist.
-fn file_version(p: &Path) -> Option<Revision> {
-    let m = std::fs::symlink_metadata(p).ok()?;
-    let mt = m
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    Revision::new(format!("v{}.{mt}", m.len())).ok()
+/// A file's version as the Node sees it (size, modification and change time, inode): `Ok(None)`
+/// when it does not exist, an error when it cannot be read.
+fn file_version(p: &Path) -> ApiResult<Option<Revision>> {
+    use std::os::unix::fs::MetadataExt;
+    match std::fs::symlink_metadata(p) {
+        Ok(m) => Ok(Some(
+            Revision::new(format!(
+                "v{}.{}.{}.{}.{}",
+                m.len(),
+                m.mtime(),
+                m.mtime_nsec(),
+                m.ctime_nsec() + m.ctime() * 1_000_000_000,
+                m.ino()
+            ))
+            .map_err(|e| ApiError::new(ErrorCode::Internal, e.to_string()))?,
+        )),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(ApiError::new(
+            ErrorCode::Internal,
+            format!("cannot stat: {e}"),
+        )),
+    }
 }
 
 /// A word for a shell, quoted so that a list of arguments reads back as exactly that list.
@@ -375,9 +425,49 @@ fn shell_quote(a: &str) -> String {
     }
 }
 
+/// `p` (absolute, or relative to `dir`) is inside the workspace `dir` once symlinks are followed:
+/// the path itself if it exists, else its nearest existing parent. Returns its typed reference and
+/// where it is on disk.
+fn inside(dir: &Path, w: &WorkspaceRef, p: &str) -> Option<(PathRef, PathBuf)> {
+    let path = Path::new(p);
+    let rel = if path.is_absolute() {
+        path.strip_prefix(dir).ok()?.to_path_buf()
+    } else {
+        path.to_path_buf()
+    };
+    if rel
+        .components()
+        .any(|c| !matches!(c, std::path::Component::Normal(_)))
+    {
+        return None;
+    }
+    let abs = dir.join(&rel);
+    let real_dir = dir.canonicalize().ok()?;
+    let mut probe = abs.clone();
+    let real = loop {
+        if let Ok(r) = probe.canonicalize() {
+            break r;
+        }
+        if !probe.pop() {
+            return None;
+        }
+    };
+    if !real.starts_with(&real_dir) {
+        return None;
+    }
+    Some((
+        PathRef {
+            workspace: w.clone(),
+            rel: RelPath::new(rel.to_string_lossy().to_string()).ok()?,
+        },
+        abs,
+    ))
+}
+
 /// A harness's permission request as Steve's: its facts bound to this execution and workspace
-/// (paths inside it are typed, anything outside it is said so: an explicit unknown), with what must
-/// still hold when the answer is used (HEAD of the repository, each target file's version).
+/// (paths inside it are typed, anything outside it or not fully known is said so: an explicit
+/// unknown), with what must still hold when the answer is used (the workspace's revision, HEAD of
+/// its repository, each target file's version).
 pub(crate) fn bind_permission(
     inner: &Inner,
     session: &SessionId,
@@ -388,43 +478,25 @@ pub(crate) fn bind_permission(
     deadline: Timestamp,
 ) -> ApiResult<PermissionRequest> {
     use steve_acp::normalize::CommandFact;
-    let row = inner
-        .j
-        .read(|t| t.session(session))?
-        .ok_or_else(|| ApiError::new(ErrorCode::Invalid, "no such session"))?;
+    let (row, wrow) = inner.j.read(|t| {
+        let row = t
+            .session(session)?
+            .ok_or_else(|| ApiError::new(ErrorCode::Invalid, "no such session"))?;
+        let w = t
+            .workspace(&row.open.workspace.id)?
+            .ok_or_else(|| ApiError::new(ErrorCode::Invalid, "no such workspace"))?;
+        Ok((row, w))
+    })?;
     let w = row.open.workspace.clone();
     let dir = workspace_dir(inner, &w)?;
     let fact = &asked.fact;
-    // a path inside the workspace, typed; None: outside it (or not a plain path)
-    let inside = |p: &str| -> Option<(PathRef, PathBuf)> {
-        let path = Path::new(p);
-        let rel = if path.is_absolute() {
-            path.strip_prefix(&dir).ok()?.to_path_buf()
-        } else {
-            path.to_path_buf()
-        };
-        if rel
-            .components()
-            .any(|c| !matches!(c, std::path::Component::Normal(_)))
-        {
-            return None;
-        }
-        let rel_s = rel.to_string_lossy().to_string();
-        Some((
-            PathRef {
-                workspace: w.clone(),
-                rel: RelPath::new(rel_s).ok()?,
-            },
-            dir.join(&rel),
-        ))
-    };
-    let bound: Vec<Option<(PathRef, PathBuf)>> = fact.paths.iter().map(|p| inside(p)).collect();
+    let bound: Vec<Option<(PathRef, PathBuf)>> =
+        fact.paths.iter().map(|p| inside(&dir, &w, p)).collect();
     let all_inside = bound.iter().all(Option::is_some);
     let refs: Vec<PathRef> = bound.iter().flatten().map(|(r, _)| r.clone()).collect();
-    let outside = |what: &str| Action::Unknown {
-        summary: format!("{what}（工作区外）：{}", fact.paths.join(", ")),
+    let unknown = |what: &str| Action::Unknown {
+        summary: format!("{what}：{}", fact.paths.join(", ")),
     };
-    let mut pre = vec![];
     let action = match fact.category {
         ToolCategory::Steve => Action::Tool {
             name: fact
@@ -445,7 +517,7 @@ pub(crate) fn bind_permission(
                 ),
                 None => None,
             };
-            match (command, fact.cwd.as_deref().map(inside)) {
+            match (command, fact.cwd.as_deref().map(|c| inside(&dir, &w, c))) {
                 (Some(command), None) => Action::Exec {
                     command,
                     cwd: None,
@@ -472,20 +544,17 @@ pub(crate) fn bind_permission(
             change_summary: asked.title.clone(),
             change: fact.change.clone(),
         },
-        ToolCategory::Edit => outside("写入"),
+        ToolCategory::Edit => unknown("写入（工作区外或未知）"),
         ToolCategory::Delete if all_inside && !refs.is_empty() => Action::Delete {
             paths: refs.clone(),
         },
-        ToolCategory::Delete => outside("删除"),
-        ToolCategory::Move if all_inside && refs.len() == 2 => Action::Move {
-            from: refs[0].clone(),
-            to: refs[1].clone(),
-        },
-        ToolCategory::Move => outside("移动"),
-        ToolCategory::Read if all_inside => Action::Read {
+        ToolCategory::Delete => unknown("删除（工作区外或未知）"),
+        // the facts do not say which path is the source: never guessed
+        ToolCategory::Move => unknown("移动"),
+        ToolCategory::Read if all_inside && !refs.is_empty() => Action::Read {
             paths: refs.clone(),
         },
-        ToolCategory::Read => outside("读取"),
+        ToolCategory::Read => unknown("读取（工作区外或未知）"),
         ToolCategory::Search => Action::Search {
             query: fact.query.clone().unwrap_or_default(),
         },
@@ -496,21 +565,22 @@ pub(crate) fn bind_permission(
             summary: asked.title.clone(),
         },
     };
-    if matches!(
-        action,
-        Action::Write { .. } | Action::Delete { .. } | Action::Move { .. }
-    ) {
+    let mut pre = vec![Precondition::Workspace {
+        workspace: w.clone(),
+        revision: wrow.view.revision.clone(),
+    }];
+    if matches!(action, Action::Write { .. } | Action::Delete { .. }) {
         for (r, abs) in bound.iter().flatten() {
             pre.push(Precondition::File {
                 path: r.clone(),
-                version: file_version(abs),
+                version: file_version(abs)?,
             });
         }
     }
     if matches!(
         action,
-        Action::Exec { .. } | Action::Write { .. } | Action::Delete { .. } | Action::Move { .. }
-    ) && let Some(head) = head_of(&dir)
+        Action::Exec { .. } | Action::Write { .. } | Action::Delete { .. }
+    ) && let Some(head) = head_of(&dir)?
     {
         pre.push(Precondition::Head {
             workspace: w.clone(),
@@ -533,30 +603,27 @@ pub(crate) fn bind_permission(
     })
 }
 
-/// The preconditions of a request still hold (checked right before an approval is used).
-fn preconditions_hold(inner: &Inner, t: &Tx, pre: &[Precondition]) -> ApiResult<()> {
+/// The preconditions of a request still hold (checked off the journal right before an approval is
+/// given to the harness). Files can change between this check and the harness's own write: a
+/// window no lock of the Node closes, as the protocol says.
+pub(crate) fn preconditions_hold(inner: &Inner, pre: &[Precondition]) -> ApiResult<()> {
     for p in pre {
         let ok = match p {
             Precondition::Workspace {
                 workspace,
                 revision,
-            } => t
-                .workspace(&workspace.id)?
+            } => inner
+                .j
+                .read(|t| t.workspace(&workspace.id))?
                 .is_some_and(|w| w.view.revision == *revision),
             Precondition::Head { workspace, commit } => {
-                let row = t
-                    .workspace(&workspace.id)?
-                    .ok_or_else(|| ApiError::new(ErrorCode::Stale, "the workspace is gone"))?;
-                head_of(Path::new(&row.path)).as_deref() == Some(commit.as_str())
+                head_of(&workspace_dir(inner, workspace)?)?.as_deref() == Some(commit.as_str())
             }
             Precondition::File { path, version } => {
-                let row = t
-                    .workspace(&path.workspace.id)?
-                    .ok_or_else(|| ApiError::new(ErrorCode::Stale, "the workspace is gone"))?;
-                file_version(&Path::new(&row.path).join(path.rel.as_str())) == *version
+                let dir = workspace_dir(inner, &path.workspace)?;
+                file_version(&dir.join(path.rel.as_str()))? == *version
             }
         };
-        let _ = inner;
         if !ok {
             return Err(ApiError::new(
                 ErrorCode::Stale,
@@ -621,11 +688,10 @@ impl LocalNode {
             .map_err(|e| ApiError::new(ErrorCode::Internal, format!("node home: {e}")))?;
         let lock = HomeLock::take(&cfg.home)?;
         let (j, incarnation) = Journal::open(&cfg.home.join("node.sqlite3"))?;
-        // a group of the old incarnation that is gone already holds nothing
+        // a group of the old incarnation that is surely gone holds nothing
         j.tx(|t| {
             for p in t.procs()? {
-                let alive = unsafe { libc::kill(-(p.pgid as libc::pid_t), 0) } == 0;
-                if p.incarnation < incarnation && !alive {
+                if p.incarnation < incarnation && procs::state(p.pgid, p.started).gone() {
                     t.drop_proc(&p.session, p.pgid)?;
                 }
             }
@@ -642,11 +708,15 @@ impl LocalNode {
             files: Mutex::new(None),
             wake: tokio::sync::Notify::new(),
             delivering: AtomicBool::new(false),
+            closed: AtomicBool::new(false),
+            faulted: AtomicBool::new(false),
             hub_down_since: Mutex::new(None),
+            output: Mutex::new(HashMap::new()),
             tools: tools::Endpoint::new(Arc::new(CurrentOf(weak.clone()))),
             tools_url: Mutex::new(None),
             repos: Mutex::new(HashMap::new()),
             snapshots: Mutex::new(HashMap::new()),
+            cache_n: AtomicU64::new(0),
         })))
     }
 
@@ -675,6 +745,20 @@ impl LocalNode {
         Ok(())
     }
 
+    /// Stops every harness (confirmed or recorded as not stopped) and ends the Node's tasks; the
+    /// home is free once the last handle is dropped.
+    pub async fn shutdown(&self) {
+        self.0.closed.store(true, Ordering::SeqCst);
+        let actors: Vec<_> = self.0.actors.lock().unwrap().drain().collect();
+        for (_, tx) in actors {
+            let (done, wait) = tokio::sync::oneshot::channel();
+            if tx.send(Msg::Shutdown { done }).is_ok() {
+                let _ = wait.await;
+            }
+        }
+        self.0.wake.notify_one();
+    }
+
     fn actor(&self, session: &SessionId) -> mpsc::UnboundedSender<Msg> {
         let mut a = self.0.actors.lock().unwrap();
         if let Some(tx) = a.get(session).filter(|t| !t.is_closed()) {
@@ -693,8 +777,9 @@ impl LocalNode {
     }
 
     /// The command inbox. Known id: same method and content → its receipt (even past the window),
-    /// otherwise conflict. New: past the window → stale; `decide` checks against the journal and
-    /// changes it, in the same transaction as the command and its events. Returns whether it was new.
+    /// otherwise conflict. New: past the window → stale; a closed or faulted Node takes nothing new;
+    /// `decide` checks against the journal and changes it, in the same transaction as the command
+    /// and its events. Returns whether it was new.
     fn accept<T: serde::Serialize>(
         &self,
         method: &'static str,
@@ -716,6 +801,18 @@ impl LocalNode {
             }
             if now() > c.accept_before.0 {
                 return Err(ApiError::new(ErrorCode::Stale, "past accept_before").on(&c.id));
+            }
+            if self.0.closed.load(Ordering::SeqCst) {
+                return Err(ApiError::new(
+                    ErrorCode::Offline,
+                    "the node is shutting down",
+                ));
+            }
+            if self.0.faulted() {
+                return Err(ApiError::new(
+                    ErrorCode::Internal,
+                    "the node's journal failed: restart it",
+                ));
             }
             let d = decide(t)?;
             let receipt = Receipt {
@@ -756,6 +853,13 @@ impl LocalNode {
             return Err(ApiError::new(
                 ErrorCode::Unsupported,
                 "this node cannot restrict a harness's network",
+            ));
+        }
+        // reads are not confined at all without a sandbox: a list of what may be read cannot be kept
+        if !p.readable.is_empty() {
+            return Err(ApiError::new(
+                ErrorCode::Unsupported,
+                "this node cannot confine what a harness reads",
             ));
         }
         Ok(())
@@ -802,6 +906,17 @@ impl LocalNode {
         Ok(())
     }
 
+    /// The workspace is not being prepared or tidied by another operation.
+    fn workspace_free(t: &Tx, resource: &str) -> ApiResult<()> {
+        if t.reservation(resource)?.is_some() {
+            return Err(ApiError::new(
+                ErrorCode::Busy,
+                "the workspace is being prepared or tidied",
+            ));
+        }
+        Ok(())
+    }
+
     fn repo_lock(&self, repo: &Path) -> Arc<tokio::sync::Mutex<()>> {
         self.0
             .repos
@@ -812,7 +927,8 @@ impl LocalNode {
             .clone()
     }
 
-    /// Finish an operation that ran outside the inbox transaction, with its event.
+    /// Finish an operation that ran outside the inbox transaction, with its event and `more` in the
+    /// same transaction.
     fn complete(&self, op: &OperationId, state: Observed, more: impl FnOnce(&Tx) -> ApiResult<()>) {
         let r = self.0.j.tx(|t| {
             more(t)?;
@@ -836,47 +952,58 @@ impl LocalNode {
         self.0.wake.notify_one();
         if let Err(e) = r {
             tracing::error!("complete {op}: {e}");
+            self.0.fault();
         }
     }
 }
 
+/// Delivers journaled events to the Hub. Every call is bounded; while there is nothing to send the
+/// Node still checks the Hub is there (an empty batch), so a Hub that went silent is noticed for the
+/// offline lease.
 async fn deliver_loop(inner: std::sync::Weak<Inner>) {
     let mut backoff = Duration::from_millis(100);
+    let mut last_ok = std::time::Instant::now();
     loop {
         let Some(me) = inner.upgrade() else { return };
+        if me.closed.load(Ordering::SeqCst) {
+            return;
+        }
         let batch = me.j.read(|t| t.unacked(200)).unwrap_or_else(|e| {
             tracing::error!("node delivery: {e}");
             vec![]
         });
-        if batch.is_empty() {
-            // wait for new events (held at most two seconds: a dropped Node ends this loop)
+        if batch.is_empty() && last_ok.elapsed() < HEARTBEAT {
             let _ = tokio::time::timeout(Duration::from_secs(2), me.wake.notified()).await;
             continue;
         }
         let sink = me.sink.lock().unwrap().clone();
         let Some(sink) = sink else {
+            me.hub_down_since.lock().unwrap().get_or_insert_with(now);
             drop(me);
             tokio::time::sleep(Duration::from_millis(200)).await;
             continue;
         };
-        match sink.commit(EventBatch { events: batch }).await {
-            Ok(ack) => {
+        let sent =
+            tokio::time::timeout(HUB_TIMEOUT, sink.commit(EventBatch { events: batch })).await;
+        match sent {
+            Ok(Ok(ack)) => {
                 backoff = Duration::from_millis(100);
+                last_ok = std::time::Instant::now();
                 *me.hub_down_since.lock().unwrap() = None;
                 if let Err(e) = me.j.tx(|t| t.ack(&ack)) {
                     tracing::error!("node ack: {e}");
                 }
-                if ack.durable.is_empty() {
-                    drop(me);
-                    tokio::time::sleep(backoff).await;
-                }
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 tracing::warn!("hub did not take events: {e}");
                 me.hub_down_since.lock().unwrap().get_or_insert_with(now);
                 drop(me);
                 tokio::time::sleep(backoff).await;
                 backoff = (backoff * 2).min(Duration::from_secs(10));
+            }
+            Err(_) => {
+                tracing::warn!("hub did not answer");
+                me.hub_down_since.lock().unwrap().get_or_insert_with(now);
             }
         }
     }
@@ -901,6 +1028,7 @@ impl SessionExecutor for LocalNode {
             let w = t
                 .workspace(&o.workspace.id)?
                 .ok_or_else(|| ApiError::new(ErrorCode::Invalid, "no such workspace"))?;
+            Self::workspace_free(t, &w.resource)?;
             let old = t.session(&o.session)?;
             if let Some(s) = &old {
                 Self::idle(t, &o.session)?;
@@ -1028,9 +1156,16 @@ impl SessionExecutor for LocalNode {
                     "the session's workspace is gone: open it again",
                 ));
             }
+            Self::workspace_free(t, &w.resource)?;
             Self::check_policy(&tu.run.policy)?;
             Self::check_limits(&tu.run.limits)?;
             Self::idle(t, &tu.session)?;
+            if t.unacked_bytes()? > JOURNAL_QUOTA {
+                return Err(ApiError::new(
+                    ErrorCode::Exhausted,
+                    "the hub has not taken this node's events: no new work until it does",
+                ));
+            }
             let running = t
                 .ops()?
                 .into_iter()
@@ -1093,6 +1228,7 @@ impl SessionExecutor for LocalNode {
         if fresh {
             let _ = self.actor(&c.body).send(Msg::Stop {
                 op: Some(c.id.clone()),
+                abandon: false,
                 done: None,
             });
         }
@@ -1139,7 +1275,8 @@ impl ExecutionControl for LocalNode {
     }
 
     /// Accepted now; finished once the execution's processes are confirmed gone: it then ends as
-    /// interrupted and its session is free to be opened again.
+    /// interrupted and its session is free to be opened again. One abandon per target; only
+    /// executions are abandoned (other unknown operations are found out otherwise).
     async fn abandon(&self, c: Command<Abandon>) -> ApiResult<Receipt> {
         let target = c.body.target.clone();
         let mut session = None;
@@ -1153,38 +1290,47 @@ impl ExecutionControl for LocalNode {
                     "only an unknown execution is abandoned (cancel a live one)",
                 ));
             }
-            if let Some(ExecutionRef::Turn { session: s, .. }) = &op.execution {
-                session = Some(s.clone());
+            let Some(ExecutionRef::Turn { session: s, .. }) = &op.execution else {
+                return Err(ApiError::new(
+                    ErrorCode::Unsupported,
+                    "only an execution is abandoned",
+                ));
+            };
+            if t.reservation(&format!("abandon:{target}"))?.is_some() {
+                return Err(ApiError::new(
+                    ErrorCode::Conflict,
+                    "this execution is being abandoned already",
+                ));
             }
+            t.reserve(&format!("abandon:{target}"), &c.id)?;
+            session = Some(s.clone());
             Ok(Decided::accepted())
         })?;
-        if fresh {
+        if fresh && let Some(s) = session {
             let me = self.clone();
             let op = c.id.clone();
             tokio::spawn(async move {
-                let gone = match &session {
-                    Some(s) => {
-                        let (tx, rx) = tokio::sync::oneshot::channel();
-                        let _ = me.actor(s).send(Msg::Stop {
-                            op: None,
-                            done: Some(tx),
-                        });
-                        rx.await.unwrap_or(false)
-                    }
-                    None => true,
-                };
-                if !gone {
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                let _ = me.actor(&s).send(Msg::Stop {
+                    op: None,
+                    abandon: true,
+                    done: Some(tx),
+                });
+                let stopped = rx.await.unwrap_or(procs::Stopped::Uncertain);
+                let key = format!("abandon:{target}");
+                if !stopped.gone() {
                     return me.complete(
                         &op,
                         failed(ApiError::new(
                             ErrorCode::Busy,
-                            "its processes would not stop",
+                            "its processes would not stop (or are not this node's to stop)",
                         )),
-                        |_| Ok(()),
+                        |t| t.unreserve(&key),
                     );
                 }
                 let inner = me.0.clone();
                 me.complete(&op, Decided::done(OperationResult::Unit).state, |t| {
+                    t.unreserve(&key)?;
                     let Some(o) = t.op(&target)? else {
                         return Ok(());
                     };
@@ -1197,6 +1343,10 @@ impl ExecutionControl for LocalNode {
                         transient: false,
                         acted: true,
                     };
+                    // only if it still is the unknown one this was for
+                    if !matches!(o.receipt.state, Observed::Unknown { .. }) {
+                        return Ok(());
+                    }
                     t.set_state(
                         &target,
                         &Observed::Finished {
@@ -1215,8 +1365,8 @@ impl ExecutionControl for LocalNode {
                             )],
                         )?;
                     }
-                    if let Some(s) = &session
-                        && let Some(mut row) = t.session(s)?
+                    if let Some(mut row) = t.session(&s)?
+                        && row.view.active == o.execution
                     {
                         row.view.phase = SessionPhase::Released;
                         row.view.active = None;
@@ -1229,6 +1379,8 @@ impl ExecutionControl for LocalNode {
         Ok(r)
     }
 
+    /// Accepted now (checked against the waiting request); finished once the answer is given to the
+    /// harness, after its preconditions were checked again right before.
     async fn resolve_permission(&self, c: Command<PermissionResolution>) -> ApiResult<Receipt> {
         let res = c.body.clone();
         let mut session = None;
@@ -1260,38 +1412,18 @@ impl ExecutionControl for LocalNode {
             if o.receipt.state.is_finished() || o.cancel {
                 return Err(ApiError::new(ErrorCode::Stale, "that attempt is over"));
             }
-            if res.decision == PermissionDecision::AllowOnce {
-                preconditions_hold(&self.0, t, &req.preconditions)?;
+            if t.answer_pending_for(&res.id)? {
+                return Err(ApiError::new(
+                    ErrorCode::Conflict,
+                    "another answer to this request is being given",
+                ));
             }
-            t.drop_wait(&res.id)?;
-            let on: Vec<WaitRef> = t
-                .waits_of(&op)?
-                .into_iter()
-                .map(|w| WaitRef::Permission(w.id))
-                .collect();
-            t.set_state(
-                &op,
-                &if on.is_empty() {
-                    Observed::Running
-                } else {
-                    Observed::Waiting { on }
-                },
-            )?;
+            t.put_answer(&c.id, &res)?;
             session = Some(s);
-            let mut d = Decided::done(OperationResult::Unit);
-            d.events = vec![(
-                Subject::Execution(req.execution.clone()),
-                EventBody::PermissionResolved {
-                    resolution: res.clone(),
-                },
-            )];
-            Ok(d)
+            Ok(Decided::accepted())
         })?;
         if fresh && let Some(s) = session {
-            let _ = self.actor(&s).send(Msg::Answer {
-                id: res.id.clone(),
-                decision: res.decision,
-            });
+            let _ = self.actor(&s).send(Msg::Answer { op: c.id.clone() });
         }
         Ok(r)
     }
@@ -1376,12 +1508,14 @@ impl ExecutionControl for LocalNode {
 
 #[async_trait]
 impl WorkspaceExecutor for LocalNode {
-    /// The same resource and spec: the workspace there is. A new one: accepted now, finished once it
-    /// is made (or adopted after checking it is what was asked).
+    /// The same resource and spec: the workspace there is. A new one: reserved and accepted now,
+    /// finished once it is made (or adopted after checking it is what was asked), the workspace and
+    /// the receipt in one transaction.
     async fn prepare_workspace(&self, c: Command<Prepare>) -> ApiResult<Receipt> {
         let spec = digest_of(&c.body.kind)?;
         let wid: WorkspaceId = id(derived_id("w", &c.body.resource))?;
         let (r, fresh) = self.accept("prepare_workspace", &c, |t| {
+            Self::workspace_free(t, &c.body.resource)?;
             if let Some(w) = t.workspace(&wid)? {
                 if w.resource == c.body.resource && w.spec == spec {
                     let mut d = Decided::done(OperationResult::Workspace(w.view.clone()));
@@ -1403,6 +1537,7 @@ impl WorkspaceExecutor for LocalNode {
                 }
                 PrepareKind::Scratch => {}
             }
+            t.reserve(&c.body.resource, &c.id)?;
             Ok(Decided::accepted())
         })?;
         if !fresh || r.state.is_finished() {
@@ -1449,47 +1584,59 @@ impl WorkspaceExecutor for LocalNode {
                     Err(e) => Err(e),
                 },
             };
+            let resource = body.resource.clone();
             let (path, repo, branch) = match made {
                 Ok(x) => x,
-                Err(e) => return me.complete(&op, failed(e), |_| Ok(())),
+                Err(e) => return me.complete(&op, failed(e), |t| t.unreserve(&resource)),
             };
             let inner = me.0.clone();
-            let mut view_out = None;
-            let saved = inner.j.tx(|t| {
+            let usable = workspace::usable(&path);
+            let view_box = std::cell::RefCell::new(None);
+            let r = inner.j.tx(|t| {
+                t.unreserve(&resource)?;
                 let view = WorkspaceView {
                     workspace: WorkspaceRef {
                         node: inner.cfg.node.clone(),
                         id: wid.clone(),
                     },
                     revision: id(format!("r{}", t.bump("revision")?))?,
-                    usable: workspace::usable(&path),
-                    branch,
+                    usable,
+                    branch: branch.clone(),
                     display: workspace::display(&path),
                 };
                 t.put_workspace(&WorkspaceRow {
                     resource: body.resource.clone(),
                     spec: spec.clone(),
                     kind: body.kind.clone(),
-                    repo: repo.map(|r| r.to_string_lossy().to_string()),
+                    repo: repo.as_ref().map(|r| r.to_string_lossy().to_string()),
                     view: view.clone(),
                     path: path.to_string_lossy().to_string(),
                     incarnation: t.bump("workspace")?,
                 })?;
-                view_out = Some(view);
+                let state = Decided::done(OperationResult::Workspace(view.clone())).state;
+                t.set_state(&op, &state)?;
+                emit_all(
+                    &inner,
+                    t,
+                    vec![(
+                        Subject::Operation {
+                            operation: op.clone(),
+                        },
+                        EventBody::OperationChanged {
+                            receipt: Receipt {
+                                operation: op.clone(),
+                                state,
+                            },
+                        },
+                    )],
+                )?;
+                *view_box.borrow_mut() = Some(view);
                 Ok(())
             });
-            match (saved, view_out) {
-                (Ok(()), Some(view)) => me.complete(
-                    &op,
-                    Decided::done(OperationResult::Workspace(view)).state,
-                    |_| Ok(()),
-                ),
-                (Err(e), _) => me.complete(&op, failed(e), |_| Ok(())),
-                (Ok(()), None) => me.complete(
-                    &op,
-                    failed(ApiError::new(ErrorCode::Internal, "no view")),
-                    |_| Ok(()),
-                ),
+            inner.wake.notify_one();
+            if let Err(e) = r {
+                tracing::error!("prepare {op}: {e}");
+                inner.fault();
             }
         });
         Ok(r)
@@ -1507,22 +1654,25 @@ impl WorkspaceExecutor for LocalNode {
         Ok(v)
     }
 
-    /// Refused while something of it runs, waits or is unknown. Accepted now; finished once its
-    /// harnesses are confirmed gone and its directory is removed (what could not be done is said).
+    /// Refused while something of it runs, waits or is unknown, or another prepare or tidy of it is
+    /// under way. Reserved and accepted now: nothing opens or starts in it meanwhile. Finished once
+    /// its harnesses are confirmed gone and its directory is removed (what could not be done is said).
     async fn tidy_workspace(&self, c: Command<Tidy>) -> ApiResult<Receipt> {
         self.mine(&c.body.workspace)?;
         let w = c.body.workspace.clone();
         let mut sessions = vec![];
+        let mut resource = String::new();
         let (r, fresh) = self.accept("tidy_workspace", &c, |t| {
-            for s in t.sessions_in(&w)? {
-                Self::idle(t, &s)?;
-                sessions.push(s);
-            }
             let row = t
                 .workspace(&w.id)?
                 .ok_or_else(|| ApiError::new(ErrorCode::Invalid, "no such workspace"))?;
+            Self::workspace_free(t, &row.resource)?;
             if row.view.revision != c.body.expected {
                 return Err(ApiError::new(ErrorCode::Conflict, "changed since"));
+            }
+            for s in t.sessions_in(&w)? {
+                Self::idle(t, &s)?;
+                sessions.push(s);
             }
             for s in &sessions {
                 if let Some(mut srow) = t.session(s)? {
@@ -1530,6 +1680,8 @@ impl WorkspaceExecutor for LocalNode {
                     t.put_session(&srow)?;
                 }
             }
+            t.reserve(&row.resource, &c.id)?;
+            resource = row.resource;
             let mut d = Decided::accepted();
             d.workspace = Some(w.clone());
             Ok(d)
@@ -1540,32 +1692,36 @@ impl WorkspaceExecutor for LocalNode {
         let me = self.clone();
         let op = c.id.clone();
         let keep = c.body.keep_branch;
+        let expected = c.body.expected.clone();
         tokio::spawn(async move {
             // the harnesses first, confirmed
             for s in &sessions {
                 let (tx, rx) = tokio::sync::oneshot::channel();
                 let _ = me.actor(s).send(Msg::Stop {
                     op: None,
+                    abandon: false,
                     done: Some(tx),
                 });
-                if !rx.await.unwrap_or(false) {
+                if !rx.await.unwrap_or(procs::Stopped::Uncertain).gone() {
+                    let res = resource.clone();
                     return me.complete(
                         &op,
                         failed(ApiError::new(
                             ErrorCode::Busy,
                             "a harness in it would not stop",
                         )),
-                        |_| Ok(()),
+                        |t| t.unreserve(&res),
                     );
                 }
             }
             let row = match me.0.j.read(|t| t.workspace(&w.id)) {
-                Ok(Some(r)) => r,
+                Ok(Some(r)) if r.view.revision == expected => r,
                 _ => {
+                    let res = resource.clone();
                     return me.complete(
                         &op,
-                        Decided::done(OperationResult::Unit).state,
-                        |_| Ok(()),
+                        failed(ApiError::new(ErrorCode::Conflict, "changed since")),
+                        |t| t.unreserve(&res),
                     );
                 }
             };
@@ -1586,6 +1742,7 @@ impl WorkspaceExecutor for LocalNode {
             .await
             .map_err(|e| e.to_string())
             .and_then(|r| r);
+            let res = resource.clone();
             match removed {
                 Ok(note) => me.complete(
                     &op,
@@ -1595,6 +1752,7 @@ impl WorkspaceExecutor for LocalNode {
                         error: note.map(|n| ApiError::new(ErrorCode::Conflict, n)),
                     },
                     |t| {
+                        t.unreserve(&res)?;
                         t.drop_workspace(&w.id)?;
                         for s in &sessions {
                             if let Some(mut srow) = t.session(s)? {
@@ -1605,8 +1763,8 @@ impl WorkspaceExecutor for LocalNode {
                         Ok(())
                     },
                 ),
-                Err(e) => me.complete(&op, failed(ApiError::new(ErrorCode::Internal, e)), |_| {
-                    Ok(())
+                Err(e) => me.complete(&op, failed(ApiError::new(ErrorCode::Internal, e)), |t| {
+                    t.unreserve(&res)
                 }),
             }
         });

@@ -170,11 +170,17 @@ pub async fn open(
                             .and_then(|os| os.iter().find(|o| o["id"] == "model"))
                             .and_then(|o| o["currentValue"].as_str())
                     });
-                if let Some(actual) = actual {
-                    reports.model(actual);
-                    if strict && actual != model {
-                        return Err(err(format!("模型没能生效：请求 {model}，实际 {actual}")));
+                match actual {
+                    Some(actual) => {
+                        reports.model(actual);
+                        if strict && actual != model {
+                            return Err(err(format!("模型没能生效：请求 {model}，实际 {actual}")));
+                        }
                     }
+                    // the adapter took it without saying what it runs: what was asked and accepted
+                    // is in force (strictly; the runner keeps what it last saw, as before)
+                    None if strict => reports.model(model),
+                    None => {}
                 }
                 if updated.get("configOptions").is_some() {
                     config = updated;

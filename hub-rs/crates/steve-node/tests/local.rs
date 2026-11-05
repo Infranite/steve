@@ -852,15 +852,20 @@ async fn a_permission_is_bound_to_the_file_as_it_was() {
     // the file changes before the answer: the approval no longer applies
     std::thread::sleep(Duration::from_millis(20));
     std::fs::write(&file, "two, longer").unwrap();
-    let e = n
-        .resolve_permission(now_cmd("op_r", answer(&req, PermissionDecision::AllowOnce)))
+    // accepted, then checked right before it would be given: it is not given
+    n.resolve_permission(now_cmd("op_r", answer(&req, PermissionDecision::AllowOnce)))
         .await
-        .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Stale);
+        .unwrap();
+    let s = finished(&n, "op_r").await;
+    assert!(
+        matches!(&s, Observed::Finished { outcome: Outcome::Failed, error: Some(e), .. } if e.code == ErrorCode::Stale),
+        "{s:?}"
+    );
     // a rejection still goes through
     n.resolve_permission(now_cmd("op_r2", answer(&req, PermissionDecision::Reject)))
         .await
         .unwrap();
+    assert!(ok(&finished(&n, "op_r2").await));
     t.until("the end", |t| !t.ended().is_empty()).await;
     assert!(t.text().contains("perm:selected:reject"), "{}", t.text());
 }
@@ -898,4 +903,104 @@ async fn a_permission_outside_the_workspace_says_so() {
         "{tool_ids:?} {:?}",
         req.invocation
     );
+}
+
+/// Attachments that never come (a Hub that hangs).
+struct Hanging;
+
+#[async_trait::async_trait]
+impl HubFiles for Hanging {
+    async fn fetch(
+        &self,
+        _a: FileAccess,
+        _id: ArtifactId,
+        _o: u64,
+        _m: u32,
+    ) -> ApiResult<ReadChunk> {
+        tokio::time::sleep(Duration::from_secs(3600)).await;
+        Err(ApiError::new(ErrorCode::Offline, "never"))
+    }
+    async fn begin_upload(&self, _b: BeginUpload) -> ApiResult<Transfer> {
+        Err(ApiError::new(ErrorCode::Unsupported, "x"))
+    }
+    async fn upload(&self, _c: BlobChunk) -> ApiResult<Transfer> {
+        Err(ApiError::new(ErrorCode::Unsupported, "x"))
+    }
+    async fn upload_status(&self, _t: TransferId) -> ApiResult<TransferState> {
+        Err(ApiError::new(ErrorCode::Unsupported, "x"))
+    }
+    async fn finish_upload(&self, _t: TransferId) -> ApiResult<ArtifactRef> {
+        Err(ApiError::new(ErrorCode::Unsupported, "x"))
+    }
+    async fn abort_upload(&self, _t: TransferId) -> ApiResult<TransferState> {
+        Err(ApiError::new(ErrorCode::Unsupported, "x"))
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cancel_while_starting_means_no_prompt_at_all() {
+    let t = T::new(&[]);
+    let n = LocalNode::open(t.config()).unwrap();
+    n.connect(t.sink.clone(), Some(Arc::new(Hanging)));
+    ready(&n, "s_1").await;
+    let mut tr = turn("s_1", "t_1", "a_1", "@say no");
+    tr.run.prompt.push(Part::File {
+        artifact: ArtifactRef {
+            id: ArtifactId::new("f_1").unwrap(),
+            sha256: Digest::sha256(b"x"),
+            size: 1,
+            mime: "text/plain".into(),
+        },
+        name: "a.txt".into(),
+    });
+    n.start_turn(now_cmd("op_t", tr)).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    n.cancel(now_cmd(
+        "op_c",
+        Cancel {
+            target: OperationId::new("op_t").unwrap(),
+            reason: "x".into(),
+        },
+    ))
+    .await
+    .unwrap();
+    t.until("the end", |t| !t.ended().is_empty()).await;
+    assert_eq!(t.ended()[0].outcome, Outcome::Cancelled);
+    assert_eq!(t.sent("session/prompt"), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shutdown_frees_the_home() {
+    let t = T::new(&[]);
+    let n = t.node();
+    ready(&n, "s_1").await;
+    n.shutdown().await;
+    drop(n);
+    // the delivery loop and the actors let go of it
+    let t0 = Instant::now();
+    let again = loop {
+        match LocalNode::open(t.config()) {
+            Ok(x) => break x,
+            Err(e) => {
+                assert_eq!(e.code, ErrorCode::Conflict);
+                assert!(t0.elapsed() < Duration::from_secs(10), "home never freed");
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+    };
+    assert!(again.incarnation() >= 2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reads_that_cannot_be_confined_are_refused() {
+    let t = T::new(&[]);
+    let n = t.node();
+    ready(&n, "s_1").await;
+    let mut o = open_body("s_2");
+    o.policy.readable = vec![PathRef {
+        workspace: ws(),
+        rel: RelPath::new("other").unwrap(),
+    }];
+    let e = n.open_session(now_cmd("op_o", o)).await.unwrap_err();
+    assert_eq!(e.code, ErrorCode::Unsupported);
 }

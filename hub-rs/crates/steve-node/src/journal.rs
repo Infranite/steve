@@ -40,7 +40,11 @@ CREATE TABLE IF NOT EXISTS waits (
   id TEXT PRIMARY KEY, op TEXT NOT NULL, session TEXT NOT NULL, request TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS procs (
   session TEXT PRIMARY KEY, pgid INTEGER NOT NULL, generation INTEGER NOT NULL,
-  incarnation INTEGER NOT NULL, meter TEXT NOT NULL, reports INTEGER NOT NULL DEFAULT 0);
+  incarnation INTEGER NOT NULL, meter TEXT NOT NULL, reports INTEGER NOT NULL DEFAULT 0,
+  started INTEGER);
+CREATE TABLE IF NOT EXISTS reservations (key TEXT PRIMARY KEY, op TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS answers (
+  op TEXT PRIMARY KEY, permission TEXT NOT NULL, resolution TEXT NOT NULL);
 ";
 
 pub(crate) struct Journal {
@@ -84,6 +88,8 @@ pub(crate) struct Proc {
     pub session: SessionId,
     pub pgid: i64,
     pub incarnation: u64,
+    /// The leader's start time when it was started (to tell a reused pid).
+    pub started: Option<u64>,
 }
 
 fn json<T: Serialize>(v: &T) -> String {
@@ -192,6 +198,9 @@ impl Tx<'_> {
         // nobody waits for an answer of the old processes
         self.c()
             .execute("DELETE FROM waits", [])
+            .map_err(internal)?;
+        self.c()
+            .execute("DELETE FROM answers", [])
             .map_err(internal)?;
         let rows: Vec<(String, String)> = self.rows("SELECT id, view FROM sessions", [], |r| {
             Ok((r.get(0)?, r.get(1)?))
@@ -683,6 +692,8 @@ impl Tx<'_> {
 
     // ── harness process groups ──
 
+    /// Records a new process group of the session. Refused while another one of it is recorded (it
+    /// was not confirmed gone): never overwritten.
     pub fn put_proc(
         &self,
         session: &SessionId,
@@ -690,13 +701,116 @@ impl Tx<'_> {
         generation: u64,
         incarnation: u64,
         meter: &str,
+        started: Option<u64>,
     ) -> ApiResult<()> {
+        if self.proc_of(session)?.is_some() {
+            return Err(ApiError::new(
+                ErrorCode::Busy,
+                "a harness of this session was not confirmed gone",
+            ));
+        }
         self.c()
             .execute(
-                "INSERT OR REPLACE INTO procs (session, pgid, generation, incarnation, meter, reports)
-                 VALUES (?1, ?2, ?3, ?4, ?5, 0)",
-                params![session.as_str(), pgid, generation as i64, incarnation as i64, meter],
+                "INSERT INTO procs (session, pgid, generation, incarnation, meter, reports, started)
+                 VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6)",
+                params![
+                    session.as_str(),
+                    pgid,
+                    generation as i64,
+                    incarnation as i64,
+                    meter,
+                    started.map(|s| s as i64)
+                ],
             )
+            .map_err(internal)?;
+        Ok(())
+    }
+
+    // ── reservations (a workspace being prepared or tidied, an execution being abandoned) ──
+
+    pub fn reservation(&self, key: &str) -> ApiResult<Option<OperationId>> {
+        let row: Option<String> = self
+            .c()
+            .query_row("SELECT op FROM reservations WHERE key = ?1", [key], |r| {
+                r.get(0)
+            })
+            .optional()
+            .map_err(internal)?;
+        row.map(|o| OperationId::new(o).map_err(internal))
+            .transpose()
+    }
+
+    pub fn reserve(&self, key: &str, op: &OperationId) -> ApiResult<()> {
+        self.c()
+            .execute(
+                "INSERT INTO reservations (key, op) VALUES (?1, ?2)",
+                params![key, op.as_str()],
+            )
+            .map_err(internal)?;
+        Ok(())
+    }
+
+    pub fn unreserve(&self, key: &str) -> ApiResult<()> {
+        self.c()
+            .execute("DELETE FROM reservations WHERE key = ?1", [key])
+            .map_err(internal)?;
+        Ok(())
+    }
+
+    /// Bytes of events the Hub has not acknowledged yet.
+    pub fn unacked_bytes(&self) -> ApiResult<u64> {
+        let n: i64 = self
+            .c()
+            .query_row(
+                "SELECT COALESCE(SUM(length(event)), 0) FROM events",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(internal)?;
+        Ok(n as u64)
+    }
+
+    // ── answers being applied (a resolution accepted, not yet given to the harness) ──
+
+    pub fn put_answer(&self, op: &OperationId, res: &PermissionResolution) -> ApiResult<()> {
+        self.c()
+            .execute(
+                "INSERT INTO answers (op, permission, resolution) VALUES (?1, ?2, ?3)",
+                params![op.as_str(), res.id.as_str(), json(res)],
+            )
+            .map_err(internal)?;
+        Ok(())
+    }
+
+    pub fn answer_of(&self, op: &OperationId) -> ApiResult<Option<PermissionResolution>> {
+        let row: Option<String> = self
+            .c()
+            .query_row(
+                "SELECT resolution FROM answers WHERE op = ?1",
+                [op.as_str()],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(internal)?;
+        row.map(|s| from(&s).map_err(internal)).transpose()
+    }
+
+    pub fn answer_pending_for(&self, permission: &PermissionId) -> ApiResult<bool> {
+        Ok(self
+            .c()
+            .query_row(
+                "SELECT 1 FROM answers WHERE permission = ?1",
+                [permission.as_str()],
+                |_| Ok(()),
+            )
+            .optional()
+            .map_err(internal)?
+            .is_some())
+    }
+
+    pub fn drop_answer(&self, op: &OperationId) -> ApiResult<()> {
+        self.c()
+            .execute("DELETE FROM answers WHERE op = ?1", [op.as_str()])
             .map_err(internal)?;
         Ok(())
     }
@@ -712,16 +826,18 @@ impl Tx<'_> {
     }
 
     pub fn procs(&self) -> ApiResult<Vec<Proc>> {
-        let rows: Vec<(String, i64, i64)> =
-            self.rows("SELECT session, pgid, incarnation FROM procs", [], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-            })?;
+        let rows: Vec<(String, i64, i64, Option<i64>)> = self.rows(
+            "SELECT session, pgid, incarnation, started FROM procs",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )?;
         rows.into_iter()
-            .map(|(s, p, i)| {
+            .map(|(s, p, i, st)| {
                 Ok(Proc {
                     session: SessionId::new(s).map_err(internal)?,
                     pgid: p,
                     incarnation: i as u64,
+                    started: st.map(|v| v as u64),
                 })
             })
             .collect()
