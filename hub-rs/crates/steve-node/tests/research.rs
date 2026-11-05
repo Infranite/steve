@@ -14,7 +14,7 @@ use steve_node_api::testkit::build::cmd;
 use steve_node_api::*;
 
 struct T {
-    _dir: tempfile::TempDir,
+    _dir: Option<tempfile::TempDir>,
     root: PathBuf,
     home: PathBuf,
     sink: Arc<RecordingSink>,
@@ -32,9 +32,19 @@ impl T {
         std::fs::write(root.join("work/proj/src/lib.rs"), "fn add() {}\n").unwrap();
         std::fs::write(root.join("work/proj/keep.txt"), "orig").unwrap();
         T {
-            _dir: dir,
+            _dir: Some(dir),
             root,
             home,
+            sink: Arc::new(RecordingSink::default()),
+        }
+    }
+
+    /// The same setup over a root made by another process's `T::new`.
+    fn at(root: &Path) -> T {
+        T {
+            _dir: None,
+            root: root.to_path_buf(),
+            home: root.join("home"),
             sink: Arc::new(RecordingSink::default()),
         }
     }
@@ -81,8 +91,12 @@ impl T {
     }
 
     fn node(&self, claude: &Path) -> LocalNode {
-        let n = LocalNode::open(self.config(2)).unwrap();
-        n.connect(self.sink.clone(), Some(Arc::new(Files::default())));
+        self.node_with(claude, 2, Arc::new(Files::default()))
+    }
+
+    fn node_with(&self, claude: &Path, jobs: u32, files: Arc<dyn HubFiles>) -> LocalNode {
+        let n = LocalNode::open(self.config(jobs)).unwrap();
+        n.connect(self.sink.clone(), Some(files));
         n.enable_research(self.research(claude, None));
         n
     }
@@ -1063,4 +1077,320 @@ async fn shutdown_stops_a_running_job_and_says_so() {
             text: "写到一半".into()
         }]
     );
+}
+
+/// The completion an operation finished with (from its receipt only: no Hub needed).
+async fn finished(n: &LocalNode, op: &str) -> Completion {
+    let t0 = Instant::now();
+    loop {
+        let r = n.operation(OperationId::new(op).unwrap()).await.unwrap();
+        if let Observed::Finished {
+            result: Some(OperationResult::Execution(c)),
+            ..
+        } = r.state
+        {
+            return c;
+        }
+        assert!(
+            t0.elapsed() < Duration::from_secs(20),
+            "{op}: {:?}",
+            r.state
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// A harness that writes a little, then (while `hold` exists) waits with a child whose pid goes
+/// to `pid`, then answers.
+fn holding(t: &T) -> (PathBuf, PathBuf, PathBuf) {
+    let (hold, pid) = (t.root.join("hold"), t.root.join("pid"));
+    let exe = t.harness(
+        "claude.sh",
+        &format!(
+            "{}\nif [ -e '{hold}' ]; then sleep 30 & echo $! > '{pid}'; wait; fi\n{}",
+            emit(&[init(), start("m1"), text("写到一半")]),
+            emit(&[result("好")]),
+            hold = hold.display(),
+            pid = pid.display(),
+        ),
+    );
+    std::fs::write(&hold, "").unwrap();
+    (exe, hold, pid)
+}
+
+fn pid_of(path: &Path) -> i32 {
+    std::fs::read_to_string(path)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap()
+}
+
+/// Runs in a child process (see `a_job_left_unknown_by_a_crash_is_abandoned_and_frees_its_slot`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn child_research_node() {
+    let Ok(root) = std::env::var("STEVE_RESEARCH_CHILD_ROOT") else {
+        return;
+    };
+    let t = T::at(Path::new(&root));
+    let n = t.node_with(&t.root.join("claude.sh"), 1, Arc::new(Files::default()));
+    n.start_job(now_cmd("op_j", job("a_1", "claude-sonnet-5-5", "q")))
+        .await
+        .unwrap();
+    until("the harness waits", || t.root.join("pid").exists()).await;
+    std::fs::write(t.root.join("ready"), "").unwrap();
+    tokio::time::sleep(Duration::from_secs(120)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_job_left_unknown_by_a_crash_is_abandoned_and_frees_its_slot() {
+    let t = T::new();
+    let (exe, hold, pid) = holding(&t);
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "child_research_node", "--nocapture"])
+        .env("STEVE_RESEARCH_CHILD_ROOT", &t.root)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    until("the child node runs its job", || {
+        t.root.join("ready").exists()
+    })
+    .await;
+    child.kill().unwrap();
+    child.wait().unwrap();
+    // the harness's group outlived the Node that ran it
+    let harness_child = pid_of(&pid);
+    struct Cleanup(i32);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            unsafe {
+                libc::kill(self.0, libc::SIGKILL);
+            }
+        }
+    }
+    let _cleanup = Cleanup(harness_child);
+    assert!(alive(harness_child));
+    std::fs::remove_file(&hold).unwrap();
+    let n = t.node_with(&exe, 1, Arc::new(Files::default()));
+    let r = n
+        .operation(OperationId::new("op_j").unwrap())
+        .await
+        .unwrap();
+    assert_eq!(r.state.tag(), StateTag::Unknown);
+    // the unknown job holds the one slot
+    let e = n
+        .start_job(now_cmd("op_k", job("a_2", "claude-sonnet-5-5", "q")))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::Exhausted);
+    // the Hub gives it up: its group is stopped first, then it ends as interrupted
+    let ab = n
+        .abandon(now_cmd(
+            "op_ab",
+            Abandon {
+                target: OperationId::new("op_j").unwrap(),
+                reason: "node crashed".into(),
+            },
+        ))
+        .await
+        .unwrap();
+    assert_eq!(ab.state, Observed::Accepted);
+    let t0 = Instant::now();
+    loop {
+        let r = n
+            .operation(OperationId::new("op_ab").unwrap())
+            .await
+            .unwrap();
+        if r.state.is_finished() {
+            assert!(
+                matches!(
+                    r.state,
+                    Observed::Finished {
+                        outcome: Outcome::Succeeded,
+                        ..
+                    }
+                ),
+                "{:?}",
+                r.state
+            );
+            break;
+        }
+        assert!(t0.elapsed() < Duration::from_secs(20), "{:?}", r.state);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(!alive(harness_child));
+    let c = t.end_of(&n, "op_j").await;
+    assert_eq!(c.outcome, Outcome::Interrupted);
+    assert_eq!(c.stop_reason, "abandoned");
+    assert_eq!(c.job.unwrap().end, JobEnd::Stopped);
+    // the slot is free: the next job runs
+    n.start_job(now_cmd("op_k2", job("a_3", "claude-sonnet-5-5", "q")))
+        .await
+        .unwrap();
+    let c = t.end_of(&n, "op_k2").await;
+    assert_eq!(c.outcome, Outcome::Succeeded, "{c:?}");
+    n.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_job_stops_when_the_hub_is_unreachable_past_its_lease() {
+    let t = T::new();
+    let (exe, _hold, pid) = holding(&t);
+    // never connected: the Hub is unreachable from the start
+    let n = LocalNode::open(t.config(1)).unwrap();
+    n.enable_research(t.research(&exe, None));
+    let mut spec = job("a_1", "claude-sonnet-5-5", "q");
+    spec.run.limits.offline_until = Timestamp(wall() + 1_500);
+    n.start_job(now_cmd("op_j", spec)).await.unwrap();
+    let c = finished(&n, "op_j").await;
+    assert_eq!(c.outcome, Outcome::TimedOut, "{c:?}");
+    assert_eq!(c.stop_reason, "offline");
+    assert_eq!(c.error.unwrap().code, ErrorCode::Offline);
+    assert!(c.job.unwrap().end.fits(Outcome::TimedOut));
+    assert!(!alive(pid_of(&pid)));
+    n.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_job_stops_at_its_output_cap() {
+    let t = T::new();
+    let (exe, _hold, pid) = holding(&t);
+    let n = t.node(&exe);
+    let mut spec = job("a_1", "claude-sonnet-5-5", "q");
+    // "写到一半" is 12 bytes
+    spec.run.limits.max_output_bytes = 8;
+    n.start_job(now_cmd("op_j", spec)).await.unwrap();
+    let c = t.end_of(&n, "op_j").await;
+    assert_eq!(c.outcome, Outcome::Cancelled, "{c:?}");
+    assert_eq!(c.stop_reason, "max_output");
+    assert_eq!(c.error.unwrap().code, ErrorCode::Exhausted);
+    assert_eq!(c.job.unwrap().end, JobEnd::Stopped);
+    // stopped as it wrote, perhaps before it started its child
+    until("the harness's child is gone", || {
+        !pid.exists() || !alive(pid_of(&pid))
+    })
+    .await;
+    n.shutdown().await;
+}
+
+/// Attachments that come after `delay` (or never).
+struct Slow(Duration, Files);
+
+#[async_trait::async_trait]
+impl HubFiles for Slow {
+    async fn fetch(
+        &self,
+        a: FileAccess,
+        id: ArtifactId,
+        offset: u64,
+        max: u32,
+    ) -> ApiResult<ReadChunk> {
+        tokio::time::sleep(self.0).await;
+        self.1.fetch(a, id, offset, max).await
+    }
+    async fn begin_upload(&self, _b: BeginUpload) -> ApiResult<Transfer> {
+        Err(ApiError::new(ErrorCode::Unsupported, "x"))
+    }
+    async fn upload(&self, _c: BlobChunk) -> ApiResult<Transfer> {
+        Err(ApiError::new(ErrorCode::Unsupported, "x"))
+    }
+    async fn upload_status(&self, _t: TransferId) -> ApiResult<TransferState> {
+        Err(ApiError::new(ErrorCode::Unsupported, "x"))
+    }
+    async fn finish_upload(&self, _t: TransferId) -> ApiResult<ArtifactRef> {
+        Err(ApiError::new(ErrorCode::Unsupported, "x"))
+    }
+    async fn abort_upload(&self, _t: TransferId) -> ApiResult<TransferState> {
+        Err(ApiError::new(ErrorCode::Unsupported, "x"))
+    }
+}
+
+/// A job whose prompt has one file the Hub serves after `delay`.
+fn with_file(delay: Duration) -> (Arc<Slow>, JobSpec) {
+    let files = Slow(delay, Files::default());
+    let a = files.1.artifact("art_1", "text/plain", b"notes");
+    let mut spec = job("a_1", "claude-sonnet-5-5", "q");
+    spec.run.prompt.push(Part::File {
+        artifact: a,
+        name: ".steve/attachments/notes.txt".into(),
+    });
+    (Arc::new(files), spec)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stalled_attachment_fetch_yields_to_cancel_shutdown_and_deadline() {
+    let hang = Duration::from_secs(3600);
+    // a cancel during the fetch ends it at once, before any harness
+    let t = T::new();
+    let (exe, _hold, _pid) = holding(&t);
+    let (files, spec) = with_file(hang);
+    let n = t.node_with(&exe, 1, files);
+    n.start_job(now_cmd("op_j", spec)).await.unwrap();
+    n.cancel(now_cmd(
+        "op_c",
+        Cancel {
+            target: OperationId::new("op_j").unwrap(),
+            reason: "stop".into(),
+        },
+    ))
+    .await
+    .unwrap();
+    let c = t.end_of(&n, "op_j").await;
+    assert_eq!(c.outcome, Outcome::Cancelled, "{c:?}");
+    assert_eq!(c.job.unwrap().end, JobEnd::Stopped);
+    assert_eq!(t.spawns(), 0);
+    n.shutdown().await;
+
+    // a shutdown does not wait for the Hub
+    let t = T::new();
+    let (exe, _hold, _pid) = holding(&t);
+    let (files, spec) = with_file(hang);
+    let n = t.node_with(&exe, 1, files);
+    n.start_job(now_cmd("op_j", spec)).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    tokio::time::timeout(Duration::from_secs(5), n.shutdown())
+        .await
+        .expect("shutdown waits for a stalled fetch");
+    let c = finished(&n, "op_j").await;
+    assert_eq!(c.outcome, Outcome::Interrupted, "{c:?}");
+    assert_eq!(c.stop_reason, "node_shutdown");
+    assert_eq!(t.spawns(), 0);
+
+    // the deadline holds during the fetch
+    let t = T::new();
+    let (exe, _hold, _pid) = holding(&t);
+    let (files, mut spec) = with_file(hang);
+    spec.run.limits.deadline = Timestamp(wall() + 800);
+    let n = t.node_with(&exe, 1, files);
+    n.start_job(now_cmd("op_j", spec)).await.unwrap();
+    let c = t.end_of(&n, "op_j").await;
+    assert_eq!(c.outcome, Outcome::TimedOut, "{c:?}");
+    assert_eq!(
+        c.job.unwrap().end,
+        JobEnd::Budget {
+            hit: BudgetHit::Time
+        }
+    );
+    assert_eq!(t.spawns(), 0);
+    n.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_slow_fetch_does_not_move_the_jobs_deadline() {
+    let t = T::new();
+    let (exe, _hold, pid) = holding(&t);
+    let (files, mut spec) = with_file(Duration::from_millis(1_500));
+    let deadline = wall() + 3_000;
+    spec.run.limits.deadline = Timestamp(deadline);
+    let n = t.node_with(&exe, 1, files);
+    n.start_job(now_cmd("op_j", spec)).await.unwrap();
+    let c = t.end_of(&n, "op_j").await;
+    let late = wall() - deadline;
+    assert_eq!(c.outcome, Outcome::TimedOut, "{c:?}");
+    assert_eq!(t.spawns(), 1);
+    // ended at the job's deadline, not the fetch's time past it
+    assert!(late < 1_000, "{late} ms past the deadline");
+    assert!(!alive(pid_of(&pid)));
+    n.shutdown().await;
 }

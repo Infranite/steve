@@ -396,6 +396,27 @@ pub(crate) async fn prompt(
     ))
 }
 
+/// Where a job attempt's process group is recorded (the journal keeps groups by session). The one
+/// derivation for every kind of job: whoever records a job's group and whoever stops it (abandon)
+/// meet here.
+pub(crate) fn job_group(attempt: &AttemptId) -> SessionId {
+    SessionId::new(derived_id("job", attempt.as_str())).expect("derived id")
+}
+
+/// Stops a job attempt's recorded group (if any) and forgets it once it is gone.
+async fn stop_job_group(inner: &Inner, group: &SessionId) -> procs::Stopped {
+    let p = match inner.j.read(|t| t.proc_of(group)) {
+        Ok(Some(p)) => p,
+        Ok(None) => return procs::Stopped::Gone,
+        Err(_) => return procs::Stopped::Uncertain,
+    };
+    let s = procs::stop(p.pgid, p.started).await;
+    if s.gone() && inner.j.tx(|t| t.drop_proc(group, p.pgid)).is_err() {
+        return procs::Stopped::Uncertain;
+    }
+    s
+}
+
 /// An attachment's bytes, from the cache (checked) or the Hub (for this execution; size, progress
 /// and hash checked; written to a file of its own, then published whole).
 async fn fetch(inner: &Arc<Inner>, exec: &ExecutionRef, a: &ArtifactRef) -> ApiResult<PathBuf> {
@@ -1660,11 +1681,13 @@ impl ExecutionControl for LocalNode {
     }
 
     /// Accepted now; finished once the execution's processes are confirmed gone: it then ends as
-    /// interrupted and its session is free to be opened again. One abandon per target; only
+    /// interrupted and its session (or its job's slot) is free again. One abandon per target; only
     /// executions are abandoned (other unknown operations are found out otherwise).
     async fn abandon(&self, c: Command<Abandon>) -> ApiResult<Receipt> {
         let target = c.body.target.clone();
         let mut session = None;
+        let mut job = None;
+        let mut research = false;
         let (r, fresh) = self.accept("abandon", &c, |t| {
             let op = t
                 .op(&target)?
@@ -1675,12 +1698,22 @@ impl ExecutionControl for LocalNode {
                     "only an unknown execution is abandoned (cancel a live one)",
                 ));
             }
-            let Some(ExecutionRef::Turn { session: s, .. }) = &op.execution else {
-                return Err(ApiError::new(
-                    ErrorCode::Unsupported,
-                    "only an execution is abandoned",
-                ));
-            };
+            match &op.execution {
+                Some(ExecutionRef::Turn { session: s, .. }) => session = Some(s.clone()),
+                Some(ExecutionRef::Job { attempt, .. }) => {
+                    job = Some(job_group(attempt));
+                    // every end of a research attempt carries its report
+                    research = t.spec(&target)?.is_some_and(|b| {
+                        b.pointer("/work/kind").and_then(Value::as_str) == Some("research")
+                    });
+                }
+                None => {
+                    return Err(ApiError::new(
+                        ErrorCode::Unsupported,
+                        "only an execution is abandoned",
+                    ));
+                }
+            }
             if t.reservation(&format!("abandon:{target}"))?.is_some() {
                 return Err(ApiError::new(
                     ErrorCode::Conflict,
@@ -1688,20 +1721,25 @@ impl ExecutionControl for LocalNode {
                 ));
             }
             t.reserve(&format!("abandon:{target}"), &c.id)?;
-            session = Some(s.clone());
             Ok(Decided::accepted())
         })?;
-        if fresh && let Some(s) = session {
+        if fresh && (session.is_some() || job.is_some()) {
             let me = self.clone();
             let op = c.id.clone();
             self.spawn_owned(async move {
-                let (tx, rx) = tokio::sync::oneshot::channel();
-                let _ = me.actor(&s).send(Msg::Stop {
-                    op: None,
-                    abandon: true,
-                    done: Some(tx),
-                });
-                let stopped = rx.await.unwrap_or(procs::Stopped::Uncertain);
+                let stopped = match (&session, &job) {
+                    (Some(s), _) => {
+                        let (tx, rx) = tokio::sync::oneshot::channel();
+                        let _ = me.actor(s).send(Msg::Stop {
+                            op: None,
+                            abandon: true,
+                            done: Some(tx),
+                        });
+                        rx.await.unwrap_or(procs::Stopped::Uncertain)
+                    }
+                    (None, Some(group)) => stop_job_group(&me.0, group).await,
+                    (None, None) => procs::Stopped::Uncertain,
+                };
                 let key = format!("abandon:{target}");
                 if !stopped.gone() {
                     return me
@@ -1729,7 +1767,12 @@ impl ExecutionControl for LocalNode {
                         continuation: None,
                         transient: false,
                         acted: true,
-                        job: None,
+                        job: research.then(|| JobReport {
+                            end: JobEnd::Stopped,
+                            turns: 0,
+                            files_read: vec![],
+                            sandboxed: false,
+                        }),
                     };
                     // only if it still is the unknown one this was for
                     if !matches!(o.receipt.state, Observed::Unknown { .. }) {
@@ -1764,7 +1807,13 @@ impl ExecutionControl for LocalNode {
                             )],
                         )?;
                     }
-                    if let Some(mut row) = t.session(&s)?
+                    if let Some(exec) = &o.execution
+                        && job.is_some()
+                    {
+                        inner.tools.revoke_job(exec);
+                    }
+                    if let Some(s) = &session
+                        && let Some(mut row) = t.session(s)?
                         && row.view.active == o.execution
                     {
                         row.view.phase = SessionPhase::Released;

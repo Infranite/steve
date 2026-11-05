@@ -17,7 +17,7 @@ use steve_research as r;
 use tokio::sync::{mpsc, watch};
 
 use crate::journal::Tx;
-use crate::{Decided, LocalNode, emit_all, now, procs, workspace};
+use crate::{Decided, LocalNode, emit_all, job_group, now, procs, workspace};
 
 /// The guarantee a research job may ask the sandbox for.
 pub(crate) const FS_READONLY: &str = "fs-readonly";
@@ -32,6 +32,18 @@ pub(crate) struct Research {
 
 /// A recorded process group: its id and its leader's start time.
 type Group = (i64, Option<u64>);
+
+/// Why the Node stops a job before its harness ends it (the API's limits, a cancel, a shutdown).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stop {
+    Cancel,
+    Shutdown,
+    Deadline,
+    /// The Hub was unreachable past the lease (`offline_until`).
+    Offline,
+    /// The draft and tool rows went past `max_output_bytes`.
+    Output,
+}
 
 /// What `start_job` checked and resolved before accepting, for the run.
 struct Plan {
@@ -177,11 +189,11 @@ impl LocalNode {
         cfg.scratch = self.0.cfg.home.join("jobs");
         cfg.sandbox = sandbox;
         cfg.models = vec![model.clone()];
-        // the deadline is the job's (one for all attempts of a run); no "still reading" notice
-        let left = Duration::from_millis(u64::try_from(run.limits.deadline.0 - now()).unwrap_or(0));
+        // the deadline is the job's (one for all attempts of a run), measured when the harness
+        // starts (after the attachments); no "still reading" notice
         cfg.budget = r::Budget {
-            hard: Some(left),
-            soft: left,
+            hard: None,
+            soft: Duration::ZERO,
             max_turns: job.budget.max_turns,
             max_tools: job.budget.max_tools,
             idle: Duration::from_millis(job.budget.idle_ms),
@@ -216,7 +228,7 @@ impl LocalNode {
 
     async fn run_research(self, op: OperationId, exec: ExecutionRef, spec: JobSpec, p: Plan) {
         let Plan {
-            cfg,
+            mut cfg,
             mut req,
             plan,
             codex,
@@ -226,7 +238,9 @@ impl LocalNode {
         let JobWork::Research(job) = &spec.work else {
             return;
         };
-        // the prompt's files and images, from the Hub for this execution
+        let limits = &spec.run.limits;
+        let mut tick = tokio::time::interval(POLL);
+        // the prompt's files and images, from the Hub for this execution, while the job is wanted
         for part in &spec.run.prompt {
             let (artifact, name) = match part {
                 Part::File { artifact, name } => (
@@ -238,7 +252,20 @@ impl LocalNode {
                 Part::Image { artifact } => (artifact, image_name(artifact)),
                 _ => continue,
             };
-            match crate::fetch(&inner, &exec, artifact).await {
+            let fetch = crate::fetch(&inner, &exec, artifact);
+            tokio::pin!(fetch);
+            let fetched = loop {
+                tokio::select! {
+                    got = &mut fetch => break got,
+                    _ = tick.tick() => {
+                        if let Some(why) = self.stop_now(&op, limits, 0) {
+                            let c = ended(Some(why), &r::RunStatus::Stopped, String::new(), None, 0, &[], false);
+                            return self.end_research(&op, &exec, c, vec![]).await;
+                        }
+                    }
+                }
+            };
+            match fetched {
                 Ok(path) => req.attachments.push(r::Attachment {
                     path,
                     name,
@@ -247,17 +274,29 @@ impl LocalNode {
                     earlier: false,
                 }),
                 Err(e) => {
-                    let report = r::RunStatus::Failed(format!("research attachments: {e}"));
-                    let c = completion(
-                        &report,
-                        String::new(),
-                        None,
-                        job_report(&report, 0, &[], false),
-                    );
+                    let failed = r::RunStatus::Failed(format!("research attachments: {e}"));
+                    let c = ended(None, &failed, String::new(), None, 0, &[], false);
                     return self.end_research(&op, &exec, c, vec![]).await;
                 }
             }
         }
+        // what is left of the job's deadline now: the harness cannot outlive it
+        let left = Duration::from_millis(u64::try_from(limits.deadline.0 - now()).unwrap_or(0));
+        if left.is_zero() {
+            let c = ended(
+                Some(Stop::Deadline),
+                &r::RunStatus::Stopped,
+                String::new(),
+                None,
+                0,
+                &[],
+                false,
+            );
+            return self.end_research(&op, &exec, c, vec![]).await;
+        }
+        cfg.budget.hard = Some(left);
+        cfg.budget.soft = left;
+        req.budget = Some(cfg.budget);
         if job.steve_tools
             && let Some(url) = inner.tools_url.lock().unwrap().clone()
         {
@@ -267,7 +306,7 @@ impl LocalNode {
             });
         }
         // the harness's process group is in the journal before it reads anything
-        let holder = job_session(&exec);
+        let holder = job_group(exec.attempt());
         let group: Arc<Mutex<Option<Group>>> = Arc::default();
         let on_spawn: r::SpawnHook = {
             let (inner, holder, group) = (inner.clone(), holder.clone(), group.clone());
@@ -294,22 +333,27 @@ impl LocalNode {
         let run = r::run_attempt(&cfg, req, one, events_tx, stop);
         tokio::pin!(run);
         let mut draft = Draft::new(&exec);
-        let mut tick = tokio::time::interval(POLL);
-        let mut shutdown = false;
+        let mut output = 0u64;
+        // the first reason the Node stopped it for
+        let mut why: Option<Stop> = None;
         let outcome = loop {
             tokio::select! {
                 out = &mut run => break out,
                 Some(ev) = events.recv() => {
                     let evs = draft.on(ev);
+                    output += output_bytes(&evs);
                     if !evs.is_empty() && self.emit(evs).is_err() {
                         // the journal is at its limit (or failed): running work stops
                         stop_tx.send_replace(true);
                     }
+                    if why.is_none() && output > limits.max_output_bytes {
+                        why = Some(Stop::Output);
+                        stop_tx.send_replace(true);
+                    }
                 }
                 _ = tick.tick() => {
-                    let cancel = inner.j.read(|t| t.op(&op)).ok().flatten().is_some_and(|o| o.cancel);
-                    shutdown = inner.closed.load(Ordering::SeqCst);
-                    if cancel || shutdown {
+                    if why.is_none() && let Some(w) = self.stop_now(&op, limits, output) {
+                        why = Some(w);
                         stop_tx.send_replace(true);
                     }
                 }
@@ -334,25 +378,50 @@ impl LocalNode {
             let _ = inner.j.tx(|t| t.drop_proc(&holder, pgid));
         }
         let usage = usage(&exec, &outcome, codex);
-        let report = job_report(
-            &outcome.status,
-            outcome.turns,
-            &outcome.files_read,
-            outcome.sandboxed,
-        );
         let session = outcome
             .claude_session
             .as_deref()
             .and_then(|s| ResumeHandle::new(s).ok());
-        let mut c = completion(&outcome.status, outcome.raw.clone(), session, report);
-        if shutdown && c.outcome == Outcome::Cancelled {
-            // stopped because this Node closes, not by the Hub: its processes are gone
-            c.outcome = Outcome::Interrupted;
-            c.stop_reason = "node_shutdown".into();
-        }
+        let c = ended(
+            why,
+            &outcome.status,
+            outcome.raw.clone(),
+            session,
+            outcome.turns,
+            &outcome.files_read,
+            outcome.sandboxed,
+        );
         let mut evs = usage;
         evs.extend(draft.close());
         self.end_research(&op, &exec, c, evs).await
+    }
+
+    /// Whether the Node stops the job now, and why: a cancel, a shutdown, its deadline, the Hub
+    /// unreachable past the lease, or its output past the cap (the actor's limits for a turn).
+    fn stop_now(&self, op: &OperationId, limits: &Limits, output: u64) -> Option<Stop> {
+        let inner = &self.0;
+        let now = now();
+        if inner
+            .j
+            .read(|t| t.op(op))
+            .ok()
+            .flatten()
+            .is_some_and(|o| o.cancel)
+        {
+            Some(Stop::Cancel)
+        } else if inner.closed.load(Ordering::SeqCst) {
+            Some(Stop::Shutdown)
+        } else if now >= limits.deadline.0 {
+            Some(Stop::Deadline)
+        } else if inner.hub_down_since().is_some_and(|since| since < now)
+            && now >= limits.offline_until.0
+        {
+            Some(Stop::Offline)
+        } else if output > limits.max_output_bytes {
+            Some(Stop::Output)
+        } else {
+            None
+        }
     }
 
     fn emit(&self, evs: Vec<(Subject, EventBody)>) -> ApiResult<()> {
@@ -461,9 +530,17 @@ fn sandbox_mode(s: &SandboxRequirement, codex: bool) -> ApiResult<r::SandboxMode
     }
 }
 
-/// Where a job's harness process group is recorded (the journal keys groups by session).
-fn job_session(exec: &ExecutionRef) -> SessionId {
-    SessionId::new(derived_id("job", exec.attempt().as_str())).expect("derived id")
+/// What the draft and tool rows add to a job's output.
+fn output_bytes(evs: &[(Subject, EventBody)]) -> u64 {
+    evs.iter()
+        .map(|(_, b)| match b {
+            EventBody::TextDelta { text, .. } => text.len() as u64,
+            EventBody::ToolChanged { tool } => {
+                serde_json::to_vec(tool).map_or(0, |v| v.len() as u64)
+            }
+            _ => 0,
+        })
+        .sum()
 }
 
 /// The name an inline image goes by in the run's files.
@@ -516,6 +593,56 @@ fn job_report(status: &r::RunStatus, turns: u32, files: &[String], sandboxed: bo
         files_read: files.to_vec(),
         sandboxed,
     }
+}
+
+/// The attempt's end, with the reason the Node stopped it if it did: a harness that ended because
+/// it was stopped ends as that reason says (a deadline as the time budget, a shutdown as
+/// interrupted, the lease and the output cap with their errors); one that ended otherwise first
+/// keeps its own end.
+fn ended(
+    why: Option<Stop>,
+    status: &r::RunStatus,
+    raw: String,
+    continuation: Option<ResumeHandle>,
+    turns: u32,
+    files: &[String],
+    sandboxed: bool,
+) -> Completion {
+    let stopped = *status == r::RunStatus::Stopped;
+    let status = match why {
+        Some(Stop::Deadline) if stopped => r::RunStatus::Budget(r::BudgetHit::Time),
+        _ => status.clone(),
+    };
+    let report = job_report(&status, turns, files, sandboxed);
+    let mut c = completion(&status, raw, continuation, report);
+    if !stopped {
+        return c;
+    }
+    match why {
+        // stopped because this Node closes, not by the Hub: its processes are gone
+        Some(Stop::Shutdown) => {
+            c.outcome = Outcome::Interrupted;
+            c.stop_reason = "node_shutdown".into();
+        }
+        Some(Stop::Offline) => {
+            c.outcome = Outcome::TimedOut;
+            c.stop_reason = "offline".into();
+            c.error = Some(ApiError::new(
+                ErrorCode::Offline,
+                "the Hub was unreachable past the lease",
+            ));
+        }
+        Some(Stop::Output) => {
+            c.outcome = Outcome::Cancelled;
+            c.stop_reason = "max_output".into();
+            c.error = Some(ApiError::new(
+                ErrorCode::Exhausted,
+                "the output limit was reached",
+            ));
+        }
+        Some(Stop::Cancel | Stop::Deadline) | None => {}
+    }
+    c
 }
 
 /// The attempt's end in Steve's terms. The answer is what the model wrote (the Hub shapes it:
