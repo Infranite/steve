@@ -676,12 +676,12 @@ mod host_tests {
         }).unwrap();
         assert!(binding_for(&store, "s1", None, &|_| true).is_some());
         assert!(binding_for(&store, "s1", None, &|p| node.allows(p)).is_none());
-        routed.created("s1");
+        routed.created("s1", None);
         assert_eq!(bound("s1"), 0, "a directory outside the roots stays legacy");
         // a scratch session could run there, but the Node stopped
         assert!(binding_for(&store, "s2", None, &|p| node.allows(p)).is_some());
         rt.stop("its tools did not connect");
-        routed.created("s2");
+        routed.created("s2", None);
         assert_eq!(bound("s2"), 0, "a stopped Node binds nothing");
         assert!(!super::super::node_runtime::bound(&store, "s2"));
         node.shutdown().await;

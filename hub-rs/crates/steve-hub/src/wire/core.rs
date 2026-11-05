@@ -2039,7 +2039,8 @@ mod routed_tests {
             retry_delays: vec![],
         };
         super::RoutedRuntime {
-            legacy: super::AcpRuntime(steve_acp::Acp::new(cfg, host)),
+            legacy: super::AcpRuntime(steve_acp::Acp::new(cfg, host.clone())),
+            host,
             node: None,
             fleet: None,
             bind_remote: None,
