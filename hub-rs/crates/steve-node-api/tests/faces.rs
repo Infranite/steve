@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use serde::{Serialize, de::DeserializeOwned};
-use steve_node_api::testkit::{FakeNode, FakeSecrets, build::*};
+use steve_node_api::testkit::{FakeNode, FakeSecrets, Scripted, build::*};
 use steve_node_api::*;
 
 fn roundtrip<T: Serialize + DeserializeOwned + PartialEq + std::fmt::Debug>(v: &T) {
@@ -267,10 +267,23 @@ fn the_new_types_survive_the_wire() {
         next: None,
         complete: false,
         issues: vec![
-            ScanIssue::Unreadable { path: rel("x") },
+            ScanIssue::Unreadable {
+                path: Some(rel("x")),
+            },
+            ScanIssue::Unreadable { path: None },
             ScanIssue::OverLimit { count: 2 },
-            ScanIssue::LinkRefused { path: rel("l") },
-            ScanIssue::Denied { path: rel("d") },
+            ScanIssue::Held {
+                path: rel("l"),
+                why: HeldWhy::Outside,
+            },
+            ScanIssue::Held {
+                path: rel("d"),
+                why: HeldWhy::Denied,
+            },
+            ScanIssue::Held {
+                path: rel("f"),
+                why: HeldWhy::Unreadable,
+            },
             ScanIssue::Interrupted,
         ],
     });
@@ -546,19 +559,16 @@ async fn scan_pages_share_one_manifest_and_only_a_clean_end_is_complete() {
     assert!(e.iter().any(|f| f.path.as_str() == "d/big.md" && f.too_big));
     assert!(big[0].complete, "a too-big file hides nothing");
 
-    // any issue that may hide a file makes it incomplete
+    // a gap (an issue that may hide a file) makes it incomplete
     for issue in [
         ScanIssue::Unreadable {
-            path: rel("d/locked"),
+            path: Some(rel("d/locked")),
         },
-        ScanIssue::LinkRefused {
-            path: rel("d/loop"),
-        },
-        ScanIssue::Denied {
-            path: rel("d/private"),
-        },
+        // an entry whose name could not be read has no path
+        ScanIssue::Unreadable { path: None },
         ScanIssue::Interrupted,
     ] {
+        assert!(issue.hides_files(), "{issue:?}");
         let m = two_roots();
         m.put_file("notes", "a.md", b"x");
         m.scan_issue("notes", issue.clone());
@@ -566,6 +576,38 @@ async fn scan_pages_share_one_manifest_and_only_a_clean_end_is_complete() {
         assert!(!p.last().unwrap().complete, "{issue:?}");
         assert_eq!(p.last().unwrap().issues, [issue]);
     }
+    // a held path is reported and the scan stays complete, as the knowledge walk has it: a link
+    // out of the folder or one unreadable file must not stop deletions elsewhere reconciling
+    for why in [HeldWhy::Outside, HeldWhy::Denied, HeldWhy::Unreadable] {
+        let issue = ScanIssue::Held {
+            path: rel("d/held.md"),
+            why,
+        };
+        assert!(!issue.hides_files());
+        let m = two_roots();
+        m.put_file("notes", "a.md", b"x");
+        m.scan_issue("notes", issue.clone());
+        let p = scan_all(&m, "op_s", spec(ScanLimits::default()), 10).await;
+        assert!(p.last().unwrap().complete, "{why:?}");
+        assert_eq!(p.last().unwrap().issues, [issue]);
+    }
+    // a complete page may carry holds, never a gap
+    let page_with = |issues: Vec<ScanIssue>| ScanPage {
+        scan: OperationId::new("op_c").unwrap(),
+        manifest: Revision::new("m").unwrap(),
+        entries: vec![],
+        next: None,
+        complete: true,
+        issues,
+    };
+    assert!(
+        page_with(vec![ScanIssue::Held {
+            path: rel("l"),
+            why: HeldWhy::Outside,
+        }])
+        .is_consistent()
+    );
+    assert!(!page_with(vec![ScanIssue::OverLimit { count: 1 }]).is_consistent());
     // a resend of a scan is the same scan; an unknown one is invalid
     n.scan(cmd("op_s1", spec(ScanLimits::default())))
         .await
@@ -767,6 +809,114 @@ async fn a_push_takes_its_header_secret_once() {
     let r = n.git_apply(c.clone()).await.unwrap();
     assert_eq!(n.git_apply(c).await.unwrap(), r);
     assert_eq!(secrets.taken().len(), 1);
+}
+
+/// A command refused before acceptance never takes its secret: the Hub did not hand it over for
+/// work the Node denied, and a resend of the same operation (busy, offline) still finds it.
+#[tokio::test]
+async fn a_refused_command_leaves_its_secret_with_the_hub() {
+    let n = two_roots();
+    let secrets = Arc::new(FakeSecrets::default());
+    n.connect_secrets(secrets.clone());
+    let w = match result_of(
+        n.prepare_workspace(cmd("op_w", existing("item:a", at("code", "app"))))
+            .await
+            .unwrap(),
+    ) {
+        OperationResult::Workspace(v) => v.workspace,
+        other => panic!("{other:?}"),
+    };
+    let key = SecretRef {
+        id: "vault:k".into(),
+        how: SecretDelivery::Env { name: "KEY".into() },
+    };
+    let with_key = |command: &str| {
+        let mut e = exec_in(w.clone(), command);
+        e.secrets = vec![key.clone()];
+        e
+    };
+
+    // busy: refused, nothing taken; the same operation sent again runs and takes it then
+    secrets.give("op_busy", "vault:k", b"s3cr3t");
+    n.refuse("exec", Some(ErrorCode::Busy));
+    let c = cmd("op_busy", with_key("deploy"));
+    let e = n.exec(c.clone()).await.unwrap_err();
+    assert_eq!(e.code, ErrorCode::Busy);
+    assert_eq!(e.retry, RetryClass::SameOperation);
+    assert!(secrets.taken().is_empty());
+    n.refuse("exec", None);
+    n.refuse_next(
+        "exec",
+        ApiError::new(ErrorCode::Exhausted, "scripted: no capacity"),
+    );
+    assert_eq!(
+        n.exec(c.clone()).await.unwrap_err().code,
+        ErrorCode::Exhausted
+    );
+    assert!(secrets.taken().is_empty());
+    n.exec(c).await.unwrap();
+    assert_eq!(secrets.taken().len(), 1);
+
+    // a past deadline, a scripted refusal: refused, nothing taken
+    secrets.give("op_late", "vault:k", b"s3cr3t");
+    let mut late = with_key("deploy");
+    late.limits.deadline = Timestamp(1);
+    assert_eq!(
+        n.exec(cmd("op_late", late)).await.unwrap_err().code,
+        ErrorCode::Expired
+    );
+    n.script_once(
+        "exec",
+        Scripted::Refuse(ApiError::new(ErrorCode::Offline, "scripted")),
+    );
+    assert_eq!(
+        n.exec(cmd("op_late", with_key("deploy")))
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::Offline
+    );
+    assert_eq!(secrets.taken().len(), 1);
+
+    // a push decided on facts that moved: stale before its credential is taken
+    let f = facts("abc");
+    n.script_git(&w, f.clone());
+    let auth = SecretRef {
+        id: "gh".into(),
+        how: SecretDelivery::Header {
+            name: "Authorization".into(),
+        },
+    };
+    secrets.give("op_push", "gh", b"basic xyz");
+    let moved = push(w.clone(), &facts("old"), Some(auth.clone()));
+    assert_eq!(
+        n.git_apply(cmd("op_push", moved)).await.unwrap_err().code,
+        ErrorCode::Stale
+    );
+    assert_eq!(secrets.taken().len(), 1);
+
+    // the root turned readonly: exec and push denied, nothing taken
+    n.set_roots(vec![
+        root("code", RootAccess::ReadOnly),
+        root("notes", RootAccess::ReadOnly),
+    ]);
+    assert_eq!(
+        n.exec(cmd("op_late", with_key("deploy")))
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::Denied
+    );
+    assert_eq!(
+        n.git_apply(cmd("op_push", push(w.clone(), &f, Some(auth))))
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::Denied
+    );
+    assert_eq!(secrets.taken().len(), 1, "{:?}", secrets.taken());
+    let log: Vec<_> = n.log().into_iter().map(|(m, _)| m).collect();
+    assert_eq!(log, ["prepare_workspace", "exec"]);
 }
 
 // ── discovery ──

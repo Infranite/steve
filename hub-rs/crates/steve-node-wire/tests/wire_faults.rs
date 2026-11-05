@@ -140,6 +140,7 @@ async fn heartbeats_keep_an_idle_link() {
         heartbeat: Duration::from_millis(20),
         dead_after: Duration::from_millis(100),
         side,
+        ..Default::default()
     };
     let hub = Conn::spawn(h.sink, h.stream, 1, Arc::new(Nothing), o("h"));
     let _node = Conn::spawn(n.sink, n.stream, 1, NodeServer::new(fake), o("n"));

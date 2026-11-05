@@ -398,26 +398,52 @@ impl Default for ScanLimits {
     }
 }
 
-/// Why a scan may not show every file that is there. Each one makes the scan incomplete.
+/// Something a scan reports besides its entries. Two kinds, as the knowledge folder's walk has
+/// always had them ([`ScanIssue::hides_files`]): a gap (an unreadable directory or entry, files past
+/// `max_files`, a cut-short scan) may hide files, and makes the scan incomplete; a hold is one
+/// wanted path the scan saw but did not list, with why, and leaves the rest of the scan whole.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ScanIssue {
-    /// A directory or entry that could not be read.
-    Unreadable { path: RelPath },
-    /// `count` wanted files past `max_files`.
+    /// Gap: a directory that could not be listed, or an entry whose name or type could not be
+    /// read (so it may be a directory). An entry without a readable name has no path.
+    Unreadable {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<RelPath>,
+    },
+    /// Gap: `count` wanted files past `max_files`.
     OverLimit { count: u64 },
-    /// A link the Node does not follow (out of the root, or a loop).
-    LinkRefused { path: RelPath },
-    /// A path the Node's rules refuse.
-    Denied { path: RelPath },
-    /// Cut short (a restart, a cancel, the deadline).
+    /// Gap: cut short (a restart, a cancel, the deadline).
     Interrupted,
+    /// Hold: a wanted path that is there but was not listed, and why. A dangling link is neither
+    /// listed nor held: its file is gone.
+    Held { path: RelPath, why: HeldWhy },
+}
+
+/// Why a scan held a path back, and what that means for the file's document.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HeldWhy {
+    /// A link resolving outside the root: not followed, its document fails (as reading it would).
+    Outside,
+    /// A path the Node's rules refuse: its document fails.
+    Denied,
+    /// Its metadata, or its link, could not be read (a loop, a permission): its document stays.
+    Unreadable,
+}
+
+impl ScanIssue {
+    /// A gap: the scan may not show every file that is there.
+    pub fn hides_files(&self) -> bool {
+        !matches!(self, ScanIssue::Held { .. })
+    }
 }
 
 /// One page of a scan, its paths relative to the scanned root ([`RootPath::root`], usable as a
 /// [`FileAddress::Root`]). Only a scan that ends with `complete` may be used to decide a file is gone;
-/// a cut-short one (offline, limits, a refused path) keeps the old index. Pages before the last one
-/// are never complete, and no page with an issue is.
+/// a cut-short one (offline, limits, an unreadable directory) keeps the old index. Pages before the
+/// last one are never complete, and no page with a gap ([`ScanIssue::hides_files`]) is; held paths
+/// leave a scan complete.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScanPage {
     pub scan: OperationId,
@@ -432,8 +458,8 @@ pub struct ScanPage {
 }
 
 impl ScanPage {
-    /// The rule above: `complete` only on the last page and only with no issue.
+    /// The rule above: `complete` only on the last page and only with no gap.
     pub fn is_consistent(&self) -> bool {
-        !self.complete || (self.next.is_none() && self.issues.is_empty())
+        !self.complete || (self.next.is_none() && !self.issues.iter().any(ScanIssue::hides_files))
     }
 }

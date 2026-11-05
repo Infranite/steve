@@ -15,7 +15,7 @@ use steve_node_api::*;
 use steve_node_wire::conn::{from_value, unsupported};
 use steve_node_wire::methods::*;
 use steve_node_wire::testkit::pair;
-use steve_node_wire::{Conn, Handler, NodeServer, RemoteSecrets};
+use steve_node_wire::{Conn, ConnOptions, Handler, NodeServer, RemoteSecrets};
 
 fn show<T: Serialize>(r: &ApiResult<T>) -> String {
     match r {
@@ -91,7 +91,13 @@ async fn fixture(n: &FakeNode) {
     n.put_file("notes", "a.md", b"hello");
     n.put_file("notes", "d/b.md", &[0u8, 1, 2, 0xff]);
     n.put_file("notes", "d/big.md", &[b'x'; 64]);
-    n.scan_issue("notes", ScanIssue::LinkRefused { path: rel("d/up") });
+    n.scan_issue(
+        "notes",
+        ScanIssue::Held {
+            path: rel("d/up"),
+            why: HeldWhy::Outside,
+        },
+    );
     let source = history_ref("cc:abc");
     n.put_history(
         HistoryEntry {
@@ -262,6 +268,56 @@ async fn a_hub_without_secrets_answers_unsupported() {
     assert!(w.remote.probe(false).await.is_ok(), "still up");
 }
 
+/// A `secret.take` whose answer is lost after the Hub got it may have used the secret up: the
+/// command that needed it fails for good (`stale`, no retry) instead of telling the Hub to resend
+/// it into a second take. One never written is `offline` and may be resent as is.
+#[tokio::test]
+async fn a_lost_secret_take_is_never_retried_as_the_same_operation() {
+    let fake = FakeNode::new("n1");
+    fake.prepare_workspace(cmd("op_w", prepare("item:ST-1")))
+        .await
+        .unwrap();
+    let hub_secrets = Arc::new(FakeSecrets::default());
+    hub_secrets.give("op_e", "vault:k", b"s3cr3t");
+    let w = wire_with(fake.clone(), 1, Some(hub_secrets.clone()));
+    fake.connect_secrets(Arc::new(RemoteSecrets(w.link.clone())));
+    // the Hub hands the secret over, its answer never arrives, then the link dies
+    w.hub_faults
+        .drop_responses
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let spec = ExecSpec {
+        workspace: workspace("n1", "item:ST-1"),
+        command: "deploy".into(),
+        cwd: None,
+        policy: policy(),
+        limits: limits(),
+        env: vec![],
+        secrets: vec![SecretRef {
+            id: "vault:k".into(),
+            how: SecretDelivery::Env { name: "KEY".into() },
+        }],
+    };
+    let run = tokio::spawn({
+        let (fake, c) = (fake.clone(), cmd("op_e", spec.clone()));
+        async move { fake.exec(c).await }
+    });
+    until("the hub gave the secret", || hub_secrets.taken().len() == 1).await;
+    w.node_faults.cut_now();
+    let e = run.await.unwrap().unwrap_err();
+    assert_eq!(e.code, ErrorCode::Stale, "{e}");
+    assert_eq!(e.retry, RetryClass::Never);
+    assert_eq!(fake.log().len(), 1, "the exec was not accepted");
+
+    // never written (no link): offline, nothing taken, safe to send again
+    let link = steve_node_wire::HubLink::new();
+    let e = RemoteSecrets(link)
+        .take(OperationId::new("op_x").unwrap(), "vault:k".into())
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::Offline);
+    assert_eq!(e.retry, RetryClass::SameOperation);
+}
+
 // ── every new kind, as it crosses ──
 
 /// Answers every call with its own arguments.
@@ -366,10 +422,23 @@ async fn every_new_kind_crosses_the_wire_unchanged() {
         crosses(&c, a).await;
     }
     for i in [
-        ScanIssue::Unreadable { path: rel("u") },
+        ScanIssue::Unreadable {
+            path: Some(rel("u")),
+        },
+        ScanIssue::Unreadable { path: None },
         ScanIssue::OverLimit { count: 7 },
-        ScanIssue::LinkRefused { path: rel("l") },
-        ScanIssue::Denied { path: rel("d") },
+        ScanIssue::Held {
+            path: rel("l"),
+            why: HeldWhy::Outside,
+        },
+        ScanIssue::Held {
+            path: rel("d"),
+            why: HeldWhy::Denied,
+        },
+        ScanIssue::Held {
+            path: rel("f"),
+            why: HeldWhy::Unreadable,
+        },
         ScanIssue::Interrupted,
     ] {
         crosses(&c, i).await;
@@ -424,75 +493,166 @@ async fn every_new_kind_crosses_the_wire_unchanged() {
 
 // ── an older peer ──
 
-/// A Node of the previous minor version: it knows no `history.locate`, and only the git reads
-/// and scan issues of its own day.
-struct OldPeer(Arc<NodeServer<FakeNode>>);
+/// A Node of the previous minor version (0.1), as one really is: its structs know none of this
+/// minor's fields and silently drop them (nothing refuses unknown fields), and it knows no
+/// `history.locate`. It records every method that reaches it.
+struct OldPeer {
+    node: Arc<NodeServer<FakeNode>>,
+    seen: std::sync::Mutex<Vec<String>>,
+}
 
-#[derive(serde::Deserialize)]
-#[allow(dead_code)]
+/// `GitQuery` of 0.1: no `reads`.
+#[derive(serde::Serialize, serde::Deserialize)]
 struct OldQuery {
     workspace: WorkspaceRef,
     #[serde(default)]
-    reads: Vec<OldRead>,
-}
-
-#[derive(serde::Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum OldRead {
-    Status,
+    refs: Vec<String>,
+    #[serde(default)]
+    ranges: Vec<(String, String)>,
+    #[serde(default)]
+    fetch: bool,
 }
 
 #[async_trait]
 impl Handler for OldPeer {
     async fn handle(&self, method: &str, p: Value) -> ApiResult<Value> {
+        self.seen.lock().unwrap().push(method.to_string());
         match method {
             HISTORY_LOCATE => Err(unsupported(method)),
             GIT_INSPECT => {
-                let _: OldQuery = from_value(p.clone())?;
-                self.0.handle(method, p).await
+                // what it understands, and nothing else
+                let q: OldQuery = from_value(p)?;
+                self.node
+                    .handle(method, serde_json::to_value(q).unwrap())
+                    .await
             }
-            _ => self.0.handle(method, p).await,
+            _ => self.node.handle(method, p).await,
         }
     }
 }
 
 #[tokio::test]
-async fn an_older_peer_answers_unsupported_and_the_link_stays() {
+async fn an_older_peer_is_never_sent_what_it_would_ignore() {
     let fake = FakeNode::new("n1");
+    fake.set_roots(vec![RootInfo {
+        id: RootId::new("notes").unwrap(),
+        display: "~/notes".into(),
+        access: RootAccess::ReadOnly,
+    }]);
     fake.prepare_workspace(cmd("op_w", prepare("item:ST-1")))
         .await
         .unwrap();
-    fake.script_git(&workspace("n1", "item:ST-1"), facts());
+    let ws = workspace("n1", "item:ST-1");
+    fake.script_git(&ws, facts());
     let (h, n) = pair();
-    let hub = Conn::spawn(h.sink, h.stream, 1, Arc::new(Echo), opts("h"));
-    let _node = Conn::spawn(
-        n.sink,
-        n.stream,
+    let hub = Conn::spawn(
+        h.sink,
+        h.stream,
         1,
-        Arc::new(OldPeer(NodeServer::new(fake.clone()))),
-        opts("n"),
+        Arc::new(Echo),
+        ConnOptions {
+            side: "h",
+            peer: (PROTOCOL.0, 1),
+            ..Default::default()
+        },
     );
+    let peer = Arc::new(OldPeer {
+        node: NodeServer::new(fake.clone()),
+        seen: Default::default(),
+    });
+    let _node = Conn::spawn(n.sink, n.stream, 1, peer.clone(), opts("n"));
+    assert_eq!(hub.peer_minor(), 1);
     let remote = steve_node_wire::RemoteNode::new(NodeId::new("n1").unwrap());
     remote.attach(hub.clone(), false);
 
-    let e = remote.locate(history_ref("cc:abc")).await.unwrap_err();
-    assert_eq!(e.code, ErrorCode::Unsupported);
-    // a read kind it has never heard of: unsupported, not a broken link
+    // what such a peer does with a field it does not know: drops it and answers without it
     let q = |reads| GitQuery {
-        workspace: workspace("n1", "item:ST-1"),
+        workspace: ws.clone(),
         refs: vec![],
         ranges: vec![],
         fetch: false,
         reads,
     };
-    let e = remote
-        .git_facts(q(vec![GitRead::Fingerprint]))
+    let raw = hub
+        .call(
+            GIT_INSPECT,
+            serde_json::to_value(q(vec![GitRead::Status])).unwrap(),
+            None,
+        )
         .await
-        .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Unsupported, "{e}");
-    // what it knows still works on the same link
-    let f = remote.git_facts(q(vec![GitRead::Status])).await.unwrap();
-    assert_eq!(f.reads, [status_read()]);
+        .unwrap();
+    assert!(raw.get("reads").is_none(), "{raw}");
+    peer.seen.lock().unwrap().clear();
+
+    // so the Hub refuses, before sending, everything that needs this minor
+    let refused = |e: ApiError| {
+        assert_eq!(e.code, ErrorCode::Unsupported, "{e}");
+        assert_eq!(e.retry, RetryClass::Never);
+        assert_eq!(e.operation, None);
+    };
+    refused(
+        remote
+            .git_facts(q(vec![GitRead::Status]))
+            .await
+            .unwrap_err(),
+    );
+    refused(remote.locate(history_ref("cc:abc")).await.unwrap_err());
+    let f = facts();
+    let merge = GitApply {
+        workspace: ws.clone(),
+        expected: f.revision.clone(),
+        expected_head: f.head.clone(),
+        action: GitAction::Merge {
+            commit: "def".into(),
+            message: Some("合并 ST-1".into()),
+            back_out_on_conflict: true,
+        },
+    };
+    refused(remote.git_apply(cmd("op_m", merge)).await.unwrap_err());
+    let push = GitApply {
+        workspace: ws.clone(),
+        expected: f.revision.clone(),
+        expected_head: f.head.clone(),
+        action: GitAction::Push {
+            remote: "origin".into(),
+            branch: "steve/st-1".into(),
+            expected_remote: None,
+            url: "https://github.com/acme/app.git".into(),
+            origin_must_be: Some("acme/app".into()),
+            expected_local: f.head.clone(),
+            auth: None,
+        },
+    };
+    refused(remote.git_apply(cmd("op_p", push)).await.unwrap_err());
+    let scan = ScanSpec {
+        root: at("notes", ""),
+        include: vec![],
+        exclude: vec![],
+        limits: ScanLimits {
+            max_files: 10,
+            max_file_bytes: 10,
+        },
+    };
+    refused(remote.scan(cmd("op_s", scan.clone())).await.unwrap_err());
+    assert!(peer.seen.lock().unwrap().is_empty(), "nothing was sent");
+    assert_eq!(fake.log().len(), 1, "nothing ran");
+
+    // what it knows still goes, on the same link
+    assert!(remote.git_facts(q(vec![])).await.unwrap().reads.is_empty());
+    let rebase = GitApply {
+        workspace: ws.clone(),
+        expected: f.revision.clone(),
+        expected_head: f.head.clone(),
+        action: GitAction::Rebase {
+            onto: "origin/main".into(),
+        },
+    };
+    remote.git_apply(cmd("op_r", rebase)).await.unwrap();
+    let default_scan = ScanSpec {
+        limits: ScanLimits::default(),
+        ..scan
+    };
+    remote.scan(cmd("op_s2", default_scan)).await.unwrap();
     assert!(remote.probe(false).await.is_ok());
     // a malformed payload is still invalid, not unsupported
     let e = hub
@@ -500,4 +660,63 @@ async fn an_older_peer_answers_unsupported_and_the_link_stays() {
         .await
         .unwrap_err();
     assert_eq!(e.code, ErrorCode::Invalid);
+}
+
+/// A request of a kind this end does not know (a newer peer's variant) is `unsupported`: nothing
+/// ran. An answer it cannot read is never that: the peer did act on a command, so it is
+/// `outcome_unknown` on the command's operation (ask, do not redo, do not route elsewhere).
+struct Newer;
+
+#[async_trait]
+impl Handler for Newer {
+    async fn handle(&self, method: &str, p: Value) -> ApiResult<Value> {
+        Ok(match method {
+            // a receipt state from a later minor
+            GIT_APPLY => json!({"operation": p["id"], "state": {"state": "teleported"}}),
+            // a read answer of a kind from a later minor
+            GIT_INSPECT => json!({
+                "revision": "g1", "head": "abc", "dirty": false,
+                "reads": [{"read": {"type": "status"}, "observed": "abc",
+                           "answer": {"type": "hologram"}}]
+            }),
+            _ => return Err(unsupported(method)),
+        })
+    }
+}
+
+#[tokio::test]
+async fn an_answer_of_a_newer_kind_is_uncertain_not_unsupported() {
+    let (h, n) = pair();
+    let hub = Conn::spawn(h.sink, h.stream, 1, Arc::new(Echo), opts("h"));
+    let _node = Conn::spawn(n.sink, n.stream, 1, Arc::new(Newer), opts("n"));
+    let remote = steve_node_wire::RemoteNode::new(NodeId::new("n1").unwrap());
+    remote.attach(hub.clone(), false);
+    let ws = workspace("n1", "item:ST-1");
+    let apply = GitApply {
+        workspace: ws.clone(),
+        expected: Revision::new("g1").unwrap(),
+        expected_head: "abc".into(),
+        action: GitAction::Rebase {
+            onto: "origin/main".into(),
+        },
+    };
+    let e = remote.git_apply(cmd("op_a", apply)).await.unwrap_err();
+    assert_eq!(e.code, ErrorCode::OutcomeUnknown, "{e}");
+    assert_eq!(e.retry, RetryClass::AfterReconcile);
+    assert_eq!(e.operation, Some(OperationId::new("op_a").unwrap()));
+    // a read ran nothing: invalid, and never unsupported either
+    let e = remote
+        .git_facts(GitQuery {
+            workspace: ws,
+            refs: vec![],
+            ranges: vec![],
+            fetch: false,
+            reads: vec![GitRead::Status],
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::Invalid, "{e}");
+    // while a request of a kind unknown here is unsupported
+    let e = from_value::<GitRead>(json!({"type": "hologram"})).unwrap_err();
+    assert_eq!(e.code, ErrorCode::Unsupported);
 }

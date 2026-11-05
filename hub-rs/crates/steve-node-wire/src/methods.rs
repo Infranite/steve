@@ -122,7 +122,8 @@ rpc_table! {
     BLOB_FINISH = "blob.finish": NodeToHub Control Blob false;
     BLOB_ABORT = "blob.abort": NodeToHub Control Blob false;
     // HubSecrets: one-shot, so a lost answer is not asked again (the operation fails instead)
-    SECRET_TAKE = "secret.take": NodeToHub Control Read false;
+    // one-shot: lost after it was written, the secret may be used up (never `offline`)
+    SECRET_TAKE = "secret.take": NodeToHub Control Read true;
 }
 
 pub fn spec(name: &str) -> Option<&'static Spec> {

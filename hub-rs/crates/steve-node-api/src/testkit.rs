@@ -136,7 +136,7 @@ struct State {
     features: Vec<String>,
     /// The files under the roots, as on disk.
     files: BTreeMap<(RootId, RelPath), FakeFile>,
-    /// Issues every scan of a root reports (an unreadable directory, a refused link).
+    /// Issues every scan of a root reports (an unreadable directory, a held link).
     scan_issues: HashMap<RootId, Vec<ScanIssue>>,
     scans: HashMap<OperationId, FakeScan>,
     /// What git says in a workspace, as the test scripted it.
@@ -144,6 +144,17 @@ struct State {
     /// What the next execs print, in order (then: exit 0, no output).
     exec_answers: std::collections::VecDeque<ExecResult>,
     history: Vec<(HistoryEntry, HistoryLocation)>,
+}
+
+/// What the inbox makes of a command before it is decided.
+#[allow(clippy::large_enum_variant)]
+enum Admitted {
+    /// Seen before: its receipt answers.
+    Resend(Receipt),
+    New {
+        drop_reply: bool,
+        unknown: bool,
+    },
 }
 
 /// What [`FakeNode::script_once`] makes one command do.
@@ -390,24 +401,54 @@ impl FakeNode {
         self.at(Point::BeforeAccept(method));
         c.check_window()?;
         let digest = c.digest(method)?;
-        let mut drop_reply = false;
+        let (receipt, events, drop_reply) = {
+            let mut st = self.st();
+            let (drop_reply, unknown) = match Self::admit(&mut st, method, c, &digest)? {
+                Admitted::Resend(r) => return Ok(r),
+                Admitted::New {
+                    drop_reply,
+                    unknown,
+                } => (drop_reply, unknown),
+            };
+            let d = decide(&mut st)?;
+            let (receipt, events) = Self::record_new(&mut st, method, c, digest, d, unknown);
+            (receipt, events, drop_reply)
+        };
+        self.finish_accept(method, c, receipt, events, drop_reply)
+            .await
+    }
+
+    /// [`Self::accept`] for a command carrying secrets. Every refusal runs first (the inbox, the
+    /// scripted refusals, the window, then `check`); only a command known to be new and accepted
+    /// takes its secrets, so a refused one leaves them with the Hub for its resend. `check` runs
+    /// again with `decide` once the secrets are in, under the lock that records the command.
+    async fn accept_taking<T: serde::Serialize>(
+        &self,
+        method: &'static str,
+        c: &Command<T>,
+        refs: &[SecretRef],
+        check: impl Fn(&State) -> ApiResult<()>,
+        decide: impl FnOnce(&mut State, &[SecretBytes]) -> ApiResult<Decided>,
+    ) -> ApiResult<Receipt> {
+        self.at(Point::BeforeAccept(method));
+        c.check_window()?;
+        let digest = c.digest(method)?;
+        let (drop_reply, unknown) = {
+            let mut st = self.st();
+            let new = match Self::admit(&mut st, method, c, &digest)? {
+                Admitted::Resend(r) => return Ok(r),
+                Admitted::New {
+                    drop_reply,
+                    unknown,
+                } => (drop_reply, unknown),
+            };
+            check(&st)?;
+            new
+        };
+        let secrets = self.take_secrets(&c.id, refs).await?;
         let (receipt, events) = {
             let mut st = self.st();
-            if let Some(code) = st.refused.get(method) {
-                return Err(ApiError::new(*code, "refused by the test").on(&c.id));
-            }
-            let script = if st.inbox.contains_key(&c.id) {
-                None
-            } else {
-                st.scripted.get_mut(method).and_then(|q| q.pop_front())
-            };
-            let mut unknown = false;
-            match script {
-                Some(Scripted::Refuse(e)) => return Err(e),
-                Some(Scripted::DropReply) => drop_reply = true,
-                Some(Scripted::Unknown) => unknown = true,
-                None => {}
-            }
+            // the same command sent twice at once: the first one recorded answers both
             if let Some(a) = st.inbox.get(&c.id) {
                 return if a.digest == digest && a.method == method {
                     Ok(a.receipt.clone())
@@ -418,42 +459,103 @@ impl FakeNode {
                     )
                 };
             }
-            if st.now > c.accept_before.0 {
-                return Err(ApiError::new(ErrorCode::Stale, "past accept_before").on(&c.id));
-            }
-            if let Some(i) = st.refusals.iter().position(|(m, _)| *m == method) {
-                return Err(st.refusals.remove(i).1.on(&c.id));
-            }
-            let mut d = decide(&mut st)?;
-            if unknown {
-                d.state = Observed::Unknown {
-                    reason: "scripted by the test".into(),
-                };
-                d.events = vec![];
-            }
-            let receipt = Receipt {
-                operation: c.id.clone(),
-                state: d.state,
-            };
-            st.inbox.insert(
-                c.id.clone(),
-                Accepted {
-                    method,
-                    digest,
-                    receipt: receipt.clone(),
-                    execution: d.execution,
-                    workspace: d.workspace,
-                    cancel_requested: false,
-                },
-            );
-            st.log.push((method, c.id.clone()));
-            let events: Vec<NodeEvent> = d
-                .events
-                .into_iter()
-                .map(|(s, b)| Self::record(&mut st, s, b))
-                .collect();
-            (receipt, events)
+            check(&st)?;
+            let d = decide(&mut st, &secrets)?;
+            Self::record_new(&mut st, method, c, digest, d, unknown)
         };
+        self.finish_accept(method, c, receipt, events, drop_reply)
+            .await
+    }
+
+    /// The checks before a command is decided: the test's refusals, a known id (its receipt or a
+    /// conflict), the window.
+    fn admit<T>(
+        st: &mut State,
+        method: &'static str,
+        c: &Command<T>,
+        digest: &Digest,
+    ) -> ApiResult<Admitted> {
+        if let Some(code) = st.refused.get(method) {
+            return Err(ApiError::new(*code, "refused by the test").on(&c.id));
+        }
+        let script = if st.inbox.contains_key(&c.id) {
+            None
+        } else {
+            st.scripted.get_mut(method).and_then(|q| q.pop_front())
+        };
+        let (mut drop_reply, mut unknown) = (false, false);
+        match script {
+            Some(Scripted::Refuse(e)) => return Err(e),
+            Some(Scripted::DropReply) => drop_reply = true,
+            Some(Scripted::Unknown) => unknown = true,
+            None => {}
+        }
+        if let Some(a) = st.inbox.get(&c.id) {
+            return if a.digest == *digest && a.method == method {
+                Ok(Admitted::Resend(a.receipt.clone()))
+            } else {
+                Err(ApiError::new(ErrorCode::Conflict, "same operation, other content").on(&c.id))
+            };
+        }
+        if st.now > c.accept_before.0 {
+            return Err(ApiError::new(ErrorCode::Stale, "past accept_before").on(&c.id));
+        }
+        if let Some(i) = st.refusals.iter().position(|(m, _)| *m == method) {
+            return Err(st.refusals.remove(i).1.on(&c.id));
+        }
+        Ok(Admitted::New {
+            drop_reply,
+            unknown,
+        })
+    }
+
+    /// Records a new command as decided and numbers its events.
+    fn record_new<T>(
+        st: &mut State,
+        method: &'static str,
+        c: &Command<T>,
+        digest: Digest,
+        mut d: Decided,
+        unknown: bool,
+    ) -> (Receipt, Vec<NodeEvent>) {
+        if unknown {
+            d.state = Observed::Unknown {
+                reason: "scripted by the test".into(),
+            };
+            d.events = vec![];
+        }
+        let receipt = Receipt {
+            operation: c.id.clone(),
+            state: d.state,
+        };
+        st.inbox.insert(
+            c.id.clone(),
+            Accepted {
+                method,
+                digest,
+                receipt: receipt.clone(),
+                execution: d.execution,
+                workspace: d.workspace,
+                cancel_requested: false,
+            },
+        );
+        st.log.push((method, c.id.clone()));
+        let events: Vec<NodeEvent> = d
+            .events
+            .into_iter()
+            .map(|(s, b)| Self::record(st, s, b))
+            .collect();
+        (receipt, events)
+    }
+
+    async fn finish_accept<T>(
+        &self,
+        method: &'static str,
+        c: &Command<T>,
+        receipt: Receipt,
+        events: Vec<NodeEvent>,
+        drop_reply: bool,
+    ) -> ApiResult<Receipt> {
         self.at(Point::AfterAccept(method));
         // a Hub that cannot take the events now gets them on replay: the command stays accepted
         self.deliver(events).await;
@@ -1609,36 +1711,41 @@ impl WorkspaceExecutor for FakeNode {
             }
             _ => vec![],
         };
-        let _secrets = self.take_secrets(&c.id, &auth).await?;
-        self.accept("git_apply", &c, |st| {
-            let w = &c.body.workspace;
+        let w = &c.body.workspace;
+        // every refusal before the credential is taken
+        let check = |st: &State| -> ApiResult<()> {
             Self::writable(st, w)?;
-            let Some(facts) = st.git.get(&w.id).cloned() else {
+            let Some(facts) = st.git.get(&w.id) else {
                 return unsupported("git facts nobody scripted");
             };
             if facts.revision != c.body.expected || facts.head != c.body.expected_head {
                 return Err(ApiError::new(ErrorCode::Stale, "changed since"));
             }
-            let mut next = facts.clone();
-            match &c.body.action {
-                GitAction::Rebase { .. } | GitAction::Merge { .. } => {
-                    next.head = format!("c{}", Self::next(st));
+            if let GitAction::Push {
+                branch,
+                expected_local,
+                ..
+            } = &c.body.action
+            {
+                let local = facts
+                    .refs
+                    .iter()
+                    .find(|(r, _)| r == branch)
+                    .and_then(|(_, sha)| sha.as_ref())
+                    .unwrap_or(&facts.head);
+                if local != expected_local {
+                    return Err(ApiError::new(ErrorCode::Stale, "the branch moved"));
                 }
-                GitAction::Push {
-                    branch,
-                    expected_local,
-                    ..
-                } => {
-                    let local = facts
-                        .refs
-                        .iter()
-                        .find(|(r, _)| r == branch)
-                        .and_then(|(_, sha)| sha.clone())
-                        .unwrap_or_else(|| facts.head.clone());
-                    if local != *expected_local {
-                        return Err(ApiError::new(ErrorCode::Stale, "the branch moved"));
-                    }
-                }
+            }
+            Ok(())
+        };
+        self.accept_taking("git_apply", &c, &auth, check, |st, _secrets| {
+            let mut next = st.git[&w.id].clone();
+            if matches!(
+                c.body.action,
+                GitAction::Rebase { .. } | GitAction::Merge { .. }
+            ) {
+                next.head = format!("c{}", Self::next(st));
             }
             next.revision = Self::revision(st);
             next.reads = vec![];
@@ -1660,13 +1767,15 @@ impl WorkspaceExecutor for FakeNode {
         {
             return Err(ApiError::new(ErrorCode::Invalid, "a header is for a push only").on(&c.id));
         }
-        let secrets = self.take_secrets(&c.id, &c.body.secrets).await?;
-        self.accept("exec", &c, |st| {
+        let check = |st: &State| -> ApiResult<()> {
             Self::writable(st, &c.body.workspace)?;
             Self::check_policy(&c.body.policy)?;
             if c.body.limits.deadline.0 <= st.now {
                 return Err(ApiError::new(ErrorCode::Expired, "deadline already passed"));
             }
+            Ok(())
+        };
+        self.accept_taking("exec", &c, &c.body.secrets, check, |st, secrets| {
             let r = st.exec_answers.pop_front().unwrap_or(ExecResult {
                 exit_code: Some(0),
                 stdout: String::new(),
@@ -1674,8 +1783,8 @@ impl WorkspaceExecutor for FakeNode {
                 truncated: false,
             });
             let r = ExecResult {
-                stdout: mask(&r.stdout, &secrets),
-                stderr: mask(&r.stderr, &secrets),
+                stdout: mask(&r.stdout, secrets),
+                stderr: mask(&r.stderr, secrets),
                 ..r
             };
             let mut d = Decided::done(OperationResult::Exec(r));
@@ -1810,7 +1919,7 @@ impl WorkspaceExecutor for FakeNode {
             manifest: s.manifest.clone(),
             entries,
             next,
-            complete: last && s.issues.is_empty(),
+            complete: last && !s.issues.iter().any(ScanIssue::hides_files),
             issues: if last { s.issues.clone() } else { vec![] },
         })
     }
