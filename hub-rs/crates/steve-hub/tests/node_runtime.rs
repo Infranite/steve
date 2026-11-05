@@ -1829,8 +1829,47 @@ async fn a_handoff_mid_turn_opens_the_successor_only_after_the_old_harness_is_le
     assert_eq!(h.prompt_of(1), "continue");
 }
 
-/// A stop the Node accepted but has not carried out yet (end_and_release on a handoff): the old
-/// turn still runs, so there is no release, and the successor does not start.
+/// A release the Node refuses on a handoff: the old harness is still open in the worktree, so the
+/// successor is not let open beside it, nor left waiting for good on the refused release. The
+/// release is asked again and the successor, told why it waits, opens once that one is done.
+#[tokio::test]
+async fn a_refused_release_on_a_handoff_is_asked_again_and_the_successor_opens_after_it() {
+    let h = hub();
+    h.rt.bind(&on_the_item(S)).unwrap();
+    h.one_turn("hello").await;
+    h.node
+        .refuse_next("release_session", ApiError::new(ErrorCode::Invalid, "no"));
+    let op = h.hand_off();
+    until("refused", || h.state_of(&op) == "rejected").await;
+    assert_eq!(
+        h.count("prepare_workspace"),
+        1,
+        "not beside the old harness"
+    );
+    assert_eq!(h.phase_of(S2), "opening");
+    until("the successor's turn", || h.count("start_turn") == 2).await;
+    assert_eq!(
+        h.count("release_session"),
+        1,
+        "the refused one never reached it"
+    );
+    let releases: i64 = h.q(&format!(
+        "SELECT COUNT(*) FROM node_commands WHERE method='release_session' AND json_extract(request,'$.body')='{S}'"
+    ));
+    assert_eq!(releases, 2, "asked again");
+    assert_eq!(h.last_state("release_session"), "finished");
+    assert_eq!(h.phase_of(S), "released");
+    assert_eq!(h.node.most_open_in_a_workspace(), 1, "never two at once");
+    assert_eq!(h.prompt_of(1), "continue");
+    let told: i64 = h.q(&format!(
+        "SELECT COUNT(*) FROM events WHERE session_id='{S2}' AND kind='system' AND data LIKE '%还没能在 Node 上释放%'"
+    ));
+    assert_eq!(told, 1);
+}
+
+/// A stop the Node accepted but has not carried out yet (a reassign, or end_and_release on a
+/// handoff: stop, then the release): the old turn still runs, so there is no release, and the
+/// successor does not start.
 #[tokio::test]
 async fn a_stop_accepted_but_not_done_holds_the_release_and_the_successor() {
     let h = hub();

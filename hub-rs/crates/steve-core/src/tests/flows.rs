@@ -1238,6 +1238,33 @@ fn reassign_checks_the_workspace() {
     assert_eq!(last_session(&k, &i.id).bot_id.as_deref(), Some("dev"));
 }
 
+/// B4 / D2: a reassign mid-turn is a handoff into the same worktree. The old turn is stopped and
+/// the new bot's session names the old one's release that is still on its way, so it opens only
+/// once the old harness is let go.
+#[test]
+fn a_reassign_mid_turn_waits_for_the_old_release() {
+    let k = Kit::new();
+    let i = new_item(&k, "写一个脚本");
+    let s = only_session(&k, &i.id);
+    assert!(k.rt.st().turning.contains(&s.id), "the opening turn runs");
+    k.rt.st().release_answers.insert(
+        s.id.clone(),
+        crate::Released::Pending("op_release_1".into()),
+    );
+    k.core.reassign(&i.id, "dev", "me").unwrap();
+    assert!(
+        k.rt.st().cancelled.contains(&s.id),
+        "the old turn is stopped"
+    );
+    let s2 = last_session(&k, &i.id);
+    assert_ne!(s2.id, s.id);
+    assert_eq!(s2.bot_id.as_deref(), Some("dev"));
+    assert_eq!(
+        k.rt.st().created.last().unwrap(),
+        &(s2.id.clone(), Some("op_release_1".to_string()))
+    );
+}
+
 #[test]
 fn session_messages_and_ending() {
     let k = Kit::new();

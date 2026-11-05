@@ -400,7 +400,8 @@ impl NodeRuntime {
 
     /// [`Self::bind`] for a session that takes over from another one: its prepare (and so its
     /// open) waits until `after`, that one's `release_session`, is done, so the two harnesses are
-    /// never open at once (they share the item's worktree). A release that fails keeps it waiting.
+    /// never open at once (they share the item's worktree). A release that fails is asked again
+    /// and the session waits for that one instead ([`Self::release_again_in`]).
     pub fn bind_after(&self, b: &Binding, after: Option<&str>) -> Result<(), StoreError> {
         let workspace = WorkspaceRef {
             node: self.node_id.clone(),
@@ -1599,7 +1600,57 @@ impl NodeRuntime {
             },
             now(),
         )?;
-        self.plan_after_in(tx, s)?;
+        if self.plan_after_in(tx, s)? != Planned::Created && !success {
+            self.release_again_in(tx, s, op)?;
+        }
+        Ok(())
+    }
+
+    /// A release of an ended session that a successor waits for came back refused or failed:
+    /// the old harness is still open in the shared worktree, so the successor keeps waiting, now
+    /// for a new release (after a delay doubling from 1 s up to a minute) that it is moved onto.
+    /// The successor is told once. Nothing waits for it: it stays as it is (tidy asks again).
+    fn release_again_in(&self, tx: &Tx, s: &str, failed: &str) -> Result<(), StoreError> {
+        let waiting: Vec<String> = tx
+            .prepare(
+                "SELECT operation_id FROM node_commands WHERE dependency_operation=? AND state='pending'",
+            )?
+            .query_map([failed], |r| r.get(0))?
+            .collect::<Result<_, _>>()?;
+        if waiting.is_empty() || !ended_in(tx, s)? {
+            return Ok(());
+        }
+        let Release::Pending(op) = self.release_in(tx, s)? else {
+            return Ok(());
+        };
+        let failures: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM node_commands WHERE method='release_session' AND json_extract(request,'$.body')=? AND state IN ('finished','rejected') AND json_extract(receipt,'$.success')=0",
+            [s],
+            |r| r.get(0),
+        )?;
+        tx.execute(
+            "UPDATE node_commands SET retry_at=?, updated=? WHERE operation_id=? AND state='pending'",
+            rusqlite::params![
+                now() + (1_000i64 << (failures - 1).clamp(0, 6)).min(60_000),
+                now(),
+                op
+            ],
+        )?;
+        for w in &waiting {
+            tx.execute(
+                "UPDATE node_commands SET dependency_operation=?, updated=? WHERE operation_id=? AND state='pending'",
+                rusqlite::params![op, now(), w],
+            )?;
+            if failures == 1
+                && let Some(next) = command_any_session_in(tx, w)?
+            {
+                system_in(
+                    tx,
+                    &next,
+                    "上一个会话还没能在 Node 上释放，这个会话等它释放后再打开，正在重试",
+                )?;
+            }
+        }
         Ok(())
     }
 

@@ -3218,8 +3218,11 @@ impl Tx<'_> {
             Some(s) => js_head(&self.last_agent_text(&s.id)?, 800).to_string(),
             None => String::new(),
         };
+        /* a handoff into the same worktree: a turn still running is stopped, and the new bot's
+        session waits for the old harness's release when that is still on its way */
         if let Some(s) = &s {
-            self.end_and_release(&s.id)?;
+            self.stop_now(&s.id);
+            self.hand_off(id, &s.id)?;
         }
         for d in self
             .db()
