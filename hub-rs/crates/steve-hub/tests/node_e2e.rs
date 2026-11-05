@@ -1,4 +1,4 @@
-//! The local Node (`STEVE_NODE=local`), end to end on the real `steve-hub` binary: a temp
+//! The local Node (`STEVE_NODE_MODE=local`), end to end on the real `steve-hub` binary: a temp
 //! STEVE_HOME, its own port, the fake ACP agent (`steve-acp/tests/fake-acp.js`, which logs every
 //! message it gets), real HTTP. Covers D5's acceptance on one Hub home:
 //! - a session created with the Node on is bound to it and its transcript is stored as `steve.v1`;
@@ -7,7 +7,7 @@
 //! - while held (upgrade drain), a message is queued and not drained, and goes once released;
 //! - the Hub killed mid-turn comes back with the attempt `unknown` (awaiting reconciliation),
 //!   which is never re-run;
-//! - with `STEVE_NODE` off, a Node-bound session is parked, never handed to the legacy runner.
+//! - with `STEVE_NODE_MODE` off, a Node-bound session is parked, never handed to the legacy runner.
 //!
 //! And on a second home, with a short attempt deadline, a card nobody answers expires.
 //!
@@ -168,7 +168,7 @@ fn spawn(h: &Home, node: bool, extra: &[(&str, &str)]) -> Hub {
         .env("CLAUDE_CODE_EXECUTABLE", "/usr/bin/false")
         .env("STEVE_ADAPTER_CLAUDE", fake)
         .env("STEVE_ADAPTER_CODEX", "/usr/bin/false")
-        .env_remove("STEVE_NODE")
+        .env_remove("STEVE_NODE_MODE")
         .env_remove("STEVE_NODE_TURN_LIMIT_MS")
         .env_remove("STEVE_NO_RESUME")
         .env_remove("STEVE_UPGRADE_ID")
@@ -189,7 +189,7 @@ fn spawn(h: &Home, node: bool, extra: &[(&str, &str)]) -> Hub {
         )
         .process_group(0);
     if node {
-        c.env("STEVE_NODE", "local");
+        c.env("STEVE_NODE_MODE", "local");
     }
     for (k, v) in extra {
         c.env(k, v);
@@ -525,7 +525,7 @@ async fn a_node_session_end_to_end() {
     assert_eq!(h.got("崩溃验收-K2"), 1, "never re-run: {:?}", h.prompts());
     hub.kill();
 
-    // ── STEVE_NODE off: the Node-bound session is parked, never handed to the legacy runner
+    // ── STEVE_NODE_MODE off: the Node-bound session is parked, never handed to the legacy runner
     let spawns = h.spawns();
     let _hub = spawn(&h, false, &[]);
     serving(&h).await;

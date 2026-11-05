@@ -788,7 +788,7 @@ pub(crate) mod tests {
         for d in [&cfg.data_dir, &cfg.worktrees, &cfg.scratch] {
             std::fs::create_dir_all(d).unwrap();
         }
-        // STEVE_NODE is unset: the Hub's ToolService as it would be installed for a Node
+        // STEVE_NODE_MODE is unset: the Hub's ToolService as it would be installed for a Node
         let w = super::super::wire_with(&cfg, &crate::bus::Bus::new(), Arc::new(get)).unwrap();
         let store = Store::open(cfg.db_path(), steve_store::FnPublisher(|_| {})).unwrap();
         let home = cfg.data_dir.join("node");

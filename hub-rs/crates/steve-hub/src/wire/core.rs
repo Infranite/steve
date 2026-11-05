@@ -95,7 +95,7 @@ pub struct HubHost {
     /// The YOLO executor: gets the full input of each tool permission request, and answers it once
     /// the runner waits for it (set once the core exists).
     pub yolo: OnceLock<steve_core::yolo::Engine>,
-    /// The local Node (`STEVE_NODE=local`), so YOLO can judge its requests against the bound
+    /// The local Node (`STEVE_NODE_MODE=local`), so YOLO can judge its requests against the bound
     /// workspace's real directory. Unset (a remote Node, or none): YOLO asks.
     pub local_node: OnceLock<std::sync::Arc<steve_node::LocalNode>>,
     /// The first `user` event of the turn being started, for `agent_turns.user_seq`.
@@ -720,35 +720,71 @@ impl super::node_runtime::NodeDomain for HubHost {
     }
 }
 
-/// Each session runs on one backend, fixed when it is bound: the ones bound to a Node go to the
-/// coordinator, every other one to the ACP runner. Holds and counts cover both.
+/// Each session runs on one backend, fixed when it is bound: the ones bound to a Node go to that
+/// Node's coordinator (`runtime_sessions.node_id`: the local Node, or a paired remote Node through
+/// the fleet), every other one to the ACP runner. Holds and counts cover them all.
 pub struct RoutedRuntime {
     pub legacy: AcpRuntime,
+    /// The local Node's coordinator (`STEVE_NODE_MODE=local`).
     pub node: Option<Arc<super::node_runtime::NodeRuntime>>,
-    /// Where bindings are read when no Node is enabled here (rollback: parked sessions).
+    /// The remote Nodes' coordinators (`STEVE_NODE_LISTEN=1`).
+    pub fleet: Option<Arc<crate::nodes::NodeFleet>>,
+    /// The remote Node new sessions are bound to when they can be (`STEVE_NODE_BIND`); unset: none.
+    pub bind_remote: Option<steve_node_api::NodeId>,
+    /// Where bindings are read.
     pub store: steve_store::Store,
 }
 
 /// Which backend a session goes to.
-enum Backend<'a> {
+enum Backend {
     Legacy,
-    Node(&'a super::node_runtime::NodeRuntime),
-    /// Bound to a Node that is not enabled here (STEVE_NODE off): its messages wait in the queue
-    /// and nothing else happens; it is never handed to the legacy runner.
+    Node(Arc<super::node_runtime::NodeRuntime>),
+    /// Bound to a Node that is not enabled here (STEVE_NODE_MODE or STEVE_NODE_LISTEN off): its
+    /// messages wait in the queue and nothing else happens; it is never handed to the legacy runner.
     Parked,
 }
 
+/// The Node `session` is bound to. A read error counts as bound to an unknown Node: never hand
+/// it to another backend.
+fn node_of(store: &steve_store::Store, session: &str) -> Option<String> {
+    use rusqlite::OptionalExtension;
+    store
+        .reader(|c| {
+            Ok::<_, steve_store::StoreError>(
+                c.query_row(
+                    "SELECT node_id FROM runtime_sessions WHERE session_id=?",
+                    [session],
+                    |r| r.get::<_, String>(0),
+                )
+                .optional()?,
+            )
+        })
+        .unwrap_or_else(|e| {
+            tracing::error!("binding of {session}: {e}");
+            Some(String::new())
+        })
+}
+
 impl RoutedRuntime {
-    fn route(&self, session_id: &str) -> Backend<'_> {
-        match self.node.as_deref() {
-            Some(n) if n.owns(session_id) => Backend::Node(n),
-            Some(_) => Backend::Legacy,
-            None if super::node_runtime::bound(&self.store, session_id) => Backend::Parked,
-            None => Backend::Legacy,
+    fn route(&self, session_id: &str) -> Backend {
+        let Some(node) = node_of(&self.store, session_id) else {
+            return Backend::Legacy;
+        };
+        if let Some(n) = &self.node
+            && n.node_id().as_str() == node
+        {
+            return Backend::Node(n.clone());
+        }
+        if node == "local" {
+            return Backend::Parked;
+        }
+        match (&self.fleet, steve_node_api::NodeId::new(node)) {
+            (Some(f), Ok(id)) => f.start(&id).map_or(Backend::Parked, Backend::Node),
+            _ => Backend::Parked,
         }
     }
 
-    fn node_for(&self, session_id: &str) -> Option<&super::node_runtime::NodeRuntime> {
+    fn node_for(&self, session_id: &str) -> Option<Arc<super::node_runtime::NodeRuntime>> {
         match self.route(session_id) {
             Backend::Node(n) => Some(n),
             _ => None,
@@ -758,13 +794,40 @@ impl RoutedRuntime {
     fn parked(&self, session_id: &str) -> bool {
         matches!(self.route(session_id), Backend::Parked)
     }
+
+    /// Binds a new session to the configured remote Node when it can run there. False: it was not
+    /// (not configured, not possible for this session, or the bind failed), nothing changed.
+    fn bind_remote(&self, session_id: &str) -> bool {
+        let (Some(f), Some(target)) = (&self.fleet, &self.bind_remote) else {
+            return false;
+        };
+        let Some(b) = super::node_binding::remote_binding_for(&self.store, session_id, target)
+        else {
+            tracing::info!("{session_id}: not bound to the remote Node {target}");
+            return false;
+        };
+        let Some(rt) = f.start(target) else {
+            return false;
+        };
+        match rt.bind(&b) {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::error!("bind {session_id} to the remote Node {target}: {e}");
+                false
+            }
+        }
+    }
 }
 
 impl steve_core::AgentRuntime for RoutedRuntime {
-    /// With a Node enabled here, a new session is bound to it when its binding can be planned
+    /// A new session is bound to the remote Node named by `STEVE_NODE_BIND` when it can run there;
+    /// otherwise, with the local Node enabled here, to it when its binding can be planned
     /// (otherwise, e.g. a permission mode the Node path cannot express, it stays on the legacy
-    /// runner). Existing sessions are never bound; without a Node nothing changes.
+    /// runner). Existing sessions are never bound; with neither configured nothing changes.
     fn created(&self, session_id: &str) {
+        if self.bind_remote(session_id) {
+            return;
+        }
         let Some(n) = &self.node else { return };
         match super::node_binding::binding_for(&self.store, session_id) {
             Some(b) => {
@@ -839,22 +902,19 @@ impl steve_core::AgentRuntime for RoutedRuntime {
         }
     }
     fn answer_permission(&self, decision_id: &str, option_id: Option<&str>) -> bool {
-        if let Some(n) = &self.node
-            && let Some(sid) = n.decision_session(decision_id)
-            && n.owns(&sid)
-        {
-            return n
-                .answer_permission(decision_id, option_id)
-                .unwrap_or_else(|e| {
-                    tracing::error!("answer {decision_id}: {e}");
-                    false
-                });
-        }
-        if self.node.is_none()
-            && let Some(sid) = super::node_runtime::decision_session(&self.store, decision_id)
-            && self.parked(&sid)
-        {
-            return false;
+        if let Some(sid) = super::node_runtime::decision_session(&self.store, decision_id) {
+            match self.route(&sid) {
+                Backend::Node(n) => {
+                    return n
+                        .answer_permission(decision_id, option_id)
+                        .unwrap_or_else(|e| {
+                            tracing::error!("answer {decision_id}: {e}");
+                            false
+                        });
+                }
+                Backend::Parked => return false,
+                Backend::Legacy => {}
+            }
         }
         self.legacy.answer_permission(decision_id, option_id)
     }
@@ -863,16 +923,23 @@ impl steve_core::AgentRuntime for RoutedRuntime {
         if let Some(n) = &self.node {
             n.hold(on);
         }
+        if let Some(f) = &self.fleet {
+            f.hold(on);
+        }
     }
     fn is_holding(&self) -> bool {
-        self.legacy.is_holding() || self.node.as_ref().is_some_and(|n| n.is_holding())
+        self.legacy.is_holding()
+            || self.node.as_ref().is_some_and(|n| n.is_holding())
+            || self.fleet.as_ref().is_some_and(|f| f.is_holding())
     }
     fn uncertain(&self, session_id: &str) -> bool {
         self.node_for(session_id)
             .is_some_and(|n| n.is_uncertain(session_id))
     }
     fn running_turns(&self) -> usize {
-        self.legacy.running_turns() + self.node.as_ref().map_or(0, |n| n.running_turns())
+        self.legacy.running_turns()
+            + self.node.as_ref().map_or(0, |n| n.running_turns())
+            + self.fleet.as_ref().map_or(0, |f| f.running_turns())
     }
     fn flush(&self, session_id: &str, lead: Option<(&str, &str)>) -> bool {
         match self.node_for(session_id) {
@@ -923,7 +990,7 @@ impl steve_core::AgentRuntime for RoutedRuntime {
 pub struct CoreDomain {
     pub core: Core,
     pub acp: Acp,
-    /// The opt-in local Node (`STEVE_NODE=local`): stopped with the Hub, its harnesses with it.
+    /// The opt-in local Node (`STEVE_NODE_MODE=local`): stopped with the Hub, its harnesses with it.
     pub node: Option<Arc<steve_node::LocalNode>>,
 }
 

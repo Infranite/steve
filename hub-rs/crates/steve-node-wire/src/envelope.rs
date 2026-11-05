@@ -1,0 +1,154 @@
+//! One JSON envelope per WebSocket text message, and the size limits checked around it.
+
+use std::pin::Pin;
+
+use futures_util::{Sink, Stream};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use steve_node_api::{ApiError, ApiResult, ErrorCode};
+
+/// Largest message the socket accepts at all (tungstenite refuses bigger ones before parsing).
+pub const MAX_FRAME: usize = 288 * 1024;
+/// Largest control envelope (handshake, heartbeat, fencing).
+pub const CONTROL_CAP: usize = 64 * 1024;
+/// Largest payload of an event batch, a blob or a file chunk: [`crate::RemoteSink`] splits batches
+/// above it so that every ack still covers a contiguous watermark.
+pub const BULK_CAP: usize = 256 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Kind {
+    Req,
+    Res,
+    Ctl,
+    /// Anything newer: answered `unsupported`, the link stays up.
+    #[serde(other)]
+    Unknown,
+}
+
+/// `{"v":[1,0],"t":"req","id":"…","m":"turn.start","gen":7,"p":{…}}`. No node id: after the
+/// handshake the link is the identity.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Envelope {
+    pub v: (u16, u16),
+    pub t: Kind,
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub re: Option<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub m: String,
+    #[serde(default, rename = "gen")]
+    pub generation: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace: Option<String>,
+    /// Informational in N2: the receiver keeps its own clock (a command's `accept_before`).
+    #[serde(default)]
+    pub deadline_at: i64,
+    #[serde(default)]
+    pub p: Value,
+}
+
+impl Envelope {
+    pub fn ctl(id: impl Into<String>, m: &str, generation: u64, p: Value) -> Envelope {
+        Envelope {
+            v: crate::WIRE,
+            t: Kind::Ctl,
+            id: id.into(),
+            re: None,
+            m: m.into(),
+            generation,
+            trace: None,
+            deadline_at: 0,
+            p,
+        }
+    }
+
+    pub fn encode(&self) -> ApiResult<String> {
+        let s = serde_json::to_string(self)
+            .map_err(|e| ApiError::new(ErrorCode::Internal, format!("encode: {e}")))?;
+        let cap = if self.t == Kind::Ctl {
+            CONTROL_CAP
+        } else {
+            MAX_FRAME
+        };
+        if s.len() > cap {
+            return Err(ApiError::new(
+                ErrorCode::Exhausted,
+                format!("{} is {} bytes, over the {cap} limit", self.m, s.len()),
+            ));
+        }
+        Ok(s)
+    }
+
+    /// `None`: malformed or over its class cap; the link closes with [`crate::close::MALFORMED`].
+    pub fn decode(s: &str) -> Option<Envelope> {
+        if s.len() > MAX_FRAME {
+            return None;
+        }
+        let e: Envelope = serde_json::from_str(s).ok()?;
+        if e.t == Kind::Ctl && s.len() > CONTROL_CAP {
+            return None;
+        }
+        Some(e)
+    }
+}
+
+/// A result as it travels: `{"ok":T}` or `{"err":ApiError}`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Outcome {
+    Ok(Value),
+    Err(ApiError),
+}
+
+/// What a link carries, independent of the WebSocket library (the Node uses tungstenite, the Hub
+/// axum's upgrade).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Frame {
+    Text(String),
+    Close(u16, String),
+}
+
+pub type FrameSink = Pin<Box<dyn Sink<Frame, Error = std::io::Error> + Send>>;
+pub type FrameStream = Pin<Box<dyn Stream<Item = std::io::Result<Frame>> + Send>>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn round_trip_and_caps() {
+        let e = Envelope {
+            v: crate::WIRE,
+            t: Kind::Req,
+            id: "r_1".into(),
+            re: None,
+            m: "turn.start".into(),
+            generation: 7,
+            trace: None,
+            deadline_at: 0,
+            p: serde_json::json!({"x": 1}),
+        };
+        let s = e.encode().unwrap();
+        assert_eq!(Envelope::decode(&s).unwrap(), e);
+        // an unknown kind decodes and is answered, it does not break the link
+        let u = Envelope::decode(r#"{"v":[1,0],"t":"stream","id":"x"}"#).unwrap();
+        assert_eq!(u.t, Kind::Unknown);
+        assert!(Envelope::decode("{not json").is_none());
+        assert!(Envelope::decode(&"x".repeat(MAX_FRAME + 1)).is_none());
+        let big = Envelope::ctl("c", "hello", 0, Value::String("y".repeat(CONTROL_CAP)));
+        assert_eq!(big.encode().unwrap_err().code, ErrorCode::Exhausted);
+        let mut raw = big.clone();
+        raw.t = Kind::Req;
+        let text = raw.encode().unwrap().replace("\"req\"", "\"ctl\"");
+        assert!(
+            Envelope::decode(&text).is_none(),
+            "an oversize control frame is refused"
+        );
+        let mut huge = e.clone();
+        huge.p = Value::String("z".repeat(MAX_FRAME));
+        assert_eq!(huge.encode().unwrap_err().code, ErrorCode::Exhausted);
+        let ok = serde_json::to_string(&Outcome::Ok(serde_json::json!(1))).unwrap();
+        assert_eq!(ok, r#"{"ok":1}"#);
+    }
+}

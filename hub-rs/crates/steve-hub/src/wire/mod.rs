@@ -56,6 +56,8 @@ pub struct Wired {
     pub yolo: steve_core::yolo::Yolo,
     /// The YOLO executor (its event and tick loops are in `jobs`).
     pub yolo_engine: steve_core::yolo::Engine,
+    /// Remote Nodes (`STEVE_NODE_LISTEN=1`): their routes and the coordinators sessions go to.
+    pub nodes: Option<Arc<crate::nodes::NodeService>>,
     /// Steve's tools as a Node reaches them (in-crate tests drive the bridge with them).
     #[cfg(test)]
     pub(crate) tool_service: Arc<tool_service::ToolService>,
@@ -142,12 +144,12 @@ fn node_runtime(
     vars: &Vars,
     jobs: &mut Vec<modules::Job>,
 ) -> Result<Option<NodeHost>, BackendError> {
-    if vars("STEVE_NODE").as_deref() != Some("local") {
+    if !local_node_mode(vars) {
         return Ok(None);
     }
     if cfg.no_resume {
         return Err(BackendError::msg(
-            "STEVE_NODE=local is disabled on STEVE_NO_RESUME copies",
+            "STEVE_NODE_MODE=local is disabled on STEVE_NO_RESUME copies",
         ));
     }
     let node_id = steve_node_api::NodeId::new("local").expect("constant node id");
@@ -170,7 +172,7 @@ fn node_runtime(
     );
     let runtime = node_runtime::NodeRuntime::new(store.clone(), node.clone(), domain);
     // an attempt's deadline (default 6 h); the end-to-end tests shorten it to see a card expire
-    if let Some(ms) = vars("STEVE_NODE_TURN_LIMIT_MS").and_then(|v| v.trim().parse::<i64>().ok()) {
+    if let Some(ms) = turn_limit(vars) {
         runtime.set_turn_limit(ms);
     }
     node.connect(
@@ -191,6 +193,89 @@ fn node_runtime(
         tools,
         node,
     }))
+}
+
+/// Whether the local Node is switched on: `STEVE_NODE_MODE=local`, or `STEVE_NODE=local` (how
+/// 0.2.50 spelled it, kept as a deprecated alias when STEVE_NODE_MODE is unset).
+fn local_node_mode(vars: &Vars) -> bool {
+    match vars("STEVE_NODE_MODE").filter(|v| !v.trim().is_empty()) {
+        Some(mode) => mode.trim() == "local",
+        None if vars("STEVE_NODE").as_deref() == Some("local") => {
+            tracing::warn!("STEVE_NODE=local is deprecated; set STEVE_NODE_MODE=local instead");
+            true
+        }
+        None => false,
+    }
+}
+
+/// An attempt's deadline when set (`STEVE_NODE_TURN_LIMIT_MS`, for tests); default 6 h.
+fn turn_limit(vars: &Vars) -> Option<i64> {
+    vars("STEVE_NODE_TURN_LIMIT_MS").and_then(|v| v.trim().parse::<i64>().ok())
+}
+
+/// Remote Nodes, only with `STEVE_NODE_LISTEN=1`: the service (pairing, listener) over a fleet of
+/// coordinators reporting to `domain`, and the Node new sessions are bound to (`STEVE_NODE_BIND`,
+/// a paired Node's id; unset: none, sessions go where they went before).
+fn remote_nodes(
+    cfg: &Config,
+    store: &steve_store::Store,
+    domain: Arc<dyn node_runtime::NodeDomain>,
+    vars: &Vars,
+) -> (
+    Option<Arc<crate::nodes::NodeService>>,
+    Option<steve_node_api::NodeId>,
+) {
+    let bind = vars("STEVE_NODE_BIND").filter(|v| !v.trim().is_empty());
+    if !crate::nodes::enabled(|k| vars(k)) {
+        if bind.is_some() {
+            tracing::warn!("STEVE_NODE_BIND is ignored without STEVE_NODE_LISTEN=1");
+        }
+        return (None, None);
+    }
+    let fleet =
+        crate::nodes::NodeFleet::new(store.clone(), cfg.data_dir.clone(), Some(domain), None);
+    if let Some(ms) = turn_limit(vars) {
+        fleet.set_turn_limit(ms);
+    }
+    let svc = crate::nodes::from_vars(store, fleet, |k| vars(k));
+    let bind = match bind.map(|v| steve_node_api::NodeId::new(v.trim())) {
+        Some(Ok(id)) if svc.is_some() => Some(id),
+        Some(Ok(_)) => None,
+        Some(Err(e)) => {
+            tracing::error!("STEVE_NODE_BIND: {e}; new sessions are not bound to a remote Node");
+            None
+        }
+        None => None,
+    };
+    (svc, bind)
+}
+
+/// Every remote Node that has sessions bound to it gets its coordinator at boot: it reconciles
+/// (once the Node links) and sends what waited, without a new message to wake it.
+async fn start_fleet(fleet: Arc<crate::nodes::NodeFleet>, store: steve_store::Store) {
+    let nodes = tokio::task::spawn_blocking(move || {
+        store.reader(|c| {
+            let mut st = c.prepare(
+                "SELECT DISTINCT r.node_id FROM runtime_sessions r JOIN nodes n ON n.node_id=r.node_id",
+            )?;
+            let v = st
+                .query_map([], |r| r.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok::<_, steve_store::StoreError>(v)
+        })
+    })
+    .await;
+    match nodes {
+        Ok(Ok(nodes)) => {
+            for n in nodes {
+                if let Ok(id) = steve_node_api::NodeId::new(n) {
+                    fleet.start(&id);
+                }
+            }
+        }
+        Ok(Err(e)) => tracing::error!("remote Nodes to start: {e}"),
+        Err(e) => tracing::error!("remote Nodes to start: {e}"),
+    }
 }
 
 /// The local Node's startup job: its tools endpoint, then the coordinator's workers. A Node
@@ -275,11 +360,15 @@ pub fn wire_with(cfg: &Arc<Config>, bus: &Bus, vars: Vars) -> Result<Wired, Back
     if let Some(h) = &node_host {
         let _ = host.local_node.set(h.node.clone());
     }
+    let (nodes, bind_remote) = remote_nodes(cfg, &db, host.clone(), &vars);
+    let fleet = nodes.as_ref().map(|s| s.fleet.clone());
     let core = steve_core::Core::new(
         steve_core::repo::Db::new(db.clone()),
         Arc::new(core::RoutedRuntime {
             legacy: core::AcpRuntime(acp.clone()),
             node: node_host.as_ref().map(|h| h.runtime.clone()),
+            fleet: fleet.clone(),
+            bind_remote,
             store: db.clone(),
         }),
         gateway,
@@ -350,6 +439,10 @@ pub fn wire_with(cfg: &Arc<Config>, bus: &Bus, vars: Vars) -> Result<Wired, Back
         }),
         extra: extra.clone(),
     });
+    if let Some(f) = &fleet {
+        f.set_service(tool_service.clone());
+        jobs.push(Box::pin(start_fleet(f.clone(), db.clone())));
+    }
     let local_node = node_host.as_ref().map(|h| h.node.clone());
     if let Some(NodeHost { tools, .. }) = node_host {
         tools
@@ -406,7 +499,34 @@ pub fn wire_with(cfg: &Arc<Config>, bus: &Bus, vars: Vars) -> Result<Wired, Back
         jobs,
         yolo,
         yolo_engine: engine,
+        nodes,
         #[cfg(test)]
         tool_service,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn vars(kv: &'static [(&'static str, &'static str)]) -> Vars {
+        Arc::new(move |k| kv.iter().find(|(n, _)| *n == k).map(|(_, v)| v.to_string()))
+    }
+
+    #[test]
+    fn local_node_mode_keeps_the_0_2_50_spelling() {
+        assert!(local_node_mode(&vars(&[("STEVE_NODE_MODE", "local")])));
+        // a 0.2.50 config upgraded in place keeps its local Node
+        assert!(local_node_mode(&vars(&[("STEVE_NODE", "local")])));
+        // a Node.js path is not the switch, and STEVE_NODE_MODE wins when both are set
+        assert!(!local_node_mode(&vars(&[(
+            "STEVE_NODE",
+            "/opt/x/bin/node"
+        )])));
+        assert!(!local_node_mode(&vars(&[
+            ("STEVE_NODE", "local"),
+            ("STEVE_NODE_MODE", "off")
+        ])));
+        assert!(!local_node_mode(&vars(&[])));
+    }
 }
