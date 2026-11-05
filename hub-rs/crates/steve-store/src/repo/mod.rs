@@ -8,6 +8,7 @@ mod core;
 mod decisions;
 mod files;
 mod items;
+pub mod jobs;
 pub mod kinds;
 pub mod lanes;
 pub mod nodes;

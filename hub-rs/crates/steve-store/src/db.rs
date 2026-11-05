@@ -87,6 +87,8 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/037.sql"),
     // 38: paired Nodes, pairing codes (hashed) and the Node audit trail (N2).
     include_str!("../migrations/038.sql"),
+    // 39: Node jobs (think calls, research runs), their one-model attempts, and commands that target them (N0d).
+    include_str!("../migrations/039.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).

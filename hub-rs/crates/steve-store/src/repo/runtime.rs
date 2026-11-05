@@ -280,7 +280,7 @@ pub fn insert_command_in(tx: &Tx<'_>, c: &NewCommand<'_>, now: i64) -> Result<bo
         return Err(conflict("self-dependent command"));
     }
     let request = to_json(c.request)?;
-    let same: Option<bool>=tx.query_row("SELECT node_id=? AND method=? AND request=? AND digest=? AND target_attempt IS ? AND dependency_operation IS ? FROM node_commands WHERE operation_id=?",
+    let same: Option<bool>=tx.query_row("SELECT node_id=? AND method=? AND request=? AND digest=? AND target_attempt IS ? AND target_job_attempt IS NULL AND dependency_operation IS ? FROM node_commands WHERE operation_id=?",
         params![c.node,c.method,request,c.digest,c.target_attempt,c.dependency,c.operation],|r|r.get(0)).optional()?;
     if let Some(same) = same {
         if !same {
