@@ -32,13 +32,19 @@ pub(super) const RETIRED: &str = "EXISTS(SELECT 1 FROM node_commands r WHERE r.m
 /// How a control reads in a session note.
 pub(super) fn what(method: &str) -> String {
     match method {
-        "open_session" => steve_i18n::t!("hub.node.what.open_session"),
-        "release_session" => steve_i18n::t!("hub.node.what.release_session"),
-        "configure_session" => steve_i18n::t!("hub.node.what.configure_session"),
-        "prepare_workspace" => steve_i18n::t!("hub.node.what.prepare_workspace"),
-        "abandon" => steve_i18n::t!("hub.node.what.abandon"),
-        "resolve_permission" => steve_i18n::t!("hub.node.what.resolve_permission"),
-        _ => steve_i18n::t!("hub.node.what.other"),
+        "open_session" => steve_i18n::stored(|| steve_i18n::t!("hub.node.what.open_session")),
+        "release_session" => steve_i18n::stored(|| steve_i18n::t!("hub.node.what.release_session")),
+        "configure_session" => {
+            steve_i18n::stored(|| steve_i18n::t!("hub.node.what.configure_session"))
+        }
+        "prepare_workspace" => {
+            steve_i18n::stored(|| steve_i18n::t!("hub.node.what.prepare_workspace"))
+        }
+        "abandon" => steve_i18n::stored(|| steve_i18n::t!("hub.node.what.abandon")),
+        "resolve_permission" => {
+            steve_i18n::stored(|| steve_i18n::t!("hub.node.what.resolve_permission"))
+        }
+        _ => steve_i18n::stored(|| steve_i18n::t!("hub.node.what.other")),
     }
 }
 
@@ -203,7 +209,7 @@ impl NodeRuntime {
         system_in(
             tx,
             &session,
-            &steve_i18n::t!("hub.node.recover_failed", detail = detail),
+            &steve_i18n::stored(|| steve_i18n::t!("hub.node.recover_failed", detail = detail)),
         )
     }
 
@@ -235,7 +241,11 @@ impl NodeRuntime {
                 rusqlite::params![op, now(), w],
             )?;
             if let Some(next) = command_any_session_in(tx, w)? {
-                system_in(tx, &next, &steve_i18n::t!("hub.node.release_retry"))?;
+                system_in(
+                    tx,
+                    &next,
+                    &steve_i18n::stored(|| steve_i18n::t!("hub.node.release_retry")),
+                )?;
             }
         }
         system_in(
@@ -291,7 +301,9 @@ impl NodeRuntime {
                 system_in(
                     tx,
                     &session,
-                    &steve_i18n::t!("hub.node.recovered_released", what = what),
+                    &steve_i18n::stored(|| {
+                        steve_i18n::t!("hub.node.recovered_released", what = what)
+                    }),
                 )?;
                 // what waits for the session (queued, or a turn that waited for an open) opens it
                 let waiting: bool = tx.query_row(
@@ -325,7 +337,9 @@ impl NodeRuntime {
                 system_in(
                     tx,
                     &session,
-                    &steve_i18n::t!("hub.node.recovered_prepare", what = what),
+                    &steve_i18n::stored(|| {
+                        steve_i18n::t!("hub.node.recovered_prepare", what = what)
+                    }),
                 )?;
                 if !opens.is_empty() {
                     let req: String = tx.query_row(
@@ -356,16 +370,22 @@ impl NodeRuntime {
             "abandon" => system_in(
                 tx,
                 &session,
-                &steve_i18n::t!("hub.node.recovered_abandon", what = what),
+                &steve_i18n::stored(|| steve_i18n::t!("hub.node.recovered_abandon", what = what)),
             )?,
             "resolve_permission" => {
                 if let Some(row) = rt::permission_of_answer_in(tx, &target)? {
-                    self.close_in(tx, &row, &steve_i18n::t!("hub.node.outcome_unknown"))?;
+                    self.close_in(
+                        tx,
+                        &row,
+                        &steve_i18n::stored(|| steve_i18n::t!("hub.node.outcome_unknown")),
+                    )?;
                 }
                 system_in(
                     tx,
                     &session,
-                    &steve_i18n::t!("hub.node.recovered_permission", what = what),
+                    &steve_i18n::stored(|| {
+                        steve_i18n::t!("hub.node.recovered_permission", what = what)
+                    }),
                 )?;
             }
             _ => {}

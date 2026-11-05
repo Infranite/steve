@@ -1814,7 +1814,7 @@ impl NodeRuntime {
                         &steve_i18n::t!(
                             "hub.node.control_unknown",
                             what = if method == "abandon" {
-                                steve_i18n::t!("hub.node.what.abandon_run")
+                                steve_i18n::stored(|| steve_i18n::t!("hub.node.what.abandon_run"))
                             } else {
                                 recover::what(&method)
                             },
@@ -1893,7 +1893,11 @@ impl NodeRuntime {
             if failures == 1
                 && let Some(next) = command_any_session_in(tx, w)?
             {
-                system_in(tx, &next, &steve_i18n::t!("hub.node.release_retry"))?;
+                system_in(
+                    tx,
+                    &next,
+                    &steve_i18n::stored(|| steve_i18n::t!("hub.node.release_retry")),
+                )?;
             }
         }
         Ok(())
@@ -2375,7 +2379,7 @@ impl NodeRuntime {
                         |r| r.get(0),
                     )?;
                     if ours && held.insert(session.clone()) && !was.contains(&session) {
-                        system_in(tx, &session, &steve_i18n::t!("hub.node.stranger"))?;
+                        system_in(tx, &session, &steve_i18n::stored(|| steve_i18n::t!("hub.node.stranger")))?;
                         changed += 1;
                     }
                 }
@@ -2516,7 +2520,11 @@ impl NodeRuntime {
             |r| r.get(0),
         )?;
         if ours {
-            system_in(tx, &session, &steve_i18n::t!("hub.node.quarantined"))?;
+            system_in(
+                tx,
+                &session,
+                &steve_i18n::stored(|| steve_i18n::t!("hub.node.quarantined")),
+            )?;
         }
         Ok(())
     }

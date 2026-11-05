@@ -393,9 +393,9 @@ fn fault_in(
     };
     let note = match fault {
         // a rolled-back Node journal
-        rt::Fault::Ahead => steve_i18n::t!("hub.node.ahead"),
+        rt::Fault::Ahead => steve_i18n::stored(|| steve_i18n::t!("hub.node.ahead")),
         // a gap
-        _ => steve_i18n::t!("hub.node.gap"),
+        _ => steve_i18n::stored(|| steve_i18n::t!("hub.node.gap")),
     };
     let fresh = rt::stream_fault_in(tx, k, fault)?;
     if fresh {
@@ -477,7 +477,11 @@ impl NodeRuntime {
             for (lag, _) in &behind {
                 if let Some(session) = stream_session_in(tx, &self.node_id, &lag.0)? {
                     if !was.contains_key(&session) {
-                        system_in(tx, &session, &steve_i18n::t!("hub.node.lagging"))?;
+                        system_in(
+                            tx,
+                            &session,
+                            &steve_i18n::stored(|| steve_i18n::t!("hub.node.lagging")),
+                        )?;
                     }
                     m.insert(session, lag.clone());
                 }
