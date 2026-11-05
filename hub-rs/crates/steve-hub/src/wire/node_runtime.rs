@@ -139,7 +139,14 @@ pub struct NodeRuntime {
     /// Set once the Hub has reconciled with the Node since it started: nothing is planned before.
     reconciled: AtomicBool,
     /// Turn ends settled outside the apply worker (a local cancel), told by it after the commit.
-    ended_later: Mutex<Vec<(String, String, Option<String>)>>,
+    ended_later: Mutex<Vec<End>>,
+    /// Attempts the Hub settled on its own word (no AttemptEnded comes for them): their
+    /// statistics row ends after the commit, as one the Node reported would.
+    settled_later: Mutex<Vec<After>>,
+    /// What the open transaction settled (see [`Self::settle_in`]): moved to `settled_later` and
+    /// `ended_later` only once it committed, so the apply worker never sees it earlier (it would
+    /// book a row the store does not show finished yet) and never sees one rolled back.
+    staged: Mutex<(Vec<After>, Vec<End>)>,
     /// Streams with events to apply.
     dirty: Mutex<HashSet<(String, String)>>,
     /// Why this Node cannot run anything (its host failed to start): its sessions then refuse
@@ -233,6 +240,8 @@ impl NodeRuntime {
             paused: AtomicBool::new(false),
             reconciled: AtomicBool::new(false),
             ended_later: Mutex::new(vec![]),
+            settled_later: Mutex::new(vec![]),
+            staged: Mutex::new((vec![], vec![])),
             dirty: Mutex::new(HashSet::new()),
             stopped: Mutex::new(None),
             turn_limit: std::sync::atomic::AtomicI64::new(TURN_LIMIT_MS),
@@ -337,7 +346,25 @@ impl NodeRuntime {
     }
 
     fn tx<T>(&self, f: impl FnOnce(&Tx) -> Result<T, StoreError>) -> Result<T, StoreError> {
-        self.store.transaction(f)
+        // transactions are serial (one writer), so what is staged while one is open is its own
+        let (out, (settled, ended)) = self.store.transaction(|tx| {
+            let take = || std::mem::take(&mut *self.staged.lock().unwrap());
+            take();
+            match f(tx) {
+                Ok(out) => Ok((out, take())),
+                Err(e) => {
+                    take();
+                    Err(e)
+                }
+            }
+        })?;
+        // committed: the apply worker books and tells it from now on
+        if !settled.is_empty() || !ended.is_empty() {
+            self.settled_later.lock().unwrap().extend(settled);
+            self.ended_later.lock().unwrap().extend(ended);
+            self.wake_apply.notify_one();
+        }
+        Ok(out)
     }
 
     /// The session runs on this Node from now on: its workspace is prepared and it is opened, by
@@ -1051,14 +1078,28 @@ impl NodeRuntime {
         )?;
         self.close_cards_of_attempt_in(tx, attempt)?;
         self.turn_over_in(tx, session, &turn, completion)?;
-        if self.plan_after_in(tx, session)? != Planned::Created {
+        // the attempt's statistics row, if it had started, ends with this outcome; booked by the
+        // apply worker once this transaction committed (staged until then, see `Self::tx`)
+        let finished = After::Finished {
+            session: session.to_string(),
+            attempt: attempt.to_string(),
+            completion: completion.clone(),
+            at: now(),
+        };
+        let settled = self.plan_after_in(tx, session)? != Planned::Created;
+        if settled {
             status_in(tx, session, settled_status(&completion.stop_reason))?;
-            self.ended_later.lock().unwrap().push((
+        }
+        let ended = settled.then(|| {
+            (
                 session.to_string(),
                 completion.stop_reason.clone(),
                 completion.error.as_ref().map(|e| e.safe_detail.clone()),
-            ));
-        }
+            )
+        });
+        let mut staged = self.staged.lock().unwrap();
+        staged.0.push(finished);
+        staged.1.extend(ended);
         Ok(())
     }
 
@@ -1925,15 +1966,23 @@ impl NodeRuntime {
                 }
             }
         }
-        // turn ends settled outside this worker (a local cancel), told after their commit
-        let later: Vec<_> = std::mem::take(&mut *self.ended_later.lock().unwrap());
-        for (session, stop, error) in later {
-            self.domain.turn_ended(&session, &stop, error);
-        }
+        self.book_settled();
         if any {
             self.wake_send.notify_one();
         }
         any
+    }
+
+    /// What the Hub settled on its own word (a local cancel, an abandon the Node has no record
+    /// of), after the commit: the attempts' statistics rows end, then their turns are told.
+    /// Only committed settles are queued here ([`Self::tx`]), so each is booked as it is.
+    fn book_settled(&self) {
+        let settled: Vec<After> = std::mem::take(&mut *self.settled_later.lock().unwrap());
+        self.after(settled);
+        let later: Vec<End> = std::mem::take(&mut *self.ended_later.lock().unwrap());
+        for (session, stop, error) in later {
+            self.domain.turn_ended(&session, &stop, error);
+        }
     }
 
     /// The Hub's side of applied events, after their commit.
@@ -2900,5 +2949,130 @@ impl EventSink for Sink {
         })
         .await
         .map_err(|e| ApiError::new(ErrorCode::Internal, e.to_string()))?
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use steve_node_api::testkit::{FakeNode, build};
+
+    /// Counts what the runtime books after commits.
+    #[derive(Default)]
+    struct Seen {
+        finished: Mutex<Vec<String>>,
+        ended: Mutex<Vec<String>>,
+        started: Mutex<Vec<String>>,
+    }
+
+    impl NodeDomain for Seen {
+        fn turn_ended(&self, session: &str, _: &str, _: Option<String>) {
+            self.ended.lock().unwrap().push(session.into());
+        }
+        fn attempt_started(&self, _: &str, attempt: &str, _: i64, _: Option<i64>, _: i64) {
+            self.started.lock().unwrap().push(attempt.into());
+        }
+        fn attempt_finished(
+            &self,
+            _: &str,
+            attempt: &str,
+            _: &Completion,
+            _: &AttemptFacts,
+            _: i64,
+        ) {
+            self.finished.lock().unwrap().push(attempt.into());
+        }
+    }
+
+    async fn until(what: &str, f: impl Fn() -> bool) {
+        for _ in 0..1000 {
+            if f() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("timed out waiting for {what}");
+    }
+
+    /// Review L4: an attempt the Hub settles on its own word reaches the apply worker only once
+    /// its transaction committed. The worker draining its queue while that transaction is still
+    /// open (it runs on another thread) used to drop the settle for good, its statistics row
+    /// left open forever.
+    #[tokio::test]
+    async fn a_settle_drained_before_its_commit_still_ends_its_row() {
+        const S: &str = "s1";
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(
+            dir.path().join("steve.sqlite3"),
+            steve_store::FnPublisher(|_| {}),
+        )
+        .unwrap();
+        store.ensure_workspace().unwrap();
+        store
+            .transaction::<_, StoreError>(|tx| {
+                tx.execute(
+                    "INSERT INTO sessions(id,workspace_id,harness,cwd,status,created,updated) VALUES (?,'default','claude-code','.','active',1,1)",
+                    [S],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let node = FakeNode::new("n1");
+        let seen = Arc::new(Seen::default());
+        let rt = NodeRuntime::new(store.clone(), node.clone(), seen.clone());
+        node.connect(Arc::new(Sink(Arc::downgrade(&rt))));
+        rt.start();
+        rt.bind(&Binding {
+            session: S.into(),
+            resource: format!("item:{S}"),
+            prepare: PrepareKind::Scratch,
+            choice: build::choice(),
+            policy: build::policy(),
+        })
+        .unwrap();
+        rt.prompt(S, "first", "user", &[]).unwrap();
+        until("started", || !seen.started.lock().unwrap().is_empty()).await;
+        let attempt = seen.started.lock().unwrap()[0].clone();
+
+        let completion = Completion {
+            outcome: Outcome::Interrupted,
+            stop_reason: "error".into(),
+            error: None,
+            result: vec![],
+            continuation: None,
+            transient: false,
+            acted: false,
+        };
+        rt.tx(|tx| {
+            rt.settle_in(tx, S, &attempt, &completion)?;
+            // the apply worker drains between the settle and its commit
+            rt.book_settled();
+            assert!(
+                seen.finished.lock().unwrap().is_empty(),
+                "booked before the commit"
+            );
+            Ok(())
+        })
+        .unwrap();
+        until("row ended", || !seen.finished.lock().unwrap().is_empty()).await;
+        until("turn told", || !seen.ended.lock().unwrap().is_empty()).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            *seen.finished.lock().unwrap(),
+            std::slice::from_ref(&attempt),
+            "once"
+        );
+        assert_eq!(*seen.ended.lock().unwrap(), [S.to_string()], "once");
+
+        // a settle whose transaction rolls back is never booked
+        let r = rt.tx(|tx| {
+            rt.settle_in(tx, S, &attempt, &completion)?;
+            Err::<(), _>(StoreError::Conflict("rolled back".into()))
+        });
+        assert!(r.is_err());
+        rt.book_settled();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(seen.finished.lock().unwrap().len(), 1);
+        assert_eq!(seen.ended.lock().unwrap().len(), 1);
     }
 }

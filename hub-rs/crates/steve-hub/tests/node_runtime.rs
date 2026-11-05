@@ -4,6 +4,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use steve_hub::wire::acp_stats;
 use steve_hub::wire::node_runtime::{
     AttemptFacts, Binding, ConfigChange, Configured, NodeDomain, NodeRuntime, Planned, Sink,
 };
@@ -18,6 +19,8 @@ struct Ends(
     Mutex<Vec<AttemptFacts>>,
     /// Cards handed to YOLO (`permission_asked`).
     Mutex<Vec<String>>,
+    /// The store the attempts' statistics rows go to, as the wired Hub books them.
+    std::sync::OnceLock<Store>,
 );
 
 impl NodeDomain for Ends {
@@ -27,13 +30,33 @@ impl NodeDomain for Ends {
             .unwrap()
             .push((session.into(), stop.into(), error));
     }
-    fn attempt_started(&self, _: &str, attempt: &str, _: i64, user_seq: Option<i64>, _: i64) {
+    fn attempt_started(
+        &self,
+        session: &str,
+        attempt: &str,
+        ordinal: i64,
+        user_seq: Option<i64>,
+        at: i64,
+    ) {
+        if let Some(store) = self.4.get() {
+            acp_stats::node_attempt_started(store, session, attempt, ordinal, user_seq, at);
+        }
         self.1
             .lock()
             .unwrap()
             .push(format!("{attempt}:{}", user_seq.is_some()));
     }
-    fn attempt_finished(&self, _: &str, _: &str, _: &Completion, f: &AttemptFacts, _: i64) {
+    fn attempt_finished(
+        &self,
+        session: &str,
+        attempt: &str,
+        c: &Completion,
+        f: &AttemptFacts,
+        at: i64,
+    ) {
+        if let Some(store) = self.4.get() {
+            acp_stats::node_attempt_finished(store, session, attempt, c, f, at);
+        }
         self.2.lock().unwrap().push(f.clone());
     }
     fn permission_asked(&self, _: &str, decision: &str, _: &PermissionRequest) {
@@ -104,6 +127,7 @@ fn hub() -> H {
         .unwrap();
     let node = FakeNode::new("n1");
     let ends = Arc::new(Ends::default());
+    let _ = ends.4.set(store.clone());
     let rt = NodeRuntime::new(store.clone(), node.clone(), ends.clone());
     let seen = Arc::new(Tee {
         to: Sink(Arc::downgrade(&rt)),
@@ -1057,8 +1081,25 @@ impl H {
         self.rt = rt;
         self.seen = seen;
         until("old Hub gone", || old.upgrade().is_none()).await;
+        // the boot closes the statistics rows the restart cut, before anything runs
+        acp_stats::interrupt_open(&self.store, steve_store::now());
         self.rt.start();
         until("reconciled", || self.rt.is_reconciled()).await;
+    }
+
+    /// The statistics rows of the attempts: (ended, stop_reason), in the attempts' order.
+    fn stat_rows(&self) -> Vec<(Option<i64>, Option<String>)> {
+        self.store
+            .reader(|c| {
+                let mut st = c.prepare(
+                    "SELECT t.ended, t.stop_reason FROM agent_turns t LEFT JOIN runtime_attempts a ON a.attempt_id = t.node_attempt_id ORDER BY a.created, a.rowid",
+                )?;
+                let v = st
+                    .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok::<_, StoreError>(v)
+            })
+            .unwrap()
     }
 
     /// The prompt text of the n-th attempt.
@@ -1133,6 +1174,20 @@ async fn a_restart_mid_turn_is_unknown_never_rerun_and_stop_abandons_it() {
     assert!(h.rt.cancel(S).unwrap());
     until("abandoned", || h.ends().len() == 1).await;
     assert_eq!(h.ends()[0].1, "abandoned");
+    // L4: the restarts did not cut the attempt's statistics row; the abandon ended it
+    // (the next turn may have started already: the first row is the abandoned attempt's)
+    let rows = h.stat_rows();
+    assert!(!rows.is_empty() && rows.len() <= 2, "{rows:?}");
+    assert!(
+        rows.iter().all(|r| r.1.as_deref() != Some("interrupted")),
+        "{rows:?}"
+    );
+    assert!(rows[0].0.is_some(), "finished");
+    assert_eq!(
+        rows[0].1.as_deref(),
+        Some("abandoned"),
+        "never 'interrupted'"
+    );
     let target: String = h.q(
         "SELECT json_extract(request,'$.body.target') FROM node_commands WHERE method='abandon'",
     );
@@ -1148,6 +1203,11 @@ async fn a_restart_mid_turn_is_unknown_never_rerun_and_stop_abandons_it() {
     let exec = h.attempts()[1].clone();
     h.node.finish(&exec, build::done()).await.unwrap();
     until("second end", || h.ends().len() == 2).await;
+    until("second row ended", || {
+        h.stat_rows().iter().all(|r| r.0.is_some())
+    })
+    .await;
+    assert_eq!(h.stat_rows().len(), 2);
 }
 
 /// A restart lets every Node session go silently: an idle one is found released, so the next
@@ -2385,6 +2445,11 @@ async fn cancel_in_retry_wait_never_sends_the_pending_attempt() {
         "the retry never reached the Node"
     );
     assert!(h.ends().is_empty(), "the item goes on with the next turn");
+    // the cancelled retry never started: it has no statistics row
+    let retry_rows: i64 = h.q(&format!(
+        "SELECT COUNT(*) FROM agent_turns t JOIN runtime_attempts a ON a.attempt_id = t.node_attempt_id WHERE a.operation_id='{retry}'"
+    ));
+    assert_eq!(retry_rows, 0);
     let exec = h.attempts().last().unwrap().clone();
     h.node.finish(&exec, build::done()).await.unwrap();
     until("turn end", || !h.ends().is_empty()).await;
@@ -2443,6 +2508,10 @@ async fn a_start_turn_refused_before_acceptance_is_settled_by_stop() {
     tokio::time::sleep(Duration::from_millis(1_300)).await;
     assert_eq!(h.count("start_turn"), 0, "never sent again");
     assert!(!h.rt.is_busy(S));
+    assert!(
+        h.stat_rows().is_empty(),
+        "it never started: no statistics row"
+    );
 }
 
 /// Issue: a start_turn whose send was uncertain may be at the Node: the cancel waits until the
@@ -2517,6 +2586,12 @@ async fn an_attempt_the_node_has_no_record_of_ends_on_stop() {
     assert!(!h.rt.is_busy(S));
     assert_eq!(h.rt.running_turns(), 0);
     assert_eq!(h.systems("没有这次执行的记录"), 1);
+    // L4: settled by the Hub, the attempt's statistics row ends with that outcome
+    until("stats row ended", || {
+        h.stat_rows().first().is_some_and(|r| r.0.is_some())
+    })
+    .await;
+    assert_eq!(h.stat_rows(), [(h.stat_rows()[0].0, Some("error".into()))]);
     assert_eq!(h.count("start_turn"), 1, "never sent again");
     assert!(h.rt.cancel(S).is_ok_and(|x| !x), "nothing left to stop");
 }

@@ -693,7 +693,23 @@ mod tests {
         let t = fresh();
         let sid = session(&t, None, "claude-code");
         let id = begin(&t, &sid, 0, 0);
+        // a turn run on a Node: the restart did not cut it
+        let node = begin(&t, &sid, 0, 0);
+        let c = db(&t);
+        c.execute_batch("PRAGMA foreign_keys = OFF;").unwrap();
+        c.execute(
+            "UPDATE agent_turns SET node_attempt_id = 'att_1' WHERE id = ?",
+            [&node],
+        )
+        .unwrap();
+        drop(c);
         interrupt_open(&t.store, 9_000);
+        let open: Option<i64> = db(&t)
+            .query_row("SELECT ended FROM agent_turns WHERE id = ?", [&node], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(open, None, "a Node turn is left to its attempt's end");
         let (ended, stop): (i64, String) = db(&t)
             .query_row(
                 "SELECT ended, stop_reason FROM agent_turns WHERE id = ?",
