@@ -840,6 +840,40 @@ async fn a_node_restarted_before_its_ack_sends_again_and_nothing_is_stored_twice
     assert_eq!(r.attempts(), ["finished"]);
 }
 
+// ── the Node sends again what the Hub holds, but changed ──
+
+/// N1-6: the Hub committed a batch but the ack was lost, and the Node's copy changed before it sent
+/// it again (a corrupted journal). The changed event is quarantined and acknowledged, the Node's
+/// delivery drains, and the conversation keeps what came first.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_corrupted_redelivery_is_quarantined_and_the_node_drains() {
+    let r = Rig::new().await;
+    r.ready().await;
+    *r.gate.lose_acks.lock().unwrap() = usize::MAX;
+    r.rt.prompt(S, "@say original", "user", &[]).unwrap();
+    until("the end", || !r.ends().is_empty()).await;
+    let j = r.journal();
+    let changed = j
+        .execute(
+            "UPDATE events SET event=json_set(event,'$.body.text','tampered') WHERE json_extract(event,'$.body.type')='text_delta'",
+            [],
+        )
+        .unwrap();
+    assert!(changed > 0, "the Node still keeps the unacknowledged text");
+    *r.gate.lose_acks.lock().unwrap() = 0;
+    r.stored_once().await;
+    let held: i64 = r.q("SELECT COUNT(*) FROM node_event_quarantine WHERE json_extract(payload,'$.body.text')='tampered'");
+    assert_eq!(held as usize, changed, "each changed event is kept aside");
+    let faulted: i64 = r.q("SELECT COUNT(*) FROM node_streams WHERE fault='conflict'");
+    assert_eq!(faulted, 1);
+    let tampered: i64 = r.q("SELECT COUNT(*) FROM events WHERE data LIKE '%tampered%'");
+    assert_eq!(tampered, 0, "never applied");
+    let text: String = r.q("SELECT group_concat(json_extract(payload,'$.body.text'),'') FROM (SELECT payload FROM node_event_inbox WHERE json_extract(payload,'$.body.type')='text_delta' ORDER BY seq)");
+    assert_eq!(text, "original");
+    assert!(r.rt.is_uncertain(S), "the session waits for reconciliation");
+    assert_eq!(r.prompts("original"), 1);
+}
+
 // ── Steve's tools ──
 
 /// A turn that may use Steve's tools, its agent waiting; the tool endpoint and token it was given.

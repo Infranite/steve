@@ -273,7 +273,7 @@ impl NodeRuntime {
         // events taken in before a restart but not applied yet
         match self.store.reader(|c| {
             let mut st = c.prepare(
-                "SELECT stream, epoch FROM node_streams WHERE node_id=? AND durable > applied",
+                "SELECT stream, epoch FROM node_streams WHERE node_id=? AND durable > applied AND fault IS NULL",
             )?;
             let v = st
                 .query_map([self.node_id.as_str()], |r| {
@@ -897,14 +897,18 @@ impl NodeRuntime {
         &self.node_id
     }
 
-    /// The session's open turn has an outcome nobody can tell yet (reconciliation decides).
+    /// The session's open turn has an outcome nobody can tell yet (reconciliation decides), or its
+    /// stream is faulted (its events wait for reconciliation, so what they say is not known).
     /// A read error counts as uncertain: waiting is the safe answer.
     pub fn is_uncertain(&self, session: &str) -> bool {
         self.store
             .reader(|c| {
                 Ok::<_, StoreError>(c.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM runtime_turns t LEFT JOIN runtime_attempts a ON a.turn_id=t.turn_id AND a.state<>'finished' WHERE t.session_id=?1 AND t.state<>'finished' AND (t.state='unknown' OR a.state='unknown'))",
-                    [session],
+                    "SELECT EXISTS(SELECT 1 FROM runtime_turns t LEFT JOIN runtime_attempts a ON a.turn_id=t.turn_id AND a.state<>'finished' WHERE t.session_id=?1 AND t.state<>'finished' AND (t.state='unknown' OR a.state='unknown'))
+                     OR EXISTS(SELECT 1 FROM node_streams s WHERE s.node_id=?2 AND s.fault IS NOT NULL AND (
+                          EXISTS(SELECT 1 FROM node_event_quarantine q WHERE q.node_id=s.node_id AND q.stream=s.stream AND q.epoch=s.epoch AND json_extract(q.payload,'$.subject.session')=?1)
+                       OR EXISTS(SELECT 1 FROM node_event_inbox e WHERE e.node_id=s.node_id AND e.stream=s.stream AND e.epoch=s.epoch AND json_extract(e.payload,'$.subject.session')=?1)))",
+                    rusqlite::params![session, self.node_id.as_str()],
                     |r| r.get::<_, bool>(0),
                 )?)
             })
@@ -1903,7 +1907,8 @@ impl NodeRuntime {
 
     // ── T3: receiving ──
 
-    /// Takes a batch from the Node into the inbox; acknowledges the contiguous durable prefixes.
+    /// Takes a batch from the Node into the inbox; acknowledges the contiguous durable prefixes
+    /// (quarantined events included).
     fn receive(&self, batch: &EventBatch) -> Result<EventAck, StoreError> {
         let node = self.node_id.to_string();
         let mut touched: Vec<(String, String)> = vec![];
@@ -1914,14 +1919,27 @@ impl NodeRuntime {
                     stream: e.cursor.stream.as_str(),
                     epoch: e.cursor.epoch.as_str(),
                 };
-                rt::inbox_insert_in(
-                    tx,
-                    k,
-                    e.cursor.seq as i64,
-                    e.id.as_str(),
-                    &serde_json::to_value(e).map_err(conflict)?,
-                    now(),
-                )?;
+                let seq = e.cursor.seq as i64;
+                let payload = serde_json::to_value(e).map_err(conflict)?;
+                // a conflict is set aside on its own stream (D5: acknowledged once it is durably
+                // quarantined), so the rest of the batch and every other stream go on
+                if let rt::Inboxed::Conflict(why) =
+                    rt::inbox_insert_in(tx, k, seq, e.id.as_str(), &payload, now())?
+                {
+                    let q = rt::quarantine_in(tx, k, seq, e.id.as_str(), &payload, why, now())?;
+                    if q.new {
+                        tracing::warn!(
+                            "node {node}: stream {} epoch {} seq {seq} ({}): {}; quarantined",
+                            k.stream,
+                            k.epoch,
+                            e.id,
+                            why.reason()
+                        );
+                    }
+                    if q.faulted {
+                        self.faulted_note_in(tx, e)?;
+                    }
+                }
                 let key = (e.cursor.stream.to_string(), e.cursor.epoch.to_string());
                 if !touched.contains(&key) {
                     touched.push(key);
@@ -1929,7 +1947,7 @@ impl NodeRuntime {
             }
             let mut durable = vec![];
             for (stream, epoch) in &touched {
-                let w = rt::watermarks_in(
+                let acked = rt::acked_in(
                     tx,
                     StreamKey {
                         node: &node,
@@ -1937,11 +1955,11 @@ impl NodeRuntime {
                         epoch,
                     },
                 )?;
-                if w.durable > 0 {
+                if acked > 0 {
                     durable.push(Watermark {
                         stream: idv(stream.clone())?,
                         epoch: idv(epoch.clone())?,
-                        seq: w.durable as u64,
+                        seq: acked as u64,
                     });
                 }
             }
@@ -1951,6 +1969,27 @@ impl NodeRuntime {
             self.dirty.lock().unwrap().extend(touched.iter().cloned());
             self.wake_apply.notify_one();
         })
+    }
+
+    /// The one note on a session whose stream just faulted: its Node events stop being applied
+    /// until reconciliation, and its open turn is never run again meanwhile ([`Self::is_uncertain`]).
+    fn faulted_note_in(&self, tx: &Tx, e: &NodeEvent) -> Result<(), StoreError> {
+        let Some(session) = ev_session(e) else {
+            return Ok(());
+        };
+        let ours: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM runtime_sessions WHERE session_id=? AND node_id=?)",
+            rusqlite::params![session, self.node_id.as_str()],
+            |r| r.get(0),
+        )?;
+        if ours {
+            system_in(
+                tx,
+                &session,
+                "Node 发来的事件与已保存的记录冲突，已隔离保存；该会话暂停应用 Node 事件，等待对账，期间不会重新运行",
+            )?;
+        }
+        Ok(())
     }
 
     // ── T4: applying ──

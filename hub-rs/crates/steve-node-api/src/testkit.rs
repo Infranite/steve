@@ -241,6 +241,22 @@ impl FakeNode {
         };
     }
 
+    /// As a journal restored from an older copy that kept its epoch: the last event of the session
+    /// `session`'s stream is forgotten, so the next one there takes its position (the Hub already
+    /// holds another event at it) under a new id.
+    pub fn rewind(&self, session: &str) {
+        let stream = Self::stream_of(&Subject::Session {
+            session: id(session),
+        });
+        let mut st = self.st();
+        if let Some(s) = st.streams.get_mut(&stream) {
+            s.produced = s.produced.saturating_sub(1);
+            s.acknowledged = s.acknowledged.min(s.produced);
+            let last = s.produced;
+            s.kept.retain(|e| e.cursor.seq <= last);
+        }
+    }
+
     /// Limit concurrent sessions and jobs (unlimited by default).
     pub fn set_capacity(&self, c: Capacity) {
         self.st().capacity = Some(c);

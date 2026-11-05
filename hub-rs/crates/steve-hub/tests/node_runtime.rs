@@ -2838,6 +2838,117 @@ async fn a_new_node_journal_mid_session_is_taken_in_without_a_conflict() {
     );
 }
 
+/// N1-6 (D5): an event that conflicts with what the Hub holds on session A's stream is set aside
+/// there and acknowledged; A's stream stops applying and A waits for reconciliation, while B's turn
+/// completes and the Node's delivery drains.
+#[tokio::test]
+async fn a_conflict_on_one_stream_quarantines_it_and_the_others_go_on() {
+    const B: &str = "s2";
+    let h = hub();
+    h.store
+        .transaction::<_, StoreError>(|tx| {
+            tx.execute(
+                "INSERT INTO sessions(id,workspace_id,harness,cwd,status,created,updated) VALUES (?,'default','claude-code','.','active',1,1)",
+                [B],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    h.bind();
+    h.rt.bind(&Binding {
+        session: B.into(),
+        resource: format!("item:{B}"),
+        prepare: PrepareKind::Scratch,
+        choice: build::choice(),
+        policy: build::policy(),
+    })
+    .unwrap();
+    let attempt_of = |session: &str| -> Option<ExecutionRef> {
+        h.store
+            .reader(|c| {
+                Ok::<_, StoreError>(
+                    c.query_row(
+                        "SELECT a.execution FROM runtime_attempts a JOIN runtime_turns t USING(turn_id) WHERE t.session_id=? AND a.state='running'",
+                        [session],
+                        |r| r.get::<_, String>(0),
+                    )
+                    .ok(),
+                )
+            })
+            .unwrap()
+            .map(|s| serde_json::from_str(&s).unwrap())
+    };
+    h.rt.prompt(S, "a", "user", &[]).unwrap();
+    h.rt.prompt(B, "b", "user", &[]).unwrap();
+    until("both running", || {
+        attempt_of(S).is_some() && attempt_of(B).is_some() && h.count("start_turn") == 2
+    })
+    .await;
+    let (a, b) = (attempt_of(S).unwrap(), attempt_of(B).unwrap());
+    let (s, t) = text(&a, "first");
+    h.node.emit(s, t).await.unwrap();
+    until("delivered", || h.node.unacked() == 0).await;
+    assert!(!h.rt.is_uncertain(S));
+
+    // A's journal forgets its last event: the next one reuses a position the Hub holds
+    let failures = h.node.delivery_failures();
+    h.node.rewind(S);
+    let (s, t) = text(&a, "conflicting");
+    h.node.emit(s, t).await.unwrap();
+    let (s, t) = text(&b, "fine");
+    h.node.emit(s, t).await.unwrap();
+    h.node.finish(&b, build::done()).await.unwrap();
+    until("B's turn ends", || h.ends().iter().any(|e| e.0 == B)).await;
+    assert_eq!(
+        h.node.unacked(),
+        0,
+        "the quarantined event is acknowledged too"
+    );
+    assert_eq!(h.node.delivery_failures(), failures, "no batch was refused");
+
+    let stream = derived_id("session", S);
+    let held: i64 = h.q(&format!(
+        "SELECT COUNT(*) FROM node_event_quarantine WHERE stream='{stream}' AND json_extract(payload,'$.body.text')='conflicting'"
+    ));
+    assert_eq!(held, 1, "kept aside");
+    assert_eq!(
+        h.q::<String>(&format!(
+            "SELECT fault FROM node_streams WHERE stream='{stream}'"
+        )),
+        "conflict"
+    );
+    assert!(h.rt.is_uncertain(S), "A waits for reconciliation");
+    assert!(!h.rt.is_uncertain(B));
+    let note = |session: &str| -> i64 {
+        h.q(&format!(
+            "SELECT COUNT(*) FROM events WHERE session_id='{session}' AND kind='system' AND data LIKE '%隔离%'"
+        ))
+    };
+    assert_eq!((note(S), note(B)), (1, 0), "one note, on A");
+
+    // A's stream applies nothing more: its end waits, and nothing is run again
+    h.node.finish(&a, build::done()).await.unwrap();
+    until("delivered", || h.node.unacked() == 0).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!h.ends().iter().any(|e| e.0 == S));
+    assert!(h.rt.is_busy(S));
+    assert_eq!(note(S), 1, "still one note");
+    let tampered: i64 = h.q(&format!(
+        "SELECT COUNT(*) FROM events WHERE session_id='{S}' AND data LIKE '%conflicting%'"
+    ));
+    assert_eq!(
+        tampered, 0,
+        "the conflicting event never reached the conversation"
+    );
+    let kept: String = h.q(&format!(
+        "SELECT json_extract(payload,'$.body.text') FROM node_event_inbox WHERE stream='{stream}' AND json_extract(payload,'$.body.type')='text_delta'"
+    ));
+    assert_eq!(kept, "first", "the inbox keeps what it had");
+    h.rt.prompt(S, "next", "user", &[]).unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(h.count("start_turn"), 2, "A is never run again meanwhile");
+}
+
 /// Issue: an AttemptStarted applied after reconciliation made the attempt unknown leaves it
 /// unknown (Stop still abandons it).
 #[tokio::test]
