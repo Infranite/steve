@@ -2545,3 +2545,195 @@ async fn a_late_attempt_started_never_revives_an_unknown_attempt() {
     );
     assert!(h.rt.is_uncertain(S));
 }
+
+// ── sessions.status and the harness id ──
+
+impl H {
+    fn session_status(&self) -> String {
+        self.q(&format!("SELECT status FROM sessions WHERE id='{S}'"))
+    }
+
+    fn acp_id(&self) -> Option<String> {
+        self.q(&format!(
+            "SELECT acp_session_id FROM sessions WHERE id='{S}'"
+        ))
+    }
+}
+
+/// A Node session's row says what the legacy runner's says: running from an attempt's start
+/// until its turn is over, then idle; and it keeps the harness's own session id (ST-28).
+#[tokio::test]
+async fn a_turn_sets_the_session_running_then_idle_and_keeps_the_harness_id() {
+    let h = hub();
+    h.bind();
+    h.rt.prompt(S, "hello", "user", &[]).unwrap();
+    until("running", || h.session_status() == "running").await;
+    let view = h
+        .node
+        .session(SessionId::try_from(S.to_string()).unwrap())
+        .await
+        .unwrap();
+    let resume = view.resume.expect("the fake Node has a resume handle");
+    until("harness id", || h.acp_id().is_some()).await;
+    assert_eq!(h.acp_id().as_deref(), Some(resume.as_str()));
+    let exec = h.attempts()[0].clone();
+    h.node.finish(&exec, build::done()).await.unwrap();
+    until("turn end", || h.ends().len() == 1).await;
+    assert_eq!(h.session_status(), "idle");
+
+    // a message during a turn: the session stays running across the turn end that has a next
+    h.rt.prompt(S, "two", "user", &[]).unwrap();
+    until("second running", || h.attempts().len() == 2).await;
+    until("running again", || h.session_status() == "running").await;
+    h.rt.prompt(S, "three", "user", &[]).unwrap();
+    until("second started", || h.count("start_turn") == 2).await;
+    let second = h.attempts()[1].clone();
+    h.node.finish(&second, build::done()).await.unwrap();
+    until("third planned", || h.attempts().len() == 3).await;
+    assert_eq!(h.session_status(), "running", "a turn follows");
+    until("third started", || h.count("start_turn") == 3).await;
+    let third = h.attempts()[2].clone();
+    h.node.finish(&third, build::done()).await.unwrap();
+    until("idle", || h.session_status() == "idle").await;
+}
+
+#[tokio::test]
+async fn a_failed_turn_leaves_the_session_in_error_and_a_retry_stays_running() {
+    let h = hub();
+    h.bind();
+    h.rt.prompt(S, "hello", "user", &[]).unwrap();
+    until("started", || h.methods().contains(&"start_turn")).await;
+    let first = h.attempts()[0].clone();
+    let mut c = build::done();
+    c.outcome = Outcome::Failed;
+    c.stop_reason = "error".into();
+    c.transient = true;
+    h.node.finish(&first, c).await.unwrap();
+    until("retry planned", || h.attempts().len() == 2).await;
+    assert_eq!(h.session_status(), "running", "a retry is the same turn");
+    h.rt.cancel(S).unwrap();
+    until("cancelled", || h.ends().len() == 1).await;
+    assert_eq!(h.session_status(), "idle");
+
+    h.rt.prompt(S, "again", "user", &[]).unwrap();
+    until("second started", || h.count("start_turn") == 2).await;
+    let exec = h.attempts().last().unwrap().clone();
+    let mut c = build::done();
+    c.outcome = Outcome::Failed;
+    c.stop_reason = "error".into();
+    c.acted = true;
+    h.node.finish(&exec, c).await.unwrap();
+    until("turn end", || h.ends().len() == 2).await;
+    assert_eq!(h.session_status(), "error");
+}
+
+#[tokio::test]
+async fn an_ended_session_stays_ended_through_its_last_turn() {
+    let h = hub();
+    h.bind();
+    h.rt.prompt(S, "hello", "user", &[]).unwrap();
+    until("running", || h.session_status() == "running").await;
+    h.store
+        .transaction::<_, StoreError>(|tx| {
+            tx.execute("UPDATE sessions SET status='ended'", [])?;
+            Ok(())
+        })
+        .unwrap();
+    let exec = h.attempts()[0].clone();
+    h.node.finish(&exec, build::done()).await.unwrap();
+    until("released", || h.phase() == "released").await;
+    assert_eq!(h.session_status(), "ended");
+}
+
+/// An attempt nobody can tell the end of after a restart is still running as far as the session
+/// row goes, until Stop gives it up.
+#[tokio::test]
+async fn an_unknown_attempt_keeps_the_session_running_until_it_is_abandoned() {
+    let mut h = hub();
+    h.bind();
+    h.rt.prompt(S, "first", "user", &[]).unwrap();
+    until("running", || h.session_status() == "running").await;
+    h.node.restart();
+    h.restart_hub().await;
+    assert_eq!(
+        h.q::<String>("SELECT state FROM runtime_attempts"),
+        "unknown"
+    );
+    assert_eq!(h.session_status(), "running");
+    assert!(h.rt.cancel(S).unwrap());
+    until("abandoned", || h.ends().len() == 1).await;
+    assert_eq!(h.session_status(), "idle");
+}
+
+/// Review L2: a turn is under way from the moment it is planned, not from the Node's
+/// AttemptStarted. A restart while the Node is still opening or loading the harness leaves the
+/// attempt unknown before it ever started; the row must not keep the last turn's `idle`.
+#[tokio::test]
+async fn an_attempt_unknown_before_it_started_keeps_the_session_running() {
+    let mut h = hub();
+    h.bind();
+    h.one_turn("first").await;
+    assert_eq!(h.session_status(), "idle");
+    assert!(h.acp_id().is_some());
+    // the Node's facts are late from here on: its AttemptStarted never reaches this Hub
+    *h.seen.stash.lock().unwrap() = Some(vec![]);
+    h.rt.prompt(S, "second", "user", &[]).unwrap();
+    until("second planned", || h.attempts().len() == 2).await;
+    assert_eq!(
+        h.session_status(),
+        "running",
+        "the harness has a session already"
+    );
+    until("sent", || h.count("start_turn") == 2).await;
+    assert_eq!(
+        h.q::<String>(
+            "SELECT state FROM runtime_attempts ORDER BY created DESC, rowid DESC LIMIT 1"
+        ),
+        "planned"
+    );
+    let late = h.seen.stash.lock().unwrap().take().unwrap();
+    h.node.restart();
+    h.restart_hub().await;
+    assert_eq!(
+        h.q::<String>(
+            "SELECT state FROM runtime_attempts ORDER BY created DESC, rowid DESC LIMIT 1"
+        ),
+        "unknown"
+    );
+    assert!(h.rt.is_uncertain(S));
+    assert_eq!(h.session_status(), "running");
+    // what the Node said before its restart arrives late (its AttemptStarted among it): it
+    // changes nothing, and the stream goes on
+    assert!(!late.is_empty());
+    for b in late {
+        h.seen.to.commit(b).await.unwrap();
+    }
+    assert_eq!(h.session_status(), "running");
+    assert!(h.rt.cancel(S).unwrap());
+    until("abandoned", || h.ends().len() == 2).await;
+    assert_eq!(h.session_status(), "idle");
+}
+
+/// Before the harness has a session of its own, a planned turn shows `starting`, as the legacy
+/// runner's; its start makes it `running`.
+#[tokio::test]
+async fn a_first_turn_is_starting_until_its_attempt_starts() {
+    let h = hub();
+    h.store
+        .transaction::<_, StoreError>(|tx| {
+            tx.execute("UPDATE sessions SET status='idle'", [])?;
+            Ok(())
+        })
+        .unwrap();
+    *h.seen.stash.lock().unwrap() = Some(vec![]);
+    h.bind();
+    h.rt.prompt(S, "hello", "user", &[]).unwrap();
+    until("planned", || h.attempts().len() == 1).await;
+    assert_eq!(h.acp_id(), None);
+    assert_eq!(h.session_status(), "starting");
+    let late = h.seen.stash.lock().unwrap().take().unwrap();
+    for b in late {
+        h.seen.to.commit(b).await.unwrap();
+    }
+    until("running", || h.session_status() == "running").await;
+}
