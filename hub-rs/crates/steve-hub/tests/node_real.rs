@@ -24,8 +24,8 @@
 //! 8. the Hub killed mid-turn: the attempt is unknown and never re-run; Stop abandons it and the
 //!    next message runs.
 //!
-//! Two checks of the harness itself run on the scripted agent and are not ignored: the test project
-//! is a Node root from the first turn, and case 5's configure path.
+//! Three checks of the harness itself run on the scripted agent and are not ignored: the test
+//! project is a Node root from the first turn, case 5's configure path, and a Bot in `auto` mode.
 //!
 //! Cases 9 (a drain waits for the turn) and 10 (YOLO arms from the Node's own_pids) come once
 //! their Hub side lands.
@@ -438,10 +438,15 @@ impl Real {
     }
 
     async fn start_on(h: Home) -> Real {
+        Real::start_as(h, "default").await
+    }
+
+    /// With the test Bot in `perm_mode`.
+    async fn start_as(h: Home, perm_mode: &str) -> Real {
         let hub = spawn(&h);
         serving(&h).await;
         let c = Client::login(&h).await;
-        let mut bot = json!({"name": "A7 实测", "harness": "claude-code", "perm_mode": "default"});
+        let mut bot = json!({"name": "A7 实测", "harness": "claude-code", "perm_mode": perm_mode});
         // the scripted agent reports no effort to set: it would refuse the open
         if h.fake.is_none() {
             bot["model"] = json!(model());
@@ -779,6 +784,33 @@ async fn a_mode_change_at_idle_configures_the_node_session() {
     r.c.say(&sid, "A7 配置之后 @say second-A7").await;
     r.turn_over(&sid, 2, "after the configure").await;
     assert!(r.said(&sid, seq, "second-A7") > 0, "the next turn ran");
+}
+
+/// B1a, on the scripted agent: a Bot in `auto` (the seeded "Steve 开发") runs on the Node in auto,
+/// and YOLO's set_mode reaches it both ways: full access, then back to the Bot's `auto`.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_auto_bot_runs_on_the_node_and_yolo_sets_auto_back() {
+    let r = Real::start_as(Home::fake(), "auto").await;
+    let sid = r.item("A7 自动 @say first-auto").await;
+    r.turn_over(&sid, 1, "first turn").await;
+    assert_eq!(
+        r.h.count(
+            "SELECT COUNT(*) FROM node_commands WHERE method='open_session' AND json_extract(request,'$.body.session')=? AND json_extract(request,'$.body.policy.permissions')='auto' AND state='finished' AND json_extract(receipt,'$.success')=1",
+            &[&sid]
+        ),
+        1,
+        "opened in auto; log:\n{}",
+        hub_log(&r.h)
+    );
+    r.c.ok("PUT", "/api/yolo", json!({"mode": "full", "confirm": true}))
+        .await;
+    r.configure_over(&sid, "full_access").await;
+    r.c.ok("PUT", "/api/yolo", json!({"mode": "off"})).await;
+    r.configure_over(&sid, "auto").await;
+    let seq = r.seq(&sid);
+    r.c.say(&sid, "A7 自动之后 @say second-auto").await;
+    r.turn_over(&sid, 2, "back in auto").await;
+    assert!(r.said(&sid, seq, "second-auto") > 0, "the next turn ran");
 }
 
 /// 1. A hello turn is stored as steve.v1, with its usage and cost.

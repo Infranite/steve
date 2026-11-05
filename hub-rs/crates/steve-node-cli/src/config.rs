@@ -48,6 +48,9 @@ pub struct RootEntry {
     pub path: PathBuf,
     #[serde(default)]
     pub display: Option<String>,
+    /// `read_only`: listed, read and scanned, never a workspace.
+    #[serde(default)]
+    pub access: steve_node_api::RootAccess,
 }
 
 pub struct Home(pub PathBuf);
@@ -104,6 +107,7 @@ impl Home {
                         .map_err(|_| anyhow::anyhow!("bad root id {}", e.id))?,
                     display: e.display.unwrap_or_else(|| e.path.display().to_string()),
                     path: e.path,
+                    access: e.access,
                 })
             })
             .collect()
@@ -149,6 +153,7 @@ impl Home {
                 jobs: 0,
                 execs: 0,
             },
+            storage: steve_node::Storage::default(),
         })
     }
 }

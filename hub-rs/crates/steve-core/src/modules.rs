@@ -261,8 +261,11 @@ impl Drop for Tx<'_> {
             let core = self.c.clone();
             let run = move || {
                 let mut items = vec![];
-                for (sid, item) in cancels {
-                    core.0.runtime.cancel(&sid);
+                for (turn, item) in cancels {
+                    // the turn frozen when the stop was asked for: a newer one is left running
+                    if let Err(e) = core.0.runtime.stop(&turn) {
+                        tracing::warn!(session = turn.session, item, "stopping the turn: {e}");
+                    }
                     if !items.contains(&item) {
                         items.push(item);
                     }

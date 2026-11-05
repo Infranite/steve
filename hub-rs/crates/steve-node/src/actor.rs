@@ -928,7 +928,7 @@ impl Actor {
                 .run
                 .limits
                 .max_output_bytes
-                .min(crate::JOURNAL_QUOTA / 4),
+                .min(self.inner.cfg.storage.quota / 4),
             Ordering::SeqCst,
         );
         self.gate.2.store(false, Ordering::SeqCst);
@@ -1446,6 +1446,7 @@ impl Actor {
                         continuation: None,
                         transient: false,
                         acted,
+                        job: None,
                     },
                 }
             }
@@ -1471,6 +1472,7 @@ impl Actor {
                         error: Some(ApiError::new(ErrorCode::Internal, e.message)),
                         result: vec![],
                         continuation: None,
+                        job: None,
                     },
                 }
             }
@@ -1642,8 +1644,8 @@ impl Actor {
         } else if self
             .inner
             .j
-            .read(|t| t.payload_bytes())
-            .is_ok_and(|n| n >= crate::JOURNAL_QUOTA)
+            .read(|t| self.inner.over_limit(t))
+            .unwrap_or(false)
         {
             Some((
                 Outcome::Cancelled,
@@ -1984,6 +1986,7 @@ fn cancelled() -> Completion {
         continuation: None,
         transient: false,
         acted: false,
+        job: None,
     }
 }
 
@@ -1996,5 +1999,6 @@ fn failure(outcome: Outcome, e: ApiError, acted: bool) -> Completion {
         error: Some(e),
         result: vec![],
         continuation: None,
+        job: None,
     }
 }

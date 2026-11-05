@@ -115,7 +115,9 @@ async fn start() -> Env {
     let w = steve_hub::wire::wire_with(&cfg, &bus, Arc::new(get.clone())).expect("wire");
     let domain = w.domain.clone();
     let store = w.modules.as_ref().unwrap().store.clone();
-    let st = AppState::new(cfg.clone(), w.backend, w.domain, bus).with_modules(w.modules);
+    let st = AppState::new(cfg.clone(), w.backend, w.domain, bus)
+        .with_modules(w.modules)
+        .with_node(w.node);
     steve_hub::app::boot(&st).await.expect("boot");
     for job in w.jobs {
         tokio::spawn(job);
@@ -243,6 +245,99 @@ async fn finishing_through_the_api_runs_an_item_flow_once_through_the_outbox() {
         ),
         (Some(0), Some(0)),
         "{h}"
+    );
+}
+
+/// healthz's `node` block without a Node (STEVE_NODE_MODE unset): off, nothing reconciled, and the
+/// store's counts as they are: Node-bound sessions with queued messages are parked, and legacy
+/// sessions that could still run (and those with work in hand) are counted for the runner's removal.
+#[tokio::test(flavor = "multi_thread")]
+async fn healthz_reports_the_node_path_without_a_node() {
+    let e = start().await;
+    let node = || async { e.call("GET", "/healthz", None).await.1["node"].clone() };
+    let before = node().await;
+    assert_eq!(
+        (
+            &before["enabled"],
+            &before["remote"],
+            &before["reconciled"],
+            &before["stopped"],
+            &before["fallbacks"]
+        ),
+        (
+            &json!(false),
+            &json!(false),
+            &Value::Null,
+            &json!(false),
+            &json!(0)
+        ),
+        "{before}"
+    );
+    let n = |v: &Value, k: &str| v.pointer(k).and_then(Value::as_i64).expect(k);
+    let ws = e.one_text("SELECT id FROM workspaces LIMIT 1");
+    let session = |id: &str, status: &str, readonly: i64| {
+        e.exec(
+            "INSERT INTO sessions (id, workspace_id, harness, cwd, status, readonly, created, updated) VALUES (?, ?, 'claude', '', ?, ?, 0, 0)",
+            &[&id, &ws, &status, &readonly],
+        )
+    };
+    let queue = |id: &str| {
+        e.exec(
+            "INSERT INTO queued (id, session_id, text, via, created) VALUES (?, ?, 'x', 'web', 0)",
+            &[&format!("q-{id}"), &id],
+        )
+    };
+    let bind = |id: &str, node: &str, phase: &str| {
+        e.exec(
+            "INSERT INTO runtime_sessions (session_id, node_id, workspace_ref, node_session_id, config_revision, phase, updated) VALUES (?, ?, 'w', ?, 'r', ?, 0)",
+            &[&id, &node, &id, &phase],
+        )
+    };
+    // legacy: idle, with a queued message, with a submitted dispatch, ended with a pending resume, read-only
+    session("hz-idle", "idle", 0);
+    session("hz-queued", "idle", 0);
+    queue("hz-queued");
+    session("hz-submitted", "running", 0);
+    e.exec(
+        "INSERT INTO session_dispatch (id, session_id, text, via, created, state, updated) VALUES ('d1', 'hz-submitted', 'x', 'web', 0, 'submitted', 0)",
+        &[],
+    );
+    session("hz-ended", "ended", 0);
+    e.exec(
+        "INSERT INTO session_resume (session_id, created) VALUES ('hz-ended', 0)",
+        &[],
+    );
+    session("hz-readonly", "idle", 1);
+    // Node-bound: one on the local Node with a message waiting, one released on a remote Node whose
+    // last attempt nobody can tell the end of
+    session("hz-local", "idle", 0);
+    bind("hz-local", "local", "ready");
+    queue("hz-local");
+    session("hz-remote", "idle", 0);
+    bind("hz-remote", "remote-1", "released");
+    e.exec(
+        "INSERT INTO runtime_turns (turn_id, session_id, state, created, updated) VALUES ('t1', 'hz-remote', 'unknown', 0, 0)",
+        &[],
+    );
+    e.exec(
+        "INSERT INTO runtime_attempts (attempt_id, turn_id, ordinal, node_id, operation_id, execution, spec, digest, state, created, updated) VALUES ('a1', 't1', 0, 'remote-1', 'op1', 'e', '{}', 'd', 'unknown', 0, 0)",
+        &[],
+    );
+    let after = node().await;
+    let delta = |k: &str| n(&after, k) - n(&before, k);
+    assert_eq!(
+        [
+            "/sessions",
+            "/open",
+            "/running",
+            "/unknown",
+            "/parked",
+            "/legacy/sessions",
+            "/legacy/busy"
+        ]
+        .map(delta),
+        [2, 1, 1, 1, 1, 3, 3],
+        "{before} -> {after}"
     );
 }
 

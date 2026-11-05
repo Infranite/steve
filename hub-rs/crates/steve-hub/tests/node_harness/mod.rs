@@ -29,7 +29,7 @@ pub struct Ends {
 }
 
 impl NodeDomain for Ends {
-    fn turn_ended(&self, session: &str, stop: &str, _: Option<String>) {
+    fn turn_ended(&self, session: &str, _: Option<&str>, stop: &str, _: Option<String>) {
         self.turns
             .lock()
             .unwrap()
@@ -268,8 +268,30 @@ pub async fn dial_url(
     serve: Arc<dyn Node>,
     incarnation: u64,
 ) -> Result<Linked, handshake::Refused> {
+    dial_url_as(
+        url,
+        hub_id,
+        id,
+        node,
+        serve,
+        incarnation,
+        steve_node_api::PROTOCOL,
+    )
+    .await
+}
+
+/// [`dial_url`] as a Node whose hello says `proto` (an earlier release's).
+pub async fn dial_url_as(
+    url: &str,
+    hub_id: &str,
+    id: &Identity,
+    node: &NodeId,
+    serve: Arc<dyn Node>,
+    incarnation: u64,
+    proto: (u16, u16),
+) -> Result<Linked, handshake::Refused> {
     let (mut sink, mut stream) = tls::connect(url, &Trust::LoopbackPlaintext).await.unwrap();
-    let (_, w) = handshake::dial(
+    let (_, w) = handshake::dial_as(
         &mut sink,
         &mut stream,
         NodeIntro {
@@ -280,6 +302,7 @@ pub async fn dial_url(
             caps: None,
             hub_id: Some(hub_id),
         },
+        proto,
     )
     .await?;
     let conn = Conn::spawn(

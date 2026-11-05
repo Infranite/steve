@@ -606,6 +606,56 @@ fn approvals_and_permissions() {
     );
 }
 
+/// The runtime says what became of an answer: one on its way to a Node resolves the card (no
+/// expiry note to the agent), a gone request takes the expired path, and an error leaves the card
+/// open with the error returned.
+#[test]
+fn a_permission_answer_follows_the_runtime_outcome() {
+    let k = Kit::new();
+    let i = new_item(&k, "g");
+    let s = only_session(&k, &i.id);
+    // idle: whatever goes to the agent starts a turn of its own
+    k.rt.end_turn(&k.core, &s.id, "end_turn", None);
+    let opts = ["ok|允许|allow_once", "no|拒绝|reject_once"];
+    let expired = |k: &Kit| {
+        k.rt.prompts_of(&s.id)
+            .iter()
+            .filter(|p| p.starts_with("你之前请求权限的那次工具调用已经失效"))
+            .count()
+    };
+
+    let p = k.decision(&i.id, Some(&s.id), "approve", "tool_call", &opts);
+    k.rt.st().pending_permissions.insert(p.clone());
+    k.core.resolve(&p, "ok", "", "me").unwrap();
+    let d = k.db().decision(&p).unwrap().unwrap();
+    assert_eq!(
+        (d.status.as_str(), d.result),
+        ("resolved", json!({"optionId": "ok"}))
+    );
+    assert_eq!(expired(&k), 0, "a pending answer is no expiry");
+
+    let p = k.decision(&i.id, Some(&s.id), "approve", "tool_call", &opts);
+    k.rt.st().answer_error = true;
+    assert!(k.core.resolve(&p, "ok", "", "me").is_err());
+    assert_eq!(k.db().decision(&p).unwrap().unwrap().status, "open");
+    assert!(
+        k.core.dismiss_decision(&p, "me").is_err(),
+        "a dismiss that cannot deny keeps the card"
+    );
+    assert_eq!(k.db().decision(&p).unwrap().unwrap().status, "open");
+    assert_eq!(expired(&k), 0);
+
+    k.rt.st().answer_error = false;
+    k.rt.st().pending_permissions.insert(p.clone());
+    k.core.resolve(&p, "no", "", "me").unwrap();
+    assert_eq!(k.db().decision(&p).unwrap().unwrap().status, "resolved");
+
+    let p = k.decision(&i.id, Some(&s.id), "approve", "tool_call", &opts);
+    k.core.resolve(&p, "ok", "", "me").unwrap();
+    assert_eq!(k.db().decision(&p).unwrap().unwrap().status, "expired");
+    assert_eq!(expired(&k), 1, "a gone request is today's expired path");
+}
+
 #[test]
 fn deliver_records_outputs_and_rework_goes_back() {
     let k = Kit::new();
@@ -736,6 +786,7 @@ fn a_session_without_an_item_gets_answerable_cards() {
     k.core
         .on_turn_end(crate::TurnEnd {
             session_id: s.id.clone(),
+            attempt: None,
             stop_reason: "end_turn".into(),
             error: None,
         })
@@ -892,6 +943,138 @@ fn deliver_queued_sends_the_queue_now_or_keeps_it_while_busy() {
 }
 
 #[test]
+fn a_deferred_stop_reaches_only_the_turn_it_was_asked_for() {
+    let k = Kit::new();
+    let i = new_item(&k, "g");
+    let s = only_session(&k, &i.id);
+    let a1 = k.rt.st().attempts[&s.id].clone();
+    k.core.session_message(&s.id, "下一条", false, &[]).unwrap();
+    // the stop is queued for a1; its worker only runs once a1 ended and the queued a2 started
+    let gate = k.rt.stop_gate.write().unwrap();
+    k.core.item_action(&i.id, ItemAction::Drop, "me").unwrap();
+    k.rt.end_turn(&k.core, &s.id, "end_turn", None);
+    let a2 = k.rt.st().attempts[&s.id].clone();
+    assert_ne!(a1, a2);
+    drop(gate);
+    assert!(k.wait(|| !k.rt.st().stops.is_empty()));
+    let st = k.rt.st();
+    assert_eq!(st.stops[0].0.attempt, a1);
+    assert_eq!(st.stops[0].1, crate::Stop::NotRunning);
+    assert!(st.cancelled.is_empty(), "a2 was not interrupted");
+    assert_eq!(st.attempts.get(&s.id), Some(&a2), "a2 still runs");
+    drop(st);
+    // the close still waits for the turn running now, and follows its end
+    assert_ne!(k.phase(&i.id), "closed");
+    k.rt.end_turn(&k.core, &s.id, "end_turn", None);
+    assert!(k.wait(|| k.phase(&i.id) == "closed"));
+}
+
+/// The runtime ends the session's turn without telling the core (its end comes later), and the
+/// next message starts a new turn.
+fn next_turn_before_the_end_is_told(k: &Kit, sid: &str) -> (String, String) {
+    let a1 = {
+        let mut st = k.rt.st();
+        st.turning.remove(sid);
+        st.attempts.remove(sid).unwrap()
+    };
+    assert_eq!(
+        k.core.session_message(sid, "下一条", false, &[]).unwrap(),
+        crate::Prompted::Sent
+    );
+    let a2 = k.rt.st().attempts[sid].clone();
+    assert_ne!(a1, a2);
+    (a1, a2)
+}
+
+fn end_of(sid: &str, attempt: &str, stop: &str) -> crate::TurnEnd {
+    crate::TurnEnd {
+        session_id: sid.into(),
+        attempt: Some(attempt.into()),
+        stop_reason: stop.into(),
+        error: None,
+    }
+}
+
+#[test]
+fn a_late_end_of_an_earlier_turn_keeps_the_running_turns_mark() {
+    let k = Kit::new();
+    let i = new_item(&k, "g");
+    let s = only_session(&k, &i.id);
+    let (a1, _) = next_turn_before_the_end_is_told(&k, &s.id);
+    // a2 asks for an approval, then a1's end arrives
+    k.core
+        .tool_request_approval(&s, "推送到 main", "git push")
+        .unwrap();
+    k.core.on_turn_end(end_of(&s.id, &a1, "end_turn")).unwrap();
+    assert!(k.open_fails(&i.id).is_empty(), "a1's end judged nothing");
+    assert_eq!(k.open_kinds(&i.id), vec!["approve"]);
+    assert_eq!(k.status(&i.id).2, "在等你批准");
+    // a2's own end still finds its approval: no stall card
+    k.rt.end_turn(&k.core, &s.id, "end_turn", None);
+    assert!(k.open_fails(&i.id).is_empty());
+    assert_eq!(k.open_kinds(&i.id), vec!["approve"]);
+}
+
+#[test]
+fn a_late_end_drops_a_mark_of_its_own_turn() {
+    let k = Kit::new();
+    let i = new_item(&k, "g");
+    let s = only_session(&k, &i.id);
+    k.core
+        .tool_request_approval(&s, "推送到 main", "git push")
+        .unwrap();
+    let d = k.db().decisions_of_item(&i.id).unwrap().pop().unwrap();
+    k.core.resolve(&d.id, "yes", "", "me").unwrap();
+    let (a1, _) = next_turn_before_the_end_is_told(&k, &s.id);
+    k.core.on_turn_end(end_of(&s.id, &a1, "end_turn")).unwrap();
+    // a2 (and the answer queued behind it) asked nothing: a1's approval does not cover its end
+    while k.rt.st().turning.contains(&s.id) {
+        k.rt.end_turn(&k.core, &s.id, "end_turn", None);
+    }
+    assert_eq!(k.open_kinds(&i.id), vec!["fail"]);
+}
+
+/// B2b review: one end covers a turn and the follow-ups that took the queue behind it, and names
+/// the last of them. A mark made in an earlier link of that chain is still the chain's: its end,
+/// with nothing running, uses it (as the legacy runner always did), so no stall card.
+#[test]
+fn a_mark_made_before_a_follow_up_counts_for_the_end_of_the_chain() {
+    let k = Kit::new();
+    let i = new_item(&k, "g");
+    let s = only_session(&k, &i.id);
+    let a1 = k.rt.st().attempts[&s.id].clone();
+    k.core
+        .tool_request_approval(&s, "推送到 main", "git push")
+        .unwrap();
+    assert_eq!(
+        k.core
+            .session_message(&s.id, "顺便看看测试", false, &[])
+            .unwrap(),
+        crate::Prompted::Queued
+    );
+    // a1 ends and the queue goes on as its follow-up: no end is told for a1
+    k.rt.end_turn(&k.core, &s.id, "end_turn", None);
+    let a2 = k.rt.st().attempts[&s.id].clone();
+    assert_ne!(a1, a2);
+    k.rt.end_turn(&k.core, &s.id, "end_turn", None);
+    assert!(k.open_fails(&i.id).is_empty());
+    assert_eq!(k.open_kinds(&i.id), vec!["approve"]);
+}
+
+#[test]
+fn the_same_turn_end_told_twice_is_handled_once() {
+    let k = Kit::new();
+    let i = new_item(&k, "g");
+    let s = only_session(&k, &i.id);
+    let a1 = k.rt.st().attempts[&s.id].clone();
+    k.rt.end_turn(&k.core, &s.id, "end_turn", None);
+    let cards = k.db().decisions_of_item(&i.id).unwrap().len();
+    assert_eq!(k.open_kinds(&i.id), vec!["fail"]);
+    k.core.on_turn_end(end_of(&s.id, &a1, "end_turn")).unwrap();
+    assert_eq!(k.db().decisions_of_item(&i.id).unwrap().len(), cards);
+}
+
+#[test]
 fn item_actions() {
     let k = Kit::new();
     let i = new_item(&k, "g");
@@ -992,6 +1175,42 @@ fn goals_small_and_big_changes() {
     ]));
 }
 
+/// B4: a handoff whose old harness is still being let go (a Node's release on its way) names that
+/// release to the new session, which opens only once it is done; one already gone names nothing.
+#[test]
+fn a_handoff_names_the_release_its_successor_waits_for() {
+    let k = Kit::new();
+    let i = new_item(&k, "写一个脚本");
+    let s = only_session(&k, &i.id);
+    k.rt.end_turn(&k.core, &s.id, "cancelled", None);
+    k.rt.st().release_answers.insert(
+        s.id.clone(),
+        crate::Released::Pending("op_release_1".into()),
+    );
+    k.core
+        .revise_goal(&i.id, "写一个脚本，并且部署到三台机器上")
+        .unwrap();
+    let s2 = last_session(&k, &i.id);
+    assert_ne!(s2.id, s.id);
+    assert_eq!(
+        k.rt.st().created.last().unwrap(),
+        &(s2.id.clone(), Some("op_release_1".to_string()))
+    );
+    /* the rollover past the handoff threshold, its old session gone at once: nothing to wait for */
+    k.rt.end_turn(&k.core, &s2.id, "cancelled", None);
+    k.db()
+        .session_patch(&s2.id, patch![used: 85, size: 100])
+        .unwrap();
+    k.core
+        .supplement(&i.id, "继续", SupplementMode::Auto, &[])
+        .unwrap();
+    let s3 = last_session(&k, &i.id);
+    assert_eq!(s3.no, 3);
+    assert_eq!(k.rt.st().created.last().unwrap(), &(s3.id.clone(), None));
+    /* a start that does not come from a handoff never inherits one left behind */
+    assert!(k.rt.st().created.iter().filter(|c| c.1.is_some()).count() == 1);
+}
+
 #[test]
 fn reassign_checks_the_workspace() {
     let k = Kit::new();
@@ -1017,6 +1236,33 @@ fn reassign_checks_the_workspace() {
         json!({"reassigned": true})
     );
     assert_eq!(last_session(&k, &i.id).bot_id.as_deref(), Some("dev"));
+}
+
+/// B4 / D2: a reassign mid-turn is a handoff into the same worktree. The old turn is stopped and
+/// the new bot's session names the old one's release that is still on its way, so it opens only
+/// once the old harness is let go.
+#[test]
+fn a_reassign_mid_turn_waits_for_the_old_release() {
+    let k = Kit::new();
+    let i = new_item(&k, "写一个脚本");
+    let s = only_session(&k, &i.id);
+    assert!(k.rt.st().turning.contains(&s.id), "the opening turn runs");
+    k.rt.st().release_answers.insert(
+        s.id.clone(),
+        crate::Released::Pending("op_release_1".into()),
+    );
+    k.core.reassign(&i.id, "dev", "me").unwrap();
+    assert!(
+        k.rt.st().cancelled.contains(&s.id),
+        "the old turn is stopped"
+    );
+    let s2 = last_session(&k, &i.id);
+    assert_ne!(s2.id, s.id);
+    assert_eq!(s2.bot_id.as_deref(), Some("dev"));
+    assert_eq!(
+        k.rt.st().created.last().unwrap(),
+        &(s2.id.clone(), Some("op_release_1".to_string()))
+    );
 }
 
 #[test]

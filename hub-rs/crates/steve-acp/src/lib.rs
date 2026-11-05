@@ -28,7 +28,7 @@ pub use rollout::find as codex_rollout;
 pub use rollout::turn_usage as codex_turn_usage;
 pub use rpc::RpcError;
 pub use runner::{
-    Acp, AcpError, AutonomousUsage, Host, McpEndpoint, Message, PermissionRequest, Prompted,
-    RESUME_AFTER_TOOLS, SessionInfo, TurnBegin, TurnEnd, TurnFinish, TurnUsage, Usage, auto_allow,
-    is_dead_agent, is_transient, permission_request, steve_tool,
+    Acp, AcpError, AutonomousUsage, Flushed, Host, McpEndpoint, Message, PermissionRequest,
+    Prompted, RESUME_AFTER_TOOLS, SessionInfo, TurnBegin, TurnEnd, TurnFinish, TurnUsage, Usage,
+    auto_allow, is_dead_agent, is_transient, permission_request, steve_tool,
 };

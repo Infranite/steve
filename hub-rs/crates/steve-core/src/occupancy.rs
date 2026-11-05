@@ -8,7 +8,14 @@
 //! A hold has a reason. The release drain and an upgrade's maintenance hold new turns independently:
 //! lifting one never lifts the other.
 
-use crate::Tx;
+use crate::{Core, Tx};
+
+impl Core {
+    /// Node work an upgrade drain waits for ([`crate::AgentRuntime::node_working`]).
+    pub fn node_working(&self) -> usize {
+        self.0.runtime.node_working()
+    }
+}
 
 /// Why new turns wait.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

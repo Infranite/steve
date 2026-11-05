@@ -16,13 +16,14 @@ const defer = () => { let resolve, reject; const promise = new Promise((a, b) =>
 const session = (id) => ({ id, no: 1, item_id: null, status: "running", created: 1, updated: 2, queued: [], harness: "codex" })
 function harness() {
   const state = { workspace: { id: "ws", item_prefix: "ST" }, workspaces: [], items: [], bots: [], allBots: [], projects: [], sessions: [session("a"), session("b")], decisions: [], recent: [], thread: [], tags: [], tagUses: {}, settings: {}, devices: [], runtimes: [] }
-  let onEvent, onOpen
+  let onEvent, onOpen, cursorFn, opens = 0, closes = 0
+  const marks = new WeakMap(), wm = { cursor: null }
   const timers = [], cues = [], notices = [], pageWs = []
-  const api = { state: async () => structuredClone(state), events: async () => [], switchWs: async () => {} }
+  const api = { state: async () => { const s = structuredClone(state); if (wm.cursor) marks.set(s, wm.cursor); return s }, events: async () => [], switchWs: async () => {} }
   const exports = {}
   runInNewContext(code, {
     exports, require: (id) => {
-      if (id === "./api") return { api, setPageWorkspace: (ws) => { pageWs.push(ws) }, stream: (event, open) => { onEvent = event; onOpen = open; return () => {} }, Unauthenticated: class extends Error {} }
+      if (id === "./api") return { api, setPageWorkspace: (ws) => { pageWs.push(ws) }, cursorOf: (s) => marks.get(s) ?? null, stream: (event, open, cursor) => { onEvent = event; onOpen = open; cursorFn = cursor; opens++; return () => { closes++ } }, Unauthenticated: class extends Error {} }
       if (id === "./event-pages") return pages
       if (id === "./live-utils") return live
       if (id === "./decision-notes") return notes
@@ -38,7 +39,7 @@ function harness() {
     setTimeout: (f, ms) => { const timer = { f, ms }; timers.push(timer); return timer }, clearTimeout: (timer) => { if (timer) timer.cancelled = true },
     requestAnimationFrame: (f) => { timers.push({ f, ms: 0 }); return 1 }, crypto: { randomUUID: () => "client-1" },
   })
-  return { store: exports, api, state, cues, notices, pageWs, event: (e) => onEvent(e), reconnect: () => onOpen(), tick: async (ms) => {
+  return { store: exports, api, state, cues, notices, pageWs, event: (e) => onEvent(e), reconnect: (resumed) => onOpen(resumed), wm, streamCursor: () => cursorFn?.(), opens: () => opens, closes: () => closes, cursorFn: () => cursorFn, tick: async (ms) => {
     const due = timers.splice(0); for (const t of due) { if (t.cancelled) continue; if (t.ms <= ms) t.f(); else timers.push(t) } await flush()
   } }
 }
@@ -84,6 +85,90 @@ test("resync marks an in-flight detail for a follow-up request", async () => {
   const loading = s.loadItem("loaded"); h.reconnect(); await flush()
   first.resolve({}); await loading; await flush()
   assert.equal(calls, 2)
+})
+
+/* C1: count what a reconnect refetches */
+function counted(h) {
+  const c = { states: 0, items: [], after: [], resyncs: 0 }
+  const state = h.api.state; h.api.state = () => { c.states++; return state() }
+  h.api.item = async (id) => { c.items.push(id); return {} }
+  h.store.hubSubs.add((e) => { if (e.type === "resync") c.resyncs++ })
+  return c
+}
+
+test("a resumed reconnect refetches only what the replay touched, and the gap's transcript once", async () => {
+  const h = harness(), s = h.store, c = counted(h)
+  h.wm.cursor = "E:5"
+  s.start(); await flush()
+  assert.equal(h.opens(), 1); assert.equal(h.streamCursor(), "E:5"); assert.equal(c.states, 1) // the stream opens after the state it continues
+  const log = [1]
+  h.api.events = async (_sid, after) => { c.after.push(after); return log.filter((seq) => seq > after).map((seq) => ({ seq, kind: "text", data: { role: "assistant", text: "ABC"[seq - 1] } })) }
+  await s.loadItem("A"); await s.loadItem("B"); await s.loadEvents("a")
+  c.items.length = 0; c.after.length = 0
+  log.push(2, 3) // written while the page was away
+  h.reconnect(true); await flush()
+  assert.equal(c.resyncs, 0); assert.equal(c.states, 1)
+  h.event({ type: "item", id: "A" }) // replayed
+  h.event({ type: "stream.gap" })
+  h.event({ type: "event", session_id: "a", seq: 3, kind: "text", data: { role: "assistant", text: "C" } }) // live, before the catch-up answers
+  await h.tick(1000); await h.tick(1000)
+  assert.deepEqual(c.items, ["A"]); assert.equal(c.states, 2); assert.equal(c.resyncs, 0)
+  assert.equal(c.after[0], 1) // from before the gap, not from the live frame (then the next page, and the frame seen during the load)
+  assert.ok(c.after.every((x) => x >= 1), String(c.after))
+  await h.tick(80); assert.equal(s.st.S.a.ev.length, 1); assert.equal(s.st.S.a.ev[0][1], "ABC") // every missed chunk once
+})
+
+test("a stream reset resyncs everything once", async () => {
+  const h = harness(), s = h.store, c = counted(h)
+  h.wm.cursor = "E:5"
+  s.start(); await flush(); await s.loadItem("A"); await s.loadItem("B")
+  c.items.length = 0
+  h.reconnect(true); h.event({ type: "stream.reset" }); await flush()
+  assert.equal(c.resyncs, 1); assert.equal(c.states, 2); assert.deepEqual(c.items.sort(), ["A", "B"])
+})
+
+test("without a cursor every open resyncs, and the stream is reopened from the state that resync loaded", async () => {
+  const h = harness(), s = h.store, c = counted(h)
+  s.start(); await flush()
+  assert.equal(h.streamCursor(), null)
+  h.reconnect(false); await flush() // an old Hub: no watermark, the stream stays as it is
+  assert.equal(c.resyncs, 1); assert.equal(h.opens(), 1); assert.equal(h.streamCursor(), null)
+  h.wm.cursor = "E:9"
+  h.reconnect(false); await flush()
+  assert.equal(c.resyncs, 2); assert.equal(h.opens(), 2); assert.equal(h.closes(), 1); assert.equal(h.streamCursor(), "E:9")
+})
+
+test("a stream opened without a cursor never resumes from a later watermark, so its live frames are not replayed", async () => {
+  const h = harness(), s = h.store
+  s.start(); await flush()
+  const legacyCursor = h.cursorFn() // the legacy stream's own cursor
+  h.wm.cursor = "E:9"
+  h.reconnect(false) // the legacy open: its resync loads E:9
+  h.event({ type: "steve.tool", ws: "ws", mid: "m1", run: "r1", name: "search", brief: "q", ok: true }) // live, no frame id
+  await flush()
+  assert.equal(s.st.live.tools.length, 1)
+  // before: this stream's next reconnect sent ?after=E:9 and the Hub replayed the tool row (and everything else) again
+  assert.equal(legacyCursor(), null); assert.equal(h.closes(), 1)
+  assert.equal(h.opens(), 2); assert.equal(h.streamCursor(), "E:9") // reopened from the watermark: its frames carry ids
+  h.reconnect(true); await flush() // a resumed open of the new stream resyncs nothing and reopens nothing
+  assert.equal(h.opens(), 2); assert.equal(s.st.live.tools.length, 1)
+})
+
+test("a stopped store does not reopen the stream after a legacy resync", async () => {
+  const h = harness(), s = h.store
+  const stop = s.start(); await flush()
+  h.wm.cursor = "E:9"
+  h.reconnect(false); stop(); await flush()
+  assert.equal(h.opens(), 1)
+})
+
+test("a workspace switch opens a new stream from the new workspace's state", async () => {
+  const h = harness(), s = h.store
+  h.wm.cursor = "E:5"
+  s.start(); await flush()
+  h.wm.cursor = "E:12"
+  await s.switchWorkspace("other")
+  assert.equal(h.opens(), 2); assert.equal(h.streamCursor(), "E:12")
 })
 
 test("old workspace event pages cannot populate the new workspace", async () => {

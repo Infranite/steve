@@ -280,7 +280,7 @@ pub fn insert_command_in(tx: &Tx<'_>, c: &NewCommand<'_>, now: i64) -> Result<bo
         return Err(conflict("self-dependent command"));
     }
     let request = to_json(c.request)?;
-    let same: Option<bool>=tx.query_row("SELECT node_id=? AND method=? AND request=? AND digest=? AND target_attempt IS ? AND dependency_operation IS ? FROM node_commands WHERE operation_id=?",
+    let same: Option<bool>=tx.query_row("SELECT node_id=? AND method=? AND request=? AND digest=? AND target_attempt IS ? AND target_job_attempt IS NULL AND dependency_operation IS ? FROM node_commands WHERE operation_id=?",
         params![c.node,c.method,request,c.digest,c.target_attempt,c.dependency,c.operation],|r|r.get(0)).optional()?;
     if let Some(same) = same {
         if !same {
@@ -463,6 +463,36 @@ pub fn watermarks_in(tx: &Tx<'_>, k: StreamKey<'_>) -> Result<Watermarks> {
         },
     )?)
 }
+/// What became of one event offered to the inbox.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Inboxed {
+    /// Stored for apply.
+    New,
+    /// Already held (or applied and pruned since): nothing changed.
+    Seen,
+    /// It contradicts what the Hub holds. Nothing was stored: the caller sets it aside
+    /// ([`quarantine_in`]) or refuses it.
+    Conflict(Conflict),
+}
+
+/// How an event contradicts the inbox.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Conflict {
+    /// Another event (id or payload) already sits at its stream position.
+    Position,
+    /// Its id is already held at another stream position.
+    EventId,
+}
+
+impl Conflict {
+    pub fn reason(self) -> &'static str {
+        match self {
+            Conflict::Position => "different event at the same stream position",
+            Conflict::EventId => "event id reused at another stream position",
+        }
+    }
+}
+
 /// Exact JSON text equality is intentional: never silently accept two encodings with differing
 /// fields under one source identity. The producer must resend its immutable envelope.
 pub fn inbox_insert_in(
@@ -472,7 +502,7 @@ pub fn inbox_insert_in(
     event_id: &str,
     payload: &Value,
     now: i64,
-) -> Result<bool> {
+) -> Result<Inboxed> {
     if seq <= 0 {
         return Err(conflict("sequence must be positive"));
     }
@@ -480,9 +510,9 @@ pub fn inbox_insert_in(
     let existing:Option<(String,String)>=tx.query_row("SELECT event_id,payload FROM node_event_inbox WHERE node_id=? AND stream=? AND epoch=? AND seq=?",params![k.node,k.stream,k.epoch,seq],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
     if let Some(old) = existing {
         if old != (event_id.into(), payload) {
-            return Err(conflict("different event at the same stream position"));
+            return Ok(Inboxed::Conflict(Conflict::Position));
         }
-        return Ok(false);
+        return Ok(Inboxed::Seen);
     }
     // no row at or below the durable prefix: it was applied and pruned since, and this is a
     // redelivery. It is never stored again (it would be applied twice); its payload can no longer be
@@ -495,7 +525,7 @@ pub fn inbox_insert_in(
         )
         .optional()?;
     if durable.is_some_and(|d| seq <= d) {
-        return Ok(false);
+        return Ok(Inboxed::Seen);
     }
     let reused: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM node_event_inbox WHERE node_id=? AND event_id=?)",
@@ -503,7 +533,7 @@ pub fn inbox_insert_in(
         |r| r.get(0),
     )?;
     if reused {
-        return Err(conflict("event id reused at another stream position"));
+        return Ok(Inboxed::Conflict(Conflict::EventId));
     }
     tx.execute(
         "INSERT OR IGNORE INTO node_streams(node_id,stream,epoch) VALUES (?,?,?)",
@@ -522,8 +552,118 @@ pub fn inbox_insert_in(
         "UPDATE node_streams SET durable=? WHERE node_id=? AND stream=? AND epoch=?",
         params![durable, k.node, k.stream, k.epoch],
     )?;
-    Ok(true)
+    Ok(Inboxed::New)
 }
+
+/// Why a stream's apply stopped until reconciliation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fault {
+    Conflict,
+    Gap,
+    Ahead,
+}
+
+impl Fault {
+    fn name(self) -> &'static str {
+        match self {
+            Fault::Conflict => "conflict",
+            Fault::Gap => "gap",
+            Fault::Ahead => "ahead",
+        }
+    }
+    fn parse(s: &str) -> Option<Fault> {
+        Some(match s {
+            "conflict" => Fault::Conflict,
+            "gap" => Fault::Gap,
+            "ahead" => Fault::Ahead,
+            _ => return None,
+        })
+    }
+}
+
+/// What [`quarantine_in`] changed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Quarantined {
+    /// The event was not held yet.
+    pub new: bool,
+    /// Its stream was not faulted before.
+    pub faulted: bool,
+}
+
+/// Keeps a conflicting event aside (never applied, never pruned: once it is acknowledged the Node
+/// drops its copy) and faults its stream, in the caller's transaction.
+pub fn quarantine_in(
+    tx: &Tx<'_>,
+    k: StreamKey<'_>,
+    seq: i64,
+    event_id: &str,
+    payload: &Value,
+    reason: Conflict,
+    now: i64,
+) -> Result<Quarantined> {
+    if seq <= 0 {
+        return Err(conflict("sequence must be positive"));
+    }
+    tx.execute(
+        "INSERT OR IGNORE INTO node_streams(node_id,stream,epoch) VALUES (?,?,?)",
+        params![k.node, k.stream, k.epoch],
+    )?;
+    let n = tx.execute(
+        "INSERT OR IGNORE INTO node_event_quarantine(node_id,stream,epoch,seq,event_id,payload,reason,received) VALUES (?,?,?,?,?,?,?,?)",
+        params![k.node, k.stream, k.epoch, seq, event_id, to_json(payload)?, reason.reason(), now],
+    )?;
+    let faulted = stream_fault_in(tx, k, Fault::Conflict)?;
+    Ok(Quarantined {
+        new: n > 0,
+        faulted,
+    })
+}
+
+/// Marks a stream faulted: its events stay but are no longer applied ([`next_event_in`]) until
+/// reconciliation clears it. The first fault is kept. True: the stream was not faulted before.
+pub fn stream_fault_in(tx: &Tx<'_>, k: StreamKey<'_>, fault: Fault) -> Result<bool> {
+    tx.execute(
+        "INSERT OR IGNORE INTO node_streams(node_id,stream,epoch) VALUES (?,?,?)",
+        params![k.node, k.stream, k.epoch],
+    )?;
+    Ok(tx.execute(
+        "UPDATE node_streams SET fault=? WHERE node_id=? AND stream=? AND epoch=? AND fault IS NULL",
+        params![fault.name(), k.node, k.stream, k.epoch],
+    )? > 0)
+}
+
+/// A stream's fault, if any (`None` too for a stream the Hub never heard of).
+pub fn stream_fault_of(c: &rusqlite::Connection, k: StreamKey<'_>) -> Result<Option<Fault>> {
+    let f: Option<Option<String>> = c
+        .query_row(
+            "SELECT fault FROM node_streams WHERE node_id=? AND stream=? AND epoch=?",
+            params![k.node, k.stream, k.epoch],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(f.flatten().as_deref().and_then(Fault::parse))
+}
+
+/// What the Hub can acknowledge on a stream: the durable prefix, extended through positions held
+/// only in quarantine (and what follows them in the inbox). Acknowledging past `durable` is safe
+/// because the quarantined copy is durable; apply still stops at `durable` (and at a fault).
+pub fn acked_in(tx: &Tx<'_>, k: StreamKey<'_>) -> Result<i64> {
+    let mut acked = watermarks_in(tx, k)?.durable;
+    while let Some(next) = acked.checked_add(1) {
+        let held: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM node_event_inbox WHERE node_id=?1 AND stream=?2 AND epoch=?3 AND seq=?4)
+                 OR EXISTS(SELECT 1 FROM node_event_quarantine WHERE node_id=?1 AND stream=?2 AND epoch=?3 AND seq=?4)",
+            params![k.node, k.stream, k.epoch, next],
+            |r| r.get(0),
+        )?;
+        if !held {
+            break;
+        }
+        acked = next;
+    }
+    Ok(acked)
+}
+
 /// Apply the next contiguous event only, in the SAME transaction as its projections/events/stats.
 /// Calling this before projections is safe only if errors are propagated and the transaction rolls back.
 pub fn mark_applied_in(tx: &Tx<'_>, k: StreamKey<'_>, seq: i64) -> Result<bool> {
@@ -550,6 +690,7 @@ pub fn mark_applied_in(tx: &Tx<'_>, k: StreamKey<'_>, seq: i64) -> Result<bool> 
 
 /// The next event eligible for ordered apply. Payload is still the original Node envelope.
 /// Read it and mark it applied within one transaction together with all projections.
+/// A faulted stream has none: its apply waits for reconciliation.
 #[derive(Debug)]
 pub struct PendingEvent {
     pub seq: i64,
@@ -558,7 +699,7 @@ pub struct PendingEvent {
 }
 pub fn next_event_in(tx: &Tx<'_>, k: StreamKey<'_>) -> Result<Option<PendingEvent>> {
     let row: Option<(i64,String,String)> = tx.query_row(
-        "SELECT e.seq,e.event_id,e.payload FROM node_event_inbox e JOIN node_streams s USING(node_id,stream,epoch) WHERE e.node_id=? AND e.stream=? AND e.epoch=? AND e.seq=s.applied+1 AND e.seq<=s.durable",
+        "SELECT e.seq,e.event_id,e.payload FROM node_event_inbox e JOIN node_streams s USING(node_id,stream,epoch) WHERE e.node_id=? AND e.stream=? AND e.epoch=? AND e.seq=s.applied+1 AND e.seq<=s.durable AND s.fault IS NULL",
         params![k.node,k.stream,k.epoch],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
     row.map(|(seq, event_id, payload)| {
         Ok(PendingEvent {

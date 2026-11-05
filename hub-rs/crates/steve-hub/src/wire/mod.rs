@@ -23,6 +23,7 @@ pub mod research_mcp;
 pub mod signals;
 pub mod store;
 pub mod tool_service;
+pub mod workspaces;
 
 use std::sync::Arc;
 
@@ -58,6 +59,10 @@ pub struct Wired {
     pub yolo_engine: steve_core::yolo::Engine,
     /// Remote Nodes (`STEVE_NODE_LISTEN=1`): their routes and the coordinators sessions go to.
     pub nodes: Option<Arc<crate::nodes::NodeService>>,
+    /// The local Node's coordinator (`STEVE_NODE_MODE=local`), for `/healthz`.
+    pub node: Option<Arc<node_runtime::NodeRuntime>>,
+    /// Where projects', items', sessions' and knowledge folders' files are (which Node).
+    pub workspaces: Arc<workspaces::Workspaces>,
     /// Steve's tools as a Node reaches them (in-crate tests drive the bridge with them).
     #[cfg(test)]
     pub(crate) tool_service: Arc<tool_service::ToolService>,
@@ -161,16 +166,21 @@ fn node_runtime(
             node: node_id.clone(),
             home,
             acp: acp_config(cfg),
-            roots: node_binding::roots(store, cfg).map_err(|e| BackendError::msg(e.to_string()))?,
+            roots: node_binding::roots(store, &workspaces::configured(cfg))
+                .map_err(|e| BackendError::msg(e.to_string()))?,
             capacity: steve_node_api::Capacity {
                 sessions: 64,
                 jobs: 0,
                 execs: 0,
             },
+            // a 256 MiB journal at most, 512 MiB left free on the disk, new work again below 80%
+            storage: steve_node::Storage::default(),
         })
         .map_err(|e| BackendError::msg(e.to_string()))?,
     );
     let runtime = node_runtime::NodeRuntime::new(store.clone(), node.clone(), domain);
+    // legacy's idle kill: an idle session's harness goes after STEVE_IDLE_RELEASE_MS (10 min)
+    runtime.set_idle_release(cfg.idle_release_ms as i64);
     // an attempt's deadline (default 6 h); the end-to-end tests shorten it to see a card expire
     if let Some(ms) = turn_limit(vars) {
         runtime.set_turn_limit(ms);
@@ -237,6 +247,7 @@ fn remote_nodes(
     if let Some(ms) = turn_limit(vars) {
         fleet.set_turn_limit(ms);
     }
+    fleet.set_idle_release(cfg.idle_release_ms as i64);
     let svc = crate::nodes::from_vars(store, fleet, |k| vars(k));
     let bind = match bind.map(|v| steve_node_api::NodeId::new(v.trim())) {
         Some(Ok(id)) if svc.is_some() => Some(id),
@@ -364,6 +375,21 @@ pub fn wire_with(cfg: &Arc<Config>, bus: &Bus, vars: Vars) -> Result<Wired, Back
     }
     let (nodes, bind_remote) = remote_nodes(cfg, &db, host.clone(), &vars);
     let fleet = nodes.as_ref().map(|s| s.fleet.clone());
+    let workspaces = workspaces::Workspaces::new(
+        db.clone(),
+        node_host.as_ref().map(|h| workspaces::LocalFace {
+            node: h.node.clone(),
+            runtime: h.runtime.clone(),
+        }),
+        fleet.clone(),
+        workspaces::configured(cfg),
+    );
+    if node_host.is_some() {
+        // the local roots follow projects and knowledge folders, with no restart
+        node_jobs.push(Box::pin(
+            workspaces.clone().follow(bus.tap(&["project", "kb"])),
+        ));
+    }
     let core = steve_core::Core::new(
         steve_core::repo::Db::new(db.clone()),
         Arc::new(core::RoutedRuntime {
@@ -372,6 +398,8 @@ pub fn wire_with(cfg: &Arc<Config>, bus: &Bus, vars: Vars) -> Result<Wired, Back
             fleet: fleet.clone(),
             bind_remote,
             store: db.clone(),
+            host: host.clone(),
+            workspaces: workspaces.clone(),
         }),
         gateway,
         core_cfg,
@@ -446,6 +474,7 @@ pub fn wire_with(cfg: &Arc<Config>, bus: &Bus, vars: Vars) -> Result<Wired, Back
         jobs.push(Box::pin(start_fleet(f.clone(), db.clone())));
     }
     let local_node = node_host.as_ref().map(|h| h.node.clone());
+    let local_runtime = node_host.as_ref().map(|h| h.runtime.clone());
     if let Some(NodeHost { tools, .. }) = node_host {
         tools
             .install(tool_service.clone())
@@ -502,6 +531,8 @@ pub fn wire_with(cfg: &Arc<Config>, bus: &Bus, vars: Vars) -> Result<Wired, Back
         yolo,
         yolo_engine: engine,
         nodes,
+        node: local_runtime,
+        workspaces,
         #[cfg(test)]
         tool_service,
     })

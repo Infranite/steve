@@ -71,6 +71,113 @@ pub struct GitQuery {
     /// Whether to fetch first (a network call on the Node).
     #[serde(default)]
     pub fetch: bool,
+    /// Further reads, answered in [`GitFacts::reads`] in the same order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reads: Vec<GitRead>,
+}
+
+/// A commit range: `from..to`, or everything reachable from `to` when `from` is `None`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RevRange {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    pub to: String,
+}
+
+/// One read-only git question. Each kind is a fixed command on the Node; there is no free argv.
+/// `max` bounds what comes back (bytes of content, or entries of a log).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum GitRead {
+    /// A file at `rev` (`rev:path`), or with no path the commit itself (message, stat and patch).
+    Show {
+        rev: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<RelPath>,
+        max: u32,
+    },
+    /// Commits of `range`, newest first, at most `max`.
+    Log { range: RevRange, max: u32 },
+    /// Stat and patch of `range`, the patch cut at `max` bytes.
+    Diff { range: RevRange, max: u32 },
+    /// Whether `ancestor` is an ancestor of (or equal to) `of`.
+    IsAncestor { ancestor: String, of: String },
+    /// The working tree's changes (what `status --porcelain` lists).
+    Status,
+    /// The tree the working directory would commit as, untracked files included, without
+    /// touching the index (it changes whenever the content does).
+    Fingerprint,
+    /// Whether `rel` is ignored, and whether anything under it is tracked.
+    TrackedIgnored { rel: RelPath },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommitInfo {
+    pub sha: String,
+    pub subject: String,
+    pub author: String,
+    pub time: Timestamp,
+    /// The full message, for a single commit's `Show`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StatusEntry {
+    pub path: RelPath,
+    /// The two porcelain status letters (`" M"`, `"??"`, `"UU"`).
+    pub code: String,
+}
+
+/// The answer to one [`GitRead`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum GitAnswer {
+    /// `Show` with a path. A missing file at that revision is `found: false`.
+    Blob {
+        found: bool,
+        #[serde(with = "crate::blob::hexbytes")]
+        bytes: Vec<u8>,
+        truncated: bool,
+    },
+    /// `Show` without a path.
+    Commit {
+        commit: CommitInfo,
+        stat: String,
+        patch: String,
+        truncated: bool,
+    },
+    Log {
+        commits: Vec<CommitInfo>,
+        truncated: bool,
+    },
+    Diff {
+        stat: String,
+        patch: String,
+        truncated: bool,
+    },
+    IsAncestor {
+        yes: bool,
+    },
+    Status {
+        entries: Vec<StatusEntry>,
+    },
+    Fingerprint {
+        tree: String,
+    },
+    TrackedIgnored {
+        ignored: bool,
+        tracked: bool,
+    },
+}
+
+/// A read with its answer and the commit it was answered at: the resolved `rev` of a `Show`, the
+/// resolved `to` of a range, HEAD for the working-tree reads. A later decision checks it again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitReadFact {
+    pub read: GitRead,
+    pub observed: String,
+    pub answer: GitAnswer,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -101,6 +208,9 @@ pub struct GitFacts {
     pub refs: Vec<(String, Option<String>)>,
     #[serde(default)]
     pub ranges: Vec<RangeFacts>,
+    /// The answers to [`GitQuery::reads`], in order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reads: Vec<GitReadFact>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -109,15 +219,39 @@ pub enum GitAction {
     Rebase {
         onto: String,
     },
+    /// Merges `commit` into HEAD. On a conflict the Node aborts the merge when
+    /// `back_out_on_conflict` (the worktree as before, the answer a `conflict`), or leaves it in
+    /// progress for the session to resolve.
     Merge {
         commit: String,
+        /// The merge commit's message; `None` takes git's default.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+        #[serde(default = "yes")]
+        back_out_on_conflict: bool,
     },
+    /// Pushes the local `branch` (which must be at `expected_local`) to the same branch at `url`.
     /// `expected_remote` is the remote ref's sha the push may replace (`None`: it must not exist).
     Push {
         remote: String,
         branch: String,
         expected_remote: Option<String>,
+        /// The canonical target (`https://github.com/owner/name.git`), pushed to directly: what
+        /// the repository's own remote config says never redirects it.
+        url: String,
+        /// `owner/name` the workspace's `remote` must point at, or the push is refused.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin_must_be: Option<String>,
+        expected_local: String,
+        /// The credential, taken from [`crate::ports::HubSecrets`] for this one push and handed to
+        /// git as an HTTP header ([`SecretDelivery::Header`]); never on argv, never on disk.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        auth: Option<SecretRef>,
     },
+}
+
+fn yes() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -127,12 +261,10 @@ pub struct GitApply {
     pub expected: Revision,
     pub expected_head: String,
     pub action: GitAction,
-    /// A credential the Hub hands over for this one action (a push token), by reference.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub secret: Option<SecretRef>,
 }
 
-/// A secret delivered for one operation over the non-persistent channel; never its bytes here.
+/// A secret delivered for one operation over the non-persistent channel; never its bytes here. The
+/// Node takes the bytes with [`crate::ports::HubSecrets::take`] under the operation's id, once.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SecretRef {
     pub id: String,
@@ -145,9 +277,38 @@ pub struct SecretRef {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SecretDelivery {
-    Env { name: String },
+    Env {
+        name: String,
+    },
     Stdin,
-    File { env: String },
+    File {
+        env: String,
+    },
+    /// An HTTP header for git (`name: <the secret>`), passed through git's environment config
+    /// like `Env`: only for [`GitAction::Push`].
+    Header {
+        name: String,
+    },
+}
+
+/// The bytes of a secret on their way to the one operation that uses them. Never printed: `Debug`
+/// shows its length only.
+#[derive(PartialEq, Eq, Serialize, Deserialize)]
+pub struct SecretBytes(#[serde(with = "crate::blob::hexbytes")] Vec<u8>);
+
+impl SecretBytes {
+    pub fn new(bytes: Vec<u8>) -> Self {
+        SecretBytes(bytes)
+    }
+    pub fn expose(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for SecretBytes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "SecretBytes(<{} bytes>)", self.0.len())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -158,7 +319,11 @@ pub struct ExecSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<RelPath>,
     pub policy: ExecutionPolicy,
+    /// `limits.deadline` is the deadline: past it the whole process group is killed.
     pub limits: Limits,
+    /// Plain environment for the command (never a secret: those go in `secrets`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env: Vec<(String, String)>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub secrets: Vec<SecretRef>,
 }
@@ -179,6 +344,9 @@ pub struct FileInfo {
     pub size: u64,
     /// Changes when the file does (mtime + size, or a hash).
     pub version: Revision,
+    /// Over the scan's `max_file_bytes`: listed, so it is not taken for gone, but not to be read.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub too_big: bool,
 }
 
 /// A file on a Node: inside a workspace, or under an allowed root read as is (a knowledge folder,
@@ -208,10 +376,74 @@ pub struct ScanSpec {
     pub include: Vec<String>,
     #[serde(default)]
     pub exclude: Vec<String>,
+    #[serde(default)]
+    pub limits: ScanLimits,
 }
 
-/// One page of a scan. Only a scan that ends with `complete` may be used to decide a file is gone; a
-/// cut-short one (offline, limits, a refused path) keeps the old index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScanLimits {
+    /// Wanted files beyond this are left out, and the scan is incomplete.
+    pub max_files: u32,
+    /// Bigger files are listed with [`FileInfo::too_big`].
+    pub max_file_bytes: u64,
+}
+
+impl Default for ScanLimits {
+    /// The knowledge folder's limits.
+    fn default() -> Self {
+        ScanLimits {
+            max_files: 20_000,
+            max_file_bytes: 2 * 1024 * 1024,
+        }
+    }
+}
+
+/// Something a scan reports besides its entries. Two kinds, as the knowledge folder's walk has
+/// always had them ([`ScanIssue::hides_files`]): a gap (an unreadable directory or entry, files past
+/// `max_files`, a cut-short scan) may hide files, and makes the scan incomplete; a hold is one
+/// wanted path the scan saw but did not list, with why, and leaves the rest of the scan whole.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ScanIssue {
+    /// Gap: a directory that could not be listed, or an entry whose name or type could not be
+    /// read (so it may be a directory). An entry without a readable name has no path.
+    Unreadable {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<RelPath>,
+    },
+    /// Gap: `count` wanted files past `max_files`.
+    OverLimit { count: u64 },
+    /// Gap: cut short (a restart, a cancel, the deadline).
+    Interrupted,
+    /// Hold: a wanted path that is there but was not listed, and why. A dangling link is neither
+    /// listed nor held: its file is gone.
+    Held { path: RelPath, why: HeldWhy },
+}
+
+/// Why a scan held a path back, and what that means for the file's document.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HeldWhy {
+    /// A link resolving outside the root: not followed, its document fails (as reading it would).
+    Outside,
+    /// A path the Node's rules refuse: its document fails.
+    Denied,
+    /// Its metadata, or its link, could not be read (a loop, a permission): its document stays.
+    Unreadable,
+}
+
+impl ScanIssue {
+    /// A gap: the scan may not show every file that is there.
+    pub fn hides_files(&self) -> bool {
+        !matches!(self, ScanIssue::Held { .. })
+    }
+}
+
+/// One page of a scan, its paths relative to the scanned root ([`RootPath::root`], usable as a
+/// [`FileAddress::Root`]). Only a scan that ends with `complete` may be used to decide a file is gone;
+/// a cut-short one (offline, limits, an unreadable directory) keeps the old index. Pages before the
+/// last one are never complete, and no page with a gap ([`ScanIssue::hides_files`]) is; held paths
+/// leave a scan complete.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScanPage {
     pub scan: OperationId,
@@ -222,5 +454,12 @@ pub struct ScanPage {
     pub next: Option<Cursor>,
     pub complete: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub issues: Vec<String>,
+    pub issues: Vec<ScanIssue>,
+}
+
+impl ScanPage {
+    /// The rule above: `complete` only on the last page and only with no gap.
+    pub fn is_consistent(&self) -> bool {
+        !self.complete || (self.next.is_none() && !self.issues.iter().any(ScanIssue::hides_files))
+    }
 }

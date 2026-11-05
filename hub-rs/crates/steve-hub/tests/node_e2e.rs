@@ -11,6 +11,7 @@
 //!
 //! And on a second home, with a short attempt deadline, a card nobody answers expires; on a
 //! third, an idle Node session goes through two Hub restarts without a resume or a restart notice.
+//! With a short idle limit, an idle Node session's agent exits and the next message resumes it.
 //!
 //! No real host, no real agent, never `~/.steve` or the production port.
 
@@ -171,6 +172,7 @@ fn spawn(h: &Home, node: bool, extra: &[(&str, &str)]) -> Hub {
         .env("STEVE_ADAPTER_CODEX", "/usr/bin/false")
         .env_remove("STEVE_NODE_MODE")
         .env_remove("STEVE_NODE_TURN_LIMIT_MS")
+        .env_remove("STEVE_IDLE_RELEASE_MS")
         .env_remove("STEVE_NO_RESUME")
         .env_remove("STEVE_UPGRADE_ID")
         .env_remove("CLAUDE_CONFIG_DIR")
@@ -230,6 +232,32 @@ async fn serving(h: &Home) {
     })
     .await;
     assert!(ok, "the Hub serves; log:\n{}", hub_log(h));
+}
+
+/// `/healthz`'s `node` block.
+async fn node_health(h: &Home) -> Value {
+    reqwest::Client::new()
+        .get(format!("{}/healthz", h.base()))
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await
+        .expect("healthz")
+        .json::<Value>()
+        .await
+        .expect("healthz json")["node"]
+        .clone()
+}
+
+/// Until `/healthz`'s `node` block satisfies `ok` (within `secs`); the last one seen.
+async fn node_health_until(h: &Home, secs: u64, ok: impl Fn(&Value) -> bool) -> Value {
+    let end = tokio::time::Instant::now() + Duration::from_secs(secs);
+    loop {
+        let v = node_health(h).await;
+        if ok(&v) || tokio::time::Instant::now() >= end {
+            return v;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
 }
 
 fn hub_log(h: &Home) -> String {
@@ -394,6 +422,12 @@ async fn a_node_session_end_to_end() {
     let mut hub = spawn(&h, true, &[]);
     serving(&h).await;
     let c = Client::login(&h).await;
+    let n = node_health_until(&h, 30, |n| n["reconciled"] == true).await;
+    assert_eq!(
+        (&n["enabled"], &n["reconciled"], &n["stopped"]),
+        (&json!(true), &json!(true), &json!(false)),
+        "healthz after boot: {n}"
+    );
 
     // ── a new session binds to the Node; its transcript is steve.v1
     let sid = c.item(&h, "节点验收 @say hello-node-7Q").await;
@@ -524,6 +558,13 @@ async fn a_node_session_end_to_end() {
     );
     tokio::time::sleep(Duration::from_secs(3)).await;
     assert_eq!(h.got("崩溃验收-K2"), 1, "never re-run: {:?}", h.prompts());
+    let n = node_health(&h).await;
+    assert_eq!(
+        (&n["reconciled"], &n["unknown"], &n["parked"]),
+        (&json!(true), &json!(1), &json!(0)),
+        "healthz after the kill: {n}"
+    );
+    assert!(n["sessions"].as_i64() >= Some(1), "{n}");
     hub.kill();
 
     // ── STEVE_NODE_MODE off: the Node-bound session is parked, never handed to the legacy runner
@@ -547,6 +588,14 @@ async fn a_node_session_end_to_end() {
     assert_eq!(h.got("回滚验收-R5"), 0, "no runner got it");
     assert_eq!(h.got("崩溃验收-K2"), 1, "still never re-run");
     assert_eq!(h.spawns(), spawns, "no legacy adapter started for it");
+    let n = node_health(&h).await;
+    assert_eq!(
+        (&n["enabled"], &n["reconciled"], &n["fallbacks"]),
+        (&json!(false), &Value::Null, &json!(0)),
+        "healthz with the Node off: {n}"
+    );
+    assert!(n["parked"].as_i64() >= Some(1), "parked: {n}");
+    assert_eq!(n["unknown"], 1, "still unknown: {n}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -722,5 +771,208 @@ async fn a_node_session_shows_its_status_and_harness_id() {
         until(30, || async { status(&get().await) == "idle" }).await,
         "idle after the cancel: {}",
         get().await
+    );
+}
+
+/// Polls the upgrade drain (`POST`, as `ops/local-release.py` does) until it reports `ready`.
+async fn drained(h: &Home, token: &str, secs: u64) -> Option<Value> {
+    let end = std::time::Instant::now() + Duration::from_secs(secs);
+    while std::time::Instant::now() < end {
+        let d = drain(h, "POST", token).await;
+        if d["ready"] == true {
+            return Some(d);
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    None
+}
+
+/// The upgrade drain waits for Node work (L3, D1): a running turn, and a turn waiting for a
+/// permission answer until it is answered; it seals once they are over, and lifting it still sends
+/// what was queued meanwhile.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_upgrade_drain_waits_for_node_turns() {
+    let h = Home::new();
+    let token = control_token(&h);
+    let _hub = spawn(&h, true, &[("STEVE_TAKEOVER_CONTINUES", "0")]);
+    serving(&h).await;
+    let c = Client::login(&h).await;
+    let sid = c.item(&h, "排空验收 @say drain-node-3D").await;
+    assert!(
+        wait(30, || steve_v1(&h, &sid, "drain-node-3D") > 0).await,
+        "the first turn ran; log:\n{}",
+        hub_log(&h)
+    );
+    assert!(wait(10, || attempts(&h, &sid, "finished") >= 1).await);
+
+    // ── a running turn holds the drain
+    c.say(&sid, "排空验收-运行 @sleep 600000").await;
+    assert!(wait(30, || h.got("排空验收-运行") == 1).await);
+    let d = drain(&h, "POST", &token).await;
+    assert_eq!(d["maintenance"], true, "{d}");
+    assert_eq!(d["ready"], false, "not sealed under a running turn: {d}");
+    assert_eq!(d["node"], 1, "{d}");
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let d = drain(&h, "POST", &token).await;
+    assert_eq!((&d["ready"], &d["node"]), (&json!(false), &json!(1)), "{d}");
+    let (st, v) = c
+        .call("POST", &format!("/api/sessions/{sid}/cancel"), None)
+        .await;
+    assert_eq!((st, &v["ok"]), (200, &json!(true)), "cancel: {v}");
+    let d = drained(&h, &token, 30).await;
+    assert!(
+        d.is_some(),
+        "sealed once the turn is over; log:\n{}",
+        hub_log(&h)
+    );
+    assert_eq!(d.expect("drain")["node"], 0);
+    let d = drain(&h, "DELETE", &token).await;
+    assert_eq!(d["maintenance"], false, "{d}");
+
+    // ── a turn waiting for a permission answer holds it too, until it is answered
+    c.say(&sid, "@perm Bash").await;
+    let mut card = None;
+    assert!(
+        wait(30, || {
+            card = open_card(&h, &sid);
+            card.is_some()
+        })
+        .await,
+        "a permission card; log:\n{}",
+        hub_log(&h)
+    );
+    let card = card.expect("card");
+    let d = drain(&h, "POST", &token).await;
+    assert_eq!(
+        (&d["ready"], &d["node"]),
+        (&json!(false), &json!(1)),
+        "a permission wait holds the drain: {d}"
+    );
+    let r = c.say(&sid, "排空验收-排队 @say drained-done").await;
+    assert_eq!(r["result"], "queued", "{r}");
+    let (st, v) = c
+        .call(
+            "POST",
+            &format!("/api/decisions/{card}"),
+            Some(json!({"choice": "allow_once"})),
+        )
+        .await;
+    assert_eq!(st, 200, "answer: {v}");
+    assert!(
+        wait(30, || steve_v1(&h, &sid, "perm:selected:") > 0).await,
+        "the agent got the answer under the drain; log:\n{}",
+        hub_log(&h)
+    );
+    assert!(
+        drained(&h, &token, 30).await.is_some(),
+        "sealed once the answered turn is over; log:\n{}",
+        hub_log(&h)
+    );
+    assert_eq!(h.got("排空验收-排队"), 0, "not sent while drained");
+
+    // ── lifting the drain sends what waited
+    let d = drain(&h, "DELETE", &token).await;
+    assert_eq!(d["maintenance"], false, "{d}");
+    assert!(
+        wait(30, || h.got("排空验收-排队") == 1).await,
+        "sent once the drain is lifted; log:\n{}",
+        hub_log(&h)
+    );
+    assert!(wait(30, || steve_v1(&h, &sid, "drained-done") > 0).await);
+}
+
+/// A4: past STEVE_IDLE_RELEASE_MS an idle Node session's agent is let go (its process exits),
+/// and the next message opens it again on the same conversation (`session/load`).
+#[tokio::test(flavor = "multi_thread")]
+async fn an_idle_node_session_is_let_go_and_the_next_message_resumes_it() {
+    let h = Home::new();
+    let env = [
+        ("STEVE_TAKEOVER_CONTINUES", "0"),
+        ("STEVE_IDLE_RELEASE_MS", "1500"),
+    ];
+    let _hub = spawn(&h, true, &env);
+    serving(&h).await;
+    let c = Client::login(&h).await;
+    let sid = c.item(&h, "空闲验收 @say idle-release-4A").await;
+    assert!(
+        wait(30, || attempts(&h, &sid, "finished") >= 1).await,
+        "the first turn ran; log:\n{}",
+        hub_log(&h)
+    );
+    let pid = h
+        .lines()
+        .iter()
+        .find_map(|m| m["spawn"]["pid"].as_i64())
+        .expect("the agent's pid") as i32;
+    let alive = |pid: i32| unsafe { libc::kill(pid, 0) } == 0;
+    assert!(
+        wait(30, || !alive(pid)).await,
+        "the idle agent exits; log:\n{}",
+        hub_log(&h)
+    );
+    assert_eq!(
+        h.count(
+            "SELECT COUNT(*) FROM node_commands WHERE method='release_session' AND json_extract(request,'$.body')=?",
+            &sid
+        ),
+        1,
+        "one release"
+    );
+    let first = h
+        .lines()
+        .iter()
+        .find(|m| m["method"] == "session/prompt")
+        .and_then(|m| m["params"]["sessionId"].as_str().map(str::to_string))
+        .expect("the first conversation");
+
+    c.say(&sid, "空闲验收-续 @say idle-again-4A").await;
+    assert!(
+        wait(30, || attempts(&h, &sid, "finished") >= 2).await,
+        "the next message ran; log:\n{}",
+        hub_log(&h)
+    );
+    assert_eq!(h.got("空闲验收-续"), 1);
+    assert_eq!(h.spawns(), 2, "a new agent");
+    assert!(
+        h.lines()
+            .iter()
+            .any(|m| m["method"] == "session/load" && m["params"]["sessionId"] == first.as_str()),
+        "the same conversation, resumed"
+    );
+}
+
+/// A new session the Node path cannot express (its bot's permission mode is one the Node has no
+/// mode for, `dontAsk`) stays on the legacy runner with the Node on, and healthz counts it: a fallback since boot and a legacy
+/// session that could still run.
+#[tokio::test(flavor = "multi_thread")]
+async fn healthz_counts_a_new_session_left_on_the_legacy_runner() {
+    let h = Home::new();
+    let _hub = spawn(&h, true, &[]);
+    serving(&h).await;
+    let c = Client::login(&h).await;
+    let before = node_health_until(&h, 30, |n| n["reconciled"] == true).await;
+    assert_eq!(before["fallbacks"], 0, "{before}");
+    let db = rusqlite::Connection::open(h.steve().join("data/steve.sqlite3")).expect("db");
+    db.busy_timeout(Duration::from_secs(5)).expect("timeout");
+    db.execute(
+        "UPDATE bots SET perm_mode='dontAsk' WHERE harness='claude-code'",
+        [],
+    )
+    .expect("dontAsk");
+    let sid = c.item(&h, "回退验收 @say fallback-legacy-3F").await;
+    let n = node_health_until(&h, 30, |n| n["fallbacks"] == 1).await;
+    assert_eq!(n["fallbacks"], 1, "{n}");
+    assert_eq!(
+        h.count(
+            "SELECT COUNT(*) FROM runtime_sessions WHERE session_id=?",
+            &sid
+        ),
+        0,
+        "not bound"
+    );
+    assert_eq!(
+        n["legacy"]["sessions"].as_i64(),
+        before["legacy"]["sessions"].as_i64().map(|x| x + 1),
+        "{before} -> {n}"
     );
 }

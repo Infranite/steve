@@ -210,6 +210,28 @@ fn busy_sessions_and_running_processes_keep_everything() {
     assert!(res.freed.is_empty() && res.removed.is_empty(), "{res:?}");
 }
 
+/// B4: a session whose harness is still being let go (a Node's release on its way) keeps the
+/// worktree: the tidy says it cannot decide yet (WorkTidy asks again), and tidies once it is gone.
+#[test]
+fn a_release_on_its_way_keeps_the_worktree_until_it_is_done() {
+    let k = Kit::new();
+    let (r, p) = project(&k);
+    let (done, branch, wt) = item_with_caches(&k, &r, &p, "done");
+    g(&r, &["merge", "-q", "--ff-only", &branch]);
+    let s = k.session(&done, "ended");
+    k.rt.st()
+        .release_answers
+        .insert(s.clone(), crate::Released::Pending("op_release_1".into()));
+    assert!(
+        !k.core.tx().tidy_branch_now(&done).unwrap(),
+        "asked again later"
+    );
+    assert!(wt.join("x.txt").exists(), "the worktree is kept");
+    k.rt.st().release_answers.remove(&s);
+    assert!(k.core.tx().tidy_branch_now(&done).unwrap());
+    assert!(!wt.exists(), "tidied once nothing runs in it");
+}
+
 #[test]
 fn an_interrupted_pass_is_finished_by_the_next() {
     let k = Kit::new();

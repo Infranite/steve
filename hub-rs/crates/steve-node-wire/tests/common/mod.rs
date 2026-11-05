@@ -31,6 +31,15 @@ pub fn opts(side: &'static str) -> ConnOptions {
 
 /// Joins `node` to a fresh Hub side at `generation`.
 pub fn wire(node: Arc<dyn Node>, generation: u64) -> Wired {
+    wire_with(node, generation, None)
+}
+
+/// As [`wire`], the Hub side answering `secret.take` from `secrets`.
+pub fn wire_with(
+    node: Arc<dyn Node>,
+    generation: u64,
+    secrets: Option<Arc<dyn HubSecrets>>,
+) -> Wired {
     let (h, n): (End, End) = pair();
     let sink = Arc::new(RecordingSink::default());
     let tools = Arc::new(StubTools::default());
@@ -42,6 +51,7 @@ pub fn wire(node: Arc<dyn Node>, generation: u64) -> Wired {
             sink: sink.clone(),
             tools: tools.clone(),
             files: None,
+            secrets,
         }),
         opts("h"),
     );

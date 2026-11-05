@@ -49,6 +49,8 @@ pub struct Inner {
     pub modules: Option<steve_modules::Modules>,
     /// Remote Nodes (`STEVE_NODE_LISTEN=1`): pairing, the `/node/ws` listener, their coordinators.
     pub nodes: Option<Arc<crate::nodes::NodeService>>,
+    /// The local Node's coordinator (`STEVE_NODE_MODE=local`), for `/healthz`.
+    pub node: Option<Arc<crate::wire::node_runtime::NodeRuntime>>,
 }
 
 impl std::ops::Deref for AppState {
@@ -77,6 +79,7 @@ impl AppState {
             state_cache: Default::default(),
             modules: None,
             nodes: None,
+            node: None,
         }))
     }
 
@@ -96,6 +99,17 @@ impl AppState {
         match Arc::try_unwrap(self.0) {
             Ok(mut inner) => {
                 inner.nodes = nodes;
+                AppState(Arc::new(inner))
+            }
+            Err(shared) => AppState(shared),
+        }
+    }
+
+    /// The same state with the local Node's coordinator attached (as wired).
+    pub fn with_node(self, node: Option<Arc<crate::wire::node_runtime::NodeRuntime>>) -> Self {
+        match Arc::try_unwrap(self.0) {
+            Ok(mut inner) => {
+                inner.node = node;
                 AppState(Arc::new(inner))
             }
             Err(shared) => AppState(shared),

@@ -20,6 +20,7 @@ use steve_store::StoreError;
 
 use super::guard::{GuardedFiles, GuardedSink, GuardedTools, LinkCtx};
 use super::{NodeService, Peer, now, peer_allowed};
+use crate::wire::node_runtime::{catch_up_streams, read_snapshot};
 
 pub async fn upgrade(
     State(svc): State<Arc<NodeService>>,
@@ -164,6 +165,8 @@ pub async fn serve(svc: Arc<NodeService>, mut sink: FrameSink, mut stream: Frame
             sink: Arc::new(GuardedSink(ctx.clone())),
             tools: Arc::new(GuardedTools(ctx.clone())),
             files: Some(Arc::new(GuardedFiles(ctx.clone()))),
+            // remote Nodes get no secrets yet (pushes and vault execs stay on the Hub)
+            secrets: None,
         },
         ctx,
     });
@@ -176,6 +179,8 @@ pub async fn serve(svc: Arc<NodeService>, mut sink: FrameSink, mut stream: Frame
             heartbeat: Duration::from_secs(10),
             dead_after: Duration::from_secs(30),
             side: "h",
+            // what the Node said it speaks: requests newer than it are refused, not sent
+            peer: hello.proto,
         },
     );
     let previous = admit.previous.lock().unwrap().take().flatten();
@@ -184,6 +189,7 @@ pub async fn serve(svc: Arc<NodeService>, mut sink: FrameSink, mut stream: Frame
     let Some(paused) = install_link(&svc, &node, conn.clone(), restarted).await else {
         return;
     };
+    svc.fleet.linked(&node, hello.proto);
     if paused != admitted.paused {
         // paused or resumed since the welcome went out
         conn.notify("paused", serde_json::json!({ "paused": paused }));
@@ -192,7 +198,7 @@ pub async fn serve(svc: Arc<NodeService>, mut sink: FrameSink, mut stream: Frame
     if remote.is_reconciling() {
         match svc.fleet.runtime_for(node.as_str()) {
             Some(rt) => tokio::spawn(reconcile_again(rt, remote.clone(), conn.clone())),
-            None => tokio::spawn(catch_up(remote.clone(), conn.clone())),
+            None => tokio::spawn(catch_up(svc.store.clone(), remote.clone(), conn.clone())),
         };
     }
     let (code, reason) = conn.closed().await;
@@ -296,36 +302,37 @@ async fn reconcile_again(
 }
 
 /// The catch-up after a Node restart when no coordinator runs for it (nothing is bound to it, or
-/// a fleet without the Hub's domain): read the Node's whole snapshot once over this link before new work goes
-/// to it; the journal replays what the Hub has not applied on its own. A failed page is retried
-/// with backoff while this link lives (a redial of the same incarnation is no longer a restart,
-/// so giving up would leave the Node refusing new work for good); a link that is gone or replaced
-/// clears nothing.
-async fn catch_up(remote: Arc<steve_node_wire::RemoteNode>, conn: Arc<Conn>) {
+/// a fleet without the Hub's domain): read the Node's whole snapshot once over this link before new
+/// work goes to it, and compare its stream heads with the Hub's inbox (the coordinator's own
+/// [`catch_up_streams`]: what cannot be reconciled is faulted, what the Hub holds and the Node did
+/// not hear acknowledged is acknowledged). With no coordinator to take them, events the Hub lacks
+/// stay in the Node's journal until one starts and replays them. A failure is retried with backoff
+/// while this link lives (a redial of the same incarnation is no longer a restart, so giving up
+/// would leave the Node refusing new work for good); a link that is gone or replaced clears
+/// nothing.
+async fn catch_up(
+    store: steve_store::Store,
+    remote: Arc<steve_node_wire::RemoteNode>,
+    conn: Arc<Conn>,
+) {
     let mut backoff = Duration::from_millis(200);
-    'again: loop {
-        let mut page = PageRequest {
-            cursor: None,
-            limit: 100,
+    loop {
+        if conn.is_closed() || remote.generation() != Some(conn.generation()) {
+            return;
+        }
+        let done = match read_snapshot(&*remote, 100).await {
+            Ok(s) => catch_up_streams(&store, &*remote, &s.heads, None).await,
+            Err(e) => Err(e),
         };
-        loop {
-            if conn.is_closed() || remote.generation() != Some(conn.generation()) {
-                return;
-            }
-            match remote.snapshot(page.clone()).await {
-                Ok(s) => match s.next {
-                    Some(c) => page.cursor = Some(c),
-                    None => break 'again,
-                },
-                Err(e) => {
-                    tracing::warn!("node catch-up: {e}");
-                    tokio::select! {
-                        _ = tokio::time::sleep(backoff) => {}
-                        _ = conn.closed() => return,
-                    }
-                    backoff = (backoff * 2).min(Duration::from_secs(30));
-                    continue 'again;
+        match done {
+            Ok(_) => break,
+            Err(e) => {
+                tracing::warn!("node catch-up: {e}");
+                tokio::select! {
+                    _ = tokio::time::sleep(backoff) => {}
+                    _ = conn.closed() => return,
                 }
+                backoff = (backoff * 2).min(Duration::from_secs(30));
             }
         }
     }

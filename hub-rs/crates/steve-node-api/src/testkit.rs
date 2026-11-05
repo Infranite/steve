@@ -8,7 +8,10 @@
 //! - a permission answer applies only to the live request it was given for, before it expires, with
 //!   one of the offered choices;
 //! - a workspace in use (running, waiting or unknown) is never tidied; another Node's ids are refused;
-//! - events are numbered per stream, kept until acknowledged, replayable, never renumbered.
+//! - events are numbered per stream, kept until acknowledged, replayable, never renumbered;
+//! - a readonly root is listed, read and scanned, never prepared, run in or changed by git;
+//! - a scan is complete only on its last page and only with no issue; its pages share a manifest;
+//! - a secret is taken once from the Hub, under the operation that uses it, and masked in output.
 //!
 //! What it does not simulate it refuses (`unsupported`) instead of pretending. Tests drive what the
 //! harness would do ([`FakeNode::emit`], [`FakeNode::finish`], [`FakeNode::ask_permission`]) and can
@@ -47,6 +50,8 @@ pub enum Point {
     AfterCommit,
     /// The Hub committed the batch, its ack not applied yet (events still kept).
     BeforeAck,
+    /// The last page of a snapshot was read (its heads are those of that moment).
+    AfterSnapshot,
 }
 
 type Hook = Arc<dyn Fn(Point) + Send + Sync>;
@@ -57,6 +62,8 @@ struct Accepted {
     receipt: Receipt,
     execution: Option<ExecutionRef>,
     workspace: Option<WorkspaceRef>,
+    /// The session a session control (open, configure, release) is for.
+    session: Option<SessionId>,
     cancel_requested: bool,
 }
 
@@ -79,6 +86,19 @@ struct Workspace {
     spec: Digest,
     view: WorkspaceView,
     incarnation: u64,
+    /// The allowed root it lives under (none for a scratch directory).
+    root: Option<RootId>,
+}
+
+struct FakeFile {
+    bytes: Vec<u8>,
+    version: Revision,
+}
+
+struct FakeScan {
+    manifest: Revision,
+    entries: Vec<FileInfo>,
+    issues: Vec<ScanIssue>,
 }
 
 #[derive(Default)]
@@ -91,6 +111,8 @@ struct State {
     active: HashMap<SessionId, ExecutionRef>,
     /// running jobs
     jobs: BTreeSet<AttemptId>,
+    /// every job started, by attempt (kept after it ended), and its draft so far
+    job_specs: HashMap<AttemptId, (JobSpec, String)>,
     sessions: HashMap<SessionId, Session>,
     waiting: HashMap<PermissionId, PermissionRequest>,
     /// answered permissions: id → the resolution that was applied
@@ -114,6 +136,33 @@ struct State {
     refused: HashMap<&'static str, ErrorCode>,
     /// What the next commands of a method do instead of the normal answer, in order.
     scripted: HashMap<&'static str, std::collections::VecDeque<Scripted>>,
+    /// The most sessions open (not released) in one workspace at once, by workspace.
+    crowded: HashMap<WorkspaceId, usize>,
+    /// The allowed roots. With none set, preparing takes any root (tests that do not care);
+    /// files and scans always need one.
+    roots: Vec<RootInfo>,
+    features: Vec<String>,
+    /// The files under the roots, as on disk.
+    files: BTreeMap<(RootId, RelPath), FakeFile>,
+    /// Issues every scan of a root reports (an unreadable directory, a held link).
+    scan_issues: HashMap<RootId, Vec<ScanIssue>>,
+    scans: HashMap<OperationId, FakeScan>,
+    /// What git says in a workspace, as the test scripted it.
+    git: HashMap<WorkspaceId, GitFacts>,
+    /// What the next execs print, in order (then: exit 0, no output).
+    exec_answers: std::collections::VecDeque<ExecResult>,
+    history: Vec<(HistoryEntry, HistoryLocation)>,
+}
+
+/// What the inbox makes of a command before it is decided.
+#[allow(clippy::large_enum_variant)]
+enum Admitted {
+    /// Seen before: its receipt answers.
+    Resend(Receipt),
+    New {
+        drop_reply: bool,
+        unknown: bool,
+    },
 }
 
 /// What [`FakeNode::script_once`] makes one command do.
@@ -131,6 +180,7 @@ pub struct FakeNode {
     node: NodeId,
     st: Mutex<State>,
     sink: Mutex<Option<Arc<dyn EventSink>>>,
+    secrets: Mutex<Option<Arc<dyn HubSecrets>>>,
     hook: Mutex<Option<Hook>>,
 }
 
@@ -139,6 +189,7 @@ struct Decided {
     state: Observed,
     execution: Option<ExecutionRef>,
     workspace: Option<WorkspaceRef>,
+    session: Option<SessionId>,
     events: Vec<(Subject, EventBody)>,
 }
 
@@ -152,6 +203,7 @@ impl Decided {
             },
             execution: None,
             workspace: None,
+            session: None,
             events: vec![],
         }
     }
@@ -168,6 +220,7 @@ impl FakeNode {
                 ..Default::default()
             }),
             sink: Mutex::new(None),
+            secrets: Mutex::new(None),
             hook: Mutex::new(None),
         })
     }
@@ -186,6 +239,64 @@ impl FakeNode {
     /// Where events go (the Hub under test). Without one they are only kept for `replay`.
     pub fn connect(&self, sink: Arc<dyn EventSink>) {
         *self.sink.lock().unwrap() = Some(sink);
+    }
+
+    /// Where secrets come from (the Hub under test). Without one a command that needs a secret is
+    /// `unsupported`.
+    pub fn connect_secrets(&self, secrets: Arc<dyn HubSecrets>) {
+        *self.secrets.lock().unwrap() = Some(secrets);
+    }
+
+    /// The allowed roots (what `probe` reports and what files, scans and prepares check).
+    pub fn set_roots(&self, roots: Vec<RootInfo>) {
+        self.st().roots = roots;
+    }
+
+    pub fn set_features(&self, features: Vec<String>) {
+        self.st().features = features;
+    }
+
+    /// Writes a file under a root (a new version every time).
+    pub fn put_file(&self, root: &str, rel: &str, bytes: &[u8]) {
+        let mut st = self.st();
+        let version = Self::revision(&mut st);
+        st.files.insert(
+            (id(root), RelPath::new(rel).expect("valid test path")),
+            FakeFile {
+                bytes: bytes.to_vec(),
+                version,
+            },
+        );
+    }
+
+    pub fn remove_file(&self, root: &str, rel: &str) {
+        let rel = RelPath::new(rel).expect("valid test path");
+        self.st().files.remove(&(id(root), rel));
+    }
+
+    /// Every later scan of `root` reports `issue`.
+    pub fn scan_issue(&self, root: &str, issue: ScanIssue) {
+        self.st()
+            .scan_issues
+            .entry(id(root))
+            .or_default()
+            .push(issue);
+    }
+
+    /// What git says in `w` from now on (`git_facts` answers it, `git_apply` checks against it).
+    /// Reads are answered from `facts.reads` by their request; any other read is `unsupported`.
+    pub fn script_git(&self, w: &WorkspaceRef, facts: GitFacts) {
+        self.st().git.insert(w.id.clone(), facts);
+    }
+
+    /// What the next exec prints and exits with (before secrets are masked).
+    pub fn answer_exec(&self, r: ExecResult) {
+        self.st().exec_answers.push_back(r);
+    }
+
+    /// A harness history entry the Node lists, and where it is.
+    pub fn put_history(&self, entry: HistoryEntry, location: HistoryLocation) {
+        self.st().history.push((entry, location));
     }
 
     pub fn set_hook(&self, hook: impl Fn(Point) + Send + Sync + 'static) {
@@ -237,8 +348,30 @@ impl FakeNode {
             refusals: old.refusals,
             refused: old.refused,
             scripted: old.scripted,
+            // the machine's own: roots, files and harness history outlive the journal
+            roots: old.roots,
+            features: old.features,
+            files: old.files,
+            scan_issues: old.scan_issues,
+            history: old.history,
             ..Default::default()
         };
+    }
+
+    /// As a journal restored from an older copy that kept its epoch: the last event of the session
+    /// `session`'s stream is forgotten, so the next one there takes its position (the Hub already
+    /// holds another event at it) under a new id.
+    pub fn rewind(&self, session: &str) {
+        let stream = Self::stream_of(&Subject::Session {
+            session: id(session),
+        });
+        let mut st = self.st();
+        if let Some(s) = st.streams.get_mut(&stream) {
+            s.produced = s.produced.saturating_sub(1);
+            s.acknowledged = s.acknowledged.min(s.produced);
+            let last = s.produced;
+            s.kept.retain(|e| e.cursor.seq <= last);
+        }
     }
 
     /// Limit concurrent sessions and jobs (unlimited by default).
@@ -257,6 +390,12 @@ impl FakeNode {
     /// The next `method` command (after those scripted before it) does `s`.
     pub fn script_once(&self, method: &'static str, s: Scripted) {
         self.st().scripted.entry(method).or_default().push_back(s);
+    }
+
+    /// The most sessions that were ever open at once in one workspace (two harnesses in one
+    /// worktree when above 1).
+    pub fn most_open_in_a_workspace(&self) -> usize {
+        self.st().crowded.values().copied().max().unwrap_or(0)
     }
 
     /// Accepted commands in order, by method.
@@ -294,24 +433,54 @@ impl FakeNode {
         self.at(Point::BeforeAccept(method));
         c.check_window()?;
         let digest = c.digest(method)?;
-        let mut drop_reply = false;
+        let (receipt, events, drop_reply) = {
+            let mut st = self.st();
+            let (drop_reply, unknown) = match Self::admit(&mut st, method, c, &digest)? {
+                Admitted::Resend(r) => return Ok(r),
+                Admitted::New {
+                    drop_reply,
+                    unknown,
+                } => (drop_reply, unknown),
+            };
+            let d = decide(&mut st)?;
+            let (receipt, events) = Self::record_new(&mut st, method, c, digest, d, unknown);
+            (receipt, events, drop_reply)
+        };
+        self.finish_accept(method, c, receipt, events, drop_reply)
+            .await
+    }
+
+    /// [`Self::accept`] for a command carrying secrets. Every refusal runs first (the inbox, the
+    /// scripted refusals, the window, then `check`); only a command known to be new and accepted
+    /// takes its secrets, so a refused one leaves them with the Hub for its resend. `check` runs
+    /// again with `decide` once the secrets are in, under the lock that records the command.
+    async fn accept_taking<T: serde::Serialize>(
+        &self,
+        method: &'static str,
+        c: &Command<T>,
+        refs: &[SecretRef],
+        check: impl Fn(&State) -> ApiResult<()>,
+        decide: impl FnOnce(&mut State, &[SecretBytes]) -> ApiResult<Decided>,
+    ) -> ApiResult<Receipt> {
+        self.at(Point::BeforeAccept(method));
+        c.check_window()?;
+        let digest = c.digest(method)?;
+        let (drop_reply, unknown) = {
+            let mut st = self.st();
+            let new = match Self::admit(&mut st, method, c, &digest)? {
+                Admitted::Resend(r) => return Ok(r),
+                Admitted::New {
+                    drop_reply,
+                    unknown,
+                } => (drop_reply, unknown),
+            };
+            check(&st)?;
+            new
+        };
+        let secrets = self.take_secrets(&c.id, refs).await?;
         let (receipt, events) = {
             let mut st = self.st();
-            if let Some(code) = st.refused.get(method) {
-                return Err(ApiError::new(*code, "refused by the test").on(&c.id));
-            }
-            let script = if st.inbox.contains_key(&c.id) {
-                None
-            } else {
-                st.scripted.get_mut(method).and_then(|q| q.pop_front())
-            };
-            let mut unknown = false;
-            match script {
-                Some(Scripted::Refuse(e)) => return Err(e),
-                Some(Scripted::DropReply) => drop_reply = true,
-                Some(Scripted::Unknown) => unknown = true,
-                None => {}
-            }
+            // the same command sent twice at once: the first one recorded answers both
             if let Some(a) = st.inbox.get(&c.id) {
                 return if a.digest == digest && a.method == method {
                     Ok(a.receipt.clone())
@@ -322,42 +491,104 @@ impl FakeNode {
                     )
                 };
             }
-            if st.now > c.accept_before.0 {
-                return Err(ApiError::new(ErrorCode::Stale, "past accept_before").on(&c.id));
-            }
-            if let Some(i) = st.refusals.iter().position(|(m, _)| *m == method) {
-                return Err(st.refusals.remove(i).1.on(&c.id));
-            }
-            let mut d = decide(&mut st)?;
-            if unknown {
-                d.state = Observed::Unknown {
-                    reason: "scripted by the test".into(),
-                };
-                d.events = vec![];
-            }
-            let receipt = Receipt {
-                operation: c.id.clone(),
-                state: d.state,
-            };
-            st.inbox.insert(
-                c.id.clone(),
-                Accepted {
-                    method,
-                    digest,
-                    receipt: receipt.clone(),
-                    execution: d.execution,
-                    workspace: d.workspace,
-                    cancel_requested: false,
-                },
-            );
-            st.log.push((method, c.id.clone()));
-            let events: Vec<NodeEvent> = d
-                .events
-                .into_iter()
-                .map(|(s, b)| Self::record(&mut st, s, b))
-                .collect();
-            (receipt, events)
+            check(&st)?;
+            let d = decide(&mut st, &secrets)?;
+            Self::record_new(&mut st, method, c, digest, d, unknown)
         };
+        self.finish_accept(method, c, receipt, events, drop_reply)
+            .await
+    }
+
+    /// The checks before a command is decided: the test's refusals, a known id (its receipt or a
+    /// conflict), the window.
+    fn admit<T>(
+        st: &mut State,
+        method: &'static str,
+        c: &Command<T>,
+        digest: &Digest,
+    ) -> ApiResult<Admitted> {
+        if let Some(code) = st.refused.get(method) {
+            return Err(ApiError::new(*code, "refused by the test").on(&c.id));
+        }
+        let script = if st.inbox.contains_key(&c.id) {
+            None
+        } else {
+            st.scripted.get_mut(method).and_then(|q| q.pop_front())
+        };
+        let (mut drop_reply, mut unknown) = (false, false);
+        match script {
+            Some(Scripted::Refuse(e)) => return Err(e),
+            Some(Scripted::DropReply) => drop_reply = true,
+            Some(Scripted::Unknown) => unknown = true,
+            None => {}
+        }
+        if let Some(a) = st.inbox.get(&c.id) {
+            return if a.digest == *digest && a.method == method {
+                Ok(Admitted::Resend(a.receipt.clone()))
+            } else {
+                Err(ApiError::new(ErrorCode::Conflict, "same operation, other content").on(&c.id))
+            };
+        }
+        if st.now > c.accept_before.0 {
+            return Err(ApiError::new(ErrorCode::Stale, "past accept_before").on(&c.id));
+        }
+        if let Some(i) = st.refusals.iter().position(|(m, _)| *m == method) {
+            return Err(st.refusals.remove(i).1.on(&c.id));
+        }
+        Ok(Admitted::New {
+            drop_reply,
+            unknown,
+        })
+    }
+
+    /// Records a new command as decided and numbers its events.
+    fn record_new<T>(
+        st: &mut State,
+        method: &'static str,
+        c: &Command<T>,
+        digest: Digest,
+        mut d: Decided,
+        unknown: bool,
+    ) -> (Receipt, Vec<NodeEvent>) {
+        if unknown {
+            d.state = Observed::Unknown {
+                reason: "scripted by the test".into(),
+            };
+            d.events = vec![];
+        }
+        let receipt = Receipt {
+            operation: c.id.clone(),
+            state: d.state,
+        };
+        st.inbox.insert(
+            c.id.clone(),
+            Accepted {
+                method,
+                digest,
+                receipt: receipt.clone(),
+                execution: d.execution,
+                workspace: d.workspace,
+                session: d.session,
+                cancel_requested: false,
+            },
+        );
+        st.log.push((method, c.id.clone()));
+        let events: Vec<NodeEvent> = d
+            .events
+            .into_iter()
+            .map(|(s, b)| Self::record(st, s, b))
+            .collect();
+        (receipt, events)
+    }
+
+    async fn finish_accept<T>(
+        &self,
+        method: &'static str,
+        c: &Command<T>,
+        receipt: Receipt,
+        events: Vec<NodeEvent>,
+        drop_reply: bool,
+    ) -> ApiResult<Receipt> {
         self.at(Point::AfterAccept(method));
         // a Hub that cannot take the events now gets them on replay: the command stays accepted
         self.deliver(events).await;
@@ -547,6 +778,14 @@ impl FakeNode {
     /// The attempt ends. Its receipt becomes final and stays so: the same end again is a no-op, a
     /// different one a conflict. Only this attempt frees its session.
     pub async fn finish(&self, exec: &ExecutionRef, completion: Completion) -> ApiResult<()> {
+        if let Some(r) = &completion.job
+            && !r.end.fits(completion.outcome)
+        {
+            return Err(ApiError::new(
+                ErrorCode::Invalid,
+                "the job's end contradicts its outcome",
+            ));
+        }
         let evs = {
             let mut st = self.st();
             let op = match st.attempts.get(exec.attempt()) {
@@ -636,6 +875,94 @@ impl FakeNode {
             };
         }
         Ok(())
+    }
+
+    /// The job an attempt was started with (kept after it ended).
+    pub fn job_spec(&self, attempt: &AttemptId) -> Option<JobSpec> {
+        self.st().job_specs.get(attempt).map(|(s, _)| s.clone())
+    }
+
+    /// A job's harness starts a new message (it replaces the draft so far) and writes it in `deltas`.
+    pub async fn draft(
+        &self,
+        exec: &ExecutionRef,
+        message: &str,
+        deltas: &[&str],
+    ) -> ApiResult<()> {
+        let subject = Subject::Execution(exec.clone());
+        let started = EventBody::MessageStarted {
+            message: message.into(),
+            block: "b0".into(),
+            role: Role::Assistant,
+        };
+        self.emit(subject.clone(), started).await?;
+        let mut offset = 0;
+        for d in deltas {
+            let delta = EventBody::TextDelta {
+                message: message.into(),
+                block: "b0".into(),
+                utf8_offset: offset,
+                text: (*d).into(),
+            };
+            self.emit(subject.clone(), delta).await?;
+            offset += d.len() as u64;
+        }
+        if let Some((_, text)) = self.st().job_specs.get_mut(exec.attempt()) {
+            *text = deltas.concat();
+        }
+        Ok(())
+    }
+
+    /// Ends the running jobs a Node would end by itself now, keeping their draft as the answer: a
+    /// requested cancel as cancelled (research: stopped), one past its deadline as timed out
+    /// (research: the time budget). Unknown ones are left alone. Returns those it ended.
+    pub async fn settle_jobs(&self) -> ApiResult<Vec<ExecutionRef>> {
+        let due: Vec<(ExecutionRef, Completion)> = {
+            let st = self.st();
+            st.jobs
+                .iter()
+                .filter_map(|attempt| {
+                    let (exec, op) = st.attempts.get(attempt)?;
+                    let a = st.inbox.get(op)?;
+                    let (spec, text) = st.job_specs.get(attempt)?;
+                    if matches!(a.receipt.state, Observed::Unknown { .. }) {
+                        return None;
+                    }
+                    let (outcome, stop, error, end) = if a.cancel_requested {
+                        (Outcome::Cancelled, "cancelled", None, JobEnd::Stopped)
+                    } else if spec.run.limits.deadline.0 <= st.now {
+                        let e = ApiError::new(ErrorCode::Expired, "deadline passed");
+                        let end = JobEnd::Budget {
+                            hit: BudgetHit::Time,
+                        };
+                        (Outcome::TimedOut, "timeout", Some(e), end)
+                    } else {
+                        return None;
+                    };
+                    let report = matches!(spec.work, JobWork::Research(_)).then_some(JobReport {
+                        end,
+                        turns: 0,
+                        files_read: vec![],
+                        sandboxed: false,
+                    });
+                    let completion = Completion {
+                        outcome,
+                        stop_reason: stop.into(),
+                        error,
+                        result: build::text(text),
+                        continuation: None,
+                        transient: false,
+                        acted: false,
+                        job: report,
+                    };
+                    Some((exec.clone(), completion))
+                })
+                .collect()
+        };
+        for (exec, completion) in &due {
+            self.finish(exec, completion.clone()).await?;
+        }
+        Ok(due.into_iter().map(|(e, _)| e).collect())
     }
 
     fn next(st: &mut State) -> u64 {
@@ -729,6 +1056,59 @@ impl FakeNode {
         Ok(())
     }
 
+    fn root_access(st: &State, root: &RootId) -> ApiResult<RootAccess> {
+        st.roots
+            .iter()
+            .find(|r| r.id == *root)
+            .map(|r| r.access)
+            .ok_or_else(|| ApiError::new(ErrorCode::Denied, "not an allowed root"))
+    }
+
+    /// A workspace commands and git may change: it exists and its root (as it is now) is writable.
+    fn writable(st: &State, w: &WorkspaceRef) -> ApiResult<()> {
+        let Some(ws) = st.workspaces.get(&w.id) else {
+            return Err(ApiError::new(ErrorCode::Invalid, "no such workspace"));
+        };
+        if let Some(r) = &ws.root
+            && Self::root_access(st, r)? == RootAccess::ReadOnly
+        {
+            return Err(ApiError::new(ErrorCode::Denied, "a readonly root"));
+        }
+        Ok(())
+    }
+
+    /// Takes the secrets of a command not seen before from the Hub (a resend takes nothing: its
+    /// receipt answers). `File` needs the `secret-file` feature.
+    async fn take_secrets(
+        &self,
+        op: &OperationId,
+        refs: &[SecretRef],
+    ) -> ApiResult<Vec<SecretBytes>> {
+        if refs.is_empty() || self.receipt(op).is_some() {
+            return Ok(vec![]);
+        }
+        if refs
+            .iter()
+            .any(|r| matches!(r.how, SecretDelivery::File { .. }))
+            && !self.st().features.iter().any(|f| f == FEATURE_SECRET_FILE)
+        {
+            return unsupported("secret files");
+        }
+        let Some(secrets) = self.secrets.lock().unwrap().clone() else {
+            return unsupported("no secrets channel");
+        };
+        let mut out = vec![];
+        for r in refs {
+            out.push(
+                secrets
+                    .take(op.clone(), r.id.clone())
+                    .await
+                    .map_err(|e| e.on(op))?,
+            );
+        }
+        Ok(out)
+    }
+
     fn heads(st: &State) -> Vec<StreamHead> {
         st.streams
             .iter()
@@ -751,6 +1131,89 @@ fn unsupported<T>(what: &str) -> ApiResult<T> {
         ErrorCode::Unsupported,
         format!("fake node: {what}"),
     ))
+}
+
+/// The remainder of `p` below `base` (`""` for `base` itself), or `None` outside it.
+fn below<'a>(base: &RelPath, p: &'a RelPath) -> Option<&'a str> {
+    let (b, p) = (base.as_str(), p.as_str());
+    if b.is_empty() {
+        return Some(p);
+    }
+    if p == b {
+        return Some("");
+    }
+    p.strip_prefix(b).and_then(|r| r.strip_prefix('/'))
+}
+
+/// One page of `items` (cursors are offsets, `o<n>`).
+fn page_of<T: Clone>(items: &[T], page: &PageRequest) -> ApiResult<(Vec<T>, Option<Cursor>)> {
+    let from = match &page.cursor {
+        None => 0,
+        Some(c) => c
+            .as_str()
+            .strip_prefix('o')
+            .and_then(|n| n.parse::<usize>().ok())
+            .filter(|n| *n <= items.len())
+            .ok_or_else(|| ApiError::new(ErrorCode::Invalid, "bad cursor"))?,
+    };
+    let to = (from + page.limit.max(1) as usize).min(items.len());
+    let next = (to < items.len()).then(|| id(format!("o{to}")));
+    Ok((items[from..to].to_vec(), next))
+}
+
+/// Replaces every secret's text in `s` (output is masked before it leaves the Node).
+fn mask(s: &str, secrets: &[SecretBytes]) -> String {
+    let mut out = s.to_string();
+    for x in secrets {
+        let t = String::from_utf8_lossy(x.expose());
+        if !t.is_empty() {
+            out = out.replace(t.as_ref(), "***");
+        }
+    }
+    out
+}
+
+/// A Hub's secrets for tests: each given to one operation, taken once.
+#[derive(Default)]
+pub struct FakeSecrets {
+    held: Mutex<HashMap<String, (OperationId, Vec<u8>)>>,
+    taken: Mutex<Vec<(OperationId, String)>>,
+}
+
+impl FakeSecrets {
+    /// `id` may be taken once, for `op`.
+    pub fn give(&self, op: &str, secret: &str, bytes: &[u8]) {
+        self.held
+            .lock()
+            .unwrap()
+            .insert(secret.into(), (id(op), bytes.to_vec()));
+    }
+    /// What was taken, in order.
+    pub fn taken(&self) -> Vec<(OperationId, String)> {
+        self.taken.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl HubSecrets for FakeSecrets {
+    async fn take(&self, operation: OperationId, secret: String) -> ApiResult<SecretBytes> {
+        let mut held = self.held.lock().unwrap();
+        match held.get(&secret) {
+            Some((op, _)) if *op != operation => Err(ApiError::new(
+                ErrorCode::Denied,
+                "a secret of another operation",
+            )),
+            Some(_) => {
+                let (_, bytes) = held.remove(&secret).unwrap();
+                self.taken.lock().unwrap().push((operation, secret));
+                Ok(SecretBytes::new(bytes))
+            }
+            None if self.taken.lock().unwrap().iter().any(|(_, s)| *s == secret) => {
+                Err(ApiError::new(ErrorCode::Stale, "already taken"))
+            }
+            None => Err(ApiError::new(ErrorCode::Denied, "no such secret")),
+        }
+    }
 }
 
 #[async_trait]
@@ -802,8 +1265,18 @@ impl SessionExecutor for FakeNode {
                     incarnation,
                 },
             );
+            let open = st
+                .sessions
+                .values()
+                .filter(|s| {
+                    s.open.workspace == o.workspace && s.view.phase != SessionPhase::Released
+                })
+                .count();
+            let most = st.crowded.entry(o.workspace.id.clone()).or_default();
+            *most = (*most).max(open);
             let mut d = Decided::done(OperationResult::Session(view.clone()));
             d.workspace = Some(o.workspace.clone());
+            d.session = Some(o.session.clone());
             d.events = vec![(
                 Subject::Session {
                     session: o.session.clone(),
@@ -849,6 +1322,7 @@ impl SessionExecutor for FakeNode {
             s.view.revision = revision;
             let view = s.view.clone();
             let mut d = Decided::done(OperationResult::Session(view.clone()));
+            d.session = Some(b.session.clone());
             d.events = vec![(
                 Subject::Session {
                     session: b.session.clone(),
@@ -904,6 +1378,7 @@ impl SessionExecutor for FakeNode {
                 state: Observed::Running,
                 execution: Some(exec.clone()),
                 workspace: Some(ws),
+                session: None,
                 events: vec![(Subject::Execution(exec.clone()), EventBody::AttemptStarted)],
             })
         })
@@ -928,6 +1403,7 @@ impl SessionExecutor for FakeNode {
             s.view.phase = SessionPhase::Released;
             let view = s.view.clone();
             let mut d = Decided::done(OperationResult::Unit);
+            d.session = Some(c.body.clone());
             d.events = vec![(
                 Subject::Session {
                     session: c.body.clone(),
@@ -947,20 +1423,9 @@ impl JobExecutor for FakeNode {
             job: c.body.job.clone(),
             attempt: c.body.run.attempt.clone(),
         };
-        let ws = match &c.body.run.directory {
-            RunDirectory::Workspace { workspace } => {
-                self.mine(workspace)?;
-                Some(workspace.clone())
-            }
-            RunDirectory::Scratch => None,
-        };
         self.accept("start_job", &c, |st| {
+            c.body.check()?;
             Self::check_run(st, &c.body.run)?;
-            if let Some(w) = &ws
-                && !st.workspaces.contains_key(&w.id)
-            {
-                return Err(ApiError::new(ErrorCode::Invalid, "no such workspace"));
-            }
             if let Some(cap) = &st.capacity
                 && Self::running(st).1 >= cap.jobs
             {
@@ -968,10 +1433,13 @@ impl JobExecutor for FakeNode {
             }
             Self::take_attempt(st, &c.id, &exec)?;
             st.jobs.insert(exec.attempt().clone());
+            st.job_specs
+                .insert(exec.attempt().clone(), (c.body.clone(), String::new()));
             Ok(Decided {
                 state: Observed::Running,
                 execution: Some(exec.clone()),
-                workspace: ws.clone(),
+                workspace: None,
+                session: None,
                 events: vec![(Subject::Execution(exec.clone()), EventBody::AttemptStarted)],
             })
         })
@@ -1024,6 +1492,7 @@ impl ExecutionControl for FakeNode {
                 continuation: None,
                 transient: false,
                 acted: true,
+                job: None,
             };
             if let Some(a) = st.inbox.get_mut(&target) {
                 a.receipt.state = Observed::Finished {
@@ -1063,6 +1532,75 @@ impl ExecutionControl for FakeNode {
             }
             if let Some(ExecutionRef::Job { attempt, .. }) = &exec {
                 st.jobs.remove(attempt);
+            }
+            let mut d = Decided::done(OperationResult::Unit);
+            d.events = events;
+            Ok(d)
+        })
+        .await
+    }
+
+    /// As LocalNode retires an unknown control: only the exact unknown target, never an execution
+    /// (abandon it), refused while the session has live work. The target ends interrupted (its
+    /// effects stay as they are, nothing is replayed); a session control lets its session go.
+    async fn recover(&self, c: Command<Recover>) -> ApiResult<Receipt> {
+        let target = c.body.target.clone();
+        self.accept("recover", &c, |st| {
+            let Some(a) = st.inbox.get(&target) else {
+                return Err(ApiError::new(ErrorCode::Invalid, "no such operation"));
+            };
+            if a.digest != c.body.expected || !matches!(a.receipt.state, Observed::Unknown { .. }) {
+                return Err(ApiError::new(ErrorCode::Stale, "recovery target changed"));
+            }
+            if a.execution.is_some() {
+                return unsupported("recover execution: use abandon");
+            }
+            let (method, session) = (a.method, a.session.clone());
+            if let Some(s) = &session
+                && let Some(x) = st.active.get(s)
+                && st.attempts.get(x.attempt()).is_some_and(|(_, op)| {
+                    st.inbox
+                        .get(op)
+                        .is_some_and(|o| !matches!(o.receipt.state, Observed::Unknown { .. }))
+                })
+            {
+                return Err(ApiError::new(ErrorCode::Busy, "session has live work"));
+            }
+            let state = Observed::Finished {
+                outcome: Outcome::Interrupted,
+                result: None,
+                error: Some(ApiError::new(
+                    ErrorCode::OutcomeUnknown,
+                    "control retired; effects preserved, not replayed",
+                )),
+            };
+            if let Some(a) = st.inbox.get_mut(&target) {
+                a.receipt.state = state.clone();
+            }
+            let mut events = vec![(
+                Subject::Operation {
+                    operation: target.clone(),
+                },
+                EventBody::OperationChanged {
+                    receipt: Receipt {
+                        operation: target.clone(),
+                        state,
+                    },
+                },
+            )];
+            if matches!(
+                method,
+                "open_session" | "configure_session" | "release_session"
+            ) && let Some(s) = &session
+                && let Some(row) = st.sessions.get_mut(s)
+            {
+                row.view.phase = SessionPhase::Released;
+                events.push((
+                    Subject::Session { session: s.clone() },
+                    EventBody::SessionChanged {
+                        view: row.view.clone(),
+                    },
+                ));
             }
             let mut d = Decided::done(OperationResult::Unit);
             d.events = events;
@@ -1182,6 +1720,10 @@ impl ExecutionControl for FakeNode {
         if !more {
             st.snapshots.remove(&token);
         }
+        drop(st);
+        if !more {
+            self.at(Point::AfterSnapshot);
+        }
         Ok(Snapshot {
             entries: page,
             heads,
@@ -1239,6 +1781,17 @@ impl WorkspaceExecutor for FakeNode {
     async fn prepare_workspace(&self, c: Command<Prepare>) -> ApiResult<Receipt> {
         let node = self.node.clone();
         self.accept("prepare_workspace", &c, |st| {
+            let root = match &c.body.kind {
+                PrepareKind::Existing { dir } => Some(dir.root.clone()),
+                PrepareKind::Worktree { repository, .. } => Some(repository.root.clone()),
+                PrepareKind::Scratch => None,
+            };
+            if let Some(r) = &root
+                && !st.roots.is_empty()
+                && Self::root_access(st, r)? == RootAccess::ReadOnly
+            {
+                return Err(ApiError::new(ErrorCode::Denied, "a readonly root"));
+            }
             let spec = digest_of(&c.body.kind)?;
             let wid: WorkspaceId = id(derived_id("w", &c.body.resource));
             let view = match st.workspaces.get(&wid) {
@@ -1272,6 +1825,7 @@ impl WorkspaceExecutor for FakeNode {
                             spec,
                             view: v.clone(),
                             incarnation,
+                            root,
                         },
                     );
                     v
@@ -1326,36 +1880,264 @@ impl WorkspaceExecutor for FakeNode {
         .await
     }
 
-    async fn git_facts(&self, _q: GitQuery) -> ApiResult<GitFacts> {
-        unsupported("git")
+    async fn git_facts(&self, q: GitQuery) -> ApiResult<GitFacts> {
+        self.mine(&q.workspace)?;
+        let st = self.st();
+        if !st.workspaces.contains_key(&q.workspace.id) {
+            return Err(ApiError::new(ErrorCode::Invalid, "no such workspace"));
+        }
+        let Some(facts) = st.git.get(&q.workspace.id) else {
+            return unsupported("git facts nobody scripted");
+        };
+        let mut reads = vec![];
+        for r in &q.reads {
+            match facts.reads.iter().find(|f| f.read == *r) {
+                Some(f) => reads.push(f.clone()),
+                None => return unsupported("a git read nobody scripted"),
+            }
+        }
+        Ok(GitFacts {
+            reads,
+            ..facts.clone()
+        })
     }
-    async fn git_apply(&self, _c: Command<GitApply>) -> ApiResult<Receipt> {
-        unsupported("git")
+
+    /// Checks the decision's revision and HEAD against the scripted facts, then moves them on: a
+    /// new revision, and a new HEAD after a rebase or a merge.
+    async fn git_apply(&self, c: Command<GitApply>) -> ApiResult<Receipt> {
+        self.mine(&c.body.workspace)?;
+        let auth = match &c.body.action {
+            GitAction::Push { auth: Some(a), .. } => {
+                if !matches!(a.how, SecretDelivery::Header { .. }) {
+                    return Err(ApiError::new(
+                        ErrorCode::Invalid,
+                        "a push credential goes as a header",
+                    )
+                    .on(&c.id));
+                }
+                vec![a.clone()]
+            }
+            _ => vec![],
+        };
+        let w = &c.body.workspace;
+        // every refusal before the credential is taken
+        let check = |st: &State| -> ApiResult<()> {
+            Self::writable(st, w)?;
+            let Some(facts) = st.git.get(&w.id) else {
+                return unsupported("git facts nobody scripted");
+            };
+            if facts.revision != c.body.expected || facts.head != c.body.expected_head {
+                return Err(ApiError::new(ErrorCode::Stale, "changed since"));
+            }
+            if let GitAction::Push {
+                branch,
+                expected_local,
+                ..
+            } = &c.body.action
+            {
+                let local = facts
+                    .refs
+                    .iter()
+                    .find(|(r, _)| r == branch)
+                    .and_then(|(_, sha)| sha.as_ref())
+                    .unwrap_or(&facts.head);
+                if local != expected_local {
+                    return Err(ApiError::new(ErrorCode::Stale, "the branch moved"));
+                }
+            }
+            Ok(())
+        };
+        self.accept_taking("git_apply", &c, &auth, check, |st, _secrets| {
+            let mut next = st.git[&w.id].clone();
+            if matches!(
+                c.body.action,
+                GitAction::Rebase { .. } | GitAction::Merge { .. }
+            ) {
+                next.head = format!("c{}", Self::next(st));
+            }
+            next.revision = Self::revision(st);
+            next.reads = vec![];
+            st.git.insert(w.id.clone(), next.clone());
+            let mut d = Decided::done(OperationResult::Git(next));
+            d.workspace = Some(w.clone());
+            Ok(d)
+        })
+        .await
     }
-    async fn exec(&self, _c: Command<ExecSpec>) -> ApiResult<Receipt> {
-        unsupported("exec")
+
+    /// Answers what the test gave ([`FakeNode::answer_exec`]), with its secrets masked.
+    async fn exec(&self, c: Command<ExecSpec>) -> ApiResult<Receipt> {
+        self.mine(&c.body.workspace)?;
+        if c.body
+            .secrets
+            .iter()
+            .any(|r| matches!(r.how, SecretDelivery::Header { .. }))
+        {
+            return Err(ApiError::new(ErrorCode::Invalid, "a header is for a push only").on(&c.id));
+        }
+        let check = |st: &State| -> ApiResult<()> {
+            Self::writable(st, &c.body.workspace)?;
+            Self::check_policy(&c.body.policy)?;
+            if c.body.limits.deadline.0 <= st.now {
+                return Err(ApiError::new(ErrorCode::Expired, "deadline already passed"));
+            }
+            Ok(())
+        };
+        self.accept_taking("exec", &c, &c.body.secrets, check, |st, secrets| {
+            let r = st.exec_answers.pop_front().unwrap_or(ExecResult {
+                exit_code: Some(0),
+                stdout: String::new(),
+                stderr: String::new(),
+                truncated: false,
+            });
+            let r = ExecResult {
+                stdout: mask(&r.stdout, secrets),
+                stderr: mask(&r.stderr, secrets),
+                ..r
+            };
+            let mut d = Decided::done(OperationResult::Exec(r));
+            d.workspace = Some(c.body.workspace.clone());
+            Ok(d)
+        })
+        .await
     }
     async fn list_dir(&self, _p: PathRef, _page: PageRequest) -> ApiResult<Page<FileInfo>> {
-        unsupported("files")
+        unsupported("files in a workspace")
     }
-    async fn list_root(&self, _at: RootPath, _page: PageRequest) -> ApiResult<Page<FileInfo>> {
-        unsupported("files")
+    /// The files and directories right below `at`.
+    async fn list_root(&self, at: RootPath, page: PageRequest) -> ApiResult<Page<FileInfo>> {
+        let st = self.st();
+        Self::root_access(&st, &at.root)?;
+        let mut items: BTreeMap<String, FileInfo> = BTreeMap::new();
+        for ((root, rel), f) in &st.files {
+            if *root != at.root {
+                continue;
+            }
+            let Some(rest) = below(&at.rel, rel).filter(|r| !r.is_empty()) else {
+                continue;
+            };
+            let name = rest.split('/').next().unwrap_or(rest);
+            let path = match at.rel.as_str() {
+                "" => name.to_string(),
+                base => format!("{base}/{name}"),
+            };
+            let info = if name == rest {
+                FileInfo {
+                    path: RelPath::new(path.clone()).expect("a stored path"),
+                    is_dir: false,
+                    size: f.bytes.len() as u64,
+                    version: f.version.clone(),
+                    too_big: false,
+                }
+            } else {
+                FileInfo {
+                    path: RelPath::new(path.clone()).expect("a stored path"),
+                    is_dir: true,
+                    size: 0,
+                    version: id("dir"),
+                    too_big: false,
+                }
+            };
+            items.insert(path, info);
+        }
+        let items: Vec<FileInfo> = items.into_values().collect();
+        let (items, next) = page_of(&items, &page)?;
+        Ok(Page { items, next })
     }
-    async fn read_file(&self, _q: FileRead) -> ApiResult<crate::blob::ReadChunk> {
-        unsupported("files")
+    async fn read_file(&self, q: FileRead) -> ApiResult<crate::blob::ReadChunk> {
+        let FileAddress::Root(at) = &q.path else {
+            return unsupported("files in a workspace");
+        };
+        let st = self.st();
+        Self::root_access(&st, &at.root)?;
+        let Some(f) = st.files.get(&(at.root.clone(), at.rel.clone())) else {
+            return Err(ApiError::new(ErrorCode::Invalid, "no such file"));
+        };
+        if q.expected.as_ref().is_some_and(|v| *v != f.version) {
+            return Err(ApiError::new(ErrorCode::Conflict, "the file changed"));
+        }
+        let from = (q.offset as usize).min(f.bytes.len());
+        let to = (from + q.max as usize).min(f.bytes.len());
+        Ok(crate::blob::ReadChunk {
+            offset: from as u64,
+            bytes: f.bytes[from..to].to_vec(),
+            eof: to == f.bytes.len(),
+        })
     }
-    async fn scan(&self, _c: Command<ScanSpec>) -> ApiResult<Receipt> {
-        unsupported("scan")
+    /// Lists every file below the root at once (a snapshot read page by page). Include and exclude
+    /// patterns are not simulated.
+    async fn scan(&self, c: Command<ScanSpec>) -> ApiResult<Receipt> {
+        if !c.body.include.is_empty() || !c.body.exclude.is_empty() {
+            return unsupported("scan patterns");
+        }
+        self.accept("scan", &c, |st| {
+            let spec = &c.body;
+            Self::root_access(st, &spec.root.root)?;
+            let mut entries: Vec<FileInfo> = st
+                .files
+                .iter()
+                .filter(|((root, rel), _)| {
+                    *root == spec.root.root && below(&spec.root.rel, rel).is_some()
+                })
+                .map(|((_, rel), f)| FileInfo {
+                    path: rel.clone(),
+                    is_dir: false,
+                    size: f.bytes.len() as u64,
+                    version: f.version.clone(),
+                    too_big: f.bytes.len() as u64 > spec.limits.max_file_bytes,
+                })
+                .collect();
+            let mut issues = st
+                .scan_issues
+                .get(&spec.root.root)
+                .cloned()
+                .unwrap_or_default();
+            let max = spec.limits.max_files as usize;
+            if entries.len() > max {
+                issues.push(ScanIssue::OverLimit {
+                    count: (entries.len() - max) as u64,
+                });
+                entries.truncate(max);
+            }
+            // the same tree gives the same manifest
+            let manifest = id(digest_of(&(&entries, &issues))?.to_string());
+            st.scans.insert(
+                c.id.clone(),
+                FakeScan {
+                    manifest,
+                    entries,
+                    issues,
+                },
+            );
+            Ok(Decided::done(OperationResult::Pages {
+                operation: c.id.clone(),
+            }))
+        })
+        .await
     }
-    async fn scan_page(&self, _s: OperationId, _p: PageRequest) -> ApiResult<ScanPage> {
-        unsupported("scan")
+    async fn scan_page(&self, scan: OperationId, page: PageRequest) -> ApiResult<ScanPage> {
+        let st = self.st();
+        let Some(s) = st.scans.get(&scan) else {
+            return Err(ApiError::new(ErrorCode::Invalid, "no such scan").on(&scan));
+        };
+        let (entries, next) = page_of(&s.entries, &page)?;
+        let last = next.is_none();
+        Ok(ScanPage {
+            scan,
+            manifest: s.manifest.clone(),
+            entries,
+            next,
+            complete: last && !s.issues.iter().any(ScanIssue::hides_files),
+            issues: if last { s.issues.clone() } else { vec![] },
+        })
     }
 }
 
 #[async_trait]
 impl Discovery for FakeNode {
     async fn probe(&self, _fresh: bool) -> ApiResult<Capabilities> {
-        let capacity = self.st().capacity.clone().unwrap_or(Capacity {
+        let st = self.st();
+        let capacity = st.capacity.clone().unwrap_or(Capacity {
             sessions: u32::MAX,
             jobs: u32::MAX,
             execs: 0,
@@ -1376,21 +2158,29 @@ impl Discovery for FakeNode {
                 images: true,
                 enforcement: vec![],
             }],
-            roots: vec![],
+            roots: st.roots.clone(),
             capacity,
+            features: st.features.clone(),
         })
     }
-    async fn history(&self, _p: PageRequest) -> ApiResult<Page<HistoryEntry>> {
-        Ok(Page {
-            items: vec![],
-            next: None,
-        })
+    async fn history(&self, p: PageRequest) -> ApiResult<Page<HistoryEntry>> {
+        let all: Vec<HistoryEntry> = self.st().history.iter().map(|(e, _)| e.clone()).collect();
+        let (items, next) = page_of(&all, &p)?;
+        Ok(Page { items, next })
     }
     async fn import_history(&self, _c: Command<HistoryImport>) -> ApiResult<Receipt> {
         unsupported("history")
     }
     async fn import_page(&self, _i: OperationId, _p: PageRequest) -> ApiResult<ImportedPage> {
         unsupported("history")
+    }
+    async fn locate(&self, source: HistoryRef) -> ApiResult<HistoryLocation> {
+        self.st()
+            .history
+            .iter()
+            .find(|(e, _)| e.source == source)
+            .map(|(_, l)| l.clone())
+            .ok_or_else(|| ApiError::new(ErrorCode::Invalid, "not a history this node lists"))
     }
 }
 
@@ -1597,10 +2387,10 @@ pub mod build {
         }
     }
 
+    /// A think job without tools.
     pub fn job(job: &str, attempt: &str, text: &str) -> JobSpec {
         JobSpec {
             job: id(job),
-            kind: JobKind::Think,
             run: RunSpec {
                 attempt: id(attempt),
                 choice: choice(),
@@ -1610,6 +2400,43 @@ pub mod build {
                 limits: limits(),
                 continuation: None,
             },
+            work: JobWork::Think(ThinkJob {
+                instructions: None,
+                tools: ThinkToolMode::None,
+            }),
+        }
+    }
+
+    /// A research job in its scratch directory, with Steve's tools and the default idle limit.
+    pub fn research(job_id: &str, attempt: &str, text: &str) -> JobSpec {
+        JobSpec {
+            work: JobWork::Research(ResearchJob {
+                cwd: None,
+                readable: vec![],
+                budget: ResearchBudget {
+                    max_turns: None,
+                    max_tools: None,
+                    idle_ms: 600_000,
+                },
+                steve_tools: true,
+            }),
+            ..job(job_id, attempt, text)
+        }
+    }
+
+    pub fn exec_job(job: &str, attempt: &str) -> ExecutionRef {
+        ExecutionRef::Job {
+            job: id(job),
+            attempt: id(attempt),
+        }
+    }
+
+    /// A job's answer: one text part, none when empty.
+    pub fn text(s: &str) -> Vec<Part> {
+        if s.is_empty() {
+            vec![]
+        } else {
+            vec![Part::Text { text: s.into() }]
         }
     }
 
@@ -1630,6 +2457,7 @@ pub mod build {
             continuation: None,
             transient: false,
             acted: false,
+            job: None,
         }
     }
 

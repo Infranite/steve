@@ -235,9 +235,18 @@ fn inbox_conflicts_gaps_duplicates_and_transactional_apply() {
             );
             inbox_insert_in(tx, k, 1, "e1", &json!({"n":1}), 1)?;
             assert_eq!(watermarks_in(tx, k)?.durable, 1);
-            assert!(!inbox_insert_in(tx, k, 1, "e1", &json!({"n":1}), 2)?);
-            assert!(inbox_insert_in(tx, k, 1, "e1", &json!({"n":99}), 2).is_err());
-            assert!(inbox_insert_in(tx, k, 2, "e1", &json!({"n":1}), 2).is_err());
+            assert_eq!(
+                inbox_insert_in(tx, k, 1, "e1", &json!({"n":1}), 2)?,
+                Inboxed::Seen
+            );
+            assert_eq!(
+                inbox_insert_in(tx, k, 1, "e1", &json!({"n":99}), 2)?,
+                Inboxed::Conflict(Conflict::Position)
+            );
+            assert_eq!(
+                inbox_insert_in(tx, k, 2, "e1", &json!({"n":1}), 2)?,
+                Inboxed::Conflict(Conflict::EventId)
+            );
             assert!(mark_applied_in(tx, k, 3).is_err());
             inbox_insert_in(tx, k, 2, "e2", &json!({"n":2}), 2)?;
             assert_eq!(watermarks_in(tx, k)?.durable, 3);
@@ -282,8 +291,14 @@ fn a_pruned_redelivery_is_not_stored_again() {
     };
     t.store
         .transaction::<_, StoreError>(|tx| {
-            assert!(inbox_insert_in(tx, k, 1, "e1", &json!({"n":1}), 1)?);
-            assert!(inbox_insert_in(tx, k, 2, "e2", &json!({"n":2}), 1)?);
+            assert_eq!(
+                inbox_insert_in(tx, k, 1, "e1", &json!({"n":1}), 1)?,
+                Inboxed::New
+            );
+            assert_eq!(
+                inbox_insert_in(tx, k, 2, "e2", &json!({"n":2}), 1)?,
+                Inboxed::New
+            );
             assert!(mark_applied_in(tx, k, 1)?);
             assert!(mark_applied_in(tx, k, 2)?);
             // as the retention prune does
@@ -291,9 +306,15 @@ fn a_pruned_redelivery_is_not_stored_again() {
                 "DELETE FROM node_event_inbox WHERE node_id='n' AND applied=1 AND seq=1",
                 [],
             )?;
-            assert!(!inbox_insert_in(tx, k, 1, "e1", &json!({"n":1}), 9)?);
+            assert_eq!(
+                inbox_insert_in(tx, k, 1, "e1", &json!({"n":1}), 9)?,
+                Inboxed::Seen
+            );
             // its payload can no longer be compared: nothing is stored either way
-            assert!(!inbox_insert_in(tx, k, 1, "e1", &json!({"n":99}), 9)?);
+            assert_eq!(
+                inbox_insert_in(tx, k, 1, "e1", &json!({"n":99}), 9)?,
+                Inboxed::Seen
+            );
             let rows: i64 = tx.query_row(
                 "SELECT COUNT(*) FROM node_event_inbox WHERE node_id='n' AND seq=1",
                 [],
@@ -308,9 +329,95 @@ fn a_pruned_redelivery_is_not_stored_again() {
                 }
             );
             // the kept row still compares, and the next position is new
-            assert!(inbox_insert_in(tx, k, 2, "e2", &json!({"n":99}), 9).is_err());
-            assert!(inbox_insert_in(tx, k, 3, "e3", &json!({"n":3}), 9)?);
+            assert_eq!(
+                inbox_insert_in(tx, k, 2, "e2", &json!({"n":99}), 9)?,
+                Inboxed::Conflict(Conflict::Position)
+            );
+            assert_eq!(
+                inbox_insert_in(tx, k, 3, "e3", &json!({"n":3}), 9)?,
+                Inboxed::New
+            );
             assert_eq!(watermarks_in(tx, k)?.durable, 3);
+            Ok(())
+        })
+        .unwrap();
+}
+
+/// N1-6: a conflict is set aside on its own stream, which stops applying; the ack covers it, and
+/// the other stream's durable prefix still advances.
+#[test]
+fn a_conflict_is_quarantined_and_faults_only_its_stream() {
+    let t = fresh();
+    let a = StreamKey {
+        node: "n",
+        stream: "a",
+        epoch: "e",
+    };
+    let b = StreamKey { stream: "b", ..a };
+    t.store
+        .transaction::<_, StoreError>(|tx| {
+            assert_eq!(inbox_insert_in(tx, a, 1, "a1", &json!({"n":1}), 1)?, Inboxed::New);
+            assert_eq!(inbox_insert_in(tx, a, 2, "a2", &json!({"n":2}), 1)?, Inboxed::New);
+            let bad = json!({"n":"other"});
+            let Inboxed::Conflict(why) = inbox_insert_in(tx, a, 2, "a2", &bad, 2)? else {
+                panic!("not a conflict");
+            };
+            assert_eq!(
+                quarantine_in(tx, a, 2, "a2", &bad, why, 2)?,
+                Quarantined {
+                    new: true,
+                    faulted: true
+                }
+            );
+            // the same conflicting event delivered again is held once
+            assert_eq!(
+                quarantine_in(tx, a, 2, "a2", &bad, why, 3)?,
+                Quarantined {
+                    new: false,
+                    faulted: false
+                }
+            );
+            // a reused event id at a new position leaves a hole the ack still covers
+            let Inboxed::Conflict(Conflict::EventId) =
+                inbox_insert_in(tx, a, 3, "a1", &json!({"n":3}), 3)?
+            else {
+                panic!("not an event id conflict");
+            };
+            assert_eq!(
+                quarantine_in(tx, a, 3, "a1", &json!({"n":3}), Conflict::EventId, 3)?,
+                Quarantined {
+                    new: true,
+                    faulted: false
+                }
+            );
+            assert_eq!(inbox_insert_in(tx, a, 4, "a4", &json!({"n":4}), 3)?, Inboxed::New);
+            assert_eq!(watermarks_in(tx, a)?.durable, 2);
+            assert_eq!(acked_in(tx, a)?, 4);
+            assert_eq!(stream_fault_of(tx, a)?, Some(Fault::Conflict));
+            // a faulted stream applies nothing, even its contiguous prefix
+            assert!(next_event_in(tx, a)?.is_none());
+            // the first fault stays
+            assert!(!stream_fault_in(tx, a, Fault::Gap)?);
+            assert_eq!(stream_fault_of(tx, a)?, Some(Fault::Conflict));
+            // the other stream goes on
+            assert_eq!(inbox_insert_in(tx, b, 1, "b1", &json!({"n":1}), 4)?, Inboxed::New);
+            assert_eq!(watermarks_in(tx, b)?.durable, 1);
+            assert_eq!(stream_fault_of(tx, b)?, None);
+            assert_eq!(next_event_in(tx, b)?.unwrap().seq, 1);
+            let rows: Vec<(i64, String, String)> = {
+                let mut st = tx.prepare(
+                    "SELECT seq, event_id, reason FROM node_event_quarantine WHERE node_id='n' ORDER BY seq",
+                )?;
+                st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                    .collect::<rusqlite::Result<_>>()?
+            };
+            assert_eq!(
+                rows,
+                [
+                    (2, "a2".into(), Conflict::Position.reason().into()),
+                    (3, "a1".into(), Conflict::EventId.reason().into())
+                ]
+            );
             Ok(())
         })
         .unwrap();

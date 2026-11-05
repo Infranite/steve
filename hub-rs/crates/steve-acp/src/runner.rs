@@ -94,8 +94,24 @@ pub struct PermissionRequest {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TurnEnd {
     pub session_id: String,
+    /// The token of the turn that ended ([`Acp::current`] while it ran); after queued follow-ups,
+    /// the last of them.
+    pub turn: u64,
     pub stop_reason: String,
     pub error: Option<String>,
+}
+
+/// What [`Acp::flush_turn`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Flushed {
+    /// A turn started, under this token.
+    Started(u64),
+    /// A turn is running already.
+    Busy,
+    /// Turns are held (release hold, maintenance), or the lead could not be queued.
+    Held,
+    /// Nothing to run.
+    Empty,
 }
 
 /// Passed to [`Host::turn_begin`] before every `session/prompt`: the first try, each gateway retry and
@@ -332,6 +348,10 @@ struct State {
     live: HashMap<String, Live>,
     /// sessions with a turn in flight, also while the adapter is still starting or a retry waits
     turning: HashSet<String>,
+    /// the turn each session in `turning` runs now: a token minted when it entered `turning` and for
+    /// every follow-up turn after it (a gateway retry keeps it), so a stop meant for one turn never
+    /// reaches the next ([`Acp::cancel_if`])
+    turns: HashMap<String, u64>,
     retrying: HashMap<String, u64>,
     /// decision id → (session id, rpc id). Like the TS, entries outlive the process that asked.
     /// decision id → (session, the asking request's rpc id, the adapter process generation that asked,
@@ -367,9 +387,18 @@ struct State {
 
 impl State {
     /// The session's turn is over (or never started): it leaves `turning`, and a cancel meant for it is moot.
-    fn end_turning(&mut self, sid: &str) {
+    /// Returns the token of the turn that ended, if one ran.
+    fn end_turning(&mut self, sid: &str) -> Option<u64> {
         self.turning.remove(sid);
         self.cancel_pending.remove(sid);
+        self.turns.remove(sid)
+    }
+
+    /// The session starts a turn (it is in `turning` from now on), under a new turn token.
+    fn begin_turning(&mut self, sid: &str) {
+        self.turning.insert(sid.to_owned());
+        let t = self.token();
+        self.turns.insert(sid.to_owned(), t);
     }
 }
 
@@ -665,7 +694,7 @@ impl Acp {
             if msgs.is_empty() {
                 return Err(AcpError::Other("无法持久保存消息，请重试".into()));
             }
-            st.turning.insert(session_id.to_owned());
+            st.begin_turning(session_id);
             drop(st);
             self.start_turn(session_id.to_owned(), msgs);
         }
@@ -702,21 +731,29 @@ impl Acp {
     /// Run what is queued for a session as one turn, optionally led by Steve's own message;
     /// identical messages (text and attachment ids) are sent once. False when a turn is running, while holding, or with nothing to run.
     pub fn flush(&self, session_id: &str, lead: Option<Message>) -> bool {
-        let msgs = {
+        matches!(self.flush_turn(session_id, lead), Flushed::Started(_))
+    }
+
+    /// [`Self::flush`], saying why nothing started, or which turn did.
+    pub fn flush_turn(&self, session_id: &str, lead: Option<Message>) -> Flushed {
+        let (msgs, token) = {
             let mut st = self.st();
-            if st.turning.contains(session_id) || st.holding || self.host().maintenance() {
-                return false;
+            if st.turning.contains(session_id) {
+                return Flushed::Busy;
+            }
+            if st.holding || self.host().maintenance() {
+                return Flushed::Held;
             }
             if let Some(m) = &lead
                 && let Err(e) = self.host().queue_add(session_id, &m.text, &m.via, &m.files)
             {
                 tracing::error!("queue {session_id}: {e}");
-                return false;
+                return Flushed::Held;
             }
             let mut seen = HashSet::new();
             let claimed = self.host().queue_take(session_id);
             if claimed.is_empty() {
-                return false;
+                return Flushed::Empty;
             }
             let msgs: Vec<Message> = lead
                 .into_iter()
@@ -727,13 +764,13 @@ impl Acp {
                 })
                 .collect();
             if msgs.is_empty() {
-                return false;
+                return Flushed::Empty;
             }
-            st.turning.insert(session_id.to_owned());
-            msgs
+            st.begin_turning(session_id);
+            (msgs, st.turns[session_id])
         };
         self.start_turn(session_id.to_owned(), msgs);
-        true
+        Flushed::Started(token)
     }
 
     /// The synchronous start of a turn (TS `runTurn` up to its first await): `user` events on the first
@@ -784,7 +821,7 @@ impl Acp {
                 Ok(x) => x,
                 Err(e) => {
                     self.turn_close(&sid, turn, None, None, "error", Some(e.clone()), false);
-                    self.st().end_turning(&sid);
+                    let token = self.st().end_turning(&sid);
                     self.host().set_status(&sid, "error");
                     self.host().add_event(
                         &sid,
@@ -793,6 +830,7 @@ impl Acp {
                     );
                     self.host().turn_end(TurnEnd {
                         session_id: sid,
+                        turn: token.unwrap_or_default(),
                         stop_reason: "error".into(),
                         error: Some(e),
                     });
@@ -869,6 +907,7 @@ impl Acp {
                 }
                 st.cancelled.remove(&ptoken);
                 st.turning.remove(&sid);
+                st.turns.remove(&sid);
                 st.tallies.remove(&sid);
                 if let Some(l) = st.live.get_mut(&sid).filter(|l| l.generation == generation) {
                     l.busy = false;
@@ -1045,7 +1084,7 @@ impl Acp {
             );
             self.host()
                 .add_event(&sid, "turn_end", json!({ "stopReason": stop_reason }));
-            let (next, held) = {
+            let (next, held, ended) = {
                 let mut st = self.st();
                 let next = if st.holding || self.host().maintenance() {
                     vec![]
@@ -1054,16 +1093,21 @@ impl Acp {
                 };
                 // a cancel that came after the prompt returned was for this turn, not the next
                 st.cancel_pending.remove(&sid);
+                let ended = st.turns.get(&sid).copied().unwrap_or_default();
                 if next.is_empty() {
                     st.turning.remove(&sid);
+                    st.turns.remove(&sid);
                     let token = st.token();
                     if let Some(l) = st.live.get_mut(&sid) {
                         l.idle = Some(token);
                         self.arm_idle(sid.clone(), token);
                     }
                 }
+                if !next.is_empty() {
+                    st.begin_turning(&sid);
+                }
                 let held = st.holding && self.host().queue_len(&sid) > 0;
-                (next, held)
+                (next, held, ended)
             };
             if !next.is_empty() {
                 // a queued follow-up replaces this turn's end callback
@@ -1078,6 +1122,7 @@ impl Acp {
             self.expire_waits(&sid, None);
             self.host().turn_end(TurnEnd {
                 session_id: sid,
+                turn: ended,
                 stop_reason,
                 error,
             });
@@ -1610,7 +1655,26 @@ impl Acp {
     /// prompt not written yet) the cancel waits and goes right after the prompt, so the agent has seen
     /// the message it interrupts. False when no turn is in flight.
     pub fn cancel(&self, session_id: &str) -> bool {
-        let mut st = self.st();
+        self.cancel_in(self.st(), session_id)
+    }
+
+    /// The token of the turn the session runs now (also while its adapter starts or a gateway retry
+    /// waits); `None` when no turn is in flight. Tokens live in memory only: no turn survives a restart.
+    pub fn current(&self, session_id: &str) -> Option<u64> {
+        self.st().turns.get(session_id).copied()
+    }
+
+    /// [`Self::cancel`], only while the session still runs the turn `token` names: a stale token
+    /// (that turn is over, maybe another one runs now) is a no-op and returns false.
+    pub fn cancel_if(&self, session_id: &str, token: u64) -> bool {
+        let st = self.st();
+        if st.turns.get(session_id) != Some(&token) {
+            return false;
+        }
+        self.cancel_in(st, session_id)
+    }
+
+    fn cancel_in(&self, mut st: MutexGuard<'_, State>, session_id: &str) -> bool {
         if st.retrying.remove(session_id).is_some() {
             let stale: Vec<String> = st
                 .waits
@@ -1628,8 +1692,11 @@ impl Acp {
             } else {
                 self.host().queue_take(session_id)
             };
+            let ended = st.turns.get(session_id).copied().unwrap_or_default();
             if next.is_empty() {
                 st.end_turning(session_id);
+            } else {
+                st.begin_turning(session_id);
             }
             drop(st);
             let h = self.host();
@@ -1646,6 +1713,7 @@ impl Acp {
             if next.is_empty() {
                 h.turn_end(TurnEnd {
                     session_id: session_id.to_owned(),
+                    turn: ended,
                     stop_reason: "cancelled".into(),
                     error: None,
                 });
@@ -1717,13 +1785,15 @@ impl Acp {
     }
 
     /// Free the adapter process when idle; the next prompt resumes with `session/load`.
-    pub fn release(&self, session_id: &str) {
+    /// True: no adapter runs for the session any more; false: a turn is in flight, it is kept.
+    pub fn release(&self, session_id: &str) -> bool {
         let mut st = self.st();
         if st.live.get(session_id).is_some_and(|l| !l.busy)
             && let Some(l) = st.live.remove(session_id)
         {
             l.conn.kill();
         }
+        !st.turning.contains(session_id) && !st.live.contains_key(session_id)
     }
 
     /// A turn is in flight: adapter start, prompt, or gateway-retry wait.

@@ -187,6 +187,35 @@ fn foreign(
     Ok(None)
 }
 
+/// The guard on what a remote Node replays when the Hub pulls it (reconcile): the same check as
+/// [`GuardedSink`]'s, keyed on the Node the coordinator drives. A batch about other work is refused
+/// whole (`denied`) and audited.
+pub(crate) fn replay_check(store: Store, node: NodeId) -> crate::wire::node_runtime::ReplayCheck {
+    Arc::new(move |batch: &EventBatch| {
+        let bad = store
+            .reader(|c| foreign(c, node.as_str(), batch))
+            .map_err(internal)?;
+        let Some(why) = bad else { return Ok(()) };
+        let audited = store.transaction::<_, StoreError>(|tx| {
+            steve_store::nodes::audit(
+                tx,
+                Some(node.as_str()),
+                None,
+                "foreign_event",
+                Some(&format!("replayed: {why}")),
+                crate::nodes::now(),
+            )
+        });
+        if audited.is_err() {
+            tracing::error!("node audit failed");
+        }
+        Err(ApiError::new(
+            ErrorCode::Denied,
+            "replayed events about another node's work",
+        ))
+    })
+}
+
 pub struct GuardedSink(pub LinkCtx);
 
 #[async_trait]

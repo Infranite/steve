@@ -64,7 +64,8 @@ fn rank(p: PermissionMode) -> u8 {
         PermissionMode::Plan => 0,
         PermissionMode::Ask => 1,
         PermissionMode::AcceptEdits => 2,
-        PermissionMode::FullAccess => 3,
+        PermissionMode::Auto => 3,
+        PermissionMode::FullAccess => 4,
     }
 }
 
@@ -73,6 +74,7 @@ fn describe(c: &HarnessChoice, p: &ExecutionPolicy) -> String {
         PermissionMode::Plan => "plan",
         PermissionMode::Ask => "ask",
         PermissionMode::AcceptEdits => "accept_edits",
+        PermissionMode::Auto => "auto",
         PermissionMode::FullAccess => "full_access",
     };
     let mut s = format!("权限 {mode}");
@@ -503,7 +505,11 @@ impl NodeRuntime {
                 self.plan_after_in(tx, &session)?;
             }
             ReceiptState::Unknown => {
-                system_in(tx, &session, "配置切换结果未知，等待对账，不会自动重发")?;
+                system_in(
+                    tx,
+                    &session,
+                    &steve_i18n::stored(|| steve_i18n::t!("hub.node.config_unknown")),
+                )?;
             }
             _ => {}
         }

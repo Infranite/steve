@@ -190,3 +190,79 @@ async fn two_coordinators_never_cross() {
         assert!(!op.as_str().contains("_sb"), "{op} went to A");
     }
 }
+
+/// What a remote Node replays when the Hub pulls it (reconcile) passes the same guard as what it
+/// pushes: B's journal holds a receipt of A's operation, B's coordinator reconciles and replays
+/// it; the batch is refused and audited, nothing reaches the inbox or A's receipt, and the
+/// reconcile still completes for B.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_node_cannot_replay_events_about_another() {
+    let h = Hub::start().await;
+    let (ida, a) = h.paired("u1").await;
+    let (idb, b) = h.paired("u1").await;
+    let fa = FakeNode::new(a.as_str());
+    let la = dial(&h, &ida, &a, fa.clone(), 1).await.unwrap();
+    fa.connect(Arc::new(RemoteSink(la.link.clone())));
+    h.session("sa");
+    let rt = h.bind(&a, "sa");
+    until("A's session ready", 5, || {
+        h.q::<String>("SELECT phase FROM runtime_sessions WHERE session_id='sa'") == "ready"
+    })
+    .await;
+    rt.prompt("sa", "hello", "user", &[]).unwrap();
+    until("A's attempt", 5, || {
+        fa.log().iter().any(|(m, _)| *m == "start_turn")
+    })
+    .await;
+    let a_op: String = h.q(&format!(
+        "SELECT operation_id FROM node_commands WHERE node_id='{a}' AND method='start_turn'"
+    ));
+    let a_receipt: Option<String> = h.q(&format!(
+        "SELECT receipt FROM node_commands WHERE operation_id='{a_op}'"
+    ));
+
+    // B's journal holds an event about A's operation, never pushed: only replay brings it
+    let fb = FakeNode::new(b.as_str());
+    let op = OperationId::new(a_op.clone()).unwrap();
+    fb.emit(
+        Subject::Operation {
+            operation: op.clone(),
+        },
+        EventBody::OperationChanged {
+            receipt: Receipt {
+                operation: op,
+                state: Observed::Unknown {
+                    reason: "forged".into(),
+                },
+            },
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(fb.unacked(), 1);
+    let _lb = dial(&h, &idb, &b, fb.clone(), 1).await.unwrap();
+    h.session("sb");
+    let rb = h.bind(&b, "sb");
+    until("B reconciled", 10, || rb.is_reconciled()).await;
+
+    assert!(
+        h.q::<i64>(&format!(
+            "SELECT COUNT(*) FROM node_audit WHERE node_id='{b}' AND what='foreign_event' AND safe_detail LIKE 'replayed%'"
+        )) >= 1,
+        "audited"
+    );
+    assert_eq!(
+        h.q::<i64>(&format!(
+            "SELECT COUNT(*) FROM node_event_inbox WHERE node_id='{b}' AND payload LIKE '%forged%'"
+        )),
+        0,
+        "nothing of it taken in"
+    );
+    assert_eq!(
+        h.q::<Option<String>>(&format!(
+            "SELECT receipt FROM node_commands WHERE operation_id='{a_op}'"
+        )),
+        a_receipt,
+        "A's receipt untouched"
+    );
+}

@@ -193,6 +193,7 @@ async fn link_once(
             heartbeat: Duration::from_millis(welcome.heartbeat_ms.max(1000)),
             dead_after: Duration::from_millis(welcome.heartbeat_ms.max(1000) * 3),
             side: "n",
+            peer: welcome.proto,
         },
     );
     tracing::info!(generation = welcome.generation, "linked to the hub");

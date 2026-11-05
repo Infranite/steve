@@ -1,6 +1,6 @@
 //! The ports. Hub → Node: one trait per face, so a Hub module gets only the face it needs (the
 //! knowledge sync gets [`WorkspaceExecutor`], never [`SessionExecutor`]). Node → Hub: [`EventSink`],
-//! [`HubTools`], [`HubFiles`], each bound by the wiring to one authenticated Node.
+//! [`HubTools`], [`HubFiles`], [`HubSecrets`], each bound by the wiring to one authenticated Node.
 //!
 //! Every argument is owned and serializable, every method async. An instance is bound to one Node: a
 //! port never routes by what is inside its arguments. Commands are idempotent by their operation id.
@@ -96,6 +96,8 @@ pub trait Discovery: Send + Sync {
     async fn history(&self, page: PageRequest) -> ApiResult<Page<HistoryEntry>>;
     async fn import_history(&self, c: Command<HistoryImport>) -> ApiResult<Receipt>;
     async fn import_page(&self, import: OperationId, page: PageRequest) -> ApiResult<ImportedPage>;
+    /// Where an entry of [`Discovery::history`] is. A key the Node did not list is `invalid`.
+    async fn locate(&self, source: HistoryRef) -> ApiResult<HistoryLocation>;
 }
 
 /// All faces of one Node.
@@ -138,4 +140,14 @@ pub trait HubFiles: Send + Sync {
     /// Checks size and hash, then keeps it; finishing again answers the same artifact.
     async fn finish_upload(&self, transfer: TransferId) -> ApiResult<ArtifactRef>;
     async fn abort_upload(&self, transfer: TransferId) -> ApiResult<TransferState>;
+}
+
+/// Secrets for one operation (a push token, a vault value for a command). The Node takes each
+/// [`SecretRef`] of a command it accepted, under that command's operation id, right before using
+/// it. One-shot and short-lived: a second take, or one after the operation ended, is `stale`; a
+/// secret given to another operation (or to another Node) is `denied`. The bytes are never
+/// journaled, logged, put in an event or a result, on either side.
+#[async_trait]
+pub trait HubSecrets: Send + Sync {
+    async fn take(&self, operation: OperationId, id: String) -> ApiResult<SecretBytes>;
 }

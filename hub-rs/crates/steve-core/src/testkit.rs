@@ -4,12 +4,14 @@
 use crate::error::{Result, msg};
 use crate::gateway::{ModelGateway, Tier};
 use crate::repo::{Db as Store, HubEvent};
-use crate::runtime::{AgentRuntime, Prompted, TurnEnd};
+use crate::runtime::{
+    AgentRuntime, Answered, Configured, Flushed, Prompted, Released, Running, Stop, TurnEnd,
+};
 use crate::{Core, CoreConfig};
 use async_trait::async_trait;
 use serde_json::json;
-use std::collections::HashSet;
-use std::sync::{Arc, Mutex};
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 #[derive(Default)]
@@ -17,14 +19,34 @@ pub struct FakeState {
     /// (session, text, via) of every turn started
     pub prompts: Vec<(String, String, String)>,
     pub turning: HashSet<String>,
+    /// The attempt each turning session runs now (`a1`, `a2`, … across the runtime).
+    pub attempts: HashMap<String, String>,
+    pub next_attempt: u64,
+    /// Sessions whose running turn a stop reached.
     pub cancelled: Vec<String>,
+    /// Every `stop` and what it did.
+    pub stops: Vec<(Running, Stop)>,
+    /// The user's stops ([`AgentRuntime::stop`]), each a cancel too.
+    pub stopped: Vec<String>,
     pub released: Vec<String>,
+    /// What `release` answers per session ([`Released::Gone`] when not set).
+    pub release_answers: HashMap<String, Released>,
+    /// `created` calls: (session, the release it waits for)
+    pub created: Vec<(String, Option<String>)>,
     /// decision id → still answerable
     pub permissions: HashSet<String>,
+    /// decision id → answerable through a queued command (a Node's): answers are [`Answered::Pending`]
+    pub pending_permissions: HashSet<String>,
+    /// Every answer fails (the backend's store, say).
+    pub answer_error: bool,
     pub answered: Vec<(String, Option<String>)>,
     pub holding: bool,
     /// `set_mode` calls: (session, mode)
     pub modes: Vec<(String, String)>,
+    /// Every `set_mode` fails (not recorded in `modes`).
+    pub mode_error: bool,
+    /// Every `set_mode` is a mode the backend cannot express (recorded in `modes`).
+    pub mode_unsupported: bool,
     /// (session, files) of every prompt sent right away
     pub files: Vec<(String, Vec<crate::repo::FileRef>)>,
     /// Per `flush`: whether it ran inside a tokio runtime (the real runtime spawns the turn there).
@@ -35,6 +57,9 @@ pub struct FakeState {
     pub recovers_itself: HashSet<String>,
     /// `flush` takes nothing and answers false (a session still opening, say).
     pub flush_stuck: bool,
+    /// The next `stop` comes too late: the turn it names ended just before and took the queue as
+    /// its follow-up (a new attempt), so the stop reaches nothing.
+    pub follow_up_before_stop: bool,
 }
 
 /// acp.ts in miniature: turns are tracked, prompts queue behind a running turn or the hold, and a test
@@ -44,6 +69,8 @@ pub struct FakeRuntime {
     pub s: Mutex<FakeState>,
     /// Signalled after every `flush`.
     pub flushed: tokio::sync::Notify,
+    /// Every `stop` takes it shared first: a test holding it exclusively delays the stops.
+    pub stop_gate: RwLock<()>,
 }
 
 impl FakeRuntime {
@@ -52,6 +79,9 @@ impl FakeRuntime {
     }
     fn run(&self, st: &mut FakeState, sid: &str, msgs: &[(String, String)]) {
         st.turning.insert(sid.into());
+        st.next_attempt += 1;
+        let attempt = format!("a{}", st.next_attempt);
+        st.attempts.insert(sid.into(), attempt);
         for (t, v) in msgs {
             let _ = self
                 .store
@@ -83,9 +113,10 @@ impl FakeRuntime {
     }
     /// End the running turn like acp.ts `runTurn`: queued rows run next (no turn-end callback), else the core hears about it.
     pub fn end_turn(&self, core: &Core, sid: &str, stop: &str, error: Option<&str>) {
-        let next = {
+        let (next, attempt) = {
             let mut st = self.st();
             st.turning.remove(sid);
+            let attempt = st.attempts.remove(sid);
             let _ = self.store.session_patch(
                 sid,
                 crate::patch![status: if stop == "error" { "error" } else { "idle" }],
@@ -103,13 +134,17 @@ impl FakeRuntime {
                 self.run(&mut st, sid, &msgs);
                 return;
             }
-            st.holding && !self.store.queued(sid).unwrap().is_empty()
+            (
+                st.holding && !self.store.queued(sid).unwrap().is_empty(),
+                attempt,
+            )
         };
         if next {
             return;
         }
         core.on_turn_end(TurnEnd {
             session_id: sid.into(),
+            attempt,
             stop_reason: stop.into(),
             error: error.map(String::from),
         })
@@ -149,29 +184,84 @@ impl AgentRuntime for FakeRuntime {
         self.run(&mut st, sid, &[(text.into(), via.into())]);
         Ok(Prompted::Sent)
     }
-    fn cancel(&self, sid: &str) -> bool {
+    fn running(&self, sid: &str) -> Option<Running> {
+        self.st().attempts.get(sid).map(|a| Running {
+            session: sid.into(),
+            attempt: a.clone(),
+        })
+    }
+    fn stop(&self, turn: &Running) -> Result<Stop> {
+        let _gate = self.stop_gate.read().unwrap();
         let mut st = self.st();
-        st.cancelled.push(sid.into());
-        st.turning.contains(sid)
+        if std::mem::take(&mut st.follow_up_before_stop) {
+            let taken = self.store.queue_take(&turn.session).unwrap();
+            let msgs: Vec<_> = taken.into_iter().map(|q| (q.text, q.via)).collect();
+            self.run(&mut st, &turn.session, &msgs);
+            self.store
+                .store()
+                .queued()
+                .submitted(&turn.session)
+                .unwrap();
+        }
+        let stop = if st.attempts.get(&turn.session) == Some(&turn.attempt) {
+            st.cancelled.push(turn.session.clone());
+            Stop::Requested
+        } else {
+            Stop::NotRunning
+        };
+        st.stops.push((turn.clone(), stop));
+        Ok(stop)
+    }
+    fn user_stop(&self, sid: &str) -> Result<Stop> {
+        self.st().stopped.push(sid.into());
+        self.cancel(sid)
     }
     fn is_busy(&self, sid: &str) -> bool {
         self.st().turning.contains(sid)
     }
-    fn release(&self, sid: &str) {
-        self.st().released.push(sid.into());
+    fn created(&self, sid: &str, after: Option<&str>) {
+        self.st()
+            .created
+            .push((sid.into(), after.map(String::from)));
     }
-    fn answer_permission(&self, decision: &str, option: Option<&str>) -> bool {
+    fn release(&self, sid: &str) -> Result<Released> {
         let mut st = self.st();
+        st.released.push(sid.into());
+        Ok(st
+            .release_answers
+            .get(sid)
+            .cloned()
+            .unwrap_or(Released::Gone))
+    }
+    fn answer_permission(&self, decision: &str, option: Option<&str>) -> Result<Answered> {
+        let mut st = self.st();
+        if st.answer_error {
+            return Err(msg("store unavailable"));
+        }
         st.answered
             .push((decision.into(), option.map(String::from)));
-        st.permissions.remove(decision)
+        Ok(if st.permissions.remove(decision) {
+            Answered::Applied
+        } else if st.pending_permissions.remove(decision) {
+            Answered::Pending
+        } else {
+            Answered::Gone
+        })
     }
     fn hold(&self, on: bool) {
         self.st().holding = on;
     }
-    fn set_mode(&self, sid: &str, mode: &str) -> bool {
-        self.st().modes.push((sid.into(), mode.into()));
-        true
+    fn set_mode(&self, sid: &str, mode: &str) -> Result<Configured> {
+        let mut st = self.st();
+        if st.mode_error {
+            return Err(msg("store unavailable"));
+        }
+        st.modes.push((sid.into(), mode.into()));
+        Ok(if st.mode_unsupported {
+            Configured::Unsupported
+        } else {
+            Configured::Applied
+        })
     }
     fn is_holding(&self) -> bool {
         self.st().holding
@@ -185,7 +275,7 @@ impl AgentRuntime for FakeRuntime {
     fn recovers_itself(&self, sid: &str) -> bool {
         self.st().recovers_itself.contains(sid)
     }
-    fn flush(&self, sid: &str, lead: Option<(&str, &str)>) -> bool {
+    fn flush(&self, sid: &str, lead: Option<(&str, &str)>) -> Flushed {
         let sent = self.flush_now(sid, lead);
         self.flushed.notify_one();
         sent
@@ -193,12 +283,15 @@ impl AgentRuntime for FakeRuntime {
 }
 
 impl FakeRuntime {
-    fn flush_now(&self, sid: &str, lead: Option<(&str, &str)>) -> bool {
+    fn flush_now(&self, sid: &str, lead: Option<(&str, &str)>) -> Flushed {
         let mut st = self.st();
         st.flush_in_runtime
             .push(tokio::runtime::Handle::try_current().is_ok());
-        if st.turning.contains(sid) || st.holding || st.flush_stuck {
-            return false;
+        if st.turning.contains(sid) {
+            return Flushed::Busy;
+        }
+        if st.holding || st.flush_stuck {
+            return Flushed::Held;
         }
         let mut seen = HashSet::new();
         let mut msgs: Vec<(String, String)> = lead
@@ -212,11 +305,14 @@ impl FakeRuntime {
         msgs.extend(taken.into_iter().map(|q| (q.text, q.via)));
         msgs.retain(|(t, _)| seen.insert(t.clone()));
         if msgs.is_empty() {
-            return false;
+            return Flushed::Empty;
         }
         self.run(&mut st, sid, &msgs);
         self.store.store().queued().submitted(sid).unwrap();
-        true
+        Flushed::Started(Running {
+            session: sid.into(),
+            attempt: st.attempts[sid].clone(),
+        })
     }
 }
 
@@ -311,6 +407,7 @@ impl Kit {
             store: store.clone(),
             s: Mutex::new(FakeState::default()),
             flushed: tokio::sync::Notify::new(),
+            stop_gate: RwLock::new(()),
         });
         let gw = Arc::new(FakeGateway {
             script: Mutex::new(Box::new(|_, _| Err(msg("no model in tests")))),

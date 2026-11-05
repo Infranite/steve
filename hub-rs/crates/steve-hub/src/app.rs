@@ -107,24 +107,41 @@ async fn maintenance_gate(State(st): State<AppState>, req: Request, next: Next) 
                 .get(header::AUTHORIZATION)
                 .and_then(|v| v.to_str().ok())
                 .and_then(|v| v.strip_prefix("Bearer "));
-            let continuation = modules.store.continuing_activity("mcp_existing_turn", || {
-                path.starts_with("/mcp")
-                    && token.is_some_and(|token| {
-                        modules
-                            .store
-                            .sessions()
-                            .by_token(token)
-                            .ok()
-                            .flatten()
-                            .is_some_and(|s| matches!(s.status.as_str(), "running" | "starting"))
-                            || modules
+            // a Node turn waiting for a permission holds the drain until it is answered (D1), so
+            // its answer must get through
+            let card = (*req.method() == axum::http::Method::POST)
+                .then(|| path.strip_prefix("/api/decisions/"))
+                .flatten()
+                .filter(|id| !id.is_empty() && !id.contains('/'));
+            let answer = card.and_then(|id| {
+                modules
+                    .store
+                    .continuing_activity("node_permission_answer", || {
+                        crate::wire::node_runtime::waiting_card(&modules.store, id)
+                    })
+            });
+            let continuation = answer.or_else(|| {
+                modules.store.continuing_activity("mcp_existing_turn", || {
+                    path.starts_with("/mcp")
+                        && token.is_some_and(|token| {
+                            modules
                                 .store
-                                .thread()
-                                .run_by_token(token)
+                                .sessions()
+                                .by_token(token)
                                 .ok()
                                 .flatten()
-                                .is_some_and(|r| r.status == "running")
-                    })
+                                .is_some_and(|s| {
+                                    matches!(s.status.as_str(), "running" | "starting")
+                                })
+                                || modules
+                                    .store
+                                    .thread()
+                                    .run_by_token(token)
+                                    .ok()
+                                    .flatten()
+                                    .is_some_and(|r| r.status == "running")
+                        })
+                })
             });
             let Some(permit) = continuation else {
                 return json_response(
@@ -193,21 +210,25 @@ pub fn app(
         .route("/healthz", get({
             let cfg = st.cfg.clone();
             let store = st.modules.as_ref().map(|m| m.store.clone());
+            let (local, remote) = (st.node.clone(), st.nodes.is_some());
             move || async move {
                 // the outbox (owed / dead deliveries) is information; `ok` stays the liveness answer.
                 // `drain`: the durable maintenance drain is on (business answers 503) and a release script
-                // must lift it. Not `maintenance`, which only the supervisor's candidate gate reports
+                // must lift it. Not `maintenance`, which only the supervisor's candidate gate reports.
+                // `node`: the Node path for rollout and rollback decisions (node_runtime::health)
                 let drain = store.as_ref().map(|s| s.maintenance());
-                let outbox = match store {
+                let (outbox, node) = match store {
                     Some(s) => tokio::task::spawn_blocking(move || {
-                        s.reader(steve_store::outbox::stats).ok()
+                        let node = crate::wire::node_runtime::health(&s, local.as_deref(), remote)
+                            .inspect_err(|e| tracing::warn!("healthz node: {e}"))
+                            .ok();
+                        (s.reader(steve_store::outbox::stats).ok(), node)
                     })
                     .await
-                    .ok()
-                    .flatten(),
-                    None => None,
+                    .unwrap_or_default(),
+                    None => (None, None),
                 };
-                json_response(200, &json!({ "ok": true, "version": version, "build_commit": crate::build_identity().map(|(_, commit)| commit), "web_version": crate::web::web_version(&cfg), "drain": drain, "outbox": outbox, "recovery": crate::recovery::status() }))
+                json_response(200, &json!({ "ok": true, "version": version, "build_commit": crate::build_identity().map(|(_, commit)| commit), "web_version": crate::web::web_version(&cfg), "drain": drain, "outbox": outbox, "node": node, "recovery": crate::recovery::status() }))
             }
         }))
         .nest("/auth", auth)

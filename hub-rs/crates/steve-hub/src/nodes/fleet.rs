@@ -24,6 +24,8 @@ struct Entry {
     remote: Arc<RemoteNode>,
     runtime: Option<Arc<NodeRuntime>>,
     tools: Option<Arc<dyn HubTools>>,
+    /// The protocol of the Node's latest link since the Hub started (`None`: not linked yet).
+    proto: Option<(u16, u16)>,
 }
 
 pub struct NodeFleet {
@@ -37,6 +39,9 @@ pub struct NodeFleet {
     holding: AtomicBool,
     /// An attempt's deadline for the coordinators started from now on (ms; 0: their default).
     turn_limit: AtomicI64,
+    /// How long a session may sit idle before it is let go, for the coordinators started from
+    /// now on (ms; -1: their default).
+    idle_release: AtomicI64,
 }
 
 /// Events of a Node no coordinator runs for yet: refused `offline`, so they stay in its journal.
@@ -87,6 +92,7 @@ impl NodeFleet {
             nodes: Mutex::new(HashMap::new()),
             holding: AtomicBool::new(false),
             turn_limit: AtomicI64::new(0),
+            idle_release: AtomicI64::new(-1),
         });
         if let Some(s) = service {
             fleet.set_service(s);
@@ -101,6 +107,10 @@ impl NodeFleet {
 
     pub fn set_turn_limit(&self, ms: i64) {
         self.turn_limit.store(ms.max(1), Ordering::Relaxed);
+    }
+
+    pub fn set_idle_release(&self, ms: i64) {
+        self.idle_release.store(ms.max(0), Ordering::Relaxed);
     }
 
     /// The Hub's release hold on every coordinator.
@@ -137,6 +147,7 @@ impl NodeFleet {
             remote: RemoteNode::new(node.clone()),
             runtime: None,
             tools: None,
+            proto: None,
         });
         f(e)
     }
@@ -146,6 +157,23 @@ impl NodeFleet {
         self.entry(node, |e| e.remote.clone())
     }
 
+    /// Records the protocol the Node's hello said, for each link it opens.
+    pub fn linked(&self, node: &NodeId, proto: (u16, u16)) {
+        self.entry(node, |e| e.proto = Some(proto));
+    }
+
+    /// Whether the Node is known to speak `since` or later: its latest link said so. A Node not
+    /// linked since the Hub started counts as not, so what a minor added is never sent to it.
+    pub fn speaks(&self, node: &NodeId, since: (u16, u16)) -> bool {
+        self.speaks_known(node, since).unwrap_or(false)
+    }
+
+    /// [`Self::speaks`], telling "not known yet" (`None`: not linked since the Hub started) from
+    /// "its hello said an older protocol" (`Some(false)`).
+    pub fn speaks_known(&self, node: &NodeId, since: (u16, u16)) -> Option<bool> {
+        self.entry(node, |e| e.proto.map(|p| p.0 == since.0 && p >= since))
+    }
+
     /// Starts the Node's coordinator (once).
     pub fn start(&self, node: &NodeId) -> Option<Arc<NodeRuntime>> {
         let domain = self.domain.clone()?;
@@ -153,9 +181,18 @@ impl NodeFleet {
             Some(rt) => (rt.clone(), false),
             None => {
                 let rt = NodeRuntime::new(self.store.clone(), e.remote.clone(), domain);
+                // what the Node replays passes the link's guard, as what it pushes does
+                rt.over_link(
+                    super::guard::replay_check(self.store.clone(), node.clone()),
+                    steve_node_wire::envelope::MAX_FRAME as u32,
+                );
                 let ms = self.turn_limit.load(Ordering::Relaxed);
                 if ms > 0 {
                     rt.set_turn_limit(ms);
+                }
+                let idle = self.idle_release.load(Ordering::Relaxed);
+                if idle >= 0 {
+                    rt.set_idle_release(idle);
                 }
                 rt.hold(self.holding.load(Ordering::SeqCst));
                 e.runtime = Some(rt.clone());

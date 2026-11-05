@@ -3,11 +3,12 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use steve_acp::AcpConfig;
-use steve_node::{LocalNode, NodeConfig, Root};
+use steve_node::{LocalNode, NodeConfig, Root, Storage};
 use steve_node_api::testkit::RecordingSink;
 use steve_node_api::testkit::build::{answer, choice, cmd, limits, policy};
 use steve_node_api::*;
@@ -77,13 +78,25 @@ impl T {
                 id: RootId::new("work").unwrap(),
                 path: root.join("work"),
                 display: "~/work".into(),
+                access: RootAccess::ReadWrite,
             }],
             capacity: Capacity {
                 sessions: 4,
                 jobs: 0,
                 execs: 0,
             },
+            storage: Storage::default(),
         }
+    }
+
+    /// A Node whose filesystem has as many free bytes as `free` says (the D6 defaults otherwise).
+    fn node_with_free(&self, free: &Arc<AtomicU64>) -> LocalNode {
+        let free = free.clone();
+        let mut cfg = self.config();
+        cfg.storage.free_space = Some(Arc::new(move || free.load(Ordering::SeqCst)));
+        let n = LocalNode::open(cfg).unwrap();
+        n.connect(self.sink.clone(), None);
+        n
     }
 
     fn node(&self) -> LocalNode {
@@ -456,6 +469,66 @@ async fn a_model_that_does_not_take_fails_the_open() {
     assert_eq!(t.sent("session/prompt"), 0, "nothing ran on another model");
 }
 
+/// The adapter's `session/set_mode` calls, in order.
+fn modes_sent(t: &T) -> Vec<String> {
+    std::fs::read_to_string(&t.log)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter(|m| m["method"] == "session/set_mode")
+        .filter_map(|m| m["params"]["modeId"].as_str().map(str::to_string))
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn auto_is_a_mode_of_its_own_at_open_and_configure() {
+    let t = T::new(&[]);
+    let n = t.node();
+    n.prepare_workspace(now_cmd("op_prep", prepare_proj()))
+        .await
+        .unwrap();
+    assert!(ok(&finished(&n, "op_prep").await));
+    let mut o = open_body("s_1");
+    o.policy.permissions = PermissionMode::Auto;
+    n.open_session(now_cmd("op_open", o)).await.unwrap();
+    let s = finished(&n, "op_open").await;
+    assert!(ok(&s), "{s:?}");
+    let v = n.session(SessionId::new("s_1").unwrap()).await.unwrap();
+    assert_eq!(v.effective_permissions, PermissionMode::Auto);
+    assert_eq!(modes_sent(&t), ["auto"], "Claude Code's own auto mode");
+    // away and back: Ask is set explicitly, then auto again
+    for (op, p) in [
+        ("op_cfg_ask", PermissionMode::Ask),
+        ("op_cfg_auto", PermissionMode::Auto),
+    ] {
+        let v = n.session(SessionId::new("s_1").unwrap()).await.unwrap();
+        let mut policy = policy();
+        policy.permissions = p;
+        n.configure_session(now_cmd(
+            op,
+            ConfigureSession {
+                session: SessionId::new("s_1").unwrap(),
+                expected: v.revision,
+                choice: choice(),
+                policy,
+            },
+        ))
+        .await
+        .unwrap();
+        let s = finished(&n, op).await;
+        assert!(ok(&s), "{op}: {s:?}");
+        let v = n.session(SessionId::new("s_1").unwrap()).await.unwrap();
+        assert_eq!(v.effective_permissions, p);
+    }
+    assert_eq!(modes_sent(&t), ["auto", "default", "auto"]);
+    // a turn runs in it
+    let mut tu = turn("s_1", "t_1", "a_1", "@say auto");
+    tu.run.policy.permissions = PermissionMode::Auto;
+    n.start_turn(now_cmd("op_t1", tu)).await.unwrap();
+    t.until("the end", |t| !t.ended().is_empty()).await;
+    assert_eq!(t.text(), "auto");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_crashed_adapter_interrupts_and_the_next_attempt_starts_fresh() {
     let t = T::new(&[]);
@@ -585,6 +658,88 @@ async fn paths_stay_inside_the_roots() {
         .await
         .unwrap_err();
     assert_eq!(e.code, ErrorCode::Denied);
+}
+
+fn prepare_in(resource: &str, root: &str, rel: &str) -> Prepare {
+    Prepare {
+        resource: resource.into(),
+        kind: PrepareKind::Existing {
+            dir: RootPath {
+                root: RootId::new(root).unwrap(),
+                rel: RelPath::new(rel).unwrap(),
+            },
+        },
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn roots_change_without_a_restart_and_a_read_only_root_takes_no_workspace() {
+    let t = T::new(&[]);
+    std::fs::create_dir_all(t.root.join("later/p")).unwrap();
+    std::fs::create_dir_all(t.root.join("kb/notes")).unwrap();
+    let n = t.node();
+    // not a root yet
+    let e = n
+        .prepare_workspace(now_cmd("op_later0", prepare_in("item:l", "later", "p")))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::Denied);
+    let work = t.config().roots.remove(0);
+    n.set_roots(vec![
+        work.clone(),
+        Root {
+            id: RootId::new("later").unwrap(),
+            path: t.root.join("later"),
+            display: "~/later".into(),
+            access: RootAccess::ReadWrite,
+        },
+        Root {
+            id: RootId::new("kb").unwrap(),
+            path: t.root.join("kb"),
+            display: "~/kb".into(),
+            access: RootAccess::ReadOnly,
+        },
+    ]);
+    // a root added after open: prepared with no restart
+    n.prepare_workspace(now_cmd("op_later", prepare_in("item:l", "later", "p")))
+        .await
+        .unwrap();
+    assert!(ok(&finished(&n, "op_later").await));
+    // a read-only root is shown as such and takes no workspace
+    let caps = n.probe(false).await.unwrap();
+    let kb = caps.roots.iter().find(|r| r.id.as_str() == "kb").unwrap();
+    assert_eq!(kb.access, RootAccess::ReadOnly);
+    let e = n
+        .prepare_workspace(now_cmd("op_kb", prepare_in("item:k", "kb", "notes")))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::Denied);
+    // a root taken away (an archived project): refused for new work
+    n.set_roots(vec![work]);
+    let e = n
+        .prepare_workspace(now_cmd("op_later2", prepare_in("item:m", "later", "p")))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::Denied);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_node_with_no_session_capacity_takes_workspace_work_only() {
+    let t = T::new(&[]);
+    let mut cfg = t.config();
+    cfg.capacity.sessions = 0;
+    let n = LocalNode::open(cfg).unwrap();
+    n.connect(t.sink.clone(), None);
+    n.prepare_workspace(now_cmd("op_prep", prepare_proj()))
+        .await
+        .unwrap();
+    assert!(ok(&finished(&n, "op_prep").await));
+    let e = n
+        .open_session(now_cmd("op_open", open_body("s1")))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::Unsupported);
+    assert_eq!(t.sent("initialize"), 0, "no harness started");
 }
 
 // ── a real crash: the Node is a child process killed with SIGKILL ──
@@ -1959,4 +2114,273 @@ async fn a_journal_from_a_newer_node_is_refused() {
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
     assert_eq!(version, 4, "left as it was");
+}
+
+// ── disk quota (N1-4): a free-space high-water with hysteresis, compaction on the ack ──
+
+const RESERVE: u64 = 512 << 20;
+
+/// The journal file and its live pages, in bytes (as the Node counts them).
+fn journal_sizes(db: &rusqlite::Connection) -> (u64, u64) {
+    let p = |name: &str| -> u64 {
+        db.pragma_query_value(None, name, |r| r.get::<_, i64>(0))
+            .unwrap() as u64
+    };
+    let (page, count, free) = (p("page_size"), p("page_count"), p("freelist_count"));
+    (count * page, (count - free) * page)
+}
+
+fn spec_ops(db: &rusqlite::Connection) -> Vec<String> {
+    let mut st = db
+        .prepare("SELECT op FROM command_specs ORDER BY op")
+        .unwrap();
+    st.query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+fn exhausted<T: std::fmt::Debug>(r: &ApiResult<T>) -> bool {
+    matches!(r, Err(e) if e.code == ErrorCode::Exhausted)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_full_disk_stops_new_work_but_not_stopping_or_the_end() {
+    let t = T::new(&[]);
+    let free = Arc::new(AtomicU64::new(1 << 40));
+    let n = t.node_with_free(&free);
+    ready(&n, "s_1").await;
+    n.start_turn(now_cmd("op_t1", turn("s_1", "t_1", "a_1", "@sleep 20000")))
+        .await
+        .unwrap();
+    t.until("the prompt", |t| t.sent("session/prompt") == 1)
+        .await;
+    // the disk has less free space than the reserve: the limit is gone
+    free.store(RESERVE / 2, Ordering::SeqCst);
+    let r = n
+        .start_turn(now_cmd("op_t2", turn("s_1", "t_2", "a_2", "hello")))
+        .await;
+    assert!(exhausted(&r), "{r:?}");
+    let r = n
+        .cancel(now_cmd(
+            "op_c",
+            Cancel {
+                target: OperationId::new("op_t1").unwrap(),
+                reason: "disk full".into(),
+            },
+        ))
+        .await;
+    assert!(!exhausted(&r), "a cancel is still taken: {r:?}");
+    // the running attempt ends (cancelled), and its end is written and delivered
+    t.until("the end", |t| !t.ended().is_empty()).await;
+    assert_eq!(t.ended()[0].outcome, Outcome::Cancelled);
+    finished(&n, "op_t1").await;
+    n.release_session(now_cmd("op_rel", SessionId::new("s_1").unwrap()))
+        .await
+        .unwrap();
+    assert!(ok(&finished(&n, "op_rel").await));
+    // still full: nothing new, not even opening again
+    let r = n.open_session(now_cmd("op_open2", open_body("s_1"))).await;
+    assert!(exhausted(&r), "{r:?}");
+    n.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_ack_compacts_the_journal_under_low_water_and_work_is_taken_again() {
+    let t = T::new(&[]);
+    let free = Arc::new(AtomicU64::new(1 << 40));
+    // the Hub takes nothing for now: events and command bodies stay in the journal
+    t.sink.set_failing(true);
+    let n = t.node_with_free(&free);
+    ready(&n, "s_1").await;
+    let pad = "x".repeat(900_000);
+    for i in 1..=4 {
+        let op = format!("op_t{i}");
+        let text = format!("@say {i}\n{pad}");
+        n.start_turn(now_cmd(
+            &op,
+            turn("s_1", &format!("t_{i}"), &format!("a_{i}"), &text),
+        ))
+        .await
+        .unwrap();
+        assert!(ok(&finished(&n, &op).await));
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let db = rusqlite::Connection::open(t.home.join("node.sqlite3")).unwrap();
+    let (file, used) = journal_sizes(&db);
+    assert!(used > 3_600_000, "{used}");
+    // high-water: the filesystem's room past the reserve is just what the journal uses
+    free.store(RESERVE - (file - used), Ordering::SeqCst);
+    let r = n
+        .start_turn(now_cmd("op_t5", turn("s_1", "t_5", "a_5", "hello")))
+        .await;
+    assert!(exhausted(&r), "{r:?}");
+    let r = n
+        .cancel(now_cmd(
+            "op_c",
+            Cancel {
+                target: OperationId::new("op_t4").unwrap(),
+                reason: "x".into(),
+            },
+        ))
+        .await;
+    assert!(!exhausted(&r), "control keeps its margin: {r:?}");
+    // a little room again, but usage is still above 80% of the limit: still refused
+    free.store(RESERVE - (file - used) + used / 8, Ordering::SeqCst);
+    let r = n
+        .start_turn(now_cmd("op_t5", turn("s_1", "t_5", "a_5", "hello")))
+        .await;
+    assert!(exhausted(&r), "hysteresis: {r:?}");
+    // the Hub takes the events: the ack drops them and the finished turns' bodies
+    t.sink.set_failing(false);
+    all_acknowledged(&n).await;
+    let specs = spec_ops(&db);
+    // the cancel finished at accept with no stream of its own: its body goes too
+    assert!(
+        specs.is_empty(),
+        "finished and acknowledged bodies are compacted: {specs:?}"
+    );
+    // the limit is used * 9/8 now, so low water (80%) is 0.9 * used
+    let (_, after) = journal_sizes(&db);
+    assert!(after * 10 < used * 9, "{after} of {used}");
+    n.start_turn(now_cmd("op_t5", turn("s_1", "t_5", "a_5", "@say again")))
+        .await
+        .unwrap();
+    assert!(ok(&finished(&n, "op_t5").await));
+    n.shutdown().await;
+}
+
+/// Counts every position the Hub took (to see each delivered once).
+#[derive(Default)]
+struct Counting {
+    hub: RecordingSink,
+    taken: Mutex<Vec<(String, String, u64)>>,
+}
+
+#[async_trait::async_trait]
+impl EventSink for Counting {
+    async fn commit(&self, batch: EventBatch) -> ApiResult<EventAck> {
+        let keys: Vec<_> = batch
+            .events
+            .iter()
+            .map(|e| {
+                (
+                    e.cursor.stream.as_str().to_string(),
+                    e.cursor.epoch.as_str().to_string(),
+                    e.cursor.seq,
+                )
+            })
+            .collect();
+        let ack = self.hub.commit(batch).await?;
+        self.taken.lock().unwrap().extend(keys);
+        Ok(ack)
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sqlite_full_mid_turn_keeps_numbered_events_and_skips_no_seq() {
+    let t = T::new(&[]);
+    t.sink.set_failing(true);
+    let n = t.node();
+    ready(&n, "s_1").await;
+    let mut tu = turn("s_1", "t_1", "a_1", "@flood");
+    tu.run.limits.max_output_bytes = 64 << 20;
+    n.start_turn(now_cmd("op_t1", tu)).await.unwrap();
+    let db = rusqlite::Connection::open(t.home.join("node.sqlite3")).unwrap();
+    let count = || -> i64 {
+        db.query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))
+            .unwrap()
+    };
+    t.until("output journaled", |_| count() > 100).await;
+    // the disk is full: the next page the journal needs is refused (SQLITE_FULL)
+    n.cap_journal_pages(0).unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    n.shutdown().await;
+    drop(n);
+    let mut st = db.prepare("SELECT event FROM events").unwrap();
+    let before: Vec<NodeEvent> = st
+        .query_map([], |r| r.get::<_, String>(0))
+        .unwrap()
+        .map(|s| serde_json::from_str(&s.unwrap()).unwrap())
+        .collect();
+    drop(st);
+    let deltas = before
+        .iter()
+        .filter(|e| matches!(e.body, EventBody::TextDelta { .. }))
+        .count();
+    assert!(
+        (50..2000).contains(&deltas),
+        "the flood was cut short by the full journal: {deltas}"
+    );
+
+    // started again (the disk has room): what was numbered is delivered, each position once
+    let hub = Arc::new(Counting::default());
+    let n = loop {
+        match LocalNode::open(t.config()) {
+            Ok(n) => break n,
+            Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
+        }
+    };
+    n.connect(hub.clone(), None);
+    all_acknowledged(&n).await;
+    let taken = hub.taken.lock().unwrap().clone();
+    let mut seen = std::collections::HashSet::new();
+    for k in &taken {
+        assert!(seen.insert(k.clone()), "delivered twice: {k:?}");
+    }
+    let held = hub.hub.events();
+    for e in &before {
+        assert!(held.contains(e), "lost: {:?}", e.cursor);
+    }
+    for h in n.streams().await.unwrap() {
+        let mut seqs: Vec<u64> = taken
+            .iter()
+            .filter(|(s, e, _)| s == h.stream.as_str() && e == h.epoch.as_str())
+            .map(|k| k.2)
+            .collect();
+        seqs.sort();
+        assert_eq!(seqs, (1..=h.produced).collect::<Vec<_>>(), "{}", h.stream);
+    }
+    n.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn acknowledged_bodies_go_but_an_unknown_prepare_keeps_its_own_for_recover() {
+    let t = T::new(&[]);
+    let n = t.node();
+    let db = rusqlite::Connection::open(t.home.join("node.sqlite3")).unwrap();
+    n.prepare_workspace(now_cmd("op_prep", prepare_proj()))
+        .await
+        .unwrap();
+    assert!(ok(&finished(&n, "op_prep").await));
+    db.execute_batch("CREATE TRIGGER fail_prepare BEFORE UPDATE ON ops WHEN NEW.id='prep_crash' AND NEW.receipt LIKE '%finished%' BEGIN SELECT RAISE(ABORT,'crash before final receipt'); END").unwrap();
+    let c = now_cmd(
+        "prep_crash",
+        Prepare {
+            resource: "recover_scratch".into(),
+            kind: PrepareKind::Scratch,
+        },
+    );
+    n.prepare_workspace(c.clone()).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    n.shutdown().await;
+    drop(n);
+    db.execute_batch("DROP TRIGGER fail_prepare").unwrap();
+    let n = reopen(&t, t.sink.clone()).await;
+    all_acknowledged(&n).await;
+    assert_eq!(spec_ops(&db), ["prep_crash"]);
+    n.recover(now_cmd(
+        "recover_prep",
+        Recover {
+            target: c.id.clone(),
+            expected: c.digest("prepare_workspace").unwrap(),
+            reason: "retire interrupted prepare".into(),
+        },
+    ))
+    .await
+    .unwrap();
+    assert!(ok(&finished(&n, "recover_prep").await));
+    all_acknowledged(&n).await;
+    assert!(spec_ops(&db).is_empty(), "{:?}", spec_ops(&db));
+    n.shutdown().await;
 }

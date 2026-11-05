@@ -12,20 +12,21 @@
 //! Points: before and after the Node accepts (a journal `ops` abort, a lost reply), before and
 //! after the harness starts (a `procs` abort, the Node closed and opened again mid-turn), before
 //! and after an event is written (a journal `events` abort, a Hub inbox abort), and the Hub
-//! committed but the Node never heard the ack (acks dropped, or the Node restarted first).
+//! committed but the Node never heard the ack (acks dropped, or the Node restarted first), and the
+//! Node's disk full (it refuses new work until there is room).
 //! Gaps that later steps close (pruned redelivery, journal identity, quarantine…) are not asserted
 //! here; their steps add their cases.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use steve_hub::wire::node_runtime::{Binding, NodeDomain, NodeRuntime, Sink};
 use steve_hub::wire::node_tools::{NodeTools, Service};
-use steve_node::{LocalNode, NodeConfig, Root};
+use steve_node::{LocalNode, NodeConfig, Root, Storage};
 use steve_node_api::testkit::{FakeNode, Point, build};
 use steve_node_api::*;
 use steve_store::{FnPublisher, Store, StoreError};
@@ -39,7 +40,7 @@ const NODE: &str = "local";
 struct Ends(Mutex<Vec<(String, String, Option<String>)>>);
 
 impl NodeDomain for Ends {
-    fn turn_ended(&self, session: &str, stop: &str, error: Option<String>) {
+    fn turn_ended(&self, session: &str, _: Option<&str>, stop: &str, error: Option<String>) {
         self.0
             .lock()
             .unwrap()
@@ -144,6 +145,7 @@ face!(Discovery {
     query probe(fresh: bool) -> Capabilities;
     query history(page: PageRequest) -> Page<HistoryEntry>;
     query import_page(import: OperationId, page: PageRequest) -> ImportedPage;
+    query locate(source: HistoryRef) -> HistoryLocation;
 });
 
 impl Node for Faulty {
@@ -358,6 +360,8 @@ struct Rig {
     rt: Arc<NodeRuntime>,
     ends: Arc<Ends>,
     tools: Mutex<Option<Arc<ToolHost>>>,
+    /// The free bytes the Node's filesystem reports.
+    free: Arc<AtomicU64>,
 }
 
 fn adapter(root: &Path) -> PathBuf {
@@ -411,6 +415,7 @@ impl Rig {
             rt,
             ends,
             tools: Mutex::new(None),
+            free: Arc::new(AtomicU64::new(1 << 40)),
         };
         r.open_node().await;
         r.rt.start();
@@ -441,11 +446,19 @@ impl Rig {
                 id: RootId::new("work").unwrap(),
                 path: root.join("work"),
                 display: "~/work".into(),
+                access: RootAccess::ReadWrite,
             }],
             capacity: Capacity {
                 sessions: 4,
                 jobs: 0,
                 execs: 0,
+            },
+            storage: Storage {
+                free_space: Some({
+                    let free = self.free.clone();
+                    Arc::new(move || free.load(Ordering::SeqCst))
+                }),
+                ..Storage::default()
             },
         }
     }
@@ -818,6 +831,34 @@ async fn a_batch_the_hub_cannot_take_comes_again_and_is_stored_once() {
     assert_eq!(text, "refusedagain");
 }
 
+// ── the Node's disk is full ──
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_turn_sent_while_the_nodes_disk_is_full_runs_once_when_room_returns() {
+    let r = Rig::new().await;
+    r.ready().await;
+    // less free space than the Node's reserve: it takes no new work (exhausted)
+    r.free.store(0, Ordering::SeqCst);
+    r.rt.prompt(S, "@say spaced", "user", &[]).unwrap();
+    until("sent", || r.starts() == 1).await;
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(
+        r.journal_starts(),
+        0,
+        "nothing accepted while the disk is full"
+    );
+    assert_eq!(r.prompts("spaced"), 0);
+    assert!(r.ends().is_empty());
+    // room again: the same command is taken, and runs once
+    r.free.store(1 << 40, Ordering::SeqCst);
+    until("the end", || !r.ends().is_empty()).await;
+    assert_eq!(r.ends()[0].1, "end_turn");
+    assert_eq!(r.prompts("spaced"), 1);
+    assert_eq!((r.starts(), r.journal_starts()), (1, 1));
+    assert_eq!(r.attempts(), ["finished"]);
+    r.stored_once().await;
+}
+
 // ── the Hub committed, the Node restarted before it heard the ack ──
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -838,6 +879,118 @@ async fn a_node_restarted_before_its_ack_sends_again_and_nothing_is_stored_twice
     assert!(again >= inbox, "nothing lost");
     assert_eq!(r.prompts("unheard"), 1);
     assert_eq!(r.attempts(), ["finished"]);
+}
+
+/// N1-7: the Hub committed every batch but no ack reached the Node, then the Hub restarted. Its
+/// reconcile compares the Node's heads with what it holds and acknowledges it itself (acks over
+/// the delivery path stay lost), so the Node's journal drains with nothing stored twice and the
+/// turn not run again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_hub_restarted_between_commit_and_ack_acknowledges_on_reconcile() {
+    let mut r = Rig::new().await;
+    r.ready().await;
+    *r.gate.lose_acks.lock().unwrap() = usize::MAX;
+    r.rt.prompt(S, "@say unheard", "user", &[]).unwrap();
+    until("the end", || !r.ends().is_empty()).await;
+    let kinds = r.kinds();
+    let unacked: i64 = r
+        .journal()
+        .query_row("SELECT COUNT(*) FROM events", [], |x| x.get(0))
+        .unwrap();
+    assert!(unacked > 0, "the Node still keeps what the Hub holds");
+    r.restart_hub().await;
+    r.stored_once().await;
+    assert_eq!(r.kinds(), kinds, "the Hub's events are the same");
+    assert_eq!(r.prompts("unheard"), 1);
+    assert_eq!(r.attempts(), ["finished"]);
+    assert_eq!(r.ends().len(), 1, "the turn ended once");
+}
+
+// ── an unknown control, retired by Stop ──
+
+/// N1-8: the journal cannot write a prepare's end, and the Node closes. Its outcome is unknown
+/// after both restart: the open waiting on it never goes, nothing retires it on its own. Stop
+/// sends one recover; the workspace is prepared again under a new id (adopted as it is) and
+/// opened, and the message queued all along runs once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stop_retires_an_unknown_prepare_and_the_queued_message_runs_once() {
+    let mut r = Rig::new().await;
+    let j = r.journal();
+    j.execute_batch("CREATE TRIGGER fail_prepare BEFORE UPDATE ON ops WHEN NEW.method='prepare_workspace' AND NEW.receipt LIKE '%finished%' BEGIN SELECT RAISE(ABORT,'injected crash before the final receipt'); END").unwrap();
+    r.bind();
+    r.rt.prompt(S, "@say queued", "user", &[]).unwrap();
+    until("the prepare taken", || {
+        r.q::<String>(&format!(
+            "SELECT state FROM node_commands WHERE operation_id='op_prep_{S}'"
+        )) != "pending"
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    r.close_node().await;
+    j.execute_batch("DROP TRIGGER fail_prepare").unwrap();
+    r.open_node().await;
+    r.restart_hub().await;
+    until("unknown", || {
+        r.q::<String>(&format!(
+            "SELECT state FROM node_commands WHERE operation_id='op_prep_{S}'"
+        )) == "unknown"
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(r.phase(), "opening", "held: the open waits on its prepare");
+    assert_eq!(r.prompts("queued"), 0);
+
+    assert!(r.rt.user_stop(S).unwrap());
+    until("the end", || !r.ends().is_empty()).await;
+    assert_eq!(r.ends()[0].1, "end_turn");
+    assert_eq!(r.prompts("queued"), 1, "the queued message ran once");
+    assert_eq!(r.attempts(), ["finished"]);
+    let recovers: i64 = r.q("SELECT COUNT(*) FROM node_commands WHERE method='recover'");
+    assert_eq!(recovers, 1, "exactly one recover");
+    let prepares: i64 = r
+        .journal()
+        .query_row(
+            "SELECT COUNT(*) FROM ops WHERE method='prepare_workspace'",
+            [],
+            |x| x.get(0),
+        )
+        .unwrap();
+    assert_eq!(prepares, 2, "the target never again, a new prepare instead");
+    r.stored_once().await;
+}
+
+// ── the Node sends again what the Hub holds, but changed ──
+
+/// N1-6: the Hub committed a batch but the ack was lost, and the Node's copy changed before it sent
+/// it again (a corrupted journal). The changed event is quarantined and acknowledged, the Node's
+/// delivery drains, and the conversation keeps what came first.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_corrupted_redelivery_is_quarantined_and_the_node_drains() {
+    let r = Rig::new().await;
+    r.ready().await;
+    *r.gate.lose_acks.lock().unwrap() = usize::MAX;
+    r.rt.prompt(S, "@say original", "user", &[]).unwrap();
+    until("the end", || !r.ends().is_empty()).await;
+    let j = r.journal();
+    let changed = j
+        .execute(
+            "UPDATE events SET event=json_set(event,'$.body.text','tampered') WHERE json_extract(event,'$.body.type')='text_delta'",
+            [],
+        )
+        .unwrap();
+    assert!(changed > 0, "the Node still keeps the unacknowledged text");
+    *r.gate.lose_acks.lock().unwrap() = 0;
+    r.stored_once().await;
+    let held: i64 = r.q("SELECT COUNT(*) FROM node_event_quarantine WHERE json_extract(payload,'$.body.text')='tampered'");
+    assert_eq!(held as usize, changed, "each changed event is kept aside");
+    let faulted: i64 = r.q("SELECT COUNT(*) FROM node_streams WHERE fault='conflict'");
+    assert_eq!(faulted, 1);
+    let tampered: i64 = r.q("SELECT COUNT(*) FROM events WHERE data LIKE '%tampered%'");
+    assert_eq!(tampered, 0, "never applied");
+    let text: String = r.q("SELECT group_concat(json_extract(payload,'$.body.text'),'') FROM (SELECT payload FROM node_event_inbox WHERE json_extract(payload,'$.body.type')='text_delta' ORDER BY seq)");
+    assert_eq!(text, "original");
+    assert!(r.rt.is_uncertain(S), "the session waits for reconciliation");
+    assert_eq!(r.prompts("original"), 1);
 }
 
 // ── Steve's tools ──

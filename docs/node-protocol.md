@@ -37,18 +37,19 @@ payload
 | 双向 | `hello` / `welcome` / `heartbeat` / `goodbye` / `error` | 版本区间、能力、帧上限、connection_epoch、恢复水位 |
 | Hub→Node | `session.open` / `configure` / `inspect` / `release` | 参数是 workspace_ref、harness、model、effort、mode、工具授权；返回不透明的 resume handle。`release` 只释放空闲的 harness 进程，不关闭 Steve 会话 |
 | Hub→Node | `turn.start` / `cancel` / `inspect` | 带 session_id、turn_id、attempt_id、prompt parts、files、limits。每个会话同时最多一个活动 attempt；忙时返回 `busy`，Node 不自己排业务队列 |
-| Hub→Node | `job.start` / `cancel` / `inspect` | kind 为 `think` 或 `research`；带 attempt_id、limits、可读范围、continuation |
+| Hub→Node | `job.start` / `cancel` / `inspect` | `run`（attempt_id、一个模型、prompt parts、limits、continuation）加上按类型区分的 `work`：`think`（可缓存的 instructions、工具 `none` 或 `read_attached`）或 `research`（cwd 和可读目录都是 root 下的路径、budget、是否提供 Steve 的只读工具）。作业总在自己的 scratch 目录里跑；prompt 里的文件只能放在 `.steve/attachments/<文件名>`（一段，名字不重复），不会覆盖 harness 自己的配置 |
 | Hub→Node | `permission.resolve` | 绑定 `permission_id + attempt_id + action_digest + decision_revision`，带 Steve 决定（`allow_once` / `reject`）。Node 只对还在等待的原请求生效，由 Node 映射成 ACP optionId。过期或不匹配时返回 `stale`，Hub 据此关闭卡片。同样的答复重复发送是幂等的；冲突的答复被拒绝。参数、目标 HEAD 或资源一变，旧授权即失效 |
 | Hub→Node | `workspace.prepare` / `inspect` / `tidy` | 工作区句柄 + revision |
-| Hub→Node | `git.inspect` / `git.apply` | 粒度较粗的事实查询，一次返回 refs、status、merge-base、冲突，并带上观察到的 revision。写操作带前置条件（`expected_head`、`expected_ref`），apply 时再校验一次。不开放任意 git argv。Node 只回事实和证据，不做业务决定：不选 merge 还是 rebase，不自动解决冲突，不决定删分支或发布版本。多个 worktree 共享一个 repo 时，写操作按 repo 协调 |
-| Hub→Node | `exec.start` / `cancel` / `inspect` | 流程 cmd 节点、带密钥执行、项目发布脚本。密钥走短期投递，不进入持久化的命令体 |
-| Hub→Node | `fs.list` / `describe` / `read` | 分页、范围、大小上限。Node 负责 realpath、symlink 和根目录约束，每次打开文件时都重新检查 |
-| Hub→Node | `tree.scan` / `scan.page` | 知识库文件夹源用。manifest 是带版本的扫描结果，不是文件系统的原子快照。`read` 带期望的版本，文件变了就返回 `conflict`，调用方重新读取。文件地址是 `FileAddress`：工作区内的路径，或允许的根目录下的路径（知识库文件夹只读读取，不会为此建工作区）。只有声明了完整、且 source revision 仍然匹配的扫描，才能拿来对账"文件已删除" |
-| Hub→Node | `harness.probe`、`history.list` / `import` / `locate` | `import` 返回标准事件，不在 Node 上建 Hub 的业务行 |
+| Hub→Node | `git.inspect` / `git.apply` | 粒度较粗的事实查询，一次返回 refs、status、merge-base、冲突，并带上观察到的 revision。只读查询是固定的几类（`show`、`log`、`diff`、`is_ancestor`、`status`、`fingerprint`、`tracked_ignored`），每个答案带上它所依据的提交。写操作带前置条件（`expected_head`、`expected_ref`），apply 时再校验一次；push 推到规范 URL，带 `origin_must_be` 和 `expected_local`，凭据以 HTTP header 方式交给 git。不开放任意 git argv。Node 只回事实和证据，不做业务决定：不选 merge 还是 rebase，不自动解决冲突，不决定删分支或发布版本。多个 worktree 共享一个 repo 时，写操作按 repo 协调 |
+| Hub→Node | `exec.start` / `cancel` / `inspect` | 流程 cmd 节点、带密钥执行、项目发布脚本。带非密钥的 env，deadline 用 `limits.deadline`。密钥走短期投递，不进入持久化的命令体；写临时文件的方式只有声明了 `secret-file` 能力的 Node（目前只有 Hub 本机）才提供 |
+| Hub→Node | `fs.list` / `describe` / `read` | 分页、范围、大小上限。Node 负责 realpath、symlink 和根目录约束，每次打开文件时都重新检查。根目录分读写和只读：只读根目录可以列出、读取、扫描，不能在里面建工作区、执行命令或做 git 写操作 |
+| Hub→Node | `tree.scan` / `scan.page` | 知识库文件夹源用。manifest 是带版本的扫描结果，不是文件系统的原子快照。`read` 带期望的版本，文件变了就返回 `conflict`，调用方重新读取。文件地址是 `FileAddress`：工作区内的路径，或允许的根目录下的路径（知识库文件夹只读读取，不会为此建工作区）。只有声明了完整、且 source revision 仍然匹配的扫描，才能拿来对账"文件已删除"。扫描带 `max_files` / `max_file_bytes` 上限；超大的文件照样列出并标 `too_big`。问题是有类型的，分两类：缺口（目录或条目读不了、超过数量上限、被打断）可能漏掉文件，有一个扫描就不算完整；搁置（`held`：指向根目录外的链接、规则拒绝的路径、读不了的单个文件）只说明这一个路径没列出及原因，扫描仍然完整，和知识库文件夹原来的扫描一致。悬空链接算文件已删除。完整只出现在最后一页 |
+| Hub→Node | `harness.probe`、`history.list` / `import` / `locate` | `import` 返回标准事件，不在 Node 上建 Hub 的业务行。`locate` 只认 Node 自己列出过的 key，客户端编造的 key 返回 `invalid` |
 | Hub→Node | `node.drain` / `node.resume` | "停止接新活"和"取消在跑的任务"是两回事 |
 | Node→Hub | `events.batch` / `execution.snapshot` / `node.status` | 只报事实。快照包含活动执行、等待中的权限和终态回执 |
 | Hub→Node | `events.ack` / `replay.request` / `flow.credit` | 落库之后才 ack 连续水位；发现缺口时请求重放 |
 | Node→Hub | `tool.catalog` / `tool.call` / `tool.inspect` / `tool.cancel` | 按执行授权；`tool_call_id` 保持稳定 |
+| Node→Hub | `secret.take` | Node 用命令自己的 operation id 取一次密钥，只在命令确定被接受之后取（被拒绝的命令不取，原样重发时还能取到）。一次性、短期：再取或操作结束后取返回 `stale`，别的操作的密钥返回 `denied`。请求发出后回复丢了，密钥可能已经用掉，按 `stale`（不重试）处理，不当作 `offline`。两端都不写日志、不进日志表、不进事件和结果 |
 | 双向 | `blob.begin` / `chunk` / `finish` / `abort` | transfer_id、hash、size、offset。双向都支持：Node 拉附件，Node 把要长期保存的产物上传到 Hub。finish 时校验 hash 后才算提交。传输的恢复和任务的恢复相互独立。密钥不走 blob，用单独的、不持久化的投递通道 |
 
 ## 3. 状态机
@@ -67,7 +68,7 @@ Hub 持久队列 → dispatch outbox → Node 已接受 → running ⇄ waiting(
   - waiting 期间待处理的请求是一个集合，不是单个布尔值。
   - cancel 只是一个意图，最终以 Node 报回的终态为准，正常完成可能先到。cancel 不等于回滚。
 - **Turn**（Hub 的逻辑回合）：`queued → dispatching → attempt… → 结束`。一个 turn 可以有多个 attempt；`attempt.ended` 不代表 turn 已经结束，由 Hub 裁定是结束还是再发一个 attempt。Hub 还要判断队列是否已排空，再推进事项。今天藏在 `turn_end` 里的"排空"语义改归 Hub。
-- **Job**：attempt 的状态机与 Turn 相同，结果放在 `job.result` 里，以引用形式给出。
+- **Job**：attempt 的状态机与 Turn 相同。答案是 completion 的 `result` 文本；草稿以 `message_started` / `text_delta` 到达（新消息替换旧草稿），工具行以 `tool_changed` 到达。每个结束的 research 尝试（失败的也一样）另在 completion 的 `job` 里报告结束方式（done、failed、stopped、budget、violated）、轮数、读过的文件和是否在沙箱里运行；done 只配 succeeded，failed 只配 failed，错误本身在 completion 的 `error` 里。
 - **Workspace / exec 操作**：`accepted → running → committed | failed`。有外部副作用的操作，超时或断线不等于没有发生。
 - **`unknown`** 是观察和恢复时的状态，不是终态，也不保证进程已经停止。Hub 不能仅凭 `unknown` 就释放工作区或派发第二个 attempt。
 
@@ -92,7 +93,7 @@ Hub 持久队列 → dispatch outbox → Node 已接受 → running ⇄ waiting(
 
 ## 5. 版本与错误
 
-- **版本协商**：`hello` 带上协议的 min/max、事件 schema 版本、能力、编码和帧上限，`welcome` 从中选定交集。major 不兼容就拒绝连接；minor 只做可选的新增。未知的必需能力只拒绝对应的操作。未知的枚举值永远不能映射成 allow。
+- **版本协商**：`hello` 带上协议的 min/max、事件 schema 版本、能力、编码和帧上限，`welcome` 从中选定交集。major 不兼容就拒绝连接；minor 只做可选的新增。未知的必需能力只拒绝对应的操作。请求里未知的方法和未知的枚举值（较新一端的新类型）都回 `unsupported`，连接保持，什么都没执行；未知的枚举值永远不能映射成 allow。回复读不懂时不是 `unsupported`：命令的回复按 `outcome_unknown` 处理（先查询，不重做，不改走别的路径），只读请求的回复是 `invalid`。较旧的一端会忽略它不认识的字段，所以 Hub 记下 hello 里 Node 的 minor，用到更新字段的请求（git 只读查询、merge、push、非默认的扫描上限、`history.locate`）不发给更旧的 Node，直接回 `unsupported`。
 - **错误**：字段为 `code, retry, operation, state, safe_detail`。错误码有 `offline`、`busy`、`unsupported`、`denied`、`expired`、`stale`、`conflict`、`exhausted`、`invalid`、`outcome_unknown`、`gap`、`internal`。
   - 接受之前就被拒绝的（`ApiError::new`）：什么都没执行。其中 offline、busy、exhausted 可以原样重发同一条命令（同一个 operation id），但绝不能换一个新 attempt。
   - 可能已经被接受的（`ApiError::uncertain`，比如回复丢了、发送后连接断了）：先查询 operation，再决定下一步。

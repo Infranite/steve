@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use common::*;
 use serde_json::json;
-use steve_acp::{Acp, Prompted};
+use steve_acp::{Acp, Flushed, Prompted};
 
 fn turn_ends(h: &MemHost) -> usize {
     h.rec(|r| r.turn_ends.len())
@@ -201,6 +201,87 @@ async fn cancel_ends_the_running_turn() {
     h.rec(|r| assert_eq!(r.turn_ends[0].stop_reason, "cancelled"));
     assert!(f.methods().contains(&"session/cancel".to_owned()));
     assert!(!acp.cancel("s1"));
+    acp.shutdown(Duration::from_secs(2)).await;
+}
+
+/// A stop aimed at one turn (its token) never reaches the turn queued behind it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancel_if_with_a_stale_token_is_a_no_op() {
+    let f = Fake::new(&[]);
+    let h = host();
+    h.with(f.session("s1", "claude-code"));
+    let acp = Acp::new(f.config(), h.clone());
+    assert_eq!(acp.current("s1"), None);
+    acp.prompt("s1", "@sleep 600", "me").await.unwrap();
+    let t1 = acp.current("s1").expect("a turn runs");
+    assert_eq!(
+        acp.prompt("s1", "@sleep 20000", "me").await.unwrap(),
+        Prompted::Queued
+    );
+    wait_for("the queued turn", 10, || f.prompts().len() == 2).await;
+    let t2 = acp.current("s1").expect("the follow-up runs");
+    assert_ne!(t1, t2);
+    assert!(!acp.cancel_if("s1", t1), "t1 is over");
+    assert!(!f.methods().contains(&"session/cancel".to_owned()));
+    assert!(h.system().is_empty());
+    assert!(acp.is_busy("s1"), "t2 still runs");
+    assert!(acp.cancel_if("s1", t2));
+    wait_for("turn end", 5, || turn_ends(&h) == 1).await;
+    h.rec(|r| assert_eq!(r.turn_ends[0].stop_reason, "cancelled"));
+    assert_eq!(acp.current("s1"), None);
+    assert!(!acp.cancel_if("s1", t2), "nothing runs any more");
+    acp.shutdown(Duration::from_secs(2)).await;
+}
+
+/// The turn end names the turn that ended: after a queued follow-up, the follow-up (the turn the
+/// end callback stands for); a flush says which turn it started, or why none.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_turn_end_carries_the_last_turn_token() {
+    let f = Fake::new(&[]);
+    let h = host();
+    h.with(f.session("s1", "claude-code"));
+    let acp = Acp::new(f.config(), h.clone());
+    acp.hold(true);
+    assert_eq!(acp.prompt("s1", "a", "me").await.unwrap(), Prompted::Queued);
+    assert_eq!(acp.flush_turn("s1", None), Flushed::Held);
+    acp.hold(false);
+    let Flushed::Started(t1) = acp.flush_turn("s1", None) else {
+        panic!("a turn starts");
+    };
+    assert_eq!(acp.current("s1"), Some(t1));
+    assert_eq!(acp.flush_turn("s1", None), Flushed::Busy);
+    wait_for("turn end", 10, || turn_ends(&h) == 1).await;
+    h.rec(|r| assert_eq!(r.turn_ends[0].turn, t1));
+    assert_eq!(acp.flush_turn("s1", None), Flushed::Empty);
+
+    acp.prompt("s1", "@sleep 600", "me").await.unwrap();
+    let t2 = acp.current("s1").unwrap();
+    acp.prompt("s1", "@sleep 600", "me").await.unwrap();
+    wait_for("the follow-up", 10, || f.prompts().len() == 3).await;
+    let t3 = acp.current("s1").unwrap();
+    assert_ne!(t2, t3);
+    wait_for("turn end", 10, || turn_ends(&h) == 2).await;
+    h.rec(|r| assert_eq!(r.turn_ends[1].turn, t3));
+    acp.shutdown(Duration::from_secs(2)).await;
+}
+
+/// A gateway retry is the same turn: the token taken before it still stops it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_retry_keeps_the_turn_token() {
+    let f = Fake::new(&[]);
+    let h = host();
+    h.with(f.session("s1", "claude-code"));
+    let mut cfg = f.config();
+    cfg.retry_delays = vec![Duration::from_millis(1500)];
+    let acp = Acp::new(cfg, h.clone());
+    acp.prompt("s1", "@fail 1 503", "me").await.unwrap();
+    let t = acp.current("s1").unwrap();
+    wait_for("retry scheduled", 10, || h.system().len() == 2).await;
+    assert_eq!(acp.current("s1"), Some(t));
+    assert!(acp.cancel_if("s1", t));
+    assert!(!acp.is_busy("s1"));
+    h.rec(|r| assert_eq!(r.turn_ends[0].stop_reason, "cancelled"));
+    h.rec(|r| assert_eq!(r.turn_ends[0].turn, t, "its end names the same turn"));
     acp.shutdown(Duration::from_secs(2)).await;
 }
 
@@ -575,7 +656,7 @@ async fn idle_adapters_are_released_and_resume_with_load() {
     acp.prompt("s1", "x", "me").await.unwrap();
     wait_for("turn end", 10, || turn_ends(&h) == 1).await;
     let pid = acp.adapter_pid("s1").unwrap();
-    acp.release("s1"); // idle → killed now
+    assert!(acp.release("s1"), "idle → killed now");
     assert!(acp.adapter_pid("s1").is_none());
     wait_for("process gone", 5, || !alive(pid)).await;
 
@@ -599,7 +680,7 @@ async fn release_spares_a_busy_adapter() {
     let acp = Acp::new(f.config(), h.clone());
     acp.prompt("s1", "@sleep 500", "me").await.unwrap();
     wait_for("prompt sent", 10, || f.prompts().len() == 1).await;
-    acp.release("s1");
+    assert!(!acp.release("s1"), "busy: kept");
     assert!(acp.adapter_pid("s1").is_some());
     wait_for("turn end", 10, || turn_ends(&h) == 1).await;
     assert_eq!(h.rec(|r| r.turn_ends[0].stop_reason.clone()), "end_turn");

@@ -13,7 +13,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
-use steve_node_api::{ApiError, ApiResult, ErrorCode, OperationId};
+use steve_node_api::{ApiError, ApiResult, ErrorCode, OperationId, PROTOCOL};
 use tokio::sync::{Notify, Semaphore, mpsc, oneshot, watch};
 use tokio::time::Instant;
 
@@ -35,6 +35,10 @@ pub struct ConnOptions {
     pub dead_after: Duration,
     /// Prefix of request ids (`h` on the Hub, `n` on the Node), for logs.
     pub side: &'static str,
+    /// The protocol both ends speak on this link (the peer's, capped at this end's). A peer of an
+    /// older minor ignores fields newer than it, so callers check [`Conn::peer_minor`] before
+    /// sending one ([`crate::RemoteNode`] does).
+    pub peer: (u16, u16),
 }
 
 impl Default for ConnOptions {
@@ -43,6 +47,7 @@ impl Default for ConnOptions {
             heartbeat: Duration::from_secs(10),
             dead_after: Duration::from_secs(30),
             side: "x",
+            peer: PROTOCOL,
         }
     }
 }
@@ -76,6 +81,7 @@ struct CloseReq {
 struct Shared {
     generation: u64,
     side: &'static str,
+    peer: (u16, u16),
     ctl: mpsc::Sender<Out>,
     bulk: mpsc::Sender<Out>,
     pending: Mutex<HashMap<String, Pending>>,
@@ -108,6 +114,7 @@ impl Conn {
         let s = Arc::new(Shared {
             generation,
             side: opts.side,
+            peer: opts.peer.min(PROTOCOL),
             ctl,
             bulk,
             pending: Mutex::new(HashMap::new()),
@@ -126,6 +133,11 @@ impl Conn {
 
     pub fn generation(&self) -> u64 {
         self.s.generation
+    }
+
+    /// The protocol minor both ends speak ([`ConnOptions::peer`]).
+    pub fn peer_minor(&self) -> u16 {
+        self.s.peer.1
     }
 
     pub fn is_closed(&self) -> bool {
@@ -493,6 +505,34 @@ pub(crate) fn to_value<T: serde::Serialize>(v: &T) -> ApiResult<Value> {
     serde_json::to_value(v).map_err(|e| ApiError::new(ErrorCode::Internal, format!("encode: {e}")))
 }
 
-pub(crate) fn from_value<T: serde::de::DeserializeOwned>(v: Value) -> ApiResult<T> {
-    serde_json::from_value(v).map_err(|e| ApiError::new(ErrorCode::Invalid, format!("decode: {e}")))
+/// Decodes a request. A kind this end does not know (a newer peer's variant) is `unsupported`,
+/// like an unknown method: nothing ran, the peer may do without it. Any other bad payload is
+/// `invalid`. Never for answers: see [`answer_of`].
+pub fn from_value<T: serde::de::DeserializeOwned>(v: Value) -> ApiResult<T> {
+    serde_json::from_value(v).map_err(|e| {
+        let code = if e.to_string().starts_with("unknown variant") {
+            ErrorCode::Unsupported
+        } else {
+            ErrorCode::Invalid
+        };
+        ApiError::new(code, format!("decode: {e}"))
+    })
+}
+
+/// Decodes the answer to this end's own call. An answer it cannot read (a newer peer's variant, a
+/// bad payload) is never `unsupported`, which would say nothing ran: the peer did answer, so a
+/// command (`op`) may have taken effect and is `outcome_unknown` on its operation (ask, do not
+/// redo or route elsewhere); a pure read is `invalid`.
+pub fn answer_of<T: serde::de::DeserializeOwned>(
+    method: &str,
+    v: Value,
+    op: Option<&OperationId>,
+) -> ApiResult<T> {
+    serde_json::from_value(v).map_err(|e| match op {
+        Some(op) => ApiError::uncertain(op, format!("{method}: unreadable answer: {e}")),
+        None => ApiError::new(
+            ErrorCode::Invalid,
+            format!("{method}: unreadable answer: {e}"),
+        ),
+    })
 }
