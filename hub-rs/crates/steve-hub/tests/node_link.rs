@@ -317,3 +317,74 @@ async fn a_dropped_link_reconnects_and_replays_once() {
     n.task.abort();
     n.node.shutdown().await;
 }
+
+/// A paired device's LocalNode (the `steve-node` binary) has no discovery switch on: over the
+/// link it lists, reads and locates no history, even with transcripts under its user's home, and
+/// its probe reports no harness version.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_remote_local_node_refuses_history() {
+    let h = Hub::start().await;
+    let (id, node) = h.paired("u1").await;
+    let n = local_node(&h, id, &node).await;
+    let home = n.log.parent().unwrap().to_path_buf();
+    let sid = "0b7f2c1e-1111-4222-8333-444455556666";
+    let t = home.join(format!(".claude/projects/-w/{sid}.jsonl"));
+    std::fs::create_dir_all(t.parent().unwrap()).unwrap();
+    std::fs::write(
+        &t,
+        format!(
+            r#"{{"type":"user","cwd":"/w","sessionId":"{sid}","message":{{"role":"user","content":"secret"}}}}"#
+        ) + "\n",
+    )
+    .unwrap();
+    let remote = h.fleet.remote(&node);
+    until("attached", 10, || remote.generation().is_some()).await;
+    let unsupported = |r: String| {
+        assert!(r.contains("\"unsupported\""), "{r}");
+        assert!(!r.contains("secret"), "{r}");
+    };
+    unsupported(show(
+        &remote
+            .history(PageRequest {
+                cursor: None,
+                limit: 50,
+            })
+            .await,
+    ));
+    let source = HistoryRef {
+        harness: "claude-code".into(),
+        key: format!("cc:{sid}"),
+    };
+    unsupported(show(&remote.locate(source.clone()).await));
+    unsupported(show(
+        &remote
+            .import_history(cmd(
+                "op_imp",
+                HistoryImport {
+                    source,
+                    expected: Revision::new("m1-s1").unwrap(),
+                },
+            ))
+            .await,
+    ));
+    unsupported(show(
+        &remote
+            .import_page(
+                OperationId::new("op_imp").unwrap(),
+                PageRequest {
+                    cursor: None,
+                    limit: 50,
+                },
+            )
+            .await,
+    ));
+    let caps = remote.probe(true).await.unwrap();
+    assert!(
+        caps.harnesses
+            .iter()
+            .all(|h| h.version.is_empty() && h.models.is_empty()),
+        "{caps:?}"
+    );
+    n.task.abort();
+    n.node.shutdown().await;
+}

@@ -174,11 +174,8 @@ async fn an_import_reads_a_listed_key_at_its_version_and_pages_its_events() {
         .into_iter()
         .find(|e| e.source.harness == "claude-code")
         .unwrap();
-    let r = t
-        .node
-        .import_history(cmd("imp_1", cc.source.clone(), cc.version.clone()))
-        .await
-        .unwrap();
+    let c = cmd("imp_1", cc.source.clone(), cc.version.clone());
+    let r = t.node.import_history(c.clone()).await.unwrap();
     let Observed::Finished {
         outcome: Outcome::Succeeded,
         result: Some(OperationResult::Pages { operation }),
@@ -187,10 +184,10 @@ async fn an_import_reads_a_listed_key_at_its_version_and_pages_its_events() {
     else {
         panic!("{r:?}");
     };
-    // the same command again: the same answer, nothing read twice
+    // the same command again (as sent, timestamps and all): the same answer, nothing read twice
     assert_eq!(
         t.node
-            .import_history(cmd("imp_1", cc.source.clone(), cc.version.clone()))
+            .import_history(c.clone())
             .await
             .unwrap()
             .operation

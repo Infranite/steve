@@ -266,7 +266,7 @@ impl Catalog {
     async fn load(&self, harness: &str, fresh: bool) -> Value {
         let (models, source, default) = if harness == CODEX {
             let listed = match self.node.get() {
-                Some(n) => Some(node_codex(n.as_ref(), fresh).await),
+                Some(n) => node_codex(n.as_ref(), fresh).await,
                 None => self.codex_list().await,
             };
             let (models, source) = match listed {
@@ -345,27 +345,29 @@ impl Catalog {
     }
 }
 
-/// Codex's models as the local Node's probe reports them; none when it has no Codex (never the
-/// built-in list: the Node is where Codex runs).
-async fn node_codex(node: &dyn steve_node_api::Node, fresh: bool) -> Vec<Entry> {
+/// Codex's models as the local Node's probe reports them. An empty list only when the Node says
+/// it has no Codex (no version); `None`, so the built-in list applies as without the Node, when the
+/// probe fails, the Node runs no Codex harness, or Codex answers `--version` but lists no models
+/// (`debug models` failed, timed out or is unknown to that CLI).
+async fn node_codex(node: &dyn steve_node_api::Node, fresh: bool) -> Option<Vec<Entry>> {
     let caps = match node.probe(fresh).await {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!("probe of the local Node: {e}");
-            return vec![];
+            return None;
         }
     };
-    caps.harnesses
+    let h = caps.harnesses.iter().find(|h| h.name == CODEX)?;
+    if h.version.is_empty() {
+        return Some(vec![]);
+    }
+    let models: Vec<Entry> = h
+        .models
         .iter()
-        .find(|h| h.name == CODEX)
-        .map(|h| {
-            h.models
-                .iter()
-                .filter(|m| steve_core::models::valid_model(m))
-                .map(|m| Entry::new(m, None))
-                .collect()
-        })
-        .unwrap_or_default()
+        .filter(|m| steve_core::models::valid_model(m))
+        .map(|m| Entry::new(m, None))
+        .collect();
+    (!models.is_empty()).then_some(models)
 }
 
 /// Adds what the statistics saw (`used`: model → `{calls, ok_at, failed_at}`) to a list: each listed
@@ -442,29 +444,135 @@ fn add_usage(mut list: Value, used: &Value) -> Value {
 mod tests {
     use super::*;
 
-    /// With the local Node, Codex's list is its probe's: a Node without Codex lists none, and the
-    /// Hub runs no `codex` (the configured one would leave a mark).
+    /// An executable shell script at `p`.
+    fn script(p: &Path, body: &str) {
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(p, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    }
+
+    /// A catalog whose own `codex` would leave a mark if the Hub ran it.
+    fn marked(dir: &Path) -> Catalog {
+        let codex = dir.join("hub-codex");
+        script(&codex, &format!("touch '{}'", dir.join("ran").display()));
+        Catalog::new(dir.join("settings.json"), codex, dir.join(".codex"), None)
+    }
+
+    /// A LocalNode with a Codex adapter whose probe asks `codex` (absent unless the test writes it).
+    fn node_with_codex(dir: &Path, codex: PathBuf) -> std::sync::Arc<steve_node::LocalNode> {
+        let node = steve_node::LocalNode::open(steve_node::NodeConfig {
+            node: steve_node_api::NodeId::new("local").unwrap(),
+            home: dir.join("node"),
+            acp: steve_acp::AcpConfig {
+                adapters: HashMap::from([(CODEX.to_string(), dir.join("adapter"))]),
+                node: "node".into(),
+                claude_executable: dir.join("no-claude"),
+                steve_home: dir.join("steve"),
+                codex_home: dir.join(".codex"),
+                user_home: dir.to_path_buf(),
+                version: "test".into(),
+                idle_release: Duration::from_secs(600),
+                retry_delays: vec![],
+            },
+            roots: vec![],
+            capacity: steve_node_api::Capacity {
+                sessions: 0,
+                jobs: 0,
+                execs: 0,
+            },
+            storage: Default::default(),
+        })
+        .unwrap();
+        node.set_discovery(steve_node::history::DiscoveryConfig {
+            homes: steve_node::history::Homes {
+                user_home: dir.to_path_buf(),
+                steve_home: dir.join("steve"),
+                claude_dir: dir.join(".claude"),
+                codex_home: dir.join(".codex"),
+            },
+            binaries: steve_node::history::Binaries {
+                claude: dir.join("no-claude"),
+                codex,
+            },
+        });
+        std::sync::Arc::new(node)
+    }
+
+    fn ids(v: &Value) -> Vec<String> {
+        v["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["id"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    fn builtin() -> Vec<String> {
+        CODEX_MODELS.iter().map(|m| m.to_string()).collect()
+    }
+
+    /// With the local Node, the Hub runs no `codex`; a Node that runs no Codex harness, or whose
+    /// probe fails, leaves the built-in list as without the Node.
+    #[tokio::test]
+    async fn a_node_without_a_codex_harness_keeps_the_builtin_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = marked(dir.path());
+        c.set_node(steve_node_api::testkit::FakeNode::new("local"));
+        let v = c.get(CODEX, true).await.unwrap();
+        assert_eq!(ids(&v), builtin(), "{v}");
+        assert_eq!(v["source"], BUILTIN);
+        assert!(!dir.path().join("ran").exists(), "the Hub ran codex");
+    }
+
+    /// Codex is installed (it has a version) but `debug models` fails: the built-in list, not
+    /// none, as the same machine lists without the Node.
+    #[tokio::test]
+    async fn codex_with_a_version_but_no_models_keeps_the_builtin_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let codex = dir.path().join("bin/codex");
+        script(
+            &codex,
+            "if [ \"$1\" = \"--version\" ]; then echo 'codex-cli 0.40.0'; else exit 2; fi",
+        );
+        let node = node_with_codex(dir.path(), codex);
+        let c = marked(dir.path());
+        c.set_node(node.clone());
+        let v = c.get(CODEX, true).await.unwrap();
+        assert_eq!(ids(&v), builtin(), "{v}");
+        assert_eq!(v["source"], BUILTIN);
+        assert!(!dir.path().join("ran").exists(), "the Hub ran codex");
+        node.shutdown().await;
+    }
+
+    /// A Node whose machine has no Codex (no version) lists no Codex models.
     #[tokio::test]
     async fn a_node_without_codex_lists_no_codex_models() {
         let dir = tempfile::tempdir().unwrap();
-        let codex = dir.path().join("codex");
-        std::fs::write(
-            &codex,
-            format!("#!/bin/sh\ntouch '{}'\n", dir.path().join("ran").display()),
-        )
-        .unwrap();
-        std::fs::set_permissions(&codex, std::os::unix::fs::PermissionsExt::from_mode(0o755))
-            .unwrap();
-        let c = Catalog::new(
-            dir.path().join("settings.json"),
-            codex,
-            dir.path().join(".codex"),
-            None,
-        );
-        c.set_node(steve_node_api::testkit::FakeNode::new("local"));
+        let node = node_with_codex(dir.path(), dir.path().join("bin/codex"));
+        let c = marked(dir.path());
+        c.set_node(node.clone());
         let v = c.get(CODEX, true).await.unwrap();
         assert_eq!(v["models"], json!([]), "{v}");
         assert!(!dir.path().join("ran").exists(), "the Hub ran codex");
+        node.shutdown().await;
+    }
+
+    /// A Node whose Codex lists models: those, in Codex's order.
+    #[tokio::test]
+    async fn a_node_with_codex_lists_its_models() {
+        let dir = tempfile::tempdir().unwrap();
+        let codex = dir.path().join("bin/codex");
+        script(
+            &codex,
+            r#"if [ "$1" = "--version" ]; then echo 'codex-cli 0.80.0'; else echo '{"models":[{"slug":"gpt-5.5","visibility":"list","priority":2},{"slug":"gpt-5.5-codex","visibility":"list","priority":1}]}'; fi"#,
+        );
+        let node = node_with_codex(dir.path(), codex);
+        let c = marked(dir.path());
+        c.set_node(node.clone());
+        let v = c.get(CODEX, true).await.unwrap();
+        assert_eq!(ids(&v), ["gpt-5.5-codex", "gpt-5.5"], "{v}");
+        assert_eq!(v["source"], "codex debug models");
+        node.shutdown().await;
     }
 
     /// A settings file with a key helper that would leave a mark if anything ran it, and a key in

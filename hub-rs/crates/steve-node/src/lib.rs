@@ -161,8 +161,10 @@ pub(crate) struct Inner {
     snapshots: Mutex<HashMap<u64, Snapshot>>,
     cache_n: AtomicU64,
     tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
-    /// Where the harnesses' history is and which binaries a probe asks.
-    discovery: std::sync::RwLock<Arc<history::DiscoveryConfig>>,
+    /// Where the harnesses' history is and which binaries a probe asks; none until the host turns
+    /// discovery on ([`LocalNode::set_discovery`]): history is then `unsupported` and a probe runs
+    /// no harness binary.
+    discovery: std::sync::RwLock<Option<Arc<history::DiscoveryConfig>>>,
     probes: history::Probes,
     imports: history::Imports,
 }
@@ -965,10 +967,9 @@ impl LocalNode {
             }
             Ok(())
         })?;
-        let discovery = history::DiscoveryConfig::of(&cfg.acp);
         Ok(LocalNode(Arc::new_cyclic(|weak| Inner {
             roots: std::sync::RwLock::new(Arc::new(cfg.roots.clone())),
-            discovery: std::sync::RwLock::new(Arc::new(discovery)),
+            discovery: std::sync::RwLock::new(None),
             probes: Default::default(),
             imports: Default::default(),
             cfg,
@@ -1104,13 +1105,19 @@ impl LocalNode {
 
     /// Host bridge, like [`Self::set_roots`]: where this machine's harnesses keep their history and
     /// which binaries a probe asks, as the Hub on the same machine configures its own harnesses.
-    /// By default both come from the ACP configuration ([`history::DiscoveryConfig::of`]).
+    /// Off until set: a Node nobody turned discovery on for (the `steve-node` binary on a paired
+    /// device) lists, reads and locates no history and runs no harness binary to probe.
     pub fn set_discovery(&self, d: history::DiscoveryConfig) {
-        *self.0.discovery.write().unwrap() = Arc::new(d);
+        *self.0.discovery.write().unwrap() = Some(Arc::new(d));
     }
 
-    fn discovery(&self) -> Arc<history::DiscoveryConfig> {
-        self.0.discovery.read().unwrap().clone()
+    fn discovery(&self) -> ApiResult<Arc<history::DiscoveryConfig>> {
+        self.0
+            .discovery
+            .read()
+            .unwrap()
+            .clone()
+            .map_or_else(|| unsupported("history"), Ok)
     }
 
     fn mine(&self, w: &WorkspaceRef) -> ApiResult<()> {
@@ -2408,7 +2415,10 @@ impl WorkspaceExecutor for LocalNode {
 #[async_trait]
 impl Discovery for LocalNode {
     async fn probe(&self, fresh: bool) -> ApiResult<Capabilities> {
-        let probed = self.0.probes.get(&self.discovery(), fresh).await;
+        let probed = match self.discovery() {
+            Ok(d) => self.0.probes.get(&d, fresh).await,
+            Err(_) => Default::default(),
+        };
         let mut harnesses: Vec<HarnessCapability> = self
             .0
             .cfg
@@ -2453,6 +2463,7 @@ impl Discovery for LocalNode {
     }
     /// Newest first; the cursor is the position in that order.
     async fn history(&self, p: PageRequest) -> ApiResult<Page<HistoryEntry>> {
+        let d = self.discovery()?;
         let from = match &p.cursor {
             None => 0,
             Some(c) => c
@@ -2461,7 +2472,6 @@ impl Discovery for LocalNode {
                 .map_err(|_| ApiError::new(ErrorCode::Invalid, "bad cursor"))?,
         };
         let limit = p.limit.clamp(1, 500) as usize;
-        let d = self.discovery();
         let all = tokio::task::spawn_blocking(move || history::candidates(&d.homes, from + limit))
             .await
             .map_err(|e| ApiError::new(ErrorCode::Internal, format!("history: {e}")))?;
@@ -2474,6 +2484,7 @@ impl Discovery for LocalNode {
     /// names) at the version the Hub saw (else `stale`), and keeps its events to be read page by
     /// page. Nothing is journaled: the files stay the harness's.
     async fn import_history(&self, c: Command<HistoryImport>) -> ApiResult<Receipt> {
+        let d = self.discovery()?;
         c.check_window()?;
         let digest = c.digest("import_history")?;
         let done = |op: &OperationId| Receipt {
@@ -2489,7 +2500,6 @@ impl Discovery for LocalNode {
         if self.0.imports.seen(&c.id, &digest)? {
             return Ok(done(&c.id));
         }
-        let d = self.discovery();
         let (op, source, expected) = (c.id.clone(), c.body.source.clone(), c.body.expected);
         let events = tokio::task::spawn_blocking(move || {
             let h = &d.homes;
@@ -2530,10 +2540,11 @@ impl Discovery for LocalNode {
         Ok(done(&c.id))
     }
     async fn import_page(&self, i: OperationId, p: PageRequest) -> ApiResult<ImportedPage> {
+        self.discovery()?;
         self.0.imports.page(&i, &p)
     }
     async fn locate(&self, source: HistoryRef) -> ApiResult<HistoryLocation> {
-        let d = self.discovery();
+        let d = self.discovery()?;
         tokio::task::spawn_blocking(move || history::locate(&d.homes, &source))
             .await
             .map_err(|e| ApiError::new(ErrorCode::Internal, format!("locate: {e}")))?

@@ -49,31 +49,6 @@ pub struct DiscoveryConfig {
     pub binaries: Binaries,
 }
 
-impl DiscoveryConfig {
-    /// From the ACP configuration: `CLAUDE_CONFIG_DIR` when set, Codex where Homebrew puts it.
-    pub fn of(acp: &steve_acp::AcpConfig) -> DiscoveryConfig {
-        let claude_dir = std::env::var_os("CLAUDE_CONFIG_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| acp.user_home.join(".claude"));
-        let codex = ["/opt/homebrew/bin/codex", "/usr/local/bin/codex"]
-            .into_iter()
-            .find(|p| Path::new(p).exists())
-            .unwrap_or("/opt/homebrew/bin/codex");
-        DiscoveryConfig {
-            homes: Homes {
-                user_home: acp.user_home.clone(),
-                steve_home: acp.steve_home.clone(),
-                claude_dir,
-                codex_home: acp.codex_home.clone(),
-            },
-            binaries: Binaries {
-                claude: acp.claude_executable.clone(),
-                codex: codex.into(),
-            },
-        }
-    }
-}
-
 pub const CLAUDE_CODE: &str = "claude-code";
 pub const CODEX: &str = "codex";
 
