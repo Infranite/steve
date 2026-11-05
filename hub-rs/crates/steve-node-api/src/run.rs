@@ -261,7 +261,8 @@ pub struct ThinkJob {
 pub enum ThinkToolMode {
     /// No tool at all.
     None,
-    /// Read only, for the prompt's [`Part::File`]s (placed at their `name` in the scratch directory).
+    /// Read only, for the prompt's [`Part::File`]s (placed at their `name` in the scratch directory,
+    /// always `.steve/attachments/<file>`).
     ReadAttached,
 }
 
@@ -314,15 +315,17 @@ impl JobSpec {
         if !run.policy.readable.is_empty() {
             return bad("a job names what it reads in its work");
         }
-        let mut files = false;
+        let mut files = std::collections::HashSet::new();
         for p in &run.prompt {
             match p {
                 Part::Text { .. } | Part::Image { .. } => {}
                 Part::File { name, .. } => {
-                    if name.is_empty() || RelPath::new(name.as_str()).is_err() {
-                        return bad("a file part is named by a relative path");
+                    if !is_attachment_name(name) {
+                        return bad("a file part is named .steve/attachments/<file>");
                     }
-                    files = true;
+                    if !files.insert(name.as_str()) {
+                        return bad("two file parts have the same name");
+                    }
                 }
                 Part::Diff { .. } => return bad("a job prompt has no diff"),
             }
@@ -332,7 +335,7 @@ impl JobSpec {
                 if run.continuation.is_some() {
                     return bad("a think job does not continue a session");
                 }
-                if files && t.tools == ThinkToolMode::None {
+                if !files.is_empty() && t.tools == ThinkToolMode::None {
                     return bad("files in a think job need read_attached");
                 }
             }
@@ -347,7 +350,19 @@ impl JobSpec {
     }
 }
 
-/// How a research job ended, besides its [`crate::common::Outcome`] (in `Completion::job`).
+/// Where a job's files go in its scratch directory: `.steve/attachments/<file>`, one plain segment.
+/// Keeping them there means a file can never be (or overwrite) the harness's own configuration
+/// (`.claude/settings.json`, `.mcp.json`, `CLAUDE.md`) in the directory the harness runs from.
+pub const ATTACHMENTS_DIR: &str = ".steve/attachments/";
+
+fn is_attachment_name(name: &str) -> bool {
+    name.strip_prefix(ATTACHMENTS_DIR).is_some_and(|f| {
+        !f.is_empty() && f != "." && !f.contains('/') && RelPath::new(name).is_ok()
+    })
+}
+
+/// How a research attempt ended, besides its [`crate::common::Outcome`] (in `Completion::job`).
+/// Every finished research attempt carries one, a failed one too, so its turns and reads are kept.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JobReport {
     pub end: JobEnd,
@@ -364,7 +379,11 @@ pub struct JobReport {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum JobEnd {
+    /// It finished with an answer (outcome `succeeded`).
     Done,
+    /// The harness reported an error or ended without a result (outcome `failed`; the error is in
+    /// `Completion::error`).
+    Failed,
     /// Stopped by a cancel; the answer is what was written until then.
     Stopped,
     Budget {
@@ -378,6 +397,20 @@ pub enum JobEnd {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         target: Option<String>,
     },
+}
+
+impl JobEnd {
+    /// The end does not contradict the attempt's outcome: `done` comes only with success and
+    /// `failed` only with failure (the other ends say why it stopped and leave the outcome to the
+    /// Node).
+    pub fn fits(&self, outcome: crate::common::Outcome) -> bool {
+        use crate::common::Outcome as O;
+        match self {
+            JobEnd::Done => outcome == O::Succeeded,
+            JobEnd::Failed => outcome == O::Failed,
+            _ => true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -96,6 +96,7 @@ fn job_types_survive_the_wire() {
     roundtrip(&cmd("op_r", research("j_r", "a_r", "x")));
     for end in [
         JobEnd::Done,
+        JobEnd::Failed,
         JobEnd::Stopped,
         JobEnd::Budget {
             hit: BudgetHit::Idle,
@@ -149,6 +150,8 @@ fn job_wire_names_are_steves() {
     }))
     .unwrap();
     assert_eq!(v["job"]["end"], json!({"type": "budget", "hit": "time"}));
+    let v = serde_json::to_value(report(JobEnd::Failed)).unwrap();
+    assert_eq!(v["job"]["end"], json!({"type": "failed"}));
     // a completion without a report says nothing about one, and an older one still decodes
     let v = serde_json::to_value(done()).unwrap();
     assert!(v.get("job").is_none(), "{v}");
@@ -222,7 +225,24 @@ async fn a_malformed_job_is_refused_before_anything_runs() {
         tools: ThinkToolMode::None,
     });
     cases.push(("file without read_attached", j));
-    for bad in ["../secret", "/etc/passwd", ""] {
+    for bad in [
+        "../secret",
+        "/etc/passwd",
+        "",
+        // outside .steve/attachments: the harness's own configuration in its cwd
+        ".claude/settings.json",
+        ".mcp.json",
+        "CLAUDE.md",
+        "AGENTS.md",
+        ".",
+        // not exactly one plain segment under it
+        ".steve/attachments/",
+        ".steve/attachments/.",
+        ".steve/attachments/..",
+        ".steve/attachments/sub/x.md",
+        ".steve/attachments//x.md",
+        ".steve/attachments-x.md",
+    ] {
         let mut j = think_with_file();
         j.run.prompt[1] = Part::File {
             artifact: artifact(),
@@ -230,6 +250,9 @@ async fn a_malformed_job_is_refused_before_anything_runs() {
         };
         cases.push(("file name", j));
     }
+    let mut j = think_with_file();
+    j.run.prompt.push(j.run.prompt[1].clone());
+    cases.push(("duplicate file name", j));
     let mut j = job("j_1", "a_1", "x");
     j.run.continuation = Some(ResumeHandle::new("claude_s1").unwrap());
     cases.push(("think continuation", j));
@@ -270,6 +293,12 @@ async fn a_malformed_job_is_refused_before_anything_runs() {
     // research run is refused as unsupported, not invalid)
     think_with_file().check().unwrap();
     research_in_projects().check().unwrap();
+    let mut two = think_with_file();
+    two.run.prompt.push(Part::File {
+        artifact: artifact(),
+        name: ".steve/attachments/att_2-notes.md".into(),
+    });
+    two.check().unwrap();
     n.start_job(cmd("op_ok", think_with_file())).await.unwrap();
     let e = n
         .start_job(cmd("op_rs", research_in_projects()))
@@ -387,6 +416,54 @@ async fn a_job_streams_its_draft_and_ends_with_its_answer() {
         n.draft(&exec, "m3", &["x"]).await.unwrap_err().code,
         ErrorCode::Stale
     );
+}
+
+#[tokio::test]
+async fn a_failed_research_attempt_keeps_its_report() {
+    let (n, _) = connected();
+    n.start_job(cmd("op_r", research("j_r", "a_r", "q")))
+        .await
+        .unwrap();
+    let exec = exec_job("j_r", "a_r");
+    n.draft(&exec, "m1", &["读到一半"]).await.unwrap();
+    let failed = |end: JobEnd| Completion {
+        outcome: Outcome::Failed,
+        stop_reason: "error".into(),
+        error: Some(ApiError::new(ErrorCode::Internal, "harness error")),
+        ..report(end)
+    };
+    // a report that says done next to a failure contradicts itself
+    assert_eq!(
+        n.finish(&exec, failed(JobEnd::Done))
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::Invalid
+    );
+    assert_eq!(
+        n.finish(&exec, report(JobEnd::Failed))
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::Invalid
+    );
+    let end = failed(JobEnd::Failed);
+    roundtrip(&end);
+    n.finish(&exec, end.clone()).await.unwrap();
+    match n.operation(op("op_r")).await.unwrap().state {
+        Observed::Finished {
+            outcome: Outcome::Failed,
+            result: Some(OperationResult::Execution(c)),
+            error: Some(e),
+        } => {
+            assert_eq!(e.safe_detail, "harness error");
+            let r = c.job.unwrap();
+            assert_eq!(r.end, JobEnd::Failed);
+            assert_eq!((r.turns, r.files_read), (3, vec!["src/lib.rs".to_string()]));
+            assert!(r.sandboxed);
+        }
+        s => panic!("{s:?}"),
+    }
 }
 
 #[tokio::test]

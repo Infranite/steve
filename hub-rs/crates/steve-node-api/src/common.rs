@@ -290,7 +290,8 @@ pub struct Completion {
     /// Tools ran in this attempt: their effects happened, a retry must not redo them blindly.
     #[serde(default)]
     pub acted: bool,
-    /// How a research job ended besides its outcome (`None` for turns and think jobs).
+    /// How a research job ended besides its outcome. Every finished research attempt carries one,
+    /// a failed one too (`JobEnd::Failed`, the error above); `None` for turns and think jobs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub job: Option<crate::run::JobReport>,
 }

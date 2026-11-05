@@ -549,6 +549,14 @@ impl FakeNode {
     /// The attempt ends. Its receipt becomes final and stays so: the same end again is a no-op, a
     /// different one a conflict. Only this attempt frees its session.
     pub async fn finish(&self, exec: &ExecutionRef, completion: Completion) -> ApiResult<()> {
+        if let Some(r) = &completion.job
+            && !r.end.fits(completion.outcome)
+        {
+            return Err(ApiError::new(
+                ErrorCode::Invalid,
+                "the job's end contradicts its outcome",
+            ));
+        }
         let evs = {
             let mut st = self.st();
             let op = match st.attempts.get(exec.attempt()) {
