@@ -155,6 +155,9 @@ pub struct NodeRuntime {
     /// How long an attempt (and so a permission it asks) may take, in ms. 6 h unless the host
     /// sets it ([`Self::set_turn_limit`]).
     turn_limit: std::sync::atomic::AtomicI64,
+    /// New sessions left on the legacy runner since boot although this Node was on (no binding
+    /// could be planned, or the bind failed): `/healthz` shows them, so they don't hide.
+    fallbacks: std::sync::atomic::AtomicU64,
 }
 
 /// How long applied Node events stay in the inbox (what is still needed stays longer).
@@ -245,6 +248,7 @@ impl NodeRuntime {
             dirty: Mutex::new(HashSet::new()),
             stopped: Mutex::new(None),
             turn_limit: std::sync::atomic::AtomicI64::new(TURN_LIMIT_MS),
+            fallbacks: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
@@ -258,6 +262,21 @@ impl NodeRuntime {
     /// prompts, cancels, answers and releases with `why`, and nothing is sent.
     pub fn stop(&self, why: &str) {
         *self.stopped.lock().unwrap() = Some(why.to_string());
+    }
+
+    /// Whether [`Self::stop`] was called (its reason stays in the log).
+    pub fn is_stopped(&self) -> bool {
+        self.stopped.lock().unwrap().is_some()
+    }
+
+    /// A new session stayed on the legacy runner although this Node is on.
+    pub fn fell_back(&self) {
+        self.fallbacks.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// How many new sessions [`Self::fell_back`] since boot.
+    pub fn fallbacks(&self) -> u64 {
+        self.fallbacks.load(Ordering::Relaxed)
     }
 
     /// An error if [`Self::stop`] was called.
@@ -2873,6 +2892,75 @@ fn system_in(tx: &Tx, session: &str, text: &str) -> Result<(), StoreError> {
         now(),
     )?;
     Ok(())
+}
+
+/// `/healthz`'s `node` block: what rollout and rollback decisions read instead of the database.
+/// `local`: the local Node's coordinator when `STEVE_NODE_MODE=local`; `remote`: remote Nodes are
+/// listened for (`STEVE_NODE_LISTEN=1`). The counts come from the store, so they are there with
+/// the Node off too:
+///
+/// - `sessions` / `open`: sessions bound to any Node / not released by it; `running`: their turns
+///   not finished, plus harnesses restarting for a configure (what a drain waits for);
+/// - `unknown`: attempts whose outcome nobody can tell (a person gives them up);
+/// - `parked`: sessions with queued messages bound to a Node that is not enabled here;
+/// - `legacy.sessions`: sessions the legacy runner would still run (not ended, not read-only,
+///   bound to no Node); `legacy.busy`: legacy sessions with work in hand (queued messages, a
+///   claimed or submitted dispatch, a pending resume). Removing the runner needs both at 0.
+///
+/// `fallbacks` (since boot) counts new sessions left on the legacy runner although the local Node
+/// was on. Public: no reason text, ids or paths, only states and counts.
+pub fn health(
+    store: &Store,
+    local: Option<&NodeRuntime>,
+    remote: bool,
+) -> Result<Value, StoreError> {
+    let (sessions, open, running, unknown, parked, legacy, busy) = store.reader(|c| {
+        Ok::<_, StoreError>(c.query_row(
+            "SELECT
+               (SELECT COUNT(*) FROM runtime_sessions),
+               (SELECT COUNT(*) FROM runtime_sessions WHERE phase<>'released'),
+               (SELECT COUNT(*) FROM runtime_turns WHERE state<>'finished')
+                 + (SELECT COUNT(*) FROM runtime_sessions WHERE phase='configuring'),
+               (SELECT COUNT(*) FROM runtime_attempts WHERE state='unknown'),
+               (SELECT COUNT(*) FROM runtime_sessions r
+                 WHERE ((r.node_id='local' AND ?1=0) OR (r.node_id<>'local' AND ?2=0))
+                   AND EXISTS(SELECT 1 FROM queued q WHERE q.session_id=r.session_id)),
+               (SELECT COUNT(*) FROM sessions s WHERE s.status<>'ended' AND s.readonly=0
+                   AND NOT EXISTS(SELECT 1 FROM runtime_sessions r WHERE r.session_id=s.id)),
+               (SELECT COUNT(*) FROM sessions s
+                 WHERE NOT EXISTS(SELECT 1 FROM runtime_sessions r WHERE r.session_id=s.id)
+                   AND (EXISTS(SELECT 1 FROM queued q WHERE q.session_id=s.id)
+                     OR EXISTS(SELECT 1 FROM session_dispatch d WHERE d.session_id=s.id
+                                 AND d.backend='legacy' AND d.state IN ('claimed','submitted'))
+                     OR EXISTS(SELECT 1 FROM session_resume x WHERE x.session_id=s.id)))",
+            [local.is_some(), remote],
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, i64>(4)?,
+                    r.get::<_, i64>(5)?,
+                    r.get::<_, i64>(6)?,
+                ))
+            },
+        )?)
+    })?;
+    Ok(json!({
+        "enabled": local.is_some(),
+        "remote": remote,
+        "reconciled": local.map(|n| n.is_reconciled()),
+        "stopped": local.is_some_and(|n| n.is_stopped()),
+        "holding": local.is_some_and(|n| n.is_holding()),
+        "fallbacks": local.map_or(0, |n| n.fallbacks()),
+        "sessions": sessions,
+        "open": open,
+        "running": running,
+        "unknown": unknown,
+        "parked": parked,
+        "legacy": { "sessions": legacy, "busy": busy },
+    }))
 }
 
 /// The session a decision belongs to.

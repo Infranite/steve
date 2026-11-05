@@ -232,6 +232,32 @@ async fn serving(h: &Home) {
     assert!(ok, "the Hub serves; log:\n{}", hub_log(h));
 }
 
+/// `/healthz`'s `node` block.
+async fn node_health(h: &Home) -> Value {
+    reqwest::Client::new()
+        .get(format!("{}/healthz", h.base()))
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await
+        .expect("healthz")
+        .json::<Value>()
+        .await
+        .expect("healthz json")["node"]
+        .clone()
+}
+
+/// Until `/healthz`'s `node` block satisfies `ok` (within `secs`); the last one seen.
+async fn node_health_until(h: &Home, secs: u64, ok: impl Fn(&Value) -> bool) -> Value {
+    let end = tokio::time::Instant::now() + Duration::from_secs(secs);
+    loop {
+        let v = node_health(h).await;
+        if ok(&v) || tokio::time::Instant::now() >= end {
+            return v;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
 fn hub_log(h: &Home) -> String {
     let s = std::fs::read_to_string(h.dir.path().join("hub.log")).unwrap_or_default();
     s.lines()
@@ -394,6 +420,12 @@ async fn a_node_session_end_to_end() {
     let mut hub = spawn(&h, true, &[]);
     serving(&h).await;
     let c = Client::login(&h).await;
+    let n = node_health_until(&h, 30, |n| n["reconciled"] == true).await;
+    assert_eq!(
+        (&n["enabled"], &n["reconciled"], &n["stopped"]),
+        (&json!(true), &json!(true), &json!(false)),
+        "healthz after boot: {n}"
+    );
 
     // ── a new session binds to the Node; its transcript is steve.v1
     let sid = c.item(&h, "节点验收 @say hello-node-7Q").await;
@@ -524,6 +556,13 @@ async fn a_node_session_end_to_end() {
     );
     tokio::time::sleep(Duration::from_secs(3)).await;
     assert_eq!(h.got("崩溃验收-K2"), 1, "never re-run: {:?}", h.prompts());
+    let n = node_health(&h).await;
+    assert_eq!(
+        (&n["reconciled"], &n["unknown"], &n["parked"]),
+        (&json!(true), &json!(1), &json!(0)),
+        "healthz after the kill: {n}"
+    );
+    assert!(n["sessions"].as_i64() >= Some(1), "{n}");
     hub.kill();
 
     // ── STEVE_NODE_MODE off: the Node-bound session is parked, never handed to the legacy runner
@@ -547,6 +586,14 @@ async fn a_node_session_end_to_end() {
     assert_eq!(h.got("回滚验收-R5"), 0, "no runner got it");
     assert_eq!(h.got("崩溃验收-K2"), 1, "still never re-run");
     assert_eq!(h.spawns(), spawns, "no legacy adapter started for it");
+    let n = node_health(&h).await;
+    assert_eq!(
+        (&n["enabled"], &n["reconciled"], &n["fallbacks"]),
+        (&json!(false), &Value::Null, &json!(0)),
+        "healthz with the Node off: {n}"
+    );
+    assert!(n["parked"].as_i64() >= Some(1), "parked: {n}");
+    assert_eq!(n["unknown"], 1, "still unknown: {n}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -722,5 +769,41 @@ async fn a_node_session_shows_its_status_and_harness_id() {
         until(30, || async { status(&get().await) == "idle" }).await,
         "idle after the cancel: {}",
         get().await
+    );
+}
+
+/// A new session the Node path cannot express (its bot's permission mode is `auto`) stays on the
+/// legacy runner with the Node on, and healthz counts it: a fallback since boot and a legacy
+/// session that could still run.
+#[tokio::test(flavor = "multi_thread")]
+async fn healthz_counts_a_new_session_left_on_the_legacy_runner() {
+    let h = Home::new();
+    let _hub = spawn(&h, true, &[]);
+    serving(&h).await;
+    let c = Client::login(&h).await;
+    let before = node_health_until(&h, 30, |n| n["reconciled"] == true).await;
+    assert_eq!(before["fallbacks"], 0, "{before}");
+    let db = rusqlite::Connection::open(h.steve().join("data/steve.sqlite3")).expect("db");
+    db.busy_timeout(Duration::from_secs(5)).expect("timeout");
+    db.execute(
+        "UPDATE bots SET perm_mode='auto' WHERE harness='claude-code'",
+        [],
+    )
+    .expect("auto");
+    let sid = c.item(&h, "回退验收 @say fallback-legacy-3F").await;
+    let n = node_health_until(&h, 30, |n| n["fallbacks"] == 1).await;
+    assert_eq!(n["fallbacks"], 1, "{n}");
+    assert_eq!(
+        h.count(
+            "SELECT COUNT(*) FROM runtime_sessions WHERE session_id=?",
+            &sid
+        ),
+        0,
+        "not bound"
+    );
+    assert_eq!(
+        n["legacy"]["sessions"].as_i64(),
+        before["legacy"]["sessions"].as_i64().map(|x| x + 1),
+        "{before} -> {n}"
     );
 }

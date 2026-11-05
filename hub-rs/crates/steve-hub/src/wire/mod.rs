@@ -58,6 +58,8 @@ pub struct Wired {
     pub yolo_engine: steve_core::yolo::Engine,
     /// Remote Nodes (`STEVE_NODE_LISTEN=1`): their routes and the coordinators sessions go to.
     pub nodes: Option<Arc<crate::nodes::NodeService>>,
+    /// The local Node's coordinator (`STEVE_NODE_MODE=local`), for `/healthz`.
+    pub node: Option<Arc<node_runtime::NodeRuntime>>,
     /// Steve's tools as a Node reaches them (in-crate tests drive the bridge with them).
     #[cfg(test)]
     pub(crate) tool_service: Arc<tool_service::ToolService>,
@@ -446,6 +448,7 @@ pub fn wire_with(cfg: &Arc<Config>, bus: &Bus, vars: Vars) -> Result<Wired, Back
         jobs.push(Box::pin(start_fleet(f.clone(), db.clone())));
     }
     let local_node = node_host.as_ref().map(|h| h.node.clone());
+    let local_runtime = node_host.as_ref().map(|h| h.runtime.clone());
     if let Some(NodeHost { tools, .. }) = node_host {
         tools
             .install(tool_service.clone())
@@ -502,6 +505,7 @@ pub fn wire_with(cfg: &Arc<Config>, bus: &Bus, vars: Vars) -> Result<Wired, Back
         yolo,
         yolo_engine: engine,
         nodes,
+        node: local_runtime,
         #[cfg(test)]
         tool_service,
     })
