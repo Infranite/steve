@@ -21,7 +21,9 @@ import { useUploads } from "@/attach"
 import { kb, levelLabel, visLabel, memKind, recordOf, MEM_KINDS, SOURCE_KIND, LEVEL_DOT, type Candidate, type DocBrief, type Hit, type KbSource, type Mem } from "@/api/knowledge"
 import { KbGate, LevelSel, VisSel, errMsg } from "@/knowledge/fields"
 import { DocView, NoteView } from "@/knowledge/doc"
+import { t as tt, useT } from "@/i18n"
 
+/* tab values are ids (also data-seg / data-kb-tab); the labels come from knowledge:tab.* */
 type Tab = "搜索" | "长期记忆" | "知识条目" | "笔记与文档" | "来源" | "待确认"
 type RecordName = "长期记忆" | "知识条目"
 let tab: Tab = "长期记忆", query = ""
@@ -35,6 +37,7 @@ export function KnowledgeView({ sub, id }: { sub?: string; id?: string }) {
 const hashParam = (k: string) => new URLSearchParams(location.hash.split("?")[1] ?? "").get(k)
 
 function KnowledgeHome() {
+  const t = useT()
   const [, f] = useState(0), r = () => f((x) => x + 1)
   const focusMem = hashParam("mem")
   if (focusMem && tab !== "长期记忆" && tab !== "知识条目") tab = "长期记忆"
@@ -42,11 +45,11 @@ function KnowledgeHome() {
   const loadPend = useCallback(() => { kb.candidates().then((xs) => setPend(xs.length), () => {}) }, [])
   useEffect(loadPend, [loadPend])
   useHubEvents(["mm", "kb"], loadPend)
-  const setTab = (t: Tab) => { tab = t; r() }
-  const opts = [["搜索", "搜索"], ["长期记忆", "长期记忆"], ["知识条目", "知识条目"], ["笔记与文档", "笔记与文档"], ["来源", "来源"],
-    ["待确认", <span key="p" className="inline-flex items-center gap-1">待确认{pend > 0 && <span className="rounded-full bg-attention px-1.5 text-[10px] font-semibold text-white" data-pending-count>{pend}</span>}</span>, "待确认"]] as const
+  const setTab = (x: Tab) => { tab = x; r() }
+  const opts = [["搜索", t("knowledge:tab.search")], ["长期记忆", t("knowledge:tab.mems")], ["知识条目", t("knowledge:tab.entries")], ["笔记与文档", t("knowledge:tab.docs")], ["来源", t("knowledge:tab.sources")],
+    ["待确认", <span key="p" className="inline-flex items-center gap-1">{t("knowledge:tab.pending")}{pend > 0 && <span className="rounded-full bg-attention px-1.5 text-[10px] font-semibold text-white" data-pending-count>{pend}</span>}</span>, t("knowledge:tab.pending")]] as const
   return (
-    <Page title="知识" sub="Steve 记得的事和能查到的资料" max={760}>
+    <Page title={t("knowledge:page.title")} sub={t("knowledge:page.sub")} max={760}>
       <div className="flex flex-col gap-5">
         <SearchBox onQuery={(q) => { query = q; if (q && tab !== "搜索") tab = "搜索"; r() }} />
         <div className="-mx-1 overflow-x-auto px-1 pb-0.5 [scrollbar-width:none]"><Segmented value={tab} onChange={setTab} options={opts} /></div>
@@ -63,14 +66,15 @@ function KnowledgeHome() {
 }
 
 function SearchBox({ onQuery }: { onQuery: (q: string) => void }) {
-  const [v, setV] = useState(query), t = useRef<number>(0)
-  const set = (x: string) => { setV(x); clearTimeout(t.current); t.current = window.setTimeout(() => onQuery(x.trim()), 250) }
+  const t = useT()
+  const [v, setV] = useState(query), timer = useRef<number>(0)
+  const set = (x: string) => { setV(x); clearTimeout(timer.current); timer.current = window.setTimeout(() => onQuery(x.trim()), 250) }
   return (
     <div role="search" className="flex items-center gap-2 rounded-xl border bg-card px-3 focus-within:border-blue/60">
       <SearchIcon className="size-4 shrink-0 text-muted-foreground" strokeWidth={1.75} />
-      <input type="search" aria-label="搜索知识库" value={v} onChange={(e) => set(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") { clearTimeout(t.current); onQuery(v.trim()) } }}
-        placeholder="搜索长期记忆、知识、笔记和文档" maxLength={200} className="h-10 min-w-0 flex-1 bg-transparent text-[14px] outline-none placeholder:text-tertiary [&::-webkit-search-cancel-button]:hidden" data-kb-search />
-      {v && <Button variant="ghost" size="icon-xs" aria-label="清除" className="text-muted-foreground" onClick={() => { setV(""); onQuery("") }}><XIcon /></Button>}
+      <input type="search" aria-label={t("knowledge:search.aria")} value={v} onChange={(e) => set(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") { clearTimeout(timer.current); onQuery(v.trim()) } }}
+        placeholder={t("knowledge:search.placeholder")} maxLength={200} className="h-10 min-w-0 flex-1 bg-transparent text-[14px] outline-none placeholder:text-tertiary [&::-webkit-search-cancel-button]:hidden" data-kb-search />
+      {v && <Button variant="ghost" size="icon-xs" aria-label={t("knowledge:search.clear")} className="text-muted-foreground" onClick={() => { setV(""); onQuery("") }}><XIcon /></Button>}
     </div>
   )
 }
@@ -86,6 +90,7 @@ function Highlight({ text, q }: { text: string; q: string }) {
 const LevelTag = ({ l }: { l: string }) => <span className="inline-flex shrink-0 items-center gap-1 type-footnote text-muted-foreground" data-level={l}><StatusDot s={LEVEL_DOT[l] ?? "idle"} />{levelLabel(l)}</span>
 
 function SearchTab({ q }: { q: string }) {
+  const t = useT()
   const [res, setRes] = useState<{ q: string; hits: Hit[]; ms: number } | null>(null), [err, setErr] = useState("")
   useEffect(() => {
     if (!q) { setRes(null); return }
@@ -93,12 +98,12 @@ function SearchTab({ q }: { q: string }) {
     kb.search(q).then((x) => on && setRes({ q, hits: x.hits, ms: x.took_ms }), (e) => on && setErr(errMsg(e)))
     return () => { on = false }
   }, [q])
-  if (!q) return <Empty icon={<SearchIcon />} title="在知识库里找" sub="长期记忆、知识条目、笔记、文件夹、事项记录和会话记录都能搜到。" />
-  if (err) return <Empty title="搜索失败" sub={err} />
-  if (!res || res.q !== q) return <div className="flex justify-center py-12" role="status" aria-label="正在搜索"><Spinner className="size-5 text-muted-foreground" /></div>
-  if (!res.hits.length) return <Empty title="没有找到" sub={`知识库里没有和“${q}”相关的内容。`} />
+  if (!q) return <Empty icon={<SearchIcon />} title={t("knowledge:search.idleTitle")} sub={t("knowledge:search.idleSub")} />
+  if (err) return <Empty title={t("knowledge:search.failed")} sub={err} />
+  if (!res || res.q !== q) return <div className="flex justify-center py-12" role="status" aria-label={t("knowledge:search.searching")}><Spinner className="size-5 text-muted-foreground" /></div>
+  if (!res.hits.length) return <Empty title={t("knowledge:search.noneTitle")} sub={t("knowledge:search.noneSub", { q })} />
   return (
-    <section aria-label="搜索结果"><SectionLabel>{res.hits.length} 条结果 · {res.ms} ms</SectionLabel>
+    <section aria-label={t("knowledge:search.results")}><SectionLabel>{t("knowledge:search.count", { count: res.hits.length, ms: res.ms })}</SectionLabel>
       <Group>{res.hits.map((h) => (
         <Row key={h.type + h.id + h.seq} onClick={() => go(h.href)} data-hit={h.id}
           title={<span className="flex min-w-0 items-baseline gap-2"><span className="min-w-0 truncate"><Highlight text={h.title} q={q} />{h.heading ? <span className="text-muted-foreground"> · <Highlight text={h.heading} q={q} /></span> : null}</span></span>}
@@ -110,18 +115,20 @@ function SearchTab({ q }: { q: string }) {
 }
 
 /* ───────── 长期记忆 / 知识条目 ───────── */
-const RECORD: Record<RecordName, { kind: string; hint: string; empty: string; note: string }> = {
-  长期记忆: { kind: "rule", hint: "添加一条长期规则，例如：周五下午不安排部署", empty: "你明确说过以后都要这样的偏好和规则，确认后记在这里，每次相关的事都会带上。",
-    note: "长期记忆是你明确表达、以后都适用的偏好和规则。某件事里的一次性要求留在那件事的记录里，不会记成长期记忆。" },
-  知识条目: { kind: "fact", hint: "添加一条知识，例如：Acme 的合同每年 3 月续签", empty: "做事过程中确认过、以后别的事也用得上的事实和做法，确认后记在这里。",
-    note: "知识条目是确认过、能在别的事里复用的事实和做法。“这次改了什么”属于事项记录，可以直接搜到，不另记成知识。" },
+/* the kind a typed entry gets, and where its texts live: knowledge:record.<key>.* */
+const RECORD: Record<RecordName, { kind: string; key: "mem" | "entry" }> = {
+  长期记忆: { kind: "rule", key: "mem" },
+  知识条目: { kind: "fact", key: "entry" },
 }
 const aboutKey = (m: Mem) => m.about.map((a) => a.type + ":" + a.id).sort().join(",")
-const aboutLabel = (m: Mem) => (m.about.length ? "关于 " + m.about.map((a) => a.name ?? (a.type === "party" ? "联系人 " : a.type === "item" ? "事项 " : "") + a.id).join("、") : "通用")
+const aboutName = (a: Mem["about"][number]) => a.name ?? (a.type === "party" ? tt("knowledge:mems.aboutParty", { id: a.id }) : a.type === "item" ? tt("knowledge:mems.aboutItem", { id: a.id }) : a.id)
+const aboutLabel = (m: Mem) => (m.about.length ? tt("knowledge:mems.aboutLabel", { names: m.about.map(aboutName).join(tt("knowledge:listSep")) }) : tt("knowledge:mems.general"))
 
 function MemsTab({ record, focus, onRecord }: { record: RecordName; focus: string | null; onRecord: (r: RecordName) => void }) {
-  const R = RECORD[record]
-  const [xs, setXs] = useState<Mem[] | null>(null), [err, setErr] = useState(""), [kind, setKind] = useState("全部"), [v, setV] = useState(""), [busy, setBusy] = useState(false)
+  const t = useT()
+  const R = RECORD[record], k = R.key
+  /* "" is every kind; the chips show kind labels, with the "all" label first */
+  const [xs, setXs] = useState<Mem[] | null>(null), [err, setErr] = useState(""), [kind, setKind] = useState(""), [v, setV] = useState(""), [busy, setBusy] = useState(false)
   const load = useCallback(() => kb.mems().then(setXs, (e) => setErr(errMsg(e))), [])
   useEffect(() => { void load() }, [load])
   useHubEvents(["mm"], () => void load())
@@ -130,66 +137,70 @@ function MemsTab({ record, focus, onRecord }: { record: RecordName; focus: strin
   useEffect(() => { if (focused && recordOf(focused.kind) !== record) onRecord(recordOf(focused.kind) as RecordName) }, [focused, record, onRecord])
   useEffect(() => { if (focus && xs) document.querySelector(`[data-mem="${CSS.escape(focus)}"]`)?.scrollIntoView({ block: "center" }) }, [focus, xs])
   const add = async () => {
-    const t = v.trim(); if (!t || busy) return
+    const text = v.trim(); if (!text || busy) return
     setBusy(true)
-    try { await kb.addMem({ text: t, kind: R.kind }); setV(""); toast("已记下"); await load() } catch (e) { toast(errMsg(e)) } finally { setBusy(false) }
+    try { await kb.addMem({ text, kind: R.kind }); setV(""); toast(t("knowledge:mems.added")); await load() } catch (e) { toast(errMsg(e)) } finally { setBusy(false) }
   }
   const patch = async (m: Mem, p: Parameters<typeof kb.patchMem>[1]) => { try { const n = await kb.patchMem(m.id, p); setXs((a) => a?.map((x) => (x.id === m.id ? { ...x, ...n } : x)) ?? null) } catch (e) { toast(errMsg(e)) } }
-  const remove = async (m: Mem) => { try { await kb.deleteMem(m.id); setXs((a) => a?.filter((x) => x.id !== m.id) ?? null); toast("已删除") } catch (e) { toast(errMsg(e)) } }
+  const remove = async (m: Mem) => { try { await kb.deleteMem(m.id); setXs((a) => a?.filter((x) => x.id !== m.id) ?? null); toast(t("knowledge:mems.deleted")) } catch (e) { toast(errMsg(e)) } }
   const mine = (xs ?? []).filter((m) => recordOf(m.kind) === record)
-  const kinds = ["全部", ...MEM_KINDS.filter(([k]) => mine.some((m) => m.kind === k)).map(([, l]) => l)]
-  const shown = mine.filter((m) => kind === "全部" || memKind(m.kind) === kind)
-  const groups = new Map<string, Mem[]>(); for (const m of shown) { const k = aboutKey(m); groups.set(k, [...(groups.get(k) ?? []), m]) }
+  const all = t("knowledge:all")
+  const kinds = [all, ...MEM_KINDS.filter(([c]) => mine.some((m) => m.kind === c)).map(([, l]) => l)]
+  const shown = mine.filter((m) => !kind || memKind(m.kind) === kind)
+  const groups = new Map<string, Mem[]>(); for (const m of shown) { const g = aboutKey(m); groups.set(g, [...(groups.get(g) ?? []), m]) }
   return (
     <div className="flex flex-col gap-6">
       <div className="flex items-center gap-2 rounded-xl border bg-card py-1 pl-3 pr-1 focus-within:border-blue/60">
-        <input aria-label={"添加一条" + record} value={v} onChange={(e) => setV(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && !e.nativeEvent.isComposing) void add() }} maxLength={2000}
-          placeholder={R.hint} className="h-8 min-w-0 flex-1 bg-transparent text-[14px] outline-none placeholder:text-tertiary" data-mem-input />
-        <Button size="sm" disabled={!v.trim() || busy} onClick={() => void add()} data-mem-add>{busy ? <Spinner className="size-3.5" /> : <PlusIcon />}添加</Button>
+        <input aria-label={t(`knowledge:record.${k}.addAria`)} value={v} onChange={(e) => setV(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && !e.nativeEvent.isComposing) void add() }} maxLength={2000}
+          placeholder={t(`knowledge:record.${k}.hint`)} className="h-8 min-w-0 flex-1 bg-transparent text-[14px] outline-none placeholder:text-tertiary" data-mem-input />
+        <Button size="sm" disabled={!v.trim() || busy} onClick={() => void add()} data-mem-add>{busy ? <Spinner className="size-3.5" /> : <PlusIcon />}{t("knowledge:mems.add")}</Button>
       </div>
-      {kinds.length > 2 && <Chips value={kinds.includes(kind) ? kind : "全部"} onChange={setKind} options={kinds} />}
-      {err ? <Empty title={record + "打不开"} sub={err} /> : !xs ? <Loading /> : !shown.length ? <Empty title={"还没有" + record} sub={R.empty} /> :
-        [...groups.entries()].map(([k, ms]) => (
-          <section key={k}><SectionLabel>{aboutLabel(ms[0])} · {ms.length}</SectionLabel>
+      {kinds.length > 2 && <Chips value={kind && kinds.includes(kind) ? kind : all} onChange={(x) => setKind(x === all ? "" : x)} options={kinds} />}
+      {err ? <Empty title={t(`knowledge:record.${k}.failed`)} sub={err} /> : !xs ? <Loading /> : !shown.length ? <Empty title={t(`knowledge:record.${k}.none`)} sub={t(`knowledge:record.${k}.empty`)} /> :
+        [...groups.entries()].map(([g, ms]) => (
+          <section key={g}><SectionLabel>{aboutLabel(ms[0])} · {ms.length}</SectionLabel>
             <Group>{ms.map((m) => (
               <Row key={m.id} data-mem={m.id} className={cn(STACK, m.id === focus && "bg-blue/5", m.status === "stale" && "opacity-60")}
-                title={<span className="inline-flex flex-wrap items-center gap-2">{m.text}{m.status === "candidate" && <Badge variant="outline" className="font-normal text-attention">待确认</Badge>}{m.status === "stale" && <Badge variant="outline" className="font-normal text-muted-foreground">已过时</Badge>}</span>}
-                sub={`${memKind(m.kind)} · 来源：${m.source_label || "你写的"}`}>
+                title={<span className="inline-flex flex-wrap items-center gap-2">{m.text}{m.status === "candidate" && <Badge variant="outline" className="font-normal text-attention">{t("knowledge:mems.pending")}</Badge>}{m.status === "stale" && <Badge variant="outline" className="font-normal text-muted-foreground">{t("knowledge:mems.stale")}</Badge>}</span>}
+                sub={t("knowledge:mems.sub", { kind: memKind(m.kind), source: m.source_label || t("knowledge:mems.youWrote") })}>
                 <span className="flex flex-wrap items-center justify-end gap-0.5 max-sm:justify-start">
                   <LevelSel v={m.level} on={(l) => l && void patch(m, { level: l })} testId={"mem-level-" + m.id} />
                   <VisSel v={m.visibility} on={(x) => void patch(m, { visibility: x })} testId={"mem-vis-" + m.id} />
-                  <Button variant="ghost" size="icon-xs" aria-label={"删除记忆：" + m.text} className="text-muted-foreground" onClick={() => void remove(m)} data-mem-del><XIcon /></Button>
+                  <Button variant="ghost" size="icon-xs" aria-label={t("knowledge:mems.deleteAria", { text: m.text })} className="text-muted-foreground" onClick={() => void remove(m)} data-mem-del><XIcon /></Button>
                 </span>
               </Row>))}</Group>
           </section>))}
-      <div className="-mt-2 px-1 type-footnote text-muted-foreground">{R.note}披露级别决定回复里能说到什么程度：“仅用于推理”只帮 Steve 判断，不会被说出来；“不可使用”的不会进入任何回答。</div>
+      <div className="-mt-2 px-1 type-footnote text-muted-foreground">{t("knowledge:mems.footer", { note: t(`knowledge:record.${k}.note`) })}</div>
     </div>
   )
 }
 /** on a phone the row's controls go on their own line under the text */
 const STACK = "max-sm:[&>[data-slot=item-actions]]:w-full max-sm:[&>[data-slot=item-actions]]:justify-start max-sm:[&>[data-slot=item-actions]]:-ml-2"
-const Loading = () => <div className="flex justify-center py-12" role="status" aria-label="正在加载"><Spinner className="size-5 text-muted-foreground" /></div>
+const Loading = () => { const t = useT(); return <div className="flex justify-center py-12" role="status" aria-label={t("knowledge:page.loading")}><Spinner className="size-5 text-muted-foreground" /></div> }
 
 /* ───────── 笔记与文档 ───────── */
 export const docHref = (d: { id: string; source: { kind: string } }) => (d.source.kind === "notes" ? "#/knowledge/note/" : "#/knowledge/doc/") + d.id
 function DocsTab() {
-  const [xs, setXs] = useState<DocBrief[] | null>(null), [err, setErr] = useState(""), [src, setSrc] = useState("全部"), [newNote, setNewNote] = useState(false)
+  const t = useT()
+  /* src "" is every source; the chips show source names, with the "all" label first */
+  const [xs, setXs] = useState<DocBrief[] | null>(null), [err, setErr] = useState(""), [src, setSrc] = useState(""), [newNote, setNewNote] = useState(false)
   const loadDocs = useCallback(() => kb.docs().then(setXs, (e) => setErr(errMsg(e))), [])
   useEffect(() => { void loadDocs() }, [loadDocs])
   useHubEvents(["kb"], () => void loadDocs())
-  const names = ["全部", ...new Set((xs ?? []).map((d) => d.source.name))]
-  const shown = (xs ?? []).filter((d) => src === "全部" || d.source.name === src)
+  const all = t("knowledge:all")
+  const names = [all, ...new Set((xs ?? []).map((d) => d.source.name))]
+  const shown = (xs ?? []).filter((d) => !src || d.source.name === src)
   return (
     <div className="flex flex-col gap-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        {names.length > 2 ? <Chips value={names.includes(src) ? src : "全部"} onChange={setSrc} options={names} /> : <span />}
-        <Button size="sm" onClick={() => setNewNote(true)} data-new-note><FilePlusIcon />新建笔记</Button>
+        {names.length > 2 ? <Chips value={src && names.includes(src) ? src : all} onChange={(x) => setSrc(x === all ? "" : x)} options={names} /> : <span />}
+        <Button size="sm" onClick={() => setNewNote(true)} data-new-note><FilePlusIcon />{t("knowledge:docs.newNote")}</Button>
       </div>
-      {err ? <Empty title="文档打不开" sub={err} /> : !xs ? <Loading /> : !shown.length ? <Empty title="还没有笔记和文档" sub="新建一篇笔记，或者在“来源”里添加文件夹和文件。" /> :
+      {err ? <Empty title={t("knowledge:docs.failed")} sub={err} /> : !xs ? <Loading /> : !shown.length ? <Empty title={t("knowledge:docs.noneTitle")} sub={t("knowledge:docs.noneSub")} /> :
         <Group>{shown.map((d) => (
           <Row key={d.id} onClick={() => go(docHref(d))} data-doc={d.id}
             title={<span className="truncate">{d.title}</span>}
-            sub={<span className="flex flex-wrap gap-x-1.5"><span>{d.source.name}</span>{d.source.kind !== "notes" && d.ref && <span className="truncate">· {d.ref}</span>}<span>· {visLabel(d.visibility)}</span><span>· {tm(d.updated)}</span>{d.status !== "active" && <span className="text-attention">· {d.status === "error" ? "出错" : d.status}</span>}</span>}>
+            sub={<span className="flex flex-wrap gap-x-1.5"><span>{d.source.name}</span>{d.source.kind !== "notes" && d.ref && <span className="truncate">· {d.ref}</span>}<span>· {visLabel(d.visibility)}</span><span>· {tm(d.updated)}</span>{d.status !== "active" && <span className="text-attention">· {d.status === "error" ? t("knowledge:docs.error") : d.status}</span>}</span>}>
             <LevelTag l={d.level} />
           </Row>))}</Group>}
       <NewNoteDialog open={newNote} onClose={() => setNewNote(false)} />
@@ -198,22 +209,23 @@ function DocsTab() {
 }
 
 function NewNoteDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const t = useT()
   const [title, setTitle] = useState(""), [body, setBody] = useState(""), [busy, setBusy] = useState(false)
   const save = async () => {
     if (!title.trim() || busy) return
     setBusy(true)
-    try { const d = await kb.newNote({ title: title.trim(), body }); toast("已保存，现在就能搜到"); onClose(); go("#/knowledge/note/" + d.id) } catch (e) { toast(errMsg(e)) } finally { setBusy(false) }
+    try { const d = await kb.newNote({ title: title.trim(), body }); toast(t("knowledge:newNote.saved")); onClose(); go("#/knowledge/note/" + d.id) } catch (e) { toast(errMsg(e)) } finally { setBusy(false) }
   }
   return (
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
       <DialogContent className="gap-4 rounded-2xl sm:max-w-[560px]">
-        <DialogHeader><DialogTitle className="type-headline">新建笔记</DialogTitle><DialogDescription className="type-callout">保存后马上进入知识库，默认只有你能看到。</DialogDescription></DialogHeader>
+        <DialogHeader><DialogTitle className="type-headline">{t("knowledge:newNote.title")}</DialogTitle><DialogDescription className="type-callout">{t("knowledge:newNote.desc")}</DialogDescription></DialogHeader>
         <FieldGroup className="gap-4">
-          <Field><FieldLabel htmlFor="kb-note-title">标题</FieldLabel><Input id="kb-note-title" autoFocus maxLength={120} value={title} onChange={(e) => setTitle(e.target.value)} placeholder="例如：Acme 合同说明" data-note-title /></Field>
-          <Field><FieldLabel htmlFor="kb-note-body">正文</FieldLabel><Textarea id="kb-note-body" className="min-h-40 font-mono text-[13px]" value={body} onChange={(e) => setBody(e.target.value)} placeholder="支持 Markdown" data-note-body
+          <Field><FieldLabel htmlFor="kb-note-title">{t("knowledge:newNote.titleLabel")}</FieldLabel><Input id="kb-note-title" autoFocus maxLength={120} value={title} onChange={(e) => setTitle(e.target.value)} placeholder={t("knowledge:newNote.titlePlaceholder")} data-note-title /></Field>
+          <Field><FieldLabel htmlFor="kb-note-body">{t("knowledge:newNote.bodyLabel")}</FieldLabel><Textarea id="kb-note-body" className="min-h-40 font-mono text-[13px]" value={body} onChange={(e) => setBody(e.target.value)} placeholder={t("knowledge:newNote.bodyPlaceholder")} data-note-body
             onKeyDown={(e) => { if ((e.metaKey || e.ctrlKey) && e.key === "Enter") void save() }} /></Field>
         </FieldGroup>
-        <DialogFooter className="gap-2"><Button variant="ghost" onClick={onClose}>取消</Button><Button disabled={!title.trim() || busy} onClick={() => void save()} data-note-save>{busy && <Spinner className="size-3.5" />}保存</Button></DialogFooter>
+        <DialogFooter className="gap-2"><Button variant="ghost" onClick={onClose}>{t("common:action.cancel")}</Button><Button disabled={!title.trim() || busy} onClick={() => void save()} data-note-save>{busy && <Spinner className="size-3.5" />}{t("common:action.save")}</Button></DialogFooter>
       </DialogContent>
     </Dialog>
   )
@@ -221,46 +233,47 @@ function NewNoteDialog({ open, onClose }: { open: boolean; onClose: () => void }
 
 /* ───────── 来源 ───────── */
 const statsLine = (s: KbSource) => {
-  const x = s.stats ?? {}, parts = [`${x.docs ?? 0} 篇`, `${x.chunks ?? 0} 段`]
-  if (x.skipped) parts.push(`跳过 ${x.skipped}`)
+  const x = s.stats ?? {}, parts = [tt("knowledge:sources.docs", { count: x.docs ?? 0 }), tt("knowledge:sources.chunks", { count: x.chunks ?? 0 })]
+  if (x.skipped) parts.push(tt("knowledge:sources.skipped", { count: x.skipped }))
   /* built-in sources follow their objects as they change; only folders are scanned */
-  if (s.status === "syncing") parts.push("正在同步…"); else if (s.last_sync) parts.push("上次同步 " + tm(s.last_sync)); else if (!s.builtin) parts.push("还没同步")
+  if (s.status === "syncing") parts.push(tt("knowledge:sources.syncing")); else if (s.last_sync) parts.push(tt("knowledge:sources.lastSync", { time: tm(s.last_sync) })); else if (!s.builtin) parts.push(tt("knowledge:sources.neverSynced"))
   return parts.join(" · ")
 }
 function SourcesTab() {
+  const t = useT()
   const [xs, setXs] = useState<KbSource[] | null>(null), [err, setErr] = useState(""), [folder, setFolder] = useState(false)
   const load = useCallback(() => kb.sources().then(setXs, (e) => setErr(errMsg(e))), [])
   useEffect(() => { void load() }, [load])
   useHubEvents(["kb"], () => void load())
   /* a scan runs in the background: poll while one is going */
   const syncing = xs?.some((s) => s.status === "syncing")
-  useEffect(() => { if (!syncing) return; const t = setInterval(() => void load(), 2000); return () => clearInterval(t) }, [syncing, load])
+  useEffect(() => { if (!syncing) return; const iv = setInterval(() => void load(), 2000); return () => clearInterval(iv) }, [syncing, load])
   const patch = async (s: KbSource, p: Parameters<typeof kb.patchSource>[1], msg?: string) => { try { const n = await kb.patchSource(s.id, p); setXs((a) => a?.map((x) => (x.id === s.id ? n : x)) ?? null); if (msg) toast(msg) } catch (e) { toast(errMsg(e)) } }
-  const sync = async (s: KbSource) => { try { await kb.sync(s.id); toast("开始同步"); setTimeout(() => void load(), 300) } catch (e) { toast(errMsg(e)) } }
-  const remove = async (s: KbSource) => { try { await kb.deleteSource(s.id); toast("已移除来源"); void load() } catch (e) { toast(errMsg(e)) } }
+  const sync = async (s: KbSource) => { try { await kb.sync(s.id); toast(t("knowledge:sources.syncStarted")); setTimeout(() => void load(), 300) } catch (e) { toast(errMsg(e)) } }
+  const remove = async (s: KbSource) => { try { await kb.deleteSource(s.id); toast(t("knowledge:sources.removed")); void load() } catch (e) { toast(errMsg(e)) } }
   return (
     <div className="flex flex-col gap-5">
-      <div className="flex flex-wrap justify-end gap-2"><AddFiles onDone={() => void load()} /><Button size="sm" onClick={() => setFolder(true)} data-add-folder><FolderPlusIcon />添加文件夹</Button></div>
-      {err ? <Empty title="来源打不开" sub={err} /> : !xs ? <Loading /> :
+      <div className="flex flex-wrap justify-end gap-2"><AddFiles onDone={() => void load()} /><Button size="sm" onClick={() => setFolder(true)} data-add-folder><FolderPlusIcon />{t("knowledge:sources.addFolder")}</Button></div>
+      {err ? <Empty title={t("knowledge:sources.failed")} sub={err} /> : !xs ? <Loading /> :
         <Group>{xs.map((s) => (
           <Row key={s.id} data-source={s.id} data-source-kind={s.kind} className={cn(STACK, s.paused && "opacity-70")}
-            title={<span className="inline-flex flex-wrap items-center gap-2">{s.name}<span className="type-footnote text-muted-foreground">{SOURCE_KIND[s.kind] ?? s.kind}</span>{s.status === "error" && <Badge variant="outline" className="font-normal text-destructive">出错</Badge>}</span>}
+            title={<span className="inline-flex flex-wrap items-center gap-2">{s.name}<span className="type-footnote text-muted-foreground">{SOURCE_KIND[s.kind] ?? s.kind}</span>{s.status === "error" && <Badge variant="outline" className="font-normal text-destructive">{t("knowledge:sources.error")}</Badge>}</span>}
             sub={<span className="flex flex-col"><span data-source-stats>{statsLine(s)}</span>{s.path && <span className="truncate font-mono text-[11.5px]">{s.path.replace(/^\/Users\/[^/]+/, "~")}</span>}{s.error && <span className="text-destructive">{s.error}</span>}</span>}>
             <span className="flex flex-wrap items-center justify-end gap-0.5 max-sm:justify-start">
-              <LevelSel v={s.level} on={(l) => l && void patch(s, { level: l }, "默认级别已改，已有内容跟着变")} testId={"src-level-" + s.id} />
+              <LevelSel v={s.level} on={(l) => l && void patch(s, { level: l }, t("knowledge:sources.levelChanged"))} testId={"src-level-" + s.id} />
               <VisSel v={s.visibility} on={(x) => void patch(s, { visibility: x })} testId={"src-vis-" + s.id} />
-              <Switch checked={!s.paused} onCheckedChange={(on) => void patch(s, { paused: !on }, on ? "已恢复" : "已暂停：不同步，也不参与检索")} aria-label={(s.paused ? "恢复 " : "暂停 ") + s.name} className="ml-1" data-source-on />
+              <Switch checked={!s.paused} onCheckedChange={(on) => void patch(s, { paused: !on }, on ? t("knowledge:sources.resumed") : t("knowledge:sources.paused"))} aria-label={s.paused ? t("knowledge:sources.resumeAria", { name: s.name }) : t("knowledge:sources.pauseAria", { name: s.name })} className="ml-1" data-source-on />
               {s.kind === "folder" && <DropdownMenu>
-                <DropdownMenuTrigger render={<Button variant="ghost" size="icon-xs" aria-label={"更多：" + s.name} className="text-muted-foreground" data-source-menu />}><MoreHorizontalIcon /></DropdownMenuTrigger>
+                <DropdownMenuTrigger render={<Button variant="ghost" size="icon-xs" aria-label={t("knowledge:sources.moreAria", { name: s.name })} className="text-muted-foreground" data-source-menu />}><MoreHorizontalIcon /></DropdownMenuTrigger>
                 <DropdownMenuContent align="end" className="min-w-36">
-                  <DropdownMenuItem disabled={s.status === "syncing" || s.paused} onClick={() => void sync(s)} data-source-sync><RefreshCwIcon />立即同步</DropdownMenuItem>
+                  <DropdownMenuItem disabled={s.status === "syncing" || s.paused} onClick={() => void sync(s)} data-source-sync><RefreshCwIcon />{t("knowledge:sources.syncNow")}</DropdownMenuItem>
                   <DropdownMenuSeparator />
-                  <DropdownMenuItem variant="destructive" onClick={() => void remove(s)} data-source-del><TrashIcon />移除来源</DropdownMenuItem>
+                  <DropdownMenuItem variant="destructive" onClick={() => void remove(s)} data-source-del><TrashIcon />{t("knowledge:sources.remove")}</DropdownMenuItem>
                 </DropdownMenuContent>
               </DropdownMenu>}
             </span>
           </Row>))}</Group>}
-      <div className="-mt-2 px-1 type-footnote text-muted-foreground">新内容默认用来源的级别和可见范围，单篇可以在文档里改。暂停的来源不同步，也不参与检索。</div>
+      <div className="-mt-2 px-1 type-footnote text-muted-foreground">{t("knowledge:sources.footer")}</div>
       <FolderDialog open={folder} onClose={() => setFolder(false)} onDone={() => void load()} />
     </div>
   )
@@ -268,51 +281,53 @@ function SourcesTab() {
 
 /** "添加文件": the composer's upload path, then each uploaded file joins the knowledge base */
 function AddFiles({ onDone }: { onDone: () => void }) {
+  const t = useT()
   const up = useUploads(), input = useRef<HTMLInputElement>(null), added = useRef(new Set<string>())
   useEffect(() => {
     const fresh = up.ready.filter((f) => !added.current.has(f.id)); if (!fresh.length) return
     for (const f of fresh) added.current.add(f.id)
     Promise.allSettled(fresh.map((f) => kb.addFile(f.id))).then((rs) => {
       const bad = rs.find((r) => r.status === "rejected") as PromiseRejectedResult | undefined
-      toast(bad ? errMsg(bad.reason) : `已加入知识库：${fresh.map((f) => f.name).join("、")}`)
+      toast(bad ? errMsg(bad.reason) : t("knowledge:files.added", { names: fresh.map((f) => f.name).join(t("knowledge:listSep")) }))
       if (!up.uploading) up.clear()
       onDone()
     })
   }, [up.ready.length]) // eslint-disable-line react-hooks/exhaustive-deps
   const failed = up.list.find((p) => p.error)
-  useEffect(() => { if (failed) { toast(`${failed.name}：${failed.error}`); up.remove(failed.key) } }, [failed?.key]) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (failed) { toast(t("knowledge:files.failed", { name: failed.name, error: failed.error })); up.remove(failed.key) } }, [failed?.key]) // eslint-disable-line react-hooks/exhaustive-deps
   return <>
     <input ref={input} type="file" multiple hidden accept=".md,.txt,.html,.pdf,.docx,text/*,application/pdf" onChange={(e) => { if (e.target.files) up.add(e.target.files); e.target.value = "" }} data-add-file-input />
-    <Button size="sm" variant="outline" disabled={up.uploading} onClick={() => input.current?.click()} data-add-file>{up.uploading ? <Spinner className="size-3.5" /> : <UploadIcon />}添加文件</Button>
+    <Button size="sm" variant="outline" disabled={up.uploading} onClick={() => input.current?.click()} data-add-file>{up.uploading ? <Spinner className="size-3.5" /> : <UploadIcon />}{t("knowledge:files.add")}</Button>
   </>
 }
 
 const lines = (s: string) => s.split(/[\n,]/).map((x) => x.trim()).filter(Boolean)
 function FolderDialog({ open, onClose, onDone }: { open: boolean; onClose: () => void; onDone: () => void }) {
+  const t = useT()
   const [name, setName] = useState(""), [path, setPath] = useState(""), [inc, setInc] = useState("**/*.md\n**/*.txt"), [exc, setExc] = useState(".obsidian/**\nnode_modules/**"), [busy, setBusy] = useState(false), [err, setErr] = useState("")
   useEffect(() => { if (open) { setErr(""); setBusy(false) } }, [open])
   const save = async () => {
     if (!path.trim() || busy) return
     setBusy(true); setErr("")
-    const p = path.trim(), n = name.trim() || p.replace(/\/+$/, "").split("/").pop() || "文件夹"
-    try { await kb.addFolder({ name: n.slice(0, 40), path: p, include: lines(inc), exclude: lines(exc) }); toast("已添加，正在扫描"); setName(""); setPath(""); onClose(); onDone() }
+    const p = path.trim(), n = name.trim() || p.replace(/\/+$/, "").split("/").pop() || t("knowledge:folder.defaultName")
+    try { await kb.addFolder({ name: n.slice(0, 40), path: p, include: lines(inc), exclude: lines(exc) }); toast(t("knowledge:folder.added")); setName(""); setPath(""); onClose(); onDone() }
     catch (e) { setErr(errMsg(e)) } finally { setBusy(false) }
   }
   const field = (id: string, label: ReactNode, el: ReactNode, desc?: string) => <Field><FieldLabel htmlFor={id}>{label}</FieldLabel>{el}{desc && <FieldDescription>{desc}</FieldDescription>}</Field>
   return (
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
       <DialogContent className="gap-4 rounded-2xl sm:max-w-[520px]">
-        <DialogHeader><DialogTitle className="type-headline">添加文件夹</DialogTitle><DialogDescription className="type-callout">Steve 会读这个文件夹里的文档，改动后自动重新整理。文件不会被修改。</DialogDescription></DialogHeader>
+        <DialogHeader><DialogTitle className="type-headline">{t("knowledge:folder.title")}</DialogTitle><DialogDescription className="type-callout">{t("knowledge:folder.desc")}</DialogDescription></DialogHeader>
         <FieldGroup className="gap-4">
-          {field("kb-folder-path", "路径", <Input id="kb-folder-path" autoFocus className="font-mono" value={path} onChange={(e) => setPath(e.target.value)} placeholder="/Users/user/Documents/wiki" data-folder-path />, "Hub 所在电脑上的目录")}
-          {field("kb-folder-name", "名字", <Input id="kb-folder-name" maxLength={40} value={name} onChange={(e) => setName(e.target.value)} placeholder="默认用文件夹名" data-folder-name />)}
+          {field("kb-folder-path", t("knowledge:folder.path"), <Input id="kb-folder-path" autoFocus className="font-mono" value={path} onChange={(e) => setPath(e.target.value)} placeholder="/Users/user/Documents/wiki" data-folder-path />, t("knowledge:folder.pathDesc"))}
+          {field("kb-folder-name", t("knowledge:folder.name"), <Input id="kb-folder-name" maxLength={40} value={name} onChange={(e) => setName(e.target.value)} placeholder={t("knowledge:folder.namePlaceholder")} data-folder-name />)}
           <div className="grid gap-4 sm:grid-cols-2">
-            {field("kb-folder-inc", "包含", <Textarea id="kb-folder-inc" className="min-h-20 font-mono text-[12.5px]" value={inc} onChange={(e) => setInc(e.target.value)} data-folder-include />, "每行一个规则")}
-            {field("kb-folder-exc", "排除", <Textarea id="kb-folder-exc" className="min-h-20 font-mono text-[12.5px]" value={exc} onChange={(e) => setExc(e.target.value)} data-folder-exclude />)}
+            {field("kb-folder-inc", t("knowledge:folder.include"), <Textarea id="kb-folder-inc" className="min-h-20 font-mono text-[12.5px]" value={inc} onChange={(e) => setInc(e.target.value)} data-folder-include />, t("knowledge:folder.includeDesc"))}
+            {field("kb-folder-exc", t("knowledge:folder.exclude"), <Textarea id="kb-folder-exc" className="min-h-20 font-mono text-[12.5px]" value={exc} onChange={(e) => setExc(e.target.value)} data-folder-exclude />)}
           </div>
           {err && <div role="alert" className="type-callout text-destructive" data-folder-error>{err}</div>}
         </FieldGroup>
-        <DialogFooter className="gap-2"><Button variant="ghost" onClick={onClose}>取消</Button><Button disabled={!path.trim() || busy} onClick={() => void save()} data-folder-save>{busy && <Spinner className="size-3.5" />}添加</Button></DialogFooter>
+        <DialogFooter className="gap-2"><Button variant="ghost" onClick={onClose}>{t("common:action.cancel")}</Button><Button disabled={!path.trim() || busy} onClick={() => void save()} data-folder-save>{busy && <Spinner className="size-3.5" />}{t("common:action.add")}</Button></DialogFooter>
       </DialogContent>
     </Dialog>
   )
@@ -320,6 +335,7 @@ function FolderDialog({ open, onClose, onDone }: { open: boolean; onClose: () =>
 
 /* ───────── 待确认 ───────── */
 function CandidatesTab({ onChange }: { onChange: (n: number) => void }) {
+  const t = useT()
   const [xs, setXs] = useState<Candidate[] | null>(null), [err, setErr] = useState(""), [busy, setBusy] = useState(false)
   const load = useCallback(() => kb.candidates().then((a) => { setXs(a); onChange(a.length) }, (e) => setErr(errMsg(e))), [onChange])
   useEffect(() => { void load() }, [load])
@@ -327,27 +343,27 @@ function CandidatesTab({ onChange }: { onChange: (n: number) => void }) {
   const resolve = async (ids: string[], choice: "yes" | "no") => {
     if (!ids.length || busy) return
     setBusy(true)
-    try { const r = await kb.resolve(ids, choice); toast(choice === "yes" ? `已确认 ${r.done} 条` : `已忽略 ${r.done} 条`); await load() } catch (e) { toast(errMsg(e)) } finally { setBusy(false) }
+    try { const r = await kb.resolve(ids, choice); toast(choice === "yes" ? t("knowledge:cand.confirmed", { count: r.done }) : t("knowledge:cand.ignored", { count: r.done })); await load() } catch (e) { toast(errMsg(e)) } finally { setBusy(false) }
   }
-  if (err) return <Empty title="待确认打不开" sub={err} />
+  if (err) return <Empty title={t("knowledge:cand.failed")} sub={err} />
   if (!xs) return <Loading />
-  if (!xs.length) return <Empty title="没有待确认的条目" sub="Steve 从事项和对话里发现值得长期保留的规则或知识时，会先放在这里等你确认。大多数事项和对话不会产生新条目。" />
+  if (!xs.length) return <Empty title={t("knowledge:cand.noneTitle")} sub={t("knowledge:cand.noneSub")} />
   /* the batch call takes at most 50 ids */
   const ids = xs.slice(0, 50).map((c) => c.mem.id)
   return (
     <section>
-      <SectionLabel right={<span className="flex gap-1"><Button size="xs" variant="ghost" className="text-muted-foreground" disabled={busy} onClick={() => void resolve(ids, "no")} data-cand-all-no>全部忽略</Button><Button size="xs" variant="outline" disabled={busy} onClick={() => void resolve(ids, "yes")} data-cand-all-yes>全部确认</Button></span>}>
-        待确认 · {xs.length}</SectionLabel>
+      <SectionLabel right={<span className="flex gap-1"><Button size="xs" variant="ghost" className="text-muted-foreground" disabled={busy} onClick={() => void resolve(ids, "no")} data-cand-all-no>{t("knowledge:cand.ignoreAll")}</Button><Button size="xs" variant="outline" disabled={busy} onClick={() => void resolve(ids, "yes")} data-cand-all-yes>{t("knowledge:cand.confirmAll")}</Button></span>}>
+        {t("knowledge:cand.title", { count: xs.length })}</SectionLabel>
       <Group>{xs.map((c) => (
         <Row key={c.mem.id} data-candidate={c.mem.id} className={STACK}
           title={<span className="inline-flex flex-wrap items-center gap-2">{c.mem.text}<Badge variant="outline" className="font-normal text-muted-foreground" data-cand-record>{c.record ?? recordOf(c.mem.kind)}</Badge></span>}
-          sub={<span className="flex flex-col gap-0.5"><span>{memKind(c.mem.kind)} · 来源：{c.origin_label || c.mem.source_label}</span>{c.why && <span className="break-words text-foreground/80" data-cand-why>为什么值得保留：{c.why}</span>}{c.scope && <span className="break-words">适用：{c.scope}</span>}{c.evidence && <span className="break-words">原话：{c.evidence}</span>}{c.supersedes && <span className="break-words">会替换：{c.supersedes.text}</span>}</span>}>
+          sub={<span className="flex flex-col gap-0.5"><span>{t("knowledge:cand.source", { kind: memKind(c.mem.kind), source: c.origin_label || c.mem.source_label })}</span>{c.why && <span className="break-words text-foreground/80" data-cand-why>{t("knowledge:cand.why", { why: c.why })}</span>}{c.scope && <span className="break-words">{t("knowledge:cand.scope", { scope: c.scope })}</span>}{c.evidence && <span className="break-words">{t("knowledge:cand.evidence", { evidence: c.evidence })}</span>}{c.supersedes && <span className="break-words">{t("knowledge:cand.supersedes", { text: c.supersedes.text })}</span>}</span>}>
           <span className="flex items-center gap-1">
-            <Button size="xs" variant="ghost" className="text-muted-foreground" disabled={busy} onClick={() => void resolve([c.mem.id], "no")} data-cand-no>不保存</Button>
-            <Button size="xs" variant="outline" disabled={busy} onClick={() => void resolve([c.mem.id], "yes")} data-cand-yes>保存</Button>
+            <Button size="xs" variant="ghost" className="text-muted-foreground" disabled={busy} onClick={() => void resolve([c.mem.id], "no")} data-cand-no>{t("knowledge:cand.no")}</Button>
+            <Button size="xs" variant="outline" disabled={busy} onClick={() => void resolve([c.mem.id], "yes")} data-cand-yes>{t("common:action.save")}</Button>
           </span>
         </Row>))}</Group>
-      <div className="mt-2 px-1 type-footnote text-muted-foreground">确认后才会用到；30 天没处理的会自动过期。只是这件事的要求、复述目标或单次反馈的，选“不保存”即可，事项记录里仍然保留。</div>
+      <div className="mt-2 px-1 type-footnote text-muted-foreground">{t("knowledge:cand.footer")}</div>
     </section>
   )
 }

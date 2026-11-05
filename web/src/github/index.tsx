@@ -16,6 +16,8 @@ import { Unwired } from "@/unwired"
 import { gh, submitManifest, type GhOverview, type GhRepo, type GhAvailable } from "@/api/github"
 import { NotWired } from "@/api"
 import { RepoView } from "@/github/repo"
+import { Trans } from "react-i18next"
+import { t, useT } from "@/i18n"
 
 /* ── shared ── */
 export type Load<T> = { s: "loading" } | { s: "absent" } | { s: "error"; msg: string } | { s: "ok"; v: T }
@@ -35,14 +37,18 @@ export function useOverview() {
   useHubEvents(["gh", "connection"], () => void load())
   return [ov, load] as const
 }
-export const INGEST: Record<string, string> = { app: "GitHub App 推送", repo_hook: "仓库 Webhook", poll: "轮询" }
+/** how a repository's events arrive (r.ingest, a backend value) as a label; unknown kinds show as they are */
+export const ingestLabel = (k: string) =>
+  k === "app" ? t("github:ingest.app") : k === "repo_hook" ? t("github:ingest.repoHook") : k === "poll" ? t("github:ingest.poll") : k
 export function Health({ r }: { r: GhRepo }) {
-  const [s, l] = !r.enabled ? ["idle", r.problem ?? "已停用"] : r.healthy ? ["done", "正常"] : ["fail", r.problem ?? "连接有问题"]
-  return <span className="inline-flex items-center gap-1.5" data-gh-health={s}><StatusDot s={s} />{INGEST[r.ingest] ?? r.ingest} · {l}</span>
+  const t = useT()
+  const [s, l] = !r.enabled ? ["idle", r.problem ?? t("github:shared.disabled")] : r.healthy ? ["done", t("github:shared.ok")] : ["fail", r.problem ?? t("github:shared.problem")]
+  return <span className="inline-flex items-center gap-1.5" data-gh-health={s}><StatusDot s={s} />{t("github:shared.health", { ingest: ingestLabel(r.ingest), state: l })}</span>
 }
-export function Loading() { return <div className="flex justify-center py-16" role="status" aria-label="加载中"><Spinner className="size-5 text-muted-foreground" /></div> }
+export function Loading() { const t = useT(); return <div className="flex justify-center py-16" role="status" aria-label={t("github:shared.loading")}><Spinner className="size-5 text-muted-foreground" /></div> }
 export function Failed({ msg, retry }: { msg: string; retry: () => void }) {
-  return <div className="flex flex-col items-center gap-3 py-16 text-center" role="alert"><div className="type-headline">读不到 GitHub 的数据</div><div className="type-callout text-muted-foreground">{msg}</div><Button size="sm" variant="outline" onClick={retry}><RefreshCwIcon />重试</Button></div>
+  const t = useT()
+  return <div className="flex flex-col items-center gap-3 py-16 text-center" role="alert"><div className="type-headline">{t("github:shared.failed")}</div><div className="type-callout text-muted-foreground">{msg}</div><Button size="sm" variant="outline" onClick={retry}><RefreshCwIcon />{t("common:action.retry")}</Button></div>
 }
 const ICO = "flex size-9 items-center justify-center rounded-lg bg-muted text-muted-foreground"
 function GhMark({ className }: { className?: string }) {
@@ -70,6 +76,7 @@ export function GitHubView({ repo }: { repo?: string }) {
 
 /* ── #/github ── */
 function IndexView() {
+  const t = useT()
   const [ov, load] = useOverview()
   const [note] = useState(() => flash)
   useEffect(() => { flash = null }, [])
@@ -80,33 +87,34 @@ function IndexView() {
   const connected = !!v?.connections.length
   const appConn = v?.connections.some((c) => c.kind === "app")
   return (
-    <Page title="GitHub" sub="仓库、PR 和检查。关联到项目后，Steve 在验收时问你要不要开 PR，检查失败时把日志交给事项去修" max={720}
-      actions={connected ? <Button size="sm" onClick={() => setAdding({})} data-gh-add><PlusIcon />添加仓库</Button> : undefined}>
+    <Page title="GitHub" sub={t("github:index.sub")} max={720}
+      actions={connected ? <Button size="sm" onClick={() => setAdding({})} data-gh-add><PlusIcon />{t("github:index.addRepo")}</Button> : undefined}>
       <div className="flex flex-col gap-8">
-        {note?.error && <div role="alert" className="rounded-xl border border-destructive/40 px-4 py-3 type-callout" data-gh-error><div className="type-headline text-destructive">没有完成</div><div className="mt-0.5 text-muted-foreground">{note.error}</div>{note.error.includes("保险箱") && <a href="#/vault" className="mt-1 inline-block text-blue hover:underline">去启用保险箱</a>}</div>}
-        {note?.app === "created" && !appConn && <div role="status" className="rounded-xl border px-4 py-3 type-callout" data-gh-created><div className="type-headline">GitHub App 已创建</div><div className="mt-0.5 text-muted-foreground">下一步把它安装到要让 Steve 管的仓库上；装好后 GitHub 会带你回到这里。</div></div>}
+        {/* note.error is the Hub's message; "保险箱" in it is matched as text the Hub sends, not shown from here */}
+        {note?.error && <div role="alert" className="rounded-xl border border-destructive/40 px-4 py-3 type-callout" data-gh-error><div className="type-headline text-destructive">{t("github:index.notDone")}</div><div className="mt-0.5 text-muted-foreground">{note.error}</div>{note.error.includes("保险箱") && <a href="#/vault" className="mt-1 inline-block text-blue hover:underline">{t("github:index.enableVault")}</a>}</div>}
+        {note?.app === "created" && !appConn && <div role="status" className="rounded-xl border px-4 py-3 type-callout" data-gh-created><div className="type-headline">{t("github:index.appCreated")}</div><div className="mt-0.5 text-muted-foreground">{t("github:index.appCreatedSub")}</div></div>}
         {ov.s === "loading" ? <Loading /> : ov.s === "error" ? <Failed msg={ov.msg} retry={load} /> : v && <>
           {!connected && !v.apps.length && <ConnectCard onPat={() => setPat(true)} />}
           {v.apps.length > 0 && <section><SectionLabel>GitHub App</SectionLabel>
             <Group>{v.apps.map((a) => (
-              <Row key={a.slug} icon={<GhIcon />} title={<span className="font-medium">{a.slug}</span>} sub={<Meta><span>{a.owner || "个人账号"}</span><span>评论和 PR 以 {a.slug}[bot] 的身份出现</span></Meta>} data-gh-app={a.slug}>
-                <Button size="sm" variant={appConn ? "ghost" : "default"} nativeButton={false} render={<a href={a.html_url.replace(/\/$/, "") + "/installations/new"} />} data-gh-install>{appConn ? "安装到更多仓库" : "安装到仓库"}</Button>
+              <Row key={a.slug} icon={<GhIcon />} title={<span className="font-medium">{a.slug}</span>} sub={<Meta><span>{a.owner || t("github:index.personalAccount")}</span><span>{t("github:index.botIdentity", { slug: a.slug })}</span></Meta>} data-gh-app={a.slug}>
+                <Button size="sm" variant={appConn ? "ghost" : "default"} nativeButton={false} render={<a href={a.html_url.replace(/\/$/, "") + "/installations/new"} />} data-gh-install>{appConn ? t("github:index.installMore") : t("github:index.install")}</Button>
               </Row>))}</Group></section>}
-          {connected && <section><SectionLabel right={!v.connections.some((c) => c.kind === "pat") ? <Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => setPat(true)} data-gh-pat-open><KeyRoundIcon />用个人令牌</Button> : undefined}>连接</SectionLabel>
+          {connected && <section><SectionLabel right={!v.connections.some((c) => c.kind === "pat") ? <Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => setPat(true)} data-gh-pat-open><KeyRoundIcon />{t("github:shared.usePat")}</Button> : undefined}>{t("github:index.connections")}</SectionLabel>
             <Group>{v.connections.map((c) => (
-              <Row key={c.id} icon={<GhIcon />} title={c.account || c.id} sub={<Meta><span>{c.kind === "app" ? "GitHub App · 本公司的机器人" : "个人令牌 · 我的账号"}</span><span className="inline-flex items-center gap-1.5"><StatusDot s={c.status === "ok" ? "done" : "fail"} />{c.status === "ok" ? "正常" : c.status}</span></Meta>} data-gh-conn={c.kind} />))}</Group></section>}
-          {v.suggestions.length > 0 && <section><SectionLabel>建议关联</SectionLabel>
+              <Row key={c.id} icon={<GhIcon />} title={c.account || c.id} sub={<Meta><span>{c.kind === "app" ? t("github:index.connApp") : t("github:index.connPat")}</span><span className="inline-flex items-center gap-1.5"><StatusDot s={c.status === "ok" ? "done" : "fail"} />{c.status === "ok" ? t("github:shared.ok") : c.status}</span></Meta>} data-gh-conn={c.kind} />))}</Group></section>}
+          {v.suggestions.length > 0 && <section><SectionLabel>{t("github:index.suggestions")}</SectionLabel>
             <Group>{v.suggestions.map((s) => (
-              <Row key={s.project_id} icon={<span className={ICO}><SparklesIcon className="size-[18px]" strokeWidth={1.5} /></span>} title={<span>把 <span className="font-mono text-[13px]">{s.full_name}</span> 关联到项目 {projectName(s.project_id)}？</span>} sub="项目目录的 origin 指向这个仓库" data-gh-suggest={s.full_name}>
-                <Button size="sm" variant="outline" onClick={() => void gh.link({ connection_id: s.connection_id, gh_id: s.gh_id, project_id: s.project_id }).then(() => { toast("已关联 " + s.full_name); void load() }, (e) => toast(errMsg(e)))}>关联</Button>
+              <Row key={s.project_id} icon={<span className={ICO}><SparklesIcon className="size-[18px]" strokeWidth={1.5} /></span>} title={<span><Trans t={t} i18nKey="github:index.suggestTitle" values={{ repo: s.full_name, project: projectName(s.project_id) }} components={{ mono: <span className="font-mono text-[13px]" /> }} /></span>} sub={t("github:shared.linkHint")} data-gh-suggest={s.full_name}>
+                <Button size="sm" variant="outline" onClick={() => void gh.link({ connection_id: s.connection_id, gh_id: s.gh_id, project_id: s.project_id }).then(() => { toast(t("github:shared.linked", { name: s.full_name })); void load() }, (e) => toast(errMsg(e)))}>{t("github:shared.link")}</Button>
               </Row>))}</Group></section>}
-          {connected && <section><SectionLabel>仓库 · {v.repos.length}</SectionLabel>
+          {connected && <section><SectionLabel>{t("github:index.repos", { n: v.repos.length })}</SectionLabel>
             {v.repos.length ? <Group>{v.repos.map((r) => (
               <Row key={r.id} icon={<GhIcon />} onClick={() => go("#/github/" + r.id)} data-gh-repo={r.full_name}
                 title={<span className="font-mono text-[13.5px]">{r.full_name}</span>}
-                sub={<Meta><span>{r.project ? "项目 " + r.project.name : "没有关联项目"}</span><Health r={r} /><span>{r.open_prs} 个打开的 PR</span></Meta>}>
+                sub={<Meta><span>{r.project ? t("github:index.project", { name: r.project.name }) : t("github:index.noProject")}</span><Health r={r} /><span>{t("github:shared.openPrs", { count: r.open_prs })}</span></Meta>}>
                 <ChevronRightIcon className="size-4 text-tertiary" /></Row>))}</Group>
-              : <Empty title="还没有关联仓库" sub="添加一个仓库，再把它关联到项目；Steve 就能跟踪这个项目的 PR 和检查。" />}</section>}
+              : <Empty title={t("github:index.noRepoYet")} sub={t("github:index.noRepoSub")} />}</section>}
         </>}
       </div>
       {pat && <PatDialog onClose={() => setPat(false)} onDone={() => { setPat(false); void load() }} />}
@@ -116,6 +124,7 @@ function IndexView() {
 }
 
 function ConnectCard({ onPat }: { onPat: () => void }) {
+  const t = useT()
   const [owner, setOwner] = useState(""), [busy, setBusy] = useState(false)
   const create = async () => {
     setBusy(true)
@@ -124,37 +133,38 @@ function ConnectCard({ onPat }: { onPat: () => void }) {
   return (
     <section className="flex flex-col gap-4 rounded-xl border px-4 py-4" data-gh-connect>
       <div className="flex items-start gap-3"><GhIcon />
-        <div className="min-w-0"><div className="type-headline">接入 GitHub</div>
-          <div className="mt-0.5 type-callout text-muted-foreground">推荐建一个 GitHub App：装到哪些仓库就收到哪些仓库的事件，令牌一小时就过期，评论和 PR 以机器人身份出现，你可以审查并批准 Steve 开的 PR。</div></div>
+        <div className="min-w-0"><div className="type-headline">{t("github:connect.title")}</div>
+          <div className="mt-0.5 type-callout text-muted-foreground">{t("github:connect.intro")}</div></div>
       </div>
       <FieldGroup className="gap-3">
-        <Field className="gap-1.5"><FieldLabel htmlFor="gh-owner">建在哪个组织下（可选）</FieldLabel>
-          <Input id="gh-owner" className="max-w-xs rounded-lg font-mono text-[13px]" value={owner} onChange={(e) => setOwner(e.target.value)} placeholder="留空：建在你的个人账号下" autoComplete="off" spellCheck={false} />
-          <FieldDescription className="type-footnote">点下面的按钮会跳到 GitHub 确认创建，完成后自动回来。</FieldDescription></Field>
+        <Field className="gap-1.5"><FieldLabel htmlFor="gh-owner">{t("github:connect.owner")}</FieldLabel>
+          <Input id="gh-owner" className="max-w-xs rounded-lg font-mono text-[13px]" value={owner} onChange={(e) => setOwner(e.target.value)} placeholder={t("github:connect.ownerPlaceholder")} autoComplete="off" spellCheck={false} />
+          <FieldDescription className="type-footnote">{t("github:connect.ownerHint")}</FieldDescription></Field>
       </FieldGroup>
       <div className="flex flex-wrap gap-2">
-        <Button onClick={() => void create()} disabled={busy} data-gh-create-app>{busy ? <Spinner className="size-3.5" /> : <GhMark className="size-4" />}创建 GitHub App（推荐）</Button>
-        <Button variant="outline" onClick={onPat} data-gh-pat-open><KeyRoundIcon />用个人令牌</Button>
+        <Button onClick={() => void create()} disabled={busy} data-gh-create-app>{busy ? <Spinner className="size-3.5" /> : <GhMark className="size-4" />}{t("github:connect.createApp")}</Button>
+        <Button variant="outline" onClick={onPat} data-gh-pat-open><KeyRoundIcon />{t("github:shared.usePat")}</Button>
       </div>
     </section>
   )
 }
 
 function PatDialog({ onClose, onDone }: { onClose: () => void; onDone: () => void }) {
+  const t = useT()
   const [token, setToken] = useState(""), [busy, setBusy] = useState(false)
   const save = async () => {
     setBusy(true)
-    try { await gh.connectPat(token.trim()); toast("已接入个人令牌"); onDone() } catch (e) { toast(errMsg(e)) } finally { setBusy(false) }
+    try { await gh.connectPat(token.trim()); toast(t("github:pat.done")); onDone() } catch (e) { toast(errMsg(e)) } finally { setBusy(false) }
   }
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
       <DialogContent className="gap-4 rounded-2xl sm:max-w-[480px]" data-gh-pat-dialog>
-        <DialogHeader><DialogTitle className="type-headline">用个人令牌接入</DialogTitle>
-          <DialogDescription className="type-callout">以你本人的身份操作，PR 是你自己开的。令牌存在系统保险箱里，不会给 Bot 看到。</DialogDescription></DialogHeader>
-        <Field className="gap-1.5"><FieldLabel htmlFor="gh-token">令牌</FieldLabel>
+        <DialogHeader><DialogTitle className="type-headline">{t("github:pat.title")}</DialogTitle>
+          <DialogDescription className="type-callout">{t("github:pat.desc")}</DialogDescription></DialogHeader>
+        <Field className="gap-1.5"><FieldLabel htmlFor="gh-token">{t("github:pat.token")}</FieldLabel>
           <Input id="gh-token" type="password" autoFocus className="rounded-lg font-mono text-[13px]" value={token} onChange={(e) => setToken(e.target.value)} placeholder="github_pat_…" autoComplete="off" spellCheck={false} onKeyDown={(e) => { if (e.key === "Enter" && token.trim() && !busy) void save() }} />
-          <FieldDescription className="type-footnote">GitHub 设置 → Developer settings → Fine-grained tokens：选好仓库，给 Contents、Pull requests、Issues 读写，Checks、Actions 读；要接收事件再给 Webhooks 读写。没有 Webhooks 权限的仓库改为每 2 分钟轮询。</FieldDescription></Field>
-        <DialogFooter className="gap-2"><Button variant="outline" onClick={onClose}>取消</Button><Button disabled={!token.trim() || busy} onClick={() => void save()} data-gh-pat-go>{busy && <Spinner className="size-3.5" />}接入</Button></DialogFooter>
+          <FieldDescription className="type-footnote">{t("github:pat.hint")}</FieldDescription></Field>
+        <DialogFooter className="gap-2"><Button variant="outline" onClick={onClose}>{t("common:action.cancel")}</Button><Button disabled={!token.trim() || busy} onClick={() => void save()} data-gh-pat-go>{busy && <Spinner className="size-3.5" />}{t("github:pat.connect")}</Button></DialogFooter>
       </DialogContent>
     </Dialog>
   )
@@ -162,6 +172,7 @@ function PatDialog({ onClose, onDone }: { onClose: () => void; onDone: () => voi
 
 /* 添加仓库：选连接 → 连接能看到的仓库 → 可选的项目 */
 function AddRepoDialog({ ov, init, onClose, onDone }: { ov: GhOverview; init: { project?: string; connection?: string; gh_id?: number }; onClose: () => void; onDone: (r: GhRepo) => void }) {
+  const t = useT()
   const [conn, setConn] = useState(init.connection ?? ov.connections[0]?.id ?? "")
   const [list, setList] = useState<GhAvailable[] | null>(null), [err, setErr] = useState("")
   const [pick, setPick] = useState<number | null>(init.gh_id ?? null), [busy, setBusy] = useState(false)
@@ -176,31 +187,31 @@ function AddRepoDialog({ ov, init, onClose, onDone }: { ov: GhOverview; init: { 
   const go_ = async () => {
     if (pick == null) return
     setBusy(true)
-    try { const r = await gh.link({ connection_id: conn, gh_id: pick, project_id: project === "none" ? null : project }); toast("已关联 " + r.full_name); onDone(r) } catch (e) { toast(errMsg(e)) } finally { setBusy(false) }
+    try { const r = await gh.link({ connection_id: conn, gh_id: pick, project_id: project === "none" ? null : project }); toast(t("github:shared.linked", { name: r.full_name })); onDone(r) } catch (e) { toast(errMsg(e)) } finally { setBusy(false) }
   }
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
       <DialogContent className="gap-4 rounded-2xl sm:max-w-[520px]" data-gh-add-dialog>
-        <DialogHeader><DialogTitle className="type-headline">添加仓库</DialogTitle>
-          <DialogDescription className="type-callout">一个项目最多关联一个仓库。关联后 Steve 跟踪这个仓库的 PR、检查和 Issue。</DialogDescription></DialogHeader>
+        <DialogHeader><DialogTitle className="type-headline">{t("github:index.addRepo")}</DialogTitle>
+          <DialogDescription className="type-callout">{t("github:add.desc")}</DialogDescription></DialogHeader>
         <FieldGroup className="gap-4">
-          {ov.connections.length > 1 && <Field orientation="horizontal" className="justify-between"><FieldLabel>连接</FieldLabel>
-            <Select align="end" testId="gh-conn" value={conn} onChange={(x) => { setConn(x); setPick(null) }} options={ov.connections.map((c) => ({ v: c.id, l: `${c.account} · ${c.kind === "app" ? "App" : "个人令牌"}` }))} /></Field>}
-          <div className="flex flex-col gap-1.5"><div className="type-label text-muted-foreground" id="gh-avail-label">仓库</div>
-            {err ? <div role="alert" className="type-callout text-destructive">{err}</div> : !list ? <Loading /> : !list.length ? <div className="py-4 type-callout text-muted-foreground">这个连接看不到任何仓库。App 要先安装到仓库上；个人令牌要在 GitHub 上选好仓库。</div> :
+          {ov.connections.length > 1 && <Field orientation="horizontal" className="justify-between"><FieldLabel>{t("github:add.connection")}</FieldLabel>
+            <Select align="end" testId="gh-conn" value={conn} onChange={(x) => { setConn(x); setPick(null) }} options={ov.connections.map((c) => ({ v: c.id, l: t("github:add.connOption", { account: c.account, kind: c.kind === "app" ? t("github:add.app") : t("github:shared.pat") }) }))} /></Field>}
+          <div className="flex flex-col gap-1.5"><div className="type-label text-muted-foreground" id="gh-avail-label">{t("github:add.repo")}</div>
+            {err ? <div role="alert" className="type-callout text-destructive">{err}</div> : !list ? <Loading /> : !list.length ? <div className="py-4 type-callout text-muted-foreground">{t("github:add.noneVisible")}</div> :
               <div role="radiogroup" aria-labelledby="gh-avail-label" className="flex max-h-64 flex-col overflow-y-auto rounded-lg border">
                 {list.map((a) => (
                   <label key={a.gh_id} className={"flex cursor-pointer items-center gap-3 border-b px-3 py-2.5 last:border-b-0 has-[:disabled]:cursor-default has-[:disabled]:opacity-60 " + (pick === a.gh_id ? "bg-accent" : "hover:bg-accent/60")} data-gh-avail={a.full_name}>
                     <input type="radio" name="gh-repo" className="accent-[var(--blue)]" checked={pick === a.gh_id} disabled={a.linked} onChange={() => setPick(a.gh_id)} />
                     <span className="min-w-0 flex-1 truncate font-mono text-[13px]">{a.full_name}</span>
-                    <span className="type-footnote text-muted-foreground">{a.linked ? "已关联" : a.private ? "私有" : "公开"}</span>
+                    <span className="type-footnote text-muted-foreground">{a.linked ? t("github:add.alreadyLinked") : a.private ? t("github:repo.private") : t("github:repo.public")}</span>
                   </label>))}
               </div>}
           </div>
-          <Field orientation="horizontal" className="justify-between"><div><FieldLabel>项目</FieldLabel><FieldDescription className="type-footnote">也可以以后在仓库页里改</FieldDescription></div>
-            <Select align="end" testId="gh-project" value={project} onChange={setProject} options={[{ v: "none", l: "先不关联" }, ...projects.map((p) => ({ v: p.id, l: p.name }))]} /></Field>
+          <Field orientation="horizontal" className="justify-between"><div><FieldLabel>{t("github:add.project")}</FieldLabel><FieldDescription className="type-footnote">{t("github:add.projectHint")}</FieldDescription></div>
+            <Select align="end" testId="gh-project" value={project} onChange={setProject} options={[{ v: "none", l: t("github:add.notYet") }, ...projects.map((p) => ({ v: p.id, l: p.name }))]} /></Field>
         </FieldGroup>
-        <DialogFooter className="gap-2"><Button variant="outline" onClick={onClose}>取消</Button><Button disabled={pick == null || busy} onClick={() => void go_()} data-gh-add-go>{busy && <Spinner className="size-3.5" />}关联</Button></DialogFooter>
+        <DialogFooter className="gap-2"><Button variant="outline" onClick={onClose}>{t("common:action.cancel")}</Button><Button disabled={pick == null || busy} onClick={() => void go_()} data-gh-add-go>{busy && <Spinner className="size-3.5" />}{t("github:shared.link")}</Button></DialogFooter>
       </DialogContent>
     </Dialog>
   )
@@ -208,6 +219,7 @@ function AddRepoDialog({ ov, init, onClose, onDone }: { ov: GhOverview; init: { 
 
 /* ── 项目页的 “GitHub” 一行 ── */
 export function GitHubLine({ project }: { project: string }) {
+  const t = useT()
   const [ov, setOv] = useState<GhOverview | null>(null)
   useEffect(() => { gh.overview().then(setOv, () => setOv(null)) }, [project])
   if (!ov) return null // no GitHub module on this Hub (or not readable): the project page stays as it was
@@ -215,11 +227,11 @@ export function GitHubLine({ project }: { project: string }) {
   return (
     <section data-gh-line><SectionLabel>GitHub</SectionLabel>
       <Group>{r
-        ? <Row icon={<GhIcon />} onClick={() => go("#/github/" + r.id)} title={<span className="font-mono text-[13.5px]">{r.full_name}</span>} sub={<Meta><Health r={r} /><span>{r.open_prs} 个打开的 PR</span></Meta>}><ChevronRightIcon className="size-4 text-tertiary" /></Row>
-        : s ? <Row icon={<GhIcon />} title={<span>关联到 <span className="font-mono text-[13px]">{s.full_name}</span>？</span>} sub="项目目录的 origin 指向这个仓库">
-            <Button size="sm" variant="outline" onClick={() => void gh.link({ connection_id: s.connection_id, gh_id: s.gh_id, project_id: project }).then((x) => { toast("已关联 " + x.full_name); setOv({ ...ov, repos: [...ov.repos, x], suggestions: ov.suggestions.filter((y) => y !== s) }) }, (e) => toast(errMsg(e)))} data-gh-line-suggest>关联</Button></Row>
-        : <Row icon={<GhIcon />} title="没有关联仓库" sub={ov.connections.length ? "关联后 Steve 跟踪这个项目的 PR 和检查" : "先接入 GitHub"}>
-            <Button size="sm" variant="outline" onClick={() => go(ov.connections.length ? "#/github?link=" + encodeURIComponent(project) : "#/github")} data-gh-line-link>{ov.connections.length ? "关联仓库" : "接入 GitHub"}</Button></Row>}
+        ? <Row icon={<GhIcon />} onClick={() => go("#/github/" + r.id)} title={<span className="font-mono text-[13.5px]">{r.full_name}</span>} sub={<Meta><Health r={r} /><span>{t("github:shared.openPrs", { count: r.open_prs })}</span></Meta>}><ChevronRightIcon className="size-4 text-tertiary" /></Row>
+        : s ? <Row icon={<GhIcon />} title={<span><Trans t={t} i18nKey="github:line.suggestTitle" values={{ repo: s.full_name }} components={{ mono: <span className="font-mono text-[13px]" /> }} /></span>} sub={t("github:shared.linkHint")}>
+            <Button size="sm" variant="outline" onClick={() => void gh.link({ connection_id: s.connection_id, gh_id: s.gh_id, project_id: project }).then((x) => { toast(t("github:shared.linked", { name: x.full_name })); setOv({ ...ov, repos: [...ov.repos, x], suggestions: ov.suggestions.filter((y) => y !== s) }) }, (e) => toast(errMsg(e)))} data-gh-line-suggest>{t("github:shared.link")}</Button></Row>
+        : <Row icon={<GhIcon />} title={t("github:shared.noRepo")} sub={ov.connections.length ? t("github:line.linkedSub") : t("github:line.connectFirst")}>
+            <Button size="sm" variant="outline" onClick={() => go(ov.connections.length ? "#/github?link=" + encodeURIComponent(project) : "#/github")} data-gh-line-link>{ov.connections.length ? t("github:line.linkRepo") : t("github:shared.connectGithub")}</Button></Row>}
       </Group>
     </section>
   )
@@ -227,5 +239,6 @@ export function GitHubLine({ project }: { project: string }) {
 
 /* “我的”列表里的入口（GitHub 不占主导航） */
 export function GitHubMoreRow() {
-  return <Row icon={<GhIcon />} title="GitHub" sub="仓库、PR 和检查" onClick={() => go("#/github")} data-more-github><ChevronRightIcon className="size-4 text-tertiary" /></Row>
+  const t = useT()
+  return <Row icon={<GhIcon />} title="GitHub" sub={t("github:index.moreSub")} onClick={() => go("#/github")} data-more-github><ChevronRightIcon className="size-4 text-tertiary" /></Row>
 }

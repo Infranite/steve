@@ -9,7 +9,7 @@ if (shots) await mkdir(shots, { recursive: true })
 const results = []
 try {
   for (const width of [390, 1280]) for (const mode of ["single", "changed", "multi"]) {
-    const page = await browser.newPage({ viewport: { width, height: 900 } })
+    const page = await browser.newPage({ locale: "zh-CN", viewport: { width, height: 900 } })
     const errors = [], unexpected = [], mutations = []
     page.on("pageerror", e => errors.push(e.message))
     const plan = body => {

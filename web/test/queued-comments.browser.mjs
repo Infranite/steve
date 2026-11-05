@@ -7,7 +7,7 @@ const base = process.env.STEVE_TEST_WEB || "http://127.0.0.1:5189"
 const errors = [], requests = []
 try {
   for (const width of [1066, 390]) {
-    const page = await browser.newPage({ viewport: { width, height: 900 }, colorScheme: "dark" })
+    const page = await browser.newPage({ locale: "zh-CN", viewport: { width, height: 900 }, colorScheme: "dark" })
     page.on("pageerror", e => errors.push(e.message))
     await page.route("**/*", route => {
       const u = new URL(route.request().url())

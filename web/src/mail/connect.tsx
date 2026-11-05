@@ -10,6 +10,7 @@ import { Chips } from "@/ui"
 import { Select } from "@/view-shared"
 import { IMAP_PRESETS, type ImapPreset } from "@/api/mail"
 import type { RFieldDef } from "@/api/accounts"
+import { useT } from "@/i18n"
 
 const SERVER = ["imap_host", "imap_port", "imap_security", "smtp_host", "smtp_port", "smtp_security", "username"]
 const SECURITY = [{ v: "tls", l: "TLS" }, { v: "starttls", l: "STARTTLS" }]
@@ -18,6 +19,7 @@ const SECURITY = [{ v: "tls", l: "TLS" }, { v: "starttls", l: "STARTTLS" }]
 const presetVals = (p: ImapPreset) => ({ imap_host: p.imap_host, imap_port: String(p.imap_port), imap_security: "tls", smtp_host: p.smtp_host, smtp_port: String(p.smtp_port), smtp_security: p.smtp_security })
 
 export function ImapFields({ fields, vals, setVals }: { fields: RFieldDef[]; vals: Record<string, string>; setVals: (v: Record<string, string>) => void }) {
+  const t = useT()
   const [preset, setPreset] = useState<ImapPreset | null>(null), [open, setOpen] = useState(false)
   const pick = (name: string) => {
     const p = IMAP_PRESETS.find((x) => x.name === name)!; setPreset(p)
@@ -31,7 +33,7 @@ export function ImapFields({ fields, vals, setVals }: { fields: RFieldDef[]; val
     const d = f(k); if (!d) return null
     return (
       <Field key={k}>
-        <FieldLabel htmlFor={k.endsWith("_security") ? undefined : "imap-" + k}>{d.label}{d.secret && <LockIcon className="ml-1 inline size-3 text-muted-foreground" aria-label="机密" />}{!d.required && <span className="ml-1 font-normal text-muted-foreground">（可选）</span>}</FieldLabel>
+        <FieldLabel htmlFor={k.endsWith("_security") ? undefined : "imap-" + k}>{d.label}{d.secret && <LockIcon className="ml-1 inline size-3 text-muted-foreground" aria-label={t("mail:connect.secret")} />}{!d.required && <span className="ml-1 font-normal text-muted-foreground">{t("mail:connect.optional")}</span>}</FieldLabel>
         {k.endsWith("_security")
           ? <div role="group" aria-label={d.label}><Select testId={"imap-" + k} value={v(k) || "tls"} onChange={(x) => set(k, x)} options={SECURITY} /></div>
           : <Input id={"imap-" + k} className={cn("rounded-lg", extra?.mono !== false && "font-mono")} autoFocus={extra?.autoFocus} placeholder={extra?.placeholder}
@@ -45,17 +47,17 @@ export function ImapFields({ fields, vals, setVals }: { fields: RFieldDef[]; val
   return (
     <div className="flex flex-col gap-4" data-imap-form>
       <Field>
-        <FieldLabel>邮箱服务商</FieldLabel>
+        <FieldLabel>{t("mail:connect.provider")}</FieldLabel>
         <Chips value={preset?.name ?? ""} onChange={pick} options={IMAP_PRESETS.map((p) => p.name)} className="flex-wrap" />
         <FieldDescription data-imap-hint>{preset
-          ? <>{preset.hint}{preset.help && <> · <a href={preset.help} target="_blank" rel="noreferrer noopener" className="inline-flex items-center gap-0.5 text-blue hover:underline">怎么拿应用专用密码<ExternalLinkIcon className="size-3" aria-hidden /></a></>}</>
-          : "选一个服务商，服务器地址和端口会自动填好。Outlook.com 个人邮箱不支持密码方式，请用 Outlook 授权接入。"}</FieldDescription>
+          ? <>{preset.hint}{preset.help && <> · <a href={preset.help} target="_blank" rel="noreferrer noopener" className="inline-flex items-center gap-0.5 text-blue hover:underline">{t("mail:connect.appPasswordHelp")}<ExternalLinkIcon className="size-3" aria-hidden /></a></>}</>
+          : t("mail:connect.pickProvider")}</FieldDescription>
       </Field>
       {input("address", { placeholder: "you@example.com" })}
       {input("password")}
       <div>
         <button type="button" className="inline-flex items-center gap-1 type-callout text-muted-foreground hover:text-foreground" aria-expanded={open} onClick={() => setOpen(!open)} data-imap-server-toggle>
-          服务器设置<ChevronDownIcon className={cn("size-4 transition-transform", open && "rotate-180")} aria-hidden />
+          {t("mail:connect.serverSettings")}<ChevronDownIcon className={cn("size-4 transition-transform", open && "rotate-180")} aria-hidden />
           {!open && v("imap_host") && <span className="ml-1 font-mono text-[12px]">{v("imap_host")}:{v("imap_port")} · {v("smtp_host")}:{v("smtp_port")}</span>}
         </button>
         {open && <div className="mt-3 grid grid-cols-1 gap-4 sm:grid-cols-[1fr_96px_120px]" data-imap-server>

@@ -14,71 +14,75 @@ import { st, tm, botName, projectName, tagName, pendingCards, sessionCards, unre
 import { go, StatusDot, ItemNo, DecisionCard, SectionLabel, RelNote } from "@/ui"
 import type { RNotice } from "@/api"
 import { ResearchLive, researchSummary, researchIcon, researchToolLabel } from "@/thread/parts"
+import { t, useT } from "@/i18n"
 
 /* ───────── what Steve did ───────── */
-const KIND: Record<string, string> = { chat: "直接回答", answer: "直接回答", research: "就地研究", item: "建事项", suggest: "建议", ask: "追问", supplement: "送到事项", status: "问进展", config: "配置", reroute: "改道" }
-const TOOL: Record<string, [string, any]> = { create_item: ["建事项", ListPlusIcon], draft_config: ["起草配置改动", SlidersHorizontalIcon], supplement: ["送到事项", SendIcon], digest: ["汇报进展", MegaphoneIcon] }
-const secs = (ms?: number) => (ms == null ? "" : ms < 1000 ? `${ms} 毫秒` : `${(ms / 1000).toFixed(1)} 秒`)
+/* labels are functions so they follow a language change */
+const KIND: Record<string, () => string> = { chat: () => t("shell:chat.kind.answer"), answer: () => t("shell:chat.kind.answer"), research: () => t("shell:chat.kind.research"), item: () => t("shell:chat.kind.item"), suggest: () => t("shell:chat.kind.suggest"), ask: () => t("shell:chat.kind.ask"), supplement: () => t("shell:chat.kind.supplement"), status: () => t("shell:chat.kind.status"), config: () => t("shell:chat.kind.config"), reroute: () => t("shell:chat.kind.reroute") }
+const kindLabel = (k: string) => KIND[k]?.() ?? k
+const TOOL: Record<string, [() => string, any]> = { create_item: [() => t("shell:chat.tool.createItem"), ListPlusIcon], draft_config: [() => t("shell:chat.tool.draftConfig"), SlidersHorizontalIcon], supplement: [() => t("shell:chat.tool.supplement"), SendIcon], digest: [() => t("shell:chat.tool.digest"), MegaphoneIcon] }
+const secs = (ms?: number) => (ms == null ? "" : ms < 1000 ? t("shell:chat.ms", { n: ms }) : t("common:time.secondsN", { n: (ms / 1000).toFixed(1) }))
 const firstSentence = (t: string) => t.split(/(?<=[。！？.!?])\s*/)[0]?.slice(0, 80) ?? ""
-const RESEARCH_ERROR: Record<string, string> = {
-  permission_denied: "工具调用被权限或审批策略拒绝，查询未完成。",
-  invalid_arguments: "查询参数不正确，未能完成这次调用。",
-  transport: "查询服务连接失败，请稍后重试。",
-  guard_violation: "调用超出本次研究允许的范围，已停止。",
-  unknown: "这次查询未完成，未能确认具体原因。",
+const RESEARCH_ERROR: Record<string, () => string> = {
+  permission_denied: () => t("shell:chat.researchError.permissionDenied"),
+  invalid_arguments: () => t("shell:chat.researchError.invalidArguments"),
+  transport: () => t("shell:chat.researchError.transport"),
+  guard_violation: () => t("shell:chat.researchError.guardViolation"),
+  unknown: () => t("shell:chat.researchError.unknown"),
 }
-const researchError = (code?: string) => code && Object.hasOwn(RESEARCH_ERROR, code) ? RESEARCH_ERROR[code] : RESEARCH_ERROR.unknown
+const researchError = (code?: string) => (code && Object.hasOwn(RESEARCH_ERROR, code) ? RESEARCH_ERROR[code] : RESEARCH_ERROR.unknown)()
 /** one line for the folded block and the rail */
 export function stepsSummary(s: Steps): string {
   const r = s.route
   if (s.research) return researchSummary(s)
   if (s.answer?.thought) return firstSentence(s.answer.thought)
   if (r?.why) return r.why
-  if (r) return `${KIND[r.kind]}${r.kind === "item" ? " · " + botName(r.picked ?? r.bot) : ""}`
-  const t = s.tools[0]; return t ? TOOL[t.name]?.[0] ?? t.name : ""
+  if (r) return `${kindLabel(r.kind)}${r.kind === "item" ? " · " + botName(r.picked ?? r.bot) : ""}`
+  const tool = s.tools[0]; return tool ? TOOL[tool.name]?.[0]() ?? tool.name : ""
 }
 const OPEN_EV = "steve-open-steps"
 /** scroll the conversation to a message's steps and unfold them */
 export function openSteps(id: string) { window.dispatchEvent(new CustomEvent(OPEN_EV, { detail: id })) }
 
 export function StepsBlock({ m }: { m: Msg }) {
-  const s = m.steps, [open, setOpen] = useState(false)
+  const s = m.steps, [open, setOpen] = useState(false), t = useT()
   useEffect(() => {
     const h = (e: Event) => { if ((e as CustomEvent).detail !== m.id) return; setOpen(true); document.getElementById("steps-" + m.id)?.scrollIntoView({ behavior: "smooth", block: "center" }) }
     window.addEventListener(OPEN_EV, h); return () => window.removeEventListener(OPEN_EV, h)
   }, [m.id])
   if (!s || (!s.route && !s.tools.length)) return null
-  const r = s.route, failed = s.tools.some((t) => t.status === "failed")
-  const routeDesc = r && [KIND[r.kind] ?? r.kind, r.kind === "item" && botName(r.picked ?? r.bot), r.project && projectName(r.project), ...r.tags.map(tagName), ...r.newTags.map((t) => t + "（新建）")].filter(Boolean).join(" · ")
+  const r = s.route, failed = s.tools.some((x) => x.status === "failed")
+  const routeDesc = r && [kindLabel(r.kind), r.kind === "item" && botName(r.picked ?? r.bot), r.project && projectName(r.project), ...r.tags.map(tagName), ...r.newTags.map((tag) => t("shell:chat.newTag", { tag }))].filter(Boolean).join(" · ")
   return (
     <TraceCollapsible open={open} onOpenChange={setOpen} id={"steps-" + m.id} className="max-w-full self-start" data-steps={m.id}>
       <TraceCollapsibleTrigger className="px-2 py-1 hover:bg-muted [&_[data-slot=trace-line]]:text-[12px] [&_[data-slot=trace-description]]:text-muted-foreground" data-steps-toggle>
-        <TraceLine status={failed ? "error" : undefined}><TraceIcon><BrainIcon strokeWidth={1.5} /></TraceIcon><TraceTitle>{s.research ? "查了" : "思考"}</TraceTitle>
+        <TraceLine status={failed ? "error" : undefined}><TraceIcon><BrainIcon strokeWidth={1.5} /></TraceIcon><TraceTitle>{s.research ? t("shell:chat.researched") : t("shell:chat.thinking")}</TraceTitle>
           <TraceDescription className="min-w-0 shrink truncate">{stepsSummary(s)}{s.ms != null && !s.research && <span className="ml-1.5">· {secs(s.ms)}</span>}</TraceDescription></TraceLine>
       </TraceCollapsibleTrigger>
       <TraceCollapsibleContent>
         <Trace className="gap-1.5 pt-1">
           {r && <div className="flex flex-col gap-0.5" data-step-route>
-            <TraceLine><TraceIcon><RouteIcon strokeWidth={1.5} /></TraceIcon><TraceTitle className="text-foreground/80">分诊</TraceTitle><TraceDescription className="min-w-0 shrink truncate">{routeDesc}</TraceDescription></TraceLine>
-            <div className="pl-6 type-footnote text-muted-foreground">{r.picked ? `你用 @ 指定了${botName(r.picked)}。` : ""}{r.why}{r.guard && r.modelKind && r.modelKind !== r.kind ? `（模型判为${KIND[r.modelKind] ?? r.modelKind}，按规则改成${KIND[r.kind] ?? r.kind}）` : ""}<span className="ml-1.5 text-tertiary">{[r.model, secs(r.ms)].filter(Boolean).join(" · ")}</span></div>
+            <TraceLine><TraceIcon><RouteIcon strokeWidth={1.5} /></TraceIcon><TraceTitle className="text-foreground/80">{t("shell:chat.triage")}</TraceTitle><TraceDescription className="min-w-0 shrink truncate">{routeDesc}</TraceDescription></TraceLine>
+            <div className="pl-6 type-footnote text-muted-foreground">{r.picked ? t("shell:chat.picked", { bot: botName(r.picked) }) : ""}{r.why}{r.guard && r.modelKind && r.modelKind !== r.kind ? t("shell:chat.guarded", { model: kindLabel(r.modelKind), kind: kindLabel(r.kind) }) : ""}<span className="ml-1.5 text-tertiary">{[r.model, secs(r.ms)].filter(Boolean).join(" · ")}</span></div>
           </div>}
           {s.answer?.thought && <div className="flex flex-col gap-0.5" data-step-thought>
-            <TraceLine><TraceIcon><BrainIcon strokeWidth={1.5} /></TraceIcon><TraceTitle className="text-foreground/80">怎么回答</TraceTitle><TraceDescription>{secs(s.answer.ms)}</TraceDescription></TraceLine>
+            <TraceLine><TraceIcon><BrainIcon strokeWidth={1.5} /></TraceIcon><TraceTitle className="text-foreground/80">{t("shell:chat.howToAnswer")}</TraceTitle><TraceDescription>{secs(s.answer.ms)}</TraceDescription></TraceLine>
             <div className="min-w-0 break-words pl-6 text-muted-foreground"><Markdown text={s.answer.thought} className="type-callout" /></div>
           </div>}
-          {s.tools.map((t, n) => {
-            const brief = typeof t.args?.brief === "string" ? t.args.brief : undefined
-            const [label, I] = TOOL[t.name] ?? (brief !== undefined ? [researchToolLabel(t.name), researchIcon(t.name)] : [t.name, InfoIcon]), item = t.result?.item as string | undefined
-            const desc = t.name === "create_item" ? [item, botName((t.result?.bot ?? t.args.bot) as string), t.result?.project ? projectName(t.result.project as string) : "无项目"].filter(Boolean).join(" · ")
-              : t.name === "draft_config" ? `${t.result?.target ?? ""}${t.result ? ` · ${t.result.changes} 项改动` : ""}` : t.name === "supplement" ? String(t.args.item ?? "") : brief ?? ""
+          {s.tools.map((tool, n) => {
+            const brief = typeof tool.args?.brief === "string" ? tool.args.brief : undefined
+            const known = TOOL[tool.name]
+            const [label, I] = known ? [known[0](), known[1]] : brief !== undefined ? [researchToolLabel(tool.name), researchIcon(tool.name)] : [tool.name, InfoIcon], item = tool.result?.item as string | undefined
+            const desc = tool.name === "create_item" ? [item, botName((tool.result?.bot ?? tool.args.bot) as string), tool.result?.project ? projectName(tool.result.project as string) : t("shell:chat.noProject")].filter(Boolean).join(" · ")
+              : tool.name === "draft_config" ? `${tool.result?.target ?? ""}${tool.result ? " · " + t("shell:chat.changes", { count: Number(tool.result.changes) }) : ""}` : tool.name === "supplement" ? String(tool.args.item ?? "") : brief ?? ""
             return (
-              <div key={n} className="flex flex-col gap-0.5" data-step-tool={t.name}>
-                <TraceLine status={t.status === "failed" ? "error" : undefined}>
-                  <TraceIcon>{t.status === "failed" ? <XIcon strokeWidth={1.75} /> : <I strokeWidth={1.5} />}</TraceIcon><TraceTitle className={t.status === "failed" ? "" : "text-foreground/80"}>{label}</TraceTitle>
+              <div key={n} className="flex flex-col gap-0.5" data-step-tool={tool.name}>
+                <TraceLine status={tool.status === "failed" ? "error" : undefined}>
+                  <TraceIcon>{tool.status === "failed" ? <XIcon strokeWidth={1.75} /> : <I strokeWidth={1.5} />}</TraceIcon><TraceTitle className={tool.status === "failed" ? "" : "text-foreground/80"}>{label}</TraceTitle>
                   <TraceDescription className="min-w-0 shrink truncate font-mono text-[12px]">{item ? <button type="button" className="hover:text-foreground hover:underline" onClick={() => go("#/items/" + item)}>{desc}</button> : desc}</TraceDescription>
-                  <TraceDescription className="inline-flex items-center gap-1">{t.status === "ok" && <CheckIcon className="size-3.5" strokeWidth={1.75} />}{secs(t.ms)}</TraceDescription>
+                  <TraceDescription className="inline-flex items-center gap-1">{tool.status === "ok" && <CheckIcon className="size-3.5" strokeWidth={1.75} />}{secs(tool.ms)}</TraceDescription>
                 </TraceLine>
-                {(t.error || (s.research && t.status === "failed")) && <div className="pl-6 type-footnote text-destructive">{s.research ? researchError(t.error) : t.error}</div>}
+                {(tool.error || (s.research && tool.status === "failed")) && <div className="pl-6 type-footnote text-destructive">{s.research ? researchError(tool.error) : tool.error}</div>}
               </div>
             )
           })}
@@ -88,31 +92,32 @@ export function StepsBlock({ m }: { m: Msg }) {
   )
 }
 
-const PHASE: Record<string, string> = { route: "正在判断怎么处理", answer: "正在想怎么回答", research: "正在查", item: "正在建事项", config: "正在起草配置改动", supplement: "正在送到事项" }
+const PHASE: Record<string, () => string> = { route: () => t("shell:chat.phase.route"), answer: () => t("shell:chat.phase.answer"), research: () => t("shell:chat.phase.research"), item: () => t("shell:chat.phase.item"), config: () => t("shell:chat.phase.config"), supplement: () => t("shell:chat.phase.supplement") }
 /** while Steve works on a message: what it is doing right now; while an answer is written, its reasoning so far */
 export function LiveSteps() {
-  const d = st.draft
+  const d = st.draft, t = useT()
   if (st.live) return <ResearchLive />
   if (d?.thought) return (
     <div className="-mb-1 max-w-[88%] self-start px-1" data-live-steps="thought">
-      <TraceLine><TraceIcon>{d.text ? <BrainIcon strokeWidth={1.5} /> : <Spinner className="size-3.5" />}</TraceIcon><TraceTitle>思考</TraceTitle>
+      <TraceLine><TraceIcon>{d.text ? <BrainIcon strokeWidth={1.5} /> : <Spinner className="size-3.5" />}</TraceIcon><TraceTitle>{t("shell:chat.thinking")}</TraceTitle>
         <TraceDescription className="min-w-0 shrink truncate">{firstSentence(d.thought)}</TraceDescription></TraceLine>
     </div>
   )
   if (d?.text) return null
-  return <div className="flex items-center gap-2 self-start px-1 type-callout text-muted-foreground" data-live-steps={st.phase || "start"}><Spinner className="size-3.5" /><span className="shimmer">{PHASE[st.phase] ?? "正在理解"}</span></div>
+  return <div className="flex items-center gap-2 self-start px-1 type-callout text-muted-foreground" data-live-steps={st.phase || "start"}><Spinner className="size-3.5" /><span className="shimmer">{PHASE[st.phase]?.() ?? t("shell:chat.phase.start")}</span></div>
 }
 
 /** a failure notification's line in the conversation; it leaves once closed by hand or by a later release of its item */
 export function NoticeLine({ m, onOpen }: { m: Msg; onOpen: () => void }) {
+  const t = useT()
   return (
     <div className="flex max-w-[88%] items-start gap-2.5 self-start px-1 type-callout anim-in" data-notice-line={m.notice?.ref ?? m.id}>
       <CircleAlertIcon className="mt-0.5 size-4 shrink-0 text-destructive" strokeWidth={1.75} />
       <div className="min-w-0 flex-1 wrap-anywhere"><span className="text-foreground">{m.t}</span>
-        <span className="ml-2 inline-flex gap-2 type-footnote text-muted-foreground">{m.item && <button type="button" className="hover:text-foreground hover:underline" onClick={() => go("#/items/" + m.item)}>去 {m.item}</button>}<button type="button" className="hover:text-foreground hover:underline" onClick={onOpen}>通知</button></span></div>
+        <span className="ml-2 inline-flex gap-2 type-footnote text-muted-foreground">{m.item && <button type="button" className="hover:text-foreground hover:underline" onClick={() => go("#/items/" + m.item)}>{t("shell:chat.goItem", { item: m.item })}</button>}<button type="button" className="hover:text-foreground hover:underline" onClick={onOpen}>{t("shell:chat.notices")}</button></span></div>
       <Tooltip>
-        <TooltipTrigger render={<Button variant="ghost" size="icon-xs" aria-label="关闭这条提示" className="-my-0.5 shrink-0 text-muted-foreground" onClick={() => dismissNotice(m.notice?.ref ?? m.id!)} data-notice-dismiss />}><XIcon /></TooltipTrigger>
-        <TooltipContent>关闭，通知里仍可查到</TooltipContent>
+        <TooltipTrigger render={<Button variant="ghost" size="icon-xs" aria-label={t("shell:chat.dismissNotice")} className="-my-0.5 shrink-0 text-muted-foreground" onClick={() => dismissNotice(m.notice?.ref ?? m.id!)} data-notice-dismiss />}><XIcon /></TooltipTrigger>
+        <TooltipContent>{t("shell:chat.dismissNoticeHint")}</TooltipContent>
       </Tooltip>
     </div>
   )
@@ -143,28 +148,28 @@ export function showNotices() { if (wide()) { historyOpen = false; if (!railOpen
 
 /** 事项: what Steve is following for you (running, waiting on you) and the notices, in the rail */
 export function RailToggle({ className }: { className?: string }) {
-  const { railOpen: open } = useRail()
+  const { railOpen: open } = useRail(), t = useT()
   const n = unreadNotices().length, waiting = pendingCards().length, run = st.items.filter((i) => i.st === "run" && !i.arch).length
-  const label = [`事项，${run} 件进行中`, waiting && `${waiting} 件等你`, n && `${n} 条未读通知`].filter(Boolean).join("，")
+  const label = [t("shell:chat.railLabel.running", { count: run }), waiting && t("shell:chat.railLabel.waiting", { count: waiting }), n && t("shell:chat.railLabel.unread", { count: n })].filter(Boolean).join(t("shell:chat.railLabel.sep"))
   return (
     <Tooltip>
       <TooltipTrigger render={<Button variant="ghost" size="sm" aria-label={label} aria-pressed={open && wide()} onClick={toggleRail} className={cn("gap-1.5 px-2 text-muted-foreground aria-pressed:bg-muted aria-pressed:text-foreground", className)} data-rail-toggle />}>
-        <ListTodoIcon /><span className="max-sm:sr-only">事项</span>{run + waiting > 0 && <span className="tabular-nums text-foreground" data-rail-count>{run + waiting}</span>}
+        <ListTodoIcon /><span className="max-sm:sr-only">{t("shell:chat.items")}</span>{run + waiting > 0 && <span className="tabular-nums text-foreground" data-rail-count>{run + waiting}</span>}
         {waiting > 0 ? <span className="size-1.5 rounded-full bg-attention" aria-hidden data-rail-waiting /> : n > 0 && <span className="size-1.5 rounded-full bg-blue" aria-hidden data-unread />}
       </TooltipTrigger>
-      <TooltipContent>{open && wide() ? "收起事项栏" : "在办事项、等你决定的和通知"}</TooltipContent>
+      <TooltipContent>{open && wide() ? t("shell:chat.hideRail") : t("shell:chat.showRail")}</TooltipContent>
     </Tooltip>
   )
 }
 
 /** the rail beside the conversation: inline on wide screens, a sheet otherwise */
 export function ChatRail() {
-  const { railOpen } = useRail()
+  const { railOpen } = useRail(), t = useT()
   const isWide = useWide()
   if (isWide) return railOpen ? <aside className="flex w-[300px] shrink-0 flex-col overflow-y-auto overflow-x-hidden border-l border-sidebar-border bg-sidebar px-4 pb-6 pt-3" data-rail="aside"><RailBody /></aside> : null
   return (
     <Sheet open={sheetOpen} onOpenChange={(o) => { sheetOpen = o; bump() }}>
-      <SheetContent side="right" className="w-[88vw] max-w-[360px]! overflow-y-auto overflow-x-hidden px-4 pb-8 pt-3" data-rail="sheet"><SheetTitle className="sr-only">通知和摘要</SheetTitle><RailBody /></SheetContent>
+      <SheetContent side="right" className="w-[88vw] max-w-[360px]! overflow-y-auto overflow-x-hidden px-4 pb-8 pt-3" data-rail="sheet"><SheetTitle className="sr-only">{t("shell:chat.railTitle")}</SheetTitle><RailBody /></SheetContent>
     </Sheet>
   )
 }
@@ -176,10 +181,10 @@ const NI: Record<string, any> = { release: MegaphoneIcon, archive: ArchiveIcon, 
 const DAY = 86400_000
 
 function RailBody() {
-  const [older, setOlder] = useState(false)
+  const [older, setOlder] = useState(false), t = useT()
   const unread = unreadNotices()
   /* what is on screen counts as read, after a moment so the new ones are seen highlighted */
-  useEffect(() => { if (!unread.length) return; const t = setTimeout(readNotices, 2500); return () => clearTimeout(t) }, [unread.length])
+  useEffect(() => { if (!unread.length) return; const h = setTimeout(readNotices, 2500); return () => clearTimeout(h) }, [unread.length])
   const run = st.items.filter((i) => i.st === "run" && !i.arch), cards = pendingCards()
   const delivered = st.items.filter((i) => i.st === "done" && !i.arch && Date.now() - i.updated < 7 * DAY).sort((a, b) => b.updated - a.updated).slice(0, 5)
   const thoughts = st.thread.filter((m) => m.k === "steve" && m.steps && (m.steps.route || m.steps.tools.length)).slice(-5).reverse()
@@ -196,27 +201,27 @@ function RailBody() {
         <I className={cn("mt-0.5 size-4 shrink-0 self-start", n.level === "fail" && !n.closed ? "text-destructive" : n.level === "fail" ? "text-muted-foreground" : n.level === "success" ? "text-success" : "text-muted-foreground")} strokeWidth={1.75} />
         <span className="min-w-0 flex-1"><span title={n.text} className={cn("line-clamp-2 break-all type-callout", isNew ? "font-medium text-foreground" : "text-foreground/80")}>{n.text}</span>
           <span className="mt-0.5 block type-footnote text-muted-foreground">{n.item_id && <span className="mr-1.5 font-mono">{n.item_id}</span>}{tm(n.created)}</span></span>
-        {isNew && <span className="mt-1.5 size-2 shrink-0 self-start rounded-full bg-blue" aria-label="未读" data-unread-dot />}
+        {isNew && <span className="mt-1.5 size-2 shrink-0 self-start rounded-full bg-blue" aria-label={t("shell:chat.unread")} data-unread-dot />}
       </Line>
     )
   }
   return (
     <div className="flex flex-col gap-6" data-rail-body>
       {/* the bar above the conversation already says what Steve is doing: the rail starts with what waits on you */}
-      {cards.length > 0 && <section data-rail-wait><SectionLabel>等你 · {cards.length}</SectionLabel>
-        {cards.slice(0, 5).map(({ i, w }) => <Line key={w.decision} onClick={() => go(i.id ? "#/inbox" : "#/sessions/" + w.session)} test={"wait-" + w.decision}><StatusDot s="wait" />{i.id && <ItemNo id={i.id} />}<span className="min-w-0 flex-1 truncate type-callout">{i.id ? i.t : "会话 " + i.t}</span><span className="shrink-0 type-footnote text-muted-foreground">{w.subject === "tool_call" ? "权限" : WT[w.type]}</span></Line>)}
-        {cards.length > 5 && <Line onClick={() => go("#/inbox")}><span className="type-footnote text-muted-foreground">还有 {cards.length - 5} 件，去待处理</span></Line>}</section>}
-      {thoughts.length > 0 && <section data-rail-thoughts><SectionLabel>思考摘要</SectionLabel>
+      {cards.length > 0 && <section data-rail-wait><SectionLabel>{t("shell:chat.waitingHead", { count: cards.length })}</SectionLabel>
+        {cards.slice(0, 5).map(({ i, w }) => <Line key={w.decision} onClick={() => go(i.id ? "#/inbox" : "#/sessions/" + w.session)} test={"wait-" + w.decision}><StatusDot s="wait" />{i.id && <ItemNo id={i.id} />}<span className="min-w-0 flex-1 truncate type-callout">{i.id ? i.t : t("shell:chat.sessionTitle", { title: i.t })}</span><span className="shrink-0 type-footnote text-muted-foreground">{w.subject === "tool_call" ? t("shell:chat.permission") : WT[w.type]}</span></Line>)}
+        {cards.length > 5 && <Line onClick={() => go("#/inbox")}><span className="type-footnote text-muted-foreground">{t("shell:chat.moreWaiting", { count: cards.length - 5 })}</span></Line>}</section>}
+      {thoughts.length > 0 && <section data-rail-thoughts><SectionLabel>{t("shell:chat.thoughtsHead")}</SectionLabel>
         {thoughts.map((m) => <Line key={m.id} onClick={() => openSteps(m.id!)} test={"thought-" + m.id}><BrainIcon className="size-4 shrink-0 text-muted-foreground" strokeWidth={1.5} /><span className="min-w-0 flex-1 truncate type-callout">{stepsSummary(m.steps!)}</span><span className="shrink-0 type-footnote text-muted-foreground">{tm(m.created)}</span></Line>)}</section>}
-      <section data-rail-notices><SectionLabel>通知{unread.length ? ` · ${unread.length} 条未读` : ""}</SectionLabel>
-        {!st.notices.length && <div className="type-footnote text-muted-foreground">发布结果、自动归档这类消息会出现在这里</div>}
+      <section data-rail-notices><SectionLabel>{unread.length ? t("shell:chat.noticesUnread", { count: unread.length }) : t("shell:chat.notices")}</SectionLabel>
+        {!st.notices.length && <div className="type-footnote text-muted-foreground">{t("shell:chat.noticesEmpty")}</div>}
         {pinned.map(notice)}{fresh.map(notice)}{seen.slice(0, shownSeen).map(notice)}
-        {seen.length > shownSeen && <button type="button" className="mt-1 type-footnote text-muted-foreground hover:text-foreground" onClick={() => setOlder(true)} data-older>已读的 {seen.length - shownSeen} 条</button>}
-        {older && <button type="button" className="mt-1 type-footnote text-muted-foreground hover:text-foreground" onClick={() => setOlder(false)}>收起已读</button>}
+        {seen.length > shownSeen && <button type="button" className="mt-1 type-footnote text-muted-foreground hover:text-foreground" onClick={() => setOlder(true)} data-older>{t("shell:chat.olderRead", { count: seen.length - shownSeen })}</button>}
+        {older && <button type="button" className="mt-1 type-footnote text-muted-foreground hover:text-foreground" onClick={() => setOlder(false)}>{t("shell:chat.hideRead")}</button>}
       </section>
-      {run.length > 0 && <section data-rail-run><SectionLabel>进行中 · {run.length}</SectionLabel>
-        {run.slice(0, 5).map((i) => <Line key={i.id} onClick={() => go("#/items/" + i.id)} test={"run-" + i.id}><StatusDot s="run" /><ItemNo id={i.id} /><span className="min-w-0 flex-1 truncate type-callout">{i.t}</span>{i.rel?.tone === "fail" && <span className="shrink-0 type-footnote text-destructive" data-rel="fail">{i.rel.text.includes("没有发布") ? "没有发布" : "发布失败"}</span>}</Line>)}</section>}
-      {delivered.length > 0 && <section data-rail-done><SectionLabel>最近交付</SectionLabel>
+      {run.length > 0 && <section data-rail-run><SectionLabel>{t("shell:chat.runningHead", { count: run.length })}</SectionLabel>
+        {run.slice(0, 5).map((i) => <Line key={i.id} onClick={() => go("#/items/" + i.id)} test={"run-" + i.id}><StatusDot s="run" /><ItemNo id={i.id} /><span className="min-w-0 flex-1 truncate type-callout">{i.t}</span>{i.rel?.tone === "fail" && <span className="shrink-0 type-footnote text-destructive" data-rel="fail">{i.rel.text.includes("没有发布") ? t("shell:chat.notReleased") : t("shell:chat.releaseFailed")}</span>}</Line>)}</section>}
+      {delivered.length > 0 && <section data-rail-done><SectionLabel>{t("shell:chat.recentDone")}</SectionLabel>
         {delivered.map((i) => <Line key={i.id} onClick={() => go("#/items/" + i.id)} test={"done-" + i.id}><CircleCheckIcon className="size-4 shrink-0 text-success" strokeWidth={1.75} /><ItemNo id={i.id} /><span className="min-w-0 flex-1 truncate type-callout">{i.t}</span><span className="shrink-0 type-footnote text-muted-foreground">{i.up}</span></Line>)}</section>}
     </div>
   )

@@ -1,6 +1,7 @@
 /* Accounts and connections (accounts-vault.md §5): the Rust Hub's /api/systems, /api/accounts, /api/match-rules and
  * /api/connections. The TS Hub doesn't have them; `NotWired` tells a page to fall back to its Unwired placeholder. */
 import { modReq, qs as q } from "@/api"
+import { t } from "@/i18n"
 export const mget = <T>(p: string) => modReq<T>("GET", p)
 export const mpost = <T = any>(p: string, b: unknown = {}) => modReq<T>("POST", p, b)
 export const mpatch = <T = any>(p: string, b: unknown) => modReq<T>("PATCH", p, b)
@@ -49,14 +50,25 @@ export const accountsApi = {
   disconnect: (id: string) => mdel<{ ok: true; usage: RUsage }>("/connections/" + e(id)),
 }
 
+/** a table (object or array) whose entries are read through getters, so a label is translated each time it is read
+ *  and a language switch shows on the next render; keys, Object.keys/entries, find and map work as on a plain table */
+export function lazy<T extends object>(src: { [K in keyof T]: () => T[K] }): T {
+  const out = (Array.isArray(src) ? [] : {}) as T
+  for (const k of Object.keys(src)) Object.defineProperty(out, k, { get: (src as Record<string, () => unknown>)[k], enumerable: true })
+  return out
+}
+
 /* wording the Hub leaves to the web */
-export const CAP_LABEL: Record<string, string> = {
-  "msg.receive": "收消息", "msg.send": "发消息", "msg.send_as_user": "以你的名义发消息", "mail.read": "读邮件", "mail.draft": "起草邮件", "mail.send": "发邮件",
-  "cal.read": "读日程", "cal.write": "改日程", "directory.read": "读通讯录", "repo.read": "读代码仓库", "repo.write": "改代码仓库", events: "接收事件",
-}
+export const CAP_LABEL: Record<string, string> = lazy({
+  "msg.receive": () => t("api:cap.msgReceive"), "msg.send": () => t("api:cap.msgSend"), "msg.send_as_user": () => t("api:cap.msgSendAsUser"), "mail.read": () => t("api:cap.mailRead"), "mail.draft": () => t("api:cap.mailDraft"), "mail.send": () => t("api:cap.mailSend"),
+  "cal.read": () => t("api:cap.calRead"), "cal.write": () => t("api:cap.calWrite"), "directory.read": () => t("api:cap.directoryRead"), "repo.read": () => t("api:cap.repoRead"), "repo.write": () => t("api:cap.repoWrite"), events: () => t("api:cap.events"),
+})
 export const capLabel = (c: string) => CAP_LABEL[c] ?? c
-export const KIND_LABEL: Record<string, string> = {
-  personal: "个人", work_email: "工作邮箱", app_bot: "应用机器人", shared_mailbox: "共享邮箱", bank_card: "银行卡", service: "服务账号", phone: "手机号", bot: "机器人", calendar: "日历", root: "根账号", other: "其他",
-}
+export const KIND_LABEL: Record<string, string> = lazy({
+  personal: () => t("api:accountKind.personal"), work_email: () => t("api:accountKind.workEmail"), app_bot: () => t("api:accountKind.appBot"), shared_mailbox: () => t("api:accountKind.sharedMailbox"), bank_card: () => t("api:accountKind.bankCard"), service: () => t("api:accountKind.service"),
+  phone: () => t("api:accountKind.phone"), bot: () => t("api:accountKind.bot"), calendar: () => t("api:accountKind.calendar"), root: () => t("api:accountKind.root"), other: () => t("api:accountKind.other"),
+})
 export const kindLabel = (k: string) => KIND_LABEL[k] ?? k
-export const CONN_STATUS: Record<ConnStatus, [string, string]> = { ok: ["正常", "done"], reauth: ["要重新授权", "wait"], error: ["出错了", "fail"], paused: ["已暂停", "pause"], revoked: ["已断开", "drop"] }
+export const CONN_STATUS: Record<ConnStatus, [string, string]> = lazy({
+  ok: () => [t("api:connStatus.ok"), "done"], reauth: () => [t("api:connStatus.reauth"), "wait"], error: () => [t("api:connStatus.error"), "fail"], paused: () => [t("api:connStatus.paused"), "pause"], revoked: () => [t("api:connStatus.revoked"), "drop"],
+})

@@ -34,7 +34,7 @@ const rels = (xs) => `<Relationships xmlns="http://schemas.openxmlformats.org/pa
 const tc = (t) => `<w:tc><w:p><w:r><w:t>${t}</w:t></w:r></w:p></w:tc>`
 
 const png = async (label, w, h, color) => {
-  const p = await browser.newPage({ viewport: { width: w, height: h } })
+  const p = await browser.newPage({ locale: "zh-CN", viewport: { width: w, height: h } })
   await p.setContent(`<body style="margin:0;background:${color};font:bold 64px sans-serif;color:#fff;display:flex;align-items:center;justify-content:center;height:${h}px">${label}</body>`)
   const b = await p.screenshot(); await p.close(); return b
 }
@@ -73,7 +73,7 @@ const errors = []
 /** the fake Hub's data, carried from the first page to the later ones (each page has its own storage) */
 let hub = null
 async function open(width, theme, fresh) {
-  const page = await browser.newPage({ viewport: { width, height: width === 390 ? 844 : 1000 }, reducedMotion: "reduce", colorScheme: theme, hasTouch: width === 390 })
+  const page = await browser.newPage({ locale: "zh-CN", viewport: { width, height: width === 390 ? 844 : 1000 }, reducedMotion: "reduce", colorScheme: theme, hasTouch: width === 390 })
   if (!fresh && hub) await page.addInitScript((h) => { if (!localStorage.getItem("fx-hub")) localStorage.setItem("fx-hub", h) }, hub)
   page.on("pageerror", (e) => errors.push(e.message))
   await page.route((u) => u.pathname.startsWith("/api/"), (route) => {

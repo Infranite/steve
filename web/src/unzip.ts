@@ -1,6 +1,9 @@
 /* reading a zip (Word, Excel and PowerPoint files are zips of XML) with the browser's own inflate: no library.
  * Stored and deflated entries; no zip64, no encryption — Office files need neither. */
 
+/* a relative .ts import so node --test loads this file without a bundler */
+import { t } from "./i18n/index.ts"
+
 export type Zip = { names: string[]; bytes: (name: string) => Promise<Uint8Array | null>; text: (name: string) => Promise<string | null> }
 
 async function inflate(data: Uint8Array): Promise<Uint8Array> {
@@ -13,7 +16,7 @@ export function unzip(buf: ArrayBuffer): Zip {
   /* the end of central directory record: within the last 64 KB (its comment) */
   let end = -1
   for (let i = b.length - 22; i >= Math.max(0, b.length - 65_557); i--) if (v.getUint32(i, true) === 0x06054b50) { end = i; break }
-  if (end < 0) throw new Error("不是有效的 zip 文件")
+  if (end < 0) throw new Error(t("shell:misc.badZip"))
   const count = v.getUint16(end + 10, true)
   let p = v.getUint32(end + 16, true)
   const entries = new Map<string, { method: number; size: number; at: number }>()

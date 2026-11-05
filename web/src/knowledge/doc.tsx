@@ -13,8 +13,10 @@ import { Page, SectionLabel, Segmented, Empty, Meta, go } from "@/ui"
 import { toast, tm } from "@/store"
 import { kb, SOURCE_KIND, visLabel, levelLabel, type Doc, type Level } from "@/api/knowledge"
 import { LevelSel, VisSel, errMsg } from "@/knowledge/fields"
+import { t as tt, useT } from "@/i18n"
 
-const BACK: [string, string] = ["#/knowledge", "知识"]
+/** the back link, resolved at render so it follows the UI language */
+const back = (): [string, string] => ["#/knowledge", tt("knowledge:page.title")]
 const seqOf = () => { const v = new URLSearchParams(location.hash.split("?")[1] ?? "").get("seq"); return v === null ? null : Number(v) }
 
 function useDoc(id: string) {
@@ -29,42 +31,45 @@ function Prop({ label, children }: { label: string; children: ReactNode }) {
 
 /** source, path, level, visibility, about, uses; level and visibility can go back to following the source */
 function Props({ d, setD }: { d: Doc; setD: (d: Doc) => void }) {
+  const t = useT()
   const [src, setSrc] = useState<{ level: Level; visibility: string } | null>(null)
   useEffect(() => { kb.sources().then((xs) => { const s = xs.find((x) => x.id === d.source.id); if (s) setSrc({ level: s.level, visibility: s.visibility }) }, () => {}) }, [d.source.id])
   const patch = async (p: Parameters<typeof kb.patchDoc>[1], msg: string) => { try { setD(await kb.patchDoc(d.id, p)); toast(msg) } catch (e) { toast(errMsg(e)) } }
   return (
-    <section aria-label="属性" className="rounded-xl border px-4 py-1.5" data-doc-props>
-      <Prop label="来源"><span>{d.source.name}<span className="text-muted-foreground"> · {SOURCE_KIND[d.source.kind] ?? d.source.kind}</span></span></Prop>
-      {d.source.kind !== "notes" && d.ref && <Prop label="路径"><span className="truncate font-mono text-[12.5px]">{d.ref}</span></Prop>}
-      <Prop label="披露级别"><LevelSel v={d.inherited.level ? "" : d.level} inherit={src?.level ?? d.level} on={(l) => void patch({ level: l || null }, l ? `已改成“${levelLabel(l)}”` : "已改回跟随来源")} testId="doc-level" /></Prop>
-      <Prop label="可见范围"><VisSel v={d.inherited.visibility ? "" : d.visibility} inherit={src?.visibility ?? d.visibility} on={(v) => void patch({ visibility: v || null }, v ? `已改成“${visLabel(v)}”` : "已改回跟随来源")} testId="doc-vis" /></Prop>
-      {d.about.length > 0 && <Prop label="关于"><span className="flex flex-wrap gap-1">{d.about.map((a) => <span key={a.type + a.id} className="inline-flex h-6 items-center rounded-full bg-muted px-2 type-footnote">{a.name ?? a.id}</span>)}</span></Prop>}
-      <Prop label="使用"><span className="text-muted-foreground" data-doc-uses>被用到 {d.uses} 次 · {d.chunks} 段 · 更新于 {tm(d.updated) || "—"}</span></Prop>
-      {d.error && <Prop label="出错"><span className="text-destructive">{d.error}</span></Prop>}
+    <section aria-label={t("knowledge:doc.props")} className="rounded-xl border px-4 py-1.5" data-doc-props>
+      <Prop label={t("knowledge:doc.source")}><span>{d.source.name}<span className="text-muted-foreground"> · {SOURCE_KIND[d.source.kind] ?? d.source.kind}</span></span></Prop>
+      {d.source.kind !== "notes" && d.ref && <Prop label={t("knowledge:doc.path")}><span className="truncate font-mono text-[12.5px]">{d.ref}</span></Prop>}
+      <Prop label={t("knowledge:doc.level")}><LevelSel v={d.inherited.level ? "" : d.level} inherit={src?.level ?? d.level} on={(l) => void patch({ level: l || null }, l ? t("knowledge:doc.changedTo", { label: levelLabel(l) }) : t("knowledge:doc.backToInherit"))} testId="doc-level" /></Prop>
+      <Prop label={t("knowledge:doc.visibility")}><VisSel v={d.inherited.visibility ? "" : d.visibility} inherit={src?.visibility ?? d.visibility} on={(v) => void patch({ visibility: v || null }, v ? t("knowledge:doc.changedTo", { label: visLabel(v) }) : t("knowledge:doc.backToInherit"))} testId="doc-vis" /></Prop>
+      {d.about.length > 0 && <Prop label={t("knowledge:doc.about")}><span className="flex flex-wrap gap-1">{d.about.map((a) => <span key={a.type + a.id} className="inline-flex h-6 items-center rounded-full bg-muted px-2 type-footnote">{a.name ?? a.id}</span>)}</span></Prop>}
+      <Prop label={t("knowledge:doc.use")}><span className="text-muted-foreground" data-doc-uses>{[t("knowledge:doc.uses", { count: d.uses }), t("knowledge:doc.chunks", { count: d.chunks }), t("knowledge:doc.updated", { time: tm(d.updated) || "—" })].join(" · ")}</span></Prop>
+      {d.error && <Prop label={t("knowledge:doc.error")}><span className="text-destructive">{d.error}</span></Prop>}
     </section>
   )
 }
 
-function DeleteButton({ d, what }: { d: Doc; what: string }) {
+function DeleteButton({ d, note }: { d: Doc; note?: boolean }) {
+  const t = useT()
   const [open, setOpen] = useState(false)
-  const del = async () => { try { await kb.deleteDoc(d.id); toast(what === "笔记" ? "笔记已删除" : "已从知识库移除"); go("#/knowledge") } catch (e) { toast(errMsg(e)) } }
+  const del = async () => { try { await kb.deleteDoc(d.id); toast(note ? t("knowledge:doc.noteDeleted") : t("knowledge:doc.fileRemoved")); go("#/knowledge") } catch (e) { toast(errMsg(e)) } }
   return <>
-    <Button size="sm" variant="ghost" className="text-destructive" onClick={() => setOpen(true)} data-doc-delete><TrashIcon />{what === "笔记" ? "删除" : "移除"}</Button>
+    <Button size="sm" variant="ghost" className="text-destructive" onClick={() => setOpen(true)} data-doc-delete><TrashIcon />{note ? t("common:action.delete") : t("knowledge:doc.remove")}</Button>
     <AlertDialog open={open} onOpenChange={setOpen}><AlertDialogContent>
-      <AlertDialogHeader><AlertDialogTitle>{what === "笔记" ? `删除“${d.title}”？` : `从知识库移除“${d.title}”？`}</AlertDialogTitle>
-        <AlertDialogDescription>{what === "笔记" ? "笔记和它的片段一起删除，Steve 之后查不到它。" : "原文件不受影响；Steve 之后查不到它。"}</AlertDialogDescription></AlertDialogHeader>
-      <AlertDialogFooter><AlertDialogCancel>取消</AlertDialogCancel><AlertDialogAction variant="destructive" onClick={() => void del()} data-doc-delete-ok>{what === "笔记" ? "删除" : "移除"}</AlertDialogAction></AlertDialogFooter>
+      <AlertDialogHeader><AlertDialogTitle>{note ? t("knowledge:doc.deleteNoteTitle", { title: d.title }) : t("knowledge:doc.removeFileTitle", { title: d.title })}</AlertDialogTitle>
+        <AlertDialogDescription>{note ? t("knowledge:doc.deleteNoteDesc") : t("knowledge:doc.removeFileDesc")}</AlertDialogDescription></AlertDialogHeader>
+      <AlertDialogFooter><AlertDialogCancel>{t("common:action.cancel")}</AlertDialogCancel><AlertDialogAction variant="destructive" onClick={() => void del()} data-doc-delete-ok>{note ? t("common:action.delete") : t("knowledge:doc.remove")}</AlertDialogAction></AlertDialogFooter>
     </AlertDialogContent></AlertDialog>
   </>
 }
 
 /** the indexed chunks; `?seq=` scrolls to that one and marks it */
 function Chunks({ d }: { d: Doc }) {
+  const t = useT()
   const seq = seqOf(), box = useRef<HTMLDivElement>(null)
   useEffect(() => { if (seq !== null) box.current?.querySelector(`[data-seq="${seq}"]`)?.scrollIntoView({ block: "center" }) }, [seq, d.id])
-  if (!d.preview.length) return <Empty title="还没有内容" sub={d.status === "pending" ? "正在整理，稍后刷新。" : "这篇文档没有可检索的文字。"} />
+  if (!d.preview.length) return <Empty title={t("knowledge:doc.noContent")} sub={d.status === "pending" ? t("knowledge:doc.pendingSub") : t("knowledge:doc.noTextSub")} />
   return (
-    <section ref={box} aria-label="片段"><SectionLabel>片段 · {d.chunks}{d.preview.length < d.chunks ? `（显示前 ${d.preview.length} 段）` : ""}</SectionLabel>
+    <section ref={box} aria-label={t("knowledge:doc.chunksAria")}><SectionLabel>{d.preview.length < d.chunks ? t("knowledge:doc.chunksTitlePartial", { count: d.chunks, shown: d.preview.length }) : t("knowledge:doc.chunksTitle", { count: d.chunks })}</SectionLabel>
       <div className="flex flex-col gap-2">{d.preview.map((c) => (
         <div key={c.seq} data-seq={c.seq} aria-current={c.seq === seq ? "true" : undefined} className={cn("scroll-mt-24 rounded-xl border px-4 py-3", c.seq === seq && "border-blue/50 bg-blue/5 ring-2 ring-blue/20")}>
           {c.heading && <div className="mb-1 type-footnote font-medium text-muted-foreground">{c.heading}</div>}
@@ -75,52 +80,55 @@ function Chunks({ d }: { d: Doc }) {
 }
 
 export function DocView({ id }: { id: string }) {
+  const t = useT()
   const { d, setD, err } = useDoc(id)
   /* notes have their own editor page */
   const isNote = d?.source.kind === "notes"
   useEffect(() => { if (isNote) location.replace("#/knowledge/note/" + id + (location.hash.includes("?") ? "?" + location.hash.split("?")[1] : "")) }, [isNote, id])
-  if (err) return <Page title="文档" back={BACK}><Empty title="打不开这篇文档" sub={err} /></Page>
-  if (!d) return <Page title="文档" back={BACK}><Spin /></Page>
+  if (err) return <Page title={t("knowledge:doc.title")} back={back()}><Empty title={t("knowledge:doc.openFailed")} sub={err} /></Page>
+  if (!d) return <Page title={t("knowledge:doc.title")} back={back()}><Spin /></Page>
   if (isNote) return null
   const removable = d.source.kind === "files"
   return (
-    <Page title={d.title} back={BACK} max={760} sub={<Meta><span>{d.source.name}</span>{d.ref && <span className="font-mono text-[12px]">{d.ref}</span>}</Meta>} actions={removable ? <DeleteButton d={d} what="文件" /> : undefined}>
+    <Page title={d.title} back={back()} max={760} sub={<Meta><span>{d.source.name}</span>{d.ref && <span className="font-mono text-[12px]">{d.ref}</span>}</Meta>} actions={removable ? <DeleteButton d={d} /> : undefined}>
       <div className="flex flex-col gap-8"><Props d={d} setD={setD} /><Chunks d={d} /></div>
     </Page>
   )
 }
-const Spin = () => <div className="flex justify-center py-16" role="status" aria-label="正在加载"><Spinner className="size-5 text-muted-foreground" /></div>
+const Spin = () => { const t = useT(); return <div className="flex justify-center py-16" role="status" aria-label={t("knowledge:page.loading")}><Spinner className="size-5 text-muted-foreground" /></div> }
 
+type Mode = "edit" | "preview" | "chunks"
 export function NoteView({ id }: { id: string }) {
+  const t = useT()
   const { d, setD, err } = useDoc(id)
-  const [title, setTitle] = useState(""), [body, setBody] = useState(""), [mode, setMode] = useState<"编辑" | "预览" | "片段">(seqOf() !== null ? "片段" : "编辑"), [busy, setBusy] = useState(false)
+  const [title, setTitle] = useState(""), [body, setBody] = useState(""), [mode, setMode] = useState<Mode>(seqOf() !== null ? "chunks" : "edit"), [busy, setBusy] = useState(false)
   useEffect(() => { if (d) { setTitle(d.title); setBody(d.body ?? "") } }, [d?.id]) // eslint-disable-line react-hooks/exhaustive-deps
   const dirty = !!d && (title.trim() !== d.title || body !== (d.body ?? ""))
   const save = async () => {
     if (!d || !dirty || busy || !title.trim()) return
     setBusy(true)
-    try { setD(await kb.saveNote(d.id, { title: title.trim(), body })); toast("已保存") } catch (e) { toast(errMsg(e)) } finally { setBusy(false) }
+    try { setD(await kb.saveNote(d.id, { title: title.trim(), body })); toast(t("common:state.saved")) } catch (e) { toast(errMsg(e)) } finally { setBusy(false) }
   }
   const saveRef = useRef(save); saveRef.current = save
   useEffect(() => {
     const h = (e: KeyboardEvent) => { if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s") { e.preventDefault(); void saveRef.current() } }
     window.addEventListener("keydown", h); return () => window.removeEventListener("keydown", h)
   }, [])
-  if (err) return <Page title="笔记" back={BACK}><Empty title="打不开这篇笔记" sub={err} /></Page>
-  if (!d) return <Page title="笔记" back={BACK}><Spin /></Page>
+  if (err) return <Page title={t("knowledge:doc.noteTitle")} back={back()}><Empty title={t("knowledge:doc.noteOpenFailed")} sub={err} /></Page>
+  if (!d) return <Page title={t("knowledge:doc.noteTitle")} back={back()}><Spin /></Page>
   return (
-    <Page title={d.title} back={BACK} max={760} sub="笔记"
-      actions={<><DeleteButton d={d} what="笔记" /><Button size="sm" disabled={!dirty || busy || !title.trim()} onClick={() => void save()} title="⌘S" data-note-save>{busy && <Spinner className="size-3.5" />}{dirty ? "保存" : "已保存"}</Button></>}>
+    <Page title={d.title} back={back()} max={760} sub={t("knowledge:doc.noteTitle")}
+      actions={<><DeleteButton d={d} note /><Button size="sm" disabled={!dirty || busy || !title.trim()} onClick={() => void save()} title="⌘S" data-note-save>{busy && <Spinner className="size-3.5" />}{dirty ? t("common:action.save") : t("common:state.saved")}</Button></>}>
       <div className="flex flex-col gap-8">
         <Props d={d} setD={setD} />
-        <section className="flex flex-col gap-3" aria-label="正文">
-          <div className="flex flex-wrap items-center justify-between gap-2"><Segmented size="sm" value={mode} onChange={setMode} options={["编辑", "预览", "片段"] as const} /><span className="type-footnote text-muted-foreground">⌘S 保存</span></div>
-          {mode === "编辑" && <>
-            <Input aria-label="标题" maxLength={120} value={title} onChange={(e) => setTitle(e.target.value)} className="h-10 text-[15px] font-medium" data-note-title />
-            <Textarea aria-label="正文" value={body} onChange={(e) => setBody(e.target.value)} className="min-h-[360px] font-mono text-[13px] leading-[20px]" placeholder="支持 Markdown" data-note-body />
+        <section className="flex flex-col gap-3" aria-label={t("knowledge:doc.body")}>
+          <div className="flex flex-wrap items-center justify-between gap-2"><Segmented size="sm" value={mode} onChange={setMode} options={[["edit", t("knowledge:doc.modeEdit")], ["preview", t("knowledge:doc.modePreview")], ["chunks", t("knowledge:doc.modeChunks")]] as const} /><span className="type-footnote text-muted-foreground">{t("knowledge:doc.saveHint")}</span></div>
+          {mode === "edit" && <>
+            <Input aria-label={t("knowledge:newNote.titleLabel")} maxLength={120} value={title} onChange={(e) => setTitle(e.target.value)} className="h-10 text-[15px] font-medium" data-note-title />
+            <Textarea aria-label={t("knowledge:doc.body")} value={body} onChange={(e) => setBody(e.target.value)} className="min-h-[360px] font-mono text-[13px] leading-[20px]" placeholder={t("knowledge:doc.bodyPlaceholder")} data-note-body />
           </>}
-          {mode === "预览" && <div className="min-h-40 rounded-xl border px-4 py-3 type-body">{body.trim() ? <Markdown text={body} /> : <span className="text-muted-foreground">还没有正文</span>}</div>}
-          {mode === "片段" && <Chunks d={d} />}
+          {mode === "preview" && <div className="min-h-40 rounded-xl border px-4 py-3 type-body">{body.trim() ? <Markdown text={body} /> : <span className="text-muted-foreground">{t("knowledge:doc.noBody")}</span>}</div>}
+          {mode === "chunks" && <Chunks d={d} />}
         </section>
       </div>
     </Page>

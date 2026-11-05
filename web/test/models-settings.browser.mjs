@@ -37,7 +37,7 @@ const catalog = (h) => ({ harness: h, name: h, source: 'mock', default: harnesse
 const patches = []
 
 const run = async ({ width, height, scheme, flow }) => {
-  const page = await browser.newPage({ viewport: { width, height }, colorScheme: scheme, reducedMotion: 'reduce' })
+  const page = await browser.newPage({ locale: "zh-CN", viewport: { width, height }, colorScheme: scheme, reducedMotion: 'reduce' })
   page.setDefaultTimeout(10000)
   const errors = []; page.on('pageerror', (e) => errors.push(e.message))
   await page.route('**/*', async (route) => {

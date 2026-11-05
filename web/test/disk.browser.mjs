@@ -22,7 +22,7 @@ let state = report(12 * GB, "floor", 11 * GB), reclaims = 0, forbid = false
 const errors = []
 try {
   for (const width of [1440, 390]) for (const theme of ["light", "dark"]) {
-    const page = await browser.newPage({ viewport: { width, height: width === 390 ? 844 : 1000 }, reducedMotion: "reduce", colorScheme: theme })
+    const page = await browser.newPage({ locale: "zh-CN", viewport: { width, height: width === 390 ? 844 : 1000 }, reducedMotion: "reduce", colorScheme: theme })
     page.on("pageerror", e => errors.push(e.message))
     state = report(12 * GB, "floor", 11 * GB)
     await page.route(u => new URL(u).pathname.startsWith("/api/"), async route => {
@@ -52,7 +52,7 @@ try {
   }
   /* someone who is not the instance owner sees nothing of this machine */
   forbid = true
-  const page = await browser.newPage()
+  const page = await browser.newPage({ locale: "zh-CN" })
   await page.route(u => new URL(u).pathname.startsWith("/api/"), route => route.fulfill({ status: 403, contentType: "application/json", body: JSON.stringify({ error: "仅实例管理员可查看和回收工作区" }) }))
   await page.goto(base + "/test/fixtures/disk.html")
   await page.waitForTimeout(500)

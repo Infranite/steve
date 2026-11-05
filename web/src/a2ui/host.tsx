@@ -2,6 +2,7 @@
  * the reply it lives in (to submit, and what was submitted already), and whether it is already inside an interface. */
 import { createContext, useContext, useMemo, type ReactNode } from "react"
 import type { A2uiRecord } from "@/api"
+import { useT } from "@/i18n"
 
 export type Host = { msg: string; records: Record<string, A2uiRecord>; readonly?: string }
 export const HostCtx = createContext<Host | null>(null)
@@ -15,8 +16,11 @@ export const Nested = createContext(false)
 export const useA2uiNested = () => useContext(Nested)
 
 /** while the block is still being written, or (`loading`) a finished one waits for the renderer */
-export const A2uiPending = ({ loading }: { loading?: boolean }) => (
+export function A2uiPending({ loading }: { loading?: boolean }) {
+  const t = useT()
+  return (
   <div className="my-3 flex items-center gap-2 rounded-xl border border-dashed px-4 py-3 type-callout text-muted-foreground" data-a2ui-pending={loading ? undefined : true} data-a2ui-loading={loading || undefined}>
-    <span className="size-1.5 animate-pulse rounded-full bg-muted-foreground" aria-hidden />{loading ? "正在加载界面…" : "正在生成界面…"}
+    <span className="size-1.5 animate-pulse rounded-full bg-muted-foreground" aria-hidden />{loading ? t("misc:a2ui.loading") : t("misc:a2ui.generating")}
   </div>
-)
+  )
+}

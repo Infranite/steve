@@ -8,7 +8,7 @@ if (shots) await mkdir(shots, { recursive: true })
 const errors = []
 try {
   for (const width of [1440, 390]) for (const theme of ["light", "dark"]) {
-    const page = await browser.newPage({ viewport: { width, height: width === 390 ? 844 : 1000 }, reducedMotion: "reduce", colorScheme: theme })
+    const page = await browser.newPage({ locale: "zh-CN", viewport: { width, height: width === 390 ? 844 : 1000 }, reducedMotion: "reduce", colorScheme: theme })
     page.on("pageerror", e => errors.push(e.message))
     // no Hub behind the fixture: its own calls are stubbed in the page
     await page.route(u => u.pathname.startsWith("/api/"), route => route.fulfill({ status: 503, json: { error: "fixture" } }))

@@ -1,5 +1,6 @@
 /* WebAuthn glue between webauthn-rs's JSON (base64url byte strings) and navigator.credentials (ArrayBuffers).
  * Registration: `create(await registerStart(name))` → registerFinish. Reveal: `get(await revealStart(...))` → revealFinish. */
+import { t } from "@/i18n"
 
 const toBuf = (s: string): ArrayBuffer => {
   const b = atob(s.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(s.length / 4) * 4, "="))
@@ -19,7 +20,7 @@ export const webauthnAvailable = () => typeof window !== "undefined" && !!window
 export async function createPasskey(ccr: any): Promise<unknown> {
   const pk = ccr.publicKey
   const c = (await navigator.credentials.create({ publicKey: { ...pk, challenge: toBuf(pk.challenge), user: { ...pk.user, id: toBuf(pk.user.id) }, excludeCredentials: creds(pk.excludeCredentials) } })) as PublicKeyCredential | null
-  if (!c) throw new Error("没有完成登记")
+  if (!c) throw new Error(t("vault:webauthn.notRegistered"))
   const r = c.response as AuthenticatorAttestationResponse
   return { id: c.id, rawId: toB64u(c.rawId), type: c.type, extensions: c.getClientExtensionResults?.() ?? {},
     response: { attestationObject: toB64u(r.attestationObject), clientDataJSON: toB64u(r.clientDataJSON), transports: r.getTransports?.() } }
@@ -29,7 +30,7 @@ export async function createPasskey(ccr: any): Promise<unknown> {
 export async function getAssertion(rcr: any): Promise<unknown> {
   const pk = rcr.publicKey
   const c = (await navigator.credentials.get({ publicKey: { ...pk, challenge: toBuf(pk.challenge), allowCredentials: creds(pk.allowCredentials) } })) as PublicKeyCredential | null
-  if (!c) throw new Error("没有完成本机验证")
+  if (!c) throw new Error(t("vault:webauthn.notVerified"))
   const r = c.response as AuthenticatorAssertionResponse
   return { id: c.id, rawId: toB64u(c.rawId), type: c.type, extensions: c.getClientExtensionResults?.() ?? {},
     response: { authenticatorData: toB64u(r.authenticatorData), clientDataJSON: toB64u(r.clientDataJSON), signature: toB64u(r.signature), userHandle: toB64u(r.userHandle) } }
@@ -38,8 +39,8 @@ export async function getAssertion(rcr: any): Promise<unknown> {
 /** a user who cancels the system sheet gets a calm message, not a DOMException name */
 export function webauthnError(e: unknown): string {
   const n = (e as any)?.name
-  if (n === "NotAllowedError" || n === "AbortError") return "已取消本机验证"
-  if (n === "InvalidStateError") return "这台设备上已经登记过通行密钥了"
-  if (n === "SecurityError") return "这个访问地址不能使用通行密钥（需要 https 域名或 localhost）"
-  return (e as Error)?.message || "本机验证没有完成"
+  if (n === "NotAllowedError" || n === "AbortError") return t("vault:webauthn.cancelled")
+  if (n === "InvalidStateError") return t("vault:webauthn.alreadyRegistered")
+  if (n === "SecurityError") return t("vault:webauthn.insecure")
+  return (e as Error)?.message || t("vault:webauthn.failed")
 }

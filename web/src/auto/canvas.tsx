@@ -7,32 +7,34 @@ import { CheckIcon, XIcon } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { Badge } from "@/components/ui/badge"
 import type { GNode, Graph } from "@/api/flow"
-import { kindOf, effectful, ACTION_LABEL } from "@/auto/nodes"
+import { kindOf, effectful, actionLabel } from "@/auto/nodes"
 import { srcIcon } from "@/auto/common"
+import { useT } from "@/i18n"
 
 const NW = 224, NH = 76
 type Ran = "ok" | "skip" | "fail" | "wait"
 type D = { n: GNode; sel: boolean; fresh: boolean; ran?: Ran; narrow: boolean }
 
 function FlowNode({ data }: NodeProps<Node<D>>) {
+  const t = useT()
   const { n, sel, fresh, ran, narrow } = data, [label, I] = kindOf(n.kind)
   const Icon = n.kind === "trigger" ? srcIcon(n.config?.source) : I
-  const sub = n.note || (n.kind === "action" ? ACTION_LABEL[n.config?.action] : "")
+  const sub = n.note || (n.kind === "action" ? actionLabel(n.config?.action) : "")
   return (
     <div className={cn("relative flex h-[76px] w-[224px] cursor-pointer items-center gap-3 rounded-xl border bg-card px-3 transition-[box-shadow,opacity] duration-150 hover:shadow-md", sel ? "border-blue ring-3 ring-blue/20" : "border-border", fresh && "ring-3 ring-blue/30", ran === "skip" && "opacity-45")} data-rule-node={n.id} data-ran={ran}
-      role="button" tabIndex={0} aria-label={`${label}：${n.title}`} aria-pressed={sel}>
+      role="button" tabIndex={0} aria-label={t("auto:canvas.nodeAria", { kind: label, title: n.title })} aria-pressed={sel}>
       <Handle type="target" position={narrow ? Position.Top : Position.Left} className="!size-1.5 !min-h-0 !min-w-0 !border-0 !bg-border" />
       <span className={cn("flex size-8 shrink-0 items-center justify-center rounded-lg", n.kind === "trigger" ? "bg-foreground text-background" : "bg-muted text-muted-foreground")}><Icon className="size-4" strokeWidth={1.5} /></span>
       <span className="min-w-0 flex-1">
         <span className="flex items-center gap-1.5 type-footnote text-muted-foreground">{label}
           {n.kind === "bot" && <Badge variant="outline" className="h-4 px-1 text-[10px]">AI</Badge>}
-          {effectful(n) && <Badge variant="outline" className="h-4 px-1 text-[10px]">需审批</Badge>}</span>
+          {effectful(n) && <Badge variant="outline" className="h-4 px-1 text-[10px]">{t("auto:canvas.needsApproval")}</Badge>}</span>
         <span className="block truncate text-[13px] font-medium">{n.title || n.id}</span>
         {sub && <span className="block truncate text-[11.5px] text-muted-foreground">{sub}</span>}
       </span>
-      {ran === "ok" && <CheckIcon className="absolute -right-1.5 -top-1.5 size-4 rounded-full bg-success p-0.5 text-white" strokeWidth={3} aria-label="已执行" />}
-      {ran === "fail" && <XIcon className="absolute -right-1.5 -top-1.5 size-4 rounded-full bg-destructive p-0.5 text-white" strokeWidth={3} aria-label="失败" />}
-      {ran === "wait" && <span className="absolute -right-1 -top-1 size-3 rounded-full bg-attention ring-2 ring-card" aria-label="等待中" />}
+      {ran === "ok" && <CheckIcon className="absolute -right-1.5 -top-1.5 size-4 rounded-full bg-success p-0.5 text-white" strokeWidth={3} aria-label={t("auto:canvas.ran")} />}
+      {ran === "fail" && <XIcon className="absolute -right-1.5 -top-1.5 size-4 rounded-full bg-destructive p-0.5 text-white" strokeWidth={3} aria-label={t("auto:runStatus.failed")} />}
+      {ran === "wait" && <span className="absolute -right-1 -top-1 size-3 rounded-full bg-attention ring-2 ring-card" aria-label={t("auto:runStatus.waiting")} />}
       <Handle type="source" position={narrow ? Position.Bottom : Position.Right} className="!size-1.5 !min-h-0 !min-w-0 !border-0 !bg-border" />
     </div>
   )

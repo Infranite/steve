@@ -3,7 +3,7 @@ import assert from "node:assert/strict"
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || "playwright")
 const browser = await chromium.launch({ headless: true, ...(process.env.PLAYWRIGHT_EXECUTABLE ? { executablePath: process.env.PLAYWRIGHT_EXECUTABLE } : {}) })
 const base = process.env.STEVE_TEST_WEB || "http://127.0.0.1:5189"
-const page = await browser.newPage({ viewport: { width: 390, height: 844 } })
+const page = await browser.newPage({ locale: "zh-CN", viewport: { width: 390, height: 844 } })
 const errors = [], writes = []
 let navigations = 0
 page.on("framenavigated", frame => { if (frame === page.mainFrame()) navigations++ })

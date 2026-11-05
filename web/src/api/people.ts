@@ -2,6 +2,7 @@
  * steve-modules/src/contacts; the TS Hub has none of these routes, so every page first asks `available()`. */
 import { useEffect, useState } from "react"
 import { modReq as req, Unauthenticated, qs } from "@/api"
+import { t } from "@/i18n"
 
 export type Level = "public" | "conclusion" | "reasoning" | "never"
 export type Visibility = string // workspace | private | team:<id> | space:<id>
@@ -122,4 +123,4 @@ export function usePeopleOn(): boolean | null {
 /** a provider id that identification fell back to as a name (`ou_…`, `on_…`, `cli_…`) — never shown as one */
 export const looksLikeHandle = (n: string) => !n.trim() || /^(ou|on|cli|oc|u|uid)_[A-Za-z0-9]{6,}$/.test(n.trim())
 /** what to call a contact: its name, or “未知用户” while the name is still a raw id */
-export const nameOf = (c: { name: string; label?: string }) => c.label ?? (looksLikeHandle(c.name) ? "未知用户" : c.name)
+export const nameOf = (c: { name: string; label?: string }) => c.label ?? (looksLikeHandle(c.name) ? t("api:person.unknown") : c.name)

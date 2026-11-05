@@ -2,13 +2,14 @@
 import { Streamdown, defaultRehypePlugins, defaultRemarkPlugins, type Components } from "streamdown"
 import remarkBreaks from "remark-breaks"
 import { cardLink } from "@/channels/card-link"
+import { t } from "@/i18n"
 
 const components: Components = {
   a: ({ href, children }) => {
     const safe = cardLink(href)
     return safe ? <a href={safe} target="_blank" rel="noopener noreferrer" referrerPolicy="no-referrer" className="text-blue underline break-all">{children}</a> : <span>{children}</span>
   },
-  img: ({ alt }) => <span className="text-muted-foreground">[图片{alt ? `：${alt}` : ""}]</span>,
+  img: ({ alt }) => <span className="text-muted-foreground">{alt ? t("channels:card.imageAlt", { alt }) : t("channels:card.image")}</span>,
   code: ({ children }) => <code className="whitespace-pre-wrap break-all rounded bg-muted px-1">{children}</code>,
 }
 

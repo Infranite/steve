@@ -63,7 +63,7 @@ const usageRow = (key, label) => ({ ...usage, key, label, priced: true })
 const errors = [], calls = []
 try {
   for (const width of [1440, 390]) for (const theme of ["light", "dark"]) {
-    const page = await browser.newPage({ viewport: { width, height: width === 390 ? 844 : 1000 }, reducedMotion: "reduce", colorScheme: theme })
+    const page = await browser.newPage({ locale: "zh-CN", viewport: { width, height: width === 390 ? 844 : 1000 }, reducedMotion: "reduce", colorScheme: theme })
     page.on("pageerror", (e) => errors.push(e.message))
     const c0 = calls.length
     await page.route((u) => u.pathname.startsWith("/api/") || u.pathname.startsWith("/healthz"), async (route) => {
@@ -244,7 +244,7 @@ try {
   }
 
   /* paused: the breaker's alert with 恢复 */
-  const page = await browser.newPage({ viewport: { width: 390, height: 844 } })
+  const page = await browser.newPage({ locale: "zh-CN", viewport: { width: 390, height: 844 } })
   await page.route((u) => u.pathname.startsWith("/api/"), (route) => route.fulfill({ contentType: "application/json", body: JSON.stringify(route.request().url().includes("summary") ? summary : { buckets: days, series: [], rows: [], total: 0, next: null }) }))
   await page.goto(base + "/test/fixtures/stats.html?yolo=paused")
   await page.locator('[data-run-state="paused"]').waitFor()

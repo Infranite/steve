@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import { NotWired, Unauthenticated } from "@/api"
 import { useHubEvents } from "@/store"
 import type { Filter } from "@/api/stats"
+import { t } from "@/i18n"
 import { dayRange, durUnit, longDur, monthDayTime } from "@/i18n/format"
 
 export const fmtN = (n: number | null | undefined) => {
@@ -22,10 +23,11 @@ export const fmtMs = (ms: number | null | undefined) => {
 /** a change against the previous range, as grey text: “↑ 18%”, “↓ 3%”, “持平”, or `null` when there is nothing to compare */
 export const delta = (now: number | null | undefined, before: number | null | undefined) => {
   if (now == null || before == null || !isFinite(now) || !isFinite(before)) return null
-  if (before === 0) return now === 0 ? "持平" : null
+  if (before === 0) return now === 0 ? t("stats:delta.flat") : null
   const r = (now - before) / Math.abs(before)
-  if (Math.abs(r) < 0.005) return "持平"
-  return (r > 0 ? "↑ " : "↓ ") + Math.abs(r * 100).toFixed(Math.abs(r) < 0.1 ? 1 : 0) + "%"
+  if (Math.abs(r) < 0.005) return t("stats:delta.flat")
+  const pct = Math.abs(r * 100).toFixed(Math.abs(r) < 0.1 ? 1 : 0)
+  return r > 0 ? t("stats:delta.up", { pct }) : t("stats:delta.down", { pct })
 }
 export const time = (ts: number) => monthDayTime(ts)
 export const hhmm = (ts: number) => { const d = new Date(ts); return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}` }
@@ -37,11 +39,11 @@ export const isHour = (b: string) => b.length > 10 && b[10] === "T"
 /** “14:00–15:00” (the last one “23:00–24:00”) */
 export const hourSpan = (b: string) => { const h = Number(b.slice(11, 13)); return `${String(h).padStart(2, "0")}:00–${String(h + 1).padStart(2, "0")}:00` }
 /** a bucket, said in full: “11月5日 14:00–15:00”, or the day “11月5日” */
-export const bucketName = (b: string) => isHour(b) ? `${fmtRange(b.slice(0, 10), b.slice(0, 10))} ${hourSpan(b)}` : fmtRange(b, b)
+export const bucketName = (b: string) => isHour(b) ? t("common:time.dateAt", { date: fmtRange(b.slice(0, 10), b.slice(0, 10)), time: hourSpan(b) }) : fmtRange(b, b)
 /** the bucket under the axis: “14:00”, or the day “11/5” */
 export const bucketTick = (b: string) => (isHour(b) ? b.slice(11, 16) : shortDay(b))
 /** the zone an hourly chart is cut in, for its subtitle: “北京时间” for Asia/Shanghai, else the IANA name */
-export const zoneName = (tz?: string | null) => (!tz || tz === "local" ? "Hub 所在时区" : tz === "Asia/Shanghai" ? "北京时间" : tz)
+export const zoneName = (tz?: string | null) => (!tz || tz === "local" ? t("stats:zone.hub") : tz === "Asia/Shanghai" ? t("stats:zone.beijing") : tz)
 
 export type Load<T> = { s: "loading" } | { s: "absent" } | { s: "error"; msg: string } | { s: "ok"; v: T; at: number }
 /** loads `f` now, whenever `deps` change and on every `stats` stream event (`live` = only while it can matter) */

@@ -2,6 +2,8 @@
  * fall back to its Unwired placeholder. Shapes follow steve-mail's api.rs / drafts.rs. Sending only ever happens through
  * a `mail_draft` decision: `POST /mail/drafts/:id/send` opens it and approves it as you, or the approval card's `send`. */
 import { modReq, qs, type RFile } from "@/api"
+import { lazy } from "@/api/accounts"
+import { t } from "@/i18n"
 const e = encodeURIComponent
 const get = <T>(p: string) => modReq<T>("GET", p)
 const post = <T = any>(p: string, b: unknown = {}) => modReq<T>("POST", p, b)
@@ -64,16 +66,23 @@ export const MAIL_ADAPTERS = ["imap", "gmail", "outlook"]
 
 /* IMAP presets of the new-mailbox dialog (email.md §1, same as steve-mail's adapters::imap::PRESETS) */
 export type ImapPreset = { id: string; name: string; imap_host: string; imap_port: number; smtp_host: string; smtp_port: number; smtp_security: "tls" | "starttls"; hint: string; help?: string }
+/** a preset whose name and hint are read in the current language (the dialog matches presets by name, which stays
+ *  consistent within one render) */
+const preset = (p: Omit<ImapPreset, "name" | "hint">, name: () => string, hint: () => string): ImapPreset =>
+  Object.defineProperties({ ...p } as ImapPreset, { name: { get: name, enumerable: true }, hint: { get: hint, enumerable: true } })
 export const IMAP_PRESETS: ImapPreset[] = [
-  { id: "icloud", name: "iCloud", imap_host: "imap.mail.me.com", imap_port: 993, smtp_host: "smtp.mail.me.com", smtp_port: 587, smtp_security: "starttls", hint: "在 Apple ID 账户设置里生成 App 专用密码", help: "https://support.apple.com/zh-cn/102654" },
-  { id: "qq", name: "QQ 邮箱", imap_host: "imap.qq.com", imap_port: 993, smtp_host: "smtp.qq.com", smtp_port: 465, smtp_security: "tls", hint: "在 QQ 邮箱设置里开启 IMAP 服务并生成授权码" },
-  { id: "163", name: "网易 163", imap_host: "imap.163.com", imap_port: 993, smtp_host: "smtp.163.com", smtp_port: 465, smtp_security: "tls", hint: "在 163 邮箱设置里开启 IMAP 服务并生成授权码" },
-  { id: "fastmail", name: "Fastmail", imap_host: "imap.fastmail.com", imap_port: 993, smtp_host: "smtp.fastmail.com", smtp_port: 465, smtp_security: "tls", hint: "在 Fastmail 设置的 Privacy & Security 里生成应用专用密码" },
-  { id: "gmail", name: "Gmail", imap_host: "imap.gmail.com", imap_port: 993, smtp_host: "smtp.gmail.com", smtp_port: 465, smtp_security: "tls", hint: "需要先开启两步验证，再生成应用专用密码", help: "https://support.google.com/accounts/answer/185833" },
-  { id: "custom", name: "其他", imap_host: "", imap_port: 993, smtp_host: "", smtp_port: 465, smtp_security: "tls", hint: "向邮箱服务商要 IMAP、SMTP 的地址和应用专用密码。只支持加密连接（TLS 或 STARTTLS）。" },
+  preset({ id: "icloud", imap_host: "imap.mail.me.com", imap_port: 993, smtp_host: "smtp.mail.me.com", smtp_port: 587, smtp_security: "starttls", help: "https://support.apple.com/zh-cn/102654" }, () => "iCloud", () => t("api:preset.icloudHint")),
+  preset({ id: "qq", imap_host: "imap.qq.com", imap_port: 993, smtp_host: "smtp.qq.com", smtp_port: 465, smtp_security: "tls" }, () => t("api:preset.qq"), () => t("api:preset.qqHint")),
+  preset({ id: "163", imap_host: "imap.163.com", imap_port: 993, smtp_host: "smtp.163.com", smtp_port: 465, smtp_security: "tls" }, () => t("api:preset.netease163"), () => t("api:preset.netease163Hint")),
+  preset({ id: "fastmail", imap_host: "imap.fastmail.com", imap_port: 993, smtp_host: "smtp.fastmail.com", smtp_port: 465, smtp_security: "tls" }, () => "Fastmail", () => t("api:preset.fastmailHint")),
+  preset({ id: "gmail", imap_host: "imap.gmail.com", imap_port: 993, smtp_host: "smtp.gmail.com", smtp_port: 465, smtp_security: "tls", help: "https://support.google.com/accounts/answer/185833" }, () => "Gmail", () => t("api:preset.gmailHint")),
+  preset({ id: "custom", imap_host: "", imap_port: 993, smtp_host: "", smtp_port: 465, smtp_security: "tls" }, () => t("api:preset.custom"), () => t("api:preset.customHint")),
 ]
 
-export const VIEWS: [MailView, string][] = [["needs_reply", "需要处理"], ["inbox", "收件箱"], ["waiting", "等对方"], ["sent", "已发送"], ["drafts", "草稿"]]
-export const DRAFT_STATUS: Record<DraftStatus, [string, string]> = {
-  draft: ["草稿", "idle"], pending: ["等你批准", "wait"], approved: ["即将发出", "run"], sending: ["正在发送", "run"], sent: ["已发出", "done"], failed: ["没发出去", "fail"], unknown: ["发送结果不明，待核实", "wait"], discarded: ["已放弃", "drop"],
-}
+export const VIEWS: [MailView, string][] = lazy([
+  () => ["needs_reply", t("api:mailView.needsReply")], () => ["inbox", t("api:mailView.inbox")], () => ["waiting", t("api:mailView.waiting")], () => ["sent", t("api:mailView.sent")], () => ["drafts", t("api:mailView.drafts")],
+])
+export const DRAFT_STATUS: Record<DraftStatus, [string, string]> = lazy({
+  draft: () => [t("api:draftStatus.draft"), "idle"], pending: () => [t("api:draftStatus.pending"), "wait"], approved: () => [t("api:draftStatus.approved"), "run"], sending: () => [t("api:draftStatus.sending"), "run"],
+  sent: () => [t("api:draftStatus.sent"), "done"], failed: () => [t("api:draftStatus.failed"), "fail"], unknown: () => [t("api:draftStatus.unknown"), "wait"], discarded: () => [t("api:draftStatus.discarded"), "drop"],
+})

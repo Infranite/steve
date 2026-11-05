@@ -30,26 +30,32 @@ import { PlanBar } from "@/view-shared"
 import { cn } from "cn"
 import { ArrowDownIcon, ChevronRightIcon, CircleCheckIcon, CircleStopIcon, CopyIcon, ListChecksIcon, MessageCircleIcon, MessageSquareReplyIcon, RouteIcon, Undo2Icon } from "lucide-react"
 import { Fragment, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react"
+import { t as tr, useT } from "@/i18n"
 
 
 /* ═════════ 对话 ═════════ */
 /* One compact bar (ST-50): who, what Steve himself is doing right now, and the way to history and to 事项. How many items
  * he follows is on 事项, not under his name, so it does not read as “working on 8 things”. */
-const CUE_LABEL: Partial<Record<HeroCue, string>> = { input: "在听", think: "在想…", success: "交出去了", affirm: "收到", inspect: "在找你说的事项", wary: "", love: "♥", failure: "没发出去" }
-const DOING: Record<string, string> = { route: "正在理解", answer: "正在想", research: "正在查", item: "正在建事项", config: "正在起草改动", supplement: "正在转给事项" }
+/* what each cue says, read when it plays so it is in the current language; "wary" counts what waits */
+const CUES = ["input", "think", "success", "affirm", "inspect", "love", "failure"] as const
+const cueLabel = (c: HeroCue): string | null => c === "wary" ? tr("pages:chat.waiting", { count: pendingCards().length }) : (CUES as readonly string[]).includes(c) ? tr(`pages:chat.cue.${c as (typeof CUES)[number]}`) : null
+/* what Steve is doing, by the phase the Hub reports */
+const PHASES = ["route", "answer", "research", "item", "config", "supplement"] as const
+const doingLabel = (phase: string) => tr(`pages:chat.doing.${(PHASES as readonly string[]).includes(phase) ? phase as (typeof PHASES)[number] : "answer"}`)
 
 function Hero() {
   const S = st.bots.steve
+  const t = useT()
   const [label, setLabel] = useState<string | null>(null)
   useEffect(() => {
-    let t: any
-    const off = onCue((c) => { clearTimeout(t); const l = CUE_LABEL[c]; setLabel(c === "wary" ? `有 ${pendingCards().length} 件等你决定` : l ?? null); if (c !== "think" && c !== "input") t = setTimeout(() => setLabel(null), 2600) })
+    let timer: any
+    const off = onCue((c) => { clearTimeout(timer); setLabel(cueLabel(c)); if (c !== "think" && c !== "input") timer = setTimeout(() => setLabel(null), 2600) })
     const w = pendingCards().length ? setTimeout(() => cue("wary"), 700) : undefined
-    return () => { off(); clearTimeout(t); clearTimeout(w) }
+    return () => { off(); clearTimeout(timer); clearTimeout(w) }
   }, [])
-  const doing = st.live ? "正在查" : st.draft?.text ? "正在回复" : isThinking() ? DOING[st.phase] ?? "正在想" : ""
+  const doing = st.live ? t("pages:chat.doing.research") : st.draft?.text ? t("pages:chat.doing.reply") : isThinking() ? doingLabel(st.phase) : ""
   /* while he works, the work is the state; a cue only fills the quiet moments */
-  const text = doing || label || "空闲"
+  const text = doing || label || t("pages:chat.idle")
   return (
     <div className="flex min-w-0 shrink items-center gap-2.5" data-hero="compact">
       <div className="shrink-0" onDoubleClick={() => cue("love")}><Robot k="steve" size={28} live /></div>
@@ -78,39 +84,41 @@ const Me = ({ t, files }: { t: string; files?: RFile[] }) => <div className="fle
 function MsgActions({ m }: { m: Msg }) {
   const fromChat = !!m.item && (m.steps?.route?.kind === "item" || !!m.updates?.length) && !m.update
   const canItem = !m.item && (!!m.chat || !!m.suggest || m.steps?.route?.kind === "research" || m.steps?.route?.kind === "answer")
+  const t = useT()
   return (
     <div className="absolute -bottom-7 left-0 flex gap-0.5 pl-1 opacity-0 transition-opacity focus-within:opacity-100 group-hover/sm:opacity-100 group-focus-within/sm:opacity-100 [@media(hover:none)]:opacity-100" data-msg-actions>
-      <Tooltip><TooltipTrigger render={<Button variant="ghost" size="icon-xs" aria-label="复制" className="text-muted-foreground" onClick={() => { navigator.clipboard?.writeText(m.t ?? "").catch(() => {}); toast("已复制") }} />}><CopyIcon /></TooltipTrigger><TooltipContent>复制</TooltipContent></Tooltip>
-      {m.id && <Tooltip><TooltipTrigger render={<Button variant="ghost" size="icon-xs" aria-label="引用回复" className="text-muted-foreground" onClick={() => quoteMsg(m.id!)} data-quote-reply />}><MessageSquareReplyIcon /></TooltipTrigger><TooltipContent>{m.item ? `引用回复，送到 ${m.item}` : "引用回复"}</TooltipContent></Tooltip>}
-      {canItem && <Tooltip><TooltipTrigger render={<Button variant="ghost" size="icon-xs" aria-label="做成事项" className="text-muted-foreground" disabled={isPromoting(m)} onClick={() => makeItem(m)} data-make-item />}><ListChecksIcon /></TooltipTrigger><TooltipContent>做成事项</TooltipContent></Tooltip>}
-      {fromChat && <Tooltip><TooltipTrigger render={<Button variant="ghost" size="icon-xs" aria-label="改成在这里回答" className="text-muted-foreground" onClick={() => void reroute(m, "inline")} data-to-inline />}><MessageCircleIcon /></TooltipTrigger><TooltipContent>改成在这里回答</TooltipContent></Tooltip>}
+      <Tooltip><TooltipTrigger render={<Button variant="ghost" size="icon-xs" aria-label={t("common:action.copy")} className="text-muted-foreground" onClick={() => { navigator.clipboard?.writeText(m.t ?? "").catch(() => {}); toast(t("common:action.copied")) }} />}><CopyIcon /></TooltipTrigger><TooltipContent>{t("common:action.copy")}</TooltipContent></Tooltip>
+      {m.id && <Tooltip><TooltipTrigger render={<Button variant="ghost" size="icon-xs" aria-label={t("pages:chat.quote")} className="text-muted-foreground" onClick={() => quoteMsg(m.id!)} data-quote-reply />}><MessageSquareReplyIcon /></TooltipTrigger><TooltipContent>{m.item ? t("pages:chat.quoteTo", { item: m.item }) : t("pages:chat.quote")}</TooltipContent></Tooltip>}
+      {canItem && <Tooltip><TooltipTrigger render={<Button variant="ghost" size="icon-xs" aria-label={t("pages:chat.makeItem")} className="text-muted-foreground" disabled={isPromoting(m)} onClick={() => makeItem(m)} data-make-item />}><ListChecksIcon /></TooltipTrigger><TooltipContent>{t("pages:chat.makeItem")}</TooltipContent></Tooltip>}
+      {fromChat && <Tooltip><TooltipTrigger render={<Button variant="ghost" size="icon-xs" aria-label={t("pages:chat.toInline")} className="text-muted-foreground" onClick={() => void reroute(m, "inline")} data-to-inline />}><MessageCircleIcon /></TooltipTrigger><TooltipContent>{t("pages:chat.toInline")}</TooltipContent></Tooltip>}
     </div>
   )
 }
 
 /* the menu on your own messages: quote it, or send it somewhere else than the router did */
 function MeActions({ m }: { m: Msg }) {
+  const t = useT()
   const [toItem, setToItem] = useState(false), [id, setId] = useState("")
   if (!m.id) return null
-  const send = () => { const v = id.trim().toUpperCase().replace(/^#/, ""); if (!/^[A-Z]{1,6}-\d+$/.test(v)) { toast("写一个事项编号，比如 ST-12"); return } setToItem(false); setId(""); void reroute(m, "item:" + v) }
+  const send = () => { const v = id.trim().toUpperCase().replace(/^#/, ""); if (!/^[A-Z]{1,6}-\d+$/.test(v)) { toast(t("pages:chat.badId")); return } setToItem(false); setId(""); void reroute(m, "item:" + v) }
   return (
     <div className="absolute -bottom-7 right-0 flex items-center gap-0.5 opacity-0 transition-opacity focus-within:opacity-100 group-hover/me:opacity-100 group-focus-within/me:opacity-100 [@media(hover:none)]:opacity-100" data-me-actions>
-      <Tooltip><TooltipTrigger render={<Button variant="ghost" size="icon-xs" aria-label="引用回复" className="text-muted-foreground" onClick={() => quoteMsg(m.id!)} />}><MessageSquareReplyIcon /></TooltipTrigger><TooltipContent>引用回复</TooltipContent></Tooltip>
+      <Tooltip><TooltipTrigger render={<Button variant="ghost" size="icon-xs" aria-label={t("pages:chat.quote")} className="text-muted-foreground" onClick={() => quoteMsg(m.id!)} />}><MessageSquareReplyIcon /></TooltipTrigger><TooltipContent>{t("pages:chat.quote")}</TooltipContent></Tooltip>
       <DropdownMenu>
-        <DropdownMenuTrigger render={<Button variant="ghost" size="icon-xs" aria-label="重新分流" className="text-muted-foreground" data-reroute-menu />}><RouteIcon /></DropdownMenuTrigger>
+        <DropdownMenuTrigger render={<Button variant="ghost" size="icon-xs" aria-label={t("pages:chat.reroute")} className="text-muted-foreground" data-reroute-menu />}><RouteIcon /></DropdownMenuTrigger>
         <DropdownMenuContent align="end" className="min-w-44">
-          <div className="px-2 py-1 type-footnote text-muted-foreground">重新分流…</div>
-          <DropdownMenuItem onClick={() => void reroute(m, "inline")} data-reroute="inline">在这里回答</DropdownMenuItem>
-          <DropdownMenuItem onClick={() => void reroute(m, "item")} data-reroute="item">建成事项</DropdownMenuItem>
-          <DropdownMenuItem onClick={() => setToItem(true)} data-reroute="supplement">送到 ST-n…</DropdownMenuItem>
+          <div className="px-2 py-1 type-footnote text-muted-foreground">{t("pages:chat.rerouteMenu")}</div>
+          <DropdownMenuItem onClick={() => void reroute(m, "inline")} data-reroute="inline">{t("pages:chat.inline")}</DropdownMenuItem>
+          <DropdownMenuItem onClick={() => void reroute(m, "item")} data-reroute="item">{t("pages:chat.asItem")}</DropdownMenuItem>
+          <DropdownMenuItem onClick={() => setToItem(true)} data-reroute="supplement">{t("pages:chat.toItem")}</DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
       <Popover open={toItem} onOpenChange={setToItem}>
         <PopoverTrigger render={<span className="size-0" aria-hidden />} />
         <PopoverContent align="end" className="w-60 gap-2 rounded-2xl p-3" data-reroute-popover>
-          <div className="type-callout font-medium">送到哪个事项？</div>
+          <div className="type-callout font-medium">{t("pages:chat.whichItem")}</div>
           <Input autoFocus placeholder="ST-12" value={id} onChange={(e) => setId(e.target.value)} onKeyDown={(e) => e.key === "Enter" && send()} className="h-8" data-reroute-item />
-          <div className="flex justify-end gap-2"><Button size="sm" variant="ghost" onClick={() => setToItem(false)}>取消</Button><Button size="sm" onClick={send}>送过去</Button></div>
+          <div className="flex justify-end gap-2"><Button size="sm" variant="ghost" onClick={() => setToItem(false)}>{t("common:action.cancel")}</Button><Button size="sm" onClick={send}>{t("pages:chat.send")}</Button></div>
         </PopoverContent>
       </Popover>
     </div>
@@ -119,22 +127,25 @@ function MeActions({ m }: { m: Msg }) {
 
 /* first-run onboarding, inline in the conversation */
 function Onboarding() {
+  const t = useT()
   const n = st.onboard
   if (n < 0) return null
   const rt = st.runtimes.filter((r) => r.ok).map((r) => r.name)
-  const steps: [string, string, string[]][] = [
-    ["你好，我是 Steve，帮你把事情交出去、盯进度、该你决定时叫你。", "开始", ["好的"]],
-    [rt.length ? `我在这台机器上找到了 ${rt.join("、")}，默认用 ${rt[0]} 干活。每个 Bot 可以单独设置。` : "这台机器上还没有找到可用的 harness（Claude Code 或 Codex），先装好再交代事情。", "运行环境", ["好的", "去设备页看看"]],
-    [`事情按工作空间和项目来管：现在在「${st.workspace?.name}」，有 ${st.projects.length} 个项目。项目就是一个目录，事项选了项目就在那里干活。`, "项目", ["好的", "去看看项目"]],
-    ["邮件、日历和 IM 还没有接入，接入后我会在后台分诊。现在试着交给我一件事，比如“给事项列表加按状态筛选”。", "第一件事", ["完成引导"]],
+  /* each step: what Steve says, the step's name, and the answers offered (by id) */
+  type Opt = "ok" | "devices" | "seeProjects" | "finish"
+  const steps: [string, string, Opt[]][] = [
+    [t("pages:chat.onboard.hello"), t("pages:chat.onboard.start"), ["ok"]],
+    [rt.length ? t("pages:chat.onboard.runtimes", { list: rt.join(t("pages:listSep")), first: rt[0] }) : t("pages:chat.onboard.noRuntime"), t("pages:chat.onboard.runtime"), ["ok", "devices"]],
+    [t("pages:chat.onboard.projects", { space: st.workspace?.name, count: st.projects.length }), t("pages:chat.onboard.project"), ["ok", "seeProjects"]],
+    [t("pages:chat.onboard.first"), t("pages:chat.onboard.firstTask"), ["finish"]],
   ]
   return <>
     {steps.slice(0, n + 1).map(([q, step, opts], j) => (
       <div key={j} className="flex flex-col gap-2" data-onboard={j}>
-        <SteveSays sub={`首次引导 · ${j + 1}/${steps.length} · ${step}`}>{q}</SteveSays>
+        <SteveSays sub={t("pages:chat.onboard.sub", { n: j + 1, total: steps.length, step })}>{q}</SteveSays>
         {j === n && <div className="flex flex-wrap gap-2 self-start">{opts.map((o) => <Button key={o} size="sm" variant="outline" className="rounded-full" data-onboard-opt={o}
-          onClick={() => { if (o === "去设备页看看") { go("#/devices"); return } if (o === "去看看项目") { go("#/projects"); return } if (j === steps.length - 1) { finishOnboarding(); toast("引导完成"); return } st.onboard = j + 1; emit() }}>{o}</Button>)}
-          <Button size="sm" variant="ghost" className="text-muted-foreground" onClick={finishOnboarding}>跳过引导</Button></div>}
+          onClick={() => { if (o === "devices") { go("#/devices"); return } if (o === "seeProjects") { go("#/projects"); return } if (j === steps.length - 1) { finishOnboarding(); toast(t("pages:chat.onboard.done")); return } st.onboard = j + 1; emit() }}>{t(`pages:chat.onboard.${o}`)}</Button>)}
+          <Button size="sm" variant="ghost" className="text-muted-foreground" onClick={finishOnboarding}>{t("pages:chat.onboard.skip")}</Button></div>}
       </div>))}
   </>
 }
@@ -142,13 +153,14 @@ function Onboarding() {
 /* away digest — modelled on iOS notification summaries: one headline, then short sections with the top three rows each */
 
 function DigestSection({ title, items, row, id }: { title: string; items: Item[]; row: (i: Item) => ReactNode; id: string }) {
+  const t = useT()
   const [all, setAll] = useState(false)
   if (!items.length) return null
   const xs = all ? items : items.slice(0, 3)
   return (
     <div className="border-t px-1.5 py-2" data-digest-section={id}>
       <div className="flex items-center justify-between px-2.5 py-1 type-label text-muted-foreground"><span>{title} · {items.length}</span>
-        {items.length > 3 && <button type="button" className="font-normal hover:text-foreground" onClick={() => setAll(!all)}>{all ? "收起" : `还有 ${items.length - 3} 件`}</button>}</div>
+        {items.length > 3 && <button type="button" className="font-normal hover:text-foreground" onClick={() => setAll(!all)}>{all ? t("pages:chat.digest.collapse") : t("pages:chat.digest.more", { count: items.length - 3 })}</button>}</div>
       {xs.map((i) => <div key={i.id} role="button" tabIndex={0} onClick={() => go("#/items/" + i.id)} className="flex min-h-10 cursor-pointer items-center gap-2.5 rounded-lg px-2.5 py-1.5 transition-colors hover:bg-accent">{row(i)}</div>)}
     </div>
   )
@@ -159,19 +171,20 @@ const SEEN = "steve-seen"
 function Digest({ from }: { from: number }) {
   const p = pending(), done = st.items.filter((i) => i.st === "done" && i.updated >= from && !i.arch), run = st.items.filter((i) => (i.st === "run" || i.st === "block") && !i.arch)
   const h = Math.round((Date.now() - from) / 3600_000)
+  const t = useT()
   return (
     <Card size="sm" className="-mt-2 w-full max-w-[560px] self-start gap-0 py-0 anim-in" data-digest>
       <div className="px-4 pb-3 pt-3.5">
-        <div className="type-footnote text-muted-foreground">{tm(from)} – 现在 · 离开 {h} 小时</div>
-        <div className="mt-1 type-headline">{p.length} 件等你决定，{done.length} 件已完成，{run.length} 件在进行</div>
+        <div className="type-footnote text-muted-foreground">{t("pages:chat.digest.away", { from: tm(from), count: h })}</div>
+        <div className="mt-1 type-headline">{t("pages:chat.digest.headline", { wait: p.length, done: done.length, run: run.length })}</div>
       </div>
-      <DigestSection id="need" title="需要你" items={p} row={(i) => <>
+      <DigestSection id="need" title={t("pages:chat.digest.need")} items={p} row={(i) => <>
         <StatusDot s="wait" /><ItemNo id={i.id} /><span className="min-w-0 flex-1 truncate type-callout">{i.t}</span>
         <Button size="xs" variant="outline" onClick={(e) => { e.stopPropagation(); go("#/inbox") }}>{WACT[i.wait!.type]}</Button></>} />
-      <DigestSection id="done" title="已完成" items={done} row={(i) => <>
+      <DigestSection id="done" title={t("pages:chat.digest.done")} items={done} row={(i) => <>
         <CircleCheckIcon className="size-4 shrink-0 text-success" strokeWidth={1.75} /><ItemNo id={i.id} /><span className="min-w-0 flex-1 truncate type-callout">{i.t}</span><span className="type-footnote text-muted-foreground">{i.now}</span></>} />
-      <DigestSection id="run" title="进行中" items={run} row={(i) => <>
-        <StatusDot s={i.st} /><ItemNo id={i.id} /><span className="min-w-0 flex-1 truncate type-callout">{i.t}</span><span className="hidden type-footnote text-muted-foreground sm:inline">{i.plan ? <PlanBar i={i} /> : i.st === "block" ? "等前置" : ""}</span></>} />
+      <DigestSection id="run" title={t("pages:chat.digest.run")} items={run} row={(i) => <>
+        <StatusDot s={i.st} /><ItemNo id={i.id} /><span className="min-w-0 flex-1 truncate type-callout">{i.t}</span><span className="hidden type-footnote text-muted-foreground sm:inline">{i.plan ? <PlanBar i={i} /> : i.st === "block" ? t("pages:chat.digest.blocked") : ""}</span></>} />
     </Card>
   )
 }
@@ -190,6 +203,7 @@ const FLASH_MS = 1600
 /** `conv`: an IM conversation (`chan:<space>`, channels §2.12), read-only; without it, yours */
 export function ChatView({ conv }: { conv?: string } = {}) {
   const S = st.bots.steve, p = pendingCards(), away = useAway()
+  const t = useT()
   useHistory()
   const im = useConversation(conv)
   const list: Msg[] = conv ? im?.msgs ?? [] : mainThread(st.thread)
@@ -269,7 +283,7 @@ export function ChatView({ conv }: { conv?: string } = {}) {
     if (!list.some((m) => m.id === id) && created) await fillTo(created)
     requestAnimationFrame(() => requestAnimationFrame(() => {
       const el = scroller.current, x = el?.querySelector<HTMLElement>(`[data-msg="${CSS.escape(id)}"]`)
-      if (!el || !x) { toast("这条消息不在对话里了"); return }
+      if (!el || !x) { toast(tr("pages:chat.notInThread")); return }
       leave()
       /* centred; what was just loaded above still lays out (Markdown, code), so it is put back once more after that */
       const at: Anchor = { id, created: created ?? 0, offset: Math.max(16, (el.clientHeight - x.offsetHeight) / 2) }
@@ -318,9 +332,9 @@ export function ChatView({ conv }: { conv?: string } = {}) {
       <div className="relative flex min-h-0 flex-1 flex-col"><div ref={scroller} tabIndex={-1} className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-none outline-none" data-chat-scroll>
         <div className="mx-auto flex w-full max-w-[800px] flex-col gap-8 px-4 pb-10 pt-5 sm:px-8" data-chat-messages>
           {!conv && list.length > 0 && <div ref={top} className="-mb-4 flex min-h-5 justify-center type-footnote text-muted-foreground" data-chat-older={loading ? "loading" : more ? "more" : ended ? "start" : "none"}>
-            {loading ? <span className="flex items-center gap-2"><Spinner className="size-3.5" />载入更早的消息</span> : more ? <button type="button" className="hover:text-foreground" onClick={() => { keep.current = anchorNow(); void loadOlder() }}>更早的消息</button> : ended && <span>对话从这里开始</span>}
+            {loading ? <span className="flex items-center gap-2"><Spinner className="size-3.5" />{t("pages:chat.loadingOlder")}</span> : more ? <button type="button" className="hover:text-foreground" onClick={() => { keep.current = anchorNow(); void loadOlder() }}>{t("pages:chat.older")}</button> : ended && <span>{t("pages:chat.start")}</span>}
           </div>}
-          {conv && im === null && <div className="py-10 text-center type-callout text-muted-foreground" data-conv-missing>没有这个对话，或者你看不到它所在的空间。</div>}
+          {conv && im === null && <div className="py-10 text-center type-callout text-muted-foreground" data-conv-missing>{t("pages:chat.missing")}</div>}
           {list.map((m, n) => {
             const key = m.clientId ?? m.id ?? m.k
             const prev = list[n - 1], day = m.created && (!prev?.created || new Date(prev.created).toDateString() !== new Date(m.created).toDateString())
@@ -332,30 +346,30 @@ export function ChatView({ conv }: { conv?: string } = {}) {
             if (m.notice) return <Fragment key={key}>{dayLabel}<NoticeLine m={m} onOpen={showNotices} /></Fragment>
             return <Fragment key={key}>{dayLabel}<div className={cn("group/sm relative flex min-w-0 flex-col gap-2.5 transition-colors duration-500", lit)} data-msg={m.id} data-flash={lit ? "" : undefined}>
               <div className="flex min-w-0 items-center gap-2 px-1 type-footnote text-muted-foreground" data-chat-author><span className="truncate font-medium text-foreground">{S?.n ?? "Steve"}</span>{m.created && <time className="shrink-0" dateTime={new Date(m.created).toISOString()}>{tm(m.created)}</time>}</div>
-              <QuoteHead id={m.replyTo} /><StepsBlock m={m} /><SteveSays still={m.id === st.drafted}>{!m.update && !m.cardOnly && <A2uiHost msg={m.id} records={m.a2ui} readonly={conv ? "群聊里的界面只能看，操作请在你和 Steve 的主线对话里进行" : undefined}><Markdown text={linkCites(m.t ?? "", m.cites)} /></A2uiHost>}{m.item && !m.update && !m.card && (m.wasCard || list.some((x) => x.card?.item === m.item) ? <CardLink id={m.item} /> : <ItemRef id={m.item} />)}{m.card ? <ItemCard c={m.card} inText={!m.cardOnly && m.card.delivery?.text === m.t} /> : <Updates m={m} />}{m.stopped && <div className="mt-2 flex items-center gap-1.5 type-footnote text-muted-foreground" data-stopped><CircleStopIcon className="size-3.5" aria-hidden />你停下了这次回答</div>}<OfferLine m={m} /><SuggestCard m={m} /><AskChips m={m} conv={!!conv} /><Rerun m={m} conv={!!conv} /></SteveSays>{m.cfgs && <div className="-mt-1 flex flex-col gap-2 self-start">{m.cfgs.map((p) => <ProposalCard key={p.id} p={p} inChat />)}</div>}<Cites cites={m.cites} />{conv ? <ChanOutNote m={rawOf(m)} /> : <MsgActions m={m} />}</div></Fragment>
+              <QuoteHead id={m.replyTo} /><StepsBlock m={m} /><SteveSays still={m.id === st.drafted}>{!m.update && !m.cardOnly && <A2uiHost msg={m.id} records={m.a2ui} readonly={conv ? t("pages:chat.readonlyUi") : undefined}><Markdown text={linkCites(m.t ?? "", m.cites)} /></A2uiHost>}{m.item && !m.update && !m.card && (m.wasCard || list.some((x) => x.card?.item === m.item) ? <CardLink id={m.item} /> : <ItemRef id={m.item} />)}{m.card ? <ItemCard c={m.card} inText={!m.cardOnly && m.card.delivery?.text === m.t} /> : <Updates m={m} />}{m.stopped && <div className="mt-2 flex items-center gap-1.5 type-footnote text-muted-foreground" data-stopped><CircleStopIcon className="size-3.5" aria-hidden />{t("pages:chat.stopped")}</div>}<OfferLine m={m} /><SuggestCard m={m} /><AskChips m={m} conv={!!conv} /><Rerun m={m} conv={!!conv} /></SteveSays>{m.cfgs && <div className="-mt-1 flex flex-col gap-2 self-start">{m.cfgs.map((p) => <ProposalCard key={p.id} p={p} inChat />)}</div>}<Cites cites={m.cites} />{conv ? <ChanOutNote m={rawOf(m)} /> : <MsgActions m={m} />}</div></Fragment>
           })}
-          {!conv && away > 0 && <><SteveSays sub="离开期间汇报">你不在的时候：</SteveSays><Digest from={away} /></>}
+          {!conv && away > 0 && <><SteveSays sub={t("pages:chat.digest.sub")}>{t("pages:chat.digest.lead")}</SteveSays><Digest from={away} /></>}
           {!conv && <Onboarding />}
         </div>
       </div>
       {/* pinned to the list, not the page: the composer's height differs between phone and desktop and grows with the queue */}
       {back ? <div className="absolute bottom-3 left-1/2 flex -translate-x-1/2 items-center gap-0.5 rounded-full border bg-popover p-0.5 shadow-md anim-in" data-jump-bar>
-          {back !== "latest" && <Button size="sm" variant="ghost" className="rounded-full" onClick={() => { const a = back; setBack(null); if (!toAnchor(a)) bottom() }} data-jump-back><Undo2Icon />返回刚才位置</Button>}
-          <Button size="sm" variant="ghost" className="rounded-full text-muted-foreground" onClick={bottom} data-jump-latest>{fresh ? `${fresh} 条新消息` : "回到最新"}<ArrowDownIcon /></Button>
+          {back !== "latest" && <Button size="sm" variant="ghost" className="rounded-full" onClick={() => { const a = back; setBack(null); if (!toAnchor(a)) bottom() }} data-jump-back><Undo2Icon />{t("pages:chat.jumpBack")}</Button>}
+          <Button size="sm" variant="ghost" className="rounded-full text-muted-foreground" onClick={bottom} data-jump-latest>{fresh ? t("pages:chat.newCount", { count: fresh }) : t("pages:chat.latest")}<ArrowDownIcon /></Button>
         </div>
-        : unread && <Button className="absolute bottom-3 left-1/2 -translate-x-1/2 rounded-full" size="sm" onClick={bottom} data-new-messages>{fresh ? `${fresh} 条新消息` : "新消息"}<ArrowDownIcon /></Button>}</div>
+        : unread && <Button className="absolute bottom-3 left-1/2 -translate-x-1/2 rounded-full" size="sm" onClick={bottom} data-new-messages>{fresh ? t("pages:chat.newCount", { count: fresh }) : t("pages:chat.newMessages")}<ArrowDownIcon /></Button>}</div>
       <div className="mx-auto w-full max-w-[800px] shrink-0 px-4 pb-[76px] pt-3 sm:px-8 md:pb-5" data-chat-input>
         {conv ? im && <ImReadOnly b={im.badge} /> : <>
         {p.length > 0 && (
           <button type="button" onClick={() => go("#/inbox")} data-pending-strip className="mb-2 flex w-full items-center gap-2.5 rounded-xl px-3 py-2 text-left type-callout transition-colors hover:bg-accent">
-            <StatusDot s="wait" /><span className="font-medium">{p.length} 件等你</span>
-            <span className="min-w-0 flex-1 truncate text-muted-foreground">{p.map((c) => (c.w.subject === "tool_call" ? "权限" : WT[c.w.type]) + "：" + (c.i.id ? c.i.t : "会话 " + c.i.t)).join(" · ")}</span>
+            <StatusDot s="wait" /><span className="font-medium">{t("pages:chat.pending", { count: p.length })}</span>
+            <span className="min-w-0 flex-1 truncate text-muted-foreground">{p.map((c) => t("pages:chat.pendingRow", { kind: c.w.subject === "tool_call" ? t("pages:chat.pendingPermission") : WT[c.w.type], title: c.i.id ? c.i.t : t("pages:chat.pendingConv", { title: c.i.t }) })).join(" · ")}</span>
             <ChevronRightIcon className="size-4 text-muted-foreground" />
           </button>
         )}
         <ChatQueue composer={composer} />
         <ComposerBars />
-        <Composer draftKey={draftKey(st.workspace?.id, "chat")} handle={composer} placeholder={focusItem() ? `补充给 ${focusItem()}…` : chatBusy() ? `${S?.n ?? "Steve"} 还在忙，可以接着说，本回合结束后发出…` : `和 ${S?.n ?? "Steve"} 说…`} testId="chat" onSend={(t, files, refs, mentions) => { bottom(); return chatSend(t, files, refs, mentions) }} busy={working} onStop={stopReply}
+        <Composer draftKey={draftKey(st.workspace?.id, "chat")} handle={composer} placeholder={focusItem() ? t("pages:chat.placeholderFocus", { item: focusItem() }) : chatBusy() ? t("pages:chat.placeholderBusy", { name: S?.n ?? "Steve" }) : t("pages:chat.placeholder", { name: S?.n ?? "Steve" })} testId="chat" onSend={(t, files, refs, mentions) => { bottom(); return chatSend(t, files, refs, mentions) }} busy={working} onStop={stopReply}
           onCommand={(c) => { if (c === "digest") { void chatSend("/汇报"); return } openSheet(c) }} />
         </>}
       </div>

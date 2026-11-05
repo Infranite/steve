@@ -1,4 +1,5 @@
 /* Hub API: raw shapes (mirroring hub/src/repo.ts) and calls. store.ts maps them onto the view model. */
+import { t } from "@/i18n"
 export type ItemStatus = "prop" | "run" | "wait" | "pause" | "done" | "drop" | "block"
 export type PlanStep = { step: string; done: boolean; left?: boolean }
 export type RItem = {
@@ -105,8 +106,8 @@ async function req<T>(method: string, path: string, body?: unknown): Promise<T> 
   const r = await fetch("/api" + path, { method, headers: wsHeaders(body !== undefined ? { "content-type": "application/json" } : {}), body: body !== undefined ? JSON.stringify(body) : undefined, credentials: "same-origin", signal: method === "GET" ? AbortSignal.timeout(30_000) : undefined })
   if (r.status === 401) { const j = await r.json().catch(() => ({})); throw new Unauthenticated(j.login ?? null) }
   const j = await r.json().catch(() => (r.ok && method === "GET" ? CUT : {}))
-  if (j === CUT) throw new Error("响应不完整，稍后重试") // a cut-off body used to come back as {} and break the caller silently
-  if (!r.ok) throw new Error(j.error ?? `请求失败（${r.status}）`)
+  if (j === CUT) throw new Error(t("shell:http.incomplete")) // a cut-off body used to come back as {} and break the caller silently
+  if (!r.ok) throw new Error(j.error ?? t("shell:http.failed", { status: r.status }))
   return j as T
 }
 
@@ -115,7 +116,7 @@ async function req<T>(method: string, path: string, body?: unknown): Promise<T> 
  * methods with a plain-text 404, so "this Hub has no such module" is: a network error, a non-JSON answer that is 200 /
  * 404 / 405, or a JSON 404 / 405 without an `error`. Every module client throws `NotWired` for these, and its page
  * shows the module's Unwired placeholder instead — never sample data. */
-export class NotWired extends Error { constructor() { super("连不上 Steve，稍后重试") } }
+export class NotWired extends Error { constructor() { super(t("shell:http.unreachable")) } }
 /** an error answer of a module route that exists; `status` tells 400 / 404 / 409 / 503 apart */
 export class HubError extends Error { status: number; constructor(status: number, msg: string) { super(msg); this.status = status } }
 export const isNotWired = (e: unknown): e is NotWired => e instanceof NotWired
@@ -132,11 +133,11 @@ export async function modReq<T>(method: string, path: string, body?: unknown, si
   if (!json) {
     if (r.ok && method !== "GET") return {} as T // 204, or an empty body
     if (r.ok || r.status === 404 || r.status === 405) throw new NotWired()
-    throw new HubError(r.status, `请求失败（${r.status}）`)
+    throw new HubError(r.status, t("shell:http.failed", { status: r.status }))
   }
   if ((r.status === 404 || r.status === 405) && !j?.error) throw new NotWired()
-  if (!r.ok) throw new HubError(r.status, j?.error ?? `请求失败（${r.status}）`)
-  if (j === undefined) throw new Error("响应不完整，稍后重试")
+  if (!r.ok) throw new HubError(r.status, j?.error ?? t("shell:http.failed", { status: r.status }))
+  if (j === undefined) throw new Error(t("shell:http.incomplete"))
   return j as T
 }
 /** `?a=1&b=2` from the defined, non-empty values */
@@ -205,7 +206,7 @@ export const api = {
   upload: async (f: Blob, name: string): Promise<RFile> => {
     const r = await fetch("/api/files?name=" + encodeURIComponent(name), { method: "POST", body: f, headers: wsHeaders({ "content-type": "application/octet-stream" }), credentials: "same-origin" })
     if (r.status === 401) { const j = await r.json().catch(() => ({})); throw new Unauthenticated(j.login ?? null) }
-    const j = await r.json().catch(() => ({})); if (!r.ok) throw new Error(j.error ?? `上传失败（${r.status}）`); return j as RFile
+    const j = await r.json().catch(() => ({})); if (!r.ok) throw new Error(j.error ?? t("shell:http.uploadFailed", { status: r.status })); return j as RFile
   },
   logout: () => fetch("/auth/logout", { method: "POST", credentials: "same-origin" }),
 }

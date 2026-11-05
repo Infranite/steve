@@ -13,15 +13,16 @@ import { st, useStore, type Msg } from "@/store"
 import { openConversations } from "@/thread/conversations"
 import { historyState, jumpToMsg, loadOlder, mainThread, searchThread, useHistory } from "@/thread/history"
 import { snippet, topicsOf, type Topic } from "@/thread/topics"
+import { lang, t as tr, useT } from "@/i18n"
+import { date, hm } from "@/i18n/format"
 
 const DAY = 86400_000
-const hhmm = (ts: number) => new Date(ts).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false })
 export function dayLabel(ts: number) {
   const d = new Date(ts), today = new Date(); today.setHours(0, 0, 0, 0)
   const diff = today.getTime() - new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime()
-  if (diff <= 0) return "今天"
-  if (diff <= DAY) return "昨天"
-  return `${d.getFullYear() !== today.getFullYear() ? d.getFullYear() + "年" : ""}${d.getMonth() + 1}月${d.getDate()}日`
+  if (diff <= 0) return tr("thread:history.today")
+  if (diff <= DAY) return tr("thread:history.yesterday")
+  return date(d, { ...(d.getFullYear() !== today.getFullYear() && { year: "numeric" }), month: "short", day: "numeric" })
 }
 function byDay<T>(xs: T[], at: (x: T) => number): [string, T[]][] {
   const out: [string, T[]][] = []
@@ -31,12 +32,13 @@ function byDay<T>(xs: T[], at: (x: T) => number): [string, T[]][] {
 
 export function HistoryToggle() {
   const { historyOpen } = useRail()
+  const t = useT()
   return (
     <Tooltip>
-      <TooltipTrigger render={<Button variant="ghost" size="sm" aria-label="历史" aria-pressed={historyOpen} onClick={() => setHistory(!historyOpen)} className="gap-1.5 px-2 text-muted-foreground aria-pressed:bg-muted aria-pressed:text-foreground" data-history-toggle />}>
-        <HistoryIcon /><span className="max-sm:sr-only">历史</span>
+      <TooltipTrigger render={<Button variant="ghost" size="sm" aria-label={t("thread:history.title")} aria-pressed={historyOpen} onClick={() => setHistory(!historyOpen)} className="gap-1.5 px-2 text-muted-foreground aria-pressed:bg-muted aria-pressed:text-foreground" data-history-toggle />}>
+        <HistoryIcon /><span className="max-sm:sr-only">{t("thread:history.title")}</span>
       </TooltipTrigger>
-      <TooltipContent>搜索和翻找以前的消息</TooltipContent>
+      <TooltipContent>{t("thread:history.tooltip")}</TooltipContent>
     </Tooltip>
   )
 }
@@ -45,16 +47,18 @@ export function HistoryToggle() {
 export function HistoryPanel() {
   const { historyOpen } = useRail()
   const isWide = useWide()
+  const t = useT()
   if (isWide) return historyOpen ? <aside className="flex w-[340px] shrink-0 flex-col border-l border-sidebar-border bg-sidebar" data-history="aside"><HistoryBody /></aside> : null
   return (
     <Sheet open={historyOpen} onOpenChange={setHistory}>
-      <SheetContent side="right" className="w-[88vw] max-w-[380px]! gap-0 p-0" showCloseButton={false} data-history="sheet"><SheetTitle className="sr-only">历史</SheetTitle><HistoryBody /></SheetContent>
+      <SheetContent side="right" className="w-[88vw] max-w-[380px]! gap-0 p-0" showCloseButton={false} data-history="sheet"><SheetTitle className="sr-only">{t("thread:history.title")}</SheetTitle><HistoryBody /></SheetContent>
     </Sheet>
   )
 }
 
 function HistoryBody() {
   useStore(); useHistory()
+  const t = useT()
   const [q, setQ] = useState(""), [hits, setHits] = useState<Msg[] | null>(null), [local, setLocal] = useState(false), [busy, setBusy] = useState(false), [at, setAt] = useState<string | null>(null)
   const input = useRef<HTMLInputElement>(null)
   useEffect(() => { if (wide()) input.current?.focus() }, [])
@@ -62,40 +66,40 @@ function HistoryBody() {
     const x = q.trim()
     if (!x) { setHits(null); setBusy(false); return }
     const ac = new AbortController(); setBusy(true)
-    const t = setTimeout(() => searchThread(x, ac.signal).then((r) => { setHits(r.msgs); setLocal(r.local) }).catch(() => {}).finally(() => { if (!ac.signal.aborted) setBusy(false) }), 220)
-    return () => { clearTimeout(t); ac.abort() }
+    const timer = setTimeout(() => searchThread(x, ac.signal).then((r) => { setHits(r.msgs); setLocal(r.local) }).catch(() => {}).finally(() => { if (!ac.signal.aborted) setBusy(false) }), 220)
+    return () => { clearTimeout(timer); ac.abort() }
   }, [q])
   const list = mainThread(st.thread)
-  const topics = useMemo(() => topicsOf(list), [list])
+  const topics = useMemo(() => topicsOf(list), [list, lang()])
   const { more, ended, loading } = historyState()
   const open = (id: string, created?: number) => { setAt(id); jumpToMsg(id, created); if (!wide()) setHistory(false) }
   return (
     <div className="flex min-h-0 flex-1 flex-col" data-history-body>
       <div className="flex h-[52px] shrink-0 items-center gap-2 border-b border-sidebar-border px-4">
-        <span className="type-headline">历史</span>
-        <Button variant="ghost" size="icon-sm" className="ml-auto text-muted-foreground" aria-label="关闭历史" onClick={() => setHistory(false)} data-history-close><XIcon /></Button>
+        <span className="type-headline">{t("thread:history.title")}</span>
+        <Button variant="ghost" size="icon-sm" className="ml-auto text-muted-foreground" aria-label={t("thread:history.close")} onClick={() => setHistory(false)} data-history-close><XIcon /></Button>
       </div>
       <label className="mx-4 mt-3 mb-1 flex h-9 shrink-0 items-center gap-2 rounded-lg bg-muted px-2.5 type-callout">
         <SearchIcon className="size-4 shrink-0 text-muted-foreground" />
-        <input ref={input} value={q} onChange={(e) => setQ(e.target.value)} onKeyDown={(e) => { if (e.key === "Escape" && q) { e.stopPropagation(); setQ("") } }} placeholder="搜索消息或事项编号" aria-label="搜索消息" className="min-w-0 flex-1 bg-transparent outline-none placeholder:text-tertiary" data-history-search />
-        {busy ? <Spinner className="size-3.5 text-muted-foreground" /> : hits && <span className="shrink-0 type-footnote text-muted-foreground tabular-nums" data-history-count>{hits.length} 条</span>}
+        <input ref={input} value={q} onChange={(e) => setQ(e.target.value)} onKeyDown={(e) => { if (e.key === "Escape" && q) { e.stopPropagation(); setQ("") } }} placeholder={t("thread:history.searchPlaceholder")} aria-label={t("thread:history.searchLabel")} className="min-w-0 flex-1 bg-transparent outline-none placeholder:text-tertiary" data-history-search />
+        {busy ? <Spinner className="size-3.5 text-muted-foreground" /> : hits && <span className="shrink-0 type-footnote text-muted-foreground tabular-nums" data-history-count>{t("thread:history.hits", { count: hits.length })}</span>}
       </label>
       <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain pb-3" data-history-list>
         {hits ? <>
-          {local && <div className="px-4 pt-2 type-footnote text-muted-foreground">只搜了已载入的消息</div>}
-          {!hits.length && !busy && <div className="px-4 py-8 text-center type-callout text-muted-foreground" data-history-empty>没有找到“{q.trim()}”</div>}
+          {local && <div className="px-4 pt-2 type-footnote text-muted-foreground">{t("thread:history.localOnly")}</div>}
+          {!hits.length && !busy && <div className="px-4 py-8 text-center type-callout text-muted-foreground" data-history-empty>{t("thread:history.notFound", { q: q.trim() })}</div>}
           {byDay(hits, (m) => m.created ?? 0).map(([day, ms]) => <section key={day}><div className="px-4 pb-1 pt-3 type-label text-muted-foreground">{day}</div>
             {ms.map((m) => <Hit key={m.id} m={m} q={q.trim()} on={at === m.id} onClick={() => open(m.id!, m.created)} />)}</section>)}
         </> : <>
-          {byDay(topics, (t) => t.at).map(([day, ts]) => <section key={day}><div className="px-4 pb-1 pt-3 type-label text-muted-foreground">{day}</div>
-            {ts.map((t) => <TopicRow key={t.id} t={t} on={at === t.id} onClick={() => open(t.id, t.at)} />)}</section>)}
-          {!topics.length && <div className="px-4 py-8 text-center type-callout text-muted-foreground">还没有对话</div>}
+          {byDay(topics, (x) => x.at).map(([day, ts]) => <section key={day}><div className="px-4 pb-1 pt-3 type-label text-muted-foreground">{day}</div>
+            {ts.map((x) => <TopicRow key={x.id} t={x} on={at === x.id} onClick={() => open(x.id, x.at)} />)}</section>)}
+          {!topics.length && <div className="px-4 py-8 text-center type-callout text-muted-foreground">{t("thread:history.empty")}</div>}
         </>}
       </div>
       <div className="flex shrink-0 items-center gap-1 border-t border-sidebar-border px-2 py-1.5">
-        {!hits && (more ? <Button variant="ghost" size="sm" className="text-muted-foreground" disabled={loading} onClick={() => void loadOlder()} data-history-older>{loading && <Spinner />}加载更早</Button>
-          : ended && <span className="px-2 type-footnote text-muted-foreground" data-history-start>已到对话开头</span>)}
-        <Button variant="ghost" size="sm" className="ml-auto text-muted-foreground" onClick={openConversations} data-open-conversations><ListIcon />群聊和私聊</Button>
+        {!hits && (more ? <Button variant="ghost" size="sm" className="text-muted-foreground" disabled={loading} onClick={() => void loadOlder()} data-history-older>{loading && <Spinner />}{t("thread:history.older")}</Button>
+          : ended && <span className="px-2 type-footnote text-muted-foreground" data-history-start>{t("thread:history.start")}</span>)}
+        <Button variant="ghost" size="sm" className="ml-auto text-muted-foreground" onClick={openConversations} data-open-conversations><ListIcon />{t("thread:conv.list")}</Button>
       </div>
     </div>
   )
@@ -106,21 +110,22 @@ function Row({ on, onClick, children, test }: { on: boolean; onClick: () => void
 }
 
 function Hit({ m, q, on, onClick }: { m: Msg; q: string; on: boolean; onClick: () => void }) {
-  const s = snippet(m.t ?? "", q)
+  const s = snippet(m.t ?? "", q), t = useT()
   const text = s.at < 0 ? s.text : <>{s.text.slice(0, s.at)}<mark className="rounded-sm bg-attention/25 text-foreground">{s.text.slice(s.at, s.at + s.len)}</mark>{s.text.slice(s.at + s.len)}</>
   return (
     <Row on={on} onClick={onClick} test={{ "data-history-hit": m.id! }}>
-      <span className="flex min-w-0 items-baseline gap-2 type-footnote text-muted-foreground"><span className="font-medium text-foreground/85">{m.k === "me" ? "你" : st.bots.steve?.n ?? "Steve"}</span>{m.item && <span className="font-mono">{m.item}</span>}<span className="ml-auto shrink-0 tabular-nums">{m.created ? hhmm(m.created) : ""}</span></span>
+      <span className="flex min-w-0 items-baseline gap-2 type-footnote text-muted-foreground"><span className="font-medium text-foreground/85">{m.k === "me" ? t("thread:who.me") : st.bots.steve?.n ?? "Steve"}</span>{m.item && <span className="font-mono">{m.item}</span>}<span className="ml-auto shrink-0 tabular-nums">{m.created ? hm(m.created) : ""}</span></span>
       <span className="line-clamp-2 break-all type-callout text-foreground/90">{text}</span>
     </Row>
   )
 }
 
-function TopicRow({ t, on, onClick }: { t: Topic; on: boolean; onClick: () => void }) {
+function TopicRow({ t: topic, on, onClick }: { t: Topic; on: boolean; onClick: () => void }) {
+  const t = useT()
   return (
-    <Row on={on} onClick={onClick} test={{ "data-history-topic": t.id }}>
-      <span className="flex min-w-0 items-baseline gap-2"><span className="min-w-0 flex-1 truncate type-callout text-foreground">{t.title}</span><span className="shrink-0 type-footnote tabular-nums text-muted-foreground">{hhmm(t.at)}</span></span>
-      <span className="truncate type-footnote text-muted-foreground">{t.count} 条{t.items.length ? " · " + t.items.slice(0, 3).join(" ") : ""}</span>
+    <Row on={on} onClick={onClick} test={{ "data-history-topic": topic.id }}>
+      <span className="flex min-w-0 items-baseline gap-2"><span className="min-w-0 flex-1 truncate type-callout text-foreground">{topic.title}</span><span className="shrink-0 type-footnote tabular-nums text-muted-foreground">{hm(topic.at)}</span></span>
+      <span className="truncate type-footnote text-muted-foreground">{topic.items.length ? t("thread:topic.countItems", { count: topic.count, items: topic.items.slice(0, 3).join(" ") }) : t("thread:topic.count", { count: topic.count })}</span>
     </Row>
   )
 }

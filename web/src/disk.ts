@@ -1,4 +1,6 @@
 /** Settings · 数据 · 工作区与磁盘 (ST-45): the Hub's `/api/system/workspaces` report and what the page says about it. */
+/* a relative .ts import so node --test loads this file without a bundler */
+import { t } from "./i18n/index.ts"
 
 export type DiskPolicy = { floor: number; low: number; idle_ms: number }
 export type Pressure = "ok" | "low" | "floor"
@@ -26,7 +28,7 @@ export function bytes(n: number | null | undefined): string {
 
 /** What a worktree is doing, in the words of the list; the order is the list's order. */
 export type EntryState = "busy" | "in_use" | "open" | "closed" | "gone"
-export const STATE_LABEL: Record<EntryState, string> = { busy: "运行中", in_use: "有进程在用", open: "进行中", closed: "已结束", gone: "已回收" }
+export const stateLabel = (s: EntryState): string => t(`shell:disk.state.${s}`)
 export function entryState(e: DiskEntry): EntryState {
   if (!e.exists) return "gone"
   if (e.busy) return "busy"
@@ -45,19 +47,19 @@ export function diskRows(r: DiskReport) {
 
 /** One line on the disk against the thresholds. */
 export function pressureText(r: DiskReport): string {
-  if (r.free === null) return "读不到这块磁盘的剩余空间"
+  if (r.free === null) return t("shell:disk.noFree")
   const p = r.policy
-  if (r.pressure === "floor") return `只剩 ${bytes(r.free)}，低于下限 ${bytes(p.floor)}：暂停新建工作区，回收闲置缓存`
-  if (r.pressure === "low") return `剩余 ${bytes(r.free)}，低于 ${bytes(p.low)}：回收闲置 ${Math.round(p.idle_ms / 3_600_000)} 小时以上事项的缓存`
-  return `剩余 ${bytes(r.free)}，充足；低于 ${bytes(p.low)} 回收闲置缓存，低于 ${bytes(p.floor)} 暂停新建工作区`
+  if (r.pressure === "floor") return t("shell:disk.floor", { free: bytes(r.free), floor: bytes(p.floor) })
+  if (r.pressure === "low") return t("shell:disk.low", { free: bytes(r.free), low: bytes(p.low), count: Math.round(p.idle_ms / 3_600_000) })
+  return t("shell:disk.ok", { free: bytes(r.free), low: bytes(p.low), floor: bytes(p.floor) })
 }
 
 /** The toast after "立即回收". */
 export function reclaimText(r: Reclaimed): string {
-  if (r.skipped) return "已有一次回收在进行，稍后再看"
+  if (r.skipped) return t("shell:disk.skipped")
   const freed = r.freed.reduce((s, f) => s + f.bytes, 0)
-  const parts = [freed > 0 ? `释放了 ${bytes(freed)}` : "没有可回收的缓存"]
-  if (r.removed.length) parts.push(`删除了 ${r.removed.length} 个工作区（分支都保留）`)
-  if (r.kept.length) parts.push(`${r.kept.length} 个按规则保留`)
-  return parts.join("，")
+  const parts = [freed > 0 ? t("shell:disk.freed", { bytes: bytes(freed) }) : t("shell:disk.nothingFreed")]
+  if (r.removed.length) parts.push(t("shell:disk.removed", { count: r.removed.length }))
+  if (r.kept.length) parts.push(t("shell:disk.kept", { count: r.kept.length }))
+  return parts.join(t("shell:disk.sep"))
 }

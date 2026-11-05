@@ -6,6 +6,8 @@ import type { ChannelAttachment } from "@/api/channel-content"
 import { modReq, qs, isNotWired } from "@/api"
 import { accountsApi, type RAccount, type RConnection, type RDevice, type RDeviceStatus } from "@/api/accounts"
 import { integrationsApi, providerByAdapter } from "@/api/integrations"
+import { lazy } from "@/api/accounts"
+import { t } from "@/i18n"
 
 const e = encodeURIComponent
 const get = <T>(p: string) => modReq<T>("GET", p)
@@ -163,27 +165,35 @@ export const channelsApi = {
 }
 
 /* ───────── wording the Hub leaves to the web ───────── */
-export const LEVEL: Record<Level, [string, string]> = {
-  public: ["公开", "原文和细节都能说"], conclusion: ["可转述结论", "只说结论，不带来源、人名、原话、数字"],
-  reasoning: ["仅用于推理", "能用来推理，回复里不出现可辨认的内容"], never: ["不可使用", "不检索，不使用"],
-}
-export const OUT_LABEL: Record<BasisEntry["out"], [string, string]> = { verbatim: ["原样使用", "done"], conclusion: ["改写为结论", "prop"], reasoning: ["仅用于推理", "idle"], blocked: ["已拦下", "wait"] }
-export const SPACE_KIND: Record<string, string> = { group: "群", topic_group: "话题群", dm: "私聊", self_dm: "和自己的对话", channel: "话题群", thread: "话题", mail_thread: "邮件往来", meeting: "会议" }
+export const LEVEL: Record<Level, [string, string]> = lazy({
+  public: () => [t("api:level.public"), t("api:level.publicSub")], conclusion: () => [t("api:level.conclusion"), t("api:level.conclusionSub")],
+  reasoning: () => [t("api:level.reasoning"), t("api:level.reasoningSub")], never: () => [t("api:level.never"), t("api:level.neverSub")],
+})
+export const OUT_LABEL: Record<BasisEntry["out"], [string, string]> = lazy({
+  verbatim: () => [t("api:out.verbatim"), "done"], conclusion: () => [t("api:out.conclusion"), "prop"], reasoning: () => [t("api:out.reasoning"), "idle"], blocked: () => [t("api:out.blocked"), "wait"],
+})
+export const SPACE_KIND: Record<string, string> = lazy({
+  group: () => t("api:spaceKind.group"), topic_group: () => t("api:spaceKind.topicGroup"), dm: () => t("api:spaceKind.dm"), self_dm: () => t("api:spaceKind.selfDm"),
+  channel: () => t("api:spaceKind.topicGroup"), thread: () => t("api:spaceKind.thread"), mail_thread: () => t("api:spaceKind.mailThread"), meeting: () => t("api:spaceKind.meeting"),
+})
 /** 实时 · 不提醒 · 屏蔽, with what each means */
-export const ATTENTION: Record<Attention, [string, string]> = {
-  realtime: ["实时", "照常处理：按 Steve 的角色回答、起草或转给你"],
-  quiet: ["不提醒", "只记录、可搜索；不进待处理、不起草、不提醒你"],
-  blocked: ["屏蔽", "不处理，也不保存新消息；列表里默认隐藏"],
-}
-export const ROLE: Record<Role, [string, string]> = {
-  answer: ["回答", "按规则直接回复"], draft: ["起草", "起草回复，等你批准再发"], record: ["只记录", "不发言，只记录；转给你的仍进待处理"], observe: ["不参与", "没有能发言的身份"],
-}
+export const ATTENTION: Record<Attention, [string, string]> = lazy({
+  realtime: () => [t("api:attention.realtime"), t("api:attention.realtimeSub")],
+  quiet: () => [t("api:attention.quiet"), t("api:attention.quietSub")],
+  blocked: () => [t("api:attention.blocked"), t("api:attention.blockedSub")],
+})
+export const ROLE: Record<Role, [string, string]> = lazy({
+  answer: () => [t("api:role.answer"), t("api:role.answerSub")], draft: () => [t("api:role.draft"), t("api:role.draftSub")],
+  record: () => [t("api:role.record"), t("api:role.recordSub")], observe: () => [t("api:role.observe"), t("api:role.observeSub")],
+})
 export const attentionOf = (s: Pick<Space, "attention">): Attention => s.attention ?? "realtime"
 export const isDm = (s: Pick<Space, "kind">) => s.kind === "dm" || s.kind === "self_dm"
 /** what a list or header calls the space: a DM after the other party, your chat with yourself 你自己 */
-export const spaceTitle = (s: Pick<Space, "title" | "name" | "kind" | "self_chat">) => s.title || (s.self_chat || s.kind === "self_dm" ? "你自己" : s.name || (isDm(s) ? "私聊" : "群"))
+export const spaceTitle = (s: Pick<Space, "title" | "name" | "kind" | "self_chat">) => s.title || (s.self_chat || s.kind === "self_dm" ? t("api:spaceTitle.self") : s.name || (isDm(s) ? t("api:spaceTitle.dm") : t("api:spaceTitle.group")))
 export const TRIGGER_EVERYWHERE = "*", TRIGGER_ALL_DMS = "dm:*"
-export const MSG_STATUS: Partial<Record<ChanMessage["status"], string>> = { draft: "草稿，等你批准", pending: "发送中", failed: "没发出去", unknown: "可能已发出，正在核对", recalled: "已撤回", blocked: "已拦下" }
+export const MSG_STATUS: Partial<Record<ChanMessage["status"], string>> = lazy({
+  draft: () => t("api:msgStatus.draft"), pending: () => t("api:msgStatus.pending"), failed: () => t("api:msgStatus.failed"), unknown: () => t("api:msgStatus.unknown"), recalled: () => t("api:msgStatus.recalled"), blocked: () => t("api:msgStatus.blocked"),
+})
 
 /* ───────── what an outbound message answers (its approval card) ───────── */
 export type ROutContext = {

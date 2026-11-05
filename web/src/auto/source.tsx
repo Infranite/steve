@@ -11,9 +11,10 @@ import { Unwired } from "@/unwired"
 import { flowApi, useLoad, errText, type ScopeMode, type SourcePatch } from "@/api/flow"
 import { Ico, Pick, Loading, Failed, botOptions, mainBot } from "@/auto/common"
 import { NewRuleDialog } from "@/auto/new-rule"
+import { t as tr, useT } from "@/i18n"
 
-const BACK: [string, string] = ["#/auto/sources", "自动化"]
-const MODES: { v: ScopeMode; l: string }[] = [{ v: "receive", l: "接收" }, { v: "record", l: "只记录" }, { v: "ignore", l: "不接收" }]
+const back = (): [string, string] => ["#/auto/sources", tr("auto:title")]
+const modes = (): { v: ScopeMode; l: string }[] => [{ v: "receive", l: tr("auto:source.modeReceive") }, { v: "record", l: tr("auto:source.modeRecord") }, { v: "ignore", l: tr("auto:source.modeIgnore") }]
 
 export function SourceView({ adapter }: { adapter: string }) {
   const L = useLoad(() => flowApi.sources(), [], ["signal"])
@@ -21,57 +22,58 @@ export function SourceView({ adapter }: { adapter: string }) {
   const s = L.data?.find((x) => x.adapter === adapter)
   const recent = useLoad(() => (s ? flowApi.signals({ range: "7d", source: s.source }) : Promise.resolve(null)), [s?.source], ["signal"])
   const [busy, setBusy] = useState(false), [newRule, setNewRule] = useState(false)
+  const t = useT(), BACK = back()
   if (L.unwired) return <Unwired id="auto" />
-  if (L.error && !L.data) return <Failed title="事件源" back={BACK} msg={errText(L.error)} retry={() => void L.reload()} />
-  if (!L.data) return <Loading title="事件源" back={BACK} />
+  if (L.error && !L.data) return <Failed title={t("auto:source.page")} back={BACK} msg={errText(L.error)} retry={() => void L.reload()} />
+  if (!L.data) return <Loading title={t("auto:source.page")} back={BACK} />
   if (adapter === "im" || s?.source === "im") return (
-    <Page title="IM" back={BACK}><Empty title="IM 已经移到“渠道”" sub="各个渠道的账号、群、身份和响应规则都在渠道里管理。" /><div className="flex justify-center"><Button onClick={() => go("#/channels")}>去渠道</Button></div></Page>
+    <Page title="IM" back={BACK}><Empty title={t("auto:source.imMoved")} sub={t("auto:source.imMovedSub")} /><div className="flex justify-center"><Button onClick={() => go("#/channels")}>{t("auto:source.toChannels")}</Button></div></Page>
   )
-  if (!s) return <Page title="事件源" back={BACK}><Empty title="没有这个事件源" sub="可能是它的插件已经停用。" /></Page>
+  if (!s) return <Page title={t("auto:source.page")} back={BACK}><Empty title={t("auto:source.notFound")} sub={t("auto:source.notFoundSub")} /></Page>
   const patch = async (p: SourcePatch, ok?: string) => {
     setBusy(true)
     try { const v = await flowApi.patchSource(s.adapter, p); L.set(L.data!.map((x) => (x.adapter === v.adapter ? v : x))); if (ok) toast(ok) } catch (e) { toast(errText(e)) } finally { setBusy(false) }
   }
-  const refresh = async () => { setBusy(true); try { const v = await flowApi.refreshScopes(s.adapter); L.set(L.data!.map((x) => (x.adapter === v.adapter ? v : x))); toast("已刷新") } catch (e) { toast(errText(e)) } finally { setBusy(false) } }
+  const refresh = async () => { setBusy(true); try { const v = await flowApi.refreshScopes(s.adapter); L.set(L.data!.map((x) => (x.adapter === v.adapter ? v : x))); toast(t("auto:source.refreshed")) } catch (e) { toast(errText(e)) } finally { setBusy(false) } }
   const mine = (flows.data ?? []).filter((f) => f.trigger?.source === s.source)
   const triage = s.triage_bot ?? mainBot()
   const connName = (id: string) => s.connections.find((c) => c.id === id)?.name ?? ""
   return (
-    <Page title={s.name} back={BACK} max={680} sub={s.paused ? "已暂停：期间的事件不接收，恢复后不补收" : `${s.connections.length} 个账号 · 收到的事件按流程处理`}
-      actions={<><span className="hidden type-footnote text-muted-foreground sm:inline">{s.paused ? "已暂停" : "接收中"}</span>
-        <Switch checked={!s.paused} disabled={busy || !s.connections.length} onCheckedChange={(v) => void patch({ paused: !v }, v ? "已恢复接收" : "已暂停，期间的事件不接收，恢复后不补收")} aria-label="接收事件" data-source-on /></>}>
+    <Page title={s.name} back={BACK} max={680} sub={s.paused ? t("auto:source.pausedSub") : t("auto:source.sub", { count: s.connections.length })}
+      actions={<><span className="hidden type-footnote text-muted-foreground sm:inline">{s.paused ? t("auto:sources.paused") : t("auto:source.receiving")}</span>
+        <Switch checked={!s.paused} disabled={busy || !s.connections.length} onCheckedChange={(v) => void patch({ paused: !v }, v ? t("auto:source.resumed") : t("auto:source.pausedToast"))} aria-label={t("auto:source.receiveAria")} data-source-on /></>}>
       {newRule && <NewRuleDialog source={s.source} onClose={() => setNewRule(false)} />}
       <div className="flex flex-col gap-8">
-        <section><SectionLabel>先交给谁判断</SectionLabel>
-          <Group><Row icon={<BotAvatar k={triage} size={28} />} title={botName(triage)} sub="收到事件后，先由它按流程判断；没有流程的事件只记录">
-            <Pick label="先交给谁判断" testId="src-bot" value={s.triage_bot ?? "_"} disabled={busy || !s.connections.length} options={[{ v: "_", l: "主 Bot（" + botName(mainBot()) + "）" }, ...botOptions()]} onChange={(v) => void patch({ triage_bot: v === "_" ? null : v }, "已改为交给" + botName(v === "_" ? mainBot() : v))} /></Row></Group>
+        <section><SectionLabel>{t("auto:source.triage")}</SectionLabel>
+          <Group><Row icon={<BotAvatar k={triage} size={28} />} title={botName(triage)} sub={t("auto:source.triageSub")}>
+            <Pick label={t("auto:source.triage")} testId="src-bot" value={s.triage_bot ?? "_"} disabled={busy || !s.connections.length} options={[{ v: "_", l: t("auto:source.mainBot", { name: botName(mainBot()) }) }, ...botOptions()]} onChange={(v) => void patch({ triage_bot: v === "_" ? null : v }, t("auto:source.triageSet", { name: botName(v === "_" ? mainBot() : v) }))} /></Row></Group>
         </section>
-        <section><SectionLabel>账号</SectionLabel>
+        <section><SectionLabel>{t("auto:source.accounts")}</SectionLabel>
           <Group>
-            {s.connections.map((c) => <Row key={c.id} title={c.name} sub={c.last_sync ? "同步于 " + tm(c.last_sync) : "还没有同步"} data-source-conn={c.id}>
-              <span className="inline-flex items-center gap-1.5 type-footnote text-muted-foreground"><StatusDot s={c.status === "ok" ? "done" : "wait"} />{c.status === "ok" ? "正常" : "要重新授权"}</span></Row>)}
-            <Row icon={<Ico I={PlusIcon} />} title={<span className="text-blue">添加账号</span>} sub="在账号里授权，授权后自动出现在这里" onClick={() => go("#/accounts")} data-add-account />
+            {s.connections.map((c) => <Row key={c.id} title={c.name} sub={c.last_sync ? t("auto:source.syncedAt", { time: tm(c.last_sync) }) : t("auto:source.notSynced")} data-source-conn={c.id}>
+              <span className="inline-flex items-center gap-1.5 type-footnote text-muted-foreground"><StatusDot s={c.status === "ok" ? "done" : "wait"} />{c.status === "ok" ? t("auto:ok") : t("auto:source.reauth")}</span></Row>)}
+            <Row icon={<Ico I={PlusIcon} />} title={<span className="text-blue">{t("auto:source.addAccount")}</span>} sub={t("auto:source.addAccountSub")} onClick={() => go("#/accounts")} data-add-account />
           </Group>
         </section>
-        {s.connections.length > 0 && <section><SectionLabel right={<Button size="xs" variant="ghost" className="text-muted-foreground" disabled={busy} onClick={() => void refresh()}><RefreshCwIcon />刷新</Button>}>接收范围</SectionLabel>
+        {s.connections.length > 0 && <section><SectionLabel right={<Button size="xs" variant="ghost" className="text-muted-foreground" disabled={busy} onClick={() => void refresh()}><RefreshCwIcon />{t("common:action.refresh")}</Button>}>{t("auto:source.scopes")}</SectionLabel>
           {s.scopes.length ? <Group>{s.scopes.map((x) => (
-            <Row key={x.connection_id + x.ext_id} title={x.name || x.ext_id} sub={[s.connections.length > 1 ? connName(x.connection_id) : "", x.mode === "record" ? "进信号页，不触发流程" : x.mode === "ignore" ? "不接收" : ""].filter(Boolean).join(" · ") || undefined} data-scope={x.ext_id}>
-              <Pick label={"接收范围：" + (x.name || x.ext_id)} testId={x.ext_id} value={x.mode} options={MODES} disabled={busy} onChange={(v) => void patch({ scopes: [{ connection_id: x.connection_id, ext_id: x.ext_id, mode: v }] })} /></Row>))}</Group>
-            : <div className="rounded-xl border border-dashed px-4 py-6 text-center type-callout text-muted-foreground">这个事件源没有可选的范围，全部接收</div>}
+            <Row key={x.connection_id + x.ext_id} title={x.name || x.ext_id} sub={[s.connections.length > 1 ? connName(x.connection_id) : "", x.mode === "record" ? t("auto:source.scopeRecord") : x.mode === "ignore" ? t("auto:source.modeIgnore") : ""].filter(Boolean).join(" · ") || undefined} data-scope={x.ext_id}>
+              <Pick label={t("auto:source.scopeAria", { name: x.name || x.ext_id })} testId={x.ext_id} value={x.mode} options={modes()} disabled={busy} onChange={(v) => void patch({ scopes: [{ connection_id: x.connection_id, ext_id: x.ext_id, mode: v }] })} /></Row>))}</Group>
+            : <div className="rounded-xl border border-dashed px-4 py-6 text-center type-callout text-muted-foreground">{t("auto:source.noScopes")}</div>}
         </section>}
-        <section><SectionLabel>产生的事件</SectionLabel>
-          <Group>{s.types.map((t) => <Row key={t.key} title={t.label} sub={`${t.desc ? t.desc + " · " : ""}24 小时 ${t.n24} 条 · ${t.flows ? t.flows + " 条流程在用" : "没有流程，只记录"}`} data-event-type={t.key}>
-            {t.param !== null && <ParamInput v={t.param} label={t.label + " 的参数"} disabled={busy || !s.connections.length} onSave={(p) => void patch({ types: { [t.key]: { param: p } } }, "已保存")} />}
-            <Switch checked={t.on} disabled={busy || !s.connections.length} onCheckedChange={(v) => void patch({ types: { [t.key]: { on: v } } }, v ? `已开始接收「${t.label}」` : `不再接收「${t.label}」`)} aria-label={t.label} data-event-toggle={t.key} /></Row>)}</Group>
-          {!s.connections.length && <div className="mt-2 px-1 type-footnote text-muted-foreground">先添加账号，才能改接收设置。</div>}
+        <section><SectionLabel>{t("auto:source.types")}</SectionLabel>
+          <Group>{s.types.map((y) => <Row key={y.key} title={y.label} sub={[y.desc, t("auto:sources.events24", { count: y.n24 }), y.flows ? t("auto:source.flowsUsing", { count: y.flows }) : t("auto:source.noFlowsRecord")].filter(Boolean).join(" · ")} data-event-type={y.key}>
+            {y.param !== null && <ParamInput v={y.param} label={t("auto:source.param", { label: y.label })} disabled={busy || !s.connections.length} onSave={(p) => void patch({ types: { [y.key]: { param: p } } }, t("common:state.saved"))} />}
+            <Switch checked={y.on} disabled={busy || !s.connections.length} onCheckedChange={(v) => void patch({ types: { [y.key]: { on: v } } }, v ? t("auto:source.typeOn", { label: y.label }) : t("auto:source.typeOff", { label: y.label }))} aria-label={y.label} data-event-toggle={y.key} /></Row>)}</Group>
+          {!s.connections.length && <div className="mt-2 px-1 type-footnote text-muted-foreground">{t("auto:source.addFirst")}</div>}
         </section>
-        <section><SectionLabel right={<Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => setNewRule(true)}><PlusIcon />新建流程</Button>}>收到之后怎么处理</SectionLabel>
-          {mine.length ? <Group>{mine.map((f) => <Row key={f.id} icon={<Ico I={WorkflowIcon} />} title={f.name} sub={f.description || f.origin_label} onClick={() => go("#/auto/rule/" + f.id)}><span className="type-footnote text-muted-foreground">{f.enabled ? "启用" : "停用"}</span><ChevronRightIcon className="size-4 text-tertiary" aria-hidden /></Row>)}</Group>
-            : <div className="rounded-xl border border-dashed px-4 py-6 text-center type-callout text-muted-foreground">还没有流程，事件只记录在信号页</div>}
+        <section><SectionLabel right={<Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => setNewRule(true)}><PlusIcon />{t("auto:newFlow")}</Button>}>{t("auto:source.handling")}</SectionLabel>
+          {mine.length ? <Group>{mine.map((f) => <Row key={f.id} icon={<Ico I={WorkflowIcon} />} title={f.name} sub={f.description || f.origin_label} onClick={() => go("#/auto/rule/" + f.id)}><span className="type-footnote text-muted-foreground">{f.enabled ? t("auto:source.on") : t("auto:source.off")}</span><ChevronRightIcon className="size-4 text-tertiary" aria-hidden /></Row>)}</Group>
+            : <div className="rounded-xl border border-dashed px-4 py-6 text-center type-callout text-muted-foreground">{t("auto:source.noFlows")}</div>}
         </section>
-        <section><SectionLabel right={<a href="#/signals" className="font-normal hover:text-foreground">看全部信号</a>}>最近事件</SectionLabel>
-          {recent.data?.items.length ? <Group>{recent.data.items.slice(0, 6).map((e) => <Row key={e.id} title={e.summary} sub={<>{e.outcome_label || "处理中"}{e.flow && <> · 流程「{e.flow.name}」</>}</>} onClick={() => go("#/signals?e=" + e.id)}><span className="type-footnote tabular-nums text-muted-foreground">{tm(e.received)}</span></Row>)}</Group>
-            : <div className="px-1 type-callout text-muted-foreground">{recent.data ? "7 天里没有事件" : "载入中…"}</div>}
+        <section><SectionLabel right={<a href="#/signals" className="font-normal hover:text-foreground">{t("auto:source.allSignals")}</a>}>{t("auto:source.recent")}</SectionLabel>
+          {recent.data?.items.length ? <Group>{recent.data.items.slice(0, 6).map((e) => <Row key={e.id} title={e.summary} sub={<>{e.outcome_label || t("auto:source.processing")}{e.flow && <> · {t("auto:flowRef", { name: e.flow.name })}</>}</>} onClick={() => go("#/signals?e=" + e.id)}><span className="type-footnote tabular-nums text-muted-foreground">{tm(e.received)}</span></Row>)}</Group>
+            : <div className="px-1 type-callout text-muted-foreground">{recent.data ? t("auto:source.noRecent") : t("auto:loading")}</div>}
         </section>
       </div>
     </Page>

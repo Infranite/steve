@@ -1,3 +1,5 @@
+import { t } from "../i18n/index.ts"
+
 /** Public registration view only: never store application secrets or device codes in the browser. */
 export type RegistrationView = { state: string; error?: string; expires_at: number }
 
@@ -7,14 +9,14 @@ export function registrationPending(r: RegistrationView): boolean {
 
 export function registrationLabel(r: RegistrationView): string {
   switch (r.state) {
-    case "pending": return "等待你在官方页面确认"
-    case "credentials_saved": return r.error ? "凭据已保存，连接检查未完成" : "凭据已安全保存，正在检查连接"
-    case "verifying": return "正在检查连接"
-    case "succeeded": return "应用已接入"
-    case "denied": return "你没有同意接入"
-    case "expired": return "确认链接已过期"
-    case "cancelled": return "已取消本次接入"
-    default: return "接入未完成"
+    case "pending": return t("integrations:reg.state.pending")
+    case "credentials_saved": return r.error ? t("integrations:reg.state.savedError") : t("integrations:reg.state.saved")
+    case "verifying": return t("integrations:reg.state.verifying")
+    case "succeeded": return t("integrations:reg.state.succeeded")
+    case "denied": return t("integrations:reg.state.denied")
+    case "expired": return t("integrations:reg.state.expired")
+    case "cancelled": return t("integrations:reg.state.cancelled")
+    default: return t("integrations:reg.state.other")
   }
 }
 

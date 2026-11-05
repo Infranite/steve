@@ -6,11 +6,12 @@ import { ReactFlow, Controls, Handle, Position, MarkerType, type Edge, type Node
 import { FileTextIcon, FolderIcon, TerminalIcon } from "lucide-react"
 import { gBuild, gComps, gNear, gProjects, ST, SS, botName, type GNode } from "@/store"
 import { StatusDot } from "@/ui"
+import { t, useT } from "@/i18n"
 
 const W = 232, H = 64
 
 function NodeCard({ data }: NodeProps<Node<{ n: GNode; focus: boolean }>>) {
-  const { n, focus } = data
+  const { n, focus } = data, t = useT()
   const label = n.k === "item" ? ST[n.st]?.[0] : SS[n.st]?.[0]
   const Icon = n.k === "item" ? FileTextIcon : n.k === "proj" ? FolderIcon : TerminalIcon
   return (
@@ -22,7 +23,7 @@ function NodeCard({ data }: NodeProps<Node<{ n: GNode; focus: boolean }>>) {
       <span className="min-w-0 flex-1">
         <span className="block truncate text-[13px] font-medium text-foreground">{n.k === "item" && <span className="mr-1.5 font-mono text-[11.5px] font-normal text-muted-foreground">{n.id}</span>}{n.title}</span>
         <span className="mt-0.5 flex items-center gap-1.5 truncate text-[12px] text-muted-foreground">
-          {n.k === "proj" ? <>项目 · {n.n} 个事项</> : <><StatusDot s={n.st} />{n.k === "item" ? "事项" : `会话${n.n ? " #" + n.n : ""}`} · {label}{n.b ? " · " + botName(n.b) : ""}</>}
+          {n.k === "proj" ? <>{t("shell:graph.projectItems", { count: n.n })}</> : <><StatusDot s={n.st} />{n.k === "item" ? t("shell:graph.item") : n.n ? t("shell:graph.sessionN", { n: n.n }) : t("shell:graph.session")} · {label}{n.b ? " · " + botName(n.b) : ""}</>}
         </span>
       </span>
       <Handle type="source" position={Position.Bottom} className="!size-1.5 !min-h-0 !min-w-0 !border-0 !bg-border" />
@@ -30,6 +31,8 @@ function NodeCard({ data }: NodeProps<Node<{ n: GNode; focus: boolean }>>) {
   )
 }
 const nodeTypes = { card: NodeCard }
+/* the store's edge kinds ("派生", "交接", "依赖", "项目"; "" is a run) and the words shown for them */
+const edgeLabel = (l: string) => l.startsWith("派生") ? t("shell:graph.fork") : l === "交接" ? t("shell:graph.handoff") : l === "依赖" ? t("shell:graph.dep") : l === "项目" ? t("shell:graph.project") : l
 
 function layout(ids: string[], E: [string, string, string][], N: Record<string, GNode>, focus?: string | null) {
   const g = new dagre.graphlib.Graph(); g.setGraph({ rankdir: "TB", nodesep: 28, ranksep: 56, marginx: 16, marginy: 16 }); g.setDefaultEdgeLabel(() => ({}))
@@ -42,7 +45,7 @@ function layout(ids: string[], E: [string, string, string][], N: Record<string, 
   const edges: Edge[] = es.map(([a, b, l]) => {
     const fork = l.startsWith("派生"), ho = l === "交接", dep = l === "依赖", proj = l === "项目"
     const color = fork ? "var(--blue)" : proj ? "var(--border)" : "var(--tertiary)"
-    return { id: a + ">" + b, source: a, target: b, type: "smoothstep", label: (!proj && l) || undefined, animated: false,
+    return { id: a + ">" + b, source: a, target: b, type: "smoothstep", label: (!proj && l && edgeLabel(l)) || undefined, animated: false,
       style: { stroke: dep ? "var(--foreground)" : color, strokeDasharray: ho ? "5 4" : dep ? "1.5 3.5" : undefined, strokeLinecap: "round" as const, strokeWidth: dep ? 1.75 : undefined },
       markerEnd: { type: MarkerType.ArrowClosed, width: 14, height: 14, color: dep ? "var(--foreground)" : color },
       labelStyle: { fontSize: 11, fill: fork ? "var(--blue)" : "var(--muted-foreground)", fontWeight: 500 },
@@ -76,12 +79,13 @@ export function RelationGraph({ focus, scope = "comp", height = 420, hideSimple 
 }
 
 export function GraphLegend() {
+  const t = useT()
   return (
     <div className="flex flex-wrap items-center gap-x-4 gap-y-1 type-footnote text-muted-foreground">
-      {[["项目", "var(--border)", ""], ["执行", "var(--tertiary)", ""], ["交接", "var(--tertiary)", "4 3"], ["派生", "var(--blue)", ""], ["依赖", "var(--foreground)", "1.5 3"]].map(([l, c, d]) => (
+      {[[t("shell:graph.project"), "var(--border)", ""], [t("shell:graph.run"), "var(--tertiary)", ""], [t("shell:graph.handoff"), "var(--tertiary)", "4 3"], [t("shell:graph.fork"), "var(--blue)", ""], [t("shell:graph.dep"), "var(--foreground)", "1.5 3"]].map(([l, c, d]) => (
         <span key={l} className="inline-flex items-center gap-1.5"><svg width="20" height="6"><line x1="0" y1="3" x2="20" y2="3" stroke={c} strokeWidth="1.5" strokeDasharray={d} /></svg>{l}</span>
       ))}
-      <span>· 点节点进入，可拖动和缩放</span>
+      <span>{t("shell:graph.hint")}</span>
     </div>
   )
 }

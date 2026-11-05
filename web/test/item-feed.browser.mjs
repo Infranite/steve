@@ -14,7 +14,7 @@ const expected = [
 ]
 try {
   for (const [width, dark] of [[1066, false], [1066, true], [390, false]]) {
-    const page = await browser.newPage({ viewport: { width, height: 1100 } })
+    const page = await browser.newPage({ locale: "zh-CN", viewport: { width, height: 1100 } })
     page.on("pageerror", e => errors.push(e.message))
     await page.route("**/*", route => {
       const u = new URL(route.request().url())

@@ -7,6 +7,7 @@ import { BanIcon, BellOffIcon, CheckIcon, EllipsisIcon, InfoIcon, TriangleAlertI
 import { DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { ContactAvatar } from "@/people/avatar"
 import { ATTENTION, SPACE_KIND, attentionOf, isDm, spaceTitle, type Attention, type Conflict, type Space } from "@/api/channels"
+import { t, useT } from "@/i18n"
 
 /** group: a group icon; DM: the other party's initials; your chat with yourself: a person */
 export function SpaceAvatar({ s, size = 32 }: { s: Space; size?: number }) {
@@ -23,8 +24,8 @@ export function Name({ children, className }: { children: string; className?: st
 /** “群 · 12 人” / “私聊” / “和自己的对话” */
 export function kindLine(s: Space) {
   if (s.self_chat || s.kind === "self_dm") return SPACE_KIND.self_dm
-  if (isDm(s)) return s.counterpart?.is_bot ? "和机器人的私聊" : SPACE_KIND.dm
-  return [SPACE_KIND[s.kind] ?? "群", s.member_count ? `${s.member_count} 人` : ""].filter(Boolean).join(" · ")
+  if (isDm(s)) return s.counterpart?.is_bot ? t("channels:bits.botDm") : SPACE_KIND.dm
+  return [SPACE_KIND[s.kind] ?? t("channels:bits.group"), s.member_count ? t("channels:bits.members", { count: s.member_count }) : ""].filter(Boolean).join(" · ")
 }
 
 const ATT_ICON: Record<Attention, ReactNode> = { realtime: null, quiet: <BellOffIcon className="size-3.5" aria-hidden />, blocked: <BanIcon className="size-3.5" aria-hidden /> }
@@ -36,13 +37,14 @@ export function AttentionTag({ a }: { a: Attention }) {
 
 /** the quick action on a list row: hover on desktop, always there on touch */
 export function AttentionMenu({ s, onPick, disabled }: { s: Space; onPick: (a: Attention) => void; disabled?: boolean }) {
+  const t = useT()
   const cur = attentionOf(s)
   return (
     <DropdownMenu>
-      <DropdownMenuTrigger disabled={disabled} render={<button type="button" aria-label={`${spaceTitle(s)}：关注程度`} className="flex size-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground opacity-0 transition-opacity hover:bg-accent hover:text-foreground focus-visible:opacity-100 group-hover/space:opacity-100 data-[popup-open]:opacity-100 [@media(hover:none)]:opacity-100" data-space-menu={s.id} />}>
+      <DropdownMenuTrigger disabled={disabled} render={<button type="button" aria-label={t("channels:bits.attentionAria", { name: spaceTitle(s) })} className="flex size-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground opacity-0 transition-opacity hover:bg-accent hover:text-foreground focus-visible:opacity-100 group-hover/space:opacity-100 data-[popup-open]:opacity-100 [@media(hover:none)]:opacity-100" data-space-menu={s.id} />}>
         <EllipsisIcon className="size-4" /></DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-60">
-        <DropdownMenuGroup><DropdownMenuLabel className="type-footnote text-muted-foreground">要不要打扰你</DropdownMenuLabel>
+        <DropdownMenuGroup><DropdownMenuLabel className="type-footnote text-muted-foreground">{t("channels:bits.disturb")}</DropdownMenuLabel>
         {(Object.keys(ATTENTION) as Attention[]).map((a) => (
           <DropdownMenuItem key={a} onClick={() => a !== cur && onPick(a)} data-attention-pick={a} className="items-start">
             <span className="mt-0.5 size-4 shrink-0">{a === cur && <CheckIcon className="size-4" />}</span>
@@ -50,7 +52,7 @@ export function AttentionMenu({ s, onPick, disabled }: { s: Space; onPick: (a: A
           </DropdownMenuItem>))}</DropdownMenuGroup>
         <DropdownMenuSeparator />
         <DropdownMenuItem onClick={() => { location.hash = "#/channels/space/" + s.id }}>
-          <span className="size-4 shrink-0" />打开设置…</DropdownMenuItem>
+          <span className="size-4 shrink-0" />{t("channels:bits.openSettings")}</DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
   )

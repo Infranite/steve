@@ -7,6 +7,7 @@
 import { useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react"
 import { cn } from "cn"
 import type { Series } from "@/api/stats"
+import { t, useT } from "@/i18n"
 import { bucketName, bucketTick, hhmm, hourSpan } from "@/stats/format"
 
 /** identity colours, in order (index.css `--series-*`, validated light and dark) */
@@ -51,7 +52,7 @@ export function ChartHead({ title, meta, legend, right, k }: { title: ReactNode;
 export function fold(d: Series, max = 5): Series {
   if (d.series.length <= max) return d
   const keep = d.series.slice(0, max - 1), rest = d.series.slice(max - 1)
-  const other = { key: "other", label: `其他 ${rest.length} 项`, values: d.buckets.map((_, i) => rest.reduce<number | null>((s, l) => (l.values[i] == null ? s : (s ?? 0) + l.values[i]!), null)) }
+  const other = { key: "other", label: t("stats:chart.otherN", { count: rest.length }), values: d.buckets.map((_, i) => rest.reduce<number | null>((s, l) => (l.values[i] == null ? s : (s ?? 0) + l.values[i]!), null)) }
   return { ...d, series: [...keep, other] }
 }
 
@@ -82,6 +83,7 @@ export function Chart({ data, kind, fmt, picked, onPick, label, colors, height =
   /** a bucket as the axis writes it (days by default) */
   xFmt?: (bucket: string) => string
 }) {
+  const t = useT()
   const box = useRef<HTMLDivElement>(null)
   const [w, setW] = useState(640)
   const [hover, setHover] = useState<number | null>(null)
@@ -99,7 +101,7 @@ export function Chart({ data, kind, fmt, picked, onPick, label, colors, height =
   const tf = tipFmt ?? fmt
   const y = (v: number) => PAD.t + ih - (v / max) * ih
   const x = (i: number) => PAD.l + slot * i + slot / 2
-  const ticks = [0, 0.5, 1].map((t) => t * max)
+  const ticks = [0, 0.5, 1].map((k) => k * max)
   const hourly = data.bucket === "hour", cur = hourly ? data.current ?? -1 : -1
   /** an hour after the current one: not yet */
   const future = (i: number) => cur >= 0 && i > cur
@@ -127,14 +129,14 @@ export function Chart({ data, kind, fmt, picked, onPick, label, colors, height =
     <div role="status" className="pointer-events-none absolute top-1 z-10 min-w-36 max-w-60 rounded-lg border bg-popover px-3 py-2 text-popover-foreground shadow-md"
       style={{ left: Math.min(Math.max(0, x(at) + 12), Math.max(0, w - 200)) }} data-chart-tip>
       <div className="type-label text-muted-foreground">{bucketName(data.buckets[at])}</div>
-      {at === cur && <div className="mt-0.5 type-footnote text-tertiary" data-tip-current>未结束，截至 {hhmm(Date.now())}</div>}
-      {future(at) ? <div className="mt-1 type-footnote text-muted-foreground" data-tip-future>还没到这个小时</div> : lines.map((l, i) => (kind !== "band" || i === 0 || lines.length < 2) ? (
+      {at === cur && <div className="mt-0.5 type-footnote text-tertiary" data-tip-current>{t("stats:chart.openUntil", { time: hhmm(Date.now()) })}</div>}
+      {future(at) ? <div className="mt-1 type-footnote text-muted-foreground" data-tip-future>{t("stats:chart.notYet")}</div> : lines.map((l, i) => (kind !== "band" || i === 0 || lines.length < 2) ? (
         <div key={l.key} className="mt-1 flex items-center gap-2 type-footnote"><Swatch c={color(i)} line /><span className="min-w-0 flex-1 truncate text-muted-foreground">{l.label}</span><span className="font-medium tabular-nums text-foreground">{l.values[at] == null ? "—" : tf(l.values[at]!)}</span></div>
       ) : (
         <div key={l.key} className="mt-1 flex items-center gap-2 type-footnote"><Swatch c={STATE.band} /><span className="min-w-0 flex-1 truncate text-muted-foreground">{l.label}</span><span className="font-medium tabular-nums text-foreground">{l.values[at] == null ? "—" : tf(l.values[at]!)}</span></div>
       ))}
-      {kind === "stack" && lines.length > 1 && !future(at) && <div className="mt-1 flex justify-between border-t pt-1 type-footnote"><span className="text-muted-foreground">合计</span><span className="font-medium tabular-nums">{tf(stackTop[at])}</span></div>}
-      {onPick && !future(at) && <div className="mt-1 type-footnote text-tertiary">{data.buckets[at] === picked ? "点击取消" : hourly ? "点击看这个小时的明细" : "点击看这一天的明细"}</div>}
+      {kind === "stack" && lines.length > 1 && !future(at) && <div className="mt-1 flex justify-between border-t pt-1 type-footnote"><span className="text-muted-foreground">{t("stats:chart.total")}</span><span className="font-medium tabular-nums">{tf(stackTop[at])}</span></div>}
+      {onPick && !future(at) && <div className="mt-1 type-footnote text-tertiary">{data.buckets[at] === picked ? t("stats:chart.clickCancel") : hourly ? t("stats:chart.clickHour") : t("stats:chart.clickDay")}</div>}
     </div>
   )
   return (
@@ -146,12 +148,12 @@ export function Chart({ data, kind, fmt, picked, onPick, label, colors, height =
         onClick={() => { if (hover == null || !future(hover)) onPick?.(hover != null && data.buckets[hover] !== picked ? data.buckets[hover] : null) }}>
         {cur >= 0 && <g data-current={data.buckets[cur]}>
           <rect x={PAD.l + slot * cur} y={PAD.t} width={slot} height={ih} fill="var(--muted)" opacity={0.8} />
-          <text x={x(cur)} y={PAD.t - 3} textAnchor="middle" className="fill-tertiary text-[10px]">未结束</text>
+          <text x={x(cur)} y={PAD.t - 3} textAnchor="middle" className="fill-tertiary text-[10px]">{t("stats:chart.open")}</text>
         </g>}
-        {ticks.map((t) => (
-          <g key={t}>
-            <line x1={PAD.l} x2={w - PAD.r} y1={y(t)} y2={y(t)} stroke="var(--border)" strokeWidth={1} />
-            <text x={PAD.l - 8} y={y(t)} dy="0.32em" textAnchor="end" className="fill-muted-foreground text-[11px] tabular-nums">{fmt(t)}</text>
+        {ticks.map((v) => (
+          <g key={v}>
+            <line x1={PAD.l} x2={w - PAD.r} y1={y(v)} y2={y(v)} stroke="var(--border)" strokeWidth={1} />
+            <text x={PAD.l - 8} y={y(v)} dy="0.32em" textAnchor="end" className="fill-muted-foreground text-[11px] tabular-nums">{fmt(v)}</text>
           </g>
         ))}
         {data.buckets.map((d, i) => i % every === 0 && <text key={d} x={x(i)} y={height - 8} textAnchor="middle" className={cn("text-[11px] tabular-nums", d === picked || i === cur ? "fill-foreground font-medium" : future(i) ? "fill-tertiary" : "fill-muted-foreground")}>{xFmt(d)}</text>)}
@@ -204,17 +206,18 @@ export function Chart({ data, kind, fmt, picked, onPick, label, colors, height =
 
 /** the same numbers as a table (每个图可切“表格”) */
 export function ChartTable({ data, fmt, picked, onPick }: { data: Series; fmt: (v: number) => string; picked?: string | null; onPick?: (d: string | null) => void }) {
+  const t = useT()
   const hourly = data.bucket === "hour", cur = hourly ? data.current ?? -1 : -1
   return (
     <div className="max-h-80 overflow-auto" data-chart-table>
       <table className="w-full type-footnote tabular-nums">
-        <thead className="sticky top-0 bg-background"><tr className="text-muted-foreground"><th className="py-1.5 pr-3 text-left font-medium">{hourly ? "时段" : "日期"}</th>{data.series.map((l) => <th key={l.key} className="py-1.5 pl-3 text-right font-medium">{l.label}</th>)}</tr></thead>
+        <thead className="sticky top-0 bg-background"><tr className="text-muted-foreground"><th className="py-1.5 pr-3 text-left font-medium">{hourly ? t("stats:col.hourSpan") : t("stats:col.date")}</th>{data.series.map((l) => <th key={l.key} className="py-1.5 pl-3 text-right font-medium">{l.label}</th>)}</tr></thead>
         <tbody>{data.buckets.map((d, i) => {
           const later = cur >= 0 && i > cur, can = onPick && !later
           return (
             <tr key={d} className={cn("border-t", can && "cursor-pointer hover:bg-accent", picked === d && "bg-accent", later && "text-tertiary")} onClick={() => can && onPick(picked === d ? null : d)} data-table-row={d}>
-              <td className="py-1.5 pr-3">{hourly ? hourSpan(d) : d}{i === cur && <span className="ml-1 text-tertiary">未结束</span>}</td>
-              {data.series.map((l) => <td key={l.key} className="py-1.5 pl-3 text-right">{later ? "未到" : l.values[i] == null ? "—" : fmt(l.values[i]!)}</td>)}
+              <td className="py-1.5 pr-3">{hourly ? hourSpan(d) : d}{i === cur && <span className="ml-1 text-tertiary">{t("stats:chart.open")}</span>}</td>
+              {data.series.map((l) => <td key={l.key} className="py-1.5 pl-3 text-right">{later ? t("stats:chart.notCome") : l.values[i] == null ? "—" : fmt(l.values[i]!)}</td>)}
             </tr>)
         })}</tbody>
       </table>

@@ -20,7 +20,7 @@ const shot = async (page, name, sel) => {
 try {
   for (const width of [1440, 390]) for (const theme of ["light", "dark"]) {
     const tag = `${width}-${theme}`
-    const page = await browser.newPage({ viewport: { width, height: width === 390 ? 844 : 1000 }, reducedMotion: "reduce", colorScheme: theme })
+    const page = await browser.newPage({ locale: "zh-CN", viewport: { width, height: width === 390 ? 844 : 1000 }, reducedMotion: "reduce", colorScheme: theme })
     page.on("pageerror", (e) => errors.push(`${tag}: ${e.message}`))
     await page.route("**/*", (r) => { const u = new URL(r.request().url()); if (u.origin !== base) { external.push(u.href); return r.abort() } return r.continue() })
     await page.goto(url + "?reset")
