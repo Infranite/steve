@@ -980,7 +980,7 @@ async fn over_the_file_limit_deletes_nothing() {
 }
 
 #[tokio::test]
-async fn a_file_turned_into_an_outside_link_is_kept_and_counted() {
+async fn a_file_turned_into_an_outside_link_fails_and_is_not_deleted() {
     let e = setup();
     let outside = e.home.join("outside");
     write(&outside.join("secret.md"), "外面的秘密：工资表");
@@ -993,12 +993,43 @@ async fn a_file_turned_into_an_outside_link_is_kept_and_counted() {
     std::os::unix::fs::symlink(outside.join("secret.md"), e.wiki().join("a.md")).unwrap();
     fs::remove_file(e.wiki().join("b.md")).unwrap();
     let r = e.sync(&id).await;
-    // The walk itself was complete: the really vanished file is deleted, the link is not read.
+    // The walk itself was complete: the really vanished file is deleted, the link is not read
+    // and its document fails with its old chunks gone, as when the loader refuses it.
     assert_eq!((r.links_refused, r.kept, r.deleted), (1, 1, 1), "{r:?}");
     assert!(r.incomplete.is_empty());
-    assert_eq!(e.doc_by_ref(&id, "a.md").status, "active");
+    let a = e.doc_by_ref(&id, "a.md");
+    assert_eq!(a.status, "failed");
+    assert_eq!(a.error.as_deref(), Some(OUTSIDE));
+    assert!(e.chunk_texts(&a.id).is_empty());
     assert_eq!(e.doc_by_ref(&id, "b.md").status, "deleted");
     assert!(e.search(ME, "工资表").await.is_empty());
+    assert!(e.search(ME, "部署").await.is_empty());
     let s = e.wait(&id).await;
     assert_eq!(s["stats"]["kept"], 1, "{s}");
+
+    // Later syncs leave it failed; once the link is a file again it is indexed again.
+    let r = e.sync(&id).await;
+    assert_eq!((r.kept, r.deleted), (1, 0), "{r:?}");
+    assert_eq!(e.doc_by_ref(&id, "a.md").status, "failed");
+    fs::remove_file(e.wiki().join("a.md")).unwrap();
+    write(&e.wiki().join("a.md"), "# 甲\n\n部署脚本搬到了新仓库。");
+    let r = e.sync(&id).await;
+    assert_eq!((r.kept, r.deleted), (0, 0), "{r:?}");
+    e.wait(&id).await;
+    assert_eq!(e.doc_by_ref(&id, "a.md").status, "active");
+    assert_eq!(e.search(ME, "部署").await.len(), 1);
+}
+
+#[tokio::test]
+async fn a_file_turned_into_a_dangling_link_is_deleted() {
+    let e = setup();
+    write(&e.wiki().join("a.md"), "# 甲\n\n部署脚本在 ops 仓库。");
+    let s = e.add_folder(&e.wiki(), json!({})).await;
+    let id = s["id"].as_str().unwrap().to_string();
+    fs::remove_file(e.wiki().join("a.md")).unwrap();
+    std::os::unix::fs::symlink(e.wiki().join("missing.md"), e.wiki().join("a.md")).unwrap();
+    let r = e.sync(&id).await;
+    assert_eq!((r.links_refused, r.kept, r.deleted), (1, 0, 1), "{r:?}");
+    assert_eq!(e.doc_by_ref(&id, "a.md").status, "deleted");
+    assert!(e.search(ME, "部署").await.is_empty());
 }

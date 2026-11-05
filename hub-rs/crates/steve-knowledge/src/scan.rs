@@ -135,6 +135,15 @@ impl Gap {
     }
 }
 
+/// Why a wanted path the walk saw was not read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Held {
+    /// A link resolving outside the root: its document fails, as when the loader refuses it.
+    Outside,
+    /// Its metadata (or its link) could not be read: its document stays as it is.
+    Unreadable,
+}
+
 /// What a walk found.
 #[derive(Debug, Default)]
 pub struct Walk {
@@ -145,9 +154,8 @@ pub struct Walk {
     pub over_limit: usize,
     /// Links pointing outside the root (or nowhere), not followed.
     pub links_refused: usize,
-    /// Wanted paths that exist but could not be looked at (a refused link, unreadable
-    /// metadata). Their documents are kept as they are.
-    pub held: Vec<String>,
+    /// Wanted paths that exist but could not be read, and why. Never a reason to delete.
+    pub held: Vec<(String, Held)>,
     /// Why parts of the folder were not seen (sorted, no repeats). Empty = complete.
     pub gaps: Vec<Gap>,
 }
@@ -159,9 +167,9 @@ impl Walk {
         self.gaps.is_empty()
     }
 
-    fn hold(&mut self, rules: &Rules, rel: String) {
+    fn hold(&mut self, rules: &Rules, rel: String, why: Held) {
         if rules.wants_file(&rel) {
-            self.held.push(rel);
+            self.held.push((rel, why));
         }
     }
 
@@ -224,13 +232,23 @@ pub fn walk(root: &Path, rules: &Rules) -> io::Result<Walk> {
                         Ok(m) if m.is_file() => (t, m),
                         Ok(_) => continue, // linked directories are not entered
                         Err(_) => {
-                            out.hold(rules, rel);
+                            out.hold(rules, rel, Held::Unreadable);
                             continue;
                         }
                     },
-                    _ => {
+                    Ok(_) => {
                         out.links_refused += 1;
-                        out.hold(rules, rel);
+                        out.hold(rules, rel, Held::Outside);
+                        continue;
+                    }
+                    // dangling: the file is gone, as the loader sees it
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                        out.links_refused += 1;
+                        continue;
+                    }
+                    Err(_) => {
+                        out.links_refused += 1;
+                        out.hold(rules, rel, Held::Unreadable);
                         continue;
                     }
                 }
@@ -246,7 +264,7 @@ pub fn walk(root: &Path, rules: &Rules) -> io::Result<Walk> {
                 match e.metadata() {
                     Ok(m) => (e.path(), m),
                     Err(_) => {
-                        out.hold(rules, rel);
+                        out.hold(rules, rel, Held::Unreadable);
                         continue;
                     }
                 }
@@ -372,7 +390,7 @@ mod tests {
     }
 
     #[test]
-    fn refused_links_are_held_when_wanted() {
+    fn outside_links_are_held_when_wanted() {
         let d = tempfile::tempdir().unwrap();
         let base = fs::canonicalize(d.path()).unwrap();
         let (root, outside) = (base.join("root"), base.join("outside"));
@@ -385,7 +403,7 @@ mod tests {
         ln(&root.join("missing.md"), "dangling.md");
         let w = walk(&root, &Rules::new(vec![], vec![])).unwrap();
         assert_eq!(w.links_refused, 3);
-        assert_eq!(w.held, ["dangling.md", "out.md"]);
+        assert_eq!(w.held, [("out.md".to_string(), Held::Outside)]);
         assert!(w.complete(), "a refused link is seen, not missed");
     }
 }

@@ -522,7 +522,9 @@ async fn run(
 ///
 /// Only a complete walk deletes: when part of the folder was not seen (an unreadable
 /// directory, over the file limit), a missing file is no proof it is gone, so its document is
-/// `kept`. Paths the walk saw but could not look at (`held`) are kept either way.
+/// `kept`. Paths the walk saw but could not read (`held`) are never deleted: a link out of the
+/// folder fails its document with [`OUTSIDE`] (chunks removed, as the loader does), an
+/// unreadable path keeps its document as it is.
 fn reconcile(
     tx: &Tx,
     src: &SourceRow,
@@ -587,10 +589,16 @@ fn reconcile(
             index::fail_doc(tx, &d, "skipped", TOO_BIG, now)?;
         }
     }
-    let held: HashSet<&str> = w.held.iter().map(String::as_str).collect();
+    let held: HashMap<&str, scan::Held> = w.held.iter().map(|(r, h)| (r.as_str(), *h)).collect();
     for (rel, d) in &existing {
         if !seen.contains(rel.as_str()) && d.status != "deleted" {
-            if !w.complete() || held.contains(rel.as_str()) {
+            let why = held.get(rel.as_str()).copied();
+            if why == Some(scan::Held::Outside)
+                && (d.status != "failed" || d.error.as_deref() != Some(OUTSIDE))
+            {
+                index::fail_doc(tx, d, "failed", OUTSIDE, now)?;
+            }
+            if !w.complete() || why.is_some() {
                 rep.kept += 1;
                 continue;
             }
