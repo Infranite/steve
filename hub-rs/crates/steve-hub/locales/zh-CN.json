@@ -43,6 +43,7 @@
   "hub.output.path_missing": "找不到 %{path}",
   "hub.output.no_commit_hash": "标题里没有提交号",
   "hub.output.no_repo": "事项没有可读的 git 仓库",
+  "hub.output.git_elsewhere": "这个事项的 git 记录在另一台设备上，暂时不能在这里查看",
   "hub.output.commit_gone": "仓库里没有提交 %{hash}（可能被 rebase 改写了）",
   "hub.output.branch_gone": "分支 %{branch} 已经不在了（发布后会收起）",
   "hub.project.dir_missing": "目录不存在：%{path}",

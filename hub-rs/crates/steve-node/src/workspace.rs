@@ -83,7 +83,38 @@ pub(crate) struct Commands {
     pub op: OperationId,
 }
 impl Commands {
-    fn git(&self, dir: &Path, args: &[&str]) -> Result<String, String> {
+    pub(crate) fn git(&self, dir: &Path, args: &[&str]) -> Result<String, String> {
+        match self.run(dir, args, &[], 1 << 20)? {
+            (_, true) => Err("git output limit".into()),
+            (out, false) => Ok(String::from_utf8_lossy(&out).trim().to_string()),
+        }
+    }
+
+    /// A git that only reads: no optional lock taken, no missing object fetched, no prompt. Its
+    /// stdout as it is, the first `cap` bytes of it with whether there was more.
+    pub(crate) fn read(
+        &self,
+        dir: &Path,
+        args: &[&str],
+        cap: usize,
+    ) -> Result<(Vec<u8>, bool), String> {
+        const READ_ENV: [(&str, &str); 3] = [
+            ("GIT_OPTIONAL_LOCKS", "0"),
+            ("GIT_NO_LAZY_FETCH", "1"),
+            ("GIT_TERMINAL_PROMPT", "0"),
+        ];
+        self.run(dir, args, &READ_ENV, cap)
+    }
+
+    /// `git args` in `dir` under the pipe: stdout (the first `cap` bytes, the rest drained and
+    /// dropped) and whether it was cut; a failure is its stderr.
+    fn run(
+        &self,
+        dir: &Path,
+        args: &[&str],
+        env: &[(&str, &str)],
+        cap: usize,
+    ) -> Result<(Vec<u8>, bool), String> {
         use std::io::{Read, Write};
         use std::os::{fd::AsRawFd, unix::process::CommandExt};
         use std::process::Stdio;
@@ -99,6 +130,7 @@ impl Commands {
                 "steve-git",
             ])
             .args(args)
+            .envs(env.iter().copied())
             .current_dir(dir)
             .process_group(0)
             .stdin(Stdio::piped())
@@ -146,26 +178,28 @@ impl Commands {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let mut truncated = false;
-        let mut drain = |reader: &mut dyn Read, dest: &mut Vec<u8>| {
+        // whether `dest` had to drop some of what came, past `cap`
+        let drain = |reader: &mut dyn Read, dest: &mut Vec<u8>, cap: usize| -> bool {
+            let mut cut = false;
             let mut buf = [0; 4096];
             // Per tick budget; a continuously writable pipe must not starve timeout checks.
             for _ in 0..64 {
                 match reader.read(&mut buf) {
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
-                        if dest.len() + n <= 1 << 20 {
-                            dest.extend_from_slice(&buf[..n]);
-                        } else {
-                            truncated = true;
-                            break;
-                        }
+                        // past the cap the rest is read and dropped, so git can finish
+                        let keep = n.min(cap.saturating_sub(dest.len()));
+                        dest.extend_from_slice(&buf[..keep]);
+                        cut |= keep < n;
                     }
                 }
             }
+            cut
         };
+        const ERR_CAP: usize = 64 * 1024;
         let status = loop {
-            drain(&mut out, &mut stdout);
-            drain(&mut err, &mut stderr);
+            truncated |= drain(&mut out, &mut stdout, cap);
+            drain(&mut err, &mut stderr, ERR_CAP);
             if let Ok(Some(status)) = child.try_wait() {
                 break Some(status);
             }
@@ -186,8 +220,8 @@ impl Commands {
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         };
-        drain(&mut out, &mut stdout);
-        drain(&mut err, &mut stderr);
+        truncated |= drain(&mut out, &mut stdout, cap);
+        drain(&mut err, &mut stderr, ERR_CAP);
         if !crate::procs::state(pid, started).gone() {
             return Err("git group stop uncertain".into());
         }
@@ -195,13 +229,8 @@ impl Commands {
             .j
             .tx(|t| t.drop_proc(&session, pid))
             .map_err(|e| e.to_string())?;
-        if truncated {
-            return Err("git output limit".into());
-        }
         match status {
-            Some(status) if status.success() => {
-                Ok(String::from_utf8_lossy(&stdout).trim().to_string())
-            }
+            Some(status) if status.success() => Ok((stdout, truncated)),
             Some(_) => Err(String::from_utf8_lossy(&stderr).trim().to_string()),
             None => Err("git cancelled or timed out".into()),
         }

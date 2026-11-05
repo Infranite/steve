@@ -43,6 +43,7 @@
   "hub.output.path_missing": "Can't find %{path}",
   "hub.output.no_commit_hash": "The title has no commit hash",
   "hub.output.no_repo": "The item has no readable git repository",
+  "hub.output.git_elsewhere": "This item's git history is on another device and cannot be shown here yet",
   "hub.output.commit_gone": "Commit %{hash} isn't in the repository (a rebase may have rewritten it)",
   "hub.output.branch_gone": "Branch %{branch} no longer exists (branches are removed after release)",
   "hub.project.dir_missing": "Directory doesn't exist: %{path}",

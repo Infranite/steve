@@ -12,6 +12,7 @@
 //! confirmed gone ([`procs`]).
 
 mod actor;
+mod git;
 mod journal;
 mod procs;
 mod scan;
@@ -2363,8 +2364,18 @@ impl WorkspaceExecutor for LocalNode {
         Ok(r)
     }
 
-    async fn git_facts(&self, _q: GitQuery) -> ApiResult<GitFacts> {
-        unsupported("git")
+    /// The read kinds of git in a workspace (show, log, diff), its HEAD, branch and refs. Each
+    /// git runs through the workspace pipe under a read id of its own.
+    async fn git_facts(&self, q: GitQuery) -> ApiResult<GitFacts> {
+        static READS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        self.mine(&q.workspace)?;
+        let dir = workspace_dir(&self.0, &q.workspace)?;
+        let n = READS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let commands = workspace::Commands {
+            inner: self.0.clone(),
+            op: id(format!("git-read-{}-{n}", self.0.incarnation))?,
+        };
+        blocking(move || git::facts(&commands, &dir, &q)).await
     }
     async fn git_apply(&self, _c: Command<GitApply>) -> ApiResult<Receipt> {
         unsupported("git")

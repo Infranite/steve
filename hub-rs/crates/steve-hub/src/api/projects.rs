@@ -134,11 +134,11 @@ async fn via(st: &AppState, path: &str) -> Result<Via, ApiError> {
 }
 
 /// `设备离线` is a 503: the device may come back, the request was fine.
-fn offline() -> ApiError {
+pub(super) fn offline() -> ApiError {
     ApiError::Json(503, steve_i18n::t!("hub.workspaces.offline"))
 }
 
-fn placement_error(e: PlacementError) -> ApiError {
+pub(super) fn placement_error(e: PlacementError) -> ApiError {
     match e {
         PlacementError::Offline { .. } => offline(),
         e => ApiError::internal(e.to_string()),

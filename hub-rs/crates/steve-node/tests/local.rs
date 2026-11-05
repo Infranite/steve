@@ -2916,3 +2916,151 @@ async fn a_scan_read_after_a_restart_is_scanned_again() {
         .unwrap_err();
     assert_eq!(e.code, ErrorCode::Expired);
 }
+
+fn git_in(dir: &Path, args: &[&str]) -> String {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .env("GIT_AUTHOR_NAME", "t")
+        .env("GIT_AUTHOR_EMAIL", "t@example.com")
+        .env("GIT_COMMITTER_NAME", "t")
+        .env("GIT_COMMITTER_EMAIL", "t@example.com")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "git {args:?}");
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn git_facts_reads_files_commits_logs_and_diffs_of_a_workspace() {
+    let t = T::new(&[]);
+    let repo = t.root.join("work/proj");
+    git_in(&repo, &["init", "-q", "-b", "main"]);
+    put(&t.root, "work/proj/a.txt", b"a\n");
+    git_in(&repo, &["add", "."]);
+    git_in(&repo, &["commit", "-q", "-m", "a"]);
+    git_in(&repo, &["checkout", "-q", "-b", "steve/st-1"]);
+    put(
+        &t.root,
+        "work/proj/docs/方案.md",
+        b"# \xe6\x96\xb9\xe6\xa1\x88\n",
+    );
+    git_in(&repo, &["add", "."]);
+    git_in(&repo, &["commit", "-q", "-m", "加方案"]);
+    let tip = git_in(&repo, &["rev-parse", "HEAD"]);
+    git_in(&repo, &["checkout", "-q", "main"]);
+    let n = t.node();
+    n.prepare_workspace(now_cmd("op_prep", prepare_proj()))
+        .await
+        .unwrap();
+    assert!(ok(&finished(&n, "op_prep").await));
+
+    let range = |from: Option<&str>, to: &str| RevRange {
+        from: from.map(str::to_string),
+        to: to.into(),
+    };
+    let reads = vec![
+        GitRead::Show {
+            rev: "steve/st-1".into(),
+            path: Some(RelPath::new("docs/方案.md").unwrap()),
+            max: 1000,
+        },
+        GitRead::Show {
+            rev: "main".into(),
+            path: Some(RelPath::new("docs/方案.md").unwrap()),
+            max: 1000,
+        },
+        GitRead::Show {
+            rev: tip[..7].into(),
+            path: None,
+            max: 1000,
+        },
+        GitRead::Log {
+            range: range(Some("main"), "steve/st-1"),
+            max: 200,
+        },
+        GitRead::Diff {
+            range: range(Some("main"), "steve/st-1"),
+            max: 20,
+        },
+    ];
+    let f = n
+        .git_facts(GitQuery {
+            workspace: ws(),
+            refs: vec!["refs/heads/main".into(), "refs/heads/gone".into()],
+            ranges: vec![],
+            fetch: false,
+            reads: reads.clone(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(f.branch.as_deref(), Some("main"));
+    assert!(!f.dirty);
+    assert_eq!(f.refs[0].1.as_deref(), Some(f.head.as_str()));
+    assert_eq!(f.refs[1].1, None);
+    let a: Vec<&GitAnswer> = f.reads.iter().map(|r| &r.answer).collect();
+    assert_eq!(f.reads[0].observed, tip);
+    assert!(
+        matches!(a[0], GitAnswer::Blob { found: true, bytes, truncated: false } if bytes == "# 方案\n".as_bytes()),
+        "{:?}",
+        a[0]
+    );
+    assert!(matches!(a[1], GitAnswer::Blob { found: false, .. }));
+    let GitAnswer::Commit {
+        commit,
+        stat,
+        patch,
+        truncated,
+    } = a[2]
+    else {
+        panic!("{:?}", a[2])
+    };
+    assert_eq!(commit.sha, tip);
+    assert_eq!(commit.subject, "加方案");
+    assert_eq!(commit.body.as_deref().map(str::trim), Some("加方案"));
+    assert!(stat.contains("docs/方案.md"), "{stat}");
+    assert!(patch.contains("diff --git a/docs/方案.md"), "{patch}");
+    assert!(!truncated);
+    let GitAnswer::Log { commits, truncated } = a[3] else {
+        panic!("{:?}", a[3])
+    };
+    assert_eq!((commits.len(), *truncated), (1, false));
+    assert_eq!(commits[0].subject, "加方案");
+    let GitAnswer::Diff {
+        stat,
+        patch,
+        truncated,
+    } = a[4]
+    else {
+        panic!("{:?}", a[4])
+    };
+    assert!(stat.contains("docs/方案.md"));
+    assert!(patch.len() <= 20 && *truncated, "{patch}");
+
+    // a revision is never an option; a changed tree is another revision
+    let q = |rev: &str| GitQuery {
+        workspace: ws(),
+        refs: vec![],
+        ranges: vec![],
+        fetch: false,
+        reads: vec![GitRead::Show {
+            rev: rev.into(),
+            path: None,
+            max: 10,
+        }],
+    };
+    assert_eq!(
+        n.git_facts(q("--output=x")).await.unwrap_err().code,
+        ErrorCode::Invalid
+    );
+    assert_eq!(
+        n.git_facts(q("nope")).await.unwrap_err().code,
+        ErrorCode::Invalid
+    );
+    put(&t.root, "work/proj/new.txt", b"x");
+    let g = n.git_facts(q("HEAD")).await.unwrap();
+    assert!(g.dirty);
+    assert_ne!(g.revision, f.revision);
+    assert!(!repo.join("x").exists());
+}
