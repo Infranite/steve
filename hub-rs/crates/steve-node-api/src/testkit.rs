@@ -47,6 +47,8 @@ pub enum Point {
     AfterCommit,
     /// The Hub committed the batch, its ack not applied yet (events still kept).
     BeforeAck,
+    /// The last page of a snapshot was read (its heads are those of that moment).
+    AfterSnapshot,
 }
 
 type Hook = Arc<dyn Fn(Point) + Send + Sync>;
@@ -1197,6 +1199,10 @@ impl ExecutionControl for FakeNode {
         let next = more.then(|| id(format!("snap{token}.{}", offset + page.len())));
         if !more {
             st.snapshots.remove(&token);
+        }
+        drop(st);
+        if !more {
+            self.at(Point::AfterSnapshot);
         }
         Ok(Snapshot {
             entries: page,

@@ -1211,7 +1211,16 @@ impl H {
     /// The Hub process restarts on the same database and the same Node: a new coordinator that
     /// reconciles with the Node before it sends anything.
     async fn restart_hub(&mut self) {
+        self.restart_hub_with(None).await
+    }
+
+    /// [`Self::restart_hub`], the new coordinator's reconcile waiting `apply_wait` at most for the
+    /// Node's heads to be applied.
+    async fn restart_hub_with(&mut self, apply_wait: Option<Duration>) {
         let rt = NodeRuntime::new(self.store.clone(), self.node.clone(), self.ends.clone());
+        if let Some(d) = apply_wait {
+            rt.set_apply_wait(d);
+        }
         let seen = Arc::new(Tee {
             to: Sink(Arc::downgrade(&rt)),
             seen: Mutex::new(vec![]),
@@ -3421,10 +3430,13 @@ async fn reconcile_replays_what_the_hub_missed_before_the_first_new_plan() {
     let dup: i64 = h.q("SELECT COUNT(*) FROM (SELECT 1 FROM events WHERE source_node IS NOT NULL GROUP BY source_node,source_stream,source_epoch,source_seq HAVING COUNT(*)>1)");
     assert_eq!(dup, 0);
     until("the journal drained", || h.node.unacked() == 0).await;
+    // the second turn's events may still be applying
+    until("all applied", || {
+        h.q::<i64>("SELECT COUNT(*) FROM node_streams WHERE applied < durable") == 0
+    })
+    .await;
     assert_eq!(
-        h.q::<i64>(
-            "SELECT COUNT(*) FROM node_streams WHERE applied < durable OR fault IS NOT NULL"
-        ),
+        h.q::<i64>("SELECT COUNT(*) FROM node_streams WHERE fault IS NOT NULL"),
         0
     );
 }
@@ -3501,4 +3513,174 @@ async fn node_work_the_hub_does_not_know_holds_the_session_and_sends_nothing() {
     h.rt.reconcile_again().await.unwrap();
     assert_eq!(h.systems("没有它的记录"), 1);
     assert_eq!(h.rt.prompt(S, "more", "user", &[]).unwrap(), Planned::Held);
+}
+
+/// The Hub restarts while a turn runs, and the Node pushes events right after the snapshot was read
+/// (its heads are those of before): the Hub then holds more than the snapshot's head. The Node's
+/// current head says it did not go back: no `ahead`, nothing held, the turn goes on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn events_pushed_while_reconcile_reads_the_snapshot_do_not_fault_ahead() {
+    let mut h = hub();
+    h.bind();
+    h.rt.prompt(S, "first", "user", &[]).unwrap();
+    until("attempt", || h.attempts().len() == 1).await;
+    let exec = h.attempts()[0].clone();
+    until("running", || h.phase() == "active").await;
+    until("the Node runs it", || h.count("start_turn") == 1).await;
+    let (s, b) = text(&exec, "before");
+    h.node.emit(s, b).await.unwrap();
+    until("acknowledged", || h.node.unacked() == 0).await;
+
+    let armed = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let (node, a, e) = (h.node.clone(), armed.clone(), exec.clone());
+    h.node.set_hook(move |p| {
+        if p == testkit::Point::AfterSnapshot && a.swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            let (s, b) = text(&e, "during");
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(node.emit(s, b))
+            })
+            .unwrap();
+        }
+    });
+    h.restart_hub().await;
+    assert!(
+        !armed.load(std::sync::atomic::Ordering::SeqCst),
+        "the Node pushed while reconcile ran"
+    );
+    assert_eq!(h.fault_of_session_stream(), None);
+    assert_eq!(h.systems("回到了较早的状态"), 0);
+    assert!(!h.rt.is_uncertain(S));
+
+    h.node.finish(&exec, build::done()).await.unwrap();
+    until("turn end", || h.ends().len() == 1).await;
+    let during: i64 = h.q("SELECT COUNT(*) FROM events WHERE kind='text' AND data LIKE '%during%'");
+    assert_eq!(during, 1);
+    assert_eq!(
+        h.rt.prompt(S, "next", "user", &[]).unwrap(),
+        Planned::Created
+    );
+}
+
+/// One session's stream cannot be applied (here the store refuses to advance it, as a Node event
+/// kind this Hub cannot read would): reconcile stops waiting for it, holds that session with a
+/// note and completes; another session of the same Node gets its turn. Once the stream is applied,
+/// what waited on the held session goes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stream_that_cannot_be_applied_holds_only_its_own_session() {
+    const S2: &str = "s_other";
+    let mut h = hub();
+    h.store
+        .transaction::<_, StoreError>(|tx| {
+            tx.execute(
+                "INSERT INTO sessions(id,workspace_id,harness,cwd,status,created,updated) VALUES (?,'default','claude-code','.','active',1,1)",
+                [S2],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    h.bind();
+    let phase2 = |h: &H| -> String {
+        h.q(&format!(
+            "SELECT phase FROM runtime_sessions WHERE session_id='{S2}'"
+        ))
+    };
+    h.rt.bind(&Binding {
+        session: S2.into(),
+        resource: format!("item:{S2}"),
+        prepare: PrepareKind::Scratch,
+        choice: build::choice(),
+        policy: build::policy(),
+    })
+    .unwrap();
+    until("both ready", || {
+        h.phase() == "ready" && phase2(&h) == "ready"
+    })
+    .await;
+    h.rt.prompt(S, "first", "user", &[]).unwrap();
+    until("attempt", || h.attempts().len() == 1).await;
+    let exec = h.attempts()[0].clone();
+    until("running", || h.phase() == "active").await;
+    let stream = derived_id("session", S);
+    until("the Node runs it, all applied", || {
+        h.count("start_turn") == 1
+            && h.node.unacked() == 0
+            && h.q::<i64>(&format!(
+                "SELECT durable - applied FROM node_streams WHERE stream='{stream}'"
+            )) == 0
+    })
+    .await;
+    h.store
+        .transaction::<_, StoreError>(|tx| {
+            tx.execute_batch(&format!(
+                "CREATE TRIGGER stuck BEFORE UPDATE OF applied ON node_streams WHEN NEW.stream='{stream}' BEGIN SELECT RAISE(ABORT,'stuck'); END;"
+            ))?;
+            Ok(())
+        })
+        .unwrap();
+    let (s, b) = text(&exec, "unapplied");
+    h.node.emit(s, b).await.unwrap();
+    until("acknowledged", || h.node.unacked() == 0).await;
+    let behind: i64 = h.q(&format!(
+        "SELECT durable - applied FROM node_streams WHERE stream='{stream}'"
+    ));
+    assert_eq!(behind, 1, "taken in, not applied");
+
+    h.restart_hub_with(Some(Duration::from_millis(300))).await;
+    assert_eq!(h.systems("未能及时应用"), 1, "the session is told");
+    assert!(h.rt.is_uncertain(S));
+    assert_eq!(
+        h.rt.prompt(S, "second", "user", &[]).unwrap(),
+        Planned::Held
+    );
+    let starts = h.count("start_turn");
+    h.rt.prompt(S2, "elsewhere", "user", &[]).unwrap();
+    until("the other session's turn", || {
+        h.count("start_turn") == starts + 1
+    })
+    .await;
+    assert_eq!(h.fault_of_session_stream(), None, "nothing faulted");
+
+    // the stream can be applied again: the hold lifts on its own
+    h.store
+        .transaction::<_, StoreError>(|tx| {
+            tx.execute_batch("DROP TRIGGER stuck;")?;
+            Ok(())
+        })
+        .unwrap();
+    until("applied", || {
+        h.q::<i64>(&format!(
+            "SELECT durable - applied FROM node_streams WHERE stream='{stream}'"
+        )) == 0
+    })
+    .await;
+    until("lifted", || !h.rt.is_uncertain(S)).await;
+    h.node.finish(&exec, build::done()).await.unwrap();
+    until("the queued turn", || h.count("start_turn") == starts + 2).await;
+    assert_eq!(h.systems("未能及时应用"), 1);
+}
+
+/// An event bigger than a replay page (256 KiB) is pulled alone in a bigger one: reconcile does not
+/// fail on it, and it is stored once.
+#[tokio::test]
+async fn reconcile_replays_an_event_bigger_than_a_page() {
+    let mut h = hub();
+    h.bind();
+    h.rt.prompt(S, "first", "user", &[]).unwrap();
+    until("attempt", || h.attempts().len() == 1).await;
+    let exec = h.attempts()[0].clone();
+    until("running", || h.phase() == "active").await;
+    until("the Node runs it", || h.count("start_turn") == 1).await;
+    h.node.connect(Arc::new(Refusing));
+    let big = format!("big{}", "x".repeat(300 * 1024));
+    let (s, b) = text(&exec, &big);
+    h.node.emit(s, b).await.unwrap();
+    h.node.finish(&exec, build::done()).await.unwrap();
+    assert!(h.node.unacked() >= 2, "kept for replay");
+
+    h.restart_hub().await;
+    let bigs: i64 = h.q("SELECT COUNT(*) FROM events WHERE kind='text' AND data LIKE '%bigxxx%'");
+    assert_eq!(bigs, 1, "replayed once");
+    assert_eq!(h.ends(), [(S.to_string(), "end_turn".to_string(), None)]);
+    until("the journal drained", || h.node.unacked() == 0).await;
 }

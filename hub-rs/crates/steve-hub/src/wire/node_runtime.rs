@@ -24,8 +24,8 @@
 //! What it does not do yet (tidy chains, set_mode) is refused explicitly, never reported as done.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -40,7 +40,9 @@ mod heads;
 mod perm;
 
 pub use config::{ConfigChange, Configured};
-pub use heads::{CaughtUp, NodeSnapshot, Receive, catch_up_streams, read_snapshot};
+pub use heads::{
+    CaughtUp, NodeSnapshot, Pull, Receive, ReplayCheck, catch_up_streams, read_snapshot,
+};
 
 /// Retries of a turn after a passing failure (gateway 5xx) with no tool run, and their waits.
 const RETRY_DELAYS_MS: [i64; 2] = [20_000, 60_000];
@@ -144,6 +146,15 @@ pub struct NodeRuntime {
     /// Sessions with Node work the Hub has no record of (found by the last reconcile): nothing is
     /// planned for them, and that work is never given up on its own (D7).
     held: Mutex<HashSet<String>>,
+    /// Sessions whose stream reconcile stopped waiting for ([`heads::APPLY_WAIT`]): nothing is
+    /// planned for them until the apply worker has caught up on it.
+    lagging: Mutex<HashMap<String, heads::Lag>>,
+    /// How long reconcile waits for the Node's heads to be applied, in ms.
+    apply_wait_ms: AtomicU64,
+    /// What a remote Node's replayed batches pass before the inbox ([`Self::over_link`]).
+    replay_check: OnceLock<ReplayCheck>,
+    /// The largest replay page the Node's transport carries (unbounded in process).
+    largest_replay: AtomicU32,
     /// Turn ends settled outside the apply worker (a local cancel), told by it after the commit.
     ended_later: Mutex<Vec<End>>,
     /// Attempts the Hub settled on its own word (no AttemptEnded comes for them): their
@@ -248,6 +259,10 @@ impl NodeRuntime {
             paused: AtomicBool::new(false),
             reconciled: AtomicBool::new(false),
             held: Mutex::new(HashSet::new()),
+            lagging: Mutex::new(HashMap::new()),
+            apply_wait_ms: AtomicU64::new(heads::APPLY_WAIT.as_millis() as u64),
+            replay_check: OnceLock::new(),
+            largest_replay: AtomicU32::new(u32::MAX),
             ended_later: Mutex::new(vec![]),
             settled_later: Mutex::new(vec![]),
             staged: Mutex::new((vec![], vec![])),
@@ -255,6 +270,25 @@ impl NodeRuntime {
             stopped: Mutex::new(None),
             turn_limit: std::sync::atomic::AtomicI64::new(TURN_LIMIT_MS),
         })
+    }
+
+    /// The Node is remote, behind a link: what it replays passes `check` (the link's guard, as
+    /// what it pushes does), and no replay page is asked bigger than `largest` (its frame). Set
+    /// before [`Self::start`]; once.
+    pub fn over_link(&self, check: ReplayCheck, largest: u32) {
+        let _ = self.replay_check.set(check);
+        self.largest_replay.store(largest, Ordering::Relaxed);
+    }
+
+    /// How long reconcile waits for the Node's heads to be applied before it holds the sessions
+    /// of the streams still behind and goes on ([`heads::APPLY_WAIT`] unless set).
+    pub fn set_apply_wait(&self, d: Duration) {
+        self.apply_wait_ms
+            .store(d.as_millis() as u64, Ordering::Relaxed);
+    }
+
+    fn apply_wait(&self) -> Duration {
+        Duration::from_millis(self.apply_wait_ms.load(Ordering::Relaxed))
     }
 
     /// Attempts planned from now on get `ms` as their deadline (and their permissions with it).
@@ -927,9 +961,11 @@ impl NodeRuntime {
             || self.is_held(session)
     }
 
-    /// The Node holds work of the session the Hub has no record of ([`Self::reconcile`]).
+    /// The Node holds work of the session the Hub has no record of ([`Self::reconcile`]), or
+    /// its stream was not applied in time and has not caught up yet.
     fn is_held(&self, session: &str) -> bool {
         self.held.lock().unwrap().contains(session)
+            || self.lagging.lock().unwrap().contains_key(session)
     }
 
     /// Asks the Node to cancel the attempt running now (frozen as the target here, never looked up
@@ -2091,6 +2127,7 @@ impl NodeRuntime {
                             .lock()
                             .unwrap()
                             .remove(&(stream.clone(), epoch.clone()));
+                        self.caught_up_on(&stream, &epoch);
                         break;
                     }
                     Err(e) => {
