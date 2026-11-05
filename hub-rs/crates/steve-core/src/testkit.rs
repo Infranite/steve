@@ -31,6 +31,8 @@ pub struct FakeState {
     pub flush_in_runtime: Vec<bool>,
     /// Sessions whose last attempt's outcome nobody can tell ([`AgentRuntime::uncertain`]).
     pub uncertain: HashSet<String>,
+    /// Sessions whose backend recovers them after a restart ([`AgentRuntime::recovers_itself`]).
+    pub recovers_itself: HashSet<String>,
     /// `flush` takes nothing and answers false (a session still opening, say).
     pub flush_stuck: bool,
 }
@@ -179,6 +181,9 @@ impl AgentRuntime for FakeRuntime {
     }
     fn uncertain(&self, sid: &str) -> bool {
         self.st().uncertain.contains(sid)
+    }
+    fn recovers_itself(&self, sid: &str) -> bool {
+        self.st().recovers_itself.contains(sid)
     }
     fn flush(&self, sid: &str, lead: Option<(&str, &str)>) -> bool {
         let sent = self.flush_now(sid, lead);

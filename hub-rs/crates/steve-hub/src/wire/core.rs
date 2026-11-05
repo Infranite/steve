@@ -871,6 +871,9 @@ impl steve_core::AgentRuntime for RoutedRuntime {
         self.node_for(session_id)
             .is_some_and(|n| n.is_uncertain(session_id))
     }
+    fn recovers_itself(&self, session_id: &str) -> bool {
+        matches!(self.route(session_id), Backend::Node(_) | Backend::Parked)
+    }
     fn running_turns(&self) -> usize {
         self.legacy.running_turns() + self.node.as_ref().map_or(0, |n| n.running_turns())
     }
