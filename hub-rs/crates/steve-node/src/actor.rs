@@ -75,6 +75,12 @@ pub(crate) enum Msg {
         op: OperationId,
         result: ApiResult<()>,
     },
+    AnswerSent {
+        op: OperationId,
+        req: Box<PermissionRequest>,
+        res: PermissionResolution,
+        result: ApiResult<()>,
+    },
     Prompted {
         token: u64,
         result: Result<Value, RpcError>,
@@ -182,6 +188,8 @@ pub(crate) struct Actor {
     waits: HashMap<PermissionId, (Value, Asked)>,
     tokens: u64,
     retry_armed: bool,
+    sending: usize,
+    deferred_prompt: Option<Result<Value, RpcError>>,
     stage_cancel: Option<watch::Sender<bool>>,
     stage_task: Option<tokio::task::JoinHandle<()>>,
 }
@@ -201,6 +209,8 @@ impl Actor {
             waits: HashMap::new(),
             tokens: 0,
             retry_armed: false,
+            sending: 0,
+            deferred_prompt: None,
             stage_cancel: None,
             stage_task: None,
         };
@@ -264,6 +274,39 @@ impl Actor {
             Msg::Cancel { target } => self.cancel(&target),
             Msg::Answer { op } => self.answer(op),
             Msg::Checked { op, result } => self.answer_checked(op, result),
+            Msg::AnswerSent {
+                op,
+                req,
+                res,
+                result,
+            } => {
+                self.sending = self.sending.saturating_sub(1);
+                let state = match result {
+                    Ok(()) => done_state(OperationResult::Unit),
+                    Err(e) => Observed::Unknown {
+                        reason: e.safe_detail,
+                    },
+                };
+                let _ = self.tx(|t| {
+                    t.drop_answer(&op)?;
+                    t.set_state(&op, &state)?;
+                    let mut evs = vec![op_changed(&op, state.clone())];
+                    if state.is_finished() {
+                        evs.push((
+                            Subject::Execution(req.execution),
+                            EventBody::PermissionResolved { resolution: res },
+                        ));
+                    }
+                    crate::emit_all(&self.inner, t, evs)
+                });
+                if self.sending == 0 {
+                    if let Some(result) = self.deferred_prompt.take() {
+                        self.finish(result).await;
+                    } else if self.run.as_ref().is_some_and(|r| r.ending.is_some()) {
+                        self.commit_end();
+                    }
+                }
+            }
             Msg::Stop { op, abandon, done } => {
                 let s = if abandon && self.live.is_some() {
                     // a harness of this incarnation runs: not what an abandon is about
@@ -283,7 +326,11 @@ impl Actor {
             Msg::Prepared { token, result } => self.prepared(token, result).await,
             Msg::Prompted { token, result } => {
                 if self.run.as_ref().is_some_and(|r| r.token == token) {
-                    self.finish(result).await;
+                    if self.sending == 0 {
+                        self.finish(result).await;
+                    } else {
+                        self.deferred_prompt = Some(result);
+                    }
                 }
             }
             Msg::Kill { token } => {
@@ -1067,10 +1114,10 @@ impl Actor {
                 Err(ApiError::new(ErrorCode::Stale, "the harness is gone")),
             );
         };
-        // journal first, then answer: what the harness got is what was recorded
+        // Durable send intent first. The final receipt needs writer evidence, not just enqueue.
         let r = self.tx(|t| {
+            t.answer_for_send(&op, now())?;
             t.drop_wait(&res.id)?;
-            t.drop_answer(&op)?;
             let on: Vec<WaitRef> = t
                 .waits_of(&attempt_op)?
                 .into_iter()
@@ -1084,25 +1131,36 @@ impl Actor {
                     Observed::Waiting { on }
                 },
             )?;
-            let state = done_state(OperationResult::Unit);
-            t.set_state(&op, &state)?;
-            crate::emit_all(
-                &self.inner,
-                t,
-                vec![
-                    (
-                        Subject::Execution(req.execution.clone()),
-                        EventBody::PermissionResolved {
-                            resolution: res.clone(),
-                        },
-                    ),
-                    op_changed(&op, state),
-                ],
-            )
+            Ok(())
         });
-        if r.is_ok() {
-            self.waits.remove(&res.id);
-            conn.respond(rpc_id, permission::answer(&asked, Some(res.decision)));
+        match r {
+            Ok(()) => {
+                self.waits.remove(&res.id);
+                let sent =
+                    conn.respond_tracked(rpc_id, permission::answer(&asked, Some(res.decision)));
+                self.sending += 1;
+                let tx = self.tx.clone();
+                tokio::spawn(async move {
+                    let result = match sent {
+                        Ok(rx) => match tokio::time::timeout(Duration::from_secs(10), rx).await {
+                            Ok(Ok(Ok(()))) => Ok(()),
+                            _ => Err(ApiError::new(
+                                ErrorCode::OutcomeUnknown,
+                                "permission write not confirmed",
+                            )),
+                        },
+                        Err(e) => Err(ApiError::new(ErrorCode::OutcomeUnknown, e.message)),
+                    };
+                    let _ = tx.send(Msg::AnswerSent {
+                        op,
+                        req: Box::new(req),
+                        res,
+                        result,
+                    });
+                });
+            }
+            Err(e) if e.code == ErrorCode::Stale => self.answer_done(&op, Err(e)),
+            Err(_) => {}
         }
     }
 
@@ -1194,6 +1252,9 @@ impl Actor {
     }
 
     fn commit_end(&mut self) {
+        if self.sending != 0 {
+            return;
+        }
         let Some(run) = self.run.as_mut() else { return };
         let Some(completion) = run.ending.clone() else {
             return;

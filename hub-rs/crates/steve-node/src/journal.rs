@@ -831,6 +831,25 @@ impl Tx<'_> {
             .is_some())
     }
 
+    /// Last durable authorization check, in the transaction reserving the send. A queued Cancel
+    /// message cannot be used as evidence: the cancel flag may already have committed.
+    pub fn answer_for_send(&self, op: &OperationId, now: i64) -> ApiResult<()> {
+        let stale = || ApiError::new(ErrorCode::Stale, "permission no longer applicable");
+        let res = self.answer_of(op)?.ok_or_else(stale)?;
+        let (attempt, _, req) = self.wait(&res.id)?.ok_or_else(stale)?;
+        let run = self.op(&attempt)?.ok_or_else(stale)?;
+        if run.cancel
+            || run.receipt.state.is_finished()
+            || matches!(run.receipt.state, Observed::Unknown { .. })
+            || req.expires_at.0 <= now
+            || req.execution != res.execution
+            || req.digest != res.action_digest
+        {
+            return Err(stale());
+        }
+        Ok(())
+    }
+
     pub fn drop_answer(&self, op: &OperationId) -> ApiResult<()> {
         self.c()
             .execute("DELETE FROM answers WHERE op = ?1", [op.as_str()])
@@ -953,5 +972,58 @@ mod migration_tests {
                 .unwrap(),
             0
         );
+    }
+}
+
+#[cfg(test)]
+mod answer_fence_tests {
+    use super::*;
+    use steve_node_api::testkit::build::{answer, permission};
+    #[test]
+    fn durable_cancel_wins_even_before_actor_sees_its_message() {
+        let d = tempfile::tempdir().unwrap();
+        let (j, _) = Journal::open(&d.path().join("j")).unwrap();
+        let op = OperationId::new("run").unwrap();
+        let resolve = OperationId::new("resolve").unwrap();
+        let session = SessionId::new("s").unwrap();
+        let exec = ExecutionRef::Turn {
+            session: session.clone(),
+            turn: TurnId::new("t").unwrap(),
+            attempt: AttemptId::new("a").unwrap(),
+        };
+        let req = permission("p", exec.clone(), "echo hello");
+        j.tx(|t| {
+            t.accept(
+                &op,
+                &Op {
+                    method: "start_turn".into(),
+                    digest: Digest::sha256(b"run"),
+                    receipt: Receipt {
+                        operation: op.clone(),
+                        state: Observed::Running,
+                    },
+                    execution: Some(exec),
+                    workspace: None,
+                    cancel: false,
+                },
+                Some(&session),
+                1,
+            )?;
+            t.put_wait(&op, &session, &req)?;
+            t.put_answer(&resolve, &answer(&req, PermissionDecision::AllowOnce))?;
+            t.answer_for_send(&resolve, 1)
+        })
+        .unwrap();
+        j.tx(|t| t.set_cancel(&op)).unwrap(); // no actor Cancel message has been consumed
+        assert_eq!(
+            j.tx(|t| t.answer_for_send(&resolve, 1)).unwrap_err().code,
+            ErrorCode::Stale
+        );
+        j.read(|t| {
+            assert!(t.wait(&req.id)?.is_some());
+            assert!(t.answer_of(&resolve)?.is_some());
+            Ok(())
+        })
+        .unwrap();
     }
 }

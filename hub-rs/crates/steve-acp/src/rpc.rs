@@ -20,6 +20,32 @@ use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::util::js_slice;
 
+struct Outbound {
+    line: String,
+    written: Option<oneshot::Sender<Result<(), RpcError>>>,
+}
+
+async fn write_frames<W: tokio::io::AsyncWrite + Unpin>(
+    writer: &mut W,
+    queue: &mut mpsc::UnboundedReceiver<Outbound>,
+) {
+    while let Some(frame) = queue.recv().await {
+        let result = async {
+            writer.write_all(frame.line.as_bytes()).await?;
+            writer.flush().await
+        }
+        .await
+        .map_err(|e: std::io::Error| RpcError::msg(format!("adapter write: {e}")));
+        let failed = result.is_err();
+        if let Some(tx) = frame.written {
+            let _ = tx.send(result);
+        }
+        if failed {
+            break;
+        }
+    }
+}
+
 /// An error answer from the adapter, a timeout, or the process going away.
 #[derive(Debug, Clone, thiserror::Error)]
 #[error("{message}")]
@@ -66,7 +92,7 @@ type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, RpcError>>>>
 /// A live adapter process.
 pub struct Conn {
     pid: u32,
-    out: mpsc::UnboundedSender<String>,
+    out: mpsc::UnboundedSender<Outbound>,
     pending: Pending,
     next_id: AtomicU64,
     exited: watch::Receiver<bool>,
@@ -107,7 +133,7 @@ impl Conn {
         else {
             return Err(RpcError::msg("adapter stdio unavailable"));
         };
-        let (out, mut out_rx) = mpsc::unbounded_channel::<String>();
+        let (out, mut out_rx) = mpsc::unbounded_channel::<Outbound>();
         let (exit_tx, exited) = watch::channel(false);
         let conn = Arc::new(Conn {
             pid,
@@ -117,13 +143,8 @@ impl Conn {
             exited,
         });
 
-        // writer: write errors (closed pipe) are ignored, the exit handler fails pending requests
         tokio::spawn(async move {
-            while let Some(line) = out_rx.recv().await {
-                if stdin.write_all(line.as_bytes()).await.is_err() || stdin.flush().await.is_err() {
-                    break;
-                }
-            }
+            write_frames(&mut stdin, &mut out_rx).await;
         });
 
         let tag = sp.log_tag.clone();
@@ -220,7 +241,10 @@ impl Conn {
         let mut o = serde_json::Map::new();
         o.insert("jsonrpc".into(), json!("2.0"));
         o.append(&mut m);
-        let _ = self.out.send(format!("{}\n", Value::Object(o)));
+        let _ = self.out.send(Outbound {
+            line: format!("{}\n", Value::Object(o)),
+            written: None,
+        });
     }
 
     /// Sends a request; `timeout` of `None` waits forever (used for `session/prompt`).
@@ -268,6 +292,25 @@ impl Conn {
         m.insert("id".into(), id);
         m.insert("result".into(), result);
         self.send(m);
+    }
+
+    /// Queue a response and report whether all its bytes were flushed to the adapter pipe.
+    /// This is transport write evidence, NOT an acknowledgement that the agent applied it.
+    /// A dropped receiver/timeout is uncertain: never resend a permission under a new identity.
+    pub fn respond_tracked(
+        &self,
+        id: Value,
+        result: Value,
+    ) -> Result<oneshot::Receiver<Result<(), RpcError>>, RpcError> {
+        let (tx, rx) = oneshot::channel();
+        let line = format!("{}\n", json!({"jsonrpc":"2.0", "id":id, "result":result}));
+        self.out
+            .send(Outbound {
+                line,
+                written: Some(tx),
+            })
+            .map_err(|_| RpcError::msg("adapter response pipe is closed"))?;
+        Ok(rx)
     }
 
     pub fn respond_error(&self, id: Value, code: i64, message: &str) {
@@ -326,5 +369,49 @@ mod control_tests {
             .await
             .unwrap();
         assert!(dir.path().join("clean").exists());
+    }
+}
+
+#[cfg(test)]
+mod write_evidence_tests {
+    use super::*;
+    #[tokio::test]
+    async fn queued_response_is_not_written_and_broken_pipe_is_not_success() {
+        let (mut pipe, peer) = tokio::io::duplex(1);
+        let (tx, mut queue) = mpsc::unbounded_channel();
+        let (written, mut evidence) = oneshot::channel();
+        tx.send(Outbound {
+            line: "a response larger than the pipe".into(),
+            written: Some(written),
+        })
+        .unwrap();
+        let writer = tokio::spawn(async move {
+            write_frames(&mut pipe, &mut queue).await;
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut evidence)
+                .await
+                .is_err()
+        );
+        drop(peer);
+        assert!(evidence.await.unwrap().is_err());
+        writer.await.unwrap();
+    }
+    #[tokio::test]
+    async fn successful_write_has_explicit_evidence() {
+        let (mut pipe, mut peer) = tokio::io::duplex(128);
+        let (tx, mut queue) = mpsc::unbounded_channel();
+        let (written, evidence) = oneshot::channel();
+        tx.send(Outbound {
+            line: "response\n".into(),
+            written: Some(written),
+        })
+        .unwrap();
+        drop(tx);
+        write_frames(&mut pipe, &mut queue).await;
+        assert!(evidence.await.unwrap().is_ok());
+        let mut b = [0; 9];
+        peer.read_exact(&mut b).await.unwrap();
+        assert_eq!(&b, b"response\n");
     }
 }
