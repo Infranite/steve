@@ -304,27 +304,44 @@ impl Mail {
             archive: true,
             ..Default::default()
         };
+        let exts: Vec<&str> = todo.iter().map(|m| m.ext_id.as_str()).collect();
+        let results = adapter.set_flags_many(&cx, &exts, &ch).await;
         let now = self.now();
-        for m in &todo {
-            adapter.set_flags(&cx, &m.ext_id, &ch).await?;
-            let mut f: Vec<String> = m
-                .folders
-                .iter()
-                .filter(|f| !inbox.contains(&f.as_str()))
-                .cloned()
-                .collect();
-            if let Some(a) = &archive
-                && !f.contains(a)
-            {
-                f.push(a.clone());
-            }
-            self.0.m.store.transaction(|tx| -> MailResult<()> {
+        // the local copies follow the messages that moved
+        let mut moved = 0;
+        let mut first_err = None;
+        self.0.m.store.transaction(|tx| -> MailResult<()> {
+            for (m, r) in todo.iter().zip(results) {
+                if let Err(e) = r {
+                    first_err.get_or_insert(e);
+                    continue;
+                }
+                let mut f: Vec<String> = m
+                    .folders
+                    .iter()
+                    .filter(|f| !inbox.contains(&f.as_str()))
+                    .cloned()
+                    .collect();
+                if let Some(a) = &archive
+                    && !f.contains(a)
+                {
+                    f.push(a.clone());
+                }
                 repo::set_folders(tx, &m.id, &f)?;
-                repo::refresh_thread(tx, thread_id, now)
-            })?;
+                moved += 1;
+            }
+            if moved > 0 {
+                repo::refresh_thread(tx, thread_id, now)?;
+            }
+            Ok(())
+        })?;
+        if moved > 0 {
+            self.0.notify.thread(ws, thread_id);
         }
-        self.0.notify.thread(ws, thread_id);
-        Ok(todo.len())
+        match first_err {
+            Some(e) => Err(e.into()),
+            None => Ok(moved),
+        }
     }
 
     /// Marks one message read at the provider and locally. `false` when it already was.
@@ -539,9 +556,13 @@ impl Mail {
         let mut archived = Vec::new();
         for (t, archive, _) in &threads {
             self.0.notify.thread(ws, t);
+            // one failing thread (mailbox down, auth paused) neither stops the others nor the
+            // candidate memories below: the threads are already `done`, so there is no retry
             if *archive {
-                self.archive_thread(ws, t).await?;
-                archived.push(t.clone());
+                match self.archive_thread(ws, t).await {
+                    Ok(_) => archived.push(t.clone()),
+                    Err(e) => tracing::warn!(thread = %t, "mail: archive on done: {e}"),
+                }
             }
         }
         for (t, _, newly) in &threads {

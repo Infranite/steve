@@ -38,7 +38,7 @@ use zeroize::Zeroizing;
 use super::utf7;
 use crate::adapter::{
     FetchedMessage, FlagChange, FolderInfo, MailAdapter, MailSink, PartMeta, ScopeMode, SendMeta,
-    SentRef, SyncReport, SyncState,
+    SentRef, SyncReport, SyncSession, SyncState,
 };
 use crate::config::MailConfig;
 use crate::error::AdapterError;
@@ -57,6 +57,8 @@ pub const FLAG_RECHECK_MS: i64 = 10 * 60 * 1000;
 /// IDLE is re-entered after this (RFC 2177: servers may drop it after 29 minutes).
 pub const IDLE_RENEW: Duration = Duration::from_secs(25 * 60);
 const NET_TIMEOUT: Duration = Duration::from_secs(30);
+/// LOGOUT is a courtesy: a server that does not answer it holds nothing up for long.
+const LOGOUT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Provider presets for the new-mailbox dialog (§1). `id` is the preset, not an adapter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -272,6 +274,11 @@ async fn timed<T>(
     tokio::time::timeout(NET_TIMEOUT, f)
         .await
         .map_err(|_| AdapterError::Transient("邮件服务器没有响应".into()))?
+}
+
+/// LOGOUT, bounded by [`LOGOUT_TIMEOUT`]; its outcome does not matter.
+async fn logout(mut s: Session) {
+    let _ = tokio::time::timeout(LOGOUT_TIMEOUT, s.logout()).await;
 }
 
 /// Reads one CRLF line byte by byte (no buffering beyond it: TLS starts right after).
@@ -655,7 +662,7 @@ fn item_of(attrs: &[AttributeValue<'_>]) -> Item {
 /// Runs a FETCH-like command and collects its FETCH responses (async-imap's `Fetch` does not expose
 /// `X-GM-THRID`, so the responses are read directly).
 async fn fetch(s: &mut Session, cmd: &str) -> Result<Vec<Item>, AdapterError> {
-    let tag = s.run_command(cmd).await.map_err(imap_err)?;
+    let tag = timed(async { s.run_command(cmd).await.map_err(imap_err) }).await?;
     let mut out = Vec::new();
     loop {
         let r = timed(async {
@@ -684,14 +691,17 @@ async fn fetch(s: &mut Session, cmd: &str) -> Result<Vec<Item>, AdapterError> {
 
 /// `UID STORE <uid> <op>FLAGS.SILENT (<flag>)`.
 async fn store_flag(s: &mut Session, uid: u32, op: &str, flag: &str) -> Result<(), AdapterError> {
-    let _: Vec<_> = s
-        .uid_store(uid.to_string(), format!("{op}FLAGS.SILENT ({flag})"))
-        .await
-        .map_err(imap_err)?
-        .try_collect()
-        .await
-        .map_err(imap_err)?;
-    Ok(())
+    timed(async {
+        let _: Vec<_> = s
+            .uid_store(uid.to_string(), format!("{op}FLAGS.SILENT ({flag})"))
+            .await
+            .map_err(imap_err)?
+            .try_collect()
+            .await
+            .map_err(imap_err)?;
+        Ok(())
+    })
+    .await
 }
 
 fn uid_set(uids: &[u32]) -> String {
@@ -744,7 +754,7 @@ impl ImapAdapter {
         sink: &mut dyn MailSink,
         report: &mut SyncReport,
     ) -> Result<(), AdapterError> {
-        let mb = s.examine(wire).await.map_err(imap_err)?;
+        let mb = timed(async { s.examine(wire).await.map_err(imap_err) }).await?;
         let validity = mb.uid_validity.map(i64::from).unwrap_or(0);
         if f.uidvalidity != Some(validity) {
             if f.uidvalidity.is_some() {
@@ -759,12 +769,14 @@ impl ImapAdapter {
         let backfill = first;
         let mut uids: Vec<u32> = if first {
             let since = search_date(now - sync_days.max(1) * 86_400_000);
-            let mut u: Vec<u32> = s
-                .uid_search(format!("SINCE {since}"))
-                .await
-                .map_err(imap_err)?
-                .into_iter()
-                .collect();
+            let mut u: Vec<u32> = timed(async {
+                s.uid_search(format!("SINCE {since}"))
+                    .await
+                    .map_err(imap_err)
+            })
+            .await?
+            .into_iter()
+            .collect();
             u.sort_unstable();
             let skip = u.len().saturating_sub(FIRST_SYNC_MAX);
             u.split_off(skip)
@@ -818,13 +830,15 @@ impl ImapAdapter {
                 );
             }
             items.sort_by_key(|i| i.uid);
+            let mut batch = Vec::with_capacity(items.len());
+            let mut top = None;
             for it in items {
                 let Some(uid) = it.uid else { continue };
                 let partial = it.body.is_none();
                 let Some(raw) = it.body.or(it.header) else {
                     continue;
                 };
-                sink.put(FetchedMessage {
+                batch.push(FetchedMessage {
                     ext_id: ext_id(&f.ext_id, validity, uid),
                     folder: f.ext_id.clone(),
                     mode: f.mode,
@@ -836,9 +850,15 @@ impl ImapAdapter {
                     size: it.size.map(i64::from).unwrap_or(0),
                     provider_thread: it.thrid.map(|t| t.to_string()),
                     backfill,
-                })?;
-                report.fetched += 1;
-                f.last_uid = Some(f.last_uid.unwrap_or(0).max(i64::from(uid)));
+                });
+                top = top.max(Some(i64::from(uid)));
+            }
+            // the cursor moves only once the whole chunk is stored
+            let n = batch.len();
+            sink.put_batch(batch).await?;
+            report.fetched += n;
+            if let Some(top) = top {
+                f.last_uid = Some(f.last_uid.unwrap_or(0).max(top));
             }
         }
         if first {
@@ -853,29 +873,29 @@ impl ImapAdapter {
                 && let (Some(old), Some(high)) = (f.modseq, mb.highest_modseq)
             {
                 if high as i64 > old {
-                    for it in fetch(
+                    let updates: Vec<_> = fetch(
                         s,
                         &format!("UID FETCH 1:{last} (UID FLAGS) (CHANGEDSINCE {old})"),
                     )
                     .await?
-                    {
-                        if let Some(uid) = it.uid {
-                            sink.flags(&ext_id(&f.ext_id, validity, uid), &it.flags)?;
-                            report.flag_updates += 1;
-                        }
-                    }
+                    .into_iter()
+                    .filter_map(|it| Some((ext_id(&f.ext_id, validity, it.uid?), it.flags)))
+                    .collect();
+                    report.flag_updates += updates.len();
+                    sink.flags_batch(updates).await?;
                 }
             } else if !caps.condstore
                 && f.flags_checked.is_none_or(|t| now - t >= FLAG_RECHECK_MS)
                 && mb.exists > 0
             {
                 let from = mb.exists.saturating_sub(FLAG_RECHECK_COUNT - 1).max(1);
-                for it in fetch(s, &format!("FETCH {from}:* (UID FLAGS)")).await? {
-                    if let Some(uid) = it.uid {
-                        sink.flags(&ext_id(&f.ext_id, validity, uid), &it.flags)?;
-                        report.flag_updates += 1;
-                    }
-                }
+                let updates: Vec<_> = fetch(s, &format!("FETCH {from}:* (UID FLAGS)"))
+                    .await?
+                    .into_iter()
+                    .filter_map(|it| Some((ext_id(&f.ext_id, validity, it.uid?), it.flags)))
+                    .collect();
+                report.flag_updates += updates.len();
+                sink.flags_batch(updates).await?;
                 f.flags_checked = Some(now);
             }
         }
@@ -886,6 +906,59 @@ impl ImapAdapter {
             f.modseq = mb.highest_modseq.map(|m| m as i64).or(f.modseq);
         }
         f.synced = Some(now);
+        Ok(())
+    }
+
+    /// [`MailAdapter::set_flags`] for one message over an open session.
+    async fn apply_flags(
+        s: &mut Session,
+        caps: Caps,
+        wires: &BTreeMap<String, (String, String)>,
+        ext: &str,
+        ch: &FlagChange,
+    ) -> Result<(), AdapterError> {
+        let (_, uid) = timed(Self::find_uid(s, ext, None, wires, true)).await?;
+        if let Some(seen) = ch.seen {
+            store_flag(s, uid, if seen { "+" } else { "-" }, "\\Seen").await?;
+        }
+        if let Some(fl) = ch.flagged {
+            store_flag(s, uid, if fl { "+" } else { "-" }, "\\Flagged").await?;
+        }
+        if ch.archive {
+            let target = wires
+                .values()
+                .find(|(_, role)| role == "archive")
+                .map(|(w, _)| w.clone())
+                .ok_or_else(|| AdapterError::Rejected("这个邮箱没有归档文件夹".into()))?;
+            if caps.moves {
+                timed(async {
+                    s.uid_mv(uid.to_string(), target.as_str())
+                        .await
+                        .map_err(imap_err)
+                })
+                .await?;
+            } else {
+                timed(async {
+                    s.uid_copy(uid.to_string(), target.as_str())
+                        .await
+                        .map_err(imap_err)
+                })
+                .await?;
+                store_flag(s, uid, "+", "\\Deleted").await?;
+                timed(async {
+                    let r: Vec<_> = s
+                        .uid_expunge(uid.to_string())
+                        .await
+                        .map_err(imap_err)?
+                        .try_collect()
+                        .await
+                        .map_err(imap_err)?;
+                    drop(r);
+                    Ok(())
+                })
+                .await?;
+            }
+        }
         Ok(())
     }
 
@@ -972,7 +1045,7 @@ impl ConnectionProvider for ImapAdapter {
         let password = cx.secret("password").await?;
         let (mut s, _) = timed(self.login(&st, &password)).await?;
         timed(async { list_folders(&mut s).await }).await?;
-        let _ = s.logout().await;
+        logout(s).await;
         let smtp = self.smtp(&st, &password)?;
         let ok = timed(async { smtp.test_connection().await.map_err(smtp_err) }).await?;
         if !ok {
@@ -989,7 +1062,7 @@ impl MailAdapter for ImapAdapter {
     async fn folders(&self, cx: &ConnCx) -> Result<Vec<FolderInfo>, AdapterError> {
         let (mut s, _) = self.session(cx).await?;
         let out = timed(list_folders(&mut s)).await?;
-        let _ = s.logout().await;
+        logout(s).await;
         Ok(out.into_iter().map(|(f, _)| f).collect())
     }
 
@@ -999,30 +1072,23 @@ impl MailAdapter for ImapAdapter {
         state: &mut SyncState,
         sink: &mut dyn MailSink,
     ) -> Result<SyncReport, AdapterError> {
+        let (_, session) = self.open_sync(cx).await?;
+        session.sync(state, sink).await
+    }
+
+    /// One login and one LIST serve both the folder list and the sync that follows.
+    async fn open_sync<'a>(
+        &'a self,
+        cx: &'a ConnCx,
+    ) -> Result<(Vec<FolderInfo>, Box<dyn SyncSession + 'a>), AdapterError> {
         let (mut s, caps) = self.session(cx).await?;
-        let wires = timed(Self::wire_names(&mut s)).await?;
-        let mut report = SyncReport::default();
-        for f in state.folders.iter_mut() {
-            if f.mode == ScopeMode::Ignore {
-                continue;
-            }
-            let Some((wire, _)) = wires.get(&f.ext_id) else {
-                continue;
-            };
-            Self::sync_folder(
-                &mut s,
-                caps,
-                wire,
-                f,
-                state.sync_days,
-                state.now,
-                sink,
-                &mut report,
-            )
-            .await?;
-        }
-        let _ = s.logout().await;
-        Ok(report)
+        let listed = timed(list_folders(&mut s)).await?;
+        let wires = listed
+            .iter()
+            .map(|(f, wire)| (f.ext_id.clone(), (wire.clone(), f.role.clone())))
+            .collect();
+        let folders = listed.into_iter().map(|(f, _)| f).collect();
+        Ok((folders, Box::new(ImapSync { s, caps, wires })))
     }
 
     async fn watch(
@@ -1033,7 +1099,7 @@ impl MailAdapter for ImapAdapter {
     ) -> Result<(), AdapterError> {
         let (mut s, caps) = self.session(cx).await?;
         if !caps.idle {
-            let _ = s.logout().await;
+            logout(s).await;
             return Err(AdapterError::Unsupported);
         }
         loop {
@@ -1081,7 +1147,7 @@ impl MailAdapter for ImapAdapter {
         let wires = timed(Self::wire_names(&mut s)).await?;
         let (_, uid) = timed(Self::find_uid(&mut s, ext, message_id, &wires, false)).await?;
         let items = timed(fetch(&mut s, &format!("UID FETCH {uid} (UID BODY.PEEK[])"))).await?;
-        let _ = s.logout().await;
+        logout(s).await;
         items
             .into_iter()
             .find_map(|i| i.body)
@@ -1091,40 +1157,43 @@ impl MailAdapter for ImapAdapter {
     async fn set_flags(&self, cx: &ConnCx, ext: &str, ch: &FlagChange) -> Result<(), AdapterError> {
         let (mut s, caps) = self.session(cx).await?;
         let wires = timed(Self::wire_names(&mut s)).await?;
-        let (_, uid) = timed(Self::find_uid(&mut s, ext, None, &wires, true)).await?;
-        if let Some(seen) = ch.seen {
-            store_flag(&mut s, uid, if seen { "+" } else { "-" }, "\\Seen").await?;
-        }
-        if let Some(fl) = ch.flagged {
-            store_flag(&mut s, uid, if fl { "+" } else { "-" }, "\\Flagged").await?;
-        }
-        if ch.archive {
-            let target = wires
-                .values()
-                .find(|(_, role)| role == "archive")
-                .map(|(w, _)| w.clone())
-                .ok_or_else(|| AdapterError::Rejected("这个邮箱没有归档文件夹".into()))?;
-            if caps.moves {
-                s.uid_mv(uid.to_string(), target.as_str())
-                    .await
-                    .map_err(imap_err)?;
-            } else {
-                s.uid_copy(uid.to_string(), target.as_str())
-                    .await
-                    .map_err(imap_err)?;
-                store_flag(&mut s, uid, "+", "\\Deleted").await?;
-                let r: Vec<_> = s
-                    .uid_expunge(uid.to_string())
-                    .await
-                    .map_err(imap_err)?
-                    .try_collect()
-                    .await
-                    .map_err(imap_err)?;
-                drop(r);
-            }
-        }
-        let _ = s.logout().await;
+        Self::apply_flags(&mut s, caps, &wires, ext, ch).await?;
+        logout(s).await;
         Ok(())
+    }
+
+    /// One session and one LIST for all of them (an archived thread is many messages; providers
+    /// throttle repeated logins).
+    async fn set_flags_many(
+        &self,
+        cx: &ConnCx,
+        ext_ids: &[&str],
+        ch: &FlagChange,
+    ) -> Vec<Result<(), AdapterError>> {
+        let opened = async {
+            let (mut s, caps) = self.session(cx).await?;
+            let wires = timed(Self::wire_names(&mut s)).await?;
+            Ok::<_, AdapterError>((s, caps, wires))
+        };
+        let (mut s, caps, wires) = match opened.await {
+            Ok(o) => o,
+            Err(e) => return vec![Err(e); ext_ids.len()],
+        };
+        let mut out = Vec::with_capacity(ext_ids.len());
+        for ext in ext_ids {
+            let r = Self::apply_flags(&mut s, caps, &wires, ext, ch).await;
+            // after a broken connection or a timeout the session is in no known state: the
+            // rest fail the same way
+            if let Err(e @ AdapterError::Transient(_)) = &r {
+                let e = e.clone();
+                out.push(r);
+                out.resize(ext_ids.len(), Err(e));
+                return out;
+            }
+            out.push(r);
+        }
+        logout(s).await;
+        out
     }
 
     async fn send(
@@ -1173,6 +1242,50 @@ impl MailAdapter for ImapAdapter {
         // The sender's copy deadline includes this final exchange too.
         s.logout().await.map_err(imap_err)?;
         Ok(())
+    }
+}
+
+/// The sync half of [`ImapAdapter::open_sync`]: the logged-in session and its LIST.
+struct ImapSync {
+    s: Session,
+    caps: Caps,
+    wires: BTreeMap<String, (String, String)>,
+}
+
+#[async_trait]
+impl SyncSession for ImapSync {
+    async fn sync(
+        self: Box<Self>,
+        state: &mut SyncState,
+        sink: &mut dyn MailSink,
+    ) -> Result<SyncReport, AdapterError> {
+        let ImapSync { mut s, caps, wires } = *self;
+        let mut report = SyncReport::default();
+        for f in state.folders.iter_mut() {
+            if f.mode == ScopeMode::Ignore {
+                continue;
+            }
+            let Some((wire, _)) = wires.get(&f.ext_id) else {
+                continue;
+            };
+            ImapAdapter::sync_folder(
+                &mut s,
+                caps,
+                wire,
+                f,
+                state.sync_days,
+                state.now,
+                sink,
+                &mut report,
+            )
+            .await?;
+        }
+        logout(s).await;
+        Ok(report)
+    }
+
+    async fn close(self: Box<Self>) {
+        logout(self.s).await;
     }
 }
 

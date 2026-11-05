@@ -120,8 +120,8 @@ async fn idle_can_be_ready_while_initial_sync_is_still_backfilling() {
             .await
     );
     assert!(
-        h.imap.logins() >= 3,
-        "the previous readiness heuristic is satisfied"
+        h.imap.logins() >= 2,
+        "the previous readiness heuristic (one sync login, one IDLE login) is satisfied"
     );
     assert!(
         !inbox_synced(&h, &conn),

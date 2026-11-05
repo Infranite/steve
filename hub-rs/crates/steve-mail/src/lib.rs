@@ -67,7 +67,7 @@ use steve_modules::accounts::connections::Connections;
 
 pub use adapter::{
     FetchedMessage, FlagChange, FolderInfo, FolderState, MailAdapter, MailSink, ScopeMode,
-    SendMeta, SentRef, SyncReport, SyncState,
+    SendMeta, SentRef, SyncReport, SyncSession, SyncState,
 };
 pub use adapters::ImapAdapter;
 pub use config::MailConfig;

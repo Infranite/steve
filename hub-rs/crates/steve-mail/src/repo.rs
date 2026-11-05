@@ -224,9 +224,9 @@ pub struct ThreadRow {
     pub created_by: String,
 }
 
-const THREAD_COLS: &str = "id, workspace_id, connection_id, thread_key, subject, last_at, count, unread, participants, state, visibility, created_by";
+pub(crate) const THREAD_COLS: &str = "id, workspace_id, connection_id, thread_key, subject, last_at, count, unread, participants, state, visibility, created_by";
 
-fn thread_row(r: &Row<'_>) -> rusqlite::Result<ThreadRow> {
+pub(crate) fn thread_row(r: &Row<'_>) -> rusqlite::Result<ThreadRow> {
     Ok(ThreadRow {
         id: r.get(0)?,
         workspace_id: r.get(1)?,
@@ -481,6 +481,39 @@ pub fn message_by_shape(
     .optional()?)
 }
 
+/// The columns of a message that a thread's list card shows.
+#[derive(Debug, Clone)]
+pub struct BriefMsg {
+    pub direction: String,
+    pub from_name: String,
+    pub from_addr: String,
+    pub from_party_id: Option<String>,
+    pub snippet: String,
+    pub has_attachments: bool,
+    pub event_id: Option<String>,
+}
+
+/// [`thread_messages`] narrowed to [`BriefMsg`]: no bodies, references or recipients.
+pub fn thread_brief_rows(c: &Connection, thread: &str) -> MailResult<Vec<BriefMsg>> {
+    let mut st = c.prepare_cached(
+        "SELECT direction, from_name, from_addr, from_party_id, snippet, has_attachments, event_id
+           FROM mail_messages WHERE thread_id = ? ORDER BY date, rowid",
+    )?;
+    Ok(st
+        .query_map([thread], |r| {
+            Ok(BriefMsg {
+                direction: r.get(0)?,
+                from_name: r.get(1)?,
+                from_addr: r.get(2)?,
+                from_party_id: r.get(3)?,
+                snippet: r.get(4)?,
+                has_attachments: r.get::<_, i64>(5)? != 0,
+                event_id: r.get(6)?,
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?)
+}
+
 pub fn thread_messages(c: &Connection, thread: &str) -> MailResult<Vec<MessageRow>> {
     let mut st = c.prepare_cached(&format!(
         "SELECT {MSG_COLS} FROM mail_messages WHERE thread_id = ? ORDER BY date, rowid"
@@ -658,18 +691,25 @@ pub fn attachments(c: &Connection, message: &str) -> MailResult<Vec<AttachmentRo
 // ---------------------------------------------------------------- retention, disconnect
 
 /// `(id, raw_path)` of messages older than `before` whose bodies are still kept.
+/// One page of expired, not yet purged messages as `(id, raw_path, date)`, in `(date, id)` order and
+/// strictly after `after`, so a row that cannot be purged does not come back on the next page.
 pub fn expired(
     c: &Connection,
     ws: &str,
     before: i64,
+    after: Option<(i64, &str)>,
     limit: i64,
-) -> MailResult<Vec<(String, Option<String>)>> {
+) -> MailResult<Vec<(String, Option<String>, i64)>> {
+    let (ad, ai) = after.map_or((None, None), |(d, i)| (Some(d), Some(i)));
     let mut st = c.prepare_cached(
-        "SELECT id, raw_path FROM mail_messages WHERE workspace_id = ? AND date < ? AND purged IS NULL
-          ORDER BY date LIMIT ?",
+        "SELECT id, raw_path, date FROM mail_messages WHERE workspace_id = ?1 AND date < ?2 AND purged IS NULL
+            AND (?3 IS NULL OR (date, id) > (?3, ?4))
+          ORDER BY date, id LIMIT ?5",
     )?;
     Ok(st
-        .query_map(params![ws, before, limit], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .query_map(params![ws, before, ad, ai, limit], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })?
         .collect::<rusqlite::Result<_>>()?)
 }
 
@@ -829,10 +869,11 @@ pub fn thread_drafts(c: &Connection, thread: &str) -> MailResult<Vec<DraftRow>> 
 
 /// Approved drafts whose delay is over (the send queue), oldest first; those of a connection that
 /// waits ([`WAITING`]: paused, to be authorized again) stay approved and aren't listed.
+/// Approved drafts whose time has come, as `(id, connection_id)`, oldest first.
 pub fn due_drafts(c: &Connection, now: i64, limit: i64) -> MailResult<Vec<(String, String)>> {
     let waiting = WAITING.map(|s| format!("'{s}'")).join(", ");
     let mut st = c.prepare_cached(&format!(
-        "SELECT d.id, d.workspace_id FROM mail_drafts d
+        "SELECT d.id, d.connection_id FROM mail_drafts d
           WHERE d.status = 'approved' AND d.send_at <= ?
             AND NOT EXISTS (SELECT 1 FROM connections c WHERE c.id = d.connection_id AND c.status IN ({waiting}))
           ORDER BY d.send_at LIMIT ?"
