@@ -477,9 +477,13 @@ impl Core {
                 "DELETE FROM settings WHERE workspace_id=? AND key=?",
                 rusqlite::params![ws, key],
             )?;
+            // strictly after the last message of its conversation: the turn's last word (a stop note)
+            // can be written in the same millisecond, and a tie would list them in either order
             let released = tx.execute(
-                "UPDATE messages SET created=?, meta=json_remove(meta,'$.held')
-                  WHERE id=? AND json_valid(meta) AND json_extract(meta,'$.held')=1",
+                "UPDATE messages SET created=MAX(?1, (SELECT MAX(m.created) + 1 FROM messages m
+                   WHERE m.workspace_id=messages.workspace_id AND m.space=messages.space)),
+                   meta=json_remove(meta,'$.held')
+                  WHERE id=?2 AND json_valid(meta) AND json_extract(meta,'$.held')=1",
                 rusqlite::params![now(), mid],
             )?;
             tx.commit()?;

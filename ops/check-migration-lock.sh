@@ -7,9 +7,15 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 DIR=hub-rs/crates/steve-store/migrations
 this=${1:-}
-# released versions, newest first, without the one being built (fetched one by one: CI checks out shallow)
+# the newest released version before the one being built (fetched one by one: CI checks out shallow); a
+# version built again later (a re-run) still compares with the one before it, not with what came after
 tags=$(git ls-remote --tags --refs origin 'v*') || { echo "✗ can't list the released versions"; exit 1; }
-prev=$(sed 's|.*refs/tags/||' <<<"$tags" | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | grep -vxF "${this:-none}" | sort -V | tail -1 || true)
+versions=$(sed 's|.*refs/tags/||' <<<"$tags" | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | grep -vxF "${this:-none}" || true)
+if [[ $this =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  prev=$(printf '%s\n' $versions "$this" | sort -V | grep -B1 -xF "$this" | grep -vxF "$this" || true)
+else
+  prev=$(printf '%s\n' $versions | sort -V | tail -1 || true)
+fi
 [ -n "$prev" ] || { echo "no released version: nothing to compare"; exit 0; }
 git rev-parse -q --verify "refs/tags/$prev" >/dev/null ||
   git fetch -q --depth 1 origin "refs/tags/$prev:refs/tags/$prev" || { echo "✗ can't fetch $prev"; exit 1; }
