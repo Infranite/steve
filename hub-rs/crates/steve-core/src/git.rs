@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 
 /// The git Steve runs: `STEVE_GIT` when set (a pinned build Steve manages), else `git` on `PATH`. Every git
 /// call of the domain layer goes through it, so one setting moves them all.
@@ -51,19 +52,52 @@ pub fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
         .arg(dir)
         .args(args)
         .env("GIT_EDITOR", "true")
+        .env("GIT_TERMINAL_PROMPT", "0")
         .stdin(Stdio::null())
         .output()
         .map_err(|e| e.to_string())?;
-    if out.status.success() {
-        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    outcome(
+        args,
+        out.status.success(),
+        &String::from_utf8_lossy(&out.stdout),
+        &String::from_utf8_lossy(&out.stderr),
+    )
+}
+
+/// How long a read of the repository through [`git_read`] may take. Generous: it only has to end a
+/// git that hangs (a helper waiting on something that never comes), never a slow one.
+const READ_DEADLINE: Duration = Duration::from_secs(120);
+
+/// [`git`] for a command that only reads (`status`, `rev-parse`, `rev-list`, `merge-base`): it takes no
+/// optional lock (so it never waits on a stale `index.lock`), never fetches a missing object, and is
+/// killed at [`READ_DEADLINE`]. A command that changes the repository goes through [`git`], whose
+/// half-done work a kill would leave behind.
+pub fn git_read(dir: &Path, args: &[&str]) -> Result<String, String> {
+    let mut cmd = command();
+    cmd.arg("-C")
+        .arg(dir)
+        .args(args)
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_NO_LAZY_FETCH", "1")
+        .env("GIT_TERMINAL_PROMPT", "0");
+    match crate::util::run_deadline(cmd, READ_DEADLINE) {
+        Ok((ok, out, err)) => outcome(args, ok, &out, &err),
+        Err(crate::util::RunError::Spawn(e)) => Err(e.to_string()),
+        Err(e) => Err(format!("git {}: {e}", args.join(" "))),
+    }
+}
+
+/// Trimmed stdout, or the trimmed stderr (≤300 chars) as the error.
+fn outcome(args: &[&str], ok: bool, out: &str, err: &str) -> Result<String, String> {
+    if ok {
+        Ok(out.trim().to_string())
     } else {
-        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        let err = if err.is_empty() {
+        let err = err.trim();
+        Err(if err.is_empty() {
             format!("git {} failed", args.join(" "))
         } else {
-            err
-        };
-        Err(js_head(&err, 300).to_string())
+            js_head(err, 300).to_string()
+        })
     }
 }
 
@@ -117,7 +151,14 @@ pub fn merge_base(dir: &Path, a: &str, b: &str) -> Result<Option<String>, String
     }
 }
 
+/// Whether a read-only git command succeeds (through [`git_read`], so it is killed at its deadline).
 fn succeeds(dir: &Path, args: &[&str]) -> bool {
+    git_read(dir, args).is_ok()
+}
+
+/// Whether a git command that changes the repository succeeds (through [`git`]: never killed, so it
+/// cannot leave half-done work behind).
+fn succeeds_write(dir: &Path, args: &[&str]) -> bool {
     git(dir, args).is_ok()
 }
 
@@ -150,7 +191,7 @@ pub enum Rebase {
 /// worktree is as before.
 pub fn rebase_onto(worktree: &Path, base: &str) -> Rebase {
     let inner = || -> Result<Rebase, String> {
-        let dirty = git(worktree, &["status", "--porcelain", "--untracked-files=no"])?;
+        let dirty = git_read(worktree, &["status", "--porcelain", "--untracked-files=no"])?;
         if !dirty.is_empty() {
             return Ok(Rebase::Dirty(
                 dirty.lines().take(10).collect::<Vec<_>>().join("\n"),
@@ -159,7 +200,7 @@ pub fn rebase_onto(worktree: &Path, base: &str) -> Rebase {
         if succeeds(worktree, &["merge-base", "--is-ancestor", base, "HEAD"]) {
             return Ok(Rebase::Ok { moved: false });
         }
-        let before = git(worktree, &["rev-parse", "HEAD"])?;
+        let before = git_read(worktree, &["rev-parse", "HEAD"])?;
         if let Err(e) = git(worktree, &["rebase", base]) {
             let files =
                 git(worktree, &["diff", "--name-only", "--diff-filter=U"]).unwrap_or_default();
@@ -171,7 +212,7 @@ pub fn rebase_onto(worktree: &Path, base: &str) -> Rebase {
             });
         }
         Ok(Rebase::Ok {
-            moved: git(worktree, &["rev-parse", "HEAD"])? != before,
+            moved: git_read(worktree, &["rev-parse", "HEAD"])? != before,
         })
     };
     inner().unwrap_or_else(Rebase::Error)
@@ -186,21 +227,21 @@ pub fn has_changes(repo: &Path, worktree: Option<&Path>, branch: &str, base: &st
     }
     let head = format!("refs/heads/{branch}");
     if succeeds(repo, &["rev-parse", "--verify", "--quiet", &head]) {
-        let ahead = git(repo, &["rev-list", "--count", &format!("{base}..{head}")]).ok()?;
+        let ahead = git_read(repo, &["rev-list", "--count", &format!("{base}..{head}")]).ok()?;
         if ahead.parse::<u64>().ok()? > 0 {
             return Some(true);
         }
     } else {
         /* the base must exist, or "no branch" may just be a repo we don't understand */
-        git(repo, &["rev-parse", "--verify", "--quiet", base]).ok()?;
+        git_read(repo, &["rev-parse", "--verify", "--quiet", base]).ok()?;
     }
     match worktree.filter(|w| w.exists()) {
         Some(w) if is_git(w) => {
             /* the worktree may have moved off the branch; its own commits count too */
-            let ahead = git(w, &["rev-list", "--count", &format!("{base}..HEAD")]).ok()?;
+            let ahead = git_read(w, &["rev-list", "--count", &format!("{base}..HEAD")]).ok()?;
             Some(
                 ahead.parse::<u64>().ok()? > 0
-                    || !git(w, &["status", "--porcelain"]).ok()?.is_empty(),
+                    || !git_read(w, &["status", "--porcelain"]).ok()?.is_empty(),
             )
         }
         Some(_) => None,
@@ -216,8 +257,8 @@ pub fn landed(repo: &Path, branch: &str, base: &str) -> bool {
     static MEMO: OnceLock<Mutex<Memo>> = OnceLock::new();
     let head = format!("refs/heads/{branch}");
     let (Ok(tip), Ok(at)) = (
-        git(repo, &["rev-parse", "--verify", "--quiet", &head]),
-        git(repo, &["rev-parse", "--verify", "--quiet", base]),
+        git_read(repo, &["rev-parse", "--verify", "--quiet", &head]),
+        git_read(repo, &["rev-parse", "--verify", "--quiet", base]),
     ) else {
         return false;
     };
@@ -292,7 +333,7 @@ pub fn tidy_worktree(
         /* `git worktree remove` without --force refuses modified or untracked files */
         wt = if only_merged && !landed {
             WorktreeTidy::Unmerged
-        } else if succeeds(repo, &["worktree", "remove", &worktree.to_string_lossy()]) {
+        } else if succeeds_write(repo, &["worktree", "remove", &worktree.to_string_lossy()]) {
             WorktreeTidy::Removed
         } else {
             WorktreeTidy::Dirty
@@ -307,7 +348,7 @@ pub fn tidy_worktree(
     if exists
         && merged
         && !matches!(wt, WorktreeTidy::Dirty | WorktreeTidy::Unmerged)
-        && succeeds(repo, &["branch", "-d", branch])
+        && succeeds_write(repo, &["branch", "-d", branch])
     {
         br = BranchTidy::Deleted;
     }

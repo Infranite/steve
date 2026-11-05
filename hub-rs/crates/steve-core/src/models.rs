@@ -176,6 +176,12 @@ pub const STEVE_DEFAULT_CLAUDE: &str = "claude-sonnet-5-5";
 /// At most this many models in one fallback list.
 pub const MAX_MODELS: usize = 5;
 
+/// A `day` no usage record at or after `since` is filed before, whatever zone its workspace counts days
+/// in (no zone is a day off UTC): bounds a query by `ts` so the `(workspace_id, day)` index serves it.
+fn day_floor(since: i64) -> String {
+    steve_stats::day(since - 86_400_000, steve_stats::tz(Some("UTC")))
+}
+
 /// The setting purpose a stats purpose is chosen by: `intent` (channel rules) is a kind of routing;
 /// `digest` and `other` have no setting and follow Steve.
 pub fn purpose_of(tag: &str) -> Option<&'static Purpose> {
@@ -553,14 +559,14 @@ impl Models {
     pub fn recent(&self, ws: &str, since: i64) -> BTreeMap<String, Value> {
         let rows = self
             .store
-            .with_conn(|c| {
+            .reader::<_, steve_store::StoreError>(|c| {
                 let mut st = c.prepare(
                     "SELECT purpose, harness, model, count(*), max(ts), sum(CASE WHEN ok = 0 THEN 1 ELSE 0 END) FROM usage_records
-                     WHERE workspace_id = ? AND source = 'gateway' AND ts >= ? AND model != ''
+                     WHERE workspace_id = ? AND day >= ? AND source = 'gateway' AND ts >= ? AND model != ''
                      GROUP BY purpose, harness, model",
                 )?;
                 let v = st
-                    .query_map(rusqlite::params![ws, since], |r| {
+                    .query_map(rusqlite::params![ws, day_floor(since), since], |r| {
                         Ok((
                             r.get::<_, String>(0)?,
                             r.get::<_, String>(1)?,
@@ -611,13 +617,13 @@ impl Models {
             _ => [CLAUDE_CODE, "claude-cli"],
         };
         self.store
-            .with_conn(|c| {
+            .reader::<_, steve_store::StoreError>(|c| {
                 let mut st = c.prepare(
                     "SELECT model, count(*), max(CASE WHEN ok = 1 THEN ts END), max(CASE WHEN ok = 0 THEN ts END) FROM usage_records
-                     WHERE workspace_id = ? AND harness IN (?, ?) AND ts >= ? AND model != '' GROUP BY model",
+                     WHERE workspace_id = ? AND day >= ? AND harness IN (?, ?) AND ts >= ? AND model != '' GROUP BY model",
                 )?;
                 let v = st
-                    .query_map(rusqlite::params![ws, names[0], names[1], since], |r| {
+                    .query_map(rusqlite::params![ws, day_floor(since), names[0], names[1], since], |r| {
                         Ok((
                             r.get::<_, String>(0)?,
                             json!({"calls": r.get::<_, i64>(1)?, "ok_at": r.get::<_, Option<i64>>(2)?, "failed_at": r.get::<_, Option<i64>>(3)?}),
@@ -1187,7 +1193,7 @@ mod tests {
                 .usage_add(&NewUsage {
                     workspace_id: "default".into(),
                     ts,
-                    day: "2026-11-02".into(),
+                    day: steve_stats::day(ts, None),
                     source: "gateway".into(),
                     purpose: purpose.into(),
                     harness: harness.into(),
@@ -1220,6 +1226,19 @@ mod tests {
         assert_eq!(r["route"]["used"][0]["harness"], json!("claude-code"));
         assert_eq!(r["route"]["used"][1]["failed"], json!(1));
         assert!(!r.contains_key("chat"), "older than the window");
+    }
+
+    /// The day bound of the usage queries never cuts a record of the window, in any zone.
+    #[test]
+    fn the_day_floor_is_not_after_any_zone_s_day() {
+        let since = steve_store::now();
+        for z in ["Pacific/Kiritimati", "Etc/GMT+12", "Asia/Shanghai", "UTC"] {
+            assert!(
+                day_floor(since) <= steve_stats::day(since, steve_stats::tz(Some(z))),
+                "{z}"
+            );
+        }
+        assert!(day_floor(since) <= steve_stats::day(since, None));
     }
 
     #[test]

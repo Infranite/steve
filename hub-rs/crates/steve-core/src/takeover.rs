@@ -88,7 +88,7 @@ pub fn rule_text(rule: &str) -> &'static str {
 }
 
 fn head_of(cwd: &str) -> Option<String> {
-    crate::git::git(Path::new(cwd), &["rev-parse", "HEAD"]).ok()
+    crate::git::git_read(Path::new(cwd), &["rev-parse", "HEAD"]).ok()
 }
 
 impl Tx<'_> {
@@ -602,51 +602,27 @@ pub(crate) fn build_of(runs: &Value, commit: &str) -> Build {
 
 /// `gh run list` for the runs `tag` started, with a deadline.
 fn query_build(gh: &Path, slug: &str, tag: &str, commit: &str) -> Build {
-    let child = std::process::Command::new(gh)
-        .args([
-            "run",
-            "list",
-            "--repo",
-            slug,
-            "--branch",
-            tag,
-            "--limit",
-            "10",
-            "--json",
-            "databaseId,status,conclusion,url,headSha,workflowName",
-        ])
-        .env("GH_PROMPT_DISABLED", "1")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn();
-    let mut child = match child {
-        Ok(c) => c,
-        Err(e) => return Build::Unknown(format!("gh 不可用：{e}")),
+    let mut cmd = std::process::Command::new(gh);
+    cmd.args([
+        "run",
+        "list",
+        "--repo",
+        slug,
+        "--branch",
+        tag,
+        "--limit",
+        "10",
+        "--json",
+        "databaseId,status,conclusion,url,headSha,workflowName",
+    ])
+    .env("GH_PROMPT_DISABLED", "1");
+    let out = match crate::util::run_deadline(cmd, GH_DEADLINE) {
+        Ok((true, out, _)) => out,
+        Ok((false, _, e)) => return Build::Unknown(js_head(e.trim(), 200).to_string()),
+        Err(crate::util::RunError::Spawn(e)) => return Build::Unknown(format!("gh 不可用：{e}")),
+        Err(_) => return Build::Unknown("gh 超时".into()),
     };
-    let end = std::time::Instant::now() + GH_DEADLINE;
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) if std::time::Instant::now() < end => {
-                std::thread::sleep(Duration::from_millis(100))
-            }
-            _ => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Build::Unknown("gh 超时".into());
-            }
-        }
-    }
-    let out = match child.wait_with_output() {
-        Ok(o) => o,
-        Err(e) => return Build::Unknown(e.to_string()),
-    };
-    if !out.status.success() {
-        let e = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        return Build::Unknown(js_head(&e, 200).to_string());
-    }
-    match serde_json::from_slice::<Value>(&out.stdout) {
+    match serde_json::from_str::<Value>(&out) {
         Ok(v) => build_of(&v, commit),
         Err(e) => Build::Unknown(e.to_string()),
     }

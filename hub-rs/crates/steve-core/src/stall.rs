@@ -59,11 +59,11 @@ impl Tx<'_> {
         }
         let mut out = vec![];
         for ws in self.db().workspace_ids()? {
-            for i in self.db().items_all(&ws)? {
-                /* only work in progress stalls; a closing waits on its own gate */
-                if i.status != "run" || i.archived || i.phase != crate::cycle::ACTIVE {
+            /* only work in progress stalls; a closing waits on its own gate */
+            for id in self.db().items_running(&ws)? {
+                let Some(i) = self.db().item(&id)? else {
                     continue;
-                }
+                };
                 let Some(s) = self.active_session(&i.id)? else {
                     continue;
                 };

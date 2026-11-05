@@ -129,19 +129,33 @@ impl Core {
     /// Poll `releases/last.json` every 3 s and report when it changes (`fs.watchFile`). Runs forever.
     pub async fn watch_releases(self) {
         let f = self.config().releases_last();
-        let one = |f: &Path| std::fs::metadata(f).and_then(|m| m.modified()).ok();
-        let stamp = |f: &Path| (one(f), one(&f.with_file_name("rollback.json")));
+        fn one(f: &Path) -> Option<SystemTime> {
+            std::fs::metadata(f).and_then(|m| m.modified()).ok()
+        }
+        fn stamp(f: &Path) -> (Option<SystemTime>, Option<SystemTime>) {
+            (one(f), one(&f.with_file_name("rollback.json")))
+        }
         let mut last: (Option<SystemTime>, Option<SystemTime>) = stamp(&f);
         let mut tick = tokio::time::interval(Duration::from_secs(3));
         loop {
             tick.tick().await;
-            let cur = stamp(&f);
-            /* a pending result is looked at again on every tick: its script may die without touching the file */
-            if cur != last || pending(&f) {
-                last = cur;
-                if let Err(e) = self.report_release() {
+            /* the files are read and the result reported (the core's lock, the store) off the runtime's
+             * workers */
+            let (c, f, seen) = (self.clone(), f.clone(), last);
+            let looked = tokio::task::spawn_blocking(move || {
+                let cur = stamp(&f);
+                /* a pending result is looked at again on every tick: its script may die without touching the file */
+                if (cur != seen || pending(&f))
+                    && let Err(e) = c.report_release()
+                {
                     tracing::error!("report release {e}");
                 }
+                cur
+            })
+            .await;
+            match looked {
+                Ok(cur) => last = cur,
+                Err(e) => tracing::error!("report release task {e}"),
             }
         }
     }

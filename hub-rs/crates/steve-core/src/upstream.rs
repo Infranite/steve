@@ -7,10 +7,9 @@
 //! the git work. [`probe`] talks to the remote (fetch, `ls-remote`) with a deadline and must never run
 //! under the core's lock: callers run it on a thread of its own and come back with the result.
 
-use std::io::Read;
 use std::path::Path;
 use std::process::Stdio;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::git::git;
 use crate::util::js_head;
@@ -196,59 +195,19 @@ pub fn push_head(dir: &Path, branch: &str) -> Result<(), String> {
     git_net(dir, &["push", "--quiet", "origin", &refspec]).map(|_| ())
 }
 
-/// `git args…` with a deadline (network calls). The output is drained while the command runs.
+/// `git args…` with a deadline (network calls). The output is drained while the command runs, and at the
+/// deadline git goes with whatever it started (`ssh`, `git-remote-https`, a credential helper).
 fn git_net(dir: &Path, args: &[&str]) -> Result<String, String> {
-    let mut child = crate::git::command()
-        .arg("-C")
+    let mut cmd = crate::git::command();
+    cmd.arg("-C")
         .arg(dir)
         .args(args)
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| e.to_string())?;
-    let drain = |r: Option<Box<dyn Read + Send>>| {
-        std::thread::spawn(move || {
-            let mut s = String::new();
-            if let Some(mut r) = r {
-                let _ = r.read_to_string(&mut s);
-            }
-            s
-        })
-    };
-    let out = drain(
-        child
-            .stdout
-            .take()
-            .map(|o| Box::new(o) as Box<dyn Read + Send>),
-    );
-    let err = drain(
-        child
-            .stderr
-            .take()
-            .map(|o| Box::new(o) as Box<dyn Read + Send>),
-    );
-    let end = Instant::now() + NET_DEADLINE;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(s)) => break Some(s),
-            Ok(None) if Instant::now() < end => std::thread::sleep(Duration::from_millis(50)),
-            _ => {
-                let _ = child.kill();
-                let _ = child.wait();
-                break None;
-            }
-        }
-    };
-    let (out, err) = (
-        out.join().unwrap_or_default(),
-        err.join().unwrap_or_default(),
-    );
-    match status {
-        Some(s) if s.success() => Ok(out.trim().to_string()),
-        Some(_) => Err(js_head(err.trim(), 300).to_string()),
-        None => Err(format!("git {} 超时", args.first().unwrap_or(&""))),
+        .env("GIT_TERMINAL_PROMPT", "0");
+    match crate::util::run_deadline(cmd, NET_DEADLINE) {
+        Ok((true, out, _)) => Ok(out.trim().to_string()),
+        Ok((false, _, err)) => Err(js_head(err.trim(), 300).to_string()),
+        Err(crate::util::RunError::Spawn(e)) => Err(e.to_string()),
+        Err(_) => Err(format!("git {} 超时", args.first().unwrap_or(&""))),
     }
 }
 

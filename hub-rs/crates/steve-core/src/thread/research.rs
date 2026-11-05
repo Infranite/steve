@@ -13,7 +13,7 @@ use crate::repo::{Bot, FileRef, HubEvent, Project};
 use crate::util::{js_head, now};
 use async_trait::async_trait;
 use serde_json::{Value, json};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use steve_store::RunPatch;
 use tokio::sync::mpsc;
@@ -189,7 +189,7 @@ pub(crate) struct InlineJob {
     /// the Steve message this answer continues (suggestion card “在这里出方案”, “改成在这里回答”)
     pub reply_to: Option<String>,
     pub run: Option<String>,
-    pub stop: Arc<AtomicBool>,
+    pub stop: super::Stop,
     pub t0: i64,
     /// a follow-up of a recent research answer
     pub resume: Option<ResumeFrom>,
@@ -202,7 +202,7 @@ pub(crate) struct InlineJob {
 struct Active {
     run: Option<String>,
     kind: Inline,
-    stop: Arc<AtomicBool>,
+    stop: super::Stop,
 }
 
 #[derive(Default)]
@@ -214,6 +214,8 @@ struct LaneState {
 pub(crate) struct InlineLane {
     tx: mpsc::UnboundedSender<InlineJob>,
     st: Arc<Mutex<LaneState>>,
+    /// told whenever an answer or research ends or leaves the queue (`turn_done` waits on it)
+    idle: Arc<tokio::sync::Notify>,
 }
 
 /// `steve.draft` at most every [`DRAFT_EVERY`] ms, never twice the same.
@@ -221,7 +223,7 @@ struct Drafts<'a> {
     core: &'a Core,
     ws: &'a str,
     mid: &'a str,
-    stop: &'a AtomicBool,
+    stop: &'a super::Stop,
     last: Mutex<(i64, String, String)>,
     /// an IM conversation's answer: nothing streams to the web's conversation
     quiet: bool,
@@ -231,7 +233,7 @@ impl Drafts<'_> {
     fn send(&self, thought: &str, text: &str) {
         let mut l = lock(&self.last);
         if self.quiet
-            || self.stop.load(Ordering::SeqCst)
+            || self.stop.is_stopped()
             || now() - l.0 < DRAFT_EVERY
             || (l.1 == thought && l.2 == text)
         {
@@ -346,7 +348,7 @@ impl Core {
         let st = lock(&l.st);
         match &st.running {
             Some(a) => {
-                a.stop.store(true, Ordering::SeqCst);
+                a.stop.stop();
                 true
             }
             None => false,
@@ -381,7 +383,7 @@ impl Core {
         let Some((stop, running)) = found else {
             return Ok(false);
         };
-        stop.store(true, Ordering::SeqCst);
+        stop.stop();
         if !running {
             let th = self.store().store().thread();
             if let Some(r) = th.run(run)? {
@@ -405,43 +407,17 @@ impl Core {
 
     /// Queue an answer or research run; `false` when the queue is full (the caller says so).
     pub(crate) fn enqueue_inline(&self, ws: &str, mut job: InlineJob) -> Result<bool> {
+        /* held to the end: the job is sent under the map's lock, and an idle lane only goes under it */
         let mut lanes = lock(&self.0.thread.inline);
-        let lane = lanes.entry(lane_key(ws, &job.space)).or_insert_with(|| {
-            let (tx, mut rx) = mpsc::unbounded_channel::<InlineJob>();
-            let st = Arc::new(Mutex::new(LaneState::default()));
-            let core = self.clone();
-            let w = ws.to_string();
-            let s = st.clone();
-            tokio::spawn(async move {
-                while let Some(j) = rx.recv().await {
-                    let _activity = core.store().store().activity("thread_answer").await;
-                    {
-                        let mut g = lock(&s);
-                        g.waiting.retain(|a| !Arc::ptr_eq(&a.stop, &j.stop));
-                        if j.stop.load(Ordering::SeqCst) {
-                            continue;
-                        }
-                        g.running = Some(Active {
-                            run: j.run.clone(),
-                            kind: j.kind,
-                            stop: j.stop.clone(),
-                        });
-                    }
-                    if let Err(e) = core.store().store().admitted(core.run_inline(&w, &j)).await {
-                        tracing::error!("inline answer in {w}: {e}");
-                        let _ = core.post(
-                            &w,
-                            &j.space,
-                            &format!("（出错了：{}）", js_head(&e.to_string(), 120)),
-                            None,
-                            Some(&json!({"origin": j.origin, "error": true})),
-                        );
-                    }
-                    lock(&s).running = None;
-                }
-            });
-            InlineLane { tx, st }
-        });
+        let key = lane_key(ws, &job.space);
+        if lanes.get(&key).is_some_and(|l| l.tx.is_closed()) {
+            /* its worker is gone: a new lane takes over, so the conversation is not stuck */
+            tracing::error!("inline lane of {ws} was gone; starting it again");
+            lanes.remove(&key);
+        }
+        let lane = lanes
+            .entry(key.clone())
+            .or_insert_with(|| self.inline_lane(ws, &key));
         let queued = {
             let mut st = lock(&lane.st);
             let busy = st.running.is_some() || !st.waiting.is_empty();
@@ -480,7 +456,7 @@ impl Core {
             if let Some(a) = lock(&lane.st)
                 .waiting
                 .iter_mut()
-                .find(|a| Arc::ptr_eq(&a.stop, &job.stop))
+                .find(|a| a.stop.same(&job.stop))
             {
                 a.run = Some(r.id.clone());
             }
@@ -497,6 +473,81 @@ impl Core {
             tracing::error!("inline lane of {ws} is gone");
         }
         Ok(true)
+    }
+
+    /// The `turn_done` signal of the main conversation's inline lane, if it has one.
+    pub(crate) fn inline_idle(&self, ws: &str) -> Option<Arc<tokio::sync::Notify>> {
+        lock(&self.0.thread.inline).get(ws).map(|l| l.idle.clone())
+    }
+
+    /// An inline lane `key` of workspace `ws`: one answer or research at a time, each on a task of its
+    /// own so a panic loses that one only. It goes after [`super::LANE_IDLE`] with nothing to do.
+    fn inline_lane(&self, ws: &str, key: &str) -> InlineLane {
+        let (tx, mut rx) = mpsc::unbounded_channel::<InlineJob>();
+        let st = Arc::new(Mutex::new(LaneState::default()));
+        let idle = Arc::new(tokio::sync::Notify::new());
+        let me = tx.downgrade();
+        let core = self.clone();
+        let (w, key) = (ws.to_string(), key.to_string());
+        let (s, done) = (st.clone(), idle.clone());
+        tokio::spawn(async move {
+            loop {
+                let j = match tokio::time::timeout(super::LANE_IDLE, rx.recv()).await {
+                    Ok(Some(j)) => j,
+                    Ok(None) => return,
+                    Err(_) => {
+                        let mut lanes = lock(&core.0.thread.inline);
+                        let busy = {
+                            let g = lock(&s);
+                            g.running.is_some() || !g.waiting.is_empty()
+                        };
+                        if busy || !rx.is_empty() {
+                            continue;
+                        }
+                        if me.upgrade().is_some_and(|me| {
+                            lanes.get(&key).is_some_and(|l| l.tx.same_channel(&me))
+                        }) {
+                            lanes.remove(&key);
+                        }
+                        return;
+                    }
+                };
+                let _activity = core.store().store().activity("thread_answer").await;
+                {
+                    let mut g = lock(&s);
+                    g.waiting.retain(|a| !a.stop.same(&j.stop));
+                    if j.stop.is_stopped() {
+                        drop(g);
+                        done.notify_waiters();
+                        continue;
+                    }
+                    g.running = Some(Active {
+                        run: j.run.clone(),
+                        kind: j.kind,
+                        stop: j.stop.clone(),
+                    });
+                }
+                let (c, w2) = (core.clone(), w.clone());
+                let run = tokio::spawn(async move {
+                    if let Err(e) = c.store().store().admitted(c.run_inline(&w2, &j)).await {
+                        tracing::error!("inline answer in {w2}: {e}");
+                        let _ = c.post(
+                            &w2,
+                            &j.space,
+                            &format!("（出错了：{}）", js_head(&e.to_string(), 120)),
+                            None,
+                            Some(&json!({"origin": j.origin, "error": true})),
+                        );
+                    }
+                });
+                if let Err(e) = run.await {
+                    tracing::error!("inline answer in {w} failed: {e}");
+                }
+                lock(&s).running = None;
+                done.notify_waiters();
+            }
+        });
+        InlineLane { tx, st, idle }
     }
 
     /// The user message shows “排队中” while its answer waits.
@@ -544,7 +595,7 @@ impl Core {
                         id,
                         &RunPatch {
                             status: Some(
-                                if j.stop.load(Ordering::SeqCst) {
+                                if j.stop.is_stopped() {
                                     "stopped"
                                 } else if answer.is_ok() {
                                     "done"
@@ -666,9 +717,9 @@ impl Core {
                     &on_draft,
                 ),
             ) => Some(a),
-            _ = super::until_stopped(&j.stop) => None,
+            _ = j.stop.stopped() => None,
         };
-        let Some(a) = a.filter(|_| !j.stop.load(Ordering::SeqCst)) else {
+        let Some(a) = a.filter(|_| !j.stop.is_stopped()) else {
             /* what was written so far stays, marked as stopped */
             let partial = lock(&drafts.last).2.trim().to_string();
             let text = if partial.is_empty() {
@@ -714,7 +765,7 @@ impl Core {
     ) -> Result<()> {
         let a0 = now();
         let r = host.answer(ws, &j.space, &j.origin).await;
-        if j.stop.load(Ordering::SeqCst) {
+        if j.stop.is_stopped() {
             self.post(
                 ws,
                 &j.space,
@@ -820,7 +871,7 @@ impl Core {
             files: j.files.clone(),
             earlier_files: j.earlier.clone(),
             resume: j.resume.clone(),
-            stop: j.stop.clone(),
+            stop: j.stop.flag(),
             mcp: Some(crate::McpEndpoint {
                 url: format!("http://127.0.0.1:{}/mcp", self.config().port),
                 token,
@@ -847,7 +898,7 @@ impl Core {
             first_text: Mutex::new(None),
         };
         let mut out = r.research(req, &sink).await;
-        if j.stop.load(Ordering::SeqCst) && out.end == RunEnd::Done {
+        if j.stop.is_stopped() && out.end == RunEnd::Done {
             out.end = RunEnd::Stopped;
         }
         let tools = lock(&steps).tools.len() as i64;

@@ -9,10 +9,9 @@
 //! branch's rules. Never under the core's lock.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::Read;
 use std::path::Path;
-use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::process::Command;
+use std::time::Duration;
 
 use serde::Serialize;
 use serde_json::Value;
@@ -1020,77 +1019,9 @@ fn local_git(dir: &Path, args: &[&str]) -> Result<String, String> {
     }
 }
 
-/// Runs `cmd` in a process group of its own and reads its output meanwhile: `(succeeded, stdout,
-/// stderr)`. At `deadline` the whole group is killed (a wrapper's children too), and output still
-/// held open by something it left behind is not waited for.
-fn run(mut cmd: Command, deadline: Duration) -> Result<(bool, String, String), String> {
-    use std::os::unix::process::CommandExt;
-    use std::sync::mpsc;
-    let mut child = cmd
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .process_group(0)
-        .spawn()
-        .map_err(|e| format!("启动不了：{e}"))?;
-    let group = child.id() as i32;
-    let kill_group = || {
-        // SAFETY: a plain kill(2) of the group this child leads; while any member lives the id is
-        // the group's and can't be another process's
-        unsafe { libc::kill(-group, libc::SIGKILL) };
-    };
-    let (tx, rx) = mpsc::channel();
-    let pipes: [Option<Box<dyn Read + Send>>; 2] = [
-        child
-            .stdout
-            .take()
-            .map(|o| Box::new(o) as Box<dyn Read + Send>),
-        child
-            .stderr
-            .take()
-            .map(|o| Box::new(o) as Box<dyn Read + Send>),
-    ];
-    for (n, pipe) in pipes.into_iter().enumerate() {
-        let tx = tx.clone();
-        std::thread::spawn(move || {
-            let mut s = String::new();
-            if let Some(mut r) = pipe {
-                let _ = r.read_to_string(&mut s);
-            }
-            let _ = tx.send((n, s));
-        });
-    }
-    drop(tx);
-    let end = Instant::now() + deadline;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(s)) => break Some(s),
-            Ok(None) if Instant::now() < end => std::thread::sleep(Duration::from_millis(20)),
-            _ => {
-                kill_group();
-                let _ = child.wait();
-                break None;
-            }
-        }
-    };
-    let mut out = [String::new(), String::new()];
-    for _ in 0..2 {
-        let left = end
-            .saturating_duration_since(Instant::now())
-            .max(Duration::from_millis(500));
-        match rx.recv_timeout(left) {
-            Ok((n, s)) => out[n] = s,
-            Err(_) => {
-                kill_group();
-                return Err("超时：输出一直没有结束".into());
-            }
-        }
-    }
-    let [o, e] = out;
-    match status {
-        Some(s) => Ok((s.success(), o, e)),
-        None => Err(format!("超时（{} 秒）", deadline.as_secs())),
-    }
+/// [`crate::util::run_deadline`], its failure in words.
+fn run(cmd: Command, deadline: Duration) -> Result<(bool, String, String), String> {
+    crate::util::run_deadline(cmd, deadline).map_err(|e| e.to_string())
 }
 
 fn join<'a>(xs: impl IntoIterator<Item = &'a String>) -> String {
@@ -1172,38 +1103,6 @@ mod tests {
         assert_eq!(triggers("on: &events\n  push:\n"), None);
         assert_eq!(triggers("on:\n  - {push: x}\n"), None);
         assert_eq!(triggers("on: [push\n"), None);
-    }
-
-    #[test]
-    fn a_command_and_what_it_started_end_at_the_deadline() {
-        let mark = tempfile::tempdir().unwrap();
-        let alive = mark.path().join("alive");
-        /* a wrapper that leaves a child holding its output open, and one that hangs itself */
-        for script in [
-            format!("(sleep 5; touch {}) & echo started", alive.display()),
-            format!("sleep 5; touch {}", alive.display()),
-        ] {
-            let mut cmd = Command::new("/bin/sh");
-            cmd.args(["-c", &script]);
-            let t = Instant::now();
-            assert!(run(cmd, Duration::from_millis(300)).is_err(), "{script}");
-            assert!(
-                t.elapsed() < Duration::from_secs(3),
-                "{script}: {:?}",
-                t.elapsed()
-            );
-        }
-        std::thread::sleep(Duration::from_secs(6));
-        assert!(
-            !alive.exists(),
-            "what the command started was killed with it"
-        );
-        let mut ok = Command::new("/bin/sh");
-        ok.args(["-c", "echo out; echo err >&2; exit 3"]);
-        assert_eq!(
-            run(ok, Duration::from_secs(5)).unwrap(),
-            (false, "out\n".into(), "err\n".into())
-        );
     }
 
     #[test]

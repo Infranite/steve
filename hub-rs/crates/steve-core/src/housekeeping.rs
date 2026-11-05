@@ -53,8 +53,12 @@ impl Core {
         let mut tick = tokio::time::interval(Duration::from_secs(3600));
         loop {
             tick.tick().await;
-            if let Err(e) = self.housekeeping() {
-                tracing::error!("housekeeping {e}");
+            /* it waits on the core's lock and writes the store: off the runtime's workers */
+            let c = self.clone();
+            match tokio::task::spawn_blocking(move || c.housekeeping()).await {
+                Ok(Err(e)) => tracing::error!("housekeeping {e}"),
+                Err(e) => tracing::error!("housekeeping task {e}"),
+                Ok(Ok(())) => {}
             }
         }
     }

@@ -40,6 +40,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use steve_modules::contacts::item_people::{self, Mention};
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 static REF: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^#?([A-Z]{1,6}-\d+)\b\s*").expect("valid regex"));
@@ -234,14 +235,39 @@ pub(crate) fn lane_key(ws: &str, space: &str) -> String {
     }
 }
 
-/// How often a message waiting for the turn before it to end looks again, in ms.
-const TURN_POLL: u64 = 100;
+/// How long a conversation's lane waits for its next message before it goes (a new message starts
+/// it again). Short in tests, so they go through it.
+const LANE_IDLE: std::time::Duration =
+    std::time::Duration::from_millis(if cfg!(test) { 300 } else { 600_000 });
 
-/// Resolves once `flag` is set: raced against a model call, the user's stop ends it at once (the
-/// harness process is killed with the dropped call) instead of after the whole reply is written.
-pub(crate) async fn until_stopped(flag: &AtomicBool) {
-    while !flag.load(Ordering::SeqCst) {
-        tokio::time::sleep(std::time::Duration::from_millis(TURN_POLL)).await;
+/// The user's stop of a reply or an answer being prepared: set once, never cleared.
+#[derive(Clone, Default)]
+pub(crate) struct Stop {
+    /// what a research executor reads ([`research::ResearchRequest::stop`])
+    flag: Arc<AtomicBool>,
+    token: CancellationToken,
+}
+
+impl Stop {
+    pub(crate) fn stop(&self) {
+        self.flag.store(true, Ordering::SeqCst);
+        self.token.cancel();
+    }
+    pub(crate) fn is_stopped(&self) -> bool {
+        self.flag.load(Ordering::SeqCst)
+    }
+    /// Resolves once stopped: raced against a model call, the user's stop ends it at once (the
+    /// harness process is killed with the dropped call) instead of after the whole reply is written.
+    pub(crate) async fn stopped(&self) {
+        self.token.cancelled().await
+    }
+    /// The flag a research executor reads.
+    pub(crate) fn flag(&self) -> Arc<AtomicBool> {
+        self.flag.clone()
+    }
+    /// The same stop (the same job), not just an equal one.
+    pub(crate) fn same(&self, other: &Stop) -> bool {
+        Arc::ptr_eq(&self.flag, &other.flag)
     }
 }
 
@@ -252,7 +278,7 @@ pub(crate) struct Lanes {
     lanes: Mutex<HashMap<String, mpsc::UnboundedSender<Job>>>,
     admitted: Mutex<HashSet<String>>,
     /// the message being routed, per [`lane_key`]; its flag stops it
-    inflight: Mutex<HashMap<String, Arc<AtomicBool>>>,
+    inflight: Mutex<HashMap<String, Stop>>,
     promoting: Mutex<HashMap<String, Promotion>>,
     /// answers and research runs, one at a time per workspace (§4.6)
     inline: Mutex<HashMap<String, research::InlineLane>>,
@@ -441,9 +467,10 @@ impl Core {
         if lock(&self.0.thread.inflight).contains_key(ws) || self.inline_busy(ws) {
             return Ok(true);
         }
-        Ok(self.store().store().with_conn(|c| {
+        /* a key range rather than `LIKE`, which is case-insensitive and so can't seek the settings key */
+        Ok(self.store().store().reader::<_, steve_store::StoreError>(|c| {
             Ok(c.query_row(
-                "SELECT EXISTS(SELECT 1 FROM settings WHERE workspace_id=? AND key LIKE 'thread.pending.%'
+                "SELECT EXISTS(SELECT 1 FROM settings WHERE workspace_id=? AND key >= 'thread.pending.' AND key < 'thread.pending/'
                    AND json_valid(value) AND json_extract(value,'$.conv.space')=?)",
                 rusqlite::params![ws, MAIN],
                 |r| r.get::<_, bool>(0),
@@ -451,11 +478,30 @@ impl Core {
         })?)
     }
 
+    /// How many routing and inline lanes are running.
+    #[cfg(test)]
+    pub(crate) fn lanes_open(&self) -> (usize, usize) {
+        (
+            lock(&self.0.thread.lanes).len(),
+            lock(&self.0.thread.inline).len(),
+        )
+    }
+
     /// Waits until the main conversation's answer or research (and those queued behind it) is done:
     /// a message said meanwhile is routed after the turn, with its reply in the history.
     async fn turn_done(&self, ws: &str) {
-        while self.inline_busy(ws) {
-            tokio::time::sleep(std::time::Duration::from_millis(TURN_POLL)).await;
+        loop {
+            /* listen before looking, so an end in between is not missed */
+            let Some(idle) = self.inline_idle(ws) else {
+                return;
+            };
+            let ended = idle.notified();
+            tokio::pin!(ended);
+            ended.as_mut().enable();
+            if !self.inline_busy(ws) {
+                return;
+            }
+            ended.await;
         }
     }
 
@@ -600,41 +646,85 @@ impl Core {
         if !lock(&self.0.thread.admitted).insert(job.mid.clone()) {
             return;
         }
+        /* sent under the map's lock: an idle lane only goes under it too, and only with nothing queued */
         let mut lanes = lock(&self.0.thread.lanes);
+        let key = lane_key(ws, &job.conv.space);
         let tx = lanes
-            .entry(lane_key(ws, &job.conv.space))
-            .or_insert_with(|| {
-                let (tx, mut rx) = mpsc::unbounded_channel::<Job>();
-                let core = self.clone();
-                let w = ws.to_string();
-                tokio::spawn(async move {
-                    while let Some(j) = rx.recv().await {
-                        if !j.conv.guest() {
-                            core.turn_done(&w).await;
-                        }
-                        let _activity = core.store().store().activity("thread_router").await;
-                        let j = match core.claim(&w, &j.mid) {
-                            Ok(Some(job)) => job,
-                            Ok(None) => {
-                                /* withdrawn while it waited */
-                                lock(&core.0.thread.admitted).remove(&j.mid);
-                                continue;
-                            }
-                            Err(e) => {
-                                tracing::error!("thread queue claim: {e}");
-                                lock(&core.0.thread.admitted).remove(&j.mid);
-                                continue;
-                            }
-                        };
-                        core.store().store().admitted(core.handle(&w, &j)).await;
-                        lock(&core.0.thread.admitted).remove(&j.mid);
-                    }
-                });
-                tx
-            });
-        if tx.send(job).is_err() {
-            tracing::error!("thread lane of {ws} is gone");
+            .entry(key.clone())
+            .or_insert_with(|| self.routing_lane(ws, &key));
+        if let Err(mpsc::error::SendError(job)) = tx.send(job) {
+            /* its worker is gone: a new lane takes the message, so the conversation is not stuck */
+            tracing::error!("thread lane of {ws} was gone; starting it again");
+            let tx = self.routing_lane(ws, &key);
+            let _ = tx.send(job);
+            lanes.insert(key, tx);
         }
+    }
+
+    /// A routing lane `key` of workspace `ws`: one message at a time, each on a task of its own so a
+    /// panic loses that message only. It goes after [`LANE_IDLE`] without messages.
+    fn routing_lane(&self, ws: &str, key: &str) -> mpsc::UnboundedSender<Job> {
+        let (tx, mut rx) = mpsc::unbounded_channel::<Job>();
+        let me = tx.downgrade();
+        let core = self.clone();
+        let (w, key) = (ws.to_string(), key.to_string());
+        tokio::spawn(async move {
+            loop {
+                let j = match tokio::time::timeout(LANE_IDLE, rx.recv()).await {
+                    Ok(Some(j)) => j,
+                    Ok(None) => return,
+                    Err(_) => {
+                        let mut lanes = lock(&core.0.thread.lanes);
+                        if !rx.is_empty() {
+                            continue;
+                        }
+                        if me
+                            .upgrade()
+                            .is_some_and(|me| lanes.get(&key).is_some_and(|t| t.same_channel(&me)))
+                        {
+                            lanes.remove(&key);
+                        }
+                        return;
+                    }
+                };
+                if !j.conv.guest() {
+                    core.turn_done(&w).await;
+                }
+                let _activity = core.store().store().activity("thread_router").await;
+                let j = match core.claim(&w, &j.mid) {
+                    Ok(Some(job)) => job,
+                    Ok(None) => {
+                        /* withdrawn while it waited */
+                        lock(&core.0.thread.admitted).remove(&j.mid);
+                        continue;
+                    }
+                    Err(e) => {
+                        tracing::error!("thread queue claim: {e}");
+                        lock(&core.0.thread.admitted).remove(&j.mid);
+                        continue;
+                    }
+                };
+                let (mid, guest) = (j.mid.clone(), j.conv.guest());
+                let (c, w2) = (core.clone(), w.clone());
+                let run = tokio::spawn(async move {
+                    c.store().store().admitted(c.handle(&w2, &j)).await;
+                });
+                if let Err(e) = run.await {
+                    /* what `handle` would have cleared on its way out */
+                    tracing::error!(message = %mid, "routing a message in {w} failed: {e}");
+                    lock(&core.0.thread.inflight).remove(&key);
+                    if !guest {
+                        core.store().publish(HubEvent::SteveThinking {
+                            on: false,
+                            ws: Some(w.clone()),
+                            phase: None,
+                        });
+                    }
+                }
+                lock(&core.0.thread.admitted).remove(&mid);
+            }
+        });
+        tx
     }
 
     /// A message the paste guard caught (V4 §4.6): stored with the secrets replaced, answered with
@@ -932,7 +1022,7 @@ impl Core {
         let routing = lock(&self.0.thread.inflight).get(ws).cloned();
         let inline = self.stop_inline(ws);
         if let Some(f) = &routing {
-            f.store(true, Ordering::SeqCst);
+            f.stop();
         }
         if routing.is_none() && !inline {
             return Ok(false);
@@ -976,14 +1066,17 @@ impl Core {
         // stopped before routing (the lane is in memory): no route, no run, no reply. Say so, with
         // a rerun, instead of leaving the message silently unanswered; never answered by itself.
         for (ws, mid) in th.unrouted_since(now() - crate::orchestrator::RESUME_MAX_AGE_MS)? {
-            let pending: Option<String> = self.store().store().with_conn(|c| {
-                Ok(c.query_row(
-                    "SELECT value FROM settings WHERE workspace_id=? AND key=?",
-                    rusqlite::params![ws, format!("thread.pending.{mid}")],
-                    |r| r.get(0),
-                )
-                .optional()?)
-            })?;
+            let pending: Option<String> = self
+                .store()
+                .store()
+                .reader::<_, steve_store::StoreError>(|c| {
+                    Ok(c.query_row(
+                        "SELECT value FROM settings WHERE workspace_id=? AND key=?",
+                        rusqlite::params![ws, format!("thread.pending.{mid}")],
+                        |r| r.get(0),
+                    )
+                    .optional()?)
+                })?;
             // Only a complete job for this message and conversation will be routed by ready.
             // Malformed JSON, incomplete jobs and mismatched identities still need a rerun card.
             if pending
@@ -1040,8 +1133,8 @@ impl Core {
                 }
             }
         }
-        let pending: Vec<(String, String, String)> = self.store().store().with_conn(|c| {
-            let mut q = c.prepare("SELECT workspace_id,key,value FROM settings WHERE key LIKE 'thread.pending.%' ORDER BY updated")?;
+        let pending: Vec<(String, String, String)> = self.store().store().reader::<_, steve_store::StoreError>(|c| {
+            let mut q = c.prepare("SELECT workspace_id,key,value FROM settings WHERE key >= 'thread.pending.' AND key < 'thread.pending/' ORDER BY updated")?;
             Ok(q.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect::<rusqlite::Result<_>>()?)
         })?;
         for (ws, key, data) in pending {
@@ -1117,7 +1210,7 @@ impl Core {
             offer: None,
             reply_to: r.reply_id.clone(),
             run: Some(r.id.clone()),
-            stop: Arc::new(AtomicBool::new(false)),
+            stop: Stop::default(),
             t0: now(),
             resume: None,
             space: m.space,
