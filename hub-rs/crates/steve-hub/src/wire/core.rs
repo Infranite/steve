@@ -1109,9 +1109,11 @@ impl steve_core::AgentRuntime for RoutedRuntime {
     fn set_mode(&self, session_id: &str, mode: &str) -> steve_core::Result<steve_core::Configured> {
         use super::node_runtime::Configured as Node;
         use steve_core::Configured;
-        match self.node_for(session_id) {
+        // the binding is read strictly: an unreadable one is an error (the caller keeps the
+        // switch pending and retries it), not a parked session's NotRunning
+        match self.route_strict(session_id)? {
             // through the Node's configure, at the session's next idle boundary
-            Some(n) => match super::node_binding::permission_mode(mode) {
+            Backend::Node(n) => match super::node_binding::permission_mode(mode) {
                 Some(p) => Ok(
                     match n.configure(
                         session_id,
@@ -1129,8 +1131,8 @@ impl steve_core::AgentRuntime for RoutedRuntime {
                 None => Ok(Configured::Unsupported),
             },
             // its Node is not enabled here: nothing runs for it now (as before D5)
-            None if self.parked(session_id) => Ok(Configured::NotRunning),
-            None => self.legacy.set_mode(session_id, mode),
+            Backend::Parked => Ok(Configured::NotRunning),
+            Backend::Legacy => self.legacy.set_mode(session_id, mode),
         }
     }
     fn agent_pid(&self, session_id: &str) -> Option<u32> {
@@ -1958,7 +1960,7 @@ mod recovery_tests {
 #[cfg(test)]
 mod routed_tests {
     use std::sync::{Arc, OnceLock};
-    use steve_core::{AgentRuntime, Answered, Configured};
+    use steve_core::{AgentRuntime, Answered};
     use steve_store::{NoPublisher, Store};
 
     fn routed(dir: &std::path::Path) -> super::RoutedRuntime {
@@ -2020,10 +2022,11 @@ mod routed_tests {
             rt.answer_permission("d1", Some("allow")).is_err(),
             "binding unreadable"
         );
-        // a session that may be parked has no runner now: not an error to retry every sync
-        assert_eq!(
-            rt.set_mode("s1", "default").unwrap(),
-            Configured::NotRunning
+        // a mode switch reads the binding strictly too: an error keeps it pending for the next
+        // sync, rather than a NotRunning that drops it
+        assert!(
+            rt.set_mode("s1", "default").is_err(),
+            "binding unreadable: the switch is retried"
         );
         rt.store
             .with_conn(|c| Ok(c.execute_batch("DROP TABLE decisions")?))
