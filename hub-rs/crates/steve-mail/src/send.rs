@@ -11,6 +11,7 @@ use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
+use futures::stream::{self, StreamExt};
 use mail_builder::MessageBuilder;
 use mail_builder::headers::address::Address;
 use rusqlite::Connection;
@@ -41,6 +42,8 @@ pub const QUEUE_EVERY: Duration = Duration::from_secs(2);
 pub const SEND_TIMEOUT: Duration = Duration::from_secs(120);
 /// Optional provider-side copy must not extend the submission's uncertainty window.
 pub const COPY_TIMEOUT: Duration = Duration::from_secs(5);
+/// How many mailboxes the queue sends from at once (each mailbox sends one draft at a time).
+const SEND_MAILBOXES: usize = 4;
 pub const ERR_UNKNOWN: &str =
     "发送结果不明，可能已经发出。请核实已发送邮件或询问收件人，确认未发送后才重试";
 pub const UNKNOWN_OPTIONS: [&str; 2] = ["confirmed_not_sent", "discard"];
@@ -1043,12 +1046,32 @@ impl Mail {
             .m
             .store
             .reader(|c| repo::due_drafts(c, self.now(), 20))?;
-        let mut out = Vec::new();
-        for (id, _) in due {
-            let o = self.execute(&id).await?;
-            out.push((id, o));
+        // One stuck SMTP host must not hold up the other mailboxes: each mailbox sends its drafts in
+        // order, a few mailboxes at a time.
+        let mut groups: Vec<(String, Vec<(usize, String)>)> = Vec::new();
+        for (i, (id, conn)) in due.into_iter().enumerate() {
+            match groups.iter_mut().find(|(c, _)| *c == conn) {
+                Some((_, g)) => g.push((i, id)),
+                None => groups.push((conn, vec![(i, id)])),
+            }
         }
-        Ok(out)
+        let mut out: Vec<(usize, String, SendOutcome)> = stream::iter(groups)
+            .map(|(_, drafts)| async move {
+                let mut done = Vec::with_capacity(drafts.len());
+                for (i, id) in drafts {
+                    match self.execute(&id).await {
+                        Ok(o) => done.push((i, id, o)),
+                        Err(e) => tracing::warn!(draft = %id, error = %e, "mail send queue: draft"),
+                    }
+                }
+                done
+            })
+            .buffer_unordered(SEND_MAILBOXES)
+            .flat_map(stream::iter)
+            .collect()
+            .await;
+        out.sort_by_key(|(i, _, _)| *i);
+        Ok(out.into_iter().map(|(_, id, o)| (id, o)).collect())
     }
 
     /// The send queue: every 2 seconds.

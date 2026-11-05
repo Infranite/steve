@@ -18,6 +18,8 @@ use steve_modules::accounts::service::current_party;
 use steve_modules::contacts::repo as people;
 use steve_store::{Store, Tx, outbox, uid};
 
+use async_trait::async_trait;
+
 use crate::adapter::{FetchedMessage, MailSink, ScopeMode};
 use crate::error::{MailError, MailResult};
 use crate::events::{Actor, Delivery, MailEvent, classify};
@@ -557,8 +559,9 @@ impl StoreSink<'_> {
     }
 }
 
-impl MailSink for StoreSink<'_> {
-    fn put(&mut self, m: FetchedMessage) -> MailResult<()> {
+impl StoreSink<'_> {
+    /// Stores one message (blocking).
+    pub fn put(&mut self, m: FetchedMessage) -> MailResult<()> {
         let Some(p) = parse::parse(&m.raw, m.partial) else {
             tracing::warn!(ext = %m.ext_id, "mail did not parse; skipped");
             return Ok(());
@@ -571,7 +574,8 @@ impl MailSink for StoreSink<'_> {
         self.store_new(m, p)
     }
 
-    fn flags(&mut self, ext_id: &str, flags: &[String]) -> MailResult<()> {
+    /// New flags of a stored message (blocking).
+    pub fn flags(&mut self, ext_id: &str, flags: &[String]) -> MailResult<()> {
         let conn = self.mailbox.connection_id.clone();
         let Some(r) = self
             .store
@@ -591,7 +595,8 @@ impl MailSink for StoreSink<'_> {
         Ok(())
     }
 
-    fn removed(&mut self, ext_id: &str) -> MailResult<()> {
+    /// The message left a folder (blocking).
+    pub fn removed(&mut self, ext_id: &str) -> MailResult<()> {
         let conn = self.mailbox.connection_id.clone();
         let Some(r) = self
             .store
@@ -607,6 +612,81 @@ impl MailSink for StoreSink<'_> {
             .transaction(|tx| repo::set_folders(tx, &r.id, &folders))?;
         self.changed.insert(r.thread_id);
         Ok(())
+    }
+}
+
+/// The [`MailSink`] of a sync run: a [`StoreSink`] whose work runs on the blocking pool, one task
+/// per fetched chunk, so the runtime never waits on parsing, fsync or the writer lock.
+pub struct OffloadSink {
+    store: Store,
+    home: PathBuf,
+    now: i64,
+    mailbox: Mailbox,
+    pub changed: BTreeSet<String>,
+    pub stored: usize,
+}
+
+impl OffloadSink {
+    pub fn new(store: Store, home: PathBuf, mailbox: Mailbox, now: i64) -> Self {
+        Self {
+            store,
+            home,
+            now,
+            mailbox,
+            changed: BTreeSet::new(),
+            stored: 0,
+        }
+    }
+
+    /// Runs `f` on a [`StoreSink`] off the runtime and keeps what it changed.
+    async fn blocking(
+        &mut self,
+        f: impl FnOnce(&mut StoreSink<'_>) -> MailResult<()> + Send + 'static,
+    ) -> MailResult<()> {
+        let (store, home, mailbox, now) = (
+            self.store.clone(),
+            self.home.clone(),
+            self.mailbox.clone(),
+            self.now,
+        );
+        let (changed, stored, res) = tokio::task::spawn_blocking(move || {
+            let mut s = StoreSink::new(&store, &home, &mailbox, now);
+            let res = f(&mut s);
+            (s.changed, s.stored, res)
+        })
+        .await
+        .map_err(|e| MailError::Other(format!("task failed: {e}")))?;
+        self.changed.extend(changed);
+        self.stored += stored;
+        res
+    }
+}
+
+#[async_trait]
+impl MailSink for OffloadSink {
+    async fn put_batch(&mut self, ms: Vec<FetchedMessage>) -> MailResult<()> {
+        if ms.is_empty() {
+            return Ok(());
+        }
+        self.blocking(move |s| ms.into_iter().try_for_each(|m| s.put(m)))
+            .await
+    }
+
+    async fn flags_batch(&mut self, updates: Vec<(String, Vec<String>)>) -> MailResult<()> {
+        if updates.is_empty() {
+            return Ok(());
+        }
+        self.blocking(move |s| {
+            updates
+                .iter()
+                .try_for_each(|(ext, flags)| s.flags(ext, flags))
+        })
+        .await
+    }
+
+    async fn removed(&mut self, ext_id: &str) -> MailResult<()> {
+        let ext = ext_id.to_string();
+        self.blocking(move |s| s.removed(&ext)).await
     }
 }
 

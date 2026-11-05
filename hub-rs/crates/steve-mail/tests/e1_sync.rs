@@ -366,6 +366,79 @@ async fn retention_drops_raw_and_text_keeps_snippet() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn one_sync_logs_in_once() {
+    let h = setup().await;
+    h.inject("INBOX", fixtures::get("gbk.eml").unwrap());
+    let conn = h.connect().await;
+    let before = h.imap.logins();
+    h.sync(&conn).await;
+    assert_eq!(
+        h.imap.logins() - before,
+        1,
+        "LIST and sync share the session"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn archiving_a_thread_logs_in_once() {
+    let h = setup().await;
+    let [t1, t2, t3] = fixtures::thread();
+    h.inject("INBOX", t1);
+    h.inject("Sent", t2);
+    h.inject("INBOX", t3);
+    let conn = h.connect().await;
+    h.sync(&conn).await;
+    let thread = h.by_subject(&conn, "预算审批流程").thread_id;
+    let before = h.imap.logins();
+    assert_eq!(h.mail.archive_thread(WS, &thread).await.unwrap(), 2);
+    assert_eq!(
+        h.imap.logins() - before,
+        1,
+        "one session for the whole thread"
+    );
+    assert!(h.imap.messages(ADDR, "INBOX").unwrap().is_empty());
+    assert_eq!(h.imap.messages(ADDR, "Archive").unwrap().len(), 2);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn retention_skips_a_file_it_cannot_delete_and_finishes() {
+    let h = setup().await;
+    h.inject("INBOX", fixtures::get("gbk.eml").unwrap());
+    h.inject("INBOX", fixtures::get("newsletter.eml").unwrap());
+    h.inject("INBOX", fixtures::get("invoice-pdf.eml").unwrap());
+    let conn = h.connect().await;
+    h.sync(&conn).await;
+    let msgs = h.messages(&conn);
+    assert_eq!(msgs.len(), 3);
+    // one raw file replaced by a non-empty directory: remove_file fails with something other
+    // than NotFound
+    let stuck = h.env.dir.path().join(msgs[0].raw_path.as_deref().unwrap());
+    std::fs::remove_file(&stuck).unwrap();
+    std::fs::create_dir(&stuck).unwrap();
+    std::fs::write(stuck.join("x"), b"x").unwrap();
+
+    h.env.clock.advance(400 * DAY_MS);
+    // pages of one: a page that purges nothing used to be fetched again forever
+    let mail = h.mail.clone();
+    let n = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        tokio::task::spawn_blocking(move || mail.retention_paged(1)),
+    )
+    .await
+    .expect("retention finishes")
+    .unwrap()
+    .unwrap();
+    assert_eq!(n, 2);
+    let left = h
+        .messages(&conn)
+        .into_iter()
+        .filter(|m| m.purged.is_none())
+        .map(|m| m.id)
+        .collect::<Vec<_>>();
+    assert_eq!(left, [msgs[0].id.clone()]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn disconnect_removes_the_mail() {
     let h = setup().await;
     h.inject("INBOX", fixtures::get("invoice-pdf.eml").unwrap());

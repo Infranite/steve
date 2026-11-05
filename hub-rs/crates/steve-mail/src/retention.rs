@@ -35,17 +35,35 @@ pub fn keep_days(store: &steve_store::Store, ws: &str) -> i64 {
 impl Mail {
     /// Runs retention once (blocking: call it off the runtime). Returns how many messages it purged.
     pub fn retention(&self) -> MailResult<usize> {
+        self.retention_paged(BATCH)
+    }
+
+    /// [`Mail::retention`] with a given page size (tests use a small one).
+    #[doc(hidden)]
+    pub fn retention_paged(&self, batch: i64) -> MailResult<usize> {
         let store = &self.0.m.store;
         let now = self.now();
         let mut purged = 0;
         for ws in store.reader(repo::mail_workspaces)? {
             let before = now - keep_days(store, &ws) * DAY_MS;
+            // keyset paging: rows whose file could not be deleted stay behind the cursor
+            let mut after: Option<(i64, String)> = None;
             loop {
-                let rows = store.reader(|c| repo::expired(c, &ws, before, BATCH))?;
-                if rows.is_empty() {
+                let rows = store.reader(|c| {
+                    repo::expired(
+                        c,
+                        &ws,
+                        before,
+                        after.as_ref().map(|(d, i)| (*d, i.as_str())),
+                        batch,
+                    )
+                })?;
+                let Some((last_id, _, last_date)) = rows.last() else {
                     break;
-                }
-                for (id, raw) in &rows {
+                };
+                after = Some((*last_date, last_id.clone()));
+                let mut done = Vec::with_capacity(rows.len());
+                for (id, raw, _) in &rows {
                     if let Some(path) = raw
                         .as_deref()
                         .and_then(|r| raw_abs_path(self.0.cfg.home(), r))
@@ -60,10 +78,19 @@ impl Mail {
                             }
                         }
                     }
-                    store.transaction(|tx| repo::purge(tx, id, now))?;
-                    purged += 1;
+                    done.push(id.as_str());
                 }
-                if (rows.len() as i64) < BATCH {
+                // one write transaction per page
+                if !done.is_empty() {
+                    store.transaction(|tx| {
+                        for id in &done {
+                            repo::purge(tx, id, now)?;
+                        }
+                        Ok::<_, crate::MailError>(())
+                    })?;
+                    purged += done.len();
+                }
+                if (rows.len() as i64) < batch {
                     break;
                 }
             }

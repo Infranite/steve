@@ -3,6 +3,8 @@
 //! `cid:` image or `.eml`. Threads are private to the mailbox's owner: every entry point checks the
 //! caller sees the thread (`404 没有这个往来` / `没有这封邮件`).
 
+use std::collections::HashMap;
+
 use rusqlite::{Connection, OptionalExtension, params_from_iter};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -236,15 +238,32 @@ fn current_org(c: &Connection, viewer: &Viewer, party: &str) -> Option<String> {
 
 /// The brief of a thread the viewer sees.
 pub fn brief(c: &Connection, viewer: &Viewer, t: &ThreadRow) -> MailResult<ThreadBrief> {
-    let msgs = repo::thread_messages(c, &t.id)?;
-    let address = conn_repo::get(c, &t.connection_id)?
-        .and_then(|r| {
-            r.config
-                .get("address")
-                .and_then(Value::as_str)
-                .map(String::from)
-        })
-        .unwrap_or_default();
+    brief_with(c, viewer, t, &mut HashMap::new())
+}
+
+/// [`brief`] with the mailbox addresses looked up so far (a list shares a few mailboxes).
+fn brief_with(
+    c: &Connection,
+    viewer: &Viewer,
+    t: &ThreadRow,
+    addresses: &mut HashMap<String, String>,
+) -> MailResult<ThreadBrief> {
+    let msgs = repo::thread_brief_rows(c, &t.id)?;
+    let address = match addresses.get(&t.connection_id) {
+        Some(a) => a.clone(),
+        None => {
+            let a = conn_repo::get(c, &t.connection_id)?
+                .and_then(|r| {
+                    r.config
+                        .get("address")
+                        .and_then(Value::as_str)
+                        .map(String::from)
+                })
+                .unwrap_or_default();
+            addresses.insert(t.connection_id.clone(), a.clone());
+            a
+        }
+    };
     let shown = msgs
         .iter()
         .rev()
@@ -465,7 +484,8 @@ impl Mail {
         self.0.m.store.reader(|c| {
             let scope = base::visible_sql("t", &viewer);
             let mut sql = format!(
-                "SELECT t.id FROM mail_threads t WHERE t.workspace_id = ? AND {} AND {}",
+                "SELECT {} FROM mail_threads t WHERE t.workspace_id = ? AND {} AND {}",
+                repo::THREAD_COLS,
                 scope.sql,
                 q.view.sql()
             );
@@ -492,17 +512,15 @@ impl Mail {
             }
             sql.push_str(" ORDER BY t.last_at DESC, t.id DESC LIMIT ?");
             args.push((limit as i64).into());
-            let ids: Vec<String> = c
+            let threads: Vec<ThreadRow> = c
                 .prepare(&sql)?
-                .query_map(params_from_iter(args), |r| r.get(0))?
+                .query_map(params_from_iter(args), repo::thread_row)?
                 .collect::<rusqlite::Result<_>>()?;
-            let mut out = Vec::with_capacity(ids.len());
-            for id in ids {
-                if let Some(t) = repo::thread(c, &id)? {
-                    out.push(brief(c, &viewer, &t)?);
-                }
-            }
-            Ok(out)
+            let mut addresses = HashMap::new();
+            threads
+                .iter()
+                .map(|t| brief_with(c, &viewer, t, &mut addresses))
+                .collect()
         })
     }
 

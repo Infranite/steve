@@ -19,7 +19,7 @@ use tokio_util::sync::CancellationToken;
 use crate::adapter::{FolderState, MailAdapter, ScopeMode, SyncReport, SyncState};
 use crate::error::{AdapterError, MailError, MailResult};
 use crate::repo::{self, ScopeEntry};
-use crate::store::{Mailbox, StoreSink};
+use crate::store::{Mailbox, OffloadSink};
 use crate::{Mail, lock};
 
 /// Polling interval of a mailbox (and of folders other than the watched inbox).
@@ -30,6 +30,8 @@ pub const BACKOFF_MAX: Duration = Duration::from_secs(300);
 /// How often the job looks for new or removed mailboxes, and runs retention.
 const SCAN: Duration = Duration::from_secs(60);
 const RETENTION_EVERY: Duration = Duration::from_secs(3600);
+/// The longest one sync may take (a first sync of 500 messages takes a few minutes at most).
+const SYNC_DEADLINE: Duration = Duration::from_secs(15 * 60);
 
 /// The next backoff delay.
 pub fn backoff(prev: Option<Duration>) -> Duration {
@@ -91,7 +93,8 @@ impl Mail {
         let l = self.conn_lock(connection_id);
         let _g = l.lock().await;
         let (adapter, cx) = self.adapter_of(ws, connection_id)?;
-        let folders = match adapter.folders(&cx).await {
+        // one provider session lists the folders and then syncs them
+        let (folders, session) = match adapter.open_sync(&cx).await {
             Ok(f) => f,
             Err(e) => {
                 cx.report(health_of(&e)).await;
@@ -106,17 +109,30 @@ impl Mail {
             .map(|((_, f), t)| (f.clone(), *t))
             .collect();
         let m = self.clone();
-        let prepared =
-            tokio::task::spawn_blocking(move || m.prepare(&ws_s, &conn_s, &folders, now, &checks))
-                .await
-                .map_err(|e| MailError::Other(format!("task failed: {e}")))??;
-        let Some((mut state, mailbox)) = prepared else {
-            return Ok(SyncReport::default());
+        let prepared = match tokio::task::spawn_blocking(move || {
+            m.prepare(&ws_s, &conn_s, &folders, now, &checks)
+        })
+        .await
+        .map_err(|e| MailError::Other(format!("task failed: {e}")))
+        .and_then(|r| r)
+        {
+            Ok(Some(p)) => p,
+            Ok(None) => {
+                session.close().await;
+                return Ok(SyncReport::default());
+            }
+            Err(e) => {
+                session.close().await;
+                return Err(e);
+            }
         };
+        let (mut state, mailbox) = prepared;
         let home = self.0.cfg.home().to_path_buf();
-        let store = self.0.m.store.clone();
-        let mut sink = StoreSink::new(&store, &home, &mailbox, now);
-        let res = adapter.sync(&cx, &mut state, &mut sink).await;
+        let mut sink = OffloadSink::new(self.0.m.store.clone(), home, mailbox, now);
+        // a backstop over the per-command timeouts: the mailbox lock is always released
+        let res = tokio::time::timeout(SYNC_DEADLINE, session.sync(&mut state, &mut sink))
+            .await
+            .unwrap_or_else(|_| Err(AdapterError::Transient("邮件同步太久没有完成".into())));
         let changed = std::mem::take(&mut sink.changed);
         drop(sink);
         // what got stored is kept, also after an error midway
@@ -128,20 +144,31 @@ impl Mail {
                 }
             }
         }
-        self.0.m.store.transaction(|tx| -> MailResult<()> {
-            for f in &state.folders {
-                repo::save_folder(tx, connection_id, f)?;
+        let (m, ws_s, conn_s, ok) = (
+            self.clone(),
+            ws.to_string(),
+            connection_id.to_string(),
+            res.is_ok(),
+        );
+        tokio::task::spawn_blocking(move || -> MailResult<()> {
+            m.0.m.store.transaction(|tx| -> MailResult<()> {
+                for f in &state.folders {
+                    repo::save_folder(tx, &conn_s, f)?;
+                }
+                repo::set_cursor(tx, &conn_s, state.cursor.as_deref())
+            })?;
+            if ok && let Err(e) = m.0.conns.touch_sync(&ws_s, &conn_s) {
+                tracing::warn!(connection = %conn_s, error = %e, "touch_sync failed");
             }
-            repo::set_cursor(tx, connection_id, state.cursor.as_deref())
-        })?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| MailError::Other(format!("task failed: {e}")))??;
         for t in &changed {
             self.0.notify.thread(ws, t);
         }
         match res {
             Ok(r) => {
-                if let Err(e) = self.0.conns.touch_sync(ws, connection_id) {
-                    tracing::warn!(connection = connection_id, error = %e, "touch_sync failed");
-                }
                 cx.report(Health::Ok).await;
                 Ok(r)
             }

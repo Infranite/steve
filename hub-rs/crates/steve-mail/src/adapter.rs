@@ -130,13 +130,46 @@ pub struct FetchedMessage {
     pub backfill: bool,
 }
 
-/// Where an adapter delivers what it fetched. Synchronous: one SQLite write per call.
+/// Where an adapter delivers what it fetched, a fetched chunk at a time. The store parses, writes
+/// files and SQLite off the runtime.
+#[async_trait]
 pub trait MailSink: Send {
-    fn put(&mut self, m: FetchedMessage) -> Result<(), MailError>;
-    /// New flags of a message already delivered (normalized like [`FetchedMessage::flags`]).
-    fn flags(&mut self, ext_id: &str, flags: &[String]) -> Result<(), MailError>;
+    /// Stores the messages in order. On an error some may be stored already: the cursor must not
+    /// pass any of them (they come again and are deduped).
+    async fn put_batch(&mut self, ms: Vec<FetchedMessage>) -> Result<(), MailError>;
+    /// New flags of messages already delivered, `(ext_id, flags)` (normalized like
+    /// [`FetchedMessage::flags`]).
+    async fn flags_batch(&mut self, updates: Vec<(String, Vec<String>)>) -> Result<(), MailError>;
     /// The message left the folder.
-    fn removed(&mut self, ext_id: &str) -> Result<(), MailError>;
+    async fn removed(&mut self, ext_id: &str) -> Result<(), MailError>;
+}
+
+/// The second half of [`MailAdapter::open_sync`]: syncs once, or is closed unused (paused source).
+#[async_trait]
+pub trait SyncSession: Send {
+    async fn sync(
+        self: Box<Self>,
+        state: &mut SyncState,
+        sink: &mut dyn MailSink,
+    ) -> Result<SyncReport, AdapterError>;
+    async fn close(self: Box<Self>) {}
+}
+
+/// The default [`SyncSession`]: a plain [`MailAdapter::sync`] later.
+struct Deferred<'a, A: ?Sized> {
+    adapter: &'a A,
+    cx: &'a ConnCx,
+}
+
+#[async_trait]
+impl<A: MailAdapter + ?Sized> SyncSession for Deferred<'_, A> {
+    async fn sync(
+        self: Box<Self>,
+        state: &mut SyncState,
+        sink: &mut dyn MailSink,
+    ) -> Result<SyncReport, AdapterError> {
+        self.adapter.sync(self.cx, state, sink).await
+    }
 }
 
 /// A change of a message's state at the provider (`POST /mail/threads/:id/archive|read`).
@@ -202,6 +235,29 @@ pub trait MailAdapter: ConnectionProvider {
         ext_id: &str,
         ch: &FlagChange,
     ) -> Result<(), AdapterError>;
+    /// [`MailAdapter::set_flags`] for several messages, one result per message in order. IMAP does
+    /// them over one session instead of logging in per message; the default loops `set_flags`.
+    async fn set_flags_many(
+        &self,
+        cx: &ConnCx,
+        ext_ids: &[&str],
+        ch: &FlagChange,
+    ) -> Vec<Result<(), AdapterError>> {
+        let mut out = Vec::with_capacity(ext_ids.len());
+        for ext in ext_ids {
+            out.push(self.set_flags(cx, ext, ch).await);
+        }
+        out
+    }
+    /// The folders, and a [`SyncSession`] that syncs after the job has prepared its state from
+    /// them. IMAP lists and syncs over one login; the default calls `folders`, then `sync`.
+    async fn open_sync<'a>(
+        &'a self,
+        cx: &'a ConnCx,
+    ) -> Result<(Vec<FolderInfo>, Box<dyn SyncSession + 'a>), AdapterError> {
+        let folders = self.folders(cx).await?;
+        Ok((folders, Box::new(Deferred { adapter: self, cx })))
+    }
     /// Sends a finished MIME message. Only `send::execute` (E3) may call this: it re-checks the
     /// approval first (§5.4). Auth/Rejected/Config/Gone/Unsupported must mean submission was
     /// definitely not accepted. A lost acknowledgement or any uncertain post-submission error

@@ -220,6 +220,35 @@ async fn a_done_thread_submits_candidates_once() {
     assert_eq!(candidates(&e.h).len(), 1);
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_archive_on_done_still_submits_candidates() {
+    let e = e6().await;
+    e.h.env.gateway.script(PROMPT_HEAD, CANDIDATES);
+    let msg = e.h.by_subject(&e.conn, "预算审批流程").id;
+    e.h.env
+        .store()
+        .transaction(|tx| -> Result<(), steve_mail::MailError> {
+            tx.execute(
+                "INSERT INTO items (id, workspace_id, no, kind, title, status, stage, created, updated) VALUES ('ST-7', ?, 7, 'task', '回复预算审批', 'open', '', 1, 1)",
+                [WS],
+            )?;
+            tx.execute(
+                "UPDATE mail_account_settings SET archive_on_done = 1 WHERE connection_id = ?",
+                [&e.conn],
+            )?;
+            nodes::link_item(tx, WS, "ST-7", &msg, &e.thread)
+        })
+        .unwrap();
+    // the mailbox refuses the archive
+    e.h.imap.fail_next("LOGIN", "NO [UNAVAILABLE] try later");
+
+    let archived = e.mail.on_item_finished(WS, "ST-7").await.unwrap();
+    assert!(archived.is_empty(), "{archived:?}");
+    assert_eq!(e.h.imap.messages(ADDR, "INBOX").unwrap().len(), 2);
+    // the thread is done and its memories were asked for anyway
+    assert_eq!(candidates(&e.h).len(), 1);
+}
+
 const EXAMPLE: &str = "邮件签名改成 — Peng，回客户的信先给结论";
 const EXAMPLE_OPS: &str = r#"好的：{"ops":[{"op":"set","key":"signature","value":"— Peng"},{"op":"set","key":"duty","value":"回客户的信先给结论"}]}"#;
 
