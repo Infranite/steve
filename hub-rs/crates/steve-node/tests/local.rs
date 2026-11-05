@@ -1830,6 +1830,22 @@ async fn a_recreated_journal_never_repeats_positions_or_ids() {
             .all(|e| !old_positions.contains(&(e.cursor.stream.clone(), e.cursor.epoch.clone()))),
         "no (stream, epoch) of the old journal is written again"
     );
+    // nor a revision: the Hub matches views by revision, the same steps must not give the same one
+    let revisions = |evs: &[NodeEvent]| -> std::collections::HashSet<String> {
+        evs.iter()
+            .filter_map(|e| match &e.body {
+                EventBody::SessionChanged { view } => Some(view.revision.to_string()),
+                EventBody::WorkspaceChanged { revision, .. } => Some(revision.to_string()),
+                _ => None,
+            })
+            .collect()
+    };
+    let (old_revs, new_revs) = (revisions(&first), revisions(&second));
+    assert!(!new_revs.is_empty());
+    assert!(
+        old_revs.is_disjoint(&new_revs),
+        "no revision is handed out again: {old_revs:?} {new_revs:?}"
+    );
     n.shutdown().await;
 }
 

@@ -1697,7 +1697,9 @@ impl NodeRuntime {
     }
 
     /// A `Released` view from before the Hub's last open of the session (that open's own view
-    /// has not come on the stream yet): it says nothing of the session open now.
+    /// has not come on the stream yet): it says nothing of the session open now. Only the event's
+    /// own epoch counts: a stream keeps its epoch within one journal, and an older journal's views
+    /// say nothing of this one's.
     fn stale_release_in(&self, tx: &Tx, session: &str, ev: &NodeEvent) -> Result<bool, StoreError> {
         let r: Option<String> = tx
             .query_row(
@@ -1718,7 +1720,7 @@ impl NodeRuntime {
             return Ok(false);
         };
         let seen: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM node_event_inbox WHERE node_id=?1 AND stream=?2 AND (epoch<>?3 OR seq<?4)
+            "SELECT EXISTS(SELECT 1 FROM node_event_inbox WHERE node_id=?1 AND stream=?2 AND epoch=?3 AND seq<?4
                AND json_extract(payload,'$.body.type')='session_changed' AND json_extract(payload,'$.body.view.id')=?5
                AND json_extract(payload,'$.body.view.revision')=?6)",
             rusqlite::params![

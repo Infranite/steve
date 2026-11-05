@@ -643,8 +643,13 @@ impl FakeNode {
         st.counter
     }
 
+    /// A revision of this fake journal: a new journal never repeats one of an older journal.
     fn revision(st: &mut State) -> Revision {
-        id(format!("r{}", Self::next(st)))
+        let n = Self::next(st);
+        match st.journal {
+            0 => id(format!("r{n}")),
+            j => id(format!("r{j}_{n}")),
+        }
     }
 
     /// What this Node can enforce: no sandbox guarantee at all.

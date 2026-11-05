@@ -2603,3 +2603,76 @@ async fn a_late_attempt_started_never_revives_an_unknown_attempt() {
     );
     assert!(h.rt.is_uncertain(S));
 }
+
+/// N1-3 review: a recreated journal hands out revisions the old one also had. A `Released` of the
+/// new journal from before the last open, delivered late, says nothing of that open, even when
+/// the old journal holds a view with the open's revision: the session open now does not go.
+#[tokio::test]
+async fn a_late_release_of_a_new_journal_does_not_let_a_reopened_session_go() {
+    let mut h = hub();
+    h.bind();
+    // the old journal: a turn, a release, a reopen (its views stay in the Hub's inbox)
+    h.one_turn("hello").await;
+    assert!(h.rt.release(S).unwrap());
+    until("released", || h.phase() == "released").await;
+    let reopen = |h: &H, text: &str| {
+        h.rt.prompt(S, text, "user", &[]).unwrap();
+        h.store
+            .transaction::<_, StoreError>(|tx| {
+                tx.execute("DELETE FROM queued", [])?;
+                Ok(())
+            })
+            .unwrap();
+    };
+    reopen(&h, "x");
+    until("ready", || h.phase() == "ready").await;
+    let old: Vec<String> = h
+        .store
+        .reader(|c| {
+            let mut st = c.prepare(
+                "SELECT json_extract(payload,'$.body.view.revision') FROM node_event_inbox WHERE json_extract(payload,'$.body.type')='session_changed'",
+            )?;
+            let v = st
+                .query_map([], |r| r.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok::<_, StoreError>(v)
+        })
+        .unwrap();
+
+    // the same again on a new journal, its stream late from the release on
+    h.node.reset_journal();
+    h.restart_hub().await;
+    assert_eq!(h.phase(), "released");
+    // the new journal has the workspace again (the Hub making it again is not this case)
+    h.node
+        .prepare_workspace(build::cmd(
+            "op_prep_again",
+            build::prepare(&format!("item:{S}")),
+        ))
+        .await
+        .unwrap();
+    h.one_turn("again").await;
+    *h.seen.stash.lock().unwrap() = Some(vec![]);
+    assert!(h.rt.release(S).unwrap());
+    until("released", || h.phase() == "released").await;
+    reopen(&h, "y");
+    until("ready", || h.phase() == "ready").await;
+    let opened: String = h.q(
+        "SELECT json_extract(receipt,'$.payload.state.result.revision') FROM node_commands WHERE method='open_session' ORDER BY created DESC, rowid DESC LIMIT 1",
+    );
+    assert!(
+        !old.contains(&opened),
+        "a new journal's revision {opened} is none of the old journal's {old:?}"
+    );
+    let late = h.seen.stash.lock().unwrap().take().unwrap();
+    assert!(!late.is_empty());
+    for b in late {
+        h.seen.to.commit(b).await.unwrap();
+    }
+    until("applied", || {
+        h.q::<i64>("SELECT COUNT(*) FROM node_streams WHERE durable > applied") == 0
+    })
+    .await;
+    assert_eq!(h.phase(), "ready", "the old view says nothing of this open");
+    assert_eq!(h.count("release_session"), 2);
+}

@@ -1307,7 +1307,7 @@ impl SessionExecutor for LocalNode {
                 .or_else(|| old.as_ref().and_then(|s| s.acp_id.clone()));
             let view = SessionView {
                 id: o.session.clone(),
-                revision: id(format!("r{}", t.bump("revision")?))?,
+                revision: id(t.revision()?)?,
                 phase: SessionPhase::Opening,
                 active: None,
                 effective: o.choice.clone(),
@@ -2013,7 +2013,7 @@ impl WorkspaceExecutor for LocalNode {
                             node: inner.cfg.node.clone(),
                             id: wid.clone(),
                         },
-                        revision: id(format!("r{}", t.bump("revision")?))?,
+                        revision: id(t.revision()?)?,
                         usable,
                         branch: branch.clone(),
                         display: workspace::display(&path),

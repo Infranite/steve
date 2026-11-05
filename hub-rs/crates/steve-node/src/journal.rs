@@ -229,6 +229,13 @@ impl Tx<'_> {
         Ok(v as u64)
     }
 
+    /// The next session or workspace revision. It names this journal: a journal made again in the
+    /// same home never hands out a revision the Hub holds from the old one.
+    pub fn revision(&self) -> ApiResult<String> {
+        let n = self.bump("revision")?;
+        Ok(format!("r{}_{n}", self.journal_id()?))
+    }
+
     fn journal_id(&self) -> ApiResult<String> {
         let v: i64 = self
             .c()
