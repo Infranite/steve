@@ -170,16 +170,41 @@ harness 自带的工具（Bash、Edit…）不经过 `tool.call`。其中需要�
 | N3 | 界面：配对、选择 Node 和根目录、离线/暂停/unknown 状态、bot 的运行设备 | 浏览器测试；两人同时审批只生效一次 |
 | C1 | 变更日志 + 可续传 SSE + 套壳断线恢复 | 断网或手机切后台后恢复，只补差量；超出窗口时只 reset 一次 |
 
-**N0b 细分**：以下七步各自都可以单独合并。每一步都明确选定执行后端，单机行为保持不变。
+**N0b–N0c 的施工顺序**（2026-11-05 与 codex 第五轮评审后调整）：先做一条带 attempt 身份的纵切，再收拢调用面。可以推后的只有调用面的清理；完成条件、审批的应用状态、资源依赖和重启隔离都不能推后。
 
-- **B0**：收紧契约和测试替身。
-- **B1**：Hub 维护自己的运行投影和占用。`is_busy`、`is_holding`、`running_turns` 改成读 Hub 自己的状态；hold 改为原因 + generation 的集合。
-- **B2**：引入持久意图和 outbox，执行放到锁外的 worker 里。先迁移不依赖即时结果的部分：暂停、取消、空闲释放。
-- **B3**：审批改成三段式：裁决 → 待应用 → 应用。HubHost 的反向回调另设独立入口。
-- **B4**：取消 → 释放 → 清理、换会话、准备工作区，都改成依赖链。
-- **B5**：队列和 SubmitMessage 交给 Hub 的单一 claim owner。这一步与 N0c 一起打开真实 Node 路径。
-- **B6**：发布维护、恢复、YOLO 模式和生产 wiring 收口，删除能直接摸到 Node 的 `rt()`。
+1. **B0、B1**（已完成）：收紧契约和测试替身。Hub 有了统一的运行状态入口，hold 带原因。
+2. **D1 共享驱动**：在 `steve-acp` 里把以下部分抽成共享模块，旧 runner 和新 Node 用同一份实现：
+   - transport（进程与 JSON-RPC）
+   - adapter（启动命令）
+   - session（handshake、模型、思考强度，失败时一律拒绝）
+   - normalize（ACP → Steve 事件、用量、能力）
+   - permission（解析和选项映射）
 
-逐个调用点的处置清单在施工记录里。
+   队列、重试、排空这些政策不进共享驱动。
+3. **D2 本机 Node**：新建 `steve-node` crate，实现 LocalNode：
+   - 持久的 inbox、执行日志和 Node incarnation；重启后结果不确定的一律标 `unknown`，绝不把"内存里没有"当成"从未执行"。
+   - 一次只执行一个 attempt，不自行重试，也不自行取下一条。
+   - 工作区的 prepare/adopt/inspect。
+   - 附件经 HubFiles 获取；本机 MCP 入口转发到 HubTools。
+
+   契约测试同时跑 FakeNode 和 LocalNode。
+4. **D3 Hub 协调器**：
+   - 在一个 DB 事务里完成消息 claim、冻结 prompt 和附件、分配 attempt、建立占用、写 outbox；Node 的回执单独记录。
+   - 运行投影要覆盖准备中、待启动、运行、等待、重试等待、取消中、`unknown` 各状态。
+   - EventSink 按 `(Node, stream, epoch, seq)` 去重，在同一事务里落库并 apply。
+   - 重试和"排空"的判断上移到这里。
+   - 同时改造必要的调用点：审批的待应用状态、queued_send_now、resume、tidy 与换会话的依赖链、on_turn_end 带 execution 身份、Drop 里的 cancel、YOLO set_mode、wire/core.rs 绕过 core 的调用。
+4. **D4 双格式**：新事件以 `steve.v1` 落库，旧事件经 LegacyEventReader 读取。Web、last_agent_text、统计、YOLO 事实、历史导入都只消费归一后的投影。
+5. **D5 切换**：后端归属和 incarnation 按会话持久化。开启或回滚前先 drain 并对账，同一会话只有一个 claim owner；迁移不了的旧会话留在旧后端，直到排空。验收覆盖：
+   - 审批过期
+   - 断线或重启后不重跑
+   - 旧 cancel 打不到新 attempt
+   - 工具失败后的重试
+   - hold 下队列不被排空
+   - 双格式读取
+   - 回滚
+6. 然后才是 B2–B4 的调用面清理（届时意图已经有 attempt 身份），最后删除旧 runner 的队列逻辑。
+
+逐个调用点的处置清单见施工记录（codex 第三、五轮）。
 
 **最大风险**：把"没收到结果"当成"没执行"，导致 prompt、发布、推送、工具副作用被重跑。对策：从 N0 起就有 attempt 身份和 `unknown` 状态，N1 补上持久对账。不确定结果的执行交给 Hub 决定，永远不自动重发。
