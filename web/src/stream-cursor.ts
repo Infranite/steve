@@ -4,7 +4,7 @@
  * empty Last-Event-ID, so the cursor goes in the URL (`?after=`) every time. Without a cursor the Hub streams as before
  * and the caller resyncs everything on open (`onOpen(false)`).
  * A phone that comes back to the page (visible, online, pageshow) reconnects at once instead of waiting out the backoff;
- * an open stream that has been silent longer than two pings is presumed dead and reopened too. */
+ * an open stream that has been silent longer than two pings, or one the browser closed without an error, is reopened too. */
 
 /** the part of EventSource used here, so tests can drive it */
 export type SourceLike = {
@@ -36,7 +36,7 @@ export type StreamDeps = {
 
 /** Hub pings every 25 s: past this an "open" stream is a dead socket the phone's network stack has not noticed */
 export const STALE_MS = 45_000
-const FIRST_RETRY = 1000, MAX_RETRY = 15_000
+const FIRST_RETRY = 1000, MAX_RETRY = 15_000, CLOSED = 2
 
 export function resumableStream(d: StreamDeps) {
   let es: SourceLike | null = null, timer: unknown = null, retry = FIRST_RETRY, closed = false
@@ -58,7 +58,8 @@ export function resumableStream(d: StreamDeps) {
   /* back in front: don't wait for the backoff; a failed attempt now retries after 2 s, not 15 */
   const wake = () => {
     if (closed || d.doc?.visibilityState === "hidden") return
-    if (es && d.now() - alive < STALE_MS) return
+    // a source the browser closed without an error (frozen, bfcache) is dead however recent its last frame
+    if (es && es.readyState !== CLOSED && d.now() - alive < STALE_MS) return
     if (es) { const old = es; es = null; old.close() }
     if (timer !== null) { d.clearTimeout(timer); timer = null }
     retry = FIRST_RETRY; open()

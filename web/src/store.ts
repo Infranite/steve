@@ -676,18 +676,24 @@ function resync(): Promise<void> {
   return resyncing
 }
 /* Opened after the state it continues from. A resumed (re)open replays only the frames after the cursor, which take the
- * live paths below; without a cursor (the state failed to load, or an old Hub) every open resyncs everything, and the
- * state that resync loaded becomes the cursor for the next reconnect. */
+ * live paths below; without a cursor (the state failed to load, or an old Hub) every open resyncs everything. A stream
+ * opened without a cursor carries no frame ids, so the watermark a later resync loads is never its cursor: the frames
+ * handled live since then would all be replayed on the next reconnect (steve.tool twice). Once that resync has a
+ * watermark the stream is reopened from it instead, so its frames carry ids; only the short handoff can repeat. */
+let streamGen = 0
 const connect = () => {
   closeStream()
-  let from = watermark
-  closeStream = stream(onHub, (resumed) => { if (!resumed) void resync().then(() => { from ??= watermark }) }, () => from)
+  const gen = ++streamGen, from = watermark
+  closeStream = stream(onHub, (resumed) => {
+    if (resumed) return
+    void resync().then(() => { if (gen === streamGen && watermark) connect() })
+  }, () => from)
   yoloSoon()
 }
 export function start() {
   let live = true
   void refresh().then(() => { if (live) connect() })
-  return () => { live = false; closeStream(); closeStream = () => {} }
+  return () => { live = false; streamGen++; closeStream(); closeStream = () => {} }
 }
 
 /* ───────── selectors ───────── */

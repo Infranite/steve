@@ -93,3 +93,13 @@ test("a hidden page does not reconnect early, and close stops everything", () =>
   r.advance(60_000); r.win.fire("online")
   assert.equal(r.sources.length, 1)
 })
+
+test("a source the browser closed without an error is reopened on pageshow, however recent its last frame", () => {
+  const r = rig({ cursor: () => "E:1" })
+  r.last().open(); r.last().send('{"type":"item","id":"A"}', "E:4")
+  r.last().readyState = 2 // frozen or put in the bfcache: closed, no onerror
+  r.advance(5000); r.win.fire("pageshow")
+  assert.equal(r.sources.length, 2); assert.equal(r.last().url, "/api/stream?after=E:4")
+  r.advance(1000); r.doc.fire("visibilitychange") // the new one is connecting: left alone
+  assert.equal(r.sources.length, 2)
+})
