@@ -95,6 +95,9 @@ pub enum PlacementError {
     NotFound(Kind),
     /// It has no files anywhere yet (an item with no project, cwd or bound session).
     NoWorkspace,
+    /// A directory of the Hub's own device under none of the local Node's roots (D11: only
+    /// configured roots, no "anywhere under ~").
+    Outside,
     Store(StoreError),
 }
 
@@ -108,6 +111,7 @@ impl std::fmt::Display for PlacementError {
             Self::NotFound(Kind::Session) => steve_i18n::t!("hub.not_found.session"),
             Self::NotFound(Kind::KbSource) => steve_i18n::t!("hub.not_found.kb_source"),
             Self::NoWorkspace => steve_i18n::t!("hub.workspaces.no_workspace"),
+            Self::Outside => steve_i18n::t!("hub.workspaces.outside"),
             Self::Store(e) => return write!(f, "{e}"),
         };
         f.write_str(&text)
@@ -208,6 +212,24 @@ impl Workspaces {
         })
     }
 
+    /// The local Node's roots as the Hub configures them now (what [`Workspaces::refresh_roots`]
+    /// gives it). [`PlacementError::LocalOff`] without a local Node.
+    pub fn local_roots(&self) -> Result<Vec<steve_node::Root>, PlacementError> {
+        if self.local.is_none() {
+            return Err(PlacementError::LocalOff);
+        }
+        Ok(super::node_binding::roots(&self.store, &self.extra)?)
+    }
+
+    /// An absolute directory of the Hub's own device (a project's path being chosen) on the local
+    /// Node: under the deepest of [`Workspaces::local_roots`] that holds it, else
+    /// [`PlacementError::Outside`]. The Node checks the path itself (links included) when asked.
+    pub fn hub_path(&self, path: &Path) -> Result<Placement, PlacementError> {
+        let roots = self.local_roots()?;
+        let at = within(&roots, path).ok_or(PlacementError::Outside)?;
+        self.on(HUB_DEVICE, At::Root(at), "")
+    }
+
     fn is_local(&self, node: &str) -> bool {
         self.local
             .as_ref()
@@ -268,6 +290,29 @@ impl Workspaces {
             }
         }
     }
+}
+
+/// `path` (absolute, normalized) as a place under the deepest root that holds it; the match is by
+/// whole path components, made on the names alone.
+pub(crate) fn within(roots: &[steve_node::Root], path: &Path) -> Option<RootPath> {
+    roots
+        .iter()
+        .filter_map(|r| {
+            let rest = path.strip_prefix(&r.path).ok()?;
+            let rel = rest
+                .components()
+                .map(|c| c.as_os_str().to_str())
+                .collect::<Option<Vec<_>>>()?
+                .join("/");
+            Some((r.path.components().count(), r.id.clone(), rel))
+        })
+        .max_by_key(|(depth, ..)| *depth)
+        .and_then(|(_, root, rel)| {
+            Some(RootPath {
+                root,
+                rel: RelPath::new(rel).ok()?,
+            })
+        })
 }
 
 enum Found {
@@ -526,6 +571,44 @@ mod tests {
             },
         })
         .await
+    }
+
+    #[test]
+    fn a_hub_path_is_under_the_deepest_root_that_holds_it() {
+        let root = |p: &str| steve_node::Root {
+            id: root_id(Path::new(p)).unwrap(),
+            display: "local workspace".into(),
+            path: PathBuf::from(p),
+            access: RootAccess::ReadWrite,
+        };
+        let roots = [root("/w/code"), root("/w/code/app")];
+        let at = within(&roots, Path::new("/w/code/app/src/x")).unwrap();
+        assert_eq!(at.root, roots[1].id);
+        assert_eq!(at.rel.as_str(), "src/x");
+        let at = within(&roots, Path::new("/w/code")).unwrap();
+        assert_eq!((at.root, at.rel.as_str()), (roots[0].id.clone(), ""));
+        // whole components only: /w/codex is not under /w/code
+        assert!(within(&roots, Path::new("/w/codex")).is_none());
+        assert!(within(&roots, Path::new("/w")).is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_new_projects_directory_is_read_only_under_the_local_roots() {
+        let t = local(false);
+        let p = t.dir.path().join("proj");
+        std::fs::create_dir_all(p.join("sub")).unwrap();
+        project(&t, "p1", "hub", p.to_str().unwrap());
+        let at = root_of(&t.ws.hub_path(&p.join("sub")).unwrap());
+        assert_eq!(at.root, root_id(&p).unwrap());
+        assert_eq!(at.rel.as_str(), "sub");
+        // not configured: no root, whatever is on the disk (no "anywhere under ~")
+        assert!(matches!(
+            t.ws.hub_path(t.dir.path()),
+            Err(PlacementError::Outside)
+        ));
+        // without the local Node the Hub reads its own disk
+        let off = Workspaces::new(t.store.clone(), None, None, vec![]);
+        assert!(matches!(off.hub_path(&p), Err(PlacementError::LocalOff)));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

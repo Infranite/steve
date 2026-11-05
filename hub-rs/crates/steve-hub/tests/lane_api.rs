@@ -33,6 +33,7 @@ fn g(dir: &Path, args: &[&str]) {
 struct Env {
     _home: tempfile::TempDir,
     home: std::path::PathBuf,
+    db: std::path::PathBuf,
     base: String,
     http: reqwest::Client,
     cookie: String,
@@ -59,6 +60,11 @@ impl Env {
 }
 
 async fn start() -> Env {
+    start_with(false).await
+}
+
+/// `node`: with the local Node on (`STEVE_NODE_MODE=local`, so not a `STEVE_NO_RESUME` copy).
+async fn start_with(node: bool) -> Env {
     steve_modules::net::forbid_in_this_process();
     let home = tempfile::tempdir().unwrap();
     let h = home.path().to_path_buf();
@@ -93,6 +99,10 @@ async fn start() -> Env {
     ] {
         vars.insert(k.into(), v);
     }
+    if node {
+        vars.remove("STEVE_NO_RESUME");
+        vars.insert("STEVE_NODE_MODE".into(), "local".into());
+    }
     let vars = Arc::new(vars);
     let get = {
         let vars = vars.clone();
@@ -104,7 +114,9 @@ async fn start() -> Env {
     }
     let bus = Bus::new();
     let w = steve_hub::wire::wire_with(&cfg, &bus, Arc::new(get.clone())).unwrap();
-    let st = AppState::new(cfg.clone(), w.backend, w.domain, bus).with_modules(w.modules);
+    let st = AppState::new(cfg.clone(), w.backend, w.domain, bus)
+        .with_modules(w.modules)
+        .with_workspaces(Some(w.workspaces));
     steve_hub::app::boot(&st).await.unwrap();
     let app = steve_hub::app::app(st, w.auth, w.mcp, w.module_routes, w.root_routes);
     tokio::spawn(async move {
@@ -131,6 +143,7 @@ async fn start() -> Env {
     Env {
         _home: home,
         home: h,
+        db: cfg.data_dir.join("steve.sqlite3"),
         base,
         http,
         cookie,
@@ -227,4 +240,87 @@ async fn a_git_project_shows_the_lane_it_merges_into() {
     assert_eq!(s, 400, "{v}");
     let (s, _) = e.call("GET", "/api/projects/prj_nope/lane", None).await;
     assert_eq!(s, 404);
+}
+
+#[tokio::test]
+async fn a_project_on_a_device_that_is_not_there_says_device_offline() {
+    let e = start().await;
+    let repo = e.home.join("far");
+    std::fs::create_dir_all(&repo).unwrap();
+    g(&repo, &["init", "-q", "-b", "main"]);
+    let (s, p) = e
+        .call(
+            "POST",
+            "/api/projects",
+            Some(json!({"name": "Far", "path": repo.to_string_lossy()})),
+        )
+        .await;
+    assert_eq!(s, 200, "{p}");
+    let id = p["id"].as_str().unwrap().to_string();
+    /* the project lives on a paired device's Node now; nothing links it */
+    let c = rusqlite::Connection::open(&e.db).unwrap();
+    c.execute(
+        "UPDATE projects SET device_id='n_gone', path='work/far' WHERE id=?",
+        [&id],
+    )
+    .unwrap();
+    let (s, v) = e
+        .call("GET", &format!("/api/projects/{id}/lane"), None)
+        .await;
+    assert_eq!((s, v), (503, json!({"error": "设备离线"})));
+}
+
+/// With the local Node on, `dirs` browses only toward its configured roots (D11); a directory
+/// typed in is still taken as a new project, and becomes a root.
+#[tokio::test]
+async fn with_the_local_node_dirs_browses_toward_its_roots() {
+    let e = start_with(true).await;
+    std::fs::create_dir_all(e.home.join("private/notes")).unwrap();
+    let home = e.home.to_string_lossy().to_string();
+    /* the home directory is no root: only the way down to the roots (the Hub's scratch and
+    worktrees under STEVE_HOME) is offered, not what else is there */
+    let (s, v) = e
+        .call("GET", &format!("/api/fs/dirs?path={home}/"), None)
+        .await;
+    assert_eq!((s, v), (200, json!([format!("{home}/steve")])));
+    let (s, v) = e
+        .call("GET", &format!("/api/fs/dirs?path={home}/private"), None)
+        .await;
+    assert_eq!((s, v), (200, json!([])));
+    /* a missing directory is said as before */
+    let gone = e.home.join("gone").to_string_lossy().to_string();
+    for path in ["/api/projects", "/api/projects/describe"] {
+        let (s, v) = e
+            .call("POST", path, Some(json!({"name": "Gone", "path": gone})))
+            .await;
+        assert_eq!(s, 400, "{path}: {v}");
+        assert_eq!(v["error"], format!("目录不存在：{gone}"), "{path}");
+    }
+    /* one typed in becomes a project, and a root: browsed from then on */
+    let notes = e.home.join("private/notes").to_string_lossy().to_string();
+    let (s, v) = e
+        .call(
+            "POST",
+            "/api/projects",
+            Some(json!({"name": "Notes", "path": notes})),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["kind"], "dir");
+    let (s, v) = e
+        .call("GET", &format!("/api/fs/dirs?path={home}/private"), None)
+        .await;
+    assert_eq!((s, v), (200, json!([notes])));
+    /* under a root (here: the scratch directory) it is taken too */
+    let dir = e.home.join("steve/scratch/tool");
+    std::fs::create_dir_all(&dir).unwrap();
+    let (s, v) = e
+        .call(
+            "POST",
+            "/api/projects",
+            Some(json!({"name": "Tool", "path": dir.to_string_lossy()})),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["kind"], "dir");
 }

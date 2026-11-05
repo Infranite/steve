@@ -90,6 +90,7 @@
   "hub.workspaces.offline": "Device offline",
   "hub.workspaces.local_off": "This machine's Node is not on",
   "hub.workspaces.no_workspace": "No workspace yet",
+  "hub.workspaces.outside": "Not under a directory of this machine's Node",
   "hub.not_found.kb_source": "No such knowledge source",
   "hub.node.stranger": "The Node has unfinished work for this session that the Hub has no record of (the Hub's data may have gone back to an earlier state). The session is paused: no new commands are sent, and that work is not given up on its own",
   "hub.node.control_unknown": "The Node cannot tell whether %{what} finished (%{detail}). The session waits for reconciliation and nothing is sent again. Press Stop to retract it.",

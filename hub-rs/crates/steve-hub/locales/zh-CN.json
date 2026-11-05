@@ -90,6 +90,7 @@
   "hub.workspaces.offline": "设备离线",
   "hub.workspaces.local_off": "本机 Node 没有开启",
   "hub.workspaces.no_workspace": "还没有工作区",
+  "hub.workspaces.outside": "不在本机 Node 的目录里",
   "hub.not_found.kb_source": "没有这个知识源",
   "hub.node.stranger": "Node 上有这个会话尚未结束的工作，但 Hub 没有它的记录（Hub 的数据可能回到了较早的状态）；该会话暂停，不会发出新的指令，那项工作也不会被自动放弃",
   "hub.node.control_unknown": "Node 无法确定%{what}是否完成（%{detail}），会话等待对账，不会自动重发。点停止可撤回这个操作。",
