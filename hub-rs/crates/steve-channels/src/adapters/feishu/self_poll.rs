@@ -32,7 +32,7 @@ use chrono::{TimeZone, Timelike};
 use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
 use steve_modules::accounts::connections::ConnCx;
-use tokio::sync::watch;
+use tokio_util::sync::{CancellationToken, DropGuard};
 
 use super::auth::{APP_ADAPTER, APP_SYSTEM, FeishuUser, USER_ADAPTER, USER_SYSTEM};
 use super::client::{self, FeishuClient, FeishuError};
@@ -722,10 +722,10 @@ impl SelfPoller {
         }
     }
 
-    /// Rounds until `stop` turns true (or its sender is dropped).
-    pub async fn run(mut self, mut stop: watch::Receiver<bool>) {
+    /// Rounds until `stop` is cancelled.
+    pub async fn run(mut self, stop: CancellationToken) {
         loop {
-            if *stop.borrow() {
+            if stop.is_cancelled() {
                 return;
             }
             let r = self.round().await;
@@ -735,7 +735,7 @@ impl SelfPoller {
             let d = self.next_delay(&r, self.channels.now());
             tokio::select! {
                 _ = tokio::time::sleep(d) => {}
-                c = stop.changed() => if c.is_err() || *stop.borrow() { return },
+                _ = stop.cancelled() => return,
             }
         }
     }
@@ -943,8 +943,20 @@ fn map_message(m: &Value, chat: &ChatRow, ids: &Ids) -> InboundMessage {
 // All pollers.
 
 struct Running {
-    stop: watch::Sender<bool>,
+    /// Cancels the poller when it is stopped or dropped (the pollers with it).
+    stop: DropGuard,
     task: tokio::task::JoinHandle<()>,
+}
+
+impl Running {
+    fn spawn(p: SelfPoller) -> Self {
+        let stop = CancellationToken::new();
+        let task = tokio::spawn(p.run(stop.clone()));
+        Self {
+            stop: stop.drop_guard(),
+            task,
+        }
+    }
 }
 
 /// The pollers of all `feishu_user` connections with `msg.receive` (one task each).
@@ -1006,9 +1018,7 @@ impl SelfPollers {
             if let Some(s) = &self.sink {
                 p = p.with_sink(s.clone());
             }
-            let (tx, rx) = watch::channel(false);
-            let task = tokio::spawn(p.run(rx));
-            running.insert(id, Running { stop: tx, task });
+            running.insert(id, Running::spawn(p));
             n += 1;
         }
         n
@@ -1027,9 +1037,7 @@ impl SelfPollers {
         if let Some(s) = &self.sink {
             p = p.with_sink(s.clone());
         }
-        let (tx, rx) = watch::channel(false);
-        let task = tokio::spawn(p.run(rx));
-        running.insert(conn.to_string(), Running { stop: tx, task });
+        running.insert(conn.to_string(), Running::spawn(p));
         true
     }
 
@@ -1038,8 +1046,8 @@ impl SelfPollers {
         let Some(r) = self.running.lock().await.remove(conn) else {
             return false;
         };
-        let _ = r.stop.send(true);
-        let mut task = r.task;
+        let Running { stop, mut task } = r;
+        drop(stop);
         if tokio::time::timeout(Duration::from_secs(30), &mut task)
             .await
             .is_err()

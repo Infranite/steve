@@ -35,6 +35,7 @@ use serde_json::Value;
 use tokio::sync::{mpsc, watch};
 use tokio_tungstenite::tungstenite;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
+use tokio_util::sync::CancellationToken;
 
 use super::pbbp2::{self, Frame, code, header, kind};
 
@@ -383,7 +384,7 @@ struct Inner<H> {
 /// A running client. Dropping the handle does not stop it; call [`WsHandle::stop`].
 pub struct WsHandle {
     state: watch::Receiver<WsState>,
-    stop: watch::Sender<bool>,
+    stop: CancellationToken,
     task: tokio::task::JoinHandle<Result<(), WsError>>,
 }
 
@@ -419,7 +420,7 @@ impl WsHandle {
 
     /// Stops the client and returns the run's result.
     pub async fn stop(self) -> Result<(), WsError> {
-        let _ = self.stop.send(true);
+        self.stop.cancel();
         self.join().await
     }
 
@@ -438,7 +439,7 @@ pub fn spawn<H: WsHandler>(opts: WsOptions, handler: Arc<H>) -> Result<WsHandle,
         .timeout(opts.http_timeout)
         .build()?;
     let (state_tx, state_rx) = watch::channel(WsState::Connecting);
-    let (stop_tx, stop_rx) = watch::channel(false);
+    let stop = CancellationToken::new();
     let inner = Arc::new(Inner {
         config: Mutex::new(opts.initial_config),
         opts,
@@ -447,37 +448,27 @@ pub fn spawn<H: WsHandler>(opts: WsOptions, handler: Arc<H>) -> Result<WsHandle,
         parts: Mutex::new(Parts::default()),
         state: state_tx,
     });
+    let token = stop.clone();
     let task = tokio::spawn(async move {
-        let r = inner.clone().run(stop_rx).await;
+        let r = inner.clone().run(token).await;
         let error = r.as_ref().err().map(ToString::to_string);
         inner.state.send_replace(WsState::Stopped { error });
         r
     });
     Ok(WsHandle {
         state: state_rx,
-        stop: stop_tx,
+        stop,
         task,
     })
 }
 
 /// Sleeps `d` unless stopped first; false when stopped.
-async fn sleep_or_stop(d: Duration, stop: &mut watch::Receiver<bool>) -> bool {
-    if *stop.borrow() {
-        return false;
+async fn sleep_or_stop(d: Duration, stop: &CancellationToken) -> bool {
+    tokio::select! {
+        biased;
+        _ = stop.cancelled() => false,
+        _ = tokio::time::sleep(d) => true,
     }
-    let sleep = tokio::time::sleep(d);
-    tokio::pin!(sleep);
-    let stopped = tokio::select! {
-        _ = &mut sleep => false,
-        true = wait_stop(stop) => true,
-    };
-    !stopped && !*stop.borrow()
-}
-
-/// Resolves once stop is requested (true), or the handle is gone (false). Returns no
-/// `watch::Ref`, which isn't `Send`.
-async fn wait_stop(stop: &mut watch::Receiver<bool>) -> bool {
-    stop.wait_for(|s| *s).await.is_ok()
 }
 
 /// Why one connection ended.
@@ -496,23 +487,23 @@ impl<H: WsHandler> Inner<H> {
     }
 
     /// `runCoordinator`.
-    async fn run(self: Arc<Self>, mut stop: watch::Receiver<bool>) -> Result<(), WsError> {
+    async fn run(self: Arc<Self>, stop: CancellationToken) -> Result<(), WsError> {
         let mut conn = match self.establish().await {
             Ok(c) => c,
             Err(e) => {
                 tracing::warn!(error = %e, "feishu ws: initial connection failed");
-                match self.reconnect(e, &mut stop).await? {
+                match self.reconnect(e, &stop).await? {
                     Some(c) => c,
                     None => return Ok(()),
                 }
             }
         };
         loop {
-            match self.serve(conn, &mut stop).await {
+            match self.serve(conn, &stop).await {
                 Exit::Stopped => return Ok(()),
                 Exit::Failed(e) => {
                     tracing::warn!(error = %e, "feishu ws: connection failed");
-                    conn = match self.reconnect(e, &mut stop).await? {
+                    conn = match self.reconnect(e, &stop).await? {
                         Some(c) => c,
                         None => return Ok(()),
                     };
@@ -525,7 +516,7 @@ impl<H: WsHandler> Inner<H> {
     async fn reconnect(
         &self,
         mut failure: WsError,
-        stop: &mut watch::Receiver<bool>,
+        stop: &CancellationToken,
     ) -> Result<Option<Conn>, WsError> {
         if !self.opts.auto_reconnect || !failure.retryable() {
             return Err(failure);
@@ -604,7 +595,7 @@ impl<H: WsHandler> Inner<H> {
     }
 
     /// Runs one connection until it fails or the client is stopped.
-    async fn serve(self: &Arc<Self>, conn: Conn, stop: &mut watch::Receiver<bool>) -> Exit {
+    async fn serve(self: &Arc<Self>, conn: Conn, stop: &CancellationToken) -> Exit {
         let Conn {
             socket,
             conn_id,
@@ -638,7 +629,7 @@ impl<H: WsHandler> Inner<H> {
         let mut deadline = tokio::time::Instant::now() + self.read_window();
         let exit = loop {
             tokio::select! {
-                true = wait_stop(stop) => break Exit::Stopped,
+                _ = stop.cancelled() => break Exit::Stopped,
                 Some(e) = fail_rx.recv() => break Exit::Failed(e),
                 _ = tokio::time::sleep_until(next_ping) => {
                     let _ = out_tx.send(Frame::ping(service_id).to_bytes()).await;
@@ -655,10 +646,10 @@ impl<H: WsHandler> Inner<H> {
                     };
                     deadline = tokio::time::Instant::now() + self.read_window();
                     match msg {
+                        // Handled inline so events reach the handler in arrival order; the handler
+                        // only enqueues, and the ACK waits on the writer like a ping does.
                         WsMessage::Binary(b) => {
-                            let me = self.clone();
-                            let out = out_tx.clone();
-                            tokio::spawn(async move { me.handle_message(b.to_vec(), out).await });
+                            self.clone().handle_message(b.to_vec(), out_tx.clone()).await;
                         }
                         WsMessage::Close(f) => {
                             break Exit::Failed(WsError::Transport(format!("closed by server: {f:?}")));

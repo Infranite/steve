@@ -12,13 +12,15 @@
 //! - [`LongConnection`] / [`LongConnections`]: one ws client per `feishu_app` connection.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use steve_flow::AdapterError;
 use steve_modules::accounts::connections::{ConnCx, ProviderError};
-use tokio::sync::mpsc;
+use tokio::sync::{Semaphore, mpsc};
+use tokio::task::JoinSet;
 
 use super::auth::{APP_SECRET, APP_SYSTEM, FeishuApp, USER_SYSTEM};
 use super::client::{self, FeishuClient};
@@ -550,14 +552,80 @@ impl WsHandler for FeishuInbound {
     }
 }
 
-/// Runs `on_inbound` (`on_space_event`) for each queued item, in order, until the queue closes.
+/// How many chats of one connection are worked on at the same time.
+pub const SPACE_LANES: usize = 8;
+
+impl Queued {
+    /// The chat the item belongs to: items of one chat are handled in order.
+    fn space_ext_id(&self) -> &str {
+        match self {
+            Self::Message(m) => &m.space_ext_id,
+            Self::Space(ev) => ev.space_ext_id(),
+        }
+    }
+}
+
+/// One chat's lane: its queue and how many of its items are not done yet.
+struct Lane {
+    tx: mpsc::UnboundedSender<Queued>,
+    pending: Arc<AtomicUsize>,
+}
+
+/// Runs `on_inbound` (`on_space_event`) for each queued item until the queue closes: in order
+/// within a chat, and up to [`SPACE_LANES`] chats at once, so a slow chat (a model call, a slow
+/// adapter) doesn't hold up the others.
 pub async fn run_worker(
     sink: Arc<dyn MessageSink>,
     ws: String,
     conn: String,
     mut rx: mpsc::UnboundedReceiver<Queued>,
 ) {
+    let permits = Arc::new(Semaphore::new(SPACE_LANES));
+    let mut lanes: HashMap<String, Lane> = HashMap::new();
+    // Dropping the set (the worker aborted) aborts the lanes with it.
+    let mut tasks = JoinSet::new();
     while let Some(item) = rx.recv().await {
+        while tasks.try_join_next().is_some() {}
+        // A lane with nothing pending is idle; only this loop adds to it, so closing it now
+        // can't lose an item or reorder its chat. A lane whose task died goes too.
+        lanes.retain(|_, l| l.pending.load(Ordering::Acquire) > 0 && !l.tx.is_closed());
+        let key = item.space_ext_id().to_string();
+        let lane = lanes.entry(key).or_insert_with(|| {
+            let (tx, lane_rx) = mpsc::unbounded_channel();
+            let pending = Arc::new(AtomicUsize::new(0));
+            tasks.spawn(run_lane(
+                sink.clone(),
+                ws.clone(),
+                conn.clone(),
+                lane_rx,
+                pending.clone(),
+                permits.clone(),
+            ));
+            Lane { tx, pending }
+        });
+        lane.pending.fetch_add(1, Ordering::AcqRel);
+        if lane.tx.send(item).is_err() {
+            // the lane task just died; its chat starts a fresh lane with the next item
+            tracing::warn!(conn, "feishu ws: inbound lane gone, item dropped");
+        }
+    }
+    // The queue closed: let the lanes finish what they have.
+    drop(lanes);
+    while tasks.join_next().await.is_some() {}
+}
+
+/// Handles one chat's items in order, each under a permit of the connection's limit.
+async fn run_lane(
+    sink: Arc<dyn MessageSink>,
+    ws: String,
+    conn: String,
+    mut rx: mpsc::UnboundedReceiver<Queued>,
+    pending: Arc<AtomicUsize>,
+    permits: Arc<Semaphore>,
+) {
+    while let Some(item) = rx.recv().await {
+        // never closed, so acquiring only waits
+        let _permit = permits.acquire().await;
         match item {
             Queued::Message(m) => {
                 let ext = m.external_id.clone();
@@ -572,6 +640,7 @@ pub async fn run_worker(
                 }
             }
         }
+        pending.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -860,5 +929,66 @@ mod tests {
         h.accept(&body).unwrap();
         assert!(rx.try_recv().is_err(), "another app's event");
         assert!(h.accept(b"nope").is_err());
+    }
+
+    /// Records which messages ran; the first message of chat A waits for `gate`.
+    struct Gated {
+        done: tokio::sync::mpsc::UnboundedSender<String>,
+        gate: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait]
+    impl MessageSink for Gated {
+        async fn inbound(
+            &self,
+            _ws: &str,
+            _conn: &str,
+            msg: InboundMessage,
+        ) -> crate::ChannelResult<crate::inbound::Inbound> {
+            if msg.external_id == "a1" {
+                self.gate.notified().await;
+            }
+            let _ = self.done.send(msg.external_id);
+            Err(crate::ChannelError::not_found("test"))
+        }
+    }
+
+    #[tokio::test]
+    async fn worker_keeps_chat_order_but_does_not_wait_on_other_chats() {
+        let (done, mut out) = tokio::sync::mpsc::unbounded_channel();
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let sink: Arc<dyn MessageSink> = Arc::new(Gated {
+            done,
+            gate: gate.clone(),
+        });
+        let (tx, rx) = mpsc::unbounded_channel();
+        let worker = tokio::spawn(run_worker(sink, "ws".into(), "conn".into(), rx));
+        let msg = |space: &str, id: &str| {
+            let mut m = parse("message_group_at_bot");
+            m.space_ext_id = space.into();
+            m.external_id = id.into();
+            Queued::Message(Box::new(m))
+        };
+        for (space, id) in [("oc_a", "a1"), ("oc_a", "a2"), ("oc_b", "b1")] {
+            tx.send(msg(space, id)).unwrap();
+        }
+        let wait = std::time::Duration::from_secs(5);
+        let next = async |out: &mut tokio::sync::mpsc::UnboundedReceiver<String>| {
+            tokio::time::timeout(wait, out.recv())
+                .await
+                .unwrap()
+                .unwrap()
+        };
+        assert_eq!(next(&mut out).await, "b1", "chat B ran while A was busy");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(out.try_recv().is_err(), "a2 waits for a1");
+        gate.notify_one();
+        assert_eq!(next(&mut out).await, "a1");
+        assert_eq!(next(&mut out).await, "a2");
+        // An idle chat gets a fresh lane; closing the queue ends the worker.
+        tx.send(msg("oc_b", "b2")).unwrap();
+        assert_eq!(next(&mut out).await, "b2");
+        drop(tx);
+        tokio::time::timeout(wait, worker).await.unwrap().unwrap();
     }
 }

@@ -76,11 +76,12 @@ fn account_json(ch: &Channels, v: &Viewer, id: &str, with_spaces: bool) -> ApiRe
         let acc = accounts::out(ch, c, v, id)?;
         let mut out = serde_json::to_value(acc)?;
         if with_spaces {
+            let trigger = spaces::your_trigger(c, &v.ws)?;
             let list: Vec<Value> = spaces::list(c, v, Some(id), None)?
                 .iter()
                 .map(|s| -> ApiResult<Value> {
                     let set = spaces::settings(c, &s.id)?;
-                    let full = spaces::out(c, s)?;
+                    let full = spaces::out_with(c, s, &trigger)?;
                     Ok(json!({
                         "id": s.id, "kind": s.kind, "name": s.name, "title": full.title, "self_chat": full.self_chat,
                         "attention": set.attention, "member_count": full.member_count,
