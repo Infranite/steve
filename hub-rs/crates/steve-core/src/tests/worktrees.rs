@@ -294,3 +294,58 @@ fn a_removed_worktree_its_backend_makes_again_is_not_made_by_the_core() {
     assert!(wt.join("x.txt").exists());
     let _ = fs::metadata(&wt);
 }
+
+#[test]
+fn a_session_bound_to_a_directory_it_only_opens_gets_its_worktree_before_it_is_bound() {
+    // an item first prepared by its backend as an existing directory keeps that plan: the
+    // backend opens it right away, so the core makes a worktree tidied since before it binds
+    let k = kit(true);
+    k.rt.st().binds_existing = true;
+    let (r, p) = project(&k);
+    let id = k.item("run", "执行", Some(&p));
+    let (branch, wt) = branch_with(&r, &k.core.config().worktrees, &id, "x.txt", "x\n");
+    k.db()
+        .item_patch(
+            &id,
+            patch![cwd: wt.to_string_lossy().to_string(), branch: branch.as_str()],
+        )
+        .unwrap();
+    g(&r, &["worktree", "remove", &wt.to_string_lossy()]);
+    k.core.tx().start_session(&id, Some("继续"), None).unwrap();
+    assert_eq!(k.rt.st().bound_with_dir, vec![true], "made before the bind");
+    assert!(wt.join("x.txt").exists());
+}
+
+#[test]
+fn a_worktree_the_core_could_not_make_is_not_left_named_and_a_retry_still_waits_for_disk() {
+    let k = Kit::with(|c| {
+        c.disk = DiskPolicy {
+            floor: u64::MAX,
+            low: u64::MAX,
+            idle_ms: i64::MAX,
+        }
+    });
+    {
+        let mut st = k.rt.st();
+        st.makes_worktrees = true;
+        st.binds_worktrees = false;
+    }
+    let (_, p) = project(&k);
+    let id = k.item("run", "定义", Some(&p));
+    let wt = k.core.config().worktrees.join(&id);
+    assert!(k.core.tx().start_session(&id, None, None).is_err());
+    let i = k.db().item(&id).unwrap().unwrap();
+    assert!(i.cwd.as_deref().is_none_or(str::is_empty), "{:?}", i.cwd);
+    assert!(i.branch.as_deref().is_none_or(str::is_empty));
+    assert!(
+        k.db()
+            .sessions_of_item(&id)
+            .unwrap()
+            .iter()
+            .all(|s| s.status == "ended")
+    );
+    // continuing it later is still a new worktree below the floor: refused, not made
+    k.core.tx().ensure_cwd(&id).unwrap();
+    assert!(k.core.tx().start_session(&id, None, None).is_err());
+    assert!(!wt.exists());
+}

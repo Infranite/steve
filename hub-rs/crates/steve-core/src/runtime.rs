@@ -204,6 +204,13 @@ pub trait AgentRuntime: Send + Sync {
     fn makes_worktrees(&self) -> bool {
         false
     }
+    /// [`Self::created`] would bind `session_id` where its worktree is made (asked before it, so
+    /// that the core makes the worktree first for a session bound otherwise, e.g. to a directory
+    /// the backend only opens).
+    fn would_make_workspace(&self, session_id: &str) -> bool {
+        let _ = session_id;
+        false
+    }
     /// `session_id`'s backend makes the worktree it works in (once [`Self::created`] bound it),
     /// and makes it again when the session opens after a tidy.
     fn makes_workspace(&self, session_id: &str) -> bool {

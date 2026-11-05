@@ -64,6 +64,11 @@ pub struct FakeState {
     pub makes_worktrees: bool,
     /// `created` binds the session where its worktree is made (else it stays with the core).
     pub binds_worktrees: bool,
+    /// `created` binds the session to a directory it only opens (its item was first prepared
+    /// there as an existing directory): it makes no worktree.
+    pub binds_existing: bool,
+    /// Per `created` that bound a session: whether its directory was there by then.
+    pub bound_with_dir: Vec<bool>,
     /// Sessions whose worktree the backend makes ([`AgentRuntime::makes_workspace`]).
     pub node_made: HashSet<String>,
     /// `tidy` calls: (session, keep_branch).
@@ -231,11 +236,25 @@ impl AgentRuntime for FakeRuntime {
         let mut st = self.st();
         st.created.push((sid.into(), after.map(String::from)));
         if st.makes_worktrees && st.binds_worktrees {
-            st.node_made.insert(sid.into());
+            if st.binds_existing {
+                let there = self
+                    .store
+                    .session(sid)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|s| std::path::Path::new(&s.cwd).exists());
+                st.bound_with_dir.push(there);
+            } else {
+                st.node_made.insert(sid.into());
+            }
         }
     }
     fn makes_worktrees(&self) -> bool {
         self.st().makes_worktrees
+    }
+    fn would_make_workspace(&self, _sid: &str) -> bool {
+        let st = self.st();
+        st.makes_worktrees && st.binds_worktrees && !st.binds_existing
     }
     fn makes_workspace(&self, sid: &str) -> bool {
         self.st().node_made.contains(sid)

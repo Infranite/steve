@@ -1001,9 +1001,36 @@ impl RoutedRuntime {
     }
 }
 
+impl RoutedRuntime {
+    /// The binding `session_id` gets on the local Node, planned only (nothing bound or written).
+    fn local_binding(&self, session_id: &str) -> Option<super::node_runtime::Binding> {
+        // a project added a moment ago is a root before its first session is prepared
+        if let Err(e) = self.workspaces.refresh_roots() {
+            tracing::error!("local Node roots before binding {session_id}: {e}");
+        }
+        let perm = self.perm_mode(session_id);
+        let local = self.host.local_node.get();
+        let allows = |at: &steve_node_api::RootPath| local.is_some_and(|l| l.allows(at));
+        super::node_binding::binding_with(
+            &self.store,
+            session_id,
+            perm.as_deref(),
+            &allows,
+            self.worktrees.as_deref(),
+        )
+    }
+}
+
 impl steve_core::AgentRuntime for RoutedRuntime {
     fn makes_worktrees(&self) -> bool {
         self.node.is_some() && self.worktrees.is_some()
+    }
+    /// Only the local Node makes worktrees; a remote one takes no item of a project.
+    fn would_make_workspace(&self, session_id: &str) -> bool {
+        self.makes_worktrees()
+            && self
+                .local_binding(session_id)
+                .is_some_and(|b| matches!(b.prepare, steve_node_api::PrepareKind::Worktree { .. }))
     }
     fn makes_workspace(&self, session_id: &str) -> bool {
         let Some(n) = &self.node else { return false };
@@ -1038,20 +1065,7 @@ impl steve_core::AgentRuntime for RoutedRuntime {
             return;
         }
         let Some(n) = &self.node else { return };
-        // a project added a moment ago is a root before its first session is prepared
-        if let Err(e) = self.workspaces.refresh_roots() {
-            tracing::error!("local Node roots before binding {session_id}: {e}");
-        }
-        let perm = self.perm_mode(session_id);
-        let local = self.host.local_node.get();
-        let allows = |at: &steve_node_api::RootPath| local.is_some_and(|l| l.allows(at));
-        match super::node_binding::binding_with(
-            &self.store,
-            session_id,
-            perm.as_deref(),
-            &allows,
-            self.worktrees.as_deref(),
-        ) {
+        match self.local_binding(session_id) {
             Some(b) => {
                 if let Err(e) = n.bind_after(&b, after) {
                     n.fell_back();

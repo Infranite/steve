@@ -1101,13 +1101,16 @@ impl Tx<'_> {
             token: tok.clone(),
         })?;
         self.st.tokens.insert(s.id.clone(), tok);
+        /* a session its backend binds otherwise (a directory it only opens) gets the worktree
+         * before it is bound, as without it: the backend opens it right away */
+        let core_makes = planned && !self.rt().would_make_workspace(&s.id);
+        if core_makes {
+            self.unplan_on_err(&item, &s.id, self.prepare_cwd(&item))?;
+        }
         self.rt().created(&s.id, after.as_deref());
-        if planned && !self.rt().makes_workspace(&s.id) {
+        if planned && !core_makes && !self.rt().makes_workspace(&s.id) {
             /* not bound where the worktree is made after all: made here, as without it */
-            if let Err(e) = self.prepare_cwd(&item) {
-                self.db().session_patch(&s.id, patch![status: "ended"])?;
-                return Err(e);
-            }
+            self.unplan_on_err(&item, &s.id, self.prepare_cwd(&item))?;
         }
         self.db().timeline_add(
             item_id,
@@ -1128,6 +1131,19 @@ impl Tx<'_> {
         };
         self.rt().prompt(&s.id, &text, "steve", files)?;
         Ok(s)
+    }
+
+    /// A start whose worktree the core could not make after it named it leaves nothing named: the
+    /// session ends and the item is back as it was (a worktree never made is no worktree to
+    /// restore, so a retry still waits for disk space).
+    fn unplan_on_err<T>(&self, before: &Item, session: &str, r: Result<T>) -> Result<()> {
+        let Err(e) = r else { return Ok(()) };
+        self.db().session_patch(session, patch![status: "ended"])?;
+        self.db().item_patch(
+            &before.id,
+            patch![cwd: before.cwd.as_deref(), branch: before.branch.as_deref(), stage: before.stage.as_str(), status: before.status.as_str(), now: before.now.as_str()],
+        )?;
+        Err(e)
     }
 
     /// Session tokens live only in memory: after a restart each session gets a fresh one on its next start.

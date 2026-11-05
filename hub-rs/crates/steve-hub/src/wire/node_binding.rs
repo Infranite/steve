@@ -376,6 +376,48 @@ mod tests {
             .unwrap();
         assert!(binding_for(&h.store, "s1", None, &|_| true).is_none());
     }
+
+    /// An item the Node first prepared as an existing directory keeps that plan, also once its
+    /// worktree is gone: the core makes it before such a session is bound (only a worktree plan
+    /// is one the Node makes).
+    #[tokio::test]
+    async fn an_item_first_prepared_as_existing_keeps_it_with_its_worktree_gone() {
+        let h = fixture(vec![]).await;
+        let project = h.dir.path().join("project");
+        let worktrees = h.dir.path().join("worktrees");
+        let cwd = worktrees.join("i1");
+        h.store.transaction::<_,StoreError>(|tx|{
+            tx.execute("INSERT INTO projects(id,workspace_id,name,path,kind,worktree,created,updated) VALUES('p1','default','project',?,'git',1,1,1)",[project.to_str().unwrap()])?;
+            tx.execute("UPDATE items SET project_id='p1', branch='steve/i1', cwd=?1 WHERE id='i1'",[cwd.to_str().unwrap()])?;
+            tx.execute("UPDATE sessions SET cwd=? WHERE id='s1'",[cwd.to_str().unwrap()])?;
+            Ok(())
+        }).unwrap();
+        let plan = || binding_with(&h.store, "s1", None, &|_| true, Some(&worktrees)).unwrap();
+        assert!(matches!(plan().prepare, PrepareKind::Worktree { .. }));
+        let existing = PrepareKind::Existing {
+            dir: RootPath {
+                root: root_id(&worktrees).unwrap(),
+                rel: RelPath::new("i1").unwrap(),
+            },
+        };
+        let c = Command {
+            id: OperationId::new("op_prep_s0").unwrap(),
+            issued_at: Timestamp(1),
+            accept_before: Timestamp(2),
+            grant: GrantId::new("hub").unwrap(),
+            body: Prepare {
+                resource: "item:i1".into(),
+                kind: existing.clone(),
+            },
+        };
+        let req = serde_json::to_string(&c).unwrap();
+        h.store.transaction::<_,StoreError>(|tx|{
+            tx.execute("INSERT INTO node_commands(operation_id,node_id,method,request,digest,state,created,updated) VALUES('op_prep_s0','local','prepare_workspace',?,'d','finished',1,1)",[req])?;
+            Ok(())
+        }).unwrap();
+        assert!(!cwd.exists());
+        assert_eq!(plan().prepare, existing);
+    }
 }
 
 #[cfg(test)]
