@@ -23,6 +23,7 @@ pub mod research_mcp;
 pub mod signals;
 pub mod store;
 pub mod tool_service;
+pub mod workspaces;
 
 use std::sync::Arc;
 
@@ -58,6 +59,8 @@ pub struct Wired {
     pub yolo_engine: steve_core::yolo::Engine,
     /// Remote Nodes (`STEVE_NODE_LISTEN=1`): their routes and the coordinators sessions go to.
     pub nodes: Option<Arc<crate::nodes::NodeService>>,
+    /// Where projects', items', sessions' and knowledge folders' files are (which Node).
+    pub workspaces: Arc<workspaces::Workspaces>,
     /// Steve's tools as a Node reaches them (in-crate tests drive the bridge with them).
     #[cfg(test)]
     pub(crate) tool_service: Arc<tool_service::ToolService>,
@@ -161,7 +164,8 @@ fn node_runtime(
             node: node_id.clone(),
             home,
             acp: acp_config(cfg),
-            roots: node_binding::roots(store, cfg).map_err(|e| BackendError::msg(e.to_string()))?,
+            roots: node_binding::roots(store, &workspaces::configured(cfg))
+                .map_err(|e| BackendError::msg(e.to_string()))?,
             capacity: steve_node_api::Capacity {
                 sessions: 64,
                 jobs: 0,
@@ -364,6 +368,21 @@ pub fn wire_with(cfg: &Arc<Config>, bus: &Bus, vars: Vars) -> Result<Wired, Back
     }
     let (nodes, bind_remote) = remote_nodes(cfg, &db, host.clone(), &vars);
     let fleet = nodes.as_ref().map(|s| s.fleet.clone());
+    let workspaces = workspaces::Workspaces::new(
+        db.clone(),
+        node_host.as_ref().map(|h| workspaces::LocalFace {
+            node: h.node.clone(),
+            runtime: h.runtime.clone(),
+        }),
+        fleet.clone(),
+        workspaces::configured(cfg),
+    );
+    if node_host.is_some() {
+        // the local roots follow projects and knowledge folders, with no restart
+        node_jobs.push(Box::pin(
+            workspaces.clone().follow(bus.tap(&["project", "kb"])),
+        ));
+    }
     let core = steve_core::Core::new(
         steve_core::repo::Db::new(db.clone()),
         Arc::new(core::RoutedRuntime {
@@ -372,6 +391,7 @@ pub fn wire_with(cfg: &Arc<Config>, bus: &Bus, vars: Vars) -> Result<Wired, Back
             fleet: fleet.clone(),
             bind_remote,
             store: db.clone(),
+            workspaces: workspaces.clone(),
         }),
         gateway,
         core_cfg,
@@ -502,6 +522,7 @@ pub fn wire_with(cfg: &Arc<Config>, bus: &Bus, vars: Vars) -> Result<Wired, Back
         yolo,
         yolo_engine: engine,
         nodes,
+        workspaces,
         #[cfg(test)]
         tool_service,
     })

@@ -77,6 +77,7 @@ impl T {
                 id: RootId::new("work").unwrap(),
                 path: root.join("work"),
                 display: "~/work".into(),
+                access: RootAccess::ReadWrite,
             }],
             capacity: Capacity {
                 sessions: 4,
@@ -585,6 +586,88 @@ async fn paths_stay_inside_the_roots() {
         .await
         .unwrap_err();
     assert_eq!(e.code, ErrorCode::Denied);
+}
+
+fn prepare_in(resource: &str, root: &str, rel: &str) -> Prepare {
+    Prepare {
+        resource: resource.into(),
+        kind: PrepareKind::Existing {
+            dir: RootPath {
+                root: RootId::new(root).unwrap(),
+                rel: RelPath::new(rel).unwrap(),
+            },
+        },
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn roots_change_without_a_restart_and_a_read_only_root_takes_no_workspace() {
+    let t = T::new(&[]);
+    std::fs::create_dir_all(t.root.join("later/p")).unwrap();
+    std::fs::create_dir_all(t.root.join("kb/notes")).unwrap();
+    let n = t.node();
+    // not a root yet
+    let e = n
+        .prepare_workspace(now_cmd("op_later0", prepare_in("item:l", "later", "p")))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::Denied);
+    let work = t.config().roots.remove(0);
+    n.set_roots(vec![
+        work.clone(),
+        Root {
+            id: RootId::new("later").unwrap(),
+            path: t.root.join("later"),
+            display: "~/later".into(),
+            access: RootAccess::ReadWrite,
+        },
+        Root {
+            id: RootId::new("kb").unwrap(),
+            path: t.root.join("kb"),
+            display: "~/kb".into(),
+            access: RootAccess::ReadOnly,
+        },
+    ]);
+    // a root added after open: prepared with no restart
+    n.prepare_workspace(now_cmd("op_later", prepare_in("item:l", "later", "p")))
+        .await
+        .unwrap();
+    assert!(ok(&finished(&n, "op_later").await));
+    // a read-only root is shown as such and takes no workspace
+    let caps = n.probe(false).await.unwrap();
+    let kb = caps.roots.iter().find(|r| r.id.as_str() == "kb").unwrap();
+    assert_eq!(kb.access, RootAccess::ReadOnly);
+    let e = n
+        .prepare_workspace(now_cmd("op_kb", prepare_in("item:k", "kb", "notes")))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::Denied);
+    // a root taken away (an archived project): refused for new work
+    n.set_roots(vec![work]);
+    let e = n
+        .prepare_workspace(now_cmd("op_later2", prepare_in("item:m", "later", "p")))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::Denied);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_node_with_no_session_capacity_takes_workspace_work_only() {
+    let t = T::new(&[]);
+    let mut cfg = t.config();
+    cfg.capacity.sessions = 0;
+    let n = LocalNode::open(cfg).unwrap();
+    n.connect(t.sink.clone(), None);
+    n.prepare_workspace(now_cmd("op_prep", prepare_proj()))
+        .await
+        .unwrap();
+    assert!(ok(&finished(&n, "op_prep").await));
+    let e = n
+        .open_session(now_cmd("op_open", open_body("s1")))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::Unsupported);
+    assert_eq!(t.sent("initialize"), 0, "no harness started");
 }
 
 // ── a real crash: the Node is a child process killed with SIGKILL ──

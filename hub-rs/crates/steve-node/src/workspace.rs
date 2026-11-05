@@ -14,6 +14,8 @@ pub struct Root {
     pub path: PathBuf,
     /// How it is shown (`~/code`).
     pub display: String,
+    /// A read-only root is listed, read and scanned; no workspace is prepared in it.
+    pub access: RootAccess,
 }
 
 /// The directory name for a resource: readable when it is simple, always unique (a hash suffix).
@@ -33,12 +35,19 @@ pub(crate) fn dir_name(resource: &str) -> String {
     format!("{readable}-{}", &h[..12])
 }
 
-/// `root` joined with `rel`, resolved, and still inside `root` (symlinks included).
-pub(crate) fn resolve(roots: &[Root], at: &RootPath) -> ApiResult<PathBuf> {
+/// `root` joined with `rel`, resolved, and still inside `root` (symlinks included). `write`: the
+/// root must allow workspaces (a read-only root is `denied`).
+pub(crate) fn resolve(roots: &[Root], at: &RootPath, write: bool) -> ApiResult<PathBuf> {
     let root = roots
         .iter()
         .find(|r| r.id == at.root)
         .ok_or_else(|| ApiError::new(ErrorCode::Denied, "not a root this node allows"))?;
+    if write && root.access == RootAccess::ReadOnly {
+        return Err(ApiError::new(
+            ErrorCode::Denied,
+            "a read-only root: no workspace there",
+        ));
+    }
     let rel = Path::new(at.rel.as_str());
     if rel
         .components()
@@ -304,7 +313,8 @@ pub(crate) fn remove(
     }
 }
 
-/// A recorded workspace path is still a directory, and (for one under a root) still inside it.
+/// A recorded workspace path is still a directory, and (for one under a root) still inside a root
+/// that allows workspaces.
 pub(crate) fn still_valid(path: &Path, roots: &[Root], under_root: bool) -> ApiResult<PathBuf> {
     let real = path
         .canonicalize()
@@ -318,6 +328,7 @@ pub(crate) fn still_valid(path: &Path, roots: &[Root], under_root: bool) -> ApiR
     if under_root
         && !roots
             .iter()
+            .filter(|r| r.access == RootAccess::ReadWrite)
             .filter_map(|r| r.path.canonicalize().ok())
             .any(|r| real.starts_with(r))
     {

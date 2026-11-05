@@ -156,31 +156,45 @@ pub fn remote_binding_for(store: &Store, session: &str, node: &NodeId) -> Option
     Some(b)
 }
 
-/// Boot-time allowlist: explicit configured roots plus project and local session directories. No
-/// filesystem traversal and never `/`. Newly added project paths need a host restart before binding.
-pub(crate) fn roots(
-    store: &Store,
-    cfg: &crate::config::Config,
-) -> Result<Vec<steve_node::Root>, StoreError> {
-    let paths = store.reader(|c| {
+/// The local Node's allowlist: explicit configured roots (`extra`: the scratch and worktree
+/// directories) plus project and local session directories, read-write, and knowledge folders,
+/// read-only. No filesystem traversal and never `/`. A path that is both stays read-write. Built at
+/// boot and again whenever projects or knowledge sources change ([`super::workspaces`]), so a
+/// project added after boot binds without a restart and an archived one is refused.
+pub(crate) fn roots(store: &Store, extra: &[PathBuf]) -> Result<Vec<steve_node::Root>, StoreError> {
+    let (rw, ro) = store.reader(|c| {
         let mut q = c.prepare("SELECT path FROM projects WHERE archived=0 AND device_id='hub' UNION SELECT cwd FROM sessions WHERE status<>'ended' AND readonly=0 AND source='Steve' AND device_id='hub' UNION SELECT cwd FROM items WHERE cwd IS NOT NULL")?;
-        let paths = q.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
-        Ok::<_, StoreError>(paths)
+        let rw = q.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+        let mut q = c.prepare("SELECT json_extract(config,'$.path') FROM kb_sources WHERE kind='folder' AND json_type(config,'$.path')='text'")?;
+        let ro = q.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+        Ok::<_, StoreError>((rw, ro))
     })?;
-    let mut paths: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
-    paths.extend([cfg.scratch.clone(), cfg.worktrees.clone()]);
-    paths.sort();
-    paths.dedup();
-    Ok(paths
-        .into_iter()
-        .filter(|p| p != Path::new("/"))
-        .filter_map(|path| {
-            Some(steve_node::Root {
-                id: root_id(&path)?,
-                display: "local workspace".into(),
-                path,
-            })
+    let mut rw: Vec<PathBuf> = rw.into_iter().map(PathBuf::from).collect();
+    rw.extend(extra.iter().cloned());
+    rw.sort();
+    rw.dedup();
+    let mut ro: Vec<PathBuf> = ro.into_iter().map(PathBuf::from).collect();
+    ro.sort();
+    ro.dedup();
+    ro.retain(|p| rw.binary_search(p).is_err());
+    let root = |path: PathBuf, access: RootAccess| {
+        Some(steve_node::Root {
+            id: root_id(&path)?,
+            display: if access == RootAccess::ReadOnly {
+                "knowledge folder".into()
+            } else {
+                "local workspace".into()
+            },
+            path,
+            access,
         })
+    };
+    Ok(rw
+        .into_iter()
+        .map(|p| (p, RootAccess::ReadWrite))
+        .chain(ro.into_iter().map(|p| (p, RootAccess::ReadOnly)))
+        .filter(|(p, _)| p != Path::new("/"))
+        .filter_map(|(p, a)| root(p, a))
         .collect())
 }
 

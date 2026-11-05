@@ -745,6 +745,8 @@ pub struct RoutedRuntime {
     pub bind_remote: Option<steve_node_api::NodeId>,
     /// Where bindings are read.
     pub store: steve_store::Store,
+    /// The local Node's roots, built again before a session is bound to it.
+    pub workspaces: Arc<super::workspaces::Workspaces>,
 }
 
 /// Whether boot recovery leaves `session` to a Node that is not enabled here: only when its
@@ -853,6 +855,10 @@ impl steve_core::AgentRuntime for RoutedRuntime {
             return;
         }
         let Some(n) = &self.node else { return };
+        // a project added a moment ago is a root before its first session is prepared
+        if let Err(e) = self.workspaces.refresh_roots() {
+            tracing::error!("local Node roots before binding {session_id}: {e}");
+        }
         match super::node_binding::binding_for(&self.store, session_id) {
             Some(b) => {
                 if let Err(e) = n.bind(&b) {
