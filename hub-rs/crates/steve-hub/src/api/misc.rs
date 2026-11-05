@@ -42,6 +42,8 @@ const STATE_TTL: std::time::Duration = std::time::Duration::from_secs(2);
 /// One cached `/api/state` body per (user, workspace).
 pub struct StateCached {
     generation: u64,
+    /// the change-log head read before the body was computed (`x-steve-cursor`)
+    cursor: String,
     at: std::time::Instant,
     body: axum::body::Bytes,
 }
@@ -56,6 +58,15 @@ pub type StateCache = std::sync::Mutex<
 /// `/api/state` is the hottest endpoint and a pure function of the database (plus a few in-memory flags):
 /// computed once per (user, workspace) until the bus publishes anything; concurrent requests wait for the one
 /// computation instead of repeating it.
+///
+/// The response carries the bus change-log head as `x-steve-cursor: <epoch>:<n>`, a watermark a client can
+/// pass to `/api/stream?after=` to get only what changed since this snapshot. It is read before
+/// `compute_state` and is sound because store writes publish after their commit and the head only moves once
+/// the dispatcher has sent a frame: every frame with an id up to the watermark describes a write committed
+/// before any read below, so the body already reflects it, and every later change gets a larger id. A frame
+/// published before the read but sent after it is delivered again on resume; that is harmless, clients
+/// refetch by id. A cached body keeps its older watermark: the generation check means only frames that
+/// change no state (`steve.tool`, `stats`) can lie between it and the head, and replaying those is safe.
 pub async fn state(State(st): State<AppState>, Extension(c): Extension<Ctx>) -> ApiResult {
     let slot = {
         let mut m = st.state_cache.lock().unwrap_or_else(|e| e.into_inner());
@@ -66,9 +77,10 @@ pub async fn state(State(st): State<AppState>, Extension(c): Extension<Ctx>) -> 
         && x.generation == st.bus.generation()
         && x.at.elapsed() < STATE_TTL
     {
-        return Ok(state_response(x.body.clone()));
+        return Ok(state_response(x.body.clone(), &x.cursor));
     }
     let generation = st.bus.generation();
+    let cursor = st.bus.cursor().to_string();
     let at = std::time::Instant::now();
     let v = compute_state(&st, c).await?;
     let body = axum::body::Bytes::from(
@@ -76,14 +88,25 @@ pub async fn state(State(st): State<AppState>, Extension(c): Extension<Ctx>) -> 
     );
     *cached = Some(StateCached {
         generation,
+        cursor: cursor.clone(),
         at,
         body: body.clone(),
     });
-    Ok(state_response(body))
+    Ok(state_response(body, &cursor))
 }
 
-fn state_response(body: axum::body::Bytes) -> axum::response::Response {
-    ([(header::CONTENT_TYPE, "application/json")], body).into_response()
+/// The header carrying `/api/state`'s change-log watermark.
+pub const CURSOR_HEADER: &str = "x-steve-cursor";
+
+fn state_response(body: axum::body::Bytes, cursor: &str) -> axum::response::Response {
+    (
+        [
+            (header::CONTENT_TYPE, "application/json"),
+            (header::HeaderName::from_static(CURSOR_HEADER), cursor),
+        ],
+        body,
+    )
+        .into_response()
 }
 
 async fn compute_state(st: &AppState, c: Ctx) -> Result<Value, ApiError> {
