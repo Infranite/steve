@@ -840,6 +840,31 @@ async fn a_node_restarted_before_its_ack_sends_again_and_nothing_is_stored_twice
     assert_eq!(r.attempts(), ["finished"]);
 }
 
+/// N1-7: the Hub committed every batch but no ack reached the Node, then the Hub restarted. Its
+/// reconcile compares the Node's heads with what it holds and acknowledges it itself (acks over
+/// the delivery path stay lost), so the Node's journal drains with nothing stored twice and the
+/// turn not run again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_hub_restarted_between_commit_and_ack_acknowledges_on_reconcile() {
+    let mut r = Rig::new().await;
+    r.ready().await;
+    *r.gate.lose_acks.lock().unwrap() = usize::MAX;
+    r.rt.prompt(S, "@say unheard", "user", &[]).unwrap();
+    until("the end", || !r.ends().is_empty()).await;
+    let kinds = r.kinds();
+    let unacked: i64 = r
+        .journal()
+        .query_row("SELECT COUNT(*) FROM events", [], |x| x.get(0))
+        .unwrap();
+    assert!(unacked > 0, "the Node still keeps what the Hub holds");
+    r.restart_hub().await;
+    r.stored_once().await;
+    assert_eq!(r.kinds(), kinds, "the Hub's events are the same");
+    assert_eq!(r.prompts("unheard"), 1);
+    assert_eq!(r.attempts(), ["finished"]);
+    assert_eq!(r.ends().len(), 1, "the turn ended once");
+}
+
 // ── the Node sends again what the Hub holds, but changed ──
 
 /// N1-6: the Hub committed a batch but the ack was lost, and the Node's copy changed before it sent
