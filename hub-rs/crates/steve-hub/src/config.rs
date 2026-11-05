@@ -389,8 +389,11 @@ impl Config {
             codex_home: get("CODEX_HOME")
                 .map(PathBuf::from)
                 .unwrap_or_else(|| home_dir().join(".codex")),
-            // only ever the Node.js binary for `.js` adapters; the Steve Node switch is STEVE_NODE_MODE
-            node: env("STEVE_NODE", "node"),
+            // the Node.js binary for `.js` adapters; the Steve Node switch is STEVE_NODE_MODE.
+            // `local` is the 0.2.50 spelling of that switch (deprecated), never a binary
+            node: get("STEVE_NODE")
+                .filter(|v| v != "local")
+                .unwrap_or_else(|| "node".into()),
             openviking,
             home,
         })
@@ -433,6 +436,8 @@ mod tests {
     fn steve_node_is_only_the_node_js_binary() {
         // the Steve Node's switch has its own name and never reaches the adapters' Node.js
         assert_eq!(cfg(&[("STEVE_NODE_MODE", "local")]).node, "node");
+        // 0.2.50 configs say STEVE_NODE=local: still the switch, never a binary named `local`
+        assert_eq!(cfg(&[("STEVE_NODE", "local")]).node, "node");
         assert_eq!(
             cfg(&[("STEVE_NODE", "/opt/x/bin/node")]).node,
             "/opt/x/bin/node"

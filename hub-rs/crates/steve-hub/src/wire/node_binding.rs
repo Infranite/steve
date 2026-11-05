@@ -119,7 +119,9 @@ pub fn binding_for(store: &Store, session: &str) -> Option<Binding> {
 /// when it must stay where it would go otherwise. A remote Node has none of the Hub's directories,
 /// so only an item without a project qualifies, in a fresh scratch workspace on that Node, and only
 /// while every earlier session of the item ran there too (its files are there, not on the Hub).
-/// The Node must be paired and active (a paused or revoked Node takes no new work).
+/// The Node must be paired and active (a paused or revoked Node takes no new work), and paired by
+/// an owner of the session's workspace: any signed-in user can pair a Node, and the Node sees the
+/// session's prompts, tool output and files, so a member's own machine never gets others' work.
 pub fn remote_binding_for(store: &Store, session: &str, node: &NodeId) -> Option<Binding> {
     let mut b = binding_for(store, session)?;
     let s = store.sessions().get(session).ok()??;
@@ -130,6 +132,13 @@ pub fn remote_binding_for(store: &Store, session: &str, node: &NodeId) -> Option
     let ok = store
         .reader(|c| {
             let state = steve_store::nodes::get(c, node.as_str())?.map(|n| n.state);
+            // the user who paired the Node owns the session's workspace
+            let owned: bool = c.query_row(
+                "SELECT EXISTS(SELECT 1 FROM nodes n JOIN workspace_members m ON m.user_id=n.owner
+                  WHERE n.node_id=?1 AND m.workspace_id=?2 AND m.role='owner')",
+                rusqlite::params![node.as_str(), s.workspace_id],
+                |r| r.get(0),
+            )?;
             // earlier sessions of the item that are not on this Node (on the Hub, or elsewhere)
             let elsewhere: bool = c.query_row(
                 "SELECT EXISTS(SELECT 1 FROM sessions x LEFT JOIN runtime_sessions r ON r.session_id=x.id
@@ -137,7 +146,7 @@ pub fn remote_binding_for(store: &Store, session: &str, node: &NodeId) -> Option
                 rusqlite::params![item.id, session, node.as_str()],
                 |r| r.get(0),
             )?;
-            Ok::<_, StoreError>(state.as_deref() == Some("active") && !elsewhere)
+            Ok::<_, StoreError>(state.as_deref() == Some("active") && owned && !elsewhere)
         })
         .ok()?;
     if !ok {
@@ -248,8 +257,11 @@ mod remote_tests {
             &format!(
                 "INSERT INTO items(id,workspace_id,no,title,status,stage,cwd,created,updated) VALUES ('i1','default',1,'t','run','执行','{c}',1,1);
                  INSERT INTO sessions(id,workspace_id,item_id,harness,cwd,status,created,updated) VALUES ('s1','default','i1','claude-code','{c}','active',1,1);
+                 INSERT INTO users(id,workspace_id,subject,name,role,created) VALUES ('u','default','sub_u','u','owner',1),('m','default','sub_m','m','member',1);
+                 INSERT INTO workspace_members(workspace_id,user_id,role,created) VALUES ('default','u','owner',1),('default','m','member',1);
                  INSERT INTO nodes(node_id,owner,name,pubkey,fingerprint,state,created) VALUES ('n_a','u','a',zeroblob(32),'fa','active',1);
-                 INSERT INTO nodes(node_id,owner,name,pubkey,fingerprint,state,created) VALUES ('n_p','u','p',zeroblob(32),'fp','paused',1);",
+                 INSERT INTO nodes(node_id,owner,name,pubkey,fingerprint,state,created) VALUES ('n_p','u','p',zeroblob(32),'fp','paused',1);
+                 INSERT INTO nodes(node_id,owner,name,pubkey,fingerprint,state,created) VALUES ('n_m','m','m',zeroblob(32),'fm','active',1);",
                 c = cwd.display()
             ),
         );
@@ -264,6 +276,8 @@ mod remote_tests {
         // a paused or unknown Node takes no new work
         assert!(remote_binding_for(&store, "s1", &NodeId::new("n_p").unwrap()).is_none());
         assert!(remote_binding_for(&store, "s1", &NodeId::new("n_none").unwrap()).is_none());
+        // a Node a plain member paired never gets the workspace's sessions
+        assert!(remote_binding_for(&store, "s1", &NodeId::new("n_m").unwrap()).is_none());
         // an earlier session of the item on the Hub keeps the item's work there
         exec(
             &store,

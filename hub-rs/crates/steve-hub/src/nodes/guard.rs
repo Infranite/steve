@@ -4,8 +4,9 @@
 //! - every frame of a link that is no longer the registry's current one is refused `stale`;
 //! - before anything with an effect (events committed, a tool called, an upload kept) the Node's
 //!   row is read again: same generation, active or paused, or `stale`;
-//! - an event batch must be wholly about this Node's own sessions, attempts and operations
-//!   (`Sink::commit` itself does not check it); otherwise nothing commits and an audit row says so.
+//! - an event batch must be wholly about this Node's own sessions, attempts and operations, and
+//!   the ids in each event's body must be its subject's (`Sink::commit` itself does not check it);
+//!   otherwise nothing commits and an audit row says so.
 //!
 //! Revocation cannot stop processes on a hostile Node; it only stops the Hub from taking its
 //! facts, serving its tools or giving it files.
@@ -92,7 +93,13 @@ impl LinkCtx {
     }
 }
 
-/// Whether every subject of the batch belongs to `node`; the first one that does not, if any.
+/// Whether every event of the batch is about `node`'s own work; why the first one is not, if any.
+///
+/// The subject must be this Node's: its session (the Hub's session id and the Node's are the same),
+/// an attempt of that very turn of that very session, or one of its operations. The ids the
+/// coordinator takes from the body must be the subject's: a permission request or resolution of
+/// another execution, a session view of another session or a receipt of another operation would
+/// otherwise reach work that is not this Node's.
 fn foreign(
     c: &rusqlite::Connection,
     node: &str,
@@ -100,29 +107,40 @@ fn foreign(
 ) -> Result<Option<String>, StoreError> {
     let own_session = |s: &SessionId| -> Result<bool, StoreError> {
         Ok(c.query_row(
-            "SELECT 1 FROM runtime_sessions WHERE node_session_id=? AND node_id=?",
+            "SELECT 1 FROM runtime_sessions WHERE session_id=?1 AND node_session_id=?1 AND node_id=?2",
             params![s.as_str(), node],
             |_| Ok(()),
         )
         .optional()?
         .is_some())
     };
-    let own_attempt = |a: &AttemptId| -> Result<bool, StoreError> {
-        Ok(c.query_row(
-            "SELECT 1 FROM runtime_attempts WHERE attempt_id=? AND node_id=?",
-            params![a.as_str(), node],
-            |_| Ok(()),
-        )
-        .optional()?
-        .is_some())
+    let own_execution = |x: &ExecutionRef| -> Result<bool, StoreError> {
+        let found = match x {
+            ExecutionRef::Turn {
+                session,
+                turn,
+                attempt,
+            } => c
+                .query_row(
+                    "SELECT 1 FROM runtime_attempts a JOIN runtime_turns t ON t.turn_id=a.turn_id JOIN runtime_sessions s ON s.session_id=t.session_id WHERE a.attempt_id=?1 AND a.turn_id=?2 AND t.session_id=?3 AND s.node_session_id=?3 AND a.node_id=?4 AND s.node_id=?4",
+                    params![attempt.as_str(), turn.as_str(), session.as_str(), node],
+                    |_| Ok(()),
+                )
+                .optional()?,
+            ExecutionRef::Job { attempt, .. } => c
+                .query_row(
+                    "SELECT 1 FROM runtime_attempts WHERE attempt_id=? AND node_id=?",
+                    params![attempt.as_str(), node],
+                    |_| Ok(()),
+                )
+                .optional()?,
+        };
+        Ok(found.is_some())
     };
     for e in &batch.events {
-        let ok = match &e.subject {
+        let own = match &e.subject {
             Subject::Session { session } => own_session(session)?,
-            Subject::Execution(ExecutionRef::Turn {
-                session, attempt, ..
-            }) => own_session(session)? && own_attempt(attempt)?,
-            Subject::Execution(ExecutionRef::Job { attempt, .. }) => own_attempt(attempt)?,
+            Subject::Execution(x) => own_execution(x)?,
             Subject::Operation { operation } => c
                 .query_row(
                     "SELECT 1 FROM node_commands WHERE operation_id=? AND node_id=?",
@@ -132,9 +150,36 @@ fn foreign(
                 .optional()?
                 .is_some(),
         };
-        if !ok {
+        if !own {
             return Ok(Some(format!(
                 "event {} names a subject of another node",
+                e.id
+            )));
+        }
+        let execution = match &e.subject {
+            Subject::Execution(x) => Some(x),
+            _ => None,
+        };
+        let session = match &e.subject {
+            Subject::Session { session } => Some(session),
+            Subject::Execution(ExecutionRef::Turn { session, .. }) => Some(session),
+            _ => None,
+        };
+        let body_matches = match &e.body {
+            EventBody::PermissionRequested { request } => execution == Some(&request.execution),
+            EventBody::PermissionResolved { resolution } => {
+                execution == Some(&resolution.execution)
+            }
+            EventBody::SessionChanged { view } => session == Some(&view.id),
+            EventBody::OperationChanged { receipt } => matches!(
+                &e.subject,
+                Subject::Operation { operation } if *operation == receipt.operation
+            ),
+            _ => true,
+        };
+        if !body_matches {
+            return Ok(Some(format!(
+                "event {} names in its body other work than its subject",
                 e.id
             )));
         }

@@ -701,7 +701,7 @@ async fn pair_in_process(h: &Home, c: &Client, id: &Identity) -> NodeId {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn another_nodes_session_is_refused() {
-    let (h, _hub, n, _p, node) = setup().await;
+    let (h, mut hub, n, _p, node) = setup().await;
     let c = Client::login(&h).await;
     let sid = c.item(&h, "隔离验收 @say iso-3M @sleep 600000").await;
     assert!(
@@ -787,6 +787,171 @@ async fn another_nodes_session_is_refused() {
         matches!(&r, Err(e) if e.code == ErrorCode::Denied)
             || matches!(&r, Ok(ToolResult::Failed { error }) if error.code == ErrorCode::Denied),
         "{r:?}"
+    );
+
+    // B's own work, as the Hub would hold it (a session, turn, attempt and command bound to B),
+    // so B's events pass the subject check: only the ids in their bodies point at A's session
+    {
+        let w = rusqlite::Connection::open(h.steve().join("data/steve.sqlite3")).expect("db");
+        w.busy_timeout(Duration::from_secs(10)).unwrap();
+        w.execute_batch(&format!(
+            "CREATE TEMP TABLE sb AS SELECT * FROM sessions WHERE id='{sid}';
+             UPDATE sb SET id='s_b_own', item_id=NULL;
+             INSERT INTO sessions SELECT * FROM sb;
+             INSERT INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,updated) VALUES ('s_b_own','{b}','{{}}','s_b_own','r','ready',0);
+             INSERT INTO runtime_turns(turn_id,session_id,state,created,updated) VALUES ('t_b_own','s_b_own','running',0,0);
+             INSERT INTO node_commands(operation_id,node_id,method,request,digest,state,created,updated) VALUES ('op_b_own','{b}','start_turn','{{}}','d','finished',0,0);
+             INSERT INTO runtime_attempts(attempt_id,turn_id,ordinal,node_id,operation_id,execution,spec,digest,state,created,updated) VALUES ('a_b_own','t_b_own',0,'{b}','op_b_own','{{}}','{{}}','d','running',0,0);"
+        ))
+        .expect("B's own rows");
+    }
+    // B has a session here now, so a Hub restart starts B's coordinator: B's events reach it
+    hub.kill();
+    let _hub = spawn_hub(&h, Some(&node));
+    serving(&h).await;
+    let fb = FakeNode::new(b.as_str());
+    let lb = node_harness::dial_url(&ws, &hub_id, &idb, &b, fb.clone(), 1)
+        .await
+        .expect("B links again");
+    fb.connect(Arc::new(RemoteSink(lb.link.clone())));
+    let own_b = ExecutionRef::Turn {
+        session: SessionId::new("s_b_own").unwrap(),
+        turn: TurnId::new("t_b_own").unwrap(),
+        attempt: AttemptId::new("a_b_own").unwrap(),
+    };
+    let spoof = |n: u64, subject: Subject, body: EventBody| EventBatch {
+        events: vec![NodeEvent {
+            schema: 1,
+            id: EventId::new(format!("spoof_{n}")).unwrap(),
+            at: Timestamp(1),
+            cursor: Watermark {
+                stream: StreamId::new(format!("st_spoof_{n}")).unwrap(),
+                epoch: Epoch::new("e1").unwrap(),
+                seq: 1,
+            },
+            subject,
+            body,
+        }],
+    };
+    let a_revision = h.one(
+        "SELECT node_revision FROM runtime_sessions WHERE session_id=?",
+        &sid,
+    );
+    let a_op = h
+        .one(
+            "SELECT a.operation_id FROM runtime_attempts a JOIN runtime_turns t USING(turn_id) WHERE t.session_id=?",
+            &sid,
+        )
+        .expect("A's operation");
+    let a_receipt = h.one(
+        "SELECT receipt FROM node_commands WHERE operation_id=?",
+        &a_op,
+    );
+    let action = Action::Delete { paths: vec![] };
+    let spoofs = [
+        // a card on A's session from B's own turn: the request names A's session
+        spoof(
+            1,
+            Subject::Execution(own_b.clone()),
+            EventBody::PermissionRequested {
+                request: PermissionRequest {
+                    id: PermissionId::new("perm_spoof").unwrap(),
+                    execution: ExecutionRef::Turn {
+                        session: SessionId::new(sid.clone()).unwrap(),
+                        turn: TurnId::new("t_b_own").unwrap(),
+                        attempt: AttemptId::new("a_b_own").unwrap(),
+                    },
+                    invocation: CallId::new("call_spoof").unwrap(),
+                    title: "rm -rf spoofed".into(),
+                    digest: permission_digest(&action, &[]).unwrap(),
+                    action,
+                    preconditions: vec![],
+                    choices: vec![PermissionDecision::AllowOnce, PermissionDecision::Reject],
+                    expires_at: Timestamp(i64::MAX / 2),
+                    own_pids: vec![],
+                },
+            },
+        ),
+        // B's own session reports a view of A's session (its revision)
+        spoof(
+            2,
+            Subject::Session {
+                session: SessionId::new("s_b_own").unwrap(),
+            },
+            EventBody::SessionChanged {
+                view: SessionView {
+                    id: SessionId::new(sid.clone()).unwrap(),
+                    revision: Revision::new("rev_spoofed").unwrap(),
+                    phase: SessionPhase::Released,
+                    active: None,
+                    effective: HarnessChoice {
+                        harness: "codex".into(),
+                        model: Some("spoofed-model".into()),
+                        effort: None,
+                    },
+                    effective_permissions: PermissionMode::Ask,
+                    guarantees: vec![],
+                    resume: None,
+                },
+            },
+        ),
+        // B's own operation carries the receipt of A's turn
+        spoof(
+            3,
+            Subject::Operation {
+                operation: OperationId::new("op_b_own").unwrap(),
+            },
+            EventBody::OperationChanged {
+                receipt: Receipt {
+                    operation: OperationId::new(a_op.clone()).unwrap(),
+                    state: Observed::Unknown {
+                        reason: "spoofed".into(),
+                    },
+                },
+            },
+        ),
+    ];
+    for batch in spoofs {
+        let e = RemoteSink(lb.link.clone())
+            .commit(batch.clone())
+            .await
+            .expect_err("a body naming another node's work is refused");
+        assert_eq!(e.code, ErrorCode::Denied, "{batch:?}");
+    }
+    assert_eq!(
+        h.count("SELECT COUNT(*) FROM decisions WHERE session_id=?", &sid),
+        0,
+        "no card on A's session"
+    );
+    assert_eq!(
+        h.count(
+            "SELECT COUNT(*) FROM events WHERE session_id=? AND kind='permission'",
+            &sid
+        ),
+        0
+    );
+    assert_eq!(
+        h.one(
+            "SELECT node_revision FROM runtime_sessions WHERE session_id=?",
+            &sid
+        ),
+        a_revision,
+        "A's session revision untouched"
+    );
+    assert_eq!(
+        h.one(
+            "SELECT receipt FROM node_commands WHERE operation_id=?",
+            &a_op
+        ),
+        a_receipt,
+        "A's receipt untouched"
+    );
+    assert_eq!(
+        h.count(
+            "SELECT COUNT(*) FROM node_audit WHERE node_id=? AND what='foreign_event'",
+            b.as_str()
+        ),
+        4
     );
 
     // another Node's own process claiming to be A is refused at the handshake, and stops

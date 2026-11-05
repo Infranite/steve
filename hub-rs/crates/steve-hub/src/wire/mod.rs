@@ -144,7 +144,7 @@ fn node_runtime(
     vars: &Vars,
     jobs: &mut Vec<modules::Job>,
 ) -> Result<Option<NodeHost>, BackendError> {
-    if vars("STEVE_NODE_MODE").as_deref() != Some("local") {
+    if !local_node_mode(vars) {
         return Ok(None);
     }
     if cfg.no_resume {
@@ -193,6 +193,19 @@ fn node_runtime(
         tools,
         node,
     }))
+}
+
+/// Whether the local Node is switched on: `STEVE_NODE_MODE=local`, or `STEVE_NODE=local` (how
+/// 0.2.50 spelled it, kept as a deprecated alias when STEVE_NODE_MODE is unset).
+fn local_node_mode(vars: &Vars) -> bool {
+    match vars("STEVE_NODE_MODE").filter(|v| !v.trim().is_empty()) {
+        Some(mode) => mode.trim() == "local",
+        None if vars("STEVE_NODE").as_deref() == Some("local") => {
+            tracing::warn!("STEVE_NODE=local is deprecated; set STEVE_NODE_MODE=local instead");
+            true
+        }
+        None => false,
+    }
 }
 
 /// An attempt's deadline when set (`STEVE_NODE_TURN_LIMIT_MS`, for tests); default 6 h.
@@ -490,4 +503,30 @@ pub fn wire_with(cfg: &Arc<Config>, bus: &Bus, vars: Vars) -> Result<Wired, Back
         #[cfg(test)]
         tool_service,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn vars(kv: &'static [(&'static str, &'static str)]) -> Vars {
+        Arc::new(move |k| kv.iter().find(|(n, _)| *n == k).map(|(_, v)| v.to_string()))
+    }
+
+    #[test]
+    fn local_node_mode_keeps_the_0_2_50_spelling() {
+        assert!(local_node_mode(&vars(&[("STEVE_NODE_MODE", "local")])));
+        // a 0.2.50 config upgraded in place keeps its local Node
+        assert!(local_node_mode(&vars(&[("STEVE_NODE", "local")])));
+        // a Node.js path is not the switch, and STEVE_NODE_MODE wins when both are set
+        assert!(!local_node_mode(&vars(&[(
+            "STEVE_NODE",
+            "/opt/x/bin/node"
+        )])));
+        assert!(!local_node_mode(&vars(&[
+            ("STEVE_NODE", "local"),
+            ("STEVE_NODE_MODE", "off")
+        ])));
+        assert!(!local_node_mode(&vars(&[])));
+    }
 }

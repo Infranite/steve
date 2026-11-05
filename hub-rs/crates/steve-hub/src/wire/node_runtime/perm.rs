@@ -96,8 +96,14 @@ impl NodeRuntime {
             // the same request again (a replay): its card is there
             return Ok(None);
         }
-        if attempt_row(tx, attempt)?.is_none() {
-            tracing::warn!(permission = %request.id, attempt, "request of an attempt the Hub never planned");
+        // an attempt this Hub planned on this Node, of that very session (whatever the body says)
+        let planned: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM runtime_attempts a JOIN runtime_turns t ON t.turn_id=a.turn_id JOIN runtime_sessions s ON s.session_id=t.session_id WHERE a.attempt_id=?1 AND t.session_id=?2 AND a.node_id=?3 AND s.node_id=?3)",
+            rusqlite::params![attempt, session, self.node_id.as_str()],
+            |r| r.get(0),
+        )?;
+        if !planned {
+            tracing::warn!(permission = %request.id, attempt, "request of an attempt the Hub never planned on this Node");
             return Ok(None);
         }
         let (ws, item, bot): (String, Option<String>, Option<String>) = tx.query_row(

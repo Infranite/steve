@@ -1171,8 +1171,8 @@ impl NodeRuntime {
         let op = receipt.operation.as_str();
         let Some(method) = tx
             .query_row(
-                "SELECT method FROM node_commands WHERE operation_id=?",
-                [op],
+                "SELECT method FROM node_commands WHERE operation_id=? AND node_id=?",
+                [op, self.node_id.as_str()],
                 |r| r.get::<_, String>(0),
             )
             .ok()
@@ -2015,9 +2015,18 @@ impl NodeRuntime {
             }
             EventBody::SessionChanged { view } => {
                 // the Node's revision of the session, kept here (the inbox it came in is pruned)
+                // keyed on the event's subject and this Node, never on the id the body gives
+                if view.id.as_str() != session {
+                    tracing::warn!(session, view = %view.id, "session view of another session");
+                    return Ok(out);
+                }
                 tx.execute(
-                    "UPDATE runtime_sessions SET node_revision=? WHERE session_id=?",
-                    [view.revision.as_str(), view.id.as_str()],
+                    "UPDATE runtime_sessions SET node_revision=? WHERE session_id=? AND node_id=?",
+                    [
+                        view.revision.as_str(),
+                        session.as_str(),
+                        self.node_id.as_str(),
+                    ],
                 )?;
                 if view.phase == SessionPhase::Released
                     && !self.stale_release_in(tx, &session, ev)?
