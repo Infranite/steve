@@ -11,6 +11,7 @@
 //!
 //! And on a second home, with a short attempt deadline, a card nobody answers expires; on a
 //! third, an idle Node session goes through two Hub restarts without a resume or a restart notice.
+//! With a short idle limit, an idle Node session's agent exits and the next message resumes it.
 //!
 //! No real host, no real agent, never `~/.steve` or the production port.
 
@@ -171,6 +172,7 @@ fn spawn(h: &Home, node: bool, extra: &[(&str, &str)]) -> Hub {
         .env("STEVE_ADAPTER_CODEX", "/usr/bin/false")
         .env_remove("STEVE_NODE_MODE")
         .env_remove("STEVE_NODE_TURN_LIMIT_MS")
+        .env_remove("STEVE_IDLE_RELEASE_MS")
         .env_remove("STEVE_NO_RESUME")
         .env_remove("STEVE_UPGRADE_ID")
         .env_remove("CLAUDE_CONFIG_DIR")
@@ -722,5 +724,65 @@ async fn a_node_session_shows_its_status_and_harness_id() {
         until(30, || async { status(&get().await) == "idle" }).await,
         "idle after the cancel: {}",
         get().await
+    );
+}
+
+/// A4: past STEVE_IDLE_RELEASE_MS an idle Node session's agent is let go (its process exits),
+/// and the next message opens it again on the same conversation (`session/load`).
+#[tokio::test(flavor = "multi_thread")]
+async fn an_idle_node_session_is_let_go_and_the_next_message_resumes_it() {
+    let h = Home::new();
+    let env = [
+        ("STEVE_TAKEOVER_CONTINUES", "0"),
+        ("STEVE_IDLE_RELEASE_MS", "1500"),
+    ];
+    let _hub = spawn(&h, true, &env);
+    serving(&h).await;
+    let c = Client::login(&h).await;
+    let sid = c.item(&h, "空闲验收 @say idle-release-4A").await;
+    assert!(
+        wait(30, || attempts(&h, &sid, "finished") >= 1).await,
+        "the first turn ran; log:\n{}",
+        hub_log(&h)
+    );
+    let pid = h
+        .lines()
+        .iter()
+        .find_map(|m| m["spawn"]["pid"].as_i64())
+        .expect("the agent's pid") as i32;
+    let alive = |pid: i32| unsafe { libc::kill(pid, 0) } == 0;
+    assert!(
+        wait(30, || !alive(pid)).await,
+        "the idle agent exits; log:\n{}",
+        hub_log(&h)
+    );
+    assert_eq!(
+        h.count(
+            "SELECT COUNT(*) FROM node_commands WHERE method='release_session' AND json_extract(request,'$.body')=?",
+            &sid
+        ),
+        1,
+        "one release"
+    );
+    let first = h
+        .lines()
+        .iter()
+        .find(|m| m["method"] == "session/prompt")
+        .and_then(|m| m["params"]["sessionId"].as_str().map(str::to_string))
+        .expect("the first conversation");
+
+    c.say(&sid, "空闲验收-续 @say idle-again-4A").await;
+    assert!(
+        wait(30, || attempts(&h, &sid, "finished") >= 2).await,
+        "the next message ran; log:\n{}",
+        hub_log(&h)
+    );
+    assert_eq!(h.got("空闲验收-续"), 1);
+    assert_eq!(h.spawns(), 2, "a new agent");
+    assert!(
+        h.lines()
+            .iter()
+            .any(|m| m["method"] == "session/load" && m["params"]["sessionId"] == first.as_str()),
+        "the same conversation, resumed"
     );
 }

@@ -37,6 +37,9 @@ pub struct NodeFleet {
     holding: AtomicBool,
     /// An attempt's deadline for the coordinators started from now on (ms; 0: their default).
     turn_limit: AtomicI64,
+    /// How long a session may sit idle before it is let go, for the coordinators started from
+    /// now on (ms; -1: their default).
+    idle_release: AtomicI64,
 }
 
 /// Events of a Node no coordinator runs for yet: refused `offline`, so they stay in its journal.
@@ -87,6 +90,7 @@ impl NodeFleet {
             nodes: Mutex::new(HashMap::new()),
             holding: AtomicBool::new(false),
             turn_limit: AtomicI64::new(0),
+            idle_release: AtomicI64::new(-1),
         });
         if let Some(s) = service {
             fleet.set_service(s);
@@ -101,6 +105,10 @@ impl NodeFleet {
 
     pub fn set_turn_limit(&self, ms: i64) {
         self.turn_limit.store(ms.max(1), Ordering::Relaxed);
+    }
+
+    pub fn set_idle_release(&self, ms: i64) {
+        self.idle_release.store(ms.max(0), Ordering::Relaxed);
     }
 
     /// The Hub's release hold on every coordinator.
@@ -156,6 +164,10 @@ impl NodeFleet {
                 let ms = self.turn_limit.load(Ordering::Relaxed);
                 if ms > 0 {
                     rt.set_turn_limit(ms);
+                }
+                let idle = self.idle_release.load(Ordering::Relaxed);
+                if idle >= 0 {
+                    rt.set_idle_release(idle);
                 }
                 rt.hold(self.holding.load(Ordering::SeqCst));
                 e.runtime = Some(rt.clone());

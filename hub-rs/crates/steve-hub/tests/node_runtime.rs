@@ -769,6 +769,82 @@ async fn a_message_queued_while_releasing_reopens_once_the_release_is_done() {
     assert_eq!(h.phase(), "ready");
 }
 
+/// A4: an open session idle past the limit is let go once, as legacy's idle kill; the next
+/// message opens it again, resuming the conversation.
+#[tokio::test]
+async fn an_idle_session_is_let_go_once_and_the_next_message_resumes_it() {
+    let h = hub();
+    h.rt.set_idle_release(300);
+    h.bind();
+    h.one_turn("hello").await;
+    until("released", || h.phase() == "released").await;
+    // more passes of the worker let nothing else go
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(h.count("release_session"), 1);
+
+    assert_eq!(h.rt.prompt(S, "again", "user", &[]).unwrap(), Planned::Busy);
+    until("second turn", || h.count("start_turn") == 2).await;
+    assert_eq!(h.count("open_session"), 2);
+    let resume: Option<String> = h.q(
+        "SELECT json_extract(request,'$.body.resume') FROM node_commands WHERE method='open_session' ORDER BY created DESC, rowid DESC LIMIT 1",
+    );
+    assert!(resume.is_some(), "continues the same conversation");
+}
+
+#[tokio::test]
+async fn a_session_with_a_turn_running_is_not_let_go_however_long_it_takes() {
+    let h = hub();
+    h.rt.set_idle_release(0);
+    h.bind();
+    h.rt.prompt(S, "hello", "user", &[]).unwrap();
+    until("active", || h.phase() == "active").await;
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(h.phase(), "active");
+    assert_eq!(h.count("release_session"), 0);
+    // over: idle from now, let go
+    let exec = h.attempts()[0].clone();
+    h.node.finish(&exec, build::done()).await.unwrap();
+    until("released", || h.phase() == "released").await;
+    assert_eq!(h.count("release_session"), 1);
+}
+
+#[tokio::test]
+async fn a_session_with_a_message_waiting_is_not_let_go() {
+    let h = hub();
+    h.bind();
+    h.one_turn("hello").await;
+    // held (an upgrade drain): the message waits in the queue of a session that is open
+    h.rt.hold(true);
+    assert_eq!(h.rt.prompt(S, "later", "user", &[]).unwrap(), Planned::Held);
+    h.rt.set_idle_release(0);
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(h.phase(), "ready");
+    assert_eq!(h.count("release_session"), 0);
+}
+
+#[tokio::test]
+async fn a_session_with_an_open_card_is_not_let_go() {
+    let h = hub();
+    h.rt.set_idle_release(0);
+    h.bind();
+    h.rt.prompt(S, "hello", "user", &[]).unwrap();
+    until("started", || h.methods().contains(&"start_turn")).await;
+    let exec = h.attempts()[0].clone();
+    h.node
+        .ask_permission(perm("p1", exec.clone(), "git push"))
+        .await
+        .unwrap();
+    until("card", || {
+        h.q::<i64>(
+            "SELECT COUNT(*) FROM decisions WHERE subject_type='tool_call' AND status='open'",
+        ) == 1
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(h.count("release_session"), 0, "waits on the person");
+    assert_eq!(h.phase(), "active");
+}
+
 #[tokio::test]
 async fn an_unknown_attempt_keeps_its_session_and_cancel_abandons_it() {
     let h = hub();
