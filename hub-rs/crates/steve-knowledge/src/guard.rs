@@ -1,75 +1,23 @@
-//! A minimal stand-in for `steve_vault::guard::scan` (accounts-vault.md §4, slice V4), so folder
-//! and file sources never index a token while the real scanner is not wired yet. Same patterns as
-//! the vault spec: Luhn-valid 13–19 digit runs, `ghp_`, `github_pat_`, `sk-`/`sk-ant-`,
-//! `xox[abps]-`, `AKIA…`, PEM private keys, and “密码/口令/PIN 是 …”.
-//!
-//! The integrator should replace it with the vault's guard once V4 lands (`Knowledge::new(guard, …)`).
+//! The knowledge base's secret scanner: `steve_vault::guard::scan` (accounts-vault.md §4.6) behind
+//! the [`Guard`] trait, so folder and file sources never index a token. It used to be an interim
+//! copy of the vault's patterns; the vault's set is a superset (grouped card numbers, `xapp-`,
+//! `ASIA`, `glpat-`, `AIza`, `sk_live_`, `password=` …), so every builder that does not pass its own
+//! guard (`MailBuilder`'s default, tests) gets the full set too.
 
 use std::ops::Range;
-use std::sync::LazyLock;
-
-use regex::Regex;
 
 use crate::state::Guard;
 
-static TOKENS: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(concat!(
-        r"(?-u:\b)(?:",
-        r"gh[pousr]_[A-Za-z0-9]{20,}",
-        r"|github_pat_[A-Za-z0-9_]{20,}",
-        r"|sk-ant-[A-Za-z0-9_\-]{16,}",
-        r"|sk-[A-Za-z0-9_\-]{16,}",
-        r"|xox[abps]-[A-Za-z0-9\-]{10,}",
-        r"|AKIA[0-9A-Z]{16}",
-        r")",
-        r"|-----BEGIN [A-Z ]*PRIVATE KEY-----(?s:.*?)(?:-----END [A-Z ]*PRIVATE KEY-----|\z)",
-    ))
-    .expect("token pattern")
-});
-
-/// “密码是 …” and friends: only the value (≥6 non-blank characters) is a secret.
-static SAID: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?:密码|口令|PIN)\s*(?:是|为|：|:)\s*(\S{6,})").expect("said pattern")
-});
-
-static DIGITS: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?-u:\b)[0-9]{13,19}(?-u:\b)").expect("digit pattern"));
-
-fn luhn(digits: &str) -> bool {
-    let mut sum = 0;
-    for (i, c) in digits.bytes().rev().enumerate() {
-        let mut d = u32::from(c - b'0');
-        if i % 2 == 1 {
-            d *= 2;
-            if d > 9 {
-                d -= 9;
-            }
-        }
-        sum += d;
-    }
-    sum % 10 == 0
-}
-
-/// Pattern-based secret scanner (see the module docs).
+/// The vault's paste guard as a [`Guard`].
 #[derive(Debug, Default, Clone, Copy)]
 pub struct TokenGuard;
 
 impl Guard for TokenGuard {
     fn scan(&self, text: &str) -> Vec<Range<usize>> {
-        let mut out: Vec<Range<usize>> = TOKENS.find_iter(text).map(|m| m.range()).collect();
-        out.extend(
-            SAID.captures_iter(text)
-                .filter_map(|c| c.get(1))
-                .map(|m| m.range()),
-        );
-        out.extend(
-            DIGITS
-                .find_iter(text)
-                .filter(|m| luhn(m.as_str()))
-                .map(|m| m.range()),
-        );
-        out.sort_by_key(|r| r.start);
-        out
+        steve_vault::guard::scan(text)
+            .into_iter()
+            .map(|s| s.range())
+            .collect()
     }
 }
 
@@ -110,5 +58,8 @@ mod tests {
         assert_eq!(r("订单 1234567890123"), "订单 1234567890123");
         // Too short to be a token, or ordinary prose.
         assert_eq!(r("ghp_short sk-1 密码是 abc"), "ghp_short sk-1 密码是 abc");
+        // the vault's wider set: grouped card numbers and `password=`
+        assert_eq!(r("卡号 4111 1111 1111 1111"), "卡号 ［已拦下的机密］");
+        assert_eq!(r("password=hunter22!"), "password=［已拦下的机密］");
     }
 }

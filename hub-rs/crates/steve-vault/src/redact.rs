@@ -292,7 +292,11 @@ pub fn scrub(session_id: &str, v: &mut Value) {
 /// [`scrub`] for plain text.
 pub fn scrub_text<'s>(session_id: &str, s: &'s str) -> Cow<'s, str> {
     match redactor_at(session_id, Instant::now()) {
-        Some(r) => Cow::Owned(r.scrub_str(s).into_owned()),
+        // the redactor is a temporary `Arc`, so a borrowed result is re-borrowed from `s`
+        Some(r) => match r.scrub_str(s) {
+            Cow::Borrowed(_) => Cow::Borrowed(s),
+            Cow::Owned(t) => Cow::Owned(t),
+        },
         None => Cow::Borrowed(s),
     }
 }

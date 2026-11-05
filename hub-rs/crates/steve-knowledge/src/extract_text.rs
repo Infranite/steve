@@ -8,6 +8,8 @@
 
 use std::io::{Cursor, Read};
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use quick_xml::events::Event as XmlEvent;
@@ -21,6 +23,11 @@ pub const MAX_TEXT_BYTES: usize = 2 * 1024 * 1024;
 const MAX_DOCX_XML_BYTES: u64 = 64 * 1024 * 1024;
 /// Time limit of [`extract_isolated`].
 pub const EXTRACT_TIMEOUT: Duration = Duration::from_secs(30);
+/// How many isolated extractions run at once across the Hub.
+const EXTRACT_PARALLEL: usize = 3;
+/// How many timed-out extraction threads (still running, unkillable) we tolerate before refusing
+/// new extractions until some of them end.
+const MAX_ABANDONED: usize = 16;
 /// Disclosure levels a front matter may set (`steve.level`).
 pub const LEVELS: [&str; 4] = ["public", "conclusion", "reasoning", "never"];
 
@@ -126,10 +133,61 @@ async fn extract_isolated_with(
     bytes: Vec<u8>,
     limit: Duration,
 ) -> Result<Extracted, ExtractError> {
-    let task = tokio::task::spawn_blocking(move || extract(format, &bytes));
+    static SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(EXTRACT_PARALLEL);
+    static ABANDONED: AtomicUsize = AtomicUsize::new(0);
+    run_isolated(&SLOTS, &ABANDONED, limit, move || extract(format, &bytes))
+        .await
+        .inspect_err(|e| {
+            if *e == ExtractError::Timeout {
+                tracing::warn!(?format, "text extraction timed out");
+            }
+        })
+}
+
+/// Runs `job` on the blocking pool, at most `slots` at a time, for at most `limit`.
+///
+/// The permit stays with the caller, not the thread: on timeout it is released and the next
+/// extraction runs, so stuck parsers cannot take every slot for good (and the wait for a slot is
+/// bounded, since every holder lets go within `limit`). A timed-out thread cannot be killed; it
+/// is counted in `abandoned` until it ends, and once [`MAX_ABANDONED`] are stuck, new jobs fail
+/// at once with [`ExtractError::Timeout`] instead of piling more threads onto the pool.
+async fn run_isolated<F>(
+    slots: &tokio::sync::Semaphore,
+    abandoned: &'static AtomicUsize,
+    limit: Duration,
+    job: F,
+) -> Result<Extracted, ExtractError>
+where
+    F: FnOnce() -> Result<Extracted, ExtractError> + Send + 'static,
+{
+    if abandoned.load(Ordering::Acquire) >= MAX_ABANDONED {
+        tracing::warn!("too many stuck text extractions; refusing a new one");
+        return Err(ExtractError::Timeout);
+    }
+    let _permit = slots.acquire().await.map_err(|_| ExtractError::Panicked)?;
+    // Set by whichever side finishes first: the thread when it ends, the caller when it gives up.
+    let done = Arc::new(AtomicBool::new(false));
+    let on_thread = done.clone();
+    let task = tokio::task::spawn_blocking(move || {
+        // A guard, so the count also drops if the job unwinds.
+        struct Ended(Arc<AtomicBool>, &'static AtomicUsize);
+        impl Drop for Ended {
+            fn drop(&mut self) {
+                if self.0.swap(true, Ordering::AcqRel) {
+                    self.1.fetch_sub(1, Ordering::AcqRel);
+                }
+            }
+        }
+        let _ended = Ended(on_thread, abandoned);
+        job()
+    });
     match tokio::time::timeout(limit, task).await {
         Err(_) => {
-            tracing::warn!(?format, "text extraction timed out");
+            // Count first, then mark: if the thread already ended, take the count back.
+            abandoned.fetch_add(1, Ordering::AcqRel);
+            if done.swap(true, Ordering::AcqRel) {
+                abandoned.fetch_sub(1, Ordering::AcqRel);
+            }
             Err(ExtractError::Timeout)
         }
         Ok(Err(_join)) => Err(ExtractError::Panicked),
@@ -612,5 +670,72 @@ mod tests {
         )
         .await;
         assert!(matches!(r, Err(ExtractError::Timeout) | Ok(_)));
+    }
+
+    fn plain(text: &str) -> Extracted {
+        Extracted {
+            text: text.into(),
+            kind: TextKind::Plain,
+            front: FrontMatter::default(),
+        }
+    }
+
+    /// Stuck parsers holding every slot must not block later extractions (regression).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stuck_extractions_free_their_slots() {
+        static SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(EXTRACT_PARALLEL);
+        static ABANDONED: AtomicUsize = AtomicUsize::new(0);
+        let (release, gate) = std::sync::mpsc::channel::<()>();
+        let gate = Arc::new(std::sync::Mutex::new(gate));
+        let limit = Duration::from_millis(50);
+
+        for _ in 0..EXTRACT_PARALLEL {
+            let gate = gate.clone();
+            let r = run_isolated(&SLOTS, &ABANDONED, limit, move || {
+                let _ = gate.lock().unwrap().recv();
+                Ok(plain("late"))
+            })
+            .await;
+            assert_eq!(r, Err(ExtractError::Timeout));
+        }
+        assert_eq!(ABANDONED.load(Ordering::Acquire), EXTRACT_PARALLEL);
+
+        // All "real" slots are held by stuck threads; a new extraction still runs.
+        let r = tokio::time::timeout(
+            Duration::from_secs(5),
+            run_isolated(&SLOTS, &ABANDONED, limit, || Ok(plain("ok"))),
+        )
+        .await
+        .expect("extraction waited for a stuck thread's slot");
+        assert_eq!(r.unwrap().text, "ok");
+
+        // Stuck threads that finally end are no longer counted.
+        drop(release);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while ABANDONED.load(Ordering::Acquire) != 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "abandoned count never dropped"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    /// Past the cap on stuck threads, new extractions fail at once instead of adding threads.
+    #[tokio::test]
+    async fn too_many_stuck_extractions_refuse_new_ones() {
+        static SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(EXTRACT_PARALLEL);
+        static ABANDONED: AtomicUsize = AtomicUsize::new(MAX_ABANDONED);
+        let r = run_isolated(&SLOTS, &ABANDONED, Duration::from_secs(5), || {
+            panic!("must not run")
+        })
+        .await;
+        assert_eq!(r, Err(ExtractError::Timeout));
+        ABANDONED.store(MAX_ABANDONED - 1, Ordering::Release);
+        let r = run_isolated(&SLOTS, &ABANDONED, Duration::from_secs(5), || {
+            Ok(plain("ok"))
+        })
+        .await;
+        assert_eq!(r.unwrap().text, "ok");
     }
 }

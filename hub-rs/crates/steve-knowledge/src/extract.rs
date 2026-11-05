@@ -537,35 +537,47 @@ pub async fn run(
         return Ok(Vec::new());
     }
     let now = m.clock.now();
-    let (names, similar, known) = m.store.reader(|c| {
-        let viewer = Viewer::load(c, &origin.ws, &origin.user)?;
-        let names = Names::load(c, &viewer, item)?;
-        let q_text = clip(&text, SIMILAR_QUERY_CHARS);
-        let kinds = ["mems"];
-        let mut q = Query::new(kb.store(), &viewer, &q_text, Purpose::Agent);
-        q.kinds = Some(&kinds);
-        q.k = SIMILAR_K;
-        q.now = now;
-        let mut similar: Vec<Similar> = retrieve::retrieve(c, &q)?
-            .into_iter()
-            .filter(|h| h.obj_type == "mem")
-            .map(|h| Similar {
-                id: h.obj_id,
-                text: h.text,
-                pending: false,
+    // retrieval (which may ask a remote store) and the name list: off the runtime
+    let (k, o, t, it) = (
+        kb.clone(),
+        origin.clone(),
+        text.clone(),
+        item.map(str::to_string),
+    );
+    let (names, similar, known) = m
+        .blocking(move |m| {
+            m.store.reader(|c| {
+                let (kb, origin, text, item) = (&k, &o, &t, it.as_deref());
+                let viewer = Viewer::load(c, &origin.ws, &origin.user)?;
+                let names = Names::load(c, &viewer, item)?;
+                let q_text = clip(text, SIMILAR_QUERY_CHARS);
+                let kinds = ["mems"];
+                let mut q = Query::new(kb.store(), &viewer, &q_text, Purpose::Agent);
+                q.kinds = Some(&kinds);
+                q.k = SIMILAR_K;
+                q.now = now;
+                let mut similar: Vec<Similar> = retrieve::retrieve(c, &q)?
+                    .into_iter()
+                    .filter(|h| h.obj_type == "mem")
+                    .map(|h| Similar {
+                        id: h.obj_id,
+                        text: h.text,
+                        pending: false,
+                    })
+                    .collect();
+                let (pending, known) = known(c, &origin.ws, &origin.user)?;
+                // pending candidates are not in the index: the ones most made of this text's words
+                let mut close: Vec<(f64, Similar)> = pending
+                    .into_iter()
+                    .map(|p| (contained(&p.text, text), p))
+                    .filter(|(s, _)| *s >= 0.3)
+                    .collect();
+                close.sort_by(|a, b| b.0.total_cmp(&a.0));
+                similar.extend(close.into_iter().take(SIMILAR_K).map(|(_, s)| s));
+                Ok::<_, ApiError>((names, similar, known))
             })
-            .collect();
-        let (pending, known) = known(c, &origin.ws, &origin.user)?;
-        // pending candidates are not in the index: the ones most made of this text's words
-        let mut close: Vec<(f64, Similar)> = pending
-            .into_iter()
-            .map(|p| (contained(&p.text, &text), p))
-            .filter(|(s, _)| *s >= 0.3)
-            .collect();
-        close.sort_by(|a, b| b.0.total_cmp(&a.0));
-        similar.extend(close.into_iter().take(SIMILAR_K).map(|(_, s)| s));
-        Ok::<_, ApiError>((names, similar, known))
-    })?;
+        })
+        .await?;
     let p = prompt(&origin.label, &text, &similar, &names, task);
     let answer = {
         let _slot = SLOTS
@@ -608,16 +620,20 @@ pub async fn run(
     if chosen.is_empty() {
         return Ok(Vec::new());
     }
-    m.store.transaction(|tx| {
-        chosen
-            .iter()
-            .map(|c| {
-                let mut c = c.clone();
-                c.evidence = redact(kb.guard.as_ref(), &c.evidence);
-                candidates::propose(tx, origin, &c)
-            })
-            .collect::<ApiResult<Vec<_>>>()
+    let (guard, origin) = (kb.guard.clone(), origin.clone());
+    m.blocking(move |m| {
+        m.store.transaction(|tx| {
+            chosen
+                .iter()
+                .map(|c| {
+                    let mut c = c.clone();
+                    c.evidence = redact(guard.as_ref(), &c.evidence);
+                    candidates::propose(tx, &origin, &c)
+                })
+                .collect::<ApiResult<Vec<_>>>()
+        })
     })
+    .await
 }
 
 /// The entry point for other modules (§5.1 “其他模块”): mail threads (`OriginKind::Mail`, default

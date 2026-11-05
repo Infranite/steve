@@ -239,7 +239,7 @@ impl SqliteStore {
             Sql::Integer(seq),
         ];
         p.extend(tail.1);
-        let mut st = c.prepare(&sql)?;
+        let mut st = c.prepare_cached(&sql)?;
         let mut rows = st.query_map(bind(p), |r| candidate(r, Some(0.0)))?;
         Ok(rows.next().transpose()?)
     }
@@ -277,7 +277,7 @@ impl KnowledgeStore for SqliteStore {
             );
             let mut p = vec![Sql::Text(text.into()), Sql::Text(text.into())];
             p.extend(tail.1);
-            let mut st = c.prepare(&sql)?;
+            let mut st = c.prepare_cached(&sql)?;
             let rows = st.query_map(bind(p), |r| candidate(r, Some(1.0)))?;
             return Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?);
         }
@@ -301,7 +301,7 @@ impl KnowledgeStore for SqliteStore {
         );
         let mut p = vec![Sql::Text(expr)];
         p.extend(tail.1);
-        let mut st = c.prepare(&sql)?;
+        let mut st = c.prepare_cached(&sql)?;
         let rows = st.query_map(bind(p), |r| candidate(r, None))?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }

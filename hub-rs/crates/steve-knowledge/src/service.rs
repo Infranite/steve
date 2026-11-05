@@ -166,6 +166,14 @@ pub fn doc_brief(d: &DocRow, s: &SourceRow) -> Value {
 
 /// `Doc` (§6.1): the brief plus body (notes only), about, tags, preview, uses, error.
 pub fn doc_json(c: &Connection, d: &DocRow, s: &SourceRow) -> ApiResult<Value> {
+    let mut v = doc_json_bare(c, d, s)?;
+    add_uses(c, &mut v, &d.workspace_id, &d.id)?;
+    Ok(v)
+}
+
+/// `doc_json` without `uses`. Counting uses scans the retrieval log, so the write paths build
+/// this inside the transaction and add the count after commit, on a reader.
+fn doc_json_bare(c: &Connection, d: &DocRow, s: &SourceRow) -> ApiResult<Value> {
     let mut v = doc_brief(d, s);
     let about = repo::doc_about(c, &d.id)?
         .into_iter()
@@ -187,11 +195,26 @@ pub fn doc_json(c: &Connection, d: &DocRow, s: &SourceRow) -> ApiResult<Value> {
     o.insert("about".into(), json!(about));
     o.insert("tags".into(), json!(d.tags));
     o.insert("preview".into(), json!(preview));
-    o.insert(
-        "uses".into(),
-        json!(repo::uses_of(c, &d.workspace_id, &d.id)?),
-    );
     o.insert("error".into(), json!(d.error));
+    Ok(v)
+}
+
+fn add_uses(c: &Connection, v: &mut Value, ws: &str, id: &str) -> ApiResult<()> {
+    let n = repo::uses_of(c, ws, id)?;
+    if let Some(o) = v.as_object_mut() {
+        o.insert("uses".into(), json!(n));
+    }
+    Ok(())
+}
+
+/// After a write: the doc built in the transaction, with its use count read outside it.
+fn with_uses(m: &Modules, ws: &str, mut v: Value) -> ApiResult<Value> {
+    let id = v
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    m.store.reader(|c| add_uses(c, &mut v, ws, &id))?;
     Ok(v)
 }
 
@@ -297,8 +320,9 @@ pub fn patch_doc(
             &json!({"visibility": vis, "level": level, "about": b.about.as_ref().map(Vec::len)}),
         )?;
         let (d, s) = own_doc_any(tx, &d.id)?;
-        doc_json(tx, &d, &s)
+        doc_json_bare(tx, &d, &s)
     })?;
+    let out = with_uses(m, &who.ws, out)?;
     kb.notify(&who.ws, id);
     Ok(out)
 }
@@ -384,8 +408,9 @@ pub fn create_note(m: &Modules, kb: &Knowledge, who: &Caller, b: NoteBody) -> Ap
             now,
         )?;
         let (d, s) = own_doc_any(tx, &id)?;
-        doc_json(tx, &d, &s)
+        doc_json_bare(tx, &d, &s)
     })?;
+    let out = with_uses(m, &who.ws, out)?;
     if let Some(id) = out.get("id").and_then(Value::as_str) {
         kb.notify(&who.ws, id);
     }
@@ -430,8 +455,9 @@ pub fn update_note(
             now,
         )?;
         let (d, s) = own_doc_any(tx, id)?;
-        doc_json(tx, &d, &s)
+        doc_json_bare(tx, &d, &s)
     })?;
+    let out = with_uses(m, &who.ws, out)?;
     kb.notify(&who.ws, id);
     Ok(out)
 }

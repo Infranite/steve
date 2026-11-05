@@ -52,6 +52,8 @@ const BACKOFF_BASE_MS: i64 = 15 * MINUTE;
 const BACKOFF_MAX_MS: i64 = 6 * 60 * MINUTE;
 /// `error` after this many failures in a row.
 const FAILS_TO_ERROR: i64 = 3;
+/// What one scheduled health check may take.
+const HEALTH_TIMEOUT: Duration = Duration::from_secs(60);
 
 fn backoff(fails: i64) -> i64 {
     let shift = (fails.max(1) - 1).min(10) as u32;
@@ -2118,7 +2120,10 @@ impl Connections {
             let Some(p) = self.provider(&r.adapter) else {
                 continue;
             };
-            let h = p.health(&self.cx_of(&r)).await;
+            // one provider that hangs must not hold up the rest of the pass
+            let h = tokio::time::timeout(HEALTH_TIMEOUT, p.health(&self.cx_of(&r)))
+                .await
+                .unwrap_or_else(|_| Health::Failed("health check timed out".into()));
             self.record(&r.workspace_id, &r.id, h).await;
             n += 1;
         }
@@ -2129,14 +2134,28 @@ impl Connections {
     pub fn spawn_jobs(&self) -> tokio::task::JoinHandle<()> {
         let c = self.clone();
         tokio::spawn(async move {
-            let mut refresh = tokio::time::interval(Duration::from_secs(5 * 60));
-            let mut health = tokio::time::interval(Duration::from_secs(15 * 60));
-            loop {
-                tokio::select! {
-                    _ = refresh.tick() => { c.refresh_due().await; }
-                    _ = health.tick() => { c.check_health().await; }
-                }
-            }
+            // two loops side by side: a long health pass must not delay a token refresh. A pass
+            // that overruns its period starts the next one a full period later, not in a burst.
+            let every = |mins: u64| {
+                let mut i = tokio::time::interval(Duration::from_secs(mins * 60));
+                i.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                i
+            };
+            let (mut refresh, mut health) = (every(5), every(15));
+            tokio::join!(
+                async {
+                    loop {
+                        refresh.tick().await;
+                        c.refresh_due().await;
+                    }
+                },
+                async {
+                    loop {
+                        health.tick().await;
+                        c.check_health().await;
+                    }
+                },
+            );
         })
     }
 }

@@ -821,6 +821,25 @@ async fn write_json(p: &Path, v: &Value) -> std::io::Result<()> {
     Ok(())
 }
 
+/// How much of the harness's stderr is kept: only its end is ever shown.
+const STDERR_TAIL: usize = 16 * 1024;
+
+/// Drains `r` to EOF (a full pipe would block the harness) and keeps the last [`STDERR_TAIL`]
+/// bytes, decoded leniently so invalid UTF-8 does not lose the message.
+async fn stderr_tail(mut r: impl tokio::io::AsyncRead + Unpin) -> String {
+    let mut tail: std::collections::VecDeque<u8> = std::collections::VecDeque::new();
+    let mut buf = [0u8; 8192];
+    while let Ok(n) = r.read(&mut buf).await {
+        if n == 0 {
+            break;
+        }
+        tail.extend(&buf[..n]);
+        let over = tail.len().saturating_sub(STDERR_TAIL);
+        tail.drain(..over);
+    }
+    String::from_utf8_lossy(tail.make_contiguous()).into_owned()
+}
+
 /// Runs one harness process until it exits or the Hub kills it. Err is why it produced nothing usable.
 async fn attempt(
     ctx: &Ctx<'_>,
@@ -872,14 +891,10 @@ async fn attempt(
         });
     }
     let pid = child.id();
-    let (Some(stdout), Some(mut stderr)) = (child.stdout.take(), child.stderr.take()) else {
+    let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
         return Err("harness 没有输出".into());
     };
-    let err_task = tokio::spawn(async move {
-        let mut s = String::new();
-        let _ = stderr.read_to_string(&mut s).await;
-        s
-    });
+    let err_task = tokio::spawn(stderr_tail(stderr));
     let model = st.model.clone().unwrap_or_default();
     let _ = ctx.tx.send(ResearchEvent::Started { model });
     let mut lines = tokio::io::BufReader::new(stdout).lines();
@@ -1177,6 +1192,16 @@ fn finish(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn stderr_keeps_a_bounded_tail_even_with_invalid_utf8() {
+        // read_to_string used to drop everything here: one bad byte, and the error came out empty
+        let mut e = vec![b'a'; STDERR_TAIL * 3];
+        e.extend_from_slice(b"\xff boom: the real reason");
+        let t = stderr_tail(e.as_slice()).await;
+        assert!(t.ends_with(" boom: the real reason"), "{t:?}");
+        assert!(t.len() <= STDERR_TAIL + 3);
+    }
 
     #[test]
     fn no_limit_unless_the_setting_names_one() {

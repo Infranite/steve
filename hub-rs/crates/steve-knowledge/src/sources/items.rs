@@ -317,14 +317,21 @@ pub async fn finished(m: &Modules, kb: &Knowledge, item_id: &str) -> ApiResult<V
     let now = m.clock.now();
     let mark = format!("extract:item:{}", f.id);
     let stamp = f.stamp.to_string();
-    let (doc, fresh) = m.store.transaction(|tx| {
-        let doc = write_doc(tx, kb, &f, &text, now)?;
-        let fresh = repo::mark(tx, &f.ws, &mark)?.as_deref() != Some(stamp.as_str());
-        if fresh {
-            repo::set_mark(tx, &f.ws, &mark, &stamp, now)?;
-        }
-        Ok::<_, ApiError>((doc, fresh))
-    })?;
+    // chunking the document happens inside the write: off the runtime
+    let k = kb.clone();
+    let (f, doc, fresh) = m
+        .blocking(move |m| {
+            let (doc, fresh) = m.store.transaction(|tx| {
+                let doc = write_doc(tx, &k, &f, &text, now)?;
+                let fresh = repo::mark(tx, &f.ws, &mark)?.as_deref() != Some(stamp.as_str());
+                if fresh {
+                    repo::set_mark(tx, &f.ws, &mark, &stamp, now)?;
+                }
+                Ok::<_, ApiError>((doc, fresh))
+            })?;
+            Ok((f, doc, fresh))
+        })
+        .await?;
     kb.notify(&f.ws, &doc);
     if !fresh {
         return Ok(Vec::new());
