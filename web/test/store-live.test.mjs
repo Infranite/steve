@@ -170,3 +170,15 @@ test("acceptance modes round-trip through their Hub keys in en", async () => {
     assert.deepEqual(sent.map(([, p]) => p.accept_mode), ["inherit", "manual", "auto"])
   } finally { await i18n.default.changeLanguage("zh-CN") }
 })
+
+test("an approved release that was not released says so by its outcome in en, not by its zh-CN text", async () => {
+  const s = harness().store
+  await i18n.default.changeLanguage("en")
+  try {
+    const d = (result) => ({ id: "d1", kind: "approve", subject_type: "release", status: "resolved", result: { approved: true, ...result } })
+    const not = s.relOf(d({ outcome: "not_released" }))
+    assert.equal(not.tone, "fail"); assert.equal(not.outcome, "not_released"); assert.doesNotMatch(not.text, /[一-鿿]/)
+    assert.equal(s.relOf(d({ outcome: "not_released", reason: "no changes" })).outcome, "not_released")
+    assert.equal(s.relOf(d({ outcome: "failed" })).outcome, "failed")
+  } finally { await i18n.default.changeLanguage("zh-CN") }
+})

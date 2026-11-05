@@ -23,7 +23,7 @@ export type Done = { id: string; type: Wait["type"]; q: string; choice: string; 
   /** answered by YOLO: its reason (modules/yolo.md §3.3 `decided_by: "yolo"`) */
   yolo?: string }
 /** what became of an approved release (hub decision.result.outcome): the card says this, never a bare "approved" */
-export type Rel = { tone: "run" | "fail" | "ok"; text: string; /** the release decision it comes from */ key?: string }
+export type Rel = { tone: "run" | "fail" | "ok"; text: string; /** the Hub's outcome, for deciding (text is a translated label) */ outcome?: "releasing" | "not_released" | "failed" | "released"; /** the release decision it comes from */ key?: string }
 /** an earlier plan: replaced (its open steps abandoned) or done (a new round followed) */
 /** an output the bot delivered: kind, title, location, artifact id, when it was delivered, and whether the bot said it is
  * a record of the work (`record`) or the result (`result`); unsaid, its title decides */
@@ -279,15 +279,15 @@ export function relOf(d: RDecision): Rel | undefined {
   const r = d.result ?? {}
   if (d.kind !== "approve" || d.subject_type !== "release" || d.status !== "resolved" || !r.approved) return undefined
   switch (r.outcome) {
-    case "releasing": return { tone: "run", text: t("core:rel.releasing") }
-    case "not_released": return { tone: "fail", text: r.reason ? t("core:rel.notReleasedWhy", { why: r.reason }) : t("core:rel.notReleased") }
+    case "releasing": return { tone: "run", outcome: "releasing", text: t("core:rel.releasing") }
+    case "not_released": return { tone: "fail", outcome: "not_released", text: r.reason ? t("core:rel.notReleasedWhy", { why: r.reason }) : t("core:rel.notReleased") }
     case "failed": {
       const why = [r.reason, r.note].filter(Boolean).join(t("core:rel.sep")), hubOnly = r.hub_ok && !r.web_ok
-      return { tone: "fail", text: hubOnly ? (why ? t("core:rel.hubOnlyWhy", { why }) : t("core:rel.hubOnly")) : why ? t("core:rel.failedWhy", { why }) : t("core:rel.failed") }
+      return { tone: "fail", outcome: "failed", text: hubOnly ? (why ? t("core:rel.hubOnlyWhy", { why }) : t("core:rel.hubOnly")) : why ? t("core:rel.failedWhy", { why }) : t("core:rel.failed") }
     }
     case "released": {
       const what = t(r.kind === "web" ? "core:rel.releasedWeb" : r.kind === "hub+web" ? "core:rel.releasedBoth" : "core:rel.released")
-      return { tone: "ok", text: r.version ? t("core:rel.withVersion", { what, version: r.version }) : what }
+      return { tone: "ok", outcome: "released", text: r.version ? t("core:rel.withVersion", { what, version: r.version }) : what }
     }
   }
   return undefined
