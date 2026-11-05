@@ -3,6 +3,7 @@
 
 pub mod files;
 pub mod folder;
+pub mod folder_node;
 
 use rusqlite::Connection;
 use serde_json::{Value, json};

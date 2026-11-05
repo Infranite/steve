@@ -569,6 +569,13 @@ pub fn set_doc_seen(tx: &Tx, id: &str, size: i64, mtime: i64, now: i64) -> Resul
     Ok(())
 }
 
+/// Forgets when a document's file was last seen (`mtime`), so the next scan reads it again.
+pub fn forget_seen(tx: &Tx, id: &str) -> Result<()> {
+    tx.prepare_cached("UPDATE kb_docs SET mtime = NULL WHERE id = ?")?
+        .execute([id])?;
+    Ok(())
+}
+
 /// What a document's front matter set (title, tags, own scope).
 pub fn set_doc_front(
     tx: &Tx,

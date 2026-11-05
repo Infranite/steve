@@ -39,6 +39,8 @@ pub enum Gap {
     Entry,
     /// Wanted files beyond [`MAX_FILES`].
     OverLimit,
+    /// The scan was cut short (a Node's scan: a restart, a cancel, the deadline).
+    Interrupted,
 }
 
 impl Gap {
@@ -48,6 +50,7 @@ impl Gap {
             Gap::Unreadable => "unreadable",
             Gap::Entry => "entry",
             Gap::OverLimit => "over_limit",
+            Gap::Interrupted => "interrupted",
         }
     }
 }
@@ -59,6 +62,8 @@ pub enum Held {
     Outside,
     /// Its metadata (or its link) could not be read: its document stays as it is.
     Unreadable,
+    /// The Node that scanned it refuses the path: its document fails, as when reading it would.
+    Denied,
 }
 
 /// What a walk found.
@@ -90,7 +95,7 @@ impl Walk {
         }
     }
 
-    fn gap(&mut self, g: Gap) {
+    pub(crate) fn gap(&mut self, g: Gap) {
         if let Err(i) = self.gaps.binary_search(&g) {
             self.gaps.insert(i, g);
         }

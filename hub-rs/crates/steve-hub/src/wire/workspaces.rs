@@ -270,6 +270,51 @@ impl Workspaces {
     }
 }
 
+/// The knowledge folder sources' view of the router (N0e-E4): their Node scans and reads them.
+/// Wired only with the local Node on; a folder there is a read-only root.
+pub struct KbFolders(pub Arc<Workspaces>);
+
+#[async_trait::async_trait]
+impl steve_knowledge::sources::folder_node::FolderPlaces for KbFolders {
+    async fn place(
+        &self,
+        source: &str,
+        scanning: bool,
+    ) -> Result<
+        Option<steve_knowledge::sources::folder_node::FolderPlace>,
+        steve_knowledge::sources::folder_node::Unplaced,
+    > {
+        use steve_knowledge::sources::folder_node::{FolderPlace, Unplaced};
+        let (w, id) = (self.0.clone(), source.to_string());
+        // a folder just added is a root once the roots are built again; the scan needs it now
+        let placed = tokio::task::spawn_blocking(move || {
+            if scanning {
+                w.refresh_roots()?;
+            }
+            w.placement_of(Subject::KbSource(&id))
+        })
+        .await
+        .map_err(|e| Unplaced::Failed(e.to_string()))?;
+        match placed {
+            Ok(Placement {
+                node,
+                at: At::Root(root),
+                ..
+            }) => Ok(Some(FolderPlace {
+                files: node.clone(),
+                control: node,
+                root,
+            })),
+            Ok(_) | Err(PlacementError::NotFound(_) | PlacementError::NoWorkspace) => {
+                Err(Unplaced::Nowhere)
+            }
+            Err(PlacementError::LocalOff) => Ok(None),
+            Err(PlacementError::Offline { .. }) => Err(Unplaced::Offline),
+            Err(PlacementError::Store(e)) => Err(Unplaced::Failed(e.to_string())),
+        }
+    }
+}
+
 enum Found {
     Missing,
     Nowhere,
@@ -444,6 +489,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path().join("hub.sqlite3"), steve_store::NoPublisher).unwrap();
         store.ensure_workspace().unwrap();
+        local_in(dir, store, remote)
+    }
+
+    /// [`local`] over `store`.
+    fn local_in(dir: tempfile::TempDir, store: Store, remote: bool) -> T {
         let extra = vec![dir.path().join("scratch")];
         std::fs::create_dir_all(&extra[0]).unwrap();
         let node = Arc::new(
@@ -777,5 +827,78 @@ mod tests {
             ws.placement_of(Subject::Project("pu")),
             Err(PlacementError::Offline { .. })
         ));
+    }
+
+    /// N0e-E4: with the local Node on, a knowledge folder is scanned and read by it (a read-only
+    /// root), and the Hub's index follows as it does without it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_knowledge_folder_is_scanned_and_read_by_the_local_node() {
+        use steve_knowledge::sources::folder::{self, FolderPolicy, SourceBody};
+        let env = steve_modules::testkit::TestEnv::new(|_| {});
+        let t = local_in(tempfile::tempdir().unwrap(), env.store().clone(), false);
+        let home = t.dir.path().canonicalize().unwrap().join("home");
+        let wiki = home.join("wiki");
+        std::fs::create_dir_all(wiki.join("sub")).unwrap();
+        std::fs::create_dir_all(home.join(".steve")).unwrap();
+        std::fs::write(wiki.join("a.md"), "# 甲\n苹果").unwrap();
+        std::fs::write(wiki.join("sub/b.md"), "---\ntitle: 香蕉页\n---\n香蕉").unwrap();
+        let kb = steve_knowledge::Knowledge::bare();
+        assert!(kb.set_folder_policy(FolderPolicy::new(&home, home.join(".steve"))));
+        assert!(kb.set_folder_places(Arc::new(KbFolders(t.ws.clone()))));
+        let m = &env.modules;
+        let who =
+            steve_modules::testkit::caller(steve_modules::testkit::WS, steve_modules::testkit::ME);
+        let src = folder::create(
+            m,
+            &kb,
+            &who,
+            SourceBody {
+                kind: "folder".into(),
+                name: "Wiki".into(),
+                path: wiki.to_string_lossy().into(),
+                include: None,
+                exclude: None,
+                visibility: None,
+                level: None,
+            },
+        )
+        .unwrap();
+        // no restart, no follow job here: the scan builds the roots it needs
+        let r = folder::sync_now(m, &kb, &src.id).await.unwrap().unwrap();
+        assert_eq!((r.files, r.changed, r.deleted), (2, 2, 0), "{r:?}");
+        let snap = t
+            .node
+            .snapshot(PageRequest {
+                cursor: None,
+                limit: 100,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            snap.entries.iter().filter(|e| e.method == "scan").count(),
+            1,
+            "scanned by the Node"
+        );
+        let docs = || {
+            let mut d = env
+                .store()
+                .reader(|c| steve_knowledge::repo::docs_of_source(c, &src.id))
+                .unwrap();
+            d.sort_by(|a, b| a.r#ref.cmp(&b.r#ref));
+            d
+        };
+        let d = docs();
+        assert_eq!(
+            d.iter()
+                .map(|d| (d.r#ref.as_str(), d.status.as_str(), d.title.as_str()))
+                .collect::<Vec<_>>(),
+            [("a.md", "active", "a"), ("sub/b.md", "active", "香蕉页")]
+        );
+        assert!(d.iter().all(|d| d.indexed.is_some() && d.chunks > 0));
+
+        std::fs::remove_file(wiki.join("a.md")).unwrap();
+        let r = folder::sync_now(m, &kb, &src.id).await.unwrap().unwrap();
+        assert_eq!(r.deleted, 1, "{r:?}");
+        assert_eq!(docs()[0].status, "deleted");
     }
 }
