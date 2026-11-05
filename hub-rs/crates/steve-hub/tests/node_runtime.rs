@@ -386,6 +386,67 @@ async fn a_busy_node_gets_the_very_same_command_again() {
     assert_eq!(h.attempts().len(), 1);
 }
 
+/// Issue: a Node out of room (Exhausted) was asked again every second, forever, and nobody was
+/// told. Now the same command waits longer each time and the session hears it once.
+#[tokio::test]
+async fn an_exhausted_node_backs_off_tells_the_session_once_and_runs_the_same_command_later() {
+    let h = hub();
+    h.node.refuse("start_turn", Some(ErrorCode::Exhausted));
+    h.bind();
+    h.rt.prompt(S, "hello", "user", &[]).unwrap();
+    let exhausted = || {
+        h.q::<Option<i64>>(
+            "SELECT MAX(json_extract(receipt,'$.exhausted')) FROM node_commands WHERE method='start_turn'",
+        )
+        .unwrap_or(0)
+    };
+    let mut delays = vec![];
+    for n in 1..=3 {
+        until("refused again", || exhausted() == n).await;
+        // the time between the refusal and the next send
+        delays.push(
+            h.q::<i64>("SELECT retry_at-updated FROM node_commands WHERE method='start_turn'"),
+        );
+        // not waiting it out: due now
+        h.store
+            .transaction::<_, StoreError>(|tx| {
+                tx.execute(
+                    "UPDATE node_commands SET retry_at=0 WHERE method='start_turn'",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+    }
+    for (d, want) in delays.iter().zip([2_000, 4_000, 8_000]) {
+        assert!((want..want + 50).contains(d), "{delays:?}");
+    }
+    let notes: i64 =
+        h.q("SELECT COUNT(*) FROM events WHERE kind='system' AND data LIKE '%Node 存储/容量已满%'");
+    assert_eq!(notes, 1, "one note, not one per retry");
+    assert_eq!(h.attempts().len(), 1, "never a new attempt");
+    let state: String = h.q("SELECT state FROM node_commands WHERE method='start_turn'");
+    assert_eq!(state, "pending");
+    assert!(!h.methods().contains(&"start_turn"));
+
+    // room again: the very same operation runs, once
+    h.node.refuse("start_turn", None);
+    until("start_turn", || h.methods().contains(&"start_turn")).await;
+    until("active", || h.phase() == "active").await;
+    let ran: Vec<_> = h
+        .node
+        .log()
+        .into_iter()
+        .filter(|(m, _)| *m == "start_turn")
+        .collect();
+    assert_eq!(ran.len(), 1);
+    let op: String = h.q("SELECT operation_id FROM node_commands WHERE method='start_turn'");
+    assert_eq!(ran[0].1.to_string(), op);
+    let commands: i64 = h.q("SELECT COUNT(*) FROM node_commands WHERE method='start_turn'");
+    assert_eq!(commands, 1);
+    assert_eq!(h.attempts().len(), 1);
+}
+
 #[tokio::test]
 async fn steves_lead_goes_first_once_and_attachments_go_by_hash() {
     let h = hub();

@@ -1037,7 +1037,12 @@ impl NodeRuntime {
             {
                 // not refused for good, or maybe accepted: the very same command again later
                 let uncertain = e.retry != RetryClass::SameOperation;
-                rt::retry_command_in(tx, &lease, now(), now() + 1_000, uncertain)?;
+                let delay = if e.code == ErrorCode::Exhausted {
+                    self.exhausted_in(tx, &lease, e)?
+                } else {
+                    1_000
+                };
+                rt::retry_command_in(tx, &lease, now(), now() + delay, uncertain)?;
                 // a start_turn the user stopped meanwhile, now refused before acceptance: it
                 // provably never ran, so it ends here instead of going out again
                 if !uncertain
@@ -1105,6 +1110,42 @@ impl NodeRuntime {
         }
         self.wake_apply.notify_one();
         true
+    }
+
+    /// A command the Node refused because it is out of room: the refusal is kept on the command
+    /// with how many came in a row, which sets its next delay (2 s doubling, at most 60 s). The
+    /// first one tells the session, once; the command itself stays the same and is not counted
+    /// as an attempt again.
+    fn exhausted_in(
+        &self,
+        tx: &Tx,
+        lease: &rt::CommandLease,
+        e: &ApiError,
+    ) -> Result<i64, StoreError> {
+        let before: Option<i64> = tx
+            .query_row(
+                "SELECT json_extract(receipt,'$.exhausted') FROM node_commands WHERE operation_id=? AND state='pending'",
+                [&lease.operation],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten();
+        let n = before.unwrap_or(0) + 1;
+        let refusal = json!({ "success": false, "payload": e, "exhausted": n });
+        tx.execute(
+            "UPDATE node_commands SET receipt=? WHERE operation_id=? AND state='pending'",
+            rusqlite::params![refusal.to_string(), lease.operation],
+        )?;
+        if n == 1
+            && let Some(session) = command_any_session_in(tx, &lease.operation)?
+        {
+            system_in(
+                tx,
+                &session,
+                "Node 存储/容量已满，暂停接新工作，恢复后自动继续",
+            )?;
+        }
+        Ok(exhausted_delay(n))
     }
 
     async fn send(&self, l: &rt::CommandLease) -> ApiResult<Receipt> {
@@ -2617,6 +2658,31 @@ fn command_session_in(tx: &Tx, op: &str) -> Result<String, StoreError> {
     )?)
 }
 
+/// The delay before the `n`th send after as many Exhausted refusals in a row.
+fn exhausted_delay(n: i64) -> i64 {
+    (2_000i64 << (n - 1).clamp(0, 5)).min(60_000)
+}
+
+/// The session any command is for: its own, its target attempt's, or (a workspace) the open
+/// waiting on it. `None`: none of them.
+fn command_any_session_in(tx: &Tx, op: &str) -> Result<Option<String>, StoreError> {
+    Ok(tx
+        .query_row(
+            "SELECT COALESCE(
+                CASE c.method WHEN 'release_session' THEN json_extract(c.request,'$.body')
+                    ELSE json_extract(c.request,'$.body.session') END,
+                (SELECT t.session_id FROM runtime_attempts a JOIN runtime_turns t ON t.turn_id=a.turn_id
+                  WHERE a.attempt_id=c.target_attempt),
+                (SELECT json_extract(d.request,'$.body.session') FROM node_commands d
+                  WHERE d.dependency_operation=c.operation_id ORDER BY d.created, d.rowid LIMIT 1))
+             FROM node_commands c WHERE c.operation_id=?",
+            [op],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten())
+}
+
 /// A `system` entry of the session, for the people reading it.
 fn system_in(tx: &Tx, session: &str, text: &str) -> Result<(), StoreError> {
     rt::add_event_in(
@@ -2772,5 +2838,17 @@ impl EventSink for Sink {
         })
         .await
         .map_err(|e| ApiError::new(ErrorCode::Internal, e.to_string()))?
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn exhausted_delays_double_from_two_seconds_up_to_a_minute() {
+        let d: Vec<i64> = (1..=8).map(super::exhausted_delay).collect();
+        assert_eq!(
+            d,
+            [2_000, 4_000, 8_000, 16_000, 32_000, 60_000, 60_000, 60_000]
+        );
     }
 }
