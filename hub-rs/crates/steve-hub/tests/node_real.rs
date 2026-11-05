@@ -210,8 +210,8 @@ impl Drop for Hub {
     }
 }
 
-/// The real Hub with the local Node on. Both switch names are set: `STEVE_NODE` (D5) and
-/// `STEVE_NODE_MODE` (its N2 name). On a [`Home::fake`] the scripted agent replaces claude and
+/// The real Hub with the local Node on (`STEVE_NODE_MODE=local`; the deprecated `STEVE_NODE=local`
+/// alias is covered by `wire::local_node_mode`'s tests). On a [`Home::fake`] the scripted agent replaces claude and
 /// `HOME` is the temp dir, so nothing of the user's login is read.
 fn spawn(h: &Home) -> Hub {
     let mut c = Command::new(env!("CARGO_BIN_EXE_steve-hub"));
@@ -225,7 +225,7 @@ fn spawn(h: &Home) -> Hub {
         .env("STEVE_FORBID_REAL_HOSTS", "1")
         .env("STEVE_VERSION", VERSION)
         .env("STEVE_WEB_DIR", &h.web)
-        .env("STEVE_NODE", "local")
+        .env_remove("STEVE_NODE")
         .env("STEVE_NODE_MODE", "local")
         .env("STEVE_ADAPTER_CODEX", "/usr/bin/false")
         .env_remove("STEVE_NODE_TURN_LIMIT_MS")
