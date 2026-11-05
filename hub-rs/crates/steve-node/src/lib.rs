@@ -805,7 +805,7 @@ impl LocalNode {
             delivering: AtomicBool::new(false),
             closed: AtomicBool::new(false),
             faulted: AtomicBool::new(false),
-            hub_down_since: Mutex::new(None),
+            hub_down_since: Mutex::new(Some(now())),
             output: Mutex::new(HashMap::new()),
             tools: tools::Endpoint::new(Arc::new(CurrentOf(weak.clone()))),
             tools_url: Mutex::new(None),
@@ -924,7 +924,7 @@ impl LocalNode {
                     "the node is shutting down",
                 ));
             }
-            if self.0.faulted() {
+            if self.0.faulted() && !matches!(method, "cancel" | "abandon" | "recover") {
                 return Err(ApiError::new(
                     ErrorCode::Internal,
                     "the node's journal failed: restart it",
@@ -1045,30 +1045,43 @@ impl LocalNode {
 
     /// Finish an operation that ran outside the inbox transaction, with its event and `more` in the
     /// same transaction.
-    fn complete(&self, op: &OperationId, state: Observed, more: impl FnOnce(&Tx) -> ApiResult<()>) {
-        let r = self.0.j.tx(|t| {
-            more(t)?;
-            t.set_state(op, &state)?;
-            emit_all(
-                &self.0,
-                t,
-                vec![(
-                    Subject::Operation {
-                        operation: op.clone(),
-                    },
-                    EventBody::OperationChanged {
-                        receipt: Receipt {
+    async fn complete(
+        &self,
+        op: &OperationId,
+        state: Observed,
+        more: impl Fn(&Tx) -> ApiResult<()>,
+    ) {
+        loop {
+            let r = self.0.j.tx(|t| {
+                more(t)?;
+                t.set_state(op, &state)?;
+                emit_all(
+                    &self.0,
+                    t,
+                    vec![(
+                        Subject::Operation {
                             operation: op.clone(),
-                            state: state.clone(),
                         },
-                    },
-                )],
-            )
-        });
-        self.0.wake.notify_one();
-        if let Err(e) = r {
-            tracing::error!("complete {op}: {e}");
-            self.0.fault();
+                        EventBody::OperationChanged {
+                            receipt: Receipt {
+                                operation: op.clone(),
+                                state: state.clone(),
+                            },
+                        },
+                    )],
+                )
+            });
+            self.0.wake.notify_one();
+            if let Err(e) = r {
+                tracing::error!("complete {op}: {e}");
+                self.0.fault();
+                if self.0.closed.load(Ordering::SeqCst) {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            } else {
+                return;
+            }
         }
     }
 }
@@ -1103,11 +1116,23 @@ async fn deliver_loop(inner: std::sync::Weak<Inner>) {
             tokio::time::timeout(HUB_TIMEOUT, sink.commit(EventBatch { events: batch })).await;
         match sent {
             Ok(Ok(ack)) => {
-                backoff = Duration::from_millis(100);
                 last_ok = std::time::Instant::now();
                 *me.hub_down_since.lock().unwrap() = None;
-                if let Err(e) = me.j.tx(|t| t.ack(&ack)) {
-                    tracing::error!("node ack: {e}");
+                let progress = me.j.tx(|t| {
+                    let before: u64 = t.heads()?.iter().map(|h| h.acknowledged).sum();
+                    t.ack(&ack)?;
+                    let after: u64 = t.heads()?.iter().map(|h| h.acknowledged).sum();
+                    Ok(after > before)
+                });
+                if matches!(progress, Ok(true)) {
+                    backoff = Duration::from_millis(100);
+                } else {
+                    if let Err(e) = progress {
+                        tracing::error!("node ack: {e}");
+                    }
+                    drop(me);
+                    tokio::time::sleep(backoff).await;
+                    backoff = (backoff * 2).min(Duration::from_secs(10));
                 }
             }
             Ok(Err(e)) => {
@@ -1435,14 +1460,16 @@ impl ExecutionControl for LocalNode {
                 let stopped = rx.await.unwrap_or(procs::Stopped::Uncertain);
                 let key = format!("abandon:{target}");
                 if !stopped.gone() {
-                    return me.complete(
-                        &op,
-                        failed(ApiError::new(
-                            ErrorCode::Busy,
-                            "its processes would not stop (or are not this node's to stop)",
-                        )),
-                        |t| t.unreserve(&key),
-                    );
+                    return me
+                        .complete(
+                            &op,
+                            failed(ApiError::new(
+                                ErrorCode::Busy,
+                                "its processes would not stop (or are not this node's to stop)",
+                            )),
+                            |t| t.unreserve(&key),
+                        )
+                        .await;
                 }
                 let inner = me.0.clone();
                 me.complete(&op, Decided::done(OperationResult::Unit).state, |t| {
@@ -1472,6 +1499,17 @@ impl ExecutionControl for LocalNode {
                         },
                     )?;
                     if let Some(exec) = &o.execution {
+                        for wait in t.waits_of(&target)? {
+                            t.drop_wait(&wait.id)?;
+                            emit_all(
+                                &inner,
+                                t,
+                                vec![(
+                                    Subject::Execution(exec.clone()),
+                                    EventBody::PermissionExpired { id: wait.id },
+                                )],
+                            )?;
+                        }
                         emit_all(
                             &inner,
                             t,
@@ -1489,7 +1527,8 @@ impl ExecutionControl for LocalNode {
                         t.put_session(&row)?;
                     }
                     Ok(())
-                });
+                })
+                .await;
             });
         }
         Ok(r)
@@ -1703,56 +1742,66 @@ impl WorkspaceExecutor for LocalNode {
             let resource = body.resource.clone();
             let (path, repo, branch) = match made {
                 Ok(x) => x,
-                Err(e) => return me.complete(&op, failed(e), |t| t.unreserve(&resource)),
+                Err(e) => {
+                    return me
+                        .complete(&op, failed(e), |t| t.unreserve(&resource))
+                        .await;
+                }
             };
             let inner = me.0.clone();
             let usable = workspace::usable(&path);
-            let view_box = std::cell::RefCell::new(None);
-            let r = inner.j.tx(|t| {
-                t.unreserve(&resource)?;
-                let view = WorkspaceView {
-                    workspace: WorkspaceRef {
-                        node: inner.cfg.node.clone(),
-                        id: wid.clone(),
-                    },
-                    revision: id(format!("r{}", t.bump("revision")?))?,
-                    usable,
-                    branch: branch.clone(),
-                    display: workspace::display(&path),
-                };
-                t.put_workspace(&WorkspaceRow {
-                    resource: body.resource.clone(),
-                    spec: spec.clone(),
-                    kind: body.kind.clone(),
-                    repo: repo.as_ref().map(|r| r.to_string_lossy().to_string()),
-                    view: view.clone(),
-                    path: path.to_string_lossy().to_string(),
-                    incarnation: t.bump("workspace")?,
-                })?;
-                let state = Decided::done(OperationResult::Workspace(view.clone())).state;
-                t.set_state(&op, &state)?;
-                emit_all(
-                    &inner,
-                    t,
-                    vec![(
-                        Subject::Operation {
-                            operation: op.clone(),
+            loop {
+                let r = inner.j.tx(|t| {
+                    t.unreserve(&resource)?;
+                    let view = WorkspaceView {
+                        workspace: WorkspaceRef {
+                            node: inner.cfg.node.clone(),
+                            id: wid.clone(),
                         },
-                        EventBody::OperationChanged {
-                            receipt: Receipt {
+                        revision: id(format!("r{}", t.bump("revision")?))?,
+                        usable,
+                        branch: branch.clone(),
+                        display: workspace::display(&path),
+                    };
+                    t.put_workspace(&WorkspaceRow {
+                        resource: body.resource.clone(),
+                        spec: spec.clone(),
+                        kind: body.kind.clone(),
+                        repo: repo.as_ref().map(|r| r.to_string_lossy().to_string()),
+                        view: view.clone(),
+                        path: path.to_string_lossy().to_string(),
+                        incarnation: t.bump("workspace")?,
+                    })?;
+                    let state = Decided::done(OperationResult::Workspace(view.clone())).state;
+                    t.set_state(&op, &state)?;
+                    emit_all(
+                        &inner,
+                        t,
+                        vec![(
+                            Subject::Operation {
                                 operation: op.clone(),
-                                state,
                             },
-                        },
-                    )],
-                )?;
-                *view_box.borrow_mut() = Some(view);
-                Ok(())
-            });
-            inner.wake.notify_one();
-            if let Err(e) = r {
-                tracing::error!("prepare {op}: {e}");
-                inner.fault();
+                            EventBody::OperationChanged {
+                                receipt: Receipt {
+                                    operation: op.clone(),
+                                    state,
+                                },
+                            },
+                        )],
+                    )?;
+                    Ok(())
+                });
+                inner.wake.notify_one();
+                if let Err(e) = r {
+                    tracing::error!("prepare {op}: {e}");
+                    inner.fault();
+                    if inner.closed.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                } else {
+                    break;
+                }
             }
         });
         Ok(r)
@@ -1820,25 +1869,29 @@ impl WorkspaceExecutor for LocalNode {
                 });
                 if !rx.await.unwrap_or(procs::Stopped::Uncertain).gone() {
                     let res = resource.clone();
-                    return me.complete(
-                        &op,
-                        failed(ApiError::new(
-                            ErrorCode::Busy,
-                            "a harness in it would not stop",
-                        )),
-                        |t| t.unreserve(&res),
-                    );
+                    return me
+                        .complete(
+                            &op,
+                            failed(ApiError::new(
+                                ErrorCode::Busy,
+                                "a harness in it would not stop",
+                            )),
+                            |t| t.unreserve(&res),
+                        )
+                        .await;
                 }
             }
             let row = match me.0.j.read(|t| t.workspace(&w.id)) {
                 Ok(Some(r)) if r.view.revision == expected => r,
                 _ => {
                     let res = resource.clone();
-                    return me.complete(
-                        &op,
-                        failed(ApiError::new(ErrorCode::Conflict, "changed since")),
-                        |t| t.unreserve(&res),
-                    );
+                    return me
+                        .complete(
+                            &op,
+                            failed(ApiError::new(ErrorCode::Conflict, "changed since")),
+                            |t| t.unreserve(&res),
+                        )
+                        .await;
                 }
             };
             let lock = row.repo.as_ref().map(|r| me.repo_lock(Path::new(r)));
@@ -1860,28 +1913,34 @@ impl WorkspaceExecutor for LocalNode {
             .and_then(|r| r);
             let res = resource.clone();
             match removed {
-                Ok(note) => me.complete(
-                    &op,
-                    Observed::Finished {
-                        outcome: Outcome::Succeeded,
-                        result: Some(OperationResult::Unit),
-                        error: note.map(|n| ApiError::new(ErrorCode::Conflict, n)),
-                    },
-                    |t| {
-                        t.unreserve(&res)?;
-                        t.drop_workspace(&w.id)?;
-                        for s in &sessions {
-                            if let Some(mut srow) = t.session(s)? {
-                                srow.view.phase = SessionPhase::Released;
-                                t.put_session(&srow)?;
+                Ok(note) => {
+                    me.complete(
+                        &op,
+                        Observed::Finished {
+                            outcome: Outcome::Succeeded,
+                            result: Some(OperationResult::Unit),
+                            error: note.map(|n| ApiError::new(ErrorCode::Conflict, n)),
+                        },
+                        |t| {
+                            t.unreserve(&res)?;
+                            t.drop_workspace(&w.id)?;
+                            for s in &sessions {
+                                if let Some(mut srow) = t.session(s)? {
+                                    srow.view.phase = SessionPhase::Released;
+                                    t.put_session(&srow)?;
+                                }
                             }
-                        }
-                        Ok(())
-                    },
-                ),
-                Err(e) => me.complete(&op, failed(ApiError::new(ErrorCode::Internal, e)), |t| {
-                    t.unreserve(&res)
-                }),
+                            Ok(())
+                        },
+                    )
+                    .await
+                }
+                Err(e) => {
+                    me.complete(&op, failed(ApiError::new(ErrorCode::Internal, e)), |t| {
+                        t.unreserve(&res)
+                    })
+                    .await
+                }
             }
         });
         Ok(r)

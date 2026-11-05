@@ -1120,3 +1120,86 @@ async fn handshake_permission_is_answered_without_a_live_session() {
     );
     n.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn terminal_commit_retries_preserve_closing_and_release() {
+    let t = T::new(&[]);
+    let n = t.node();
+    ready(&n, "s_1").await;
+    let db = rusqlite::Connection::open(t.home.join("node.sqlite3")).unwrap();
+    db.execute_batch("CREATE TRIGGER fail_end BEFORE UPDATE ON ops WHEN NEW.id='op_t1' AND NEW.receipt LIKE '%finished%' BEGIN SELECT RAISE(ABORT,'injected disk failure'); END;").unwrap();
+    n.start_turn(now_cmd("op_t1", turn("s_1", "t_1", "a_1", "@say hello")))
+        .await
+        .unwrap();
+    t.until("text before failed closing", |t| t.text().contains("hello"))
+        .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        !n.operation(OperationId::new("op_t1").unwrap())
+            .await
+            .unwrap()
+            .state
+            .is_finished()
+    );
+    db.execute_batch("DROP TRIGGER fail_end").unwrap();
+    assert!(ok(&finished(&n, "op_t1").await));
+    t.until("closing", |t| {
+        t.sink
+            .events()
+            .iter()
+            .any(|e| matches!(e.body, EventBody::MessageCompleted { .. }))
+    })
+    .await;
+    assert_eq!(
+        t.sink
+            .events()
+            .iter()
+            .filter(|e| matches!(e.body, EventBody::MessageCompleted { .. }))
+            .count(),
+        1
+    );
+    // A faulted Node still accepts cancellation/abandon; it never re-runs the attempt.
+    n.cancel(now_cmd(
+        "cancel_after_fault",
+        Cancel {
+            target: OperationId::new("op_t1").unwrap(),
+            reason: "cleanup".into(),
+        },
+    ))
+    .await
+    .unwrap();
+    assert_eq!(t.sent("session/prompt"), 1);
+    n.shutdown().await;
+}
+
+struct EmptyAck(std::sync::atomic::AtomicUsize);
+#[async_trait::async_trait]
+impl EventSink for EmptyAck {
+    async fn commit(&self, _batch: EventBatch) -> ApiResult<EventAck> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(EventAck { durable: vec![] })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn disconnected_lease_and_empty_ack_backoff() {
+    let t = T::new(&[]);
+    let n = LocalNode::open(t.config()).unwrap();
+    ready(&n, "s_1").await;
+    let mut spec = turn("s_1", "t_1", "a_1", "@sleep 20000");
+    spec.run.limits.offline_until = Timestamp(wall() + 200);
+    n.start_turn(now_cmd("op_t1", spec)).await.unwrap();
+    assert!(matches!(
+        finished(&n, "op_t1").await,
+        Observed::Finished {
+            outcome: Outcome::TimedOut,
+            ..
+        }
+    ));
+    let sink = Arc::new(EmptyAck(std::sync::atomic::AtomicUsize::new(0)));
+    n.connect(sink.clone(), None);
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    let calls = sink.0.load(std::sync::atomic::Ordering::SeqCst);
+    assert!((1..=5).contains(&calls), "empty ack hot loop: {calls}");
+    n.shutdown().await;
+}

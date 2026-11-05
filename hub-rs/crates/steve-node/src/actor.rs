@@ -96,6 +96,17 @@ pub(crate) enum Msg {
     Kill {
         token: u64,
     },
+    ReleaseDone {
+        op: OperationId,
+        stopped: Stopped,
+    },
+    AnswerDone {
+        op: OperationId,
+        result: ApiResult<()>,
+    },
+    Facts {
+        events: Vec<(Subject, EventBody)>,
+    },
     /// Try again what the journal did not take.
     Retry,
     // from the adapter
@@ -119,6 +130,7 @@ pub(crate) enum Msg {
 #[derive(Default)]
 pub(crate) struct Gate(AtomicU64);
 
+#[derive(Clone)]
 pub(crate) struct LiveNew {
     conn: Arc<Conn>,
     generation: u64,
@@ -173,6 +185,9 @@ struct Run {
     stopped: Option<(Outcome, ApiError)>,
     /// The end, computed and waiting to be committed (kept while the journal fails).
     ending: Option<Completion>,
+    closing: Option<Vec<EventBody>>,
+    final_usage: Vec<(Subject, EventBody)>,
+    unknown: Option<String>,
 }
 
 /// What a harness start is for.
@@ -195,6 +210,7 @@ pub(crate) struct Actor {
     waits: HashMap<PermissionId, (Value, Asked)>,
     tokens: u64,
     retry_armed: bool,
+    pending: Vec<Msg>,
     sending: usize,
     deferred_prompt: Option<Result<Value, RpcError>>,
     stage_cancel: Option<watch::Sender<bool>>,
@@ -216,6 +232,7 @@ impl Actor {
             waits: HashMap::new(),
             tokens: 0,
             retry_armed: false,
+            pending: vec![],
             sending: 0,
             deferred_prompt: None,
             stage_cancel: None,
@@ -262,6 +279,11 @@ impl Actor {
         self.tokens
     }
 
+    fn later(&mut self, message: Msg) {
+        self.pending.push(message);
+        self.arm_retry();
+    }
+
     fn arm_retry(&mut self) {
         if self.retry_armed {
             return;
@@ -276,6 +298,16 @@ impl Actor {
 
     async fn handle(&mut self, m: Msg) {
         match m {
+            Msg::ReleaseDone { op, stopped } => self.finish_release(&op, stopped),
+            Msg::AnswerDone { op, result } => self.answer_done(&op, result),
+            Msg::Facts { events } => {
+                if self
+                    .tx(|t| crate::emit_all(&self.inner, t, events.clone()))
+                    .is_err()
+                {
+                    self.later(Msg::Facts { events });
+                }
+            }
             Msg::Open { op } => self.open(op).await,
             Msg::Start { op, spec, exec } => self.start(op, spec, exec).await,
             Msg::Cancel { target } => self.cancel(&target),
@@ -296,25 +328,36 @@ impl Actor {
                 res,
                 result,
             } => {
-                self.sending = self.sending.saturating_sub(1);
-                let state = match result {
+                let state = match &result {
                     Ok(()) => done_state(OperationResult::Unit),
                     Err(e) => Observed::Unknown {
-                        reason: e.safe_detail,
+                        reason: e.safe_detail.clone(),
                     },
                 };
-                let _ = self.tx(|t| {
+                let saved = self.tx(|t| {
                     t.drop_answer(&op)?;
                     t.set_state(&op, &state)?;
                     let mut evs = vec![op_changed(&op, state.clone())];
                     if state.is_finished() {
                         evs.push((
-                            Subject::Execution(req.execution),
-                            EventBody::PermissionResolved { resolution: res },
+                            Subject::Execution(req.execution.clone()),
+                            EventBody::PermissionResolved {
+                                resolution: res.clone(),
+                            },
                         ));
                     }
                     crate::emit_all(&self.inner, t, evs)
                 });
+                if saved.is_err() {
+                    self.later(Msg::AnswerSent {
+                        op,
+                        req,
+                        res,
+                        result,
+                    });
+                    return;
+                }
+                self.sending = self.sending.saturating_sub(1);
                 if self.sending == 0 {
                     if let Some(result) = self.deferred_prompt.take() {
                         self.finish(result).await;
@@ -374,6 +417,17 @@ impl Actor {
             }
             Msg::Retry => {
                 self.retry_armed = false;
+                if !self.pending.is_empty() {
+                    for message in std::mem::take(&mut self.pending) {
+                        let _ = self.tx.send(message);
+                    }
+                    self.arm_retry();
+                    return;
+                }
+                if let Some(why) = self.run.as_ref().and_then(|r| r.unknown.clone()) {
+                    self.unknown_end(&why);
+                    return;
+                }
                 if self.run.as_ref().is_some_and(|r| r.ending.is_some()) {
                     self.commit_end();
                 }
@@ -440,7 +494,7 @@ impl Actor {
 
     fn finish_release(&mut self, op: &OperationId, s: Stopped) {
         let session = self.session.clone();
-        let _ = self.tx(|t| {
+        let saved = self.tx(|t| {
             let mut row = t.session(&session)?;
             let state = if s.gone() {
                 if let Some(r) = row.as_mut() {
@@ -465,6 +519,12 @@ impl Actor {
             }
             crate::emit_all(&self.inner, t, evs)
         });
+        if saved.is_err() {
+            self.later(Msg::ReleaseDone {
+                op: op.clone(),
+                stopped: s,
+            });
+        }
     }
 
     async fn exited(&mut self, generation: u64) {
@@ -523,15 +583,15 @@ impl Actor {
         match purpose {
             Opening::Command(op) => {
                 let session = self.session.clone();
+                let candidate = result.clone();
                 let view = match result {
                     Ok(l) => {
                         let view = l.view.clone();
-                        self.live = Some(l.into());
                         Ok(view)
                     }
                     Err(e) => Err(e),
                 };
-                let _ = self.tx(|t| {
+                let saved = self.tx(|t| {
                     let Some(mut row) = t.session(&session)? else {
                         return Ok(());
                     };
@@ -575,6 +635,17 @@ impl Actor {
                         ],
                     )
                 });
+                if saved.is_ok() {
+                    if let Ok(l) = candidate {
+                        self.live = Some(l.into());
+                    }
+                } else {
+                    self.opening = Some((token, Opening::Command(op)));
+                    self.later(Msg::Opened {
+                        token,
+                        result: candidate,
+                    });
+                }
             }
             Opening::Attempt(tok) => {
                 if !self.run.as_ref().is_some_and(|r| r.token == tok) {
@@ -682,6 +753,9 @@ impl Actor {
             cancel: false,
             stopped: None,
             ending: None,
+            closing: None,
+            final_usage: vec![],
+            unknown: None,
         });
         self.inner.reset_output(&self.session);
         if self.persisted_cancel() {
@@ -960,8 +1034,11 @@ impl Actor {
                     EventBody::SessionChanged { view: row.view },
                 ));
             }
-            crate::emit_all(&self.inner, t, std::mem::take(&mut evs))
+            crate::emit_all(&self.inner, t, evs.clone())
         });
+        if r.is_err() && !evs.is_empty() {
+            self.later(Msg::Facts { events: evs });
+        }
         if r.is_err()
             && let Some(token) = self.run.as_ref().map(|r| r.token)
         {
@@ -1238,15 +1315,21 @@ impl Actor {
     }
 
     fn answer_done(&mut self, op: &OperationId, r: ApiResult<()>) {
-        let state = match r {
+        let state = match &r {
             Ok(()) => done_state(OperationResult::Unit),
-            Err(e) => failed_state(e),
+            Err(e) => failed_state(e.clone()),
         };
-        let _ = self.tx(|t| {
+        let saved = self.tx(|t| {
             t.drop_answer(op)?;
             t.set_state(op, &state)?;
             crate::emit_all(&self.inner, t, vec![op_changed(op, state)])
         });
+        if saved.is_err() {
+            self.later(Msg::AnswerDone {
+                op: op.clone(),
+                result: r,
+            });
+        }
     }
 
     /// The prompt answered: build the attempt's completion and end it.
@@ -1265,8 +1348,8 @@ impl Actor {
                     .unwrap_or("end_turn")
                     .to_string();
                 let usage = final_usage(run, &resp);
-                if !usage.is_empty() {
-                    let _ = self.tx(|t| crate::emit_all(&self.inner, t, usage));
+                if let Some(run) = self.run.as_mut() {
+                    run.final_usage = usage;
                 }
                 match stopped {
                     Some((outcome, e)) => failure(outcome, e, acted),
@@ -1325,26 +1408,32 @@ impl Actor {
     }
 
     fn commit_end(&mut self) {
-        if self.sending != 0 {
+        if self.sending != 0 || !self.pending.is_empty() {
+            self.arm_retry();
             return;
         }
         let Some(run) = self.run.as_mut() else { return };
         let Some(completion) = run.ending.clone() else {
             return;
         };
-        let closing: Vec<EventBody> = run
-            .norm
-            .finish()
-            .into_iter()
-            .filter_map(|f| match f {
-                Fact::Event(e) => Some(e),
-                _ => None,
+        let closing = run
+            .closing
+            .get_or_insert_with(|| {
+                run.norm
+                    .finish()
+                    .into_iter()
+                    .filter_map(|f| match f {
+                        Fact::Event(e) => Some(e),
+                        _ => None,
+                    })
+                    .collect()
             })
-            .collect();
+            .clone();
+        let usage = run.final_usage.clone();
         let (exec, op) = (run.exec.clone(), run.op.clone());
         let session = self.session.clone();
         let r = self.tx(|t| {
-            let mut evs = vec![];
+            let mut evs = usage.clone();
             for w in t.waits_of(&op)? {
                 t.drop_wait(&w.id)?;
                 evs.push((
@@ -1394,13 +1483,31 @@ impl Actor {
     /// The attempt may still be running somewhere (its group did not stop): it stays unknown and
     /// keeps its session; the Hub decides (abandon, once the group is gone).
     fn unknown_end(&mut self, why: &str) {
-        let Some(run) = &self.run else { return };
+        let Some(run) = &mut self.run else { return };
+        run.unknown = Some(why.to_string());
         let op = run.op.clone();
+        let exec = run.exec.clone();
         let state = Observed::Unknown { reason: why.into() };
-        if self.tx(|t| t.set_state(&op, &state).map(|_| ())).is_ok() {
+        if self
+            .tx(|t| {
+                let mut events = vec![op_changed(&op, state.clone())];
+                for wait in t.waits_of(&op)? {
+                    t.drop_wait(&wait.id)?;
+                    events.push((
+                        Subject::Execution(exec.clone()),
+                        EventBody::PermissionExpired { id: wait.id },
+                    ));
+                }
+                t.set_state(&op, &state)?;
+                crate::emit_all(&self.inner, t, events)
+            })
+            .is_ok()
+        {
             self.gate.0.store(0, Ordering::SeqCst);
             self.run = None;
             self.waits.clear();
+        } else {
+            self.arm_retry();
         }
     }
 
