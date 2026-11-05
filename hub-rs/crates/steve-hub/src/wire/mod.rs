@@ -66,6 +66,9 @@ pub struct Wired {
     /// Steve's tools as a Node reaches them (in-crate tests drive the bridge with them).
     #[cfg(test)]
     pub(crate) tool_service: Arc<tool_service::ToolService>,
+    /// The core, whose model gateway in-crate tests call.
+    #[cfg(test)]
+    pub(crate) core: steve_core::Core,
 }
 
 /// Process-wide SQLite settings, before the first connection: no memory statistics. With them on (the
@@ -396,8 +399,34 @@ pub fn wire_with(cfg: &Arc<Config>, bus: &Bus, vars: Vars) -> Result<Wired, Back
         core_cfg.models_research = list("STEVE_MODELS_RESEARCH");
     }
     core_cfg.models_check = list("STEVE_MODELS_CHECK");
-    let gateway = Arc::new(steve_core::stats::RecordingGateway::new(
-        Arc::new(steve_core::ClaudeCli {
+    let think_on_node = node_jobs(&vars).think;
+    let mut node_jobs = vec![];
+    let node_host = node_runtime(cfg, &db, host.clone(), &vars, &mut node_jobs)?;
+    if let Some(h) = &node_host {
+        let _ = host.local_node.set(h.node.clone());
+    }
+    let models = || {
+        Some(steve_core::models::Models::new(
+            db.clone(),
+            steve_core::models::Defaults::of(&core_cfg),
+        ))
+    };
+    // Steve's own model calls: in process, or one Node job per model tried
+    // (`STEVE_NODE_JOBS=think` with the local Node); the fallback stays here either way
+    let one_model: Arc<dyn steve_core::ModelGateway> = match &node_host {
+        Some(h) if think_on_node => {
+            tracing::info!("think calls run as local Node jobs (STEVE_NODE_JOBS=think)");
+            Arc::new(steve_core::Fallback {
+                one: node_runtime::NodePrint {
+                    runtime: h.runtime.clone(),
+                    data_dir: cfg.data_dir.clone(),
+                },
+                fast: cfg.models.fast.clone(),
+                smart: cfg.models.smart.clone(),
+                models: models(),
+            })
+        }
+        _ => Arc::new(steve_core::ClaudeCli {
             one: steve_core::LocalPrint {
                 codex: Some(cfg.codex_executable.clone().into()),
                 executable: cfg.claude_executable.clone().into(),
@@ -405,18 +434,13 @@ pub fn wire_with(cfg: &Arc<Config>, bus: &Bus, vars: Vars) -> Result<Wired, Back
             },
             fast: cfg.models.fast.clone(),
             smart: cfg.models.smart.clone(),
-            models: Some(steve_core::models::Models::new(
-                db.clone(),
-                steve_core::models::Defaults::of(&core_cfg),
-            )),
+            models: models(),
         }),
+    };
+    let gateway = Arc::new(steve_core::stats::RecordingGateway::new(
+        one_model,
         db.clone(),
     ));
-    let mut node_jobs = vec![];
-    let node_host = node_runtime(cfg, &db, host.clone(), &vars, &mut node_jobs)?;
-    if let Some(h) = &node_host {
-        let _ = host.local_node.set(h.node.clone());
-    }
     let (nodes, bind_remote) = remote_nodes(cfg, &db, host.clone(), &vars);
     let fleet = nodes.as_ref().map(|s| s.fleet.clone());
     let workspaces = workspaces::Workspaces::new(
@@ -559,6 +583,8 @@ pub fn wire_with(cfg: &Arc<Config>, bus: &Bus, vars: Vars) -> Result<Wired, Back
         .merge(crate::api::yolo::routes(engine.clone()));
     Ok(Wired {
         backend,
+        #[cfg(test)]
+        core: core.clone(),
         domain: Arc::new(core::CoreDomain {
             core,
             acp,
@@ -611,6 +637,80 @@ mod tests {
                 research: true
             }
         );
+    }
+
+    /// With the local Node on, Steve's think calls go to it only when STEVE_NODE_JOBS names
+    /// `think`; otherwise they run in process and no job is written.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn think_runs_on_the_node_only_with_steve_node_jobs() {
+        steve_modules::net::forbid_in_this_process();
+        for jobs in [None, Some("think")] {
+            let dir = tempfile::tempdir().unwrap();
+            let h = dir.path().canonicalize().unwrap();
+            let claude = h.join("claude");
+            std::fs::write(
+                &claude,
+                "#!/bin/sh\necho \"$$\" >> \"$0.spawns\"\necho '{\"type\":\"result\",\"is_error\":false,\"result\":\"答案\"}'\n",
+            )
+            .unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let mut vars: std::collections::HashMap<&str, String> = [
+                ("HOME", h.display().to_string()),
+                ("STEVE_HOME", h.join("steve").display().to_string()),
+                ("STEVE_HOST", "127.0.0.1".into()),
+                ("STEVE_PUBLIC_URL", "http://127.0.0.1:9".into()),
+                ("STEVE_DEV_LOGIN", "1".into()),
+                ("STEVE_REPO", "/nonexistent".into()),
+                ("STEVE_VAULT_KEYSTORE", "file".into()),
+                ("STEVE_FORBID_REAL_HOSTS", "1".into()),
+                ("CLAUDE_CODE_EXECUTABLE", claude.display().to_string()),
+                ("STEVE_ADAPTER_CLAUDE", "/usr/bin/false".into()),
+                ("STEVE_ADAPTER_CODEX", "/usr/bin/false".into()),
+                ("STEVE_WEB_DIR", h.join("no-web").display().to_string()),
+                ("STEVE_NODE_MODE", "local".into()),
+            ]
+            .into_iter()
+            .collect();
+            if let Some(j) = jobs {
+                vars.insert("STEVE_NODE_JOBS", j.into());
+            }
+            let get = move |k: &str| vars.get(k).cloned();
+            let cfg = Arc::new(crate::config::Config::from_vars(&get).unwrap());
+            for d in [&cfg.data_dir, &cfg.worktrees, &cfg.scratch] {
+                std::fs::create_dir_all(d).unwrap();
+            }
+            let w = wire_with(&cfg, &crate::bus::Bus::new(), Arc::new(get)).unwrap();
+            for job in w.jobs {
+                tokio::spawn(job);
+            }
+            let p = w
+                .core
+                .gateway()
+                .call(
+                    "想一想",
+                    steve_core::Tier::Smart,
+                    std::time::Duration::from_secs(20),
+                    &steve_core::gateway::ThinkTools::None,
+                )
+                .await
+                .unwrap();
+            assert_eq!(p.text, "答案");
+            let spawns = std::fs::read_to_string(h.join("claude.spawns")).unwrap();
+            assert_eq!(spawns.lines().count(), 1);
+            let store =
+                steve_store::Store::open(cfg.db_path(), steve_store::FnPublisher(|_| {})).unwrap();
+            let n: i64 = store
+                .reader(|c| {
+                    Ok::<_, steve_store::StoreError>(c.query_row(
+                        "SELECT COUNT(*) FROM runtime_jobs",
+                        [],
+                        |r| r.get(0),
+                    )?)
+                })
+                .unwrap();
+            assert_eq!(n, if jobs.is_some() { 1 } else { 0 }, "{jobs:?}");
+        }
     }
 
     #[test]

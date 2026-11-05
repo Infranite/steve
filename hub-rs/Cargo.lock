@@ -5093,6 +5093,7 @@ dependencies = [
  "steve-node-api",
  "steve-node-cli",
  "steve-node-wire",
+ "steve-print",
  "steve-research",
  "steve-stats",
  "steve-store",
