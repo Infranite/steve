@@ -941,8 +941,8 @@ async fn an_idle_node_session_is_let_go_and_the_next_message_resumes_it() {
     );
 }
 
-/// A new session the Node path cannot express (its bot's permission mode is `auto`) stays on the
-/// legacy runner with the Node on, and healthz counts it: a fallback since boot and a legacy
+/// A new session the Node path cannot express (its bot's permission mode is one the Node has no
+/// mode for, `dontAsk`) stays on the legacy runner with the Node on, and healthz counts it: a fallback since boot and a legacy
 /// session that could still run.
 #[tokio::test(flavor = "multi_thread")]
 async fn healthz_counts_a_new_session_left_on_the_legacy_runner() {
@@ -955,10 +955,10 @@ async fn healthz_counts_a_new_session_left_on_the_legacy_runner() {
     let db = rusqlite::Connection::open(h.steve().join("data/steve.sqlite3")).expect("db");
     db.busy_timeout(Duration::from_secs(5)).expect("timeout");
     db.execute(
-        "UPDATE bots SET perm_mode='auto' WHERE harness='claude-code'",
+        "UPDATE bots SET perm_mode='dontAsk' WHERE harness='claude-code'",
         [],
     )
-    .expect("auto");
+    .expect("dontAsk");
     let sid = c.item(&h, "回退验收 @say fallback-legacy-3F").await;
     let n = node_health_until(&h, 30, |n| n["fallbacks"] == 1).await;
     assert_eq!(n["fallbacks"], 1, "{n}");
