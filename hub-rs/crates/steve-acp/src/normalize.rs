@@ -289,6 +289,11 @@ impl Normalizer {
         self.tools.get(raw_id)
     }
 
+    /// The tool's view as it stands.
+    pub fn view_of(&self, raw_id: &str) -> Option<ToolView> {
+        self.tools.get(raw_id).map(|f| f.view(&self.root))
+    }
+
     /// Merge an ACP ToolCall/ToolCallUpdate without touching message boundaries.
     /// Missing/null optional fields leave their value alone; explicit empty collections replace
     /// old content/locations. rawInput/rawOutput are opaque values and replace, never deep-merge.

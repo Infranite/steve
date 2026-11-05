@@ -42,20 +42,27 @@ pub fn asked(norm: &mut Normalizer, rpc_id: &Value, params: &Value) -> Asked {
         other => other.to_string(),
     });
     let mut update = tc.cloned().unwrap_or_else(|| json!({}));
-    update
-        .as_object_mut()
-        .expect("tool object")
-        .insert("toolCallId".into(), json!(tool_call));
+    if !update.is_object() {
+        update = json!({});
+    }
+    if let Some(o) = update.as_object_mut() {
+        o.insert("toolCallId".into(), json!(tool_call));
+    }
     update["sessionUpdate"] = json!("tool_call_update");
     let updates = norm.update(&update);
+    // the merge always knows the tool now (its id was set above); never panic on a harness's input
     let view = updates
         .iter()
         .find_map(|f| match f {
             Fact::Event(steve_node_api::EventBody::ToolChanged { tool }) => Some(tool.clone()),
             _ => None,
         })
-        .expect("request has tool id");
-    let fact = norm.fact(&tool_call).expect("merged above").clone();
+        .or_else(|| norm.view_of(&tool_call));
+    let (Some(view), Some(fact)) = (view, norm.fact(&tool_call).cloned()) else {
+        let mut fallback = norm_fallback(&tool_call);
+        fallback.choices = choices_of(params);
+        return fallback;
+    };
     let title = if view.title.is_empty() {
         "工具调用".into()
     } else {
@@ -71,7 +78,25 @@ pub fn asked(norm: &mut Normalizer, rpc_id: &Value, params: &Value) -> Asked {
     } else {
         None
     };
-    let choices = params
+    let choices = choices_of(params);
+    Asked {
+        fact,
+        updates,
+        tool_call,
+        title,
+        target: view.target,
+        action: view.action.unwrap_or(Action::Unknown {
+            summary: String::new(),
+        }),
+        steve_tool,
+        choices,
+    }
+}
+
+/// The choices a request offers and the option each answers with (`allow_once`, `reject_once`).
+fn choices_of(params: &Value) -> Vec<(PermissionDecision, String)> {
+    let s = |v: Option<&Value>| v.and_then(Value::as_str).map(String::from);
+    params
         .get("options")
         .and_then(Value::as_array)
         .map(|os| {
@@ -93,18 +118,40 @@ pub fn asked(norm: &mut Normalizer, rpc_id: &Value, params: &Value) -> Asked {
             }
             out
         })
-        .unwrap_or_default();
+        .unwrap_or_default()
+}
+
+/// A request whose tool the facts do not know (not reachable: the merge always records it).
+fn norm_fallback(tool_call: &str) -> Asked {
+    let fact = ToolFact {
+        raw_id: tool_call.to_string(),
+        call: crate::normalize::call_id(tool_call),
+        name: "tool".into(),
+        category: steve_node_api::ToolCategory::Other,
+        origin: steve_node_api::ToolOrigin::Harness,
+        title: String::new(),
+        phase: steve_node_api::ToolPhase::Pending,
+        paths: vec![],
+        cwd: None,
+        command: None,
+        query: None,
+        url: None,
+        change: None,
+        result: vec![],
+        error: None,
+        raw: json!({}),
+    };
     Asked {
         fact,
-        updates,
-        tool_call,
-        title,
-        target: view.target,
-        action: view.action.unwrap_or(Action::Unknown {
+        updates: vec![],
+        tool_call: tool_call.to_string(),
+        title: "工具调用".into(),
+        target: None,
+        action: Action::Unknown {
             summary: String::new(),
-        }),
-        steve_tool,
-        choices,
+        },
+        steve_tool: None,
+        choices: vec![],
     }
 }
 

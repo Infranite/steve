@@ -22,7 +22,7 @@ use steve_acp::session::{self as acp_session, OpenConfig, Reports, Strictness};
 use steve_node_api::*;
 use tokio::sync::mpsc;
 
-use crate::journal::{SessionRow, Tx, internal};
+use crate::journal::{Tx, internal};
 use crate::{Inner, now, stop_group};
 
 pub(crate) enum Msg {
@@ -714,9 +714,23 @@ impl Actor {
             conn.respond(rpc_id, cancelled);
             return;
         }
+        let run = self.run.as_mut().expect("checked");
+        // merged into the attempt's own tool facts (a request may be the first word of a tool)
+        let asked = permission::asked(&mut run.norm, &rpc_id, params);
+        let exec_now = run.exec.clone();
+        let mut early_events: Vec<(Subject, EventBody)> = vec![];
+        for f in &asked.updates {
+            if let Fact::Event(e) = f {
+                if matches!(e, EventBody::ToolChanged { .. }) {
+                    run.acted = true;
+                }
+                early_events.push((Subject::Execution(exec_now.clone()), e.clone()));
+            }
+        }
+        if !early_events.is_empty() {
+            let _ = self.tx(|t| crate::emit_all(&self.inner, t, early_events));
+        }
         let run = self.run.as_ref().expect("checked");
-        let root = run_root(&self.inner, &self.session);
-        let asked = permission::asked(&rpc_id, params, &root);
         // the entry to Steve's own tools: the Hub authorizes each call itself (HubTools)
         if asked.steve_tool.is_some() {
             conn.respond(
@@ -1020,16 +1034,6 @@ impl Actor {
             }
         });
     }
-}
-
-fn run_root(inner: &Inner, session: &SessionId) -> std::path::PathBuf {
-    inner
-        .j
-        .read(|t| t.session(session))
-        .ok()
-        .flatten()
-        .and_then(|r: SessionRow| crate::workspace_dir(inner, &r.open.workspace).ok())
-        .unwrap_or_default()
 }
 
 fn done_state(result: OperationResult) -> Observed {

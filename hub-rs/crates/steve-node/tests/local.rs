@@ -816,3 +816,86 @@ async fn steves_tools_reach_the_hub_as_the_running_attempt() {
     assert!(after.get("error").is_some(), "{after}");
     assert_eq!(tools.calls.lock().unwrap().len(), 1);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_permission_is_bound_to_the_file_as_it_was() {
+    let t = T::new(&[]);
+    let n = t.node();
+    let file = t.root.join("work/proj/a.txt");
+    std::fs::write(&file, "one").unwrap();
+    ready(&n, "s_1").await;
+    let path = file.canonicalize().unwrap();
+    n.start_turn(now_cmd(
+        "op_t",
+        turn(
+            "s_1",
+            "t_1",
+            "a_1",
+            &format!("@permtool edit {}", path.display()),
+        ),
+    ))
+    .await
+    .unwrap();
+    t.until("the request", |t| t.request().is_some()).await;
+    let req = t.request().unwrap();
+    let Action::Write { paths, .. } = &req.action else {
+        panic!("{:?}", req.action)
+    };
+    assert_eq!(paths[0].rel.as_str(), "a.txt");
+    assert!(req.preconditions.iter().any(|p| matches!(
+        p,
+        Precondition::File {
+            version: Some(_),
+            ..
+        }
+    )));
+    // the file changes before the answer: the approval no longer applies
+    std::thread::sleep(Duration::from_millis(20));
+    std::fs::write(&file, "two, longer").unwrap();
+    let e = n
+        .resolve_permission(now_cmd("op_r", answer(&req, PermissionDecision::AllowOnce)))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::Stale);
+    // a rejection still goes through
+    n.resolve_permission(now_cmd("op_r2", answer(&req, PermissionDecision::Reject)))
+        .await
+        .unwrap();
+    t.until("the end", |t| !t.ended().is_empty()).await;
+    assert!(t.text().contains("perm:selected:reject"), "{}", t.text());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_permission_outside_the_workspace_says_so() {
+    let t = T::new(&[]);
+    let n = t.node();
+    ready(&n, "s_1").await;
+    n.start_turn(now_cmd(
+        "op_t",
+        turn("s_1", "t_1", "a_1", "@permtool edit /etc/hosts"),
+    ))
+    .await
+    .unwrap();
+    t.until("the request", |t| t.request().is_some()).await;
+    let req = t.request().unwrap();
+    assert!(
+        matches!(&req.action, Action::Unknown { summary } if summary.contains("工作区外") && summary.contains("/etc/hosts")),
+        "{:?}",
+        req.action
+    );
+    // the tool's view and the request name the same call
+    let tool_ids: Vec<CallId> = t
+        .sink
+        .events()
+        .into_iter()
+        .filter_map(|e| match e.body {
+            EventBody::ToolChanged { tool } => Some(tool.id),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        tool_ids.contains(&req.invocation),
+        "{tool_ids:?} {:?}",
+        req.invocation
+    );
+}

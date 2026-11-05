@@ -363,8 +363,21 @@ fn file_version(p: &Path) -> Option<Revision> {
     Revision::new(format!("v{}.{mt}", m.len())).ok()
 }
 
-/// A harness's permission request as Steve's: bound to this execution and its workspace, with what
-/// must still hold when the answer is used (HEAD of the repository, the target file's version).
+/// A word for a shell, quoted so that a list of arguments reads back as exactly that list.
+fn shell_quote(a: &str) -> String {
+    let safe = !a.is_empty()
+        && a.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-_./=:,+@%".contains(&b));
+    if safe {
+        a.to_string()
+    } else {
+        format!("'{}'", a.replace('\'', "'\\''"))
+    }
+}
+
+/// A harness's permission request as Steve's: its facts bound to this execution and workspace
+/// (paths inside it are typed, anything outside it is said so: an explicit unknown), with what must
+/// still hold when the answer is used (HEAD of the repository, each target file's version).
 pub(crate) fn bind_permission(
     inner: &Inner,
     session: &SessionId,
@@ -374,35 +387,122 @@ pub(crate) fn bind_permission(
     asked: &Asked,
     deadline: Timestamp,
 ) -> ApiResult<PermissionRequest> {
+    use steve_acp::normalize::CommandFact;
     let row = inner
         .j
         .read(|t| t.session(session))?
         .ok_or_else(|| ApiError::new(ErrorCode::Invalid, "no such session"))?;
     let w = row.open.workspace.clone();
     let dir = workspace_dir(inner, &w)?;
-    let mut action = asked.action.clone();
-    let mut pre = vec![];
-    // a target inside the workspace is a typed path (and a file version to keep)
-    let inside = asked.target.as_ref().and_then(|t| {
-        let p = Path::new(t);
-        (p.is_relative() && !t.contains("..")).then(|| (t.clone(), dir.join(p)))
-    });
-    if let Some((rel, abs)) = &inside
-        && let Ok(rel) = RelPath::new(rel.clone())
-    {
-        let pr = PathRef {
-            workspace: w.clone(),
-            rel,
+    let fact = &asked.fact;
+    // a path inside the workspace, typed; None: outside it (or not a plain path)
+    let inside = |p: &str| -> Option<(PathRef, PathBuf)> {
+        let path = Path::new(p);
+        let rel = if path.is_absolute() {
+            path.strip_prefix(&dir).ok()?.to_path_buf()
+        } else {
+            path.to_path_buf()
         };
-        match &mut action {
-            Action::Write { paths, .. } | Action::Read { paths } | Action::Delete { paths } => {
-                paths.push(pr.clone());
-            }
-            _ => {}
+        if rel
+            .components()
+            .any(|c| !matches!(c, std::path::Component::Normal(_)))
+        {
+            return None;
         }
-        if matches!(action, Action::Write { .. } | Action::Delete { .. }) {
+        let rel_s = rel.to_string_lossy().to_string();
+        Some((
+            PathRef {
+                workspace: w.clone(),
+                rel: RelPath::new(rel_s).ok()?,
+            },
+            dir.join(&rel),
+        ))
+    };
+    let bound: Vec<Option<(PathRef, PathBuf)>> = fact.paths.iter().map(|p| inside(p)).collect();
+    let all_inside = bound.iter().all(Option::is_some);
+    let refs: Vec<PathRef> = bound.iter().flatten().map(|(r, _)| r.clone()).collect();
+    let outside = |what: &str| Action::Unknown {
+        summary: format!("{what}（工作区外）：{}", fact.paths.join(", ")),
+    };
+    let mut pre = vec![];
+    let action = match fact.category {
+        ToolCategory::Steve => Action::Tool {
+            name: fact
+                .name
+                .strip_prefix("mcp__steve__")
+                .unwrap_or(&fact.name)
+                .to_string(),
+            args: fact.raw.get("rawInput").cloned().unwrap_or(Value::Null),
+        },
+        ToolCategory::Exec => {
+            let command = match &fact.command {
+                Some(CommandFact::Shell(s)) => Some(s.clone()),
+                Some(CommandFact::Argv(a)) => Some(
+                    a.iter()
+                        .map(|x| shell_quote(x))
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                ),
+                None => None,
+            };
+            match (command, fact.cwd.as_deref().map(|c| inside(c))) {
+                (Some(command), None) => Action::Exec {
+                    command,
+                    cwd: None,
+                    network: NetworkScope::Unrestricted,
+                },
+                (Some(command), Some(Some((cwd, _)))) => Action::Exec {
+                    command,
+                    cwd: Some(cwd),
+                    network: NetworkScope::Unrestricted,
+                },
+                (Some(command), Some(None)) => Action::Unknown {
+                    summary: format!(
+                        "在工作区外执行：{command}（{}）",
+                        fact.cwd.clone().unwrap_or_default()
+                    ),
+                },
+                (None, _) => Action::Unknown {
+                    summary: asked.title.clone(),
+                },
+            }
+        }
+        ToolCategory::Edit if all_inside && !refs.is_empty() => Action::Write {
+            paths: refs.clone(),
+            change_summary: asked.title.clone(),
+            change: fact.change.clone(),
+        },
+        ToolCategory::Edit => outside("写入"),
+        ToolCategory::Delete if all_inside && !refs.is_empty() => Action::Delete {
+            paths: refs.clone(),
+        },
+        ToolCategory::Delete => outside("删除"),
+        ToolCategory::Move if all_inside && refs.len() == 2 => Action::Move {
+            from: refs[0].clone(),
+            to: refs[1].clone(),
+        },
+        ToolCategory::Move => outside("移动"),
+        ToolCategory::Read if all_inside => Action::Read {
+            paths: refs.clone(),
+        },
+        ToolCategory::Read => outside("读取"),
+        ToolCategory::Search => Action::Search {
+            query: fact.query.clone().unwrap_or_default(),
+        },
+        ToolCategory::Fetch => Action::Fetch {
+            url: fact.url.clone().unwrap_or_default(),
+        },
+        _ => Action::Unknown {
+            summary: asked.title.clone(),
+        },
+    };
+    if matches!(
+        action,
+        Action::Write { .. } | Action::Delete { .. } | Action::Move { .. }
+    ) {
+        for (r, abs) in bound.iter().flatten() {
             pre.push(Precondition::File {
-                path: pr,
+                path: r.clone(),
                 version: file_version(abs),
             });
         }
@@ -422,7 +522,8 @@ pub(crate) fn bind_permission(
         // one request instance: the operation and the adapter's request id
         id: id(derived_id(op.as_str(), &rpc_id.to_string()))?,
         execution: exec.clone(),
-        invocation: id(derived_id("call", &asked.tool_call))?,
+        // the same id the tool's view has
+        invocation: fact.call.clone(),
         title: asked.title.clone(),
         action,
         preconditions: pre,
