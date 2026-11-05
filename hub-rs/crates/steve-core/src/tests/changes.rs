@@ -60,6 +60,76 @@ async fn a_bot_draft_encodes_labels_and_undo_restores() {
 }
 
 #[tokio::test]
+async fn a_new_bot_is_drafted_made_and_undone() {
+    let k = Kit::new();
+    k.gw.set(|p, _| {
+        assert!(p.starts_with("You configure \"a new bot \"验收\" (it does not exist yet"));
+        assert!(!p.contains("enabled · 启用状态"), "a new bot starts enabled");
+        Ok(r#"{"changes":[{"key":"role","value":"独立验收"},{"key":"perm_mode","value":"可以改文件、运行命令；对外操作仍需你批准"},{"key":"reasoning_effort","value":"high"}]}"#.into())
+    });
+    let p = k
+        .core
+        .draft(WS, target("bot", Some("new:验收")), "加一个验收 Bot")
+        .await
+        .unwrap();
+    assert_eq!(
+        (p.title.as_str(), p.href.as_str()),
+        ("新建 Bot · 验收", "#/bots")
+    );
+    assert_eq!(
+        serde_json::to_value(&p.changes).unwrap(),
+        json!([
+            {"label": "名字", "from": "—", "to": "验收"},
+            {"label": "职责", "from": "—", "to": "独立验收"},
+            {"label": "权限", "from": "—", "to": "可以改文件、运行命令；对外操作仍需你批准"},
+            {"label": "思考强度", "from": "—", "to": "high"}
+        ])
+    );
+    let r = k.core.apply(&p.id, "me", WS).unwrap();
+    let made = r["bot"].as_str().unwrap().to_string();
+    let b = k.db().bot(&made).unwrap().unwrap();
+    assert_eq!(
+        (
+            b.name.as_str(),
+            b.role.as_str(),
+            b.perm_mode.as_str(),
+            b.harness.as_str()
+        ),
+        ("验收", "独立验收", "auto", "claude-code")
+    );
+    assert!(b.enabled && k.db().bot_in_workspace(&made, WS).unwrap());
+    /* work it took meanwhile goes to the main bot when the bot is undone */
+    let i = k.item("plan", "复核", None);
+    k.db()
+        .item_patch(&i, crate::patch![bot_id: made.as_str()])
+        .unwrap();
+    k.core.undo(&p.id, "me", WS).unwrap();
+    assert!(!k.db().bots(WS).unwrap().iter().any(|x| x.id == made));
+    assert_eq!(
+        k.db().item(&i).unwrap().unwrap().bot_id.as_deref(),
+        Some("steve")
+    );
+}
+
+#[tokio::test]
+async fn a_new_bot_needs_a_name_nobody_has() {
+    let k = Kit::new();
+    k.gw.set(|_, _| Ok(r#"{"changes":[{"key":"role","value":"写代码"}]}"#.into()));
+    let e = k
+        .core
+        .draft(WS, target("bot", Some("new:Steve 开发")), "再加一个开发")
+        .await
+        .unwrap_err();
+    assert_eq!(e.to_string(), "已经有叫「Steve 开发」的 Bot，改它就行");
+    let e = k
+        .core
+        .draft(WS, target("bot", Some("new")), "加一个 Bot")
+        .await
+        .unwrap_err();
+    assert_eq!(e.to_string(), "新 Bot 要有个名字");
+}
+
+#[tokio::test]
 async fn a_draft_of_another_workspace_cannot_be_applied() {
     let k = Kit::new();
     k.gw.set(|_, _| Ok(r#"{"changes":[{"key":"persona","value":"热情"}]}"#.into()));

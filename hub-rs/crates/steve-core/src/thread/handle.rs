@@ -8,7 +8,7 @@ use super::suggest;
 use super::{AT, Job, REF, Steps, lock, names_bot, route_step};
 use crate::Core;
 use crate::error::Result;
-use crate::gateway::Route;
+use crate::gateway::{Route, Said};
 use crate::repo::{FileRef, HubEvent, ItemExt};
 use crate::util::{js_head, now};
 use regex::Regex;
@@ -350,7 +350,10 @@ impl Core {
                 }
                 Logged { item: None }
             }
-            "config" => self.on_config(ws, text, user, reply, steps).await?,
+            "config" => {
+                let request = with_earlier(text, &history);
+                self.on_config(ws, &request, user, reply, steps).await?
+            }
             "suggest" => {
                 let item = match &d.for_item {
                     Some(i) => self.store().item(i)?,
@@ -646,6 +649,18 @@ impl Core {
         Ok(Logged {
             item: Some(item.id),
         })
+    }
+}
+
+/// A settings request with Steve's last reply, which “按这个方案改” refers to: the drafts read the
+/// proposal from it, and leave it alone when the request says what to change by itself.
+fn with_earlier(text: &str, history: &[Said]) -> String {
+    match history.iter().rev().find(|m| m.author != "me") {
+        Some(m) if !m.text.trim().is_empty() => format!(
+            "{text}\n\n（Steve 上一条回复如下。只有用户这句话沿用它时（如“按这个方案”“就按你说的改”）才照它改，否则忽略：\n{}）",
+            js_head(m.text.trim(), 6000)
+        ),
+        _ => text.to_string(),
     }
 }
 

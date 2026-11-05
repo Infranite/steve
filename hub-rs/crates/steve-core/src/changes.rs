@@ -341,6 +341,50 @@ fn bot_fields(b: &Bot, projects: &[crate::repo::Project]) -> Vec<BotField> {
     fs
 }
 
+/// The name a bot target that makes a new bot carries: `new`, or `new:<name>` when one request makes
+/// several; `None` for an existing bot.
+fn new_bot_name(id: &str) -> Option<&str> {
+    match id.split_once(':') {
+        Some(("new", n)) => Some(n.trim()),
+        None if id == "new" => Some(""),
+        _ => None,
+    }
+}
+
+/// A bot that does not exist yet, with the seed defaults: the draft of a new bot starts from it.
+fn blank_bot(ws: &str, name: &str) -> Bot {
+    Bot {
+        id: String::new(),
+        workspace_id: ws.into(),
+        name: name.into(),
+        role: String::new(),
+        main: false,
+        harness: "claude-code".into(),
+        model: None,
+        rules: String::new(),
+        accept_mode: "inherit".into(),
+        perm_mode: "default".into(),
+        enabled: true,
+        revision: 0,
+        updated: 0,
+        persona: String::new(),
+        proactive: 1,
+        avatar: Default::default(),
+        default_project: None,
+        prompt: None,
+        device: None,
+        reasoning_effort: None,
+    }
+}
+
+fn new_bot_title(name: &str) -> String {
+    if name.is_empty() {
+        "新建 Bot".into()
+    } else {
+        format!("新建 Bot · {name}")
+    }
+}
+
 /// The choice of a purpose that has no override.
 const FOLLOW: &str = "跟随 Steve";
 
@@ -638,7 +682,7 @@ fn setting_shown(specs: &[Value], k: &str, v: &Value) -> Value {
 /// What a configuration request in the conversation is about (see [`Core::pick_targets`]).
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Picked {
-    /// at most three, in the order the request names them
+    /// at most [`MAX_TARGETS`], in the order the request names them
     pub targets: Vec<Target>,
     /// the request only asks how they are set now
     pub ask: bool,
@@ -654,6 +698,12 @@ pub struct Drafted {
     /// How it is set now.
     pub current: Vec<Current>,
 }
+
+/// How many configurations one request drafts at most (“按这个方案补齐 Bot” can touch every bot).
+const MAX_TARGETS: usize = 6;
+
+/// The option line of a bot to make; `bot:new:<名字>` once per new bot.
+const NEW_BOT_OPTION: &str = "bot:new:<名字> — 新建一个 Bot，名字写在冒号后，每个新 Bot 一项；已有职责相近的 Bot 就改它，不新建";
 
 /// The draft targets steve-core owns itself; the rest belong to the modules.
 const CORE_KINDS: [&str; 5] = ["bot", "project", "settings", "models", "tags"];
@@ -732,6 +782,11 @@ impl Core {
                 .collect()
         };
         Ok(match target.kind.as_str() {
+            "bot" if new_bot_name(&tid).is_some() => (
+                new_bot_title(new_bot_name(&tid).unwrap_or_default()),
+                "#/bots".into(),
+                vec![],
+            ),
             "bot" => {
                 let b = match db.bot(&tid)? {
                     Some(b) if db.bot_in_workspace(&b.id, ws)? => b,
@@ -826,13 +881,24 @@ impl Core {
         match target.kind.as_str() {
             "bot" => {
                 let id = target.id.clone().unwrap_or_default();
-                let b = db.bot(&id)?.ok_or_else(|| msg("没有这个 Bot"))?;
-                let fs = bot_fields(&b, &db.projects(ws)?);
+                let fresh = new_bot_name(&id);
+                let b = match fresh {
+                    Some(n) => blank_bot(ws, n),
+                    None => db.bot(&id)?.ok_or_else(|| msg("没有这个 Bot"))?,
+                };
+                let mut fs = bot_fields(&b, &db.projects(ws)?);
+                /* a new bot starts enabled */
+                if fresh.is_some() {
+                    fs.retain(|f| f.spec.key != "enabled");
+                }
                 let specs: Vec<FieldSpec> = fs.iter().map(|f| f.spec.clone()).collect();
                 let bv = serde_json::to_value(&b)?;
-                for (k, value) in
-                    draft_fields(gw, &format!("the bot \"{}\"", b.name), &specs, request).await?
-                {
+                let what = match fresh {
+                    Some("") => "a new bot (it does not exist yet; fill in only what the request says about this one bot)".to_string(),
+                    Some(n) => format!("a new bot \"{n}\" (it does not exist yet; fill in only what the request says about this one bot)"),
+                    None => format!("the bot \"{}\"", b.name),
+                };
+                for (k, value) in draft_fields(gw, &what, &specs, request).await? {
                     let Some(f) = fs.iter().find(|f| f.spec.key == k) else {
                         continue;
                     };
@@ -843,10 +909,40 @@ impl Core {
                     let to = f.dec.as_ref().map(|d| d(&v)).unwrap_or_else(|| v.clone());
                     changes.push(Change {
                         label: f.spec.label.clone(),
-                        from: show(&f.spec.current),
+                        from: if fresh.is_some() {
+                            "—".into()
+                        } else {
+                            show(&f.spec.current)
+                        },
                         to: show(&to),
                     });
                     patch.insert(k, v);
+                }
+                /* a new bot has a name of its own: the one drafted, else the one its target carries */
+                if let Some(n) = fresh {
+                    let name = patch
+                        .get("name")
+                        .map(jstr)
+                        .unwrap_or_else(|| n.to_string())
+                        .trim()
+                        .to_string();
+                    if name.is_empty() {
+                        return Err(msg("新 Bot 要有个名字"));
+                    }
+                    if db.bots(ws)?.iter().any(|x| x.name == name) {
+                        return Err(msg(format!("已经有叫「{name}」的 Bot，改它就行")));
+                    }
+                    if !patch.contains_key("name") {
+                        changes.insert(
+                            0,
+                            Change {
+                                label: "名字".into(),
+                                from: "—".into(),
+                                to: name.clone(),
+                            },
+                        );
+                    }
+                    patch.insert("name".into(), json!(name));
                 }
             }
             "project" => {
@@ -1106,6 +1202,7 @@ impl Core {
                 )
             })
             .collect();
+        opts.push(NEW_BOT_OPTION.into());
         opts.extend(db.store().projects().list(ws, true)?.iter().map(|p| {
             format!(
                 "project:{} — 项目 {}{}",
@@ -1144,7 +1241,7 @@ impl Core {
         }
         let prompt = crate::gateway::with_static(
             &format!(
-                "Which Steve configurations does this request change or ask about? Options:\n{}\nReply with ONLY JSON {{\"targets\":[\"<option before the dash>\"],\"ask\":false}}: every option the request changes, in its order (usually one, at most 3). \"ask\": true when the request only asks how they are set now and changes nothing.",
+                "Which Steve configurations does this request change or ask about? Options:\n{}\nReply with ONLY JSON {{\"targets\":[\"<option before the dash>\"],\"ask\":false}}: every option the request changes, in its order (usually one, at most {MAX_TARGETS}). \"ask\": true when the request only asks how they are set now and changes nothing.",
                 opts.join("\n")
             ),
             &format!("Request: {}", serde_json::to_string(request)?),
@@ -1182,7 +1279,7 @@ impl Core {
                 targets.push(target);
             }
         }
-        targets.truncate(3);
+        targets.truncate(MAX_TARGETS);
         if targets.is_empty() {
             targets.push(Target {
                 kind: "settings".into(),
@@ -1383,6 +1480,12 @@ impl Core {
         let mut before = Map::new();
         let tid = p.target.id.clone().unwrap_or_default();
         match p.target.kind.as_str() {
+            "bot" if new_bot_name(&tid).is_some() => {
+                let mut nb = p.patch.clone();
+                nb.insert("harness".into(), json!("claude-code"));
+                let b = db.bot_create(&p.ws, Value::Object(nb), actor)?;
+                before.insert("created".into(), json!(b.id));
+            }
             "bot" => {
                 let b = serde_json::to_value(db.bot(&tid)?.ok_or_else(|| msg("没有这个 Bot"))?)?;
                 for k in p.patch.keys() {
@@ -1499,6 +1602,10 @@ impl Core {
             &json!({"target": p.target, "patch": p.patch}),
             &p.ws,
         )?;
+        let mut r = json!({"ok": true, "undo": id});
+        if let Some(b) = before.get("created") {
+            r["bot"] = b.clone();
+        }
         t.st.applied.insert(
             id.into(),
             Applied {
@@ -1507,7 +1614,7 @@ impl Core {
                 ws: p.ws.clone(),
             },
         );
-        Ok(json!({"ok": true, "undo": id}))
+        Ok(r)
     }
 
     /// Undo an applied draft of this workspace.
@@ -1524,9 +1631,16 @@ impl Core {
             _ => return Err(msg("这次改动已经不能撤销了")),
         };
         t.st.applied.remove(id);
-        let db = t.db();
         let tid = a.target.id.clone().unwrap_or_default();
+        /* a bot made by the draft goes again; work it took meanwhile goes to the main bot */
+        if a.target.kind == "bot" && new_bot_name(&tid).is_some() {
+            let made = a.before.get("created").map(jstr).unwrap_or_default();
+            let main = t.db().main_bot()?.id;
+            t.delete_bot(&made, &main, actor)?;
+        }
+        let db = t.db();
         match a.target.kind.as_str() {
+            "bot" if new_bot_name(&tid).is_some() => {}
             "bot" => db.bot_patch(&tid, &a.before, actor)?,
             "project" => db.project_patch(&tid, &a.before, actor)?,
             "settings" => {

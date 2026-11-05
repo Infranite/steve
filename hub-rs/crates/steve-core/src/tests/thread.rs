@@ -296,6 +296,60 @@ async fn one_message_drafts_several_settings_and_their_cards_remember_what_happe
 }
 
 #[tokio::test]
+async fn following_steves_proposal_drafts_new_and_existing_bots_from_it() {
+    let k = Kit::new();
+    k.db()
+        .message_add(
+            WS,
+            "steve",
+            "建议补齐分工：新增「设计」Bot 负责交互方案；开发 Bot 交付要附复现步骤。",
+            None,
+            None,
+        )
+        .unwrap();
+    k.gw.set(|p, _| {
+        if p.starts_with("You are the router") {
+            Ok(r#"{"kind":"config","title":"x"}"#.into())
+        } else if p.starts_with("Which Steve configuration") {
+            assert!(p.contains("bot:new:<名字> — 新建一个 Bot"));
+            assert!(p.contains("at most 6"));
+            assert!(
+                p.contains("新增「设计」Bot 负责交互方案"),
+                "the picker reads the proposal"
+            );
+            Ok(r#"{"targets":["bot:new:设计","bot:dev"]}"#.into())
+        } else {
+            assert!(p.contains("按这个方案补齐 Bot"));
+            assert!(
+                p.contains("开发 Bot 交付要附复现步骤"),
+                "the drafts read the proposal"
+            );
+            if p.contains("a new bot \"设计\"") {
+                Ok(r#"{"changes":[{"key":"role","value":"交互方案"}]}"#.into())
+            } else {
+                Ok(r#"{"changes":[{"key":"rules","value":"交付附复现步骤"}]}"#.into())
+            }
+        }
+    });
+    k.core.say(WS, "按这个方案补齐 Bot", &[]).unwrap();
+    let ms = settle(&k, 3).await;
+    let ps = ms[2].meta["proposals"].as_array().unwrap().clone();
+    assert_eq!(ps.len(), 2);
+    assert_eq!(ps[0]["target"], json!({"kind": "bot", "id": "new:设计"}));
+    assert_eq!(ps[0]["title"], "新建 Bot · 设计");
+    assert_eq!(ps[1]["target"], json!({"kind": "bot", "id": "dev"}));
+    let r = k
+        .core
+        .apply(ps[0]["id"].as_str().unwrap(), "me", WS)
+        .unwrap();
+    let made = k.db().bot(r["bot"].as_str().unwrap()).unwrap().unwrap();
+    assert_eq!(
+        (made.name.as_str(), made.role.as_str()),
+        ("设计", "交互方案")
+    );
+}
+
+#[tokio::test]
 async fn asking_how_a_setting_is_set_shows_it_without_drafting() {
     let k = Kit::new();
     k.gw.set(|p, _| {
