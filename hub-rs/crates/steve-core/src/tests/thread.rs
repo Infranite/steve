@@ -716,13 +716,15 @@ fn notifications_and_the_read_cursor() {
 /// Real model calls through the Claude CLI (claude-haiku-5-5; the kiro route has no upstream); `cargo test -- --ignored`.
 fn real_gateway(home: &std::path::Path) -> crate::ClaudeCli {
     crate::ClaudeCli {
-        codex: None,
-        executable: std::env::var("CLAUDE_CODE_EXECUTABLE")
-            .unwrap_or_else(|_| "/opt/homebrew/bin/claude".into())
-            .into(),
+        one: crate::LocalPrint {
+            codex: None,
+            executable: std::env::var("CLAUDE_CODE_EXECUTABLE")
+                .unwrap_or_else(|_| "/opt/homebrew/bin/claude".into())
+                .into(),
+            cwd: home.to_path_buf(),
+        },
         fast: vec!["claude-haiku-5-5".into()],
         smart: vec!["claude-haiku-5-5".into()],
-        cwd: home.to_path_buf(),
         models: None,
     }
 }

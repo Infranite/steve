@@ -55,7 +55,7 @@ pub struct Attempt {
 /// Told what the model has written so far in its current message, each time it grows.
 pub type OnText<'a> = &'a (dyn Fn(&str) + Send + Sync);
 
-/// One model call with fallback; implemented by [`ClaudeCli`], faked in tests.
+/// One model call with fallback; implemented by [`Fallback`] ([`ClaudeCli`] in process), faked in tests.
 #[async_trait]
 pub trait ModelGateway: Send + Sync {
     /// `claudePrintWith`: `tools` are what the call may use besides answering (a chat answer that reads
@@ -131,14 +131,16 @@ fn elapsed_ms(t0: Instant) -> u64 {
     u64::try_from(t0.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
-/// One run of the CLI: its reply (text and `total_cost_usd`) or error, and the tokens it reported either way.
-struct Tried {
-    reply: Result<(String, Option<f64>)>,
-    usage: Vec<ModelUsage>,
+/// One try of one model ([`OneModel::once`]): its reply (text and `total_cost_usd`) or error, and the
+/// tokens it reported either way (a failed try spent them too).
+pub struct Tried {
+    pub reply: Result<(String, Option<f64>)>,
+    pub usage: Vec<ModelUsage>,
 }
 
 impl Tried {
-    fn failed(e: CoreError) -> Tried {
+    /// A try that failed before the model ran (nothing spent).
+    pub fn failed(e: CoreError) -> Tried {
         Tried {
             reply: Err(e),
             usage: vec![],
@@ -195,41 +197,59 @@ pub fn model_usage(r: steve_print::UsageReport) -> ModelUsage {
     }
 }
 
-/// Steve's judgments through a harness CLI in `STEVE_HOME/scratch`, each model of the list in turn: the
-/// purpose's harness and list from 设置 · 模型 ([`crate::models::Models::for_call`], Steve's bot unless
-/// overridden) when `models` is set, else the tier's on Claude Code.
+/// One think call as [`Fallback`] hands it to each model in turn: everything but the model and effort,
+/// which the fallback chooses.
+pub struct OneCall<'a> {
+    pub prompt: &'a str,
+    /// Per try, not for the whole fallback.
+    pub timeout: Duration,
+    pub tools: &'a ThinkTools,
+    /// The purpose runs on Codex (设置 · 模型), else on Claude Code.
+    pub codex: bool,
+    /// The images of the call ([`with_images`]), the same for every model tried.
+    pub images: &'a [steve_print::Image],
+}
+
+/// A single attempt of one model, with no fallback of its own: in process ([`LocalPrint`]), or elsewhere
+/// (a Node). [`Fallback`] keeps the policy around it: which models, in which order, and what the
+/// statistics see of the tries.
+#[async_trait]
+pub trait OneModel: Send + Sync {
+    /// Runs `model` (empty: the harness's default) once; streaming when `on_text` is given.
+    async fn once(
+        &self,
+        call: &OneCall<'_>,
+        model: &str,
+        effort: Option<&str>,
+        on_text: Option<OnText<'_>>,
+    ) -> Tried;
+}
+
+/// Steve's judgments through a harness CLI in `STEVE_HOME/scratch`, in this process.
 ///
 /// - Claude Code: `claude -p <prompt> --output-format json --model <m>`.
 /// - Codex: `codex exec --json --ephemeral -s read-only [-m <m>] -` with the prompt on stdin (see
 ///   [`steve_print::codex_args`]).
-pub struct ClaudeCli {
+pub struct LocalPrint {
     pub executable: PathBuf,
     /// `codex` for purposes that run on Codex; `None`: such calls fail with a clear error.
     pub codex: Option<PathBuf>,
-    pub fast: Vec<String>,
-    pub smart: Vec<String>,
     pub cwd: PathBuf,
-    /// The resolver of 设置 · 模型; `None` (tests) uses `fast` / `smart` as they are.
-    pub models: Option<crate::models::Models>,
 }
 
-impl ClaudeCli {
+#[async_trait]
+impl OneModel for LocalPrint {
     /// One run of `model` through [`steve_print`]: Codex when `codex`, else `claude -p` (json, or
     /// stream-json when `on_text` is given or there are images). `effort` comes from 设置 · 模型 and is
     /// kept apart from `tools`, so a call without tools keeps its cache-friendly layout ([`print_args`]).
-    #[allow(clippy::too_many_arguments)]
     async fn once(
         &self,
-        prompt: &str,
+        call: &OneCall<'_>,
         model: &str,
-        timeout: Duration,
-        tools: &ThinkTools,
         effort: Option<&str>,
-        codex: bool,
-        images: &[steve_print::Image],
         on_text: Option<OnText<'_>>,
     ) -> Tried {
-        let (harness, executable) = if codex {
+        let (harness, executable) = if call.codex {
             let Some(exe) = &self.codex else {
                 return Tried::failed(msg(
                     "没有配置 codex（CODEX_EXECUTABLE），不能用 Codex 做判断",
@@ -239,7 +259,7 @@ impl ClaudeCli {
         } else {
             (steve_print::Harness::Claude, &self.executable)
         };
-        let (head, message) = split_static(prompt);
+        let (head, message) = split_static(call.prompt);
         let run = steve_print::PrintRun {
             harness,
             executable,
@@ -248,13 +268,28 @@ impl ClaudeCli {
             effort,
             head,
             message,
-            tools: tool_mode(tools),
-            images,
-            timeout,
+            tools: tool_mode(call.tools),
+            images: call.images,
+            timeout: call.timeout,
         };
-        Tried::of(steve_print::run(&run, on_text).await, codex)
+        Tried::of(steve_print::run(&run, on_text).await, call.codex)
     }
 }
+
+/// The Hub's model gateway: each model of the call's list in turn over `one`, until one answers. The
+/// purpose's harness and list come from 设置 · 模型 ([`crate::models::Models::for_call`], Steve's bot
+/// unless overridden) when `models` is set, else the tier's on Claude Code.
+pub struct Fallback<M> {
+    /// Runs one model once.
+    pub one: M,
+    pub fast: Vec<String>,
+    pub smart: Vec<String>,
+    /// The resolver of 设置 · 模型; `None` (tests) uses `fast` / `smart` as they are.
+    pub models: Option<crate::models::Models>,
+}
+
+/// Steve's gateway in process: the fallback over [`LocalPrint`].
+pub type ClaudeCli = Fallback<LocalPrint>;
 
 /// The statistics' harness name of `codex exec` calls (`usage_records.harness`).
 pub const CODEX_HARNESS: &str = "codex-cli";
@@ -399,7 +434,7 @@ fn merge_usage(into: &mut Vec<ModelUsage>, more: Vec<ModelUsage>) {
     }
 }
 
-impl ClaudeCli {
+impl<M: OneModel> Fallback<M> {
     /// The models (and effort) of this call: its purpose and workspace come from the caller's
     /// [`crate::stats::CallTag`].
     pub fn choice(&self, tier: Tier) -> crate::models::Choice {
@@ -447,18 +482,17 @@ impl ClaudeCli {
         };
         // the images of the call ([`with_images`]), for every model tried
         let images = current_images().map(|b| images_of(&b)).unwrap_or_default();
+        let call = OneCall {
+            prompt,
+            timeout,
+            tools,
+            codex,
+            images: &images,
+        };
         for m in models {
             let r = self
-                .once(
-                    prompt,
-                    m,
-                    timeout,
-                    tools,
-                    choice.effort.as_deref(),
-                    codex,
-                    &images,
-                    on_text,
-                )
+                .one
+                .once(&call, m, choice.effort.as_deref(), on_text)
                 .await;
             a.attempts += 1;
             a.model = m.clone();
@@ -490,7 +524,7 @@ impl ClaudeCli {
 }
 
 #[async_trait]
-impl ModelGateway for ClaudeCli {
+impl<M: OneModel> ModelGateway for Fallback<M> {
     async fn call(
         &self,
         prompt: &str,
@@ -1595,7 +1629,7 @@ mod tests {
         assert!(cli_tools(&ThinkTools::None).is_empty());
     }
 
-    /// The `claude -p` layout and tool arguments in the order [`ClaudeCli::once`] passes them.
+    /// The `claude -p` layout and tool arguments in the order [`LocalPrint::once`] passes them.
     fn layout<'a>(prompt: &'a str, tools: &ThinkTools) -> (&'a str, Vec<&'a str>) {
         let (m, mut a) = print_args(prompt, tools);
         a.extend(cli_tools(tools));
