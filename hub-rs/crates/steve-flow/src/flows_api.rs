@@ -539,7 +539,7 @@ async fn history(
             Some(_) => return Err(ApiError::invalid("dry")),
         };
         flows::own(c, &who.ws, &id)?;
-        let rows = runs::page_of(c, &id, None, q.limit.unwrap_or(20), dry)?;
+        let rows = runs::page_of(c, &who.ws, &id, None, q.limit.unwrap_or(20), dry)?;
         Ok(Json(Value::Array(
             rows.iter()
                 .map(|r| {

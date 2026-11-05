@@ -2,7 +2,7 @@
 //! [`EventAdapter`]s, the per-connection receive settings (`source_settings`), and the source page,
 //! one entry per adapter with the `events` capability.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use rusqlite::{Connection, OptionalExtension, params};
@@ -303,16 +303,30 @@ fn flows_for(c: &Connection, ws: &str, source: &str, type_key: &str) -> FlowResu
     Ok(flows.len() as i64)
 }
 
-/// Events of these connections and type received in the last 24 hours (stored ones).
-fn stored_24h(c: &Connection, conns: &[String], type_key: &str, since: i64) -> FlowResult<i64> {
-    let mut n = 0;
-    let mut st = c.prepare_cached(
-        "SELECT COUNT(*) FROM ext_events WHERE connection_id = ? AND type = ? AND received >= ?",
-    )?;
-    for id in conns {
-        n += st.query_row(params![id, type_key, since], |r| r.get::<_, i64>(0))?;
+/// Events of `ws`'s connections `conns` received since `since` (stored ones), per type: one
+/// grouped query for the whole page.
+fn stored_24h(
+    c: &Connection,
+    ws: &str,
+    conns: &[String],
+    since: i64,
+) -> FlowResult<HashMap<String, i64>> {
+    if conns.is_empty() {
+        return Ok(HashMap::new());
     }
-    Ok(n)
+    let sql = format!(
+        "SELECT type, COUNT(*) FROM ext_events WHERE workspace_id = ? AND received >= ? AND connection_id IN ({}) GROUP BY type",
+        vec!["?"; conns.len()].join(", ")
+    );
+    let mut args: Vec<&dyn rusqlite::ToSql> = vec![&ws, &since];
+    args.extend(conns.iter().map(|id| id as &dyn rusqlite::ToSql));
+    let mut st = c.prepare(&sql)?;
+    let rows = st
+        .query_map(rusqlite::params_from_iter(args), |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+        })?
+        .collect::<rusqlite::Result<HashMap<_, _>>>()?;
+    Ok(rows)
 }
 
 pub const DAY_MS: i64 = 24 * 3_600_000;
@@ -332,12 +346,13 @@ pub fn view(
     let first = sets.first();
     let ids: Vec<String> = conns.iter().map(|x| x.id.clone()).collect();
     let since = cx.now() - DAY_MS;
+    let stored = stored_24h(c, &who.ws, &ids, since)?;
     let types = a
         .event_types()
         .iter()
         .map(|t: &EventTypeDef| -> FlowResult<Value> {
             let set = first.and_then(|s| s.types.get(t.key));
-            let n24 = stored_24h(c, &ids, t.key, since)? + cx.drops.count(&ids, t.key, since);
+            let n24 = stored.get(t.key).copied().unwrap_or(0) + cx.drops.count(&ids, t.key, since);
             Ok(json!({
                 "key": t.key,
                 "label": t.label,

@@ -237,27 +237,35 @@ fn matching_waits(tx: &Tx, ws: &str, ev: &RawEvent) -> FlowResult<Vec<(String, S
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    let types: Vec<&str> = ev.types().collect();
     Ok(rows
         .into_iter()
-        .filter(|(_, _, m)| {
-            let m: Value = m
-                .as_deref()
-                .and_then(|m| serde_json::from_str(m).ok())
-                .unwrap_or(Value::Null);
-            let source_ok = m["source"]
-                .as_str()
-                .is_none_or(|s| s.is_empty() || s == ev.source);
-            let type_ok = match &m["type"] {
-                Value::String(t) => t.is_empty() || ev.types().any(|x| x == t),
-                Value::Array(ts) => {
-                    ts.is_empty() || ts.iter().any(|t| ev.types().any(|x| Some(x) == t.as_str()))
-                }
-                _ => true,
-            };
-            source_ok && type_ok
-        })
+        .filter(|(_, _, m)| wait_takes(m.as_deref(), &ev.source, &types))
         .map(|(r, n, _)| (r, n))
         .collect())
+}
+
+/// Does a `wait(event)` with this stored `match` take an event of `source` and `types`? An empty or
+/// missing `source` / `type` takes any; `type` is one type or a list (`match.when` is the
+/// executor's to evaluate).
+pub(crate) fn wait_takes(m: Option<&str>, source: &str, types: &[&str]) -> bool {
+    let m: Value = m
+        .and_then(|m| serde_json::from_str(m).ok())
+        .unwrap_or(Value::Null);
+    let source_ok = m["source"]
+        .as_str()
+        .is_none_or(|s| s.is_empty() || s == source);
+    let type_ok = match &m["type"] {
+        Value::String(t) => t.is_empty() || types.contains(&t.as_str()),
+        Value::Array(ts) => {
+            ts.is_empty()
+                || ts
+                    .iter()
+                    .any(|t| t.as_str().is_some_and(|t| types.contains(&t)))
+        }
+        _ => true,
+    };
+    source_ok && type_ok
 }
 
 /// What the transaction decided, for the work after the commit.
@@ -293,10 +301,23 @@ pub async fn ingest(
 ) -> FlowResult<Ingested> {
     check(&ev)?;
     let now = cx.now();
-    let step = cx
-        .store()
-        .transaction(|tx| store_in(tx, cx, ws, conn, &ev, now))?;
-    Ok(after_store(cx, ws, step))
+    // on the blocking pool: the write may wait for the writer (a retention pass, a sync). The
+    // commit and the work after it are one task: a caller that stops waiting (the poll timeout, a
+    // dropped hook request) cannot leave a stored event whose runs are never driven.
+    let (cx, ws, conn) = (cx.clone(), ws.to_string(), conn.map(String::from));
+    tokio::spawn(async move {
+        let step = {
+            let (cx, ws) = (cx.clone(), ws.clone());
+            cx.clone()
+                .blocking(move |s| {
+                    s.transaction(|tx| store_in(tx, &cx, &ws, conn.as_deref(), &ev, now))
+                })
+                .await?
+        };
+        Ok(after_store(&cx, &ws, step))
+    })
+    .await
+    .map_err(|e| ApiError::Internal(format!("task failed: {e}")))?
 }
 
 /// The stored part of [`ingest`], in the caller's transaction: dedupe, the `ext_events` row, the runs it
@@ -573,10 +594,11 @@ pub async fn poll_connection(
         }
     }
     let now = cx.now();
-    cx.store()
-        .transaction(|tx| -> FlowResult<()> {
-            if let Some(c) = &batch.cursor {
-                sources::save_cursor(tx, ws, conn, c, now)?;
+    let (ws, conn, cursor) = (ws.to_string(), conn.to_string(), batch.cursor);
+    cx.blocking(move |s| {
+        s.transaction(|tx| -> FlowResult<()> {
+            if let Some(c) = &cursor {
+                sources::save_cursor(tx, &ws, &conn, c, now)?;
             }
             tx.execute(
                 "UPDATE connections SET last_sync = ? WHERE id = ?",
@@ -584,7 +606,9 @@ pub async fn poll_connection(
             )?;
             Ok(())
         })
-        .map_err(|e| AdapterError::Malformed(e.to_string()))?;
+    })
+    .await
+    .map_err(|e| AdapterError::Malformed(e.to_string()))?;
     Ok(stored)
 }
 
@@ -615,6 +639,10 @@ pub async fn push(
 pub const MAX_BACKOFF: Duration = Duration::from_secs(30 * 60);
 /// How often the poller looks for due connections.
 pub const POLL_TICK: Duration = Duration::from_secs(15);
+/// Connections polled at the same time.
+pub const POLL_PARALLEL: usize = 4;
+/// A poll (provider call and its ingests) that takes longer counts as failed.
+pub const POLL_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
 /// The `flow.poll` job: every [`IngestMode::Poll`] connection with the `events` capability, at its
 /// adapter's interval; failures double the wait up to [`MAX_BACKOFF`].
@@ -650,7 +678,9 @@ impl Poller {
             }
         };
         let now = self.cx.now();
-        let mut polled = 0;
+        // a connection that is gone is no longer tracked
+        self.due.retain(|id, _| conns.iter().any(|c| &c.0 == id));
+        let mut todo = Vec::new();
         for (id, ws, adapter, caps) in conns {
             let Some(a) = self.cx.events.get(&adapter) else {
                 continue;
@@ -665,20 +695,49 @@ impl Poller {
             if next > now {
                 continue;
             }
-            polled += 1;
-            let wait = match poll_connection(&self.cx, &ws, &id).await {
+            todo.push((id, ws, every, fails));
+        }
+        let polled = todo.len();
+        // a few at a time, so one slow upstream does not hold up the others; a connection is in
+        // the list once, so its own polls stay one after another
+        let mut todo = todo.into_iter();
+        let mut running = tokio::task::JoinSet::new();
+        loop {
+            while running.len() < POLL_PARALLEL {
+                let Some((id, ws, every, fails)) = todo.next() else {
+                    break;
+                };
+                let cx = self.cx.clone();
+                running.spawn(async move {
+                    let r = tokio::time::timeout(POLL_TIMEOUT, poll_connection(&cx, &ws, &id))
+                        .await
+                        .unwrap_or_else(|_| Err(AdapterError::Malformed("拉取超时".into())));
+                    (id, every, fails, r)
+                });
+            }
+            let Some(done) = running.join_next().await else {
+                break;
+            };
+            let (id, every, fails, r) = match done {
+                Ok(x) => x,
+                // a panicked poll leaves its connection due; it is tried again next round
+                Err(e) => {
+                    tracing::error!("flow.poll task: {e}");
+                    continue;
+                }
+            };
+            match r {
                 Ok(_) => {
                     self.due.insert(id, (now + every.as_millis() as i64, 0));
-                    continue;
                 }
                 Err(e) => {
                     tracing::warn!(conn = id, "flow.poll failed: {e}");
                     let back = every.saturating_mul(2u32.saturating_pow(fails + 1));
-                    back.min(MAX_BACKOFF)
+                    let wait = back.min(MAX_BACKOFF);
+                    self.due
+                        .insert(id, (now + wait.as_millis() as i64, fails + 1));
                 }
-            };
-            self.due
-                .insert(id, (now + wait.as_millis() as i64, fails + 1));
+            }
         }
         polled
     }

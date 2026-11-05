@@ -97,7 +97,7 @@ async fn item_create(cx: &FlowCx, run: &RunRow, cfg: &Value) -> FlowResult<Actio
     let ws = run.workspace_id.clone();
     let (bot, note, previous) = cx.store().reader(|c| -> FlowResult<_> {
         let (bot, note) = pick_bot(c, &ws, cfg["bot"].as_str().unwrap_or(&s.spec.bot))?;
-        let prev = runs::last_real(c, &run.flow_id, Some(&run.id))?;
+        let prev = runs::last_real(c, &run.workspace_id, &run.flow_id, Some(&run.id))?;
         Ok((bot, note, prev))
     })?;
     let mut planned = format!("计划时间 {}", schedules::local(at, tz, "%Y-%m-%d %H:%M"));
@@ -189,7 +189,7 @@ async fn report(cx: &FlowCx, run: &RunRow, cfg: &Value) -> FlowResult<ActionOutc
     let ws = run.workspace_id.clone();
     let what = cfg["what"].as_str().unwrap_or("").to_string();
     let (entries, items) = cx.store().reader(|c| -> FlowResult<_> {
-        let since = runs::last_real(c, &run.flow_id, Some(&run.id))?
+        let since = runs::last_real(c, &run.workspace_id, &run.flow_id, Some(&run.id))?
             .map(|p| p.started)
             .unwrap_or(0);
         let entries = digest::pending(c, &ws, since)?;

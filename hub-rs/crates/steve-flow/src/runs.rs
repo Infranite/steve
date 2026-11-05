@@ -249,10 +249,10 @@ pub fn save(tx: &Tx, r: &RunRow) -> FlowResult<()> {
 }
 
 /// Is an earlier run of this flow still `running` or `waiting` (the overlap rule)?
-pub fn active_exists(c: &Connection, flow_id: &str) -> FlowResult<bool> {
+pub fn active_exists(c: &Connection, ws: &str, flow_id: &str) -> FlowResult<bool> {
     Ok(c.query_row(
-        "SELECT EXISTS (SELECT 1 FROM flow_runs WHERE flow_id = ? AND status IN ('running', 'waiting'))",
-        [flow_id],
+        "SELECT EXISTS (SELECT 1 FROM flow_runs WHERE workspace_id = ? AND flow_id = ? AND status IN ('running', 'waiting'))",
+        params![ws, flow_id],
         |r| r.get(0),
     )?)
 }
@@ -260,12 +260,13 @@ pub fn active_exists(c: &Connection, flow_id: &str) -> FlowResult<bool> {
 /// The latest run that is not `skipped` (`Schedule.last`, and “上次结果” in the item goal).
 pub fn last_real(
     c: &Connection,
+    ws: &str,
     flow_id: &str,
     except: Option<&str>,
 ) -> FlowResult<Option<RunRow>> {
     Ok(c.query_row(
-        "SELECT * FROM flow_runs WHERE flow_id = ? AND status != 'skipped' AND id != ? ORDER BY started DESC, rowid DESC LIMIT 1",
-        params![flow_id, except.unwrap_or("")],
+        "SELECT * FROM flow_runs WHERE workspace_id = ? AND flow_id = ? AND status != 'skipped' AND id != ? ORDER BY started DESC, rowid DESC LIMIT 1",
+        params![ws, flow_id, except.unwrap_or("")],
         RunRow::from_row,
     )
     .optional()?)
@@ -274,23 +275,25 @@ pub fn last_real(
 /// A page of history, newest first: `started < before` (when given), at most [`MAX_PAGE`].
 pub fn page(
     c: &Connection,
+    ws: &str,
     flow_id: &str,
     before: Option<i64>,
     limit: i64,
 ) -> FlowResult<Vec<RunRow>> {
-    page_of(c, flow_id, before, limit, None)
+    page_of(c, ws, flow_id, before, limit, None)
 }
 
 /// [`page`], only dry runs (`Some(true)`) or only real ones (`Some(false)`).
 pub fn page_of(
     c: &Connection,
+    ws: &str,
     flow_id: &str,
     before: Option<i64>,
     limit: i64,
     dry: Option<bool>,
 ) -> FlowResult<Vec<RunRow>> {
     let mut st = c.prepare_cached(
-        "SELECT * FROM flow_runs WHERE flow_id = ?1 AND started < ?2 AND (?4 IS NULL OR dry_run = ?4)
+        "SELECT * FROM flow_runs WHERE workspace_id = ?5 AND flow_id = ?1 AND started < ?2 AND (?4 IS NULL OR dry_run = ?4)
            ORDER BY started DESC, rowid DESC LIMIT ?3",
     )?;
     let rows = st
@@ -299,7 +302,8 @@ pub fn page_of(
                 flow_id,
                 before.unwrap_or(i64::MAX),
                 limit.clamp(1, MAX_PAGE),
-                dry
+                dry,
+                ws
             ],
             RunRow::from_row,
         )?

@@ -6,8 +6,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, ToSql, params, params_from_iter};
 use serde_json::{Value, json};
+use steve_store::Tx;
 
 use crate::{FlowCx, FlowResult};
 
@@ -62,45 +63,101 @@ pub struct Swept {
     pub events_deleted: usize,
 }
 
-/// One pass over all workspaces at `now`.
+/// Events purged per transaction; the writer is let go between batches.
+pub const PURGE_BATCH: usize = 500;
+/// Event rows deleted per transaction.
+pub const DELETE_BATCH: usize = 1000;
+
+/// One pass over all workspaces at `now`, in short transactions: per workspace, batches of
+/// [`PURGE_BATCH`] events lose their payload together with the data of the runs that handled them,
+/// then year-old rows go [`DELETE_BATCH`] at a time. Synchronous; [`run`] calls it off the runtime.
 pub fn sweep(cx: &FlowCx, now: i64) -> FlowResult<Swept> {
-    cx.store().transaction(|tx| -> FlowResult<Swept> {
-        let wss: Vec<String> = {
-            let mut st = tx.prepare("SELECT DISTINCT workspace_id FROM ext_events")?;
-            st.query_map([], |r| r.get(0))?
-                .collect::<rusqlite::Result<_>>()?
-        };
-        let mut out = Swept::default();
-        for ws in wss {
-            let cut = now - keep_raw_days(tx, &ws)? * 24 * 3_600_000;
-            tx.execute(
-                "UPDATE flow_run_steps SET input = ?1, output = ?1 WHERE run_id IN (
-                   SELECT r.id FROM flow_runs r JOIN ext_events e ON e.id = r.event_id
-                    WHERE e.workspace_id = ?2 AND e.received < ?3 AND e.payload_purged IS NULL)",
-                params![PURGED, ws, cut],
-            )?;
-            out.runs += tx.execute(
-                "UPDATE flow_runs SET context = ?1 WHERE event_id IN (
-                   SELECT id FROM ext_events WHERE workspace_id = ?2 AND received < ?3 AND payload_purged IS NULL)",
-                params![PURGED, ws, cut],
-            )?;
-            out.payloads += tx.execute(
-                "UPDATE ext_events SET payload = NULL, payload_purged = ?1 WHERE workspace_id = ?2 AND received < ?3 AND payload_purged IS NULL",
-                params![now, ws, cut],
-            )?;
+    let wss: Vec<String> = cx.store().reader(|c| -> FlowResult<_> {
+        let mut st = c.prepare("SELECT id FROM workspaces")?;
+        let rows = st
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(rows)
+    })?;
+    let mut out = Swept::default();
+    for ws in wss {
+        let cut = now - cx.store().reader(|c| keep_raw_days(c, &ws))? * 24 * 3_600_000;
+        loop {
+            let (runs, payloads) = cx
+                .store()
+                .transaction(|tx| purge_batch(tx, &ws, cut, now))?;
+            out.runs += runs;
+            out.payloads += payloads;
+            if payloads < PURGE_BATCH {
+                break;
+            }
         }
-        out.events_deleted = tx.execute(
-            "DELETE FROM ext_events WHERE received < ?",
-            [now - KEEP_EVENT_MS],
-        )?;
-        Ok(out)
-    })
+    }
+    loop {
+        let n = cx.store().transaction(|tx| -> FlowResult<usize> {
+            Ok(tx.execute(
+                "DELETE FROM ext_events WHERE rowid IN (SELECT rowid FROM ext_events WHERE received < ? LIMIT ?)",
+                params![now - KEEP_EVENT_MS, DELETE_BATCH as i64],
+            )?)
+        })?;
+        out.events_deleted += n;
+        if n < DELETE_BATCH {
+            break;
+        }
+    }
+    Ok(out)
 }
 
-/// The hourly job.
+/// Purges up to [`PURGE_BATCH`] of `ws`'s events received before `cut`: their payload, and the
+/// contexts and step data of their runs, in the caller's transaction so the three stay consistent.
+/// Returns `(runs, events)` purged.
+fn purge_batch(tx: &Tx, ws: &str, cut: i64, now: i64) -> FlowResult<(usize, usize)> {
+    let ids: Vec<String> = {
+        let mut st = tx.prepare_cached(
+            "SELECT id FROM ext_events WHERE workspace_id = ? AND received < ? AND payload_purged IS NULL LIMIT ?",
+        )?;
+        st.query_map(params![ws, cut, PURGE_BATCH as i64], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?
+    };
+    if ids.is_empty() {
+        return Ok((0, 0));
+    }
+    let marks = vec!["?"; ids.len()].join(", ");
+    // the first parameter, then the ids
+    let with = |first: &'static dyn ToSql| -> Vec<&dyn ToSql> {
+        std::iter::once(first)
+            .chain(ids.iter().map(|i| i as &dyn ToSql))
+            .collect()
+    };
+    tx.execute(
+        &format!(
+            "UPDATE flow_run_steps SET input = ?1, output = ?1 WHERE run_id IN (
+               SELECT id FROM flow_runs WHERE event_id IN ({marks}))"
+        ),
+        params_from_iter(with(&PURGED)),
+    )?;
+    let runs = tx.execute(
+        &format!("UPDATE flow_runs SET context = ? WHERE event_id IN ({marks})"),
+        params_from_iter(with(&PURGED)),
+    )?;
+    let mut with_now: Vec<&dyn ToSql> = vec![&now];
+    with_now.extend(ids.iter().map(|i| i as &dyn ToSql));
+    let events = tx.execute(
+        &format!("UPDATE ext_events SET payload = NULL, payload_purged = ? WHERE id IN ({marks})"),
+        params_from_iter(with_now),
+    )?;
+    Ok((runs, events))
+}
+
+/// The hourly job; each pass runs on the blocking pool.
 pub async fn run(cx: Arc<FlowCx>) {
     loop {
-        match sweep(&cx, cx.now()) {
+        let now = cx.now();
+        let pass = {
+            let cx = cx.clone();
+            cx.clone().blocking(move |_| sweep(&cx, now)).await
+        };
+        match pass {
             Ok(s) if s.payloads + s.events_deleted > 0 => tracing::info!(?s, "flow.retention"),
             Ok(_) => {}
             Err(e) => tracing::warn!("flow.retention: {e}"),

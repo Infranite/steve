@@ -315,7 +315,7 @@ async fn detail(Extension(cx): Cx, who: Caller, Path(id): Path<String>) -> ApiRe
     cx.store().reader(|c| -> ApiResult<_> {
         let s = schedules::own(c, &who.ws, &id)?;
         let mut v = serde_json::to_value(schedules::view(c, &s)?)?;
-        let recent: Vec<RunView> = runs::page(c, &s.id, None, 10)?
+        let recent: Vec<RunView> = runs::page(c, &s.workspace_id, &s.id, None, 10)?
             .iter()
             .map(|r| r.view())
             .collect();
@@ -357,10 +357,11 @@ async fn history(
 ) -> ApiResult<Json<Value>> {
     cx.store().reader(|c| -> ApiResult<_> {
         let s = schedules::own(c, &who.ws, &id)?;
-        let page: Vec<RunView> = runs::page(c, &s.id, q.before, q.limit.unwrap_or(20))?
-            .iter()
-            .map(|r| r.view())
-            .collect();
+        let page: Vec<RunView> =
+            runs::page(c, &s.workspace_id, &s.id, q.before, q.limit.unwrap_or(20))?
+                .iter()
+                .map(|r| r.view())
+                .collect();
         Ok(Json(serde_json::to_value(page)?))
     })
 }
