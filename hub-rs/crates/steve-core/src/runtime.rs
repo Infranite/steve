@@ -76,6 +76,13 @@ pub trait AgentRuntime: Send + Sync {
         let _ = session_id;
         false
     }
+    /// The session's backend recovers it after a restart by itself (a Node's reconcile settles its
+    /// attempts and expires its own cards; a parked one waits for its Node): boot recovery leaves it
+    /// alone, with no notice, no failure card and no resume.
+    fn recovers_itself(&self, session_id: &str) -> bool {
+        let _ = session_id;
+        false
+    }
     /// The pid of the session's live agent adapter (its process group leader), if one runs.
     fn agent_pid(&self, session_id: &str) -> Option<u32> {
         let _ = session_id;

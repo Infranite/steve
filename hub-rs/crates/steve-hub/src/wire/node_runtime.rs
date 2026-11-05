@@ -2715,16 +2715,19 @@ pub fn decision_session(store: &Store, decision: &str) -> Option<String> {
 
 /// Whether `session` is bound to a Node (whether or not that Node is enabled in this process).
 pub fn bound(store: &Store, session: &str) -> bool {
-    store
-        .reader(|c| {
-            Ok::<_, StoreError>(c.query_row(
-                "SELECT EXISTS(SELECT 1 FROM runtime_sessions WHERE session_id=?)",
-                [session],
-                |r| r.get::<_, bool>(0),
-            )?)
-        })
-        // when unsure, as bound: never hand it to another backend
-        .unwrap_or(true)
+    // when unsure, as bound: never hand it to another backend
+    bound_strict(store, session).unwrap_or(true)
+}
+
+/// [`bound`], with a read error as an error: for a decision that must not rest on a guess.
+pub fn bound_strict(store: &Store, session: &str) -> Result<bool, StoreError> {
+    store.reader(|c| {
+        Ok::<_, StoreError>(c.query_row(
+            "SELECT EXISTS(SELECT 1 FROM runtime_sessions WHERE session_id=?)",
+            [session],
+            |r| r.get::<_, bool>(0),
+        )?)
+    })
 }
 
 /// A message for a Node-bound session while its Node is not enabled here (STEVE_NODE_MODE off): it is

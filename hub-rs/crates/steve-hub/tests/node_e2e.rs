@@ -9,7 +9,8 @@
 //!   which is never re-run;
 //! - with `STEVE_NODE_MODE` off, a Node-bound session is parked, never handed to the legacy runner.
 //!
-//! And on a second home, with a short attempt deadline, a card nobody answers expires.
+//! And on a second home, with a short attempt deadline, a card nobody answers expires; on a
+//! third, an idle Node session goes through two Hub restarts without a resume or a restart notice.
 //!
 //! No real host, no real agent, never `~/.steve` or the production port.
 
@@ -596,4 +597,70 @@ async fn a_permission_nobody_answers_expires() {
         steve_v1(&h, &sid, "perm:selected:") == 0,
         "a late answer ({st} {v}) never reaches the agent"
     );
+}
+
+/// Events of `sid` (any format) mentioning a Hub restart.
+fn restart_notices(h: &Home, sid: &str) -> i64 {
+    h.count(
+        "SELECT COUNT(*) FROM events WHERE session_id=? AND instr(data, 'Hub 重启') > 0",
+        sid,
+    )
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_idle_node_session_is_not_resumed_after_a_restart() {
+    let h = Home::new();
+    // the turn ends without a delivery: Steve's takeover would continue it later, on its own
+    // clock (a prompt that is no resume); with no continues it opens its card once, settled below
+    let quiet = [("STEVE_TAKEOVER_CONTINUES", "0")];
+    let mut hub = spawn(&h, true, &quiet);
+    serving(&h).await;
+    let c = Client::login(&h).await;
+    let sid = c.item(&h, "重启验收 @say idle-node-3R").await;
+    assert!(
+        wait(30, || steve_v1(&h, &sid, "idle-node-3R") > 0).await,
+        "the first turn ran; log:\n{}",
+        hub_log(&h)
+    );
+    assert!(wait(10, || attempts(&h, &sid, "finished") >= 1).await);
+    let fails = || {
+        h.count(
+            "SELECT COUNT(*) FROM decisions WHERE item_id=(SELECT item_id FROM sessions WHERE id=?) AND kind='fail' AND status='open'",
+            &sid,
+        )
+    };
+    assert!(
+        wait(10, || fails() == 1).await,
+        "the takeover's card; log:\n{}",
+        hub_log(&h)
+    );
+    let (before, fails_before) = (h.prompts().len(), fails());
+    for round in 0..2 {
+        hub.kill();
+        hub = spawn(&h, true, &quiet);
+        serving(&h).await;
+        // ready() has run once the Hub serves; give a wrong resume time to show up
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let prompts = h.prompts();
+        assert!(
+            !prompts.iter().any(|p| p.contains("Hub 刚重启")),
+            "restart {round}: no RESUME prompt: {prompts:?}"
+        );
+        assert_eq!(prompts.len(), before, "restart {round}: no new turn");
+        assert_eq!(
+            restart_notices(&h, &sid),
+            0,
+            "restart {round}: no 'Hub 重启' event; log:\n{}",
+            hub_log(&h)
+        );
+        assert_eq!(
+            h.count(
+                "SELECT COUNT(*) FROM session_resume WHERE session_id=?",
+                &sid
+            ),
+            0,
+            "restart {round}: no resume intent"
+        );
+    }
+    assert_eq!(fails(), fails_before, "no failure card");
 }

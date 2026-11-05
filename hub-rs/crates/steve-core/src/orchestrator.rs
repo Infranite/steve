@@ -3510,7 +3510,14 @@ impl Tx<'_> {
         /* first the cards that no longer apply, so "waits on the user" below only counts live ones */
         for w in self.db().workspace_ids()? {
             for d in self.db().decisions_open(&w)? {
-                if d.kind == "approve" && d.subject_type == "tool_call" {
+                if d.kind == "approve"
+                    && d.subject_type == "tool_call"
+                    && d.session_id
+                        .as_deref()
+                        .is_some_and(|sid| self.rt().recovers_itself(sid))
+                {
+                    /* a Node's card outlives the Hub: the Node expires it, or the attempt goes on */
+                } else if d.kind == "approve" && d.subject_type == "tool_call" {
                     /* a tool permission dies with the adapter that asked; the resumed turn asks again if it still needs it */
                     self.db()
                         .decision_resolve(&d.id, json!({"expired": true}), "expired", None)?;
@@ -3566,6 +3573,12 @@ impl Tx<'_> {
             }
             if s.status == "ended" {
                 // nothing to continue: the intent goes
+                store.queued().resume_done(&s.id)?;
+                continue;
+            }
+            // its backend settles it (a Node's reconcile, or the Node it waits for); an intent an
+            // earlier boot left goes without a word
+            if self.rt().recovers_itself(&s.id) {
                 store.queued().resume_done(&s.id)?;
                 continue;
             }
@@ -3690,7 +3703,7 @@ impl Tx<'_> {
                         crate::cycle::CLOSING | crate::cycle::CLOSED
                     )
                 });
-            if closing {
+            if closing || self.rt().recovers_itself(id) {
                 if let Err(e) = self.db().store().queued().resume_done(id) {
                     tracing::warn!("resume intent of {id}: {e}");
                 }
@@ -3743,8 +3756,11 @@ impl Tx<'_> {
                 tracing::warn!("not flushing {id}: cwd {} unusable", s.cwd);
                 continue;
             }
+            // a resume intent holds the queue for the resumed turn; a session that recovers
+            // itself is never resumed, so a leftover intent must not hold it
             if !self.waits_on_user(s.item_id.as_deref())?
-                && !self.db().store().queued().resume_ids()?.contains(&id)
+                && (self.rt().recovers_itself(&id)
+                    || !self.db().store().queued().resume_ids()?.contains(&id))
             {
                 self.rt().flush(&id, None);
             }

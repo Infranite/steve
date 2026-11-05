@@ -556,3 +556,90 @@ fn a_turn_a_deploy_cut_resumes_past_other_cards_and_the_half_hour_limit() {
         "an item waiting on you is not poked"
     );
 }
+
+#[test]
+fn a_session_that_recovers_itself_is_left_to_its_backend() {
+    let k = Kit::new();
+    // a Node-owned session as D5 left it: never moved past 'starting', a resume intent from an
+    // earlier boot that is now over a day old, an open tool permission and a queued message
+    let i = k.item("run", "执行", None);
+    let s = k.session(&i, "starting");
+    k.rt.st().recovers_itself.insert(s.clone());
+    k.db().store().queued().plan_resume(&s).unwrap();
+    k.db()
+        .store()
+        .with_conn(|c| {
+            c.execute(
+                "UPDATE session_resume SET created = created - ? WHERE session_id = ?",
+                rusqlite::params![crate::orchestrator::RESUME_MAX_AGE_MS + 1, s],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let card = k.decision(&i, Some(&s), "approve", "tool_call", &["a|允许|allow_once"]);
+    k.db().queue_add(&s, "排队的话", "me", &[]).unwrap();
+    // a legacy session in the same database is still continued once
+    let li = k.item("run", "执行", None);
+    let legacy = k.session(&li, "running");
+
+    for _ in 0..2 {
+        k.core.recover().unwrap();
+        k.core.ready();
+    }
+
+    assert!(k.rt.prompts_of(&s).is_empty(), "no RESUME, no flush");
+    assert_eq!(
+        k.db().queued(&s).unwrap().len(),
+        1,
+        "the queue waits for the open card"
+    );
+    let system: Vec<_> = k
+        .db()
+        .events_after(&s, 0)
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.kind == "system")
+        .collect();
+    assert!(system.is_empty(), "no system event: {system:?}");
+    assert!(k.open_fails(&i).is_empty(), "no failure card");
+    assert!(
+        !k.db().store().queued().resume_ids().unwrap().contains(&s),
+        "the leftover intent is dropped"
+    );
+    assert_eq!(
+        k.db().decision(&card).unwrap().unwrap().status,
+        "open",
+        "the Node expires its own cards"
+    );
+    assert!(
+        !k.timeline_texts(&i).iter().any(|t| t.contains("Hub 重启")),
+        "nothing on the timeline"
+    );
+    assert_eq!(
+        k.rt.prompts_of(&legacy),
+        vec![RESUME],
+        "legacy resumes once"
+    );
+}
+
+#[test]
+fn a_resume_intent_from_before_the_upgrade_is_not_run_for_a_session_that_recovers_itself() {
+    let k = Kit::new();
+    let i = k.item("run", "执行", None);
+    let s = k.session(&i, "running");
+    // prepared by a boot before the session's backend took it over
+    k.core.recover().unwrap();
+    k.rt.st().recovers_itself.insert(s.clone());
+    k.db().queue_add(&s, "后来的话", "me", &[]).unwrap();
+    k.core.ready();
+    assert_eq!(
+        k.rt.prompts_of(&s),
+        vec!["后来的话"],
+        "no RESUME; the queue is not held for a resume that never comes"
+    );
+    assert!(!k.db().store().queued().resume_ids().unwrap().contains(&s));
+    assert!(
+        !k.timeline_texts(&i)
+            .contains(&"Hub 重启打断了会话，已自动继续".to_string())
+    );
+}
