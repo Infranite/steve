@@ -117,15 +117,21 @@ impl Frame {
     }
 }
 
+/// Events that change nothing `/api/state` reads, so they leave [`Bus::generation`] alone: transcript chunks
+/// (stored only in `events`; a turn's end publishes `session`), a chat answer being written and its research
+/// tool calls (the stored reply publishes `message`), and statistics (counted by their own generation).
+const STATELESS: &[&str] = &["event", "steve.draft", "steve.tool", "stats"];
+
 type Resolver = Box<dyn Fn(&str) -> Option<String> + Send + Sync>;
 type Taps = Arc<Mutex<Vec<(Vec<String>, tokio::sync::mpsc::UnboundedSender<Value>)>>>;
 
 struct Inner {
-    /// bumped by every publish, synchronously: anything computed from the database before a write is stale after it
+    /// bumped by every publish that can change `/api/state`, synchronously: anything computed from the database
+    /// before a write is stale after it
     generation: std::sync::atomic::AtomicU64,
     /// bumped by every `stats` event before it is coalesced: cached statistics older than this are stale
     stats_generation: std::sync::atomic::AtomicU64,
-    tx: Mutex<std::sync::mpsc::Sender<Value>>,
+    tx: std::sync::mpsc::Sender<Value>,
     out: broadcast::Sender<Arc<Frame>>,
     taps: Taps,
     resolver: Arc<OnceLock<Resolver>>,
@@ -162,7 +168,7 @@ impl Bus {
         Bus(Arc::new(Inner {
             generation: std::sync::atomic::AtomicU64::new(0),
             stats_generation: std::sync::atomic::AtomicU64::new(0),
-            tx: Mutex::new(tx),
+            tx,
             out,
             taps,
             resolver,
@@ -195,16 +201,18 @@ impl Bus {
 
     /// Any event shaped `{type, …}` (steve-store's and steve-core's events serialize to the same JSON).
     pub fn publish_value(&self, v: Value) {
-        self.0
-            .generation
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        if v.get("type").and_then(Value::as_str) == Some("stats") {
+        let ty = v.get("type").and_then(Value::as_str);
+        if !ty.is_some_and(|t| STATELESS.contains(&t)) {
+            self.0
+                .generation
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        if ty == Some("stats") {
             self.0
                 .stats_generation
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
-        let tx = self.0.tx.lock().unwrap_or_else(|e| e.into_inner());
-        let _ = tx.send(v);
+        let _ = self.0.tx.send(v);
     }
 
     /// How many events were published so far.
@@ -467,6 +475,24 @@ mod tests {
         assert_eq!(t.deadline(), None);
         assert_eq!(t.offer(ev("a", 4), at + 6 * s), None);
         assert_eq!(t.due(at + 10 * s), vec![ev("a", 4)]);
+    }
+
+    #[test]
+    fn only_state_changes_bump_the_generation() {
+        let bus = Bus::new();
+        let g = bus.generation();
+        bus.publish_value(
+            json!({"type": "event", "session_id": "s", "seq": 1, "kind": "k", "data": {}}),
+        );
+        bus.publish_value(
+            json!({"type": "steve.draft", "ws": "w1", "mid": "m", "thought": "", "text": "x"}),
+        );
+        bus.publish_value(json!({"type": "steve.tool", "ws": "w1"}));
+        bus.publish_value(json!({"type": "stats", "ws": "w1"}));
+        assert_eq!(bus.generation(), g);
+        bus.publish_value(json!({"type": "session", "id": "s"}));
+        bus.publish_value(json!({"type": "message", "id": "m"}));
+        assert_eq!(bus.generation(), g + 2);
     }
 
     #[tokio::test]

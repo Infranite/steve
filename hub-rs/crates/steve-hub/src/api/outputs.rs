@@ -121,7 +121,7 @@ pub async fn raw(
             format!("文件太大（{}），不在这里打开", human(size)),
         ));
     }
-    let Ok(data) = tokio::fs::read(&p).await else {
+    let Ok(file) = tokio::fs::File::open(&p).await else {
         return Ok(json_response(404, &json!({ "error": "文件不见了" })));
     };
     let name = p
@@ -130,17 +130,21 @@ pub async fn raw(
         .unwrap_or_default();
     let (form, mime) = media(&name);
     let inline = form.is_some() && q.get("download").map(String::as_str) != Some("1");
-    let total = data.len();
+    let total = size as usize;
     // one byte range, so Safari can play a video
     let range = headers
         .get(header::RANGE)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| byte_range(v, total));
-    let (status, body, span) = match range {
-        Some((a, b)) => (206, data[a..=b].to_vec(), Some((a, b))),
-        None => (200, data, None),
+    let (status, (start, len), span) = match range {
+        Some((a, b)) => (206, (a, b - a + 1), Some((a, b))),
+        None => (200, (0, total), None),
     };
-    let mut res = Response::new(Body::from(body));
+    // only the requested span is read, as it is sent
+    let Ok(body) = stream_file(file, start as u64, len as u64).await else {
+        return Ok(json_response(404, &json!({ "error": "文件不见了" })));
+    };
+    let mut res = Response::new(body);
     *res.status_mut() = axum::http::StatusCode::from_u16(status).unwrap_or_default();
     let h = res.headers_mut();
     let mut put = |k: header::HeaderName, v: String| {
@@ -160,6 +164,7 @@ pub async fn raw(
     put(header::X_CONTENT_TYPE_OPTIONS, "nosniff".into());
     put(header::CONTENT_DISPOSITION, disposition(&name, inline));
     put(header::ACCEPT_RANGES, "bytes".into());
+    put(header::CONTENT_LENGTH, len.to_string());
     if let Some((a, b)) = span {
         put(header::CONTENT_RANGE, format!("bytes {a}-{b}/{total}"));
     }
@@ -173,6 +178,21 @@ pub async fn raw(
     );
     put(header::CACHE_CONTROL, "private, no-cache".into());
     Ok(res)
+}
+
+/// `len` bytes of `file` from `start`, streamed from disk instead of read into memory first.
+pub(super) async fn stream_file(
+    mut file: tokio::fs::File,
+    start: u64,
+    len: u64,
+) -> std::io::Result<Body> {
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+    if start > 0 {
+        file.seek(std::io::SeekFrom::Start(start)).await?;
+    }
+    Ok(Body::from_stream(tokio_util::io::ReaderStream::new(
+        file.take(len),
+    )))
 }
 
 /// `bytes=a-b`, `bytes=a-` or `bytes=-n` within `total`.
@@ -658,6 +678,24 @@ fn human(n: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn stream_file_sends_only_the_span() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("v.bin");
+        std::fs::write(&p, b"0123456789").unwrap();
+        let read = |a, n| {
+            let p = p.clone();
+            async move {
+                let f = tokio::fs::File::open(&p).await.unwrap();
+                let b = stream_file(f, a, n).await.unwrap();
+                axum::body::to_bytes(b, usize::MAX).await.unwrap()
+            }
+        };
+        assert_eq!(&read(0, 10).await[..], b"0123456789");
+        assert_eq!(&read(3, 4).await[..], b"3456");
+        assert_eq!(&read(9, 1).await[..], b"9");
+    }
 
     fn g(dir: &FsPath, args: &[&str]) -> String {
         git(dir, args).unwrap_or_else(|e| panic!("git {args:?}: {e}"))

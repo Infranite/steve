@@ -4,6 +4,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use regex::Regex;
@@ -86,50 +87,87 @@ pub fn register_hub(r: &dyn Repo, name: &str, os: &str, version: &str) -> BResul
 
 // ── runtimes ──
 
-/// `runtimes(fresh)` with its 5-minute cache. The probe never blocks the async runtime.
+/// How long a probe result counts as current; an older one is still served while a new probe runs.
+const RUNTIMES_MAX_AGE: Duration = Duration::from_secs(300);
+
+type RuntimesCache = Arc<std::sync::Mutex<Option<(Instant, Value)>>>;
+
+/// `runtimes(fresh)` with its 5-minute cache. The probe never blocks the async runtime, and once there is a
+/// result `/api/state` never waits for one: an expired result is served while a background probe replaces it.
 pub struct Runtimes {
     cfg: Arc<Config>,
-    cache: Mutex<Option<(Instant, Value)>>,
+    cache: RuntimesCache,
+    /// a background refresh is running
+    refreshing: Arc<AtomicBool>,
+    /// callers that must wait for a probe (nothing cached yet, or `fresh`) probe one at a time
+    probing: Mutex<()>,
 }
 
 impl Runtimes {
     pub fn new(cfg: Arc<Config>) -> Self {
         Runtimes {
             cfg,
-            cache: Mutex::new(None),
+            cache: Arc::default(),
+            refreshing: Arc::default(),
+            probing: Mutex::new(()),
         }
     }
 
+    fn cached(&self) -> Option<(Instant, Value)> {
+        self.cache.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
     pub async fn get(&self, fresh: bool) -> Value {
-        let mut c = self.cache.lock().await;
-        if let Some((at, list)) = c.as_ref()
-            && !fresh
-            && at.elapsed() < Duration::from_secs(300)
-        {
-            return list.clone();
+        if !fresh && let Some((at, list)) = self.cached() {
+            if at.elapsed() >= RUNTIMES_MAX_AGE
+                && self
+                    .refreshing
+                    .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+            {
+                let (cfg, cache, refreshing) = (
+                    self.cfg.clone(),
+                    self.cache.clone(),
+                    self.refreshing.clone(),
+                );
+                tokio::spawn(async move {
+                    let list = probe(&cfg).await;
+                    *cache.lock().unwrap_or_else(|e| e.into_inner()) = Some((Instant::now(), list));
+                    refreshing.store(false, Ordering::SeqCst);
+                });
+            }
+            return list;
+        }
+        let _probing = self.probing.lock().await;
+        // another caller may have filled the cache while this one waited
+        if !fresh && let Some((_, list)) = self.cached() {
+            return list;
         }
         let list = probe(&self.cfg).await;
-        *c = Some((Instant::now(), list.clone()));
+        *self.cache.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some((Instant::now(), list.clone()));
         list
+    }
+}
+
+/// `<bin> --version` when the file exists, `""` otherwise.
+async fn version_of(bin: &str) -> String {
+    if !bin.is_empty() && Path::new(bin).exists() {
+        run(bin, &["--version"]).await
+    } else {
+        String::new()
     }
 }
 
 async fn probe(cfg: &Config) -> Value {
     let exists = |p: &str| Path::new(p).exists();
-    let claude_v = if exists(&cfg.claude_executable) {
-        run(&cfg.claude_executable, &["--version"]).await
-    } else {
-        String::new()
-    };
     let codex_bin = ["/opt/homebrew/bin/codex", "/usr/local/bin/codex"]
         .into_iter()
         .find(|p| exists(p))
         .unwrap_or("");
-    let codex_v = if codex_bin.is_empty() {
-        String::new()
-    } else {
-        run(codex_bin, &["--version"]).await
-    };
+    // two CLI start-ups, side by side
+    let (claude_v, codex_v) =
+        tokio::join!(version_of(&cfg.claude_executable), version_of(codex_bin));
     let claude_adapter = cfg
         .adapters
         .get("claude-code")
@@ -706,5 +744,34 @@ mod tests {
         assert_eq!(prepare_import(&steve_home, "nocolon"), Prepared::Missing);
         // runs inside STEVE_HOME are Steve's own
         assert!(peek_claude(Path::new("/pro"), &f).is_none());
+    }
+
+    #[tokio::test]
+    async fn expired_runtimes_are_served_while_refreshing() {
+        let vars = [
+            ("CLAUDE_CODE_EXECUTABLE", "/nonexistent/claude"),
+            ("STEVE_ADAPTER_CLAUDE", "/x/claude.js"),
+            ("STEVE_ADAPTER_CODEX", "/x/codex"),
+        ];
+        let cfg = Config::from_vars(|k| {
+            vars.iter()
+                .find(|(n, _)| *n == k)
+                .map(|(_, v)| v.to_string())
+        })
+        .expect("config");
+        let rt = Runtimes::new(Arc::new(cfg));
+        let old = Instant::now()
+            .checked_sub(RUNTIMES_MAX_AGE * 2)
+            .expect("instant");
+        *rt.cache.lock().expect("cache") = Some((old, json!("stale")));
+        // the expired list comes back at once; a background probe replaces it
+        assert_eq!(rt.get(false).await, json!("stale"));
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while rt.refreshing.load(Ordering::SeqCst) && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let list = rt.get(false).await;
+        assert_eq!(list[0]["id"], json!("claude-code"));
+        assert_eq!(list[0]["ok"], json!(false));
     }
 }

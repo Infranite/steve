@@ -79,15 +79,16 @@ pub async fn upload(
         .map_err(|_| too_large())?;
     let (buf, name) = if multipart {
         let req = Request::from_parts(parts, Body::from(bytes));
+        // a malformed form is the client's: axum's own status for it (400, 413), not a 500
         let mut form = Multipart::from_request(req, &())
             .await
-            .map_err(|e| ApiError::internal(e.body_text()))?;
+            .map_err(|e| ApiError::Json(e.status().as_u16(), e.body_text()))?;
         // parseBody keeps the last value of a repeated field
         let mut file = None;
         while let Some(field) = form
             .next_field()
             .await
-            .map_err(|e| ApiError::internal(e.body_text()))?
+            .map_err(|e| ApiError::Json(e.status().as_u16(), e.body_text()))?
         {
             if field.name() != Some("file") {
                 continue;
@@ -96,7 +97,7 @@ pub async fn upload(
             let data = field
                 .bytes()
                 .await
-                .map_err(|e| ApiError::internal(e.body_text()))?;
+                .map_err(|e| ApiError::Json(e.status().as_u16(), e.body_text()))?;
             file = fname.map(|n| (data, n));
         }
         let Some((data, n)) = file else {
@@ -125,8 +126,15 @@ pub async fn download(
         .read(move |r| Ok(own(r.file_get(&id)?, &c.ws, "附件")?))
         .await?;
     let path = att::blob_path(&st.cfg.data_dir, &f);
-    let Ok(data) = tokio::fs::read(&path).await else {
-        return Ok(json_response(404, &json!({ "error": "附件的文件不见了" })));
+    let gone = || Ok(json_response(404, &json!({ "error": "附件的文件不见了" })));
+    let Ok(file) = tokio::fs::File::open(&path).await else {
+        return gone();
+    };
+    let Ok(len) = file.metadata().await.map(|m| m.len()) else {
+        return gone();
+    };
+    let Ok(body) = super::outputs::stream_file(file, 0, len).await else {
+        return gone();
     };
     let s = |k: &str| {
         f.get(k)
@@ -135,9 +143,8 @@ pub async fn download(
             .to_string()
     };
     let (mime, name) = (s("mime"), s("name"));
-    let size = f.get("size").map(crate::js::string).unwrap_or_default();
     let inline = att::is_inline_image(&mime) && q.get("download").map(String::as_str) != Some("1");
-    let mut res = Response::new(Body::from(data));
+    let mut res = Response::new(body);
     let h = res.headers_mut();
     let mut put = |k: header::HeaderName, v: String| {
         if let Ok(v) = HeaderValue::from_str(&v) {
@@ -145,7 +152,7 @@ pub async fn download(
         }
     };
     put(header::CONTENT_TYPE, mime);
-    put(header::CONTENT_LENGTH, size);
+    put(header::CONTENT_LENGTH, len.to_string());
     put(header::X_CONTENT_TYPE_OPTIONS, "nosniff".into());
     put(header::CONTENT_DISPOSITION, att::disposition(&name, inline));
     put(

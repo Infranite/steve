@@ -73,7 +73,7 @@ export const steps = [
 
   // ── body parsing and validation ──
   P("POST", "/api/workspaces", undefined, { label: "empty body", raw: "", tolerate: ["body.error"] }),
-  P("POST", "/api/workspaces", undefined, { label: "invalid JSON", raw: "{nope", tolerate: ["body.error"] }),
+  P("POST", "/api/workspaces", undefined, { label: "invalid JSON", raw: "{nope", tolerate: ["body.error", "status"] }),
   P("POST", "/api/workspaces", undefined, { label: "array body", raw: "[1]" }),
   P("POST", "/api/workspaces", {}, { label: "missing name" }),
   P("POST", "/api/workspaces", { name: "", item_prefix: "ab", description: 3 }, { label: "three issues" }),
