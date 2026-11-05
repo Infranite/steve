@@ -387,6 +387,47 @@ async fn cancel_attempt_with_an_old_attempt_queues_nothing() {
     until("a2's cancel", || cancels() == 1).await;
 }
 
+/// Issue (B2a review): a stop frozen on an attempt that then failed in passing reaches its gateway
+/// retry (the same turn, a new attempt), as the legacy runner's turn token does; it never reaches
+/// the next turn.
+#[tokio::test]
+async fn cancel_attempt_reaches_the_retry_of_its_turn() {
+    let h = hub();
+    h.bind();
+    h.rt.prompt(S, "one", "user", &[]).unwrap();
+    until("started", || h.count("start_turn") == 1).await;
+    let a1 = h.rt.active_attempt(S).unwrap().expect("a1 runs");
+    let first = h.attempts()[0].clone();
+    h.transient_failure(&first).await;
+    let retry = h.rt.active_attempt(S).unwrap().expect("the retry waits");
+    assert_ne!(a1, retry);
+    let op: String =
+        h.q("SELECT operation_id FROM node_commands WHERE method='start_turn' ORDER BY created DESC, rowid DESC LIMIT 1");
+
+    assert!(
+        h.rt.cancel_attempt(S, &a1).unwrap(),
+        "the turn of a1 still runs"
+    );
+    let state: String = h.q(&format!(
+        "SELECT state FROM node_commands WHERE operation_id='{op}'"
+    ));
+    assert_eq!(state, "rejected", "the retry is settled here, never sent");
+    until("turn end", || !h.ends().is_empty()).await;
+    assert_eq!(h.ends(), [(S.to_string(), "cancelled".to_string(), None)]);
+    assert_eq!(h.count("start_turn"), 1, "no second start_turn");
+    assert!(!h.rt.is_busy(S));
+
+    // a stop of that turn, late, leaves the next turn alone
+    h.rt.prompt(S, "two", "user", &[]).unwrap();
+    until("the next turn", || h.count("start_turn") == 2).await;
+    assert!(!h.rt.cancel_attempt(S, &a1).unwrap(), "a1's turn is over");
+    assert!(!h.rt.cancel_attempt(S, &retry).unwrap());
+    let cancels: i64 =
+        h.q("SELECT COUNT(*) FROM node_commands WHERE method IN ('cancel','abandon')");
+    assert_eq!(cancels, 0, "nothing queued for the next turn");
+    assert!(h.rt.is_busy(S), "the next turn still runs");
+}
+
 #[tokio::test]
 async fn the_same_events_again_are_stored_once() {
     let h = hub();

@@ -24,7 +24,8 @@ impl Prompted {
 }
 
 /// The turn a session runs now, frozen when it was looked at: a stop aimed at it reaches that turn
-/// and never the next one. `attempt` is opaque and only means something to the backend that minted it.
+/// and never the next one (a gateway retry of it is the same turn, on every backend). `attempt` is
+/// opaque and only means something to the backend that minted it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Running {
     pub session: String,

@@ -959,15 +959,18 @@ impl NodeRuntime {
         }
     }
 
-    /// Asks the Node to cancel `attempt`, only while it is still the session's running one (frozen
-    /// as the target here, never looked up again when the command goes out). `true`: it was, the
-    /// cancel is on its way; `false`: it is over or another one runs now, and nothing is queued.
+    /// Asks the Node to cancel the turn `attempt` belongs to, only while that turn is still the
+    /// session's running one: the stop reaches the attempt active now, which is `attempt` itself or
+    /// a gateway retry of it (a retry is a new attempt of the same turn, as the legacy runner keeps
+    /// its turn token across one). The target is frozen here, never looked up again when the
+    /// command goes out. `true`: the turn ran, the cancel is on its way; `false`: that turn is over
+    /// (another one may run now), and nothing is queued.
     pub fn cancel_attempt(&self, session: &str, attempt: &str) -> Result<bool, StoreError> {
         self.running()?;
         let r = self.tx(|tx| {
             let row: Option<(String, String, i64)> = tx
                 .query_row(
-                    "SELECT a.attempt_id, a.operation_id, a.revision FROM runtime_sessions s JOIN runtime_attempts a ON a.attempt_id = s.active_attempt WHERE s.session_id=?1 AND a.attempt_id=?2 AND a.state<>'finished'",
+                    "SELECT a.attempt_id, a.operation_id, a.revision FROM runtime_sessions s JOIN runtime_attempts a ON a.attempt_id = s.active_attempt JOIN runtime_turns t ON t.turn_id = a.turn_id JOIN runtime_attempts asked ON asked.turn_id = a.turn_id WHERE s.session_id=?1 AND asked.attempt_id=?2 AND a.state<>'finished' AND t.state<>'finished'",
                     [session, attempt],
                     |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
                 )
