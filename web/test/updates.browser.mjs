@@ -34,7 +34,9 @@ const phase = value => page.locator(`[data-upgrade-phase="${value}"]`).waitFor()
 try {
   await go()
   await page.getByText("前端和后端不是同一次构建。建议先保存工作，再重新载入与后端匹配的前端版本。").waitFor()
-  await page.getByText(/当前为源码或非托管运行/).waitFor()
+  // no upgrade button here: said plainly, with the Hub's reason
+  await page.locator("[data-upgrade-unavailable]").getByText("不能在这里一键升级").waitFor()
+  await page.locator("[data-upgrade-reason]").getByText("source checkout", { exact: true }).waitFor()
   await page.locator("[data-upgrade-check]").click()
   await page.locator('[data-upgrade-check-status="available"]').waitFor()
   assert.equal(await page.locator("[data-upgrade-execute]").count(), 0)
@@ -92,7 +94,7 @@ try {
     assert.equal(await page.locator("[data-upgrade-execute]").count(), 0, status)
   }
   state.capability = { managed: true, can_execute: false, reason: "macOS Keychain 签名身份不能使用预编译升级包" }
-  await page.reload(); await page.getByText("当前不能自动升级。请查看下方原因。").waitFor()
+  await page.reload(); await page.getByText("不能在这里一键升级 · 托管安装").waitFor()
   await page.getByText(state.capability.reason, { exact: true }).waitFor()
   assert.equal(await page.getByText("只有实例管理员可以执行升级或批准 Agent 的升级请求。").count(), 0)
   state.capability.can_execute = true
@@ -164,11 +166,15 @@ try {
 
   // Installations Steve doesn't switch itself: this machine's commands instead of a button, then a read-back.
   const home = "/Users/example/.steve", repo = "/Users/example/Agents/steve"
-  state = { ...state, current: { hub: "v1.1.0", web: "v1.1.0" }, capability: { managed: false, can_execute: false, reason: "当前安装未使用 managed supervisor" }, install: { kind: "local_release", home, release: "1.1.0-local-51826fc", repo }, check: check("available"), operation: null, backup: null }
+  const localReason = "这台机器的 Hub 是本机签名构建（ops/local-release.py），靠本机签名身份和 steve-keyhelper 读取 Keychain 里的密钥。"
+  state = { ...state, current: { hub: "v1.1.0", web: "v1.1.0" }, capability: { managed: false, can_execute: false, reason: localReason }, install: { kind: "local_release", home, release: "1.1.0-local-51826fc", repo }, check: check("available"), operation: null, backup: null }
   await page.reload(); await page.locator('[data-upgrade-guide="local_release"]').waitFor()
   assert.equal(await page.locator("[data-upgrade-execute]").count(), 0)
-  assert.match(await page.locator("[data-upgrade-capability]").innerText(), /^本机签名构建：/)
-  assert.equal(await page.getByText("当前安装未使用 managed supervisor").count(), 0, "the raw supervisor reason gives way to the installation")
+  const unavailable = await page.locator('[data-upgrade-unavailable][data-install-kind="local_release"]').innerText()
+  assert.match(unavailable, /^不能在这里一键升级 · 本机签名构建/)
+  assert.ok(unavailable.includes(localReason), "the Hub's reason is shown, not swallowed")
+  assert.match(unavailable, /按下方步骤在这台机器上升级/)
+  assert.match(await page.locator("[data-upgrade-enable]").innerText(), /STEVE_VAULT_KEYSTORE=dir.*run-managed\.sh/)
   const commands = await page.locator("[data-upgrade-command] pre").allInnerTexts()
   assert.deepEqual(commands.map(c => c.trim()).slice(1), [`python3 ${repo}/ops/local-release.py build v1.2.0`, `python3 ${repo}/ops/local-release.py deploy ${home}/releases/1.2.0-local-*`])
   assert.match(await page.locator("[data-upgrade-backup]").innerText(), /\/Users\/example\/\.steve\/backups/)
@@ -187,14 +193,24 @@ try {
   await page.locator("[data-upgrade-refresh]").waitFor()
   assert.match(await page.locator("[data-upgrade-verify]").innerText(), /重新载入页面后完成核对/, "an old page is never called upgraded")
   // someone else only learns who upgrades; no paths, no commands
-  state.install = { kind: "local_release" }
-  await page.reload(); await page.getByText("本机签名构建：升级需由实例管理员在这台机器上完成。").waitFor()
+  state.install = { kind: "local_release" }; state.capability = { ...state.capability, reason: "仅实例管理员可批准和执行升级" }
+  await page.reload(); await page.getByText("不能在这里一键升级 · 本机签名构建").waitFor()
+  await page.getByText("仅实例管理员可批准和执行升级", { exact: true }).waitFor()
+  assert.equal(await page.locator("[data-upgrade-enable]").count(), 0)
   assert.equal(await page.locator("[data-upgrade-guide]").count(), 0)
   for (const kind of ["release_script", "source", "external"]) {
     state.install = { kind, home, repo }; await page.reload()
     await page.locator(`[data-upgrade-guide="${kind}"]`).waitFor()
     assert.ok(!(await page.locator(`[data-upgrade-guide="${kind}"]`).innerText()).includes("local-release.py"), kind)
   }
+  // not checked yet, or nothing newer: still says why and what to do, without a guide
+  state.install = { kind: "local_release", home, repo }; state.capability.reason = localReason
+  for (const [status, says] of [[null, /点「检查更新」。有新版本时/], ["up_to_date", /^有新版本时/m]]) {
+    state.check = status && check(status); await page.reload()
+    await page.locator('[data-upgrade-unavailable][data-install-kind="local_release"]').getByText(says).waitFor()
+    assert.equal(await page.locator("[data-upgrade-guide]").count(), 0, String(status))
+  }
+  if (process.env.STEVE_TEST_ARTIFACTS) await page.locator("[data-upgrade-settings]").screenshot({ path: process.env.STEVE_TEST_ARTIFACTS + "/upgrade-unavailable-up-to-date.png" })
 
   // Managed: steps while it runs, the backup it took, how a failure was recovered.
   state = { ...state, capability: { managed: true, can_execute: true, reason: "managed supervisor" }, install: { kind: "managed", home }, check: check("available") }

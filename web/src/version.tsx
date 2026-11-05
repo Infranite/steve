@@ -1,7 +1,7 @@
 import { HubError, Unauthenticated } from "@/api"
 import { useEffect, useRef, useState } from "react"
 import { updates, updateActive, updateKey, repairKey, sameReleaseVersion, updatePhaseLabel, type UpdateBackup, type UpdateState, type UpdateOperation } from "@/updates"
-import { installLabel, stageIndex, upgradeGuide, upgradeStages, verifyUpgrade, type Health, type Install } from "@/upgrade-guide"
+import { enableOneClick, installLabel, stageIndex, upgradeGuide, upgradeStages, verifyUpgrade, type Health, type Install } from "@/upgrade-guide"
 import { CheckIcon, CircleAlertIcon, CopyIcon, LoaderCircleIcon, RefreshCwIcon } from "lucide-react"
 import { Markdown } from "@/components/markdown"
 import { Button } from "@/components/ui/button"
@@ -135,8 +135,9 @@ export function UpgradeSettings() {
     </Group>
     {connection && <p role="status" className="mt-2 type-footnote text-muted-foreground" data-upgrade-connection>{connection}</p>}
     {state && <div className="mt-3 space-y-3 type-callout">
-      <p className="text-muted-foreground" data-upgrade-capability data-install-kind={install?.kind}>{install && install.kind !== "managed" ? `${installLabel[install.kind]}：${manual ? "这里检查更新，升级需要按下方步骤在这台机器上完成。" : "升级需由实例管理员在这台机器上完成。"}` : !state.capability.managed ? "当前为源码或非托管运行，仅支持检查更新。请按部署方式更新并重启服务。" : !state.capability.can_execute ? "当前不能自动升级。请查看下方原因。" : "托管安装：可在这里升级。升级前备份数据库，新版本验证不通过会自动恢复旧版本和数据。"}</p>
-      {state.capability.reason && state.capability.managed && !state.capability.can_execute && <p className="type-footnote text-muted-foreground">{state.capability.reason}</p>}
+      {canExecute
+        ? <p className="text-muted-foreground" data-upgrade-capability data-install-kind={install?.kind}>托管安装：可在这里升级。升级前备份数据库，新版本验证不通过会自动恢复旧版本和数据。</p>
+        : <UpgradeUnavailable state={state} manual={manual} />}
       {check && <div data-upgrade-check-status={check.status}>
         <p>{messages[check.status]}</p>
         {check.error && <p className="mt-1 text-destructive">{check.error}</p>}
@@ -160,6 +161,22 @@ export function UpgradeSettings() {
       </div>}
     </div>}
     {error && <p className="mt-2 type-footnote text-destructive" role="alert">{error}</p>}
+  </div>
+}
+
+/** No upgrade button here: say so, the Hub's reason for this installation, and what to do instead. */
+function UpgradeUnavailable({ state, manual }: { state: UpdateState; manual: boolean }) {
+  const install = state.install, check = state.check
+  const kind = install?.kind ?? (state.capability.managed ? "managed" : undefined)
+  const next = !manual ? null
+    : check?.status === "available" ? "按下方步骤在这台机器上升级，完成后回到本页核对版本与服务健康。"
+    : `${check ? "" : "点「检查更新」。"}有新版本时，这里会列出这台机器的升级命令、备份位置和失败时的恢复方式。`
+  const enable = manual && install ? enableOneClick[install.kind] : undefined
+  return <div className="rounded-lg border p-3 space-y-1.5" data-upgrade-capability data-upgrade-unavailable data-install-kind={kind}>
+    <p className="font-medium">不能在这里一键升级{kind ? ` · ${installLabel[kind]}` : ""}</p>
+    {state.capability.reason && <p className="text-muted-foreground" data-upgrade-reason>{state.capability.reason}</p>}
+    {next && <p>{next}</p>}
+    {enable && <p className="type-footnote text-muted-foreground" data-upgrade-enable>{enable}</p>}
   </div>
 }
 

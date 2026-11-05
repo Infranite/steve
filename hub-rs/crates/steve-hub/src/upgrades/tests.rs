@@ -60,6 +60,30 @@ fn durable_request_is_idempotent_and_permission_separated() {
     assert_eq!(u.approve(&op.id, "owner").unwrap().phase, "staging");
 }
 
+#[test]
+fn an_unmanaged_install_names_its_kind_and_why_it_is_not_upgraded_here() {
+    let dir = tempfile::tempdir().unwrap();
+    let u = Updates {
+        home: dir.path().into(),
+        repository: "Infranite/steve".into(),
+        current_hub: "0.1.0".into(),
+        current_web: "0.1.0".into(),
+        managed: false,
+        blocked_reason: None,
+        client: reqwest::Client::new(),
+        api_base: String::new(),
+    };
+    // the test binary runs from a cargo target dir: source, or external when that lives elsewhere
+    let install = u.install(Path::new(""));
+    let reason = install.reason().unwrap();
+    let status = u.status().unwrap();
+    assert_eq!(status["install"]["kind"], install.kind);
+    assert_eq!(status["capability"]["managed"], false);
+    assert_eq!(status["capability"]["reason"], reason);
+    let refused = u.request("0.2.0", "one", "agent:s", false).unwrap_err();
+    assert_eq!(refused.to_string(), reason);
+}
+
 #[tokio::test]
 async fn github_checks_validate_assets_and_bind_cache_to_repository_and_both_versions() {
     use axum::response::IntoResponse;

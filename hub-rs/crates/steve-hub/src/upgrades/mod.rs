@@ -205,7 +205,8 @@ impl Updates {
     }
     pub fn execution_reason(&self) -> Option<String> {
         if !self.managed {
-            return Some("当前安装未使用 managed supervisor".into());
+            // the kind doesn't depend on the checkout, only the commands do
+            return self.install(Path::new("")).reason().map(Into::into);
         }
         self.blocked_reason.clone()
     }
@@ -247,7 +248,7 @@ impl Updates {
         let operation = self.active()?;
         let backup = operation.as_ref().map(|op| self.backup(op));
         Ok(
-            json!({"repository":self.repository,"current":{"hub":self.current_hub,"web":self.current_web},"capability":{"managed":self.managed,"reason":self.execution_reason().unwrap_or_else(||"managed supervisor".into())},"check":self.cached_check().map(|cached|cached.result),"operation":operation,"backup":backup}),
+            json!({"repository":self.repository,"current":{"hub":self.current_hub,"web":self.current_web},"capability":{"managed":self.managed,"reason":self.execution_reason().unwrap_or_else(||"managed supervisor".into())},"install":{"kind":self.install(Path::new("")).kind},"check":self.cached_check().map(|cached|cached.result),"operation":operation,"backup":backup}),
         )
     }
     /// Where the supervisor keeps what a failed upgrade is recovered from: the verified database copy
