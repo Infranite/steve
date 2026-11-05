@@ -215,9 +215,10 @@ impl Core {
         &self.0.store
     }
     /// Interrupt the session's running turn on whichever backend runs it (the user's stop);
-    /// false if nothing was running; an error when the backend cannot tell.
+    /// false if nothing was running; an error when the backend cannot tell. The user's Stop: a
+    /// backend may also retire what holds the session ([`AgentRuntime::user_stop`]).
     pub fn cancel_turn(&self, session_id: &str) -> Result<bool> {
-        Ok(self.0.runtime.cancel(session_id)? == Stop::Requested)
+        Ok(self.0.runtime.user_stop(session_id)? == Stop::Requested)
     }
     pub fn config(&self) -> &CoreConfig {
         &self.0.config

@@ -1037,6 +1037,19 @@ impl steve_core::AgentRuntime for RoutedRuntime {
             Backend::Legacy => self.legacy.stop(turn),
         }
     }
+    /// The user's Stop: a Node may also retire a control of the session whose outcome is unknown.
+    fn user_stop(&self, session_id: &str) -> steve_core::Result<steve_core::Stop> {
+        match self.route(session_id) {
+            Backend::Node(n) => Ok(if n.user_stop(session_id)? {
+                steve_core::Stop::Requested
+            } else {
+                steve_core::Stop::NotRunning
+            }),
+            Backend::Parked => Ok(steve_core::Stop::NotRunning),
+            // the legacy runner has nothing to retire: its stop is its cancel
+            Backend::Legacy => self.legacy.cancel(session_id),
+        }
+    }
     fn is_busy(&self, session_id: &str) -> bool {
         match self.route(session_id) {
             Backend::Node(n) => n.is_busy(session_id),

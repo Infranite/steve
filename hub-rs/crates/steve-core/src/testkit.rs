@@ -26,6 +26,8 @@ pub struct FakeState {
     pub cancelled: Vec<String>,
     /// Every `stop` and what it did.
     pub stops: Vec<(Running, Stop)>,
+    /// The user's stops ([`AgentRuntime::stop`]), each a cancel too.
+    pub stopped: Vec<String>,
     pub released: Vec<String>,
     /// What `release` answers per session ([`Released::Gone`] when not set).
     pub release_answers: HashMap<String, Released>,
@@ -209,6 +211,10 @@ impl AgentRuntime for FakeRuntime {
         };
         st.stops.push((turn.clone(), stop));
         Ok(stop)
+    }
+    fn user_stop(&self, sid: &str) -> Result<Stop> {
+        self.st().stopped.push(sid.into());
+        self.cancel(sid)
     }
     fn is_busy(&self, sid: &str) -> bool {
         self.st().turning.contains(sid)

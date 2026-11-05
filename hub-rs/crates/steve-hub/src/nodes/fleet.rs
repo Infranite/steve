@@ -177,6 +177,11 @@ impl NodeFleet {
             Some(rt) => (rt.clone(), false),
             None => {
                 let rt = NodeRuntime::new(self.store.clone(), e.remote.clone(), domain);
+                // what the Node replays passes the link's guard, as what it pushes does
+                rt.over_link(
+                    super::guard::replay_check(self.store.clone(), node.clone()),
+                    steve_node_wire::envelope::MAX_FRAME as u32,
+                );
                 let ms = self.turn_limit.load(Ordering::Relaxed);
                 if ms > 0 {
                     rt.set_turn_limit(ms);

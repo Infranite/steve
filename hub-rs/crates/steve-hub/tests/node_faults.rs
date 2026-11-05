@@ -879,6 +879,118 @@ async fn a_node_restarted_before_its_ack_sends_again_and_nothing_is_stored_twice
     assert_eq!(r.attempts(), ["finished"]);
 }
 
+/// N1-7: the Hub committed every batch but no ack reached the Node, then the Hub restarted. Its
+/// reconcile compares the Node's heads with what it holds and acknowledges it itself (acks over
+/// the delivery path stay lost), so the Node's journal drains with nothing stored twice and the
+/// turn not run again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_hub_restarted_between_commit_and_ack_acknowledges_on_reconcile() {
+    let mut r = Rig::new().await;
+    r.ready().await;
+    *r.gate.lose_acks.lock().unwrap() = usize::MAX;
+    r.rt.prompt(S, "@say unheard", "user", &[]).unwrap();
+    until("the end", || !r.ends().is_empty()).await;
+    let kinds = r.kinds();
+    let unacked: i64 = r
+        .journal()
+        .query_row("SELECT COUNT(*) FROM events", [], |x| x.get(0))
+        .unwrap();
+    assert!(unacked > 0, "the Node still keeps what the Hub holds");
+    r.restart_hub().await;
+    r.stored_once().await;
+    assert_eq!(r.kinds(), kinds, "the Hub's events are the same");
+    assert_eq!(r.prompts("unheard"), 1);
+    assert_eq!(r.attempts(), ["finished"]);
+    assert_eq!(r.ends().len(), 1, "the turn ended once");
+}
+
+// ── an unknown control, retired by Stop ──
+
+/// N1-8: the journal cannot write a prepare's end, and the Node closes. Its outcome is unknown
+/// after both restart: the open waiting on it never goes, nothing retires it on its own. Stop
+/// sends one recover; the workspace is prepared again under a new id (adopted as it is) and
+/// opened, and the message queued all along runs once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stop_retires_an_unknown_prepare_and_the_queued_message_runs_once() {
+    let mut r = Rig::new().await;
+    let j = r.journal();
+    j.execute_batch("CREATE TRIGGER fail_prepare BEFORE UPDATE ON ops WHEN NEW.method='prepare_workspace' AND NEW.receipt LIKE '%finished%' BEGIN SELECT RAISE(ABORT,'injected crash before the final receipt'); END").unwrap();
+    r.bind();
+    r.rt.prompt(S, "@say queued", "user", &[]).unwrap();
+    until("the prepare taken", || {
+        r.q::<String>(&format!(
+            "SELECT state FROM node_commands WHERE operation_id='op_prep_{S}'"
+        )) != "pending"
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    r.close_node().await;
+    j.execute_batch("DROP TRIGGER fail_prepare").unwrap();
+    r.open_node().await;
+    r.restart_hub().await;
+    until("unknown", || {
+        r.q::<String>(&format!(
+            "SELECT state FROM node_commands WHERE operation_id='op_prep_{S}'"
+        )) == "unknown"
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(r.phase(), "opening", "held: the open waits on its prepare");
+    assert_eq!(r.prompts("queued"), 0);
+
+    assert!(r.rt.user_stop(S).unwrap());
+    until("the end", || !r.ends().is_empty()).await;
+    assert_eq!(r.ends()[0].1, "end_turn");
+    assert_eq!(r.prompts("queued"), 1, "the queued message ran once");
+    assert_eq!(r.attempts(), ["finished"]);
+    let recovers: i64 = r.q("SELECT COUNT(*) FROM node_commands WHERE method='recover'");
+    assert_eq!(recovers, 1, "exactly one recover");
+    let prepares: i64 = r
+        .journal()
+        .query_row(
+            "SELECT COUNT(*) FROM ops WHERE method='prepare_workspace'",
+            [],
+            |x| x.get(0),
+        )
+        .unwrap();
+    assert_eq!(prepares, 2, "the target never again, a new prepare instead");
+    r.stored_once().await;
+}
+
+// ── the Node sends again what the Hub holds, but changed ──
+
+/// N1-6: the Hub committed a batch but the ack was lost, and the Node's copy changed before it sent
+/// it again (a corrupted journal). The changed event is quarantined and acknowledged, the Node's
+/// delivery drains, and the conversation keeps what came first.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_corrupted_redelivery_is_quarantined_and_the_node_drains() {
+    let r = Rig::new().await;
+    r.ready().await;
+    *r.gate.lose_acks.lock().unwrap() = usize::MAX;
+    r.rt.prompt(S, "@say original", "user", &[]).unwrap();
+    until("the end", || !r.ends().is_empty()).await;
+    let j = r.journal();
+    let changed = j
+        .execute(
+            "UPDATE events SET event=json_set(event,'$.body.text','tampered') WHERE json_extract(event,'$.body.type')='text_delta'",
+            [],
+        )
+        .unwrap();
+    assert!(changed > 0, "the Node still keeps the unacknowledged text");
+    *r.gate.lose_acks.lock().unwrap() = 0;
+    r.stored_once().await;
+    let held: i64 = r.q("SELECT COUNT(*) FROM node_event_quarantine WHERE json_extract(payload,'$.body.text')='tampered'");
+    assert_eq!(held as usize, changed, "each changed event is kept aside");
+    let faulted: i64 = r.q("SELECT COUNT(*) FROM node_streams WHERE fault='conflict'");
+    assert_eq!(faulted, 1);
+    let tampered: i64 = r.q("SELECT COUNT(*) FROM events WHERE data LIKE '%tampered%'");
+    assert_eq!(tampered, 0, "never applied");
+    let text: String = r.q("SELECT group_concat(json_extract(payload,'$.body.text'),'') FROM (SELECT payload FROM node_event_inbox WHERE json_extract(payload,'$.body.type')='text_delta' ORDER BY seq)");
+    assert_eq!(text, "original");
+    assert!(r.rt.is_uncertain(S), "the session waits for reconciliation");
+    assert_eq!(r.prompts("original"), 1);
+}
+
 // ── Steve's tools ──
 
 /// A turn that may use Steve's tools, its agent waiting; the tool endpoint and token it was given.

@@ -16,15 +16,16 @@
 //!   (never a rewrite), the next turn or, once nothing follows, the turn's end for the business
 //!   side, exactly once.
 //!
-//! On start, before anything is sent, the Hub reconciles with the Node (its ledger, its sessions,
-//! its waiting permissions): what the Node cannot tell the end of becomes `unknown` and keeps its
-//! session until a person gives it up; it is never sent again.
+//! On start, before anything is sent, the Hub reconciles with the Node (its stream heads, its
+//! ledger, its sessions, its waiting permissions): what the Hub missed of the Node's events is
+//! replayed and applied first (`heads`), what the Node cannot tell the end of becomes `unknown` and
+//! keeps its session until a person gives it up; it is never sent again.
 //!
 //! What it does not do yet (tidy chains, set_mode) is refused explicitly, never reported as done.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -35,9 +36,14 @@ use steve_store::runtime::{self as rt, ReceiptState, StreamKey};
 use steve_store::{FileRef, Store, StoreError, Tx};
 
 mod config;
+mod heads;
 mod perm;
+mod recover;
 
 pub use config::{ConfigChange, Configured};
+pub use heads::{
+    CaughtUp, NodeSnapshot, Pull, Receive, ReplayCheck, catch_up_streams, read_snapshot,
+};
 
 /// Retries of a turn after a passing failure (gateway 5xx) with no tool run, and their waits.
 const RETRY_DELAYS_MS: [i64; 2] = [20_000, 60_000];
@@ -154,6 +160,18 @@ pub struct NodeRuntime {
     paused: AtomicBool,
     /// Set once the Hub has reconciled with the Node since it started: nothing is planned before.
     reconciled: AtomicBool,
+    /// Sessions with Node work the Hub has no record of (found by the last reconcile): nothing is
+    /// planned for them, and that work is never given up on its own (D7).
+    held: Mutex<HashSet<String>>,
+    /// Sessions whose stream reconcile stopped waiting for ([`heads::APPLY_WAIT`]): nothing is
+    /// planned for them until the apply worker has caught up on it.
+    lagging: Mutex<HashMap<String, heads::Lag>>,
+    /// How long reconcile waits for the Node's heads to be applied, in ms.
+    apply_wait_ms: AtomicU64,
+    /// What a remote Node's replayed batches pass before the inbox ([`Self::over_link`]).
+    replay_check: OnceLock<ReplayCheck>,
+    /// The largest replay page the Node's transport carries (unbounded in process).
+    largest_replay: AtomicU32,
     /// Turn ends settled outside the apply worker (a local cancel), told by it after the commit.
     ended_later: Mutex<Vec<End>>,
     /// Attempts the Hub settled on its own word (no AttemptEnded comes for them): their
@@ -183,6 +201,8 @@ pub struct NodeRuntime {
     fallbacks: std::sync::atomic::AtomicU64,
 }
 
+/// What a session with Node work the Hub has no record of reads.
+const STRANGER: &str = "Node 上有这个会话尚未结束的工作，但 Hub 没有它的记录（Hub 的数据可能回到了较早的状态）；该会话暂停，不会发出新的指令，那项工作也不会被自动放弃";
 /// How long applied Node events stay in the inbox (what is still needed stays longer).
 const INBOX_KEEP_MS: i64 = 7 * 24 * 3600 * 1000;
 /// How often the apply worker prunes, and how many rows at most per transaction.
@@ -283,6 +303,11 @@ impl NodeRuntime {
             holding: AtomicBool::new(false),
             paused: AtomicBool::new(false),
             reconciled: AtomicBool::new(false),
+            held: Mutex::new(HashSet::new()),
+            lagging: Mutex::new(HashMap::new()),
+            apply_wait_ms: AtomicU64::new(heads::APPLY_WAIT.as_millis() as u64),
+            replay_check: OnceLock::new(),
+            largest_replay: AtomicU32::new(u32::MAX),
             ended_later: Mutex::new(vec![]),
             settled_later: Mutex::new(vec![]),
             staged: Mutex::new((vec![], vec![])),
@@ -293,6 +318,25 @@ impl NodeRuntime {
             idle_release: std::sync::atomic::AtomicI64::new(IDLE_RELEASE_MS),
             fallbacks: std::sync::atomic::AtomicU64::new(0),
         })
+    }
+
+    /// The Node is remote, behind a link: what it replays passes `check` (the link's guard, as
+    /// what it pushes does), and no replay page is asked bigger than `largest` (its frame). Set
+    /// before [`Self::start`]; once.
+    pub fn over_link(&self, check: ReplayCheck, largest: u32) {
+        let _ = self.replay_check.set(check);
+        self.largest_replay.store(largest, Ordering::Relaxed);
+    }
+
+    /// How long reconcile waits for the Node's heads to be applied before it holds the sessions
+    /// of the streams still behind and goes on ([`heads::APPLY_WAIT`] unless set).
+    pub fn set_apply_wait(&self, d: Duration) {
+        self.apply_wait_ms
+            .store(d.as_millis() as u64, Ordering::Relaxed);
+    }
+
+    fn apply_wait(&self) -> Duration {
+        Duration::from_millis(self.apply_wait_ms.load(Ordering::Relaxed))
     }
 
     /// Attempts planned from now on get `ms` as their deadline (and their permissions with it).
@@ -341,7 +385,7 @@ impl NodeRuntime {
         // events taken in before a restart but not applied yet
         match self.store.reader(|c| {
             let mut st = c.prepare(
-                "SELECT stream, epoch FROM node_streams WHERE node_id=? AND durable > applied",
+                "SELECT stream, epoch FROM node_streams WHERE node_id=? AND durable > applied AND fault IS NULL",
             )?;
             let v = st
                 .query_map([self.node_id.as_str()], |r| {
@@ -546,6 +590,16 @@ impl NodeRuntime {
     /// The session's harness is gone on its Node (released, or abandoned there): open it again,
     /// continuing the same conversation where the Node can.
     fn reopen_in(&self, tx: &Tx, session: &str) -> Result<(), StoreError> {
+        self.reopen_after_in(tx, session, None)
+    }
+
+    /// [`Self::reopen_in`], the open waiting on `dependency` (a prepare) when there is one.
+    fn reopen_after_in(
+        &self,
+        tx: &Tx,
+        session: &str,
+        dependency: Option<&str>,
+    ) -> Result<(), StoreError> {
         let mut open = self.open_of(tx, session)?;
         self.fold_desired_in(tx, session, &mut open)?;
         open.resume = resume_of_in(tx, &self.node_id, session)?;
@@ -560,7 +614,7 @@ impl NodeRuntime {
                 request: &req,
                 digest: &digest,
                 target_attempt: None,
-                dependency: None,
+                dependency,
             },
             now(),
         )?;
@@ -886,6 +940,11 @@ impl NodeRuntime {
             // not reconciled with the Node yet: it waits in the queue
             return Ok(Planned::Busy);
         }
+        // a faulted stream waits for reconciliation: what the Node does for this session now would
+        // never be applied, so nothing new starts there (and a released session is not reopened)
+        if faulted(tx, &self.node_id, session)? || self.is_held(session) {
+            return Ok(Planned::Held);
+        }
         let (phase, active): (String, Option<String>) = tx.query_row(
             "SELECT phase, active_attempt FROM runtime_sessions WHERE session_id=?",
             [session],
@@ -1172,7 +1231,8 @@ impl NodeRuntime {
         &self.node_id
     }
 
-    /// The session's open turn has an outcome nobody can tell yet (reconciliation decides).
+    /// The session's open turn has an outcome nobody can tell yet (reconciliation decides), or its
+    /// stream is faulted (its events wait for reconciliation, so what they say is not known).
     /// A read error counts as uncertain: waiting is the safe answer.
     pub fn is_uncertain(&self, session: &str) -> bool {
         self.store
@@ -1181,9 +1241,17 @@ impl NodeRuntime {
                     "SELECT EXISTS(SELECT 1 FROM runtime_turns t LEFT JOIN runtime_attempts a ON a.turn_id=t.turn_id AND a.state<>'finished' WHERE t.session_id=?1 AND t.state<>'finished' AND (t.state='unknown' OR a.state='unknown'))",
                     [session],
                     |r| r.get::<_, bool>(0),
-                )?)
+                )? || faulted(c, &self.node_id, session)?)
             })
             .unwrap_or(true)
+            || self.is_held(session)
+    }
+
+    /// The Node holds work of the session the Hub has no record of ([`Self::reconcile`]), or
+    /// its stream was not applied in time and has not caught up yet.
+    fn is_held(&self, session: &str) -> bool {
+        self.held.lock().unwrap().contains(session)
+            || self.lagging.lock().unwrap().contains_key(session)
     }
 
     /// The attempt the session runs now (not finished yet), if any.
@@ -1198,7 +1266,9 @@ impl NodeRuntime {
         })
     }
 
-    /// Asks the Node to cancel the attempt running now ([`Self::cancel_attempt`] of it).
+    /// Asks the Node to cancel the attempt running now ([`Self::cancel_attempt`] of it). The
+    /// lifecycle's cancels (an item cancelled, done or paused, a steer) come here: they never
+    /// retire a control, that is the user's [`Self::user_stop`] only.
     pub fn cancel(&self, session: &str) -> Result<bool, StoreError> {
         match self.active_attempt(session)? {
             Some(a) => self.cancel_attempt(session, &a),
@@ -1209,6 +1279,13 @@ impl NodeRuntime {
         }
     }
 
+    /// The user's Stop: [`Self::cancel`], and with no attempt to stop, a control whose outcome is
+    /// unknown and holds the session is retired by one explicit `recover` ([`recover`]).
+    pub fn user_stop(&self, session: &str) -> Result<bool, StoreError> {
+        let attempt = self.active_attempt(session)?;
+        self.cancel_as(session, attempt.as_deref(), true)
+    }
+
     /// Asks the Node to cancel the turn `attempt` belongs to, only while that turn is still the
     /// session's running one: the stop reaches the attempt active now, which is `attempt` itself or
     /// a gateway retry of it (a retry is a new attempt of the same turn, as the legacy runner keeps
@@ -1216,17 +1293,34 @@ impl NodeRuntime {
     /// command goes out. `true`: the turn ran, the cancel is on its way; `false`: that turn is over
     /// (another one may run now), and nothing is queued.
     pub fn cancel_attempt(&self, session: &str, attempt: &str) -> Result<bool, StoreError> {
+        self.cancel_as(session, Some(attempt), false)
+    }
+
+    /// [`Self::cancel_attempt`]; `stop`: the user asked, a recover may be planned (also with no
+    /// attempt to stop).
+    fn cancel_as(
+        &self,
+        session: &str,
+        attempt: Option<&str>,
+        stop: bool,
+    ) -> Result<bool, StoreError> {
         self.running()?;
         let r = self.tx(|tx| {
-            let row: Option<(String, String, i64)> = tx
-                .query_row(
-                    "SELECT a.attempt_id, a.operation_id, a.revision FROM runtime_sessions s JOIN runtime_attempts a ON a.attempt_id = s.active_attempt JOIN runtime_turns t ON t.turn_id = a.turn_id JOIN runtime_attempts asked ON asked.turn_id = a.turn_id WHERE s.session_id=?1 AND asked.attempt_id=?2 AND a.state<>'finished' AND t.state<>'finished'",
-                    [session, attempt],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-                )
-                .optional()?;
+            let row: Option<(String, String, i64)> = match attempt {
+                Some(attempt) => tx
+                    .query_row(
+                        "SELECT a.attempt_id, a.operation_id, a.revision FROM runtime_sessions s JOIN runtime_attempts a ON a.attempt_id = s.active_attempt JOIN runtime_turns t ON t.turn_id = a.turn_id JOIN runtime_attempts asked ON asked.turn_id = a.turn_id WHERE s.session_id=?1 AND asked.attempt_id=?2 AND a.state<>'finished' AND t.state<>'finished'",
+                        [session, attempt],
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                    )
+                    .optional()?,
+                None => None,
+            };
             let Some((attempt, target, rev)) = row else {
-                return Ok(false);
+                if !stop {
+                    return Ok(false);
+                }
+                return Ok(self.recover_in(tx, session, None)?.unwrap_or(false));
             };
             let state: String = tx.query_row(
                 "SELECT state FROM runtime_attempts WHERE attempt_id=?",
@@ -1255,6 +1349,13 @@ impl NodeRuntime {
                 Some((st, true)) if st == "pending" && state == "planned" => return Ok(true),
                 _ => {}
             }
+            // an abandon of it the Node cannot tell the end of is retired first (its slot freed)
+            if stop
+                && state == "unknown"
+                && let Some(r) = self.recover_in(tx, session, Some(&attempt))?
+            {
+                return Ok(r);
+            }
             // what nobody can tell is running is given up, once the Node proves it stopped
             let method = if state == "unknown" { "abandon" } else { "cancel" };
             self.stop_command_in(tx, &attempt, &target, method)?;
@@ -1277,8 +1378,9 @@ impl NodeRuntime {
         target: &str,
         method: &str,
     ) -> Result<(), StoreError> {
+        // one retired by a recover is over too, even before its own end came
         let (n, live): (i64, bool) = tx.query_row(
-            "SELECT COUNT(*), COALESCE(MAX(state NOT IN ('finished','rejected') OR json_extract(receipt,'$.success')=1), 0) FROM node_commands WHERE method=? AND target_attempt=?",
+            &format!("SELECT COUNT(*), COALESCE(MAX((c.state NOT IN ('finished','rejected') OR json_extract(c.receipt,'$.success')=1) AND NOT {}), 0) FROM node_commands c WHERE c.method=? AND c.target_attempt=?", recover::RETIRED),
             [method, attempt],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
@@ -1485,6 +1587,10 @@ impl NodeRuntime {
                     "configure_session" => {
                         return Ok((None, self.refused_configure_in(tx, &lease.operation, e)?));
                     }
+                    "recover" => {
+                        self.recover_failed_in(tx, &lease.operation, &e.safe_detail)?;
+                        None
+                    }
                     _ => None,
                 };
                 Ok((end, None))
@@ -1565,6 +1671,7 @@ impl NodeRuntime {
             "configure_session" => n.configure_session(parse(&l.request)?).await,
             "resolve_permission" => n.resolve_permission(parse(&l.request)?).await,
             "abandon" => n.abandon(parse(&l.request)?).await,
+            "recover" => n.recover(parse(&l.request)?).await,
             other => Err(ApiError::new(
                 ErrorCode::Unsupported,
                 format!("the coordinator does not send {other}"),
@@ -1598,6 +1705,26 @@ impl NodeRuntime {
         if !moved {
             return Ok(None);
         }
+        let detail = match &receipt.state {
+            Observed::Finished { error: Some(e), .. } => e.safe_detail.clone(),
+            Observed::Unknown { reason } => reason.clone(),
+            _ => String::new(),
+        };
+        if method == "recover" {
+            self.recover_receipt_in(tx, op, state, success, &detail)?;
+            return Ok(None);
+        }
+        // a target a recover retires: what follows comes with the recover's own end
+        let interrupted = matches!(
+            &receipt.state,
+            Observed::Finished {
+                outcome: Outcome::Interrupted,
+                ..
+            }
+        );
+        if self.retiring_in(tx, op, interrupted)? {
+            return Ok(None);
+        }
         if method == "resolve_permission" && state == ReceiptState::Finished {
             let error = match &receipt.state {
                 Observed::Finished { error, .. } => error.clone(),
@@ -1608,11 +1735,6 @@ impl NodeRuntime {
         if method == "configure_session" {
             self.configure_receipt_in(tx, op, state, success, receipt)?;
         }
-        let detail = match &receipt.state {
-            Observed::Finished { error: Some(e), .. } => e.safe_detail.clone(),
-            Observed::Unknown { reason } => reason.clone(),
-            _ => String::new(),
-        };
         match (method.as_str(), state) {
             ("release_session", ReceiptState::Finished) => {
                 let s = command_session_in(tx, op)?;
@@ -1672,7 +1794,7 @@ impl NodeRuntime {
                     tx,
                     &s,
                     &format!(
-                        "Node 无法确定{}是否完成（{detail}），会话等待对账，不会自动重发。",
+                        "Node 无法确定{}是否完成（{detail}），会话等待对账，不会自动重发。点停止可撤回这个操作。",
                         if method == "open_session" {
                             "打开会话"
                         } else {
@@ -1680,6 +1802,23 @@ impl NodeRuntime {
                         }
                     ),
                 )?;
+            }
+            ("prepare_workspace" | "abandon", ReceiptState::Unknown) => {
+                // never sent again: what waits on it waits until it is retired
+                if let Some(s) = command_any_session_in(tx, op)? {
+                    system_in(
+                        tx,
+                        &s,
+                        &format!(
+                            "Node 无法确定{}是否完成（{detail}），会话等待对账，不会自动重发。点停止可撤回这个操作。",
+                            if method == "abandon" {
+                                "放弃这次执行"
+                            } else {
+                                "工作区准备"
+                            }
+                        ),
+                    )?;
+                }
             }
             _ => {}
         }
@@ -2024,13 +2163,15 @@ impl NodeRuntime {
         Ok(n)
     }
 
-    /// What waited in the queue while the Hub was not reconciled goes now.
+    /// What waited while the Hub was not reconciled goes now: queued messages, and a desired
+    /// config whose idle boundary (a turn's end applied during reconcile) found nothing planned.
     fn plan_waiting(&self) {
         let sessions: Vec<String> = self
             .store
             .reader(|c| {
                 let mut st = c.prepare(
-                    "SELECT DISTINCT q.session_id FROM queued q JOIN runtime_sessions s ON s.session_id=q.session_id WHERE s.node_id=?",
+                    "SELECT s.session_id FROM runtime_sessions s WHERE s.node_id=?
+                       AND (s.desired_config IS NOT NULL OR EXISTS(SELECT 1 FROM queued q WHERE q.session_id=s.session_id))",
                 )?;
                 let v = st
                     .query_map([self.node_id.as_str()], |r| r.get::<_, String>(0))?
@@ -2046,42 +2187,28 @@ impl NodeRuntime {
         self.wake_send.notify_one();
     }
 
-    /// Compares the Hub's view with what the Node holds now (its ledger as of one moment, its
-    /// sessions, its waiting permissions), before anything is sent. The Node may have restarted
-    /// meanwhile (a local Node restarts with the Hub): what it cannot tell the end of becomes
-    /// `unknown` (never sent again; a person gives it up), a session it let go is `released` (the
-    /// next message opens it again), a card nobody waits for any more expires. Returns how many
+    /// Compares the Hub's view with what the Node holds now (its ledger and stream heads as of one
+    /// moment, its sessions, its waiting permissions), before anything is sent. First the Hub's
+    /// inbox is brought up to the Node's heads and applied ([`catch_up_streams`]: replayed what it
+    /// lacks, faulted what cannot be reconciled). The Node may have restarted meanwhile (a local
+    /// Node restarts with the Hub): what it cannot tell the end of becomes `unknown` (never sent
+    /// again; a person gives it up), a session it let go is `released` (the next message opens it
+    /// again), a card nobody waits for any more expires, and a session with Node work the Hub has
+    /// no record of is held with a note (that work is never given up on its own). Returns how many
     /// things changed.
     pub async fn reconcile(&self) -> ApiResult<usize> {
         let internal = |e: StoreError| ApiError::new(ErrorCode::Internal, e.to_string());
         // the Node's ledger, all pages of one snapshot
-        let mut entries: HashMap<String, SnapshotEntry> = HashMap::new();
-        let (mut cursor, mut restarts) = (None, 0);
-        loop {
-            match self
-                .node
-                .snapshot(PageRequest {
-                    cursor: cursor.clone(),
-                    limit: 200,
-                })
-                .await
-            {
-                Ok(page) => {
-                    for e in page.entries {
-                        entries.insert(e.receipt.operation.to_string(), e);
-                    }
-                    match page.next {
-                        Some(c) => cursor = Some(c),
-                        None => break,
-                    }
-                }
-                Err(e) if e.code == ErrorCode::Expired && restarts < 3 => {
-                    restarts += 1;
-                    entries.clear();
-                    cursor = None;
-                }
-                Err(e) => return Err(e),
-            }
+        let NodeSnapshot { entries, heads } = read_snapshot(&*self.node, 200).await?;
+        // its events up to that moment, applied before the ledger is compared
+        let caught = self.catch_up(&heads).await?;
+        if caught.replayed > 0 || caught.faulted > 0 {
+            tracing::info!(
+                "node {}: reconcile replayed {} events, faulted {} streams",
+                self.node_id,
+                caught.replayed,
+                caught.faulted
+            );
         }
         // the sessions as the Node holds them (None: it has no such session)
         let sessions: Vec<String> = self
@@ -2214,9 +2341,54 @@ impl NodeRuntime {
                         changed += 1;
                     }
                 }
-                Ok(changed)
+                // 4. Node work the Hub has no record of (its database went back, say): counted
+                // and logged, its session held with a note; never given up on its own (D7)
+                let was = self.held.lock().unwrap().clone();
+                let mut held = HashSet::new();
+                let mut strangers = 0;
+                for (op, e) in &entries {
+                    if e.receipt.state.is_finished() {
+                        continue;
+                    }
+                    let known: bool = tx.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM node_commands WHERE operation_id=? AND node_id=?)",
+                        rusqlite::params![op, self.node_id.as_str()],
+                        |r| r.get(0),
+                    )?;
+                    if known {
+                        continue;
+                    }
+                    strangers += 1;
+                    let session = e.execution.as_ref().and_then(exec_session);
+                    tracing::warn!(
+                        "node {}: {} {op} ({:?}) is not the Hub's; held",
+                        self.node_id,
+                        e.method,
+                        e.receipt.state.tag()
+                    );
+                    let Some(session) = session else { continue };
+                    let ours: bool = tx.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM runtime_sessions WHERE session_id=? AND node_id=?)",
+                        rusqlite::params![session, self.node_id.as_str()],
+                        |r| r.get(0),
+                    )?;
+                    if ours && held.insert(session.clone()) && !was.contains(&session) {
+                        system_in(tx, &session, STRANGER)?;
+                        changed += 1;
+                    }
+                }
+                if strangers > 0 {
+                    tracing::warn!(
+                        "node {}: {strangers} operations the Hub has no record of, {} sessions held",
+                        self.node_id,
+                        held.len()
+                    );
+                }
+                Ok((changed, held))
             })
             .map_err(internal)?;
+        let (changed, held) = changed;
+        *self.held.lock().unwrap() = held;
         for end in ends {
             self.tell_end(end);
         }
@@ -2266,7 +2438,8 @@ impl NodeRuntime {
 
     // ── T3: receiving ──
 
-    /// Takes a batch from the Node into the inbox; acknowledges the contiguous durable prefixes.
+    /// Takes a batch from the Node into the inbox; acknowledges the contiguous durable prefixes
+    /// (quarantined events included).
     fn receive(&self, batch: &EventBatch) -> Result<EventAck, StoreError> {
         let node = self.node_id.to_string();
         let mut touched: Vec<(String, String)> = vec![];
@@ -2277,14 +2450,27 @@ impl NodeRuntime {
                     stream: e.cursor.stream.as_str(),
                     epoch: e.cursor.epoch.as_str(),
                 };
-                rt::inbox_insert_in(
-                    tx,
-                    k,
-                    e.cursor.seq as i64,
-                    e.id.as_str(),
-                    &serde_json::to_value(e).map_err(conflict)?,
-                    now(),
-                )?;
+                let seq = e.cursor.seq as i64;
+                let payload = serde_json::to_value(e).map_err(conflict)?;
+                // a conflict is set aside on its own stream (D5: acknowledged once it is durably
+                // quarantined), so the rest of the batch and every other stream go on
+                if let rt::Inboxed::Conflict(why) =
+                    rt::inbox_insert_in(tx, k, seq, e.id.as_str(), &payload, now())?
+                {
+                    let q = rt::quarantine_in(tx, k, seq, e.id.as_str(), &payload, why, now())?;
+                    if q.new {
+                        tracing::warn!(
+                            "node {node}: stream {} epoch {} seq {seq} ({}): {}; quarantined",
+                            k.stream,
+                            k.epoch,
+                            e.id,
+                            why.reason()
+                        );
+                    }
+                    if q.faulted {
+                        self.faulted_note_in(tx, e)?;
+                    }
+                }
                 let key = (e.cursor.stream.to_string(), e.cursor.epoch.to_string());
                 if !touched.contains(&key) {
                     touched.push(key);
@@ -2292,7 +2478,7 @@ impl NodeRuntime {
             }
             let mut durable = vec![];
             for (stream, epoch) in &touched {
-                let w = rt::watermarks_in(
+                let acked = rt::acked_in(
                     tx,
                     StreamKey {
                         node: &node,
@@ -2300,11 +2486,11 @@ impl NodeRuntime {
                         epoch,
                     },
                 )?;
-                if w.durable > 0 {
+                if acked > 0 {
                     durable.push(Watermark {
                         stream: idv(stream.clone())?,
                         epoch: idv(epoch.clone())?,
-                        seq: w.durable as u64,
+                        seq: acked as u64,
                     });
                 }
             }
@@ -2314,6 +2500,27 @@ impl NodeRuntime {
             self.dirty.lock().unwrap().extend(touched.iter().cloned());
             self.wake_apply.notify_one();
         })
+    }
+
+    /// The one note on a session whose stream just faulted: its Node events stop being applied
+    /// until reconciliation, and its open turn is never run again meanwhile ([`Self::is_uncertain`]).
+    fn faulted_note_in(&self, tx: &Tx, e: &NodeEvent) -> Result<(), StoreError> {
+        let Some(session) = ev_session(e) else {
+            return Ok(());
+        };
+        let ours: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM runtime_sessions WHERE session_id=? AND node_id=?)",
+            rusqlite::params![session, self.node_id.as_str()],
+            |r| r.get(0),
+        )?;
+        if ours {
+            system_in(
+                tx,
+                &session,
+                "Node 发来的事件与已保存的记录冲突，已隔离保存；该会话暂停应用 Node 事件，等待对账，期间不会重新运行",
+            )?;
+        }
+        Ok(())
     }
 
     // ── T4: applying ──
@@ -2371,6 +2578,7 @@ impl NodeRuntime {
                             .lock()
                             .unwrap()
                             .remove(&(stream.clone(), epoch.clone()));
+                        self.caught_up_on(&stream, &epoch);
                         break;
                     }
                     Err(e) => {
@@ -3072,7 +3280,7 @@ pub enum Planned {
     Created,
     /// The session is opening, running or releasing: it waits.
     Busy,
-    /// Turns are held (release, maintenance).
+    /// Turns are held (release, maintenance, or the session's stream is faulted).
     Held,
     /// Nothing is queued.
     Empty,
@@ -3241,6 +3449,20 @@ fn ended_in(tx: &Tx, session: &str) -> Result<bool, StoreError> {
 }
 
 /// The session's phase and active attempt; `None`: not bound.
+/// One of this Node's streams that carries `session`'s events (any epoch the Hub holds for it)
+/// is faulted: its events wait for reconciliation. The session's own stream counts even when the
+/// Hub holds none of its events (a gap found by reconcile).
+fn faulted(c: &rusqlite::Connection, node: &NodeId, session: &str) -> Result<bool, StoreError> {
+    Ok(c.query_row(
+        "SELECT EXISTS(SELECT 1 FROM node_streams s WHERE s.node_id=?2 AND s.fault IS NOT NULL AND (
+              s.stream=?3
+           OR EXISTS(SELECT 1 FROM node_event_quarantine q WHERE q.node_id=s.node_id AND q.stream=s.stream AND q.epoch=s.epoch AND json_extract(q.payload,'$.subject.session')=?1)
+           OR EXISTS(SELECT 1 FROM node_event_inbox e WHERE e.node_id=s.node_id AND e.stream=s.stream AND e.epoch=s.epoch AND json_extract(e.payload,'$.subject.session')=?1)))",
+        rusqlite::params![session, node.as_str(), heads::session_stream(session)],
+        |r| r.get(0),
+    )?)
+}
+
 fn phase_in(tx: &Tx, session: &str) -> Result<Option<(String, Option<String>)>, StoreError> {
     Ok(tx
         .query_row(
