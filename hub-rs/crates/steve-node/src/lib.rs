@@ -445,7 +445,7 @@ pub(crate) fn bind_permission(
                 ),
                 None => None,
             };
-            match (command, fact.cwd.as_deref().map(|c| inside(c))) {
+            match (command, fact.cwd.as_deref().map(inside)) {
                 (Some(command), None) => Action::Exec {
                     command,
                     cwd: None,
