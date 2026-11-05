@@ -1,5 +1,6 @@
 /* Hub API: raw shapes (mirroring hub/src/repo.ts) and calls. store.ts maps them onto the view model. */
 import { lang, t } from "@/i18n"
+import { resumableStream } from "./stream-cursor"
 export type ItemStatus = "prop" | "run" | "wait" | "pause" | "done" | "drop" | "block"
 export type PlanStep = { step: string; done: boolean; left?: boolean }
 export type RItem = {
@@ -61,7 +62,7 @@ export type State = {
 }
 export type RHold = { item: string; running: number; since: number }
 export type RNotice = { id: string; kind: "release" | "archive" | "system"; level: "info" | "success" | "fail"; text: string; item_id: string | null; created: number; closed?: boolean }
-export type HubEvent = { type: "item" | "bot" | "project" | "tag" | "workspace" | "settings" | "device" | "message"; id: string } | { type: "decision" | "session"; id: string; item_id?: string | null } | { type: "event"; session_id: string; seq: number; kind: string; data: unknown } | { type: "steve.thinking"; on: boolean; phase?: "route" | "answer" | "config" | "item" | "supplement" | "research" } | { type: "steve.tool"; ws: string; mid: string; run: string; name: string; brief: string; ok: boolean } | { type: "thread.run"; id: string; ws: string } | { type: "steve.draft"; ws: string; mid: string; thought: string; text: string } | { type: "release.hold"; hold: RHold | null }
+export type HubEvent = { type: "item" | "bot" | "project" | "tag" | "workspace" | "settings" | "device" | "message"; id: string } | { type: "decision" | "session"; id: string; item_id?: string | null } | { type: "event"; session_id: string; seq: number; kind: string; data: unknown } | { type: "steve.thinking"; on: boolean; phase?: "route" | "answer" | "config" | "item" | "supplement" | "research" } | { type: "steve.tool"; ws: string; mid: string; run: string; name: string; brief: string; ok: boolean } | { type: "thread.run"; id: string; ws: string } | { type: "steve.draft"; ws: string; mid: string; thought: string; text: string } | { type: "release.hold"; hold: RHold | null } | { type: "stream.gap" | "stream.reset" }
 
 /** an A2UI action as the page sends it (A2UI v0.9.1 `action` plus where it came from); `data`: the surface's data model then */
 export type A2uiSubmit = { block: string; surfaceId: string; sourceComponentId: string; name: string; label: string; context: Record<string, unknown>; data: unknown; timestamp: string }
@@ -102,15 +103,19 @@ export const withWs = (url: string) => (pageWs ? `${url}${url.includes("?") ? "&
 
 export class Unauthenticated extends Error { login: string | null; constructor(login: string | null) { super("unauthenticated"); this.login = login } }
 const CUT = {}
-async function req<T>(method: string, path: string, body?: unknown): Promise<T> {
+async function req<T>(method: string, path: string, body?: unknown, seen?: (r: Response) => void): Promise<T> {
   /* a read that stalls (proxy, dropped connection) must fail, not leave a view loading forever */
   const r = await fetch("/api" + path, { method, headers: wsHeaders(body !== undefined ? { "content-type": "application/json" } : {}), body: body !== undefined ? JSON.stringify(body) : undefined, credentials: "same-origin", signal: method === "GET" ? AbortSignal.timeout(30_000) : undefined })
   if (r.status === 401) { const j = await r.json().catch(() => ({})); throw new Unauthenticated(j.login ?? null) }
   const j = await r.json().catch(() => (r.ok && method === "GET" ? CUT : {}))
   if (j === CUT) throw new Error(t("shell:http.incomplete")) // a cut-off body used to come back as {} and break the caller silently
   if (!r.ok) throw new Error(j.error ?? t("shell:http.failed", { status: r.status }))
+  seen?.(r)
   return j as T
 }
+/* the change-log watermark each /api/state body was read at (`x-steve-cursor`): the stream resumes after it */
+const stateCursors = new WeakMap<object, string>()
+export const cursorOf = (s: State): string | null => stateCursors.get(s) ?? null
 
 /* ───────── module routes (contacts, knowledge, accounts, vault, signals, flows, GitHub …) ─────────
  * Only the Rust Hub serves them. The TS Hub answers an unknown GET /api/* with the SPA's index.html (200) and other
@@ -145,7 +150,7 @@ export async function modReq<T>(method: string, path: string, body?: unknown, si
 export const qs = (o: Record<string, string | number | boolean | undefined | null>) => { const s = new URLSearchParams(); for (const [k, v] of Object.entries(o)) if (v !== undefined && v !== null && v !== "") s.set(k, String(v)); const x = s.toString(); return x ? "?" + x : "" }
 const get = <T>(p: string) => req<T>("GET", p), post = <T = any>(p: string, b: unknown = {}) => req<T>("POST", p, b), patch = <T = any>(p: string, b: unknown) => req<T>("PATCH", p, b), del = <T = any>(p: string, b?: unknown) => req<T>("DELETE", p, b)
 export const api = {
-  state: () => get<State>("/state"),
+  state: () => { let c: string | null = null; return req<State>("GET", "/state", undefined, (r) => { c = r.headers.get("x-steve-cursor") }).then((s) => { if (c) stateCursors.set(s, c); return s }) },
   me: () => get<{ user: { id: string; name: string; email: string | null; role: string }; version: string; web_version: string }>("/me"),
   switchWs: (id: string) => post(`/workspaces/${id}/switch`), newWs: (p: { name: string; description?: string; item_prefix?: string }) => post<RWorkspace>("/workspaces", p), patchWs: (id: string, p: Partial<RWorkspace>) => patch(`/workspaces/${id}`, p),
   say: (text: string, files: string[] = [], mentions: { kind: "party" | "bot"; id: string }[] = [], to: { item?: string; reply_to?: string } = {}) => post("/thread", { text, files, ...(mentions.length ? { mentions } : {}), ...(to.item ? { item: to.item } : {}), ...(to.reply_to ? { reply_to: to.reply_to } : {}) }),
@@ -211,14 +216,16 @@ export const api = {
   },
   logout: () => fetch("/auth/logout", { method: "POST", credentials: "same-origin" }),
 }
-export function stream(on: (e: HubEvent) => void, onOpen: () => void) {
-  let es: EventSource | null = null, retry = 1000, closed = false
-  const open = () => {
-    if (closed) return // a retry scheduled before close must not reopen
-    es = new EventSource(withWs(`/api/stream?lang=${encodeURIComponent(lang())}`)) // the workspace and language at each (re)connect
-    es.onopen = () => { retry = 1000; onOpen() }
-    es.onmessage = (m) => { try { on(JSON.parse(m.data)) } catch {} }
-    es.onerror = () => { es?.close(); if (!closed) setTimeout(open, retry = Math.min(retry * 2, 15000)) }
-  }
-  open(); return () => { closed = true; es?.close() }
+/** the live stream; `cursor` is the watermark of the state on screen, `onOpen(resumed)` is false when the Hub could not
+ * be asked to resume (no cursor yet): then everything on screen has to be refetched */
+export function stream(on: (e: HubEvent) => void, onOpen: (resumed: boolean) => void, cursor: () => string | null = () => null) {
+  const s = resumableStream({
+    url: (after) => withWs(`/api/stream?lang=${encodeURIComponent(lang())}${after ? "&after=" + encodeURIComponent(after) : ""}`), // the workspace and language at each (re)connect
+    source: (url) => new EventSource(url),
+    on: (data) => { try { on(JSON.parse(data)) } catch {} },
+    onOpen, cursor,
+    setTimeout: (f, ms) => setTimeout(f, ms), clearTimeout: (x) => clearTimeout(x as ReturnType<typeof setTimeout>), now: Date.now,
+    win: window, doc: document,
+  })
+  return s.close
 }
