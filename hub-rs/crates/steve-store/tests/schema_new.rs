@@ -68,7 +68,7 @@ fn at_version(v: usize) -> (tempfile::TempDir, std::path::PathBuf) {
 
 #[test]
 fn schema_version_is_23() {
-    assert_eq!(db::SCHEMA_VERSION, 33);
+    assert_eq!(db::SCHEMA_VERSION, 34);
 }
 
 #[test]
@@ -138,12 +138,15 @@ fn rerunning_the_module_migrations_changes_nothing() {
     drop(t.store);
     let before = schema_of(&path);
     let c = Connection::open(&path).unwrap();
-    for m in &db::MIGRATIONS[3..] {
+    // Historical module migrations are directly repeatable. 034 contains one-shot ALTERs;
+    // their replay protection is the runner's schema_version transaction, exercised below.
+    for m in &db::MIGRATIONS[3..33] {
         c.execute_batch(m).unwrap();
     }
     drop(c);
     assert_eq!(schema_of(&path), before);
-    // and opening again at v20 runs nothing
+    db::migrate(&Connection::open(&path).unwrap()).unwrap();
+    // Opening again at the current version runs no one-shot ALTERs.
     drop(Store::open(&path, NoPublisher).unwrap());
     assert_eq!(schema_of(&path), before);
 }

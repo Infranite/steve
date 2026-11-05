@@ -502,6 +502,9 @@ impl QueuedRepo<'_> {
     pub fn claim(&self, session_id: &str) -> Result<Vec<Queued>> {
         self.0.write(|w| {
             let tx = w.c.unchecked_transaction()?;
+            let node: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM runtime_sessions WHERE session_id=?)", [session_id], |r| r.get(0))?;
+            if node { return Err(crate::StoreError::Conflict("session belongs to the Node runtime".into())); }
+
             let xs = all(&tx, "SELECT * FROM queued WHERE session_id = ? ORDER BY created, rowid", [session_id], Queued::from_row)?;
             tx.run("INSERT INTO session_dispatch (id,session_id,text,via,created,files,state,updated) SELECT id,session_id,text,via,created,files,'claimed',? FROM queued WHERE session_id = ?", params![now(),session_id])?;
             tx.run("DELETE FROM queued WHERE session_id = ?", [session_id])?;
@@ -515,7 +518,10 @@ impl QueuedRepo<'_> {
     pub fn submitted(&self, session_id: &str) -> Result<()> {
         self.0.write(|w| {
             let tx = w.c.unchecked_transaction()?;
-            tx.run("UPDATE session_dispatch SET state='submitted',updated=? WHERE session_id=? AND state='claimed'", params![now(),session_id])?;
+            let node: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM runtime_sessions WHERE session_id=?)", [session_id], |r| r.get(0))?;
+            if node { return Err(crate::StoreError::Conflict("session belongs to the Node runtime".into())); }
+
+            tx.run("UPDATE session_dispatch SET state='submitted',updated=? WHERE backend='legacy' AND session_id=? AND state='claimed'", params![now(),session_id])?;
             tx.run(r#"INSERT INTO events (session_id, kind, data, ts) SELECT ?, 'system', '{"resumed":true,"text":"Hub 重启后已提交继续请求"}', ? WHERE EXISTS (SELECT 1 FROM session_resume WHERE session_id=?)"#, params![session_id,now(),session_id])?;
             tx.run("DELETE FROM session_resume WHERE session_id=?", [session_id])?;
             tx.commit()?;
@@ -526,8 +532,11 @@ impl QueuedRepo<'_> {
     pub fn defer_claimed(&self, session_id: &str) -> Result<()> {
         self.0.write(|w| {
             let tx = w.c.unchecked_transaction()?;
-            tx.run("INSERT INTO queued (id,session_id,text,via,created,files) SELECT 'q_' || lower(hex(randomblob(16))),session_id,text,via,created,files FROM session_dispatch WHERE session_id=? AND state='claimed'", [session_id])?;
-            tx.run("UPDATE session_dispatch SET state='interrupted',updated=? WHERE session_id=? AND state='claimed'", params![now(),session_id])?;
+            let node: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM runtime_sessions WHERE session_id=?)", [session_id], |r| r.get(0))?;
+            if node { return Err(crate::StoreError::Conflict("session belongs to the Node runtime".into())); }
+
+            tx.run("INSERT INTO queued (id,session_id,text,via,created,files) SELECT 'q_' || lower(hex(randomblob(16))),session_id,text,via,created,files FROM session_dispatch WHERE backend='legacy' AND session_id=? AND state='claimed'", [session_id])?;
+            tx.run("UPDATE session_dispatch SET state='interrupted',updated=? WHERE backend='legacy' AND session_id=? AND state='claimed'", params![now(),session_id])?;
             tx.commit()?;
             Ok(())
         })
@@ -535,7 +544,7 @@ impl QueuedRepo<'_> {
 
     pub fn receipt(&self, session_id: &str, state: &str) -> Result<()> {
         self.0.write(|w| {
-            w.c.run("UPDATE session_dispatch SET state=?,updated=? WHERE session_id=? AND state IN ('claimed','submitted')", params![state,now(),session_id])?;
+            w.c.run("UPDATE session_dispatch SET state=?,updated=? WHERE backend='legacy' AND session_id=? AND state IN ('claimed','submitted')", params![state,now(),session_id])?;
             Ok(())
         })
     }
@@ -545,13 +554,13 @@ impl QueuedRepo<'_> {
     pub fn recover_dispatches(&self) -> Result<()> {
         self.0.write(|w| {
             let tx = w.c.unchecked_transaction()?;
-            tx.run("INSERT OR IGNORE INTO session_resume SELECT DISTINCT session_id,? FROM session_dispatch WHERE state='submitted'", [now()])?;
+            tx.run("INSERT OR IGNORE INTO session_resume SELECT DISTINCT session_id,? FROM session_dispatch WHERE backend='legacy' AND state='submitted'", [now()])?;
             // never delivered: back as it was; delivered (maybe acted on): back marked, to be checked, not redone
-            tx.run("INSERT OR IGNORE INTO queued (id,session_id,text,via,created,files) SELECT id,session_id,text,via,created,files FROM session_dispatch WHERE state='claimed'", [])?;
-            tx.run("INSERT OR IGNORE INTO queued (id,session_id,text,via,created,files) SELECT id,session_id,text,CASE WHEN via LIKE 'resumed:%' THEN via ELSE 'resumed:' || via END,created,files FROM session_dispatch WHERE state='submitted'", [])?;
+            tx.run("INSERT OR IGNORE INTO queued (id,session_id,text,via,created,files) SELECT id,session_id,text,via,created,files FROM session_dispatch WHERE backend='legacy' AND state='claimed'", [])?;
+            tx.run("INSERT OR IGNORE INTO queued (id,session_id,text,via,created,files) SELECT id,session_id,text,CASE WHEN via LIKE 'resumed:%' THEN via ELSE 'resumed:' || via END,created,files FROM session_dispatch WHERE backend='legacy' AND state='submitted'", [])?;
             // Re-claimed rows receive fresh receipt ids at the next claim.
-            tx.run("UPDATE queued SET id = 'q_' || lower(hex(randomblob(16))) WHERE id IN (SELECT id FROM session_dispatch WHERE state IN ('claimed','submitted'))", [])?;
-            tx.run("UPDATE session_dispatch SET state='interrupted',updated=? WHERE state IN ('claimed','submitted')", [now()])?;
+            tx.run("UPDATE queued SET id = 'q_' || lower(hex(randomblob(16))) WHERE id IN (SELECT id FROM session_dispatch WHERE backend='legacy' AND state IN ('claimed','submitted'))", [])?;
+            tx.run("UPDATE session_dispatch SET state='interrupted',updated=? WHERE backend='legacy' AND state IN ('claimed','submitted')", [now()])?;
             tx.commit()?;
             Ok(())
         })

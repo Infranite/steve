@@ -77,6 +77,8 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/032.sql"),
     // 33: outputs delivered as records of the work, and the user's notes on outputs (ST-38).
     include_str!("../migrations/033.sql"),
+    // 34: Node dispatch intents, execution projections and durable event inbox.
+    include_str!("../migrations/034.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).

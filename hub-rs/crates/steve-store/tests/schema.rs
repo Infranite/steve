@@ -75,8 +75,15 @@ fn fresh_database_is_ts_schema_plus_module_migrations() {
     ts.execute_batch("CREATE TABLE item_cycles (item_id TEXT, cycle INTEGER, revision INTEGER, outcome TEXT, acceptance TEXT, reason TEXT, closed INTEGER, source TEXT)").unwrap();
     ts.execute_batch(db::ITEM_LIFECYCLE).unwrap();
     ts.execute_batch("DROP TABLE item_cycles; CREATE INDEX items_closing ON items(phase) WHERE phase = 'closing';").unwrap();
-    // what the module migrations alone create (they only add objects), on stubs of the tables they touch
-    const STUBS: [&str; 7] = [
+    // 034 extends the original events table. Compare its altered definition, while the module
+    // side below still contributes its new indexes and tables.
+    for statement in db::MIGRATIONS[33].split(';') {
+        if statement.trim_start().starts_with("ALTER TABLE events ") {
+            ts.execute_batch(statement).unwrap();
+        }
+    }
+    // What module migrations create, on stubs of the original tables they touch.
+    const STUBS: [&str; 8] = [
         "workspaces",
         "users",
         "tags",
@@ -84,6 +91,7 @@ fn fresh_database_is_ts_schema_plus_module_migrations() {
         "sessions",
         "decisions",
         "queued",
+        "events",
     ];
     let only = Connection::open_in_memory().unwrap();
     for t in STUBS {
@@ -130,8 +138,8 @@ fn fresh_database_is_ts_schema_plus_module_migrations() {
 
 #[test]
 fn migrations_are_the_ts_strings() {
-    assert_eq!(db::MIGRATIONS.len(), 33);
-    assert_eq!(db::SCHEMA_VERSION, 33);
+    assert_eq!(db::MIGRATIONS.len(), 34);
+    assert_eq!(db::SCHEMA_VERSION, 34);
     assert!(db::MIGRATIONS[0].starts_with("\n  CREATE TABLE workspaces (id TEXT PRIMARY KEY, name TEXT NOT NULL, created INTEGER NOT NULL);"));
     assert!(
         db::MIGRATIONS[1]
