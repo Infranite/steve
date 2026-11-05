@@ -4782,6 +4782,7 @@ dependencies = [
  "axum",
  "base64 0.23.1",
  "chrono",
+ "futures",
  "hex",
  "hmac 0.13.0",
  "jsonwebtoken",
@@ -4801,6 +4802,7 @@ dependencies = [
  "tower",
  "tracing",
  "url",
+ "wait-timeout",
  "zeroize",
 ]
 

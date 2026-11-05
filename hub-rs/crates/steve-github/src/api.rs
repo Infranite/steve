@@ -206,7 +206,15 @@ impl GhClient {
             let body = if bytes.is_empty() {
                 Value::Null
             } else {
-                serde_json::from_slice(&bytes).unwrap_or(Value::Null)
+                match serde_json::from_slice(&bytes) {
+                    Ok(v) => v,
+                    // a garbled read is an error (it would otherwise be cached under its ETag);
+                    // a write that GitHub did accept must not look failed and be repeated
+                    Err(_) if method == Method::GET && (200..=299).contains(&status) => {
+                        return Err(GhError::Decode);
+                    }
+                    Err(_) => Value::Null,
+                }
             };
             return match status {
                 200..=299 => Ok(GhResponse {
@@ -409,7 +417,9 @@ impl GhConn {
         {
             return Ok(body);
         }
-        if let Some(e) = r.etag {
+        if let Some(e) = r.etag
+            && !r.body.is_null()
+        {
             self.etags.put(self.cx.id(), path, e, r.body.clone());
         }
         Ok(r.body)
@@ -459,9 +469,10 @@ impl GhConn {
         // GitHub caps most lists far below this; it only stops a misbehaving server.
         for _ in 0..100 {
             let r = self.send(Method::GET, &url, None, None).await?;
+            let mut body = r.body;
             let list = match key {
-                Some(k) => r.body.get(k).cloned().unwrap_or(Value::Null),
-                None => r.body,
+                Some(k) => body.get_mut(k).map(Value::take).unwrap_or(Value::Null),
+                None => body,
             };
             match list {
                 Value::Array(v) => out.extend(v),
@@ -526,7 +537,7 @@ impl GhConn {
             break res;
         };
         let status = res.status().as_u16();
-        let res = match status {
+        let mut res = match status {
             200 => res,
             301 | 302 | 303 | 307 | 308 => {
                 let loc = res
@@ -567,8 +578,15 @@ impl GhConn {
                 });
             }
         };
-        let bytes = res.bytes().await.map_err(|_| GhError::Network)?;
-        let tail = &bytes[bytes.len().saturating_sub(max)..];
+        // stream the log, keeping only a rolling tail: job logs can be hundreds of MB
+        let mut buf: Vec<u8> = Vec::with_capacity(max.saturating_mul(2).min(1 << 20));
+        while let Some(chunk) = res.chunk().await.map_err(|_| GhError::Network)? {
+            buf.extend_from_slice(&chunk);
+            if buf.len() > max.saturating_mul(2) {
+                buf.drain(..buf.len() - max);
+            }
+        }
+        let tail = &buf[buf.len().saturating_sub(max)..];
         Ok(String::from_utf8_lossy(tail).into_owned())
     }
 }
@@ -610,6 +628,27 @@ mod tests {
         assert!(c.url("http://127.0.0.1:1/user?page=2").is_ok());
         assert!(c.url("https://evil.example/user").is_err());
         assert!(c.url("http://127.0.0.1:10/user").is_err());
+    }
+
+    /// A garbled 2xx body is an error for a read (it would otherwise be cached as `null` under
+    /// its ETag) but not for a write GitHub accepted (it must not be repeated).
+    #[tokio::test]
+    async fn a_garbled_body_fails_a_read_not_a_write() {
+        let app = axum::Router::new().route(
+            "/x",
+            axum::routing::any(|| async { ([(header::ETAG, "\"e1\"")], "{\"truncated\": [") }),
+        );
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", l.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(l, app).await });
+        let c = GhClient::new(reqwest::Client::new(), &base);
+        let r = c.request(Method::GET, "/x", None, None, None).await;
+        assert_eq!(r.err(), Some(GhError::Decode));
+        let r = c
+            .request(Method::POST, "/x", None, Some(&Value::Null), None)
+            .await
+            .expect("a write that went through");
+        assert_eq!((r.status, r.body), (200, Value::Null));
     }
 
     /// App JWT calls, installation tokens and PAT requests all go through `request`: a real

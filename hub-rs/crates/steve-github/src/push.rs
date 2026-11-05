@@ -9,12 +9,15 @@
 //!   variables: not on the command line, not in a file, not in logs;
 //! - the target is the canonical `<git_base>/<owner>/<name>.git`, not whatever `origin` says.
 //!
-//! Synchronous (`std::process`); call it from `spawn_blocking`.
+//! Synchronous (`std::process`, every git call under a deadline); call it from `spawn_blocking`.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 use base64::Engine;
+use wait_timeout::ChildExt;
 use zeroize::Zeroizing;
 
 use crate::repos::parse_remote;
@@ -92,13 +95,56 @@ fn git(dir: &Path) -> Command {
     c
 }
 
-fn run(mut c: Command) -> Result<String, PushError> {
-    let out = c.output().map_err(|e| PushError::Git(e.to_string()))?;
-    if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr);
+/// Local git calls (rev-parse, init, update-ref): quick, but never allowed to hang.
+const LOCAL_TIMEOUT: Duration = Duration::from_secs(60);
+/// The push itself. git also gives up on its own on a stalled transfer (`http.lowSpeed*`).
+const PUSH_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+
+fn run(c: Command) -> Result<String, PushError> {
+    run_for(c, LOCAL_TIMEOUT)
+}
+
+/// Runs `c`, killing it after `limit`. A push that timed out may still have landed: the caller
+/// treats any `Git` error as an unknown outcome.
+fn run_for(mut c: Command, limit: Duration) -> Result<String, PushError> {
+    let mut child = c
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| PushError::Git(e.to_string()))?;
+    // read both pipes while waiting, so a chatty child cannot block on a full pipe
+    let drain = |p: Option<Box<dyn Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut v = Vec::new();
+            if let Some(mut p) = p {
+                let _ = p.read_to_end(&mut v);
+            }
+            v
+        })
+    };
+    let out = drain(child.stdout.take().map(|p| Box::new(p) as _));
+    let err = drain(child.stderr.take().map(|p| Box::new(p) as _));
+    let status = match child.wait_timeout(limit) {
+        Ok(Some(s)) => s,
+        Ok(None) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            // the readers are left behind: a helper git started may still hold the pipes
+            return Err(PushError::Git(format!("{} 秒内没有完成", limit.as_secs())));
+        }
+        Err(e) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(PushError::Git(e.to_string()));
+        }
+    };
+    let out = out.join().unwrap_or_default();
+    let err = err.join().unwrap_or_default();
+    if !status.success() {
+        let err = String::from_utf8_lossy(&err);
         return Err(PushError::Git(err.trim().chars().take(300).collect()));
     }
-    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    Ok(String::from_utf8_lossy(&out).trim().to_string())
 }
 
 /// The configured `origin` URL (not rewritten by `insteadOf`) must name `full_name`.
@@ -227,9 +273,14 @@ pub fn push(s: &PushSpec) -> Result<String, PushError> {
     );
     let header = Zeroizing::new(format!("AUTHORIZATION: basic {}", auth.as_str()));
     let mut c = git(tmp.path());
-    c.env("GIT_CONFIG_COUNT", "1")
+    // a transfer slower than 1 byte/s for 60 s is given up by git itself
+    c.env("GIT_CONFIG_COUNT", "3")
         .env("GIT_CONFIG_KEY_0", format!("http.{base}/.extraheader"))
         .env("GIT_CONFIG_VALUE_0", header.as_str())
+        .env("GIT_CONFIG_KEY_1", "http.lowSpeedLimit")
+        .env("GIT_CONFIG_VALUE_1", "1")
+        .env("GIT_CONFIG_KEY_2", "http.lowSpeedTime")
+        .env("GIT_CONFIG_VALUE_2", "60")
         .args([
             "push",
             "--quiet",
@@ -237,7 +288,7 @@ pub fn push(s: &PushSpec) -> Result<String, PushError> {
             &url,
             &format!("refs/heads/{0}:refs/heads/{0}", s.branch),
         ]);
-    run(c)?;
+    run_for(c, PUSH_TIMEOUT)?;
     Ok(sha)
 }
 
@@ -255,6 +306,26 @@ mod tests {
         ] {
             assert!(!branch_ok(b), "{b}");
         }
+    }
+
+    #[test]
+    fn a_hanging_command_is_killed_at_the_deadline() {
+        let mut c = Command::new("sh");
+        c.args(["-c", "echo started; sleep 30"]);
+        let t = std::time::Instant::now();
+        let r = run_for(c, Duration::from_millis(300));
+        assert!(matches!(r, Err(PushError::Git(_))), "{r:?}");
+        assert!(t.elapsed() < Duration::from_secs(10), "{:?}", t.elapsed());
+
+        let mut c = Command::new("sh");
+        c.args(["-c", "echo done"]);
+        assert_eq!(run_for(c, Duration::from_secs(10)), Ok("done".into()));
+        let mut c = Command::new("sh");
+        c.args(["-c", "echo nope >&2; exit 1"]);
+        assert_eq!(
+            run_for(c, Duration::from_secs(10)),
+            Err(PushError::Git("nope".into()))
+        );
     }
 
     #[test]

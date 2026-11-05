@@ -33,10 +33,13 @@ rusqlite = { version = "=0.40.2", features = ["bundled"] }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = { version = "=1.0.154", features = ["preserve_order"] }
 sha2 = "=0.11.1"
+futures = "=0.3.34"
 thiserror = "=2.0.21"
 tokio = { version = "=1.54.1", features = ["rt", "sync", "time", "macros"] }
 tracing = "=0.1.44"
 url = "=2.5.8"
+# A deadline on the git calls of a push (push.rs).
+wait-timeout = "=0.2.1"
 zeroize = "=1.9.1"
 
 rand = "=0.10.3"
