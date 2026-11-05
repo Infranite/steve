@@ -1419,6 +1419,8 @@ pub mod build {
             error: None,
             result: vec![],
             continuation: None,
+            transient: false,
+            acted: false,
         }
     }
 

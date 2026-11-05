@@ -437,6 +437,16 @@ static TRANSIENT: LazyLock<Regex> = LazyLock::new(|| {
     )
     .expect("static regex")
 });
+/// A failure that may pass by itself (gateway 5xx, overload, rate limit).
+pub fn is_transient(message: &str) -> bool {
+    TRANSIENT.is_match(message)
+}
+
+/// The agent behind the adapter is gone: the adapter must be dropped.
+pub fn is_dead_agent(message: &str) -> bool {
+    DEAD_AGENT.is_match(message)
+}
+
 static CC_TOOL: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^mcp__steve__([0-9A-Za-z_]+)$").expect("static regex"));
 static CODEX_TOOL: LazyLock<Regex> = LazyLock::new(|| {

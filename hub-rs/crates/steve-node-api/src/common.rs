@@ -283,6 +283,13 @@ pub struct Completion {
     /// Where the harness session continues (a research run's follow-up, a session after release).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub continuation: Option<ResumeHandle>,
+    /// The failure may pass by itself (an inference gateway's 503, a rate limit): a fact for the Hub's
+    /// retry policy, never a retry by the Node.
+    #[serde(default)]
+    pub transient: bool,
+    /// Tools ran in this attempt: their effects happened, a retry must not redo them blindly.
+    #[serde(default)]
+    pub acted: bool,
 }
 
 /// The answer to a command: it was accepted (or had already been) and where it stands. Not

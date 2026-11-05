@@ -21,7 +21,7 @@ mod runner;
 pub mod session;
 mod util;
 
-pub use attachments::{FileRef, INLINE_IMAGES, StoredFile, kb};
+pub use attachments::{FileRef, ForAgent, INLINE_IMAGES, StoredFile, for_agent, kb};
 pub use codex::{codex_args, codex_mode, sanitize_catalog};
 pub use config::{AcpConfig, default_claude_adapter, default_codex_adapter, npm_root};
 pub use rollout::find as codex_rollout;
@@ -30,5 +30,5 @@ pub use rpc::RpcError;
 pub use runner::{
     Acp, AcpError, AutonomousUsage, Host, McpEndpoint, Message, PermissionRequest, Prompted,
     RESUME_AFTER_TOOLS, SessionInfo, TurnBegin, TurnEnd, TurnFinish, TurnUsage, Usage, auto_allow,
-    permission_request, steve_tool,
+    is_dead_agent, is_transient, permission_request, steve_tool,
 };

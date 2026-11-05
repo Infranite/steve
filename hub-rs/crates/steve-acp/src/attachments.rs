@@ -48,14 +48,14 @@ pub fn kb(n: u64) -> String {
     }
 }
 
-pub(crate) struct ForAgent {
+pub struct ForAgent {
     pub note: String,
     pub images: Vec<Value>,
 }
 
 /// Copy attachments into `<cwd>/.steve/attachments` (ignored by git) and say where they are;
 /// images that fit also go inline. Rows the Hub no longer knows are skipped, like the TS.
-pub(crate) fn for_agent(
+pub fn for_agent(
     cwd: &str,
     refs: &[FileRef],
     inline_images: bool,
