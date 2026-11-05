@@ -313,12 +313,16 @@ pub struct CommandLease {
     pub owner: String,
     pub generation: i64,
     pub until: i64,
+    /// An earlier send may have reached the Node (`maybe_sent` before this lease set it).
+    pub maybe_sent: bool,
 }
 /// Leases are worker fences, not execution identities. Only pending commands are sent. Accepted or
 /// unknown commands require operation lookup/reconciliation, not a fresh execution. A dependency
 /// must have a successful final receipt; the caller explicitly sets success via merge_receipt_in.
+/// Only `node`'s commands: one coordinator per Node shares the store with the others.
 pub fn lease_command_in(
     tx: &Tx<'_>,
+    node: &str,
     owner: &str,
     now: i64,
     until: i64,
@@ -326,10 +330,10 @@ pub fn lease_command_in(
     if owner.is_empty() || until <= now {
         return Err(conflict("invalid lease"));
     }
-    let row: Option<(String,String,String,String,String,i64)>=tx.query_row(
-        "SELECT c.operation_id,c.node_id,c.method,c.request,c.digest,c.lease_generation FROM node_commands c WHERE c.state='pending' AND c.retry_at<=? AND (c.lease_until IS NULL OR c.lease_until<=?) AND (c.dependency_operation IS NULL OR EXISTS(SELECT 1 FROM node_commands d WHERE d.operation_id=c.dependency_operation AND d.state='finished' AND json_extract(d.receipt,'$.success')=1)) ORDER BY c.created,c.rowid LIMIT 1",
-        params![now,now],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?))).optional()?;
-    let Some((operation, node, method, request, digest, generation)) = row else {
+    let row: Option<(String,String,String,String,String,i64,bool)>=tx.query_row(
+        "SELECT c.operation_id,c.node_id,c.method,c.request,c.digest,c.lease_generation,c.maybe_sent FROM node_commands c WHERE c.node_id=? AND c.state='pending' AND c.retry_at<=? AND (c.lease_until IS NULL OR c.lease_until<=?) AND (c.dependency_operation IS NULL OR EXISTS(SELECT 1 FROM node_commands d WHERE d.operation_id=c.dependency_operation AND d.state='finished' AND json_extract(d.receipt,'$.success')=1)) ORDER BY c.created,c.rowid LIMIT 1",
+        params![node,now,now],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?))).optional()?;
+    let Some((operation, node, method, request, digest, generation, maybe_sent)) = row else {
         return Ok(None);
     };
     let generation = generation
@@ -345,12 +349,15 @@ pub fn lease_command_in(
         owner: owner.into(),
         generation,
         until,
+        maybe_sent,
     }))
 }
 /// Retry only after a transport failure known not to be a final Node rejection. Uncertain sends use
 /// the same operation ID/request. A stale worker cannot reschedule a reclaimed command.
 /// `uncertain`: this send may have reached the Node (OutcomeUnknown); otherwise it was refused
-/// before acceptance, and the command counts as never sent again (`maybe_sent=0`).
+/// before acceptance. `maybe_sent` stays 1 once any send was uncertain: a later refusal says
+/// nothing about the earlier send, which may still arrive. It goes back to 0 only while every send
+/// so far was refused.
 pub fn retry_command_in(
     tx: &Tx<'_>,
     lease: &CommandLease,
@@ -358,8 +365,9 @@ pub fn retry_command_in(
     retry_at: i64,
     uncertain: bool,
 ) -> Result<bool> {
+    let maybe_sent = lease.maybe_sent || uncertain;
     Ok(tx.execute("UPDATE node_commands SET retry_at=?,lease_owner=NULL,lease_until=NULL,maybe_sent=?,updated=? WHERE operation_id=? AND state='pending' AND lease_owner=? AND lease_generation=? AND lease_until>?",
-        params![retry_at,uncertain as i64,now,lease.operation,lease.owner,lease.generation,now])?==1)
+        params![retry_at,maybe_sent as i64,now,lease.operation,lease.owner,lease.generation,now])?==1)
 }
 
 /// Receipt progression deliberately collapses running/waiting to Active: their order is determined
@@ -474,6 +482,19 @@ pub fn inbox_insert_in(
         if old != (event_id.into(), payload) {
             return Err(conflict("different event at the same stream position"));
         }
+        return Ok(false);
+    }
+    // no row at or below the durable prefix: it was applied and pruned since, and this is a
+    // redelivery. It is never stored again (it would be applied twice); its payload can no longer be
+    // compared, and a fresh journal never reuses a position (it gets a new epoch).
+    let durable: Option<i64> = tx
+        .query_row(
+            "SELECT durable FROM node_streams WHERE node_id=? AND stream=? AND epoch=?",
+            params![k.node, k.stream, k.epoch],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if durable.is_some_and(|d| seq <= d) {
         return Ok(false);
     }
     let reused: bool = tx.query_row(
@@ -781,12 +802,17 @@ pub fn permission_cas_in(
     )? == 1)
 }
 
-/// Waiting requests whose expiry has come, oldest first.
-pub fn due_permissions_in(tx: &Tx<'_>, now: i64, limit: i64) -> Result<Vec<PermissionRow>> {
+/// `node`'s waiting requests whose expiry has come, oldest first.
+pub fn due_permissions_in(
+    tx: &Tx<'_>,
+    node: &str,
+    now: i64,
+    limit: i64,
+) -> Result<Vec<PermissionRow>> {
     permissions(
         tx,
-        "WHERE state='waiting' AND expires_at<=? ORDER BY expires_at LIMIT ?",
-        params![now, limit],
+        "WHERE node_id=? AND state='waiting' AND expires_at<=? ORDER BY expires_at LIMIT ?",
+        params![node, now, limit],
     )
 }
 

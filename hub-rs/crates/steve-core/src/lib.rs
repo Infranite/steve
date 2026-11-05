@@ -46,7 +46,7 @@ mod tests;
 
 pub use config::CoreConfig;
 pub use error::{CoreError, Result};
-pub use gateway::{ClaudeCli, ModelGateway, SharedGateway, Tier};
+pub use gateway::{ClaudeCli, Fallback, LocalPrint, ModelGateway, OneModel, SharedGateway, Tier};
 pub use orchestrator::{
     CreateItem, Forked, ItemAction, RESUMED_NOTE, SendNow, SupplementMode, resumed_text,
 };

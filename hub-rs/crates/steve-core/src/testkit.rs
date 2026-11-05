@@ -31,6 +31,8 @@ pub struct FakeState {
     pub flush_in_runtime: Vec<bool>,
     /// Sessions whose last attempt's outcome nobody can tell ([`AgentRuntime::uncertain`]).
     pub uncertain: HashSet<String>,
+    /// Sessions whose backend recovers them after a restart ([`AgentRuntime::recovers_itself`]).
+    pub recovers_itself: HashSet<String>,
     /// `flush` takes nothing and answers false (a session still opening, say).
     pub flush_stuck: bool,
 }
@@ -180,6 +182,9 @@ impl AgentRuntime for FakeRuntime {
     fn uncertain(&self, sid: &str) -> bool {
         self.st().uncertain.contains(sid)
     }
+    fn recovers_itself(&self, sid: &str) -> bool {
+        self.st().recovers_itself.contains(sid)
+    }
     fn flush(&self, sid: &str, lead: Option<(&str, &str)>) -> bool {
         let sent = self.flush_now(sid, lead);
         self.flushed.notify_one();
@@ -221,8 +226,8 @@ type Script = Box<dyn Fn(&str, Tier) -> Result<String> + Send + Sync>;
 pub struct FakeGateway {
     pub script: Mutex<Script>,
     pub calls: Mutex<Vec<String>>,
-    /// extra CLI arguments of each call
-    pub extras: Mutex<Vec<Vec<String>>>,
+    /// the tools of each call
+    pub tools: Mutex<Vec<crate::gateway::ThinkTools>>,
     /// the image blocks of each call ([`crate::gateway::with_images`])
     pub images: Mutex<Vec<Vec<serde_json::Value>>>,
     /// how long a call whose prompt starts with the text takes (awaited, so a stop can cut it short)
@@ -240,10 +245,10 @@ impl ModelGateway for FakeGateway {
         prompt: &str,
         tier: Tier,
         _t: Duration,
-        extra: &[String],
+        tools: &crate::gateway::ThinkTools,
     ) -> Result<crate::gateway::Printed> {
         self.calls.lock().unwrap().push(prompt.into());
-        self.extras.lock().unwrap().push(extra.to_vec());
+        self.tools.lock().unwrap().push(tools.clone());
         let slow = *self.slow.lock().unwrap();
         if let Some((_, d)) = slow.filter(|(head, _)| prompt.starts_with(head)) {
             tokio::time::sleep(d).await;
@@ -310,7 +315,7 @@ impl Kit {
         let gw = Arc::new(FakeGateway {
             script: Mutex::new(Box::new(|_, _| Err(msg("no model in tests")))),
             calls: Mutex::new(vec![]),
-            extras: Mutex::new(vec![]),
+            tools: Mutex::new(vec![]),
             images: Mutex::new(vec![]),
             slow: Mutex::new(None),
         });

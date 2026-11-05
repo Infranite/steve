@@ -342,6 +342,9 @@ pub struct Tokens {
     pub cache_read: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_write: Option<u64>,
+    /// Part of `output` reported separately (Codex's reasoning tokens); never added to it again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

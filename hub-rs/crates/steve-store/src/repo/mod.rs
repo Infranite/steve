@@ -10,6 +10,7 @@ mod files;
 mod items;
 pub mod kinds;
 pub mod lanes;
+pub mod nodes;
 pub mod runtime;
 mod sessions;
 mod stats;

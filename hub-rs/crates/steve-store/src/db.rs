@@ -85,6 +85,8 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/036.sql"),
     // 37: Node permission cards (expiry, one answer each) and a Node session's desired config.
     include_str!("../migrations/037.sql"),
+    // 38: paired Nodes, pairing codes (hashed) and the Node audit trail (N2).
+    include_str!("../migrations/038.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).

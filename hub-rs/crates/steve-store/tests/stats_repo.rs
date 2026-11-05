@@ -341,6 +341,56 @@ fn interrupt_open_closes_only_open_turns() {
     .unwrap();
 }
 
+/// A turn run on a Node is not cut by a Hub restart: only the in-process (legacy) one is closed.
+#[test]
+fn interrupt_open_leaves_node_turns_open() {
+    let t = with_steve();
+    let s = &t.store;
+    let legacy = begin(s, None, 0, 100);
+    let node = begin(s, None, 0, 100);
+    s.with_conn(|c| {
+        c.execute_batch("PRAGMA foreign_keys = OFF;")?;
+        c.execute(
+            "UPDATE agent_turns SET node_attempt_id = 'att_1' WHERE id = ?",
+            [&node],
+        )?;
+        c.execute_batch("PRAGMA foreign_keys = ON;")?;
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(
+        s.stats()
+            .interrupt_open(5_000, |_, _| "2026-11-02".into())
+            .unwrap(),
+        1
+    );
+    s.with_conn(|c| {
+        let ended = |id: &str| -> rusqlite::Result<(Option<i64>, Option<String>)> {
+            c.query_row(
+                "SELECT ended, stop_reason FROM agent_turns WHERE id = ?",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+        };
+        assert_eq!(ended(&legacy)?, (Some(100), Some("interrupted".into())));
+        assert_eq!(ended(&node)?, (None, None), "the Node turn stays open");
+        Ok(())
+    })
+    .unwrap();
+    // a later finish of the Node turn books its real outcome
+    assert!(
+        s.stats()
+            .turn_finish(&TurnFinish {
+                turn_id: node.clone(),
+                ended: 6_000,
+                day: "2026-11-02".into(),
+                stop_reason: Some("abandoned".into()),
+                ..TurnFinish::default()
+            })
+            .unwrap()
+    );
+}
+
 #[test]
 fn marks_flag_the_item_and_unknown_items_are_ignored() {
     let t = with_steve();

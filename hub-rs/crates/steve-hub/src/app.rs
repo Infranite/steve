@@ -179,8 +179,16 @@ pub fn app(
         st.clone(),
         api::optional_user,
     ));
-    Router::new()
-        .merge(root)
+    // remote Nodes (N2): mounted only with STEVE_NODE_LISTEN=1 (wired with the Hub's coordinators)
+    let nodes = st.nodes.clone();
+    let (base, modules) = match nodes {
+        Some(svc) => (
+            crate::nodes::node_router(svc.clone()),
+            modules.merge(crate::nodes::api_router(svc)),
+        ),
+        None => (Router::new(), modules),
+    };
+    base.merge(root)
         // `version` is the Hub (ops/release.sh waits for it after a restart); the web build is released on its own
         .route("/healthz", get({
             let cfg = st.cfg.clone();

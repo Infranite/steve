@@ -186,7 +186,7 @@ pub(crate) fn emit_all(inner: &Inner, t: &Tx, evs: Vec<(Subject, EventBody)>) ->
             Subject::Operation { operation } => derived_id("op", operation.as_str()),
         })?;
         let n = t.bump("event")?;
-        let event_id: EventId = id(format!("ev_{}_{n}", inner.incarnation))?;
+        let event_id: EventId = id(format!("ev_{}_{}_{n}", inner.j.id(), inner.incarnation))?;
         t.record(&stream, |cursor| NodeEvent {
             schema: EVENT_SCHEMA,
             id: event_id,
@@ -1307,7 +1307,7 @@ impl SessionExecutor for LocalNode {
                 .or_else(|| old.as_ref().and_then(|s| s.acp_id.clone()));
             let view = SessionView {
                 id: o.session.clone(),
-                revision: id(format!("r{}", t.bump("revision")?))?,
+                revision: id(t.revision()?)?,
                 phase: SessionPhase::Opening,
                 active: None,
                 effective: o.choice.clone(),
@@ -2013,7 +2013,7 @@ impl WorkspaceExecutor for LocalNode {
                             node: inner.cfg.node.clone(),
                             id: wid.clone(),
                         },
-                        revision: id(format!("r{}", t.bump("revision")?))?,
+                        revision: id(t.revision()?)?,
                         usable,
                         branch: branch.clone(),
                         display: workspace::display(&path),

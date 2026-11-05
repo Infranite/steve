@@ -134,10 +134,19 @@ pub struct NodeRuntime {
     wake_send: Arc<tokio::sync::Notify>,
     wake_apply: Arc<tokio::sync::Notify>,
     holding: AtomicBool,
+    /// The owner paused the Node ([`Self::set_paused`]).
+    paused: AtomicBool,
     /// Set once the Hub has reconciled with the Node since it started: nothing is planned before.
     reconciled: AtomicBool,
     /// Turn ends settled outside the apply worker (a local cancel), told by it after the commit.
-    ended_later: Mutex<Vec<(String, String, Option<String>)>>,
+    ended_later: Mutex<Vec<End>>,
+    /// Attempts the Hub settled on its own word (no AttemptEnded comes for them): their
+    /// statistics row ends after the commit, as one the Node reported would.
+    settled_later: Mutex<Vec<After>>,
+    /// What the open transaction settled (see [`Self::settle_in`]): moved to `settled_later` and
+    /// `ended_later` only once it committed, so the apply worker never sees it earlier (it would
+    /// book a row the store does not show finished yet) and never sees one rolled back.
+    staged: Mutex<(Vec<After>, Vec<End>)>,
     /// Streams with events to apply.
     dirty: Mutex<HashSet<(String, String)>>,
     /// Why this Node cannot run anything (its host failed to start): its sessions then refuse
@@ -228,8 +237,11 @@ impl NodeRuntime {
             wake_send: Arc::new(tokio::sync::Notify::new()),
             wake_apply: Arc::new(tokio::sync::Notify::new()),
             holding: AtomicBool::new(false),
+            paused: AtomicBool::new(false),
             reconciled: AtomicBool::new(false),
             ended_later: Mutex::new(vec![]),
+            settled_later: Mutex::new(vec![]),
+            staged: Mutex::new((vec![], vec![])),
             dirty: Mutex::new(HashSet::new()),
             stopped: Mutex::new(None),
             turn_limit: std::sync::atomic::AtomicI64::new(TURN_LIMIT_MS),
@@ -334,7 +346,25 @@ impl NodeRuntime {
     }
 
     fn tx<T>(&self, f: impl FnOnce(&Tx) -> Result<T, StoreError>) -> Result<T, StoreError> {
-        self.store.transaction(f)
+        // transactions are serial (one writer), so what is staged while one is open is its own
+        let (out, (settled, ended)) = self.store.transaction(|tx| {
+            let take = || std::mem::take(&mut *self.staged.lock().unwrap());
+            take();
+            match f(tx) {
+                Ok(out) => Ok((out, take())),
+                Err(e) => {
+                    take();
+                    Err(e)
+                }
+            }
+        })?;
+        // committed: the apply worker books and tells it from now on
+        if !settled.is_empty() || !ended.is_empty() {
+            self.settled_later.lock().unwrap().extend(settled);
+            self.ended_later.lock().unwrap().extend(ended);
+            self.wake_apply.notify_one();
+        }
+        Ok(out)
     }
 
     /// The session runs on this Node from now on: its workspace is prepared and it is opened, by
@@ -519,8 +549,8 @@ impl NodeRuntime {
         self.store
             .reader(|c| {
                 Ok::<_, StoreError>(c.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM runtime_sessions WHERE session_id=?)",
-                    [session],
+                    "SELECT EXISTS(SELECT 1 FROM runtime_sessions WHERE session_id=? AND node_id=?)",
+                    [session, self.node_id.as_str()],
                     |r| r.get::<_, bool>(0),
                 )?)
             })
@@ -779,6 +809,24 @@ impl NodeRuntime {
         )? {
             return Err(conflict("the session changed while planning"));
         }
+        // as the legacy runner's begin(): the turn is under way from the moment it is planned
+        // (opening or loading the harness may take long, and a restart may leave the attempt
+        // unknown before it starts); `starting` until the harness has a session of its own. A
+        // retry of a turn already running stays running.
+        let (acp, status): (bool, Option<String>) = tx
+            .query_row(
+                "SELECT acp_session_id IS NOT NULL, status FROM sessions WHERE id=?",
+                [session],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?
+            .unwrap_or((false, None));
+        let starting = if acp || status.as_deref() == Some("running") {
+            "running"
+        } else {
+            "starting"
+        };
+        status_in(tx, session, starting)?;
         Ok(())
     }
 
@@ -808,8 +856,8 @@ impl NodeRuntime {
             .reader(|c| {
                 Ok::<_, StoreError>(c.query_row(
                     // a harness restarting for a configure counts: a drain waits for it
-                    "SELECT (SELECT COUNT(*) FROM runtime_turns WHERE state<>'finished') + (SELECT COUNT(*) FROM runtime_sessions WHERE phase='configuring')",
-                    [],
+                    "SELECT (SELECT COUNT(*) FROM runtime_turns t JOIN runtime_sessions s USING(session_id) WHERE s.node_id=?1 AND t.state<>'finished') + (SELECT COUNT(*) FROM runtime_sessions WHERE node_id=?1 AND phase='configuring')",
+                    [self.node_id.as_str()],
                     |r| r.get::<_, i64>(0),
                 )?)
             })
@@ -820,8 +868,33 @@ impl NodeRuntime {
         self.holding.store(on, Ordering::SeqCst);
     }
 
+    /// The owner paused this Node: nothing new is planned for it until it is resumed. Kept apart
+    /// from [`Self::hold`] (the Hub's release hold), so that one never lifts the other.
+    pub fn set_paused(self: &Arc<Self>, on: bool) {
+        if self.paused.swap(on, Ordering::SeqCst) == on || on {
+            return;
+        }
+        // resumed: what waited in the queue meanwhile is planned now (once reconciled)
+        if self.reconciled.load(Ordering::SeqCst) {
+            let me = self.clone();
+            match tokio::runtime::Handle::try_current() {
+                Ok(h) => {
+                    h.spawn_blocking(move || me.plan_waiting());
+                }
+                Err(_) => me.plan_waiting(),
+            }
+        }
+    }
+
     pub fn is_holding(&self) -> bool {
-        self.holding.load(Ordering::SeqCst) || self.store.maintenance()
+        self.holding.load(Ordering::SeqCst)
+            || self.paused.load(Ordering::SeqCst)
+            || self.store.maintenance()
+    }
+
+    /// The Node this coordinator drives.
+    pub fn node_id(&self) -> &NodeId {
+        &self.node_id
     }
 
     /// The session's open turn has an outcome nobody can tell yet (reconciliation decides).
@@ -875,7 +948,7 @@ impl NodeRuntime {
                 // it may be on its way or at the Node: a cancel now could reach the Node first and
                 // be refused for a target it does not know yet. The cancel goes once the Node is
                 // known to hold it (receipt_in); a send refused before acceptance settles it here
-                // (send_one); a refusal ends it anyway. Once it started on the Node (its stream
+                // (send_one) unless an earlier send was uncertain; a refusal ends it anyway. Once it started on the Node (its stream
                 // said so), the Node holds it and the cancel goes now
                 Some((st, true)) if st == "pending" && state == "planned" => return Ok(true),
                 _ => {}
@@ -1005,13 +1078,28 @@ impl NodeRuntime {
         )?;
         self.close_cards_of_attempt_in(tx, attempt)?;
         self.turn_over_in(tx, session, &turn, completion)?;
-        if self.plan_after_in(tx, session)? != Planned::Created {
-            self.ended_later.lock().unwrap().push((
+        // the attempt's statistics row, if it had started, ends with this outcome; booked by the
+        // apply worker once this transaction committed (staged until then, see `Self::tx`)
+        let finished = After::Finished {
+            session: session.to_string(),
+            attempt: attempt.to_string(),
+            completion: completion.clone(),
+            at: now(),
+        };
+        let settled = self.plan_after_in(tx, session)? != Planned::Created;
+        if settled {
+            status_in(tx, session, settled_status(&completion.stop_reason))?;
+        }
+        let ended = settled.then(|| {
+            (
                 session.to_string(),
                 completion.stop_reason.clone(),
                 completion.error.as_ref().map(|e| e.safe_detail.clone()),
-            ));
-        }
+            )
+        });
+        let mut staged = self.staged.lock().unwrap();
+        staged.0.push(finished);
+        staged.1.extend(ended);
         Ok(())
     }
 
@@ -1019,15 +1107,22 @@ impl NodeRuntime {
 
     /// Leases one command, sends it and merges what came back. False: nothing to send.
     async fn send_one(&self) -> bool {
-        let lease =
-            match self.tx(|tx| rt::lease_command_in(tx, &self.owner, now(), now() + LEASE_MS)) {
-                Ok(Some(l)) => l,
-                Ok(None) => return false,
-                Err(e) => {
-                    tracing::error!("node command lease: {e}");
-                    return false;
-                }
-            };
+        let lease = match self.tx(|tx| {
+            rt::lease_command_in(
+                tx,
+                self.node_id.as_str(),
+                &self.owner,
+                now(),
+                now() + LEASE_MS,
+            )
+        }) {
+            Ok(Some(l)) => l,
+            Ok(None) => return false,
+            Err(e) => {
+                tracing::error!("node command lease: {e}");
+                return false;
+            }
+        };
         let sent = self.send(&lease).await;
         // a turn end to report, and a session whose configure was refused for a stale revision
         let r = self.tx(|tx| match &sent {
@@ -1037,10 +1132,17 @@ impl NodeRuntime {
             {
                 // not refused for good, or maybe accepted: the very same command again later
                 let uncertain = e.retry != RetryClass::SameOperation;
-                rt::retry_command_in(tx, &lease, now(), now() + 1_000, uncertain)?;
-                // a start_turn the user stopped meanwhile, now refused before acceptance: it
-                // provably never ran, so it ends here instead of going out again
+                let delay = if e.code == ErrorCode::Exhausted {
+                    self.exhausted_in(tx, &lease, e)?
+                } else {
+                    1_000
+                };
+                rt::retry_command_in(tx, &lease, now(), now() + delay, uncertain)?;
+                // a start_turn the user stopped meanwhile, refused before acceptance every time
+                // it went: it provably never ran, so it ends here instead of going out again. One
+                // earlier uncertain send may still arrive: the cancel waits for the Node instead
                 if !uncertain
+                    && !lease.maybe_sent
                     && lease.method == "start_turn"
                     && let Some((attempt, session)) = cancelled_start_in(tx, &lease.operation)?
                 {
@@ -1107,6 +1209,42 @@ impl NodeRuntime {
         true
     }
 
+    /// A command the Node refused because it is out of room: the refusal is kept on the command
+    /// with how many came in a row, which sets its next delay (2 s doubling, at most 60 s). The
+    /// first one tells the session, once; the command itself stays the same and is not counted
+    /// as an attempt again.
+    fn exhausted_in(
+        &self,
+        tx: &Tx,
+        lease: &rt::CommandLease,
+        e: &ApiError,
+    ) -> Result<i64, StoreError> {
+        let before: Option<i64> = tx
+            .query_row(
+                "SELECT json_extract(receipt,'$.exhausted') FROM node_commands WHERE operation_id=? AND state='pending'",
+                [&lease.operation],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten();
+        let n = before.unwrap_or(0) + 1;
+        let refusal = json!({ "success": false, "payload": e, "exhausted": n });
+        tx.execute(
+            "UPDATE node_commands SET receipt=? WHERE operation_id=? AND state='pending'",
+            rusqlite::params![refusal.to_string(), lease.operation],
+        )?;
+        if n == 1
+            && let Some(session) = command_any_session_in(tx, &lease.operation)?
+        {
+            system_in(
+                tx,
+                &session,
+                "Node 存储/容量已满，暂停接新工作，恢复后自动继续",
+            )?;
+        }
+        Ok(exhausted_delay(n))
+    }
+
     async fn send(&self, l: &rt::CommandLease) -> ApiResult<Receipt> {
         fn parse<T: serde::de::DeserializeOwned>(v: &Value) -> ApiResult<Command<T>> {
             serde_json::from_value(v.clone())
@@ -1136,8 +1274,8 @@ impl NodeRuntime {
         let op = receipt.operation.as_str();
         let Some(method) = tx
             .query_row(
-                "SELECT method FROM node_commands WHERE operation_id=?",
-                [op],
+                "SELECT method FROM node_commands WHERE operation_id=? AND node_id=?",
+                [op, self.node_id.as_str()],
                 |r| r.get::<_, String>(0),
             )
             .ok()
@@ -1357,6 +1495,9 @@ impl NodeRuntime {
             s,
             &format!("Node 没能打开这个会话（{detail}），下一条消息会再试。"),
         )?;
+        if let Some((_, stop, _)) = &end {
+            status_in(tx, s, settled_status(stop))?;
+        }
         Ok(end)
     }
 
@@ -1502,6 +1643,24 @@ impl NodeRuntime {
         self.may_plan()
     }
 
+    /// The Node restarted (a new incarnation) while this Hub ran: nothing new is planned until the
+    /// Hub has reconciled with it again (what it cannot tell the end of becomes `unknown`, never
+    /// re-run); then what waited in the queue goes.
+    pub async fn reconcile_again(self: &Arc<Self>) -> ApiResult<usize> {
+        self.reconciled.store(false, Ordering::SeqCst);
+        let n = self.reconcile().await?;
+        if n > 0 {
+            tracing::info!(
+                "node {}: reconciled after its restart, {n} changed",
+                self.node_id
+            );
+        }
+        self.reconciled.store(true, Ordering::SeqCst);
+        let me = self.clone();
+        let _ = tokio::task::spawn_blocking(move || me.plan_waiting()).await;
+        Ok(n)
+    }
+
     /// What waited in the queue while the Hub was not reconciled goes now.
     fn plan_waiting(&self) {
         let sessions: Vec<String> = self
@@ -1594,16 +1753,22 @@ impl NodeRuntime {
             .tx(|tx| {
                 let mut changed = 0;
                 // 1. commands: what the Node says of each one in flight
-                let cmds: Vec<(String, String, String)> = {
+                let cmds: Vec<(String, String, String, String)> = {
                     let mut st = tx.prepare(
-                        "SELECT operation_id, state, digest FROM node_commands WHERE node_id=? AND state IN ('pending','accepted','active','unknown') ORDER BY created, rowid",
+                        "SELECT operation_id, state, method, request FROM node_commands WHERE node_id=? AND state IN ('pending','accepted','active','unknown') ORDER BY created, rowid",
                     )?;
                     st.query_map([self.node_id.as_str()], |r| {
-                        Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+                        Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
                     })?
                     .collect::<Result<Vec<_>, _>>()?
                 };
-                for (op, state, digest) in cmds {
+                for (op, state, method, request) in cmds {
+                    // the Node keeps the command's content hash as it computes it (method and
+                    // business fields, not the id), not the Hub's hash of the stored envelope
+                    let digest = serde_json::from_str::<Command<Value>>(&request)
+                        .map_err(conflict)?
+                        .digest(&method)
+                        .map_err(conflict)?;
                     let unknown = |reason: &str| -> Result<Receipt, StoreError> {
                         Ok(Receipt {
                             operation: idv(op.clone())?,
@@ -1613,7 +1778,7 @@ impl NodeRuntime {
                         })
                     };
                     let receipt = match entries.get(&op) {
-                        Some(e) if e.digest.as_str() == digest => e.receipt.clone(),
+                        Some(e) if e.digest == digest && e.method == method => e.receipt.clone(),
                         Some(_) => unknown("the Node holds another command under this id")?,
                         // never got there: the sender sends the very same command
                         None if state == "pending" => continue,
@@ -1697,7 +1862,9 @@ impl NodeRuntime {
     }
 
     /// A `Released` view from before the Hub's last open of the session (that open's own view
-    /// has not come on the stream yet): it says nothing of the session open now.
+    /// has not come on the stream yet): it says nothing of the session open now. Only the event's
+    /// own epoch counts: a stream keeps its epoch within one journal, and an older journal's views
+    /// say nothing of this one's.
     fn stale_release_in(&self, tx: &Tx, session: &str, ev: &NodeEvent) -> Result<bool, StoreError> {
         let r: Option<String> = tx
             .query_row(
@@ -1718,7 +1885,7 @@ impl NodeRuntime {
             return Ok(false);
         };
         let seen: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM node_event_inbox WHERE node_id=?1 AND stream=?2 AND (epoch<>?3 OR seq<?4)
+            "SELECT EXISTS(SELECT 1 FROM node_event_inbox WHERE node_id=?1 AND stream=?2 AND epoch=?3 AND seq<?4
                AND json_extract(payload,'$.body.type')='session_changed' AND json_extract(payload,'$.body.view.id')=?5
                AND json_extract(payload,'$.body.view.revision')=?6)",
             rusqlite::params![
@@ -1844,15 +2011,23 @@ impl NodeRuntime {
                 }
             }
         }
-        // turn ends settled outside this worker (a local cancel), told after their commit
-        let later: Vec<_> = std::mem::take(&mut *self.ended_later.lock().unwrap());
-        for (session, stop, error) in later {
-            self.domain.turn_ended(&session, &stop, error);
-        }
+        self.book_settled();
         if any {
             self.wake_send.notify_one();
         }
         any
+    }
+
+    /// What the Hub settled on its own word (a local cancel, an abandon the Node has no record
+    /// of), after the commit: the attempts' statistics rows end, then their turns are told.
+    /// Only committed settles are queued here ([`Self::tx`]), so each is booked as it is.
+    fn book_settled(&self) {
+        let settled: Vec<After> = std::mem::take(&mut *self.settled_later.lock().unwrap());
+        self.after(settled);
+        let later: Vec<End> = std::mem::take(&mut *self.ended_later.lock().unwrap());
+        for (session, stop, error) in later {
+            self.domain.turn_ended(&session, &stop, error);
+        }
     }
 
     /// The Hub's side of applied events, after their commit.
@@ -1956,9 +2131,18 @@ impl NodeRuntime {
             }
             EventBody::SessionChanged { view } => {
                 // the Node's revision of the session, kept here (the inbox it came in is pruned)
+                // keyed on the event's subject and this Node, never on the id the body gives
+                if view.id.as_str() != session {
+                    tracing::warn!(session, view = %view.id, "session view of another session");
+                    return Ok(out);
+                }
                 tx.execute(
-                    "UPDATE runtime_sessions SET node_revision=? WHERE session_id=?",
-                    [view.revision.as_str(), view.id.as_str()],
+                    "UPDATE runtime_sessions SET node_revision=? WHERE session_id=? AND node_id=?",
+                    [
+                        view.revision.as_str(),
+                        session.as_str(),
+                        self.node_id.as_str(),
+                    ],
                 )?;
                 if view.phase == SessionPhase::Released
                     && !self.stale_release_in(tx, &session, ev)?
@@ -1983,9 +2167,17 @@ impl NodeRuntime {
                         )?;
                     }
                 }
+                // the resume handle is the harness's own session id (ACP `sessionId`), what ST-28
+                // shows and the legacy runner keeps too
                 tx.execute(
-                    "UPDATE sessions SET model = COALESCE(?, model), reasoning_effort = COALESCE(?, reasoning_effort), updated = ? WHERE id = ?",
-                    rusqlite::params![view.effective.model, view.effective.effort, now(), session],
+                    "UPDATE sessions SET model = COALESCE(?, model), reasoning_effort = COALESCE(?, reasoning_effort), acp_session_id = COALESCE(?, acp_session_id), updated = ? WHERE id = ?",
+                    rusqlite::params![
+                        view.effective.model,
+                        view.effective.effort,
+                        view.resume.as_ref().map(|r| r.to_string()),
+                        now(),
+                        session
+                    ],
                 )?;
                 tx.publish(steve_store::ChangeEvent::Session {
                     id: session,
@@ -2002,6 +2194,7 @@ impl NodeRuntime {
                         [x.attempt().as_str()],
                         |r| r.get(0),
                     )?;
+                    status_in(tx, &session, "running")?;
                     // the turn's first message: the first `user` entry since the last turn ended
                     let user_seq: Option<i64> = tx.query_row(
                         "SELECT MIN(seq) FROM events WHERE session_id=?1 AND kind='user' AND seq > (SELECT COALESCE(MAX(seq), 0) FROM events WHERE session_id=?1 AND kind='turn_end')",
@@ -2338,6 +2531,7 @@ impl NodeRuntime {
         if ended {
             self.release_in(tx, session)?;
         }
+        status_in(tx, session, settled_status(&c.stop_reason))?;
         let stop = c.stop_reason.clone();
         let error = c.error.as_ref().map(|e| e.safe_detail.clone());
         Ok(Some((session.to_string(), stop, error)))
@@ -2617,6 +2811,56 @@ fn command_session_in(tx: &Tx, op: &str) -> Result<String, StoreError> {
     )?)
 }
 
+/// The delay before the `n`th send after as many Exhausted refusals in a row.
+fn exhausted_delay(n: i64) -> i64 {
+    (2_000i64 << (n - 1).clamp(0, 5)).min(60_000)
+}
+
+/// The session any command is for: its own, its target attempt's, or (a workspace) the open
+/// waiting on it. `None`: none of them.
+fn command_any_session_in(tx: &Tx, op: &str) -> Result<Option<String>, StoreError> {
+    Ok(tx
+        .query_row(
+            "SELECT COALESCE(
+                CASE c.method WHEN 'release_session' THEN json_extract(c.request,'$.body')
+                    ELSE json_extract(c.request,'$.body.session') END,
+                (SELECT t.session_id FROM runtime_attempts a JOIN runtime_turns t ON t.turn_id=a.turn_id
+                  WHERE a.attempt_id=c.target_attempt),
+                (SELECT json_extract(d.request,'$.body.session') FROM node_commands d
+                  WHERE d.dependency_operation=c.operation_id ORDER BY d.created, d.rowid LIMIT 1))
+             FROM node_commands c WHERE c.operation_id=?",
+            [op],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten())
+}
+
+/// `sessions.status` once a turn is over and nothing follows it: the legacy runner's values.
+fn settled_status(stop_reason: &str) -> &'static str {
+    if stop_reason == "error" {
+        "error"
+    } else {
+        "idle"
+    }
+}
+
+/// Sets `sessions.status` the way the legacy runner does (`running` from an attempt's start until
+/// the turn is over). A session the business side ended stays ended.
+fn status_in(tx: &Tx, session: &str, status: &str) -> Result<(), StoreError> {
+    let n = tx.execute(
+        "UPDATE sessions SET status=?1, updated=?2 WHERE id=?3 AND status NOT IN ('ended', ?1)",
+        rusqlite::params![status, now(), session],
+    )?;
+    if n > 0 {
+        tx.publish(steve_store::ChangeEvent::Session {
+            id: session.into(),
+            item_id: None,
+        });
+    }
+    Ok(())
+}
+
 /// A `system` entry of the session, for the people reading it.
 fn system_in(tx: &Tx, session: &str, text: &str) -> Result<(), StoreError> {
     rt::add_event_in(
@@ -2647,19 +2891,22 @@ pub fn decision_session(store: &Store, decision: &str) -> Option<String> {
 
 /// Whether `session` is bound to a Node (whether or not that Node is enabled in this process).
 pub fn bound(store: &Store, session: &str) -> bool {
-    store
-        .reader(|c| {
-            Ok::<_, StoreError>(c.query_row(
-                "SELECT EXISTS(SELECT 1 FROM runtime_sessions WHERE session_id=?)",
-                [session],
-                |r| r.get::<_, bool>(0),
-            )?)
-        })
-        // when unsure, as bound: never hand it to another backend
-        .unwrap_or(true)
+    // when unsure, as bound: never hand it to another backend
+    bound_strict(store, session).unwrap_or(true)
 }
 
-/// A message for a Node-bound session while its Node is not enabled here (STEVE_NODE off): it is
+/// [`bound`], with a read error as an error: for a decision that must not rest on a guess.
+pub fn bound_strict(store: &Store, session: &str) -> Result<bool, StoreError> {
+    store.reader(|c| {
+        Ok::<_, StoreError>(c.query_row(
+            "SELECT EXISTS(SELECT 1 FROM runtime_sessions WHERE session_id=?)",
+            [session],
+            |r| r.get::<_, bool>(0),
+        )?)
+    })
+}
+
+/// A message for a Node-bound session while its Node is not enabled here (STEVE_NODE_MODE off): it is
 /// queued, never given to another backend, and goes once the Node is back and reconciled.
 pub fn park(
     store: &Store,
@@ -2680,7 +2927,7 @@ pub fn park(
                 tx,
                 session,
                 "system",
-                json!({ "text": "该会话绑定在 Node 上，但 Node 未启用（STEVE_NODE），消息已排队，不会交给旧运行器。", "parked": true }),
+                json!({ "text": "该会话绑定在 Node 上，但 Node 未启用（STEVE_NODE_MODE），消息已排队，不会交给旧运行器。", "parked": true }),
                 V1,
                 None,
                 now(),
@@ -2772,5 +3019,139 @@ impl EventSink for Sink {
         })
         .await
         .map_err(|e| ApiError::new(ErrorCode::Internal, e.to_string()))?
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use steve_node_api::testkit::{FakeNode, build};
+
+    /// Counts what the runtime books after commits.
+    #[derive(Default)]
+    struct Seen {
+        finished: Mutex<Vec<String>>,
+        ended: Mutex<Vec<String>>,
+        started: Mutex<Vec<String>>,
+    }
+
+    impl NodeDomain for Seen {
+        fn turn_ended(&self, session: &str, _: &str, _: Option<String>) {
+            self.ended.lock().unwrap().push(session.into());
+        }
+        fn attempt_started(&self, _: &str, attempt: &str, _: i64, _: Option<i64>, _: i64) {
+            self.started.lock().unwrap().push(attempt.into());
+        }
+        fn attempt_finished(
+            &self,
+            _: &str,
+            attempt: &str,
+            _: &Completion,
+            _: &AttemptFacts,
+            _: i64,
+        ) {
+            self.finished.lock().unwrap().push(attempt.into());
+        }
+    }
+
+    async fn until(what: &str, f: impl Fn() -> bool) {
+        for _ in 0..1000 {
+            if f() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("timed out waiting for {what}");
+    }
+
+    /// Review L4: an attempt the Hub settles on its own word reaches the apply worker only once
+    /// its transaction committed. The worker draining its queue while that transaction is still
+    /// open (it runs on another thread) used to drop the settle for good, its statistics row
+    /// left open forever.
+    #[tokio::test]
+    async fn a_settle_drained_before_its_commit_still_ends_its_row() {
+        const S: &str = "s1";
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(
+            dir.path().join("steve.sqlite3"),
+            steve_store::FnPublisher(|_| {}),
+        )
+        .unwrap();
+        store.ensure_workspace().unwrap();
+        store
+            .transaction::<_, StoreError>(|tx| {
+                tx.execute(
+                    "INSERT INTO sessions(id,workspace_id,harness,cwd,status,created,updated) VALUES (?,'default','claude-code','.','active',1,1)",
+                    [S],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let node = FakeNode::new("n1");
+        let seen = Arc::new(Seen::default());
+        let rt = NodeRuntime::new(store.clone(), node.clone(), seen.clone());
+        node.connect(Arc::new(Sink(Arc::downgrade(&rt))));
+        rt.start();
+        rt.bind(&Binding {
+            session: S.into(),
+            resource: format!("item:{S}"),
+            prepare: PrepareKind::Scratch,
+            choice: build::choice(),
+            policy: build::policy(),
+        })
+        .unwrap();
+        rt.prompt(S, "first", "user", &[]).unwrap();
+        until("started", || !seen.started.lock().unwrap().is_empty()).await;
+        let attempt = seen.started.lock().unwrap()[0].clone();
+
+        let completion = Completion {
+            outcome: Outcome::Interrupted,
+            stop_reason: "error".into(),
+            error: None,
+            result: vec![],
+            continuation: None,
+            transient: false,
+            acted: false,
+        };
+        rt.tx(|tx| {
+            rt.settle_in(tx, S, &attempt, &completion)?;
+            // the apply worker drains between the settle and its commit
+            rt.book_settled();
+            assert!(
+                seen.finished.lock().unwrap().is_empty(),
+                "booked before the commit"
+            );
+            Ok(())
+        })
+        .unwrap();
+        until("row ended", || !seen.finished.lock().unwrap().is_empty()).await;
+        until("turn told", || !seen.ended.lock().unwrap().is_empty()).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            *seen.finished.lock().unwrap(),
+            std::slice::from_ref(&attempt),
+            "once"
+        );
+        assert_eq!(*seen.ended.lock().unwrap(), [S.to_string()], "once");
+
+        // a settle whose transaction rolls back is never booked
+        let r = rt.tx(|tx| {
+            rt.settle_in(tx, S, &attempt, &completion)?;
+            Err::<(), _>(StoreError::Conflict("rolled back".into()))
+        });
+        assert!(r.is_err());
+        rt.book_settled();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(seen.finished.lock().unwrap().len(), 1);
+        assert_eq!(seen.ended.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn exhausted_delays_double_from_two_seconds_up_to_a_minute() {
+        let d: Vec<i64> = (1..=8).map(super::exhausted_delay).collect();
+        assert_eq!(
+            d,
+            [2_000, 4_000, 8_000, 16_000, 32_000, 60_000, 60_000, 60_000]
+        );
     }
 }

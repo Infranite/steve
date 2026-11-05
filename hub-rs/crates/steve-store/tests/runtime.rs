@@ -270,6 +270,87 @@ fn inbox_conflicts_gaps_duplicates_and_transactional_apply() {
         .unwrap();
 }
 
+/// Issue: an applied event pruned from the inbox and delivered again was stored again (applied=0),
+/// to be applied a second time.
+#[test]
+fn a_pruned_redelivery_is_not_stored_again() {
+    let t = fresh();
+    let k = StreamKey {
+        node: "n",
+        stream: "s",
+        epoch: "e",
+    };
+    t.store
+        .transaction::<_, StoreError>(|tx| {
+            assert!(inbox_insert_in(tx, k, 1, "e1", &json!({"n":1}), 1)?);
+            assert!(inbox_insert_in(tx, k, 2, "e2", &json!({"n":2}), 1)?);
+            assert!(mark_applied_in(tx, k, 1)?);
+            assert!(mark_applied_in(tx, k, 2)?);
+            // as the retention prune does
+            tx.execute(
+                "DELETE FROM node_event_inbox WHERE node_id='n' AND applied=1 AND seq=1",
+                [],
+            )?;
+            assert!(!inbox_insert_in(tx, k, 1, "e1", &json!({"n":1}), 9)?);
+            // its payload can no longer be compared: nothing is stored either way
+            assert!(!inbox_insert_in(tx, k, 1, "e1", &json!({"n":99}), 9)?);
+            let rows: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM node_event_inbox WHERE node_id='n' AND seq=1",
+                [],
+                |r| r.get(0),
+            )?;
+            assert_eq!(rows, 0);
+            assert_eq!(
+                watermarks_in(tx, k)?,
+                Watermarks {
+                    durable: 2,
+                    applied: 2
+                }
+            );
+            // the kept row still compares, and the next position is new
+            assert!(inbox_insert_in(tx, k, 2, "e2", &json!({"n":99}), 9).is_err());
+            assert!(inbox_insert_in(tx, k, 3, "e3", &json!({"n":3}), 9)?);
+            assert_eq!(watermarks_in(tx, k)?.durable, 3);
+            Ok(())
+        })
+        .unwrap();
+}
+
+/// Issue: a send refused after an uncertain one reset maybe_sent to 0, so a stop settled on the Hub
+/// a command whose first send may still reach the Node.
+#[test]
+fn maybe_sent_stays_once_a_send_was_uncertain() {
+    let t = fresh();
+    let maybe_sent = |tx: &steve_store::Tx<'_>| -> Result<i64> {
+        Ok(tx.query_row(
+            "SELECT maybe_sent FROM node_commands WHERE operation_id='op'",
+            [],
+            |r| r.get(0),
+        )?)
+    };
+    t.store
+        .transaction::<_, StoreError>(|tx| {
+            command(tx, "op", None)?;
+            assert_eq!(maybe_sent(tx)?, 0);
+            // refused before acceptance: never sent
+            let l = lease_command_in(tx, "n", "w", 1, 10)?.unwrap();
+            assert!(!l.maybe_sent);
+            assert_eq!(maybe_sent(tx)?, 1, "in flight");
+            assert!(retry_command_in(tx, &l, 2, 2, false)?);
+            assert_eq!(maybe_sent(tx)?, 0);
+            // uncertain, then refused: still maybe sent
+            let l = lease_command_in(tx, "n", "w", 3, 10)?.unwrap();
+            assert!(retry_command_in(tx, &l, 4, 4, true)?);
+            assert_eq!(maybe_sent(tx)?, 1);
+            let l = lease_command_in(tx, "n", "w", 5, 10)?.unwrap();
+            assert!(l.maybe_sent);
+            assert!(retry_command_in(tx, &l, 6, 6, false)?);
+            assert_eq!(maybe_sent(tx)?, 1);
+            Ok(())
+        })
+        .unwrap();
+}
+
 #[test]
 fn receipts_never_regress_and_terminal_conflicts_are_visible() {
     let t = fresh();
@@ -375,20 +456,30 @@ fn leases_fence_stale_workers_and_wait_for_successful_dependencies() {
         .transaction::<_, StoreError>(|tx| {
             command(tx, "open", None)?;
             command(tx, "run", Some("open"))?;
-            let a = lease_command_in(tx, "worker", 1, 10)?.unwrap();
+            let a = lease_command_in(tx, "n", "worker", 1, 10)?.unwrap();
             assert_eq!(a.operation, "open");
-            assert!(lease_command_in(tx, "other", 2, 11)?.is_none());
-            let b = lease_command_in(tx, "worker", 10, 20)?.unwrap();
+            assert!(lease_command_in(tx, "n", "other", 2, 11)?.is_none());
+            let b = lease_command_in(tx, "n", "worker", 10, 20)?.unwrap();
             assert!(b.generation > a.generation);
             assert!(!retry_command_in(tx, &a, 11, 12, true)?);
             assert!(retry_command_in(tx, &b, 11, 12, true)?);
-            assert!(lease_command_in(tx, "x", 11, 20)?.is_none());
+            assert!(lease_command_in(tx, "n", "x", 11, 20)?.is_none());
             merge_receipt_in(tx, "open", ReceiptState::Finished, true, &json!({}), 12)?;
-            assert_eq!(lease_command_in(tx, "x", 12, 22)?.unwrap().operation, "run");
+            assert_eq!(
+                lease_command_in(tx, "n", "x", 12, 22)?.unwrap().operation,
+                "run"
+            );
             command(tx, "failed", None)?;
             command(tx, "blocked", Some("failed"))?;
             merge_receipt_in(tx, "failed", ReceiptState::Finished, false, &json!({}), 13)?;
-            assert!(lease_command_in(tx, "x", 13, 23)?.is_none());
+            assert!(lease_command_in(tx, "n", "x", 13, 23)?.is_none());
+            // another Node's coordinator never leases this Node's commands
+            command(tx, "mine", None)?;
+            assert!(lease_command_in(tx, "other_node", "y", 14, 24)?.is_none());
+            assert_eq!(
+                lease_command_in(tx, "n", "y", 14, 24)?.unwrap().operation,
+                "mine"
+            );
             Ok(())
         })
         .unwrap();
@@ -521,11 +612,12 @@ fn permission_rows_replay_cas_due_and_per_attempt() {
             let r = permission_in(tx, "n", "a", "p1")?.unwrap();
             assert_eq!((r.decision.as_str(), r.state.as_str()), ("d1", "waiting"));
             assert!(permission_in(tx, "n", "other", "p1")?.is_none());
-            let due: Vec<String> = due_permissions_in(tx, 200, 10)?
+            let due: Vec<String> = due_permissions_in(tx, "n", 200, 10)?
                 .into_iter()
                 .map(|r| r.decision)
                 .collect();
             assert_eq!(due, ["d1"]);
+            assert!(due_permissions_in(tx, "other_node", 200, 10)?.is_empty());
             assert!(permission_cas_in(
                 tx,
                 "d1",
@@ -539,7 +631,7 @@ fn permission_rows_replay_cas_due_and_per_attempt() {
                 tx, "d1", r.revision, "expired", None, 2
             )?);
             assert!(
-                due_permissions_in(tx, 1_000, 10)?
+                due_permissions_in(tx, "n", 1_000, 10)?
                     .iter()
                     .all(|r| r.decision == "d2")
             );

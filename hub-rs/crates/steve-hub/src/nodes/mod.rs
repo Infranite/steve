@@ -1,0 +1,154 @@
+//! Remote Nodes (N2): pairing, the `/node/ws` listener, the registry of live links, the guards
+//! every Node request passes and the fleet of per-Node coordinators.
+//!
+//! Off by default: nothing here is mounted unless `STEVE_NODE_LISTEN=1`. The Hub decides, the
+//! Node executes; ACP and MCP never cross the link. The listener rides the Hub's own port and
+//! takes connections only from a loopback peer: a remote Node comes in through the TLS-terminating
+//! proxy on the Hub's machine (or is on the same machine, over loopback).
+
+pub mod fleet;
+pub mod guard;
+pub mod listener;
+pub mod pairing;
+pub mod registry;
+
+use std::net::SocketAddr;
+use std::sync::Arc;
+
+use axum::Router;
+use axum::http::HeaderMap;
+use axum::routing::{get, post};
+use rusqlite::OptionalExtension;
+use steve_store::{Store, StoreError};
+
+pub use fleet::NodeFleet;
+pub use registry::NodeRegistry;
+
+pub fn now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// `STEVE_NODE_LISTEN=1`.
+pub fn enabled(var: impl Fn(&str) -> Option<String>) -> bool {
+    var("STEVE_NODE_LISTEN").as_deref() == Some("1")
+}
+
+/// The TCP peer, when the server records it.
+pub struct Peer(pub Option<SocketAddr>);
+
+impl<S: Send + Sync> axum::extract::FromRequestParts<S> for Peer {
+    type Rejection = std::convert::Infallible;
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _: &S,
+    ) -> Result<Self, Self::Rejection> {
+        Ok(Peer(
+            parts
+                .extensions
+                .get::<axum::extract::ConnectInfo<SocketAddr>>()
+                .map(|c| c.0),
+        ))
+    }
+}
+
+/// Only loopback peers: the proxy in front of the Hub, or a Node on this machine.
+pub(crate) fn peer_allowed(peer: Option<SocketAddr>, _headers: &HeaderMap) -> bool {
+    peer.as_ref().is_some_and(crate::app::is_loopback)
+}
+
+pub struct NodeService {
+    pub store: Store,
+    pub hub_id: String,
+    /// `sha256:…` of the Hub's certificate when it terminates TLS itself (`STEVE_NODE_TLS_PIN`).
+    pub pin: Option<String>,
+    pub registry: Arc<NodeRegistry>,
+    pub fleet: Arc<NodeFleet>,
+    pub limiter: pairing::Limiter,
+    /// Taken while a link is checked against the store and installed, and while the owner's
+    /// revoke/pause/resume acts on the live link: one cannot slip between the other's steps.
+    pub(crate) links: tokio::sync::Mutex<()>,
+}
+
+const HUB_ID_KEY: &str = "node.hub_id";
+
+/// This Hub's random id, made once and kept in the settings.
+pub fn hub_id(store: &Store) -> Result<String, StoreError> {
+    store.transaction(|tx| {
+        let old: Option<String> = tx
+            .query_row(
+                "SELECT value FROM settings WHERE workspace_id='default' AND key=?",
+                [HUB_ID_KEY],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(v) = old {
+            return Ok(v);
+        }
+        let raw = steve_node_wire::identity::random::<12>()
+            .map_err(|e| StoreError::Conflict(e.to_string()))?;
+        let id = format!("hub_{}", hex::encode(raw));
+        tx.execute(
+            "INSERT INTO settings(workspace_id,key,value,updated) VALUES ('default',?,?,?)",
+            rusqlite::params![HUB_ID_KEY, id, now()],
+        )?;
+        Ok(id)
+    })
+}
+
+impl NodeService {
+    pub fn new(
+        store: Store,
+        fleet: Arc<NodeFleet>,
+        pin: Option<String>,
+    ) -> Result<Arc<Self>, StoreError> {
+        Ok(Arc::new(NodeService {
+            hub_id: hub_id(&store)?,
+            store,
+            pin,
+            registry: Arc::new(NodeRegistry::default()),
+            fleet,
+            limiter: pairing::Limiter::default(),
+            links: tokio::sync::Mutex::new(()),
+        }))
+    }
+}
+
+/// The service when `STEVE_NODE_LISTEN=1`, over `fleet`; `None` otherwise (and on a store error,
+/// which is logged: the Hub runs on without remote Nodes, their sessions wait).
+pub fn from_vars(
+    store: &Store,
+    fleet: Arc<NodeFleet>,
+    var: impl Fn(&str) -> Option<String>,
+) -> Option<Arc<NodeService>> {
+    if !enabled(&var) {
+        return None;
+    }
+    let pin = var("STEVE_NODE_TLS_PIN").filter(|p| !p.is_empty());
+    match NodeService::new(store.clone(), fleet, pin) {
+        Ok(s) => Some(s),
+        Err(e) => {
+            tracing::error!("remote nodes disabled: {e}");
+            None
+        }
+    }
+}
+
+/// `/node/pair` and `/node/ws`: no login, the code or the signature is the credential.
+pub fn node_router(svc: Arc<NodeService>) -> Router {
+    Router::new()
+        .route("/node/pair", post(pairing::claim))
+        .route("/node/ws", get(listener::upgrade))
+        .with_state(svc)
+}
+
+/// The owner's routes, mounted under `/api` behind the login.
+pub fn api_router(svc: Arc<NodeService>) -> Router {
+    Router::new()
+        .route("/nodes", get(pairing::list))
+        .route("/nodes/pairings", post(pairing::create))
+        .route("/nodes/{id}/{action}", post(pairing::act))
+        .with_state(svc)
+}

@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use steve_store::{ModelUsage, NewUsage, Store};
 
 use crate::error::Result;
-use crate::gateway::{Attempt, ModelGateway, OnText, Printed, Tier};
+use crate::gateway::{Attempt, ModelGateway, OnText, Printed, ThinkTools, Tier};
 
 pub use steve_modules::gateway::{CallTag, current_tag, for_item, purpose, tagged};
 
@@ -139,9 +139,9 @@ impl ModelGateway for RecordingGateway {
         prompt: &str,
         tier: Tier,
         timeout: Duration,
-        extra: &[String],
+        tools: &ThinkTools,
     ) -> Result<Printed> {
-        self.attempt(prompt, tier, timeout, extra, None)
+        self.attempt(prompt, tier, timeout, tools, None)
             .await
             .result
     }
@@ -150,10 +150,10 @@ impl ModelGateway for RecordingGateway {
         prompt: &str,
         tier: Tier,
         timeout: Duration,
-        extra: &[String],
+        tools: &ThinkTools,
         on_text: OnText<'_>,
     ) -> Result<Printed> {
-        self.attempt(prompt, tier, timeout, extra, Some(on_text))
+        self.attempt(prompt, tier, timeout, tools, Some(on_text))
             .await
             .result
     }
@@ -162,12 +162,12 @@ impl ModelGateway for RecordingGateway {
         prompt: &str,
         tier: Tier,
         timeout: Duration,
-        extra: &[String],
+        tools: &ThinkTools,
         on_text: Option<OnText<'_>>,
     ) -> Attempt {
         let a = self
             .inner
-            .attempt(prompt, tier, timeout, extra, on_text)
+            .attempt(prompt, tier, timeout, tools, on_text)
             .await;
         self.record(&a);
         a
@@ -210,11 +210,13 @@ mod tests {
         std::fs::write(&exe, script).unwrap();
         std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
         Arc::new(ClaudeCli {
-            codex: None,
-            executable: exe,
+            one: crate::LocalPrint {
+                codex: None,
+                executable: exe,
+                cwd: dir.into(),
+            },
             fast: vec!["busy".into(), "haiku".into()],
             smart: vec!["slow".into(), "dead".into()],
-            cwd: dir.into(),
             models: None,
         })
     }
@@ -302,6 +304,119 @@ mod tests {
         assert!(usage_of(&json!({"result":"x"}), "m").is_empty());
     }
 
+    /// The rows the gateway booked before the print run moved to steve-print: `steve_stats::normalize`
+    /// straight on the harness's JSON.
+    fn rows_before(d: &Value, model: &str) -> Vec<ModelUsage> {
+        let total = d.get("total_cost_usd").and_then(Value::as_f64);
+        let tokens = |u: &Value| {
+            steve_stats::normalize("claude-cli", steve_stats::RawUsage::from_json(u), true)
+        };
+        let mut rows: Vec<ModelUsage> = match (d.get("modelUsage"), d.get("usage")) {
+            (Some(Value::Object(m)), _) if !m.is_empty() => m
+                .iter()
+                .map(|(k, u)| ModelUsage {
+                    model: k.clone(),
+                    tokens: tokens(u),
+                    cost_reported: u.get("costUSD").and_then(Value::as_f64),
+                    detail: json!({"scope": "all"}),
+                })
+                .collect(),
+            (_, Some(u @ Value::Object(_))) => vec![ModelUsage {
+                model: model.to_string(),
+                tokens: tokens(u),
+                cost_reported: None,
+                detail: json!({"scope": "main"}),
+            }],
+            _ if total.is_some() => vec![ModelUsage {
+                model: model.to_string(),
+                detail: json!({"scope": "main"}),
+                ..ModelUsage::default()
+            }],
+            _ => vec![],
+        };
+        if rows.iter().all(|r| r.cost_reported.is_none())
+            && let Some(r) = rows.first_mut()
+        {
+            r.cost_reported = total;
+        }
+        rows
+    }
+
+    /// UsageReport → ModelUsage gives exactly the rows of before, cost and reasoning included.
+    #[test]
+    fn print_reports_book_the_same_rows_as_before() {
+        let recorded: Value = serde_json::from_str(RECORDED).unwrap();
+        let busy: Value = serde_json::from_str(BUSY).unwrap();
+        let mut only_usage = recorded.clone();
+        only_usage.as_object_mut().unwrap().remove("modelUsage");
+        let cases = [
+            recorded,
+            busy,
+            only_usage,
+            json!({"result":"x","total_cost_usd":0.5,"modelUsage":{
+                "claude-opus-5-5":{"inputTokens":10,"outputTokens":20,"costUSD":0.4,"reasoningOutputTokens":7},
+                "claude-haiku-5-5":{"inputTokens":1,"outputTokens":null,"costUSD":0.1}}}),
+            json!({"total_cost_usd": 0.1 + 0.2}),
+            json!({"result": "x"}),
+        ];
+        for (i, d) in cases.iter().enumerate() {
+            assert_eq!(
+                usage_of(d, "asked-for"),
+                rows_before(d, "asked-for"),
+                "case {i}"
+            );
+        }
+        assert_eq!(usage_of(&cases[0], "x")[0].cost_reported, Some(0.000829045));
+        assert_eq!(usage_of(&cases[3], "x")[0].tokens.reasoning, Some(7));
+    }
+
+    /// steve-print reads the same Tokens as the statistics' normalizer for the print harnesses.
+    #[test]
+    fn print_tokens_match_the_normalizer() {
+        let cases: &[(&str, Value)] = &[
+            (
+                "claude-cli",
+                json!({"input_tokens": 2, "cache_creation_input_tokens": 5727, "cache_read_input_tokens": 11097, "output_tokens": 4}),
+            ),
+            (
+                "claude-cli",
+                json!({"inputTokens": 2, "outputTokens": 4, "cacheReadInputTokens": 11097, "cacheCreationInputTokens": 5727, "costUSD": 0.0008}),
+            ),
+            (
+                "claude-cli",
+                json!({"inputTokens": 5, "outputTokens": null, "cachedReadTokens": null}),
+            ),
+            ("claude-cli", json!({})),
+            ("claude-cli", json!(null)),
+            (
+                "codex",
+                json!({"inputTokens": 1000, "outputTokens": 300, "cachedReadTokens": 800, "thoughtTokens": 120}),
+            ),
+            (
+                "codex",
+                json!({"input_tokens": 100, "cached_input_tokens": 40, "output_tokens": 5, "reasoning_output_tokens": 3}),
+            ),
+            ("codex", json!({"inputTokens": 10, "cachedReadTokens": 800})),
+            ("codex", json!({"inputTokens": 10, "outputTokens": 1})),
+            ("codex", json!({"input_tokens": 12.0, "output_tokens": 3})),
+        ];
+        for (i, (h, v)) in cases.iter().enumerate() {
+            let want = steve_stats::normalize(h, steve_stats::RawUsage::from_json(v), true);
+            let report = steve_print::UsageReport {
+                report_id: "r".into(),
+                model: Some("m".into()),
+                meter_epoch: steve_print::Epoch::new("e").unwrap(),
+                scope: steve_print::UsageScope::Main,
+                measurement: steve_print::Measurement::Final,
+                tokens: steve_print::tokens(v, *h == "codex"),
+                context_used: None,
+                context_limit: None,
+                cost: None,
+            };
+            assert_eq!(crate::gateway::model_usage(report).tokens, want, "case {i}");
+        }
+    }
+
     #[tokio::test]
     async fn a_call_that_falls_back_is_one_row_with_two_attempts() {
         let dir = tempfile::tempdir().unwrap();
@@ -310,7 +425,7 @@ mod tests {
         let p = tagged(
             "route",
             "default",
-            gw.call("hi", Tier::Fast, Duration::from_secs(10), &[]),
+            gw.call("hi", Tier::Fast, Duration::from_secs(10), &ThinkTools::None),
         )
         .await
         .unwrap();
@@ -359,7 +474,12 @@ mod tests {
         // `slow` times out, then `dead` fails at once; the bound leaves room for a loaded test run to
         // spawn the script (300 ms was flaky)
         let e = gw
-            .call("hi", Tier::Smart, Duration::from_millis(1500), &[])
+            .call(
+                "hi",
+                Tier::Smart,
+                Duration::from_millis(1500),
+                &ThinkTools::None,
+            )
             .await
             .unwrap_err();
         assert_eq!(e.to_string(), "Command failed: boom");
@@ -420,20 +540,26 @@ mod tests {
         let seen = std::sync::Mutex::new(0);
         let fast_only = RecordingGateway::new(
             Arc::new(ClaudeCli {
-                codex: None,
-                executable: dir.path().join("claude"),
+                one: crate::LocalPrint {
+                    codex: None,
+                    executable: dir.path().join("claude"),
+                    cwd: dir.path().into(),
+                },
                 fast: vec!["haiku".into()],
                 smart: vec!["haiku".into()],
-                cwd: dir.path().into(),
                 models: None,
             }),
             s.clone(),
         );
         purpose(
             "chat",
-            fast_only.call_streaming("hi", Tier::Smart, Duration::from_secs(10), &[], &|_| {
-                *seen.lock().unwrap() += 1
-            }),
+            fast_only.call_streaming(
+                "hi",
+                Tier::Smart,
+                Duration::from_secs(10),
+                &ThinkTools::None,
+                &|_| *seen.lock().unwrap() += 1,
+            ),
         )
         .await
         .unwrap();
@@ -454,5 +580,116 @@ mod tests {
             *seen.lock().unwrap() == 0,
             "the result line alone has no deltas"
         );
+    }
+
+    /// One try as [`Scripted`] saw it: model, effort, Codex, timeout in ms, streaming.
+    type Try = (String, Option<String>, bool, u128, bool);
+
+    /// A [`crate::gateway::OneModel`] that answers like [`fake`]'s script without a process, and notes
+    /// what each try was given.
+    struct Scripted {
+        tries: std::sync::Mutex<Vec<Try>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::gateway::OneModel for Scripted {
+        async fn once(
+            &self,
+            call: &crate::gateway::OneCall<'_>,
+            model: &str,
+            effort: Option<&str>,
+            on_text: Option<crate::gateway::OnText<'_>>,
+        ) -> crate::gateway::Tried {
+            self.tries.lock().unwrap().push((
+                model.to_string(),
+                effort.map(str::to_string),
+                call.codex,
+                call.timeout.as_millis(),
+                on_text.is_some(),
+            ));
+            let json = |t: &str| serde_json::from_str::<Value>(t).unwrap();
+            let (reply, usage) = match model {
+                "haiku" => (
+                    Ok(("ok".to_string(), Some(0.000829045))),
+                    usage_of(&json(RECORDED), model),
+                ),
+                "busy" => (
+                    Err(crate::error::msg("API Error: 503 upstream unavailable")),
+                    usage_of(&json(BUSY), model),
+                ),
+                "slow" => (
+                    Err(crate::error::msg(format!(
+                        "Command timed out after {} ms",
+                        call.timeout.as_millis()
+                    ))),
+                    vec![],
+                ),
+                _ => (Err(crate::error::msg("Command failed: boom")), vec![]),
+            };
+            crate::gateway::Tried { reply, usage }
+        }
+    }
+
+    /// What the statistics see of an attempt, its wall time left out.
+    fn seen(a: &Attempt) -> String {
+        let result = match &a.result {
+            Ok(p) => format!(
+                "ok {:?} {} {:?} {} {:?}",
+                p.text, p.model, p.cost_usd, p.attempts, p.usage
+            ),
+            Err(e) => format!("err {e}"),
+        };
+        format!(
+            "{result} | {} {} {:?} {:?} {:?}",
+            a.attempts, a.model, a.failures, a.usage, a.harness
+        )
+    }
+
+    /// The fallback over a scripted single model gives the same attempts as over the CLI: model order,
+    /// failures, merged usage, the answer and its cost.
+    #[tokio::test]
+    async fn the_fallback_over_a_scripted_model_matches_the_cli() {
+        let dir = tempfile::tempdir().unwrap();
+        let cli = fake(dir.path());
+        let scripted = crate::gateway::Fallback {
+            one: Scripted {
+                tries: Default::default(),
+            },
+            fast: vec!["busy".into(), "haiku".into()],
+            smart: vec!["slow".into(), "dead".into()],
+            models: None,
+        };
+        let seen_text = std::sync::Mutex::new(0);
+        let on_text = |_: &str| *seen_text.lock().unwrap() += 1;
+        for (tier, timeout, streaming) in [
+            (Tier::Fast, Duration::from_secs(10), false),
+            (Tier::Fast, Duration::from_secs(10), true),
+            (Tier::Smart, Duration::from_millis(1500), false),
+        ] {
+            let text: Option<crate::gateway::OnText<'_>> = streaming.then_some(&on_text);
+            let want = cli
+                .attempt("hi", tier, timeout, &ThinkTools::None, text)
+                .await;
+            let got = scripted
+                .attempt("hi", tier, timeout, &ThinkTools::None, text)
+                .await;
+            assert_eq!(seen(&got), seen(&want), "{tier:?} streaming {streaming}");
+        }
+        let a = &tries(&scripted);
+        assert_eq!(
+            a,
+            &[
+                ("busy".to_string(), None, false, 10_000, false),
+                ("haiku".into(), None, false, 10_000, false),
+                ("busy".into(), None, false, 10_000, true),
+                ("haiku".into(), None, false, 10_000, true),
+                ("slow".into(), None, false, 1500, false),
+                ("dead".into(), None, false, 1500, false),
+            ]
+        );
+    }
+
+    fn tries(f: &crate::gateway::Fallback<Scripted>) -> Vec<Try> {
+        f.one.tries.lock().unwrap().clone()
     }
 }

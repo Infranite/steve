@@ -293,13 +293,15 @@ async fn route_eval_real_model() {
         },
     );
     let gw = std::sync::Arc::new(ClaudeCli {
-        codex: None,
-        executable: std::env::var("CLAUDE_CODE_EXECUTABLE")
-            .unwrap_or_else(|_| "/opt/homebrew/bin/claude".into())
-            .into(),
+        one: crate::LocalPrint {
+            codex: None,
+            executable: std::env::var("CLAUDE_CODE_EXECUTABLE")
+                .unwrap_or_else(|_| "/opt/homebrew/bin/claude".into())
+                .into(),
+            cwd: dir.path().to_path_buf(),
+        },
         fast: models.clone(),
         smart: models,
-        cwd: dir.path().to_path_buf(),
         models: Some(resolver),
     });
     // STEVE_ROUTE_EVAL_PARALLEL=1 runs the cases one after another, as a conversation does (cache measurements)
@@ -318,7 +320,12 @@ async fn route_eval_real_model() {
             let r = crate::stats::tagged(
                 "route",
                 "",
-                gw.call(&prompt, Tier::Fast, Duration::from_secs(60), &[]),
+                gw.call(
+                    &prompt,
+                    Tier::Fast,
+                    Duration::from_secs(60),
+                    &gateway::ThinkTools::None,
+                ),
             )
             .await;
             let ms = t0.elapsed().as_millis() as u64;

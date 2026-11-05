@@ -296,7 +296,7 @@ impl Engine {
         let gw = self.core().gw_arc();
         let (ws, item_id) = (d.workspace_id.clone(), d.item_id.clone());
         let reply = block_on(async move {
-            let call = gw.call(&p, Tier::Smart, TIMEOUT, &[]);
+            let call = gw.call(&p, Tier::Smart, TIMEOUT, &crate::gateway::ThinkTools::None);
             match item_id {
                 Some(i) => {
                     crate::stats::tagged("yolo", &ws, crate::stats::for_item(&i, call)).await

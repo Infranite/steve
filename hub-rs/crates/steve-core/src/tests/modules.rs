@@ -567,9 +567,9 @@ impl ModelGateway for Costly {
         prompt: &str,
         tier: Tier,
         _: Duration,
-        extra: &[String],
+        tools: &crate::gateway::ThinkTools,
     ) -> crate::Result<Printed> {
-        assert!(extra.is_empty());
+        assert_eq!(*tools, crate::gateway::ThinkTools::None);
         Ok(Printed {
             text: format!("{tier:?}:{prompt}"),
             model: format!("m-{tier:?}"),
@@ -632,11 +632,13 @@ async fn claude_cli_falls_back_down_the_tier_and_reports_total_cost() {
     .unwrap();
     std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
     let cli: Arc<dyn ModelGateway> = Arc::new(ClaudeCli {
-        codex: None,
-        executable: exe,
+        one: crate::LocalPrint {
+            codex: None,
+            executable: exe,
+            cwd: dir.path().into(),
+        },
         fast: vec!["bad".into(), "good".into()],
         smart: vec![],
-        cwd: dir.path().into(),
         models: None,
     });
     let o = SharedGateway(cli.clone())

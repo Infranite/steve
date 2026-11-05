@@ -91,6 +91,8 @@ export default {
     docs_other: "{{count}} 篇",
     chunks_other: "{{count}} 段",
     skipped: "跳过 {{count}}",
+    kept: "{{count}} 篇这次没读到，先保留",
+    incomplete: "部分没读到",
     syncing: "正在同步…",
     lastSync: "上次同步 {{time}}",
     neverSynced: "还没同步",

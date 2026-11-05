@@ -55,16 +55,17 @@ pub struct Attempt {
 /// Told what the model has written so far in its current message, each time it grows.
 pub type OnText<'a> = &'a (dyn Fn(&str) + Send + Sync);
 
-/// One model call with fallback; implemented by [`ClaudeCli`], faked in tests.
+/// One model call with fallback; implemented by [`Fallback`] ([`ClaudeCli`] in process), faked in tests.
 #[async_trait]
 pub trait ModelGateway: Send + Sync {
-    /// `claudePrintWith`: `extra` are CLI arguments (e.g. `--allowedTools Read` for a chat answer that reads attachments).
+    /// `claudePrintWith`: `tools` are what the call may use besides answering (a chat answer that reads
+    /// its attachments: [`ThinkTools::Read`]); most calls use none.
     async fn call(
         &self,
         prompt: &str,
         tier: Tier,
         timeout: Duration,
-        extra: &[String],
+        tools: &ThinkTools,
     ) -> Result<Printed>;
     /// [`ModelGateway::call`] that reports the text while it is generated (a chat answer shown as it is
     /// written). Without streaming, `on_text` hears the whole text once.
@@ -73,16 +74,19 @@ pub trait ModelGateway: Send + Sync {
         prompt: &str,
         tier: Tier,
         timeout: Duration,
-        extra: &[String],
+        tools: &ThinkTools,
         on_text: OnText<'_>,
     ) -> Result<Printed> {
-        let p = self.call(prompt, tier, timeout, extra).await?;
+        let p = self.call(prompt, tier, timeout, tools).await?;
         on_text(&p.text);
         Ok(p)
     }
     /// `claudePrint`: the text only.
     async fn print(&self, prompt: &str, tier: Tier, timeout: Duration) -> Result<String> {
-        Ok(self.call(prompt, tier, timeout, &[]).await?.text)
+        Ok(self
+            .call(prompt, tier, timeout, &ThinkTools::None)
+            .await?
+            .text)
     }
     /// [`ModelGateway::call`] (or [`ModelGateway::call_streaming`] with `on_text`) that also tells, when
     /// the call fails, how many models were tried and what they used; for [`crate::stats::RecordingGateway`].
@@ -91,13 +95,13 @@ pub trait ModelGateway: Send + Sync {
         prompt: &str,
         tier: Tier,
         timeout: Duration,
-        extra: &[String],
+        tools: &ThinkTools,
         on_text: Option<OnText<'_>>,
     ) -> Attempt {
         let t0 = Instant::now();
         let result = match on_text {
-            Some(f) => self.call_streaming(prompt, tier, timeout, extra, f).await,
-            None => self.call(prompt, tier, timeout, extra).await,
+            Some(f) => self.call_streaming(prompt, tier, timeout, tools, f).await,
+            None => self.call(prompt, tier, timeout, tools).await,
         };
         let ms = elapsed_ms(t0);
         match result {
@@ -127,509 +131,186 @@ fn elapsed_ms(t0: Instant) -> u64 {
     u64::try_from(t0.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
-/// One run of the CLI: its reply (text and `total_cost_usd`) or error, and the tokens it reported either way.
-struct Tried {
-    reply: Result<(String, Option<f64>)>,
-    usage: Vec<ModelUsage>,
+/// One try of one model ([`OneModel::once`]): its reply (text and `total_cost_usd`) or error, and the
+/// tokens it reported either way (a failed try spent them too).
+pub struct Tried {
+    pub reply: Result<(String, Option<f64>)>,
+    pub usage: Vec<ModelUsage>,
 }
 
 impl Tried {
-    fn failed(e: CoreError) -> Tried {
+    /// A try that failed before the model ran (nothing spent).
+    pub fn failed(e: CoreError) -> Tried {
         Tried {
             reply: Err(e),
             usage: vec![],
         }
     }
-    fn of(d: &Value, model: &str) -> Tried {
+
+    /// A [`steve_print`] run in the gateway's terms: its error in Steve's words, its usage as rows.
+    fn of(ran: steve_print::Ran, codex: bool) -> Tried {
         Tried {
-            reply: result_of(d),
-            usage: usage_of(d, model),
+            reply: ran
+                .reply
+                .map(|r| (r.text, r.cost.as_ref().and_then(steve_print::cost_f64)))
+                .map_err(|e| print_error(e, codex)),
+            usage: ran.usage.into_iter().map(model_usage).collect(),
         }
     }
 }
 
-/// Steve's judgments through a harness CLI in `STEVE_HOME/scratch`, each model of the list in turn: the
-/// purpose's harness and list from 设置 · 模型 ([`crate::models::Models::for_call`], Steve's bot unless
-/// overridden) when `models` is set, else the tier's on Claude Code.
+/// What a failed print run says (`codex`: stderr is cut to 300 characters).
+fn print_error(e: steve_print::PrintError, codex: bool) -> CoreError {
+    use steve_print::PrintError as P;
+    match e {
+        P::Timeout(t) => msg(format!("Command timed out after {} ms", t.as_millis())),
+        P::Failed(err) if codex => msg(format!("Command failed: {}", js_head(&err, 300))),
+        P::Failed(err) => msg(format!("Command failed: {err}")),
+        P::Harness { text, .. } => msg(js_head(&text, 300).to_string()),
+        P::CodexFailed => msg("Codex 失败"),
+        P::NoResult => msg("harness 没有返回结果"),
+        P::NoOutput => msg("harness 没有输出"),
+        P::Io(e) => CoreError::Io(e),
+    }
+}
+
+/// A usage report of a print run as the statistics' row (its dollars back to the same `f64`).
+pub fn model_usage(r: steve_print::UsageReport) -> ModelUsage {
+    use steve_print::UsageScope;
+    let n = |x: Option<u64>| x.and_then(|x| i64::try_from(x).ok());
+    let scope = match r.scope {
+        UsageScope::All => "all",
+        UsageScope::Main => "main",
+        UsageScope::Background => "background",
+    };
+    ModelUsage {
+        model: r.model.unwrap_or_default(),
+        tokens: steve_store::Tokens {
+            input: n(r.tokens.input),
+            output: n(r.tokens.output),
+            cache_read: n(r.tokens.cache_read),
+            cache_write: n(r.tokens.cache_write),
+            reasoning: n(r.tokens.reasoning),
+        },
+        cost_reported: r.cost.as_ref().and_then(steve_print::cost_f64),
+        detail: json!({"scope": scope}),
+    }
+}
+
+/// One think call as [`Fallback`] hands it to each model in turn: everything but the model and effort,
+/// which the fallback chooses.
+pub struct OneCall<'a> {
+    pub prompt: &'a str,
+    /// Per try, not for the whole fallback.
+    pub timeout: Duration,
+    pub tools: &'a ThinkTools,
+    /// The purpose runs on Codex (设置 · 模型), else on Claude Code.
+    pub codex: bool,
+    /// The images of the call ([`with_images`]), the same for every model tried.
+    pub images: &'a [steve_print::Image],
+}
+
+/// A single attempt of one model, with no fallback of its own: in process ([`LocalPrint`]), or elsewhere
+/// (a Node). [`Fallback`] keeps the policy around it: which models, in which order, and what the
+/// statistics see of the tries.
+#[async_trait]
+pub trait OneModel: Send + Sync {
+    /// Runs `model` (empty: the harness's default) once; streaming when `on_text` is given.
+    async fn once(
+        &self,
+        call: &OneCall<'_>,
+        model: &str,
+        effort: Option<&str>,
+        on_text: Option<OnText<'_>>,
+    ) -> Tried;
+}
+
+/// Steve's judgments through a harness CLI in `STEVE_HOME/scratch`, in this process.
 ///
 /// - Claude Code: `claude -p <prompt> --output-format json --model <m>`.
 /// - Codex: `codex exec --json --ephemeral -s read-only [-m <m>] -` with the prompt on stdin (see
-///   [`codex_args`]).
-pub struct ClaudeCli {
+///   [`steve_print::codex_args`]).
+pub struct LocalPrint {
     pub executable: PathBuf,
     /// `codex` for purposes that run on Codex; `None`: such calls fail with a clear error.
     pub codex: Option<PathBuf>,
+    pub cwd: PathBuf,
+}
+
+#[async_trait]
+impl OneModel for LocalPrint {
+    /// One run of `model` through [`steve_print`]: Codex when `codex`, else `claude -p` (json, or
+    /// stream-json when `on_text` is given or there are images). `effort` comes from 设置 · 模型 and is
+    /// kept apart from `tools`, so a call without tools keeps its cache-friendly layout ([`print_args`]).
+    async fn once(
+        &self,
+        call: &OneCall<'_>,
+        model: &str,
+        effort: Option<&str>,
+        on_text: Option<OnText<'_>>,
+    ) -> Tried {
+        let (harness, executable) = if call.codex {
+            let Some(exe) = &self.codex else {
+                return Tried::failed(msg(
+                    "没有配置 codex（CODEX_EXECUTABLE），不能用 Codex 做判断",
+                ));
+            };
+            (steve_print::Harness::Codex, exe)
+        } else {
+            (steve_print::Harness::Claude, &self.executable)
+        };
+        let (head, message) = split_static(call.prompt);
+        let run = steve_print::PrintRun {
+            harness,
+            executable,
+            cwd: &self.cwd,
+            model,
+            effort,
+            head,
+            message,
+            tools: tool_mode(call.tools),
+            images: call.images,
+            timeout: call.timeout,
+        };
+        Tried::of(steve_print::run(&run, on_text).await, call.codex)
+    }
+}
+
+/// The Hub's model gateway: each model of the call's list in turn over `one`, until one answers. The
+/// purpose's harness and list come from 设置 · 模型 ([`crate::models::Models::for_call`], Steve's bot
+/// unless overridden) when `models` is set, else the tier's on Claude Code.
+pub struct Fallback<M> {
+    /// Runs one model once.
+    pub one: M,
     pub fast: Vec<String>,
     pub smart: Vec<String>,
-    pub cwd: PathBuf,
     /// The resolver of 设置 · 模型; `None` (tests) uses `fast` / `smart` as they are.
     pub models: Option<crate::models::Models>,
 }
 
-impl ClaudeCli {
-    /// `extra` is the caller's (tools it wants); `effort` comes from 设置 · 模型 and is kept apart so a
-    /// call without tools keeps its cache-friendly layout ([`print_args`]) when an effort is set.
-    async fn once(
-        &self,
-        prompt: &str,
-        model: &str,
-        timeout: Duration,
-        extra: &[String],
-        effort: &[String],
-    ) -> Tried {
-        let mut cmd = tokio::process::Command::new(&self.executable);
-        for key in [
-            "STEVE_UPGRADE_CONTROL_TOKEN",
-            "STEVE_SUPERVISOR_PID",
-            "STEVE_UPGRADE_ID",
-        ] {
-            cmd.env_remove(key);
-        }
-        let (message, layout) = print_args(prompt, extra);
-        cmd.args(["-p", message, "--output-format", "json", "--model", model])
-            .args(layout)
-            .args(extra)
-            .args(effort)
-            .current_dir(&self.cwd)
-            .stdin(std::process::Stdio::null())
-            .kill_on_drop(true);
-        let out = match tokio::time::timeout(timeout, cmd.output()).await {
-            Err(_) => {
-                return Tried::failed(msg(format!(
-                    "Command timed out after {} ms",
-                    timeout.as_millis()
-                )));
-            }
-            Ok(Err(e)) => return Tried::failed(CoreError::Io(e)),
-            Ok(Ok(o)) => o,
-        };
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        let d: Value = match serde_json::from_str(&stdout) {
-            Ok(d) => d,
-            Err(_) if !out.status.success() => {
-                let err = String::from_utf8_lossy(&out.stderr);
-                return Tried::failed(msg(format!("Command failed: {}", err.trim())));
-            }
-            Err(_) => return Tried::failed(msg("harness 没有返回结果")),
-        };
-        Tried::of(&d, model)
-    }
-
-    /// [`ClaudeCli::once`] with `--output-format stream-json --include-partial-messages`: text deltas go to
-    /// `on_text` as they arrive, the closing `result` line is the reply.
-    async fn once_streaming(
-        &self,
-        prompt: &str,
-        model: &str,
-        timeout: Duration,
-        extra: &[String],
-        effort: &[String],
-        on_text: OnText<'_>,
-    ) -> Tried {
-        use tokio::io::{AsyncBufReadExt, AsyncReadExt};
-        let mut cmd = tokio::process::Command::new(&self.executable);
-        for key in [
-            "STEVE_UPGRADE_CONTROL_TOKEN",
-            "STEVE_SUPERVISOR_PID",
-            "STEVE_UPGRADE_ID",
-        ] {
-            cmd.env_remove(key);
-        }
-        let (message, layout) = print_args(prompt, extra);
-        let images = current_images();
-        /* with images the message goes to stdin as one stream-json user message (text, then images) */
-        let head: Vec<&str> = match &images {
-            Some(_) => vec!["-p", "--input-format", "stream-json"],
-            None => vec!["-p", message],
-        };
-        cmd.args(head)
-            .args([
-                "--output-format",
-                "stream-json",
-                "--verbose",
-                "--include-partial-messages",
-                "--model",
-                model,
-            ])
-            .args(layout)
-            .args(extra)
-            .args(effort)
-            .current_dir(&self.cwd)
-            .stdin(if images.is_some() {
-                std::process::Stdio::piped()
-            } else {
-                std::process::Stdio::null()
-            })
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true);
-        let mut child = match cmd.spawn() {
-            Ok(c) => c,
-            Err(e) => return Tried::failed(CoreError::Io(e)),
-        };
-        if let (Some(imgs), Some(mut w)) = (&images, child.stdin.take()) {
-            let line = format!("{}\n", user_message(message, imgs));
-            tokio::spawn(async move {
-                use tokio::io::AsyncWriteExt;
-                if let Err(e) = w.write_all(line.as_bytes()).await {
-                    tracing::warn!("writing the message to the harness: {e}");
-                }
-                let _ = w.shutdown().await;
-            });
-        }
-        let (Some(stdout), Some(mut stderr)) = (child.stdout.take(), child.stderr.take()) else {
-            return Tried::failed(msg("harness 没有输出"));
-        };
-        let err = tokio::spawn(async move {
-            let mut s = String::new();
-            let _ = stderr.read_to_string(&mut s).await;
-            s
-        });
-        let run = async {
-            let mut lines = tokio::io::BufReader::new(stdout).lines();
-            let mut s = Streamed::default();
-            while let Some(l) = lines.next_line().await? {
-                if s.line(&l) {
-                    on_text(&s.text);
-                }
-            }
-            let status = child.wait().await?;
-            Ok::<_, std::io::Error>((s, status))
-        };
-        let (s, status) = match tokio::time::timeout(timeout, run).await {
-            Err(_) => {
-                return Tried::failed(msg(format!(
-                    "Command timed out after {} ms",
-                    timeout.as_millis()
-                )));
-            }
-            Ok(Err(e)) => return Tried::failed(CoreError::Io(e)),
-            Ok(Ok(x)) => x,
-        };
-        match s.result {
-            Some(d) => Tried::of(&d, model),
-            None if !status.success() => {
-                let e = err.await.unwrap_or_default();
-                Tried::failed(msg(format!("Command failed: {}", e.trim())))
-            }
-            None => Tried::failed(msg("harness 没有返回结果")),
-        }
-    }
-}
+/// Steve's gateway in process: the fallback over [`LocalPrint`].
+pub type ClaudeCli = Fallback<LocalPrint>;
 
 /// The statistics' harness name of `codex exec` calls (`usage_records.harness`).
 pub const CODEX_HARNESS: &str = "codex-cli";
 
-/// Codex features a judgment never needs: user hooks, plugins, sub-agents, the browser and computer
-/// use, image generation, goals and apps. `unified_exec` is off so a shell command shows up as a
-/// `command_execution` event.
-pub const CODEX_OFF: [&str; 9] = [
-    "hooks",
-    "plugins",
-    "multi_agent",
-    "computer_use",
-    "browser_use",
-    "image_generation",
-    "goals",
-    "apps",
-    "unified_exec",
-];
-
-/// The arguments of one `codex exec` judgment (the prompt goes on stdin, `-`): JSON events, nothing
-/// persisted, the read-only sandbox (no writes, no network for commands), no MCP servers and no web
-/// search. `instructions` (a file holding the prompt's stable head) replaces Codex's own instructions
-/// for a call without tools, as `--system-prompt` does for `claude -p`; a call with tools (`tools`,
-/// e.g. a chat answer that reads attachments) keeps Codex's instructions and its shell.
-pub fn codex_args(
-    cwd: &std::path::Path,
-    model: &str,
-    effort: Option<&str>,
-    tools: bool,
-    instructions: Option<&std::path::Path>,
-    images: &[PathBuf],
-) -> Vec<String> {
-    let mut a: Vec<String> = [
-        "exec",
-        "--json",
-        "--ephemeral",
-        "--skip-git-repo-check",
-        "-s",
-        "read-only",
-        "-C",
-    ]
-    .map(String::from)
-    .into();
-    a.push(cwd.to_string_lossy().into_owned());
-    if !model.is_empty() {
-        a.extend(["-m".into(), model.into()]);
-    }
-    a.extend([
-        "-c".into(),
-        "mcp_servers={}".into(),
-        "-c".into(),
-        "web_search=\"disabled\"".into(),
-    ]);
-    for f in CODEX_OFF {
-        a.extend(["--disable".into(), f.into()]);
-    }
-    if !tools {
-        a.extend(["--disable".into(), "shell_tool".into()]);
-    }
-    if let Some(p) = instructions {
-        a.extend([
-            "-c".into(),
-            format!(
-                "model_instructions_file={}",
-                serde_json::to_string(&p.to_string_lossy()).unwrap_or_default()
-            ),
-        ]);
-    }
-    if let Some(e) = effort {
-        a.extend(["-c".into(), format!("model_reasoning_effort=\"{e}\"")]);
-    }
-    for i in images {
-        a.extend(["-i".into(), i.to_string_lossy().into_owned()]);
-    }
-    a.push("-".into());
-    a
-}
-
-/// What a `codex exec --json` run has said so far: the text of its latest message, the closing usage,
-/// and the error it ended with.
-#[derive(Debug, Default)]
-pub struct CodexStreamed {
-    pub text: String,
-    /// `turn.completed`'s `usage`; set when the turn ended well.
-    pub usage: Option<Value>,
-    pub error: Option<String>,
-}
-
-impl CodexStreamed {
-    /// Take one output line; true when the text changed.
-    pub fn line(&mut self, l: &str) -> bool {
-        let Ok(v) = serde_json::from_str::<Value>(l.trim()) else {
-            return false;
-        };
-        match v.get("type").and_then(Value::as_str) {
-            Some("item.completed") if v["item"]["type"] == "agent_message" => {
-                match v["item"]["text"].as_str() {
-                    Some(t) if !t.trim().is_empty() => {
-                        self.text = t.trim_start().to_string();
-                        true
-                    }
-                    _ => false,
-                }
-            }
-            Some("turn.completed") => {
-                self.usage = Some(v.get("usage").cloned().unwrap_or(json!({})));
-                false
-            }
-            Some("turn.failed") => {
-                self.error = v["error"]["message"]
-                    .as_str()
-                    .map(String::from)
-                    .or_else(|| self.error.take())
-                    .or_else(|| Some("Codex 失败".into()));
-                false
-            }
-            Some("error") => {
-                self.error = v["message"].as_str().map(String::from);
-                false
-            }
-            _ => false,
-        }
-    }
-
-    /// The reply and the tokens (booked to `model`, Codex reports no per-model split).
-    fn tried(self, model: &str) -> Tried {
-        let usage = self
-            .usage
-            .as_ref()
-            .map(|u| {
-                vec![ModelUsage {
-                    model: model.to_string(),
-                    tokens: steve_stats::normalize(
-                        "codex",
-                        steve_stats::RawUsage::from_json(u),
-                        true,
-                    ),
-                    cost_reported: None,
-                    detail: json!({"scope": "main"}),
-                }]
-            })
-            .unwrap_or_default();
-        let reply = match (self.usage.is_some(), self.error) {
-            (true, _) => Ok((self.text, None)),
-            (false, Some(e)) => Err(msg(js_head(&e, 300).to_string())),
-            (false, None) => Err(msg("harness 没有返回结果")),
-        };
-        Tried { reply, usage }
-    }
-}
-
-/// Image blocks written out as files for `codex exec -i`; deleted on drop.
-#[derive(Default)]
-struct CodexImages(Vec<PathBuf>);
-
-impl CodexImages {
-    async fn write(dir: &std::path::Path, blocks: &[Value]) -> std::io::Result<CodexImages> {
-        use base64::Engine;
-        let dir = dir.join("codex-images");
-        tokio::fs::create_dir_all(&dir).await?;
-        let mut out = CodexImages::default();
-        for b in blocks {
+/// The images of [`with_images`] blocks (`{"type":"image","source":{"type":"base64",…}}`); a block
+/// without base64 data is left out.
+fn images_of(blocks: &[Value]) -> Vec<steve_print::Image> {
+    use base64::Engine;
+    blocks
+        .iter()
+        .filter_map(|b| {
             let src = &b["source"];
-            let Some(data) = src["data"].as_str() else {
-                continue;
-            };
-            let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(data) else {
-                continue;
-            };
-            let ext = match src["media_type"].as_str().unwrap_or("") {
-                "image/jpeg" => "jpg",
-                "image/gif" => "gif",
-                "image/webp" => "webp",
-                _ => "png",
-            };
-            let p = dir.join(format!("{}.{ext}", uuid::Uuid::new_v4().simple()));
-            tokio::fs::write(&p, bytes).await?;
-            out.0.push(p);
-        }
-        Ok(out)
-    }
-}
-
-impl Drop for CodexImages {
-    fn drop(&mut self) {
-        for p in &self.0 {
-            let _ = std::fs::remove_file(p);
-        }
-    }
-}
-
-impl ClaudeCli {
-    /// The file holding `head` as Codex's instructions (`STEVE_HOME/scratch/codex-instructions/<hash>.md`),
-    /// written once per distinct head.
-    async fn instructions_file(&self, head: &str) -> std::io::Result<PathBuf> {
-        use sha2::Digest;
-        let hash = sha2::Sha256::digest(head.as_bytes());
-        let name: String = hash.iter().take(12).map(|b| format!("{b:02x}")).collect();
-        let dir = self.cwd.join("codex-instructions");
-        let p = dir.join(format!("{name}.md"));
-        if tokio::fs::metadata(&p).await.is_err() {
-            tokio::fs::create_dir_all(&dir).await?;
-            let tmp = dir.join(format!("{name}.{}.tmp", std::process::id()));
-            tokio::fs::write(&tmp, head).await?;
-            tokio::fs::rename(&tmp, &p).await?;
-        }
-        Ok(p)
-    }
-
-    /// One `codex exec` run ([`codex_args`]) with the prompt on stdin. Codex reports whole messages, not
-    /// deltas: `on_text` hears each message when it is complete.
-    async fn once_codex(
-        &self,
-        prompt: &str,
-        model: &str,
-        timeout: Duration,
-        extra: &[String],
-        effort: Option<&str>,
-        on_text: Option<OnText<'_>>,
-    ) -> Tried {
-        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
-        let Some(exe) = &self.codex else {
-            return Tried::failed(msg(
-                "没有配置 codex（CODEX_EXECUTABLE），不能用 Codex 做判断",
-            ));
-        };
-        let tools = !extra.is_empty();
-        let (head, message) = split_static(prompt);
-        let (instructions, input) = if tools {
-            let input = match head {
-                Some(h) => format!("{h}\n\n{message}"),
-                None => message.to_string(),
-            };
-            (None, input)
-        } else {
-            match self.instructions_file(head.unwrap_or(GATEWAY_SYSTEM)).await {
-                Ok(p) => (Some(p), message.to_string()),
-                Err(e) => return Tried::failed(CoreError::Io(e)),
-            }
-        };
-        // the images of the call ([`with_images`]) as files for `-i`, removed when the call ends
-        let images = match current_images() {
-            Some(imgs) => match CodexImages::write(&self.cwd, &imgs).await {
-                Ok(i) => i,
-                Err(e) => return Tried::failed(CoreError::Io(e)),
-            },
-            None => CodexImages::default(),
-        };
-        let mut cmd = tokio::process::Command::new(exe);
-        for key in [
-            "STEVE_UPGRADE_CONTROL_TOKEN",
-            "STEVE_SUPERVISOR_PID",
-            "STEVE_UPGRADE_ID",
-        ] {
-            cmd.env_remove(key);
-        }
-        cmd.args(codex_args(
-            &self.cwd,
-            model,
-            effort,
-            tools,
-            instructions.as_deref(),
-            &images.0,
-        ))
-        .current_dir(&self.cwd)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true);
-        let mut child = match cmd.spawn() {
-            Ok(c) => c,
-            Err(e) => return Tried::failed(CoreError::Io(e)),
-        };
-        let (Some(mut stdin), Some(stdout), Some(mut stderr)) =
-            (child.stdin.take(), child.stdout.take(), child.stderr.take())
-        else {
-            return Tried::failed(msg("harness 没有输出"));
-        };
-        let err = tokio::spawn(async move {
-            let mut s = String::new();
-            let _ = stderr.read_to_string(&mut s).await;
-            s
-        });
-        let run = async {
-            stdin.write_all(input.as_bytes()).await?;
-            drop(stdin);
-            let mut lines = tokio::io::BufReader::new(stdout).lines();
-            let mut s = CodexStreamed::default();
-            while let Some(l) = lines.next_line().await? {
-                if s.line(&l)
-                    && let Some(f) = on_text
-                {
-                    f(&s.text);
-                }
-            }
-            let status = child.wait().await?;
-            Ok::<_, std::io::Error>((s, status))
-        };
-        let (s, status) = match tokio::time::timeout(timeout, run).await {
-            Err(_) => {
-                return Tried::failed(msg(format!(
-                    "Command timed out after {} ms",
-                    timeout.as_millis()
-                )));
-            }
-            Ok(Err(e)) => return Tried::failed(CoreError::Io(e)),
-            Ok(Ok(x)) => x,
-        };
-        if s.usage.is_none() && s.error.is_none() && !status.success() {
-            let e = err.await.unwrap_or_default();
-            return Tried::failed(msg(format!("Command failed: {}", js_head(e.trim(), 300))));
-        }
-        s.tried(model)
-    }
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(src["data"].as_str()?)
+                .ok()?;
+            Some(steve_print::Image {
+                mime: src["media_type"].as_str().unwrap_or("").to_string(),
+                bytes,
+            })
+        })
+        .collect()
 }
 
 pub use steve_modules::gateway::{STATIC_END, split_static, with_static};
@@ -657,118 +338,73 @@ pub fn current_images() -> Option<std::sync::Arc<Vec<Value>>> {
         .filter(|i| !i.is_empty())
 }
 
-/// The stream-json user message of a call with images: the text, then the images.
-pub fn user_message(text: &str, images: &[Value]) -> String {
-    let mut content = vec![json!({"type": "text", "text": text})];
-    content.extend(images.iter().cloned());
-    json!({"type": "user", "message": {"role": "user", "content": content}}).to_string()
+/// A file a think call may read: the attachment's id and where its copy sits relative to the call's
+/// working directory (`.steve/attachments/<id>-<name>`, as the prompt names it).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Readable {
+    pub file_id: String,
+    pub rel_path: String,
 }
 
-/// The system prompt of a gateway call whose prompt has no stable head of its own.
-pub const GATEWAY_SYSTEM: &str = "You are a component of Steve, a personal assistant app. Follow the instructions in the user message exactly and reply with only what they ask for.";
+/// What a think call may use besides answering. Typed rather than CLI arguments, so a harness other
+/// than the in-process one can place the files and choose its own flags.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum ThinkTools {
+    /// No tools at all (the cache-friendly layout of [`print_args`]).
+    #[default]
+    None,
+    /// The Read tool only, for these files (already copied next to the in-process run).
+    Read(Vec<Readable>),
+}
 
-/// The CLI arguments of a chat answer: none without readable attachments (no tools at all), else
-/// [`ATTACHMENT_TOOLS`].
-pub fn answer_tools(files: &ChatFiles) -> Vec<String> {
-    if files.readable {
-        ATTACHMENT_TOOLS.iter().map(|a| a.to_string()).collect()
+impl ThinkTools {
+    /// Whether the call has any tool.
+    pub fn any(&self) -> bool {
+        matches!(self, ThinkTools::Read(_))
+    }
+}
+
+/// The `claude -p` arguments of `tools`: none, or [`ATTACHMENT_TOOLS`].
+pub fn cli_tools(tools: &ThinkTools) -> &'static [&'static str] {
+    steve_print::tool_args(tool_mode(tools))
+}
+
+/// The tools of a chat answer: none without readable attachments, else Read for those files.
+pub fn answer_tools(files: &ChatFiles) -> ThinkTools {
+    if files.readable.is_empty() {
+        ThinkTools::None
     } else {
-        vec![]
+        ThinkTools::Read(files.readable.clone())
     }
 }
 
-/// The CLI arguments of a chat answer that reads its attachments: Read is the only tool there is (not
-/// merely allowed: no shell, no writes, whatever the user's own allow rules say), and only user settings
-/// load (the gateway login), not a project's or local ones.
-pub const ATTACHMENT_TOOLS: [&str; 6] = [
-    "--tools",
-    "Read",
-    "--allowedTools",
-    "Read",
-    "--setting-sources",
-    "user",
-];
+/// The print run's tool mode of `tools` (the files themselves are already next to the in-process run).
+fn tool_mode(tools: &ThinkTools) -> steve_print::ToolMode {
+    match tools {
+        ThinkTools::None => steve_print::ToolMode::None,
+        ThinkTools::Read(_) => steve_print::ToolMode::ReadOnly,
+    }
+}
 
-/// The message for `-p` and the arguments that lay a `claude -p` call out for the prompt cache.
-///
-/// Claude Code's own system prompt, tool list and per-machine context came to ~16k tokens per call and
-/// the call's instructions sat in the user message, where the cache cannot reuse them; one route call
-/// cost ~20k tokens, about half of them cache writes. Now:
-/// - no `extra` (no tools): the prompt's stable head (or [`GATEWAY_SYSTEM`]) replaces the system prompt,
-///   with no tools, MCP servers or skills, so the call is the head (read from the cache) plus the
-///   message;
-/// - with `extra` (e.g. a chat answer that reads attachments): Claude Code's prompt and tools stay, the
-///   head is appended to the system prompt.
-pub fn print_args<'a>(prompt: &'a str, extra: &[String]) -> (&'a str, Vec<&'a str>) {
+pub use steve_print::{ATTACHMENT_TOOLS, GATEWAY_SYSTEM};
+
+/// The message for `-p` and the arguments that lay a `claude -p` call out for the prompt cache
+/// ([`steve_print::claude_layout`]): without tools the prompt's stable head (or [`GATEWAY_SYSTEM`])
+/// replaces Claude Code's system prompt and tools; with tools it is appended to them.
+pub fn print_args<'a>(prompt: &'a str, tools: &ThinkTools) -> (&'a str, Vec<&'a str>) {
     let (head, message) = split_static(prompt);
-    let mut a: Vec<&str> = Vec::with_capacity(6);
-    if extra.is_empty() {
-        a.extend([
-            "--system-prompt",
-            head.unwrap_or(GATEWAY_SYSTEM),
-            "--tools",
-            "",
-        ]);
-    } else if let Some(h) = head {
-        a.extend(["--append-system-prompt", h]);
-    }
-    a.extend(["--strict-mcp-config", "--disable-slash-commands"]);
-    (message, a)
+    (message, steve_print::claude_layout(head, tool_mode(tools)))
 }
 
-/// The reply of a harness `result` object: its text and cost, or its error.
-fn result_of(d: &Value) -> Result<(String, Option<f64>)> {
-    if d.get("is_error").is_some_and(truthy) {
-        return Err(msg(js_head(
-            &jstr(d.get("result").unwrap_or(&Value::Null)),
-            300,
-        )
-        .to_string()));
-    }
-    let text = match d.get("result") {
-        None | Some(Value::Null) => String::new(),
-        Some(v) => jstr(v),
-    };
-    Ok((text, d.get("total_cost_usd").and_then(Value::as_f64)))
-}
-
-/// The tokens a harness `result` object reports: one row per key of `modelUsage` (the
-/// models that actually answered, sub-calls included), else one row from `usage` booked to `model`, the
-/// model asked for. Missing figures stay `None`. Dollars: each model's `costUSD`, else `total_cost_usd`
-/// on the first row.
+/// The tokens a harness `result` object reports ([`steve_print::claude_usage`]): one row per key of
+/// `modelUsage` (the models that actually answered, sub-calls included), else one row from `usage`
+/// booked to `model`, the model asked for. Missing figures stay `None`. Dollars: each model's
+/// `costUSD`, else `total_cost_usd` on the first row.
 pub fn usage_of(d: &Value, model: &str) -> Vec<ModelUsage> {
-    let total = d.get("total_cost_usd").and_then(Value::as_f64);
-    let tokens =
-        |u: &Value| steve_stats::normalize("claude-cli", steve_stats::RawUsage::from_json(u), true);
-    let mut rows: Vec<ModelUsage> = match (d.get("modelUsage"), d.get("usage")) {
-        (Some(Value::Object(m)), _) if !m.is_empty() => m
-            .iter()
-            .map(|(k, u)| ModelUsage {
-                model: k.clone(),
-                tokens: tokens(u),
-                cost_reported: u.get("costUSD").and_then(Value::as_f64),
-                detail: json!({"scope": "all"}),
-            })
-            .collect(),
-        (_, Some(u @ Value::Object(_))) => vec![ModelUsage {
-            model: model.to_string(),
-            tokens: tokens(u),
-            cost_reported: None,
-            detail: json!({"scope": "main"}),
-        }],
-        _ if total.is_some() => vec![ModelUsage {
-            model: model.to_string(),
-            detail: json!({"scope": "main"}),
-            ..ModelUsage::default()
-        }],
-        _ => vec![],
-    };
-    if rows.iter().all(|r| r.cost_reported.is_none())
-        && let Some(r) = rows.first_mut()
-    {
-        r.cost_reported = total;
-    }
-    rows
+    steve_print::claude_usage(d, model)
+        .into_iter()
+        .map(model_usage)
+        .collect()
 }
 
 /// Adds `more` to `into`, summing rows of the same model and scope (a model tried twice).
@@ -798,51 +434,7 @@ fn merge_usage(into: &mut Vec<ModelUsage>, more: Vec<ModelUsage>) {
     }
 }
 
-/// What a `stream-json` run has said so far: the text of the model's current message and, at the end, the
-/// `result` object. A harness that prints only the `result` line (as `--output-format json`) works too.
-#[derive(Debug, Default)]
-pub struct Streamed {
-    pub text: String,
-    pub result: Option<Value>,
-}
-
-impl Streamed {
-    /// Take one output line; true when the text grew.
-    pub fn line(&mut self, l: &str) -> bool {
-        let Ok(v) = serde_json::from_str::<Value>(l.trim()) else {
-            return false;
-        };
-        match v.get("type").and_then(Value::as_str) {
-            Some("result") => {
-                self.result = Some(v);
-                false
-            }
-            Some("stream_event") => {
-                let e = &v["event"];
-                match e.get("type").and_then(Value::as_str) {
-                    /* a new message (after a tool call): its text replaces the last one's */
-                    Some("message_start") => {
-                        self.text.clear();
-                        false
-                    }
-                    Some("content_block_delta") if e["delta"]["type"] == "text_delta" => {
-                        match e["delta"]["text"].as_str() {
-                            Some(t) if !t.is_empty() => {
-                                self.text.push_str(t);
-                                true
-                            }
-                            _ => false,
-                        }
-                    }
-                    _ => false,
-                }
-            }
-            _ => false,
-        }
-    }
-}
-
-impl ClaudeCli {
+impl<M: OneModel> Fallback<M> {
     /// The models (and effort) of this call: its purpose and workspace come from the caller's
     /// [`crate::stats::CallTag`].
     pub fn choice(&self, tier: Tier) -> crate::models::Choice {
@@ -865,17 +457,12 @@ impl ClaudeCli {
         prompt: &str,
         tier: Tier,
         timeout: Duration,
-        extra: &[String],
+        tools: &ThinkTools,
         on_text: Option<OnText<'_>>,
     ) -> Attempt {
         let t0 = Instant::now();
         let choice = self.choice(tier);
         let models = &choice.models;
-        // apart from `extra`: an effort does not make the call one that wants Claude Code's tools
-        let effort: Vec<String> = match &choice.effort {
-            Some(e) => vec!["--effort".to_string(), e.clone()],
-            None => vec![],
-        };
         let codex = choice.harness == crate::models::CODEX;
         let mut a = Attempt {
             result: Err(msg("没有可用的模型")),
@@ -893,21 +480,20 @@ impl ClaudeCli {
         } else {
             models
         };
-        /* images go in on stdin, which only the stream-json layout takes */
-        let quiet = |_: &str| {};
-        let on_text = on_text.or_else(|| current_images().map(|_| &quiet as OnText<'_>));
+        // the images of the call ([`with_images`]), for every model tried
+        let images = current_images().map(|b| images_of(&b)).unwrap_or_default();
+        let call = OneCall {
+            prompt,
+            timeout,
+            tools,
+            codex,
+            images: &images,
+        };
         for m in models {
-            let r = match on_text {
-                _ if codex => {
-                    self.once_codex(prompt, m, timeout, extra, choice.effort.as_deref(), on_text)
-                        .await
-                }
-                Some(f) => {
-                    self.once_streaming(prompt, m, timeout, extra, &effort, f)
-                        .await
-                }
-                None => self.once(prompt, m, timeout, extra, &effort).await,
-            };
+            let r = self
+                .one
+                .once(&call, m, choice.effort.as_deref(), on_text)
+                .await;
             a.attempts += 1;
             a.model = m.clone();
             merge_usage(&mut a.usage, r.usage);
@@ -938,15 +524,15 @@ impl ClaudeCli {
 }
 
 #[async_trait]
-impl ModelGateway for ClaudeCli {
+impl<M: OneModel> ModelGateway for Fallback<M> {
     async fn call(
         &self,
         prompt: &str,
         tier: Tier,
         timeout: Duration,
-        extra: &[String],
+        tools: &ThinkTools,
     ) -> Result<Printed> {
-        self.fall_back(prompt, tier, timeout, extra, None)
+        self.fall_back(prompt, tier, timeout, tools, None)
             .await
             .result
     }
@@ -955,10 +541,10 @@ impl ModelGateway for ClaudeCli {
         prompt: &str,
         tier: Tier,
         timeout: Duration,
-        extra: &[String],
+        tools: &ThinkTools,
         on_text: OnText<'_>,
     ) -> Result<Printed> {
-        self.fall_back(prompt, tier, timeout, extra, Some(on_text))
+        self.fall_back(prompt, tier, timeout, tools, Some(on_text))
             .await
             .result
     }
@@ -967,10 +553,10 @@ impl ModelGateway for ClaudeCli {
         prompt: &str,
         tier: Tier,
         timeout: Duration,
-        extra: &[String],
+        tools: &ThinkTools,
         on_text: Option<OnText<'_>>,
     ) -> Attempt {
-        self.fall_back(prompt, tier, timeout, extra, on_text).await
+        self.fall_back(prompt, tier, timeout, tools, on_text).await
     }
 }
 
@@ -1001,7 +587,7 @@ impl steve_modules::Gateway for SharedGateway {
             steve_modules::Tier::Smart => Tier::Smart,
         };
         self.0
-            .call(prompt, tier, timeout, &[])
+            .call(prompt, tier, timeout, &ThinkTools::None)
             .await
             .map(|p| steve_modules::GatewayOut {
                 text: p.text,
@@ -1015,32 +601,7 @@ impl steve_modules::Gateway for SharedGateway {
     }
 }
 
-/// JS `String(v)` for a JSON value.
-pub fn jstr(v: &Value) -> String {
-    match v {
-        Value::String(s) => s.clone(),
-        Value::Null => "null".into(),
-        Value::Bool(b) => b.to_string(),
-        Value::Number(n) => n.to_string(),
-        Value::Array(a) => a
-            .iter()
-            .map(|x| if x.is_null() { String::new() } else { jstr(x) })
-            .collect::<Vec<_>>()
-            .join(","),
-        Value::Object(_) => "[object Object]".into(),
-    }
-}
-
-/// JS truthiness of a JSON value.
-pub fn truthy(v: &Value) -> bool {
-    match v {
-        Value::Null => false,
-        Value::Bool(b) => *b,
-        Value::Number(n) => n.as_f64().is_some_and(|f| f != 0.0 && !f.is_nan()),
-        Value::String(s) => !s.is_empty(),
-        _ => true,
-    }
-}
+pub use steve_print::{jstr, truthy};
 
 static BRACES: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\{[\s\S]*\}").expect("valid regex"));
 
@@ -1553,7 +1114,12 @@ pub async fn route(
 ) -> Route {
     let prompt = route_prompt(c, text, history, promote);
     match gw
-        .call(&prompt, Tier::Fast, Duration::from_secs(60), &[])
+        .call(
+            &prompt,
+            Tier::Fast,
+            Duration::from_secs(60),
+            &ThinkTools::None,
+        )
         .await
     {
         Ok(Printed {
@@ -1594,8 +1160,8 @@ pub struct ChatFiles {
     pub count: usize,
     /// the path note, or `\n（附件没能读取：…）` when copying failed
     pub note: String,
-    /// copied: let the model read them with the Read tool only (files that are not inline images)
-    pub readable: bool,
+    /// copied files that are not inline images: the model reads them with the Read tool only
+    pub readable: Vec<Readable>,
     /// images that go into the message itself (`{"type":"image","source":{…}}`)
     pub images: Vec<Value>,
 }
@@ -1625,7 +1191,11 @@ pub fn answer_prompt(
         })
         .collect::<Vec<_>>()
         .join("\n");
-    let read = match (files.count > 0, files.readable, files.images.is_empty()) {
+    let read = match (
+        files.count > 0,
+        !files.readable.is_empty(),
+        files.images.is_empty(),
+    ) {
         (false, ..) => "",
         (true, true, true) => "Read the attached files with the Read tool before answering.\n\n",
         (true, true, false) => {
@@ -1692,7 +1262,7 @@ pub async fn answer(
     context: &str,
     on_draft: OnDraft<'_>,
 ) -> Answer {
-    let extra = answer_tools(files);
+    let tools = answer_tools(files);
     let timeout = Duration::from_secs(if files.count > 0 { 150 } else { 90 });
     let on_text = |raw: &str| {
         let (t, a) = draft_of(raw);
@@ -1704,7 +1274,7 @@ pub async fn answer(
             &answer_prompt(main, text, history, files, context),
             Tier::Smart,
             timeout,
-            &extra,
+            &tools,
             &on_text,
         ),
     )
@@ -2001,26 +1571,76 @@ mod tests {
         );
     }
 
+    fn readable(id: &str, name: &str) -> Readable {
+        Readable {
+            file_id: id.into(),
+            rel_path: format!(".steve/attachments/{}-{name}", &id[4..]),
+        }
+    }
+
     #[test]
     fn an_answer_reading_attachments_has_read_and_nothing_else() {
         let none = ChatFiles::default();
-        assert!(answer_tools(&none).is_empty(), "no attachments: no tools");
-        let files = ChatFiles {
-            readable: true,
+        assert_eq!(
+            answer_tools(&none),
+            ThinkTools::None,
+            "no attachments: no tools"
+        );
+        // attached, but only inline images: nothing to read, still no tools
+        let images = ChatFiles {
             count: 1,
+            images: vec![json!({"type": "image"})],
             ..ChatFiles::default()
         };
-        let a = answer_tools(&files);
-        let after = |f: &str| a.iter().position(|x| x == f).map(|i| a[i + 1].as_str());
-        assert_eq!(after("--tools"), Some("Read"), "the only tool there is");
-        assert_eq!(after("--setting-sources"), Some("user"));
+        assert_eq!(answer_tools(&images), ThinkTools::None);
+        let files = ChatFiles {
+            readable: vec![readable("fil_a1", "log.txt"), readable("fil_b2", "big.png")],
+            count: 3,
+            images: vec![json!({"type": "image"})],
+            ..ChatFiles::default()
+        };
+        let t = answer_tools(&files);
+        assert_eq!(
+            t,
+            ThinkTools::Read(vec![
+                Readable {
+                    file_id: "fil_a1".into(),
+                    rel_path: ".steve/attachments/a1-log.txt".into()
+                },
+                Readable {
+                    file_id: "fil_b2".into(),
+                    rel_path: ".steve/attachments/b2-big.png".into()
+                },
+            ])
+        );
+        assert!(t.any() && !ThinkTools::None.any());
+        assert_eq!(
+            cli_tools(&t),
+            [
+                "--tools",
+                "Read",
+                "--allowedTools",
+                "Read",
+                "--setting-sources",
+                "user"
+            ],
+            "Read is the only tool there is, user settings only"
+        );
+        assert!(cli_tools(&ThinkTools::None).is_empty());
+    }
+
+    /// The `claude -p` layout and tool arguments in the order [`LocalPrint::once`] passes them.
+    fn layout<'a>(prompt: &'a str, tools: &ThinkTools) -> (&'a str, Vec<&'a str>) {
+        let (m, mut a) = print_args(prompt, tools);
+        a.extend(cli_tools(tools));
+        (m, a)
     }
 
     #[test]
     fn print_args_put_the_stable_head_in_the_system_prompt() {
         let p = with_static("rules", "message");
         assert_eq!(
-            print_args(&p, &[]),
+            layout(&p, &ThinkTools::None),
             (
                 "message",
                 vec![
@@ -2034,28 +1654,56 @@ mod tests {
             )
         );
         // no head: a short fixed system prompt, still no tools
-        let (m, a) = print_args("just this", &[]);
         assert_eq!(
-            (m, &a[..2]),
-            ("just this", &["--system-prompt", GATEWAY_SYSTEM][..])
+            layout("just this", &ThinkTools::None),
+            (
+                "just this",
+                vec![
+                    "--system-prompt",
+                    GATEWAY_SYSTEM,
+                    "--tools",
+                    "",
+                    "--strict-mcp-config",
+                    "--disable-slash-commands"
+                ]
+            )
         );
-        // tools wanted: Claude Code's own prompt stays, the head is appended
-        let extra = vec!["--allowedTools".to_string(), "Read".to_string()];
+        // tools wanted: Claude Code's own prompt stays, the head is appended, Read is the only tool;
+        // the files themselves are not arguments (they are already next to the run)
+        let read = ThinkTools::Read(vec![readable("fil_a1", "log.txt")]);
         assert_eq!(
-            print_args(&p, &extra),
+            layout(&p, &read),
             (
                 "message",
                 vec![
                     "--append-system-prompt",
                     "rules",
                     "--strict-mcp-config",
-                    "--disable-slash-commands"
+                    "--disable-slash-commands",
+                    "--tools",
+                    "Read",
+                    "--allowedTools",
+                    "Read",
+                    "--setting-sources",
+                    "user"
                 ]
             )
         );
         assert_eq!(
-            print_args("m", &extra),
-            ("m", vec!["--strict-mcp-config", "--disable-slash-commands"])
+            layout("m", &ThinkTools::Read(vec![])),
+            (
+                "m",
+                vec![
+                    "--strict-mcp-config",
+                    "--disable-slash-commands",
+                    "--tools",
+                    "Read",
+                    "--allowedTools",
+                    "Read",
+                    "--setting-sources",
+                    "user"
+                ]
+            )
         );
     }
 
@@ -2095,111 +1743,40 @@ mod tests {
         assert_eq!(draft_of("直接回答"), (String::new(), "直接回答".into()));
     }
 
+    /// What a failed print run says, word for word as before the run moved to steve-print.
     #[test]
-    fn stream_json_lines() {
-        let mut s = Streamed::default();
-        let d = |t: &str| {
-            json!({"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":t}}}).to_string()
-        };
-        let start = json!({"type":"stream_event","event":{"type":"message_start","message":{}}})
-            .to_string();
-        assert!(!s.line(r#"{"type":"system","subtype":"init"}"#));
-        assert!(!s.line(&start));
-        assert!(s.line(&d("我先读")));
-        assert!(!s.line(&json!({"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"input_json_delta","partial_json":"{"}}}).to_string()));
-        assert!(!s.line(&start));
-        assert_eq!(s.text, "");
-        assert!(s.line(&d("{\"answer\":")) && s.line(&d("\"好\"}")));
-        assert_eq!(s.text, "{\"answer\":\"好\"}");
-        assert!(!s.line("not json"));
-        assert!(!s.line(r#"{"type":"result","is_error":false,"result":"{\"answer\":\"好\"}","total_cost_usd":0.01}"#));
+    fn a_failed_run_says_why_in_steves_words() {
+        use steve_print::PrintError as P;
+        let said = |e, codex| print_error(e, codex).to_string();
         assert_eq!(
-            result_of(s.result.as_ref().unwrap()).unwrap(),
-            ("{\"answer\":\"好\"}".into(), Some(0.01))
+            said(P::Timeout(Duration::from_millis(200)), false),
+            "Command timed out after 200 ms"
         );
-    }
-
-    /// A stand-in `claude` that writes its answer in pieces, a moment apart.
-    #[cfg(unix)]
-    fn slow_claude(dir: &std::path::Path, body: &str) -> ClaudeCli {
-        use std::os::unix::fs::PermissionsExt;
-        let p = dir.join("claude");
-        std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
-        ClaudeCli {
-            codex: None,
-            executable: p,
-            fast: vec!["m1".into()],
-            smart: vec!["m1".into(), "m2".into()],
-            cwd: dir.to_path_buf(),
-            models: None,
-        }
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn the_cli_streams_text_before_it_exits() {
-        let dir = tempfile::tempdir().unwrap();
-        let ev = |t: &str| {
-            format!(
-                "echo '{{\"type\":\"stream_event\",\"event\":{{\"type\":\"content_block_delta\",\"delta\":{{\"type\":\"text_delta\",\"text\":{}}}}}}}'",
-                serde_json::to_string(t).unwrap()
+        assert_eq!(
+            said(P::Failed("nope".into()), false),
+            "Command failed: nope"
+        );
+        let long = "x".repeat(400);
+        assert_eq!(said(P::Failed(long.clone()), false).len(), 16 + 400);
+        assert_eq!(
+            said(P::Failed(long.clone()), true).len(),
+            16 + 300,
+            "Codex's stderr is cut"
+        );
+        assert_eq!(
+            said(
+                P::Harness {
+                    text: long,
+                    transient: false
+                },
+                false
             )
-        };
-        let body = [
-            r#"case "$*" in *stream-json*--include-partial-messages*) ;; *) echo "not streaming: $*" >&2; exit 1;; esac"#.to_string(),
-            r#"case "$*" in *m1*) echo boom >&2; exit 3;; esac"#.to_string(),
-            ev("{\"thought\":\"想\",\"answer\":\"一"),
-            "sleep 0.3".into(),
-            ev("二\"}"),
-            "sleep 0.3".into(),
-            r#"echo '{"type":"result","is_error":false,"result":"{\"thought\":\"想\",\"answer\":\"一二\"}"}'"#.into(),
-        ]
-        .join("\n");
-        let gw = slow_claude(dir.path(), &body);
-        let t0 = std::time::Instant::now();
-        let seen = std::sync::Mutex::new(vec![]);
-        let a = answer(
-            &gw,
-            &bot("steve"),
-            "数数",
-            &[],
-            &ChatFiles::default(),
-            "",
-            &|t, x| {
-                seen.lock()
-                    .unwrap()
-                    .push((t.to_string(), x.to_string(), t0.elapsed()))
-            },
-        )
-        .await;
-        assert_eq!(
-            (a.text.as_str(), a.thought.as_str(), a.model.as_deref()),
-            ("一二", "想", Some("m2")),
-            "{a:?}"
+            .len(),
+            300
         );
-        let seen = seen.into_inner().unwrap();
-        assert_eq!(
-            seen.iter().map(|s| s.1.as_str()).collect::<Vec<_>>(),
-            ["一", "一二"]
-        );
-        assert!(
-            t0.elapsed() - seen[0].2 >= Duration::from_millis(500),
-            "the first part came before the run ended"
-        );
-        /* a run that fails says why */
-        let gw = slow_claude(dir.path(), "echo nope >&2; exit 2");
-        let e = gw
-            .call_streaming("x", Tier::Fast, Duration::from_secs(5), &[], &|_| {})
-            .await
-            .unwrap_err();
-        assert_eq!(e.to_string(), "Command failed: nope");
-        let gw = slow_claude(dir.path(), "sleep 5");
-        let e = gw
-            .call_streaming("x", Tier::Fast, Duration::from_millis(200), &[], &|_| {})
-            .await
-            .unwrap_err();
-        assert_eq!(e.to_string(), "Command timed out after 200 ms");
+        assert_eq!(said(P::CodexFailed, true), "Codex 失败");
+        assert_eq!(said(P::NoResult, false), "harness 没有返回结果");
+        assert_eq!(said(P::NoOutput, true), "harness 没有输出");
     }
 
     #[test]
@@ -2219,7 +1796,7 @@ mod tests {
         struct Gw(Option<&'static str>);
         #[async_trait]
         impl ModelGateway for Gw {
-            async fn call(&self, _: &str, _: Tier, _: Duration, _: &[String]) -> Result<Printed> {
+            async fn call(&self, _: &str, _: Tier, _: Duration, _: &ThinkTools) -> Result<Printed> {
                 match self.0 {
                     Some(t) => Ok(Printed {
                         text: t.into(),
@@ -2365,7 +1942,7 @@ mod tests {
         struct Capture;
         #[async_trait]
         impl ModelGateway for Capture {
-            async fn call(&self, _: &str, _: Tier, _: Duration, _: &[String]) -> Result<Printed> {
+            async fn call(&self, _: &str, _: Tier, _: Duration, _: &ThinkTools) -> Result<Printed> {
                 let images = current_images().expect("image scope reaches actual model gateway");
                 assert_eq!(images[0]["source"]["data"], "aW1hZ2U=");
                 Ok(Printed::default())

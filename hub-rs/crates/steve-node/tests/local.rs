@@ -1744,3 +1744,219 @@ async fn a_bound_workspace_has_a_local_dir_for_the_host_only() {
         "a gone directory is not given"
     );
 }
+
+/// Opens the home again once the last Node has let go of it.
+async fn reopen(t: &T, sink: Arc<RecordingSink>) -> LocalNode {
+    let t0 = Instant::now();
+    let n = loop {
+        match LocalNode::open(t.config()) {
+            Ok(x) => break x,
+            Err(e) => {
+                assert_eq!(e.code, ErrorCode::Conflict, "{e:?}");
+                assert!(t0.elapsed() < Duration::from_secs(10), "home never freed");
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+    };
+    n.connect(sink, None);
+    n
+}
+
+async fn all_acknowledged(n: &LocalNode) {
+    let t0 = Instant::now();
+    loop {
+        let heads = n.streams().await.unwrap();
+        if !heads.is_empty() && heads.iter().all(|h| h.acknowledged == h.produced) {
+            return;
+        }
+        assert!(t0.elapsed() < Duration::from_secs(15), "{heads:?}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// A deleted journal (the node home made again) is a new journal: its streams get another epoch
+/// and its events other ids, so the Hub that holds the old ones takes the new ones without a clash.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_recreated_journal_never_repeats_positions_or_ids() {
+    let t = T::new(&[]);
+    let n = t.node();
+    ready(&n, "s_1").await;
+    all_acknowledged(&n).await;
+    let first = t.sink.events();
+    n.shutdown().await;
+    drop(n);
+    for f in ["node.sqlite3", "node.sqlite3-wal", "node.sqlite3-shm"] {
+        let _ = std::fs::remove_file(t.home.join(f));
+    }
+
+    let n = reopen(&t, t.sink.clone()).await;
+    ready(&n, "s_1").await;
+    // the same Hub (sink) holds both journals' events: it refuses a clash, so all must arrive
+    all_acknowledged(&n).await;
+    let second: Vec<NodeEvent> = t
+        .sink
+        .events()
+        .into_iter()
+        .filter(|e| !first.contains(e))
+        .collect();
+    assert!(!second.is_empty());
+    let session = StreamId::new(derived_id("session", "s_1")).unwrap();
+    let epoch_of = |evs: &[NodeEvent]| {
+        let mut v: Vec<Epoch> = evs
+            .iter()
+            .filter(|e| e.cursor.stream == session)
+            .map(|e| e.cursor.epoch.clone())
+            .collect();
+        v.dedup();
+        v
+    };
+    let (old, new) = (epoch_of(&first), epoch_of(&second));
+    assert_eq!(old.len(), 1, "{old:?}");
+    assert_eq!(new.len(), 1, "{new:?}");
+    assert_ne!(old, new, "the session stream starts again in a new epoch");
+    assert!(new[0].as_str().starts_with('j'), "{new:?}");
+    let old_ids: std::collections::HashSet<_> = first.iter().map(|e| e.id.clone()).collect();
+    assert!(
+        second.iter().all(|e| !old_ids.contains(&e.id)),
+        "no event id is reused"
+    );
+    let old_positions: std::collections::HashSet<_> = first
+        .iter()
+        .map(|e| (e.cursor.stream.clone(), e.cursor.epoch.clone()))
+        .collect();
+    assert!(
+        second
+            .iter()
+            .all(|e| !old_positions.contains(&(e.cursor.stream.clone(), e.cursor.epoch.clone()))),
+        "no (stream, epoch) of the old journal is written again"
+    );
+    // nor a revision: the Hub matches views by revision, the same steps must not give the same one
+    let revisions = |evs: &[NodeEvent]| -> std::collections::HashSet<String> {
+        evs.iter()
+            .filter_map(|e| match &e.body {
+                EventBody::SessionChanged { view } => Some(view.revision.to_string()),
+                EventBody::WorkspaceChanged { revision, .. } => Some(revision.to_string()),
+                _ => None,
+            })
+            .collect()
+    };
+    let (old_revs, new_revs) = (revisions(&first), revisions(&second));
+    assert!(!new_revs.is_empty());
+    assert!(
+        old_revs.is_disjoint(&new_revs),
+        "no revision is handed out again: {old_revs:?} {new_revs:?}"
+    );
+    n.shutdown().await;
+}
+
+/// A journal from before journal identity (v2) keeps the epoch of the streams it has: what the
+/// Hub acknowledged stays valid and numbering goes on where it was.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_v2_journal_keeps_its_e1_streams() {
+    let t = T::new(&[]);
+    let n = t.node();
+    ready(&n, "s_1").await;
+    all_acknowledged(&n).await;
+    n.shutdown().await;
+    drop(n);
+    let session = derived_id("session", "s_1");
+    let path = t.home.join("node.sqlite3");
+    let produced: i64 = {
+        // as a v2 Node left it: no journal id, every stream in epoch e1
+        let db = rusqlite::Connection::open(&path).unwrap();
+        db.execute_batch(
+            "UPDATE streams SET epoch='e1'; DELETE FROM meta WHERE key='journal_id'; PRAGMA user_version=2;",
+        )
+        .unwrap();
+        db.query_row(
+            "SELECT produced FROM streams WHERE stream=?1",
+            [&session],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    assert!(produced > 0);
+
+    let sink = Arc::new(RecordingSink::default());
+    let n = reopen(&t, sink.clone()).await;
+    n.open_session(now_cmd("op_open_again", open_body("s_1")))
+        .await
+        .unwrap();
+    assert!(ok(&finished(&n, "op_open_again").await));
+    let head = n
+        .streams()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|h| h.stream.as_str() == session)
+        .unwrap();
+    assert_eq!(head.epoch.as_str(), "e1");
+    assert!(head.produced as i64 > produced, "{head:?}");
+    let t0 = Instant::now();
+    while sink.events().is_empty() {
+        assert!(t0.elapsed() < Duration::from_secs(15));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let on_session: Vec<NodeEvent> = sink
+        .events()
+        .into_iter()
+        .filter(|e| e.cursor.stream.as_str() == session)
+        .collect();
+    assert_eq!(on_session[0].cursor.epoch.as_str(), "e1");
+    assert_eq!(
+        on_session[0].cursor.seq as i64,
+        produced + 1,
+        "numbering goes on"
+    );
+    // an ack in e1 is taken: the old stream is still the stream the Node keeps
+    n.acknowledge(EventAck {
+        durable: vec![on_session[0].cursor.clone()],
+    })
+    .await
+    .unwrap();
+    n.shutdown().await;
+    drop(n);
+    let db = rusqlite::Connection::open(&path).unwrap();
+    let version: i64 = db
+        .pragma_query_value(None, "user_version", |r| r.get(0))
+        .unwrap();
+    assert_eq!(version, 3);
+    let ids: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM meta WHERE key='journal_id'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(ids, 1, "the upgrade gave the journal its identity");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_journal_from_a_newer_node_is_refused() {
+    let t = T::new(&[]);
+    let n = t.node();
+    n.shutdown().await;
+    drop(n);
+    let path = t.home.join("node.sqlite3");
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .execute_batch("PRAGMA user_version=4;")
+        .unwrap();
+    let t0 = Instant::now();
+    let e = loop {
+        match LocalNode::open(t.config()) {
+            Ok(_) => panic!("a newer journal was opened"),
+            Err(e) if e.code == ErrorCode::Conflict => {
+                assert!(t0.elapsed() < Duration::from_secs(10), "home never freed");
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Err(e) => break e,
+        }
+    };
+    assert_eq!(e.code, ErrorCode::Unsupported, "{e:?}");
+    let version: i64 = rusqlite::Connection::open(&path)
+        .unwrap()
+        .pragma_query_value(None, "user_version", |r| r.get(0))
+        .unwrap();
+    assert_eq!(version, 4, "left as it was");
+}

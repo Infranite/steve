@@ -4735,6 +4735,7 @@ dependencies = [
  "serde_json",
  "sha2 0.11.1",
  "steve-modules",
+ "steve-print",
  "steve-stats",
  "steve-store",
  "steve-transcript",
@@ -4839,6 +4840,8 @@ dependencies = [
  "steve-modules",
  "steve-node",
  "steve-node-api",
+ "steve-node-cli",
+ "steve-node-wire",
  "steve-research",
  "steve-stats",
  "steve-store",
@@ -4849,6 +4852,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tokio-stream",
+ "tokio-tungstenite 0.30.0",
  "tokio-util",
  "tower",
  "tower-http",
@@ -5026,8 +5030,61 @@ dependencies = [
 ]
 
 [[package]]
+name = "steve-node-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "hex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "steve-acp",
+ "steve-node",
+ "steve-node-api",
+ "steve-node-wire",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "steve-node-wire"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "ed25519-dalek",
+ "futures-util",
+ "getrandom 0.3.4",
+ "hex",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "steve-node-api",
+ "tokio",
+ "tokio-tungstenite 0.30.0",
+ "tracing",
+ "webpki-roots 0.26.11",
+]
+
+[[package]]
 name = "steve-people"
 version = "0.1.0"
+
+[[package]]
+name = "steve-print"
+version = "0.1.0"
+dependencies = [
+ "base64 0.23.1",
+ "serde_json",
+ "sha2 0.11.1",
+ "steve-node-api",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "uuid",
+]
 
 [[package]]
 name = "steve-research"

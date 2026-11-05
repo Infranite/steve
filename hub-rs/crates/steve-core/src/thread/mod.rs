@@ -886,7 +886,7 @@ impl Core {
                     out.images
                         .extend(a.images.iter().map(crate::attachments::message_image));
                     /* only files that are not inline images need the Read tool */
-                    out.readable |= fs.len() > a.images.len();
+                    out.readable.extend(a.readable);
                 }
                 Err(e) => out.note.push_str(&format!("\n（附件没能读取：{e}）")),
             }

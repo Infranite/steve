@@ -9,7 +9,7 @@ export type ObjRef = { type: string; id: string; name?: string }
 export type KbSource = {
   id: string; kind: "notes" | "files" | "folder" | "items" | "chat" | "mems" | "bot_mems"; name: string; path?: string; include?: string[]; exclude?: string[]
   visibility: string; level: Level; paused: boolean; status: "ok" | "syncing" | "error"; error: string | null
-  stats: { docs?: number; chunks?: number; skipped?: number; bytes?: number }; last_sync: number | null; builtin: boolean; revision: number
+  stats: { docs?: number; chunks?: number; skipped?: number; bytes?: number; kept?: number; incomplete?: string[] }; last_sync: number | null; builtin: boolean; revision: number
 }
 export type DocBrief = {
   id: string; source: { id: string; kind: KbSource["kind"]; name: string }; title: string; ref: string; visibility: string; level: Level
