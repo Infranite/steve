@@ -199,22 +199,7 @@ pub(crate) async fn followup(cx: &FlowCx, f: Followup) {
             item_id,
             decision_id,
         } => {
-            // The answer's transaction may still be committing when we get here.
-            let mut status = String::from("open");
-            for _ in 0..100 {
-                status = cx
-                    .store()
-                    .reader(|c| steve_store::base::decisions::get(c, &decision_id))
-                    .ok()
-                    .flatten()
-                    .map(|d| d.status)
-                    .unwrap_or_default();
-                if status != "open" {
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            }
-            if status != "resolved" {
+            if !crate::decisions::committed(cx, &decision_id).await {
                 return;
             }
             if let Err(e) = cx.core.resume_item(&ws, &item_id).await {

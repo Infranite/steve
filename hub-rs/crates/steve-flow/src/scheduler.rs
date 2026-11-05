@@ -91,7 +91,7 @@ fn start(tx: &Tx, f: &FlowInfo, s: &Start, now: i64) -> FlowResult<(String, bool
     if let (Some(ctx), Some(extra)) = (context.as_object_mut(), s.extra.as_object()) {
         ctx.extend(extra.clone());
     }
-    let active = runs::active_exists(tx, &f.id)?;
+    let active = runs::active_exists(tx, &f.ws, &f.id)?;
     if overlap_blocks(f.overlap, active.then_some("running")) {
         let id = runs::insert(
             tx,
@@ -238,22 +238,39 @@ fn claim(tx: &Tx, d: &Due, now: i64) -> FlowResult<Option<(String, bool)>> {
 }
 
 /// One round: claims every due trigger, every wait whose time came, and every due retry. Returns
-/// the runs to drive.
+/// the runs to drive. Each claim commits on its own, so a claim that fails is logged and skipped:
+/// the runs already claimed are still returned (nothing else would drive them before a restart),
+/// and one broken row does not hold up the others. Never fails; the `Result` is the callers'.
 pub fn claim_due(cx: &FlowCx) -> FlowResult<Vec<String>> {
     let now = cx.now();
     let mut out = Vec::new();
-    for d in cx.store().reader(|c| due(c, now))? {
-        if let Some((id, true)) = cx.store().transaction(|tx| claim(tx, &d, now))? {
-            out.push(id);
+    let triggers = cx.store().reader(|c| due(c, now)).unwrap_or_else(|e| {
+        tracing::error!("due triggers: {e}");
+        Vec::new()
+    });
+    for d in triggers {
+        match cx.store().transaction(|tx| claim(tx, &d, now)) {
+            Ok(Some((id, true))) => out.push(id),
+            Ok(_) => {}
+            Err(e) => tracing::error!(trigger = %d.id, flow = %d.flow_id, "claim failed: {e}"),
         }
     }
-    out.extend(crate::engine::claim_due_waits(cx)?);
-    for (id, retry_at) in cx.store().reader(|c| runs::due_retries(c, now))? {
-        if cx
+    out.extend(crate::engine::claim_due_waits(cx));
+    let retries = cx
+        .store()
+        .reader(|c| runs::due_retries(c, now))
+        .unwrap_or_else(|e| {
+            tracing::error!("due retries: {e}");
+            Vec::new()
+        });
+    for (id, retry_at) in retries {
+        match cx
             .store()
-            .transaction(|tx| runs::claim_retry(tx, &id, retry_at))?
+            .transaction(|tx| runs::claim_retry(tx, &id, retry_at))
         {
-            out.push(id);
+            Ok(true) => out.push(id),
+            Ok(false) => {}
+            Err(e) => tracing::error!(run = %id, "retry claim failed: {e}"),
         }
     }
     Ok(out)
@@ -386,8 +403,10 @@ impl Scheduler {
         self.cx
             .store()
             .admitted(async {
-                self.cx.run_followups().await;
-                let ids = claim_due(&self.cx)?;
+                // spawned, not awaited: a resumed run must not hold up the claims
+                self.cx.spawn_followups().await;
+                let cx = self.cx.clone();
+                let ids = self.cx.blocking(move |_| claim_due(&cx)).await?;
                 Ok(ids
                     .into_iter()
                     .map(|id| spawn_drive(self.cx.clone(), id))
@@ -411,7 +430,11 @@ impl Scheduler {
             let now = self.cx.now();
             if now.saturating_sub(pruned_at) >= RETENTION_EVERY_MS {
                 pruned_at = now;
-                match self.cx.store().transaction(|tx| runs::prune(tx, now)) {
+                let pruned = self
+                    .cx
+                    .blocking(move |s| s.transaction(|tx| runs::prune(tx, now)))
+                    .await;
+                match pruned {
                     Ok(n) if n > 0 => tracing::info!("pruned {n} old schedule runs"),
                     Ok(_) => {}
                     Err(e) => tracing::error!("schedule run retention: {e}"),

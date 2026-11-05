@@ -47,7 +47,7 @@ fn daily(mode: &str) -> Value {
 fn runs_of(e: &FlowEnv, flow: &str) -> Vec<runs::RunRow> {
     e.env
         .store()
-        .reader(|c| runs::page(c, flow, None, 50))
+        .reader(|c| runs::page(c, WS, flow, None, 50))
         .unwrap()
 }
 
@@ -257,6 +257,41 @@ async fn due_trigger_starts_exactly_one_run_even_with_two_loops() {
     assert_eq!(rs[0].at(), monday_8am() + 30 * MIN);
     assert_eq!(next_at(&e, &id), Some(monday_8am() + 30 * MIN + DAY));
     // another round at the same time finds nothing
+    assert!(claim_due(&e.flow).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_broken_trigger_does_not_lose_the_others_claims() {
+    let e = env();
+    let a = create(&e, daily("report")).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let b = create(&e, daily("report")).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    // `a`'s claim fails every round (its graph cannot be read)
+    e.env
+        .store()
+        .with_conn(|c| {
+            c.execute("UPDATE flows SET graph = 'not json' WHERE id = ?", [&a])?;
+            Ok(())
+        })
+        .unwrap();
+    e.env.clock.set(monday_8am() + 30 * MIN);
+    // `b` is claimed and returned (so it is driven), whatever order the two come in
+    let ids = claim_due(&e.flow).unwrap();
+    assert_eq!(ids.len(), 1);
+    let rs = runs_of(&e, &b);
+    assert_eq!(rs.len(), 1);
+    assert_eq!(
+        (rs[0].id.as_str(), rs[0].status.as_str()),
+        (ids[0].as_str(), "running")
+    );
+    // `a`'s claim rolled back: no run, still due
+    assert!(runs_of(&e, &a).is_empty());
+    assert_eq!(next_at(&e, &a), Some(monday_8am() + 30 * MIN));
     assert!(claim_due(&e.flow).unwrap().is_empty());
 }
 

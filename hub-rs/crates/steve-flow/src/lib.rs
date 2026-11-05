@@ -190,12 +190,44 @@ impl FlowCx {
         self.recovered.send_replace(true);
     }
 
-    /// Runs the queued [`Followup`]s; the scheduler calls it every round, tests call it directly.
+    /// Runs synchronous store work on the blocking pool (the shape of `Modules::blocking`), so a
+    /// transaction waiting for the writer does not hold up a runtime worker.
+    pub async fn blocking<R: Send + 'static>(
+        &self,
+        f: impl FnOnce(&Store) -> FlowResult<R> + Send + 'static,
+    ) -> FlowResult<R> {
+        let store = self.store().clone();
+        tokio::task::spawn_blocking(move || f(&store))
+            .await
+            .map_err(|e| ApiError::Internal(format!("task failed: {e}")))?
+    }
+
+    /// Runs the queued [`Followup`]s one after another and returns when they are done (tests, and
+    /// callers that want the work finished).
     pub async fn run_followups(&self) {
         let mut rx = self.followups.lock().await;
         while let Ok(f) = rx.try_recv() {
             decisions::followup(self, f).await;
         }
+    }
+
+    /// Starts each queued [`Followup`] in its own task, so a resumed run does not hold up the
+    /// scheduler round. Each task holds its own activity permit and runs admitted; a follow-up is
+    /// only taken off the queue once it has a permit, so none is lost while maintenance waits.
+    pub async fn spawn_followups(self: &Arc<Self>) -> Vec<tokio::task::JoinHandle<()>> {
+        let mut rx = self.followups.lock().await;
+        let mut out = Vec::new();
+        while let Some(permit) = self.store().try_activity("flow_followup") {
+            let Ok(f) = rx.try_recv() else {
+                break;
+            };
+            let cx = self.clone();
+            out.push(tokio::spawn(async move {
+                let _permit = permit;
+                cx.store().admitted(decisions::followup(&cx, f)).await;
+            }));
+        }
+        out
     }
 }
 

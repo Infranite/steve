@@ -369,8 +369,8 @@ pub fn summary(c: &Connection, f: &FlowRow, now: i64) -> FlowResult<Value> {
         })
     });
     let (runs24, last_run): (i64, Option<i64>) = c.query_row(
-        "SELECT count(CASE WHEN started >= ? THEN 1 END), max(started) FROM flow_runs WHERE flow_id = ? AND dry_run = 0 AND status != 'skipped'",
-        params![now - 24 * 3_600_000, f.id],
+        "SELECT count(CASE WHEN started >= ? THEN 1 END), max(started) FROM flow_runs WHERE workspace_id = ? AND flow_id = ? AND dry_run = 0 AND status != 'skipped'",
+        params![now - 24 * 3_600_000, f.workspace_id, f.id],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
     Ok(json!({

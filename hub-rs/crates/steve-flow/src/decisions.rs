@@ -133,23 +133,19 @@ impl DecisionHandler for SignalDecisions {
     }
 }
 
-/// Waits until the decision's answer is committed; `true` when it was resolved.
+/// Waits until the decision's answer is settled; `true` when it was resolved. Handlers queue their
+/// follow-up inside the answer's transaction, which holds the store's writer until it commits or
+/// rolls back, so reading the decision under the writer sees how it ended (a rolled-back answer
+/// leaves it `open`).
 pub(crate) async fn committed(cx: &FlowCx, decision_id: &str) -> bool {
-    let mut status = String::from("open");
-    for _ in 0..100 {
-        status = cx
-            .store()
-            .reader(|c| steve_store::base::decisions::get(c, decision_id))
-            .ok()
-            .flatten()
-            .map(|d| d.status)
-            .unwrap_or_default();
-        if status != "open" {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
-    status == "resolved"
+    let id = decision_id.to_string();
+    cx.blocking(move |s| {
+        s.transaction(|tx| -> FlowResult<_> { Ok(steve_store::base::decisions::get(tx, &id)?) })
+    })
+    .await
+    .ok()
+    .flatten()
+    .is_some_and(|d| d.status == "resolved")
 }
 
 /// Runs one follow-up after its decision committed.

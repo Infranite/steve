@@ -18,6 +18,7 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -117,6 +118,12 @@ fn wake_event_in(tx: &Tx, run_id: &str, node_id: &str, event: &Value) -> FlowRes
 }
 
 tokio::task_local! { static IN_FLOW: bool; }
+
+tokio::task_local! {
+    /// Held by each step's write, inside its blocking task, so a driver that stops waiting (a dry
+    /// run's time limit) can wait for the write it left behind before it ends the run.
+    static STEP_WRITES: Arc<tokio::sync::Mutex<()>>;
+}
 
 /// Drives a run, then settles its event and resumes its parent when it finished.
 pub fn drive<'a>(cx: &'a FlowCx, run_id: &'a str) -> BoxFut<'a, FlowResult<RunStatus>> {
@@ -330,6 +337,9 @@ fn step_of(g: &Graph, node: &crate::graph::Node, o: NodeOutcome) -> Step {
 }
 
 async fn drive_inner(cx: &FlowCx, run_id: &str) -> FlowResult<RunStatus> {
+    // the graph and the sender are fixed for a run (its version is pinned, a dry run's graph and
+    // the event are in its context): loaded once, on the first step
+    let mut loaded: Option<(Graph, Value)> = None;
     for _ in 0..MAX_STEPS {
         let run = cx
             .store()
@@ -338,16 +348,21 @@ async fn drive_inner(cx: &FlowCx, run_id: &str) -> FlowResult<RunStatus> {
         if run.status != "running" {
             return Ok(RunStatus::parse(&run.status));
         }
-        let loaded = cx.store().reader(|c| -> FlowResult<_> {
-            let g = graph_of(c, &run)?;
-            let s = sender_of(c, run.context.get("event").unwrap_or(&Value::Null));
-            Ok((g, s))
-        });
-        let (graph, sender) = match loaded {
-            Ok(x) => x,
-            Err(e) => {
-                end_failed(cx, &run, &e.to_string())?;
-                return Ok(RunStatus::Failed);
+        let (graph, sender) = match &mut loaded {
+            Some(x) => &*x,
+            slot @ None => {
+                let r = cx.store().reader(|c| -> FlowResult<_> {
+                    let g = graph_of(c, &run)?;
+                    let s = sender_of(c, run.context.get("event").unwrap_or(&Value::Null));
+                    Ok((g, s))
+                });
+                match r {
+                    Ok(x) => &*slot.insert(x),
+                    Err(e) => {
+                        end_failed(cx, &run, &e.to_string())?;
+                        return Ok(RunStatus::Failed);
+                    }
+                }
             }
         };
         let Some(cursor) = run.cursor.clone() else {
@@ -379,27 +394,27 @@ async fn drive_inner(cx: &FlowCx, run_id: &str) -> FlowResult<RunStatus> {
         let mut rcx = RunCx {
             flow: cx,
             run: run.clone(),
-            graph: &graph,
+            graph,
             node,
             dry_run: run.dry_run,
-            sender,
+            sender: sender.clone(),
             effects: Default::default(),
         };
         let mut gate_ok = approved(&run, &cursor);
         let step = match resume {
             Some(r) if r["gate"] == GATE_NO => Step::Refused,
             Some(r) if r.get("error").is_some_and(|e| !e.is_null()) => step_of(
-                &graph,
+                graph,
                 node,
                 NodeOutcome::Fail(r["error"].as_str().unwrap_or("").to_string()),
             ),
             Some(r) if r["gate"] == GATE_YES => {
                 gate_ok = true;
                 rcx.run.context["approved"][&cursor] = json!(true);
-                step_of(&graph, node, kind.run(&mut rcx, &node.config, &input).await)
+                step_of(graph, node, kind.run(&mut rcx, &node.config, &input).await)
             }
             Some(r) => step_of(
-                &graph,
+                graph,
                 node,
                 NodeOutcome::Next {
                     output: r.get("output").cloned().unwrap_or(Value::Null),
@@ -416,7 +431,7 @@ async fn drive_inner(cx: &FlowCx, run_id: &str) -> FlowResult<RunStatus> {
                     })
                     .unwrap_or_default();
                 if effectful {
-                    step_of(&graph, node, NodeOutcome::next(skipped(DRY_EFFECT)))
+                    step_of(graph, node, NodeOutcome::next(skipped(DRY_EFFECT)))
                 } else if node.kind == "approve" || node.kind == "bot" {
                     let e = graph.preferred(&cursor, &prefer);
                     let mut out = skipped("试运行时按预设的分支走");
@@ -428,7 +443,7 @@ async fn drive_inner(cx: &FlowCx, run_id: &str) -> FlowResult<RunStatus> {
                         status: "ok",
                     }
                 } else if node.kind == "wait" {
-                    let l = wait::pass_label(&graph, node);
+                    let l = wait::pass_label(graph, node);
                     let to = graph
                         .outs(&cursor)
                         .find(|e| Some(&e.label) == l.as_ref())
@@ -441,7 +456,7 @@ async fn drive_inner(cx: &FlowCx, run_id: &str) -> FlowResult<RunStatus> {
                     }
                 } else {
                     step_of(
-                        &graph,
+                        graph,
                         node,
                         kind.dry_run(&mut rcx, &node.config, &input).await,
                     )
@@ -455,7 +470,7 @@ async fn drive_inner(cx: &FlowCx, run_id: &str) -> FlowResult<RunStatus> {
                     None => false,
                 };
                 if ok {
-                    step_of(&graph, node, kind.run(&mut rcx, &node.config, &input).await)
+                    step_of(graph, node, kind.run(&mut rcx, &node.config, &input).await)
                 } else {
                     let flow_name = cx.store().reader(|c| flows::name_of(c, &run.flow_id))?;
                     rcx.effects.outcome = Some("need".into());
@@ -470,13 +485,23 @@ async fn drive_inner(cx: &FlowCx, run_id: &str) -> FlowResult<RunStatus> {
                     )))
                 }
             }
-            None => step_of(&graph, node, kind.run(&mut rcx, &node.config, &input).await),
+            None => step_of(graph, node, kind.run(&mut rcx, &node.config, &input).await),
         };
         let ms = t0.elapsed().as_secs_f64() * 1000.0;
         let effects = std::mem::take(&mut rcx.effects);
         let gate_mark = rcx.run.context["approved"][&cursor] == json!(true);
         let now = cx.now();
-        let status = cx.store().transaction(|tx| -> FlowResult<RunStatus> {
+        let node_name = node.name().to_string();
+        let run_id_owned = run_id.to_string();
+        let held = match STEP_WRITES.try_with(Arc::clone) {
+            Ok(m) => Some(m.lock_owned().await),
+            Err(_) => None,
+        };
+        // on the blocking pool: the step's write may wait for the writer
+        let status = cx
+            .blocking(move |s| s.transaction(|tx| -> FlowResult<RunStatus> {
+            let _held = held;
+            let run_id = run_id_owned.as_str();
             let mut r = runs::get(tx, run_id)?.ok_or_else(|| ApiError::not_found("运行"))?;
             let ours = r.status == "running";
             if let Some(o) = r.context.as_object_mut() {
@@ -550,6 +575,10 @@ async fn drive_inner(cx: &FlowCx, run_id: &str) -> FlowResult<RunStatus> {
                         }
                     }
                 }
+                // a run that ended while the node ran gets the step, not a decision or a wait
+                Step::Wait(w) if !ours => {
+                    add(tx, "waiting", &w.output, None, None)?;
+                }
                 Step::Wait(w) => {
                     let mut out = w.output.clone();
                     let mut decision_id: Option<String> = None;
@@ -569,9 +598,7 @@ async fn drive_inner(cx: &FlowCx, run_id: &str) -> FlowResult<RunStatus> {
                         "INSERT OR REPLACE INTO flow_waits (run_id, node_id, workspace_id, mode, until, match, decision_id, created) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                         params![run_id, cursor, r.workspace_id, w.mode, w.until, w.matcher.to_string(), decision_id, now],
                     )?;
-                    if ours {
-                        r.status = "waiting".into();
-                    }
+                    r.status = "waiting".into();
                 }
                 Step::Retry(e) => {
                     add(tx, "failed", &Value::Null, None, Some(e))?;
@@ -603,14 +630,15 @@ async fn drive_inner(cx: &FlowCx, run_id: &str) -> FlowResult<RunStatus> {
                         r.status = "done".into();
                         r.cursor = None;
                         r.outcome = None;
-                        r.outcome_label = format!("你没有批准「{}」，没有执行", node.name());
+                        r.outcome_label = format!("你没有批准「{node_name}」，没有执行");
                         r.ended = Some(now);
                     }
                 }
             }
             runs::save(tx, &r)?;
             Ok(RunStatus::parse(&r.status))
-        })?;
+        }))
+            .await?;
         match status {
             RunStatus::Running => continue,
             RunStatus::Waiting => {
@@ -827,16 +855,7 @@ pub async fn dry_run(
     let id = cx
         .store()
         .transaction(|tx| open_run(tx, f, "dry_run", ctx, event_id, true, None, 0, now))?;
-    match tokio::time::timeout(DRY_RUN_LIMIT, drive_inner(cx, &id)).await {
-        Ok(r) => {
-            r?;
-        }
-        Err(_) => {
-            if let Some(run) = cx.store().reader(|c| runs::get(c, &id))? {
-                end_failed(cx, &run, "试运行超过 30 秒，已停止")?;
-            }
-        }
-    }
+    drive_dry(cx, &id, DRY_RUN_LIMIT).await?;
     // a dry run never stays waiting (waits pass, approvals are simulated); a waiting sub-flow can't
     cx.store().transaction(|tx| -> FlowResult<()> {
         if let Some(mut r) =
@@ -850,6 +869,26 @@ pub async fn dry_run(
         Ok(())
     })?;
     Ok(id)
+}
+
+/// Drives dry run `id` for at most `limit`, then ends it as failed if it is still running. A step
+/// write the time limit cut off still commits; it is waited for first, so it cannot land on the
+/// run after it was ended.
+async fn drive_dry(cx: &FlowCx, id: &str, limit: Duration) -> FlowResult<()> {
+    let writes = Arc::new(tokio::sync::Mutex::new(()));
+    let driven = STEP_WRITES.scope(writes.clone(), drive_inner(cx, id));
+    match tokio::time::timeout(limit, driven).await {
+        Ok(r) => {
+            r?;
+        }
+        Err(_) => {
+            drop(writes.lock().await);
+            if let Some(run) = cx.store().reader(|c| runs::get(c, id))? {
+                end_failed(cx, &run, "试运行超过 30 秒，已停止")?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// `POST /runs/:id/cancel`: a running or waiting run → `cancelled`; its waits go. `false` when it
@@ -873,10 +912,11 @@ pub fn cancel(tx: &Tx, run: &RunRow, now: i64) -> FlowResult<bool> {
 }
 
 /// Waits due by the clock (`delay`, `until`, event timeouts): resumes them and returns the runs to
-/// drive. Called by every scheduler round.
-pub fn claim_due_waits(cx: &FlowCx) -> FlowResult<Vec<String>> {
+/// drive. Called by every scheduler round. A wait that cannot be resumed is logged and skipped, so
+/// the ones resumed before it are still driven.
+pub fn claim_due_waits(cx: &FlowCx) -> Vec<String> {
     let now = cx.now();
-    let due: Vec<(String, String, String, Value)> = cx.store().reader(|c| -> FlowResult<_> {
+    let due = cx.store().reader(|c| -> FlowResult<Vec<(String, String, String, Value)>> {
         let mut st = c.prepare_cached(
             "SELECT w.run_id, w.node_id, w.mode, w.match FROM flow_waits w JOIN flow_runs r ON r.id = w.run_id
               WHERE w.until IS NOT NULL AND w.until <= ? AND w.mode IN ('delay', 'until', 'event') AND r.status = 'waiting'
@@ -894,7 +934,11 @@ pub fn claim_due_waits(cx: &FlowCx) -> FlowResult<Vec<String>> {
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
-    })?;
+    });
+    let due = due.unwrap_or_else(|e| {
+        tracing::error!("due waits: {e}");
+        Vec::new()
+    });
     let mut out = Vec::new();
     for (run_id, node, mode, matcher) in due {
         let ok = cx.store().transaction(|tx| -> FlowResult<bool> {
@@ -907,12 +951,14 @@ pub fn claim_due_waits(cx: &FlowCx) -> FlowResult<Vec<String>> {
                 json!({ "output": { "waited": mode, "at": now } })
             };
             resume_in(tx, run, &node, res)
-        })?;
-        if ok {
-            out.push(run_id);
+        });
+        match ok {
+            Ok(true) => out.push(run_id),
+            Ok(false) => {}
+            Err(e) => tracing::error!(run = %run_id, node = %node, "wait not resumed: {e}"),
         }
     }
-    Ok(out)
+    out
 }
 
 /// `flow.recover` for flows (§3.3; schedule runs are [`crate::scheduler::recover`]'s): a run left
@@ -998,5 +1044,89 @@ pub fn release_held_outcome(r: &mut RunRow) {
         if let Some(o) = r.context.as_object_mut() {
             o.remove("held_outcome");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testkit::FlowEnv;
+    use steve_modules::testkit::{ME, WS, call, caller};
+
+    fn steps(e: &FlowEnv, run: &str) -> i64 {
+        e.flow
+            .store()
+            .reader(|c| -> FlowResult<i64> {
+                Ok(c.query_row(
+                    "SELECT count(*) FROM flow_run_steps WHERE run_id = ?",
+                    [run],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap()
+    }
+
+    /// The blocking pool is one thread and busy, so the first step's write starts only after the
+    /// limit, while the writer itself is free for the end of the run.
+    #[test]
+    fn a_dry_run_cut_off_mid_write_waits_for_the_write_before_it_ends() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .max_blocking_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(cut_off_dry_run());
+    }
+
+    async fn cut_off_dry_run() {
+        let e = FlowEnv::new();
+        let graph = json!({
+            "nodes": [
+                {"id": "t", "kind": "trigger", "config": {"source": "mail", "types": ["mail.new"]}},
+                {"id": "a", "kind": "action", "config": {"action": "ignore", "reason": "x"}}
+            ],
+            "edges": [{"from": "t", "to": "a"}]
+        });
+        let body = json!({ "name": "f", "graph": graph });
+        let (st, v) = call(
+            &e.router(),
+            Some(&caller(WS, ME)),
+            "POST",
+            "/flows",
+            Some(&body),
+        )
+        .await;
+        assert_eq!(st, 200, "{v}");
+        let f = e
+            .flow
+            .store()
+            .reader(|c| flows::own(c, WS, v["id"].as_str().unwrap()))
+            .unwrap();
+        let now = e.flow.now();
+        let ctx = json!({ "prefer": [], "at": now });
+        let id = e
+            .flow
+            .store()
+            .transaction(|tx| open_run(tx, &f, "dry_run", ctx, None, true, None, 0, now))
+            .unwrap();
+        let busy = tokio::task::spawn_blocking(|| std::thread::sleep(Duration::from_millis(300)));
+        drive_dry(&e.flow, &id, Duration::from_millis(50))
+            .await
+            .unwrap();
+        // the cut-off step landed before the run was ended, and nothing lands after
+        let at_end = steps(&e, &id);
+        busy.await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(at_end, 1);
+        assert_eq!(steps(&e, &id), at_end);
+        let run = e
+            .flow
+            .store()
+            .reader(|c| runs::get(c, &id))
+            .unwrap()
+            .unwrap();
+        assert_eq!(run.status, "failed");
+        assert_eq!(run.cursor.as_deref(), Some("a"));
     }
 }

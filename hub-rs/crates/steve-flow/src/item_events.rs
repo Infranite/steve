@@ -71,21 +71,9 @@ fn anyone_listening(c: &Connection, ws: &str, type_key: &str) -> FlowResult<bool
     let matches = st
         .query_map([ws], |r| r.get::<_, Option<String>>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(matches.iter().any(|m| {
-        let m: Value = m
-            .as_deref()
-            .and_then(|m| serde_json::from_str(m).ok())
-            .unwrap_or(Value::Null);
-        let source_ok = m["source"]
-            .as_str()
-            .is_none_or(|s| s.is_empty() || s == SOURCE);
-        let type_ok = match &m["type"] {
-            Value::String(t) => t.is_empty() || t == type_key,
-            Value::Array(ts) => ts.is_empty() || ts.iter().any(|t| t == type_key),
-            _ => true,
-        };
-        source_ok && type_ok
-    }))
+    Ok(matches
+        .iter()
+        .any(|m| crate::ingest::wait_takes(m.as_deref(), SOURCE, &[type_key])))
 }
 
 /// The flows whose runs made `item` (`links(item, 'from', 'flow_run', run)`).

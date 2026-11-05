@@ -419,7 +419,7 @@ pub struct ScheduleView {
 }
 
 pub fn view(c: &Connection, s: &Schedule) -> FlowResult<ScheduleView> {
-    let last = runs::last_real(c, &s.id, None)?.map(|r| Last {
+    let last = runs::last_real(c, &s.workspace_id, &s.id, None)?.map(|r| Last {
         at: r.at(),
         status: r.status.clone(),
         text: r.outcome_label.clone(),

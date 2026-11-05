@@ -222,7 +222,12 @@ fn visible(viewer: &Viewer, params: &mut Vec<Sql>) -> String {
     sql
 }
 
-const SELECT: &str = "SELECT e.*, coalesce(nullif(a.handle_display, ''), a.handle) AS conn_name, f.name AS flow_name, f.kind AS flow_kind, p.name AS actor_name
+/// Every `ext_events` column but `payload` (the raw body is only read by [`raw`]).
+const SELECT: &str = "SELECT e.id, e.workspace_id, e.connection_id, e.source, e.type, e.external_id, e.dedupe_key,
+    e.thread_key, e.group_key, e.scope_ext_id, e.space_id, e.message_id, e.actor_account_id, e.actor_party_id,
+    e.occurred, e.received, e.summary, e.payload_purged, e.visibility, e.outcome, e.outcome_label, e.reason,
+    e.handled_by, e.flow_id, e.run_id, e.work_item_id, e.decision_id, (e.payload IS NOT NULL) AS raw_available,
+    coalesce(nullif(a.handle_display, ''), a.handle) AS conn_name, f.name AS flow_name, f.kind AS flow_kind, p.name AS actor_name
   FROM ext_events e LEFT JOIN connections c ON c.id = e.connection_id LEFT JOIN accounts a ON a.id = c.account_id
   LEFT JOIN flows f ON f.id = e.flow_id LEFT JOIN parties p ON p.id = e.actor_party_id";
 
@@ -232,7 +237,6 @@ fn signal(r: &Row) -> rusqlite::Result<Value> {
     let flow: Option<String> = r.get("flow_id")?;
     let party: Option<String> = r.get("actor_party_id")?;
     let group: Option<String> = r.get("group_key")?;
-    let payload: Option<String> = r.get("payload")?;
     Ok(json!({
         "id": r.get::<_, String>("id")?,
         "source": r.get::<_, String>("source")?,
@@ -260,7 +264,7 @@ fn signal(r: &Row) -> rusqlite::Result<Value> {
         }).transpose()?,
         "work_item_id": r.get::<_, Option<String>>("work_item_id")?,
         "decision_id": r.get::<_, Option<String>>("decision_id")?,
-        "raw_available": payload.is_some(),
+        "raw_available": r.get::<_, bool>("raw_available")?,
         "occurred": r.get::<_, i64>("occurred")?,
         "received": r.get::<_, i64>("received")?,
     }))
