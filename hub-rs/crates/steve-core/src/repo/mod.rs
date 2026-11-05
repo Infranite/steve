@@ -201,6 +201,13 @@ impl Db {
     pub fn bot_seed_fixups(&self, steve_project: Option<&str>) -> Result<()> {
         Ok(self.s.bots().seed_fixups(steve_project)?)
     }
+    /// A new bot in `ws`; `b` is a `NewBot` as JSON.
+    pub fn bot_create(&self, ws: &str, b: Value, author: &str) -> Result<Bot> {
+        self.s
+            .bots()
+            .create(ws, &serde_json::from_value(b)?, author)?
+            .ok_or_else(|| crate::error::msg("没有这个 Bot"))
+    }
     pub fn bot_patch(&self, id: &str, p: &Map<String, Value>, author: &str) -> Result<()> {
         self.s.bots().patch(id, &decode(p.clone())?, author)?;
         Ok(())
