@@ -10,6 +10,7 @@ import { blockSlots, type FeedRow } from "./feed-order"
 import { api, setPageWorkspace, stream, Unauthenticated, type State, type RItem, type RItemDetail, type RSession, type RDecision, type RBot, type REvent, type RProject, type Proposal, type LocalSession, type HubEvent, type RNotice } from "./api"
 import { cue } from "./bus"
 import { elapsed, pastTime, span } from "./i18n/format"
+import i18n, { t } from "./i18n"
 import type { RFile, PlanStep, RHold, RQueued, RKindReview, SuggestChoice, A2uiRecord, A2uiSubmit, RAnnotation } from "./api"
 import type { Cite } from "./api/knowledge"
 import { yoloApi, type RYolo, type RYoloAction } from "./api/yolo"
@@ -79,20 +80,39 @@ export type LiveRun = { mid: string; run: string; t0: number; tools: { name: str
 export type Orphan = { i: Item; w: Wait }
 export type Project = RProject
 
-export const PRO = ["只在必要时", "适中", "积极"]
-export const ST: Record<string, [string, "accent" | "orange" | "green" | "neutral" | "red"]> = {
-  prop: ["提议", "accent"], block: ["等前置", "neutral"], run: ["进行中", "accent"], wait: ["等你", "orange"], pause: ["已暂停", "neutral"], done: ["已完成", "green"], drop: ["已放弃", "neutral"],
+/* label tables read when they are used (getters), so a language switch shows at once; the keys are the Hub's values */
+function live<K extends string, V>(keys: readonly K[], f: (k: K) => V): Record<string, V> {
+  const x: Record<string, V> = {}
+  for (const k of keys) Object.defineProperty(x, k, { get: () => f(k), enumerable: true })
+  return x
 }
-export const SS: Record<string, [string, "accent" | "orange" | "green" | "neutral"]> = { run: ["运行中", "accent"], wait: ["等你", "orange"], idle: ["空闲", "neutral"], ended: ["已结束", "neutral"] }
-export const WT: Record<string, string> = { approve: "审批", ask: "问题", accept: "验收", propose: "提议", fail: "异常", confirm: "确认" }
+/** a list whose entries are read when they are used; `fixed` are the plain entries before and after the label at `at` */
+function liveList<T extends unknown[]>(fixed: unknown[], at: number, f: () => string): T {
+  const x: unknown[] = []
+  fixed.forEach((v, n) => { if (n !== at) x[n] = v })
+  Object.defineProperty(x, at, { get: f, enumerable: true })
+  return x as T
+}
+/** a bot's proactive level 0, 1, 2 as words; the index is what is stored */
+export const PRO: string[] = []
+;(["rare", "moderate", "active"] as const).forEach((k, n) => Object.defineProperty(PRO, n, { get: () => t(`core:proactive.${k}`), enumerable: true }))
+type Tone = "accent" | "orange" | "green" | "neutral" | "red"
+const ST_TONE = { prop: "accent", block: "neutral", run: "accent", wait: "orange", pause: "neutral", done: "green", drop: "neutral" } as const
+export const ST: Record<string, [string, Tone]> = live(Object.keys(ST_TONE) as (keyof typeof ST_TONE)[], (k) => [t(`core:itemStatus.${k}`), ST_TONE[k]])
+const SS_TONE = { run: "accent", wait: "orange", idle: "neutral", ended: "neutral" } as const
+export const SS: Record<string, [string, "accent" | "orange" | "green" | "neutral"]> = live(Object.keys(SS_TONE) as (keyof typeof SS_TONE)[], (k) => [t(`core:sessStatus.${k}`), SS_TONE[k]])
+const WAIT_TYPES = ["approve", "ask", "accept", "propose", "fail", "confirm"] as const
+export const WT: Record<string, string> = live(WAIT_TYPES, (k) => t(`core:waitType.${k}`))
 /** what you do about a card of this type: the button that takes you to it */
-export const WACT: Record<string, string> = { accept: "验收", approve: "审批", ask: "回答", propose: "决定", fail: "查看", confirm: "确认" }
+export const WACT: Record<string, string> = live(WAIT_TYPES, (k) => t(`core:waitAction.${k}`))
 /** what a card asks of you, in a line: `审批：推送到 main` */
-export const waitLine = (w: Wait) => `${w.subject === "tool_call" ? "权限" : w.subject === "release" ? "发布" : WT[w.type] ?? "待处理"}：${w.q}`
+export const waitLine = (w: Wait) => t("core:wait.line", { kind: w.subject === "tool_call" ? t("core:wait.tool") : w.subject === "release" ? t("core:wait.release") : WT[w.type] ?? t("core:wait.other"), q: w.q })
 export const HARNESS: Record<string, string> = { "claude-code": "Claude Code", codex: "Codex" }
-export const ACC: Record<string, string> = { inherit: "跟随全局", manual: "需要你验收", auto: "自动验收" }
-export const PERM: Record<string, string> = { plan: "只读：只出方案，不改文件", default: "每次改文件或运行命令都问你", acceptEdits: "可以改项目目录里的文件，运行命令要问你", auto: "可以改文件、运行命令；对外操作仍需你批准" }
-const accKey = (label: string) => Object.keys(ACC).find((k) => ACC[k] === label) ?? "inherit"
+/** acceptance modes by their Hub value; the view model carries the label (Item.acc, Bot.acc), accKey turns it back */
+export const ACC: Record<string, string> = live(["inherit", "manual", "auto"] as const, (k) => t(`core:acc.${k}`))
+export const PERM: Record<string, string> = live(["plan", "default", "acceptEdits", "auto"] as const, (k) => t(`core:perm.${k}`))
+/* a label in the current language, or the Hub value itself */
+const accKey = (label: string) => Object.keys(ACC).find((k) => ACC[k] === label) ?? (label in ACC ? label : "inherit")
 
 /* ───────── time labels ───────── */
 export const tm = (ts: number | null | undefined) => pastTime(ts)
@@ -131,7 +151,7 @@ const ls = new Set<() => void>()
 export function emit() { st.ver++; ls.forEach((f) => f()) }
 export function useStore() { return useSyncExternalStore((cb) => { ls.add(cb); return () => ls.delete(cb) }, () => st.ver) }
 export function toast(t: string, opts?: Parameters<typeof sonner>[1]) { sonner(t, opts) }
-const fail = (e: unknown) => { if (e instanceof Unauthenticated) { st.login = e.login; emit(); return } toast((e as Error).message || "出错了") }
+const fail = (e: unknown) => { if (e instanceof Unauthenticated) { st.login = e.login; emit(); return } toast((e as Error).message || t("core:error.generic")) }
 /** run an API call; refresh afterwards; report errors as a toast */
 async function call<T>(p: Promise<T>, ok?: string): Promise<T | undefined> {
   try { const r = await p; if (ok) toast(ok); await refresh(); return r } catch (e) { fail(e); return undefined }
@@ -147,22 +167,24 @@ async function sendMessage(p: Promise<unknown>, ok?: string): Promise<boolean> {
 /* ───────── mapping ───────── */
 function botOf(b: RBot): Bot {
   const prev = st.bots[b.id], proj = raw.state?.projects.find((p) => p.id === b.default_project)
-  return { id: b.id, main: b.main, n: b.name, a: b.name[0] ?? "B", role: b.role, pers: b.persona, pro: b.proactive, h: HARNESS[b.harness] ?? b.harness, harness: b.harness, m: b.model ?? "默认模型", model: b.model, reasoningEffort: b.reasoning_effort,
-    on: b.enabled, acc: ACC[b.accept_mode] ?? "跟随全局", ws: proj?.name ?? "按事项推断", project: b.default_project, perm: PERM[b.perm_mode] ?? b.perm_mode, permMode: b.perm_mode, rule: b.rules, prompt: b.prompt,
+  return { id: b.id, main: b.main, n: b.name, a: b.name[0] ?? "B", role: b.role, pers: b.persona, pro: b.proactive, h: HARNESS[b.harness] ?? b.harness, harness: b.harness, m: b.model ?? t("core:defaultModel"), model: b.model, reasoningEffort: b.reasoning_effort,
+    on: b.enabled, acc: ACC[b.accept_mode] ?? ACC.inherit, ws: proj?.name ?? t("core:projectByItem"), project: b.default_project, perm: PERM[b.perm_mode] ?? b.perm_mode, permMode: b.perm_mode, rule: b.rules, prompt: b.prompt,
     mem: prev?.mem ?? [], memLoaded: prev?.memLoaded ?? false, memCount: b.memories, routines: [], hue: b.avatar.color ?? "#8e8e93", color: b.avatar.color ?? defaultColor(b.name), round: b.avatar.round ?? 60, skin: b.avatar.skin ?? null, dev: b.device ?? undefined, workspaces: b.workspaces }
 }
-export const AVATAR_COLORS: [string, string][] = [["#7aa7c7", "雾蓝"], ["#8c7ae6", "薰衣草"], ["#5fb39a", "青绿"], ["#e0a458", "琥珀"], ["#d9777f", "珊瑚"], ["#6c7a89", "石板灰"], ["#3d4a5c", "深蓝灰"], ["#b08968", "胡桃"]]
+const AVATAR_HUES = [["#7aa7c7", "mist"], ["#8c7ae6", "lavender"], ["#5fb39a", "teal"], ["#e0a458", "amber"], ["#d9777f", "coral"], ["#6c7a89", "slate"], ["#3d4a5c", "navy"], ["#b08968", "walnut"]] as const
+/** [color, its name] */
+export const AVATAR_COLORS: [string, string][] = AVATAR_HUES.map(([c, k]) => liveList<[string, string]>([c, ""], 1, () => t(`core:avatarColor.${k}`)))
 const hash = (s: string) => { let h = 2166136261; for (const ch of s) { h ^= ch.codePointAt(0)!; h = Math.imul(h, 16777619) } return h >>> 0 }
 export const defaultColor = (name: string) => AVATAR_COLORS[hash(name) % AVATAR_COLORS.length][0]
 
 /** one line for a prompt Steve hands an agent (the task brief runs to pages: role, rules, retrieved knowledge) */
 export function briefHead(text: string): string {
   const title = /^You are working for Steve\b[^\n]*?“(.+?)”/.exec(text)?.[1]
-  if (title) return "任务说明 · " + title
+  if (title) return t("core:brief.titled", { title })
   const line = text.split("\n").find((l) => l.trim())?.trim() ?? ""
-  return !line ? "任务说明" : line.length > 120 ? line.slice(0, 120) + "…" : line
+  return !line ? t("core:brief.plain") : line.length > 120 ? line.slice(0, 120) + "…" : line
 }
-const STEVE_TOOL: Record<string, string> = { steve_update: "更新计划", steve_ask: "向你提问", steve_request_approval: "请求批准", steve_deliver: "交付", steve_publish: "申请发布" }
+const STEVE_TOOL: Record<string, string> = live(["steve_update", "steve_ask", "steve_request_approval", "steve_deliver", "steve_publish"] as const, (k) => t(`core:steveTool.${k}`))
 const KIND: Record<string, string> = { read: "read", edit: "edit", search: "search", exec: "run", fetch: "search", think: "read", delete: "edit", move: "edit" }
 const unfence = (t: string) => t.replace(/^```[a-z]*\n?/, "").replace(/\n?```\s*$/, "")
 const diffText = (d: any) => [...String(d.old ?? "").split("\n").filter((l, _i, a) => a.length > 1 || l).map((l) => "- " + l), ...String(d.new ?? "").split("\n").map((l) => "+ " + l)].join("\n")
@@ -175,7 +197,7 @@ function toolEv(t: Ev, v: any) {
   const text = result.filter((p) => p?.type === "text").map((p) => String(p.text ?? "")).join("\n")
   t.length = 0
   if (steve) t.push("tool", "steve", STEVE_TOOL[short] ?? short, "Steve", "", live)
-  else t.push("tool", KIND[v.category] ?? "run", name || title.split(" ")[0] || "工具", v.target ?? title.split(" ").slice(1).join(" ").slice(0, 80), "", live)
+  else t.push("tool", KIND[v.category] ?? "run", name || title.split(" ")[0] || i18n.t("core:tool.fallback"), v.target ?? title.split(" ").slice(1).join(" ").slice(0, 80), "", live)
   if (diffs.length) { t[4] = diffs.map(diffText).join("\n⋯\n"); t[6] = diffs.reduce((n, d) => n + (d.added ?? 0), 0); t[7] = diffs.reduce((n, d) => n + (d.removed ?? 0), 0); if (!steve && diffs[0].path) t[3] = diffs[0].path }
   else if (text) t[4] = t[1] === "run" ? unfence(text) : text
   if (!t[4] && v.error) t[4] = String(v.error)
@@ -211,12 +233,12 @@ export function toEv(evs: REvent[], running: boolean): { ev: Ev[]; seqs: number[
       const t = toolEv([], v); tools.set(id, t); push(t, e.seq); continue
     }
     if (e.kind === "system") { push(["sys", d.text], e.seq); continue }
-    if (e.kind === "permission") { push(["ask", String(d.title ?? "工具调用"), d.decision], e.seq); continue }
+    if (e.kind === "permission") { push(["ask", String(d.title ?? t("core:tool.permission")), d.decision], e.seq); continue }
     if (e.kind === "turn_end") { push(["end", d.stopReason ?? ""], e.seq); continue }
-    if (e.kind === "queued") { push(["sys", "已排队：" + briefHead(String(d.text ?? ""))], e.seq); continue }
-    if (e.kind === "queued_edited") { push(["sys", "改了排队的消息：" + briefHead(String(d.text ?? ""))], e.seq); continue }
-    if (e.kind === "queued_removed") { push(["sys", "撤回了排队的消息：" + briefHead(String(d.text ?? ""))], e.seq); continue }
-    if (e.kind === "queued_sent_now") { push(["sys", (d.interrupted ? "中断当前回合，立即发送：" : "立即发送：") + briefHead(String(d.text ?? ""))], e.seq); continue }
+    if (e.kind === "queued") { push(["sys", t("core:queueLine.queued", { text: briefHead(String(d.text ?? "")) })], e.seq); continue }
+    if (e.kind === "queued_edited") { push(["sys", t("core:queueLine.edited", { text: briefHead(String(d.text ?? "")) })], e.seq); continue }
+    if (e.kind === "queued_removed") { push(["sys", t("core:queueLine.removed", { text: briefHead(String(d.text ?? "")) })], e.seq); continue }
+    if (e.kind === "queued_sent_now") { push(["sys", t(d.interrupted ? "core:queueLine.sentNowInterrupted" : "core:queueLine.sentNow", { text: briefHead(String(d.text ?? "")) })], e.seq); continue }
   }
   if (!running) ev.forEach((x) => { if (x[0] === "tool") x[5] = 0 })
   return { ev, seqs, ts }
@@ -230,7 +252,7 @@ function convOf(sid: string, xs: REvent[], running: boolean) {
 function sessOf(s: RSession, openSessions: Set<string>): Sess {
   const evs = raw.events.get(s.id), running = s.status === "running" || s.status === "starting"
   const conv = evs ? convOf(s.id, evs, running) : { ev: [], seqs: [], ts: [] }
-  return { id: s.id, n: s.no, item: s.item_id, b: s.bot_id, h: HARNESS[s.harness] ?? s.harness, harness: s.harness, nativeId: s.harness_session_id ?? null, cwd: s.cwd, m: s.model ?? "默认模型", st: running ? "run" : s.status === "ended" ? "ended" : openSessions.has(s.id) ? "wait" : "idle",
+  return { id: s.id, n: s.no, item: s.item_id, b: s.bot_id, h: HARNESS[s.harness] ?? s.harness, harness: s.harness, nativeId: s.harness_session_id ?? null, cwd: s.cwd, m: s.model ?? t("core:defaultModel"), st: running ? "run" : s.status === "ended" ? "ended" : openSessions.has(s.id) ? "wait" : "idle",
     title: s.title, dur: dur(s.created, s.updated), reasoningEffort: s.reasoning_effort, contextKnown: s.used != null && s.size != null && s.size > 0, ctx: s.used && s.size ? Math.round((s.used / s.size) * 100) : 0, src: s.source, up: tm(s.updated), ev: conv.ev, seqs: conv.seqs, ts: conv.ts, queue: s.queued,
     ro: s.readonly, device: s.device_id, loaded: !!evs, busy: s.busy }
 }
@@ -246,22 +268,27 @@ export function permissionDecision(id?: string) {
 /** a stand-in item for a decision without one: id "" marks it; the title and bot come from its session */
 function orphanOf(d: RDecision): Orphan {
   const s = raw.state?.sessions.find((x) => x.id === d.session_id), w = waitOf(d)
-  const i = { id: "", t: s?.title || "未关联事项的会话", b: s?.bot_id ?? d.requested_by, st: "wait", waits: [w], wait: w, ss: s ? [s.id] : [], tags: [], deps: [], tl: [], outs: [], anns: [], q: [], goals: [], rounds: [], now: "", src: ["会话", "session"], ws: "—", project: null, up: "", acc: "跟随全局", branch: null, cwd: null, detail: false, dependents: [], created: d.created, updated: d.created } as unknown as Item
+  const i = { id: "", t: s?.title || t("core:orphan.title"), b: s?.bot_id ?? d.requested_by, st: "wait", waits: [w], wait: w, ss: s ? [s.id] : [], tags: [], deps: [], tl: [], outs: [], anns: [], q: [], goals: [], rounds: [], now: "", src: [t("core:orphan.source"), "session"], ws: "—", project: null, up: "", acc: ACC.inherit, branch: null, cwd: null, detail: false, dependents: [], created: d.created, updated: d.created } as unknown as Item
   return { i, w }
 }
 /* what was chosen on a module card (signals, flows, vault, connections); a flow_step choice is its own label */
 const MODULE_CHOICE_SUBJECTS = new Set(["signal", "flow_step", "flow_run", "secret_use", "connection", "mail_draft"])
-const MODULE_CHOICE: Record<string, string> = { done: "知道了", to_item: "转成事项", retry: "重试", drop: "放弃这次", continue_once: "预算翻倍，继续", stop: "停下", once: "批准这一次", grant_1h: "授权 1 小时", grant_8h: "授权 8 小时", grant_24h: "授权 24 小时", deny: "拒绝", pause: "暂停接收", reauth: "重新授权", send: "发送", no: "不发" }
+const MODULE_CHOICE: Record<string, string> = live(["done", "to_item", "retry", "drop", "continue_once", "stop", "once", "grant_1h", "grant_8h", "grant_24h", "deny", "pause", "reauth", "send", "no"] as const, (k) => t(`core:moduleChoice.${k}`))
 /** an approved release's outcome; undefined for anything else (and for approvals recorded before outcomes existed) */
 export function relOf(d: RDecision): Rel | undefined {
   const r = d.result ?? {}
   if (d.kind !== "approve" || d.subject_type !== "release" || d.status !== "resolved" || !r.approved) return undefined
-  const why = (x: string) => (x ? "：" + x : "")
   switch (r.outcome) {
-    case "releasing": return { tone: "run", text: "已批准，正在发布，结果出来后会通知你" }
-    case "not_released": return { tone: "fail", text: "已批准，但没有发布" + why(r.reason ?? "") }
-    case "failed": return { tone: "fail", text: (r.hub_ok && !r.web_ok ? "已批准，Hub 已发布，前端发布失败" : "已批准，发布失败") + why([r.reason, r.note].filter(Boolean).join("，")) }
-    case "released": return { tone: "ok", text: `已发布${r.kind === "web" ? "前端" : r.kind === "hub+web" ? " Hub 和前端" : ""}${r.version ? " " + r.version : ""}` }
+    case "releasing": return { tone: "run", text: t("core:rel.releasing") }
+    case "not_released": return { tone: "fail", text: r.reason ? t("core:rel.notReleasedWhy", { why: r.reason }) : t("core:rel.notReleased") }
+    case "failed": {
+      const why = [r.reason, r.note].filter(Boolean).join(t("core:rel.sep")), hubOnly = r.hub_ok && !r.web_ok
+      return { tone: "fail", text: hubOnly ? (why ? t("core:rel.hubOnlyWhy", { why }) : t("core:rel.hubOnly")) : why ? t("core:rel.failedWhy", { why }) : t("core:rel.failed") }
+    }
+    case "released": {
+      const what = t(r.kind === "web" ? "core:rel.releasedWeb" : r.kind === "hub+web" ? "core:rel.releasedBoth" : "core:rel.released")
+      return { tone: "ok", text: r.version ? t("core:rel.withVersion", { what, version: r.version }) : what }
+    }
   }
   return undefined
 }
@@ -305,20 +332,22 @@ export function closeRel(i: Item) {
 }
 function choiceLabel(d: RDecision) {
   const r = d.result ?? {}
-  if (r.dismissed) return "撤回"
-  if (d.status === "expired") return String(r.superseded ?? (r.dropped ? "事项已放弃" : r.reassigned ? "换了 Bot" : "已过期"))
-  if (d.kind === "accept") return r.choice === "pass" ? "验收通过" : "返工：" + (r.text ?? "")
-  if (d.subject_type === "space") return (r.choice ?? r.answer) === "mute" ? "静默" : "去设置"
+  if (r.dismissed) return t("core:choice.dismissed")
+  if (d.status === "expired") return String(r.superseded ?? (r.dropped ? t("core:choice.itemDropped") : r.reassigned ? t("core:choice.reassigned") : t("core:choice.expired")))
+  if (d.kind === "accept") return r.choice === "pass" ? t("core:choice.pass") : t("core:choice.rework", { text: r.text ?? "" })
+  if (d.subject_type === "space") return (r.choice ?? r.answer) === "mute" ? t("core:choice.mute") : t("core:choice.setup")
   if (d.kind === "ask") return String(r.answer ?? "")
-  if (d.subject_type === "party_merge") return r.choice === "merge" ? "合并" : "不是同一个人"
-  if (d.kind === "confirm") return r.choice === "yes" ? "确认" : "不对"
-  if (d.kind === "propose") return r.choice === "yes" ? "开始" : "不需要"
-  if (MODULE_CHOICE_SUBJECTS.has(d.subject_type)) return MODULE_CHOICE[r.choice] ?? String(r.choice ?? "已处理")
-  if (d.kind === "fail") return ({ continue: "让它继续", delivered: "它其实做完了", look: "我来看看", tosteve: "换成 Steve", drop: "放弃", release_waive: "不需要发布", release_retry: "需要发布", release_live: "已经上线" } as Record<string, string>)[r.choice] ?? r.choice
-  if (d.subject_type === "tool_call") return r.optionId ? "允许" : "拒绝"
-  if (d.subject_type === "release") return r.approved ? "批准发布" : "不发布"
-  return r.approved ? "批准" : "拒绝"
+  if (d.subject_type === "party_merge") return r.choice === "merge" ? t("core:choice.merge") : t("core:choice.notSame")
+  if (d.kind === "confirm") return r.choice === "yes" ? t("core:choice.confirmYes") : t("core:choice.confirmNo")
+  if (d.kind === "propose") return r.choice === "yes" ? t("core:choice.proposeYes") : t("core:choice.proposeNo")
+  if (MODULE_CHOICE_SUBJECTS.has(d.subject_type)) return MODULE_CHOICE[r.choice] ?? String(r.choice ?? t("core:choice.handled"))
+  if (d.kind === "fail") return FAIL_CHOICE[r.choice] ?? r.choice
+  if (d.subject_type === "tool_call") return r.optionId ? t("core:choice.allow") : t("core:choice.deny")
+  if (d.subject_type === "release") return r.approved ? t("core:choice.release") : t("core:choice.noRelease")
+  return r.approved ? t("core:choice.approve") : t("core:choice.deny")
 }
+/** the choices on a card about something that went wrong, by the Hub's choice id */
+export const FAIL_CHOICE: Record<string, string> = live(["continue", "delivered", "look", "tosteve", "drop", "release_waive", "release_retry", "release_live"] as const, (k) => t(`core:fail.${k}`))
 /* ── which agent turn answered a comment in the work log ──
  * a comment (timeline kind "me") becomes a user prompt in one of the item's sessions: "补充信息：…", "用户的回答：…", a merged queue…
  * the first unclaimed prompt sent at or after the comment that contains its text is the one; the reply is that turn */
@@ -373,12 +402,12 @@ function itemOf(i: RItem): Item {
   const after = new Map(blockSlots(rows).flatMap((at, k) => at < 0 ? [] : [[at, k] as const])), tl: any[] = []
   lines.forEach((t, n) => {
     const sid = started(t)
-    tl.push(sid ? ["sys", `开始会话`, tm(t.ts)] : t.kind === "me" ? ["me", t.text, tm(t.ts), t.session_id ?? undefined, replies.get(t.id), t.files, t.via, t.id] : ["sys", t.text, tm(t.ts)])
+    tl.push(sid ? ["sys", i18n.t("core:sessionStarted"), tm(t.ts)] : t.kind === "me" ? ["me", t.text, tm(t.ts), t.session_id ?? undefined, replies.get(t.id), t.files, t.via, t.id] : ["sys", t.text, tm(t.ts)])
     const k = after.get(n); if (k == null) return
     const sk = started(lines[k]); tl.push(sk ? ["sess", sk] : ["reply", replies.get(lines[k].id)])
   })
   return {
-    id: i.id, t: i.title, b: i.bot_id ?? "steve", st: i.status, deps: i.deps, src: i.source, ws: proj?.name ?? "—", project: i.project_id, up: tm(i.updated), star: i.star, acc: ACC[i.accept_mode ?? "inherit"] ?? "跟随全局",
+    id: i.id, t: i.title, b: i.bot_id ?? "steve", st: i.status, deps: i.deps, src: i.source, ws: proj?.name ?? "—", project: i.project_id, up: tm(i.updated), star: i.star, acc: ACC[i.accept_mode ?? "inherit"] ?? ACC.inherit,
     goals: det ? det.goalsList.map((g) => g.text) : [i.goal], now: i.now || "", plan: i.plan.length ? steps(i.plan) : undefined,
     rounds: (det?.planRounds ?? []).map((r) => ({ n: r.round, steps: steps(r.steps), end: r.end, at: tm(r.created) })),
     wait: open.length ? waitOf(open[0]) : undefined, waits: open.map(waitOf), ss: i.sessionIds, tl, outs: det ? det.artifacts.map((a): Out => [a.kind, a.title, a.location, a.id, a.created, det.artifactRoles?.[a.id] as Out[5]]) : [], anns: det?.annotations ?? [],
@@ -412,8 +441,8 @@ export function proposalOf(p: Proposal, state: "draft" | "applied" | "dropped" =
   if (cur) { if (!cur.touched || state === cur.state) { cur.state = state; cur.touched = false } return cur }
   const x: any = { title: p.title, target: p.title, href: p.href, changes: p.changes, state, id: p.id, touched: false }
   const set = (s: typeof state) => { x.state = s; x.touched = true; emit() }
-  x.undo = async () => { if (await call(api.undoConfig(p.id), "已撤销")) set("draft") }
-  x.apply = async () => { const r = await call(api.apply(p.id)); if (r) { set("applied"); toast("已应用", { action: { label: "撤销", onClick: () => void x.undo() } }) } }
+  x.undo = async () => { if (await call(api.undoConfig(p.id), t("core:toast.undone"))) set("draft") }
+  x.apply = async () => { const r = await call(api.apply(p.id)); if (r) { set("applied"); toast(t("core:toast.applied"), { action: { label: t("core:toast.undo"), onClick: () => void x.undo() } }) } }
   x.drop = async () => { if (await call(api.dropConfig(p.id))) set("dropped") }
   proposals.set(p.id, x); return x
 }
@@ -452,10 +481,12 @@ function build() {
   st.done = s.recent.filter((d) => d.item_id).map((d) => ({ id: d.item_id!, type: d.kind, q: d.question, choice: choiceLabel(d), tm: tm(d.resolved), decision: d.id, canUndo: !!d.undo && !!d.resolved && Date.now() - d.resolved < 86400_000, rel: relOf(d),
     how: d.result?.dismissed ? "dismissed" : d.status === "expired" ? "expired" : "chose", yolo: d.result?.decided_by === "yolo" ? String(d.result?.yolo_reason ?? "") : undefined }))
   st.settings = s.settings; st.devices = s.devices; st.runtimes = s.runtimes
-  st.cfg = { ...s.settings, accDefault: ACC[s.settings.accDefault] ?? "需要你验收", harness: s.runtimes.map((r) => ({ id: r.id, n: r.name, ok: r.ok, ver: r.version, path: r.path, models: r.models, def: "默认模型", login: r.note })) }
+  st.cfg = { ...s.settings, accDefault: ACC[s.settings.accDefault] ?? ACC.manual, harness: s.runtimes.map((r) => ({ id: r.id, n: r.name, ok: r.ok, ver: r.version, path: r.path, models: r.models, def: t("core:defaultModel"), login: r.note })) }
   if (st.onboard < 0 && !s.thread.length && !s.items.length && localStorage.getItem("steve-onboarded") !== "1") st.onboard = 0
   st.ready = true
 }
+/* the view model holds labels (status words, "默认模型", transcript lines): map it again in the new language */
+i18n.on("languageChanged", () => { convs.clear(); build(); emit() })
 
 /* ───────── loading and live updates ───────── */
 let scopeEpoch = 0
@@ -491,7 +522,7 @@ export async function loadItem(id: string, force = false) {
 const tries = new Map<string, number>()
 function retry(key: string, e: unknown, f: () => unknown) {
   const n = (tries.get(key) ?? 0) + 1; tries.set(key, n)
-  if (n === 3) toast("载入失败，正在重试：" + ((e as Error).message || "网络出错"))
+  if (n === 3) toast(t("core:error.loadRetry", { msg: (e as Error).message || t("core:error.network") }))
   setTimeout(f, 1000 * Math.min(30, 2 ** n))
 }
 /** Pages are limited by bytes as well as rows; only an empty page means EOF. */
@@ -581,13 +612,12 @@ const yoloSoon = () => { clearTimeout(yoloTimer); yoloTimer = setTimeout(() => v
 async function yoloCall<T>(p: Promise<T>, ok?: string): Promise<T | undefined> {
   try { const r = await p; if (ok) toast(ok); await loadYolo(); return r } catch (e) { fail(e); return undefined }
 }
-const LEVEL_TOAST = { off: "已关闭，每个决定都等你", on: "YOLO 已打开", full: "完全放开已打开" } as const
-export const yoloSet = (mode: "off" | "on" | "full", includeOpen = false) => yoloCall(yoloApi.set(mode, includeOpen), LEVEL_TOAST[mode])
-export const yoloScope = (type: "project" | "item", id: string, mode: "on" | "off" | "inherit" | "full") => yoloCall(yoloApi.scope(type, id, mode), "已保存")
-export const yoloResume = () => yoloCall(yoloApi.resume(), "YOLO 已恢复")
-export const yoloUndo = (id: string, text?: string) => yoloCall(yoloApi.undo(id, text), "已撤销").then((r) => { void refresh(); return r })
+export const yoloSet = (mode: "off" | "on" | "full", includeOpen = false) => yoloCall(yoloApi.set(mode, includeOpen), t(`core:yolo.${mode}`))
+export const yoloScope = (type: "project" | "item", id: string, mode: "on" | "off" | "inherit" | "full") => yoloCall(yoloApi.scope(type, id, mode), t("common:state.saved"))
+export const yoloResume = () => yoloCall(yoloApi.resume(), t("core:yolo.resumed"))
+export const yoloUndo = (id: string, text?: string) => yoloCall(yoloApi.undo(id, text), t("core:toast.undone")).then((r) => { void refresh(); return r })
 export const yoloNow = (id: string) => yoloCall(yoloApi.now(id)).then((r) => { void refresh(); return r })
-export const yoloCancel = (id: string) => yoloCall(yoloApi.cancel(id), "这张卡留给你")
+export const yoloCancel = (id: string) => yoloCall(yoloApi.cancel(id), t("core:yolo.leftToYou"))
 
 function onHub(e: HubEvent | ModuleEvent) {
   hubSubs.forEach((f) => f(e))
@@ -656,11 +686,11 @@ const cardOf = (id: string, decision?: string): { i?: Item; w?: Wait } => { if (
 export const snoozed = () => st.items.filter((i) => !!i.wait && !!i.snooze)
 export const active = (i: Item) => i.ss.map((x) => st.S[x]).filter((s) => s && s.st !== "ended").pop()
 export const sidOf = (s: Sess) => s.id
-export const accOf = (i: Item) => (i.acc !== "跟随全局" ? i.acc : st.bots[i.b] && st.bots[i.b].acc !== "跟随全局" ? st.bots[i.b].acc : st.cfg.accDefault)
+export const accOf = (i: Item) => (i.acc !== ACC.inherit ? i.acc : st.bots[i.b] && st.bots[i.b].acc !== ACC.inherit ? st.bots[i.b].acc : st.cfg.accDefault)
 export const botName = (k: string | null) => (!k ? "" : st.bots[k] ? (st.bots[k].main ? st.bots[k].n : st.bots[k].n + " Bot") : k === "agent" ? "Agent" : k)
-export const hm = (s: Sess) => `${s.h ?? "未知 harness"} · ${s.m ?? "默认模型"}`
+export const hm = (s: Sess) => t("core:harnessModel", { harness: s.h ?? t("core:unknownHarness"), model: s.m ?? t("core:defaultModel") })
 export const isThinking = () => st.thinking
-export const projectName = (id: string | null | undefined) => st.projects.find((p) => p.id === id)?.name ?? "无"
+export const projectName = (id: string | null | undefined) => st.projects.find((p) => p.id === id)?.name ?? t("common:state.none")
 export const depsOpen = (i: Item) => (i.deps || []).filter((d) => st.items.find((x) => x.id === d)?.st !== "done")
 export function stageOf(i: Item): string {
   if (i.st === "prop") return "分流"; if (i.st === "block") return "规划"; if (i.st === "done" || i.st === "drop") return "收尾"
@@ -703,19 +733,19 @@ export async function stopReply() {
   if (r[1] && !(r[1] as { ok?: boolean }).ok && !r[0]?.ok) { st.thinking = false; st.live = null; build(); emit(); soon() }
 }
 /* ── the main conversation's queue: a message waiting for the turn can be changed or withdrawn until it goes ── */
-export async function threadQueuedEdit(id: string, text: string) { const r = await qCall(api.threadQueuedEdit(id, text)); if (r) toast("已修改排队的消息"); return !!r }
+export async function threadQueuedEdit(id: string, text: string) { const r = await qCall(api.threadQueuedEdit(id, text)); if (r) toast(t("core:toast.queuedEdited")); return !!r }
 /** back into the composer when it is empty; otherwise removed, with an undo that queues it again */
 export async function threadQueuedWithdraw(id: string, composer?: { empty: () => boolean; fill: (t: string, f: RFile[]) => void } | null) {
   const r = await qCall(api.threadQueuedWithdraw(id)); if (!r) return
   const files = r.files ?? []
-  if (composer?.empty()) { composer.fill(r.text, files); toast("已撤回，放回输入框了"); return }
-  toast("已撤回", { action: { label: "撤销", onClick: () => void chatSend(r.text, files.map((f) => f.id), files) } })
+  if (composer?.empty()) { composer.fill(r.text, files); toast(t("core:toast.withdrawnToComposer")); return }
+  toast(t("core:toast.withdrawn"), { action: { label: t("core:toast.undo"), onClick: () => void chatSend(r.text, files.map((f) => f.id), files) } })
 }
 export function quoteMsg(id: string | null) { st.quote = id; emit(); requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>("[data-composer='chat'] textarea, textarea")?.focus()) }
 export function clearFocus() { st.focus = null; emit() }
 export const focusItem = () => (st.focus && st.focus.until > Date.now() ? st.focus.item : null)
 /* thread routing actions: a 409 (already handled) comes back as its message */
-export async function takeOffer(m: Msg, take: boolean) { if (!m.id) return; const r = await call(api.offer(m.id, take)); if (r?.item) toast("已做成 " + r.item.id) }
+export async function takeOffer(m: Msg, take: boolean) { if (!m.id) return; const r = await call(api.offer(m.id, take)); if (r?.item) toast(t("core:toast.madeItem", { id: r.item.id })) }
 /** an A2UI button pressed in a reply: `already` when this surface had been submitted (another tab, a double click that got through) */
 export async function a2uiSubmit(msg: string, a: A2uiSubmit): Promise<{ already: boolean }> {
   const r = await api.a2ui(msg, a)
@@ -726,18 +756,18 @@ export async function chooseSuggest(m: Msg, choice: SuggestChoice) {
   if (!m.id) return
   const append = !!m.suggest?.choices.find((c) => c.id === choice)?.item
   const r = await call(api.suggest(m.id, choice))
-  if (r?.item) toast((append ? "已追加到 " : "已建成 ") + r.item.id)
+  if (r?.item) toast(t(append ? "core:toast.appendedTo" : "core:toast.createdItem", { id: r.item.id }))
 }
 export async function reroute(m: Msg, to: string) {
   if (!m.id) return
   const r = await call(api.reroute(m.id, to))
-  if (r) toast(to === "inline" ? "改成在这里回答" : r.item ? (to.startsWith("item:") ? "已送到 " : "已做成 ") + r.item.id : "已改")
+  if (r) toast(to === "inline" ? t("core:toast.answerHere") : r.item ? t(to.startsWith("item:") ? "core:toast.sentTo" : "core:toast.madeItem", { id: r.item.id }) : t("core:toast.changed"))
 }
 /** 做成事项 on an answer: the old promote when it is a chat answer, else a correction to an item */
 export function makeItem(m: Msg) { if (m.chat) void promote(m); else void reroute(m, "item") }
-export function cancelQueued(run: string) { void call(api.cancelRun(run), "已撤回") }
+export function cancelQueued(run: string) { void call(api.cancelRun(run), t("core:toast.withdrawn")) }
 export function stopRun(run: string) { void call(api.stopRun(run)); cue("idle") }
-export async function threadFollow(item: string, follow: boolean) { await call(api.threadFollow(item, follow), follow ? "会在对话里跟进" : "不在对话里跟进了"); dirty.add(item); soon() }
+export async function threadFollow(item: string, follow: boolean) { await call(api.threadFollow(item, follow), t(follow ? "core:toast.follow" : "core:toast.unfollow")); dirty.add(item); soon() }
 /** the raw thread info of an item's detail (§5), once loaded */
 export const itemThread = (id: string) => raw.details.get(id)?.thread ?? null
 /** a decision's full text (a delivery summary), from the open cards, item details or recent decisions */
@@ -760,38 +790,44 @@ export const isPromoting = (m: Msg) => !!m.id && promoting.has(m.id)
 export async function promote(m: Msg) {
   if (!m.id || promoting.has(m.id)) return
   promoting.add(m.id); emit(); cue("success")
-  try { const r = await call(api.promote(m.id)); if (r) toast("已做成 " + r.id) } finally { promoting.delete(m.id); emit() }
+  try { const r = await call(api.promote(m.id)); if (r) toast(t("core:toast.madeItem", { id: r.id })) } finally { promoting.delete(m.id); emit() }
 }
 export function finishOnboarding() { localStorage.setItem("steve-onboarded", "1"); st.onboard = -1; emit() }
 
 /* ───────── actions: decisions ───────── */
-const SNOOZE: Record<string, () => number> = {
-  "1 小时后": () => Date.now() + 3600_000,
-  "今晚 20:00": () => { const d = new Date(); d.setHours(20, 0, 0, 0); if (d.getTime() < Date.now()) d.setDate(d.getDate() + 1); return d.getTime() },
-  "明天早上": () => { const d = new Date(); d.setDate(d.getDate() + 1); d.setHours(8, 30, 0, 0); return d.getTime() },
+/** when a snoozed card comes back; the Hub keeps the label it is given and shows it */
+export const SNOOZE_KEYS = ["hour", "tonight", "morning"] as const
+export type SnoozeKey = (typeof SNOOZE_KEYS)[number]
+const SNOOZE: Record<SnoozeKey, () => number> = {
+  hour: () => Date.now() + 3600_000,
+  tonight: () => { const d = new Date(); d.setHours(20, 0, 0, 0); if (d.getTime() < Date.now()) d.setDate(d.getDate() + 1); return d.getTime() },
+  morning: () => { const d = new Date(); d.setDate(d.getDate() + 1); d.setHours(8, 30, 0, 0); return d.getTime() },
 }
-export function snooze(id: string, when: string) { void call(api.snooze(id, when, (SNOOZE[when] ?? SNOOZE["1 小时后"])()), `${when}再提醒你`) }
+export const snoozeLabel = (k: SnoozeKey) => t(`core:snooze.${k}`)
+export function snooze(id: string, key: SnoozeKey) { const when = snoozeLabel(key); void call(api.snooze(id, when, (SNOOZE[key] ?? SNOOZE.hour)()), t("core:snooze.toast", { when })) }
 export function unsnooze(id: string) { void call(api.snooze(id, null, null)) }
 /** resolve the item's open decision; `c` is the decision's own choice id */
 /* the toast after answering a card: per module subject first, then by choice; the plain fallbacks last */
-const DECIDED_BY_SUBJECT: Record<string, Record<string, string> | ((c: string) => string)> = {
-  signal: { done: "知道了", to_item: "已转成事项" },
-  flow_step: (c) => (c.startsWith("不") ? "已跳过这一步，流程继续" : `已选「${c}」，流程继续`),
-  flow_run: { retry: "已重试这次运行", drop: "已放弃这次运行", continue_once: "预算翻倍，流程继续", stop: "流程已停下" },
-  secret_use: { once: "已批准这一次", grant_1h: "已授权 1 小时", grant_8h: "已授权 8 小时", grant_24h: "已授权 24 小时", deny: "已拒绝，它拿不到这个机密" },
-  connection: { pause: "已暂停接收，恢复后也不补收" },
-  space: { open: "好，去设置这个群", mute: "已静默：这个群只记录，不发言" },
-  mem: { yes: "已保存", no: "不保存，留在原记录里" },
-  party_merge: { merge: "已合并，可以在联系人页拆回", not_same: "已记下：不是同一个人" },
-  release: { no: "没有批准发布" },
-  chan_message: { yes: "已批准，稍后发出", no: "不发出，这条已关闭" },
+const DECIDED_BY_SUBJECT: Record<string, readonly string[] | ((c: string) => string)> = {
+  signal: ["done", "to_item"],
+  flow_step: (c) => (c.startsWith("不") ? t("core:decided.flowSkipped") : t("core:decided.flowChose", { choice: c })),
+  flow_run: ["retry", "drop", "continue_once", "stop"],
+  secret_use: ["once", "grant_1h", "grant_8h", "grant_24h", "deny"],
+  connection: ["pause"],
+  space: ["open", "mute"],
+  mem: ["yes", "no"],
+  party_merge: ["merge", "not_same"],
+  release: ["no"],
+  chan_message: ["yes", "no"],
 }
-const DECIDED: Record<string, string> = { pass: "已验收，事项完成", rework: "已发回返工", yes: "已确认", no: "已处理", continue: "已让它继续", delivered: "已转成验收", look: "已暂停，等你处理", tosteve: "已交给 Steve", drop: "已放弃", deny: "已拒绝" }
+const DECIDED_ANY = ["pass", "rework", "yes", "no", "continue", "delivered", "look", "tosteve", "drop", "deny"]
 function decidedText(w: Wait, c: string, bot: string | null) {
-  const m = DECIDED_BY_SUBJECT[w.subject], x = typeof m === "function" ? m(c) : m?.[c]
-  if (x) return x
-  if (w.type === "confirm") return c === "yes" ? "已确认" : "已记下：不对"
-  return DECIDED[c] ?? (w.type === "ask" ? "已告诉" + botName(bot) : w.subject === "tool_call" ? "已允许" : "已处理")
+  const m = DECIDED_BY_SUBJECT[w.subject]
+  if (typeof m === "function") return m(c)
+  if (m?.includes(c)) return t(`core:decided.${w.subject}.${c}` as "core:decided.signal.done")
+  if (w.type === "confirm") return c === "yes" ? t("core:decided.confirmYes") : t("core:decided.confirmNo")
+  if (DECIDED_ANY.includes(c)) return t(`core:decided.any.${c}` as "core:decided.any.pass")
+  return w.type === "ask" ? t("core:decided.toldBot", { bot: botName(bot) }) : w.subject === "tool_call" ? t("core:decided.allowed") : t("core:decided.handled")
 }
 /** accepted, but the project still has a release to go: the item is not finished yet */
 const releaseAhead = (i?: Item) => !!i?.branch && !!st.projects.find((p) => p.id === i.project)?.release
@@ -804,7 +840,7 @@ export async function decide(id: string, c: string, text?: string, decision?: st
     if (w.subject === "release" && c === "yes") {
       /* the answer already says whether the release started; "已发布" only comes with the result */
       const d = await call(api.decide(w.decision, c, text))
-      if (d) { const rel = relOf(d); toast(rel?.text ?? "已批准发布"); if (rel?.tone === "fail") cue("failure") }
+      if (d) { const rel = relOf(d); toast(rel?.text ?? t("core:decided.releaseApproved")); if (rel?.tone === "fail") cue("failure") }
       return
     }
     if (c === "pass" && w.type === "accept" && text !== "no-release" && releaseAhead(i) && i) {
@@ -812,7 +848,7 @@ export async function decide(id: string, c: string, text?: string, decision?: st
       if (!(await call(api.decide(w.decision, c, text)))) return
       cue("success")
       const after = await api.item(i.id).catch(() => null)
-      toast(after?.status === "done" ? "已验收，没有需要发布的改动，事项完成" : "已验收，等它申请发布")
+      toast(after?.status === "done" ? t("core:decided.acceptedNothingToRelease") : t("core:decided.acceptedAwaitRelease"))
       return
     }
     const result = await call(api.decide(w.decision, c, text), decidedText(w, c, i?.b ?? null))
@@ -825,7 +861,7 @@ export async function discardOut(decision: string) {
   const key = "decision:" + decision
   if (st.pendingActions.has(key)) return false
   st.pendingActions.add(key); emit()
-  try { return !!(await call(api.decide(decision, "no"), "不发出，这条已关闭")) }
+  try { return !!(await call(api.decide(decision, "no"), t("core:toast.discarded"))) }
   finally { st.pendingActions.delete(key); emit() }
 }
 /** take one card out of 待处理 without answering it (the item's first one unless `decision` says which);
@@ -833,51 +869,51 @@ export async function discardOut(decision: string) {
 export async function dismiss(id: string, decision?: string) {
   const { w } = cardOf(id, decision); if (!w) return
   const d = await call(api.dismiss(w.decision))
-  if (d) toast(w.subject === "tool_call" ? "已撤回，这次工具调用被拒绝" : w.subject === "chan_message" && w.type === "approve" ? "已撤回，这条回复不发出" : "已撤回，不再提醒", w.subject === "tool_call" ? undefined : { action: { label: "撤销", onClick: () => void call(api.undo(w.decision), `已撤销，${id || "它"}回到待处理`) } })
+  if (d) toast(t(w.subject === "tool_call" ? "core:toast.dismissedTool" : w.subject === "chan_message" && w.type === "approve" ? "core:toast.dismissedReply" : "core:toast.dismissed"), w.subject === "tool_call" ? undefined : { action: { label: t("core:toast.undo"), onClick: () => void call(api.undo(w.decision), id ? t("core:toast.backToPending", { id }) : t("core:toast.backToPendingIt")) } })
 }
-export function undoDecision(n: number) { const d = st.done[n]; if (!d?.canUndo) return; void call(api.undo(d.decision), `已撤销，${d.id} 回到待处理`) }
+export function undoDecision(n: number) { const d = st.done[n]; if (!d?.canUndo) return; void call(api.undo(d.decision), t("core:toast.undoneToPending", { id: d.id })) }
 
 /* ───────── actions: items ───────── */
 export async function newItem(goal: string, bot?: string, project?: string | null, mode: "start" | "propose" = "start") {
   const r = await call(api.newItem({ goal, bot, project, mode })); return r?.id
 }
 export async function supp(id: string, v: string, target: "auto" | "steer" | "new", files: string[] = []) {
-  const msg = target === "steer" ? "已插话" : target === "new" ? "已开新会话" : active(it(id))?.st === "run" ? "已排队，会话本回合结束后送达" : "已送达"
+  const msg = t(target === "steer" ? "core:toast.steered" : target === "new" ? "core:toast.newSession" : active(it(id))?.st === "run" ? "core:toast.queuedForTurn" : "core:toast.delivered")
   return sendMessage(api.supplement(id, v, target, files), msg)
 }
-export function deliver(id: string) { void call(api.deliver(id), "已送达") }
-export function withdraw(qid: string) { void call(api.dropQueued(qid), "已撤回") }
+export function deliver(id: string) { void call(api.deliver(id), t("core:toast.delivered")) }
+export function withdraw(qid: string) { void call(api.dropQueued(qid), t("core:toast.withdrawn")) }
 /* ── queued messages of a session: each one can be edited, withdrawn or sent now ──
  * A row a turn already took answers 409 (“已经发出”): the error is shown and the strip refreshes. */
 async function qCall<T>(p: Promise<T>): Promise<T | undefined> {
   try { const r = await p; await refresh(); return r } catch (e) { fail(e); await refresh(); return undefined }
 }
-export async function qEdit(sid: string, qid: string, text: string) { const r = await qCall(api.queuedEdit(sid, qid, text)); if (r) toast("已修改排队的消息"); return !!r }
+export async function qEdit(sid: string, qid: string, text: string) { const r = await qCall(api.queuedEdit(sid, qid, text)); if (r) toast(t("core:toast.queuedEdited")); return !!r }
 /** back into the composer when it is empty; otherwise just removed, with an undo that queues it again */
 export async function qWithdraw(sid: string, qid: string, composer?: { empty: () => boolean; fill: (t: string, f: RFile[]) => void } | null, strip = (t: string) => t) {
   const r = await qCall(api.queuedRemove(sid, qid)); if (!r) return
   const files = r.files ?? []
-  if (composer?.empty()) { composer.fill(strip(r.text), files); toast("已撤回，放回输入框了"); return }
-  toast("已撤回", { action: { label: "撤销", onClick: () => void call(api.sessionSay(sid, r.text, "排队", files.map((f) => f.id))).then((x: any) => x && toast(x.result === "queued" ? "已放回队列" : "已发送")) } })
+  if (composer?.empty()) { composer.fill(strip(r.text), files); toast(t("core:toast.withdrawnToComposer")); return }
+  toast(t("core:toast.withdrawn"), { action: { label: t("core:toast.undo"), onClick: () => void call(api.sessionSay(sid, r.text, "排队", files.map((f) => f.id))).then((x: any) => x && toast(t(x.result === "queued" ? "core:toast.requeued" : "core:toast.sent"))) } })
 }
 export async function qSendNow(sid: string, qid: string) {
   const r = await qCall(api.queuedSendNow(sid, qid)); if (!r) return
-  toast(r.result === "interrupted" ? "已中断当前回合，排队的消息接着发送" : r.result === "sent" ? "已发送" : (r.reason ?? "暂时发不出去，排在最前面"))
+  toast(r.result === "interrupted" ? t("core:toast.interruptedThenSend") : r.result === "sent" ? t("core:toast.sent") : (r.reason ?? t("core:toast.cannotSendYet")))
 }
-export function saveGoal(id: string, v: string) { const i = it(id); if (!v || v === i.goals[i.goals.length - 1]) return; void call(api.goal(id, v), "目标已更新") }
-export function reassign(id: string, k: string) { if (k === it(id).b) return; void call(api.reassign(id, k), `已交给${botName(k)}`) }
+export function saveGoal(id: string, v: string) { const i = it(id); if (!v || v === i.goals[i.goals.length - 1]) return; void call(api.goal(id, v), t("core:toast.goalUpdated")) }
+export function reassign(id: string, k: string) { if (k === it(id).b) return; void call(api.reassign(id, k), t("core:toast.handedTo", { bot: botName(k) })) }
 export function setSt(id: string, s: Item["st"]) {
   const i = it(id), action = s === "pause" ? "pause" : s === "drop" ? "drop" : ["done", "drop"].includes(i.st) ? "reopen" : "resume"
-  void call(api.itemAction(id, action), ({ pause: "已暂停", drop: "已放弃", reopen: "已重新打开", resume: "继续处理" } as Record<string, string>)[action])
+  void call(api.itemAction(id, action), t(({ pause: "core:toast.paused", drop: "core:toast.dropped", reopen: "core:toast.reopened", resume: "core:toast.resumed" } as const)[action]))
 }
 /** mark done right away; the toast can take it back (the Hub restores the item as it was) */
 export async function markDone(id: string) {
   const r = await call(api.itemAction(id, "finish")); if (!r) return
-  toast(`已标记完成 ${id}`, { action: { label: "撤销", onClick: () => void call(api.itemAction(id, "unfinish"), `已撤销，${id} 回到之前的状态`) } })
+  toast(t("core:toast.markedDone", { id }), { action: { label: t("core:toast.undo"), onClick: () => void call(api.itemAction(id, "unfinish"), t("core:toast.backToBefore", { id })) } })
 }
 export function star(id: string) { void call(api.patchItem(id, { star: !it(id).star })) }
 export function setAcc(id: string, v: string) { void call(api.patchItem(id, { accept_mode: accKey(v) })) }
-export function patchItem(id: string, p: Partial<Item>, _note?: string) {
+export function patchItem(id: string, p: Partial<Item>) {
   const q: Parameters<typeof api.patchItem>[1] = {}
   if (p.t !== undefined) q.title = p.t
   if (p.pri !== undefined) q.priority = p.pri
@@ -885,13 +921,13 @@ export function patchItem(id: string, p: Partial<Item>, _note?: string) {
   if ("project" in p) q.project_id = p.project ?? null
   void call(api.patchItem(id, q))
 }
-export function archive(ids: string[], v = true) { void call(Promise.all(ids.map((id) => api.itemAction(id, v ? "archive" : "unarchive"))), v ? `已归档 ${ids.length} 件` : `已恢复 ${ids.length} 件`) }
-export function deleteItem(id: string) { void call(api.deleteItem(id), `已删除 ${id}，编号不再使用；它的会话保留为未关联`) }
+export function archive(ids: string[], v = true) { void call(Promise.all(ids.map((id) => api.itemAction(id, v ? "archive" : "unarchive"))), t(v ? "core:toast.archived" : "core:toast.restored", { count: ids.length })) }
+export function deleteItem(id: string) { void call(api.deleteItem(id), t("core:toast.deletedItem", { id })) }
 export function bulk(ids: string[], op: "pause" | "run" | "drop" | "arch") {
   if (op === "arch") return archive(ids)
-  void call(api.bulk(ids, op === "run" ? "resume" : op).then((r) => { toast(({ pause: "已暂停", run: "已继续", drop: "已放弃" } as Record<string, string>)[op] + ` ${r.n} 件`); return r }))
+  void call(api.bulk(ids, op === "run" ? "resume" : op).then((r) => { toast(t(({ pause: "core:toast.bulkPaused", run: "core:toast.bulkResumed", drop: "core:toast.bulkDropped" } as const)[op], { count: r.n })); return r }))
 }
-export function addDep(id: string, dep: string) { void call(api.addDep(id, dep), `已添加前置 ${dep}`) }
+export function addDep(id: string, dep: string) { void call(api.addDep(id, dep), t("core:toast.depAdded", { id: dep })) }
 export function rmDep(id: string, dep: string) { void call(api.rmDep(id, dep)) }
 
 /* ───────── actions: sessions ───────── */
@@ -900,35 +936,35 @@ export async function doFork(k: string, at: number, goal: string, asSess: boolea
   const s = st.S[k], n = Math.min(at, s.seqs.length - 1)
   /* fork after the whole tuple (an agent reply spans many chunk events), not at its first event */
   const seq = s.seqs[n + 1] ? s.seqs[n + 1] - 1 : n >= 0 ? (raw.events.get(k)?.at(-1)?.seq ?? s.seqs[n]) : 0
-  const r = await call(api.fork(k, seq, goal, asSess), asSess ? "已派生新会话" : "已派生新事项")
+  const r = await call(api.fork(k, seq, goal, asSess), t(asSess ? "core:toast.forkedSession" : "core:toast.forkedItem"))
   return r?.item ? "#/items/" + r.item : r?.session ? "#/sessions/" + r.session : "#/sessions/" + k
 }
 export async function sessSend(k: string, v: string, mode: "插话" | "排队", files: string[] = []) {
   const key = "session:" + k
   if (st.pendingActions.has(key)) return false
   st.pendingActions.add(key); emit()
-  try { return await sendMessage(api.sessionSay(k, v, mode, files), st.S[k]?.st === "run" && mode === "排队" ? "已排队，本回合结束后发送" : undefined) }
+  try { return await sendMessage(api.sessionSay(k, v, mode, files), st.S[k]?.st === "run" && mode === "排队" ? t("core:toast.queuedAfterTurn") : undefined) }
   finally { st.pendingActions.delete(key); emit() }
 }
-export function interrupt(k: string) { void call(api.cancel(k), "已中断") }
-export function link(k: string, id: string) { void call(api.link(k, id), "已关联到「" + it(id).t + "」") }
+export function interrupt(k: string) { void call(api.cancel(k), t("core:toast.interrupted")) }
+export function link(k: string, id: string) { void call(api.link(k, id), t("core:toast.linked", { title: it(id).t })) }
 export function sessPatch(k: string, p: Partial<Sess>, msg?: string) {
   if (p.title) void call(api.renameSession(k, p.title), msg)
   if (p.st === "ended") void call(api.endSession(k), msg)
 }
-export function sessRemove(k: string) { const t = st.S[k]?.title; void call(api.removeSession(k), `已移除「${t}」，本机原始记录没有改动`) }
+export function sessRemove(k: string) { const title = st.S[k]?.title; void call(api.removeSession(k), t("core:toast.sessionRemoved", { title })) }
 export async function loadLocalSessions() { try { st.localSessions = await api.localSessions(); emit() } catch (e) { fail(e) } }
 export async function importSessions(keys: string[]) {
   const r = await call(api.importSessions(keys)); if (!r) return
   const bad = r.filter((x) => typeof x !== "string") as { error: string }[]
-  toast(bad.length ? `导入了 ${r.length - bad.length} 个，${bad.length} 个失败：${bad[0].error}` : `已导入 ${r.length} 个会话，导入的会话只读`)
+  toast(bad.length ? t("core:toast.importedSome", { ok: r.length - bad.length, bad: bad.length, error: bad[0].error }) : t("core:toast.imported", { count: r.length }))
 }
 
 /* ───────── actions: bots ───────── */
 export async function loadMemories(k: string) {
   try { const xs = await api.memories(k); const b = st.bots[k]; if (b) { b.mem = xs.map((m) => [m.text, m.source, m.id]); b.memLoaded = true; emit() } } catch (e) { fail(e) }
 }
-export async function saveBot(k: string, p: { n?: string; role?: string; pers?: string; pro?: number; rule?: string; acc?: string; harness?: string; model?: string | null; reasoningEffort?: string | null; permMode?: string; project?: string | null; color?: string; round?: number; skin?: string | null; prompt?: string | null; on?: boolean; dev?: string | null }, msg = "已保存，对之后的回复和运行生效") {
+export async function saveBot(k: string, p: { n?: string; role?: string; pers?: string; pro?: number; rule?: string; acc?: string; harness?: string; model?: string | null; reasoningEffort?: string | null; permMode?: string; project?: string | null; color?: string; round?: number; skin?: string | null; prompt?: string | null; on?: boolean; dev?: string | null }, msg = t("core:toast.botSaved")) {
   const b = st.bots[k]
   const q: Partial<RBot> = {}
   if (p.reasoningEffort !== undefined) q.reasoning_effort = p.reasoningEffort
@@ -938,36 +974,42 @@ export async function saveBot(k: string, p: { n?: string; role?: string; pers?: 
   if (p.color !== undefined || p.round !== undefined || p.skin !== undefined) q.avatar = { color: p.color ?? b.color, round: p.round ?? b.round, skin: p.skin !== undefined ? p.skin : b.skin }
   await call(api.patchBot(k, q), msg)
 }
-export async function makeBot(n: string, role: string, harness = "claude-code", model: string | null = null) { const r = await call(api.newBot({ name: n, role, harness, model }), "已创建，先设定性格和工作方式"); return r?.id }
-export async function draftBot(desc: string) { const r = await call(api.draftBot(desc), "Steve 起草好了，看看要不要改"); return r?.id }
+export async function makeBot(n: string, role: string, harness = "claude-code", model: string | null = null) { const r = await call(api.newBot({ name: n, role, harness, model }), t("core:toast.botCreated")); return r?.id }
+export async function draftBot(desc: string) { const r = await call(api.draftBot(desc), t("core:toast.botDrafted")); return r?.id }
 export async function deleteBot(k: string, to: string, mem: "删除" | "导出") {
   const b = st.bots[k]; const r = await call(api.deleteBot(k, to, mem === "删除" ? "delete" : "export")); if (!r) return
-  if (mem === "导出" && r.memories.length) { const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([JSON.stringify(r.memories, null, 2)], { type: "application/json" })); a.download = `${b?.n ?? k}-记忆.json`; a.click() }
-  toast(`已删除 ${b?.n} Bot，${r.moved.length} 件事项交给${botName(to)}${mem === "导出" ? "，记忆已导出" : ""}`, { action: { label: "撤销", onClick: () => void call(api.restoreBot(k), `已恢复 ${b?.n} Bot；已交出去的事项不会自动收回`) } })
+  if (mem === "导出" && r.memories.length) { const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([JSON.stringify(r.memories, null, 2)], { type: "application/json" })); a.download = t("core:toast.memoryFile", { name: b?.n ?? k }); a.click() }
+  toast(t(mem === "导出" ? "core:toast.botDeletedExported" : "core:toast.botDeleted", { name: b?.n, count: r.moved.length, to: botName(to) }), { action: { label: t("core:toast.undo"), onClick: () => void call(api.restoreBot(k), t("core:toast.botRestored", { name: b?.n })) } })
 }
-export async function dupBot(k: string) { const r = await call(api.dupBot(k), "已复制，默认停用，改好后再启用"); return r?.id }
-export function addMem(k: string, t: string) { void call(api.addMemory(k, t), "已添加记忆").then(() => loadMemories(k)) }
-export function editMem(k: string, id: string, t: string) { void call(api.editMemory(id, t)).then(() => loadMemories(k)) }
-export function delMem(k: string, id: string) { void call(api.deleteMemory(id), "已删除").then(() => loadMemories(k)) }
-export function setBotWorkspaces(k: string, ids: string[]) { void call(api.botWorkspaces(k, ids), "已更新这个 Bot 参与的工作空间") }
+export async function dupBot(k: string) { const r = await call(api.dupBot(k), t("core:toast.botCopied")); return r?.id }
+export function addMem(k: string, text: string) { void call(api.addMemory(k, text), t("core:toast.memoryAdded")).then(() => loadMemories(k)) }
+export function editMem(k: string, id: string, text: string) { void call(api.editMemory(id, text)).then(() => loadMemories(k)) }
+export function delMem(k: string, id: string) { void call(api.deleteMemory(id), t("core:toast.deleted")).then(() => loadMemories(k)) }
+export function setBotWorkspaces(k: string, ids: string[]) { void call(api.botWorkspaces(k, ids), t("core:toast.botWorkspaces")) }
 
 /* ───────── actions: workspaces and projects ───────── */
 export async function switchWorkspace(id: string) {
-  try { await api.switchWs(id); setPageWorkspace(id); scopeEpoch++; replayFrom.clear(); painted.clear(); raw.loadingItem.clear(); raw.loadingEv.clear(); reloadAgain.clear(); missedEv.clear(); raw.details.clear(); raw.events.clear(); convs.clear(); openItems.clear(); dirty.clear(); st.thinking = false; st.draft = null; connect(); await refresh(); location.hash = "#/"; toast("已切换到「" + (st.workspace?.name ?? "") + "」") } catch (e) { fail(e) }
+  try { await api.switchWs(id); setPageWorkspace(id); scopeEpoch++; replayFrom.clear(); painted.clear(); raw.loadingItem.clear(); raw.loadingEv.clear(); reloadAgain.clear(); missedEv.clear(); raw.details.clear(); raw.events.clear(); convs.clear(); openItems.clear(); dirty.clear(); st.thinking = false; st.draft = null; connect(); await refresh(); location.hash = "#/"; toast(t("core:toast.switchedWorkspace", { name: st.workspace?.name ?? "" })) } catch (e) { fail(e) }
 }
 export async function newWorkspace(name: string, description: string, item_prefix?: string) { const w = await call(api.newWs({ name, description, item_prefix })); if (w) await switchWorkspace(w.id) }
-export async function newProject(p: { name: string; path: string; description?: string; worktree?: boolean; default_bot?: string | null }) { const r = await call(api.newProject(p), `已添加项目「${p.name}」`); return r?.id }
-export function patchProject(id: string, p: Partial<RProject>, msg = "已保存") { void call(api.patchProject(id, p), msg) }
+export async function newProject(p: { name: string; path: string; description?: string; worktree?: boolean; default_bot?: string | null }) { const r = await call(api.newProject(p), t("core:toast.projectAdded", { name: p.name })); return r?.id }
+export function patchProject(id: string, p: Partial<RProject>, msg = t("common:state.saved")) { void call(api.patchProject(id, p), msg) }
 
 /* ───────── tags ───────── */
 export const tag = (id: string) => st.tags.find((t) => t.id === id)
 export const tagName = (id: string) => tag(id)?.name ?? id
 export const tagUses = (id: string) => st.tagUses[id] ?? 0
+/** tag categories as the Hub stores them (Chinese values); show one with tagCatLabel */
 export const TAG_CATS = ["项目", "类型", "领域", "客户", "主题"]
+const TAG_CAT_KEY: Record<string, "project" | "kind" | "domain" | "client" | "topic"> = { 项目: "project", 类型: "kind", 领域: "domain", 客户: "client", 主题: "topic" }
+/** a tag category in the UI language; an unknown one as it is */
+export const tagCatLabel = (cat: string) => (TAG_CAT_KEY[cat] ? t(`core:tagCat.${TAG_CAT_KEY[cat]}`) : cat)
 /* item categories (ST-34): every item has exactly one of these six tags of category 类型, the Hub refuses
    anything else; the other categories are domain tags, as many as fit */
 export const KIND_CAT = "类型"
-export const KINDS: [string, string, string][] = [["bug", "修复", "#d9777f"], ["feat", "功能", "#7aa7c7"], ["doc", "文档", "#8c7ae6"], ["refactor", "重构", "#e0a458"], ["ops", "运维", "#5fb39a"], ["chore", "杂项", "#6c7a89"]]
+const KIND_HUES = [["bug", "#d9777f"], ["feat", "#7aa7c7"], ["doc", "#8c7ae6"], ["refactor", "#e0a458"], ["ops", "#5fb39a"], ["chore", "#6c7a89"]] as const
+/** [the tag name the Hub keeps, its label, its color] */
+export const KINDS: [string, string, string][] = KIND_HUES.map(([n, c]) => liveList<[string, string, string]>([n, "", c], 1, () => t(`core:kind.${n}`)))
 /** categories a new or edited domain tag may have */
 export const DOMAIN_CATS = TAG_CATS.filter((c) => c !== KIND_CAT)
 export const isKind = (t?: Tag) => t?.cat === KIND_CAT
@@ -983,15 +1025,15 @@ export const loadKindsReview = () => api.kindsReview().catch(() => [] as RKindRe
 /** the user looked at these filled-in categories (kept or changed); returns what is left */
 export const kindsReviewed = (ids: string[]) => call(api.kindsReviewed(ids))
 /** fill in the items without exactly one category; already filled ones are left alone */
-export async function kindsBackfill() { const r = await call(api.kindsBackfill()); if (r) toast(r.filled.length ? `补齐了 ${r.filled.length} 件事项的分类，${r.filled.filter((f) => f.uncertain).length} 件拿不准` : `${r.checked} 件事项都已有分类`); return r }
+export async function kindsBackfill() { const r = await call(api.kindsBackfill()); if (r) toast(r.filled.length ? t("core:toast.kindsFilled", { count: r.filled.length, unsure: r.filled.filter((f) => f.uncertain).length }) : t("core:toast.kindsAllSet", { count: r.checked })); return r }
 export function setKind(id: string, kind: string) { const i = it(id); if (kindOf(i) === kind) return; setTags(id, [kind, ...(i.tags ?? []).filter((x) => !isKind(tag(x)))]) }
 export async function makeTag(t: { name: string; cat: string; desc: string }) { const r = await call(api.newTag({ name: t.name, cat: t.cat, description: t.desc })); return r?.id }
-export function saveTag(id: string, p: Partial<Tag>) { void call(api.patchTag(id, { name: p.name, cat: p.cat, description: p.desc }), "标签已保存") }
-export function deleteTag(id: string) { const n = tagUses(id), name = tagName(id); void call(api.deleteTag(id), `已删除标签「${name}」，${n} 件事项上的这个标签已移除`) }
-export function mergeTag(from: string, into: string) { const a = tagName(from); void call(api.mergeTag(from, into), `已把「${a}」合并到「${tagName(into)}」`) }
+export function saveTag(id: string, p: Partial<Tag>) { void call(api.patchTag(id, { name: p.name, cat: p.cat, description: p.desc }), t("core:toast.tagSaved")) }
+export function deleteTag(id: string) { const n = tagUses(id), name = tagName(id); void call(api.deleteTag(id), t("core:toast.tagDeleted", { name, count: n })) }
+export function mergeTag(from: string, into: string) { const a = tagName(from); void call(api.mergeTag(from, into), t("core:toast.tagMerged", { from: a, into: tagName(into) })) }
 
 /* ───────── settings ───────── */
-export function setSetting(p: Record<string, string>, msg = "已保存") { void call(api.settings(p), msg) }
+export function setSetting(p: Record<string, string>, msg = t("common:state.saved")) { void call(api.settings(p), msg) }
 
 /* ───────── relation graph model ───────── */
 export type GNode = { id: string; k: "item" | "sess" | "proj"; title: string; st: string; n?: number; b?: string | null; project?: string | null }

@@ -33,7 +33,7 @@ const errors = []
 try {
   for (const width of [1440, 390]) for (const theme of ["light", "dark"]) {
     let failed = true, synced = 0
-    const page = await browser.newPage({ viewport: { width, height: width === 390 ? 844 : 1000 }, reducedMotion: "reduce", colorScheme: theme })
+    const page = await browser.newPage({ locale: "zh-CN", viewport: { width, height: width === 390 ? 844 : 1000 }, reducedMotion: "reduce", colorScheme: theme })
     page.on("pageerror", (e) => errors.push(e.message))
     await page.route((u) => u.pathname.startsWith("/api/"), async (route) => {
       const u = new URL(route.request().url())

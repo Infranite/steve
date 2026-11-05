@@ -6,7 +6,7 @@ const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || "playwright")
 const browser = await chromium.launch({ headless: true, ...(process.env.PLAYWRIGHT_EXECUTABLE ? { executablePath: process.env.PLAYWRIGHT_EXECUTABLE } : {}) })
 const base = process.env.STEVE_TEST_WEB || "http://127.0.0.1:5178"
 const errors = []
-const page = await browser.newPage({ viewport: { width: 390, height: 844 } })
+const page = await browser.newPage({ locale: "zh-CN", viewport: { width: 390, height: 844 } })
 page.on("pageerror", e => errors.push(e.message))
 page.on("console", m => { if (m.type() === "error" && m.text().includes("Base UI:")) errors.push(m.text()) })
 let registration = null, starts = 0, reads = 0, retry = 0, deviceCancelled = false, deviceDrop = false, deviceBody

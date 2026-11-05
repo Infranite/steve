@@ -4,7 +4,7 @@ import { Children, Fragment, memo, useEffect, useLayoutEffect, useRef, useState,
 import { Robot } from "@/robot"
 import { cue } from "@/bus"
 import { clockDur } from "@/i18n/format"
-import { LANGS, lang, setLang, useT, type Lang } from "@/i18n"
+import { LANGS, lang, setLang, t, useT, type Lang } from "@/i18n"
 import { cn } from "cn"
 import { BookOpenIcon, ChartNoAxesColumnIcon,
   ArrowUpIcon, BrainIcon, CheckIcon, ChevronLeftIcon, FileTextIcon, GitForkIcon, InboxIcon, ListTodoIcon,
@@ -37,7 +37,7 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/component
 import { Markdown } from "@/components/markdown"
 import { PermissionDetails, PermissionRecord } from "@/components/permission"
 import { LOADED_WEB_VERSION, permissionDecision, useStore } from "@/store"
-import { st, emit, briefHead, pendingCards, ST, SS, WT, botName, decide, dismiss, setSt, snooze, tag, isKind, kindColor, sortTags, loadEvents, type Item, type Reply, type Rel, type Sess } from "@/store"
+import { st, emit, briefHead, pendingCards, ST, SS, WT, FAIL_CHOICE, SNOOZE_KEYS, snoozeLabel, tagCatLabel, botName, decide, dismiss, setSt, snooze, tag, isKind, kindColor, sortTags, loadEvents, type Item, type Reply, type Rel, type Sess } from "@/store"
 import { YoloBadge } from "@/yolo/badges"
 import { YoloPill } from "@/yolo/switch"
 import { WorkspaceSwitcher } from "@/workspace-switcher"
@@ -68,9 +68,10 @@ applyTheme(); mq.addEventListener("change", () => { applyTheme(); emit() })
 export const getTheme = () => themePref
 export function setTheme(t: ThemePref) { themePref = t; localStorage.setItem("steve-theme", t); applyTheme(); emit() }
 export function ThemeSwitch({ className, labels = false }: { className?: string; labels?: boolean }) {
+  const t = useT()
   const o = (v: ThemePref, I: any, l: string) => [v, <span key={v} className="inline-flex items-center gap-1.5"><I className="size-3.5" />{labels && l}</span>, l] as const
   return <Segmented className={className} value={themePref} onChange={(v) => setTheme(v as ThemePref)} iconOnly={!labels} size="sm"
-    options={[o("light", SunIcon, "浅色"), o("dark", MoonIcon, "深色"), o("system", MonitorIcon, "跟随系统")]} />
+    options={[o("light", SunIcon, t("core:theme.light")), o("dark", MoonIcon, t("core:theme.dark")), o("system", MonitorIcon, t("core:theme.system"))]} />
 }
 /** the UI language, remembered on this device; each name is written in its own language */
 export function LanguageSwitch({ className }: { className?: string }) {
@@ -97,10 +98,11 @@ export function RelNote({ rel, box, className, onClose }: { rel: Rel; box?: bool
 }
 /** closes a failure that is no longer worth showing; it stays in the timeline and the notifications */
 export function AlertClose({ onClose, className }: { onClose: () => void; className?: string }) {
+  const t = useT()
   return (
     <Tooltip>
-      <TooltipTrigger render={<Button variant="ghost" size="icon-xs" aria-label="关闭这条提示" className={cn("shrink-0 text-muted-foreground", className)} onClick={(e) => { e.stopPropagation(); onClose() }} onKeyDown={(e) => e.stopPropagation()} data-alert-close />}><XIcon /></TooltipTrigger>
-      <TooltipContent>关闭，时间线和通知里仍可查到</TooltipContent>
+      <TooltipTrigger render={<Button variant="ghost" size="icon-xs" aria-label={t("core:alert.close")} className={cn("shrink-0 text-muted-foreground", className)} onClick={(e) => { e.stopPropagation(); onClose() }} onKeyDown={(e) => e.stopPropagation()} data-alert-close />}><XIcon /></TooltipTrigger>
+      <TooltipContent>{t("core:alert.closeHint")}</TooltipContent>
     </Tooltip>
   )
 }
@@ -127,13 +129,14 @@ export function BotName({ k, className }: { k: string | null; className?: string
 }
 /** an item's category: an outline pill with its own muted dot, always first and never removable on its own */
 export function KindTag({ id, className }: { id: string; className?: string }) {
-  const t = tag(id)
+  const tr = useT(), t = tag(id)
   if (!t) return null
-  return <span title={`分类 · ${t.desc}`} className={cn("inline-flex h-5 shrink-0 items-center gap-1 rounded-full border border-border bg-background px-1.5 font-mono text-[11px] leading-none text-foreground", className)} data-kind={t.name}>
+  return <span title={tr("core:tag.kindTitle", { desc: t.desc })} className={cn("inline-flex h-5 shrink-0 items-center gap-1 rounded-full border border-border bg-background px-1.5 font-mono text-[11px] leading-none text-foreground", className)} data-kind={t.name}>
     <span aria-hidden className="size-1.5 rounded-full" style={{ background: kindColor(t.name) }} />{t.name}</span>
 }
 /** tags: the category first (see KindTag), then quiet grey pills; the tag category shows on hover */
 export function Tags({ ids, className, onRemove, max }: { ids?: string[]; className?: string; onRemove?: (id: string) => void; max?: number }) {
+  const tr = useT()
   const xs = sortTags(ids).map(tag).filter(Boolean) as NonNullable<ReturnType<typeof tag>>[]
   if (!xs.length) return null
   const kinds = xs.filter(isKind), rest = xs.filter((t) => !isKind(t))
@@ -142,8 +145,8 @@ export function Tags({ ids, className, onRemove, max }: { ids?: string[]; classN
     <span className={cn("inline-flex flex-wrap items-center gap-1", className)} data-tags>
       {kinds.map((t) => <KindTag key={t.id} id={t.id} />)}
       {shown.map((t) => (
-        <span key={t.id} title={`${t.cat} · ${t.desc}`} className="inline-flex h-5 items-center gap-0.5 rounded-full bg-muted px-2 text-[11.5px] leading-none text-muted-foreground" data-tag={t.name}>
-          {t.name}{onRemove && <button type="button" aria-label={"移除标签 " + t.name} onClick={(e) => { e.stopPropagation(); onRemove(t.id) }} className="-mr-1 ml-0.5 flex size-4 items-center justify-center rounded-full hover:bg-background hover:text-foreground"><XIcon className="size-3" /></button>}
+        <span key={t.id} title={tr("core:tag.title", { cat: tagCatLabel(t.cat), desc: t.desc })} className="inline-flex h-5 items-center gap-0.5 rounded-full bg-muted px-2 text-[11.5px] leading-none text-muted-foreground" data-tag={t.name}>
+          {t.name}{onRemove && <button type="button" aria-label={tr("core:tag.remove", { name: t.name })} onClick={(e) => { e.stopPropagation(); onRemove(t.id) }} className="-mr-1 ml-0.5 flex size-4 items-center justify-center rounded-full hover:bg-background hover:text-foreground"><XIcon className="size-3" /></button>}
         </span>))}
       {max && rest.length > max && <span className="text-[11.5px] text-muted-foreground">+{rest.length - max}</span>}
     </span>
@@ -253,23 +256,26 @@ export function Page({ title, sub, back, actions, toolbar, toolbarTop = false, c
 }
 
 /* ───────── shell ───────── */
-const NAV = [
-  { h: "", l: "对话", I: MessageCircleIcon, group: "工作" },
-  { h: "inbox", l: "待处理", I: InboxIcon, group: "工作" },
-  { h: "items", l: "事项", I: ListTodoIcon, group: "工作" },
-  { h: "projects", l: "项目", I: FolderIcon, group: "工作" },
-  { h: "sessions", l: "会话", I: SquareTerminalIcon, group: "工作" },
-  { h: "stats", l: "统计", I: ChartNoAxesColumnIcon, group: "工作" },
-  { h: "integrations", l: "接入", I: PlugIcon, group: "连接与资料" },
-  { h: "channels", l: "渠道", I: MessagesSquareIcon, group: "连接与资料" },
-  { h: "mail", l: "邮件", I: MailIcon, group: "连接与资料" },
-  { h: "contacts", l: "联系人", I: ContactRoundIcon, group: "连接与资料" },
-  { h: "knowledge", l: "知识", I: BookOpenIcon, group: "连接与资料" },
-  { h: "bots", l: "Bot", I: BotIcon, group: "自动化" },
-  { h: "auto", l: "自动化", I: WorkflowIcon, group: "自动化" },
-  { h: "signals", l: "信号", I: RadioIcon, group: "自动化" },
+type NavGroup = "work" | "connect" | "automate"
+const NAV_GROUPS: NavGroup[] = ["work", "connect", "automate"]
+const NAV: { h: string; l: "chat" | "inbox" | "items" | "projects" | "sessions" | "stats" | "integrations" | "channels" | "mail" | "contacts" | "knowledge" | "bots" | "auto" | "signals"; I: any; group: NavGroup }[] = [
+  { h: "", l: "chat", I: MessageCircleIcon, group: "work" },
+  { h: "inbox", l: "inbox", I: InboxIcon, group: "work" },
+  { h: "items", l: "items", I: ListTodoIcon, group: "work" },
+  { h: "projects", l: "projects", I: FolderIcon, group: "work" },
+  { h: "sessions", l: "sessions", I: SquareTerminalIcon, group: "work" },
+  { h: "stats", l: "stats", I: ChartNoAxesColumnIcon, group: "work" },
+  { h: "integrations", l: "integrations", I: PlugIcon, group: "connect" },
+  { h: "channels", l: "channels", I: MessagesSquareIcon, group: "connect" },
+  { h: "mail", l: "mail", I: MailIcon, group: "connect" },
+  { h: "contacts", l: "contacts", I: ContactRoundIcon, group: "connect" },
+  { h: "knowledge", l: "knowledge", I: BookOpenIcon, group: "connect" },
+  { h: "bots", l: "bots", I: BotIcon, group: "automate" },
+  { h: "auto", l: "auto", I: WorkflowIcon, group: "automate" },
+  { h: "signals", l: "signals", I: RadioIcon, group: "automate" },
 ]
 export function Sidebar({ route: full }: { route: string }) {
+  const t = useT()
   const route = full.split("?")[0] // #/knowledge?mem=… still highlights 知识
   const S = st.bots.steve ?? Object.values(st.bots)[0], n = pendingCards().length
   const people = usePeopleOn(), meOn = route === "contacts" && location.hash.startsWith("#/contacts/me")
@@ -291,43 +297,44 @@ export function Sidebar({ route: full }: { route: string }) {
           <SidebarMenuItem>
             <SidebarMenuButton size="lg" tooltip={S?.n} render={<a href="#/bots/steve" />}>
               <BotAvatar k="steve" size={28} className="size-7!" />
-              <span className="min-w-0"><span className="block truncate type-headline">{S?.n}</span><span className="block type-footnote text-muted-foreground">你的助手</span></span>
+              <span className="min-w-0"><span className="block truncate type-headline">{S?.n}</span><span className="block type-footnote text-muted-foreground">{t("core:sidebar.assistant")}</span></span>
             </SidebarMenuButton>
           </SidebarMenuItem>
           <WorkspaceSwitcher />
           {st.yolo && <SidebarMenuItem className="px-1.5 py-0.5 group-data-[collapsible=icon]:hidden" data-sidebar-yolo><YoloPill /></SidebarMenuItem>}
           <SidebarMenuItem>
-            <SidebarMenuButton tooltip="搜索 ⌘K" onClick={() => openSheet("command")} className="text-muted-foreground" data-open-command>
-              <SearchIcon className="size-4!" strokeWidth={1.5} /><span className="flex-1">搜索</span><Kbd className="group-data-[collapsible=icon]:hidden">⌘K</Kbd>
+            <SidebarMenuButton tooltip={t("core:sidebar.searchTip")} onClick={() => openSheet("command")} className="text-muted-foreground" data-open-command>
+              <SearchIcon className="size-4!" strokeWidth={1.5} /><span className="flex-1">{t("common:action.search")}</span><Kbd className="group-data-[collapsible=icon]:hidden">⌘K</Kbd>
             </SidebarMenuButton>
           </SidebarMenuItem>
         </SidebarMenu>
       </SidebarHeader>
       <SidebarContent>
-        {["工作", "连接与资料", "自动化"].map((group) => <SidebarGroup key={group} className="py-1">
-          <SidebarGroupLabel className="h-6 text-[11px] text-muted-foreground">{group}</SidebarGroupLabel>
-          <SidebarGroupContent><SidebarMenu>{NAV.filter((x) => x.group === group).map((x) => item(x.h, x.l, x.I, (route === x.h && !(x.h === "contacts" && meOn)) || (x.h === "contacts" && (route === "orgs" || route === "teams"))))}</SidebarMenu></SidebarGroupContent>
+        {NAV_GROUPS.map((group) => <SidebarGroup key={group} className="py-1">
+          <SidebarGroupLabel className="h-6 text-[11px] text-muted-foreground">{t(`core:navGroup.${group}`)}</SidebarGroupLabel>
+          <SidebarGroupContent><SidebarMenu>{NAV.filter((x) => x.group === group).map((x) => item(x.h, t(`core:nav.${x.l}`), x.I, (route === x.h && !(x.h === "contacts" && meOn)) || (x.h === "contacts" && (route === "orgs" || route === "teams"))))}</SidebarMenu></SidebarGroupContent>
         </SidebarGroup>)}
       </SidebarContent>
       <SidebarFooter>
         <SidebarMenu>
-          {people && item("contacts/me", "我", UserRoundIcon, meOn)}
-          {item("devices", "设备", ServerIcon, route === "devices")}
-          {item("accounts", "账号", KeyRoundIcon, route === "accounts" || route === "vault")}
-          {item("settings", "设置", SettingsIcon, route === "settings" || route === "plugins")}
+          {people && item("contacts/me", t("core:nav.me"), UserRoundIcon, meOn)}
+          {item("devices", t("core:nav.devices"), ServerIcon, route === "devices")}
+          {item("accounts", t("core:nav.accounts"), KeyRoundIcon, route === "accounts" || route === "vault")}
+          {item("settings", t("core:nav.settings"), SettingsIcon, route === "settings" || route === "plugins")}
         </SidebarMenu>
         <SidebarSeparator className="mx-0" />
-        <div className="flex items-center justify-between px-1 pb-1 group-data-[collapsible=icon]:hidden"><span className="type-footnote text-muted-foreground">外观</span><ThemeSwitch /></div>
-        {!!st.webVersion && st.webVersion !== LOADED_WEB_VERSION && <a href="#/settings/about" className="block rounded-lg px-2 py-1 type-footnote text-primary hover:bg-muted group-data-[collapsible=icon]:hidden" data-sidebar-web-update>前端有更新 · 查看</a>}
+        <div className="flex items-center justify-between px-1 pb-1 group-data-[collapsible=icon]:hidden"><span className="type-footnote text-muted-foreground">{t("core:sidebar.appearance")}</span><ThemeSwitch /></div>
+        {!!st.webVersion && st.webVersion !== LOADED_WEB_VERSION && <a href="#/settings/about" className="block rounded-lg px-2 py-1 type-footnote text-primary hover:bg-muted group-data-[collapsible=icon]:hidden" data-sidebar-web-update>{t("core:sidebar.webUpdate")}</a>}
       </SidebarFooter>
       <SidebarRail />
     </UISidebar>
   )
 }
 export function MobileTabs({ route: full }: { route: string }) {
+  const tr = useT()
   const route = full.split("?")[0]
   const n = pendingCards().length
-  const tabs = [{ h: "", l: "对话", I: MessageCircleIcon }, { h: "inbox", l: "待处理", I: InboxIcon, b: n }, { h: "items", l: "事项", I: ListTodoIcon }, { h: "more", l: "我的", I: UserIcon }]
+  const tabs = [{ h: "", l: tr("core:nav.chat"), I: MessageCircleIcon }, { h: "inbox", l: tr("core:nav.inbox"), I: InboxIcon, b: n }, { h: "items", l: tr("core:nav.items"), I: ListTodoIcon }, { h: "more", l: tr("core:nav.mine"), I: UserIcon }]
   const more = ["more", "projects", "sessions", "stats", "mail", "signals", "settings", "bots", "design", "auto", "plugins", "personas", "contacts", "orgs", "teams", "accounts", "vault", "devices", "knowledge", "github", "yolo"]
   return (
     <nav className="fixed inset-x-0 bottom-0 z-40 flex h-[60px] border-t bg-background/85 pb-[env(safe-area-inset-bottom)] backdrop-blur-xl md:hidden">
@@ -352,7 +359,8 @@ export const closeSheet = () => { sheet = null; emit() }
 export const getSheet = () => sheet
 
 /* ───────── composer (InputGroup) ───────── */
-export const COMMANDS: [string, string, string][] = [["新事项", "把一件事交出去", "newItem"], ["新项目", "添加一个项目目录", "newProject"], ["汇报", "现在汇报一次进展", "digest"], ["新 Bot", "让 Steve 起草一个 Bot", "newBot"]]
+/** the composer's slash commands: [the token the Hub reads after "/", the command id]; label and description by id */
+export const COMMANDS: [string, "newItem" | "newProject" | "digest" | "newBot"][] = [["新事项", "newItem"], ["新项目", "newProject"], ["汇报", "digest"], ["新 Bot", "newBot"]]
 type MenuKind = "#" | "@" | "/"
 /* what the composer marks in its text: the same tokens the Hub reads (an item id, “@名字”, a leading “/命令”), plus the one being typed */
 type Mark = "item" | "bot" | "party" | "cmd" | "typing"
@@ -362,10 +370,11 @@ const MARK: Record<Mark, string> = {
   typing: "bg-foreground/[0.05] text-muted-foreground ring-foreground/[0.05]",
 }
 const TOKEN = /(?<![\w@#-])#?[A-Za-z]{1,6}-\d+(?![\w-])|(?<!\S)@[^\s#@]+|^\/\S+/g
+const t_ = t
 export function markText(v: string, at: (ins: string) => "bot" | "party" | undefined, typing?: [number, number] | null): [string, Mark | null][] {
   const rs: [number, number, Mark][] = []
   for (const m of v.matchAll(TOKEN)) {
-    const t = m[0], k: Mark | undefined = t[0] === "@" ? at(t) : t[0] === "/" ? (COMMANDS.some(([n]) => "/" + n.replace(/\s+/g, "") === t.replace(/\s+/g, "")) ? "cmd" : undefined)
+    const t = m[0], k: Mark | undefined = t[0] === "@" ? at(t) : t[0] === "/" ? (COMMANDS.some(([n, c]) => [n, t_(`core:cmd.${c}`)].some((x) => "/" + x.replace(/\s+/g, "") === t.replace(/\s+/g, ""))) ? "cmd" : undefined)
       : st.items.some((i) => i.id === t.replace(/^#/, "").toUpperCase()) ? "item" : undefined
     if (k) rs.push([m.index, m.index + t.length, k])
   }
@@ -391,6 +400,7 @@ export function Composer(props: ComposerProps) {
   return <ComposerInput key={props.draftKey} {...props} />
 }
 function ComposerInput({ placeholder, onSend, model, left, autoFocus, className, testId, disabled, busy, onStop, onCommand, handle, draftKey }: ComposerProps) {
+  const tr = useT()
   const [initial] = useState(() => readDraft(draftKey))
   const [v, setV] = useState(initial.text)
   const [sending, setSending] = useState(false)
@@ -439,10 +449,10 @@ function ComposerInput({ placeholder, onSend, model, left, autoFocus, className,
     ? st.items.filter((i) => !i.arch && (!menu.q || i.id.toLowerCase().includes(menu.q.toLowerCase()) || i.t.includes(menu.q))).slice(0, 6).map((i) => ({ id: i.id, ins: i.id, label: <><ItemNo id={i.id} className="w-14" /><span className="min-w-0 flex-1 truncate type-callout">{i.t}</span><Status s={i.st} /></> }))
     : menu.kind === "@" && men.opts ? men.opts
     : menu.kind === "@"
-    ? [...Object.keys(st.bots).filter((k) => st.bots[k].on && !st.bots[k].main && (!menu.q || st.bots[k].n.includes(menu.q))).map((k) => ({ id: k, ins: "@" + st.bots[k].n.replace(/\s+/g, ""), label: <><BotAvatar k={k} size={18} /><span className="type-callout">{st.bots[k].n} Bot</span><span className="min-w-0 flex-1 truncate type-footnote text-muted-foreground">交给它 · {st.bots[k].role}</span></> })),
-      ...st.pp.contacts.filter((c) => !c.me && c.kind !== "未确认" && (!menu.q || [c.n, ...c.aliases].some((x) => x.toLowerCase().includes(menu.q.toLowerCase())))).slice(0, 5).map((c) => ({ id: c.id, ins: "@" + c.n.split(" ")[0], label: <><span className="flex size-[18px] items-center justify-center rounded-full bg-muted text-[10px]">{c.n[0]}</span><span className="type-callout">{c.n}</span><span className="min-w-0 flex-1 truncate type-footnote text-muted-foreground">关联 · {[st.pp.orgs.find((o) => o.id === c.org)?.n, c.title].filter(Boolean).join(" · ")}</span></> })),
-      ...st.pp.teams.filter((g) => !menu.q || g.n.includes(menu.q)).slice(0, 3).map((g) => ({ id: g.id, ins: "@" + g.n.replace(/\s+/g, ""), label: <><UsersRoundIcon className="size-[18px] text-muted-foreground" /><span className="type-callout">{g.n}</span><span className="min-w-0 flex-1 truncate type-footnote text-muted-foreground">关联团队 · {g.members.length} 人</span></> }))]
-    : COMMANDS.filter(([n]) => !menu.q || n.includes(menu.q)).map(([n, d, c]) => ({ id: c, ins: "", cmd: c, label: <><SlashIcon className="size-3.5 text-muted-foreground" /><span className="type-callout">{n}</span><span className="min-w-0 flex-1 truncate type-footnote text-muted-foreground">{d}</span></> }))
+    ? [...Object.keys(st.bots).filter((k) => st.bots[k].on && !st.bots[k].main && (!menu.q || st.bots[k].n.includes(menu.q))).map((k) => ({ id: k, ins: "@" + st.bots[k].n.replace(/\s+/g, ""), label: <><BotAvatar k={k} size={18} /><span className="type-callout">{tr("core:composer.botName", { name: st.bots[k].n })}</span><span className="min-w-0 flex-1 truncate type-footnote text-muted-foreground">{tr("core:composer.handTo", { role: st.bots[k].role })}</span></> })),
+      ...st.pp.contacts.filter((c) => !c.me && c.kind !== "未确认" && (!menu.q || [c.n, ...c.aliases].some((x) => x.toLowerCase().includes(menu.q.toLowerCase())))).slice(0, 5).map((c) => ({ id: c.id, ins: "@" + c.n.split(" ")[0], label: <><span className="flex size-[18px] items-center justify-center rounded-full bg-muted text-[10px]">{c.n[0]}</span><span className="type-callout">{c.n}</span><span className="min-w-0 flex-1 truncate type-footnote text-muted-foreground">{tr("core:composer.relate", { info: [st.pp.orgs.find((o) => o.id === c.org)?.n, c.title].filter(Boolean).join(" · ") })}</span></> })),
+      ...st.pp.teams.filter((g) => !menu.q || g.n.includes(menu.q)).slice(0, 3).map((g) => ({ id: g.id, ins: "@" + g.n.replace(/\s+/g, ""), label: <><UsersRoundIcon className="size-[18px] text-muted-foreground" /><span className="type-callout">{g.n}</span><span className="min-w-0 flex-1 truncate type-footnote text-muted-foreground">{tr("core:composer.team", { count: g.members.length })}</span></> }))]
+    : COMMANDS.filter(([n, c]) => !menu.q || n.includes(menu.q) || tr(`core:cmd.${c}`).toLowerCase().includes(menu.q.toLowerCase())).map(([, c]) => ({ id: c, ins: "", cmd: c, label: <><SlashIcon className="size-3.5 text-muted-foreground" /><span className="type-callout">{tr(`core:cmd.${c}`)}</span><span className="min-w-0 flex-1 truncate type-footnote text-muted-foreground">{tr(`core:cmd.${c}Desc`)}</span></> }))
   const track = (val: string, caret: number) => {
     const before = val.slice(0, caret)
     const m = before.match(/#([^\s#@]{0,24})$/) || (chat ? before.match(/(?:^|\s)@([^\s#@]{0,12})$/) : null) || (chat ? before.match(/^\/(\S{0,12})$/) : null)
@@ -467,7 +477,7 @@ function ComposerInput({ placeholder, onSend, model, left, autoFocus, className,
   }
   const marked = markText(v, atKind, menu && [menu.start, menu.end])
   useLayoutEffect(() => { if (mirror.current && ta.current) mirror.current.scrollTop = ta.current.scrollTop })
-  const head = menu?.kind === "#" ? <><HashIcon className="size-3.5" />引用事项</> : menu?.kind === "@" ? <><AtSignIcon className="size-3.5" />Bot（交给它）· 联系人和团队（关联到这件事）</> : <><SlashIcon className="size-3.5" />命令</>
+  const head = menu?.kind === "#" ? <><HashIcon className="size-3.5" />{tr("core:composer.headItem")}</> : menu?.kind === "@" ? <><AtSignIcon className="size-3.5" />{tr("core:composer.headMention")}</> : <><SlashIcon className="size-3.5" />{tr("core:composer.headCommand")}</>
   return (
     <div className="relative" data-dropzone
       onDragEnter={(e) => { if (isFileDrag(e)) { e.preventDefault(); setDrag((n) => n + 1) } }}
@@ -496,7 +506,7 @@ function ComposerInput({ placeholder, onSend, model, left, autoFocus, className,
         <div ref={mirror} aria-hidden data-composer-marks className="pointer-events-none absolute inset-0 overflow-hidden [scrollbar-gutter:stable] whitespace-pre-wrap break-words px-4 pb-2 pt-3 text-[14px] leading-[22px] text-foreground">
           {marked.map(([t, k], n) => k ? <span key={n} data-mark={k} className={cn("rounded-[4px] ring-2", MARK[k])}>{t}</span> : <Fragment key={n}>{t}</Fragment>)}{v.endsWith("\n") && "\u200b"}
         </div>
-        <InputGroupTextarea ref={ta} autoFocus={autoFocus} disabled={disabled || sending} value={v} placeholder={drag > 0 ? "松开即可添加文件" : placeholder} rows={1}
+        <InputGroupTextarea ref={ta} autoFocus={autoFocus} disabled={disabled || sending} value={v} placeholder={drag > 0 ? tr("core:composer.dropFiles") : placeholder} rows={1}
           onPaste={(e) => { if (e.clipboardData?.files?.length && takeFiles(e.clipboardData.files)) e.preventDefault() }}
           onChange={(e) => { if (chat && !v && e.target.value) cue("input"); else if (chat && v && !e.target.value && !st.thinking) cue("idle"); setV(e.target.value); track(e.target.value, e.target.selectionStart ?? e.target.value.length) }}
           onScroll={(e) => { if (mirror.current) mirror.current.scrollTop = e.currentTarget.scrollTop }}
@@ -517,10 +527,10 @@ function ComposerInput({ placeholder, onSend, model, left, autoFocus, className,
           {model && <span className="px-1.5 type-footnote text-muted-foreground" data-model>{model}</span>}
           {left}
           <span className="flex-1" />
-          <span className="mr-1 hidden items-center gap-1 type-footnote text-tertiary lg:inline-flex">{chat && <><Kbd>#</Kbd>事项<Kbd>@</Kbd>Bot<Kbd>/</Kbd>命令</>}{!chat && <><Kbd>⏎</Kbd>发送<Kbd>⇧⏎</Kbd>换行</>}</span>
-          {queues && <Tooltip><TooltipTrigger render={<InputGroupButton size="icon-sm" variant="outline" aria-label={stopping ? "正在停止" : "停止"} data-stop data-stopping={stopping || undefined} onClick={stop} disabled={stopping} className="rounded-full" />}>
-            {stopping ? <Spinner className="size-4" /> : <SquareIcon className="size-3 fill-current" />}</TooltipTrigger><TooltipContent>{stopping ? "正在停止…" : <>停止这次回答 <Kbd>Esc</Kbd></>}</TooltipContent></Tooltip>}
-          <InputGroupButton size="icon-sm" variant="default" aria-label={sending ? "提交中" : queues ? "排队发送" : "发送"} title={queues ? "排队发送：本回合结束后发出" : undefined} data-send data-send-queues={queues || undefined} onClick={() => void send()} disabled={sending || up.uploading || (!v.trim() && !up.ready.length) || disabled} className="rounded-full disabled:opacity-25">{sending ? <Spinner className="size-4" /> : <ArrowUpIcon className="size-4" strokeWidth={2.25} />}</InputGroupButton>
+          <span className="mr-1 hidden items-center gap-1 type-footnote text-tertiary lg:inline-flex">{chat && <><Kbd>#</Kbd>{tr("core:composer.hintItem")}<Kbd>@</Kbd>Bot<Kbd>/</Kbd>{tr("core:composer.hintCommand")}</>}{!chat && <><Kbd>⏎</Kbd>{tr("core:composer.hintSend")}<Kbd>⇧⏎</Kbd>{tr("core:composer.hintNewline")}</>}</span>
+          {queues && <Tooltip><TooltipTrigger render={<InputGroupButton size="icon-sm" variant="outline" aria-label={tr(stopping ? "core:composer.stopping" : "core:composer.stop")} data-stop data-stopping={stopping || undefined} onClick={stop} disabled={stopping} className="rounded-full" />}>
+            {stopping ? <Spinner className="size-4" /> : <SquareIcon className="size-3 fill-current" />}</TooltipTrigger><TooltipContent>{stopping ? tr("core:composer.stoppingTip") : <>{tr("core:composer.stopTip")} <Kbd>Esc</Kbd></>}</TooltipContent></Tooltip>}
+          <InputGroupButton size="icon-sm" variant="default" aria-label={tr(sending ? "core:composer.submitting" : queues ? "core:composer.queueSend" : "core:composer.send")} title={queues ? tr("core:composer.queueSendTip") : undefined} data-send data-send-queues={queues || undefined} onClick={() => void send()} disabled={sending || up.uploading || (!v.trim() && !up.ready.length) || disabled} className="rounded-full disabled:opacity-25">{sending ? <Spinner className="size-4" /> : <ArrowUpIcon className="size-4" strokeWidth={2.25} />}</InputGroupButton>
         </InputGroupAddon>
       </InputGroup>
     </div>
@@ -547,18 +557,19 @@ export function useNow(on: boolean) {
   }, [on])
   return n
 }
-const TOOLN: Record<string, string> = { ToolSearch: "加载工具", TodoWrite: "更新待办", Task: "子任务", Agent: "子任务", Skill: "技能" }
+const TOOLN = ["ToolSearch", "TodoWrite", "Task", "Agent", "Skill"] as const
+const toolName = (tool: string) => ((TOOLN as readonly string[]).includes(tool) ? t(`core:transcript.tool.${tool as (typeof TOOLN)[number]}`) : undefined)
 type StepView = { I: any; verb: string; subj: string; mono: boolean; full?: string }
 /** icon, verb and subject of one tool call: the command (with the agent's own description), the file, the pattern */
 function stepView(e: any[]): StepView {
   const tool = String(e[9] ?? ""), file = e[3] && e[3] !== "Steve" ? String(e[3]) : ""
   if (e[1] === "steve") return { I: SparklesIcon, verb: e[2], subj: e[10] ?? "", mono: false }
-  if (e[1] === "read") return { I: FileTextIcon, verb: "读取", subj: base(file) || e[2], mono: true, full: file }
-  if (e[1] === "edit") return { I: tool === "Write" ? FilePlusIcon : PencilIcon, verb: tool === "Write" ? "写入" : "编辑", subj: base(file) || e[2], mono: true, full: file }
-  if (e[1] === "search") { const web = /^Web/.test(tool); return { I: web ? GlobeIcon : SearchIcon, verb: web ? "联网搜索" : "搜索", subj: e[11] ?? e[3] ?? "", mono: !web, full: e[11] } }
-  if (tool && tool !== "Bash") return { I: WrenchIcon, verb: TOOLN[tool] ?? tool.replace(/^mcp__[^_]+__/, ""), subj: e[10] ?? e[11] ?? "", mono: !e[10] && !!e[11] }
+  if (e[1] === "read") return { I: FileTextIcon, verb: t("core:transcript.read"), subj: base(file) || e[2], mono: true, full: file }
+  if (e[1] === "edit") return { I: tool === "Write" ? FilePlusIcon : PencilIcon, verb: t(tool === "Write" ? "core:transcript.write" : "core:transcript.edit"), subj: base(file) || e[2], mono: true, full: file }
+  if (e[1] === "search") { const web = /^Web/.test(tool); return { I: web ? GlobeIcon : SearchIcon, verb: t(web ? "core:transcript.webSearch" : "core:transcript.search"), subj: e[11] ?? e[3] ?? "", mono: !web, full: e[11] } }
+  if (tool && tool !== "Bash") return { I: WrenchIcon, verb: toolName(tool) ?? tool.replace(/^mcp__[^_]+__/, ""), subj: e[10] ?? e[11] ?? "", mono: !e[10] && !!e[11] }
   const cmd = String(e[11] ?? [e[2], e[3]].filter(Boolean).join(" "))
-  return { I: TerminalIcon, verb: e[10] || "运行", subj: cmd.split("\n")[0], mono: true, full: cmd }
+  return { I: TerminalIcon, verb: e[10] || t("core:transcript.run"), subj: cmd.split("\n")[0], mono: true, full: cmd }
 }
 /** "运行 14 条命令 · 读取 3 个文件 · 编辑 2 个文件 · 思考 1 次" */
 function workStats(evs: any[]) {
@@ -575,7 +586,7 @@ function workStats(evs: any[]) {
     else if (e[1] === "search") n.search++
     else n.other++
   }
-  return [n.run && `运行 ${n.run} 条命令`, n.read && `读取 ${n.read} 个文件`, files.size && `改动 ${files.size} 个文件`, n.search && `搜索 ${n.search} 次`, n.other && `其他工具 ${n.other} 次`, n.th && `思考 ${n.th} 次`, n.fail && `${n.fail} 次失败`].filter(Boolean) as string[]
+  return [n.run && t("core:transcript.stats.run", { count: n.run }), n.read && t("core:transcript.stats.read", { count: n.read }), files.size && t("core:transcript.stats.changed", { count: files.size }), n.search && t("core:transcript.stats.search", { count: n.search }), n.other && t("core:transcript.stats.other", { count: n.other }), n.th && t("core:transcript.stats.thought", { count: n.th }), n.fail && t("core:transcript.stats.failed", { count: n.fail })].filter(Boolean) as string[]
 }
 function Detail({ text }: { text: string }) {
   const lines = String(text || "").split("\n").filter(Boolean)
@@ -605,6 +616,7 @@ function PlanList({ plan }: { plan: [string, boolean][] }) {
   )
 }
 function Step({ e, live, last }: { e: any[]; live: boolean; last: boolean }) {
+  const t = useT()
   if (e[0] === "a") return <div className="py-1 type-callout text-foreground/80" data-narration><Markdown text={e[1]} /></div>
   if (e[0] === "th") {
     const thinking = live && last, preview = String(e[1] || "").trim().split("\n")[0]
@@ -612,7 +624,7 @@ function Step({ e, live, last }: { e: any[]; live: boolean; last: boolean }) {
       <Collapsible data-step data-step-kind="th">
         <CollapsibleTrigger className="group/step flex w-full min-w-0 items-center gap-2 rounded-md py-[3px] text-left type-callout text-muted-foreground hover:text-foreground">
           <span className="flex size-4 shrink-0 items-center justify-center"><BrainIcon className="size-4" strokeWidth={1.5} /></span>
-          <span className={cn("shrink-0 text-foreground/85", thinking && "shimmer")}>{thinking ? "正在思考" : "思考"}</span>
+          <span className={cn("shrink-0 text-foreground/85", thinking && "shimmer")}>{t(thinking ? "core:transcript.thinking" : "core:transcript.thought")}</span>
           <span className="min-w-0 truncate italic">{preview}</span>
           <ChevronRightIcon className="size-3.5 shrink-0 opacity-0 transition group-hover/step:opacity-100 group-aria-expanded/step:rotate-90 group-aria-expanded/step:opacity-100" />
         </CollapsibleTrigger>
@@ -629,7 +641,7 @@ function Step({ e, live, last }: { e: any[]; live: boolean; last: boolean }) {
       <span className={cn("max-w-[60%] shrink-0 truncate text-foreground/85", running && "shimmer", failed && "text-destructive")}>{v.verb}</span>
       {v.subj && <span className={cn("min-w-0 truncate", v.mono && "font-mono text-[12px]")} title={v.full}>{v.subj}</span>}
       {diff}
-      {failed && <span className="shrink-0 rounded-md bg-destructive/10 px-1.5 text-[11px] leading-[18px] text-destructive">失败</span>}
+      {failed && <span className="shrink-0 rounded-md bg-destructive/10 px-1.5 text-[11px] leading-[18px] text-destructive">{t("core:transcript.failed")}</span>}
     </>
   )
   const row = "flex w-full min-w-0 items-center gap-2 rounded-md py-[3px] text-left type-callout text-muted-foreground"
@@ -643,14 +655,16 @@ function Step({ e, live, last }: { e: any[]; live: boolean; last: boolean }) {
 }
 /** what the agent is doing right now, in a few words */
 function Doing({ evs }: { evs: any[] }) {
+  const t = useT()
   const run = evs.findLast((e) => e[0] === "tool" && e[5] === 1)
   if (run) { const v = stepView(run); return <><span className="shrink-0">{v.verb}</span>{v.subj && <span className={cn("min-w-0 truncate text-muted-foreground", v.mono && "font-mono text-[11.5px]")}>{v.subj}</span>}</> }
   const last = evs[evs.length - 1]
-  return <span>{!last ? "正在准备" : last[0] === "th" ? "正在思考" : last[0] === "a" ? "正在回复" : last[0] === "ask" ? "等你批准" : "正在处理"}</span>
+  return <span>{t(!last ? "core:transcript.preparing" : last[0] === "th" ? "core:transcript.thinking" : last[0] === "a" ? "core:transcript.replying" : last[0] === "ask" ? "core:transcript.awaitingApproval" : "core:transcript.processing")}</span>
 }
 /* a folded block stays as the reader left it, across re-renders and remounts */
 const workOpen = new Map<string, boolean>()
 function WorkBlock({ k, g, live }: { k: string; g: Seg; live: boolean }) {
+  const t = useT()
   const key = k + ":" + g.idx
   const [open, setOpenS] = useState(() => workOpen.get(key) ?? live), [all, setAll] = useState(false)
   useEffect(() => { if (!workOpen.has(key)) setOpenS(live) }, [live, key])
@@ -665,14 +679,14 @@ function WorkBlock({ k, g, live }: { k: string; g: Seg; live: boolean }) {
       <CollapsibleTrigger className="group/work flex w-full min-w-0 items-center gap-2 rounded-lg py-1 text-left type-callout">
         {live ? <span className="relative flex size-4 shrink-0 items-center justify-center"><span className="absolute size-2 rounded-full bg-blue dot-running" /></span>
           : cancelled ? <CircleSlashIcon className="size-4 shrink-0 text-muted-foreground" strokeWidth={1.75} /> : <CircleCheckIcon className="size-4 shrink-0 text-success" strokeWidth={1.75} />}
-        <span className={cn("shrink-0 font-medium", live ? "text-blue" : "text-foreground/85")}>{live ? <span className="shimmer">正在工作</span> : cancelled ? "已中断" : "已处理"}</span>
+        <span className={cn("shrink-0 font-medium", live ? "text-blue" : "text-foreground/85")}>{live ? <span className="shimmer">{t("core:transcript.working")}</span> : t(cancelled ? "core:transcript.interrupted" : "core:transcript.handled")}</span>
         {(ms > 0 || live) && <span className="shrink-0 tabular-nums text-muted-foreground" data-work-clock>{live ? clock(ms) : fmtDur(ms)}</span>}
         {stats.length > 0 && <span className="min-w-0 truncate text-muted-foreground">· {stats.join(" · ")}</span>}
         <ChevronRightIcon className="ml-auto size-4 shrink-0 text-muted-foreground transition group-aria-expanded/work:rotate-90" />
       </CollapsibleTrigger>
       <CollapsibleContent className="h-(--collapsible-panel-height) overflow-hidden transition-[height] duration-200 data-ending-style:h-0 data-starting-style:h-0">
         <div className="ml-[7px] mt-1 flex flex-col border-l pl-4">
-          {hidden > 0 && <button type="button" onClick={() => setAll(true)} className="self-start py-1 type-footnote text-muted-foreground hover:text-foreground" data-show-steps>前面还有 {hidden} 步 · 显示全部</button>}
+          {hidden > 0 && <button type="button" onClick={() => setAll(true)} className="self-start py-1 type-footnote text-muted-foreground hover:text-foreground" data-show-steps>{t("core:transcript.moreSteps", { count: hidden })}</button>}
           {g.evs.map((x, j) => j < hidden ? null : <Step key={j} e={x} live={live} last={j === g.evs.length - 1} />)}
         </div>
       </CollapsibleContent>
@@ -681,22 +695,24 @@ function WorkBlock({ k, g, live }: { k: string; g: Seg; live: boolean }) {
 }
 /** the files a turn changed, like a review summary */
 function FilesCard({ files }: { files: [string, number, number][] }) {
+  const t = useT()
   const add = files.reduce((n, f) => n + f[1], 0), del = files.reduce((n, f) => n + f[2], 0)
   return (
     <div className="overflow-hidden rounded-xl border bg-card anim-in" data-files-changed>
-      <div className="flex items-center gap-2 border-b bg-muted/40 px-3.5 py-2 type-footnote"><FileDiffIcon className="size-3.5 text-muted-foreground" /><span className="font-medium text-foreground">改动了 {files.length} 个文件</span><span className="font-mono tabular-nums"><span className="text-success">+{add}</span> <span className="text-destructive">−{del}</span></span></div>
+      <div className="flex items-center gap-2 border-b bg-muted/40 px-3.5 py-2 type-footnote"><FileDiffIcon className="size-3.5 text-muted-foreground" /><span className="font-medium text-foreground">{t("core:transcript.filesChanged", { count: files.length })}</span><span className="font-mono tabular-nums"><span className="text-success">+{add}</span> <span className="text-destructive">−{del}</span></span></div>
       <ul className="flex flex-col py-1">{files.slice(0, 12).map(([p, a, d]) => (
         <li key={p} className="flex min-w-0 items-center gap-2 px-3.5 py-1 font-mono text-[12px]" title={p}><span className="shrink-0 text-foreground">{base(p)}</span><span className="min-w-0 truncate text-muted-foreground">{p.split("/").slice(-4, -1).join("/")}</span><span className="ml-auto shrink-0 tabular-nums"><span className="text-success">+{a}</span> <span className="text-destructive">−{d}</span></span></li>
-      ))}{files.length > 12 && <li className="px-3.5 py-1 type-footnote text-muted-foreground">另有 {files.length - 12} 个文件</li>}</ul>
+      ))}{files.length > 12 && <li className="px-3.5 py-1 type-footnote text-muted-foreground">{t("core:transcript.moreFiles", { count: files.length - 12 })}</li>}</ul>
     </div>
   )
 }
 function ForkBtn({ k, at }: { k: string; at: number }) {
+  const t = useT()
   return (
     <Tooltip>
-      <TooltipTrigger render={<Button variant="ghost" size="icon-xs" aria-label="从这条派生" data-fork={at} onClick={() => openSheet("fork", { k, at })}
+      <TooltipTrigger render={<Button variant="ghost" size="icon-xs" aria-label={t("core:transcript.fork")} data-fork={at} onClick={() => openSheet("fork", { k, at })}
         className="shrink-0 rounded-full text-muted-foreground opacity-0 transition-opacity duration-150 group-hover/msg:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-100" />}><GitForkIcon /></TooltipTrigger>
-      <TooltipContent>从这条派生</TooltipContent>
+      <TooltipContent>{t("core:transcript.fork")}</TooltipContent>
     </Tooltip>
   )
 }
@@ -722,6 +738,7 @@ function TranscriptPermission({ e }: { e: any[] }) {
   return <PermissionRecord title={e[1]} id={e[2]} decision={permissionDecision(e[2])} />
 }
 const SegView = memo(function SegView({ k, g, live }: { k: string; g: Seg; live: boolean }) {
+  const t = useT()
   const e = g.evs[0]
   if (g.t === "work") return <WorkBlock k={k} g={g} live={live} />
   if (g.t === "files") return <FilesCard files={g.files!} />
@@ -744,17 +761,17 @@ const SegView = memo(function SegView({ k, g, live }: { k: string; g: Seg; live:
   )
   if (g.t === "q") return (
     <div className="ml-auto max-w-[85%] rounded-2xl bg-muted px-3.5 py-2.5 anim-in" data-merged>
-      <div className="mb-1 flex items-center gap-1.5 type-label text-muted-foreground"><InboxIcon className="size-3.5" />来自事项的补充 · {e[1].length} 条，合并送达</div>
+      <div className="mb-1 flex items-center gap-1.5 type-label text-muted-foreground"><InboxIcon className="size-3.5" />{t("core:transcript.merged", { count: e[1].length })}</div>
       {e[1].map((x: string) => <Markdown key={x} text={x} className="type-body" />)}
     </div>
   )
-  if (g.t === "hi") return <div className="flex gap-2 rounded-xl bg-muted/50 px-3 py-2 type-callout text-muted-foreground" data-handoff><CornerDownRightIcon className="mt-0.5 size-4 shrink-0" strokeWidth={1.5} /><div className="min-w-0 flex-1"><Brief text={e[3] ?? e[1]} label="Steve 交代" /><Files files={e[2]} className="mt-1.5" /></div></div>
+  if (g.t === "hi") return <div className="flex gap-2 rounded-xl bg-muted/50 px-3 py-2 type-callout text-muted-foreground" data-handoff><CornerDownRightIcon className="mt-0.5 size-4 shrink-0" strokeWidth={1.5} /><div className="min-w-0 flex-1"><Brief text={e[3] ?? e[1]} label={t("core:transcript.steveBrief")} /><Files files={e[2]} className="mt-1.5" /></div></div>
   if (g.t === "ho") return (
     <div className="flex items-center gap-3 type-footnote text-muted-foreground"><span className="h-px flex-1 bg-border" />
       <button type="button" onClick={() => go("#/sessions/" + e[2])} className="inline-flex items-center gap-1 text-blue hover:underline">{e[1]}<ArrowUpRightIcon className="size-3" /></button><span className="h-px flex-1 bg-border" /></div>
   )
   if (g.t === "ask") return <TranscriptPermission e={e} />
-  if (g.t === "away") return <div className="flex items-center gap-2 type-footnote text-muted-foreground" data-away><CornerDownRightIcon className="size-3.5 shrink-0" strokeWidth={1.5} />这一回合回复的是下方的评论，过程显示在那里</div>
+  if (g.t === "away") return <div className="flex items-center gap-2 type-footnote text-muted-foreground" data-away><CornerDownRightIcon className="size-3.5 shrink-0" strokeWidth={1.5} />{t("core:transcript.away")}</div>
   if (g.t === "sys") return <div className="flex items-center gap-3 type-footnote text-muted-foreground"><span className="h-px flex-1 bg-border/70" /><span className="max-w-[80%] text-center">{e[1]}</span><span className="h-px flex-1 bg-border/70" /></div>
   return null
 }, (a, b) => a.k === b.k && a.live === b.live && a.g.idx === b.g.idx && a.g.t === b.g.t && a.g.t1 === b.g.t1 && a.g.end === b.g.end && a.g.files?.length === b.g.files?.length && sameEvs(a.g.evs, b.g.evs))
@@ -809,12 +826,13 @@ type TP = { k: string; compact?: boolean; tail?: number; range?: [number, number
 export function Transcript(p: TP) { const s = st.S[p.k]; return <TranscriptOf {...p} ev={s?.ev} st={s?.st} loaded={s?.loaded} /> }
 const TranscriptOf = memo(TranscriptImpl, (a, b) => a.k === b.k && a.ev === b.ev && a.st === b.st && a.loaded === b.loaded && a.compact === b.compact && a.tail === b.tail && a.range?.[0] === b.range?.[0] && a.range?.[1] === b.range?.[1] && String(a.skip ?? "") === String(b.skip ?? ""))
 function TranscriptImpl({ k, tail, range, skip }: TP & { ev?: unknown; st?: string; loaded?: boolean }) {
+  const t = useT()
   const s = st.S[k]
   const [full, setFull] = useState(false)
   useEffect(() => { if (s && !s.loaded) void loadEvents(k) }, [k, s?.loaded])
   if (!s) return null
-  if (!s.loaded) return <div className="flex items-center gap-2 type-callout text-muted-foreground"><Spinner className="size-3.5" />载入会话</div>
-  if (!s.ev.length && !range) return <div className="type-callout text-muted-foreground">{s.st === "run" ? "正在开始…" : "这个会话还没有内容"}</div>
+  if (!s.loaded) return <div className="flex items-center gap-2 type-callout text-muted-foreground"><Spinner className="size-3.5" />{t("core:transcript.loading")}</div>
+  if (!s.ev.length && !range) return <div className="type-callout text-muted-foreground">{t(s.st === "run" ? "core:transcript.starting" : "core:transcript.empty")}</div>
   const segs = segsOf(s, range, skip)
   /* the turn running now may be shown elsewhere (skipped): then its progress is there, not here */
   const last = segs[segs.length - 1], tailOpen = (!range || range[1] >= s.ev.length) && last?.t !== "away"
@@ -822,15 +840,16 @@ function TranscriptImpl({ k, tail, range, skip }: TP & { ev?: unknown; st?: stri
   const from = tail && !full && segs.length > tail ? segs.length - tail : 0
   return (
     <div className="flex flex-col gap-4" data-transcript={k}>
-      {from > 0 && <button type="button" onClick={() => setFull(true)} className="self-start type-footnote text-muted-foreground hover:text-foreground" data-show-all>前面还有 {from} 段 · 显示全部</button>}
+      {from > 0 && <button type="button" onClick={() => setFull(true)} className="self-start type-footnote text-muted-foreground hover:text-foreground" data-show-all>{t("core:transcript.moreSegs", { count: from })}</button>}
       {segs.map((g, n) => n < from ? null : <SegView key={k + ":" + g.idx + ":" + g.t} k={k} g={g} live={n === liveIdx} />)}
-      {s.st === "run" && liveIdx < 0 && tailOpen && <div className="flex items-center gap-2 type-callout text-blue"><span className="flex size-4 items-center justify-center"><span className="size-2 rounded-full bg-blue dot-running" /></span><span className="shimmer">{last?.t === "a" ? "正在回复" : "正在开始"}</span></div>}
+      {s.st === "run" && liveIdx < 0 && tailOpen && <div className="flex items-center gap-2 type-callout text-blue"><span className="flex size-4 items-center justify-center"><span className="size-2 rounded-full bg-blue dot-running" /></span><span className="shimmer">{t(last?.t === "a" ? "core:transcript.replying" : "core:transcript.startingShort")}</span></div>}
     </div>
   )
 }
 
 /** the session's state at a glance, above the composer: running and doing what, waiting on you, or done and how it went */
 export function RunBar({ k, onStop }: { k: string; onStop?: () => void }) {
+  const t = useT()
   const s = st.S[k], run = s?.st === "run"
   const now = useNow(run)
   if (!s || !s.loaded || (!s.ev.length && !run)) return null
@@ -840,8 +859,8 @@ export function RunBar({ k, onStop }: { k: string; onStop?: () => void }) {
   const end = turn.findLast((e) => e[0] === "end"), endAt = end ? s.ts[s.ev.lastIndexOf(end)] : 0
   const stats = workStats(turn)
   const tone = run ? "run" : s.st === "wait" ? "wait" : end?.[1] === "cancelled" ? "stop" : s.st === "ended" ? "ended" : "done"
-  const label = { run: "运行中", wait: "等你处理", stop: "已中断", ended: "会话已结束", done: "本回合已完成" }[tone]
-  const what = run ? <Doing evs={turn} /> : tone === "wait" ? "有卡片等你决定，见对话末尾" : stats.join(" · ")
+  const label = t(`core:runBar.${tone}`)
+  const what = run ? <Doing evs={turn} /> : tone === "wait" ? t("core:runBar.waitWhat") : stats.join(" · ")
   return (
     <div role="status" aria-live="polite" data-runbar={tone}
       className={cn("mb-2 flex min-h-10 items-center gap-2.5 rounded-xl border px-3.5 py-2 type-footnote transition-colors",
@@ -850,8 +869,8 @@ export function RunBar({ k, onStop }: { k: string; onStop?: () => void }) {
         : tone === "wait" ? <StatusDot s="wait" className="mx-1" /> : tone === "done" ? <CircleCheckIcon className="size-4 shrink-0 text-success" strokeWidth={1.75} /> : tone === "stop" ? <CircleSlashIcon className="size-4 shrink-0 text-muted-foreground" strokeWidth={1.75} /> : <StatusDot s="ended" className="mx-1" />}
       <span className={cn("shrink-0 font-medium", tone === "run" ? "text-blue" : tone === "wait" ? "text-attention" : "text-foreground/85")}>{label}</span>
       {what && <span className={cn("flex min-w-0 items-baseline gap-1.5 truncate", run ? "text-foreground/85" : "text-muted-foreground")} data-doing>{what}</span>}
-      <span className="ml-auto shrink-0 tabular-nums text-muted-foreground">{run ? clock(now - t0) : endAt && t0 ? "用时 " + fmtDur(endAt - t0) : ""}</span>
-      {run && onStop && <Button size="xs" variant="outline" className="shrink-0 bg-background" onClick={onStop} data-interrupt><SquareIcon className="fill-current" />中断</Button>}
+      <span className="ml-auto shrink-0 tabular-nums text-muted-foreground">{run ? clock(now - t0) : endAt && t0 ? t("core:runBar.took", { dur: fmtDur(endAt - t0) }) : ""}</span>
+      {run && onStop && <Button size="xs" variant="outline" className="shrink-0 bg-background" onClick={onStop} data-interrupt><SquareIcon className="fill-current" />{t("core:runBar.interrupt")}</Button>}
     </div>
   )
 }
@@ -859,6 +878,7 @@ export function RunBar({ k, onStop }: { k: string; onStop?: () => void }) {
 /* a session as a block inside the item's work log */
 const expanded = new Set<string>(), collapsedLive = new Set<string>()
 export function SessionBlock({ k, defaultOpen, replies }: { k: string; defaultOpen?: boolean; /** comments' replies the feed shows on their own */ replies?: Reply[] }) {
+  const t = useT()
   const [, f] = useState(0)
   const s = st.S[k]
   if (!s) return null
@@ -873,12 +893,12 @@ export function SessionBlock({ k, defaultOpen, replies }: { k: string; defaultOp
       <div className="group/sess flex min-h-9 items-center gap-2">
         <span className="flex size-5 shrink-0 items-center justify-center"><SquareTerminalIcon className="size-4 text-muted-foreground" strokeWidth={1.5} /></span>
         <button type="button" onClick={toggle} className="flex min-w-0 flex-1 items-center gap-2.5 text-left" aria-expanded={open}>
-          <span className="shrink-0 type-callout font-medium">会话 #{s.n}</span>
+          <span className="shrink-0 type-callout font-medium">{t("core:session.no", { n: s.n })}</span>
           <Status s={s.st} sess />
-          <span className="min-w-0 truncate type-footnote text-muted-foreground">{open ? `${st.devices.find((d) => d.id === s.device)?.name ?? "Hub"} · ${s.h} · ${s.m} · ${s.dur}${s.ctx ? ` · 上下文 ${s.ctx}%` : ""}` : lastA ? lastA[1] : s.st === "run" ? "运行中" : ""}</span>
-          <span className="ml-auto shrink-0 type-footnote text-muted-foreground">{open ? "收起" : "展开"}</span>
+          <span className="min-w-0 truncate type-footnote text-muted-foreground">{open ? `${st.devices.find((d) => d.id === s.device)?.name ?? "Hub"} · ${s.h} · ${s.m} · ${s.dur}${s.ctx ? t("core:session.context", { pct: s.ctx }) : ""}` : lastA ? lastA[1] : s.st === "run" ? t("core:runBar.run") : ""}</span>
+          <span className="ml-auto shrink-0 type-footnote text-muted-foreground">{t(open ? "core:session.collapse" : "core:session.expand")}</span>
         </button>
-        <Tooltip><TooltipTrigger render={<Button variant="ghost" size="icon-xs" onClick={() => go("#/sessions/" + k)} data-enter-session={k} aria-label="进入会话" className="text-muted-foreground" />}><ArrowUpRightIcon /></TooltipTrigger><TooltipContent>进入会话</TooltipContent></Tooltip>
+        <Tooltip><TooltipTrigger render={<Button variant="ghost" size="icon-xs" onClick={() => go("#/sessions/" + k)} data-enter-session={k} aria-label={t("core:session.enter")} className="text-muted-foreground" />}><ArrowUpRightIcon /></TooltipTrigger><TooltipContent>{t("core:session.enter")}</TooltipContent></Tooltip>
       </div>
       {open && <div className="mb-2 ml-[9px] mt-1 border-l pl-[19px]"><Transcript k={k} compact={!live} tail={4} skip={skip?.length ? skip : undefined} /></div>}
     </div>
@@ -890,24 +910,25 @@ export function SessionBlock({ k, defaultOpen, replies }: { k: string; defaultOp
  * Whether it is open outlives a remount: lines written while it runs shift its place in the feed */
 const replyOpen = new Set<string>()
 export function ReplyBlock({ r }: { r: Reply }) {
+  const t = useT()
   const key = r.s + ":" + r.from
   const [open, setOpenS] = useState(() => replyOpen.has(key))
   const setOpen = (v: boolean) => { if (v) replyOpen.add(key); else replyOpen.delete(key); setOpenS(v) }
   const s = st.S[r.s]
   if (!s) return null
   const who = s.b ?? "agent"
-  if (!r.text && !r.tools) return r.live ? <div className="ml-7 flex items-center gap-2 py-1 type-footnote text-muted-foreground" data-reply-live><Spinner className="size-3" /><span className="shimmer">{botName(who)} 正在回复</span></div> : null
+  if (!r.text && !r.tools) return r.live ? <div className="ml-7 flex items-center gap-2 py-1 type-footnote text-muted-foreground" data-reply-live><Spinner className="size-3" /><span className="shimmer">{t("core:session.botReplying", { bot: botName(who) })}</span></div> : null
   /* counted as the work block counts them: commands, files changed */
   const stats = open ? [] : workStats(s.ev.slice(r.from, r.to))
   return (
     <div className="mb-1.5 ml-[9px] border-l pl-[19px]" data-reply={r.s}>
       <div className="flex min-h-7 min-w-0 items-center gap-1.5 type-footnote text-muted-foreground">
         <BotAvatar k={who} size={16} /><span className="shrink-0 font-medium text-foreground/80">{botName(who)}</span>
-        <span className="shrink-0">· 会话 #{s.n}</span>
+        <span className="shrink-0">{t("core:session.replyNo", { n: s.n })}</span>
         {stats.length > 0 && <span className="min-w-0 truncate" data-reply-stats>· {stats.join(" · ")}</span>}
         {r.live && !open && <Spinner className="size-3 shrink-0" />}
-        <button type="button" onClick={() => setOpen(!open)} aria-expanded={open} className="ml-auto shrink-0 hover:text-foreground" data-reply-toggle>{open ? "收起过程" : "展开过程"}</button>
-        <Tooltip><TooltipTrigger render={<Button variant="ghost" size="icon-xs" onClick={() => go("#/sessions/" + r.s)} aria-label="进入会话" className="text-muted-foreground" />}><ArrowUpRightIcon /></TooltipTrigger><TooltipContent>进入会话</TooltipContent></Tooltip>
+        <button type="button" onClick={() => setOpen(!open)} aria-expanded={open} className="ml-auto shrink-0 hover:text-foreground" data-reply-toggle>{t(open ? "core:session.collapseWork" : "core:session.expandWork")}</button>
+        <Tooltip><TooltipTrigger render={<Button variant="ghost" size="icon-xs" onClick={() => go("#/sessions/" + r.s)} aria-label={t("core:session.enter")} className="text-muted-foreground" />}><ArrowUpRightIcon /></TooltipTrigger><TooltipContent>{t("core:session.enter")}</TooltipContent></Tooltip>
       </div>
       {open ? <div className="pb-2 pt-1"><Transcript k={r.s} compact={!r.live} range={[r.from, r.to]} /></div>
         : r.text ? <div className="line-clamp-6 whitespace-pre-wrap break-words pb-1 type-body text-foreground" data-reply-text><Markdown text={r.text} /></div> : null}
@@ -916,8 +937,10 @@ export function ReplyBlock({ r }: { r: Reply }) {
 }
 
 /* ───────── decisions ───────── */
-const FAIL: Record<string, [string, "ghost" | "outline" | "default"]> = { look: ["我来看看", "ghost"], drop: ["放弃", "outline"], tosteve: ["换成 Steve", "outline"], delivered: ["它其实做完了", "outline"], release_waive: ["不需要发布", "outline"], release_retry: ["需要发布", "outline"], release_live: ["已经上线", "default"], continue: ["让它继续", "default"] }
+/** the buttons of a failure card in their order, with their look; the words are FAIL_CHOICE */
+const FAIL: Record<string, "ghost" | "outline" | "default"> = { look: "ghost", drop: "outline", tosteve: "outline", delivered: "outline", release_waive: "outline", release_retry: "outline", release_live: "default", continue: "default" }
 export function DecisionCard({ i, w = i.wait!, showItem = true }: { i: Item; w?: Item["wait"] & {}; showItem?: boolean }) {
+  const t = useT()
   const [rework, setRework] = useState(false), [txt, setTxt] = useState(""), [localBusy, setBusy] = useState(false), [free, setFree] = useState(false)
   const busy = localBusy || st.pendingActions.has("decision:" + w.decision)
   const act = async (c: string, t?: string) => { if (busy) return; setBusy(true); try { await decide(i.id, c, t, w.decision) } finally { setBusy(false) } }
@@ -925,31 +948,31 @@ export function DecisionCard({ i, w = i.wait!, showItem = true }: { i: Item; w?:
     <CardHeader className="flex min-w-0 flex-col gap-2 pt-3.5 pb-3">
       <div className="flex w-full min-w-0 flex-wrap items-center justify-between gap-x-3 gap-y-1">
       <CardDescription className="flex min-w-0 max-w-full items-center gap-2 type-footnote">
-        <StatusDot s={w.type === "propose" ? "prop" : w.type === "fail" ? "fail" : "wait"} /><span className="shrink-0 whitespace-nowrap font-medium text-foreground/80">{w.subject === "tool_call" ? "权限" : w.subject === "release" ? "发布" : WT[w.type]}</span>
+        <StatusDot s={w.type === "propose" ? "prop" : w.type === "fail" ? "fail" : "wait"} /><span className="shrink-0 whitespace-nowrap font-medium text-foreground/80">{w.subject === "tool_call" ? t("core:wait.tool") : w.subject === "release" ? t("core:wait.release") : WT[w.type]}</span>
         {showItem && (i.id ? <><span className="text-tertiary">·</span><a href={"#/items/" + i.id} className="min-w-0 truncate hover:text-foreground hover:underline"><span className="font-mono tabular-nums">{i.id}</span> {i.t}</a></>
-          : w.session ? <><span className="text-tertiary">·</span><a href={"#/sessions/" + w.session} className="min-w-0 truncate hover:text-foreground hover:underline" data-orphan-session={w.session}>会话 {i.t}</a></> : null)}
+          : w.session ? <><span className="text-tertiary">·</span><a href={"#/sessions/" + w.session} className="min-w-0 truncate hover:text-foreground hover:underline" data-orphan-session={w.session}>{t("core:card.sessionTitle", { title: i.t })}</a></> : null)}
       </CardDescription>
-      <CardAction className="flex max-w-full items-center gap-1 type-footnote text-muted-foreground"><span className="truncate">{botName(w.by === "steve" ? "steve" : w.by)} · 等了 {w.since}</span>
+      <CardAction className="flex max-w-full items-center gap-1 type-footnote text-muted-foreground"><span className="truncate">{t("core:card.waited", { bot: botName(w.by === "steve" ? "steve" : w.by), since: w.since })}</span>
         {i.id && <DropdownMenu>
-          <DropdownMenuTrigger render={<Button variant="ghost" size="icon-xs" aria-label="稍后提醒" className="-mr-1.5 text-muted-foreground" data-snooze={i.id} />}><AlarmClockIcon /></DropdownMenuTrigger>
+          <DropdownMenuTrigger render={<Button variant="ghost" size="icon-xs" aria-label={t("core:card.snooze")} className="-mr-1.5 text-muted-foreground" data-snooze={i.id} />}><AlarmClockIcon /></DropdownMenuTrigger>
           <DropdownMenuContent align="end" className="min-w-40">
-            <DropdownMenuRadioGroup value="" onValueChange={(v) => snooze(i.id, v as string)}>{["1 小时后", "今晚 20:00", "明天早上"].map((x) => <DropdownMenuRadioItem key={x} value={x} data-snooze-opt={x}>{x}</DropdownMenuRadioItem>)}</DropdownMenuRadioGroup>
+            <DropdownMenuRadioGroup value="" onValueChange={(v) => snooze(i.id, v as (typeof SNOOZE_KEYS)[number])}>{SNOOZE_KEYS.map((x) => <DropdownMenuRadioItem key={x} value={x} data-snooze-opt={x}>{snoozeLabel(x)}</DropdownMenuRadioItem>)}</DropdownMenuRadioGroup>
           </DropdownMenuContent>
         </DropdownMenu>}
         {/* cards that no longer matter: withdraw this one, or give up on the whole item */}
         <DropdownMenu>
-          <DropdownMenuTrigger render={<Button variant="ghost" size="icon-xs" aria-label="更多" className="-mr-1.5 text-muted-foreground" data-decision-more={i.id} />}><EllipsisIcon /></DropdownMenuTrigger>
+          <DropdownMenuTrigger render={<Button variant="ghost" size="icon-xs" aria-label={t("common:action.more")} className="-mr-1.5 text-muted-foreground" data-decision-more={i.id} />}><EllipsisIcon /></DropdownMenuTrigger>
           <DropdownMenuContent align="end" className="min-w-52">
-            {!(w.subject === "mail_draft" && w.options.includes("confirmed_not_sent")) && <DropdownMenuItem disabled={busy} onClick={() => void dismiss(i.id, w.decision)} data-dismiss={i.id}><BellOffIcon />{w.subject === "tool_call" ? "撤回（拒绝这次调用）" : "撤回，不再需要处理"}</DropdownMenuItem>}
+            {!(w.subject === "mail_draft" && w.options.includes("confirmed_not_sent")) && <DropdownMenuItem disabled={busy} onClick={() => void dismiss(i.id, w.decision)} data-dismiss={i.id}><BellOffIcon />{t(w.subject === "tool_call" ? "core:card.dismissTool" : "core:card.dismiss")}</DropdownMenuItem>}
             {i.id && <><DropdownMenuSeparator />
-            <DropdownMenuItem variant="destructive" disabled={busy} onClick={() => setSt(i.id, "drop")} data-drop-item={i.id}><BanIcon />放弃这个事项</DropdownMenuItem></>}
+            <DropdownMenuItem variant="destructive" disabled={busy} onClick={() => setSt(i.id, "drop")} data-drop-item={i.id}><BanIcon />{t("core:card.dropItem")}</DropdownMenuItem></>}
           </DropdownMenuContent>
         </DropdownMenu>
       </CardAction>
       </div>
       {title && <CardTitle className="col-span-full min-w-0 break-words type-headline">{title}</CardTitle>}
       <YoloBadge decision={w.decision} subject={w.subject} />
-      {w.busy && <div role="status" className="col-span-full flex items-center gap-1.5 type-footnote text-muted-foreground" data-agent-busy><span className="size-1.5 shrink-0 animate-pulse rounded-full bg-blue" aria-hidden />agent 还在收尾，你的回答会在它停下后送达</div>}
+      {w.busy && <div role="status" className="col-span-full flex items-center gap-1.5 type-footnote text-muted-foreground" data-agent-busy><span className="size-1.5 shrink-0 animate-pulse rounded-full bg-blue" aria-hidden />{t("core:card.agentBusy")}</div>}
     </CardHeader>
   )
   const foot = (c: ReactNode) => <CardFooter className="flex-wrap justify-end gap-2 border-t bg-muted/20 px-4 py-2.5!">{c}</CardFooter>
@@ -964,37 +987,37 @@ export function DecisionCard({ i, w = i.wait!, showItem = true }: { i: Item; w?:
   else if (w.type === "accept") body = <>
     {head(w.q)}
     <CardContent className="pb-4">{draft}
-      {rework && <Textarea autoFocus className="mt-3 min-h-20 rounded-lg" placeholder={`哪里不对？写给${botName(i.b)}`} value={txt} onChange={(e) => setTxt(e.target.value)} data-rework />}</CardContent>
-    {foot(rework ? <><Button variant="ghost" onClick={() => setRework(false)}>取消</Button><Button disabled={busy} onClick={() => act("rework", txt.trim())}>发回返工</Button></>
-      : <><Button variant="outline" onClick={() => setRework(true)}>返工…</Button><Button disabled={busy} onClick={() => act("pass")} data-pass><CheckIcon />验收通过</Button></>)}
+      {rework && <Textarea autoFocus className="mt-3 min-h-20 rounded-lg" placeholder={t("core:card.reworkPlaceholder", { bot: botName(i.b) })} value={txt} onChange={(e) => setTxt(e.target.value)} data-rework />}</CardContent>
+    {foot(rework ? <><Button variant="ghost" onClick={() => setRework(false)}>{t("common:action.cancel")}</Button><Button disabled={busy} onClick={() => act("rework", txt.trim())}>{t("core:card.sendRework")}</Button></>
+      : <><Button variant="outline" onClick={() => setRework(true)}>{t("core:card.rework")}</Button><Button disabled={busy} onClick={() => act("pass")} data-pass><CheckIcon />{t("core:card.pass")}</Button></>)}
   </>
   else if (w.type === "approve" && w.subject === "tool_call") {
     const opts = w.options.map((o) => { const [id, name, kind] = o.split("|"); return { id, name, kind } })
     const always = opts.find((o) => o.kind === "allow_always"), once = opts.find((o) => o.kind === "allow_once")
     body = <>
-      {head("允许这次工具调用？")}
+      {head(t("core:card.allowTool"))}
       <CardContent className="min-w-0 pb-3"><PermissionDetails title={w.q.replace(/^允许执行[：:]\s*/, "")} input={w.draft} /></CardContent>
-      {foot(<><Button variant="ghost" className="mr-auto text-muted-foreground" disabled={busy} onClick={() => act("deny")}>拒绝</Button>
-        {always && <Button variant="outline" disabled={busy} onClick={() => act(always.id)} title={always.name}>总是允许</Button>}
-        {once && <Button disabled={busy} onClick={() => act(once.id)} data-allow>允许这一次</Button>}</>)}
+      {foot(<><Button variant="ghost" className="mr-auto text-muted-foreground" disabled={busy} onClick={() => act("deny")}>{t("core:card.deny")}</Button>
+        {always && <Button variant="outline" disabled={busy} onClick={() => act(always.id)} title={always.name}>{t("core:card.allowAlways")}</Button>}
+        {once && <Button disabled={busy} onClick={() => act(once.id)} data-allow>{t("core:card.allowOnce")}</Button>}</>)}
     </>
   }
   else if (w.type === "approve") body = <>
     {head(w.q)}
-    <CardContent className="pb-4">{draft}{rework && <Textarea autoFocus className="mt-3 min-h-16 rounded-lg" placeholder="为什么不批准？会转告它" value={txt} onChange={(e) => setTxt(e.target.value)} />}</CardContent>
-    {foot(rework ? <><Button variant="ghost" onClick={() => setRework(false)}>取消</Button><Button variant="outline" disabled={busy} onClick={() => act("no", txt.trim())}>不批准</Button></>
-      : <><Button variant="ghost" className="mr-auto text-muted-foreground" onClick={() => setRework(true)}>不批准…</Button><Button disabled={busy} onClick={() => act("yes")} data-approve>{w.subject === "release" ? "批准发布" : "批准"}</Button></>)}
+    <CardContent className="pb-4">{draft}{rework && <Textarea autoFocus className="mt-3 min-h-16 rounded-lg" placeholder={t("core:card.rejectPlaceholder")} value={txt} onChange={(e) => setTxt(e.target.value)} />}</CardContent>
+    {foot(rework ? <><Button variant="ghost" onClick={() => setRework(false)}>{t("common:action.cancel")}</Button><Button variant="outline" disabled={busy} onClick={() => act("no", txt.trim())}>{t("core:card.reject")}</Button></>
+      : <><Button variant="ghost" className="mr-auto text-muted-foreground" onClick={() => setRework(true)}>{t("core:card.rejectMore")}</Button><Button disabled={busy} onClick={() => act("yes")} data-approve>{t(w.subject === "release" ? "core:card.approveRelease" : "core:card.approve")}</Button></>)}
   </>
   else if (w.type === "propose") body = <>
     {head(w.q)}
     <CardContent className="pb-4">{draft}</CardContent>
-    {foot(<><Button variant="outline" disabled={busy} onClick={() => act("no")}>不需要</Button><Button disabled={busy} onClick={() => act("yes")} data-propose-yes>开始</Button></>)}
+    {foot(<><Button variant="outline" disabled={busy} onClick={() => act("no")}>{t("core:card.notNeeded")}</Button><Button disabled={busy} onClick={() => act("yes")} data-propose-yes>{t("core:card.start")}</Button></>)}
   </>
   else if (w.type === "fail") body = <>
     {head(w.q)}
-    <CardContent className="pb-4">{draft}{rework && <Textarea autoFocus className="mt-3 min-h-16 rounded-lg" placeholder="告诉它接下来怎么做（可选）" value={txt} onChange={(e) => setTxt(e.target.value)} />}</CardContent>
+    <CardContent className="pb-4">{draft}{rework && <Textarea autoFocus className="mt-3 min-h-16 rounded-lg" placeholder={t("core:card.nextPlaceholder")} value={txt} onChange={(e) => setTxt(e.target.value)} />}</CardContent>
     {foot(<>{w.options.filter((o) => FAIL[o]).sort((a, b) => Object.keys(FAIL).indexOf(a) - Object.keys(FAIL).indexOf(b)).map((o) => (
-      <Button key={o} variant={FAIL[o][1]} disabled={busy} className={cn(o === "look" && "mr-auto text-muted-foreground")} onClick={() => (o === "continue" && !rework ? setRework(true) : act(o, o === "continue" ? txt.trim() : undefined))} data-fail={o}>{o === "continue" && rework ? "发送并继续" : FAIL[o][0]}</Button>))}</>)}
+      <Button key={o} variant={FAIL[o]} disabled={busy} className={cn(o === "look" && "mr-auto text-muted-foreground")} onClick={() => (o === "continue" && !rework ? setRework(true) : act(o, o === "continue" ? txt.trim() : undefined))} data-fail={o}>{o === "continue" && rework ? t("core:card.sendContinue") : FAIL_CHOICE[o]}</Button>))}</>)}
   </>
   /* a typed answer is not one of the questionnaire's answer controls, so its validation would block the submit; send it directly */
   else if (w.type === "ask") { const typed = free || !w.opts?.length; body = <>
@@ -1005,14 +1028,14 @@ export function DecisionCard({ i, w = i.wait!, showItem = true }: { i: Item; w?:
         {!free && !!w.opts?.length && <QuestionnaireChoices className="-mx-2 gap-0.5">
           {w.opts.map((o) => <QuestionnaireChoice key={o} value={o} className="min-h-10 rounded-lg border-transparent px-2 py-2.5 hover:bg-accent data-checked:border-transparent data-checked:bg-blue/5">{o}</QuestionnaireChoice>)}
         </QuestionnaireChoices>}
-        {typed && <Textarea autoFocus className="min-h-16 rounded-lg" placeholder="直接写你的回答" value={txt} onChange={(e) => setTxt(e.target.value)} data-free-answer />}
+        {typed && <Textarea autoFocus className="min-h-16 rounded-lg" placeholder={t("core:card.answerPlaceholder")} value={txt} onChange={(e) => setTxt(e.target.value)} data-free-answer />}
       </QuestionnaireItem>
-      <QuestionnaireActions className="flex justify-end gap-2 border-t px-3 py-2.5">{!!w.opts?.length && <Button type="button" variant="ghost" className="mr-auto text-muted-foreground" onClick={() => setFree(!free)}>{free ? "从选项里选" : "自己回答…"}</Button>}{typed
-        ? <Button type="button" data-answer disabled={busy || !txt.trim()} onClick={() => void act("answer", txt.trim())}>回答</Button>
-        : <QuestionnaireSubmit data-answer disabled={busy}>回答</QuestionnaireSubmit>}</QuestionnaireActions>
+      <QuestionnaireActions className="flex justify-end gap-2 border-t px-3 py-2.5">{!!w.opts?.length && <Button type="button" variant="ghost" className="mr-auto text-muted-foreground" onClick={() => setFree(!free)}>{t(free ? "core:card.fromOptions" : "core:card.ownAnswer")}</Button>}{typed
+        ? <Button type="button" data-answer disabled={busy || !txt.trim()} onClick={() => void act("answer", txt.trim())}>{t("core:card.answer")}</Button>
+        : <QuestionnaireSubmit data-answer disabled={busy}>{t("core:card.answer")}</QuestionnaireSubmit>}</QuestionnaireActions>
     </Questionnaire>
   </> }
-  return <Card size="sm" className="gap-0 py-0" data-decision={w.type} data-decision-wrap={i.id || w.decision} aria-busy={busy}>{busy && <div role="status" className="px-4 py-2 type-footnote text-muted-foreground">提交中…</div>}{body}</Card>
+  return <Card size="sm" className="gap-0 py-0" data-decision={w.type} data-decision-wrap={i.id || w.decision} aria-busy={busy}>{busy && <div role="status" className="px-4 py-2 type-footnote text-muted-foreground">{t("core:card.submitting")}</div>}{body}</Card>
 }
 
 export function ItemRef({ id }: { id: string }) {

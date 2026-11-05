@@ -7,6 +7,7 @@ import { api, fileUrl, type RFile } from "@/api"
 import { Attachment, AttachmentAction, AttachmentActions, AttachmentContent, AttachmentDescription, AttachmentMedia, AttachmentTitle } from "@/components/ui/attachment"
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog"
 import { Spinner } from "@/components/ui/spinner"
+import { t, useT } from "@/i18n"
 
 export const MAX_FILE = 20 * 1024 * 1024, MAX_FILES = 10
 export const ACCEPT = "image/png,image/jpeg,image/gif,image/webp,application/pdf,application/zip,.zip,.pdf,.txt,.log,.md,.csv,.json,.yaml,.yml,.xml,text/*"
@@ -43,9 +44,9 @@ export function useUploads(initial: RFile[] = [], draftKey?: string, onReady?: (
     const room = MAX_FILES - live.current.length
     const picked = [...fs].slice(0, Math.max(0, room)).map((f) => {
       /* a pasted screenshot is always "image.png": give it a name that says when */
-      const name = /^image\.(png|jpe?g|gif|webp)$/i.test(f.name) ? `截图-${stamp()}.${f.name.split(".").pop()}` : f.name || "file"
+      const name = /^image\.(png|jpe?g|gif|webp)$/i.test(f.name) ? t("shell:attach.screenshotName", { stamp: stamp(), ext: f.name.split(".").pop() }) : f.name || "file"
       const p: Pending = { key: "u" + ++seq, name, mime: f.type, size: f.size, preview: isImage(f.type) ? URL.createObjectURL(f) : undefined }
-      if (f.size > MAX_FILE) p.error = `超过 ${MAX_FILE / 1024 / 1024} MB`
+      if (f.size > MAX_FILE) p.error = t("shell:attach.tooLarge", { mb: MAX_FILE / 1024 / 1024 })
       return { p, f }
     })
     if (!picked.length) return
@@ -63,13 +64,14 @@ export function useUploads(initial: RFile[] = [], draftKey?: string, onReady?: (
 
 /** thumbnails in the composer, each removable before sending */
 export function PendingList({ list, onRemove }: { list: Pending[]; onRemove: (key: string) => void }) {
+  const t = useT()
   return (
     <div className="flex flex-wrap gap-2" data-attachments>
       {list.map((p) => (
         <Attachment key={p.key} size="xs" state={p.error ? "error" : p.file ? "done" : "uploading"} className="max-w-[220px] pr-1" data-pending-file={p.file?.id ?? ""} data-state-label={p.error ? "error" : p.file ? "done" : "uploading"}>
           <AttachmentMedia variant={p.preview ? "image" : "icon"}>{p.preview ? <img src={p.preview} alt={p.name} /> : !p.file && !p.error ? <Spinner /> : <KindIcon mime={p.mime} />}</AttachmentMedia>
-          <AttachmentContent><AttachmentTitle>{p.name}</AttachmentTitle><AttachmentDescription>{p.error ?? (p.file ? size(p.size) : "上传中…")}</AttachmentDescription></AttachmentContent>
-          <AttachmentActions><AttachmentAction aria-label={"移除 " + p.name} onClick={() => onRemove(p.key)} data-remove-file><XIcon /></AttachmentAction></AttachmentActions>
+          <AttachmentContent><AttachmentTitle>{p.name}</AttachmentTitle><AttachmentDescription>{p.error ?? (p.file ? size(p.size) : t("shell:attach.uploading"))}</AttachmentDescription></AttachmentContent>
+          <AttachmentActions><AttachmentAction aria-label={t("shell:attach.remove", { name: p.name })} onClick={() => onRemove(p.key)} data-remove-file><XIcon /></AttachmentAction></AttachmentActions>
         </Attachment>
       ))}
     </div>
@@ -77,10 +79,10 @@ export function PendingList({ list, onRemove }: { list: Pending[]; onRemove: (ke
 }
 
 export function AttachButton({ onFiles, disabled }: { onFiles: (f: FileList) => void; disabled?: boolean }) {
-  const ref = useRef<HTMLInputElement>(null)
+  const ref = useRef<HTMLInputElement>(null), t = useT()
   return (
     <>
-      <button type="button" aria-label="添加附件" title="添加附件（也可以粘贴截图或拖进来）" disabled={disabled} onClick={() => ref.current?.click()} data-attach
+      <button type="button" aria-label={t("shell:attach.add")} title={t("shell:attach.addHint")} disabled={disabled} onClick={() => ref.current?.click()} data-attach
         className="flex size-8 items-center justify-center rounded-full text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-40"><PaperclipIcon className="size-4" strokeWidth={1.75} /></button>
       <input ref={ref} type="file" multiple accept={ACCEPT} className="hidden" data-file-input onChange={(e) => { if (e.target.files?.length) onFiles(e.target.files); e.target.value = "" }} />
     </>
@@ -94,7 +96,7 @@ function KindIcon({ mime, className }: { mime: string; className?: string }) {
 }
 /** attached files of one message: image previews (click to zoom) and download chips */
 export function Files({ files, align = "start", className }: { files?: RFile[] | null; align?: "start" | "end"; className?: string }) {
-  const [zoom, setZoom] = useState<RFile | null>(null)
+  const [zoom, setZoom] = useState<RFile | null>(null), t = useT()
   const xs = (files ?? []).filter((f) => f && typeof f === "object" && f.id)
   if (!xs.length) return null
   const imgs = xs.filter((f) => isImage(f.mime)), rest = xs.filter((f) => !isImage(f.mime))
@@ -102,7 +104,7 @@ export function Files({ files, align = "start", className }: { files?: RFile[] |
     <div className={cn("flex flex-col gap-1.5", align === "end" ? "items-end" : "items-start", className)} data-files>
       {imgs.length > 0 && <div className={cn("flex flex-wrap gap-1.5", align === "end" && "justify-end")}>
         {imgs.map((f) => (
-          <button key={f.id} type="button" onClick={() => setZoom(f)} aria-label={"放大查看 " + f.name} data-file-image={f.id}
+          <button key={f.id} type="button" onClick={() => setZoom(f)} aria-label={t("shell:attach.zoom", { name: f.name })} data-file-image={f.id}
             className="overflow-hidden rounded-xl border bg-muted outline-none focus-visible:ring-2 focus-visible:ring-ring/40">
             <img src={fileUrl(f.id)} alt={f.name} loading="lazy" className="block max-h-48 max-w-[min(320px,70vw)] object-contain" />
           </button>
@@ -120,7 +122,7 @@ export function Files({ files, align = "start", className }: { files?: RFile[] |
           <DialogTitle className="sr-only">{zoom?.name}</DialogTitle>
           {zoom && <img src={fileUrl(zoom.id)} alt={zoom.name} className="max-h-[80vh] max-w-[88vw] rounded-lg object-contain" />}
           {zoom && <div className="flex items-center justify-between gap-3 px-1 type-footnote text-muted-foreground"><span className="min-w-0 truncate">{zoom.name} · {size(zoom.size)}</span>
-            <a href={fileUrl(zoom.id, true)} download={zoom.name} className="inline-flex items-center gap-1 text-blue hover:underline"><DownloadIcon className="size-3.5" />下载</a></div>}
+            <a href={fileUrl(zoom.id, true)} download={zoom.name} className="inline-flex items-center gap-1 text-blue hover:underline"><DownloadIcon className="size-3.5" />{t("shell:attach.download")}</a></div>}
         </DialogContent>
       </Dialog>
     </div>

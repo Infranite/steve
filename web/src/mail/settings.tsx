@@ -11,11 +11,14 @@ import { Select } from "@/view-shared"
 import { tm } from "@/store"
 import { useLoad, useBusy } from "@/accounts/load"
 import { mailApi, type MailAccount, type MailSettings } from "@/api/mail"
+import { useT } from "@/i18n"
 
-const DELAYS = [0, 10, 30, 60].map((s) => ({ v: String(s), l: s ? `${s} 秒` : "立即发出" }))
-const DAYS = [7, 30, 90].map((d) => ({ v: String(d), l: `${d} 天` }))
+type T = ReturnType<typeof useT>
+const delays = (t: T) => [0, 10, 30, 60].map((s) => ({ v: String(s), l: s ? t("common:dur.seconds", { count: s }) : t("mail:settings.sendNow") }))
+const days = (t: T) => [7, 30, 90].map((d) => ({ v: String(d), l: t("common:dur.days", { count: d }) }))
 
 function TextSetting({ id, label, sub, value, max, rows, onSave, busy }: { id: string; label: string; sub: string; value: string; max: number; rows: number; onSave: (v: string) => Promise<unknown>; busy: boolean }) {
+  const t = useT()
   const [v, setV] = useState(value)
   useEffect(() => setV(value), [value])
   const dirty = v !== value
@@ -23,30 +26,33 @@ function TextSetting({ id, label, sub, value, max, rows, onSave, busy }: { id: s
     <div className="flex flex-col gap-2 px-2 py-2.5">
       <label htmlFor={id} className="type-body">{label}<span className="mt-0.5 block type-footnote text-muted-foreground">{sub}</span></label>
       <Textarea id={id} className="rounded-lg" style={{ minHeight: rows * 22 + 16 }} value={v} maxLength={max} onChange={(e) => setV(e.target.value)} data-mail-setting={id} />
-      {dirty && <div className="flex justify-end gap-2"><Button size="sm" variant="ghost" onClick={() => setV(value)}>还原</Button><Button size="sm" disabled={busy} onClick={() => void onSave(v)} data-mail-setting-save={id}>保存</Button></div>}
+      {dirty && <div className="flex justify-end gap-2"><Button size="sm" variant="ghost" onClick={() => setV(value)}>{t("mail:settings.revert")}</Button><Button size="sm" disabled={busy} onClick={() => void onSave(v)} data-mail-setting-save={id}>{t("common:action.save")}</Button></div>}
     </div>
   )
 }
 
 export function MailSettingsSection({ connection }: { connection: string }) {
+  const t = useT()
   const L = useLoad(() => mailApi.accounts().then((xs) => xs.find((x) => x.connection_id === connection) ?? null), [connection], ["mail", "connection"])
   const [busy, act] = useBusy()
   const [a, setA] = useState<MailAccount | null>(null)
   useEffect(() => { if (L.s === "ok") setA(L.data) }, [L])
   if (L.s !== "ok" || !a) return null // no mail module on this Hub, or not a mailbox
   const s = a.settings
-  const save = async (p: Partial<MailSettings>) => { const r = await act(() => mailApi.patchAccount(connection, p), "已保存"); if (r) setA(r) }
+  const save = async (p: Partial<MailSettings>) => { const r = await act(() => mailApi.patchAccount(connection, p), t("common:state.saved")); if (r) setA(r) }
+  const DELAYS = delays(t)
+  const sync = a.last_sync ? t("mail:settings.lastSync", { time: tm(a.last_sync) }) : t("mail:settings.neverSynced")
   return (
     <section data-mail-settings={connection}>
-      <SectionLabel right={<Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => go("#/mail?account=" + encodeURIComponent(connection))}>打开邮件</Button>}>邮箱设置</SectionLabel>
+      <SectionLabel right={<Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => go("#/mail?account=" + encodeURIComponent(connection))}>{t("mail:settings.openMail")}</Button>}>{t("mail:settings.title")}</SectionLabel>
       <Group>
-        <Row title={a.address || "邮箱"} sub={`${a.last_sync ? "上次同步 " + tm(a.last_sync) : "还没有同步"}${a.unread ? ` · ${a.unread} 封未读` : ""}`}>
-          <Button size="xs" variant="ghost" className="text-muted-foreground" disabled={busy} onClick={() => void act(() => mailApi.sync(connection), "开始同步")} data-mail-sync><RefreshCwIcon />现在同步</Button></Row>
-        <TextSetting id="signature" label="签名" sub="起草时附在正文末尾" value={s.signature} max={1000} rows={3} busy={busy} onSave={(v) => save({ signature: v })} />
-        <TextSetting id="duty" label="职责与写信习惯" sub="这个邮箱用来做什么、回信时注意什么。起草时交给邮件 Bot" value={s.duty} max={4000} rows={3} busy={busy} onSave={(v) => save({ duty: v })} />
-        <Row title="发送延迟" sub="批准后等这么久再发出，期间可以撤销"><Select align="end" testId="send-delay" value={String(s.send_delay_s)} onChange={(v) => void save({ send_delay_s: +v })} options={DELAYS.some((d) => d.v === String(s.send_delay_s)) ? DELAYS : [...DELAYS, { v: String(s.send_delay_s), l: `${s.send_delay_s} 秒` }]} /></Row>
-        <Row title="事项完成后归档这串往来"><Switch aria-label="事项完成后归档这串往来" checked={s.archive_on_done} disabled={busy} onCheckedChange={(v) => void save({ archive_on_done: v })} data-archive-on-done /></Row>
-        <Row title="回溯天数" sub="接入时读取多久以前的邮件；回溯的旧邮件只记录，不触发流程"><Select align="end" testId="sync-days" value={String(s.sync_days)} onChange={(v) => void save({ sync_days: +v })} options={DAYS} /></Row>
+        <Row title={a.address || t("mail:settings.mailbox")} sub={a.unread ? t("mail:settings.syncUnread", { sync, count: a.unread }) : sync}>
+          <Button size="xs" variant="ghost" className="text-muted-foreground" disabled={busy} onClick={() => void act(() => mailApi.sync(connection), t("mail:settings.syncStarted"))} data-mail-sync><RefreshCwIcon />{t("mail:settings.syncNow")}</Button></Row>
+        <TextSetting id="signature" label={t("mail:settings.signature")} sub={t("mail:settings.signatureSub")} value={s.signature} max={1000} rows={3} busy={busy} onSave={(v) => save({ signature: v })} />
+        <TextSetting id="duty" label={t("mail:settings.duty")} sub={t("mail:settings.dutySub")} value={s.duty} max={4000} rows={3} busy={busy} onSave={(v) => save({ duty: v })} />
+        <Row title={t("mail:settings.sendDelay")} sub={t("mail:settings.sendDelaySub")}><Select align="end" testId="send-delay" value={String(s.send_delay_s)} onChange={(v) => void save({ send_delay_s: +v })} options={DELAYS.some((d) => d.v === String(s.send_delay_s)) ? DELAYS : [...DELAYS, { v: String(s.send_delay_s), l: t("common:dur.seconds", { count: s.send_delay_s }) }]} /></Row>
+        <Row title={t("mail:settings.archiveOnDone")}><Switch aria-label={t("mail:settings.archiveOnDone")} checked={s.archive_on_done} disabled={busy} onCheckedChange={(v) => void save({ archive_on_done: v })} data-archive-on-done /></Row>
+        <Row title={t("mail:settings.syncDays")} sub={t("mail:settings.syncDaysSub")}><Select align="end" testId="sync-days" value={String(s.sync_days)} onChange={(v) => void save({ sync_days: +v })} options={days(t)} /></Row>
       </Group>
     </section>
   )

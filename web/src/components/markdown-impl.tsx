@@ -5,6 +5,7 @@ import remarkBreaks from "remark-breaks"
 import { cn } from "cn"
 import { st } from "@/store"
 import { A2uiPending, useA2uiNested } from "@/a2ui/host"
+import { useT } from "@/i18n"
 
 /* A2UI blocks (ST-46) draw with the app's controls and the stats chart: loaded the first time a reply carries one */
 const A2uiBlock = lazy(() => import("@/a2ui/render").then((m) => ({ default: m.A2uiBlock })))
@@ -66,24 +67,24 @@ const text = (n: ReactNode): string => typeof n === "string" || typeof n === "nu
 /* the page posts its height so the frame fits its content; the sandbox has no same-origin access */
 const SIZE = `<script>(()=>{const b=document.body,p=()=>{const s=getComputedStyle(b);parent.postMessage({steveHtmlHeight:Math.ceil(b.getBoundingClientRect().height+parseFloat(s.marginTop)+parseFloat(s.marginBottom))},"*")};addEventListener("load",p);new ResizeObserver(p).observe(b)})()</script>`
 function HtmlPreview({ src }: { src: string }) {
-  const ref = useRef<HTMLIFrameElement>(null), [h, setH] = useState(160)
+  const t = useT(), ref = useRef<HTMLIFrameElement>(null), [h, setH] = useState(160)
   useEffect(() => {
     const on = (e: MessageEvent) => { if (e.source === ref.current?.contentWindow && typeof e.data?.steveHtmlHeight === "number") setH(Math.min(560, Math.max(60, e.data.steveHtmlHeight))) }
     addEventListener("message", on); return () => removeEventListener("message", on)
   }, [])
-  return <iframe ref={ref} title="HTML 预览" sandbox="allow-scripts" referrerPolicy="no-referrer" srcDoc={src + SIZE} style={{ height: h }} className="block w-full bg-white" data-html-preview />
+  return <iframe ref={ref} title={t("misc:markdown.htmlPreview")} sandbox="allow-scripts" referrerPolicy="no-referrer" srcDoc={src + SIZE} style={{ height: h }} className="block w-full bg-white" data-html-preview />
 }
 type CodeProps = ComponentProps<DefaultComponents["code"]>
 function HtmlBlock(props: CodeProps) {
-  const streaming = useIsCodeFenceIncomplete(), [tab, setTab] = useState<"预览" | "代码">("预览")
-  const showCode = streaming || tab === "代码"
+  const t = useT(), streaming = useIsCodeFenceIncomplete(), [tab, setTab] = useState<"preview" | "code">("preview")
+  const showCode = streaming || tab === "code"
   return (
     <div className="my-4 overflow-hidden rounded-xl border" data-html-block>
       <div className="flex items-center gap-1 border-b bg-muted/60 px-2 py-1">
         <span className="mr-auto px-1 font-mono text-[12px] text-muted-foreground">html</span>
-        {(["预览", "代码"] as const).map((t) => (
-          <button key={t} type="button" disabled={streaming} aria-pressed={!showCode === (t === "预览")} onClick={() => setTab(t)}
-            className="rounded-md px-2 py-0.5 type-footnote text-muted-foreground hover:text-foreground disabled:opacity-50 aria-pressed:bg-background aria-pressed:text-foreground">{t}</button>
+        {(["preview", "code"] as const).map((k) => (
+          <button key={k} type="button" disabled={streaming} aria-pressed={!showCode === (k === "preview")} onClick={() => setTab(k)}
+            className="rounded-md px-2 py-0.5 type-footnote text-muted-foreground hover:text-foreground disabled:opacity-50 aria-pressed:bg-background aria-pressed:text-foreground">{t(`misc:markdown.${k}`)}</button>
         ))}
       </div>
       {showCode ? <div className="[&>[data-streamdown=code-block]]:my-0 [&>[data-streamdown=code-block]]:rounded-none [&>[data-streamdown=code-block]]:border-0"><defaultComponents.code {...props} /></div>
@@ -97,13 +98,13 @@ function HtmlBlock(props: CodeProps) {
    A very long table shows its first rows and a button for the rest */
 const TABLE_FOLD = 30, TABLE_SHOW = 20
 function Table({ node, children, className, ...rest }: ComponentProps<DefaultComponents["table"]>) {
-  const rows = countRows(node), [open, setOpen] = useState(false), fold = rows > TABLE_FOLD && !open
+  const t = useT(), rows = countRows(node), [open, setOpen] = useState(false), fold = rows > TABLE_FOLD && !open
   return (
     <div className="my-3" data-md-table>
       <div className="overflow-x-auto" data-folded={fold || undefined}>
         <table {...rest} className={className}>{children}</table>
       </div>
-      {fold && <button type="button" onClick={() => setOpen(true)} className="mt-1 rounded-md px-2 py-1 type-footnote text-muted-foreground hover:bg-muted hover:text-foreground">展开其余 {rows - TABLE_SHOW} 行</button>}
+      {fold && <button type="button" onClick={() => setOpen(true)} className="mt-1 rounded-md px-2 py-1 type-footnote text-muted-foreground hover:bg-muted hover:text-foreground">{t("misc:markdown.moreRows", { count: rows - TABLE_SHOW })}</button>}
     </div>
   )
 }

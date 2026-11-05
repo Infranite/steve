@@ -1,6 +1,8 @@
 /* Knowledge base API (knowledge.md §6). Only the Rust Hub serves it: on the TS Hub every /api/kb route falls through to
  * the SPA's index.html (or a plain 404), which `NotWired` marks so the pages fall back to the "还没有接入" placeholder. */
 import { modReq as req, NotWired, qs } from "@/api"
+import { lazy } from "@/api/accounts"
+import { t } from "@/i18n"
 
 export type Level = "public" | "conclusion" | "reasoning" | "never"
 export type ObjRef = { type: string; id: string; name?: string }
@@ -56,17 +58,22 @@ export function kbAvailable(): Promise<boolean> {
   return probe
 }
 
-export const LEVELS: [Level, string][] = [["public", "公开"], ["conclusion", "可转述结论"], ["reasoning", "仅用于推理"], ["never", "不可使用"]]
+export const LEVELS: [Level, string][] = lazy([() => ["public", t("api:level.public")], () => ["conclusion", t("api:level.conclusion")], () => ["reasoning", t("api:level.reasoning")], () => ["never", t("api:level.never")]])
 export const levelLabel = (l: string) => LEVELS.find((x) => x[0] === l)?.[1] ?? l
 /** StatusDot colour per level: quotable green, conclusion blue, reasoning grey, never orange */
 export const LEVEL_DOT: Record<string, string> = { public: "done", conclusion: "prop", reasoning: "idle", never: "wait" }
-export const VIS: [string, string][] = [["private", "只有我"], ["workspace", "工作空间"]]
-export const visLabel = (v: string) => VIS.find((x) => x[0] === v)?.[1] ?? (v.startsWith("team:") ? "团队" : v.startsWith("space:") ? "群" : v)
-export const MEM_KINDS: [string, string][] = [["fact", "事实"], ["preference", "偏好"], ["rule", "规则"], ["event", "事件"], ["summary", "摘要"]]
+export const VIS: [string, string][] = lazy([() => ["private", t("api:vis.private")], () => ["workspace", t("api:vis.workspace")]])
+export const visLabel = (v: string) => VIS.find((x) => x[0] === v)?.[1] ?? (v.startsWith("team:") ? t("api:vis.team") : v.startsWith("space:") ? t("api:vis.space") : v)
+export const MEM_KINDS: [string, string][] = lazy([
+  () => ["fact", t("api:memKind.fact")], () => ["preference", t("api:memKind.preference")], () => ["rule", t("api:memKind.rule")], () => ["event", t("api:memKind.event")], () => ["summary", t("api:memKind.summary")],
+])
 export const memKind = (k: string) => MEM_KINDS.find((x) => x[0] === k)?.[1] ?? k
 /** the four kinds of record (ST-41): an item's record and the conversation record are kept where they are and
  *  searchable; only 长期记忆 (preferences, rules you said hold from now on) and 知识条目 (verified facts reusable
  *  elsewhere) are distilled from them, and both wait for your confirmation */
 export const LONG_TERM = ["preference", "rule"]
-export const recordOf = (kind: string) => (LONG_TERM.includes(kind) ? "长期记忆" : "知识条目")
-export const SOURCE_KIND: Record<string, string> = { notes: "笔记", files: "文件", folder: "文件夹", items: "事项记录", chat: "会话记录", mems: "长期记忆与知识条目", bot_mems: "Bot 记忆" }
+export const recordOf = (kind: string) => (LONG_TERM.includes(kind) ? t("api:record.longTerm") : t("api:record.knowledge"))
+export const SOURCE_KIND: Record<string, string> = lazy({
+  notes: () => t("api:sourceKind.notes"), files: () => t("api:sourceKind.files"), folder: () => t("api:sourceKind.folder"), items: () => t("api:sourceKind.items"),
+  chat: () => t("api:sourceKind.chat"), mems: () => t("api:sourceKind.mems"), bot_mems: () => t("api:sourceKind.botMems"),
+})

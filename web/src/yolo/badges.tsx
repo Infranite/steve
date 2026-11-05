@@ -9,14 +9,16 @@ import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, 
 import { DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuLabel, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import type { YoloMode } from "@/api/yolo"
 import { st, yoloCancel, yoloNow, yoloScope, type Item } from "@/store"
-import { Dot, FULL_GIVES, FULL_KEEPS, levelOf, type YoloState } from "@/yolo/switch"
+import { Dot, fullGives, fullKeeps, levelOf, type YoloState } from "@/yolo/switch"
+import { t, useT } from "@/i18n"
 
 /** how a choice reads on the card */
-const CHOICE: Record<string, string> = {
-  pass: "验收通过", rework: "返工", yes: "批准", continue: "让它继续", retry: "重试", send: "发送", once: "允许这一次", approved: "允许这一次",
-}
+const CHOICE = {
+  pass: () => t("yolo:choice.pass"), rework: () => t("yolo:choice.rework"), yes: () => t("yolo:choice.yes"), continue: () => t("yolo:choice.continue"),
+  retry: () => t("yolo:choice.retry"), send: () => t("yolo:choice.send"), once: () => t("yolo:choice.once"), approved: () => t("yolo:choice.once"),
+} as Record<string, () => string>
 export const choiceText = (c: string | null | undefined, subject?: string) =>
-  !c ? "" : subject === "release" && c === "yes" ? "批准发布" : CHOICE[c] ?? c
+  !c ? "" : subject === "release" && c === "yes" ? t("yolo:choice.releaseYes") : Object.hasOwn(CHOICE, c) ? CHOICE[c]() : c
 
 /** the small grey “⚡ YOLO” in front of what YOLO did */
 export function YoloMark({ className }: { className?: string }) {
@@ -30,13 +32,14 @@ function useTick(on: boolean) {
 
 const left = (ms: number) => {
   const s = Math.max(0, Math.round(ms / 1000))
-  return s >= 60 ? `${Math.ceil(s / 60)} 分钟后` : `${s} 秒后`
+  return s >= 60 ? t("yolo:badge.inMinutes", { count: Math.ceil(s / 60) }) : t("yolo:badge.inSeconds", { count: s })
 }
 
 const LINE = "col-span-full flex min-w-0 items-baseline gap-1.5 type-footnote text-muted-foreground"
 
 /** under a decision card: what YOLO did, will do, or left to you */
 export function YoloBadge({ decision, result, subject }: { decision: string; result?: any; subject?: string }) {
+  const t = useT()
   const a = st.yoloActs[decision]
   /* forced off or paused, nothing scheduled will run: no countdown */
   const scheduled = a?.outcome === "scheduled" && a.due_at != null && !!st.yolo?.active
@@ -44,25 +47,27 @@ export function YoloBadge({ decision, result, subject }: { decision: string; res
   const [busy, setBusy] = useState(false)
   if (result?.decided_by === "yolo") return (
     <div className={LINE} data-yolo-badge="decided" title={result.yolo_reason || undefined}>
-      <YoloMark /><span className="min-w-0 truncate">{(c => c ? `替你选了「${c}」` : "替你处理了")(choiceText(result.choice ?? result.optionId ?? a?.choice, subject))}{result.yolo_reason ? ` · ${result.yolo_reason}` : ""}</span></div>
+      <YoloMark /><span className="min-w-0 truncate">{((choice: string, reason: string | undefined) => choice
+        ? (reason ? t("yolo:badge.choseWhy", { choice, reason }) : t("yolo:badge.chose", { choice }))
+        : (reason ? t("yolo:badge.handledWhy", { reason }) : t("yolo:badge.handled")))(choiceText(result.choice ?? result.optionId ?? a?.choice, subject), result.yolo_reason || undefined)}</span></div>
   )
   if (!a) return null
   const btn = "shrink-0 font-medium text-foreground/80 hover:text-foreground disabled:opacity-50"
   if (scheduled) return (
     <div role="status" className={cn(LINE, "flex-wrap")} data-yolo-badge="scheduled">
-      <YoloMark /><span className="min-w-0">{left(a.due_at! - Date.now())}会选「{choiceText(a.choice, subject)}」</span>
+      <YoloMark /><span className="min-w-0">{t("yolo:badge.willChoose", { when: left(a.due_at! - Date.now()), choice: choiceText(a.choice, subject) })}</span>
       <span className="flex-1" />
-      <button type="button" className={cn(btn, "text-blue")} disabled={busy} onClick={() => { setBusy(true); void yoloNow(a.id).finally(() => setBusy(false)) }} data-yolo-now>现在</button>
+      <button type="button" className={cn(btn, "text-blue")} disabled={busy} onClick={() => { setBusy(true); void yoloNow(a.id).finally(() => setBusy(false)) }} data-yolo-now>{t("yolo:badge.now")}</button>
       <span className="text-tertiary">·</span>
-      <button type="button" className={btn} disabled={busy} onClick={() => { setBusy(true); void yoloCancel(a.id).finally(() => setBusy(false)) }} data-yolo-cancel>我来定</button>
+      <button type="button" className={btn} disabled={busy} onClick={() => { setBusy(true); void yoloCancel(a.id).finally(() => setBusy(false)) }} data-yolo-cancel>{t("yolo:badge.mine")}</button>
     </div>
   )
   if (a.outcome === "declined") return (
     <div className={LINE} data-yolo-badge="declined" title={a.reason}>
-      <YoloMark /><span className="line-clamp-2 min-w-0 break-words">没接：{a.reason.replace(/^硬限制：/, "")}</span></div>
+      <YoloMark /><span className="line-clamp-2 min-w-0 break-words">{t("yolo:badge.declined", { reason: a.reason.replace(/^硬限制：/, "") })}</span></div>
   )
   if (a.outcome === "cancelled" && a.reason === "你选择自己来定") return (
-    <div className={LINE} data-yolo-badge="yours"><YoloMark /><span>这张你来定</span></div>
+    <div className={LINE} data-yolo-badge="yours"><YoloMark /><span>{t("yolo:badge.yours")}</span></div>
   )
   return null
 }
@@ -70,34 +75,35 @@ export function YoloBadge({ decision, result, subject }: { decision: string; res
 /* ───────── scopes: the item's and the project's own setting ───────── */
 const scopeOf = (type: "project" | "item", id: string) => st.yolo?.scopes.find((s) => s.object_type === type && s.object_id === id)
 
-const WORD: Record<"off" | "on" | "full", string> = { off: "每步等你", on: "YOLO 替你审批", full: "完全放开" }
+const levelText = (l: "off" | "on" | "full") => t(`yolo:level.${l}`)
 
 /** what applies to this item now: item → project (a real directory defaults to off) → workspace */
 export function yoloFor(i: Item): { on: boolean; level: "off" | "on" | "full"; state: YoloState; why: string } {
   const y = st.yolo
   const r = (level: "off" | "on" | "full", why: string, state?: YoloState) => ({ on: level !== "off", level, state: state ?? level, why })
   if (!y) return r("off", "")
-  if (y.forced_off) return r("off", "这台 Hub 上不可用", "forced")
-  if (y.paused) return r("off", "YOLO 已暂停", "paused")
+  if (y.forced_off) return r("off", t("yolo:why.forced"), "forced")
+  if (y.paused) return r("off", t("yolo:why.paused"), "paused")
   const lv = (m: YoloMode) => (m === "full" ? "full" : m === "on" ? "on" : "off")
   const it = scopeOf("item", i.id)
-  if (it && it.mode !== "inherit") return r(lv(it.mode), it.reason || "这件单独设置")
+  if (it && it.mode !== "inherit") return r(lv(it.mode), it.reason || t("yolo:why.itemOwn"))
   if (i.project) {
     const p = scopeOf("project", i.project)
-    if (p && p.mode !== "inherit") return r(lv(p.mode), p.default ? "项目没有 worktree，默认关" : "跟随项目")
+    if (p && p.mode !== "inherit") return r(lv(p.mode), p.default ? t("yolo:why.projectDefault") : t("yolo:why.followProject"))
   }
-  return r(levelOf(y), "跟随全局")
+  return r(levelOf(y), t("yolo:why.followGlobal"))
 }
 
 /** the scope menu: 跟随 / 关 / YOLO / 完全放开 (full access asks first) */
 function ScopeMenu({ type, id, cur, inherit, label, children }: { type: "project" | "item"; id: string; cur: YoloMode; inherit: string; label: string; children: React.ReactNode }) {
+  const t = useT()
   const [ask, setAsk] = useState(false)
   const pick = (m: YoloMode) => { if (m === cur) return; if (m === "full") setAsk(true); else void yoloScope(type, id, m) }
   const opts: [YoloMode, string, string][] = [
-    ["inherit", "跟随" + (type === "item" ? "项目和全局" : "全局"), inherit],
-    ["off", "关", "每个决定都等你"],
-    ["on", "YOLO 替你审批", "能撤回的决定 Steve 来做"],
-    ["full", "完全放开", "Agent 不再请求权限"],
+    ["inherit", type === "item" ? t("yolo:scope.inheritItem") : t("yolo:scope.inheritProject"), inherit],
+    ["off", t("common:state.off"), t("yolo:scope.offSub")],
+    ["on", t("yolo:level.on"), t("yolo:scope.onSub")],
+    ["full", t("yolo:level.full"), t("yolo:scope.fullSub")],
   ]
   return (
     <>
@@ -109,9 +115,9 @@ function ScopeMenu({ type, id, cur, inherit, label, children }: { type: "project
           <DropdownMenuGroup><DropdownMenuLabel className="type-footnote text-muted-foreground">{label}</DropdownMenuLabel></DropdownMenuGroup>
           <DropdownMenuSeparator />
           <DropdownMenuRadioGroup value={cur} onValueChange={(v) => pick(v as YoloMode)}>
-            {opts.map(([m, t, sub]) => (
+            {opts.map(([m, title, sub]) => (
               <DropdownMenuRadioItem key={m} value={m} data-yolo-scope-opt={m} className="items-start">
-                <span className="flex min-w-0 flex-col"><span className="text-[13.5px]">{t}</span><span className="type-footnote text-muted-foreground">{sub}</span></span>
+                <span className="flex min-w-0 flex-col"><span className="text-[13.5px]">{title}</span><span className="type-footnote text-muted-foreground">{sub}</span></span>
               </DropdownMenuRadioItem>))}
           </DropdownMenuRadioGroup>
         </DropdownMenuContent>
@@ -119,11 +125,11 @@ function ScopeMenu({ type, id, cur, inherit, label, children }: { type: "project
       <AlertDialog open={ask} onOpenChange={setAsk}>
         <AlertDialogContent data-yolo-scope-confirm>
           <AlertDialogHeader>
-            <AlertDialogTitle>{type === "item" ? "这件事项" : "这个项目的事项"}完全放开？</AlertDialogTitle>
-            <AlertDialogDescription className="flex flex-col gap-2"><span className="text-foreground">{FULL_GIVES}</span><span>{FULL_KEEPS}</span></AlertDialogDescription>
+            <AlertDialogTitle>{type === "item" ? t("yolo:scope.confirmItem") : t("yolo:scope.confirmProject")}</AlertDialogTitle>
+            <AlertDialogDescription className="flex flex-col gap-2"><span className="text-foreground">{fullGives()}</span><span>{fullKeeps()}</span></AlertDialogDescription>
           </AlertDialogHeader>
-          <AlertDialogFooter><AlertDialogCancel>取消</AlertDialogCancel>
-            <AlertDialogAction className="bg-attention text-white hover:bg-attention/90" onClick={() => void yoloScope(type, id, "full")} data-yolo-scope-full-ok>完全放开</AlertDialogAction></AlertDialogFooter>
+          <AlertDialogFooter><AlertDialogCancel>{t("common:action.cancel")}</AlertDialogCancel>
+            <AlertDialogAction className="bg-attention text-white hover:bg-attention/90" onClick={() => void yoloScope(type, id, "full")} data-yolo-scope-full-ok>{t("yolo:level.full")}</AlertDialogAction></AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
     </>
@@ -132,34 +138,36 @@ function ScopeMenu({ type, id, cur, inherit, label, children }: { type: "project
 
 /** the item page's line: what applies now and why, and the menu to change it for this item only */
 export function YoloItemSwitch({ i }: { i: Item }) {
+  const t = useT()
   if (!st.yolo) return null
   const cur = (scopeOf("item", i.id)?.mode ?? "inherit") as YoloMode
   const eff = yoloFor(i)
-  const now = eff.state === "forced" ? "YOLO 不可用" : eff.state === "paused" ? "YOLO 已暂停" : WORD[eff.level]
+  const now = eff.state === "forced" ? t("yolo:scope.unavailable") : eff.state === "paused" ? t("yolo:why.paused") : levelText(eff.level)
   return (
     <div className="flex flex-wrap items-center gap-x-1 type-footnote text-muted-foreground" data-yolo-item={eff.level}>
-      <span className="pl-0.5">你不在时：</span>
-      <ScopeMenu type="item" id={i.id} cur={cur} inherit={`现在是「${levelWord()}」`} label="这件事项你不在时">
+      <span className="pl-0.5">{t("yolo:scope.away")}</span>
+      <ScopeMenu type="item" id={i.id} cur={cur} inherit={t("yolo:scope.inheritNow", { level: levelWord() })} label={t("yolo:scope.itemMenu")}>
         <Dot s={eff.state} /><span className="font-medium">{now}</span>
-        {eff.why && <span className="max-w-[28ch] truncate text-muted-foreground">· {eff.why}</span>}
+        {eff.why && <span className="max-w-[28ch] truncate text-muted-foreground">{t("yolo:scope.why", { why: eff.why })}</span>}
       </ScopeMenu>
     </div>
   )
 }
 
-const levelWord = () => WORD[levelOf(st.yolo)]
+const levelWord = () => levelText(levelOf(st.yolo))
 
 /** the project settings row's control (a real-directory project defaults to 关) */
 export function YoloProjectSelect({ id, realDir }: { id: string; realDir: boolean }) {
+  const t = useT()
   if (!st.yolo) return null
   const sc = scopeOf("project", id)
   /* a real-directory project without a setting counts as 关 (its agents change the real files) */
   const cur: YoloMode = sc?.default ? "off" : ((sc?.mode ?? (realDir ? "off" : "inherit")) as YoloMode)
-  const word = cur === "inherit" ? `跟随全局（${levelWord()}）` : WORD[cur === "full" ? "full" : cur === "on" ? "on" : "off"]
+  const word = cur === "inherit" ? t("yolo:scope.projectInherit", { level: levelWord() }) : levelText(cur === "full" ? "full" : cur === "on" ? "on" : "off")
   const s: YoloState = cur === "inherit" ? (levelOf(st.yolo) as YoloState) : cur === "full" ? "full" : cur === "on" ? "on" : "off"
   return (
     <span data-yolo-project={cur}>
-      <ScopeMenu type="project" id={id} cur={cur} inherit={`现在是「${levelWord()}」`} label="这个项目的事项你不在时"><Dot s={s} /><span>{word}</span></ScopeMenu>
+      <ScopeMenu type="project" id={id} cur={cur} inherit={t("yolo:scope.inheritNow", { level: levelWord() })} label={t("yolo:scope.projectMenu")}><Dot s={s} /><span>{word}</span></ScopeMenu>
     </span>
   )
 }

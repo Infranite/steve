@@ -13,10 +13,12 @@ import { report } from "@/accounts/load"
 import type { Wait } from "@/store"
 import { channelsApi, type Attention, type Space } from "@/api/channels"
 import { SpaceAvatar, kindLine } from "@/channels/space-bits"
+import { useT } from "@/i18n"
 
 type P = { w: Wait; act: (c: string, t?: string) => Promise<void>; busy: boolean; head: (t: ReactNode) => ReactNode; foot: (c: ReactNode) => ReactNode }
 
 export function NewSpaceCard({ w, act, busy, head, foot }: P) {
+  const t = useT()
   const [s, setS] = useState<Space | null>(null), sid = w.subjectId ?? ""
   useEffect(() => { if (!sid) return; let live = true; channelsApi.space(sid).then((x) => live && setS(x), () => {}); return () => { live = false } }, [sid])
   const level = (a: Attention, choice: "quiet" | "block") => w.options.includes(choice)
@@ -27,16 +29,16 @@ export function NewSpaceCard({ w, act, busy, head, foot }: P) {
     {head(w.q)}
     <CardContent className="flex flex-col gap-3 pb-4" data-new-space={sid}>
       {s && <div className="flex min-w-0 items-center gap-2.5"><SpaceAvatar s={s} size={28} /><div className="min-w-0"><div className="truncate type-body" title={s.title || s.name}>{s.title || s.name}</div>
-        <div className="truncate type-footnote text-muted-foreground">{kindLine(s)}{s.has_external ? " · 有外部成员" : ""} · 现在用“{s.persona?.name ?? "默认身份"}”，按账号的默认规则处理</div></div></div>}
+        <div className="truncate type-footnote text-muted-foreground">{[kindLine(s), s.has_external ? t("channels:word.externalMembers") : "", t("channels:newSpace.current", { persona: s.persona?.name ?? t("channels:word.defaultPersona") })].filter(Boolean).join(" · ")}</div></div></div>}
       {suggest && <div className="flex items-start gap-2 rounded-lg bg-blue/8 px-3 py-2 type-footnote" data-suggest-quiet><BellOffIcon className="mt-px size-3.5 shrink-0 text-blue" aria-hidden />
-        <span className="min-w-0">{suggest}。建议设为“不提醒”：照样记录、可以搜索，但不进待处理、不起草、不提醒你。</span></div>}
-      <div className="type-footnote text-muted-foreground">不提醒：只记录，不打扰你。屏蔽：不处理，也不保存新消息。只记录：Steve 在这里不发言。</div>
+        <span className="min-w-0">{t("channels:newSpace.suggest", { reason: suggest })}</span></div>}
+      <div className="type-footnote text-muted-foreground">{t("channels:newSpace.legend")}</div>
     </CardContent>
     {foot(<>
-      <Button variant="ghost" className="text-muted-foreground" disabled={busy} onClick={() => level("blocked", "block")} data-space-block>屏蔽</Button>
-      {w.options.includes("mute") && <Button variant="outline" disabled={busy} onClick={() => void act("mute").then(() => channelsApi.patchSpace(sid, { muted: true })).catch(report)} data-space-mute>只记录</Button>}
-      <Button variant={suggest ? "default" : "outline"} disabled={busy} onClick={() => level("quiet", "quiet")} data-space-quiet>不提醒</Button>
-      {w.options.includes("open") && <Button variant={suggest ? "outline" : "default"} disabled={busy} onClick={() => void act("open").then(() => go("#/channels/space/" + sid))} data-space-open>去设置</Button>}
+      <Button variant="ghost" className="text-muted-foreground" disabled={busy} onClick={() => level("blocked", "block")} data-space-block>{t("channels:newSpace.block")}</Button>
+      {w.options.includes("mute") && <Button variant="outline" disabled={busy} onClick={() => void act("mute").then(() => channelsApi.patchSpace(sid, { muted: true })).catch(report)} data-space-mute>{t("channels:word.recordOnly")}</Button>}
+      <Button variant={suggest ? "default" : "outline"} disabled={busy} onClick={() => level("quiet", "quiet")} data-space-quiet>{t("channels:newSpace.quiet")}</Button>
+      {w.options.includes("open") && <Button variant={suggest ? "outline" : "default"} disabled={busy} onClick={() => void act("open").then(() => go("#/channels/space/" + sid))} data-space-open>{t("channels:newSpace.open")}</Button>}
     </>)}
   </>
 }

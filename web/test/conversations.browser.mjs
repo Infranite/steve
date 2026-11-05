@@ -5,7 +5,7 @@ const base = process.env.STEVE_TEST_WEB || "http://127.0.0.1:5193"
 let assertions = 0
 try {
   for (const width of [390, 1280]) {
-    const page = await browser.newPage({ viewport: { width, height: 844 } }), errors = []
+    const page = await browser.newPage({ locale: "zh-CN", viewport: { width, height: 844 } }), errors = []
     page.on("pageerror", e => errors.push(e.message))
     const rows = Array.from({ length: 237 }, (_, i) => ({ space: `chan:sp${i}`, space_id: `sp${i}`, name: `项目群 ${i}`, provider: "飞书", dm: false, member_count: 5, last_text: `最近消息 ${i}`, count: 1, last: 237-i, closed: false }))
     let fail = false, releaseMutation, delayed = false

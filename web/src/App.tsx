@@ -9,6 +9,7 @@ import { Spinner } from "@/components/ui/spinner"
 import { Command, CommandDialog, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList, CommandSeparator, CommandShortcut } from "@/components/ui/command"
 import { BookOpenIcon, BotIcon, ChartNoAxesColumnIcon, Building2Icon, ContactRoundIcon, FolderIcon, GitPullRequestIcon, KeyRoundIcon, LockIcon, UsersRoundIcon, WorkflowIcon, InboxIcon, ListTodoIcon, MessageCircleIcon, MessagesSquareIcon, MoonIcon, PlugIcon, PlusIcon, RadioIcon, ServerIcon, SettingsIcon, SquareTerminalIcon, SunIcon } from "lucide-react"
 import { st, useStore, start } from "@/store"
+import { useT } from "@/i18n"
 import { useRoute, Sidebar, MobileTabs, getSheet, resolvedTheme, openSheet, closeSheet, go, setTheme, StatusDot, ItemNo } from "@/ui"
 const InboxView = lazyView(() => import("@/views").then((m) => ({ default: m.InboxView })))
 const ItemsView = lazyView(() => import("@/views").then((m) => ({ default: m.ItemsView })))
@@ -74,39 +75,39 @@ const PARTY_ICON: Record<PartyOption["type"], any> = { contact: ContactRoundIcon
 
 /* ⌘K — jump to any page, item, project or session; quick actions */
 function CommandMenu({ open }: { open: boolean }) {
-  const [q, setQ] = useState("")
+  const [q, setQ] = useState(""), t = useT()
   const parties = useParties(open ? q : "")
   useEffect(() => {
     const h = (e: KeyboardEvent) => { if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") { e.preventDefault(); open ? closeSheet() : openSheet("command") } }
     window.addEventListener("keydown", h); return () => window.removeEventListener("keydown", h)
   }, [open])
   const run = (f: () => void) => { closeSheet(); f() }
-  const pages: [string, string, any][] = [["", "对话", MessageCircleIcon], ["inbox", "待处理", InboxIcon], ["items", "事项", ListTodoIcon], ["projects", "项目", FolderIcon], ["sessions", "会话", SquareTerminalIcon], ["stats", "统计", ChartNoAxesColumnIcon], ["signals", "信号", RadioIcon], ["auto", "自动化", WorkflowIcon], ["integrations", "接入", PlugIcon], ["channels", "渠道", MessagesSquareIcon], ["contacts", "联系人", ContactRoundIcon], ["knowledge", "知识", BookOpenIcon], ["github", "GitHub", GitPullRequestIcon], ["accounts", "账号", KeyRoundIcon], ["vault", "保险箱", LockIcon], ["bots", "Bot", BotIcon], ["devices", "设备", ServerIcon], ["settings/general", "设置", SettingsIcon], ["settings/tags", "设置 · 标签", SettingsIcon], ["settings/workspace", "设置 · 工作空间", SettingsIcon]]
+  const pages: [string, string, any][] = [["", t("shell:cmd.page.chat"), MessageCircleIcon], ["inbox", t("shell:cmd.page.inbox"), InboxIcon], ["items", t("shell:cmd.page.items"), ListTodoIcon], ["projects", t("shell:cmd.page.projects"), FolderIcon], ["sessions", t("shell:cmd.page.sessions"), SquareTerminalIcon], ["stats", t("shell:cmd.page.stats"), ChartNoAxesColumnIcon], ["signals", t("shell:cmd.page.signals"), RadioIcon], ["auto", t("shell:cmd.page.auto"), WorkflowIcon], ["integrations", t("shell:cmd.page.integrations"), PlugIcon], ["channels", t("shell:cmd.page.channels"), MessagesSquareIcon], ["contacts", t("shell:cmd.page.contacts"), ContactRoundIcon], ["knowledge", t("shell:cmd.page.knowledge"), BookOpenIcon], ["github", "GitHub", GitPullRequestIcon], ["accounts", t("shell:cmd.page.accounts"), KeyRoundIcon], ["vault", t("shell:cmd.page.vault"), LockIcon], ["bots", "Bot", BotIcon], ["devices", t("shell:cmd.page.devices"), ServerIcon], ["settings/general", t("shell:cmd.page.settings"), SettingsIcon], ["settings/tags", t("shell:cmd.page.settingsTags"), SettingsIcon], ["settings/workspace", t("shell:cmd.page.settingsSpace"), SettingsIcon]]
   return (
-    <CommandDialog open={open} onOpenChange={(o) => !o && closeSheet()} title="搜索" description="跳转到页面、事项、项目或会话">
+    <CommandDialog open={open} onOpenChange={(o) => !o && closeSheet()} title={t("common:action.search")} description={t("shell:cmd.description")}>
       <Command filter={(v, q) => (v.toLowerCase().includes(q.trim().toLowerCase()) ? 1 : 0)}>
-      <CommandInput placeholder="搜索页面、事项编号、标题、项目或会话…" value={q} onValueChange={setQ} data-command-input />
+      <CommandInput placeholder={t("shell:cmd.placeholder")} value={q} onValueChange={setQ} data-command-input />
       <CommandList className="max-h-[420px]">
-        <CommandEmpty>没有匹配的结果</CommandEmpty>
-        <CommandGroup heading="操作">
-          <CommandItem onSelect={() => run(() => { go("#/items"); openSheet("newItem") })}><PlusIcon />新事项<CommandShortcut>N</CommandShortcut></CommandItem>
-          <CommandItem onSelect={() => run(() => { go("#/projects"); openSheet("newProject") })}><FolderIcon />新建项目</CommandItem>
-          <CommandItem onSelect={() => run(() => { go("#/bots"); openSheet("newBot") })} data-cmd-newbot><BotIcon />新建 Bot</CommandItem>
-          <CommandItem onSelect={() => run(() => setTheme(resolvedTheme() === "dark" ? "light" : "dark"))}>{resolvedTheme() === "dark" ? <SunIcon /> : <MoonIcon />}切换到{resolvedTheme() === "dark" ? "浅色" : "深色"}</CommandItem>
+        <CommandEmpty>{t("shell:cmd.empty")}</CommandEmpty>
+        <CommandGroup heading={t("shell:cmd.actions")}>
+          <CommandItem onSelect={() => run(() => { go("#/items"); openSheet("newItem") })}><PlusIcon />{t("shell:cmd.newItem")}<CommandShortcut>N</CommandShortcut></CommandItem>
+          <CommandItem onSelect={() => run(() => { go("#/projects"); openSheet("newProject") })}><FolderIcon />{t("shell:cmd.newProject")}</CommandItem>
+          <CommandItem onSelect={() => run(() => { go("#/bots"); openSheet("newBot") })} data-cmd-newbot><BotIcon />{t("shell:cmd.newBot")}</CommandItem>
+          <CommandItem onSelect={() => run(() => setTheme(resolvedTheme() === "dark" ? "light" : "dark"))}>{resolvedTheme() === "dark" ? <SunIcon /> : <MoonIcon />}{resolvedTheme() === "dark" ? t("shell:cmd.toLight") : t("shell:cmd.toDark")}</CommandItem>
         </CommandGroup>
         <CommandSeparator />
-        <CommandGroup heading="页面">{pages.map(([h, l, I]) => <CommandItem key={h} value={"页面 " + l} onSelect={() => run(() => go("#/" + h))}><I />{l}</CommandItem>)}</CommandGroup>
+        <CommandGroup heading={t("shell:cmd.pages")}>{pages.map(([h, l, I]) => <CommandItem key={h} value={t("shell:cmd.pages") + " " + l} onSelect={() => run(() => go("#/" + h))}><I />{l}</CommandItem>)}</CommandGroup>
         <CommandSeparator />
-        {parties.length > 0 && <><CommandGroup heading="联系人 / 团队">{parties.map((p) => { const I = PARTY_ICON[p.type] ?? ContactRoundIcon; return <CommandItem key={p.type + p.id} value={"联系人 " + p.id + " " + p.name + " " + q} onSelect={() => run(() => go(PARTY_HREF[p.type] + p.id))} data-cmd-party={p.id}><I /><span className="truncate">{p.name}</span>{p.sub && <CommandShortcut className="max-w-[45%] truncate">{p.sub}</CommandShortcut>}</CommandItem> })}</CommandGroup><CommandSeparator /></>}
-        <CommandGroup heading="项目">{st.projects.map((p) => <CommandItem key={p.id} value={"项目 " + p.name + " " + p.path} onSelect={() => run(() => go("#/projects/" + p.id))}><FolderIcon />{p.name}<CommandShortcut className="font-mono">{p.path.replace(/^\/Users\/[^/]+/, "~")}</CommandShortcut></CommandItem>)}</CommandGroup>
+        {parties.length > 0 && <><CommandGroup heading={t("shell:cmd.parties")}>{parties.map((p) => { const I = PARTY_ICON[p.type] ?? ContactRoundIcon; return <CommandItem key={p.type + p.id} value={t("shell:cmd.contact") + " " + p.id + " " + p.name + " " + q} onSelect={() => run(() => go(PARTY_HREF[p.type] + p.id))} data-cmd-party={p.id}><I /><span className="truncate">{p.name}</span>{p.sub && <CommandShortcut className="max-w-[45%] truncate">{p.sub}</CommandShortcut>}</CommandItem> })}</CommandGroup><CommandSeparator /></>}
+        <CommandGroup heading={t("shell:cmd.page.projects")}>{st.projects.map((p) => <CommandItem key={p.id} value={t("shell:cmd.page.projects") + " " + p.name + " " + p.path} onSelect={() => run(() => go("#/projects/" + p.id))}><FolderIcon />{p.name}<CommandShortcut className="font-mono">{p.path.replace(/^\/Users\/[^/]+/, "~")}</CommandShortcut></CommandItem>)}</CommandGroup>
         <CommandSeparator />
         <CommandGroup heading="Bot">{Object.keys(st.bots).map((k) => <CommandItem key={k} value={"Bot " + st.bots[k].n + " " + st.bots[k].role} onSelect={() => run(() => go("#/bots/" + k))}><BotIcon />{st.bots[k].main ? st.bots[k].n : st.bots[k].n + " Bot"}<CommandShortcut>{st.bots[k].role.slice(0, 12)}</CommandShortcut></CommandItem>)}</CommandGroup>
         <CommandSeparator />
-        <CommandGroup heading="对话">{st.thread.filter((m) => m.k !== "thinking" && m.t).slice(-30).map((m, n) => <CommandItem key={n} value={"对话 " + m.t} onSelect={() => run(() => go("#/"))}><MessageCircleIcon /><span className="truncate">{m.t}</span></CommandItem>)}</CommandGroup>
+        <CommandGroup heading={t("shell:cmd.page.chat")}>{st.thread.filter((m) => m.k !== "thinking" && m.t).slice(-30).map((m, n) => <CommandItem key={n} value={t("shell:cmd.page.chat") + " " + m.t} onSelect={() => run(() => go("#/"))}><MessageCircleIcon /><span className="truncate">{m.t}</span></CommandItem>)}</CommandGroup>
         <CommandSeparator />
-        <CommandGroup heading="事项">{st.items.map((i) => <CommandItem key={i.id} value={i.id + " " + i.t} onSelect={() => run(() => go("#/items/" + i.id))} data-cmd-item={i.id}><StatusDot s={i.st} /><ItemNo id={i.id} className="w-14" /><span className="truncate">{i.t}</span></CommandItem>)}</CommandGroup>
+        <CommandGroup heading={t("shell:cmd.page.items")}>{st.items.map((i) => <CommandItem key={i.id} value={i.id + " " + i.t} onSelect={() => run(() => go("#/items/" + i.id))} data-cmd-item={i.id}><StatusDot s={i.st} /><ItemNo id={i.id} className="w-14" /><span className="truncate">{i.t}</span></CommandItem>)}</CommandGroup>
         <CommandSeparator />
-        <CommandGroup heading="会话">{Object.keys(st.S).map((k) => { const s = st.S[k]; return <CommandItem key={k} value={"会话 " + s.title + " " + (s.item ?? "")} onSelect={() => run(() => go("#/sessions/" + k))}><SquareTerminalIcon /><span className="truncate">{s.title}</span>{s.item && <CommandShortcut className="font-mono">{s.item} · #{s.n}</CommandShortcut>}</CommandItem> })}</CommandGroup>
+        <CommandGroup heading={t("shell:cmd.page.sessions")}>{Object.keys(st.S).map((k) => { const s = st.S[k]; return <CommandItem key={k} value={t("shell:cmd.page.sessions") + " " + s.title + " " + (s.item ?? "")} onSelect={() => run(() => go("#/sessions/" + k))}><SquareTerminalIcon /><span className="truncate">{s.title}</span>{s.item && <CommandShortcut className="font-mono">{s.item} · #{s.n}</CommandShortcut>}</CommandItem> })}</CommandGroup>
       </CommandList>
       </Command>
     </CommandDialog>
@@ -126,15 +127,16 @@ const UNWIRED = ["plugins"]
 
 export default function App() {
   useStore()
+  const t = useT()
   useEffect(() => start(), [])
   const [a = "", b, c] = useRoute()
   /* an “撤销” toast belongs to the page it was raised on */
   useEffect(() => { sonnerToast.dismiss() }, [a, b, c])
   if (st.login) return (
-    <Splash><Robot k="steve" size={72} /><div><div className="type-title">Steve</div><div className="mt-1 type-callout text-muted-foreground">登录后继续</div></div>
-      <Button onClick={() => { location.href = st.login + "?back=" + encodeURIComponent(location.pathname + location.hash) }} data-login>登录</Button></Splash>
+    <Splash><Robot k="steve" size={72} /><div><div className="type-title">Steve</div><div className="mt-1 type-callout text-muted-foreground">{t("shell:app.signInToContinue")}</div></div>
+      <Button onClick={() => { location.href = st.login + "?back=" + encodeURIComponent(location.pathname + location.hash) }} data-login>{t("shell:app.signIn")}</Button></Splash>
   )
-  if (!st.ready) return <Splash>{st.error ? <><div className="type-headline">连不上 Steve</div><div className="type-callout text-muted-foreground">{st.error}</div></> : <Spinner className="size-5 text-muted-foreground" />}</Splash>
+  if (!st.ready) return <Splash>{st.error ? <><div className="type-headline">{t("shell:app.cantConnect")}</div><div className="type-callout text-muted-foreground">{st.error}</div></> : <Spinner className="size-5 text-muted-foreground" />}</Splash>
   const view =
     a === "inbox" ? <InboxView /> :
     a === "items" ? (b ? <ItemView key={b} id={b} /> : <ItemsView />) :

@@ -8,6 +8,7 @@ import * as live from "../src/live-utils.ts"
 import * as notes from "../src/decision-notes.ts"
 import * as feed from "../src/feed-order.ts"
 import * as format from "../src/i18n/format.ts"
+import * as i18n from "../src/i18n/index.ts"
 
 const code = ts.transpileModule(readFileSync(new URL("../src/store.ts", import.meta.url), "utf8"), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2023 } }).outputText
 const flush = async () => { for (let i = 0; i < 40; i++) await Promise.resolve() }
@@ -27,6 +28,7 @@ function harness() {
       if (id === "./decision-notes") return notes
       if (id === "./feed-order") return feed
       if (id === "./i18n/format") return format
+      if (id === "./i18n") return { __esModule: true, ...i18n }
       if (id === "./bus") return { cue: (x) => cues.push(x) }
       if (id === "sonner") return { toast: (x) => notices.push(x) }
       if (id === "react") return {}

@@ -11,6 +11,7 @@ import { cn } from "cn"
 import { OfficeView } from "@/office"
 import { ChevronLeftIcon, ChevronRightIcon, CopyIcon, DownloadIcon, ExternalLinkIcon, FileIcon, FileTextIcon, FolderIcon, GalleryVerticalIcon, GitBranchIcon, ZoomInIcon, ZoomOutIcon } from "lucide-react"
 import { useEffect, useRef, useState, type ReactNode } from "react"
+import { useT } from "@/i18n"
 
 /* what an item's output holds, shown as itself: documents rendered, code highlighted, tables as tables, images,
  * PDFs and media in place, folders browsable, branches and commits as their commits and diff */
@@ -23,7 +24,8 @@ function Note({ children }: { children: ReactNode }) {
   return <div className="rounded-lg bg-muted/60 px-3 py-2 type-footnote text-muted-foreground">{children}</div>
 }
 function Missing({ reason }: { reason: string }) {
-  return <div className="flex flex-col items-center gap-1 py-12 text-center" data-out-missing><FileIcon className="size-6 text-tertiary" /><div className="type-callout">看不了内容</div><div className="max-w-md type-footnote text-muted-foreground">{reason}</div></div>
+  const t = useT()
+  return <div className="flex flex-col items-center gap-1 py-12 text-center" data-out-missing><FileIcon className="size-6 text-tertiary" /><div className="type-callout">{t("pages:outputs.cantView")}</div><div className="max-w-md type-footnote text-muted-foreground">{reason}</div></div>
 }
 function Plain({ text }: { text: string }) {
   return <pre className="max-h-[60vh] overflow-auto rounded-xl bg-muted/60 p-3 font-mono text-[12.5px] leading-5 whitespace-pre-wrap break-words" data-out-plain>{text}</pre>
@@ -59,11 +61,13 @@ function Table({ text, sep }: { text: string; sep: string }) {
   )
 }
 function Html({ text }: { text: string }) {
-  return <iframe title="HTML 预览" sandbox="allow-scripts" referrerPolicy="no-referrer" srcDoc={text} className="block h-[60vh] w-full rounded-xl border bg-white" data-out-html />
+  const t = useT()
+  return <iframe title={t("pages:outputs.htmlTitle")} sandbox="allow-scripts" referrerPolicy="no-referrer" srcDoc={text} className="block h-[60vh] w-full rounded-xl border bg-white" data-out-html />
 }
 
 /** a text file by what it is: a document, a page, a table, a diagram, JSON or code; rendered ones can show their source */
 function TextView({ p }: { p: Extract<ROutPreview, { type: "text" }> }) {
+  const t = useT()
   const rendered = ["markdown", "html", "csv", "tsv", "mermaid"].includes(p.lang)
   const [tab, setTab] = useState<"预览" | "源码">("预览")
   let json = p.text
@@ -75,16 +79,17 @@ function TextView({ p }: { p: Extract<ROutPreview, { type: "text" }> }) {
     : <Table text={p.text} sep={p.lang === "tsv" ? "\t" : ","} />
   return (
     <div className="flex flex-col gap-2" data-out-text={p.lang}>
-      {rendered && <Segmented size="sm" value={tab} onChange={setTab} options={["预览", "源码"] as const} />}
-      {p.from && <Note>工作区已收起，内容取自 {p.from}</Note>}
+      {rendered && <Segmented size="sm" value={tab} onChange={setTab} options={[["预览", t("pages:outputs.preview")], ["源码", t("pages:outputs.source")]] as const} />}
+      {p.from && <Note>{t("pages:outputs.from", { from: p.from })}</Note>}
       {body}
-      {p.truncated && <Note>文件较大，只显示了前 512 KB</Note>}
+      {p.truncated && <Note>{t("pages:outputs.truncText")}</Note>}
     </div>
   )
 }
 
 /** a unified diff, one collapsible block per file */
 function Diff({ diff, truncated }: { diff: string; truncated: boolean }) {
+  const t = useT()
   const files = diff ? diff.split(/^(?=diff --git )/m).filter(Boolean) : []
   if (!files.length) return null
   return (
@@ -103,12 +108,12 @@ function Diff({ diff, truncated }: { diff: string; truncated: boolean }) {
             <CollapsibleContent>
               <pre className="max-h-[50vh] overflow-auto py-1 font-mono text-[12px] leading-[18px]">{body[0]?.startsWith("@@") ? body.map((l, k) => (
                 <div key={k} className={cn("px-3 whitespace-pre", l.startsWith("@@") ? "bg-blue/10 text-muted-foreground" : l.startsWith("+") ? "bg-success/8" : l.startsWith("-") ? "bg-destructive/8" : "")}>{l || " "}</div>
-              )) : <div className="px-3 text-muted-foreground">二进制文件或只改了权限</div>}</pre>
+              )) : <div className="px-3 text-muted-foreground">{t("pages:outputs.binaryDiff")}</div>}</pre>
             </CollapsibleContent>
           </Collapsible>
         )
       })}
-      {truncated && <Note>改动较多，只显示了前 400 KB</Note>}
+      {truncated && <Note>{t("pages:outputs.truncDiff")}</Note>}
     </div>
   )
 }
@@ -116,12 +121,13 @@ const statLast = (stat: string) => stat.trim().split("\n").pop() ?? ""
 
 /** `base`: the path walked below the output so far; an entry opens as `base/name` */
 function Folder({ p, item, art, base, open, browse }: { p: Extract<ROutPreview, { type: "dir" }>; item: string; art: string; base: string; open: (sub: string) => void; browse: () => void }) {
+  const t = useT()
   const at = (n: string) => (base ? base + "/" : "") + n
   const pics = p.entries.filter((e) => e.form === "image"), rest = p.entries.filter((e) => e.form !== "image")
-  if (!p.entries.length) return <Missing reason="文件夹是空的" />
+  if (!p.entries.length) return <Missing reason={t("pages:outputs.emptyDir")} />
   return (
     <div className="flex flex-col gap-3" data-out-dir>
-      {pics.length > 1 && <Button size="sm" variant="outline" className="self-start" onClick={browse} data-out-browse><GalleryVerticalIcon />连续浏览 {pics.length} 张图片</Button>}
+      {pics.length > 1 && <Button size="sm" variant="outline" className="self-start" onClick={browse} data-out-browse><GalleryVerticalIcon />{t("pages:outputs.browseAll", { count: pics.length })}</Button>}
       {pics.length > 0 && <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">{pics.map((e) => (
         <button key={e.name} type="button" onClick={() => open(at(e.name))} className="group flex flex-col gap-1 text-left" data-out-entry={e.name}>
           <img src={outRawUrl(item, art, at(e.name))} alt={e.name} loading="lazy" className="aspect-[4/3] w-full rounded-lg border bg-muted object-cover object-top transition-opacity group-hover:opacity-85" />
@@ -134,12 +140,13 @@ function Folder({ p, item, art, base, open, browse }: { p: Extract<ROutPreview, 
           {e.size != null && <span className="shrink-0 type-footnote tabular-nums text-muted-foreground">{size(e.size)}</span>}
           <ChevronRightIcon className="size-4 shrink-0 text-tertiary" />
         </button>))}</div>}
-      {p.truncated && <Note>只列出了前 500 项</Note>}
+      {p.truncated && <Note>{t("pages:outputs.truncDir")}</Note>}
     </div>
   )
 }
 function Media({ p, url, page }: { p: Extract<ROutPreview, { type: "image" | "pdf" | "video" | "audio" }>; url: string; page?: number }) {
-  if (p.large) return <Missing reason={`文件太大（${size(p.size ?? 0)}），请下载后查看`} />
+  const t = useT()
+  if (p.large) return <Missing reason={t("pages:outputs.tooLarge", { size: size(p.size ?? 0) })} />
   return p.type === "pdf" ? <iframe key={page ?? 0} title={p.name} src={page ? `${url}#page=${page}` : url} className="block h-[65vh] w-full rounded-xl border" data-out-pdf />
     : p.type === "video" ? <video src={url} controls className="max-h-[65vh] w-full rounded-xl bg-black" data-out-video />
     : <audio src={url} controls className="w-full" data-out-audio />
@@ -151,6 +158,7 @@ type Pic = { key: string; name: string; art: string; path: string; src: string; 
  * 连续 shows them all, one under another. While regions are drawn or the picture is zoomed, dragging belongs to the picture. */
 function Gallery({ pics, at, go, notesOf, drawing, onDraw, focus, mode, setMode }: { pics: Pic[]; at: number; go: (n: number) => void; notesOf: (p: Pic) => { a: RAnnotation; n: number }[]
   drawing: boolean; onDraw: (p: Pic, b: { x: number; y: number; w: number; h: number }) => void; focus?: string; mode: "逐张" | "连续"; setMode: (m: "逐张" | "连续") => void }) {
+  const t = useT()
   const [zoom, setZoom] = useState(false)
   const start = useRef<{ x: number; y: number } | null>(null), strip = useRef<HTMLDivElement>(null)
   const cur = pics[at], many = pics.length > 1
@@ -170,10 +178,10 @@ function Gallery({ pics, at, go, notesOf, drawing, onDraw, focus, mode, setMode 
   if (!cur) return null
   const bar = (
     <div className="flex items-center gap-2" data-gallery-bar>
-      {many && <Segmented size="sm" value={mode} onChange={setMode} options={["逐张", "连续"] as const} />}
+      {many && <Segmented size="sm" value={mode} onChange={setMode} options={[["逐张", t("pages:outputs.oneByOne")], ["连续", t("pages:outputs.all")]] as const} />}
       {many && mode === "逐张" && <span className="type-footnote tabular-nums text-muted-foreground" data-gallery-count>{at + 1} / {pics.length}</span>}
-      <span className="min-w-0 flex-1 truncate type-footnote text-muted-foreground">{mode === "逐张" ? cur.name : `共 ${pics.length} 张，上下滑动浏览`}</span>
-      {mode === "逐张" && <Button size="sm" variant="ghost" aria-pressed={zoom} onClick={() => setZoom(!zoom)} data-gallery-zoom>{zoom ? <ZoomOutIcon /> : <ZoomInIcon />}{zoom ? "还原" : "放大"}</Button>}
+      <span className="min-w-0 flex-1 truncate type-footnote text-muted-foreground">{mode === "逐张" ? cur.name : t("pages:outputs.allHint", { count: pics.length })}</span>
+      {mode === "逐张" && <Button size="sm" variant="ghost" aria-pressed={zoom} onClick={() => setZoom(!zoom)} data-gallery-zoom>{zoom ? <ZoomOutIcon /> : <ZoomInIcon />}{zoom ? t("pages:outputs.zoomReset") : t("pages:outputs.zoomIn")}</Button>}
     </div>
   )
   if (mode === "连续") return (
@@ -203,12 +211,12 @@ function Gallery({ pics, at, go, notesOf, drawing, onDraw, focus, mode, setMode 
         <AnnImage key={cur.key} src={cur.src} alt={cur.name} notes={notesOf(cur)} drawing={drawing} onDraw={(b) => onDraw(cur, b)} focus={focus}
           className={cn(zoom && "max-w-none")} imgClass={zoom ? "max-w-none w-[200%]" : "max-h-[55vh] max-sm:max-h-[45vh]"} />
         {many && !zoom && <>
-          <Button size="icon" variant="outline" aria-label="上一张" disabled={at === 0} onClick={() => go(at - 1)} className="absolute left-2 top-1/2 -translate-y-1/2 rounded-full bg-background/85 backdrop-blur disabled:opacity-0" data-gallery-prev><ChevronLeftIcon /></Button>
-          <Button size="icon" variant="outline" aria-label="下一张" disabled={at === pics.length - 1} onClick={() => go(at + 1)} className="absolute right-2 top-1/2 -translate-y-1/2 rounded-full bg-background/85 backdrop-blur disabled:opacity-0" data-gallery-next><ChevronRightIcon /></Button>
+          <Button size="icon" variant="outline" aria-label={t("pages:outputs.prev")} disabled={at === 0} onClick={() => go(at - 1)} className="absolute left-2 top-1/2 -translate-y-1/2 rounded-full bg-background/85 backdrop-blur disabled:opacity-0" data-gallery-prev><ChevronLeftIcon /></Button>
+          <Button size="icon" variant="outline" aria-label={t("pages:outputs.next")} disabled={at === pics.length - 1} onClick={() => go(at + 1)} className="absolute right-2 top-1/2 -translate-y-1/2 rounded-full bg-background/85 backdrop-blur disabled:opacity-0" data-gallery-next><ChevronRightIcon /></Button>
         </>}
       </div>
       {many && <div ref={strip} className="flex gap-1.5 overflow-x-auto pb-1" data-gallery-strip>
-        {pics.map((p, n) => <button key={p.key} type="button" aria-label={`第 ${n + 1} 张：${p.name}`} aria-current={n === at} onClick={() => go(n)} data-pic-thumb={n}
+        {pics.map((p, n) => <button key={p.key} type="button" aria-label={t("pages:outputs.thumb", { n: n + 1, name: p.name })} aria-current={n === at} onClick={() => go(n)} data-pic-thumb={n}
           className={cn("h-12 w-16 shrink-0 overflow-hidden rounded-md border-2 transition-opacity", n === at ? "border-blue" : "border-transparent opacity-60 hover:opacity-100")}>
           <img src={p.src} alt="" loading="lazy" className="size-full object-cover object-top" /></button>)}
       </div>}
@@ -234,6 +242,7 @@ type Entry = Extract<ROutPreview, { type: "dir" }>["entries"][number]
 /** the body of the output dialog; `loc` and the kind come from the row, the rest from the Hub. `siblings`: the other
  * pictures delivered with this one, to move between; `focus`: a note to show where it is; `anns`: the item's notes */
 export function OutPreview({ o, item, anns = [], focus: focus0, siblings = [], outs = [], onOpen }: { o: Out; item: string; anns?: RAnnotation[]; focus?: string; siblings?: Out[]; outs?: Out[]; onOpen?: (o: Out, focus?: string) => void }) {
+  const t = useT()
   const [k, , loc, art] = o
   const start = anns.find((a) => a.id === focus0 && a.artifact_id === art)
   const [path, setPath] = useState<string[]>(start?.path ? start.path.split("/") : [])
@@ -302,28 +311,28 @@ export function OutPreview({ o, item, anns = [], focus: focus0, siblings = [], o
   const body = err ? <Missing reason={err} />
     : !p ? <div className="flex justify-center py-16"><Spinner className="size-5 text-muted-foreground" /></div>
     : p.type === "missing" ? <Missing reason={p.reason} />
-    : p.type === "link" ? <div className="flex flex-col items-start gap-3 py-2"><span className="break-all font-mono text-[12.5px]">{p.url}</span><Button size="sm" onClick={() => window.open(p.url, "_blank", "noopener")}><ExternalLinkIcon />打开链接</Button></div>
+    : p.type === "link" ? <div className="flex flex-col items-start gap-3 py-2"><span className="break-all font-mono text-[12.5px]">{p.url}</span><Button size="sm" onClick={() => window.open(p.url, "_blank", "noopener")}><ExternalLinkIcon />{t("pages:outputs.openLink")}</Button></div>
     : p.type === "text" ? <TextView key={at} p={p} />
-    : p.type === "binary" ? <Missing reason={legacy ? `${p.name} 是旧版 Office 或 iWork 格式，不能直接预览：可以下载后打开，或让 Bot 另存为 PDF、docx、xlsx、pptx` : `${p.name} 不是文本、图片或媒体文件（${size(p.size ?? 0)}），可以下载后用本地应用打开`} />
-    : p.type === "office" ? (p.large ? <Missing reason={`文件太大（${size(p.size ?? 0)}），请下载后查看`} /> : <OfficeView url={raw()} name={p.name} fallback={(r) => <Missing reason={r} />} />)
+    : p.type === "binary" ? <Missing reason={legacy ? t("pages:outputs.legacy", { name: p.name }) : t("pages:outputs.binary", { name: p.name, size: size(p.size ?? 0) })} />
+    : p.type === "office" ? (p.large ? <Missing reason={t("pages:outputs.tooLarge", { size: size(p.size ?? 0) })} /> : <OfficeView url={raw()} name={p.name} fallback={(r) => <Missing reason={r} />} />)
     : p.type === "dir" ? <Folder p={p} item={item} art={art} base={at} open={(s) => setPath(s.split("/"))} browse={() => { const e = p.entries.find((x) => x.form === "image"); if (e) { setMode("连续"); setPath([...path, e.name]) } }} />
     : p.type === "commit" ? <div className="flex flex-col gap-3" data-out-commit>
         <div className="flex flex-col gap-1"><div className="type-callout whitespace-pre-wrap break-words">{p.message}</div><div className="type-footnote text-muted-foreground"><span className="font-mono">{p.hash.slice(0, 10)}</span> · {p.author}{p.at && ` · ${tm(p.at)}`} · {statLast(p.stat)}</div></div>
         <Diff diff={p.diff} truncated={p.truncated} /></div>
     : p.type === "branch" ? <div className="flex flex-col gap-3" data-out-branch>
         <div className="flex items-center gap-1.5 type-footnote text-muted-foreground"><GitBranchIcon className="size-3.5" /><span className="font-mono">{p.branch}</span>
-          {p.base ? <span>· 比 {p.base} 多 {p.commits.length} 个提交{p.stat && ` · ${statLast(p.stat)}`}</span> : <span>· 最近的提交</span>}</div>
-        {p.base && !p.commits.length && <Note>这个分支的改动已经都在 {p.base} 上了</Note>}
+          {p.base ? <span>{t("pages:outputs.branchAhead", { base: p.base, count: p.commits.length })}{p.stat && ` · ${statLast(p.stat)}`}</span> : <span>{t("pages:outputs.branchRecent")}</span>}</div>
+        {p.base && !p.commits.length && <Note>{t("pages:outputs.merged", { base: p.base })}</Note>}
         {p.commits.length > 0 && <Commits cs={p.commits} />}
         <Diff diff={p.diff} truncated={p.truncated} /></div>
-    : p.type === "image" ? (p.large ? <Missing reason={`文件太大（${size(p.size ?? 0)}），请下载后查看`} />
+    : p.type === "image" ? (p.large ? <Missing reason={t("pages:outputs.tooLarge", { size: size(p.size ?? 0) })} />
         : <Gallery pics={pics} at={cur} go={goPic} notesOf={notesOf} drawing={drawing} focus={focus} mode={mode} setMode={setMode}
             onDraw={(x, b) => setPending({ art: x.art, path: x.path, anchor: { type: "region", ...b } })} />)
     : <Media p={p} url={raw()} page={page} />
   return (
     <div className="flex min-h-0 min-w-0 flex-col gap-3 overflow-y-auto" data-out-preview={p?.type ?? "loading"} data-kind={k}>
       {path.length > 0 && <nav className="flex flex-wrap items-center gap-1 type-footnote text-muted-foreground" data-out-crumbs>
-        <button type="button" className="hover:text-foreground" onClick={() => setPath([])}>{(loc ?? "").replace(/\/$/, "").split("/").pop() || "产出"}</button>
+        <button type="button" className="hover:text-foreground" onClick={() => setPath([])}>{(loc ?? "").replace(/\/$/, "").split("/").pop() || t("pages:outputs.output")}</button>
         {path.map((s, n) => <span key={n} className="flex items-center gap-1"><ChevronRightIcon className="size-3" /><button type="button" className={cn(n === path.length - 1 ? "text-foreground" : "hover:text-foreground")} onClick={() => setPath(path.slice(0, n + 1))}>{s}</button></span>)}
       </nav>}
       <div ref={box} className="min-w-0 shrink-0" data-out-body>{body}</div>
@@ -331,10 +340,10 @@ export function OutPreview({ o, item, anns = [], focus: focus0, siblings = [], o
         canDraw={p.type === "image" && !p.large} drawing={drawing} setDrawing={setDrawing} pdf={p.type === "pdf"} onLocate={locate} />}
       {(where || file || ref) && <div className="flex flex-wrap items-center gap-2 border-t pt-3">
         {where && <span className="mr-auto min-w-0 truncate font-mono text-[12px] text-muted-foreground" title={where}>{where}{p && "size" in p && p.size != null ? ` · ${size(p.size)}` : ""}</span>}
-        {file && <Button variant="ghost" size="sm" onClick={() => { location.href = raw(true) }}><DownloadIcon />下载</Button>}
-        {media && <Button variant="ghost" size="sm" onClick={() => window.open(raw(), "_blank", "noopener")}><ExternalLinkIcon />新标签打开</Button>}
-        {ref && <Button variant="ghost" size="sm" className={cn(!where && "ml-auto")} onClick={() => { navigator.clipboard?.writeText(ref).catch(() => {}); toast(p?.type === "commit" ? "已复制提交号" : "已复制分支名") }}><CopyIcon />{p?.type === "commit" ? "复制提交号" : "复制分支名"}</Button>}
-        {where && <Button variant="ghost" size="sm" onClick={() => { navigator.clipboard?.writeText(where).catch(() => {}); toast("已复制位置") }}><CopyIcon />复制位置</Button>}
+        {file && <Button variant="ghost" size="sm" onClick={() => { location.href = raw(true) }}><DownloadIcon />{t("pages:outputs.download")}</Button>}
+        {media && <Button variant="ghost" size="sm" onClick={() => window.open(raw(), "_blank", "noopener")}><ExternalLinkIcon />{t("pages:outputs.newTab")}</Button>}
+        {ref && <Button variant="ghost" size="sm" className={cn(!where && "ml-auto")} onClick={() => { navigator.clipboard?.writeText(ref).catch(() => {}); toast(p?.type === "commit" ? t("pages:outputs.copiedCommit") : t("pages:outputs.copiedBranch")) }}><CopyIcon />{p?.type === "commit" ? t("pages:outputs.copyCommit") : t("pages:outputs.copyBranch")}</Button>}
+        {where && <Button variant="ghost" size="sm" onClick={() => { navigator.clipboard?.writeText(where).catch(() => {}); toast(t("pages:outputs.copiedLocation")) }}><CopyIcon />{t("pages:outputs.copyLocation")}</Button>}
       </div>}
     </div>
   )

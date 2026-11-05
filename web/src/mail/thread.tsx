@@ -18,23 +18,27 @@ import { size } from "@/attach"
 import { useLoad, useBusy } from "@/accounts/load"
 import { mailApi, type Message, type Thread, type MailAttachment, type Addr } from "@/api/mail"
 import { ThreadDraft } from "@/mail/draft"
+import { useT } from "@/i18n"
+import { date } from "@/i18n/format"
 
 const who = (a: Addr) => a.name || a.addr
-const full = (d: number) => new Date(d).toLocaleString("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })
+const full = (d: number) => date(d, { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })
 const reSubject = (s: string) => (/^\s*(re|回复|答复)\s*[:：]/i.test(s) ? s : "Re: " + s)
 
 export function ThreadView({ id }: { id: string }) {
+  const t = useT()
   const T = useLoad(() => mailApi.thread(id), [id], ["mail"])
   const read = useRef(false)
   useEffect(() => { if (T.s === "ok" && T.data.unread > 0 && !read.current) { read.current = true; mailApi.read(id).catch(() => {}) } }, [T, id])
-  const back: [string, string] = ["#/mail", "邮件"]
+  const back: [string, string] = ["#/mail", t("mail:shared.title")]
   if (T.s === "unwired") return <Unwired id="mail" />
-  if (T.s === "loading") return <Page title="邮件" back={back}><div className="flex justify-center py-16"><Spinner className="size-5 text-muted-foreground" /></div></Page>
-  if (T.s === "error") return <Page title="邮件" back={back}><Empty title={T.status === 404 ? "这串往来不存在，或者你看不到" : T.err} /></Page>
+  if (T.s === "loading") return <Page title={t("mail:shared.title")} back={back}><div className="flex justify-center py-16"><Spinner className="size-5 text-muted-foreground" /></div></Page>
+  if (T.s === "error") return <Page title={t("mail:shared.title")} back={back}><Empty title={T.status === 404 ? t("mail:thread.notFound") : T.err} /></Page>
   return <ThreadPage t={T.data} reload={T.reload} back={back} />
 }
 
 function ThreadPage({ t, reload, back }: { t: Thread; reload: () => Promise<void>; back: [string, string] }) {
+  const tr = useT()
   const last = t.messages.length - 1
   const [open, setOpen] = useState<Set<string>>(() => new Set(last >= 0 ? [t.messages[last].id] : []))
   useEffect(() => { if (last >= 0) setOpen((o) => new Set([...o, t.messages[last].id])) }, [t.messages[last]?.id])
@@ -42,18 +46,18 @@ function ThreadPage({ t, reload, back }: { t: Thread; reload: () => Promise<void
   const allOpen = t.messages.every((m) => open.has(m.id))
   const drafts = t.drafts.filter((d) => d.status !== "sent" && d.status !== "discarded")
   return (
-    <Page title={t.subject || "（没有主题）"} back={back} max={760} small
-      sub={<Meta><span>{t.connection.address}</span><span>{t.count} 封</span>{t.signal && <span>{t.signal.outcome_label}</span>}{t.state === "muted" && <span>已静音</span>}{t.state === "done" && <span>已处理</span>}{t.item_id && <ItemNo id={t.item_id} />}</Meta>}
+    <Page title={t.subject || tr("mail:shared.noSubject")} back={back} max={760} small
+      sub={<Meta><span>{t.connection.address}</span><span>{tr("mail:thread.count", { count: t.count })}</span>{t.signal && <span>{t.signal.outcome_label}</span>}{t.state === "muted" && <span>{tr("mail:thread.muted")}</span>}{t.state === "done" && <span>{tr("mail:thread.done")}</span>}{t.item_id && <ItemNo id={t.item_id} />}</Meta>}
       actions={<ThreadActions t={t} reload={reload} />}>
       <div className="flex flex-col gap-6">
         {t.messages.length > 1 && <div className="-mb-4 flex justify-end"><Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => setOpen(allOpen ? new Set([t.messages[last].id]) : new Set(t.messages.map((m) => m.id)))} data-expand-all>
-          <ChevronsUpDownIcon />{allOpen ? "只展开最后一封" : "全部展开"}</Button></div>}
-        <ol className="flex flex-col overflow-hidden rounded-xl border" aria-label="往来邮件" data-messages>
+          <ChevronsUpDownIcon />{allOpen ? tr("mail:thread.collapse") : tr("mail:thread.expandAll")}</Button></div>}
+        <ol className="flex flex-col overflow-hidden rounded-xl border" aria-label={tr("mail:thread.messagesAria")} data-messages>
           {t.messages.map((m, n) => <li key={m.id} className={cn(n > 0 && "border-t")}><MessageBlock m={m} open={open.has(m.id)} onToggle={() => toggle(m.id)} /></li>)}
         </ol>
         {drafts.map((d) => <ThreadDraft key={d.id} d={d} onChange={() => void reload()} />)}
         <Compose t={t} hasDraft={drafts.length > 0} reload={reload} />
-        {t.items.length > 0 && <section><SectionLabel>相关事项</SectionLabel>{t.items.map((i) => <ItemRef key={i.id} id={i.id} />)}</section>}
+        {t.items.length > 0 && <section><SectionLabel>{tr("mail:thread.related")}</SectionLabel>{t.items.map((i) => <ItemRef key={i.id} id={i.id} />)}</section>}
       </div>
     </Page>
   )
@@ -61,18 +65,20 @@ function ThreadPage({ t, reload, back }: { t: Thread; reload: () => Promise<void
 
 /* ───────── one message ───────── */
 function MessageBlock({ m, open, onToggle }: { m: Message; open: boolean; onToggle: () => void }) {
+  const t = useT()
   const [quoted, setQuoted] = useState(false), [html, setHtml] = useState(false)
+  const sep = t("mail:shared.listSep")
   const line = (m.text_new ?? m.text ?? "").replace(/\s+/g, " ").trim()
   const head = (
     <button type="button" onClick={onToggle} aria-expanded={open} className="flex w-full items-start gap-3 px-4 py-3 text-left hover:bg-accent/60" data-message-toggle={m.id}>
       <ContactAvatar name={who(m.from)} size={28} className="mt-0.5" />
       <span className="min-w-0 flex-1">
-        <span className="flex items-baseline gap-2"><span className="min-w-0 truncate type-body font-medium">{m.direction === "out" ? "我" : who(m.from)}</span>
+        <span className="flex items-baseline gap-2"><span className="min-w-0 truncate type-body font-medium">{m.direction === "out" ? t("mail:thread.me") : who(m.from)}</span>
           {open && m.direction === "in" && m.from.name && <span className="hidden min-w-0 truncate type-footnote text-muted-foreground sm:inline">{m.from.addr}</span>}
-          <span className="flex-1" />{m.attachments.length > 0 && <PaperclipIcon className="size-3.5 shrink-0 text-muted-foreground" aria-label="有附件" />}
+          <span className="flex-1" />{m.attachments.length > 0 && <PaperclipIcon className="size-3.5 shrink-0 text-muted-foreground" aria-label={t("mail:shared.hasAttachments")} />}
           <span className="shrink-0 type-footnote tabular-nums text-muted-foreground" title={full(m.date)}>{tm(m.date)}</span></span>
-        {open ? <span className="block truncate type-footnote text-muted-foreground">发给 {m.to.map(who).join("、") || "—"}{m.cc.length ? ` · 抄送 ${m.cc.map(who).join("、")}` : ""}</span>
-          : <span className="block truncate type-callout text-muted-foreground" data-message-line>{line || (m.purged ? "原文已过保留期" : "（没有正文）")}</span>}
+        {open ? <span className="block truncate type-footnote text-muted-foreground">{m.cc.length ? t("mail:thread.toCc", { to: m.to.map(who).join(sep) || "—", cc: m.cc.map(who).join(sep) }) : t("mail:thread.to", { to: m.to.map(who).join(sep) || "—" })}</span>
+          : <span className="block truncate type-callout text-muted-foreground" data-message-line>{line || (m.purged ? t("mail:thread.purged") : t("mail:thread.noBody"))}</span>}
       </span>
     </button>
   )
@@ -82,12 +88,12 @@ function MessageBlock({ m, open, onToggle }: { m: Message; open: boolean; onTogg
     <div data-message={m.id} data-open="1">
       {head}
       <div className="px-4 pb-4 sm:pl-[56px]">
-        {m.purged ? <div className="rounded-lg bg-muted/60 px-3 py-2 type-callout text-muted-foreground">原文已过保留期，只剩摘要：{line || "—"}</div>
+        {m.purged ? <div className="rounded-lg bg-muted/60 px-3 py-2 type-callout text-muted-foreground">{t("mail:thread.purgedSummary", { line: line || "—" })}</div>
           : html ? <HtmlBody id={m.id} />
           : <div className="whitespace-pre-wrap break-words type-body" data-message-text>{quoted ? m.text : m.text_new ?? m.text ?? ""}</div>}
         <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 type-footnote text-muted-foreground">
-          {!html && hasQuote && <button type="button" className="hover:text-foreground" onClick={() => setQuoted(!quoted)} aria-expanded={quoted} data-show-quote>{quoted ? "隐藏引用的内容" : "显示引用的内容"}</button>}
-          {m.has_html && !m.purged && <button type="button" className="inline-flex items-center gap-1 hover:text-foreground" onClick={() => setHtml(!html)} aria-pressed={html} data-show-html>{html ? <><FileTextIcon className="size-3.5" aria-hidden />显示纯文本</> : <><CodeIcon className="size-3.5" aria-hidden />显示原格式</>}</button>}
+          {!html && hasQuote && <button type="button" className="hover:text-foreground" onClick={() => setQuoted(!quoted)} aria-expanded={quoted} data-show-quote>{quoted ? t("mail:thread.hideQuote") : t("mail:thread.showQuote")}</button>}
+          {m.has_html && !m.purged && <button type="button" className="inline-flex items-center gap-1 hover:text-foreground" onClick={() => setHtml(!html)} aria-pressed={html} data-show-html>{html ? <><FileTextIcon className="size-3.5" aria-hidden />{t("mail:thread.showPlain")}</> : <><CodeIcon className="size-3.5" aria-hidden />{t("mail:thread.showHtml")}</>}</button>}
         </div>
         {m.attachments.length > 0 && <div className="mt-3 flex flex-wrap gap-1.5">{m.attachments.map((a) => <AttachmentChip key={a.id} a={a} />)}</div>}
       </div>
@@ -98,12 +104,13 @@ function MessageBlock({ m, open, onToggle }: { m: Message; open: boolean; onTogg
 /** the original HTML: an iframe with an empty sandbox (no scripts, forms, popups or same-origin); the Hub's CSP blocks
  *  remote images until you ask for them */
 function HtmlBody({ id }: { id: string }) {
+  const t = useT()
   const [images, setImages] = useState(false)
   return (
     <div className="flex flex-col gap-1.5" data-html-body={images ? "images" : "blocked"}>
-      {!images && <div className="flex items-center gap-2 rounded-lg bg-muted/60 px-3 py-1.5 type-footnote text-muted-foreground"><ImageIcon className="size-3.5" aria-hidden />为了防止跟踪，远程图片没有加载。
-        <button type="button" className="ml-auto shrink-0 whitespace-nowrap text-blue hover:underline" onClick={() => setImages(true)} data-show-images>显示图片</button></div>}
-      <iframe key={String(images)} title="邮件原格式" sandbox="" referrerPolicy="no-referrer" loading="lazy" src={mailApi.htmlUrl(id, images)}
+      {!images && <div className="flex items-center gap-2 rounded-lg bg-muted/60 px-3 py-1.5 type-footnote text-muted-foreground"><ImageIcon className="size-3.5" aria-hidden />{t("mail:thread.imagesBlocked")}
+        <button type="button" className="ml-auto shrink-0 whitespace-nowrap text-blue hover:underline" onClick={() => setImages(true)} data-show-images>{t("mail:thread.showImages")}</button></div>}
+      <iframe key={String(images)} title={t("mail:thread.frameTitle")} sandbox="" referrerPolicy="no-referrer" loading="lazy" src={mailApi.htmlUrl(id, images)}
         className="h-[480px] w-full resize-y rounded-lg border bg-white" data-html-frame />
     </div>
   )
@@ -125,18 +132,19 @@ function AttachmentChip({ a }: { a: MailAttachment }) {
 
 /* ───────── actions ───────── */
 function ThreadActions({ t, reload }: { t: Thread; reload: () => Promise<void> }) {
+  const tr = useT()
   const [busy, act] = useBusy()
   const done = async (p: Promise<unknown> | undefined) => { if (await p) { await reload(); await refresh() } }
   return (
     <DropdownMenu>
-      <DropdownMenuTrigger render={<Button size="sm" variant="ghost" aria-label="更多操作" disabled={busy} data-thread-more />}><EllipsisIcon /></DropdownMenuTrigger>
+      <DropdownMenuTrigger render={<Button size="sm" variant="ghost" aria-label={tr("mail:thread.moreActions")} disabled={busy} data-thread-more />}><EllipsisIcon /></DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="min-w-48">
-        {!t.item_id && <DropdownMenuItem onClick={() => void act(() => mailApi.toItem(t.id), "已转成事项").then((r) => r && go("#/items/" + r.item_id))} data-thread-to-item><ListTodoIcon />转成事项</DropdownMenuItem>}
-        <DropdownMenuItem onClick={() => void act(() => mailApi.toKnowledge(t.id), "已加进知识库")} data-thread-to-kb><BookPlusIcon />加进知识库</DropdownMenuItem>
+        {!t.item_id && <DropdownMenuItem onClick={() => void act(() => mailApi.toItem(t.id), tr("mail:thread.toItemDone")).then((r) => r && go("#/items/" + r.item_id))} data-thread-to-item><ListTodoIcon />{tr("mail:thread.toItem")}</DropdownMenuItem>}
+        <DropdownMenuItem onClick={() => void act(() => mailApi.toKnowledge(t.id), tr("mail:thread.toKbDone"))} data-thread-to-kb><BookPlusIcon />{tr("mail:thread.toKb")}</DropdownMenuItem>
         <DropdownMenuSeparator />
-        {t.state !== "done" && <DropdownMenuItem onClick={() => void done(act(() => mailApi.patchThread(t.id, "done"), "已标为处理完"))} data-thread-done><CheckIcon />处理完了</DropdownMenuItem>}
-        <DropdownMenuItem onClick={() => void act(() => mailApi.archive(t.id), "已归档").then((r) => r && go("#/mail"))} data-thread-archive><ArchiveIcon />归档</DropdownMenuItem>
-        <DropdownMenuItem onClick={() => void done(act(() => mailApi.patchThread(t.id, t.state === "muted" ? "open" : "muted"), t.state === "muted" ? "已取消静音" : "已静音，这串往来的新邮件不再提醒"))} data-thread-mute><BellOffIcon />{t.state === "muted" ? "取消静音" : "静音"}</DropdownMenuItem>
+        {t.state !== "done" && <DropdownMenuItem onClick={() => void done(act(() => mailApi.patchThread(t.id, "done"), tr("mail:thread.markDoneDone")))} data-thread-done><CheckIcon />{tr("mail:thread.markDone")}</DropdownMenuItem>}
+        <DropdownMenuItem onClick={() => void act(() => mailApi.archive(t.id), tr("mail:thread.archived")).then((r) => r && go("#/mail"))} data-thread-archive><ArchiveIcon />{tr("mail:thread.archive")}</DropdownMenuItem>
+        <DropdownMenuItem onClick={() => void done(act(() => mailApi.patchThread(t.id, t.state === "muted" ? "open" : "muted"), t.state === "muted" ? tr("mail:thread.unmuted") : tr("mail:thread.mutedToast")))} data-thread-mute><BellOffIcon />{t.state === "muted" ? tr("mail:thread.unmute") : tr("mail:thread.mute")}</DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
   )
@@ -144,9 +152,10 @@ function ThreadActions({ t, reload }: { t: Thread; reload: () => Promise<void> }
 
 /** 让邮件 Bot 起草 (with what you want said) or 自己回复 (an empty draft to the last sender) */
 function Compose({ t, hasDraft, reload }: { t: Thread; hasDraft: boolean; reload: () => Promise<void> }) {
+  const tr = useT()
   const [mode, setMode] = useState<"" | "bot">(""), [ins, setIns] = useState(""), [busy, act] = useBusy()
   const lastIn = [...t.messages].reverse().find((m) => m.direction === "in")
-  const botDraft = async () => { const r = await act(() => mailApi.quickDraft(t.id, { instruction: ins.trim() || undefined }), "邮件 Bot 起草好了，看一下再发"); if (r) { setMode(""); setIns(""); await reload(); await refresh() } }
+  const botDraft = async () => { const r = await act(() => mailApi.quickDraft(t.id, { instruction: ins.trim() || undefined }), tr("mail:thread.botReady")); if (r) { setMode(""); setIns(""); await reload(); await refresh() } }
   const mine = async () => {
     if (!lastIn) return
     const r = await act(() => mailApi.newDraft({ connection_id: t.connection.id, mode: "reply", thread_id: t.id, reply_to: lastIn.id, to: [{ addr: lastIn.from.addr, name: lastIn.from.name }], subject: reSubject(t.subject), body: "" }))
@@ -155,15 +164,15 @@ function Compose({ t, hasDraft, reload }: { t: Thread; hasDraft: boolean; reload
   if (hasDraft && !mode) return null
   if (mode === "bot") return (
     <form className="flex flex-col gap-2 rounded-xl border p-3" onSubmit={(e) => { e.preventDefault(); void botDraft() }} data-bot-draft-form>
-      <label htmlFor="mail-ins" className="type-callout text-muted-foreground">想怎么回？（可选）</label>
-      <Textarea id="mail-ins" autoFocus className="min-h-16 rounded-lg" maxLength={2000} placeholder="例如：同意改到周五下午两点，顺便问一下议程" value={ins} onChange={(e) => setIns(e.target.value)} data-bot-draft-ins />
-      <div className="flex justify-end gap-2"><Button type="button" variant="ghost" onClick={() => setMode("")}>取消</Button><Button type="submit" disabled={busy} data-bot-draft-go>{busy ? <Spinner /> : <SparklesIcon />}{busy ? "起草中…" : "起草"}</Button></div>
+      <label htmlFor="mail-ins" className="type-callout text-muted-foreground">{tr("mail:thread.insLabel")}</label>
+      <Textarea id="mail-ins" autoFocus className="min-h-16 rounded-lg" maxLength={2000} placeholder={tr("mail:thread.insPlaceholder")} value={ins} onChange={(e) => setIns(e.target.value)} data-bot-draft-ins />
+      <div className="flex justify-end gap-2"><Button type="button" variant="ghost" onClick={() => setMode("")}>{tr("common:action.cancel")}</Button><Button type="submit" disabled={busy} data-bot-draft-go>{busy ? <Spinner /> : <SparklesIcon />}{busy ? tr("mail:thread.drafting") : tr("mail:thread.draft")}</Button></div>
     </form>
   )
   return (
     <div className="flex flex-wrap gap-2" data-compose>
-      <Button variant="outline" onClick={() => setMode("bot")} data-bot-draft><PenLineIcon />让邮件 Bot 起草</Button>
-      {lastIn && <Button variant="outline" disabled={busy} onClick={() => void mine()} data-reply-mine><ReplyIcon />自己回复</Button>}
+      <Button variant="outline" onClick={() => setMode("bot")} data-bot-draft><PenLineIcon />{tr("mail:thread.botDraft")}</Button>
+      {lastIn && <Button variant="outline" disabled={busy} onClick={() => void mine()} data-reply-mine><ReplyIcon />{tr("mail:thread.replyMine")}</Button>}
     </div>
   )
 }

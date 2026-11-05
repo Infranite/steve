@@ -1,5 +1,6 @@
 import { modReq } from "@/api"
 import type { Health, Install } from "@/upgrade-guide"
+import { t } from "@/i18n"
 
 export type UpdatePhase = "awaiting_approval" | "staging" | "ready" | "draining" | "stopping" | "backing_up" | "restarting" | "verifying" | "committed" | "succeeded" | "rolling_back" | "rolled_back_pending_health" | "rolled_back" | "failed"
 export type UpdateCheck = { status: "available" | "up_to_date" | "ahead" | "unknown_current" | "no_release" | "error" | "unsupported_platform"; checked_at: number; version: string | null; release_url: string | null; notes: string | null; error: string | null }
@@ -25,6 +26,7 @@ export const updateActive = (op: UpdateOperation | null) => !!op && !["succeeded
 export const updateKey = (repository: string, version: string, retryOf?: string) => `web-upgrade:${repository}:${version}${retryOf ? `:retry:${retryOf}` : ""}`
 export const sameReleaseVersion = (left: string, right: string) => left.replace(/^v/, "") === right.replace(/^v/, "")
 export const repairKey = (state: UpdateState, version: string) => `${updateKey(state.repository, version)}:align:${state.current.hub}:${state.current.web}:${state.operation?.id ?? "initial"}`
-export const updatePhaseLabel: Record<UpdatePhase, string> = {
-  awaiting_approval: "等待管理员批准", staging: "正在下载并校验升级包", ready: "升级包已就绪", draining: "正在等待运行中的任务安全停止", stopping: "正在停止旧版本", backing_up: "正在备份数据", restarting: "正在重启", verifying: "正在验证新版本", committed: "版本已切换，正在恢复服务", succeeded: "新版本已运行", rolling_back: "正在恢复旧版本", rolled_back_pending_health: "旧版本已恢复，正在确认服务健康", rolled_back: "已恢复旧版本", failed: "升级未完成",
-}
+const PHASES: readonly UpdatePhase[] = ["awaiting_approval", "staging", "ready", "draining", "stopping", "backing_up", "restarting", "verifying", "committed", "succeeded", "rolling_back", "rolled_back_pending_health", "rolled_back", "failed"]
+/** what each phase reads as, in the current UI language: every lookup translates, so a language switch shows at once */
+export const updatePhaseLabel = Object.defineProperties({} as Record<UpdatePhase, string>,
+  Object.fromEntries(PHASES.map((p) => [p, { enumerable: true, get: () => t(`misc:update.phase.${p}`) }])))

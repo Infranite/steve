@@ -13,8 +13,8 @@ import { tm } from "@/store"
 import { ContactAvatar } from "@/people/avatar"
 import { useLoad } from "@/accounts/load"
 import { mailApi, VIEWS, DRAFT_STATUS, type MailView, type ThreadBrief, type MailAccount } from "@/api/mail"
+import { useT } from "@/i18n"
 
-const ALL = "全部"
 const query = () => new URLSearchParams(/\?(.*)$/.exec(location.hash)?.[1] ?? "")
 const isView = (v: string | null): v is MailView => !!v && VIEWS.some(([x]) => x === v)
 /** keep the view, mailbox and search in the address, so back from a thread lands on the same list */
@@ -24,24 +24,26 @@ const remember = (p: { view: MailView; account: string; q: string }) => {
 }
 
 export function MailView() {
+  const t = useT()
   const A = useLoad(() => mailApi.accounts(), [], ["mail", "connection"])
   if (A.s === "unwired") return <Unwired id="mail" />
-  if (A.s === "loading") return <Page title="邮件"><div className="flex justify-center py-16"><Spinner className="size-5 text-muted-foreground" /></div></Page>
-  if (A.s === "error") return <Page title="邮件"><Empty title={A.err} /></Page>
+  if (A.s === "loading") return <Page title={t("mail:shared.title")}><div className="flex justify-center py-16"><Spinner className="size-5 text-muted-foreground" /></div></Page>
+  if (A.s === "error") return <Page title={t("mail:shared.title")}><Empty title={A.err} /></Page>
   if (!A.data.length) return <Onboarding />
   return <Threads accounts={A.data} />
 }
 
 /** no mailbox yet: the prototype's first-run card */
 function Onboarding() {
+  const t = useT()
   return (
-    <Page title="邮件" sub="收件、分诊、起草回复；每封信都在你批准后才发出" max={640}>
+    <Page title={t("mail:shared.title")} sub={t("mail:list.onboardingSub")} max={640}>
       <div className="flex items-start gap-3 rounded-xl border px-4 py-4" data-mail-onboarding>
         <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground"><MailIcon className="size-[18px]" strokeWidth={1.5} /></span>
         <div className="min-w-0 flex-1">
-          <div className="type-headline">要接入邮件和日历吗？</div>
-          <div className="mt-0.5 type-callout text-muted-foreground">接入后 Steve 帮你分诊来信：需要你回的列出来，邮件 Bot 起草回复，你改过、点发送才会发出。通知类邮件进汇报，不打扰你。</div>
-          <Button size="sm" className="mt-3" onClick={() => go("#/accounts")} data-mail-connect><PlusIcon />接入邮箱</Button>
+          <div className="type-headline">{t("mail:list.onboardingTitle")}</div>
+          <div className="mt-0.5 type-callout text-muted-foreground">{t("mail:list.onboardingBody")}</div>
+          <Button size="sm" className="mt-3" onClick={() => go("#/accounts")} data-mail-connect><PlusIcon />{t("mail:list.connect")}</Button>
         </div>
       </div>
     </Page>
@@ -49,20 +51,21 @@ function Onboarding() {
 }
 
 function Threads({ accounts }: { accounts: MailAccount[] }) {
+  const tr = useT(), ALL = tr("mail:list.all")
   const q0 = query()
   const [view, setView] = useState<MailView>(isView(q0.get("view")) ? (q0.get("view") as MailView) : "needs_reply")
   const [account, setAccount] = useState(accounts.some((a) => a.connection_id === q0.get("account")) ? q0.get("account")! : "")
   const [q, setQ] = useState(q0.get("q") ?? ""), [qq, setQq] = useState(q)
-  useEffect(() => { const t = setTimeout(() => setQq(q.trim()), 250); return () => clearTimeout(t) }, [q])
+  useEffect(() => { const h = setTimeout(() => setQq(q.trim()), 250); return () => clearTimeout(h) }, [q])
   useEffect(() => remember({ view, account, q: qq }), [view, account, qq])
   const T = useLoad(() => mailApi.threads({ view, account: account || undefined, q: qq || undefined, limit: 100 }), [view, account, qq], ["mail"])
   const labels = useMemo(() => accounts.map((a) => a.address || a.connection_id), [accounts])
   if (T.s === "unwired") return <Unwired id="mail" />
   const unread = accounts.reduce((n, a) => n + a.unread, 0)
   return (
-    <Page title="邮件" sub={unread ? `${unread} 封未读` : undefined} max={820}
+    <Page title={tr("mail:shared.title")} sub={unread ? tr("mail:shared.unread", { count: unread }) : undefined} max={820}
       toolbar={<div className="relative"><SearchIcon className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" aria-hidden />
-        <Input type="search" aria-label="搜索邮件" placeholder="搜索主题、发件人" className="h-8 w-56 rounded-lg pl-8" value={q} onChange={(e) => setQ(e.target.value)} data-mail-search /></div>}>
+        <Input type="search" aria-label={tr("mail:list.searchAria")} placeholder={tr("mail:list.searchPlaceholder")} className="h-8 w-56 rounded-lg pl-8" value={q} onChange={(e) => setQ(e.target.value)} data-mail-search /></div>}>
       <div className="mb-4 flex flex-col gap-3">
         {accounts.length > 1 && <Chips value={account ? labels[accounts.findIndex((a) => a.connection_id === account)] : ALL} options={[ALL, ...labels]}
           onChange={(l) => setAccount(l === ALL ? "" : accounts[labels.indexOf(l)]?.connection_id ?? "")} className="flex-wrap" />}
@@ -70,15 +73,15 @@ function Threads({ accounts }: { accounts: MailAccount[] }) {
       </div>
       {T.s === "loading" ? <div className="flex justify-center py-16"><Spinner className="size-5 text-muted-foreground" /></div>
         : T.s === "error" ? <Empty title={T.err} />
-        : !T.data.length ? <Empty title={qq ? "没有匹配的邮件" : EMPTY[view]} />
+        : !T.data.length ? <Empty title={qq ? tr("mail:list.noMatch") : tr(`mail:list.empty.${view}`)} />
         : <div data-mail-list={view}><Group>{T.data.map((t) => <ThreadRow key={t.id} t={t} showAccount={accounts.length > 1 && !account} />)}</Group></div>}
     </Page>
   )
 }
-const EMPTY: Record<MailView, string> = { needs_reply: "没有需要你处理的邮件", inbox: "收件箱是空的", waiting: "没有在等对方回复的往来", sent: "还没有发出的邮件", drafts: "没有草稿", all: "没有邮件" }
 
 function ThreadRow({ t, showAccount }: { t: ThreadBrief; showAccount: boolean }) {
-  const name = t.from?.name || t.from?.addr || "（没有发件人）"
+  const tr = useT()
+  const name = t.from?.name || t.from?.addr || tr("mail:list.noSender")
   return (
     <button type="button" onClick={() => go("#/mail/t/" + t.id)} role="listitem" className="flex w-full items-start gap-3 rounded-lg px-2 py-2.5 text-left transition-colors hover:bg-accent" data-thread-row={t.id} data-unread={t.unread > 0 || undefined}>
       <ContactAvatar name={name} size={32} className="mt-0.5" />
@@ -88,14 +91,14 @@ function ThreadRow({ t, showAccount }: { t: ThreadBrief; showAccount: boolean })
           {t.from?.org && <span className="shrink-0 truncate type-footnote text-muted-foreground">{t.from.org}</span>}
           {t.count > 1 && <span className="shrink-0 type-footnote tabular-nums text-muted-foreground">{t.count}</span>}
           <span className="flex-1" />
-          {t.has_attachments && <PaperclipIcon className="size-3.5 shrink-0 text-muted-foreground" aria-label="有附件" />}
+          {t.has_attachments && <PaperclipIcon className="size-3.5 shrink-0 text-muted-foreground" aria-label={tr("mail:shared.hasAttachments")} />}
           <span className="shrink-0 type-footnote tabular-nums text-muted-foreground">{tm(t.last_at)}</span>
         </span>
-        <span className={cn("block truncate type-callout", t.unread > 0 ? "text-foreground" : "text-foreground/85")}>{t.unread > 0 && <span className="mr-1.5 inline-block size-2 rounded-full bg-blue align-middle" aria-label="未读" />}{t.subject || "（没有主题）"}</span>
+        <span className={cn("block truncate type-callout", t.unread > 0 ? "text-foreground" : "text-foreground/85")}>{t.unread > 0 && <span className="mr-1.5 inline-block size-2 rounded-full bg-blue align-middle" aria-label={tr("mail:list.unread")} />}{t.subject || tr("mail:shared.noSubject")}</span>
         <span className="block truncate type-footnote text-muted-foreground">{t.snippet}</span>
         {(t.signal || t.item_id || t.draft || showAccount) && <span className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 type-footnote text-muted-foreground">
           {t.signal && <span className="inline-flex items-center gap-1.5" data-thread-signal><StatusDot s={/等你|需要/.test(t.signal.outcome_label) ? "wait" : "idle"} />{t.signal.outcome_label}</span>}
-          {t.draft && <span className="inline-flex items-center gap-1.5" data-thread-draft-status={t.draft.status}><StatusDot s={DRAFT_STATUS[t.draft.status]?.[1] ?? "idle"} />草稿 · {DRAFT_STATUS[t.draft.status]?.[0] ?? t.draft.status}</span>}
+          {t.draft && <span className="inline-flex items-center gap-1.5" data-thread-draft-status={t.draft.status}><StatusDot s={DRAFT_STATUS[t.draft.status]?.[1] ?? "idle"} />{tr("mail:list.draftStatus", { status: DRAFT_STATUS[t.draft.status]?.[0] ?? t.draft.status })}</span>}
           {t.item_id && <ItemNo id={t.item_id} />}
           {showAccount && <span className="truncate">{t.connection.address}</span>}
         </span>}

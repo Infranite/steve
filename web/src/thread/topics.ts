@@ -1,5 +1,6 @@
 /* ST-50: the conversation's history as topics, and where the reader was. Pure, so node tests can import it. */
 import type { Msg } from "../store"
+import { t as tr } from "../i18n/index.ts"
 
 /** a pause this long starts a new topic (the same gap Cindy splits its work groups at) */
 export const TOPIC_GAP = 30 * 60_000
@@ -25,7 +26,7 @@ export function topicsOf(msgs: Msg[]): Topic[] {
     for (const id of [m.item, m.card?.item, ...(m.k === "me" ? m.t?.match(ITEM) ?? [] : [])]) if (id && !cur.items.includes(id)) cur.items.push(id)
   }
   if (cur) out.push(cur)
-  return out.reverse().map(({ named: _, ...t }) => ({ ...t, title: t.title || "（附件）" }))
+  return out.reverse().map(({ named: _, ...t }) => ({ ...t, title: t.title || tr("thread:topic.attachment") }))
 }
 
 /** a few words of `text` around the first match of `q`, the match marked by its offsets */

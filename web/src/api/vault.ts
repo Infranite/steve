@@ -1,7 +1,8 @@
 /* The vault (accounts-vault.md §4, §5): status and keys, items with masked fields, grants, the use log, passkeys and the
  * reveal ceremony. No response here carries a secret value except `revealFinish`, whose value the caller only shows. */
-import { mget, mpost, mpatch, mput, mdel } from "@/api/accounts"
+import { mget, mpost, mpatch, mput, mdel, lazy } from "@/api/accounts"
 import { qs as q } from "@/api"
+import { t } from "@/i18n"
 
 export type Sensitivity = "normal" | "sensitive" | "high"
 /** where the master keys live (accounts-vault.md §3.3); a Hub that doesn't say uses the macOS keychain */
@@ -48,27 +49,33 @@ export const vaultApi = {
   deletePasskey: (id: string) => mdel<{ ok: true }>("/passkeys/" + e(id)),
 }
 
-export const SENS_LABEL: Record<Sensitivity, string> = { normal: "普通", sensitive: "敏感", high: "高密" }
-export const MODE_LABEL: Record<string, string> = { env: "环境变量注入", file: "临时文件注入", stdin: "标准输入注入", internal: "连接内部使用", view: "本机查看", copy: "本机复制", browser_fill: "浏览器代填" }
-export const USE_STATUS: Record<string, string> = { pending: "等你批准", denied: "没有批准", running: "执行中", ok: "完成", failed: "失败", expired: "已过期" }
+export const SENS_LABEL: Record<Sensitivity, string> = lazy({ normal: () => t("api:sens.normal"), sensitive: () => t("api:sens.sensitive"), high: () => t("api:sens.high") })
+export const MODE_LABEL: Record<string, string> = lazy({
+  env: () => t("api:mode.env"), file: () => t("api:mode.file"), stdin: () => t("api:mode.stdin"), internal: () => t("api:mode.internal"),
+  view: () => t("api:mode.view"), copy: () => t("api:mode.copy"), browser_fill: () => t("api:mode.browserFill"),
+})
+export const USE_STATUS: Record<string, string> = lazy({
+  pending: () => t("api:useStatus.pending"), denied: () => t("api:useStatus.denied"), running: () => t("api:useStatus.running"),
+  ok: () => t("api:useStatus.ok"), failed: () => t("api:useStatus.failed"), expired: () => t("api:useStatus.expired"),
+})
 /** the 400 when this device has no passkey (§4.2), verbatim from the Hub */
 export const NEED_PASSKEY = "先在这台设备上登记 Touch ID 或通行密钥"
 
 /** the store holding the master key, as a place: "Mac mini 的钥匙串", "Linux 密钥环", "密钥目录 /srv/steve-keys" */
 export function keyStoreWhere(s: RVaultStatus): string {
   const k = s.keystore
-  if (!k || k.kind === "keychain") return "Mac mini 的钥匙串"
-  if (k.kind === "secret-service") return "Linux 密钥环"
+  if (!k || k.kind === "keychain") return t("api:keystore.keychain")
+  if (k.kind === "secret-service") return t("api:keystore.secretService")
   return k.label
 }
 /** the master key's state in its store, worded for that store; the macOS texts are the Hub's own 503 messages */
 export function keyStoreState(s: RVaultStatus): string {
   const kind = s.keystore?.kind ?? "keychain", where = keyStoreWhere(s)
   switch (s.keychain) {
-    case "ok": return "正常"
-    case "missing": return kind === "keychain" ? "钥匙串里没有主密钥，请用恢复码恢复" : `${where}里没有主密钥，请用恢复码恢复`
-    case "locked": return kind === "keychain" ? "Mac mini 的钥匙串被锁了（Mac mini 重启后还没有登录）" : kind === "secret-service" ? "Linux 密钥环被锁了（登录桌面解锁后再试）" : `${where}被锁了`
-    case "denied": return kind === "keychain" ? "钥匙串没有授权这个版本的 Steve 读取主密钥（发布时没有用固定签名）" : kind === "secret-service" ? "Linux 密钥环拒绝了 Steve（授权提示被关掉或没人响应）" : `${where}拒绝了 Steve 读取主密钥`
+    case "ok": return t("api:keystore.ok")
+    case "missing": return kind === "keychain" ? t("api:keystore.keychainMissing") : t("api:keystore.missing", { where })
+    case "locked": return kind === "keychain" ? t("api:keystore.keychainLocked") : kind === "secret-service" ? t("api:keystore.secretServiceLocked") : t("api:keystore.locked", { where })
+    case "denied": return kind === "keychain" ? t("api:keystore.keychainDenied") : kind === "secret-service" ? t("api:keystore.secretServiceDenied") : t("api:keystore.denied", { where })
     default: return s.keychain
   }
 }

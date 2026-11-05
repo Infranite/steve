@@ -7,9 +7,11 @@ import { Button } from "@/components/ui/button"
 import { CardContent } from "@/components/ui/card"
 import { Markdown } from "@/components/markdown"
 import { flowApi } from "@/api/flow"
+import { useT } from "@/i18n"
 
 export const FLOW_SUBJECTS = ["flow_step", "signal", "flow_run"]
-const LABEL: Record<string, string> = { done: "知道了", to_item: "转成事项", retry: "重试", drop: "放弃这次", continue_once: "这次预算翻倍，继续", stop: "停下" }
+/* the label of each option the hub sends; any other option is shown as it is */
+const LABEL = { done: "auto:decision.done", to_item: "auto:decision.toItem", retry: "common:action.retry", drop: "auto:decision.drop", continue_once: "auto:decision.continueOnce", stop: "auto:decision.stop" } as const
 const QUIET = new Set(["done", "drop", "stop", "不执行"])
 
 type Ctx = { summary?: string; flow?: { id: string; name: string } | null; event?: string | null }
@@ -35,6 +37,8 @@ export function FlowDecisionBody({ w, act, busy, head, foot }: {
   w: { subject: string; subjectId?: string; q: string; draft?: string; options: string[]; decision: string }; act: (c: string) => void; busy: boolean; head: (t: ReactNode) => ReactNode; foot: (c: ReactNode) => ReactNode
 }) {
   const c = useCtx(w.subject, w.subjectId ?? "")
+  const t = useT()
+  const label = (o: string) => (o in LABEL ? t(LABEL[o as keyof typeof LABEL]) : o)
   const opts = w.options.length ? w.options : w.subject === "signal" ? ["done", "to_item"] : []
   /* the first option that moves things on is the primary button (rightmost); “不…”, 知道了, 放弃 stay quiet */
   const primary = opts.find((o) => !QUIET.has(o) && !o.startsWith("不")) ?? opts[0], rest = opts.filter((o) => o !== primary)
@@ -42,12 +46,12 @@ export function FlowDecisionBody({ w, act, busy, head, foot }: {
     {head(w.q)}
     <CardContent className="flex flex-col gap-2 pb-4" data-flow-card={w.subject}>
       {((c.summary && c.summary !== w.q) || c.flow) && <div className="flex flex-wrap items-center gap-x-1.5 gap-y-1 type-footnote text-muted-foreground">
-        {c.summary && c.summary !== w.q && (c.event ? <a href={"#/signals?e=" + encodeURIComponent(c.event)} className="min-w-0 truncate hover:text-foreground hover:underline">「{c.summary}」</a> : <span>「{c.summary}」</span>)}
-        {c.flow && <a href={"#/auto/rule/" + c.flow.id} className="inline-flex items-center gap-1 hover:text-foreground"><WorkflowIcon className="size-3.5" aria-hidden />流程「{c.flow.name}」</a>}
+        {c.summary && c.summary !== w.q && (c.event ? <a href={"#/signals?e=" + encodeURIComponent(c.event)} className="min-w-0 truncate hover:text-foreground hover:underline">{t("auto:quoted", { text: c.summary })}</a> : <span>{t("auto:quoted", { text: c.summary })}</span>)}
+        {c.flow && <a href={"#/auto/rule/" + c.flow.id} className="inline-flex items-center gap-1 hover:text-foreground"><WorkflowIcon className="size-3.5" aria-hidden />{t("auto:flowRef", { name: c.flow.name })}</a>}
       </div>}
       {w.draft && <div className="max-h-72 overflow-auto break-words type-body text-muted-foreground"><Markdown text={w.draft} /></div>}
     </CardContent>
-    {foot(<>{rest.map((o, i) => <Button key={o} variant={QUIET.has(o) ? "ghost" : "outline"} className={i === 0 && QUIET.has(o) ? "mr-auto text-muted-foreground" : undefined} disabled={busy} onClick={() => act(o)} data-flow-choice={o}>{LABEL[o] ?? o}</Button>)}
-      {primary && <Button disabled={busy} onClick={() => act(primary)} data-flow-choice={primary}>{LABEL[primary] ?? primary}</Button>}</>)}
+    {foot(<>{rest.map((o, i) => <Button key={o} variant={QUIET.has(o) ? "ghost" : "outline"} className={i === 0 && QUIET.has(o) ? "mr-auto text-muted-foreground" : undefined} disabled={busy} onClick={() => act(o)} data-flow-choice={o}>{label(o)}</Button>)}
+      {primary && <Button disabled={busy} onClick={() => act(primary)} data-flow-choice={primary}>{label(primary)}</Button>}</>)}
   </>
 }

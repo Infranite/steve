@@ -22,6 +22,8 @@ import {
   type Comp, type Problem, type Scope, type Surface,
 } from "@/a2ui/model"
 import { A2uiPending, HostCtx, Nested } from "@/a2ui/host"
+import { useT } from "@/i18n"
+import { date, num } from "@/i18n/format"
 
 /* ───────── the block ───────── */
 /** a ```a2ui code block: a placeholder while it is written, the surfaces once it is closed, a note when it can't be drawn */
@@ -39,23 +41,23 @@ export function A2uiBlock({ src, streaming, code }: { src: string; streaming?: b
 }
 
 function Broken({ why, problems, code }: { why: string; problems: Problem[]; code: ReactNode }) {
-  const [open, setOpen] = useState(false)
+  const t = useT(), [open, setOpen] = useState(false)
   return (
     <div className="my-3 rounded-xl border px-4 py-3" data-a2ui-broken>
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1 type-callout">
         <L.TriangleAlertIcon className="size-4 shrink-0 text-attention" aria-hidden />
-        <span className="text-foreground">这段界面没能显示：{why}</span>
-        <button type="button" className="type-footnote text-muted-foreground hover:text-foreground" aria-expanded={open} onClick={() => setOpen(!open)}>{open ? "收起" : "查看原始描述"}</button>
+        <span className="text-foreground">{t("misc:a2ui.broken", { why })}</span>
+        <button type="button" className="type-footnote text-muted-foreground hover:text-foreground" aria-expanded={open} onClick={() => setOpen(!open)}>{open ? t("misc:a2ui.hide") : t("misc:a2ui.showSource")}</button>
       </div>
       {open && <div className="mt-2">{problems.length > 0 && <ProblemList list={problems} />}<div className="[&_[data-streamdown=code-block]]:mb-0">{code}</div></div>}
     </div>
   )
 }
 function Problems({ list }: { list: Problem[] }) {
-  const [open, setOpen] = useState(false)
+  const t = useT(), [open, setOpen] = useState(false)
   return (
     <div className="type-footnote text-muted-foreground" data-a2ui-problems>
-      <button type="button" className="hover:text-foreground" aria-expanded={open} onClick={() => setOpen(!open)}>界面描述有 {list.length} 处问题，已跳过{open ? "（收起）" : "（查看）"}</button>
+      <button type="button" className="hover:text-foreground" aria-expanded={open} onClick={() => setOpen(!open)}>{open ? t("misc:a2ui.problemsOpen", { count: list.length }) : t("misc:a2ui.problems", { count: list.length })}</button>
       {open && <ProblemList list={list} />}
     </div>
   )
@@ -77,7 +79,7 @@ const RunCtx = createContext<Run | null>(null)
 const draftKey = (msg: string, block: string, surface: string) => `steve.a2ui.${msg}.${block}.${surface}`
 
 function SurfaceView({ s, block }: { s: Surface; block: string }) {
-  const host = useContext(HostCtx), key = actionKey(block, s.id)
+  const t = useT(), host = useContext(HostCtx), key = actionKey(block, s.id)
   const done = host?.records[key]
   /* what the inputs show: the values submitted, else what you typed before a reload, else the model as written */
   const [data, setData] = useState<unknown>(() => {
@@ -88,7 +90,7 @@ function SurfaceView({ s, block }: { s: Surface; block: string }) {
   useEffect(() => { if (done?.data !== undefined) setData(done.data) }, [done])
   const [busy, setBusy] = useState<string | null>(null)
   const inflight = useRef(false)
-  const locked = done ? "已提交" : host?.readonly ?? (host ? null : "在主线对话里可以操作")
+  const locked = done ? t("misc:a2ui.submitted") : host?.readonly ?? (host ? null : t("misc:a2ui.mainOnly"))
   const set = (ptr: string, v: unknown) => setData((d: unknown) => {
     const next = setPointer(d, ptr, v)
     if (host) try { localStorage.setItem(draftKey(host.msg, block, s.id), JSON.stringify(next)) } catch { /* full or private */ }
@@ -98,7 +100,7 @@ function SurfaceView({ s, block }: { s: Surface; block: string }) {
     const a = (c.action ?? {}) as { event?: { name?: unknown; context?: unknown }; functionCall?: { call?: unknown; args?: Record<string, unknown> } }
     if (a.functionCall?.call === "openUrl") {
       const url = str(resolve(a.functionCall.args?.url, scope))
-      if (/^https?:\/\//i.test(url)) window.open(url, "_blank", "noopener,noreferrer"); else toast("只能打开 http(s) 链接")
+      if (/^https?:\/\//i.test(url)) window.open(url, "_blank", "noopener,noreferrer"); else toast(t("misc:a2ui.httpOnly"))
       return
     }
     if (!a.event || typeof a.event.name !== "string") return
@@ -108,10 +110,10 @@ function SurfaceView({ s, block }: { s: Surface; block: string }) {
       const r = await a2uiSubmit(host.msg, {
         block, surfaceId: s.id, sourceComponentId: c.id, name: a.event.name, label, context: eventContext(a.event.context, scope), data, timestamp: new Date().toISOString(),
       })
-      if (r.already) toast("这个界面已经提交过了")
+      if (r.already) toast(t("misc:a2ui.already"))
       try { localStorage.removeItem(draftKey(host.msg, block, s.id)) } catch { /* ignore */ }
     } catch (e) {
-      toast(`没提交成功：${(e as Error).message || "网络错误"}，可以再试一次`)
+      toast(t("misc:a2ui.submitFailed", { error: (e as Error).message || t("misc:a2ui.network") }))
     } finally { inflight.current = false; setBusy(null) }
   }
   const run: Run = { s, data, set, done, locked, busy, fire }
@@ -120,7 +122,7 @@ function SurfaceView({ s, block }: { s: Surface; block: string }) {
       <Nested.Provider value>
         <section className="flex min-w-0 flex-col gap-2" data-a2ui-surface={s.id} data-a2ui-state={done ? "submitted" : locked ? "readonly" : "open"}>
           <Node id="root" base="/" depth={0} trail="" />
-          {done && <div className="flex items-center gap-1.5 type-footnote text-muted-foreground" data-a2ui-done><L.CircleCheckIcon className="size-3.5 text-success" aria-hidden />已提交「{done.label || done.name}」{done.at ? ` · ${new Date(done.at).toLocaleString("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })}` : ""}</div>}
+          {done && <div className="flex items-center gap-1.5 type-footnote text-muted-foreground" data-a2ui-done><L.CircleCheckIcon className="size-3.5 text-success" aria-hidden />{done.at ? t("misc:a2ui.doneAt", { label: done.label || done.name, time: date(done.at, { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }) }) : t("misc:a2ui.done", { label: done.label || done.name })}</div>}
           {!done && locked && <div className="type-footnote text-muted-foreground" data-a2ui-readonly>{locked}</div>}
         </section>
       </Nested.Provider>
@@ -133,15 +135,15 @@ type P = { c: Comp; scope: Scope; depth: number; trail: string }
 const useRun = () => useContext(RunCtx)!
 
 function Node({ id, base, depth, trail }: { id: string; base: string; depth: number; trail: string }) {
-  const run = useRun()
+  const t = useT(), run = useRun()
   const c = run.s.comps.get(id)
   const here = `${id}@${base}`
   /* a missing child is not written yet (or never will be): skip it; a loop or an absurd depth stops */
   if (!c || trail.split("|").includes(here)) return null
-  if (depth > LIMITS.depth) return <Unsupported what={`嵌套超过 ${LIMITS.depth} 层`} />
+  if (depth > LIMITS.depth) return <Unsupported what={t("misc:a2ui.tooDeep", { n: LIMITS.depth })} />
   const scope: Scope = { data: run.data, base }
   const R = (run.s.catalog === STEVE ? STEVE_COMPONENTS : BASIC_COMPONENTS)[c.component]
-  if (!R) return <Unsupported what={`不支持的组件：${c.component}`} />
+  if (!R) return <Unsupported what={t("misc:a2ui.unsupported", { name: c.component })} />
   return <R c={c} scope={scope} depth={depth} trail={`${trail}|${here}`} />
 }
 const Child = ({ id, scope, depth, trail }: { id: unknown; scope: Scope; depth: number; trail: string }) =>
@@ -171,13 +173,13 @@ const safeMedia = (u: string, image = false) => /^https:\/\//i.test(u) || (image
 const IMG: Record<string, string> = { icon: "size-6", avatar: "size-10 rounded-full", smallFeature: "max-h-32 max-w-48", mediumFeature: "max-h-60 max-w-full", largeFeature: "max-h-96 max-w-full", header: "h-40 w-full" }
 const FIT: Record<string, string> = { contain: "object-contain", cover: "object-cover", fill: "object-fill", none: "object-none", scaleDown: "object-scale-down" }
 function Image({ c, scope }: P) {
-  const u = str(resolve(c.url, scope))
-  if (!safeMedia(u, true)) return <Unsupported what="图片地址只能是 https" />
+  const t = useT(), u = str(resolve(c.url, scope))
+  if (!safeMedia(u, true)) return <Unsupported what={t("misc:a2ui.imageHttps")} />
   return <img src={u} alt={str(resolve(c.description, scope)) || a11y(c, scope) || ""} loading="lazy" referrerPolicy="no-referrer" className={cn("rounded-lg", IMG[String(c.variant)] ?? IMG.mediumFeature, FIT[String(c.fit)] ?? (c.variant === "header" ? "object-cover" : "object-contain"))} />
 }
 function Media({ c, scope }: P) {
-  const u = str(resolve(c.url, scope))
-  if (!safeMedia(u)) return <Unsupported what="媒体地址只能是 https" />
+  const t = useT(), u = str(resolve(c.url, scope))
+  if (!safeMedia(u)) return <Unsupported what={t("misc:a2ui.mediaHttps")} />
   return c.component === "Video" ? <video src={u} controls preload="metadata" className="max-h-80 w-full rounded-lg bg-black" /> : <audio src={u} controls preload="metadata" className="w-full" aria-label={str(resolve(c.description, scope)) || undefined} />
 }
 const ICONS: Record<string, ComponentType<{ className?: string }>> = {
@@ -211,21 +213,22 @@ function Card({ c, scope, depth, trail }: P) {
   return <div className="min-w-0 rounded-xl border bg-card px-4 py-3.5" data-a2ui-card><Child id={c.child} scope={scope} depth={depth} trail={trail} /></div>
 }
 function TabsC({ c, scope, depth, trail }: P) {
-  const tabs = Array.isArray(c.tabs) ? (c.tabs as { title?: unknown; child?: unknown }[]).filter((t) => t && typeof t.child === "string") : []
+  const t = useT()
+  const tabs = Array.isArray(c.tabs) ? (c.tabs as { title?: unknown; child?: unknown }[]).filter((x) => x && typeof x.child === "string") : []
   if (!tabs.length) return null
   return (
     <Tabs defaultValue={0} className="min-w-0">
-      <TabsList className="max-w-full overflow-x-auto">{tabs.map((t, i) => <TabsTrigger key={i} value={i}>{str(resolve(t.title, scope)) || `第 ${i + 1} 页`}</TabsTrigger>)}</TabsList>
-      {tabs.map((t, i) => <TabsContent key={i} value={i} className="pt-1"><Child id={t.child} scope={scope} depth={depth} trail={trail} /></TabsContent>)}
+      <TabsList className="max-w-full overflow-x-auto">{tabs.map((x, i) => <TabsTrigger key={i} value={i}>{str(resolve(x.title, scope)) || t("misc:a2ui.tab", { n: i + 1 })}</TabsTrigger>)}</TabsList>
+      {tabs.map((x, i) => <TabsContent key={i} value={i} className="pt-1"><Child id={x.child} scope={scope} depth={depth} trail={trail} /></TabsContent>)}
     </Tabs>
   )
 }
 function Modal({ c, scope, depth, trail }: P) {
-  const [open, setOpen] = useState(false), run = useRun()
+  const t = useT(), [open, setOpen] = useState(false), run = useRun()
   return <>
     <RunCtx.Provider value={{ ...run, trigger: () => setOpen(true) }}><Child id={c.trigger} scope={scope} depth={depth} trail={trail} /></RunCtx.Provider>
     <Dialog open={open} onOpenChange={setOpen}>
-      <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-lg"><DialogTitle className="sr-only">{a11y(c, scope) ?? "详情"}</DialogTitle><Child id={c.content} scope={scope} depth={depth} trail={trail} /></DialogContent>
+      <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-lg"><DialogTitle className="sr-only">{a11y(c, scope) ?? t("misc:a2ui.details")}</DialogTitle><Child id={c.content} scope={scope} depth={depth} trail={trail} /></DialogContent>
     </Dialog>
   </>
 }
@@ -241,9 +244,9 @@ function labelOf(id: unknown, run: Run, scope: Scope, n = 0): string {
   return ""
 }
 function ButtonC({ c, scope, depth, trail }: P) {
-  const run = useRun(), [errs, setErrs] = useState<string[]>([])
+  const t = useT(), run = useRun(), [errs, setErrs] = useState<string[]>([])
   const ev = !!(c.action as { event?: unknown } | undefined)?.event
-  const label = labelOf(c.child, run, scope) || a11y(c, scope) || "按钮"
+  const label = labelOf(c.child, run, scope) || a11y(c, scope) || t("misc:a2ui.button")
   const mine = run.done?.sourceComponentId === c.id
   const click = () => {
     if (run.trigger) { run.trigger(); return }
@@ -259,7 +262,7 @@ function ButtonC({ c, scope, depth, trail }: P) {
         {run.busy === c.id ? <Spinner className="size-3.5" /> : mine ? <L.CheckIcon /> : null}
         <span className="truncate"><Child id={c.child} scope={scope} depth={depth} trail={trail} /></span>
       </Button>
-      {errs.length > 0 && <div role="alert" className="type-footnote text-destructive">{errs.join("；")}</div>}
+      {errs.length > 0 && <div role="alert" className="type-footnote text-destructive">{errs.join(t("misc:a2ui.errSep"))}</div>}
     </div>
   )
 }
@@ -272,18 +275,21 @@ function useBound(c: Comp, scope: Scope, prop = "value") {
   const value = cur !== undefined ? cur : isBinding(v) ? undefined : resolve(v, scope)
   return { value, set: (x: unknown) => run.set(path, x), off: !!run.locked }
 }
-const Field = ({ label, children, errs, htmlFor }: { label?: string; children: ReactNode; errs?: string[]; htmlFor?: string }) => (
+function Field({ label, children, errs, htmlFor }: { label?: string; children: ReactNode; errs?: string[]; htmlFor?: string }) {
+  const t = useT()
+  return (
   <div className="flex min-w-0 flex-col gap-1.5">
     {label && <label htmlFor={htmlFor} className="type-label text-muted-foreground">{label}</label>}
     {children}
-    {errs && errs.length > 0 && <div className="type-footnote text-destructive">{errs.join("；")}</div>}
+    {errs && errs.length > 0 && <div className="type-footnote text-destructive">{errs.join(t("misc:a2ui.errSep"))}</div>}
   </div>
-)
+  )
+}
 function TextField({ c, scope }: P) {
-  const b = useBound(c, scope), [touched, setTouched] = useState(false), id = `a2ui-${c.id}-${scope.base}`
+  const t = useT(), b = useBound(c, scope), [touched, setTouched] = useState(false), id = `a2ui-${c.id}-${scope.base}`
   const v = String(c.variant ?? "shortText"), val = str(b.value)
   const re = typeof c.validationRegexp === "string" && c.validationRegexp.length <= 200 ? (() => { try { return new RegExp(c.validationRegexp as string) } catch { return null } })() : null
-  const errs = touched ? [...(re && val && !re.test(val) ? ["格式不对"] : []), ...failedChecks(c, scope)] : []
+  const errs = touched ? [...(re && val && !re.test(val) ? [t("misc:a2ui.badFormat")] : []), ...failedChecks(c, scope)] : []
   const props = { id, value: val, disabled: b.off, onBlur: () => setTouched(true), "aria-invalid": errs.length > 0 || undefined }
   return (
     <Field label={str(resolve(c.label, scope))} errs={errs} htmlFor={id}>
@@ -302,7 +308,7 @@ function CheckBoxC({ c, scope }: P) {
   )
 }
 function ChoicePicker({ c, scope }: P) {
-  const b = useBound(c, scope), [q, setQ] = useState("")
+  const t = useT(), b = useBound(c, scope), [q, setQ] = useState("")
   const multi = c.variant === "multipleSelection"
   const opts = (Array.isArray(c.options) ? c.options : []).filter((o): o is { label: unknown; value: string } => !!o && typeof (o as { value?: unknown }).value === "string")
     .map((o) => ({ value: o.value, label: str(resolve(o.label, scope)) || o.value }))
@@ -313,7 +319,7 @@ function ChoicePicker({ c, scope }: P) {
   const chips = c.displayStyle === "chips"
   return (
     <Field label={label}>
-      {c.filterable === true && opts.length > 6 && <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="筛选" className="h-8 max-w-60" />}
+      {c.filterable === true && opts.length > 6 && <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder={t("misc:a2ui.filter")} className="h-8 max-w-60" />}
       <div role={multi ? "group" : "radiogroup"} aria-label={label || undefined} className={cn("flex min-w-0 flex-wrap", chips ? "gap-2" : "flex-col gap-1.5")} data-a2ui-choice={c.id}>
         {shown.map((o) => {
           const on = sel.includes(o.value)
@@ -354,19 +360,19 @@ function DateTimeInput({ c, scope }: P) {
 const KIND = { line: "line", bar: "group", stack: "stack" } as const
 const DAY = /^\d{4}-\d{2}-\d{2}$/
 function ChartC({ c, scope }: P) {
-  const [table, setTable] = useState(false)
+  const t = useT(), [table, setTable] = useState(false)
   const rows = chartRows(resolve(c.data, scope), resolve(c.last, scope))
   const x = typeof c.x === "string" ? c.x : "x"
   const series = (Array.isArray(c.series) ? c.series : []).filter((s): s is { key: string; label?: unknown } => !!s && typeof (s as { key?: unknown }).key === "string")
     .map((s) => ({ key: s.key, label: str(resolve(s.label, scope)) || s.key }))
   const unit = str(resolve(c.unit, scope)), title = str(resolve(c.title, scope))
-  const fmt = (v: number) => `${v.toLocaleString("zh-CN", { maximumFractionDigits: 2 })}${unit && unit.length <= 2 ? unit : ""}`
+  const fmt = (v: number) => `${num(v, { maximumFractionDigits: 2 })}${unit && unit.length <= 2 ? unit : ""}`
   const n = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : typeof v === "string" && v.trim() !== "" && Number.isFinite(Number(v)) ? Number(v) : null)
   const kind = String(c.kind ?? "line")
-  if (!series.length || !rows.length) return <Unsupported what={title ? `${title}：没有数据` : "图表没有数据"} />
+  if (!series.length || !rows.length) return <Unsupported what={title ? t("misc:a2ui.noDataTitled", { title }) : t("misc:a2ui.noData")} />
   const legend = series.length > 1 ? series.map((s, i) => ({ label: s.label, c: seriesColor(i), line: kind === "line" })) : undefined
-  const head = <ChartHead title={title || series[0].label} meta={[unit, rows.length > 1 && DAY.test(str(rows[0][x])) ? `${str(rows[0][x])} – ${str(rows[rows.length - 1][x])}` : ""].filter(Boolean).join(" · ") || undefined} legend={legend}
-    right={<button type="button" className="type-footnote text-muted-foreground hover:text-foreground" aria-pressed={table} onClick={() => setTable(!table)} data-a2ui-chart-table>{table ? "看图" : "看表格"}</button>} />
+  const head = <ChartHead title={title || series[0].label} meta={[unit, rows.length > 1 && DAY.test(str(rows[0][x])) ? t("common:time.range", { from: str(rows[0][x]), to: str(rows[rows.length - 1][x]) }) : ""].filter(Boolean).join(" · ") || undefined} legend={legend}
+    right={<button type="button" className="type-footnote text-muted-foreground hover:text-foreground" aria-pressed={table} onClick={() => setTable(!table)} data-a2ui-chart-table>{table ? t("misc:a2ui.showChart") : t("misc:a2ui.showTable")}</button>} />
   const body = table ? (
     <div className="md" data-md-table><div className="overflow-x-auto"><table><thead><tr><th>{x}</th>{series.map((s) => <th key={s.key}>{s.label}</th>)}</tr></thead>
       <tbody>{rows.map((r, i) => <tr key={i}><td>{str(r[x])}</td>{series.map((s) => <td key={s.key} className="tabular-nums">{n(r[s.key]) == null ? "—" : fmt(n(r[s.key])!)}</td>)}</tr>)}</tbody></table></div></div>

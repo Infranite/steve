@@ -12,44 +12,48 @@ import { Textarea } from "@/components/ui/textarea"
 import { st, tm, emit, chatSend, takeOffer, chooseSuggest, cancelQueued, stopRun, clearFocus, focusItem, quoteMsg, decisionDraft, decide, botName, alertClosed, closeAlerts, type Msg, type SuggestChoice, type Steps, type Update, type Item, type ItemCardState } from "@/store"
 import { ItemRef, DecisionCard, ItemNo, StatusDot, AlertClose, go } from "@/ui"
 import { jumpToMsg, threadMsg } from "@/thread/history"
+import { Trans } from "react-i18next"
+import { t as tr, useT } from "@/i18n"
 
 /* ───────── research ───────── */
 const isRead = (n: string) => n === "Read"
 const isSearch = (n: string) => n === "Grep" || n === "Glob" || n === "LS"
 const isKb = (n: string) => n.includes("knowledge")
-const secs = (ms: number) => `${Math.max(1, Math.round(ms / 1000))} 秒`
+const secs = (ms: number) => tr("common:dur.seconds", { count: Math.max(1, Math.round(ms / 1000)) })
 /** "读了 9 个文件 · 搜索 4 次 · 知识库 2 次 · 41 秒" for a finished research run */
 export function researchSummary(s: Steps): string {
   const ts = s.tools, r = s.research
   const files = new Set(ts.filter((t) => isRead(t.name)).map((t) => String(t.args?.brief ?? ""))).size
-  const parts = [files && `读了 ${files} 个文件`, ts.filter((t) => isSearch(t.name)).length && `搜索 ${ts.filter((t) => isSearch(t.name)).length} 次`,
-    ts.filter((t) => isKb(t.name)).length && `知识库 ${ts.filter((t) => isKb(t.name)).length} 次`,
-    ts.filter((t) => t.name.includes("steve_item")).length && `查事项 ${ts.filter((t) => t.name.includes("steve_item")).length} 次`].filter(Boolean) as string[]
-  if (!parts.length) parts.push("没有读文件")
+  const searches = ts.filter((t) => isSearch(t.name)).length, kb = ts.filter((t) => isKb(t.name)).length, items = ts.filter((t) => t.name.includes("steve_item")).length
+  const parts = [files && tr("thread:research.files", { count: files }), searches && tr("thread:research.searches", { count: searches }),
+    kb && tr("thread:research.kb", { count: kb }), items && tr("thread:research.items", { count: items })].filter(Boolean) as string[]
+  if (!parts.length) parts.push(tr("thread:research.noFiles"))
   const failures = ts.filter((t) => t.status === "failed").length
-  if (failures) parts.push(`${failures} 次调用失败`)
+  if (failures) parts.push(tr("thread:research.failures", { count: failures }))
   if (r?.ms != null) parts.push(secs(r.ms))
-  const stop = r?.stopped ? { user: "你停下了", budget: "没读完", violation: "越界停下", restart: "Hub 重启", failed: "失败" }[r.stopped] : ""
+  const stop = r?.stopped ? tr(`thread:research.stopped.${r.stopped}`) : ""
   return [...parts, stop].filter(Boolean).join(" · ")
 }
 /** the icon of a research tool row */
 export function researchIcon(name: string) { return isRead(name) ? FileTextIcon : isSearch(name) ? SearchIcon : isKb(name) ? LibraryIcon : FileTextIcon }
-const TOOL_LABEL = (n: string) => (isRead(n) ? "读" : isSearch(n) ? "搜索" : isKb(n) ? "查知识库" : n.includes("item") ? "查事项" : n)
+const TOOL_LABEL = (n: string) => (isRead(n) ? tr("thread:research.tool.read") : isSearch(n) ? tr("thread:research.tool.search") : isKb(n) ? tr("thread:research.tool.kb") : n.includes("item") ? tr("thread:research.tool.item") : n)
+/** "正在读" / "正在搜索": the live line's verb for a tool */
+const liveLabel = (n: string) => (isRead(n) ? tr("thread:research.live.read") : isSearch(n) ? tr("thread:research.live.search") : isKb(n) ? tr("thread:research.live.kb") : n.includes("item") ? tr("thread:research.live.item") : tr("thread:research.live.other", { name: n }))
 export const researchToolLabel = TOOL_LABEL
 
 /** the research being read right now: one line that keeps changing, with a stop button */
 export function ResearchLive() {
-  const l = st.live, [, tick] = useState(0)
+  const l = st.live, [, tick] = useState(0), t = useT()
   useEffect(() => { if (!l) return; const t = setInterval(() => tick((x) => x + 1), 1000); return () => clearInterval(t) }, [l?.run])
   if (!l) return null
   const last = l.tools[l.tools.length - 1], I = last ? researchIcon(last.name) : FileTextIcon
   return (
     <div className="-mb-1 flex max-w-[88%] items-center gap-2 self-start px-1" data-research-live={l.run}>
       <TraceLine className="min-w-0 flex-1"><TraceIcon>{last ? <I strokeWidth={1.5} /> : <Spinner className="size-3.5" />}</TraceIcon>
-        <TraceTitle className="shrink-0">{last ? (isRead(last.name) ? "正在读" : "正在" + TOOL_LABEL(last.name)) : "正在读"}</TraceTitle>
+        <TraceTitle className="shrink-0">{last ? liveLabel(last.name) : t("thread:research.live.read")}</TraceTitle>
         <TraceDescription className="min-w-0 shrink truncate font-mono text-[12px]">{last?.brief ?? "…"}</TraceDescription>
-        <TraceDescription className="shrink-0 tabular-nums">· 第 {l.tools.length} 个工具 · {secs(Date.now() - l.t0)}{Date.now() - l.t0 > 90_000 ? " · 还在读…" : ""}</TraceDescription></TraceLine>
-      <Button size="xs" variant="outline" className="shrink-0" onClick={() => stopRun(l.run)} data-research-stop><SquareIcon className="fill-current" />停</Button>
+        <TraceDescription className="shrink-0 tabular-nums">{t(Date.now() - l.t0 > 90_000 ? "thread:research.liveMetaSlow" : "thread:research.liveMeta", { n: l.tools.length, time: secs(Date.now() - l.t0) })}</TraceDescription></TraceLine>
+      <Button size="xs" variant="outline" className="shrink-0" onClick={() => stopRun(l.run)} data-research-stop><SquareIcon className="fill-current" />{t("thread:research.stop")}</Button>
     </div>
   )
 }
@@ -57,33 +61,33 @@ export function ResearchLive() {
 /* ───────── offer · suggestion card · ask ───────── */
 /** "要我改吗？ [做成事项：…] [不用]" under an answer */
 export function OfferLine({ m }: { m: Msg }) {
-  const o = m.offer, [busy, setBusy] = useState(false), [open, setOpen] = useState(false)
+  const o = m.offer, [busy, setBusy] = useState(false), [open, setOpen] = useState(false), t = useT()
   if (!o) return null
   if (o.state === "taken") return o.item ? (st.thread.some((x) => x.card?.item === o.item) ? <CardLink id={o.item} /> : <ItemRef id={o.item} />) : null
   if (o.state === "dismissed") return null
   const act = async (take: boolean) => { setBusy(true); try { await takeOffer(m, take) } finally { setBusy(false) } }
-  if (o.folded && !open) return <button type="button" className="mt-2 self-start type-footnote text-muted-foreground hover:text-foreground" onClick={() => setOpen(true)} data-offer-folded={m.id}>之前提议过：{o.title}</button>
+  if (o.folded && !open) return <button type="button" className="mt-2 self-start type-footnote text-muted-foreground hover:text-foreground" onClick={() => setOpen(true)} data-offer-folded={m.id}>{t("thread:offer.folded", { title: o.title })}</button>
   return (
     <div className="mt-3 flex flex-wrap items-center gap-2" data-offer={m.id}>
-      <span className="type-callout text-muted-foreground">要我改吗？</span>
-      <Button size="sm" variant="outline" className="max-w-full rounded-full" disabled={busy} onClick={() => void act(true)} data-offer-take><span className="truncate">做成事项：{o.title}</span></Button>
-      <Button size="sm" variant="ghost" className="text-muted-foreground" disabled={busy} onClick={() => void act(false)} data-offer-dismiss>不用</Button>
+      <span className="type-callout text-muted-foreground">{t("thread:offer.question")}</span>
+      <Button size="sm" variant="outline" className="max-w-full rounded-full" disabled={busy} onClick={() => void act(true)} data-offer-take><span className="truncate">{t("thread:offer.take", { title: o.title })}</span></Button>
+      <Button size="sm" variant="ghost" className="text-muted-foreground" disabled={busy} onClick={() => void act(false)} data-offer-dismiss>{t("thread:offer.dismiss")}</Button>
     </div>
   )
 }
 
 /** a suggestion card: answer here or make it an item; greyed once expired, still clickable */
 export function SuggestCard({ m }: { m: Msg }) {
-  const s = m.suggest, [busy, setBusy] = useState(false)
+  const s = m.suggest, [busy, setBusy] = useState(false), t = useT()
   if (!s) return null
   const chosen = s.state === "chosen"
   const act = async (c: SuggestChoice) => { setBusy(true); try { await chooseSuggest(m, c) } finally { setBusy(false) } }
   return (
     <div className={cn("mt-3 flex flex-col gap-2", s.state === "expired" && "opacity-60")} data-suggest={m.id} data-suggest-state={s.state}>
-      {chosen ? <div className="type-footnote text-muted-foreground">{s.chosen === "here" ? "你选了在这里回答" : s.item ? "" : "你选了建成事项"}</div>
+      {chosen ? <div className="type-footnote text-muted-foreground">{s.chosen === "here" ? t("thread:suggest.choseHere") : s.item ? "" : t("thread:suggest.choseItem")}</div>
         : <div className="flex flex-wrap gap-2">{s.choices.map((c) => (
           <Button key={c.id} size="sm" variant={(s.choices.some((x) => x.recommended) ? c.recommended : c.id === "here") ? "default" : "outline"} className="max-w-full rounded-full" disabled={busy} onClick={() => void act(c.id)} data-suggest-choice={c.id}><span className="truncate">{c.label}</span></Button>))}
-          {s.state === "expired" && <span className="self-center type-footnote text-muted-foreground">过了 24 小时，仍可点</span>}</div>}
+          {s.state === "expired" && <span className="self-center type-footnote text-muted-foreground">{t("thread:suggest.expired")}</span>}</div>}
       {s.item && (st.thread.some((x) => x.card?.item === s.item) ? <CardLink id={s.item} /> : <ItemRef id={s.item} />)}
     </div>
   )
@@ -95,8 +99,9 @@ const answering = new Set<string>()
  *  `conv`: an IM conversation, where the question is for the people in the chat — the options are what they can reply,
  *  not buttons that would speak in your own conversation */
 export function AskChips({ m, conv }: { m: Msg; conv?: boolean }) {
+  const t = useT()
   if (!m.ask?.options?.length) return null
-  if (conv) return <div className="mt-2 type-footnote text-muted-foreground" data-ask={m.id} data-ask-readonly>可以回复：{m.ask.options.join(" / ")}</div>
+  if (conv) return <div className="mt-2 type-footnote text-muted-foreground" data-ask={m.id} data-ask-readonly>{t("thread:ask.canReply", { options: m.ask.options.join(" / ") })}</div>
   const at = st.thread.findIndex((x) => x === m || (!!m.id && x.id === m.id))
   if (at >= 0 && st.thread.slice(at + 1).some((x) => x.k === "me")) return null
   const key = m.id ?? ""
@@ -110,17 +115,19 @@ export function AskChips({ m, conv }: { m: Msg; conv?: boolean }) {
 
 /** "（Hub 重启，没答完）": ask the question again (your own conversation only: an IM turn is asked in its chat) */
 export function Rerun({ m, conv }: { m: Msg; conv?: boolean }) {
+  const t = useT()
   if (!m.rerun || conv) return null
   const q = st.thread.find((x) => x.id === m.rerun)
-  return q?.t ? <div className="mt-3"><Button size="sm" variant="outline" className="rounded-full" onClick={() => void chatSend(q.t!)} data-rerun><RotateCcwIcon />重新回答</Button></div> : null
+  return q?.t ? <div className="mt-3"><Button size="sm" variant="outline" className="rounded-full" onClick={() => void chatSend(q.t!)} data-rerun><RotateCcwIcon />{t("thread:rerun")}</Button></div> : null
 }
 
 /* ───────── queue · quote ───────── */
 /** under a user message waiting behind a research run */
 export function QueuedNote({ m }: { m: Msg }) {
+  const t = useT()
   if (!m.queued) return null
   const run = m.queued.run
-  return <div className="flex items-center gap-2 self-end type-footnote text-muted-foreground" data-queued={m.id}><Spinner className="size-3" />排队中{run && <button type="button" className="hover:text-foreground hover:underline" onClick={() => cancelQueued(run)} data-queued-cancel>取消</button>}</div>
+  return <div className="flex items-center gap-2 self-end type-footnote text-muted-foreground" data-queued={m.id}><Spinner className="size-3" />{t("thread:queued")}{run && <button type="button" className="hover:text-foreground hover:underline" onClick={() => cancelQueued(run)} data-queued-cancel>{t("common:action.cancel")}</button>}</div>
 }
 
 /** scroll to a message and flash it; the conversation offers the way back (ST-50) */
@@ -128,32 +135,33 @@ export function jumpTo(id: string) { jumpToMsg(id, threadMsg(id)?.created) }
 const clip = (t: string, n = 24) => { const x = t.replace(/\s+/g, " ").trim(); return x.length > n ? x.slice(0, n) + "…" : x }
 /** "↳ 你 18:09 说的「…」": the message this one answers or quotes */
 export function QuoteHead({ id, className }: { id?: string; className?: string }) {
+  const t = useT()
   if (!id) return null
   const q = threadMsg(id)
   if (!q) return null
   return (
     <button type="button" onClick={() => jumpTo(id)} className={cn("flex max-w-full items-center gap-1 self-start truncate type-footnote text-muted-foreground hover:text-foreground", className)} data-quote={id}>
-      <CornerDownRightIcon className="size-3.5 shrink-0" /><span className="truncate">{q.k === "me" ? "你" : "Steve"} {tm(q.created)} 说的「{clip(q.t ?? "")}」</span>
+      <CornerDownRightIcon className="size-3.5 shrink-0" /><span className="truncate">{t(q.k === "me" ? "thread:quote.me" : "thread:quote.steve", { time: tm(q.created), text: clip(q.t ?? "") })}</span>
     </button>
   )
 }
 
 /* ───────── flow-back from an item (§5.2) ───────── */
 function UpdateRow({ u }: { u: Update }) {
-  const i = st.items.find((x) => x.id === u.item), [full, setFull] = useState(false)
+  const i = st.items.find((x) => x.id === u.item), [full, setFull] = useState(false), t = useT()
   const w = u.decision ? i?.waits.find((x) => x.decision === u.decision) : undefined
   if (u.kind === "done" || u.kind === "drop") {
     const I = u.kind === "done" ? CircleCheckIcon : BanIcon
-    return <div className="flex items-center gap-2 type-callout" data-update={u.kind}><I className={cn("size-4 shrink-0", u.kind === "done" ? "text-success" : "text-muted-foreground")} strokeWidth={1.75} /><ItemNo id={u.item} /><span className="min-w-0 truncate">{u.text || (u.kind === "done" ? "完成：" : "放弃：") + (i?.t ?? "")}</span></div>
+    return <div className="flex items-center gap-2 type-callout" data-update={u.kind}><I className={cn("size-4 shrink-0", u.kind === "done" ? "text-success" : "text-muted-foreground")} strokeWidth={1.75} /><ItemNo id={u.item} /><span className="min-w-0 truncate">{u.text || t(u.kind === "done" ? "thread:update.done" : "thread:update.drop", { title: i?.t ?? "" })}</span></div>
   }
   if ((u.kind === "ask" || u.kind === "fail") && w && i) return <div className="flex flex-col gap-2" data-update={u.kind}>{u.text && u.kind === "fail" && <div className="flex items-center gap-2 type-callout"><CircleAlertIcon className="size-4 text-destructive" strokeWidth={1.75} />{u.text}</div>}<DecisionCard i={i} w={w} showItem={false} /></div>
   if (u.kind === "deliver") {
     const all = full ? decisionDraft(u.decision ?? "") : undefined
     return (
       <div className="flex flex-col gap-2" data-update="deliver">
-        <div className="type-footnote text-muted-foreground"><ItemNo id={u.item} /> 交付了{w ? "，等你验收" : ""}</div>
+        <div className="type-footnote text-muted-foreground"><ItemNo id={u.item} />{" "}{t(w ? "thread:update.deliveredAccept" : "thread:update.delivered")}</div>
         <Markdown text={all ?? u.text ?? ""} className="type-chat" />
-        {!u.full && u.decision && <button type="button" className="self-start type-footnote text-muted-foreground hover:text-foreground" onClick={() => setFull(!full)} data-update-expand>{full ? "收起" : "展开全文"}</button>}
+        {!u.full && u.decision && <button type="button" className="self-start type-footnote text-muted-foreground hover:text-foreground" onClick={() => setFull(!full)} data-update-expand>{full ? t("thread:update.collapse") : t("thread:update.expandFull")}</button>}
         {w && i && <DecisionCard i={i} w={w} showItem={false} />}
       </div>
     )
@@ -173,32 +181,32 @@ type Look = { label: string; dot: string; tone: "run" | "wait" | "fail" | "done"
 /** what the card says the item is doing now: live from the item, with the card for what the item no longer shows (released) */
 export function cardLook(i: Item, c?: ItemCardState): Look {
   const w = i.waits[0]
-  if (i.st === "done") return c?.released ? { label: "已发布", version: c.released.version, dot: "done", tone: "done" } : { label: "已完成", dot: "done", tone: "done" }
-  if (i.st === "drop") return { label: "已放弃", dot: "drop", tone: "quiet" }
-  if (w?.type === "fail") return { label: "出错了，等你处理", dot: "fail", tone: "fail" }
-  if (w?.type === "accept") return { label: "交付了，等你验收", dot: "wait", tone: "wait" }
-  if (w?.subject === "release") return { label: "等你批准发布", dot: "wait", tone: "wait" }
-  if (w?.subject === "tool_call") return { label: "等你允许", dot: "wait", tone: "wait" }
-  if (w?.type === "approve") return { label: "等你批准", dot: "wait", tone: "wait" }
-  if (w?.type === "ask") return { label: "等你回答", dot: "wait", tone: "wait" }
-  if (w) return { label: "等你", dot: "wait", tone: "wait" }
-  if (i.st === "block") return { label: "等前置事项", dot: "block", tone: "quiet" }
-  if (i.st === "pause") return { label: "已暂停", dot: "pause", tone: "quiet" }
-  if (i.rel?.tone === "run") return { label: "正在发布", dot: "run", tone: "run" }
-  return { label: "进行中", dot: "run", tone: "run" }
+  if (i.st === "done") return c?.released ? { label: tr("thread:card.status.released"), version: c.released.version, dot: "done", tone: "done" } : { label: tr("thread:card.status.done"), dot: "done", tone: "done" }
+  if (i.st === "drop") return { label: tr("thread:card.status.dropped"), dot: "drop", tone: "quiet" }
+  if (w?.type === "fail") return { label: tr("thread:card.status.failed"), dot: "fail", tone: "fail" }
+  if (w?.type === "accept") return { label: tr("thread:card.status.accept"), dot: "wait", tone: "wait" }
+  if (w?.subject === "release") return { label: tr("thread:card.status.release"), dot: "wait", tone: "wait" }
+  if (w?.subject === "tool_call") return { label: tr("thread:card.status.toolCall"), dot: "wait", tone: "wait" }
+  if (w?.type === "approve") return { label: tr("thread:card.status.approve"), dot: "wait", tone: "wait" }
+  if (w?.type === "ask") return { label: tr("thread:card.status.answer"), dot: "wait", tone: "wait" }
+  if (w) return { label: tr("thread:card.status.waiting"), dot: "wait", tone: "wait" }
+  if (i.st === "block") return { label: tr("thread:card.status.blocked"), dot: "block", tone: "quiet" }
+  if (i.st === "pause") return { label: tr("thread:card.status.paused"), dot: "pause", tone: "quiet" }
+  if (i.rel?.tone === "run") return { label: tr("thread:card.status.releasing"), dot: "run", tone: "run" }
+  return { label: tr("thread:card.status.running"), dot: "run", tone: "run" }
 }
 const TONE: Record<Look["tone"], string> = { run: "text-blue", wait: "text-attention", fail: "text-destructive", done: "text-success", quiet: "text-muted-foreground" }
 
 /** the delivery summary, two lines until opened; the full text is the acceptance draft when there is one */
 function DeliveryBlock({ d, open: open0 = false }: { d: NonNullable<ItemCardState["delivery"]>; open?: boolean }) {
-  const [open, setOpen] = useState(open0)
+  const [open, setOpen] = useState(open0), t = useT()
   const all = open && d.decision ? decisionDraft(d.decision) : undefined
   return (
     <div className="flex min-w-0 flex-col gap-1" data-card-delivery>
-      <div className="type-footnote text-muted-foreground">交付摘要</div>
+      <div className="type-footnote text-muted-foreground">{t("thread:card.delivery")}</div>
       <div className={cn("min-w-0 break-words", !open && "line-clamp-2")}><Markdown text={all ?? d.text} className="type-callout" /></div>
       <button type="button" className="flex items-center gap-0.5 self-start type-footnote text-muted-foreground hover:text-foreground" onClick={() => setOpen(!open)} data-card-expand>
-        {open ? "收起" : "展开"}<ChevronDownIcon className={cn("size-3.5 transition-transform", open && "rotate-180")} /></button>
+        {open ? t("thread:card.collapse") : t("thread:card.expand")}<ChevronDownIcon className={cn("size-3.5 transition-transform", open && "rotate-180")} /></button>
     </div>
   )
 }
@@ -211,14 +219,14 @@ function Linked({ text }: { text: string }) {
 
 /** accept or send back right on the card: the summary above is what was delivered */
 function AcceptRow({ i, decision }: { i: Item; decision: string }) {
-  const [rework, setRework] = useState(false), [txt, setTxt] = useState(""), [busy, setBusy] = useState(false)
-  const act = async (c: string, t?: string) => { setBusy(true); try { await decide(i.id, c, t, decision) } finally { setBusy(false) } }
+  const [rework, setRework] = useState(false), [txt, setTxt] = useState(""), [busy, setBusy] = useState(false), t = useT()
+  const act = async (c: string, text?: string) => { setBusy(true); try { await decide(i.id, c, text, decision) } finally { setBusy(false) } }
   return (
     <div className="flex flex-col gap-2" data-card-accept={decision}>
-      {rework && <Textarea autoFocus className="min-h-16 rounded-lg" placeholder={`哪里不对？写给${botName(i.b)}`} value={txt} onChange={(e) => setTxt(e.target.value)} data-rework />}
+      {rework && <Textarea autoFocus className="min-h-16 rounded-lg" placeholder={t("thread:card.reworkPlaceholder", { bot: botName(i.b) })} value={txt} onChange={(e) => setTxt(e.target.value)} data-rework />}
       <div className="flex flex-wrap justify-end gap-2">{rework
-        ? <><Button size="sm" variant="ghost" onClick={() => setRework(false)}>取消</Button><Button size="sm" disabled={busy} onClick={() => void act("rework", txt.trim())}>发回返工</Button></>
-        : <><Button size="sm" variant="outline" onClick={() => setRework(true)}>返工…</Button><Button size="sm" disabled={busy} onClick={() => void act("pass")} data-pass><CheckIcon />验收通过</Button></>}</div>
+        ? <><Button size="sm" variant="ghost" onClick={() => setRework(false)}>{t("common:action.cancel")}</Button><Button size="sm" disabled={busy} onClick={() => void act("rework", txt.trim())}>{t("thread:card.sendRework")}</Button></>
+        : <><Button size="sm" variant="outline" onClick={() => setRework(true)}>{t("thread:card.rework")}</Button><Button size="sm" disabled={busy} onClick={() => void act("pass")} data-pass><CheckIcon />{t("thread:card.pass")}</Button></>}</div>
     </div>
   )
 }
@@ -226,7 +234,7 @@ function AcceptRow({ i, decision }: { i: Item; decision: string }) {
 /** One card per item made from the conversation: what it is doing now, its latest delivery (folded), the reply to what you
  * last sent it, and whatever it needs from you — answerable right here. Lifecycle events update it; they are not messages. */
 export function ItemCard({ c, inText = false }: { c: ItemCardState; inText?: boolean }) {
-  const i = st.items.find((x) => x.id === c.item)
+  const i = st.items.find((x) => x.id === c.item), t = useT()
   if (!i) return null
   const look = cardLook(i, c), w = i.waits[0]
   const accept = w?.type === "accept" ? w : undefined
@@ -248,7 +256,7 @@ export function ItemCard({ c, inText = false }: { c: ItemCardState; inText?: boo
       </button>
       {d && !inText && <DeliveryBlock key={d.decision ?? d.text} d={d} open={!!d.full} />}
       {reply && <div className="flex min-w-0 flex-col gap-1 border-l-2 border-border pl-3" data-card-reply>
-        <div className="type-footnote text-muted-foreground">它的回复</div><div className="line-clamp-4 min-w-0 break-words"><Markdown text={reply.text} className="type-callout" /></div></div>}
+        <div className="type-footnote text-muted-foreground">{t("thread:card.reply")}</div><div className="line-clamp-4 min-w-0 break-words"><Markdown text={reply.text} className="type-callout" /></div></div>}
       {c.build && <div className="flex items-start gap-2 type-callout text-muted-foreground" data-card-build><CircleAlertIcon className="mt-0.5 size-4 shrink-0 text-attention" strokeWidth={1.75} />
         <span className="min-w-0 flex-1 [overflow-wrap:anywhere]"><Linked text={c.build.text.replace(new RegExp(`^${i.id}\\s+`), "")} /></span></div>}
       {failLine && <div className="flex items-start gap-2 type-callout text-muted-foreground" data-card-fail><CircleAlertIcon className="mt-0.5 size-4 shrink-0 text-destructive" strokeWidth={1.75} /><span className="min-w-0 flex-1">{failLine}</span>
@@ -261,11 +269,11 @@ export function ItemCard({ c, inText = false }: { c: ItemCardState; inText?: boo
 
 /** an item whose card is elsewhere in the conversation (it moved, or this message only mentions the item): one quiet line to the card */
 export function CardLink({ id }: { id: string }) {
-  const i = st.items.find((x) => x.id === id), at = st.thread.findLast((m) => m.card?.item === id)
+  const i = st.items.find((x) => x.id === id), at = st.thread.findLast((m) => m.card?.item === id), t = useT()
   if (!i) return null
   return (
     <button type="button" onClick={() => (at?.id ? jumpTo(at.id) : go("#/items/" + id))} className="mt-2 flex max-w-full items-center gap-1.5 self-start truncate type-footnote text-muted-foreground hover:text-foreground" data-card-link={id}>
-      <ItemNo id={id} /><span className="truncate">{i.t}</span><span className="shrink-0">· 看最新进展</span><CornerDownRightIcon className="size-3.5 shrink-0" />
+      <ItemNo id={id} /><span className="truncate">{i.t}</span><span className="shrink-0">{t("thread:card.latest")}</span><CornerDownRightIcon className="size-3.5 shrink-0" />
     </button>
   )
 }
@@ -274,18 +282,18 @@ export function CardLink({ id }: { id: string }) {
 /** the quoted message and the item the conversation is talking to */
 export function ComposerBars() {
   const q = st.quote ? threadMsg(st.quote) : undefined, f = focusItem()
-  const [, tick] = useState(0)
+  const [, tick] = useState(0), t = useT()
   useEffect(() => { if (!st.focus) return; const t = setInterval(() => { tick((x) => x + 1); if (st.focus && st.focus.until <= Date.now()) { st.focus = null; emit() } }, 30_000); return () => clearInterval(t) }, [st.focus?.item])
   if (!q && !f) return null
   const it = f ? st.items.find((x) => x.id === f) : undefined
   return (
     <div className="mb-2 flex flex-col gap-1.5" data-composer-bars>
       {q && <div className="flex min-w-0 items-center gap-2 rounded-xl bg-muted/60 px-3 py-1.5 type-footnote text-muted-foreground" data-quote-bar>
-        <MessageSquareReplyIcon className="size-3.5 shrink-0" /><span className="min-w-0 flex-1 truncate">回复{q.item ? ` ${q.item}` : ""}：「{clip(q.t ?? "", 40)}」</span>
-        <button type="button" aria-label="取消引用" onClick={() => quoteMsg(null)} className="shrink-0 hover:text-foreground"><XIcon className="size-3.5" /></button></div>}
+        <MessageSquareReplyIcon className="size-3.5 shrink-0" /><span className="min-w-0 flex-1 truncate">{q.item ? t("thread:composer.replyItem", { item: q.item, text: clip(q.t ?? "", 40) }) : t("thread:composer.reply", { text: clip(q.t ?? "", 40) })}</span>
+        <button type="button" aria-label={t("thread:composer.unquote")} onClick={() => quoteMsg(null)} className="shrink-0 hover:text-foreground"><XIcon className="size-3.5" /></button></div>}
       {f && !q?.item && <div className="flex min-w-0 items-center gap-2 rounded-xl bg-muted/60 px-3 py-1.5 type-footnote text-muted-foreground" data-focus-bar={f}>
-        <span className="size-1.5 shrink-0 rounded-full bg-blue" aria-hidden /><span className="min-w-0 flex-1 truncate">正在跟 <span className="font-mono tabular-nums text-foreground">{f}</span>{it ? ` ${it.t}` : ""} 说</span>
-        <button type="button" aria-label="不再跟这个事项说" onClick={clearFocus} className="shrink-0 hover:text-foreground" data-focus-close><XIcon className="size-3.5" /></button></div>}
+        <span className="size-1.5 shrink-0 rounded-full bg-blue" aria-hidden /><span className="min-w-0 flex-1 truncate"><Trans t={t} i18nKey={it ? "thread:composer.talkingNamed" : "thread:composer.talking"} components={{ id: <span className="font-mono tabular-nums text-foreground">{f}</span>, name: <>{it?.t}</> }} /></span>
+        <button type="button" aria-label={t("thread:composer.unfocus")} onClick={clearFocus} className="shrink-0 hover:text-foreground" data-focus-close><XIcon className="size-3.5" /></button></div>}
     </div>
   )
 }

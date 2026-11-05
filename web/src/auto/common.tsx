@@ -8,6 +8,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Page, Empty } from "@/ui"
 import { Spinner } from "@/components/ui/spinner"
 import { st } from "@/store"
+import { t, useT } from "@/i18n"
 
 export const SOURCE_ICON: Record<string, LucideIcon> = { mail: MailIcon, cal: CalendarIcon, im: MessageSquareIcon, github: GitPullRequestIcon, webhook: SirenIcon, time: ClockIcon, item: ListTodoIcon, manual: HandIcon, notify: BellIcon }
 export const srcIcon = (s: string | null | undefined) => (s && SOURCE_ICON[s]) || RadioIcon
@@ -37,15 +38,17 @@ export function Modal({ title, desc, children, footer, wide, onClose }: { title:
   )
 }
 
-export const Loading = ({ title, back }: { title: string; back?: [string, string] }) => (
-  <Page title={title} back={back}><div className="flex justify-center py-16" role="status" aria-label="载入中"><Spinner className="size-5 text-muted-foreground" /></div></Page>
-)
-export const Failed = ({ title, back, msg, retry }: { title: string; back?: [string, string]; msg: string; retry?: () => void }) => (
-  <Page title={title} back={back}><Empty title="载入失败" sub={msg} />{retry && <div className="flex justify-center"><button type="button" className="type-callout text-blue hover:underline" onClick={retry}>重试</button></div>}</Page>
-)
+export function Loading({ title, back }: { title: string; back?: [string, string] }) {
+  const t = useT()
+  return <Page title={title} back={back}><div className="flex justify-center py-16" role="status" aria-label={t("auto:loadingAria")}><Spinner className="size-5 text-muted-foreground" /></div></Page>
+}
+export function Failed({ title, back, msg, retry }: { title: string; back?: [string, string]; msg: string; retry?: () => void }) {
+  const t = useT()
+  return <Page title={title} back={back}><Empty title={t("auto:loadFailed")} sub={msg} />{retry && <div className="flex justify-center"><button type="button" className="type-callout text-blue hover:underline" onClick={retry}>{t("common:action.retry")}</button></div>}</Page>
+}
 
 /** bots of this workspace, the main one first */
-export const botOptions = () => Object.keys(st.bots).filter((k) => st.bots[k].on || st.bots[k].main).sort((a, b) => Number(!!st.bots[b].main) - Number(!!st.bots[a].main)).map((k) => ({ v: k, l: st.bots[k].main ? st.bots[k].n : st.bots[k].n + " Bot" }))
+export const botOptions = () => Object.keys(st.bots).filter((k) => st.bots[k].on || st.bots[k].main).sort((a, b) => Number(!!st.bots[b].main) - Number(!!st.bots[a].main)).map((k) => ({ v: k, l: st.bots[k].main ? st.bots[k].n : t("auto:bot.named", { name: st.bots[k].n }) }))
 export const mainBot = () => Object.keys(st.bots).find((k) => st.bots[k].main) ?? "steve"
 
 /** a future time: “今天 08:30”“明天 08:30”“周五 09:00”“11-12 09:00” */
@@ -57,4 +60,7 @@ export function Json({ v, className }: { v: unknown; className?: string }) {
   return <pre className={cn("max-h-48 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-muted/70 px-3 py-2 font-mono text-[11.5px] leading-[18px] text-foreground/85", className)}>{typeof v === "string" ? v : JSON.stringify(v, null, 2)}</pre>
 }
 
-export const RUN_STATUS: Record<string, [string, string]> = { running: ["运行中", "run"], waiting: ["等待中", "wait"], done: ["完成", "done"], failed: ["失败", "fail"], cancelled: ["已取消", "idle"], skipped: ["跳过", "idle"] }
+/** a run status → [label, StatusDot state]; the label is read in the current language each time */
+const RUN_DOT = { running: "run", waiting: "wait", done: "done", failed: "fail", cancelled: "idle", skipped: "idle" } as const
+export const RUN_STATUS: Record<string, [string, string]> = Object.defineProperties({}, Object.fromEntries(Object.entries(RUN_DOT).map(([k, dot]) =>
+  [k, { enumerable: true, get: (): [string, string] => [t(`auto:runStatus.${k as keyof typeof RUN_DOT}`), dot] }])))

@@ -2,6 +2,7 @@ import { unzip, resolve, type Zip } from "@/unzip"
 import { Segmented } from "@/ui"
 import { cn } from "cn"
 import { useEffect, useState, type ReactNode } from "react"
+import { t, useT } from "@/i18n"
 
 /* Word, Excel and PowerPoint files (docx/xlsx/pptx) read in the page: the text, headings, lists, tables and pictures of a
  * document, the cells of each sheet, the text, tables and pictures of each slide. Layout, fonts and charts are not
@@ -57,7 +58,7 @@ const pics = (): Pics => {
 /* ── Word ── */
 async function docx(z: Zip, px: Pics): Promise<Block[]> {
   const doc = xml(await z.text("word/document.xml"))
-  if (!doc) throw new Error("没有找到文档正文（word/document.xml）")
+  if (!doc) throw new Error(t("shell:office.noDocument"))
   const rel = await rels(z, "word/document.xml")
   const names = new Map<string, string>()
   for (const s of all(xml(await z.text("word/styles.xml")), "style")) names.set(attr(s, "styleId") ?? "", (attr(kid(s, "name"), "val") ?? "").toLowerCase())
@@ -120,7 +121,7 @@ const fromSerial = (v: number) => {
 }
 async function xlsx(z: Zip): Promise<Sheet[]> {
   const wb = xml(await z.text("xl/workbook.xml"))
-  if (!wb) throw new Error("没有找到工作簿（xl/workbook.xml）")
+  if (!wb) throw new Error(t("shell:office.noWorkbook"))
   const rel = await rels(z, "xl/workbook.xml")
   const shared = all(xml(await z.text("xl/sharedStrings.xml")), "si").map((si) => all(si, "t").filter((t) => t.parentElement?.localName !== "rPh").map((t) => t.textContent ?? "").join(""))
   const st = xml(await z.text("xl/styles.xml"))
@@ -153,7 +154,7 @@ async function xlsx(z: Zip): Promise<Sheet[]> {
 /* ── PowerPoint ── */
 async function pptx(z: Zip, px: Pics): Promise<Slide[]> {
   const pres = xml(await z.text("ppt/presentation.xml"))
-  if (!pres) throw new Error("没有找到演示文稿（ppt/presentation.xml）")
+  if (!pres) throw new Error(t("shell:office.noPresentation"))
   const rel = await rels(z, "ppt/presentation.xml")
   const slides: Slide[] = []
   for (const id of all(pres, "sldId")) {
@@ -196,7 +197,7 @@ export async function readOffice(buf: ArrayBuffer, name: string, px: Pics): Prom
   if (ext === "docx") return { type: "docx", blocks: await docx(z, px) }
   if (ext === "xlsx") return { type: "xlsx", sheets: await xlsx(z) }
   if (ext === "pptx") return { type: "pptx", slides: await pptx(z, px) }
-  throw new Error(`不认识的格式：${name}`)
+  throw new Error(t("shell:office.unknownFormat", { name }))
 }
 
 /* ── rendering ── */
@@ -213,14 +214,14 @@ function Blocks({ blocks }: { blocks: Block[] }) {
     : <p key={n} className={cn("min-h-[1lh] break-words", H[b.style] ?? "my-1.5", b.list != null && "relative pl-5 before:absolute before:left-1.5 before:content-['•'] before:text-muted-foreground")} style={b.list ? { marginLeft: b.list * 20 } : undefined}><Runs runs={b.runs} /></p>)}</>
 }
 function Sheets({ sheets }: { sheets: Sheet[] }) {
-  const [at, setAt] = useState(sheets[0]?.name ?? "")
+  const [at, setAt] = useState(sheets[0]?.name ?? ""), t = useT()
   const s = sheets.find((x) => x.name === at) ?? sheets[0]
-  if (!s) return <div className="py-8 text-center type-footnote text-muted-foreground">工作簿里没有工作表</div>
+  if (!s) return <div className="py-8 text-center type-footnote text-muted-foreground">{t("shell:office.noSheets")}</div>
   return (
     <div className="flex min-w-0 flex-col gap-2" data-office-sheets>
       {sheets.length > 1 && <div className="overflow-x-auto"><Segmented size="sm" value={s.name} onChange={setAt} options={sheets.map((x) => x.name)} /></div>}
-      <div className="max-h-[60vh] overflow-auto rounded-xl border" data-ann-at={`工作表 ${s.name}`} data-office-sheet={s.name}>
-        {!s.rows.length ? <div className="py-8 text-center type-footnote text-muted-foreground">这张表是空的</div> :
+      <div className="max-h-[60vh] overflow-auto rounded-xl border" data-ann-at={t("shell:office.annSheet", { name: s.name })} data-office-sheet={s.name}>
+        {!s.rows.length ? <div className="py-8 text-center type-footnote text-muted-foreground">{t("shell:office.emptySheet")}</div> :
         <table className="border-collapse type-footnote">
           <thead className="sticky top-0 z-[1] bg-muted"><tr><th className="sticky left-0 bg-muted px-2 py-1" />{Array.from({ length: s.cols }, (_, n) => <th key={n} className="min-w-16 border-l px-2 py-1 text-center font-normal text-muted-foreground">{colName(n)}</th>)}</tr></thead>
           <tbody>{s.rows.map((r, y) => <tr key={y} className="border-t">
@@ -229,22 +230,23 @@ function Sheets({ sheets }: { sheets: Sheet[] }) {
           </tr>)}</tbody>
         </table>}
       </div>
-      {s.cut && <div className="rounded-lg bg-muted/60 px-3 py-2 type-footnote text-muted-foreground">表格较大，只显示了前 {ROWS_MAX} 行、{COLS_MAX} 列</div>}
+      {s.cut && <div className="rounded-lg bg-muted/60 px-3 py-2 type-footnote text-muted-foreground">{t("shell:office.cut", { rows: ROWS_MAX, cols: COLS_MAX })}</div>}
     </div>
   )
 }
 function Slides({ slides }: { slides: Slide[] }) {
-  if (!slides.length) return <div className="py-8 text-center type-footnote text-muted-foreground">演示文稿里没有幻灯片</div>
+  const t = useT()
+  if (!slides.length) return <div className="py-8 text-center type-footnote text-muted-foreground">{t("shell:office.noSlides")}</div>
   return (
     <div className="flex flex-col gap-3" data-office-slides>
       {slides.map((s) => (
-        <section key={s.n} className="rounded-xl border px-5 py-4" data-ann-at={`第 ${s.n} 张幻灯片`} data-office-slide={s.n}>
+        <section key={s.n} className="rounded-xl border px-5 py-4" data-ann-at={t("shell:office.annSlide", { n: s.n })} data-office-slide={s.n}>
           <div className="mb-2 type-footnote tabular-nums text-muted-foreground">{s.n} / {slides.length}</div>
           {s.title && <h3 className="mb-2 text-[19px] font-semibold leading-snug">{s.title}</h3>}
           {s.parts.map((p, n) => p.kind === "img" ? <img key={n} src={p.src} alt="" className="my-2 max-h-[45vh] max-w-full rounded" />
             : p.kind === "table" ? <div key={n} className="my-2 overflow-x-auto"><table className="w-full border-collapse type-footnote"><tbody>{p.rows.map((r, k) => <tr key={k}>{r.map((c, j) => <td key={j} className="border px-2 py-1 align-top">{c}</td>)}</tr>)}</tbody></table></div>
             : <div key={n} className="my-1.5">{p.paras.map((x, k) => <p key={k} className={cn("break-words", x.level > 0 || p.paras.length > 1 ? "relative pl-5 before:absolute before:left-1.5 before:content-['•'] before:text-muted-foreground" : "")} style={x.level ? { marginLeft: x.level * 20 } : undefined}><Runs runs={x.runs} /></p>)}</div>)}
-          {!s.title && !s.parts.length && <div className="type-footnote text-tertiary">这张幻灯片没有文字或图片</div>}
+          {!s.title && !s.parts.length && <div className="type-footnote text-tertiary">{t("shell:office.emptySlide")}</div>}
         </section>
       ))}
     </div>
@@ -253,19 +255,19 @@ function Slides({ slides }: { slides: Slide[] }) {
 
 /** fetches the file and renders it; failures say what went wrong and leave the download */
 export function OfficeView({ url, name, fallback }: { url: string; name: string; fallback: (reason: string) => ReactNode }) {
-  const [doc, setDoc] = useState<OfficeDoc | null>(null), [err, setErr] = useState("")
+  const [doc, setDoc] = useState<OfficeDoc | null>(null), [err, setErr] = useState(""), t = useT()
   useEffect(() => {
     let live = true; const px = pics()
     setDoc(null); setErr("")
-    fetch(url, { credentials: "same-origin" }).then((r) => { if (!r.ok) throw new Error(`读取失败（${r.status}）`); return r.arrayBuffer() })
-      .then((b) => readOffice(b, name, px)).then((d) => live && setDoc(d), (e: Error) => live && setErr(e.message || "解析失败"))
+    fetch(url, { credentials: "same-origin" }).then((r) => { if (!r.ok) throw new Error(t("shell:office.fetchFailed", { status: r.status })); return r.arrayBuffer() })
+      .then((b) => readOffice(b, name, px)).then((d) => live && setDoc(d), (e: Error) => live && setErr(e.message || t("shell:office.parseFailed")))
     return () => { live = false; px.urls.forEach((u) => URL.revokeObjectURL(u)) }
   }, [url, name])
-  if (err) return <>{fallback(`${name} 没能在这里打开：${err}。可以下载后用本地应用查看`)}</>
-  if (!doc) return <div className="py-16 text-center type-footnote text-muted-foreground">正在读取 {name}…</div>
+  if (err) return <>{fallback(t("shell:office.cantOpen", { name, error: err }))}</>
+  if (!doc) return <div className="py-16 text-center type-footnote text-muted-foreground">{t("shell:office.loading", { name })}</div>
   return (
     <div className="min-w-0" data-office={doc.type}>
-      {doc.type === "docx" ? <article className="max-h-[60vh] overflow-auto rounded-xl border px-5 py-4 type-body" data-ann-at="">{doc.blocks.length ? <Blocks blocks={doc.blocks} /> : <div className="type-footnote text-muted-foreground">文档是空的</div>}</article>
+      {doc.type === "docx" ? <article className="max-h-[60vh] overflow-auto rounded-xl border px-5 py-4 type-body" data-ann-at="">{doc.blocks.length ? <Blocks blocks={doc.blocks} /> : <div className="type-footnote text-muted-foreground">{t("shell:office.emptyDoc")}</div>}</article>
         : doc.type === "xlsx" ? <Sheets sheets={doc.sheets} /> : <Slides slides={doc.slides} />}
     </div>
   )

@@ -3,13 +3,14 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { Unauthenticated, NotWired, HubError } from "@/api"
 import { st, emit, useHubEvents, toast } from "@/store"
+import { t } from "@/i18n"
 
 export type Load<T> = { s: "loading" } | { s: "unwired" } | { s: "error"; err: string; status: number } | { s: "ok"; data: T }
 
 /** report an error from an action: a lost session goes to the login screen, anything else is a toast */
 export function report(e: unknown) {
   if (e instanceof Unauthenticated) { st.login = e.login; emit(); return }
-  toast((e as Error)?.message || "出错了")
+  toast((e as Error)?.message || t("accounts:error.generic"))
 }
 
 /** `fn` runs on mount, when `deps` change, and when the stream says something of `types` changed */

@@ -4,6 +4,8 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { modReq as req, Unauthenticated, NotWired, qs } from "@/api"
 import { refresh, useHubEvents } from "@/store"
+import { lazy } from "@/api/accounts"
+import { t } from "@/i18n"
 
 export type Outcome = "pending" | "need" | "item" | "linked" | "digest" | "ignored" | "recorded" | "failed"
 export type Signal = {
@@ -111,6 +113,9 @@ export function useLoad<T>(f: () => Promise<T>, deps: unknown[], live: string[] 
 }
 
 /* labels shared by the pages */
-export const SOURCE_LABEL: Record<string, string> = { mail: "邮件", cal: "日程", im: "IM", github: "GitHub", webhook: "告警", time: "定时", item: "事项", manual: "手动" }
+export const SOURCE_LABEL: Record<string, string> = lazy({
+  mail: () => t("api:source.mail"), cal: () => t("api:source.cal"), im: () => t("api:source.im"), github: () => t("api:source.github"),
+  webhook: () => t("api:source.webhook"), time: () => t("api:source.time"), item: () => t("api:source.item"), manual: () => t("api:source.manual"),
+})
 export const sourceLabel = (s: string | null | undefined) => (s ? SOURCE_LABEL[s] ?? s : "")
-export const errText = (e: unknown) => (e instanceof NotWired ? "连不上 Steve，稍后重试" : (e as Error)?.message || "出错了")
+export const errText = (e: unknown) => (e instanceof NotWired ? t("api:error.unreachable") : (e as Error)?.message || t("api:error.generic"))

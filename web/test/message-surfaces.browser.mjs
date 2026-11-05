@@ -2,7 +2,7 @@ import assert from "node:assert/strict"
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || "playwright")
 const browser = await chromium.launch({ headless: true, ...(process.env.PLAYWRIGHT_EXECUTABLE ? { executablePath: process.env.PLAYWRIGHT_EXECUTABLE } : {}) })
 const base = process.env.STEVE_TEST_WEB || "http://127.0.0.1:5193"
-const page = await browser.newPage({ viewport: { width: 390, height: 844 } }), errors = []
+const page = await browser.newPage({ locale: "zh-CN", viewport: { width: 390, height: 844 } }), errors = []
 page.on("pageerror", e => errors.push(e.message))
 const message = { id: "cm_fixture", space_id: "space", direction: "in", sender: { name: "同事", party_id: null }, persona_id: null, on_behalf: "none", text: "API摘要不重复展示", status: "received", work_item_id: null, decision_id: null, created: 100, sent: null, purged: null, basis: null,
   attachments: [{ type: "card", schema: 2, title: "两处入口的同一张卡片", blocks: [{ t: "markdown", text: "**共同正文**" }] }, { type: "file", name: "资料.pdf", url: "/api/chan-messages/cm_fixture/resources/1" }] }

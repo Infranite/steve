@@ -5,6 +5,8 @@ import { loadItem, tm, toast, type Out } from "@/store"
 import { cn } from "cn"
 import { CrosshairIcon, FileTextIcon, MessageSquarePlusIcon, PencilIcon, SendIcon, SquareDashedIcon, TextSelectIcon, Trash2Icon, XIcon } from "lucide-react"
 import { useEffect, useRef, useState, type PointerEvent as PE, type RefObject } from "react"
+import { t, useT } from "@/i18n"
+import { Trans } from "react-i18next"
 
 /* notes on an output (ST-38): a region of a picture, selected text, a PDF page or the whole file. A note is a draft on the
  * Hub (so it survives a reload) until the user sends the item's drafts; they then reach the item as one message of the
@@ -16,9 +18,10 @@ const pct = (f: number) => `${Math.round(f * 100)}%`
 export function placeOf(a: { anchor: RAnchor; path?: string }, withFile = true) {
   const file = withFile && a.path ? a.path.split("/").pop() + " · " : "", at = a.anchor.at ? a.anchor.at + " · " : ""
   const x = a.anchor
-  const what = x.type === "region" ? `区域（左 ${pct(x.x)}，上 ${pct(x.y)}，宽 ${pct(x.w)}，高 ${pct(x.h)}）`
-    : x.type === "text" ? `「${x.quote.replace(/\s+/g, " ").slice(0, 60)}${x.quote.length > 60 ? "…" : ""}」${x.line ? `（第 ${x.line} 行）` : ""}`
-    : x.type === "page" ? `第 ${x.page} 页` : "整体"
+  const quote = x.type === "text" ? `${x.quote.replace(/\s+/g, " ").slice(0, 60)}${x.quote.length > 60 ? "…" : ""}` : ""
+  const what = x.type === "region" ? t("shell:ann.region", { x: pct(x.x), y: pct(x.y), w: pct(x.w), h: pct(x.h) })
+    : x.type === "text" ? (x.line ? t("shell:ann.quoteLine", { quote, line: x.line }) : t("shell:ann.quote", { quote }))
+    : x.type === "page" ? t("shell:ann.page", { page: x.page }) : t("shell:ann.whole")
   return file + at + what
 }
 
@@ -36,10 +39,10 @@ export async function sendDrafts(item: string, drafts: RAnnotation[]): Promise<b
   try {
     const r = await api.annSend(item, drafts.map((a) => a.id), k)
     sendKeys.delete(item)
-    toast(r.again ? (r.pending ? "上一次发送还在进行，稍后刷新看看" : "这些批注已经发送过") : r.warning ? `${r.sent} 条批注已记到 ${item}，但没能送达会话：${r.warning}` : `${r.sent} 条批注已发送到 ${item}`)
+    toast(r.again ? (r.pending ? t("shell:ann.stillSending") : t("shell:ann.alreadySent")) : r.warning ? t("shell:ann.sentUndelivered", { count: r.sent, item, warning: r.warning }) : t("shell:ann.sentTo", { count: r.sent, item }))
     return true
   } catch (e) {
-    toast(`没有发送成功，草稿还在：${(e as Error).message}`)
+    toast(t("shell:ann.sendFailed", { error: (e as Error).message }))
     return false
   } finally { sending.delete(item); void loadItem(item, true) }
 }
@@ -140,7 +143,7 @@ export function AnnBar({ item, art, path, notes, allDrafts, pending, setPending,
 }) {
   const [text, setText] = useState(""), [page, setPage] = useState("1"), [busy, setBusy] = useState(false)
   const [edit, setEdit] = useState<{ id: string; text: string } | null>(null)
-  const [sendBusy, setSendBusy] = useState(false)
+  const [sendBusy, setSendBusy] = useState(false), t = useT()
   useEffect(() => { setText("") }, [pending])
   const drafts = notes.filter((x) => x.a.status !== "sent"), sent = notes.filter((x) => x.a.status === "sent")
   const elsewhere = allDrafts.filter((a) => !notes.some((x) => x.a.id === a.id)).length
@@ -148,31 +151,31 @@ export function AnnBar({ item, art, path, notes, allDrafts, pending, setPending,
     if (!pending || !text.trim() || busy) return
     const anchor: RAnchor = pending.anchor.type === "page" ? { ...pending.anchor, page: Math.max(1, Math.floor(+page) || 1) } : pending.anchor
     setBusy(true)
-    try { await api.annAdd(item, { art: pending.art, path: pending.path || undefined, anchor, note: text.trim() }); setPending(null); setDrawing(false); toast("已存为草稿，确认发送前可以修改"); void loadItem(item, true) }
-    catch (e) { toast(`没有存上：${(e as Error).message}`) } finally { setBusy(false) }
+    try { await api.annAdd(item, { art: pending.art, path: pending.path || undefined, anchor, note: text.trim() }); setPending(null); setDrawing(false); toast(t("shell:ann.savedDraft")); void loadItem(item, true) }
+    catch (e) { toast(t("shell:ann.saveFailed", { error: (e as Error).message })) } finally { setBusy(false) }
   }
   const act = async (f: () => Promise<unknown>, ok: string) => { try { await f(); toast(ok) } catch (e) { toast((e as Error).message) } finally { void loadItem(item, true) } }
   return (
     <div className="flex flex-col gap-2 border-t pt-3" data-ann-bar>
       <div className="flex flex-wrap items-center gap-1.5">
-        <span className="mr-auto flex items-center gap-1.5 type-callout"><MessageSquarePlusIcon className="size-4 text-muted-foreground" />批注
-          {(drafts.length > 0 || sent.length > 0) && <span className="type-footnote text-muted-foreground">{[drafts.length && `草稿 ${drafts.length}`, sent.length && `已发送 ${sent.length}`].filter(Boolean).join(" · ")}</span>}</span>
-        {canDraw && <Button size="sm" variant={drawing ? "secondary" : "ghost"} aria-pressed={drawing} onClick={() => { setDrawing(!drawing); setPending(null) }} data-ann-draw><SquareDashedIcon />{drawing ? "框选中，拖动画出区域" : "框选区域"}</Button>}
-        {pdf && <Button size="sm" variant="ghost" onClick={() => setPending({ art, path, anchor: { type: "page", page: 1 } })} data-ann-page><FileTextIcon />批注某页</Button>}
-        <Button size="sm" variant="ghost" onClick={() => setPending({ art, path, anchor: { type: "file" } })} data-ann-file><PencilIcon />整体批注</Button>
+        <span className="mr-auto flex items-center gap-1.5 type-callout"><MessageSquarePlusIcon className="size-4 text-muted-foreground" />{t("shell:ann.title")}
+          {(drafts.length > 0 || sent.length > 0) && <span className="type-footnote text-muted-foreground">{[drafts.length && t("shell:ann.drafts", { count: drafts.length }), sent.length && t("shell:ann.sentCount", { count: sent.length })].filter(Boolean).join(" · ")}</span>}</span>
+        {canDraw && <Button size="sm" variant={drawing ? "secondary" : "ghost"} aria-pressed={drawing} onClick={() => { setDrawing(!drawing); setPending(null) }} data-ann-draw><SquareDashedIcon />{drawing ? t("shell:ann.drawing") : t("shell:ann.draw")}</Button>}
+        {pdf && <Button size="sm" variant="ghost" onClick={() => setPending({ art, path, anchor: { type: "page", page: 1 } })} data-ann-page><FileTextIcon />{t("shell:ann.notePage")}</Button>}
+        <Button size="sm" variant="ghost" onClick={() => setPending({ art, path, anchor: { type: "file" } })} data-ann-file><PencilIcon />{t("shell:ann.noteWhole")}</Button>
       </div>
       {sel && !pending && <div className="flex items-center gap-2 rounded-lg bg-muted/60 px-2.5 py-1.5" data-ann-sel>
-        <TextSelectIcon className="size-4 shrink-0 text-muted-foreground" /><span className="min-w-0 flex-1 truncate type-footnote">已选中「{sel.anchor.quote.replace(/\s+/g, " ")}」</span>
-        <Button size="sm" onClick={() => { setPending({ art, path, anchor: sel.anchor }); clearSel() }} data-ann-sel-add>批注所选</Button>
-        <Button size="icon-sm" variant="ghost" aria-label="取消选中" onClick={clearSel}><XIcon /></Button>
+        <TextSelectIcon className="size-4 shrink-0 text-muted-foreground" /><span className="min-w-0 flex-1 truncate type-footnote">{t("shell:ann.selected", { quote: sel.anchor.quote.replace(/\s+/g, " ") })}</span>
+        <Button size="sm" onClick={() => { setPending({ art, path, anchor: sel.anchor }); clearSel() }} data-ann-sel-add>{t("shell:ann.noteSelection")}</Button>
+        <Button size="icon-sm" variant="ghost" aria-label={t("shell:ann.clearSelection")} onClick={clearSel}><XIcon /></Button>
       </div>}
       {pending && <div className="flex flex-col gap-2 rounded-xl border p-2.5" data-ann-new={pending.anchor.type}>
         <div className="flex items-center gap-2 type-footnote text-muted-foreground"><CrosshairIcon className="size-3.5 shrink-0" />
-          {pending.anchor.type === "page" ? <label className="flex items-center gap-1.5">第<input type="number" min={1} value={page} onChange={(e) => setPage(e.target.value)} className="h-6 w-16 rounded-md border bg-background px-1.5 text-foreground" data-ann-page-input />页</label>
+          {pending.anchor.type === "page" ? <label className="flex items-center gap-1.5"><Trans t={t} i18nKey="shell:ann.pageInput" components={{ n: <input type="number" min={1} value={page} onChange={(e) => setPage(e.target.value)} className="h-6 w-16 rounded-md border bg-background px-1.5 text-foreground" data-ann-page-input /> }} /></label>
             : <span className="min-w-0 truncate">{placeOf({ anchor: pending.anchor, path: pending.path })}</span>}</div>
-        <Textarea autoFocus value={text} onChange={(e) => setText(e.target.value)} placeholder="写下要改什么，或者有什么问题" className="min-h-16 rounded-lg" data-ann-input
+        <Textarea autoFocus value={text} onChange={(e) => setText(e.target.value)} placeholder={t("shell:ann.placeholder")} className="min-h-16 rounded-lg" data-ann-input
           onKeyDown={(e) => { e.stopPropagation(); if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) void save() }} />
-        <div className="flex justify-end gap-2"><Button size="sm" variant="ghost" onClick={() => setPending(null)}>取消</Button><Button size="sm" disabled={!text.trim() || busy} onClick={() => void save()} data-ann-save>存为草稿</Button></div>
+        <div className="flex justify-end gap-2"><Button size="sm" variant="ghost" onClick={() => setPending(null)}>{t("common:action.cancel")}</Button><Button size="sm" disabled={!text.trim() || busy} onClick={() => void save()} data-ann-save>{t("shell:ann.saveDraft")}</Button></div>
       </div>}
       {notes.length > 0 && <ol className="flex max-h-48 flex-col overflow-auto" data-ann-list>
         {notes.map(({ a, n }) => (
@@ -181,19 +184,19 @@ export function AnnBar({ item, art, path, notes, allDrafts, pending, setPending,
             <div className="min-w-0 flex-1">
               <button type="button" className="block max-w-full truncate text-left type-footnote text-muted-foreground hover:text-foreground" onClick={() => onLocate(a)} data-ann-locate>{placeOf(a)}</button>
               {edit?.id === a.id ? <div className="mt-1 flex flex-col gap-1.5"><Textarea autoFocus value={edit.text} onChange={(e) => setEdit({ ...edit, text: e.target.value })} onKeyDown={(e) => e.stopPropagation()} className="min-h-14 rounded-lg" data-ann-edit-input />
-                <div className="flex justify-end gap-2"><Button size="sm" variant="ghost" onClick={() => setEdit(null)}>取消</Button><Button size="sm" disabled={!edit.text.trim()} onClick={() => { const t = edit.text.trim(); setEdit(null); void act(() => api.annEdit(item, a.id, t), "草稿已更新") }} data-ann-edit-save>保存</Button></div></div>
+                <div className="flex justify-end gap-2"><Button size="sm" variant="ghost" onClick={() => setEdit(null)}>{t("common:action.cancel")}</Button><Button size="sm" disabled={!edit.text.trim()} onClick={() => { const note = edit.text.trim(); setEdit(null); void act(() => api.annEdit(item, a.id, note), t("shell:ann.draftUpdated")) }} data-ann-edit-save>{t("common:action.save")}</Button></div></div>
                 : <div className="type-callout whitespace-pre-wrap break-words">{a.note}</div>}
-              {a.status !== "draft" && <div className="type-footnote text-tertiary">{a.status === "sent" ? `已发送 · ${tm(a.sent ?? a.updated)}` : "发送中…"}</div>}
+              {a.status !== "draft" && <div className="type-footnote text-tertiary">{a.status === "sent" ? t("shell:ann.sentAt", { time: tm(a.sent ?? a.updated) }) : t("shell:ann.sending")}</div>}
             </div>
             {a.status === "draft" && edit?.id !== a.id && <div className="flex shrink-0 gap-0.5 opacity-70 group-hover/ann:opacity-100">
-              <Button size="icon-sm" variant="ghost" aria-label="修改" onClick={() => setEdit({ id: a.id, text: a.note })} data-ann-edit><PencilIcon /></Button>
-              <Button size="icon-sm" variant="ghost" aria-label="删除" onClick={() => void act(() => api.annRemove(item, a.id), "草稿已删除")} data-ann-del><Trash2Icon /></Button>
+              <Button size="icon-sm" variant="ghost" aria-label={t("shell:ann.edit")} onClick={() => setEdit({ id: a.id, text: a.note })} data-ann-edit><PencilIcon /></Button>
+              <Button size="icon-sm" variant="ghost" aria-label={t("common:action.delete")} onClick={() => void act(() => api.annRemove(item, a.id), t("shell:ann.draftDeleted"))} data-ann-del><Trash2Icon /></Button>
             </div>}
           </li>))}
       </ol>}
       {allDrafts.length > 0 && <div className="flex flex-wrap items-center justify-end gap-2" data-ann-send-row>
-        <span className="mr-auto type-footnote text-muted-foreground">确认后作为你的回复发到 {item}{elsewhere > 0 && `，含其他产出上的 ${elsewhere} 条`}</span>
-        <Button size="sm" disabled={sendBusy} onClick={() => { setSendBusy(true); void sendDrafts(item, allDrafts).finally(() => setSendBusy(false)) }} data-ann-send><SendIcon />{sendBusy ? "发送中…" : `确认发送 ${allDrafts.length} 条`}</Button>
+        <span className="mr-auto type-footnote text-muted-foreground">{elsewhere > 0 ? t("shell:ann.sendNoteElsewhere", { item, count: elsewhere }) : t("shell:ann.sendNote", { item })}</span>
+        <Button size="sm" disabled={sendBusy} onClick={() => { setSendBusy(true); void sendDrafts(item, allDrafts).finally(() => setSendBusy(false)) }} data-ann-send><SendIcon />{sendBusy ? t("shell:ann.sending") : t("shell:ann.sendN", { count: allDrafts.length })}</Button>
       </div>}
     </div>
   )
@@ -201,6 +204,7 @@ export function AnnBar({ item, art, path, notes, allDrafts, pending, setPending,
 
 /** a sent note in the item's activity: what it marks, on which version of which output; opens the output there */
 export function AnnRefs({ item, anns, outs, open }: { item: string; anns: RAnnotation[]; outs: Out[]; open: (o: Out, ann: string) => void }) {
+  const t = useT()
   return (
     <div className="mt-1 flex flex-col gap-1.5" data-ann-refs>
       {anns.map((a, n) => {
@@ -212,10 +216,10 @@ export function AnnRefs({ item, anns, outs, open }: { item: string; anns: RAnnot
             {a.anchor.type === "region" ? <RegionThumb src={outRawUrl(item, a.artifact_id, a.path || undefined)} b={a.anchor} />
               : <span className="flex size-12 shrink-0 items-center justify-center rounded-md border bg-muted text-muted-foreground">{a.anchor.type === "text" ? <TextSelectIcon className="size-4" /> : <FileTextIcon className="size-4" />}</span>}
             <span className="min-w-0 flex-1">
-              <span className="block truncate type-footnote text-muted-foreground">{n + 1}. {o ? o[1] : "产出已不在"}{v > 0 && ` · 第 ${v} 版`} · {placeOf(a)}</span>
+              <span className="block truncate type-footnote text-muted-foreground">{n + 1}. {o ? o[1] : t("shell:ann.outputGone")}{v > 0 && " · " + t("shell:ann.version", { v })} · {placeOf(a)}</span>
               <span className="block type-callout whitespace-pre-wrap break-words">{a.note}</span>
             </span>
-            {o && <span className="shrink-0 self-center type-footnote text-blue">定位</span>}
+            {o && <span className="shrink-0 self-center type-footnote text-blue">{t("shell:ann.locate")}</span>}
           </button>
         )
       })}

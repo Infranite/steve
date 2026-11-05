@@ -2,7 +2,7 @@ import assert from "node:assert/strict"
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || "playwright")
 const browser = await chromium.launch({ headless: true, ...(process.env.PLAYWRIGHT_EXECUTABLE ? { executablePath: process.env.PLAYWRIGHT_EXECUTABLE } : {}) })
 const base = process.env.STEVE_TEST_WEB || "http://127.0.0.1:5193"
-const page = await browser.newPage({ viewport: { width: 760, height: 420 } })
+const page = await browser.newPage({ locale: "zh-CN", viewport: { width: 760, height: 420 } })
 const errors = []
 page.on("pageerror", e => errors.push(e.message))
 try {

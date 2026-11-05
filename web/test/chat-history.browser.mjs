@@ -14,7 +14,7 @@ const errors = []
 const near = (a, b, d = 4) => Math.abs(a - b) <= d
 try {
   for (const width of [1440, 390]) for (const theme of ["dark", "light"]) {
-    const page = await browser.newPage({ viewport: { width, height: width === 390 ? 844 : 900 }, reducedMotion: "reduce", colorScheme: theme })
+    const page = await browser.newPage({ locale: "zh-CN", viewport: { width, height: width === 390 ? 844 : 900 }, reducedMotion: "reduce", colorScheme: theme })
     page.on("pageerror", e => errors.push(e.message))
     const calls = []
     await page.route("**/api/**", route => {

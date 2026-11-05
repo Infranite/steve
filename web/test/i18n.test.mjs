@@ -114,3 +114,108 @@ test("en uses its own words and plurals", async () => {
   })
   assert.equal(i18n.lang(), "zh-CN")
 })
+
+/* ───────── the source scan: UI text lives in locales/, not in components ─────────
+ * Every token of code (strings, template parts, regexes, JSX text; comments are skipped) under web/src outside
+ * i18n/locales is checked for CJK. What is left is not text the page shows: it is a value the Hub sends or reads,
+ * so it has to stay byte-identical. Each file lists the exact CJK runs it may contain and why. An entry that no
+ * longer occurs fails too, so the list only shrinks. */
+const { readFileSync, readdirSync, statSync } = await import("node:fs")
+const { join, relative, sep } = await import("node:path")
+const ts = (await import("../node_modules/typescript/lib/typescript.js")).default
+const SRC = new URL("../src/", import.meta.url).pathname
+const CJK = /[　-〿㐀-鿿＀-￯]+/g
+
+const HUB = "Hub value, sent or matched as is"
+const ALLOW = {
+  "accounts/index.tsx": [["，、"], "separators accepted when splitting typed aliases"],
+  "auto/nodes.tsx": [["，、"], "separators accepted when splitting a typed list"],
+  "people/contact.tsx": [["、", "，"], "separators accepted when splitting typed aliases"],
+  "people/org.tsx": [["、", "，"], "separators accepted when splitting typed names"],
+  "chat2.tsx": [["。！？", "没有发布"], "sentence ends for clipping user text; the Hub's release failure text"],
+  "mail/thread.tsx": [["回复", "答复", "："], "reply prefixes in incoming subjects, so Re: is not doubled"],
+  "api.ts": [["插话", "排队"], `message modes: ${HUB}`],
+  "api/vault.ts": [["先在这台设备上登记", "或通行密钥"], "the Hub's NEED_PASSKEY error, matched to open the passkey dialog"],
+  "auto/decision.tsx": [["不执行", "不"], `decision option values: ${HUB}`],
+  "auto/schedules.tsx": [["每天", "每周五", "每月", "日", "每周一", "运维", "邮件"], "schedule phrases the Hub's rule parser reads; Bot names matched to pick a template's Bot"],
+  "channels/persona.tsx": [["（不透露身份，只回答问题本身）", "我是", "，", "。", "助手", "由", "驱动", "归", "管理", "你", "新身份", "我是新身份。"], "the Hub's intro_of, ported for the live preview: what the persona says in chats"],
+  "chat-view.tsx": [["（附件）", "汇报"], `attachment-only placeholder and the /汇报 command: ${HUB}`],
+  "queue.tsx": [["（附件）"], `attachment-only placeholder: ${HUB}`],
+  "thread/topics.ts": [["（附件）"], `attachment-only placeholder: ${HUB}`],
+  "ui.tsx": [["新事项", "新项目", "汇报", "新", "（附件）", "未确认", "允许执行", "："], `slash command names the Hub accepts, attachment placeholder, contact kind, permission question prefix: ${HUB}`],
+  "decision-notes.ts": [["不发布", "：", "批准", "拒绝", "。补充：", "。原因：", "添加标签", "移除标签", "稍后提醒", "暂停", "放弃", "归档", "恢复", "撤销了决定", "同意开始", "不需要", "批准发布", "回答", "返工"], "parses and rebuilds the Hub's decision timeline text"],
+  "devices.tsx": [["暂停接活", "正常"], `device status: ${HUB}`],
+  "github/index.tsx": [["保险箱"], "matched in the Hub's error to link to the vault"],
+  "graph.tsx": [["派生", "交接", "依赖", "项目"], "edge kinds from store.ts, mapped to t() labels"],
+  "store.ts": [["高", "中", "低", "你", "开始会话", "分流", "规划", "收尾", "交付与验收", "发布", "正在开始", "刚开始", "定义", "执行", "不", "排队", "插话", "删除", "导出", "项目", "类型", "领域", "客户", "主题", "交接", "依赖", "派生"], `priorities, tag categories, stage and edge ids, timeline text: ${HUB}`],
+  "views.tsx": [["接收", "分流", "定义", "规划", "准备", "执行", "交付与验收", "收尾", "高", "中", "低", "无", "今天", "明天", "周五", "下周一", "跟随全局", "需要你验收", "自动验收", "全部", "等你", "进行中", "动态", "产出", "关系图", "派生", "交付", "目标更新", "前置", "开新会话", "交接", "自动开始", "暂停", "放弃", "继续", "关联", "发布", "冲突", "失败", "回到", "补充信息：", "（附件）", "：", "插话", "排队", "本机", "本机的"], `stage, priority, due and acceptance values (labels via t()), tab ids, timeline keywords, queued-comment prefix: ${HUB}`],
+  "view-shared.tsx": [["高", "今天"], `priority and due values: ${HUB}`],
+  "stats/overview.tsx": [["全部", "等你", "进行中"], "filter ids passed to views.showItems"],
+  "knowledge/index.tsx": [["搜索", "长期记忆", "知识条目", "笔记与文档", "来源", "待确认"], "tab ids (labels via t()); 长期记忆/知识条目 are the Hub's record names"],
+  "knowledge/parts.tsx": [["存为长期记忆吗？", "存为知识条目吗？", "记住这条吗？", "为什么值得保留："], "the Hub's question and reason prefixes, matched"],
+  "mail/list.tsx": [["等你", "需要"], "matched in the Hub's outcome label"],
+  "manage.tsx": [["全部", "启用", "停用", "项目", "类型", "领域", "客户", "主题", "设置", "删除", "导出", "概览", "对外身份", "能力", "系统提示词", "定时与流程", "记忆", "自己写", "自动生成", "对话", "待处理", "事项", "自动开始", "提醒我开始", "关闭", "不发", "标准", "大", "开", "关", "天", "年", "永久"], "stored setting values, tag categories and tab ids; every one is shown through t()"],
+  "out-groups.ts": [["自查", "自测", "调试", "记录", "日志", "截图", "输出", "运行", "测试", "构建", "中间", "结果", "产物", "文件", "版本", "临时", "草稿", "过程记录", "执行记录"], "words that mark an output name as a work record (names come from Bots)"],
+  "outputs.tsx": [["预览", "源码", "逐张", "连续"], "view mode ids (labels via t()); data-gallery in browser tests"],
+  "stats/tables.tsx": [["　"], "an ideographic space that keeps an empty footer one line tall"],
+  "vault/new-item.tsx": [["私钥", "恢复码", "内容"], "matched in the Hub's field labels"],
+  "version.tsx": [["拒绝", "升级已提交"], "matched in the Hub's upgrade error"],
+  "yolo/badges.tsx": [["硬限制：", "你选择自己来定"], `YOLO reason text: ${HUB}`],
+}
+
+const sources = (d) => readdirSync(d).flatMap((n) => {
+  const p = join(d, n)
+  if (statSync(p).isDirectory()) return relative(SRC, p).split(sep).join("/") === "i18n/locales" ? [] : sources(p)
+  return /\.tsx?$/.test(n) ? [p] : []
+})
+/** CJK runs per file, from code tokens only (comments and JSDoc are not tokens) */
+function cjkRuns() {
+  const out = {}
+  for (const f of sources(SRC)) {
+    const rel = relative(SRC, f).split(sep).join("/")
+    const src = ts.createSourceFile(f, readFileSync(f, "utf8"), ts.ScriptTarget.Latest, true, f.endsWith("x") ? ts.ScriptKind.TSX : ts.ScriptKind.TS)
+    const visit = (n) => {
+      if (n.kind >= ts.SyntaxKind.FirstJSDocNode && n.kind <= ts.SyntaxKind.LastJSDocNode) return
+      const kids = n.getChildren(src)
+      if (kids.length) return kids.forEach(visit)
+      for (const r of n.getText(src).match(CJK) ?? []) (out[rel] ??= new Map()).set(r, src.getLineAndCharacterOfPosition(n.getStart(src)).line + 1)
+    }
+    visit(src)
+  }
+  return out
+}
+
+test("no CJK text in web/src outside i18n/locales except the listed Hub values", () => {
+  const found = cjkRuns(), bad = [], stale = []
+  for (const [f, runs] of Object.entries(found)) {
+    const ok = new Set(ALLOW[f]?.[0] ?? [])
+    for (const [r, line] of runs) if (!ok.has(r)) bad.push(`${f}:${line} ${JSON.stringify(r)}`)
+  }
+  for (const [f, [words]] of Object.entries(ALLOW)) for (const w of words) if (!found[f]?.has(w)) stale.push(`${f} ${JSON.stringify(w)}`)
+  assert.deepEqual(bad, [], "move these into locales/ and use t()")
+  assert.deepEqual(stale, [], "these allowlist entries no longer occur; remove them")
+})
+
+const leaves = (o, p = "") => Object.entries(o).flatMap(([k, v]) => (v && typeof v === "object" ? leaves(v, p + k + ".") : [[p + k, v]]))
+const vars = (s) => new Set([...String(s).matchAll(/\{\{\s*([\w.]+)[^}]*\}\}/g)].map((m) => m[1]))
+
+test("every value is a non-empty string in both languages", () => {
+  for (const [name, res] of [["zh-CN", zh], ["en", en]]) for (const ns of i18n.NAMESPACES) for (const [k, v] of leaves(res[ns])) {
+    assert.equal(typeof v, "string", `${name} ${ns}:${k} is not a string`)
+    assert.ok(v.trim().length > 0, `${name} ${ns}:${k} is empty`)
+  }
+})
+
+test("every {{var}} in zh-CN is used by en", () => {
+  const bad = []
+  for (const ns of i18n.NAMESPACES) {
+    const e = new Map(leaves(en[ns]))
+    /* en forms of one key: the key itself, or all its plural forms */
+    const forms = (k) => { const base = k.replace(PLURAL, ""); return [...e].filter(([ek]) => ek === k || ek.replace(PLURAL, "") === base).map(([, v]) => v) }
+    for (const [k, v] of leaves(zh[ns])) {
+      const have = new Set(forms(k).flatMap((x) => [...vars(x)]))
+      for (const x of vars(v)) if (!have.has(x)) bad.push(`${ns}:${k} {{${x}}}`)
+    }
+  }
+  assert.deepEqual(bad, [])
+})

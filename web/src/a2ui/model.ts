@@ -2,6 +2,8 @@
  * objects one after another, or one array). They are applied in order into surfaces — a flat component list by id and a
  * data model — that the renderer draws. Nothing here touches the DOM: the parser, bindings and functions are plain data
  * so they can be tested on their own. Everything an agent can get wrong becomes a `Problem` with a JSON Pointer, never a throw. */
+import { t } from "../i18n/index.ts"
+import { date } from "../i18n/format.ts"
 
 export const BASIC = "https://a2ui.org/specification/v0_9/catalogs/basic/catalog.json"
 /** the basic catalog plus `Chart` */
@@ -36,54 +38,54 @@ const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 
 /** reads a block into surfaces; `fatal` when nothing could be drawn at all */
 export function parseBlock(src: string): Doc {
   const problems: Problem[] = [], surfaces = new Map<string, Surface>()
-  if (src.length > LIMITS.bytes) return { surfaces: [], problems, fatal: `界面描述超过 ${LIMITS.bytes / 1024} KB` }
+  if (src.length > LIMITS.bytes) return { surfaces: [], problems, fatal: t("misc:a2ui.model.tooLarge", { kb: LIMITS.bytes / 1024 }) }
   const msgs: unknown[] = []
   for (const part of splitJson(src)) {
     let v: unknown
-    try { v = JSON.parse(part.text) } catch (e) { problems.push({ path: `@${part.at}`, message: `不是有效的 JSON：${(e as Error).message}` }); continue }
+    try { v = JSON.parse(part.text) } catch (e) { problems.push({ path: `@${part.at}`, message: t("misc:a2ui.model.badJson", { error: (e as Error).message }) }); continue }
     if (Array.isArray(v)) msgs.push(...v); else msgs.push(v)
   }
-  if (!msgs.length) return { surfaces: [], problems, fatal: problems.length ? "界面描述不是有效的 JSON" : "界面描述是空的" }
+  if (!msgs.length) return { surfaces: [], problems, fatal: problems.length ? t("misc:a2ui.model.notJson") : t("misc:a2ui.model.empty") }
   msgs.forEach((m, i) => apply(m, `/${i}`, surfaces, problems))
   const list = [...surfaces.values()]
-  for (const s of list) if (!s.comps.has("root")) problems.push({ path: `/${s.id}`, surfaceId: s.id, message: "没有 id 为 root 的组件" })
+  for (const s of list) if (!s.comps.has("root")) problems.push({ path: `/${s.id}`, surfaceId: s.id, message: t("misc:a2ui.model.noRoot") })
   const drawable = list.filter((s) => s.comps.has("root"))
-  return { surfaces: drawable, problems, fatal: drawable.length ? undefined : list.length ? "界面里没有 root 组件" : "没有可显示的界面（缺 createSurface 或 updateComponents）" }
+  return { surfaces: drawable, problems, fatal: drawable.length ? undefined : list.length ? t("misc:a2ui.model.noRootSurface") : t("misc:a2ui.model.nothing") }
 }
 
 function apply(m: unknown, at: string, surfaces: Map<string, Surface>, problems: Problem[]) {
-  if (!isObj(m)) { problems.push({ path: at, message: "每条消息应是一个对象" }); return }
-  if (m.version !== undefined && !VERSIONS.has(String(m.version))) { problems.push({ path: `${at}/version`, message: `不支持的版本 ${String(m.version)}，只认 v0.9 / v0.9.1` }); return }
+  if (!isObj(m)) { problems.push({ path: at, message: t("misc:a2ui.model.notObject") }); return }
+  if (m.version !== undefined && !VERSIONS.has(String(m.version))) { problems.push({ path: `${at}/version`, message: t("misc:a2ui.model.badVersion", { version: String(m.version) }) }); return }
   const op = ["createSurface", "updateComponents", "updateDataModel", "deleteSurface"].find((k) => k in m)
-  if (!op) { problems.push({ path: at, message: "缺少 createSurface / updateComponents / updateDataModel / deleteSurface" }); return }
+  if (!op) { problems.push({ path: at, message: t("misc:a2ui.model.noOp") }); return }
   const body = m[op], p = `${at}/${op}`
-  if (!isObj(body) || typeof body.surfaceId !== "string" || !body.surfaceId) { problems.push({ path: `${p}/surfaceId`, message: "缺少 surfaceId" }); return }
+  if (!isObj(body) || typeof body.surfaceId !== "string" || !body.surfaceId) { problems.push({ path: `${p}/surfaceId`, message: t("misc:a2ui.model.noSurfaceId") }); return }
   const id = body.surfaceId
   const get = () => {
     let s = surfaces.get(id)
     /* a forgotten createSurface is the most common slip: draw it with Steve's catalog rather than nothing */
-    if (!s) { problems.push({ path: p, surfaceId: id, message: `surface ${id} 没有先 createSurface` }); s = { id, catalog: STEVE, comps: new Map(), data: {} }; surfaces.set(id, s) }
+    if (!s) { problems.push({ path: p, surfaceId: id, message: t("misc:a2ui.model.notCreated", { id }) }); s = { id, catalog: STEVE, comps: new Map(), data: {} }; surfaces.set(id, s) }
     return s
   }
   if (op === "createSurface") {
-    if (surfaces.has(id)) { problems.push({ path: p, surfaceId: id, message: `surface ${id} 已存在` }); return }
+    if (surfaces.has(id)) { problems.push({ path: p, surfaceId: id, message: t("misc:a2ui.model.exists", { id }) }); return }
     let catalog = typeof body.catalogId === "string" ? body.catalogId : ""
-    if (catalog !== BASIC && catalog !== STEVE) { problems.push({ path: `${p}/catalogId`, surfaceId: id, message: `不认识的目录 ${catalog || "（空）"}，按 Steve 目录显示` }); catalog = STEVE }
+    if (catalog !== BASIC && catalog !== STEVE) { problems.push({ path: `${p}/catalogId`, surfaceId: id, message: t("misc:a2ui.model.unknownCatalog", { catalog: catalog || t("misc:a2ui.model.emptyCatalog") }) }); catalog = STEVE }
     surfaces.set(id, { id, catalog, comps: new Map(), data: {}, theme: isObj(body.theme) ? body.theme : undefined })
   } else if (op === "updateComponents") {
     const s = get()
-    if (!Array.isArray(body.components)) { problems.push({ path: `${p}/components`, surfaceId: id, message: "components 应是数组" }); return }
+    if (!Array.isArray(body.components)) { problems.push({ path: `${p}/components`, surfaceId: id, message: t("misc:a2ui.model.notArray") }); return }
     body.components.forEach((c, j) => {
       const cp = `${p}/components/${j}`
-      if (!isObj(c) || typeof c.id !== "string" || typeof c.component !== "string") { problems.push({ path: cp, surfaceId: id, message: "组件需要字符串 id 和 component" }); return }
-      if (!s.comps.has(c.id) && s.comps.size >= LIMITS.components) { problems.push({ path: cp, surfaceId: id, message: `组件超过 ${LIMITS.components} 个，其余不显示` }); return }
+      if (!isObj(c) || typeof c.id !== "string" || typeof c.component !== "string") { problems.push({ path: cp, surfaceId: id, message: t("misc:a2ui.model.badComponent") }); return }
+      if (!s.comps.has(c.id) && s.comps.size >= LIMITS.components) { problems.push({ path: cp, surfaceId: id, message: t("misc:a2ui.model.tooMany", { n: LIMITS.components }) }); return }
       s.comps.set(c.id, c as Comp)
     })
   } else if (op === "updateDataModel") {
     const s = get(), path = typeof body.path === "string" && body.path ? body.path : "/"
     s.data = setPointer(s.data, path, "value" in body ? body.value : undefined, !("value" in body))
   } else {
-    if (!surfaces.delete(id)) problems.push({ path: p, surfaceId: id, message: `surface ${id} 不存在` })
+    if (!surfaces.delete(id)) problems.push({ path: p, surfaceId: id, message: t("misc:a2ui.model.missing", { id }) })
   }
 }
 
@@ -186,14 +188,14 @@ export function formatDate(v: unknown, f: string): string {
   const d = typeof v === "number" ? new Date(v) : typeof v === "string" ? new Date(v) : null
   if (!d || Number.isNaN(d.getTime())) return str(v)
   const p = (n: number) => String(n).padStart(2, "0")
-  if (!f) return d.toLocaleString("zh-CN")
+  if (!f) return date(d, { year: "numeric", month: "numeric", day: "numeric", hour: "numeric", minute: "numeric", second: "numeric" })
   return f.replace(/yyyy|MM|dd|HH|mm|ss/g, (t) => t === "yyyy" ? String(d.getFullYear()) : t === "MM" ? p(d.getMonth() + 1) : t === "dd" ? p(d.getDate()) : t === "HH" ? p(d.getHours()) : t === "mm" ? p(d.getMinutes()) : p(d.getSeconds()))
 }
 
 /** a component's `checks` that fail, as their messages */
 export function failedChecks(c: Comp, s: Scope): string[] {
   if (!Array.isArray(c.checks)) return []
-  return c.checks.filter((k) => isObj(k) && !resolve(k.condition, s)).map((k) => str((k as Record<string, unknown>).message) || "输入不符合要求")
+  return c.checks.filter((k) => isObj(k) && !resolve(k.condition, s)).map((k) => str((k as Record<string, unknown>).message) || t("misc:a2ui.model.checkFailed"))
 }
 
 /** an event's `context` with every binding read (what the action message carries) */

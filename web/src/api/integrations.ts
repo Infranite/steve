@@ -2,6 +2,8 @@
  * in (adapters) and planned ones, the caller's connections, and per connection the state of each capability area.
  * The TS Hub doesn't have it; `NotWired` makes the page fall back to its Unwired placeholder. */
 import { modReq } from "@/api"
+import { lazy } from "@/api/accounts"
+import { t } from "@/i18n"
 import type { ConnStatus, RAdapter, RFieldDef } from "@/api/accounts"
 
 export type AreaId = "channel" | "docs" | "sheets" | "calendar" | "tasks" | "approval" | "minutes" | "mail" | "repo" | "directory" | string
@@ -37,9 +39,12 @@ export const integrationsApi = {
 }
 
 /* wording the Hub leaves to the web */
-const AREA_LABEL: Record<string, string> = { channel: "渠道", send_as_you: "以你的名义发送", docs: "文档/知识库", sheets: "表格/多维表格", calendar: "日历", tasks: "任务", approval: "审批", minutes: "妙记", mail: "邮件", repo: "代码仓库", directory: "通讯录" }
+const AREA_LABEL: Record<string, string> = lazy({
+  channel: () => t("api:area.channel"), send_as_you: () => t("api:area.sendAsYou"), docs: () => t("api:area.docs"), sheets: () => t("api:area.sheets"), calendar: () => t("api:area.calendar"), tasks: () => t("api:area.tasks"),
+  approval: () => t("api:area.approval"), minutes: () => t("api:area.minutes"), mail: () => t("api:area.mail"), repo: () => t("api:area.repo"), directory: () => t("api:area.directory"),
+})
 export const areaLabel = (a: string) => AREA_LABEL[a] ?? a
-export const IDENTITY_LABEL: Record<string, string> = { bot: "应用机器人", self: "你本人", app: "已安装的应用", account: "账号" }
+export const IDENTITY_LABEL: Record<string, string> = lazy({ bot: () => t("api:identity.bot"), self: () => t("api:identity.self"), app: () => t("api:identity.app"), account: () => t("api:identity.account") })
 export const identityLabel = (i: string) => IDENTITY_LABEL[i] ?? i
 /** an adapter of the integrations list in the shape the generic connect dialog takes */
 export const asAdapter = (a: IAdapter, system: string): RAdapter => ({ id: a.id, system, name: a.name, auth: a.auth, caps: a.capabilities.flatMap((c) => c.caps), device: a.device, fields: a.fields })

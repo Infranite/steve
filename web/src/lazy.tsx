@@ -1,5 +1,6 @@
 import { lazy, Suspense, type ComponentType, type ComponentProps } from "react"
 import { Skeleton } from "@/components/ui/skeleton"
+import { t } from "@/i18n"
 
 export function lazyView<T extends ComponentType<any>>(load: () => Promise<{ default: T }>) {
   const View = lazy(async () => {
@@ -12,5 +13,5 @@ export function lazyView<T extends ComponentType<any>>(load: () => Promise<{ def
       throw e
     }
   })
-  return (props: ComponentProps<T>) => <Suspense fallback={<div className="space-y-4 p-6" role="status" aria-label="载入中"><Skeleton className="h-7 w-40" /><Skeleton className="h-48 w-full" /></div>}><View {...props} /></Suspense>
+  return (props: ComponentProps<T>) => <Suspense fallback={<div className="space-y-4 p-6" role="status" aria-label={t("shell:misc.loading")}><Skeleton className="h-7 w-40" /><Skeleton className="h-48 w-full" /></div>}><View {...props} /></Suspense>
 }

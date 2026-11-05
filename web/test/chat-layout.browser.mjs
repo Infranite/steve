@@ -8,7 +8,7 @@ if (shots) await mkdir(shots, { recursive: true })
 const errors = []
 try {
   for (const width of [1440, 390]) for (const theme of ["light", "dark"]) {
-    const page = await browser.newPage({ viewport: { width, height: width === 390 ? 844 : 1000 }, reducedMotion: "reduce", colorScheme: theme })
+    const page = await browser.newPage({ locale: "zh-CN", viewport: { width, height: width === 390 ? 844 : 1000 }, reducedMotion: "reduce", colorScheme: theme })
     page.on("pageerror", e => errors.push(e.message))
     await page.goto(base + "/test/fixtures/chat-layout.html")
     await page.locator('[data-msg="answer"]').waitFor()

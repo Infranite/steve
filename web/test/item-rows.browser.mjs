@@ -6,7 +6,7 @@ const base = process.env.STEVE_TEST_WEB || "http://127.0.0.1:5189"
 const errors = []
 try {
   for (const width of [1066, 390]) for (const theme of ["dark", "light"]) {
-    const page = await browser.newPage({ viewport: { width, height: 700 }, reducedMotion: "reduce", colorScheme: theme })
+    const page = await browser.newPage({ locale: "zh-CN", viewport: { width, height: 700 }, reducedMotion: "reduce", colorScheme: theme })
     page.on("pageerror", e => errors.push(e.message))
     await page.goto(base + "/test/fixtures/item-rows.html")
     await page.locator('[data-item-row="ST-53"]').waitFor()

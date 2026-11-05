@@ -17,7 +17,7 @@ const messages = () => [
 try {
   for (const [width, theme] of [[1280, "dark"], [390, "light"]]) {
     out = "draft"; decided = []; said = []
-    const page = await browser.newPage({ viewport: { width, height: 844 } }), errors = []
+    const page = await browser.newPage({ locale: "zh-CN", viewport: { width, height: 844 } }), errors = []
     page.on("pageerror", e => errors.push(e.message))
     await page.route("**/*", async route => {
       const u = new URL(route.request().url()); if (u.origin !== base) return route.abort()
