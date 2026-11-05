@@ -1080,6 +1080,19 @@ async fn a_stopped_runtime_refuses_instead_of_queueing() {
     ));
     assert_eq!(queued, 0, "nothing waits for a sender that never runs");
     assert_eq!(h.count("start_turn"), 0);
+    // a new session is not bound to it either: it stays on the legacy runner
+    let e =
+        h.rt.bind(&Binding {
+            session: "s2".into(),
+            resource: "item:s2".into(),
+            prepare: PrepareKind::Scratch,
+            choice: build::choice(),
+            policy: build::policy(),
+        })
+        .unwrap_err();
+    assert!(e.to_string().contains("not running"), "{e}");
+    let bound: i64 = h.q("SELECT COUNT(*) FROM runtime_sessions WHERE session_id='s2'");
+    assert_eq!(bound, 0);
 }
 
 /// The Node let the session go by itself, then refuses to open it again: the session is not

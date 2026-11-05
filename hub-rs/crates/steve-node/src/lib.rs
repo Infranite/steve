@@ -979,6 +979,13 @@ impl LocalNode {
         })
     }
 
+    /// Host bridge: whether a prepare of `at` would pass the roots check now (a root this Node was
+    /// started with, the directory there and inside it), so the Hub plans no session it would
+    /// refuse. Reads the filesystem, creates nothing.
+    pub fn allows(&self, at: &RootPath) -> bool {
+        workspace::resolve(&self.0.cfg.roots, at).is_ok()
+    }
+
     fn mine(&self, w: &WorkspaceRef) -> ApiResult<()> {
         if w.node != self.0.cfg.node {
             return Err(ApiError::new(ErrorCode::Denied, "another node's workspace"));

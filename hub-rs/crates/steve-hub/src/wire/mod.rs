@@ -372,6 +372,7 @@ pub fn wire_with(cfg: &Arc<Config>, bus: &Bus, vars: Vars) -> Result<Wired, Back
             fleet: fleet.clone(),
             bind_remote,
             store: db.clone(),
+            host: host.clone(),
         }),
         gateway,
         core_cfg,
