@@ -31,13 +31,13 @@ import { NativeIdLine, ResumeCard } from "@/resume"
 import { ItemStatsRows, SessionStats } from "@/stats/drill"
 import { accOf, active, addDep, archive, bulk, closeRel, deleteItem, depsOpen, doFork, gBuild, gComps, hm, importSessions, interrupt, it, itemThread, link, loadEvents, loadItem, loadLocalSessions, markDone, newItem, patchItem, pending, pendingCards, reassign, rmDep, saveGoal, sessPatch, sessRemove, sessSend, setAcc, setSt, setTags, setKind, kindOf, kindTags, isKind, DOMAIN_CATS, snoozed, st, stageOf, star, supp, tag, threadFollow, tm, toast, undoDecision, unsnooze, WT, type Item, type PlanRound, type Reply } from "@/store"
 import { BotAvatar, BotName, Chips, closeSheet, Composer, DecisionCard, Empty, go, Group, ItemNo, KindTag, Meta, openSheet, Page, RelNote, ReplyBlock, Row, RunBar, SectionLabel, Segmented, SessionBlock, Status, StatusDot, Tags, ThemeSwitch, Transcript, type ComposerHandle } from "@/ui"
-import { ChoiceCards, ItemRow, PlanBar, ProjectChip, Select, selected } from "@/view-shared"
+import { ChoiceCards, dueLabel, ItemRow, PlanBar, ProjectChip, Select, selected } from "@/view-shared"
 import { choiceText, YoloItemSwitch, YoloMark } from "@/yolo/badges"
 import { YoloPill, yoloState } from "@/yolo/switch"
 import { RunState } from "@/yolo/status"
 import { cn } from "cn"
-import { t as tr, useT } from "@/i18n"
-import { num } from "@/i18n/format"
+import { lang, t as tr, useT } from "@/i18n"
+import { nearTime, num } from "@/i18n/format"
 import { ArchiveIcon, BanIcon, BookOpenIcon, BotIcon, CalendarIcon, ChartNoAxesColumnIcon, CheckIcon, ChevronDownIcon, ChevronRightIcon, CircleCheckIcon, ContactRoundIcon, CopyIcon, DownloadIcon, FolderIcon, GitPullRequestIcon, KeyRoundIcon, LinkIcon, ListIcon, LockIcon, MailIcon, MessageSquareIcon, MessagesSquareIcon, MinusIcon, MoreHorizontalIcon, PauseIcon, PencilIcon, PlayIcon, PlugIcon, PlusIcon, RadioIcon, RotateCcwIcon, SearchIcon, SettingsIcon, SquareIcon, SquareTerminalIcon, StarIcon, TrashIcon, UploadIcon, UserRoundIcon, WorkflowIcon, XIcon, ZapIcon } from "lucide-react"
 import { useEffect, useRef, useState, type ReactNode } from "react"
 export { ChoiceCards,ItemRowExport,Select } from "@/view-shared"
@@ -48,9 +48,8 @@ const GraphLegend = lazyView(() => import("@/graph").then((m) => ({ default: m.G
 /* stage values come from stageOf() in the store; STAGE_LABEL gives each one's translation key */
 export const STAGES = ["接收", "分流", "定义", "规划", "准备", "执行", "交付与验收", "收尾"] as const
 const STAGE_LABEL = { 接收: "views:stage.intake", 分流: "views:stage.triage", 定义: "views:stage.define", 规划: "views:stage.plan", 准备: "views:stage.prepare", 执行: "views:stage.execute", 交付与验收: "views:stage.deliver", 收尾: "views:stage.wrapUp" } as const
-/* priority, due presets and acceptance modes are stored as these Chinese values; only their labels are translated */
+/* priority and acceptance modes are stored as these Chinese values; only their labels are translated (due presets: dueLabel in view-shared) */
 const PRI_LABEL = { 高: "views:item.priHigh", 中: "views:item.priMid", 低: "views:item.priLow" } as const
-const DUE_LABEL = { 无: "views:item.dueNone", "今天 18:00": "views:item.dueToday", 明天: "views:item.dueTomorrow", 周五: "views:item.dueFriday", 下周一: "views:item.dueNextMonday" } as const
 const ACC_LABEL = { 跟随全局: "views:item.accInherit", 需要你验收: "views:item.accManual", 自动验收: "views:item.accAuto" } as const
 /** the label of a stored value, or the value itself when it is not one of ours (a due date the Hub wrote, say) */
 const labelOf = <M extends Record<string, Parameters<typeof tr>[0]>>(m: M, v: string): string => (v in m ? String(tr(m[v as keyof M] as any)) : v)
@@ -81,7 +80,7 @@ export function InboxView() {
             return g.length ? <section key={ty}><SectionLabel>{WT[ty]} · {g.length}</SectionLabel><div className="flex flex-col gap-3">{g.map((c) => <DecisionCard key={c.w.decision} i={c.i} w={c.w} />)}</div></section> : null
           })}
           {sz.length > 0 && <section data-snoozed><SectionLabel>{t("views:inbox.snoozed", { count: sz.length })}</SectionLabel>
-            <Group>{sz.map((i) => <Row key={i.id} title={<><ItemNo id={i.id} className="mr-2" />{i.t}</>} sub={t("views:inbox.snoozedAt", { type: WT[i.wait!.type], when: i.snooze })}><Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => unsnooze(i.id)} data-unsnooze>{t("views:inbox.handleNow")}</Button></Row>)}</Group></section>}
+            <Group>{sz.map((i) => <Row key={i.id} title={<><ItemNo id={i.id} className="mr-2" />{i.t}</>} sub={t("views:inbox.snoozedAt", { type: WT[i.wait!.type], when: lang() === "zh-CN" ? i.snooze : nearTime(i.snoozeUntil) })}><Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => unsnooze(i.id)} data-unsnooze>{t("views:inbox.handleNow")}</Button></Row>)}</Group></section>}
         </div>
       </>}
       {ibTab === "done" && (st.done.length ? <>
@@ -186,7 +185,7 @@ export function ItemsView() {
               {g.map((i) => (
                 <button key={i.id} type="button" onClick={() => go("#/items/" + i.id)} className="rounded-lg border bg-card p-3 text-left transition-shadow duration-150 hover:shadow-md" data-kanban-card={i.id}>
                   <ItemNo id={i.id} /><div className="mt-0.5 type-callout font-medium">{i.t}</div><div className="mt-1 line-clamp-2 type-footnote text-muted-foreground">{i.now}</div>
-                  <Tags ids={i.tags} max={2} className="mt-2" /><Meta className="mt-2"><BotName k={i.b} />{i.project && <ProjectChip id={i.project} plain />}{i.due && <span>{t("views:items.due", { due: i.due })}</span>}{i.plan && <PlanBar i={i} />}</Meta>
+                  <Tags ids={i.tags} max={2} className="mt-2" /><Meta className="mt-2"><BotName k={i.b} />{i.project && <ProjectChip id={i.project} plain />}{i.due && <span>{t("views:items.due", { due: dueLabel(i.due) })}</span>}{i.plan && <PlanBar i={i} />}</Meta>
                 </button>
               ))}
             </div>) })}
@@ -491,7 +490,7 @@ export function ItemView({ id }: { id: string }) {
               <Tags ids={(i.tags ?? []).filter((x) => !isKind(tag(x)))} onRemove={(id) => setTags(i.id, (i.tags ?? []).filter((x) => x !== id))} />
               <TagPicker i={i} /></div></Prop>
             <Prop label={t("views:item.propPri")}><Select quiet testId="pri" value={i.pri ?? "中"} onChange={(v) => patchItem(i.id, { pri: v as Item["pri"] })} options={["高", "中", "低"].map((v) => ({ v, l: labelOf(PRI_LABEL, v) }))} /></Prop>
-            <Prop label={t("views:item.propDue")}><Select quiet testId="due" value={i.due ?? "无"} onChange={(v) => patchItem(i.id, { due: v === "无" ? undefined : v })} options={[...new Set(["无", i.due ?? "无", "今天 18:00", "明天", "周五", "下周一"])].map((v) => ({ v, l: labelOf(DUE_LABEL, v) }))} /></Prop>
+            <Prop label={t("views:item.propDue")}><Select quiet testId="due" value={i.due ?? "无"} onChange={(v) => patchItem(i.id, { due: v === "无" ? undefined : v })} options={[...new Set(["无", i.due ?? "无", "今天 18:00", "明天", "周五", "下周一"])].map((v) => ({ v, l: dueLabel(v) }))} /></Prop>
             <Prop label={t("views:item.propAcc")}><Select quiet testId="acc" value={i.acc} onChange={(v) => setAcc(i.id, v)} options={["跟随全局", "需要你验收", "自动验收"].map((v) => ({ v, l: labelOf(ACC_LABEL, v) }))} />{i.acc === "跟随全局" && <div className="pl-2 type-footnote text-muted-foreground">{t("views:item.accEffective", { mode: labelOf(ACC_LABEL, accOf(i)) })}</div>}</Prop>
             <Prop label={t("views:item.propDeps")}>
               <div className="flex flex-col gap-1 pt-1" data-deps>
@@ -628,7 +627,7 @@ export function SessionView({ k }: { k: string }) {
               {!s.ro && <QueueStrip sid={k} rows={s.queue} note={queueNote(s)} composer={composer} />}
               {s.ro ? (
                 <div className="flex flex-wrap items-center gap-3 rounded-2xl border bg-card px-4 py-3" data-readonly>
-                  <LockIcon className="size-4 text-muted-foreground" /><span className="min-w-0 flex-1 type-callout text-muted-foreground">{t("views:session.readOnlyNote", { src: s.src.replace("本机 ", "本机的 ") })}</span>
+                  <LockIcon className="size-4 text-muted-foreground" /><span className="min-w-0 flex-1 type-callout text-muted-foreground">{t("views:session.readOnlyNote", { src: s.src.startsWith("本机 ") ? t("views:session.srcLocal", { h: s.src.slice(3) }) : s.src })}</span>
                   <Button size="sm" variant="outline" onClick={() => openSheet("fork", { k, at: Math.max(0, s.ev.length - 1) })}>{t("views:session.toItem")}</Button>
                 </div>
               ) : <Composer key={k} draftKey={draftKey(st.workspace?.id, "session", k)} handle={composer} testId="session" model={hm(s)} placeholder={s.st === "ended" ? t("views:session.endedPlaceholder") : t("views:session.placeholder")} onSend={(text, files) => sessSend(k, text, mode, files)}

@@ -370,11 +370,10 @@ const MARK: Record<Mark, string> = {
   typing: "bg-foreground/[0.05] text-muted-foreground ring-foreground/[0.05]",
 }
 const TOKEN = /(?<![\w@#-])#?[A-Za-z]{1,6}-\d+(?![\w-])|(?<!\S)@[^\s#@]+|^\/\S+/g
-const t_ = t
 export function markText(v: string, at: (ins: string) => "bot" | "party" | undefined, typing?: [number, number] | null): [string, Mark | null][] {
   const rs: [number, number, Mark][] = []
   for (const m of v.matchAll(TOKEN)) {
-    const t = m[0], k: Mark | undefined = t[0] === "@" ? at(t) : t[0] === "/" ? (COMMANDS.some(([n, c]) => [n, t_(`core:cmd.${c}`)].some((x) => "/" + x.replace(/\s+/g, "") === t.replace(/\s+/g, ""))) ? "cmd" : undefined)
+    const t = m[0], k: Mark | undefined = t[0] === "@" ? at(t) : t[0] === "/" ? (COMMANDS.some(([n]) => "/" + n.replace(/\s+/g, "") === t.replace(/\s+/g, "")) ? "cmd" : undefined)
       : st.items.some((i) => i.id === t.replace(/^#/, "").toUpperCase()) ? "item" : undefined
     if (k) rs.push([m.index, m.index + t.length, k])
   }

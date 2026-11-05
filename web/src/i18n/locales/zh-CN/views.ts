@@ -278,6 +278,8 @@ export default {
     nativeId: "会话 ID",
     model: "模型",
     defaultModel: "默认模型",
+    /* the Hub's source "本机 Claude Code" */
+    srcLocal: "本机的 {{h}}",
     readOnlyNote: "从{{src}}导入，只读。需要继续，可以从任一回复派生，或据此建事项。",
     endedPlaceholder: "会话已结束，发送会恢复这个会话继续",
     placeholder: "直接和 agent 对话…",
