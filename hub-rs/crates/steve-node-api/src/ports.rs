@@ -50,9 +50,9 @@ pub trait ExecutionControl: Send + Sync {
     /// Applies only to the request still waiting with this attempt and action digest; anything else
     /// is `stale`.
     async fn resolve_permission(&self, c: Command<PermissionResolution>) -> ApiResult<Receipt>;
-    /// Everything not yet acknowledged as finished: live executions, waits, final receipts, in a stable
-    /// order (by operation id) so paging is consistent.
-    async fn snapshot(&self, page: PageRequest) -> ApiResult<Page<SnapshotEntry>>;
+    /// Every accepted operation with its state, and the stream heads, as of one moment: a page with
+    /// no cursor takes a new snapshot, the following pages continue that same one.
+    async fn snapshot(&self, page: PageRequest) -> ApiResult<Snapshot>;
     /// Where every stream stands.
     async fn streams(&self) -> ApiResult<Vec<StreamHead>>;
     /// Events after `from` (exclusive), at most `max_bytes` encoded; `gap` past retention.

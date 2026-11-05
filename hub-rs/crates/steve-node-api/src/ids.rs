@@ -153,16 +153,18 @@ impl fmt::Display for Digest {
     }
 }
 
-/// An id derived from other text (`session:<id>`, a resource key): kept as is when it is a valid id,
-/// otherwise `<prefix>:` plus a hash, so deriving never fails and never collides on truncation.
+/// An id derived from other text (`session:<id>`, a resource key): `<prefix>:<text>` when that is a
+/// valid id and `text` does not begin with `:`, otherwise `<prefix>::` plus a hash. The two forms
+/// never meet (only the hashed one has `::` after the prefix), so deriving never fails and never
+/// collides short of a hash collision.
 pub fn derived_id(prefix: &str, text: &str) -> String {
     let plain = format!("{prefix}:{text}");
-    if check_id(&plain).is_ok() {
+    if !text.starts_with(':') && check_id(&plain).is_ok() {
         return plain;
     }
     use sha2::Digest as _;
     format!(
-        "{prefix}:h{}",
+        "{prefix}::{}",
         &hex::encode(sha2::Sha256::digest(text.as_bytes()))[..32]
     )
 }
@@ -231,7 +233,10 @@ mod tests {
         assert!(Digest::new(Digest::sha256(b"a").to_string()).is_ok());
         assert_eq!(derived_id("session", "s_1"), "session:s_1");
         let long = derived_id("session", &"x".repeat(128));
-        assert!(check_id(&long).is_ok() && long.starts_with("session:h"));
+        assert!(check_id(&long).is_ok() && long.starts_with("session::"));
+        // a valid id that looks like the hashed form of another still differs from it
+        let forged = long.trim_start_matches("session:").to_string();
+        assert_ne!(derived_id("session", &forged), long);
         assert!(check_id(&derived_id("item", "ST 12/中文")).is_ok());
     }
 

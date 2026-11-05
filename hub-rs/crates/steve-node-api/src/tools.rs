@@ -44,12 +44,9 @@ impl ToolCall {
             id: self.id.clone(),
         }
     }
-    pub fn args_digest(&self) -> Digest {
-        Digest::sha256(
-            serde_json::json!({"name": self.name, "args": self.args})
-                .to_string()
-                .as_bytes(),
-        )
+    /// Canonical over the tool name and its arguments (key order never matters).
+    pub fn args_digest(&self) -> crate::common::ApiResult<Digest> {
+        crate::common::digest_of(&serde_json::json!({"name": self.name, "args": self.args}))
     }
 }
 

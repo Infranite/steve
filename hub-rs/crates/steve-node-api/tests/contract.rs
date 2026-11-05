@@ -766,7 +766,7 @@ async fn cancel_is_an_intent() {
         })
         .await
         .unwrap();
-    assert_eq!(snap.items.len(), 2);
+    assert_eq!(snap.entries.len(), 2);
     let rest = n
         .snapshot(PageRequest {
             cursor: snap.next.clone(),
@@ -775,7 +775,7 @@ async fn cancel_is_an_intent() {
         .await
         .unwrap();
     assert!(rest.next.is_none());
-    assert_eq!(snap.items.len() + rest.items.len(), n.log().len());
+    assert_eq!(snap.entries.len() + rest.entries.len(), n.log().len());
 }
 
 #[tokio::test]
@@ -848,5 +848,349 @@ async fn workspaces_are_bound_to_their_node_and_spec() {
             .unwrap_err()
             .code,
         ErrorCode::Denied
+    );
+}
+
+// ── round 4: what the fake must refuse ──
+
+/// The current revision of a workspace the fake prepared.
+async fn rev_of(n: &FakeNode, w: WorkspaceRef) -> Revision {
+    n.workspace(w).await.unwrap().revision
+}
+
+#[tokio::test]
+async fn a_turn_cannot_change_the_sessions_configuration() {
+    let (n, _) = connected("hub");
+    ready(&n, "s_1").await;
+    let base = turn("s_1", "t_1", "a_1", "x");
+    let mut variants = vec![];
+    let mut t = base.clone();
+    t.run.choice.model = Some("opus".into());
+    variants.push(t);
+    let mut t = base.clone();
+    t.run.choice.effort = Some("high".into());
+    variants.push(t);
+    let mut t = base.clone();
+    t.run.policy.permissions = PermissionMode::FullAccess;
+    variants.push(t);
+    let mut t = base.clone();
+    t.run.policy.revision = Revision::new("p2").unwrap();
+    variants.push(t);
+    let mut t = base.clone();
+    t.run.policy.network = NetworkScope::Denied;
+    variants.push(t);
+    let mut t = base.clone();
+    t.run.policy.tools = GrantId::new("g_other").unwrap();
+    variants.push(t);
+    for (i, v) in variants.into_iter().enumerate() {
+        let e = n.start_turn(cmd(&format!("op_v{i}"), v)).await.unwrap_err();
+        assert_eq!(e.code, ErrorCode::Invalid, "variant {i}");
+    }
+    // once configured, the old turn is refused and the new one runs
+    let v = n.session(SessionId::new("s_1").unwrap()).await.unwrap();
+    let mut new_choice = choice();
+    new_choice.model = Some("opus".into());
+    n.configure_session(cmd(
+        "op_conf",
+        ConfigureSession {
+            session: v.id.clone(),
+            expected: v.revision,
+            choice: new_choice.clone(),
+            policy: policy(),
+        },
+    ))
+    .await
+    .unwrap();
+    assert!(n.start_turn(cmd("op_old", base.clone())).await.is_err());
+    let mut t = base;
+    t.run.choice = new_choice;
+    n.start_turn(cmd("op_new", t)).await.unwrap();
+}
+
+#[tokio::test]
+async fn preconditions_are_checked_when_asked_and_when_used() {
+    let (n, _) = connected("hub");
+    ready(&n, "s_1").await;
+    n.start_turn(cmd("op_t", turn("s_1", "t_1", "a_1", "x")))
+        .await
+        .unwrap();
+    let exec = exec_turn("s_1", "t_1", "a_1");
+    let w = workspace("hub", "item:s_1");
+    let with = |pid: &str, pre: Vec<Precondition>| {
+        let mut r = permission(pid, exec.clone(), "make deploy");
+        r.preconditions = pre;
+        r.digest = permission_digest(&r.action, &r.preconditions).unwrap();
+        r
+    };
+    // a correct digest over a revision that is not the workspace's: refused
+    let wrong = with(
+        "p_1",
+        vec![Precondition::Workspace {
+            workspace: w.clone(),
+            revision: Revision::new("r999").unwrap(),
+        }],
+    );
+    assert_eq!(
+        n.ask_permission(wrong).await.unwrap_err().code,
+        ErrorCode::Stale
+    );
+    // file and HEAD conditions are not simulated: refused, not assumed to hold
+    let head = with(
+        "p_2",
+        vec![Precondition::Head {
+            workspace: w.clone(),
+            commit: "abc".into(),
+        }],
+    );
+    assert_eq!(
+        n.ask_permission(head).await.unwrap_err().code,
+        ErrorCode::Unsupported
+    );
+    // the right revision: asked; still right when answered: applied
+    let good = with(
+        "p_3",
+        vec![Precondition::Workspace {
+            workspace: w.clone(),
+            revision: rev_of(&n, w.clone()).await,
+        }],
+    );
+    n.ask_permission(good.clone()).await.unwrap();
+    n.resolve_permission(cmd("op_r", answer(&good, PermissionDecision::AllowOnce)))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_tidied_workspace_takes_its_sessions_and_never_comes_back_the_same() {
+    let (n, _) = connected("hub");
+    ready(&n, "s_1").await;
+    let w = workspace("hub", "item:s_1");
+    let first = rev_of(&n, w.clone()).await;
+    let tidy = |op: &str, expected: Revision| {
+        cmd(
+            op,
+            Tidy {
+                workspace: w.clone(),
+                expected,
+                keep_branch: false,
+            },
+        )
+    };
+    n.tidy_workspace(tidy("op_tidy1", first.clone()))
+        .await
+        .unwrap();
+    // the idle session opened in it cannot start a turn
+    let e = n
+        .start_turn(cmd("op_t", turn("s_1", "t_1", "a_1", "x")))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::Invalid);
+    // prepared again: another revision, so a late tidy aimed at the old one cannot remove it
+    n.prepare_workspace(cmd("op_prep2", prepare("item:s_1")))
+        .await
+        .unwrap();
+    let second = rev_of(&n, w.clone()).await;
+    assert_ne!(first, second);
+    let e = n
+        .tidy_workspace(tidy("op_tidy_late", first))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::Conflict);
+    // the session opens again in the new workspace and runs
+    n.open_session(cmd("op_reopen", open("s_1", "hub")))
+        .await
+        .unwrap();
+    n.start_turn(cmd("op_t", turn("s_1", "t_1", "a_1", "x")))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_snapshot_is_one_moment_across_its_pages() {
+    // no Hub connected: nothing gets acknowledged, so the snapshot's heads stay replayable
+    let n = FakeNode::new("hub");
+    ready(&n, "s_b").await;
+    ready(&n, "s_d").await;
+    let first = n
+        .snapshot(PageRequest {
+            cursor: None,
+            limit: 1,
+        })
+        .await
+        .unwrap();
+    let heads = first.heads.clone();
+    // things happen between the pages
+    ready(&n, "s_a").await;
+    n.start_turn(cmd("op_t", turn("s_b", "t_1", "a_1", "x")))
+        .await
+        .unwrap();
+    let mut entries = first.entries;
+    let mut next = first.next;
+    while let Some(c) = next {
+        let p = n
+            .snapshot(PageRequest {
+                cursor: Some(c),
+                limit: 1,
+            })
+            .await
+            .unwrap();
+        assert_eq!(p.heads, heads, "every page shows the same moment");
+        entries.extend(p.entries);
+        next = p.next;
+    }
+    // the four commands of s_b and s_d, nothing of what came after
+    assert_eq!(entries.len(), 4);
+    assert!(entries.iter().all(|e| e.method != "start_turn"));
+    // replaying from the snapshot's heads gives what came after it
+    let h = heads
+        .iter()
+        .find(|h| h.stream.as_str() == "session:s_b")
+        .unwrap();
+    let later = n
+        .replay(
+            Watermark {
+                stream: h.stream.clone(),
+                epoch: h.epoch.clone(),
+                seq: h.produced,
+            },
+            1 << 20,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        later
+            .events
+            .iter()
+            .map(|e| e.cursor.seq)
+            .collect::<Vec<_>>(),
+        [h.produced + 1]
+    );
+}
+
+#[tokio::test]
+async fn the_sink_checks_a_batch_against_itself() {
+    let n = FakeNode::new("hub");
+    ready(&n, "s_1").await;
+    let head = n.streams().await.unwrap().remove(0);
+    let ev = n
+        .replay(
+            Watermark {
+                stream: head.stream,
+                epoch: head.epoch,
+                seq: 0,
+            },
+            1 << 20,
+        )
+        .await
+        .unwrap()
+        .events
+        .remove(0);
+    let sink = RecordingSink::default();
+    let mut other = ev.clone();
+    other.id = EventId::new("ev_other").unwrap();
+    let e = sink
+        .commit(EventBatch {
+            events: vec![ev.clone(), other],
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::Conflict);
+    assert!(
+        sink.events().is_empty(),
+        "nothing kept from a refused batch"
+    );
+    // the very same event twice in a batch is kept once
+    sink.commit(EventBatch {
+        events: vec![ev.clone(), ev],
+    })
+    .await
+    .unwrap();
+    assert_eq!(sink.events().len(), 1);
+}
+
+#[tokio::test]
+async fn revisions_never_run_out_or_repeat() {
+    let (n, _) = connected("hub");
+    ready(&n, "s_1").await;
+    let mut seen = std::collections::HashSet::new();
+    for i in 0..200 {
+        let v = n.session(SessionId::new("s_1").unwrap()).await.unwrap();
+        assert!(seen.insert(v.revision.clone()), "repeated at {i}");
+        n.configure_session(cmd(
+            &format!("op_c{i}"),
+            ConfigureSession {
+                session: v.id,
+                expected: v.revision,
+                choice: choice(),
+                policy: policy(),
+            },
+        ))
+        .await
+        .unwrap();
+    }
+    for i in 0..50 {
+        n.release_session(cmd(&format!("op_rel{i}"), SessionId::new("s_1").unwrap()))
+            .await
+            .unwrap();
+        n.open_session(cmd(&format!("op_open{i}"), open("s_1", "hub")))
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn an_unenforceable_policy_is_refused_before_anything_changes() {
+    let (n, _) = connected("hub");
+    n.prepare_workspace(cmd("op_p", prepare("item:s_1")))
+        .await
+        .unwrap();
+    let mut strict = policy();
+    strict.sandbox = SandboxRequirement::Required {
+        guarantees: vec!["no-network".into()],
+    };
+    let mut o = open("s_1", "hub");
+    o.policy = strict.clone();
+    assert_eq!(
+        n.open_session(cmd("op_o1", o)).await.unwrap_err().code,
+        ErrorCode::Unsupported
+    );
+    assert!(n.session(SessionId::new("s_1").unwrap()).await.is_err());
+    n.open_session(cmd("op_o2", open("s_1", "hub")))
+        .await
+        .unwrap();
+    let before = n.session(SessionId::new("s_1").unwrap()).await.unwrap();
+    let e = n
+        .configure_session(cmd(
+            "op_c",
+            ConfigureSession {
+                session: before.id.clone(),
+                expected: before.revision.clone(),
+                choice: choice(),
+                policy: strict,
+            },
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::Unsupported);
+    assert_eq!(
+        n.session(before.id.clone()).await.unwrap(),
+        before,
+        "nothing changed"
+    );
+}
+
+#[test]
+fn tool_call_digests_ignore_key_order() {
+    let call = |args: &str| ToolCall {
+        id: CallId::new("c1").unwrap(),
+        execution: exec_turn("s_1", "t_1", "a_1"),
+        catalog: Revision::new("c1").unwrap(),
+        name: "steve_update".into(),
+        args: serde_json::from_str(args).unwrap(),
+        deadline: Timestamp(1),
+    };
+    assert_eq!(
+        call(r#"{"a":1,"b":{"y":2,"x":3}}"#).args_digest().unwrap(),
+        call(r#"{"b":{"x":3,"y":2},"a":1}"#).args_digest().unwrap()
     );
 }

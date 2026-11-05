@@ -66,6 +66,15 @@ struct Stream {
 struct Session {
     open: OpenSession,
     view: SessionView,
+    /// The incarnation of its workspace it was opened in: tidied and prepared again is another one.
+    incarnation: u64,
+}
+
+struct Workspace {
+    resource: String,
+    spec: Digest,
+    view: WorkspaceView,
+    incarnation: u64,
 }
 
 #[derive(Default)]
@@ -82,8 +91,11 @@ struct State {
     waiting: HashMap<PermissionId, PermissionRequest>,
     /// answered permissions: id → the resolution that was applied
     resolved: HashMap<PermissionId, PermissionResolution>,
-    /// workspace → (resource, digest of its prepare spec, view)
-    workspaces: HashMap<WorkspaceId, (String, Digest, WorkspaceView)>,
+    workspaces: HashMap<WorkspaceId, Workspace>,
+    /// Revisions and incarnations come from one counter: never reused.
+    counter: u64,
+    /// Snapshots being paged: token → (entries, heads)
+    snapshots: HashMap<u64, (Vec<SnapshotEntry>, Vec<StreamHead>)>,
     streams: BTreeMap<StreamId, Stream>,
     log: Vec<(&'static str, OperationId)>,
     next_event: u64,
@@ -389,6 +401,7 @@ impl FakeNode {
                 ));
             }
             let op = Self::live_op(&st, &req.execution)?;
+            self.check_preconditions(&st, &req.preconditions)?;
             if let Some(a) = st.inbox.get_mut(&op) {
                 let mut on = match &a.receipt.state {
                     Observed::Waiting { on } => on.clone(),
@@ -500,14 +513,18 @@ impl FakeNode {
         Ok(())
     }
 
-    fn check_run(st: &State, run: &RunSpec) -> ApiResult<()> {
-        if run.choice.harness != HARNESS {
-            return Err(ApiError::new(
-                ErrorCode::Unsupported,
-                "no such harness here",
-            ));
-        }
-        if let SandboxRequirement::Required { guarantees } = &run.policy.sandbox
+    fn next(st: &mut State) -> u64 {
+        st.counter += 1;
+        st.counter
+    }
+
+    fn revision(st: &mut State) -> Revision {
+        id(format!("r{}", Self::next(st)))
+    }
+
+    /// What this Node can enforce: no sandbox guarantee at all.
+    fn check_policy(p: &ExecutionPolicy) -> ApiResult<()> {
+        if let SandboxRequirement::Required { guarantees } = &p.sandbox
             && !guarantees.is_empty()
         {
             return Err(ApiError::new(
@@ -515,6 +532,45 @@ impl FakeNode {
                 "the fake enforces no sandbox",
             ));
         }
+        Ok(())
+    }
+
+    /// The preconditions still hold. The fake knows workspace revisions; file versions and HEAD it does
+    /// not simulate, so it refuses them rather than pretending they hold.
+    fn check_preconditions(&self, st: &State, pre: &[Precondition]) -> ApiResult<()> {
+        for p in pre {
+            match p {
+                Precondition::Workspace {
+                    workspace,
+                    revision,
+                } => {
+                    self.mine(workspace)?;
+                    match st.workspaces.get(&workspace.id) {
+                        Some(w) if w.view.revision == *revision => {}
+                        _ => {
+                            return Err(ApiError::new(
+                                ErrorCode::Stale,
+                                "the workspace changed since",
+                            ));
+                        }
+                    }
+                }
+                Precondition::File { .. } | Precondition::Head { .. } => {
+                    return unsupported("file and HEAD preconditions");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn check_run(st: &State, run: &RunSpec) -> ApiResult<()> {
+        if run.choice.harness != HARNESS {
+            return Err(ApiError::new(
+                ErrorCode::Unsupported,
+                "no such harness here",
+            ));
+        }
+        Self::check_policy(&run.policy)?;
         if run.limits.deadline.0 <= st.now {
             return Err(ApiError::new(ErrorCode::Expired, "deadline already passed"));
         }
@@ -543,6 +599,18 @@ impl FakeNode {
         Ok(())
     }
 
+    fn heads(st: &State) -> Vec<StreamHead> {
+        st.streams
+            .iter()
+            .map(|(k, s)| StreamHead {
+                stream: k.clone(),
+                epoch: s.epoch.clone(),
+                produced: s.produced,
+                acknowledged: s.acknowledged,
+            })
+            .collect()
+    }
+
     fn running(st: &State) -> (u32, u32) {
         (st.active.len() as u32, st.jobs.len() as u32)
     }
@@ -567,9 +635,11 @@ impl SessionExecutor for FakeNode {
                     "no such harness here",
                 ));
             }
-            if !st.workspaces.contains_key(&o.workspace.id) {
+            Self::check_policy(&o.policy)?;
+            let Some(incarnation) = st.workspaces.get(&o.workspace.id).map(|w| w.incarnation)
+            else {
                 return Err(ApiError::new(ErrorCode::Invalid, "no such workspace"));
-            }
+            };
             if let Some(s) = st.sessions.get(&o.session) {
                 if st.active.contains_key(&o.session) {
                     return Err(ApiError::new(ErrorCode::Busy, "an attempt is running"));
@@ -584,14 +654,9 @@ impl SessionExecutor for FakeNode {
                     ));
                 }
             }
-            let rev = st
-                .sessions
-                .get(&o.session)
-                .map(|s| format!("{}x", s.view.revision))
-                .unwrap_or_else(|| "r1".into());
             let view = SessionView {
                 id: o.session.clone(),
-                revision: id(rev),
+                revision: Self::revision(st),
                 phase: SessionPhase::Ready,
                 active: None,
                 effective: o.choice.clone(),
@@ -604,6 +669,7 @@ impl SessionExecutor for FakeNode {
                 Session {
                     open: o.clone(),
                     view: view.clone(),
+                    incarnation,
                 },
             );
             let mut d = Decided::done(OperationResult::Session(view.clone()));
@@ -640,11 +706,17 @@ impl SessionExecutor for FakeNode {
                     "another harness needs another session",
                 ));
             }
+            Self::check_policy(&b.policy)?;
+            // everything checked: now change it
+            let revision = Self::revision(st);
+            let Some(s) = st.sessions.get_mut(&b.session) else {
+                return Err(ApiError::new(ErrorCode::Internal, "session vanished"));
+            };
             s.open.choice = b.choice.clone();
             s.open.policy = b.policy.clone();
             s.view.effective = b.choice.clone();
             s.view.effective_permissions = b.policy.permissions;
-            s.view.revision = id(format!("{}x", s.view.revision));
+            s.view.revision = revision;
             let view = s.view.clone();
             let mut d = Decided::done(OperationResult::Session(view.clone()));
             d.events = vec![(
@@ -677,6 +749,12 @@ impl SessionExecutor for FakeNode {
             }
             t.check_against(&s.open)?;
             let ws = s.open.workspace.clone();
+            if st.workspaces.get(&ws.id).map(|w| w.incarnation) != Some(s.incarnation) {
+                return Err(ApiError::new(
+                    ErrorCode::Invalid,
+                    "the session's workspace is gone: open it again",
+                ));
+            }
             Self::check_run(st, &t.run)?;
             if st.active.contains_key(&t.session) {
                 return Err(ApiError::new(ErrorCode::Busy, "an attempt is running"));
@@ -818,6 +896,10 @@ impl ExecutionControl for FakeNode {
                     "not one of the offered choices",
                 ));
             }
+            // checked again right before the approval is used
+            if res.decision == PermissionDecision::AllowOnce {
+                self.check_preconditions(st, &req.preconditions)?;
+            }
             let exec = req.execution.clone();
             let op = Self::live_op(st, &exec)?;
             st.waiting.remove(&res.id);
@@ -848,56 +930,68 @@ impl ExecutionControl for FakeNode {
         .await
     }
 
-    async fn snapshot(&self, page: PageRequest) -> ApiResult<Page<SnapshotEntry>> {
-        let st = self.st();
+    async fn snapshot(&self, page: PageRequest) -> ApiResult<Snapshot> {
+        let mut st = self.st();
         let limit = page.limit.max(1) as usize;
-        let after = page.cursor.as_ref().map(|c| c.as_str().to_string());
-        let mut items: Vec<SnapshotEntry> = vec![];
-        let mut next = None;
-        for (op, a) in &st.inbox {
-            if after.as_deref().is_some_and(|x| op.as_str() <= x) {
-                continue;
+        let (token, offset) = match &page.cursor {
+            None => {
+                let entries: Vec<SnapshotEntry> = st
+                    .inbox
+                    .values()
+                    .map(|a| SnapshotEntry {
+                        receipt: a.receipt.clone(),
+                        method: a.method.into(),
+                        digest: a.digest.clone(),
+                        execution: a.execution.clone(),
+                        workspace: a.workspace.clone(),
+                        pending: a
+                            .execution
+                            .as_ref()
+                            .map(|e| {
+                                st.waiting
+                                    .values()
+                                    .filter(|r| r.execution == *e)
+                                    .cloned()
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                        cancel_requested: a.cancel_requested,
+                    })
+                    .collect();
+                let heads = Self::heads(&st);
+                let token = Self::next(&mut st);
+                st.snapshots.insert(token, (entries, heads));
+                (token, 0usize)
             }
-            if items.len() == limit {
-                next = items.last().map(|e| id(e.receipt.operation.as_str()));
-                break;
+            Some(c) => {
+                let bad = || ApiError::new(ErrorCode::Invalid, "not a snapshot cursor");
+                let (t, o) = c
+                    .as_str()
+                    .strip_prefix("snap")
+                    .and_then(|r| r.split_once('.'))
+                    .ok_or_else(bad)?;
+                (t.parse().map_err(|_| bad())?, o.parse().map_err(|_| bad())?)
             }
-            let pending = a
-                .execution
-                .as_ref()
-                .map(|e| {
-                    st.waiting
-                        .values()
-                        .filter(|r| r.execution == *e)
-                        .cloned()
-                        .collect()
-                })
-                .unwrap_or_default();
-            items.push(SnapshotEntry {
-                receipt: a.receipt.clone(),
-                method: a.method.into(),
-                digest: a.digest.clone(),
-                execution: a.execution.clone(),
-                workspace: a.workspace.clone(),
-                pending,
-                cancel_requested: a.cancel_requested,
-            });
+        };
+        let Some((entries, heads)) = st.snapshots.get(&token) else {
+            return Err(ApiError::new(ErrorCode::Expired, "this snapshot is gone"));
+        };
+        let page: Vec<SnapshotEntry> = entries.iter().skip(offset).take(limit).cloned().collect();
+        let heads = heads.clone();
+        let more = offset + page.len() < entries.len();
+        let next = more.then(|| id(format!("snap{token}.{}", offset + page.len())));
+        if !more {
+            st.snapshots.remove(&token);
         }
-        Ok(Page { items, next })
+        Ok(Snapshot {
+            entries: page,
+            heads,
+            next,
+        })
     }
 
     async fn streams(&self) -> ApiResult<Vec<StreamHead>> {
-        Ok(self
-            .st()
-            .streams
-            .iter()
-            .map(|(k, s)| StreamHead {
-                stream: k.clone(),
-                epoch: s.epoch.clone(),
-                produced: s.produced,
-                acknowledged: s.acknowledged,
-            })
-            .collect())
+        Ok(Self::heads(&self.st()))
     }
 
     async fn replay(&self, from: Watermark, max_bytes: u32) -> ApiResult<EventBatch> {
@@ -949,7 +1043,7 @@ impl WorkspaceExecutor for FakeNode {
             let spec = digest_of(&c.body.kind)?;
             let wid: WorkspaceId = id(derived_id("w", &c.body.resource));
             let view = match st.workspaces.get(&wid) {
-                Some((res, d, v)) if *res == c.body.resource && *d == spec => v.clone(),
+                Some(w) if w.resource == c.body.resource && w.spec == spec => w.view.clone(),
                 Some(_) => {
                     return Err(ApiError::new(
                         ErrorCode::Conflict,
@@ -961,18 +1055,26 @@ impl WorkspaceExecutor for FakeNode {
                         PrepareKind::Worktree { branch, .. } => Some(branch.clone()),
                         _ => None,
                     };
+                    let incarnation = Self::next(st);
                     let v = WorkspaceView {
                         workspace: WorkspaceRef {
                             node: node.clone(),
                             id: wid.clone(),
                         },
-                        revision: id("r1"),
+                        revision: Self::revision(st),
                         usable: true,
                         branch,
                         display: format!("fake/{wid}"),
                     };
-                    st.workspaces
-                        .insert(wid.clone(), (c.body.resource.clone(), spec, v.clone()));
+                    st.workspaces.insert(
+                        wid.clone(),
+                        Workspace {
+                            resource: c.body.resource.clone(),
+                            spec,
+                            view: v.clone(),
+                            incarnation,
+                        },
+                    );
                     v
                 }
             };
@@ -988,7 +1090,7 @@ impl WorkspaceExecutor for FakeNode {
         self.st()
             .workspaces
             .get(&w.id)
-            .map(|(_, _, v)| v.clone())
+            .map(|x| x.view.clone())
             .ok_or_else(|| ApiError::new(ErrorCode::Invalid, "no such workspace"))
     }
 
@@ -1005,11 +1107,18 @@ impl WorkspaceExecutor for FakeNode {
                 return Err(ApiError::new(ErrorCode::Busy, "the workspace is in use"));
             }
             match st.workspaces.get(&w.id) {
-                Some((_, _, v)) if v.revision != c.body.expected => {
+                Some(x) if x.view.revision != c.body.expected => {
                     Err(ApiError::new(ErrorCode::Conflict, "changed since"))
                 }
                 Some(_) => {
                     st.workspaces.remove(&w.id);
+                    // sessions opened in it cannot run anymore (they are released; opening again
+                    // needs a workspace)
+                    for s in st.sessions.values_mut() {
+                        if s.open.workspace == *w {
+                            s.view.phase = SessionPhase::Released;
+                        }
+                    }
                     Ok(Decided::done(OperationResult::Unit))
                 }
                 None => Err(ApiError::new(ErrorCode::Invalid, "no such workspace")),
@@ -1130,20 +1239,23 @@ impl EventSink for RecordingSink {
             return Err(ApiError::new(ErrorCode::Offline, "hub store unavailable"));
         }
         let mut held = self.held.lock().unwrap();
+        // the whole batch is checked (against itself and what is held) before anything is kept
+        let mut seen: BTreeMap<(StreamId, Epoch, u64), &NodeEvent> = BTreeMap::new();
         for e in &batch.events {
             let k = (
                 e.cursor.stream.clone(),
                 e.cursor.epoch.clone(),
                 e.cursor.seq,
             );
-            if let Some(old) = held.get(&k)
-                && *old != *e
-            {
+            let clash = held.get(&k).is_some_and(|old| old != e)
+                || seen.get(&k).is_some_and(|old| *old != e);
+            if clash {
                 return Err(ApiError::new(
                     ErrorCode::Conflict,
                     "another event at this position",
                 ));
             }
+            seen.insert(k, e);
         }
         for e in batch.events {
             let k = (

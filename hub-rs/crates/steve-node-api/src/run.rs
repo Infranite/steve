@@ -178,8 +178,9 @@ pub struct TurnSpec {
 }
 
 impl TurnSpec {
-    /// A turn runs in its session's context: in the session's workspace, with its harness. A model or
-    /// policy change goes through [`ConfigureSession`] first, a continuation belongs to the session.
+    /// A turn runs in its session's context: in the session's workspace, with exactly the session's
+    /// current choice and policy (`open` as last configured). A model or policy change goes through
+    /// [`ConfigureSession`] first; a continuation belongs to the session.
     pub fn check_against(&self, open: &OpenSession) -> crate::common::ApiResult<()> {
         use crate::common::{ApiError, ErrorCode};
         let bad = |why: &str| Err(ApiError::new(ErrorCode::Invalid, why));
@@ -192,6 +193,9 @@ impl TurnSpec {
         }
         if self.run.choice.harness != open.choice.harness {
             return bad("another harness needs another session");
+        }
+        if self.run.choice != open.choice || self.run.policy != open.policy {
+            return bad("the session is configured otherwise: configure it first");
         }
         if self.run.continuation.is_some() {
             return bad("a session turn has no continuation of its own");
