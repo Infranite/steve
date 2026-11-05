@@ -49,6 +49,23 @@ impl LegacyReader {
         }
     }
 
+    /// Exactly one entry per stored row, for reads by seq: [`crate::SKIP`] when the row shows
+    /// nothing (an image chunk, a mode change), its single entry otherwise.
+    pub fn read_row(&mut self, kind: &str, data: &Value) -> Entry {
+        let mut xs = self.read(kind, data);
+        debug_assert!(xs.len() <= 1, "one ACP update is at most one entry");
+        xs.pop().unwrap_or_else(|| Entry {
+            kind: crate::SKIP.into(),
+            data: serde_json::json!({}),
+        })
+    }
+
+    /// Whether this reader has seen the tool an update is for (a live update after a restart has
+    /// not: its view would be a fragment).
+    pub fn knows(&self, kind: &str, data: &Value) -> bool {
+        self.missing_tool(kind, data).is_none()
+    }
+
     /// The entries of one row. Rows that are not ACP's (the Hub's own kinds) pass as they are.
     pub fn read(&mut self, kind: &str, data: &Value) -> Vec<Entry> {
         if !is_legacy(kind, data) {

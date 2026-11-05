@@ -68,7 +68,7 @@ pub fn asked(norm: &mut Normalizer, rpc_id: &Value, params: &Value) -> Asked {
     } else {
         view.title.clone()
     };
-    let steve_tool = if fact.origin == steve_node_api::ToolOrigin::Steve && fact.name != "tool" {
+    let steve_tool = if fact.origin == steve_node_api::ToolOrigin::Steve && !fact.name.is_empty() {
         Some(
             fact.name
                 .strip_prefix("mcp__steve__")
@@ -126,7 +126,7 @@ fn norm_fallback(tool_call: &str) -> Asked {
     let fact = ToolFact {
         raw_id: tool_call.to_string(),
         call: crate::normalize::call_id(tool_call),
-        name: "tool".into(),
+        name: String::new(),
         category: steve_node_api::ToolCategory::Other,
         origin: steve_node_api::ToolOrigin::Harness,
         title: String::new(),

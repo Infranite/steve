@@ -8,7 +8,7 @@
 
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use serde::Serialize;
@@ -97,12 +97,69 @@ pub struct HubHost {
     pub yolo: OnceLock<steve_core::yolo::Engine>,
     /// The first `user` event of the turn being started, for `agent_turns.user_seq`.
     pub user_seqs: super::acp_stats::UserSeqs,
-    /// Per session, what the runner's turn said so far (its tool updates carry only what changed).
-    pub transcripts:
-        std::sync::Mutex<std::collections::HashMap<String, steve_transcript::LegacyReader>>,
+    /// Per session, what the runner's turn said so far (its tool updates carry only what changed),
+    /// and when it last said something.
+    pub transcripts: std::sync::Mutex<Readers>,
 }
 
+pub type Readers = std::collections::HashMap<String, (steve_transcript::LegacyReader, Instant)>;
+
+/// How long a session's transcript reader is kept with nothing new from its runner.
+const TRANSCRIPT_IDLE: Duration = Duration::from_secs(3600);
+
 impl HubHost {
+    /// The runner's row as transcript entries: its ACP updates are read (with what its turn said
+    /// before), the Hub's own kinds pass. A tool update the reader never saw the beginning of (the
+    /// Hub restarted in between) is dropped rather than stored as a fragment that would replace
+    /// the tool's card.
+    fn transcript_of(
+        &self,
+        session_id: &str,
+        kind: &str,
+        data: Value,
+    ) -> Vec<steve_transcript::Entry> {
+        let mut readers = self.transcripts.lock().unwrap_or_else(|e| e.into_inner());
+        let now = Instant::now();
+        readers.retain(|_, (_, used)| now.duration_since(*used) < TRANSCRIPT_IDLE);
+        if !steve_transcript::is_legacy(kind, &data) {
+            if kind == "user" {
+                // a new turn: tool updates never cross one, what the reader kept is done with
+                readers.remove(session_id);
+            }
+            return vec![steve_transcript::Entry {
+                kind: kind.into(),
+                data,
+            }];
+        }
+        if !readers.contains_key(session_id) {
+            // the store is read without holding every session's readers
+            drop(readers);
+            let cwd = self
+                .store
+                .sessions()
+                .get(session_id)
+                .ok()
+                .flatten()
+                .map(|s| s.cwd)
+                .unwrap_or_default();
+            readers = self.transcripts.lock().unwrap_or_else(|e| e.into_inner());
+            readers
+                .entry(session_id.to_string())
+                .or_insert_with(|| (steve_transcript::LegacyReader::new(&cwd), now));
+        }
+        let Some((reader, used)) = readers.get_mut(session_id) else {
+            return vec![];
+        };
+        *used = now;
+        if !reader.knows(kind, &data) {
+            tracing::warn!(
+                "event {session_id} {kind}: an update of a tool not seen this turn, dropped"
+            );
+            return vec![];
+        }
+        reader.read(kind, &data)
+    }
+
     fn patch(&self, sid: &str, p: SessionPatch) {
         if let Err(e) = self.store.sessions().patch(sid, &p) {
             tracing::error!("session {sid} patch: {e}");
@@ -208,35 +265,7 @@ impl Host for HubHost {
         let armed = (kind == "permission")
             .then(|| data["decision"].as_str().map(String::from))
             .flatten();
-        // the runner's ACP updates are stored as Steve's own transcript entries
-        let entries = if steve_transcript::is_legacy(kind, &data) {
-            let mut readers = self.transcripts.lock().unwrap_or_else(|e| e.into_inner());
-            let reader = readers.entry(session_id.to_string()).or_insert_with(|| {
-                let cwd = self
-                    .store
-                    .sessions()
-                    .get(session_id)
-                    .ok()
-                    .flatten()
-                    .map(|s| s.cwd)
-                    .unwrap_or_default();
-                steve_transcript::LegacyReader::new(&cwd)
-            });
-            reader.read(kind, &data)
-        } else {
-            if kind == "turn_end" {
-                // tool updates never cross a turn: what the reader kept is done with
-                self.transcripts
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .remove(session_id);
-            }
-            vec![steve_transcript::Entry {
-                kind: kind.into(),
-                data,
-            }]
-        };
-        for x in entries {
+        for x in self.transcript_of(session_id, kind, data) {
             match self.store.events().add(session_id, &x.kind, x.data) {
                 Ok(seq) if kind == "user" => self.user_seqs.user_event(session_id, seq),
                 Ok(_) => {}

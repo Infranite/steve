@@ -283,6 +283,9 @@ pub struct ToolView {
     pub name: String,
     pub category: ToolCategory,
     pub title: String,
+    /// What the agent said it is for ("List the files"), for people; bounded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     /// What it works on, for people: a path relative to the workspace, a command, a query.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,

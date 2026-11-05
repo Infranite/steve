@@ -234,14 +234,13 @@ impl Repo for StoreBackend {
             .events()
             .visit_legacy_page(session, after, |e| {
                 // Value serialization is infallible; use the repository's transparent hydration.
-                for x in reader.read(&e.kind, &e.data) {
-                    each((
-                        e.seq,
-                        e.ts,
-                        x.kind,
-                        serde_json::to_string(&x.data).expect("JSON event"),
-                    ));
-                }
+                let x = reader.read_row(&e.kind, &e.data);
+                each((
+                    e.seq,
+                    e.ts,
+                    x.kind,
+                    serde_json::to_string(&x.data).expect("JSON event"),
+                ));
             })
             .map_err(err)?;
         Ok(true)
@@ -258,14 +257,13 @@ impl Repo for StoreBackend {
             .events()
             .visit_page(session, after, |e| {
                 // Value serialization is infallible; use the repository's transparent hydration.
-                for x in reader.read(&e.kind, &e.data) {
-                    each((
-                        e.seq,
-                        e.ts,
-                        x.kind,
-                        serde_json::to_string(&x.data).expect("JSON event"),
-                    ));
-                }
+                let x = reader.read_row(&e.kind, &e.data);
+                each((
+                    e.seq,
+                    e.ts,
+                    x.kind,
+                    serde_json::to_string(&x.data).expect("JSON event"),
+                ));
             })
             .map_err(err)?;
         Ok(true)
@@ -669,14 +667,13 @@ impl Repo for StoreBackend {
         let mut reader = self.transcript(session, after)?;
         let mut out = vec![];
         for e in self.0.events().after(session, after, 5000).map_err(err)? {
-            for x in reader.read(&e.kind, &e.data) {
-                out.push(steve_store::Event {
-                    seq: e.seq,
-                    ts: e.ts,
-                    kind: x.kind,
-                    data: x.data,
-                });
-            }
+            let x = reader.read_row(&e.kind, &e.data);
+            out.push(steve_store::Event {
+                seq: e.seq,
+                ts: e.ts,
+                kind: x.kind,
+                data: x.data,
+            });
         }
         objs(out)
     }

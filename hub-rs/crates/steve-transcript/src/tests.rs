@@ -115,3 +115,33 @@ fn node_events_map_onto_the_same_entries() {
     assert_eq!(t.data["role"], "thought");
     assert!(of_node(&EventBody::AttemptStarted, None).is_none());
 }
+
+#[test]
+fn every_row_reads_as_exactly_one_entry() {
+    let mut r = LegacyReader::new("/w");
+    let image =
+        json!({"sessionUpdate": "agent_message_chunk", "content": {"type": "image", "data": "x"}});
+    assert_eq!(r.read_row("agent_message_chunk", &image).kind, SKIP);
+    let mode = json!({"sessionUpdate": "session_info_update"});
+    assert_eq!(r.read_row("session_info_update", &mode).kind, SKIP);
+    assert_eq!(
+        r.read_row("agent_message_chunk", &chunk("agent_message_chunk", "x"))
+            .kind,
+        TEXT
+    );
+}
+
+#[test]
+fn a_tool_keeps_what_it_is_for_and_a_bounded_action() {
+    let mut r = LegacyReader::new("/w");
+    let long = "x".repeat(TEXT_MAX * 2);
+    let call = json!({"sessionUpdate": "tool_call", "toolCallId": "t1", "title": "Bash", "kind": "execute", "status": "pending",
+        "rawInput": {"command": long, "description": "Write the file"}, "_meta": {"claudeCode": {"toolName": "Bash"}}});
+    let e = r.read_row("tool_call", &call);
+    assert_eq!(e.data["tool"]["description"], "Write the file");
+    let cmd = e.data["tool"]["action"]["command"].as_str().unwrap();
+    assert_eq!(cmd.chars().count(), TEXT_MAX + 1, "cut, with an ellipsis");
+    // a tool whose name nobody gave stays nameless
+    let anon = json!({"sessionUpdate": "tool_call", "toolCallId": "t2", "title": "Bash ls", "kind": "execute", "status": "completed"});
+    assert_eq!(r.read_row("tool_call", &anon).data["tool"]["name"], "");
+}

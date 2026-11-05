@@ -3,7 +3,7 @@
 use super::Cached;
 use std::collections::HashSet;
 
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -352,21 +352,27 @@ impl Events<'_> {
         })
     }
 
-    /// The rows at or before `after` of the tools that are still updated after it: what a reader of
-    /// the old ACP rows needs to read a page that starts at `after` (an update carries only what
-    /// changed). Empty from the start.
+    /// The old ACP tool rows of the turn that is open at `after`: what a reader of those rows needs
+    /// to read a page that starts at `after` (an update carries only what changed, and tool
+    /// updates never cross a turn). Bounded by one turn; empty from the start.
     pub fn tool_context(&self, session_id: &str, after: i64) -> Result<Vec<Event>> {
         if after <= 0 {
             return Ok(vec![]);
         }
         self.0.read(|c| {
             let tx = c.unchecked_transaction()?;
+            let start: i64 = tx
+                .query_row(
+                    "SELECT seq FROM events WHERE session_id = ? AND seq <= ? AND kind = 'user' ORDER BY seq DESC LIMIT 1",
+                    params![session_id, after],
+                    |r| r.get(0),
+                )
+                .optional()?
+                .unwrap_or(0);
             let mut events: Vec<Event> = all(
                 &tx,
-                "SELECT seq, ts, kind, data FROM events WHERE session_id = ?1 AND seq <= ?2 AND kind IN ('tool_call', 'tool_call_update')
-                   AND json_extract(data, '$.toolCallId') IN (SELECT json_extract(data, '$.toolCallId') FROM events WHERE session_id = ?1 AND seq > ?2 AND kind = 'tool_call_update')
-                 ORDER BY seq",
-                params![session_id, after],
+                "SELECT seq, ts, kind, data FROM events WHERE session_id = ? AND seq > ? AND seq <= ? AND kind IN ('tool_call', 'tool_call_update') ORDER BY seq",
+                params![session_id, start, after],
                 event_row,
             )?;
             for e in &mut events { hydrate_event(&tx, session_id, e)?; }

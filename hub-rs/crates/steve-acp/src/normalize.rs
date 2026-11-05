@@ -348,7 +348,8 @@ fn tool_name(u: &Value) -> String {
                 .and_then(Value::as_str)
         })
         .or_else(|| u.pointer("/rawInput/tool_name").and_then(Value::as_str))
-        .unwrap_or("tool")
+        // unknown: empty, never a made-up name
+        .unwrap_or("")
         .to_string()
 }
 
@@ -571,6 +572,11 @@ impl ToolFact {
             category: self.category,
             origin: self.origin,
             title: bound(&self.title, 200),
+            description: input
+                .get("description")
+                .and_then(Value::as_str)
+                .filter(|d| !d.is_empty())
+                .map(|d| bound(d, 200)),
             target: self.target(root).map(|t| bound(&t, 200)),
             phase: self.phase,
             action,

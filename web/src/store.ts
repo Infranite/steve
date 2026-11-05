@@ -193,6 +193,8 @@ function toolEv(t: Ev, v: any) {
   t[8] = v.phase === "failed" ? 1 : 0; t[9] = name
   const a = v.action
   if (a?.type === "exec") t[11] = a.command; else if (a?.type === "search") t[11] = a.query; else if (a?.type === "fetch") t[11] = a.url
+  else if (t[1] === "run" && v.target) t[11] = v.target
+  if (!steve && v.description) t[10] = v.description
   if (args) {
     if (typeof args.now === "string") t[10] = args.now
     if (Array.isArray(args.plan)) t[12] = args.plan.map((x: any) => [String(x.step ?? ""), !!x.done])

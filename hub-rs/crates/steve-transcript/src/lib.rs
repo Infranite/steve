@@ -68,11 +68,38 @@ pub fn of_node(body: &EventBody, role: Option<Role>) -> Option<Entry> {
                 "text": text,
             }),
         )),
-        EventBody::ToolChanged { tool } => Some(Entry::new(TOOL, json!({ "tool": tool }))),
+        EventBody::ToolChanged { tool } => {
+            let mut tool = serde_json::to_value(tool).unwrap_or(Value::Null);
+            // the action is the Node's to bind and check; for people a bounded copy is enough
+            if let Some(a) = tool.get_mut("action") {
+                bound_strings(a);
+            }
+            Some(Entry::new(TOOL, json!({ "tool": tool })))
+        }
         EventBody::Plan { entries } => Some(Entry::new(PLAN, json!({ "entries": entries }))),
         _ => None,
     }
 }
+
+/// The longest text a transcript keeps of a tool's action (a command, a Steve tool's arguments),
+/// in characters: the same bound as a tool's output preview.
+pub const TEXT_MAX: usize = 4000;
+
+fn bound_strings(v: &mut Value) {
+    match v {
+        Value::String(s) if s.chars().count() > TEXT_MAX => {
+            let cut: String = s.chars().take(TEXT_MAX).collect();
+            *s = format!("{cut}…");
+        }
+        Value::Array(a) => a.iter_mut().for_each(bound_strings),
+        Value::Object(o) => o.values_mut().for_each(bound_strings),
+        _ => {}
+    }
+}
+
+/// A stored row with nothing to show (`{}`): it keeps its place, so a page of rows always yields
+/// entries and paging by seq goes on.
+pub const SKIP: &str = "skip";
 
 /// The assistant's text in a row of either format, if it is one.
 pub fn assistant_text<'a>(kind: &str, data: &'a Value) -> Option<&'a str> {
