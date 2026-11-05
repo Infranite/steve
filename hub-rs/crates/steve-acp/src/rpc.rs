@@ -172,7 +172,7 @@ impl Conn {
             .spawn()
             .map_err(|e| RpcError::msg(format!("spawn {} {e}", sp.program.display())))?;
         let pid = child.id().unwrap_or(0);
-        let (Some(mut stdin), Some(stdout), Some(mut stderr)) =
+        let (Some(mut stdin), Some(stdout), Some(stderr)) =
             (child.stdin.take(), child.stdout.take(), child.stderr.take())
         else {
             return Err(RpcError::msg("adapter stdio unavailable"));
@@ -193,22 +193,7 @@ impl Conn {
         });
 
         let tag = sp.log_tag.clone();
-        tokio::spawn(async move {
-            let mut buf = vec![0u8; 8192];
-            while let Ok(n) = stderr.read(&mut buf).await {
-                if n == 0 {
-                    break;
-                }
-                let t = String::from_utf8_lossy(&buf[..n]);
-                let t = t.trim();
-                if !t.is_empty() {
-                    // an adapter's stderr can echo what a command printed: no injected secret
-                    // reaches the log (V4)
-                    let t = steve_vault::redact::scrub_any(t);
-                    tracing::warn!("{tag} {}", js_slice(&t, 500));
-                }
-            }
-        });
+        tokio::spawn(stderr_lines(stderr, move |t| tracing::warn!("{tag} {t}")));
 
         let weak = Arc::downgrade(&conn);
         let reader = tokio::spawn(async move {
@@ -412,6 +397,85 @@ impl Conn {
     pub async fn wait_exit(&self) {
         let mut rx = self.exited.clone();
         let _ = rx.wait_for(|e| *e).await;
+    }
+}
+
+/// The longest stderr line read at once; the rest of an overlong line is drained, not logged.
+const STDERR_LINE_MAX: u64 = 64 * 1024;
+
+/// Logs an adapter's stderr a line at a time, scrubbed and cut to 500 characters. Whole lines
+/// matter: an adapter's stderr can echo what a command printed, and an injected secret split
+/// across two reads would slip past the redactor (V4).
+async fn stderr_lines(stderr: impl tokio::io::AsyncRead + Unpin, mut log: impl FnMut(&str)) {
+    let mut r = BufReader::new(stderr);
+    let mut line = Vec::new();
+    // inside an overlong line whose head was already logged
+    let mut tail = false;
+    loop {
+        line.clear();
+        match (&mut r)
+            .take(STDERR_LINE_MAX)
+            .read_until(b'\n', &mut line)
+            .await
+        {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {}
+        }
+        let skip = tail;
+        tail = line.last() != Some(&b'\n');
+        if skip {
+            continue;
+        }
+        let t = String::from_utf8_lossy(&line);
+        let t = t.trim();
+        if !t.is_empty() {
+            // scrubbed before the cut, so a value straddling the 500th character is caught too
+            let t = steve_vault::redact::scrub_any(t);
+            log(js_slice(&t, 500));
+        }
+    }
+}
+
+#[cfg(test)]
+mod stderr_tests {
+    use super::*;
+    use tokio::io::AsyncWriteExt;
+
+    #[tokio::test]
+    async fn a_secret_split_across_reads_is_still_scrubbed() {
+        let secret = "sk-test-stderr-split-0123456789abcdef";
+        steve_vault::redact::register("rpc-stderr-test", "API_KEY", secret.as_bytes());
+        // a tiny pipe, so the reader sees the line in several pieces
+        let (mut w, r) = tokio::io::duplex(8);
+        let feed = tokio::spawn(async move {
+            let text = format!("token is {secret} ok\nnext line\n");
+            for piece in text.as_bytes().chunks(5) {
+                w.write_all(piece).await.unwrap();
+                tokio::task::yield_now().await;
+            }
+        });
+        let mut got = Vec::new();
+        stderr_lines(r, |t| got.push(t.to_string())).await;
+        feed.await.unwrap();
+        steve_vault::redact::forget("rpc-stderr-test");
+        assert_eq!(got.len(), 2, "{got:?}");
+        assert!(!got[0].contains("sk-test"), "{got:?}");
+        assert!(
+            got[0].starts_with("token is ") && got[0].ends_with(" ok"),
+            "{got:?}"
+        );
+        assert_eq!(got[1], "next line");
+    }
+
+    #[tokio::test]
+    async fn an_overlong_line_is_logged_once() {
+        let mut text = "x".repeat(STDERR_LINE_MAX as usize * 2);
+        text.push_str("\nafter\n");
+        let mut got = Vec::new();
+        stderr_lines(text.as_bytes(), |t| got.push(t.to_string())).await;
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].len(), 500);
+        assert_eq!(got[1], "after");
     }
 }
 

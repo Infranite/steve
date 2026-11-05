@@ -158,14 +158,19 @@ pub fn sync_day(m: &Modules, kb: &Knowledge, ws: &str, day: &str) -> ApiResult<O
 pub async fn extract_day(m: &Modules, kb: &Knowledge, ws: &str, day: &str) -> ApiResult<Vec<Mem>> {
     let mark = format!("extract:chat:{day}");
     let now = m.clock.now();
-    let todo = m.store.transaction(|tx| {
-        if repo::mark(tx, ws, &mark)?.is_some() {
-            return Ok::<_, ApiError>(None);
-        }
-        repo::set_mark(tx, ws, &mark, "done", now)?;
-        let user = extract::owner(tx, ws)?;
-        Ok(day_text(tx, ws, day)?.map(|t| (user, t)))
-    })?;
+    let (w, d) = (ws.to_string(), day.to_string());
+    let todo = m
+        .blocking(move |m| {
+            m.store.transaction(|tx| {
+                if repo::mark(tx, &w, &mark)?.is_some() {
+                    return Ok::<_, ApiError>(None);
+                }
+                repo::set_mark(tx, &w, &mark, "done", now)?;
+                let user = extract::owner(tx, &w)?;
+                Ok(day_text(tx, &w, &d)?.map(|t| (user, t)))
+            })
+        })
+        .await?;
     let Some((user, text)) = todo else {
         return Ok(Vec::new());
     };
@@ -194,28 +199,38 @@ pub async fn extract_day(m: &Modules, kb: &Knowledge, ws: &str, day: &str) -> Ap
 /// One run of the job at `now`: today's document of every workspace (when `today` is set), and after
 /// 03:30 / 03:40 yesterday's final document / extraction if not done yet.
 pub async fn tick(m: &Modules, kb: &Knowledge, now: i64, today: bool) -> ApiResult<()> {
-    let wss: Vec<String> = m.store.reader(|c| {
-        Ok::<_, ApiError>(
-            c.prepare("SELECT id FROM workspaces ORDER BY id")?
-                .query_map([], |r| r.get(0))?
-                .collect::<rusqlite::Result<Vec<String>>>()?,
-        )
-    })?;
+    let wss: Vec<String> = m
+        .blocking(|m| {
+            m.store.reader(|c| {
+                Ok::<_, ApiError>(
+                    c.prepare("SELECT id FROM workspaces ORDER BY id")?
+                        .query_map([], |r| r.get(0))?
+                        .collect::<rusqlite::Result<Vec<String>>>()?,
+                )
+            })
+        })
+        .await?;
     let local = Local.timestamp_millis_opt(now).earliest();
     let hm = local.map(|t| (t.hour(), t.minute())).unwrap_or((0, 0));
     let yesterday = day_of(now - DAY_MS);
     for ws in wss {
-        if today {
-            sync_day(m, kb, &ws, &day_of(now))?;
-        }
-        if hm >= FINALIZE_AT {
-            let mark = format!("sync:chat:{yesterday}");
-            if m.store.reader(|c| repo::mark(c, &ws, &mark))?.is_none() {
-                sync_day(m, kb, &ws, &yesterday)?;
-                m.store
-                    .transaction(|tx| repo::set_mark(tx, &ws, &mark, "final", now))?;
+        // a day's document is rebuilt and chunked in one write: off the runtime
+        let (k, w, y) = (kb.clone(), ws.clone(), yesterday.clone());
+        m.blocking(move |m| {
+            if today {
+                sync_day(m, &k, &w, &day_of(now))?;
             }
-        }
+            if hm >= FINALIZE_AT {
+                let mark = format!("sync:chat:{y}");
+                if m.store.reader(|c| repo::mark(c, &w, &mark))?.is_none() {
+                    sync_day(m, &k, &w, &y)?;
+                    m.store
+                        .transaction(|tx| repo::set_mark(tx, &w, &mark, "final", now))?;
+                }
+            }
+            Ok(())
+        })
+        .await?;
         if hm >= EXTRACT_AT
             && let Err(e) = extract_day(m, kb, &ws, &yesterday).await
         {

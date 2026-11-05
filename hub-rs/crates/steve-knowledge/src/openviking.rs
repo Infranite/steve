@@ -27,6 +27,8 @@ pub const TOPIC_V: i64 = 1;
 
 /// A search must answer within this (it runs inside the callers' reads).
 pub const SEARCH_TIMEOUT: Duration = Duration::from_secs(5);
+/// How many subject searches run at once.
+const FIND_PARALLEL: usize = 8;
 /// Writing one object's chunks (embedding on CPU, waited for).
 pub const WRITE_TIMEOUT: Duration = Duration::from_secs(120);
 /// Below this cosine similarity a chunk is not about the query.
@@ -259,11 +261,26 @@ impl KnowledgeStore for OpenViking {
             subjects.push(vec![tag("by", &scope.user)]);
             subjects.extend(scope.scopes.iter().map(|s| vec![tag("vis", s)]));
         }
+        // The finds run side by side (a few at a time), so a slow server costs one timeout per
+        // round rather than one per subject.
+        let mut results = Vec::with_capacity(subjects.len());
+        for round in subjects.chunks(FIND_PARALLEL) {
+            std::thread::scope(|t| {
+                let calls: Vec<_> = round
+                    .iter()
+                    .map(|tags| t.spawn(|| self.find(&scope.ws, text, tags, limit)))
+                    .collect();
+                for h in calls {
+                    results.push(
+                        h.join()
+                            .unwrap_or_else(|_| Err("search thread panicked".into())),
+                    );
+                }
+            });
+        }
         let mut best: HashMap<(String, String, i64), f64> = HashMap::new();
-        for tags in subjects {
-            let found = self
-                .find(&scope.ws, text, &tags, limit)
-                .map_err(|e| unavailable(self.id(), e))?;
+        for found in results {
+            let found = found.map_err(|e| unavailable(self.id(), e))?;
             for (uri, score) in found {
                 if let Some(k) = parse_uri(&uri) {
                     let s = best.entry(k).or_insert(score);

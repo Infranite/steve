@@ -208,7 +208,12 @@ pub fn format_of(mime: &str, name: &str, bytes: &[u8]) -> Format {
 /// Extracts on the right thread: text inline, binary formats isolated (§2.3).
 pub async fn load_bytes(format: Format, bytes: Vec<u8>) -> Loaded {
     let r = match format {
-        Format::Markdown | Format::Plain => extract_text::extract(format, &bytes),
+        // inline extraction is still parsing: off the runtime too
+        Format::Markdown | Format::Plain => {
+            tokio::task::spawn_blocking(move || extract_text::extract(format, &bytes))
+                .await
+                .unwrap_or(Err(ExtractError::Panicked))
+        }
         _ => extract_text::extract_isolated(format, bytes).await,
     };
     match r {
@@ -471,20 +476,24 @@ async fn run(
         links_refused: walked.links_refused,
         ..Default::default()
     };
-    let changed = m
-        .store
-        .transaction(|tx| reconcile(tx, src, &walked, now, &mut rep))
-        .map_err(|e| format!("同步失败：{e}"))?;
+    let bytes: u64 = walked.files.iter().map(|e| e.size).sum();
+    // thousands of upserts for a large folder: on the blocking pool, not a runtime worker
+    let (store, s) = (m.store.clone(), src.clone());
+    let (changed, mut rep) = index::blocking(move || {
+        let changed = store.transaction(|tx| reconcile(tx, &s, &walked, now, &mut rep))?;
+        Ok((changed, rep))
+    })
+    .await
+    .map_err(|e| format!("同步失败：{e}"))?;
     rep.changed = changed.len();
     for batch in changed.chunks(BATCH) {
         index::run_batch(m, kb, batch)
             .await
             .map_err(|e| format!("入库失败：{e}"))?;
     }
-    let bytes: u64 = walked.files.iter().map(|e| e.size).sum();
-    let (docs, chunks) = m
-        .store
-        .reader(|c| repo::source_counts(c, src))
+    let (store, s) = (m.store.clone(), src.clone());
+    let (docs, chunks) = index::blocking(move || store.reader(|c| repo::source_counts(c, &s)))
+        .await
         .map_err(|e| e.to_string())?;
     let stats = json!({"docs": docs, "chunks": chunks, "skipped": rep.skipped, "bytes": bytes});
     Ok((rep, stats))

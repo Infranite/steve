@@ -8,6 +8,7 @@
 use std::future::Future;
 use std::pin::Pin;
 
+use futures_util::StreamExt;
 use rusqlite::params;
 use steve_modules::Modules;
 use steve_store::base::{Level, Visibility};
@@ -331,82 +332,112 @@ impl Knowledge {
     }
 }
 
+/// Runs synchronous store work (and the chunking inside it) on the blocking pool, so a long
+/// write does not hold up a runtime worker. A panic inside carries on as a panic here.
+pub(crate) async fn blocking<T: Send + 'static>(
+    f: impl FnOnce() -> Result<T> + Send + 'static,
+) -> Result<T> {
+    tokio::task::spawn_blocking(f)
+        .await
+        .unwrap_or_else(|e| std::panic::resume_unwind(e.into_panic()))
+}
+
+/// How many documents of a batch load at once.
+const LOAD_PARALLEL: usize = 4;
+
 /// Loads and writes one batch: every document in one transaction, then one `kb` event each.
 pub async fn run_batch(m: &Modules, kb: &Knowledge, ids: &[String]) -> Result<()> {
-    let mut work: Vec<(DocRow, SourceRow, Loaded)> = Vec::new();
-    for id in ids {
-        let found = m.store.reader(|c| {
-            let Some(d) = repo::doc(c, id)? else {
-                return Ok::<_, steve_store::StoreError>(None);
+    let found = {
+        let (m, ids) = (m.clone(), ids.to_vec());
+        blocking(move || {
+            m.store.reader(|c| {
+                let mut found = Vec::new();
+                for id in &ids {
+                    let Some(d) = repo::doc(c, id)? else { continue };
+                    if d.status == "deleted" {
+                        continue;
+                    }
+                    if let Some(s) = repo::source(c, &d.source_id)? {
+                        found.push((d, s));
+                    }
+                }
+                Ok(found)
+            })
+        })
+        .await?
+    };
+    // a few loads side by side (file reads, isolated extraction), in batch order
+    let work: Vec<(DocRow, SourceRow, Loaded)> = futures_util::stream::iter(found)
+        .map(|(doc, src)| async move {
+            let loaded = match kb.loader(&src.kind, &doc) {
+                Some(l) => l.load(m, &doc, &src).await,
+                None => Loaded::Failed("这种来源还不能入库".into()),
             };
-            Ok(repo::source(c, &d.source_id)?.map(|s| (d, s)))
-        })?;
-        let Some((doc, src)) = found else { continue };
-        if doc.status == "deleted" {
-            continue;
-        }
-        let loaded = match kb.loader(&src.kind, &doc) {
-            Some(l) => l.load(m, &doc, &src).await,
-            None => Loaded::Failed("这种来源还不能入库".into()),
-        };
-        work.push((doc, src, loaded));
-    }
+            (doc, src, loaded)
+        })
+        .buffered(LOAD_PARALLEL)
+        .collect()
+        .await;
     let now = m.clock.now();
-    let done = m.store.transaction(|tx| {
-        let mut done = Vec::new();
-        for (doc, src, loaded) in &work {
-            // Re-read: the document may have changed while its text was loading.
-            let Some(doc) = repo::doc(tx, &doc.id)? else {
-                continue;
-            };
-            match loaded {
-                Loaded::Text(ex) => {
-                    // A wiki page or uploaded Markdown may set its own title, tags and scope (§2.3).
-                    let fronted;
-                    let d = if matches!(src.kind.as_str(), "folder" | "files") {
-                        fronted =
-                            crate::sources::folder::apply_front(tx, &doc, src, &ex.front, now)?;
-                        &fronted
-                    } else {
-                        &doc
-                    };
-                    index_doc(tx, kb.guard.as_ref(), d, src, ex, now, false)?;
+    let (store, guard) = (m.store.clone(), kb.guard.clone());
+    let done = blocking(move || {
+        store.transaction(|tx| {
+            let mut done = Vec::new();
+            for (doc, src, loaded) in &work {
+                // Re-read: the document may have changed while its text was loading.
+                let Some(doc) = repo::doc(tx, &doc.id)? else {
+                    continue;
+                };
+                match loaded {
+                    Loaded::Text(ex) => {
+                        // A wiki page or uploaded Markdown may set its own title, tags and scope (§2.3).
+                        let fronted;
+                        let d = if matches!(src.kind.as_str(), "folder" | "files") {
+                            fronted =
+                                crate::sources::folder::apply_front(tx, &doc, src, &ex.front, now)?;
+                            &fronted
+                        } else {
+                            &doc
+                        };
+                        index_doc(tx, guard.as_ref(), d, src, ex, now, false)?;
+                    }
+                    Loaded::Skipped(why) => {
+                        // Title-only: one empty chunk carries the title into the index.
+                        let label = doc_label(src, &doc.title);
+                        let meta = ChunkMeta {
+                            ws: &doc.workspace_id,
+                            obj_type: "chunk",
+                            obj_id: &doc.id,
+                            title: &doc.title,
+                            visibility: &doc.eff_visibility(src),
+                            level: doc.eff_level(src),
+                            created_by: &doc.created_by,
+                            source_kind: &src.kind,
+                            label: &label,
+                            updated: now,
+                        };
+                        let empty = Chunk {
+                            seq: 0,
+                            heading: String::new(),
+                            text: String::new(),
+                            start: 0,
+                            end: 0,
+                        };
+                        replace(tx, &meta, &[empty])?;
+                        repo::set_doc_indexed(tx, &doc.id, "", 0, "skipped", Some(why), now)?;
+                    }
+                    Loaded::Failed(why) => fail_doc(tx, &doc, "failed", why, now)?,
+                    Loaded::Gone => {
+                        remove(tx, "chunk", &doc.id)?;
+                        repo::set_doc_indexed(tx, &doc.id, "", 0, "deleted", None, now)?;
+                    }
                 }
-                Loaded::Skipped(why) => {
-                    // Title-only: one empty chunk carries the title into the index.
-                    let label = doc_label(src, &doc.title);
-                    let meta = ChunkMeta {
-                        ws: &doc.workspace_id,
-                        obj_type: "chunk",
-                        obj_id: &doc.id,
-                        title: &doc.title,
-                        visibility: &doc.eff_visibility(src),
-                        level: doc.eff_level(src),
-                        created_by: &doc.created_by,
-                        source_kind: &src.kind,
-                        label: &label,
-                        updated: now,
-                    };
-                    let empty = Chunk {
-                        seq: 0,
-                        heading: String::new(),
-                        text: String::new(),
-                        start: 0,
-                        end: 0,
-                    };
-                    replace(tx, &meta, &[empty])?;
-                    repo::set_doc_indexed(tx, &doc.id, "", 0, "skipped", Some(why), now)?;
-                }
-                Loaded::Failed(why) => fail_doc(tx, &doc, "failed", why, now)?,
-                Loaded::Gone => {
-                    remove(tx, "chunk", &doc.id)?;
-                    repo::set_doc_indexed(tx, &doc.id, "", 0, "deleted", None, now)?;
-                }
+                done.push((doc.workspace_id.clone(), doc.id.clone()));
             }
-            done.push((doc.workspace_id.clone(), doc.id.clone()));
-        }
-        Ok::<_, steve_store::StoreError>(done)
-    })?;
+            Ok::<_, steve_store::StoreError>(done)
+        })
+    })
+    .await?;
     for (ws, id) in done {
         kb.notify(&ws, &id);
     }
