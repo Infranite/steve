@@ -161,12 +161,14 @@ fn the_new_types_survive_the_wire() {
         ranges: vec![],
         fetch: false,
         reads: reads.clone(),
+        heads_only: false,
     });
     let commit = CommitInfo {
         sha: "abc".into(),
         subject: "修复".into(),
         author: "Lee".into(),
         time: Timestamp(1),
+        abbrev: None,
         body: Some("修复\n\n细节".into()),
     };
     let answers = vec![
@@ -413,6 +415,7 @@ fn git_query(w: WorkspaceRef) -> GitQuery {
         ranges: vec![],
         fetch: false,
         reads: vec![],
+        heads_only: false,
     }
 }
 

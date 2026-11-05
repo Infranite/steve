@@ -78,6 +78,23 @@ pub(crate) fn control_session(op: &OperationId) -> SessionId {
 
 /// Every git process waits on a pipe until its identity is durable. A Node crash before recording
 /// closes the pipe: the shell exits without executing git. After recording, recovery can stop it.
+/// Why a git under the pipe gave no output.
+#[derive(Debug)]
+pub(crate) enum Failed {
+    /// Git ran and refused (its stderr): no such revision, not a repository.
+    Git(String),
+    /// Git did not finish under the pipe: cancelled, past its deadline, not started or not reaped.
+    Pipe(String),
+}
+
+impl From<Failed> for String {
+    fn from(f: Failed) -> String {
+        match f {
+            Failed::Git(s) | Failed::Pipe(s) => s,
+        }
+    }
+}
+
 pub(crate) struct Commands {
     pub inner: std::sync::Arc<crate::Inner>,
     pub op: OperationId,
@@ -97,7 +114,7 @@ impl Commands {
         dir: &Path,
         args: &[&str],
         cap: usize,
-    ) -> Result<(Vec<u8>, bool), String> {
+    ) -> Result<(Vec<u8>, bool), Failed> {
         const READ_ENV: [(&str, &str); 3] = [
             ("GIT_OPTIONAL_LOCKS", "0"),
             ("GIT_NO_LAZY_FETCH", "1"),
@@ -114,14 +131,14 @@ impl Commands {
         args: &[&str],
         env: &[(&str, &str)],
         cap: usize,
-    ) -> Result<(Vec<u8>, bool), String> {
+    ) -> Result<(Vec<u8>, bool), Failed> {
         use std::io::{Read, Write};
         use std::os::{fd::AsRawFd, unix::process::CommandExt};
         use std::process::Stdio;
         use std::sync::atomic::Ordering;
         let session = control_session(&self.op);
         if self.inner.closed.load(Ordering::SeqCst) {
-            return Err("node shutting down".into());
+            return Err(Failed::Pipe("node shutting down".into()));
         }
         let mut child = Command::new("/bin/sh")
             .args([
@@ -137,7 +154,7 @@ impl Commands {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| Failed::Pipe(e.to_string()))?;
         let pid = child.id() as i64;
         let started = crate::procs::start_time(pid);
         if let Err(e) = self.inner.j.tx(|t| {
@@ -153,7 +170,7 @@ impl Commands {
             drop(child.stdin.take());
             let _ = child.kill();
             let _ = child.wait();
-            return Err(e.to_string());
+            return Err(Failed::Pipe(e.to_string()));
         }
         let mut input = child.stdin.take().expect("pipe");
         let sent = input.write_all(b"go\n");
@@ -171,7 +188,9 @@ impl Commands {
                 }
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err("cannot bound git pipes; process evidence retained".into());
+                return Err(Failed::Pipe(
+                    "cannot bound git pipes; process evidence retained".into(),
+                ));
             }
         }
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
@@ -223,16 +242,18 @@ impl Commands {
         truncated |= drain(&mut out, &mut stdout, cap);
         drain(&mut err, &mut stderr, ERR_CAP);
         if !crate::procs::state(pid, started).gone() {
-            return Err("git group stop uncertain".into());
+            return Err(Failed::Pipe("git group stop uncertain".into()));
         }
         self.inner
             .j
             .tx(|t| t.drop_proc(&session, pid))
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| Failed::Pipe(e.to_string()))?;
         match status {
             Some(status) if status.success() => Ok((stdout, truncated)),
-            Some(_) => Err(String::from_utf8_lossy(&stderr).trim().to_string()),
-            None => Err("git cancelled or timed out".into()),
+            Some(_) => Err(Failed::Git(
+                String::from_utf8_lossy(&stderr).trim().to_string(),
+            )),
+            None => Err(Failed::Pipe("git cancelled or timed out".into())),
         }
     }
 }

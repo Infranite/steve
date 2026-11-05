@@ -2992,6 +2992,7 @@ async fn git_facts_reads_files_commits_logs_and_diffs_of_a_workspace() {
             ranges: vec![],
             fetch: false,
             reads: reads.clone(),
+            heads_only: false,
         })
         .await
         .unwrap();
@@ -3027,6 +3028,7 @@ async fn git_facts_reads_files_commits_logs_and_diffs_of_a_workspace() {
     };
     assert_eq!((commits.len(), *truncated), (1, false));
     assert_eq!(commits[0].subject, "加方案");
+    assert_eq!(commits[0].abbrev.as_deref(), Some(&tip[..7]));
     let GitAnswer::Diff {
         stat,
         patch,
@@ -3049,18 +3051,46 @@ async fn git_facts_reads_files_commits_logs_and_diffs_of_a_workspace() {
             path: None,
             max: 10,
         }],
+        heads_only: false,
     };
     assert_eq!(
         n.git_facts(q("--output=x")).await.unwrap_err().code,
         ErrorCode::Invalid
     );
-    assert_eq!(
-        n.git_facts(q("nope")).await.unwrap_err().code,
-        ErrorCode::Invalid
+    // a revision that names no commit is an answer, not a failure (the checkout is there)
+    let none = n.git_facts(q("1234567")).await.unwrap();
+    assert!(
+        matches!(&none.reads[0].answer, GitAnswer::Blob { found: false, .. }),
+        "{:?}",
+        none.reads
     );
     put(&t.root, "work/proj/new.txt", b"x");
     let g = n.git_facts(q("HEAD")).await.unwrap();
     assert!(g.dirty);
     assert_ne!(g.revision, f.revision);
+    // heads only: no tree scan, a revision of another kind than one with the tree in it
+    let h = n
+        .git_facts(GitQuery {
+            heads_only: true,
+            ..q("HEAD")
+        })
+        .await
+        .unwrap();
+    assert!(!h.dirty);
+    assert_eq!(h.head, g.head);
+    assert_ne!(h.revision, g.revision);
+    // the hash as git abbreviates it here, which follows core.abbrev
+    git_in(&repo, &["config", "core.abbrev", "10"]);
+    let h = n
+        .git_facts(GitQuery {
+            heads_only: true,
+            ..q("HEAD")
+        })
+        .await
+        .unwrap();
+    let GitAnswer::Commit { commit, .. } = &h.reads[0].answer else {
+        panic!("{:?}", h.reads)
+    };
+    assert_eq!(commit.abbrev.as_deref(), Some(&commit.sha[..10]));
     assert!(!repo.join("x").exists());
 }

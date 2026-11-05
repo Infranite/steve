@@ -74,6 +74,12 @@ pub struct GitQuery {
     /// Further reads, answered in [`GitFacts::reads`] in the same order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reads: Vec<GitRead>,
+    /// Leave the working tree out: no status scan, `dirty` is false and the revision is HEAD and
+    /// the branch only (never equal to one with the tree in it). For reads that never look at the
+    /// tree, such as a preview of a commit or a branch. A Node that does not know it scans as
+    /// before (a fuller revision, never a wrong one).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub heads_only: bool,
 }
 
 /// A commit range: `from..to`, or everything reachable from `to` when `from` is `None`.
@@ -90,6 +96,7 @@ pub struct RevRange {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum GitRead {
     /// A file at `rev` (`rev:path`), or with no path the commit itself (message, stat and patch).
+    /// A `rev` that names no commit answers a `Blob` with `found: false`, with or without a path.
     Show {
         rev: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -117,6 +124,10 @@ pub struct CommitInfo {
     pub subject: String,
     pub author: String,
     pub time: Timestamp,
+    /// The hash as git abbreviates it in this repository (`%h`: its length grows with the
+    /// repository and follows `core.abbrev`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub abbrev: Option<String>,
     /// The full message, for a single commit's `Show`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
@@ -133,7 +144,8 @@ pub struct StatusEntry {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum GitAnswer {
-    /// `Show` with a path. A missing file at that revision is `found: false`.
+    /// `Show` with a path: a missing file at that revision is `found: false`. Also `Show` without
+    /// a path of a revision that names no commit.
     Blob {
         found: bool,
         #[serde(with = "crate::blob::hexbytes")]

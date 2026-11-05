@@ -45,6 +45,7 @@
   "hub.output.no_repo": "The item has no readable git repository",
   "hub.output.git_elsewhere": "This item's git history is on another device and cannot be shown here yet",
   "hub.output.commit_gone": "Commit %{hash} isn't in the repository (a rebase may have rewritten it)",
+  "hub.output.git_failed": "Git could not read this item's repository just now (it may be busy or very large); try again later",
   "hub.output.branch_gone": "Branch %{branch} no longer exists (branches are removed after release)",
   "hub.project.dir_missing": "Directory doesn't exist: %{path}",
   "hub.project.already_project": "This directory is already a project",

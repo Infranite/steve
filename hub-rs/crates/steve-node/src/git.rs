@@ -7,7 +7,7 @@ use std::path::Path;
 use sha2::Digest as _;
 use steve_node_api::*;
 
-use crate::workspace::Commands;
+use crate::workspace::{Commands, Failed};
 
 /// What one fixed command may print before it is cut (a patch or a file is cut at the read's own
 /// `max`, well below this).
@@ -50,8 +50,21 @@ struct Git<'a> {
 }
 
 impl Git<'_> {
+    /// What git printed. Git refusing is `invalid`; git not finishing under the pipe (its deadline,
+    /// a cancel) is `internal`, never mistaken for an answer.
     fn out(&self, args: &[&str], cap: usize) -> ApiResult<(Vec<u8>, bool)> {
-        self.c.read(self.dir, args, cap).map_err(invalid)
+        self.c.read(self.dir, args, cap).map_err(|f| match f {
+            Failed::Git(e) => invalid(e),
+            Failed::Pipe(e) => ApiError::new(ErrorCode::Internal, e),
+        })
+    }
+    /// What git printed, or `None` when git refused.
+    fn may(&self, args: &[&str]) -> ApiResult<Option<String>> {
+        match self.line(args) {
+            Ok(s) => Ok(Some(s)),
+            Err(e) if e.code == ErrorCode::Invalid => Ok(None),
+            Err(e) => Err(e),
+        }
     }
     fn line(&self, args: &[&str]) -> ApiResult<String> {
         Ok(text(&self.out(args, 64 * 1024)?.0))
@@ -60,8 +73,7 @@ impl Git<'_> {
     fn commit(&self, r: &str) -> ApiResult<Option<String>> {
         let spec = format!("{}^{{commit}}", rev(r)?);
         Ok(self
-            .line(&["rev-parse", "--verify", "--quiet", &spec])
-            .ok()
+            .may(&["rev-parse", "--verify", "--quiet", &spec])?
             .filter(|s| !s.is_empty()))
     }
     fn must(&self, r: &str) -> ApiResult<String> {
@@ -107,7 +119,8 @@ impl Git<'_> {
                             truncated,
                         },
                     ),
-                    Err(_) => (sha, not_found()),
+                    Err(e) if e.code == ErrorCode::Invalid => (sha, not_found()),
+                    Err(e) => return Err(e),
                 }
             }
             GitRead::Show {
@@ -115,20 +128,27 @@ impl Git<'_> {
                 path: None,
                 max,
             } => {
-                let sha = self.must(at)?;
-                let meta =
-                    self.line(&["show", "-s", "--format=%H%x1f%s%x1f%an%x1f%ct%x1f%B", &sha])?;
-                let f: Vec<&str> = meta.splitn(5, '\u{1f}').collect();
+                let Some(sha) = self.commit(at)? else {
+                    return Ok((String::new(), not_found()));
+                };
+                let meta = self.line(&[
+                    "show",
+                    "-s",
+                    "--format=%H%x1f%h%x1f%s%x1f%an%x1f%ct%x1f%B",
+                    &sha,
+                ])?;
+                let f: Vec<&str> = meta.splitn(6, '\u{1f}').collect();
                 let (stat, patch, truncated) =
                     self.stat_patch(&["show", "--format="], &sha, *max)?;
                 let commit = CommitInfo {
                     sha: f.first().copied().unwrap_or(&sha).to_string(),
-                    subject: f.get(1).copied().unwrap_or_default().to_string(),
-                    author: f.get(2).copied().unwrap_or_default().to_string(),
+                    abbrev: f.get(1).map(|h| h.to_string()),
+                    subject: f.get(2).copied().unwrap_or_default().to_string(),
+                    author: f.get(3).copied().unwrap_or_default().to_string(),
                     time: Timestamp(
-                        f.get(3).and_then(|t| t.parse::<i64>().ok()).unwrap_or(0) * 1000,
+                        f.get(4).and_then(|t| t.parse::<i64>().ok()).unwrap_or(0) * 1000,
                     ),
-                    body: Some(f.get(4).copied().unwrap_or_default().to_string()),
+                    body: Some(f.get(5).copied().unwrap_or_default().to_string()),
                 };
                 (
                     sha,
@@ -153,20 +173,21 @@ impl Git<'_> {
                     "--no-color",
                     "-n",
                     &n,
-                    "--format=%H%x1f%s%x1f%an%x1f%ct",
+                    "--format=%H%x1f%h%x1f%s%x1f%an%x1f%ct",
                     &span,
                 ])?;
                 let mut commits: Vec<CommitInfo> = log
                     .lines()
                     .filter(|l| !l.is_empty())
                     .map(|l| {
-                        let f: Vec<&str> = l.splitn(4, '\u{1f}').collect();
+                        let f: Vec<&str> = l.splitn(5, '\u{1f}').collect();
                         CommitInfo {
                             sha: f.first().copied().unwrap_or_default().to_string(),
-                            subject: f.get(1).copied().unwrap_or_default().to_string(),
-                            author: f.get(2).copied().unwrap_or_default().to_string(),
+                            abbrev: f.get(1).map(|h| h.to_string()),
+                            subject: f.get(2).copied().unwrap_or_default().to_string(),
+                            author: f.get(3).copied().unwrap_or_default().to_string(),
                             time: Timestamp(
-                                f.get(3).and_then(|t| t.parse::<i64>().ok()).unwrap_or(0) * 1000,
+                                f.get(4).and_then(|t| t.parse::<i64>().ok()).unwrap_or(0) * 1000,
                             ),
                             body: None,
                         }
@@ -215,7 +236,8 @@ fn not_found() -> GitAnswer {
 }
 
 /// The facts `q` asks for in the checkout at `dir`. A fetch and ranges are not served yet
-/// (`unsupported`), nor are the working-tree reads.
+/// (`unsupported`), nor are the working-tree reads. A `dir` that is no checkout with a commit, or a
+/// read git refuses, is `invalid`; git not finishing (its deadline) is `internal`.
 pub(crate) fn facts(c: &Commands, dir: &Path, q: &GitQuery) -> ApiResult<GitFacts> {
     if q.fetch || !q.ranges.is_empty() {
         return Err(ApiError::new(
@@ -228,10 +250,13 @@ pub(crate) fn facts(c: &Commands, dir: &Path, q: &GitQuery) -> ApiResult<GitFact
         .commit("HEAD")?
         .ok_or_else(|| invalid("not a git checkout with a commit"))?;
     let branch = g
-        .line(&["symbolic-ref", "--short", "-q", "HEAD"])
-        .ok()
+        .may(&["symbolic-ref", "--short", "-q", "HEAD"])?
         .filter(|b| !b.is_empty());
-    let status = g.out(&["status", "--porcelain", "-z"], OUT_CAP)?.0;
+    // a preview reads no working tree: no untracked-file scan for it
+    let status = match q.heads_only {
+        true => vec![],
+        false => g.out(&["status", "--porcelain", "-z"], OUT_CAP)?.0,
+    };
     let mut refs = vec![];
     for r in &q.refs {
         refs.push((r.clone(), g.commit(r)?));
@@ -252,7 +277,8 @@ pub(crate) fn facts(c: &Commands, dir: &Path, q: &GitQuery) -> ApiResult<GitFact
     h.update(branch.as_deref().unwrap_or_default().as_bytes());
     h.update([0]);
     h.update(&status);
-    let revision = Revision::new(format!("g{}", &hex::encode(h.finalize())[..32]))
+    let kind = if q.heads_only { "h" } else { "g" };
+    let revision = Revision::new(format!("{kind}{}", &hex::encode(h.finalize())[..32]))
         .map_err(|e| ApiError::new(ErrorCode::Internal, e.to_string()))?;
     Ok(GitFacts {
         revision,
