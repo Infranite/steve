@@ -226,6 +226,8 @@ pub struct Env<'a> {
     pub yolo_forced: Option<steve_core::yolo::Forced>,
     /// The OpenViking server knowledge is stored in (`None`: the Hub's own index only).
     pub openviking: Option<steve_knowledge::openviking::OpenVikingConfig>,
+    /// Where `cmd` flow steps run when the project is on a Node (`None`: on the Hub, as before).
+    pub cmd_node: Option<Arc<dyn steve_flow::nodes::cmd::CmdNode>>,
 }
 
 /// Registers every module, builds [`Modules`] and the flow context, and collects the routes.
@@ -241,6 +243,7 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
         vars,
         yolo_forced,
         openviking,
+        cmd_node,
     } = env;
     use super::ports::{self as hp, VaultGuard};
     let guard = Arc::new(VaultGuard);
@@ -433,7 +436,13 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
         .connections(conns.clone())
         .guard(guard.clone())
         .node(Arc::new(steve_flow::nodes::http::Http::new(vault.clone())))
-        .node(Arc::new(steve_flow::nodes::cmd::Cmd::new(steve_home)))
+        .node(Arc::new({
+            let cmd = steve_flow::nodes::cmd::Cmd::new(steve_home);
+            match cmd_node {
+                Some(n) => cmd.with_node(n),
+                None => cmd,
+            }
+        }))
         .node(Arc::new(steve_flow::nodes::bot::BotNode::new(
             guard.clone(),
         )));

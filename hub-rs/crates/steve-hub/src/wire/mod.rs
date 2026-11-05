@@ -9,6 +9,7 @@ pub mod acp_stats;
 pub mod auth;
 pub mod chan;
 pub mod core;
+pub mod flow_cmd;
 pub mod mcp;
 pub mod mcp_extra;
 pub mod modules;
@@ -171,7 +172,8 @@ fn node_runtime(
             capacity: steve_node_api::Capacity {
                 sessions: 64,
                 jobs: 0,
-                execs: 0,
+                // flow `cmd` steps (N0e-E6)
+                execs: 16,
             },
             // a 256 MiB journal at most, 512 MiB left free on the disk, new work again below 80%
             storage: steve_node::Storage::default(),
@@ -435,6 +437,11 @@ pub fn wire_with(cfg: &Arc<Config>, bus: &Bus, vars: Vars) -> Result<Wired, Back
         vars: &vars,
         yolo_forced,
         openviking: cfg.openviking.clone(),
+        // with the local Node on, `cmd` steps run on the Node that holds the project
+        cmd_node: node_host.as_ref().map(|_| {
+            flow_cmd::FlowCmd::new(db.clone(), workspaces.clone())
+                as Arc<dyn steve_flow::nodes::cmd::CmdNode>
+        }),
     })?;
     let _ = host.flow.set(built.flow.clone());
     let yolo = steve_core::yolo::Yolo::new(

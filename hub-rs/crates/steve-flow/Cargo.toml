@@ -31,5 +31,9 @@ zeroize = "=1.9.1"
 
 [dev-dependencies]
 tempfile = "=3.27.0"
+# `cmd` steps against a real local Node (tests/code_nodes.rs)
+steve-acp = { path = "../steve-acp" }
+steve-node = { path = "../steve-node" }
+steve-node-api = { path = "../steve-node-api", features = ["testkit"] }
 tokio = { version = "=1.54.1", features = ["rt", "rt-multi-thread", "sync", "time", "macros", "net", "io-util"] }
 tracing-subscriber = { version = "=0.3.23", default-features = false, features = ["fmt"] }
