@@ -37,7 +37,7 @@ payload
 | 双向 | `hello` / `welcome` / `heartbeat` / `goodbye` / `error` | 版本区间、能力、帧上限、connection_epoch、恢复水位 |
 | Hub→Node | `session.open` / `configure` / `inspect` / `release` | 参数是 workspace_ref、harness、model、effort、mode、工具授权；返回不透明的 resume handle。`release` 只释放空闲的 harness 进程，不关闭 Steve 会话 |
 | Hub→Node | `turn.start` / `cancel` / `inspect` | 带 session_id、turn_id、attempt_id、prompt parts、files、limits。每个会话同时最多一个活动 attempt；忙时返回 `busy`，Node 不自己排业务队列 |
-| Hub→Node | `job.start` / `cancel` / `inspect` | kind 为 `think` 或 `research`；带 attempt_id、limits、可读范围、continuation |
+| Hub→Node | `job.start` / `cancel` / `inspect` | `run`（attempt_id、一个模型、prompt parts、limits、continuation）加上按类型区分的 `work`：`think`（可缓存的 instructions、工具 `none` 或 `read_attached`）或 `research`（cwd 和可读目录都是 root 下的路径、budget、是否提供 Steve 的只读工具）。作业总在自己的 scratch 目录里跑 |
 | Hub→Node | `permission.resolve` | 绑定 `permission_id + attempt_id + action_digest + decision_revision`，带 Steve 决定（`allow_once` / `reject`）。Node 只对还在等待的原请求生效，由 Node 映射成 ACP optionId。过期或不匹配时返回 `stale`，Hub 据此关闭卡片。同样的答复重复发送是幂等的；冲突的答复被拒绝。参数、目标 HEAD 或资源一变，旧授权即失效 |
 | Hub→Node | `workspace.prepare` / `inspect` / `tidy` | 工作区句柄 + revision |
 | Hub→Node | `git.inspect` / `git.apply` | 粒度较粗的事实查询，一次返回 refs、status、merge-base、冲突，并带上观察到的 revision。写操作带前置条件（`expected_head`、`expected_ref`），apply 时再校验一次。不开放任意 git argv。Node 只回事实和证据，不做业务决定：不选 merge 还是 rebase，不自动解决冲突，不决定删分支或发布版本。多个 worktree 共享一个 repo 时，写操作按 repo 协调 |
@@ -67,7 +67,7 @@ Hub 持久队列 → dispatch outbox → Node 已接受 → running ⇄ waiting(
   - waiting 期间待处理的请求是一个集合，不是单个布尔值。
   - cancel 只是一个意图，最终以 Node 报回的终态为准，正常完成可能先到。cancel 不等于回滚。
 - **Turn**（Hub 的逻辑回合）：`queued → dispatching → attempt… → 结束`。一个 turn 可以有多个 attempt；`attempt.ended` 不代表 turn 已经结束，由 Hub 裁定是结束还是再发一个 attempt。Hub 还要判断队列是否已排空，再推进事项。今天藏在 `turn_end` 里的"排空"语义改归 Hub。
-- **Job**：attempt 的状态机与 Turn 相同，结果放在 `job.result` 里，以引用形式给出。
+- **Job**：attempt 的状态机与 Turn 相同。答案是 completion 的 `result` 文本；草稿以 `message_started` / `text_delta` 到达（新消息替换旧草稿），工具行以 `tool_changed` 到达。research 作业另在 completion 的 `job` 里报告结束方式（done、stopped、budget、violated）、轮数、读过的文件和是否在沙箱里运行。
 - **Workspace / exec 操作**：`accepted → running → committed | failed`。有外部副作用的操作，超时或断线不等于没有发生。
 - **`unknown`** 是观察和恢复时的状态，不是终态，也不保证进程已经停止。Hub 不能仅凭 `unknown` 就释放工作区或派发第二个 attempt。
 

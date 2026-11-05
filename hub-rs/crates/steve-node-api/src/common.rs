@@ -290,6 +290,9 @@ pub struct Completion {
     /// Tools ran in this attempt: their effects happened, a retry must not redo them blindly.
     #[serde(default)]
     pub acted: bool,
+    /// How a research job ended besides its outcome (`None` for turns and think jobs).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job: Option<crate::run::JobReport>,
 }
 
 /// The answer to a command: it was accepted (or had already been) and where it stands. Not

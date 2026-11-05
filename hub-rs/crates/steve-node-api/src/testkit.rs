@@ -91,6 +91,8 @@ struct State {
     active: HashMap<SessionId, ExecutionRef>,
     /// running jobs
     jobs: BTreeSet<AttemptId>,
+    /// every job started, by attempt (kept after it ended), and its draft so far
+    job_specs: HashMap<AttemptId, (JobSpec, String)>,
     sessions: HashMap<SessionId, Session>,
     waiting: HashMap<PermissionId, PermissionRequest>,
     /// answered permissions: id → the resolution that was applied
@@ -638,6 +640,94 @@ impl FakeNode {
         Ok(())
     }
 
+    /// The job an attempt was started with (kept after it ended).
+    pub fn job_spec(&self, attempt: &AttemptId) -> Option<JobSpec> {
+        self.st().job_specs.get(attempt).map(|(s, _)| s.clone())
+    }
+
+    /// A job's harness starts a new message (it replaces the draft so far) and writes it in `deltas`.
+    pub async fn draft(
+        &self,
+        exec: &ExecutionRef,
+        message: &str,
+        deltas: &[&str],
+    ) -> ApiResult<()> {
+        let subject = Subject::Execution(exec.clone());
+        let started = EventBody::MessageStarted {
+            message: message.into(),
+            block: "b0".into(),
+            role: Role::Assistant,
+        };
+        self.emit(subject.clone(), started).await?;
+        let mut offset = 0;
+        for d in deltas {
+            let delta = EventBody::TextDelta {
+                message: message.into(),
+                block: "b0".into(),
+                utf8_offset: offset,
+                text: (*d).into(),
+            };
+            self.emit(subject.clone(), delta).await?;
+            offset += d.len() as u64;
+        }
+        if let Some((_, text)) = self.st().job_specs.get_mut(exec.attempt()) {
+            *text = deltas.concat();
+        }
+        Ok(())
+    }
+
+    /// Ends the running jobs a Node would end by itself now, keeping their draft as the answer: a
+    /// requested cancel as cancelled (research: stopped), one past its deadline as timed out
+    /// (research: the time budget). Unknown ones are left alone. Returns those it ended.
+    pub async fn settle_jobs(&self) -> ApiResult<Vec<ExecutionRef>> {
+        let due: Vec<(ExecutionRef, Completion)> = {
+            let st = self.st();
+            st.jobs
+                .iter()
+                .filter_map(|attempt| {
+                    let (exec, op) = st.attempts.get(attempt)?;
+                    let a = st.inbox.get(op)?;
+                    let (spec, text) = st.job_specs.get(attempt)?;
+                    if matches!(a.receipt.state, Observed::Unknown { .. }) {
+                        return None;
+                    }
+                    let (outcome, stop, error, end) = if a.cancel_requested {
+                        (Outcome::Cancelled, "cancelled", None, JobEnd::Stopped)
+                    } else if spec.run.limits.deadline.0 <= st.now {
+                        let e = ApiError::new(ErrorCode::Expired, "deadline passed");
+                        let end = JobEnd::Budget {
+                            hit: BudgetHit::Time,
+                        };
+                        (Outcome::TimedOut, "timeout", Some(e), end)
+                    } else {
+                        return None;
+                    };
+                    let report = matches!(spec.work, JobWork::Research(_)).then_some(JobReport {
+                        end,
+                        turns: 0,
+                        files_read: vec![],
+                        sandboxed: false,
+                    });
+                    let completion = Completion {
+                        outcome,
+                        stop_reason: stop.into(),
+                        error,
+                        result: build::text(text),
+                        continuation: None,
+                        transient: false,
+                        acted: false,
+                        job: report,
+                    };
+                    Some((exec.clone(), completion))
+                })
+                .collect()
+        };
+        for (exec, completion) in &due {
+            self.finish(exec, completion.clone()).await?;
+        }
+        Ok(due.into_iter().map(|(e, _)| e).collect())
+    }
+
     fn next(st: &mut State) -> u64 {
         st.counter += 1;
         st.counter
@@ -947,20 +1037,9 @@ impl JobExecutor for FakeNode {
             job: c.body.job.clone(),
             attempt: c.body.run.attempt.clone(),
         };
-        let ws = match &c.body.run.directory {
-            RunDirectory::Workspace { workspace } => {
-                self.mine(workspace)?;
-                Some(workspace.clone())
-            }
-            RunDirectory::Scratch => None,
-        };
         self.accept("start_job", &c, |st| {
+            c.body.check()?;
             Self::check_run(st, &c.body.run)?;
-            if let Some(w) = &ws
-                && !st.workspaces.contains_key(&w.id)
-            {
-                return Err(ApiError::new(ErrorCode::Invalid, "no such workspace"));
-            }
             if let Some(cap) = &st.capacity
                 && Self::running(st).1 >= cap.jobs
             {
@@ -968,10 +1047,12 @@ impl JobExecutor for FakeNode {
             }
             Self::take_attempt(st, &c.id, &exec)?;
             st.jobs.insert(exec.attempt().clone());
+            st.job_specs
+                .insert(exec.attempt().clone(), (c.body.clone(), String::new()));
             Ok(Decided {
                 state: Observed::Running,
                 execution: Some(exec.clone()),
-                workspace: ws.clone(),
+                workspace: None,
                 events: vec![(Subject::Execution(exec.clone()), EventBody::AttemptStarted)],
             })
         })
@@ -1024,6 +1105,7 @@ impl ExecutionControl for FakeNode {
                 continuation: None,
                 transient: false,
                 acted: true,
+                job: None,
             };
             if let Some(a) = st.inbox.get_mut(&target) {
                 a.receipt.state = Observed::Finished {
@@ -1597,10 +1679,10 @@ pub mod build {
         }
     }
 
+    /// A think job without tools.
     pub fn job(job: &str, attempt: &str, text: &str) -> JobSpec {
         JobSpec {
             job: id(job),
-            kind: JobKind::Think,
             run: RunSpec {
                 attempt: id(attempt),
                 choice: choice(),
@@ -1610,6 +1692,43 @@ pub mod build {
                 limits: limits(),
                 continuation: None,
             },
+            work: JobWork::Think(ThinkJob {
+                instructions: None,
+                tools: ThinkToolMode::None,
+            }),
+        }
+    }
+
+    /// A research job in its scratch directory, with Steve's tools and the default idle limit.
+    pub fn research(job_id: &str, attempt: &str, text: &str) -> JobSpec {
+        JobSpec {
+            work: JobWork::Research(ResearchJob {
+                cwd: None,
+                readable: vec![],
+                budget: ResearchBudget {
+                    max_turns: None,
+                    max_tools: None,
+                    idle_ms: 600_000,
+                },
+                steve_tools: true,
+            }),
+            ..job(job_id, attempt, text)
+        }
+    }
+
+    pub fn exec_job(job: &str, attempt: &str) -> ExecutionRef {
+        ExecutionRef::Job {
+            job: id(job),
+            attempt: id(attempt),
+        }
+    }
+
+    /// A job's answer: one text part, none when empty.
+    pub fn text(s: &str) -> Vec<Part> {
+        if s.is_empty() {
+            vec![]
+        } else {
+            vec![Part::Text { text: s.into() }]
         }
     }
 
@@ -1630,6 +1749,7 @@ pub mod build {
             continuation: None,
             transient: false,
             acted: false,
+            job: None,
         }
     }
 

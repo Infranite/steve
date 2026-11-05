@@ -1593,6 +1593,7 @@ impl ExecutionControl for LocalNode {
                         continuation: None,
                         transient: false,
                         acted: true,
+                        job: None,
                     };
                     // only if it still is the unknown one this was for
                     if !matches!(o.receipt.state, Observed::Unknown { .. }) {
