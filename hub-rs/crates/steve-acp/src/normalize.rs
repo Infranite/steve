@@ -10,14 +10,73 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 use steve_node_api::{
-    Action, Digest, EventBody, Measurement, Money, NetworkScope, Part, PlanEntry, Role, Severity,
-    Tokens, ToolCategory, ToolOrigin, ToolPhase, ToolView, UsageReport, UsageScope,
+    Action, CallId, Digest, EventBody, Measurement, Money, NetworkScope, Part, PlanEntry, Role,
+    Severity, Tokens, ToolCategory, ToolOrigin, ToolPhase, ToolView, UsageReport, UsageScope,
 };
 
 /// Text kept of a tool's output or input preview (characters).
 pub const TEXT_MAX: usize = 4000;
 /// Lines of a diff preview.
 const DIFF_LINES: usize = 60;
+
+/// A command before the Node binds its working directory and permission policy.
+/// Never flatten argv into shell text: argument boundaries are part of the action.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommandFact {
+    Shell(String),
+    Argv(Vec<String>),
+}
+
+/// Driver-local tool facts. Paths, cwd, command arguments and inputs are not display previews.
+/// The Node must bind these to its workspace and resource versions before authorizing an action.
+/// `result` is a bounded preview; `raw` retains the merged ACP fields for lossless driver use.
+/// Neither `raw` nor this structure is a Hub wire payload.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToolFact {
+    pub raw_id: String,
+    pub call: CallId,
+    pub name: String,
+    pub category: ToolCategory,
+    pub origin: ToolOrigin,
+    pub title: String,
+    pub phase: ToolPhase,
+    /// All known paths from current locations/input/diffs, in original form. An empty locations
+    /// update clears that source, not independent paths still present in rawInput or content.
+    pub paths: Vec<String>,
+    pub cwd: Option<String>,
+    pub command: Option<CommandFact>,
+    pub query: Option<String>,
+    pub url: Option<String>,
+    /// Canonical digest of the complete edit input (or full content diffs), never its preview.
+    pub change: Option<Digest>,
+    /// Bounded previews; Diff added/removed count full supplied new/old text lines, not an LCS.
+    pub result: Vec<Part>,
+    pub error: Option<String>,
+    pub raw: Value,
+}
+
+/// Stable call identity shared by tool updates and permission requests.
+/// Valid ids are unchanged except the reserved `acp-h:` namespace. That namespace (including
+/// valid raw ids beginning with it) and all other inputs use a full SHA-256 digest. The two
+/// encoding spaces are disjoint; hashed inputs have SHA-256's collision resistance, not a
+/// mathematical injectivity guarantee for arbitrarily long strings into bounded ids.
+pub fn call_id(raw: &str) -> CallId {
+    if !raw.starts_with("acp-h:")
+        && let Ok(id) = CallId::new(raw)
+    {
+        return id;
+    }
+    let digest = Digest::sha256(raw.as_bytes());
+    CallId::new(format!("acp-h:{}", &digest.as_str()[7..])).expect("bounded ASCII hash")
+}
+
+fn diagnostic(code: &str, context: &str) -> Fact {
+    Fact::Event(EventBody::Diagnostic {
+        severity: Severity::Info,
+        code: code.into(),
+        safe_text: bound(context, 200),
+    })
+}
 
 /// What one `session/update` says. (`Event` is the common case; boxing it buys nothing.)
 #[allow(clippy::large_enum_variant)]
@@ -51,7 +110,7 @@ pub struct Normalizer {
     messages: u64,
     reports: u64,
     open: Option<Open>,
-    tools: HashMap<String, ToolView>,
+    tools: HashMap<String, ToolFact>,
 }
 
 impl Normalizer {
@@ -76,8 +135,9 @@ impl Normalizer {
             "user_message_chunk" => vec![Fact::Nothing],
             "tool_call" | "tool_call_update" => {
                 let mut out = self.close();
-                if let Some(t) = self.tool(u, kind == "tool_call") {
+                if let Some((t, diagnostics)) = self.merge_tool(u) {
                     out.push(Fact::Event(EventBody::ToolChanged { tool: t }));
+                    out.extend(diagnostics);
                 }
                 out
             }
@@ -138,6 +198,12 @@ impl Normalizer {
     }
 
     fn text(&mut self, u: &Value, role: Role) -> Vec<Fact> {
+        if u.pointer("/content/type").and_then(Value::as_str) != Some("text") {
+            return vec![diagnostic(
+                "unsupported_content",
+                "message content is not text",
+            )];
+        }
         let t = u
             .pointer("/content/text")
             .and_then(Value::as_str)
@@ -218,101 +284,34 @@ impl Normalizer {
         }
     }
 
-    /// The tool's whole view after this update (`None`: an update of a tool never announced).
-    fn tool(&mut self, u: &Value, new: bool) -> Option<ToolView> {
-        let id = str_of(u.get("toolCallId"));
-        if id.is_empty() {
-            return None;
-        }
-        let call = steve_node_api::CallId::new(sanitize(&id)).ok()?;
-        if new || !self.tools.contains_key(&id) {
-            if !new {
-                return None;
-            }
-            let name = tool_name(u);
-            let origin = if name.starts_with("mcp__steve__") || steve_title(u) {
-                ToolOrigin::Steve
-            } else if name.starts_with("mcp__") {
-                ToolOrigin::External
-            } else {
-                ToolOrigin::Harness
-            };
-            let category = if origin == ToolOrigin::Steve {
-                ToolCategory::Steve
-            } else {
-                category(u.get("kind").and_then(Value::as_str).unwrap_or(""))
-            };
-            self.tools.insert(
-                id.clone(),
-                ToolView {
-                    id: call,
-                    parent: None,
-                    origin,
-                    name,
-                    category,
-                    title: String::new(),
-                    target: None,
-                    phase: ToolPhase::Pending,
-                    action: None,
-                    result: vec![],
-                    error: None,
-                    duration_ms: None,
-                },
-            );
-        }
-        let root = self.root.clone();
-        let t = self.tools.get_mut(&id)?;
-        if let Some(title) = u.get("title").and_then(Value::as_str) {
-            t.title = bound(title, 200);
-        }
-        if let Some(s) = u.get("status").and_then(Value::as_str) {
-            t.phase = match s {
-                "in_progress" => ToolPhase::Running,
-                "completed" => ToolPhase::Succeeded,
-                "failed" => ToolPhase::Failed,
-                _ => ToolPhase::Pending,
-            };
-        }
-        if let Some(input) = u.get("rawInput").filter(|v| v.is_object()) {
-            t.action = Some(action(&t.name, t.category, input, &root));
-            let diffs = input_diffs(input, &root);
-            if !diffs.is_empty() {
-                t.result.retain(|p| !matches!(p, Part::Diff { .. }));
-                t.result.extend(diffs);
+    /// The current lossless driver facts of a tool, including updates received in permissions.
+    pub fn fact(&self, raw_id: &str) -> Option<&ToolFact> {
+        self.tools.get(raw_id)
+    }
+
+    /// Merge an ACP ToolCall/ToolCallUpdate without touching message boundaries.
+    /// Missing/null optional fields leave their value alone; explicit empty collections replace
+    /// old content/locations. rawInput/rawOutput are opaque values and replace, never deep-merge.
+    /// Returns a display projection and diagnostics, which a permission handler must also emit.
+    pub fn merge_tool(&mut self, u: &Value) -> Option<(ToolView, Vec<Fact>)> {
+        let raw_id = u.get("toolCallId")?.as_str()?.to_string();
+        let mut merged = self
+            .tools
+            .get(&raw_id)
+            .map(|t| t.raw.clone())
+            .unwrap_or_else(|| serde_json::json!({}));
+        let fields = merged.as_object_mut().expect("tool fields are an object");
+        for (key, value) in u.as_object()? {
+            if key != "sessionUpdate"
+                && (!value.is_null() || matches!(key.as_str(), "rawInput" | "rawOutput"))
+            {
+                fields.insert(key.clone(), value.clone());
             }
         }
-        let target = target(u, &root);
-        if target.is_some() {
-            t.target = target;
-        }
-        let parts = content_parts(u, &root);
-        if !parts.is_empty() {
-            // the adapter's diff (with whole texts) replaces the one read from the input
-            if parts.iter().any(|p| matches!(p, Part::Diff { .. })) {
-                t.result.retain(|p| !matches!(p, Part::Diff { .. }));
-            }
-            t.result.retain(|p| !matches!(p, Part::Text { .. }));
-            t.result.extend(parts);
-        } else if let Some(out) = u.get("rawOutput") {
-            let text = match out {
-                Value::String(s) => s.clone(),
-                Value::Null => String::new(),
-                other => other.to_string(),
-            };
-            if !text.is_empty() {
-                t.result.retain(|p| !matches!(p, Part::Text { .. }));
-                t.result.push(Part::Text {
-                    text: bound(&text, TEXT_MAX),
-                });
-            }
-        }
-        if t.phase == ToolPhase::Failed && t.error.is_none() {
-            t.error = t.result.iter().find_map(|p| match p {
-                Part::Text { text } => Some(bound(text, 500)),
-                _ => None,
-            });
-        }
-        Some(t.clone())
+        let (fact, diagnostics) = tool_fact(&raw_id, merged, &self.root);
+        let view = fact.view(&self.root);
+        self.tools.insert(raw_id, fact);
+        Some((view, diagnostics))
     }
 }
 
@@ -330,22 +329,6 @@ pub fn bound(s: &str, max: usize) -> String {
     out
 }
 
-/// A tool call id as Steve's id (harness ids may hold characters ids do not allow).
-fn sanitize(id: &str) -> String {
-    let s: String = id
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | ':' | '-') {
-                c
-            } else {
-                '_'
-            }
-        })
-        .take(128)
-        .collect();
-    if s.is_empty() { "_".into() } else { s }
-}
-
 fn decimal(a: f64) -> String {
     let s = format!("{a:.6}");
     let s = s.trim_end_matches('0').trim_end_matches('.');
@@ -353,23 +336,15 @@ fn decimal(a: f64) -> String {
 }
 
 fn tool_name(u: &Value) -> String {
-    u.pointer("/_meta/claudeCode/toolName")
+    u.get("name")
         .and_then(Value::as_str)
-        .map(String::from)
         .or_else(|| {
-            u.get("title")
+            u.pointer("/_meta/claudeCode/toolName")
                 .and_then(Value::as_str)
-                .and_then(|t| t.split_whitespace().next())
-                .map(String::from)
         })
-        .unwrap_or_else(|| "tool".into())
-}
-
-/// Steve's tools as some adapters title them (`steve_deliver`, `mcp__steve__steve_update`).
-fn steve_title(u: &Value) -> bool {
-    u.get("title")
-        .and_then(Value::as_str)
-        .is_some_and(|t| t.contains("steve_"))
+        .or_else(|| u.pointer("/rawInput/tool_name").and_then(Value::as_str))
+        .unwrap_or("tool")
+        .to_string()
 }
 
 fn category(kind: &str) -> ToolCategory {
@@ -413,15 +388,14 @@ pub fn shown(path: &str, root: &Path) -> String {
     }
 }
 
-fn command_of(input: &Value) -> Option<String> {
+fn command_of(input: &Value) -> Option<CommandFact> {
     match input.get("command")? {
-        Value::String(s) => Some(s.clone()),
-        Value::Array(a) => Some(
-            a.iter()
-                .filter_map(Value::as_str)
-                .collect::<Vec<_>>()
-                .join(" "),
-        ),
+        Value::String(s) => Some(CommandFact::Shell(s.clone())),
+        Value::Array(a) => a
+            .iter()
+            .map(|v| v.as_str().map(String::from))
+            .collect::<Option<Vec<_>>>()
+            .map(CommandFact::Argv),
         _ => None,
     }
 }
@@ -431,23 +405,6 @@ fn path_of(input: &Value) -> Option<String> {
         .iter()
         .find_map(|k| input.get(*k).and_then(Value::as_str))
         .map(String::from)
-}
-
-fn target(u: &Value, root: &Path) -> Option<String> {
-    if let Some(p) = u.pointer("/locations/0/path").and_then(Value::as_str) {
-        return Some(shown(p, root));
-    }
-    let input = u.get("rawInput")?;
-    if let Some(p) = path_of(input) {
-        return Some(shown(&p, root));
-    }
-    if let Some(c) = command_of(input) {
-        return Some(bound(&c, 200));
-    }
-    ["pattern", "query", "url"]
-        .iter()
-        .find_map(|k| input.get(*k).and_then(Value::as_str))
-        .map(|s| bound(s, 200))
 }
 
 fn lines(s: &str) -> u32 {
@@ -466,6 +423,8 @@ fn preview_lines(s: &str) -> String {
     bound(&out.join("\n"), TEXT_MAX)
 }
 
+/// `added`/`removed` count the complete new/old supplied texts, not a minimal edit script.
+/// Previews may be cut; these counts refer to their untruncated source texts.
 fn diff(path: &str, root: &Path, old: Option<&str>, new: &str) -> Part {
     Part::Diff {
         path: shown(path, root),
@@ -509,7 +468,7 @@ fn input_diffs(input: &Value, root: &Path) -> Vec<Part> {
 }
 
 /// The tool's output as the adapter reports it: text, and diffs with whole texts.
-fn content_parts(u: &Value, root: &Path) -> Vec<Part> {
+fn content_parts(u: &Value, root: &Path, diagnostics: &mut Vec<Fact>) -> Vec<Part> {
     let Some(items) = u.get("content").and_then(Value::as_array) else {
         return vec![];
     };
@@ -523,6 +482,11 @@ fn content_parts(u: &Value, root: &Path) -> Vec<Part> {
                         text.push('\n');
                     }
                     text.push_str(t);
+                } else {
+                    diagnostics.push(diagnostic(
+                        "unsupported_content",
+                        "tool content is not text",
+                    ));
                 }
             }
             Some("diff") => out.push(diff(
@@ -531,8 +495,14 @@ fn content_parts(u: &Value, root: &Path) -> Vec<Part> {
                 c.get("oldText").and_then(Value::as_str),
                 c.get("newText").and_then(Value::as_str).unwrap_or(""),
             )),
-            _ => {}
+            _ => diagnostics.push(diagnostic(
+                "unsupported_content",
+                "unsupported tool content",
+            )),
         }
+    }
+    if text.chars().count() > TEXT_MAX {
+        diagnostics.push(diagnostic("truncated", "tool text preview"));
     }
     if !text.is_empty() {
         out.insert(
@@ -545,52 +515,268 @@ fn content_parts(u: &Value, root: &Path) -> Vec<Part> {
     out
 }
 
-/// What the call would do, structured. Paths stay out of [`Action`]'s typed fields (they need the
-/// Node's workspace reference): they are in the tool's `target` and its diffs.
-fn action(name: &str, cat: ToolCategory, input: &Value, root: &Path) -> Action {
-    if cat == ToolCategory::Steve {
-        return Action::Tool {
-            name: name
-                .strip_prefix("mcp__steve__")
-                .unwrap_or(name)
-                .to_string(),
-            args: input.clone(),
+impl ToolFact {
+    /// Display projection only. The Node builds the authoritative permission Action from these
+    /// facts: it must bind paths/cwd, preserve argv, and capture/recheck resource preconditions.
+    /// In particular an argv or explicit cwd cannot be represented as a root-relative shell Exec.
+    pub fn view(&self, root: &Path) -> ToolView {
+        let input = &self.raw["rawInput"];
+        let action = if self.origin == ToolOrigin::Steve {
+            Some(Action::Tool {
+                name: self
+                    .name
+                    .strip_prefix("mcp__steve__")
+                    .unwrap_or(&self.name)
+                    .into(),
+                args: input.clone(),
+            })
+        } else if self.category == ToolCategory::Exec || self.name == "Bash" {
+            match (&self.command, &self.cwd) {
+                (Some(CommandFact::Shell(command)), None) => Some(Action::Exec {
+                    command: command.clone(),
+                    cwd: None,
+                    network: NetworkScope::Unrestricted,
+                }),
+                _ => Some(Action::Unknown {
+                    summary: "command needs Node binding".into(),
+                }),
+            }
+        } else {
+            match self.category {
+                ToolCategory::Edit => Some(Action::Write {
+                    paths: vec![],
+                    change_summary: bound(&self.title, 200),
+                    change: self.change.clone(),
+                }),
+                ToolCategory::Read => Some(Action::Read { paths: vec![] }),
+                ToolCategory::Search => self.query.as_ref().map(|query| Action::Search {
+                    query: query.clone(),
+                }),
+                ToolCategory::Fetch => self
+                    .url
+                    .as_ref()
+                    .map(|url| Action::Fetch { url: url.clone() }),
+                _ => None,
+            }
         };
+        ToolView {
+            id: self.call.clone(),
+            parent: None,
+            name: self.name.clone(),
+            category: self.category,
+            origin: self.origin,
+            title: bound(&self.title, 200),
+            target: self.target(root).map(|t| bound(&t, 200)),
+            phase: self.phase,
+            action,
+            result: self.result.clone(),
+            error: self.error.as_ref().map(|e| bound(e, 500)),
+            duration_ms: None,
+        }
     }
-    if let Some(c) = command_of(input).filter(|_| cat == ToolCategory::Exec || name == "Bash") {
-        return Action::Exec {
-            command: c,
-            cwd: None,
-            network: NetworkScope::Unrestricted,
+
+    fn target(&self, root: &Path) -> Option<String> {
+        self.paths
+            .first()
+            .map(|p| shown(p, root))
+            .or_else(|| {
+                self.command.as_ref().map(|c| match c {
+                    CommandFact::Shell(s) => s.clone(),
+                    // JSON is a display representation, never a shell command.
+                    CommandFact::Argv(a) => serde_json::to_string(a).expect("strings serialize"),
+                })
+            })
+            .or_else(|| self.query.clone())
+            .or_else(|| self.url.clone())
+    }
+}
+
+fn tool_fact(raw_id: &str, raw: Value, root: &Path) -> (ToolFact, Vec<Fact>) {
+    let name = tool_name(&raw);
+    let input = &raw["rawInput"];
+    // server_name is programmatic routing metadata, unlike a title or a command's text.
+    let server = input.get("server_name").and_then(Value::as_str);
+    let origin = if name.starts_with("mcp__steve__") || server == Some("steve") {
+        ToolOrigin::Steve
+    } else if name.starts_with("mcp__") || server.is_some() {
+        ToolOrigin::External
+    } else {
+        ToolOrigin::Harness
+    };
+    let category = if origin == ToolOrigin::Steve {
+        ToolCategory::Steve
+    } else {
+        category(raw.get("kind").and_then(Value::as_str).unwrap_or(""))
+    };
+    let title = str_of(raw.get("title"));
+    let phase = match raw.get("status").and_then(Value::as_str) {
+        Some("in_progress") => ToolPhase::Running,
+        Some("completed") => ToolPhase::Succeeded,
+        Some("failed") => ToolPhase::Failed,
+        _ => ToolPhase::Pending,
+    };
+    let mut paths = vec![];
+    let mut add_path = |p: &str| {
+        if !paths.iter().any(|old| old == p) {
+            paths.push(p.to_string());
+        }
+    };
+    if let Some(locations) = raw.get("locations").and_then(Value::as_array) {
+        for l in locations {
+            if let Some(p) = l.get("path").and_then(Value::as_str) {
+                add_path(p);
+            }
+        }
+    }
+    for key in [
+        "file_path",
+        "path",
+        "notebook_path",
+        "old_path",
+        "new_path",
+        "source",
+        "destination",
+    ] {
+        if let Some(p) = input.get(key).and_then(Value::as_str) {
+            add_path(p);
+        }
+    }
+    if let Some(ps) = input.get("paths").and_then(Value::as_array) {
+        for p in ps.iter().filter_map(Value::as_str) {
+            add_path(p);
+        }
+    }
+    if let Some(content) = raw.get("content").and_then(Value::as_array) {
+        for d in content
+            .iter()
+            .filter(|c| c.get("type").and_then(Value::as_str) == Some("diff"))
+        {
+            if let Some(p) = d.get("path").and_then(Value::as_str) {
+                add_path(p);
+            }
+        }
+    }
+    let mut diagnostics = vec![];
+    // An explicitly supplied collection is authoritative, even when empty. Never resurrect an
+    // old rawOutput/input diff when content was cleared by the adapter.
+    let result = if raw.get("content").is_some_and(Value::is_array) {
+        content_parts(&raw, root, &mut diagnostics)
+    } else if let Some(output) = raw.get("rawOutput") {
+        let text = match output {
+            Value::String(s) => s.clone(),
+            Value::Null => String::new(),
+            v => v.to_string(),
         };
-    }
-    match cat {
-        ToolCategory::Edit => Action::Write {
-            paths: vec![],
-            change_summary: path_of(input)
-                .map(|p| format!("编辑 {}", shown(&p, root)))
-                .unwrap_or_else(|| "编辑".into()),
-            change: steve_node_api::digest_of(input).ok(),
-        },
-        ToolCategory::Search => Action::Search {
-            query: ["pattern", "query"]
-                .iter()
-                .find_map(|k| input.get(*k).and_then(Value::as_str))
-                .unwrap_or("")
-                .to_string(),
-        },
-        ToolCategory::Fetch => Action::Fetch {
-            url: input
-                .get("url")
+        if text.chars().count() > TEXT_MAX {
+            diagnostics.push(diagnostic("truncated", "tool output preview"));
+        }
+        if text.is_empty() {
+            vec![]
+        } else {
+            vec![Part::Text {
+                text: bound(&text, TEXT_MAX),
+            }]
+        }
+    } else {
+        input_diffs(input, root)
+    };
+    let diffs: Vec<&Value> = raw
+        .get("content")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|c| c.get("type").and_then(Value::as_str) == Some("diff"))
+        .collect();
+    for d in &diffs {
+        for key in ["oldText", "newText"] {
+            if d.get(key)
                 .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string(),
-        },
-        ToolCategory::Read => Action::Read { paths: vec![] },
-        _ => Action::Unknown {
-            summary: bound(name, 80),
-        },
+                .is_some_and(diff_truncated)
+            {
+                diagnostics.push(diagnostic("truncated", "tool diff preview"));
+            }
+        }
     }
+    if !raw.get("content").is_some_and(Value::is_array) && raw.get("rawOutput").is_none() {
+        let truncated = if let Some(edits) = input.get("edits").and_then(Value::as_array) {
+            ["old_string", "new_string"].iter().any(|key| {
+                let texts: Vec<&str> = edits
+                    .iter()
+                    .filter_map(|e| e.get(*key).and_then(Value::as_str))
+                    .collect();
+                diff_truncated(&texts.join("\n⋯\n"))
+            })
+        } else {
+            ["old_string", "new_string", "content"]
+                .iter()
+                .filter_map(|key| input.get(*key).and_then(Value::as_str))
+                .any(diff_truncated)
+        };
+        if truncated {
+            diagnostics.push(diagnostic("truncated", "input diff preview"));
+        }
+    }
+    if title.chars().count() > 200 {
+        diagnostics.push(diagnostic("truncated", "tool title preview"));
+    }
+    let change = if category == ToolCategory::Edit && !input.is_null() {
+        digest_json(input)
+    } else if !diffs.is_empty() {
+        steve_node_api::digest_of(&diffs).ok()
+    } else {
+        None
+    };
+    let error = if phase == ToolPhase::Failed {
+        if let Some(content) = raw.get("content").and_then(Value::as_array) {
+            let texts: Vec<&str> = content
+                .iter()
+                .filter(|c| c["type"] == "content")
+                .filter_map(|c| c.pointer("/content/text").and_then(Value::as_str))
+                .collect();
+            (!texts.is_empty()).then(|| texts.join("\n"))
+        } else {
+            raw.get("rawOutput")
+                .filter(|v| !v.is_null())
+                .map(|v| match v {
+                    Value::String(s) => s.clone(),
+                    v => v.to_string(),
+                })
+        }
+    } else {
+        None
+    };
+    if error.as_ref().is_some_and(|e| e.chars().count() > 500) {
+        diagnostics.push(diagnostic("truncated", "tool error preview"));
+    }
+    let fact = ToolFact {
+        raw_id: raw_id.into(),
+        call: call_id(raw_id),
+        name,
+        category,
+        origin,
+        title,
+        phase,
+        paths,
+        cwd: input.get("cwd").and_then(Value::as_str).map(String::from),
+        command: command_of(input),
+        query: ["pattern", "query"]
+            .iter()
+            .find_map(|k| input.get(*k).and_then(Value::as_str))
+            .map(String::from),
+        url: input.get("url").and_then(Value::as_str).map(String::from),
+        change,
+        result,
+        error,
+        raw,
+    };
+    if fact.target(root).is_some_and(|t| t.chars().count() > 200) {
+        diagnostics.push(diagnostic("truncated", "tool target preview"));
+    }
+    (fact, diagnostics)
+}
+
+fn diff_truncated(s: &str) -> bool {
+    s.lines().count() > DIFF_LINES || s.chars().count() > TEXT_MAX
 }
 
 /// Used by tests and drivers that need a digest of something ACP-specific without exposing it.
@@ -754,8 +940,10 @@ mod tests {
             n.update(&json!({"sessionUpdate": "current_mode_update"})),
             vec![Fact::Nothing]
         );
-        // an update for a tool never announced says nothing
-        assert!(events(n.update(&json!({"sessionUpdate": "tool_call_update", "toolCallId": "zz", "status": "completed"}))).is_empty());
+        // A permission or an update may be the first observation of a tool.
+        assert!(
+            matches!(&events(n.update(&json!({"sessionUpdate": "tool_call_update", "toolCallId": "zz", "status": "completed"})))[0], EventBody::ToolChanged { tool } if tool.phase == ToolPhase::Succeeded)
+        );
     }
 
     #[test]
