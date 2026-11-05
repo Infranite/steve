@@ -136,6 +136,7 @@ mod tests {
             Arc::new(Frame {
                 bytes: Bytes::from_static(b"data: {}\n\n"),
                 scope,
+                id: None,
             })
         };
         let mut sub = Sub {
@@ -161,6 +162,7 @@ mod tests {
         let first = Arc::new(Frame {
             bytes: Bytes::from_static(b"data: own\n\n"),
             scope: Scope::Ws("a".into()),
+            id: None,
         });
         let mut sub = Sub {
             ws: "a".into(),
@@ -170,6 +172,7 @@ mod tests {
         tx.send(Arc::new(Frame {
             bytes: Bytes::from_static(b"data: secret\n\n"),
             scope: Scope::Ws("b".into()),
+            id: None,
         }))
         .unwrap();
         assert_eq!(sub.coalesce(first), Bytes::from_static(b"data: own\n\n"));
