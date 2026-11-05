@@ -217,6 +217,8 @@ export default {
   },
   persona: {
     title: "Personas",
+    newName: "New persona",
+    newIntro: "I am a new persona.",
     usedAccounts_one: "Default for {{count}} account",
     usedAccounts_other: "Default for {{count}} accounts",
     usedSpaces_one: "In {{count}} group or DM",

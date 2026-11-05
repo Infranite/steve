@@ -223,6 +223,8 @@ export default {
   /* 对外身份 */
   persona: {
     title: "对外身份",
+    newName: "新身份",
+    newIntro: "我是新身份。",
     usedAccounts_other: "{{count}} 个账号默认用它",
     usedSpaces_other: "出现在 {{count}} 个群和私聊",
     usedNone: "还没有账号或群在用",

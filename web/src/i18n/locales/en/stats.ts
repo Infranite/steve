@@ -461,7 +461,7 @@ export default {
     backfillNote: "This item finished before token details were recorded, so it only has a conversation-level adapter quote, a lower bound.",
     timeline: "Timeline",
     timelineAria: "Item timeline",
-    turnTip: "Turn {{time}} · {{dur}} · {{tokens}} tokens · {{tools}} tools",
+    turnTip: "Turn {{time}} · {{dur}} · {{tokens}} tokens · tools: {{tools}}",
     decResolved: "{{kind}} {{time}} · handled after {{dur}}",
     decResolvedYolo: "{{kind}} {{time}} · handled after {{dur}} (YOLO)",
     decChoice: "{{text}} · {{choice}}",

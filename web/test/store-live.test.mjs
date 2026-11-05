@@ -153,3 +153,20 @@ test("the page names its workspace from the state it shows, and the one it switc
   await s.switchWorkspace("ws2"); await flush()
   assert.equal(h.pageWs.at(-1), "ws2")
 })
+
+test("acceptance modes round-trip through their Hub keys in en", async () => {
+  await i18n.default.changeLanguage("en")
+  try {
+    const h = harness(), s = h.store, sent = []
+    h.state.items = [{ id: "ST-1", title: "x", status: "wait", accept_mode: "auto", deps: [], source: [], tags: [], plan: [], sessionIds: [], timeline: [], created: 1, updated: 2 }]
+    h.api.patchItem = async (id, p) => { sent.push([id, p]); return {} }
+    s.start(); await flush()
+    const i = s.st.items.find((x) => x.id === "ST-1")
+    assert.equal(i.acc, s.ACC.auto); assert.equal(s.accKey(i.acc), "auto")
+    assert.equal(s.ACC.manual, "You review")
+    // the item selector offers the Hub keys and hands the chosen key to setAcc
+    for (const k of ["inherit", "manual", "auto"]) { assert.equal(s.accKey(s.ACC[k]), k); s.setAcc("ST-1", k) }
+    await flush()
+    assert.deepEqual(sent.map(([, p]) => p.accept_mode), ["inherit", "manual", "auto"])
+  } finally { await i18n.default.changeLanguage("zh-CN") }
+})
