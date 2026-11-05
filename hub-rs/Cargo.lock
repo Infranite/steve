@@ -4735,6 +4735,7 @@ dependencies = [
  "serde_json",
  "sha2 0.11.1",
  "steve-modules",
+ "steve-print",
  "steve-stats",
  "steve-store",
  "steve-transcript",
@@ -5070,6 +5071,20 @@ dependencies = [
 [[package]]
 name = "steve-people"
 version = "0.1.0"
+
+[[package]]
+name = "steve-print"
+version = "0.1.0"
+dependencies = [
+ "base64 0.23.1",
+ "serde_json",
+ "sha2 0.11.1",
+ "steve-node-api",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "uuid",
+]
 
 [[package]]
 name = "steve-research"
