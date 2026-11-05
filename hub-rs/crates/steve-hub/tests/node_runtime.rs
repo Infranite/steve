@@ -6,7 +6,8 @@ use std::time::Duration;
 
 use steve_hub::wire::acp_stats;
 use steve_hub::wire::node_runtime::{
-    AttemptFacts, Binding, ConfigChange, Configured, NodeDomain, NodeRuntime, Planned, Sink,
+    AttemptFacts, Binding, ConfigChange, Configured, NodeDomain, NodeRuntime, Planned, Release,
+    Sink,
 };
 use steve_node_api::testkit::{FakeNode, Scripted, build};
 use steve_node_api::*;
@@ -21,14 +22,20 @@ struct Ends(
     Mutex<Vec<String>>,
     /// The store the attempts' statistics rows go to, as the wired Hub books them.
     std::sync::OnceLock<Store>,
+    /// The attempt each turn end named, in the order of `.0`.
+    Mutex<Vec<Option<String>>>,
+    /// While set, `attempt_finished` holds the apply worker there (mid-pass); `.7` says it does.
+    std::sync::atomic::AtomicBool,
+    std::sync::atomic::AtomicBool,
 );
 
 impl NodeDomain for Ends {
-    fn turn_ended(&self, session: &str, stop: &str, error: Option<String>) {
+    fn turn_ended(&self, session: &str, attempt: Option<&str>, stop: &str, error: Option<String>) {
         self.0
             .lock()
             .unwrap()
             .push((session.into(), stop.into(), error));
+        self.5.lock().unwrap().push(attempt.map(String::from));
     }
     fn attempt_started(
         &self,
@@ -58,6 +65,10 @@ impl NodeDomain for Ends {
             acp_stats::node_attempt_finished(store, session, attempt, c, f, at);
         }
         self.2.lock().unwrap().push(f.clone());
+        while self.6.load(std::sync::atomic::Ordering::SeqCst) {
+            self.7.store(true, std::sync::atomic::Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
     fn permission_asked(&self, _: &str, decision: &str, _: &PermissionRequest) {
         self.3.lock().unwrap().push(decision.into());
@@ -316,6 +327,53 @@ async fn a_passing_failure_with_no_tool_run_is_a_new_attempt_of_the_same_turn() 
     assert!(wait >= 19_000, "the retry waits ({wait} ms)");
 }
 
+/// B2b: the item hears the end of a turn under its last attempt, the gateway retry that ended it,
+/// and a flush names the attempt it planned.
+#[tokio::test]
+async fn the_turn_end_names_the_last_attempt_of_its_retry_chain() {
+    let h = hub();
+    h.bind();
+    h.rt.prompt(S, "hello", "user", &[]).unwrap();
+    until("started", || h.count("start_turn") == 1).await;
+    let first = h.attempts()[0].clone();
+    h.transient_failure(&first).await;
+    let retry = h.attempts()[1].clone();
+    assert_eq!(
+        h.rt.active_attempt(S).unwrap().as_deref(),
+        Some(retry.attempt().as_str())
+    );
+    assert!(
+        h.rt.same_turn(first.attempt().as_str(), retry.attempt().as_str())
+            .unwrap()
+    );
+    // the retry goes now instead of after its wait
+    h.store
+        .transaction::<_, StoreError>(|tx| {
+            tx.execute(
+                "UPDATE node_commands SET retry_at=0 WHERE state='pending'",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    until("retry sent", || h.count("start_turn") == 2).await;
+    h.node.finish(&retry, build::done()).await.unwrap();
+    until("turn end", || !h.ends().is_empty()).await;
+    assert_eq!(h.ends().len(), 1, "one end for the turn");
+    assert_eq!(
+        *h.ends.5.lock().unwrap(),
+        [Some(retry.attempt().to_string())]
+    );
+
+    // the next turn, planned by a flush, is a turn of its own
+    h.store.queued().add(S, "next", "user", &[]).unwrap();
+    let (planned, next) = h.rt.flush_turn(S, None).unwrap();
+    assert_eq!(planned, Planned::Created);
+    let next = next.expect("the planned attempt");
+    assert_eq!(h.rt.active_attempt(S).unwrap(), Some(next.clone()));
+    assert!(!h.rt.same_turn(retry.attempt().as_str(), &next).unwrap());
+}
+
 #[tokio::test]
 async fn a_failure_after_a_tool_ran_ends_the_turn() {
     let h = hub();
@@ -357,6 +415,75 @@ async fn cancel_targets_the_attempt_running_when_asked() {
     until("turn end", || !h.ends().is_empty()).await;
     assert_eq!(h.attempts().len(), 1, "a cancelled turn is not retried");
     assert!(!h.rt.cancel(S).unwrap(), "nothing left to cancel");
+}
+
+#[tokio::test]
+async fn cancel_attempt_with_an_old_attempt_queues_nothing() {
+    let h = hub();
+    h.bind();
+    h.rt.prompt(S, "hello", "user", &[]).unwrap();
+    until("started", || h.methods().contains(&"start_turn")).await;
+    let exec = h.attempts()[0].clone();
+    let a1 = h.rt.active_attempt(S).unwrap().expect("a1 runs");
+    h.rt.prompt(S, "next", "user", &[]).unwrap();
+    h.node.finish(&exec, build::done()).await.unwrap();
+    until("the next turn", || h.attempts().len() == 2).await;
+    let a2 = h.rt.active_attempt(S).unwrap().expect("a2 runs");
+    assert_ne!(a1, a2);
+    until("a2 sent", || {
+        h.methods().iter().filter(|m| **m == "start_turn").count() == 2
+    })
+    .await;
+    assert!(!h.rt.cancel_attempt(S, &a1).unwrap(), "a1 is over");
+    assert!(!h.rt.cancel_attempt(S, "att_nobody").unwrap());
+    let cancels =
+        || h.q::<i64>("SELECT COUNT(*) FROM node_commands WHERE method IN ('cancel','abandon')");
+    assert_eq!(cancels(), 0, "no command for a stale attempt");
+    assert!(h.rt.is_busy(S), "a2 still runs");
+    assert!(h.rt.cancel_attempt(S, &a2).unwrap());
+    // queued now, or once the Node is known to hold a2's start
+    until("a2's cancel", || cancels() == 1).await;
+}
+
+/// Issue (B2a review): a stop frozen on an attempt that then failed in passing reaches its gateway
+/// retry (the same turn, a new attempt), as the legacy runner's turn token does; it never reaches
+/// the next turn.
+#[tokio::test]
+async fn cancel_attempt_reaches_the_retry_of_its_turn() {
+    let h = hub();
+    h.bind();
+    h.rt.prompt(S, "one", "user", &[]).unwrap();
+    until("started", || h.count("start_turn") == 1).await;
+    let a1 = h.rt.active_attempt(S).unwrap().expect("a1 runs");
+    let first = h.attempts()[0].clone();
+    h.transient_failure(&first).await;
+    let retry = h.rt.active_attempt(S).unwrap().expect("the retry waits");
+    assert_ne!(a1, retry);
+    let op: String =
+        h.q("SELECT operation_id FROM node_commands WHERE method='start_turn' ORDER BY created DESC, rowid DESC LIMIT 1");
+
+    assert!(
+        h.rt.cancel_attempt(S, &a1).unwrap(),
+        "the turn of a1 still runs"
+    );
+    let state: String = h.q(&format!(
+        "SELECT state FROM node_commands WHERE operation_id='{op}'"
+    ));
+    assert_eq!(state, "rejected", "the retry is settled here, never sent");
+    until("turn end", || !h.ends().is_empty()).await;
+    assert_eq!(h.ends(), [(S.to_string(), "cancelled".to_string(), None)]);
+    assert_eq!(h.count("start_turn"), 1, "no second start_turn");
+    assert!(!h.rt.is_busy(S));
+
+    // a stop of that turn, late, leaves the next turn alone
+    h.rt.prompt(S, "two", "user", &[]).unwrap();
+    until("the next turn", || h.count("start_turn") == 2).await;
+    assert!(!h.rt.cancel_attempt(S, &a1).unwrap(), "a1's turn is over");
+    assert!(!h.rt.cancel_attempt(S, &retry).unwrap());
+    let cancels: i64 =
+        h.q("SELECT COUNT(*) FROM node_commands WHERE method IN ('cancel','abandon')");
+    assert_eq!(cancels, 0, "nothing queued for the next turn");
+    assert!(h.rt.is_busy(S), "the next turn still runs");
 }
 
 #[tokio::test]
@@ -697,19 +824,26 @@ async fn release_lets_an_idle_session_go_and_only_an_idle_one() {
     h.bind();
     h.rt.prompt(S, "hello", "user", &[]).unwrap();
     until("active", || h.phase() == "active").await;
-    assert!(!h.rt.release(S).unwrap(), "busy: not let go");
+    assert_eq!(h.rt.release(S).unwrap(), Release::Busy, "busy: not let go");
     let exec = h.attempts()[0].clone();
     h.node.finish(&exec, build::done()).await.unwrap();
     until("ready", || h.phase() == "ready").await;
 
-    assert!(h.rt.release(S).unwrap());
+    assert!(matches!(h.rt.release(S).unwrap(), Release::Pending(_)));
     assert_eq!(h.phase(), "releasing");
-    assert!(!h.rt.release(S).unwrap(), "already being let go");
+    assert!(
+        matches!(h.rt.release(S).unwrap(), Release::Pending(_)),
+        "already being let go"
+    );
     until("released", || h.phase() == "released").await;
     assert_eq!(h.count("release_session"), 1);
     let receipt: String = h.q("SELECT state FROM node_commands WHERE method='release_session'");
     assert_eq!(receipt, "finished");
-    assert!(!h.rt.release(S).unwrap(), "nothing open to let go");
+    assert_eq!(
+        h.rt.release(S).unwrap(),
+        Release::Gone,
+        "nothing open to let go"
+    );
     assert!(!h.rt.is_busy(S));
 }
 
@@ -718,7 +852,7 @@ async fn a_released_session_opens_again_for_the_next_message_with_its_resume_han
     let h = hub();
     h.bind();
     h.one_turn("hello").await;
-    assert!(h.rt.release(S).unwrap());
+    assert!(matches!(h.rt.release(S).unwrap(), Release::Pending(_)));
     until("released", || h.phase() == "released").await;
 
     assert_eq!(
@@ -754,7 +888,7 @@ async fn a_message_queued_while_releasing_reopens_once_the_release_is_done() {
     h.bind();
     h.one_turn("hello").await;
     // both before the release goes out (one thread: nothing is sent until the test waits)
-    assert!(h.rt.release(S).unwrap());
+    assert!(matches!(h.rt.release(S).unwrap(), Release::Pending(_)));
     assert_eq!(h.rt.prompt(S, "more", "user", &[]).unwrap(), Planned::Busy);
     until("second turn", || h.count("start_turn") == 2).await;
     assert_eq!(h.count("release_session"), 1);
@@ -1146,7 +1280,7 @@ async fn pruning_the_inbox_keeps_what_is_read_again() {
     );
 
     // and the session still opens again where it left off
-    assert!(h.rt.release(S).unwrap());
+    assert!(matches!(h.rt.release(S).unwrap(), Release::Pending(_)));
     until("released", || h.phase() == "released").await;
     h.rt.prompt(S, "again", "user", &[]).unwrap();
     until("second turn", || h.count("start_turn") == 2).await;
@@ -1449,7 +1583,7 @@ async fn a_refused_release_leaves_the_session_ready_and_what_waited_runs() {
     h.one_turn("hello").await;
     h.node
         .refuse_next("release_session", ApiError::new(ErrorCode::Invalid, "no"));
-    assert!(h.rt.release(S).unwrap());
+    assert!(matches!(h.rt.release(S).unwrap(), Release::Pending(_)));
     assert_eq!(h.rt.prompt(S, "more", "user", &[]).unwrap(), Planned::Busy);
     until("second turn", || h.count("start_turn") == 2).await;
     assert_eq!(h.count("open_session"), 1, "never let go");
@@ -1463,7 +1597,7 @@ async fn a_refused_reopen_leaves_the_session_released_and_the_next_message_tries
     let h = hub();
     h.bind();
     h.one_turn("hello").await;
-    assert!(h.rt.release(S).unwrap());
+    assert!(matches!(h.rt.release(S).unwrap(), Release::Pending(_)));
     until("released", || h.phase() == "released").await;
     h.node.refuse_next(
         "open_session",
@@ -1541,7 +1675,7 @@ async fn a_lead_on_a_released_idle_session_opens_it() {
     let h = hub();
     h.bind();
     h.one_turn("hello").await;
-    assert!(h.rt.release(S).unwrap());
+    assert!(matches!(h.rt.release(S).unwrap(), Release::Pending(_)));
     until("released", || h.phase() == "released").await;
     assert_eq!(
         h.rt.flush(S, Some(("go on", "steve"))).unwrap(),
@@ -1561,7 +1695,7 @@ async fn a_late_release_view_does_not_let_a_reopened_session_go() {
     h.one_turn("hello").await;
     // the stream is late from here on; answers still come
     *h.seen.stash.lock().unwrap() = Some(vec![]);
-    assert!(h.rt.release(S).unwrap());
+    assert!(matches!(h.rt.release(S).unwrap(), Release::Pending(_)));
     until("released", || h.phase() == "released").await;
     // a message reopens it, then is withdrawn before its turn: the session ends up idle and ready
     h.rt.prompt(S, "x", "user", &[]).unwrap();
@@ -1598,11 +1732,284 @@ async fn an_ended_session_is_let_go_when_its_turn_is_over() {
             Ok(())
         })
         .unwrap();
-    assert!(!h.rt.release(S).unwrap(), "busy");
+    assert!(
+        matches!(h.rt.release(S).unwrap(), Release::Pending(_)),
+        "ended: queued for when the turn is over"
+    );
     let exec = h.attempts()[0].clone();
     h.node.finish(&exec, build::done()).await.unwrap();
     until("released", || h.phase() == "released").await;
     assert_eq!(h.count("release_session"), 1);
+}
+
+const S2: &str = "s2";
+
+/// A binding of `session` to the item's one workspace (a successor shares its predecessor's).
+fn on_the_item(session: &str) -> Binding {
+    Binding {
+        session: session.into(),
+        resource: "item:i1".into(),
+        prepare: PrepareKind::Scratch,
+        choice: build::choice(),
+        policy: build::policy(),
+    }
+}
+
+impl H {
+    /// The business side ends `S` for a successor `S2` (a rollover): `S`'s release, then `S2`
+    /// bound after it, with a message waiting.
+    fn hand_off(&self) -> String {
+        self.store
+            .transaction::<_, StoreError>(|tx| {
+                tx.execute("UPDATE sessions SET status='ended' WHERE id=?", [S])?;
+                tx.execute(
+                    "INSERT INTO sessions(id,workspace_id,harness,cwd,status,created,updated) VALUES (?,'default','claude-code','.','starting',1,1)",
+                    [S2],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let Release::Pending(op) = self.rt.release(S).unwrap() else {
+            panic!("an ended session's release is on its way");
+        };
+        self.rt.bind_after(&on_the_item(S2), Some(&op)).unwrap();
+        self.rt.prompt(S2, "continue", "user", &[]).unwrap();
+        op
+    }
+
+    fn phase_of(&self, s: &str) -> String {
+        self.q(&format!(
+            "SELECT phase FROM runtime_sessions WHERE session_id='{s}'"
+        ))
+    }
+}
+
+/// B4 / D2: a handoff while the old turn runs waits for it. The successor's harness is not opened
+/// (its prepare not even leased) until the old turn is over and its release is done: never two
+/// harnesses in one worktree.
+#[tokio::test]
+async fn a_handoff_mid_turn_opens_the_successor_only_after_the_old_harness_is_let_go() {
+    let h = hub();
+    h.rt.bind(&on_the_item(S)).unwrap();
+    h.rt.prompt(S, "hello", "user", &[]).unwrap();
+    until("active", || h.phase() == "active").await;
+    let op = h.hand_off();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        h.methods(),
+        ["prepare_workspace", "open_session", "start_turn"],
+        "the successor waits for the old turn"
+    );
+    assert_eq!(h.phase_of(S2), "opening");
+    assert!(h.rt.is_busy(S2));
+
+    let exec = h.attempts()[0].clone();
+    h.node.finish(&exec, build::done()).await.unwrap();
+    until("the successor's turn", || h.count("start_turn") == 2).await;
+    assert_eq!(
+        h.methods(),
+        [
+            "prepare_workspace",
+            "open_session",
+            "start_turn",
+            "release_session",
+            "prepare_workspace",
+            "open_session",
+            "start_turn"
+        ]
+    );
+    assert_eq!(
+        h.state_of(&op),
+        "finished",
+        "the very release it waited for"
+    );
+    assert_eq!(h.count("release_session"), 1);
+    assert_eq!(h.phase_of(S), "released");
+    assert_eq!(h.node.most_open_in_a_workspace(), 1, "never two at once");
+    assert_eq!(h.prompt_of(1), "continue");
+}
+
+/// A release the Node refuses on a handoff: the old harness is still open in the worktree, so the
+/// successor is not let open beside it, nor left waiting for good on the refused release. The
+/// release is asked again and the successor, told why it waits, opens once that one is done.
+#[tokio::test]
+async fn a_refused_release_on_a_handoff_is_asked_again_and_the_successor_opens_after_it() {
+    let h = hub();
+    h.rt.bind(&on_the_item(S)).unwrap();
+    h.one_turn("hello").await;
+    h.node
+        .refuse_next("release_session", ApiError::new(ErrorCode::Invalid, "no"));
+    let op = h.hand_off();
+    until("refused", || h.state_of(&op) == "rejected").await;
+    assert_eq!(
+        h.count("prepare_workspace"),
+        1,
+        "not beside the old harness"
+    );
+    assert_eq!(h.phase_of(S2), "opening");
+    until("the successor's turn", || h.count("start_turn") == 2).await;
+    assert_eq!(
+        h.count("release_session"),
+        1,
+        "the refused one never reached it"
+    );
+    let releases: i64 = h.q(&format!(
+        "SELECT COUNT(*) FROM node_commands WHERE method='release_session' AND json_extract(request,'$.body')='{S}'"
+    ));
+    assert_eq!(releases, 2, "asked again");
+    assert_eq!(h.last_state("release_session"), "finished");
+    assert_eq!(h.phase_of(S), "released");
+    assert_eq!(h.node.most_open_in_a_workspace(), 1, "never two at once");
+    assert_eq!(h.prompt_of(1), "continue");
+    let told: i64 = h.q(&format!(
+        "SELECT COUNT(*) FROM events WHERE session_id='{S2}' AND kind='system' AND data LIKE '%还没能在 Node 上释放%'"
+    ));
+    assert_eq!(told, 1);
+}
+
+/// A stop the Node accepted but has not carried out yet (a reassign, or end_and_release on a
+/// handoff: stop, then the release): the old turn still runs, so there is no release, and the
+/// successor does not start.
+#[tokio::test]
+async fn a_stop_accepted_but_not_done_holds_the_release_and_the_successor() {
+    let h = hub();
+    h.rt.bind(&on_the_item(S)).unwrap();
+    h.rt.prompt(S, "hello", "user", &[]).unwrap();
+    until("active", || h.phase() == "active").await;
+    assert!(h.rt.cancel(S).unwrap());
+    let op = h.hand_off();
+    until("cancel accepted", || h.count("cancel") == 1).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(h.count("release_session"), 0);
+    assert_eq!(h.count("prepare_workspace"), 1, "no successor start");
+    assert_eq!(h.state_of(&op), "pending");
+
+    let exec = h.attempts()[0].clone();
+    let mut stopped = build::done();
+    stopped.outcome = Outcome::Cancelled;
+    stopped.stop_reason = "cancelled".into();
+    h.node.finish(&exec, stopped).await.unwrap();
+    until("the successor's turn", || h.count("start_turn") == 2).await;
+    assert_eq!(h.state_of(&op), "finished");
+    assert_eq!(h.node.most_open_in_a_workspace(), 1);
+}
+
+/// The oracle the test above relies on: without the dependency the two harnesses do share the
+/// worktree for a while.
+#[tokio::test]
+async fn without_the_dependency_a_successor_opens_beside_the_old_harness() {
+    let h = hub();
+    h.rt.bind(&on_the_item(S)).unwrap();
+    h.rt.prompt(S, "hello", "user", &[]).unwrap();
+    until("active", || h.phase() == "active").await;
+    h.store
+        .transaction::<_, StoreError>(|tx| {
+            tx.execute(
+                "INSERT INTO sessions(id,workspace_id,harness,cwd,status,created,updated) VALUES (?,'default','claude-code','.','starting',1,1)",
+                [S2],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    h.rt.bind(&on_the_item(S2)).unwrap();
+    until("opened", || h.phase_of(S2) == "ready").await;
+    assert_eq!(h.node.most_open_in_a_workspace(), 2);
+}
+
+/// A handoff while the old session is still opening: its release waits for the open; an open
+/// that fails lets nothing go, so that release is done without going out and the successor opens.
+#[tokio::test]
+async fn a_handoff_while_the_old_open_fails_lets_the_successor_open() {
+    let h = hub();
+    h.rt.bind(&on_the_item(S)).unwrap();
+    h.node
+        .refuse_next("open_session", ApiError::new(ErrorCode::Invalid, "no"));
+    // one thread: nothing went out yet
+    let op = h.hand_off();
+    until("the successor's turn", || h.count("start_turn") == 1).await;
+    assert_eq!(h.state_of(&op), "finished");
+    assert_eq!(h.count("release_session"), 0, "nothing was open to let go");
+    assert_eq!(h.phase_of(S), "released");
+    assert_eq!(h.node.most_open_in_a_workspace(), 1);
+}
+
+/// A successor's prepare that waited behind its predecessor longer than a command's window is
+/// issued again when it finally goes (the Node would refuse it as past accept_before).
+#[tokio::test]
+async fn a_command_that_waited_past_its_window_goes_issued_again() {
+    let h = hub();
+    h.rt.bind(&on_the_item(S)).unwrap();
+    h.rt.prompt(S, "hello", "user", &[]).unwrap();
+    until("active", || h.phase() == "active").await;
+    h.hand_off();
+    let past = steve_store::now() - 1;
+    h.store
+        .transaction::<_, StoreError>(|tx| {
+            tx.execute(
+                "UPDATE node_commands SET request=json_set(request,'$.issued_at',?1-1,'$.accept_before',?1) WHERE operation_id=?2",
+                rusqlite::params![past, format!("op_prep_{S2}")],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    h.node.set_now(steve_store::now());
+    let exec = h.attempts()[0].clone();
+    h.node.finish(&exec, build::done()).await.unwrap();
+    until("the successor's turn", || h.count("start_turn") == 2).await;
+    let issued: i64 = h.q(&format!(
+        "SELECT json_extract(request,'$.accept_before') FROM node_commands WHERE operation_id='op_prep_{S2}'"
+    ));
+    assert!(issued > past);
+}
+
+/// B4: a release receipt that is not the session's last release's (an earlier one, come late)
+/// does not move the session: it stays releasing until its own release is known.
+#[tokio::test]
+async fn a_stale_release_receipt_does_not_move_a_reopened_session() {
+    let h = hub();
+    h.bind();
+    h.one_turn("hello").await;
+    let Release::Pending(first) = h.rt.release(S).unwrap() else {
+        panic!("idle: let go");
+    };
+    until("released", || h.phase() == "released").await;
+    h.one_turn("again").await;
+    // the second release: the Node cannot tell what became of it
+    h.node.script_once("release_session", Scripted::Unknown);
+    let Release::Pending(second) = h.rt.release(S).unwrap() else {
+        panic!("idle: let go");
+    };
+    assert_ne!(first, second);
+    until("unknown", || h.state_of(&second) == "unknown").await;
+    // as if the first one's final receipt had never come in, and comes now
+    h.store
+        .transaction::<_, StoreError>(|tx| {
+            tx.execute(
+                "UPDATE node_commands SET state='accepted' WHERE operation_id=?",
+                [&first],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let op: OperationId = first.clone().try_into().unwrap();
+    h.node
+        .emit(
+            Subject::Operation {
+                operation: op.clone(),
+            },
+            EventBody::OperationChanged {
+                receipt: h.node.receipt(&op).unwrap(),
+            },
+        )
+        .await
+        .unwrap();
+    until("applied", || h.state_of(&first) == "finished").await;
+    assert_eq!(
+        h.phase(),
+        "releasing",
+        "the second release is not known yet"
+    );
+    assert!(h.rt.is_busy(S));
 }
 
 /// D5 acceptance "回滚": with the Node not enabled, a Node-bound session's messages are queued
@@ -2277,7 +2684,7 @@ async fn a_released_session_takes_the_change_when_it_opens_again() {
     let h = hub();
     h.bind();
     h.ready().await;
-    assert!(h.rt.release(S).unwrap());
+    assert!(matches!(h.rt.release(S).unwrap(), Release::Pending(_)));
     until("released", || h.phase() == "released").await;
     assert_eq!(h.mode(PermissionMode::FullAccess), Configured::OnReopen);
     h.one_turn("hello").await;
@@ -2431,7 +2838,7 @@ async fn hold_keeps_the_queue_through_open_and_release_receipts() {
     .await;
 
     // a release receipt under the hold neither claims nor reopens
-    assert!(h.rt.release(S).unwrap());
+    assert!(matches!(h.rt.release(S).unwrap(), Release::Pending(_)));
     h.rt.hold(true);
     assert_eq!(h.rt.prompt(S, "two", "user", &[]).unwrap(), Planned::Held);
     until("released", || h.phase() == "released").await;
@@ -2611,6 +3018,51 @@ async fn cancel_in_retry_wait_with_nothing_queued_tells_the_item_once() {
     assert_eq!(h.phase(), "ready");
     assert!(!h.rt.is_busy(S));
     assert!(!h.rt.cancel(S).unwrap(), "nothing left to cancel");
+}
+
+/// B2b review: a turn ended by a local cancel is told before a newer turn whose end the same
+/// apply pass reaches. The worker is held mid-pass; meanwhile the waiting retry is cancelled here
+/// (its end is left for the worker), a new turn runs and finishes. The item hears the cancelled
+/// turn first, then the new one: never an older end after a newer one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_locally_settled_end_is_told_before_a_newer_turns_end() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let h = hub();
+    h.bind();
+    h.rt.prompt(S, "one", "user", &[]).unwrap();
+    until("started", || h.count("start_turn") == 1).await;
+    let first = h.attempts()[0].clone();
+    h.ends.6.store(true, SeqCst);
+    h.transient_failure(&first).await;
+    until("worker held", || h.ends.7.load(SeqCst)).await;
+    let retry = h.attempts()[1].clone();
+
+    assert!(h.rt.cancel(S).unwrap(), "the waiting retry is settled here");
+    assert_eq!(
+        h.rt.prompt(S, "two", "user", &[]).unwrap(),
+        Planned::Created
+    );
+    until("second sent", || h.count("start_turn") == 2).await;
+    let second = h.attempts().last().unwrap().clone();
+    assert!(
+        !h.rt
+            .same_turn(retry.attempt().as_str(), second.attempt().as_str())
+            .unwrap()
+    );
+    h.node.finish(&second, build::done()).await.unwrap();
+    h.ends.6.store(false, SeqCst);
+
+    until("both ends", || h.ends().len() == 2).await;
+    assert_eq!(
+        *h.ends.5.lock().unwrap(),
+        [
+            Some(retry.attempt().to_string()),
+            Some(second.attempt().to_string())
+        ],
+        "in commit order"
+    );
+    assert_eq!(h.ends()[0].1, "cancelled");
+    assert_eq!(h.ends()[1].1, "end_turn");
 }
 
 /// Issue: a start_turn the Node refused before accepting (no capacity), stopped while it waits to
@@ -3064,7 +3516,7 @@ async fn a_late_release_of_a_new_journal_does_not_let_a_reopened_session_go() {
     h.bind();
     // the old journal: a turn, a release, a reopen (its views stay in the Hub's inbox)
     h.one_turn("hello").await;
-    assert!(h.rt.release(S).unwrap());
+    assert!(matches!(h.rt.release(S).unwrap(), Release::Pending(_)));
     until("released", || h.phase() == "released").await;
     let reopen = |h: &H, text: &str| {
         h.rt.prompt(S, text, "user", &[]).unwrap();
@@ -3104,7 +3556,7 @@ async fn a_late_release_of_a_new_journal_does_not_let_a_reopened_session_go() {
         .unwrap();
     h.one_turn("again").await;
     *h.seen.stash.lock().unwrap() = Some(vec![]);
-    assert!(h.rt.release(S).unwrap());
+    assert!(matches!(h.rt.release(S).unwrap(), Release::Pending(_)));
     until("released", || h.phase() == "released").await;
     reopen(&h, "y");
     until("ready", || h.phase() == "ready").await;
@@ -3126,4 +3578,175 @@ async fn a_late_release_of_a_new_journal_does_not_let_a_reopened_session_go() {
     .await;
     assert_eq!(h.phase(), "ready", "the old view says nothing of this open");
     assert_eq!(h.count("release_session"), 2);
+}
+
+// ── what an upgrade drain waits for (L3, D1) ──
+
+/// A turn waiting for a permission answer holds the drain until it is answered and the turn ends;
+/// an opening harness counts too, an idle one does not.
+#[tokio::test]
+async fn working_counts_a_turn_waiting_for_a_permission_until_it_settles() {
+    let h = hub();
+    *h.seen.stash.lock().unwrap() = Some(vec![]);
+    h.bind();
+    until("opening", || h.phase() == "opening").await;
+    assert_eq!(h.rt.working(), 1, "a harness opening is Node work");
+    let late = h.seen.stash.lock().unwrap().take().unwrap();
+    for b in late {
+        h.seen.to.commit(b).await.unwrap();
+    }
+    h.ready().await;
+    assert_eq!(h.rt.working(), 0, "an idle harness holds nothing");
+
+    let exec = h.running("hello").await;
+    assert_eq!(h.rt.working(), 1);
+    h.node
+        .ask_permission(perm("p1", exec.clone(), "git push"))
+        .await
+        .unwrap();
+    until("card", || h.cards().len() == 1).await;
+    assert_eq!(h.rt.working(), 1, "a permission wait holds the drain");
+    let d = h.cards()[0].clone();
+    assert!(h.rt.answer_permission(&d, Some("allow_once")).unwrap());
+    until("answered", || h.status(&d) == "resolved").await;
+    assert_eq!(h.rt.working(), 1, "the turn goes on after the answer");
+    h.node.finish(&exec, build::done()).await.unwrap();
+    until("turn end", || h.ends().len() == 1).await;
+    h.ready().await;
+    assert_eq!(h.rt.working(), 0);
+}
+
+/// A card that expires unanswered ends its wait: once the turn is over, nothing is left.
+#[tokio::test]
+async fn working_drops_to_zero_after_an_expired_card_and_the_turn_end() {
+    let h = hub();
+    h.bind();
+    let exec = h.running("hello").await;
+    h.node
+        .ask_permission(perm_ttl("p1", exec.clone(), "rm x", 300))
+        .await
+        .unwrap();
+    until("card", || h.cards().len() == 1).await;
+    assert_eq!(h.rt.working(), 1);
+    let d = h.cards()[0].clone();
+    until("expired", || h.status(&d) == "expired").await;
+    h.node.finish(&exec, build::done()).await.unwrap();
+    until("turn end", || h.ends().len() == 1).await;
+    h.ready().await;
+    assert_eq!(h.rt.working(), 0);
+}
+
+/// An attempt nobody can tell the outcome of holds the drain until Stop settles it.
+#[tokio::test]
+async fn working_counts_an_unknown_attempt_until_it_is_abandoned() {
+    let h = hub();
+    h.bind();
+    let exec = h.running("hello").await;
+    let (_, start_op) = h
+        .node
+        .log()
+        .into_iter()
+        .find(|(m, _)| *m == "start_turn")
+        .unwrap();
+    h.node.lose_track(&exec).unwrap();
+    h.node
+        .emit(
+            Subject::Execution(exec.clone()),
+            EventBody::OperationChanged {
+                receipt: Receipt {
+                    operation: start_op,
+                    state: Observed::Unknown {
+                        reason: "node restarted".into(),
+                    },
+                },
+            },
+        )
+        .await
+        .unwrap();
+    until("unknown", || {
+        h.q::<String>("SELECT state FROM runtime_attempts") == "unknown"
+    })
+    .await;
+    assert_eq!(h.rt.working(), 1, "an unknown attempt holds the drain");
+    assert!(h.rt.cancel(S).unwrap());
+    until("abandoned", || h.ends().len() == 1).await;
+    // the harness went with it: nothing waits, so nothing reopens it
+    until("settled", || h.rt.working() == 0).await;
+}
+
+/// A Node stopped at boot (its tools did not connect) refuses the Stop that would settle its open
+/// or unknown turns: it holds no drain, or an upgrade, the one way to fix it, could never seal.
+#[tokio::test]
+async fn a_stopped_node_holds_no_drain_with_an_open_or_unknown_turn() {
+    let h = hub();
+    h.bind();
+    let exec = h.running("hello").await;
+    let (_, start_op) = h
+        .node
+        .log()
+        .into_iter()
+        .find(|(m, _)| *m == "start_turn")
+        .unwrap();
+    h.node.lose_track(&exec).unwrap();
+    h.node
+        .emit(
+            Subject::Execution(exec.clone()),
+            EventBody::OperationChanged {
+                receipt: Receipt {
+                    operation: start_op,
+                    state: Observed::Unknown {
+                        reason: "node restarted".into(),
+                    },
+                },
+            },
+        )
+        .await
+        .unwrap();
+    until("unknown", || {
+        h.q::<String>("SELECT state FROM runtime_attempts") == "unknown"
+    })
+    .await;
+    assert_eq!(h.rt.working(), 1);
+    h.rt.stop("its tools did not connect");
+    assert!(h.rt.cancel(S).is_err(), "a stopped Node cannot abandon it");
+    assert_eq!(h.rt.working(), 0, "a stopped Node runs nothing");
+    // the turn itself is left as it was, unknown, for a Node that runs again
+    assert_eq!(
+        h.q::<String>("SELECT state FROM runtime_attempts"),
+        "unknown"
+    );
+}
+
+/// A configure whose outcome is unknown keeps the session configuring: the drain waits for it.
+#[tokio::test]
+async fn working_counts_a_configuring_harness() {
+    let h = hub();
+    h.bind();
+    h.ready().await;
+    h.node.script_once("configure_session", Scripted::Unknown);
+    assert_eq!(h.mode(PermissionMode::FullAccess), Configured::Sent);
+    until("unknown", || h.cfg_states() == ["unknown"]).await;
+    assert_eq!(h.phase(), "configuring");
+    assert_eq!(h.rt.working(), 1);
+}
+
+/// Only this Node's work holds its drain count: a turn of a session bound to another Node (a
+/// remote one, which outlives the Hub's restart) is not this coordinator's.
+#[tokio::test]
+async fn working_counts_only_this_nodes_sessions() {
+    let h = hub();
+    h.bind();
+    h.ready().await;
+    let _exec = h.running("hello").await;
+    assert_eq!(h.rt.working(), 1);
+    h.store
+        .transaction::<_, StoreError>(|tx| {
+            tx.execute(
+                "UPDATE runtime_sessions SET node_id='elsewhere' WHERE session_id=?",
+                [S],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(h.rt.working(), 0, "another Node's turn");
 }

@@ -9,7 +9,7 @@
 //! - A switch while a session runs is not a message of its own: it waits in front of the next message
 //!   the session gets (the user's or Steve's), and the harness's mode is switched in place.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
 use crate::Core;
@@ -99,12 +99,16 @@ fn note(from: Level, to: Level) -> Option<&'static str> {
     }
 }
 
-/// What each running session was last told about YOLO, and the note waiting for its next message.
+/// What each running session was last told about YOLO, the note waiting for its next message, and
+/// the sessions whose harness mode switch did not go through yet.
 #[derive(Default)]
 pub(crate) struct Sessions {
     told: Mutex<HashMap<String, Level>>,
     /// The note waiting for the next message, with the level the session was at before it.
     notes: Mutex<HashMap<String, (Level, &'static str)>>,
+    /// The mode switch failed (a store error, say): the next sync tries it again, whatever the
+    /// note did meanwhile. Apart from `told`, so a retry never makes a note again.
+    mode_pending: Mutex<HashSet<String>>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -115,19 +119,20 @@ impl Sessions {
     pub(crate) fn started(&self, sid: &str, level: Level) {
         lock(&self.told).insert(sid.into(), level);
         lock(&self.notes).remove(sid);
+        lock(&self.mode_pending).remove(sid);
     }
     /// The note for the next message to `sid`, taken.
     pub(crate) fn take_note(&self, sid: &str) -> Option<&'static str> {
         lock(&self.notes).remove(sid).map(|(_, n)| n)
     }
-    /// Records the level; true when it differs from what the session was told (unknown = off, the
-    /// protocol of a session started before YOLO).
-    fn changed(&self, sid: &str, level: Level) -> bool {
+    /// Records the level; the level the session was told before when it differs (unknown = off,
+    /// the protocol of a session started before YOLO).
+    fn changed(&self, sid: &str, level: Level) -> Option<Level> {
         let was = lock(&self.told)
             .insert(sid.into(), level)
             .unwrap_or(Level::Off);
         if was == level {
-            return false;
+            return None;
         }
         let mut notes = lock(&self.notes);
         // the note compares with what the session last heard (on then off again before it heard of
@@ -136,7 +141,19 @@ impl Sessions {
         if let Some(n) = note(heard, level) {
             notes.insert(sid.into(), (heard, n));
         }
-        true
+        Some(was)
+    }
+    /// Whether the last mode switch for `sid` is still to be made.
+    fn mode_pending(&self, sid: &str) -> bool {
+        lock(&self.mode_pending).contains(sid)
+    }
+    fn set_mode_pending(&self, sid: &str, pending: bool) {
+        let mut p = lock(&self.mode_pending);
+        if pending {
+            p.insert(sid.into());
+        } else {
+            p.remove(sid);
+        }
     }
 }
 
@@ -228,7 +245,9 @@ impl Core {
                 continue;
             };
             let level = self.yolo_level(&item);
-            if !self.0.yolo_sessions.changed(&s.id, level) {
+            let sessions = &self.0.yolo_sessions;
+            // a level change makes the note; the mode is switched for it, or again after a failure
+            if sessions.changed(&s.id, level).is_none() && !sessions.mode_pending(&s.id) {
                 continue;
             }
             let bot = s
@@ -238,8 +257,20 @@ impl Core {
                 .map(|b| b.perm_mode);
             let own = y.own_dir(item.cwd.as_deref()).is_some();
             if let Some(mode) = harness_mode(bot.as_deref(), level, own) {
-                self.0.runtime.set_mode(&s.id, &mode);
+                match self.0.runtime.set_mode(&s.id, &mode) {
+                    Err(e) => {
+                        // not lost: the next sync tries again (the note is not made again)
+                        tracing::warn!(session = %s.id, mode, "yolo sync: set mode: {e}");
+                        sessions.set_mode_pending(&s.id, true);
+                        continue;
+                    }
+                    Ok(crate::runtime::Configured::Unsupported) => {
+                        tracing::warn!(session = %s.id, mode, "yolo sync: a mode its backend cannot express: unchanged");
+                    }
+                    Ok(_) => {}
+                }
             }
+            sessions.set_mode_pending(&s.id, false);
             out.push(s.id);
         }
         out
@@ -300,24 +331,24 @@ mod tests {
         use Level::*;
         let s = Sessions::default();
         s.started("a", Off);
-        assert!(!s.changed("a", Off));
-        assert!(s.changed("a", On));
+        assert_eq!(s.changed("a", Off), None);
+        assert_eq!(s.changed("a", On), Some(Off));
         assert_eq!(s.take_note("a"), Some(NOTE_ON));
         assert_eq!(s.take_note("a"), None);
-        assert!(s.changed("a", Off));
-        assert!(s.changed("a", On));
+        assert_eq!(s.changed("a", Off), Some(On));
+        assert_eq!(s.changed("a", On), Some(Off));
         assert_eq!(
             s.take_note("a"),
             None,
             "off then on again before any message"
         );
         // full access: told once, and stepping back down says so
-        assert!(s.changed("a", Full));
+        assert_eq!(s.changed("a", Full), Some(On));
         assert_eq!(s.take_note("a"), Some(NOTE_FULL));
-        assert!(s.changed("a", On));
+        assert_eq!(s.changed("a", On), Some(Full));
         assert_eq!(s.take_note("a"), Some(NOTE_FULL_OFF));
-        assert!(s.changed("a", Full));
-        assert!(s.changed("a", Off));
+        assert_eq!(s.changed("a", Full), Some(On));
+        assert_eq!(s.changed("a", Off), Some(Full));
         assert_eq!(s.take_note("a"), Some(NOTE_OFF), "on → full → off: off");
     }
 }

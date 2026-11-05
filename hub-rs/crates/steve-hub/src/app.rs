@@ -107,24 +107,41 @@ async fn maintenance_gate(State(st): State<AppState>, req: Request, next: Next) 
                 .get(header::AUTHORIZATION)
                 .and_then(|v| v.to_str().ok())
                 .and_then(|v| v.strip_prefix("Bearer "));
-            let continuation = modules.store.continuing_activity("mcp_existing_turn", || {
-                path.starts_with("/mcp")
-                    && token.is_some_and(|token| {
-                        modules
-                            .store
-                            .sessions()
-                            .by_token(token)
-                            .ok()
-                            .flatten()
-                            .is_some_and(|s| matches!(s.status.as_str(), "running" | "starting"))
-                            || modules
+            // a Node turn waiting for a permission holds the drain until it is answered (D1), so
+            // its answer must get through
+            let card = (*req.method() == axum::http::Method::POST)
+                .then(|| path.strip_prefix("/api/decisions/"))
+                .flatten()
+                .filter(|id| !id.is_empty() && !id.contains('/'));
+            let answer = card.and_then(|id| {
+                modules
+                    .store
+                    .continuing_activity("node_permission_answer", || {
+                        crate::wire::node_runtime::waiting_card(&modules.store, id)
+                    })
+            });
+            let continuation = answer.or_else(|| {
+                modules.store.continuing_activity("mcp_existing_turn", || {
+                    path.starts_with("/mcp")
+                        && token.is_some_and(|token| {
+                            modules
                                 .store
-                                .thread()
-                                .run_by_token(token)
+                                .sessions()
+                                .by_token(token)
                                 .ok()
                                 .flatten()
-                                .is_some_and(|r| r.status == "running")
-                    })
+                                .is_some_and(|s| {
+                                    matches!(s.status.as_str(), "running" | "starting")
+                                })
+                                || modules
+                                    .store
+                                    .thread()
+                                    .run_by_token(token)
+                                    .ok()
+                                    .flatten()
+                                    .is_some_and(|r| r.status == "running")
+                        })
+                })
             });
             let Some(permit) = continuation else {
                 return json_response(

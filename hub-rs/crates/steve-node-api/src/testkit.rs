@@ -114,6 +114,8 @@ struct State {
     refused: HashMap<&'static str, ErrorCode>,
     /// What the next commands of a method do instead of the normal answer, in order.
     scripted: HashMap<&'static str, std::collections::VecDeque<Scripted>>,
+    /// The most sessions open (not released) in one workspace at once, by workspace.
+    crowded: HashMap<WorkspaceId, usize>,
 }
 
 /// What [`FakeNode::script_once`] makes one command do.
@@ -257,6 +259,12 @@ impl FakeNode {
     /// The next `method` command (after those scripted before it) does `s`.
     pub fn script_once(&self, method: &'static str, s: Scripted) {
         self.st().scripted.entry(method).or_default().push_back(s);
+    }
+
+    /// The most sessions that were ever open at once in one workspace (two harnesses in one
+    /// worktree when above 1).
+    pub fn most_open_in_a_workspace(&self) -> usize {
+        self.st().crowded.values().copied().max().unwrap_or(0)
     }
 
     /// Accepted commands in order, by method.
@@ -802,6 +810,15 @@ impl SessionExecutor for FakeNode {
                     incarnation,
                 },
             );
+            let open = st
+                .sessions
+                .values()
+                .filter(|s| {
+                    s.open.workspace == o.workspace && s.view.phase != SessionPhase::Released
+                })
+                .count();
+            let most = st.crowded.entry(o.workspace.id.clone()).or_default();
+            *most = (*most).max(open);
             let mut d = Decided::done(OperationResult::Session(view.clone()));
             d.workspace = Some(o.workspace.clone());
             d.events = vec![(

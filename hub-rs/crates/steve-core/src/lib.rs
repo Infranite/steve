@@ -52,10 +52,13 @@ pub use gateway::{ClaudeCli, Fallback, LocalPrint, ModelGateway, OneModel, Share
 pub use orchestrator::{
     CreateItem, Forked, ItemAction, RESUMED_NOTE, SendNow, SupplementMode, resumed_text,
 };
-pub use runtime::{AgentRuntime, Check, McpEndpoint, Output, Prompted, TurnEnd};
+pub use runtime::{
+    AgentRuntime, Answered, Check, Configured, Flushed, McpEndpoint, Output, Prompted, Released,
+    Running, Stop, TurnEnd,
+};
 
 use repo::Db;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 /// The domain layer. Cheap to clone; all clones share one state.
@@ -105,9 +108,13 @@ pub(crate) struct Releasing {
 /// In-memory state of the TS module globals (lost on restart there too).
 #[derive(Default)]
 pub(crate) struct State {
-    pending: HashMap<String, Mark>,
+    /// The session's last Steve tool call, with the turn it was made in (`None`: none ran then).
+    pending: HashMap<String, (Mark, Option<runtime::Running>)>,
     tokens: HashMap<String, String>,
-    resumed: HashSet<String>,
+    /// Sessions resumed after a restart, with the turn the resume started.
+    resumed: HashMap<String, runtime::Running>,
+    /// The last turn end each session had (its attempt): the same end told again is ignored.
+    ended: HashMap<String, String>,
     /// Boot resumes scheduled by `recover` and not yet run: (batch, sessions); each batch runs once.
     resumes: Vec<(u64, Vec<String>)>,
     resume_batch: u64,
@@ -119,9 +126,10 @@ pub(crate) struct State {
     hooks: Vec<modules::HookEvent>,
     /// Items the user marked done, with what to restore if they undo it from the toast.
     marked_done: HashMap<String, orchestrator::MarkedDone>,
-    /// Turns to cancel once the lock is gone `(session, item)`: a cancel can call back into the core
+    /// Turns to stop once the lock is gone `(turn, item)`: a cancel can call back into the core
     /// (the gateway-retry wait ends with a turn end), so a lifecycle stop never cancels under the lock.
-    cancels: Vec<(String, String)>,
+    /// The turn is frozen when the stop is asked for, so a turn started meanwhile is left alone.
+    cancels: Vec<(runtime::Running, String)>,
     /// Items whose completion rule is being checked against the remote now, since when (`takeover`).
     probing: HashMap<String, i64>,
     /// The last completion probe of each item.
@@ -130,6 +138,9 @@ pub(crate) struct State {
     build_checked: HashMap<String, i64>,
     /// Why new turns wait now (`occupancy`).
     holds: std::collections::BTreeSet<occupancy::Hold>,
+    /// Items handing over to a new session while the old one's release is on its way: the
+    /// release (`Released::Pending`) the item's next session waits for, taken when it starts.
+    handoffs: HashMap<String, String>,
 }
 
 /// One critical section: the core plus the held state lock.
@@ -204,9 +215,9 @@ impl Core {
         &self.0.store
     }
     /// Interrupt the session's running turn on whichever backend runs it (the user's stop);
-    /// false if nothing was running.
-    pub fn cancel_turn(&self, session_id: &str) -> bool {
-        self.0.runtime.cancel(session_id)
+    /// false if nothing was running; an error when the backend cannot tell.
+    pub fn cancel_turn(&self, session_id: &str) -> Result<bool> {
+        Ok(self.0.runtime.cancel(session_id)? == Stop::Requested)
     }
     pub fn config(&self) -> &CoreConfig {
         &self.0.config
@@ -256,5 +267,16 @@ impl Tx<'_> {
     }
     pub(crate) fn cfg(&self) -> &CoreConfig {
         &self.c.0.config
+    }
+    /// Interrupt the session's running turn right away (the turn looked at now and stopped now);
+    /// false if none runs. A backend that cannot tell is logged and counts as nothing stopped.
+    pub(crate) fn stop_now(&self, sid: &str) -> bool {
+        match self.rt().cancel(sid) {
+            Ok(stop) => stop == Stop::Requested,
+            Err(e) => {
+                tracing::error!(session = sid, "stopping the turn: {e}");
+                false
+            }
+        }
     }
 }

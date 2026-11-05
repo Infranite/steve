@@ -138,6 +138,23 @@ fn send_now_interrupts_and_the_queue_runs_next_with_it_first() {
     assert!(k.db().queued(&sid).unwrap().is_empty());
 }
 
+/// B2b review: the turn ends and takes the queue (the moved-up message with it) between reading
+/// the running turn and stopping it. The stop reaches nothing and the flush finds the follow-up
+/// busy; the row is gone, so the message went: Sent, said in the session, and the item goes on.
+#[test]
+fn send_now_after_the_turn_took_the_queue_as_its_follow_up_is_sent() {
+    let k = Kit::new();
+    let (_, sid) = started(&k);
+    let q = queue(&k, &sid, &["一", "二"]);
+    k.rt.st().follow_up_before_stop = true;
+    assert_eq!(k.core.queued_send_now(&sid, &q[1]).unwrap(), SendNow::Sent);
+    assert_eq!(k.rt.st().stops.last().unwrap().1, crate::Stop::NotRunning);
+    assert!(k.rt.st().cancelled.is_empty());
+    assert_eq!(k.rt.prompts_of(&sid).last().unwrap(), "二\n\n一");
+    assert!(k.db().queued(&sid).unwrap().is_empty());
+    assert!(kinds(&k, &sid).contains(&"queued_sent_now".to_string()));
+}
+
 #[test]
 fn send_now_on_an_idle_session_starts_the_turn() {
     let k = Kit::new();

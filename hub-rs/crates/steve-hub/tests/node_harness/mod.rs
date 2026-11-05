@@ -29,7 +29,7 @@ pub struct Ends {
 }
 
 impl NodeDomain for Ends {
-    fn turn_ended(&self, session: &str, stop: &str, _: Option<String>) {
+    fn turn_ended(&self, session: &str, _: Option<&str>, stop: &str, _: Option<String>) {
         self.turns
             .lock()
             .unwrap()

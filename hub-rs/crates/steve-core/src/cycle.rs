@@ -636,8 +636,10 @@ impl Tx<'_> {
             reason,
         )?;
         for s in self.db().sessions_of_item(item_id)? {
-            if s.status != "ended" {
-                self.st.cancels.push((s.id.clone(), item_id.into()));
+            if s.status != "ended"
+                && let Some(turn) = self.rt().running(&s.id)
+            {
+                self.st.cancels.push((turn, item_id.into()));
             }
         }
         self.lc_try_close(item_id)?;
