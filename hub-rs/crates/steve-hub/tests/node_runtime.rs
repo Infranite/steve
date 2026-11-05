@@ -3684,3 +3684,312 @@ async fn reconcile_replays_an_event_bigger_than_a_page() {
     assert_eq!(h.ends(), [(S.to_string(), "end_turn".to_string(), None)]);
     until("the journal drained", || h.node.unacked() == 0).await;
 }
+
+// ── N1-8: Stop retires a control whose outcome is unknown, by one explicit recover (D7) ──
+
+impl H {
+    /// Rows of `method` the Hub planned.
+    fn planned(&self, method: &str) -> i64 {
+        self.q(&format!(
+            "SELECT COUNT(*) FROM node_commands WHERE method='{method}'"
+        ))
+    }
+
+    /// How often the Node accepted `op`.
+    fn sent(&self, op: &str) -> usize {
+        self.node
+            .log()
+            .iter()
+            .filter(|(_, o)| o.as_str() == op)
+            .count()
+    }
+
+    /// The latest recover's target.
+    fn recover_target(&self) -> String {
+        self.q("SELECT json_extract(request,'$.body.target') FROM node_commands WHERE method='recover' ORDER BY created DESC, rowid DESC LIMIT 1")
+    }
+
+    /// Runs the attempt the Node took last to its end; the session goes back to ready.
+    async fn finish_last(&self) {
+        let before = self.ends().len();
+        let exec = self.attempts().last().unwrap().clone();
+        self.node.finish(&exec, build::done()).await.unwrap();
+        until("turn end", || self.ends().len() > before).await;
+    }
+}
+
+#[tokio::test]
+async fn stop_retires_an_unknown_open_once_and_the_queued_message_opens_it_again() {
+    let h = hub();
+    h.node.script_once("open_session", Scripted::Unknown);
+    h.bind();
+    assert_eq!(h.rt.prompt(S, "hello", "user", &[]).unwrap(), Planned::Busy);
+    until("unknown", || {
+        h.state_of(&format!("op_open_{S}")) == "unknown"
+    })
+    .await;
+    assert!(
+        h.systems("点停止可撤回") >= 1,
+        "the session says how to get out"
+    );
+    // the recover waits at the Node (busy, the very same command again later)
+    h.node.refuse("recover", Some(ErrorCode::Busy));
+    assert!(h.rt.cancel(S).unwrap());
+    assert!(h.rt.cancel(S).unwrap(), "the one on its way is not doubled");
+    assert_eq!(h.planned("recover"), 1);
+    assert_eq!(h.recover_target(), format!("op_open_{S}"));
+    let expected: String = h.q(
+        "SELECT json_extract(request,'$.body.expected') FROM node_commands WHERE method='recover'",
+    );
+    assert!(expected.starts_with("sha256:"), "frozen when planned");
+    h.node.refuse("recover", None);
+    until("the queued turn", || h.count("start_turn") == 1).await;
+    assert_eq!(h.count("recover"), 1, "exactly one recover");
+    assert_eq!(
+        h.sent(&format!("op_open_{S}")),
+        1,
+        "the target is never sent again"
+    );
+    assert_eq!(h.count("open_session"), 2, "opened again under a new id");
+    assert_eq!(h.state_of(&format!("op_open_{S}")), "finished");
+    assert_eq!(h.systems("不算成功"), 1, "never said to have succeeded");
+    h.finish_last().await;
+    assert_eq!(h.ends().len(), 1);
+    assert_eq!(h.attempts().len(), 1, "the queued message ran once");
+    assert!(h.rt.cancel(S).is_ok_and(|x| !x), "nothing left to stop");
+}
+
+#[tokio::test]
+async fn stop_retires_an_unknown_release_and_the_next_message_reopens() {
+    let h = hub();
+    h.bind();
+    until("ready", || h.phase() == "ready").await;
+    h.node.script_once("release_session", Scripted::Unknown);
+    assert!(h.rt.release(S).unwrap());
+    until("unknown", || h.last_state("release_session") == "unknown").await;
+    assert_eq!(h.phase(), "releasing");
+    assert!(h.rt.cancel(S).unwrap());
+    until("released", || h.phase() == "released").await;
+    assert_eq!(h.count("recover"), 1);
+    h.rt.prompt(S, "next", "user", &[]).unwrap();
+    until("the turn", || h.count("start_turn") == 1).await;
+    assert_eq!(
+        h.count("release_session"),
+        1,
+        "the target is never sent again"
+    );
+    assert_eq!(h.count("open_session"), 2);
+    h.finish_last().await;
+}
+
+#[tokio::test]
+async fn stop_retires_an_unknown_configure_and_the_reopen_carries_the_change() {
+    let h = hub();
+    h.bind();
+    h.ready().await;
+    h.node.script_once("configure_session", Scripted::Unknown);
+    assert_eq!(h.mode(PermissionMode::FullAccess), Configured::Sent);
+    until("unknown", || h.cfg_states() == ["unknown"]).await;
+    h.rt.prompt(S, "hello", "user", &[]).unwrap();
+    assert!(h.rt.cancel(S).unwrap());
+    until("the queued turn", || h.count("start_turn") == 1).await;
+    assert_eq!(h.count("recover"), 1);
+    assert_eq!(
+        h.count("configure_session"),
+        1,
+        "the target is never sent again"
+    );
+    assert_eq!(h.cfg_states(), ["finished"]);
+    assert_eq!(h.count("open_session"), 2);
+    assert_eq!(
+        h.last_mode(),
+        "full_access",
+        "the change goes with the reopen"
+    );
+    h.finish_last().await;
+}
+
+#[tokio::test]
+async fn stop_retires_an_unknown_prepare_with_a_new_prepare_and_open() {
+    let h = hub();
+    h.node.script_once("prepare_workspace", Scripted::Unknown);
+    h.bind();
+    h.rt.prompt(S, "hello", "user", &[]).unwrap();
+    until("unknown", || {
+        h.state_of(&format!("op_prep_{S}")) == "unknown"
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(h.count("open_session"), 0, "the open waits on its prepare");
+    assert!(h.rt.cancel(S).unwrap());
+    until("the queued turn", || h.count("start_turn") == 1).await;
+    assert_eq!(h.count("recover"), 1);
+    assert_eq!(
+        h.sent(&format!("op_prep_{S}")),
+        1,
+        "the target is never sent again"
+    );
+    assert_eq!(
+        h.count("prepare_workspace"),
+        2,
+        "a new prepare under a new id"
+    );
+    assert_eq!(h.count("open_session"), 1);
+    assert_eq!(
+        h.state_of(&format!("op_open_{S}")),
+        "rejected",
+        "never sent"
+    );
+    h.finish_last().await;
+    assert_eq!(h.attempts().len(), 1, "the queued message ran once");
+}
+
+#[tokio::test]
+async fn an_unsupported_recover_keeps_the_session_held_and_the_next_stop_asks_again() {
+    let h = hub();
+    h.node.script_once("open_session", Scripted::Unknown);
+    h.bind();
+    h.rt.prompt(S, "hello", "user", &[]).unwrap();
+    until("unknown", || {
+        h.state_of(&format!("op_open_{S}")) == "unknown"
+    })
+    .await;
+    h.node.refuse("recover", Some(ErrorCode::Unsupported));
+    assert!(h.rt.cancel(S).unwrap());
+    until("refused", || h.last_state("recover") == "rejected").await;
+    assert_eq!(h.systems("需要人工核验 Node 状态"), 1);
+    assert_eq!(h.phase(), "opening", "still held");
+    assert!(h.rt.is_busy(S));
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(h.planned("recover"), 1, "nothing asks again on its own");
+    assert_eq!(h.count("start_turn"), 0);
+
+    h.node.refuse("recover", None);
+    assert!(h.rt.cancel(S).unwrap());
+    assert_eq!(h.planned("recover"), 2);
+    let second: String = h.q(
+        "SELECT operation_id FROM node_commands WHERE method='recover' ORDER BY created DESC, rowid DESC LIMIT 1",
+    );
+    assert_eq!(second, format!("op_recover_op_open_{S}_1"), "a new id");
+    until("the queued turn", || h.count("start_turn") == 1).await;
+    assert_eq!(
+        h.sent(&format!("op_open_{S}")),
+        1,
+        "the target is never sent again"
+    );
+    h.finish_last().await;
+}
+
+#[tokio::test]
+async fn stop_retires_an_unknown_abandon_and_the_next_stop_abandons_anew() {
+    let h = hub();
+    h.bind();
+    h.rt.prompt(S, "hello", "user", &[]).unwrap();
+    until("running", || {
+        h.q::<i64>("SELECT COUNT(*) FROM runtime_attempts WHERE state='running'") == 1
+    })
+    .await;
+    let (_, op) = h
+        .node
+        .log()
+        .into_iter()
+        .find(|(m, _)| *m == "start_turn")
+        .unwrap();
+    let exec = h.attempts()[0].clone();
+    h.node.lose_track(&exec).unwrap();
+    h.node
+        .emit(
+            Subject::Operation {
+                operation: op.clone(),
+            },
+            EventBody::OperationChanged {
+                receipt: h.node.receipt(&op).unwrap(),
+            },
+        )
+        .await
+        .unwrap();
+    until("unknown", || {
+        h.q::<String>("SELECT state FROM runtime_attempts") == "unknown"
+    })
+    .await;
+    let a: String = h.q("SELECT attempt_id FROM runtime_attempts");
+    h.node.script_once("abandon", Scripted::Unknown);
+    assert!(h.rt.cancel(S).unwrap());
+    until("abandon unknown", || {
+        h.state_of(&format!("op_abandon_{a}")) == "unknown"
+    })
+    .await;
+
+    // the abandon nobody can tell the end of is retired first, nothing else goes
+    assert!(h.rt.cancel(S).unwrap());
+    assert_eq!(h.recover_target(), format!("op_abandon_{a}"));
+    until("recovered", || h.last_state("recover") == "finished").await;
+    assert_eq!(h.planned("abandon"), 1);
+    assert_eq!(h.systems("已撤回结果未知的放弃操作"), 1);
+    assert_eq!(
+        h.q::<String>("SELECT state FROM runtime_attempts"),
+        "unknown",
+        "the attempt stays unknown"
+    );
+    assert!(h.rt.is_busy(S));
+
+    // its slot is free: a new Stop sends a new abandon, never the old one again
+    assert!(h.rt.cancel(S).unwrap());
+    assert_eq!(h.planned("abandon"), 2);
+    assert_eq!(h.planned("recover"), 1, "exactly one recover");
+    until("the new abandon sent", || {
+        h.state_of(&format!("op_abandon_{a}_1")) != "pending"
+    })
+    .await;
+    assert_eq!(
+        h.sent(&format!("op_abandon_{a}")),
+        1,
+        "the target is never sent again"
+    );
+}
+
+#[tokio::test]
+async fn stop_retires_an_unknown_answer_and_leaves_its_attempt_alone() {
+    let h = hub();
+    h.bind();
+    h.rt.prompt(S, "hello", "user", &[]).unwrap();
+    until("started", || h.methods().contains(&"start_turn")).await;
+    let exec = h.attempts()[0].clone();
+    h.node
+        .ask_permission(perm("p1", exec.clone(), "git push"))
+        .await
+        .unwrap();
+    until("card", || {
+        h.q::<i64>(
+            "SELECT COUNT(*) FROM decisions WHERE subject_type='tool_call' AND status='open'",
+        ) == 1
+    })
+    .await;
+    let d: String = h.q("SELECT id FROM decisions WHERE subject_type='tool_call'");
+    h.node.script_once("resolve_permission", Scripted::Unknown);
+    assert!(h.rt.answer_permission(&d, Some("allow_once")).unwrap());
+    until("answer unknown", || {
+        h.state_of(&format!("op_answer_{d}")) == "unknown"
+    })
+    .await;
+    h.finish_last().await;
+    let completion: String = h.q("SELECT completion FROM runtime_attempts");
+
+    assert!(h.rt.cancel(S).unwrap());
+    until("recovered", || h.last_state("recover") == "finished").await;
+    assert_eq!(h.recover_target(), format!("op_answer_{d}"));
+    assert_eq!(h.systems("已撤回结果未知的授权回复"), 1);
+    let card: String = h.q(&format!("SELECT status FROM decisions WHERE id='{d}'"));
+    assert_ne!(card, "open", "the card is closed");
+    assert_eq!(
+        h.q::<String>("SELECT completion FROM runtime_attempts"),
+        completion,
+        "the attempt is unchanged"
+    );
+    assert_eq!(
+        h.count("resolve_permission"),
+        1,
+        "the target is never sent again"
+    );
+    assert!(h.rt.cancel(S).is_ok_and(|x| !x), "nothing left to stop");
+}

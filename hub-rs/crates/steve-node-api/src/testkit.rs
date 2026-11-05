@@ -59,6 +59,8 @@ struct Accepted {
     receipt: Receipt,
     execution: Option<ExecutionRef>,
     workspace: Option<WorkspaceRef>,
+    /// The session a session control (open, configure, release) is for.
+    session: Option<SessionId>,
     cancel_requested: bool,
 }
 
@@ -141,6 +143,7 @@ struct Decided {
     state: Observed,
     execution: Option<ExecutionRef>,
     workspace: Option<WorkspaceRef>,
+    session: Option<SessionId>,
     events: Vec<(Subject, EventBody)>,
 }
 
@@ -154,6 +157,7 @@ impl Decided {
             },
             execution: None,
             workspace: None,
+            session: None,
             events: vec![],
         }
     }
@@ -365,6 +369,7 @@ impl FakeNode {
                     receipt: receipt.clone(),
                     execution: d.execution,
                     workspace: d.workspace,
+                    session: d.session,
                     cancel_requested: false,
                 },
             );
@@ -822,6 +827,7 @@ impl SessionExecutor for FakeNode {
             );
             let mut d = Decided::done(OperationResult::Session(view.clone()));
             d.workspace = Some(o.workspace.clone());
+            d.session = Some(o.session.clone());
             d.events = vec![(
                 Subject::Session {
                     session: o.session.clone(),
@@ -867,6 +873,7 @@ impl SessionExecutor for FakeNode {
             s.view.revision = revision;
             let view = s.view.clone();
             let mut d = Decided::done(OperationResult::Session(view.clone()));
+            d.session = Some(b.session.clone());
             d.events = vec![(
                 Subject::Session {
                     session: b.session.clone(),
@@ -922,6 +929,7 @@ impl SessionExecutor for FakeNode {
                 state: Observed::Running,
                 execution: Some(exec.clone()),
                 workspace: Some(ws),
+                session: None,
                 events: vec![(Subject::Execution(exec.clone()), EventBody::AttemptStarted)],
             })
         })
@@ -946,6 +954,7 @@ impl SessionExecutor for FakeNode {
             s.view.phase = SessionPhase::Released;
             let view = s.view.clone();
             let mut d = Decided::done(OperationResult::Unit);
+            d.session = Some(c.body.clone());
             d.events = vec![(
                 Subject::Session {
                     session: c.body.clone(),
@@ -990,6 +999,7 @@ impl JobExecutor for FakeNode {
                 state: Observed::Running,
                 execution: Some(exec.clone()),
                 workspace: ws.clone(),
+                session: None,
                 events: vec![(Subject::Execution(exec.clone()), EventBody::AttemptStarted)],
             })
         })
@@ -1081,6 +1091,75 @@ impl ExecutionControl for FakeNode {
             }
             if let Some(ExecutionRef::Job { attempt, .. }) = &exec {
                 st.jobs.remove(attempt);
+            }
+            let mut d = Decided::done(OperationResult::Unit);
+            d.events = events;
+            Ok(d)
+        })
+        .await
+    }
+
+    /// As LocalNode retires an unknown control: only the exact unknown target, never an execution
+    /// (abandon it), refused while the session has live work. The target ends interrupted (its
+    /// effects stay as they are, nothing is replayed); a session control lets its session go.
+    async fn recover(&self, c: Command<Recover>) -> ApiResult<Receipt> {
+        let target = c.body.target.clone();
+        self.accept("recover", &c, |st| {
+            let Some(a) = st.inbox.get(&target) else {
+                return Err(ApiError::new(ErrorCode::Invalid, "no such operation"));
+            };
+            if a.digest != c.body.expected || !matches!(a.receipt.state, Observed::Unknown { .. }) {
+                return Err(ApiError::new(ErrorCode::Stale, "recovery target changed"));
+            }
+            if a.execution.is_some() {
+                return unsupported("recover execution: use abandon");
+            }
+            let (method, session) = (a.method, a.session.clone());
+            if let Some(s) = &session
+                && let Some(x) = st.active.get(s)
+                && st.attempts.get(x.attempt()).is_some_and(|(_, op)| {
+                    st.inbox
+                        .get(op)
+                        .is_some_and(|o| !matches!(o.receipt.state, Observed::Unknown { .. }))
+                })
+            {
+                return Err(ApiError::new(ErrorCode::Busy, "session has live work"));
+            }
+            let state = Observed::Finished {
+                outcome: Outcome::Interrupted,
+                result: None,
+                error: Some(ApiError::new(
+                    ErrorCode::OutcomeUnknown,
+                    "control retired; effects preserved, not replayed",
+                )),
+            };
+            if let Some(a) = st.inbox.get_mut(&target) {
+                a.receipt.state = state.clone();
+            }
+            let mut events = vec![(
+                Subject::Operation {
+                    operation: target.clone(),
+                },
+                EventBody::OperationChanged {
+                    receipt: Receipt {
+                        operation: target.clone(),
+                        state,
+                    },
+                },
+            )];
+            if matches!(
+                method,
+                "open_session" | "configure_session" | "release_session"
+            ) && let Some(s) = &session
+                && let Some(row) = st.sessions.get_mut(s)
+            {
+                row.view.phase = SessionPhase::Released;
+                events.push((
+                    Subject::Session { session: s.clone() },
+                    EventBody::SessionChanged {
+                        view: row.view.clone(),
+                    },
+                ));
             }
             let mut d = Decided::done(OperationResult::Unit);
             d.events = events;

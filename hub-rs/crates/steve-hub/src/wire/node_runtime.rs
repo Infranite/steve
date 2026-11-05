@@ -38,6 +38,7 @@ use steve_store::{FileRef, Store, StoreError, Tx};
 mod config;
 mod heads;
 mod perm;
+mod recover;
 
 pub use config::{ConfigChange, Configured};
 pub use heads::{
@@ -501,6 +502,16 @@ impl NodeRuntime {
     /// The session's harness is gone on its Node (released, or abandoned there): open it again,
     /// continuing the same conversation where the Node can.
     fn reopen_in(&self, tx: &Tx, session: &str) -> Result<(), StoreError> {
+        self.reopen_after_in(tx, session, None)
+    }
+
+    /// [`Self::reopen_in`], the open waiting on `dependency` (a prepare) when there is one.
+    fn reopen_after_in(
+        &self,
+        tx: &Tx,
+        session: &str,
+        dependency: Option<&str>,
+    ) -> Result<(), StoreError> {
         let mut open = self.open_of(tx, session)?;
         self.fold_desired_in(tx, session, &mut open)?;
         open.resume = resume_of_in(tx, &self.node_id, session)?;
@@ -515,7 +526,7 @@ impl NodeRuntime {
                 request: &req,
                 digest: &digest,
                 target_attempt: None,
-                dependency: None,
+                dependency,
             },
             now(),
         )?;
@@ -969,7 +980,9 @@ impl NodeRuntime {
     }
 
     /// Asks the Node to cancel the attempt running now (frozen as the target here, never looked up
-    /// again when the command goes out). `true`: there was one, the cancel is on its way.
+    /// again when the command goes out). `true`: there was one, the cancel is on its way. With no
+    /// attempt to stop, a control whose outcome is unknown and holds the session is retired by one
+    /// explicit `recover` ([`recover`]).
     pub fn cancel(&self, session: &str) -> Result<bool, StoreError> {
         self.running()?;
         let r = self.tx(|tx| {
@@ -981,7 +994,7 @@ impl NodeRuntime {
                 )
                 .ok();
             let Some((attempt, target, rev)) = row else {
-                return Ok(false);
+                return Ok(self.recover_in(tx, session, None)?.unwrap_or(false));
             };
             let state: String = tx.query_row(
                 "SELECT state FROM runtime_attempts WHERE attempt_id=?",
@@ -1010,6 +1023,12 @@ impl NodeRuntime {
                 Some((st, true)) if st == "pending" && state == "planned" => return Ok(true),
                 _ => {}
             }
+            // an abandon of it the Node cannot tell the end of is retired first (its slot freed)
+            if state == "unknown"
+                && let Some(r) = self.recover_in(tx, session, Some(&attempt))?
+            {
+                return Ok(r);
+            }
             // what nobody can tell is running is given up, once the Node proves it stopped
             let method = if state == "unknown" { "abandon" } else { "cancel" };
             self.stop_command_in(tx, &attempt, &target, method)?;
@@ -1032,8 +1051,9 @@ impl NodeRuntime {
         target: &str,
         method: &str,
     ) -> Result<(), StoreError> {
+        // one retired by a recover is over too, even before its own end came
         let (n, live): (i64, bool) = tx.query_row(
-            "SELECT COUNT(*), COALESCE(MAX(state NOT IN ('finished','rejected') OR json_extract(receipt,'$.success')=1), 0) FROM node_commands WHERE method=? AND target_attempt=?",
+            &format!("SELECT COUNT(*), COALESCE(MAX((c.state NOT IN ('finished','rejected') OR json_extract(c.receipt,'$.success')=1) AND NOT {}), 0) FROM node_commands c WHERE c.method=? AND c.target_attempt=?", recover::RETIRED),
             [method, attempt],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
@@ -1237,6 +1257,10 @@ impl NodeRuntime {
                     "configure_session" => {
                         return Ok((None, self.refused_configure_in(tx, &lease.operation, e)?));
                     }
+                    "recover" => {
+                        self.recover_failed_in(tx, &lease.operation, &e.safe_detail)?;
+                        None
+                    }
                     _ => None,
                 };
                 Ok((end, None))
@@ -1317,6 +1341,7 @@ impl NodeRuntime {
             "configure_session" => n.configure_session(parse(&l.request)?).await,
             "resolve_permission" => n.resolve_permission(parse(&l.request)?).await,
             "abandon" => n.abandon(parse(&l.request)?).await,
+            "recover" => n.recover(parse(&l.request)?).await,
             other => Err(ApiError::new(
                 ErrorCode::Unsupported,
                 format!("the coordinator does not send {other}"),
@@ -1350,6 +1375,19 @@ impl NodeRuntime {
         if !moved {
             return Ok(None);
         }
+        let detail = match &receipt.state {
+            Observed::Finished { error: Some(e), .. } => e.safe_detail.clone(),
+            Observed::Unknown { reason } => reason.clone(),
+            _ => String::new(),
+        };
+        if method == "recover" {
+            self.recover_receipt_in(tx, op, state, success, &detail)?;
+            return Ok(None);
+        }
+        // a target a recover retires: what follows comes with the recover's own end
+        if self.retiring_in(tx, op)? {
+            return Ok(None);
+        }
         if method == "resolve_permission" && state == ReceiptState::Finished {
             let error = match &receipt.state {
                 Observed::Finished { error, .. } => error.clone(),
@@ -1360,11 +1398,6 @@ impl NodeRuntime {
         if method == "configure_session" {
             self.configure_receipt_in(tx, op, state, success, receipt)?;
         }
-        let detail = match &receipt.state {
-            Observed::Finished { error: Some(e), .. } => e.safe_detail.clone(),
-            Observed::Unknown { reason } => reason.clone(),
-            _ => String::new(),
-        };
         match (method.as_str(), state) {
             ("release_session", ReceiptState::Finished) => {
                 let s = command_session_in(tx, op)?;
@@ -1424,7 +1457,7 @@ impl NodeRuntime {
                     tx,
                     &s,
                     &format!(
-                        "Node 无法确定{}是否完成（{detail}），会话等待对账，不会自动重发。",
+                        "Node 无法确定{}是否完成（{detail}），会话等待对账，不会自动重发。点停止可撤回这个操作。",
                         if method == "open_session" {
                             "打开会话"
                         } else {
@@ -1432,6 +1465,23 @@ impl NodeRuntime {
                         }
                     ),
                 )?;
+            }
+            ("prepare_workspace" | "abandon", ReceiptState::Unknown) => {
+                // never sent again: what waits on it waits until it is retired
+                if let Some(s) = command_any_session_in(tx, op)? {
+                    system_in(
+                        tx,
+                        &s,
+                        &format!(
+                            "Node 无法确定{}是否完成（{detail}），会话等待对账，不会自动重发。点停止可撤回这个操作。",
+                            if method == "abandon" {
+                                "放弃这次执行"
+                            } else {
+                                "工作区准备"
+                            }
+                        ),
+                    )?;
+                }
             }
             _ => {}
         }

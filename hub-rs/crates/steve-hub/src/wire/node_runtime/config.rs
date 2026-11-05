@@ -503,7 +503,11 @@ impl NodeRuntime {
                 self.plan_after_in(tx, &session)?;
             }
             ReceiptState::Unknown => {
-                system_in(tx, &session, "配置切换结果未知，等待对账，不会自动重发")?;
+                system_in(
+                    tx,
+                    &session,
+                    "配置切换结果未知，等待对账，不会自动重发；点停止可撤回这个操作",
+                )?;
             }
             _ => {}
         }

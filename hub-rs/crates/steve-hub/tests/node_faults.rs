@@ -865,6 +865,59 @@ async fn a_hub_restarted_between_commit_and_ack_acknowledges_on_reconcile() {
     assert_eq!(r.ends().len(), 1, "the turn ended once");
 }
 
+// ── an unknown control, retired by Stop ──
+
+/// N1-8: the journal cannot write a prepare's end, and the Node closes. Its outcome is unknown
+/// after both restart: the open waiting on it never goes, nothing retires it on its own. Stop
+/// sends one recover; the workspace is prepared again under a new id (adopted as it is) and
+/// opened, and the message queued all along runs once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stop_retires_an_unknown_prepare_and_the_queued_message_runs_once() {
+    let mut r = Rig::new().await;
+    let j = r.journal();
+    j.execute_batch("CREATE TRIGGER fail_prepare BEFORE UPDATE ON ops WHEN NEW.method='prepare_workspace' AND NEW.receipt LIKE '%finished%' BEGIN SELECT RAISE(ABORT,'injected crash before the final receipt'); END").unwrap();
+    r.bind();
+    r.rt.prompt(S, "@say queued", "user", &[]).unwrap();
+    until("the prepare taken", || {
+        r.q::<String>(&format!(
+            "SELECT state FROM node_commands WHERE operation_id='op_prep_{S}'"
+        )) != "pending"
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    r.close_node().await;
+    j.execute_batch("DROP TRIGGER fail_prepare").unwrap();
+    r.open_node().await;
+    r.restart_hub().await;
+    until("unknown", || {
+        r.q::<String>(&format!(
+            "SELECT state FROM node_commands WHERE operation_id='op_prep_{S}'"
+        )) == "unknown"
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(r.phase(), "opening", "held: the open waits on its prepare");
+    assert_eq!(r.prompts("queued"), 0);
+
+    assert!(r.rt.cancel(S).unwrap());
+    until("the end", || !r.ends().is_empty()).await;
+    assert_eq!(r.ends()[0].1, "end_turn");
+    assert_eq!(r.prompts("queued"), 1, "the queued message ran once");
+    assert_eq!(r.attempts(), ["finished"]);
+    let recovers: i64 = r.q("SELECT COUNT(*) FROM node_commands WHERE method='recover'");
+    assert_eq!(recovers, 1, "exactly one recover");
+    let prepares: i64 = r
+        .journal()
+        .query_row(
+            "SELECT COUNT(*) FROM ops WHERE method='prepare_workspace'",
+            [],
+            |x| x.get(0),
+        )
+        .unwrap();
+    assert_eq!(prepares, 2, "the target never again, a new prepare instead");
+    r.stored_once().await;
+}
+
 // ── the Node sends again what the Hub holds, but changed ──
 
 /// N1-6: the Hub committed a batch but the ack was lost, and the Node's copy changed before it sent
