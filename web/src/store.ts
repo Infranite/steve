@@ -7,7 +7,7 @@ import { useEffect, useRef, useSyncExternalStore } from "react"
 import { toast as sonner } from "sonner"
 import { promptNeedle, withDecisionNotes } from "./decision-notes"
 import { blockSlots, type FeedRow } from "./feed-order"
-import { api, setPageWorkspace, stream, Unauthenticated, type State, type RItem, type RItemDetail, type RSession, type RDecision, type RBot, type REvent, type RProject, type Proposal, type LocalSession, type HubEvent, type RNotice } from "./api"
+import { api, cursorOf, setPageWorkspace, stream, Unauthenticated, type State, type RItem, type RItemDetail, type RSession, type RDecision, type RBot, type REvent, type RProject, type Proposal, type LocalSession, type HubEvent, type RNotice } from "./api"
 import { cue } from "./bus"
 import { elapsed, pastTime, span } from "./i18n/format"
 import i18n, { t } from "./i18n"
@@ -490,13 +490,15 @@ i18n.on("languageChanged", () => { convs.clear(); build(); emit() })
 
 /* ───────── loading and live updates ───────── */
 let scopeEpoch = 0
+/** the change-log watermark of the state on screen: a stream opened after it replays only what changed since */
+let watermark: string | null = null
 let inflight: Promise<void> | null = null, again = false
 export function refresh(): Promise<void> {
   if (inflight) { again = true; return inflight.then(() => inflight ?? undefined) } // resolve after the follow-up, so callers see state newer than their action
   inflight = (async () => {
     /* asked after Steve stopped, the state has the reply (stored before steve.thinking went off): the draft has served */
     const settled = !st.thinking, epoch = scopeEpoch
-    try { const state = await api.state(); if (epoch !== scopeEpoch) return; raw.state = state; setPageWorkspace(state.workspace?.id ?? ""); st.login = null; st.error = ""; build(); if (settled && st.draft) { st.draft = null; build() } emit() }
+    try { const state = await api.state(); if (epoch !== scopeEpoch) return; raw.state = state; watermark = cursorOf(state) ?? watermark; setPageWorkspace(state.workspace?.id ?? ""); st.login = null; st.error = ""; build(); if (settled && st.draft) { st.draft = null; build() } emit() }
     catch (e) { if (epoch !== scopeEpoch) return; if (e instanceof Unauthenticated) st.login = e.login ?? "/auth/login"; else st.error = (e as Error).message; emit() }
     finally { inflight = null; if (again) { again = false; void refresh() } }
   })()
@@ -620,6 +622,10 @@ export const yoloNow = (id: string) => yoloCall(yoloApi.now(id)).then((r) => { v
 export const yoloCancel = (id: string) => yoloCall(yoloApi.cancel(id), t("core:yolo.leftToYou"))
 
 function onHub(e: HubEvent | ModuleEvent) {
+  /* the Hub could not continue from our cursor (it restarted, or we were away past its window): refetch everything, once */
+  if (e.type === "stream.reset") { void resync(); return }
+  /* the replay after a reconnect is done; transcript chunks from the gap are not replayed, the events API has them */
+  if (e.type === "stream.gap") { freezeCursors(); void bounded([...new Set([...raw.events.keys(), ...raw.loadingEv])], catchUp); yoloSoon(); return }
   hubSubs.forEach((f) => f(e))
   if (e.type === "yolo" || e.type === "yolo_action") { yoloSoon(); return }
   if (moduleTypes.has(e.type)) return
@@ -648,9 +654,10 @@ function onHub(e: HubEvent | ModuleEvent) {
 /* the stream is bound to the workspace it was opened in: reopen it after a switch */
 let closeStream = () => {}
 let resyncing: Promise<void> | null = null, resyncAgain = false
+/** Freeze the pre-gap transcript cursors before newer SSE frames can advance the caches. */
+function freezeCursors() { for (const [sid, xs] of raw.events) if (!replayFrom.has(sid)) replayFrom.set(sid, xs.at(-1)?.seq ?? 0) }
 function resync(): Promise<void> {
-  // Freeze the pre-gap cursors before newer SSE frames can advance the caches.
-  for (const [sid, xs] of raw.events) if (!replayFrom.has(sid)) replayFrom.set(sid, xs.at(-1)?.seq ?? 0)
+  freezeCursors()
   if (resyncing) { resyncAgain = true; return resyncing }
   resyncing = (async () => {
     do {
@@ -668,10 +675,19 @@ function resync(): Promise<void> {
   })().finally(() => { resyncing = null; if (resyncAgain) void resync() })
   return resyncing
 }
-const connect = () => { closeStream(); closeStream = stream(onHub, () => void resync()); yoloSoon() }
+/* Opened after the state it continues from. A resumed (re)open replays only the frames after the cursor, which take the
+ * live paths below; without a cursor (the state failed to load, or an old Hub) every open resyncs everything, and the
+ * state that resync loaded becomes the cursor for the next reconnect. */
+const connect = () => {
+  closeStream()
+  let from = watermark
+  closeStream = stream(onHub, (resumed) => { if (!resumed) void resync().then(() => { from ??= watermark }) }, () => from)
+  yoloSoon()
+}
 export function start() {
-  void refresh(); connect()
-  return () => { closeStream(); closeStream = () => {} }
+  let live = true
+  void refresh().then(() => { if (live) connect() })
+  return () => { live = false; closeStream(); closeStream = () => {} }
 }
 
 /* ───────── selectors ───────── */
@@ -990,7 +1006,7 @@ export function setBotWorkspaces(k: string, ids: string[]) { void call(api.botWo
 
 /* ───────── actions: workspaces and projects ───────── */
 export async function switchWorkspace(id: string) {
-  try { await api.switchWs(id); setPageWorkspace(id); scopeEpoch++; replayFrom.clear(); painted.clear(); raw.loadingItem.clear(); raw.loadingEv.clear(); reloadAgain.clear(); missedEv.clear(); raw.details.clear(); raw.events.clear(); convs.clear(); openItems.clear(); dirty.clear(); st.thinking = false; st.draft = null; connect(); await refresh(); location.hash = "#/"; toast(t("core:toast.switchedWorkspace", { name: st.workspace?.name ?? "" })) } catch (e) { fail(e) }
+  try { await api.switchWs(id); setPageWorkspace(id); scopeEpoch++; replayFrom.clear(); painted.clear(); raw.loadingItem.clear(); raw.loadingEv.clear(); reloadAgain.clear(); missedEv.clear(); raw.details.clear(); raw.events.clear(); convs.clear(); openItems.clear(); dirty.clear(); watermark = null; st.thinking = false; st.draft = null; closeStream(); await refresh(); connect(); location.hash = "#/"; toast(t("core:toast.switchedWorkspace", { name: st.workspace?.name ?? "" })) } catch (e) { fail(e) }
 }
 export async function newWorkspace(name: string, description: string, item_prefix?: string) { const w = await call(api.newWs({ name, description, item_prefix })); if (w) await switchWorkspace(w.id) }
 export async function newProject(p: { name: string; path: string; description?: string; worktree?: boolean; default_bot?: string | null }) { const r = await call(api.newProject(p), t("core:toast.projectAdded", { name: p.name })); return r?.id }
