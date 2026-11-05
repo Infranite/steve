@@ -127,3 +127,35 @@ impl AcpConfig {
         }
     }
 }
+
+impl AcpConfig {
+    /// The program and arguments that start `harness`'s adapter (a `.js` adapter runs through node;
+    /// Codex gets its catalog and home).
+    pub fn adapter_command(
+        &self,
+        harness: &str,
+    ) -> Result<(std::path::PathBuf, Vec<std::ffi::OsString>), String> {
+        let cmd = self
+            .adapters
+            .get(harness)
+            .ok_or_else(|| format!("no adapter for harness {harness}"))?;
+        let extra: Vec<std::ffi::OsString> = if harness == "codex" {
+            crate::codex::codex_args(&self.codex_home, &self.steve_home, &self.user_home)
+                .into_iter()
+                .map(std::ffi::OsString::from)
+                .collect()
+        } else {
+            vec![]
+        };
+        Ok(if cmd.extension().is_some_and(|e| e == "js") {
+            (
+                self.node.clone(),
+                std::iter::once(cmd.clone().into_os_string())
+                    .chain(extra)
+                    .collect(),
+            )
+        } else {
+            (cmd.clone(), extra)
+        })
+    }
+}

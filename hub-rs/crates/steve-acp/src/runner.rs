@@ -11,7 +11,7 @@ use regex::Regex;
 use serde_json::{Value, json};
 
 use crate::attachments::{FileRef, StoredFile, for_agent};
-use crate::codex::{codex_args, codex_mode};
+use crate::codex::codex_mode;
 use crate::config::AcpConfig;
 use crate::rpc::{Conn, Incoming, RpcError, Spawn};
 use crate::session::{self as acp_session, OpenConfig, Reports, Strictness, effort_option};
@@ -1329,29 +1329,7 @@ impl Acp {
         &self,
         harness: &str,
     ) -> Result<(std::path::PathBuf, Vec<OsString>), String> {
-        let cfg = &self.0.cfg;
-        let cmd = cfg
-            .adapters
-            .get(harness)
-            .ok_or_else(|| format!("no adapter for harness {harness}"))?;
-        let extra: Vec<OsString> = if harness == "codex" {
-            codex_args(&cfg.codex_home, &cfg.steve_home, &cfg.user_home)
-                .into_iter()
-                .map(OsString::from)
-                .collect()
-        } else {
-            vec![]
-        };
-        Ok(if cmd.extension().is_some_and(|e| e == "js") {
-            (
-                cfg.node.clone(),
-                std::iter::once(cmd.clone().into_os_string())
-                    .chain(extra)
-                    .collect(),
-            )
-        } else {
-            (cmd.clone(), extra)
-        })
+        self.0.cfg.adapter_command(harness)
     }
 
     async fn start_process(
