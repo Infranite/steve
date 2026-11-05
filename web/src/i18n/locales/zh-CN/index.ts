@@ -1,0 +1,23 @@
+/* every namespace in zh-CN, registered in ../../index.ts (NAMESPACES). A new namespace goes in both languages and in NAMESPACES. */
+import accounts from "./accounts.ts"
+import api from "./api.ts"
+import views from "./views.ts"
+import manage from "./manage.ts"
+import core from "./core.ts"
+import pages from "./pages.ts"
+import shell from "./shell.ts"
+import auto from "./auto.ts"
+import channels from "./channels.ts"
+import github from "./github.ts"
+import integrations from "./integrations.ts"
+import knowledge from "./knowledge.ts"
+import mail from "./mail.ts"
+import people from "./people.ts"
+import stats from "./stats.ts"
+import thread from "./thread.ts"
+import vault from "./vault.ts"
+import yolo from "./yolo.ts"
+import misc from "./misc.ts"
+import common from "./common.ts"
+
+export default { accounts, api, views, manage, core, pages, shell, auto, channels, github, integrations, knowledge, mail, people, stats, thread, vault, yolo, misc, common }

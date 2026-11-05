@@ -5,6 +5,7 @@
 import { useState, type ReactNode } from "react"
 import { cn } from "cn"
 import { ChartColumnIcon, TableIcon, XIcon } from "lucide-react"
+import { ago } from "@/i18n/format"
 import { Button } from "@/components/ui/button"
 import { Spinner } from "@/components/ui/spinner"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
@@ -120,7 +121,6 @@ export function StatusBars({ f, drill, setDrill }: { f: Filter; drill: Drill | n
 
 /* ───────── the drill-down ───────── */
 
-const ago = (ms: number) => { const m = Math.round((Date.now() - ms) / 60000); return m < 1 ? "刚刚" : m < 60 ? `${m} 分钟前` : m < 1440 ? `${Math.round(m / 60)} 小时前` : `${Math.round(m / 1440)} 天前` }
 function ItemLines({ rows, empty }: { rows: { i: Item; sub?: ReactNode; key?: string }[]; empty: string }) {
   const [all, setAll] = useState(false)
   if (!rows.length) return <div className="py-6 type-callout text-muted-foreground">{empty}</div>
