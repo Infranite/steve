@@ -395,16 +395,20 @@ impl Core {
             .session_message(session_id, text, interrupt, files)
     }
     /// Change the text of a message still waiting in a session's queue (409 once a turn took it).
+    /// For Node sessions too: a claimed row has left `queued` (runtime::claim_in), so this is the 409.
     pub fn queued_edit(&self, session_id: &str, queued_id: &str, text: &str) -> Result<Queued> {
         self.tx().queued_edit(session_id, queued_id, text)
     }
     /// Take a message back out of a session's queue (409 once a turn took it); returns it.
+    /// For Node sessions too: a claimed row has left `queued` (runtime::claim_in), so this is the 409.
     pub fn queued_remove(&self, session_id: &str, queued_id: &str) -> Result<Queued> {
         self.tx().queued_remove(session_id, queued_id)
     }
     /// Send a queued message now: it moves to the head of the queue and the running turn is
     /// interrupted (like 中断), so the queue in order is the next turn; an idle session starts it
-    /// at once. While the Hub holds for a release it waits (and says so).
+    /// at once. While the Hub holds (a release, upgrade maintenance), while the last turn's outcome
+    /// is uncertain, or while nothing could take the queue yet (a session opening), it waits and
+    /// says why; the message stays first.
     pub fn queued_send_now(&self, session_id: &str, queued_id: &str) -> Result<SendNow> {
         self.tx().queued_send_now(session_id, queued_id)
     }
@@ -1054,6 +1058,7 @@ impl Tx<'_> {
             token: tok.clone(),
         })?;
         self.st.tokens.insert(s.id.clone(), tok);
+        self.rt().created(&s.id);
         self.db().timeline_add(
             item_id,
             "steve",
@@ -3196,6 +3201,16 @@ impl Tx<'_> {
         if self.holding() {
             return Ok(SendNow::Waiting("Hub 正在准备发布，发布后发送".into()));
         }
+        if self.db().store().maintenance() {
+            return Ok(SendNow::Waiting("Hub 正在维护，维护结束后发送".into()));
+        }
+        // moving on from a turn nobody can tell the end of is a decision of its own (中断), not
+        // part of a reorder: the message stays first and goes once reconciliation settles it
+        if self.rt().uncertain(sid) {
+            return Ok(SendNow::Waiting(
+                "上一轮的结果还不确定，确认后再发送".into(),
+            ));
+        }
         let ev = |interrupted: bool| json!({"id": qid, "text": q.text, "interrupted": interrupted});
         // a cancel while the adapter is still starting goes right after its prompt; false means the
         // turn ended just now (and took the queue, or left it for the flush below)
@@ -3212,10 +3227,28 @@ impl Tx<'_> {
         if s.status == "ended" {
             self.db().session_patch(sid, patch![status: "idle"])?;
         }
+        // false with the row gone means a turn took the queue in between: the message went anyway;
+        // false with the row still queued means nothing took it (a session opening, say)
+        let went = self.rt().flush(sid, None);
+        if !went
+            && self
+                .db()
+                .store()
+                .queued()
+                .get(qid)?
+                .is_some_and(|q| q.session_id == sid)
+        {
+            return Ok(SendNow::Waiting(
+                if self.busy(sid) {
+                    "会话正在准备，就绪后发送"
+                } else {
+                    "暂时发不出去，稍后自动发送"
+                }
+                .into(),
+            ));
+        }
         self.db().event_add(sid, "queued_sent_now", ev(false))?;
         self.reactivate(s.item_id.as_deref())?;
-        // false means a turn took the queue in between: the message went anyway
-        self.rt().flush(sid, None);
         Ok(SendNow::Sent)
     }
 

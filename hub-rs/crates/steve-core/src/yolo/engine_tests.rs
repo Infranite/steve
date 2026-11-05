@@ -154,6 +154,8 @@ fn a_tool_call_inside_the_worktree_is_allowed_once_and_recorded() {
             raw: json!({"file_path": file, "content": "x"}),
             kind: Some("edit".into()),
             locations: vec![file.clone()],
+            own_dir: None,
+            own_pids: None,
         },
     );
     let a = t.engine.consider(&d).unwrap().expect("an action");
@@ -199,6 +201,8 @@ fn a_delete_outside_the_worktree_stays_for_the_user() {
             raw: json!({"file_path": outside}),
             kind: Some("delete".into()),
             locations: vec![outside.clone()],
+            own_dir: None,
+            own_pids: None,
         },
     );
     let a = t
@@ -235,6 +239,8 @@ fn a_permission_the_runner_does_not_wait_for_is_left_alone() {
             raw: json!({"file_path": file}),
             kind: Some("edit".into()),
             locations: vec![],
+            own_dir: None,
+            own_pids: None,
         },
     );
     // stashed, not armed: the runner has not registered it yet
@@ -603,4 +609,123 @@ fn nothing_happens_while_switched_off() {
     );
     assert!(t.engine.consider(&d).unwrap().is_none());
     assert!(t.actions(&d).is_empty());
+}
+
+/// A Node session: the item's cwd says nothing about where the Node put its worktree (here it
+/// points elsewhere), the Node's directory under `STEVE_HOME/data/node` is reported as `own_dir`.
+fn node_item(t: &T) -> (String, String, std::path::PathBuf) {
+    let id = t.kit.item("run", "执行", None);
+    let elsewhere = t.kit.home().join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let c = elsewhere.to_string_lossy().to_string();
+    t.kit
+        .db()
+        .item_patch(&id, crate::patch![cwd: c.as_str()])
+        .unwrap();
+    let s = t.kit.session(&id, "idle");
+    let dir = t.kit.home().join("data/node/worktrees/w1");
+    std::fs::create_dir_all(&dir).unwrap();
+    (id, s, limits::canonical(&dir))
+}
+
+fn node_edit(file: &str, own_dir: Option<std::path::PathBuf>) -> ToolInput {
+    ToolInput {
+        raw: json!({"file_path": file}),
+        kind: Some("edit".into()),
+        locations: vec![file.into()],
+        own_dir,
+        own_pids: Some(vec![]),
+    }
+}
+
+fn node_exec(command: &str, cwd: &std::path::Path, own_pids: Vec<u32>) -> ToolInput {
+    ToolInput {
+        raw: json!({"command": command, "cwd": cwd}),
+        kind: Some("execute".into()),
+        locations: vec![],
+        own_dir: Some(cwd.to_path_buf()),
+        own_pids: Some(own_pids),
+    }
+}
+
+#[test]
+fn a_node_worktree_is_the_items_own_directory_when_the_node_says_so() {
+    let t = t();
+    let (item, sid, dir) = node_item(&t);
+    let file = dir.join("src/x.rs").to_string_lossy().to_string();
+    let d = t.permission(&item, &sid, node_edit(&file, Some(dir.clone())));
+    let a = t.engine.consider(&d).unwrap().expect("an action");
+    assert_eq!(
+        (a.outcome.as_str(), a.rule.as_str()),
+        ("decided", "tool.worktree"),
+        "{}",
+        a.reason
+    );
+    // without the Node's word the same path is Steve's data, never inside
+    let d = t.permission(&item, &sid, node_edit(&file, None));
+    let a = t.engine.consider(&d).unwrap();
+    assert!(a.as_ref().is_none_or(|a| a.outcome != "decided"), "{a:?}");
+    assert_eq!(t.decision(&d).status, "open");
+}
+
+#[test]
+fn a_node_session_kills_only_what_the_node_says_its_harness_started() {
+    let t = t();
+    let (item, sid, dir) = node_item(&t);
+    let mut child = std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .unwrap();
+    let pid = child.id();
+    // the Hub's own child, but the Node did not report it: left to the user (no `ps` here)
+    let d = t.permission(&item, &sid, node_exec(&format!("kill {pid}"), &dir, vec![]));
+    let a = t.engine.consider(&d).unwrap();
+    assert!(a.as_ref().is_none_or(|a| a.outcome != "decided"), "{a:?}");
+    assert_eq!(t.decision(&d).status, "open");
+    // reported by the Node: its own
+    let d = t.permission(
+        &item,
+        &sid,
+        node_exec(&format!("kill {pid}"), &dir, vec![pid]),
+    );
+    let a = t.engine.consider(&d).unwrap().expect("an action");
+    let _ = child.kill();
+    let _ = child.wait();
+    assert_eq!(a.outcome, "decided", "{}", a.reason);
+}
+
+/// 审批过期: a card the Node expired is not answered by YOLO even though it was armed.
+#[test]
+fn an_expired_node_card_is_never_answered() {
+    let t = t();
+    let (item, sid, dir) = node_item(&t);
+    let file = dir.join("a.txt").to_string_lossy().to_string();
+    let d = t.permission(&item, &sid, node_edit(&file, Some(dir.clone())));
+    t.kit
+        .db()
+        .decision_resolve(&d, json!({"superseded": "这一轮已经结束"}), "expired", None)
+        .unwrap();
+    assert!(t.engine.consider(&d).unwrap().is_none());
+    assert!(t.kit.rt.st().answered.is_empty());
+    assert!(t.engine.tool_input(&d).is_none(), "its input is let go");
+}
+
+/// After a Hub restart nothing is stashed or armed for an old card: YOLO leaves it alone.
+#[test]
+fn a_node_card_from_before_a_restart_is_left_alone() {
+    let t = t();
+    let (item, sid, _) = node_item(&t);
+    let d = t.card(
+        &item,
+        &sid,
+        "approve",
+        "tool_call",
+        "允许执行：Edit",
+        "{}",
+        &PERM_OPTIONS,
+    );
+    t.kit.rt.st().permissions.insert(d.clone());
+    assert!(t.engine.consider(&d).unwrap().is_none());
+    assert!(t.actions(&d).is_empty());
+    assert!(t.kit.rt.st().answered.is_empty());
 }

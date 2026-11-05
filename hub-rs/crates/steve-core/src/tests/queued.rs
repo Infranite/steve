@@ -234,3 +234,65 @@ fn resumed_rows_are_conflicts_without_edit_removal_reordering_or_interrupt() {
         "pause keeps delivery evidence for a later deliberate resume"
     );
 }
+
+fn texts(k: &Kit, sid: &str) -> Vec<String> {
+    k.db()
+        .queued(sid)
+        .unwrap()
+        .into_iter()
+        .map(|q| q.text)
+        .collect()
+}
+
+#[test]
+fn send_now_on_an_uncertain_session_waits_and_does_not_give_the_turn_up() {
+    let k = Kit::new();
+    let (_, sid) = started(&k);
+    let q = queue(&k, &sid, &["一", "二"]);
+    k.rt.st().uncertain.insert(sid.clone());
+    assert_eq!(
+        k.core.queued_send_now(&sid, &q[1]).unwrap(),
+        SendNow::Waiting("上一轮的结果还不确定，确认后再发送".into())
+    );
+    assert!(k.rt.st().cancelled.is_empty(), "no cancel, no abandon");
+    assert_eq!(texts(&k, &sid), ["二", "一"], "it goes first once settled");
+    assert!(!kinds(&k, &sid).contains(&"queued_sent_now".to_string()));
+}
+
+#[test]
+fn send_now_during_persisted_maintenance_waits() {
+    let k = Kit::new();
+    let (_, sid) = started(&k);
+    let q = queue(&k, &sid, &["一", "二"]);
+    k.db().store().maintenance_set(true).unwrap();
+    assert_eq!(
+        k.core.queued_send_now(&sid, &q[1]).unwrap(),
+        SendNow::Waiting("Hub 正在维护，维护结束后发送".into())
+    );
+    assert!(k.rt.st().cancelled.is_empty());
+    assert_eq!(texts(&k, &sid), ["二", "一"]);
+    assert!(!kinds(&k, &sid).contains(&"queued_sent_now".to_string()));
+}
+
+#[test]
+fn send_now_waits_when_the_flush_leaves_the_message_queued() {
+    let k = Kit::new();
+    let (_, sid) = started(&k);
+    let q = queue(&k, &sid, &["一", "二"]);
+    k.rt.st().turning.clear();
+    k.rt.st().flush_stuck = true;
+    assert_eq!(
+        k.core.queued_send_now(&sid, &q[1]).unwrap(),
+        SendNow::Waiting("暂时发不出去，稍后自动发送".into())
+    );
+    assert_eq!(texts(&k, &sid), ["二", "一"]);
+    assert!(
+        !kinds(&k, &sid).contains(&"queued_sent_now".to_string()),
+        "nothing was sent: no event says so"
+    );
+    // nothing took it and nothing went: the flush gets its turn later
+    k.rt.st().flush_stuck = false;
+    assert_eq!(k.core.queued_send_now(&sid, &q[1]).unwrap(), SendNow::Sent);
+    assert_eq!(k.rt.prompts_of(&sid).last().unwrap(), "二\n\n一");
+    assert!(kinds(&k, &sid).contains(&"queued_sent_now".to_string()));
+}

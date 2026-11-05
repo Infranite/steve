@@ -37,6 +37,81 @@ pub struct Decisions<'a>(&'a Store);
 
 const DECISION: &str = "SELECT * FROM decisions WHERE id = ?";
 
+fn insert(c: &rusqlite::Connection, p: &NewDecision) -> Result<Decision> {
+    let id = uid("dec");
+    c.run(
+        "INSERT INTO decisions (id, workspace_id, kind, subject_type, subject_id, item_id, session_id, question, draft, options, status, requested_by, created) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)",
+        params![
+            id,
+            p.workspace_id,
+            p.kind,
+            p.subject_type,
+            p.subject_id,
+            p.item_id,
+            p.session_id,
+            p.question,
+            p.draft.as_deref().unwrap_or(""),
+            to_json(&p.options.clone().unwrap_or_default())?,
+            p.requested_by,
+            now()
+        ],
+    )?;
+    one(c, DECISION, [&id], Decision::from_row)?
+        .ok_or_else(|| crate::StoreError::Conflict("decision vanished".into()))
+}
+
+/// [`Decisions::create`] inside the caller's transaction; published after the commit.
+pub fn decision_create_in(tx: &crate::Tx<'_>, p: &NewDecision) -> Result<Decision> {
+    let d = insert(tx, p)?;
+    tx.publish(ChangeEvent::Decision {
+        id: d.id.clone(),
+        item_id: Some(p.item_id.clone()),
+    });
+    Ok(d)
+}
+
+/// [`Decisions::resolve`] inside the caller's transaction: settles it if it is open. `true`: it was.
+pub fn decision_resolve_in(
+    tx: &crate::Tx<'_>,
+    id: &str,
+    result: &Value,
+    status: &str,
+) -> Result<bool> {
+    let n = tx.execute(
+        "UPDATE decisions SET status = ?, result = ?, resolved = ? WHERE id = ? AND status = 'open'",
+        params![status, to_json(result)?, now(), id],
+    )?;
+    let item: Option<Option<String>> = tx
+        .query_row("SELECT item_id FROM decisions WHERE id = ?", [id], |r| {
+            r.get(0)
+        })
+        .ok();
+    tx.publish(ChangeEvent::Decision {
+        id: id.into(),
+        item_id: item,
+    });
+    Ok(n > 0)
+}
+
+/// A card whose answer was never applied (the Node refused it, or the request ended first) is
+/// expired, even if it was already marked resolved: it never claims an answer that did not happen.
+pub fn decision_expire_unapplied_in(tx: &crate::Tx<'_>, id: &str, result: &Value) -> Result<bool> {
+    let n = tx.execute(
+        "UPDATE decisions SET status = 'expired', result = ?, resolved = ? WHERE id = ? AND status IN ('open','resolved')",
+        params![to_json(result)?, now(), id],
+    )?;
+    let item: Option<Option<String>> = tx
+        .query_row("SELECT item_id FROM decisions WHERE id = ?", [id], |r| {
+            r.get(0)
+        })
+        .ok();
+    tx.publish(ChangeEvent::Decision {
+        id: id.into(),
+        item_id: item,
+    });
+    Ok(n > 0)
+}
+
 fn changed(w: &crate::W, id: &str) -> Result<Option<Decision>> {
     let d = one(w.c, DECISION, [id], Decision::from_row)?;
     w.publish(ChangeEvent::Decision {
@@ -81,26 +156,12 @@ impl Decisions<'_> {
 
     pub fn create(&self, p: &NewDecision) -> Result<Option<Decision>> {
         self.0.write(|w| {
-            let id = uid("dec");
-            w.c.run(
-                "INSERT INTO decisions (id, workspace_id, kind, subject_type, subject_id, item_id, session_id, question, draft, options, status, requested_by, created) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)",
-                params![
-                    id,
-                    p.workspace_id,
-                    p.kind,
-                    p.subject_type,
-                    p.subject_id,
-                    p.item_id,
-                    p.session_id,
-                    p.question,
-                    p.draft.as_deref().unwrap_or(""),
-                    to_json(&p.options.clone().unwrap_or_default())?,
-                    p.requested_by,
-                    now()
-                ],
-            )?;
-            w.publish(ChangeEvent::Decision { id: id.clone(), item_id: Some(p.item_id.clone()) });
-            one(w.c, DECISION, [&id], Decision::from_row)
+            let d = insert(w.c, p)?;
+            w.publish(ChangeEvent::Decision {
+                id: d.id.clone(),
+                item_id: Some(p.item_id.clone()),
+            });
+            Ok(Some(d))
         })
     }
 

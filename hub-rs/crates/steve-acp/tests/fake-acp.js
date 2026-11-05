@@ -10,6 +10,7 @@
 //   @fail <n> <message>    the first n prompts with this exact text fail with a JSON-RPC error <message>
 //   @crash                 exit(3) mid-turn
 //   @perm <toolName>       Claude-style request_permission; says "perm:<outcome>:<optionId>"
+//   @permexec <command>    request_permission for an `execute` tool call running <command>
 //   @codexperm <tool>      Codex-style MCP approval form for the steve server
 //   @permtool <kind> <path> request_permission for a `kind` tool call on `path` (rawInput.file_path, locations);
 //                          like a real harness, in mode bypassPermissions / full-access it asks nothing
@@ -41,7 +42,7 @@ let toolN = 0
 async function turn(text) {
   const n = (failures.get(text) ?? 0) + 1; failures.set(text, n)
   const out = { stopReason: "end_turn" }
-  for (const [, cmd, arg] of text.matchAll(/@(flood|bigperm|bigreply|sleep|say|usage|tally|quota|tool|later|fail|crash|perm|permtool|codexperm|fsread)\b([^@\n]*)/g)) {
+  for (const [, cmd, arg] of text.matchAll(/@(flood|bigperm|bigreply|sleep|say|usage|tally|quota|tool|later|fail|crash|perm|permtool|permexec|codexperm|fsread)\b([^@\n]*)/g)) {
     const a = arg.trim()
     if (cmd === "sleep" && (await sleep(Number(a) || 1000))) return { ...out, stopReason: "cancelled" }
     if (cmd === "say") say(a)
@@ -71,6 +72,10 @@ async function turn(text) {
       const [kind, path] = a.split(" ")
       if (mode === "bypassPermissions" || mode === "full-access") { say("perm:bypassed:"); continue }
       const r = await ask("session/request_permission", { sessionId: sid, options, toolCall: { toolCallId: `pt-${n}-${kind}`, title: `${kind} ${path}`, kind, rawInput: { file_path: path }, locations: [{ path }] } })
+      say(`perm:${r.outcome.outcome}:${r.outcome.optionId ?? ""}`)
+    }
+    if (cmd === "permexec") {
+      const r = await ask("session/request_permission", { sessionId: sid, options, toolCall: { toolCallId: `px-${n}`, title: a, kind: "execute", rawInput: { command: a } } })
       say(`perm:${r.outcome.outcome}:${r.outcome.optionId ?? ""}`)
     }
     if (cmd === "codexperm") {

@@ -389,7 +389,11 @@ impl Config {
             codex_home: get("CODEX_HOME")
                 .map(PathBuf::from)
                 .unwrap_or_else(|| home_dir().join(".codex")),
-            node: env("STEVE_NODE", "node"),
+            // STEVE_NODE is also the opt-in switch for the local Steve Node (`local`), which is
+            // not a Node.js binary
+            node: get("STEVE_NODE")
+                .filter(|v| v != "local")
+                .unwrap_or_else(|| "node".into()),
             openviking,
             home,
         })
@@ -426,6 +430,15 @@ mod tests {
         m.entry("STEVE_ADAPTER_CODEX".into())
             .or_insert("/x/codex".into());
         Config::from_vars(|k| m.get(k).cloned()).expect("config")
+    }
+
+    #[test]
+    fn steve_node_local_is_the_node_switch_not_a_binary() {
+        assert_eq!(cfg(&[("STEVE_NODE", "local")]).node, "node");
+        assert_eq!(
+            cfg(&[("STEVE_NODE", "/opt/x/bin/node")]).node,
+            "/opt/x/bin/node"
+        );
     }
 
     #[test]

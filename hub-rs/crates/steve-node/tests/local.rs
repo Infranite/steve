@@ -870,6 +870,82 @@ async fn a_permission_is_bound_to_the_file_as_it_was() {
     assert!(t.text().contains("perm:selected:reject"), "{}", t.text());
 }
 
+/// For `kill <pid>` the Node says which processes are the harness's own (the adapter's children, not
+/// the adapter): a fact for the Hub's judgement, outside the digest. Any other command gets none.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_kill_permission_carries_the_harness_processes() {
+    let dir = tempfile::tempdir().unwrap();
+    let pidfile = dir.path().join("grandchild.pid");
+    let t = T::new(&[("FAKE_ACP_GRANDCHILD", pidfile.to_str().unwrap())]);
+    let n = t.node();
+    ready(&n, "s_1").await;
+    let mut child = String::new();
+    for _ in 0..200 {
+        child = std::fs::read_to_string(&pidfile).unwrap_or_default();
+        if !child.trim().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let child: u32 = child.trim().parse().unwrap();
+    n.start_turn(now_cmd(
+        "op_t",
+        turn("s_1", "t_1", "a_1", &format!("@permexec kill {child}")),
+    ))
+    .await
+    .unwrap();
+    t.until("the request", |t| t.request().is_some()).await;
+    let req = t.request().unwrap();
+    assert!(
+        matches!(&req.action, Action::Exec { command, .. } if command == &format!("kill {child}")),
+        "{:?}",
+        req.action
+    );
+    assert!(req.own_pids.contains(&child), "{:?}", req.own_pids);
+    let adapter = std::fs::read_to_string(&t.log)
+        .unwrap()
+        .lines()
+        .find_map(|l| serde_json::from_str::<serde_json::Value>(l).ok()?["spawn"]["pid"].as_u64())
+        .unwrap() as u32;
+    assert!(
+        !req.own_pids.contains(&adapter),
+        "the adapter is not its own child"
+    );
+    // the digest binds the action and preconditions only
+    assert_eq!(
+        permission_digest(&req.action, &req.preconditions).unwrap(),
+        req.digest
+    );
+    n.resolve_permission(now_cmd("op_r", answer(&req, PermissionDecision::Reject)))
+        .await
+        .unwrap();
+    t.until("the end", |t| !t.ended().is_empty()).await;
+
+    n.start_turn(now_cmd(
+        "op_t2",
+        turn("s_1", "t_2", "a_2", "@permexec echo hi"),
+    ))
+    .await
+    .unwrap();
+    t.until("the second request", |t| {
+        t.sink.events().into_iter().any(|e| matches!(e.body, EventBody::PermissionRequested { ref request } if request.title == "echo hi"))
+    })
+    .await;
+    let second = t
+        .sink
+        .events()
+        .into_iter()
+        .find_map(|e| match e.body {
+            EventBody::PermissionRequested { request } if request.title == "echo hi" => {
+                Some(request)
+            }
+            _ => None,
+        })
+        .unwrap();
+    assert!(second.own_pids.is_empty());
+    unsafe { libc::kill(child as i32, libc::SIGKILL) };
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_permission_outside_the_workspace_says_so() {
     let t = T::new(&[]);
@@ -1637,4 +1713,34 @@ async fn permission_receipt_retries_without_sending_allow_twice() {
         1
     );
     n.shutdown().await;
+}
+
+/// The host bridge tells a same-machine Hub where a bound workspace is; another Node's or an
+/// unknown workspace has no directory here.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_bound_workspace_has_a_local_dir_for_the_host_only() {
+    let t = T::new(&[]);
+    let n = t.node();
+    ready(&n, "s_1").await;
+    let dir = n.local_dir(&ws()).unwrap();
+    assert_eq!(dir.path, t.root.join("work/proj").canonicalize().unwrap());
+    assert!(
+        !dir.owned,
+        "an existing directory is adopted, not the Node's own"
+    );
+    let other = WorkspaceRef {
+        node: NodeId::new("elsewhere").unwrap(),
+        ..ws()
+    };
+    assert!(n.local_dir(&other).is_none());
+    let unknown = WorkspaceRef {
+        id: WorkspaceId::new("w_unknown").unwrap(),
+        ..ws()
+    };
+    assert!(n.local_dir(&unknown).is_none());
+    std::fs::remove_dir_all(t.root.join("work/proj")).unwrap();
+    assert!(
+        n.local_dir(&ws()).is_none(),
+        "a gone directory is not given"
+    );
 }

@@ -101,6 +101,23 @@ struct State {
     next_event: u64,
     capacity: Option<Capacity>,
     delivery_failures: u64,
+    /// Refusals the test asked for, by method, used up in order.
+    refusals: Vec<(&'static str, ApiError)>,
+    /// Methods refused with this code until told otherwise.
+    refused: HashMap<&'static str, ErrorCode>,
+    /// What the next commands of a method do instead of the normal answer, in order.
+    scripted: HashMap<&'static str, std::collections::VecDeque<Scripted>>,
+}
+
+/// What [`FakeNode::script_once`] makes one command do.
+#[derive(Debug, Clone)]
+pub enum Scripted {
+    /// Refused before anything is recorded.
+    Refuse(ApiError),
+    /// Recorded and decided as normal, the answer lost on the way back.
+    DropReply,
+    /// Recorded, then the Node cannot tell what it did: its receipt is unknown, nothing else happens.
+    Unknown,
 }
 
 pub struct FakeNode {
@@ -173,9 +190,47 @@ impl FakeNode {
         self.st().now = ms;
     }
 
+    /// The next command of `method` is refused with `e` before anything is decided (nothing runs).
+    pub fn refuse_next(&self, method: &'static str, e: ApiError) {
+        self.st().refusals.push((method, e));
+    }
+
+    /// As a Node process that restarts (LocalNode's journal when it opens again): every operation
+    /// not finished becomes unknown, nobody waits for an answer any more and every session is let
+    /// go, all silently (no event).
+    pub fn restart(&self) {
+        let mut st = self.st();
+        for a in st.inbox.values_mut() {
+            if !a.receipt.state.is_finished()
+                && !matches!(a.receipt.state, Observed::Unknown { .. })
+            {
+                a.receipt.state = Observed::Unknown {
+                    reason: "the node restarted while it ran".into(),
+                };
+            }
+        }
+        st.waiting.clear();
+        for s in st.sessions.values_mut() {
+            s.view.phase = SessionPhase::Released;
+        }
+    }
+
     /// Limit concurrent sessions and jobs (unlimited by default).
     pub fn set_capacity(&self, c: Capacity) {
         self.st().capacity = Some(c);
+    }
+
+    /// Refuse every `method` with `code` before recording it (`None`: stop refusing).
+    pub fn refuse(&self, method: &'static str, code: Option<ErrorCode>) {
+        match code {
+            Some(c) => self.st().refused.insert(method, c),
+            None => self.st().refused.remove(method),
+        };
+    }
+
+    /// The next `method` command (after those scripted before it) does `s`.
+    pub fn script_once(&self, method: &'static str, s: Scripted) {
+        self.st().scripted.entry(method).or_default().push_back(s);
     }
 
     /// Accepted commands in order, by method.
@@ -213,8 +268,24 @@ impl FakeNode {
         self.at(Point::BeforeAccept(method));
         c.check_window()?;
         let digest = c.digest(method)?;
+        let mut drop_reply = false;
         let (receipt, events) = {
             let mut st = self.st();
+            if let Some(code) = st.refused.get(method) {
+                return Err(ApiError::new(*code, "refused by the test").on(&c.id));
+            }
+            let script = if st.inbox.contains_key(&c.id) {
+                None
+            } else {
+                st.scripted.get_mut(method).and_then(|q| q.pop_front())
+            };
+            let mut unknown = false;
+            match script {
+                Some(Scripted::Refuse(e)) => return Err(e),
+                Some(Scripted::DropReply) => drop_reply = true,
+                Some(Scripted::Unknown) => unknown = true,
+                None => {}
+            }
             if let Some(a) = st.inbox.get(&c.id) {
                 return if a.digest == digest && a.method == method {
                     Ok(a.receipt.clone())
@@ -228,7 +299,16 @@ impl FakeNode {
             if st.now > c.accept_before.0 {
                 return Err(ApiError::new(ErrorCode::Stale, "past accept_before").on(&c.id));
             }
-            let d = decide(&mut st)?;
+            if let Some(i) = st.refusals.iter().position(|(m, _)| *m == method) {
+                return Err(st.refusals.remove(i).1.on(&c.id));
+            }
+            let mut d = decide(&mut st)?;
+            if unknown {
+                d.state = Observed::Unknown {
+                    reason: "scripted by the test".into(),
+                };
+                d.events = vec![];
+            }
             let receipt = Receipt {
                 operation: c.id.clone(),
                 state: d.state,
@@ -255,6 +335,9 @@ impl FakeNode {
         self.at(Point::AfterAccept(method));
         // a Hub that cannot take the events now gets them on replay: the command stays accepted
         self.deliver(events).await;
+        if drop_reply {
+            return Err(ApiError::uncertain(&c.id, "the answer was lost (scripted)"));
+        }
         Ok(receipt)
     }
 
@@ -499,6 +582,11 @@ impl FakeNode {
         };
         self.deliver(evs).await;
         Ok(())
+    }
+
+    /// As a Node whose journal lost an operation: it holds no record of `op` any more.
+    pub fn forget(&self, op: &OperationId) {
+        self.st().inbox.remove(op);
     }
 
     /// After a crash the Node cannot tell what a live attempt did. It keeps holding its session.
@@ -885,12 +973,42 @@ impl ExecutionControl for FakeNode {
                 ));
             }
             let exec = a.execution.clone();
+            // as the real Node ends it: interrupted, its waiting permissions expired
+            let completion = Completion {
+                outcome: Outcome::Interrupted,
+                stop_reason: "abandoned".into(),
+                error: Some(ApiError::new(ErrorCode::OutcomeUnknown, "abandoned")),
+                result: vec![],
+                continuation: None,
+                transient: false,
+                acted: true,
+            };
             if let Some(a) = st.inbox.get_mut(&target) {
                 a.receipt.state = Observed::Finished {
                     outcome: Outcome::Interrupted,
-                    result: None,
-                    error: Some(ApiError::new(ErrorCode::OutcomeUnknown, "abandoned")),
+                    result: Some(OperationResult::Execution(completion.clone())),
+                    error: completion.error.clone(),
                 };
+            }
+            let mut events = vec![];
+            if let Some(x) = &exec {
+                let expired: Vec<PermissionId> = st
+                    .waiting
+                    .iter()
+                    .filter(|(_, r)| r.execution == *x)
+                    .map(|(k, _)| k.clone())
+                    .collect();
+                for p in expired {
+                    st.waiting.remove(&p);
+                    events.push((
+                        Subject::Execution(x.clone()),
+                        EventBody::PermissionExpired { id: p },
+                    ));
+                }
+                events.push((
+                    Subject::Execution(x.clone()),
+                    EventBody::AttemptEnded { completion },
+                ));
             }
             if let Some(ExecutionRef::Turn { session, .. }) = &exec
                 && st.active.get(session) == exec.as_ref()
@@ -904,7 +1022,9 @@ impl ExecutionControl for FakeNode {
             if let Some(ExecutionRef::Job { attempt, .. }) = &exec {
                 st.jobs.remove(attempt);
             }
-            Ok(Decided::done(OperationResult::Unit))
+            let mut d = Decided::done(OperationResult::Unit);
+            d.events = events;
+            Ok(d)
         })
         .await
     }
@@ -1477,6 +1597,7 @@ pub mod build {
             preconditions: vec![],
             choices: vec![PermissionDecision::AllowOnce, PermissionDecision::Reject],
             expires_at: Timestamp(10_000_000),
+            own_pids: vec![],
         }
     }
 

@@ -1243,3 +1243,50 @@ fn records_and_annotations_drafts_one_send_per_key_and_removal() {
     assert!(n.list(&a.id).unwrap().is_empty());
     assert!(s.artifacts().roles(&a.id).unwrap().is_empty());
 }
+
+#[test]
+fn an_unapplied_answer_expires_its_card_open_or_resolved_only() {
+    let t = with_steve();
+    let s = &t.store;
+    let i = new_item(s, WS, "a");
+    let nd = || NewDecision {
+        workspace_id: WS.into(),
+        kind: "approve".into(),
+        subject_type: "tool_call".into(),
+        subject_id: "p1".into(),
+        item_id: Some(i.id.clone()),
+        question: "允许？".into(),
+        requested_by: "steve".into(),
+        ..Default::default()
+    };
+    let status = |id: &str| s.decisions().get(id).unwrap().unwrap().status;
+    let open = s.decisions().create(&nd()).unwrap().unwrap();
+    let resolved = s.decisions().create(&nd()).unwrap().unwrap();
+    let expired = s.decisions().create(&nd()).unwrap().unwrap();
+    let cancelled = s.decisions().create(&nd()).unwrap().unwrap();
+    s.transaction::<_, StoreError>(|tx| {
+        decision_resolve_in(
+            tx,
+            &resolved.id,
+            &json!({"optionId": "allow_once"}),
+            "resolved",
+        )?;
+        decision_resolve_in(tx, &expired.id, &json!({}), "expired")?;
+        decision_resolve_in(tx, &cancelled.id, &json!({}), "cancelled")?;
+        let r = json!({"expired": true, "refused": "expired"});
+        assert!(decision_expire_unapplied_in(tx, &open.id, &r)?);
+        assert!(decision_expire_unapplied_in(tx, &resolved.id, &r)?);
+        assert!(!decision_expire_unapplied_in(tx, &expired.id, &r)?);
+        assert!(!decision_expire_unapplied_in(tx, &cancelled.id, &r)?);
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(status(&open.id), "expired");
+    assert_eq!(status(&resolved.id), "expired");
+    assert_eq!(status(&cancelled.id), "cancelled");
+    let d = s.decisions().get(&resolved.id).unwrap().unwrap();
+    assert_eq!(
+        serde_json::to_value(&d).unwrap()["result"]["refused"],
+        "expired"
+    );
+}

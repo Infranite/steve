@@ -226,6 +226,14 @@ pub struct PermissionRequest {
     pub digest: Digest,
     pub choices: Vec<PermissionDecision>,
     pub expires_at: Timestamp,
+    /// Pids (in the Node's own pid namespace) of the processes this execution's harness started
+    /// (the adapter's descendants plus the members of its process group, the adapter itself
+    /// excluded), read when the request was made. Only filled for an `exec` whose command contains
+    /// `kill`; empty means not looked up or not certain. A judging fact, deliberately outside
+    /// [`permission_digest`]: an approval binds to the action and preconditions, not to the process
+    /// table.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub own_pids: Vec<u32>,
 }
 
 /// The Hub's answer, bound to the request, its attempt, its action and the decision's revision.
@@ -353,4 +361,48 @@ pub struct UsageReport {
     pub context_limit: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost: Option<Money>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `own_pids` is new: a request stored before it existed still reads, and an empty list is not
+    /// written at all.
+    #[test]
+    fn own_pids_is_optional_on_the_wire() {
+        let action = Action::Exec {
+            command: "kill 1".into(),
+            cwd: None,
+            network: NetworkScope::Unrestricted,
+        };
+        let mut req = PermissionRequest {
+            id: PermissionId::new("p1").unwrap(),
+            execution: ExecutionRef::Turn {
+                session: SessionId::new("s").unwrap(),
+                turn: TurnId::new("t").unwrap(),
+                attempt: AttemptId::new("a").unwrap(),
+            },
+            invocation: CallId::new("c").unwrap(),
+            title: "kill 1".into(),
+            digest: permission_digest(&action, &[]).unwrap(),
+            action,
+            preconditions: vec![],
+            choices: vec![PermissionDecision::AllowOnce],
+            expires_at: Timestamp(1),
+            own_pids: vec![],
+        };
+        let old = serde_json::to_value(&req).unwrap();
+        assert!(old.get("own_pids").is_none());
+        let back: PermissionRequest = serde_json::from_value(old).unwrap();
+        assert_eq!(back, req);
+        req.own_pids = vec![42];
+        let v = serde_json::to_value(&req).unwrap();
+        assert_eq!(v["own_pids"], serde_json::json!([42]));
+        // a judging fact, not part of what an approval binds to
+        assert_eq!(
+            permission_digest(&req.action, &req.preconditions).unwrap(),
+            req.digest
+        );
+    }
 }

@@ -21,6 +21,16 @@ pub struct SessionBinding<'a> {
     pub config_revision: &'a str,
 }
 
+/// The workspace a session is bound to (the protocol's `WorkspaceRef` JSON), if it is bound.
+pub fn workspace_ref_of(c: &rusqlite::Connection, session: &str) -> Result<Option<String>> {
+    Ok(c.query_row(
+        "SELECT workspace_ref FROM runtime_sessions WHERE session_id=?",
+        [session],
+        |r| r.get(0),
+    )
+    .optional()?)
+}
+
 /// Idempotent insert; a reused session with a different binding is a conflict.
 pub fn bind_session_in(tx: &Tx<'_>, b: &SessionBinding<'_>, now: i64) -> Result<bool> {
     let workspace = to_json(b.workspace)?;
@@ -65,6 +75,7 @@ pub fn session_cas_in(
         "active",
         "releasing",
         "released",
+        "configuring",
     ]
     .contains(&u.phase)
     {
@@ -324,7 +335,7 @@ pub fn lease_command_in(
     let generation = generation
         .checked_add(1)
         .ok_or_else(|| conflict("lease generation overflow"))?;
-    tx.execute("UPDATE node_commands SET lease_owner=?,lease_until=?,lease_generation=?,updated=? WHERE operation_id=?",params![owner,until,generation,now,operation])?;
+    tx.execute("UPDATE node_commands SET lease_owner=?,lease_until=?,lease_generation=?,maybe_sent=1,updated=? WHERE operation_id=?",params![owner,until,generation,now,operation])?;
     Ok(Some(CommandLease {
         operation,
         node,
@@ -338,14 +349,17 @@ pub fn lease_command_in(
 }
 /// Retry only after a transport failure known not to be a final Node rejection. Uncertain sends use
 /// the same operation ID/request. A stale worker cannot reschedule a reclaimed command.
+/// `uncertain`: this send may have reached the Node (OutcomeUnknown); otherwise it was refused
+/// before acceptance, and the command counts as never sent again (`maybe_sent=0`).
 pub fn retry_command_in(
     tx: &Tx<'_>,
     lease: &CommandLease,
     now: i64,
     retry_at: i64,
+    uncertain: bool,
 ) -> Result<bool> {
-    Ok(tx.execute("UPDATE node_commands SET retry_at=?,lease_owner=NULL,lease_until=NULL,updated=? WHERE operation_id=? AND state='pending' AND lease_owner=? AND lease_generation=? AND lease_until>?",
-        params![retry_at,now,lease.operation,lease.owner,lease.generation,now])?==1)
+    Ok(tx.execute("UPDATE node_commands SET retry_at=?,lease_owner=NULL,lease_until=NULL,maybe_sent=?,updated=? WHERE operation_id=? AND state='pending' AND lease_owner=? AND lease_generation=? AND lease_until>?",
+        params![retry_at,uncertain as i64,now,lease.operation,lease.owner,lease.generation,now])?==1)
 }
 
 /// Receipt progression deliberately collapses running/waiting to Active: their order is determined
@@ -617,4 +631,170 @@ pub fn add_event_in(
         data,
     });
     Ok(Some(seq))
+}
+
+/// A Node session's desired harness config (applied at its next idle boundary), as the coordinator
+/// wrote it.
+pub fn desired_config_in(tx: &Tx<'_>, session: &str) -> Result<Option<Value>> {
+    let v: Option<Option<String>> = tx
+        .query_row(
+            "SELECT desired_config FROM runtime_sessions WHERE session_id=?",
+            [session],
+            |r| r.get(0),
+        )
+        .optional()?;
+    v.flatten()
+        .map(|s| serde_json::from_str(&s).map_err(StoreError::from))
+        .transpose()
+}
+
+/// Sets or clears the desired config. Leaves the session's revision alone: it is not a phase change.
+pub fn set_desired_config_in(
+    tx: &Tx<'_>,
+    session: &str,
+    v: Option<&Value>,
+    now: i64,
+) -> Result<()> {
+    let v = v.map(to_json).transpose()?;
+    tx.execute(
+        "UPDATE runtime_sessions SET desired_config=?, updated=? WHERE session_id=?",
+        params![v, now, session],
+    )?;
+    Ok(())
+}
+
+/// A Node's permission request as the Hub holds it, with its card.
+pub struct NewPermission<'a> {
+    pub decision: &'a str,
+    pub node: &'a str,
+    pub session: &'a str,
+    pub attempt: &'a str,
+    pub permission: &'a str,
+    pub request: &'a Value,
+    pub expires_at: i64,
+}
+
+/// Inserts the request as `waiting`. False: this Node's attempt already has a request of that id.
+pub fn insert_permission_in(tx: &Tx<'_>, p: &NewPermission<'_>, now: i64) -> Result<bool> {
+    Ok(tx.execute(
+        "INSERT INTO runtime_permissions(decision_id,node_id,session_id,attempt_id,permission_id,request,expires_at,state,created,updated)
+           VALUES (?,?,?,?,?,?,?,'waiting',?,?) ON CONFLICT(node_id,attempt_id,permission_id) DO NOTHING",
+        params![p.decision, p.node, p.session, p.attempt, p.permission, to_json(p.request)?, p.expires_at, now, now],
+    )? == 1)
+}
+
+#[derive(Debug, Clone)]
+pub struct PermissionRow {
+    pub decision: String,
+    pub node: String,
+    pub session: String,
+    pub attempt: String,
+    pub permission: String,
+    pub request: Value,
+    pub expires_at: i64,
+    pub state: String,
+    pub answer_operation: Option<String>,
+    pub revision: i64,
+}
+
+const PERMISSION: &str = "SELECT decision_id,node_id,session_id,attempt_id,permission_id,request,expires_at,state,answer_operation,revision FROM runtime_permissions";
+
+fn permissions(tx: &Tx<'_>, filter: &str, p: impl rusqlite::Params) -> Result<Vec<PermissionRow>> {
+    let mut st = tx.prepare_cached(&format!("{PERMISSION} {filter}"))?;
+    let rows = st
+        .query_map(p, |r| {
+            Ok((
+                (
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                ),
+                (
+                    r.get::<_, String>(5)?,
+                    r.get::<_, i64>(6)?,
+                    r.get::<_, String>(7)?,
+                    r.get::<_, Option<String>>(8)?,
+                    r.get::<_, i64>(9)?,
+                ),
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    rows.into_iter()
+        .map(
+            |(
+                (decision, node, session, attempt, permission),
+                (request, expires_at, state, answer_operation, revision),
+            )| {
+                Ok(PermissionRow {
+                    decision,
+                    node,
+                    session,
+                    attempt,
+                    permission,
+                    request: serde_json::from_str(&request)?,
+                    expires_at,
+                    state,
+                    answer_operation,
+                    revision,
+                })
+            },
+        )
+        .collect()
+}
+
+pub fn permission_in(
+    tx: &Tx<'_>,
+    node: &str,
+    attempt: &str,
+    permission: &str,
+) -> Result<Option<PermissionRow>> {
+    Ok(permissions(
+        tx,
+        "WHERE node_id=? AND attempt_id=? AND permission_id=?",
+        params![node, attempt, permission],
+    )?
+    .pop())
+}
+
+pub fn permission_of_decision_in(tx: &Tx<'_>, decision: &str) -> Result<Option<PermissionRow>> {
+    Ok(permissions(tx, "WHERE decision_id=?", [decision])?.pop())
+}
+
+pub fn permission_of_answer_in(tx: &Tx<'_>, operation: &str) -> Result<Option<PermissionRow>> {
+    Ok(permissions(tx, "WHERE answer_operation=?", [operation])?.pop())
+}
+
+/// Moves a request to `state` if it is still at `revision`; `answer_operation` is kept when `None`.
+pub fn permission_cas_in(
+    tx: &Tx<'_>,
+    decision: &str,
+    revision: i64,
+    state: &str,
+    answer_operation: Option<&str>,
+    now: i64,
+) -> Result<bool> {
+    Ok(tx.execute(
+        "UPDATE runtime_permissions SET state=?, answer_operation=COALESCE(?,answer_operation), revision=revision+1, updated=? WHERE decision_id=? AND revision=?",
+        params![state, answer_operation, now, decision, revision],
+    )? == 1)
+}
+
+/// Waiting requests whose expiry has come, oldest first.
+pub fn due_permissions_in(tx: &Tx<'_>, now: i64, limit: i64) -> Result<Vec<PermissionRow>> {
+    permissions(
+        tx,
+        "WHERE state='waiting' AND expires_at<=? ORDER BY expires_at LIMIT ?",
+        params![now, limit],
+    )
+}
+
+/// An attempt's requests that are still open (waiting or answering).
+pub fn permissions_of_attempt_in(tx: &Tx<'_>, attempt: &str) -> Result<Vec<PermissionRow>> {
+    permissions(
+        tx,
+        "WHERE attempt_id=? AND state IN ('waiting','answering') ORDER BY created, rowid",
+        [attempt],
+    )
 }
