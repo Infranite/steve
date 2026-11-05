@@ -19,13 +19,14 @@ fn at(path: &str) -> Option<RootPath> {
     })
 }
 
-/// Steve's permission mode for a harness or bot mode name. `None` (including `auto`): the Node path
-/// cannot express it, fail closed.
+/// Steve's permission mode for a harness or bot mode name. `None`: the Node path cannot express it,
+/// fail closed.
 pub(crate) fn permission_mode(perm: &str) -> Option<PermissionMode> {
     Some(match perm {
         "plan" => PermissionMode::Plan,
         "default" | "ask" => PermissionMode::Ask,
         "acceptEdits" | "accept_edits" => PermissionMode::AcceptEdits,
+        "auto" => PermissionMode::Auto,
         "bypassPermissions" | "full_access" => PermissionMode::FullAccess,
         _ => return None,
     })
@@ -301,6 +302,32 @@ mod remote_tests {
 }
 
 #[cfg(test)]
+mod bot_tests {
+    use super::*;
+
+    /// The seeded "Steve 开发" bot runs in `auto`: its sessions go to the Node in that mode.
+    #[test]
+    fn the_steve_dev_bot_binds_in_auto() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("hub.sqlite3"), steve_store::NoPublisher).unwrap();
+        store.ensure_workspace().unwrap();
+        store
+            .transaction::<_, StoreError>(|tx| {
+                tx.execute_batch(
+                    "INSERT INTO bots(id,workspace_id,name,harness,perm_mode,revision,updated) VALUES ('dev','default','Steve 开发','claude-code','auto',3,1);
+                     INSERT INTO items(id,workspace_id,no,title,status,stage,bot_id,created,updated) VALUES ('i1','default',1,'t','run','执行','dev',1,1);
+                     INSERT INTO sessions(id,workspace_id,item_id,bot_id,harness,cwd,status,created,updated) VALUES ('s1','default','i1','dev','claude-code','','active',1,1);",
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let b = binding_for(&store, "s1").expect("the Steve 开发 bot binds");
+        assert_eq!(b.policy.permissions, PermissionMode::Auto);
+        assert_eq!(b.policy.revision.as_str(), "host-3");
+    }
+}
+
+#[cfg(test)]
 mod host_tests {
     use super::super::node_tools::tests::Ends;
     use super::super::{Vars, node_tools};
@@ -418,7 +445,7 @@ mod host_tests {
     }
 
     #[test]
-    fn permission_modes_map_and_auto_fails_closed() {
+    fn permission_modes_map_and_unknown_ones_fail_closed() {
         assert_eq!(permission_mode("plan"), Some(PermissionMode::Plan));
         assert_eq!(permission_mode("default"), Some(PermissionMode::Ask));
         assert_eq!(
@@ -429,7 +456,8 @@ mod host_tests {
             permission_mode("bypassPermissions"),
             Some(PermissionMode::FullAccess)
         );
-        assert_eq!(permission_mode("auto"), None);
+        assert_eq!(permission_mode("auto"), Some(PermissionMode::Auto));
         assert_eq!(permission_mode(""), None);
+        assert_eq!(permission_mode("dontAsk"), None);
     }
 }

@@ -222,6 +222,7 @@ pub(crate) fn mode(harness: &str, p: PermissionMode) -> Option<String> {
         PermissionMode::Plan => "plan",
         PermissionMode::Ask => "default",
         PermissionMode::AcceptEdits => "acceptEdits",
+        PermissionMode::Auto => "auto",
         PermissionMode::FullAccess => "bypassPermissions",
     };
     if harness == "codex" {
