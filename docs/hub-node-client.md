@@ -1,118 +1,157 @@
 # Hub、Node、Client 的职责划分
 
-状态：提案（2026-11-05）。描述现状、目标边界和拆分顺序；末尾列出待定事项。
+状态：方向已定（2026-11-05），尚未施工。
 
-## 1. 现状：三种角色挤在一个进程里
+## 0. 思路
 
-`devices` 表、`projects.device_id`、`sessions.device_id`、`bots.device` 都已存在，但值全部是 `'hub'`，没有任何路由读取它们。Hub 进程同时承担：
+一句话：**Hub 是大脑，Node 是 harness 的宿主，Client 是 Hub 的窗口。**
 
-| 实际在做的事 | 位置（hub-rs/crates/） | 应属于 |
+- **Hub（steve-server）**：唯一的事实来源和决策者。负责事项、会话、队列、决策、权限裁决、编排、认证、保险箱、渠道、Steve 工具的语义、附件和统计。Hub 不运行任何 harness，也不读写任何项目目录。它的职责是连接 Node、使用 Node。
+- **Node**：harness 的宿主。它持有 harness 进程、项目目录、git/worktree，以及本机有哪些 harness 的知识。Node 不存业务状态，也不做业务决策。Hub 所在的机器上跑一个内嵌 Node，和远程 Node 用同一套接口。
+- **Client**：只连 Hub。现在的 Web 加一层套壳就够了。所有人、所有端看到的都是 Hub 里的同一份数据，这本身就是多人协作的前提。Client 不会直接连 Node。
+
+**两类通信不能混**：
+
+| | 系统通信 | agent 通信 |
 |---|---|---|
-| SQLite、编排、REST/SSE、认证、保险箱、渠道、MCP 工具 | steve-store、steve-core、steve-hub、steve-auth、steve-vault、steve-channels、steve-mcp | Hub |
-| 拉起 adapter 进程、ACP stdio、权限请求、取消 | steve-acp `runner.rs`、`rpc.rs` | Node |
-| 准备/清理 worktree、cwd 可写探测 | steve-core `orchestrator.rs` `prepare_cwd`/`cwd_usable`/`tidy_worktree`，`git.rs` | Node |
-| 合并通道和发布的 git 操作（rebase、merge-tree、patch-id、fetch、`gh`） | steve-core `release.rs`、`cycle.rs`、`upstream.rs`、`lane/*`、`takeover.rs`、`yolo/facts.rs` | Node（Hub 只发起与记录） |
-| 项目目录浏览、README、产物预览 | steve-hub `api/projects.rs`、`api/outputs.rs` | Node |
-| 流程的 cmd 节点、带密钥执行命令、只读调研 | steve-flow `nodes/cmd.rs`、steve-modules `vault/inject.rs`、steve-research | Node（密钥由 Hub 按次下发） |
-| 探测 harness、导入 Claude Code/Codex 历史、找原生记录 | steve-hub `system.rs`、`resume.rs`、`catalog.rs`、`wire/acp_stats.rs`，steve-acp `codex.rs`/`rollout.rs` | Node |
-| 自升级、supervisor | steve-hub `upgrades/` | 各机器各自一份 |
+| 是什么 | Hub ↔ Node、Client ↔ Hub | Node ↔ harness 进程 |
+| 协议 | Steve 自己的协议：会话、回合、事件、作业、工作区操作、工具调用 | ACP、MCP、`claude -p`、以后的其他协议 |
+| 谁懂 | Hub、Node、Client | 只有 Node 里对应的驱动 |
+| 词汇 | Steve 的概念：回合、工具调用、权限请求、用量 | 各协议自己的概念：`session/update`、`_meta`、`rawInput`… |
 
-客户端一侧只支持一种形态：与 Hub 同源、带 `steve_session` cookie 的浏览器。没有用户 API 令牌、没有客户端身份、SSE 帧没有 `id`、无法续传、没有 CORS；Web 写死相对路径 `/api`。
+agent 协议在 Node 上终止。Hub 和 Client 永远看不到 ACP/MCP 的报文。接入新 harness 或新 agent 协议，只需要在 Node 上加一个驱动，Hub 和 Client 不用改。
 
-MCP 地址写死 `http://127.0.0.1:{port}/mcp`（`steve-core/src/orchestrator.rs`），`/mcp` 只接受回环地址（`steve-mcp/src/lib.rs`），所以别的机器上的 agent 根本连不到 Steve 工具。
+## 1. 现状：哪里混在一起了
 
-好消息是执行边界其实已经有了：`steve-acp` 不依赖数据库，Hub→执行器走 `steve_core::AgentRuntime`（`runtime.rs`），执行器→Hub 走 `steve_acp::Host`（`runner.rs`）。黏住的部分是这两个 trait 之外的那些：core 自己在锁里跑 git、探测路径、拷文件，HTTP handler 直接读项目目录。
+`devices` 表、`projects.device_id`、`sessions.device_id`、`bots.device` 都已存在，但值全是 `'hub'`，没有任何路由读它们。
 
-## 2. 目标边界
+**agent 协议漏进了系统层**
+
+- 存库的会话事件就是原样转发的 ACP `session/update`（`steve-acp/src/runner.rs`，`add_event(sid, kind, u)`）。Hub 的 DB、SSE 和 Web 都在解读 ACP 格式，`steve-hub/src/api/slim.rs` 为此专门过滤 `_meta` 和 `rawInput`。
+- Hub 自己是 MCP 服务端（`steve-mcp`，`/mcp` 只接受回环地址），地址写死 `http://127.0.0.1:{port}/mcp`（`steve-core/src/orchestrator.rs`）。结果是 Steve 工具的语义和 MCP 这个 agent 协议绑在了一起，并且只能在 Hub 本机使用。
+
+**harness 宿主散在 Hub 各处，有三套各自的实现**
+
+- `steve-acp`：agent 会话。
+- `steve-core/src/gateway.rs`：Steve 自己的模型调用，走 `claude -p` 和 `codex`。
+- `steve-research`：只读调研，用 `sandbox-exec` 包着 harness 运行。
+- 另外还有 harness 探测和历史导入：`steve-hub/src/system.rs`、`resume.rs`、`catalog.rs`、`wire/acp_stats.rs`，以及 `steve-acp/src/codex.rs`、`rollout.rs`。
+
+**Hub 直接读写项目目录**
+
+- 准备和清理 worktree、cwd 可写探测：`orchestrator.rs` 的 `prepare_cwd`、`cwd_usable`、`tidy_worktree`，以及 `git.rs`。
+- 合并通道、发布、yolo 里的 git 和 `gh`：`release.rs`、`cycle.rs`、`upstream.rs`、`lane/*`、`takeover.rs`、`yolo/facts.rs`。
+- 目录浏览和产物预览：`steve-hub/src/api/projects.rs`、`api/outputs.rs`。
+- 流程的 cmd 节点和带密钥执行：`steve-flow/src/nodes/cmd.rs`、`steve-modules/src/vault/inject.rs`。
+- 推送：`steve-github/src/push.rs`。
+
+**Client**
+
+只支持一种：和 Hub 同源、带 cookie 的浏览器。SSE 帧没有 `id`，断线后只能全量重取。
+
+## 2. 目标结构
 
 ```text
- Client（Web / 桌面壳 / 手机壳 / CLI / IM 渠道）
-        │  HTTPS：REST + 可续传 SSE；cookie 或 Bearer
-        ▼
- ┌──────────────── Hub (steve-server) ────────────────┐
- │ 唯一事实来源：DB、事项/会话/队列/决策、编排、认证、     │
- │ 保险箱、渠道、MCP 工具、附件 blob、统计、Web 静态资源    │
- └───────────────▲───────────────────────────────────┘
-                 │  Node 主动外连的一条长连接（WebSocket）
-                 │  双向 RPC + 带序号的事件流
- ┌───────────────┴─────────┐   ┌────────────────────┐
- │ Node "hub"（内嵌，同进程） │   │ Node "mbp" / "linux" │ …
- │ adapter 进程、项目目录、   │   │ 同一套协议           │
- │ git/worktree、harness     │   └────────────────────┘
+ Client（Web / Web 套壳）── HTTPS: REST + SSE ──┐
+                                               ▼
+ ┌──────────────────────── Hub ───────────────────────────┐
+ │ DB · 事项/会话/队列/决策 · 编排 · 权限裁决 · 认证 · 保险箱 │
+ │ 渠道 · Steve 工具（语义与执行） · 附件 · 统计 · Web 静态资源 │
+ │                 Node 调度（选择节点、派活、收事件）         │
+ └──────────────────────────▲─────────────────────────────┘
+                            │ 系统协议：Node 主动外连的一条长连接
+              ┌─────────────┴──────────────┐
+ ┌────────────┴───────────┐   ┌────────────┴───────────┐
+ │ Node "hub"（内嵌）       │   │ Node "mbp"…            │
+ │ ┌ 系统协议端 ──────────┐ │   │ 同一个程序              │
+ │ │ 会话/作业/工作区/发现 │ │   └────────────────────────┘
+ │ └──────────┬──────────┘ │
+ │   harness 驱动（agent 协议在这里终止）
+ │   ACP 驱动 · print 驱动(claude -p/codex) · 沙箱调研驱动
+ │   本机 MCP 端点（把工具调用转成系统协议里的 tool.call）
+ │   项目目录 · git/worktree
  └─────────────────────────┘
 ```
 
-三条规则：
+## 3. 系统协议（Hub ↔ Node）
 
-1. **Hub 不碰项目目录。** 凡是要读写 `projects.path` 或 session cwd 的，一律经由 Node 接口完成，Hub 自己机器上的也一样。
-2. **Node 不存业务状态。** Node 只持有进程、本机文件，以及断线期间没送达的事件缓冲。重装 Node 不会丢任何事项、会话或决策。
-3. **Client 只是视图。** 所有客户端用同一套 API 和事件流，不为某一端单独开后门。
+只要高效就行。建议用一条长连接（WebSocket 或 HTTP/2 流），帧用紧凑编码，由 Node 主动外连。协议里只出现 Steve 的概念。
 
-Hub 所在机器上的执行能力变成一个**内嵌 Node**：同一个 trait，进程内直接调用。单机部署的行为和性能保持不变；远程 Node 只是把同一个 trait 换成网络实现。
+**Hub → Node：调用**
 
-## 3. Hub ↔ Node 协议
+| 面 | 操作 |
+|---|---|
+| 会话 | `session.open(session_id, harness, cwd, model, effort, mode)` · `turn.run(turn_id, prompt, files)` · `turn.cancel` · `permission.answer(decision_id, option)` · `session.set_mode` · `session.release` · drain（`hold`/`quiesce`/`reopen`） |
+| 作业 | `job.run(job_id, kind, harness, prompt, opts)`，kind 有两种：`think` 是原来 gateway 的单次模型调用，`research` 是只读沙箱调研 |
+| 工作区 | `ws.prepare`/`ws.usable`/`ws.tidy`、有限的 git 查询与执行集合、`fs.list`/`fs.describe`/`fs.read`、`push`、`exec`（密钥按次下发，不落盘） |
+| 发现 | `harness.probe`、`history.list`/`history.import`、`history.locate` |
 
-协议分三个面，都按 `device_id` 路由。会话创建时取项目的 `projects.device_id`，没有项目时取 `bots.device`，都没有就用 `hub`；一旦确定就写进 `sessions.device_id`，之后不再改。
+**Node → Hub：事件与请求**
 
-**A. 会话运行时**：就是现有的 `AgentRuntime` 和 `Host`，外加 drain 控制（`hold`/`quiesce`/`reopen`/`take_cut`/`continue_cut`）。上网络前要先改三处：
+- 事件，每条带 `(session_id 或 job_id, seq)`：
+  - `turn.started`、`message.chunk`、`thought.chunk`
+  - `tool.started`、`tool.updated`、`tool.finished`
+  - `permission.requested`
+  - `usage`
+  - `turn.ended`
+  - `harness.model`
+  - `node.status`
 
-- `Host::file` 返回的是本地路径，要改成返回字节，或者一个带短期令牌的拉取地址。附件只在 Node 侧落到 `<cwd>/.steve/attachments/`，`steve-core/src/attachments.rs` 与 `steve-hub/src/files.rs` 里的重复实现一并去掉。
-- 队列留在 Hub（它是用户可见的持久状态）。`queue_add`/`queue_take` 目前在 runner 锁里同步调用，要改成 Hub 下发一个"执行这一轮"的指令，带 turn_id，Node 按 turn_id 幂等执行。runner 里的队列逻辑上移到 core。
-- 同步写回（`set_status`、`add_event`、`set_usage` 等）改为事件，每条带 `(session_id, seq)`。Node 先存本地缓冲再发；Hub 收到后按 seq 去重并 ack。断线时 adapter 照常跑完当前这一轮，重连后补发。
+  Node 先在本地缓冲再发，Hub 按 seq 去重并 ack，断线期间的事件在重连后补发。事件格式是 Steve 的 schema，由 Node 里的驱动从 ACP 等格式翻译过来。
+- 请求：
+  - `tool.call(session_id, name, args)`：agent 调用 Steve 工具时，Node 本机的 MCP 端点收到请求，转成这一条发给 Hub，由 Hub 执行并返回。
+  - `tool.catalog`：Node 按 session 向 Hub 拉取工具清单，再通过 MCP 暴露给 agent。
+  - `file.fetch(file_id)`：取附件字节。
 
-**B. 工作区操作**：把 core 和 HTTP handler 里直接做的本机事务收拢成一个 `NodeOps` 接口：
+**由此确定的几件事**
 
-- `prepare_cwd`、`cwd_usable`、`tidy_worktree`
-- git：给 release/cycle/upstream/lane/takeover/yolo 用的有限查询与执行集合，不开放任意 shell
-- fs：`list_dirs`、`describe`、`read_output`、`exists`
-- `push`（令牌由 Hub 按次下发）
-- `exec`（流程 cmd 节点与带密钥执行；密钥只在调用时下发，Node 不落盘）
-- `research_run`
+- 队列在 Hub。Node 只执行 Hub 下发的回合，`turn_id` 保证幂等。runner 里现有的 `queue_*` 逻辑上移到 core。
+- 权限请求由 Node 上报，裁决在 Hub（用户、YOLO、规则），结果再下发给 Node。
+- Steve 自己的思考（gateway）也是 Node 上的作业，Hub 选一个具备该 harness 的 Node 来跑。Hub 机器不用装任何 harness，只要有一个 Node 在线即可。
+- 会话的 `device_id` 在创建时确定：先看项目的 `device_id`，其次是 bot 的 `device`，否则用内嵌 Node，之后不再改。
+- Node 离线时，绑定在它上面的会话显示"设备离线"，队列保留，等它回来。不迁移到别的 Node，因为 worktree 在那台机器上。
+- MCP 的 bearer 只在 Node 内部用于区分本机的 agent 会话。Hub 只认 Node 的连接凭据，以及协议里带的 session_id。
 
-**C. 发现与导入**：harness 探测（runtimes）、可导入的历史会话、原生记录定位、Codex 用量回填。Node 上线时上报一次，之后按需刷新。上报的内容就是 `devices` 行里的 `os`/`version`/`roles`，再加 runtimes。
+## 4. 注册 Node
 
-**MCP**：Node 在本机回环起一个 MCP 代理，agent 仍然连 `127.0.0.1`，代理把请求连同 session bearer 经长连接转给 Hub。这样 Hub 的 `/mcp` 继续只对回环开放，不用暴露到公网，`McpEndpoint` 的地址改由 Node 提供。
-
-## 4. 注册 Node 的最小成本
-
-用户要做的只有三步：
-
-1. 在 Hub「设备」页点「配对新设备」，拿到一个一次性配对码（10 分钟有效）。
+1. 在 Hub 设备页点「配对新设备」，拿到一次性配对码。
 2. 在新机器上运行 `steve-node pair https://<hub> <配对码>`。
-3. 在 Hub 上确认；设备随即出现，可以改名、暂停接活、吊销。
+3. 回到 Hub 确认。之后可以改名、暂停接活、吊销。
 
-具体过程：
+细节：
 
-- Node 在本机生成密钥对，用配对码换取 Hub 签发的设备凭据。凭据是一个可吊销的设备令牌，Hub 只存哈希，`devices` 表里加 `credential_hash` 和 `revoked` 两列。
-- 之后 Node 主动外连，所以 NAT 后面、经公网网关都能用。
-- Node 是单个二进制，配置只有 Hub 地址、凭据和允许的项目根目录。不需要数据库，不需要 OIDC，也不需要保险箱。
-- `devices.status`（暂停接活）和 `max_sessions` 从这一步开始真正生效：Hub 派活前先检查。
-- 负责人沿用 ownership：设备归配对的人所有（参见"一切挂到人"）。
+- Node 生成密钥，换到一张 Hub 签发、可吊销的设备凭据。Hub 只存它的哈希。
+- Node 是单个二进制，配置只有三项：Hub 地址、凭据、允许的项目根目录。
+- Node 上线后上报 OS、版本和 harness 清单（即 `harness.probe` 的结果）。`devices.status` 和 `max_sessions` 从这时起真正生效。
+- 设备归配对的人，沿用现有的 ownership。
 
-## 5. 多端 Client
+## 5. Client
 
-按成本从低到高排：
+所有 Client 只连 Hub，用同一套 REST + SSE。多端就是在 Web 外面套壳，加载 Hub 的网址，cookie 照常使用。
 
-1. **桌面/手机壳直接加载 Hub 的 URL**（Tauri/Capacitor 之类）。和浏览器同源，cookie 照用，几乎零改动。推荐先做这一步。
-2. **Bearer 令牌**：`lookup_user` 在 cookie 之外再接受 `Authorization: Bearer`。令牌有两种来源：个人令牌（CLI、脚本）和客户端设备令牌（走和 Node 一样的配对流程，`roles` 标为 `客户端`）。工作区仍用 `x-steve-ws` 指定。
-3. **可续传 SSE**：每帧带 `id`（全局单调序号），Hub 保留最近 N 条（或者落在 change log 里），客户端带 `Last-Event-ID` 重连只补差量。超出窗口才发 `workspace` 全量重取。手机端频繁断线时这一项收益最大。
-4. **独立前端源**：Web 加可配置的 base URL，Hub 加 CORS 白名单（复用 `STEVE_PUBLIC_URLS`）。只有真的要把前端从 Hub 拆出去时才需要。
+对 Hub 的要求只有一条：**SSE 要能续传**。每帧带 `id`，客户端用 `Last-Event-ID` 补差量，超出窗口才全量重取。套壳在手机上断线频繁，这一项收益最大。
 
-## 6. 拆分顺序
+Hub 和 Client 之间同样不出现 agent 协议。会话事件统一用第 3 节的 Steve schema，`slim.rs` 里针对 ACP 的过滤届时就可以删掉。
 
-每一步都可以单独发布，并且不改变单机行为：
+## 6. 这样分开以后自然得到的能力
+
+- **任何机器都能接入**：装一个 `steve-node` 配对即可，NAT 后面或经公网网关都能用，Hub 不需要对外暴露 MCP 或文件。
+- **新 harness、新 agent 协议只改 Node**：加一个驱动，Hub 和 Client 不动。
+- **三套 harness 宿主合成一套**：会话、思考、调研都是 Node 上的 harness 作业，共用启动、环境、沙箱、用量统计和取消逻辑。
+- **Steve 工具和 MCP 解耦**：工具只在 Hub 定义和执行一次，Node 负责把它们暴露成 MCP。以后换别的工具协议，也只是在 Node 上再加一种暴露方式。所有工具调用都经过 Hub，审计、限额和权限只需要做一处。
+- **多人协作**：所有人看的是同一份 Hub 数据，同一个会话可以多人围观、多人审批，不需要额外设计同步。
+- **调度**：Hub 可以按 harness 清单、`max_sessions`、负责人、在线状态选 Node，思考作业可以分散到空闲的机器上。
+- **Hub 升级不打断执行**：Hub 重启时 Node 上的回合继续跑，事件缓冲下来，重连后补发。今天重启 Hub 会杀掉所有 adapter。
+- **事件 schema 归 Steve 所有**：存储、统计、界面都不再随 ACP 版本变化而改动。
+
+## 7. 拆分顺序
+
+每一步都能单独发布，单机行为不变。
 
 | 阶段 | 内容 | 验收 |
 |---|---|---|
-| N0 | 在 steve-core 定义 `NodeOps`，把第 1 节里所有直接的 fs/git/process 调用迁到内嵌实现后面；core 持锁时不做 IO | 现有测试和 e2e 不变；全仓直接 `std::process`/`std::fs` 的调用只剩 Node 实现、blob 存储、知识源、升级 |
-| N1 | 第 3 节 A 面的三处改造：附件字节化、队列上移、事件带 seq 并 ack | runner 不再调用 `queue_*`；断开再重连的模拟测试 |
-| N2 | `steve-node` 二进制、WebSocket 传输、配对与吊销、MCP 代理、按 `device_id` 路由 | 本机用另一个 `STEVE_HOME` 起第二个 Node，在它的项目上跑完整事项 |
-| N3 | UI：配对、建项目时选设备、目录浏览经由 Node、bot 的"运行设备"字段生效、离线状态 | 浏览器测试 |
-| C1 | Bearer 令牌 + SSE 续传 | CLI 能列出事项、发消息、跟随会话 |
-
-## 7. 待定
-
-1. **队列归属**：建议放 Hub，Node 只执行"这一轮"。另一种做法是把队列放到 Node，改动更少，但用户可见状态就分散到了多台机器。
-2. **Steve 自己的模型调用**（`steve-core/src/gateway.rs` 用 `claude -p`/`codex`）：建议先留在 Hub 机器，后面再考虑声明了 `网关` 角色的 Node。
-3. **传输方式**：建议 WebSocket + JSON（与 ACP/MCP 的 JSON-RPC 风格一致，过网关简单）。gRPC 性能更好，但部署和调试成本更高。
-4. **Node 离线时，绑在它上面的会话**：建议标为"设备离线"并保留队列，等它回来；不自动迁到别的 Node，因为 worktree 在那台机器上。
+| N0 | 定义 Node 接口（第 3 节的调用、事件和请求，先只做进程内实现）。把第 1 节里 core、hub、flow、github、vault 直接做的 fs/git/process 操作，以及 gateway、research 的 harness 启动，全部移到内嵌 Node 后面。core 持锁时不做 IO | 现有测试和 e2e 不变。Node 实现之外，全仓不再有直接启动 harness、读写项目目录的调用 |
+| N1 | 驱动内部把 ACP 翻译成 Steve 事件 schema，老事件由读取端兼容。队列上移到 core。事件带 seq 并 ack。工具调用改走 `tool.call`，Hub 侧的工具执行与 MCP 服务端分离 | runner 不再调用 `queue_*`，DB 里不再写入 ACP 原始报文。断线重连的模拟测试 |
+| N2 | `steve-node` 二进制、长连接传输、配对与吊销、Node 本机的 MCP 端点、按 `device_id` 路由、作业选择 Node | 本机用另一个 `STEVE_HOME` 起第二个 Node，在它上面跑完一个完整事项，包括思考作业 |
+| N3 | 界面：配对、建项目时选设备、目录浏览经由 Hub 转到 Node、bot 的"运行设备"、离线状态 | 浏览器测试 |
+| C1 | SSE 续传。Web 套壳 | 手机套壳断网再恢复后，只补收差量 |
