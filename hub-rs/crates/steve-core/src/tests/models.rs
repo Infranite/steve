@@ -491,7 +491,7 @@ async fn codex_without_a_model_or_an_executable() {
             "hi",
             crate::gateway::Tier::Smart,
             std::time::Duration::from_secs(10),
-            &["--allowedTools".into(), "Read".into()],
+            &crate::gateway::ThinkTools::Read(vec![]),
         ),
     )
     .await
@@ -509,7 +509,7 @@ async fn codex_without_a_model_or_an_executable() {
             "hi",
             crate::gateway::Tier::Smart,
             std::time::Duration::from_secs(10),
-            &[],
+            &crate::gateway::ThinkTools::None,
         ),
     )
     .await

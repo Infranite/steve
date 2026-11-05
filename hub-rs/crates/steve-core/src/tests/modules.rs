@@ -567,9 +567,9 @@ impl ModelGateway for Costly {
         prompt: &str,
         tier: Tier,
         _: Duration,
-        extra: &[String],
+        tools: &crate::gateway::ThinkTools,
     ) -> crate::Result<Printed> {
-        assert!(extra.is_empty());
+        assert_eq!(*tools, crate::gateway::ThinkTools::None);
         Ok(Printed {
             text: format!("{tier:?}:{prompt}"),
             model: format!("m-{tier:?}"),

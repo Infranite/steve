@@ -58,13 +58,14 @@ pub type OnText<'a> = &'a (dyn Fn(&str) + Send + Sync);
 /// One model call with fallback; implemented by [`ClaudeCli`], faked in tests.
 #[async_trait]
 pub trait ModelGateway: Send + Sync {
-    /// `claudePrintWith`: `extra` are CLI arguments (e.g. `--allowedTools Read` for a chat answer that reads attachments).
+    /// `claudePrintWith`: `tools` are what the call may use besides answering (a chat answer that reads
+    /// its attachments: [`ThinkTools::Read`]); most calls use none.
     async fn call(
         &self,
         prompt: &str,
         tier: Tier,
         timeout: Duration,
-        extra: &[String],
+        tools: &ThinkTools,
     ) -> Result<Printed>;
     /// [`ModelGateway::call`] that reports the text while it is generated (a chat answer shown as it is
     /// written). Without streaming, `on_text` hears the whole text once.
@@ -73,16 +74,19 @@ pub trait ModelGateway: Send + Sync {
         prompt: &str,
         tier: Tier,
         timeout: Duration,
-        extra: &[String],
+        tools: &ThinkTools,
         on_text: OnText<'_>,
     ) -> Result<Printed> {
-        let p = self.call(prompt, tier, timeout, extra).await?;
+        let p = self.call(prompt, tier, timeout, tools).await?;
         on_text(&p.text);
         Ok(p)
     }
     /// `claudePrint`: the text only.
     async fn print(&self, prompt: &str, tier: Tier, timeout: Duration) -> Result<String> {
-        Ok(self.call(prompt, tier, timeout, &[]).await?.text)
+        Ok(self
+            .call(prompt, tier, timeout, &ThinkTools::None)
+            .await?
+            .text)
     }
     /// [`ModelGateway::call`] (or [`ModelGateway::call_streaming`] with `on_text`) that also tells, when
     /// the call fails, how many models were tried and what they used; for [`crate::stats::RecordingGateway`].
@@ -91,13 +95,13 @@ pub trait ModelGateway: Send + Sync {
         prompt: &str,
         tier: Tier,
         timeout: Duration,
-        extra: &[String],
+        tools: &ThinkTools,
         on_text: Option<OnText<'_>>,
     ) -> Attempt {
         let t0 = Instant::now();
         let result = match on_text {
-            Some(f) => self.call_streaming(prompt, tier, timeout, extra, f).await,
-            None => self.call(prompt, tier, timeout, extra).await,
+            Some(f) => self.call_streaming(prompt, tier, timeout, tools, f).await,
+            None => self.call(prompt, tier, timeout, tools).await,
         };
         let ms = elapsed_ms(t0);
         match result {
@@ -167,14 +171,15 @@ pub struct ClaudeCli {
 }
 
 impl ClaudeCli {
-    /// `extra` is the caller's (tools it wants); `effort` comes from 设置 · 模型 and is kept apart so a
-    /// call without tools keeps its cache-friendly layout ([`print_args`]) when an effort is set.
+    /// `tools` are the caller's (as CLI arguments: [`cli_tools`]); `effort` comes from 设置 · 模型 and is
+    /// kept apart so a call without tools keeps its cache-friendly layout ([`print_args`]) when an effort
+    /// is set.
     async fn once(
         &self,
         prompt: &str,
         model: &str,
         timeout: Duration,
-        extra: &[String],
+        tools: &ThinkTools,
         effort: &[String],
     ) -> Tried {
         let mut cmd = tokio::process::Command::new(&self.executable);
@@ -185,10 +190,10 @@ impl ClaudeCli {
         ] {
             cmd.env_remove(key);
         }
-        let (message, layout) = print_args(prompt, extra);
+        let (message, layout) = print_args(prompt, tools);
         cmd.args(["-p", message, "--output-format", "json", "--model", model])
             .args(layout)
-            .args(extra)
+            .args(cli_tools(tools))
             .args(effort)
             .current_dir(&self.cwd)
             .stdin(std::process::Stdio::null())
@@ -222,7 +227,7 @@ impl ClaudeCli {
         prompt: &str,
         model: &str,
         timeout: Duration,
-        extra: &[String],
+        tools: &ThinkTools,
         effort: &[String],
         on_text: OnText<'_>,
     ) -> Tried {
@@ -235,7 +240,7 @@ impl ClaudeCli {
         ] {
             cmd.env_remove(key);
         }
-        let (message, layout) = print_args(prompt, extra);
+        let (message, layout) = print_args(prompt, tools);
         let images = current_images();
         /* with images the message goes to stdin as one stream-json user message (text, then images) */
         let head: Vec<&str> = match &images {
@@ -252,7 +257,7 @@ impl ClaudeCli {
                 model,
             ])
             .args(layout)
-            .args(extra)
+            .args(cli_tools(tools))
             .args(effort)
             .current_dir(&self.cwd)
             .stdin(if images.is_some() {
@@ -532,7 +537,7 @@ impl ClaudeCli {
         prompt: &str,
         model: &str,
         timeout: Duration,
-        extra: &[String],
+        tools: &ThinkTools,
         effort: Option<&str>,
         on_text: Option<OnText<'_>>,
     ) -> Tried {
@@ -542,7 +547,7 @@ impl ClaudeCli {
                 "没有配置 codex（CODEX_EXECUTABLE），不能用 Codex 做判断",
             ));
         };
-        let tools = !extra.is_empty();
+        let tools = tools.any();
         let (head, message) = split_static(prompt);
         let (instructions, input) = if tools {
             let input = match head {
@@ -667,13 +672,46 @@ pub fn user_message(text: &str, images: &[Value]) -> String {
 /// The system prompt of a gateway call whose prompt has no stable head of its own.
 pub const GATEWAY_SYSTEM: &str = "You are a component of Steve, a personal assistant app. Follow the instructions in the user message exactly and reply with only what they ask for.";
 
-/// The CLI arguments of a chat answer: none without readable attachments (no tools at all), else
-/// [`ATTACHMENT_TOOLS`].
-pub fn answer_tools(files: &ChatFiles) -> Vec<String> {
-    if files.readable {
-        ATTACHMENT_TOOLS.iter().map(|a| a.to_string()).collect()
+/// A file a think call may read: the attachment's id and where its copy sits relative to the call's
+/// working directory (`.steve/attachments/<id>-<name>`, as the prompt names it).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Readable {
+    pub file_id: String,
+    pub rel_path: String,
+}
+
+/// What a think call may use besides answering. Typed rather than CLI arguments, so a harness other
+/// than the in-process one can place the files and choose its own flags.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum ThinkTools {
+    /// No tools at all (the cache-friendly layout of [`print_args`]).
+    #[default]
+    None,
+    /// The Read tool only, for these files (already copied next to the in-process run).
+    Read(Vec<Readable>),
+}
+
+impl ThinkTools {
+    /// Whether the call has any tool.
+    pub fn any(&self) -> bool {
+        matches!(self, ThinkTools::Read(_))
+    }
+}
+
+/// The `claude -p` arguments of `tools`: none, or [`ATTACHMENT_TOOLS`].
+pub fn cli_tools(tools: &ThinkTools) -> &'static [&'static str] {
+    match tools {
+        ThinkTools::None => &[],
+        ThinkTools::Read(_) => &ATTACHMENT_TOOLS,
+    }
+}
+
+/// The tools of a chat answer: none without readable attachments, else Read for those files.
+pub fn answer_tools(files: &ChatFiles) -> ThinkTools {
+    if files.readable.is_empty() {
+        ThinkTools::None
     } else {
-        vec![]
+        ThinkTools::Read(files.readable.clone())
     }
 }
 
@@ -694,15 +732,15 @@ pub const ATTACHMENT_TOOLS: [&str; 6] = [
 /// Claude Code's own system prompt, tool list and per-machine context came to ~16k tokens per call and
 /// the call's instructions sat in the user message, where the cache cannot reuse them; one route call
 /// cost ~20k tokens, about half of them cache writes. Now:
-/// - no `extra` (no tools): the prompt's stable head (or [`GATEWAY_SYSTEM`]) replaces the system prompt,
+/// - no tools ([`ThinkTools::None`]): the prompt's stable head (or [`GATEWAY_SYSTEM`]) replaces the system prompt,
 ///   with no tools, MCP servers or skills, so the call is the head (read from the cache) plus the
 ///   message;
-/// - with `extra` (e.g. a chat answer that reads attachments): Claude Code's prompt and tools stay, the
+/// - with tools (e.g. a chat answer that reads attachments): Claude Code's prompt and tools stay, the
 ///   head is appended to the system prompt.
-pub fn print_args<'a>(prompt: &'a str, extra: &[String]) -> (&'a str, Vec<&'a str>) {
+pub fn print_args<'a>(prompt: &'a str, tools: &ThinkTools) -> (&'a str, Vec<&'a str>) {
     let (head, message) = split_static(prompt);
     let mut a: Vec<&str> = Vec::with_capacity(6);
-    if extra.is_empty() {
+    if !tools.any() {
         a.extend([
             "--system-prompt",
             head.unwrap_or(GATEWAY_SYSTEM),
@@ -865,13 +903,13 @@ impl ClaudeCli {
         prompt: &str,
         tier: Tier,
         timeout: Duration,
-        extra: &[String],
+        tools: &ThinkTools,
         on_text: Option<OnText<'_>>,
     ) -> Attempt {
         let t0 = Instant::now();
         let choice = self.choice(tier);
         let models = &choice.models;
-        // apart from `extra`: an effort does not make the call one that wants Claude Code's tools
+        // apart from `tools`: an effort does not make the call one that wants Claude Code's tools
         let effort: Vec<String> = match &choice.effort {
             Some(e) => vec!["--effort".to_string(), e.clone()],
             None => vec![],
@@ -899,14 +937,14 @@ impl ClaudeCli {
         for m in models {
             let r = match on_text {
                 _ if codex => {
-                    self.once_codex(prompt, m, timeout, extra, choice.effort.as_deref(), on_text)
+                    self.once_codex(prompt, m, timeout, tools, choice.effort.as_deref(), on_text)
                         .await
                 }
                 Some(f) => {
-                    self.once_streaming(prompt, m, timeout, extra, &effort, f)
+                    self.once_streaming(prompt, m, timeout, tools, &effort, f)
                         .await
                 }
-                None => self.once(prompt, m, timeout, extra, &effort).await,
+                None => self.once(prompt, m, timeout, tools, &effort).await,
             };
             a.attempts += 1;
             a.model = m.clone();
@@ -944,9 +982,9 @@ impl ModelGateway for ClaudeCli {
         prompt: &str,
         tier: Tier,
         timeout: Duration,
-        extra: &[String],
+        tools: &ThinkTools,
     ) -> Result<Printed> {
-        self.fall_back(prompt, tier, timeout, extra, None)
+        self.fall_back(prompt, tier, timeout, tools, None)
             .await
             .result
     }
@@ -955,10 +993,10 @@ impl ModelGateway for ClaudeCli {
         prompt: &str,
         tier: Tier,
         timeout: Duration,
-        extra: &[String],
+        tools: &ThinkTools,
         on_text: OnText<'_>,
     ) -> Result<Printed> {
-        self.fall_back(prompt, tier, timeout, extra, Some(on_text))
+        self.fall_back(prompt, tier, timeout, tools, Some(on_text))
             .await
             .result
     }
@@ -967,10 +1005,10 @@ impl ModelGateway for ClaudeCli {
         prompt: &str,
         tier: Tier,
         timeout: Duration,
-        extra: &[String],
+        tools: &ThinkTools,
         on_text: Option<OnText<'_>>,
     ) -> Attempt {
-        self.fall_back(prompt, tier, timeout, extra, on_text).await
+        self.fall_back(prompt, tier, timeout, tools, on_text).await
     }
 }
 
@@ -1001,7 +1039,7 @@ impl steve_modules::Gateway for SharedGateway {
             steve_modules::Tier::Smart => Tier::Smart,
         };
         self.0
-            .call(prompt, tier, timeout, &[])
+            .call(prompt, tier, timeout, &ThinkTools::None)
             .await
             .map(|p| steve_modules::GatewayOut {
                 text: p.text,
@@ -1553,7 +1591,12 @@ pub async fn route(
 ) -> Route {
     let prompt = route_prompt(c, text, history, promote);
     match gw
-        .call(&prompt, Tier::Fast, Duration::from_secs(60), &[])
+        .call(
+            &prompt,
+            Tier::Fast,
+            Duration::from_secs(60),
+            &ThinkTools::None,
+        )
         .await
     {
         Ok(Printed {
@@ -1594,8 +1637,8 @@ pub struct ChatFiles {
     pub count: usize,
     /// the path note, or `\n（附件没能读取：…）` when copying failed
     pub note: String,
-    /// copied: let the model read them with the Read tool only (files that are not inline images)
-    pub readable: bool,
+    /// copied files that are not inline images: the model reads them with the Read tool only
+    pub readable: Vec<Readable>,
     /// images that go into the message itself (`{"type":"image","source":{…}}`)
     pub images: Vec<Value>,
 }
@@ -1625,7 +1668,11 @@ pub fn answer_prompt(
         })
         .collect::<Vec<_>>()
         .join("\n");
-    let read = match (files.count > 0, files.readable, files.images.is_empty()) {
+    let read = match (
+        files.count > 0,
+        !files.readable.is_empty(),
+        files.images.is_empty(),
+    ) {
         (false, ..) => "",
         (true, true, true) => "Read the attached files with the Read tool before answering.\n\n",
         (true, true, false) => {
@@ -1692,7 +1739,7 @@ pub async fn answer(
     context: &str,
     on_draft: OnDraft<'_>,
 ) -> Answer {
-    let extra = answer_tools(files);
+    let tools = answer_tools(files);
     let timeout = Duration::from_secs(if files.count > 0 { 150 } else { 90 });
     let on_text = |raw: &str| {
         let (t, a) = draft_of(raw);
@@ -1704,7 +1751,7 @@ pub async fn answer(
             &answer_prompt(main, text, history, files, context),
             Tier::Smart,
             timeout,
-            &extra,
+            &tools,
             &on_text,
         ),
     )
@@ -2001,26 +2048,76 @@ mod tests {
         );
     }
 
+    fn readable(id: &str, name: &str) -> Readable {
+        Readable {
+            file_id: id.into(),
+            rel_path: format!(".steve/attachments/{}-{name}", &id[4..]),
+        }
+    }
+
     #[test]
     fn an_answer_reading_attachments_has_read_and_nothing_else() {
         let none = ChatFiles::default();
-        assert!(answer_tools(&none).is_empty(), "no attachments: no tools");
-        let files = ChatFiles {
-            readable: true,
+        assert_eq!(
+            answer_tools(&none),
+            ThinkTools::None,
+            "no attachments: no tools"
+        );
+        // attached, but only inline images: nothing to read, still no tools
+        let images = ChatFiles {
             count: 1,
+            images: vec![json!({"type": "image"})],
             ..ChatFiles::default()
         };
-        let a = answer_tools(&files);
-        let after = |f: &str| a.iter().position(|x| x == f).map(|i| a[i + 1].as_str());
-        assert_eq!(after("--tools"), Some("Read"), "the only tool there is");
-        assert_eq!(after("--setting-sources"), Some("user"));
+        assert_eq!(answer_tools(&images), ThinkTools::None);
+        let files = ChatFiles {
+            readable: vec![readable("fil_a1", "log.txt"), readable("fil_b2", "big.png")],
+            count: 3,
+            images: vec![json!({"type": "image"})],
+            ..ChatFiles::default()
+        };
+        let t = answer_tools(&files);
+        assert_eq!(
+            t,
+            ThinkTools::Read(vec![
+                Readable {
+                    file_id: "fil_a1".into(),
+                    rel_path: ".steve/attachments/a1-log.txt".into()
+                },
+                Readable {
+                    file_id: "fil_b2".into(),
+                    rel_path: ".steve/attachments/b2-big.png".into()
+                },
+            ])
+        );
+        assert!(t.any() && !ThinkTools::None.any());
+        assert_eq!(
+            cli_tools(&t),
+            [
+                "--tools",
+                "Read",
+                "--allowedTools",
+                "Read",
+                "--setting-sources",
+                "user"
+            ],
+            "Read is the only tool there is, user settings only"
+        );
+        assert!(cli_tools(&ThinkTools::None).is_empty());
+    }
+
+    /// The `claude -p` layout and tool arguments in the order [`ClaudeCli::once`] passes them.
+    fn layout<'a>(prompt: &'a str, tools: &ThinkTools) -> (&'a str, Vec<&'a str>) {
+        let (m, mut a) = print_args(prompt, tools);
+        a.extend(cli_tools(tools));
+        (m, a)
     }
 
     #[test]
     fn print_args_put_the_stable_head_in_the_system_prompt() {
         let p = with_static("rules", "message");
         assert_eq!(
-            print_args(&p, &[]),
+            layout(&p, &ThinkTools::None),
             (
                 "message",
                 vec![
@@ -2034,29 +2131,126 @@ mod tests {
             )
         );
         // no head: a short fixed system prompt, still no tools
-        let (m, a) = print_args("just this", &[]);
         assert_eq!(
-            (m, &a[..2]),
-            ("just this", &["--system-prompt", GATEWAY_SYSTEM][..])
+            layout("just this", &ThinkTools::None),
+            (
+                "just this",
+                vec![
+                    "--system-prompt",
+                    GATEWAY_SYSTEM,
+                    "--tools",
+                    "",
+                    "--strict-mcp-config",
+                    "--disable-slash-commands"
+                ]
+            )
         );
-        // tools wanted: Claude Code's own prompt stays, the head is appended
-        let extra = vec!["--allowedTools".to_string(), "Read".to_string()];
+        // tools wanted: Claude Code's own prompt stays, the head is appended, Read is the only tool;
+        // the files themselves are not arguments (they are already next to the run)
+        let read = ThinkTools::Read(vec![readable("fil_a1", "log.txt")]);
         assert_eq!(
-            print_args(&p, &extra),
+            layout(&p, &read),
             (
                 "message",
                 vec![
                     "--append-system-prompt",
                     "rules",
                     "--strict-mcp-config",
-                    "--disable-slash-commands"
+                    "--disable-slash-commands",
+                    "--tools",
+                    "Read",
+                    "--allowedTools",
+                    "Read",
+                    "--setting-sources",
+                    "user"
                 ]
             )
         );
         assert_eq!(
-            print_args("m", &extra),
-            ("m", vec!["--strict-mcp-config", "--disable-slash-commands"])
+            layout("m", &ThinkTools::Read(vec![])),
+            (
+                "m",
+                vec![
+                    "--strict-mcp-config",
+                    "--disable-slash-commands",
+                    "--tools",
+                    "Read",
+                    "--allowedTools",
+                    "Read",
+                    "--setting-sources",
+                    "user"
+                ]
+            )
         );
+    }
+
+    #[test]
+    fn codex_args_turn_the_shell_off_without_tools() {
+        let cwd = std::path::Path::new("/s");
+        let head = [
+            "exec",
+            "--json",
+            "--ephemeral",
+            "--skip-git-repo-check",
+            "-s",
+            "read-only",
+            "-C",
+            "/s",
+            "-m",
+            "gpt-x",
+            "-c",
+            "mcp_servers={}",
+            "-c",
+            "web_search=\"disabled\"",
+            "--disable",
+            "hooks",
+            "--disable",
+            "plugins",
+            "--disable",
+            "multi_agent",
+            "--disable",
+            "computer_use",
+            "--disable",
+            "browser_use",
+            "--disable",
+            "image_generation",
+            "--disable",
+            "goals",
+            "--disable",
+            "apps",
+            "--disable",
+            "unified_exec",
+        ];
+        let instr = std::path::Path::new("/s/instructions.md");
+        let mut want: Vec<&str> = head.to_vec();
+        want.extend([
+            "--disable",
+            "shell_tool",
+            "-c",
+            "model_instructions_file=\"/s/instructions.md\"",
+            "-c",
+            "model_reasoning_effort=\"high\"",
+            "-i",
+            "/s/a.png",
+            "-",
+        ]);
+        let no_tools = ThinkTools::None;
+        assert_eq!(
+            codex_args(
+                cwd,
+                "gpt-x",
+                Some("high"),
+                no_tools.any(),
+                Some(instr),
+                &["/s/a.png".into()]
+            ),
+            want
+        );
+        // with tools: the shell and Codex's own instructions stay
+        let mut want: Vec<&str> = head.to_vec();
+        want.push("-");
+        let read = ThinkTools::Read(vec![readable("fil_a1", "log.txt")]);
+        assert_eq!(codex_args(cwd, "gpt-x", None, read.any(), None, &[]), want);
     }
 
     #[test]
@@ -2190,13 +2384,25 @@ mod tests {
         /* a run that fails says why */
         let gw = slow_claude(dir.path(), "echo nope >&2; exit 2");
         let e = gw
-            .call_streaming("x", Tier::Fast, Duration::from_secs(5), &[], &|_| {})
+            .call_streaming(
+                "x",
+                Tier::Fast,
+                Duration::from_secs(5),
+                &ThinkTools::None,
+                &|_| {},
+            )
             .await
             .unwrap_err();
         assert_eq!(e.to_string(), "Command failed: nope");
         let gw = slow_claude(dir.path(), "sleep 5");
         let e = gw
-            .call_streaming("x", Tier::Fast, Duration::from_millis(200), &[], &|_| {})
+            .call_streaming(
+                "x",
+                Tier::Fast,
+                Duration::from_millis(200),
+                &ThinkTools::None,
+                &|_| {},
+            )
             .await
             .unwrap_err();
         assert_eq!(e.to_string(), "Command timed out after 200 ms");
@@ -2219,7 +2425,7 @@ mod tests {
         struct Gw(Option<&'static str>);
         #[async_trait]
         impl ModelGateway for Gw {
-            async fn call(&self, _: &str, _: Tier, _: Duration, _: &[String]) -> Result<Printed> {
+            async fn call(&self, _: &str, _: Tier, _: Duration, _: &ThinkTools) -> Result<Printed> {
                 match self.0 {
                     Some(t) => Ok(Printed {
                         text: t.into(),
@@ -2365,7 +2571,7 @@ mod tests {
         struct Capture;
         #[async_trait]
         impl ModelGateway for Capture {
-            async fn call(&self, _: &str, _: Tier, _: Duration, _: &[String]) -> Result<Printed> {
+            async fn call(&self, _: &str, _: Tier, _: Duration, _: &ThinkTools) -> Result<Printed> {
                 let images = current_images().expect("image scope reaches actual model gateway");
                 assert_eq!(images[0]["source"]["data"], "aW1hZ2U=");
                 Ok(Printed::default())

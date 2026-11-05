@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use steve_store::{ModelUsage, NewUsage, Store};
 
 use crate::error::Result;
-use crate::gateway::{Attempt, ModelGateway, OnText, Printed, Tier};
+use crate::gateway::{Attempt, ModelGateway, OnText, Printed, ThinkTools, Tier};
 
 pub use steve_modules::gateway::{CallTag, current_tag, for_item, purpose, tagged};
 
@@ -139,9 +139,9 @@ impl ModelGateway for RecordingGateway {
         prompt: &str,
         tier: Tier,
         timeout: Duration,
-        extra: &[String],
+        tools: &ThinkTools,
     ) -> Result<Printed> {
-        self.attempt(prompt, tier, timeout, extra, None)
+        self.attempt(prompt, tier, timeout, tools, None)
             .await
             .result
     }
@@ -150,10 +150,10 @@ impl ModelGateway for RecordingGateway {
         prompt: &str,
         tier: Tier,
         timeout: Duration,
-        extra: &[String],
+        tools: &ThinkTools,
         on_text: OnText<'_>,
     ) -> Result<Printed> {
-        self.attempt(prompt, tier, timeout, extra, Some(on_text))
+        self.attempt(prompt, tier, timeout, tools, Some(on_text))
             .await
             .result
     }
@@ -162,12 +162,12 @@ impl ModelGateway for RecordingGateway {
         prompt: &str,
         tier: Tier,
         timeout: Duration,
-        extra: &[String],
+        tools: &ThinkTools,
         on_text: Option<OnText<'_>>,
     ) -> Attempt {
         let a = self
             .inner
-            .attempt(prompt, tier, timeout, extra, on_text)
+            .attempt(prompt, tier, timeout, tools, on_text)
             .await;
         self.record(&a);
         a
@@ -310,7 +310,7 @@ mod tests {
         let p = tagged(
             "route",
             "default",
-            gw.call("hi", Tier::Fast, Duration::from_secs(10), &[]),
+            gw.call("hi", Tier::Fast, Duration::from_secs(10), &ThinkTools::None),
         )
         .await
         .unwrap();
@@ -359,7 +359,12 @@ mod tests {
         // `slow` times out, then `dead` fails at once; the bound leaves room for a loaded test run to
         // spawn the script (300 ms was flaky)
         let e = gw
-            .call("hi", Tier::Smart, Duration::from_millis(1500), &[])
+            .call(
+                "hi",
+                Tier::Smart,
+                Duration::from_millis(1500),
+                &ThinkTools::None,
+            )
             .await
             .unwrap_err();
         assert_eq!(e.to_string(), "Command failed: boom");
@@ -431,9 +436,13 @@ mod tests {
         );
         purpose(
             "chat",
-            fast_only.call_streaming("hi", Tier::Smart, Duration::from_secs(10), &[], &|_| {
-                *seen.lock().unwrap() += 1
-            }),
+            fast_only.call_streaming(
+                "hi",
+                Tier::Smart,
+                Duration::from_secs(10),
+                &ThinkTools::None,
+                &|_| *seen.lock().unwrap() += 1,
+            ),
         )
         .await
         .unwrap();

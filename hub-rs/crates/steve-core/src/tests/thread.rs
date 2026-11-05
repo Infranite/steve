@@ -555,7 +555,10 @@ async fn chat_attachments_are_read_by_steve_and_carried_into_promote() {
     );
     let rel = format!(".steve/attachments/{}-a.png", &f.id[4..]);
     assert!(ans.contains(&format!("User: 这是什么\n\n用户附带了 1 个附件，已保存在工作目录里（绝对路径前缀 {}/），需要时直接读取：\n- {rel}（image/png，1 KB，图片也直接附在这条消息里）", k.core.config().scratch.display())), "{ans}");
-    assert!(k.gw.extras.lock().unwrap().last().unwrap().is_empty());
+    assert_eq!(
+        *k.gw.tools.lock().unwrap().last().unwrap(),
+        crate::gateway::ThinkTools::None
+    );
     let imgs = k.gw.images.lock().unwrap().last().unwrap().clone();
     assert_eq!(imgs.len(), 1);
     assert_eq!(imgs[0]["type"], "image");
@@ -581,6 +584,38 @@ async fn chat_attachments_are_read_by_steve_and_carried_into_promote() {
             .1
             .clone();
     assert_eq!(sent, vec![f]);
+}
+
+/// A chat answer about a text file and an image: Read for the text file only (by id and the path
+/// the prompt names), the image inline.
+#[tokio::test]
+async fn a_chat_answer_reads_the_files_that_are_not_inline_images() {
+    use crate::gateway::{Readable, ThinkTools};
+    let k = Kit::new();
+    router(&k, json!({"kind": "chat", "title": "看日志"}), "看过了");
+    let img = k.file("a.png", "image/png", b"\x89PNG fake");
+    let txt = k.file("log.txt", "text/plain", b"line");
+    k.core
+        .say(WS, "这是什么", &[img.clone(), txt.clone()])
+        .unwrap();
+    let ms = settle(&k, 2).await;
+    let rel = format!(".steve/attachments/{}-log.txt", &txt.id[4..]);
+    let ans = &k.gw.calls.lock().unwrap()[1];
+    assert!(
+        ans.contains("read the other attached files with the Read tool"),
+        "{ans}"
+    );
+    assert!(ans.contains(&format!("- {rel}（text/plain")), "{ans}");
+    assert_eq!(
+        *k.gw.tools.lock().unwrap().last().unwrap(),
+        ThinkTools::Read(vec![Readable {
+            file_id: txt.id.clone(),
+            rel_path: rel.clone(),
+        }])
+    );
+    assert!(k.core.config().scratch.join(&rel).exists());
+    assert_eq!(k.gw.images.lock().unwrap().last().unwrap().len(), 1);
+    assert_eq!(ms[1].author, "steve");
 }
 
 #[tokio::test]
@@ -703,7 +738,7 @@ async fn real_model_print_and_route() {
             "Reply with ONLY this JSON: {\"ok\":true}",
             Tier::Fast,
             std::time::Duration::from_secs(90),
-            &[],
+            &crate::gateway::ThinkTools::None,
         )
         .await
         .unwrap();

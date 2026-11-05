@@ -35,6 +35,8 @@ fn kb(n: i64) -> String {
 pub struct ForAgent {
     pub note: String,
     pub images: Vec<Value>,
+    /// the copies that are not inline images, which only the Read tool reaches
+    pub readable: Vec<crate::gateway::Readable>,
 }
 
 /// Copy the attachments into `<cwd>/.steve/attachments` and say where they are.
@@ -56,6 +58,7 @@ pub fn for_agent(
     }
     let mut lines = vec![];
     let mut images = vec![];
+    let mut readable = vec![];
     for r in files {
         let Some(f) = db.file(&r.id)? else { continue };
         let rel = format!(
@@ -73,6 +76,11 @@ pub fn for_agent(
             let data = base64::engine::general_purpose::STANDARD
                 .encode(std::fs::read(blob_path(data_dir, &f))?);
             images.push(json!({"type": "image", "data": data, "mimeType": f.mime}));
+        } else {
+            readable.push(crate::gateway::Readable {
+                file_id: f.id.clone(),
+                rel_path: rel.clone(),
+            });
         }
         let mime = f.mime.split(';').next().unwrap_or("");
         lines.push(format!(
@@ -93,6 +101,7 @@ pub fn for_agent(
             lines.join("\n")
         ),
         images,
+        readable,
     })
 }
 

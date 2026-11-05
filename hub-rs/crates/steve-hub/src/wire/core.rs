@@ -1505,9 +1505,12 @@ impl Domain for CoreDomain {
         let p = steve_core::stats::tagged(
             purpose,
             ws,
-            self.core
-                .gateway()
-                .call(prompt, t, Duration::from_millis(timeout_ms), &[]),
+            self.core.gateway().call(
+                prompt,
+                t,
+                Duration::from_millis(timeout_ms),
+                &steve_core::gateway::ThinkTools::None,
+            ),
         )
         .await
         .map_err(cerr)?;
