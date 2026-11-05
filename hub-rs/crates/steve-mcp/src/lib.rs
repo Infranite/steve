@@ -239,52 +239,66 @@ struct PublishArgs {
 }
 
 impl<B: Backend> Handler<B> {
-    /// Runs one tool; `Ok` is the success text, `Err` the `isError` text.
     async fn run(&self, s: &B::Session, name: &str, args: &JsonObject) -> Result<String, String> {
-        tools::validate(name, args)?;
-        let b = &*self.backend;
-        let done = match name {
-            tools::UPDATE => {
-                let a: UpdateArgs = parse(args)?;
-                b.update(s, a.now, a.plan)
-                    .await
-                    .map(|_| "Steve updated the item.".to_owned())
-            }
-            tools::ASK => {
-                let a: AskArgs = parse(args)?;
-                let hint = AskHint {
-                    recommended: a.recommended,
-                    why: a.why,
-                };
-                b.ask(s, a.question, a.options, hint)
-                    .await
-                    .map(|_| format!("Question sent to the user. {END}"))
-            }
-            tools::REQUEST_APPROVAL => {
-                let a: ApprovalArgs = parse(args)?;
-                b.request_approval(s, a.action, a.detail)
-                    .await
-                    .map(|_| format!("Approval requested. {END}"))
-            }
-            tools::DELIVER => {
-                let a: DeliverArgs = parse(args)?;
-                b.deliver(s, a.summary, a.outputs, a.checks, a.unfinished)
-                    .await
-                    .map(|_| format!("Delivered for acceptance. {END}"))
-            }
-            tools::PUBLISH => {
-                let a: PublishArgs = parse(args)?;
-                b.publish(s, a.branch, a.summary)
-                    .await
-                    .map(|_| format!("Release requested. {END}"))
-            }
-            _ => return Err(format!("MCP error -32602: Tool {name} not found")),
-        };
-        done.map_err(|e| {
-            tracing::warn!(tool = name, error = %e, "steve tool failed");
-            e.to_string()
-        })
+        run(&*self.backend, s, name, args).await
     }
+}
+
+/// Whether `name` is one of the five Steve tools served here.
+pub fn handles(name: &str) -> bool {
+    tools::list().iter().any(|t| t.name == name)
+}
+
+/// Runs one of the five Steve tools, independent of any tool protocol: `Ok` is the success text,
+/// `Err` the error text (MCP returns them as a result and an `isError` result).
+pub async fn run<B: Backend>(
+    b: &B,
+    s: &B::Session,
+    name: &str,
+    args: &JsonObject,
+) -> Result<String, String> {
+    tools::validate(name, args)?;
+    let done = match name {
+        tools::UPDATE => {
+            let a: UpdateArgs = parse(args)?;
+            b.update(s, a.now, a.plan)
+                .await
+                .map(|_| "Steve updated the item.".to_owned())
+        }
+        tools::ASK => {
+            let a: AskArgs = parse(args)?;
+            let hint = AskHint {
+                recommended: a.recommended,
+                why: a.why,
+            };
+            b.ask(s, a.question, a.options, hint)
+                .await
+                .map(|_| format!("Question sent to the user. {END}"))
+        }
+        tools::REQUEST_APPROVAL => {
+            let a: ApprovalArgs = parse(args)?;
+            b.request_approval(s, a.action, a.detail)
+                .await
+                .map(|_| format!("Approval requested. {END}"))
+        }
+        tools::DELIVER => {
+            let a: DeliverArgs = parse(args)?;
+            b.deliver(s, a.summary, a.outputs, a.checks, a.unfinished)
+                .await
+                .map(|_| format!("Delivered for acceptance. {END}"))
+        }
+        tools::PUBLISH => {
+            let a: PublishArgs = parse(args)?;
+            b.publish(s, a.branch, a.summary)
+                .await
+                .map(|_| format!("Release requested. {END}"))
+        }
+        _ => return Err(format!("MCP error -32602: Tool {name} not found")),
+    };
+    done.map_err(|e| {
+        tracing::warn!(tool = name, error = %e, "steve tool failed");
+        e.to_string()
+    })
 }
 
 impl<B: Backend> ServerHandler for Handler<B> {

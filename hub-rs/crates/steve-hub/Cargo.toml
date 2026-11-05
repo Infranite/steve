@@ -27,6 +27,7 @@ steve-channels = { path = "../steve-channels" }
 steve-mail = { path = "../steve-mail" }
 steve-vault = { path = "../steve-vault" }
 steve-stats = { path = "../steve-stats" }
+steve-node-api = { path = "../steve-node-api" }
 anyhow = "=1.0.104"
 async-trait = "=0.1.92"
 axum = { version = "=0.8.9", features = ["http1", "json", "query", "tokio", "macros", "multipart"] }

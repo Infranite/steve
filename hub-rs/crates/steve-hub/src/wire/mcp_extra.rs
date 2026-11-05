@@ -210,93 +210,12 @@ pub async fn layer(State(x): State<Extra>, req: Request, next: Next) -> Response
             let Some(s) = session else {
                 return StatusCode::UNAUTHORIZED.into_response();
             };
-            let store = x.store.clone();
-            let ws = s.workspace_id.clone();
-            let user = tokio::task::spawn_blocking(move || owner(&store, &ws))
-                .await
-                .ok()
-                .flatten()
-                .unwrap_or_default();
-            let cx = mcp::McpCx {
-                ws: s.workspace_id,
-                user,
-                bot_id: s.bot_id.unwrap_or_else(|| "agent".into()),
-                item_id: s.item_id,
-                session_id: Some(s.id),
-            };
             let args = m
                 .pointer("/params/arguments")
                 .cloned()
                 .unwrap_or_else(|| json!({}));
             let id = m.get("id").cloned().unwrap_or(Value::Null);
-            let out = match tool_owner {
-                Owner::Upgrade => {
-                    let ws = cx.ws.clone();
-                    let store = x.store.clone();
-                    let may_request=tokio::task::spawn_blocking(move||store.reader(|c|{let (members,owners):(i64,i64)=c.query_row("SELECT COUNT(*),COALESCE(SUM(CASE WHEN u.role='owner' THEN 1 ELSE 0 END),0) FROM workspace_members wm JOIN users u ON u.id=wm.user_id WHERE wm.workspace_id=?",[ws],|r|Ok((r.get(0)?,r.get(1)?)))?;Ok::<_,steve_store::StoreError>(members==1&&owners==1)}).unwrap_or(false)).await.unwrap_or(false);
-                    if args["action"] == "request" && !may_request {
-                        Err("共享工作空间或非实例管理员的工作空间目前只能检查/查看升级；请实例管理员从设置发起升级".into())
-                    } else {
-                        match crate::config::Config::from_env()
-                            .map_err(|e| e.to_string())
-                            .and_then(|cfg| {
-                                crate::upgrades::Updates::new(&cfg).map_err(|e| e.to_string())
-                            }) {
-                            Ok(u) => u
-                                .agent(cx.session_id.as_deref().unwrap_or_default(), &args)
-                                .await
-                                .map_err(|e| e.to_string()),
-                            Err(e) => Err(e),
-                        }
-                    }
-                }
-                Owner::Contacts => mcp::call(&x.modules, &x.ports, &cx, &name, &args).await,
-                Owner::Knowledge => {
-                    steve_knowledge::tools::call(&x.modules, &x.kb, &cx, &name, &args).await
-                }
-                // synchronous (one write transaction): off the runtime
-                Owner::Vault => {
-                    let ucx = steve_modules::vault::UseCx::from(&cx);
-                    let out =
-                        steve_modules::vault::mcp::call(&x.tools.uses, &ucx, &name, &args).await;
-                    approval(&x, &cx, out)
-                }
-                Owner::Github => {
-                    let out = steve_github::mcp::call(&x.tools.gh, &cx, &name, &args).await;
-                    approval(&x, &cx, out)
-                }
-                // `steve_mail_draft` marks the session itself (`DraftHooks::awaiting_approval`)
-                Owner::Mail => steve_mail::mcp::call(&x.tools.mail, &cx, &name, &args).await,
-                Owner::Flow => steve_flow::mcp::call(&x.tools.flow, &cx, &name, &args).await,
-                Owner::ReplySource => match (
-                    args.get("text").and_then(Value::as_str),
-                    cx.item_id.as_deref(),
-                ) {
-                    (None, _) => Err(format!(
-                        "MCP error -32602: Input validation error: Invalid arguments for tool {REPLY_SOURCE}: Invalid input: expected string, received {} at text",
-                        if args.get("text").is_none() {
-                            "undefined"
-                        } else {
-                            "other"
-                        }
-                    )),
-                    (Some(_), None) => Ok(steve_channels::outbound::SRC_NO_SOURCE.to_string()),
-                    (Some(text), Some(item)) => x
-                        .tools
-                        .outbox
-                        .reply_source(&x.tools.channels, &cx.ws, item, text)
-                        .await
-                        .map_err(|e| e.to_string()),
-                },
-                Owner::Remember => {
-                    let (m, kb) = (x.modules.clone(), x.kb.clone());
-                    tokio::task::spawn_blocking(move || {
-                        steve_knowledge::candidates::remember(&m, &kb, &cx, &args)
-                    })
-                    .await
-                    .unwrap_or_else(|e| Err(e.to_string()))
-                }
-            };
+            let out = call_owned(&x, s, tool_owner, &name, args).await;
             return match out {
                 Ok(text) => json_rpc(
                     &id,
@@ -334,4 +253,110 @@ pub async fn layer(State(x): State<Extra>, req: Request, next: Next) -> Response
     }
     rp.headers.remove(header::CONTENT_LENGTH);
     Response::from_parts(rp, Body::from(v.to_string()))
+}
+
+/// A module's tool (`owner`), run for session `s`: the success text or the error text. Independent of
+/// any tool protocol (MCP wraps it below; the Node path's tool service calls it too).
+async fn call_owned(
+    x: &Extra,
+    s: steve_store::Session,
+    tool_owner: Owner,
+    name: &str,
+    args: Value,
+) -> Result<String, String> {
+    let store = x.store.clone();
+    let ws = s.workspace_id.clone();
+    let user = tokio::task::spawn_blocking(move || owner(&store, &ws))
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let cx = mcp::McpCx {
+        ws: s.workspace_id,
+        user,
+        bot_id: s.bot_id.unwrap_or_else(|| "agent".into()),
+        item_id: s.item_id,
+        session_id: Some(s.id),
+    };
+    let out: Result<String, String> = match tool_owner {
+        Owner::Upgrade => {
+            let ws = cx.ws.clone();
+            let store = x.store.clone();
+            let may_request=tokio::task::spawn_blocking(move||store.reader(|c|{let (members,owners):(i64,i64)=c.query_row("SELECT COUNT(*),COALESCE(SUM(CASE WHEN u.role='owner' THEN 1 ELSE 0 END),0) FROM workspace_members wm JOIN users u ON u.id=wm.user_id WHERE wm.workspace_id=?",[ws],|r|Ok((r.get(0)?,r.get(1)?)))?;Ok::<_,steve_store::StoreError>(members==1&&owners==1)}).unwrap_or(false)).await.unwrap_or(false);
+            if args["action"] == "request" && !may_request {
+                Err("共享工作空间或非实例管理员的工作空间目前只能检查/查看升级；请实例管理员从设置发起升级".into())
+            } else {
+                match crate::config::Config::from_env()
+                    .map_err(|e| e.to_string())
+                    .and_then(|cfg| crate::upgrades::Updates::new(&cfg).map_err(|e| e.to_string()))
+                {
+                    Ok(u) => u
+                        .agent(cx.session_id.as_deref().unwrap_or_default(), &args)
+                        .await
+                        .map_err(|e| e.to_string()),
+                    Err(e) => Err(e),
+                }
+            }
+        }
+        Owner::Contacts => mcp::call(&x.modules, &x.ports, &cx, name, &args).await,
+        Owner::Knowledge => steve_knowledge::tools::call(&x.modules, &x.kb, &cx, name, &args).await,
+        // synchronous (one write transaction): off the runtime
+        Owner::Vault => {
+            let ucx = steve_modules::vault::UseCx::from(&cx);
+            let out = steve_modules::vault::mcp::call(&x.tools.uses, &ucx, name, &args).await;
+            approval(x, &cx, out)
+        }
+        Owner::Github => {
+            let out = steve_github::mcp::call(&x.tools.gh, &cx, name, &args).await;
+            approval(x, &cx, out)
+        }
+        // `steve_mail_draft` marks the session itself (`DraftHooks::awaiting_approval`)
+        Owner::Mail => steve_mail::mcp::call(&x.tools.mail, &cx, name, &args).await,
+        Owner::Flow => steve_flow::mcp::call(&x.tools.flow, &cx, name, &args).await,
+        Owner::ReplySource => match (
+            args.get("text").and_then(Value::as_str),
+            cx.item_id.as_deref(),
+        ) {
+            (None, _) => Err(format!(
+                "MCP error -32602: Input validation error: Invalid arguments for tool {REPLY_SOURCE}: Invalid input: expected string, received {} at text",
+                if args.get("text").is_none() {
+                    "undefined"
+                } else {
+                    "other"
+                }
+            )),
+            (Some(_), None) => Ok(steve_channels::outbound::SRC_NO_SOURCE.to_string()),
+            (Some(text), Some(item)) => x
+                .tools
+                .outbox
+                .reply_source(&x.tools.channels, &cx.ws, item, text)
+                .await
+                .map_err(|e| e.to_string()),
+        },
+        Owner::Remember => {
+            let (m, kb) = (x.modules.clone(), x.kb.clone());
+            tokio::task::spawn_blocking(move || {
+                steve_knowledge::candidates::remember(&m, &kb, &cx, &args)
+            })
+            .await
+            .unwrap_or_else(|e| Err(e.to_string()))
+        }
+    };
+    out
+}
+
+/// A module's tool by name; `None`: no module serves it.
+pub(crate) async fn call_module(
+    x: &Extra,
+    s: steve_store::Session,
+    name: &str,
+    args: Value,
+) -> Option<Result<String, String>> {
+    let owner = owner_of(name)?;
+    Some(call_owned(x, s, owner, name, args).await)
+}
+
+/// The modules' tool definitions (what `tools/list` adds).
+pub(crate) fn module_tools() -> Vec<Value> {
+    extra_tools()
 }

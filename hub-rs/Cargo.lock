@@ -4832,6 +4832,7 @@ dependencies = [
  "steve-mail",
  "steve-mcp",
  "steve-modules",
+ "steve-node-api",
  "steve-research",
  "steve-stats",
  "steve-store",

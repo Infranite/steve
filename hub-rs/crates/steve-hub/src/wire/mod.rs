@@ -18,6 +18,7 @@ pub mod research;
 pub mod research_mcp;
 pub mod signals;
 pub mod store;
+pub mod tool_service;
 
 use std::sync::Arc;
 
