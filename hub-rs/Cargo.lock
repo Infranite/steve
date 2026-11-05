@@ -5278,6 +5278,8 @@ dependencies = [
  "sha2 0.11.1",
  "steve-acp",
  "steve-node-api",
+ "steve-print",
+ "steve-research",
  "tempfile",
  "tokio",
  "tracing",

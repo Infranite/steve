@@ -305,6 +305,9 @@ pub struct ResearchOutcome {
     pub sandboxed: bool,
     /// The harness's closing `result` object (tokens per model for the statistics), when it sent one.
     pub result: Option<Value>,
+    /// What the model wrote before the answer was shaped: the closing result's text, or the part
+    /// written until the end ([`present`] turns it into `answer`, `offer` and `citations`).
+    pub raw: String,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -535,6 +538,7 @@ fn failed_outcome(run_id: String, err: String) -> ResearchOutcome {
         cost_usd: None,
         sandboxed: false,
         result: None,
+        raw: String::new(),
     }
 }
 
@@ -695,6 +699,46 @@ struct Ctx<'a> {
     codex_exe: Option<PathBuf>,
     /// The `sandbox-exec` profile, when the run is sandboxed.
     profile: Option<PathBuf>,
+    on_spawn: Option<SpawnHook>,
+}
+
+/// Told the process group id of each harness right after it started; `false` ends it at once (the
+/// host could not record it) and the attempt fails.
+pub type SpawnHook = Arc<dyn Fn(u32) -> bool + Send + Sync>;
+
+/// One attempt for a host that runs each attempt on its own (a Node job, one model per job).
+pub struct OneAttempt {
+    /// The run's directory names (`<scratch>/<run_id>`, `<files_root>/<run_id>`).
+    pub run_id: String,
+    /// What to run: the model, the session to resume and the prompt ([`plan`] made it on the Hub).
+    pub plan: AttemptPlan,
+    pub on_spawn: Option<SpawnHook>,
+}
+
+/// Runs exactly one attempt with all of a run's layers (allowlist and settings, guard, sandbox,
+/// budgets, attachments) and returns its outcome. No fallback: another model is another attempt.
+/// Admission (one run per workspace, `max_global`) is the caller's. Dropping the future kills the
+/// harness's process group.
+pub async fn run_attempt(
+    cfg: &ResearchConfig,
+    req: ResearchRequest,
+    one: OneAttempt,
+    events: mpsc::UnboundedSender<ResearchEvent>,
+    stop: watch::Receiver<bool>,
+) -> ResearchOutcome {
+    let plans = [one.plan];
+    let processes = Arc::new(crate::processes::Processes::default());
+    let host = Host {
+        plans: &plans,
+        on_spawn: one.on_spawn,
+    };
+    execute_plans(cfg, req, one.run_id, events, stop, processes, host).await
+}
+
+/// What a run tries and how its processes are reported.
+struct Host<'p> {
+    plans: &'p [AttemptPlan],
+    on_spawn: Option<SpawnHook>,
 }
 
 async fn execute(
@@ -702,8 +746,25 @@ async fn execute(
     req: ResearchRequest,
     run_id: String,
     tx: mpsc::UnboundedSender<ResearchEvent>,
+    stop: watch::Receiver<bool>,
+    processes: Arc<crate::processes::Processes>,
+) -> ResearchOutcome {
+    let plans = plan(&req, cfg);
+    let host = Host {
+        plans: &plans,
+        on_spawn: None,
+    };
+    execute_plans(cfg, req, run_id, tx, stop, processes, host).await
+}
+
+async fn execute_plans(
+    cfg: &ResearchConfig,
+    req: ResearchRequest,
+    run_id: String,
+    tx: mpsc::UnboundedSender<ResearchEvent>,
     mut stop: watch::Receiver<bool>,
     processes: Arc<crate::processes::Processes>,
+    host: Host<'_>,
 ) -> ResearchOutcome {
     let t0 = Instant::now();
     let budget = req.budget.unwrap_or(cfg.budget);
@@ -776,9 +837,9 @@ async fn execute(
         return failed_outcome(run_id, format!("research setup: {e}"));
     }
 
-    let plans = plan(&req, cfg);
     let ctx = Ctx {
         processes,
+        on_spawn: host.on_spawn,
         cfg,
         req: &req,
         budget,
@@ -815,7 +876,7 @@ async fn execute(
         stop: &mut stop,
         soft_sent: false,
     };
-    let last_err = drive(&plans, &mut local)
+    let last_err = drive(host.plans, &mut local)
         .instrument(tracing::info_span!("research", run = %run_id))
         .await;
     let _ = tokio::fs::remove_file(ctx.run_dir.join("mcp.json")).await;
@@ -836,7 +897,7 @@ struct Local<'a, 'c> {
 
 impl AttemptRunner for Local<'_, '_> {
     async fn run(&mut self, plan: &AttemptPlan) -> Attempted {
-        let error = run_attempt(self.ctx, plan, self.st, self.stop, &mut self.soft_sent)
+        let error = run_plan(self.ctx, plan, self.st, self.stop, &mut self.soft_sent)
             .await
             .err();
         Attempted {
@@ -855,7 +916,7 @@ impl AttemptRunner for Local<'_, '_> {
 }
 
 /// One attempt: the harness invocation for this plan's model, prompt and session, run to its end.
-async fn run_attempt(
+async fn run_plan(
     ctx: &Ctx<'_>,
     plan: &AttemptPlan,
     st: &mut State,
@@ -985,6 +1046,12 @@ async fn attempt(
         });
     }
     let pid = child.id();
+    if let (Some(hook), Some(p)) = (&ctx.on_spawn, pid)
+        && !hook(p)
+    {
+        kill_tree(&mut child, pid).await;
+        return Err("harness process not recorded".into());
+    }
     let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
         return Err("harness 没有输出".into());
     };
@@ -1243,16 +1310,7 @@ fn finish(
         (RunStatus::Done, Some(t)) if !t.trim().is_empty() => t.to_string(),
         _ => st.partial().to_string(),
     };
-    let (mut text, mut offer) = answer::split_offer(&raw);
-    match &status {
-        RunStatus::Stopped => text = answer::with_mark(&text, answer::MARK_STOPPED),
-        RunStatus::Budget(_) => {
-            text = answer::with_mark(&text, answer::MARK_BUDGET);
-            offer = offer.or_else(|| Some(answer::deeper_offer(&req.question)));
-        }
-        RunStatus::Violated(_) => text = answer::with_mark(&text, answer::MARK_VIOLATION),
-        _ => {}
-    }
+    let (text, offer, citations) = present(&status, &raw, &req.question, &st.files_read);
     let mut tools = st.tools;
     for t in &mut tools {
         if t.ok.is_none() {
@@ -1260,7 +1318,8 @@ fn finish(
         }
     }
     ResearchOutcome {
-        citations: answer::citations(&text, &st.files_read),
+        citations,
+        raw,
         run_id,
         status,
         model: st.model,
@@ -1276,6 +1335,29 @@ fn finish(
         sandboxed,
         result: st.result.clone(),
     }
+}
+
+/// What the thread shows for a run that ended with `status` after writing `raw`: the answer without
+/// its `OFFER:` line and with the end mark of a stopped, cut or violating run, the offer (a cut run
+/// offers to go deeper into `question`) and the citations of the files it read.
+pub fn present(
+    status: &RunStatus,
+    raw: &str,
+    question: &str,
+    files_read: &[String],
+) -> (String, Option<Offer>, Vec<Citation>) {
+    let (mut text, mut offer) = answer::split_offer(raw);
+    match status {
+        RunStatus::Stopped => text = answer::with_mark(&text, answer::MARK_STOPPED),
+        RunStatus::Budget(_) => {
+            text = answer::with_mark(&text, answer::MARK_BUDGET);
+            offer = offer.or_else(|| Some(answer::deeper_offer(question)));
+        }
+        RunStatus::Violated(_) => text = answer::with_mark(&text, answer::MARK_VIOLATION),
+        _ => {}
+    }
+    let citations = answer::citations(&text, files_read);
+    (text, offer, citations)
 }
 
 #[cfg(test)]

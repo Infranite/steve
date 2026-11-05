@@ -1,7 +1,8 @@
 //! Steve's tools as harnesses reach them: an MCP endpoint on this machine's loopback that turns each
 //! call into a [`ToolCall`] to the Hub ([`HubTools`]). The Hub defines, authorizes, runs and audits
 //! the tools; this only speaks MCP to the agent. A token stands for one session of this Node, and a
-//! call counts for the attempt that session runs at that moment (none running: refused).
+//! call counts for the attempt that session runs at that moment (none running: refused); or for one
+//! job attempt, valid until that job ends.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -36,9 +37,18 @@ pub trait Current: Send + Sync + 'static {
     fn execution(&self, session: &SessionId) -> Option<ExecutionRef>;
 }
 
+/// Whom a token was given to.
+#[derive(Clone, PartialEq)]
+enum Holder {
+    /// A session's harness: its calls count for the attempt it runs at the time.
+    Session(SessionId),
+    /// One job attempt's harness.
+    Job(ExecutionRef),
+}
+
 pub(crate) struct Endpoint {
     hub: Mutex<Option<Arc<dyn HubTools>>>,
-    tokens: Mutex<HashMap<String, SessionId>>,
+    tokens: Mutex<HashMap<String, Holder>>,
     current: Arc<dyn Current>,
     calls: AtomicU64,
     /// Random per process. The Hub keys its durable tool journal by (execution, CallId), and an
@@ -71,26 +81,43 @@ impl Endpoint {
 
     /// A new token for `session` (the previous ones of the session stay valid until revoked).
     pub fn token(&self, session: &SessionId) -> String {
+        self.issue(Holder::Session(session.clone()))
+    }
+
+    /// A token for one job attempt (`ExecutionRef::Job`), valid until [`Self::revoke_job`].
+    pub fn job_token(&self, exec: &ExecutionRef) -> String {
+        self.issue(Holder::Job(exec.clone()))
+    }
+
+    fn issue(&self, holder: Holder) -> String {
         use sha2::Digest as _;
         let n = self.calls.fetch_add(1, Ordering::SeqCst);
+        let who = match &holder {
+            Holder::Session(s) => s.to_string(),
+            Holder::Job(e) => e.attempt().to_string(),
+        };
         let seed = format!(
-            "{session}:{n}:{:?}:{:?}",
+            "{who}:{n}:{}:{:?}:{:?}",
+            self.boot,
             std::time::SystemTime::now(),
             std::thread::current().id()
         );
         let t = hex::encode(sha2::Sha256::digest(seed.as_bytes()));
-        self.tokens
-            .lock()
-            .unwrap()
-            .insert(t.clone(), session.clone());
+        self.tokens.lock().unwrap().insert(t.clone(), holder);
         t
     }
 
     pub fn revoke_session(&self, session: &SessionId) {
-        self.tokens.lock().unwrap().retain(|_, s| s != session);
+        let h = Holder::Session(session.clone());
+        self.tokens.lock().unwrap().retain(|_, s| *s != h);
     }
 
-    fn session_of(&self, token: &str) -> Option<SessionId> {
+    pub fn revoke_job(&self, exec: &ExecutionRef) {
+        let h = Holder::Job(exec.clone());
+        self.tokens.lock().unwrap().retain(|_, s| *s != h);
+    }
+
+    fn holder_of(&self, token: &str) -> Option<Holder> {
         self.tokens.lock().unwrap().get(token).cloned()
     }
 
@@ -136,7 +163,7 @@ fn boot_id() -> String {
 }
 
 #[derive(Clone)]
-struct Authed(SessionId);
+struct Authed(Holder);
 
 pub(crate) fn router(ep: Arc<Endpoint>) -> Router {
     let factory = {
@@ -181,10 +208,10 @@ async fn auth(State(ep): State<Arc<Endpoint>>, req: Request, next: Next) -> Resp
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
         .unwrap_or("");
-    let Some(session) = (!token.is_empty()).then(|| ep.session_of(token)).flatten() else {
+    let Some(holder) = (!token.is_empty()).then(|| ep.holder_of(token)).flatten() else {
         return empty(StatusCode::UNAUTHORIZED);
     };
-    req.extensions_mut().insert(Authed(session));
+    req.extensions_mut().insert(Authed(holder));
     next.run(req).await
 }
 
@@ -193,7 +220,7 @@ struct Handler {
 }
 
 impl Handler {
-    fn authed(ctx: &RequestContext<RoleServer>) -> Result<SessionId, McpError> {
+    fn authed(ctx: &RequestContext<RoleServer>) -> Result<Holder, McpError> {
         ctx.extensions
             .get::<axum::http::request::Parts>()
             .and_then(|p| p.extensions.get::<Authed>())
@@ -210,11 +237,19 @@ impl Handler {
             .ok_or_else(|| McpError::internal_error("the hub is not connected", None))
     }
 
-    fn execution(&self, session: &SessionId) -> Result<ExecutionRef, McpError> {
-        self.ep
-            .current
-            .execution(session)
-            .ok_or_else(|| McpError::invalid_request("no attempt of this session is running", None))
+    /// The attempt a call counts for: the session's running one, or the job's own (checked again
+    /// against the token, which goes when the job ends).
+    fn execution(&self, holder: &Holder) -> Result<ExecutionRef, McpError> {
+        match holder {
+            Holder::Session(session) => self.ep.current.execution(session).ok_or_else(|| {
+                McpError::invalid_request("no attempt of this session is running", None)
+            }),
+            Holder::Job(exec) => {
+                let live = self.ep.tokens.lock().unwrap().values().any(|h| h == holder);
+                live.then(|| exec.clone())
+                    .ok_or_else(|| McpError::invalid_request("this job has ended", None))
+            }
+        }
     }
 }
 
@@ -260,8 +295,8 @@ impl ServerHandler for Handler {
         _request: Option<PaginatedRequestParams>,
         ctx: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
-        let session = Self::authed(&ctx)?;
-        let exec = self.execution(&session)?;
+        let holder = Self::authed(&ctx)?;
+        let exec = self.execution(&holder)?;
         let catalog = self
             .hub()?
             .catalog(exec)
@@ -286,8 +321,8 @@ impl ServerHandler for Handler {
         request: CallToolRequestParams,
         ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, McpError> {
-        let session = Self::authed(&ctx)?;
-        let exec = self.execution(&session)?;
+        let holder = Self::authed(&ctx)?;
+        let exec = self.execution(&holder)?;
         let hub = self.hub()?;
         let id = self
             .ep

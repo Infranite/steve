@@ -14,6 +14,7 @@
 mod actor;
 mod journal;
 mod procs;
+mod research;
 mod tools;
 pub mod workspace;
 
@@ -160,6 +161,7 @@ pub(crate) struct Inner {
     snapshots: Mutex<HashMap<u64, Snapshot>>,
     cache_n: AtomicU64,
     tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    research: research::Research,
 }
 
 impl Inner {
@@ -983,6 +985,7 @@ impl LocalNode {
             snapshots: Mutex::new(HashMap::new()),
             cache_n: AtomicU64::new(0),
             tasks: Mutex::new(Vec::new()),
+            research: Default::default(),
         })))
     }
 
@@ -1617,8 +1620,11 @@ impl SessionExecutor for LocalNode {
 
 #[async_trait]
 impl JobExecutor for LocalNode {
-    async fn start_job(&self, _c: Command<JobSpec>) -> ApiResult<Receipt> {
-        unsupported("jobs")
+    async fn start_job(&self, c: Command<JobSpec>) -> ApiResult<Receipt> {
+        match &c.body.work {
+            JobWork::Research(_) => self.start_research(c).await,
+            JobWork::Think(_) => unsupported("think jobs"),
+        }
     }
 }
 

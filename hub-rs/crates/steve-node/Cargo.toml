@@ -17,6 +17,8 @@ serde_json = { version = "=1.0.154", features = ["preserve_order"] }
 sha2 = "=0.11.1"
 steve-acp = { path = "../steve-acp" }
 steve-node-api = { path = "../steve-node-api" }
+steve-print = { path = "../steve-print" }
+steve-research = { path = "../steve-research" }
 tokio = { version = "=1.54.1", features = ["rt", "sync", "time", "macros", "process", "fs", "net"] }
 tracing = "=0.1.44"
 
