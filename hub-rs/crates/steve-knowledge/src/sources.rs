@@ -79,6 +79,13 @@ pub fn builtin(tx: &Tx, ws: &str, kind: &str, actor: &str, now: i64) -> Result<S
 pub fn source_json(c: &Connection, s: &SourceRow) -> Result<Value> {
     let (docs, chunks) = repo::source_counts(c, s)?;
     let skipped = s.stats.get("skipped").and_then(Value::as_i64).unwrap_or(0);
+    let mut stats = json!({"docs": docs, "chunks": chunks, "skipped": skipped});
+    // set only by a folder scan that could not see everything (nothing was deleted)
+    for k in ["kept", "incomplete"] {
+        if let Some(v) = s.stats.get(k) {
+            stats[k] = v.clone();
+        }
+    }
     let cfg = &s.config;
     let list = |k: &str| {
         cfg.get(k)
@@ -98,7 +105,7 @@ pub fn source_json(c: &Connection, s: &SourceRow) -> Result<Value> {
         "paused": s.paused,
         "status": s.status,
         "error": s.error,
-        "stats": {"docs": docs, "chunks": chunks, "skipped": skipped},
+        "stats": stats,
         "last_sync": s.last_sync,
         "builtin": is_builtin(&s.kind),
         "revision": s.revision,

@@ -88,6 +88,8 @@ export default {
     chunks_one: "{{count}} chunk",
     chunks_other: "{{count}} chunks",
     skipped: "{{count}} skipped",
+    kept: "{{count}} not read this time, kept",
+    incomplete: "partly unreadable",
     syncing: "Syncing…",
     lastSync: "Synced {{time}}",
     neverSynced: "Not synced yet",
