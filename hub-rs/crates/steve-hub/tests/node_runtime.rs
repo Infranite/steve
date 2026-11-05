@@ -3222,6 +3222,49 @@ async fn working_counts_an_unknown_attempt_until_it_is_abandoned() {
     until("settled", || h.rt.working() == 0).await;
 }
 
+/// A Node stopped at boot (its tools did not connect) refuses the Stop that would settle its open
+/// or unknown turns: it holds no drain, or an upgrade, the one way to fix it, could never seal.
+#[tokio::test]
+async fn a_stopped_node_holds_no_drain_with_an_open_or_unknown_turn() {
+    let h = hub();
+    h.bind();
+    let exec = h.running("hello").await;
+    let (_, start_op) = h
+        .node
+        .log()
+        .into_iter()
+        .find(|(m, _)| *m == "start_turn")
+        .unwrap();
+    h.node.lose_track(&exec).unwrap();
+    h.node
+        .emit(
+            Subject::Execution(exec.clone()),
+            EventBody::OperationChanged {
+                receipt: Receipt {
+                    operation: start_op,
+                    state: Observed::Unknown {
+                        reason: "node restarted".into(),
+                    },
+                },
+            },
+        )
+        .await
+        .unwrap();
+    until("unknown", || {
+        h.q::<String>("SELECT state FROM runtime_attempts") == "unknown"
+    })
+    .await;
+    assert_eq!(h.rt.working(), 1);
+    h.rt.stop("its tools did not connect");
+    assert!(h.rt.cancel(S).is_err(), "a stopped Node cannot abandon it");
+    assert_eq!(h.rt.working(), 0, "a stopped Node runs nothing");
+    // the turn itself is left as it was, unknown, for a Node that runs again
+    assert_eq!(
+        h.q::<String>("SELECT state FROM runtime_attempts"),
+        "unknown"
+    );
+}
+
 /// A configure whose outcome is unknown keeps the session configuring: the drain waits for it.
 #[tokio::test]
 async fn working_counts_a_configuring_harness() {

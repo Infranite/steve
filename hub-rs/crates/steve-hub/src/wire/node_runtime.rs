@@ -868,7 +868,12 @@ impl NodeRuntime {
     /// until it is answered or expires, retrying, or unknown until settled or abandoned), plus each
     /// session whose harness is opening, configuring or releasing with no open turn. A read error
     /// counts as work: the drain then waits rather than seal under a running turn.
+    /// A stopped Node counts nothing: it runs nothing and refuses the Stop that would settle its
+    /// open turns, so a restart cuts nothing (its unknown turns stay unknown across it).
     pub fn working(&self) -> usize {
+        if self.stopped.lock().unwrap().is_some() {
+            return 0;
+        }
         self.store
             .reader(|c| {
                 Ok::<_, StoreError>(c.query_row(
