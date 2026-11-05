@@ -117,12 +117,14 @@ pub enum Severity {
 }
 
 /// What a tool call or a permission request would do, in Steve's terms, structured enough for the
-/// Hub (and YOLO) to judge. What a driver cannot normalize is `Unknown` and goes by explicit policy.
+/// Hub (and YOLO) to judge. What a driver cannot normalize is `Unknown` and goes by explicit policy
+/// (never allowed just because an earlier unknown with the same summary was).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Action {
     Exec {
         command: String,
+        /// Inside the execution's own workspace; `None` is the workspace root (never "wherever").
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cwd: Option<PathRef>,
         network: NetworkScope,
@@ -130,6 +132,10 @@ pub enum Action {
     Write {
         paths: Vec<PathRef>,
         change_summary: String,
+        /// Hash of the whole change (the new contents or the patch), so an approval of one edit never
+        /// covers another with the same summary.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        change: Option<Digest>,
     },
     Delete {
         paths: Vec<PathRef>,
@@ -157,6 +163,36 @@ pub enum Action {
     },
 }
 
+/// What must still hold when an approved action runs: the Node checks it again before using the
+/// approval, and a change voids it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Precondition {
+    /// The workspace is at this revision.
+    Workspace {
+        workspace: WorkspaceRef,
+        revision: Revision,
+    },
+    /// The file has this version (`None`: it does not exist).
+    File {
+        path: PathRef,
+        version: Option<Revision>,
+    },
+    /// HEAD of the workspace's repository is this commit.
+    Head {
+        workspace: WorkspaceRef,
+        commit: String,
+    },
+}
+
+/// The digest a permission answer is bound to: the action and everything it assumes.
+pub fn permission_digest(
+    action: &Action,
+    preconditions: &[Precondition],
+) -> crate::common::ApiResult<Digest> {
+    crate::common::digest_of(&serde_json::json!({"action": action, "preconditions": preconditions}))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PermissionDecision {
@@ -172,7 +208,10 @@ pub struct PermissionRequest {
     /// Short title for the card (`git push`, `编辑 src/main.rs`).
     pub title: String,
     pub action: Action,
-    /// Hash of `action`: an answer only applies to the very action it was given for.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub preconditions: Vec<Precondition>,
+    /// [`permission_digest`] of `action` and `preconditions`: an answer only applies to the very
+    /// action, in the very state, it was given for.
     pub digest: Digest,
     pub choices: Vec<PermissionDecision>,
     pub expires_at: Timestamp,
@@ -297,11 +336,4 @@ pub struct UsageReport {
     pub context_limit: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost: Option<Money>,
-}
-
-impl Action {
-    /// The digest a permission answer is bound to.
-    pub fn digest(&self) -> Digest {
-        Digest::sha256(serde_json::to_string(self).unwrap_or_default().as_bytes())
-    }
 }

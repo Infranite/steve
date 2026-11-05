@@ -1,6 +1,7 @@
 //! Opaque ids. Each is its own type so a session id can never be passed where an attempt id belongs.
 //! They are checked when built or decoded (non-empty, at most 128 bytes, `[A-Za-z0-9_.:-]`), which
-//! keeps them safe in logs, file names and keys; whoever receives one still checks what it may do.
+//! keeps them printable and bounded. They are not file names (`..` is a valid id): a Node that names
+//! a directory after one encodes it first. Whoever receives an id still checks what it may do.
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -97,14 +98,17 @@ ids! {
     TransferId,
     /// The version of something that can change (a workspace, a policy, a decision).
     Revision,
-    /// A content hash, `sha256:<hex>`.
-    Digest,
     /// Where a harness session continues; only the Node that issued it understands it.
     ResumeHandle,
     /// A page position.
     Cursor,
     EventId,
 }
+
+/// A content hash, `sha256:` and 64 lowercase hex digits.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct Digest(String);
 
 impl Digest {
     /// `sha256:<hex>` of `bytes`.
@@ -115,6 +119,52 @@ impl Digest {
             hex::encode(sha2::Sha256::digest(bytes))
         ))
     }
+    pub fn new(s: impl Into<String>) -> Result<Self, BadId> {
+        let s = s.into();
+        let ok = s.strip_prefix("sha256:").is_some_and(|h| {
+            h.len() == 64
+                && h.bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        });
+        if ok {
+            Ok(Self(s))
+        } else {
+            Err(BadId(s.chars().take(40).collect()))
+        }
+    }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+impl TryFrom<String> for Digest {
+    type Error = BadId;
+    fn try_from(s: String) -> Result<Self, BadId> {
+        Self::new(s)
+    }
+}
+impl From<Digest> for String {
+    fn from(v: Digest) -> String {
+        v.0
+    }
+}
+impl fmt::Display for Digest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// An id derived from other text (`session:<id>`, a resource key): kept as is when it is a valid id,
+/// otherwise `<prefix>:` plus a hash, so deriving never fails and never collides on truncation.
+pub fn derived_id(prefix: &str, text: &str) -> String {
+    let plain = format!("{prefix}:{text}");
+    if check_id(&plain).is_ok() {
+        return plain;
+    }
+    use sha2::Digest as _;
+    format!(
+        "{prefix}:h{}",
+        &hex::encode(sha2::Sha256::digest(text.as_bytes()))[..32]
+    )
 }
 
 /// A path relative to a root or workspace: `/`-separated, no `..`, not absolute. The Node resolves it
@@ -130,7 +180,9 @@ impl RelPath {
             || s.starts_with('/')
             || s.contains('\\')
             || s.contains('\0')
-            || s.split('/').any(|c| c == "..");
+            || s.split('/').any(|c| c == "..")
+            || (!s.is_empty() && s.split('/').any(str::is_empty))
+            || s.as_bytes().get(1) == Some(&b':');
         if bad {
             Err(BadId(s.chars().take(40).collect()))
         } else {
@@ -174,10 +226,28 @@ mod tests {
     }
 
     #[test]
+    fn digests_and_derived_ids() {
+        assert!(Digest::new("x").is_err());
+        assert!(Digest::new(Digest::sha256(b"a").to_string()).is_ok());
+        assert_eq!(derived_id("session", "s_1"), "session:s_1");
+        let long = derived_id("session", &"x".repeat(128));
+        assert!(check_id(&long).is_ok() && long.starts_with("session:h"));
+        assert!(check_id(&derived_id("item", "ST 12/中文")).is_ok());
+    }
+
+    #[test]
     fn rel_paths_stay_inside() {
         assert!(RelPath::new("src/main.rs").is_ok());
         assert!(RelPath::new("").is_ok());
-        for bad in ["/etc/passwd", "../x", "a/../../b", "a\\b"] {
+        for bad in [
+            "/etc/passwd",
+            "../x",
+            "a/../../b",
+            "a\\b",
+            "a//b",
+            "a/",
+            "C:foo",
+        ] {
             assert!(RelPath::new(bad).is_err(), "{bad}");
         }
     }

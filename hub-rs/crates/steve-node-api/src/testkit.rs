@@ -1,15 +1,24 @@
-//! An in-memory Node for tests of the Hub side. It keeps the contract's rules, so a Hub that breaks
-//! them fails here and not on a real machine: commands are deduplicated by operation id and content,
-//! late commands are stale, an attempt never runs twice, a session runs one attempt at a time, a
-//! permission answer applies only to the request still waiting. Tests drive what the harness would do
-//! ([`FakeNode::emit`], [`FakeNode::finish`], [`FakeNode::ask_permission`]).
+//! An in-memory Node for tests of the Hub side. It keeps the contract's rules strictly, so a Hub that
+//! breaks them fails here and not on a real machine:
+//!
+//! - commands are deduplicated by operation id, method and content; a known command can always be
+//!   read back, a new one past its window is stale;
+//! - an attempt never runs twice; a session runs one attempt at a time; a final state never changes;
+//! - lifecycle facts must name the whole execution (session, turn and attempt), not just the attempt;
+//! - a permission answer applies only to the live request it was given for, before it expires, with
+//!   one of the offered choices;
+//! - a workspace in use (running, waiting or unknown) is never tidied; another Node's ids are refused;
+//! - events are numbered per stream, kept until acknowledged, replayable, never renumbered.
+//!
+//! What it does not simulate it refuses (`unsupported`) instead of pretending. Tests drive what the
+//! harness would do ([`FakeNode::emit`], [`FakeNode::finish`], [`FakeNode::ask_permission`]) and can
+//! stop it at fixed points ([`FakeNode::set_hook`]) to test interleavings without sleeping.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
-use crate::blob::*;
 use crate::common::*;
 use crate::discovery::*;
 use crate::events::*;
@@ -25,31 +34,94 @@ where
     T::try_from(s.into()).expect("valid test id")
 }
 
+/// Points where a test can hold the fake (a hook that blocks, a barrier).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Point {
+    /// A command arrived, nothing decided yet.
+    BeforeAccept(&'static str),
+    /// Accepted and recorded, the answer not yet returned.
+    AfterAccept(&'static str),
+    /// Events are about to go to the Hub.
+    BeforeCommit,
+}
+
+type Hook = Arc<dyn Fn(Point) + Send + Sync>;
+
+struct Accepted {
+    method: &'static str,
+    digest: Digest,
+    receipt: Receipt,
+    execution: Option<ExecutionRef>,
+    workspace: Option<WorkspaceRef>,
+    cancel_requested: bool,
+}
+
+struct Stream {
+    epoch: Epoch,
+    produced: u64,
+    acknowledged: u64,
+    kept: Vec<NodeEvent>,
+}
+
+struct Session {
+    open: OpenSession,
+    view: SessionView,
+}
+
 #[derive(Default)]
 struct State {
     now: i64,
-    /// operation id → (content digest, current receipt)
-    inbox: HashMap<OperationId, (Digest, Receipt)>,
-    /// attempt → the operation that runs it
-    attempts: HashMap<AttemptId, OperationId>,
-    /// session → its running attempt
+    inbox: BTreeMap<OperationId, Accepted>,
+    /// attempt → (its whole execution, the operation that runs it)
+    attempts: HashMap<AttemptId, (ExecutionRef, OperationId)>,
+    /// session → its running (or unknown) attempt
     active: HashMap<SessionId, ExecutionRef>,
-    sessions: HashMap<SessionId, SessionView>,
-    /// waiting permission requests
+    /// running jobs
+    jobs: BTreeSet<AttemptId>,
+    sessions: HashMap<SessionId, Session>,
     waiting: HashMap<PermissionId, PermissionRequest>,
-    workspaces: HashMap<WorkspaceId, WorkspaceView>,
-    /// stream → (epoch, next seq, unacknowledged events)
-    streams: BTreeMap<StreamId, (Epoch, u64, Vec<NodeEvent>)>,
-    /// every accepted command, in order: (method, operation id)
+    /// answered permissions: id → the resolution that was applied
+    resolved: HashMap<PermissionId, PermissionResolution>,
+    /// workspace → (resource, digest of its prepare spec, view)
+    workspaces: HashMap<WorkspaceId, (String, Digest, WorkspaceView)>,
+    streams: BTreeMap<StreamId, Stream>,
     log: Vec<(&'static str, OperationId)>,
     next_event: u64,
+    capacity: Option<Capacity>,
+    delivery_failures: u64,
 }
 
 pub struct FakeNode {
     node: NodeId,
     st: Mutex<State>,
     sink: Mutex<Option<Arc<dyn EventSink>>>,
+    hook: Mutex<Option<Hook>>,
 }
+
+/// What a new command's handler decided: its state, its execution and workspace, events to emit.
+struct Decided {
+    state: Observed,
+    execution: Option<ExecutionRef>,
+    workspace: Option<WorkspaceRef>,
+    events: Vec<(Subject, EventBody)>,
+}
+
+impl Decided {
+    fn done(result: OperationResult) -> Self {
+        Decided {
+            state: Observed::Finished {
+                outcome: Outcome::Succeeded,
+                result: Some(result),
+                error: None,
+            },
+            execution: None,
+            workspace: None,
+            events: vec![],
+        }
+    }
+}
+
+const HARNESS: &str = "claude-code";
 
 impl FakeNode {
     pub fn new(node: &str) -> Arc<Self> {
@@ -60,6 +132,7 @@ impl FakeNode {
                 ..Default::default()
             }),
             sink: Mutex::new(None),
+            hook: Mutex::new(None),
         })
     }
 
@@ -67,14 +140,30 @@ impl FakeNode {
         self.st.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    fn at(&self, p: Point) {
+        let hook = self.hook.lock().unwrap().clone();
+        if let Some(h) = hook {
+            h(p);
+        }
+    }
+
     /// Where events go (the Hub under test). Without one they are only kept for `replay`.
     pub fn connect(&self, sink: Arc<dyn EventSink>) {
         *self.sink.lock().unwrap() = Some(sink);
     }
 
-    /// The Node's clock (Unix ms) that `accept_before` is checked against.
+    pub fn set_hook(&self, hook: impl Fn(Point) + Send + Sync + 'static) {
+        *self.hook.lock().unwrap() = Some(Arc::new(hook));
+    }
+
+    /// The Node's clock (Unix ms).
     pub fn set_now(&self, ms: i64) {
         self.st().now = ms;
+    }
+
+    /// Limit concurrent sessions and jobs (unlimited by default).
+    pub fn set_capacity(&self, c: Capacity) {
+        self.st().capacity = Some(c);
     }
 
     /// Accepted commands in order, by method.
@@ -83,122 +172,233 @@ impl FakeNode {
     }
 
     pub fn receipt(&self, op: &OperationId) -> Option<Receipt> {
-        self.st().inbox.get(op).map(|(_, r)| r.clone())
+        self.st().inbox.get(op).map(|a| a.receipt.clone())
     }
 
-    /// The command inbox: same id and content → the receipt it already has; same id, other content →
-    /// conflict; past its window → stale. `start` runs only for a new command.
-    fn accept<T: serde::Serialize>(
+    pub fn cancel_requested(&self, op: &OperationId) -> bool {
+        self.st().inbox.get(op).is_some_and(|a| a.cancel_requested)
+    }
+
+    /// Batches the Hub failed to take (they stay for replay).
+    pub fn delivery_failures(&self) -> u64 {
+        self.st().delivery_failures
+    }
+
+    /// Events not yet acknowledged.
+    pub fn unacked(&self) -> usize {
+        self.st().streams.values().map(|s| s.kept.len()).sum()
+    }
+
+    /// The command inbox. Known id: same method and content → its receipt (even past the window);
+    /// otherwise conflict. New id: past the window → stale; then `decide` runs, under the same lock
+    /// as the recording and the numbering of its events, so a resend can never emit them twice.
+    async fn accept<T: serde::Serialize>(
         &self,
         method: &'static str,
         c: &Command<T>,
-        start: impl FnOnce(&mut State) -> ApiResult<Observed>,
+        decide: impl FnOnce(&mut State) -> ApiResult<Decided>,
     ) -> ApiResult<Receipt> {
-        let digest = c.digest();
-        let mut st = self.st();
-        if let Some((d, r)) = st.inbox.get(&c.id) {
-            return if *d == digest {
-                Ok(r.clone())
-            } else {
-                Err(ApiError::new(ErrorCode::Conflict, "same operation, other content").on(&c.id))
+        self.at(Point::BeforeAccept(method));
+        c.check_window()?;
+        let digest = c.digest(method)?;
+        let (receipt, events) = {
+            let mut st = self.st();
+            if let Some(a) = st.inbox.get(&c.id) {
+                return if a.digest == digest && a.method == method {
+                    Ok(a.receipt.clone())
+                } else {
+                    Err(
+                        ApiError::new(ErrorCode::Conflict, "same operation, other content")
+                            .on(&c.id),
+                    )
+                };
+            }
+            if st.now > c.accept_before.0 {
+                return Err(ApiError::new(ErrorCode::Stale, "past accept_before").on(&c.id));
+            }
+            let d = decide(&mut st)?;
+            let receipt = Receipt {
+                operation: c.id.clone(),
+                state: d.state,
             };
-        }
-        if st.now > c.accept_before.0 {
-            return Err(ApiError::new(ErrorCode::Stale, "past accept_before").on(&c.id));
-        }
-        let state = start(&mut st)?;
-        let r = Receipt {
-            operation: c.id.clone(),
-            state,
+            st.inbox.insert(
+                c.id.clone(),
+                Accepted {
+                    method,
+                    digest,
+                    receipt: receipt.clone(),
+                    execution: d.execution,
+                    workspace: d.workspace,
+                    cancel_requested: false,
+                },
+            );
+            st.log.push((method, c.id.clone()));
+            let events: Vec<NodeEvent> = d
+                .events
+                .into_iter()
+                .map(|(s, b)| Self::record(&mut st, s, b))
+                .collect();
+            (receipt, events)
         };
-        st.inbox.insert(c.id.clone(), (digest, r.clone()));
-        st.log.push((method, c.id.clone()));
-        Ok(r)
+        self.at(Point::AfterAccept(method));
+        // a Hub that cannot take the events now gets them on replay: the command stays accepted
+        self.deliver(events).await;
+        Ok(receipt)
     }
 
     fn stream_of(subject: &Subject) -> StreamId {
-        match subject {
-            Subject::Session { session } => id(format!("session:{session}")),
+        let s = match subject {
+            Subject::Session { session } => derived_id("session", session.as_str()),
             Subject::Execution(ExecutionRef::Turn { session, .. }) => {
-                id(format!("session:{session}"))
+                derived_id("session", session.as_str())
             }
-            Subject::Execution(ExecutionRef::Job { job, .. }) => id(format!("job:{job}")),
-            Subject::Operation { operation } => id(format!("op:{operation}")),
-        }
+            Subject::Execution(ExecutionRef::Job { job, .. }) => derived_id("job", job.as_str()),
+            Subject::Operation { operation } => derived_id("op", operation.as_str()),
+        };
+        id(s)
     }
 
-    /// Number an event in its stream and keep it until acknowledged.
     fn record(st: &mut State, subject: Subject, body: EventBody) -> NodeEvent {
         let stream = Self::stream_of(&subject);
         st.next_event += 1;
         let n = st.next_event;
         let at = Timestamp(st.now);
-        let entry = st
-            .streams
-            .entry(stream.clone())
-            .or_insert_with(|| (id("e1"), 1, vec![]));
+        let s = st.streams.entry(stream.clone()).or_insert_with(|| Stream {
+            epoch: id("e1"),
+            produced: 0,
+            acknowledged: 0,
+            kept: vec![],
+        });
+        s.produced += 1;
         let ev = NodeEvent {
             schema: crate::EVENT_SCHEMA,
             id: id(format!("ev_{n}")),
             at,
             cursor: Watermark {
                 stream,
-                epoch: entry.0.clone(),
-                seq: entry.1,
+                epoch: s.epoch.clone(),
+                seq: s.produced,
             },
             subject,
             body,
         };
-        entry.1 += 1;
-        entry.2.push(ev.clone());
+        s.kept.push(ev.clone());
         ev
     }
 
-    /// Send events to the sink and drop what it acknowledged.
-    async fn deliver(&self, events: Vec<NodeEvent>) -> ApiResult<()> {
+    async fn deliver(&self, events: Vec<NodeEvent>) {
+        if events.is_empty() {
+            return;
+        }
         let sink = self.sink.lock().unwrap().clone();
-        let Some(sink) = sink else { return Ok(()) };
-        let ack = sink.commit(EventBatch { events }).await?;
-        self.drop_acked(&ack);
-        Ok(())
-    }
-
-    fn drop_acked(&self, ack: &EventAck) {
-        let mut st = self.st();
-        for w in &ack.durable {
-            if let Some((epoch, _, kept)) = st.streams.get_mut(&w.stream)
-                && *epoch == w.epoch
-            {
-                kept.retain(|e| e.cursor.seq > w.seq);
+        let Some(sink) = sink else { return };
+        self.at(Point::BeforeCommit);
+        match sink.commit(EventBatch { events }).await {
+            Ok(ack) => {
+                let _ = self.apply_ack(&ack);
             }
+            Err(_) => self.st().delivery_failures += 1,
         }
     }
 
-    /// Events not yet acknowledged, per stream.
-    pub fn unacked(&self) -> usize {
-        self.st().streams.values().map(|(_, _, k)| k.len()).sum()
+    fn apply_ack(&self, ack: &EventAck) -> ApiResult<()> {
+        let mut st = self.st();
+        for w in &ack.durable {
+            let Some(s) = st.streams.get_mut(&w.stream) else {
+                return Err(ApiError::new(
+                    ErrorCode::Invalid,
+                    "ack of an unknown stream",
+                ));
+            };
+            if s.epoch != w.epoch {
+                return Err(ApiError::new(ErrorCode::Stale, "ack of another epoch"));
+            }
+            if w.seq > s.produced {
+                return Err(ApiError::new(
+                    ErrorCode::Invalid,
+                    "ack ahead of what was produced",
+                ));
+            }
+            if w.seq > s.acknowledged {
+                s.acknowledged = w.seq;
+                s.kept.retain(|e| e.cursor.seq > w.seq);
+            }
+        }
+        Ok(())
     }
 
-    /// What the harness reports while it runs (text, tools, usage…).
+    /// The execution `exec` names exactly, live (not finished).
+    fn live_op(st: &State, exec: &ExecutionRef) -> ApiResult<OperationId> {
+        match st.attempts.get(exec.attempt()) {
+            Some((e, op)) if e == exec => match st.inbox.get(op) {
+                Some(a) if !a.receipt.state.is_finished() => Ok(op.clone()),
+                _ => Err(ApiError::new(ErrorCode::Stale, "that attempt is over")),
+            },
+            Some(_) => Err(ApiError::new(
+                ErrorCode::Invalid,
+                "the attempt belongs to another execution",
+            )),
+            None => Err(ApiError::new(ErrorCode::Invalid, "no such attempt")),
+        }
+    }
+
+    /// What the harness reports while it runs (text, tools, usage…), for a live execution or a session.
     pub async fn emit(&self, subject: Subject, body: EventBody) -> ApiResult<()> {
-        let ev = Self::record(&mut self.st(), subject, body);
-        self.deliver(vec![ev]).await
+        let ev = {
+            let mut st = self.st();
+            match &subject {
+                Subject::Execution(e) => {
+                    Self::live_op(&st, e)?;
+                }
+                Subject::Session { session } if !st.sessions.contains_key(session) => {
+                    return Err(ApiError::new(ErrorCode::Invalid, "no such session"));
+                }
+                _ => {}
+            }
+            Self::record(&mut st, subject, body)
+        };
+        self.deliver(vec![ev]).await;
+        Ok(())
     }
 
-    /// The harness asks before a tool runs: the attempt waits until the Hub answers.
+    /// The harness asks before a tool runs: the attempt waits until the Hub answers. The same request
+    /// again changes nothing; another one under the same id is a conflict.
     pub async fn ask_permission(&self, req: PermissionRequest) -> ApiResult<()> {
         let ev = {
             let mut st = self.st();
-            let op = st.attempts.get(req.execution.attempt()).cloned();
-            if let Some(op) = op
-                && let Some((_, r)) = st.inbox.get_mut(&op)
-            {
-                let mut on = match &r.state {
+            if let Some(old) = st.waiting.get(&req.id) {
+                return if *old == req {
+                    Ok(())
+                } else {
+                    Err(ApiError::new(
+                        ErrorCode::Conflict,
+                        "another request with this id",
+                    ))
+                };
+            }
+            if st.resolved.contains_key(&req.id) {
+                return Err(ApiError::new(
+                    ErrorCode::Conflict,
+                    "this request was answered",
+                ));
+            }
+            if permission_digest(&req.action, &req.preconditions)? != req.digest {
+                return Err(ApiError::new(
+                    ErrorCode::Invalid,
+                    "digest does not match the action",
+                ));
+            }
+            let op = Self::live_op(&st, &req.execution)?;
+            if let Some(a) = st.inbox.get_mut(&op) {
+                let mut on = match &a.receipt.state {
                     Observed::Waiting { on } => on.clone(),
                     _ => vec![],
                 };
-                on.push(WaitRef::Permission(req.id.clone()));
-                r.state = Observed::Waiting { on };
+                let w = WaitRef::Permission(req.id.clone());
+                if !on.contains(&w) {
+                    on.push(w);
+                }
+                a.receipt.state = Observed::Waiting { on };
             }
             st.waiting.insert(req.id.clone(), req.clone());
             Self::record(
@@ -207,28 +407,59 @@ impl FakeNode {
                 EventBody::PermissionRequested { request: req },
             )
         };
-        self.deliver(vec![ev]).await
+        self.deliver(vec![ev]).await;
+        Ok(())
     }
 
-    /// The attempt ends: its receipt is final, the session is free again.
+    /// The attempt ends. Its receipt becomes final and stays so: the same end again is a no-op, a
+    /// different one a conflict. Only this attempt frees its session.
     pub async fn finish(&self, exec: &ExecutionRef, completion: Completion) -> ApiResult<()> {
-        let ev = {
+        let evs = {
             let mut st = self.st();
-            let op = st.attempts.get(exec.attempt()).cloned();
-            if let Some(op) = op
-                && let Some((_, r)) = st.inbox.get_mut(&op)
-            {
-                r.state = Observed::Finished {
-                    outcome: completion.outcome,
-                    result: Some(OperationResult::Execution(completion.clone())),
-                    error: completion.error.clone(),
+            let op = match st.attempts.get(exec.attempt()) {
+                Some((e, op)) if e == exec => op.clone(),
+                Some(_) => {
+                    return Err(ApiError::new(
+                        ErrorCode::Invalid,
+                        "the attempt belongs to another execution",
+                    ));
+                }
+                None => return Err(ApiError::new(ErrorCode::Invalid, "no such attempt")),
+            };
+            let final_state = Observed::Finished {
+                outcome: completion.outcome,
+                result: Some(OperationResult::Execution(completion.clone())),
+                error: completion.error.clone(),
+            };
+            let Some(a) = st.inbox.get_mut(&op) else {
+                return Err(ApiError::new(
+                    ErrorCode::Internal,
+                    "attempt without operation",
+                ));
+            };
+            if a.receipt.state.is_finished() {
+                return if a.receipt.state == final_state {
+                    Ok(())
+                } else {
+                    Err(ApiError::new(
+                        ErrorCode::Conflict,
+                        "already ended otherwise",
+                    ))
                 };
             }
-            if let ExecutionRef::Turn { session, .. } = exec {
-                st.active.remove(session);
-                if let Some(v) = st.sessions.get_mut(session) {
-                    v.phase = SessionPhase::Ready;
-                    v.active = None;
+            a.receipt.state = final_state;
+            match exec {
+                ExecutionRef::Turn { session, .. } => {
+                    if st.active.get(session) == Some(exec) {
+                        st.active.remove(session);
+                        if let Some(s) = st.sessions.get_mut(session) {
+                            s.view.phase = SessionPhase::Ready;
+                            s.view.active = None;
+                        }
+                    }
+                }
+                ExecutionRef::Job { attempt, .. } => {
+                    st.jobs.remove(attempt);
                 }
             }
             let expired: Vec<PermissionId> = st
@@ -237,19 +468,15 @@ impl FakeNode {
                 .filter(|(_, r)| r.execution == *exec)
                 .map(|(k, _)| k.clone())
                 .collect();
-            for p in &expired {
-                st.waiting.remove(p);
+            let mut evs = vec![];
+            for p in expired {
+                st.waiting.remove(&p);
+                evs.push(Self::record(
+                    &mut st,
+                    Subject::Execution(exec.clone()),
+                    EventBody::PermissionExpired { id: p },
+                ));
             }
-            let mut evs: Vec<NodeEvent> = expired
-                .into_iter()
-                .map(|p| {
-                    Self::record(
-                        &mut st,
-                        Subject::Execution(exec.clone()),
-                        EventBody::PermissionExpired { id: p },
-                    )
-                })
-                .collect();
             evs.push(Self::record(
                 &mut st,
                 Subject::Execution(exec.clone()),
@@ -257,53 +484,67 @@ impl FakeNode {
             ));
             evs
         };
-        self.deliver(ev).await
+        self.deliver(evs).await;
+        Ok(())
     }
 
-    /// After a crash the Node cannot tell what an attempt did.
-    pub fn lose_track(&self, exec: &ExecutionRef) {
+    /// After a crash the Node cannot tell what a live attempt did. It keeps holding its session.
+    pub fn lose_track(&self, exec: &ExecutionRef) -> ApiResult<()> {
         let mut st = self.st();
-        if let Some(op) = st.attempts.get(exec.attempt()).cloned()
-            && let Some((_, r)) = st.inbox.get_mut(&op)
-        {
-            r.state = Observed::Unknown {
+        let op = Self::live_op(&st, exec)?;
+        if let Some(a) = st.inbox.get_mut(&op) {
+            a.receipt.state = Observed::Unknown {
                 reason: "node restarted".into(),
             };
         }
+        Ok(())
     }
 
-    fn start_attempt(
-        st: &mut State,
-        op: &OperationId,
-        exec: ExecutionRef,
-        session: Option<&SessionId>,
-    ) -> ApiResult<Observed> {
-        let attempt = exec.attempt().clone();
-        if let Some(other) = st.attempts.get(&attempt)
+    fn check_run(st: &State, run: &RunSpec) -> ApiResult<()> {
+        if run.choice.harness != HARNESS {
+            return Err(ApiError::new(
+                ErrorCode::Unsupported,
+                "no such harness here",
+            ));
+        }
+        if let SandboxRequirement::Required { guarantees } = &run.policy.sandbox
+            && !guarantees.is_empty()
+        {
+            return Err(ApiError::new(
+                ErrorCode::Unsupported,
+                "the fake enforces no sandbox",
+            ));
+        }
+        if run.limits.deadline.0 <= st.now {
+            return Err(ApiError::new(ErrorCode::Expired, "deadline already passed"));
+        }
+        Ok(())
+    }
+
+    fn take_attempt(st: &mut State, op: &OperationId, exec: &ExecutionRef) -> ApiResult<()> {
+        if let Some((_, other)) = st.attempts.get(exec.attempt())
             && other != op
         {
             return Err(ApiError::new(
                 ErrorCode::Conflict,
-                "this attempt already runs under another operation",
+                "this attempt already ran under another operation",
             )
             .on(op));
         }
-        if let Some(s) = session {
-            match st.sessions.get(s) {
-                None => return Err(ApiError::new(ErrorCode::Invalid, "session not open")),
-                Some(_) if st.active.contains_key(s) => {
-                    return Err(ApiError::new(ErrorCode::Busy, "an attempt is running"));
-                }
-                Some(_) => {}
-            }
-            st.active.insert(s.clone(), exec.clone());
-            if let Some(v) = st.sessions.get_mut(s) {
-                v.phase = SessionPhase::Active;
-                v.active = Some(exec.clone());
-            }
+        st.attempts
+            .insert(exec.attempt().clone(), (exec.clone(), op.clone()));
+        Ok(())
+    }
+
+    fn mine(&self, w: &WorkspaceRef) -> ApiResult<()> {
+        if w.node != self.node {
+            return Err(ApiError::new(ErrorCode::Denied, "another node's workspace"));
         }
-        st.attempts.insert(attempt, op.clone());
-        Ok(Observed::Running)
+        Ok(())
+    }
+
+    fn running(st: &State) -> (u32, u32) {
+        (st.active.len() as u32, st.jobs.len() as u32)
     }
 }
 
@@ -317,75 +558,177 @@ fn unsupported<T>(what: &str) -> ApiResult<T> {
 #[async_trait]
 impl SessionExecutor for FakeNode {
     async fn open_session(&self, c: Command<OpenSession>) -> ApiResult<Receipt> {
+        self.mine(&c.body.workspace)?;
         self.accept("open_session", &c, |st| {
+            let o = &c.body;
+            if o.choice.harness != HARNESS {
+                return Err(ApiError::new(
+                    ErrorCode::Unsupported,
+                    "no such harness here",
+                ));
+            }
+            if !st.workspaces.contains_key(&o.workspace.id) {
+                return Err(ApiError::new(ErrorCode::Invalid, "no such workspace"));
+            }
+            if let Some(s) = st.sessions.get(&o.session) {
+                if st.active.contains_key(&o.session) {
+                    return Err(ApiError::new(ErrorCode::Busy, "an attempt is running"));
+                }
+                if s.view.phase != SessionPhase::Released {
+                    return Err(ApiError::new(ErrorCode::Conflict, "already open"));
+                }
+                if s.open.workspace != o.workspace || s.open.choice.harness != o.choice.harness {
+                    return Err(ApiError::new(
+                        ErrorCode::Conflict,
+                        "reopened in another workspace or harness",
+                    ));
+                }
+            }
+            let rev = st
+                .sessions
+                .get(&o.session)
+                .map(|s| format!("{}x", s.view.revision))
+                .unwrap_or_else(|| "r1".into());
             let view = SessionView {
-                id: c.body.session.clone(),
-                revision: id("r1"),
+                id: o.session.clone(),
+                revision: id(rev),
                 phase: SessionPhase::Ready,
                 active: None,
-                effective: c.body.choice.clone(),
-                resume: Some(id(format!("resume_{}", c.body.session))),
+                effective: o.choice.clone(),
+                effective_permissions: o.policy.permissions,
+                guarantees: vec![],
+                resume: Some(id(derived_id("resume", o.session.as_str()))),
             };
-            st.sessions.insert(c.body.session.clone(), view.clone());
-            Ok(Observed::Finished {
-                outcome: Outcome::Succeeded,
-                result: Some(OperationResult::Session(view)),
-                error: None,
-            })
+            st.sessions.insert(
+                o.session.clone(),
+                Session {
+                    open: o.clone(),
+                    view: view.clone(),
+                },
+            );
+            let mut d = Decided::done(OperationResult::Session(view.clone()));
+            d.workspace = Some(o.workspace.clone());
+            d.events = vec![(
+                Subject::Session {
+                    session: o.session.clone(),
+                },
+                EventBody::SessionChanged { view },
+            )];
+            Ok(d)
         })
+        .await
     }
+
     async fn configure_session(&self, c: Command<ConfigureSession>) -> ApiResult<Receipt> {
         self.accept("configure_session", &c, |st| {
-            if st.active.contains_key(&c.body.session) {
+            let b = &c.body;
+            if st.active.contains_key(&b.session) {
                 return Err(ApiError::new(ErrorCode::Busy, "an attempt is running"));
             }
-            let Some(v) = st.sessions.get_mut(&c.body.session) else {
+            let Some(s) = st.sessions.get_mut(&b.session) else {
                 return Err(ApiError::new(ErrorCode::Invalid, "session not open"));
             };
-            v.effective = c.body.choice.clone();
-            Ok(Observed::Finished {
-                outcome: Outcome::Succeeded,
-                result: Some(OperationResult::Session(v.clone())),
-                error: None,
-            })
+            if s.view.revision != b.expected {
+                return Err(ApiError::new(
+                    ErrorCode::Conflict,
+                    "the session changed since",
+                ));
+            }
+            if b.choice.harness != s.open.choice.harness {
+                return Err(ApiError::new(
+                    ErrorCode::Invalid,
+                    "another harness needs another session",
+                ));
+            }
+            s.open.choice = b.choice.clone();
+            s.open.policy = b.policy.clone();
+            s.view.effective = b.choice.clone();
+            s.view.effective_permissions = b.policy.permissions;
+            s.view.revision = id(format!("{}x", s.view.revision));
+            let view = s.view.clone();
+            let mut d = Decided::done(OperationResult::Session(view.clone()));
+            d.events = vec![(
+                Subject::Session {
+                    session: b.session.clone(),
+                },
+                EventBody::SessionChanged { view },
+            )];
+            Ok(d)
         })
+        .await
     }
+
     async fn start_turn(&self, c: Command<TurnSpec>) -> ApiResult<Receipt> {
         let exec = ExecutionRef::Turn {
             session: c.body.session.clone(),
             turn: c.body.turn.clone(),
             attempt: c.body.run.attempt.clone(),
         };
-        let fresh = !self.st().inbox.contains_key(&c.id);
-        let r = self.accept("start_turn", &c, |st| {
-            Self::start_attempt(st, &c.id, exec.clone(), Some(&c.body.session))
-        })?;
-        if fresh {
-            self.emit(Subject::Execution(exec), EventBody::AttemptStarted)
-                .await?;
-        }
-        Ok(r)
+        self.accept("start_turn", &c, |st| {
+            let t = &c.body;
+            let Some(s) = st.sessions.get(&t.session) else {
+                return Err(ApiError::new(ErrorCode::Invalid, "session not open"));
+            };
+            if s.view.phase == SessionPhase::Released {
+                return Err(ApiError::new(
+                    ErrorCode::Invalid,
+                    "session released: open it again",
+                ));
+            }
+            t.check_against(&s.open)?;
+            let ws = s.open.workspace.clone();
+            Self::check_run(st, &t.run)?;
+            if st.active.contains_key(&t.session) {
+                return Err(ApiError::new(ErrorCode::Busy, "an attempt is running"));
+            }
+            if let Some(cap) = &st.capacity
+                && Self::running(st).0 >= cap.sessions
+            {
+                return Err(ApiError::new(ErrorCode::Exhausted, "no session capacity"));
+            }
+            Self::take_attempt(st, &c.id, &exec)?;
+            st.active.insert(t.session.clone(), exec.clone());
+            if let Some(s) = st.sessions.get_mut(&t.session) {
+                s.view.phase = SessionPhase::Active;
+                s.view.active = Some(exec.clone());
+            }
+            Ok(Decided {
+                state: Observed::Running,
+                execution: Some(exec.clone()),
+                workspace: Some(ws),
+                events: vec![(Subject::Execution(exec.clone()), EventBody::AttemptStarted)],
+            })
+        })
+        .await
     }
+
     async fn session(&self, s: SessionId) -> ApiResult<SessionView> {
         match self.st().sessions.get(&s) {
-            Some(v) => Ok(v.clone()),
+            Some(x) => Ok(x.view.clone()),
             None => Err(ApiError::new(ErrorCode::Invalid, "no such session")),
         }
     }
+
     async fn release_session(&self, c: Command<SessionId>) -> ApiResult<Receipt> {
         self.accept("release_session", &c, |st| {
             if st.active.contains_key(&c.body) {
                 return Err(ApiError::new(ErrorCode::Busy, "an attempt is running"));
             }
-            if let Some(v) = st.sessions.get_mut(&c.body) {
-                v.phase = SessionPhase::Released;
-            }
-            Ok(Observed::Finished {
-                outcome: Outcome::Succeeded,
-                result: Some(OperationResult::Unit),
-                error: None,
-            })
+            let Some(s) = st.sessions.get_mut(&c.body) else {
+                return Err(ApiError::new(ErrorCode::Invalid, "no such session"));
+            };
+            s.view.phase = SessionPhase::Released;
+            let view = s.view.clone();
+            let mut d = Decided::done(OperationResult::Unit);
+            d.events = vec![(
+                Subject::Session {
+                    session: c.body.clone(),
+                },
+                EventBody::SessionChanged { view },
+            )];
+            Ok(d)
         })
+        .await
     }
 }
 
@@ -396,15 +739,35 @@ impl JobExecutor for FakeNode {
             job: c.body.job.clone(),
             attempt: c.body.run.attempt.clone(),
         };
-        let fresh = !self.st().inbox.contains_key(&c.id);
-        let r = self.accept("start_job", &c, |st| {
-            Self::start_attempt(st, &c.id, exec.clone(), None)
-        })?;
-        if fresh {
-            self.emit(Subject::Execution(exec), EventBody::AttemptStarted)
-                .await?;
-        }
-        Ok(r)
+        let ws = match &c.body.run.directory {
+            RunDirectory::Workspace { workspace } => {
+                self.mine(workspace)?;
+                Some(workspace.clone())
+            }
+            RunDirectory::Scratch => None,
+        };
+        self.accept("start_job", &c, |st| {
+            Self::check_run(st, &c.body.run)?;
+            if let Some(w) = &ws
+                && !st.workspaces.contains_key(&w.id)
+            {
+                return Err(ApiError::new(ErrorCode::Invalid, "no such workspace"));
+            }
+            if let Some(cap) = &st.capacity
+                && Self::running(st).1 >= cap.jobs
+            {
+                return Err(ApiError::new(ErrorCode::Exhausted, "no job capacity"));
+            }
+            Self::take_attempt(st, &c.id, &exec)?;
+            st.jobs.insert(exec.attempt().clone());
+            Ok(Decided {
+                state: Observed::Running,
+                execution: Some(exec.clone()),
+                workspace: ws.clone(),
+                events: vec![(Subject::Execution(exec.clone()), EventBody::AttemptStarted)],
+            })
+        })
+        .await
     }
 }
 
@@ -414,16 +777,26 @@ impl ExecutionControl for FakeNode {
         self.receipt(&op)
             .ok_or_else(|| ApiError::new(ErrorCode::Invalid, "no such operation").on(&op))
     }
+
+    /// Records the intent (the cancel itself is done once recorded); the target ends when the test
+    /// says so ([`FakeNode::finish`]), possibly normally.
     async fn cancel(&self, c: Command<Cancel>) -> ApiResult<Receipt> {
         let target = c.body.target.clone();
-        self.accept("cancel", &c, |st| match st.inbox.get(&target) {
-            Some(_) => Ok(Observed::Accepted),
-            None => Err(ApiError::new(ErrorCode::Invalid, "no such operation")),
+        self.accept("cancel", &c, |st| {
+            let Some(a) = st.inbox.get_mut(&target) else {
+                return Err(ApiError::new(ErrorCode::Invalid, "no such operation"));
+            };
+            if !a.receipt.state.is_finished() {
+                a.cancel_requested = true;
+            }
+            Ok(Decided::done(OperationResult::Unit))
         })
+        .await
     }
+
     async fn resolve_permission(&self, c: Command<PermissionResolution>) -> ApiResult<Receipt> {
         let res = c.body.clone();
-        let r = self.accept("resolve_permission", &c, |st| {
+        self.accept("resolve_permission", &c, |st| {
             let Some(req) = st.waiting.get(&res.id) else {
                 return Err(ApiError::new(
                     ErrorCode::Stale,
@@ -436,65 +809,135 @@ impl ExecutionControl for FakeNode {
                     "the answer is for another attempt or action",
                 ));
             }
+            if req.expires_at.0 <= st.now {
+                return Err(ApiError::new(ErrorCode::Expired, "the request expired"));
+            }
+            if !req.choices.contains(&res.decision) {
+                return Err(ApiError::new(
+                    ErrorCode::Invalid,
+                    "not one of the offered choices",
+                ));
+            }
             let exec = req.execution.clone();
+            let op = Self::live_op(st, &exec)?;
             st.waiting.remove(&res.id);
-            if let Some(op) = st.attempts.get(exec.attempt()).cloned()
-                && let Some((_, r)) = st.inbox.get_mut(&op)
-                && let Observed::Waiting { on } = &r.state
+            st.resolved.insert(res.id.clone(), res.clone());
+            if let Some(a) = st.inbox.get_mut(&op)
+                && let Observed::Waiting { on } = &a.receipt.state
             {
                 let on: Vec<WaitRef> = on
                     .iter()
                     .filter(|w| **w != WaitRef::Permission(res.id.clone()))
                     .cloned()
                     .collect();
-                r.state = if on.is_empty() {
+                a.receipt.state = if on.is_empty() {
                     Observed::Running
                 } else {
                     Observed::Waiting { on }
                 };
             }
-            Ok(Observed::Finished {
-                outcome: Outcome::Succeeded,
-                result: Some(OperationResult::Unit),
-                error: None,
+            let mut d = Decided::done(OperationResult::Unit);
+            d.events = vec![(
+                Subject::Execution(exec),
+                EventBody::PermissionResolved {
+                    resolution: res.clone(),
+                },
+            )];
+            Ok(d)
+        })
+        .await
+    }
+
+    async fn snapshot(&self, page: PageRequest) -> ApiResult<Page<SnapshotEntry>> {
+        let st = self.st();
+        let limit = page.limit.max(1) as usize;
+        let after = page.cursor.as_ref().map(|c| c.as_str().to_string());
+        let mut items: Vec<SnapshotEntry> = vec![];
+        let mut next = None;
+        for (op, a) in &st.inbox {
+            if after.as_deref().is_some_and(|x| op.as_str() <= x) {
+                continue;
+            }
+            if items.len() == limit {
+                next = items.last().map(|e| id(e.receipt.operation.as_str()));
+                break;
+            }
+            let pending = a
+                .execution
+                .as_ref()
+                .map(|e| {
+                    st.waiting
+                        .values()
+                        .filter(|r| r.execution == *e)
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default();
+            items.push(SnapshotEntry {
+                receipt: a.receipt.clone(),
+                method: a.method.into(),
+                digest: a.digest.clone(),
+                execution: a.execution.clone(),
+                workspace: a.workspace.clone(),
+                pending,
+                cancel_requested: a.cancel_requested,
+            });
+        }
+        Ok(Page { items, next })
+    }
+
+    async fn streams(&self) -> ApiResult<Vec<StreamHead>> {
+        Ok(self
+            .st()
+            .streams
+            .iter()
+            .map(|(k, s)| StreamHead {
+                stream: k.clone(),
+                epoch: s.epoch.clone(),
+                produced: s.produced,
+                acknowledged: s.acknowledged,
             })
-        })?;
-        let ev = Self::record(
-            &mut self.st(),
-            Subject::Execution(res.execution.clone()),
-            EventBody::PermissionResolved { resolution: res },
-        );
-        self.deliver(vec![ev]).await?;
-        Ok(r)
+            .collect())
     }
-    async fn snapshot(&self, _page: PageRequest) -> ApiResult<Page<Receipt>> {
+
+    async fn replay(&self, from: Watermark, max_bytes: u32) -> ApiResult<EventBatch> {
         let st = self.st();
-        let mut items: Vec<Receipt> = st.inbox.values().map(|(_, r)| r.clone()).collect();
-        items.sort_by(|a, b| a.operation.cmp(&b.operation));
-        Ok(Page { items, next: None })
-    }
-    async fn replay(&self, from: Watermark, _max_bytes: u32) -> ApiResult<EventBatch> {
-        let st = self.st();
-        let Some((epoch, _, kept)) = st.streams.get(&from.stream) else {
-            return Ok(EventBatch::default());
+        let Some(s) = st.streams.get(&from.stream) else {
+            return Err(ApiError::new(ErrorCode::Invalid, "no such stream"));
         };
-        if *epoch != from.epoch {
+        if s.epoch != from.epoch {
             return Err(ApiError::new(ErrorCode::Gap, "another stream epoch"));
         }
-        if kept.first().is_some_and(|e| e.cursor.seq > from.seq + 1) {
-            return Err(ApiError::new(ErrorCode::Gap, "past retention"));
+        if from.seq < s.acknowledged {
+            return Err(ApiError::new(
+                ErrorCode::Gap,
+                "already acknowledged and dropped",
+            ));
         }
-        Ok(EventBatch {
-            events: kept
-                .iter()
-                .filter(|e| e.cursor.seq > from.seq)
-                .cloned()
-                .collect(),
-        })
+        if from.seq > s.produced {
+            return Err(ApiError::new(ErrorCode::Invalid, "ahead of the stream"));
+        }
+        let mut events = vec![];
+        let mut used = 0usize;
+        for e in s.kept.iter().filter(|e| e.cursor.seq > from.seq) {
+            let n = serde_json::to_vec(e).map(|v| v.len()).unwrap_or(usize::MAX);
+            if used.saturating_add(n) > max_bytes as usize {
+                if events.is_empty() {
+                    return Err(ApiError::new(
+                        ErrorCode::Exhausted,
+                        "the next event does not fit in max_bytes",
+                    ));
+                }
+                break;
+            }
+            used += n;
+            events.push(e.clone());
+        }
+        Ok(EventBatch { events })
     }
+
     async fn acknowledge(&self, ack: EventAck) -> ApiResult<()> {
-        self.drop_acked(&ack);
-        Ok(())
+        self.apply_ack(&ack)
     }
 }
 
@@ -503,60 +946,78 @@ impl WorkspaceExecutor for FakeNode {
     async fn prepare_workspace(&self, c: Command<Prepare>) -> ApiResult<Receipt> {
         let node = self.node.clone();
         self.accept("prepare_workspace", &c, |st| {
-            let wid: WorkspaceId = id(format!("w_{}", c.body.key));
-            let branch = match &c.body.kind {
-                PrepareKind::Worktree { branch, .. } => Some(branch.clone()),
-                _ => None,
+            let spec = digest_of(&c.body.kind)?;
+            let wid: WorkspaceId = id(derived_id("w", &c.body.resource));
+            let view = match st.workspaces.get(&wid) {
+                Some((res, d, v)) if *res == c.body.resource && *d == spec => v.clone(),
+                Some(_) => {
+                    return Err(ApiError::new(
+                        ErrorCode::Conflict,
+                        "this resource's workspace was prepared otherwise",
+                    ));
+                }
+                None => {
+                    let branch = match &c.body.kind {
+                        PrepareKind::Worktree { branch, .. } => Some(branch.clone()),
+                        _ => None,
+                    };
+                    let v = WorkspaceView {
+                        workspace: WorkspaceRef {
+                            node: node.clone(),
+                            id: wid.clone(),
+                        },
+                        revision: id("r1"),
+                        usable: true,
+                        branch,
+                        display: format!("fake/{wid}"),
+                    };
+                    st.workspaces
+                        .insert(wid.clone(), (c.body.resource.clone(), spec, v.clone()));
+                    v
+                }
             };
-            let view = st
-                .workspaces
-                .entry(wid.clone())
-                .or_insert_with(|| WorkspaceView {
-                    workspace: WorkspaceRef {
-                        node: node.clone(),
-                        id: wid.clone(),
-                    },
-                    revision: id("r1"),
-                    usable: true,
-                    branch,
-                    display: format!("fake/{}", c.body.key),
-                })
-                .clone();
-            Ok(Observed::Finished {
-                outcome: Outcome::Succeeded,
-                result: Some(OperationResult::Workspace(view)),
-                error: None,
-            })
+            let mut d = Decided::done(OperationResult::Workspace(view.clone()));
+            d.workspace = Some(view.workspace);
+            Ok(d)
         })
+        .await
     }
+
     async fn workspace(&self, w: WorkspaceRef) -> ApiResult<WorkspaceView> {
-        if w.node != self.node {
-            return Err(ApiError::new(ErrorCode::Denied, "another node's workspace"));
-        }
+        self.mine(&w)?;
         self.st()
             .workspaces
             .get(&w.id)
-            .cloned()
+            .map(|(_, _, v)| v.clone())
             .ok_or_else(|| ApiError::new(ErrorCode::Invalid, "no such workspace"))
     }
+
     async fn tidy_workspace(&self, c: Command<Tidy>) -> ApiResult<Receipt> {
+        self.mine(&c.body.workspace)?;
         self.accept("tidy_workspace", &c, |st| {
-            match st.workspaces.get(&c.body.workspace.id) {
-                Some(v) if v.revision != c.body.expected => {
+            let w = &c.body.workspace;
+            let in_use = st.inbox.values().any(|a| {
+                a.workspace.as_ref() == Some(w)
+                    && a.execution.is_some()
+                    && !a.receipt.state.is_finished()
+            });
+            if in_use {
+                return Err(ApiError::new(ErrorCode::Busy, "the workspace is in use"));
+            }
+            match st.workspaces.get(&w.id) {
+                Some((_, _, v)) if v.revision != c.body.expected => {
                     Err(ApiError::new(ErrorCode::Conflict, "changed since"))
                 }
                 Some(_) => {
-                    st.workspaces.remove(&c.body.workspace.id);
-                    Ok(Observed::Finished {
-                        outcome: Outcome::Succeeded,
-                        result: Some(OperationResult::Unit),
-                        error: None,
-                    })
+                    st.workspaces.remove(&w.id);
+                    Ok(Decided::done(OperationResult::Unit))
                 }
                 None => Err(ApiError::new(ErrorCode::Invalid, "no such workspace")),
             }
         })
+        .await
     }
+
     async fn git_facts(&self, _q: GitQuery) -> ApiResult<GitFacts> {
         unsupported("git")
     }
@@ -572,7 +1033,7 @@ impl WorkspaceExecutor for FakeNode {
     async fn list_root(&self, _at: RootPath, _page: PageRequest) -> ApiResult<Page<FileInfo>> {
         unsupported("files")
     }
-    async fn read_file(&self, _q: FileRead) -> ApiResult<ReadChunk> {
+    async fn read_file(&self, _q: FileRead) -> ApiResult<crate::blob::ReadChunk> {
         unsupported("files")
     }
     async fn scan(&self, _c: Command<ScanSpec>) -> ApiResult<Receipt> {
@@ -586,12 +1047,17 @@ impl WorkspaceExecutor for FakeNode {
 #[async_trait]
 impl Discovery for FakeNode {
     async fn probe(&self, _fresh: bool) -> ApiResult<Capabilities> {
+        let capacity = self.st().capacity.clone().unwrap_or(Capacity {
+            sessions: u32::MAX,
+            jobs: u32::MAX,
+            execs: 0,
+        });
         Ok(Capabilities {
             node: self.node.clone(),
             os: "fake".into(),
             version: "0".into(),
             harnesses: vec![HarnessCapability {
-                name: "claude-code".into(),
+                name: HARNESS.into(),
                 version: "0".into(),
                 sessions: true,
                 jobs: true,
@@ -603,11 +1069,7 @@ impl Discovery for FakeNode {
                 enforcement: vec![],
             }],
             roots: vec![],
-            capacity: Capacity {
-                sessions: 4,
-                jobs: 4,
-                execs: 4,
-            },
+            capacity,
         })
     }
     async fn history(&self, _p: PageRequest) -> ApiResult<Page<HistoryEntry>> {
@@ -630,34 +1092,79 @@ impl Node for FakeNode {
     }
 }
 
-/// An [`EventSink`] that keeps what it got and acknowledges everything (deduplicating like the Hub
-/// must: by stream, epoch and seq).
+/// An [`EventSink`] that commits like the Hub must: each `(stream, epoch, seq)` once (the same key
+/// with other content is a conflict), and acknowledges only the contiguous prefix it holds.
 #[derive(Default)]
 pub struct RecordingSink {
-    pub events: Mutex<Vec<NodeEvent>>,
+    held: Mutex<BTreeMap<(StreamId, Epoch, u64), NodeEvent>>,
+    fail: Mutex<bool>,
+}
+
+impl RecordingSink {
+    /// Committed events in stream order.
+    pub fn events(&self) -> Vec<NodeEvent> {
+        self.held.lock().unwrap().values().cloned().collect()
+    }
+    /// The body types of committed events, in stream order.
+    pub fn kinds(&self) -> Vec<String> {
+        self.events()
+            .iter()
+            .map(|e| {
+                serde_json::to_value(&e.body).unwrap()["type"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string()
+            })
+            .collect()
+    }
+    /// Refuse commits (a Hub whose database is down).
+    pub fn set_failing(&self, on: bool) {
+        *self.fail.lock().unwrap() = on;
+    }
 }
 
 #[async_trait]
 impl EventSink for RecordingSink {
     async fn commit(&self, batch: EventBatch) -> ApiResult<EventAck> {
-        let mut kept = self.events.lock().unwrap();
-        let mut top: BTreeMap<(StreamId, Epoch), u64> = BTreeMap::new();
-        for e in kept.iter() {
-            let k = (e.cursor.stream.clone(), e.cursor.epoch.clone());
-            let s = top.entry(k).or_default();
-            *s = (*s).max(e.cursor.seq);
+        if *self.fail.lock().unwrap() {
+            return Err(ApiError::new(ErrorCode::Offline, "hub store unavailable"));
+        }
+        let mut held = self.held.lock().unwrap();
+        for e in &batch.events {
+            let k = (
+                e.cursor.stream.clone(),
+                e.cursor.epoch.clone(),
+                e.cursor.seq,
+            );
+            if let Some(old) = held.get(&k)
+                && *old != *e
+            {
+                return Err(ApiError::new(
+                    ErrorCode::Conflict,
+                    "another event at this position",
+                ));
+            }
         }
         for e in batch.events {
-            let k = (e.cursor.stream.clone(), e.cursor.epoch.clone());
-            let s = top.entry(k).or_default();
-            if e.cursor.seq > *s {
-                *s = e.cursor.seq;
-                kept.push(e);
+            let k = (
+                e.cursor.stream.clone(),
+                e.cursor.epoch.clone(),
+                e.cursor.seq,
+            );
+            held.entry(k).or_insert(e);
+        }
+        // contiguous frontier per (stream, epoch)
+        let mut frontier: BTreeMap<(StreamId, Epoch), u64> = BTreeMap::new();
+        for (s, ep, seq) in held.keys() {
+            let f = frontier.entry((s.clone(), ep.clone())).or_insert(0);
+            if *seq == *f + 1 {
+                *f = *seq;
             }
         }
         Ok(EventAck {
-            durable: top
+            durable: frontier
                 .into_iter()
+                .filter(|(_, seq)| *seq > 0)
                 .map(|((stream, epoch), seq)| Watermark { stream, epoch, seq })
                 .collect(),
         })
@@ -680,7 +1187,7 @@ pub mod build {
 
     pub fn choice() -> HarnessChoice {
         HarnessChoice {
-            harness: "claude-code".into(),
+            harness: HARNESS.into(),
             model: Some("sonnet".into()),
             effort: None,
         }
@@ -697,40 +1204,89 @@ pub mod build {
         }
     }
 
-    pub fn workspace(node: &str, w: &str) -> WorkspaceRef {
+    /// The workspace [`prepare`] gives for `resource` on `node`.
+    pub fn workspace(node: &str, resource: &str) -> WorkspaceRef {
         WorkspaceRef {
             node: id(node),
-            id: id(w),
+            id: id(derived_id("w", resource)),
         }
+    }
+
+    pub fn prepare(resource: &str) -> Prepare {
+        Prepare {
+            resource: resource.into(),
+            kind: PrepareKind::Scratch,
+        }
+    }
+
+    /// Prepare `item:<session>` and open the session in it.
+    pub async fn ready(n: &FakeNode, session: &str) {
+        let res = format!("item:{session}");
+        n.prepare_workspace(cmd(&format!("op_prep_{session}"), prepare(&res)))
+            .await
+            .unwrap();
+        n.open_session(cmd(
+            &format!("op_open_{session}"),
+            open(session, n.id().as_str()),
+        ))
+        .await
+        .unwrap();
     }
 
     pub fn open(session: &str, node: &str) -> OpenSession {
         OpenSession {
             session: id(session),
-            workspace: workspace(node, "w_1"),
+            workspace: workspace(node, &format!("item:{session}")),
             choice: choice(),
             policy: policy(),
             resume: None,
         }
     }
 
+    pub fn limits() -> Limits {
+        Limits {
+            deadline: Timestamp(10_000_000),
+            offline_until: Timestamp(10_000_000),
+            max_output_bytes: 1 << 20,
+            max_tokens: None,
+            max_cost: None,
+        }
+    }
+
+    /// A turn in the session's own workspace on `hub`.
     pub fn turn(session: &str, turn: &str, attempt: &str, text: &str) -> TurnSpec {
+        turn_on("hub", session, turn, attempt, text)
+    }
+
+    pub fn turn_on(node: &str, session: &str, turn: &str, attempt: &str, text: &str) -> TurnSpec {
         TurnSpec {
             session: id(session),
             turn: id(turn),
             run: RunSpec {
                 attempt: id(attempt),
                 choice: choice(),
+                directory: RunDirectory::Workspace {
+                    workspace: workspace(node, &format!("item:{session}")),
+                },
+                prompt: vec![Part::Text { text: text.into() }],
+                policy: policy(),
+                limits: limits(),
+                continuation: None,
+            },
+        }
+    }
+
+    pub fn job(job: &str, attempt: &str, text: &str) -> JobSpec {
+        JobSpec {
+            job: id(job),
+            kind: JobKind::Think,
+            run: RunSpec {
+                attempt: id(attempt),
+                choice: choice(),
                 directory: RunDirectory::Scratch,
                 prompt: vec![Part::Text { text: text.into() }],
                 policy: policy(),
-                limits: Limits {
-                    deadline: Timestamp(10_000_000),
-                    offline_until: Timestamp(10_000_000),
-                    max_output_bytes: 1 << 20,
-                    max_tokens: None,
-                    max_cost: None,
-                },
+                limits: limits(),
                 continuation: None,
             },
         }
@@ -765,8 +1321,9 @@ pub mod build {
             execution: exec,
             invocation: id(format!("call_{pid}")),
             title: command.into(),
-            digest: action.digest(),
+            digest: permission_digest(&action, &[]).unwrap(),
             action,
+            preconditions: vec![],
             choices: vec![PermissionDecision::AllowOnce, PermissionDecision::Reject],
             expires_at: Timestamp(10_000_000),
         }
@@ -779,16 +1336,6 @@ pub mod build {
             action_digest: req.digest.clone(),
             decision_revision: id("d1"),
             decision: d,
-        }
-    }
-
-    /// Unused in the builders but handy for tests that move blobs.
-    pub fn manifest(bytes: &[u8]) -> BlobManifest {
-        BlobManifest {
-            sha256: Digest::sha256(bytes),
-            size: bytes.len() as u64,
-            mime: "application/octet-stream".into(),
-            name: "blob".into(),
         }
     }
 }

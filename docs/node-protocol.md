@@ -43,7 +43,7 @@ payload
 | Hub→Node | `git.inspect` / `git.apply` | 粒度较粗的事实查询，一次返回 refs、status、merge-base、冲突，并带上观察到的 revision。写操作带前置条件（`expected_head`、`expected_ref`），apply 时再校验一次。不开放任意 git argv。Node 只回事实和证据，不做业务决定：不选 merge 还是 rebase，不自动解决冲突，不决定删分支或发布版本。多个 worktree 共享一个 repo 时，写操作按 repo 协调 |
 | Hub→Node | `exec.start` / `cancel` / `inspect` | 流程 cmd 节点、带密钥执行、项目发布脚本。密钥走短期投递，不进入持久化的命令体 |
 | Hub→Node | `fs.list` / `describe` / `read` | 分页、范围、大小上限。Node 负责 realpath、symlink 和根目录约束，每次打开文件时都重新检查 |
-| Hub→Node | `tree.scan` / `scan.page` | 知识库文件夹源用。manifest 是带版本的扫描结果，不是文件系统的原子快照。`read` 带期望的版本或 hash，文件变了就返回 `changed`。只有声明了完整、且 source revision 仍然匹配的扫描，才能拿来对账"文件已删除" |
+| Hub→Node | `tree.scan` / `scan.page` | 知识库文件夹源用。manifest 是带版本的扫描结果，不是文件系统的原子快照。`read` 带期望的版本，文件变了就返回 `conflict`，调用方重新读取。文件地址是 `FileAddress`：工作区内的路径，或允许的根目录下的路径（知识库文件夹只读读取，不会为此建工作区）。只有声明了完整、且 source revision 仍然匹配的扫描，才能拿来对账"文件已删除" |
 | Hub→Node | `harness.probe`、`history.list` / `import` / `locate` | `import` 返回标准事件，不在 Node 上建 Hub 的业务行 |
 | Hub→Node | `node.drain` / `node.resume` | "停止接新活"和"取消在跑的任务"是两回事 |
 | Node→Hub | `events.batch` / `execution.snapshot` / `node.status` | 只报事实。快照包含活动执行、等待中的权限和终态回执 |
@@ -78,7 +78,7 @@ Hub 持久队列 → dispatch outbox → Node 已接受 → running ⇄ waiting(
    - 同一个键、同一个 hash：返回已有的状态或结果。
    - 同一个键、不同的 hash：返回 `conflict`。
    - 终态保留 tombstone。
-   - 每条命令带固定的 `issued_at` 和 `accept_before`，重试时不更新。过了 `accept_before` 的命令一律返回 `stale`，所以 tombstone 清理之后，旧命令也不会被当成新命令执行。
+   - 每条命令带固定的 `issued_at` 和 `accept_before`，重试时不更新。Node 收到过的命令，任何时候都能读回它的回执；没收到过、且已过 `accept_before` 的命令，一律返回 `stale`。所以 tombstone 清理之后，旧命令也不会被当成新命令执行。命令的 digest 包含方法名，用规范化 JSON（键排序）计算：同一个 id 用在另一个方法上，同样是 `conflict`。
    - 除了命令去重，执行身份也唯一：同一个 attempt 换了 operation_id，或者同一个 operation_id 换了 payload，都不会启动第二份执行。
 3. Node 的每个事实先写入执行日志再发送。Hub 对 `(node_id, stream_id, stream_epoch, seq)` 加唯一约束；事件、统计、状态投影和后续 outbox 在同一事务提交，然后 ack 连续水位。事件有没有送到某个 Client，不影响 ack。
 4. 启动进程和写日志做不到原子，所以不宣称端到端 exactly-once。无法确定结果的执行标为 `unknown`，交给 Hub 决定，永远不自动重发原 prompt。
@@ -93,7 +93,9 @@ Hub 持久队列 → dispatch outbox → Node 已接受 → running ⇄ waiting(
 ## 5. 版本与错误
 
 - **版本协商**：`hello` 带上协议的 min/max、事件 schema 版本、能力、编码和帧上限，`welcome` 从中选定交集。major 不兼容就拒绝连接；minor 只做可选的新增。未知的必需能力只拒绝对应的操作。未知的枚举值永远不能映射成 allow。
-- **错误**：字段为 `code, retry_class, operation_id, execution_state, safe_detail`。错误码区分 `offline`、`busy`、`unsupported`、`permission_denied`、`expired`、`conflict`、`resource_exhausted`、`outcome_unknown`。
+- **错误**：字段为 `code, retry, operation, state, safe_detail`。错误码有 `offline`、`busy`、`unsupported`、`denied`、`expired`、`stale`、`conflict`、`exhausted`、`invalid`、`outcome_unknown`、`gap`、`internal`。
+  - 接受之前就被拒绝的（`ApiError::new`）：什么都没执行。其中 offline、busy、exhausted 可以原样重发同一条命令（同一个 operation id），但绝不能换一个新 attempt。
+  - 可能已经被接受的（`ApiError::uncertain`，比如回复丢了、发送后连接断了）：先查询 operation，再决定下一步。
 - **超时有四种**，各自独立，网络重发不会重新计时：
   - RPC 等待时限：只表示没等到回复。
   - 审批有效期。
@@ -102,30 +104,32 @@ Hub 持久队列 → dispatch outbox → Node 已接受 → running ⇄ waiting(
 
 ## 6. Steve 事件 schema
 
+代码是这份 schema 的准绳（`hub-rs/crates/steve-node-api/src/events.rs`）。线上的形状如下：
+
 ```json
 {
-  "schema_version": 1,
-  "event_id": "ev_…",
-  "source": {"kind": "node", "node_id": "nd_…", "driver": "claude-code", "driver_version": "…"},
-  "stream": {"id": "session:s_…", "epoch": "se_…", "seq": "42"},
-  "execution": {"session_id": "s_…", "turn_id": "t_…", "attempt_id": "a_…"},
-  "type": "message.delta",
-  "occurred_at": "…",
-  "payload": {"message_id": "m_…", "block_id": "b_…", "role": "assistant", "format": "text", "offset": 0, "text": "…"}
+  "schema": 1,
+  "id": "ev_…",
+  "at": 1762300000000,
+  "cursor": {"stream": "session:s_…", "epoch": "e1", "seq": 42},
+  "subject": {"of": "execution", "type": "turn", "session": "s_…", "turn": "t_…", "attempt": "a_…"},
+  "body": {"type": "text_delta", "message": "m_…", "block": "b_…", "utf8_offset": 0, "text": "…"}
 }
 ```
 
-| 事件族 | 关键字段 |
+Node 和驱动的身份不放在每个事件里。Node 身份来自已认证的连接；驱动和版本是 stream 的元数据，在 `session_changed` 和能力描述里给出。
+
+| `body.type` | 关键字段 |
 |---|---|
-| `session.opened` / `configured` / `released` | 请求的与实际生效的 model、effort、mode |
-| `turn.started` / `ended`、`job.started` / `ended` | execution ids；ended 带 outcome、stop_reason（Steve 枚举）、safe error、result_ref、最后的事件水位 |
-| `message.started` / `delta` / `completed` | message_id、block_id、role、format、offset；delta 与 snapshot 要区分清楚 |
-| `thought.delta` | 只放驱动本来就公开的内容 |
-| `tool.started` / `updated` / `finished` | invocation_id、parent?、origin（steve/harness/external）、name、category（read/edit/exec/search/fetch/steve/other）、状态、结构化 action、结果 parts、artifact refs |
-| `permission.requested` / `resolved` / `expired` | permission_id、attempt_id、invocation_id、结构化 action（exec 带 command 和网络意图，写文件带规范化后的路径和变更摘要）、可选的 Steve 动作、expires_at。无法归一的操作标为 unknown，走明确的策略 |
-| `usage.reported` | report_id、model、各类 token 数、context used/limit、cost（decimal + 币种）、scope、`delta` / `cumulative` / `final`、meter_epoch。不知道的值为 null，不填 0 |
-| `workspace.changed`、`artifact.available` | workspace_ref、revision、artifact_id、mime、size、hash。不带本机绝对路径 |
-| `diagnostic`、`capability.changed` | 标准的 severity/code/text。不透传未知的原始报文 |
+| `session_changed` | SessionView：请求的与实际生效的 model/effort、实际生效的权限模式与保证、resume 句柄 |
+| `attempt_started` / `attempt_ended` | `attempt_ended` 带 Completion：outcome、stop_reason（Steve 枚举）、safe error、result、continuation。它是该 attempt 在 stream 里最后一个有序事实，其 cursor 就是这次执行的水位 |
+| `operation_changed` | 非执行类操作（工作区、git、exec、扫描）的回执变化 |
+| `message_started` / `text_delta` / `message_completed` | message、block、role（user/assistant/thought）。`utf8_offset` 是块内字节偏移，所以重发的 delta 不会被追加两次 |
+| `tool_changed` | ToolView 整体替换：id、parent?、origin（steve/harness/external）、name、category、phase、结构化 action、结果 parts。太大的内容改为 artifact |
+| `permission_requested` / `permission_resolved` / `permission_expired` | id、execution、invocation、结构化 action、preconditions（工作区 revision、文件版本、HEAD）、digest、choices、expires_at。无法归一的操作为 `unknown`，走明确的策略 |
+| `usage` | report_id、model、meter_epoch、scope（main/all/background）、measurement（delta/cumulative/final）、tokens、context used/limit、cost（decimal + 币种）。不知道的值为 null，不填 0 |
+| `workspace_changed`、`artifact_available` | workspace_ref、revision、artifact。不带本机绝对路径 |
+| `diagnostic` | severity/code/safe_text。不透传未知的原始报文 |
 
 **用量记账规则**（用 reducer fixture 验证）：
 

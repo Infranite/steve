@@ -68,6 +68,8 @@ pub struct ApiError {
 }
 
 impl ApiError {
+    /// Refused before anything was accepted: nothing ran. Offline, busy and exhausted may be resent
+    /// as the very same command (same operation id, never a new attempt); the rest may not.
     pub fn new(code: ErrorCode, detail: impl Into<String>) -> Self {
         let retry = match code {
             ErrorCode::Offline | ErrorCode::Busy | ErrorCode::Exhausted => {
@@ -81,6 +83,17 @@ impl ApiError {
             retry,
             operation: None,
             state: None,
+            safe_detail: detail.into(),
+        }
+    }
+    /// The command may have been accepted (the answer got lost, the connection broke after sending):
+    /// find out with [`crate::ports::ExecutionControl::operation`] before doing anything else.
+    pub fn uncertain(op: &OperationId, detail: impl Into<String>) -> Self {
+        ApiError {
+            code: ErrorCode::OutcomeUnknown,
+            retry: RetryClass::AfterReconcile,
+            operation: Some(op.clone()),
+            state: Some(StateTag::Unknown),
             safe_detail: detail.into(),
         }
     }
@@ -113,17 +126,72 @@ pub struct Command<T> {
 }
 
 impl<T: Serialize> Command<T> {
-    /// The content hash a Node keeps with the operation id: same id with another hash is a conflict.
-    /// Covers every business field (not the transport's request id).
-    pub fn digest(&self) -> Digest {
-        let v = serde_json::json!({
+    /// The content hash a Node keeps with the operation id: the same id with another hash (or for
+    /// another method) is a conflict. Covers the method and every business field, not the
+    /// transport's request id; canonical, so key order never changes it.
+    pub fn digest(&self, method: &str) -> ApiResult<Digest> {
+        digest_of(&serde_json::json!({
+            "method": method,
             "issued_at": self.issued_at,
             "accept_before": self.accept_before,
             "grant": self.grant,
             "body": self.body,
-        });
-        Digest::sha256(v.to_string().as_bytes())
+        }))
     }
+    /// `issued_at` ≤ `accept_before`.
+    pub fn check_window(&self) -> ApiResult<()> {
+        if self.issued_at > self.accept_before {
+            return Err(
+                ApiError::new(ErrorCode::Invalid, "accept_before is before issued_at").on(&self.id),
+            );
+        }
+        Ok(())
+    }
+}
+
+/// JSON with object keys sorted at every level: the same value always gives the same text (the
+/// crate's `serde_json` keeps insertion order, which differs between producers).
+pub fn canonical_json(v: &serde_json::Value) -> String {
+    use serde_json::Value;
+    fn walk(v: &Value, out: &mut String) {
+        match v {
+            Value::Object(m) => {
+                let mut keys: Vec<&String> = m.keys().collect();
+                keys.sort();
+                out.push('{');
+                for (i, k) in keys.into_iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    out.push_str(&Value::String(k.clone()).to_string());
+                    out.push(':');
+                    walk(&m[k], out);
+                }
+                out.push('}');
+            }
+            Value::Array(a) => {
+                out.push('[');
+                for (i, x) in a.iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    walk(x, out);
+                }
+                out.push(']');
+            }
+            other => out.push_str(&other.to_string()),
+        }
+    }
+    let mut out = String::new();
+    walk(v, &mut out);
+    out
+}
+
+/// sha256 of the canonical JSON of `v`. Fails (rather than hashing nothing) when `v` does not serialize.
+pub fn digest_of<T: Serialize + ?Sized>(v: &T) -> ApiResult<Digest> {
+    let v = serde_json::to_value(v)
+        .map_err(|e| ApiError::new(ErrorCode::Invalid, format!("not serializable: {e}")))?;
+    Ok(Digest::sha256(canonical_json(&v).as_bytes()))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -193,6 +261,7 @@ pub enum OperationResult {
     Execution(Completion),
     Workspace(WorkspaceView),
     Git(GitFacts),
+    Exec(crate::workspace::ExecResult),
     /// A scan or an import is read page by page under its own operation id.
     Pages {
         operation: OperationId,
@@ -259,6 +328,37 @@ impl ExecutionRef {
             ExecutionRef::Turn { attempt, .. } | ExecutionRef::Job { attempt, .. } => attempt,
         }
     }
+}
+
+/// One accepted operation as a Node can report it after a reconnect: enough for the Hub to check it
+/// against its own ledger (which stays the source of the command itself).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SnapshotEntry {
+    pub receipt: Receipt,
+    /// The method it was accepted under (`start_turn`, `prepare_workspace`…).
+    pub method: String,
+    pub digest: Digest,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution: Option<ExecutionRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<crate::run::WorkspaceRef>,
+    /// Permission requests of this execution still waiting, in full.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending: Vec<crate::events::PermissionRequest>,
+    /// A cancel was asked for and the end has not come yet.
+    #[serde(default)]
+    pub cancel_requested: bool,
+}
+
+/// Where a stream stands on the Node: what it produced and from where it can still replay.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StreamHead {
+    pub stream: StreamId,
+    pub epoch: Epoch,
+    /// Highest seq produced (0: none yet).
+    pub produced: u64,
+    /// Highest seq acknowledged; replay starts after it, anything before is gone.
+    pub acknowledged: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

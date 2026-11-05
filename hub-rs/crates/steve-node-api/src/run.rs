@@ -95,7 +95,8 @@ pub enum PermissionMode {
     Ask,
     /// Edits in the workspace go through; the rest asks.
     AcceptEdits,
-    /// Nothing asks. The Hub chose it and records it.
+    /// Nothing asks. The Hub chose it and records it. It only means "no questions" within the policy:
+    /// roots, network, sandbox, lease and the Hub's check of Steve's tools all still hold.
     FullAccess,
 }
 
@@ -107,7 +108,9 @@ pub enum NetworkScope {
     Unrestricted,
 }
 
-/// The policy of one execution, decided by the Hub, enforced by the Node.
+/// The policy of one execution, decided by the Hub, enforced by the Node. Writes are confined to the
+/// execution's own workspace; `readable` directories are never writable. A driver that cannot
+/// enforce a part of it refuses (`unsupported`) instead of mapping it to the nearest flag.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecutionPolicy {
     pub revision: Revision,
@@ -174,6 +177,29 @@ pub struct TurnSpec {
     pub run: RunSpec,
 }
 
+impl TurnSpec {
+    /// A turn runs in its session's context: in the session's workspace, with its harness. A model or
+    /// policy change goes through [`ConfigureSession`] first, a continuation belongs to the session.
+    pub fn check_against(&self, open: &OpenSession) -> crate::common::ApiResult<()> {
+        use crate::common::{ApiError, ErrorCode};
+        let bad = |why: &str| Err(ApiError::new(ErrorCode::Invalid, why));
+        if self.session != open.session {
+            return bad("turn of another session");
+        }
+        match &self.run.directory {
+            RunDirectory::Workspace { workspace } if *workspace == open.workspace => {}
+            _ => return bad("a turn runs in its session's workspace"),
+        }
+        if self.run.choice.harness != open.choice.harness {
+            return bad("another harness needs another session");
+        }
+        if self.run.continuation.is_some() {
+            return bad("a session turn has no continuation of its own");
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum JobKind {
@@ -220,6 +246,10 @@ pub struct SessionView {
     pub active: Option<crate::common::ExecutionRef>,
     /// What the harness actually uses (it may differ from what was asked).
     pub effective: HarnessChoice,
+    /// The permission mode and guarantees actually in force (what the audit shows).
+    pub effective_permissions: PermissionMode,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub guarantees: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resume: Option<ResumeHandle>,
 }

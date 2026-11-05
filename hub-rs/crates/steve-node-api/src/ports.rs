@@ -3,8 +3,11 @@
 //! [`HubTools`], [`HubFiles`], each bound by the wiring to one authenticated Node.
 //!
 //! Every argument is owned and serializable, every method async. An instance is bound to one Node: a
-//! port never routes by what is inside its arguments. Commands are idempotent by their operation id;
-//! dropping a returned future only stops waiting.
+//! port never routes by what is inside its arguments. Commands are idempotent by their operation id.
+//!
+//! Dropping a returned future: before its first poll nothing was sent; after the receipt came back it
+//! only stops waiting; in between the outcome is unknown, so ask ([`ExecutionControl::operation`])
+//! instead of guessing. An implementation never ties the work it starts to the caller's future.
 
 use async_trait::async_trait;
 
@@ -47,8 +50,11 @@ pub trait ExecutionControl: Send + Sync {
     /// Applies only to the request still waiting with this attempt and action digest; anything else
     /// is `stale`.
     async fn resolve_permission(&self, c: Command<PermissionResolution>) -> ApiResult<Receipt>;
-    /// Everything not yet acknowledged as finished: live executions, waits, final receipts.
-    async fn snapshot(&self, page: PageRequest) -> ApiResult<Page<Receipt>>;
+    /// Everything not yet acknowledged as finished: live executions, waits, final receipts, in a stable
+    /// order (by operation id) so paging is consistent.
+    async fn snapshot(&self, page: PageRequest) -> ApiResult<Page<SnapshotEntry>>;
+    /// Where every stream stands.
+    async fn streams(&self) -> ApiResult<Vec<StreamHead>>;
     /// Events after `from` (exclusive), at most `max_bytes` encoded; `gap` past retention.
     async fn replay(&self, from: Watermark, max_bytes: u32) -> ApiResult<EventBatch>;
     async fn acknowledge(&self, ack: EventAck) -> ApiResult<()>;
@@ -69,6 +75,7 @@ pub trait WorkspaceExecutor: Send + Sync {
     /// Browse an allowed root (choosing a project directory).
     async fn list_root(&self, at: RootPath, page: PageRequest) -> ApiResult<Page<FileInfo>>;
     async fn read_file(&self, q: FileRead) -> ApiResult<ReadChunk>;
+    /// Scan a tree; read its pages under the scan's operation id.
     async fn scan(&self, c: Command<ScanSpec>) -> ApiResult<Receipt>;
     async fn scan_page(&self, scan: OperationId, page: PageRequest) -> ApiResult<ScanPage>;
 }
@@ -114,8 +121,11 @@ pub trait HubFiles: Send + Sync {
         offset: u64,
         max: u32,
     ) -> ApiResult<ReadChunk>;
-    async fn begin_upload(&self, access: FileAccess, m: BlobManifest) -> ApiResult<Transfer>;
+    async fn begin_upload(&self, b: BeginUpload) -> ApiResult<Transfer>;
+    /// Checks the offset and the chunk's digest.
     async fn upload(&self, chunk: BlobChunk) -> ApiResult<Transfer>;
-    /// Checks size and hash, then keeps it.
+    async fn upload_status(&self, transfer: TransferId) -> ApiResult<TransferState>;
+    /// Checks size and hash, then keeps it; finishing again answers the same artifact.
     async fn finish_upload(&self, transfer: TransferId) -> ApiResult<ArtifactRef>;
+    async fn abort_upload(&self, transfer: TransferId) -> ApiResult<TransferState>;
 }

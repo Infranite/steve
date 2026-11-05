@@ -32,8 +32,10 @@ pub enum PrepareKind {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Prepare {
-    /// The Hub's name for it (`ST-12`), stable across retries: preparing twice gives the same workspace.
-    pub key: String,
+    /// The Hub's stable id of what the workspace is for, namespaced (`item:it_3f2a…`, not the visible
+    /// `ST-12`). Preparing again with the same resource and the same kind gives the same workspace;
+    /// with another kind, repository or branch it is a conflict.
+    pub resource: String,
     pub kind: PrepareKind,
 }
 
@@ -121,6 +123,8 @@ pub enum GitAction {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GitApply {
     pub workspace: WorkspaceRef,
+    /// The revision of the [`GitFacts`] the decision was made on (refs, index, dirty state).
+    pub expected: Revision,
     pub expected_head: String,
     pub action: GitAction,
     /// A credential the Hub hands over for this one action (a push token), by reference.
@@ -132,8 +136,18 @@ pub struct GitApply {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SecretRef {
     pub id: String,
-    /// `env:NAME`, `stdin`, or `file` (the last one only where the Node can keep it off disk).
-    pub how: String,
+    pub how: SecretDelivery,
+}
+
+/// How the process gets the secret. `File` writes a temporary file: a Node offers it only when it
+/// says so in its capabilities (`secret-file`), and the Hub allows it only for Nodes it trusts with
+/// that (the Hub's own machine, for now).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SecretDelivery {
+    Env { name: String },
+    Stdin,
+    File { env: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -167,10 +181,19 @@ pub struct FileInfo {
     pub version: Revision,
 }
 
+/// A file on a Node: inside a workspace, or under an allowed root read as is (a knowledge folder,
+/// never made a workspace).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "in", rename_all = "snake_case")]
+pub enum FileAddress {
+    Workspace(PathRef),
+    Root(RootPath),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileRead {
-    pub path: PathRef,
-    /// `None` reads whatever is there; otherwise a changed file answers `conflict`.
+    pub path: FileAddress,
+    /// `None` reads whatever is there; otherwise a changed file answers `conflict` (read again).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected: Option<Revision>,
     pub offset: u64,
@@ -192,6 +215,8 @@ pub struct ScanSpec {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScanPage {
     pub scan: OperationId,
+    /// The version of this scan's manifest; every page of one scan has the same.
+    pub manifest: Revision,
     pub entries: Vec<FileInfo>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next: Option<Cursor>,

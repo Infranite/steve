@@ -17,4 +17,6 @@ sha2 = "=0.11.1"
 hex = "=0.4.3"
 
 [dev-dependencies]
-tokio = { version = "=1.54.1", features = ["rt", "macros"] }
+# The contract tests use the fake Node: a plain `cargo test --workspace` runs them too.
+steve-node-api = { path = ".", features = ["testkit"] }
+tokio = { version = "=1.54.1", features = ["rt", "rt-multi-thread", "macros"] }
