@@ -373,6 +373,12 @@ fn prune_removes_more_than_one_batch() {
     while d.pump(&t.store, 1).unwrap().done > 0 {}
     emit(&t.store, "default", 1);
     assert_eq!(outbox::prune(&t.store, i64::MAX / 2, 0).unwrap(), 1201);
-    assert_eq!(one::<i64>(&t.store, "SELECT count(*) FROM outbox_events"), 1);
-    assert_eq!(one::<i64>(&t.store, "SELECT count(*) FROM outbox_receipts"), 0);
+    assert_eq!(
+        one::<i64>(&t.store, "SELECT count(*) FROM outbox_events"),
+        1
+    );
+    assert_eq!(
+        one::<i64>(&t.store, "SELECT count(*) FROM outbox_receipts"),
+        0
+    );
 }

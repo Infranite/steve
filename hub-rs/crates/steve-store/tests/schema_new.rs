@@ -238,7 +238,10 @@ fn yolo_migration_does_not_depend_on_013() {
     assert_eq!(yolo(&c), want);
 
     // the full run also adds 035's indexes on yolo_actions
-    for l in db::MIGRATIONS[34].lines().filter(|l| l.contains(" ON yolo_")) {
+    for l in db::MIGRATIONS[34]
+        .lines()
+        .filter(|l| l.contains(" ON yolo_"))
+    {
         c.execute_batch(l).unwrap();
     }
     let want = yolo(&c);

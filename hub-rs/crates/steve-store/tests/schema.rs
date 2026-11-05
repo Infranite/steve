@@ -125,7 +125,10 @@ fn fresh_database_is_ts_schema_plus_module_migrations() {
     }
     // 035 indexes both kinds of table: an index on a TS table belongs to the TS side, the rest to
     // the module side (each statement is one line)
-    for statement in db::MIGRATIONS[34].lines().filter(|l| l.starts_with("CREATE ")) {
+    for statement in db::MIGRATIONS[34]
+        .lines()
+        .filter(|l| l.starts_with("CREATE "))
+    {
         let (_, on) = statement.split_once(" ON ").unwrap();
         let table = on.split('(').next().unwrap().trim();
         let in_ts: bool = ts
