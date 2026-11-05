@@ -1,4 +1,4 @@
-//! Slice P5 acceptance: with a scripted model gateway, the two examples of §5 give
+//! Slice P5 acceptance: with a scripted model gateway, the two examples give
 //! the expected operations and preview lines, apply writes the data and undo puts it back exactly;
 //! names that are not recognized show “（没认出：X）” instead of being guessed. Plus the other fields and
 //! operations of the three targets, staleness (409), org-chart limits and the `global` candidates.
@@ -163,7 +163,7 @@ fn state(t: &TestEnv) -> Value {
     })
 }
 
-// ---------------------------------------------------------------- §5 example 1
+// ---------------------------------------------------------------- Example 1
 
 #[tokio::test]
 async fn sarah_moves_to_globex() {
@@ -260,7 +260,7 @@ async fn sarah_moves_to_globex() {
     assert_eq!(state(&t), before, "undo puts everything back");
 }
 
-// ---------------------------------------------------------------- §5 example 2
+// ---------------------------------------------------------------- Example 2
 
 #[tokio::test]
 async fn new_delivery_team_from_names() {

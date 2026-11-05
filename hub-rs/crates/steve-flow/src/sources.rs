@@ -266,7 +266,7 @@ pub fn connections_of(
         .collect())
 }
 
-/// `Source` of §4.1.
+/// `Source`.
 #[derive(Debug, Clone, Serialize)]
 pub struct SourceView {
     pub adapter: String,

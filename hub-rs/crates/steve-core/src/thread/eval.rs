@@ -11,7 +11,7 @@
 //!   cargo test -p steve-core route_eval_real_model -- --ignored --nocapture
 //! ```
 //!
-//! The bar (§10 R1): at least 90% of the cases hit, and no question becomes an item.
+//! The bar: at least 90% of the cases hit, and no question becomes an item.
 
 use super::decide::{DecideCtx, decide};
 use crate::gateway::{self, ClaudeCli, ModelGateway, RouteCtx, Said, Tier};

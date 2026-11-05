@@ -86,8 +86,8 @@ pub struct ThreadReady {
     pub failed: usize,
 }
 
-/// A conversation: the web's (`steve`) or a guest one — an IM space's (`chan:<space>`, channels
-/// §2.12), whose turns come from people in that space. A guest conversation is routed like the web's,
+/// A conversation: the web's (`steve`) or a guest one — an IM space's (`chan:<space>`),
+/// whose turns come from people in that space. A guest conversation is routed like the web's,
 /// but never changes configuration, never talks to items (`#ST-n`, “送到事项”, progress questions)
 /// and never answers `/汇报`; research and items are allowed only when the host says so.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -727,7 +727,7 @@ impl Core {
         tx
     }
 
-    /// A message the paste guard caught (V4 §4.6): stored with the secrets replaced, answered with
+    /// A message the paste guard caught: stored with the secrets replaced, answered with
     /// the fixed reply (linking the vault), and not routed: no model sees it (`guarded`, so a
     /// restart does not take it for a message the routing lane lost).
     pub fn say_guarded(&self, ws: &str, stored: &str, reply: &str, href: &str) -> Result<String> {

@@ -11,7 +11,7 @@ use super::cx::{ConnCx, StartCx};
 use super::integration::Integration;
 use super::oauth::{self, OAuthClient, OAuthSpec, TokenSet};
 
-/// The capability codes of §2.2. Adapters declare the subset they support.
+/// The capability codes. Adapters declare the subset they support.
 pub const CAPS: [&str; 12] = [
     "msg.receive",
     "msg.send",
@@ -206,7 +206,7 @@ pub enum ProviderError {
     Unsupported,
 }
 
-/// A health check's outcome (§2.2 `ok → reauth → error`).
+/// A health check's outcome.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Health {
     Ok,

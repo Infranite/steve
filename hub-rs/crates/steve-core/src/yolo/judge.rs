@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 
 use super::{guard, limits};
 
-/// Choices YOLO never makes, whatever the facts (§2.2 last paragraph).
+/// Choices YOLO never makes, whatever the facts.
 pub const NEVER: &[&str] = &["allow_always", "delivered", "tosteve", "continue_once"];
 
 /// What the user can widen or narrow. The defaults are the spec's; [`Policy::widest`] turns

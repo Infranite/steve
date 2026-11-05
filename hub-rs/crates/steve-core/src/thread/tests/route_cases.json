@@ -1,5 +1,5 @@
 {
- "note": "thread-routing §9: the 22 user messages of the main conversation (prod, 2026-10-31 18:50 to 11-01 18:09, each with the 6 messages before it) and 20 synthetic ones. expect = kinds allowed after the guards; question = must never become an item. The tags are those of today's database (the first messages were routed before they existed).",
+ "note": "Thread routing: the 22 user messages of the main conversation (prod, 2026-10-31 18:50 to 11-01 18:09, each with the 6 messages before it) and 20 synthetic ones. expect = kinds allowed after the guards; question = must never become an item. The tags are those of today's database (the first messages were routed before they existed).",
  "ctx": {
   "bots": [
    {

@@ -8,7 +8,7 @@
 //!
 //! - [`repo`] — the SQL (tables of migration 5, owned by steve-store);
 //! - [`service`] — the rules, shared by REST, the change operations and identification;
-//! - [`identify`] — §2.3;
+//! - [`identify`] — identification of a handle as a contact;
 //! - [`ops`] — `account.add` / `account.patch` change operations;
 //! - [`api`] — the REST handlers; [`routes`] is what the integrator mounts under `/api`.
 //!

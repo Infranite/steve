@@ -145,7 +145,7 @@ impl Graph {
     }
 }
 
-/// §3.1 validation; the error is the `400` text.
+/// Validation; the error is the `400` text.
 pub fn validate(v: &Value, reg: &NodeRegistry) -> Result<Graph, String> {
     let g = Graph::from_value(v)?;
     if g.nodes.is_empty() {

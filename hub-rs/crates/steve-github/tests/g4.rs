@@ -1,7 +1,7 @@
 //! G4 acceptance: an item without a linked repo gets the fixed hint; a fake token
 //! (and the connection's own token, and a value injected into the session) in a CI log comes back
 //! masked; an agent's comment without a grant is a decision and END, `grant_8h` posts it and lets
-//! the second one through directly; the panel JSON has the §7 shape; `rerun_failed` reruns the
+//! the second one through directly; the panel JSON has the expected shape; `rerun_failed` reruns the
 //! failed workflow; an agent's `steve_github_open_pr` opens a draft PR after your yes and tells
 //! the session.
 //!
@@ -742,7 +742,7 @@ async fn the_panel_matches_section_7_and_reruns_failed_checks() {
         steve_modules::ApiError::not_found("操作").to_string()
     );
 
-    // all green, item waiting for acceptance: no rerun button, the §7 foot
+    // all green, item waiting for acceptance: no rerun button, the foot
     let sha = git(h.work.path(), &["rev-parse", BRANCH]);
     h.fake.set_check(REPO, &sha, "build", Some("success"));
     let repo = q(&h, "SELECT id FROM gh_repos", &[]);

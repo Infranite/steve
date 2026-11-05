@@ -1,4 +1,4 @@
-//! In-process use of an item's secrets (§4.4 `mode=internal`): the vault side
+//! In-process use of an item's secrets: the vault side
 //! of `ConnCx::with_credential`. The values are lent to a closure and zeroed when it returns, so an
 //! adapter never holds a copy it could keep. One of the three decryption sites.
 

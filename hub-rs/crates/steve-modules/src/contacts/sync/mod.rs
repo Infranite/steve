@@ -1,4 +1,4 @@
-//! Org-chart sync from an office IM directory (slice P6, §7 job
+//! Org-chart sync from an office IM directory (job
 //! `people.directory_sync`): every connection with `directory.read` hands a [`Snapshot`] through its
 //! [`DirectoryAdapter`]; [`apply::apply`] turns departments into org-chart teams of the own organization
 //! and people into contacts with accounts, members, leads, jobs and `reports_to` links.

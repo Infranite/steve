@@ -41,7 +41,7 @@ pub const REPO_HOOK_EVENTS: [&str; 8] = [
     "status",
 ];
 
-/// The repo settings of §3.4, with defaults.
+/// The repo settings, with defaults.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settings {
     /// `ask_pr|none`.
@@ -217,7 +217,7 @@ pub fn check_state(c: &CheckRow) -> &'static str {
     }
 }
 
-/// `Pr` of §8.
+/// `Pr`.
 pub fn pr_out(c: &rusqlite::Connection, repo: &RepoRow, p: &PrRow) -> rusqlite::Result<Value> {
     let rows = repo::checks_for_sha(c, &repo.id, &p.head_sha)?;
     let checks: Vec<Value> = latest_checks(&rows)
@@ -238,7 +238,7 @@ pub fn pr_out(c: &rusqlite::Connection, repo: &RepoRow, p: &PrRow) -> rusqlite::
     }))
 }
 
-/// `Repo` of §8.
+/// `Repo`.
 pub fn repo_out(c: &rusqlite::Connection, r: &RepoRow) -> rusqlite::Result<Value> {
     let (adapter, account, status) =
         repo::connection_label(c, &r.connection_id)?.unwrap_or_default();
@@ -614,7 +614,7 @@ impl GitHub {
         }
     }
 
-    /// `GET /github/repos/:id`: one `Repo` of §8.
+    /// `GET /github/repos/:id`: one `Repo`.
     pub fn repo_detail(&self, who: &Caller, id: &str) -> VaultResult<Value> {
         let r = self.own_repo(&who.ws, id)?;
         Ok(self

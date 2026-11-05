@@ -303,7 +303,7 @@ pub fn patch(
     Ok(())
 }
 
-/// §3.4 delete.
+/// Delete.
 pub fn delete(tx: &Tx, f: &FlowRow, actor: &str, now: i64) -> FlowResult<()> {
     tx.execute(
         "UPDATE flows SET deleted = 1, enabled = 0, updated = ? WHERE id = ?",

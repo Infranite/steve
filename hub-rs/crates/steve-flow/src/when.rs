@@ -536,7 +536,7 @@ mod tests {
         Utc.with_ymd_and_hms(2026, 11, 1, 0, 0, 0).unwrap()
     }
 
-    /// The §3.3 table, at least two phrasings per row, plus the extra forms we accept.
+    /// The table, at least two phrasings per row, plus the extra forms we accept.
     #[test]
     fn rule_table() {
         let cases = [

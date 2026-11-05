@@ -1,4 +1,4 @@
-//! Comments on PRs and issues (§8 `POST /github/comments`).
+//! Comments on PRs and issues.
 //!
 //! - Yours (`POST /github/comments`): posted directly, audited `github.comment`.
 //! - An agent's (`steve_github_comment`): posted directly only while an open

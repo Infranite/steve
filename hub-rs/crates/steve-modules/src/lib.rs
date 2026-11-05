@@ -1,11 +1,11 @@
 //! The shared base every new Hub module builds on (slice B0):
 //!
-//! - [`ApiError`] and the extractors ([`Caller`], [`Body`], [`Check`]): the error-code conventions of §0.4;
+//! - [`ApiError`] and the extractors ([`Caller`], [`Body`], [`Check`]): the error-code conventions;
 //! - [`Modules`]: the state module routers run on (store, model gateway, registries);
 //! - [`changes`]: persisted conversational-config drafts as operation lists, apply/undo in one
 //!   transaction, `409` when the target moved, 24-hour undo;
 //! - [`decisions`]: dispatch of `POST /api/decisions/:id` to the module that opened the decision, and the
-//!   `confirm` kind (§0.1 point 6);
+//!   `confirm` kind;
 //! - [`own`]: the `own_<x>(ws, me, id)` check;
 //! - [`sse`]: which subscribers get a module event;
 //! - B1, the seams between modules and steve-core: [`gateway`] (model calls),

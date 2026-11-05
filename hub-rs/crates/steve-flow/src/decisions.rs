@@ -1,4 +1,4 @@
-//! Decision handlers of flows (§9 待处理): `flow_step` (an `approve` node, or the approval the
+//! Decision handlers of flows: `flow_step` (an `approve` node, or the approval the
 //! engine asks for before an effect), `signal` (a `notify`: 知道了 / 转成事项). `flow_run` (budget,
 //! and `retry`/`drop` after a restart) is [`crate::budget::FlowRunDecisions`]. Handlers run inside
 //! the answer's transaction, so the run is only marked `running` there; driving it, and creating

@@ -1,4 +1,4 @@
-//! G5 acceptance: the §9 example as a `gh_repo` draft — its change lines,
+//! G5 acceptance: the example as a `gh_repo` draft — its change lines,
 //! apply, undo, a stale draft; the `github.comment` grant drafted on the repo and through
 //! [`CommentGrants`] (Chinese name, bot / repo / hours parsing, never a guess); an issue turned
 //! into an item has a `from` link and is not turned twice; `GET /github/repos/:id`.

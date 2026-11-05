@@ -8,8 +8,8 @@ use steve_store::base::Level;
 
 use crate::Modules;
 
-/// The mark the outbound path puts in front of a message YOLO approved in the user's name (YOLO user
-/// decision 2026-11-01 §2): Feishu as the user and proxy sends get it at the start of the text, mail
+/// The mark the outbound path puts in front of a message YOLO approved in the user's name:
+/// Feishu as the user and proxy sends get it at the start of the text, mail
 /// on the first line of the body; the subject is not changed.
 pub const AI_PREFIX: &str = "[AI] ";
 

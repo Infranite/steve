@@ -1,4 +1,4 @@
-//! Decisions opened by modules (§0.1 point 6). A module opens one with
+//! Decisions opened by modules. A module opens one with
 //! `steve_store::base::decisions::open(tx, NewDecision)` and registers a [`DecisionHandler`] for its
 //! `subject_type`; `POST /api/decisions/:id` reaches [`dispatch`] first.
 

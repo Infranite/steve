@@ -123,7 +123,7 @@ pub fn normalize(system: &System, raw: &str) -> Option<Handle> {
 
 // ---------------------------------------------------------------- seeds, start
 
-/// Seeds the built-in systems and the workspace's default match rule when missing (§1 seeds).
+/// Seeds the built-in systems and the workspace's default match rule when missing.
 pub fn ensure_seeds(tx: &Tx, ws: &str) -> ApiResult<()> {
     if !repo::builtins_seeded(tx)? {
         repo::seed_builtins(tx)?;

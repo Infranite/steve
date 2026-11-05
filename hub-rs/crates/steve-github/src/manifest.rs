@@ -82,7 +82,7 @@ fn valid_login(s: &str) -> bool {
         && !s.contains("--")
 }
 
-/// The manifest of §1.1 (verbatim, the name cut to GitHub's 34 characters).
+/// The manifest (verbatim, the name cut to GitHub's 34 characters).
 pub fn manifest(workspace_name: &str, public_url: &str, origin: &str) -> Value {
     let name: String = format!("Steve · {workspace_name}")
         .chars()

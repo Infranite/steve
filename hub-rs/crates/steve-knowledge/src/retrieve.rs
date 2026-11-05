@@ -39,7 +39,7 @@ const MEM_BOOST: f64 = 1.2;
 const CHAT_HALF_LIFE_DAYS: f64 = 30.0;
 const DAY_MS: f64 = 86_400_000.0;
 
-/// Who is asking, which decides extra filters (the main-thread rule of §3.3).
+/// Who is asking, which decides extra filters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Purpose {
@@ -91,7 +91,7 @@ impl<'a> Query<'a> {
     }
 }
 
-/// One numbered result. Serializes as the API `Hit` of §6.1.
+/// One numbered result. Serializes as the API `Hit`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Hit {
     pub n: usize,

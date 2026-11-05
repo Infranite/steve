@@ -3,7 +3,7 @@
 //! nonce per write, stored as `nonce || ciphertext+tag`. The AAD binds every ciphertext to its
 //! workspace, item, and field (or KEK version), so a blob copied to another row fails to open.
 //!
-//! Decryption of field values is `pub(crate)` on purpose: §10 rule 2 allows it in exactly three call
+//! Decryption of field values is `pub(crate)` on purpose: it is allowed in exactly three call
 //! sites (reveal/finish, injection, `with_credential`), all inside this module.
 
 use chacha20poly1305::XChaCha20Poly1305;
@@ -100,7 +100,7 @@ pub fn seal_field(
     seal(dek.bytes(), &field_aad(ws, item_id, field_id), plain)
 }
 
-/// The plaintext of one secret field. Only for the three call sites of §10 rule 2: `items/reveal.rs`, `items/credential.rs`, and V4's injection.
+/// The plaintext of one secret field. Only for the three call sites: `items/reveal.rs`, `items/credential.rs`, and V4's injection.
 pub(crate) fn open_field(
     dek: &Dek,
     ws: &str,

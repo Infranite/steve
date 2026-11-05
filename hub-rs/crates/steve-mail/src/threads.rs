@@ -106,7 +106,7 @@ pub struct DraftBrief {
     pub status: String,
 }
 
-/// `ThreadBrief` of §9.
+/// `ThreadBrief`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ThreadBrief {
     pub id: String,
@@ -141,7 +141,7 @@ pub struct AttachmentOut {
     pub inline: bool,
 }
 
-/// `Message` of §9.
+/// `Message`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct MessageOut {
     pub id: String,

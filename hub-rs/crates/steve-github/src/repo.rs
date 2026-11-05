@@ -187,7 +187,7 @@ pub struct RepoRow {
     pub last_delivery: Option<i64>,
     /// `{pulls_etag, issues_since, last_poll, last_issues_poll, branch_checks, hook_item, lost_access}`.
     pub poll_state: Value,
-    /// §3.4, only the keys set (defaults applied when read, see `crate::repos::Settings`).
+    /// The repo settings, only the keys set (defaults applied when read, see `crate::repos::Settings`).
     pub settings: Value,
     pub enabled: bool,
     pub revision: i64,

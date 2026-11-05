@@ -54,7 +54,7 @@ pub const OPTIONS: [&str; 5] = ["once", "grant_1h", "grant_8h", "grant_24h", "de
 pub const OPTIONS_HIGH: [&str; 2] = ["once", "deny"];
 
 const DAY_MS: i64 = 86_400_000;
-/// Unanswered requests expire after a day (§9 `vault.cleanup`).
+/// Unanswered requests expire after a day.
 const PENDING_MS: i64 = DAY_MS;
 /// Use rows are kept for a year.
 const RETENTION_MS: i64 = 365 * DAY_MS;

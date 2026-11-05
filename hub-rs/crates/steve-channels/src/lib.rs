@@ -17,7 +17,7 @@
 //! `POST /spaces/:id/rules/to-flow`, `DELETE /spaces/:id/flow`, [`spaces::set_account_rules`] for
 //! `PATCH /channels/:connection_id`.
 //!
-//! C4 (reply generation): [`compose`] (the §2.8 prompt in seven layers, K4 retrieval in layer 7,
+//! C4 (reply generation): [`compose`] (the prompt in seven layers, K4 retrieval in layer 7,
 //! P3 contact cards in layer 6), [`replies::Replies`] (the [`Responder`]: `reply`/`draft`
 //! generate, `create_item` creates and links the item and answers its number), [`deliver`] (the
 //! [`deliver::Outbound`] hand-off to C6; [`deliver::DraftOnly`] until then — C4 never sends),

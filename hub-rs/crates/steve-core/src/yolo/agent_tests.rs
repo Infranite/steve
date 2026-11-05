@@ -1,4 +1,4 @@
-//! YOLO Y4: the protocol a session starts with (unchanged while YOLO is off, the §4.1 lines while it
+//! YOLO Y4: the protocol a session starts with (unchanged while YOLO is off, the lines while it
 //! is on, the release sentence only for Steve's own release), the harness mode, and what a running
 //! session hears when YOLO changes under it.
 

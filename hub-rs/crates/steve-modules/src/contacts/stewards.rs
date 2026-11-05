@@ -641,7 +641,7 @@ pub fn holdings(m: &Modules, who: &Caller, id: &str) -> ApiResult<Holdings> {
     })
 }
 
-/// The objects nobody confirmed as 负责人 (§4 “没有负责人”): Steve's bots, personas, devices,
+/// The objects nobody confirmed as 负责人: Steve's bots, personas, devices,
 /// connections, bot parties and service / shared-mailbox accounts.
 pub fn unowned_in(c: &Connection, ws: &str) -> ApiResult<Vec<ObjectInfo>> {
     let none = |t: &str, col: &str| {

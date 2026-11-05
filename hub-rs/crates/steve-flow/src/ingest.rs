@@ -291,7 +291,7 @@ pub(crate) fn check(ev: &RawEvent) -> FlowResult<()> {
     c.done()
 }
 
-/// §2.2. Called by adapters through the poll job and the hooks route, and by other modules through
+/// Takes one event in. Called by adapters through the poll job and the hooks route, and by other modules through
 /// [`EventSink`]. `conn` must be a connection of `ws` (`404 没有这个连接` otherwise).
 pub async fn ingest(
     cx: &Arc<FlowCx>,

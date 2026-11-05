@@ -1,5 +1,5 @@
-//! Signals = events + their triage result (§4.2
-//! `/signals`, §7 SSE): the list with its stats, one signal with its runs, the original, the outcome
+//! Signals = events + their triage result (`/signals`,
+//! SSE): the list with its stats, one signal with its runs, the original, the outcome
 //! rule over several runs, and the coalesced `signal` SSE event.
 
 use std::collections::HashMap;
@@ -231,7 +231,7 @@ const SELECT: &str = "SELECT e.id, e.workspace_id, e.connection_id, e.source, e.
   FROM ext_events e LEFT JOIN connections c ON c.id = e.connection_id LEFT JOIN accounts a ON a.id = c.account_id
   LEFT JOIN flows f ON f.id = e.flow_id LEFT JOIN parties p ON p.id = e.actor_party_id";
 
-/// `Signal` of §4.1.
+/// `Signal`.
 fn signal(r: &Row) -> rusqlite::Result<Value> {
     let conn: Option<String> = r.get("connection_id")?;
     let flow: Option<String> = r.get("flow_id")?;
@@ -354,7 +354,7 @@ fn parse_json(s: Option<String>) -> Value {
         .unwrap_or(Value::Null)
 }
 
-/// `Run` of §4.1 with its steps.
+/// `Run` with its steps.
 pub fn run_view(c: &Connection, id: &str) -> FlowResult<Option<Value>> {
     let run = c
         .query_row(

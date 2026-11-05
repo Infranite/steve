@@ -59,7 +59,7 @@ impl System {
     }
 }
 
-/// The built-in systems (§1 seeds): `(id, name, kind, family, normalize)`.
+/// The built-in systems: `(id, name, kind, family, normalize)`.
 pub const BUILTIN_SYSTEMS: [(&str, &str, &str, &str, &str); 14] = [
     ("steve", "Steve", "steve", "other", "none"),
     ("mail", "邮件", "comm", "email", "email"),

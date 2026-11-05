@@ -1,6 +1,6 @@
 //! G2 acceptance: a bad signature is a 401 and writes nothing; a redelivery is
 //! processed once; a change seen by the webhook and the poll gives one event; `checks_state`
-//! follows §3.3; a repo removed from the installation gets `enabled=0`. Plus the repo endpoints and
+//! follows the check runs; a repo removed from the installation gets `enabled=0`. Plus the repo endpoints and
 //! the PAT repository hook. Everything runs against the fake GitHub; the hooks are served on a real
 //! local port so the fake can POST to them.
 

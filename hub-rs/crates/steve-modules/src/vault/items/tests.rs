@@ -982,7 +982,7 @@ async fn connection_credentials_in_the_system_vault() {
     assert_eq!(w, None);
 }
 
-/// §10 rule 2: field values are decrypted in exactly three places: reveal/finish, injection (V4) and
+/// Field values are decrypted in exactly three places: reveal/finish, injection (V4) and
 /// `with_credential`.
 #[test]
 fn decryption_call_sites() {

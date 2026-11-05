@@ -23,7 +23,7 @@ pub struct VaultRow {
 }
 
 impl VaultRow {
-    /// §4.1: personal only for its owner, shared for every member, system never (Hub-internal).
+    /// Personal only for its owner, shared for every member, system never (Hub-internal).
     pub fn visible_to(&self, ws: &str, user: &str) -> bool {
         self.workspace_id == ws
             && match self.scope.as_str() {
@@ -290,7 +290,7 @@ pub fn touch_item(c: &Connection, id: &str, now: i64) -> Result<()> {
     Ok(())
 }
 
-/// §4.1 delete: destroys the data key and every field value, keeps the title for the use log. The
+/// Delete: destroys the data key and every field value, keeps the title for the use log. The
 /// blobs are first overwritten with zeros of the same size so the freed bytes in the page don't keep
 /// the old wrapped key or ciphertext.
 pub fn destroy_item(c: &Connection, id: &str, now: i64) -> Result<()> {

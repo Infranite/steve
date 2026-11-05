@@ -1,4 +1,4 @@
-//! K5 acceptance: both examples of §8 with a fixed model reply (preview
+//! K5 acceptance: both examples with a fixed model reply (preview
 //! lines, apply, undo); a draft with a refused path has one line with the reason and no operation;
 //! plus the `kb_source:<id>` patch (owner rule, staleness) and `doc.patch` / `note.create`.
 

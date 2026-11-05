@@ -1,4 +1,4 @@
-//! Slice A1 acceptance: the four identification paths of §2.3 (Feishu
+//! Slice A1 acceptance: the four identification paths (Feishu
 //! union_id/open_id, the prefix rule excluding `noreply`, same name + same organization giving a
 //! proposal), handle conflicts 409, accounts following a merge and coming back on split — plus the REST
 //! branches, the contacts ports and the change operations. Tables from migration 5 (steve-store).
@@ -98,7 +98,7 @@ async fn acme(r: &Router) -> Acme {
     }
 }
 
-// ---------------------------------------------------------------- §2.3 step 1: exact handles
+// ---------------------------------------------------------------- Step 1: exact handles
 
 #[tokio::test]
 async fn exact_handle_finds_the_owner_and_follows_merges() {
@@ -211,7 +211,7 @@ async fn feishu_union_id_and_open_ids() {
     assert_eq!(label, "Steve 开发群");
 }
 
-// ---------------------------------------------------------------- §2.3 step 2: the prefix rule
+// ---------------------------------------------------------------- Step 2: the prefix rule
 
 #[tokio::test]
 async fn prefix_rule_attaches_same_local_part_in_the_same_org() {
@@ -370,7 +370,7 @@ async fn prefix_rule_with_unique_owner_across_two_domains() {
     assert_eq!(got.party_id, a.sarah);
 }
 
-// ---------------------------------------------------------------- §2.3 step 3: proposals
+// ---------------------------------------------------------------- Step 3: proposals
 
 #[tokio::test]
 async fn same_name_and_signature_org_gives_a_proposal() {
@@ -515,7 +515,7 @@ async fn private_contacts_of_others_are_not_proposed() {
     assert!(got.proposal.is_none());
 }
 
-// ---------------------------------------------------------------- §2.3 step 4: new contacts
+// ---------------------------------------------------------------- Step 4: new contacts
 
 #[tokio::test]
 async fn unknown_handle_creates_an_unconfirmed_contact() {

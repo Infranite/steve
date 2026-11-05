@@ -19,7 +19,7 @@ use crate::vault::secret::Dek;
 use crate::vault::{Vault, VaultError, VaultResult, ensure_active};
 use crate::{ApiError, Check};
 
-/// Limits of §5.2.
+/// Limits.
 const TITLE_MAX: usize = 80;
 const SITE_MAX: usize = 200;
 const LABEL_MAX: usize = 40;
@@ -313,7 +313,7 @@ fn check_account(c: &rusqlite::Connection, ws: &str, id: Option<&str>) -> VaultR
 }
 
 impl Vault {
-    /// The three vaults of §1 (personal for `user`, shared, system), created on first use, and the
+    /// The three vaults (personal for `user`, shared, system), created on first use, and the
     /// built-in templates. Cheap when they exist (one read).
     pub fn ensure_vaults(&self, ws: &str, user: &str) -> VaultResult<()> {
         let missing = |vs: &[VaultRow]| {

@@ -33,7 +33,7 @@ pub const SUBJECT: &str = "mem";
 pub const MAX_PER_ORIGIN: usize = 3;
 /// Unanswered candidates expire after this long.
 pub const EXPIRE_AFTER_MS: i64 = 30 * 24 * 3600 * 1000;
-/// How often the expiry job runs (§10 `kb.candidates_expire`).
+/// How often the expiry job runs.
 pub const EXPIRE_EVERY: Duration = Duration::from_secs(3600);
 /// Quotes are cut to this many characters (`mem_candidates.evidence`).
 pub const EVIDENCE_MAX: usize = 300;
@@ -596,7 +596,7 @@ pub fn remember_tool() -> Value {
     })
 }
 
-/// `steve_remember` (§5.1 origin `tool`): no model call, the text becomes a candidate of the user the
+/// `steve_remember`: no model call, the text becomes a candidate of the user the
 /// agent works for. `Ok` is the result text, `Err` the `isError` text. Synchronous: call it from a
 /// blocking task.
 pub fn remember(m: &Modules, kb: &Knowledge, cx: &McpCx, args: &Value) -> Result<String, String> {

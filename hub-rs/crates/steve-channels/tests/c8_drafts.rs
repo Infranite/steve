@@ -1,4 +1,4 @@
-//! C8 acceptance: the two examples of §7 with a fixed model output —
+//! C8 acceptance: the two examples with a fixed model output —
 //! change rows, apply, undo — plus `409` on a stale draft, your own account refusing a persona (one
 //! line with the reason, no operation) and `reply`, the channel target (persona, rules, duty,
 //! trigger words / where), names that are not recognized, and the `global` candidates. The model is

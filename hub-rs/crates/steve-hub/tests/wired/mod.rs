@@ -603,7 +603,7 @@ async fn a_secret_use_runs_after_its_decision() {
     assert_eq!((status.as_deref(), code), (Some("ok"), Some(0)));
 }
 
-/// V4 §4.6: a pasted password or token is stored replaced, answered with the fixed reply, and never
+/// The paste guard: a pasted password or token is stored replaced, answered with the fixed reply, and never
 /// routed (no model call); `/api/config/draft` refuses it the same way.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_paste_guard_keeps_secrets_out_of_the_thread() {
@@ -724,7 +724,7 @@ async fn a_channel_round_trip_on_the_fake_feishu() {
         .call("GET", &format!("/api/chan-messages/{out}/basis"), None)
         .await;
     assert_eq!(s, 200, "{b}");
-    // §2.11: “收到” went on first and was swapped for “完成” once the reply was out
+    // “收到” went on first and was swapped for “完成” once the reply was out
     let m = "om_p2ptext00000000000000000000001";
     assert!(
         until(10, || async { fake.reactions_on(m) == ["DONE"] }).await,
@@ -737,7 +737,7 @@ async fn a_channel_round_trip_on_the_fake_feishu() {
         r[0].deleted && r[0].as_user.is_none(),
         "as the bot, taken off"
     );
-    // §2.12: the DM is a conversation of its own, with the turn and Steve's answer
+    // The DM is a conversation of its own, with the turn and Steve's answer
     let (s, l) = e.call("GET", "/api/conversations", None).await;
     assert_eq!(s, 200, "{l}");
     let c = &l["conversations"][0];

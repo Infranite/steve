@@ -1,6 +1,6 @@
 # Feishu sample payloads
 
-These are plaintext schema-2.0 callback bodies, in the shape they have after decryption. They were written from the field lists and examples in the open-platform docs; they are not recordings. F7 replaces them with real callbacks recorded during the live hookup (feishu.md §6).
+These are plaintext schema-2.0 callback bodies, in the shape they have after decryption. They were written from the field lists and examples in the open-platform docs; they are not recordings. They are to be replaced with real callbacks recorded during a live hookup.
 
 The ids match `World::sample()` in `src/fake/feishu/model.rs`:
 
@@ -80,7 +80,7 @@ The fake's REST responses follow these pages:
 - **HTTP status for token errors:** the fake returns 400.
 - **Some error codes:** `230001`, `230011`, `40004`, `41050`, `42002`, `10014`, `99992402` and `20001`–`20026` were not checked one by one.
 
-## Long connection and user identity (F0 delta, feishu-lark-cli.md)
+## Long connection and user identity
 - Long connection: larksuite/oapi-sdk-go `ws/` at db9f52d (2026-10-15) — `pbbp2.pb.go` (frame
   layout; gogo always writes fields 6, 7, 9), `client_transport.go` (endpoint, handshake errors),
   `client_session.go` / `client_lifecycle.go` (ping, read deadline `2×PingInterval+5 s`,

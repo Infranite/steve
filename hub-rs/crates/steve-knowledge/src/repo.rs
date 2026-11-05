@@ -434,7 +434,7 @@ pub fn set_mark(tx: &Tx, ws: &str, name: &str, value: &str, now: i64) -> Result<
     Ok(())
 }
 
-/// Members of a workspace (the main-thread rule of §3.3).
+/// Members of a workspace.
 pub fn member_count(c: &Connection, ws: &str) -> Result<i64> {
     Ok(
         c.prepare_cached("SELECT COUNT(*) FROM workspace_members WHERE workspace_id = ?")?

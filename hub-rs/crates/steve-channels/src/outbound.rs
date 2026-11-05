@@ -104,7 +104,7 @@ pub const ERR_NO_AUTH: &str = "没有有效的批准或授权";
 pub const ERR_SECRET: &str = "正文里有机密值，已拦下";
 pub const ERR_NO_RECALL: &str = "这个渠道不支持撤回";
 
-/// `chan_messages.status` of a draft you said no to (the §1 list has no word for it).
+/// `chan_messages.status` of a draft you said no to.
 pub const DISCARDED: &str = "discarded";
 
 /// The `steve_reply_source` answers, verbatim.

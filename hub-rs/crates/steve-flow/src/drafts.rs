@@ -1,6 +1,6 @@
 //! Conversational configuration. This file: schedules; the [`source`] and [`flow`] targets are in their own files. The
 //! `schedule` draft target (`schedule:<id>` and `schedule:new`) and the `schedule.create` /
-//! `schedule.patch` operations. Times are resolved by the rules of §3.3 while planning; a phrase
+//! `schedule.patch` operations. Times are resolved by the rules while planning; a phrase
 //! they do not understand is not put into the draft but shown as “（没看懂时间：<原话>）”.
 
 use std::sync::Arc;

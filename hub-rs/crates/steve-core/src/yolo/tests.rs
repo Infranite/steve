@@ -887,7 +887,7 @@ fn outbound(
     }
 }
 
-/// One case per row of §2.2 (with the user's decisions): `(name, facts, expected choice or rule)`.
+/// One case per row (with the user's decisions): `(name, facts, expected choice or rule)`.
 #[test]
 fn every_row_of_the_table() {
     let pl = place();
