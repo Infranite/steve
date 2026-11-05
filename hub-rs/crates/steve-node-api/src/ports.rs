@@ -47,6 +47,8 @@ pub trait ExecutionControl: Send + Sync {
     /// An intent: the answer says it was taken; the end comes as the operation's own final state
     /// (which may be a normal finish that came first).
     async fn cancel(&self, c: Command<Cancel>) -> ApiResult<Receipt>;
+    /// Give up an `unknown` execution once its processes are confirmed gone ([`Abandon`]).
+    async fn abandon(&self, c: Command<Abandon>) -> ApiResult<Receipt>;
     /// Applies only to the request still waiting with this attempt and action digest; anything else
     /// is `stale`.
     async fn resolve_permission(&self, c: Command<PermissionResolution>) -> ApiResult<Receipt>;

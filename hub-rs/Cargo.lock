@@ -4989,6 +4989,7 @@ dependencies = [
  "async-trait",
  "axum",
  "hex",
+ "libc",
  "rmcp",
  "rusqlite",
  "serde",

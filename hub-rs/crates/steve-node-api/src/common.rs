@@ -385,6 +385,15 @@ pub struct Cancel {
     pub reason: String,
 }
 
+/// The Hub gives up on an execution whose outcome is unknown (after a Node restart): the Node makes
+/// sure its processes are gone (stopping them if they still run), then ends it as interrupted and
+/// frees what it held. Only for `unknown` targets; a live one is cancelled instead.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Abandon {
+    pub target: OperationId,
+    pub reason: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PageRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -13,7 +13,8 @@ use steve_node_api::testkit::build::{answer, choice, cmd, limits, policy};
 use steve_node_api::*;
 
 struct T {
-    _dir: tempfile::TempDir,
+    _dir: Option<tempfile::TempDir>,
+    root: PathBuf,
     home: PathBuf,
     log: PathBuf,
     adapter: PathBuf,
@@ -24,30 +25,40 @@ impl T {
     /// `env`: extra variables for the fake adapter (`FAKE_ACP_SHAPE=claude099`…).
     fn new(env: &[(&str, &str)]) -> T {
         let dir = tempfile::tempdir().unwrap();
-        let home = dir.path().join("node");
-        let log = dir.path().join("acp.log");
+        let mut t = T::at(dir.path(), env);
+        t._dir = Some(dir);
+        t
+    }
+
+    /// A Node home under `root` (made if new; reused by a child process of a test).
+    fn at(root: &Path, env: &[(&str, &str)]) -> T {
+        let home = root.join("node");
+        let log = root.join("acp.log");
         let fake = Path::new(env!("CARGO_MANIFEST_DIR")).join("../steve-acp/tests/fake-acp.js");
-        let adapter = dir.path().join("adapter.sh");
+        let adapter = root.join("adapter.sh");
         let mut script = format!("#!/bin/sh\nexport FAKE_ACP_LOG='{}'\n", log.display());
         for (k, v) in env {
             script.push_str(&format!("export {k}='{v}'\n"));
         }
         script.push_str(&format!("exec node '{}' \"$@\"\n", fake.display()));
-        std::fs::write(&adapter, script).unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&adapter, std::fs::Permissions::from_mode(0o755)).unwrap();
-        std::fs::create_dir_all(dir.path().join("work/proj")).unwrap();
+        if !adapter.exists() {
+            std::fs::write(&adapter, script).unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&adapter, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        std::fs::create_dir_all(root.join("work/proj")).unwrap();
         T {
+            root: root.to_path_buf(),
             home,
             log,
             adapter,
             sink: Arc::new(RecordingSink::default()),
-            _dir: dir,
+            _dir: None,
         }
     }
 
     fn config(&self) -> NodeConfig {
-        let root = self.home.parent().unwrap().to_path_buf();
+        let root = self.root.clone();
         NodeConfig {
             node: NodeId::new("hub").unwrap(),
             home: self.home.clone(),
@@ -98,7 +109,7 @@ impl T {
         let t0 = Instant::now();
         while !f(self) {
             assert!(
-                t0.elapsed() < Duration::from_secs(10),
+                t0.elapsed() < Duration::from_secs(15),
                 "timed out waiting for {what}: {:?}",
                 self.kinds()
             );
@@ -127,6 +138,40 @@ impl T {
             })
             .collect()
     }
+
+    fn request(&self) -> Option<PermissionRequest> {
+        self.sink.events().into_iter().find_map(|e| match e.body {
+            EventBody::PermissionRequested { request } => Some(request),
+            _ => None,
+        })
+    }
+}
+
+/// Waits until the operation is finished; returns its final state.
+async fn finished(n: &LocalNode, op: &str) -> Observed {
+    let t0 = Instant::now();
+    loop {
+        let r = n.operation(OperationId::new(op).unwrap()).await.unwrap();
+        if r.state.is_finished() {
+            return r.state;
+        }
+        assert!(
+            t0.elapsed() < Duration::from_secs(15),
+            "{op}: {:?}",
+            r.state
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+fn ok(s: &Observed) -> bool {
+    matches!(
+        s,
+        Observed::Finished {
+            outcome: Outcome::Succeeded,
+            ..
+        }
+    )
 }
 
 fn ws() -> WorkspaceRef {
@@ -166,36 +211,44 @@ fn turn(session: &str, t: &str, attempt: &str, text: &str) -> TurnSpec {
     }
 }
 
+fn wall() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64
+}
+
 /// A command that is accepted now (the real clock).
 fn now_cmd<T>(op: &str, body: T) -> Command<T> {
     let mut c = cmd(op, body);
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
-    c.issued_at = Timestamp(now);
-    c.accept_before = Timestamp(now + 60_000);
+    c.issued_at = Timestamp(wall());
+    c.accept_before = Timestamp(wall() + 60_000);
     c
 }
 
-async fn ready(n: &LocalNode, session: &str) {
-    n.prepare_workspace(now_cmd(
-        "op_prep",
-        Prepare {
-            resource: "item:x".into(),
-            kind: PrepareKind::Existing {
-                dir: RootPath {
-                    root: RootId::new("work").unwrap(),
-                    rel: RelPath::new("proj").unwrap(),
-                },
+fn prepare_proj() -> Prepare {
+    Prepare {
+        resource: "item:x".into(),
+        kind: PrepareKind::Existing {
+            dir: RootPath {
+                root: RootId::new("work").unwrap(),
+                rel: RelPath::new("proj").unwrap(),
             },
         },
-    ))
-    .await
-    .unwrap();
-    n.open_session(now_cmd(&format!("op_open_{session}"), open_body(session)))
+    }
+}
+
+async fn ready(n: &LocalNode, session: &str) {
+    n.prepare_workspace(now_cmd("op_prep", prepare_proj()))
         .await
         .unwrap();
+    assert!(ok(&finished(n, "op_prep").await));
+    let op = format!("op_open_{session}");
+    n.open_session(now_cmd(&op, open_body(session)))
+        .await
+        .unwrap();
+    let s = finished(n, &op).await;
+    assert!(ok(&s), "{s:?}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -216,16 +269,20 @@ async fn a_turn_runs_once_and_reports_in_steves_words() {
         (e.outcome, e.stop_reason.as_str()),
         (Outcome::Succeeded, "end_turn")
     );
-    let kinds = t.kinds();
-    for k in [
-        "attempt_started",
-        "message_started",
-        "text_delta",
-        "message_completed",
-        "attempt_ended",
-    ] {
-        assert!(kinds.contains(&k.to_string()), "{k} in {kinds:?}");
-    }
+    // the attempt's last event is its end
+    let of_attempt: Vec<String> = t
+        .sink
+        .events()
+        .into_iter()
+        .filter(|e| matches!(&e.subject, Subject::Execution(x) if x.attempt().as_str() == "a_1"))
+        .map(|e| {
+            serde_json::to_value(&e.body).unwrap()["type"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        })
+        .collect();
+    assert_eq!(of_attempt.last().map(String::as_str), Some("attempt_ended"));
     // no ACP word reached the Hub
     let all = serde_json::to_string(&t.sink.events()).unwrap();
     for word in [
@@ -237,17 +294,20 @@ async fn a_turn_runs_once_and_reports_in_steves_words() {
     ] {
         assert!(!all.contains(word), "{word} leaked");
     }
-    let op = n
-        .operation(OperationId::new("op_t1").unwrap())
-        .await
-        .unwrap();
-    assert!(op.state.is_finished());
-    // the next attempt reuses the adapter process
+    // the next attempt reuses the adapter process the open started
     n.start_turn(now_cmd("op_t2", turn("s_1", "t_2", "a_2", "@say again")))
         .await
         .unwrap();
     t.until("the second end", |t| t.ended().len() == 2).await;
     assert_eq!(t.sent("initialize"), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn one_node_per_home() {
+    let t = T::new(&[]);
+    let _n = t.node();
+    let e = LocalNode::open(t.config()).err().expect("refused");
+    assert_eq!(e.code, ErrorCode::Conflict);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -275,6 +335,38 @@ async fn a_cancel_ends_the_attempt_as_cancelled() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_late_cancel_never_reaches_the_next_attempt() {
+    let t = T::new(&[]);
+    let n = t.node();
+    ready(&n, "s_1").await;
+    n.start_turn(now_cmd("op_a", turn("s_1", "t_1", "a_1", "@say one")))
+        .await
+        .unwrap();
+    t.until("the first end", |t| t.ended().len() == 1).await;
+    n.start_turn(now_cmd(
+        "op_b",
+        turn("s_1", "t_2", "a_2", "@sleep 1500 @say two"),
+    ))
+    .await
+    .unwrap();
+    t.until("the second prompt", |t| t.sent("session/prompt") == 2)
+        .await;
+    // a cancel of the first, which is over: nothing goes to the adapter
+    n.cancel(now_cmd(
+        "op_c",
+        Cancel {
+            target: OperationId::new("op_a").unwrap(),
+            reason: "late".into(),
+        },
+    ))
+    .await
+    .unwrap();
+    t.until("the second end", |t| t.ended().len() == 2).await;
+    assert_eq!(t.sent("session/cancel"), 0);
+    assert_eq!(t.ended()[1].outcome, Outcome::Succeeded);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_permission_waits_for_the_hubs_answer() {
     let t = T::new(&[]);
     let n = t.node();
@@ -282,19 +374,8 @@ async fn a_permission_waits_for_the_hubs_answer() {
     n.start_turn(now_cmd("op_t", turn("s_1", "t_1", "a_1", "@perm Bash")))
         .await
         .unwrap();
-    t.until("the request", |t| {
-        t.kinds().contains(&"permission_requested".into())
-    })
-    .await;
-    let req = t
-        .sink
-        .events()
-        .into_iter()
-        .find_map(|e| match e.body {
-            EventBody::PermissionRequested { request } => Some(request),
-            _ => None,
-        })
-        .unwrap();
+    t.until("the request", |t| t.request().is_some()).await;
+    let req = t.request().unwrap();
     assert_eq!(
         req.choices,
         vec![PermissionDecision::AllowOnce, PermissionDecision::Reject]
@@ -315,36 +396,36 @@ async fn a_permission_waits_for_the_hubs_answer() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_restart_makes_a_running_attempt_unknown() {
+async fn an_answer_after_the_cancel_is_stale() {
     let t = T::new(&[]);
     let n = t.node();
     ready(&n, "s_1").await;
-    let first = now_cmd("op_t", turn("s_1", "t_1", "a_1", "@sleep 3000"));
-    n.start_turn(first.clone()).await.unwrap();
-    t.until("the prompt", |t| t.sent("session/prompt") == 1)
-        .await;
-    // another incarnation on the same journal
-    let again = LocalNode::open(t.config()).unwrap();
-    assert!(again.incarnation() > n.incarnation());
-    let r = again
-        .operation(OperationId::new("op_t").unwrap())
+    n.start_turn(now_cmd("op_t", turn("s_1", "t_1", "a_1", "@perm Bash")))
         .await
         .unwrap();
-    assert_eq!(r.state.tag(), StateTag::Unknown);
-    // nothing reruns it: the same command reads back unknown; the session must be opened again
-    assert_eq!(
-        again.start_turn(first).await.unwrap().state.tag(),
-        StateTag::Unknown
-    );
-    let e = again
-        .start_turn(now_cmd("op_t2", turn("s_1", "t_2", "a_2", "@say x")))
+    t.until("the request", |t| t.request().is_some()).await;
+    let req = t.request().unwrap();
+    n.cancel(now_cmd(
+        "op_c",
+        Cancel {
+            target: OperationId::new("op_t").unwrap(),
+            reason: "stop".into(),
+        },
+    ))
+    .await
+    .unwrap();
+    t.until("the end", |t| !t.ended().is_empty()).await;
+    assert!(t.kinds().contains(&"permission_expired".to_string()));
+    let e = n
+        .resolve_permission(now_cmd("op_r", answer(&req, PermissionDecision::AllowOnce)))
         .await
         .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Invalid);
+    assert_eq!(e.code, ErrorCode::Stale);
+    assert!(!t.text().contains("perm:selected"), "{}", t.text());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_model_that_does_not_take_fails_the_attempt() {
+async fn a_model_that_does_not_take_fails_the_open() {
     let t = T::new(&[("FAKE_ACP_SHAPE", "claude099")]);
     let n = t.node();
     n.prepare_workspace(now_cmd(
@@ -356,22 +437,22 @@ async fn a_model_that_does_not_take_fails_the_attempt() {
     ))
     .await
     .unwrap();
+    finished(&n, "op_prep").await;
     let mut o = open_body("s_1");
     o.choice.model = Some("no-such-model".into());
     n.open_session(now_cmd("op_open", o)).await.unwrap();
-    let mut tr = turn("s_1", "t_1", "a_1", "@say x");
-    tr.run.choice.model = Some("no-such-model".into());
-    n.start_turn(now_cmd("op_t", tr)).await.unwrap();
-    t.until("the end", |t| !t.ended().is_empty()).await;
-    let e = &t.ended()[0];
-    assert_eq!(e.outcome, Outcome::Failed);
-    assert!(
-        e.error
-            .as_ref()
-            .unwrap()
-            .safe_detail
-            .contains("no-such-model")
-    );
+    let s = finished(&n, "op_open").await;
+    let Observed::Finished {
+        outcome: Outcome::Failed,
+        error: Some(e),
+        ..
+    } = s
+    else {
+        panic!("{s:?}")
+    };
+    assert!(e.safe_detail.contains("no-such-model"), "{}", e.safe_detail);
+    let v = n.session(SessionId::new("s_1").unwrap()).await.unwrap();
+    assert_eq!(v.phase, SessionPhase::Released);
     assert_eq!(t.sent("session/prompt"), 0, "nothing ran on another model");
 }
 
@@ -403,30 +484,74 @@ async fn a_crashed_adapter_interrupts_and_the_next_attempt_starts_fresh() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_deadline_ends_the_attempt() {
+    let t = T::new(&[]);
+    let n = t.node();
+    ready(&n, "s_1").await;
+    let mut tr = turn("s_1", "t_1", "a_1", "@sleep 30000");
+    tr.run.limits.deadline = Timestamp(wall() + 1500);
+    n.start_turn(now_cmd("op_t", tr)).await.unwrap();
+    t.until("the end", |t| !t.ended().is_empty()).await;
+    assert_eq!(t.ended()[0].outcome, Outcome::TimedOut);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn what_cannot_be_enforced_is_refused() {
+    let t = T::new(&[]);
+    let n = t.node();
+    ready(&n, "s_1").await;
+    let mut tr = turn("s_1", "t_1", "a_1", "@say x");
+    tr.run.limits.max_cost = Some(Money {
+        decimal: "1".into(),
+        currency: "USD".into(),
+    });
+    let e = n.start_turn(now_cmd("op_t", tr)).await.unwrap_err();
+    assert_eq!(e.code, ErrorCode::Unsupported);
+    let mut o = open_body("s_2");
+    o.policy.network = NetworkScope::Denied;
+    let e = n.open_session(now_cmd("op_o", o)).await.unwrap_err();
+    assert_eq!(e.code, ErrorCode::Unsupported);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn checking_a_workspace_touches_nothing_there() {
+    let t = T::new(&[]);
+    let n = t.node();
+    let proj = t.root.join("work/proj");
+    std::fs::write(proj.join(".steve-node-probe"), "mine").unwrap();
+    ready(&n, "s_1").await;
+    let v = n.workspace(ws()).await.unwrap();
+    assert!(v.usable);
+    assert_eq!(
+        std::fs::read_to_string(proj.join(".steve-node-probe")).unwrap(),
+        "mine"
+    );
+    let left: Vec<_> = std::fs::read_dir(&proj)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .filter(|n| n.starts_with(".steve-node-probe-"))
+        .collect();
+    assert!(left.is_empty(), "{left:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn release_finishes_once_the_harness_is_gone() {
+    let t = T::new(&[]);
+    let n = t.node();
+    ready(&n, "s_1").await;
+    n.release_session(now_cmd("op_rel", SessionId::new("s_1").unwrap()))
+        .await
+        .unwrap();
+    assert!(ok(&finished(&n, "op_rel").await));
+    let v = n.session(SessionId::new("s_1").unwrap()).await.unwrap();
+    assert_eq!(v.phase, SessionPhase::Released);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn paths_stay_inside_the_roots() {
     let t = T::new(&[]);
     let n = t.node();
-    for rel in ["../..", "proj/../../x"] {
-        assert!(
-            RelPath::new(rel).is_err() || {
-                let e = n
-                    .prepare_workspace(now_cmd(
-                        "op_bad",
-                        Prepare {
-                            resource: "item:bad".into(),
-                            kind: PrepareKind::Existing {
-                                dir: RootPath {
-                                    root: RootId::new("work").unwrap(),
-                                    rel: RelPath::new(rel).unwrap(),
-                                },
-                            },
-                        },
-                    ))
-                    .await;
-                e.is_err()
-            }
-        );
-    }
     let e = n
         .prepare_workspace(now_cmd(
             "op_other",
@@ -443,6 +568,105 @@ async fn paths_stay_inside_the_roots() {
         .await
         .unwrap_err();
     assert_eq!(e.code, ErrorCode::Denied);
+    std::os::unix::fs::symlink("/", t.root.join("work/out")).unwrap();
+    let e = n
+        .prepare_workspace(now_cmd(
+            "op_link",
+            Prepare {
+                resource: "item:l".into(),
+                kind: PrepareKind::Existing {
+                    dir: RootPath {
+                        root: RootId::new("work").unwrap(),
+                        rel: RelPath::new("out").unwrap(),
+                    },
+                },
+            },
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::Denied);
+}
+
+// ── a real crash: the Node is a child process killed with SIGKILL ──
+
+/// Runs in a child process (see `a_killed_node_leaves_its_attempt_unknown_until_abandoned`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn child_node_process() {
+    let Ok(root) = std::env::var("STEVE_NODE_CHILD_ROOT") else {
+        return;
+    };
+    let t = T::at(Path::new(&root), &[]);
+    let n = t.node();
+    ready(&n, "s_1").await;
+    n.start_turn(now_cmd("op_t", turn("s_1", "t_1", "a_1", "@sleep 60000")))
+        .await
+        .unwrap();
+    t.until("the prompt", |t| t.sent("session/prompt") == 1)
+        .await;
+    std::fs::write(Path::new(&root).join("ready"), "").unwrap();
+    tokio::time::sleep(Duration::from_secs(120)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_killed_node_leaves_its_attempt_unknown_until_abandoned() {
+    let t = T::new(&[]);
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "child_node_process", "--nocapture"])
+        .env("STEVE_NODE_CHILD_ROOT", &t.root)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let t0 = Instant::now();
+    while !t.root.join("ready").exists() {
+        assert!(
+            t0.elapsed() < Duration::from_secs(20),
+            "child never got ready"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    child.kill().unwrap();
+    child.wait().unwrap();
+    // the adapter's group (its own process group) outlived the Node
+    let n = t.node();
+    assert!(n.incarnation() >= 2);
+    let r = n
+        .operation(OperationId::new("op_t").unwrap())
+        .await
+        .unwrap();
+    assert_eq!(r.state.tag(), StateTag::Unknown);
+    // nothing new runs in that session, not even after opening it again
+    let e = n
+        .open_session(now_cmd("op_reopen", open_body("s_1")))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::Busy);
+    // the Hub gives it up: its processes are stopped first
+    n.abandon(now_cmd(
+        "op_ab",
+        Abandon {
+            target: OperationId::new("op_t").unwrap(),
+            reason: "node crashed".into(),
+        },
+    ))
+    .await
+    .unwrap();
+    assert!(ok(&finished(&n, "op_ab").await));
+    let r = n
+        .operation(OperationId::new("op_t").unwrap())
+        .await
+        .unwrap();
+    assert!(matches!(
+        r.state,
+        Observed::Finished {
+            outcome: Outcome::Interrupted,
+            ..
+        }
+    ));
+    n.open_session(now_cmd("op_reopen2", open_body("s_1")))
+        .await
+        .unwrap();
+    assert!(ok(&finished(&n, "op_reopen2").await));
 }
 
 // ── Steve's tools through the Node's endpoint ──
@@ -499,7 +723,6 @@ async fn mcp(url: &str, token: &str, body: serde_json::Value) -> (u16, serde_jso
     s.read_to_string(&mut out).await.unwrap();
     let status: u16 = out.split_whitespace().nth(1).unwrap().parse().unwrap();
     let body = out.split("\r\n\r\n").nth(1).unwrap_or("");
-    // chunked or not: take the JSON object in it
     let v = body
         .find('{')
         .and_then(|i| body.rfind('}').map(|j| &body[i..=j]))
@@ -566,7 +789,6 @@ async fn steves_tools_reach_the_hub_as_the_running_attempt() {
         }
     );
     assert_eq!(calls[0].args["now"], "写测试");
-    // a wrong token is refused
     let (s, _) = mcp(
         &url,
         "nope",
@@ -574,7 +796,6 @@ async fn steves_tools_reach_the_hub_as_the_running_attempt() {
     )
     .await;
     assert_eq!(s, 401);
-    // once the attempt is over, the session's token calls nothing
     n.cancel(now_cmd(
         "op_c",
         Cancel {

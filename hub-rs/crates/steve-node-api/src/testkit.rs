@@ -872,6 +872,43 @@ impl ExecutionControl for FakeNode {
         .await
     }
 
+    async fn abandon(&self, c: Command<Abandon>) -> ApiResult<Receipt> {
+        let target = c.body.target.clone();
+        self.accept("abandon", &c, |st| {
+            let Some(a) = st.inbox.get(&target) else {
+                return Err(ApiError::new(ErrorCode::Invalid, "no such operation"));
+            };
+            if !matches!(a.receipt.state, Observed::Unknown { .. }) {
+                return Err(ApiError::new(
+                    ErrorCode::Conflict,
+                    "only an unknown execution is abandoned (cancel a live one)",
+                ));
+            }
+            let exec = a.execution.clone();
+            if let Some(a) = st.inbox.get_mut(&target) {
+                a.receipt.state = Observed::Finished {
+                    outcome: Outcome::Interrupted,
+                    result: None,
+                    error: Some(ApiError::new(ErrorCode::OutcomeUnknown, "abandoned")),
+                };
+            }
+            if let Some(ExecutionRef::Turn { session, .. }) = &exec
+                && st.active.get(session) == exec.as_ref()
+            {
+                st.active.remove(session);
+                if let Some(s) = st.sessions.get_mut(session) {
+                    s.view.phase = SessionPhase::Released;
+                    s.view.active = None;
+                }
+            }
+            if let Some(ExecutionRef::Job { attempt, .. }) = &exec {
+                st.jobs.remove(attempt);
+            }
+            Ok(Decided::done(OperationResult::Unit))
+        })
+        .await
+    }
+
     async fn resolve_permission(&self, c: Command<PermissionResolution>) -> ApiResult<Receipt> {
         let res = c.body.clone();
         self.accept("resolve_permission", &c, |st| {

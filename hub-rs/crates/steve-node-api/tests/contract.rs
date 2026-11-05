@@ -1194,3 +1194,46 @@ fn tool_call_digests_ignore_key_order() {
         call(r#"{"b":{"x":3,"y":2},"a":1}"#).args_digest().unwrap()
     );
 }
+
+#[tokio::test]
+async fn an_unknown_execution_is_abandoned_not_cancelled() {
+    let (n, _) = connected("hub");
+    ready(&n, "s_1").await;
+    n.start_turn(cmd("op_t", turn("s_1", "t_1", "a_1", "x")))
+        .await
+        .unwrap();
+    let ab = |op: &str| {
+        cmd(
+            op,
+            Abandon {
+                target: OperationId::new("op_t").unwrap(),
+                reason: "node restarted".into(),
+            },
+        )
+    };
+    // a live one is cancelled, not abandoned
+    assert_eq!(
+        n.abandon(ab("op_ab1")).await.unwrap_err().code,
+        ErrorCode::Conflict
+    );
+    n.lose_track(&exec_turn("s_1", "t_1", "a_1")).unwrap();
+    n.abandon(ab("op_ab2")).await.unwrap();
+    let r = n
+        .operation(OperationId::new("op_t").unwrap())
+        .await
+        .unwrap();
+    assert!(matches!(
+        r.state,
+        Observed::Finished {
+            outcome: Outcome::Interrupted,
+            ..
+        }
+    ));
+    // the session is free again once opened again
+    n.open_session(cmd("op_reopen", open("s_1", "hub")))
+        .await
+        .unwrap();
+    n.start_turn(cmd("op_t2", turn("s_1", "t_2", "a_2", "y")))
+        .await
+        .unwrap();
+}

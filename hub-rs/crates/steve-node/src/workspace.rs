@@ -77,8 +77,8 @@ fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
     }
 }
 
-/// A worktree of `repo` at `path` on `branch` (created from `base`, else HEAD, when new). Kept when it
-/// exists already.
+/// A worktree of `repo` at `path` on `branch` (created from `base`, else HEAD, when new). One that
+/// is there already is adopted only if it is a worktree of that very repository on that branch.
 pub(crate) fn add_worktree(
     repo: &Path,
     path: &Path,
@@ -86,7 +86,7 @@ pub(crate) fn add_worktree(
     base: Option<&str>,
 ) -> Result<(), String> {
     if path.exists() {
-        return Ok(());
+        return check_worktree(repo, path, branch);
     }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -103,42 +103,122 @@ pub(crate) fn add_worktree(
     }
 }
 
-/// Removes a worktree (the branch stays unless asked) or a scratch directory. A directory the
-/// workspace only adopted (an existing project directory) is never removed.
+/// `path` is a worktree of `repo` with `branch` checked out.
+pub(crate) fn check_worktree(repo: &Path, path: &Path, branch: &str) -> Result<(), String> {
+    let common = |d: &Path| -> Result<PathBuf, String> {
+        let c = git(
+            d,
+            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        )?;
+        PathBuf::from(c).canonicalize().map_err(|e| e.to_string())
+    };
+    if common(path)? != common(repo)? {
+        return Err(format!(
+            "{} is not a worktree of {}",
+            path.display(),
+            repo.display()
+        ));
+    }
+    let top = PathBuf::from(git(path, &["rev-parse", "--show-toplevel"])?)
+        .canonicalize()
+        .map_err(|e| e.to_string())?;
+    if top != path.canonicalize().map_err(|e| e.to_string())? {
+        return Err(format!("{} is inside another worktree", path.display()));
+    }
+    let head = git(path, &["rev-parse", "--abbrev-ref", "HEAD"])?;
+    if head != branch {
+        return Err(format!(
+            "{} has {head} checked out, not {branch}",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+/// Removes a worktree or a scratch directory; a directory the workspace only adopted (an existing
+/// project directory) is never removed. Returns what could not be done (a branch git would not
+/// delete), never swallowing it.
 pub(crate) fn remove(
     kind: &PrepareKind,
     path: &Path,
     repo: Option<&Path>,
     branch: Option<&str>,
     keep_branch: bool,
-) -> Result<(), String> {
+) -> Result<Option<String>, String> {
     match kind {
-        PrepareKind::Existing { .. } => Ok(()),
+        PrepareKind::Existing { .. } => Ok(None),
         PrepareKind::Scratch => {
             if path.exists() {
                 std::fs::remove_dir_all(path).map_err(|e| e.to_string())?;
             }
-            Ok(())
+            Ok(None)
         }
         PrepareKind::Worktree { .. } => {
             let repo = repo.ok_or("no repository")?;
             if path.exists() {
                 git(repo, &["worktree", "remove", &path.to_string_lossy()])?;
             }
-            if let (false, Some(b)) = (keep_branch, branch) {
-                let _ = git(repo, &["branch", "-d", b]);
+            match (keep_branch, branch) {
+                (false, Some(b)) => Ok(git(repo, &["branch", "-d", b])
+                    .err()
+                    .map(|e| format!("branch {b} kept: {e}"))),
+                _ => Ok(None),
             }
-            Ok(())
         }
     }
 }
 
-/// Writable: a file can be created and removed in it.
+/// A recorded workspace path is still a directory, and (for one under a root) still inside it.
+pub(crate) fn still_valid(path: &Path, roots: &[Root], under_root: bool) -> ApiResult<PathBuf> {
+    let real = path
+        .canonicalize()
+        .map_err(|_| ApiError::new(ErrorCode::Invalid, "the workspace directory is gone"))?;
+    if !real.is_dir() {
+        return Err(ApiError::new(
+            ErrorCode::Invalid,
+            "the workspace is not a directory",
+        ));
+    }
+    if under_root
+        && !roots
+            .iter()
+            .filter_map(|r| r.path.canonicalize().ok())
+            .any(|r| real.starts_with(r))
+    {
+        return Err(ApiError::new(
+            ErrorCode::Denied,
+            "the workspace left its root",
+        ));
+    }
+    Ok(real)
+}
+
+/// Writable: a file of a fresh random name can be created and removed in it. Nothing that was there
+/// is touched (create-new, never following an existing name).
 pub(crate) fn usable(path: &Path) -> bool {
-    let probe = path.join(".steve-node-probe");
-    let ok = std::fs::write(&probe, b"").is_ok();
-    let _ = std::fs::remove_file(&probe);
-    ok
+    let n = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let name = format!(
+        ".steve-node-probe-{}",
+        &hex::encode(sha2::Sha256::digest(format!(
+            "{n}{:?}",
+            std::thread::current().id()
+        )))[..16]
+    );
+    let probe = path.join(name);
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe)
+    {
+        Ok(_) => {
+            let _ = std::fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
+    }
 }
 
 /// How a path is shown: with `~` for the home directory.
