@@ -368,8 +368,10 @@ impl NodeRuntime {
     }
 
     /// The session runs on this Node from now on: its workspace is prepared and it is opened, by
-    /// two commands (the open waits for the prepare). Idempotent for the same binding.
+    /// two commands (the open waits for the prepare). Idempotent for the same binding. Refused
+    /// once [`Self::stop`] was called: nothing would ever send those commands.
     pub fn bind(&self, b: &Binding) -> Result<(), StoreError> {
+        self.running()?;
         let workspace = WorkspaceRef {
             node: self.node_id.clone(),
             id: idv(derived_id("w", &b.resource))?,

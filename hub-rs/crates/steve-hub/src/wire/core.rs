@@ -745,6 +745,9 @@ pub struct RoutedRuntime {
     pub bind_remote: Option<steve_node_api::NodeId>,
     /// Where bindings are read.
     pub store: steve_store::Store,
+    /// The legacy runner's host: a binding starts in the mode it would start the session in, and
+    /// in a directory the local Node takes.
+    pub host: Arc<HubHost>,
 }
 
 /// Whether boot recovery leaves `session` to a Node that is not enabled here: only when its
@@ -839,6 +842,11 @@ impl RoutedRuntime {
         }
     }
 
+    /// The harness mode the legacy runner would start `session_id` in (YOLO's widening included).
+    fn perm_mode(&self, session_id: &str) -> Option<String> {
+        self.host.session(session_id).and_then(|s| s.perm_mode)
+    }
+
     /// Binds a new session to the configured remote Node when it can run there. False: it was not
     /// (not configured, not possible for this session, or the bind failed), nothing changed.
     fn bind_remote(&self, session_id: &str) -> bool {
@@ -846,9 +854,14 @@ impl RoutedRuntime {
             return false;
         };
         let auto = f.speaks(target, steve_node_api::AUTO_MODE);
-        let Some(b) =
-            super::node_binding::remote_binding_for(&self.store, session_id, target, auto)
-        else {
+        let perm = self.perm_mode(session_id);
+        let Some(b) = super::node_binding::remote_binding_for(
+            &self.store,
+            session_id,
+            perm.as_deref(),
+            target,
+            auto,
+        ) else {
             tracing::info!("{session_id}: not bound to the remote Node {target}");
             return false;
         };
@@ -868,14 +881,18 @@ impl RoutedRuntime {
 impl steve_core::AgentRuntime for RoutedRuntime {
     /// A new session is bound to the remote Node named by `STEVE_NODE_BIND` when it can run there;
     /// otherwise, with the local Node enabled here, to it when its binding can be planned
-    /// (otherwise, e.g. a permission mode the Node path cannot express, it stays on the legacy
-    /// runner). Existing sessions are never bound; with neither configured nothing changes.
+    /// (otherwise, e.g. a permission mode the Node path cannot express, a directory outside its
+    /// roots or a Node that stopped, it stays on the legacy runner). Existing sessions are never
+    /// bound; with neither configured nothing changes.
     fn created(&self, session_id: &str) {
         if self.bind_remote(session_id) {
             return;
         }
         let Some(n) = &self.node else { return };
-        match super::node_binding::binding_for(&self.store, session_id) {
+        let perm = self.perm_mode(session_id);
+        let local = self.host.local_node.get();
+        let allows = |at: &steve_node_api::RootPath| local.is_some_and(|l| l.allows(at));
+        match super::node_binding::binding_for(&self.store, session_id, perm.as_deref(), &allows) {
             Some(b) => {
                 if let Err(e) = n.bind(&b) {
                     tracing::error!(
