@@ -964,12 +964,16 @@ impl steve_core::AgentRuntime for RoutedRuntime {
         match super::node_binding::binding_for(&self.store, session_id, perm.as_deref(), &allows) {
             Some(b) => {
                 if let Err(e) = n.bind_after(&b, after) {
+                    n.fell_back();
                     tracing::error!(
                         "bind {session_id} to the Node: {e}; it stays on the legacy runner"
                     );
                 }
             }
-            None => tracing::info!("{session_id}: no Node binding can be planned; legacy runner"),
+            None => {
+                n.fell_back();
+                tracing::info!("{session_id}: no Node binding can be planned; legacy runner")
+            }
         }
     }
     fn prompt(

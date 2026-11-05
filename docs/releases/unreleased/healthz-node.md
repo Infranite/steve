@@ -1,0 +1,1 @@
+- `/healthz` 新增 `node`，不用查数据库就能判断 Node 路径的状态：本机 Node 是否启用（`STEVE_NODE_MODE=local`）、是否已和 Hub 对账、是否因启动失败而停用；绑定在 Node 上的会话数、未释放的会话数、进行中的轮次、结果未知需要人处理的尝试（`unknown`），以及因所在 Node 未启用而排队等待的会话（`parked`，Node 关闭时同样显示）。`legacy.sessions` 是仍会由旧运行器执行的会话数，`legacy.busy` 是其中还有排队消息、未完成派发或待恢复的会话数；`fallbacks` 是本次启动以来 Node 已开启、但新会话仍留在旧运行器上的次数。只有状态和计数，不含会话 ID、路径或错误原文。
