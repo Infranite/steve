@@ -1203,3 +1203,438 @@ async fn disconnected_lease_and_empty_ack_backoff() {
     assert!((1..=5).contains(&calls), "empty ack hot loop: {calls}");
     n.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unknown_workspace_controls_recover_via_public_port() {
+    let t = T::new(&[]);
+    let n = t.node();
+    let db = rusqlite::Connection::open(t.home.join("node.sqlite3")).unwrap();
+    db.execute_batch("CREATE TRIGGER fail_prepare BEFORE UPDATE ON ops WHEN NEW.id='prep_crash' AND NEW.receipt LIKE '%finished%' BEGIN SELECT RAISE(ABORT,'crash before final receipt'); END").unwrap();
+    let c = now_cmd(
+        "prep_crash",
+        Prepare {
+            resource: "recover_scratch".into(),
+            kind: PrepareKind::Scratch,
+        },
+    );
+    n.prepare_workspace(c.clone()).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    n.shutdown().await;
+    drop(n);
+    db.execute_batch("DROP TRIGGER fail_prepare").unwrap();
+    let n = t.node();
+    assert!(matches!(
+        n.operation(c.id.clone()).await.unwrap().state,
+        Observed::Unknown { .. }
+    ));
+    let recover = now_cmd(
+        "recover_prep",
+        Recover {
+            target: c.id.clone(),
+            expected: c.digest("prepare_workspace").unwrap(),
+            reason: "retire interrupted prepare".into(),
+        },
+    );
+    n.recover(recover.clone()).await.unwrap();
+    assert!(ok(&finished(&n, "recover_prep").await));
+    assert!(matches!(
+        n.operation(c.id.clone()).await.unwrap().state,
+        Observed::Finished {
+            outcome: Outcome::Interrupted,
+            ..
+        }
+    ));
+    assert!(ok(&n.recover(recover).await.unwrap().state));
+    n.prepare_workspace(now_cmd("prep_retry", c.body))
+        .await
+        .unwrap();
+    let Observed::Finished {
+        result: Some(OperationResult::Workspace(w)),
+        ..
+    } = finished(&n, "prep_retry").await
+    else {
+        panic!("prepare")
+    };
+    db.execute_batch("CREATE TRIGGER fail_tidy BEFORE UPDATE ON ops WHEN NEW.id='tidy_crash' AND NEW.receipt LIKE '%finished%' BEGIN SELECT RAISE(ABORT,'crash after removal'); END").unwrap();
+    let tidy = now_cmd(
+        "tidy_crash",
+        Tidy {
+            workspace: w.workspace.clone(),
+            expected: w.revision,
+            keep_branch: true,
+        },
+    );
+    n.tidy_workspace(tidy.clone()).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    n.shutdown().await;
+    drop(n);
+    db.execute_batch("DROP TRIGGER fail_tidy").unwrap();
+    let n = t.node();
+    n.recover(now_cmd(
+        "recover_tidy",
+        Recover {
+            target: tidy.id.clone(),
+            expected: tidy.digest("tidy_workspace").unwrap(),
+            reason: "retire after removal".into(),
+        },
+    ))
+    .await
+    .unwrap();
+    assert!(ok(&finished(&n, "recover_tidy").await));
+    n.tidy_workspace(now_cmd("tidy_retry", tidy.body))
+        .await
+        .unwrap();
+    assert!(ok(&finished(&n, "tidy_retry").await));
+    n.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn all_ingress_frames_are_bounded_and_control_stays_responsive() {
+    for prompt in ["@flood", "@bigperm", "@bigreply"] {
+        let t = T::new(&[]);
+        let n = t.node();
+        ready(&n, "s_1").await;
+        let mut spec = turn("s_1", "t_1", "a_1", prompt);
+        spec.run.limits.max_output_bytes = 20_000;
+        n.start_turn(now_cmd("op_t1", spec)).await.unwrap();
+        let state = tokio::time::timeout(Duration::from_secs(5), finished(&n, "op_t1"))
+            .await
+            .unwrap();
+        assert!(
+            matches!(
+                state,
+                Observed::Finished {
+                    outcome: Outcome::Cancelled,
+                    ..
+                }
+            ),
+            "{prompt}: {state:?}"
+        );
+        assert!(t.text().len() <= 20_000);
+        n.shutdown().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn uncertain_stop_retries_unknown_event_and_expires_permissions() {
+    let dir = tempfile::tempdir().unwrap();
+    let pidfile = dir.path().join("descendant");
+    let t = T::at(
+        dir.path(),
+        &[("FAKE_ACP_GRANDCHILD", pidfile.to_str().unwrap())],
+    );
+    let n = t.node();
+    ready(&n, "s_1").await;
+    let descendant: i32 = std::fs::read_to_string(&pidfile).unwrap().parse().unwrap();
+    struct Cleanup(i32);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            unsafe {
+                libc::kill(self.0, libc::SIGKILL);
+            }
+        }
+    }
+    let cleanup = Cleanup(descendant);
+    n.start_turn(now_cmd(
+        "op_t1",
+        turn("s_1", "t_1", "a_1", "@permtool read absent"),
+    ))
+    .await
+    .unwrap();
+    t.until("waiting", |t| t.request().is_some()).await;
+    let db = rusqlite::Connection::open(t.home.join("node.sqlite3")).unwrap();
+    db.execute_batch("CREATE TRIGGER fail_unknown BEFORE UPDATE ON ops WHEN NEW.id='op_t1' AND NEW.receipt LIKE '%unknown%' BEGIN SELECT RAISE(ABORT,'unknown commit failure'); END").unwrap();
+    let leader: i32 = std::fs::read_to_string(&t.log)
+        .unwrap()
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find_map(|v| v.pointer("/spawn/pid").and_then(|v| v.as_i64()))
+        .unwrap() as i32;
+    unsafe {
+        libc::kill(leader, libc::SIGKILL);
+    }
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    db.execute_batch("DROP TRIGGER fail_unknown").unwrap();
+    t.until("unknown event", |t| t.sink.events().iter().any(|e| matches!(&e.body, EventBody::OperationChanged {receipt} if receipt.operation.as_str()=="op_t1" && matches!(receipt.state, Observed::Unknown {..})))).await;
+    assert!(
+        t.sink
+            .events()
+            .iter()
+            .any(|e| matches!(&e.body, EventBody::PermissionExpired { .. }))
+    );
+    assert!(
+        t.ended().is_empty(),
+        "uncertain is not a terminal execution"
+    );
+    drop(cleanup);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    n.abandon(now_cmd(
+        "abandon_unknown",
+        Abandon {
+            target: OperationId::new("op_t1").unwrap(),
+            reason: "descendant externally stopped".into(),
+        },
+    ))
+    .await
+    .unwrap();
+    assert!(ok(&finished(&n, "abandon_unknown").await));
+    n.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn prepare_and_release_retry_after_storage_recovers() {
+    let t = T::new(&[]);
+    let n = t.node();
+    let db = rusqlite::Connection::open(t.home.join("node.sqlite3")).unwrap();
+    db.execute_batch("CREATE TRIGGER fail_prepare BEFORE UPDATE ON ops WHEN NEW.id='op_prep' AND NEW.receipt LIKE '%finished%' BEGIN SELECT RAISE(ABORT,'prepare failure'); END").unwrap();
+    n.prepare_workspace(now_cmd("op_prep", prepare_proj()))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    db.execute_batch("DROP TRIGGER fail_prepare").unwrap();
+    assert!(ok(&finished(&n, "op_prep").await));
+    // Faulted stays fail-closed for new work. Restart for the release half of the test.
+    n.shutdown().await;
+    drop(n);
+    let n = t.node();
+    n.open_session(now_cmd("open_after_restart", open_body("s_1")))
+        .await
+        .unwrap();
+    assert!(ok(&finished(&n, "open_after_restart").await));
+    db.execute_batch("CREATE TRIGGER fail_release BEFORE UPDATE ON ops WHEN NEW.id='rel' AND NEW.receipt LIKE '%finished%' BEGIN SELECT RAISE(ABORT,'release failure'); END").unwrap();
+    n.release_session(now_cmd("rel", SessionId::new("s_1").unwrap()))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    db.execute_batch("DROP TRIGGER fail_release").unwrap();
+    assert!(ok(&finished(&n, "rel").await));
+    assert_eq!(
+        n.session(SessionId::new("s_1").unwrap())
+            .await
+            .unwrap()
+            .phase,
+        SessionPhase::Released
+    );
+    n.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn journal_budget_stops_running_work_and_reserves_terminal_space() {
+    let t = T::new(&[]);
+    let n = t.node();
+    ready(&n, "s_1").await;
+    n.start_turn(now_cmd("op_t1", turn("s_1", "t_1", "a_1", "@sleep 20000")))
+        .await
+        .unwrap();
+    t.until("prompt before quota", |t| t.sent("session/prompt") == 1)
+        .await;
+    let db = rusqlite::Connection::open(t.home.join("node.sqlite3")).unwrap();
+    // Storage fault fixture: retained history reaches the data budget while an attempt runs.
+    // Embedded NULs deliberately distinguish UTF-8 bytes from SQLite length(TEXT).
+    db.execute(
+        "INSERT INTO command_specs VALUES ('quota_fixture', CAST(zeroblob(268435456) AS TEXT))",
+        [],
+    )
+    .unwrap();
+    let state = tokio::time::timeout(Duration::from_secs(5), finished(&n, "op_t1"))
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            state,
+            Observed::Finished {
+                outcome: Outcome::Cancelled,
+                ..
+            }
+        ),
+        "{state:?}"
+    );
+    assert!(matches!(
+        n.start_turn(now_cmd(
+            "new_over_quota",
+            turn("s_1", "t_2", "a_2", "hello")
+        ))
+        .await,
+        Err(ApiError {
+            code: ErrorCode::Exhausted,
+            ..
+        })
+    ));
+    n.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn failed_process_registration_never_executes_adapter() {
+    let t = T::new(&[]);
+    let n = t.node();
+    n.prepare_workspace(now_cmd("prep", prepare_proj()))
+        .await
+        .unwrap();
+    assert!(ok(&finished(&n, "prep").await));
+    let db = rusqlite::Connection::open(t.home.join("node.sqlite3")).unwrap();
+    db.execute_batch("CREATE TRIGGER fail_proc BEFORE INSERT ON procs BEGIN SELECT RAISE(ABORT,'registration failure'); END").unwrap();
+    n.open_session(now_cmd("open", open_body("s_1")))
+        .await
+        .unwrap();
+    assert!(matches!(
+        finished(&n, "open").await,
+        Observed::Finished {
+            outcome: Outcome::Failed,
+            ..
+        }
+    ));
+    assert!(
+        !t.log.exists(),
+        "adapter must not execute before process ownership is durable"
+    );
+    db.execute_batch("DROP TRIGGER fail_proc").unwrap();
+    n.open_session(now_cmd("open_retry", open_body("s_1")))
+        .await
+        .unwrap();
+    assert!(ok(&finished(&n, "open_retry").await));
+    assert_eq!(t.sent("initialize"), 1);
+    n.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn worktree_git_is_registered_before_effects_and_reaped_after() {
+    let t = T::new(&[]);
+    let repo = t.root.join("work/proj");
+    for args in [
+        vec!["init", "-b", "main"],
+        vec![
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "initial",
+        ],
+    ] {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    let n = t.node();
+    let db = rusqlite::Connection::open(t.home.join("node.sqlite3")).unwrap();
+    db.execute_batch("CREATE TRIGGER fail_git BEFORE INSERT ON procs BEGIN SELECT RAISE(ABORT,'git registration failure'); END").unwrap();
+    let prepare = Prepare {
+        resource: "worktree_resource".into(),
+        kind: PrepareKind::Worktree {
+            repository: RootPath {
+                root: RootId::new("work").unwrap(),
+                rel: RelPath::new("proj").unwrap(),
+            },
+            branch: "topic".into(),
+            base: None,
+        },
+    };
+    n.prepare_workspace(now_cmd("git_rejected", prepare.clone()))
+        .await
+        .unwrap();
+    assert!(matches!(
+        finished(&n, "git_rejected").await,
+        Observed::Finished {
+            outcome: Outcome::Failed,
+            ..
+        }
+    ));
+    assert!(
+        !std::process::Command::new("git")
+            .args(["rev-parse", "--verify", "topic"])
+            .current_dir(&repo)
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    db.execute_batch("DROP TRIGGER fail_git").unwrap();
+    n.prepare_workspace(now_cmd("git_retry", prepare))
+        .await
+        .unwrap();
+    let state = finished(&n, "git_retry").await;
+    assert!(ok(&state), "{state:?}");
+    let Observed::Finished {
+        result: Some(OperationResult::Workspace(w)),
+        ..
+    } = state
+    else {
+        panic!("workspace")
+    };
+    n.tidy_workspace(now_cmd(
+        "git_tidy",
+        Tidy {
+            workspace: w.workspace,
+            expected: w.revision,
+            keep_branch: true,
+        },
+    ))
+    .await
+    .unwrap();
+    assert!(ok(&finished(&n, "git_tidy").await));
+    assert_eq!(
+        db.query_row("SELECT COUNT(*) FROM procs", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    n.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn permission_receipt_retries_without_sending_allow_twice() {
+    let t = T::new(&[]);
+    let n = t.node();
+    ready(&n, "s_1").await;
+    n.start_turn(now_cmd(
+        "op_t1",
+        turn("s_1", "t_1", "a_1", "@permtool read absent"),
+    ))
+    .await
+    .unwrap();
+    t.until("permission", |t| t.request().is_some()).await;
+    let req = t.request().unwrap();
+    let db = rusqlite::Connection::open(t.home.join("node.sqlite3")).unwrap();
+    db.execute_batch("CREATE TRIGGER fail_answer BEFORE UPDATE ON ops WHEN NEW.id='answer' AND NEW.receipt LIKE '%finished%' BEGIN SELECT RAISE(ABORT,'answer final commit failure'); END").unwrap();
+    n.resolve_permission(now_cmd(
+        "answer",
+        answer(&req, PermissionDecision::AllowOnce),
+    ))
+    .await
+    .unwrap();
+    t.until("approval written", |t| {
+        std::fs::read_to_string(&t.log)
+            .unwrap_or_default()
+            .contains("\"optionId\":\"once\"")
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        !n.operation(OperationId::new("answer").unwrap())
+            .await
+            .unwrap()
+            .state
+            .is_finished()
+    );
+    db.execute_batch("DROP TRIGGER fail_answer").unwrap();
+    assert!(ok(&finished(&n, "answer").await));
+    finished(&n, "op_t1").await;
+    assert_eq!(
+        std::fs::read_to_string(&t.log)
+            .unwrap()
+            .matches("\"optionId\":\"once\"")
+            .count(),
+        1
+    );
+    n.shutdown().await;
+}

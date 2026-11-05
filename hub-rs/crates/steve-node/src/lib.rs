@@ -157,6 +157,26 @@ impl tools::Current for CurrentOf {
 /// Journal events in `t` (numbered in their streams as part of the transaction).
 pub(crate) fn emit_all(inner: &Inner, t: &Tx, evs: Vec<(Subject, EventBody)>) -> ApiResult<()> {
     for (subject, body) in evs {
+        let data = match &body {
+            EventBody::OperationChanged { .. }
+            | EventBody::AttemptEnded { .. }
+            | EventBody::PermissionExpired { .. }
+            | EventBody::PermissionResolved { .. }
+            | EventBody::SessionChanged { .. }
+            | EventBody::MessageCompleted { .. } => false,
+            EventBody::Usage { report } => report.measurement != Measurement::Final,
+            _ => true,
+        };
+        if data
+            && t.payload_bytes()?
+                .saturating_add(serde_json::to_vec(&body).map_err(internal)?.len() as u64 + 16384)
+                > JOURNAL_QUOTA
+        {
+            return Err(ApiError::new(
+                ErrorCode::Exhausted,
+                "journal data budget reached",
+            ));
+        }
         let stream: StreamId = id(match &subject {
             Subject::Session { session } => derived_id("session", session.as_str()),
             Subject::Execution(ExecutionRef::Turn { session, .. }) => {
@@ -371,40 +391,72 @@ async fn fetch(inner: &Arc<Inner>, exec: &ExecutionRef, a: &ArtifactRef) -> ApiR
 /// HEAD of the workspace's repository: `Ok(None)` when it is no repository, an error when it is one
 /// and git cannot tell.
 fn head_of(dir: &Path) -> ApiResult<Option<String>> {
+    head_with(dir, Path::new("git"), Duration::from_secs(3))
+}
+
+fn head_with(dir: &Path, program: &Path, timeout: Duration) -> ApiResult<Option<String>> {
+    use std::io::Read;
+    use std::os::{fd::AsRawFd, unix::process::CommandExt};
     let is_repo = dir.join(".git").exists();
-    let o = std::process::Command::new("git")
+    let mut child = std::process::Command::new(program)
         .args(["rev-parse", "HEAD"])
         .current_dir(dir)
+        .process_group(0)
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .spawn()
-        .and_then(|mut child| {
-            let deadline = std::time::Instant::now() + Duration::from_secs(3);
-            loop {
-                if child.try_wait()?.is_some() {
-                    return child.wait_with_output();
-                }
-                if std::time::Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::TimedOut,
-                        "git HEAD timeout",
-                    ));
-                }
-                std::thread::sleep(Duration::from_millis(10));
+        .map_err(internal)?;
+    let mut pipe = child.stdout.take().expect("pipe");
+    let flags = unsafe { libc::fcntl(pipe.as_raw_fd(), libc::F_GETFL) };
+    if flags < 0
+        || unsafe { libc::fcntl(pipe.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0
+    {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(internal("cannot bound HEAD pipe"));
+    }
+    let until = std::time::Instant::now() + timeout;
+    let mut output = Vec::new();
+    loop {
+        let mut bytes = [0; 4096];
+        for _ in 0..16 {
+            match pipe.read(&mut bytes) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => output.extend_from_slice(&bytes[..n]),
             }
-        });
-    match o {
-        Ok(o) if o.status.success() => {
-            Ok(Some(String::from_utf8_lossy(&o.stdout).trim().to_string()))
         }
-        _ if !is_repo => Ok(None),
-        _ => Err(ApiError::new(
-            ErrorCode::Internal,
-            "the workspace's HEAD cannot be read",
-        )),
+        if std::time::Instant::now() >= until || output.len() > 65536 {
+            // The direct child has not been reaped: its pid/group cannot be recycled yet.
+            unsafe {
+                libc::kill(-(child.id() as i32), libc::SIGKILL);
+            }
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(ApiError::new(
+                ErrorCode::Stale,
+                "HEAD probe timed out or exceeded output budget",
+            ));
+        }
+        match child.try_wait().map_err(internal)? {
+            Some(status) => {
+                // Do not wait for descendants holding a pipe after the direct child exits.
+                while let Ok(n) = pipe.read(&mut bytes) {
+                    if n == 0 || output.len() + n > 65536 {
+                        break;
+                    }
+                    output.extend_from_slice(&bytes[..n]);
+                }
+                return if status.success() {
+                    Ok(Some(String::from_utf8_lossy(&output).trim().to_string()))
+                } else if !is_repo {
+                    Ok(None)
+                } else {
+                    Err(internal("cannot read HEAD"))
+                };
+            }
+            None => std::thread::sleep(Duration::from_millis(10)),
+        }
     }
 }
 
@@ -825,7 +877,7 @@ impl LocalNode {
         *self.0.sink.lock().unwrap() = Some(sink);
         *self.0.files.lock().unwrap() = files;
         if !self.0.delivering.swap(true, Ordering::SeqCst) {
-            tokio::spawn(deliver_loop(Arc::downgrade(&self.0)));
+            self.spawn_owned(deliver_loop(Arc::downgrade(&self.0)));
         }
         self.0.wake.notify_one();
     }
@@ -845,6 +897,7 @@ impl LocalNode {
     /// home is free once the last handle is dropped.
     pub async fn shutdown(&self) {
         self.0.closed.store(true, Ordering::SeqCst);
+        self.0.wake.notify_one();
         let tasks = std::mem::take(&mut *self.0.tasks.lock().unwrap());
         for task in tasks {
             let _ = task.await;
@@ -924,10 +977,24 @@ impl LocalNode {
                     "the node is shutting down",
                 ));
             }
-            if self.0.faulted() && !matches!(method, "cancel" | "abandon" | "recover") {
+            if self.0.faulted()
+                && !matches!(method, "cancel" | "abandon" | "recover" | "release_session")
+            {
                 return Err(ApiError::new(
                     ErrorCode::Internal,
                     "the node's journal failed: restart it",
+                ));
+            }
+            let control = matches!(
+                method,
+                "cancel" | "abandon" | "recover" | "release_session" | "resolve_permission"
+            );
+            let bytes = serde_json::to_vec(&c.body).map_err(internal)?.len() as u64;
+            let budget = JOURNAL_QUOTA + if control { 8 << 20 } else { 0 };
+            if bytes > 1 << 20 || t.payload_bytes()?.saturating_add(bytes) >= budget {
+                return Err(ApiError::new(
+                    ErrorCode::Exhausted,
+                    "journal admission budget reached",
                 ));
             }
             let d = decide(t)?;
@@ -948,6 +1015,7 @@ impl LocalNode {
                 d.session.as_ref(),
                 now(),
             )?;
+            t.save_spec(&c.id, &c.body)?;
             emit_all(&self.0, t, d.events)?;
             Ok((receipt, true))
         })?;
@@ -1534,6 +1602,133 @@ impl ExecutionControl for LocalNode {
         Ok(r)
     }
 
+    async fn recover(&self, c: Command<Recover>) -> ApiResult<Receipt> {
+        let target = c.body.target.clone();
+        let key = format!("recover:{target}");
+        let mut session = None;
+        let (receipt, fresh) = self.accept("recover", &c, |t| {
+            let op = t.op(&target)?.ok_or_else(|| internal("unknown target"))?;
+            if op.digest != c.body.expected || !matches!(op.receipt.state, Observed::Unknown { .. })
+            {
+                return Err(ApiError::new(ErrorCode::Stale, "recovery target changed"));
+            }
+            if op.execution.is_some() {
+                return unsupported("recover execution: use abandon");
+            }
+            if t.spec(&target)?.is_none()
+                && matches!(op.method.as_str(), "prepare_workspace" | "tidy_workspace")
+            {
+                return unsupported("legacy workspace control has no process evidence");
+            }
+            session = t.session_of(&target)?;
+            if session.is_none()
+                && op.method == "abandon"
+                && let Some(spec) = t.spec(&target)?
+                && let Some(target) = spec.get("target").and_then(Value::as_str)
+            {
+                session = t.session_of(&OperationId::new(target).map_err(internal)?)?;
+            }
+            if let Some(session) = &session {
+                for (_, other) in t.open_ops_of(session)? {
+                    if !matches!(other.receipt.state, Observed::Unknown { .. }) {
+                        return Err(ApiError::new(ErrorCode::Busy, "session has live work"));
+                    }
+                }
+            }
+            t.reserve(&key, &c.id)?;
+            Ok(Decided::accepted())
+        })?;
+        if !fresh {
+            return Ok(receipt);
+        }
+        let me = self.clone();
+        self.spawn_owned(async move {
+            let mut stopped = true;
+            if let Some(session) = &session {
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                let _ = me.actor(session).send(Msg::Stop {
+                    op: None,
+                    abandon: false,
+                    done: Some(tx),
+                });
+                stopped = rx.await.is_ok_and(procs::Stopped::gone);
+            }
+            let process = workspace::control_session(&target);
+            match me.0.j.read(|t| t.proc_of(&process)) {
+                Ok(Some(p)) => {
+                    if procs::stop(p.pgid, p.started).await.gone() {
+                        stopped &= me.0.j.tx(|t| t.drop_proc(&process, p.pgid)).is_ok();
+                    } else {
+                        stopped = false;
+                    }
+                }
+                Ok(None) => {}
+                Err(_) => stopped = false,
+            }
+            if !stopped {
+                me.complete(
+                    &c.id,
+                    failed(ApiError::new(
+                        ErrorCode::OutcomeUnknown,
+                        "recovery could not prove stopped",
+                    )),
+                    |t| t.unreserve(&key),
+                )
+                .await;
+                return;
+            }
+            me.complete(&c.id, Decided::done(OperationResult::Unit).state, |t| {
+                let op = t.op(&target)?.ok_or_else(|| internal("target gone"))?;
+                if op.digest != c.body.expected
+                    || !matches!(op.receipt.state, Observed::Unknown { .. })
+                {
+                    return Err(ApiError::new(ErrorCode::Stale, "recovery target changed"));
+                }
+                let state = Observed::Finished {
+                    outcome: Outcome::Interrupted,
+                    result: None,
+                    error: Some(ApiError::new(
+                        ErrorCode::OutcomeUnknown,
+                        "control retired; effects preserved, not replayed",
+                    )),
+                };
+                t.set_state(&target, &state)?;
+                t.unreserve_owned(&target)?;
+                t.unreserve(&key)?;
+                t.drop_answer(&target)?;
+                let mut events = vec![(
+                    Subject::Operation {
+                        operation: target.clone(),
+                    },
+                    EventBody::OperationChanged {
+                        receipt: Receipt {
+                            operation: target.clone(),
+                            state,
+                        },
+                    },
+                )];
+                if matches!(
+                    op.method.as_str(),
+                    "open_session" | "configure_session" | "release_session"
+                ) && let Some(session) = &session
+                    && let Some(mut row) = t.session(session)?
+                {
+                    row.view.phase = SessionPhase::Released;
+                    t.put_session(&row)?;
+                    events.push((
+                        Subject::Session {
+                            session: session.clone(),
+                        },
+                        EventBody::SessionChanged { view: row.view },
+                    ));
+                }
+                emit_all(&me.0, t, events)
+            })
+            .await;
+        });
+        Ok(receipt)
+    }
+
     /// Accepted now (checked against the waiting request); finished once the answer is given to the
     /// harness, after its preconditions were checked again right before.
     async fn resolve_permission(&self, c: Command<PermissionResolution>) -> ApiResult<Receipt> {
@@ -1725,8 +1920,12 @@ impl WorkspaceExecutor for LocalNode {
                         let p = home.join("worktrees").join(&name);
                         let (r2, p2, b2, base2) =
                             (repo.clone(), p.clone(), branch.clone(), base.clone());
+                        let commands = workspace::Commands {
+                            inner: me.0.clone(),
+                            op: op.clone(),
+                        };
                         tokio::task::spawn_blocking(move || {
-                            workspace::add_worktree(&r2, &p2, &b2, base2.as_deref())
+                            workspace::add_worktree(&commands, &r2, &p2, &b2, base2.as_deref())
                         })
                         .await
                         .map_err(|e| e.to_string())
@@ -1740,6 +1939,22 @@ impl WorkspaceExecutor for LocalNode {
                 },
             };
             let resource = body.resource.clone();
+            if me
+                .0
+                .j
+                .read(|t| t.proc_of(&workspace::control_session(&op)))
+                .map_or(true, |p| p.is_some())
+            {
+                me.complete(
+                    &op,
+                    Observed::Unknown {
+                        reason: "workspace process not confirmed stopped".into(),
+                    },
+                    |_| Ok(()),
+                )
+                .await;
+                return;
+            }
             let (path, repo, branch) = match made {
                 Ok(x) => x,
                 Err(e) => {
@@ -1905,13 +2120,40 @@ impl WorkspaceExecutor for LocalNode {
                 row.repo.clone().map(PathBuf::from),
                 row.view.branch.clone(),
             );
+            let commands = workspace::Commands {
+                inner: me.0.clone(),
+                op: op.clone(),
+            };
             let removed = tokio::task::spawn_blocking(move || {
-                workspace::remove(&kind, &path, repo.as_deref(), branch.as_deref(), keep)
+                workspace::remove(
+                    &commands,
+                    &kind,
+                    &path,
+                    repo.as_deref(),
+                    branch.as_deref(),
+                    keep,
+                )
             })
             .await
             .map_err(|e| e.to_string())
             .and_then(|r| r);
             let res = resource.clone();
+            if me
+                .0
+                .j
+                .read(|t| t.proc_of(&workspace::control_session(&op)))
+                .map_or(true, |p| p.is_some())
+            {
+                me.complete(
+                    &op,
+                    Observed::Unknown {
+                        reason: "workspace process not confirmed stopped".into(),
+                    },
+                    |_| Ok(()),
+                )
+                .await;
+                return;
+            }
             match removed {
                 Ok(note) => {
                     me.complete(
@@ -2034,6 +2276,24 @@ impl Node for LocalNode {
 mod binding_tests {
     use super::*;
     use std::os::unix::fs::symlink;
+
+    #[test]
+    fn hanging_git_probe_is_bounded_and_reaped() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let program = d.path().join("git");
+        std::fs::write(&program, "#!/bin/sh\necho $$ > pid\nexec sleep 30\n").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let started = std::time::Instant::now();
+        assert!(head_with(d.path(), &program, Duration::from_millis(1000)).is_err());
+        assert!(started.elapsed() < Duration::from_secs(2));
+        let pid: i32 = std::fs::read_to_string(d.path().join("pid"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+    }
 
     #[test]
     fn dangling_and_retargeted_links_fail_closed() {

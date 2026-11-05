@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS procs (
   incarnation INTEGER NOT NULL, meter TEXT NOT NULL, reports INTEGER NOT NULL DEFAULT 0,
   started INTEGER);
 CREATE TABLE IF NOT EXISTS reservations (key TEXT PRIMARY KEY, op TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS command_specs (op TEXT PRIMARY KEY, body TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS answers (
   op TEXT PRIMARY KEY, permission TEXT NOT NULL, resolution TEXT NOT NULL);
 ";
@@ -124,7 +125,7 @@ impl Journal {
         let version: i64 = c
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .map_err(internal)?;
-        if version > 1 {
+        if version > 2 {
             return Err(ApiError::new(
                 ErrorCode::Unsupported,
                 "journal needs a newer Node",
@@ -145,7 +146,7 @@ impl Journal {
                         .map_err(internal)?;
                 }
                 t.c()
-                    .pragma_update(None, "user_version", 1)
+                    .pragma_update(None, "user_version", 2)
                     .map_err(internal)?;
                 let inc = t.bump("incarnation")?;
                 t.mark_unknown()?;
@@ -271,6 +272,44 @@ impl Tx<'_> {
             workspace: workspace.map(|w| from(&w)).transpose()?,
             cancel: r.get::<_, i64>(5)? != 0,
         })
+    }
+
+    pub fn save_spec<T: Serialize>(&self, op: &OperationId, body: &T) -> ApiResult<()> {
+        self.c()
+            .execute(
+                "INSERT INTO command_specs VALUES (?1, ?2)",
+                params![op.as_str(), json(body)],
+            )
+            .map_err(internal)?;
+        Ok(())
+    }
+    pub fn spec(&self, op: &OperationId) -> ApiResult<Option<serde_json::Value>> {
+        let s: Option<String> = self
+            .c()
+            .query_row(
+                "SELECT body FROM command_specs WHERE op=?1",
+                [op.as_str()],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(internal)?;
+        s.map(|s| serde_json::from_str(&s).map_err(internal))
+            .transpose()
+    }
+    pub fn session_of(&self, op: &OperationId) -> ApiResult<Option<SessionId>> {
+        let s: Option<String> = self
+            .c()
+            .query_row("SELECT session FROM ops WHERE id=?1", [op.as_str()], |r| {
+                r.get(0)
+            })
+            .map_err(internal)?;
+        s.map(|s| SessionId::new(s).map_err(internal)).transpose()
+    }
+    pub fn unreserve_owned(&self, op: &OperationId) -> ApiResult<()> {
+        self.c()
+            .execute("DELETE FROM reservations WHERE op=?1", [op.as_str()])
+            .map_err(internal)?;
+        Ok(())
     }
 
     pub fn op(&self, id: &OperationId) -> ApiResult<Option<Op>> {
@@ -780,12 +819,30 @@ impl Tx<'_> {
         Ok(())
     }
 
+    /// Live SQLite pages: includes command history, ids, indexes and payloads. Free pages are
+    /// reusable after acknowledgement. WAL/temporary journal files require filesystem headroom.
+    pub fn payload_bytes(&self) -> ApiResult<u64> {
+        let page: i64 = self
+            .c()
+            .pragma_query_value(None, "page_size", |r| r.get(0))
+            .map_err(internal)?;
+        let count: i64 = self
+            .c()
+            .pragma_query_value(None, "page_count", |r| r.get(0))
+            .map_err(internal)?;
+        let free: i64 = self
+            .c()
+            .pragma_query_value(None, "freelist_count", |r| r.get(0))
+            .map_err(internal)?;
+        Ok(((count - free).max(0) * page) as u64)
+    }
+
     /// Bytes of events the Hub has not acknowledged yet.
     pub fn unacked_bytes(&self) -> ApiResult<u64> {
         let n: i64 = self
             .c()
             .query_row(
-                "SELECT COALESCE(SUM(length(event)), 0) FROM events",
+                "SELECT COALESCE(SUM(length(CAST(event AS BLOB))), 0) FROM events",
                 [],
                 |r| r.get(0),
             )

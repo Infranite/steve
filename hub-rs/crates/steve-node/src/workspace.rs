@@ -63,50 +63,184 @@ pub(crate) fn resolve(roots: &[Root], at: &RootPath) -> ApiResult<PathBuf> {
     Ok(real)
 }
 
-fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
-    let o = Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .stdin(std::process::Stdio::null())
-        .output()
-        .map_err(|e| e.to_string())?;
-    if o.status.success() {
-        Ok(String::from_utf8_lossy(&o.stdout).trim().to_string())
-    } else {
-        Err(String::from_utf8_lossy(&o.stderr).trim().to_string())
+pub(crate) fn control_session(op: &OperationId) -> SessionId {
+    SessionId::new(derived_id("workspace-control", op.as_str())).expect("derived id")
+}
+
+/// Every git process waits on a pipe until its identity is durable. A Node crash before recording
+/// closes the pipe: the shell exits without executing git. After recording, recovery can stop it.
+pub(crate) struct Commands {
+    pub inner: std::sync::Arc<crate::Inner>,
+    pub op: OperationId,
+}
+impl Commands {
+    fn git(&self, dir: &Path, args: &[&str]) -> Result<String, String> {
+        use std::io::{Read, Write};
+        use std::os::{fd::AsRawFd, unix::process::CommandExt};
+        use std::process::Stdio;
+        use std::sync::atomic::Ordering;
+        let session = control_session(&self.op);
+        if self.inner.closed.load(Ordering::SeqCst) {
+            return Err("node shutting down".into());
+        }
+        let mut child = Command::new("/bin/sh")
+            .args([
+                "-c",
+                "IFS= read -r go || exit 125; exec git \"$@\"",
+                "steve-git",
+            ])
+            .args(args)
+            .current_dir(dir)
+            .process_group(0)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        let pid = child.id() as i64;
+        let started = crate::procs::start_time(pid);
+        if let Err(e) = self.inner.j.tx(|t| {
+            t.put_proc(
+                &session,
+                pid,
+                0,
+                self.inner.incarnation,
+                "workspace",
+                started,
+            )
+        }) {
+            drop(child.stdin.take());
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(e.to_string());
+        }
+        let mut input = child.stdin.take().expect("pipe");
+        let sent = input.write_all(b"go\n");
+        drop(input);
+        let mut out = child.stdout.take().expect("pipe");
+        let mut err = child.stderr.take().expect("pipe");
+        for fd in [out.as_raw_fd(), err.as_raw_fd()] {
+            let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+            if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0
+            {
+                if crate::procs::state(pid, started) == crate::procs::Stopped::Alive {
+                    unsafe {
+                        libc::kill(-(pid as i32), libc::SIGKILL);
+                    }
+                }
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("cannot bound git pipes; process evidence retained".into());
+            }
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut truncated = false;
+        let mut drain = |reader: &mut dyn Read, dest: &mut Vec<u8>| {
+            let mut buf = [0; 4096];
+            // Per tick budget; a continuously writable pipe must not starve timeout checks.
+            for _ in 0..64 {
+                match reader.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if dest.len() + n <= 1 << 20 {
+                            dest.extend_from_slice(&buf[..n]);
+                        } else {
+                            truncated = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        };
+        let status = loop {
+            drain(&mut out, &mut stdout);
+            drain(&mut err, &mut stderr);
+            if let Ok(Some(status)) = child.try_wait() {
+                break Some(status);
+            }
+            if sent.is_err()
+                || self.inner.closed.load(Ordering::SeqCst)
+                || std::time::Instant::now() >= deadline
+            {
+                // Child is unreaped, so its pid cannot have been recycled. Descendants are killed
+                // only while the group identity still matches; uncertainty retains the procs row.
+                if crate::procs::state(pid, started) == crate::procs::Stopped::Alive {
+                    unsafe {
+                        libc::kill(-(pid as i32), libc::SIGKILL);
+                    }
+                }
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        drain(&mut out, &mut stdout);
+        drain(&mut err, &mut stderr);
+        if !crate::procs::state(pid, started).gone() {
+            return Err("git group stop uncertain".into());
+        }
+        self.inner
+            .j
+            .tx(|t| t.drop_proc(&session, pid))
+            .map_err(|e| e.to_string())?;
+        if truncated {
+            return Err("git output limit".into());
+        }
+        match status {
+            Some(status) if status.success() => {
+                Ok(String::from_utf8_lossy(&stdout).trim().to_string())
+            }
+            Some(_) => Err(String::from_utf8_lossy(&stderr).trim().to_string()),
+            None => Err("git cancelled or timed out".into()),
+        }
     }
 }
 
 /// A worktree of `repo` at `path` on `branch` (created from `base`, else HEAD, when new). One that
 /// is there already is adopted only if it is a worktree of that very repository on that branch.
 pub(crate) fn add_worktree(
+    commands: &Commands,
     repo: &Path,
     path: &Path,
     branch: &str,
     base: Option<&str>,
 ) -> Result<(), String> {
     if path.exists() {
-        return check_worktree(repo, path, branch);
+        return check_worktree(commands, repo, path, branch);
     }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     let p = path.to_string_lossy();
-    if git(repo, &["rev-parse", "--verify", branch]).is_ok() {
-        git(repo, &["worktree", "add", &p, branch]).map(|_| ())
+    if commands
+        .git(repo, &["rev-parse", "--verify", branch])
+        .is_ok()
+    {
+        commands
+            .git(repo, &["worktree", "add", &p, branch])
+            .map(|_| ())
     } else {
-        git(
-            repo,
-            &["worktree", "add", "-b", branch, &p, base.unwrap_or("HEAD")],
-        )
-        .map(|_| ())
+        commands
+            .git(
+                repo,
+                &["worktree", "add", "-b", branch, &p, base.unwrap_or("HEAD")],
+            )
+            .map(|_| ())
     }
 }
 
 /// `path` is a worktree of `repo` with `branch` checked out.
-pub(crate) fn check_worktree(repo: &Path, path: &Path, branch: &str) -> Result<(), String> {
+pub(crate) fn check_worktree(
+    commands: &Commands,
+    repo: &Path,
+    path: &Path,
+    branch: &str,
+) -> Result<(), String> {
     let common = |d: &Path| -> Result<PathBuf, String> {
-        let c = git(
+        let c = commands.git(
             d,
             &["rev-parse", "--path-format=absolute", "--git-common-dir"],
         )?;
@@ -119,13 +253,13 @@ pub(crate) fn check_worktree(repo: &Path, path: &Path, branch: &str) -> Result<(
             repo.display()
         ));
     }
-    let top = PathBuf::from(git(path, &["rev-parse", "--show-toplevel"])?)
+    let top = PathBuf::from(commands.git(path, &["rev-parse", "--show-toplevel"])?)
         .canonicalize()
         .map_err(|e| e.to_string())?;
     if top != path.canonicalize().map_err(|e| e.to_string())? {
         return Err(format!("{} is inside another worktree", path.display()));
     }
-    let head = git(path, &["rev-parse", "--abbrev-ref", "HEAD"])?;
+    let head = commands.git(path, &["rev-parse", "--abbrev-ref", "HEAD"])?;
     if head != branch {
         return Err(format!(
             "{} has {head} checked out, not {branch}",
@@ -139,6 +273,7 @@ pub(crate) fn check_worktree(repo: &Path, path: &Path, branch: &str) -> Result<(
 /// project directory) is never removed. Returns what could not be done (a branch git would not
 /// delete), never swallowing it.
 pub(crate) fn remove(
+    commands: &Commands,
     kind: &PrepareKind,
     path: &Path,
     repo: Option<&Path>,
@@ -156,10 +291,11 @@ pub(crate) fn remove(
         PrepareKind::Worktree { .. } => {
             let repo = repo.ok_or("no repository")?;
             if path.exists() {
-                git(repo, &["worktree", "remove", &path.to_string_lossy()])?;
+                commands.git(repo, &["worktree", "remove", &path.to_string_lossy()])?;
             }
             match (keep_branch, branch) {
-                (false, Some(b)) => Ok(git(repo, &["branch", "-d", b])
+                (false, Some(b)) => Ok(commands
+                    .git(repo, &["branch", "-d", b])
                     .err()
                     .map(|e| format!("branch {b} kept: {e}"))),
                 _ => Ok(None),

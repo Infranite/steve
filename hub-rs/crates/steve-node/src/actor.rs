@@ -19,7 +19,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -109,6 +109,9 @@ pub(crate) enum Msg {
     },
     /// Try again what the journal did not take.
     Retry,
+    Overflow {
+        token: u64,
+    },
     // from the adapter
     Update {
         generation: u64,
@@ -128,7 +131,14 @@ pub(crate) enum Msg {
 
 /// The token of the attempt whose prompt is out, stamped on each adapter message as it is read.
 #[derive(Default)]
-pub(crate) struct Gate(AtomicU64);
+pub(crate) struct Gate(AtomicU64, AtomicU64, AtomicBool);
+impl Gate {
+    fn overflow(&self, tx: &mpsc::UnboundedSender<Msg>, token: u64) {
+        if token != 0 && !self.2.swap(true, Ordering::SeqCst) {
+            let _ = tx.send(Msg::Overflow { token });
+        }
+    }
+}
 
 #[derive(Clone)]
 pub(crate) struct LiveNew {
@@ -202,6 +212,8 @@ pub(crate) struct Actor {
     inner: Arc<Inner>,
     session: SessionId,
     rx: mpsc::UnboundedReceiver<Msg>,
+    data_rx: mpsc::Receiver<Msg>,
+    data_tx: mpsc::Sender<Msg>,
     tx: mpsc::UnboundedSender<Msg>,
     gate: Arc<Gate>,
     live: Option<Live>,
@@ -220,10 +232,13 @@ pub(crate) struct Actor {
 impl Actor {
     pub(crate) fn spawn(inner: Arc<Inner>, session: SessionId) -> mpsc::UnboundedSender<Msg> {
         let (tx, rx) = mpsc::unbounded_channel();
+        let (data_tx, data_rx) = mpsc::channel(64);
         let a = Actor {
             inner,
             session,
             rx,
+            data_rx,
+            data_tx,
             tx: tx.clone(),
             gate: Arc::default(),
             live: None,
@@ -246,18 +261,21 @@ impl Actor {
         let mut tick = tokio::time::interval(Duration::from_millis(500));
         loop {
             tokio::select! {
+                biased;
                 m = self.rx.recv() => {
                     let Some(m) = m else { return };
                     if let Msg::Shutdown { done } = m {
                         if let Some(cancel) = self.stage_cancel.take() { let _ = cancel.send(true); }
                         if let Some(task) = self.stage_task.take() { let _ = task.await; }
                         self.stop_process().await;
+                        drop(self);
                         let _ = done.send(());
                         return;
                     }
                     self.handle(m).await;
                 }
                 _ = tick.tick() => self.check_limits(),
+                Some(message) = self.data_rx.recv() => self.handle(message).await,
             }
         }
     }
@@ -268,7 +286,9 @@ impl Actor {
             Ok(_) => self.inner.wake.notify_one(),
             Err(e) => {
                 tracing::error!("node journal ({}): {e}", self.session);
-                self.inner.fault();
+                if e.code == ErrorCode::Internal {
+                    self.inner.fault();
+                }
             }
         }
         r
@@ -298,6 +318,14 @@ impl Actor {
 
     async fn handle(&mut self, m: Msg) {
         match m {
+            Msg::Overflow { token } => {
+                self.stopping(
+                    token,
+                    Outcome::Cancelled,
+                    ApiError::new(ErrorCode::Exhausted, "ingress budget exceeded"),
+                );
+                let _ = self.tx.send(Msg::Kill { token });
+            }
             Msg::ReleaseDone { op, stopped } => self.finish_release(&op, stopped),
             Msg::AnswerDone { op, result } => self.answer_done(&op, result),
             Msg::Facts { events } => {
@@ -384,6 +412,24 @@ impl Actor {
             Msg::Opened { token, result } => self.opened(token, result).await,
             Msg::Prepared { token, result } => self.prepared(token, result).await,
             Msg::Prompted { token, result } => {
+                // Responses follow updates on ACP, but control has priority here. Drain only the
+                // already bounded data prefix before sealing this attempt's final facts.
+                while let Ok(message) = self.data_rx.try_recv() {
+                    match message {
+                        Msg::Update {
+                            generation,
+                            token,
+                            update,
+                        } => self.update(generation, token, &update),
+                        Msg::Permission {
+                            generation,
+                            token,
+                            rpc_id,
+                            params,
+                        } => self.permission(generation, token, rpc_id, &params),
+                        _ => unreachable!("data messages"),
+                    }
+                }
                 if self.run.as_ref().is_some_and(|r| r.token == token) {
                     if self.sending == 0 {
                         self.finish(result).await;
@@ -455,10 +501,11 @@ impl Actor {
         let session = self.session.clone();
         let tx = self.tx.clone();
         let gate = self.gate.clone();
+        let data_tx = self.data_tx.clone();
         let (cancel, cancelled) = watch::channel(false);
         self.stage_cancel = Some(cancel);
         self.stage_task = Some(tokio::spawn(async move {
-            let result = open_harness(&inner, &session, tx.clone(), gate, cancelled).await;
+            let result = open_harness(&inner, &session, tx.clone(), data_tx, gate, cancelled).await;
             let _ = tx.send(Msg::Opened { token, result });
         }));
     }
@@ -733,7 +780,14 @@ impl Actor {
             .read(|t| t.session(&self.session))
             .ok()
             .flatten()
-            .and_then(|r| crate::workspace_dir(&self.inner, &r.open.workspace).ok())
+            .and_then(|r| {
+                self.inner
+                    .j
+                    .read(|t| t.workspace(&r.open.workspace.id))
+                    .ok()
+                    .flatten()
+            })
+            .map(|w| std::path::PathBuf::from(w.path))
             .unwrap_or_default()
     }
 
@@ -775,19 +829,22 @@ impl Actor {
 
     fn persisted_cancel(&self) -> bool {
         let Some(r) = &self.run else { return false };
-        r.cancel
-            || self
-                .inner
-                .j
-                .read(|t| t.op(&r.op))
-                .ok()
-                .flatten()
-                .is_some_and(|o| o.cancel)
+        if r.cancel {
+            return true;
+        }
+        match self.inner.j.read(|t| t.op(&r.op)) {
+            Ok(Some(op)) => op.cancel,
+            Ok(None) => true,
+            Err(_) => {
+                self.inner.fault();
+                true
+            }
+        }
     }
 
     /// Attachments for the prompt, fetched in a task (bounded by the attempt's deadline).
     fn prepare(&mut self, token: u64) {
-        let root = self.root();
+        let context = crate::permission_context(&self.inner, &self.session);
         let image = self.live.as_ref().is_some_and(|l| l.image);
         let Some(run) = self.run.as_mut() else { return };
         run.phase = Phase::Preparing;
@@ -804,7 +861,10 @@ impl Actor {
             let left = Duration::from_millis((deadline.0 - now()).max(0) as u64);
             let result = tokio::select! {
                 _ = cancelled.changed() => Err(ApiError::new(ErrorCode::Expired, "preparation cancelled")),
-                result = tokio::time::timeout(left, crate::prompt(&inner, &exec, &root, &parts, image)) => {
+                result = tokio::time::timeout(left, async {
+                    let root = tokio::task::spawn_blocking(move || context?.dir()).await.map_err(internal)??;
+                    crate::prompt(&inner, &exec, &root, &parts, image).await
+                }) => {
                     result.unwrap_or_else(|_| Err(ApiError::new(ErrorCode::Expired, "past deadline preparing attachments")))
                 }
             };
@@ -862,6 +922,18 @@ impl Actor {
             r.phase = Phase::Prompting;
         }
         // from here the adapter's messages are this attempt's
+        self.gate.1.store(
+            self.run
+                .as_ref()
+                .expect("run")
+                .spec
+                .run
+                .limits
+                .max_output_bytes
+                .min(crate::JOURNAL_QUOTA / 4),
+            Ordering::SeqCst,
+        );
+        self.gate.2.store(false, Ordering::SeqCst);
         self.gate.0.store(token, Ordering::SeqCst);
         let mut req = Box::pin(async move {
             conn.request(
@@ -1036,6 +1108,17 @@ impl Actor {
             }
             crate::emit_all(&self.inner, t, evs.clone())
         });
+        if r.as_ref().is_err_and(|e| e.code == ErrorCode::Exhausted) {
+            if let Some(token) = self.run.as_ref().map(|r| r.token) {
+                self.stopping(
+                    token,
+                    Outcome::Cancelled,
+                    ApiError::new(ErrorCode::Exhausted, "journal data budget reached"),
+                );
+                let _ = self.tx.send(Msg::Kill { token });
+            }
+            return;
+        }
         if r.is_err() && !evs.is_empty() {
             self.later(Msg::Facts { events: evs });
         }
@@ -1310,7 +1393,7 @@ impl Actor {
                 });
             }
             Err(e) if e.code == ErrorCode::Stale => self.answer_done(&op, Err(e)),
-            Err(_) => {}
+            Err(_) => self.later(Msg::Answer { op }),
         }
     }
 
@@ -1468,6 +1551,7 @@ impl Actor {
         match r {
             Ok(()) => {
                 self.gate.0.store(0, Ordering::SeqCst);
+                self.inner.reset_output(&self.session);
                 self.run = None;
                 for (_, (rpc_id, _)) in self.waits.drain() {
                     if let Some(l) = &self.live {
@@ -1557,6 +1641,16 @@ impl Actor {
                 Outcome::Cancelled,
                 ApiError::new(ErrorCode::Exhausted, "the output limit was reached"),
             ))
+        } else if self
+            .inner
+            .j
+            .read(|t| t.payload_bytes())
+            .is_ok_and(|n| n >= crate::JOURNAL_QUOTA)
+        {
+            Some((
+                Outcome::Cancelled,
+                ApiError::new(ErrorCode::Exhausted, "journal data budget reached"),
+            ))
         } else if self.inner.faulted() {
             Some((
                 Outcome::Failed,
@@ -1578,6 +1672,7 @@ async fn open_harness(
     inner: &Arc<Inner>,
     session: &SessionId,
     tx: mpsc::UnboundedSender<Msg>,
+    data_tx: mpsc::Sender<Msg>,
     gate: Arc<Gate>,
     mut cancelled: watch::Receiver<bool>,
 ) -> ApiResult<LiveNew> {
@@ -1599,11 +1694,14 @@ async fn open_harness(
     let generation = inner.generation.fetch_add(1, Ordering::SeqCst) + 1;
     let (tx1, tx2) = (tx.clone(), tx);
     let counter = inner.output_counter(session);
-    let launch = format!("spawn:{session}");
-    let launch_id = OperationId::new(derived_id("spawn", &format!("{session}.{generation}")))
-        .map_err(internal)?;
-    inner.j.tx(|t| t.reserve(&launch, &launch_id))?;
-    let conn = Conn::spawn(
+    let meter = derived_id(
+        "p",
+        &format!("{session}.{}.{generation}", inner.incarnation),
+    );
+    let mut registered_start = None;
+    let admission_gate = gate.clone();
+    let admission_tx = tx1.clone();
+    let conn = Conn::spawn_registered(
         Spawn {
             program,
             args,
@@ -1614,18 +1712,64 @@ async fn open_harness(
             )],
             log_tag: format!("[node {session}]"),
         },
+        1 << 20,
+        move |bytes| {
+            let token = admission_gate.0.load(Ordering::SeqCst);
+            if token == 0 {
+                let total = counter
+                    .fetch_add(bytes as u64, Ordering::SeqCst)
+                    .saturating_add(bytes as u64);
+                return bytes <= 1 << 20 && total <= 8 << 20;
+            }
+            let total = counter
+                .fetch_add(bytes as u64, Ordering::SeqCst)
+                .saturating_add(bytes as u64);
+            if bytes > 1 << 20 || total > admission_gate.1.load(Ordering::SeqCst) {
+                admission_gate.overflow(&admission_tx, token);
+                return false;
+            }
+            !admission_gate.2.load(Ordering::SeqCst)
+        },
+        |pid| {
+            let started = procs::start_time(pid as i64).ok_or_else(|| RpcError {
+                message: "cannot identify gated adapter".into(),
+                data: None,
+            })?;
+            inner
+                .j
+                .tx(|t| {
+                    t.put_proc(
+                        session,
+                        pid as i64,
+                        generation,
+                        inner.incarnation,
+                        &meter,
+                        Some(started),
+                    )
+                })
+                .map_err(|e| RpcError {
+                    message: e.to_string(),
+                    data: None,
+                })?;
+            registered_start = Some(started);
+            Ok(())
+        },
         move |c, inc| {
             let token = gate.0.load(Ordering::SeqCst);
             match inc {
                 Incoming::Notification { method, params } if method == "session/update" => {
                     if let Some(u) = params.get("update") {
                         // counted as it arrives: a flood is stopped before it is all kept
-                        counter.fetch_add(u.to_string().len() as u64, Ordering::SeqCst);
-                        let _ = tx1.send(Msg::Update {
-                            generation,
-                            token,
-                            update: u.clone(),
-                        });
+                        if data_tx
+                            .try_send(Msg::Update {
+                                generation,
+                                token,
+                                update: u.clone(),
+                            })
+                            .is_err()
+                        {
+                            gate.overflow(&tx1, token);
+                        }
                     }
                 }
                 Incoming::Notification { .. } => {}
@@ -1636,12 +1780,18 @@ async fn open_harness(
                         c.respond(id, json!({"outcome": {"outcome": "cancelled"}}));
                         return;
                     }
-                    let _ = tx1.send(Msg::Permission {
-                        generation,
-                        token,
-                        rpc_id: id,
-                        params,
-                    });
+                    if data_tx
+                        .try_send(Msg::Permission {
+                            generation,
+                            token,
+                            rpc_id: id.clone(),
+                            params,
+                        })
+                        .is_err()
+                    {
+                        c.respond(id, json!({"outcome": {"outcome": "cancelled"}}));
+                        gate.overflow(&tx1, token);
+                    }
                 }
                 Incoming::Request { id, method, .. } => {
                     c.respond_error(id, -32601, &format!("{method} not supported by Steve"));
@@ -1652,37 +1802,9 @@ async fn open_harness(
             let _ = tx2.send(Msg::Exited { generation });
         },
     )
-    .map_err(|e| {
-        let _ = inner.j.tx(|t| t.unreserve(&launch));
-        ApiError::new(ErrorCode::Unsupported, e.message)
-    })?;
+    .map_err(|e| ApiError::new(ErrorCode::Unsupported, e.message))?;
     let pgid = conn.pid() as i64;
-    let started = procs::start_time(pgid);
-    let meter = derived_id(
-        "p",
-        &format!("{session}.{}.{generation}", inner.incarnation),
-    );
-    if let Err(e) = inner.j.tx(|t| {
-        t.put_proc(
-            session,
-            pgid,
-            generation,
-            inner.incarnation,
-            &meter,
-            started,
-        )?;
-        t.unreserve(&launch)
-    }) {
-        if procs::stop(pgid, started).await.gone() {
-            inner.j.tx(|t| t.unreserve(&launch))?;
-            return Err(e);
-        }
-        inner.fault();
-        return Err(ApiError::new(
-            ErrorCode::OutcomeUnknown,
-            "unregistered process not confirmed stopped; launch reservation retained",
-        ));
-    }
+    let started = registered_start;
     #[derive(Default)]
     struct Seen(std::sync::Mutex<(Option<String>, Option<String>, Option<String>)>);
     impl Reports for Seen {
