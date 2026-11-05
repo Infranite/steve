@@ -3021,6 +3021,39 @@ async fn an_attempt_unknown_before_it_started_keeps_the_session_running() {
     assert_eq!(h.session_status(), "running");
     // what the Node said before its restart arrives late (its AttemptStarted among it): it
     // changes nothing, and the stream goes on
+    assert!(!late.is_empty());
+    for b in late {
+        h.seen.to.commit(b).await.unwrap();
+    }
+    assert_eq!(h.session_status(), "running");
+    assert!(h.rt.cancel(S).unwrap());
+    until("abandoned", || h.ends().len() == 2).await;
+    assert_eq!(h.session_status(), "idle");
+}
+
+/// Before the harness has a session of its own, a planned turn shows `starting`, as the legacy
+/// runner's; its start makes it `running`.
+#[tokio::test]
+async fn a_first_turn_is_starting_until_its_attempt_starts() {
+    let h = hub();
+    h.store
+        .transaction::<_, StoreError>(|tx| {
+            tx.execute("UPDATE sessions SET status='idle'", [])?;
+            Ok(())
+        })
+        .unwrap();
+    *h.seen.stash.lock().unwrap() = Some(vec![]);
+    h.bind();
+    h.rt.prompt(S, "hello", "user", &[]).unwrap();
+    until("planned", || h.attempts().len() == 1).await;
+    assert_eq!(h.acp_id(), None);
+    assert_eq!(h.session_status(), "starting");
+    let late = h.seen.stash.lock().unwrap().take().unwrap();
+    for b in late {
+        h.seen.to.commit(b).await.unwrap();
+    }
+    until("running", || h.session_status() == "running").await;
+}
 
 /// N1-3 review: a recreated journal hands out revisions the old one also had. A `Released` of the
 /// new journal from before the last open, delivered late, says nothing of that open, even when
@@ -3087,35 +3120,6 @@ async fn a_late_release_of_a_new_journal_does_not_let_a_reopened_session_go() {
     for b in late {
         h.seen.to.commit(b).await.unwrap();
     }
-    assert_eq!(h.session_status(), "running");
-    assert!(h.rt.cancel(S).unwrap());
-    until("abandoned", || h.ends().len() == 2).await;
-    assert_eq!(h.session_status(), "idle");
-}
-
-/// Before the harness has a session of its own, a planned turn shows `starting`, as the legacy
-/// runner's; its start makes it `running`.
-#[tokio::test]
-async fn a_first_turn_is_starting_until_its_attempt_starts() {
-    let h = hub();
-    h.store
-        .transaction::<_, StoreError>(|tx| {
-            tx.execute("UPDATE sessions SET status='idle'", [])?;
-            Ok(())
-        })
-        .unwrap();
-    *h.seen.stash.lock().unwrap() = Some(vec![]);
-    h.bind();
-    h.rt.prompt(S, "hello", "user", &[]).unwrap();
-    until("planned", || h.attempts().len() == 1).await;
-    assert_eq!(h.acp_id(), None);
-    assert_eq!(h.session_status(), "starting");
-    let late = h.seen.stash.lock().unwrap().take().unwrap();
-    for b in late {
-        h.seen.to.commit(b).await.unwrap();
-    }
-    until("running", || h.session_status() == "running").await;
-
     until("applied", || {
         h.q::<i64>("SELECT COUNT(*) FROM node_streams WHERE durable > applied") == 0
     })

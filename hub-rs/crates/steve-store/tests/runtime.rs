@@ -333,16 +333,16 @@ fn maybe_sent_stays_once_a_send_was_uncertain() {
             command(tx, "op", None)?;
             assert_eq!(maybe_sent(tx)?, 0);
             // refused before acceptance: never sent
-            let l = lease_command_in(tx, "w", 1, 10)?.unwrap();
+            let l = lease_command_in(tx, "n", "w", 1, 10)?.unwrap();
             assert!(!l.maybe_sent);
             assert_eq!(maybe_sent(tx)?, 1, "in flight");
             assert!(retry_command_in(tx, &l, 2, 2, false)?);
             assert_eq!(maybe_sent(tx)?, 0);
             // uncertain, then refused: still maybe sent
-            let l = lease_command_in(tx, "w", 3, 10)?.unwrap();
+            let l = lease_command_in(tx, "n", "w", 3, 10)?.unwrap();
             assert!(retry_command_in(tx, &l, 4, 4, true)?);
             assert_eq!(maybe_sent(tx)?, 1);
-            let l = lease_command_in(tx, "w", 5, 10)?.unwrap();
+            let l = lease_command_in(tx, "n", "w", 5, 10)?.unwrap();
             assert!(l.maybe_sent);
             assert!(retry_command_in(tx, &l, 6, 6, false)?);
             assert_eq!(maybe_sent(tx)?, 1);
