@@ -187,6 +187,10 @@ impl Tx<'_> {
         let Some(p) = self.db().project(i.project_id.as_deref())? else {
             return Ok(false);
         };
+        if p.device_id != HUB_DEVICE {
+            /* its paths name the other device's files: git here can't tell; the release request is refused */
+            return Ok(false);
+        }
         let wt = i
             .cwd
             .as_deref()
@@ -205,6 +209,15 @@ impl Tx<'_> {
         let Some(i) = self.db().item(item_id)? else {
             return Ok(true);
         };
+        /* a project on another device: its cwd is that device's, the Hub touches no git here and
+        start_release refuses it */
+        if self
+            .db()
+            .project(i.project_id.as_deref())?
+            .is_some_and(|p| p.device_id != HUB_DEVICE)
+        {
+            return Ok(true);
+        }
         let Some(cwd) = i
             .cwd
             .as_deref()

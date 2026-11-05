@@ -1,6 +1,7 @@
 //! Release scripts run in their own process group so they outlive the Hub they restart. In tests nothing
 //! restarts: a script a test started must be gone when its kit drops, and a fake one left behind must stop by itself.
 
+use crate::git::tests::{branch_with, g, repo};
 use crate::patch;
 use crate::release::test_spawned;
 use crate::repo::{Release, WS};
@@ -110,10 +111,12 @@ fn a_fake_release_script_stops_when_its_home_is_gone() {
 }
 
 /// The release script is a Hub-host operation (D12): a project on a remote Node is refused with a fail card,
-/// and neither its release nor a rollback starts a process, even when a script exists at its path here.
+/// and neither its release nor a rollback starts a process, even when a script exists at its path here. Its
+/// paths are the other device's: a checkout at the same path on the Hub, behind main, is not rebased.
 #[test]
 fn a_project_on_a_remote_device_is_refused_and_starts_no_script() {
     let k = Kit::new();
+    let r = repo(k.home());
     let script = k.home().join("release.sh");
     std::fs::write(&script, super::fake_release_script("exit 0\n")).unwrap();
     let rel = Release {
@@ -127,9 +130,9 @@ fn a_project_on_a_remote_device_is_refused_and_starts_no_script() {
             WS,
             "R",
             "",
-            &k.home().to_string_lossy(),
-            "dir",
-            false,
+            &r.to_string_lossy(),
+            "git",
+            true,
             None,
             Some(&rel),
         )
@@ -142,16 +145,37 @@ fn a_project_on_a_remote_device_is_refused_and_starts_no_script() {
         )
         .unwrap();
     let i = k.item("wait", "收尾", Some(&p));
-    k.db().item_patch(&i, patch![branch: "steve/x"]).unwrap();
+    let (name, wt) = branch_with(&r, &k.core.config().worktrees, &i, "b.txt", "b\n");
+    std::fs::write(r.join("c.txt"), "c\n").unwrap();
+    g(&r, &["add", "."]);
+    g(&r, &["commit", "-qm", "main c"]);
+    let head = g(&wt, &["rev-parse", "HEAD"]);
+    k.db()
+        .item_patch(
+            &i,
+            patch![cwd: wt.to_string_lossy().to_string(), branch: name.as_str()],
+        )
+        .unwrap();
     let s = k.session(&i, "idle");
     let r = k.decision(&i, Some(&s), "approve", "release", &["yes", "no"]);
     k.db()
         .exec(
-            "UPDATE decisions SET subject_id = 'steve/x' WHERE id = ?",
-            &[&r],
+            "UPDATE decisions SET subject_id = ? WHERE id = ?",
+            &[&name, &r],
         )
         .unwrap();
     k.core.resolve(&r, "yes", "", "me").unwrap();
+
+    assert_eq!(
+        g(&wt, &["rev-parse", "HEAD"]),
+        head,
+        "the checkout here is not rebased"
+    );
+    assert!(
+        !k.timeline_texts(&i).iter().any(|t| t.contains("rebase")),
+        "{:?}",
+        k.timeline_texts(&i)
+    );
 
     assert!(test_spawned::of(k.home()).is_empty(), "no script started");
     assert!(!k.core.release_busy());
