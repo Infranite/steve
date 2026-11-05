@@ -308,6 +308,9 @@ async fn api_fallback(State(st): State<AppState>, req: Request) -> Response {
     crate::web::serve(&st.cfg, req).await
 }
 
+/// The largest request body the API reads (uploads to `/files` have their own limit).
+const BODY_MAX: usize = 16 * 1024 * 1024;
+
 /// The `/api` router with every route of api.ts, in declaration order.
 pub fn router(st: AppState, modules: Router) -> Router {
     Router::new()
@@ -323,7 +326,11 @@ pub fn router(st: AppState, modules: Router) -> Router {
         .route("/workspaces/{id}", patch(misc::workspace_patch))
         .route("/workspaces/{id}/switch", post(misc::workspace_switch))
         // attachments
-        .route("/files", post(files::upload))
+        // reads the body itself up to its own limit, and answers a larger one with a clean 413
+        .route(
+            "/files",
+            post(files::upload).layer(axum::extract::DefaultBodyLimit::disable()),
+        )
         .route("/files/{id}", get(files::download))
         // conversation
         .route("/thread", post(misc::thread_say))
@@ -476,8 +483,8 @@ pub fn router(st: AppState, modules: Router) -> Router {
         .with_state(st.clone())
         // the new modules (their paths do not overlap the TS routes), behind the same login
         .merge(modules)
-        // Hono reads bodies without a limit; /files enforces its own
-        .layer(axum::extract::DefaultBodyLimit::disable())
+        // Hono reads bodies without a limit; every JSON body here (the modules' too) is far below this
+        .layer(axum::extract::DefaultBodyLimit::max(BODY_MAX))
         .layer(middleware::from_fn_with_state(st, require_user))
 }
 

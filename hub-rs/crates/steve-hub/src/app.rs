@@ -1,6 +1,6 @@
 //! The whole HTTP surface and the boot sequence (main.ts).
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 
 use axum::Router;
 use axum::extract::{ConnectInfo, Request, State};
@@ -14,10 +14,15 @@ use crate::api::{self, AppState};
 use crate::backend::BackendError;
 use crate::error::json_response;
 
-/// `^(127\.|::1|::ffff:127\.)` against the TCP peer, as main.ts and auth.ts check it.
+/// Whether the TCP peer is this machine: 127/8, `::1` or an IPv4-mapped 127/8 (main.ts and auth.ts match
+/// `^(127\.|::1|::ffff:127\.)` on the text, which also let `::1234:…` through).
 pub fn is_loopback(addr: &SocketAddr) -> bool {
-    let ip = addr.ip().to_string();
-    ip.starts_with("127.") || ip.starts_with("::1") || ip.starts_with("::ffff:127.")
+    match addr.ip() {
+        IpAddr::V4(v4) => v4.is_loopback(),
+        IpAddr::V6(v6) => {
+            v6.is_loopback() || v6.to_ipv4_mapped().is_some_and(|v4| v4.is_loopback())
+        }
+    }
 }
 
 /// Everything under `/mcp` (prefix match, so `/mcpx` too) bypasses the rest of the app: loopback peers
@@ -477,5 +482,21 @@ mod compression_tests {
             1,
             "one Vary on a gzip answer"
         );
+    }
+}
+
+#[cfg(test)]
+mod loopback_tests {
+    use super::*;
+
+    #[test]
+    fn only_real_loopback_peers() {
+        let is = |ip: &str| is_loopback(&SocketAddr::new(ip.parse().expect("ip"), 1));
+        for ip in ["127.0.0.1", "127.0.0.2", "::1", "::ffff:127.0.0.1"] {
+            assert!(is(ip), "{ip}");
+        }
+        for ip in ["10.0.0.1", "::1:0:0:1", "::1234:5678", "::ffff:10.0.0.1"] {
+            assert!(!is(ip), "{ip}");
+        }
     }
 }

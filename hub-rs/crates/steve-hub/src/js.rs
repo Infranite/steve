@@ -98,10 +98,10 @@ pub fn truthy(v: Option<&Value>) -> bool {
     }
 }
 
-/// `JSON.parse(text)` with V8's SyntaxError message for the common cases. Hono's `c.req.json()` throws
-/// this and api.ts serves it as `500 {"error": message}`.
+/// `JSON.parse(text)` of a request body with V8's SyntaxError message for the common cases. Hono served
+/// it as a 500; it is the client's mistake, so it is `400 {"error": message}` here.
 pub fn parse_json(text: &str) -> Result<Value, ApiError> {
-    serde_json::from_str(text).map_err(|e| ApiError::internal(syntax_message(text, &e)))
+    serde_json::from_str(text).map_err(|e| ApiError::bad_request(syntax_message(text, &e)))
 }
 
 fn syntax_message(text: &str, e: &serde_json::Error) -> String {
@@ -134,7 +134,7 @@ fn syntax_message(text: &str, e: &serde_json::Error) -> String {
 }
 
 /// gateway.ts `firstJson`: the greedy `{…}` span of a model reply, parsed. No braces → `None`; a span that
-/// is not valid JSON throws (500) like `JSON.parse`.
+/// is not valid JSON throws (500, the model's fault) like `JSON.parse`.
 pub fn first_json(text: &str) -> Result<Option<Value>, ApiError> {
     let (Some(a), Some(b)) = (text.find('{'), text.rfind('}')) else {
         return Ok(None);
@@ -142,7 +142,10 @@ pub fn first_json(text: &str) -> Result<Option<Value>, ApiError> {
     if b < a {
         return Ok(None);
     }
-    parse_json(&text[a..=b]).map(Some)
+    let span = &text[a..=b];
+    serde_json::from_str(span)
+        .map(Some)
+        .map_err(|e| ApiError::internal(syntax_message(span, &e)))
 }
 
 #[cfg(test)]
@@ -174,15 +177,15 @@ mod tests {
     fn json_errors() {
         assert_eq!(
             parse_json(""),
-            Err(ApiError::internal("Unexpected end of JSON input"))
+            Err(ApiError::bad_request("Unexpected end of JSON input"))
         );
         assert_eq!(
             parse_json("{\"a\":"),
-            Err(ApiError::internal("Unexpected end of JSON input"))
+            Err(ApiError::bad_request("Unexpected end of JSON input"))
         );
         assert_eq!(
             parse_json("abc"),
-            Err(ApiError::internal(
+            Err(ApiError::bad_request(
                 "Unexpected token 'a', \"abc\" is not valid JSON"
             ))
         );
