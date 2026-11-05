@@ -1652,6 +1652,8 @@ impl Outbox {
         let weak = ch.downgrade();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(QUEUE_EVERY);
+            // A slow round of sends is not followed by a burst of catch-up rounds.
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 tick.tick().await;
                 let Some(ch) = weak.upgrade() else { break };

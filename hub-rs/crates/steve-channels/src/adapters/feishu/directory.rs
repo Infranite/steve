@@ -32,7 +32,8 @@ use steve_modules::contacts::sync::{
     DirectorySync, Snapshot,
 };
 
-use super::client::{FeishuClient, FeishuError, TokenSource, data};
+use super::client::{FeishuClient, FeishuError, TokenSource};
+use super::ratelimit;
 
 /// The accounts system of [`DirUser::id`]: Feishu `union_id`s.
 pub const SYSTEM: &str = "feishu";
@@ -47,8 +48,7 @@ const USER_PAGE: &str = "50";
 const SCOPE_PAGE: &str = "100";
 /// Retries after a rate-limit answer (feishu.md §4).
 const RATE_RETRIES: u32 = 3;
-/// Wait when the answer has no reset header, and the most we wait.
-const RATE_WAIT_DEFAULT: Duration = Duration::from_secs(1);
+/// The most we wait (one second when the answer has no reset header).
 const RATE_WAIT_MAX: Duration = Duration::from_secs(30);
 /// Guards against a server that keeps answering `has_more`.
 const MAX_PAGES: usize = 10_000;
@@ -146,26 +146,23 @@ impl FeishuDirectory {
 
     /// One GET, waiting out rate limits.
     async fn get(&self, path: &str, query: &[(&str, &str)]) -> Result<Value, DirectoryError> {
-        let mut tries = 0;
-        loop {
-            match self.client.get(self.tokens.as_ref(), path, query).await {
-                Ok(v) => return Ok(data(&v).clone()),
-                Err(FeishuError::RateLimited { reset, .. }) if tries < RATE_RETRIES => {
-                    tries += 1;
-                    let wait = reset.unwrap_or(RATE_WAIT_DEFAULT).min(RATE_WAIT_MAX);
-                    tracing::debug!(path, ?wait, "feishu: directory read rate-limited");
-                    tokio::time::sleep(wait).await;
-                }
-                Err(e) => {
-                    if e.is_no_scope() {
-                        let (sc, why) = scope_of(path);
-                        let mut m = lock(&self.missing);
-                        if !m.iter().any(|(x, _)| x == sc) {
-                            m.push((sc.into(), why.into()));
-                        }
+        let what = format!("directory read {path}");
+        let call = || self.client.get(self.tokens.as_ref(), path, query);
+        match ratelimit::with_retries_capped(RATE_RETRIES, RATE_WAIT_MAX, &what, call).await {
+            // the `data` member, taken rather than copied
+            Ok((mut v, _)) => Ok(match v.get_mut("data") {
+                Some(d) => d.take(),
+                None => v,
+            }),
+            Err(e) => {
+                if e.is_no_scope() {
+                    let (sc, why) = scope_of(path);
+                    let mut m = lock(&self.missing);
+                    if !m.iter().any(|(x, _)| x == sc) {
+                        m.push((sc.into(), why.into()));
                     }
-                    return Err(dir_error(e));
                 }
+                Err(dir_error(e))
             }
         }
     }

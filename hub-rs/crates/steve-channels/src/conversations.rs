@@ -24,6 +24,7 @@
 
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use rusqlite::{OptionalExtension, params};
 use serde_json::{Map, Value, json};
@@ -116,17 +117,36 @@ pub trait Thread: Send + Sync {
     fn say(&self, ws: &str, turn: Turn) -> Result<String, String>;
 }
 
+/// How long a generated reply waits for its delivery before it is forgotten.
+const GENERATION_TTL: Duration = Duration::from_secs(30 * 60);
+/// At most this many are kept; the oldest go first.
+const GENERATIONS_MAX: usize = 500;
+
 /// Generated replies waiting to be delivered, by the conversation message they answer.
 #[derive(Default)]
-pub struct Generations(Mutex<HashMap<String, Generation>>);
+pub struct Generations(Mutex<HashMap<String, (Instant, Generation)>>);
 
 impl Generations {
     fn put(&self, origin: &str, g: Generation) {
+        self.put_at(origin, g, Instant::now());
+    }
+
+    /// Forgets expired ones and then the oldest over the cap, never all of them at once: a
+    /// missing generation lets its reply skip the skip and approval checks.
+    fn put_at(&self, origin: &str, g: Generation, now: Instant) {
         let mut m = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        if m.len() > 500 {
-            m.clear();
+        m.retain(|_, (t, _)| now.saturating_duration_since(*t) < GENERATION_TTL);
+        while m.len() >= GENERATIONS_MAX {
+            let Some(oldest) = m
+                .iter()
+                .min_by_key(|(_, (t, _))| *t)
+                .map(|(k, _)| k.clone())
+            else {
+                break;
+            };
+            m.remove(&oldest);
         }
-        m.insert(origin.into(), g);
+        m.insert(origin.into(), (now, g));
     }
 
     fn take(&self, origin: &str) -> Option<Generation> {
@@ -134,6 +154,7 @@ impl Generations {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(origin)
+            .map(|(_, g)| g)
     }
 }
 
@@ -900,5 +921,37 @@ mod tests {
         let m = json!({"ask": {"options": ["前端", "后端"]}});
         assert_eq!(said_text("哪个？", &m), "哪个？\n（可以回复：前端 / 后端）");
         assert_eq!(said_text(" 好 ", &json!({})), "好");
+    }
+
+    #[test]
+    fn generations_expire_and_evict_the_oldest_not_all() {
+        let g = Generations::default();
+        let t0 = Instant::now();
+        let flagged = Generation {
+            needs_approval: true,
+            ..Default::default()
+        };
+        g.put_at("old", flagged.clone(), t0);
+        for i in 0..GENERATIONS_MAX {
+            g.put_at(
+                &format!("m{i}"),
+                Generation::default(),
+                t0 + Duration::from_millis(1 + i as u64),
+            );
+        }
+        // Over the cap: only the oldest went, the pending ones stayed.
+        assert_eq!(g.take("old"), None);
+        assert_eq!(g.take("m0"), Some(Generation::default()));
+        g.put_at("keep", flagged.clone(), t0 + Duration::from_secs(1));
+        assert!(g.0.lock().unwrap().len() <= GENERATIONS_MAX);
+        assert_eq!(g.take("keep"), Some(flagged.clone()));
+        // After the TTL a new put forgets the stale ones.
+        g.put_at(
+            "late",
+            flagged.clone(),
+            t0 + GENERATION_TTL + Duration::from_secs(5),
+        );
+        assert_eq!(g.take("m1"), None);
+        assert_eq!(g.take("late"), Some(flagged));
     }
 }

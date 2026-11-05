@@ -19,11 +19,11 @@
 //! uses them. Lookups are remembered for a while ([`MEMBERS_TTL_MS`], [`HANDLE_TTL_MS`]) so the
 //! periodic run costs nothing when nothing is new.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Mutex;
 use std::time::Duration;
 
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, params};
 use serde::Serialize;
 use steve_modules::accounts::connections::repo as conn_repo;
 use steve_modules::accounts::{self, Enrichment, ExtraHandle, TenantHint, looks_like_handle};
@@ -334,18 +334,21 @@ fn dm_names(c: &Connection, ws: &str) -> ChannelResult<HashMap<String, String>> 
 /// Step 2c: the organization key each person carried in the stored payloads — as a sender
 /// (`sender.tenant_key`; the long connection keeps the whole envelope, the poller the message) or
 /// as someone @-mentioned (`mentions[].tenant_key`) — with the space it was last seen in:
-/// `account → (tenant_key, space name)`. Bots are left out.
-fn local_tenants(c: &Connection, ws: &str) -> ChannelResult<HashMap<String, (String, String)>> {
-    let mut out: HashMap<String, (String, String)> = HashMap::new();
+/// `account → (tenant_key, space name, party, who created the party)`. Bots and people who
+/// already have a job are left out.
+fn local_tenants(c: &Connection, ws: &str) -> ChannelResult<HashMap<String, SeenTenant>> {
+    let mut out: HashMap<String, SeenTenant> = HashMap::new();
     let mut st = c.prepare(
         "SELECT m.sender_account_id,
                 coalesce(json_extract(e.payload, '$.raw.event.sender.tenant_key'), json_extract(e.payload, '$.raw.sender.tenant_key')),
                 coalesce(json_extract(e.payload, '$.raw.event.sender.sender_type'), json_extract(e.payload, '$.raw.sender.sender_type')),
-                s.name
+                s.name, p.id, p.created_by
            FROM chan_messages m JOIN ext_events e ON e.id = m.event_id JOIN spaces s ON s.id = m.space_id
            JOIN accounts a ON a.id = m.sender_account_id JOIN parties p ON p.id = a.party_id
-          WHERE m.workspace_id = ? AND m.direction = 'in' AND e.payload IS NOT NULL
+          WHERE m.workspace_id = ?1 AND m.direction = 'in' AND e.payload IS NOT NULL
             AND a.kind NOT IN ('bot', 'app_bot') AND coalesce(p.contact_kind, '') <> 'bot'
+            AND NOT EXISTS (SELECT 1 FROM links l WHERE l.subject_id = a.party_id
+                             AND l.predicate = 'works_at' AND l.workspace_id = ?1)
           ORDER BY m.created DESC",
     )?;
     let rows = st.query_map(params![ws], |r| {
@@ -353,44 +356,78 @@ fn local_tenants(c: &Connection, ws: &str) -> ChannelResult<HashMap<String, (Str
             r.get::<_, String>(0)?,
             r.get::<_, Option<String>>(1)?,
             r.get::<_, Option<String>>(2)?,
-            r.get::<_, String>(3)?,
+            SeenTenant {
+                tenant: String::new(),
+                space: r.get(3)?,
+                party: r.get(4)?,
+                actor: r.get(5)?,
+            },
         ))
     })?;
     for row in rows {
-        let (acc, tk, kind, space) = row?;
+        let (acc, tk, kind, seen) = row?;
         if kind.as_deref() == Some("app") {
             continue;
         }
         if let Some(tk) = tk.filter(|t| !t.trim().is_empty()) {
-            out.entry(acc).or_insert((tk, space));
+            out.entry(acc).or_insert(SeenTenant { tenant: tk, ..seen });
         }
     }
     // the people @-mentioned: their handle, through the account that has it
     let mut st = c.prepare(
-        "SELECT h.account_id, json_extract(j.value, '$.tenant_key'), s.name
+        "SELECT h.account_id, json_extract(j.value, '$.tenant_key'), s.name, p.id, p.created_by
            FROM chan_messages m JOIN ext_events e ON e.id = m.event_id JOIN spaces s ON s.id = m.space_id,
                 json_each(coalesce(json_extract(e.payload, '$.raw.event.message.mentions'), json_extract(e.payload, '$.raw.mentions'), '[]')) j
            JOIN account_handles h ON h.workspace_id = m.workspace_id
             AND h.handle = coalesce(json_extract(j.value, '$.id.open_id'), json_extract(j.value, '$.id'))
            JOIN accounts a ON a.id = h.account_id JOIN parties p ON p.id = a.party_id
-          WHERE m.workspace_id = ? AND e.payload IS NOT NULL AND json_type(j.value, '$.id') IS NOT NULL
+          WHERE m.workspace_id = ?1 AND e.payload IS NOT NULL AND json_type(j.value, '$.id') IS NOT NULL
             AND a.kind NOT IN ('bot', 'app_bot') AND coalesce(p.contact_kind, '') <> 'bot'
+            AND NOT EXISTS (SELECT 1 FROM links l WHERE l.subject_id = a.party_id
+                             AND l.predicate = 'works_at' AND l.workspace_id = ?1)
           ORDER BY m.created DESC",
     )?;
     let rows = st.query_map(params![ws], |r| {
         Ok((
             r.get::<_, String>(0)?,
             r.get::<_, Option<String>>(1)?,
-            r.get::<_, String>(2)?,
+            SeenTenant {
+                tenant: String::new(),
+                space: r.get(2)?,
+                party: r.get(3)?,
+                actor: r.get(4)?,
+            },
         ))
     })?;
     for row in rows {
-        let (acc, tk, space) = row?;
+        let (acc, tk, seen) = row?;
         if let Some(tk) = tk.filter(|t| !t.trim().is_empty()) {
-            out.entry(acc).or_insert((tk, space));
+            out.entry(acc).or_insert(SeenTenant { tenant: tk, ..seen });
         }
     }
     Ok(out)
+}
+
+/// What [`local_tenants`] found about one account.
+struct SeenTenant {
+    tenant: String,
+    /// The space it was last seen in.
+    space: String,
+    party: String,
+    /// Who created the party: the actor its organization is recorded for.
+    actor: Option<String>,
+}
+
+/// Whether the account's party works somewhere in `ws`.
+fn has_job(store: &steve_store::Store, ws: &str, acc: &str) -> ChannelResult<bool> {
+    store.reader(|c| -> ChannelResult<bool> {
+        Ok(c.query_row(
+            "SELECT EXISTS (SELECT 1 FROM accounts a JOIN links l ON l.subject_id = a.party_id
+               WHERE a.id = ? AND l.predicate = 'works_at' AND l.workspace_id = ?)",
+            params![acc, ws],
+            |r| r.get(0),
+        )?)
+    })
 }
 
 /// The organization keys of the workspace's own connections (`config.tenant_key`, written when you
@@ -501,21 +538,34 @@ fn of_installation<'a>(ids: &'a [Identity], inst: &str) -> Vec<&'a Identity> {
 
 /// The profile that names a candidate, if any (a named one; the directory's wins).
 fn match_profile<'a>(profiles: &'a [Profile], h: &HandleRef) -> Option<&'a Profile> {
-    let hits = profiles.iter().filter(|p| {
+    match_at(profiles, h).map(|(_, p)| p)
+}
+
+/// [`match_profile`] over any list of profiles, with the position of the one picked.
+fn match_at<'a>(
+    profiles: impl IntoIterator<Item = &'a Profile>,
+    h: &HandleRef,
+) -> Option<(usize, &'a Profile)> {
+    let hits = profiles.into_iter().enumerate().filter(|(_, p)| {
         p.handle.as_ref().is_some_and(|x| {
             x.system == h.system && (x.is(&h.handle) || h.extra.iter().any(|e| x.is(e)))
         })
     });
-    let mut best: Option<&Profile> = None;
-    for p in hits {
+    let mut best: Option<(usize, &Profile)> = None;
+    for (i, p) in hits {
         best = match best {
-            None => Some(p),
-            Some(b) if !b.directory && p.directory && !p.name.is_empty() => Some(p),
-            Some(b) if b.name.is_empty() && !p.name.is_empty() => Some(p),
+            None => Some((i, p)),
+            Some((_, b)) if !b.directory && p.directory && !p.name.is_empty() => Some((i, p)),
+            Some((_, b)) if b.name.is_empty() && !p.name.is_empty() => Some((i, p)),
             Some(b) => Some(b),
         };
     }
     best
+}
+
+/// The profiles found so far, without what they were found with.
+fn just_profiles(profiles: &[(Profile, Option<String>, String)]) -> impl Iterator<Item = &Profile> {
+    profiles.iter().map(|(p, _, _)| p)
 }
 
 impl Channels {
@@ -595,12 +645,27 @@ impl Channels {
         let mut rep = NameReport::default();
         let store = self.store().clone();
         let now = self.now();
-        let cands = store.reader(|c| candidates(c, ws, now))?;
+        // The big reads (whole-workspace scans of messages and payloads) run off the runtime.
+        let w = ws.to_string();
+        let cands = self
+            .modules()
+            .blocking(move |m| m.store.reader(|c| candidates(c, &w, now)))
+            .await?;
         rep.candidates = cands.len();
 
-        // 2. what Steve already has
-        let (mentions, dms) = store
-            .reader(|c| -> ChannelResult<_> { Ok((mention_names(c, ws)?, dm_names(c, ws)?)) })?;
+        // 2. what Steve already has (only looked at for the candidates)
+        let (mentions, dms) = if cands.is_empty() {
+            Default::default()
+        } else {
+            let w = ws.to_string();
+            self.modules()
+                .blocking(move |m| {
+                    m.store.reader(|c| -> ChannelResult<_> {
+                        Ok((mention_names(c, &w)?, dm_names(c, &w)?))
+                    })
+                })
+                .await?
+        };
         let mut open: Vec<Candidate> = Vec::new();
         for cand in cands {
             let local = mentions
@@ -669,8 +734,17 @@ impl Channels {
         }
 
         // 2c. organizations from the stored payloads (anyone without a job yet, named or not)
-        let (tenants_seen, mut own_keys) = store
-            .reader(|c| -> ChannelResult<_> { Ok((local_tenants(c, ws)?, own_tenants(c, ws)?)) })?;
+        let w = ws.to_string();
+        let (tenants_seen, mut own_keys) = self
+            .modules()
+            .blocking(move |m| {
+                m.store.reader(|c| -> ChannelResult<_> {
+                    Ok((local_tenants(c, &w)?, own_tenants(c, &w)?))
+                })
+            })
+            .await?;
+        // parties given an organization in this run: another account of theirs checks again
+        let mut given: HashSet<String> = HashSet::new();
         let own_names: HashMap<String, String> = tenants
             .values()
             .flatten()
@@ -682,33 +756,23 @@ impl Channels {
             }
         }
         if !own_keys.is_empty() {
-            for (acc, (tk, space)) in &tenants_seen {
+            for (acc, seen) in &tenants_seen {
+                let tk = &seen.tenant;
                 let hint = TenantHint {
                     key: tk.clone(),
                     own: own_keys.contains(tk),
                     name: own_names.get(tk).cloned(),
-                    seen_in: Some(space.clone()),
+                    seen_in: Some(seen.space.clone()),
                 };
-                let actor = store.reader(|c| -> ChannelResult<Option<String>> {
-                    Ok(c.query_row(
-                        "SELECT p.created_by FROM accounts a JOIN parties p ON p.id = a.party_id WHERE a.id = ?",
-                        params![acc],
-                        |r| r.get(0),
-                    )
-                    .optional()?)
-                })?;
-                let Some(actor) = actor else { continue };
-                let has_job = store.reader(|c| -> ChannelResult<bool> {
-                    Ok(c.query_row(
-                        "SELECT EXISTS (SELECT 1 FROM accounts a JOIN links l ON l.subject_id = a.party_id
-                           WHERE a.id = ? AND l.predicate = 'works_at' AND l.workspace_id = ?)",
-                        params![acc, ws],
-                        |r| r.get(0),
-                    )?)
-                })?;
-                if has_job {
+                let Some(actor) = seen.actor.clone() else {
+                    continue;
+                };
+                // local_tenants left out whoever had a job; only a party given one just now
+                // needs the check again
+                if given.contains(&seen.party) && has_job(&store, ws, acc)? {
                     continue;
                 }
+                given.insert(seen.party.clone());
                 let ws2 = ws.to_string();
                 let org =
                     match store.transaction(|tx| accounts::tenant_org(tx, &ws2, &actor, &hint)) {
@@ -738,7 +802,11 @@ impl Channels {
             rep.nameless = self.count_nameless(ws)?;
             return Ok(rep);
         }
-        let spaces = store.reader(|c| seen_spaces(c, ws, &open))?;
+        let (w, o) = (ws.to_string(), open.clone());
+        let spaces = self
+            .modules()
+            .blocking(move |m| m.store.reader(|c| seen_spaces(c, &w, &o)))
+            .await?;
         // account → (connection, outcome) of each call that actually asked about them
         let mut asked: HashMap<String, Vec<(String, Outcome)>> = HashMap::new();
         let mut profiles: Vec<(Profile, Option<String>, String)> = Vec::new(); // (profile, seen in, installation)
@@ -747,8 +815,8 @@ impl Channels {
         let named_by =
             |profiles: &[(Profile, Option<String>, String)], acc: &str, cands: &[Candidate]| {
                 cands.iter().find(|c| c.account_id == acc).is_some_and(|c| {
-                    let ps: Vec<Profile> = profiles.iter().map(|(p, _, _)| p.clone()).collect();
-                    match_profile(&ps, &c.handle).is_some_and(|p| !p.name.is_empty())
+                    match_at(just_profiles(profiles), &c.handle)
+                        .is_some_and(|(_, p)| !p.name.is_empty())
                 })
             };
         for sp in spaces.iter().take(MAX_SPACES) {
@@ -809,9 +877,8 @@ impl Channels {
         let mut by_inst: BTreeMap<String, Vec<HandleRef>> = BTreeMap::new();
         let own_keys_all: Vec<String> = tenants.values().flatten().map(|t| t.key.clone()).collect();
         for cand in &open {
-            let ps: Vec<Profile> = profiles.iter().map(|(p, _, _)| p.clone()).collect();
             // named by the directory, or of another organization (whose directory is not ours): done
-            if match_profile(&ps, &cand.handle).is_some_and(|p| {
+            if match_at(just_profiles(&profiles), &cand.handle).is_some_and(|(_, p)| {
                 !p.name.is_empty()
                     && (p.directory
                         || p.tenant_key
@@ -888,16 +955,11 @@ impl Channels {
         }
 
         // 4. apply
-        let ps: Vec<Profile> = profiles.iter().map(|(p, _, _)| p.clone()).collect();
         for cand in &open {
-            let Some(p) = match_profile(&ps, &cand.handle) else {
+            let Some((at, p)) = match_at(just_profiles(&profiles), &cand.handle) else {
                 continue;
             };
-            let (seen_in, inst) = profiles
-                .iter()
-                .find(|(x, _, _)| std::ptr::eq(x as *const Profile, p as *const Profile) || x == p)
-                .map(|(_, s, i)| (s.clone(), i.clone()))
-                .unwrap_or((None, String::new()));
+            let (seen_in, inst) = (profiles[at].1.clone(), profiles[at].2.clone());
             let own_keys: Vec<TenantInfo> = tenants.get(&inst).cloned().unwrap_or_default();
             // a directory profile is of the identity's own organization
             let tenant_key = p.tenant_key.clone().or_else(|| {
@@ -966,13 +1028,9 @@ impl Channels {
             if calls.is_empty() {
                 continue; // nothing asked about them this run (cached): their record stands
             }
-            let hit = match_profile(&ps, &cand.handle);
-            let answered_by = hit.and_then(|p| {
-                profiles
-                    .iter()
-                    .find(|(x, _, _)| x == p)
-                    .map(|(_, _, i)| i.clone())
-            });
+            let hit = match_at(just_profiles(&profiles), &cand.handle);
+            let answered_by = hit.map(|(at, _)| profiles[at].2.clone());
+            let hit = hit.map(|(_, p)| p);
             let ev = Evidence {
                 calls,
                 own_keys: match &answered_by {

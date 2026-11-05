@@ -108,9 +108,10 @@ pub fn our_echo(
     if crate::arbiter::echo_key(text).is_empty() {
         return Ok(None);
     }
+    // `m.workspace_id` too, so the (workspace_id, space_id, created) index applies.
     let mut st = c.prepare_cached(
         "SELECT m.id, m.space_id, coalesce(m.text, '') FROM chan_messages m JOIN spaces s ON s.id = m.space_id
-          WHERE s.workspace_id = ?1 AND s.external_id = ?2 AND m.direction = 'out'
+          WHERE s.workspace_id = ?1 AND s.external_id = ?2 AND m.workspace_id = ?1 AND m.direction = 'out'
             AND m.status IN ('pending', 'sent', 'unknown') AND m.external_id IS NULL AND coalesce(m.sent, m.created) >= ?3
           ORDER BY m.created DESC, m.id",
     )?;
@@ -410,39 +411,53 @@ pub fn page(
 /// How often `channels.retention` runs (§9).
 pub const RETENTION_EVERY: Duration = Duration::from_secs(3600);
 
+/// Messages purged per write transaction, so a large purge doesn't hold the write lock long.
+const PURGE_BATCH: usize = 1000;
+
 /// One pass at `now`: in every workspace, message text and attachments (card blocks, file names,
 /// resource keys) older than `keepRaw` days are cleared and `purged = now`. Returns the messages
-/// purged.
+/// purged. Blocking: runs in batches of [`PURGE_BATCH`], each in its own transaction.
 pub fn sweep(m: &Modules, now: i64) -> ApiResult<usize> {
-    m.store.transaction(|tx| -> ApiResult<usize> {
-        let wss: Vec<String> = {
-            let mut st = tx.prepare(
-                "SELECT DISTINCT workspace_id FROM chan_messages WHERE purged IS NULL AND text IS NOT NULL",
-            )?;
-            st.query_map([], |r| r.get(0))?
-                .collect::<rusqlite::Result<_>>()?
-        };
-        // what a sweep before attachments were cleared left behind
+    let wss: Vec<String> = m.store.reader(|c| -> ApiResult<_> {
+        let mut st = c.prepare("SELECT id FROM workspaces ORDER BY id")?;
+        Ok(st
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?)
+    })?;
+    // what a sweep before attachments were cleared left behind
+    m.store.transaction(|tx| -> ApiResult<()> {
         tx.execute(
             "UPDATE chan_messages SET attachments = '[]' WHERE purged IS NOT NULL AND attachments <> '[]'",
             [],
         )?;
-        let mut n = 0;
-        for ws in wss {
-            let cut = now - steve_flow::retention::keep_raw_days(tx, &ws)? * 24 * 3_600_000;
-            n += tx.execute(
-                "UPDATE chan_messages SET text = NULL, attachments = '[]', purged = ?1 WHERE workspace_id = ?2 AND created < ?3 AND purged IS NULL",
-                params![now, ws, cut],
-            )?;
+        Ok(())
+    })?;
+    let mut n = 0;
+    for ws in wss {
+        loop {
+            let done = m.store.transaction(|tx| -> ApiResult<usize> {
+                let cut = now - steve_flow::retention::keep_raw_days(tx, &ws)? * 24 * 3_600_000;
+                Ok(tx.execute(
+                    "UPDATE chan_messages SET text = NULL, attachments = '[]', purged = ?1
+                      WHERE rowid IN (SELECT rowid FROM chan_messages
+                                       WHERE workspace_id = ?2 AND purged IS NULL AND created < ?3
+                                       LIMIT ?4)",
+                    params![now, ws, cut, PURGE_BATCH as i64],
+                )?)
+            })?;
+            n += done;
+            if done < PURGE_BATCH {
+                break;
+            }
         }
-        Ok(n)
-    })
+    }
+    Ok(n)
 }
 
-/// The hourly job.
+/// The hourly job; each sweep runs off the async runtime.
 pub async fn retention(m: Modules) {
     loop {
-        match sweep(&m, m.clock.now()) {
+        match m.blocking(|m| sweep(m, m.clock.now())).await {
             Ok(n) if n > 0 => tracing::info!(purged = n, "channels.retention"),
             Ok(_) => {}
             Err(e) => tracing::warn!("channels.retention: {e}"),

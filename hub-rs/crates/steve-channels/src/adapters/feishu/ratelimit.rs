@@ -136,7 +136,21 @@ pub fn backoff(reset: Option<Duration>) -> Duration {
 /// Runs `call`, and again up to `retries` times while Feishu answers “rate limited”, waiting
 /// [`backoff`] in between. `call` must make the same request each time (same `uuid`). Returns the
 /// answer and how many retries it took; the last rate-limit error when they ran out.
-pub async fn with_retries<T, F, Fut>(retries: u32, mut call: F) -> Result<(T, u32), FeishuError>
+pub async fn with_retries<T, F, Fut>(retries: u32, call: F) -> Result<(T, u32), FeishuError>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, FeishuError>>,
+{
+    with_retries_capped(retries, MAX_BACKOFF, "send", call).await
+}
+
+/// [`with_retries`] waiting at most `cap` each time; `what` names the request in the log.
+pub async fn with_retries_capped<T, F, Fut>(
+    retries: u32,
+    cap: Duration,
+    what: &str,
+    mut call: F,
+) -> Result<(T, u32), FeishuError>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<T, FeishuError>>,
@@ -145,13 +159,14 @@ where
     loop {
         match call().await {
             Err(FeishuError::RateLimited { code, reset }) if n < retries => {
-                let wait = backoff(reset);
+                let wait = reset.unwrap_or(DEFAULT_BACKOFF).min(cap);
                 n += 1;
                 tracing::info!(
                     code,
+                    what,
                     attempt = n,
                     wait_ms = wait.as_millis() as u64,
-                    "feishu: send rate limited, retrying with the same uuid"
+                    "feishu: rate limited, retrying the same request"
                 );
                 tokio::time::sleep(wait).await;
             }

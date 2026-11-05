@@ -1092,6 +1092,15 @@ pub fn dm_party(c: &Connection, s: &SpaceRow) -> ChannelResult<(Option<Counterpa
 }
 
 pub fn out(c: &Connection, s: &SpaceRow) -> ChannelResult<SpaceOut> {
+    out_with(c, s, &your_trigger(c, &s.workspace_id)?)
+}
+
+/// [`out`] with the workspace's [`your_trigger`] already read (a list of spaces reads it once).
+pub fn out_with(
+    c: &Connection,
+    s: &SpaceRow,
+    trigger: &Option<crate::rules::Trigger>,
+) -> ChannelResult<SpaceOut> {
     let set = settings_or_defaults(c, s)?;
     let account = channel_settings(c, &s.workspace_id, &s.connection_id)?;
     let account_rules = account
@@ -1111,7 +1120,6 @@ pub fn out(c: &Connection, s: &SpaceRow) -> ChannelResult<SpaceOut> {
         });
     let effective = set.rules.clone().unwrap_or_else(|| account_rules.clone());
     let role = role_of(&set, &effective, voice.as_ref().map(|v| v.mode));
-    let trigger = your_trigger(c, &s.workspace_id)?;
     let mut conflicts = conflicts(
         s,
         &set,

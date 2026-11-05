@@ -29,6 +29,9 @@ fn snippet(t: &str) -> String {
     }
 }
 
+/// A space someone was seen in: `(id, name, kind, when)`.
+type SpaceRow = (String, String, String, i64);
+
 /// For each party of `parties` that was seen somewhere the viewer can see.
 pub fn seen(
     c: &Connection,
@@ -42,16 +45,36 @@ pub fn seen(
               WHERE workspace_id = ?1 AND direction = 'in' AND sender_party_id = ?2
              UNION ALL
              SELECT sm.space_id, sm.joined FROM space_members sm JOIN accounts a ON a.id = sm.account_id
-              WHERE sm.workspace_id = ?1 AND a.party_id = ?2
-             UNION ALL
-             SELECT m.space_id, m.created FROM chan_messages m,
-                    json_each(CASE WHEN json_valid(m.mentions) THEN m.mentions ELSE '[]' END) j
-               JOIN accounts a ON a.id = json_extract(j.value, '$.account_id')
-              WHERE m.workspace_id = ?1 AND a.party_id = ?2) x
+              WHERE sm.workspace_id = ?1 AND a.party_id = ?2) x
            JOIN spaces s ON s.id = x.space_id
           WHERE s.workspace_id = ?1 AND {vis}
-          GROUP BY s.id ORDER BY at DESC"
+          GROUP BY s.id"
     ))?;
+    // Where they were @-mentioned, for all of `parties` in one pass over the mentions.
+    let mut mentioned: HashMap<String, Vec<SpaceRow>> = HashMap::new();
+    if !parties.is_empty() {
+        let vis2 = visible_sql("?2");
+        let mut st = c.prepare(&format!(
+            "SELECT a.party_id, s.id, s.name, s.kind, MAX(m.created) FROM chan_messages m,
+                    json_each(CASE WHEN json_valid(m.mentions) THEN m.mentions ELSE '[]' END) j
+               JOIN accounts a ON a.id = json_extract(j.value, '$.account_id')
+               JOIN spaces s ON s.id = m.space_id
+              WHERE m.workspace_id = ?1 AND a.party_id IN (SELECT value FROM json_each(?3))
+                AND s.workspace_id = ?1 AND {vis2}
+              GROUP BY a.party_id, s.id"
+        ))?;
+        let ids = serde_json::to_string(parties).unwrap_or_else(|_| "[]".into());
+        let rows = st.query_map(params![viewer.ws, viewer.user, ids], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                (r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?),
+            ))
+        })?;
+        for row in rows {
+            let (party, sp) = row?;
+            mentioned.entry(party).or_default().push(sp);
+        }
+    }
     let mut last_q = c.prepare(&format!(
         "SELECT m.text, m.created, s.id, s.name FROM chan_messages m JOIN spaces s ON s.id = m.space_id
           WHERE m.workspace_id = ?1 AND m.direction = 'in' AND m.sender_party_id = ?2
@@ -64,16 +87,19 @@ pub fn seen(
     let mut attention_of: HashMap<String, String> = HashMap::new();
     let mut out = Vec::new();
     for p in parties {
-        let rows = spaces_q
+        let mut rows: Vec<SpaceRow> = spaces_q
             .query_map(params![viewer.ws, p, viewer.user], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                    r.get::<_, i64>(3)?,
-                ))
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
+        // each space once, at the latest time they were seen there, latest first
+        for m in mentioned.remove(p).unwrap_or_default() {
+            match rows.iter_mut().find(|r| r.0 == m.0) {
+                Some(r) => r.3 = r.3.max(m.3),
+                None => rows.push(m),
+            }
+        }
+        rows.sort_by(|a, b| b.3.cmp(&a.3).then_with(|| a.0.cmp(&b.0)));
         if rows.is_empty() {
             continue;
         }

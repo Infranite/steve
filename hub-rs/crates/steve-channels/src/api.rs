@@ -53,6 +53,7 @@ struct ListQ {
 async fn list(Extension(ch): Cx, who: Caller, Query(q): Query<ListQ>) -> ApiResult<Json<Value>> {
     let v = viewer(&ch, &who)?;
     let out = ch.store().reader(|c| -> ApiResult<Vec<spaces::SpaceOut>> {
+        let trigger = spaces::your_trigger(c, &v.ws)?;
         spaces::list(
             c,
             &v,
@@ -60,7 +61,7 @@ async fn list(Extension(ch): Cx, who: Caller, Query(q): Query<ListQ>) -> ApiResu
             q.q.as_deref(),
         )?
         .iter()
-        .map(|s| spaces::out(c, s))
+        .map(|s| spaces::out_with(c, s, &trigger))
         .collect()
     })?;
     Ok(Json(serde_json::to_value(out)?))
