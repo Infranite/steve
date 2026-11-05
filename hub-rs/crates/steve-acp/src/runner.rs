@@ -14,25 +14,8 @@ use crate::attachments::{FileRef, StoredFile, for_agent};
 use crate::codex::{codex_args, codex_mode};
 use crate::config::AcpConfig;
 use crate::rpc::{Conn, Incoming, RpcError, Spawn};
-use crate::util::{coalesce, js_slice, js_str, json_indent1, truthy};
-
-fn effort_option(config: &Value) -> Option<&Value> {
-    config.get("configOptions")?.as_array()?.iter().find(|o| {
-        o.get("id")
-            .and_then(Value::as_str)
-            .is_some_and(|id| ["thought_level", "reasoning_effort", "effort"].contains(&id))
-            || o.get("category").and_then(Value::as_str) == Some("thought_level")
-    })
-}
-
-fn option_supports(options: &Value, effort: &str) -> bool {
-    options.as_array().is_some_and(|os| {
-        os.iter().any(|o| {
-            o.get("value").and_then(Value::as_str) == Some(effort)
-                || o.get("options").is_some_and(|v| option_supports(v, effort))
-        })
-    })
-}
+use crate::session::{self as acp_session, OpenConfig, Reports, Strictness, effort_option};
+use crate::util::{coalesce, js_slice, js_str, json_indent1};
 
 /// The session fields the runner reads (a `sessions` row plus the bot's `perm_mode`).
 #[derive(Debug, Clone, Default)]
@@ -1434,69 +1417,25 @@ impl Acp {
         }
     }
 
-    /// initialize + session/new|load + mode + model; returns the ACP session id and whether the
-    /// adapter takes image blocks.
+    /// initialize + session/new|load + mode + model ([`acp_session::open`]); what the adapter reports
+    /// is stored as it comes. Returns the ACP session id and whether the adapter takes image blocks.
     async fn handshake(&self, l: &Conn, s: &SessionInfo) -> Result<(String, bool), RpcError> {
+        struct HostReports<'a>(&'a dyn Host, &'a str);
+        impl Reports for HostReports<'_> {
+            fn new_session(&self, acp_id: &str) {
+                self.0.set_acp_session_id(self.1, acp_id);
+            }
+            fn model(&self, model: &str) {
+                self.0.set_model(self.1, model);
+            }
+            fn effort(&self, effort: &str) {
+                self.0.set_reasoning_effort(self.1, effort);
+            }
+        }
         let host = self.host();
-        let init = json!({
-            "protocolVersion": 1,
-            "clientCapabilities": { "fs": { "readTextFile": false, "writeTextFile": false }, "terminal": false },
-            "clientInfo": { "name": "steve", "version": self.0.cfg.version },
-        });
-        let init = l
-            .request("initialize", init, Some(Duration::from_secs(60)))
-            .await?;
-        // image content blocks only go to adapters that say they take them; attachments always also go by path
-        let image = init
-            .pointer("/agentCapabilities/promptCapabilities/image")
-            .is_some_and(truthy);
         let mcp = host.mcp_endpoint(s);
         let mcp_servers = json!([{ "type": "http", "name": "steve", "url": mcp.url,
             "headers": [{ "name": "Authorization", "value": format!("Bearer {}", mcp.token) }] }]);
-        let (r, acp_id) = match &s.acp_session_id {
-            Some(id) => {
-                let r = l
-                    .request(
-                        "session/load",
-                        json!({ "sessionId": id, "cwd": s.cwd, "mcpServers": mcp_servers }),
-                        Some(Duration::from_secs(120)),
-                    )
-                    .await?;
-                (r, id.clone())
-            }
-            None => {
-                let r = l
-                    .request(
-                        "session/new",
-                        json!({ "cwd": s.cwd, "mcpServers": mcp_servers }),
-                        Some(Duration::from_secs(120)),
-                    )
-                    .await?;
-                let id = js_str(r.get("sessionId"));
-                host.set_acp_session_id(&s.id, &id);
-                (r, id)
-            }
-        };
-        // Claude Code reports models in `models`; Codex only as the "model" config option
-        let model_opt = r
-            .get("configOptions")
-            .and_then(Value::as_array)
-            .and_then(|os| {
-                os.iter()
-                    .find(|o| o.get("id").and_then(Value::as_str) == Some("model"))
-            });
-        let models = r.get("models").filter(|v| !v.is_null());
-        let reported = coalesce([
-            models.and_then(|m| m.get("currentModelId")),
-            model_opt.and_then(|o| o.get("currentValue")),
-        ])
-        .and_then(Value::as_str)
-        .filter(|m| !m.is_empty());
-        let model = s.model.as_deref().filter(|m| !m.is_empty());
-        if let Some(rep) = reported {
-            host.set_model(&s.id, rep);
-        }
-        // the mode does not survive session/load, so it is set every time the process starts
         let mode = if s.harness == "codex" {
             Some(codex_mode(s.perm_mode.as_deref()).to_owned())
         } else {
@@ -1504,145 +1443,23 @@ impl Acp {
                 .clone()
                 .filter(|m| !m.is_empty() && m != "default")
         };
-        if let Some(mode) = mode
-            && let Err(e) = l
-                .request(
-                    "session/set_mode",
-                    json!({ "sessionId": acp_id, "modeId": mode }),
-                    Some(Duration::from_secs(30)),
-                )
-                .await
-        {
-            tracing::error!("set_mode {}", e.message);
-        }
         // `model` is the snapshot taken when the turn started, like the TS `s.model`
-        let mut config = r.clone();
-        if let Some(model) = model
-            && let Some(updated) = self
-                .apply_model(l, &acp_id, model, model_opt.is_some())
-                .await
-        {
-            if let Some(actual) = updated
-                .pointer("/models/currentModelId")
-                .and_then(Value::as_str)
-                .or_else(|| {
-                    updated
-                        .get("configOptions")
-                        .and_then(Value::as_array)
-                        .and_then(|os| os.iter().find(|o| o["id"] == "model"))
-                        .and_then(|o| o["currentValue"].as_str())
-                })
-            {
-                host.set_model(&s.id, actual);
-            }
-            if updated.get("configOptions").is_some() {
-                config = updated;
-            }
-        }
-        let effort_opt = effort_option(&config);
-        if let Some(effort) = s.reasoning_effort.as_deref().filter(|e| !e.is_empty()) {
-            let option = effort_opt.ok_or_else(|| RpcError {
-                message: format!("当前 harness 未报告可设置的思考强度，无法应用 {effort}"),
-                data: None,
-            })?;
-            if !option
-                .get("options")
-                .is_some_and(|v| option_supports(v, effort))
-            {
-                return Err(RpcError {
-                    message: format!("当前模型不支持思考强度 {effort}"),
-                    data: None,
-                });
-            }
-            let updated = l
-                .request(
-                    "session/set_config_option",
-                    json!({"sessionId": acp_id, "configId": option["id"], "value": effort}),
-                    Some(Duration::from_secs(30)),
-                )
-                .await?;
-            let actual = effort_option(&updated).and_then(|o| o["currentValue"].as_str());
-            if let Some(actual) = actual {
-                host.set_reasoning_effort(&s.id, actual);
-            }
-            if actual != Some(effort) {
-                return Err(RpcError {
-                    message: format!(
-                        "思考强度未生效：请求 {effort}，实际 {}",
-                        actual.unwrap_or("未知")
-                    ),
-                    data: None,
-                });
-            }
-        } else if let Some(actual) = effort_opt.and_then(|o| o["currentValue"].as_str()) {
-            host.set_reasoning_effort(&s.id, actual);
-        }
-        Ok((acp_id, image))
-    }
-
-    /// Switch the session's model. claude-agent-acp 0.99.1 and codex-acp only take the "model" config
-    /// option (`session/set_model` is -32601 there) and the model does not survive `session/load`, so
-    /// this runs on every start. `session/set_model` is the fallback for adapters without the option.
-    /// Failures and substitutions are logged as warnings: the session then runs on another model.
-    async fn apply_model(
-        &self,
-        l: &Conn,
-        acp_id: &str,
-        model: &str,
-        has_option: bool,
-    ) -> Option<Value> {
-        let t = Some(Duration::from_secs(30));
-        let by_option = || {
-            l.request(
-                "session/set_config_option",
-                json!({ "sessionId": acp_id, "configId": "model", "value": model }),
-                t,
-            )
-        };
-        let by_set_model = || {
-            l.request(
-                "session/set_model",
-                json!({ "sessionId": acp_id, "modelId": model }),
-                t,
-            )
-        };
-        let not_found = |e: &RpcError| {
-            e.data
-                .as_ref()
-                .and_then(|d| d.get("code"))
-                .and_then(Value::as_i64)
-                == Some(-32601)
-        };
-        let r = if has_option {
-            by_option().await
-        } else {
-            match by_set_model().await {
-                Err(e) if not_found(&e) => by_option().await,
-                r => r,
-            }
-        };
-        match r {
-            Err(e) => {
-                tracing::warn!("set model {model} {}", e.message);
-                None
-            }
-            Ok(r) => {
-                // the adapter may map an id it does not list to a near one (kiro/claude-haiku-5-5 → claude-haiku-5-5)
-                let current = r
-                    .get("configOptions")
-                    .and_then(Value::as_array)
-                    .and_then(|os| {
-                        os.iter()
-                            .find(|o| o.get("id").and_then(Value::as_str) == Some("model"))
-                    })
-                    .and_then(|o| o.get("currentValue"))
-                    .and_then(Value::as_str);
-                if let Some(cur) = current.filter(|c| *c != model) {
-                    tracing::warn!("set model {model}: the adapter runs {cur}");
-                }
-                Some(r)
-            }
-        }
+        let opened = acp_session::open(
+            l,
+            OpenConfig {
+                client_version: &self.0.cfg.version,
+                cwd: &s.cwd,
+                resume: s.acp_session_id.as_deref(),
+                mcp_servers,
+                mode,
+                model: s.model.as_deref(),
+                effort: s.reasoning_effort.as_deref(),
+            },
+            &HostReports(host, &s.id),
+            Strictness::Lenient,
+        )
+        .await?;
+        Ok((opened.acp_id, opened.image))
     }
 
     fn on_incoming(&self, sid: &str, generation: u64, conn: &Conn, inc: Incoming) {

@@ -13,9 +13,11 @@
 mod attachments;
 mod codex;
 mod config;
+pub mod normalize;
 mod rollout;
 mod rpc;
 mod runner;
+pub mod session;
 mod util;
 
 pub use attachments::{FileRef, INLINE_IMAGES, StoredFile, kb};

@@ -4655,6 +4655,7 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
+ "steve-node-api",
  "steve-vault",
  "tempfile",
  "thiserror 2.0.21",
