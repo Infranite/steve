@@ -15,6 +15,7 @@ use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt};
 use tokio::sync::{mpsc, watch};
 use tokio::time::Instant;
+use tracing::Instrument;
 
 /// A run whose harness says nothing (no text, no tool call, no event at all) for this long is stuck and is
 /// ended. This is not a limit on how long a conversation may take: a run that keeps working never ends by
@@ -577,15 +578,123 @@ impl State {
     }
 }
 
+/// One attempt of a run: one harness process with one model.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttemptPlan {
+    /// The model; `""` leaves it to Codex's configured default.
+    pub model: String,
+    /// The harness session to `--resume` (only the first attempt of a follow-up on Claude Code).
+    pub resume: Option<String>,
+    /// What the attempt asks, before the attachment note.
+    pub prompt: String,
+}
+
+/// The attempts of a run in the order to try them (the Hub's policy):
+/// - the request's models, or the configured ones; Codex with none named uses its own default;
+/// - a follow-up first continues the earlier session with its model, then starts fresh on each model
+///   with the earlier answer as context;
+/// - Codex never resumes (it cannot continue a Claude Code session): fresh attempts only.
+pub fn plan(req: &ResearchRequest, cfg: &ResearchConfig) -> Vec<AttemptPlan> {
+    let codex = req.harness == "codex";
+    let default_only = [String::new()];
+    let models: &[String] = match req.models.as_deref() {
+        Some([]) | None if codex => &default_only,
+        Some(m) => m,
+        None => &cfg.models,
+    };
+    let fresh = |prompt: String| {
+        models.iter().map(move |m| AttemptPlan {
+            model: m.clone(),
+            resume: None,
+            prompt: prompt.clone(),
+        })
+    };
+    match &req.resume {
+        None => fresh(req.prompt.clone()).collect(),
+        Some(r) => {
+            let prior = format!(
+                "上一轮你的回答：\n{}\n\n用户接着问：\n{}",
+                r.prior_answer.trim(),
+                req.prompt.trim()
+            );
+            let resumed = (!codex).then(|| AttemptPlan {
+                model: r.model.clone(),
+                resume: Some(r.claude_session.clone()),
+                prompt: req.prompt.clone(),
+            });
+            resumed.into_iter().chain(fresh(prior)).collect()
+        }
+    }
+}
+
+/// What one attempt left behind, as far as the driver cares.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Attempted {
+    /// The run was ended on purpose: the user's stop, a budget or a violation.
+    pub killed: bool,
+    /// It wrote text or called a tool.
+    pub progressed: bool,
+    /// The harness's closing result: `Ok` when it answered, `Err(reason)` when it reported an error.
+    pub result: Option<Result<(), String>>,
+    /// Why the process produced nothing usable (it did not start, crashed, sent no result).
+    pub error: Option<String>,
+}
+
+/// Runs one [`AttemptPlan`] (one harness process, one model).
+pub trait AttemptRunner {
+    fn run(&mut self, plan: &AttemptPlan) -> impl Future<Output = Attempted> + Send;
+}
+
+/// Tries the plans in order. It stops after the first attempt that answered, progressed or was ended
+/// on purpose (a later model must not start over a half-written answer or after a violation), and goes
+/// on after one that produced nothing. Returns why the last failed attempt failed.
+pub async fn drive<R: AttemptRunner>(plans: &[AttemptPlan], runner: &mut R) -> String {
+    let mut last_err = String::from("no research model configured");
+    for p in plans {
+        let a = runner.run(p).await;
+        if let Some(e) = a.error {
+            last_err = e;
+        }
+        if a.killed || a.progressed {
+            break;
+        }
+        match a.result {
+            Some(Ok(())) => break,
+            Some(Err(e)) => last_err = e,
+            None => {}
+        }
+        tracing::warn!(model = %p.model, error = %last_err, "research attempt failed, trying the next");
+    }
+    last_err
+}
+
+/// The reason a closing `result` object gives for an error.
+fn result_error(r: &Value) -> String {
+    r["result"]
+        .as_str()
+        .or_else(|| r["subtype"].as_str())
+        .unwrap_or("harness error")
+        .to_string()
+}
+
 struct Ctx<'a> {
     processes: Arc<crate::processes::Processes>,
     cfg: &'a ResearchConfig,
+    req: &'a ResearchRequest,
     budget: Budget,
     scope: Scope,
     tx: mpsc::UnboundedSender<ResearchEvent>,
     /// The wall-time limit, when the setting names one.
     deadline: Option<Instant>,
     soft: Instant,
+    cwd: PathBuf,
+    run_dir: PathBuf,
+    add_dirs: Vec<PathBuf>,
+    files: crate::attach::Prepared,
+    codex: bool,
+    codex_exe: Option<PathBuf>,
+    /// The `sandbox-exec` profile, when the run is sandboxed.
+    profile: Option<PathBuf>,
 }
 
 async fn execute(
@@ -667,59 +776,24 @@ async fn execute(
         return failed_outcome(run_id, format!("research setup: {e}"));
     }
 
+    let plans = plan(&req, cfg);
     let ctx = Ctx {
         processes,
         cfg,
+        req: &req,
         budget,
         scope,
         tx,
         deadline: budget.hard.map(|h| t0 + h),
         soft: t0 + budget.soft,
+        profile: sandboxed.then(|| run_dir.join("sandbox.sb")),
+        cwd,
+        run_dir,
+        add_dirs,
+        files,
+        codex,
+        codex_exe,
     };
-    // (model, --resume session, prompt) in the order to try.
-    let mut attempts: Vec<(String, Option<String>, String)> = Vec::new();
-    let default_only = vec![String::new()];
-    let models = match req.models.as_ref() {
-        // Codex with no model named: its configured default
-        Some(m) if codex && m.is_empty() => &default_only,
-        None if codex => &default_only,
-        Some(m) => m,
-        None => &cfg.models,
-    };
-    match &req.resume {
-        // a Codex run cannot continue a Claude Code session: a fresh run with the earlier answer
-        Some(r) if codex => {
-            let fresh = format!(
-                "上一轮你的回答：\n{}\n\n用户接着问：\n{}",
-                r.prior_answer.trim(),
-                req.prompt.trim()
-            );
-            for m in models {
-                attempts.push((m.clone(), None, fresh.clone()));
-            }
-        }
-        Some(r) => {
-            attempts.push((
-                r.model.clone(),
-                Some(r.claude_session.clone()),
-                req.prompt.clone(),
-            ));
-            let fresh = format!(
-                "上一轮你的回答：\n{}\n\n用户接着问：\n{}",
-                r.prior_answer.trim(),
-                req.prompt.trim()
-            );
-            for m in models {
-                attempts.push((m.clone(), None, fresh.clone()));
-            }
-        }
-        None => {
-            for m in models {
-                attempts.push((m.clone(), None, req.prompt.clone()));
-            }
-        }
-    }
-
     let mut st = State {
         t0,
         text: String::new(),
@@ -735,79 +809,99 @@ async fn execute(
         result: None,
         kill: None,
     };
-    let mut last_err = String::from("no research model configured");
-    let mut soft_sent = false;
-    let profile = sandboxed.then(|| run_dir.join("sandbox.sb"));
-    for (model, resume, prompt) in &attempts {
-        st.model = Some(model.clone());
-        st.session = None;
-        st.result = None;
-        let prompt = format!("{prompt}{}", files.note);
-        // Claude Code takes the images as blocks of a stream-json message; Codex as `-i <file>`
-        let stdin = (!codex && !files.images.is_empty())
-            .then(|| crate::attach::stdin_message(&prompt, &files.images));
-        let inv = match &codex_exe {
-            Some(exe) if codex => command::codex_invocation(&command::CodexPlan {
-                executable: exe,
-                prompt: &prompt,
-                model,
-                cwd: &cwd,
-                run_dir: &run_dir,
-                mcp: req.mcp.as_ref().map(|m| (m.url.as_str(), m.token.as_str())),
-                effort: req.effort.as_deref(),
-                images: &files.image_files,
-            }),
-            _ => command::invocation(&CommandPlan {
-                executable: &cfg.executable,
-                prompt: &prompt,
-                stdin_input: stdin.is_some(),
-                model,
-                max_turns: budget.max_turns,
-                cwd: &cwd,
-                add_dirs: &add_dirs,
-                run_dir: &run_dir,
-                with_mcp: req.mcp.is_some(),
-                resume: resume.as_deref(),
-                sandbox_profile: profile.as_deref(),
-                effort: req.effort.as_deref(),
-            }),
-        };
-        let parse: fn(&str) -> Vec<StreamItem> = if codex { parse_codex_line } else { parse_line };
-        match attempt(
-            &ctx,
-            &inv,
-            stdin.as_deref(),
-            &mut st,
-            &mut stop,
-            &mut soft_sent,
-            parse,
-        )
-        .await
-        {
-            Ok(()) => {}
-            Err(e) => last_err = e,
-        }
-        if st.kill.is_some() || st.progressed() {
-            break;
-        }
-        match &st.result {
-            Some(r) if !r["is_error"].as_bool().unwrap_or(false) => break,
-            Some(r) => {
-                last_err = r["result"]
-                    .as_str()
-                    .or_else(|| r["subtype"].as_str())
-                    .unwrap_or("harness error")
-                    .to_string()
-            }
-            None => {}
-        }
-        tracing::warn!(run = %run_id, model = %model, error = %last_err, "research attempt failed, trying the next");
-    }
-    let _ = tokio::fs::remove_file(run_dir.join("mcp.json")).await;
-    if let Some(d) = &files.dir {
+    let mut local = Local {
+        ctx: &ctx,
+        st: &mut st,
+        stop: &mut stop,
+        soft_sent: false,
+    };
+    let last_err = drive(&plans, &mut local)
+        .instrument(tracing::info_span!("research", run = %run_id))
+        .await;
+    let _ = tokio::fs::remove_file(ctx.run_dir.join("mcp.json")).await;
+    if let Some(d) = &ctx.files.dir {
         let _ = tokio::fs::remove_dir_all(d).await;
     }
     finish(run_id, &req, st, last_err, sandboxed)
+}
+
+/// Runs the attempts in this process, all into one [`State`].
+struct Local<'a, 'c> {
+    ctx: &'a Ctx<'c>,
+    st: &'a mut State,
+    stop: &'a mut watch::Receiver<bool>,
+    /// The soft-limit notice is sent once per run, not per attempt.
+    soft_sent: bool,
+}
+
+impl AttemptRunner for Local<'_, '_> {
+    async fn run(&mut self, plan: &AttemptPlan) -> Attempted {
+        let error = run_attempt(self.ctx, plan, self.st, self.stop, &mut self.soft_sent)
+            .await
+            .err();
+        Attempted {
+            killed: self.st.kill.is_some(),
+            progressed: self.st.progressed(),
+            result: self.st.result.as_ref().map(|r| {
+                if r["is_error"].as_bool().unwrap_or(false) {
+                    Err(result_error(r))
+                } else {
+                    Ok(())
+                }
+            }),
+            error,
+        }
+    }
+}
+
+/// One attempt: the harness invocation for this plan's model, prompt and session, run to its end.
+async fn run_attempt(
+    ctx: &Ctx<'_>,
+    plan: &AttemptPlan,
+    st: &mut State,
+    stop: &mut watch::Receiver<bool>,
+    soft_sent: &mut bool,
+) -> Result<(), String> {
+    st.model = Some(plan.model.clone());
+    st.session = None;
+    st.result = None;
+    let prompt = format!("{}{}", plan.prompt, ctx.files.note);
+    let req = ctx.req;
+    // Claude Code takes the images as blocks of a stream-json message; Codex as `-i <file>`
+    let stdin = (!ctx.codex && !ctx.files.images.is_empty())
+        .then(|| crate::attach::stdin_message(&prompt, &ctx.files.images));
+    let inv = match &ctx.codex_exe {
+        Some(exe) if ctx.codex => command::codex_invocation(&command::CodexPlan {
+            executable: exe,
+            prompt: &prompt,
+            model: &plan.model,
+            cwd: &ctx.cwd,
+            run_dir: &ctx.run_dir,
+            mcp: req.mcp.as_ref().map(|m| (m.url.as_str(), m.token.as_str())),
+            effort: req.effort.as_deref(),
+            images: &ctx.files.image_files,
+        }),
+        _ => command::invocation(&CommandPlan {
+            executable: &ctx.cfg.executable,
+            prompt: &prompt,
+            stdin_input: stdin.is_some(),
+            model: &plan.model,
+            max_turns: ctx.budget.max_turns,
+            cwd: &ctx.cwd,
+            add_dirs: &ctx.add_dirs,
+            run_dir: &ctx.run_dir,
+            with_mcp: req.mcp.is_some(),
+            resume: plan.resume.as_deref(),
+            sandbox_profile: ctx.profile.as_deref(),
+            effort: req.effort.as_deref(),
+        }),
+    };
+    let parse: fn(&str) -> Vec<StreamItem> = if ctx.codex {
+        parse_codex_line
+    } else {
+        parse_line
+    };
+    attempt(ctx, &inv, stdin.as_deref(), st, stop, soft_sent, parse).await
 }
 
 async fn write_json(p: &Path, v: &Value) -> std::io::Result<()> {
@@ -1138,13 +1232,9 @@ fn finish(
         Some(Kill::Violation(v)) => RunStatus::Violated(v.clone()),
         None => match result {
             Some(r) if r["subtype"] == "error_max_turns" => RunStatus::Budget(BudgetHit::Turns),
-            Some(r) if r["is_error"].as_bool().unwrap_or(false) => RunStatus::Failed(
-                r["result"]
-                    .as_str()
-                    .or_else(|| r["subtype"].as_str())
-                    .unwrap_or("harness error")
-                    .to_string(),
-            ),
+            Some(r) if r["is_error"].as_bool().unwrap_or(false) => {
+                RunStatus::Failed(result_error(r))
+            }
             Some(_) => RunStatus::Done,
             None => RunStatus::Failed(last_err),
         },
@@ -1217,5 +1307,154 @@ mod tests {
         assert_eq!(b.hard, Some(Duration::from_secs(999)));
         assert_eq!((b.max_tools, b.max_turns), (Some(500), Some(10)));
         assert_eq!(b.idle, Duration::from_secs(30));
+    }
+
+    fn cfg() -> ResearchConfig {
+        let mut c = ResearchConfig::new("/bin/claude", "/tmp/scratch");
+        c.models = vec!["sonnet".into(), "opus".into()];
+        c
+    }
+
+    fn at(model: &str, resume: Option<&str>, prompt: &str) -> AttemptPlan {
+        AttemptPlan {
+            model: model.into(),
+            resume: resume.map(String::from),
+            prompt: prompt.into(),
+        }
+    }
+
+    fn follow_up(harness: &str) -> ResearchRequest {
+        let mut r = ResearchRequest::new("ws", "q", "再细一点");
+        r.harness = harness.into();
+        r.resume = Some(Resume {
+            claude_session: "sess_1".into(),
+            model: "opus".into(),
+            prior_answer: "  前面的答案 \n".into(),
+        });
+        r
+    }
+
+    const PRIOR: &str = "上一轮你的回答：\n前面的答案\n\n用户接着问：\n再细一点";
+
+    #[test]
+    fn plan_without_resume_tries_each_configured_model() {
+        let r = ResearchRequest::new("ws", "q", "prompt");
+        assert_eq!(
+            plan(&r, &cfg()),
+            vec![at("sonnet", None, "prompt"), at("opus", None, "prompt")]
+        );
+    }
+
+    #[test]
+    fn plan_resumes_on_claude_then_starts_fresh_with_the_prior_answer() {
+        assert_eq!(
+            plan(&follow_up("claude-code"), &cfg()),
+            vec![
+                at("opus", Some("sess_1"), "再细一点"),
+                at("sonnet", None, PRIOR),
+                at("opus", None, PRIOR),
+            ]
+        );
+    }
+
+    #[test]
+    fn plan_on_codex_never_resumes() {
+        // no model named: Codex's own default, fresh with the earlier answer only
+        assert_eq!(plan(&follow_up("codex"), &cfg()), vec![at("", None, PRIOR)]);
+        let mut r = follow_up("codex");
+        r.models = Some(Vec::new());
+        assert_eq!(plan(&r, &cfg()), vec![at("", None, PRIOR)]);
+        r.models = Some(vec!["gpt".into()]);
+        assert_eq!(plan(&r, &cfg()), vec![at("gpt", None, PRIOR)]);
+    }
+
+    #[test]
+    fn plan_prefers_the_requests_models_over_the_configured_ones() {
+        let mut r = ResearchRequest::new("ws", "q", "prompt");
+        r.models = Some(vec!["haiku".into()]);
+        assert_eq!(plan(&r, &cfg()), vec![at("haiku", None, "prompt")]);
+        // an empty list on Claude Code is no model at all (the run fails as unconfigured)
+        r.models = Some(Vec::new());
+        assert!(plan(&r, &cfg()).is_empty());
+    }
+
+    /// Plays one scripted [`Attempted`] per attempt and records the models it was asked to run.
+    struct Scripted {
+        script: std::collections::VecDeque<Attempted>,
+        ran: Vec<String>,
+    }
+
+    impl AttemptRunner for Scripted {
+        async fn run(&mut self, plan: &AttemptPlan) -> Attempted {
+            self.ran.push(plan.model.clone());
+            self.script.pop_front().unwrap_or_default()
+        }
+    }
+
+    async fn drive_script(script: Vec<Attempted>) -> (Vec<String>, String) {
+        let plans = vec![at("a", None, "p"), at("b", None, "p"), at("c", None, "p")];
+        let mut s = Scripted {
+            script: script.into(),
+            ran: Vec::new(),
+        };
+        let err = drive(&plans, &mut s).await;
+        (s.ran, err)
+    }
+
+    fn failed(e: &str) -> Attempted {
+        Attempted {
+            error: Some(e.into()),
+            ..Attempted::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn driver_stops_after_progress_a_kill_or_an_answer() {
+        let progressed = Attempted {
+            progressed: true,
+            error: Some("crashed midway".into()),
+            ..Attempted::default()
+        };
+        let (ran, _) = drive_script(vec![failed("busy"), progressed]).await;
+        assert_eq!(ran, ["a", "b"]);
+        // a violation (or the user's stop, or a budget) ends the run on the spot
+        let killed = Attempted {
+            killed: true,
+            ..Attempted::default()
+        };
+        let (ran, _) = drive_script(vec![killed]).await;
+        assert_eq!(ran, ["a"]);
+        let answered = Attempted {
+            result: Some(Ok(())),
+            ..Attempted::default()
+        };
+        let (ran, _) = drive_script(vec![failed("busy"), answered]).await;
+        assert_eq!(ran, ["a", "b"]);
+    }
+
+    #[tokio::test]
+    async fn driver_goes_on_after_an_attempt_that_produced_nothing() {
+        let harness_error = Attempted {
+            result: Some(Err("overloaded".into())),
+            ..Attempted::default()
+        };
+        let (ran, err) = drive_script(vec![failed("spawn x"), harness_error, failed("dead")]).await;
+        assert_eq!(ran, ["a", "b", "c"]);
+        assert_eq!(err, "dead");
+        // the harness's own reason wins over the process error of the same attempt
+        let both = Attempted {
+            result: Some(Err("rate limited".into())),
+            error: Some("exit 1".into()),
+            ..Attempted::default()
+        };
+        let (_, err) = drive_script(vec![failed("x"), failed("y"), both]).await;
+        assert_eq!(err, "rate limited");
+        // nothing to try: the run fails as unconfigured
+        let mut none = Scripted {
+            script: Default::default(),
+            ran: Vec::new(),
+        };
+        assert_eq!(drive(&[], &mut none).await, "no research model configured");
+        assert!(none.ran.is_empty());
     }
 }
