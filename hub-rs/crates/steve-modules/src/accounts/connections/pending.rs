@@ -1,6 +1,6 @@
-//! Server-side state of flows in progress (§10 rule 6): OAuth `state` values with their PKCE verifier,
+//! Server-side state of flows in progress: OAuth `state` values with their PKCE verifier,
 //! single use, 10 minutes, swept on every access; only states this Hub issued are accepted. The same
-//! [`PendingStates`] serves the GitHub App manifest flow (github.md §1.1 “同 OAuth state 规则”).
+//! [`PendingStates`] serves the GitHub App manifest flow.
 
 use std::collections::HashMap;
 use std::sync::Mutex;

@@ -1,4 +1,4 @@
-//! Extracting candidate memories with the model gateway (knowledge.md §5.1).
+//! Extracting candidate memories with the model gateway.
 //!
 //! One call per origin (an item completion, a day of chat, a mail thread): the text, the memories it
 //! resembles (confirmed and still pending, so the model can say “duplicate of” or “replaces”) and the
@@ -27,7 +27,7 @@ use crate::candidates::{self, MAX_PER_ORIGIN, NewCandidate, Origin, OriginKind};
 use crate::retrieve::{self, Purpose, Query};
 use crate::state::{Knowledge, redact};
 
-/// Model time limit (smart tier, §5.1).
+/// Model time limit (smart tier).
 pub const TIMEOUT: Duration = Duration::from_secs(90);
 /// Source text given to the model.
 pub const MAX_INPUT: usize = 12_000;
@@ -170,8 +170,8 @@ pub struct Task<'a> {
     pub events: bool,
 }
 
-/// The extraction prompt. It sorts the text into the four kinds of record first (knowledge.md §5.1,
-/// ST-41): item records and conversation records are kept already and are never proposed; only
+/// The extraction prompt. It sorts the text into the four kinds of record first (ST-41):
+/// item records and conversation records are kept already and are never proposed; only
 /// long-term memories (preference, rule) and reusable knowledge (fact) are, and none is the usual answer.
 pub fn prompt(label: &str, text: &str, similar: &[Similar], names: &Names, task: Task) -> String {
     let names = names.prompt_lines();
@@ -437,7 +437,7 @@ pub fn check(r: &Raw, source: &str, task: Task, known: &[String]) -> Result<Vec<
     Ok(quotes)
 }
 
-/// The server's rules over the model's items (§5.1, ST-41): [`check`] first; then `about` names
+/// The server's rules over the model's items (ST-41): [`check`] first; then `about` names
 /// resolved exactly, unknown ones dropped — and a candidate whose named objects are all unknown is
 /// dropped (it would be about the wrong thing, or nothing); the stricter of the model's and the
 /// origin's level; `conflicts` kept only if `valid_conflict` accepts it; near-duplicates within the

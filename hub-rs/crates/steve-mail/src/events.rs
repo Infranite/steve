@@ -1,4 +1,4 @@
-//! Mail → signal events (email.md §3.5 step 6), through [`MailEvents`]: the integrator implements it
+//! Mail → signal events, through [`MailEvents`]: the integrator implements it
 //! on steve-flow (`ingest` for live mail; a direct `ext_events` row with a fixed outcome for mail
 //! that must not run flows). [`RecordingEvents`] is the fake for tests.
 //!
@@ -166,7 +166,7 @@ impl MailEvents for RecordingEvents {
     }
 }
 
-/// The type of an incoming message and the other types that hold (§3.5 step 6).
+/// The type of an incoming message and the other types that hold.
 pub fn classify(reply_to_mine: bool, vip: bool, attachment: bool) -> (String, Vec<String>) {
     let mut held = Vec::new();
     if reply_to_mine {

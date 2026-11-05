@@ -1,4 +1,4 @@
-//! The price table (setting `stats.prices`, stats.md §4.1): dollars per million tokens. Costs are always
+//! The price table (setting `stats.prices`): dollars per million tokens. Costs are always
 //! estimates computed at query time; nothing here is a bill.
 //!
 //! A model is priced by [`PriceBook::quote`]: the table first (its rows, or the built-in defaults, are

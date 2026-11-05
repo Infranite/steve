@@ -1,4 +1,4 @@
-//! Retrieval evaluation (knowledge.md §3.5): a fixed corpus, queries with expected sources,
+//! Retrieval evaluation: a fixed corpus, queries with expected sources,
 //! and recall@k / MRR. The corpus lives in `tests/eval/`; this module loads it with the same
 //! extraction and chunking the index uses, and scores any search function, so the FTS baseline
 //! here (K0) and the full `retrieve` (K1) and vector variants (K6) are measured the same way.
@@ -47,7 +47,7 @@ const DIRS: [(&str, &str); 3] = [("notes", "notes"), ("wiki", "folder"), ("items
 /// Loads `<dir>/{notes,wiki,items}/*.md` and `<dir>/mems.jsonl`.
 ///
 /// Titles come from the front matter, else the first `# ` heading, else the file name.
-/// A memory becomes one chunk “关于对象：正文”, as the `mems` source indexes it (§2.1).
+/// A memory becomes one chunk “关于对象：正文”, as the `mems` source indexes it.
 pub fn load_corpus(dir: &Path) -> std::io::Result<Vec<Doc>> {
     let mut docs = Vec::new();
     for (sub, kind) in DIRS {

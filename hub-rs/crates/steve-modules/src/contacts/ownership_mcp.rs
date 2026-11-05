@@ -1,4 +1,4 @@
-//! The ownership MCP tools (ownership.md §5): `steve_whois`, `steve_person_holdings` and
+//! The ownership MCP tools: `steve_whois`, `steve_person_holdings` and
 //! `steve_steward_propose`, plus the ownership lines of `steve_contacts_find`. Defined and routed in
 //! [`super::mcp`]; the texts follow the other contacts tools (English frame, names as they are).
 

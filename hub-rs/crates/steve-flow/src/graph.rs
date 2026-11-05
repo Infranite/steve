@@ -1,4 +1,4 @@
-//! The flow graph (signals-automation.md §3.1): its shape, validation, and the edge rules the engine
+//! The flow graph: its shape, validation, and the edge rules the engine
 //! walks by. The JSON is the canvas one-to-one; nothing here touches the database.
 
 use std::collections::{HashMap, HashSet};

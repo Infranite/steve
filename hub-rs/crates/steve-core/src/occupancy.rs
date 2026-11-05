@@ -1,4 +1,4 @@
-//! What runs and what holds new turns, as the Hub sees it (docs/hub-node-client.md, N0b step B1).
+//! What runs and what holds new turns, as the Hub sees it (N0b step B1).
 //!
 //! The Hub decides what runs, so whether a session is busy and whether new turns wait is the Hub's own
 //! state, never a question to the place that executes. Every reader in the core asks here. While the

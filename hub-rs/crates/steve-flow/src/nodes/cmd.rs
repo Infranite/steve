@@ -1,5 +1,5 @@
-//! `cmd`: `{command, project_id, timeout_s ≤ 600}` runs a shell command in the project's directory
-//! (signals-automation.md §3.2). Effectful: every run is approved by you (the engine's gate) unless
+//! `cmd`: `{command, project_id, timeout_s ≤ 600}` runs a shell command in the project's directory.
+//! Effectful: every run is approved by you (the engine's gate) unless
 //! the flow holds a `grants(subject_type='flow', capability='cmd.run', resource_type='project',
 //! resource_id=<project_id> | '*')`. Restarts never replay it; dry runs skip it.
 //!

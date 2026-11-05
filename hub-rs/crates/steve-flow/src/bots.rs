@@ -1,4 +1,4 @@
-//! Flows and Bots (signals-automation.md §6): what a Bot's “定时与流程” tab lists
+//! Flows and Bots: what a Bot's “定时与流程” tab lists
 //! (`GET /bots/:id/flows`) and what happens to flows when a Bot is deleted ([`on_bot_deleted`]).
 //!
 //! A flow uses a Bot through the `bot` of an action (`item.create`, `report`), the `bot_id` of a
@@ -167,7 +167,7 @@ pub fn note(c: &Connection, bot: &str, heir: &str) -> FlowResult<String> {
     ))
 }
 
-/// The Bot `bot` was deleted and `heir` takes over in `ws` (§6). In one transaction:
+/// The Bot `bot` was deleted and `heir` takes over in `ws`. In one transaction:
 /// - every flow (not deleted, enabled or not) whose graph names `bot` gets the heir instead, as a
 ///   new version by `steve` with the note “<Bot> 已删除，交给 <heir>”;
 /// - every schedule of `bot` is handed to `heir` (a new version, same note);

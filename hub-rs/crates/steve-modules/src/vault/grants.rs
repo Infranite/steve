@@ -1,4 +1,4 @@
-//! Grants (accounts-vault.md §4.3): a bot may use one `normal` or `sensitive` item without asking,
+//! Grants: a bot may use one `normal` or `sensitive` item without asking,
 //! within one scope, for 1, 8 or 24 hours. Scope is a project (`{"project_id"}`), the items without a
 //! project (`{"scratch": true}`), or a site (`{"site"}`, kept for browser filling later; it never
 //! covers a command). `high` items and bank cards are never grantable.
@@ -14,7 +14,7 @@ use super::use_repo as urepo;
 use super::{Vault, VaultError, VaultResult};
 use crate::ApiError;
 
-/// `400` for a grant on a `high` item or a bank card (§4.3), verbatim.
+/// `400` for a grant on a `high` item or a bank card, verbatim.
 pub const GRANT_HIGH: &str = "高密条目不允许授权，每次都要你批准";
 /// The allowed durations; 24 hours is the cap.
 pub const HOURS: [i64; 3] = [1, 8, 24];
@@ -125,7 +125,7 @@ pub(crate) fn covering(
 }
 
 impl Vault {
-    /// `POST /vault/items/:id/grants` (§4.3, §5.2).
+    /// `POST /vault/items/:id/grants`.
     pub fn create_grant(
         &self,
         ws: &str,

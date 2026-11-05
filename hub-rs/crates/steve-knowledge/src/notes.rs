@@ -1,4 +1,4 @@
-//! Notes (knowledge.md §2.1 `notes`): Markdown written in the knowledge page, stored in
+//! Notes: Markdown written in the knowledge page, stored in
 //! `kb_docs.body` and indexed in the same transaction as the save, so a saved note is searchable
 //! immediately.
 

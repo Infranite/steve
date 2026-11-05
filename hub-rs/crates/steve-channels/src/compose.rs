@@ -1,4 +1,4 @@
-//! Reply generation (channels-personas.md §2.8, knowledge.md §4.1, slice C4): the prompt in its
+//! Reply generation: the prompt in its
 //! fixed seven layers — the more specific further down, the safety rules on top and never
 //! overridden — then the last 20 messages of the space and the message itself. One call on the
 //! model gateway's smart tier (the Bot's own `model` when it has one and a [`PinnedModel`] is
@@ -39,7 +39,7 @@ use crate::respond::Plan;
 use crate::spaces::{self, Mode};
 use crate::{ChannelResult, Channels, bindings, messages};
 
-/// Messages of the space given as history (§2.8).
+/// Messages of the space given as history.
 pub const HISTORY: usize = 20;
 /// … when the model asks for more context (`need_context`), once.
 pub const HISTORY_WIDE: usize = 80;

@@ -1,6 +1,6 @@
 //! GitHub: connections, repositories, pull requests and panels
 //!
-//! Spec: steve-rs-plan/modules/github.md. Slices so far:
+//! Slices so far:
 //! - G0: [`fake`] (feature `fake`), [`signature`];
 //! - G1: the API client ([`api`]: headers, ETag, rate limits, 401 → re-mint once → `reauth`), App
 //!   authentication ([`auth`]: JWT, installation tokens), the two connection adapters

@@ -1,4 +1,4 @@
-//! The flow template “邮件分诊” (email.md §4, prototype r1), installed enabled when the first mailbox
+//! The flow template “邮件分诊” (prototype r1), installed enabled when the first mailbox
 //! of a workspace connects (`origin=template:mail-triage`).
 //!
 //! ```text

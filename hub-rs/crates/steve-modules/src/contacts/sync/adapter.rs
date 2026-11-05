@@ -1,5 +1,5 @@
 //! What a directory (an office IM's address book) hands the sync: one full snapshot of the departments
-//! and people the connection can see (contacts.md §7). Feishu's implementation lives with the channels
+//! and people the connection can see. Feishu's implementation lives with the channels
 //! module (`feishu::directory`, slice C7/F5); [`FakeDirectory`] is the test double.
 
 use std::sync::Mutex;
@@ -73,7 +73,7 @@ pub trait DirectoryAdapter: Send + Sync {
     /// The accounts system of [`DirUser::id`] (`feishu`).
     fn system(&self) -> &str;
 
-    /// Reads every visible department and person. Read-only: the sync never writes back (§8).
+    /// Reads every visible department and person. Read-only: the sync never writes back.
     async fn snapshot(&self) -> Result<Snapshot, DirectoryError>;
 
     /// The visibility range the last snapshot read, when the directory tells.

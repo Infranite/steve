@@ -1,4 +1,4 @@
-//! `/api/stats/*` (modules/stats.md §4): the summary, trends, breakdowns, the per-item table and
+//! `/api/stats/*`: the summary, trends, breakdowns, the per-item table and
 //! drill-down, a session's totals, the price table, the Models.dev price sync and time zone, and the rebuild. Reads go to the
 //! store's read pool; summaries are cached per query until the next statistics change (at most 5 s).
 
@@ -210,7 +210,7 @@ fn key(ws: &str, what: &str, p: &Params) -> String {
     format!("{ws}\u{1}{what}\u{1}{sorted:?}")
 }
 
-/// A summary as JSON with its range in `range` (stats.md §4.2).
+/// A summary as JSON with its range in `range`.
 fn summary_json(c: &Connection, q: &StatsQuery) -> Result<Value, ApiError> {
     let s = metrics::summary(c, q)
         .map_err(serr)?

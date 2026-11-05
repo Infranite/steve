@@ -1,4 +1,4 @@
-//! C4 acceptance (channels-personas.md §11): with a scripted gateway, the reply prompt has the seven
+//! C4 acceptance: with a scripted gateway, the reply prompt has the seven
 //! layers in order (safety rules on top), a `never` attribute is not in it, `reveal.ai=false` leaves
 //! no “我是 AI”; generated replies become drafts with their approval (nothing is sent); the
 //! `create_item` act creates the item, links it, and answers its number; `reply_as` and

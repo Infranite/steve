@@ -1,6 +1,6 @@
-//! SQL of the contacts module (contacts.md §1.2): parties, organization domains, attribute definitions
+//! SQL of the contacts module: parties, organization domains, attribute definitions
 //! and values, and the reads the API shapes need. Every list of parties goes through a [`Viewer`]
-//! (§8: visibility is filtered here, never in a handler). Writes take a [`Tx`]; events are published by
+//! (visibility is filtered here, never in a handler). Writes take a [`Tx`]; events are published by
 //! the service, once per request.
 
 use rusqlite::types::Value as Sql;
@@ -144,7 +144,7 @@ impl NewParty {
     }
 }
 
-/// Id prefix per party type (§0.3).
+/// Id prefix per party type.
 fn prefix(kind: &str) -> &'static str {
     match kind {
         "org" => "org",
@@ -764,7 +764,7 @@ pub fn value_delete(tx: &Tx, id: &str) -> Result<bool> {
     Ok(tx.run("DELETE FROM attr_values WHERE id = ?", [id])? > 0)
 }
 
-/// Physically deletes every value of a party (deleting a contact, §8). Returns how many.
+/// Physically deletes every value of a party (deleting a contact). Returns how many.
 pub fn values_delete_of(tx: &Tx, ws: &str, party: &str) -> Result<usize> {
     Ok(tx.run(
         "DELETE FROM attr_values WHERE workspace_id = ? AND party_id = ?",

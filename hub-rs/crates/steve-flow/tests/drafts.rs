@@ -1,4 +1,4 @@
-//! Conversational configuration (signals-automation.md §8, schedules.md §10): schedules, event
+//! Conversational configuration: schedules, event
 //! sources and flows, each with a fixed model output: preview lines, apply and undo.
 
 use std::sync::Arc;

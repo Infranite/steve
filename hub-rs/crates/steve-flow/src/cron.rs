@@ -1,6 +1,6 @@
 //! 5-field cron: validation, next run in a time zone, minimum interval, Chinese description.
 //!
-//! schedules.md §3.1–§3.2. We validate the syntax ourselves (so the error names the offending
+//! We validate the syntax ourselves (so the error names the offending
 //! fragment and we only accept the subset the spec allows) and let `croner` walk the wall clock.
 //! The wall-clock result is then mapped to an instant with our own DST policy, because croner's
 //! policy depends on whether a pattern is "fixed time" and the spec wants one rule for all:
@@ -247,7 +247,7 @@ impl CronExpr {
         Ok(())
     }
 
-    /// Chinese description for the UI (schedules.md §3.3), or `按 cron「…」` when the
+    /// Chinese description for the UI, or `按 cron「…」` when the
     /// combination has no short wording.
     pub fn describe(&self) -> String {
         describe_shapes(&self.shapes).unwrap_or_else(|| format!("按 cron「{}」", self.expr))

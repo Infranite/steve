@@ -1,4 +1,4 @@
-//! Signals = events + their triage result (signals-automation.md §2.3, §4.1 `Signal`, §4.2
+//! Signals = events + their triage result (§4.2
 //! `/signals`, §7 SSE): the list with its stats, one signal with its runs, the original, the outcome
 //! rule over several runs, and the coalesced `signal` SSE event.
 
@@ -24,7 +24,7 @@ pub const RAW_GONE: &str = "原文已过保留期限，只剩处理结果和摘�
 /// SSE `signal` events of one workspace within this window collapse into the last one.
 pub const COALESCE: Duration = Duration::from_millis(500);
 
-/// Outcomes from heaviest to lightest (§2.3); `failed` only when nothing else came out.
+/// Outcomes from heaviest to lightest; `failed` only when nothing else came out.
 pub const OUTCOME_ORDER: [&str; 6] = ["need", "item", "linked", "digest", "ignored", "recorded"];
 
 /// Chinese name of a source code, for `q` and item sources (“邮件”).
@@ -77,7 +77,7 @@ impl SignalDebounce {
     }
 }
 
-/// Recomputes an event's triage result from its (non-dry) runs (§2.3). Called after a run ends (the
+/// Recomputes an event's triage result from its (non-dry) runs. Called after a run ends (the
 /// executor, S2's engine after waits). Returns the event's workspace when it changed.
 pub fn settle(tx: &Tx, event_id: &str) -> FlowResult<Option<String>> {
     let ev = tx

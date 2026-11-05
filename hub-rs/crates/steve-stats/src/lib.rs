@@ -1,4 +1,4 @@
-//! Statistics (modules/stats.md): token usage, estimated spend and how work flows through items.
+//! Statistics: token usage, estimated spend and how work flows through items.
 //!
 //! The detail rows and the daily cube are written by `steve_store::Stats` (migration 15); this crate holds
 //! the pure parts every writer and reader shares: how adapters' token figures are brought to one
@@ -6,7 +6,7 @@
 //! from Models.dev ([`catalog`]), and which local day a
 //! timestamp belongs to ([`day`]). On top of the stored rows: the per-item facts ([`items`]), their
 //! refresh and the cube rebuild ([`refresh`]), the one-off backfill from the older tables ([`backfill`])
-//! and every metric of stats.md §3 ([`metrics`]).
+//! and every metric ([`metrics`]).
 //!
 //! Hub wiring (slice ST5): at boot `backfill::spawn(store)` and `tokio::spawn(Refresher::new().run(store))`;
 //! `POST /api/stats/rebuild` calls `refresh::rebuild`; the REST reads call `metrics::summary` /

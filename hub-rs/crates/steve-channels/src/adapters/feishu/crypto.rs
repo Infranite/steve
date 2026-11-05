@@ -1,4 +1,4 @@
-//! Event-callback crypto for Feishu "send events to developer server" (feishu.md §3.1 steps 2–3).
+//! Event-callback crypto for Feishu "send events to developer server".
 //!
 //! With an Encrypt Key configured, every callback body is `{"encrypt":"<base64>"}` and carries
 //! `X-Lark-Request-Timestamp`, `X-Lark-Request-Nonce`, `X-Lark-Signature` headers. The signature
@@ -16,7 +16,7 @@ pub const HEADER_NONCE: &str = "X-Lark-Request-Nonce";
 /// Header carrying `hex(sha256(timestamp + nonce + encrypt_key + body))`.
 pub const HEADER_SIGNATURE: &str = "X-Lark-Signature";
 
-/// Requests signed further than this from our clock are refused (feishu.md §3.1 step 2).
+/// Requests signed further than this from our clock are refused.
 pub const MAX_CLOCK_SKEW_SECS: i64 = 10 * 60;
 
 type Aes256CbcDec = cbc::Decryptor<aes::Aes256>;

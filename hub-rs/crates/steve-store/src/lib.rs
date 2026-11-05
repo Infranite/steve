@@ -9,7 +9,7 @@
 //! WAL lets the pooled readers serve `/api/state` and event paging in parallel without waiting on it.
 //! A write followed by a read in the same operation runs on the write connection, so it sees its own data.
 //!
-//! The API is synchronous like better-sqlite3 (see rust-hub-plan.md: "同步调用"); calls take microseconds,
+//! The API is synchronous like better-sqlite3; calls take microseconds,
 //! async callers can run them inline or in `spawn_blocking` for the big reads.
 
 pub mod base;

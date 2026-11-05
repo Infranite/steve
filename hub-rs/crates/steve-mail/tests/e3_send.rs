@@ -1,4 +1,4 @@
-//! E3 acceptance (email.md §14): no decision → `execute` refuses and writes `mail.send.blocked`;
+//! E3 acceptance: no decision → `execute` refuses and writes `mail.send.blocked`;
 //! undo within the 10 s delay → nothing sent; content edited before approval → 409; `reply_all`
 //! drops my addresses; recipients in the model output are ignored; a vault secret in the body is
 //! blocked; the MIME the fake SMTP receives carries the right `In-Reply-To`/`References`; a provider

@@ -1,5 +1,4 @@
-//! Conversational configuration (signals-automation.md §8). This file: schedules (schedules.md
-//! §10), the [`source`] and [`flow`] targets are in their own files. The
+//! Conversational configuration. This file: schedules; the [`source`] and [`flow`] targets are in their own files. The
 //! `schedule` draft target (`schedule:<id>` and `schedule:new`) and the `schedule.create` /
 //! `schedule.patch` operations. Times are resolved by the rules of §3.3 while planning; a phrase
 //! they do not understand is not put into the draft but shown as “（没看懂时间：<原话>）”.
@@ -463,7 +462,7 @@ fn create_lines(
 ) -> (Vec<Field>, Vec<Change>) {
     let mut fields = Vec::new();
     let mut lines = Vec::new();
-    // `cron` wins over `when` when both are there (§8)
+    // `cron` wins over `when` when both are there
     let time_key = if op.get("cron").is_some() {
         "cron"
     } else {

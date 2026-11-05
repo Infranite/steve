@@ -1,4 +1,4 @@
-//! Lexical baseline on the evaluation corpus (knowledge.md §3.5): `seg` bigrams in the spec's
+//! Lexical baseline on the evaluation corpus: `seg` bigrams in the spec's
 //! `kb_fts` table, `fts_query`, `bm25(kb_fts, 1.0, 2.0)`, best chunk per document. No anchor,
 //! memory or recency weighting — that is `retrieve` (K1), which must score at least this.
 //!
@@ -71,7 +71,7 @@ fn recall_on_eval_corpus() {
             .map(|id| owner[&id.unwrap()].clone())
             .collect()
     };
-    // Strict (§3.2) first; when it yields fewer than 5 documents, append a relaxed pass
+    // Strict first; when it yields fewer than 5 documents, append a relaxed pass
     // (bigrams without phrases) so short queries with a typo still find something.
     let mut ranked: HashMap<String, (Vec<String>, Vec<String>)> = HashMap::new();
     for c in &cases {

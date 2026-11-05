@@ -1,4 +1,4 @@
-//! [`MailEvents`] over steve-flow's `ingest` (email.md §3.5 step 6): the bridge the integrator would
+//! [`MailEvents`] over steve-flow's `ingest`: the bridge the integrator would
 //! otherwise write. [`Mail`](crate::Mail) is built before the flow module (whose mail actions hold
 //! it), so the bridge is bound afterwards and holds the module weakly (no reference cycle).
 //!

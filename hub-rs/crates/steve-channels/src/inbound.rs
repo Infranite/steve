@@ -1,4 +1,4 @@
-//! The inbound pipeline `on_inbound(ws, conn, msg)`, steps 1–3 of channels-personas.md §2.3:
+//! The inbound pipeline `on_inbound(ws, conn, msg)`, steps 1–3:
 //!
 //! 1. locate or create the space (a new one gets `space_settings(configured=0)`, its members, and —
 //!    for a group a bot account just found itself in — the “新群” decision); `identify` the sender
@@ -14,7 +14,7 @@
 //! What comes back ([`Inbound::next`]) tells steps 4–7 whether to evaluate the rules;
 //! [`Channels::on_message`] runs them (C3):
 //!
-//! 4. your own account's trigger words (§2.7) come first (handed to the responder, C6);
+//! 4. your own account's trigger words come first (handed to the responder, C6);
 //! 5. a space with a live `flow_id` belongs to that flow: its `message` trigger took the event in
 //!    step 2, so nothing more happens here;
 //! 6. otherwise the space's rules (or the account's) decide ([`crate::rules`]); muted, everything but
@@ -153,7 +153,7 @@ pub(crate) fn identify_handle(
 }
 
 /// [`identify_handle`] for a sender or member that may be a bot: a new bot becomes a bot party with
-/// a `bot` account, not an unconfirmed person (ownership.md §3).
+/// a `bot` account, not an unconfirmed person.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn identify_handle_as(
     tx: &Tx,
@@ -923,7 +923,7 @@ fn live_flow(c: &rusqlite::Connection, ws: &str, id: &str) -> ChannelResult<bool
 }
 
 impl Channels {
-    /// The whole inbound pipeline (§2.3): steps 1–3 ([`Channels::on_inbound`]), then 4–7. A
+    /// The whole inbound pipeline: steps 1–3 ([`Channels::on_inbound`]), then 4–7. A
     /// duplicate (also one seen through the other connection) stops after step 2.
     pub async fn on_message(
         &self,
@@ -941,7 +941,7 @@ impl Channels {
     }
 
     /// Steps 4–7 for a message steps 1–3 stored. Sends nothing. The space's voice acts
-    /// (domain-model.md §1.4, [`crate::arbiter`]): whichever identity received the message, only the
+    /// ([`crate::arbiter`]): whichever identity received the message, only the
     /// voice's mode and rules count and the voice answers; your `/bot` goes to the voice, or, with no
     /// voice, to your web conversation. Precedence 屏蔽 (stopped in step 1) > `/bot` > 不提醒 > role
     /// rules.

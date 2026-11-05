@@ -1,7 +1,7 @@
-//! PRs and items (github.md §3.2, §2): which item a PR belongs to, and what linking writes.
+//! PRs and items: which item a PR belongs to, and what linking writes.
 //!
 //! Order, for a new PR or one that is not linked yet:
-//! 1. a PR Steve opened (§4) is that item's (`steve`), set by [`crate::accept`];
+//! 1. a PR Steve opened is that item's (`steve`), set by [`crate::accept`];
 //! 2. `head_ref` is an item's `branch` and the item is in the repo's project (`branch`);
 //! 3. the title or body names an existing item of the workspace, `\b<prefix>-\d+\b` (`ref`);
 //! 4. you link it by hand (`manual`), which overrides the rest; unlinking by hand sticks too

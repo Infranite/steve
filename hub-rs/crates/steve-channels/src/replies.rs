@@ -1,11 +1,11 @@
-//! [`Replies`]: C4's [`Responder`] (channels-personas.md §2.5). `reply` / `draft` generate the
+//! [`Replies`]: C4's [`Responder`]. `reply` / `draft` generate the
 //! text ([`crate::compose`]); `create_item` creates the item through steve-core (the flow module's
 //! `Core` port), links it to the message and its sender, and answers “收到，已记为 <编号>。”.
 //! Everything said goes to the [`Outbound`] (C6's [`crate::outbound::Outbox`]; [`DraftOnly`] by
 //! default), so this module never sends by itself; it says what would let a message out
 //! ([`Auth`]) and the outbound checks it.
 //!
-//! Trigger words (§2.7, C6): your own message starting with one of your words, where they work →
+//! Trigger words: your own message starting with one of your words, where they work →
 //! the rest is the instruction; the reply is generated with the space's last 20 messages and goes
 //! out as you (`on_behalf=proxy`, “（由 Steve 代发）” when marked), unless the model says it
 //! needs approval (an outward promise, money, deleting) — then it is a draft.
@@ -25,7 +25,7 @@ use crate::rules::{Act, ItemMode};
 use crate::spaces::{self, Mode};
 use crate::{ChannelResult, Channels, bindings, messages, personas};
 
-/// Context lines put into an item's goal (§2.5).
+/// Context lines put into an item's goal.
 pub const ITEM_CONTEXT: usize = 10;
 /// An item's title, in characters.
 const TITLE_MAX: usize = 80;
@@ -259,7 +259,7 @@ impl Replies {
 }
 
 impl Replies {
-    /// Your trigger words (§2.7): only on your own account (C3 hands them on only for your own
+    /// Your trigger words: only on your own account (C3 hands them on only for your own
     /// messages there).
     async fn trigger(
         &self,
@@ -268,7 +268,7 @@ impl Replies {
         instruction: &str,
     ) -> ChannelResult<Option<Acted>> {
         if plan.mode != Mode::Own {
-            // your `/bot` where a bot speaks (domain-model §1.6): the bot answers it, as itself
+            // your `/bot` where a bot speaks: the bot answers it, as itself
             return self.command_as_bot(ch, plan, instruction).await;
         }
         let opts = ComposeOpts {

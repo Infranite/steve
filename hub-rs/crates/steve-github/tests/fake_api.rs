@@ -1,4 +1,4 @@
-//! Runs every endpoint of the fake (github.md §11) with plain reqwest, and
+//! Runs every endpoint of the fake with plain reqwest, and
 //! checks webhook signatures against an independent HMAC implementation.
 
 use std::process::Command;
@@ -30,7 +30,7 @@ fn jwt_with(claims: Value) -> String {
     .unwrap()
 }
 
-/// What github.md §1.1 step 4 prescribes: iat = now-60, exp = now+540.
+/// What GitHub prescribes for an App JWT: iat = now-60, exp = now+540.
 fn app_jwt() -> String {
     jwt_with(json!({"iat": now() - 60, "exp": now() + 540, "iss": defaults::APP_ID}))
 }

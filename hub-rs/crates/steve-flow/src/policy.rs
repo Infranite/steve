@@ -1,4 +1,4 @@
-//! Missed-run and overlap rules for time triggers (schedules.md §4.2–§4.3), as pure functions.
+//! Missed-run and overlap rules for time triggers, as pure functions.
 //!
 //! The scheduler (S7) claims a trigger, asks [`plan_claim`] what to do with it, and writes the
 //! `flow_runs` row and the new `next_at` in the same transaction.

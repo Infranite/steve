@@ -1,9 +1,9 @@
-//! Contacts, organizations and teams (slices P1, P2, P3 of steve-rs-plan/modules/contacts.md): “我”, contacts,
+//! Contacts, organizations and teams (slices P1, P2, P3): “我”, contacts,
 //! the workspace's own organization, organizations with domains, jobs (`works_at` links), attribute
 //! definitions and values with disclosure levels, virtual and org-chart teams ([`teams`]); P3: memories
 //! about parties ([`memory`]), people on items, `@` and the guess from names ([`item_people`]), the `@`
 //! menu and ⌘K ([`mentions`]), the agents' MCP tools ([`mcp`]) and contact cards for prompts ([`cards`]);
-//! ownership (归属与负责人, ownership.md): [`stewards`] and its routes [`stewards_api`].
+//! ownership (归属与负责人): [`stewards`] and its routes [`stewards_api`].
 //!
 //! The build plan names the crate `steve-people`; P1 and P2 landed here in steve-modules, so P3 lives next
 //! to them.
@@ -79,7 +79,7 @@ pub trait PartyHooks: Send + Sync {
     }
 }
 
-/// Account handles, provided by the accounts module (accounts-vault.md). Without it, `q` matches only
+/// Account handles, provided by the accounts module. Without it, `q` matches only
 /// names, aliases, organizations and titles, and `accounts` counts are 0.
 pub trait HandleSearch: Send + Sync {
     /// Party ids of `ws` owning an account whose handle contains `q` (case-insensitive).

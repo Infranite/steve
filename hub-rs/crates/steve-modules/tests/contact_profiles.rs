@@ -1,4 +1,4 @@
-//! Contact and organization profiles (BACKEND-CONTRACT.md of the UX closeout): what you set by hand
+//! Contact and organization profiles: what you set by hand
 //! — a person's name, even a handle-looking one; job fields, also edits from before they were
 //! marked, across a departure and return, and on a job added back — is never overwritten by the
 //! directory sync or by enrichment; enrichment fills only what is empty and attaches an unclaimed

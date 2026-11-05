@@ -1,4 +1,4 @@
-//! Issue → item (github.md §8 `POST /github/issues/:id/to-item`): an item from the issue's title
+//! Issue → item: an item from the issue's title
 //! and body (`source:["GitHub","sig"]`, project = the repo's project), linked
 //! `links(item, 'from', 'gh_issue', ghi)`, and `gh_issues.item_id` set so the issue list shows it.
 //! An issue whose item still exists answers that item instead of making a second one.

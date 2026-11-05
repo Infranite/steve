@@ -1,4 +1,4 @@
-//! C3 acceptance (channels-personas.md §11): the prototype's four accounts (you, 值班小运, 需求官,
+//! C3 acceptance: the prototype's four accounts (you, 值班小运, 需求官,
 //! 小助理) and six spaces evaluated rule by rule on the [`FakeChannel`] with a scripted gateway —
 //! including a handoff that still reaches the inbox while muted and an `unconfirmed` contact that
 //! does not count as a `member`; converting to a flow hands messages to the flow, converting back
@@ -1120,7 +1120,7 @@ async fn a_message_seen_through_both_connections_is_handled_once() {
 #[tokio::test(flavor = "multi_thread")]
 async fn default_rules_of_a_new_own_account() {
     let h = setup().await;
-    // a second personal account without settings yet: the defaults of feishu-lark-cli.md §2.3
+    // a second personal account without settings yet: the defaults
     let (con, _) = FakeChannel::seed_connection(h.env.store(), &caller(WS, ME), Some("upx2"))
         .expect("you again");
     let i = push(&h, &con, msg("C_MEDM", "d1", "ulilei", "在吗", false)).await;
@@ -1147,7 +1147,7 @@ async fn default_rules_of_a_new_own_account() {
 
 /// Without the grant to send as you (some tenants don't let members request
 /// `im:message.send_as_user`), nothing is drafted or sent on your account: the rules that would
-/// draft only record, and the space says why (domain-model.md §5).
+/// draft only record, and the space says why.
 #[tokio::test]
 async fn without_send_as_you_your_account_only_records() {
     let h = setup().await;

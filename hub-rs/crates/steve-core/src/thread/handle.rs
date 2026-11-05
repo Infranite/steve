@@ -1,4 +1,4 @@
-//! One message on the workspace lane: route it, let the guards decide (§3.3), log the routing, and act —
+//! One message on the workspace lane: route it, let the guards decide, log the routing, and act —
 //! queue an answer or research, make an item, show a card, send it to an item, or correct the last routing.
 
 use super::decide::{self, DecideCtx};
@@ -26,12 +26,12 @@ static TO_INLINE: LazyLock<Regex> = LazyLock::new(|| {
         .expect("valid regex")
 });
 
-/// Asking how an item is going, not telling it something (§5.3 `status`).
+/// Asking how an item is going, not telling it something.
 static PROGRESS: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"进展|进度|做完没|做完了吗|完成了吗|怎么样了|到哪了|到哪一步").expect("valid regex")
 });
 
-/// How long a spoken “别建事项” reaches back (§3.5).
+/// How long a spoken “别建事项” reaches back.
 const REROUTE_WINDOW: i64 = 10 * 60 * 1000;
 
 fn status_label(s: &str) -> &str {
@@ -464,7 +464,7 @@ impl Core {
         Ok(s)
     }
 
-    /// A correction said in words (§3.5): back into the conversation for the latest item made here in
+    /// A correction said in words: back into the conversation for the latest item made here in
     /// the last 10 minutes, or the latest answer made into an item. Only the latest one counts.
     async fn spoken_reroute(
         &self,

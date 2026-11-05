@@ -1,4 +1,4 @@
-//! Node kinds (signals-automation.md §3.2) as a registry: the built-in `trigger`, `filter`, `table`,
+//! Node kinds as a registry: the built-in `trigger`, `filter`, `table`,
 //! `flow`, `wait`, `approve`, `action`, `script`, `cmd`, `http` (S3) and `bot` (S4) here; the
 //! vault-backed `http`, `cmd` with `STEVE_HOME`, the guarded `bot` and the channel actions are
 //! registered through [`crate::FlowSetup`].
@@ -288,7 +288,7 @@ pub fn skipped(reason: &str) -> Value {
     json!({ "skipped": reason })
 }
 
-/// `skipped` of effectful nodes in dry runs (§3.3).
+/// `skipped` of effectful nodes in dry runs.
 pub const DRY_EFFECT: &str = "对外动作，试运行时不执行";
 /// `skipped` of actions that would write inside Steve.
 pub const DRY_WRITE: &str = "试运行时不执行";

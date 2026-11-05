@@ -1,4 +1,4 @@
-//! Mail and the knowledge base (email.md §8).
+//! Mail and the knowledge base.
 //!
 //! Mail bodies are not indexed by default. Two ways in:
 //! - “加进知识库” on a thread ([`Mail::to_knowledge`], `POST /mail/threads/:id/to-knowledge`): the
@@ -27,7 +27,7 @@ use crate::repo::{self, MessageRow, ThreadRow};
 
 /// The built-in knowledge source mail threads are added to.
 pub const SOURCE_KIND: &str = "files";
-/// Level of a thread document and default level of mail candidates (§8; channels-personas.md §2.6).
+/// Level of a thread document and default level of mail candidates.
 pub const LEVEL: Level = Level::Reasoning;
 /// `kb_marks` name prefix of the candidate extraction of a thread.
 pub const MARK_PREFIX: &str = "extract:mail:";
@@ -147,7 +147,7 @@ impl DocLoader for ThreadLoader {
 }
 
 impl Mail {
-    /// “加进知识库” (§8): adds a thread the caller sees as a `files` document (`private`,
+    /// “加进知识库”: adds a thread the caller sees as a `files` document (`private`,
     /// `reasoning`) and indexes it now. Adding it again re-indexes the same document. Returns its id.
     pub fn to_knowledge(&self, who: &Caller, thread_id: &str) -> MailResult<String> {
         let viewer = self.viewer_of(who)?;
@@ -217,7 +217,7 @@ impl Mail {
         Ok(id)
     }
 
-    /// A thread became `done`: submits candidate memories from it (§8). Skipped without the
+    /// A thread became `done`: submits candidate memories from it. Skipped without the
     /// knowledge module, when nothing was said, or when this state of the thread (same last message)
     /// was already submitted. Returns how many candidates were written.
     pub async fn submit_done(&self, ws: &str, thread_id: &str) -> MailResult<usize> {

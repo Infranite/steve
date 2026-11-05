@@ -1,4 +1,4 @@
-//! What G3 needs from steve-core to wrap an item up (github.md §4.1, §4.2): set its stage and
+//! What G3 needs from steve-core to wrap an item up: set its stage and
 //! `now`, finish it, fail it. A small trait the integrator implements over the orchestrator
 //! (`item_patch`, `finish`, `fail`); never called while a store transaction is open.
 

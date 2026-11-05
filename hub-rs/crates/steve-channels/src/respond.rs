@@ -1,4 +1,4 @@
-//! What steps 4–7 of the inbound pipeline hand on (channels-personas.md §2.3, §2.5): a [`Plan`]
+//! What steps 4–7 of the inbound pipeline hand on: a [`Plan`]
 //! for the [`Responder`] — the seam C4 (reply generation, items) and C6 (outbound, trigger words)
 //! implement — and the [`Response`] that comes back on [`crate::Inbound::response`].
 //!
@@ -6,7 +6,7 @@
 //! - `handoff`: the `ask` decision (always, muted or not); “我请 <主人称呼> 来看。” is the
 //!   responder's to send ([`Responder::acknowledge`]) and only when not muted;
 //! - `reply` / `draft`: a pending outbound draft (`chan_messages` `direction=out, status=draft`) and
-//!   its `approve` decision (§2.7), so nothing goes out until you approve (C6 sends);
+//!   its `approve` decision, so nothing goes out until you approve (C6 sends);
 //! - `create_item`: handed to you as a handoff (options include “to_item”), so nothing is lost;
 //! - trigger words: recorded, nothing sent.
 
@@ -21,9 +21,9 @@ use crate::{ChannelResult, Channels, bindings, messages, personas};
 
 /// `subject_type` of decisions about one channel message (C6 registers its handler).
 pub const SUBJECT_MESSAGE: &str = "chan_message";
-/// Options of the handoff decision (§2.5).
+/// Options of the handoff decision.
 pub const HANDOFF_OPTIONS: [&str; 3] = ["draft_reply", "to_item", "done"];
-/// Options of the approval of a draft (§2.7).
+/// Options of the approval of a draft.
 pub const DRAFT_OPTIONS: [&str; 2] = ["yes", "no"];
 /// The handoff question's summary of the message, in characters.
 const SUMMARY_MAX: usize = 60;
@@ -33,7 +33,7 @@ const SUMMARY_MAX: usize = 60;
 pub enum By {
     /// Not processed (own message, another bot, a duplicate, a paused source).
     Skipped,
-    /// Your own trigger words (§2.7).
+    /// Your own trigger words.
     Trigger { instruction: String },
     /// The space's flow (its `message` trigger took the event in step 2).
     Flow { flow_id: String },
@@ -160,7 +160,7 @@ pub(crate) fn space_label(s: &SpaceRow) -> String {
     }
 }
 
-/// The handoff decision (§2.5): `「<空间>」里 <发送人> 找你：<摘要>`. Linked from the inbound
+/// The handoff decision: `「<空间>」里 <发送人> 找你：<摘要>`. Linked from the inbound
 /// message (`decision_id`). One per message.
 pub fn open_handoff(tx: &Tx, plan: &Plan) -> ChannelResult<String> {
     open_handoff_asking(tx, plan, None)
@@ -211,7 +211,7 @@ pub fn open_handoff_asking(tx: &Tx, plan: &Plan, ask: Option<&str>) -> ChannelRe
     Ok(d.id)
 }
 
-/// A pending outbound draft replying to the message, and its `approve` decision (§2.7): “以你本人
+/// A pending outbound draft replying to the message, and its `approve` decision: “以你本人
 /// 发到「<空间>」” on your own account, “以<身份>发到「<空间>」” on a bot. The body is `text`
 /// (empty until a composer writes one; you can write it in the inbox). Returns `(message, decision)`.
 pub fn open_draft(tx: &Tx, plan: &Plan, text: &str, now: i64) -> ChannelResult<(String, String)> {
@@ -298,7 +298,7 @@ pub const NO_SEND_AS_YOU: &str = "没有“以你的名义发送”的权限：�
 pub const NO_SEND_AS_YOU_COMMAND: &str = "没有“以你的名义发送”的权限：你的指令在网页对话里回答";
 
 impl Channels {
-    /// Step 7 (§2.5) for a decided plan.
+    /// Step 7 for a decided plan.
     pub(crate) async fn execute(&self, plan: &Plan) -> ChannelResult<Response> {
         let mut r = Response {
             by: if let Some(i) = &plan.trigger {
@@ -319,8 +319,8 @@ impl Channels {
         if plan.act == Act::Record {
             return Ok(r);
         }
-        // Without the grant to send as you, nothing is drafted or sent on your account
-        // (domain-model.md §5): your `/bot` is answered in your web conversation instead.
+        // Without the grant to send as you, nothing is drafted or sent on your account:
+        // your `/bot` is answered in your web conversation instead.
         if plan.mode == Mode::Own
             && matches!(plan.act, Act::Reply | Act::Draft)
             && !self

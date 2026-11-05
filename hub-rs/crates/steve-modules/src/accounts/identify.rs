@@ -1,4 +1,4 @@
-//! Who is behind a handle (accounts-vault.md §2.3). Called by channel messages, mail, calendar and
+//! Who is behind a handle. Called by channel messages, mail, calendar and
 //! directory sync with whatever handle they saw; always ends with an account and a party:
 //!
 //! 1. an exact handle (`account_handles`, primary or extra) → its owner, following merges;
@@ -20,7 +20,7 @@ use crate::contacts::repo::{self as people, NewParty, PARTY, Party};
 use crate::contacts::service as contacts;
 use crate::{ApiError, ApiResult};
 
-/// Merge proposals from identification carry this confidence (§2.3 step 3).
+/// Merge proposals from identification carry this confidence.
 pub const PROPOSAL_CONFIDENCE: f64 = 0.6;
 /// Accounts attached by the `email_prefix` rule.
 pub const PREFIX_CONFIDENCE: f64 = 0.9;
@@ -39,7 +39,7 @@ pub struct Hints {
     pub source_label: Option<String>,
     /// Account kind of a new account; default `work_email` for an email under a known organization,
     /// else `personal`. `bot` / `app_bot` (another bot seen in a chat) make a new identity a bot party
-    /// (`contact_kind = bot`, ownership.md §1) with no 负责人 yet, never a merge proposal.
+    /// (`contact_kind = bot`) with no 负责人 yet, never a merge proposal.
     pub kind: Option<String>,
     /// Visibility of a new contact (default `workspace`).
     pub visibility: Option<Visibility>,
@@ -171,7 +171,7 @@ pub fn identify(
     } else {
         display_name.clone()
     };
-    // a bot is not a person: its own bot party, nobody's yet (ownership.md §3)
+    // a bot is not a person: its own bot party, nobody's yet
     if matches!(kind.as_str(), "bot" | "app_bot") {
         let bot = crate::contacts::stewards::new_bot_party(tx, ws, actor, &name, "identify")?;
         let a = repo::insert(tx, ws, &new_account(&bot.id, true, 1.0, &source, &label))?;
@@ -253,7 +253,7 @@ fn created(
     Ok(())
 }
 
-/// Step 2: the one owner of an email with the same local part (§2.3), if the rule allows it.
+/// Step 2: the one owner of an email with the same local part, if the rule allows it.
 fn by_prefix(tx: &Tx, ws: &str, email: &str, org: Option<&str>) -> ApiResult<Option<Party>> {
     let Some(rule) = repo::prefix_rule(tx, ws)?.filter(|r| r.enabled) else {
         return Ok(None);
@@ -361,7 +361,7 @@ fn same_name(
     Ok(if found.len() == 1 { found.pop() } else { None })
 }
 
-/// A new `unconfirmed` contact (contacts.md §2.2), with a `works_at` link when the organization is known.
+/// A new `unconfirmed` contact, with a `works_at` link when the organization is known.
 fn new_contact(
     tx: &Tx,
     ws: &str,
@@ -398,7 +398,7 @@ fn new_contact(
     Ok(p)
 }
 
-/// Writes the merge proposal and opens its decision (contacts.md §2.7); the `party_merge` handler (P4)
+/// Writes the merge proposal and opens its decision; the `party_merge` handler (P4)
 /// acts on the answer. A pair rejected before is not proposed again.
 fn propose(
     tx: &Tx,

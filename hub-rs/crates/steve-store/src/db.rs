@@ -22,7 +22,7 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/002.sql"),
     include_str!("../migrations/003.sql"),
     // From here on the migrations belong to the new modules and exist only in the Rust Hub (no TS Hub may
-    // open such a database, see `migrate` and ops/CUTOVER.md). Numbering (modules/build-plan.md §0): 4 shared base +
+    // open such a database, see `migrate`; the TS Hub never checked the schema it opened). Numbering: 4 shared base +
     // contacts, 5 accounts & vault, 6 signals & automation + schedules, 7 channels + Feishu, 8 knowledge,
     // 9 email, 10 GitHub, 11 channel poll cursors, 12 spaces outlive their connection. 4–11 are
     // `IF NOT EXISTS` and alter nothing existing; 12 rebuilds `spaces` (see `migrate`). Once these
@@ -37,19 +37,19 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/011.sql"),
     include_str!("../migrations/012.sql"),
     // 13 is a comment-only placeholder that stays empty (the delivery queue takes the next free number);
-    // versions are positions in this list, so it keeps the later ones in place. 14: YOLO (modules/yolo.md
-    // §6). 15: statistics. 16: thread routing (modules/thread-routing.md §7.1). All new tables only.
+    // versions are positions in this list, so it keeps the later ones in place. 14: YOLO.
+    // 15: statistics. 16: thread routing. All new tables only.
     include_str!("../migrations/013.sql"),
     include_str!("../migrations/014.sql"),
     include_str!("../migrations/015.sql"),
     include_str!("../migrations/016.sql"),
     // 17: reasoning effort (conditional columns in run_pending for TS Hub compatibility).
     include_str!("../migrations/017.sql"),
-    // 18: ownership (modules/ownership.md §2): the `stewards` table and its one-time backfill.
+    // 18: ownership: the `stewards` table and its one-time backfill.
     include_str!("../migrations/018.sql"),
-    // 19: a space's attention (实时/不提醒/屏蔽) and voice, the `space_prefs` table (domain-model.md §1.4).
+    // 19: a space's attention (实时/不提醒/屏蔽) and voice, the `space_prefs` table.
     include_str!("../migrations/019.sql"),
-    // 20: IM reactions (`chan_reactions`, channels-personas.md §2.11).
+    // 20: IM reactions (`chan_reactions`).
     include_str!("../migrations/020.sql"),
     // 21: the durable outbox (`outbox_events`, consumers, receipts, leases; [`crate::outbox`]).
     include_str!("../migrations/021.sql"),

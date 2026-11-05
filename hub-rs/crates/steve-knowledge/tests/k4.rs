@@ -1,4 +1,4 @@
-//! K4 acceptance (knowledge.md §12): the opening prompt is unchanged with an empty knowledge base;
+//! K4 acceptance: the opening prompt is unchanged with an empty knowledge base;
 //! with hits it has the §4.2 format and stays ≤6000 characters; a main-thread answer citing a number
 //! that does not exist loses that mark and `cites` lists only what was cited; a shared workspace's
 //! main thread never shows private knowledge; MCP cannot read another user's private document.

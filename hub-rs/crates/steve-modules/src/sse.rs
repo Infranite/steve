@@ -1,4 +1,4 @@
-//! SSE scoping (§0.6): module events carry `ws` and reach only subscribers of that workspace; the old
+//! SSE scoping: module events carry `ws` and reach only subscribers of that workspace; the old
 //! event types keep going to every subscriber, unchanged.
 
 use steve_store::ChangeEvent;

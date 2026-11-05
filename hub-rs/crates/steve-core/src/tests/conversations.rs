@@ -1,4 +1,4 @@
-//! Guest conversations (channels §2.12): an IM space's turns are routed like web chat in a conversation
+//! Guest conversations: an IM space's turns are routed like web chat in a conversation
 //! of their own (`chan:<space>`), answered in the host's voice, and never configure Steve or talk to
 //! items; follow-ups continue the same conversation; items made there flow back there.
 

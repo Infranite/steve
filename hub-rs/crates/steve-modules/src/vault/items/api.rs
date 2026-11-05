@@ -1,5 +1,5 @@
-//! REST of slice V2 (accounts-vault.md §5.2): vaults, templates, items, fields, and the two reveal
-//! steps. Request bodies with values are never `Debug`-printed (§10 rule 7); the only response with a
+//! REST of slice V2: vaults, templates, items, fields, and the two reveal
+//! steps. Request bodies with values are never `Debug`-printed; the only response with a
 //! secret is `reveal/finish`, `cache-control: no-store`.
 
 use std::sync::Arc;

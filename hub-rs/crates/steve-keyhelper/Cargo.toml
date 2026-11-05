@@ -1,7 +1,7 @@
 [package]
 name = "steve-keyhelper"
 # Not the workspace version or edition: every change to this crate changes the helper's cdhash, and with it the
-# keychain partition of the vault master key (ops/KEYHELPER.md). ops/release.sh rebuilds it only when the hash of
+# keychain partition of the vault master key. ops/release.sh rebuilds it only when the hash of
 # this file and src/ changes, and then migrates the key from the old helper to the new one.
 edition = "2024"
 version = "1.0.0"

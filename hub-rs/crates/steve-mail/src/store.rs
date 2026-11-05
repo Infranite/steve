@@ -1,4 +1,4 @@
-//! The local mail library (email.md §3.5): [`StoreSink`] takes what an adapter fetched and stores it —
+//! The local mail library: [`StoreSink`] takes what an adapter fetched and stores it —
 //! parse, dedupe across folders and rescans, raw file (0600), attachments (metadata only),
 //! identification of the people involved, threads, and the events to send once the sync is done.
 
@@ -327,7 +327,7 @@ impl StoreSink<'_> {
         let out = mb.is_mine(&from.addr);
         let store = self.store;
         let res = store.transaction(|tx| -> MailResult<String> {
-            // identification (§3.5 step 4)
+            // identification
             let (from_acc, from_party, to, cc) = if out {
                 let (fa, fp) = lookup(tx, &mb.ws, &from.addr)?;
                 let mut to = Vec::new();
@@ -406,7 +406,7 @@ impl StoreSink<'_> {
                 repo::insert_attachment(tx, &mb.ws, &id, a, self.now)?;
             }
             repo::refresh_thread(tx, &thread.id, self.now)?;
-            // the thread's state follows who wrote last (§4)
+            // the thread's state follows who wrote last
             let latest = date >= thread.last_at;
             match (out, thread.state.as_str()) {
                 (true, "open" | "needs_reply") if latest => {
@@ -465,7 +465,7 @@ impl StoreSink<'_> {
         }
     }
 
-    /// The event of a received message (§3.5 step 6).
+    /// The event of a received message.
     #[allow(clippy::too_many_arguments)]
     fn event(
         &self,

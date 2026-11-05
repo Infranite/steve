@@ -1,4 +1,4 @@
-//! REST of ownership (steve-rs-plan/modules/ownership.md §4), relative to `/api`:
+//! REST of ownership, relative to `/api`:
 //!
 //! - `GET /people/:id/holdings` — 名下: own accounts by system, what the person is responsible for;
 //! - `GET /stewards/unowned` — objects without a confirmed 负责人;

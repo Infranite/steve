@@ -1,4 +1,4 @@
-//! REST of scheduled tasks (signals-automation.md §4.2, schedules.md §7–§8), relative to `/api`:
+//! REST of scheduled tasks, relative to `/api`:
 //!
 //! | route | |
 //! | --- | --- |
@@ -57,7 +57,7 @@ fn nullable<'de, D: Deserializer<'de>, T: Deserialize<'de>>(
     Option::<T>::deserialize(d).map(Some)
 }
 
-/// Body of `POST /schedules` and `PATCH /schedules/:id` (§8).
+/// Body of `POST /schedules` and `PATCH /schedules/:id`.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct ScheduleBody {
     pub name: Option<String>,
@@ -117,7 +117,7 @@ fn when_error(e: WhenError) -> ApiError {
     ApiError::rule(e.to_string())
 }
 
-/// `when` → cron (§3.3): the rules, then the model (fast, 30 s), each answer validated like a cron.
+/// `when` → cron: the rules, then the model (fast, 30 s), each answer validated like a cron.
 pub async fn parse_phrase(cx: &FlowCx, phrase: &str, tz: Tz) -> ApiResult<Parsed> {
     let now = utc(cx.now());
     match when::parse_when(phrase, tz, now) {

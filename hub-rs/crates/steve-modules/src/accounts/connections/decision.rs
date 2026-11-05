@@ -1,4 +1,4 @@
-//! The `connection` decision handler (§2.2, §8 待处理): the “<账号> 的授权过期了” card with
+//! The `connection` decision handler (§8 待处理): the “<账号> 的授权过期了” card with
 //! `reauth` / `pause`.
 
 use serde_json::{Value, json};

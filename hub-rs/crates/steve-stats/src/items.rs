@@ -1,4 +1,4 @@
-//! One fact row per item (`item_stats`, stats.md §2.1, §3): when it was done, how long it took and where
+//! One fact row per item (`item_stats`): when it was done, how long it took and where
 //! the time went, how its deliveries were judged, and what it cost in tokens. [`compute`] is a pure
 //! function of the item's marks, turns, decisions and token records; [`refresh_in`] loads those by
 //! `item_id` (index lookups only) and writes the row back.
@@ -52,7 +52,7 @@ pub struct DecisionRow {
 }
 
 impl DecisionRow {
-    /// Decided by YOLO on the user's behalf (yolo.md Y2): not time the user spent.
+    /// Decided by YOLO on the user's behalf: not time the user spent.
     pub fn by_yolo(&self) -> bool {
         self.result.get("decided_by").and_then(Value::as_str) == Some("yolo")
     }

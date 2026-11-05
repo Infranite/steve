@@ -99,7 +99,7 @@ pub struct TurnEnd {
 }
 
 /// Passed to [`Host::turn_begin`] before every `session/prompt`: the first try, each gateway retry and
-/// each queued follow-up get their own turn (stats.md §2.2).
+/// each queued follow-up get their own turn.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TurnBegin {
     pub session_id: String,

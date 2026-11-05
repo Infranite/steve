@@ -1,4 +1,4 @@
-//! The routing eval (thread-routing §9): 22 real messages of the main conversation plus 20 synthetic ones
+//! The routing eval: 22 real messages of the main conversation plus 20 synthetic ones
 //! (`tests/route_cases.json`), each with the kinds it may end up as after the guards.
 //!
 //! - `recorded_router_outputs_pass_the_bar` replays the model replies recorded from the last real run

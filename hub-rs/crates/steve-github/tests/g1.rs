@@ -1,4 +1,4 @@
-//! G1 acceptance (github.md §13): on the fake GitHub, manifest → install → connection; the App's key
+//! G1 acceptance: on the fake GitHub, manifest → install → connection; the App's key
 //! and webhook secret are ciphertext in the system vault; installation tokens are renewed 5 minutes
 //! before they expire; a 401 re-mints once, a second one puts the connection in `reauth`; ETag 304s
 //! and rate limits; the PAT adapter.

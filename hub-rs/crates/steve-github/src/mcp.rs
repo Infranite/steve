@@ -1,4 +1,4 @@
-//! MCP tools for agents (github.md §6): `steve_github_status`, `steve_github_ci_log`,
+//! MCP tools for agents: `steve_github_status`, `steve_github_ci_log`,
 //! `steve_github_comment`, `steve_github_open_pr`.
 //!
 //! The tools are always listed; each call first checks that the session's item belongs to a
@@ -35,7 +35,7 @@ pub const CI_LOG: &str = "steve_github_ci_log";
 pub const COMMENT: &str = "steve_github_comment";
 pub const OPEN_PR: &str = "steve_github_open_pr";
 
-/// The answer when the session's item has nothing to do with GitHub (§6), verbatim.
+/// The answer when the session's item has nothing to do with GitHub, verbatim.
 pub const NOT_LINKED: &str = "This item is not linked to a GitHub repository.";
 /// Characters of one log answer.
 pub const LOG_MAX: usize = 20_000;
@@ -297,7 +297,7 @@ fn sha7(sha: &str) -> &str {
     sha.get(..7).unwrap_or(sha)
 }
 
-/// `steve_github_status` (§6).
+/// `steve_github_status`.
 fn status(gh: &GitHub, l: &Linked) -> Result<String, String> {
     if l.prs.is_empty() {
         let r = l.project_repo.as_ref().ok_or(NOT_LINKED)?;
@@ -386,7 +386,7 @@ fn is_error_line(l: &str) -> bool {
         || l.to_lowercase().contains("error")
 }
 
-/// The part of a log worth reading (§6): every error line with [`LOG_CONTEXT`] lines around it,
+/// The part of a log worth reading: every error line with [`LOG_CONTEXT`] lines around it,
 /// plus the last [`LOG_TAIL`] lines; gaps shown as `…`; at most [`LOG_MAX`] characters (the end
 /// wins).
 pub fn excerpt(log: &str) -> String {
@@ -425,7 +425,7 @@ pub fn excerpt(log: &str) -> String {
     out
 }
 
-/// `steve_github_ci_log` (§6): the job's log, secrets removed, cut to what matters.
+/// `steve_github_ci_log`: the job's log, secrets removed, cut to what matters.
 async fn ci_log(gh: &GitHub, cx: &McpCx, l: &Linked, job: &str) -> Result<String, String> {
     if job.trim().is_empty() {
         return Err("Give a check name or job id from steve_github_status.".into());
@@ -535,7 +535,7 @@ fn comment_target(
         .ok_or_else(|| INTERNAL.to_string())
 }
 
-/// `steve_github_comment` (§6, §4.3).
+/// `steve_github_comment`.
 async fn comment_tool(
     gh: &GitHub,
     cx: &McpCx,
@@ -555,7 +555,7 @@ async fn comment_tool(
     gh.agent_comment(&m, cx, t, body).await
 }
 
-/// `steve_github_open_pr` (§6): a `gh_pr_open` decision; Steve pushes and opens after your yes.
+/// `steve_github_open_pr`: a `gh_pr_open` decision; Steve pushes and opens after your yes.
 fn open_pr(
     gh: &GitHub,
     cx: &McpCx,

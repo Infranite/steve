@@ -1,4 +1,4 @@
-//! The question's attachments in a research run (thread-routing §4.2): every file is copied into a
+//! The question's attachments in a research run: every file is copied into a
 //! per-run directory outside `~/.steve` (whose reads stay denied) that the run may read, and is named in
 //! the prompt; images small enough also go into the message itself as image blocks, so the model sees
 //! them without a tool call. Read-only either way: the copy is made by the Hub before the harness starts,

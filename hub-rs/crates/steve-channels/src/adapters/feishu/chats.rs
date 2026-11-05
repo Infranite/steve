@@ -1,4 +1,4 @@
-//! Groups and members (F4, feishu.md §2.3, §3.2):
+//! Groups and members:
 //!
 //! - [`space_info`]: `GET im/v1/chats/{id}` → name, kind (`chat_mode`: `group`→group,
 //!   `topic`→channel, `p2p`→dm), member count (`user_count`), `has_external` (`external`);

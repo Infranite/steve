@@ -299,7 +299,7 @@ impl ConnectionProvider for FeishuUser {
     fn reauth_question(&self, _: &str) -> String {
         "飞书需要重新授权".into()
     }
-    /// The app connection's App ID and Secret (feishu.md §2.1), not `STEVE_OAUTH_FEISHU_*`.
+    /// The app connection's App ID and Secret, not `STEVE_OAUTH_FEISHU_*`.
     async fn oauth_client(&self, cx: &StartCx<'_>) -> Result<Option<OAuthClient>, ProviderError> {
         let Some(app) = cx.config.get("app_connection").and_then(Value::as_str) else {
             return Ok(None);

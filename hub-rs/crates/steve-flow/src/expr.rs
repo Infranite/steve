@@ -1,4 +1,4 @@
-//! Paths, templates and the condition language of flow nodes (signals-automation.md §3.1–§3.2).
+//! Paths, templates and the condition language of flow nodes.
 //!
 //! - Paths: `event.payload.from`, `steps.p.amount`, `sender.name`, `input.level`,
 //!   `event.attachments[0].url`. A path whose first segment is not one of the roots is read from

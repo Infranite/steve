@@ -1,4 +1,4 @@
-//! A2 acceptance (accounts-vault.md §11): a fake OAuth round trip creates the account and the
+//! A2 acceptance: a fake OAuth round trip creates the account and the
 //! connection; tokens are ciphertext in the system vault; a failing health check → `reauth` + one
 //! decision; after disconnect the credential's `dek_wrapped` is empty. Plus: PKCE and state rules,
 //! public origins, single-use refresh tokens committed before use (Outlook, Feishu), minted tokens
@@ -1164,7 +1164,7 @@ async fn device_flow_connects_in_the_background() {
     assert_eq!(secret(&h, &item, "refresh_token"), "PLAINTEXT-dev-refresh");
 }
 
-/// ownership.md §1, §3: an app bot connected with `Owner::Bot` becomes its own bot party; the
+/// An app bot connected with `Owner::Bot` becomes its own bot party; the
 /// connection and the bot are owned by the connecting user, unless the provider names the app's
 /// owner (a known person's account), who then owns the bot (source `sync`). A reconnect keeps
 /// the party.

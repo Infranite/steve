@@ -337,7 +337,7 @@ pub async fn boot(st: &AppState) -> anyhow::Result<()> {
         .await;
         match r {
             Ok(Ok(())) => {
-                // ownership.md §3: the Hub device is “我”'s (where “我” exists; otherwise it is
+                // the Hub device is “我”'s (where “我” exists; otherwise it is
                 // linked when “我” is created)
                 if let Some(m) = dev.modules.clone() {
                     let r = tokio::task::spawn_blocking(move || {

@@ -1,4 +1,4 @@
-//! F5 acceptance (feishu.md §7, §2.4; contacts.md §7) on the fake Feishu: the bot connection's
+//! F5 acceptance on the fake Feishu: the bot connection's
 //! address book read as a full snapshot (department tree, members, leaders, every page), synced into
 //! org-chart teams; resigned people leave their teams but stay contacts; a narrowed visibility scope
 //! (departments, single users, user groups); permission errors and rate limits; directory events

@@ -1,4 +1,4 @@
-//! `HelperStore`: the macOS keychain through `steve-keyhelper` (crates/steve-keyhelper, ops/KEYHELPER.md).
+//! `HelperStore`: the macOS keychain through `steve-keyhelper` (crates/steve-keyhelper).
 //!
 //! A login-keychain item gets the partition `cdhash:<creator>` when its creator has no Apple Team ID, so an
 //! item the Hub itself created is refused to every rebuilt Hub. The helper is installed outside the releases

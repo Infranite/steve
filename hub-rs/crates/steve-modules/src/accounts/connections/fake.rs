@@ -1,4 +1,4 @@
-//! `FakeAdapter` (build-plan §0): a scripted [`ConnectionProvider`] for tests of this and later
+//! `FakeAdapter`: a scripted [`ConnectionProvider`] for tests of this and later
 //! slices, in both shapes (OAuth against any fake token endpoint, credential form). Never
 //! registered by the Hub.
 

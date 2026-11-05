@@ -1,4 +1,4 @@
-//! S3 acceptance (signals-automation.md §12): a script with an endless loop is stopped within 1 s
+//! S3 acceptance: a script with an endless loop is stopped within 1 s
 //! and `fetch` is a ReferenceError; `http` to 127.0.0.1 (and localhost, private names, redirects to
 //! them) is refused; `{{secrets}}` values appear nowhere in `context`, step output, decisions or
 //! logs; an effect without a grant opens an approval, with one it runs (`http.effect`, `cmd.run`);
@@ -192,7 +192,7 @@ fn env() -> Env {
     // answered by FakeDns above (loopback, or for meta.test an internal address the resolver refuses),
     // so none of them can reach a real host
     steve_modules::net::allow_test_names(&["api.test", "rebind.test", "other.test", "meta.test"]);
-    // never the real keychain (WORKERS.md)
+    // never the real keychain
     // SAFETY: set before any vault is opened; tests in this binary all want the same value.
     unsafe { std::env::set_var("STEVE_VAULT_KEYSTORE", "file") };
     let keys = tempfile::tempdir().unwrap();

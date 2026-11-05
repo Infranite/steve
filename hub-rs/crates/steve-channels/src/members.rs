@@ -1,4 +1,4 @@
-//! `GET /spaces/:id/members?offset=&limit=` (channels-personas.md §5, the space page's 成员): the
+//! `GET /spaces/:id/members?offset=&limit=` (the space page's 成员): the
 //! space's `space_members`, each with the contact `identify` attached it to and whether it is
 //! external.
 //!
@@ -160,7 +160,7 @@ fn member(
     let external = match &party {
         _ if !space.has_external => Some(false),
         Some(p) if p.user_id.is_some() || Some(p.id.as_str()) == self_org => Some(false),
-        // one of our own app bots (its own bot party since ownership.md §1)
+        // one of our own app bots (each is its own bot party)
         Some(p) if is_ours(c, p)? => Some(false),
         Some(p) if p.kind == "org" => Some(true),
         _ if self_org.is_some_and(|o| jobs.iter().any(|j| j == o)) => Some(false),

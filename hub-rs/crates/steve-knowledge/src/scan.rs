@@ -1,4 +1,4 @@
-//! Walking a folder source (knowledge.md §2.2): a self-written, read-only traversal that never
+//! Walking a folder source: a self-written, read-only traversal that never
 //! leaves the root. Symbolic links are resolved and dropped when they point outside it; linked
 //! directories are not entered (their real path inside the root is walked anyway, and this rules
 //! out loops). Fixed exclusions: `.git/`, `node_modules/`, `.obsidian/`, `.trash/` and every

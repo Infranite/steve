@@ -242,7 +242,7 @@ fn prompt_contexts_join_sessions_and_take_the_first_chat() {
         .unwrap();
 }
 
-/// The github.md §7 example, with the alternatives resolved.
+/// The GitHub panel example, with the alternatives resolved.
 fn github_panel_json() -> Value {
     json!({"id":"github.pr:ghp_1","plugin":"github","title":"PR 与检查",
      "head":{"text":"#12 fix: preserve return_to","href":"https://github.com/o/r/pull/12","badges":["草稿"]},

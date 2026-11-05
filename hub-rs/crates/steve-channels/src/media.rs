@@ -1,4 +1,4 @@
-//! Images, files and cards of channel messages (CONTRACT.md of the message-media task):
+//! Images, files and cards of channel messages:
 //!
 //! - [`present`]: what a stored message shows — provider keys removed, a `url` for each resource
 //!   that can be fetched now or the reason it cannot (`unavailable`); a message stored before

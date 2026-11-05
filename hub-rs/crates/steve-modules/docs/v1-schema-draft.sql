@@ -1,5 +1,5 @@
 -- Draft for M0 (migration 005): the tables slice V1 (vault keys, envelope encryption, rotation) reads
--- and writes. Copied verbatim from steve-rs-plan/modules/accounts-vault.md §1; M0 owns the real 005.sql.
+-- and writes. Copied verbatim from the vault spec; M0 owns the real 005.sql.
 -- vault_items.account_id references accounts(id), so 005 must create `accounts` before `vault_items`
 -- (the V1 tests create a stub `accounts` table first). Not a migration: nothing registers this file.
 

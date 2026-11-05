@@ -27,7 +27,7 @@ pub struct Printed {
     pub model: String,
     /// The harness's `total_cost_usd` of the answering run, when it reports one (module budgets add it up).
     pub cost_usd: Option<f64>,
-    /// Tokens per model over every model tried, failed tries included (stats.md §2.4).
+    /// Tokens per model over every model tried, failed tries included.
     pub usage: Vec<ModelUsage>,
     /// Models of the tier tried, the one that answered included.
     pub attempts: u32,
@@ -732,7 +732,7 @@ fn result_of(d: &Value) -> Result<(String, Option<f64>)> {
     Ok((text, d.get("total_cost_usd").and_then(Value::as_f64)))
 }
 
-/// The tokens a harness `result` object reports (stats.md §2.4): one row per key of `modelUsage` (the
+/// The tokens a harness `result` object reports: one row per key of `modelUsage` (the
 /// models that actually answered, sub-calls included), else one row from `usage` booked to `model`, the
 /// model asked for. Missing figures stay `None`. Dollars: each model's `costUSD`, else `total_cost_usd`
 /// on the first row.
@@ -1092,7 +1092,7 @@ pub fn partial_str(t: &str, key: &str) -> Option<String> {
 /// The tag categories a new tag may have; `类型` holds only the six item categories (ST-34).
 pub const TAG_CATS: [&str; 4] = ["项目", "领域", "客户", "主题"];
 
-/// The routing results (thread-routing §3.1). `chat` from older routers reads as `answer`.
+/// The routing results. `chat` from older routers reads as `answer`.
 pub const KINDS: [&str; 9] = [
     "answer",
     "research",
@@ -1105,7 +1105,7 @@ pub const KINDS: [&str; 9] = [
     "reroute",
 ];
 
-/// Why the router chose what it chose (§3.2); the guards in `thread::decide` read them.
+/// Why the router chose what it chose; the guards in `thread::decide` read them.
 pub const SIGNALS: [&str; 7] = [
     "explicit",
     "change",
@@ -1190,7 +1190,7 @@ impl Default for Route {
 }
 
 impl Route {
-    /// What the router falls back to when the model fails (§3.3 rule 6): never an item. Research when
+    /// What the router falls back to when the model fails: never an item. Research when
     /// there is a project to read (`project`), else a direct answer.
     pub fn fallback(text: &str, project: Option<String>) -> Route {
         Route {
@@ -1216,7 +1216,7 @@ pub struct Said {
     pub text: String,
 }
 
-/// An open item of the conversation the router may send a message to (§5.3).
+/// An open item of the conversation the router may send a message to.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct FocusItem {
     pub id: String,
@@ -1248,7 +1248,7 @@ fn js_json(s: &str) -> String {
     serde_json::to_string(s).unwrap_or_default()
 }
 
-/// The fixed part of the router prompt: principles, kinds and examples (thread-routing §3.2).
+/// The fixed part of the router prompt: principles, kinds and examples.
 pub const ROUTE_RULES: &str = include_str!("thread/route_prompt.txt");
 
 /// The router prompt: [`ROUTE_RULES`] plus what exists in the workspace and the recent conversation.
@@ -1600,11 +1600,11 @@ pub struct ChatFiles {
     pub images: Vec<Value>,
 }
 
-/// How Steve may draw an interface in an answer of the main conversation (ST-46, docs/ST-46-a2ui.md): the chat
+/// How Steve may draw an interface in an answer of the main conversation (ST-46): the chat
 /// answer and in-place research of the web conversation get it; an IM conversation's answers never do.
 pub const A2UI_HINT: &str = include_str!("a2ui_hint.txt");
 
-/// The chat-answer prompt (gateway.ts, with the “做成事项” hint replaced by an offer, thread-routing §6.1). `extra` is module context (B1 `PromptContext::chat`),
+/// The chat-answer prompt (gateway.ts, with the “做成事项” hint replaced by an offer). `extra` is module context (B1 `PromptContext::chat`),
 /// inserted after the main bot's part and before the history; `""` leaves the prompt as in TS.
 pub fn answer_prompt(
     main: &Bot,
@@ -1661,7 +1661,7 @@ pub fn answer_prompt(
 pub struct Answer {
     pub text: String,
     pub thought: String,
-    /// work the answer leads to (§3.4)
+    /// work the answer leads to
     pub offer: Option<Offer>,
     pub model: Option<String>,
     pub failed: bool,

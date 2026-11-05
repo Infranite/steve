@@ -1,4 +1,4 @@
-//! `github_pat`: a fine-grained personal access token (§1.2), entered in the generic
+//! `github_pat`: a fine-grained personal access token, entered in the generic
 //! `POST /connections {adapter:"github_pat", fields:{令牌}}` form. The account is the token owner's
 //! GitHub login, owned by “我”.
 

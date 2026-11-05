@@ -1,5 +1,5 @@
-//! The knowledge REST operations of slice K1 (knowledge.md §6): search, sources (read only),
-//! documents, notes and memories. Ownership first (§0.4), then the store; handlers stay thin.
+//! The knowledge REST operations of slice K1: search, sources (read only),
+//! documents, notes and memories. Ownership first, then the store; handlers stay thin.
 
 use std::time::Instant;
 
@@ -19,7 +19,7 @@ use crate::sources;
 use crate::state::Knowledge;
 use crate::sync;
 
-/// `400` for a search text that looks like a secret (§3.2).
+/// `400` for a search text that looks like a secret.
 pub const SECRET_QUERY: &str = "检索词里像是有密码或令牌";
 pub const NOUN_DOC: &str = "文档";
 pub const NOUN_NOTE: &str = "笔记";
@@ -33,7 +33,7 @@ fn nullable<'de, D: Deserializer<'de>, T: Deserialize<'de>>(
     Ok(Some(Option::deserialize(d)?))
 }
 
-/// Creates the built-in sources on a workspace's first knowledge request (§1).
+/// Creates the built-in sources on a workspace's first knowledge request.
 pub fn prepare(m: &Modules, who: &Caller) -> ApiResult<()> {
     if m.store.reader(|c| sources::has_builtin(c, &who.ws))? {
         return Ok(());
@@ -148,7 +148,7 @@ pub fn own_doc(
     }
 }
 
-/// `DocBrief` (§6.1).
+/// `DocBrief`.
 pub fn doc_brief(d: &DocRow, s: &SourceRow) -> Value {
     json!({
         "id": d.id,
@@ -164,7 +164,7 @@ pub fn doc_brief(d: &DocRow, s: &SourceRow) -> Value {
     })
 }
 
-/// `Doc` (§6.1): the brief plus body (notes only), about, tags, preview, uses, error.
+/// `Doc`: the brief plus body (notes only), about, tags, preview, uses, error.
 pub fn doc_json(c: &Connection, d: &DocRow, s: &SourceRow) -> ApiResult<Value> {
     let mut v = doc_json_bare(c, d, s)?;
     add_uses(c, &mut v, &d.workspace_id, &d.id)?;
@@ -464,7 +464,7 @@ pub fn update_note(
 
 // ---- memories
 
-/// `Mem` (contacts.md §3.1), with `source_type` and the name of every `about` object (like
+/// `Mem`, with `source_type` and the name of every `about` object (like
 /// `Doc.about`; an unknown object has an empty name).
 pub fn mem_json(c: &Connection, m: &Mem) -> Value {
     let about: Vec<Value> = m

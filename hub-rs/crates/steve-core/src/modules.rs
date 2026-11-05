@@ -1,4 +1,4 @@
-//! The B1 seams into steve-core (modules/build-plan.md §1): item lifecycle hooks, extra prompt context,
+//! The B1 seams into steve-core: item lifecycle hooks, extra prompt context,
 //! `before_undo` of module decisions, and the shared model gateway. Nothing here changes what the core
 //! does while no [`steve_modules::Modules`] is attached or nothing is registered.
 //!

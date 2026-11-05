@@ -1,4 +1,4 @@
-//! Vault slice V2 (steve-rs-plan/modules/accounts-vault.md §4.1, §4.2, §5): items and fields.
+//! Vault slice V2: items and fields.
 //!
 //! - [`templates`]: the built-in templates (seeded under workspace `*`);
 //! - three vaults per workspace, created on first use: `个人` (one per user), `共享`, `系统` (connection

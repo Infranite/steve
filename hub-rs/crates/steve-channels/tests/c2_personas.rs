@@ -1,4 +1,4 @@
-//! C2 acceptance (channels-personas.md §11): the default persona is seeded; a space's own binding
+//! C2 acceptance: the default persona is seeded; a space's own binding
 //! overrides the account default; deleting a persona moves accounts to the default persona and
 //! spaces back to following; your own account cannot get a persona (400). Plus the `/personas`
 //! routes (validation, ownership, revisions, `intro_preview`, `used_by`) and `on_bot_deleted`.

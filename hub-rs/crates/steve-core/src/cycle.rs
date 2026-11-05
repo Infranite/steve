@@ -1,4 +1,4 @@
-//! The item lifecycle (CLAUDE-LIFECYCLE-DISCUSSION.txt rounds 3–4, API-CONTRACT.txt): the one place
+//! The item lifecycle (CLAUDE-LIFECYCLE-DISCUSSION.txt rounds 3–4): the one place
 //! that moves an item between its phases.
 //!
 //! ```text
@@ -1055,13 +1055,13 @@ impl Tx<'_> {
         Ok(())
     }
 
-    /// The projection of the item's lifecycle (API-CONTRACT.txt §1).
+    /// The projection of the item's lifecycle.
     pub(crate) fn lc_view(&self, i: &Item) -> Result<Value> {
         lifecycle_view(self, i)
     }
 }
 
-/// The lifecycle object of an item (API-CONTRACT.txt §1), computed from the item, its decisions,
+/// The lifecycle object of an item, computed from the item, its decisions,
 /// sessions and operations.
 pub(crate) fn lifecycle_view(t: &Tx, i: &Item) -> Result<Value> {
     let c = closing_of(i);

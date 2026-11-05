@@ -1,4 +1,4 @@
-//! What the statistics page reads besides the summary (stats.md §4.2): ranges, the trend series, the
+//! What the statistics page reads besides the summary: ranges, the trend series, the
 //! per-item table and drill-down, a session's totals, the non-token breakdowns, and the labels of keys.
 //! Everything reads the cube and `item_stats` through their indexes; per-item reads go by `item_id`.
 

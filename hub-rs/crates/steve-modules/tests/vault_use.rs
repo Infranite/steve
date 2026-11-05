@@ -1,4 +1,4 @@
-//! V4 acceptance tests (accounts-vault.md §11): no grant → decision + END; `grant_1h` and the second
+//! V4 acceptance tests: no grant → decision + END; `grant_1h` and the second
 //! use runs directly; injected values and their base64 are masked; cwd escape 400; `high` grants
 //! 400; temp dir gone after the run; bank cards always ask; deny; restart expires waiting requests;
 //! pasted `ghp_…` intercepted and not in the database; no value in any table or file.

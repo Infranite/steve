@@ -1,4 +1,4 @@
-//! Names for the people the channels meet (domain-model.md §2) on the fake Feishu: a sender known
+//! Names for the people the channels meet on the fake Feishu: a sender known
 //! only by an `ou_…` id is named through your identity first (chat members), then the bot's; the
 //! address book names people by id and a shared `union_id` merges an unconfirmed person into the
 //! known one; @mentions and private chats name people without any lookup; `tenant_key` becomes the

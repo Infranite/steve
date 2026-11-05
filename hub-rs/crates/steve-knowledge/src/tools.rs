@@ -1,4 +1,4 @@
-//! MCP tools of the knowledge module for agents in a session (knowledge.md §7, slice K4):
+//! MCP tools of the knowledge module for agents in a session:
 //! `steve_knowledge_search` and `steve_knowledge_read`. Results are filtered for the session's
 //! workspace and the user its item was raised by ([`crate::context::item_viewer`], the same viewer as
 //! the opening prompt); `never` is never returned. (`steve_remember` belongs to K3.)
@@ -29,7 +29,7 @@ pub const SEARCH_DEFAULT: usize = 5;
 pub const SEARCH_MAX: usize = 10;
 /// Characters of one `steve_knowledge_read` answer.
 pub const READ_MAX: usize = 20_000;
-/// The last line of every search answer (§7, verbatim).
+/// The last line of every search answer (verbatim).
 pub const LEVELS: &str = "Levels: public = can be quoted; conclusion = state conclusions only; reasoning = use for reasoning, never put it in anything sent to others.";
 
 static TOOLS: LazyLock<Vec<Value>> = LazyLock::new(|| {
@@ -176,7 +176,7 @@ pub fn session_viewer(m: &Modules, cx: &McpCx) -> ApiResult<Viewer> {
     })
 }
 
-/// One search result (§7): `[K<n>] <title> · <label> · level: <code>`, the document id when there
+/// One search result: `[K<n>] <title> · <label> · level: <code>`, the document id when there
 /// is more to read, then the text.
 fn entry(h: &Hit) -> String {
     let id = if h.obj_type == "chunk" {

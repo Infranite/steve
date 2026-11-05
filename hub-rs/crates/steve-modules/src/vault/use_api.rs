@@ -1,4 +1,4 @@
-//! REST of slice V4 (accounts-vault.md §5.2): grants and the use log.
+//! REST of slice V4: grants and the use log.
 //!
 //! - `POST /vault/items/:id/grants {bot_id, scope: {project_id}|{site}|{scratch:true}, hours: 1|8|24}`
 //! - `DELETE /grants/:id` → `{ok:true}`
@@ -65,7 +65,7 @@ pub struct ActorOut {
     pub name: String,
 }
 
-/// `SecretUseOut` (§5.1), plus `exit_code` and `finished`.
+/// `SecretUseOut`, plus `exit_code` and `finished`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SecretUseOut {
     pub id: String,

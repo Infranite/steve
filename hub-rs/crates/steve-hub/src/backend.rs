@@ -2,11 +2,11 @@
 //!
 //! steve-store and steve-core are written in parallel, so the binary codes against these traits and the
 //! integrator implements them with adapters. Entities cross the boundary as JSON objects already shaped like
-//! the TS row mappers (清单 §3.1: column order, booleans, parsed JSON columns, removed keys), because the
+//! the TS row mappers (column order, booleans, parsed JSON columns, removed keys), because the
 //! API's job is to pass those shapes through byte-for-byte; typed structs on this side would only add a
 //! second place where the shape can drift.
 //!
-//! Concurrency (rust-hub-plan §3): [`Backend::reader`] is a read-pool connection used by read-only endpoints
+//! Concurrency: [`Backend::reader`] is a read-pool connection used by read-only endpoints
 //! without the core lock; [`Backend::writer`] holds steve-core's single lock for the duration of one
 //! synchronous closure, so a handler's read-check-write sequence is as atomic as it was in Node.
 
@@ -89,7 +89,7 @@ pub struct ImportedSession {
     pub created: f64,
 }
 
-/// What `summary()` adds to one item (清单 §2.2): computed per item by default, or for a whole workspace in
+/// What `summary()` adds to one item: computed per item by default, or for a whole workspace in
 /// a handful of queries by [`Repo::item_extras`].
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ItemExtras {
@@ -114,7 +114,7 @@ pub struct BotExtras {
 }
 
 /// Storage operations, one per repo.ts function the API layer calls. Writes publish their bus events
-/// (清单 §3.3) inside the store, exactly where repo.ts does. Every method has a default that reports
+/// inside the store, exactly where repo.ts does. Every method has a default that reports
 /// "not implemented" so the binary compiles before every adapter method exists; the contract test
 /// shows which ones are still missing.
 #[allow(unused_variables)]
@@ -384,7 +384,7 @@ pub trait Repo {
     fn deps_dependents(&self, item: &str) -> BResult<Vec<String>> {
         todo_backend!("deps_dependents")
     }
-    /// `{follow, origin_msg}` of an item made from the conversation (thread-routing §5), else `None`.
+    /// `{follow, origin_msg}` of an item made from the conversation, else `None`.
     fn thread_item(&self, item: &str) -> BResult<Option<Value>> {
         Ok(None)
     }
@@ -887,7 +887,7 @@ pub trait Domain: Send + Sync + 'static {
     async fn promote(&self, ws: &str, message: &str) -> BResult<Obj> {
         todo_backend!("promote")
     }
-    /// Thread routing (thread-routing §3.4–3.5): the result `{message_id, item?}` and whether it had been
+    /// Thread routing: the result `{message_id, item?}` and whether it had been
     /// handled before (the API answers 409 then). `to`: `inline` | `item` | `item:<ST-n>`.
     async fn reroute(&self, ws: &str, message: &str, to: &str) -> BResult<(Obj, bool)> {
         todo_backend!("reroute")

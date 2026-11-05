@@ -1,4 +1,4 @@
-//! JSON-RPC 2.0 over NDJSON on an adapter's stdio (acp.ts `startProcess` framing, §5.1–5.2).
+//! JSON-RPC 2.0 over NDJSON on an adapter's stdio (acp.ts `startProcess` framing).
 //!
 //! One [`Conn`] per adapter process. A reader task dispatches stdout lines: responses resolve
 //! pending requests, everything else goes to the caller's [`Incoming`] sink in arrival order.
@@ -101,7 +101,7 @@ pub struct Conn {
 
 impl Conn {
     /// Spawns the adapter in its own process group, so that killing the group also takes down the
-    /// harness it launches (claude under claude-agent-acp) — plan §2, inventory §13.11.
+    /// harness it launches (claude under claude-agent-acp).
     /// `on_incoming` runs on the reader task, in stdout order; `on_exit` runs once after exit.
     pub fn spawn(
         sp: Spawn,

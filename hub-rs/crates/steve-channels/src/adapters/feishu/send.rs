@@ -1,4 +1,4 @@
-//! Sending, replying and recalling as the bot (F3, feishu.md §2.2, §4). Only C6's
+//! Sending, replying and recalling as the bot. Only C6's
 //! `outbound::send` calls these, after the rules or you approved the message: nothing here
 //! decides to send.
 //!
@@ -82,7 +82,7 @@ pub fn receive_id_type(id: &str) -> &'static str {
     }
 }
 
-/// Whether a reply goes into the message's topic (feishu.md §2.2): in a topic group always, else
+/// Whether a reply goes into the message's topic: in a topic group always, else
 /// when the message is in a topic already (its `thread_key` is a Feishu thread id, `omt_…`).
 pub fn reply_in_thread(kind: SpaceKind, thread_key: Option<&str>) -> bool {
     kind == SpaceKind::Channel || thread_key.is_some_and(|t| t.starts_with("omt_"))

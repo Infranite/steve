@@ -1,4 +1,4 @@
-//! Applying one snapshot in one transaction (contacts.md §7): departments → org-chart teams of the own
+//! Applying one snapshot in one transaction: departments → org-chart teams of the own
 //! organization, people → contacts and accounts, membership, leads, `works_at` and `reports_to`.
 //!
 //! Rules beyond the spec's sentence, and why:
@@ -485,7 +485,7 @@ fn person(
         r.contacts += 1;
         touched.insert(p.id.clone());
     }
-    // the directory is an exact source: an unconfirmed contact becomes real (§2.5)
+    // the directory is an exact source: an unconfirmed contact becomes real
     let mut patch = PartyPatch::default();
     let (mut before, mut after) = (Map::new(), Map::new());
     if p.contact_kind.as_deref() == Some("unconfirmed") {

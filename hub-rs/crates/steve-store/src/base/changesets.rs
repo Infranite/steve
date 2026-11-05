@@ -1,4 +1,4 @@
-//! Persisted conversational-config drafts (`changesets`, §0.8): an ordered list of operations
+//! Persisted conversational-config drafts (`changesets`): an ordered list of operations
 //! `{"op":"<module>.<verb>", …}`, the preview lines, and after apply the `before` of every operation so
 //! it can be undone (24 hours). The engine that runs the operations is in steve-modules.
 

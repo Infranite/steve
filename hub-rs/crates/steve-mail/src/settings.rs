@@ -1,6 +1,6 @@
-//! Per-mailbox settings (`mail_account_settings`, email.md §1): signature, duty, send delay, archive
+//! Per-mailbox settings (`mail_account_settings`): signature, duty, send delay, archive
 //! on done, look-back days, append to “已发送”. Created with defaults on the first sync; changes are
-//! validated like `PATCH /mail/accounts/:connection_id` (§9) and written with a revision.
+//! validated like `PATCH /mail/accounts/:connection_id` and written with a revision.
 
 use serde::Deserialize;
 use serde_json::json;

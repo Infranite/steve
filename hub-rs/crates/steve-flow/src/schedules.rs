@@ -1,4 +1,4 @@
-//! Scheduled tasks as stored (schedules.md §2, §8): a `flows` row of `kind='schedule'` with the form
+//! Scheduled tasks as stored: a `flows` row of `kind='schedule'` with the form
 //! in `flows.schedule`, a generated two-node graph, a version history and one `flow_triggers` row
 //! of `kind='time'`. Everything here is synchronous SQL; resolving a `when` phrase (which may ask the
 //! model) happens before, in [`crate::api`] and [`crate::drafts`].
@@ -66,7 +66,7 @@ impl Mode {
     }
 }
 
-/// `flows.schedule` (§2).
+/// `flows.schedule`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Spec {
     /// The phrase as first said (“每周五 09:00”); the UI shows `describe(cron)`.
@@ -369,7 +369,7 @@ pub fn update(
     Ok(())
 }
 
-/// Deletes like a flow (§3.4): `deleted=1`, triggers removed; runs and items stay.
+/// Deletes like a flow: `deleted=1`, triggers removed; runs and items stay.
 pub fn delete(tx: &Tx, s: &Schedule, now: i64) -> FlowResult<()> {
     tx.execute(
         "UPDATE flows SET deleted = 1, enabled = 0, updated = ? WHERE id = ?",
@@ -383,7 +383,7 @@ pub fn delete(tx: &Tx, s: &Schedule, now: i64) -> FlowResult<()> {
     Ok(())
 }
 
-/// `Schedule.last` (§8).
+/// `Schedule.last`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Last {
     pub at: i64,

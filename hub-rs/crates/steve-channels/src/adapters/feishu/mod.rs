@@ -1,4 +1,4 @@
-//! Feishu / Lark open platform (feishu.md, feishu-lark-cli.md).
+//! Feishu / Lark open platform.
 //!
 //! - [`client`]: the REST client, token sources, the invalid-token retry (F1);
 //! - [`auth`]: the bot (`feishu_app`) and user (`feishu_user`) connection providers, tenant token
@@ -13,7 +13,7 @@
 //! - [`chats`]: group info, members, the bot's groups, member and chat events (F4);
 //! - [`user_oauth`], [`as_user`]: you — your Feishu account on “我”, sending as you (F6);
 //! - [`self_poll`]: you — your chats read with your user token about once a minute (F8);
-//! - [`profiles`]: names of people behind ids, through you first, then the bot (domain-model.md §2);
+//! - [`profiles`]: names of people behind ids, through you first, then the bot;
 //! - [`runtime`]: long connections and self pollers started / stopped as connections change.
 
 pub mod app_registration;

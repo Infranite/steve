@@ -1,4 +1,4 @@
-//! The channel adapter seam (channels-personas.md §2.1) and the adapter-neutral inbound message
+//! The channel adapter seam and the adapter-neutral inbound message
 //! every adapter turns its provider's payloads into before [`crate::Channels::on_inbound`].
 //!
 //! A [`ChannelAdapter`] extends the connection provider of the accounts module: the same object is
@@ -27,7 +27,7 @@ pub struct ChannelFeatures {
     pub reactions: bool,
 }
 
-/// The reactions Steve puts on a message it answers (channels-personas.md §2.11). Each adapter maps
+/// The reactions Steve puts on a message it answers. Each adapter maps
 /// them to its own emoji ([`ChannelAdapter::reaction_emoji`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -190,7 +190,7 @@ impl OutContent {
 }
 
 /// A change of a space or its members, as an adapter saw it (Feishu `im.chat.member.*`,
-/// `im.chat.updated_v1`, `im.chat.disbanded_v1`; feishu.md §3.2). [`crate::Channels::on_space_event`]
+/// `im.chat.updated_v1`, `im.chat.disbanded_v1`). [`crate::Channels::on_space_event`]
 /// applies it.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SpaceEvent {
@@ -344,7 +344,7 @@ impl InboundMessage {
     }
 }
 
-/// A channel provider (§2.1). Only Feishu is real in phase 1; [`crate::fake::channel::FakeChannel`]
+/// A channel provider. Only Feishu is real in phase 1; [`crate::fake::channel::FakeChannel`]
 /// is the scripted one for tests.
 #[async_trait]
 pub trait ChannelAdapter: ConnectionProvider {
@@ -418,7 +418,7 @@ pub trait ChannelAdapter: ConnectionProvider {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Profiles: who is behind a handle (domain-model.md §2 “补全资料”).
+// Profiles: who is behind a handle.
 
 /// What to look up: people seen in a space (its member list names them all at once), or handles on
 /// their own (the provider's directory).

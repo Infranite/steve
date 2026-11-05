@@ -1,4 +1,4 @@
-//! The executor (modules/yolo.md §2.1, §3, §5; Y2): looks at each new or changed decision, judges it
+//! The executor: looks at each new or changed decision, judges it
 //! with the facts from the database, and answers it the way the user's button would — core decisions
 //! through [`Core::resolve`], module decisions through `steve_modules::decisions::dispatch` — with the
 //! actor `yolo`. What it did or left alone goes to the ledger.
@@ -56,7 +56,7 @@ struct Inner {
     core: Core,
     yolo: Yolo,
     tools: Mutex<Tools>,
-    /// The model's answer per question card, asked once (§2.4).
+    /// The model's answer per question card, asked once.
     answers: Mutex<HashMap<String, super::judge::Answer>>,
     /// The channel recall for `recall` undos (set by the Hub).
     recall: std::sync::OnceLock<Arc<dyn super::undo::Recall>>,

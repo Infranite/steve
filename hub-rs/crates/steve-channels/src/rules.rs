@@ -1,4 +1,4 @@
-//! Response rules (channels-personas.md §2.4): their shape and validation, evaluation against one
+//! Response rules: their shape and validation, evaluation against one
 //! inbound message (first match wins, none = `record`, muted = everything but `handoff` becomes
 //! `record`), the `intent` judgement on the model gateway's fast tier, and the “转成流程” compile
 //! into a `kind=response` flow.
@@ -7,7 +7,7 @@
 //!
 //! Besides the conditions of §2.4, `mention` (only @) and `dm` (only private chats) are accepted:
 //! the prototype's accounts use “被 @” and “私聊” on their own, and your own account's default
-//! rules split “私聊你” from “群里 @你” (feishu-lark-cli.md §2.3).
+//! rules split “私聊你” from “群里 @你”.
 
 use std::time::Duration;
 
@@ -23,7 +23,7 @@ use crate::spaces::Mode;
 
 /// Rules per account or space.
 pub const MAX_RULES: usize = 20;
-/// `400` for `reply` on your own account (trigger words are the only exception, §2.7).
+/// `400` for `reply` on your own account (trigger words are the only exception).
 pub const SELF_NO_REPLY: &str = "以你本人接入时不能直接回复，只能起草";
 /// Keywords per rule, and their length.
 pub const MAX_WORDS: usize = 20;
@@ -32,7 +32,7 @@ pub const WORD_MAX: usize = 40;
 pub const INTENT_MAX: usize = 200;
 /// Parties and teams per `member` rule.
 pub const MAX_MEMBERS: usize = 50;
-/// Messages of context the `intent` judgement sees (§2.4: the last 5).
+/// Messages of context the `intent` judgement sees (the last 5).
 pub const INTENT_CONTEXT: usize = 5;
 /// The fast tier's limit for one `intent` judgement.
 pub const INTENT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -135,7 +135,7 @@ impl Act {
         }
     }
 
-    /// What a muted space does instead (§2.3 step 6).
+    /// What a muted space does instead.
     pub fn muted(self) -> Self {
         match self {
             Self::Handoff => Self::Handoff,
@@ -328,7 +328,7 @@ fn parse_when(v: &Value, field: &str, c: &mut steve_modules::Check) -> Option<Wh
     })
 }
 
-/// Validates a rule list (§2.4): a list of at most 20 `{when, act, mode?}`; your own account
+/// Validates a rule list: a list of at most 20 `{when, act, mode?}`; your own account
 /// (`mode=self`) may not `reply`. Field errors are `400 参数不对：rules.<i>.…`.
 pub fn parse(v: &Value, mode: Mode) -> ChannelResult<Vec<Rule>> {
     let Some(items) = v.as_array() else {
@@ -653,7 +653,7 @@ impl IntentJudge for GatewayJudge<'_> {
 
 // ---------------------------------------------------------------- trigger words
 
-/// `channel_settings.trigger` (§2.7): your own account's words that let Steve send as you.
+/// `channel_settings.trigger`: your own account's words that let Steve send as you.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Trigger {
     pub on: bool,
@@ -851,7 +851,7 @@ fn act_node(id: String, act: Act, owner: &str) -> Option<Node> {
     })
 }
 
-/// Compiles rules into a `kind=response` flow graph (§2.4): `trigger(message, spaces=[space])`,
+/// Compiles rules into a `kind=response` flow graph: `trigger(message, spaces=[space])`,
 /// then a `filter` per run of ordinary rules (one branch per rule) and a `bot` judgement per
 /// `intent` rule, each falling through to the next; every branch leads to its action node
 /// (`reply_as`, `item.create`, `notify`). Muting is compiled in (the flow replaces the rules, so a
@@ -977,7 +977,7 @@ fn push_act(
     }
 }
 
-/// The handoff's reply (§2.5).
+/// The handoff's reply.
 pub fn handoff_ack(owner: &str) -> String {
     format!("我请 {owner} 来看。")
 }
@@ -989,7 +989,7 @@ pub const FLOW_KIND: &str = "response";
 /// Its `origin_label`.
 pub const FLOW_ORIGIN_LABEL: &str = "由响应规则转成";
 
-/// `POST /spaces/:id/rules/to-flow` (§2.4): compiles the effective rules into a `kind=response`
+/// `POST /spaces/:id/rules/to-flow`: compiles the effective rules into a `kind=response`
 /// flow (enabled), writes its id to `flow_id`; a revision of the space, audit `space.to_flow`.
 /// With `nodes` the graph is validated against the registered node kinds first (`400` with the
 /// flow module's text). Already converted → `409`.

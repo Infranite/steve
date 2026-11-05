@@ -1,4 +1,4 @@
-//! Offers (thread-routing §3.4) and the items the conversation makes: an answer may end with “要我改吗？
+//! Offers and the items the conversation makes: an answer may end with “要我改吗？
 //! → 做成事项：<标题>”; taking it (button, or “好，改吧”) makes the item with the conversation as context.
 //! Not a decision: YOLO never takes one.
 
@@ -105,7 +105,7 @@ impl Core {
         Ok(())
     }
 
-    /// The opening of an item made from the conversation (§5.1): the related part of the conversation,
+    /// The opening of an item made from the conversation: the related part of the conversation,
     /// oldest first — the run of messages before the origin (gaps ≤30 min, ≤8 messages, ≤6000 chars)
     /// and everything up to the answer it grows out of, with the files that answer read.
     pub(crate) fn opening_for(
@@ -129,7 +129,7 @@ impl Core {
         let Some(at) = all.iter().position(|m| m.id == origin) else {
             return Ok(format!("这件事来自你和用户的主线对话。\n目标：{goal}"));
         };
-        /* a chat's conversation (channels §2.12): say where it came from */
+        /* a chat's conversation: say where it came from */
         let place = all[at]
             .meta
             .get("chan")

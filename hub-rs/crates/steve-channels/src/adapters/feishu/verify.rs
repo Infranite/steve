@@ -1,5 +1,5 @@
-//! Verifying a Feishu connection (feishu.md §2.1 `verify()`, §2.5 the permission table,
-//! feishu-lark-cli.md §2.1/§2.4): who the bot or user is, that the app is a 企业自建应用, and which
+//! Verifying a Feishu connection (`verify()`):
+//! who the bot or user is, that the app is a 企业自建应用, and which
 //! permissions are actually enabled.
 
 use serde::Serialize;
@@ -23,7 +23,7 @@ pub enum Level {
     Suggested,
     /// Directory sync (P6).
     Directory,
-    /// Names of the people Steve meets (domain-model.md §2): without them people stay “未知飞书用户”.
+    /// Names of the people Steve meets: without them people stay “未知飞书用户”.
     Names,
     /// Optional, asked for only with the user's explicit consent.
     Optional,
@@ -47,7 +47,7 @@ const fn p(scope: &'static str, purpose: &'static str, level: Level) -> Permissi
     }
 }
 
-/// The bot (tenant) permissions, feishu.md §2.5 with feishu-lark-cli.md §3.
+/// The bot (tenant) permissions Steve checks.
 pub const BOT_PERMISSIONS: &[Permission] = &[
     p("im:message", "发消息、回复", Level::Required),
     p(
@@ -118,7 +118,7 @@ pub const BOT_PERMISSIONS: &[Permission] = &[
     ),
 ];
 
-/// The user permissions (feishu-lark-cli.md §2.4, §4).
+/// The user permissions.
 pub const USER_PERMISSIONS: &[Permission] = &[
     p("offline_access", "保持授权（刷新令牌）", Level::Required),
     p("im:message", "以你本人读写消息", Level::Required),
@@ -429,7 +429,7 @@ pub enum AppKind {
 
 /// Self-built or not: `application/v6/applications/{app_id}` `scene_type` (0 = 自建) when the app
 /// may read its own info; otherwise the long-connection endpoint, which only self-built apps get
-/// (feishu-lark-cli.md §0 (d); 403 = not self-built). Both answers are 实测 items for F7.
+/// (403 = not self-built).
 pub async fn app_kind(
     client: &FeishuClient,
     tokens: &dyn TokenSource,
@@ -441,7 +441,7 @@ pub async fn app_kind(
 
 /// [`app_kind`] and the app's owner from the same app info: `owner.owner_id` as a `union_id` (the
 /// handle of a Feishu user account) when the owner is a member of the tenant (`owner.type` 2, or no
-/// type given). ownership.md §3: that person becomes the app bot's 负责人.
+/// type given). That person becomes the app bot's 负责人.
 pub async fn app_info(
     client: &FeishuClient,
     tokens: &dyn TokenSource,
@@ -487,7 +487,7 @@ pub async fn app_info(
     (kind, None)
 }
 
-/// The bot permission check of the connect dialog (feishu.md §2.5): `GET im/v1/chats?page_size=1`
+/// The bot permission check of the connect dialog: `GET im/v1/chats?page_size=1`
 /// tells `im:chat:readonly`, then one message of a group the bot is in tells `im:message.group_msg`,
 /// and `contact/v3/scopes` tells the directory base scope. A missing-scope answer marks the row
 /// 未开通; the rest can't be checked without sending and stay 以控制台为准.
@@ -559,8 +559,8 @@ pub async fn check_bot_permissions(
         .collect()
 }
 
-/// The user permission check: the scopes the grant actually has (feishu-lark-cli.md §2.4 “把实际
-/// 授予的 scope 存下来”). An empty list means Feishu didn't say: everything stays unknown.
+/// The user permission check: the scopes the grant actually has, as stored.
+/// An empty list means Feishu didn't say: everything stays unknown.
 pub fn check_user_scopes(granted: &[String]) -> Vec<PermissionCheck> {
     USER_PERMISSIONS
         .iter()
@@ -579,13 +579,13 @@ pub fn check_user_scopes(granted: &[String]) -> Vec<PermissionCheck> {
         .collect()
 }
 
-/// The rejection of a store app (feishu-lark-cli.md §2.6: long connection and the user identity
+/// The rejection of a store app (long connection and the user identity
 /// only work for self-built apps).
 pub const NOT_SELF_BUILT: &str = "这不是企业自建应用。Steve 只支持企业自建应用：请在飞书开发者后台新建一个企业自建应用并打开机器人能力";
 
 /// `verify()` of the bot connection: bot info (`app_name`, the bot's `open_id`), self-built check,
 /// permission check. Account: handle `app_id` (`feishu_app`), display name `app_name`, the bot's
-/// `open_id` as a handle under this connection, owned by a bot party of its own (ownership.md §1).
+/// `open_id` as a handle under this connection, owned by a bot party of its own.
 pub async fn verify_app(cx: &ConnCx) -> Result<AccountInfo, ProviderError> {
     let app_id = cx
         .config_str("app_id")
@@ -606,7 +606,7 @@ pub async fn verify_app(cx: &ConnCx) -> Result<AccountInfo, ProviderError> {
     let perms = check_bot_permissions(&client, &tokens).await;
     let mut a = AccountInfo::new(app_id, bot.app_name.clone());
     a.kind = "app_bot".into();
-    // ownership.md §1: an app bot is its own bot party; the app's owner is its 负责人
+    // an app bot is its own bot party; the app's owner is its 负责人
     a.owner = Owner::Bot;
     a.steward_hint = owner.map(|handle| StewardHint {
         system: super::auth::USER_SYSTEM.into(),

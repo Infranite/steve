@@ -1,4 +1,4 @@
-//! Flow-back (thread-routing §5.2), as one living card per item: an item made from the conversation
+//! Flow-back, as one living card per item: an item made from the conversation
 //! has exactly one card in it (`meta.card` on one message), updated in place as the item moves —
 //! running, waiting for you, delivered, released, failed, done — with the latest delivery summary and
 //! the latest reply to something forwarded from the conversation. Lifecycle events never post a message

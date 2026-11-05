@@ -1,4 +1,4 @@
-//! The contact page's “往来” (contacts.md `TimelineSource`, email.md §3.5 step 7): mail from a party
+//! The contact page's “往来”: mail from a party
 //! or to it, newest first, only in threads the viewer may see. Mail recorded under a contact that was
 //! later merged into this one counts too.
 

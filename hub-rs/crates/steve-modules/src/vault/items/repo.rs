@@ -387,7 +387,7 @@ pub fn insert_field(c: &Connection, ws: &str, f: &FieldRow) -> Result<()> {
     Ok(())
 }
 
-/// Whole-value replacement (§4.1: no read-modify-write of a secret).
+/// Whole-value replacement (no read-modify-write of a secret).
 pub fn set_field_value(
     c: &Connection,
     id: &str,
@@ -484,7 +484,7 @@ pub fn project_name(c: &Connection, ws: &str, id: &str) -> Result<Option<String>
     )
 }
 
-/// A `secret_uses` row (§4.5). Holds no value.
+/// A `secret_uses` row. Holds no value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UseRow {
     pub id: String,
@@ -520,7 +520,7 @@ pub fn insert_use(c: &Connection, ws: &str, u: &UseRow) -> Result<()> {
 }
 
 /// Whether an `internal` use with this status was already recorded for the item and actor since
-/// `since` (§4.4: internal uses are merged into one row per connection and day; failures each get one).
+/// `since` (internal uses are merged into one row per connection and day; failures each get one).
 pub fn has_internal_use(
     c: &Connection,
     ws: &str,

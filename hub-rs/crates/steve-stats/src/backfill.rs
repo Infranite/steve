@@ -1,4 +1,4 @@
-//! The one-off backfill (stats.md §2.7): turns, session-level costs and item marks reconstructed from the
+//! The one-off backfill: turns, session-level costs and item marks reconstructed from the
 //! tables that existed before migration 15 (`events`, `sessions`, `items`, `audit`, `timeline`,
 //! `decisions`). Every row it writes is marked (`backfill = 1`, or `source = 'backfill'` for token
 //! records), so a run first deletes the previous run's rows: running it again gives the same result.

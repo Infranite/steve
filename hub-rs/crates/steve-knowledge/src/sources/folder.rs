@@ -1,4 +1,4 @@
-//! Folder sources (knowledge.md §2.1–2.2): a Markdown / text folder on the Hub (a wiki, an Obsidian
+//! Folder sources: a Markdown / text folder on the Hub (a wiki, an Obsidian
 //! vault), scanned every 10 minutes and on demand, read only, never written back.
 //!
 //! - [`check_path`]: the whitelist-style path check, `400 这个目录不能加入知识库：<原因>`;
@@ -27,7 +27,7 @@ use crate::service;
 use crate::sources::{is_builtin, source_json};
 use crate::state::Knowledge;
 
-/// Prefix of every refused path (§2.2).
+/// Prefix of every refused path.
 pub const PATH_REFUSED: &str = "这个目录不能加入知识库";
 /// A folder outside `$HOME` and `/Volumes` (coordinator decision, 2026-11-01).
 pub const OUTSIDE_HOME: &str = "只能添加你主目录或外接磁盘里的文件夹";
@@ -205,7 +205,7 @@ pub fn format_of(mime: &str, name: &str, bytes: &[u8]) -> Format {
     }
 }
 
-/// Extracts on the right thread: text inline, binary formats isolated (§2.3).
+/// Extracts on the right thread: text inline, binary formats isolated.
 pub async fn load_bytes(format: Format, bytes: Vec<u8>) -> Loaded {
     let r = match format {
         // inline extraction is still parsing: off the runtime too
@@ -310,7 +310,7 @@ pub fn narrows(base: &Visibility, v: &Visibility) -> bool {
     }
 }
 
-/// Applies a document's front matter (§2.3: `title`, `tags`, `steve.level`, `steve.visibility`
+/// Applies a document's front matter (`title`, `tags`, `steve.level`, `steve.visibility`
 /// override the document's settings) and returns the row again. Which fields came from the front
 /// matter is remembered in `kb_marks front:<doc>`, so removing a field from the file hands the
 /// setting back to the source. Uploaded files keep the title they were added with.
@@ -595,7 +595,7 @@ pub async fn scan_all(m: &Modules, kb: &Knowledge) -> usize {
     n
 }
 
-/// The `kb.folder_scan` job (§10): clears syncing states left by a previous run, then scans all
+/// The `kb.folder_scan` job: clears syncing states left by a previous run, then scans all
 /// folder sources now and every 10 minutes. The integrator starts it once.
 pub fn spawn_scans(m: Modules, kb: Knowledge) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
@@ -624,7 +624,7 @@ pub fn spawn_scans(m: Modules, kb: Knowledge) -> tokio::task::JoinHandle<()> {
     })
 }
 
-// ---- REST operations (§6.2)
+// ---- REST operations
 
 /// `own_source(ws, me, id)`: in the caller's workspace; a folder source also visible to them.
 pub fn own_source(c: &Connection, who: &Caller, id: &str) -> ApiResult<SourceRow> {
@@ -679,7 +679,7 @@ pub struct SourceBody {
     pub level: Option<Level>,
 }
 
-/// A folder source that passed the request and path checks (§2.2), ready to insert. Shared by
+/// A folder source that passed the request and path checks, ready to insert. Shared by
 /// `POST /kb/sources` and the `kb.source.create` draft operation.
 #[derive(Debug, Clone, PartialEq)]
 pub struct NewFolder {

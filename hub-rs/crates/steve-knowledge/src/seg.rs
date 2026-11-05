@@ -1,4 +1,4 @@
-//! Tokenizing for the `kb_fts` index (knowledge.md §3.1–3.2).
+//! Tokenizing for the `kb_fts` index.
 //!
 //! SQLite's `unicode61` tokenizer treats a whole run of Han characters as one token, so a
 //! search for “部署” would never find “部署脚本”. Instead of a dictionary segmenter (jieba keeps
@@ -103,7 +103,7 @@ fn quote(term: &str) -> String {
     format!("\"{}\"", term.replace('"', "\"\""))
 }
 
-/// Builds the FTS5 `MATCH` expression for a search text (§3.2); `None` when nothing searchable
+/// Builds the FTS5 `MATCH` expression for a search text; `None` when nothing searchable
 /// remains (empty input, only punctuation or emoji).
 ///
 /// - CJK run of 2–4 characters → one phrase of its bigrams (adjacent bigrams = the original
@@ -164,7 +164,7 @@ fn build_query(text: &str, phrases: bool) -> Option<String> {
 }
 
 /// True when the whole query is one CJK character (after trimming): bigram indexing cannot
-/// answer it well, so retrieval falls back to `LIKE` on titles and memory text (§3.2).
+/// answer it well, so retrieval falls back to `LIKE` on titles and memory text.
 pub fn is_single_cjk(text: &str) -> bool {
     let folded = fold(text);
     let mut it = folded.trim().chars();

@@ -1,4 +1,4 @@
-//! Persona bindings (channels-personas.md §1, §2.2, §2.7): which persona speaks for a bot account
+//! Persona bindings: which persona speaks for a bot account
 //! (`space_id = ''`, the account default) and, optionally, in one space. The effective persona of a
 //! space = space binding ?? account default ?? the workspace's default persona “Steve”.
 //!
@@ -87,7 +87,7 @@ impl Effective {
     }
 }
 
-/// The effective persona of a space (§2.7). `None` for spaces of your own accounts, or when the
+/// The effective persona of a space. `None` for spaces of your own accounts, or when the
 /// workspace has no default persona yet (no Bot to seed it with).
 pub fn effective(c: &Connection, space: &SpaceRow) -> ChannelResult<Option<Effective>> {
     // disconnected: nobody speaks there any more
@@ -227,7 +227,7 @@ fn upsert(
     Ok(())
 }
 
-/// A persona is going away (§3): account defaults on it move to `fallback`, space bindings on it are
+/// A persona is going away: account defaults on it move to `fallback`, space bindings on it are
 /// dropped (back to following the account). Publishes `channel` / `space` for what moved.
 pub(crate) fn release(
     tx: &Tx,

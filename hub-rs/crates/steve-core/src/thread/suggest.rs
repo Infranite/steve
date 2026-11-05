@@ -1,4 +1,4 @@
-//! Suggestion cards (thread-routing §3.4): when the router is unsure whether a message is work, Steve asks
+//! Suggestion cards: when the router is unsure whether a message is work, Steve asks
 //! with a card — “在这里出方案 / 建成事项：<标题>” — instead of quietly making an item. Only in the
 //! conversation (not in the inbox), never taken by YOLO, greyed out after 24 hours but still clickable.
 
@@ -12,7 +12,7 @@ use crate::repo::{FileRef, Item};
 use crate::util::now;
 use serde_json::{Value, json};
 
-/// After this long an unanswered card is `expired` (§3.4).
+/// After this long an unanswered card is `expired`.
 const EXPIRES: i64 = 24 * 3600 * 1000;
 
 /// The card's text and `meta.suggest` for a route the guards turned into a suggestion. About an existing

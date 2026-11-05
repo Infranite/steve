@@ -121,7 +121,7 @@ pub struct App {
     pub user_scopes: Vec<String>,
 }
 
-/// The user scopes feishu-lark-cli.md §2.4 asks for.
+/// The user scopes Steve asks for.
 pub const USER_SCOPES: &[&str] = &[
     "offline_access",
     "im:message",
@@ -299,7 +299,7 @@ pub struct World {
     pub groups: Vec<UserGroup>,
     /// The user who completes the fake OAuth flow (F6).
     pub oauth_user_open_id: String,
-    /// Open question (b) of feishu-lark-cli.md: whether a user token can read a group the bot
+    /// Open question (b): whether a user token can read a group the bot
     /// isn't in. `false` (default) lets it; `true` answers "bot not in chat".
     pub user_read_requires_bot: bool,
     /// Whether user-identity search finds messages of groups without the bot (also open).

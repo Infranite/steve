@@ -1,4 +1,4 @@
-//! Slice P5 acceptance (contacts.md §5, §9): with a scripted model gateway, the two examples of §5 give
+//! Slice P5 acceptance: with a scripted model gateway, the two examples of §5 give
 //! the expected operations and preview lines, apply writes the data and undo puts it back exactly;
 //! names that are not recognized show “（没认出：X）” instead of being guessed. Plus the other fields and
 //! operations of the three targets, staleness (409), org-chart limits and the `global` candidates.

@@ -1,5 +1,5 @@
 //! Long-connection (WebSocket) event client, a port of larksuite/oapi-sdk-go `ws/`
-//! (read at commit db9f52d, 2026-10-15). feishu-lark-cli.md §2.2.
+//! (read at commit db9f52d, 2026-10-15).
 //!
 //! Protocol, as the Go SDK implements it:
 //! 1. `POST {base}/callback/ws/endpoint {"AppID","AppSecret","ClientAssertion":""}` →

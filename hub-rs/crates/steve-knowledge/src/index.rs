@@ -1,4 +1,4 @@
-//! Writing the retrieval index (knowledge.md §2.4–2.5): `kb_chunks` rows and their `kb_fts` twins,
+//! Writing the retrieval index: `kb_chunks` rows and their `kb_fts` twins,
 //! always in the same transaction so the FTS index never points at a missing or stale chunk.
 //!
 //! Two ways in: [`index_doc`] for a document whose text is at hand (notes, inline on save), and the
@@ -21,10 +21,10 @@ use crate::repo::{self, DocRow, SourceRow};
 use crate::seg::seg;
 use crate::state::{Guard, Knowledge, redact};
 
-/// Documents per transaction in the queue worker (§2.5).
+/// Documents per transaction in the queue worker.
 pub const BATCH: usize = 20;
 
-/// Display text of a chunk is cut to this many characters (`kb_chunks.text`, §1).
+/// Display text of a chunk is cut to this many characters (`kb_chunks.text`).
 pub const MAX_CHUNK_TEXT: usize = 1200;
 
 /// What every index row of one object shares.
@@ -113,7 +113,7 @@ fn remove_rows(tx: &Tx, obj_type: &str, obj_id: &str) -> Result<usize> {
         .execute([obj_type, obj_id])?)
 }
 
-/// Rewrites visibility and level of an object's index rows (scope changes, §1).
+/// Rewrites visibility and level of an object's index rows (scope changes).
 pub fn rescope(
     tx: &Tx,
     obj_type: &str,
@@ -136,7 +136,7 @@ pub fn rescope(
 }
 
 /// Rewrites the scope of every document that follows `source` (after the source's visibility or
-/// level changed, §1); documents with their own setting keep it. For `mems` nothing follows
+/// level changed); documents with their own setting keep it. For `mems` nothing follows
 /// (memories carry their own); `bot_mems` entries all follow.
 pub fn rescope_source(tx: &Tx, source: &SourceRow) -> Result<usize> {
     if source.kind == "mems" {
@@ -189,7 +189,7 @@ pub fn rescope_source(tx: &Tx, source: &SourceRow) -> Result<usize> {
     Ok(n)
 }
 
-/// `"<prefix> · <title>"`, the citation label of a document (§1, “笔记 · Acme 合同说明”); an item's
+/// `"<prefix> · <title>"`, the citation label of a document (“笔记 · Acme 合同说明”); an item's
 /// document is its 事项记录, a day of the main thread its 会话记录 (ST-41).
 pub fn doc_label(source: &SourceRow, title: &str) -> String {
     let prefix = match source.kind.as_str() {
@@ -286,7 +286,7 @@ pub enum Loaded {
 pub trait DocLoader: Send + Sync {
     fn kinds(&self) -> &[&str];
     /// Whether this loader reads `doc` (of one of its kinds). Lets another module own some documents
-    /// of a built-in source (mail threads added to `files`, email.md §8); the first loader that
+    /// of a built-in source (mail threads added to `files`); the first loader that
     /// accepts wins, so such loaders are registered before the built-in one.
     fn accepts(&self, doc: &DocRow) -> bool {
         let _ = doc;
@@ -300,7 +300,7 @@ pub trait DocLoader: Send + Sync {
     ) -> BoxFuture<'a, Loaded>;
 }
 
-/// Starts the index worker (§2.5, job `kb.index`) and connects [`Knowledge::enqueue`] to it.
+/// Starts the index worker (job `kb.index`) and connects [`Knowledge::enqueue`] to it.
 /// Call once at startup; a second call returns `None`.
 pub fn spawn_worker(m: Modules, kb: Knowledge) -> Option<tokio::task::JoinHandle<()>> {
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
@@ -390,7 +390,7 @@ pub async fn run_batch(m: &Modules, kb: &Knowledge, ids: &[String]) -> Result<()
                 };
                 match loaded {
                     Loaded::Text(ex) => {
-                        // A wiki page or uploaded Markdown may set its own title, tags and scope (§2.3).
+                        // A wiki page or uploaded Markdown may set its own title, tags and scope.
                         let fronted;
                         let d = if matches!(src.kind.as_str(), "folder" | "files") {
                             fronted =

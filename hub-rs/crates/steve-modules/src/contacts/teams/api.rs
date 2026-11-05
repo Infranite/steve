@@ -1,4 +1,4 @@
-//! REST handlers of slice P2 (contacts.md §3.2, the `/teams` rows). Merged into [`super::super::routes`],
+//! REST handlers of slice P2 (the `/teams` rows). Merged into [`super::super::routes`],
 //! which adds the [`Ports`] extension.
 
 use std::sync::Arc;

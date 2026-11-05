@@ -1,4 +1,4 @@
-//! The redactor (accounts-vault.md §4.4): replaces injected secret values in text with
+//! The redactor: replaces injected secret values in text with
 //! `[已打码：<字段>]`, in every form a command is likely to print them in:
 //!
 //! - the raw value, and JSON-escaped when that differs;
@@ -30,7 +30,7 @@ use data_encoding::{
 use serde_json::Value;
 use zeroize::Zeroizing;
 
-/// How long a session keeps an injected value in its redactor (§4.4).
+/// How long a session keeps an injected value in its redactor.
 pub const SESSION_TTL: Duration = Duration::from_secs(3600);
 
 /// Values shorter than this are only matched raw, and derived forms shorter than `MIN_DERIVED` are

@@ -1,4 +1,4 @@
-//! Accounts and identification (slice A1 of steve-rs-plan/modules/accounts-vault.md): systems, accounts
+//! Accounts and identification (slice A1): systems, accounts
 //! (some party's identity in some system), their handles, the `email_prefix` match rule, and
 //! [`identify::identify`], which turns a handle seen on a channel, in mail or in a directory into an
 //! account and a contact.
@@ -59,7 +59,7 @@ pub fn plug(p: &mut Ports) {
     p.handles = Some(Arc::new(AccountHandles));
 }
 
-/// [`PartyHooks`] of the accounts module (§2.1). Its merge result is kept under `moved.hooks.vault`:
+/// [`PartyHooks`] of the accounts module. Its merge result is kept under `moved.hooks.vault`:
 /// `{"accounts": [<moved account ids>]}`.
 pub struct AccountHooks;
 

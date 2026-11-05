@@ -1,4 +1,4 @@
-//! K1 acceptance (knowledge.md §12): notes searchable on save, private notes invisible to others,
+//! K1 acceptance: notes searchable on save, private notes invisible to others,
 //! `never` memories never returned, source scope changes reach the index, deleted memories leave
 //! it, old Bot memories become searchable after a sync; plus the REST shapes and error codes.
 

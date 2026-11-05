@@ -1,4 +1,4 @@
-//! `/api/yolo` (modules/yolo.md §7): the workspace switch, project and item scopes, resuming after the
+//! `/api/yolo`: the workspace switch, project and item scopes, resuming after the
 //! breaker (Y0), and the ledger (Y6): the digest, undo, and the cool-down buttons “现在” / “我来定”.
 //! Mounted with the module routes, so the caller comes from the `Caller` layer and errors are the
 //! module kind (`400 参数不对：…`, `404 没有这个…`, `409 …`).

@@ -1,5 +1,5 @@
 //! What the fakes need to know about a message, read once with `mail-parser`
-//! (the same parser the real sync uses, email.md §3.1).
+//! (the same parser the real sync uses).
 
 use mail_parser::{AddressList, MessageParser};
 

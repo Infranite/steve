@@ -6,7 +6,7 @@ publish.workspace = true
 description = "Accounts, connections and the secret vault"
 
 [dependencies]
-# V4: the session redactor (accounts-vault.md §4.4) and the paste guard (§4.6). Kept free of the store so
+# V4: the session redactor and the paste guard. Kept free of the store so
 # steve-core, steve-knowledge and the channels can call them without pulling in the vault service.
 aho-corasick = "=1.1.5"
 data-encoding = "=2.11.1"

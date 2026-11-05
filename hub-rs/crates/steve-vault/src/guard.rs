@@ -1,4 +1,4 @@
-//! The paste guard (accounts-vault.md §4.6): finds passwords, tokens, private keys and card numbers in
+//! The paste guard: finds passwords, tokens, private keys and card numbers in
 //! text a person typed (`POST /api/thread`, `POST /api/config/draft`) or a source brought in (knowledge
 //! base, event bodies, channel messages), so they are replaced before anything is stored or sent to a
 //! model.
@@ -21,9 +21,9 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
-/// What a hit is replaced with before storing or routing the text (§4.6), verbatim.
+/// What a hit is replaced with before storing or routing the text, verbatim.
 pub const REPLACEMENT: &str = "［已拦下的机密］";
-/// Steve's fixed answer when a message was intercepted (§4.6), verbatim.
+/// Steve's fixed answer when a message was intercepted, verbatim.
 pub const REPLY: &str = "看起来你发了一个密码或令牌，我没有记下它。请在保险箱里新建条目保存。";
 /// Where [`REPLY`] links to.
 pub const REPLY_HREF: &str = "#/vault";
@@ -160,7 +160,7 @@ pub fn redact(text: &str) -> Option<String> {
     Some(out)
 }
 
-/// What `POST /api/thread` and `POST /api/config/draft` do with a message (§4.6).
+/// What `POST /api/thread` and `POST /api/config/draft` do with a message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Intercepted {
     /// The text to store and route: the original, or with the hits replaced.

@@ -1,4 +1,4 @@
-//! The only way mail leaves Steve (email.md §5.4): an approval decision answered `send`, a delay you can
+//! The only way mail leaves Steve: an approval decision answered `send`, a delay you can
 //! undo, then [`Mail::execute`] — which checks the approval again, builds the MIME, refuses registered
 //! vault secrets, and calls the adapter. `MailAdapter::send(` appears nowhere else in this crate.
 //!
@@ -53,7 +53,7 @@ pub const SEND_CAP: &str = "mail.send";
 pub const ERR_NO_APPROVAL: &str = "没有有效的批准";
 pub const ERR_SECRET: &str = "正文里有保险箱里的机密，已拦下";
 
-/// The vault's redactor as the sender needs it (accounts-vault.md §4.4; V4 implements it). Answers the
+/// The vault's redactor as the sender needs it (V4 implements it). Answers the
 /// field labels of registered secret values found in `text`; any hit blocks the mail.
 pub trait SecretScan: Send + Sync {
     fn find(&self, ws: &str, text: &str) -> Vec<String>;
@@ -71,7 +71,7 @@ impl SecretScan for NoSecrets {
 /// What steve-core does for drafts (the integrator implements it; calls come after the commit or from
 /// inside the decision's transaction, so implementations should only queue work).
 pub trait DraftHooks: Send + Sync {
-    /// `no` on a draft written in a session: tell the agent (steve-core's `send`, list §6.5).
+    /// `no` on a draft written in a session: tell the agent (steve-core's `send`).
     fn rejected(&self, ws: &str, session_id: &str, item_id: Option<&str>, message: &str) {
         let _ = (ws, session_id, item_id, message);
     }
@@ -635,7 +635,7 @@ impl Mail {
         })
     }
 
-    /// Sends one approved draft whose delay is over (§5.4). Never sends without a resolved `send`
+    /// Sends one approved draft whose delay is over. Never sends without a resolved `send`
     /// decision for exactly this content; refusals write `mail.send.blocked`.
     pub async fn execute(&self, draft_id: &str) -> MailResult<SendOutcome> {
         let Some(_activity) = self.0.m.store.try_activity("mail_send") else {

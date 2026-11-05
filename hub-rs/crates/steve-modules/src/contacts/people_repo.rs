@@ -1,4 +1,4 @@
-//! SQL of slice P3 (contacts.md §2.6, §2.8, §3.2, §4): items linked to parties, the workspace's bots for
+//! SQL of slice P3: items linked to parties, the workspace's bots for
 //! the `@` menu, item timeline lines, and the candidate side of memories (`mem_candidates`, migration 8).
 //! Kept apart from [`super::repo`] so the slices of one wave do not edit the same file.
 
@@ -9,7 +9,7 @@ use steve_store::{Cached, ChangeEvent, Result, Tx, now};
 
 use super::repo::Party;
 
-/// The item ↔ party roles of `links` (§2.3).
+/// The item ↔ party roles of `links`.
 pub const ROLES: [&str; 5] = ["raised_by", "related", "waiting_on", "about", "attendee"];
 
 /// The few item columns the contacts module needs.
@@ -131,7 +131,7 @@ pub fn team_member_ids(c: &Connection, ws: &str, team: &str) -> Result<Vec<Strin
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
-/// Is the team an org-chart team (its count goes over the sub-tree, §2.4)?
+/// Is the team an org-chart team (its count goes over the sub-tree)?
 pub fn is_chart(c: &Connection, team: &str) -> Result<bool> {
     Ok(
         c.prepare_cached("SELECT 1 FROM team_details WHERE party_id = ? AND kind = 'chart'")?
@@ -160,7 +160,7 @@ pub fn timeline_add(tx: &Tx, item: &str, actor: &str, kind: &str, text: &str) ->
     Ok(())
 }
 
-// ---------------------------------------------------------------- candidate memories (knowledge.md §5)
+// ---------------------------------------------------------------- candidate memories
 
 /// The `mem_candidates` row of a candidate written by an agent tool.
 pub struct NewCandidate<'a> {
@@ -184,7 +184,7 @@ pub fn candidate_delete(tx: &Tx, mem_id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Open `confirm` decisions about memories in the workspace (at most 20 at a time, knowledge.md §5.2).
+/// Open `confirm` decisions about memories in the workspace (at most 20 at a time).
 pub fn open_mem_confirms(c: &Connection, ws: &str) -> Result<i64> {
     Ok(c.row(
         "SELECT COUNT(*) FROM decisions WHERE workspace_id = ? AND kind = 'confirm' AND subject_type = 'mem' AND status = 'open'",

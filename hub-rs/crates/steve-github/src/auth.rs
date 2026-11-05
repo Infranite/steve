@@ -1,4 +1,4 @@
-//! GitHub App authentication (github.md §1.1 step 4): the App JWT (RS256, `iat = now-60`,
+//! GitHub App authentication: the App JWT (RS256, `iat = now-60`,
 //! `exp = now+540`, `iss = app id`) and installation tokens.
 //!
 //! Caching: the GitHub App adapter declares `TokenKind::Minted`, so the connections framework keeps

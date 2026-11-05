@@ -1,4 +1,4 @@
-//! The `flow` draft target (signals-automation.md §8): `flow:<id>`, what is said in the main
+//! The `flow` draft target: `flow:<id>`, what is said in the main
 //! conversation (“GitHub 通知以后都忽略”). The model gets the current graph and answers with graph
 //! edits (`node.add`, `node.update`, `node.remove`, `edge.add`, `edge.remove`); the server applies
 //! them to the graph, validates the result like `PUT /flows/:id`, and stores one `flow.save {graph}`
@@ -560,7 +560,7 @@ impl DraftTarget for FlowTarget {
 
 /// `flow.save {id, graph, note?, author?}`: the graph as a new version (validated again at
 /// apply). Author `steve` unless given (Steve drafted it, you confirmed). Undo saves the graph
-/// from before as one more version: versions only ever grow (§3.4).
+/// from before as one more version: versions only ever grow.
 pub struct SaveOp(pub Arc<LateFlow>);
 
 impl ChangeOp for SaveOp {

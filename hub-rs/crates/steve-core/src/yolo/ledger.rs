@@ -1,4 +1,4 @@
-//! The ledger (modules/yolo.md §3.3): every decision YOLO looked at gets a `yolo_actions` row, and
+//! The ledger: every decision YOLO looked at gets a `yolo_actions` row, and
 //! what it answered carries `decided_by: "yolo"` in the decision's `result`, next to the action, rule
 //! and reason. Also the streaks the table needs (automatic continues without progress).
 

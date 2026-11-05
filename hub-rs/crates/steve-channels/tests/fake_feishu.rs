@@ -14,7 +14,7 @@ use steve_channels::adapters::feishu::crypto;
 use steve_channels::fake::feishu::{Endpoint, FakeFeishu, fixture, fixtures_dir, ids};
 
 // ---------------------------------------------------------------------------------------------
-// A minimal hook receiver that follows feishu.md §3.1 using only the library crypto.
+// A minimal hook receiver that decrypts and verifies Feishu events using only the library crypto.
 
 #[derive(Default)]
 struct Hook {

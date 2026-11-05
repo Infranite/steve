@@ -1,4 +1,4 @@
-//! REST handlers of slice A1 (accounts-vault.md §5.2: systems, accounts, match rules). Thin: parse,
+//! REST handlers of slice A1 (systems, accounts, match rules). Thin: parse,
 //! run the service off the runtime, shape the answer.
 
 use axum::extract::{Path, Query, State};

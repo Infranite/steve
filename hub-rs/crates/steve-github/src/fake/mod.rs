@@ -1,4 +1,4 @@
-//! A fake GitHub for tests (feature `fake`), github.md §11.
+//! A fake GitHub for tests (feature `fake`).
 //!
 //! [`FakeGitHub::start`] serves the REST subset Steve uses on a random local
 //! port; pass [`FakeGitHub::url`] as the connection's `api_base`. The world

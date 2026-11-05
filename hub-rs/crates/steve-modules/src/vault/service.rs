@@ -1,4 +1,4 @@
-//! Key lifecycle (accounts-vault.md §3.2): init, recover, rotate with background re-wrapping, and the
+//! Key lifecycle: init, recover, rotate with background re-wrapping, and the
 //! data-key calls slice V2 builds on. Synchronous (store and key store both block); the API runs it
 //! with [`Vault::blocking`].
 
@@ -15,7 +15,7 @@ use super::keystore::{KeyStore, KeyStoreError, account_name};
 use super::repo::{self, ACTIVE, RETIRED, RETIRING};
 use super::secret::{Dek, Kek, RecoveryCode};
 
-/// Items re-wrapped per transaction (§3.2).
+/// Items re-wrapped per transaction.
 const BATCH: usize = 100;
 
 /// The vault service. Cheap to clone; one per Hub process (the KEK cache lives here).
@@ -25,7 +25,7 @@ pub struct Vault(Arc<Inner>);
 struct Inner {
     store: Store,
     keys: Arc<dyn KeyStore>,
-    /// `(workspace, version) → KEK`, filled on first use, gone when the process exits (§3.1).
+    /// `(workspace, version) → KEK`, filled on first use, gone when the process exits.
     cache: Mutex<HashMap<(String, i64), Arc<Kek>>>,
     /// Serializes init / recover / starting a rotation, so two requests can't write the same entry.
     lifecycle: Mutex<()>,
@@ -44,7 +44,7 @@ pub enum Keychain {
     Denied,
 }
 
-/// `GET /vault/status`: which store holds the master keys (§3.3).
+/// `GET /vault/status`: which store holds the master keys.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct KeyStoreInfo {
     /// `keychain`, `secret-service`, `dir` or `file` ([`KeyStore::kind`]).
@@ -332,7 +332,7 @@ impl Vault {
         });
     }
 
-    /// `vault.rewrap` (§3.2): re-wraps every DEK still under a `retiring` version with the active KEK,
+    /// `vault.rewrap`: re-wraps every DEK still under a `retiring` version with the active KEK,
     /// [`BATCH`] items per transaction; when none is left, the old versions become `retired` and are
     /// deleted from the key store. Safe to rerun.
     pub fn rewrap(&self, ws: &str) -> VaultResult<RewrapReport> {

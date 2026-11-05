@@ -1,4 +1,4 @@
-//! V2 acceptance tests (accounts-vault.md §11): create, change fields, delete leaves nothing to
+//! V2 acceptance tests: create, change fields, delete leaves nothing to
 //! recover; list and detail without secret values; personal vault 404 for another user; plus the
 //! template rules, search, reveal gate, `with_credential`, audit and SSE. The leak scan over logs and
 //! the database files is `tests/vault_secrets.rs`.

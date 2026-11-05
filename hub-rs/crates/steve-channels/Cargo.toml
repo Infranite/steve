@@ -6,7 +6,7 @@ publish.workspace = true
 description = "Channels, external personas and the Feishu adapter"
 
 [features]
-# In-process fake of the Feishu open platform for tests (feishu.md §6); never used in the Hub binary.
+# In-process fake of the Feishu open platform for tests; never used in the Hub binary.
 fake = ["axum/ws"]
 
 [[bin]]

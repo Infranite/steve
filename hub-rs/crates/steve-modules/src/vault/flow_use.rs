@@ -1,5 +1,5 @@
-//! Flow use of secrets (signals-automation.md §3.3): an `http` node of a flow expands
-//! `{{secrets.<item>.<field>}}` at send time. Same rules as a bot's use (accounts-vault.md §4.3) with
+//! Flow use of secrets: an `http` node of a flow expands
+//! `{{secrets.<item>.<field>}}` at send time. Same rules as a bot's use with
 //! the flow as the subject: a `secret.use` grant with `subject_type='flow'` lets it go ahead,
 //! otherwise you approve the step. `high` items and bank cards are never covered by a grant. Each
 //! release writes one `secret_uses` row (`actor_type=flow`, `run_id`, `mode=internal`). The values

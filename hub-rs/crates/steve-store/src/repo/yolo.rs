@@ -1,4 +1,4 @@
-//! YOLO storage (migration 14, modules/yolo.md §6): the on/off/inherit rows per workspace, project and
+//! YOLO storage (migration 14): the on/off/inherit rows per workspace, project and
 //! item, the windows a workspace switch was on, and the ledger of what YOLO did or left alone.
 //!
 //! Free functions over a connection (reads) or a [`Tx`] (writes), so steve-core can change a scope, write

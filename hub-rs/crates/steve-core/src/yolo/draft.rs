@@ -1,4 +1,4 @@
-//! Conversational YOLO configuration (modules/yolo.md §7 “对话式配置”, Y6): the draft target `yolo`
+//! Conversational YOLO configuration: the draft target `yolo`
 //! with the operations `yolo.set {on}` and `yolo.scope {type, id, mode}`. “开 YOLO 到明早 8 点，前端项目
 //! 除外” becomes two operations the user confirms; applying them is the same as the switches (audit,
 //! revisions, windows) and the changeset undoes them for 24 hours.

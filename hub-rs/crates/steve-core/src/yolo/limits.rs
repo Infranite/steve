@@ -1,4 +1,4 @@
-//! Hard limits (modules/yolo.md §2.3, with the user's decision of 2026-11-01 §2): what YOLO never does,
+//! Hard limits (with the user's decision of 2026-11-01 §2): what YOLO never does,
 //! whatever the settings say. Nothing here reads a setting; [`check`] runs before every other rule.
 //!
 //! 1. money: bank cards, an over-budget flow, payment words anywhere in the card or command;

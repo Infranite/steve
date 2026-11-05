@@ -1,13 +1,13 @@
-//! Email: accounts, sync, drafts and sending (spec: steve-rs-plan/modules/email.md).
+//! Email: accounts, sync, drafts and sending.
 //!
 //! Slice E1 — IMAP connection, sync and the local mail library:
-//! - [`adapter`]: the [`MailAdapter`] / [`MailSink`] traits and what they exchange (§3.1);
-//! - [`adapters::ImapAdapter`]: IMAP + SMTP with an app password, presets for the dialog (§1, §3.2);
-//! - [`store`]: [`store::StoreSink`] — parse, dedupe, raw file, attachments, identification, threads (§3.5);
+//! - [`adapter`]: the [`MailAdapter`] / [`MailSink`] traits and what they exchange;
+//! - [`adapters::ImapAdapter`]: IMAP + SMTP with an app password, presets for the dialog;
+//! - [`store`]: [`store::StoreSink`] — parse, dedupe, raw file, attachments, identification, threads;
 //! - [`parse`]: MIME → text, `body_new`, snippet, attachments, signature organization;
 //! - [`events`]: the [`MailEvents`] seam to steve-flow (`ingest` / fixed outcomes) and SSE [`MailNotify`];
 //! - [`Mail`] (`sync.rs`): sync now, background runners (IDLE + 2-minute polling, backoff 5 s → 5 min);
-//! - [`retention`]: `keepMail` (§3.6); [`timeline::MailTimeline`]: “往来” of a contact;
+//! - [`retention`]: `keepMail`; [`timeline::MailTimeline`]: “往来” of a contact;
 //!   [`usage::MailUsage`]: cleanup on disconnect; [`settings`]: `mail_account_settings`.
 //!
 //! Integration (integrator):
@@ -16,14 +16,14 @@
 //! 2. `let mail = Mail::builder(modules, conns, cfg).adapter(imap).events(<steve-flow impl of
 //!    MailEvents>).notify(<publisher of {type:"mail", id, ws}>).build();` and `mail.spawn_jobs()`;
 //! 3. contacts `Ports.timelines.push(Arc::new(MailTimeline))`;
-//! 4. `HubEvent` gets `{type:"mail", id, ws}`; SETTINGS gets `keepMail` (email.md §2).
+//! 4. `HubEvent` gets `{type:"mail", id, ws}`; SETTINGS gets `keepMail`.
 //!
-//! Slice E4 — triage (§4): [`nodes`] (`mail.draft_reply`, `mail.archive`, `mail.mark_read`, the mail
+//! Slice E4 — triage: [`nodes`] (`mail.draft_reply`, `mail.archive`, `mail.mark_read`, the mail
 //! links of items, the `thread_key → item` lookup, `archive_on_done` via [`nodes::MailHooks`]),
 //! [`template`] (“邮件分诊”, [`template::install`]) and [`flow_events::FlowEvents`] (mail events
 //! into `steve_flow::ingest`).
 //!
-//! Slice E6 — knowledge and conversational configuration (§8, §10): [`knowledge`] (“加进知识库”,
+//! Slice E6 — knowledge and conversational configuration: [`knowledge`] (“加进知识库”,
 //! candidates when a thread is done, [`knowledge::ThreadLoader`]), [`config::targets`] (target
 //! `mail_account`, op `mail.account.patch`) and the thread routes `archive` / `read` / `to-knowledge`.
 //! Integrator: `Mail::builder(..).knowledge(kb)`; `Knowledge::with_loaders(guard, notify,

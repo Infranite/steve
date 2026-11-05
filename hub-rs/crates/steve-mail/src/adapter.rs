@@ -1,4 +1,4 @@
-//! What a mail adapter implements (email.md §3.1) and what it exchanges with the sync job.
+//! What a mail adapter implements and what it exchanges with the sync job.
 //!
 //! An adapter never touches the database: the job loads a [`SyncState`] (folders, cursors, scope
 //! modes), the adapter advances it while handing every message to a [`MailSink`], and the job writes
@@ -12,7 +12,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::error::{AdapterError, MailError};
 
-/// How a folder's mail is received (`source_settings.scopes[].mode`, signals-automation.md §1).
+/// How a folder's mail is received (`source_settings.scopes[].mode`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ScopeMode {
@@ -25,7 +25,7 @@ pub enum ScopeMode {
 }
 
 impl ScopeMode {
-    /// The default for a new folder (§3.2): the inbox `receive`, sent mail `record`, the rest `ignore`.
+    /// The default for a new folder: the inbox `receive`, sent mail `record`, the rest `ignore`.
     pub fn default_for(role: &str) -> Self {
         match role {
             "inbox" => Self::Receive,
@@ -201,7 +201,7 @@ pub struct SentRef {
     pub ext_id: Option<String>,
 }
 
-/// A mail provider (email.md §3.1). The connection side (`id`, `verify`, credential form) comes from
+/// A mail provider. The connection side (`id`, `verify`, credential form) comes from
 /// [`ConnectionProvider`]; register the same `Arc` with `Connections` and with [`crate::Mail`].
 #[async_trait]
 pub trait MailAdapter: ConnectionProvider {
@@ -259,7 +259,7 @@ pub trait MailAdapter: ConnectionProvider {
         Ok((folders, Box::new(Deferred { adapter: self, cx })))
     }
     /// Sends a finished MIME message. Only `send::execute` (E3) may call this: it re-checks the
-    /// approval first (§5.4). Auth/Rejected/Config/Gone/Unsupported must mean submission was
+    /// approval first. Auth/Rejected/Config/Gone/Unsupported must mean submission was
     /// definitely not accepted. A lost acknowledgement or any uncertain post-submission error
     /// must be Transient/Store; optional sent-folder copy failures after acceptance should return
     /// success. The sender never automatically retries an uncertain result.

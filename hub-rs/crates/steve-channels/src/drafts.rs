@@ -1,4 +1,4 @@
-//! Conversational configuration of channels (channels-personas.md §7, contacts.md §0.8): the draft
+//! Conversational configuration of channels: the draft
 //! targets `space`, `persona` and `channel` (the channel part of a connection; `connection` itself
 //! is the accounts module's target), their `global` candidates, and one operation per target:
 //! `chan.space.patch` (= `PATCH /spaces/:id`), `chan.persona.patch` (= `PATCH /personas/:id`) and
@@ -46,7 +46,7 @@ pub const FOLLOW: &str = "跟随账号";
 /// Your own account speaks as you.
 pub const YOU: &str = "你本人";
 pub const DISCLOSURE_LABEL: &str = "本群内容在别处能说到什么程度";
-/// Trigger words belong to your own account only (§2.7).
+/// Trigger words belong to your own account only.
 pub const TRIGGER_SELF_ONLY: &str = "触发语只用于以你本人接入的账号";
 pub const TRIGGER_WORDS_MAX: usize = 10;
 pub const DUTY_MAX: usize = 4000;
@@ -74,7 +74,7 @@ const REVEALS: [(&str, &str); 5] = [
     ("owner", "归谁管理"),
 ];
 
-/// How the prompt explains the rule JSON (§2.4), so the model can write a whole new list.
+/// How the prompt explains the rule JSON, so the model can write a whole new list.
 const RULES_FORMAT: &str = "JSON 列表，整体替换。每条 {\"when\":{\"kind\":\"mention_or_dm|mention|dm|reply_to_me|keyword|intent|member|external|hours|all|other_group\", 参数: keyword 的 words、intent 的 text、member 的 parties/teams（名字）、hours 的 outside/start/end/days},\"act\":\"reply|draft|record|create_item|handoff\", create_item 可带 \"mode\":\"start|propose\"}；按顺序第一条命中的生效";
 
 /// Registers the three targets and their operations.
@@ -1322,7 +1322,7 @@ fn word_ok(w: &str) -> bool {
             .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
 }
 
-/// `PATCH /channels/:connection_id` `trigger` (§5.2): `{on?, words?: str[≤10], where?: str[], mark?}`.
+/// `PATCH /channels/:connection_id` `trigger`: `{on?, words?: str[≤10], where?: str[], mark?}`.
 fn check_trigger(v: &Value) -> ApiResult<()> {
     let mut c = steve_modules::Check::new();
     c.that("trigger", v.is_object());

@@ -1,9 +1,8 @@
-//! `interactive` message content → readable text and a `card` attachment of whitelisted blocks
-//! (CONTRACT.md §1–2 of the message-media task).
+//! `interactive` message content → readable text and a `card` attachment of whitelisted blocks.
 //!
 //! Feishu hands a card over in four shapes, all read here:
 //! - **flattened** — what `im.message.receive_v1` and the message API return by default
-//!   (`{title, elements: [[{tag…}]]}`, message_content.md “卡片 interactive”);
+//!   (`{title, elements: [[{tag…}]]}`);
 //! - **raw** — `{json_card: "<json>", card_schema, json_attachment}`, nodes wrapped in `property`
 //!   with camelCase fields (larksuite/cli `convert_lib/card.go`);
 //! - **user_dsl** — the event's `{user_dsl: "<json>"}` (`card_userdsl.go`), the card as it was
@@ -1307,7 +1306,7 @@ mod tests {
         vec![("@_user_1".into(), "李鹏翔".into())]
     }
 
-    /// message_content.md “卡片 interactive”: what the receive event and the message API give
+    /// The flattened shape: what the receive event and the message API give
     /// by default.
     #[test]
     fn flattened_default_shape() {

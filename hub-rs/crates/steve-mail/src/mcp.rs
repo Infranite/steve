@@ -1,11 +1,11 @@
-//! MCP tools of the mail module for agents in a session (email.md §7, slice E5):
+//! MCP tools of the mail module for agents in a session:
 //! `steve_mail_thread`, `steve_mail_attachment` and `steve_mail_draft`. They only work for a session
 //! whose item is about an email thread (a `from`/`about` link) the item's user may see; everything
 //! else answers `This item is not about an email thread.`.
 //!
-//! None of them sends mail: `steve_mail_draft` writes a draft and opens the `mail_draft` approval
-//! (§5.4), and only the user's `send` on that decision leads to [`Mail::execute`]. Recipients are the
-//! server's (§5.2); the agent cannot add any.
+//! None of them sends mail: `steve_mail_draft` writes a draft and opens the `mail_draft` approval,
+//! and only the user's `send` on that decision leads to [`Mail::execute`]. Recipients are the
+//! server's; the agent cannot add any.
 //!
 //! Serving them is steve-mcp's (integrator), like the contacts and knowledge tools: list [`tools`]
 //! after the Steve tools and route names for which [`handles`] is true to [`call`] with the session's
@@ -35,11 +35,11 @@ pub const THREAD: &str = "steve_mail_thread";
 pub const ATTACHMENT: &str = "steve_mail_attachment";
 pub const DRAFT: &str = "steve_mail_draft";
 
-/// The answer outside an email item (§7, verbatim).
+/// The answer outside an email item (verbatim).
 pub const NOT_ABOUT: &str = "This item is not about an email thread.";
 /// steve-mcp's `END` (tools.rs), copied verbatim so the draft tool ends the turn like `steve_ask`.
 pub const END: &str = "End your turn now. The user's answer will arrive as your next message.";
-/// The answer of `steve_mail_draft` (§7, verbatim) before `END`.
+/// The answer of `steve_mail_draft` (verbatim) before `END`.
 pub const SAVED: &str = "Draft saved; the user will review it. ";
 /// Characters of message text in one `steve_mail_thread` answer.
 pub const THREAD_MAX: usize = 20_000;

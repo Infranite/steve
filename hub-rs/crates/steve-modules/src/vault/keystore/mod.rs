@@ -1,4 +1,4 @@
-//! Where the workspace master keys live (accounts-vault.md §3.1, §3.3). One OS-native store per
+//! Where the workspace master keys live. One OS-native store per
 //! platform, picked by [`from_env`]:
 //!
 //! | `STEVE_VAULT_KEYSTORE` | store | where |
@@ -211,7 +211,7 @@ fn windows_unsupported() -> KeyStoreError {
     )
 }
 
-/// The store the Hub uses (§3.3), from `STEVE_VAULT_KEYSTORE` (see the module table). `file` keeps
+/// The store the Hub uses, from `STEVE_VAULT_KEYSTORE` (see the module table). `file` keeps
 /// `<steve_home>/vault-keys` and is refused for the real `~/.steve`; `dir` needs
 /// `STEVE_VAULT_KEY_DIR` outside `steve_home`. `env` is `std::env::var(..).ok()` in production.
 pub fn from_env(
@@ -286,7 +286,7 @@ fn keychain(steve_home: &Path, helper: Option<&str>) -> Result<Arc<dyn KeyStore>
         None => {
             tracing::warn!(
                 "vault: steve-keyhelper is not installed in {}/bin; using the keychain in-process, so a rebuilt Hub \
-                 will be refused the keys (ops/KEYHELPER.md)",
+                 will be refused the keys; install steve-keyhelper with ops/release.sh",
                 steve_home.display()
             );
             Ok(Arc::new(KeychainStore::login()))

@@ -1,5 +1,5 @@
 //! `script`: `{code}` runs `export const handler = async (input) => …` in QuickJS (`rquickjs`) and
-//! outputs what it returns (signals-automation.md §3.2).
+//! outputs what it returns.
 //!
 //! Sandbox: a fresh runtime per run with only the language itself plus `JSON`, `Math`, `Date`,
 //! `RegExp`, `Map`/`Set` and promises; no module loader, no `console`, no network, no files (QuickJS

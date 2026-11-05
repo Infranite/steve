@@ -1,4 +1,4 @@
-//! E5 acceptance (email.md §14): a session only reads the threads its own item is about;
+//! E5 acceptance: a session only reads the threads its own item is about;
 //! `steve_mail_draft` overwrites the old draft and reopens the decision; attachments are copied to
 //! `.steve/attachments/` in the session's working directory (paths checked); after `no` the session
 //! gets the user's feedback. Plus `to-item`, the item panel, and: no MCP tool sends mail.

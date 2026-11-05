@@ -1,4 +1,4 @@
-//! Outbound rate limits (feishu.md §4), shared by the bot's sends (F3, [`super::send`]) and sending
+//! Outbound rate limits, shared by the bot's sends (F3, [`super::send`]) and sending
 //! as you (F6, [`super::as_user`]):
 //!
 //! - [`Limiter`]: token buckets that make a send wait its turn before it goes out — per (bot
@@ -22,7 +22,7 @@ use super::client::FeishuError;
 pub const CHAT_PER_SEC: u32 = 5;
 /// Sends per second of one bot connection.
 pub const APP_PER_SEC: u32 = 50;
-/// Retries of a bot send after a rate limit (feishu.md §4).
+/// Retries of a bot send after a rate limit.
 pub const SEND_RETRIES: u32 = 3;
 /// Retries of a send as you (each user ≤ 5/s; F6 keeps one).
 pub const USER_RETRIES: u32 = 1;

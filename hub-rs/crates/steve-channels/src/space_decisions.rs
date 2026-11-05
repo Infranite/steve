@@ -1,4 +1,4 @@
-//! The “新群” decision (channels-personas.md §2.2, §8 待处理): `{kind:"ask", subject_type:"space",
+//! The “新群” decision (§8 待处理): `{kind:"ask", subject_type:"space",
 //! options:["open","mute","quiet","block"]}` (older ones have only the first two), opened when a bot
 //! account finds itself in a new group.
 //!

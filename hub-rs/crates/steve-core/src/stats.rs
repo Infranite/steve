@@ -1,4 +1,4 @@
-//! Gateway usage records (stats.md §2.4): every model call Steve makes itself — routing, chat answers,
+//! Gateway usage records: every model call Steve makes itself — routing, chat answers,
 //! drafts, the modules' calls — is written to `usage_records` (`source=gateway`) with what it was for.
 //!
 //! [`RecordingGateway`] wraps the real gateway once, and both [`crate::Core`] and the modules

@@ -1,4 +1,4 @@
-//! “YOLO 替你做了这些决定” (modules/yolo.md §3.3, §7; Y6): the ledger grouped by window and item for
+//! “YOLO 替你做了这些决定”: the ledger grouped by window and item for
 //! `GET /yolo/actions`, with what each row can be undone with right now, and the line `/汇报` gets
 //! (a [`steve_modules::DigestNotes`] source).
 

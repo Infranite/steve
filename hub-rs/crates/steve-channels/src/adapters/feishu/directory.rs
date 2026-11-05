@@ -1,7 +1,7 @@
-//! Feishu's address book as a [`DirectoryAdapter`] (slice F5; feishu.md §2.4, contacts.md §7).
+//! Feishu's address book as a [`DirectoryAdapter`].
 //!
 //! One snapshot is a full read of what the app can see — the organisation is small, so a full
-//! snapshot is simpler than replaying change events (feishu.md §3). The read follows the contact
+//! snapshot is simpler than replaying change events. The read follows the contact
 //! visibility scope (`contact/v3/scopes`):
 //! - departments: when the scope is the whole company (`"0"`), every descendant of the root; else each
 //!   scoped department and its descendants (`departments/{id}/children?fetch_child=true` only lists
@@ -12,7 +12,7 @@
 //!
 //! User groups only widen who is visible: the sync port has org-chart departments, and a user group is
 //! not one (it would become an org-chart team that nobody can edit). Every list is read to the last page.
-//! Rate limits wait for `x-ogw-ratelimit-reset` and retry up to three times (feishu.md §4). Missing
+//! Rate limits wait for `x-ogw-ratelimit-reset` and retry up to three times. Missing
 //! scopes and departments outside the scope fail the whole read as [`DirectoryError::Auth`], so the
 //! sync changes nothing rather than dissolving teams it merely can't see.
 //!
@@ -46,7 +46,7 @@ pub const NAME: &str = "飞书";
 const DEPT_PAGE: &str = "50";
 const USER_PAGE: &str = "50";
 const SCOPE_PAGE: &str = "100";
-/// Retries after a rate-limit answer (feishu.md §4).
+/// Retries after a rate-limit answer.
 const RATE_RETRIES: u32 = 3;
 /// The most we wait (one second when the answer has no reset header).
 const RATE_WAIT_MAX: Duration = Duration::from_secs(30);

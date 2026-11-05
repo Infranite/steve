@@ -1,4 +1,4 @@
-//! The run engine (signals-automation.md §3.3): [`GraphEngine`] walks a run's graph node by node.
+//! The run engine: [`GraphEngine`] walks a run's graph node by node.
 //!
 //! - After every node, one transaction writes the step (`flow_run_steps`) and moves `cursor` and
 //!   `context` on; only then does the next node run, so a restarted Hub continues from `cursor`
@@ -42,7 +42,7 @@ pub struct GraphEngine;
 pub const MAX_STEPS: usize = 200;
 /// A dry run is stopped after this long.
 pub const DRY_RUN_LIMIT: Duration = Duration::from_secs(30);
-/// Error of a run interrupted at an effectful node (§3.3).
+/// Error of a run interrupted at an effectful node.
 pub const INTERRUPTED: &str = crate::scheduler::INTERRUPTED;
 /// The options of the approval the engine asks for before an ungated effect.
 pub const GATE_YES: &str = "执行";
@@ -961,7 +961,7 @@ pub fn claim_due_waits(cx: &FlowCx) -> Vec<String> {
     out
 }
 
-/// `flow.recover` for flows (§3.3; schedule runs are [`crate::scheduler::recover`]'s): a run left
+/// `flow.recover` for flows (schedule runs are [`crate::scheduler::recover`]'s): a run left
 /// `running` at an effectful node is not replayed but failed, with the event `need` and a `fail`
 /// decision (`retry` / `drop`); others continue. Unfinished dry runs are dropped. Returns the runs
 /// to drive.

@@ -1,5 +1,5 @@
-//! Spaces and members following the provider's own events (feishu.md §3.2, channels-personas.md
-//! §2.2): the bot added to a group creates the space and opens the “新群” decision, removed or
+//! Spaces and members following the provider's own events:
+//! the bot added to a group creates the space and opens the “新群” decision, removed or
 //! disbanded sets `status=left|archived`, people joining or leaving update `space_members` and
 //! `has_external`, a renamed group gets its new name. [`Channels::sync_spaces`] creates the spaces
 //! of the groups a bot is already in when it is connected (`configured=0`, no decision).
@@ -435,8 +435,8 @@ impl Channels {
         })
     }
 
-    /// Creates the spaces of the groups connection `conn` is already in (feishu.md §2.3 “机器人
-    /// 所在的群”): `configured=0`, no “新群” decision each (the spaces page points them out).
+    /// Creates the spaces of the groups connection `conn` is already in:
+    /// `configured=0`, no “新群” decision each (the spaces page points them out).
     /// Known spaces are left as they are. Returns how many were created.
     pub async fn sync_spaces(
         &self,

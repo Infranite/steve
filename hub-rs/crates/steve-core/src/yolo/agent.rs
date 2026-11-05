@@ -1,4 +1,4 @@
-//! The agent's side of YOLO (modules/yolo.md §4.1, §4.2; Y4): the protocol lines a session starts with
+//! The agent's side of YOLO: the protocol lines a session starts with
 //! while YOLO applies to its item, the permission mode its harness runs in, and what a running session
 //! is told when YOLO changes under it.
 //!
@@ -65,7 +65,7 @@ impl Level {
     }
 }
 
-/// The mode a session's harness runs in (§4.2): `bot` = the bot's `perm_mode`, `yolo` = YOLO applies to
+/// The mode a session's harness runs in: `bot` = the bot's `perm_mode`, `yolo` = YOLO applies to
 /// the item and the item has its own directory. Never `bypassPermissions`: that is [`harness_mode`]'s
 /// answer for full access only.
 pub fn perm_mode(bot: Option<&str>, yolo: bool) -> Option<String> {
@@ -172,7 +172,7 @@ impl Core {
     }
 
     /// The harness mode session `s` starts in: the bot's `perm_mode`, widened to `acceptEdits` while
-    /// YOLO applies to an item with its own directory (§4.2), `bypassPermissions` under full access.
+    /// YOLO applies to an item with its own directory, `bypassPermissions` under full access.
     pub fn session_perm_mode(
         &self,
         s: &crate::repo::Session,

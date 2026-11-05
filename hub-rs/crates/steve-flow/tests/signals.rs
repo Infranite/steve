@@ -1,4 +1,4 @@
-//! S1 acceptance (signals-automation.md §12) plus the rules of §2 and the `/signals`, `/sources`
+//! S1 acceptance plus the rules of §2 and the `/signals`, `/sources`
 //! routes, on a temp store with the fake event adapter.
 
 use std::sync::Arc;

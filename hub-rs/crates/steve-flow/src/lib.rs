@@ -1,6 +1,6 @@
 //! Signals, automation flows and schedules
 //!
-//! Spec: steve-rs-plan/modules/signals-automation.md, schedules.md. So far: S7a (cron, Chinese time
+//! So far: S7a (cron, Chinese time
 //! phrases, missed/overlap policy) and S7 (scheduled tasks: storage, scheduler, run history, the
 //! `action` node, budget, REST, conversational config), S1 (events and signals: [`EventAdapter`],
 //! [`ingest()`], `/signals`, `/sources`, retention) and S2 (the flow engine: [`graph`] validation,

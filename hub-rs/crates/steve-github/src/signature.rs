@@ -1,4 +1,4 @@
-//! Webhook signatures (`X-Hub-Signature-256`), github.md §5.1.
+//! Webhook signatures (`X-Hub-Signature-256`).
 //!
 //! GitHub signs the raw request body with HMAC-SHA256 keyed by the webhook
 //! secret and sends `sha256=<lowercase hex>`. Verification must run on the

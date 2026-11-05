@@ -1,4 +1,4 @@
-//! Org-chart sync from an office IM directory (slice P6 of steve-rs-plan/modules/contacts.md, §7 job
+//! Org-chart sync from an office IM directory (slice P6, §7 job
 //! `people.directory_sync`): every connection with `directory.read` hands a [`Snapshot`] through its
 //! [`DirectoryAdapter`]; [`apply::apply`] turns departments into org-chart teams of the own organization
 //! and people into contacts with accounts, members, leads, jobs and `reports_to` links.
@@ -38,14 +38,14 @@ pub use adapter::{
 };
 pub use apply::{EMPTY_SNAPSHOT, SyncReport};
 
-/// Hour of the daily run, local time (§7).
+/// Hour of the daily run, local time.
 pub const DAILY_HOUR: u32 = 6;
-/// Directory change events are coalesced for this long before one sync (feishu.md §3).
+/// Directory change events are coalesced for this long before one sync.
 pub const DEBOUNCE_MS: i64 = 60_000;
 /// Finished jobs kept for [`DirectorySync::job`].
 const KEEP_JOBS: usize = 100;
 /// Connections that never synced (just connected, or every read failed — usually a permission
-/// not granted yet) are tried again this often, so granting it is enough (domain-model.md §4).
+/// not granted yet) are tried again this often, so granting it is enough.
 pub const CATCH_UP_MS: i64 = 15 * 60_000;
 /// The first catch-up after start: a little after boot, so a Hub that just started is not busy
 /// with it at once.

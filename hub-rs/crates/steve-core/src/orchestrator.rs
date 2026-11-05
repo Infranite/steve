@@ -585,7 +585,7 @@ impl Core {
         }
         Ok(n)
     }
-    /// The lifecycle projection of an item (API-CONTRACT.txt §1).
+    /// The lifecycle projection of an item.
     pub fn lifecycle_view(&self, item: &str) -> Result<Value> {
         let t = self.tx();
         let i = t.item(item)?;
@@ -686,7 +686,7 @@ impl Tx<'_> {
         }
     }
 
-    /// [`AgentRuntime::prompt`] with a pending YOLO note in front (modules/yolo.md §4.1 “中途开关”).
+    /// [`AgentRuntime::prompt`] with a pending YOLO note in front.
     pub(crate) fn rt_prompt(
         &self,
         sid: &str,
@@ -833,7 +833,7 @@ impl Tx<'_> {
         lines.push(self.bot_prompt(bot, &item.workspace_id)?);
         /* module context (knowledge, contact cards); "" when there is none and is dropped below */
         lines.push(self.c.session_context(item));
-        /* YOLO on for this item: the lines of modules/yolo.md §4.1; off: unchanged */
+        /* YOLO on for this item: the lines; off: unchanged */
         let yolo = self.c.yolo_on(item);
         lines.push("How to work with Steve — use the steve MCP tools:".into());
         lines.push(crate::yolo::agent::UPDATE.into());

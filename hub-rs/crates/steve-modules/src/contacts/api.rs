@@ -1,4 +1,4 @@
-//! REST handlers of slice P1 (contacts.md §3.2: contacts, jobs, attributes, attribute definitions,
+//! REST handlers of slice P1 (contacts, jobs, attributes, attribute definitions,
 //! organizations). Thin: parse, run the service off the runtime, shape the answer.
 
 use std::sync::Arc;

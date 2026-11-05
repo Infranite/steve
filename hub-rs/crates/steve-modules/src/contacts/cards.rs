@@ -3,8 +3,8 @@
 //! confirmed attributes and memories, each with its disclosure level. `never` never appears, nor do
 //! candidates, stale values or parties the viewer cannot see.
 //!
-//! The text is Chinese like the rest of the prompts; levels are written as knowledge.md §4.2 does
-//! (可以引用 / 可转述结论 / 仅用于推理).
+//! The text is Chinese like the rest of the prompts; levels are written as the knowledge
+//! module's prompts do (可以引用 / 可转述结论 / 仅用于推理).
 
 use rusqlite::Connection;
 use steve_store::base::links;
@@ -22,7 +22,7 @@ pub const CARD_MEMS: i64 = 10;
 /// Members listed on a team card.
 pub const CARD_MEMBERS: usize = 20;
 
-/// The prompt wording of a level (knowledge.md §4.2). `never` has none: it is never shown.
+/// The prompt wording of a level. `never` has none: it is never shown.
 pub fn level_label(l: Level) -> &'static str {
     match l {
         Level::Public => "可以引用",
@@ -280,7 +280,7 @@ fn header(c: &Connection, viewer: &Viewer, p: &Party, roles: &[String]) -> ApiRe
             if p.contact_kind.as_deref() == Some("virtual") {
                 parts.push("虚拟账号".into());
             }
-            // ownership.md §5: a bot or service sender's 负责人 (“飞书机器人「告警小助手」· 负责人 张三”)
+            // a bot or service sender's 负责人 (“飞书机器人「告警小助手」· 负责人 张三”)
             let owners = super::stewards::party_owner_names(c, &viewer.ws, &p.id)?;
             if !owners.is_empty() {
                 parts.push(format!("负责人 {}", owners.join("、")));

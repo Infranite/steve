@@ -1,4 +1,4 @@
-//! You: the self poller (F8, feishu-lark-cli.md §2.3). Feishu pushes nothing a user receives, so the
+//! You: the self poller. Feishu pushes nothing a user receives, so the
 //! `feishu_user` connection reads your chats with your user token every 20 s and feeds
 //! what is new into C1's inbound pipeline with `via=poll`.
 //!

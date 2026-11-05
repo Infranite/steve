@@ -1,4 +1,4 @@
-//! The receive pipeline `ingest(ws, conn, RawEvent)` (signals-automation.md §2.2), the poll job
+//! The receive pipeline `ingest(ws, conn, RawEvent)`, the poll job
 //! `flow.poll` and the push entry the `/hooks` route (S6) calls.
 //!
 //! 1. paused source, type turned off, scope `ignore` → dropped, only counted;
@@ -187,7 +187,7 @@ fn allows(list: &[String], v: Option<&str>) -> bool {
 /// A trigger that takes the event: `(flow_id, flow_version, node_id, trigger kind)`.
 type Hit = (String, i64, String, String);
 
-/// The enabled event triggers matching `ev` (§2.2 step 6), one per flow.
+/// The enabled event triggers matching `ev`, one per flow.
 fn matching_triggers(tx: &Tx, ws: &str, conn: Option<&str>, ev: &RawEvent) -> FlowResult<Vec<Hit>> {
     let mut st = tx.prepare_cached(
         "SELECT t.flow_id, f.version, t.node_id, t.kind, t.types, t.connections, t.scopes, t.spaces
@@ -506,7 +506,7 @@ pub(crate) fn after_store(cx: &Arc<FlowCx>, ws: &str, step: Step) -> Ingested {
     }
 }
 
-/// Drives a run in the background, then settles its event's outcome (§2.3).
+/// Drives a run in the background, then settles its event's outcome.
 fn spawn_run(cx: Arc<FlowCx>, run: String, event: String) {
     tokio::spawn(async move {
         if let Err(e) = cx.exec.drive(&cx, &run).await {
@@ -635,7 +635,7 @@ pub async fn push(
     Ok(out)
 }
 
-/// Longest wait after failures (§10: back off to 30 minutes).
+/// Longest wait after failures (back off to 30 minutes).
 pub const MAX_BACKOFF: Duration = Duration::from_secs(30 * 60);
 /// How often the poller looks for due connections.
 pub const POLL_TICK: Duration = Duration::from_secs(15);

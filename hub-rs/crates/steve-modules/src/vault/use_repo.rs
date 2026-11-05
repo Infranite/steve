@@ -1,4 +1,4 @@
-//! SQL of slice V4: grants and `secret_uses` rows (accounts-vault.md §1, §4.3, §4.5), and the few
+//! SQL of slice V4: grants and `secret_uses` rows, and the few
 //! reads of steve-core's tables it needs (session working directory, item project, bot name).
 //! Parameterized queries only; no row ever holds a secret value.
 
@@ -238,7 +238,7 @@ pub fn uses_in(c: &Connection, status: &str, before: i64) -> Result<Vec<UseRecor
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
-/// The one-year retention (§4.5).
+/// The one-year retention.
 pub fn delete_uses_before(c: &Connection, before: i64) -> Result<usize> {
     Ok(
         c.prepare_cached("DELETE FROM secret_uses WHERE created < ?")?

@@ -1,4 +1,4 @@
-//! `steve_ask` answered for the user (modules/yolo.md §2.4, Y3): the main bot's view of the question
+//! `steve_ask` answered for the user: the main bot's view of the question
 //! from one model call (smart tier, 60 s, no ACP session), turned into [`Answer`] for
 //! [`super::judge`]. The judge decides; this file only gathers. Whatever is unclear — no usable reply,
 //! the model asks for the user, low confidence without a recommendation — ends with the user.
@@ -20,7 +20,7 @@ use crate::gateway::Tier;
 use crate::repo::{Decision, Item};
 use crate::util::{js_head, js_tail};
 
-/// The model call's timeout (§2.4 step 2).
+/// The model call's timeout.
 pub const TIMEOUT: Duration = Duration::from_secs(60);
 /// How much of the session's last words goes into the prompt.
 const TAIL: usize = 2000;
@@ -80,7 +80,7 @@ pub fn looks_like_question(text: &str) -> Option<String> {
         .then(|| js_head(last, 400).to_string())
 }
 
-/// What the model is told (§2.4 step 2).
+/// What the model is told.
 #[derive(Debug, Clone, Default)]
 pub struct Context {
     pub goal: String,

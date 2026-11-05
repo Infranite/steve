@@ -1,5 +1,5 @@
 //! Extra prompt context (B1): what modules add to an Agent session's opening prompt and to Steve's
-//! main-thread answers (knowledge.md §4.1: knowledge snippets, contact cards). steve-core calls
+//! main-thread answers (knowledge snippets, contact cards). steve-core calls
 //! [`PromptContexts::session`] in `startSession` and [`PromptContexts::chat`] /
 //! [`PromptContexts::chat_done`] in `answer` (integrator).
 //!

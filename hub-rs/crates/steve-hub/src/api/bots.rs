@@ -157,7 +157,7 @@ pub async fn create(
             Ok((Value::Object(out), id))
         })
         .await?;
-    // ownership.md §3: the user who creates a Bot is its 负责人 (best effort: the Bot exists either way)
+    // the user who creates a Bot is its 负责人 (best effort: the Bot exists either way)
     if let (Some(m), Some(id)) = (st.modules.clone(), id) {
         let done = tokio::task::spawn_blocking(move || {
             m.store.transaction(|tx| {

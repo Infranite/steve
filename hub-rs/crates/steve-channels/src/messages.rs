@@ -1,4 +1,4 @@
-//! Channel messages (`chan_messages`, channels-personas.md §1, §5): storing inbound ones, the
+//! Channel messages (`chan_messages`): storing inbound ones, the
 //! `ChanMessage` shape, paging, the `channels.retention` job (text → NULL after `keepRaw` days) and
 //! the contact page's “往来” ([`MessageTimeline`]).
 
@@ -408,7 +408,7 @@ pub fn page(
 
 // ---------------------------------------------------------------- retention
 
-/// How often `channels.retention` runs (§9).
+/// How often `channels.retention` runs.
 pub const RETENTION_EVERY: Duration = Duration::from_secs(3600);
 
 /// Messages purged per write transaction, so a large purge doesn't hold the write lock long.

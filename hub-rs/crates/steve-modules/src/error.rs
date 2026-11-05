@@ -1,4 +1,4 @@
-//! Errors of the new module APIs (contacts.md §0.4). Body `{"error":"<中文>"}`; unlike the old API,
+//! Errors of the new module APIs. Body `{"error":"<中文>"}`; unlike the old API,
 //! domain errors are never 500: validation and rule refusals are 400, owner-only actions 403,
 //! missing/foreign/invisible 404, state conflicts 409.
 

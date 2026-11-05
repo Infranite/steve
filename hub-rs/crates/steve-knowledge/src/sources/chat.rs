@@ -1,4 +1,4 @@
-//! The `chat` source (knowledge.md §2.1): the main thread with Steve (`messages`, space `steve`), one
+//! The `chat` source: the main thread with Steve (`messages`, space `steve`), one
 //! document per local day (`ref = chat:2026-10-31`), text only — no draft-card JSON, which lives in
 //! `meta`. Today's document is refreshed hourly, yesterday's is finalized at 03:30, and yesterday's
 //! conversation is extracted into candidate memories at 03:40 (§10 `kb.chat`, `kb.extract`).

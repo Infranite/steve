@@ -1,5 +1,5 @@
-//! What knowledge a consumer was given (`kb_uses`, knowledge.md §6.2 `GET /kb/uses`): the hits are
-//! stored as ids and numbers only (§11), so titles, labels and links are looked up again here under
+//! What knowledge a consumer was given (`kb_uses`, `GET /kb/uses`): the hits are
+//! stored as ids and numbers only, so titles, labels and links are looked up again here under
 //! today's visibility. Whatever is gone, or no longer visible to the caller, shows as “已删除”.
 
 use rusqlite::{Connection, OptionalExtension, params};
@@ -56,7 +56,7 @@ pub fn uses_of(c: &Connection, ws: &str, ctype: &str, cid: &str) -> Result<Vec<U
 }
 
 /// The highest `n` a session has been given so far (opening prompt and earlier searches), so the
-/// next `steve_knowledge_search` continues the numbering (§7).
+/// next `steve_knowledge_search` continues the numbering.
 pub fn last_n(c: &Connection, ws: &str, session_id: &str) -> Result<usize> {
     Ok(uses_of(c, ws, "session", session_id)?
         .iter()

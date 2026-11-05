@@ -1,4 +1,4 @@
-//! Taking back what YOLO did, and the cool-down buttons (modules/yolo.md §3.3, §7; Y6):
+//! Taking back what YOLO did, and the cool-down buttons:
 //! `POST /yolo/actions/:id/undo` by kind — `decision` (the core's or the module's `undo_decision`,
 //! 24 hours), `rollback` (the last release only, `release.sh --rollback <prev>`), `recall` (the channel
 //! message), `reanswer` (a correction sent to the session), `pause` (the item stops and leaves YOLO) —

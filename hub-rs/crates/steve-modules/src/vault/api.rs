@@ -1,6 +1,6 @@
-//! REST of slice V1 (accounts-vault.md §5.2): `GET /vault/status`, `POST /vault/init`,
+//! REST of slice V1: `GET /vault/status`, `POST /vault/init`,
 //! `POST /vault/recover`, `POST /vault/rotate`. Responses that carry a recovery code are
-//! `cache-control: no-store`. Request bodies are never `Debug`-printed (§10 rule 7).
+//! `cache-control: no-store`. Request bodies are never `Debug`-printed.
 
 use axum::extract::State;
 use axum::http::{StatusCode, header};

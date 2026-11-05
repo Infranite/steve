@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use steve_store::Item;
 
 /// "I take over the wrap-up": returned from [`ItemHooks::on_accepted`] when a module finishes the item
-/// itself later (GitHub: ask to open a PR first, github.md §4.1). steve-core then skips its `finish`.
+/// itself later (GitHub: ask to open a PR first). steve-core then skips its `finish`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Takeover {
     /// The hook that took over ([`ItemHooks::name`]), for the log.

@@ -1,4 +1,4 @@
-//! Per-run budgets (schedules.md §6). A run's cost is the report's model cost, or for `item*` runs the
+//! Per-run budgets. A run's cost is the report's model cost, or for `item*` runs the
 //! sum of the `sessions.cost` of the items linked `from` it. Over the limit: the item is paused and a
 //! `fail` decision about the `flow_run` asks “continue once” (the limit doubles) or “stop”. One
 //! decision per limit: only exceeding the doubled limit opens another.

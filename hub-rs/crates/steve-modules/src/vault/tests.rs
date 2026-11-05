@@ -1,4 +1,4 @@
-//! V1 acceptance tests (accounts-vault.md §11): lifecycle, rotation, the key store guard, API. §10 rule 1
+//! V1 acceptance tests: lifecycle, rotation, the key store guard, API. §10 rule 1
 //! (no secret in logs, errors, the database file) is `tests/vault_secrets.rs`, a binary of its own so its
 //! log capture sees every callsite. Key stores are files in temp dirs; the
 //! real keychain is only used by the ignored test in `keystore/keychain.rs`.

@@ -1,4 +1,4 @@
-//! Fake IMAP server (email.md §12).
+//! Fake IMAP server.
 //!
 //! Supported: `CAPABILITY`, `ID`, `STARTTLS`, `LOGIN`, `AUTHENTICATE PLAIN`
 //! (with or without SASL-IR), `ENABLE`, `NAMESPACE`, `LIST`/`LSUB` (with
@@ -46,7 +46,7 @@ pub struct ImapConfig {
     /// `[Gmail]/…` folder layout including `\All`.
     pub gmail: bool,
     /// Behave like NetEase 163: `SELECT`/`EXAMINE` are refused until the
-    /// client sent `ID` (email.md §1).
+    /// client sent `ID`.
     pub require_id: bool,
 }
 

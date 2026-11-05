@@ -1,4 +1,4 @@
-//! Mail and items (email.md §4 “事项接入”, §9 `to-item`, §11 the item panel “往来邮件”):
+//! Mail and items:
 //! - [`item_threads`]: the threads an item is about (`links(item, from|about, mail_thread|mail_message)`);
 //! - [`Mail::to_item`]: `POST /mail/threads/:id/to-item`, like signals' “转成事项”;
 //! - [`MailPanel`]: the B1 item panel (`registry.item_panel(Box::new(MailPanel))`).

@@ -1,4 +1,4 @@
-//! REST handlers: the subset of api.github.com that github.md uses.
+//! REST handlers: the subset of api.github.com that Steve uses.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};

@@ -1,4 +1,4 @@
-//! F8 acceptance (feishu-lark-cli.md §2.3) on the fake Feishu: your user token's chats are polled;
+//! F8 acceptance on the fake Feishu: your user token's chats are polled;
 //! a new private message lands within one round as `im.dm` to be handled (the “私聊你” rule) with
 //! `via=poll`; a chat seen for the first time gets a cursor but no backfill; what the long
 //! connection already stored is not processed again, and the bot's groups are not read; a rate

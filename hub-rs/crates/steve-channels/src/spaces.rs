@@ -1,4 +1,4 @@
-//! Spaces (groups, DMs, topic groups) and their settings (channels-personas.md §1, §2.2, §5), and the
+//! Spaces (groups, DMs, topic groups) and their settings, and the
 //! per-connection channel settings the inbound pipeline needs (`mode`, default rules).
 //!
 //! Visibility: a space of a personal connection (an account of someone's “我”, a `mode=self`
@@ -20,7 +20,7 @@ pub const SUBJECT_SPACE: &str = "space";
 /// without ever asking you, `block` (屏蔽) stops processing it.
 pub const NEW_SPACE_OPTIONS: [&str; 4] = ["open", "mute", "quiet", "block"];
 
-/// Your attention to a space (domain-model.md §1.4, migration 019 `space_prefs.attention`): whether
+/// Your attention to a space (migration 019 `space_prefs.attention`): whether
 /// its messages may disturb you. Independent of Steve's role there (静默 = `muted` = role 只记录).
 /// Ordered from closest to farthest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -61,7 +61,7 @@ impl Attention {
     }
 }
 
-/// Steve's role in a space (domain-model.md §1.4), derived: what the voice identity's effective
+/// Steve's role in a space, derived: what the voice identity's effective
 /// rules do, `record` when muted (静默), `observe` for an identity that is not the voice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -106,8 +106,8 @@ pub fn attention(c: &Connection, space: &str) -> ChannelResult<Attention> {
         .unwrap_or(Attention::Realtime))
 }
 
-/// The voice of a space: the one identity (connection id) that speaks for Steve there (domain-model.md
-/// §1.4) — the chosen one while it still sees the space, else a bot identity in it, else your own
+/// The voice of a space: the one identity (connection id) that speaks for Steve there:
+/// the chosen one while it still sees the space, else a bot identity in it, else your own
 /// account. `None` when no connected identity sees it. Other modules read it only here.
 pub fn voice(c: &Connection, space: &str) -> ChannelResult<Option<String>> {
     Ok(c.query_row(
@@ -186,12 +186,12 @@ pub fn quiet_reason(c: &Connection, s: &SpaceRow) -> ChannelResult<Option<String
     Ok(None)
 }
 
-/// The default rules of a bot account (§2.2): mentioned or DM'd → reply.
+/// The default rules of a bot account: mentioned or DM'd → reply.
 pub fn default_bot_rules() -> Value {
     json!([{"when": {"kind": "mention_or_dm"}, "act": "reply"}])
 }
 
-/// The default rules of your own account (feishu-lark-cli.md §2.3): 私聊你 → draft, 群里 @你 →
+/// The default rules of your own account: 私聊你 → draft, 群里 @你 →
 /// draft, the rest only recorded.
 pub fn default_self_rules() -> Value {
     json!([
@@ -577,7 +577,7 @@ pub fn list(
     Ok(rows)
 }
 
-/// Default disclosure of a new space's content (§2.6): customer groups (external members), DMs and
+/// Default disclosure of a new space's content: customer groups (external members), DMs and
 /// mail `reasoning`; internal groups `conclusion`.
 pub fn default_disclosure(kind: SpaceKind, has_external: bool) -> &'static str {
     if has_external || matches!(kind, SpaceKind::Dm | SpaceKind::MailThread) {
@@ -647,7 +647,7 @@ pub fn locate_or_create(tx: &Tx, n: &NewSpace) -> ChannelResult<(SpaceRow, bool)
     Ok((s, created))
 }
 
-/// Opens the “新群” decision (§2.2) for a space a bot account just found itself in.
+/// Opens the “新群” decision for a space a bot account just found itself in.
 pub fn open_new_space_decision(
     tx: &Tx,
     ws: &str,
@@ -771,7 +771,7 @@ pub fn settings(c: &Connection, space: &str) -> ChannelResult<SpaceSettings> {
     .ok_or_else(|| ApiError::not_found("空间"))
 }
 
-/// [`settings`], or for a space whose account was disconnected (its settings are deleted, §2.2)
+/// [`settings`], or for a space whose account was disconnected (its settings are deleted)
 /// what a new space of its kind starts with, so it can still be shown.
 pub fn settings_or_defaults(c: &Connection, s: &SpaceRow) -> ChannelResult<SpaceSettings> {
     match settings(c, &s.id) {
@@ -846,7 +846,7 @@ pub struct SpaceOut {
     pub self_chat: bool,
     /// Only for a space not set up yet: why it looks like a notification group (suggest 不提醒).
     pub suggest_quiet: Option<String>,
-    /// Settings that are on but do not apply here, and why (domain-model.md §5: 屏蔽 > `/bot` >
+    /// Settings that are on but do not apply here, and why (屏蔽 > `/bot` >
     /// 不提醒 > role rules), so the page shows it next to the setting.
     pub conflicts: Vec<Conflict>,
 }
@@ -1229,7 +1229,7 @@ pub struct SpacePatch {
     #[serde(default, deserialize_with = "some_nullable")]
     pub persona_id: Option<Option<String>>,
     pub duty: Option<String>,
-    /// Absent = unchanged; `null` = follow the account; a list = this space's own rules (§2.4).
+    /// Absent = unchanged; `null` = follow the account; a list = this space's own rules.
     #[serde(default, deserialize_with = "some_nullable_value")]
     pub rules: Option<Option<Value>>,
     pub muted: Option<bool>,

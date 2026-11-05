@@ -1,4 +1,4 @@
-//! Reading the mail library (email.md §9): the thread list with its five views, one thread with its
+//! Reading the mail library: the thread list with its five views, one thread with its
 //! messages, drafts and items, the thread state (`PATCH`), and a message's original as HTML, inline
 //! `cid:` image or `.eml`. Threads are private to the mailbox's owner: every entry point checks the
 //! caller sees the thread (`404 没有这个往来` / `没有这封邮件`).
@@ -24,10 +24,10 @@ pub const MAX_LIMIT: usize = 100;
 /// Inline images put into the HTML as `data:` URLs: per image and in total.
 pub const MAX_INLINE: usize = 5 * 1024 * 1024;
 pub const MAX_INLINE_TOTAL: usize = 15 * 1024 * 1024;
-/// The original is past the local retention (§3.6).
+/// The original is past the local retention.
 pub const PURGED: &str = "原件已经过了本地保留期，请先重新取原件";
 
-/// The views of the list (§11: 需要处理 · 收件箱 · 等对方 · 已发送 · 草稿, and all).
+/// The views of the list (需要处理 · 收件箱 · 等对方 · 已发送 · 草稿, and all).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum View {
@@ -183,7 +183,7 @@ pub struct ThreadPatch {
     pub state: Option<String>,
 }
 
-/// A message's HTML as served (§6).
+/// A message's HTML as served.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Html {
     pub body: String,
@@ -410,7 +410,7 @@ fn linked_items(c: &Connection, ws: &str, thread: &str) -> MailResult<Vec<ItemRe
     Ok(out)
 }
 
-/// The Content-Security-Policy of a message's HTML (§6): nothing loads, no scripts, inline styles
+/// The Content-Security-Policy of a message's HTML: nothing loads, no scripts, inline styles
 /// only; remote images only with `images`.
 pub fn csp(images: bool) -> String {
     let img = if images {
@@ -547,7 +547,7 @@ impl Mail {
     }
 
     /// `PATCH /mail/threads/:id {state}`: `muted` makes later mail of the thread `ignored`
-    /// (“这串往来已静音”); `done` submits candidate memories in the background (§8).
+    /// (“这串往来已静音”); `done` submits candidate memories in the background.
     pub fn patch_thread(&self, who: &Caller, id: &str, p: &ThreadPatch) -> MailResult<ThreadBrief> {
         let state = p.state.as_deref();
         if state.is_some_and(|s| !["open", "done", "muted"].contains(&s)) {

@@ -1,4 +1,4 @@
-//! Vault slice V3 (accounts-vault.md §4.2): WebAuthn passkeys as the local verification before a
+//! Vault slice V3: WebAuthn passkeys as the local verification before a
 //! secret value is shown or copied (Touch ID / Face ID on the Mac and iPhone).
 //!
 //! - one relying party per configured public origin (`STEVE_PUBLIC_URLS`); a request uses the one
@@ -41,9 +41,9 @@ use super::{VaultError, VaultResult};
 use crate::clock::{Clock, SystemClock};
 use crate::{ApiError, Body, Caller};
 
-/// How long a challenge (reveal or registration) can be answered (§4.2).
+/// How long a challenge (reveal or registration) can be answered.
 pub const CHALLENGE_TTL_MS: i64 = 60_000;
-/// Registration needs a login at most this old (§4.2).
+/// Registration needs a login at most this old.
 pub const FRESH_LOGIN_MS: i64 = 10 * 60_000;
 /// The browser session cookie (steve-auth `SESSION`).
 const SESSION_COOKIE: &str = "steve_session";
@@ -520,7 +520,7 @@ impl RevealGate for Passkeys {
     }
 }
 
-/// The passkey routes (§5.2). Merge under `/api` after `require_user`.
+/// The passkey routes. Merge under `/api` after `require_user`.
 pub fn routes<S: Clone + Send + Sync + 'static>(pk: Passkeys) -> Router<S> {
     Router::new()
         .route("/passkeys", get(list))

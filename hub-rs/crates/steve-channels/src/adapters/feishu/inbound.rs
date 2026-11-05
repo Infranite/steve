@@ -1,5 +1,5 @@
 //! The bot connection as a [`ChannelAdapter`], and its long connection feeding C1's inbound
-//! pipeline (feishu.md §3.2, feishu-lark-cli.md §2.2):
+//! pipeline:
 //!
 //! - [`ChannelAdapter`] for [`FeishuApp`]: features; `space_info` and `members` are
 //!   [`chats`]' (F4), `send` and `recall` [`send`]'s (F3).
@@ -56,7 +56,7 @@ fn opt(v: &Value, k: &str) -> Option<String> {
 
 #[async_trait]
 impl ChannelAdapter for FeishuApp {
-    /// Phase 1 sends no cards and no buttons (feishu.md §4); the bot can edit and recall its own.
+    /// Phase 1 sends no cards and no buttons; the bot can edit and recall its own.
     fn features(&self) -> ChannelFeatures {
         ChannelFeatures {
             multi_bot: true,
@@ -269,7 +269,7 @@ fn post_attachments(content: &Value) -> Vec<Value> {
 }
 
 /// A standalone media message's attachment (`image`, `file`, `folder`, `audio`, `media`,
-/// `sticker`; message_content.md).
+/// `sticker`).
 fn media_attachment(msg_type: &str, c: &Value) -> Option<Value> {
     let kind = match msg_type {
         "image" => {
@@ -443,7 +443,7 @@ pub fn parse_receive(env: &Value, bot_open_id: &str) -> Result<Option<InboundMes
 // ---------------------------------------------------------------------------------------------
 // The long connection.
 
-/// `event_id`s seen recently (feishu.md §3.1 step 6).
+/// `event_id`s seen recently.
 #[derive(Default)]
 pub struct SeenEvents {
     order: VecDeque<(i64, String)>,

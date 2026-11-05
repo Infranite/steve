@@ -1,4 +1,4 @@
-//! Connections (slice A2 of steve-rs-plan/modules/accounts-vault.md §2.2, §5.2, §9, §10): how Steve
+//! Connections (slice A2): how Steve
 //! is let into an account — the framework every adapter (Gmail/Outlook A3/E2, IMAP E1, Feishu F1/F6,
 //! GitHub G1) plugs into.
 //!

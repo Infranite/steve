@@ -1,11 +1,11 @@
-//! The bundled SQLite has what `kb_fts` needs (knowledge.md §1, §3.1): FTS5, contentless
+//! The bundled SQLite has what `kb_fts` needs: FTS5, contentless
 //! tables with `contentless_delete`, `bm25` with column weights, and phrase matching over the
 //! bigram token stream produced by `seg`.
 
 use rusqlite::{Connection, params};
 use steve_knowledge::seg::{fts_query, seg};
 
-/// Verbatim from knowledge.md §1 (migration 008).
+/// Verbatim from migration 008.
 const KB_FTS: &str = "CREATE VIRTUAL TABLE IF NOT EXISTS kb_fts USING fts5(
   seg, title, tokenize = 'unicode61 remove_diacritics 2', content = '', contentless_delete = 1);";
 

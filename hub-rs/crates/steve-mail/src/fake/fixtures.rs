@@ -57,7 +57,7 @@ pub fn thread() -> [&'static [u8]; 3] {
 
 /// A message of at least `size` bytes: short text plus a base64
 /// `application/octet-stream` attachment (e.g. 28 MB for the "only fetch the
-/// header and BODYSTRUCTURE" path, email.md §3.2). Deterministic.
+/// header and BODYSTRUCTURE" path). Deterministic.
 pub fn large(size: usize) -> Vec<u8> {
     let head = "Date: Sat, 31 Oct 2026 12:00:00 +0000\r\n\
 From: Scanner <scanner@office.example>\r\n\

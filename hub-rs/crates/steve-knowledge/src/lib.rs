@@ -1,6 +1,6 @@
 //! Knowledge base: sources, index, retrieval and citations
 //!
-//! Spec: steve-rs-plan/modules/knowledge.md. Empty skeleton (slice I0); slices add their `mod` lines here.
+//! Empty skeleton (slice I0); slices add their `mod` lines here.
 
 // K0: tokenizing, chunking, extraction, evaluation.
 pub mod chunk;

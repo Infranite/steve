@@ -1,4 +1,4 @@
-//! Knowledge in prompts (knowledge.md §4.1–4.3, slice K4): the extra context of an Agent session's
+//! Knowledge in prompts: the extra context of an Agent session's
 //! opening prompt ([`session_context`]), of Steve's main-thread answers ([`chat_context`]), and the
 //! retrieval channel replies (C4) use ([`reply_hits`]).
 //!
@@ -7,7 +7,7 @@
 //! nothing, so prompts stay byte for byte what they are without the module.
 //!
 //! Visibility, `never` and paused sources are filtered by [`retrieve`]/[`anchor_mems`] and P3's
-//! cards (§11); nothing here builds its own conditions.
+//! cards; nothing here builds its own conditions.
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
@@ -29,9 +29,9 @@ pub const CHAT_K: usize = 6;
 pub const REPLY_K: usize = 10;
 /// Rules and preferences about the anchors (layer 6), before the retrieved hits.
 pub const ANCHOR_MEMS: usize = 5;
-/// The whole session context, in characters; entries are dropped from the end beyond it (§4.2).
+/// The whole session context, in characters; entries are dropped from the end beyond it.
 pub const SESSION_MAX: usize = 6000;
-/// One entry's text, in characters (§4.2).
+/// One entry's text, in characters.
 pub const SNIPPET_MAX: usize = 600;
 /// The search text built from an item or a message, in characters.
 pub const QUERY_MAX: usize = 500;
@@ -46,7 +46,7 @@ pub const CHAT_RULES: &str = "使用规则：用到知识时在句末标 [n]，�
 /// Heading of the contact cards in a session (layer 6).
 pub const CARDS_HEAD: &str = "这件事相关的人（Steve 记得的，括号里是披露级别）：";
 
-/// The prompt wording of a level (§4.2); `never` never reaches a prompt.
+/// The prompt wording of a level; `never` never reaches a prompt.
 pub fn level_label(l: Level) -> &'static str {
     contacts::cards::level_label(l)
 }
@@ -85,7 +85,7 @@ pub fn render_snippets(head: &str, rules: &str, prefix: &str, hits: &[Hit]) -> S
 }
 
 /// The text to search with: secrets the guard finds are blanked out (never searched, never stored in
-/// `kb_uses`, §11), whitespace collapsed, cut to [`QUERY_MAX`] characters.
+/// `kb_uses`), whitespace collapsed, cut to [`QUERY_MAX`] characters.
 pub fn scrub_query(guard: &dyn Guard, text: &str) -> String {
     let mut s = text.to_string();
     let mut ranges = guard.scan(text);
@@ -194,7 +194,7 @@ pub struct SessionCtx {
     pub cards: Vec<ContactCard>,
 }
 
-/// Layers 6 and 7 for an Agent session on `item` (§4.1): the cards of the item's people, the rules
+/// Layers 6 and 7 for an Agent session on `item`: the cards of the item's people, the rules
 /// and preferences about the item, its project and those people, and `retrieve(title + latest goal,
 /// k=8, Agent)`; all as the item's user sees them. ≤[`SESSION_MAX`] characters.
 pub fn session_context(
@@ -277,9 +277,9 @@ pub fn cite_of(h: &Hit) -> Cite {
     }
 }
 
-/// Layers 6 and 7 for Steve's answer to `text` from `viewer` (§4.1): rules and preferences about
-/// “我”, then `retrieve(text, k=6, Chat)`; numbered `[1] [2]` (§4.3). In a workspace with more than
-/// one member only workspace-visible knowledge is used (§3.3). `None` = nothing found.
+/// Layers 6 and 7 for Steve's answer to `text` from `viewer`: rules and preferences about
+/// “我”, then `retrieve(text, k=6, Chat)`; numbered `[1] [2]`. In a workspace with more than
+/// one member only workspace-visible knowledge is used. `None` = nothing found.
 pub fn chat_context(
     c: &Connection,
     kb: &Knowledge,
@@ -315,7 +315,7 @@ pub fn chat_context(
     }))
 }
 
-/// `cite::finish` and the reply's extra `meta` (§4.3): `cites` with only what was cited.
+/// `cite::finish` and the reply's extra `meta`: `cites` with only what was cited.
 pub fn chat_finish(answer: &str, cx: &ChatCtx) -> ChatDone {
     let f = cite::finish(answer, &cx.cites);
     let mut meta = serde_json::Map::new();
@@ -331,7 +331,7 @@ pub fn chat_finish(answer: &str, cx: &ChatCtx) -> ChatDone {
 
 // ---------------------------------------------------------------- channel replies (C4)
 
-/// Layer 7 of a channel reply (§4.1): `retrieve(message + the last 3 messages, k=10, Reply)` for the
+/// Layer 7 of a channel reply: `retrieve(message + the last 3 messages, k=10, Reply)` for the
 /// account owner's user. Layer 6 (cards, space summary) stays with C4; render the hits with
 /// [`render_snippets`] and record them in `reply_basis`.
 #[allow(clippy::too_many_arguments)]

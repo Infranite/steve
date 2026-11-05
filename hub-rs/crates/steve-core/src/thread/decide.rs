@@ -1,4 +1,4 @@
-//! The code-side guards on the router (thread-routing §3.3): the model proposes, these rules have the last
+//! The code-side guards on the router: the model proposes, these rules have the last
 //! word, so a wrong model never quietly turns a question into an item. Pure functions, table-tested.
 
 use crate::gateway::{Offer, Route};
@@ -17,7 +17,7 @@ pub struct Decision {
     pub for_item: Option<String>,
 }
 
-/// A guest conversation (an IM space, channels §2.12): what the turn may become there. Configuration,
+/// A guest conversation (an IM space): what the turn may become there. Configuration,
 /// talking to items and corrections never come from a chat (→ an answer); research and items only
 /// when the host allows them — otherwise work is answered in place and offered to you instead
 /// (`guard = "guest"` when this changed the kind).
@@ -148,7 +148,7 @@ pub fn pure_question(text: &str) -> bool {
     asks && !CHANGE.is_match(t)
 }
 
-/// Apply the guards in order (§3.3). Rule 6, the router failing, is already in `route.fallback`.
+/// Apply the guards in order. Rule 6, the router failing, is already in `route.fallback`.
 pub fn decide(r: &Route, text: &str, cx: DecideCtx) -> Decision {
     let model = r.kind.as_str();
     let d = |kind: &str, guard: Option<&'static str>| Decision {

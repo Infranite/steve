@@ -1,5 +1,4 @@
-//! What is known about a person or an organization, and why the rest is not (BACKEND-CONTRACT.md of
-//! the UX closeout):
+//! What is known about a person or an organization, and why the rest is not:
 //!
 //! - [`org_name`]: whether an organization's name is yours, the provider's, Steve's placeholder or still
 //!   the workspace's, and why a placeholder cannot be replaced by anything but you;
@@ -135,7 +134,7 @@ fn tenant_scope_missing(c: &Connection, ws: &str) -> ApiResult<bool> {
     )?)
 }
 
-/// Where the organization's name comes from (contract §1).
+/// Where the organization's name comes from.
 pub fn org_name(c: &Connection, ws: &str, p: &Party) -> ApiResult<OrgName> {
     let key = tenant_of(c, ws, &p.id)?;
     let tenant = key.map(|k| Tenant {
@@ -228,7 +227,7 @@ pub struct ProfileFields {
     pub email: FieldState,
 }
 
-/// A contact's `profile` (contract §2).
+/// A contact's `profile`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ContactProfile {
     pub checked: Option<i64>,

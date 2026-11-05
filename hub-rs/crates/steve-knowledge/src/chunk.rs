@@ -1,4 +1,4 @@
-//! Splitting normalized document text into retrieval chunks (knowledge.md §2.4).
+//! Splitting normalized document text into retrieval chunks.
 //!
 //! Markdown is first cut into sections at headings (found with pulldown-cmark, so `#` inside
 //! code blocks is not a heading), then each section is split with text-splitter into 600–1000

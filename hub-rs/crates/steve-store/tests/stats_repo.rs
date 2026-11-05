@@ -1,4 +1,4 @@
-//! Statistics writes (stats.md slice ST0): turns, token records and marks keep `stat_daily` equal to
+//! Statistics writes: turns, token records and marks keep `stat_daily` equal to
 //! the detail rows and flag the item for the `item_stats` refresh.
 
 mod common;

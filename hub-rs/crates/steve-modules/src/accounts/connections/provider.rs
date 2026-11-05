@@ -1,4 +1,4 @@
-//! What a connection adapter implements ([`ConnectionProvider`], accounts-vault.md §2.2 `SystemAdapter`)
+//! What a connection adapter implements ([`ConnectionProvider`])
 //! and the types it exchanges with the framework. Adapters live in their own slices (Gmail/Outlook in
 //! A3/E2, IMAP in E1, Feishu in F1/F6, GitHub in G1); the framework does the OAuth dance, keeps the
 //! credential in the system vault, refreshes tokens and tracks health.
@@ -131,7 +131,7 @@ impl FieldDef {
     }
 }
 
-/// Whose account a new connection is (§2.2: only these may have one).
+/// Whose account a new connection is (only these may have one).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Owner {
     /// The connecting user's “我” (OAuth user tokens, PATs, mailboxes).
@@ -140,7 +140,7 @@ pub enum Owner {
     SelfOrg,
     /// A team party.
     Team(String),
-    /// A bot party of its own, named after the account (an app bot is not a person, ownership.md §1).
+    /// A bot party of its own, named after the account (an app bot is not a person).
     /// Its 负责人 is the person the provider names ([`AccountInfo::steward_hint`], source `sync`),
     /// else the connecting user (source `connect`).
     Bot,

@@ -1,4 +1,4 @@
-//! Conversational configuration of contacts, organizations and teams (slice P5, contacts.md §5 and §0.8):
+//! Conversational configuration of contacts, organizations and teams (slice P5):
 //! the `contact`, `org` and `team` draft targets and the operations their drafts are made of.
 //!
 //! A target describes its fields and operations for the model gateway ([`DraftTarget::prepare`]); the
@@ -73,7 +73,7 @@ static DOMAIN: LazyLock<Regex> = LazyLock::new(|| {
         .expect("domain regex")
 });
 
-/// Relations to the user (§1.2), code → label. Anything else is a custom Chinese relation.
+/// Relations to the user, code → label. Anything else is a custom Chinese relation.
 const RELS: [(&str, &str); 8] = [
     ("me", "我"),
     ("colleague", "同事"),
@@ -96,7 +96,7 @@ const MEM_KINDS: [(&str, &str); 4] = [
     ("rule", "规则"),
     ("event", "事件"),
 ];
-/// Systems a draft may add an account in (never a bank card: drafts do not touch secrets, §0.8).
+/// Systems a draft may add an account in (never a bank card: drafts do not touch secrets).
 const ACCOUNT_SYSTEMS: [(&str, &str); 4] = [
     ("mail", "邮箱"),
     ("phone", "电话"),
@@ -140,7 +140,7 @@ fn named(p: &Party, n: &str) -> bool {
 
 // ---------------------------------------------------------------- name resolution
 
-/// The result of resolving a name: exactly one, none, or several (never picked automatically, §2.2).
+/// The result of resolving a name: exactly one, none, or several (never picked automatically).
 enum Found {
     One(Box<Party>),
     Missing,
@@ -299,7 +299,7 @@ fn boolean(v: &Value) -> Option<bool> {
     }
 }
 
-/// The free-text field rule (§0.8): a value that does not start with the current text is appended to it.
+/// The free-text field rule: a value that does not start with the current text is appended to it.
 fn appended(old: &str, new: &str) -> String {
     let new = new.trim();
     if old.is_empty() || new.starts_with(old) {

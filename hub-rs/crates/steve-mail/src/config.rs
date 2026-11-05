@@ -1,10 +1,10 @@
-//! Where the mail module keeps its files and which certificate roots it trusts (email.md §1, §13).
+//! Where the mail module keeps its files and which certificate roots it trusts.
 //!
 //! Only encrypted connections are made, verified against the system roots (`rustls-native-certs`).
 //! A self-signed test root can be added through `STEVE_MAIL_TEST_CA` (a PEM file), with the same
 //! guard as `FileKeyStore`: refused when `STEVE_HOME` is the real `~/.steve` (or unknown).
 //!
-//! The conversational configuration of mailboxes (email.md §10, slice E6) is [`targets`].
+//! The conversational configuration of mailboxes is [`targets`].
 
 pub mod targets;
 

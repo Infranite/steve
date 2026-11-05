@@ -1,4 +1,4 @@
-//! The fake's user-identity side (feishu-lark-cli.md §2.3–2.4): OAuth + PKCE, single-use refresh
+//! The fake's user-identity side: OAuth + PKCE, single-use refresh
 //! tokens, device flow, user-token chats / messages / search, sending as the user.
 
 use std::time::Duration;

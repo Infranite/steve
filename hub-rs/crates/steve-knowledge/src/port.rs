@@ -29,7 +29,7 @@ pub struct Scope {
     pub user: String,
     /// `team:<id>` / `space:<id>` codes readable beside `workspace`.
     pub scopes: Vec<String>,
-    /// Only `workspace` objects (the main thread's chat in a shared workspace, §3.3).
+    /// Only `workspace` objects (the main thread's chat in a shared workspace).
     pub workspace_only: bool,
     /// Only these source kinds (`notes`, `folder`, `mems` …).
     pub kinds: Option<Vec<String>>,
@@ -188,7 +188,7 @@ pub fn unavailable(store: &str, why: impl std::fmt::Display) -> StoreError {
 }
 
 /// The FTS index in the Hub's database (`kb_chunks`, `kb_fts`): bm25 with the title weighted 2;
-/// a one-character CJK query matches titles and memories by `instr` instead (§3.2).
+/// a one-character CJK query matches titles and memories by `instr` instead.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct SqliteStore;
 

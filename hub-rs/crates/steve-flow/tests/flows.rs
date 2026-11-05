@@ -1,4 +1,4 @@
-//! S2 acceptance (signals-automation.md §12): the prototype's r1 (邮件分诊) and r6 (报销单处理) save
+//! S2 acceptance: the prototype's r1 (邮件分诊) and r6 (报销单处理) save
 //! and dry-run along the prototype's paths; cycles and loose nodes are 400; `approve` → 提交
 //! continues; `wait(event)` wakes on an event; a restart at an effectful node fails the run with a
 //! decision; `item.create` links the item `from` the event; an outward action without approval stops

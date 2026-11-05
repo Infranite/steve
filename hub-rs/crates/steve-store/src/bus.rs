@@ -55,7 +55,7 @@ pub enum ChangeEvent {
         thought: String,
         text: String,
     },
-    /// One tool call of an inline research run (thread-routing §7.3), for the user message `mid`.
+    /// One tool call of an inline research run, for the user message `mid`.
     #[serde(rename = "steve.tool")]
     SteveTool {
         ws: String,
@@ -65,7 +65,7 @@ pub enum ChangeEvent {
         brief: String,
         ok: bool,
     },
-    /// An inline research run was queued, started or ended (thread-routing §7.3).
+    /// An inline research run was queued, started or ended.
     #[serde(rename = "thread.run")]
     ThreadRun { id: String, ws: String },
     /// The Hub holds for a release (Rust Hub only): `{item, running, since}` while new turns wait for
@@ -86,7 +86,7 @@ pub enum ChangeEvent {
     #[serde(rename = "device")]
     Device { id: String },
 
-    // The new modules (contacts.md §0.6 and the other module specs). Every one carries `ws`: the stream
+    // The new modules. Every one carries `ws`: the stream
     // sends them only to subscribers of that workspace. Payloads are ids only; the web refetches.
     /// Contacts, organizations and teams, and their attributes, jobs and members.
     #[serde(rename = "party")]
@@ -137,7 +137,7 @@ pub enum ChangeEvent {
         decision_id: Option<String>,
         ws: String,
     },
-    /// Statistics of the workspace changed (stats.md §4.3); `day` is the local day written, when known.
+    /// Statistics of the workspace changed; `day` is the local day written, when known.
     /// The Hub coalesces these to one per workspace every 5 seconds before they reach a browser.
     #[serde(rename = "stats")]
     Stats {

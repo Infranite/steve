@@ -1,4 +1,4 @@
-//! The two Feishu connections of one 企业自建应用 (feishu-lark-cli.md §2.1), as
+//! The two Feishu connections of one 企业自建应用, as
 //! [`ConnectionProvider`]s of the connections framework (A2):
 //!
 //! - [`FeishuApp`] (`feishu_app`): the bot. Credential form App ID + App Secret (+ optional
@@ -216,7 +216,7 @@ pub fn user_integration() -> Integration {
                     .collect(),
                 ),
             // its own area: not every tenant lets members request it, and without it nothing is
-            // drafted or sent as you (domain-model.md §5)
+            // drafted or sent as you
             CapSpec::supported("send_as_you", &["msg.send_as_user"])
                 .with_note(SEND_AS_USER_NOTE)
                 .with_scopes(vec![ScopeSpec::new(
@@ -329,7 +329,7 @@ impl ConnectionProvider for FeishuApp {
 // ---------------------------------------------------------------------------------------------
 // You.
 
-/// The user scopes asked for in one go (feishu-lark-cli.md §2.4; `search:message` stays optional).
+/// The user scopes asked for in one go (`search:message` stays optional).
 pub const USER_SCOPES: &[&str] = &[
     "offline_access",
     "im:message",

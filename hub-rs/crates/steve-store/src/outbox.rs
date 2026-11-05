@@ -1,4 +1,5 @@
-//! The durable outbox (migration 21). See docs/reliability.md for delivery guarantees.
+//! The durable outbox (migration 21): a message is written in the same transaction as the change that
+//! caused it and delivered at least once afterwards, so a crash between commit and send loses nothing.
 //!
 //! A domain records a fact in the same [`Store::transaction`] as the state change it describes
 //! ([`emit`]); a [`Dispatcher`] hands it to every registered [`Consumer`] at least once, after the

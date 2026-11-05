@@ -1,13 +1,13 @@
-//! Retrieval (knowledge.md §3.2–3.3): FTS candidates filtered by workspace, visibility, level and
+//! Retrieval: FTS candidates filtered by workspace, visibility, level and
 //! paused sources in SQL, then re-ranked, deduplicated, numbered and given citation links.
 //!
 //! Ranking: `bm25(kb_fts, 1.0, 2.0)` (title weight 2), then ×1.5 when the hit is about one of the
 //! anchors, ×1.2 for memories (short and precise), and a 30-day half-life for the main-thread
-//! chat source. The strict query (§3.2: short CJK runs as phrases) goes first; when it finds fewer
+//! chat source. The strict query (short CJK runs as phrases) goes first; when it finds fewer
 //! than 5 documents, the relaxed query (every bigram on its own, so typos still match) fills in
 //! after it — K0's evaluation showed this lifts recall@5 without hurting the strict ranking.
 //!
-//! Visibility and `never` are filtered only here and in the list functions (§11): callers never
+//! Visibility and `never` are filtered only here and in the list functions: callers never
 //! build their own conditions.
 
 use std::collections::{HashMap, HashSet};
@@ -25,13 +25,13 @@ use crate::repo;
 use crate::sync;
 use crate::sync::about_names;
 
-/// FTS candidates per pass (§3.3 step 1).
+/// FTS candidates per pass.
 pub const CANDIDATES: usize = 50;
 /// Upper bound of `k`.
 pub const MAX_K: usize = 20;
 /// The strict pass is topped up by the relaxed one below this many distinct documents.
 pub const FALLBACK_BELOW: usize = 5;
-/// Chunks of one document in one result list (§3.3 step 4).
+/// Chunks of one document in one result list.
 pub const PER_DOC: usize = 2;
 
 const ANCHOR_BOOST: f64 = 1.5;
@@ -164,7 +164,7 @@ fn title(c: &Candidate) -> String {
     }
 }
 
-/// Boosted score of a candidate (§3.3 step 3).
+/// Boosted score of a candidate.
 fn boosted(c: &Candidate, about: &[ObjRef], q: &Query) -> f64 {
     let mut s = c.base;
     if !q.anchors.is_empty() && about.iter().any(|a| q.anchors.contains(a)) {
@@ -180,7 +180,7 @@ fn boosted(c: &Candidate, about: &[ObjRef], q: &Query) -> f64 {
     s
 }
 
-/// Searches the knowledge base for `q.viewer` (§3.3). Empty or unsearchable text gives no hits.
+/// Searches the knowledge base for `q.viewer`. Empty or unsearchable text gives no hits.
 pub fn retrieve(c: &Connection, q: &Query) -> Result<Vec<Hit>> {
     let k = q.k.clamp(1, MAX_K);
     let text = q.text.trim();
@@ -224,7 +224,7 @@ pub fn retrieve(c: &Connection, q: &Query) -> Result<Vec<Hit>> {
         ranked.extend(scored);
     }
 
-    // Dedup (§3.3 step 4), cut, number.
+    // Dedup, cut, number.
     let mut per_obj: HashMap<(String, String), usize> = HashMap::new();
     let mut texts: HashSet<String> = HashSet::new();
     let mut hits = Vec::new();
@@ -263,7 +263,7 @@ pub fn retrieve(c: &Connection, q: &Query) -> Result<Vec<Hit>> {
 }
 
 /// The confirmed rules and preferences about any of `anchors`, newest first, independent of a
-/// query (prompt layer 6, §4.1). Same visibility, `never` and paused-source rules as [`retrieve`].
+/// query (prompt layer 6). Same visibility, `never` and paused-source rules as [`retrieve`].
 pub fn anchor_mems(
     c: &Connection,
     viewer: &Viewer,
@@ -334,7 +334,7 @@ pub fn anchor_mems(
 }
 
 /// Writes a `kb_uses` row: which hits a consumer (`session`, `chat`, `draft`, `flow`, `search`) got
-/// for which query. Ids and numbers only, never the text (§11). Returns the `ku_…` id.
+/// for which query. Ids and numbers only, never the text. Returns the `ku_…` id.
 pub fn record_use(
     tx: &Tx,
     ws: &str,

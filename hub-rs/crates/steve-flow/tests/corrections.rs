@@ -1,4 +1,4 @@
-//! S8 acceptance (signals-automation.md §12): after “以后这类忽略” a new event of the same group is
+//! S8 acceptance: after “以后这类忽略” a new event of the same group is
 //! ignored; undoing the changeset brings the old graph back; correcting an event no flow handled
 //! makes a `correction` flow; “转成事项” makes the event's outcome `item`.
 

@@ -1,4 +1,4 @@
-//! YOLO mode (modules/yolo.md, with the user's decisions of 2026-11-01): Steve makes the decisions that
+//! YOLO mode (with the user's decisions of 2026-11-01): Steve makes the decisions that
 //! stay on this machine and can be undone, and leaves money, outside effects and other people's data to
 //! the user. Switching it on is a plain on/off per workspace (no expiry), with per-project and per-item
 //! overrides; there are no budgets.
@@ -479,7 +479,7 @@ impl Yolo {
         self.status(ws)
     }
 
-    /// The breaker (§3.2): pauses the whole workspace until the user resumes it, ends the window,
+    /// The breaker: pauses the whole workspace until the user resumes it, ends the window,
     /// cancels what was scheduled and leaves a failure notice. A second trip while paused does nothing.
     pub fn trip(&self, ws: &str, code: &str, reason: &str) -> ApiResult<bool> {
         let now = self.now();
@@ -589,7 +589,7 @@ impl Yolo {
         own.then_some(c)
     }
 
-    /// What switching on would do with the cards open now (§1.3), judged with the default policy as if
+    /// What switching on would do with the cards open now, judged with the default policy as if
     /// the workspace switch were on. Only what a decision row tells is known here; the rest is left to you.
     pub fn preview(&self, ws: &str) -> ApiResult<Value> {
         let open: Vec<Decision> = self.store().decisions().open(ws).map_err(store_err)?;

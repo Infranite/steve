@@ -1,4 +1,4 @@
-//! One provider message, one response (domain-model.md §1.4–§1.6, channels-personas.md §2.11–§2.12).
+//! One provider message, one response.
 //!
 //! A space is one row per (installation, external chat id) whichever identities see it
 //! (`space_identities`), so a provider message is stored once (the unique `(space, external_id)`

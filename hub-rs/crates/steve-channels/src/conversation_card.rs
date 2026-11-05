@@ -1,4 +1,4 @@
-//! The conversation card (PLAN §2.2): what Steve is told, every turn, about where it is answering —
+//! The conversation card: what Steve is told, every turn, about where it is answering —
 //! the place, who asks, who else reads the answer (each with what Steve's records say they are), how
 //! complete that list is, the identity it speaks as and what this asker may make it do.
 //!

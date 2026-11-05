@@ -1,4 +1,4 @@
-//! Corrections (thread-routing §3.5): the user moves a message to the other side — an item back into the
+//! Corrections: the user moves a message to the other side — an item back into the
 //! conversation (“改成在这里回答”), an answer into an item (“做成事项”, the old `promote`), or a message to
 //! an existing item. The count of corrections is the router's error rate (`route_log.override`).
 

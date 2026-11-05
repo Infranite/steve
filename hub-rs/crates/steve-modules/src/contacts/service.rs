@@ -1,6 +1,6 @@
-//! Domain rules of contacts and organizations (contacts.md §2.1–§2.5, §3). Synchronous; the handlers run
+//! Domain rules of contacts and organizations. Synchronous; the handlers run
 //! them through [`Modules::blocking`]. Every function starts with [`start`], which creates “我” and the
-//! workspace's own organization the first time any contacts interface is used (§2.1).
+//! workspace's own organization the first time any contacts interface is used.
 
 use std::sync::LazyLock;
 
@@ -54,7 +54,7 @@ pub(crate) fn event(tx: &Tx, ws: &str, id: &str) {
     });
 }
 
-// ---------------------------------------------------------------- shapes (§3.1)
+// ---------------------------------------------------------------- shapes
 
 /// `org` of a `ContactBrief`: the primary current job.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -199,7 +199,7 @@ pub enum PartyView {
 
 // ---------------------------------------------------------------- “我”, own organization, ownership
 
-/// Creates “我” for the caller and the workspace's own organization when missing (§2.1), and returns the
+/// Creates “我” for the caller and the workspace's own organization when missing, and returns the
 /// caller's viewer and “我”.
 pub fn start(m: &Modules, who: &Caller) -> ApiResult<(Viewer, Party)> {
     let found = m.store.reader(|c| {
@@ -235,7 +235,7 @@ pub fn ensure_base(tx: &Tx, who: &Caller) -> ApiResult<Party> {
                 &json!({ "type": "contact", "me": true }),
             )?;
             event(tx, &who.ws, &me.id);
-            // ownership.md §3: Steve's bots, personas, the Hub device and connections are “我”'s
+            // Steve's bots, personas, the Hub device and connections are “我”'s
             super::stewards::seed_defaults(tx, &who.ws, &me)?;
             me
         }
@@ -300,7 +300,7 @@ pub(crate) fn check_visibility(
     }
 }
 
-/// Writes a revision and bumps the party's `revision` (§0.7).
+/// Writes a revision and bumps the party's `revision`.
 /// [`revise`] for other modules' settling code (identification, enrichment): one revision with the
 /// given `before` / `after`, then the patch.
 pub fn revise_as(
@@ -847,7 +847,7 @@ pub fn confirm_contact(m: &Modules, who: &Caller, id: &str) -> ApiResult<Contact
     contact_by_id(m, &viewer, &id)
 }
 
-/// `DELETE /contacts/:id` (§2.2): the row stays as `deleted`; its attribute values, the memories only
+/// `DELETE /contacts/:id`: the row stays as `deleted`; its attribute values, the memories only
 /// about it and its team memberships are physically deleted, other modules follow through
 /// [`super::PartyHooks::on_delete`]; links stay. The audit records only counts.
 pub fn delete_contact(m: &Modules, ports: &Ports, who: &Caller, id: &str) -> ApiResult<()> {
@@ -890,7 +890,7 @@ pub fn delete_contact(m: &Modules, ports: &Ports, who: &Caller, id: &str) -> Api
     })
 }
 
-// ---------------------------------------------------------------- jobs (§2.3)
+// ---------------------------------------------------------------- jobs
 
 fn job_props(title: Option<&str>, dept: Option<&str>, from: Option<&str>) -> Value {
     json!({ "title": title, "dept": dept, "from": from, "to": null })
@@ -1118,7 +1118,7 @@ pub fn delete_job(m: &Modules, who: &Caller, id: &str, org_id: &str) -> ApiResul
     })
 }
 
-// ---------------------------------------------------------------- attributes (§2.5)
+// ---------------------------------------------------------------- attributes
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct NewAttr {
@@ -1448,7 +1448,7 @@ pub fn delete_def(m: &Modules, who: &Caller, id: &str) -> ApiResult<()> {
     })
 }
 
-// ---------------------------------------------------------------- organizations (§2.2)
+// ---------------------------------------------------------------- organizations
 
 /// Lower case, without a mailbox part or `@`, without a leading `www.`.
 pub fn normalize_domain(d: &str) -> String {
@@ -1632,7 +1632,7 @@ pub fn patch_org(m: &Modules, who: &Caller, id: &str, b: OrgPatch) -> ApiResult<
     org_by_id(m, &viewer, id)
 }
 
-/// `DELETE /orgs/:id` (§2.2): only the in-row details and the domains go; every open job there is closed
+/// `DELETE /orgs/:id`: only the in-row details and the domains go; every open job there is closed
 /// this month; the row stays as `deleted`.
 pub fn delete_org(m: &Modules, who: &Caller, id: &str) -> ApiResult<()> {
     let (viewer, _) = start(m, who)?;

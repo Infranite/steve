@@ -1,4 +1,4 @@
-//! Drafts (email.md §5, §9): what you write yourself, what a bot drafts, the recipient rules, the
+//! Drafts: what you write yourself, what a bot drafts, the recipient rules, the
 //! content hash an approval is tied to, and the `mail_draft` approval decision. Sending is in
 //! [`crate::send`]; nothing here sends.
 //!
@@ -210,7 +210,7 @@ pub struct RcptOut {
     pub addr: String,
     pub name: String,
     pub party_id: Option<String>,
-    /// Not me, not the own organization or a colleague (§5.3: the audience is outside).
+    /// Not me, not the own organization or a colleague (the audience is outside).
     pub external: bool,
 }
 
@@ -461,7 +461,7 @@ pub fn decision_question(d: &DraftRow) -> String {
     format!("发邮件给 {}：{}", names.join("、"), d.subject)
 }
 
-/// Opens the approval decision for the draft's current content (§5.4): `status=pending`, the hash of
+/// Opens the approval decision for the draft's current content: `status=pending`, the hash of
 /// this version recorded. Open decisions about the draft are expired first (one card per draft).
 pub fn open_approval(
     tx: &Tx,
@@ -660,7 +660,7 @@ impl Mail {
     }
 
     /// `PUT /mail/drafts/:id`: only `draft`/`pending` can change. A pending draft keeps the hash its
-    /// decision was opened with, so approving the old card answers 409 (§5.4).
+    /// decision was opened with, so approving the old card answers 409.
     pub fn update_draft(&self, who: &Caller, id: &str, p: DraftPatch) -> MailResult<DraftOut> {
         let mut d = self.own_draft(who, id)?;
         if !["draft", "pending"].contains(&d.status.as_str()) {
@@ -766,7 +766,7 @@ impl Mail {
         Ok(())
     }
 
-    /// `POST /mail/drafts/:id/send`: your click is your approval (§5.4, last paragraph): a decision for
+    /// `POST /mail/drafts/:id/send`: your click is your approval (last paragraph): a decision for
     /// the current content is opened and resolved `send` by you right away, through the same handler
     /// as every other approval. The mail then waits out the send delay in the queue.
     pub fn send_draft(&self, who: &Caller, id: &str) -> MailResult<DraftOut> {

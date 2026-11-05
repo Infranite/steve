@@ -1,9 +1,9 @@
-//! Viewing a secret value (accounts-vault.md §4.2). Every reveal needs local verification by the user
+//! Viewing a secret value. Every reveal needs local verification by the user
 //! (WebAuthn, `userVerification=required`), which slice V3 implements as a [`RevealGate`]. Until then
 //! the gate is [`NoPasskeys`]: there is no passkey to verify with, so both steps answer
 //! `400 先在这台设备上登记 Touch ID 或通行密钥`.
 //!
-//! This file is one of the three places that decrypt a field (§10 rule 2): [`Vault::reveal`], which
+//! This file is one of the three places that decrypt a field: [`Vault::reveal`], which
 //! can only be called with a [`Verified`] that a gate hands out.
 
 use async_trait::async_trait;
@@ -17,9 +17,9 @@ use crate::vault::crypto::open_field;
 use crate::vault::secret::SecretBytes;
 use crate::vault::{Vault, VaultError, VaultResult};
 
-/// `400` when the user has no passkey on this Hub (§4.2), verbatim.
+/// `400` when the user has no passkey on this Hub, verbatim.
 pub const NEED_PASSKEY: &str = "先在这台设备上登记 Touch ID 或通行密钥";
-/// How long the web shows a revealed value (§4.2).
+/// How long the web shows a revealed value.
 pub const REVEAL_TTL_S: u64 = 30;
 
 /// What is being revealed, by whom.

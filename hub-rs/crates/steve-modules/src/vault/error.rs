@@ -28,7 +28,7 @@ pub enum VaultError {
     /// `400`: bad format, checksum, or no `vault_keys` row with that fingerprint.
     #[error("恢复码不对")]
     BadRecoveryCode,
-    /// `503` (§3.4).
+    /// `503`.
     #[error("保险箱暂时打不开：Mac mini 的钥匙串被锁了")]
     Locked,
     /// `503`: the key is gone from the key store (new machine, keychain reset); recover with the code.
@@ -37,7 +37,7 @@ pub enum VaultError {
     /// `503`: the keychain refused this binary.
     #[error("保险箱暂时打不开：钥匙串没有授权这个版本的 Steve 读取主密钥（发布时没有用固定签名）")]
     Denied,
-    /// `401` (§4.2): registering a passkey needs a login from the last 10 minutes.
+    /// `401`: registering a passkey needs a login from the last 10 minutes.
     #[error("请重新登录后再登记")]
     StaleLogin,
     #[error("{0}")]
