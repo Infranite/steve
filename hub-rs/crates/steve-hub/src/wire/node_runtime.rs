@@ -779,6 +779,24 @@ impl NodeRuntime {
         )? {
             return Err(conflict("the session changed while planning"));
         }
+        // as the legacy runner's begin(): the turn is under way from the moment it is planned
+        // (opening or loading the harness may take long, and a restart may leave the attempt
+        // unknown before it starts); `starting` until the harness has a session of its own. A
+        // retry of a turn already running stays running.
+        let (acp, status): (bool, Option<String>) = tx
+            .query_row(
+                "SELECT acp_session_id IS NOT NULL, status FROM sessions WHERE id=?",
+                [session],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?
+            .unwrap_or((false, None));
+        let starting = if acp || status.as_deref() == Some("running") {
+            "running"
+        } else {
+            "starting"
+        };
+        status_in(tx, session, starting)?;
         Ok(())
     }
 
