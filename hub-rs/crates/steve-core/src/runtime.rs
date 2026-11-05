@@ -83,6 +83,13 @@ pub trait AgentRuntime: Send + Sync {
         let _ = session_id;
         false
     }
+    /// Work on a Node that an upgrade drain waits for: open turns (also one waiting for a
+    /// permission answer until it is answered or expires, or one with an outcome nobody can tell
+    /// yet) and harnesses opening, configuring or releasing. A restart would cut it with nothing to
+    /// resume it, so the drain never seals while there is any. Legacy turns are not counted here.
+    fn node_working(&self) -> usize {
+        0
+    }
     /// The pid of the session's live agent adapter (its process group leader), if one runs.
     fn agent_pid(&self, session_id: &str) -> Option<u32> {
         let _ = session_id;

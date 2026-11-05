@@ -973,6 +973,9 @@ impl steve_core::AgentRuntime for RoutedRuntime {
             + self.node.as_ref().map_or(0, |n| n.running_turns())
             + self.fleet.as_ref().map_or(0, |f| f.running_turns())
     }
+    fn node_working(&self) -> usize {
+        self.node.as_ref().map_or(0, |n| n.working())
+    }
     fn flush(&self, session_id: &str, lead: Option<(&str, &str)>) -> bool {
         match self.node_for(session_id) {
             Some(n) => n
@@ -1087,9 +1090,15 @@ impl Domain for CoreDomain {
         // a turn that only waits for your permission answer doesn't hold a drain: it is cut, the
         // restart resumes it (it asks again)
         let acp = self.acp.working_turns();
+        // a Node turn has no cut-and-resume: it holds the drain, also while it waits for your
+        // permission answer (until it is answered or expires), and while its outcome is unknown
+        let node = self.core.node_working();
         let source_release_busy = self.core.source_release_busy();
-        let quiet =
-            active && running.values().sum::<usize>() == 0 && acp == 0 && !source_release_busy;
+        let quiet = active
+            && running.values().sum::<usize>() == 0
+            && acp == 0
+            && node == 0
+            && !source_release_busy;
         let adapters_stopped = if quiet {
             self.acp.quiesce().await
         } else {
@@ -1104,9 +1113,12 @@ impl Domain for CoreDomain {
                 )?)
             })
             .map_err(|e| BackendError::msg(e.to_string()))?;
-        let sealed =
-            quiet && adapters_stopped && self.acp.working_turns() == 0 && store.maintenance_seal();
-        Ok(json!({"maintenance":active,"ready":sealed,"running":running,"acp":acp,"adapters_stopped":adapters_stopped,"unknown_mail":unknown,"source_release_busy":source_release_busy}).as_object().unwrap().clone())
+        let sealed = quiet
+            && adapters_stopped
+            && self.acp.working_turns() == 0
+            && self.core.node_working() == 0
+            && store.maintenance_seal();
+        Ok(json!({"maintenance":active,"ready":sealed,"running":running,"acp":acp,"node":node,"adapters_stopped":adapters_stopped,"unknown_mail":unknown,"source_release_busy":source_release_busy}).as_object().unwrap().clone())
     }
     /// Never fails the Hub: what could not be resumed is logged and reported on `/healthz`
     /// (`recovery`), and its durable intent stays for the next boot.

@@ -864,6 +864,26 @@ impl NodeRuntime {
             .unwrap_or(0) as usize
     }
 
+    /// What an upgrade drain waits for: every open turn (running, waiting for a permission answer
+    /// until it is answered or expires, retrying, or unknown until settled or abandoned), plus each
+    /// session whose harness is opening, configuring or releasing with no open turn. A read error
+    /// counts as work: the drain then waits rather than seal under a running turn.
+    pub fn working(&self) -> usize {
+        self.store
+            .reader(|c| {
+                Ok::<_, StoreError>(c.query_row(
+                    "SELECT (SELECT COUNT(*) FROM runtime_turns WHERE state<>'finished')
+                          + (SELECT COUNT(*) FROM runtime_sessions s
+                               WHERE s.phase IN ('opening','configuring','releasing')
+                                 AND NOT EXISTS(SELECT 1 FROM runtime_turns t
+                                                WHERE t.session_id=s.session_id AND t.state<>'finished'))",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )?)
+            })
+            .unwrap_or(1) as usize
+    }
+
     pub fn hold(&self, on: bool) {
         self.holding.store(on, Ordering::SeqCst);
     }
@@ -2887,6 +2907,19 @@ pub fn decision_session(store: &Store, decision: &str) -> Option<String> {
         })
         .ok()
         .flatten()
+}
+
+/// `decision` is the card of a Node turn still waiting for its answer.
+pub fn waiting_card(store: &Store, decision: &str) -> bool {
+    store
+        .reader(|c| {
+            Ok::<_, StoreError>(c.query_row(
+                "SELECT EXISTS(SELECT 1 FROM runtime_permissions WHERE decision_id=? AND state='waiting')",
+                [decision],
+                |r| r.get::<_, bool>(0),
+            )?)
+        })
+        .unwrap_or(false)
 }
 
 /// Whether `session` is bound to a Node (whether or not that Node is enabled in this process).

@@ -3127,3 +3127,110 @@ async fn a_late_release_of_a_new_journal_does_not_let_a_reopened_session_go() {
     assert_eq!(h.phase(), "ready", "the old view says nothing of this open");
     assert_eq!(h.count("release_session"), 2);
 }
+
+// ── what an upgrade drain waits for (L3, D1) ──
+
+/// A turn waiting for a permission answer holds the drain until it is answered and the turn ends;
+/// an opening harness counts too, an idle one does not.
+#[tokio::test]
+async fn working_counts_a_turn_waiting_for_a_permission_until_it_settles() {
+    let h = hub();
+    *h.seen.stash.lock().unwrap() = Some(vec![]);
+    h.bind();
+    until("opening", || h.phase() == "opening").await;
+    assert_eq!(h.rt.working(), 1, "a harness opening is Node work");
+    let late = h.seen.stash.lock().unwrap().take().unwrap();
+    for b in late {
+        h.seen.to.commit(b).await.unwrap();
+    }
+    h.ready().await;
+    assert_eq!(h.rt.working(), 0, "an idle harness holds nothing");
+
+    let exec = h.running("hello").await;
+    assert_eq!(h.rt.working(), 1);
+    h.node
+        .ask_permission(perm("p1", exec.clone(), "git push"))
+        .await
+        .unwrap();
+    until("card", || h.cards().len() == 1).await;
+    assert_eq!(h.rt.working(), 1, "a permission wait holds the drain");
+    let d = h.cards()[0].clone();
+    assert!(h.rt.answer_permission(&d, Some("allow_once")).unwrap());
+    until("answered", || h.status(&d) == "resolved").await;
+    assert_eq!(h.rt.working(), 1, "the turn goes on after the answer");
+    h.node.finish(&exec, build::done()).await.unwrap();
+    until("turn end", || h.ends().len() == 1).await;
+    h.ready().await;
+    assert_eq!(h.rt.working(), 0);
+}
+
+/// A card that expires unanswered ends its wait: once the turn is over, nothing is left.
+#[tokio::test]
+async fn working_drops_to_zero_after_an_expired_card_and_the_turn_end() {
+    let h = hub();
+    h.bind();
+    let exec = h.running("hello").await;
+    h.node
+        .ask_permission(perm_ttl("p1", exec.clone(), "rm x", 300))
+        .await
+        .unwrap();
+    until("card", || h.cards().len() == 1).await;
+    assert_eq!(h.rt.working(), 1);
+    let d = h.cards()[0].clone();
+    until("expired", || h.status(&d) == "expired").await;
+    h.node.finish(&exec, build::done()).await.unwrap();
+    until("turn end", || h.ends().len() == 1).await;
+    h.ready().await;
+    assert_eq!(h.rt.working(), 0);
+}
+
+/// An attempt nobody can tell the outcome of holds the drain until Stop settles it.
+#[tokio::test]
+async fn working_counts_an_unknown_attempt_until_it_is_abandoned() {
+    let h = hub();
+    h.bind();
+    let exec = h.running("hello").await;
+    let (_, start_op) = h
+        .node
+        .log()
+        .into_iter()
+        .find(|(m, _)| *m == "start_turn")
+        .unwrap();
+    h.node.lose_track(&exec).unwrap();
+    h.node
+        .emit(
+            Subject::Execution(exec.clone()),
+            EventBody::OperationChanged {
+                receipt: Receipt {
+                    operation: start_op,
+                    state: Observed::Unknown {
+                        reason: "node restarted".into(),
+                    },
+                },
+            },
+        )
+        .await
+        .unwrap();
+    until("unknown", || {
+        h.q::<String>("SELECT state FROM runtime_attempts") == "unknown"
+    })
+    .await;
+    assert_eq!(h.rt.working(), 1, "an unknown attempt holds the drain");
+    assert!(h.rt.cancel(S).unwrap());
+    until("abandoned", || h.ends().len() == 1).await;
+    // the harness went with it: nothing waits, so nothing reopens it
+    until("settled", || h.rt.working() == 0).await;
+}
+
+/// A configure whose outcome is unknown keeps the session configuring: the drain waits for it.
+#[tokio::test]
+async fn working_counts_a_configuring_harness() {
+    let h = hub();
+    h.bind();
+    h.ready().await;
+    h.node.script_once("configure_session", Scripted::Unknown);
+    assert_eq!(h.mode(PermissionMode::FullAccess), Configured::Sent);
+    until("unknown", || h.cfg_states() == ["unknown"]).await;
+    assert_eq!(h.phase(), "configuring");
+    assert_eq!(h.rt.working(), 1);
+}

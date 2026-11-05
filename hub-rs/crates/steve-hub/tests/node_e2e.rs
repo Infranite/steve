@@ -724,3 +724,110 @@ async fn a_node_session_shows_its_status_and_harness_id() {
         get().await
     );
 }
+
+/// Polls the upgrade drain (`POST`, as `ops/local-release.py` does) until it reports `ready`.
+async fn drained(h: &Home, token: &str, secs: u64) -> Option<Value> {
+    let end = std::time::Instant::now() + Duration::from_secs(secs);
+    while std::time::Instant::now() < end {
+        let d = drain(h, "POST", token).await;
+        if d["ready"] == true {
+            return Some(d);
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    None
+}
+
+/// The upgrade drain waits for Node work (L3, D1): a running turn, and a turn waiting for a
+/// permission answer until it is answered; it seals once they are over, and lifting it still sends
+/// what was queued meanwhile.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_upgrade_drain_waits_for_node_turns() {
+    let h = Home::new();
+    let token = control_token(&h);
+    let _hub = spawn(&h, true, &[("STEVE_TAKEOVER_CONTINUES", "0")]);
+    serving(&h).await;
+    let c = Client::login(&h).await;
+    let sid = c.item(&h, "排空验收 @say drain-node-3D").await;
+    assert!(
+        wait(30, || steve_v1(&h, &sid, "drain-node-3D") > 0).await,
+        "the first turn ran; log:\n{}",
+        hub_log(&h)
+    );
+    assert!(wait(10, || attempts(&h, &sid, "finished") >= 1).await);
+
+    // ── a running turn holds the drain
+    c.say(&sid, "排空验收-运行 @sleep 600000").await;
+    assert!(wait(30, || h.got("排空验收-运行") == 1).await);
+    let d = drain(&h, "POST", &token).await;
+    assert_eq!(d["maintenance"], true, "{d}");
+    assert_eq!(d["ready"], false, "not sealed under a running turn: {d}");
+    assert_eq!(d["node"], 1, "{d}");
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let d = drain(&h, "POST", &token).await;
+    assert_eq!((&d["ready"], &d["node"]), (&json!(false), &json!(1)), "{d}");
+    let (st, v) = c
+        .call("POST", &format!("/api/sessions/{sid}/cancel"), None)
+        .await;
+    assert_eq!((st, &v["ok"]), (200, &json!(true)), "cancel: {v}");
+    let d = drained(&h, &token, 30).await;
+    assert!(
+        d.is_some(),
+        "sealed once the turn is over; log:\n{}",
+        hub_log(&h)
+    );
+    assert_eq!(d.expect("drain")["node"], 0);
+    let d = drain(&h, "DELETE", &token).await;
+    assert_eq!(d["maintenance"], false, "{d}");
+
+    // ── a turn waiting for a permission answer holds it too, until it is answered
+    c.say(&sid, "@perm Bash").await;
+    let mut card = None;
+    assert!(
+        wait(30, || {
+            card = open_card(&h, &sid);
+            card.is_some()
+        })
+        .await,
+        "a permission card; log:\n{}",
+        hub_log(&h)
+    );
+    let card = card.expect("card");
+    let d = drain(&h, "POST", &token).await;
+    assert_eq!(
+        (&d["ready"], &d["node"]),
+        (&json!(false), &json!(1)),
+        "a permission wait holds the drain: {d}"
+    );
+    let r = c.say(&sid, "排空验收-排队 @say drained-done").await;
+    assert_eq!(r["result"], "queued", "{r}");
+    let (st, v) = c
+        .call(
+            "POST",
+            &format!("/api/decisions/{card}"),
+            Some(json!({"choice": "allow_once"})),
+        )
+        .await;
+    assert_eq!(st, 200, "answer: {v}");
+    assert!(
+        wait(30, || steve_v1(&h, &sid, "perm:selected:") > 0).await,
+        "the agent got the answer under the drain; log:\n{}",
+        hub_log(&h)
+    );
+    assert!(
+        drained(&h, &token, 30).await.is_some(),
+        "sealed once the answered turn is over; log:\n{}",
+        hub_log(&h)
+    );
+    assert_eq!(h.got("排空验收-排队"), 0, "not sent while drained");
+
+    // ── lifting the drain sends what waited
+    let d = drain(&h, "DELETE", &token).await;
+    assert_eq!(d["maintenance"], false, "{d}");
+    assert!(
+        wait(30, || h.got("排空验收-排队") == 1).await,
+        "sent once the drain is lifted; log:\n{}",
+        hub_log(&h)
+    );
+    assert!(wait(30, || steve_v1(&h, &sid, "drained-done") > 0).await);
+}
