@@ -109,6 +109,7 @@
   "hub.node.lagging": "Hub 未能及时应用这个会话在 Node 上的事件；该会话暂停，不会发出新的指令，这些事件应用完毕后自动继续",
   "hub.node.recover_failed": "撤回结果未知的操作没有成功（%{detail}），需要人工核验 Node 状态；会话仍然暂停，可以再点一次停止重试。",
   "hub.node.recovered_released": "已撤回结果未知的%{what}；它在 Node 上的实际效果仍无法确定（不算成功）。会话已释放，下一条消息会重新打开。",
+  "hub.node.recovered_release_again": "已撤回结果未知的%{what}；它在 Node 上的实际效果仍无法确定（不算成功）。接替它的会话要等它释放，所以重新请求释放。",
   "hub.node.recovered_prepare": "已撤回结果未知的%{what}；它在 Node 上的实际效果仍无法确定（不算成功），会重新准备工作区再打开会话。",
   "hub.node.recovered_abandon": "已撤回结果未知的%{what}；这次执行的结果仍然未知，可以再点一次停止放弃它。",
   "hub.node.recovered_permission": "已撤回结果未知的%{what}；这次授权是否生效仍无法确定。",

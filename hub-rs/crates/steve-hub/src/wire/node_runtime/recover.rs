@@ -207,6 +207,49 @@ impl NodeRuntime {
         )
     }
 
+    /// A retired release a successor waits for (a handoff, B4): what it did on the Node is
+    /// unknown, so the old harness may still be open in the shared worktree. The session is asked
+    /// to let go again under a new id and the successor, told once, waits on that one instead (a
+    /// refusal of it is asked again as any handoff release is, [`Self::release_again_in`]).
+    /// False: nothing waits for the retired release.
+    fn release_for_successor_in(
+        &self,
+        tx: &Tx,
+        session: &str,
+        retired: &str,
+    ) -> Result<bool, StoreError> {
+        let waiting: Vec<String> = tx
+            .prepare(
+                "SELECT operation_id FROM node_commands WHERE dependency_operation=? AND state='pending'",
+            )?
+            .query_map([retired], |r| r.get(0))?
+            .collect::<Result<_, _>>()?;
+        if waiting.is_empty() {
+            return Ok(false);
+        }
+        // the session stays releasing: this release's end is the session's ([`Self::released_in`])
+        let op = self.release_command_in(tx, session)?;
+        for w in &waiting {
+            tx.execute(
+                "UPDATE node_commands SET dependency_operation=?, updated=? WHERE operation_id=? AND state='pending'",
+                rusqlite::params![op, now(), w],
+            )?;
+            if let Some(next) = command_any_session_in(tx, w)? {
+                system_in(tx, &next, &steve_i18n::t!("hub.node.release_retry"))?;
+            }
+        }
+        system_in(
+            tx,
+            session,
+            &steve_i18n::t!(
+                "hub.node.recovered_release_again",
+                what = what("release_session")
+            ),
+        )?;
+        self.wake_send.notify_one();
+        Ok(true)
+    }
+
     /// The Node retired the recover's target (interrupted, its effects kept as they are).
     fn retired_in(&self, tx: &Tx, op: &str) -> Result<(), StoreError> {
         let (target, method): (String, String) = tx.query_row(
@@ -226,6 +269,11 @@ impl NodeRuntime {
                     _ => "configuring",
                 };
                 if phase_in(tx, &session)?.is_none_or(|(p, a)| p != held || a.is_some()) {
+                    return Ok(());
+                }
+                if method == "release_session"
+                    && self.release_for_successor_in(tx, &session, &target)?
+                {
                     return Ok(());
                 }
                 let rev = session_revision(tx, &session)?;

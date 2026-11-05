@@ -109,6 +109,7 @@
   "hub.node.lagging": "The Hub could not apply this session's Node events in time. The session is paused and sends no new commands; it continues once they are applied",
   "hub.node.recover_failed": "Retracting the operation with an unknown outcome did not succeed (%{detail}); the Node's state needs checking by hand. The session stays paused; press Stop again to retry.",
   "hub.node.recovered_released": "Retracted %{what}, whose outcome was unknown; what it did on the Node is still unknown (not counted as a success). The session was released; the next message opens it again.",
+  "hub.node.recovered_release_again": "Retracted %{what}, whose outcome was unknown; what it did on the Node is still unknown (not counted as a success). The session that takes over waits for it to be let go, so it is asked again.",
   "hub.node.recovered_prepare": "Retracted %{what}, whose outcome was unknown; what it did on the Node is still unknown (not counted as a success). The workspace is prepared again before the session opens.",
   "hub.node.recovered_abandon": "Retracted %{what}, whose outcome was unknown; this run's outcome is still unknown. Press Stop again to give it up.",
   "hub.node.recovered_permission": "Retracted %{what}, whose outcome was unknown; whether the permission took effect is still unknown.",

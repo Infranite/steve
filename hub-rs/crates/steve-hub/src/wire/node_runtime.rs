@@ -678,7 +678,9 @@ impl NodeRuntime {
                         r.get(0)
                     })
                     .optional()?;
-                if still.is_none() {
+                // a session paused (its stream faulted, stranger Node work held, its events
+                // lagging) is sent no new command, a release included
+                if still.is_none() || self.is_held(&s) || faulted(tx, &self.node_id, &s)? {
                     return Ok(false);
                 }
                 // only a release that goes out lets a harness go

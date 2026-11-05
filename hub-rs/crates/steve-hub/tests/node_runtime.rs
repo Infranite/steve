@@ -956,6 +956,30 @@ async fn a_session_with_a_message_waiting_is_not_let_go() {
     assert_eq!(h.count("release_session"), 0);
 }
 
+/// Review of A4 with N1-6: an idle session paused on a faulted stream is sent no new command,
+/// its idle release included, until reconciliation.
+#[tokio::test]
+async fn an_idle_session_on_a_faulted_stream_is_not_let_go() {
+    let h = hub();
+    h.bind();
+    h.one_turn("hello").await;
+    let stream = derived_id("session", S);
+    let n: usize = h
+        .store
+        .transaction::<_, StoreError>(|tx| {
+            Ok(tx.execute(
+                "UPDATE node_streams SET fault='conflict' WHERE stream=?",
+                [&stream],
+            )?)
+        })
+        .unwrap();
+    assert_eq!(n, 1, "the session's stream is known");
+    h.rt.set_idle_release(0);
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(h.phase(), "ready");
+    assert_eq!(h.count("release_session"), 0);
+}
+
 #[tokio::test]
 async fn a_session_with_an_open_card_is_not_let_go() {
     let h = hub();
@@ -4495,6 +4519,38 @@ async fn stop_retires_an_unknown_release_and_the_next_message_reopens() {
     );
     assert_eq!(h.count("open_session"), 2);
     h.finish_last().await;
+}
+
+/// Review of B4 with N1-8: on a handoff the old session's release comes back unknown and Stop
+/// retires it. Nothing proves the old harness gone from the shared worktree, so it is asked to let
+/// go again under a new id and the successor, told why it waits, opens after that one (not never,
+/// and not beside the old harness).
+#[tokio::test]
+async fn a_retired_unknown_release_on_a_handoff_is_asked_again_and_the_successor_opens_after_it() {
+    let h = hub();
+    h.rt.bind(&on_the_item(S)).unwrap();
+    h.one_turn("hello").await;
+    h.node.script_once("release_session", Scripted::Unknown);
+    let op = h.hand_off();
+    until("unknown", || h.state_of(&op) == "unknown").await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(h.count("prepare_workspace"), 1, "the successor waits");
+    assert!(h.rt.user_stop(S).unwrap());
+    until("the successor's turn", || h.count("start_turn") == 2).await;
+    assert_eq!(h.count("recover"), 1);
+    assert_eq!(h.sent(&op), 1, "the target is never sent again");
+    let releases: i64 = h.q(&format!(
+        "SELECT COUNT(*) FROM node_commands WHERE method='release_session' AND json_extract(request,'$.body')='{S}'"
+    ));
+    assert_eq!(releases, 2, "asked again under a new id");
+    assert_eq!(h.last_state("release_session"), "finished");
+    assert_eq!(h.phase_of(S), "released");
+    assert_eq!(h.node.most_open_in_a_workspace(), 1, "never two at once");
+    assert_eq!(h.prompt_of(1), "continue");
+    let told: i64 = h.q(&format!(
+        "SELECT COUNT(*) FROM events WHERE session_id='{S2}' AND kind='system' AND data LIKE '%还没能在 Node 上释放%'"
+    ));
+    assert_eq!(told, 1);
 }
 
 #[tokio::test]

@@ -894,20 +894,21 @@ impl RoutedRuntime {
     /// Whether the Node `session_id` is bound to can be told [`steve_node_api::PermissionMode::Auto`]:
     /// the local Node always (it is this build), a remote one once its link said
     /// [`steve_node_api::AUTO_MODE`]. An older Node cannot decode it and would refuse the configure.
-    fn speaks_auto(&self, session_id: &str) -> bool {
+    /// `None`: not known yet (a remote Node not linked since the Hub started), which may change.
+    fn speaks_auto(&self, session_id: &str) -> Option<bool> {
         let Some(node) = node_of(&self.store, session_id) else {
-            return false;
+            return Some(false);
         };
         if self
             .node
             .as_ref()
             .is_some_and(|n| n.node_id().as_str() == node)
         {
-            return true;
+            return Some(true);
         }
         match (&self.fleet, steve_node_api::NodeId::new(node)) {
-            (Some(f), Ok(id)) => f.speaks(&id, steve_node_api::AUTO_MODE),
-            _ => false,
+            (Some(f), Ok(id)) => f.speaks_known(&id, steve_node_api::AUTO_MODE),
+            _ => Some(false),
         }
     }
 
@@ -1186,9 +1187,22 @@ impl steve_core::AgentRuntime for RoutedRuntime {
         // switch pending and retries it), not a parked session's NotRunning
         match self.route_strict(session_id)? {
             // through the Node's configure, at the session's next idle boundary
-            Backend::Node(n) => match super::node_binding::permission_mode(mode).filter(|p| {
-                *p != steve_node_api::PermissionMode::Auto || self.speaks_auto(session_id)
-            }) {
+            Backend::Node(n) => match super::node_binding::permission_mode(mode) {
+                // a remote Node not linked since the Hub started may well speak auto: not known
+                // yet, so the switch stays pending (an error) and the next sync asks again
+                Some(steve_node_api::PermissionMode::Auto)
+                    if self.speaks_auto(session_id).is_none() =>
+                {
+                    Err(CoreError::Msg(format!(
+                        "set mode {mode} on {session_id}: its Node has not linked yet"
+                    )))
+                }
+                Some(steve_node_api::PermissionMode::Auto)
+                    if self.speaks_auto(session_id) == Some(false) =>
+                {
+                    // its hello said an older protocol: trying again would not help
+                    Ok(Configured::Unsupported)
+                }
                 Some(p) => Ok(
                     match n.configure(
                         session_id,
@@ -1202,7 +1216,7 @@ impl steve_core::AgentRuntime for RoutedRuntime {
                         Node::OnReopen => Configured::NotRunning,
                     },
                 ),
-                // permanent: trying again would not help
+                // a mode no Node can express: permanent, trying again would not help
                 None => Ok(Configured::Unsupported),
             },
             // its Node is not enabled here: nothing runs for it now (as before D5)
@@ -2117,6 +2131,55 @@ mod routed_tests {
             rt.answer_permission("d1", Some("allow")).is_err(),
             "card unreadable"
         );
+    }
+
+    /// A switch to auto for a session on a remote Node not linked since the Hub started is not
+    /// known to be impossible: an error (the YOLO sync keeps it pending and asks again), never the
+    /// permanent Unsupported, which only a hello older than AUTO_MODE gives.
+    #[tokio::test]
+    async fn auto_on_a_remote_node_not_linked_yet_stays_pending() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut rt = routed(dir.path());
+        let fleet = crate::nodes::NodeFleet::new(
+            rt.store.clone(),
+            dir.path().to_path_buf(),
+            Some(Arc::new(super::super::node_tools::tests::Ends)),
+            None,
+        );
+        rt.fleet = Some(fleet.clone());
+        rt.store
+            .transaction::<_, steve_store::StoreError>(|tx| {
+                tx.execute(
+                    "INSERT INTO sessions(id,workspace_id,harness,cwd,status,created,updated) VALUES ('s1','default','claude-code','.','active',1,1)",
+                    [],
+                )?;
+                steve_store::runtime::bind_session_in(
+                    tx,
+                    &steve_store::runtime::SessionBinding {
+                        session: "s1",
+                        node: "n2",
+                        workspace: &serde_json::json!({"node": "n2", "id": "w1"}),
+                        node_session: "s1",
+                        config_revision: "r1",
+                    },
+                    1,
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(
+            rt.set_mode("s1", "auto").is_err(),
+            "not linked yet: retried"
+        );
+        let n2 = steve_node_api::NodeId::new("n2").unwrap();
+        fleet.linked(
+            &n2,
+            (steve_node_api::AUTO_MODE.0, steve_node_api::AUTO_MODE.1 - 1),
+        );
+        assert!(matches!(
+            rt.set_mode("s1", "auto").unwrap(),
+            steve_core::Configured::Unsupported
+        ));
     }
 }
 
