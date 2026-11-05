@@ -5,7 +5,7 @@
 
 use std::path::Path;
 
-use rusqlite::{Connection, OpenFlags, OptionalExtension};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior};
 
 use crate::{Result, StoreError};
 
@@ -79,6 +79,8 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/033.sql"),
     // 34: Node dispatch intents, execution projections and durable event inbox.
     include_str!("../migrations/034.sql"),
+    // 35: indexes only, for lookups that scanned whole tables (send queue, tokens, subjects, stats polls).
+    include_str!("../migrations/035.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).
@@ -136,7 +138,32 @@ pub(crate) fn pragmas(c: &Connection) -> rusqlite::Result<()> {
     c.pragma_update(None, "synchronous", "NORMAL")?;
     // the default of 16 cached statements is far fewer than the repositories use
     c.set_prepared_statement_cache_capacity(STATEMENT_CACHE);
+    // sorts and GROUP BYs build their temp b-trees in memory instead of temp files; reads of the file
+    // go through a shared mapping instead of a copy per connection
+    c.pragma_update(None, "temp_store", "MEMORY")?;
+    c.pragma_update(None, "mmap_size", MMAP_SIZE)?;
+    // 16 MiB page cache per reader (the default is 2 MB); the writer gets more in `open_writer`
+    c.pragma_update(None, "cache_size", -16_384)?;
     Ok(())
+}
+
+/// Bytes of the database file mapped into memory per connection.
+const MMAP_SIZE: i64 = 256 * 1024 * 1024;
+
+/// What the WAL file is truncated back to after a checkpoint (unbounded by default, so one spike such
+/// as a migration or a big prune would keep it large for good).
+const JOURNAL_SIZE_LIMIT: i64 = 64 * 1024 * 1024;
+
+/// Refreshes the planner's statistics where they are missing or stale (`PRAGMA optimize`), bounded so
+/// it stays cheap on a large database. Only on the writer: the readers are read-only.
+pub(crate) fn optimize(c: &Connection, at_open: bool) -> rusqlite::Result<()> {
+    // 0x10002 also looks at tables never analyzed, which is what a database opened for the first
+    // time after an upgrade needs; afterwards the plain form only redoes tables that changed a lot
+    c.execute_batch(if at_open {
+        "PRAGMA analysis_limit = 400; PRAGMA optimize = 0x10002;"
+    } else {
+        "PRAGMA analysis_limit = 400; PRAGMA optimize;"
+    })
 }
 
 /// Opens (creating if needed) the write connection and migrates it.
@@ -152,7 +179,10 @@ pub(crate) fn open_writer(path: &Path) -> Result<Connection> {
         tracing::warn!(mode, "journal_mode WAL not accepted");
     }
     pragmas(&c)?;
+    c.pragma_update(None, "cache_size", -32_768)?;
+    c.pragma_update(None, "journal_size_limit", JOURNAL_SIZE_LIMIT)?;
     migrate(&c)?;
+    optimize(&c, true)?;
     Ok(c)
 }
 
@@ -203,9 +233,11 @@ pub fn migrate(c: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// The migrations after `cur` and the version row, in one transaction.
+/// The migrations after `cur` and the version row, in one transaction. IMMEDIATE: another process
+/// (the upgrade supervisor) may open the same file, and the write lock is taken up front, where the
+/// busy timeout applies, instead of at the first write.
 fn run_pending(c: &Connection, cur: i64) -> Result<()> {
-    let tx = c.unchecked_transaction()?;
+    let tx = Transaction::new_unchecked(c, TransactionBehavior::Immediate)?;
     for m in MIGRATIONS.iter().skip(cur.max(0) as usize) {
         tx.execute_batch(m)?;
     }

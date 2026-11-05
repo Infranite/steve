@@ -132,7 +132,7 @@ impl Annotations<'_> {
     /// then (`again`); drafts another send took already are left out.
     pub fn claim(&self, item_id: &str, ids: &[String], key: &str) -> Result<Claim> {
         self.0.write(|w| {
-            let tx = w.c.unchecked_transaction()?;
+            let tx = w.tx()?;
             let before = all(
                 &tx,
                 "SELECT * FROM annotations WHERE item_id = ? AND send_key = ? ORDER BY created, id",

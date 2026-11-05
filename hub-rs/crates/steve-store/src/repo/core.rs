@@ -303,7 +303,7 @@ impl Settings<'_> {
     /// Upserts every key in one transaction, records a revision and publishes `settings`.
     pub fn set(&self, ws: &str, p: &Map<String, Value>, author: &str) -> Result<()> {
         self.0.write(|w| {
-            let tx = w.c.unchecked_transaction()?;
+            let tx = w.tx()?;
             {
                 let mut st = tx.prepare_cached(
                     "INSERT INTO settings (workspace_id, key, value, updated) VALUES (?, ?, ?, ?) ON CONFLICT(workspace_id, key) DO UPDATE SET value = excluded.value, updated = excluded.updated",

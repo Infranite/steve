@@ -354,3 +354,25 @@ fn an_idle_pass_takes_no_write_lock() {
     );
     held.join().unwrap();
 }
+
+#[test]
+fn prune_removes_more_than_one_batch() {
+    let t = common::fresh();
+    let c = Counter::new("c");
+    let d = disp(std::slice::from_ref(&c));
+    d.register(&t.store).unwrap();
+    // more than one prune batch (500), delivered, and one still owed at the end
+    t.store
+        .transaction(|tx| {
+            for i in 0..1201 {
+                outbox::emit(tx, "default", TOPIC, 1, &json!({ "i": i }))?;
+            }
+            Ok::<_, StoreError>(())
+        })
+        .unwrap();
+    while d.pump(&t.store, 1).unwrap().done > 0 {}
+    emit(&t.store, "default", 1);
+    assert_eq!(outbox::prune(&t.store, i64::MAX / 2, 0).unwrap(), 1201);
+    assert_eq!(one::<i64>(&t.store, "SELECT count(*) FROM outbox_events"), 1);
+    assert_eq!(one::<i64>(&t.store, "SELECT count(*) FROM outbox_receipts"), 0);
+}

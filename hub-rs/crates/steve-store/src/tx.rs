@@ -62,7 +62,7 @@ impl Store {
         f: impl FnOnce(&Tx) -> Result<T, E>,
     ) -> Result<T, E> {
         let c = self.lock();
-        let tx = c.unchecked_transaction().map_err(StoreError::from)?;
+        let tx = crate::immediate(&c).map_err(StoreError::from)?;
         let t = Tx {
             c: &tx,
             events: RefCell::new(Vec::new()),

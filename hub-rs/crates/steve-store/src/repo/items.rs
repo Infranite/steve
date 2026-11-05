@@ -190,7 +190,7 @@ impl Items<'_> {
     pub fn patch(&self, id: &str, p: &ItemPatch) -> Result<Option<Item>> {
         self.0.write(|w| {
             // stats: a status change leaves exactly one mark, in the same transaction as the change
-            let tx = w.c.unchecked_transaction()?;
+            let tx = w.tx()?;
             let changed = patch_on(&tx, id, p)?;
             tx.commit()?;
             if changed {
@@ -203,7 +203,7 @@ impl Items<'_> {
     /// Deletes the item and what hangs off it; sessions and decisions are kept but unlinked.
     pub fn remove(&self, id: &str) -> Result<()> {
         self.0.write(|w| {
-            let tx = w.c.unchecked_transaction()?;
+            let tx = w.tx()?;
             tx.run(
                 "UPDATE sessions SET item_id = NULL, no = 0 WHERE item_id = ?",
                 [id],
@@ -459,7 +459,7 @@ impl Artifacts<'_> {
         role: Option<&str>,
     ) -> Result<()> {
         self.0.write(|w| {
-            let tx = w.c.unchecked_transaction()?;
+            let tx = w.tx()?;
             let id = uid("art");
             tx.run(
                 "INSERT INTO artifacts (id, item_id, kind, title, location, created) VALUES (?, ?, ?, ?, ?, ?)",

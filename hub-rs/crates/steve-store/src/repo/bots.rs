@@ -156,7 +156,7 @@ impl Bots<'_> {
     /// Makes the bot a member of exactly `wss` (existing duties are kept).
     pub fn set_workspaces(&self, id: &str, wss: &[String]) -> Result<()> {
         self.0.write(|w| {
-            let tx = w.c.unchecked_transaction()?;
+            let tx = w.tx()?;
             let marks = if wss.is_empty() { "''".to_string() } else { vec!["?"; wss.len()].join(",") };
             let mut ps: Vec<&str> = vec![id];
             ps.extend(wss.iter().map(String::as_str));
