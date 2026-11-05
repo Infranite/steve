@@ -145,6 +145,11 @@ Node 和驱动的身份不放在每个事件里。Node 身份来自已认证的�
 
 - 历史行保持不动。新写入的行标 `format=steve.v1`，旧行认定为 `legacy.acp`。
 - 设一个隔离的只读 `LegacyEventReader`，把旧行转成 Steve schema。它只在读取路径上使用，不参与 Node 协议。
+- 实现（D4，`steve-transcript`）：会话记录的条目即 Steve schema。Hub 自己写的 kind（`user`、`queued…`、`system`、`permission`、`turn_end`）两种格式相同；另有 `text {role, message, text}`、`tool {tool: ToolView}`（整体替换同 id 的上一条）、`plan {entries}`、`message {message, role}`。这些 kind 与 ACP 的不重名。
+  - Node 事件经 `of_node` 落成条目；`AttemptStarted/Ended`、权限、用量等是 Hub 的状态，不进会话记录。
+  - 旧 runner 的 ACP 更新在 Hub 写入前（`HubHost::add_event`）读成条目，以 `steve.v1` 落库；导入的本机会话同样。
+  - 读取旧行（`legacy.acp`）用 `LegacyReader`（共享 normalizer）。分页时，页内工具更新所需的此前行由 `tool_context` 预读，页从中间开始也能得到完整视图。
+  - Web、core（`assistant_text`）和统计只认条目。
 - 旧数据缺少的边界标为 inferred，不捏造。
 - `slim.rs` 里针对 ACP 的过滤可以删掉，但大小控制、图片引用、脱敏和可见性投影要保留，这些是 Steve API 自己的职责。
 

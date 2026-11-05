@@ -173,31 +173,35 @@ export function briefHead(text: string): string {
   const line = text.split("\n").find((l) => l.trim())?.trim() ?? ""
   return !line ? "任务说明" : line.length > 120 ? line.slice(0, 120) + "…" : line
 }
-const textOf = (content: any): string => (Array.isArray(content) ? content : [content]).map((c: any) => c?.type === "content" ? textOf(c.content) : c?.type === "text" ? c.text : c?.type === "diff" ? `--- ${c.path}` : "").filter(Boolean).join("\n")
 const STEVE_TOOL: Record<string, string> = { steve_update: "更新计划", steve_ask: "向你提问", steve_request_approval: "请求批准", steve_deliver: "交付", steve_publish: "申请发布" }
-const KIND: Record<string, string> = { read: "read", edit: "edit", search: "search", execute: "run", fetch: "search", think: "read", delete: "edit", move: "edit" }
-const lines = (t: unknown) => (typeof t === "string" && t ? t.split("\n").length : 0)
+const KIND: Record<string, string> = { read: "read", edit: "edit", search: "search", exec: "run", fetch: "search", think: "read", delete: "edit", move: "edit" }
 const unfence = (t: string) => t.replace(/^```[a-z]*\n?/, "").replace(/\n?```\s*$/, "")
-/** what a tool call was given, for the transcript: the command, a short description, a diff from Edit/Write's own input */
-function toolInput(t: Ev, inp: any) {
-  if (!inp || typeof inp !== "object") return
-  if (typeof inp.description === "string" && inp.description) t[10] = inp.description
-  if (typeof inp.command === "string" && inp.command) t[11] = inp.command
-  else if (typeof inp.pattern === "string") t[11] = inp.pattern
-  else if (typeof inp.query === "string") t[11] = inp.query
-  else if (typeof inp.url === "string") t[11] = inp.url
-  if (typeof inp.now === "string") t[10] = inp.now
-  if (Array.isArray(inp.plan)) t[12] = inp.plan.map((x: any) => [String(x.step ?? ""), !!x.done])
-  if (typeof inp.summary === "string" && t[3] === "Steve") t[10] = inp.summary.split("\n")[0].slice(0, 160)
-  if (typeof inp.question === "string") t[10] = inp.question
-  const edits = Array.isArray(inp.edits) ? inp.edits : typeof inp.new_string === "string" ? [inp] : null
-  if (edits) {
-    t[6] = edits.reduce((n: number, x: any) => n + lines(x.new_string), 0); t[7] = edits.reduce((n: number, x: any) => n + lines(x.old_string), 0)
-    t[4] = edits.map((x: any) => [...String(x.old_string ?? "").split("\n").filter((l, _i, a) => a.length > 1 || l).slice(0, 40).map((l) => "- " + l), ...String(x.new_string ?? "").split("\n").slice(0, 60).map((l) => "+ " + l)].join("\n")).join("\n⋯\n")
-  } else if (typeof inp.content === "string" && inp.file_path) { t[6] = lines(inp.content); t[7] = 0; t[4] = inp.content.split("\n").slice(0, 80).map((l: string) => "+ " + l).join("\n") }
-  if (typeof inp.file_path === "string" && (!t[3] || t[3] === t[2])) t[3] = inp.file_path
+const diffText = (d: any) => [...String(d.old ?? "").split("\n").filter((l, _i, a) => a.length > 1 || l).map((l) => "- " + l), ...String(d.new ?? "").split("\n").map((l) => "+ " + l)].join("\n")
+/** a tool's whole current view (transcript `tool`, ToolView in docs/node-protocol.md) → its transcript tuple, in place */
+function toolEv(t: Ev, v: any) {
+  const name = String(v.name ?? ""), short = name.replace(/^mcp__steve__/, ""), title = String(v.title ?? "")
+  const steve = v.origin === "steve" || v.category === "steve", live = v.phase === "succeeded" || v.phase === "failed" ? 0 : 1
+  const args = v.action?.type === "tool" && v.action.args && typeof v.action.args === "object" ? v.action.args : undefined
+  const result: any[] = Array.isArray(v.result) ? v.result : [], diffs = result.filter((p) => p?.type === "diff")
+  const text = result.filter((p) => p?.type === "text").map((p) => String(p.text ?? "")).join("\n")
+  t.length = 0
+  if (steve) t.push("tool", "steve", STEVE_TOOL[short] ?? short, "Steve", "", live)
+  else t.push("tool", KIND[v.category] ?? "run", name || title.split(" ")[0] || "工具", v.target ?? title.split(" ").slice(1).join(" ").slice(0, 80), "", live)
+  if (diffs.length) { t[4] = diffs.map(diffText).join("\n⋯\n"); t[6] = diffs.reduce((n, d) => n + (d.added ?? 0), 0); t[7] = diffs.reduce((n, d) => n + (d.removed ?? 0), 0); if (!steve && diffs[0].path) t[3] = diffs[0].path }
+  else if (text) t[4] = t[1] === "run" ? unfence(text) : text
+  if (!t[4] && v.error) t[4] = String(v.error)
+  t[8] = v.phase === "failed" ? 1 : 0; t[9] = name
+  const a = v.action
+  if (a?.type === "exec") t[11] = a.command; else if (a?.type === "search") t[11] = a.query; else if (a?.type === "fetch") t[11] = a.url
+  if (args) {
+    if (typeof args.now === "string") t[10] = args.now
+    if (Array.isArray(args.plan)) t[12] = args.plan.map((x: any) => [String(x.step ?? ""), !!x.done])
+    if (typeof args.summary === "string") t[10] = args.summary.split("\n")[0].slice(0, 160)
+    if (typeof args.question === "string") t[10] = args.question
+  }
+  return t
 }
-/** ACP events → transcript tuples; seqs[i] is the event sequence where tuple i starts (used for fork), ts[i] its time */
+/** transcript entries (Steve's own kinds; the Hub reads old ACP rows into them) → transcript tuples; seqs[i] is the event sequence where tuple i starts (used for fork), ts[i] its time */
 export function toEv(evs: REvent[], running: boolean): { ev: Ev[]; seqs: number[]; ts: number[] } {
   const ev: Ev[] = [], seqs: number[] = [], ts: number[] = [], tools = new Map<string, Ev>()
   let cur: REvent | undefined
@@ -205,25 +209,15 @@ export function toEv(evs: REvent[], running: boolean): { ev: Ev[]; seqs: number[
   for (const e of evs) {
     const d = e.data ?? {}, last = ev[ev.length - 1]; cur = e
     if (e.kind === "user") { if (d.via === "steve") push(["hi", briefHead(String(d.text ?? "")), d.files, String(d.text ?? "")], e.seq); else push(["u", d.text, d.via === "me" ? "" : d.via, d.files], e.seq); continue }
-    if (e.kind === "agent_message_chunk") { const t = d.content?.text ?? ""; if (last?.[0] === "a") last[1] += t; else push(["a", t], e.seq); continue }
-    if (e.kind === "agent_thought_chunk") { const t = d.content?.text ?? ""; if (last?.[0] === "th") last[1] += t; else push(["th", t, ""], e.seq); continue }
-    if (e.kind === "tool_call") {
-      const name = String(d.title ?? ""), m = name.match(/steve_(update|ask|request_approval|deliver|publish)/)
-      const loc = d.locations?.[0]?.path ?? ""
-      const t: Ev = m ? ["tool", "steve", STEVE_TOOL["steve_" + m[1]], "Steve", "", d.status === "completed" ? 0 : 1] : ["tool", KIND[d.kind] ?? "run", name.split(" ")[0] || "工具", loc || name.split(" ").slice(1).join(" ").slice(0, 80), textOf(d.content), d.status === "completed" || d.status === "failed" ? 0 : 1]
-      t[8] = d.status === "failed" ? 1 : 0; t[9] = d.tool ?? d._meta?.claudeCode?.toolName ?? d.name ?? ""; toolInput(t, d.rawInput)
-      tools.set(d.toolCallId, t); push(t, e.seq); continue
-    }
-    if (e.kind === "tool_call_update") {
-      const t = tools.get(d.toolCallId); if (!t) continue
-      if (d.status === "completed" || d.status === "failed") { t[5] = 0; t[8] = d.status === "failed" ? 1 : 0 }
-      toolInput(t, d.rawInput)
-      if (d.title && t[3] !== "Steve") { t[2] = String(d.title).split(" ")[0]; if (!t[3]) t[3] = String(d.title).split(" ").slice(1).join(" ").slice(0, 80) }
-      const o = textOf(d.content); if (o && !(t[1] === "edit" && t[6] != null)) t[4] = t[1] === "run" ? unfence(o) : o
-      const diff = (d.content ?? []).find((c: any) => c.type === "diff")
-      if (diff) { t[3] = diff.path; t[6] = String(diff.newText ?? "").split("\n").length; t[7] = diff.oldText ? String(diff.oldText).split("\n").length : 0; t[4] = (diff.oldText ? String(diff.oldText).split("\n").slice(0, 6).map((l: string) => "- " + l).join("\n") + "\n" : "") + String(diff.newText ?? "").split("\n").slice(0, 12).map((l: string) => "+ " + l).join("\n") }
-      if (d.rawOutput && (!t[4] || t[1] === "run")) t[4] = typeof d.rawOutput === "string" ? d.rawOutput.slice(0, 3000) : JSON.stringify(d.rawOutput).slice(0, 2000)
+    if (e.kind === "text") {
+      const t = String(d.text ?? ""), k = d.role === "thought" ? "th" : "a"
+      if (last?.[0] === k) last[1] += t; else push(k === "th" ? ["th", t, ""] : ["a", t], e.seq)
       continue
+    }
+    if (e.kind === "tool") {
+      const v = d.tool ?? {}, id = String(v.id ?? ""), had = tools.get(id)
+      if (had) { toolEv(had, v); continue }
+      const t = toolEv([], v); tools.set(id, t); push(t, e.seq); continue
     }
     if (e.kind === "system") { push(["sys", d.text], e.seq); continue }
     if (e.kind === "permission") { push(["ask", String(d.title ?? "工具调用"), d.decision], e.seq); continue }
@@ -357,8 +351,8 @@ function repliesOf(timeline: RItemDetail["timeline"], sids: string[]): Map<numbe
     let end = k + 1
     while (end < evs.length && evs[end].kind !== "user") end++
     const turn = evs.slice(k + 1, end)
-    const text = turn.filter((e) => e.kind === "agent_message_chunk").map((e) => e.data?.content?.text ?? "").join("").trim()
-    const tools = turn.filter((e) => e.kind === "tool_call").length
+    const text = turn.filter((e) => e.kind === "text" && e.data?.role === "assistant").map((e) => e.data?.text ?? "").join("").trim()
+    const tools = new Set(turn.filter((e) => e.kind === "tool").map((e) => e.data?.tool?.id)).size
     const live = !!S && S.st === "run" && end === evs.length && !turn.some((e) => e.kind === "turn_end")
     /* the transcript tuples of this turn, for the full view */
     const firstSeq = evs[k + 1]?.seq ?? Infinity, endSeq = evs[end]?.seq ?? Infinity

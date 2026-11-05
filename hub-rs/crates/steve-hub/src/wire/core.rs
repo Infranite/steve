@@ -97,6 +97,9 @@ pub struct HubHost {
     pub yolo: OnceLock<steve_core::yolo::Engine>,
     /// The first `user` event of the turn being started, for `agent_turns.user_seq`.
     pub user_seqs: super::acp_stats::UserSeqs,
+    /// Per session, what the runner's turn said so far (its tool updates carry only what changed).
+    pub transcripts:
+        std::sync::Mutex<std::collections::HashMap<String, steve_transcript::LegacyReader>>,
 }
 
 impl HubHost {
@@ -205,10 +208,40 @@ impl Host for HubHost {
         let armed = (kind == "permission")
             .then(|| data["decision"].as_str().map(String::from))
             .flatten();
-        match self.store.events().add(session_id, kind, data) {
-            Ok(seq) if kind == "user" => self.user_seqs.user_event(session_id, seq),
-            Ok(_) => {}
-            Err(e) => tracing::error!("event {session_id} {kind}: {e}"),
+        // the runner's ACP updates are stored as Steve's own transcript entries
+        let entries = if steve_transcript::is_legacy(kind, &data) {
+            let mut readers = self.transcripts.lock().unwrap_or_else(|e| e.into_inner());
+            let reader = readers.entry(session_id.to_string()).or_insert_with(|| {
+                let cwd = self
+                    .store
+                    .sessions()
+                    .get(session_id)
+                    .ok()
+                    .flatten()
+                    .map(|s| s.cwd)
+                    .unwrap_or_default();
+                steve_transcript::LegacyReader::new(&cwd)
+            });
+            reader.read(kind, &data)
+        } else {
+            if kind == "turn_end" {
+                // tool updates never cross a turn: what the reader kept is done with
+                self.transcripts
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(session_id);
+            }
+            vec![steve_transcript::Entry {
+                kind: kind.into(),
+                data,
+            }]
+        };
+        for x in entries {
+            match self.store.events().add(session_id, &x.kind, x.data) {
+                Ok(seq) if kind == "user" => self.user_seqs.user_event(session_id, seq),
+                Ok(_) => {}
+                Err(e) => tracing::error!("event {session_id} {kind}: {e}"),
+            }
         }
         if let (Some(id), Some(engine)) = (armed, self.yolo.get()) {
             engine.arm(&id);

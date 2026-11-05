@@ -396,8 +396,7 @@ impl Engine {
         let evs = self.core().store().events_after(sid, 0).map_err(ce)?;
         let text: String = evs
             .iter()
-            .filter(|e| e.kind == "agent_message_chunk")
-            .filter_map(|e| e.data.pointer("/content/text").and_then(Value::as_str))
+            .filter_map(|e| steve_transcript::assistant_text(&e.kind, &e.data))
             .collect();
         Ok(js_tail(text.trim(), TAIL).to_string())
     }

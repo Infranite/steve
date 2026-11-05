@@ -43,7 +43,7 @@ test("stream paint preserves unrelated sessions, bots, items and thread referenc
   const h = harness(), s = h.store
   s.start(); await flush(); await s.loadEvents("a"); await s.loadEvents("b")
   const before = { b: s.st.S.b, bots: s.st.bots, items: s.st.items, thread: s.st.thread }
-  h.event({ type: "event", session_id: "a", seq: 1, kind: "agent_message_chunk", data: { content: { text: "hello" } } })
+  h.event({ type: "event", session_id: "a", seq: 1, kind: "text", data: { role: "assistant", text: "hello" } })
   await h.tick(80)
   assert.equal(s.st.S.a.ev[0][1], "hello")
   assert.equal(s.st.S.b, before.b); assert.equal(s.st.bots, before.bots); assert.equal(s.st.items, before.items); assert.equal(s.st.thread, before.thread)
@@ -53,10 +53,10 @@ test("pages paint before EOF; SSE during a load is caught up without duplicates"
   const h = harness(), s = h.store, eof = defer()
   s.start(); await flush()
   const cursors = []; let calls = 0
-  h.api.events = async (_sid, after) => { cursors.push(after); calls++; return calls === 1 ? [{ seq: 1, kind: "user", data: { text: "first" } }] : calls === 2 ? eof.promise : calls === 3 ? [{ seq: 2, kind: "agent_message_chunk", data: { content: { text: "reply" } } }] : [] }
+  h.api.events = async (_sid, after) => { cursors.push(after); calls++; return calls === 1 ? [{ seq: 1, kind: "user", data: { text: "first" } }] : calls === 2 ? eof.promise : calls === 3 ? [{ seq: 2, kind: "text", data: { role: "assistant", text: "reply" } }] : [] }
   const loading = s.loadEvents("a"); await flush()
   assert.equal(s.st.S.a.loaded, true); assert.equal(s.st.S.a.ev[0][1], "first")
-  h.event({ type: "event", session_id: "a", seq: 2, kind: "agent_message_chunk", data: { content: { text: "reply" } } })
+  h.event({ type: "event", session_id: "a", seq: 2, kind: "text", data: { role: "assistant", text: "reply" } })
   eof.resolve([]); await loading; await flush()
   assert.deepEqual(cursors, [0, 1, 1, 2]); assert.equal(s.st.S.a.ev.length, 2)
 })
@@ -111,9 +111,9 @@ test("overflow freezes the cursor before newer SSE frames arrive during state re
   const initialState = h.api.state
   h.api.state = () => state.promise
   h.event({ type: "workspace", id: "ws" })
-  h.event({ type: "event", session_id: "a", seq: 3, kind: "agent_message_chunk", data: { content: { text: "C" } } })
+  h.event({ type: "event", session_id: "a", seq: 3, kind: "text", data: { role: "assistant", text: "C" } })
   const cursors = []
-  h.api.events = async (_sid, after) => { cursors.push(after); return after === 0 ? [1, 2, 3].map((seq) => ({ seq, kind: "agent_message_chunk", data: { content: { text: "ABC"[seq - 1] } } })) : [] }
+  h.api.events = async (_sid, after) => { cursors.push(after); return after === 0 ? [1, 2, 3].map((seq) => ({ seq, kind: "text", data: { role: "assistant", text: "ABC"[seq - 1] } })) : [] }
   state.resolve(await initialState()); await flush(); await h.tick(80)
   assert.deepEqual(cursors, [0, 3]); assert.equal(s.st.S.a.ev[0][1], "ABC")
 })
@@ -123,9 +123,9 @@ test("failed overflow catch-up retains the pre-gap cursor for retry", async () =
   s.start(); await flush(); await s.loadEvents("a")
   const initialState = h.api.state; h.api.state = () => state.promise
   h.reconnect()
-  h.event({ type: "event", session_id: "a", seq: 3, kind: "agent_message_chunk", data: { content: { text: "C" } } })
+  h.event({ type: "event", session_id: "a", seq: 3, kind: "text", data: { role: "assistant", text: "C" } })
   const cursors = []; let fail = true
-  h.api.events = async (_sid, after) => { cursors.push(after); if (fail) { fail = false; throw new Error("offline") } return after === 0 ? [1, 2, 3].map((seq) => ({ seq, kind: "agent_message_chunk", data: { content: { text: "ABC"[seq - 1] } } })) : [] }
+  h.api.events = async (_sid, after) => { cursors.push(after); if (fail) { fail = false; throw new Error("offline") } return after === 0 ? [1, 2, 3].map((seq) => ({ seq, kind: "text", data: { role: "assistant", text: "ABC"[seq - 1] } })) : [] }
   state.resolve(await initialState()); await flush(); await h.tick(2000)
   assert.deepEqual(cursors, [0, 0, 3]); assert.equal(s.st.S.a.ev[0][1], "ABC")
 })

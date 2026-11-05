@@ -26,16 +26,16 @@ const timeline = [
 ]
 let seq = 0
 const ev = (n: number, kind: string, data: any): REvent => ({ seq: ++seq, ts: m(n), kind, data })
-const run = (n: number, cmd: string, open = false): REvent => ev(n, "tool_call", { toolCallId: "t" + seq, title: cmd, kind: "execute", status: open ? "in_progress" : "completed", rawInput: { command: cmd } })
-const edit = (n: number, file: string): REvent => ev(n, "tool_call", { toolCallId: "t" + seq, title: "Edit " + file, kind: "edit", status: "completed", locations: [{ path: file }], rawInput: { file_path: file, old_string: "a", new_string: "b" } })
+const run = (n: number, cmd: string, open = false): REvent => ev(n, "tool", { tool: { id: "t" + seq, origin: "harness", name: "Bash", category: "exec", title: cmd, target: cmd, phase: open ? "running" : "succeeded", action: { type: "exec", command: cmd, network: "unrestricted" } } })
+const edit = (n: number, file: string): REvent => ev(n, "tool", { tool: { id: "t" + seq, origin: "harness", name: "Edit", category: "edit", title: "Edit " + file, target: file, phase: "succeeded", result: [{ type: "diff", path: file, old: "a", new: "b", added: 1, removed: 1 }] } })
 const events: REvent[] = [
   ev(1, "user", { text: "推送 steve/st-41 并发布", via: "steve" }), run(2, "git status"), edit(3, "/tmp/st-7/README.md"),
-  ev(8, "agent_message_chunk", { content: { text: "等你批准后推送。" } }), ev(9, "turn_end", { stopReason: "end_turn" }),
+  ev(8, "text", { role: "assistant", text: "等你批准后推送。" }), ev(9, "turn_end", { stopReason: "end_turn" }),
   ev(12, "user", { text: "用户批准了：先腾出磁盘空间，再推送 steve/st-41", via: "steve" }),
   run(13, "df -h ."), run(13, "rm -rf node_modules/.cache"), edit(14, "/tmp/st-7/ops/push.sh"),
   ...(perm ? [ev(15, "permission", { title: "git push origin steve/st-41", decision: "perm-1" }), run(18, "git push origin steve/st-41")] : [run(15, "git push origin steve/st-41")]),
   edit(16, "/tmp/st-7/ops/push.sh"), run(17, "gh pr create", !done),
-  ...(done ? [ev(25, "agent_message_chunk", { content: { text: "已推送并开了 PR。" } }), ev(26, "turn_end", { stopReason: "end_turn" })] : []),
+  ...(done ? [ev(25, "text", { role: "assistant", text: "已推送并开了 PR。" }), ev(26, "turn_end", { stopReason: "end_turn" })] : []),
 ]
 const item = { id: "ST-7", workspace_id: "default", no: 7, title: "推送分支并发布", status: done ? "wait" : "run", stage: "", bot_id: "dev", project_id: null, cwd: null, branch: null, plan: [{ step: "推送", done: false }], now: "正在推送", accept_mode: null, priority: "中", archived: false, star: false, due: null, snooze: null, source: ["对话", "thread"], parent: null, created: m(0), updated: m(20), goal: "推送并发布", goals: 1, tags: [], deps: [], sessionIds: ["s1"], open: [], queued: 0, live: !done } as unknown as RItemDetail
 const detail: RItemDetail = { ...item, goalsList: [{ version: 1, text: item.goal, created: m(0) }], timeline, artifacts: [], decisions: [], dependents: [] }

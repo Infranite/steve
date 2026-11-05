@@ -1649,24 +1649,18 @@ impl Tx<'_> {
     }
 
     pub(crate) fn last_agent_text(&self, sid: &str) -> Result<String> {
-        let evs: Vec<_> = self
-            .db()
-            .events_after(sid, 0)?
-            .into_iter()
-            .filter(|e| e.kind == "agent_message_chunk")
-            .collect();
+        let evs = self.db().events_after(sid, 0)?;
         let mut tail: Vec<String> = vec![];
         let mut len = 0;
-        for e in evs.iter().rev() {
+        for t in evs
+            .iter()
+            .rev()
+            .filter_map(|e| steve_transcript::assistant_text(&e.kind, &e.data))
+        {
             if len >= 400 {
                 break;
             }
-            let t = e
-                .data
-                .pointer("/content/text")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
+            let t = t.to_string();
             len += js_len(&t);
             tail.push(t);
         }
@@ -3289,13 +3283,8 @@ impl Tx<'_> {
         let mut out: Vec<String> = vec![];
         let mut agent = String::new();
         for e in self.db().events_up_to(sid, seq)? {
-            if e.kind == "agent_message_chunk" {
-                agent.push_str(
-                    e.data
-                        .pointer("/content/text")
-                        .and_then(Value::as_str)
-                        .unwrap_or(""),
-                );
+            if let Some(t) = steve_transcript::assistant_text(&e.kind, &e.data) {
+                agent.push_str(t);
                 continue;
             }
             if !agent.is_empty() {

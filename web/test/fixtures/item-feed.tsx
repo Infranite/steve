@@ -30,10 +30,10 @@ const timeline = [
 ]
 let seq = 0
 const ev = (n: number, kind: string, data: any): REvent => ({ seq: ++seq, ts: m(n), kind, data })
-const tool = (n: number, title: string): REvent => ev(n, "tool_call", { toolCallId: "t" + seq, title, kind: "execute", status: "completed" })
+const tool = (n: number, title: string): REvent => ev(n, "tool", { tool: { id: "t" + seq, origin: "harness", name: "Bash", category: "exec", title, target: title, phase: "succeeded" } })
 const events: Record<string, REvent[]> = {
-  s1: [ev(8, "user", { text: "修复过程事件的显示顺序", via: "steve" }), tool(9, "运行 npm run check"), ev(19, "agent_message_chunk", { content: { text: "做完了，等你验收。" } }), ev(19, "turn_end", { stopReason: "end_turn" })],
-  s2: [ev(30, "user", { text: "补充信息：再加一个需求：深色模式下也要检查", via: "steve" }), tool(31, "运行 npm run check"), ev(33, "agent_message_chunk", { content: { text: "深色模式查过了。" } }), ev(33, "turn_end", { stopReason: "end_turn" }),
+  s1: [ev(8, "user", { text: "修复过程事件的显示顺序", via: "steve" }), tool(9, "运行 npm run check"), ev(19, "text", { role: "assistant", text: "做完了，等你验收。" }), ev(19, "turn_end", { stopReason: "end_turn" })],
+  s2: [ev(30, "user", { text: "补充信息：再加一个需求：深色模式下也要检查", via: "steve" }), tool(31, "运行 npm run check"), ev(33, "text", { role: "assistant", text: "深色模式查过了。" }), ev(33, "turn_end", { stopReason: "end_turn" }),
     ev(39, "user", { text: "补充信息：顺便看一下手机端", via: "me" }), tool(40, "运行 npm run test:web"), tool(41, "运行 sed -i '' 's/a/b/' src/views.tsx")],
 }
 const item = { id: "ST-9", workspace_id: "default", no: 9, title: "会话中间过程事件排序修正", status: "run", stage: "", bot_id: "dev", project_id: null, cwd: null, branch: null, plan: [{ step: "修正排序", done: false }], now: "正在改排序", accept_mode: null, priority: "中", archived: false, star: false, due: null, snooze: null, source: ["对话", "thread"], parent: null, created: m(7), updated: m(41), goal: "会话的动态部分始终在最下方", goals: 1, tags: [], deps: [], sessionIds: ["s1", "s2"], open: [], queued: 0, live: true } as unknown as RItemDetail

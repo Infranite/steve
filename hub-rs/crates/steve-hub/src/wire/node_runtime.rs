@@ -890,15 +890,18 @@ impl NodeRuntime {
 
     /// The session's Steve event, once (the Node's stream position is its identity).
     fn store_event_in(&self, tx: &Tx, session: &str, ev: &NodeEvent) -> Result<(), StoreError> {
-        let kind = serde_json::to_value(&ev.body).map_err(conflict)?["type"]
-            .as_str()
-            .unwrap_or("diagnostic")
-            .to_string();
+        let role = match &ev.body {
+            EventBody::TextDelta { message, .. } => role_of_in(tx, session, message)?,
+            _ => None,
+        };
+        let Some(entry) = steve_transcript::of_node(&ev.body, role) else {
+            return Ok(());
+        };
         rt::add_event_in(
             tx,
             session,
-            &kind,
-            serde_json::to_value(ev).map_err(conflict)?,
+            &entry.kind,
+            entry.data,
             V1,
             Some(rt::EventSource {
                 node: self.node_id.as_str(),
@@ -1018,6 +1021,15 @@ impl NodeRuntime {
                 Outcome::Interrupted | Outcome::TimedOut => "interrupted",
                 Outcome::Failed => "error",
             },
+            now(),
+        )?;
+        rt::add_event_in(
+            tx,
+            session,
+            "turn_end",
+            json!({ "stopReason": c.stop_reason }),
+            V1,
+            None,
             now(),
         )?;
         let srev = session_revision(tx, session)?;
@@ -1144,6 +1156,20 @@ fn turn_revision(tx: &Tx, turn: &str) -> Result<i64, StoreError> {
         [turn],
         |r| r.get(0),
     )?)
+}
+
+/// The role of a message, from the `message` entry that began it.
+fn role_of_in(tx: &Tx, session: &str, message: &str) -> Result<Option<Role>, StoreError> {
+    let r: Option<String> = match tx.query_row(
+        "SELECT json_extract(data,'$.role') FROM events WHERE session_id=? AND kind='message' AND format='steve.v1' AND json_extract(data,'$.message')=? ORDER BY seq DESC LIMIT 1",
+        [session, message],
+        |r| r.get(0),
+    ) {
+        Ok(x) => x,
+        Err(rusqlite::Error::QueryReturnedNoRows) => None,
+        Err(e) => return Err(e.into()),
+    };
+    Ok(r.and_then(|r| serde_json::from_value(Value::String(r)).ok()))
 }
 
 fn op_of_attempt(tx: &Tx, attempt: &str) -> Result<String, StoreError> {

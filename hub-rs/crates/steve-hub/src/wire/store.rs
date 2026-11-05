@@ -73,6 +73,23 @@ impl s::Publisher for BusPublisher {
 pub struct StoreBackend(pub s::Store, Arc<Mutex<Vec<rusqlite::Connection>>>);
 
 impl StoreBackend {
+    /// A transcript reader for a page of `session` from `after`: clients see Steve's own entries,
+    /// the old ACP rows read into them (with what the page's tool updates need from before it).
+    fn transcript(&self, session: &str, after: i64) -> BResult<steve_transcript::LegacyReader> {
+        let cwd = self
+            .0
+            .sessions()
+            .get(session)
+            .map_err(err)?
+            .map(|s| s.cwd)
+            .unwrap_or_default();
+        let mut reader = steve_transcript::LegacyReader::new(&cwd);
+        for e in self.0.events().tool_context(session, after).map_err(err)? {
+            reader.prime(&e.kind, &e.data);
+        }
+        Ok(reader)
+    }
+
     pub fn new(store: s::Store) -> BResult<Self> {
         let b = StoreBackend(store, Arc::new(Mutex::new(vec![])));
         // open one now so a broken path fails at boot, not on the first /api/state
@@ -212,16 +229,19 @@ impl Repo for StoreBackend {
         after: i64,
         each: &mut dyn FnMut(RawEvent),
     ) -> BResult<bool> {
+        let mut reader = self.transcript(session, after)?;
         self.0
             .events()
             .visit_legacy_page(session, after, |e| {
                 // Value serialization is infallible; use the repository's transparent hydration.
-                each((
-                    e.seq,
-                    e.ts,
-                    e.kind,
-                    serde_json::to_string(&e.data).expect("JSON event"),
-                ));
+                for x in reader.read(&e.kind, &e.data) {
+                    each((
+                        e.seq,
+                        e.ts,
+                        x.kind,
+                        serde_json::to_string(&x.data).expect("JSON event"),
+                    ));
+                }
             })
             .map_err(err)?;
         Ok(true)
@@ -233,16 +253,19 @@ impl Repo for StoreBackend {
         after: i64,
         each: &mut dyn FnMut(RawEvent),
     ) -> BResult<bool> {
+        let mut reader = self.transcript(session, after)?;
         self.0
             .events()
             .visit_page(session, after, |e| {
                 // Value serialization is infallible; use the repository's transparent hydration.
-                each((
-                    e.seq,
-                    e.ts,
-                    e.kind,
-                    serde_json::to_string(&e.data).expect("JSON event"),
-                ));
+                for x in reader.read(&e.kind, &e.data) {
+                    each((
+                        e.seq,
+                        e.ts,
+                        x.kind,
+                        serde_json::to_string(&x.data).expect("JSON event"),
+                    ));
+                }
             })
             .map_err(err)?;
         Ok(true)
@@ -643,7 +666,19 @@ impl Repo for StoreBackend {
             .map_err(err)
     }
     fn events_after(&self, session: &str, after: i64) -> BResult<Vec<Obj>> {
-        objs(self.0.events().after(session, after, 5000).map_err(err)?)
+        let mut reader = self.transcript(session, after)?;
+        let mut out = vec![];
+        for e in self.0.events().after(session, after, 5000).map_err(err)? {
+            for x in reader.read(&e.kind, &e.data) {
+                out.push(steve_store::Event {
+                    seq: e.seq,
+                    ts: e.ts,
+                    kind: x.kind,
+                    data: x.data,
+                });
+            }
+        }
+        objs(out)
     }
     fn queued_get(&self, id: &str) -> BResult<Option<Obj>> {
         opt(self.0.queued().get(id).map_err(err)?)
@@ -850,5 +885,64 @@ mod event_page_tests {
             .events_raw(&id, tail[0].0, &mut |e| full.push(e))
             .unwrap();
         assert_eq!(serde_json::from_str::<Value>(&full[0].3).unwrap(), data);
+    }
+
+    #[test]
+    fn old_acp_rows_read_as_transcript_entries_even_from_the_middle() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = s::Store::open(dir.path().join("test.sqlite3"), s::NoPublisher).unwrap();
+        store.ensure_workspace().unwrap();
+        let id = store
+            .sessions()
+            .create(&s::NewSession {
+                workspace_id: s::WS.into(),
+                harness: "claude-code".into(),
+                cwd: "/w".into(),
+                title: "old".into(),
+                token: "t".into(),
+                ..Default::default()
+            })
+            .unwrap()
+            .id;
+        let ev = |kind: &str, data: Value| store.events().add(&id, kind, data).unwrap();
+        ev("user", json!({"text": "hi", "via": "me"}));
+        ev(
+            "agent_message_chunk",
+            json!({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "ok"}}),
+        );
+        let call = ev(
+            "tool_call",
+            json!({"sessionUpdate": "tool_call", "toolCallId": "t1", "title": "Read /w/a.rs", "kind": "read", "status": "pending",
+                "rawInput": {"file_path": "/w/a.rs"}, "_meta": {"claudeCode": {"toolName": "Read"}}}),
+        );
+        ev(
+            "tool_call_update",
+            json!({"sessionUpdate": "tool_call_update", "toolCallId": "t1", "status": "completed"}),
+        );
+        let backend = StoreBackend::new(store.clone()).unwrap();
+        let read = |after: i64| {
+            let mut out = Vec::new();
+            backend
+                .events_raw(&id, after, &mut |e| out.push(e))
+                .unwrap();
+            out.into_iter()
+                .map(|(_, _, k, d)| (k, serde_json::from_str::<Value>(&d).unwrap()))
+                .collect::<Vec<_>>()
+        };
+        let all = read(0);
+        let kinds: Vec<&str> = all.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(kinds, ["user", "text", "tool", "tool"]);
+        assert_eq!(all[1].1["role"], "assistant");
+        assert_eq!(all[3].1["tool"]["name"], "Read");
+        assert_eq!(all[3].1["tool"]["target"], "a.rs");
+        assert!(
+            !all.iter()
+                .any(|(_, d)| d.to_string().contains("sessionUpdate"))
+        );
+        // a page that starts after the call still knows the tool
+        let tail = read(call);
+        assert_eq!(tail.len(), 1);
+        assert_eq!(tail[0].1["tool"]["name"], "Read");
+        assert_eq!(tail[0].1["tool"]["phase"], "succeeded");
     }
 }

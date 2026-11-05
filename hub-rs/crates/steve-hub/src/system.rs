@@ -591,8 +591,12 @@ pub fn import_prepared(r: &dyn Repo, bus: &Bus, ws: &str, p: Prepared) -> BResul
         import_key: key,
         created: peek.when,
     })?;
+    // stored in Steve's own terms, like everything written now
+    let mut reader = steve_transcript::LegacyReader::new(&peek.cwd);
     for (kind, data) in &events {
-        r.events_add(&id, kind, data)?;
+        for x in reader.read(kind, data) {
+            r.events_add(&id, &x.kind, &x.data)?;
+        }
     }
     bus.publish(HubEvent::Session {
         id: id.clone(),

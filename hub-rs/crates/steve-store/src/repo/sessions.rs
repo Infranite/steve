@@ -308,7 +308,8 @@ fn hydrate_event(c: &rusqlite::Connection, session: &str, e: &mut Event) -> Resu
 impl Events<'_> {
     /// Appends an event and returns its `seq`. The published event carries `data` as stored.
     ///
-    /// The one place session events are written (ACP stream, Steve tools, core): values injected
+    /// The one place session events are written (transcript entries, Steve tools, core), always in
+    /// Steve's own terms (`steve.v1`): values injected
     /// into the session (V4 `steve_secret_use`) are scrubbed from `data` first, so they reach
     /// neither the table nor the SSE stream.
     pub fn add(&self, session_id: &str, kind: &str, mut data: Value) -> Result<i64> {
@@ -318,7 +319,7 @@ impl Events<'_> {
         self.0.write(|w| {
             let tx = w.c.unchecked_transaction()?;
             tx.prepare_cached(
-                "INSERT INTO events (session_id, ts, kind, data) VALUES (?, ?, ?, ?)",
+                "INSERT INTO events (session_id, ts, kind, data, format) VALUES (?, ?, ?, ?, 'steve.v1')",
             )?
             .execute(params![session_id, now(), kind, stored])?;
             let seq = tx.last_insert_rowid();
@@ -343,6 +344,29 @@ impl Events<'_> {
                 &tx,
                 "SELECT seq, ts, kind, data FROM events WHERE session_id = ? AND seq > ? ORDER BY seq LIMIT ?",
                 params![session_id, after, limit],
+                event_row,
+            )?;
+            for e in &mut events { hydrate_event(&tx, session_id, e)?; }
+            tx.commit()?;
+            Ok(events)
+        })
+    }
+
+    /// The rows at or before `after` of the tools that are still updated after it: what a reader of
+    /// the old ACP rows needs to read a page that starts at `after` (an update carries only what
+    /// changed). Empty from the start.
+    pub fn tool_context(&self, session_id: &str, after: i64) -> Result<Vec<Event>> {
+        if after <= 0 {
+            return Ok(vec![]);
+        }
+        self.0.read(|c| {
+            let tx = c.unchecked_transaction()?;
+            let mut events: Vec<Event> = all(
+                &tx,
+                "SELECT seq, ts, kind, data FROM events WHERE session_id = ?1 AND seq <= ?2 AND kind IN ('tool_call', 'tool_call_update')
+                   AND json_extract(data, '$.toolCallId') IN (SELECT json_extract(data, '$.toolCallId') FROM events WHERE session_id = ?1 AND seq > ?2 AND kind = 'tool_call_update')
+                 ORDER BY seq",
+                params![session_id, after],
                 event_row,
             )?;
             for e in &mut events { hydrate_event(&tx, session_id, e)?; }

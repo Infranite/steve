@@ -4736,6 +4736,7 @@ dependencies = [
  "steve-modules",
  "steve-stats",
  "steve-store",
+ "steve-transcript",
  "steve-work-api",
  "tempfile",
  "thiserror 2.0.21",
@@ -4836,6 +4837,7 @@ dependencies = [
  "steve-research",
  "steve-stats",
  "steve-store",
+ "steve-transcript",
  "steve-vault",
  "tar",
  "tempfile",
@@ -5067,6 +5069,17 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "steve-transcript"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "steve-acp",
+ "steve-node-api",
+ "steve-transcript",
 ]
 
 [[package]]

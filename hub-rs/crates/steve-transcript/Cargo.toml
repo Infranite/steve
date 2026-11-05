@@ -1,0 +1,20 @@
+[package]
+name = "steve-transcript"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+description = "A session's transcript in Steve's own terms (steve.v1): what clients and the Hub read, from Node events and, read-only, from the old ACP rows."
+
+[features]
+# `LegacyReader`: reading the old ACP rows (the Hub's read path only).
+legacy = ["dep:steve-acp"]
+
+[dependencies]
+steve-node-api = { path = "../steve-node-api" }
+# only the shared normalizer, to read the old rows the way a Node's driver reads ACP
+steve-acp = { path = "../steve-acp", optional = true }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = { version = "=1.0.154", features = ["preserve_order"] }
+
+[dev-dependencies]
+steve-transcript = { path = ".", features = ["legacy"] }

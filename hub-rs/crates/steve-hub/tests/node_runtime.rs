@@ -193,8 +193,7 @@ async fn bind_prepares_opens_then_runs_what_is_queued() {
     assert_eq!(h.ends(), [(S.to_string(), "end_turn".to_string(), None)]);
     assert_eq!(h.phase(), "ready");
     assert!(!h.rt.is_busy(S));
-    let texts: i64 =
-        h.q("SELECT COUNT(*) FROM events WHERE kind='text_delta' AND format='steve.v1'");
+    let texts: i64 = h.q("SELECT COUNT(*) FROM events WHERE kind='text' AND format='steve.v1'");
     assert_eq!(texts, 1);
     let receipt: String = h.q("SELECT state FROM node_commands WHERE method='start_turn'");
     assert_eq!(receipt, "finished");
@@ -319,7 +318,7 @@ async fn the_same_events_again_are_stored_once() {
     let after: i64 = h.q("SELECT COUNT(*) FROM node_event_inbox");
     assert_eq!(before, after);
     until("applied", || {
-        h.q::<i64>("SELECT COUNT(*) FROM events WHERE kind='text_delta'") == 1
+        h.q::<i64>("SELECT COUNT(*) FROM events WHERE kind='text'") == 1
     })
     .await;
 }

@@ -210,6 +210,7 @@ pub fn cut_turns(events: &[EventRow], last: i64) -> Vec<Turn> {
     let mut out = Vec::new();
     let mut cur: Option<Turn> = None;
     let mut failed: HashSet<String> = HashSet::new();
+    let mut seen_tools: HashSet<String> = HashSet::new();
     // the time of the last event seen before the current one
     let mut seen: Option<i64> = None;
     for (seq, ts, kind, data) in events {
@@ -225,6 +226,7 @@ pub fn cut_turns(events: &[EventRow], last: i64) -> Vec<Turn> {
                         ..Turn::default()
                     });
                     failed.clear();
+                    seen_tools.clear();
                 }
             }
             "turn_end" => {
@@ -253,6 +255,7 @@ pub fn cut_turns(events: &[EventRow], last: i64) -> Vec<Turn> {
                         ..Turn::default()
                     });
                     failed.clear();
+                    seen_tools.clear();
                 } else if text.starts_with("Hub 重启") && text.contains("中断") {
                     let mut done = cur.take().unwrap_or_default();
                     done.ended = before.unwrap_or(done.started).max(done.started);
@@ -298,6 +301,27 @@ pub fn cut_turns(events: &[EventRow], last: i64) -> Vec<Turn> {
                     t.tool_errors += 1;
                 }
             }
+            // a transcript tool entry (steve.v1): its whole view, counted once by id
+            "tool" => {
+                let Some(t) = cur.as_mut() else { continue };
+                let tool = &data["tool"];
+                let id = tool["id"].as_str().unwrap_or_default();
+                if seen_tools.insert(id.to_owned()) {
+                    t.tools += 1;
+                    let name = tool["name"].as_str().unwrap_or_default();
+                    let bucket = match name.strip_prefix("mcp__steve__") {
+                        Some(tool) => format!("mcp:{tool}"),
+                        None => tool["category"].as_str().unwrap_or("other").to_owned(),
+                    };
+                    *t.tool_kinds.entry(bucket).or_default() += 1;
+                    if !name.is_empty() && !name.starts_with("mcp__steve__") {
+                        *t.tool_kinds.entry(format!("tool:{name}")).or_default() += 1;
+                    }
+                }
+                if tool["phase"] == "failed" && failed.insert(id.to_owned()) {
+                    t.tool_errors += 1;
+                }
+            }
             "permission" => {
                 if let Some(t) = cur.as_mut() {
                     t.permissions += 1;
@@ -322,7 +346,7 @@ fn turns(c: &Connection, ws: &str, s: &Sess) -> Result<usize> {
     )?;
     let events: Vec<EventRow> = c
         .prepare_cached(
-            "SELECT seq, ts, kind, CASE WHEN kind IN ('user', 'turn_end', 'system', 'tool_call', 'tool_call_update', 'permission')
+            "SELECT seq, ts, kind, CASE WHEN kind IN ('user', 'turn_end', 'system', 'tool_call', 'tool_call_update', 'tool', 'permission')
                THEN data ELSE 'null' END FROM events WHERE session_id = ?1 AND ts < ?2 ORDER BY seq",
         )?
         .query_map(params![s.id, cutoff.unwrap_or(i64::MAX)], |r| {

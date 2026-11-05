@@ -144,6 +144,7 @@ pub fn wire_with(cfg: &Arc<Config>, bus: &Bus, vars: Vars) -> Result<Wired, Back
         flow: std::sync::OnceLock::new(),
         yolo: std::sync::OnceLock::new(),
         user_seqs: Default::default(),
+        transcripts: Default::default(),
     });
     let acp = steve_acp::Acp::new(acp_config(cfg), host.clone());
     let mut core_cfg = core_config(cfg);
