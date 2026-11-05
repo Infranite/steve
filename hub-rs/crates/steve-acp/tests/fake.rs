@@ -656,7 +656,7 @@ async fn idle_adapters_are_released_and_resume_with_load() {
     acp.prompt("s1", "x", "me").await.unwrap();
     wait_for("turn end", 10, || turn_ends(&h) == 1).await;
     let pid = acp.adapter_pid("s1").unwrap();
-    acp.release("s1"); // idle → killed now
+    assert!(acp.release("s1"), "idle → killed now");
     assert!(acp.adapter_pid("s1").is_none());
     wait_for("process gone", 5, || !alive(pid)).await;
 
@@ -680,7 +680,7 @@ async fn release_spares_a_busy_adapter() {
     let acp = Acp::new(f.config(), h.clone());
     acp.prompt("s1", "@sleep 500", "me").await.unwrap();
     wait_for("prompt sent", 10, || f.prompts().len() == 1).await;
-    acp.release("s1");
+    assert!(!acp.release("s1"), "busy: kept");
     assert!(acp.adapter_pid("s1").is_some());
     wait_for("turn end", 10, || turn_ends(&h) == 1).await;
     assert_eq!(h.rec(|r| r.turn_ends[0].stop_reason.clone()), "end_turn");

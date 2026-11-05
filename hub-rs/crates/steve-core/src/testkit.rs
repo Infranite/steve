@@ -5,7 +5,7 @@ use crate::error::{Result, msg};
 use crate::gateway::{ModelGateway, Tier};
 use crate::repo::{Db as Store, HubEvent};
 use crate::runtime::{
-    AgentRuntime, Answered, Configured, Flushed, Prompted, Running, Stop, TurnEnd,
+    AgentRuntime, Answered, Configured, Flushed, Prompted, Released, Running, Stop, TurnEnd,
 };
 use crate::{Core, CoreConfig};
 use async_trait::async_trait;
@@ -27,6 +27,10 @@ pub struct FakeState {
     /// Every `stop` and what it did.
     pub stops: Vec<(Running, Stop)>,
     pub released: Vec<String>,
+    /// What `release` answers per session ([`Released::Gone`] when not set).
+    pub release_answers: HashMap<String, Released>,
+    /// `created` calls: (session, the release it waits for)
+    pub created: Vec<(String, Option<String>)>,
     /// decision id → still answerable
     pub permissions: HashSet<String>,
     /// decision id → answerable through a queued command (a Node's): answers are [`Answered::Pending`]
@@ -209,8 +213,19 @@ impl AgentRuntime for FakeRuntime {
     fn is_busy(&self, sid: &str) -> bool {
         self.st().turning.contains(sid)
     }
-    fn release(&self, sid: &str) {
-        self.st().released.push(sid.into());
+    fn created(&self, sid: &str, after: Option<&str>) {
+        self.st()
+            .created
+            .push((sid.into(), after.map(String::from)));
+    }
+    fn release(&self, sid: &str) -> Result<Released> {
+        let mut st = self.st();
+        st.released.push(sid.into());
+        Ok(st
+            .release_answers
+            .get(sid)
+            .cloned()
+            .unwrap_or(Released::Gone))
     }
     fn answer_permission(&self, decision: &str, option: Option<&str>) -> Result<Answered> {
         let mut st = self.st();

@@ -10,7 +10,9 @@ use crate::repo::{
     Bot, BotExt, Decision, FileRef, Item, ItemExt, NewDecision, NewItem, NewSession, Parent,
     PlanStep, Queued, Session, WS,
 };
-use crate::runtime::{Answered, Check, Flushed, McpEndpoint, Output, Prompted, Running, TurnEnd};
+use crate::runtime::{
+    Answered, Check, Flushed, McpEndpoint, Output, Prompted, Released, Running, TurnEnd,
+};
 use crate::thread::flowback::{Update, flow_quiet, recover_quiet};
 use crate::util::{js_head, js_len, js_tail, now, or, token};
 use crate::{Core, Mark, Tx};
@@ -1052,6 +1054,8 @@ impl Tx<'_> {
         bot_override: Option<&str>,
         files: &[FileRef],
     ) -> Result<Session> {
+        /* taken first: a start that fails leaves nothing behind for a later one */
+        let after = self.st.handoffs.remove(item_id);
         self.lc_guard_open(item_id)?;
         /* preparing the worktree is the cycle's first actual work */
         self.lc_start(item_id)?;
@@ -1090,7 +1094,7 @@ impl Tx<'_> {
             token: tok.clone(),
         })?;
         self.st.tokens.insert(s.id.clone(), tok);
-        self.rt().created(&s.id);
+        self.rt().created(&s.id, after.as_deref());
         self.db().timeline_add(
             item_id,
             "steve",
@@ -1873,12 +1877,18 @@ impl Tx<'_> {
         if !i.is_finished() || !cwd.starts_with(&prefix) || !git::is_git(Path::new(&p.path)) {
             return Ok(true);
         }
+        /* only once no harness can be in the worktree any more: a release on its way (a Node's) is
+         * asked about again later */
         let ss = self.db().sessions_of_item(item_id)?;
         if ss.iter().any(|s| self.busy(&s.id)) {
             return Ok(false);
         }
+        let mut gone = true;
         for s in &ss {
-            self.rt().release(&s.id);
+            gone &= self.rt().release(&s.id)? == Released::Gone;
+        }
+        if !gone {
+            return Ok(false);
         }
         /* the caches go to the trash first (a rename): removing the worktree under the lock is then quick,
          * and they are deleted outside it */
@@ -2211,8 +2221,7 @@ impl Tx<'_> {
                     )?;
                     let last = match &s {
                         Some(s) => {
-                            self.db().session_patch(&s.id, patch![status: "ended"])?;
-                            self.rt().release(&s.id);
+                            self.hand_off(&i, &s.id)?;
                             js_head(&self.last_agent_text(&s.id)?, 600).to_string()
                         }
                         None => String::new(),
@@ -2952,8 +2961,7 @@ impl Tx<'_> {
                     "system",
                     json!({"text": format!("上下文已用 {pct}%，带交接摘要转到新会话")}),
                 )?;
-                self.db().session_patch(&s.id, patch![status: "ended"])?;
-                self.rt().release(&s.id);
+                self.hand_off(item_id, &s.id)?;
                 self.db().timeline_add(
                     item_id,
                     "steve",
@@ -2992,8 +3000,30 @@ impl Tx<'_> {
     pub(crate) fn end_and_release(&self, sid: &str) -> Result<()> {
         self.stop_now(sid);
         self.db().session_patch(sid, patch![status: "ended"])?;
-        self.rt().release(sid);
+        self.release_logged(sid);
         Ok(())
+    }
+
+    /// Ends the item's session `sid` for a successor: its harness is let go, and when that is
+    /// still on its way (a Node's release, or one after the turn that runs now) the item's next
+    /// session starts only once it is done. On the legacy runner the successor starts right away.
+    pub(crate) fn hand_off(&mut self, item_id: &str, sid: &str) -> Result<()> {
+        self.db().session_patch(sid, patch![status: "ended"])?;
+        if let Some(Released::Pending(op)) = self.release_logged(sid) {
+            self.st.handoffs.insert(item_id.to_string(), op);
+        }
+        Ok(())
+    }
+
+    /// [`AgentRuntime::release`], an error logged (`None`): the session is ended either way.
+    fn release_logged(&self, sid: &str) -> Option<Released> {
+        match self.rt().release(sid) {
+            Ok(r) => Some(r),
+            Err(e) => {
+                tracing::error!(session = sid, "releasing the session: {e}");
+                None
+            }
+        }
     }
 
     pub(crate) fn item_action(
@@ -3151,8 +3181,7 @@ impl Tx<'_> {
         };
         /* a much bigger goal starts over with a handoff, a small change is told to the running session */
         if js_len(text) as f64 > js_len(&prev) as f64 * 1.6 {
-            self.db().session_patch(&s.id, patch![status: "ended"])?;
-            self.rt().release(&s.id);
+            self.hand_off(id, &s.id)?;
             let last = self.last_agent_text(&s.id)?;
             self.start_or_fail(
                 id,

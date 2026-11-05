@@ -6,7 +6,8 @@ use std::time::Duration;
 
 use steve_hub::wire::acp_stats;
 use steve_hub::wire::node_runtime::{
-    AttemptFacts, Binding, ConfigChange, Configured, NodeDomain, NodeRuntime, Planned, Sink,
+    AttemptFacts, Binding, ConfigChange, Configured, NodeDomain, NodeRuntime, Planned, Release,
+    Sink,
 };
 use steve_node_api::testkit::{FakeNode, Scripted, build};
 use steve_node_api::*;
@@ -823,19 +824,26 @@ async fn release_lets_an_idle_session_go_and_only_an_idle_one() {
     h.bind();
     h.rt.prompt(S, "hello", "user", &[]).unwrap();
     until("active", || h.phase() == "active").await;
-    assert!(!h.rt.release(S).unwrap(), "busy: not let go");
+    assert_eq!(h.rt.release(S).unwrap(), Release::Busy, "busy: not let go");
     let exec = h.attempts()[0].clone();
     h.node.finish(&exec, build::done()).await.unwrap();
     until("ready", || h.phase() == "ready").await;
 
-    assert!(h.rt.release(S).unwrap());
+    assert!(matches!(h.rt.release(S).unwrap(), Release::Pending(_)));
     assert_eq!(h.phase(), "releasing");
-    assert!(!h.rt.release(S).unwrap(), "already being let go");
+    assert!(
+        matches!(h.rt.release(S).unwrap(), Release::Pending(_)),
+        "already being let go"
+    );
     until("released", || h.phase() == "released").await;
     assert_eq!(h.count("release_session"), 1);
     let receipt: String = h.q("SELECT state FROM node_commands WHERE method='release_session'");
     assert_eq!(receipt, "finished");
-    assert!(!h.rt.release(S).unwrap(), "nothing open to let go");
+    assert_eq!(
+        h.rt.release(S).unwrap(),
+        Release::Gone,
+        "nothing open to let go"
+    );
     assert!(!h.rt.is_busy(S));
 }
 
@@ -844,7 +852,7 @@ async fn a_released_session_opens_again_for_the_next_message_with_its_resume_han
     let h = hub();
     h.bind();
     h.one_turn("hello").await;
-    assert!(h.rt.release(S).unwrap());
+    assert!(matches!(h.rt.release(S).unwrap(), Release::Pending(_)));
     until("released", || h.phase() == "released").await;
 
     assert_eq!(
@@ -880,7 +888,7 @@ async fn a_message_queued_while_releasing_reopens_once_the_release_is_done() {
     h.bind();
     h.one_turn("hello").await;
     // both before the release goes out (one thread: nothing is sent until the test waits)
-    assert!(h.rt.release(S).unwrap());
+    assert!(matches!(h.rt.release(S).unwrap(), Release::Pending(_)));
     assert_eq!(h.rt.prompt(S, "more", "user", &[]).unwrap(), Planned::Busy);
     until("second turn", || h.count("start_turn") == 2).await;
     assert_eq!(h.count("release_session"), 1);
@@ -1272,7 +1280,7 @@ async fn pruning_the_inbox_keeps_what_is_read_again() {
     );
 
     // and the session still opens again where it left off
-    assert!(h.rt.release(S).unwrap());
+    assert!(matches!(h.rt.release(S).unwrap(), Release::Pending(_)));
     until("released", || h.phase() == "released").await;
     h.rt.prompt(S, "again", "user", &[]).unwrap();
     until("second turn", || h.count("start_turn") == 2).await;
@@ -1575,7 +1583,7 @@ async fn a_refused_release_leaves_the_session_ready_and_what_waited_runs() {
     h.one_turn("hello").await;
     h.node
         .refuse_next("release_session", ApiError::new(ErrorCode::Invalid, "no"));
-    assert!(h.rt.release(S).unwrap());
+    assert!(matches!(h.rt.release(S).unwrap(), Release::Pending(_)));
     assert_eq!(h.rt.prompt(S, "more", "user", &[]).unwrap(), Planned::Busy);
     until("second turn", || h.count("start_turn") == 2).await;
     assert_eq!(h.count("open_session"), 1, "never let go");
@@ -1589,7 +1597,7 @@ async fn a_refused_reopen_leaves_the_session_released_and_the_next_message_tries
     let h = hub();
     h.bind();
     h.one_turn("hello").await;
-    assert!(h.rt.release(S).unwrap());
+    assert!(matches!(h.rt.release(S).unwrap(), Release::Pending(_)));
     until("released", || h.phase() == "released").await;
     h.node.refuse_next(
         "open_session",
@@ -1667,7 +1675,7 @@ async fn a_lead_on_a_released_idle_session_opens_it() {
     let h = hub();
     h.bind();
     h.one_turn("hello").await;
-    assert!(h.rt.release(S).unwrap());
+    assert!(matches!(h.rt.release(S).unwrap(), Release::Pending(_)));
     until("released", || h.phase() == "released").await;
     assert_eq!(
         h.rt.flush(S, Some(("go on", "steve"))).unwrap(),
@@ -1687,7 +1695,7 @@ async fn a_late_release_view_does_not_let_a_reopened_session_go() {
     h.one_turn("hello").await;
     // the stream is late from here on; answers still come
     *h.seen.stash.lock().unwrap() = Some(vec![]);
-    assert!(h.rt.release(S).unwrap());
+    assert!(matches!(h.rt.release(S).unwrap(), Release::Pending(_)));
     until("released", || h.phase() == "released").await;
     // a message reopens it, then is withdrawn before its turn: the session ends up idle and ready
     h.rt.prompt(S, "x", "user", &[]).unwrap();
@@ -1724,11 +1732,245 @@ async fn an_ended_session_is_let_go_when_its_turn_is_over() {
             Ok(())
         })
         .unwrap();
-    assert!(!h.rt.release(S).unwrap(), "busy");
+    assert!(
+        matches!(h.rt.release(S).unwrap(), Release::Pending(_)),
+        "ended: queued for when the turn is over"
+    );
     let exec = h.attempts()[0].clone();
     h.node.finish(&exec, build::done()).await.unwrap();
     until("released", || h.phase() == "released").await;
     assert_eq!(h.count("release_session"), 1);
+}
+
+const S2: &str = "s2";
+
+/// A binding of `session` to the item's one workspace (a successor shares its predecessor's).
+fn on_the_item(session: &str) -> Binding {
+    Binding {
+        session: session.into(),
+        resource: "item:i1".into(),
+        prepare: PrepareKind::Scratch,
+        choice: build::choice(),
+        policy: build::policy(),
+    }
+}
+
+impl H {
+    /// The business side ends `S` for a successor `S2` (a rollover): `S`'s release, then `S2`
+    /// bound after it, with a message waiting.
+    fn hand_off(&self) -> String {
+        self.store
+            .transaction::<_, StoreError>(|tx| {
+                tx.execute("UPDATE sessions SET status='ended' WHERE id=?", [S])?;
+                tx.execute(
+                    "INSERT INTO sessions(id,workspace_id,harness,cwd,status,created,updated) VALUES (?,'default','claude-code','.','starting',1,1)",
+                    [S2],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let Release::Pending(op) = self.rt.release(S).unwrap() else {
+            panic!("an ended session's release is on its way");
+        };
+        self.rt.bind_after(&on_the_item(S2), Some(&op)).unwrap();
+        self.rt.prompt(S2, "continue", "user", &[]).unwrap();
+        op
+    }
+
+    fn phase_of(&self, s: &str) -> String {
+        self.q(&format!(
+            "SELECT phase FROM runtime_sessions WHERE session_id='{s}'"
+        ))
+    }
+}
+
+/// B4 / D2: a handoff while the old turn runs waits for it. The successor's harness is not opened
+/// (its prepare not even leased) until the old turn is over and its release is done: never two
+/// harnesses in one worktree.
+#[tokio::test]
+async fn a_handoff_mid_turn_opens_the_successor_only_after_the_old_harness_is_let_go() {
+    let h = hub();
+    h.rt.bind(&on_the_item(S)).unwrap();
+    h.rt.prompt(S, "hello", "user", &[]).unwrap();
+    until("active", || h.phase() == "active").await;
+    let op = h.hand_off();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        h.methods(),
+        ["prepare_workspace", "open_session", "start_turn"],
+        "the successor waits for the old turn"
+    );
+    assert_eq!(h.phase_of(S2), "opening");
+    assert!(h.rt.is_busy(S2));
+
+    let exec = h.attempts()[0].clone();
+    h.node.finish(&exec, build::done()).await.unwrap();
+    until("the successor's turn", || h.count("start_turn") == 2).await;
+    assert_eq!(
+        h.methods(),
+        [
+            "prepare_workspace",
+            "open_session",
+            "start_turn",
+            "release_session",
+            "prepare_workspace",
+            "open_session",
+            "start_turn"
+        ]
+    );
+    assert_eq!(
+        h.state_of(&op),
+        "finished",
+        "the very release it waited for"
+    );
+    assert_eq!(h.count("release_session"), 1);
+    assert_eq!(h.phase_of(S), "released");
+    assert_eq!(h.node.most_open_in_a_workspace(), 1, "never two at once");
+    assert_eq!(h.prompt_of(1), "continue");
+}
+
+/// A stop the Node accepted but has not carried out yet (end_and_release on a handoff): the old
+/// turn still runs, so there is no release, and the successor does not start.
+#[tokio::test]
+async fn a_stop_accepted_but_not_done_holds_the_release_and_the_successor() {
+    let h = hub();
+    h.rt.bind(&on_the_item(S)).unwrap();
+    h.rt.prompt(S, "hello", "user", &[]).unwrap();
+    until("active", || h.phase() == "active").await;
+    assert!(h.rt.cancel(S).unwrap());
+    let op = h.hand_off();
+    until("cancel accepted", || h.count("cancel") == 1).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(h.count("release_session"), 0);
+    assert_eq!(h.count("prepare_workspace"), 1, "no successor start");
+    assert_eq!(h.state_of(&op), "pending");
+
+    let exec = h.attempts()[0].clone();
+    let mut stopped = build::done();
+    stopped.outcome = Outcome::Cancelled;
+    stopped.stop_reason = "cancelled".into();
+    h.node.finish(&exec, stopped).await.unwrap();
+    until("the successor's turn", || h.count("start_turn") == 2).await;
+    assert_eq!(h.state_of(&op), "finished");
+    assert_eq!(h.node.most_open_in_a_workspace(), 1);
+}
+
+/// The oracle the test above relies on: without the dependency the two harnesses do share the
+/// worktree for a while.
+#[tokio::test]
+async fn without_the_dependency_a_successor_opens_beside_the_old_harness() {
+    let h = hub();
+    h.rt.bind(&on_the_item(S)).unwrap();
+    h.rt.prompt(S, "hello", "user", &[]).unwrap();
+    until("active", || h.phase() == "active").await;
+    h.store
+        .transaction::<_, StoreError>(|tx| {
+            tx.execute(
+                "INSERT INTO sessions(id,workspace_id,harness,cwd,status,created,updated) VALUES (?,'default','claude-code','.','starting',1,1)",
+                [S2],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    h.rt.bind(&on_the_item(S2)).unwrap();
+    until("opened", || h.phase_of(S2) == "ready").await;
+    assert_eq!(h.node.most_open_in_a_workspace(), 2);
+}
+
+/// A handoff while the old session is still opening: its release waits for the open; an open
+/// that fails lets nothing go, so that release is done without going out and the successor opens.
+#[tokio::test]
+async fn a_handoff_while_the_old_open_fails_lets_the_successor_open() {
+    let h = hub();
+    h.rt.bind(&on_the_item(S)).unwrap();
+    h.node
+        .refuse_next("open_session", ApiError::new(ErrorCode::Invalid, "no"));
+    // one thread: nothing went out yet
+    let op = h.hand_off();
+    until("the successor's turn", || h.count("start_turn") == 1).await;
+    assert_eq!(h.state_of(&op), "finished");
+    assert_eq!(h.count("release_session"), 0, "nothing was open to let go");
+    assert_eq!(h.phase_of(S), "released");
+    assert_eq!(h.node.most_open_in_a_workspace(), 1);
+}
+
+/// A successor's prepare that waited behind its predecessor longer than a command's window is
+/// issued again when it finally goes (the Node would refuse it as past accept_before).
+#[tokio::test]
+async fn a_command_that_waited_past_its_window_goes_issued_again() {
+    let h = hub();
+    h.rt.bind(&on_the_item(S)).unwrap();
+    h.rt.prompt(S, "hello", "user", &[]).unwrap();
+    until("active", || h.phase() == "active").await;
+    h.hand_off();
+    let past = steve_store::now() - 1;
+    h.store
+        .transaction::<_, StoreError>(|tx| {
+            tx.execute(
+                "UPDATE node_commands SET request=json_set(request,'$.issued_at',?1-1,'$.accept_before',?1) WHERE operation_id=?2",
+                rusqlite::params![past, format!("op_prep_{S2}")],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    h.node.set_now(steve_store::now());
+    let exec = h.attempts()[0].clone();
+    h.node.finish(&exec, build::done()).await.unwrap();
+    until("the successor's turn", || h.count("start_turn") == 2).await;
+    let issued: i64 = h.q(&format!(
+        "SELECT json_extract(request,'$.accept_before') FROM node_commands WHERE operation_id='op_prep_{S2}'"
+    ));
+    assert!(issued > past);
+}
+
+/// B4: a release receipt that is not the session's last release's (an earlier one, come late)
+/// does not move the session: it stays releasing until its own release is known.
+#[tokio::test]
+async fn a_stale_release_receipt_does_not_move_a_reopened_session() {
+    let h = hub();
+    h.bind();
+    h.one_turn("hello").await;
+    let Release::Pending(first) = h.rt.release(S).unwrap() else {
+        panic!("idle: let go");
+    };
+    until("released", || h.phase() == "released").await;
+    h.one_turn("again").await;
+    // the second release: the Node cannot tell what became of it
+    h.node.script_once("release_session", Scripted::Unknown);
+    let Release::Pending(second) = h.rt.release(S).unwrap() else {
+        panic!("idle: let go");
+    };
+    assert_ne!(first, second);
+    until("unknown", || h.state_of(&second) == "unknown").await;
+    // as if the first one's final receipt had never come in, and comes now
+    h.store
+        .transaction::<_, StoreError>(|tx| {
+            tx.execute(
+                "UPDATE node_commands SET state='accepted' WHERE operation_id=?",
+                [&first],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let op: OperationId = first.clone().try_into().unwrap();
+    h.node
+        .emit(
+            Subject::Operation {
+                operation: op.clone(),
+            },
+            EventBody::OperationChanged {
+                receipt: h.node.receipt(&op).unwrap(),
+            },
+        )
+        .await
+        .unwrap();
+    until("applied", || h.state_of(&first) == "finished").await;
+    assert_eq!(
+        h.phase(),
+        "releasing",
+        "the second release is not known yet"
+    );
+    assert!(h.rt.is_busy(S));
 }
 
 /// D5 acceptance "回滚": with the Node not enabled, a Node-bound session's messages are queued
@@ -2403,7 +2645,7 @@ async fn a_released_session_takes_the_change_when_it_opens_again() {
     let h = hub();
     h.bind();
     h.ready().await;
-    assert!(h.rt.release(S).unwrap());
+    assert!(matches!(h.rt.release(S).unwrap(), Release::Pending(_)));
     until("released", || h.phase() == "released").await;
     assert_eq!(h.mode(PermissionMode::FullAccess), Configured::OnReopen);
     h.one_turn("hello").await;
@@ -2557,7 +2799,7 @@ async fn hold_keeps_the_queue_through_open_and_release_receipts() {
     .await;
 
     // a release receipt under the hold neither claims nor reopens
-    assert!(h.rt.release(S).unwrap());
+    assert!(matches!(h.rt.release(S).unwrap(), Release::Pending(_)));
     h.rt.hold(true);
     assert_eq!(h.rt.prompt(S, "two", "user", &[]).unwrap(), Planned::Held);
     until("released", || h.phase() == "released").await;
@@ -3235,7 +3477,7 @@ async fn a_late_release_of_a_new_journal_does_not_let_a_reopened_session_go() {
     h.bind();
     // the old journal: a turn, a release, a reopen (its views stay in the Hub's inbox)
     h.one_turn("hello").await;
-    assert!(h.rt.release(S).unwrap());
+    assert!(matches!(h.rt.release(S).unwrap(), Release::Pending(_)));
     until("released", || h.phase() == "released").await;
     let reopen = |h: &H, text: &str| {
         h.rt.prompt(S, text, "user", &[]).unwrap();
@@ -3275,7 +3517,7 @@ async fn a_late_release_of_a_new_journal_does_not_let_a_reopened_session_go() {
         .unwrap();
     h.one_turn("again").await;
     *h.seen.stash.lock().unwrap() = Some(vec![]);
-    assert!(h.rt.release(S).unwrap());
+    assert!(matches!(h.rt.release(S).unwrap(), Release::Pending(_)));
     until("released", || h.phase() == "released").await;
     reopen(&h, "y");
     until("ready", || h.phase() == "ready").await;

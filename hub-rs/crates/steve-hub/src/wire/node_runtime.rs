@@ -182,6 +182,9 @@ const INBOX_KEEP_MS: i64 = 7 * 24 * 3600 * 1000;
 /// How often the apply worker prunes, and how many rows at most per transaction.
 const PRUNE_EVERY: Duration = Duration::from_secs(600);
 const PRUNE_BATCH: i64 = 500;
+/// The `retry_at` of a release queued for when its session's turn is over: never leased until
+/// [`NodeRuntime::release_in`] sends it.
+const AFTER_TURN: i64 = i64::MAX;
 /// An attempt's deadline by default.
 const TURN_LIMIT_MS: i64 = 6 * 3_600_000;
 /// ?1 node, ?2 received before, ?3 at most. The json_extract terms match migration 036's indexes.
@@ -392,6 +395,13 @@ impl NodeRuntime {
     /// The session runs on this Node from now on: its workspace is prepared and it is opened, by
     /// two commands (the open waits for the prepare). Idempotent for the same binding.
     pub fn bind(&self, b: &Binding) -> Result<(), StoreError> {
+        self.bind_after(b, None)
+    }
+
+    /// [`Self::bind`] for a session that takes over from another one: its prepare (and so its
+    /// open) waits until `after`, that one's `release_session`, is done, so the two harnesses are
+    /// never open at once (they share the item's worktree). A release that fails keeps it waiting.
+    pub fn bind_after(&self, b: &Binding, after: Option<&str>) -> Result<(), StoreError> {
         let workspace = WorkspaceRef {
             node: self.node_id.clone(),
             id: idv(derived_id("w", &b.resource))?,
@@ -435,7 +445,7 @@ impl NodeRuntime {
                     request: &prep,
                     digest: &prep_d,
                     target_attempt: None,
-                    dependency: None,
+                    dependency: after,
                 },
                 now(),
             )?;
@@ -515,56 +525,125 @@ impl NodeRuntime {
     }
 
     /// Lets the session's harness go while it is idle (the next message opens it again, continuing
-    /// the conversation). `false`: it is busy, or not open.
-    pub fn release(&self, session: &str) -> Result<bool, StoreError> {
+    /// the conversation). A session the business side ended during a turn is let go once that
+    /// turn is over: its release is queued now and goes then ([`Release::Pending`] either way).
+    pub fn release(&self, session: &str) -> Result<Release, StoreError> {
         self.running()?;
         let r = self.tx(|tx| self.release_in(tx, session))?;
-        if r {
+        if matches!(r, Release::Pending(_)) {
             self.wake_send.notify_one();
         }
         Ok(r)
     }
 
     /// [`Self::release`] inside `tx`.
-    fn release_in(&self, tx: &Tx, session: &str) -> Result<bool, StoreError> {
-        {
-            let Some((phase, active)) = phase_in(tx, session)? else {
-                return Ok(false);
-            };
-            if phase != "ready" || active.is_some() {
-                return Ok(false);
+    fn release_in(&self, tx: &Tx, session: &str) -> Result<Release, StoreError> {
+        let Some((phase, active)) = phase_in(tx, session)? else {
+            return Ok(Release::Gone);
+        };
+        let waiting = after_turn_release_in(tx, session)?;
+        match (phase.as_str(), active.is_some()) {
+            ("released", false) => {
+                // nothing left to let go: a release that waited for the turn is done without
+                // going out (what waits for it may go)
+                if let Some(op) = waiting {
+                    rt::merge_receipt_in(
+                        tx,
+                        &op,
+                        ReceiptState::Finished,
+                        true,
+                        &json!({ "reason": "the session was let go already" }),
+                        now(),
+                    )?;
+                }
+                Ok(Release::Gone)
             }
-            let op = uid(&format!("op_release_{session}"));
-            let (req, digest) = command(
-                &op,
-                SessionId::try_from(session.to_string()).map_err(conflict)?,
-            )?;
-            rt::insert_command_in(
-                tx,
-                &rt::NewCommand {
-                    operation: &op,
-                    node: self.node_id.as_str(),
-                    method: "release_session",
-                    request: &req,
-                    digest: &digest,
-                    target_attempt: None,
-                    dependency: None,
-                },
-                now(),
-            )?;
-            let rev = session_revision(tx, session)?;
-            rt::session_cas_in(
-                tx,
-                session,
-                rev,
-                &rt::SessionUpdate {
-                    phase: "releasing",
-                    active_attempt: None,
-                    release_pending: false,
-                },
-                now(),
-            )
+            ("releasing", _) => Ok(match last_release_in(tx, session)? {
+                Some(op) => Release::Pending(op),
+                None => Release::Busy,
+            }),
+            ("ready", false) => {
+                let sid = SessionId::try_from(session.to_string()).map_err(conflict)?;
+                let op = match waiting {
+                    // it never went out: it goes now, issued now
+                    Some(op) => {
+                        let (req, digest) = command(&op, sid)?;
+                        tx.execute(
+                            "UPDATE node_commands SET request=?, digest=?, retry_at=?, updated=? WHERE operation_id=? AND state='pending'",
+                            rusqlite::params![
+                                serde_json::to_string(&req).map_err(conflict)?,
+                                digest,
+                                now(),
+                                now(),
+                                op
+                            ],
+                        )?;
+                        op
+                    }
+                    None => self.release_command_in(tx, session)?,
+                };
+                let rev = session_revision(tx, session)?;
+                rt::session_cas_in(
+                    tx,
+                    session,
+                    rev,
+                    &rt::SessionUpdate {
+                        phase: "releasing",
+                        active_attempt: None,
+                        release_pending: false,
+                    },
+                    now(),
+                )?;
+                Ok(Release::Pending(op))
+            }
+            _ if ended_in(tx, session)? => {
+                // busy (a turn, an open, a configure): queued for when that is over
+                let op = match waiting {
+                    Some(op) => op,
+                    None => {
+                        let op = self.release_command_in(tx, session)?;
+                        tx.execute(
+                            "UPDATE node_commands SET retry_at=? WHERE operation_id=?",
+                            rusqlite::params![AFTER_TURN, op],
+                        )?;
+                        op
+                    }
+                };
+                Ok(Release::Pending(op))
+            }
+            _ => Ok(Release::Busy),
         }
+    }
+
+    /// A new `release_session` command for `session`, its id.
+    fn release_command_in(&self, tx: &Tx, session: &str) -> Result<String, StoreError> {
+        let op = uid(&format!("op_release_{session}"));
+        let (req, digest) = command(
+            &op,
+            SessionId::try_from(session.to_string()).map_err(conflict)?,
+        )?;
+        rt::insert_command_in(
+            tx,
+            &rt::NewCommand {
+                operation: &op,
+                node: self.node_id.as_str(),
+                method: "release_session",
+                request: &req,
+                digest: &digest,
+                target_attempt: None,
+                dependency: None,
+            },
+            now(),
+        )?;
+        Ok(op)
+    }
+
+    /// An ended session is let go once it is idle (see [`Self::release`]).
+    fn release_if_ended_in(&self, tx: &Tx, session: &str) -> Result<(), StoreError> {
+        if ended_in(tx, session)? {
+            self.release_in(tx, session)?;
+        }
+        Ok(())
     }
 
     /// Whether `session` runs on a Node.
@@ -1203,6 +1282,7 @@ impl NodeRuntime {
         };
         let settled = self.plan_after_in(tx, session)? != Planned::Created;
         if settled {
+            self.release_if_ended_in(tx, session)?;
             status_in(tx, session, settled_status(&completion.stop_reason))?;
         }
         let ended = settled.then(|| End {
@@ -1222,13 +1302,16 @@ impl NodeRuntime {
     /// Leases one command, sends it and merges what came back. False: nothing to send.
     async fn send_one(&self) -> bool {
         let lease = match self.tx(|tx| {
-            rt::lease_command_in(
+            match rt::lease_command_in(
                 tx,
                 self.node_id.as_str(),
                 &self.owner,
                 now(),
                 now() + LEASE_MS,
-            )
+            )? {
+                Some(l) if !l.maybe_sent => fresh_envelope_in(tx, l).map(Some),
+                l => Ok(l),
+            }
         }) {
             Ok(Some(l)) => l,
             Ok(None) => return false,
@@ -1278,7 +1361,7 @@ impl NodeRuntime {
                     "start_turn" => self.refused_attempt_in(tx, &lease.operation, e)?,
                     "release_session" => {
                         let s = command_session_in(tx, &lease.operation)?;
-                        self.released_in(tx, &s, false)?;
+                        self.released_in(tx, &s, &lease.operation, false)?;
                         None
                     }
                     "open_session" => {
@@ -1425,7 +1508,7 @@ impl NodeRuntime {
         match (method.as_str(), state) {
             ("release_session", ReceiptState::Finished) => {
                 let s = command_session_in(tx, op)?;
-                self.released_in(tx, &s, success)?;
+                self.released_in(tx, &s, op, success)?;
             }
             ("open_session", ReceiptState::Finished) => {
                 let s = command_session_in(tx, op)?;
@@ -1496,9 +1579,12 @@ impl NodeRuntime {
     }
 
     /// A release is over: the session is let go, or (refused, failed) still open as it was. What
-    /// came in meanwhile goes now (opening it again if it was let go).
-    fn released_in(&self, tx: &Tx, s: &str, success: bool) -> Result<(), StoreError> {
-        if phase_in(tx, s)?.is_none_or(|(p, _)| p != "releasing") {
+    /// came in meanwhile goes now (opening it again if it was let go). Only the session's last
+    /// release says so: an earlier one's receipt, come late, says nothing of the session now.
+    fn released_in(&self, tx: &Tx, s: &str, op: &str, success: bool) -> Result<(), StoreError> {
+        if phase_in(tx, s)?.is_none_or(|(p, _)| p != "releasing")
+            || last_release_in(tx, s)?.as_deref() != Some(op)
+        {
             return Ok(());
         }
         let rev = session_revision(tx, s)?;
@@ -1561,7 +1647,9 @@ impl NodeRuntime {
                 },
                 now(),
             )?;
-            self.plan_after_in(tx, s)?;
+            if self.plan_after_in(tx, s)? != Planned::Created {
+                self.release_if_ended_in(tx, s)?;
+            }
             return Ok(None);
         }
         // the user hears why even when no turn waited (the queued message stays for the next try)
@@ -1611,6 +1699,7 @@ impl NodeRuntime {
             s,
             &format!("Node 没能打开这个会话（{detail}），下一条消息会再试。"),
         )?;
+        self.release_if_ended_in(tx, s)?;
         if let Some(e) = &end {
             status_in(tx, s, settled_status(&e.stop))?;
         }
@@ -2647,18 +2736,8 @@ impl NodeRuntime {
             return Ok(None);
         }
         // a session the business side ended is let go once its last turn is over (the release it
-        // asked for while the turn ran could not be done then)
-        let ended: bool = tx
-            .query_row(
-                "SELECT status='ended' FROM sessions WHERE id=?",
-                [session],
-                |r| r.get(0),
-            )
-            .optional()?
-            .unwrap_or(false);
-        if ended {
-            self.release_in(tx, session)?;
-        }
+        // asked for while the turn ran waited for this)
+        self.release_if_ended_in(tx, session)?;
         status_in(tx, session, settled_status(&c.stop_reason))?;
         Ok(Some(End {
             session: session.to_string(),
@@ -2841,6 +2920,18 @@ pub enum Planned {
     Empty,
 }
 
+/// What [`NodeRuntime::release`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Release {
+    /// No harness is open for the session (never opened, or let go already).
+    Gone,
+    /// This `release_session` lets it go: queued now, or (an ended session that is busy) queued
+    /// for when its turn is over.
+    Pending(String),
+    /// Busy and not ended: kept.
+    Busy,
+}
+
 /// The format of the events this coordinator writes: Steve's own, never a harness protocol.
 const V1: &str = "steve.v1";
 
@@ -2929,6 +3020,66 @@ fn receipt_state(s: &Observed) -> (ReceiptState, bool) {
             (ReceiptState::Finished, *outcome == Outcome::Succeeded)
         }
     }
+}
+
+/// A command that never went out and waited long (behind its dependency, say: a successor's
+/// prepare behind its predecessor's turn) is issued again now, so the Node does not refuse it as
+/// past `accept_before`. Only one no send can have reached: the Node knows nothing of it yet.
+fn fresh_envelope_in(tx: &Tx, mut l: rt::CommandLease) -> Result<rt::CommandLease, StoreError> {
+    let mut c: Command<Value> = serde_json::from_value(l.request.clone()).map_err(conflict)?;
+    if c.accept_before.0 - now() >= ACCEPT_WINDOW_MS / 2 {
+        return Ok(l);
+    }
+    c.issued_at = Timestamp(now());
+    c.accept_before = Timestamp(now() + ACCEPT_WINDOW_MS);
+    let v = serde_json::to_value(&c).map_err(conflict)?;
+    let digest = digest_of(&v).map_err(conflict)?.to_string();
+    tx.execute(
+        "UPDATE node_commands SET request=?, digest=?, updated=? WHERE operation_id=? AND state='pending'",
+        rusqlite::params![
+            serde_json::to_string(&v).map_err(conflict)?,
+            digest,
+            now(),
+            l.operation
+        ],
+    )?;
+    l.request = v;
+    l.digest = digest;
+    Ok(l)
+}
+
+/// The session's last `release_session` command, whatever became of it.
+fn last_release_in(tx: &Tx, session: &str) -> Result<Option<String>, StoreError> {
+    Ok(tx
+        .query_row(
+            "SELECT operation_id FROM node_commands WHERE method='release_session' AND json_extract(request,'$.body')=? ORDER BY created DESC, rowid DESC LIMIT 1",
+            [session],
+            |r| r.get(0),
+        )
+        .optional()?)
+}
+
+/// The session's release queued for when its turn is over (never sent yet), if any.
+fn after_turn_release_in(tx: &Tx, session: &str) -> Result<Option<String>, StoreError> {
+    Ok(tx
+        .query_row(
+            "SELECT operation_id FROM node_commands WHERE method='release_session' AND json_extract(request,'$.body')=?1 AND state='pending' AND retry_at=?2",
+            rusqlite::params![session, AFTER_TURN],
+            |r| r.get(0),
+        )
+        .optional()?)
+}
+
+/// The business side ended the session (`sessions.status`).
+fn ended_in(tx: &Tx, session: &str) -> Result<bool, StoreError> {
+    Ok(tx
+        .query_row(
+            "SELECT status='ended' FROM sessions WHERE id=?",
+            [session],
+            |r| r.get(0),
+        )
+        .optional()?
+        .unwrap_or(false))
 }
 
 /// The session's phase and active attempt; `None`: not bound.

@@ -53,8 +53,8 @@ pub use orchestrator::{
     CreateItem, Forked, ItemAction, RESUMED_NOTE, SendNow, SupplementMode, resumed_text,
 };
 pub use runtime::{
-    AgentRuntime, Answered, Check, Configured, Flushed, McpEndpoint, Output, Prompted, Running,
-    Stop, TurnEnd,
+    AgentRuntime, Answered, Check, Configured, Flushed, McpEndpoint, Output, Prompted, Released,
+    Running, Stop, TurnEnd,
 };
 
 use repo::Db;
@@ -138,6 +138,9 @@ pub(crate) struct State {
     build_checked: HashMap<String, i64>,
     /// Why new turns wait now (`occupancy`).
     holds: std::collections::BTreeSet<occupancy::Hold>,
+    /// Items handing over to a new session while the old one's release is on its way: the
+    /// release (`Released::Pending`) the item's next session waits for, taken when it starts.
+    handoffs: HashMap<String, String>,
 }
 
 /// One critical section: the core plus the held state lock.

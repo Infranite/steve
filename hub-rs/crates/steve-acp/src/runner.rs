@@ -1785,13 +1785,15 @@ impl Acp {
     }
 
     /// Free the adapter process when idle; the next prompt resumes with `session/load`.
-    pub fn release(&self, session_id: &str) {
+    /// True: no adapter runs for the session any more; false: a turn is in flight, it is kept.
+    pub fn release(&self, session_id: &str) -> bool {
         let mut st = self.st();
         if st.live.get(session_id).is_some_and(|l| !l.busy)
             && let Some(l) = st.live.remove(session_id)
         {
             l.conn.kill();
         }
+        !st.turning.contains(session_id) && !st.live.contains_key(session_id)
     }
 
     /// A turn is in flight: adapter start, prompt, or gateway-retry wait.

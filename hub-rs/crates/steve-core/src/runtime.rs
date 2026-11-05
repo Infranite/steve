@@ -86,6 +86,19 @@ pub enum Configured {
     Unsupported,
 }
 
+/// What [`AgentRuntime::release`] did with a session's harness.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Released {
+    /// Nothing runs for the session any more (it was idle and is stopped, or nothing was open).
+    Gone,
+    /// It is being let go: the operation named here does it (on a Node, a queued `release_session`;
+    /// for a session the business side ended during a turn, the one queued for when that turn is
+    /// over). Work that must not overlap the harness waits for it.
+    Pending(String),
+    /// A turn runs: nothing was done (a session that is not ended keeps its harness).
+    Busy,
+}
+
 /// A finished turn, as acp.ts hands it to the orchestrator's turn-end handler.
 #[derive(Debug, Clone)]
 pub struct TurnEnd {
@@ -101,9 +114,11 @@ pub struct TurnEnd {
 /// The ACP runner (acp.ts): per-session adapter processes, the prompt queue, permissions, and the release hold.
 pub trait AgentRuntime: Send + Sync {
     /// A session was just created (before its first prompt): the runtime may fix its backend now.
-    /// Only new sessions are ever bound here; existing ones keep the backend they have.
-    fn created(&self, session_id: &str) {
-        let _ = session_id;
+    /// Only new sessions are ever bound here; existing ones keep the backend they have. `after`: it
+    /// takes over from a session whose release is still on its way ([`Released::Pending`]); its
+    /// harness does not start before that release is done (two harnesses never share a worktree).
+    fn created(&self, session_id: &str, after: Option<&str>) {
+        let _ = (session_id, after);
     }
     /// Send now or queue behind the running turn (or behind the release hold). Writes the `queued`
     /// row/event itself (with the files). Attachments are copied into the session cwd and named in the
@@ -130,7 +145,9 @@ pub trait AgentRuntime: Send + Sync {
     /// A turn is in flight, including adapter start and the gateway-retry wait.
     fn is_busy(&self, session_id: &str) -> bool;
     /// Stop the adapter process if it is idle; the next prompt starts it again with `session/load`.
-    fn release(&self, session_id: &str);
+    /// A session the business side ended while a turn runs is let go once that turn is over.
+    /// Errors when the backend cannot tell (its store failed): nothing is known to be let go.
+    fn release(&self, session_id: &str) -> Result<Released>;
     /// Answer a pending tool permission (`None` = cancelled). Errors when the backend cannot tell
     /// (its store failed): the answer was not taken and the card stays open.
     fn answer_permission(&self, decision_id: &str, option_id: Option<&str>) -> Result<Answered>;

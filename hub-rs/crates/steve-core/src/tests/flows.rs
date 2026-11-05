@@ -1175,6 +1175,42 @@ fn goals_small_and_big_changes() {
     ]));
 }
 
+/// B4: a handoff whose old harness is still being let go (a Node's release on its way) names that
+/// release to the new session, which opens only once it is done; one already gone names nothing.
+#[test]
+fn a_handoff_names_the_release_its_successor_waits_for() {
+    let k = Kit::new();
+    let i = new_item(&k, "写一个脚本");
+    let s = only_session(&k, &i.id);
+    k.rt.end_turn(&k.core, &s.id, "cancelled", None);
+    k.rt.st().release_answers.insert(
+        s.id.clone(),
+        crate::Released::Pending("op_release_1".into()),
+    );
+    k.core
+        .revise_goal(&i.id, "写一个脚本，并且部署到三台机器上")
+        .unwrap();
+    let s2 = last_session(&k, &i.id);
+    assert_ne!(s2.id, s.id);
+    assert_eq!(
+        k.rt.st().created.last().unwrap(),
+        &(s2.id.clone(), Some("op_release_1".to_string()))
+    );
+    /* the rollover past the handoff threshold, its old session gone at once: nothing to wait for */
+    k.rt.end_turn(&k.core, &s2.id, "cancelled", None);
+    k.db()
+        .session_patch(&s2.id, patch![used: 85, size: 100])
+        .unwrap();
+    k.core
+        .supplement(&i.id, "继续", SupplementMode::Auto, &[])
+        .unwrap();
+    let s3 = last_session(&k, &i.id);
+    assert_eq!(s3.no, 3);
+    assert_eq!(k.rt.st().created.last().unwrap(), &(s3.id.clone(), None));
+    /* a start that does not come from a handoff never inherits one left behind */
+    assert!(k.rt.st().created.iter().filter(|c| c.1.is_some()).count() == 1);
+}
+
 #[test]
 fn reassign_checks_the_workspace() {
     let k = Kit::new();

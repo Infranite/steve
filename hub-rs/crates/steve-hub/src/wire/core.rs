@@ -533,8 +533,13 @@ impl steve_core::AgentRuntime for AcpRuntime {
     fn is_busy(&self, session_id: &str) -> bool {
         self.0.is_busy(session_id)
     }
-    fn release(&self, session_id: &str) {
-        self.0.release(session_id)
+    /// Idle: stopped now ([`steve_core::Released::Gone`]); in a turn: kept, it idles out later.
+    fn release(&self, session_id: &str) -> steve_core::Result<steve_core::Released> {
+        Ok(if self.0.release(session_id) {
+            steve_core::Released::Gone
+        } else {
+            steve_core::Released::Busy
+        })
     }
     fn answer_permission(
         &self,
@@ -883,7 +888,7 @@ impl RoutedRuntime {
 
     /// Binds a new session to the configured remote Node when it can run there. False: it was not
     /// (not configured, not possible for this session, or the bind failed), nothing changed.
-    fn bind_remote(&self, session_id: &str) -> bool {
+    fn bind_remote(&self, session_id: &str, after: Option<&str>) -> bool {
         let (Some(f), Some(target)) = (&self.fleet, &self.bind_remote) else {
             return false;
         };
@@ -895,7 +900,7 @@ impl RoutedRuntime {
         let Some(rt) = f.start(target) else {
             return false;
         };
-        match rt.bind(&b) {
+        match rt.bind_after(&b, after) {
             Ok(()) => true,
             Err(e) => {
                 tracing::error!("bind {session_id} to the remote Node {target}: {e}");
@@ -910,14 +915,16 @@ impl steve_core::AgentRuntime for RoutedRuntime {
     /// otherwise, with the local Node enabled here, to it when its binding can be planned
     /// (otherwise, e.g. a permission mode the Node path cannot express, it stays on the legacy
     /// runner). Existing sessions are never bound; with neither configured nothing changes.
-    fn created(&self, session_id: &str) {
-        if self.bind_remote(session_id) {
+    /// `after` (a predecessor's release on its way): a Node-bound session opens only once it is
+    /// done; a legacy one starts right away, as before.
+    fn created(&self, session_id: &str, after: Option<&str>) {
+        if self.bind_remote(session_id, after) {
             return;
         }
         let Some(n) = &self.node else { return };
         match super::node_binding::binding_for(&self.store, session_id) {
             Some(b) => {
-                if let Err(e) = n.bind(&b) {
+                if let Err(e) = n.bind_after(&b, after) {
                     tracing::error!(
                         "bind {session_id} to the Node: {e}; it stays on the legacy runner"
                     );
@@ -994,15 +1001,19 @@ impl steve_core::AgentRuntime for RoutedRuntime {
             Backend::Legacy => self.legacy.is_busy(session_id),
         }
     }
-    fn release(&self, session_id: &str) {
+    /// A Node session's release is a queued command ([`steve_core::Released::Pending`]); one the
+    /// business side ended during a turn is queued for when the turn is over. A parked one keeps
+    /// whatever its Node holds ([`steve_core::Released::Busy`], as it counts as busy).
+    fn release(&self, session_id: &str) -> steve_core::Result<steve_core::Released> {
+        use super::node_runtime::Release;
+        use steve_core::Released;
         match self.route(session_id) {
-            // idle only; a busy one that the business side ended is let go when its turn is over
-            Backend::Node(n) => match n.release(session_id) {
-                Ok(true) => {}
-                Ok(false) => tracing::debug!("release {session_id}: kept, busy or not open"),
-                Err(e) => tracing::error!("release {session_id}: {e}"),
-            },
-            Backend::Parked => {}
+            Backend::Node(n) => Ok(match n.release(session_id)? {
+                Release::Gone => Released::Gone,
+                Release::Pending(op) => Released::Pending(op),
+                Release::Busy => Released::Busy,
+            }),
+            Backend::Parked => Ok(Released::Busy),
             Backend::Legacy => self.legacy.release(session_id),
         }
     }
