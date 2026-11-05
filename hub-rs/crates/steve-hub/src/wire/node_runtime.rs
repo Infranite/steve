@@ -1234,6 +1234,11 @@ impl NodeRuntime {
         &self.node_id
     }
 
+    /// Its faces, for what needs no ledger (discovery: probing, listing and reading history).
+    pub fn node(&self) -> Arc<dyn Node> {
+        self.node.clone()
+    }
+
     /// The session's open turn has an outcome nobody can tell yet (reconciliation decides), or its
     /// stream is faulted (its events wait for reconciliation, so what they say is not known).
     /// A read error counts as uncertain: waiting is the safe answer.

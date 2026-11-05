@@ -86,6 +86,8 @@
   "hub.import.gone": "本机记录不存在了",
   "hub.import.already": "已经导入过了",
   "hub.import.unreadable": "读不出这个会话",
+  "hub.import.not_listed": "不是本机能导入的会话",
+  "hub.import.list_failed": "读不到本机的会话记录",
   "hub.import.only_imported": "只能移除导入的会话",
   "hub.workspaces.offline": "设备离线",
   "hub.workspaces.local_off": "本机 Node 没有开启",

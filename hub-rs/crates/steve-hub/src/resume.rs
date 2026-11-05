@@ -104,58 +104,42 @@ pub fn command(h: &Homes, harness: &str, id: &str, cwd: &str) -> Option<String> 
     Some(format!("{cd}{env}{run}"))
 }
 
-/// Claude Code's project directory name for a working directory.
-fn claude_project(cwd: &str) -> String {
-    cwd.chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect()
-}
-
-fn claude_transcript(dir: &Path, id: &str, cwd: &str) -> Option<PathBuf> {
-    let projects = dir.join("projects");
-    let name = format!("{id}.jsonl");
-    let direct = projects.join(claude_project(cwd)).join(&name);
-    if direct.is_file() {
-        return Some(direct);
+fn node_homes(h: &Homes) -> steve_node::history::Homes {
+    steve_node::history::Homes {
+        user_home: h.home.clone(),
+        steve_home: PathBuf::new(),
+        claude_dir: h.claude_dir.clone(),
+        codex_home: h.codex_home.clone(),
     }
-    // a long path gets a shortened directory name: look in every project
-    std::fs::read_dir(&projects)
-        .ok()?
-        .filter_map(|e| e.ok())
-        .map(|e| e.path().join(&name))
-        .find(|p| p.is_file())
 }
 
-/// The `sessionId`/`id` and `cwd` the transcript itself records, from its first lines.
-fn recorded(file: &Path, harness: &str) -> (Option<String>, Option<String>) {
-    use std::io::{BufRead, BufReader, Read};
-    let Ok(f) = std::fs::File::open(file) else {
-        return (None, None);
+/// The transcript part of [`info`]: where it is, when it changed, and what it records.
+fn transcript(
+    path: &str,
+    updated: Option<i64>,
+    rid: Option<String>,
+    rcwd: Option<String>,
+    id: &str,
+    cwd: &str,
+) -> Value {
+    let same = rid.as_deref().is_none_or(|r| r == id)
+        && rcwd.as_deref().is_none_or(|c| cwd.is_empty() || c == cwd);
+    json!({ "path": path, "updated": updated, "id": rid, "cwd": rcwd, "matches": same })
+}
+
+fn page(harness: &str, cwd: &str, h: &Homes, id: Option<&str>, transcript: Value) -> Value {
+    let cwd_exists = !cwd.is_empty() && Path::new(cwd).is_dir();
+    let Some(id) = id else {
+        return json!({ "harness": harness, "id": null, "cwd": cwd, "cwd_exists": cwd_exists, "command": null, "transcript": null });
     };
-    let (mut id, mut cwd) = (None, None);
-    let field = |v: &Value, k: &str| v.get(k).and_then(Value::as_str).map(str::to_owned);
-    // the first 8 MB (a pasted screenshot makes a line of a megabyte or more); a line cut there does not parse
-    for line in BufReader::new(f.take(8 << 20)).lines().take(50) {
-        let Ok(line) = line else { break };
-        let Ok(v) = serde_json::from_str::<Value>(&line) else {
-            continue;
-        };
-        if harness == "codex" {
-            // the first line is `session_meta`
-            if v.get("type").and_then(Value::as_str) == Some("session_meta")
-                && let Some(p) = v.get("payload")
-            {
-                return (field(p, "id"), field(p, "cwd"));
-            }
-            continue;
-        }
-        id = id.or_else(|| field(&v, "sessionId"));
-        cwd = cwd.or_else(|| field(&v, "cwd"));
-        if id.is_some() && cwd.is_some() {
-            break;
-        }
-    }
-    (id, cwd)
+    json!({
+        "harness": harness,
+        "id": id,
+        "cwd": cwd,
+        "cwd_exists": cwd_exists,
+        "command": command(h, harness, id, cwd),
+        "transcript": transcript,
+    })
 }
 
 /// What the session page shows to resume a session in its harness. Blocking: reads the harness's files.
@@ -163,40 +147,57 @@ pub fn info(h: &Homes, s: &Obj) -> Value {
     let harness = text(s, "harness").unwrap_or_default();
     let cwd = text(s, "cwd").unwrap_or_default();
     let id = native_id(s);
-    let cwd_exists = !cwd.is_empty() && Path::new(cwd).is_dir();
-    let Some(id) = id else {
-        return json!({ "harness": harness, "id": null, "cwd": cwd, "cwd_exists": cwd_exists, "command": null, "transcript": null });
+    let file = id
+        .as_deref()
+        .and_then(|id| steve_node::history::find_transcript(&node_homes(h), harness, id, cwd));
+    let found = match (&id, file) {
+        (Some(id), Some(f)) => {
+            let (rid, rcwd) = steve_node::history::recorded(&f, harness);
+            let updated = std::fs::metadata(&f)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as i64);
+            transcript(&f.to_string_lossy(), updated, rid, rcwd, id, cwd)
+        }
+        _ => Value::Null,
     };
-    let file = match harness {
-        "claude-code" => claude_transcript(&h.claude_dir, &id, cwd),
-        "codex" => steve_acp::codex_rollout(&h.codex_home, &id),
-        _ => None,
-    };
-    let transcript = file.map(|f| {
-        let (rid, rcwd) = recorded(&f, harness);
-        let updated = std::fs::metadata(&f)
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-            .map(|d| d.as_millis() as i64);
-        let same = rid.as_deref().is_none_or(|r| r == id)
-            && rcwd.as_deref().is_none_or(|c| cwd.is_empty() || c == cwd);
-        json!({ "path": f.to_string_lossy(), "updated": updated, "id": rid, "cwd": rcwd, "matches": same })
-    });
-    json!({
-        "harness": harness,
-        "id": id,
-        "cwd": cwd,
-        "cwd_exists": cwd_exists,
-        "command": command(h, harness, &id, cwd),
-        "transcript": transcript,
-    })
+    page(harness, cwd, h, id.as_deref(), found)
+}
+
+/// [`info`] with the transcript found by the local Node ([`Discovery::locate`] of
+/// `session:<id>`), the Hub reading none of the harness's files.
+pub async fn info_on(h: &Homes, s: &Obj, node: &dyn steve_node_api::Discovery) -> Value {
+    let harness = text(s, "harness").unwrap_or_default();
+    let cwd = text(s, "cwd").unwrap_or_default();
+    let id = native_id(s);
+    let mut found = Value::Null;
+    if let Some(id) = &id {
+        let at = node
+            .locate(steve_node_api::HistoryRef {
+                harness: harness.into(),
+                key: format!("session:{id}"),
+            })
+            .await;
+        if let Ok(l) = at {
+            found = transcript(
+                &l.display,
+                l.updated.map(|t| t.0),
+                l.recorded_id,
+                l.recorded_cwd,
+                id,
+                cwd,
+            );
+        }
+    }
+    page(harness, cwd, h, id.as_deref(), found)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
+    use steve_node::history::claude_project;
 
     fn obj(v: Value) -> Obj {
         v.as_object().cloned().unwrap()

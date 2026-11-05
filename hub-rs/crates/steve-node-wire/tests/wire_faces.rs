@@ -106,11 +106,15 @@ async fn fixture(n: &FakeNode) {
             directory: Some("~/code/app".into()),
             updated: Timestamp(5),
             version: Revision::new("h1").unwrap(),
+            size: None,
         },
         HistoryLocation {
             source,
             display: "~/.claude/projects/app/abc.jsonl".into(),
             resume: Some(ResumeHandle::new("abc").unwrap()),
+            updated: None,
+            recorded_id: None,
+            recorded_cwd: None,
         },
     );
     n.prepare_workspace(cmd("op_w", prepare("item:ST-1")))
@@ -478,6 +482,9 @@ async fn every_new_kind_crosses_the_wire_unchanged() {
             source: history_ref("cc:abc"),
             display: "d".into(),
             resume: None,
+            updated: None,
+            recorded_id: None,
+            recorded_cwd: None,
         },
     )
     .await;

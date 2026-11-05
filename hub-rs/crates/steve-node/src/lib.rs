@@ -12,6 +12,7 @@
 //! confirmed gone ([`procs`]).
 
 mod actor;
+pub mod history;
 mod journal;
 mod procs;
 mod tools;
@@ -160,6 +161,10 @@ pub(crate) struct Inner {
     snapshots: Mutex<HashMap<u64, Snapshot>>,
     cache_n: AtomicU64,
     tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    /// Where the harnesses' history is and which binaries a probe asks.
+    discovery: std::sync::RwLock<Arc<history::DiscoveryConfig>>,
+    probes: history::Probes,
+    imports: history::Imports,
 }
 
 impl Inner {
@@ -960,8 +965,12 @@ impl LocalNode {
             }
             Ok(())
         })?;
+        let discovery = history::DiscoveryConfig::of(&cfg.acp);
         Ok(LocalNode(Arc::new_cyclic(|weak| Inner {
             roots: std::sync::RwLock::new(Arc::new(cfg.roots.clone())),
+            discovery: std::sync::RwLock::new(Arc::new(discovery)),
+            probes: Default::default(),
+            imports: Default::default(),
             cfg,
             j,
             incarnation,
@@ -1091,6 +1100,17 @@ impl LocalNode {
     /// command; a workspace prepared under a root that is gone now is refused when it is used.
     pub fn set_roots(&self, roots: Vec<Root>) {
         *self.0.roots.write().unwrap() = Arc::new(roots);
+    }
+
+    /// Host bridge, like [`Self::set_roots`]: where this machine's harnesses keep their history and
+    /// which binaries a probe asks, as the Hub on the same machine configures its own harnesses.
+    /// By default both come from the ACP configuration ([`history::DiscoveryConfig::of`]).
+    pub fn set_discovery(&self, d: history::DiscoveryConfig) {
+        *self.0.discovery.write().unwrap() = Arc::new(d);
+    }
+
+    fn discovery(&self) -> Arc<history::DiscoveryConfig> {
+        self.0.discovery.read().unwrap().clone()
     }
 
     fn mine(&self, w: &WorkspaceRef) -> ApiResult<()> {
@@ -2387,24 +2407,28 @@ impl WorkspaceExecutor for LocalNode {
 
 #[async_trait]
 impl Discovery for LocalNode {
-    async fn probe(&self, _fresh: bool) -> ApiResult<Capabilities> {
+    async fn probe(&self, fresh: bool) -> ApiResult<Capabilities> {
+        let probed = self.0.probes.get(&self.discovery(), fresh).await;
         let mut harnesses: Vec<HarnessCapability> = self
             .0
             .cfg
             .acp
             .adapters
             .keys()
-            .map(|h| HarnessCapability {
-                name: h.clone(),
-                version: String::new(),
-                sessions: true,
-                jobs: false,
-                models: vec![],
-                resume: true,
-                cancel: true,
-                permissions: true,
-                images: true,
-                enforcement: vec![],
+            .map(|h| {
+                let p = probed.get(h).cloned().unwrap_or_default();
+                HarnessCapability {
+                    name: h.clone(),
+                    version: p.version,
+                    sessions: true,
+                    jobs: false,
+                    models: p.models,
+                    resume: true,
+                    cancel: true,
+                    permissions: true,
+                    images: true,
+                    enforcement: vec![],
+                }
             })
             .collect();
         harnesses.sort_by(|a, b| a.name.cmp(&b.name));
@@ -2427,17 +2451,92 @@ impl Discovery for LocalNode {
             features: vec![],
         })
     }
-    async fn history(&self, _p: PageRequest) -> ApiResult<Page<HistoryEntry>> {
-        unsupported("history")
+    /// Newest first; the cursor is the position in that order.
+    async fn history(&self, p: PageRequest) -> ApiResult<Page<HistoryEntry>> {
+        let from = match &p.cursor {
+            None => 0,
+            Some(c) => c
+                .as_str()
+                .parse::<usize>()
+                .map_err(|_| ApiError::new(ErrorCode::Invalid, "bad cursor"))?,
+        };
+        let limit = p.limit.clamp(1, 500) as usize;
+        let d = self.discovery();
+        let all = tokio::task::spawn_blocking(move || history::candidates(&d.homes, from + limit))
+            .await
+            .map_err(|e| ApiError::new(ErrorCode::Internal, format!("history: {e}")))?;
+        let full = all.len() == from + limit;
+        let items: Vec<HistoryEntry> = all.iter().skip(from).map(|s| s.entry()).collect();
+        let next = full.then(|| Cursor::new((from + limit).to_string()).expect("a number"));
+        Ok(Page { items, next })
     }
-    async fn import_history(&self, _c: Command<HistoryImport>) -> ApiResult<Receipt> {
-        unsupported("history")
+    /// Reads a transcript the Node lists (a key it did not list is `invalid`, whatever path it
+    /// names) at the version the Hub saw (else `stale`), and keeps its events to be read page by
+    /// page. Nothing is journaled: the files stay the harness's.
+    async fn import_history(&self, c: Command<HistoryImport>) -> ApiResult<Receipt> {
+        c.check_window()?;
+        let digest = c.digest("import_history")?;
+        let done = |op: &OperationId| Receipt {
+            operation: op.clone(),
+            state: Observed::Finished {
+                outcome: Outcome::Succeeded,
+                result: Some(OperationResult::Pages {
+                    operation: op.clone(),
+                }),
+                error: None,
+            },
+        };
+        if self.0.imports.seen(&c.id, &digest)? {
+            return Ok(done(&c.id));
+        }
+        let d = self.discovery();
+        let (op, source, expected) = (c.id.clone(), c.body.source.clone(), c.body.expected);
+        let events = tokio::task::spawn_blocking(move || {
+            let h = &d.homes;
+            let harness_of_key = match source.key.get(..3) {
+                Some("cc:") => history::CLAUDE_CODE,
+                Some("cx:") => history::CODEX,
+                _ => "",
+            };
+            if harness_of_key != source.harness || !history::listed(h, &source.key) {
+                return Err(ApiError::new(
+                    ErrorCode::Invalid,
+                    "not a history this node lists",
+                ));
+            }
+            match history::read(&h.steve_home, &source.key) {
+                history::Read::Missing => {
+                    Err(ApiError::new(ErrorCode::Stale, "the transcript is gone"))
+                }
+                history::Read::Unreadable => Err(ApiError::new(
+                    ErrorCode::Invalid,
+                    "the transcript is unreadable",
+                )),
+                history::Read::Ready { peek, rows, .. } => {
+                    if peek.version() != expected {
+                        return Err(ApiError::new(
+                            ErrorCode::Stale,
+                            "the transcript changed since it was listed",
+                        ));
+                    }
+                    Ok(history::events(&op, &peek.cwd, &rows, now()))
+                }
+            }
+        })
+        .await
+        .map_err(|e| ApiError::new(ErrorCode::Internal, format!("import: {e}")))?
+        .map_err(|e| e.on(&c.id))?;
+        self.0.imports.keep(c.id.clone(), digest, events);
+        Ok(done(&c.id))
     }
-    async fn import_page(&self, _i: OperationId, _p: PageRequest) -> ApiResult<ImportedPage> {
-        unsupported("history")
+    async fn import_page(&self, i: OperationId, p: PageRequest) -> ApiResult<ImportedPage> {
+        self.0.imports.page(&i, &p)
     }
-    async fn locate(&self, _source: HistoryRef) -> ApiResult<HistoryLocation> {
-        unsupported("history")
+    async fn locate(&self, source: HistoryRef) -> ApiResult<HistoryLocation> {
+        let d = self.discovery();
+        tokio::task::spawn_blocking(move || history::locate(&d.homes, &source))
+            .await
+            .map_err(|e| ApiError::new(ErrorCode::Internal, format!("locate: {e}")))?
     }
 }
 

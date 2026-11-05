@@ -295,6 +295,9 @@ fn the_new_types_survive_the_wire() {
         },
         display: "~/.claude/projects/x/abc.jsonl".into(),
         resume: Some(ResumeHandle::new("abc").unwrap()),
+        updated: None,
+        recorded_id: None,
+        recorded_cwd: None,
     });
     let s = SecretBytes::new(b"hunter2".to_vec());
     let back: SecretBytes = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
@@ -935,11 +938,15 @@ async fn only_a_listed_history_is_located() {
             directory: Some("~/code/app".into()),
             updated: Timestamp(5),
             version: Revision::new("h1").unwrap(),
+            size: None,
         },
         HistoryLocation {
             source: source.clone(),
             display: "~/.claude/projects/app/abc.jsonl".into(),
             resume: Some(ResumeHandle::new("abc").unwrap()),
+            updated: None,
+            recorded_id: None,
+            recorded_cwd: None,
         },
     );
     assert_eq!(n.history(page(10)).await.unwrap().items.len(), 1);

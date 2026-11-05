@@ -86,6 +86,8 @@
   "hub.import.gone": "The local record no longer exists",
   "hub.import.already": "Already imported",
   "hub.import.unreadable": "Can't read this conversation",
+  "hub.import.not_listed": "Not a conversation this machine can import",
+  "hub.import.list_failed": "Couldn't read this machine's conversation history",
   "hub.import.only_imported": "Only imported conversations can be removed",
   "hub.workspaces.offline": "Device offline",
   "hub.workspaces.local_off": "This machine's Node is not on",

@@ -178,6 +178,20 @@ fn node_runtime(
         })
         .map_err(|e| BackendError::msg(e.to_string()))?,
     );
+    // the history and harnesses the Hub would read itself: its own homes and binaries
+    let homes = crate::resume::Homes::of(cfg);
+    node.set_discovery(steve_node::history::DiscoveryConfig {
+        homes: steve_node::history::Homes {
+            user_home: homes.home,
+            steve_home: cfg.home.clone(),
+            claude_dir: homes.claude_dir,
+            codex_home: homes.codex_home,
+        },
+        binaries: steve_node::history::Binaries {
+            claude: cfg.claude_executable.clone().into(),
+            codex: cfg.codex_executable.clone().into(),
+        },
+    });
     let runtime = node_runtime::NodeRuntime::new(store.clone(), node.clone(), domain);
     // legacy's idle kill: an idle session's harness goes after STEVE_IDLE_RELEASE_MS (10 min)
     runtime.set_idle_release(cfg.idle_release_ms as i64);

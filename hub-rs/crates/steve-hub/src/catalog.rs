@@ -206,6 +206,9 @@ pub struct Catalog {
     /// `STEVE_DEFAULT_MODEL_CLAUDE`
     pub claude_default: Option<String>,
     cache: Mutex<HashMap<String, (Instant, Value)>>,
+    /// The local Node (`STEVE_NODE_MODE=local`): Codex's list is what its probe reports, the Hub
+    /// runs no `codex`.
+    node: std::sync::OnceLock<std::sync::Arc<dyn steve_node_api::Node>>,
 }
 
 impl Catalog {
@@ -221,7 +224,13 @@ impl Catalog {
             codex_home,
             claude_default,
             cache: Mutex::default(),
+            node: std::sync::OnceLock::new(),
         }
+    }
+
+    /// List through the local Node from now on.
+    pub fn set_node(&self, node: std::sync::Arc<dyn steve_node_api::Node>) {
+        let _ = self.node.set(node);
     }
 
     /// From the Hub's configuration: `$CLAUDE_CONFIG_DIR/settings.json` or `~/.claude/settings.json`.
@@ -249,14 +258,18 @@ impl Catalog {
         {
             return Some(v.clone());
         }
-        let v = self.load(harness).await;
+        let v = self.load(harness, fresh).await;
         c.insert(harness.to_string(), (Instant::now(), v.clone()));
         Some(v)
     }
 
-    async fn load(&self, harness: &str) -> Value {
+    async fn load(&self, harness: &str, fresh: bool) -> Value {
         let (models, source, default) = if harness == CODEX {
-            let (models, source) = match self.codex_list().await {
+            let listed = match self.node.get() {
+                Some(n) => Some(node_codex(n.as_ref(), fresh).await),
+                None => self.codex_list().await,
+            };
+            let (models, source) = match listed {
                 Some(m) => (m, "codex debug models"),
                 None => (
                     CODEX_MODELS.iter().map(|m| Entry::new(m, None)).collect(),
@@ -332,6 +345,29 @@ impl Catalog {
     }
 }
 
+/// Codex's models as the local Node's probe reports them; none when it has no Codex (never the
+/// built-in list: the Node is where Codex runs).
+async fn node_codex(node: &dyn steve_node_api::Node, fresh: bool) -> Vec<Entry> {
+    let caps = match node.probe(fresh).await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("probe of the local Node: {e}");
+            return vec![];
+        }
+    };
+    caps.harnesses
+        .iter()
+        .find(|h| h.name == CODEX)
+        .map(|h| {
+            h.models
+                .iter()
+                .filter(|m| steve_core::models::valid_model(m))
+                .map(|m| Entry::new(m, None))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Adds what the statistics saw (`used`: model → `{calls, ok_at, failed_at}`) to a list: each listed
 /// model gets its `used`, and a model used this week that the list lacks is appended with a note. The
 /// list's own words (source, the catch-all family) come out in the request's language.
@@ -405,6 +441,31 @@ fn add_usage(mut list: Value, used: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// With the local Node, Codex's list is its probe's: a Node without Codex lists none, and the
+    /// Hub runs no `codex` (the configured one would leave a mark).
+    #[tokio::test]
+    async fn a_node_without_codex_lists_no_codex_models() {
+        let dir = tempfile::tempdir().unwrap();
+        let codex = dir.path().join("codex");
+        std::fs::write(
+            &codex,
+            format!("#!/bin/sh\ntouch '{}'\n", dir.path().join("ran").display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&codex, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        let c = Catalog::new(
+            dir.path().join("settings.json"),
+            codex,
+            dir.path().join(".codex"),
+            None,
+        );
+        c.set_node(steve_node_api::testkit::FakeNode::new("local"));
+        let v = c.get(CODEX, true).await.unwrap();
+        assert_eq!(v["models"], json!([]), "{v}");
+        assert!(!dir.path().join("ran").exists(), "the Hub ran codex");
+    }
 
     /// A settings file with a key helper that would leave a mark if anything ran it, and a key in
     /// `env`: neither may reach the list.
