@@ -899,7 +899,7 @@ async fn stop_retires_an_unknown_prepare_and_the_queued_message_runs_once() {
     assert_eq!(r.phase(), "opening", "held: the open waits on its prepare");
     assert_eq!(r.prompts("queued"), 0);
 
-    assert!(r.rt.cancel(S).unwrap());
+    assert!(r.rt.user_stop(S).unwrap());
     until("the end", || !r.ends().is_empty()).await;
     assert_eq!(r.ends()[0].1, "end_turn");
     assert_eq!(r.prompts("queued"), 1, "the queued message ran once");

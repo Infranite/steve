@@ -206,7 +206,7 @@ impl Core {
     /// Interrupt the session's running turn on whichever backend runs it (the user's stop);
     /// false if nothing was running.
     pub fn cancel_turn(&self, session_id: &str) -> bool {
-        self.0.runtime.cancel(session_id)
+        self.0.runtime.stop(session_id)
     }
     pub fn config(&self) -> &CoreConfig {
         &self.0.config

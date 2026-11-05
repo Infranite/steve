@@ -18,6 +18,8 @@ pub struct FakeState {
     pub prompts: Vec<(String, String, String)>,
     pub turning: HashSet<String>,
     pub cancelled: Vec<String>,
+    /// The user's stops ([`AgentRuntime::stop`]), each a cancel too.
+    pub stopped: Vec<String>,
     pub released: Vec<String>,
     /// decision id → still answerable
     pub permissions: HashSet<String>,
@@ -153,6 +155,10 @@ impl AgentRuntime for FakeRuntime {
         let mut st = self.st();
         st.cancelled.push(sid.into());
         st.turning.contains(sid)
+    }
+    fn stop(&self, sid: &str) -> bool {
+        self.st().stopped.push(sid.into());
+        self.cancel(sid)
     }
     fn is_busy(&self, sid: &str) -> bool {
         self.st().turning.contains(sid)

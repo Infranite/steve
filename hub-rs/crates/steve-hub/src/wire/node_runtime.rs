@@ -980,10 +980,21 @@ impl NodeRuntime {
     }
 
     /// Asks the Node to cancel the attempt running now (frozen as the target here, never looked up
-    /// again when the command goes out). `true`: there was one, the cancel is on its way. With no
-    /// attempt to stop, a control whose outcome is unknown and holds the session is retired by one
-    /// explicit `recover` ([`recover`]).
+    /// again when the command goes out). `true`: there was one, the cancel is on its way. The
+    /// lifecycle's cancels (an item cancelled, done or paused, a steer) come here: they never
+    /// retire a control, that is the user's [`Self::user_stop`] only.
     pub fn cancel(&self, session: &str) -> Result<bool, StoreError> {
+        self.cancel_as(session, false)
+    }
+
+    /// The user's Stop: [`Self::cancel`], and with no attempt to stop, a control whose outcome is
+    /// unknown and holds the session is retired by one explicit `recover` ([`recover`]).
+    pub fn user_stop(&self, session: &str) -> Result<bool, StoreError> {
+        self.cancel_as(session, true)
+    }
+
+    /// [`Self::cancel`]; `stop`: the user asked, a recover may be planned.
+    fn cancel_as(&self, session: &str, stop: bool) -> Result<bool, StoreError> {
         self.running()?;
         let r = self.tx(|tx| {
             let row: Option<(String, String, i64)> = tx
@@ -994,6 +1005,9 @@ impl NodeRuntime {
                 )
                 .ok();
             let Some((attempt, target, rev)) = row else {
+                if !stop {
+                    return Ok(false);
+                }
                 return Ok(self.recover_in(tx, session, None)?.unwrap_or(false));
             };
             let state: String = tx.query_row(
@@ -1024,7 +1038,8 @@ impl NodeRuntime {
                 _ => {}
             }
             // an abandon of it the Node cannot tell the end of is retired first (its slot freed)
-            if state == "unknown"
+            if stop
+                && state == "unknown"
                 && let Some(r) = self.recover_in(tx, session, Some(&attempt))?
             {
                 return Ok(r);
@@ -1385,7 +1400,14 @@ impl NodeRuntime {
             return Ok(None);
         }
         // a target a recover retires: what follows comes with the recover's own end
-        if self.retiring_in(tx, op)? {
+        let interrupted = matches!(
+            &receipt.state,
+            Observed::Finished {
+                outcome: Outcome::Interrupted,
+                ..
+            }
+        );
+        if self.retiring_in(tx, op, interrupted)? {
             return Ok(None);
         }
         if method == "resolve_permission" && state == ReceiptState::Finished {

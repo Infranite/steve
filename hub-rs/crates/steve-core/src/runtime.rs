@@ -51,6 +51,11 @@ pub trait AgentRuntime: Send + Sync {
     ) -> Result<Prompted>;
     /// Interrupt the running turn (or a pending gateway retry); false if nothing was running.
     fn cancel(&self, session_id: &str) -> bool;
+    /// The user's Stop: [`Self::cancel`], and a backend may also retire what holds the session
+    /// (a Node's control whose outcome is unknown). The lifecycle's own cancels never do.
+    fn stop(&self, session_id: &str) -> bool {
+        self.cancel(session_id)
+    }
     /// A turn is in flight, including adapter start and the gateway-retry wait.
     fn is_busy(&self, session_id: &str) -> bool;
     /// Stop the adapter process if it is idle; the next prompt starts it again with `session/load`.

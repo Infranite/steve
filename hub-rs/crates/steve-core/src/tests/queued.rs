@@ -131,6 +131,7 @@ fn send_now_interrupts_and_the_queue_runs_next_with_it_first() {
         SendNow::Interrupted
     );
     assert_eq!(k.rt.st().cancelled, std::slice::from_ref(&sid));
+    assert!(k.rt.st().stopped.is_empty(), "send-now is no user stop");
     assert!(kinds(&k, &sid).contains(&"queued_sent_now".to_string()));
     // the adapter ends the cancelled turn: the queue is the next turn, in order
     k.rt.end_turn(&k.core, &sid, "cancelled", None);
@@ -225,6 +226,7 @@ fn resumed_rows_are_conflicts_without_edit_removal_reordering_or_interrupt() {
         .unwrap();
     assert_eq!(paused.status, "pause");
     assert_eq!(k.rt.st().cancelled, vec![sid.clone()]);
+    assert!(k.rt.st().stopped.is_empty(), "a pause is no user stop");
     assert!(
         k.db()
             .queued(&sid)
@@ -295,4 +297,19 @@ fn send_now_waits_when_the_flush_leaves_the_message_queued() {
     assert_eq!(k.core.queued_send_now(&sid, &q[1]).unwrap(), SendNow::Sent);
     assert_eq!(k.rt.prompts_of(&sid).last().unwrap(), "二\n\n一");
     assert!(kinds(&k, &sid).contains(&"queued_sent_now".to_string()));
+}
+
+/// Only the user's Stop is a stop (a backend may retire what holds the session then); the
+/// lifecycle's cancels are cancels only.
+#[test]
+fn the_users_stop_is_a_stop_and_a_pause_only_a_cancel() {
+    let k = Kit::new();
+    let (item, sid) = started(&k);
+    assert!(k.core.cancel_turn(&sid));
+    assert_eq!(k.rt.st().stopped, std::slice::from_ref(&sid));
+    k.core
+        .item_action(&item, crate::ItemAction::Pause, "me")
+        .unwrap();
+    assert_eq!(k.rt.st().cancelled, vec![sid.clone(), sid.clone()]);
+    assert_eq!(k.rt.st().stopped, std::slice::from_ref(&sid));
 }

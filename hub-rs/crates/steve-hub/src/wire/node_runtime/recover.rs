@@ -1,5 +1,6 @@
 //! Explicit recover of a control operation whose outcome is unknown (D7). Nothing retires one on
-//! its own: Stop on a session held by one plans exactly one `recover`, its target and the target's
+//! its own: the user's Stop ([`NodeRuntime::user_stop`], never the lifecycle's cancels) on a session
+//! held by one plans exactly one `recover`, its target and the target's
 //! expected digest fixed when it is planned. The target is never sent again. A recover proves only
 //! that the control intent is retired: its effect on the Node (a worktree, an answer) stays
 //! unknown, and what the session hears never says it succeeded.
@@ -144,12 +145,25 @@ impl NodeRuntime {
         Ok(())
     }
 
-    /// `op`'s target is being retired by a recover the Node took: its own end (interrupted) changes
-    /// nothing here, what follows comes with the recover's end ([`Self::recover_receipt_in`]).
-    pub(super) fn retiring_in(&self, tx: &Tx, op: &str) -> Result<bool, StoreError> {
+    /// `op`'s target is being retired by a recover that may be at the Node already: its own end
+    /// (`interrupted`, as a recover ends it) changes nothing here, what follows comes with the
+    /// recover's end ([`Self::recover_receipt_in`]). The Node may push that end before the Hub
+    /// merged the recover's answer, so a recover still pending counts once it was (maybe) sent.
+    /// Any other end is the target's own and is taken as usual (the recover then finds it stale).
+    pub(super) fn retiring_in(
+        &self,
+        tx: &Tx,
+        op: &str,
+        interrupted: bool,
+    ) -> Result<bool, StoreError> {
+        if !interrupted {
+            return Ok(false);
+        }
         Ok(tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM node_commands WHERE method='recover' AND node_id=? AND json_extract(request,'$.body.target')=?
-               AND (state IN ('accepted','active','unknown') OR (state='finished' AND json_extract(receipt,'$.success')=1)))",
+               AND (state IN ('accepted','active','unknown')
+                    OR (state='pending' AND (maybe_sent=1 OR lease_owner IS NOT NULL))
+                    OR (state='finished' AND json_extract(receipt,'$.success')=1)))",
             [self.node_id.as_str(), op],
             |r| r.get(0),
         )?)

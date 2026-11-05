@@ -906,6 +906,17 @@ impl steve_core::AgentRuntime for RoutedRuntime {
             None => self.legacy.cancel(session_id),
         }
     }
+    fn stop(&self, session_id: &str) -> bool {
+        match self.node_for(session_id) {
+            Some(n) => n.user_stop(session_id).unwrap_or_else(|e| {
+                tracing::error!("stop {session_id}: {e}");
+                false
+            }),
+            None if self.parked(session_id) => false,
+            // the legacy runner has nothing to retire: its stop is its cancel
+            None => self.legacy.cancel(session_id),
+        }
+    }
     fn is_busy(&self, session_id: &str) -> bool {
         match self.route(session_id) {
             Backend::Node(n) => n.is_busy(session_id),
