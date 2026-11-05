@@ -230,6 +230,11 @@ impl Workspaces {
         self.on(HUB_DEVICE, At::Root(at), "")
     }
 
+    /// Whether `p` is on the local Node (the Hub's own machine).
+    pub fn is_local_placement(&self, p: &Placement) -> bool {
+        self.is_local(p.node_id.as_str())
+    }
+
     fn is_local(&self, node: &str) -> bool {
         self.local
             .as_ref()

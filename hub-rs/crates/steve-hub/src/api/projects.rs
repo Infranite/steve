@@ -458,13 +458,30 @@ pub async fn lane(
     let p = st
         .read(move |r| Ok(own(r.project_get(&i)?, &ws, Noun::Project)?))
         .await?;
-    // a project on another device whose Node is not there: said so, never read off the Hub's disk
+    // a project on another device is never read off the Hub's disk: its `path` is a place on that
+    // device. Only the local Node's own device is read here (the same machine); a remote Node's
+    // lane waits for the profile to be read through its git face (E5b)
     if let Some(ws) = st.workspaces.clone()
         && p.get("device_id").and_then(Value::as_str) != Some(crate::wire::workspaces::HUB_DEVICE)
     {
-        let placed = blocking(move || Ok(ws.placement_of(Subject::Project(&id)).err())).await?;
-        if let Some(e @ PlacementError::Offline { .. }) = placed {
-            return Err(placement_error(e));
+        let placed = blocking(move || {
+            Ok(match ws.placement_of(Subject::Project(&id)) {
+                Ok(pl) => Ok(ws.is_local_placement(&pl)),
+                Err(e) => Err(e),
+            })
+        })
+        .await?;
+        match placed {
+            Ok(true) => {}
+            Ok(false) => {
+                return Err(ApiError::bad_request(steve_i18n::t!(
+                    "hub.project.lane_remote"
+                )));
+            }
+            Err(e @ (PlacementError::Offline { .. } | PlacementError::Store(_))) => {
+                return Err(placement_error(e));
+            }
+            Err(e) => return Err(ApiError::bad_request(e.to_string())),
         }
     }
     if p.get("kind").and_then(Value::as_str) != Some("git") {

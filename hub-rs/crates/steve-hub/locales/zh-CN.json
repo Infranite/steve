@@ -48,6 +48,7 @@
   "hub.project.dir_missing": "目录不存在：%{path}",
   "hub.project.already_project": "这个目录已经是一个项目",
   "hub.project.no_release": "这个项目没有设置发布方式，完成条件无从说起",
+  "hub.project.lane_remote": "只能查看本机项目的合并通道，这个项目在另一台设备上",
   "hub.project.lanes_git_only": "只有 git 项目有合并通道",
   "hub.project.project_dir_missing": "项目目录不存在：%{path}",
   "hub.session.imported_readonly": "导入的会话是只读的",

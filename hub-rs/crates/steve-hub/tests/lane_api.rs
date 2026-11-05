@@ -34,6 +34,8 @@ struct Env {
     _home: tempfile::TempDir,
     home: std::path::PathBuf,
     db: std::path::PathBuf,
+    /// The remote Nodes' coordinators (`listen`).
+    fleet: Option<Arc<steve_hub::nodes::NodeFleet>>,
     base: String,
     http: reqwest::Client,
     cookie: String,
@@ -60,11 +62,12 @@ impl Env {
 }
 
 async fn start() -> Env {
-    start_with(false).await
+    start_with(false, false).await
 }
 
-/// `node`: with the local Node on (`STEVE_NODE_MODE=local`, so not a `STEVE_NO_RESUME` copy).
-async fn start_with(node: bool) -> Env {
+/// `node`: with the local Node on (`STEVE_NODE_MODE=local`, so not a `STEVE_NO_RESUME` copy);
+/// `listen`: remote Nodes are listened for (`STEVE_NODE_LISTEN=1`).
+async fn start_with(node: bool, listen: bool) -> Env {
     steve_modules::net::forbid_in_this_process();
     let home = tempfile::tempdir().unwrap();
     let h = home.path().to_path_buf();
@@ -103,6 +106,9 @@ async fn start_with(node: bool) -> Env {
         vars.remove("STEVE_NO_RESUME");
         vars.insert("STEVE_NODE_MODE".into(), "local".into());
     }
+    if listen {
+        vars.insert("STEVE_NODE_LISTEN".into(), "1".into());
+    }
     let vars = Arc::new(vars);
     let get = {
         let vars = vars.clone();
@@ -114,6 +120,7 @@ async fn start_with(node: bool) -> Env {
     }
     let bus = Bus::new();
     let w = steve_hub::wire::wire_with(&cfg, &bus, Arc::new(get.clone())).unwrap();
+    let fleet = w.nodes.as_ref().map(|n| n.fleet.clone());
     let st = AppState::new(cfg.clone(), w.backend, w.domain, bus)
         .with_modules(w.modules)
         .with_workspaces(Some(w.workspaces));
@@ -144,6 +151,7 @@ async fn start_with(node: bool) -> Env {
         _home: home,
         home: h,
         db: cfg.data_dir.join("steve.sqlite3"),
+        fleet,
         base,
         http,
         cookie,
@@ -274,7 +282,7 @@ async fn a_project_on_a_device_that_is_not_there_says_device_offline() {
 /// typed in is still taken as a new project, and becomes a root.
 #[tokio::test]
 async fn with_the_local_node_dirs_browses_toward_its_roots() {
-    let e = start_with(true).await;
+    let e = start_with(true, false).await;
     std::fs::create_dir_all(e.home.join("private/notes")).unwrap();
     let home = e.home.to_string_lossy().to_string();
     /* the home directory is no root: only the way down to the roots (the Hub's scratch and
@@ -323,4 +331,142 @@ async fn with_the_local_node_dirs_browses_toward_its_roots() {
         .await;
     assert_eq!(s, 200, "{v}");
     assert_eq!(v["kind"], "dir");
+}
+
+struct Quiet;
+#[async_trait::async_trait]
+impl steve_node_wire::Handler for Quiet {
+    async fn handle(&self, method: &str, _: Value) -> steve_node_api::ApiResult<Value> {
+        Err(steve_node_wire::conn::unsupported(method))
+    }
+}
+
+/// A project on a paired, active and linked remote Node: its lane is refused, and nothing of the
+/// Hub's disk is read for it (no `git fetch` in a directory of the same name here).
+#[tokio::test]
+async fn a_project_on_a_linked_remote_node_is_never_read_off_the_hubs_disk() {
+    let e = start_with(false, true).await;
+    /* a checkout on the Hub's disk, at the very path the remote project says, never fetched */
+    let repo = e.home.join("far");
+    std::fs::create_dir_all(&repo).unwrap();
+    g(&repo, &["init", "-q", "-b", "main"]);
+    g(&repo, &["commit", "-q", "--allow-empty", "-m", "base"]);
+    let bare = e.home.join("far.git");
+    g(
+        &e.home,
+        &[
+            "clone",
+            "-q",
+            "--bare",
+            &repo.to_string_lossy(),
+            &bare.to_string_lossy(),
+        ],
+    );
+    g(&repo, &["remote", "add", "origin", &bare.to_string_lossy()]);
+    let (s, p) = e
+        .call(
+            "POST",
+            "/api/projects",
+            Some(json!({"name": "Far", "path": repo.to_string_lossy()})),
+        )
+        .await;
+    assert_eq!(s, 200, "{p}");
+    let id = p["id"].as_str().unwrap().to_string();
+    /* the project lives on n_far now, paired by the workspace's owner, active and linked */
+    let c = rusqlite::Connection::open(&e.db).unwrap();
+    c.execute_batch(&format!(
+        "INSERT INTO nodes(node_id,owner,name,pubkey,fingerprint,state,created)
+           SELECT 'n_far',user_id,'far',zeroblob(32),'ff','active',1 FROM workspace_members
+           WHERE workspace_id='default' AND role='owner' LIMIT 1;
+         UPDATE projects SET device_id='n_far' WHERE id='{id}';"
+    ))
+    .unwrap();
+    let fleet = e.fleet.as_ref().expect("remote Nodes listened for");
+    let (h, n) = steve_node_wire::testkit::pair();
+    let opts = |side| steve_node_wire::ConnOptions {
+        side,
+        ..Default::default()
+    };
+    let hub = steve_node_wire::Conn::spawn(h.sink, h.stream, 1, Arc::new(Quiet), opts("h"));
+    let _peer = steve_node_wire::Conn::spawn(n.sink, n.stream, 1, Arc::new(Quiet), opts("n"));
+    let far = steve_node_api::NodeId::new("n_far").unwrap();
+    assert!(fleet.remote(&far).attach(hub, false));
+
+    let url = format!("/api/projects/{id}/lane");
+    let lane = || e.call("GET", &url, None);
+    /* its path as the Node names it (`<root>/<rel>`): placed there, refused here */
+    c.execute("UPDATE projects SET path='work/far' WHERE id=?", [&id])
+        .unwrap();
+    let (s, v) = lane().await;
+    assert_eq!(
+        (s, v),
+        (
+            400,
+            json!({"error": "只能查看本机项目的合并通道，这个项目在另一台设备上"})
+        )
+    );
+    /* an absolute path means nothing on that device: refused as well, not read here */
+    c.execute(
+        "UPDATE projects SET path=? WHERE id=?",
+        [repo.to_string_lossy().as_ref(), id.as_str()],
+    )
+    .unwrap();
+    let (s, v) = lane().await;
+    assert_eq!((s, v), (400, json!({"error": "还没有工作区"})));
+    // no fetch ran in the Hub's checkout at that path: origin/main was never written
+    let fetched = Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["rev-parse", "--verify", "-q", "refs/remotes/origin/main"])
+        .output()
+        .unwrap();
+    assert!(
+        !fetched.status.success(),
+        "the Hub fetched a remote project"
+    );
+    /* the same once its Node is gone: 设备离线 */
+    c.execute_batch(&format!(
+        "UPDATE projects SET path='work/far' WHERE id='{id}';
+         UPDATE nodes SET state='paused' WHERE node_id='n_far';"
+    ))
+    .unwrap();
+    let (s, v) = lane().await;
+    assert_eq!((s, v), (503, json!({"error": "设备离线"})));
+}
+
+/// With the local Node on, a directory under one of its roots is read by the Node (its files face),
+/// not the Hub: a link out of the root is no directory there, and its files are not shown.
+#[tokio::test]
+async fn with_the_local_node_a_link_out_of_a_root_is_not_read() {
+    let e = start_with(true, false).await;
+    let scratch = e.home.join("steve/scratch");
+    let outside = e.home.join("private/secret");
+    std::fs::create_dir_all(outside.join("inner")).unwrap();
+    std::fs::write(outside.join("README.md"), "secret").unwrap();
+    std::fs::create_dir_all(scratch.join("real")).unwrap();
+    std::os::unix::fs::symlink(&outside, scratch.join("link")).unwrap();
+    let link = scratch.join("link").to_string_lossy().to_string();
+    /* the Hub's disk follows the link; the Node does not, so it is no directory to make a project
+    of or to describe (and no model is asked) */
+    for path in ["/api/projects", "/api/projects/describe"] {
+        let (s, v) = e
+            .call("POST", path, Some(json!({"name": "Link", "path": link})))
+            .await;
+        assert_eq!(s, 400, "{path}: {v}");
+        assert_eq!(v["error"], format!("目录不存在：{link}"), "{path}");
+    }
+    /* browsing the root lists its directories, not the link */
+    let (s, v) = e
+        .call(
+            "GET",
+            &format!("/api/fs/dirs?path={}", scratch.to_string_lossy()),
+            None,
+        )
+        .await;
+    let real = scratch.join("real").to_string_lossy().to_string();
+    assert_eq!((s, v), (200, json!([real])));
+    let (s, v) = e
+        .call("GET", &format!("/api/fs/dirs?path={link}"), None)
+        .await;
+    assert_eq!((s, v), (200, json!([])));
 }
