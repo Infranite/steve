@@ -46,11 +46,13 @@ async fn the_setting_picks_the_routers_model_in_order() {
     let k = Kit::new();
     let dir = tempfile::tempdir().unwrap();
     let cli = ClaudeCli {
-        codex: None,
-        executable: fake_claude(dir.path()),
+        one: crate::LocalPrint {
+            codex: None,
+            executable: fake_claude(dir.path()),
+            cwd: dir.path().into(),
+        },
         fast: vec!["unused".into()],
         smart: vec!["unused".into()],
-        cwd: dir.path().into(),
         models: Some(k.core.models().clone()),
     };
     let ctx = k.core.route_ctx(WS).unwrap();
@@ -278,11 +280,13 @@ async fn a_codex_steve_routes_and_answers_through_codex_exec() {
     let codex = fake_codex(dir.path(), &route_reply);
     let gw = crate::stats::RecordingGateway::new(
         std::sync::Arc::new(ClaudeCli {
-            codex: Some(codex),
-            executable: fake_claude(dir.path()),
+            one: crate::LocalPrint {
+                codex: Some(codex),
+                executable: fake_claude(dir.path()),
+                cwd: dir.path().into(),
+            },
             fast: vec!["unused".into()],
             smart: vec!["unused".into()],
-            cwd: dir.path().into(),
             models: Some(k.core.models().clone()),
         }),
         k.db().store().clone(),
@@ -476,11 +480,13 @@ async fn codex_without_a_model_or_an_executable() {
         )
         .unwrap();
     let cli = |codex: Option<std::path::PathBuf>| ClaudeCli {
-        codex,
-        executable: fake_claude(dir.path()),
+        one: crate::LocalPrint {
+            codex,
+            executable: fake_claude(dir.path()),
+            cwd: dir.path().into(),
+        },
         fast: vec![],
         smart: vec![],
-        cwd: dir.path().into(),
         models: Some(k.core.models().clone()),
     };
     use crate::gateway::ModelGateway;
@@ -536,11 +542,13 @@ async fn codex_gets_the_images_of_a_chat_answer() {
         )
         .unwrap();
     let cli = ClaudeCli {
-        codex: Some(codex),
-        executable: fake_claude(dir.path()),
+        one: crate::LocalPrint {
+            codex: Some(codex),
+            executable: fake_claude(dir.path()),
+            cwd: dir.path().into(),
+        },
         fast: vec![],
         smart: vec![],
-        cwd: dir.path().into(),
         models: Some(k.core.models().clone()),
     };
     let main = k.db().bot("steve").unwrap().unwrap();

@@ -343,11 +343,13 @@ pub fn wire_with(cfg: &Arc<Config>, bus: &Bus, vars: Vars) -> Result<Wired, Back
     core_cfg.models_check = list("STEVE_MODELS_CHECK");
     let gateway = Arc::new(steve_core::stats::RecordingGateway::new(
         Arc::new(steve_core::ClaudeCli {
-            codex: Some(cfg.codex_executable.clone().into()),
-            executable: cfg.claude_executable.clone().into(),
+            one: steve_core::LocalPrint {
+                codex: Some(cfg.codex_executable.clone().into()),
+                executable: cfg.claude_executable.clone().into(),
+                cwd: cfg.scratch.clone(),
+            },
             fast: cfg.models.fast.clone(),
             smart: cfg.models.smart.clone(),
-            cwd: cfg.scratch.clone(),
             models: Some(steve_core::models::Models::new(
                 db.clone(),
                 steve_core::models::Defaults::of(&core_cfg),

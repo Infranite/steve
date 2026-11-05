@@ -210,11 +210,13 @@ mod tests {
         std::fs::write(&exe, script).unwrap();
         std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
         Arc::new(ClaudeCli {
-            codex: None,
-            executable: exe,
+            one: crate::LocalPrint {
+                codex: None,
+                executable: exe,
+                cwd: dir.into(),
+            },
             fast: vec!["busy".into(), "haiku".into()],
             smart: vec!["slow".into(), "dead".into()],
-            cwd: dir.into(),
             models: None,
         })
     }
@@ -538,11 +540,13 @@ mod tests {
         let seen = std::sync::Mutex::new(0);
         let fast_only = RecordingGateway::new(
             Arc::new(ClaudeCli {
-                codex: None,
-                executable: dir.path().join("claude"),
+                one: crate::LocalPrint {
+                    codex: None,
+                    executable: dir.path().join("claude"),
+                    cwd: dir.path().into(),
+                },
                 fast: vec!["haiku".into()],
                 smart: vec!["haiku".into()],
-                cwd: dir.path().into(),
                 models: None,
             }),
             s.clone(),
@@ -576,5 +580,116 @@ mod tests {
             *seen.lock().unwrap() == 0,
             "the result line alone has no deltas"
         );
+    }
+
+    /// One try as [`Scripted`] saw it: model, effort, Codex, timeout in ms, streaming.
+    type Try = (String, Option<String>, bool, u128, bool);
+
+    /// A [`crate::gateway::OneModel`] that answers like [`fake`]'s script without a process, and notes
+    /// what each try was given.
+    struct Scripted {
+        tries: std::sync::Mutex<Vec<Try>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::gateway::OneModel for Scripted {
+        async fn once(
+            &self,
+            call: &crate::gateway::OneCall<'_>,
+            model: &str,
+            effort: Option<&str>,
+            on_text: Option<crate::gateway::OnText<'_>>,
+        ) -> crate::gateway::Tried {
+            self.tries.lock().unwrap().push((
+                model.to_string(),
+                effort.map(str::to_string),
+                call.codex,
+                call.timeout.as_millis(),
+                on_text.is_some(),
+            ));
+            let json = |t: &str| serde_json::from_str::<Value>(t).unwrap();
+            let (reply, usage) = match model {
+                "haiku" => (
+                    Ok(("ok".to_string(), Some(0.000829045))),
+                    usage_of(&json(RECORDED), model),
+                ),
+                "busy" => (
+                    Err(crate::error::msg("API Error: 503 upstream unavailable")),
+                    usage_of(&json(BUSY), model),
+                ),
+                "slow" => (
+                    Err(crate::error::msg(format!(
+                        "Command timed out after {} ms",
+                        call.timeout.as_millis()
+                    ))),
+                    vec![],
+                ),
+                _ => (Err(crate::error::msg("Command failed: boom")), vec![]),
+            };
+            crate::gateway::Tried { reply, usage }
+        }
+    }
+
+    /// What the statistics see of an attempt, its wall time left out.
+    fn seen(a: &Attempt) -> String {
+        let result = match &a.result {
+            Ok(p) => format!(
+                "ok {:?} {} {:?} {} {:?}",
+                p.text, p.model, p.cost_usd, p.attempts, p.usage
+            ),
+            Err(e) => format!("err {e}"),
+        };
+        format!(
+            "{result} | {} {} {:?} {:?} {:?}",
+            a.attempts, a.model, a.failures, a.usage, a.harness
+        )
+    }
+
+    /// The fallback over a scripted single model gives the same attempts as over the CLI: model order,
+    /// failures, merged usage, the answer and its cost.
+    #[tokio::test]
+    async fn the_fallback_over_a_scripted_model_matches_the_cli() {
+        let dir = tempfile::tempdir().unwrap();
+        let cli = fake(dir.path());
+        let scripted = crate::gateway::Fallback {
+            one: Scripted {
+                tries: Default::default(),
+            },
+            fast: vec!["busy".into(), "haiku".into()],
+            smart: vec!["slow".into(), "dead".into()],
+            models: None,
+        };
+        let seen_text = std::sync::Mutex::new(0);
+        let on_text = |_: &str| *seen_text.lock().unwrap() += 1;
+        for (tier, timeout, streaming) in [
+            (Tier::Fast, Duration::from_secs(10), false),
+            (Tier::Fast, Duration::from_secs(10), true),
+            (Tier::Smart, Duration::from_millis(1500), false),
+        ] {
+            let text: Option<crate::gateway::OnText<'_>> = streaming.then_some(&on_text);
+            let want = cli
+                .attempt("hi", tier, timeout, &ThinkTools::None, text)
+                .await;
+            let got = scripted
+                .attempt("hi", tier, timeout, &ThinkTools::None, text)
+                .await;
+            assert_eq!(seen(&got), seen(&want), "{tier:?} streaming {streaming}");
+        }
+        let a = &tries(&scripted);
+        assert_eq!(
+            a,
+            &[
+                ("busy".to_string(), None, false, 10_000, false),
+                ("haiku".into(), None, false, 10_000, false),
+                ("busy".into(), None, false, 10_000, true),
+                ("haiku".into(), None, false, 10_000, true),
+                ("slow".into(), None, false, 1500, false),
+                ("dead".into(), None, false, 1500, false),
+            ]
+        );
+    }
+
+    fn tries(f: &crate::gateway::Fallback<Scripted>) -> Vec<Try> {
+        f.one.tries.lock().unwrap().clone()
     }
 }
