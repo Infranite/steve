@@ -9,6 +9,7 @@ import { promptNeedle, withDecisionNotes } from "./decision-notes"
 import { blockSlots, type FeedRow } from "./feed-order"
 import { api, setPageWorkspace, stream, Unauthenticated, type State, type RItem, type RItemDetail, type RSession, type RDecision, type RBot, type REvent, type RProject, type Proposal, type LocalSession, type HubEvent, type RNotice } from "./api"
 import { cue } from "./bus"
+import { elapsed, pastTime, span } from "./i18n/format"
 import type { RFile, PlanStep, RHold, RQueued, RKindReview, SuggestChoice, A2uiRecord, A2uiSubmit, RAnnotation } from "./api"
 import type { Cite } from "./api/knowledge"
 import { yoloApi, type RYolo, type RYoloAction } from "./api/yolo"
@@ -94,21 +95,9 @@ export const PERM: Record<string, string> = { plan: "只读：只出方案，不
 const accKey = (label: string) => Object.keys(ACC).find((k) => ACC[k] === label) ?? "inherit"
 
 /* ───────── time labels ───────── */
-const pad = (n: number) => String(n).padStart(2, "0")
-export function tm(ts: number | null | undefined) {
-  if (!ts) return ""
-  const d = new Date(ts), now = new Date(), diff = now.getTime() - ts
-  if (diff < 60_000) return "刚刚"
-  const hm = `${pad(d.getHours())}:${pad(d.getMinutes())}`
-  const day = (x: Date) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime()
-  const days = Math.round((day(now) - day(d)) / 86400_000)
-  if (days === 0) return hm
-  if (days === 1) return "昨天 " + hm
-  if (days < 7) return "周" + "日一二三四五六"[d.getDay()]
-  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
-}
-const since = (ts: number) => { const m = Math.max(1, Math.round((Date.now() - ts) / 60_000)); return m < 60 ? `${m} 分钟` : m < 1440 ? `${Math.round(m / 60)} 小时` : `${Math.round(m / 1440)} 天` }
-const dur = (a: number, b: number) => { const m = Math.max(0, Math.round((b - a) / 60_000)); return m < 1 ? "刚开始" : m < 60 ? `${m} 分钟` : `${Math.floor(m / 60)} 小时 ${m % 60} 分` }
+export const tm = (ts: number | null | undefined) => pastTime(ts)
+const since = (ts: number) => span(Date.now() - ts)
+const dur = (a: number, b: number) => elapsed(b - a)
 
 /** the web build this page was loaded from: ops/release-web.sh writes it into index.html; "dev" under vite */
 export const LOADED_WEB_VERSION = document.querySelector('meta[name="steve-web-version"]')?.getAttribute("content") || "dev"

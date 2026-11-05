@@ -1,6 +1,7 @@
 /* 设置 · 模型：Steve 是一个 Bot。它自己的判断（分流、对话回答、研究、起标题……）默认都用 Steve 这个 Bot 的 harness、模型和
  * 思考强度（在 Bot 页改）。页面只铺开「默认配置」和少数单独配置的用途；跟随默认的收起，编辑在侧栏里做，备用模型放进高级选项。
  * 最近 7 天实际调用了什么在「运行记录」里看，跟当前配置分开。最下面是新会话在每个 harness 上的默认模型。 */
+import { ago as fmtAgo } from "@/i18n/format"
 import { useEffect, useRef, useState, type ReactNode, type Ref } from "react"
 import { cn } from "cn"
 import { ArrowDownIcon, ArrowUpIcon, ChevronDownIcon, ChevronRightIcon, CpuIcon, PlusIcon, TriangleAlertIcon, XIcon } from "lucide-react"
@@ -55,7 +56,7 @@ function Brief({ c }: { c: Choice }) {
   )
 }
 const same = (a: Choice | null, b: Choice | null) => !!a && !!b && a.harness === b.harness && a.models.join() === b.models.join() && (a.effort ?? null) === (b.effort ?? null)
-const ago = (t: number) => { const m = Math.round((Date.now() - t) / 60000); return m < 60 ? `${Math.max(m, 1)} 分钟前` : m < 1440 ? `${Math.round(m / 60)} 小时前` : `${Math.round(m / 1440)} 天前` }
+const ago = (t: number) => fmtAgo(t, { justNow: false })
 const failedOf = (p: Purpose) => p.recent?.used.reduce((n, u) => n + u.failed, 0) ?? 0
 const callsOf = (p: Purpose) => p.recent?.used.reduce((n, u) => n + u.calls, 0) ?? 0
 

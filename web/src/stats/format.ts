@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import { NotWired, Unauthenticated } from "@/api"
 import { useHubEvents } from "@/store"
 import type { Filter } from "@/api/stats"
+import { dayRange, durUnit, longDur, monthDayTime } from "@/i18n/format"
 
 export const fmtN = (n: number | null | undefined) => {
   if (n == null || !isFinite(n)) return "—"
@@ -16,13 +17,7 @@ export const fmtUsd = (n: number | null | undefined) => (n == null || !isFinite(
 export const fmtPct = (r: number | null | undefined, digits = 0) => (r == null || !isFinite(r) ? "—" : (r * 100).toFixed(digits) + "%")
 export const fmtMs = (ms: number | null | undefined) => {
   if (ms == null || !isFinite(ms)) return "—"
-  const m = Math.round(ms / 60000)
-  if (ms < 60000) return Math.max(0, Math.round(ms / 1000)) + " 秒"
-  if (m < 60) return m + " 分钟"
-  const h = Math.floor(m / 60)
-  if (h < 48) return h + " 小时" + (m % 60 ? ` ${m % 60} 分` : "")
-  const d = Math.floor(h / 24)
-  return d + " 天" + (h % 24 ? ` ${h % 24} 小时` : "")
+  return longDur(ms)
 }
 /** a change against the previous range, as grey text: “↑ 18%”, “↓ 3%”, “持平”, or `null` when there is nothing to compare */
 export const delta = (now: number | null | undefined, before: number | null | undefined) => {
@@ -32,7 +27,7 @@ export const delta = (now: number | null | undefined, before: number | null | un
   if (Math.abs(r) < 0.005) return "持平"
   return (r > 0 ? "↑ " : "↓ ") + Math.abs(r * 100).toFixed(Math.abs(r) < 0.1 ? 1 : 0) + "%"
 }
-export const time = (ts: number) => { const d = new Date(ts); return `${d.getMonth() + 1}月${d.getDate()}日 ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}` }
+export const time = (ts: number) => monthDayTime(ts)
 export const hhmm = (ts: number) => { const d = new Date(ts); return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}` }
 export const shortDay = (d: string) => { const [, m, x] = d.split("-"); return `${Number(m)}/${Number(x)}` }
 /* 小时（ST-43）：单日范围（今天，或选的某一天）的趋势按统计时区的整点小时，bucket 是 `YYYY-MM-DDTHH:00` */
@@ -67,9 +62,6 @@ export function useStats<T>(f: () => Promise<T>, deps: unknown[], live = true): 
   return [v, load]
 }
 /** the range a chart covers, said the same way on every chart: “11月1日 – 11月7日”, one day as “11月5日” */
-export const fmtRange = (from: string, to: string) => {
-  const d = (x: string) => { const [, m, day] = x.split("-"); return `${Number(m)}月${Number(day)}日` }
-  return from === to ? d(from) : `${d(from)} – ${d(to)}`
-}
+export const fmtRange = (from: string, to: string) => dayRange(from, to)
 /** a duration axis in one unit chosen by the largest value, so the ticks read “2 小时”, not “1 小时 57 分” */
-export const durUnit = (maxMs: number): [string, number] => (maxMs >= 2 * 86400000 ? ["天", 86400000] : maxMs >= 2 * 3600000 ? ["小时", 3600000] : ["分钟", 60000])
+export { durUnit }

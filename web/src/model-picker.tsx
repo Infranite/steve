@@ -1,5 +1,6 @@
 /* 模型选择器：从 harness 实际能用的模型里挑（GET /api/system/models?harness=…），按家族分组、可搜索；
  * 列表外的模型才用「其他…」手填。Bot 编辑器、设置 · 模型、新会话默认都用这一个。 */
+import { ago as fmtAgo } from "@/i18n/format"
 import { useEffect, useState } from "react"
 import { cn } from "cn"
 import { ChevronsUpDownIcon, PencilIcon } from "lucide-react"
@@ -37,7 +38,7 @@ export function useCatalog(harness: string | null | undefined): Catalog | null {
   return c
 }
 
-const ago = (t: number) => { const m = Math.round((Date.now() - t) / 60000); return m < 60 ? `${Math.max(m, 1)} 分钟前` : m < 1440 ? `${Math.round(m / 60)} 小时前` : `${Math.round(m / 1440)} 天前` }
+const ago = (t: number) => fmtAgo(t, { justNow: false })
 /** a dot and a few words about what the statistics saw this week */
 export function UsedMark({ u, className }: { u?: Used; className?: string }) {
   if (!u) return null

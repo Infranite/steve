@@ -1,4 +1,5 @@
 /* Bot 菜单与设置：Bot 是独立菜单；设置是分类页。所有改动都写到 Hub，也都可以直接告诉 Steve。 */
+import { useT } from "@/i18n"
 import { WorkspaceDisk } from "@/disk-settings"
 import { useEffect, useState, type ReactNode } from "react"
 import { cn } from "cn"
@@ -20,7 +21,7 @@ import {
   setSetting, toast, finishOnboarding, emit,
 } from "@/store"
 import { api, type RKindReview } from "@/api"
-import { go, Page, BotAvatar, Group, ItemNo, KindTag, Row, SectionLabel, Segmented, Meta, Empty, openSheet, closeSheet, ThemeSwitch, useRoute } from "@/ui"
+import { go, Page, BotAvatar, Group, ItemNo, KindTag, Row, SectionLabel, Segmented, Meta, Empty, openSheet, closeSheet, ThemeSwitch, LanguageSwitch, useRoute } from "@/ui"
 import { PersonasSection } from "@/channels/persona"
 import { OwnerChip } from "@/people/owner-chip"
 import { Select, ChoiceCards, ItemRowExport as ItemRow } from "@/view-shared"
@@ -258,7 +259,7 @@ const CATS: [string, string, any, string][] = [
   ["items", "事项与验收", ListChecksIcon, "验收、前置、交接、归档"],
   ["tags", "标签", TagIcon, "事项标签：名称、分类、描述"],
   ["notify", "通知", BellIcon, "推送渠道、免打扰"],
-  ["look", "外观", SunMoonIcon, "主题、字号、动态效果"],
+  ["look", "外观", SunMoonIcon, "主题、语言、字号、动态效果"],
   MODELS_CAT,
   VAULT_CAT,
   STATS_CAT,
@@ -299,6 +300,10 @@ export function SettingsView() {
       </div>
     </Page>
   )
+}
+function LanguageRow() {
+  const t = useT()
+  return <Row title={t("common:settings.language")} sub={t("common:settings.languageSub")} data-language-row><LanguageSwitch /></Row>
 }
 function Pane({ id }: { id: string }) {
   const c = st.settings
@@ -341,6 +346,7 @@ function Pane({ id }: { id: string }) {
       <div className="px-1 type-footnote text-muted-foreground">所有 Bot 都用 Agent Robot Avatar。颜色、材质和头型在每个 Bot 的设置里改。</div></section>
     <section><SectionLabel>界面</SectionLabel><Group>
       <Row title="主题" sub="只影响这台设备"><ThemeSwitch labels /></Row>
+      <LanguageRow />
       <Row title="字号"><Segmented size="sm" value={c.fontSize} onChange={(v) => setSetting({ fontSize: v })} options={["标准", "大"]} /></Row>
       <Row title="减弱动态效果" sub="也会跟随系统设置"><Switch checked={c.reduceMotion === "开"} onCheckedChange={(v) => setSetting({ reduceMotion: v ? "开" : "关" })} /></Row>
     </Group></section></div>

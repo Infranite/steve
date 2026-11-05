@@ -2,6 +2,7 @@
 import type { ReactNode } from "react"
 import { cn } from "@/lib/utils"
 import { BellIcon, CalendarIcon, ClockIcon, GitPullRequestIcon, HandIcon, ListTodoIcon, MailIcon, MessageSquareIcon, RadioIcon, SirenIcon, type LucideIcon } from "lucide-react"
+import { msDur, nearTime } from "@/i18n/format"
 import { Select as UISelect, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Page, Empty } from "@/ui"
@@ -47,19 +48,9 @@ export const Failed = ({ title, back, msg, retry }: { title: string; back?: [str
 export const botOptions = () => Object.keys(st.bots).filter((k) => st.bots[k].on || st.bots[k].main).sort((a, b) => Number(!!st.bots[b].main) - Number(!!st.bots[a].main)).map((k) => ({ v: k, l: st.bots[k].main ? st.bots[k].n : st.bots[k].n + " Bot" }))
 export const mainBot = () => Object.keys(st.bots).find((k) => st.bots[k].main) ?? "steve"
 
-const pad = (n: number) => String(n).padStart(2, "0")
 /** a future time: “今天 08:30”“明天 08:30”“周五 09:00”“11-12 09:00” */
-export function when(ts: number | null | undefined) {
-  if (!ts) return ""
-  const d = new Date(ts), now = new Date(), day = (x: Date) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime()
-  const days = Math.round((day(d) - day(now)) / 86400_000), hm = `${pad(d.getHours())}:${pad(d.getMinutes())}`
-  if (days === 0) return "今天 " + hm
-  if (days === 1) return "明天 " + hm
-  if (days === -1) return "昨天 " + hm
-  if (days > 1 && days < 7) return "周" + "日一二三四五六"[d.getDay()] + " " + hm
-  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${hm}`
-}
-export const ms = (n: number) => (n < 1 ? "<1 ms" : n < 1000 ? `${Math.round(n)} ms` : `${(n / 1000).toFixed(1)} 秒`)
+export const when = (ts: number | null | undefined) => nearTime(ts)
+export const ms = (n: number) => msDur(n)
 export const dur = (a: number, b: number | null) => (b ? ms(b - a) : "")
 
 export function Json({ v, className }: { v: unknown; className?: string }) {

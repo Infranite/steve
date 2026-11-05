@@ -3,6 +3,8 @@
 import { Children, Fragment, memo, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react"
 import { Robot } from "@/robot"
 import { cue } from "@/bus"
+import { clockDur } from "@/i18n/format"
+import { LANGS, lang, setLang, useT, type Lang } from "@/i18n"
 import { cn } from "cn"
 import { BookOpenIcon, ChartNoAxesColumnIcon,
   ArrowUpIcon, BrainIcon, CheckIcon, ChevronLeftIcon, FileTextIcon, GitForkIcon, InboxIcon, ListTodoIcon,
@@ -69,6 +71,12 @@ export function ThemeSwitch({ className, labels = false }: { className?: string;
   const o = (v: ThemePref, I: any, l: string) => [v, <span key={v} className="inline-flex items-center gap-1.5"><I className="size-3.5" />{labels && l}</span>, l] as const
   return <Segmented className={className} value={themePref} onChange={(v) => setTheme(v as ThemePref)} iconOnly={!labels} size="sm"
     options={[o("light", SunIcon, "浅色"), o("dark", MoonIcon, "深色"), o("system", MonitorIcon, "跟随系统")]} />
+}
+/** the UI language, remembered on this device; each name is written in its own language */
+export function LanguageSwitch({ className }: { className?: string }) {
+  const t = useT()
+  return <Segmented className={className} label={t("common:settings.language")} value={lang()} onChange={(v: Lang) => { setLang(v); emit() }} size="sm"
+    options={LANGS.map((l) => [l, <span key={l} lang={l}>{t(`common:lang.${l}`)}</span>] as const)} />
 }
 
 /* ───────── atoms ───────── */
@@ -171,10 +179,10 @@ export function Row({ title, sub, children, onClick, icon, className, ...rest }:
   )
 }
 /** view switcher (shadcn Tabs) */
-export function Segmented<T extends string>({ value, onChange, options, className, iconOnly = false, size = "default" }: { value: T; onChange: (v: T) => void; options: readonly (T | readonly [T, ReactNode, string?])[]; className?: string; iconOnly?: boolean; size?: "default" | "sm" }) {
+export function Segmented<T extends string>({ value, onChange, options, className, iconOnly = false, size = "default", label }: { value: T; onChange: (v: T) => void; options: readonly (T | readonly [T, ReactNode, string?])[]; className?: string; iconOnly?: boolean; size?: "default" | "sm"; label?: string }) {
   return (
     <Tabs value={value} onValueChange={(v) => onChange(v as T)} className={className}>
-      <TabsList className={cn("bg-muted", size === "sm" && "h-7!")}>
+      <TabsList aria-label={label} className={cn("bg-muted", size === "sm" && "h-7!")}>
         {options.map((o) => {
           const [v, l, tip] = typeof o === "string" ? [o, o, undefined] : o
           return <TabsTrigger key={v} value={v} aria-label={tip} title={tip} data-seg={v} className={cn("px-3 text-[13px]", iconOnly && "px-2", size === "sm" && "px-2.5 text-[12px]")}>{l}</TabsTrigger>
@@ -523,7 +531,7 @@ function ComposerInput({ placeholder, onSend, model, left, autoFocus, className,
  * read like a coding agent's own app: each turn is the message, a work block (thinking, commands, reads, edits —
  * open while it runs, folded to one line once done), the answer, and the files the turn changed */
 const base = (p: string) => String(p || "").split("/").filter(Boolean).pop() ?? ""
-export const fmtDur = (ms: number) => { const s = Math.max(0, Math.round(ms / 1000)); return s < 60 ? `${s} 秒` : s < 3600 ? `${Math.floor(s / 60)} 分 ${s % 60} 秒` : `${Math.floor(s / 3600)} 小时 ${Math.floor((s % 3600) / 60)} 分` }
+export const fmtDur = (ms: number) => clockDur(ms)
 const clock = (ms: number) => { const s = Math.max(0, Math.floor(ms / 1000)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}` }
 /* one clock for every running timer on the page: two views of the same run tick together and never disagree */
 const ticking = new Set<(n: number) => void>()

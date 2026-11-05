@@ -1,0 +1,76 @@
+/* zh-CN strings for the "common" namespace: words every page shares, and the time phrases behind ../../format.ts.
+ * The source text, byte-identical to the UI. Conventions: web/src/i18n/index.ts */
+export default {
+  action: {
+    save: "保存",
+    cancel: "取消",
+    delete: "删除",
+    ok: "确定",
+    close: "关闭",
+    retry: "重试",
+    edit: "编辑",
+    copy: "复制",
+    copied: "已复制",
+    confirm: "确认",
+    back: "返回",
+    more: "更多",
+    open: "打开",
+    add: "添加",
+    remove: "移除",
+    search: "搜索",
+    refresh: "刷新",
+  },
+  state: {
+    loading: "加载中…",
+    error: "错误",
+    loadFailed: "加载失败",
+    saved: "已保存",
+    empty: "暂无",
+    none: "无",
+    on: "开",
+    off: "关",
+  },
+  settings: {
+    language: "语言",
+    languageSub: "只影响这台设备",
+  },
+  /* the name of each language, always in that language */
+  lang: {
+    "zh-CN": "简体中文",
+    en: "English",
+  },
+  time: {
+    justNow: "刚刚",
+    justStarted: "刚开始",
+    secondsAgo_other: "{{count}} 秒前",
+    minutesAgo_other: "{{count}} 分钟前",
+    hoursAgo_other: "{{count}} 小时前",
+    daysAgo_other: "{{count}} 天前",
+    today: "今天 {{time}}",
+    yesterday: "昨天 {{time}}",
+    tomorrow: "明天 {{time}}",
+    weekdayAt: "{{weekday}} {{time}}",
+    dateAt: "{{date}} {{time}}",
+    /* "11-05": the month and day of a date further away, zero-padded */
+    monthDayShort: "{{mm}}-{{dd}}",
+    range: "{{from}} – {{to}}",
+    lessThanMs: "<1 ms",
+    ms: "{{n}} ms",
+    /* a number already rounded for display, "1.5 秒" */
+    secondsN: "{{n}} 秒",
+  },
+  /* lengths of time: "3 分钟", "2 小时 5 分" */
+  dur: {
+    seconds_other: "{{count}} 秒",
+    minutes_other: "{{count}} 分钟",
+    hours_other: "{{count}} 小时",
+    days_other: "{{count}} 天",
+    minSec: "{{m}} 分 {{s}} 秒",
+    hourMin: "{{h}} 小时 {{m}} 分",
+    dayHour: "{{d}} 天 {{h}} 小时",
+    /* the short unit word on a chart axis */
+    unitDays: "天",
+    unitHours: "小时",
+    unitMinutes: "分钟",
+  },
+}
