@@ -5269,6 +5269,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
+ "base64 0.23.1",
  "hex",
  "libc",
  "rmcp",
@@ -5278,6 +5279,7 @@ dependencies = [
  "sha2 0.11.1",
  "steve-acp",
  "steve-node-api",
+ "steve-print",
  "tempfile",
  "tokio",
  "tracing",

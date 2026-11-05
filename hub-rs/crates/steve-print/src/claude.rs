@@ -3,8 +3,8 @@
 
 use crate::usage::{claude_usage, money};
 use crate::{
-    GATEWAY_SYSTEM, Image, OnText, PrintError, PrintRun, Ran, Reply, ToolMode, command, jstr,
-    truthy,
+    GATEWAY_SYSTEM, Hooks, Image, PrintError, PrintRun, Ran, Reply, ToolMode, command, jstr,
+    read_to_exit, truthy, untracked,
 };
 use serde_json::{Value, json};
 use std::process::Stdio;
@@ -127,6 +127,8 @@ fn of(d: &Value, model: &str) -> Ran {
 pub struct Streamed {
     pub text: String,
     pub result: Option<Value>,
+    /// How many messages have started (the current one's number).
+    pub message: u32,
 }
 
 impl Streamed {
@@ -146,6 +148,7 @@ impl Streamed {
                     /* a new message (after a tool call): its text replaces the last one's */
                     Some("message_start") => {
                         self.text.clear();
+                        self.message += 1;
                         false
                     }
                     Some("content_block_delta") if e["delta"]["type"] == "text_delta" => {
@@ -165,17 +168,17 @@ impl Streamed {
     }
 }
 
-pub(crate) async fn run(run: &PrintRun<'_>, on_text: Option<OnText<'_>>) -> Ran {
-    /* images go in on stdin, which only the stream-json layout takes */
-    match on_text {
-        Some(f) => streaming(run, f).await,
-        None if !run.images.is_empty() => streaming(run, &|_| {}).await,
-        None => once(run).await,
+pub(crate) async fn run(run: &PrintRun<'_>, hooks: Hooks<'_>) -> Ran {
+    /* images go in on stdin, which only the stream-json layout takes; a supervised run streams */
+    if hooks.text.is_some() || hooks.spawned.is_some() || !run.images.is_empty() {
+        streaming(run, hooks).await
+    } else {
+        once(run).await
     }
 }
 
 async fn once(run: &PrintRun<'_>) -> Ran {
-    let mut cmd = command(run.executable, run.cwd);
+    let mut cmd = command(run.executable, run.cwd, false);
     cmd.args(claude_args(run, false)).stdin(Stdio::null());
     let out = match tokio::time::timeout(run.timeout, cmd.output()).await {
         Err(_) => return Ran::failed(PrintError::Timeout(run.timeout)),
@@ -193,12 +196,12 @@ async fn once(run: &PrintRun<'_>) -> Ran {
     }
 }
 
-/// With `--output-format stream-json --include-partial-messages`: text deltas go to `on_text` as they
-/// arrive, the closing `result` line is the reply.
-async fn streaming(run: &PrintRun<'_>, on_text: OnText<'_>) -> Ran {
-    use tokio::io::{AsyncBufReadExt, AsyncReadExt};
+/// With `--output-format stream-json --include-partial-messages`: text deltas go to the text hook as
+/// they arrive, the closing `result` line is the reply.
+async fn streaming(run: &PrintRun<'_>, hooks: Hooks<'_>) -> Ran {
+    use tokio::io::AsyncReadExt;
     let images = !run.images.is_empty();
-    let mut cmd = command(run.executable, run.cwd);
+    let mut cmd = command(run.executable, run.cwd, hooks.spawned.is_some());
     cmd.args(claude_args(run, true))
         .stdin(if images {
             Stdio::piped()
@@ -211,6 +214,10 @@ async fn streaming(run: &PrintRun<'_>, on_text: OnText<'_>) -> Ran {
         Ok(c) => c,
         Err(e) => return Ran::failed(PrintError::Io(e)),
     };
+    if !hooks.spawned(&child) {
+        let _ = child.kill().await;
+        return Ran::failed(untracked());
+    }
     if images && let Some(mut w) = child.stdin.take() {
         let line = format!("{}\n", user_message(run.message, run.images));
         tokio::spawn(async move {
@@ -230,14 +237,15 @@ async fn streaming(run: &PrintRun<'_>, on_text: OnText<'_>) -> Ran {
         s
     });
     let read = async {
-        let mut lines = tokio::io::BufReader::new(stdout).lines();
         let mut s = Streamed::default();
-        while let Some(l) = lines.next_line().await? {
-            if s.line(&l) {
-                on_text(&s.text);
+        let status = read_to_exit(stdout, &mut child, hooks.spawned.is_some(), |l| {
+            if s.line(l)
+                && let Some(f) = hooks.text
+            {
+                f(s.message, &s.text);
             }
-        }
-        let status = child.wait().await?;
+        })
+        .await?;
         Ok::<_, std::io::Error>((s, status))
     };
     let (s, status) = match tokio::time::timeout(run.timeout, read).await {

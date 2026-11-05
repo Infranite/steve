@@ -149,13 +149,20 @@ fn node_runtime(
     vars: &Vars,
     jobs: &mut Vec<modules::Job>,
 ) -> Result<Option<NodeHost>, BackendError> {
+    let kinds = node_jobs(vars);
     if !local_node_mode(vars) {
+        if kinds != NodeJobs::default() {
+            tracing::warn!("STEVE_NODE_JOBS is ignored without STEVE_NODE_MODE=local");
+        }
         return Ok(None);
     }
     if cfg.no_resume {
         return Err(BackendError::msg(
             "STEVE_NODE_MODE=local is disabled on STEVE_NO_RESUME copies",
         ));
+    }
+    if kinds.research {
+        tracing::warn!("STEVE_NODE_JOBS=research: research does not run on the local Node yet");
     }
     let node_id = steve_node_api::NodeId::new("local").expect("constant node id");
     let home = cfg.data_dir.join("node");
@@ -170,11 +177,20 @@ fn node_runtime(
                 .map_err(|e| BackendError::msg(e.to_string()))?,
             capacity: steve_node_api::Capacity {
                 sessions: 64,
-                jobs: 0,
+                jobs: if kinds.think { JOB_CAPACITY } else { 0 },
                 execs: 0,
             },
             // a 256 MiB journal at most, 512 MiB left free on the disk, new work again below 80%
             storage: steve_node::Storage::default(),
+            // think jobs run the same CLIs the in-process gateway runs
+            jobs: if kinds.think {
+                steve_node::JobHarnesses {
+                    claude: Some(cfg.claude_executable.clone().into()),
+                    codex: Some(cfg.codex_executable.clone().into()),
+                }
+            } else {
+                steve_node::JobHarnesses::default()
+            },
         })
         .map_err(|e| BackendError::msg(e.to_string()))?,
     );
@@ -216,6 +232,34 @@ fn local_node_mode(vars: &Vars) -> bool {
         }
         None => false,
     }
+}
+
+/// Think jobs the local Node may run at once (the in-process gateway has no limit of its own).
+const JOB_CAPACITY: u32 = 16;
+
+/// Which of Steve's own model work may run as local Node jobs (`STEVE_NODE_JOBS=think,research`,
+/// on top of `STEVE_NODE_MODE=local`). Off unless named.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct NodeJobs {
+    think: bool,
+    research: bool,
+}
+
+fn node_jobs(vars: &Vars) -> NodeJobs {
+    let mut j = NodeJobs::default();
+    for k in vars("STEVE_NODE_JOBS")
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|k| !k.is_empty())
+    {
+        match k {
+            "think" => j.think = true,
+            "research" => j.research = true,
+            other => tracing::warn!("STEVE_NODE_JOBS: unknown job kind {other:?}"),
+        }
+    }
+    j
 }
 
 /// An attempt's deadline when set (`STEVE_NODE_TURN_LIMIT_MS`, for tests); default 6 h.
@@ -544,6 +588,29 @@ mod tests {
 
     fn vars(kv: &'static [(&'static str, &'static str)]) -> Vars {
         Arc::new(move |k| kv.iter().find(|(n, _)| *n == k).map(|(_, v)| v.to_string()))
+    }
+
+    #[test]
+    fn node_jobs_are_off_unless_named() {
+        assert_eq!(node_jobs(&vars(&[])), NodeJobs::default());
+        assert_eq!(
+            node_jobs(&vars(&[("STEVE_NODE_JOBS", "")])),
+            NodeJobs::default()
+        );
+        assert_eq!(
+            node_jobs(&vars(&[("STEVE_NODE_JOBS", "think")])),
+            NodeJobs {
+                think: true,
+                research: false
+            }
+        );
+        assert_eq!(
+            node_jobs(&vars(&[("STEVE_NODE_JOBS", " research , think,bogus")])),
+            NodeJobs {
+                think: true,
+                research: true
+            }
+        );
     }
 
     #[test]

@@ -168,6 +168,42 @@ fn started_in(table: &[(u32, u32, u32)], root: u32) -> Vec<u32> {
     v
 }
 
+/// Sends `signal` to the group while its recorded leader is provably the one started (see
+/// [`state`]); false when it was not sent.
+pub(crate) fn signal(pgid: i64, started: Option<u64>, signal: i32) -> bool {
+    state(pgid, started) == Stopped::Alive
+        && unsafe { libc::kill(-(pgid as libc::pid_t), signal) == 0 }
+}
+
+/// Stops what is left of a group whose leader this Node started and reaped itself, just now. The
+/// leader was a member until it was reaped, and while any member lives the group's id is not
+/// given to another group: whatever is in the group now is what the leader started. A member that
+/// died but is not reaped yet (re-parented, waiting for init) can make the group unsignalable for a
+/// moment (EPERM on macOS): that is waited out, never signalled.
+pub(crate) async fn stop_reaped(pgid: i64) -> Stopped {
+    let state = || match probe(pgid) {
+        Probe::Gone => Stopped::Gone,
+        Probe::Alive => Stopped::Alive,
+        Probe::Uncertain => Stopped::Uncertain,
+    };
+    for sig in [libc::SIGTERM, libc::SIGKILL] {
+        match state() {
+            Stopped::Gone => return Stopped::Gone,
+            Stopped::Alive => unsafe {
+                libc::kill(-(pgid as libc::pid_t), sig);
+            },
+            Stopped::Uncertain => {}
+        }
+        for _ in 0..30 {
+            if state().gone() {
+                return Stopped::Gone;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+    state()
+}
+
 /// Stops the group (TERM, then KILL) and says what became of it.
 pub(crate) async fn stop(pgid: i64, started: Option<u64>) -> Stopped {
     stop_checked(

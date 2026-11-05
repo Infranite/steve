@@ -17,11 +17,13 @@ serde_json = { version = "=1.0.154", features = ["preserve_order"] }
 sha2 = "=0.11.1"
 steve-acp = { path = "../steve-acp" }
 steve-node-api = { path = "../steve-node-api" }
+steve-print = { path = "../steve-print" }
 tokio = { version = "=1.54.1", features = ["rt", "sync", "time", "macros", "process", "fs", "net"] }
 tracing = "=0.1.44"
 
 [dev-dependencies]
 steve-node-api = { path = "../steve-node-api", features = ["testkit"] }
 async-trait = "=0.1.92"
+base64 = "=0.23.1"
 tempfile = "=3.27.0"
 tokio = { version = "=1.54.1", features = ["rt-multi-thread", "macros", "time", "sync"] }

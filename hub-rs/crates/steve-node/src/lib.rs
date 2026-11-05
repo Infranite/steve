@@ -12,6 +12,7 @@
 //! confirmed gone ([`procs`]).
 
 mod actor;
+mod job;
 mod journal;
 mod procs;
 mod tools;
@@ -31,6 +32,7 @@ use steve_node_api::*;
 use tokio::sync::mpsc;
 
 use actor::{Actor, Msg};
+pub use job::JobHarnesses;
 use journal::{Journal, Op, SessionRow, Tx, WorkspaceRow, internal};
 pub use workspace::Root;
 
@@ -44,6 +46,8 @@ pub struct NodeConfig {
     pub roots: Vec<Root>,
     pub capacity: Capacity,
     pub storage: Storage,
+    /// The CLIs think jobs run with (none: no harness runs jobs, whatever `capacity.jobs` says).
+    pub jobs: JobHarnesses,
 }
 
 /// How much disk the journal may take. The limit is the quota, or less when the filesystem of the
@@ -158,6 +162,8 @@ pub(crate) struct Inner {
     /// Workspace work on one repository goes one at a time.
     repos: Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>,
     snapshots: Mutex<HashMap<u64, Snapshot>>,
+    /// The running jobs' cancel signals, by operation.
+    job_stops: Mutex<HashMap<OperationId, Arc<tokio::sync::Notify>>>,
     cache_n: AtomicU64,
     tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
@@ -396,7 +402,11 @@ pub(crate) async fn prompt(
 
 /// An attachment's bytes, from the cache (checked) or the Hub (for this execution; size, progress
 /// and hash checked; written to a file of its own, then published whole).
-async fn fetch(inner: &Arc<Inner>, exec: &ExecutionRef, a: &ArtifactRef) -> ApiResult<PathBuf> {
+pub(crate) async fn fetch(
+    inner: &Arc<Inner>,
+    exec: &ExecutionRef,
+    a: &ArtifactRef,
+) -> ApiResult<PathBuf> {
     use sha2::Digest as _;
     let internal = |e: std::io::Error| ApiError::new(ErrorCode::Internal, e.to_string());
     let dir = inner.cfg.home.join("blobs");
@@ -981,6 +991,7 @@ impl LocalNode {
             tools_url: Mutex::new(None),
             repos: Mutex::new(HashMap::new()),
             snapshots: Mutex::new(HashMap::new()),
+            job_stops: Mutex::new(HashMap::new()),
             cache_n: AtomicU64::new(0),
             tasks: Mutex::new(Vec::new()),
         })))
@@ -1617,8 +1628,77 @@ impl SessionExecutor for LocalNode {
 
 #[async_trait]
 impl JobExecutor for LocalNode {
-    async fn start_job(&self, _c: Command<JobSpec>) -> ApiResult<Receipt> {
-        unsupported("jobs")
+    /// Accepted running; a think job runs its one model in a scratch directory of its own and
+    /// ends with its answer (research jobs are not on this Node yet).
+    async fn start_job(&self, c: Command<JobSpec>) -> ApiResult<Receipt> {
+        if self.0.cfg.capacity.jobs == 0 || self.0.cfg.jobs.names().is_empty() {
+            return Err(ApiError::new(
+                ErrorCode::Unsupported,
+                "this node runs no jobs",
+            ));
+        }
+        let exec = ExecutionRef::Job {
+            job: c.body.job.clone(),
+            attempt: c.body.run.attempt.clone(),
+        };
+        let (r, fresh) = self.accept("start_job", &c, |t| {
+            let j = &c.body;
+            j.check()?;
+            if !matches!(j.work, JobWork::Think(_)) {
+                return unsupported("research jobs");
+            }
+            if self.0.cfg.jobs.executable(&j.run.choice.harness).is_none() {
+                return Err(ApiError::new(
+                    ErrorCode::Unsupported,
+                    format!("no harness {} runs jobs on this node", j.run.choice.harness),
+                ));
+            }
+            Self::check_policy(&j.run.policy)?;
+            Self::check_limits(&j.run.limits)?;
+            if t.unacked_bytes()? > self.0.cfg.storage.quota {
+                return Err(ApiError::new(
+                    ErrorCode::Exhausted,
+                    "the hub has not taken this node's events: no new work until it does",
+                ));
+            }
+            let running = t
+                .ops()?
+                .into_iter()
+                .filter(|(_, o)| o.method == "start_job" && !o.receipt.state.is_finished())
+                .count() as u32;
+            if running >= self.0.cfg.capacity.jobs {
+                return Err(ApiError::new(ErrorCode::Exhausted, "no job capacity"));
+            }
+            if t.attempt(&j.run.attempt)?.is_some() {
+                return Err(ApiError::new(
+                    ErrorCode::Conflict,
+                    "this attempt already ran under another operation",
+                ));
+            }
+            t.take_attempt(&exec, &c.id)?;
+            Ok(Decided {
+                state: Observed::Running,
+                execution: Some(exec.clone()),
+                workspace: None,
+                session: None,
+                events: vec![(Subject::Execution(exec.clone()), EventBody::AttemptStarted)],
+            })
+        })?;
+        if fresh {
+            let stop = Arc::new(tokio::sync::Notify::new());
+            self.0
+                .job_stops
+                .lock()
+                .unwrap()
+                .insert(c.id.clone(), stop.clone());
+            let inner = self.0.clone();
+            let (op, spec) = (c.id.clone(), c.body.clone());
+            self.spawn_owned(async move {
+                job::run(inner.clone(), op.clone(), spec, stop).await;
+                inner.job_stops.lock().unwrap().remove(&op);
+            });
+        }
+        Ok(r)
     }
 }
 
@@ -1649,6 +1729,8 @@ impl ExecutionControl for LocalNode {
         })?;
         if fresh && let Some(s) = session {
             let _ = self.actor(&s).send(Msg::Cancel { target });
+        } else if fresh && let Some(stop) = self.0.job_stops.lock().unwrap().get(&target) {
+            stop.notify_one();
         }
         Ok(r)
     }
@@ -1659,6 +1741,7 @@ impl ExecutionControl for LocalNode {
     async fn abandon(&self, c: Command<Abandon>) -> ApiResult<Receipt> {
         let target = c.body.target.clone();
         let mut session = None;
+        let mut job = None;
         let (r, fresh) = self.accept("abandon", &c, |t| {
             let op = t
                 .op(&target)?
@@ -1669,12 +1752,17 @@ impl ExecutionControl for LocalNode {
                     "only an unknown execution is abandoned (cancel a live one)",
                 ));
             }
-            let Some(ExecutionRef::Turn { session: s, .. }) = &op.execution else {
-                return Err(ApiError::new(
-                    ErrorCode::Unsupported,
-                    "only an execution is abandoned",
-                ));
-            };
+            match &op.execution {
+                Some(ExecutionRef::Turn { session: s, .. }) => session = Some(s.clone()),
+                // a job's group is recorded under its attempt
+                Some(ExecutionRef::Job { attempt, .. }) => job = Some(job::group_key(attempt)),
+                None => {
+                    return Err(ApiError::new(
+                        ErrorCode::Unsupported,
+                        "only an execution is abandoned",
+                    ));
+                }
+            }
             if t.reservation(&format!("abandon:{target}"))?.is_some() {
                 return Err(ApiError::new(
                     ErrorCode::Conflict,
@@ -1682,20 +1770,25 @@ impl ExecutionControl for LocalNode {
                 ));
             }
             t.reserve(&format!("abandon:{target}"), &c.id)?;
-            session = Some(s.clone());
             Ok(Decided::accepted())
         })?;
-        if fresh && let Some(s) = session {
+        if fresh && (session.is_some() || job.is_some()) {
             let me = self.clone();
             let op = c.id.clone();
             self.spawn_owned(async move {
-                let (tx, rx) = tokio::sync::oneshot::channel();
-                let _ = me.actor(&s).send(Msg::Stop {
-                    op: None,
-                    abandon: true,
-                    done: Some(tx),
-                });
-                let stopped = rx.await.unwrap_or(procs::Stopped::Uncertain);
+                let stopped = match (&session, &job) {
+                    (Some(s), _) => {
+                        let (tx, rx) = tokio::sync::oneshot::channel();
+                        let _ = me.actor(s).send(Msg::Stop {
+                            op: None,
+                            abandon: true,
+                            done: Some(tx),
+                        });
+                        rx.await.unwrap_or(procs::Stopped::Uncertain)
+                    }
+                    (None, Some(key)) => job::stop_group(&me.0, key).await,
+                    (None, None) => procs::Stopped::Uncertain,
+                };
                 let key = format!("abandon:{target}");
                 if !stopped.gone() {
                     return me
@@ -1758,7 +1851,8 @@ impl ExecutionControl for LocalNode {
                             )],
                         )?;
                     }
-                    if let Some(mut row) = t.session(&s)?
+                    if let Some(s) = &session
+                        && let Some(mut row) = t.session(s)?
                         && row.view.active == o.execution
                     {
                         row.view.phase = SessionPhase::Released;
@@ -2407,6 +2501,26 @@ impl Discovery for LocalNode {
                 enforcement: vec![],
             })
             .collect();
+        // think jobs, for the harnesses with a print-mode CLI here
+        if self.0.cfg.capacity.jobs > 0 {
+            for name in self.0.cfg.jobs.names() {
+                match harnesses.iter_mut().find(|h| h.name == name) {
+                    Some(h) => h.jobs = true,
+                    None => harnesses.push(HarnessCapability {
+                        name: name.into(),
+                        version: String::new(),
+                        sessions: false,
+                        jobs: true,
+                        models: vec![],
+                        resume: false,
+                        cancel: true,
+                        permissions: false,
+                        images: true,
+                        enforcement: vec![],
+                    }),
+                }
+            }
+        }
         harnesses.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(Capabilities {
             node: self.0.cfg.node.clone(),

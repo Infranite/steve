@@ -1,5 +1,7 @@
 //! Hub-owned attachment storage. Execution scope is the frozen attempt prompt, not every file in
-//! the workspace. Operation access resolves a Hub-owned start_turn command to that same execution.
+//! the workspace. Operation access resolves a Hub-owned start_turn or start_job command to that
+//! same execution. A job attempt's frozen prompt is its `JobSpec` in `runtime_job_attempts`, and
+//! its files must be of its job's workspace.
 use super::node_tools::{authorize, internal};
 use async_trait::async_trait;
 use rusqlite::OptionalExtension;
@@ -27,8 +29,125 @@ impl NodeFiles {
                 let exec=self.store.reader(|c|Ok::<_,StoreError>(c.query_row(
                     "SELECT a.execution FROM node_commands c JOIN runtime_attempts a ON a.attempt_id=c.target_attempt AND a.operation_id=c.operation_id WHERE c.operation_id=?1 AND c.node_id=?2 AND a.node_id=?2 AND c.method='start_turn' AND c.state NOT IN ('finished','rejected','unknown')",
                     rusqlite::params![operation.as_str(),self.node.as_str()],|r|r.get::<_,String>(0)).optional()?)).map_err(internal)?;
+                let exec = match exec {
+                    Some(e) => Some(e),
+                    None => self.store.reader(|c|Ok::<_,StoreError>(c.query_row(
+                        "SELECT a.execution FROM node_commands c JOIN runtime_job_attempts a ON a.attempt_id=c.target_job_attempt AND a.operation_id=c.operation_id WHERE c.operation_id=?1 AND c.node_id=?2 AND a.node_id=?2 AND c.method='start_job' AND c.state NOT IN ('finished','rejected','unknown')",
+                        rusqlite::params![operation.as_str(),self.node.as_str()],|r|r.get::<_,String>(0)).optional()?)).map_err(internal)?,
+                };
                 serde_json::from_str(&exec.ok_or_else(denied)?).map_err(internal)
             }
+        }
+    }
+
+    /// The workspace and frozen prompt an execution may read from: a live turn attempt
+    /// ([`authorize`]) or a live job attempt of this Node (not finished, unknown or cancelled).
+    fn grant(&self, exec: &ExecutionRef) -> ApiResult<(String, Vec<Part>)> {
+        let (job, attempt) = match exec {
+            ExecutionRef::Turn { .. } => {
+                let (session, spec) = authorize(&self.store, &self.node, exec, true)?;
+                return Ok((session.workspace_id, spec.run.prompt));
+            }
+            ExecutionRef::Job { job, attempt } => (job, attempt),
+        };
+        let row = self.store.reader(|c| {
+            Ok::<_, StoreError>(c.query_row(
+                "SELECT a.execution,a.spec,a.state,a.cancel_requested,j.workspace_id FROM runtime_job_attempts a JOIN runtime_jobs j ON j.job_id=a.job_id WHERE a.attempt_id=?1 AND a.job_id=?2 AND a.node_id=?3 AND j.node_id=?3 AND j.state='open'",
+                rusqlite::params![attempt.as_str(), job.as_str(), self.node.as_str()],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, bool>(3)?, r.get::<_, String>(4)?)),
+            ).optional()?)
+        }).map_err(internal)?.ok_or_else(denied)?;
+        let (saved, spec, state, cancelled, workspace) = row;
+        let saved: ExecutionRef = serde_json::from_str(&saved).map_err(internal)?;
+        let spec: JobSpec = serde_json::from_str(&spec).map_err(internal)?;
+        if saved != *exec
+            || spec.job != *job
+            || spec.run.attempt != *attempt
+            || cancelled
+            || matches!(state.as_str(), "finished" | "unknown")
+        {
+            return Err(denied());
+        }
+        Ok((workspace, spec.run.prompt))
+    }
+}
+
+/// Keeps an image that has no file of its own (a module's or a channel's base64 block) as a
+/// job-input artifact of `workspace`, so a job's prompt can name it: content-addressed (the same
+/// bytes in the same workspace are one file) and stored like any attachment, under the same
+/// retention.
+pub fn job_input(
+    store: &Store,
+    data_dir: &std::path::Path,
+    workspace: &str,
+    mime: &str,
+    bytes: &[u8],
+) -> ApiResult<ArtifactRef> {
+    use sha2::Digest as _;
+    if !component(workspace) {
+        return Err(ApiError::new(ErrorCode::Invalid, "bad workspace id"));
+    }
+    let sha = hex::encode(sha2::Sha256::digest(bytes));
+    let id = format!(
+        "fil_{}",
+        &hex::encode(sha2::Sha256::digest(format!("{workspace}\0{sha}")))[..16]
+    );
+    let artifact = |mime: String| -> ApiResult<ArtifactRef> {
+        Ok(ArtifactRef {
+            id: ArtifactId::new(id.clone()).map_err(internal)?,
+            sha256: Digest::new(format!("sha256:{sha}")).map_err(internal)?,
+            size: bytes.len() as u64,
+            mime,
+        })
+    };
+    let path = data_dir
+        .join("files")
+        .join(workspace)
+        .join(&sha[..2])
+        .join(&id);
+    let row = store.files().get(&id).map_err(internal)?;
+    if let Some(row) = &row
+        && (row.workspace_id != workspace || row.sha256 != sha)
+    {
+        return Err(internal("job input id taken by another file"));
+    }
+    if std::fs::metadata(&path).map(|m| m.len()).ok() != Some(bytes.len() as u64) {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let dir = path.parent().expect("a file under data/files");
+        std::fs::create_dir_all(dir).map_err(internal)?;
+        let tmp = dir.join(format!(".{id}.{}.tmp", uuid::Uuid::new_v4().simple()));
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&tmp)
+            .map_err(internal)?;
+        f.write_all(bytes).map_err(internal)?;
+        f.sync_all().map_err(internal)?;
+        std::fs::rename(&tmp, &path).map_err(internal)?;
+    }
+    match row {
+        Some(row) => artifact(row.mime),
+        None => {
+            let ext = mime.strip_prefix("image/").unwrap_or("bin");
+            let row = store
+                .files()
+                .create(&steve_store::NewFile {
+                    id: id.clone(),
+                    workspace_id: workspace.into(),
+                    sha256: sha.clone(),
+                    name: format!("job-input-{}.{ext}", &sha[..12]),
+                    mime: mime.into(),
+                    size: bytes.len() as i64,
+                    created_by: "job".into(),
+                })
+                .or_else(|e| match store.files().get(&id) {
+                    // the same input, kept by a concurrent call
+                    Ok(Some(row)) if row.workspace_id == workspace && row.sha256 == sha => Ok(row),
+                    _ => Err(internal(e)),
+                })?;
+            artifact(row.mime)
         }
     }
 }
@@ -60,10 +179,8 @@ impl HubFiles for NodeFiles {
             ));
         }
         let exec = self.execution(access)?;
-        let (session, spec) = authorize(&self.store, &self.node, &exec, true)?;
-        let artifact = spec
-            .run
-            .prompt
+        let (workspace, prompt) = self.grant(&exec)?;
+        let artifact = prompt
             .iter()
             .find_map(|part| match part {
                 Part::Image { artifact } | Part::File { artifact, .. } if artifact.id == id => {
@@ -78,7 +195,7 @@ impl HubFiles for NodeFiles {
             .get(id.as_str())
             .map_err(internal)?
             .ok_or_else(denied)?;
-        if row.workspace_id != session.workspace_id
+        if row.workspace_id != workspace
             || row.size < 0
             || row.size as u64 != artifact.size
             || format!("sha256:{}", row.sha256) != artifact.sha256.as_str()
@@ -295,5 +412,111 @@ mod tests {
         std::fs::remove_file(path.join(&f.id)).unwrap();
         std::os::unix::fs::symlink("/etc/hosts", path.join(&f.id)).unwrap();
         assert!(files.fetch(access, id, 0, 1).await.is_err());
+    }
+
+    /// A job attempt reads the inputs its frozen prompt names, while it is live, and nothing else.
+    #[tokio::test]
+    async fn a_job_attempt_reads_its_own_inputs_only() {
+        use steve_store::jobs::*;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(
+            dir.path().join("hub.sqlite3"),
+            steve_store::FnPublisher(|_| {}),
+        )
+        .unwrap();
+        store.ensure_workspace().unwrap();
+        let data = dir.path();
+        let png = job_input(&store, data, "default", "image/png", b"png-bytes").unwrap();
+        assert_eq!(
+            job_input(&store, data, "default", "image/png", b"png-bytes").unwrap(),
+            png,
+            "the same bytes are one input"
+        );
+        assert_eq!(png.sha256, Digest::sha256(b"png-bytes"));
+        let other = job_input(&store, data, "default", "image/png", b"other").unwrap();
+        assert_ne!(other.id, png.id);
+        let start = |job: &str, attempt: &str, op: &str, prompt: Vec<Part>| {
+            let exec = ExecutionRef::Job {
+                job: JobId::new(job).unwrap(),
+                attempt: AttemptId::new(attempt).unwrap(),
+            };
+            let mut spec = steve_node_api::testkit::build::job(job, attempt, "看图");
+            spec.run.prompt.extend(prompt);
+            let (e, s) = (
+                serde_json::to_value(&exec).unwrap(),
+                serde_json::to_value(&spec).unwrap(),
+            );
+            store
+                .transaction::<_, StoreError>(|tx| {
+                    create_job_in(
+                        tx,
+                        &NewJob {
+                            id: job,
+                            kind: JobKind::Think,
+                            purpose: "answer",
+                            workspace: "default",
+                            node: "local",
+                            thread_run: None,
+                        },
+                        &NewJobAttempt {
+                            id: attempt,
+                            ordinal: 0,
+                            model: "m",
+                            operation: op,
+                            execution: &e,
+                            spec: &s,
+                            digest: "d",
+                        },
+                        &StartJob {
+                            request: &serde_json::json!({}),
+                            digest: "d",
+                        },
+                        1,
+                    )
+                })
+                .unwrap();
+            exec
+        };
+        let mine = start(
+            "j_1",
+            "a_1",
+            "op_1",
+            vec![Part::Image {
+                artifact: png.clone(),
+            }],
+        );
+        let theirs = start("j_2", "a_2", "op_2", vec![]);
+        let files = NodeFiles::new(store.clone(), NodeId::new("local").unwrap(), data.into());
+        let read = |access: FileAccess, id: &ArtifactId| {
+            let (files, id) = (&files, id.clone());
+            async move { files.fetch(access, id, 0, 1 << 20).await }
+        };
+        let c = read(FileAccess::Execution(mine.clone()), &png.id)
+            .await
+            .unwrap();
+        assert_eq!((c.bytes.as_slice(), c.eof), (&b"png-bytes"[..], true));
+        let op = FileAccess::Operation {
+            operation: OperationId::new("op_1").unwrap(),
+        };
+        assert!(read(op.clone(), &png.id).await.is_ok());
+        for (access, id) in [
+            (FileAccess::Execution(mine.clone()), &other.id),
+            (FileAccess::Execution(theirs), &png.id),
+        ] {
+            assert_eq!(read(access, id).await.unwrap_err().code, ErrorCode::Denied);
+        }
+        // a finished attempt reads nothing anymore
+        store
+            .transaction::<_, StoreError>(|tx| {
+                apply_attempt_in(tx, "a_1", AttemptState::Finished, None, None, 2)
+            })
+            .unwrap();
+        assert_eq!(
+            read(FileAccess::Execution(mine), &png.id)
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Denied
+        );
     }
 }
