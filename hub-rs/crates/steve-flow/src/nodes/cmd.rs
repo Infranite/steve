@@ -11,7 +11,9 @@
 //! With a [`CmdNode`] (the Hub's local Node is on, `STEVE_NODE_MODE=local`), the command runs on
 //! the Node that holds the project's files instead, recorded once in the Hub's ledger for the run:
 //! same rules, same step results. A Node that is not there fails the step (`设备离线`), and one
-//! whose answer is lost (it restarted while the command ran) fails it as unknown: never run again.
+//! whose answer is lost (it restarted while the command ran) fails it as unknown: never run again
+//! on its own. A retry you choose after a Hub restart cut the step short is a new operation
+//! ([`CmdRequest::rerun`]).
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -47,6 +49,9 @@ pub struct CmdRequest {
     /// The run and the step: together they name the one operation (asked again, never run again).
     pub run_id: String,
     pub step: String,
+    /// How many times you asked for the step to run again after a restart cut it short (0 the
+    /// first time): each one is a new operation, never the interrupted one's answer.
+    pub rerun: u32,
     pub command: String,
     pub timeout: Duration,
 }
@@ -200,6 +205,7 @@ impl NodeKind for Cmd {
                 project_id: project.clone(),
                 run_id: cx.run.id.clone(),
                 step: cx.node.id.clone(),
+                rerun: cx.run.context["reruns"][&cx.node.id].as_u64().unwrap_or(0) as u32,
                 command: render_command(cx, cfg["command"].as_str().unwrap_or(""), input),
                 timeout: Duration::from_secs(timeout),
             };

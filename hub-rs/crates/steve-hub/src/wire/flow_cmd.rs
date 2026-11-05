@@ -1,8 +1,11 @@
 //! `cmd` flow steps on the Node that holds the project (N0e-E6), for a Hub whose local Node is on
 //! (`STEVE_NODE_MODE=local`): the project is found through [`Workspaces`], its directory prepared
-//! as the workspace `project:<id>`, and the command written to the Node's ledger for the run
-//! (`flow_run:<run>`) before it is sent, so it runs at most once. A Hub with its local Node off has
-//! none of this: [`CmdRan::Legacy`], and the step runs on the Hub as before.
+//! as a workspace of the project and that directory (`project:<id>:<dir>`, so a project moved to
+//! another path is a new one), and the command written to the Node's ledger for the run
+//! (`flow_run:<run>`) before it is sent, so it runs at most once. A retry you ask for after a
+//! restart cut the step short ([`CmdRequest::rerun`]) is a new command, sent once the lost one is
+//! stopped. A Hub with its local Node off has none of this: [`CmdRan::Legacy`], and the step runs
+//! on the Hub as before.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -21,6 +24,10 @@ const OUTPUT_CAP: u64 = 64 * 1024;
 const PREPARE_WAIT: Duration = Duration::from_secs(60);
 /// Past the command's own deadline, how long its answer may take to come back.
 const ANSWER_GRACE: Duration = Duration::from_secs(60);
+/// How long a step run again waits for the lost command before it to be stopped.
+const LOST_WAIT: Duration = Duration::from_secs(60);
+/// The step's command before it was lost and could not be stopped: the new one does not run.
+const LOST_RUNS: &str = "上一次的命令结果未知，且没能确认它已停止，这次没有运行";
 
 pub struct FlowCmd {
     store: Store,
@@ -37,9 +44,22 @@ fn wall() -> i64 {
     steve_store::now()
 }
 
-/// The ids of one step's operations: a run and a step are one command, asked again never re-run.
-fn op_of(prefix: &str, req: &CmdRequest) -> String {
-    derived_id(prefix, &format!("{}/{}", req.run_id, req.step))
+/// The id of one step's command: a run and a step (and each rerun you asked for) are one command,
+/// asked again never run again.
+fn op_of(prefix: &str, req: &CmdRequest, rerun: u32) -> String {
+    let key = match rerun {
+        0 => format!("{}/{}", req.run_id, req.step),
+        n => format!("{}/{}/{n}", req.run_id, req.step),
+    };
+    derived_id(prefix, &key)
+}
+
+/// The workspace resource of `project` at `dir`: the directory is part of it, so a project whose
+/// path changed gets a workspace of its new directory, never a conflict with the old one.
+fn resource_of(project: &str, dir: &RootPath) -> String {
+    use sha2::Digest as _;
+    let h = sha2::Sha256::digest(format!("{}\0{}", dir.root.as_str(), dir.rel.as_str()));
+    format!("project:{project}:{}", &hex::encode(h)[..16])
 }
 
 fn command<B>(op: &str, body: B, within: Duration) -> Result<Command<B>, String> {
@@ -66,6 +86,36 @@ fn project_in(store: &Store, ws: &str, id: &str) -> Result<bool, StoreError> {
 }
 
 impl FlowCmd {
+    /// `op`, an earlier command of the step, is not running: never sent, ended, or (lost) stopped
+    /// by a recover now.
+    async fn stopped(
+        &self,
+        runtime: &super::node_runtime::NodeRuntime,
+        op: &str,
+    ) -> Result<(), String> {
+        let until = Instant::now() + LOST_WAIT;
+        let mut asked = false;
+        loop {
+            match runtime.ledger(op) {
+                Ok(Some(l)) if l.state == "unknown" => {
+                    // asked once: a recover the Node could not finish leaves it as it is
+                    if !asked {
+                        asked = true;
+                        if !runtime.stop_lost(op).map_err(|e| e.to_string())? {
+                            return Err(LOST_RUNS.into());
+                        }
+                    }
+                }
+                Ok(_) => return Ok(()),
+                Err(e) => tracing::warn!("flow cmd {op}: {e}"),
+            }
+            if Instant::now() >= until {
+                return Err(LOST_RUNS.into());
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
     /// The project directory as a workspace on `node`.
     async fn prepare(
         &self,
@@ -78,7 +128,7 @@ impl FlowCmd {
         let c = command(
             &steve_store::uid("op_fprep"),
             Prepare {
-                resource: format!("project:{}", req.project_id),
+                resource: resource_of(&req.project_id, &dir),
                 kind: PrepareKind::Existing { dir },
             },
             PREPARE_WAIT,
@@ -168,9 +218,15 @@ impl CmdNode for FlowCmd {
             env: vec![],
             secrets: vec![],
         };
-        let op = op_of("op_fcmd", &req);
+        let op = op_of("op_fcmd", &req, req.rerun);
         let subject = format!("flow_run:{}", req.run_id);
         let runtime = &placed.runtime;
+        // run again after a restart: what is left of the lost command is stopped first
+        for before in 0..req.rerun {
+            if let Err(e) = self.stopped(runtime, &op_of("op_fcmd", &req, before)).await {
+                return CmdRan::NotRun(e);
+            }
+        }
         if let Err(e) = runtime.submit(&op, &subject, "exec", spec) {
             // the same step asked again: wait for the one there is, never a second one
             match runtime.ledger(&op) {
@@ -237,7 +293,9 @@ mod tests {
     use super::*;
 
     struct T {
-        dir: tempfile::TempDir,
+        root: std::path::PathBuf,
+        _tmp: Option<tempfile::TempDir>,
+        node: Arc<steve_node::LocalNode>,
         store: Store,
         runtime: Arc<NodeRuntime>,
         cmd: Arc<FlowCmd>,
@@ -254,20 +312,28 @@ mod tests {
 
     /// A Hub with its local Node on (commands allowed) and its coordinator running.
     fn hub() -> T {
-        let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(dir.path().join("hub.sqlite3"), steve_store::NoPublisher).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let mut t = hub_at(tmp.path());
+        t._tmp = Some(tmp);
+        t
+    }
+
+    /// [`hub`] in `root`, as it is there (a Hub started again after a crash).
+    fn hub_at(root: &std::path::Path) -> T {
+        let dir = root;
+        let store = Store::open(dir.join("hub.sqlite3"), steve_store::NoPublisher).unwrap();
         store.ensure_workspace().unwrap();
         let node = Arc::new(
             steve_node::LocalNode::open(steve_node::NodeConfig {
                 node: NodeId::new("local").unwrap(),
-                home: dir.path().join("node"),
+                home: dir.join("node"),
                 acp: steve_acp::AcpConfig {
                     adapters: Default::default(),
                     node: "node".into(),
                     claude_executable: "/usr/bin/false".into(),
-                    steve_home: dir.path().join("steve"),
-                    codex_home: dir.path().join("codex"),
-                    user_home: dir.path().to_path_buf(),
+                    steve_home: dir.join("steve"),
+                    codex_home: dir.join("codex"),
+                    user_home: dir.to_path_buf(),
                     version: "test".into(),
                     idle_release: Duration::from_secs(600),
                     retry_delays: vec![],
@@ -288,7 +354,7 @@ mod tests {
         let ws = Workspaces::new(
             store.clone(),
             Some(LocalFace {
-                node,
+                node: node.clone(),
                 runtime: runtime.clone(),
             }),
             None,
@@ -296,7 +362,9 @@ mod tests {
         );
         T {
             cmd: FlowCmd::new(store.clone(), ws),
-            dir,
+            root: root.to_path_buf(),
+            _tmp: None,
+            node,
             store,
             runtime,
         }
@@ -317,6 +385,7 @@ mod tests {
             project_id: project.into(),
             run_id: run.into(),
             step: "n".into(),
+            rerun: 0,
             command: command.into(),
             timeout: Duration::from_secs(10),
         }
@@ -325,11 +394,11 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_step_runs_once_on_the_projects_node_through_the_ledger() {
         let t = hub();
-        let p = t.dir.path().join("proj");
+        let p = t.root.as_path().join("proj");
         std::fs::create_dir_all(&p).unwrap();
         // made after boot: no restart needed for its root
         project(&t, "p1", "hub", p.to_str().unwrap());
-        let count = t.dir.path().join("count");
+        let count = t.root.as_path().join("count");
         let c = format!(
             "echo ran >> '{}'; pwd; echo bad >&2; exit 2",
             count.display()
@@ -363,7 +432,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn elsewhere_nowhere_or_with_the_local_node_off() {
         let t = hub();
-        let p = t.dir.path().join("proj");
+        let p = t.root.as_path().join("proj");
         std::fs::create_dir_all(&p).unwrap();
         project(&t, "p1", "hub", p.to_str().unwrap());
         project(&t, "p2", "n_far", "work/repo");
@@ -390,5 +459,218 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    /// A project whose path changed (catalog `patch`): its steps run in the new directory, never
+    /// "prepared otherwise" against the old one's workspace.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_project_moved_to_another_path_runs_there() {
+        let t = hub();
+        let (a, b) = (t.root.join("a"), t.root.join("b"));
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        project(&t, "p1", "hub", a.to_str().unwrap());
+        let pwd = |p: &std::path::Path| CmdRan::Ended {
+            exit_code: Some(0),
+            stdout: format!("{}\n", p.canonicalize().unwrap().display()),
+            stderr: String::new(),
+        };
+        assert_eq!(t.cmd.run(req("p1", "r1", "pwd")).await, pwd(&a));
+        exec(
+            &t.store,
+            &format!("UPDATE projects SET path='{}' WHERE id='p1'", b.display()),
+        );
+        assert_eq!(t.cmd.run(req("p1", "r2", "pwd")).await, pwd(&b));
+        // and back again: the first directory's workspace is the one there is
+        exec(
+            &t.store,
+            &format!("UPDATE projects SET path='{}' WHERE id='p1'", a.display()),
+        );
+        assert_eq!(t.cmd.run(req("p1", "r3", "pwd")).await, pwd(&a));
+    }
+
+    fn alive(pid_file: &std::path::Path) -> bool {
+        let pid: i32 = std::fs::read_to_string(pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        unsafe { libc::kill(-pid, 0) == 0 }
+    }
+
+    async fn eventually(what: &str, within: Duration, mut f: impl FnMut() -> bool) {
+        let t0 = Instant::now();
+        while !f() {
+            assert!(t0.elapsed() < within, "{what}");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    /// The command of step `step` of run `r1`: its pid in `<step>.pid`, then a long sleep, within
+    /// `timeout`.
+    fn sleeper(t: &T, step: &str, timeout: Duration) -> CmdRequest {
+        let mut r = req(
+            "p1",
+            "r1",
+            &format!(
+                "echo ran >> '{root}/{step}.runs'; echo $$ > '{root}/{step}.pid'; exec sleep 120",
+                root = t.root.display()
+            ),
+        );
+        r.step = step.into();
+        r.timeout = timeout;
+        r
+    }
+
+    /// Runs in a child process (see `a_command_lost_in_a_crash_is_stopped_and_never_run_again`):
+    /// a Hub with two steps' commands running when it is killed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn child_flow_cmd_crash() {
+        let Ok(root) = std::env::var("STEVE_FLOW_CMD_CHILD_ROOT") else {
+            return;
+        };
+        let t = hub_at(std::path::Path::new(&root));
+        let p = t.root.join("proj");
+        std::fs::create_dir_all(&p).unwrap();
+        project(&t, "p1", "hub", p.to_str().unwrap());
+        for (step, timeout) in [("a", 3), ("b", 300)] {
+            let (cmd, r) = (
+                t.cmd.clone(),
+                sleeper(&t, step, Duration::from_secs(timeout)),
+            );
+            tokio::spawn(async move { cmd.run(r).await });
+        }
+        for step in ["a", "b"] {
+            let op = derived_id("op_fcmd", &format!("r1/{step}"));
+            eventually("the command started", Duration::from_secs(20), || {
+                t.root.join(format!("{step}.pid")).exists()
+                    && t.runtime
+                        .ledger(&op)
+                        .unwrap()
+                        .is_some_and(|l| l.state != "pending")
+            })
+            .await;
+        }
+        std::fs::write(t.root.join("ready"), "").unwrap();
+        tokio::time::sleep(Duration::from_secs(300)).await;
+    }
+
+    /// The Hub (and its local Node with it) is killed while two steps' commands run. After the
+    /// restart both are unknown and never sent again; the one whose deadline passed is stopped by a
+    /// recover on its own, the other when you ask for its step to run again (a new command then);
+    /// with no command left open, the workspace can be tidied.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_command_lost_in_a_crash_is_stopped_and_never_run_again() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "wire::flow_cmd::tests::child_flow_cmd_crash",
+                "--nocapture",
+            ])
+            .env("STEVE_FLOW_CMD_CHILD_ROOT", tmp.path())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let ready = tmp.path().join("ready");
+        eventually("the child never got ready", Duration::from_secs(60), || {
+            ready.exists()
+        })
+        .await;
+        child.kill().unwrap();
+        child.wait().unwrap();
+        let (a_pid, b_pid) = (tmp.path().join("a.pid"), tmp.path().join("b.pid"));
+        assert!(
+            alive(&a_pid) && alive(&b_pid),
+            "the groups outlived the Hub"
+        );
+
+        let t = hub_at(tmp.path());
+        let (a, b) = (derived_id("op_fcmd", "r1/a"), derived_id("op_fcmd", "r1/b"));
+        // `a`: past its deadline (3 s) its group is stopped, and it ends interrupted (unknown to
+        // the step), not run again
+        eventually(
+            "a is stopped at its deadline",
+            Duration::from_secs(30),
+            || !alive(&a_pid),
+        )
+        .await;
+        eventually("a ends interrupted", Duration::from_secs(10), || {
+            t.runtime
+                .ledger(&a)
+                .unwrap()
+                .is_some_and(|l| l.state == "finished" && super::ran(&l) == CmdRan::Unknown)
+        })
+        .await;
+        // `b`: its deadline is far off; the lost command keeps running and stays unknown
+        let l = t.runtime.ledger(&b).unwrap().unwrap();
+        assert_eq!(l.state, "unknown");
+        assert!(alive(&b_pid));
+        assert_eq!(
+            t.cmd.run(sleeper(&t, "b", Duration::from_secs(300))).await,
+            CmdRan::Unknown,
+            "asked again, the lost one's answer"
+        );
+        // the workspace is refused while `b` is open
+        let At::Root(dir) = t
+            .cmd
+            .workspaces
+            .placement_of(Subject::Project("p1"))
+            .unwrap()
+            .at
+        else {
+            panic!("the project has a root");
+        };
+        let w = WorkspaceRef {
+            node: NodeId::new("local").unwrap(),
+            id: WorkspaceId::new(derived_id("w", &resource_of("p1", &dir))).unwrap(),
+        };
+        let tidy = |rev: Revision| {
+            command(
+                &steve_store::uid("op_tidy"),
+                Tidy {
+                    workspace: w.clone(),
+                    expected: rev,
+                    keep_branch: true,
+                },
+                Duration::from_secs(60),
+            )
+            .unwrap()
+        };
+        let view = t.node.workspace(w.clone()).await.unwrap();
+        let e = t
+            .node
+            .tidy_workspace(tidy(view.revision.clone()))
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, ErrorCode::Busy, "{e}");
+        // you ask for `b` to run again: the lost one is stopped first, then it runs anew, once
+        let mut again = sleeper(&t, "b", Duration::from_secs(10));
+        again.rerun = 1;
+        again.command = format!("echo again >> '{}/b.runs'; echo done", tmp.path().display());
+        assert_eq!(
+            t.cmd.run(again.clone()).await,
+            CmdRan::Ended {
+                exit_code: Some(0),
+                stdout: "done\n".into(),
+                stderr: String::new(),
+            }
+        );
+        assert!(!alive(&b_pid));
+        assert_eq!(t.runtime.ledger(&b).unwrap().unwrap().state, "finished");
+        // asked again: the answer it had
+        assert!(matches!(t.cmd.run(again).await, CmdRan::Ended { .. }));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        for (step, runs) in [("a", "ran\n"), ("b", "ran\nagain\n")] {
+            assert_eq!(
+                std::fs::read_to_string(tmp.path().join(format!("{step}.runs"))).unwrap(),
+                runs,
+                "{step}: never run a second time"
+            );
+        }
+        // nothing open in the workspace any more: tidy is allowed
+        let view = t.node.workspace(w.clone()).await.unwrap();
+        t.node.tidy_workspace(tidy(view.revision)).await.unwrap();
     }
 }

@@ -1003,6 +1003,71 @@ mod on_node {
         }
     }
 
+    /// Hangs on the first ask (the Hub "restarts" while it runs), then answers; keeps every ask.
+    struct Hangs(Mutex<Vec<CmdRequest>>);
+
+    #[async_trait]
+    impl CmdNode for Hangs {
+        async fn run(&self, req: CmdRequest) -> CmdRan {
+            let first = {
+                let mut got = self.0.lock().unwrap();
+                got.push(req);
+                got.len() == 1
+            };
+            if first {
+                std::future::pending::<()>().await;
+            }
+            CmdRan::Ended {
+                exit_code: Some(0),
+                stdout: "again\n".into(),
+                stderr: String::new(),
+            }
+        }
+    }
+
+    /// A restart cut a step on a Node short, and you asked for it to run again: it is asked anew
+    /// (a new rerun, so a new operation), never answered with the interrupted one's outcome.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_retry_after_a_restart_runs_the_step_anew() {
+        let hangs = Arc::new(Hangs(Mutex::new(vec![])));
+        let h2 = hangs.clone();
+        let Env { e, .. } = env_with(move |_| Some(h2 as Arc<dyn CmdNode>));
+        let f = create_flow(
+            &e,
+            "跑",
+            one_node(
+                "cmd",
+                "写",
+                json!({"command": "true", "project_id": "prj_t"}),
+            ),
+        )
+        .await;
+        grant(&e, &f, "cmd.run", "project", "prj_t");
+        let run = start(&e, &f, json!({})).await;
+        for _ in 0..200 {
+            if !hangs.0.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(hangs.0.lock().unwrap().len(), 1);
+        // the Hub restarts: the run stopped inside its cmd step, and you are asked
+        assert!(steve_flow::engine::recover(&e.flow).unwrap().is_empty());
+        assert_eq!(status(&e, &run), "failed");
+        let dec: String = q(
+            &e,
+            "SELECT id FROM decisions WHERE subject_type = 'flow_run' AND subject_id = ? AND status = 'open'",
+            [&run],
+        );
+        answer(&e, &dec, steve_flow::engine::RETRY).await;
+        assert_eq!(settled(&e, &run).await, "done");
+        let got = hangs.0.lock().unwrap().clone();
+        assert_eq!(got.len(), 2);
+        assert_eq!((got[0].rerun, got[1].rerun), (0, 1));
+        assert_eq!((&got[1].run_id, &got[1].step), (&run, &"n".to_string()));
+        assert_eq!(step(&e, &run).1["stdout"], "again\n");
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn an_offline_or_lost_node_fails_the_step_once() {
         for (said, error) in [(CmdRan::Offline, OFFLINE), (CmdRan::Unknown, UNKNOWN)] {

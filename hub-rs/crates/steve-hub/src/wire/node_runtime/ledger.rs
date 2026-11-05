@@ -144,6 +144,65 @@ impl NodeRuntime {
         })
     }
 
+    /// `op`, a ledger `exec` the Node can no longer tell the end of, stopped now rather than at
+    /// its deadline (you asked for what it was for to run again): a recover stops what is left of
+    /// it and it ends interrupted. True: it is not unknown any more, or a recover of it is on its
+    /// way or was planned now.
+    pub fn stop_lost(&self, op: &str) -> Result<bool, StoreError> {
+        self.running()?;
+        let planned = self.tx(|tx| {
+            if self.recover_exec_in(tx, op, "a step whose command was lost is run again")? {
+                return Ok(true);
+            }
+            let state: Option<String> = tx
+                .query_row(
+                    "SELECT state FROM node_commands WHERE operation_id=? AND node_id=?",
+                    [op, self.node_id.as_str()],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if state.as_deref() != Some("unknown") {
+                return Ok(true);
+            }
+            self.retiring_in(tx, op, true)
+        })?;
+        self.wake_send.notify_one();
+        Ok(planned)
+    }
+
+    /// Ledger `exec`s the Node can no longer tell the end of (a restart cut them off) whose
+    /// deadline has passed: each gets a recover, so its process group does not outlive the
+    /// deadline the command was given and its workspace can be tidied. How many were planned.
+    pub(super) fn recover_lost_execs(&self, now: i64) -> Result<usize, StoreError> {
+        let due: Vec<String> = self.store.reader(|c| {
+            let mut st = c.prepare(
+                "SELECT operation_id FROM node_commands WHERE node_id=? AND method='exec' AND state='unknown'
+                   AND COALESCE(json_extract(request,'$.body.limits.deadline'), 0) <= ?",
+            )?;
+            st.query_map(rusqlite::params![self.node_id.as_str(), now], |r| {
+                r.get::<_, String>(0)
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+        })?;
+        let mut n = 0;
+        for op in due {
+            if self.tx(|tx| {
+                self.recover_exec_in(
+                    tx,
+                    &op,
+                    "a command whose outcome is unknown, past its deadline",
+                )
+            })? {
+                n += 1;
+            }
+        }
+        if n > 0 {
+            self.wake_send.notify_one();
+        }
+        Ok(n)
+    }
+
     /// Sends a ledger operation. One that may have been sent before is asked about instead: the
     /// Node's receipt if it has one, `unknown` if it has none (it is never run a second time).
     pub(super) async fn send_ledger(&self, l: &rt::CommandLease) -> ApiResult<Receipt> {

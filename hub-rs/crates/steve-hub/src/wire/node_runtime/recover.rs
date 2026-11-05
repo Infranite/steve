@@ -13,6 +13,10 @@
 //!
 //! A recover that fails (unsupported, or the Node could not prove the target stopped) leaves the
 //! session held; the next Stop asks again under a new id.
+//!
+//! A ledger `exec` left unknown (a restart cut it off) is the one target retired without a Stop:
+//! once its deadline passed, or when you ask for its flow step to run again, a recover stops its
+//! process group and it ends interrupted ([`NodeRuntime::recover_exec_in`]). It is never run again.
 
 use super::*;
 
@@ -25,6 +29,9 @@ const RECOVERABLE: [&str; 6] = [
     "abandon",
     "resolve_permission",
 ];
+
+/// How many recovers one unknown `exec` gets at most.
+const EXEC_RECOVERS: i64 = 3;
 
 /// SQL, for a command aliased `c`: a recover of it finished with success.
 pub(super) const RETIRED: &str = "EXISTS(SELECT 1 FROM node_commands r WHERE r.method='recover' AND r.node_id=c.node_id AND json_extract(r.request,'$.body.target')=c.operation_id AND r.state='finished' AND json_extract(r.receipt,'$.success')=1)";
@@ -93,7 +100,14 @@ impl NodeRuntime {
             if command_any_session_in(tx, &target)?.as_deref() != Some(session) {
                 continue;
             }
-            self.plan_recover_in(tx, &target, &method, &request, target_attempt.as_deref())?;
+            self.plan_recover_in(
+                tx,
+                &target,
+                &method,
+                &request,
+                target_attempt.as_deref(),
+                "the user stopped a session held by a control whose outcome is unknown",
+            )?;
             return Ok(Some(true));
         }
         Ok(None)
@@ -107,6 +121,7 @@ impl NodeRuntime {
         method: &str,
         request: &str,
         target_attempt: Option<&str>,
+        reason: &str,
     ) -> Result<(), StoreError> {
         let n: i64 = tx.query_row(
             "SELECT COUNT(*) FROM node_commands WHERE method='recover' AND json_extract(request,'$.body.target')=?",
@@ -127,8 +142,7 @@ impl NodeRuntime {
             Recover {
                 target: idv(target.to_string())?,
                 expected,
-                reason: "the user stopped a session held by a control whose outcome is unknown"
-                    .into(),
+                reason: reason.into(),
             },
         )?;
         rt::insert_command_in(
@@ -146,6 +160,40 @@ impl NodeRuntime {
         )?;
         self.wake_send.notify_one();
         Ok(())
+    }
+
+    /// A recover of `op`, a ledger `exec` the Node can no longer tell the end of (a restart cut it
+    /// off): its process group, still running perhaps, is stopped and it ends interrupted (the
+    /// command is never run again). Nothing new while one is on its way or one retired it already,
+    /// and at most [`EXEC_RECOVERS`] in all (one the Node could not finish is asked again, a
+    /// few times). True: one was planned now.
+    pub(super) fn recover_exec_in(
+        &self,
+        tx: &Tx,
+        op: &str,
+        reason: &str,
+    ) -> Result<bool, StoreError> {
+        let Some(request) = tx
+            .query_row(
+                "SELECT request FROM node_commands WHERE operation_id=? AND node_id=? AND method='exec' AND state='unknown'",
+                [op, self.node_id.as_str()],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?
+        else {
+            return Ok(false);
+        };
+        let (live, all): (bool, i64) = tx.query_row(
+            "SELECT COALESCE(SUM(state IN ('pending','accepted','active','unknown') OR (state='finished' AND json_extract(receipt,'$.success')=1)), 0) > 0, COUNT(*)
+               FROM node_commands WHERE method='recover' AND node_id=? AND json_extract(request,'$.body.target')=?",
+            [self.node_id.as_str(), op],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        if live || all >= EXEC_RECOVERS {
+            return Ok(false);
+        }
+        self.plan_recover_in(tx, op, "exec", &request, None, reason)?;
+        Ok(true)
     }
 
     /// `op`'s target is being retired by a recover that may be at the Node already: its own end
