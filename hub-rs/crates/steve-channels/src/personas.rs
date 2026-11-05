@@ -1,4 +1,4 @@
-//! External personas (channels-personas.md §3, §5): the “face” a Bot shows in channels. Every
+//! External personas: the “face” a Bot shows in channels. Every
 //! workspace gets a default persona “Steve” the first time it uses channels; it cannot be deleted
 //! and is the last fallback of every bot account (see [`crate::bindings`]).
 //!
@@ -19,7 +19,7 @@ pub const DEFAULT_NAME: &str = "Steve";
 /// `introOf` when nothing is revealed.
 pub const NOTHING_REVEALED: &str = "（不透露身份，只回答问题本身）";
 
-/// What a persona tells about itself (§3). Missing keys in stored JSON read as `true`, the column
+/// What a persona tells about itself. Missing keys in stored JSON read as `true`, the column
 /// default.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Reveal {
@@ -48,7 +48,7 @@ impl Reveal {
         steve: true,
         owner: true,
     };
-    /// A new persona's default (§3): name, role and “is an AI assistant”.
+    /// A new persona's default: name, role and “is an AI assistant”.
     pub const NEW: Reveal = Reveal {
         name: true,
         role: true,
@@ -234,7 +234,7 @@ fn seed_bot(c: &Connection, ws: &str) -> ChannelResult<Option<(String, String)>>
     .optional()?)
 }
 
-/// Seeds the default persona “Steve” on first use of channels (§1). `None` when the workspace has
+/// Seeds the default persona “Steve” on first use of channels. `None` when the workspace has
 /// no Bot yet (nothing to put behind it); seeded on the next call then.
 pub fn ensure_default(tx: &Tx, ws: &str, now: i64) -> ChannelResult<Option<PersonaRow>> {
     if let Some(p) = default_persona(tx, ws)? {
@@ -362,7 +362,7 @@ pub fn create(tx: &Tx, viewer: &Viewer, n: &NewPersona, now: i64) -> ChannelResu
         ],
     )?;
     let p = own(tx, ws, &id)?;
-    // ownership.md §3: the person who creates a persona is its 负责人
+    // the person who creates a persona is its 负责人
     steve_modules::contacts::stewards::adopt(tx, ws, "persona", &id, Some(&viewer.user), "seed")?;
     base::revision(
         tx,
@@ -480,7 +480,7 @@ pub struct Moved {
     pub spaces: usize,
 }
 
-/// Deletes a persona (§3): the default one cannot be deleted; accounts using it as their default
+/// Deletes a persona: the default one cannot be deleted; accounts using it as their default
 /// switch to the default persona, spaces bound to it go back to following their account;
 /// `deleted=1`.
 pub fn delete(tx: &Tx, viewer: &Viewer, id: &str, now: i64) -> ChannelResult<Moved> {
@@ -517,7 +517,7 @@ pub fn delete(tx: &Tx, viewer: &Viewer, id: &str, now: i64) -> ChannelResult<Mov
     Ok(moved)
 }
 
-/// The Bot behind personas was deleted (`deleteBot` in steve-core calls this with the heir, §3): the
+/// The Bot behind personas was deleted (`deleteBot` in steve-core calls this with the heir): the
 /// personas keep their face and get the heir as their brain. Returns how many changed.
 pub fn on_bot_deleted(tx: &Tx, ws: &str, bot: &str, heir: &str, now: i64) -> ChannelResult<usize> {
     let mut st = tx.prepare_cached(&format!(

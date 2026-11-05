@@ -1,4 +1,4 @@
-//! Sources (knowledge.md §1, §6.1): the six built-in ones every workspace gets on first use, and
+//! Sources: the six built-in ones every workspace gets on first use, and
 //! the `Source` JSON shape. Folder sources, source writes and uploads are in [`folder`] and [`files`].
 
 pub mod files;
@@ -15,7 +15,7 @@ use crate::repo::{self, SourceRow};
 pub mod chat;
 pub mod items;
 
-/// `(kind, name, visibility, level)` of the built-in sources (§1). The `mems` defaults are unused:
+/// `(kind, name, visibility, level)` of the built-in sources. The `mems` defaults are unused:
 /// every memory carries its own scope and level.
 pub const BUILTIN: [(&str, &str, &str, &str); 6] = [
     ("notes", "我的笔记", "private", "conclusion"),
@@ -75,7 +75,7 @@ pub fn builtin(tx: &Tx, ws: &str, kind: &str, actor: &str, now: i64) -> Result<S
     repo::source_of_kind(tx, ws, kind)?.ok_or(steve_store::StoreError::NotFound("没有这个知识来源"))
 }
 
-/// `Source` (§6.1) with live document and chunk counts.
+/// `Source` with live document and chunk counts.
 pub fn source_json(c: &Connection, s: &SourceRow) -> Result<Value> {
     let (docs, chunks) = repo::source_counts(c, s)?;
     let skipped = s.stats.get("skipped").and_then(Value::as_i64).unwrap_or(0);

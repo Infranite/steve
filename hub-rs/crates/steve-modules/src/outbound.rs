@@ -1,4 +1,4 @@
-//! The disclosure check before anything leaves Steve (B1; channels-personas.md §2.6). steve-channels'
+//! The disclosure check before anything leaves Steve. steve-channels'
 //! C5 implements [`OutboundCheck`]; email drafts and GitHub comments call [`check`]. Until C5 is
 //! registered the answer is [`CheckResult::unchecked`] (email shows “没有做披露检查”), never a pass.
 

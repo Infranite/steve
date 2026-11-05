@@ -1,4 +1,4 @@
-//! Fake long connection (feishu-lark-cli.md §2.2, F0 delta): `POST /callback/ws/endpoint`,
+//! Fake long connection (F0 delta): `POST /callback/ws/endpoint`,
 //! the `wss` frame server, and Feishu's delivery behaviour.
 //!
 //! Behaviour modelled on larksuite/oapi-sdk-go `ws/` and the open-platform docs:

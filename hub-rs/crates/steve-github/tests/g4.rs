@@ -1,4 +1,4 @@
-//! G4 acceptance (github.md §13): an item without a linked repo gets the fixed hint; a fake token
+//! G4 acceptance: an item without a linked repo gets the fixed hint; a fake token
 //! (and the connection's own token, and a value injected into the session) in a CI log comes back
 //! masked; an agent's comment without a grant is a decision and END, `grant_8h` posts it and lets
 //! the second one through directly; the panel JSON has the §7 shape; `rerun_failed` reruns the

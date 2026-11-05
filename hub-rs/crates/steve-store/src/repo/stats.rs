@@ -1,4 +1,4 @@
-//! Statistics writes (modules/stats.md §2, migration 15): agent turns, token records and item marks.
+//! Statistics writes (migration 15): agent turns, token records and item marks.
 //!
 //! Every write also updates the `stat_daily` cube and flags the item's `item_stats` row dirty in the same
 //! transaction, so the summary never disagrees with the detail rows. The store knows nothing about time
@@ -240,7 +240,7 @@ impl Stats<'_> {
     }
 }
 
-/// The `fail` mark's reason code for a fail card's text (stats.md §2.5): `restart` (Hub restart),
+/// The `fail` mark's reason code for a fail card's text: `restart` (Hub restart),
 /// `stall` (the agent stopped without delivering or asking), `error` (the session failed), `release`
 /// (anything about a release), else `other`. Shared by the live hooks and the backfill.
 pub fn fail_reason(why: &str) -> &'static str {

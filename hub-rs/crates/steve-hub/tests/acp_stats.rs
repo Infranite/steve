@@ -1,4 +1,4 @@
-//! Agent turns into the statistics tables on the wired Hub (stats.md ST1), with the scripted ACP agent of
+//! Agent turns into the statistics tables on the wired Hub, with the scripted ACP agent of
 //! steve-acp (`fake-acp.js`) as the claude-code adapter: one row per turn, per model token rows, a
 //! queued follow-up as its own turn, and the daily cube. Temp STEVE_HOME, no real agent or host.
 #![allow(clippy::type_complexity)]

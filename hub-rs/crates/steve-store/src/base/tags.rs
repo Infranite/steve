@@ -1,4 +1,4 @@
-//! Tags on contacts, organizations, teams and spaces (`entity_tags`, §1.1). The tags themselves are the
+//! Tags on contacts, organizations, teams and spaces (`entity_tags`). The tags themselves are the
 //! existing `tags` table; items keep using `item_tags`.
 
 use crate::repo::Cached;

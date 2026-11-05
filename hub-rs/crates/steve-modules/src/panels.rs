@@ -1,4 +1,4 @@
-//! Item panels (B1, github.md §7): declarative cards a module shows in the item detail sidebar
+//! Item panels: declarative cards a module shows in the item detail sidebar
 //! (embedding point `item.sidebar`). steve-hub serves them (integrator):
 //! `GET /api/items/:id/panels` → [`panels`], `POST /api/items/:id/panels/:panel/actions/:action` →
 //! [`action`]. Panel ids start with their provider's id (`github.pr:ghp_…` belongs to `github`), which

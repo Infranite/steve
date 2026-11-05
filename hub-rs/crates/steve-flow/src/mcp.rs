@@ -1,4 +1,4 @@
-//! MCP tool of the flow module (signals-automation.md §7): `steve_event_get`, the original email,
+//! MCP tool of the flow module: `steve_event_get`, the original email,
 //! message or alert an item came from. Only events the session's item has a `from` link to
 //! (`links(item, 'from', 'event', evt)`, written by `item.create`, `item.link` and “转成事项”)
 //! can be read; the text goes through the vault's `guard::scan` first.
@@ -22,7 +22,7 @@ use crate::signals::source_label;
 pub const EVENT_GET: &str = "steve_event_get";
 /// Characters of original text one answer carries at most.
 pub const TEXT_MAX: usize = 20_000;
-/// The answer once the original is past the retention period (verbatim, §7).
+/// The answer once the original is past the retention period (verbatim).
 pub const PURGED: &str =
     "The original was deleted after the retention period; only this summary is left: ";
 pub const NO_ITEM: &str = "This session has no item, so there is no source event to read.";

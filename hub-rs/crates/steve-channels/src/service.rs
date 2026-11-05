@@ -81,7 +81,7 @@ pub struct ChannelsBuilder {
 }
 
 impl ChannelsBuilder {
-    /// Registers an identity that can look people up (domain-model.md §2), under the
+    /// Registers an identity that can look people up, under the
     /// `connections.adapter` it serves: Feishu's bot and you.
     pub fn profiles(mut self, a: Arc<dyn ProfileAdapter>) -> Self {
         self.profiles.insert(a.adapter_id().to_string(), a);

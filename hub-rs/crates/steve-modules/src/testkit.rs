@@ -1,4 +1,4 @@
-//! Test helpers for the module crates (contacts.md §0.10): a store in a temp dir with the dev user and
+//! Test helpers for the module crates: a store in a temp dir with the dev user and
 //! two workspaces, a scripted model gateway, and a way to call a router as some user.
 //! Never touches `~/.steve`.
 

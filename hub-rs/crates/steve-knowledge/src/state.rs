@@ -14,7 +14,7 @@ use crate::index::DocLoader;
 use crate::repo::DocRow;
 use crate::sources::folder::FolderPolicy;
 
-/// What every secret found in indexed text is replaced with (§2.3).
+/// What every secret found in indexed text is replaced with.
 pub const REDACTED: &str = "［已拦下的机密］";
 
 /// `steve_vault::guard::scan` as this crate needs it: byte ranges of things that look like
@@ -65,7 +65,7 @@ pub fn redact(guard: &dyn Guard, text: &str) -> String {
     out
 }
 
-/// `{type:"kb", id, ws}` (§7): `id` is a document or source id. Sent after the commit.
+/// `{type:"kb", id, ws}`: `id` is a document or source id. Sent after the commit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "type", rename = "kb")]
 pub struct KbEvent {
@@ -169,7 +169,7 @@ impl Knowledge {
         });
     }
 
-    /// Sets where `$HOME` and `STEVE_HOME` are for the folder checks (§2.2). Without a call they
+    /// Sets where `$HOME` and `STEVE_HOME` are for the folder checks. Without a call they
     /// come from the environment on first use. `false` if already set or used.
     pub fn set_folder_policy(&self, p: FolderPolicy) -> bool {
         self.folder_policy.set(p).is_ok()

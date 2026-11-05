@@ -1,4 +1,4 @@
-//! Sending as you (F6, feishu.md §2.2 “以你本人发送”, feishu-lark-cli.md §2.1): the bot's send and
+//! Sending as you (F6, “以你本人发送”): the bot's send and
 //! reply endpoints with the `feishu_user` connection's user token, `receive_id_type=chat_id`.
 //!
 //! Feishu allows each user at most 5 sends per second (code 230020). A limited send waits (the

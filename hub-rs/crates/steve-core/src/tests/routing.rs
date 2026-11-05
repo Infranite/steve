@@ -1,4 +1,4 @@
-//! Thread routing R3 (modules/thread-routing.md §10): questions are researched in the conversation, work
+//! Thread routing R3: questions are researched in the conversation, work
 //! becomes items, unclear requests get a card, corrections work both ways, and the router never fails
 //! into an item. The research executor is `FakeResearch`; the router is a fixed fake.
 

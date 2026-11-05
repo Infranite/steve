@@ -1,4 +1,4 @@
-//! The seams to the flow module (github.md §5.2): signals into `steve_flow::ingest`, the `gh_pr`
+//! The seams to the flow module: signals into `steve_flow::ingest`, the `gh_pr`
 //! lookup of `item.link`, and the “PR 检查失败” template installed when the first repo is linked.
 //!
 //! S2's `item.link` only accepts its built-in methods, so this module registers an `item.link`
@@ -74,7 +74,7 @@ impl ItemFinder for GhPrFinder {
 /// S2's `item.link` plus `by:"gh_pr"` (see the module docs).
 pub struct GhItemLink;
 
-/// The supplement for a PR whose checks failed (§5.2).
+/// The supplement for a PR whose checks failed.
 pub fn check_failed_text(payload: &Value) -> String {
     let names: Vec<&str> = payload["failed"]
         .as_array()

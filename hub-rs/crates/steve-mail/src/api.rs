@@ -1,4 +1,4 @@
-//! REST of email.md §9 that exists so far: mailbox settings (E1's service) and drafts (E3), `to-item` and landing attachments (E5),
+//! REST that exists so far: mailbox settings (E1's service) and drafts (E3), `to-item` and landing attachments (E5),
 //! thread archive / read and `to-knowledge` (E6), and the reading side: the thread list and one thread,
 //! `PATCH` of its state, a message's HTML / inline image / original, the IMAP presets. Mounted
 //! under `/api` behind the `Caller` layer: `.merge(steve_mail::api::routes(mail))`.
@@ -331,7 +331,7 @@ async fn to_knowledge(
 
 // ---------------------------------------------------------------- reading
 
-/// `GET /mail/presets`: the IMAP presets of the new-mailbox dialog (§1).
+/// `GET /mail/presets`: the IMAP presets of the new-mailbox dialog.
 async fn presets() -> Json<Value> {
     Json(json!(crate::adapters::PRESETS))
 }

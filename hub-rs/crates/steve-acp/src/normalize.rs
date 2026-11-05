@@ -1,4 +1,4 @@
-//! ACP → Steve's events (docs/node-protocol.md §6). The one place that reads ACP's `session/update`
+//! ACP → Steve's events. The one place that reads ACP's `session/update`
 //! payloads (`_meta`, `rawInput`, tool content) and says what they mean in Steve's terms; whatever
 //! runs a harness over ACP reports through it, and nothing past it sees ACP.
 //!

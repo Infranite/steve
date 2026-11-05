@@ -1,4 +1,4 @@
-//! Retention (email.md §3.6): every hour, mail older than the workspace's `keepMail` days loses its
+//! Retention: every hour, mail older than the workspace's `keepMail` days loses its
 //! raw file and its text (`body_text`, `body_new`), `purged = now`; snippet, headers and attachment
 //! metadata stay — the original is still in the mailbox and can be fetched again. Bodies of drafts
 //! sent more than 30 days ago are emptied (the sent copy in `mail_messages` is the record).

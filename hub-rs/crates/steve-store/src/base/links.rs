@@ -1,4 +1,4 @@
-//! Generic semantic links (`links`, migration 1) inside a transaction: the relations of contacts.md §2.3
+//! Generic semantic links (`links`, migration 1) inside a transaction: the relations
 //! (`works_at`, `reports_to`, `raised_by`, `related`, …) and the other modules' `from` links.
 //! A link is unique per (workspace, subject, predicate, object).
 
@@ -139,7 +139,7 @@ fn insert_as(tx: &Tx, ws: &str, k: &LinkKey, l: &Link) -> Result<bool> {
     )? > 0)
 }
 
-/// Moves every link where `from_ref` is either end over to `into_ref` (merging, §2.7): insert-or-ignore
+/// Moves every link where `from_ref` is either end over to `into_ref` (merging): insert-or-ignore
 /// the rewritten row (props, source, confidence and time kept), then delete the old one. Links that
 /// already existed on `into_ref` are dropped from `from_ref` and not listed (a split cannot bring them back).
 pub fn retarget(tx: &Tx, ws: &str, from_ref: &ObjRef, into_ref: &ObjRef) -> Result<Vec<MovedLink>> {

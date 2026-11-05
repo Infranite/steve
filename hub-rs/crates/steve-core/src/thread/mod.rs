@@ -1,6 +1,6 @@
 //! The main conversation with Steve (thread.ts), one per workspace: every message goes through the router.
 //!
-//! Thread routing (modules/thread-routing.md): the conversation is the default. A message is routed on the
+//! Thread routing: the conversation is the default. A message is routed on the
 //! workspace lane (a few seconds, one at a time, in order); [`decide`] puts the code's guards over the
 //! model's choice; answers and read-only research then run on the workspace's inline queue
 //! ([`research`]), so the lane is free for the next message. Items are made only for real work, a
@@ -145,7 +145,7 @@ pub trait ConvHost: Send + Sync {
     fn said(&self, ws: &str, space: &str, id: &str);
 }
 
-/// Where a message goes besides the router (§5.3): straight to an item (the focus bar “正在跟 ST-n 说”), or
+/// Where a message goes besides the router: straight to an item (the focus bar “正在跟 ST-n 说”), or
 /// as a reply quoting a message (a message of an item goes to that item).
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct SayTo {
@@ -280,11 +280,11 @@ pub(crate) struct Lanes {
     /// the message being routed, per [`lane_key`]; its flag stops it
     inflight: Mutex<HashMap<String, Stop>>,
     promoting: Mutex<HashMap<String, Promotion>>,
-    /// answers and research runs, one at a time per workspace (§4.6)
+    /// answers and research runs, one at a time per workspace
     inline: Mutex<HashMap<String, research::InlineLane>>,
     /// the read-only research executor (R2); without one, research falls back to a direct answer
     researcher: OnceLock<Arc<dyn Researcher>>,
-    /// item → the conversation message last forwarded to it, until its turn ends (§5.3)
+    /// item → the conversation message last forwarded to it, until its turn ends
     forwarded: Mutex<HashMap<String, String>>,
     /// offers, suggestion cards and corrections are handled one at a time (a double click is one click)
     acting: Mutex<()>,
@@ -739,7 +739,7 @@ impl Core {
         Ok(mid)
     }
 
-    /// Send a conversation message to an item (§5.3): its reply flows back when that turn ends.
+    /// Send a conversation message to an item: its reply flows back when that turn ends.
     pub(crate) fn forward(
         &self,
         item: &str,
@@ -985,7 +985,7 @@ impl Core {
             .collect())
     }
 
-    /// The people of a new item from its message (contacts.md §2.8): `party` mentions are linked and
+    /// The people of a new item from its message: `party` mentions are linked and
     /// returned as the reply's note (“关联了 A、B”); without mentions the names in the text are inferred
     /// (no note). Failures are logged: the item stands either way.
     fn item_people(

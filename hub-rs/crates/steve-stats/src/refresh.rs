@@ -1,4 +1,4 @@
-//! Keeping the derived tables current (stats.md §2.6): the `item_stats` refresh every 2 seconds and the
+//! Keeping the derived tables current: the `item_stats` refresh every 2 seconds and the
 //! full `rebuild` of `stat_daily` from the detail rows (needed after `stats.tz` changes, and after the
 //! backfill).
 

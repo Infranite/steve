@@ -167,7 +167,7 @@ export STEVE_KEYHELPER_SERVICE=${STEVE_KEYHELPER_SERVICE:-io.github.infranite.st
 SIGN_KC=${STEVE_SIGN_KEYCHAIN:-$HOME_DIR/signing/steve-signing.keychain-db}
 sign_hub() {
   local bin=$1 req
-  # code signing and the keychain ACL are macOS only; other systems keep the vault key elsewhere (accounts-vault.md §3.3)
+  # code signing and the keychain ACL are macOS only; other systems keep the vault key elsewhere
   if [[ $(uname -s) != Darwin ]]; then
     print -r -- "   not macOS ($(uname -s)): skipping code signing"
     return 0
@@ -183,7 +183,7 @@ sign_hub() {
   [[ $req == *"identifier \"$SIGN_IDENT\""*"certificate leaf"* ]] || { print -r -- "   unexpected signature: $req"; return 1 }
   print -r -- "   signed: $req"
 }
-# steve-keyhelper (ops/KEYHELPER.md): the only process that touches the vault keys in the macOS keychain. It lives
+# steve-keyhelper: the only process that touches the vault keys in the macOS keychain. It lives
 # outside the releases ($HOME_DIR/bin) and is rebuilt only when its source changes, so its code signature (and the
 # keychain partition of the items it created) stays the same across Hub releases. An upgrade migrates the items
 # from the old helper to the new one before the new one takes its place; a failed migration fails the release.

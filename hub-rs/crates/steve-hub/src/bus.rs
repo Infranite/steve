@@ -326,7 +326,7 @@ fn ws_of(v: &Value) -> String {
         .to_string()
 }
 
-/// `{type:"stats"}` events, coalesced per workspace (stats.md §4.3): a quiet workspace's event goes out at
+/// `{type:"stats"}` events, coalesced per workspace: a quiet workspace's event goes out at
 /// once; within [`StatsThrottle::WINDOW`] of the last one sent, the latest is held and sent when the window
 /// ends. So a browser gets at most one every 5 seconds and never misses the last change.
 #[derive(Debug, Default)]

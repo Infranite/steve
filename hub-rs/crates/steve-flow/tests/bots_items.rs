@@ -1,4 +1,4 @@
-//! S10 acceptance (signals-automation.md §12): after a Bot is deleted its flow references are the
+//! S10 acceptance: after a Bot is deleted its flow references are the
 //! heir and each flow has one more version; `item.done` starts a flow; `steve_event_get` cannot read
 //! the events of another item. Plus `GET /bots/:id/flows` and `digest::take_now`.
 

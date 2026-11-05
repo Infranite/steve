@@ -1,5 +1,5 @@
-//! Uploaded files as knowledge (knowledge.md §2.1 `files`): an attachment from the `files` table
-//! (delta-attachments.md) is added with `POST /kb/files` and indexed right away. Removing the
+//! Uploaded files as knowledge: an attachment from the `files` table
+//! is added with `POST /kb/files` and indexed right away. Removing the
 //! document (`DELETE /kb/docs/:id`) leaves the attachment itself alone.
 
 use std::path::{Path, PathBuf};

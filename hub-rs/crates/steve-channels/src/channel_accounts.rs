@@ -1,4 +1,4 @@
-//! 接入账号 (channels-personas.md §2.2, §5.1 `ChannelAccount`): a connection whose adapter can
+//! 接入账号: a connection whose adapter can
 //! receive messages (`msg.receive` among its provider's caps), with its `channel_settings`, its
 //! default persona and the permission check `verify` stored on the connection.
 //!
@@ -18,7 +18,7 @@ use crate::channel::ChannelFeatures;
 use crate::spaces::{self, Mode};
 use crate::{ChannelResult, Channels};
 
-/// `channel_settings.trigger` of a new account as it reads (§1; the column default's `where: []`
+/// `channel_settings.trigger` of a new account as it reads (the column default's `where: []`
 /// means everywhere).
 pub fn default_trigger() -> Value {
     json!({"on": false, "words": ["/bot"], "where": ["*"], "mark": true})

@@ -1,4 +1,4 @@
-//! Inline read-only research for the main thread (thread-routing.md §4, slice R2).
+//! Inline read-only research for the main thread.
 //!
 //! A research run is one `claude -p --output-format stream-json` process that may only read the
 //! workspace's project directories, the message's attachments and (through Steve's MCP) the knowledge base

@@ -1,4 +1,4 @@
-//! State sync (github.md §3.3) and the signals that follow it (§5.2). One handler for both ways in:
+//! State sync and the signals that follow it. One handler for both ways in:
 //! webhook deliveries ([`crate::hooks`]) and what the poll ([`crate::poll`]) sees, so a change seen
 //! twice is applied twice to the same rows and produces no second event.
 //!
@@ -84,7 +84,7 @@ pub(crate) struct Effects {
     pub(crate) late: bool,
 }
 
-/// Checks whose conclusion makes the commit fail (§3.3).
+/// Checks whose conclusion makes the commit fail.
 const FAILING: [&str; 4] = ["failure", "timed_out", "cancelled", "action_required"];
 
 /// The aggregate of a commit's checks: `none|pending|success|failure`, and whether every check is
@@ -460,7 +460,7 @@ impl GitHub {
         }
     }
 
-    /// `installation` and `installation_repositories` (§5.1): repos the App can no longer see are
+    /// `installation` and `installation_repositories`: repos the App can no longer see are
     /// disabled (`enabled=0`, “GitHub App 不再能访问这个仓库”), and come back when re-added.
     async fn installation(
         &self,
@@ -741,7 +741,7 @@ impl GitHub {
     }
 
     /// Upserts a PR from GitHub's object; returns the row as stored. A PR not linked yet is
-    /// matched to an item (§3.2); `steve`: the item of a PR Steve just opened. Signals:
+    /// matched to an item; `steve`: the item of a PR Steve just opened. Signals:
     /// merged/closed after being open, and review requests for one of the workspace's users.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn sync_pr(

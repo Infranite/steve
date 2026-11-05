@@ -441,7 +441,7 @@ def restore(done, old_hub, old_web, old_manifest, backup, candidate, stamp, iden
         step(f"the backup is back (the probed database is kept apart)", database)
     if not ok and done["probed"]:
         # no database we can vouch for is in place: starting would give the Hub an empty or migrated one
-        return False, steps + ["service not started: put a database back by hand (ops/CUTOVER.md), then start it"]
+        return False, steps + ["service not started: restore the pre-release database backup by hand, then start it"]
     if done["stopped"] and not health():
         step("service started", lambda: launchd("start", ident))
     back = wait_health(lambda h: h.get("version") == old_manifest["version"]

@@ -1,4 +1,4 @@
-//! REST of channel accounts (channels-personas.md §5.2) and space members, relative to `/api`,
+//! REST of channel accounts and space members, relative to `/api`,
 //! behind the `Caller` layer:
 //!
 //! | route | |

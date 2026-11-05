@@ -1,10 +1,10 @@
-//! Memories about contacts, organizations and teams (slice P3, contacts.md §2.6 and the memory rows of
-//! §3.2): `GET/POST /parties/:id/memories`, `PATCH/DELETE /mems/:id`, and the candidate an agent leaves
+//! Memories about contacts, organizations and teams (slice P3):
+//! `GET/POST /parties/:id/memories`, `PATCH/DELETE /mems/:id`, and the candidate an agent leaves
 //! with `steve_contacts_remember`.
 //!
 //! What you write is `confirmed` at once. What an agent writes is a `candidate` with a `confirm` decision
-//! (`subject_type = "mem"`); answering it is the knowledge module's handler (K3, modules/build-plan.md
-//! §1 point 1), so the candidate is written the way K3 writes its own: a `mem_candidates` row
+//! (`subject_type = "mem"`); answering it is the knowledge module's handler (K3), so
+//! the candidate is written the way K3 writes its own: a `mem_candidates` row
 //! (`origin = tool`) and at most 20 open memory decisions per workspace.
 
 use serde::{Deserialize, Serialize};
@@ -18,9 +18,9 @@ use super::repo::{PARTY, Party};
 use super::service::{check_visibility, own_party, start};
 use crate::{ApiError, ApiResult, Caller, Check, Modules, decisions};
 
-/// Kinds a memory about a party may have (§3.2).
+/// Kinds a memory about a party may have.
 const KINDS: [&str; 4] = ["fact", "preference", "rule", "event"];
-/// Open memory decisions per workspace before new candidates stop opening one (knowledge.md §5.2).
+/// Open memory decisions per workspace before new candidates stop opening one.
 pub const MAX_OPEN_CONFIRMS: i64 = 20;
 
 /// What a memory of `kind` is called on screen (ST-41): preferences and rules are 长期记忆, facts,
@@ -237,7 +237,7 @@ pub fn delete_in(tx: &Tx, id: &str) -> ApiResult<bool> {
     Ok(mems::delete(tx, id)?)
 }
 
-/// The memories about one party and nothing else, deleted physically (deleting a contact, §2.2, §8).
+/// The memories about one party and nothing else, deleted physically (deleting a contact).
 /// Returns how many.
 pub fn delete_only_about(tx: &Tx, ws: &str, party_id: &str) -> ApiResult<usize> {
     let ids = prepo::mems_only_about(tx, ws, PARTY, party_id)?;

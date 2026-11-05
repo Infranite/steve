@@ -1128,7 +1128,7 @@ async fn web_dir_is_read_per_request() {
     assert_eq!(st["web_version"], "w2");
 }
 
-/// Ownership (ownership.md): “我” owns Steve's bots and the Hub device once created, a new Bot is
+/// Ownership: “我” owns Steve's bots and the Hub device once created, a new Bot is
 /// owned by its creator, a 负责人 set over REST is undone through `/api/config/:id/undo`, and the
 /// ownership tools are served over MCP.
 #[tokio::test(flavor = "multi_thread")]

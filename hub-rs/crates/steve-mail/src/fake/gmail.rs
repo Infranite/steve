@@ -1,4 +1,4 @@
-//! Fake Gmail API (email.md §3.3): `users.getProfile`, `users.messages`
+//! Fake Gmail API: `users.getProfile`, `users.messages`
 //! (`list` with `q`/`labelIds`/paging, `get` in `raw|full|metadata|minimal`,
 //! `send`, `modify`, `batchModify`, `trash`, `untrash`, `delete`,
 //! `attachments.get`), `users.threads.get`, `users.history.list` (with the

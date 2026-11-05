@@ -857,7 +857,7 @@ async fn connecting_starts_the_long_connection_and_syncs_chats_without_a_restart
     assert!(r.started, "{r:?}");
     assert_eq!(r.synced, Some(0), "known groups are kept");
 
-    // disconnecting an account with spaces (§2.2): the spaces stay, `left` (an archived one stays
+    // disconnecting an account with spaces: the spaces stay, `left` (an archived one stays
     // archived), without settings or a connection; the long connection stops for good
     h.exec(&format!(
         "UPDATE spaces SET status = 'archived' WHERE id = (SELECT min(id) FROM spaces WHERE connection_id = '{con}')"

@@ -1,5 +1,5 @@
 //! What runs for each Feishu connection, kept in step with the connections as they change — no Hub
-//! restart after connecting (feishu-lark-cli.md §2.2, §2.3):
+//! restart after connecting:
 //!
 //! - a `feishu_app` connection that is `ok` / `error`: its long connection, and right after it
 //!   (re)starts, [`super::sync_bot_chats`] (the groups the bot is already in become spaces);
@@ -133,7 +133,7 @@ impl FeishuRuntime {
                 n += 1;
             }
         }
-        // names of the people met (domain-model.md §2): kicked runs and the periodic one
+        // names of the people met: kicked runs and the periodic one
         drop(self.channels.spawn_names());
         n
     }

@@ -1,4 +1,4 @@
-//! Slice P3 acceptance (contacts.md §9): mentions link `related`, names are inferred at 0.6,
+//! Slice P3 acceptance: mentions link `related`, names are inferred at 0.6,
 //! `steve_contacts_find` never shows `never` attributes or other users' private contacts — plus the
 //! memory routes, item people, the `@` menu, ⌘K, a party's items and timeline, `steve_contacts_remember`
 //! and contact cards.

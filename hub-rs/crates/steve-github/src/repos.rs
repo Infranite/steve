@@ -1,4 +1,4 @@
-//! Linked repositories (github.md §3.1, §3.4, §8): what a connection can see, linking a repo (with a
+//! Linked repositories: what a connection can see, linking a repo (with a
 //! repository hook for PATs, else polling), its settings, and the read endpoints the GitHub page uses
 //! (`GET /github`, PRs, issues, deliveries). Routes are relative to `/api`, behind the `Caller` layer.
 
@@ -28,8 +28,8 @@ use crate::sync::latest_checks;
 /// How long the list of repos a connection can see is reused.
 const AVAILABLE_TTL_MS: i64 = 5 * 60_000;
 
-/// Events of a PAT repository hook: the App's list (§1.1) without the App-only
-/// `installation_repositories`, plus `status` for legacy CI (§3.3).
+/// Events of a PAT repository hook: the App's list without the App-only
+/// `installation_repositories`, plus `status` for legacy CI.
 pub const REPO_HOOK_EVENTS: [&str; 8] = [
     "pull_request",
     "pull_request_review",
@@ -508,7 +508,7 @@ impl GitHub {
         }
         let out = res?;
         self.notifier().gh(&ws, &row.id);
-        // The first repo of the workspace brings the “PR 检查失败” flow (§5.2).
+        // The first repo of the workspace brings the “PR 检查失败” flow.
         match self.install_template(&ws, &who.me) {
             Ok(Some(f)) => tracing::info!(flow = %f, "github flow template installed"),
             Ok(None) => {}

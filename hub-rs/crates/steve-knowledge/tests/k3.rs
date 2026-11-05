@@ -1,4 +1,4 @@
-//! K3 acceptance (knowledge.md §12), with fixed gateway output: an item completion yields at most 5
+//! K3 acceptance, with fixed gateway output: an item completion yields at most 5
 //! candidates, `dup_of` ones are dropped, a “关于” nobody can be resolved to is dropped; at most 20
 //! memory decisions are open; confirming with `supersedes` makes the old memory stale; a batch confirm
 //! leaves decisions consistent; candidates expire after 30 days. Plus the chat source, the 待确认 list

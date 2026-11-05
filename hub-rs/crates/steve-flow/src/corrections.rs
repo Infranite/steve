@@ -1,4 +1,4 @@
-//! Corrections of a signal's handling (signals-automation.md §2.5): `POST /signals/:id/correct
+//! Corrections of a signal's handling: `POST /signals/:id/correct
 //! {action, scope}`. One click is consent, so the change is applied at once and comes back as an
 //! undoable changeset (`POST /config/:changeset_id/undo`).
 //!

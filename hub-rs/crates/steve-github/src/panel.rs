@@ -1,4 +1,4 @@
-//! The item panel “PR 与检查” (github.md §7, embedding point `item.sidebar`): one panel per PR
+//! The item panel “PR 与检查” (embedding point `item.sidebar`): one panel per PR
 //! linked to the item, open ones first. Actions: `rerun_failed` (only while a failed check comes
 //! from GitHub Actions; your click, so it runs directly) and `open` (a link).
 

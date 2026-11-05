@@ -1,4 +1,4 @@
-//! Running a flow run (schedules.md §1): the [`RunExecutor`] trait the scheduler drives runs through,
+//! Running a flow run: the [`RunExecutor`] trait the scheduler drives runs through,
 //! and [`LinearExecutor`], which knows exactly the schedule graph `trigger(time) → action`. S2's
 //! `GraphEngine` implements the same trait; the integrator swaps the registration, the data stays.
 

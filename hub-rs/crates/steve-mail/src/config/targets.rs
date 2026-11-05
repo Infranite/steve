@@ -1,11 +1,11 @@
-//! Conversational configuration of mailboxes (email.md §10): the draft target `mail_account`
+//! Conversational configuration of mailboxes: the draft target `mail_account`
 //! (`mail_account:<connection_id>`) with the fields `signature` (text), `duty` (text, appended to),
 //! `send_delay_s` (0/10/30/60 秒), `archive_on_done` (是/否) and `sync_days` (7/30/90 天), and one
 //! operation that is `PATCH /mail/accounts/:connection_id` inside the changeset's transaction and
 //! undoes to the settings the mailbox had.
 //!
 //! The operation is called `mail.account.patch` (§10 writes `mail_account.patch`): every op of the
-//! mail module starts with `mail.`, so it cannot collide in `Registry::op` (contacts.md §0).
+//! mail module starts with `mail.`, so it cannot collide in `Registry::op`.
 //! Flow-like requests (“GitHub 的通知邮件以后都忽略”) stay with the `flow` target of steve-flow.
 
 use rusqlite::Connection;

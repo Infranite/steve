@@ -1,4 +1,4 @@
-//! The webhook entries (github.md §5.1, §12): `POST /hooks/github` for the App, and the PAT
+//! The webhook entries: `POST /hooks/github` for the App, and the PAT
 //! repository hooks that arrive on the signals route `POST /hooks/<connection_id>` and are handed
 //! here by adapter.
 //!

@@ -1,4 +1,4 @@
-//! Memories (`mems` + `mem_about`, §1.1): facts, preferences, rules, summaries and events about parties,
+//! Memories (`mems` + `mem_about`): facts, preferences, rules, summaries and events about parties,
 //! items, spaces, bots, personas or the user. Every read goes through a [`Viewer`]; `never` memories are
 //! left out unless a caller explicitly asks (the owner's own management page).
 
@@ -304,7 +304,7 @@ pub fn delete(tx: &Tx, id: &str) -> Result<bool> {
     Ok(true)
 }
 
-/// Deletes the memories that are about `object` and nothing else (deleting a contact, §2.2); memories
+/// Deletes the memories that are about `object` and nothing else (deleting a contact); memories
 /// shared with other objects stay. Returns how many were deleted (audit records only the count).
 pub fn delete_only_about(tx: &Tx, ws: &str, object: &ObjRef) -> Result<usize> {
     let ids: Vec<String> = tx

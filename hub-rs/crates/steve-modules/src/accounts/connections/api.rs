@@ -1,5 +1,5 @@
-//! REST of slice A2 (accounts-vault.md §5.2 connections) and the OAuth callback. Bodies with secrets
-//! have no `Debug` and are never logged (§10 rule 7).
+//! REST of slice A2 and the OAuth callback. Bodies with secrets
+//! have no `Debug` and are never logged.
 
 use std::collections::BTreeMap;
 

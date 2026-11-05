@@ -1,4 +1,4 @@
-//! Keeping memories in the index (knowledge.md §2.1): confirmed `mems` (one entry each, prefixed
+//! Keeping memories in the index: confirmed `mems` (one entry each, prefixed
 //! with who or what they are about) and the old `bot_memories` (read only, “<Bot> 的记忆”).
 //!
 //! Event-driven ([`on_event`] on the bus's `mm` and `bot` events, wired by the integrator) with a
@@ -19,7 +19,7 @@ use crate::repo;
 use crate::sources;
 use steve_modules::contacts::memory::record_name;
 
-/// How often the sweep runs (§10).
+/// How often the sweep runs.
 pub const SWEEP_EVERY: Duration = Duration::from_secs(5 * 60);
 
 /// Names of the objects a memory is about, “、”-joined; unknown objects are left out.

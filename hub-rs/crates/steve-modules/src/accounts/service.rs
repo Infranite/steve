@@ -1,4 +1,4 @@
-//! Domain rules of accounts (accounts-vault.md §2.1, §5): handle normalization, recording, editing and
+//! Domain rules of accounts: handle normalization, recording, editing and
 //! removing accounts, the systems list and the match rules. The `*_tx` functions run inside a caller's
 //! transaction, so the REST handlers, the conversational-config operations and identification share them.
 
@@ -15,7 +15,7 @@ use crate::contacts::repo::{self as people, Party};
 use crate::contacts::service as contacts;
 use crate::{ApiError, ApiResult, Caller, Check, Modules, own};
 
-/// Account kinds (§1).
+/// Account kinds.
 pub const KINDS: [&str; 11] = [
     "personal",
     "work_email",
@@ -66,7 +66,7 @@ pub struct Handle {
     pub display: String,
 }
 
-/// Normalizes a raw handle for `system` (§2.1). `email`: lower case, no white space, `local@domain`;
+/// Normalizes a raw handle for `system`. `email`: lower case, no white space, `local@domain`;
 /// `phone`: digits and a leading `+`; `lower`; `none`: trimmed. Cards keep only the last four digits:
 /// `card:<last4>:<system>`, shown as `•••• 4821`; the full number belongs in the vault. `None` when
 /// nothing usable is left.
@@ -199,13 +199,13 @@ pub fn current_party(c: &rusqlite::Connection, id: &str) -> ApiResult<Option<Par
     Ok(p)
 }
 
-/// Can an account of this party have a connection (“我”, the own organization, a team; §2.2)?
+/// Can an account of this party have a connection (“我”, the own organization, a team)?
 pub fn may_connect(p: &Party) -> bool {
     p.is_me() || p.is_self_org() || p.kind == "team" || p.contact_kind.as_deref() == Some("bot")
 }
 
 /// Is this party one of ours — the own organization, or a bot party one of whose accounts is
-/// connected (an app bot of ours, ownership.md §1)?
+/// connected (an app bot of ours)?
 pub fn is_ours(c: &rusqlite::Connection, p: &Party) -> ApiResult<bool> {
     if p.is_self_org() {
         return Ok(true);
@@ -219,7 +219,7 @@ pub fn is_ours(c: &rusqlite::Connection, p: &Party) -> ApiResult<bool> {
     .exists([&p.id])?)
 }
 
-// ---------------------------------------------------------------- shapes (§5.1)
+// ---------------------------------------------------------------- shapes
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SystemRef {
@@ -497,7 +497,7 @@ pub struct AccountPatchBody {
     pub verified: Option<bool>,
 }
 
-/// Edits an account inside a transaction (§5.2 `PATCH`). Changing the owner is a manual correction of
+/// Edits an account inside a transaction. Changing the owner is a manual correction of
 /// identification: the account becomes verified, audit `account.move`. Writes a revision.
 pub fn patch_tx(
     tx: &Tx,
@@ -603,7 +603,7 @@ pub fn patch(m: &Modules, who: &Caller, id: &str, b: AccountPatchBody) -> ApiRes
     get(m, who, id)
 }
 
-/// Removes an account inside a transaction (§2.1): refused while connected, its vault items stay unlinked.
+/// Removes an account inside a transaction: refused while connected, its vault items stay unlinked.
 pub fn delete_tx(tx: &Tx, ws: &str, actor: &str, a: &Account) -> ApiResult<()> {
     if repo::connection_of(tx, &a.id)?.is_some() {
         return Err(ApiError::conflict("先断开 Steve 的接入"));

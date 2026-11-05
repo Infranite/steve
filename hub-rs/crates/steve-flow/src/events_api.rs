@@ -1,4 +1,4 @@
-//! REST of signals and sources (signals-automation.md §4.2), relative to `/api`:
+//! REST of signals and sources, relative to `/api`:
 //!
 //! | route | |
 //! | --- | --- |

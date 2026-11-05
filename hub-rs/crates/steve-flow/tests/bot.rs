@@ -1,4 +1,4 @@
-//! S4 acceptance (signals-automation.md §12): with a scripted gateway returning fixed JSON, the bot
+//! S4 acceptance: with a scripted gateway returning fixed JSON, the bot
 //! node's branch and reason reach the event; a gateway timeout retries once 10 minutes later; a
 //! drafted graph validates and is stored disabled; `edit-draft` returns a graph without saving.
 //! No real model is ever called.

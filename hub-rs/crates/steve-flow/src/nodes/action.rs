@@ -1,8 +1,8 @@
-//! The `action` node (signals-automation.md §3.2): a registry of [`Action`]s. Built in: `item.create`,
+//! The `action` node: a registry of [`Action`]s. Built in: `item.create`,
 //! `item.link`, `notify`, `digest`, `ignore` and `report` (schedules); the channel module registers
 //! `reply_as` and `send_to_space` (effectful, so they run only after an approval or with a grant).
 //!
-//! Schedules keep their own wording (schedules.md §5): their `item.create` and `report` go through
+//! Schedules keep their own wording: their `item.create` and `report` go through
 //! [`run`], as before.
 
 use serde_json::{Value, json};

@@ -1,5 +1,5 @@
-//! The open-platform REST client (feishu.md §2): base URLs per domain, `{code, msg, data}`
-//! answers, and the one retry after an invalid-token error (§2.1: re-mint once, then `reauth`).
+//! The open-platform REST client: base URLs per domain, `{code, msg, data}`
+//! answers, and the one retry after an invalid-token error (re-mint once, then `reauth`).
 //!
 //! Tokens come from a [`TokenSource`]: a connection ([`ConnCx`], cached by the connections
 //! framework until 5 minutes before expiry) or [`VerifyTokens`] while a new credential is being

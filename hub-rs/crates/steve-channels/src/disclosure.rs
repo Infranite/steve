@@ -1,4 +1,4 @@
-//! The audience-aware disclosure check (C5, channels-personas.md §2.6): B1's
+//! The audience-aware disclosure check: B1's
 //! [`steve_modules::outbound::OutboundCheck`], used by every channel message and by email drafts and
 //! GitHub comments.
 //!
@@ -49,7 +49,7 @@ use crate::compose::PinnedModel;
 pub const CHECK_HEAD: &str = "【披露检查】";
 /// The rewrite prompt starts with this.
 pub const REWRITE_HEAD: &str = "【改写回复】";
-/// Rewrites before a leaking reply becomes a draft (§2.6 step 3).
+/// Rewrites before a leaking reply becomes a draft.
 pub const MAX_REWRITES: usize = 2;
 /// The check model list (comma separated).
 pub const ENV_CHECK: &str = "STEVE_MODELS_CHECK";
@@ -603,7 +603,7 @@ pub fn parse_check(answer: &str) -> Option<(bool, Vec<Span>)> {
     Some((leak, spans))
 }
 
-/// The rewrite prompt for the drafting model (§2.6 step 3).
+/// The rewrite prompt for the drafting model.
 pub fn rewrite_prompt(a: &Audience, reply: &str, spans: &[Span]) -> String {
     let mut p = format!(
         "{REWRITE_HEAD}\n下面这条回复可能让听众知道了他们不该知道的内容。改写它：把标出的片段改成结论，去掉来源、人名、数字和细节；不能说的内容，像不知道一样回答，不暗示它存在。其他意思和语气不变。\n\n听众：{}\n\n原回复：\n<<<\n{}\n>>>\n\n要改的片段：\n",

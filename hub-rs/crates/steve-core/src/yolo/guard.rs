@@ -1,4 +1,4 @@
-//! The tool guard (modules/yolo.md §4.3): which agent permission requests YOLO answers with
+//! The tool guard: which agent permission requests YOLO answers with
 //! `allow_once`. Default deny: anything it does not positively recognise as work inside the item's own
 //! directory is left to the user. It runs after the hard limits, which it does not repeat.
 //!

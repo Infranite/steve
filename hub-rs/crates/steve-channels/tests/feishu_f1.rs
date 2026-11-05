@@ -1,4 +1,4 @@
-//! F1 acceptance (feishu.md §7, feishu-lark-cli.md §3) on the fake Feishu: the bot connection
+//! F1 acceptance on the fake Feishu: the bot connection
 //! through the real connect route (credentials ciphertext in the system vault, `verify` with
 //! app_name and the bot's open_id, the self-built check, the permission check), tenant tokens
 //! cached until 5 minutes before expiry and re-minted once after an invalid-token error, and the
@@ -652,7 +652,7 @@ async fn user_oauth_needs_an_app_connection() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Permissions learned at runtime, the one-click links, installations (domain-model.md §1.3).
+// Permissions learned at runtime, the one-click links, installations.
 
 fn integrations(h: &H) -> Value {
     serde_json::to_value(h.conns.integrations(&caller(WS, ME)).expect("integrations"))

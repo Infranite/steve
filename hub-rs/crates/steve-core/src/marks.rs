@@ -1,4 +1,4 @@
-//! Statistics hooks (modules/stats.md §2.5, slice ST3): the structured points of an item's life that the
+//! Statistics hooks: the structured points of an item's life that the
 //! statistics read instead of timeline text. Status changes are recorded by the store itself; the
 //! orchestrator only marks deliveries, fail cards and release outcomes, one call each.
 //!

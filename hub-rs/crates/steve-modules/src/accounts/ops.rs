@@ -1,4 +1,4 @@
-//! Conversational-config operations of the accounts module (accounts-vault.md §7, contacts.md §5):
+//! Conversational-config operations of the accounts module:
 //! `account.add {party, system, handle, kind?}` (the contact target plans it) and
 //! `account.patch {id, display_name?, kind?, owner?}` (the account target of V6 plans it).
 //! Neither ever carries a secret: a card is recorded by its last four digits only.

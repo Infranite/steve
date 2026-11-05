@@ -1,4 +1,4 @@
-//! Envelope encryption (accounts-vault.md §3.1): the workspace KEK wraps one DEK per item, the DEK
+//! Envelope encryption: the workspace KEK wraps one DEK per item, the DEK
 //! encrypts that item's secret fields. Both layers are XChaCha20-Poly1305 with a fresh random 24-byte
 //! nonce per write, stored as `nonce || ciphertext+tag`. The AAD binds every ciphertext to its
 //! workspace, item, and field (or KEK version), so a blob copied to another row fails to open.

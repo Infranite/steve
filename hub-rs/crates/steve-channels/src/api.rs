@@ -1,4 +1,4 @@
-//! REST of spaces and messages (channels-personas.md §5.2), relative to `/api`:
+//! REST of spaces and messages, relative to `/api`:
 //!
 //! | route | |
 //! | --- | --- |

@@ -2,7 +2,7 @@
 //! validate `PATCH /api/settings`.
 //!
 //! Kept as the exact `JSON.stringify(SETTINGS)` output of the TS Hub, plus `general.tz` (workspace time zone
-//! for schedules, steve-rs-plan/modules/schedules.md; not in the TS Hub yet): JS orders integer-like keys first
+//! for schedules; not in the TS Hub yet): JS orders integer-like keys first
 //! (`labels` of `awayH` comes out `0, 2, 4, 8`), and copying the bytes is the only way not to drift.
 
 use std::sync::LazyLock;

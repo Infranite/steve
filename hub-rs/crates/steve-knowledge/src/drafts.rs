@@ -1,4 +1,4 @@
-//! Conversational configuration of the knowledge base (slice K5, knowledge.md §8, contacts.md §0.8).
+//! Conversational configuration of the knowledge base.
 //!
 //! Draft targets:
 //! - `kb_source:<id>`: fields `name`, `paused`, `visibility`, `level` and, for folders, `include` /
@@ -682,7 +682,7 @@ fn folder_name(path: &std::path::Path) -> String {
         .unwrap_or_else(|| "文件夹".into())
 }
 
-/// `kb_source.create`: the path is checked now (§2.2); a refusal is the only line, with no op.
+/// `kb_source.create`: the path is checked now; a refusal is the only line, with no op.
 fn plan_create(kb: &Knowledge, c: &Connection, viewer: &Viewer, op: &Value) -> ApiResult<Planned> {
     let said = op.get("path").and_then(text_of).unwrap_or_default();
     if said.is_empty() {

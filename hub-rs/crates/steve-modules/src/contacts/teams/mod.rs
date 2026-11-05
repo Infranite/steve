@@ -1,4 +1,4 @@
-//! Teams (slice P2 of steve-rs-plan/modules/contacts.md, §2.4 and the team rows of §3.2): virtual teams you
+//! Teams (slice P2, §2.4 and the team rows of §3.2): virtual teams you
 //! build and edit, org-chart teams that follow the directory sync (only `purpose`, `space_id` and tags are
 //! local), headcounts over the sub-tree, and `team:<id>` as a visibility scope (the scope itself is
 //! [`steve_store::base::Viewer::load`]).
@@ -22,9 +22,9 @@ use super::service::{check_visibility, event, jobs, nullable, own_party, pref, r
 use crate::{ApiError, ApiResult, Caller, Check, Modules};
 use repo::Details;
 
-/// `400` for every change of an org-chart team beyond `purpose`, `space_id` and tags (§2.4, verbatim).
+/// `400` for every change of an org-chart team beyond `purpose`, `space_id` and tags (verbatim).
 pub const CHART_READONLY: &str = "组织架构团队跟随同步，不能改这一项";
-/// `400` of `POST /teams/sync` without a directory connection (§3.2, verbatim).
+/// `400` of `POST /teams/sync` without a directory connection (verbatim).
 pub const NO_DIRECTORY: &str = "还没有接入能读通讯录的账号";
 
 const ROLES: [&str; 2] = ["lead", "member"];
@@ -99,7 +99,7 @@ pub trait TeamSync: Send + Sync {
     ) -> ApiResult<Option<String>>;
 }
 
-// ---------------------------------------------------------------- shapes (§3.1)
+// ---------------------------------------------------------------- shapes
 
 /// A member as the team page shows it.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -148,7 +148,7 @@ pub struct SyncInfo {
 }
 
 /// One directory connection's last sync, for the 组织架构 header: what the app may see and why it
-/// failed (domain-model.md §4: “应用只能看到 N 个部门”).
+/// failed (“应用只能看到 N 个部门”).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct DirectoryStatus {
     pub connection_id: String,
@@ -282,7 +282,7 @@ pub fn team(
     })
 }
 
-/// A team the viewer owns (§0.4); `active` for writes. `404 没有这个团队`.
+/// A team the viewer owns; `active` for writes. `404 没有这个团队`.
 pub fn own_team(
     c: &Connection,
     viewer: &Viewer,

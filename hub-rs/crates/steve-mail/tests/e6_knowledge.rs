@@ -1,4 +1,4 @@
-//! E6 acceptance (email.md §8, §10, §14): a thread added to the knowledge base is searchable at once,
+//! E6 acceptance: a thread added to the knowledge base is searchable at once,
 //! private, at level `reasoning`; a thread becoming `done` submits candidate memories (what you sent
 //! and the last reply) once; the §10 example yields the right change lines, applies and undoes. Plus
 //! the thread routes `archive`, `read` and `to-knowledge`. Fake IMAP/SMTP, a scripted gateway, temp dirs.

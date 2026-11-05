@@ -1,4 +1,4 @@
-//! Attachments (email.md §6): received attachments are only metadata until they are “landed” — taken
+//! Attachments: received attachments are only metadata until they are “landed” — taken
 //! out of the original message and stored as a Steve attachment (`files`, through [`FileStore`]) —
 //! and files an agent attaches to a draft come from its working directory. Both directions copy
 //! bytes across the boundary of a session's working directory, so every path is checked here: nothing
@@ -38,8 +38,8 @@ impl Refused {
     }
 }
 
-/// steve-hub's attachment store (`files.rs` `store`): validates by content (`validate/sniff/cleanName`
-/// of delta-attachments.md), dedupes per workspace + sha256 + name, writes
+/// steve-hub's attachment store (`files.rs` `store`): validates by content (`validate/sniff/cleanName`),
+/// dedupes per workspace + sha256 + name, writes
 /// `data/files/<ws>/<sha[..2]>/<id>` (0600) and the `files` row. The integrator implements it.
 pub trait FileStore: Send + Sync {
     fn store(&self, ws: &str, bytes: &[u8], name: &str, by: &str) -> Result<FileRef, Refused>;
@@ -131,7 +131,7 @@ impl Mail {
         Ok((a, m))
     }
 
-    /// Lands a received attachment (§6): from the original message into `files` (deduped), and
+    /// Lands a received attachment: from the original message into `files` (deduped), and
     /// remembers the file on the attachment row. `Ok(Err(_))` = it cannot be landed, with the reason.
     pub fn land_attachment(
         &self,

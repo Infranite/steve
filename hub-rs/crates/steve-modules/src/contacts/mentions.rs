@@ -1,5 +1,5 @@
-//! The `@` menu (`GET /mention-options`) and the ⌘K party groups (`GET /parties/search`) of slice P3
-//! (contacts.md §3.2, §6). Matching is case-insensitive over names and aliases; names that start with
+//! The `@` menu (`GET /mention-options`) and the ⌘K party groups (`GET /parties/search`) of slice P3.
+//! Matching is case-insensitive over names and aliases; names that start with
 //! the query come before names that only contain it.
 
 use rusqlite::Connection;

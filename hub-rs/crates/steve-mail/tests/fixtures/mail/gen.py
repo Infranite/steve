@@ -1,4 +1,4 @@
-"""Generates the fixture emails for steve-mail (email.md §12). Output is committed; rerun with: python3 -I gen.py <this dir>."""
+"""Generates the fixture emails for steve-mail. Output is committed; rerun with: python3 -I gen.py <this dir>."""
 import base64, quopri, sys, os, zlib, struct
 from email.header import Header
 

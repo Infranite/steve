@@ -1,4 +1,4 @@
-//! IM conversations are Steve conversations (channels-personas.md §2.12, domain-model.md §1.6).
+//! IM conversations are Steve conversations.
 //!
 //! Every space where Steve answers or drafts has exactly one conversation: the messages of
 //! `messages.space = "chan:<space id>"` (the web's 对话 is `space = "steve"`). An inbound message

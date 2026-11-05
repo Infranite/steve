@@ -1,4 +1,4 @@
-//! SQL of the accounts slice (accounts-vault.md §1, tables of migration 5): systems, accounts, their
+//! SQL of the accounts slice (tables of migration 5): systems, accounts, their
 //! handles, match rules, plus the few reads of `connections`, `vault_items` and `merge_proposals` the
 //! account pages and identification need. Writes take a [`Tx`]; the service publishes events.
 
@@ -148,7 +148,7 @@ fn builtin(id: &str) -> Option<System> {
 
 // ---------------------------------------------------------------- accounts
 
-/// An `accounts` row. Never holds secrets: a card is only its last four digits (§2.1).
+/// An `accounts` row. Never holds secrets: a card is only its last four digits.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Account {
     pub id: String,
@@ -299,7 +299,7 @@ pub fn update(tx: &Tx, id: &str, p: &AccountPatch, revision: Option<i64>) -> Res
     Ok(())
 }
 
-/// Deletes an account and its handle rows; vault items linked to it keep existing, unlinked (§2.1).
+/// Deletes an account and its handle rows; vault items linked to it keep existing, unlinked.
 pub fn delete(tx: &Tx, id: &str) -> Result<()> {
     tx.run(
         "UPDATE vault_items SET account_id = NULL WHERE account_id = ?",
@@ -489,7 +489,7 @@ pub struct ItemRef {
 }
 
 /// Active vault items linked to an account that `user` may see: the shared vault and their own
-/// personal vault (the system vault never shows up, §4.1).
+/// personal vault (the system vault never shows up).
 pub fn vault_items_of(c: &Connection, account: &str, user: &str) -> Result<Vec<ItemRef>> {
     let mut st = c.prepare_cached(
         "SELECT i.id, i.title FROM vault_items i JOIN vaults v ON v.id = i.vault_id
@@ -605,7 +605,7 @@ pub fn rule_update(tx: &Tx, id: &str, enabled: bool, config: &PrefixConfig) -> R
 
 // ---------------------------------------------------------------- merge proposals
 
-/// Writes an open merge proposal (contacts.md §2.7); `false` if the same pair already has one open.
+/// Writes an open merge proposal; `false` if the same pair already has one open.
 #[allow(clippy::too_many_arguments)]
 pub fn proposal_insert(
     tx: &Tx,

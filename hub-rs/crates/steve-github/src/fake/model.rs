@@ -651,7 +651,7 @@ pub fn login_id(login: &str) -> u64 {
         + 1_000
 }
 
-/// The permissions the manifest in github.md §1.1 requests.
+/// The permissions Steve's App manifest requests.
 pub fn app_permissions() -> Value {
     json!({"metadata": "read", "contents": "write", "pull_requests": "write", "issues": "write",
            "checks": "read", "actions": "write", "statuses": "read"})

@@ -1,4 +1,4 @@
-//! Pushing an item's branch (github.md §4.1, §12). The Hub pushes, never the agent, and the token
+//! Pushing an item's branch. The Hub pushes, never the agent, and the token
 //! never meets anything the agent controls:
 //!
 //! - the worktree's `origin` must be `github.com/<owner>/<name>` of the linked repo, else refused;

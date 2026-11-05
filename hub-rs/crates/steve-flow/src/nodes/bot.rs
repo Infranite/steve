@@ -1,4 +1,4 @@
-//! `bot`: `{bot_id?, instruction, branches:[label], fields?:[name]}` (signals-automation.md §3.2).
+//! `bot`: `{bot_id?, instruction, branches:[label], fields?:[name]}`.
 //!
 //! One call to the model gateway's fast tier (60 s, no ACP session). The prompt is the bot's duty
 //! (`role`) and working rules (`rules`), the instruction, the event's summary and original text

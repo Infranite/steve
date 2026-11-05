@@ -1,4 +1,4 @@
-//! Conversational configuration for the module targets (§0.8): drafts stored in `changesets` as an
+//! Conversational configuration for the module targets: drafts stored in `changesets` as an
 //! ordered list of operations `{"op":"<module>.<verb>", …}`, applied in one transaction, undoable for 24
 //! hours in reverse order. Modules register a [`DraftTarget`] per `target.kind` and a [`ChangeOp`] per
 //! operation; this file owns the flow around them.

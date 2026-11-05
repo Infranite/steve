@@ -1,4 +1,4 @@
-//! Fake SMTP submission server (email.md §12): `EHLO`/`HELO`, `STARTTLS`,
+//! Fake SMTP submission server: `EHLO`/`HELO`, `STARTTLS`,
 //! `AUTH PLAIN`/`AUTH LOGIN`, `MAIL FROM`, `RCPT TO`, `DATA` (dot
 //! un-stuffing), `RSET`, `NOOP`, `QUIT`. Accepted messages land in
 //! [`FakeSmtp::sent`] and, when a [`FakeImap`] is attached, in the INBOX of

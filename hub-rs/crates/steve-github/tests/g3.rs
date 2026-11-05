@@ -1,4 +1,4 @@
-//! G3 acceptance (github.md §13): a PR is linked by branch name and by `ST-12` in its title;
+//! G3 acceptance: a PR is linked by branch name and by `ST-12` in its title;
 //! accepting an item opens a `gh_pr_open` decision and pushes / opens nothing until you say yes;
 //! after yes the fake remote has the branch, the fake GitHub has the PR, and the item has the PR
 //! artifact; `finish_on=merged` asks to merge only when the checks are green, a new head is a 409,

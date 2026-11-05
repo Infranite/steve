@@ -1,14 +1,14 @@
-//! The shared base every new Hub module builds on (slice B0 of steve-rs-plan/modules/contacts.md §0):
+//! The shared base every new Hub module builds on (slice B0):
 //!
 //! - [`ApiError`] and the extractors ([`Caller`], [`Body`], [`Check`]): the error-code conventions of §0.4;
 //! - [`Modules`]: the state module routers run on (store, model gateway, registries);
 //! - [`changes`]: persisted conversational-config drafts as operation lists, apply/undo in one
-//!   transaction, `409` when the target moved, 24-hour undo (§0.8);
+//!   transaction, `409` when the target moved, 24-hour undo;
 //! - [`decisions`]: dispatch of `POST /api/decisions/:id` to the module that opened the decision, and the
 //!   `confirm` kind (§0.1 point 6);
-//! - [`own`]: the `own_<x>(ws, me, id)` check (§0.4);
-//! - [`sse`]: which subscribers get a module event (§0.6);
-//! - B1, the seams between modules and steve-core (modules/build-plan.md §1): [`gateway`] (model calls),
+//! - [`own`]: the `own_<x>(ws, me, id)` check;
+//! - [`sse`]: which subscribers get a module event;
+//! - B1, the seams between modules and steve-core: [`gateway`] (model calls),
 //!   [`hooks`] (item lifecycle), [`context`] (extra prompt context), [`panels`] (item sidebar panels),
 //!   [`outbound`] (disclosure check), [`clock`]; decision handlers are in [`decisions`];
 //! - [`net`]: the `STEVE_FORBID_REAL_HOSTS=1` guard every outbound client calls before connecting.
@@ -314,7 +314,7 @@ impl Owned for Mem {
     }
 }
 
-/// `own_<x>(ws, me, id)` (§0.4): exists, in the viewer's workspace, visible to them; otherwise
+/// `own_<x>(ws, me, id)`: exists, in the viewer's workspace, visible to them; otherwise
 /// `404 没有这个<noun>`. Also for objects referenced from a request body (with their own noun).
 pub fn own<T: Owned>(x: Option<T>, viewer: &Viewer, noun: &str) -> ApiResult<T> {
     match x {

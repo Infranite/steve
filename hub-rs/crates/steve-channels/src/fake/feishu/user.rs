@@ -1,4 +1,4 @@
-//! User identity (feishu-lark-cli.md §2.4): OAuth authorization code + PKCE, refresh with
+//! User identity: OAuth authorization code + PKCE, refresh with
 //! single-use refresh tokens, and the device flow lark-cli uses.
 //!
 //! The real authorize page and the device-flow endpoints live on `accounts.feishu.cn`; the

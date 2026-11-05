@@ -1,4 +1,4 @@
-//! SQL for sources, documents, marks and uses (knowledge.md §1). Only plain row access here; the
+//! SQL for sources, documents, marks and uses. Only plain row access here; the
 //! chunk/FTS writes are in [`crate::index`], retrieval in [`crate::retrieve`].
 
 use rusqlite::types::Value as Sql;
@@ -109,7 +109,7 @@ impl DocRow {
         })
     }
 
-    /// Effective visibility: the document's own, else the source's (§1).
+    /// Effective visibility: the document's own, else the source's.
     pub fn eff_visibility(&self, s: &SourceRow) -> Visibility {
         self.visibility
             .clone()
@@ -442,7 +442,7 @@ pub fn member_count(c: &Connection, ws: &str) -> Result<i64> {
     )
 }
 
-/// Does `r` name an object of this workspace the user may refer to? Used for `about` lists (§0.4).
+/// Does `r` name an object of this workspace the user may refer to? Used for `about` lists.
 pub fn ref_exists(c: &Connection, ws: &str, me: &str, r: &ObjRef) -> Result<bool> {
     let sql = match r.kind.as_str() {
         "me" => return Ok(r.id == me || r.id == "me"),
@@ -599,7 +599,7 @@ pub fn delete_mark(tx: &Tx, ws: &str, name: &str) -> Result<()> {
     Ok(())
 }
 
-/// An uploaded file (`files`, delta-attachments.md) of the workspace.
+/// An uploaded file (`files`) of the workspace.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileInfo {
     pub id: String,

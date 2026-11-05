@@ -1,4 +1,4 @@
-//! REST handlers of slice K1 (knowledge.md §6.2), relative to `/api`. Thin: parse, run the
+//! REST handlers of slice K1, relative to `/api`. Thin: parse, run the
 //! service off the runtime, answer.
 
 use axum::extract::{Path, Query, State};
@@ -214,7 +214,7 @@ async fn sync_source(
     ))
 }
 
-/// Adds the attachment and indexes it before answering (§2.1: “加入即入库”).
+/// Adds the attachment and indexes it before answering (“加入即入库”).
 async fn add_file(
     State(m): State<Modules>,
     Extension(kb): Kb,

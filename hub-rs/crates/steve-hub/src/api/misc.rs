@@ -488,7 +488,7 @@ fn thread_result((o, already): (Obj, bool)) -> ApiResult {
     ok(Value::Object(o))
 }
 
-/// `POST /api/thread/:id/reroute {to: "inline" | "item" | "item:<ST-n>"}` (thread-routing §3.5).
+/// `POST /api/thread/:id/reroute {to: "inline" | "item" | "item:<ST-n>"}`.
 pub async fn thread_reroute(
     State(st): State<AppState>,
     Extension(c): Extension<Ctx>,
@@ -506,7 +506,7 @@ pub async fn thread_reroute(
     thread_result(st.domain.reroute(&c.ws, &id, &to).await?)
 }
 
-/// `POST /api/thread/:id/offer {take: bool}` (§3.4).
+/// `POST /api/thread/:id/offer {take: bool}`.
 pub async fn thread_offer(
     State(st): State<AppState>,
     Extension(c): Extension<Ctx>,
@@ -523,7 +523,7 @@ pub async fn thread_offer(
     thread_result(st.domain.offer(&c.ws, &id, take).await?)
 }
 
-/// `POST /api/thread/:id/suggest {choice: "here" | "item" | "new"}` (§3.4).
+/// `POST /api/thread/:id/suggest {choice: "here" | "item" | "new"}`.
 pub async fn thread_suggest(
     State(st): State<AppState>,
     Extension(c): Extension<Ctx>,
@@ -571,7 +571,7 @@ pub async fn thread_a2ui(
     ))
 }
 
-/// `POST /api/thread/runs/:id/stop` and `DELETE /api/thread/runs/:id` (§7.2): stop a research run or take
+/// `POST /api/thread/runs/:id/stop` and `DELETE /api/thread/runs/:id`: stop a research run or take
 /// a queued one off the queue.
 pub async fn thread_run_stop(
     State(st): State<AppState>,
@@ -581,7 +581,7 @@ pub async fn thread_run_stop(
     ok(json!({ "ok": st.domain.stop_run(&c.ws, &id).await? }))
 }
 
-/// `PATCH /api/items/:id/thread {follow: bool}` (§7.2).
+/// `PATCH /api/items/:id/thread {follow: bool}`.
 pub async fn item_thread_follow(
     State(st): State<AppState>,
     Extension(c): Extension<Ctx>,

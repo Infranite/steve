@@ -1,4 +1,4 @@
-//! What the runner reports for statistics (stats.md §2.2), against the fake adapter.
+//! What the runner reports for statistics, against the fake adapter.
 mod common;
 
 use std::time::Duration;

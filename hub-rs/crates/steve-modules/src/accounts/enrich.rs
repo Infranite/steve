@@ -1,11 +1,11 @@
-//! Completing an identity after it was identified (domain-model.md §2): what a provider tells later
+//! Completing an identity after it was identified: what a provider tells later
 //! about an account — a name, more handles, an email, an avatar, the organization (tenant) — is
 //! written back here, and the account's person is settled without asking when the evidence is good:
 //!
 //! - a name fills the account's empty `display_name` and the person's name while that is still empty
 //!   or a raw handle (`ou_…`); a name you set is never overwritten;
 //! - an unconfirmed person who now has a name from the provider becomes a real contact (the directory
-//!   or the chat member list is an exact source, contacts.md §2.5);
+//!   or the chat member list is an exact source);
 //! - a handle or email that already belongs to someone else is strong evidence: the two people are
 //!   merged (the unconfirmed one into the other), never the other way round for two real people;
 //! - the organization is linked with a `works_at` job when the person has none yet.

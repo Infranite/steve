@@ -1,4 +1,4 @@
-//! Statistics marks (stats.md slice ST3): every status change leaves exactly one `status` mark, and the
+//! Statistics marks: every status change leaves exactly one `status` mark, and the
 //! orchestrator marks deliveries, fail cards and release outcomes.
 
 use crate::Check;

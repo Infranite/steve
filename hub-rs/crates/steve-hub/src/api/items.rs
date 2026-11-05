@@ -498,8 +498,8 @@ pub async fn panel_action(
     )
 }
 
-/// `POST /items/:id/lifecycle {command, expected_cycle, expected_revision, reason?, goal?}`
-/// (API-CONTRACT.txt §2): `200 {item}`; `409 {error, lifecycle}` when the item changed or the phase
+/// `POST /items/:id/lifecycle {command, expected_cycle, expected_revision, reason?, goal?}`:
+/// `200 {item}`; `409 {error, lifecycle}` when the item changed or the phase
 /// does not allow the command.
 pub async fn lifecycle(
     State(st): State<AppState>,

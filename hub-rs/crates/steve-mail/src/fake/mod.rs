@@ -1,4 +1,4 @@
-//! Fake mail providers for tests (email.md §12): IMAP, SMTP submission, the
+//! Fake mail providers for tests: IMAP, SMTP submission, the
 //! Gmail API and Microsoft Graph mail, plus real-world-shaped fixture emails.
 //!
 //! Every server is started on a random port of 127.0.0.1 and returns a cheap,

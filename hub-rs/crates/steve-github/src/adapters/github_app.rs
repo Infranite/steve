@@ -1,4 +1,4 @@
-//! `github_app`: one installation of a Steve GitHub App (§1.1). Created by the manifest flow
+//! `github_app`: one installation of a Steve GitHub App. Created by the manifest flow
 //! ([`crate::manifest`]), never from the generic dialog (`AuthKind::Managed`). The connection's
 //! credential holds the App's private key and webhook secret (a copy of the App's own item, so the
 //! connection can be re-verified, minted and disconnected on its own); `config` holds

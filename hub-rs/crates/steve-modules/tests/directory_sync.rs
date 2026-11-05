@@ -1,4 +1,4 @@
-//! Slice P6 acceptance (contacts.md §9, §7): a fake directory synced twice (the second time one
+//! Slice P6 acceptance: a fake directory synced twice (the second time one
 //! department is gone and one person moved) → the team is dissolved, member rows follow, no contact is
 //! deleted — plus renames, departures, returns, matching people to existing contacts by email and by
 //! handle, scheduling (POST /teams/sync, daily 06:00, debounced events) and failure paths.

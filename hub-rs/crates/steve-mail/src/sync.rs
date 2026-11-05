@@ -1,4 +1,4 @@
-//! The sync job (email.md §3.2): one sync at a time per mailbox; folders and their scope modes
+//! The sync job: one sync at a time per mailbox; folders and their scope modes
 //! (`source_settings.scopes`, new folders get the defaults); the adapter fills a [`StoreSink`]; folder
 //! state, cursor and health are written back; then one SSE per changed thread. Each new mail's event
 //! was put in the outbox with the mail ([`crate::outbox`]).

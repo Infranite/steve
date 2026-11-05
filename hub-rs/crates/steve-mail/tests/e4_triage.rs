@@ -1,4 +1,4 @@
-//! E4 acceptance (email.md §4, §14): with the “邮件分诊” template installed, notification mail goes
+//! E4 acceptance: with the “邮件分诊” template installed, notification mail goes
 //! to the digest without a model call; mail that needs a reply gets a draft and an approval decision
 //! (event outcome `need`), and nothing is sent; later mail of the same thread supplements the item made
 //! from the first one; dry runs do not draft; `mail.archive` / `mail.mark_read` run without approval;

@@ -1,4 +1,4 @@
-//! Migration 4 and the shared base repositories (contacts.md §0, §1.1; B0 acceptance).
+//! Migration 4 and the shared base repositories (B0 acceptance).
 
 mod common;
 

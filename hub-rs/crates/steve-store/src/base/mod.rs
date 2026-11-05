@@ -1,4 +1,4 @@
-//! The shared base of the new modules (contacts.md §0, §1.1; migration 4): visibility scopes, disclosure
+//! The shared base of the new modules (migration 4): visibility scopes, disclosure
 //! levels, memories, entity tags, generic links, persisted changesets, decisions opened inside a
 //! transaction, audit and revisions.
 //!
@@ -25,7 +25,7 @@ use serde_json::{Value, json};
 use crate::repo::to_json;
 use crate::{Result, Tx, now};
 
-/// Who can see an object (§0.5). Stored and sent as its code: `workspace`, `private`, `team:<id>`, `space:<id>`.
+/// Who can see an object. Stored and sent as its code: `workspace`, `private`, `team:<id>`, `space:<id>`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Visibility {
     /// Every member of the workspace.
@@ -92,7 +92,7 @@ impl<'de> Deserialize<'de> for Visibility {
     }
 }
 
-/// Disclosure level of a fact (§0.5). `Never` content never leaves the database: not in search results,
+/// Disclosure level of a fact. `Never` content never leaves the database: not in search results,
 /// MCP answers or prompts. The other three travel with their level so the channel module can check
 /// what an outgoing message reveals.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -135,7 +135,7 @@ impl Level {
     }
 }
 
-/// The line `steve_contacts_find` and other prompt builders end with (contacts.md §4, verbatim).
+/// The line `steve_contacts_find` and other prompt builders end with (verbatim).
 pub const LEVELS_NOTE: &str = "Levels: public = can be quoted; conclusion = state conclusions only; reasoning = use for reasoning, never mention.";
 
 /// Decision kinds. The modules add exactly one, `confirm` (确认候选, options `yes`/`no`).
@@ -188,7 +188,7 @@ impl Viewer {
     }
 
     /// Loads the team scopes: every team the user's contact (“我”, `parties.user_id`) is a direct member
-    /// of, plus all their ancestors, because a member of a sub-team counts as a member of the parent (§2.4).
+    /// of, plus all their ancestors, because a member of a sub-team counts as a member of the parent.
     pub fn load(c: &Connection, ws: &str, user: &str) -> Result<Self> {
         let mut st = c.prepare_cached(
             "WITH RECURSIVE mine(id) AS (
@@ -247,7 +247,7 @@ impl Viewer {
     }
 }
 
-/// `visible_sql(alias, me)` (§0.5): an SQL condition and its positional parameters, to splice into a
+/// `visible_sql(alias, me)`: an SQL condition and its positional parameters, to splice into a
 /// query at the place where `sql` appears.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Scope {
@@ -318,7 +318,7 @@ pub fn show(v: &str) -> String {
 }
 
 /// `audit(ws, actor, action, target, detail)` inside a transaction. `action` is `<object>.<verb>`;
-/// `detail` must not contain secret values or message text (§0.7).
+/// `detail` must not contain secret values or message text.
 pub fn audit(
     tx: &Tx,
     ws: &str,
@@ -334,7 +334,7 @@ pub fn audit(
     Ok(())
 }
 
-/// Writes `revisions(object_type, object_id, version, patch={before,after}, author)` (§0.7). The caller
+/// Writes `revisions(object_type, object_id, version, patch={before,after}, author)`. The caller
 /// bumps the object's own `revision` column to `version` in the same transaction.
 #[allow(clippy::too_many_arguments)]
 pub fn revision(

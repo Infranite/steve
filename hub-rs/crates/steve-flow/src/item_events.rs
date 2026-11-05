@@ -1,4 +1,4 @@
-//! Item state changes as events (signals-automation.md §6): steve-core calls [`ingest_item_event`]
+//! Item state changes as events: steve-core calls [`ingest_item_event`]
 //! after an item is finished or dropped; the event (`source=item`, `item.done` / `item.dropped`)
 //! goes through the normal pipeline ([`crate::ingest()`]), so it can start a flow whose trigger is
 //! `{source:"item", types:[…]}` or wake a `wait(event)` with `match.source = "item"` (the “前置完成”

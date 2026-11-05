@@ -1,4 +1,4 @@
-//! C5 + C6 acceptance (channels-personas.md §11): the disclosure check (another group's customer in
+//! C5 + C6 acceptance: the disclosure check (another group's customer in
 //! a `reasoning` source → flagged and rewritten; the audience inside the source's scope → public;
 //! two failed rewrites → a draft, even with a grant; a secret → blocked) and the outbound path (a
 //! bot's `reply` rule sends with the persona's signature and a basis; your own account always
@@ -1741,7 +1741,7 @@ async fn your_own_messages_go_out_with_your_user_token_once_approved() {
     );
 }
 
-/// YOLO (user decision 2026-11-01 §2): a message in your own name that YOLO approved goes out with
+/// YOLO: a message in your own name that YOLO approved goes out with
 /// `[AI] ` in front; the same message approved by you goes out as written, and a mark the text
 /// brought along is removed — only the outbound path puts it there.
 #[tokio::test(flavor = "multi_thread")]

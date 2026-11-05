@@ -1,4 +1,4 @@
-//! 归属与负责人 (steve-rs-plan/modules/ownership.md): who is responsible for the objects that are not a
+//! 归属与负责人: who is responsible for the objects that are not a
 //! person's own identity — app bots, service accounts, shared mailboxes, connections, devices, Steve's
 //! bots, personas, bot parties and spaces. Whose identity an account is stays `accounts.party_id`.
 //!
@@ -8,9 +8,9 @@
 //! - edits by hand go through change records: the operations `steward.set` / `steward.remove`
 //!   ([`SetOp`], [`RemoveOp`]) stored and applied as a changeset ([`set`], [`remove`]), undoable for 24
 //!   hours through `POST /api/config/:id/undo` like every contact edit;
-//! - defaults (§3): [`seed_defaults`] when “我” is first created, [`adopt`] for a new bot, persona or
+//! - defaults: [`seed_defaults`] when “我” is first created, [`adopt`] for a new bot, persona or
 //!   connection, [`link`] for what a provider tells (source `sync`);
-//! - proposals from chat (§3): [`propose`] writes a `proposed` row and opens a `confirm` decision whose
+//! - proposals from chat: [`propose`] writes a `proposed` row and opens a `confirm` decision whose
 //!   handler is [`StewardConfirm`];
 //! - merges move the rows with the person ([`merge_move`], [`split_back`]).
 
@@ -550,7 +550,7 @@ pub struct Holding {
     pub others: Vec<StewardOut>,
 }
 
-/// `GET /people/:id/holdings`: 名下 (§4) — own identities by system, then what the person is
+/// `GET /people/:id/holdings`: 名下 — own identities by system, then what the person is
 /// responsible for.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Holdings {
@@ -1054,7 +1054,7 @@ impl ChangeOp for RemoveOp {
     }
 }
 
-// ---------------------------------------------------------------- defaults (§3)
+// ---------------------------------------------------------------- defaults
 
 /// Links `object` to `person` unless that row exists already; a proposed row is confirmed. Returns
 /// whether something was written. For system writes (connect, sync, seed), audited as `steward.link`.
@@ -1177,7 +1177,7 @@ pub fn seed_defaults(tx: &Tx, ws: &str, me: &Party) -> ApiResult<usize> {
     Ok(n)
 }
 
-/// Whose a connection is (§3): the person whose account it is, else the connecting user's “我”.
+/// Whose a connection is: the person whose account it is, else the connecting user's “我”.
 pub fn connection_owner(
     c: &Connection,
     ws: &str,
@@ -1196,7 +1196,7 @@ pub fn connection_owner(
         .map(|p| p.id))
 }
 
-/// A new bot party (`contact_kind = bot`, §1) for a non-person actor: an app bot on connect, another
+/// A new bot party (`contact_kind = bot`) for a non-person actor: an app bot on connect, another
 /// bot seen in a chat. Nobody owns it yet.
 pub fn new_bot_party(tx: &Tx, ws: &str, actor: &str, name: &str, source: &str) -> ApiResult<Party> {
     let name: String = name.trim().chars().take(80).collect();
@@ -1221,7 +1221,7 @@ pub fn new_bot_party(tx: &Tx, ws: &str, actor: &str, name: &str, source: &str) -
     Ok(p)
 }
 
-// ---------------------------------------------------------------- proposals from chat (§3)
+// ---------------------------------------------------------------- proposals from chat
 
 /// What [`propose`] did.
 #[derive(Debug, Clone, PartialEq)]

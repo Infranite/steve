@@ -1,4 +1,4 @@
-//! Keeping originals only as long as the user chose (signals-automation.md §2.4, job
+//! Keeping originals only as long as the user chose (job
 //! `flow.retention`): after `keepRaw` days an event's payload is dropped, and so are the contexts and
 //! step inputs/outputs of the runs that handled it (nodes, branches and timings stay); the event row
 //! itself — summary and triage result — goes after a year.

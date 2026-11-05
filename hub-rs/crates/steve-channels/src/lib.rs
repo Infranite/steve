@@ -1,6 +1,5 @@
 //! Channels, external personas and the Feishu adapter
 //!
-//! Spec: steve-rs-plan/modules/channels-personas.md, feishu.md.
 //!
 //! C1 (spaces and messages): [`channel`] (the [`ChannelAdapter`] seam and [`InboundMessage`]),
 //! [`spaces`], [`messages`] (with the `channels.retention` job and the contact timeline),
@@ -68,7 +67,7 @@
 //! contacts_ports.timelines.push(steve_channels::messages::MessageTimeline::arc());
 //! contacts_ports.spaces = Some(Arc::new(steve_channels::spaces::Spaces));
 //! tokio::spawn(steve_channels::messages::retention(modules.clone()));   // `channels.retention`
-//! // the Feishu long connection, one per `feishu_app` connection (feishu-lark-cli.md §2.2):
+//! // the Feishu long connection, one per `feishu_app` connection:
 //! steve_channels::adapters::feishu::inbound::LongConnections::new(channels.clone()).start_all().await;
 //! ```
 //!

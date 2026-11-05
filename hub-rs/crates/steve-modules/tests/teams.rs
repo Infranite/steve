@@ -1,4 +1,4 @@
-//! Slice P2 acceptance (contacts.md §9): virtual teams (fewer than two members → 400), member changes
+//! Slice P2 acceptance: virtual teams (fewer than two members → 400), member changes
 //! write revisions, org-chart teams refuse a new name with 400, `headcount` includes sub-teams, and
 //! `team:<id>` visibility reaches members — plus the other branches of the `/teams` routes.
 

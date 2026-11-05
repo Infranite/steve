@@ -1,4 +1,4 @@
-//! K2 acceptance (knowledge.md §12): every refusal of the folder path check, links out of the
+//! K2 acceptance: every refusal of the folder path check, links out of the
 //! folder are not read, changed files are re-chunked and vanished ones become `deleted`, front
 //! matter `steve.level: never` takes effect, tokens are stored as “［已拦下的机密］”; plus the
 //! source writes and `POST /kb/files`.

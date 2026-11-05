@@ -1,4 +1,4 @@
-//! `flow.scheduler` (schedules.md §4): claims due time triggers, applies the missed-run and overlap
+//! `flow.scheduler`: claims due time triggers, applies the missed-run and overlap
 //! rules, starts runs, and picks up due retries. Claiming is one conditional `UPDATE` per trigger
 //! (`… WHERE next_at = :old`), so two loops never start the same planned run twice.
 

@@ -1,4 +1,4 @@
-//! E1 acceptance (email.md §14): connect → the 30-day look-back is all `recorded` and runs no flow;
+//! E1 acceptance: connect → the 30-day look-back is all `recorded` and runs no flow;
 //! a new message afterwards → one `mail.new` event and the sender identified; a reply chain is one
 //! thread; no duplicates after UIDVALIDITY changes; GBK and RFC 2047 parse; after retention the raw
 //! file is gone and the snippet stays. All against the in-process fake IMAP/SMTP servers.

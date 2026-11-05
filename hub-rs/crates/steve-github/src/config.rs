@@ -1,4 +1,4 @@
-//! Conversational configuration (github.md §9): the `gh_repo` draft target (`gh_repo:<ghr>`) with
+//! Conversational configuration: the `gh_repo` draft target (`gh_repo:<ghr>`) with
 //! the repo's project and its §3.4 settings, and the `github.comment` grant: its Chinese name and
 //! how a grant draft names the bot, the repo and the hours ([`CommentGrants`], a
 //! [`GrantCapability`] for accounts-vault's `grant.add` drafting).

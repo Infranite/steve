@@ -1,5 +1,5 @@
-//! Who is behind a Feishu id: the [`ProfileAdapter`] of both identities of an app (domain-model.md
-//! §2 “补全资料”). [`crate::names`] asks you (`feishu_user`) first, then the bot (`feishu_app`).
+//! Who is behind a Feishu id: the [`ProfileAdapter`] of both identities of an app.
+//! [`crate::names`] asks you (`feishu_user`) first, then the bot (`feishu_app`).
 //!
 //! One lookup, each step only when the previous left names open:
 //! 1. a chat's members, `GET im/v1/chats/{chat_id}/members?member_id_type=open_id`, every page:

@@ -1,4 +1,4 @@
-//! The `imap` adapter (email.md §1, §3.2): any mailbox with IMAP + SMTP and an app password.
+//! The `imap` adapter: any mailbox with IMAP + SMTP and an app password.
 //!
 //! - TLS only: IMAP implicit TLS or STARTTLS, SMTP 465 or 587 + STARTTLS; certificates checked
 //!   against the system roots (plus the guarded test root, [`MailConfig`]).
@@ -60,7 +60,7 @@ const NET_TIMEOUT: Duration = Duration::from_secs(30);
 /// LOGOUT is a courtesy: a server that does not answer it holds nothing up for long.
 const LOGOUT_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Provider presets for the new-mailbox dialog (§1). `id` is the preset, not an adapter.
+/// Provider presets for the new-mailbox dialog. `id` is the preset, not an adapter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct Preset {
     pub id: &'static str,
@@ -866,7 +866,7 @@ impl ImapAdapter {
             let seen = i64::from(mb.uid_next.unwrap_or(1)).saturating_sub(1);
             f.last_uid = Some(f.last_uid.unwrap_or(0).max(seen));
         }
-        // flags (§3.2)
+        // flags
         let last = f.last_uid.unwrap_or(0);
         if !first && last > 0 {
             if caps.condstore

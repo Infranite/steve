@@ -1,4 +1,4 @@
-//! accounts-vault.md §10 rules 1, 6, 7 for slice A2 (the V1/V2 scan is `vault_secrets.rs`): after
+//! The vault's secret rules for slice A2 (the V1/V2 scan is `vault_secrets.rs`): after
 //! OAuth round trips (Gmail, Outlook, Feishu user), refreshes with rotating single-use refresh
 //! tokens, a revoked grant (→ reauth), a credential form (Feishu app) with good, wrong and malformed
 //! bodies, minted tenant tokens, re-authorization and disconnects, no OAuth client secret, PKCE

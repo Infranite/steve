@@ -1,4 +1,4 @@
-//! What an event source implements ([`EventAdapter`], signals-automation.md §2.1) and what every
+//! What an event source implements ([`EventAdapter`]) and what every
 //! producer of events hands to [`crate::ingest()`] ([`RawEvent`]).
 //!
 //! Two ways in:
@@ -108,7 +108,7 @@ pub enum AdapterError {
     Malformed(String),
 }
 
-/// Who an event is from. Either a handle to identify (accounts §2.3) or an account the caller already
+/// Who an event is from. Either a handle to identify or an account the caller already
 /// identified itself (mail and GitHub do their own `identify` while storing).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ActorRef {
@@ -144,8 +144,7 @@ impl ActorRef {
     }
 }
 
-/// One event as its producer saw it (§2.1, plus `also` from email.md §3.5 and the channel fields of
-/// channels-personas.md §3).
+/// One event as its producer saw it (plus the mail `also` and the channel fields).
 #[derive(Debug, Clone, PartialEq)]
 pub struct RawEvent {
     /// `mail | cal | im | github | webhook | time | item | manual`.
@@ -217,7 +216,7 @@ impl RawEvent {
     }
 }
 
-/// An event source (§2.1). Extends the connection adapter of the accounts module: the same object is
+/// An event source. Extends the connection adapter of the accounts module: the same object is
 /// registered with `Connections` (how Steve gets in) and with [`crate::FlowSetup::event_adapter`]
 /// (what it receives). Its `id()` is the `connections.adapter` it serves.
 #[async_trait]
@@ -260,7 +259,7 @@ impl Ingested {
     }
 }
 
-/// Why an event was dropped (§2.2 step 1).
+/// Why an event was dropped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DropReason {
     /// The source is paused (nothing is received meanwhile, nothing caught up later).

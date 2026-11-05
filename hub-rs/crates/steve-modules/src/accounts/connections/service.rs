@@ -1,4 +1,4 @@
-//! The connection rules (accounts-vault.md §2.2, §5.2, §9): connecting (OAuth code + PKCE, device
+//! The connection rules: connecting (OAuth code + PKCE, device
 //! flow, credential form, module-managed), the credential in the system vault, token refresh with
 //! single-use refresh tokens committed before use, health with backoff and the `reauth` decision,
 //! pause, capabilities, disconnect.
@@ -45,7 +45,7 @@ pub const REAUTH_OPTIONS: [&str; 2] = ["reauth", "pause"];
 const MINUTE: i64 = 60_000;
 /// On-demand refresh / re-mint this long before expiry.
 const USE_MARGIN_MS: i64 = 5 * MINUTE;
-/// The refresh job refreshes this long before expiry (§9).
+/// The refresh job refreshes this long before expiry.
 const JOB_MARGIN_MS: i64 = 10 * MINUTE;
 /// Health backoff: 15 min × 2^(fails-1), at most 6 h.
 const BACKOFF_BASE_MS: i64 = 15 * MINUTE;
@@ -131,7 +131,7 @@ pub trait ConnectionUsage: Send + Sync {
     }
 }
 
-// ---------------------------------------------------------------- shapes (§5.1)
+// ---------------------------------------------------------------- shapes
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct HealthOut {
@@ -671,7 +671,7 @@ impl Connections {
 
     // ------------------------------------------------------------ connecting
 
-    /// Stores the credential, verifies it, then upserts the account and connection (§2.2). The
+    /// Stores the credential, verifies it, then upserts the account and connection. The
     /// common end of every way in; modules with their own flows (the GitHub App installation) call it
     /// directly with the secrets and config they collected. `reauth_of`: the credential must belong
     /// to that connection's account.
@@ -920,7 +920,7 @@ struct Upsert {
 }
 
 impl Connections {
-    /// Default 负责人 on connect (ownership.md §3): the connection is owned by the person whose
+    /// Default 负责人 on connect: the connection is owned by the person whose
     /// account it is, else by the connecting user; a bot party is owned by the person the provider
     /// names (source `sync`), else by the connecting user (source `connect`). Objects that have
     /// stewards already keep them.
@@ -1656,7 +1656,7 @@ impl Connections {
         Ok(self.out(&r))
     }
 
-    /// `DELETE /connections/:id` (§2.2): revoke at the provider when possible, destroy the
+    /// `DELETE /connections/:id`: revoke at the provider when possible, destroy the
     /// credential (its data key), delete the row; the account stays, only recorded.
     pub async fn disconnect(&self, who: &Caller, id: &str) -> VaultResult<Usage> {
         let usage = self.usage(who, id)?;
@@ -1928,7 +1928,7 @@ impl Connections {
 
     // ------------------------------------------------------------ health
 
-    /// Records an outcome (§2.2): `Ok` resets (and leaves `reauth`/`error`), `Auth` → `reauth` plus
+    /// Records an outcome: `Ok` resets (and leaves `reauth`/`error`), `Auth` → `reauth` plus
     /// one open decision, `Failed` counts with backoff and → `error` after 3. Paused and revoked
     /// connections are left alone.
     pub async fn record(&self, ws: &str, id: &str, h: Health) {
@@ -2081,7 +2081,7 @@ impl Connections {
         self.get(who, id)
     }
 
-    // ------------------------------------------------------------ jobs (§9)
+    // ------------------------------------------------------------ jobs
 
     /// `vault.token_refresh`: OAuth connections expiring within 10 minutes, not in backoff.
     /// Returns how many were refreshed.

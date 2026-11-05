@@ -1,4 +1,4 @@
-//! C1 acceptance (channels-personas.md §11) on the [`FakeChannel`]: a pushed message creates its
+//! C1 acceptance on the [`FakeChannel`]: a pushed message creates its
 //! space, identifies the sender and reaches `ext_events`; a new group opens a decision; the bot's
 //! own messages are not processed; purged text is NULL; the message is on the contact timeline.
 //! Plus the `/spaces` routes, duplicates, `im.*` types, other bots, and the loop guard.

@@ -1,4 +1,4 @@
-//! Text extraction and normalization (knowledge.md §2.3).
+//! Text extraction and normalization.
 //!
 //! Every format ends as normalized UTF-8 text plus a [`TextKind`] telling the chunker whether
 //! to look for Markdown headings. Parsers of untrusted binary formats (PDF, docx) run under

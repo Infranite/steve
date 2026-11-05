@@ -1,4 +1,4 @@
-//! Built-in item templates (accounts-vault.md §1 seeds, fields as the prototype's `TPL_FIELDS`). They
+//! Built-in item templates. They
 //! are seeded once into `vault_templates` under workspace `*`; a template's `secret` flags are the
 //! authority when an item is created (a client can't store a template's secret field in the clear).
 
@@ -30,9 +30,9 @@ impl Template {
     }
 }
 
-/// The template of connection credentials: system vault only, never listed (§1, §2.2).
+/// The template of connection credentials: system vault only, never listed.
 pub const CONNECTION_CREDENTIAL: &str = "connection_credential";
-/// Every use of a bank card is a decision and its sensitivity can't change (§4.3).
+/// Every use of a bank card is a decision and its sensitivity can't change.
 pub const BANK_CARD: &str = "bank_card";
 
 pub const FIELD_TYPES: &[&str] = &[

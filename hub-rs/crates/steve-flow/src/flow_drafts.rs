@@ -1,4 +1,4 @@
-//! Steve drafts and edits flows (signals-automation.md §4.2), relative to `/api`:
+//! Steve drafts and edits flows, relative to `/api`:
 //!
 //! | route | |
 //! | --- | --- |

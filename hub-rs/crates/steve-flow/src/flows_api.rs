@@ -1,4 +1,4 @@
-//! REST of flows and runs (signals-automation.md §4.2), relative to `/api`:
+//! REST of flows and runs, relative to `/api`:
 //!
 //! | route | |
 //! | --- | --- |

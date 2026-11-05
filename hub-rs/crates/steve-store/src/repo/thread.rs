@@ -1,4 +1,4 @@
-//! Thread routing (modules/thread-routing.md §7.1, migration 016): one `route_log` row per routed user
+//! Thread routing (migration 016): one `route_log` row per routed user
 //! message, `thread_runs` for inline research runs, and `thread_items` linking an item to the conversation
 //! message it came from. None of these publish events: the messages they describe do.
 
@@ -203,7 +203,7 @@ impl ThreadItem {
 const ROUTE_BY_MSG: &str = "SELECT * FROM route_log WHERE message_id = ?";
 const RUN: &str = "SELECT * FROM thread_runs WHERE id = ?";
 const THREAD_ITEM: &str = "SELECT * FROM thread_items WHERE item_id = ?";
-/// The settings key that marks the one-time backfill as done (§6.1).
+/// The settings key that marks the one-time backfill as done.
 pub const BACKFILL_KEY: &str = "thread.backfill";
 
 impl Thread<'_> {
@@ -252,7 +252,7 @@ impl Thread<'_> {
         })
     }
 
-    /// The user corrected the routing (§3.5). Only the first correction counts; returns whether this one did.
+    /// The user corrected the routing. Only the first correction counts; returns whether this one did.
     pub fn route_override(&self, message_id: &str, to: &str, item: Option<&str>) -> Result<bool> {
         self.0.write(|w| {
             Ok(w.c.run(
@@ -384,7 +384,7 @@ impl Thread<'_> {
         })
     }
 
-    /// At boot: every run still queued or running did not finish (§4.7). Returns them, now `interrupted`.
+    /// At boot: every run still queued or running did not finish. Returns them, now `interrupted`.
     /// `resume`: record a resume intent for the local runs (off under `STEVE_NO_RESUME`, so a later
     /// normal boot does not revive them).
     pub fn runs_interrupt(&self, resume: bool) -> Result<Vec<ThreadRun>> {
@@ -555,7 +555,7 @@ impl Thread<'_> {
         })
     }
 
-    /// The one-time backfill (§6.1): unfinished items made from the conversation get their `thread_items`
+    /// The one-time backfill: unfinished items made from the conversation get their `thread_items`
     /// row from the message announcing them and the user message before it. Runs once per workspace
     /// (settings `thread.backfill = "v1"`); running it again changes nothing. Returns the items linked.
     pub fn backfill(&self, ws: &str) -> Result<Vec<String>> {

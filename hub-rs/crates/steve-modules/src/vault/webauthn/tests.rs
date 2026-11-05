@@ -1,4 +1,4 @@
-//! V3 acceptance tests (accounts-vault.md §4.2, §11) with webauthn-authenticator-rs's software
+//! V3 acceptance tests with webauthn-authenticator-rs's software
 //! passkey: register and reveal round trip; no passkey 400; replayed and expired challenges fail;
 //! another origin fails; a stale login can't register.
 

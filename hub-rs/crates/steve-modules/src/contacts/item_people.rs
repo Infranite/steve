@@ -1,4 +1,4 @@
-//! People on items (slice P3, contacts.md §2.8 and §3.2): the `links` between items and parties, the
+//! People on items (slice P3): the `links` between items and parties, the
 //! `@联系人` of `POST /api/thread`, the guess from names in the text when there is no `@`, a party's
 //! items and its timeline (with [`TimelineSource`] for what other modules add).
 //!
@@ -336,7 +336,7 @@ pub fn named_in(text: &str, candidates: &[Party]) -> Vec<String> {
         .collect()
 }
 
-/// `infer_item_people(ws, item_id, text)` (§2.8): for a message without `mentions`, links the contacts
+/// `infer_item_people(ws, item_id, text)`: for a message without `mentions`, links the contacts
 /// and teams the text names unambiguously as `related` (`source = infer`, confidence 0.6). Only parties
 /// the sender can see; never “我”, never unconfirmed contacts; existing links are left alone. Returns
 /// the names newly linked.
@@ -383,7 +383,7 @@ pub struct PartyItem {
     pub confidence: f64,
 }
 
-/// The item links of a party, newest first, one per (item, role). Teams (§2.8): unarchived items of
+/// The item links of a party, newest first, one per (item, role). Teams: unarchived items of
 /// their members (with sub-teams for org-chart teams) ∪ items linked to the team itself.
 fn item_links(c: &Connection, ws: &str, p: &Party) -> ApiResult<Vec<prepo::ItemLink>> {
     let mut rows = prepo::item_links_to(c, ws, std::slice::from_ref(&p.id), false)?;

@@ -1,4 +1,4 @@
-//! The outbound path (C6, channels-personas.md §2.7, §10): [`Outbox`] is the
+//! The outbound path: [`Outbox`] is the
 //! [`crate::deliver::Outbound`] every reply, acknowledgement, flow action, trigger reply and
 //! return-to-source message goes through, and [`Outbox::send`] is the only place an adapter's
 //! `send(` is called. In order:
@@ -81,7 +81,7 @@ pub const UNCLAIMED_MS: i64 = 30 * 1000;
 pub const LATE_MS: i64 = 60 * 60 * 1000;
 /// The choices on a message that may be out (sent, no answer, past the provider's dedupe window).
 pub const UNKNOWN_OPTIONS: [&str; 3] = ["sent", "retry", "discard"];
-/// Options of the decision after a failed send (§2.7).
+/// Options of the decision after a failed send.
 pub const FAIL_OPTIONS: [&str; 2] = ["retry", "discard"];
 /// Options of the decision after a blocked one.
 pub const BLOCKED_OPTIONS: [&str; 1] = ["discard"];
@@ -93,7 +93,7 @@ pub fn missing_permission(error: &str) -> bool {
         .iter()
         .any(|m| error.contains(m))
 }
-/// Appended to messages Steve sends as you after your trigger words (§2.7), verbatim.
+/// Appended to messages Steve sends as you after your trigger words, verbatim.
 pub const PROXY_MARK: &str = "（由 Steve 代发）";
 /// The longest text, in characters (like `POST /spaces/:id/messages`).
 pub const TEXT_MAX: usize = 4000;
@@ -107,7 +107,7 @@ pub const ERR_NO_RECALL: &str = "这个渠道不支持撤回";
 /// `chan_messages.status` of a draft you said no to (the §1 list has no word for it).
 pub const DISCARDED: &str = "discarded";
 
-/// The `steve_reply_source` answers (§6), verbatim.
+/// The `steve_reply_source` answers, verbatim.
 pub const SRC_POSTED: &str = "Posted.";
 pub const SRC_DRAFTED: &str = "Drafted for the user's approval.";
 pub const SRC_NO_SOURCE: &str = "This item did not come from a chat.";
@@ -430,7 +430,7 @@ fn spans_note(r: &CheckResult) -> String {
     parts.join("、")
 }
 
-/// The `approve` decision of a draft (§2.7). Returns its id.
+/// The `approve` decision of a draft. Returns its id.
 fn open_approval(
     tx: &Tx,
     ws: &str,
@@ -999,7 +999,7 @@ impl Outbox {
         Ok(text)
     }
 
-    /// Sends one `pending` outbound message (§10). The only caller of an adapter's `send(`: checks
+    /// Sends one `pending` outbound message. The only caller of an adapter's `send(`: checks
     /// `auth` against the store, claims the message once, scans the final text for secrets, sends
     /// with `uuid = cm_…`, records the result.
     pub async fn send(&self, ch: &Channels, id: &str, auth: &Auth) -> ChannelResult<SendOutcome> {
@@ -1662,7 +1662,7 @@ impl Outbox {
         })
     }
 
-    /// Back to the source (§2.7): an item made from a chat message finished → “<编号> 已完成：<结果>”
+    /// Back to the source: an item made from a chat message finished → “<编号> 已完成：<结果>”
     /// in the original thread, through the disclosure check, as a draft for your approval. Dropped
     /// items say nothing. Returns what became of it (`None`: not from a chat).
     pub async fn on_item_finished(
@@ -1724,7 +1724,7 @@ impl Outbox {
         Ok(Some(self.deliver_checked(ch, &req).await?.0))
     }
 
-    /// `steve_reply_source` (§6): an agent's update to the chat its item came from. On a bot account
+    /// `steve_reply_source`: an agent's update to the chat its item came from. On a bot account
     /// whose rules reply there it is checked and sent; otherwise (your own account, rules that don't
     /// reply, a possible leak) it waits for you as a draft. The answer is for the agent, verbatim.
     pub async fn reply_source(

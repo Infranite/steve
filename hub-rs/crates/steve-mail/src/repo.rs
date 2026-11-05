@@ -788,7 +788,7 @@ pub struct DraftRow {
     pub run_id: Option<String>,
     pub decision_id: Option<String>,
     pub basis: Option<Value>,
-    /// The version an approval decision was opened for (§5.4).
+    /// The version an approval decision was opened for.
     pub content_hash: String,
     /// `draft|pending|approved|sending|sent|failed|unknown|discarded`
     pub status: String,

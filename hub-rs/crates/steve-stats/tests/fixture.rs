@@ -1,4 +1,4 @@
-//! The backfill and the metrics on a small database shaped like production (stats.md §7): items written the
+//! The backfill and the metrics on a small database shaped like production: items written the
 //! way the Hub wrote them before migration 15, with the expected figures worked out by hand below.
 //!
 //! All times are minutes after 2026-11-01 00:00 UTC; the workspace's `stats.tz` is UTC.

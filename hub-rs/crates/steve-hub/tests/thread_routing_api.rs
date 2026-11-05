@@ -1,4 +1,4 @@
-//! Thread routing over HTTP on the wired Hub (thread-routing R3, §7.2): a clear change becomes an item,
+//! Thread routing over HTTP on the wired Hub (thread-routing R3): a clear change becomes an item,
 //! “改成在这里回答” takes it back, an answer's offer is taken once (then 409), and the new endpoints check
 //! their input. The model is a stand-in `claude` script; no agent runs (adapters are `/usr/bin/false`).
 
@@ -284,7 +284,7 @@ async fn thread_routing_api() {
     assert_eq!(s, 404);
 }
 
-/// A research run's token sees only the four read-only tools (§7.4); a session token or none gets nothing.
+/// A research run's token sees only the four read-only tools; a session token or none gets nothing.
 /// While Steve answers, what is said waits (`meta.held`), can be changed or withdrawn, and goes after the
 /// turn; stop ends the answer at once and says so (ST-33).
 #[tokio::test]

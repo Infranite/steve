@@ -1,4 +1,4 @@
-//! The thin GitHub REST client (github.md §1.3): fixed headers, ETag / `If-None-Match` for reads
+//! The thin GitHub REST client: fixed headers, ETag / `If-None-Match` for reads
 //! (a 304 does not count against the rate limit), waiting out rate limits as the headers say, and
 //! on a connection ([`GhConn`]) one re-mint after a 401 before handing over to the connection's
 //! health (`reauth`). No octocrab: the dozen endpoints Steve uses are plain JSON.

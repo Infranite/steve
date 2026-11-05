@@ -1,4 +1,4 @@
-//! F6 acceptance (feishu.md F6, feishu-lark-cli.md §2.4) on the fake Feishu: the user OAuth
+//! F6 acceptance on the fake Feishu: the user OAuth
 //! round-trip puts your Feishu account on “我” and the bot's view of you (`union_id` / `open_id`)
 //! lands on the same contact, in either order; sending and replying as you with the user token
 //! (`receive_id_type=chat_id`), the per-user rate limit (230020: wait, retry once, then error); the

@@ -1,4 +1,4 @@
-//! Injection (accounts-vault.md §4.4): Steve runs the command itself, so the agent never holds a
+//! Injection: Steve runs the command itself, so the agent never holds a
 //! value or the path of a file with one.
 //!
 //! - `cwd` must canonicalize to a directory inside the session's working directory;
@@ -11,7 +11,7 @@
 //! - stdout and stderr keep their first 64 KiB each, redacted before anything else sees them: the
 //!   injected values in all their forms, and the temp directory's path.
 //!
-//! [`Vault::injection_values`] is one of the three decryption sites (§10 rule 2).
+//! [`Vault::injection_values`] is one of the three decryption sites.
 
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
@@ -31,11 +31,11 @@ use super::secret::SecretBytes;
 use super::{Vault, VaultError, VaultResult};
 use crate::ApiError;
 
-/// `400` when `cwd` leaves the session's workspace (§4.4), verbatim.
+/// `400` when `cwd` leaves the session's workspace, verbatim.
 pub const CWD_OUTSIDE: &str = "目录不在这个会话的工作区里";
 pub const DEFAULT_TIMEOUT_S: u64 = 120;
 pub const MAX_TIMEOUT_S: u64 = 600;
-/// Bytes kept per stream (§4.4).
+/// Bytes kept per stream.
 pub const OUTPUT_CAP: usize = 64 * 1024;
 /// How long to keep reading pipes after the command ended (a straggler may still hold them).
 const DRAIN: Duration = Duration::from_secs(2);

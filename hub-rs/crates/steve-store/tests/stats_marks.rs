@@ -1,4 +1,4 @@
-//! Status marks written by the item repository (stats.md slice ST3).
+//! Status marks written by the item repository.
 
 mod common;
 

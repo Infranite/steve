@@ -1,4 +1,4 @@
-//! Run records (`flow_runs`, `flow_run_steps`) as schedules use them (schedules.md §7): insert, steps,
+//! Run records (`flow_runs`, `flow_run_steps`) as schedules use them: insert, steps,
 //! the overlap check, history pages and retention. S2's engine reuses the same rows.
 
 use rusqlite::{Connection, OptionalExtension, Row, params};
@@ -330,7 +330,7 @@ pub fn claim_retry(tx: &Tx, id: &str, retry_at: i64) -> FlowResult<bool> {
     )? == 1)
 }
 
-/// Schedule runs past retention (§7): older than 90 days and beyond the latest 200 of their
+/// Schedule runs past retention: older than 90 days and beyond the latest 200 of their
 /// schedule; never one that is still going. Steps go with them. Returns the number of runs deleted.
 pub fn prune(tx: &Tx, now: i64) -> FlowResult<usize> {
     const OLD: &str = "SELECT id FROM (SELECT r.id, r.started, r.status, ROW_NUMBER() OVER (PARTITION BY r.flow_id ORDER BY r.started DESC, r.rowid DESC) AS rn FROM flow_runs r JOIN flows f ON f.id = r.flow_id WHERE f.kind = 'schedule') WHERE rn > ?1 AND started < ?2 AND status NOT IN ('running', 'waiting')";

@@ -1,4 +1,4 @@
-//! REST of external personas (channels-personas.md §5.2), relative to `/api`; merged into
+//! REST of external personas, relative to `/api`; merged into
 //! [`crate::api::routes`]:
 //!
 //! | route | |

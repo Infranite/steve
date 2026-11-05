@@ -1,9 +1,9 @@
-//! Which layer decides whether YOLO applies (modules/yolo.md §1.1, §1.2): item > project > workspace,
+//! Which layer decides whether YOLO applies: item > project > workspace,
 //! the first that is not `inherit`; an item without a project skips the project layer, a decision
 //! without an item looks only at the workspace. Forced off (the environment, a production-copy Hub)
 //! and a tripped breaker beat every layer.
 //!
-//! No expiry (user decision 2026-11-01 §1): every layer is plain on/off/inherit until changed.
+//! No expiry: every layer is plain on/off/inherit until changed.
 //!
 //! `full` (完全放开, user decision 2026-11-02) is YOLO plus agents that run without permission prompts
 //! (`bypassPermissions` / Codex `full-access`). It is only ever set by the user, layer by layer, and a

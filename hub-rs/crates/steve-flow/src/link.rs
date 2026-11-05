@@ -1,4 +1,4 @@
-//! Finding the existing item an event belongs to, for the `item.link` action (§3.2):
+//! Finding the existing item an event belongs to, for the `item.link` action:
 //! `branch` (a `steve/<id>` branch name in the payload), `ref` (an `ST-123` in the text), `thread`
 //! (an item made from an earlier event of the same `thread_key`). Other modules register better
 //! finders for a method ([`crate::FlowSetup::item_finder`], e.g. GitHub's PR → branch lookup);

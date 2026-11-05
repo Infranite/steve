@@ -1,4 +1,4 @@
-//! Candidate memories (knowledge.md §5): writing them with their `confirm` decision, answering them
+//! Candidate memories: writing them with their `confirm` decision, answering them
 //! (the `mem` decision handler, one at a time or in a batch), the 待确认 list, the 30-day expiry and
 //! the agent tool `steve_remember`.
 //!
@@ -31,7 +31,7 @@ pub const SUBJECT: &str = "mem";
 /// Candidates kept per origin (one item completion, one day of chat, one mail thread …): few, so
 /// each is worth a look; most origins give none.
 pub const MAX_PER_ORIGIN: usize = 3;
-/// Unanswered candidates expire after this long (§5.2).
+/// Unanswered candidates expire after this long.
 pub const EXPIRE_AFTER_MS: i64 = 30 * 24 * 3600 * 1000;
 /// How often the expiry job runs (§10 `kb.candidates_expire`).
 pub const EXPIRE_EVERY: Duration = Duration::from_secs(3600);
@@ -320,7 +320,7 @@ pub fn answer(tx: &Tx, ws: &str, actor: &str, id: &str, choice: &str, text: &str
     Ok(())
 }
 
-/// The `DecisionHandler` of `subject_type = "mem"` (§5.2; moved here from contacts P4). Register it
+/// The `DecisionHandler` of `subject_type = "mem"` (moved here from contacts P4). Register it
 /// with `registry.decision(SUBJECT, Box::new(MemDecisions))`.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct MemDecisions;
@@ -411,7 +411,7 @@ async fn resolve_route(
         .await
 }
 
-/// `Candidate[]` (§6.1) of the caller, newest first.
+/// `Candidate[]` of the caller, newest first.
 pub fn list(m: &Modules, who: &Caller) -> ApiResult<Value> {
     prepare(m, who)?;
     let viewer = m.viewer(who)?;
@@ -574,7 +574,7 @@ pub fn spawn_expirer(m: Modules) -> tokio::task::JoinHandle<()> {
 // ---------------------------------------------------------------- steve_remember
 
 pub const REMEMBER: &str = "steve_remember";
-/// The answer of `steve_remember` (§7, verbatim; does not end the turn).
+/// The answer of `steve_remember` (verbatim; does not end the turn).
 pub const SAVED: &str = "Saved as a candidate; the user will confirm it.";
 const TOOL_KINDS: [&str; 3] = ["fact", "preference", "rule"];
 

@@ -1,4 +1,4 @@
-//! The evaluation corpus (knowledge.md §3.5) through the real index and [`retrieve`]: documents
+//! The evaluation corpus through the real index and [`retrieve`]: documents
 //! written with `index::replace`, memories through `mems` + `sync_mem`, queries as `Purpose::Search`
 //! with ranking boosts and the relaxed fallback. Phase-1 bar: recall@5 ≥ 0.8.
 //!

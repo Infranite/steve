@@ -1,4 +1,4 @@
-//! The wrap-up through GitHub (github.md §4.1, §4.2): after you accept an item, Steve asks whether
+//! The wrap-up through GitHub: after you accept an item, Steve asks whether
 //! to open a PR (`gh_pr_open`); with `finish_on=merged` it asks again when the checks are green
 //! (`gh_pr_merge`). Pushing, opening and merging are outward effects: they happen only after your
 //! `yes`, never from the hook or the sync.
@@ -82,7 +82,7 @@ pub fn register(r: &mut Registry) -> Slot {
     slot
 }
 
-/// The question of an agent's `steve_github_open_pr` (§6): `在验收前开一个草稿 PR（<repo>）：<标题>`.
+/// The question of an agent's `steve_github_open_pr`: `在验收前开一个草稿 PR（<repo>）：<标题>`.
 /// The PR is opened as a draft exactly when the question says so (the decision has no other
 /// place for the flag, and the schema is frozen).
 pub fn agent_question(full_name: &str, title: &str, draft: bool) -> String {

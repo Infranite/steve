@@ -1,4 +1,4 @@
-//! The two ways into GitHub (github.md §1), as connection adapters of the A2 framework
+//! The two ways into GitHub, as connection adapters of the A2 framework
 //! (`SystemAdapter` = [`steve_modules::accounts::connections::ConnectionProvider`]).
 
 pub mod github_app;
@@ -7,7 +7,7 @@ pub mod github_pat;
 pub use github_app::GitHubApp;
 pub use github_pat::GitHubPat;
 
-/// Capabilities of both (§1.1 step 3).
+/// Capabilities of both.
 pub const CAPS: [&str; 3] = ["repo.read", WRITE_CAP, "events"];
 /// What a write to a repo needs (push, PR, merge, comment, rerun).
 pub const WRITE_CAP: &str = "repo.write";

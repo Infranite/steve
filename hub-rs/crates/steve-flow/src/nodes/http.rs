@@ -1,4 +1,4 @@
-//! `http`: `{method, url, headers{}, body, effect}` (signals-automation.md §3.2, §3.3, §11).
+//! `http`: `{method, url, headers{}, body, effect}`.
 //!
 //! - `effect=false` allows only `GET`; `effect=true` is effectful: the engine asks you each time
 //!   unless the flow holds `grants(capability='http.effect', resource_type='host', resource_id=<host>)`.

@@ -1,4 +1,4 @@
-//! Releases under YOLO (modules/yolo.md §2.2 release rows, §3.1 spacing, §3.2 B1, §5; Y5): how often
+//! Releases under YOLO: how often
 //! YOLO may approve a release of the user's own Steve, one release at a time, rebase conflicts handed
 //! back, what a failed or refused release card is about, and the breaker for releases YOLO approved
 //! that went wrong. The judge decides with these facts; nothing here answers a card.
@@ -157,7 +157,7 @@ impl Engine {
         })?)
     }
 
-    /// The spacing rule (§3.1): 3 an hour, 12 a window, 15 minutes apart.
+    /// The spacing rule: 3 an hour, 12 a window, 15 minutes apart.
     pub fn release_spacing_ok(&self, ws: &str) -> ApiResult<bool> {
         let window = self
             .yolo()
@@ -188,7 +188,7 @@ impl Engine {
     }
 
     /// Another release card is already scheduled by YOLO: one release at a time, in the order they
-    /// came up (§5).
+    /// came up.
     pub(crate) fn release_queued(&self, d: &Decision) -> ApiResult<bool> {
         let scheduled = self.yolo().store().reader(|c| {
             repo::actions_where(
@@ -207,7 +207,7 @@ impl Engine {
             .any(|a| a.decision_id.as_deref() != Some(d.id.as_str())))
     }
 
-    /// Breaker B1 (§3.2), looked at when a failure card comes up: YOLO's release approvals of this
+    /// Breaker B1, looked at when a failure card comes up: YOLO's release approvals of this
     /// window that failed twice in a row, or one that never reported a result. True when it tripped.
     pub(crate) fn release_breaker(&self, d: &Decision) -> ApiResult<bool> {
         if d.kind != "fail" || d.item_id.is_none() {

@@ -1,4 +1,4 @@
-//! Chinese time phrases → cron (`POST /schedules/parse`, schedules.md §3.3).
+//! Chinese time phrases → cron (`POST /schedules/parse`).
 //!
 //! Deterministic rules first; when none matches the caller asks the model gateway (fast tier,
 //! [`MODEL_TIMEOUT_SECS`], prompt from [`model_prompt`]) and passes its answer to

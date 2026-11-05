@@ -1,4 +1,4 @@
-//! You on Feishu (F6, feishu-lark-cli.md §2.4, feishu.md F6): the identity side of the `feishu_user`
+//! You on Feishu: the identity side of the `feishu_user`
 //! connection.
 //!
 //! The user OAuth round-trip proves which Feishu user (`union_id`) the signed-in Steve user is, so

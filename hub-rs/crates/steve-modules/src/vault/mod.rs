@@ -1,4 +1,4 @@
-//! Vault slice V1 (steve-rs-plan/modules/accounts-vault.md §3, §11): keys and encryption.
+//! Vault slice V1: keys and encryption.
 //!
 //! - one 256-bit master key (KEK) per workspace in an OS-native key store ([`keystore`]: the macOS
 //!   keychain, a Linux Secret Service keyring, or a protected key directory); the database holds only
@@ -17,7 +17,7 @@
 //! startup for `STEVE_VAULT_KEYSTORE=file` on the real `~/.steve`, or when the system has no store), `let vault = Vault::new(store, ks);`,
 //! `vault.resume_rotations()` once the runtime is up, and merge [`routes`]`(vault)` under `/api`.
 //!
-//! Slice V4 (bot use of secrets, §4.3–§4.6): [`grants`], [`r#use`] (requests, the `secret_use`
+//! Slice V4 (bot use of secrets): [`grants`], [`r#use`] (requests, the `secret_use`
 //! decision handler, the job that runs approved commands), [`inject`] (Steve runs the command),
 //! [`mcp`] (`steve_secret_list`, `steve_secret_use`), [`use_api`] (grants and the use log), and the
 //! store-free [`redact`] and [`guard`] re-exported from steve-vault. Integration:

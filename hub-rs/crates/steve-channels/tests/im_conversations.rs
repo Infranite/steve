@@ -1,4 +1,4 @@
-//! IM conversations (channels-personas.md §2.11–§2.12, domain-model.md §1.4–§1.6):
+//! IM conversations:
 //! - the reaction lifecycle: “收到” before anything is generated, “完成” once the answer is out,
 //!   “失败” when it could not go out, the acknowledgement taken off for a discarded draft; an item
 //!   keeps it until it ends; reactions are best-effort (a provider refusing them changes nothing);
@@ -929,7 +929,7 @@ async fn your_command_without_a_voice_goes_to_your_web_conversation() {
     assert!(sent(&h).is_empty());
 }
 
-/// CONTRACT.md §4: an inbound turn carries its chat message (`channel_message`), read from the
+/// An inbound turn carries its chat message (`channel_message`), read from the
 /// same space only; purged sources show nothing; the turn says what Steve did not read.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_turn_carries_its_chat_message_with_media() {

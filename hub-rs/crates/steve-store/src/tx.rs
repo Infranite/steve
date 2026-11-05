@@ -1,5 +1,5 @@
 //! Public transactions for module crates, whose repositories are free functions over a connection
-//! (contacts.md §0.1: "函数收 `&rusqlite::Connection`/`&Transaction`").
+//! ("函数收 `&rusqlite::Connection`/`&Transaction`").
 
 use std::cell::{Cell, RefCell};
 use std::ops::Deref;

@@ -1,4 +1,4 @@
-//! MIME → what the mail store keeps (email.md §3.5 steps 1–2): headers, addresses, subject
+//! MIME → what the mail store keeps: headers, addresses, subject
 //! (RFC 2047), text (declared charset, HTML → text when there is no plain part), the new part of the
 //! text without quotes (`body_new`), a snippet, attachments with their IMAP part paths, the bulk
 //! marker, and a rough guess of the sender's organization from the signature.
@@ -221,7 +221,7 @@ pub fn strip_quotes(text: &str) -> String {
     out.join("\n")
 }
 
-/// The organization a signature names, roughly (§3.5 step 4): in the last 10 lines, `名字 · 组织`
+/// The organization a signature names, roughly: in the last 10 lines, `名字 · 组织`
 /// → the part after the dot; `组织 | 职位` → the part before the bar, or the next line when the part
 /// before is the sender's own name (`Chen Jie | Procurement Lead` / `Partner Co.`).
 pub fn signature_org(text: &str, sender_name: Option<&str>) -> Option<String> {

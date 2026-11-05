@@ -1,4 +1,4 @@
-//! SQL of teams (contacts.md §1.2: `team_details`, `team_members`; the team itself is a `parties` row of
+//! SQL of teams (`team_details`, `team_members`; the team itself is a `parties` row of
 //! type `team`). Lists go through a [`Viewer`]; writes take a [`Tx`].
 
 use rusqlite::types::Value as Sql;
@@ -188,7 +188,7 @@ pub fn member_remove(tx: &Tx, ws: &str, team: &str, contact: &str) -> Result<()>
     Ok(())
 }
 
-/// Distinct active contacts of a team; with `subtree`, also of every active team below it (§2.4: an
+/// Distinct active contacts of a team; with `subtree`, also of every active team below it (an
 /// org-chart team counts everyone underneath).
 pub fn headcount(c: &Connection, ws: &str, team: &str, subtree: bool) -> Result<i64> {
     if !subtree {

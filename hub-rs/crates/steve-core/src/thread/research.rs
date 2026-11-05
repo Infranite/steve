@@ -1,4 +1,4 @@
-//! Answers and inline research on the workspace's inline queue (thread-routing §4.6), and the seam to the
+//! Answers and inline research on the workspace's inline queue, and the seam to the
 //! research executor (R2, `Researcher`): this module decides when a run starts, records it in
 //! `thread_runs`, streams it into the conversation and stores the answer; the executor only reads.
 //!
@@ -90,17 +90,17 @@ pub struct ResearchRequest {
     pub context: String,
     /// the project to work in (cwd), if the router named one or the question is about Steve
     pub project: Option<Project>,
-    /// every project directory of the workspace that may be read (§4.2)
+    /// every project directory of the workspace that may be read
     pub readable: Vec<Project>,
     /// the question's attachments
     pub files: Vec<FileRef>,
     /// attachments of the message the question follows up on (“这样你也看不出来吗？” after a screenshot)
     pub earlier_files: Vec<FileRef>,
-    /// the previous round on the same topic, to `--resume` (§4.6)
+    /// the previous round on the same topic, to `--resume`
     pub resume: Option<ResumeFrom>,
     /// set when the user stops the run; the executor ends the process and returns what it has
     pub stop: Arc<AtomicBool>,
-    /// Steve's `/mcp` with this run's own token: only the read-only research tools answer it (§7.4)
+    /// Steve's `/mcp` with this run's own token: only the read-only research tools answer it
     pub mcp: Option<crate::McpEndpoint>,
     /// 设置 · 模型 · 就地研究: the models to try in order and the effort (`models::for_purpose`)
     pub models: crate::models::Choice,

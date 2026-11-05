@@ -2,7 +2,7 @@
 //! `claudePrint` is wrapped into an implementation by the integrator (it reports `total_cost_usd`);
 //! tests use [`crate::testkit::FakeGateway`].
 //!
-//! Statistics (stats.md §2.4): the gateway records every call with a purpose, a workspace and maybe an
+//! Statistics: the gateway records every call with a purpose, a workspace and maybe an
 //! item. Those come from the caller through task-locals ([`purpose`], [`tagged`], [`for_item`]) so the
 //! trait signature stays as it is; a call nobody tagged is booked as `other`.
 
@@ -91,7 +91,7 @@ pub fn split_static(prompt: &str) -> (Option<&str>, &str) {
     }
 }
 
-/// What a gateway call is for (stats.md §2.4), set by the caller around the call.
+/// What a gateway call is for, set by the caller around the call.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CallTag {
     /// route | chat | draft | extract | compose | disclosure | intent | flow | yolo | digest | other

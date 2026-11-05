@@ -1,4 +1,4 @@
-//! The knowledge base's secret scanner: `steve_vault::guard::scan` (accounts-vault.md §4.6) behind
+//! The knowledge base's secret scanner: `steve_vault::guard::scan` behind
 //! the [`Guard`] trait, so folder and file sources never index a token. It used to be an interim
 //! copy of the vault's patterns; the vault's set is a superset (grouped card numbers, `xapp-`,
 //! `ASIA`, `glpat-`, `AIza`, `sk_live_`, `password=` …), so every builder that does not pass its own

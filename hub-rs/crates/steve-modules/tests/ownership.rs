@@ -1,4 +1,4 @@
-//! Ownership (steve-rs-plan/modules/ownership.md): the defaults when “我” is created, the REST of an
+//! Ownership: the defaults when “我” is created, the REST of an
 //! object's stewards with undo through the change records, a person's holdings and the unowned list,
 //! merges and deletes moving the rows, bot parties from identification, the sender card, and the MCP
 //! tools with a chat proposal confirmed and undone through the decision.

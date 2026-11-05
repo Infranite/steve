@@ -1,4 +1,4 @@
-//! Citations in Steve's main-thread answers (knowledge.md §4.3): the answer marks the knowledge it
+//! Citations in Steve's main-thread answers: the answer marks the knowledge it
 //! used with `[n]`; marks to numbers that were never given are removed (the model must not invent
 //! sources), and the reply's `meta.cites` lists only what was actually cited.
 
@@ -42,7 +42,7 @@ fn marks(s: &str) -> Vec<(usize, usize, u32)> {
     out
 }
 
-/// `cite::finish(answer, hits)` (§4.3): drops `[n]` marks whose `n` is not among `cites` (with the
+/// `cite::finish(answer, hits)`: drops `[n]` marks whose `n` is not among `cites` (with the
 /// spaces right before them, so `用 Rust [1] [9]` becomes `用 Rust [1]`), and returns the cited
 /// entries in number order.
 pub fn finish(answer: &str, cites: &[Cite]) -> Finished {

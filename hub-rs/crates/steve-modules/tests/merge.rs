@@ -1,4 +1,4 @@
-//! Slice P4 acceptance (contacts.md §9): after a merge, attributes, links, memories and team memberships
+//! Slice P4 acceptance: after a merge, attributes, links, memories and team memberships
 //! are on `into` with one audit row; a split restores all of it; a later merge makes the split 409;
 //! after `not_same` the pair is never proposed again — plus the REST branches, the proposal decision with
 //! undo, accounts through the hooks, and the `attr_value` / `attr_def` handlers.

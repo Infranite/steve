@@ -1,6 +1,6 @@
-//! In-process use of an item's secrets (accounts-vault.md §2.2, §4.4 `mode=internal`): the vault side
+//! In-process use of an item's secrets (§4.4 `mode=internal`): the vault side
 //! of `ConnCx::with_credential`. The values are lent to a closure and zeroed when it returns, so an
-//! adapter never holds a copy it could keep. One of the three decryption sites (§10 rule 2).
+//! adapter never holds a copy it could keep. One of the three decryption sites.
 
 use std::fmt;
 

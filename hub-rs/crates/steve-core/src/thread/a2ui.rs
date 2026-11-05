@@ -1,4 +1,4 @@
-//! A2UI actions (ST-46, docs/ST-46-a2ui.md): a button in an interface Steve drew in a reply (a ```a2ui block) sends
+//! A2UI actions (ST-46): a button in an interface Steve drew in a reply (a ```a2ui block) sends
 //! an A2UI v0.9.1 `action`. It is said in the main conversation as the user's message — the standard action JSON the
 //! model reads, `meta.a2ui_action` for the page — and kept on the reply (`meta.a2ui["block:surface"]`, with the
 //! surface's data then), so a surface is submitted once: a second click, another tab or a reload gets the record back.

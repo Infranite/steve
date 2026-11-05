@@ -1,4 +1,4 @@
-//! accounts-vault.md §10 rule 1 for slices V1 and V2: after init, items with secret fields (create,
+//! No secret in plain text, for slices V1 and V2: after init, items with secret fields (create,
 //! list, detail, search, field edits, reveal refused, a connection credential and `with_credential`,
 //! delete), rotation, recovery and the error paths (through the service and the HTTP routes), no KEK,
 //! recovery code or field plaintext appears in the captured logs, in responses, in SSE events, in

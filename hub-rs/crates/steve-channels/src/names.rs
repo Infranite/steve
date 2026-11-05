@@ -1,4 +1,4 @@
-//! Names for the people the channels meet (domain-model.md §2, “识别与补全”): an account identified
+//! Names for the people the channels meet (“识别与补全”): an account identified
 //! from a message often has only a provider id (`ou_…`). This completes it — without asking — and
 //! leaves only what really needs you in 待确认.
 //!

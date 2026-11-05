@@ -14,7 +14,7 @@ use super::service::Connections;
 use crate::vault::VaultError;
 use crate::vault::items::Credential;
 
-/// Credential field keys of OAuth connections (feishu-lark-cli.md §2.4, same for every provider).
+/// Credential field keys of OAuth connections (same for every provider).
 pub const ACCESS_TOKEN: &str = "access_token";
 pub const REFRESH_TOKEN: &str = "refresh_token";
 /// Unix ms, as decimal text.

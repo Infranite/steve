@@ -1,4 +1,4 @@
-//! One token convention for every source (stats.md §2.3): Anthropic's, where `input` excludes the cache
+//! One token convention for every source: Anthropic's, where `input` excludes the cache
 //! and `output` includes thinking. Missing or `null` fields stay `None`; they are never read as 0.
 
 use serde_json::Value;
@@ -14,7 +14,7 @@ pub struct RawUsage {
     pub reasoning: Option<i64>,
 }
 
-/// Field names per figure, across the shapes seen (stats.md §1.2): ACP `PromptResponse.usage`
+/// Field names per figure, across the shapes seen: ACP `PromptResponse.usage`
 /// (camelCase), `_meta.quota.model_usage[].token_count`, `claude -p` `usage` (snake_case) and its
 /// `modelUsage` entries, and the OpenAI names codex-acp carries.
 const INPUT: &[&str] = &["inputTokens", "input_tokens"];

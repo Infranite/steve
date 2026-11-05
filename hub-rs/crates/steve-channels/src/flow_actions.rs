@@ -1,4 +1,4 @@
-//! The channel actions of the flow `action` node (channels-personas.md §4): `reply_as` (reply in the
+//! The channel actions of the flow `action` node: `reply_as` (reply in the
 //! triggering message's space and thread, fixed text or generated per §2.8) and `send_to_space`
 //! (a fixed text to a given space). Both are outward nodes: effectful for the engine (dry runs skip
 //! them; a run asks before them unless a grant allows `msg.send`), and what they say goes through

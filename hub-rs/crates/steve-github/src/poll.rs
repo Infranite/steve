@@ -1,4 +1,4 @@
-//! The polling fallback (github.md §5.3): repos without webhooks (`ingest=poll`), and App/hook
+//! The polling fallback: repos without webhooks (`ingest=poll`), and App/hook
 //! repos whose last delivery is over 6 hours old while they have an open PR linked to an item (the
 //! public entry may be down). Every 2 minutes: the 50 most recently updated PRs (with ETag), then the
 //! check runs and statuses of open PRs whose checks have not passed; every 10 minutes the issues

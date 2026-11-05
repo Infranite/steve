@@ -1,4 +1,4 @@
-//! Event sources (signals-automation.md §2.1, §4.1 `Source`, §4.2 `/sources`): the registered
+//! Event sources: the registered
 //! [`EventAdapter`]s, the per-connection receive settings (`source_settings`), and the source page,
 //! one entry per adapter with the `events` capability.
 

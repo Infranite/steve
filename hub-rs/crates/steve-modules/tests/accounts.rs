@@ -1,4 +1,4 @@
-//! Slice A1 acceptance (accounts-vault.md §11): the four identification paths of §2.3 (Feishu
+//! Slice A1 acceptance: the four identification paths of §2.3 (Feishu
 //! union_id/open_id, the prefix rule excluding `noreply`, same name + same organization giving a
 //! proposal), handle conflicts 409, accounts following a merge and coming back on split — plus the REST
 //! branches, the contacts ports and the change operations. Tables from migration 5 (steve-store).

@@ -1,4 +1,4 @@
-//! The reaction lifecycle on an inbound message Steve answers (channels-personas.md §2.11): an
+//! The reaction lifecycle on an inbound message Steve answers: an
 //! “acknowledged / working on it” reaction the moment Steve decides to respond, swapped for “done”
 //! once the answer is out (or the item it became has ended), or for “failed” when it could not be
 //! answered or sent. An answer that waits for your approval takes the acknowledgement off (nothing is

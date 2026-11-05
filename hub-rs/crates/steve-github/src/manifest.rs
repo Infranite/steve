@@ -1,4 +1,4 @@
-//! Creating and installing the GitHub App (github.md §1.1): the three endpoints of the manifest
+//! Creating and installing the GitHub App: the three endpoints of the manifest
 //! flow. All three are top-level browser steps of the signed-in user; the two GETs answer with a
 //! `302` to the web app (`/#/github…`), errors as `/#/github?error=<中文>`.
 //!

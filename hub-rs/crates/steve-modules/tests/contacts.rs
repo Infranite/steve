@@ -1,4 +1,4 @@
-//! Slice P1 acceptance (contacts.md §9): contacts, organizations, attributes and jobs — every success
+//! Slice P1 acceptance: contacts, organizations, attributes and jobs — every success
 //! and 4xx branch, “我” created once, foreign-workspace ids 404, delete keeps links but drops attributes
 //! and memories, domain conflicts 409 — plus ownership and visibility.
 

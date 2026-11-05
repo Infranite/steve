@@ -1,4 +1,4 @@
-//! `/api/stats/*` on the wired Hub (stats.md ST5): parameter checks, the previous range, the price
+//! `/api/stats/*` on the wired Hub: parameter checks, the previous range, the price
 //! table (validation, audit, revisions), breakdowns adding up to the summary, and the coalesced
 //! `stats` SSE frames, and the Models.dev price sync against a catalog served on loopback. Temp
 //! STEVE_HOME, adapters `/usr/bin/false`, no real host.

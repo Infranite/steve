@@ -1,4 +1,4 @@
-//! The metrics of stats.md §3 over a range of local days. Usage, spend and agent counters read the
+//! The metrics over a range of local days. Usage, spend and agent counters read the
 //! daily cube (`stat_daily`); flow, time and quality read `item_stats`, `item_marks` and `decisions`
 //! through their indexes. Costs are estimated here, from tokens and the prices of each day
 //! ([`PriceBook`]: the table, then Models.dev as it was that day).
@@ -646,7 +646,7 @@ pub struct Since {
     pub gateway: Option<String>,
 }
 
-/// stats.md §3 for one range.
+/// Every metric for one range.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct Summary {
     pub from: String,

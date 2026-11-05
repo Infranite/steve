@@ -1,14 +1,14 @@
-//! Triage nodes (email.md §4): the flow actions `mail.draft_reply`, `mail.archive` and
+//! Triage nodes: the flow actions `mail.draft_reply`, `mail.archive` and
 //! `mail.mark_read`, the mail links of items made from mail, the `thread_key → item` lookup behind
 //! `item.link {by:"thread"}`, and `archive_on_done` (B1 `on_finished`).
 //!
-//! - `mail.draft_reply` drafts with the quick-draft path (§5.2) and opens the approval decision; it
-//!   never sends — the only way out is a `send` choice on that decision (§5.4). The draft *is* the
+//! - `mail.draft_reply` drafts with the quick-draft path and opens the approval decision; it
+//!   never sends — the only way out is a `send` choice on that decision. The draft *is* the
 //!   approval request, so S2 does not put a second approval gate in front of it: the action is not
 //!   `effectful` for the engine. What the spec asks of an outward node still holds: dry runs do not
 //!   run it (the `action` node only describes non-built-in actions in a dry run), and a run replayed
 //!   after a restart does not draft twice (the draft of the run is reused).
-//! - `mail.archive` / `mail.mark_read` change only your own mailbox, reversibly: no approval (§4).
+//! - `mail.archive` / `mail.mark_read` change only your own mailbox, reversibly: no approval.
 //!   Dry runs skip them too.
 //!
 //! Wiring (integrator), after [`Mail`] and before `FlowSetup::build`:

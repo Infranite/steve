@@ -1,4 +1,4 @@
-//! axum handlers for the open-platform endpoints (feishu.md §2) plus `/_fake/*` control routes.
+//! axum handlers for the open-platform endpoints plus `/_fake/*` control routes.
 
 // Test-only code: handlers return ready `Response`s as errors, and immediately-called closures
 // stand in for try blocks so each handler can record its result code in one place.
@@ -1236,7 +1236,7 @@ async fn delete_message(
     finish(&sh, &ctx, r)
 }
 
-/// What a user token may read in `chat` (feishu-lark-cli.md §0 (a)/(b)): history needs the
+/// What a user token may read in `chat`: history needs the
 /// app not to share externally, the per-kind `get_as_user` scope, and membership.
 fn user_may_read(w: &World, ctx: &Ctx, chat: &Chat) -> Result<(), ApiErr> {
     if !matches!(ctx.caller, Caller::User(_)) {

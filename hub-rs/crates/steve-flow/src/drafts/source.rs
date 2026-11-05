@@ -1,4 +1,4 @@
-//! The `source` draft target (signals-automation.md §8): `source:<adapter>`, fields `paused`,
+//! The `source` draft target: `source:<adapter>`, fields `paused`,
 //! `triage_bot` (ref), each event type's `on` (labelled with the type's Chinese name) and each
 //! scope's `mode`; one operation `source.patch`, which is `PATCH /sources/:adapter` inside the
 //! changeset's transaction and undoes to the settings each connection had.

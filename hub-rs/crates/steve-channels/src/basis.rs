@@ -1,4 +1,4 @@
-//! The basis record of an outbound message (C5, channels-personas.md §2.6, §5.1): which knowledge
+//! The basis record of an outbound message: which knowledge
 //! the reply was written with, each one's level for this audience and how it ended up in the text,
 //! the rewrites, the verdict and both models. Only you see it (the space page, the inbox); people in
 //! the chat only see the reply.
@@ -39,7 +39,7 @@ pub struct NewBasis {
     pub spans: Vec<Span>,
 }
 
-/// The `basis` of a `ChanMessage` (§5.1).
+/// The `basis` of a `ChanMessage`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct BasisOut {
     pub id: String,
@@ -156,7 +156,7 @@ pub fn of_message(c: &Connection, ws: &str, message_id: &str) -> ChannelResult<O
     .map(out_of))
 }
 
-/// The `basis` field of a `ChanMessage` (§5.1): `{verdict, entries, rewrites, spans}` or `null`.
+/// The `basis` field of a `ChanMessage`: `{verdict, entries, rewrites, spans}` or `null`.
 /// The caller has checked the message is the caller's to see.
 pub fn summary_of(c: &Connection, message_id: &str) -> ChannelResult<Value> {
     let b = c

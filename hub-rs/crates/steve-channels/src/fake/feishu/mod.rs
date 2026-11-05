@@ -1,7 +1,7 @@
-//! Fake Feishu open platform (feishu.md §6).
+//! Fake Feishu open platform.
 //!
 //! [`FakeFeishu::start`] binds an axum server on `127.0.0.1:<random>` that implements the
-//! open-platform endpoints of feishu.md §2 against an in-memory [`World`]. Tests point a
+//! open-platform endpoints against an in-memory [`World`]. Tests point a
 //! connection's `config.api_base` at [`FakeFeishu::base_url`], inject faults (expired tokens,
 //! rate limits, missing scopes), push signed + encrypted events with [`FakeFeishu::pusher`], and
 //! assert on [`FakeFeishu::sent`].

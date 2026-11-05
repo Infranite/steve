@@ -1,5 +1,4 @@
-//! Merging and splitting contacts, and the decisions the contacts module opens (slice P4 of
-//! steve-rs-plan/modules/contacts.md §2.7, §2.5, §3.2).
+//! Merging and splitting contacts, and the decisions the contacts module opens (slice P4).
 //!
 //! - [`merge`] moves everything of `from` onto `into` in one transaction — attribute values (exact
 //!   duplicates stay behind), links at either end (jobs, `reports_to`, people on items), `mem_about`,
@@ -76,7 +75,7 @@ pub struct Moved {
     pub teams: Vec<MovedMember>,
     pub tags: Vec<String>,
     pub tags_shared: Vec<String>,
-    /// Steward rows (ownership.md §2: they move like accounts).
+    /// Steward rows (they move like accounts).
     pub stewards: super::stewards::MovedStewards,
     /// [`PartyHooks::on_merge`] results by [`PartyHooks::name`].
     pub hooks: Map<String, Value>,
@@ -152,7 +151,7 @@ fn own_contact(tx: &Tx, viewer: &Viewer, id: &str) -> ApiResult<Party> {
     svc::own_party(tx, viewer, id, "contact", "联系人", false)
 }
 
-/// Merges `from` into `into` (§2.7) inside `tx` and returns the merge id. Both must be active contacts of
+/// Merges `from` into `into` inside `tx` and returns the merge id. Both must be active contacts of
 /// the viewer's workspace, visible to them, not the same, and `from` not “我”.
 pub fn merge_tx(
     tx: &Tx,
@@ -366,7 +365,7 @@ fn set_proposal(tx: &Tx, id: &str, status: &str) -> ApiResult<()> {
 
 // ---------------------------------------------------------------- split
 
-/// Splits merge `id` (§2.7) inside `tx`: only the latest unsplit merge into its `into` can be split
+/// Splits merge `id` inside `tx`: only the latest unsplit merge into its `into` can be split
 /// (`409 先拆开之后的合并`, also while `into` is itself merged into someone else). Moves back what is
 /// still on `into`.
 pub fn split_tx(
@@ -528,7 +527,7 @@ pub struct ProposalAccount {
     pub system: String,
 }
 
-/// `GET /merges`: `{proposals, unconfirmed, quiet}` (需要你判断, domain-model.md §2.3).
+/// `GET /merges`: `{proposals, unconfirmed, quiet}` (需要你判断).
 #[derive(Debug, Clone, Serialize)]
 pub struct Pending {
     pub proposals: Vec<Proposal>,

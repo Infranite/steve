@@ -39,7 +39,7 @@ pub const DENIED_TOOLS: [&str; 12] = [
     "PowerShell",
 ];
 
-/// Directories under the home directory that hold secrets (§4.3). Relative to `Scope::home`.
+/// Directories under the home directory that hold secrets. Relative to `Scope::home`.
 pub const SENSITIVE_HOME_DIRS: [&str; 5] =
     [".ssh", ".steve", ".aws", ".config/gh", "Library/Keychains"];
 

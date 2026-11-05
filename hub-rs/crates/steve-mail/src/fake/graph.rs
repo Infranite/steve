@@ -1,4 +1,4 @@
-//! Fake Microsoft Graph mail (email.md §3.4): `GET /me`, `mailFolders`
+//! Fake Microsoft Graph mail: `GET /me`, `mailFolders`
 //! (list with paging, get by id or well-known name, `childFolders`),
 //! folder `messages`, `/me/messages`, a message (`$select`), its MIME via
 //! `$value`, `PATCH` (isRead, flag), `move` (new id, as Exchange does),

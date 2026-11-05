@@ -1,4 +1,4 @@
-//! Message media end to end on the fake Feishu (CONTRACT.md of the message-media task): a card,
+//! Message media end to end on the fake Feishu: a card,
 //! an image and a post with media arrive over the bot's long connection; the space's messages
 //! show them without provider keys; `GET /chan-messages/:id/resources/:n` fetches only what the
 //! stored message recorded, as the connection that received it, with the guards (workspace, space

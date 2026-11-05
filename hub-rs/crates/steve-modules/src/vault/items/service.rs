@@ -1,9 +1,9 @@
-//! Item rules (accounts-vault.md §4.1): the three vaults, items by template, fields, masked output,
+//! Item rules: the three vaults, items by template, fields, masked output,
 //! whole-value replacement of secrets, and delete = destroy the data key. Methods on [`Vault`], so
 //! they share its KEK cache. Every write is audited and publishes `{type:"vault", id: <item>, ws}`.
 //!
 //! Plaintext of a secret field exists only as [`Zeroizing`] input on its way into [`seal_field`];
-//! decryption is in `reveal.rs` and `credential.rs` (§10 rule 2), not here.
+//! decryption is in `reveal.rs` and `credential.rs`, not here.
 
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -119,7 +119,7 @@ pub struct GrantOut {
     pub until: i64,
 }
 
-/// `VaultItemOut` (§5.1). Never contains a secret value; the list leaves `fields` out entirely.
+/// `VaultItemOut`. Never contains a secret value; the list leaves `fields` out entirely.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ItemOut {
     pub id: String,
@@ -144,7 +144,7 @@ fn event(tx: &Tx, ws: &str, item: &str) {
     });
 }
 
-/// `•••• 4821` for a card number (§4.1); other secrets show no hint.
+/// `•••• 4821` for a card number; other secrets show no hint.
 fn hint(kind: &str, value: &str) -> String {
     if kind != "card_number" {
         return String::new();
@@ -538,8 +538,8 @@ impl Vault {
         })
     }
 
-    /// `PATCH /vault/items/:id` (§4.1): raising to `high` revokes every grant; a bank card's
-    /// sensitivity never changes (§4.3).
+    /// `PATCH /vault/items/:id`: raising to `high` revokes every grant; a bank card's
+    /// sensitivity never changes.
     pub fn patch_item(&self, ws: &str, user: &str, id: &str, p: ItemPatch) -> VaultResult<ItemOut> {
         let mut c = Check::new();
         c.opt_len("title", p.title.as_deref().map(str::trim), 1, TITLE_MAX)
@@ -705,7 +705,7 @@ impl Vault {
         self.get_item(ws, user, id)
     }
 
-    /// `DELETE /vault/items/:id` (§4.1): data key and field values destroyed, grants revoked, title
+    /// `DELETE /vault/items/:id`: data key and field values destroyed, grants revoked, title
     /// kept for the use log. Returns how many grants were revoked.
     pub fn delete_item(&self, ws: &str, user: &str, id: &str) -> VaultResult<usize> {
         self.store().transaction(|tx| {
@@ -724,7 +724,7 @@ impl Vault {
 
     // ------------------------------------------------- system vault (connection credentials, A2)
 
-    /// A `connection_credential` item in the system vault (§2.2): every field is secret. Returns the
+    /// A `connection_credential` item in the system vault: every field is secret. Returns the
     /// item id for `connections.credential_item`.
     pub fn create_credential(
         &self,
@@ -850,7 +850,7 @@ impl Vault {
         })
     }
 
-    /// Disconnecting (§2.2): destroys a credential item like `DELETE /vault/items/:id`, without the
+    /// Disconnecting: destroys a credential item like `DELETE /vault/items/:id`, without the
     /// visibility check (system items are never visible). Missing or already deleted is fine.
     pub fn destroy_item(
         &self,

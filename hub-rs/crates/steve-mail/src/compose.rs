@@ -1,4 +1,4 @@
-//! Quick drafts (email.md §5.1 path 1, §5.2): no ACP session, one smart-tier gateway call with the
+//! Quick drafts: no ACP session, one smart-tier gateway call with the
 //! seven-layer prompt, one draft and one approval decision out. The model writes subject and body and
 //! may choose `reply` or `reply_all`; recipients are always computed by the server, so anything else
 //! the model says about recipients is ignored.
@@ -403,7 +403,7 @@ impl Mail {
             .filter(|d| !d.body.is_empty())
             .ok_or_else(|| MailError::Api(ApiError::rule("邮件 Bot 没有写出草稿，请再试一次")))?;
 
-        // recipients and subject are the server's (§5.2); the model only picks reply / reply_all
+        // recipients and subject are the server's; the model only picks reply / reply_all
         let all = q.reply_all.unwrap_or(md.reply_all);
         let (to, cc) = reply_recipients(&g.orig, all, &g.mine);
         if to.is_empty() && cc.is_empty() {

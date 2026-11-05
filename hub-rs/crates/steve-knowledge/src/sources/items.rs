@@ -1,6 +1,6 @@
-//! The `items` source (knowledge.md §2.1): one document per finished item — latest goal, delivery
+//! The `items` source: one document per finished item — latest goal, delivery
 //! summary, outputs, and the text of text outputs inside the item's `cwd` — plus the candidate
-//! extraction each completion triggers (§5.1, once per completion: `kb_marks extract:item:<id>`).
+//! extraction each completion triggers (once per completion: `kb_marks extract:item:<id>`).
 //!
 //! steve-core calls [`KnowledgeHooks`] after `finish` (B1 `item_hooks`); a reopened and finished
 //! again item is rebuilt and extracted again. Deleting an item: [`item_deleted`].
@@ -26,7 +26,7 @@ use crate::sources;
 use crate::state::Knowledge;
 
 pub const KIND: &str = "items";
-/// Text outputs larger than this are listed, not read (§2.1).
+/// Text outputs larger than this are listed, not read.
 pub const MAX_OUTPUT_BYTES: u64 = 200 * 1024;
 
 /// What the item document and the extraction are built from.
@@ -219,7 +219,7 @@ pub fn doc_text(f: &ItemFacts) -> String {
     s
 }
 
-/// The extraction input (§5.1): goal versions, what you said, answered questions, review notes and the
+/// The extraction input: goal versions, what you said, answered questions, review notes and the
 /// delivery summary; at most 12000 characters. The goals are marked as this item's own business: the
 /// model is told restating them is no memory, and [`extract::check`] drops what does.
 pub fn extract_text(f: &ItemFacts) -> String {
@@ -354,7 +354,7 @@ pub async fn finished(m: &Modules, kb: &Knowledge, item_id: &str) -> ApiResult<V
     extract::run(m, kb, &origin, &extract_text(&f), Some(&f.id), task).await
 }
 
-/// The item was deleted: its document and index rows go (§2.1).
+/// The item was deleted: its document and index rows go.
 pub fn item_deleted(tx: &Tx, ws: &str, item_id: &str) -> ApiResult<bool> {
     let Some(src) = repo::source_of_kind(tx, ws, KIND)? else {
         return Ok(false);

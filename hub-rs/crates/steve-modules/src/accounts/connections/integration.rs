@@ -201,7 +201,7 @@ const ORDER: [&str; 5] = ["feishu", "github", "mail", "slack", "gcal"];
 pub struct IntegrationsOut {
     pub areas: Vec<AreaOut>,
     pub providers: Vec<ProviderOut>,
-    /// The same connections as installation → identity → capability (domain-model.md §1.3).
+    /// The same connections as installation → identity → capability.
     pub installations: Vec<InstallationOut>,
     /// `<origin>/auth/connect/callback` for every public origin: the redirect URI to register.
     pub callback_urls: Vec<String>,
@@ -313,7 +313,7 @@ pub fn identity_kind(identity: &str) -> &'static str {
 
 const STATUS_RANK: [&str; 5] = ["ok", "paused", "error", "reauth", "revoked"];
 
-/// The installation a connection belongs to (domain-model.md §1.3: one app of a provider, with up
+/// The installation a connection belongs to (one app of a provider, with up
 /// to two identities — Steve itself and you): the id of the connection that holds it. A connection
 /// that names its app's connection (`config.app_connection`: your Feishu user connection points at
 /// the app's) is an identity of that installation; every other connection is one of its own.

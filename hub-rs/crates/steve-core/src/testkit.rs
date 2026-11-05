@@ -395,7 +395,7 @@ pub enum Step {
     Gate,
 }
 
-/// A research executor that plays a script (thread-routing §9 `FakeResearch`).
+/// A research executor that plays a script.
 pub struct FakeResearch {
     pub script: Mutex<Vec<Step>>,
     pub offer: Mutex<Option<crate::gateway::Offer>>,

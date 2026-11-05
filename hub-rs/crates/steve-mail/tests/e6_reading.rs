@@ -1,4 +1,4 @@
-//! The reading side of the mail REST (email.md §6, §9): the thread list (five views, account, search,
+//! The reading side of the mail REST: the thread list (five views, account, search,
 //! paging), one thread with messages, drafts and items, `PATCH` of the state, a message's sanitized
 //! HTML under a strict CSP, inline `cid:` images, the original `.eml`, the IMAP presets, and the first
 //! sync of a new mailbox starting on its connection event. Every route checks the thread is the

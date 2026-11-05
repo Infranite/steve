@@ -1,4 +1,4 @@
-//! The breakers the executor trips (modules/yolo.md §3.2, without the budget breaker B4 — the user
+//! The breakers the executor trips (without the budget breaker B4 — the user
 //! dropped budgets): B2 many failure cards at once, B3 the user undoing YOLO, B5 the executor itself
 //! failing. B1 (releases) comes with the release slice. A trip pauses the whole workspace
 //! ([`Yolo::trip`]): scheduled actions are cancelled and a failure notice goes out.

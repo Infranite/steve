@@ -1,4 +1,4 @@
-//! MCP tools of the contacts module for agents in a session (slice P3, contacts.md §4):
+//! MCP tools of the contacts module for agents in a session:
 //! `steve_contacts_find` and `steve_contacts_remember`. Everything is filtered for the session's
 //! workspace and the user the agent works for; `never` attributes and memories are never returned.
 //!
@@ -23,7 +23,7 @@ use crate::{ApiError, ApiResult, Caller, Modules};
 
 pub const FIND: &str = "steve_contacts_find";
 pub const REMEMBER: &str = "steve_contacts_remember";
-/// Ownership (ownership.md §5): the account → party → 负责人 chain, a person's holdings, and a
+/// Ownership: the account → party → 负责人 chain, a person's holdings, and a
 /// 负责人 heard in chat as a proposal the user confirms.
 pub const WHOIS: &str = "steve_whois";
 pub const HOLDINGS: &str = "steve_person_holdings";
@@ -33,7 +33,7 @@ pub const STEWARD_PROPOSE: &str = "steve_steward_propose";
 pub const FIND_LIMIT: usize = 5;
 /// Memories per match.
 const FIND_MEMS: i64 = 10;
-/// The answer of `steve_contacts_remember` (§4, verbatim).
+/// The answer of `steve_contacts_remember` (verbatim).
 pub const SAVED: &str = "Saved as a candidate; the user will confirm it.";
 
 const KINDS: [&str; 3] = ["fact", "preference", "event"];

@@ -178,7 +178,7 @@ impl Items<'_> {
             super::put_item_tags(w.c, &id, &tags)?;
             w.c.run("INSERT INTO item_goals (item_id, version, text, created) VALUES (?, 1, ?, ?)", params![id, p.goal, t])?;
             if task {
-                // stats: the item's first status (modules/stats.md §2.5)
+                // stats: the item's first status
                 status_mark(w.c, ws, &id, t, None, p.status.as_deref().unwrap_or("run"))?;
             }
             w.publish(ChangeEvent::Item { id: id.clone() });

@@ -6,7 +6,7 @@ publish.workspace = true
 description = "Email: accounts, sync, drafts and sending"
 
 [features]
-# Fake IMAP/SMTP/Gmail/Graph servers and fixture emails for tests (email.md §12).
+# Fake IMAP/SMTP/Gmail/Graph servers and fixture emails for tests.
 fake = ["dep:rcgen"]
 
 [dependencies]

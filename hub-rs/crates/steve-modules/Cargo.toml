@@ -33,7 +33,7 @@ tokio = { version = "=1.54.1", features = ["rt", "sync", "time", "macros", "proc
 libc = "=0.2.191"
 tower = { version = "=0.5.3", features = ["util"] }
 tracing = "=0.1.44"
-# Passkeys for local verification before a reveal (accounts-vault.md §4.2).
+# Passkeys for local verification before a reveal.
 webauthn-rs = "=0.6.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]

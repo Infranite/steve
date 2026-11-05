@@ -1,4 +1,4 @@
-//! Flows as stored (signals-automation.md §3.4, §4.1): rows, versions, the trigger index, and the
+//! Flows as stored: rows, versions, the trigger index, and the
 //! `FlowSummary` / `Flow` shapes. Saving is a new version (`flow_versions`, `revisions`) and rebuilds
 //! `flow_triggers` from the trigger node; enabling and disabling only flip `enabled`; deleting marks
 //! the row and drops its triggers (runs and items stay). Synchronous SQL only.
@@ -144,7 +144,7 @@ pub fn create_as(
     Ok(id)
 }
 
-/// Saves `graph` as the next version (§3.4). Returns the new version.
+/// Saves `graph` as the next version. Returns the new version.
 pub fn save_version(
     tx: &Tx,
     f: &FlowRow,
@@ -203,7 +203,7 @@ fn first_at(cfg: &Value, tz: &str, now: i64) -> Option<i64> {
     expr.next_after_ms(parse_tz(tz).ok()?, now)
 }
 
-/// Rebuilds the trigger index of a flow from its trigger node (§1: dispatch reads only this table).
+/// Rebuilds the trigger index of a flow from its trigger node (dispatch reads only this table).
 /// Time triggers get their next run computed from `now`.
 pub fn rebuild_triggers(
     tx: &Tx,
@@ -359,7 +359,7 @@ pub fn list(c: &Connection, ws: &str, kind: Option<&str>) -> FlowResult<Vec<Flow
     Ok(rows)
 }
 
-/// `FlowSummary` (§4.1).
+/// `FlowSummary`.
 pub fn summary(c: &Connection, f: &FlowRow, now: i64) -> FlowResult<Value> {
     let graph = Graph::from_value(&f.graph).unwrap_or_default();
     let trigger = graph.trigger().map_or(Value::Null, |t| {

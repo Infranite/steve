@@ -1,4 +1,4 @@
-//! Bot use of secrets (accounts-vault.md §4.3–§4.5): `steve_secret_use` asks, the user approves (or a
+//! Bot use of secrets: `steve_secret_use` asks, the user approves (or a
 //! grant covers it), Steve runs the command with the values injected and gives back the redacted
 //! output.
 //!
@@ -44,11 +44,11 @@ use crate::{ApiError, ApiResult};
 
 /// The decisions' `subject_type`.
 pub const SUBJECT: &str = "secret_use";
-/// The tool result when the item doesn't exist or isn't visible (§6), verbatim.
+/// The tool result when the item doesn't exist or isn't visible, verbatim.
 pub const NO_SUCH: &str = "No such credential. Call steve_secret_list.";
 /// Same as steve-mcp's `END`; agents rely on this wording.
 pub const END: &str = "End your turn now. The user's answer will arrive as your next message.";
-/// Characters of output in the message to the session (§4.3).
+/// Characters of output in the message to the session.
 pub const MESSAGE_OUTPUT: usize = 8000;
 pub const OPTIONS: [&str; 5] = ["once", "grant_1h", "grant_8h", "grant_24h", "deny"];
 pub const OPTIONS_HIGH: [&str; 2] = ["once", "deny"];
@@ -56,28 +56,28 @@ pub const OPTIONS_HIGH: [&str; 2] = ["once", "deny"];
 const DAY_MS: i64 = 86_400_000;
 /// Unanswered requests expire after a day (§9 `vault.cleanup`).
 const PENDING_MS: i64 = DAY_MS;
-/// Use rows are kept for a year (§4.5).
+/// Use rows are kept for a year.
 const RETENTION_MS: i64 = 365 * DAY_MS;
 /// Temp directories older than this are removed by the hourly job.
 const SCRATCH_AGE: Duration = Duration::from_secs(15 * 60);
 const PURPOSE_MAX: usize = 500;
 const COMMAND_MAX: usize = 8000;
 
-/// steve-core's “send to the item's active session” (清单 §6.5 `send`): prompt the session if it is not
+/// steve-core's “send to the item's active session” (`send`): prompt the session if it is not
 /// ended, otherwise start a new session on the item with this text. The integrator implements it.
 #[async_trait]
 pub trait SessionSink: Send + Sync {
     async fn send(&self, ws: &str, item_id: Option<&str>, session_id: Option<&str>, text: &str);
 }
 
-/// The message after a denial (§4.3), verbatim.
+/// The message after a denial, verbatim.
 pub fn denied_message(title: &str) -> String {
     format!(
         "用户没有批准使用「{title}」。不要再尝试获取这个机密，换一种不需要它的做法，或者用 steve_ask 问用户。"
     )
 }
 
-/// The message after an approved run (§4.3), verbatim; the output is cut to [`MESSAGE_OUTPUT`].
+/// The message after an approved run, verbatim; the output is cut to [`MESSAGE_OUTPUT`].
 pub fn approved_message(title: &str, out: &RunOutput) -> String {
     let all = out.combined();
     let cut: String = all.chars().take(MESSAGE_OUTPUT).collect();
@@ -283,7 +283,7 @@ impl SecretUses {
         });
     }
 
-    /// The hourly part of `vault.cleanup` (§9): temp directories older than 15 minutes, requests
+    /// The hourly part of `vault.cleanup`: temp directories older than 15 minutes, requests
     /// unanswered for a day, use rows older than a year.
     pub async fn hourly(&self) -> VaultResult<()> {
         let me = self.clone();
@@ -355,7 +355,7 @@ impl SecretUses {
         })
     }
 
-    /// `steve_secret_use` (§6): runs now under a grant, or opens a decision.
+    /// `steve_secret_use`: runs now under a grant, or opens a decision.
     pub async fn request(&self, cx: &UseCx, r: UseRequest) -> VaultResult<UseOutcome> {
         let me = self.clone();
         let cx2 = cx.clone();
@@ -732,7 +732,7 @@ fn publish(tx: &Tx, u: &UseRecord) {
     });
 }
 
-/// The `secret_use` decision handler (§4.3).
+/// The `secret_use` decision handler.
 pub struct UseDecisions(SecretUses);
 
 impl DecisionHandler for UseDecisions {

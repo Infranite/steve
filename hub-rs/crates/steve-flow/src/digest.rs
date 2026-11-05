@@ -1,4 +1,4 @@
-//! `digest_entries`: things flows noted for the next report (signals-automation.md §6). The `digest`
+//! `digest_entries`: things flows noted for the next report. The `digest`
 //! action writes them; `report` schedules and steve-core's away-report take them.
 
 use rusqlite::{Connection, params};

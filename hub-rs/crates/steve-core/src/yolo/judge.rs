@@ -1,8 +1,8 @@
-//! `yolo::judge` (modules/yolo.md §2.1, §2.2): what YOLO would do with one decision, as a pure function
+//! `yolo::judge`: what YOLO would do with one decision, as a pure function
 //! of what is known about it ([`Facts`]), the user's [`Policy`] and where Steve lives ([`Env`]).
 //!
 //! Order: out of scope → [`Verdict::Off`]; a hard limit ([`super::limits::check`]) → `Decline`; the user
-//! is present → `Wait`; then the table. There are no budgets (user decision 2026-11-01 §3). Nothing in
+//! is present → `Wait`; then the table. There are no budgets. Nothing in
 //! [`Policy`] reaches the hard limits; widening it only ever turns `Decline` into `Auto` for decisions
 //! that passed them.
 //!
@@ -35,13 +35,13 @@ pub struct Policy {
     pub continue_stalls: bool,
     /// `ask` / `question`: answer for the user.
     pub answer_asks: bool,
-    /// The lowest model confidence an answer may have (§2.4: 0.75).
+    /// The lowest model confidence an answer may have (0.75).
     pub ask_min_confidence: f64,
     /// `propose` / `item`: start when the dependencies are done, or a plan from the user's own chat.
     pub propose: bool,
     /// Bot-identity channel replies to internal audiences.
     pub chan_bot_internal: bool,
-    /// Messages and mail as the user, with the `[AI] ` mark (user decision 2026-11-01 §2).
+    /// Messages and mail as the user, with the `[AI] ` mark.
     pub self_send: bool,
     /// …also when the audience includes people outside the organisation.
     pub self_send_external: bool,
@@ -333,7 +333,7 @@ pub struct Stall {
     pub steve_tried: bool,
 }
 
-/// The model's answer for the user (§2.4 step 2).
+/// The model's answer for the user.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Answer {
     /// `answer` | `ask_user`
@@ -360,10 +360,10 @@ pub struct Ask {
     pub key: String,
 }
 
-/// Rebase conflicts handed back before YOLO leaves the next release card to you (§2.2).
+/// Rebase conflicts handed back before YOLO leaves the next release card to you.
 pub const REBASE_RETURNS: u32 = 3;
 
-/// Answers YOLO gives per item and window (§2.4 step 6).
+/// Answers YOLO gives per item and window.
 pub const ASK_PER_ITEM: u32 = 10;
 
 /// What kind of decision it is, with the evidence its row of the table needs.
@@ -418,12 +418,12 @@ pub struct Facts {
     pub options: Vec<String>,
     /// YOLO is in effect for it (scope, not forced off, not paused).
     pub in_scope: bool,
-    /// The user was active on it lately (§2.1 step 4).
+    /// The user was active on it lately.
     pub present: bool,
     pub subject: Subject,
 }
 
-/// How a decided action can be undone (§3.3).
+/// How a decided action can be undone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Undo {
@@ -534,7 +534,7 @@ impl AutoExt for Verdict {
     }
 }
 
-/// The texts sent to a session when YOLO continues it (§4.1).
+/// The texts sent to a session when YOLO continues it.
 pub const CONTINUE_STALL: &str = "你上一回合没有交付也没有提问就停了。继续完成目标；做完用 steve_deliver 交付，真的需要用户才能决定时用 steve_ask（给出 recommended）。";
 
 pub fn continue_error(message: &str) -> String {
@@ -562,7 +562,7 @@ pub fn release_failed_text(prev: &str, reason: &str, log: &str) -> String {
     format!("发布失败并已自动回到 {prev}：{reason}。日志 {log}。修好后重新交付。")
 }
 
-/// What the session receives when YOLO answers a question for the user (§2.4 step 4).
+/// What the session receives when YOLO answers a question for the user.
 pub fn answer_text(answer: &str, reason: &str) -> String {
     format!(
         "（YOLO：Steve 代你回答）{answer}。依据：{reason}。如果这个假设后来证明不对，在交付摘要里写明。"
@@ -988,7 +988,7 @@ pub fn tool_options(options: &[String]) -> Vec<(String, String)> {
         .collect()
 }
 
-/// The subject a decision row alone can tell: enough for the preview (§1.3). Evidence only the
+/// The subject a decision row alone can tell: enough for the preview. Evidence only the
 /// executor gathers (checks, release state, disclosure verdicts, the full tool input) is missing, so
 /// those rows come out as [`Subject::Unverified`] and are declined; the tool input is read from the
 /// stored draft, which is cut at 2000 characters, so a draft that long counts as truncated.

@@ -85,7 +85,7 @@ async fn start() -> Env {
         ("STEVE_REPO", "/nonexistent".into()),
         ("STEVE_VAULT_KEYSTORE", "file".into()),
         ("STEVE_FORBID_REAL_HOSTS", "1".into()),
-        // a fresh temp home, not a production copy: YOLO may be on (WORKERS.md “YOLO on copies”)
+        // a fresh temp home, not a production copy: YOLO may be on
         ("STEVE_NO_RESUME", "0".into()),
         ("CLAUDE_CODE_EXECUTABLE", "/usr/bin/false".into()),
         ("STEVE_ADAPTER_CLAUDE", fake.display().to_string()),
