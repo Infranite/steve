@@ -394,6 +394,17 @@ pub struct Abandon {
     pub reason: String,
 }
 
+/// Retire an unknown *control* operation, preserving any filesystem effects. The Node must prove
+/// its processes stopped, and CAS the exact target digest; no external action is replayed. The
+/// target becomes Interrupted (not Succeeded). Executions use Abandon instead. Legacy controls
+/// without sufficient recovery evidence may remain Unsupported/OutcomeUnknown.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Recover {
+    pub target: OperationId,
+    pub expected: Digest,
+    pub reason: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PageRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]

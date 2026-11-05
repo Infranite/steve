@@ -49,6 +49,14 @@ pub trait ExecutionControl: Send + Sync {
     async fn cancel(&self, c: Command<Cancel>) -> ApiResult<Receipt>;
     /// Give up an `unknown` execution once its processes are confirmed gone ([`Abandon`]).
     async fn abandon(&self, c: Command<Abandon>) -> ApiResult<Receipt>;
+    /// Explicitly retire an unknown control operation; never implicitly re-executes it.
+    /// Default preserves compatibility with Nodes that do not implement control recovery.
+    async fn recover(&self, _c: Command<Recover>) -> ApiResult<Receipt> {
+        Err(ApiError::new(
+            ErrorCode::Unsupported,
+            "control recovery unsupported",
+        ))
+    }
     /// Applies only to the request still waiting with this attempt and action digest; anything else
     /// is `stale`.
     async fn resolve_permission(&self, c: Command<PermissionResolution>) -> ApiResult<Receipt>;
