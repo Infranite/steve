@@ -214,6 +214,7 @@ export default {
     catNotify: "通知",
     catNotifySub: "推送渠道、免打扰",
     catLook: "外观",
+    /* a deliberate change from "主题、字号、动态效果": the language switch lives in this section now */
     catLookSub: "主题、语言、字号、动态效果",
     catData: "数据与隐私",
     catDataSub: "数据位置、备份、清理",

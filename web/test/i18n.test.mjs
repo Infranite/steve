@@ -111,6 +111,8 @@ test("en uses its own words and plurals", async () => {
     assert.equal(f.dayRange("2026-11-01", "2026-11-07"), "Nov 1 – Nov 7")
     assert.equal(f.num(12345.5), "12,345.5")
     assert.equal(i18n.t("common:action.save"), "Save")
+    /* the snooze label the Hub stores stays zh-CN in any UI language */
+    assert.equal(i18n.t("core:snooze.hour", { lng: "zh-CN" }), "1 小时后")
   })
   assert.equal(i18n.lang(), "zh-CN")
 })
@@ -148,8 +150,8 @@ const ALLOW = {
   "github/index.tsx": [["保险箱"], "matched in the Hub's error to link to the vault"],
   "graph.tsx": [["派生", "交接", "依赖", "项目"], "edge kinds from store.ts, mapped to t() labels"],
   "store.ts": [["高", "中", "低", "你", "开始会话", "分流", "规划", "收尾", "交付与验收", "发布", "正在开始", "刚开始", "定义", "执行", "不", "排队", "插话", "删除", "导出", "项目", "类型", "领域", "客户", "主题", "交接", "依赖", "派生"], `priorities, tag categories, stage and edge ids, timeline text: ${HUB}`],
-  "views.tsx": [["接收", "分流", "定义", "规划", "准备", "执行", "交付与验收", "收尾", "高", "中", "低", "无", "今天", "明天", "周五", "下周一", "跟随全局", "需要你验收", "自动验收", "全部", "等你", "进行中", "动态", "产出", "关系图", "派生", "交付", "目标更新", "前置", "开新会话", "交接", "自动开始", "暂停", "放弃", "继续", "关联", "发布", "冲突", "失败", "回到", "补充信息：", "（附件）", "：", "插话", "排队", "本机", "本机的"], `stage, priority, due and acceptance values (labels via t()), tab ids, timeline keywords, queued-comment prefix: ${HUB}`],
-  "view-shared.tsx": [["高", "今天"], `priority and due values: ${HUB}`],
+  "views.tsx": [["接收", "分流", "定义", "规划", "准备", "执行", "交付与验收", "收尾", "高", "中", "低", "无", "今天", "明天", "周五", "下周一", "跟随全局", "需要你验收", "自动验收", "全部", "等你", "进行中", "动态", "产出", "关系图", "派生", "交付", "目标更新", "前置", "开新会话", "交接", "自动开始", "暂停", "放弃", "继续", "关联", "发布", "冲突", "失败", "回到", "补充信息：", "（附件）", "：", "插话", "排队", "本机"], `stage, priority, due and acceptance values (labels via t()), tab ids, timeline keywords, queued-comment prefix: ${HUB}`],
+  "view-shared.tsx": [["高", "今天", "无", "明天", "周五", "下周一"], `priority and due values (labels via t()): ${HUB}`],
   "stats/overview.tsx": [["全部", "等你", "进行中"], "filter ids passed to views.showItems"],
   "knowledge/index.tsx": [["搜索", "长期记忆", "知识条目", "笔记与文档", "来源", "待确认"], "tab ids (labels via t()); 长期记忆/知识条目 are the Hub's record names"],
   "knowledge/parts.tsx": [["存为长期记忆吗？", "存为知识条目吗？", "记住这条吗？", "为什么值得保留："], "the Hub's question and reason prefixes, matched"],

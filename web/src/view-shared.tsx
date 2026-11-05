@@ -9,7 +9,12 @@ import { BotAvatar, go, ItemNo, KindTag, Meta, RelNote, StatusDot, Tags } from "
 import { cn } from "cn"
 import { FolderIcon, GitBranchIcon, StarIcon } from "lucide-react"
 import { type ReactNode } from "react"
-import { useT } from "@/i18n"
+import { t as tr, useT } from "@/i18n"
+
+/* the due presets the web writes are stored as these Chinese values; only their labels are translated */
+const DUE_LABEL = { 无: "views:item.dueNone", "今天 18:00": "views:item.dueToday", 明天: "views:item.dueTomorrow", 周五: "views:item.dueFriday", 下周一: "views:item.dueNextMonday" } as const
+/** the label of a stored due value, or the value itself when it is not a preset (a date the Hub wrote, say) */
+export const dueLabel = (v: string): string => (v in DUE_LABEL ? String(tr(DUE_LABEL[v as keyof typeof DUE_LABEL])) : v)
 
 /** the item's project as a link; items without one say so, since the work then happens in a scratch directory */
 export function ProjectChip({ id, className, plain }: { id: string | null; className?: string; plain?: boolean }) {
@@ -58,7 +63,7 @@ export function ItemRow({ i, pick, proj = true, bot = true }: { i: Item; pick?: 
       {/* a phone row has room for the category only */}
       {kindOf(i) && <KindTag id={kindOf(i)!} className="sm:hidden" />}
       {i.pri === "高" && !closed && <span className="rounded bg-attention/12 px-1.5 text-attention">{t("shell:item.high")}</span>}
-      {i.due && !closed && <span className={cn("whitespace-nowrap", /今天/.test(i.due) && "text-foreground/80")}>{t("shell:item.due", { due: i.due })}</span>}
+      {i.due && !closed && <span className={cn("whitespace-nowrap", /今天/.test(i.due) && "text-foreground/80")}>{t("shell:item.due", { due: dueLabel(i.due) })}</span>}
       {proj && i.project && <span className="hidden max-w-28 md:inline-flex"><ProjectChip id={i.project} plain /></span>}
       {(!closed || planOpen) && <PlanBar i={i} warn={closed} />}
       {bot && i.b && <span title={botName(i.b)} className="hidden sm:inline-flex"><BotAvatar k={i.b} size={18} /></span>}

@@ -32,7 +32,7 @@ export type PlanRound = { n: number; steps: [string, number][]; end: "done" | "r
 export type Item = {
   id: string; t: string; b: string; st: "prop" | "run" | "wait" | "pause" | "done" | "drop" | "block"; deps?: string[]; src: [string, string]; ws: string; project: string | null; up: string; star?: boolean; acc: string
   goals: string[]; now: string; plan?: [string, number][]; rounds: PlanRound[]; wait?: Wait; waits: Wait[]; ss: string[]; tl: any[]; outs: Out[]; anns: RAnnotation[]; q: RQueued[]; qs: string | null; parent?: { item: string; s?: string; at?: number } | null
-  due?: string; pri?: "高" | "中" | "低"; arch?: boolean; snooze?: string; tags?: string[]; branch: string | null; cwd: string | null; projNext?: boolean; detail: boolean; dependents: string[]; created: number; updated: number
+  due?: string; pri?: "高" | "中" | "低"; arch?: boolean; snooze?: string; snoozeUntil?: number; tags?: string[]; branch: string | null; cwd: string | null; projNext?: boolean; detail: boolean; dependents: string[]; created: number; updated: number
   /** the last approved release of this item and what became of it */
   rel?: Rel
 }
@@ -412,7 +412,7 @@ function itemOf(i: RItem): Item {
     rounds: (det?.planRounds ?? []).map((r) => ({ n: r.round, steps: steps(r.steps), end: r.end, at: tm(r.created) })),
     wait: open.length ? waitOf(open[0]) : undefined, waits: open.map(waitOf), ss: i.sessionIds, tl, outs: det ? det.artifacts.map((a): Out => [a.kind, a.title, a.location, a.id, a.created, det.artifactRoles?.[a.id] as Out[5]]) : [], anns: det?.annotations ?? [],
     q: act?.queued ?? [], qs: act?.id ?? null,
-    parent: i.parent?.item ? { item: i.parent.item, s: i.parent.session ?? undefined, at: undefined } : null, due: i.due ?? undefined, pri: (i.priority as Item["pri"]) ?? "中", arch: i.archived, snooze: snoozed, tags: i.tags,
+    parent: i.parent?.item ? { item: i.parent.item, s: i.parent.session ?? undefined, at: undefined } : null, due: i.due ?? undefined, pri: (i.priority as Item["pri"]) ?? "中", arch: i.archived, snooze: snoozed, snoozeUntil: snoozed ? i.snooze!.until : undefined, tags: i.tags,
     /* the hub clears cwd when the project changes; a session still running then is in the old directory */
     branch: i.branch, cwd: i.cwd, projNext: !i.cwd && !!act, detail: !!det, dependents: det?.dependents ?? [], created: i.created, updated: i.updated,
     /* an open release card wins (it is the newest); a settled one says what happened */
@@ -804,7 +804,8 @@ const SNOOZE: Record<SnoozeKey, () => number> = {
   morning: () => { const d = new Date(); d.setDate(d.getDate() + 1); d.setHours(8, 30, 0, 0); return d.getTime() },
 }
 export const snoozeLabel = (k: SnoozeKey) => t(`core:snooze.${k}`)
-export function snooze(id: string, key: SnoozeKey) { const when = snoozeLabel(key); void call(api.snooze(id, when, (SNOOZE[key] ?? SNOOZE.hour)()), t("core:snooze.toast", { when })) }
+/* the Hub stores the label and writes it into the timeline, so it gets the zh-CN text whatever the UI language */
+export function snooze(id: string, key: SnoozeKey) { const when = snoozeLabel(key); void call(api.snooze(id, t(`core:snooze.${key}`, { lng: "zh-CN" }), (SNOOZE[key] ?? SNOOZE.hour)()), t("core:snooze.toast", { when })) }
 export function unsnooze(id: string) { void call(api.snooze(id, null, null)) }
 /** resolve the item's open decision; `c` is the decision's own choice id */
 /* the toast after answering a card: per module subject first, then by choice; the plain fallbacks last */
