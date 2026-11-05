@@ -68,7 +68,7 @@ fn at_version(v: usize) -> (tempfile::TempDir, std::path::PathBuf) {
 
 #[test]
 fn schema_version_is_23() {
-    assert_eq!(db::SCHEMA_VERSION, 34);
+    assert_eq!(db::SCHEMA_VERSION, 35);
 }
 
 #[test]
@@ -139,8 +139,9 @@ fn rerunning_the_module_migrations_changes_nothing() {
     let before = schema_of(&path);
     let c = Connection::open(&path).unwrap();
     // Historical module migrations are directly repeatable. 034 contains one-shot ALTERs;
-    // their replay protection is the runner's schema_version transaction, exercised below.
-    for m in &db::MIGRATIONS[3..33] {
+    // their replay protection is the runner's schema_version transaction, exercised below. 035 is
+    // indexes only and repeatable again.
+    for m in db::MIGRATIONS[3..33].iter().chain(&db::MIGRATIONS[34..35]) {
         c.execute_batch(m).unwrap();
     }
     drop(c);
@@ -236,6 +237,11 @@ fn yolo_migration_does_not_depend_on_013() {
     c.execute_batch(db::MIGRATIONS[13]).unwrap();
     assert_eq!(yolo(&c), want);
 
+    // the full run also adds 035's indexes on yolo_actions
+    for l in db::MIGRATIONS[34].lines().filter(|l| l.contains(" ON yolo_")) {
+        c.execute_batch(l).unwrap();
+    }
+    let want = yolo(&c);
     let (_c, path) = at_version(13);
     let s = Store::open(&path, NoPublisher).unwrap();
     s.with_conn(|c| {

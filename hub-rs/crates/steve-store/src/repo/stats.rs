@@ -148,7 +148,7 @@ impl Stats<'_> {
     /// second call cannot count a turn twice.
     pub fn turn_finish(&self, f: &TurnFinish) -> Result<bool> {
         self.0.write(|w| {
-            let tx = w.c.unchecked_transaction()?;
+            let tx = w.tx()?;
             let ws = finish_in(&tx, f)?;
             tx.commit()?;
             if let Some(ws) = &ws {
@@ -162,7 +162,7 @@ impl Stats<'_> {
     /// `ended` (the boot); `day` maps a workspace id and a time to the local day. Returns how many turns were closed.
     pub fn interrupt_open(&self, ended: i64, day: impl Fn(&str, i64) -> String) -> Result<usize> {
         self.0.write(|w| {
-            let tx = w.c.unchecked_transaction()?;
+            let tx = w.tx()?;
             // the turn stopped when its session last wrote something, not when the Hub came back up
             let open: Vec<(String, String, i64)> = tx
                 .prepare_cached(
@@ -198,7 +198,7 @@ impl Stats<'_> {
     /// Writes one token record and books it into `stat_daily`; returns the row id.
     pub fn usage_add(&self, u: &NewUsage) -> Result<i64> {
         self.0.write(|w| {
-            let tx = w.c.unchecked_transaction()?;
+            let tx = w.tx()?;
             let id = usage_in(&tx, u)?;
             tx.commit()?;
             w.publish(stats_changed(&u.workspace_id, Some(&u.day)));
@@ -209,7 +209,7 @@ impl Stats<'_> {
     /// Writes one item mark; returns the row id.
     pub fn mark_add(&self, m: &NewMark) -> Result<i64> {
         self.0.write(|w| {
-            let tx = w.c.unchecked_transaction()?;
+            let tx = w.tx()?;
             let id = mark_in(&tx, m)?;
             tx.commit()?;
             w.publish(stats_changed(&m.workspace_id, None));
@@ -223,7 +223,11 @@ impl Stats<'_> {
     pub fn refresh_pending(&self, since: i64) -> Result<bool> {
         self.0.read(|c| {
             Ok(c.query_row(
-                "SELECT EXISTS(SELECT 1 FROM item_stats WHERE dirty = 1) OR (?1 > 0 AND EXISTS(SELECT 1 FROM decisions WHERE item_id IS NOT NULL AND (created >= ?1 OR resolved >= ?1)))",
+                // one EXISTS per column, so each is a range on its own index (decisions_created_item,
+                // decisions_resolved_item) and an idle poll reads nothing
+                "SELECT EXISTS(SELECT 1 FROM item_stats WHERE dirty = 1) OR (?1 > 0 AND (
+                   EXISTS(SELECT 1 FROM decisions WHERE item_id IS NOT NULL AND created >= ?1)
+                   OR EXISTS(SELECT 1 FROM decisions WHERE item_id IS NOT NULL AND resolved >= ?1)))",
                 [since],
                 |r| r.get(0),
             )?)

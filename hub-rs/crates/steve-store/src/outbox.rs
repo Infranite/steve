@@ -499,16 +499,38 @@ pub fn prune(store: &Store, now: i64, keep_ms: i64) -> Result<usize> {
         AND NOT EXISTS (SELECT 1 FROM outbox_leases l WHERE l.event_seq = e.seq)
         AND NOT EXISTS (SELECT 1 FROM outbox_consumers k WHERE k.topic = e.topic AND e.seq > k.since_seq
                           AND NOT EXISTS (SELECT 1 FROM outbox_receipts r WHERE r.event_seq = e.seq AND r.consumer_id = k.id))";
-    store.transaction(|tx| {
-        let seqs: Vec<i64> = {
-            let mut st = tx.prepare(&format!("SELECT e.seq FROM outbox_events e WHERE {DONE}"))?;
-            st.query_map([now - keep_ms], |r| r.get(0))?
-                .collect::<rusqlite::Result<_>>()?
-        };
-        for seq in &seqs {
-            tx.execute("DELETE FROM outbox_receipts WHERE event_seq = ?", [seq])?;
-            tx.execute("DELETE FROM outbox_events WHERE seq = ?", [seq])?;
+    // In batches, each its own transaction, so the writer lock is never held for a whole week of
+    // events at once. The seqs are collected before deleting: removing receipts first would change
+    // what DONE matches.
+    let mut total = 0;
+    loop {
+        let n = store.transaction(|tx| {
+            let seqs: Vec<i64> = {
+                let mut st = tx.prepare_cached(&format!(
+                    "SELECT e.seq FROM outbox_events e WHERE {DONE} ORDER BY e.seq LIMIT {PRUNE_BATCH}"
+                ))?;
+                st.query_map([now - keep_ms], |r| r.get(0))?
+                    .collect::<rusqlite::Result<_>>()?
+            };
+            let mut receipts = tx.prepare_cached("DELETE FROM outbox_receipts WHERE event_seq = ?")?;
+            let mut events = tx.prepare_cached("DELETE FROM outbox_events WHERE seq = ?")?;
+            for seq in &seqs {
+                receipts.execute([seq])?;
+                events.execute([seq])?;
+            }
+            Ok::<_, StoreError>(seqs.len())
+        })?;
+        total += n;
+        if n < PRUNE_BATCH {
+            break;
         }
-        Ok(seqs.len())
-    })
+    }
+    // prune runs hourly: a good moment to refresh the planner's statistics too
+    if let Err(e) = store.optimize() {
+        tracing::warn!(error = %e, "PRAGMA optimize failed");
+    }
+    Ok(total)
 }
+
+/// Events [`prune`] deletes per transaction.
+const PRUNE_BATCH: usize = 500;

@@ -120,8 +120,26 @@ fn fresh_database_is_ts_schema_plus_module_migrations() {
         only.execute_batch(&format!("CREATE TABLE {t} ({cols})"))
             .unwrap();
     }
-    for m in &db::MIGRATIONS[TS_MIGRATIONS..] {
+    for m in &db::MIGRATIONS[TS_MIGRATIONS..34] {
         only.execute_batch(m).unwrap();
+    }
+    // 035 indexes both kinds of table: an index on a TS table belongs to the TS side, the rest to
+    // the module side (each statement is one line)
+    for statement in db::MIGRATIONS[34].lines().filter(|l| l.starts_with("CREATE ")) {
+        let (_, on) = statement.split_once(" ON ").unwrap();
+        let table = on.split('(').next().unwrap().trim();
+        let in_ts: bool = ts
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?)",
+                [table],
+                |r| r.get(0),
+            )
+            .unwrap();
+        if in_ts {
+            ts.execute_batch(statement).unwrap();
+        } else {
+            only.execute_batch(statement).unwrap();
+        }
     }
     let stub = |t: &str| STUBS.contains(&t) || READ_STUBS.iter().any(|(n, _)| *n == t);
     let added = objects(&only).into_iter().filter(|(ty, name, tbl, _)| {
@@ -131,15 +149,19 @@ fn fresh_database_is_ts_schema_plus_module_migrations() {
     want.sort();
     // both sides create `sqlite_sequence` once an AUTOINCREMENT table exists (001 and 015)
     want.dedup();
-    let mut got = got;
+    // the planner's statistics (`PRAGMA optimize` at open) are not schema
+    let mut got: Vec<_> = got
+        .into_iter()
+        .filter(|(_, name, _, _)| !name.starts_with("sqlite_stat"))
+        .collect();
     got.sort();
     assert_eq!(got, want);
 }
 
 #[test]
 fn migrations_are_the_ts_strings() {
-    assert_eq!(db::MIGRATIONS.len(), 34);
-    assert_eq!(db::SCHEMA_VERSION, 34);
+    assert_eq!(db::MIGRATIONS.len(), 35);
+    assert_eq!(db::SCHEMA_VERSION, 35);
     assert!(db::MIGRATIONS[0].starts_with("\n  CREATE TABLE workspaces (id TEXT PRIMARY KEY, name TEXT NOT NULL, created INTEGER NOT NULL);"));
     assert!(
         db::MIGRATIONS[1]

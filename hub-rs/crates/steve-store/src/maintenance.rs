@@ -144,13 +144,17 @@ impl Store {
         kind: &str,
         still_running: impl FnOnce() -> bool,
     ) -> Option<Permit> {
+        // The check may read the database, so it runs before the gate lock, which every permit and
+        // drop waits on. Sealing still decides under the lock: it needs `running` empty, and this
+        // admission counts itself under the same lock.
+        let ok = still_running();
         let mut g = self
             .inner
             .maintenance
             .state
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        if g.sealed || !still_running() {
+        if g.sealed || !ok {
             return None;
         }
         *g.running.entry(kind.into()).or_default() += 1;

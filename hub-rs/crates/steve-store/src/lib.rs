@@ -3,8 +3,8 @@
 //! [`Store::open`] runs the db.ts migrations verbatim; the repositories (`store.items()`, `store.bots()`, …)
 //! mirror the repo.ts objects one to one and publish a [`ChangeEvent`] after every write.
 //!
-//! Connections: one write connection behind a `std::sync::Mutex`, plus an r2d2 pool of four read-only
-//! connections. SQLite allows a single writer anyway and every write here is a few statements, so a
+//! Connections: one write connection behind a `std::sync::Mutex`, plus an r2d2 pool of read-only
+//! connections (one per core, 4 to 16). SQLite allows a single writer anyway and every write here is a few statements, so a
 //! mutex costs nothing and keeps the TS guarantee that writes (and their events) happen in one order;
 //! WAL lets the pooled readers serve `/api/state` and event paging in parallel without waiting on it.
 //! A write followed by a read in the same operation runs on the write connection, so it sees its own data.
@@ -38,8 +38,13 @@ pub use types::*;
 /// The default workspace id (`WS` in repo.ts).
 pub const WS: &str = "default";
 
-/// Number of pooled read connections.
-const READERS: u32 = 4;
+/// Number of pooled read connections: one per core, at least 4 and at most 16. WAL readers do not
+/// block each other or the writer, so a request waits on the pool only when this many reads are running.
+fn readers() -> u32 {
+    std::thread::available_parallelism()
+        .map_or(4, |n| n.get() as u32)
+        .clamp(4, 16)
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -127,6 +132,20 @@ impl W<'_> {
     pub fn publish(&self, e: ChangeEvent) {
         self.bus.publish(e)
     }
+
+    /// A write transaction on the write connection, see [`immediate`].
+    pub fn tx(&self) -> rusqlite::Result<rusqlite::Transaction<'_>> {
+        immediate(self.c)
+    }
+}
+
+/// `BEGIN IMMEDIATE`: takes the write lock at the start. The writer Mutex orders this process's
+/// writes, but another process (the upgrade supervisor, the next release during a switch) can open the
+/// same file; a DEFERRED transaction that read first and then writes after that process committed
+/// fails at once with SQLITE_BUSY_SNAPSHOT, while BEGIN IMMEDIATE waits out the busy timeout.
+/// Read-only transactions on the pooled readers stay DEFERRED (IMMEDIATE fails there).
+pub(crate) fn immediate(c: &Connection) -> rusqlite::Result<rusqlite::Transaction<'_>> {
+    rusqlite::Transaction::new_unchecked(c, rusqlite::TransactionBehavior::Immediate)
 }
 
 impl Store {
@@ -138,7 +157,11 @@ impl Store {
         let manager = SqliteConnectionManager::file(&path)
             .with_flags(OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)
             .with_init(|c| db::pragmas(c));
-        let readers = r2d2::Pool::builder().max_size(READERS).build(manager)?;
+        // a checkout test (an empty statement per `get`) finds nothing on a local file
+        let readers = r2d2::Pool::builder()
+            .max_size(readers())
+            .test_on_check_out(false)
+            .build(manager)?;
         let maintenance = Arc::new(maintenance::Gate::load(&writer)?);
         Ok(Self {
             inner: Arc::new(Inner {
@@ -196,6 +219,12 @@ impl Store {
     pub(crate) fn read<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
         let c = self.inner.readers.get()?;
         f(&c)
+    }
+
+    /// Refreshes the query planner's statistics where they went stale (`PRAGMA optimize`, bounded), on
+    /// the write connection. Cheap when nothing changed; meant for an hourly housekeeping pass.
+    pub fn optimize(&self) -> Result<()> {
+        Ok(db::optimize(&self.lock(), false)?)
     }
 
     /// Runs `f` on the write connection under the write lock, for one-off maintenance and tests.

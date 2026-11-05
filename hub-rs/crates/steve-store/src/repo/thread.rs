@@ -389,7 +389,7 @@ impl Thread<'_> {
     /// normal boot does not revive them).
     pub fn runs_interrupt(&self, resume: bool) -> Result<Vec<ThreadRun>> {
         self.0.write(|w| {
-            let tx = w.c.unchecked_transaction()?;
+            let tx = w.tx()?;
             // Reply persistence is the completion receipt even if the process died before the
             // subsequent run_patch. Do not generate a second local answer on the next boot.
             tx.run("UPDATE thread_runs SET status='done',token_hash=NULL,ended=? WHERE status IN ('queued','running') AND EXISTS (SELECT 1 FROM messages m WHERE json_valid(m.meta) AND json_extract(m.meta,'$.run')=thread_runs.id AND json_extract(m.meta,'$.run_receipt')=1 AND m.author='steve')", [now()])?;
@@ -560,7 +560,7 @@ impl Thread<'_> {
     /// (settings `thread.backfill = "v1"`); running it again changes nothing. Returns the items linked.
     pub fn backfill(&self, ws: &str) -> Result<Vec<String>> {
         self.0.write(|w| {
-            let tx = w.c.unchecked_transaction()?;
+            let tx = w.tx()?;
             let done: Option<String> = one(
                 &tx,
                 "SELECT value FROM settings WHERE workspace_id = ? AND key = ?",

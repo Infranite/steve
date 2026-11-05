@@ -282,7 +282,7 @@ impl Tags<'_> {
             if kinds::is_kind_tag(w.c, id)? {
                 return Err(StoreError::Conflict("分类标签不能删除".into()));
             }
-            let tx = w.c.unchecked_transaction()?;
+            let tx = w.tx()?;
             tx.run("DELETE FROM item_tags WHERE tag_id = ?", [id])?;
             // migration 4: tags on contacts, teams, … reference the tag too
             tx.run("DELETE FROM entity_tags WHERE tag_id = ?", [id])?;
@@ -300,7 +300,7 @@ impl Tags<'_> {
             if kinds::is_kind_tag(w.c, from)? || kinds::is_kind_tag(w.c, into)? {
                 return Err(StoreError::Conflict("分类标签不能合并".into()));
             }
-            let tx = w.c.unchecked_transaction()?;
+            let tx = w.tx()?;
             tx.run("INSERT OR IGNORE INTO item_tags (item_id, tag_id) SELECT item_id, ? FROM item_tags WHERE tag_id = ?", [into, from])?;
             tx.run("DELETE FROM item_tags WHERE tag_id = ?", [from])?;
             tx.run("INSERT OR IGNORE INTO entity_tags (workspace_id, tag_id, object_type, object_id, created) SELECT workspace_id, ?, object_type, object_id, created FROM entity_tags WHERE tag_id = ?", [into, from])?;
@@ -349,7 +349,7 @@ impl Tags<'_> {
             } else {
                 ids.to_vec()
             };
-            let tx = w.c.unchecked_transaction()?;
+            let tx = w.tx()?;
             put_item_tags(&tx, item, &ids)?;
             tx.commit()?;
             w.publish(ChangeEvent::Item { id: item.into() });

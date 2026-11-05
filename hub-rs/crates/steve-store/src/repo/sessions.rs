@@ -269,7 +269,7 @@ impl Sessions<'_> {
     /// Deletes a session with its events and queue (system.ts `removeImported`, after its readonly check).
     pub fn remove(&self, id: &str) -> Result<()> {
         self.0.write(|w| {
-            let tx = w.c.unchecked_transaction()?;
+            let tx = w.tx()?;
             tx.run("DELETE FROM events WHERE session_id = ?", [id])?;
             tx.run("DELETE FROM queued WHERE session_id = ?", [id])?;
             tx.run("DELETE FROM sessions WHERE id = ?", [id])?;
@@ -317,7 +317,7 @@ impl Events<'_> {
         let (stored, payloads) = crate::event_payload::split(kind, &data)?;
         let stored = to_json(&stored)?;
         self.0.write(|w| {
-            let tx = w.c.unchecked_transaction()?;
+            let tx = w.tx()?;
             tx.prepare_cached(
                 "INSERT INTO events (session_id, ts, kind, data, format) VALUES (?, ?, ?, ?, 'steve.v1')",
             )?
@@ -531,7 +531,7 @@ impl QueuedRepo<'_> {
     /// Atomically transfer waiting messages to a durable dispatch. No destructive dequeue gap.
     pub fn claim(&self, session_id: &str) -> Result<Vec<Queued>> {
         self.0.write(|w| {
-            let tx = w.c.unchecked_transaction()?;
+            let tx = w.tx()?;
             let node: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM runtime_sessions WHERE session_id=?)", [session_id], |r| r.get(0))?;
             if node { return Err(crate::StoreError::Conflict("session belongs to the Node runtime".into())); }
 
@@ -547,7 +547,7 @@ impl QueuedRepo<'_> {
     /// recovery must ask the agent to inspect history/results before continuing.
     pub fn submitted(&self, session_id: &str) -> Result<()> {
         self.0.write(|w| {
-            let tx = w.c.unchecked_transaction()?;
+            let tx = w.tx()?;
             let node: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM runtime_sessions WHERE session_id=?)", [session_id], |r| r.get(0))?;
             if node { return Err(crate::StoreError::Conflict("session belongs to the Node runtime".into())); }
 
@@ -561,7 +561,7 @@ impl QueuedRepo<'_> {
 
     pub fn defer_claimed(&self, session_id: &str) -> Result<()> {
         self.0.write(|w| {
-            let tx = w.c.unchecked_transaction()?;
+            let tx = w.tx()?;
             let node: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM runtime_sessions WHERE session_id=?)", [session_id], |r| r.get(0))?;
             if node { return Err(crate::StoreError::Conflict("session belongs to the Node runtime".into())); }
 
@@ -583,7 +583,7 @@ impl QueuedRepo<'_> {
     /// submissions, and preserve the original ids, text, source and attachments in the queue.
     pub fn recover_dispatches(&self) -> Result<()> {
         self.0.write(|w| {
-            let tx = w.c.unchecked_transaction()?;
+            let tx = w.tx()?;
             tx.run("INSERT OR IGNORE INTO session_resume SELECT DISTINCT session_id,? FROM session_dispatch WHERE backend='legacy' AND state='submitted'", [now()])?;
             // never delivered: back as it was; delivered (maybe acted on): back marked, to be checked, not redone
             tx.run("INSERT OR IGNORE INTO queued (id,session_id,text,via,created,files) SELECT id,session_id,text,via,created,files FROM session_dispatch WHERE backend='legacy' AND state='claimed'", [])?;
@@ -601,7 +601,7 @@ impl QueuedRepo<'_> {
     /// boot already recorded it (its notices were written then).
     pub fn plan_resume(&self, session_id: &str) -> Result<bool> {
         self.0.write(|w| {
-            let tx = w.c.unchecked_transaction()?;
+            let tx = w.tx()?;
             let fresh = tx.run(
                 "INSERT OR IGNORE INTO session_resume VALUES (?,?)",
                 params![session_id, now()],
