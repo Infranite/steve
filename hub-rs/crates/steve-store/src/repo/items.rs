@@ -572,17 +572,18 @@ fn patch_on(c: &rusqlite::Connection, id: &str, p: &ItemPatch) -> Result<bool> {
     // the lifecycle owns the terminal statuses and what a closed item is: nobody patches those
     if let Some(st) = p.status.as_deref() {
         if matches!(st, "done" | "drop" | "fail") {
-            return Err(crate::StoreError::Conflict(format!(
-                "事项的结束只能由生命周期提交（{st}）"
+            return Err(crate::StoreError::Conflict(steve_i18n::t!(
+                "store.item.end_by_lifecycle",
+                status = st
             )));
         }
         let phase: Option<String> = one(c, "SELECT phase FROM items WHERE id = ?", [id], |r| {
             r.get(0)
         })?;
         if phase.as_deref() == Some("closed") {
-            return Err(crate::StoreError::Conflict(
-                "这个事项已经结束了，需要时先新建周期".into(),
-            ));
+            return Err(crate::StoreError::Conflict(steve_i18n::t!(
+                "store.item.closed"
+            )));
         }
     }
     let before: Option<(String, String, String)> = match &p.status {

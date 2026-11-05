@@ -56,6 +56,9 @@ chrono-tz = "=0.10.4"
 # C5: the vault's guard and redactor masks; the rule check's patterns (same version as steve-modules).
 steve-vault = { path = "../steve-vault" }
 regex = "=1.13.1"
+# API errors and draft cards in the request's language.
+steve-i18n = { path = "../steve-i18n" }
+rust-i18n = "=4.2.4"
 
 [dev-dependencies]
 axum = "=0.8.9"

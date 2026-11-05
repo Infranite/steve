@@ -318,7 +318,7 @@ impl NodeKind for BotNode {
     }
 
     fn validate(&self, cfg: &Value) -> Result<(), String> {
-        let instruction = req_str(cfg, "instruction", "要 Bot 判断什么", 2000)?;
+        let instruction = req_str(cfg, "instruction", super::Required::Instruction, 2000)?;
         crate::expr::check_template(instruction)?;
         if let Some(b) = opt_str(cfg, "bot_id")? {
             crate::expr::check_template(b)?;
@@ -329,11 +329,11 @@ impl NodeKind for BotNode {
                 .iter()
                 .any(|b| b.trim().is_empty() || b.chars().count() > 40)
         {
-            return Err(format!("分支最多 {BRANCHES_MAX} 个，每个 1–40 字"));
+            return Err(steve_i18n::t!("flow.node.bot_branches", max = BRANCHES_MAX));
         }
         for (i, b) in branches.iter().enumerate() {
             if branches[..i].contains(b) {
-                return Err(format!("分支「{b}」重复了"));
+                return Err(steve_i18n::t!("flow.node.bot_branch_twice", branch = b));
             }
         }
         let fields = str_list(cfg, "fields")?;
@@ -342,10 +342,10 @@ impl NodeKind for BotNode {
                 .iter()
                 .any(|f| f.trim().is_empty() || f.chars().count() > 40)
         {
-            return Err(format!("字段最多 {FIELDS_MAX} 个，每个 1–40 字"));
+            return Err(steve_i18n::t!("flow.node.bot_fields", max = FIELDS_MAX));
         }
         if fields.iter().any(|f| f == "branch" || f == "reason") {
-            return Err("字段不能叫 branch 或 reason".into());
+            return Err(steve_i18n::t!("flow.node.bot_field_reserved"));
         }
         Ok(())
     }

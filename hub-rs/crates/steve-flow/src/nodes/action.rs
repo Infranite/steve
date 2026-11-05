@@ -375,8 +375,8 @@ impl NodeKind for ActionNode {
         let name = opt_str(cfg, "action")?.unwrap_or("");
         match self.actions.get(name) {
             Some(a) => a.validate(cfg),
-            None if name.is_empty() => Err("要选一个动作".into()),
-            None => Err(format!("不认识的动作：{name}")),
+            None if name.is_empty() => Err(steve_i18n::t!("flow.node.action_missing")),
+            None => Err(steve_i18n::t!("flow.node.action_unknown", action = name)),
         }
     }
 
@@ -439,11 +439,11 @@ fn is_schedule(cx: &RunCx<'_>) -> bool {
 fn check_mode(cfg: &Value) -> Result<(), String> {
     match opt_str(cfg, "mode")?.unwrap_or("start") {
         "start" | "propose" => {}
-        _ => return Err("mode 只能是 start 或 propose".into()),
+        _ => return Err(steve_i18n::t!("flow.node.item_mode")),
     }
     match opt_str(cfg, "accept")?.unwrap_or("inherit") {
         "auto" | "inherit" => {}
-        _ => return Err("accept 只能是 auto 或 inherit".into()),
+        _ => return Err(steve_i18n::t!("flow.node.item_accept")),
     }
     for k in ["bot", "project", "title", "goal"] {
         opt_str(cfg, k)?;
@@ -629,12 +629,12 @@ impl Action for ItemLink {
     fn validate(&self, cfg: &Value) -> Result<(), String> {
         let by = opt_str(cfg, "by")?.unwrap_or("");
         if !crate::link::METHODS.contains(&by) {
-            return Err("by 只能是 branch、ref 或 thread".into());
+            return Err(steve_i18n::t!("flow.node.link_by"));
         }
         match opt_str(cfg, "fallback")?.unwrap_or("none") {
             "create" => check_mode(cfg),
             "none" => Ok(()),
-            _ => Err("fallback 只能是 create 或 none".into()),
+            _ => Err(steve_i18n::t!("flow.node.link_fallback")),
         }
     }
     fn outcome(&self) -> Option<&'static str> {
@@ -707,7 +707,7 @@ impl Action for Notify {
         "notify"
     }
     fn validate(&self, cfg: &Value) -> Result<(), String> {
-        crate::expr::check_template(req_str(cfg, "text", "提醒的内容", 500)?)
+        crate::expr::check_template(req_str(cfg, "text", super::Required::Reminder, 500)?)
     }
     fn outcome(&self) -> Option<&'static str> {
         Some("need")

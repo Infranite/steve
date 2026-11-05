@@ -6,6 +6,9 @@
 //! the patch exactly as those routes take it, so apply validates the same way; undo puts back the
 //! values the patched keys had.
 //!
+//! The prompt (field labels, allowed values, current values, candidates) stays Chinese, as the model reads
+//! it and answers in those words; the card (title and change lines) is in the request's language.
+//!
 //! Planning resolves names only by exact name (personas, Bots, tags, spaces) or name/alias
 //! (contacts and teams in `member` rules); anything else is a “（没认出：X）” line and no change.
 //! A request the domain refuses (a persona on your own account, `reply` on your own account, rules
@@ -22,12 +25,13 @@ use std::sync::Arc;
 
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Map, Value, json};
+use steve_i18n::t;
 use steve_modules::changes::{Candidate, ChangeOp, DraftTarget, FieldSpec, OpCx, Plan, Prepared};
 use steve_modules::{ApiError, ApiResult, Clock, Registry};
 use steve_store::base::{self, Change, Viewer, show};
 use steve_store::{ChangeEvent, Tx};
 
-use crate::bindings::{self, SELF_NO_PERSONA};
+use crate::bindings;
 use crate::personas::{self, PersonaPatch, PersonaRow, Reveal};
 use crate::rules::{self, Rule, When};
 use crate::spaces::{self, Mode, SpacePatch, SpaceRow};
@@ -39,14 +43,14 @@ pub const OP_SPACE: &str = "chan.space.patch";
 pub const OP_PERSONA: &str = "chan.persona.patch";
 pub const OP_CHANNEL: &str = "chan.channel.patch";
 
-/// A line for something the model said that fits no field.
+/// A line for something the model said that fits no field (zh-CN of `channels.draft.label.unrecognized`).
 pub const UNRECOGNIZED: &str = "（没认出）";
 /// What a space without its own persona / rules shows.
 pub const FOLLOW: &str = "跟随账号";
 /// Your own account speaks as you.
 pub const YOU: &str = "你本人";
 pub const DISCLOSURE_LABEL: &str = "本群内容在别处能说到什么程度";
-/// Trigger words belong to your own account only.
+/// Trigger words belong to your own account only (zh-CN of `channels.error.trigger_self_only`).
 pub const TRIGGER_SELF_ONLY: &str = "触发语只用于以你本人接入的账号";
 pub const TRIGGER_WORDS_MAX: usize = 10;
 pub const DUTY_MAX: usize = 4000;
@@ -133,6 +137,72 @@ fn on_off(b: bool) -> &'static str {
     if b { ON } else { OFF }
 }
 
+// ---------------------------------------------------------------- card text (request language)
+
+fn on_off_card(b: bool) -> String {
+    if b {
+        t!("channels.draft.value.on")
+    } else {
+        t!("channels.draft.value.off")
+    }
+}
+
+fn muted_card(m: bool) -> String {
+    if m {
+        t!("channels.draft.value.muted")
+    } else {
+        t!("channels.draft.value.working")
+    }
+}
+
+fn reveal_card(b: bool) -> String {
+    if b {
+        t!("channels.draft.value.reveal")
+    } else {
+        t!("channels.draft.value.hide")
+    }
+}
+
+/// A `disclosure` code as the card shows it.
+fn level_card(code: &str) -> String {
+    match code {
+        "public" => t!("channels.draft.value.level_public"),
+        "conclusion" => t!("channels.draft.value.level_conclusion"),
+        "reasoning" => t!("channels.draft.value.level_reasoning"),
+        "never" => t!("channels.draft.value.level_never"),
+        _ => code.to_string(),
+    }
+}
+
+/// A `memory_scope` code as the card shows it.
+fn scope_card(code: &str) -> String {
+    match code {
+        "space" => t!("channels.draft.value.scope_space"),
+        "persona" => t!("channels.draft.value.scope_persona"),
+        _ => code.to_string(),
+    }
+}
+
+/// The card label of `reveal.<key>`.
+fn reveal_label(key: &str) -> String {
+    match key {
+        "name" => t!("channels.draft.label.reveal_name"),
+        "role" => t!("channels.draft.label.reveal_role"),
+        "ai" => t!("channels.draft.label.reveal_ai"),
+        "steve" => t!("channels.draft.label.reveal_steve"),
+        _ => t!("channels.draft.label.reveal_owner"),
+    }
+}
+
+fn appended_card(added: &str) -> String {
+    t!("channels.draft.value.appended", text = show(added))
+}
+
+/// The card's “参数不对：<field>”, worded like the API error.
+fn invalid_card(field: &str) -> String {
+    ApiError::invalid(field).to_string()
+}
+
 fn on_off_flag(v: &Value) -> Option<bool> {
     flag(
         v,
@@ -176,11 +246,15 @@ fn utf16_len(s: &str) -> usize {
 }
 
 fn not_recognized(label: &str, said: &str) -> Change {
-    Change::new(label, "—", format!("（没认出：{}）", show(said)))
+    Change::new(
+        label,
+        "—",
+        t!("channels.draft.value.unrecognized", said = show(said)),
+    )
 }
 
 fn refused(label: &str, from: impl Into<String>, why: &str) -> Change {
-    Change::new(label, from, format!("（不能改：{why}）"))
+    Change::new(label, from, t!("channels.draft.value.refused", why = why))
 }
 
 /// A domain error as a refusal reason; storage errors stay errors.
@@ -209,8 +283,11 @@ impl Lines {
         self.line(c);
     }
     fn other(&mut self, op: &Value) {
-        self.changes
-            .push(Change::new(UNRECOGNIZED, "—", show(&op.to_string())));
+        self.changes.push(Change::new(
+            t!("channels.draft.label.unrecognized"),
+            "—",
+            show(&op.to_string()),
+        ));
     }
 }
 
@@ -266,7 +343,8 @@ fn find_tags(c: &Connection, ws: &str, said: &[String]) -> ApiResult<Result<Vec<
     Ok(Ok(out))
 }
 
-fn tag_names(c: &Connection, ids: &[String]) -> String {
+/// Tag names for the prompt (`card = false`, Chinese) or the card.
+fn tag_names(c: &Connection, ids: &[String], card: bool) -> String {
     let names: Vec<String> = ids
         .iter()
         .map(|id| {
@@ -274,10 +352,11 @@ fn tag_names(c: &Connection, ids: &[String]) -> String {
                 .unwrap_or_else(|_| id.clone())
         })
         .collect();
-    if names.is_empty() {
-        "无".into()
-    } else {
-        names.join("、")
+    match (names.is_empty(), card) {
+        (true, false) => "无".into(),
+        (true, true) => t!("channels.draft.value.none"),
+        (false, false) => names.join("、"),
+        (false, true) => names.join(&t!("channels.draft.list_sep")),
     }
 }
 
@@ -336,7 +415,8 @@ fn when_text(c: &Connection, w: &When, mode: Mode) -> String {
     }
 }
 
-/// A rule list in words, the way the change lines show it: “被 @ 或私聊时直接回复；其他只记录”.
+/// A rule list in words, for the prompt (always Chinese): “被 @ 或私聊时直接回复；其他只记录”.
+/// The card shows [`rules_card`].
 pub fn describe_rules(c: &Connection, rules: &[Rule], mode: Mode) -> String {
     if rules.is_empty() {
         return "没有规则（全部只记录）".into();
@@ -354,6 +434,97 @@ pub fn describe_rules(c: &Connection, rules: &[Rule], mode: Mode) -> String {
         })
         .collect::<Vec<_>>()
         .join("；")
+}
+
+fn act_card(a: rules::Act) -> String {
+    match a {
+        rules::Act::Reply => t!("channels.rules.act.reply"),
+        rules::Act::Draft => t!("channels.rules.act.draft"),
+        rules::Act::Record => t!("channels.rules.act.record"),
+        rules::Act::CreateItem(_) => t!("channels.rules.act.create_item"),
+        rules::Act::Handoff => t!("channels.rules.act.handoff"),
+    }
+}
+
+/// [`when_text`] in the request's language.
+fn when_card(c: &Connection, w: &When, mode: Mode) -> String {
+    let own = mode == Mode::Own;
+    match w {
+        When::MentionOrDm if own => t!("channels.rules.when.mention_or_dm_own"),
+        When::MentionOrDm => t!("channels.rules.when.mention_or_dm"),
+        When::Mention if own => t!("channels.rules.when.mention_own"),
+        When::Mention => t!("channels.rules.when.mention"),
+        When::Dm if own => t!("channels.rules.when.dm_own"),
+        When::Dm => t!("channels.rules.when.dm"),
+        When::ReplyToMe => t!("channels.rules.when.reply_to_me"),
+        When::Keyword { words } => t!(
+            "channels.rules.when.keyword",
+            words = words
+                .iter()
+                .map(|w| t!("channels.rules.when.keyword_word", word = w))
+                .collect::<String>()
+        ),
+        When::Intent { text } => t!("channels.rules.when.intent", text = text),
+        When::Member { parties, teams } => {
+            let names: Vec<String> = parties
+                .iter()
+                .chain(teams)
+                .map(|id| party_name(c, id))
+                .collect();
+            t!(
+                "channels.rules.when.member",
+                names = names.join(&t!("channels.draft.list_sep"))
+            )
+        }
+        When::External => t!("channels.rules.when.external"),
+        When::Hours {
+            outside,
+            start,
+            end,
+            ..
+        } => {
+            let (start, end) = (hhmm(*start), hhmm(*end));
+            if *outside {
+                t!(
+                    "channels.rules.when.outside_hours",
+                    start = start,
+                    end = end
+                )
+            } else {
+                t!("channels.rules.when.inside_hours", start = start, end = end)
+            }
+        }
+        When::All => t!("channels.rules.when.all"),
+        When::OtherGroup => t!("channels.rules.when.other_group"),
+    }
+}
+
+/// [`describe_rules`] in the request's language, for the card.
+fn rules_card(c: &Connection, rules: &[Rule], mode: Mode) -> String {
+    if rules.is_empty() {
+        return t!("channels.rules.none");
+    }
+    rules
+        .iter()
+        .enumerate()
+        .map(|(i, r)| {
+            let act = act_card(r.act);
+            match &r.when {
+                When::All if i > 0 => t!("channels.rules.line.other", act = act),
+                When::All | When::OtherGroup => t!(
+                    "channels.rules.line.plain",
+                    when = when_card(c, &r.when, mode),
+                    act = act
+                ),
+                w => t!(
+                    "channels.rules.line.when",
+                    when = when_card(c, w, mode),
+                    act = act
+                ),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(&t!("channels.rules.sep"))
 }
 
 /// A contact or team by id, or by exact name or alias (case-insensitive); `None` when there is
@@ -439,13 +610,19 @@ fn check_rules(c: &Connection, ws: &str, mode: Mode, raw: &Value) -> ApiResult<C
     }
     Ok(Checked::Ok(
         rules::to_value(&parsed),
-        describe_rules(c, &parsed, mode),
+        rules_card(c, &parsed, mode),
     ))
 }
 
-/// Stored rules in words (leniently loaded, like the pipeline reads them).
-fn rules_text(c: &Connection, v: &Value, mode: Mode) -> String {
-    describe_rules(c, &rules::load(v, mode), mode)
+/// Stored rules in words (leniently loaded, like the pipeline reads them), for the prompt
+/// (`card = false`, Chinese) or the card.
+fn rules_text(c: &Connection, v: &Value, mode: Mode, card: bool) -> String {
+    let rules = rules::load(v, mode);
+    if card {
+        rules_card(c, &rules, mode)
+    } else {
+        describe_rules(c, &rules, mode)
+    }
 }
 
 // ---------------------------------------------------------------- space
@@ -466,6 +643,15 @@ fn account_name(c: &Connection, ws: &str, conn: &str) -> ApiResult<String> {
 fn space_name(s: &SpaceRow) -> String {
     if s.name.is_empty() {
         "私聊".into()
+    } else {
+        s.name.clone()
+    }
+}
+
+/// [`space_name`] for the card.
+fn space_name_card(s: &SpaceRow) -> String {
+    if s.name.is_empty() {
+        t!("channels.draft.dm")
     } else {
         s.name.clone()
     }
@@ -515,21 +701,32 @@ impl SpaceNow {
         })
     }
 
-    fn persona_text(&self) -> String {
-        match (&self.persona, self.mode) {
-            (_, Mode::Own) => YOU.into(),
-            (Some(p), _) if p.inherited == Some(true) => format!("{FOLLOW}（{}）", p.name),
-            (Some(p), _) => p.name.clone(),
-            (None, _) => FOLLOW.into(),
+    /// The persona for the prompt (`card = false`, Chinese) or the card.
+    fn persona_text(&self, card: bool) -> String {
+        match (&self.persona, self.mode, card) {
+            (_, Mode::Own, false) => YOU.into(),
+            (_, Mode::Own, true) => t!("channels.draft.value.you"),
+            (Some(p), _, false) if p.inherited == Some(true) => format!("{FOLLOW}（{}）", p.name),
+            (Some(p), _, true) if p.inherited == Some(true) => {
+                t!("channels.draft.value.follow_with", what = p.name)
+            }
+            (Some(p), _, _) => p.name.clone(),
+            (None, _, false) => FOLLOW.into(),
+            (None, _, true) => t!("channels.draft.value.follow"),
         }
     }
 
-    fn rules_text(&self, c: &Connection) -> String {
-        match &self.set.rules {
-            Some(v) => rules_text(c, v, self.mode),
-            None => format!(
+    /// The rules for the prompt (`card = false`, Chinese) or the card.
+    fn rules_text(&self, c: &Connection, card: bool) -> String {
+        match (&self.set.rules, card) {
+            (Some(v), _) => rules_text(c, v, self.mode, card),
+            (None, false) => format!(
                 "{FOLLOW}（{}）",
-                rules_text(c, &self.account_rules, self.mode)
+                rules_text(c, &self.account_rules, self.mode, false)
+            ),
+            (None, true) => t!(
+                "channels.draft.value.follow_with",
+                what = rules_text(c, &self.account_rules, self.mode, true)
             ),
         }
     }
@@ -544,13 +741,11 @@ fn space_revision(c: &Connection, ws: &str, id: &str) -> ApiResult<Option<i64>> 
     .optional()?)
 }
 
-const L_PERSONA: &str = "对外身份";
+// Field labels of the prompt (Chinese); the card's labels are `channels.draft.label.*`.
 const L_MUTED: &str = "工作状态";
 const L_RULES: &str = "响应规则";
 const L_MEMORY: &str = "记忆";
 const L_COLLAB: &str = "和其他机器人协作";
-const L_TAGS: &str = "事项默认标签";
-const L_DUTY: &str = "职责（agents）";
 
 /// `target.kind = "space"`.
 struct SpaceTarget;
@@ -566,7 +761,7 @@ impl DraftTarget for SpaceTarget {
                 "persona",
                 "在这里说话的对外身份（身份的名字；跟随账号写“跟随账号”）",
                 "ref",
-                json!(s.persona_text()),
+                json!(s.persona_text(false)),
             ));
         }
         fields.extend([
@@ -581,7 +776,7 @@ impl DraftTarget for SpaceTarget {
                 "rules",
                 &format!("{L_RULES}（{RULES_FORMAT}；跟随账号写 null）"),
                 "list",
-                json!({ "本群": s.set.rules, "生效": s.set.rules.clone().unwrap_or_else(|| s.account_rules.clone()), "说明": s.rules_text(c) }),
+                json!({ "本群": s.set.rules, "生效": s.set.rules.clone().unwrap_or_else(|| s.account_rules.clone()), "说明": s.rules_text(c, false) }),
             ),
             FieldSpec::new(
                 "disclosure",
@@ -603,14 +798,14 @@ impl DraftTarget for SpaceTarget {
                 "item_defaults.tags",
                 "从这里建的事项默认带的标签（标签名）",
                 "list",
-                json!(tag_names(c, &tags_of(&s.set.item_defaults))),
+                json!(tag_names(c, &tags_of(&s.set.item_defaults), false)),
             ),
             FieldSpec::new("duty", "这个群的职责（自由文本）", "text", json!(s.set.duty)),
         ]);
         Ok(Prepared {
             target_id: Some(id.to_string()),
             revision: Some(s.set.revision),
-            title: format!("{name} 的设置"),
+            title: t!("channels.draft.title.space", name = space_name_card(&s.row)),
             href: format!("#/channels/space/{id}"),
             subject: format!("the chat space \"{name}\" of the account \"{}\"", s.account),
             fields,
@@ -631,6 +826,14 @@ impl DraftTarget for SpaceTarget {
         let s = SpaceNow::load(c, viewer, id)?;
         let ws = &viewer.ws;
         let mut d = Lines::default();
+        let l_persona = t!("channels.draft.label.persona");
+        let l_muted = t!("channels.draft.label.muted");
+        let l_rules = t!("channels.draft.label.rules");
+        let l_disclosure = t!("channels.draft.label.disclosure");
+        let l_memory = t!("channels.draft.label.memory");
+        let l_collab = t!("channels.draft.label.collab");
+        let l_tags = t!("channels.draft.label.tags");
+        let l_duty = t!("channels.draft.label.duty");
         for op in raw {
             let Some((key, v)) = set_of(&op) else {
                 d.other(&op);
@@ -639,14 +842,22 @@ impl DraftTarget for SpaceTarget {
             let said = text_of(v).unwrap_or_default();
             match key {
                 "persona" if s.mode == Mode::Own => {
-                    d.line(refused(L_PERSONA, YOU, SELF_NO_PERSONA));
+                    d.line(refused(
+                        &l_persona,
+                        t!("channels.draft.value.you"),
+                        &t!("channels.error.self_no_persona"),
+                    ));
                 }
                 "persona" if v.is_null() || said.is_empty() || said == FOLLOW => {
                     if s.binding.is_some() {
                         d.set(
                             "persona_id",
                             Value::Null,
-                            Change::new(L_PERSONA, s.persona_text(), FOLLOW),
+                            Change::new(
+                                &l_persona,
+                                s.persona_text(true),
+                                t!("channels.draft.value.follow"),
+                            ),
                         );
                     }
                 }
@@ -654,41 +865,39 @@ impl DraftTarget for SpaceTarget {
                     Some(per) if s.binding.as_deref() != Some(per.id.as_str()) => d.set(
                         "persona_id",
                         json!(per.id),
-                        Change::new(L_PERSONA, s.persona_text(), per.name),
+                        Change::new(&l_persona, s.persona_text(true), per.name),
                     ),
                     Some(_) => {}
-                    None => d.line(not_recognized(L_PERSONA, &said)),
+                    None => d.line(not_recognized(&l_persona, &said)),
                 },
                 "muted" => match flag(v, &[MUTED, "是", "mute"], &[WORKING, "否"]) {
                     Some(m) if m != s.set.muted => d.set(
                         "muted",
                         json!(m),
-                        Change::new(
-                            L_MUTED,
-                            if s.set.muted { MUTED } else { WORKING },
-                            if m { MUTED } else { WORKING },
-                        ),
+                        Change::new(&l_muted, muted_card(s.set.muted), muted_card(m)),
                     ),
                     Some(_) => {}
-                    None => d.line(not_recognized(L_MUTED, &said)),
+                    None => d.line(not_recognized(&l_muted, &said)),
                 },
                 "rules" => {
                     if let Some(f) = &s.set.flow_id {
-                        let why = format!(
-                            "这个空间已经转成流程「{}」，先改回规则",
-                            steve_flow::flows::name_of(c, f)?
+                        let why = t!(
+                            "channels.error.space_is_flow",
+                            flow = steve_flow::flows::name_of(c, f)?
                         );
-                        d.line(refused(L_RULES, s.rules_text(c), &why));
+                        d.line(refused(&l_rules, s.rules_text(c, true), &why));
                         continue;
                     }
                     if v.is_null() || said == FOLLOW {
                         if s.set.rules.is_some() {
-                            let to =
-                                format!("{FOLLOW}（{}）", rules_text(c, &s.account_rules, s.mode));
+                            let to = t!(
+                                "channels.draft.value.follow_with",
+                                what = rules_text(c, &s.account_rules, s.mode, true)
+                            );
                             d.set(
                                 "rules",
                                 Value::Null,
-                                Change::new(L_RULES, s.rules_text(c), to),
+                                Change::new(&l_rules, s.rules_text(c, true), to),
                             );
                         }
                         continue;
@@ -696,59 +905,57 @@ impl DraftTarget for SpaceTarget {
                     match check_rules(c, ws, s.mode, v)? {
                         Checked::Ok(rules, to) => {
                             if s.set.rules.as_ref() != Some(&rules) {
-                                d.set("rules", rules, Change::new(L_RULES, s.rules_text(c), to));
+                                d.set(
+                                    "rules",
+                                    rules,
+                                    Change::new(&l_rules, s.rules_text(c, true), to),
+                                );
                             }
                         }
-                        Checked::Unknown(x) => d.line(not_recognized(L_RULES, &x)),
-                        Checked::Refused(why) => d.line(refused(L_RULES, s.rules_text(c), &why)),
+                        Checked::Unknown(x) => d.line(not_recognized(&l_rules, &x)),
+                        Checked::Refused(why) => {
+                            d.line(refused(&l_rules, s.rules_text(c, true), &why))
+                        }
                     }
                 }
                 "disclosure" => match code_of(&LEVELS, &said) {
                     Some(l) if l != s.set.disclosure => d.set(
                         "disclosure",
                         json!(l),
-                        Change::new(
-                            DISCLOSURE_LABEL,
-                            label_of(&LEVELS, &s.set.disclosure),
-                            label_of(&LEVELS, l),
-                        ),
+                        Change::new(&l_disclosure, level_card(&s.set.disclosure), level_card(l)),
                     ),
                     Some(_) => {}
-                    None => d.line(not_recognized(DISCLOSURE_LABEL, &said)),
+                    None => d.line(not_recognized(&l_disclosure, &said)),
                 },
                 "memory_scope" => match code_of(&SCOPES, &said) {
                     Some(m) if m != s.set.memory_scope => d.set(
                         "memory_scope",
                         json!(m),
-                        Change::new(
-                            L_MEMORY,
-                            label_of(&SCOPES, &s.set.memory_scope),
-                            label_of(&SCOPES, m),
-                        ),
+                        Change::new(&l_memory, scope_card(&s.set.memory_scope), scope_card(m)),
                     ),
                     Some(_) => {}
-                    None => d.line(not_recognized(L_MEMORY, &said)),
+                    None => d.line(not_recognized(&l_memory, &said)),
                 },
                 "collab" => match on_off_flag(v) {
                     Some(b) if b != s.set.collab => d.set(
                         "collab",
                         json!(b),
-                        Change::new(L_COLLAB, on_off(s.set.collab), on_off(b)),
+                        Change::new(&l_collab, on_off_card(s.set.collab), on_off_card(b)),
                     ),
                     Some(_) => {}
-                    None => d.line(not_recognized(L_COLLAB, &said)),
+                    None => d.line(not_recognized(&l_collab, &said)),
                 },
                 "item_defaults.tags" => {
                     let Some(names) = list_of(v) else {
-                        d.line(not_recognized(L_TAGS, &v.to_string()));
+                        d.line(not_recognized(&l_tags, &v.to_string()));
                         continue;
                     };
                     let old = tags_of(&s.set.item_defaults);
                     match find_tags(c, ws, &names)? {
                         Ok(ids) if ids.len() > 20 => d.line(refused(
-                            L_TAGS,
-                            tag_names(c, &old),
-                            "参数不对：item_defaults.tags",
+                            &l_tags,
+                            tag_names(c, &old, true),
+                            &invalid_card("item_defaults.tags"),
                         )),
                         Ok(ids) if ids != old => {
                             let mut defaults = item_defaults(&s.set.item_defaults);
@@ -756,11 +963,15 @@ impl DraftTarget for SpaceTarget {
                             d.set(
                                 "item_defaults",
                                 defaults,
-                                Change::new(L_TAGS, tag_names(c, &old), tag_names(c, &ids)),
+                                Change::new(
+                                    &l_tags,
+                                    tag_names(c, &old, true),
+                                    tag_names(c, &ids, true),
+                                ),
                             );
                         }
                         Ok(_) => {}
-                        Err(name) => d.line(not_recognized(L_TAGS, &name)),
+                        Err(name) => d.line(not_recognized(&l_tags, &name)),
                     }
                 }
                 "duty" => {
@@ -769,15 +980,11 @@ impl DraftTarget for SpaceTarget {
                         continue;
                     }
                     if utf16_len(&new) > DUTY_MAX {
-                        d.line(refused(L_DUTY, show(&s.set.duty), "参数不对：duty"));
+                        d.line(refused(&l_duty, show(&s.set.duty), &invalid_card("duty")));
                         continue;
                     }
                     let added = new.strip_prefix(s.set.duty.as_str()).unwrap_or(&new).trim();
-                    let line = Change::new(
-                        L_DUTY,
-                        show(&s.set.duty),
-                        format!("{}（追加）", show(added)),
-                    );
+                    let line = Change::new(&l_duty, show(&s.set.duty), appended_card(added));
                     d.set("duty", json!(new), line);
                 }
                 _ => d.other(&op),
@@ -916,12 +1123,6 @@ impl ChangeOp for SpaceOp {
 
 // ---------------------------------------------------------------- persona
 
-const L_NAME: &str = "名字";
-const L_BOT: &str = "背后的 Bot";
-const L_INTRO: &str = "自我介绍";
-const L_SOUL: &str = "口吻（soul）";
-const L_SIGNATURE: &str = "签名";
-
 fn reveal_of(r: &Reveal, key: &str) -> bool {
     match key {
         "name" => r.name,
@@ -937,7 +1138,11 @@ fn reveal_text(b: bool) -> &'static str {
 }
 
 fn or_none(s: &str) -> String {
-    if s.is_empty() { "无".into() } else { show(s) }
+    if s.is_empty() {
+        t!("channels.draft.value.none")
+    } else {
+        show(s)
+    }
 }
 
 /// `target.kind = "persona"`.
@@ -983,7 +1188,7 @@ impl DraftTarget for PersonaTarget {
         Ok(Prepared {
             target_id: Some(p.id.clone()),
             revision: Some(p.revision),
-            title: format!("对外身份「{}」", p.name),
+            title: t!("channels.draft.title.persona", name = p.name),
             href: format!("#/channels/personas/{}", p.id),
             subject: format!(
                 "the outward persona \"{}\" (how Steve presents itself in chats)",
@@ -1012,18 +1217,18 @@ impl DraftTarget for PersonaTarget {
                 continue;
             };
             let said = text_of(v).unwrap_or_default();
-            if let Some((k, l)) = key
+            if let Some((k, _)) = key
                 .strip_prefix("reveal.")
                 .and_then(|k| REVEALS.iter().find(|(x, _)| *x == k))
             {
-                let label = format!("透露：{l}");
+                let label = reveal_label(k);
                 match flag(v, &[REVEAL, "是", "说"], &[HIDE, "否", "不说", "不透露"]) {
                     Some(b) if b != reveal_of(&p.reveal, k) => {
                         reveal.insert((*k).into(), json!(b));
                         d.line(Change::new(
                             label,
-                            reveal_text(reveal_of(&p.reveal, k)),
-                            reveal_text(b),
+                            reveal_card(reveal_of(&p.reveal, k)),
+                            reveal_card(b),
                         ));
                     }
                     Some(_) => {
@@ -1036,62 +1241,68 @@ impl DraftTarget for PersonaTarget {
             }
             match key {
                 "name" => {
+                    let l_name = t!("channels.draft.label.name");
                     if !(1..=20).contains(&utf16_len(&said)) {
-                        d.line(not_recognized(L_NAME, &said));
+                        d.line(not_recognized(&l_name, &said));
                     } else if said != p.name {
                         d.set(
                             "name",
                             json!(said),
-                            Change::new(L_NAME, &p.name, said.clone()),
+                            Change::new(l_name, &p.name, said.clone()),
                         );
                     }
                 }
-                "bot" => match find_bot(c, &viewer.ws, &said)? {
-                    Some(b) if b != p.bot_id => d.set(
-                        "bot_id",
-                        json!(b),
-                        Change::new(L_BOT, bot_name(c, &p.bot_id), bot_name(c, &b)),
-                    ),
-                    Some(_) => {}
-                    None => d.line(not_recognized(L_BOT, &said)),
-                },
+                "bot" => {
+                    let l_bot = t!("channels.draft.label.bot");
+                    match find_bot(c, &viewer.ws, &said)? {
+                        Some(b) if b != p.bot_id => d.set(
+                            "bot_id",
+                            json!(b),
+                            Change::new(l_bot, bot_name(c, &p.bot_id), bot_name(c, &b)),
+                        ),
+                        Some(_) => {}
+                        None => d.line(not_recognized(&l_bot, &said)),
+                    }
+                }
                 "intro" => {
+                    let l_intro = t!("channels.draft.label.intro");
                     if utf16_len(&said) > 400 {
-                        d.line(refused(L_INTRO, show(&p.intro), "参数不对：intro"));
+                        d.line(refused(&l_intro, show(&p.intro), &invalid_card("intro")));
                     } else if said != p.intro {
                         d.set(
                             "intro",
                             json!(said),
-                            Change::new(L_INTRO, show(&p.intro), show(&said)),
+                            Change::new(l_intro, show(&p.intro), show(&said)),
                         );
                     }
                 }
                 "soul" => {
+                    let l_soul = t!("channels.draft.label.soul");
                     let new = appended(&p.soul, &said);
                     if said.is_empty() || new == p.soul {
                         continue;
                     }
                     if utf16_len(&new) > 2000 {
-                        d.line(refused(L_SOUL, show(&p.soul), "参数不对：soul"));
+                        d.line(refused(&l_soul, show(&p.soul), &invalid_card("soul")));
                         continue;
                     }
                     let added = new.strip_prefix(p.soul.as_str()).unwrap_or(&new).trim();
-                    let line =
-                        Change::new(L_SOUL, show(&p.soul), format!("{}（追加）", show(added)));
+                    let line = Change::new(l_soul, show(&p.soul), appended_card(added));
                     d.set("soul", json!(new), line);
                 }
                 "signature" => {
+                    let l_signature = t!("channels.draft.label.signature");
                     if utf16_len(&said) > 60 {
                         d.line(refused(
-                            L_SIGNATURE,
+                            &l_signature,
                             or_none(&p.signature),
-                            "参数不对：signature",
+                            &invalid_card("signature"),
                         ));
                     } else if said != p.signature {
                         d.set(
                             "signature",
                             json!(said),
-                            Change::new(L_SIGNATURE, or_none(&p.signature), or_none(&said)),
+                            Change::new(l_signature, or_none(&p.signature), or_none(&said)),
                         );
                     }
                 }
@@ -1186,13 +1397,7 @@ impl ChangeOp for PersonaOp {
 
 // ---------------------------------------------------------------- channel (account)
 
-const L_DEFAULT_PERSONA: &str = "默认对外身份";
 const L_DEFAULT_RULES: &str = "默认响应规则";
-const L_ACCOUNT_DUTY: &str = "账号默认职责";
-const L_TRIGGER_ON: &str = "触发语";
-const L_TRIGGER_WORDS: &str = "触发语词";
-const L_TRIGGER_WHERE: &str = "触发语生效范围";
-const L_TRIGGER_MARK: &str = "代发标记“（由 Steve 代发）”";
 
 /// The connections of channels `viewer` may configure: in the workspace, receiving messages, not
 /// someone else's personal account (`own` like `set_account_rules`).
@@ -1271,11 +1476,14 @@ impl ChannelNow {
         })
     }
 
-    fn persona_text(&self) -> String {
-        match (&self.persona, self.mode) {
-            (_, Mode::Own) => YOU.into(),
-            (Some(p), _) => p.name.clone(),
-            (None, _) => "无".into(),
+    /// The default persona for the prompt (`card = false`, Chinese) or the card.
+    fn persona_text(&self, card: bool) -> String {
+        match (&self.persona, self.mode, card) {
+            (_, Mode::Own, false) => YOU.into(),
+            (_, Mode::Own, true) => t!("channels.draft.value.you"),
+            (Some(p), _, _) => p.name.clone(),
+            (None, _, false) => "无".into(),
+            (None, _, true) => t!("channels.draft.value.none"),
         }
     }
 
@@ -1288,14 +1496,23 @@ impl ChannelNow {
     }
 }
 
-fn where_names(places: &[(String, String)], ids: &[String]) -> String {
+/// `trigger.where` in words, for the prompt (`card = false`, Chinese) or the card.
+fn where_names(places: &[(String, String)], ids: &[String], card: bool) -> String {
     let names: Vec<String> = ids
         .iter()
         .map(|id| {
             if id == rules::WHERE_ALL_DMS {
-                ALL_DMS.to_string()
+                if card {
+                    t!("channels.draft.value.all_dms")
+                } else {
+                    ALL_DMS.to_string()
+                }
             } else if id == rules::WHERE_EVERYWHERE {
-                EVERYWHERE.to_string()
+                if card {
+                    t!("channels.draft.value.everywhere")
+                } else {
+                    EVERYWHERE.to_string()
+                }
             } else {
                 places
                     .iter()
@@ -1304,10 +1521,11 @@ fn where_names(places: &[(String, String)], ids: &[String]) -> String {
             }
         })
         .collect();
-    if names.is_empty() {
-        "无".into()
-    } else {
-        names.join("、")
+    match (names.is_empty(), card) {
+        (true, false) => "无".into(),
+        (true, true) => t!("channels.draft.value.none"),
+        (false, false) => names.join("、"),
+        (false, true) => names.join(&t!("channels.draft.list_sep")),
     }
 }
 
@@ -1371,14 +1589,14 @@ impl DraftTarget for ChannelTarget {
                 "persona",
                 "默认对外身份（身份的名字）",
                 "ref",
-                json!(a.persona_text()),
+                json!(a.persona_text(false)),
             ));
         }
         fields.push(FieldSpec::new(
             "rules",
             &format!("{L_DEFAULT_RULES}（{RULES_FORMAT}）"),
             "list",
-            json!({ "规则": a.rules, "说明": rules_text(c, &a.rules, a.mode) }),
+            json!({ "规则": a.rules, "说明": rules_text(c, &a.rules, a.mode, false) }),
         ));
         fields.push(FieldSpec::new(
             "duty",
@@ -1409,7 +1627,7 @@ impl DraftTarget for ChannelTarget {
                         "触发语生效的群（群名；所有私聊写“{ALL_DMS}”，到处都生效写“{EVERYWHERE}”）"
                     ),
                     "list",
-                    json!(where_names(&places, &t.r#where)),
+                    json!(where_names(&places, &t.r#where, false)),
                 ),
                 FieldSpec::new(
                     "trigger.mark",
@@ -1423,7 +1641,7 @@ impl DraftTarget for ChannelTarget {
         Ok(Prepared {
             target_id: Some(id.to_string()),
             revision: Some(a.revision),
-            title: format!("账号「{}」", a.name),
+            title: t!("channels.draft.title.channel", name = a.name),
             href: format!("#/channels/acc/{id}"),
             subject: format!(
                 "the chat account \"{}\" ({})",
@@ -1465,17 +1683,18 @@ impl DraftTarget for ChannelTarget {
             let said = text_of(v).unwrap_or_default();
             if let Some(tk) = key.strip_prefix("trigger.") {
                 let label = match tk {
-                    "on" => L_TRIGGER_ON,
-                    "words" => L_TRIGGER_WORDS,
-                    "where" => L_TRIGGER_WHERE,
-                    "mark" => L_TRIGGER_MARK,
+                    "on" => t!("channels.draft.label.trigger_on"),
+                    "words" => t!("channels.draft.label.trigger_words"),
+                    "where" => t!("channels.draft.label.trigger_where"),
+                    "mark" => t!("channels.draft.label.trigger_mark"),
                     _ => {
                         d.other(&op);
                         continue;
                     }
                 };
+                let label = label.as_str();
                 if a.mode != Mode::Own {
-                    d.line(refused(label, "—", TRIGGER_SELF_ONLY));
+                    d.line(refused(label, "—", &t!("channels.error.trigger_self_only")));
                     continue;
                 }
                 let t = rules::Trigger::from_value(&a.trigger);
@@ -1485,20 +1704,22 @@ impl DraftTarget for ChannelTarget {
                         match on_off_flag(v) {
                             Some(b) => {
                                 trigger[tk] = json!(b);
-                                d.line(Change::new(label, on_off(old), on_off(b)));
+                                d.line(Change::new(label, on_off_card(old), on_off_card(b)));
                             }
                             None => d.line(not_recognized(label, &said)),
                         }
                     }
                     "words" => match list_of(v) {
-                        Some(ws) if ws.len() > TRIGGER_WORDS_MAX => {
-                            d.line(refused(label, t.words.join(" "), "参数不对：trigger.words"))
-                        }
+                        Some(ws) if ws.len() > TRIGGER_WORDS_MAX => d.line(refused(
+                            label,
+                            t.words.join(" "),
+                            &invalid_card("trigger.words"),
+                        )),
                         Some(ws) => match ws.iter().find(|w| !word_ok(w)) {
                             Some(bad) => d.line(refused(
                                 label,
                                 t.words.join(" "),
-                                &format!("触发语要以 / 开头、只用英文字母数字和下划线：{bad}"),
+                                &t!("channels.error.trigger_word", word = bad),
                             )),
                             None => {
                                 let mut uniq: Vec<String> = Vec::new();
@@ -1554,8 +1775,8 @@ impl DraftTarget for ChannelTarget {
                                 let ids = rules::normal_where(ids);
                                 d.line(Change::new(
                                     label,
-                                    where_names(&places, &t.r#where),
-                                    where_names(&places, &ids),
+                                    where_names(&places, &t.r#where, true),
+                                    where_names(&places, &ids, true),
                                 ));
                                 trigger["where"] = json!(ids);
                             }
@@ -1566,46 +1787,51 @@ impl DraftTarget for ChannelTarget {
             }
             match key {
                 "persona" if a.mode == Mode::Own => {
-                    d.line(refused(L_DEFAULT_PERSONA, YOU, SELF_NO_PERSONA));
+                    d.line(refused(
+                        &t!("channels.draft.label.default_persona"),
+                        t!("channels.draft.value.you"),
+                        &t!("channels.error.self_no_persona"),
+                    ));
                 }
-                "persona" => match find_persona(c, ws, &said)? {
-                    Some(per) if a.binding.as_deref() != Some(per.id.as_str()) => d.set(
-                        "persona_id",
-                        json!(per.id),
-                        Change::new(L_DEFAULT_PERSONA, a.persona_text(), per.name),
-                    ),
-                    Some(_) => {}
-                    None => d.line(not_recognized(L_DEFAULT_PERSONA, &said)),
-                },
-                "rules" => match check_rules(c, ws, a.mode, v)? {
-                    Checked::Ok(rules, to) => {
-                        if rules != a.rules {
-                            let from = rules_text(c, &a.rules, a.mode);
-                            d.set("rules", rules, Change::new(L_DEFAULT_RULES, from, to));
+                "persona" => {
+                    let label = t!("channels.draft.label.default_persona");
+                    match find_persona(c, ws, &said)? {
+                        Some(per) if a.binding.as_deref() != Some(per.id.as_str()) => d.set(
+                            "persona_id",
+                            json!(per.id),
+                            Change::new(label, a.persona_text(true), per.name),
+                        ),
+                        Some(_) => {}
+                        None => d.line(not_recognized(&label, &said)),
+                    }
+                }
+                "rules" => {
+                    let label = t!("channels.draft.label.default_rules");
+                    match check_rules(c, ws, a.mode, v)? {
+                        Checked::Ok(rules, to) => {
+                            if rules != a.rules {
+                                let from = rules_text(c, &a.rules, a.mode, true);
+                                d.set("rules", rules, Change::new(label, from, to));
+                            }
+                        }
+                        Checked::Unknown(x) => d.line(not_recognized(&label, &x)),
+                        Checked::Refused(why) => {
+                            d.line(refused(&label, rules_text(c, &a.rules, a.mode, true), &why))
                         }
                     }
-                    Checked::Unknown(x) => d.line(not_recognized(L_DEFAULT_RULES, &x)),
-                    Checked::Refused(why) => d.line(refused(
-                        L_DEFAULT_RULES,
-                        rules_text(c, &a.rules, a.mode),
-                        &why,
-                    )),
-                },
+                }
                 "duty" => {
+                    let label = t!("channels.draft.label.account_duty");
                     let new = appended(&a.duty, &said);
                     if said.is_empty() || new == a.duty {
                         continue;
                     }
                     if utf16_len(&new) > DUTY_MAX {
-                        d.line(refused(L_ACCOUNT_DUTY, show(&a.duty), "参数不对：duty"));
+                        d.line(refused(&label, show(&a.duty), &invalid_card("duty")));
                         continue;
                     }
                     let added = new.strip_prefix(a.duty.as_str()).unwrap_or(&new).trim();
-                    let line = Change::new(
-                        L_ACCOUNT_DUTY,
-                        show(&a.duty),
-                        format!("{}（追加）", show(added)),
-                    );
+                    let line = Change::new(label, show(&a.duty), appended_card(added));
                     d.set("duty", json!(new), line);
                 }
                 _ => d.other(&op),
@@ -1761,13 +1987,13 @@ impl ChangeOp for ChannelOp {
         }
         if let Some(t) = p.get("trigger") {
             if a.mode != Mode::Own {
-                return Err(ApiError::rule(TRIGGER_SELF_ONLY));
+                return Err(ApiError::rule(t!("channels.error.trigger_self_only")));
             }
             check_trigger(t)?;
         }
         if let Some(per) = p.get("persona_id") {
             if a.mode == Mode::Own {
-                return Err(ApiError::rule(SELF_NO_PERSONA));
+                return Err(ApiError::rule(t!("channels.error.self_no_persona")));
             }
             personas::own(c, cx.ws, per.as_str().unwrap_or(""))?;
         }

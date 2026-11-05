@@ -9,8 +9,8 @@ use crate::backend::BackendError;
 /// Every failure a handler can return, mapped to the TS Hub's status and body.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ApiError {
-    /// zod validation: `400 {"error":"参数不对：<path>、<path>"}`.
-    #[error("参数不对：{}", .0.join("、"))]
+    /// zod validation: `400 {"error":"参数不对：<path>、<path>"}`, in the request's language.
+    #[error("{}", invalid_message(.0))]
     Invalid(Vec<String>),
     /// `{"error": msg}` with a status (explicit `c.json({error}, n)`, `own()` 404s, thrown errors as 500).
     #[error("{1}")]
@@ -44,6 +44,12 @@ impl From<BackendError> for ApiError {
     fn from(e: BackendError) -> Self {
         ApiError::Json(e.status, e.message)
     }
+}
+
+/// "参数不对：a、b" / "Invalid parameters: a, b".
+fn invalid_message(paths: &[String]) -> String {
+    let fields = paths.join(&steve_i18n::t!("hub.error.list_sep"));
+    steve_i18n::t!("hub.error.invalid", fields = fields)
 }
 
 fn status(n: u16) -> StatusCode {
@@ -99,6 +105,14 @@ mod tests {
             ApiError::Invalid(vec![String::new()]).to_string(),
             "参数不对："
         );
+    }
+
+    #[tokio::test]
+    async fn invalid_message_in_english() {
+        let e = ApiError::Invalid(vec!["name".into(), "avatar.color".into()]);
+        let en = steve_i18n::scope(steve_i18n::EN, async { e.to_string() }).await;
+        assert_eq!(en, "Invalid parameters: name, avatar.color");
+        assert_eq!(e.to_string(), "参数不对：name、avatar.color");
     }
 
     #[test]

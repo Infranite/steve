@@ -18,23 +18,16 @@ pub struct Install {
 }
 
 impl Install {
-    /// Why this page can't upgrade it itself, in the words Settings · 关于 and `steve_upgrade` show.
+    /// Why this page can't upgrade it itself, in the words Settings · 关于 and `steve_upgrade` show (the
+    /// request's language; `/mcp` is zh-CN).
     /// `None` for `managed`; a managed install the generic bundle can't serve has its own reason.
-    pub fn reason(&self) -> Option<&'static str> {
+    pub fn reason(&self) -> Option<String> {
         Some(match self.kind {
             "managed" => return None,
-            "local_release" => {
-                "这台机器的 Hub 是本机签名构建（ops/local-release.py），靠本机签名身份和 steve-keyhelper 读取 Keychain 里的密钥。GitHub Release 的通用预编译包没有这个签名身份，换上后读不了保险箱，所以不能在页面里一键升级，需要在本机用同一个 Release 标签构建并切换。"
-            }
-            "release_script" => {
-                "这台机器由 launchd 运行 ops/release.sh 发布的版本，没有使用托管升级器（ops/run-managed.sh），Hub 不能替换并重启自己，需要用发布脚本升级。"
-            }
-            "source" => {
-                "Hub 直接从源码构建运行，没有托管升级器替它切换版本和重启，需要自己更新源码、构建并重启。"
-            }
-            _ => {
-                "认不出这台机器的安装方式（例如容器或其他部署系统），或已声明 STEVE_INSTALL_KIND=external。Steve 不改动它的文件和进程，需要在部署系统里升级。"
-            }
+            "local_release" => steve_i18n::t!("hub.upgrade.reason.local_release"),
+            "release_script" => steve_i18n::t!("hub.upgrade.reason.release_script"),
+            "source" => steve_i18n::t!("hub.upgrade.reason.source"),
+            _ => steve_i18n::t!("hub.upgrade.reason.external"),
         })
     }
 }

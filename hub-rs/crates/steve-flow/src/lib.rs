@@ -55,6 +55,16 @@
 //! // steve_flow::mcp::handles(name): steve_flow::mcp::call(&flow, &mcp_cx, name, &args).await
 //! ```
 
+steve_i18n::init!();
+
+/// `steve_i18n::t!` in a given language: for text that has a UI copy in the request's language and a stored
+/// or model-facing copy that stays zh-CN (a schedule's `when` saved from its cron description).
+macro_rules! t_in {
+    ($locale:expr, $key:literal $(, $name:ident = $val:expr)* $(,)?) => {
+        ::std::string::String::from(rust_i18n::t!($key, locale = $locale $(, $name = $val)*))
+    };
+}
+
 pub mod adapter;
 pub mod api;
 pub mod bots;

@@ -381,7 +381,7 @@ fn commands_check_the_version_and_the_phase() {
                 .session_message(&s.id, "还有一件", false, &[])
                 .unwrap_err()
         ),
-        cycle::CLOSED_MSG
+        cycle::closed_msg()
     );
     // the new cycle starts at revision 0; the old cycle stays as it closed
     let n = k

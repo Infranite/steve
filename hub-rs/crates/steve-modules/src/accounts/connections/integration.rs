@@ -210,7 +210,42 @@ pub struct IntegrationsOut {
 #[derive(Debug, Clone, Serialize)]
 pub struct AreaOut {
     pub id: &'static str,
-    pub label: &'static str,
+    pub label: String,
+}
+
+/// An area's label in the request's language ([`AREAS`] holds the zh-CN one).
+fn area_label(id: &str) -> String {
+    use steve_i18n::t;
+    match id {
+        "channel" => t!("modules.integration.area.channel"),
+        "send_as_you" => t!("modules.integration.area.send_as_you"),
+        "docs" => t!("modules.integration.area.docs"),
+        "sheets" => t!("modules.integration.area.sheets"),
+        "calendar" => t!("modules.integration.area.calendar"),
+        "tasks" => t!("modules.integration.area.tasks"),
+        "approval" => t!("modules.integration.area.approval"),
+        "minutes" => t!("modules.integration.area.minutes"),
+        "mail" => t!("modules.integration.area.mail"),
+        "repo" => t!("modules.integration.area.repo"),
+        "directory" => t!("modules.integration.area.directory"),
+        x => x.to_string(),
+    }
+}
+
+/// A [`PLANNED`] text in the request's language (the table holds the zh-CN one).
+fn planned_text(zh: &str) -> String {
+    use steve_i18n::t;
+    match zh {
+        "邮箱" => t!("modules.integration.planned.mailbox"),
+        "Gmail（Google 账号登录）" => t!("modules.integration.planned.gmail"),
+        "现在可以用 IMAP 和应用专用密码接入 Gmail" => {
+            t!("modules.integration.planned.gmail_note")
+        }
+        "Outlook（微软账号登录）" => t!("modules.integration.planned.outlook"),
+        "现在可以用 IMAP 接入" => t!("modules.integration.planned.outlook_note"),
+        "Google 日历" => t!("modules.integration.planned.gcal"),
+        x => x.to_string(),
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -235,10 +270,10 @@ pub struct ProviderArea {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PlannedOut {
-    pub name: &'static str,
+    pub name: String,
     pub areas: Vec<&'static str>,
-    #[serde(skip_serializing_if = "str::is_empty")]
-    pub note: &'static str,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub note: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -530,11 +565,11 @@ impl Connections {
             });
         }
         for x in PLANNED {
-            let k = slot(&mut providers, x.provider, x.provider_name);
+            let k = slot(&mut providers, x.provider, &planned_text(x.provider_name));
             providers[k].planned.push(PlannedOut {
-                name: x.name,
+                name: planned_text(x.name),
                 areas: x.areas.to_vec(),
-                note: x.note,
+                note: planned_text(x.note),
             });
         }
         let mut grouped = Vec::new();
@@ -598,7 +633,10 @@ impl Connections {
             installations,
             areas: AREAS
                 .iter()
-                .map(|(id, label)| AreaOut { id, label })
+                .map(|(id, _)| AreaOut {
+                    id,
+                    label: area_label(id),
+                })
                 .collect(),
             providers,
             callback_urls: self.callback_urls(),

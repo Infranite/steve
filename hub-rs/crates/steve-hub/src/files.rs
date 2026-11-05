@@ -181,20 +181,19 @@ pub fn validate(b: &[u8], name: Option<&str>) -> BResult<(&'static str, String)>
     if b.is_empty() {
         return Err(BackendError {
             status: 400,
-            message: "文件是空的".into(),
+            message: steve_i18n::t!("hub.file.empty"),
         });
     }
     if b.len() > MAX_FILE {
         return Err(BackendError {
             status: 413,
-            message: format!("文件太大，最多 {} MB", MAX_FILE / 1024 / 1024),
+            message: steve_i18n::t!("hub.file.too_large", mb = MAX_FILE / 1024 / 1024),
         });
     }
     let Some(kind) = sniff(b) else {
         return Err(BackendError {
             status: 415,
-            message: "不支持这种文件：只能上传图片（PNG/JPEG/GIF/WebP）、PDF、文本/日志或 zip"
-                .into(),
+            message: steve_i18n::t!("hub.file.unsupported"),
         });
     };
     Ok((kind.mime, clean_name(name, kind)))
@@ -294,7 +293,7 @@ pub fn refs(r: &dyn Repo, ws: &str, ids: Option<&[String]>) -> BResult<Vec<Value
             Some(f) if f.get("workspace_id").and_then(Value::as_str) == Some(ws) => {
                 Ok(file_ref(&f))
             }
-            _ => Err(BackendError::not_found("没有这个附件")),
+            _ => Err(BackendError::not_found(crate::api::Noun::File.missing())),
         })
         .collect()
 }

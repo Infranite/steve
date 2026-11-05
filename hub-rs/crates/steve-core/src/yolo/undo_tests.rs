@@ -9,7 +9,7 @@ use steve_modules::{DigestNotes, Modules, Registry};
 
 use super::digest::{Notes, Query};
 use super::engine_tests::{T, t};
-use super::undo::CANNOT;
+use super::undo::cannot;
 use crate::patch;
 use crate::repo::WS;
 
@@ -91,7 +91,7 @@ fn undoing_a_decision_reopens_it_and_counts_for_b3() {
     assert!(t.engine.consider(&d).unwrap().is_none());
     assert_eq!(
         t.engine.undo(WS, ME, &a, None).unwrap_err().to_string(),
-        CANNOT
+        cannot()
     );
     // a second undo within the hour trips B3
     let (_, _, _, a2) = accepted(&t);
@@ -233,7 +233,7 @@ fn rollback_is_offered_only_for_the_newest_release() {
             .undo(WS, ME, &first.id, None)
             .unwrap_err()
             .to_string(),
-        CANNOT
+        cannot()
     );
     std::fs::remove_file(v1.join("release.json")).unwrap();
     assert!(
@@ -256,7 +256,7 @@ fn rollback_is_offered_only_for_the_newest_release() {
             .undo(WS, ME, &first.id, None)
             .unwrap_err()
             .to_string(),
-        CANNOT
+        cannot()
     );
 }
 
@@ -300,6 +300,29 @@ fn now_and_cancel_during_the_cool_down() {
     );
     assert_eq!(t.decision(&d).status, "open");
     assert!(t.engine.cancel(WS, &a.id).is_err());
+}
+
+/// The web branches on `user_took_over`, not on `reason`, which is shown in the request's language.
+#[tokio::test]
+async fn a_cancelled_row_says_the_user_took_over_in_any_language() {
+    let t = t();
+    let (item, sid, _) = t.item();
+    let d = t.card(
+        &item,
+        &sid,
+        "fail",
+        "item",
+        "会话出错：z",
+        "",
+        &["continue", "delivered", "look"],
+    );
+    let a = t.engine.consider(&d).unwrap().unwrap();
+    let c = t.engine.cancel(WS, &a.id).unwrap();
+    let v = steve_i18n::scope(steve_i18n::EN, async { t.engine.action_json(&c).unwrap() }).await;
+    assert_eq!(v["reason"], "You chose to decide yourself");
+    assert_eq!(v["user_took_over"], true);
+    assert!(v["limit_what"].is_null());
+    assert_eq!(c.reason, super::undo::USER_CANCEL, "stored in zh-CN");
 }
 
 #[test]

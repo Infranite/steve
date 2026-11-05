@@ -21,6 +21,7 @@ use crate::sync::latest_checks;
 
 /// Provider id and panel id prefix.
 pub const PLUGIN: &str = "github";
+/// The zh-CN title (`github.panel.title`).
 pub const TITLE: &str = "PR 与检查";
 pub const RERUN: &str = "rerun_failed";
 pub const OPEN: &str = "open";
@@ -34,10 +35,10 @@ pub fn panel_id(pr: &str) -> String {
 pub fn ago(now: i64, at: i64) -> String {
     let mins = (now - at).max(0) / 60_000;
     match mins {
-        0 => "刚刚".into(),
-        m if m < 60 => format!("{m} 分钟前"),
-        m if m < 24 * 60 => format!("{} 小时前", m / 60),
-        m => format!("{} 天前", m / (24 * 60)),
+        0 => steve_i18n::t!("github.panel.ago_now"),
+        m if m < 60 => steve_i18n::t!("github.panel.ago_minutes", n = m),
+        m if m < 24 * 60 => steve_i18n::t!("github.panel.ago_hours", n = m / 60),
+        m => steve_i18n::t!("github.panel.ago_days", n = m / (24 * 60)),
     }
 }
 
@@ -62,20 +63,20 @@ pub fn failed_runs(checks: &[&CheckRow]) -> BTreeSet<i64> {
 fn badges(pr: &PrRow) -> Vec<String> {
     let mut b = Vec::new();
     if pr.draft && pr.state == "open" {
-        b.push("草稿");
+        b.push(steve_i18n::t!("github.panel.badge_draft"));
     }
     match pr.state.as_str() {
-        "merged" => b.push("已合并"),
-        "closed" => b.push("已关闭"),
+        "merged" => b.push(steve_i18n::t!("github.panel.badge_merged")),
+        "closed" => b.push(steve_i18n::t!("github.panel.badge_closed")),
         _ => {}
     }
     if pr.state == "open" && pr.mergeable.as_deref() == Some("dirty") {
-        b.push("有冲突");
+        b.push(steve_i18n::t!("github.panel.badge_conflict"));
     }
     if pr.review_state == "changes_requested" {
-        b.push("要求修改");
+        b.push(steve_i18n::t!("github.panel.badge_changes_requested"));
     }
-    b.into_iter().map(String::from).collect()
+    b
 }
 
 /// `3 项检查通过 · 等你验收后合并`.
@@ -89,24 +90,26 @@ fn foot(
     let (fail, pending, ok) = (n("fail"), n("pending"), n("ok") + n("skipped"));
     let mut parts = Vec::new();
     if checks.is_empty() {
-        parts.push("还没有检查".to_string());
+        parts.push(steve_i18n::t!("github.panel.checks_none"));
     } else if fail > 0 {
-        parts.push(format!("{fail} 项检查失败"));
+        parts.push(steve_i18n::t!("github.panel.checks_failed", n = fail));
     } else if pending > 0 {
-        parts.push(format!("{pending} 项检查进行中"));
+        parts.push(steve_i18n::t!("github.panel.checks_pending", n = pending));
     } else {
-        parts.push(format!("{ok} 项检查通过"));
+        parts.push(steve_i18n::t!("github.panel.checks_passed", n = ok));
     }
     let green = !checks.is_empty() && fail == 0 && pending == 0;
     match pr.state.as_str() {
-        "merged" => parts.push("已合并".into()),
-        "closed" => parts.push("已关闭".into()),
+        "merged" => parts.push(steve_i18n::t!("github.panel.badge_merged")),
+        "closed" => parts.push(steve_i18n::t!("github.panel.badge_closed")),
         _ if green
             && base_decisions::open_for(c, &pr.workspace_id, PR_MERGE, &pr.id)?.is_some() =>
         {
-            parts.push("等你确认合并".into())
+            parts.push(steve_i18n::t!("github.panel.wait_merge"))
         }
-        _ if green && item_status == Some("wait") => parts.push("等你验收后合并".into()),
+        _ if green && item_status == Some("wait") => {
+            parts.push(steve_i18n::t!("github.panel.wait_accept"))
+        }
         _ => {}
     }
     Ok(parts.join(" · "))
@@ -127,8 +130,8 @@ pub fn pr_panel(c: &Connection, repo: &RepoRow, pr: &PrRow, now: i64) -> ApiResu
             updated = updated.max(k.updated);
             let sub = match k.status.as_str() {
                 "completed" => k.completed.map(|t| ago(now, t)),
-                "queued" => Some("排队中".into()),
-                _ => Some("进行中".into()),
+                "queued" => Some(steve_i18n::t!("github.panel.check_queued")),
+                _ => Some(steve_i18n::t!("github.panel.check_running")),
             };
             PanelRow {
                 state: row_state(k),
@@ -142,19 +145,19 @@ pub fn pr_panel(c: &Connection, repo: &RepoRow, pr: &PrRow, now: i64) -> ApiResu
     if pr.state == "open" && !failed_runs(&checks).is_empty() {
         actions.push(PanelAction {
             id: RERUN.into(),
-            label: "重跑失败的检查".into(),
+            label: steve_i18n::t!("github.panel.rerun"),
             href: None,
         });
     }
     actions.push(PanelAction {
         id: OPEN.into(),
-        label: "在 GitHub 打开".into(),
+        label: steve_i18n::t!("github.panel.open"),
         href: Some(pr.url.clone()),
     });
     Ok(Panel {
         id: panel_id(&pr.id),
         plugin: PLUGIN.into(),
-        title: TITLE.into(),
+        title: steve_i18n::t!("github.panel.title"),
         head: Some(PanelHead {
             text: format!("#{} {}", pr.number, pr.title),
             href: Some(pr.url.clone()),
@@ -227,7 +230,9 @@ impl ItemPanel for GhPanels {
             Ok::<_, ApiError>(failed_runs(&latest_checks(&rows)))
         })?;
         if pr.state != "open" || runs.is_empty() {
-            return Err(ApiError::conflict("没有失败的检查可以重跑"));
+            return Err(ApiError::conflict(steve_i18n::t!(
+                "github.panel.nothing_to_rerun"
+            )));
         }
         let conn = gh
             .conn_for_write(&ws, &r.connection_id)
@@ -246,7 +251,10 @@ impl ItemPanel for GhPanels {
                 Err(e) => {
                     tracing::warn!(repo = %r.full_name, run, error = %e, "github rerun failed");
                     if done == 0 {
-                        return Err(ApiError::rule(format!("重跑失败：{e}")));
+                        return Err(ApiError::rule(steve_i18n::t!(
+                            "github.panel.rerun_failed",
+                            error = e
+                        )));
                     }
                 }
             }
@@ -263,7 +271,7 @@ impl ItemPanel for GhPanels {
             .map_err(ApiError::from)
         })?;
         Ok(ActionOutcome {
-            message: Some(format!("已重跑 {done} 个工作流里失败的检查")),
+            message: Some(steve_i18n::t!("github.panel.rerun_done", n = done)),
         })
     }
 }
@@ -279,5 +287,15 @@ mod tests {
         assert_eq!(ago(now, now - 2 * 60_000), "2 分钟前");
         assert_eq!(ago(now, now - 3 * 3_600_000), "3 小时前");
         assert_eq!(ago(now, now - 2 * 86_400_000), "2 天前");
+    }
+
+    #[tokio::test]
+    async fn ago_in_english() {
+        let now = 10 * 86_400_000;
+        let en = steve_i18n::scope(steve_i18n::EN, async {
+            (ago(now, now - 30_000), ago(now, now - 3 * 3_600_000))
+        })
+        .await;
+        assert_eq!(en, ("just now".to_string(), "3 h ago".to_string()));
     }
 }

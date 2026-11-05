@@ -27,6 +27,16 @@ pub const DRAFT_TIMEOUT: Duration = Duration::from_secs(90);
 pub const STALE: &str = "这份草稿已经失效，请重新说一次";
 pub const NOT_UNDOABLE: &str = "这次改动已经不能撤销了";
 
+/// [`STALE`] in the request's language, for an API answer.
+pub fn stale() -> String {
+    steve_i18n::t!("modules.changes.stale")
+}
+
+/// [`NOT_UNDOABLE`] in the request's language, for an API answer.
+pub fn not_undoable() -> String {
+    steve_i18n::t!("modules.changes.not_undoable")
+}
+
 /// A field the model may change (`FieldSpec`): `type` is `text | enum | list | ref`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct FieldSpec {
@@ -276,7 +286,7 @@ pub async fn draft(
         .blocking(move |m| {
             let viewer = m.viewer(&caller_c)?;
             let t = &m.registry.targets[&kind_s];
-            let p = m.store.reader(|c| t.prepare(c, &viewer, id_s.as_deref()))?;
+            let p = stored(|| m.store.reader(|c| t.prepare(c, &viewer, id_s.as_deref())))?;
             Ok((viewer, p))
         })
         .await?;
@@ -293,7 +303,10 @@ pub async fn draft(
     let (kind_s, request, caller_c) = (kind.to_string(), request.to_string(), caller.clone());
     m.blocking(move |m| {
         let t = &m.registry.targets[&kind_s];
-        let plan = m.store.reader(|c| t.plan(c, &viewer, &prepared, raw))?;
+        let plan = stored(|| {
+            m.store
+                .reader(|c| t.plan(c, &viewer, &prepared, raw.clone()))
+        })?;
         for op in &plan.ops {
             let name = op.get("op").and_then(Value::as_str).unwrap_or("");
             if !m.registry.ops.contains_key(name) {
@@ -326,8 +339,16 @@ pub async fn draft(
     .await
 }
 
+/// `f` (a read-only prepare or plan) in zh-CN: its title and preview lines are stored in `changesets` and read by
+/// every member, so they don't follow the request's language (see steve-i18n, "What stays Chinese"). An error
+/// is the request's own: `f` runs again in the request's language for it.
+pub fn stored<R>(f: impl Fn() -> ApiResult<R>) -> ApiResult<R> {
+    steve_i18n::stored(&f).or_else(|_| f())
+}
+
 /// Stores an already planned changeset (one-click corrections, signal suggestions) and returns it as a
-/// draft; the caller may [`apply`] it right away.
+/// draft; the caller may [`apply`] it right away. Build `prepared.title` and `plan.changes` under
+/// [`steve_i18n::stored`]: they are stored for every member to read.
 pub fn store_plan(
     m: &Modules,
     caller: &Caller,
@@ -396,19 +417,19 @@ pub fn apply(m: &Modules, caller: &Caller, id: &str) -> Option<ApiResult<Value>>
     let cs = m.store.reader(|c| changesets::get(c, id)).ok()??;
     Some((|| {
         if cs.workspace_id != caller.ws || cs.status != "draft" {
-            return Err(ApiError::conflict(STALE));
+            return Err(ApiError::conflict(stale()));
         }
         let outcome = m.store.transaction(|tx| {
-            let cs = changesets::get(tx, id)?.ok_or_else(|| ApiError::conflict(STALE))?;
+            let cs = changesets::get(tx, id)?.ok_or_else(|| ApiError::conflict(stale()))?;
             if cs.status != "draft" {
-                return Err(ApiError::conflict(STALE));
+                return Err(ApiError::conflict(stale()));
             }
             if let (Some(tid), Some(rev)) = (&cs.target_id, cs.target_revision) {
                 let t = m
                     .registry
                     .targets
                     .get(&cs.target_type)
-                    .ok_or_else(|| ApiError::conflict(STALE))?;
+                    .ok_or_else(|| ApiError::conflict(stale()))?;
                 if t.revision(tx, &cs.workspace_id, tid)? != Some(rev) {
                     changesets::close_draft(tx, &cs, "stale")?;
                     return Ok(Outcome::Stale);
@@ -430,7 +451,7 @@ pub fn apply(m: &Modules, caller: &Caller, id: &str) -> Option<ApiResult<Value>>
                 before.push(json!({ "op": op, "before": b }));
             }
             if !changesets::mark_applied(tx, &cs, &before)? {
-                return Err(ApiError::conflict(STALE));
+                return Err(ApiError::conflict(stale()));
             }
             base::audit(
                 tx,
@@ -444,7 +465,7 @@ pub fn apply(m: &Modules, caller: &Caller, id: &str) -> Option<ApiResult<Value>>
         })?;
         match outcome {
             Outcome::Applied => Ok(json!({ "ok": true, "undo": id })),
-            Outcome::Stale => Err(ApiError::conflict(STALE)),
+            Outcome::Stale => Err(ApiError::conflict(stale())),
         }
     })())
 }
@@ -461,12 +482,12 @@ pub fn undo_at(m: &Modules, caller: &Caller, id: &str, at: i64) -> Option<ApiRes
     let cs = m.store.reader(|c| changesets::get(c, id)).ok()??;
     Some((|| {
         if cs.workspace_id != caller.ws || !cs.undoable(at) {
-            return Err(ApiError::conflict(NOT_UNDOABLE));
+            return Err(ApiError::conflict(not_undoable()));
         }
         m.store.transaction(|tx| {
             let cs = changesets::get(tx, id)?
                 .filter(|c| c.undoable(at))
-                .ok_or_else(|| ApiError::conflict(NOT_UNDOABLE))?;
+                .ok_or_else(|| ApiError::conflict(not_undoable()))?;
             let vars = RefCell::new(BTreeMap::new());
             let cx = OpCx {
                 ws: &cs.workspace_id,
@@ -480,7 +501,7 @@ pub fn undo_at(m: &Modules, caller: &Caller, id: &str, at: i64) -> Option<ApiRes
                 op_of(m, &op)?.undo(tx, &cx, &op, &before)?;
             }
             if !changesets::mark_undone(tx, &cs)? {
-                return Err(ApiError::conflict(NOT_UNDOABLE));
+                return Err(ApiError::conflict(not_undoable()));
             }
             base::audit(
                 tx,
@@ -500,11 +521,11 @@ pub fn drop_draft(m: &Modules, caller: &Caller, id: &str) -> Option<ApiResult<Va
     let cs = m.store.reader(|c| changesets::get(c, id)).ok()??;
     Some((|| {
         if cs.workspace_id != caller.ws {
-            return Err(ApiError::conflict(STALE));
+            return Err(ApiError::conflict(stale()));
         }
         m.store.transaction(|tx| {
             if !changesets::close_draft(tx, &cs, "dropped")? {
-                return Err(ApiError::conflict(STALE));
+                return Err(ApiError::conflict(stale()));
             }
             Ok(json!({ "ok": true }))
         })

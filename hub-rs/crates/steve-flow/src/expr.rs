@@ -176,7 +176,7 @@ pub fn template_paths(tpl: &str) -> Vec<String> {
 pub fn check_template(tpl: &str) -> Result<(), String> {
     for p in template_paths(tpl) {
         if !valid_path(&p) {
-            return Err(format!("模板里的「{{{{{p}}}}}」写得不对"));
+            return Err(steve_i18n::t!("flow.expr.bad_template", path = p));
         }
     }
     Ok(())
@@ -293,7 +293,7 @@ fn lex(src: &str) -> Result<Vec<Tok>, String> {
                 i += 1;
                 loop {
                     let Some(&ch) = cs.get(i) else {
-                        return Err("引号没有配对".into());
+                        return Err(steve_i18n::t!("flow.expr.unclosed_quote"));
                     };
                     if ch == '\\' && cs.get(i + 1).is_some() {
                         s.push(cs[i + 1]);
@@ -317,7 +317,9 @@ fn lex(src: &str) -> Result<Vec<Tok>, String> {
                     i += 1;
                 }
                 let s: String = cs[start..i].iter().collect();
-                let n: f64 = s.parse().map_err(|_| format!("数字「{s}」写得不对"))?;
+                let n: f64 = s
+                    .parse()
+                    .map_err(|_| steve_i18n::t!("flow.expr.bad_number", number = s))?;
                 out.push(Tok::Lit(
                     serde_json::Number::from_f64(n)
                         .map(Value::Number)
@@ -354,12 +356,12 @@ fn lex(src: &str) -> Result<Vec<Tok>, String> {
                         "false" => out.push(Tok::Lit(Value::Bool(false))),
                         "null" => out.push(Tok::Lit(Value::Null)),
                         _ if valid_path(&w) => out.push(Tok::Path(w)),
-                        _ => return Err(format!("「{w}」写得不对")),
+                        _ => return Err(steve_i18n::t!("flow.expr.bad_word", word = w)),
                     }
                 }
                 continue;
             }
-            other => return Err(format!("不认识的符号「{other}」")),
+            other => return Err(steve_i18n::t!("flow.expr.bad_symbol", symbol = other)),
         }
         i += 1;
     }
@@ -440,7 +442,8 @@ impl Parser {
             if op == "matches"
                 && let Expr::Lit(Value::String(p)) = &r
             {
-                regex::Regex::new(p).map_err(|_| format!("正则「{p}」写得不对"))?;
+                regex::Regex::new(p)
+                    .map_err(|_| steve_i18n::t!("flow.expr.bad_regex", regex = p))?;
             }
             return Ok(Expr::Cmp(op, Box::new(l), Box::new(r)));
         }
@@ -454,7 +457,7 @@ impl Parser {
                 let e = self.or()?;
                 match self.next() {
                     Some(Tok::RParen) => Ok(e),
-                    _ => Err("括号没有配对".into()),
+                    _ => Err(steve_i18n::t!("flow.expr.unclosed_paren")),
                 }
             }
             Some(Tok::LBracket) => {
@@ -468,23 +471,23 @@ impl Parser {
                     match self.next() {
                         Some(Tok::Comma) => continue,
                         Some(Tok::RBracket) => break,
-                        _ => return Err("列表没有配对的 ]".into()),
+                        _ => return Err(steve_i18n::t!("flow.expr.unclosed_list")),
                     }
                 }
                 Ok(Expr::List(xs))
             }
-            _ => Err("条件不完整".into()),
+            _ => Err(steve_i18n::t!("flow.expr.incomplete")),
         }
     }
 }
 
-/// Parses a condition; the error is Chinese and goes into the `400` as it is.
+/// Parses a condition; the error, in the request's language, goes into the `400` as it is.
 pub fn parse(src: &str) -> Result<Expr, String> {
     if src.trim().is_empty() {
-        return Err("条件是空的".into());
+        return Err(steve_i18n::t!("flow.expr.empty"));
     }
     if src.chars().count() > 2000 {
-        return Err("条件太长了".into());
+        return Err(steve_i18n::t!("flow.expr.too_long"));
     }
     let mut p = Parser {
         toks: lex(src)?,
@@ -492,7 +495,7 @@ pub fn parse(src: &str) -> Result<Expr, String> {
     };
     let e = p.or()?;
     if p.pos != p.toks.len() {
-        return Err("条件后面多了东西".into());
+        return Err(steve_i18n::t!("flow.expr.trailing"));
     }
     Ok(e)
 }
@@ -603,5 +606,23 @@ mod tests {
         assert!(parse("(a == 1").is_err());
         assert!(parse("a matches \"(\"").is_err());
         assert!(parse("a == 1 b").is_err());
+    }
+
+    #[tokio::test]
+    async fn errors_in_english() {
+        let en = steve_i18n::scope(steve_i18n::EN, async {
+            (
+                parse("").unwrap_err(),
+                check_template("{{a..b}}").unwrap_err(),
+            )
+        })
+        .await;
+        assert_eq!(en.0, "The condition is empty");
+        assert_eq!(en.1, "“{{a..b}}” in the template is malformed");
+        assert_eq!(parse("").unwrap_err(), "条件是空的");
+        assert_eq!(
+            check_template("{{a..b}}").unwrap_err(),
+            "模板里的「{{a..b}}」写得不对"
+        );
     }
 }

@@ -162,7 +162,7 @@ pub async fn resolve_time(
     };
     let when = when
         .map(|w| w.trim().to_string())
-        .unwrap_or_else(|| expr.describe());
+        .unwrap_or_else(|| expr.describe_zh());
     Ok((when, expr))
 }
 
@@ -241,7 +241,7 @@ pub async fn patched_spec(cx: &FlowCx, old: &Spec, b: &ScheduleBody) -> ApiResul
         spec.when = if b.when.is_some() {
             when
         } else {
-            expr.describe()
+            expr.describe_zh()
         };
         spec.cron = expr.as_str().into();
     } else if spec.tz != old.tz {

@@ -3,6 +3,8 @@
 //! The HTTP layer is written against [`backend::Backend`] (storage) and [`backend::Domain`] (steve-core);
 //! [`wire`] is where the integrator plugs in steve-store, steve-core, steve-auth and steve-mcp.
 
+steve_i18n::init!();
+
 pub mod api;
 pub mod app;
 pub mod backend;

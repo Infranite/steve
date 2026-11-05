@@ -74,7 +74,9 @@ impl PartyHooks for AccountHooks {
         let accounts = repo::of_party(tx, ws, party_id)?;
         for a in &accounts {
             if repo::connection_of(tx, &a.id)?.is_some() {
-                return Err(ApiError::conflict("先断开 Steve 的接入"));
+                return Err(ApiError::conflict(steve_i18n::t!(
+                    "modules.accounts.disconnect_first"
+                )));
             }
         }
         for a in &accounts {

@@ -50,7 +50,7 @@ fn timeout_of(cfg: &Value) -> Result<u64, String> {
         None | Some(Value::Null) => Ok(DEFAULT_TIMEOUT_S),
         Some(v) => match v.as_f64() {
             Some(t) if t >= 1.0 && t <= MAX_TIMEOUT_S as f64 => Ok(t.ceil() as u64),
-            _ => Err(format!("超时要在 1 到 {MAX_TIMEOUT_S} 秒之间")),
+            _ => Err(steve_i18n::t!("flow.node.cmd_timeout", max = MAX_TIMEOUT_S)),
         },
     }
 }
@@ -118,12 +118,12 @@ impl NodeKind for Cmd {
     }
 
     fn validate(&self, cfg: &Value) -> Result<(), String> {
-        let command = req_str(cfg, "command", "命令", COMMAND_MAX)?;
+        let command = req_str(cfg, "command", super::Required::Command, COMMAND_MAX)?;
         if command.contains("{{secrets.") || command.contains("{{ secrets.") {
-            return Err(NO_SECRETS.into());
+            return Err(steve_i18n::t!("flow.node.no_secrets"));
         }
         crate::expr::check_template(command)?;
-        req_str(cfg, "project_id", "项目", 64)?;
+        req_str(cfg, "project_id", super::Required::Project, 64)?;
         timeout_of(cfg)?;
         Ok(())
     }

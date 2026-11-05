@@ -23,8 +23,6 @@ pub const KIND: &str = "yolo";
 pub const OP_SET: &str = "yolo.set";
 pub const OP_SCOPE: &str = "yolo.scope";
 
-const UNRECOGNIZED: &str = "（没认出）";
-
 /// Registers the target and its operations; `forced` as the Hub computed it (`STEVE_YOLO=off`,
 /// `STEVE_NO_RESUME=1`).
 pub fn register(r: &mut Registry, forced: Option<Forced>) {
@@ -37,15 +35,24 @@ fn on_label(on: bool) -> &'static str {
     if on { "开" } else { "关" }
 }
 
-fn mode_label(object_type: &str, mode: &str) -> &'static str {
+/// [`on_label`] as the card shows it, in the request's language.
+fn on_shown(on: bool) -> String {
+    if on {
+        steve_i18n::t!("core.draft.value.on")
+    } else {
+        steve_i18n::t!("core.draft.value.off")
+    }
+}
+
+/// A scope mode as the card shows it, in the request's language.
+fn mode_shown(object_type: &str, mode: &str) -> String {
     match (object_type, mode) {
-        (_, "inherit") => "跟随",
-        (_, "full") => "完全放开",
-        (PROJECT, "on") => "总是",
-        (PROJECT, "off") => "从不",
-        (_, "on") => "放手做",
-        (_, "off") => "我来盯",
-        _ => "跟随",
+        (_, "full") => steve_i18n::t!("core.yolo.mode.full"),
+        (PROJECT, "on") => steve_i18n::t!("core.yolo.mode.project_on"),
+        (PROJECT, "off") => steve_i18n::t!("core.yolo.mode.project_off"),
+        (_, "on") => steve_i18n::t!("core.yolo.mode.on"),
+        (_, "off") => steve_i18n::t!("core.yolo.mode.off"),
+        _ => steve_i18n::t!("core.yolo.mode.inherit"),
     }
 }
 
@@ -98,7 +105,7 @@ impl DraftTarget for Target {
         Ok(Prepared {
             target_id: Some(ws.to_string()),
             revision: Some(repo::scope_get(c, ws, WORKSPACE, ws)?.map(|r| r.revision).unwrap_or(0)),
-            title: "YOLO 模式".into(),
+            title: steve_i18n::t!("core.yolo.draft.title"),
             href: "#/yolo".into(),
             subject: "YOLO mode (Steve decides for the user while they are away; there is no end time — it stays on until switched off)".into(),
             fields: vec![FieldSpec::new("on", "YOLO", "enum", json!(on_label(on))).values(&["开", "关"])],
@@ -137,24 +144,28 @@ impl DraftTarget for Target {
                         &op["on"]
                     };
                     let Some(on) = parse_on(v) else {
-                        plan.changes
-                            .push(Change::new("YOLO", "—", format!("（没认出：{v}）")));
+                        plan.changes.push(Change::new(
+                            "YOLO",
+                            "—",
+                            steve_i18n::t!("core.yolo.draft.unrecognized_value", value = v),
+                        ));
                         continue;
                     };
-                    let mut to = on_label(on).to_string();
-                    if on && (op.get("until").is_some_and(|u| !u.is_null())) {
-                        to.push_str("（不限时，开着直到你关）");
-                    }
-                    plan.changes.push(Change::new("YOLO", on_label(on_now), to));
+                    let to = if on && (op.get("until").is_some_and(|u| !u.is_null())) {
+                        steve_i18n::t!("core.yolo.draft.on_no_end")
+                    } else {
+                        on_shown(on)
+                    };
+                    plan.changes.push(Change::new("YOLO", on_shown(on_now), to));
                     plan.ops.push(json!({ "op": OP_SET, "on": on }));
                     if on && !on_now {
                         let open: i64 = c
                             .prepare_cached("SELECT count(*) FROM decisions WHERE workspace_id = ? AND status = 'open'")?
                             .query_row([ws], |r| r.get(0))?;
                         plan.changes.push(Change::new(
-                            "现有的待处理卡",
-                            format!("{open} 张"),
-                            "仍然等你；YOLO 只处理之后的新卡",
+                            steve_i18n::t!("core.yolo.draft.open_cards"),
+                            steve_i18n::t!("core.yolo.draft.cards", n = open),
+                            steve_i18n::t!("core.yolo.draft.open_cards_stay"),
                         ));
                     }
                     on_now = on;
@@ -164,8 +175,11 @@ impl DraftTarget for Target {
                         Some(PROJECT) | Some("项目") => PROJECT,
                         Some(ITEM) | Some("事项") => ITEM,
                         _ => {
-                            plan.changes
-                                .push(Change::new(UNRECOGNIZED, "—", op.to_string()));
+                            plan.changes.push(Change::new(
+                                steve_i18n::t!("core.yolo.draft.unrecognized"),
+                                "—",
+                                op.to_string(),
+                            ));
                             continue;
                         }
                     };
@@ -176,8 +190,11 @@ impl DraftTarget for Target {
                         .trim()
                         .to_string();
                     let Some(mode) = parse_mode(&op["mode"]) else {
-                        plan.changes
-                            .push(Change::new(UNRECOGNIZED, "—", op.to_string()));
+                        plan.changes.push(Change::new(
+                            steve_i18n::t!("core.yolo.draft.unrecognized"),
+                            "—",
+                            op.to_string(),
+                        ));
                         continue;
                     };
                     let found = if ty == PROJECT {
@@ -204,27 +221,36 @@ impl DraftTarget for Target {
                         })
                         .ok()
                     };
-                    let noun = if ty == PROJECT { "项目" } else { "事项" };
                     let Some((id, label)) = found else {
                         plan.changes.push(Change::new(
-                            format!("{noun} {said}"),
+                            if ty == PROJECT {
+                                steve_i18n::t!("core.yolo.draft.project", name = said)
+                            } else {
+                                steve_i18n::t!("core.yolo.draft.item", name = said)
+                            },
                             "—",
-                            format!("（没认出：{said}）"),
+                            steve_i18n::t!("core.yolo.draft.unrecognized_value", value = said),
                         ));
                         continue;
                     };
                     let before = scope_mode(c, ws, ty, &id)?.unwrap_or_else(|| "inherit".into());
                     plan.changes.push(Change::new(
-                        format!("{noun}「{label}」的 YOLO"),
-                        mode_label(ty, &before),
-                        mode_label(ty, mode),
+                        if ty == PROJECT {
+                            steve_i18n::t!("core.yolo.draft.project_yolo", name = label)
+                        } else {
+                            steve_i18n::t!("core.yolo.draft.item_yolo", name = label)
+                        },
+                        mode_shown(ty, &before),
+                        mode_shown(ty, mode),
                     ));
                     plan.ops
                         .push(json!({ "op": OP_SCOPE, "type": ty, "id": id, "mode": mode }));
                 }
-                _ => plan
-                    .changes
-                    .push(Change::new(UNRECOGNIZED, "—", op.to_string())),
+                _ => plan.changes.push(Change::new(
+                    steve_i18n::t!("core.yolo.draft.unrecognized"),
+                    "—",
+                    op.to_string(),
+                )),
             }
         }
         Ok(plan)
@@ -299,7 +325,7 @@ impl ChangeOp for SetOp {
                 return Err(ApiError::conflict(f.message()));
             }
             if repo::scope_get(c, cx.ws, WORKSPACE, cx.ws)?.is_some_and(|r| r.paused.is_some()) {
-                return Err(ApiError::conflict("YOLO 已暂停；先点恢复"));
+                return Err(ApiError::conflict(steve_i18n::t!("core.yolo.paused")));
             }
         }
         Ok(())

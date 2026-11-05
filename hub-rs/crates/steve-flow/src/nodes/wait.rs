@@ -130,11 +130,11 @@ impl NodeKind for Wait {
         match opt_str(cfg, "mode")?.unwrap_or("") {
             "delay" => {
                 parse_duration(opt_str(cfg, "delay")?.unwrap_or(""))
-                    .ok_or("等待时长写得不对，例如 30m、2h、3d（最多 90 天）")?;
+                    .ok_or_else(|| steve_i18n::t!("flow.node.wait_delay"))?;
             }
             "until" => {
                 if !check_until(&cfg["until"]) {
-                    return Err("等到的时间写得不对，例如 next_workday 09:00".into());
+                    return Err(steve_i18n::t!("flow.node.wait_until"));
                 }
             }
             "event" => {
@@ -146,16 +146,16 @@ impl NodeKind for Wait {
                     _ => false,
                 };
                 if source.is_empty() && !has_type {
-                    return Err("等事件要写清来源或事件类型".into());
+                    return Err(steve_i18n::t!("flow.node.wait_event"));
                 }
                 if let Some(w) = m["when"].as_str().filter(|w| !w.trim().is_empty()) {
-                    expr::parse(w).map_err(|e| format!("等事件的条件：{e}"))?;
+                    expr::parse(w).map_err(|e| steve_i18n::t!("flow.node.wait_when", error = e))?;
                 }
             }
-            _ => return Err("mode 只能是 delay、until 或 event".into()),
+            _ => return Err(steve_i18n::t!("flow.node.wait_mode")),
         }
         if let Some(t) = opt_str(cfg, "timeout")?.filter(|t| !t.trim().is_empty()) {
-            parse_duration(t).ok_or("超时写得不对，例如 3d")?;
+            parse_duration(t).ok_or_else(|| steve_i18n::t!("flow.node.wait_timeout"))?;
         }
         opt_str(cfg, "timeout_label")?;
         Ok(())

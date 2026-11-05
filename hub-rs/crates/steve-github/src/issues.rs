@@ -103,7 +103,8 @@ impl GitHub {
             let bot = match &p.bot {
                 Some(b) if bot_in(c, &ws, b)? => b.clone(),
                 Some(_) => return Err(ApiError::not_found("Bot")),
-                None => main_bot(c)?.ok_or_else(|| ApiError::rule("没有主 Bot"))?,
+                None => main_bot(c)?
+                    .ok_or_else(|| ApiError::rule(steve_i18n::t!("github.issue.no_main_bot")))?,
             };
             Ok(Prep::Make(Box::new((r, i, bot))))
         })?;
@@ -126,7 +127,7 @@ impl GitHub {
         };
         let flow = self
             .flow()
-            .ok_or_else(|| ApiError::rule("建事项失败：建事项还没有接上"))?;
+            .ok_or_else(|| ApiError::rule(steve_i18n::t!("github.issue.not_wired")))?;
         let item = flow
             .core
             .create_item(ItemRequest {
@@ -142,7 +143,7 @@ impl GitHub {
                 run_id: String::new(),
             })
             .await
-            .map_err(|e| ApiError::rule(format!("建事项失败：{e}")))?;
+            .map_err(|e| ApiError::rule(steve_i18n::t!("github.issue.create_failed", error = e)))?;
         let now = self.now();
         self.store().transaction(|tx| -> Result<(), VaultError> {
             links::add(

@@ -153,6 +153,63 @@ pub fn effort_label(e: &str) -> Option<&'static str> {
         .map(|(_, l)| *l)
 }
 
+/// [`effort_label`] as the UI shows it, in the request's language (the Chinese label stays what models read).
+pub fn effort_shown(e: &str) -> Option<String> {
+    Some(match e {
+        "none" => steve_i18n::t!("core.effort.none"),
+        "minimal" => steve_i18n::t!("core.effort.minimal"),
+        "low" => steve_i18n::t!("core.effort.low"),
+        "medium" => steve_i18n::t!("core.effort.medium"),
+        "high" => steve_i18n::t!("core.effort.high"),
+        "xhigh" => steve_i18n::t!("core.effort.xhigh"),
+        "max" => steve_i18n::t!("core.effort.max"),
+        _ => return None,
+    })
+}
+
+/// Efforts as the settings page lists them: `{key, label}` with the label in the request's language.
+fn efforts_shown(list: &[(&str, &str)]) -> Vec<Value> {
+    list.iter()
+        .map(|(k, l)| json!({"key": k, "label": effort_shown(k).unwrap_or_else(|| l.to_string())}))
+        .collect()
+}
+
+/// A purpose's label as the UI shows it, in the request's language ([`Purpose::label`] is what models read).
+pub fn purpose_label(key: &str) -> String {
+    match key {
+        "route" => steve_i18n::t!("core.purpose.route.label"),
+        "chat" => steve_i18n::t!("core.purpose.chat.label"),
+        "research" => steve_i18n::t!("core.purpose.research.label"),
+        "title" => steve_i18n::t!("core.purpose.title.label"),
+        "extract" => steve_i18n::t!("core.purpose.extract.label"),
+        "disclosure" => steve_i18n::t!("core.purpose.disclosure.label"),
+        "yolo" => steve_i18n::t!("core.purpose.yolo.label"),
+        "draft" => steve_i18n::t!("core.purpose.draft.label"),
+        "flow" => steve_i18n::t!("core.purpose.flow.label"),
+        "mail" => steve_i18n::t!("core.purpose.mail.label"),
+        "compose" => steve_i18n::t!("core.purpose.compose.label"),
+        _ => key.to_string(),
+    }
+}
+
+/// A purpose's description as the UI shows it, in the request's language.
+pub fn purpose_desc(key: &str) -> String {
+    match key {
+        "route" => steve_i18n::t!("core.purpose.route.desc"),
+        "chat" => steve_i18n::t!("core.purpose.chat.desc"),
+        "research" => steve_i18n::t!("core.purpose.research.desc"),
+        "title" => steve_i18n::t!("core.purpose.title.desc"),
+        "extract" => steve_i18n::t!("core.purpose.extract.desc"),
+        "disclosure" => steve_i18n::t!("core.purpose.disclosure.desc"),
+        "yolo" => steve_i18n::t!("core.purpose.yolo.desc"),
+        "draft" => steve_i18n::t!("core.purpose.draft.desc"),
+        "flow" => steve_i18n::t!("core.purpose.flow.desc"),
+        "mail" => steve_i18n::t!("core.purpose.mail.desc"),
+        "compose" => steve_i18n::t!("core.purpose.compose.desc"),
+        _ => String::new(),
+    }
+}
+
 /// Models the Claude Code harness offers when the user's model picker is not readable (also
 /// `GET /api/system/harnesses`).
 pub const CLAUDE_MODELS: [&str; 3] = ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"];
@@ -249,6 +306,16 @@ impl Choice {
         };
         format!("{} · {models}", harness_name(&self.harness))
     }
+
+    /// [`Choice::describe`] as the UI shows it, in the request's language.
+    pub fn describe_shown(&self) -> String {
+        let models = if self.models.is_empty() {
+            steve_i18n::t!("core.models.default_model")
+        } else {
+            self.models.join(" → ")
+        };
+        format!("{} · {models}", harness_name(&self.harness))
+    }
 }
 
 /// What the environment says (`STEVE_MODELS_*`, `STEVE_DEFAULT_MODEL_*`) and Codex's configured model.
@@ -333,12 +400,10 @@ pub fn valid_model(m: &str) -> bool {
 }
 
 /// Codex's notes per purpose: what differs when the purpose runs on Codex.
-pub fn codex_note(purpose: &str) -> Option<&'static str> {
+pub fn codex_note(purpose: &str) -> Option<String> {
     match purpose {
-        "chat" => Some("Codex 不逐字输出：回答写完后一次显示"),
-        "research" => Some(
-            "Codex 在只读沙箱里研究（不能写、不能联网），Hub 检查每条命令；没有 sandbox-exec 这一层，也不能接着上一轮的会话追问",
-        ),
+        "chat" => Some(steve_i18n::t!("core.models.codex_note.chat")),
+        "research" => Some(steve_i18n::t!("core.models.codex_note.research")),
         _ => None,
     }
 }
@@ -390,8 +455,9 @@ impl Models {
         } else {
             (
                 CLAUDE_CODE.to_string(),
-                Some(format!(
-                    "Steve 的 harness「{harness}」还不能做判断，先用 Claude Code"
+                Some(steve_i18n::t!(
+                    "core.models.note.harness_cannot_judge",
+                    harness = harness
                 )),
             )
         };
@@ -422,9 +488,9 @@ impl Models {
             .filter(|e| same && efforts(&runs_on).iter().any(|(k, _)| k == e));
         let model_note = match (&model, runs_on.as_str()) {
             (Some(_), _) if same => None,
-            (_, CODEX) if models.is_empty() => Some("Codex 自己的默认模型".to_string()),
-            (_, CODEX) => Some("来自 Codex 配置的默认".to_string()),
-            _ => Some("Bot 没选模型，判断用的默认".to_string()),
+            (_, CODEX) if models.is_empty() => Some(steve_i18n::t!("core.models.note.codex_own")),
+            (_, CODEX) => Some(steve_i18n::t!("core.models.note.codex_config")),
+            _ => Some(steve_i18n::t!("core.models.note.bot_default")),
         };
         Steve {
             bot_id,
@@ -649,7 +715,7 @@ impl Models {
                 let custom = self.custom(ws, p.key);
                 let effective = self.resolve(ws, p.key, &st);
                 json!({
-                    "key": p.key, "label": p.label, "desc": p.desc,
+                    "key": p.key, "label": purpose_label(p.key), "desc": purpose_desc(p.key),
                     "value": custom,
                     "follows": custom.is_none(),
                     "effective": effective,
@@ -681,7 +747,7 @@ impl Models {
             .map(|(h, name)| {
                 json!({
                     "id": h, "name": name,
-                    "efforts": efforts(h).iter().map(|(k, l)| json!({"key": k, "label": l})).collect::<Vec<_>>(),
+                    "efforts": efforts_shown(efforts(h)),
                     "default_models": self.defaults.harness_list(h),
                 })
             })
@@ -692,7 +758,7 @@ impl Models {
             "agents": agents,
             "harnesses": harnesses,
             "known": CLAUDE_MODELS,
-            "efforts": EFFORTS.iter().map(|(k, l)| json!({"key": k, "label": l})).collect::<Vec<_>>(),
+            "efforts": efforts_shown(&EFFORTS),
             "max": MAX_MODELS,
         })
     }
@@ -785,40 +851,57 @@ pub fn codex_config_model(codex_home: &std::path::Path) -> Option<String> {
 /// `{"purposes": {"route": {"harness": "codex", "models": [...], "effort": "high"} | null}, "agents": {"codex": "id" | null}}`.
 /// `null` (or an empty object) puts a purpose back on Steve. A missing harness means Claude Code.
 pub fn validate(patch: &Value) -> std::result::Result<Map<String, Value>, String> {
-    let o = patch.as_object().ok_or("要一个对象")?;
+    let o = patch
+        .as_object()
+        .ok_or_else(|| steve_i18n::t!("core.models.invalid.not_object"))?;
     let mut out = Map::new();
     for k in o.keys() {
         if k != "purposes" && k != "agents" {
-            return Err(format!("不认识的字段：{k}"));
+            return Err(steve_i18n::t!(
+                "core.models.invalid.unknown_field",
+                field = k
+            ));
         }
     }
     if let Some(ps) = o.get("purposes") {
-        let ps = ps.as_object().ok_or("purposes 要是对象")?;
+        let ps = ps
+            .as_object()
+            .ok_or_else(|| steve_i18n::t!("core.models.invalid.purposes_object"))?;
         for (k, v) in ps {
             let p = PURPOSES
                 .iter()
                 .find(|p| p.key == k)
-                .ok_or_else(|| format!("没有这个用途：{k}"))?;
+                .ok_or_else(|| steve_i18n::t!("core.models.invalid.no_purpose", purpose = k))?;
             out.insert(key(p.key), choice_value(p, v)?);
         }
     }
     if let Some(ags) = o.get("agents") {
-        let ags = ags.as_object().ok_or("agents 要是对象")?;
+        let ags = ags
+            .as_object()
+            .ok_or_else(|| steve_i18n::t!("core.models.invalid.agents_object"))?;
         for (h, v) in ags {
             if !HARNESSES.iter().any(|(x, ..)| x == h) {
-                return Err(format!("没有这个 harness：{h}"));
+                return Err(steve_i18n::t!(
+                    "core.models.invalid.no_harness",
+                    harness = h
+                ));
             }
             let m = match v {
                 Value::Null => Value::Null,
                 Value::String(s) if s.trim().is_empty() => Value::Null,
                 Value::String(s) if valid_model(s.trim()) => json!(s.trim()),
-                _ => return Err(format!("{h} 的默认模型不对")),
+                _ => {
+                    return Err(steve_i18n::t!(
+                        "core.models.invalid.agent_model",
+                        harness = h
+                    ));
+                }
             };
             out.insert(agent_key(h), m);
         }
     }
     if out.is_empty() {
-        return Err("没有要改的".into());
+        return Err(steve_i18n::t!("core.models.invalid.nothing"));
     }
     Ok(out)
 }
@@ -827,47 +910,85 @@ fn choice_value(p: &Purpose, v: &Value) -> std::result::Result<Value, String> {
     let o = match v {
         Value::Null => return Ok(Value::Null),
         Value::Object(o) => o,
-        _ => return Err(format!("{} 要是对象或 null", p.label)),
+        _ => {
+            return Err(steve_i18n::t!(
+                "core.models.invalid.choice",
+                purpose = purpose_label(p.key)
+            ));
+        }
     };
     let mut models: Vec<String> = vec![];
     for (k, x) in o {
         match k.as_str() {
             "models" => {
-                let a = x
-                    .as_array()
-                    .ok_or_else(|| format!("{} 的模型要是列表", p.label))?;
+                let a = x.as_array().ok_or_else(|| {
+                    steve_i18n::t!(
+                        "core.models.invalid.models_list",
+                        purpose = purpose_label(p.key)
+                    )
+                })?;
                 for m in a {
-                    let m = m
-                        .as_str()
-                        .map(str::trim)
-                        .ok_or_else(|| format!("{} 的模型要是文字", p.label))?;
+                    let m = m.as_str().map(str::trim).ok_or_else(|| {
+                        steve_i18n::t!(
+                            "core.models.invalid.model_text",
+                            purpose = purpose_label(p.key)
+                        )
+                    })?;
                     if !valid_model(m) {
-                        return Err(format!("{} 的模型名不对：{m}", p.label));
+                        return Err(steve_i18n::t!(
+                            "core.models.invalid.model_name",
+                            purpose = purpose_label(p.key),
+                            model = m
+                        ));
                     }
                     if models.iter().any(|x| x == m) {
-                        return Err(format!("{} 的模型重复了：{m}", p.label));
+                        return Err(steve_i18n::t!(
+                            "core.models.invalid.model_dup",
+                            purpose = purpose_label(p.key),
+                            model = m
+                        ));
                     }
                     models.push(m.to_string());
                 }
                 if models.len() > MAX_MODELS {
-                    return Err(format!("{} 最多 {MAX_MODELS} 个模型", p.label));
+                    return Err(steve_i18n::t!(
+                        "core.models.invalid.too_many",
+                        purpose = purpose_label(p.key),
+                        max = MAX_MODELS
+                    ));
                 }
             }
             "effort" | "harness" => {}
-            _ => return Err(format!("{} 不认识的字段：{k}", p.label)),
+            _ => {
+                return Err(steve_i18n::t!(
+                    "core.models.invalid.choice_field",
+                    purpose = purpose_label(p.key),
+                    field = k
+                ));
+            }
         }
     }
     let harness = match o.get("harness") {
         None | Some(Value::Null) => None,
         Some(Value::String(h)) if judge_harness(h) => Some(h.clone()),
-        Some(_) => return Err(format!("{} 的 harness 不对", p.label)),
+        Some(_) => {
+            return Err(steve_i18n::t!(
+                "core.models.invalid.choice_harness",
+                purpose = purpose_label(p.key)
+            ));
+        }
     };
     let h = harness.as_deref().unwrap_or(CLAUDE_CODE);
     let effort = match o.get("effort") {
         None | Some(Value::Null) => None,
         Some(Value::String(e)) if e.is_empty() => None,
         Some(Value::String(e)) if efforts(h).iter().any(|(k, _)| k == e) => Some(e.clone()),
-        Some(_) => return Err(format!("{} 的推理强度不对", p.label)),
+        Some(_) => {
+            return Err(steve_i18n::t!(
+                "core.models.invalid.choice_effort",
+                purpose = purpose_label(p.key)
+            ));
+        }
     };
     if harness.is_none() && models.is_empty() && effort.is_none() {
         return Ok(Value::Null);

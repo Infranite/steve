@@ -54,6 +54,42 @@ pub fn by_category(acts: &[ActionRow]) -> String {
         .join("、")
 }
 
+/// [`by_category`] as the digest page shows it, in the request's language (`by_category` is the `/汇报` line's).
+fn by_category_shown(acts: &[ActionRow]) -> String {
+    let words = by_category(acts);
+    if words.is_empty() {
+        return words;
+    }
+    words
+        .split('、')
+        .map(|part| match part.rsplit_once(' ') {
+            Some((c, n)) => steve_i18n::t!(
+                "core.yolo.digest.count",
+                category = category_shown(c),
+                n = n
+            ),
+            None => part.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(&steve_i18n::t!("core.yolo.digest.list_sep"))
+}
+
+/// One of [`category`]'s words in the request's language.
+fn category_shown(c: &str) -> String {
+    match c {
+        "验收" => steve_i18n::t!("core.yolo.category.acceptance"),
+        "发布" => steve_i18n::t!("core.yolo.category.release"),
+        "代答" => steve_i18n::t!("core.yolo.category.answer"),
+        "继续" => steve_i18n::t!("core.yolo.category.continue"),
+        "工具" => steve_i18n::t!("core.yolo.category.tool"),
+        "批准" => steve_i18n::t!("core.yolo.category.approve"),
+        "开始" => steve_i18n::t!("core.yolo.category.start"),
+        "代发" => steve_i18n::t!("core.yolo.category.send"),
+        "其他" => steve_i18n::t!("core.yolo.category.other"),
+        _ => c.to_string(),
+    }
+}
+
 impl Engine {
     /// `GET /yolo/actions`: windows (newest first) → items → actions (oldest first).
     pub fn digest(&self, ws: &str, q: &Query) -> ApiResult<Value> {
@@ -125,7 +161,7 @@ impl Engine {
                 .count();
             out.push(json!({
                 "id": w.id, "started": w.started, "ended": w.ended, "ended_why": w.ended_why,
-                "counts": counts, "summary": by_category(&acts), "releases": releases,
+                "counts": counts, "summary": by_category_shown(&acts), "releases": releases,
                 "cost": has_cost.then_some(cost),
                 "waiting": if w.ended.is_none() { Some(waiting) } else { None },
                 "items": items,
@@ -144,6 +180,11 @@ impl Engine {
         v["question"] = json!(d.as_ref().map(|d| d.question.clone()));
         v["decision_status"] = json!(d.as_ref().map(|d| d.status.clone()));
         v["can_undo"] = json!(self.undo_kind(a));
+        v["reason"] = json!(super::judge::reason_shown(&a.reason));
+        // what the web acts on, as flags: `reason` is display text in the request's language
+        v["user_took_over"] =
+            json!(a.outcome == "cancelled" && a.reason == super::undo::USER_CANCEL);
+        v["limit_what"] = json!(a.reason.strip_prefix(super::limits::REASON_PREFIX));
         Ok(v)
     }
 

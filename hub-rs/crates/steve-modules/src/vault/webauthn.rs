@@ -36,7 +36,7 @@ use webauthn_rs::prelude::{
     RegisterPublicKeyCredential, Url, Uuid, Webauthn, WebauthnBuilder,
 };
 
-use super::items::{NEED_PASSKEY, RevealGate, RevealTarget, Verified};
+use super::items::{RevealGate, RevealTarget, Verified};
 use super::{VaultError, VaultResult};
 use crate::clock::{Clock, SystemClock};
 use crate::{ApiError, Body, Caller};
@@ -56,9 +56,6 @@ pub const NOT_VERIFIED: &str = "本机验证没有通过";
 pub const OTHER_ORIGIN: &str = "本机验证要在同一个访问地址上完成，请重新验证";
 /// No configured origin can be a WebAuthn relying party.
 pub const NO_RP: &str = "这个访问地址不能使用通行密钥（需要 https 域名或 localhost）";
-const REG_GONE: &str = "登记已过期，请重新开始";
-const REG_FAILED: &str = "登记没有成功：这个通行密钥无效";
-const REG_DUP: &str = "这个通行密钥已经登记过了";
 
 /// The request's host: first `x-forwarded-host` value, else `Host`; trimmed, lowercase. Matches
 /// steve-auth's `origin_of`.
@@ -227,7 +224,7 @@ impl Passkeys {
     /// The RP for a request host: exact host match, else the first configured one.
     fn rp_for(&self, host: &str) -> VaultResult<usize> {
         if self.0.rps.is_empty() {
-            return Err(ApiError::rule(NO_RP).into());
+            return Err(ApiError::rule(steve_i18n::t!("modules.webauthn.no_rp")).into());
         }
         Ok(self.0.rps.iter().position(|r| r.host == host).unwrap_or(0))
     }
@@ -245,7 +242,7 @@ impl Passkeys {
         f: impl FnOnce(&Passkeys) -> VaultResult<R> + Send + 'static,
     ) -> VaultResult<R> {
         let p = self.clone();
-        tokio::task::spawn_blocking(move || f(&p))
+        tokio::task::spawn_blocking(steve_i18n::carry(move || f(&p)))
             .await
             .map_err(|e| VaultError::internal(format!("task failed: {e}")))?
     }
@@ -351,10 +348,10 @@ impl Passkeys {
         self.check_fresh_login(user, token)?;
         let pending = lock(&self.0.regs).remove(&(ws.to_owned(), user.to_owned()));
         let Some(p) = pending.filter(|p| self.live(p.at)) else {
-            return Err(ApiError::rule(REG_GONE).into());
+            return Err(ApiError::rule(steve_i18n::t!("modules.webauthn.reg_gone")).into());
         };
         if self.rp_for(host)? != p.rp {
-            return Err(ApiError::rule(OTHER_ORIGIN).into());
+            return Err(ApiError::rule(steve_i18n::t!("modules.webauthn.other_origin")).into());
         }
         let reg: RegisterPublicKeyCredential = serde_json::from_value(credential.clone())
             .map_err(|_| ApiError::invalid("credential"))?;
@@ -364,7 +361,9 @@ impl Passkeys {
             .finish_passkey_registration(&reg, &p.state)
             .map_err(|e| {
                 tracing::info!(user, rp = %rp.rp_id, "passkey registration refused: {e}");
-                VaultError::from(ApiError::rule(REG_FAILED))
+                VaultError::from(ApiError::rule(steve_i18n::t!(
+                    "modules.webauthn.reg_failed"
+                )))
             })?;
         let cred = serde_json::to_string(&passkey)
             .map_err(|e| VaultError::internal(format!("encode passkey: {e}")))?;
@@ -384,7 +383,7 @@ impl Passkeys {
                 .filter_map(|c| serde_json::from_str::<Passkey>(&c).ok())
                 .any(|k| k.cred_id() == passkey.cred_id());
             if taken {
-                return Err(ApiError::conflict(REG_DUP).into());
+                return Err(ApiError::conflict(steve_i18n::t!("modules.webauthn.reg_dup")).into());
             }
             tx.execute(
                 "INSERT INTO passkeys (id, workspace_id, user_id, name, rp_id, credential, created) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -447,7 +446,7 @@ impl Passkeys {
             .store
             .reader(|c| Self::rows(c, &t.ws, &t.user, &rp.rp_id))?;
         if rows.is_empty() {
-            return Err(ApiError::rule(NEED_PASSKEY).into());
+            return Err(ApiError::rule(steve_i18n::t!("modules.vault.need_passkey")).into());
         }
         let keys: Vec<Passkey> = rows.into_iter().map(|r| r.passkey).collect();
         let (rcr, state) = rp
@@ -465,10 +464,10 @@ impl Passkeys {
         // Taken out first: a challenge is answered once, whether or not the answer is good.
         let pending = lock(&self.0.reveals).remove(&RevealKey::from(t));
         let Some(p) = pending.filter(|p| self.live(p.at)) else {
-            return Err(ApiError::rule(CHALLENGE_GONE).into());
+            return Err(ApiError::rule(steve_i18n::t!("modules.webauthn.challenge_gone")).into());
         };
         if self.rp_for(&t.host)? != p.rp {
-            return Err(ApiError::rule(OTHER_ORIGIN).into());
+            return Err(ApiError::rule(steve_i18n::t!("modules.webauthn.other_origin")).into());
         }
         let cred: PublicKeyCredential = serde_json::from_value(assertion.clone())
             .map_err(|_| ApiError::invalid("assertion"))?;
@@ -478,17 +477,19 @@ impl Passkeys {
             .finish_passkey_authentication(&cred, &p.state)
             .map_err(|e| {
                 tracing::info!(user = %t.user, rp = %rp.rp_id, "passkey assertion refused: {e}");
-                VaultError::from(ApiError::rule(NOT_VERIFIED))
+                VaultError::from(ApiError::rule(steve_i18n::t!(
+                    "modules.webauthn.not_verified"
+                )))
             })?;
         if !res.user_verified() {
-            return Err(ApiError::rule(NOT_VERIFIED).into());
+            return Err(ApiError::rule(steve_i18n::t!("modules.webauthn.not_verified")).into());
         }
         let now = self.now();
         self.0.store.transaction(|tx| {
             let mut rows = Self::rows(tx, &t.ws, &t.user, &rp.rp_id)?;
             let Some(row) = rows.iter_mut().find(|r| r.passkey.cred_id() == res.cred_id()) else {
                 // deleted between start and finish
-                return Err(ApiError::rule(NOT_VERIFIED).into());
+                return Err(ApiError::rule(steve_i18n::t!("modules.webauthn.not_verified")).into());
             };
             let cred = match row.passkey.update_credential(&res) {
                 Some(true) => Some(

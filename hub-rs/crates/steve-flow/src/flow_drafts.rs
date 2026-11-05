@@ -35,7 +35,6 @@ pub const SOURCES: [&str; 8] = [
     "mail", "cal", "im", "github", "webhook", "time", "item", "manual",
 ];
 
-const NO_MODEL: &str = "Steve 现在起草不了，稍后再试";
 const NOTE_DEFAULT: &str = "按你说的改了";
 
 type Cx = Extension<Arc<FlowCx>>;
@@ -129,9 +128,10 @@ async fn ask(cx: &FlowCx, prompt: &str) -> ApiResult<Value> {
         .await
         .map_err(|e| {
             tracing::warn!("flow draft: gateway failed: {e}");
-            ApiError::rule(NO_MODEL)
+            ApiError::rule(steve_i18n::t!("flow.flow_draft.no_model"))
         })?;
-    first_json(&out.text).ok_or_else(|| ApiError::rule("Steve 起草的流程看不懂，换个说法再试一次"))
+    first_json(&out.text)
+        .ok_or_else(|| ApiError::rule(steve_i18n::t!("flow.flow_draft.unreadable")))
 }
 
 /// Puts the requested source on the drafted trigger when the model left it out or changed it.
@@ -159,7 +159,11 @@ async fn settle_graph(
     for attempt in 0..2 {
         let mut g = answer["graph"].clone();
         fix(&mut g);
-        let checked = cx.store().reader(|c| check_graph(c, cx, ws, &g));
+        // the model reads the reason, so it is checked in zh-CN
+        let checked = steve_i18n::scope(steve_i18n::ZH_CN, async {
+            cx.store().reader(|c| check_graph(c, cx, ws, &g))
+        })
+        .await;
         match checked {
             Ok(graph) => return Ok((graph, answer)),
             Err(ApiError::Rule(e)) if attempt == 0 => {
@@ -169,8 +173,16 @@ async fn settle_graph(
                 );
                 answer = ask(cx, &retry).await?;
             }
-            Err(ApiError::Rule(e)) => {
-                return Err(ApiError::rule(format!("Steve 起草的流程没有通过检查：{e}")));
+            Err(ApiError::Rule(zh)) => {
+                // the same check once more for the person, in the request's language
+                let e = match cx.store().reader(|c| check_graph(c, cx, ws, &g)) {
+                    Err(ApiError::Rule(e)) => e,
+                    _ => zh,
+                };
+                return Err(ApiError::rule(steve_i18n::t!(
+                    "flow.flow_draft.failed_check",
+                    reason = e
+                )));
             }
             Err(e) => return Err(e),
         }
@@ -264,7 +276,9 @@ async fn edit_draft(
         Ok((f, bots_text(c, &who.ws)?))
     })?;
     if f.kind == "schedule" {
-        return Err(ApiError::rule("定时任务请在定时任务页修改"));
+        return Err(ApiError::rule(steve_i18n::t!(
+            "flow.draft.schedule_elsewhere"
+        )));
     }
     let prompt = format!(
         "{EDIT_START}「{}」。现在的图：\n{}\n\n用户要的改动：\n<<<\n{text}\n>>>\n\n{}\n{}\n\n工作空间里的 Bot（bot_id 或 bot 只能用这些 id）：\n{bots}\n\n\

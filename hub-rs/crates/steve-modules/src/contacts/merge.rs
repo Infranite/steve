@@ -165,13 +165,17 @@ pub fn merge_tx(
     let from = own_contact(tx, viewer, from_id)?;
     let into = own_contact(tx, viewer, into_id)?;
     if from.id == into.id {
-        return Err(ApiError::rule("不能合并到自己"));
+        return Err(ApiError::rule(steve_i18n::t!("modules.merge.into_self")));
     }
     if from.is_me() {
-        return Err(ApiError::rule("不能把你自己合并到别人"));
+        return Err(ApiError::rule(steve_i18n::t!(
+            "modules.merge.self_into_other"
+        )));
     }
     if from.status != "active" || into.status != "active" {
-        return Err(ApiError::conflict("这个联系人已经合并过了"));
+        return Err(ApiError::conflict(steve_i18n::t!(
+            "modules.merge.already_merged"
+        )));
     }
     let (fr, ir) = (pref(&from.id), pref(&into.id));
     let mut moved = Moved::default();
@@ -382,13 +386,19 @@ pub fn split_tx(
     let into = own_contact(tx, viewer, &m.into_id).map_err(|_| ApiError::not_found("合并记录"))?;
     let from = repo::get(tx, &m.from_id)?.ok_or_else(|| ApiError::not_found("合并记录"))?;
     if m.split.is_some() {
-        return Err(ApiError::conflict("这次合并已经拆开了"));
+        return Err(ApiError::conflict(steve_i18n::t!(
+            "modules.merge.already_split"
+        )));
     }
     if into.status != "active" || later_merge(tx, &m)? {
-        return Err(ApiError::conflict("先拆开之后的合并"));
+        return Err(ApiError::conflict(steve_i18n::t!(
+            "modules.merge.split_later_first"
+        )));
     }
     if from.status != "merged" || from.merged_into.as_deref() != Some(into.id.as_str()) {
-        return Err(ApiError::conflict("这个联系人已经不在合并状态"));
+        return Err(ApiError::conflict(steve_i18n::t!(
+            "modules.merge.not_merged"
+        )));
     }
     let mv = &m.moved;
 
@@ -561,14 +571,15 @@ pub struct PendingAccount {
 /// The first account of a party: `(system id, system name, handle_display)`.
 fn first_account(c: &rusqlite::Connection, party: &str) -> ApiResult<Option<PendingAccount>> {
     Ok(c.prepare_cached(
-        "SELECT a.system_id, coalesce(s.name, a.system_id), a.handle_display FROM accounts a
+        "SELECT a.system_id, coalesce(s.name, a.system_id), a.handle_display, coalesce(s.workspace_id = '*', 0) FROM accounts a
                LEFT JOIN systems s ON s.id = a.system_id AND s.workspace_id IN ('*', a.workspace_id)
               WHERE a.party_id = ? AND a.status = 'active' ORDER BY a.created, a.id LIMIT 1",
     )?
     .query_row([party], |r| {
+        let (system, name): (String, String) = (r.get(0)?, r.get(1)?);
         Ok(PendingAccount {
-            system: r.get(0)?,
-            system_name: r.get(1)?,
+            system_name: crate::shown::system_name(&system, r.get(3)?, &name),
+            system,
             handle: r.get(2)?,
         })
     })
@@ -686,13 +697,12 @@ pub fn pending(m: &Modules, ports: &Ports, who: &Caller) -> ApiResult<Pending> {
             let nameless = crate::accounts::looks_like_handle(&p.name)
                 || account.as_ref().is_some_and(|a| a.handle == p.name);
             let label = if nameless {
-                format!(
-                    "未知{}用户",
-                    account
-                        .as_ref()
-                        .map(|a| a.system_name.as_str())
-                        .unwrap_or("")
-                )
+                match account.as_ref() {
+                    Some(a) => {
+                        steve_i18n::t!("modules.merge.unknown_user", system = a.system_name)
+                    }
+                    None => steve_i18n::t!("modules.merge.unknown_user_plain"),
+                }
             } else {
                 p.name.clone()
             };
@@ -800,7 +810,9 @@ impl DecisionHandler for PartyMerge {
             .filter(|p| p.0 == cx.ws)
             .ok_or_else(|| ApiError::not_found("合并提议"))?;
         if status != "open" {
-            return Err(ApiError::conflict("这个提议已经处理过了"));
+            return Err(ApiError::conflict(steve_i18n::t!(
+                "modules.merge.proposal_handled"
+            )));
         }
         let mut result = decisions::choice_result(cx);
         match cx.choice {

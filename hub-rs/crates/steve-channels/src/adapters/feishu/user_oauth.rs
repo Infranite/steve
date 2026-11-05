@@ -193,14 +193,14 @@ pub async fn claim_self_for(
     user: String,
     ids: FeishuIds,
 ) -> ApiResult<Vec<String>> {
-    tokio::task::spawn_blocking(move || {
+    tokio::task::spawn_blocking(steve_i18n::carry(move || {
         let who = Caller { ws, me: user };
         let (viewer, me) = asvc::start(&m, &who)?;
         m.store
             .transaction(|tx| claim_self(tx, &hooks, &viewer, &who.me, &me, &ids))
-    })
+    }))
     .await
-    .map_err(|_| ApiError::rule("任务失败"))?
+    .map_err(|_| ApiError::rule(steve_i18n::t!("channels.error.task_failed")))?
 }
 
 // ---------------------------------------------------------------------------------------------

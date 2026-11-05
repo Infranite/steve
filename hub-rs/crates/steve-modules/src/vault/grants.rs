@@ -73,7 +73,7 @@ pub(crate) fn add_grant(
     decision_id: Option<&str>,
 ) -> VaultResult<String> {
     if !grantable(item) {
-        return Err(ApiError::rule(GRANT_HIGH).into());
+        return Err(ApiError::rule(steve_i18n::t!("modules.vault.grant_high")).into());
     }
     if !HOURS.contains(&hours) {
         return Err(ApiError::invalid("hours").into());
@@ -136,7 +136,7 @@ impl Vault {
         let id = self.store().transaction(|tx| {
             let (item, _) = super::items::own_item(tx, ws, user, item_id)?;
             if !grantable(&item) {
-                return Err(ApiError::rule(GRANT_HIGH).into());
+                return Err(ApiError::rule(steve_i18n::t!("modules.vault.grant_high")).into());
             }
             if !urepo::bot_in(tx, ws, &g.bot_id)? {
                 return Err(ApiError::not_found("Bot").into());

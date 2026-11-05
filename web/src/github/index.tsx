@@ -59,11 +59,11 @@ export const GhIcon = () => <span className={ICO}><GhMark className="size-[18px]
 const projectName = (id: string) => st.projects.find((p) => p.id === id)?.name ?? id
 
 /* one-shot query of #/github?error=…|app=created|link=<project>: read, then the hash is cleaned (which remounts the page) */
-let flash: { error?: string; app?: string; link?: string } | null = null
+let flash: { error?: string; errorCode?: string; app?: string; link?: string } | null = null
 function takeQuery() {
   if (!location.hash.includes("?")) return // StrictMode runs the effect twice; the first run already took it
   const p = new URLSearchParams(location.hash.split("?")[1] ?? "")
-  flash = { error: p.get("error") ?? undefined, app: p.get("app") ?? undefined, link: p.get("link") ?? undefined }
+  flash = { error: p.get("error") ?? undefined, errorCode: p.get("error_code") ?? undefined, app: p.get("app") ?? undefined, link: p.get("link") ?? undefined }
   go("#/github")
 }
 
@@ -90,8 +90,9 @@ function IndexView() {
     <Page title="GitHub" sub={t("github:index.sub")} max={720}
       actions={connected ? <Button size="sm" onClick={() => setAdding({})} data-gh-add><PlusIcon />{t("github:index.addRepo")}</Button> : undefined}>
       <div className="flex flex-col gap-8">
-        {/* note.error is the Hub's message; "保险箱" in it is matched as text the Hub sends, not shown from here */}
-        {note?.error && <div role="alert" className="rounded-xl border border-destructive/40 px-4 py-3 type-callout" data-gh-error><div className="type-headline text-destructive">{t("github:index.notDone")}</div><div className="mt-0.5 text-muted-foreground">{note.error}</div>{note.error.includes("保险箱") && <a href="#/vault" className="mt-1 inline-block text-blue hover:underline">{t("github:index.enableVault")}</a>}</div>}
+        {/* note.error is the Hub's message in the browser's language (a redirect from GitHub carries no UI language);
+            a known note.errorCode is rendered from the web's own catalog instead */}
+        {note?.error && <div role="alert" className="rounded-xl border border-destructive/40 px-4 py-3 type-callout" data-gh-error><div className="type-headline text-destructive">{t("github:index.notDone")}</div><div className="mt-0.5 text-muted-foreground">{note.errorCode === "vault_needed" ? t("github:index.vaultNeeded") : note.error}</div>{note.errorCode === "vault_needed" && <a href="#/vault" className="mt-1 inline-block text-blue hover:underline">{t("github:index.enableVault")}</a>}</div>}
         {note?.app === "created" && !appConn && <div role="status" className="rounded-xl border px-4 py-3 type-callout" data-gh-created><div className="type-headline">{t("github:index.appCreated")}</div><div className="mt-0.5 text-muted-foreground">{t("github:index.appCreatedSub")}</div></div>}
         {ov.s === "loading" ? <Loading /> : ov.s === "error" ? <Failed msg={ov.msg} retry={load} /> : v && <>
           {!connected && !v.apps.length && <ConnectCard onPat={() => setPat(true)} />}

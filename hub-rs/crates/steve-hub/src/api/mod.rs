@@ -124,7 +124,8 @@ impl AppState {
 pub(crate) async fn blocking<R: Send + 'static>(
     f: impl FnOnce() -> Result<R, ApiError> + Send + 'static,
 ) -> Result<R, ApiError> {
-    tokio::task::spawn_blocking(f)
+    // the request's language goes along: errors and labels built off the runtime are in it too
+    tokio::task::spawn_blocking(steve_i18n::carry(f))
         .await
         .map_err(|e| ApiError::internal(format!("task failed: {e}")))?
 }
@@ -185,15 +186,30 @@ enum Who {
     User(Ctx),
     /// Signed in, but the workspace it is for can't be told or isn't theirs: refused with this status
     /// and message, never quietly run in another workspace.
-    Refused(u16, &'static str),
+    Refused(u16, Refusal),
 }
 
-/// The page named a workspace the user is not (or no longer) a member of.
-pub const WS_GONE: &str = "这个页面所在的空间已经不可用了，请刷新页面";
-/// A write from a browser page that does not say its workspace (a page loaded before the Hub required it).
-pub const WS_RELOAD: &str = "页面需要刷新后才能继续操作";
-/// The user belongs to no workspace.
-pub const WS_NONE: &str = "你还没有加入任何空间";
+/// Why a signed-in request is refused its workspace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refusal {
+    /// The page named a workspace the user is not (or no longer) a member of.
+    Gone,
+    /// A write from a browser page that does not say its workspace (a page loaded before the Hub required it).
+    Reload,
+    /// The user belongs to no workspace.
+    NoWorkspace,
+}
+
+impl Refusal {
+    /// The `{"error"}` text, in the request's language.
+    pub fn message(self) -> String {
+        match self {
+            Refusal::Gone => steve_i18n::t!("hub.workspace.gone"),
+            Refusal::Reload => steve_i18n::t!("hub.workspace.reload"),
+            Refusal::NoWorkspace => steve_i18n::t!("hub.workspace.none"),
+        }
+    }
+}
 
 /// The value of query parameter `name` (percent-decoded).
 fn query_param(query: Option<&str>, name: &str) -> Option<String> {
@@ -240,13 +256,13 @@ async fn lookup_user(
         };
         let ws = match named {
             Some(n) if is_mine(&n) => n,
-            Some(_) => return Ok(Who::Refused(409, WS_GONE)),
-            None if write && browser => return Ok(Who::Refused(409, WS_RELOAD)),
+            Some(_) => return Ok(Who::Refused(409, Refusal::Gone)),
+            None if write && browser => return Ok(Who::Refused(409, Refusal::Reload)),
             None => match remembered.filter(|c| is_mine(c)) {
                 Some(c) => c,
                 None => match mine.first() {
                     Some(w) => str_of(w, "id"),
-                    None => return Ok(Who::Refused(403, WS_NONE)),
+                    None => return Ok(Who::Refused(403, Refusal::NoWorkspace)),
                 },
             },
         };
@@ -297,7 +313,7 @@ async fn require_user(State(st): State<AppState>, mut req: Request, next: Next) 
             insert_caller(&mut req, ctx);
             next.run(req).await
         }
-        Ok(Who::Refused(status, error)) => json_response(status, &json!({ "error": error })),
+        Ok(Who::Refused(status, why)) => json_response(status, &json!({ "error": why.message() })),
         Ok(Who::Anonymous) if session_optional(&req) => next.run(req).await,
         Ok(Who::Anonymous) => {
             let login = if st.cfg.oidc.issuer.is_some() {
@@ -526,11 +542,42 @@ pub(crate) fn str_of(o: &Obj, k: &str) -> String {
         .to_string()
 }
 
+/// What `own()` looked for, for its `404 没有这个<noun>` in the request's language.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Noun {
+    Item,
+    Session,
+    Decision,
+    Queued,
+    Tag,
+    Memory,
+    File,
+    Project,
+    Bot,
+}
+
+impl Noun {
+    /// "没有这个事项" / "No such item".
+    pub(crate) fn missing(self) -> String {
+        match self {
+            Noun::Item => steve_i18n::t!("hub.not_found.item"),
+            Noun::Session => steve_i18n::t!("hub.not_found.session"),
+            Noun::Decision => steve_i18n::t!("hub.not_found.decision"),
+            Noun::Queued => steve_i18n::t!("hub.not_found.queued"),
+            Noun::Tag => steve_i18n::t!("hub.not_found.tag"),
+            Noun::Memory => steve_i18n::t!("hub.not_found.memory"),
+            Noun::File => steve_i18n::t!("hub.not_found.file"),
+            Noun::Project => steve_i18n::t!("hub.not_found.project"),
+            Noun::Bot => steve_i18n::t!("hub.not_found.bot"),
+        }
+    }
+}
+
 /// `own(x, what)`: the object must exist and belong to the current workspace, else `404 没有这个<what>`.
-pub(crate) fn own(x: Option<Obj>, ws: &str, what: &str) -> BResult<Obj> {
+pub(crate) fn own(x: Option<Obj>, ws: &str, what: Noun) -> BResult<Obj> {
     match x {
         Some(o) if o.get("workspace_id").and_then(Value::as_str) == Some(ws) => Ok(o),
-        _ => Err(BackendError::not_found(format!("没有这个{what}"))),
+        _ => Err(BackendError::not_found(what.missing())),
     }
 }
 
@@ -539,7 +586,7 @@ pub(crate) fn own_bot(r: &dyn Repo, id: &str, ws: &str) -> BResult<()> {
     if r.bot_in_workspace(id, ws)? {
         Ok(())
     } else {
-        Err(BackendError::not_found("没有这个 Bot"))
+        Err(BackendError::not_found(Noun::Bot.missing()))
     }
 }
 
@@ -753,13 +800,13 @@ mod tests {
     fn own_checks_workspace() {
         let o: Obj =
             serde_json::from_value(json!({"id": "ST-1", "workspace_id": "default"})).expect("obj");
-        assert!(own(Some(o.clone()), "default", "事项").is_ok());
+        assert!(own(Some(o.clone()), "default", Noun::Item).is_ok());
         assert_eq!(
-            own(Some(o), "ws_b", "事项").unwrap_err(),
+            own(Some(o), "ws_b", Noun::Item).unwrap_err(),
             BackendError::not_found("没有这个事项")
         );
         assert_eq!(
-            own(None, "default", "会话").unwrap_err().message,
+            own(None, "default", Noun::Session).unwrap_err().message,
             "没有这个会话"
         );
     }

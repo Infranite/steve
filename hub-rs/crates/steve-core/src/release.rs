@@ -76,7 +76,11 @@ impl Core {
     /// (`report_release` reads `releases/rollback.json`).
     pub fn rollback_release(&self, item: &str, target: &str, action: &str) -> Result<String> {
         if let Some(why) = self.rollback_refusal(target) {
-            return Err(crate::error::msg(format!("不能回滚到 {target}：{why}")));
+            return Err(crate::error::msg(steve_i18n::t!(
+                "core.release.rollback_refused",
+                target = target,
+                why = why
+            )));
         }
         self.tx().start_rollback(item, target, action)
     }
@@ -88,7 +92,7 @@ impl Core {
     /// or started, so a refused one is neither shown as possible nor counted as undone.
     pub fn rollback_refusal(&self, target: &str) -> Option<String> {
         if target.is_empty() || target.contains('/') || target.starts_with('.') {
-            return Some("不是一个已安装的版本".into());
+            return Some(steve_i18n::t!("core.release.not_installed"));
         }
         let manifest = self
             .config()
@@ -102,17 +106,19 @@ impl Core {
             .and_then(|m| m.pointer("/schema/target").and_then(Value::as_i64));
         let db = match self.store().store().with_conn(steve_store::db::compat) {
             Ok(c) => c,
-            Err(e) => return Some(format!("读不到数据库的 schema（{e}）")),
+            Err(e) => return Some(steve_i18n::t!("core.release.schema_unreadable", error = e)),
         };
         match knows {
             _ if db.min_reader == 0 => None,
-            None => Some(format!(
-                "它说不清自己认识哪个 schema（release.json 里没有），不能打开 schema v{} 的数据库",
-                db.schema
+            None => Some(steve_i18n::t!(
+                "core.release.schema_unknown",
+                schema = db.schema
             )),
-            Some(k) if k < db.min_reader => Some(format!(
-                "它只认识到 schema v{k}，数据库（v{}）需要至少 v{}",
-                db.schema, db.min_reader
+            Some(k) if k < db.min_reader => Some(steve_i18n::t!(
+                "core.release.schema_too_old",
+                knows = k,
+                schema = db.schema,
+                min = db.min_reader
             )),
             Some(_) => None,
         }
@@ -345,9 +351,9 @@ impl Tx<'_> {
 
     pub(crate) fn start_release(&mut self, branch: &str, item_id: &str) -> Result<()> {
         if self.db().store().maintenance() {
-            return Err(crate::error::msg(
-                "正在准备二进制升级，暂不启动源码发布或回滚",
-            ));
+            return Err(crate::error::msg(steve_i18n::t!(
+                "core.release.maintenance"
+            )));
         }
         let Some(item) = self.db().item(item_id)? else {
             return Ok(());
@@ -470,9 +476,9 @@ impl Tx<'_> {
         action: &str,
     ) -> Result<String> {
         if self.db().store().maintenance() {
-            return Err(crate::error::msg(
-                "正在准备二进制升级，暂不启动源码发布或回滚",
-            ));
+            return Err(crate::error::msg(steve_i18n::t!(
+                "core.release.maintenance"
+            )));
         }
         let item = self.item(item_id)?;
         let p = self.db().project(item.project_id.as_deref())?;
@@ -481,12 +487,14 @@ impl Tx<'_> {
             .and_then(|p| p.release.as_ref())
             .map(|r| r.cmd.clone());
         let Some((p, script)) = p.zip(script).filter(|(_, s)| Path::new(s).exists()) else {
-            return Err(crate::error::msg("这个项目的发布脚本不存在，没法回滚"));
+            return Err(crate::error::msg(steve_i18n::t!(
+                "core.release.no_script_rollback"
+            )));
         };
         if let Some(r) = &self.st.releasing {
-            return Err(crate::error::msg(format!(
-                "另一个发布（{}）正在进行，等它结束再回滚",
-                r.item
+            return Err(crate::error::msg(steve_i18n::t!(
+                "core.release.busy_rollback",
+                item = r.item
             )));
         }
         let logs = self.cfg().home.join("logs");
@@ -516,9 +524,12 @@ impl Tx<'_> {
         std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
         self.st.release_generation += 1;
         let generation = self.st.release_generation;
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| crate::error::msg(format!("回滚脚本没有启动（{e}）")))?;
+        let mut child = cmd.spawn().map_err(|e| {
+            crate::error::msg(steve_i18n::t!(
+                "core.release.rollback_not_started",
+                error = e
+            ))
+        })?;
         self.st.releasing = Some(Releasing {
             token: tok,
             item: item_id.into(),

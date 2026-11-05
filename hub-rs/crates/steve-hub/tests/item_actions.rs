@@ -582,7 +582,7 @@ async fn workspace_is_named_never_guessed(e: &Env) {
     let (s, v) = send("GET", vec![("x-steve-ws", "ws_ffffffffffffffff".into())]).await;
     assert_eq!(
         (s, v["error"].as_str()),
-        (409, Some(steve_hub::api::WS_GONE)),
+        (409, Some("这个页面所在的空间已经不可用了，请刷新页面")),
         "{v}"
     );
     // a browser page that doesn't say: may read, may not write
@@ -591,7 +591,7 @@ async fn workspace_is_named_never_guessed(e: &Env) {
     let (s, v) = send("POST", vec![("sec-fetch-site", "same-origin".into())]).await;
     assert_eq!(
         (s, v["error"].as_str()),
-        (409, Some(steve_hub::api::WS_RELOAD)),
+        (409, Some("页面需要刷新后才能继续操作")),
         "{v}"
     );
     // what can't send a header (an EventSource, an <img>) names it as ?ws=, under the same rule
@@ -600,7 +600,7 @@ async fn workspace_is_named_never_guessed(e: &Env) {
     let (s, v) = e.call("GET", "/api/me?ws=ws_ffffffffffffffff", None).await;
     assert_eq!(
         (s, v["error"].as_str()),
-        (409, Some(steve_hub::api::WS_GONE)),
+        (409, Some("这个页面所在的空间已经不可用了，请刷新页面")),
         "{v}"
     );
     // a script (no Fetch Metadata) keeps the cookie's workspace

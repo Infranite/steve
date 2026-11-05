@@ -576,6 +576,173 @@ pub fn error_backoff_s(attempts: u32, restart: bool) -> u64 {
     STEPS[i.min(STEPS.len() - 1)]
 }
 
+/// A stored reason (a ledger row's, a scope's) as the UI shows it, in the request's language. The reasons are
+/// stored in Chinese and read back by rules and the digest; this translates the fixed ones and the fixed frame
+/// of the ones with a value, and leaves the rest (a model's own words, a guard's detail) as it is.
+pub fn reason_shown(reason: &str) -> String {
+    let tail = |p: &str| reason.strip_prefix(p);
+    if let Some(w) = tail(super::limits::REASON_PREFIX) {
+        return steve_i18n::t!("core.yolo.reason.limit", what = w);
+    }
+    if let Some(w) = tail("看起来涉及工作区以外：") {
+        return steve_i18n::t!("core.yolo.reason.outside", what = w);
+    }
+    if let Some(w) = tail("选了 Agent 推荐的：") {
+        return steve_i18n::t!("core.yolo.reason.recommended", why = reason_shown(w));
+    }
+    if let Some(w) = tail("YOLO 没替你答：") {
+        let why = if w == "拿不准" {
+            steve_i18n::t!("core.yolo.reason.unsure")
+        } else {
+            w.to_string()
+        };
+        return steve_i18n::t!("core.yolo.reason.not_answered", why = why);
+    }
+    if let Some(w) = tail("执行前复查结果变了：") {
+        return steve_i18n::t!(
+            "core.yolo.reason.recheck_changed_why",
+            why = reason_shown(w)
+        );
+    }
+    if let Some(w) = tail("执行失败：") {
+        return steve_i18n::t!("core.yolo.reason.failed", error = w);
+    }
+    if let Some(w) = tail("模型调用失败（").and_then(|w| w.strip_suffix('）')) {
+        return steve_i18n::t!("core.yolo.reason.model_failed", error = w);
+    }
+    if let Some(c) = tail("YOLO 不会选「").and_then(|w| w.strip_suffix('」')) {
+        return steve_i18n::t!("core.yolo.reason.never", choice = c);
+    }
+    if reason == format!("这件事项已经代答了 {ASK_PER_ITEM} 次，之后的提问留给你")
+    {
+        return steve_i18n::t!("core.yolo.reason.ask_count", n = ASK_PER_ITEM);
+    }
+    if let Some(what) = reason.strip_suffix("要在打开后由执行器核对") {
+        match what {
+            "检查结果" => return steve_i18n::t!("core.yolo.later.check_results"),
+            "发布状态" => return steve_i18n::t!("core.yolo.later.release_state"),
+            "停下的原因" => return steve_i18n::t!("core.yolo.later.stop_reason"),
+            "代答" => return steve_i18n::t!("core.yolo.later.answer"),
+            "事项来源" => return steve_i18n::t!("core.yolo.later.item_source"),
+            "保险箱条目" => return steve_i18n::t!("core.yolo.later.vault_entry"),
+            "披露检查" => return steve_i18n::t!("core.yolo.later.disclosure"),
+            _ => {}
+        }
+    }
+    match reason {
+        "你刚在这件事项上操作过，先等你" => {
+            steve_i18n::t!("core.yolo.reason.presence")
+        }
+        "这件事项没有自己的工作区，直接改的是真实目录" => {
+            steve_i18n::t!("core.yolo.reason.tool_real_dir")
+        }
+        "工作区内的操作，守卫检查通过" => {
+            steve_i18n::t!("core.yolo.reason.tool_worktree")
+        }
+        "设置里没有让 YOLO 批准动作" => steve_i18n::t!("core.yolo.reason.action_off"),
+        "工作区内、可以重做的动作" => steve_i18n::t!("core.yolo.reason.action_local"),
+        "设置里没有让 YOLO 批准发布" => steve_i18n::t!("core.yolo.reason.release_off"),
+        "另一个发布正在进行，等它结束再判" => {
+            steve_i18n::t!("core.yolo.reason.release_busy")
+        }
+        "发布前的 rebase 已经交回 Bot 3 次" => {
+            steve_i18n::t!("core.yolo.reason.release_rebase")
+        }
+        "分支不对或事项还没验收" => steve_i18n::t!("core.yolo.reason.release_state"),
+        "发布太频繁（每小时最多 3 次、每次至少隔 15 分钟），这次留给你" =>
+        {
+            steve_i18n::t!("core.yolo.reason.release_rate")
+        }
+        "发布你自己的 Steve，健康检查失败会自动回滚" => {
+            steve_i18n::t!("core.yolo.reason.release_self")
+        }
+        "设置里没有让 YOLO 开始事项" => steve_i18n::t!("core.yolo.reason.propose_off"),
+        "前置事项都已完成" => steve_i18n::t!("core.yolo.reason.propose_deps"),
+        "这件事项不是你在对话里建的" => {
+            steve_i18n::t!("core.yolo.reason.propose_source")
+        }
+        "你在对话里让 Steve 建的事项" => steve_i18n::t!("core.yolo.reason.propose_chat"),
+        "保险箱的使用留给你，需要的话给 Bot 限时授权" => {
+            steve_i18n::t!("core.yolo.reason.secret")
+        }
+        "GitHub 上的操作留给你" => steve_i18n::t!("core.yolo.reason.github"),
+        "流程里你自己设的关卡" => steve_i18n::t!("core.yolo.reason.flow_step"),
+        "流程停在对外节点，重放会重复对外效果" => {
+            steve_i18n::t!("core.yolo.reason.flow_run")
+        }
+        "需要你本人重新授权" => steve_i18n::t!("core.yolo.reason.connection"),
+        "交付批次失败不自动重试" => steve_i18n::t!("core.yolo.reason.batch_failed"),
+        "不挡任何事项，只进摘要" => steve_i18n::t!("core.yolo.reason.muted"),
+        "YOLO 不认识这种卡" => steve_i18n::t!("core.yolo.reason.unknown"),
+        "设置里没有让 YOLO 验收" => steve_i18n::t!("core.yolo.reason.accept_off"),
+        "这件事项设成了手动验收" => steve_i18n::t!("core.yolo.reason.accept_manual"),
+        "连续 3 次自动返工没有进展" => steve_i18n::t!("core.yolo.reason.stuck_rework"),
+        "没有列出检查或有检查没过" => steve_i18n::t!("core.yolo.reason.accept_rework"),
+        "还有 Agent 故意留着没做的步骤" => {
+            steve_i18n::t!("core.yolo.reason.accept_unfinished")
+        }
+        "分支有没提交的改动，或没有新提交" => {
+            steve_i18n::t!("core.yolo.reason.accept_branch")
+        }
+        "检查全部通过" => steve_i18n::t!("core.yolo.reason.accept_checks"),
+        "设置里没有让 YOLO 让它继续" => steve_i18n::t!("core.yolo.reason.continue_off"),
+        "连续 3 次自动继续没有进展" => steve_i18n::t!("core.yolo.reason.stuck_continue"),
+        "Steve 已经让它继续过，仍然没有交付，留给你看" => {
+            steve_i18n::t!("core.yolo.reason.continue_again")
+        }
+        "它停下了，没有交付也没有提问" => {
+            steve_i18n::t!("core.yolo.reason.continue_stall")
+        }
+        "会话出错后自动继续" => steve_i18n::t!("core.yolo.reason.continue_error"),
+        "这件事项第二次发布失败" => steve_i18n::t!("core.yolo.reason.continue_release"),
+        "发布失败已回滚，交回 Bot 修" => {
+            steve_i18n::t!("core.yolo.reason.release_rolled_back")
+        }
+        "另一个发布正在进行，结束后再让它重新请求" => {
+            steve_i18n::t!("core.yolo.reason.release_busy_again")
+        }
+        "另一个发布已经结束，让它重新请求发布" => {
+            steve_i18n::t!("core.yolo.reason.release_done_again")
+        }
+        "这种失败留给你看" => steve_i18n::t!("core.yolo.reason.continue_other"),
+        "设置里没有让 YOLO 代答" => steve_i18n::t!("core.yolo.reason.ask_off"),
+        "同一个问题又问了一次，Agent 没接受上次的答案" => {
+            steve_i18n::t!("core.yolo.reason.ask_repeated")
+        }
+        "答案涉及硬限制" => steve_i18n::t!("core.yolo.reason.ask_limit"),
+        "Agent 的推荐" => steve_i18n::t!("core.yolo.reason.agent_recommended"),
+        "卡上没有发送选项" => steve_i18n::t!("core.yolo.reason.no_option"),
+        "别人点名找的是你" => steve_i18n::t!("core.yolo.reason.handoff"),
+        "披露检查没通过" => steve_i18n::t!("core.yolo.reason.blocked"),
+        "没有通过披露检查" => steve_i18n::t!("core.yolo.reason.unchecked"),
+        "客户群留给你" => steve_i18n::t!("core.yolo.reason.customer"),
+        "设置里没有让 YOLO 代发" => steve_i18n::t!("core.yolo.reason.send_off"),
+        "听众里有外部成员" => steve_i18n::t!("core.yolo.reason.external"),
+        "设置里没有让 YOLO 以你的名义发" => {
+            steve_i18n::t!("core.yolo.reason.self_send_off")
+        }
+        "披露检查通过，冷静期后发出" => {
+            steve_i18n::t!("core.yolo.reason.send_after_cooldown")
+        }
+        "事项不在了" => steve_i18n::t!("core.yolo.reason.item_gone"),
+        "项目没有配置发布" => steve_i18n::t!("core.yolo.reason.no_release_action"),
+        "消息不在了" => steve_i18n::t!("core.yolo.reason.message_gone"),
+        "邮件草稿不在了" => steve_i18n::t!("core.yolo.reason.mail_draft_gone"),
+        "模型没有给出可用的答案" => steve_i18n::t!("core.yolo.reason.model_no_answer"),
+        "你已经处理了这张卡" => steve_i18n::t!("core.yolo.reason.handled_by_you"),
+        "权限请求已经失效" => steve_i18n::t!("core.yolo.reason.permission_expired"),
+        "没有对应的决定" => steve_i18n::t!("core.yolo.reason.no_decision"),
+        "YOLO 已经不再处理这件" => steve_i18n::t!("core.yolo.reason.no_longer"),
+        "你选择自己来定" => steve_i18n::t!("core.yolo.reason.user_cancel"),
+        "执行前复查结果变了" => steve_i18n::t!("core.yolo.reason.recheck_changed"),
+        "你在 YOLO 摘要里暂停了这件" => {
+            steve_i18n::t!("core.yolo.reason.paused_in_digest")
+        }
+        "没有 worktree，直接改真实目录" => steve_i18n::t!("core.yolo.reason.real_dir"),
+        _ => reason.to_string(),
+    }
+}
+
 /// Judges one decision. See the module docs for the order.
 pub fn judge(f: &Facts, p: &Policy, env: &Env) -> Verdict {
     if !f.in_scope {

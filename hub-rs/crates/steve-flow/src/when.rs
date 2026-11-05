@@ -17,13 +17,15 @@ use crate::cron::{CronError, CronExpr, validate};
 /// Gateway timeout for the model fallback.
 pub const MODEL_TIMEOUT_SECS: u64 = 30;
 
-/// `assumed` when the phrase names days but no time of day.
-pub const ASSUMED_NINE: &str = "没说几点，按 09:00";
+/// `assumed` when the phrase names days but no time of day (“没说几点，按 09:00”).
+pub fn assumed_nine() -> String {
+    steve_i18n::t!("flow.when.assumed_nine")
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum WhenError {
     /// No rule matched (try the model), or the model's answer was unusable (show this).
-    #[error("没看懂这个时间，换个说法，例如“每周一 09:00”")]
+    #[error("{}", steve_i18n::t!("flow.when.not_understood"))]
     NotUnderstood,
     /// Understood, but the result is not allowed (too frequent, unsupported cron…).
     #[error(transparent)]
@@ -156,7 +158,7 @@ pub fn rule_cron(when: &str) -> Result<Option<RuleCron>, WhenError> {
         return Ok(None);
     };
     let (time, assumed) = if rest.is_empty() {
-        ((9, 0), Some(ASSUMED_NINE.to_string()))
+        ((9, 0), Some(assumed_nine()))
     } else {
         match time_of_day(rest) {
             Some(t) => (t, None),
@@ -170,7 +172,7 @@ pub fn rule_cron(when: &str) -> Result<Option<RuleCron>, WhenError> {
         Days::Week(set) => ("*".to_string(), dow_field(&set)),
         Days::MonthDay(n) => {
             if n > 28 {
-                notes.push(format!("有的月份没有 {n} 日，那个月不运行"));
+                notes.push(steve_i18n::t!("flow.when.short_month", day = n));
             }
             (n.to_string(), "*".to_string())
         }
@@ -488,7 +490,7 @@ fn interval(s: &str) -> Result<Option<RuleCron>, WhenError> {
                 let notes = if 60u32.is_multiple_of(n) {
                     vec![]
                 } else {
-                    vec!["每小时整点重新起算".to_string()]
+                    vec![steve_i18n::t!("flow.when.restarts_hourly")]
                 };
                 plain(format!("*/{n} * * * *"), notes)
             }
@@ -512,7 +514,7 @@ fn every_hours(n: u32) -> Result<Option<RuleCron>, WhenError> {
             notes: if 24u32.is_multiple_of(n) {
                 vec![]
             } else {
-                vec!["每天 0 点重新起算".to_string()]
+                vec![steve_i18n::t!("flow.when.restarts_daily")]
             },
         }),
         _ => None,
@@ -644,7 +646,7 @@ mod tests {
         ] {
             let r = rule_cron(when).unwrap().unwrap();
             assert_eq!(r.cron, cron, "{when}");
-            assert_eq!(r.assumed.as_deref(), Some(ASSUMED_NINE), "{when}");
+            assert_eq!(r.assumed.as_deref(), Some("没说几点，按 09:00"), "{when}");
         }
         assert_eq!(rule_cron("每天 08:30").unwrap().unwrap().assumed, None);
     }
@@ -752,7 +754,7 @@ mod tests {
 
         let p = parse_when("每月最后一天", tz, now()).unwrap();
         let json = serde_json::to_value(&p).unwrap();
-        assert_eq!(json["assumed"], ASSUMED_NINE);
+        assert_eq!(json["assumed"], "没说几点，按 09:00");
         assert_eq!(json["describe"], "每月最后一天 09:00");
     }
 
@@ -805,6 +807,26 @@ mod tests {
         let prompt = model_prompt("每两周的周一");
         assert!(prompt.ends_with("说法：每两周的周一"));
         assert!(prompt.contains("每周一、三、五 09:00 → 0 9 * * 1,3,5"));
+    }
+
+    #[tokio::test]
+    async fn english_labels() {
+        let tz = parse_tz("Asia/Taipei").unwrap();
+        steve_i18n::scope(steve_i18n::EN, async {
+            let p = parse_when("每月 31 日", tz, now()).unwrap();
+            assert_eq!(p.assumed.as_deref(), Some("No time given, using 09:00"));
+            assert_eq!(
+                p.notes,
+                ["Some months have no day 31; it won't run in those months"]
+            );
+            assert_eq!(p.describe, "Day 31 of every month at 09:00");
+            assert!(
+                WhenError::NotUnderstood
+                    .to_string()
+                    .starts_with("Couldn't understand this time")
+            );
+        })
+        .await;
     }
 
     #[test]

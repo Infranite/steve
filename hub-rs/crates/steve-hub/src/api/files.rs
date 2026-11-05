@@ -11,7 +11,7 @@ use axum::http::{HeaderValue, header};
 use axum::response::Response;
 use serde_json::{Value, json};
 
-use super::{ApiResult, AppState, Ctx, ok, own};
+use super::{ApiResult, AppState, Ctx, Noun, ok, own};
 use crate::error::{ApiError, json_response};
 use crate::files::{self as att, MAX_FILE, MAX_FILES};
 use crate::validate::{Check, Str};
@@ -35,7 +35,10 @@ pub(crate) async fn refs(
 }
 
 fn too_large() -> ApiError {
-    ApiError::Json(413, format!("文件太大，最多 {} MB", MAX_FILE / 1024 / 1024))
+    ApiError::Json(
+        413,
+        steve_i18n::t!("hub.file.too_large", mb = MAX_FILE / 1024 / 1024),
+    )
 }
 
 pub async fn upload(
@@ -101,7 +104,9 @@ pub async fn upload(
             file = fname.map(|n| (data, n));
         }
         let Some((data, n)) = file else {
-            return Err(ApiError::bad_request("缺少文件（字段 file）"));
+            return Err(ApiError::bad_request(steve_i18n::t!(
+                "hub.file.missing_field"
+            )));
         };
         (data.to_vec(), Some(n))
     } else {
@@ -123,10 +128,15 @@ pub async fn download(
     Query(q): Query<HashMap<String, String>>,
 ) -> ApiResult {
     let f = st
-        .read(move |r| Ok(own(r.file_get(&id)?, &c.ws, "附件")?))
+        .read(move |r| Ok(own(r.file_get(&id)?, &c.ws, Noun::File)?))
         .await?;
     let path = att::blob_path(&st.cfg.data_dir, &f);
-    let gone = || Ok(json_response(404, &json!({ "error": "附件的文件不见了" })));
+    let gone = || {
+        Ok(json_response(
+            404,
+            &json!({ "error": steve_i18n::t!("hub.file.gone") }),
+        ))
+    };
     let Ok(file) = tokio::fs::File::open(&path).await else {
         return gone();
     };

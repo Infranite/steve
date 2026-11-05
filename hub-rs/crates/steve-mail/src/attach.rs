@@ -50,7 +50,10 @@ pub struct NoFiles;
 
 impl FileStore for NoFiles {
     fn store(&self, _: &str, _: &[u8], _: &str, _: &str) -> Result<FileRef, Refused> {
-        Err(Refused::new(400, "附件存储还没有接上"))
+        Err(Refused::new(
+            400,
+            steve_i18n::t!("mail.attachment.no_store"),
+        ))
     }
 }
 
@@ -154,7 +157,10 @@ impl Mail {
             return Ok(Ok(r));
         }
         if a.size > MAX_FILE {
-            return Ok(Err(Refused::new(413, "文件太大，最多 20 MB")));
+            return Ok(Err(Refused::new(
+                413,
+                steve_i18n::t!("mail.attachment.too_large"),
+            )));
         }
         let Some(path) = m
             .raw_path
@@ -163,7 +169,7 @@ impl Mail {
         else {
             return Ok(Err(Refused::new(
                 410,
-                "原件已经过了本地保留期，请先重新取原件",
+                steve_i18n::t!("mail.original.purged"),
             )));
         };
         let raw = match fs::read(&path) {
@@ -171,13 +177,16 @@ impl Mail {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(Err(Refused::new(
                     410,
-                    "原件已经过了本地保留期，请先重新取原件",
+                    steve_i18n::t!("mail.original.purged"),
                 )));
             }
             Err(e) => return Err(e.into()),
         };
         let Some(bytes) = parse::attachment_bytes(&raw, &a.part) else {
-            return Ok(Err(Refused::new(404, "原件里找不到这个附件")));
+            return Ok(Err(Refused::new(
+                404,
+                steve_i18n::t!("mail.attachment.not_in_original"),
+            )));
         };
         let by = if viewer.user.is_empty() {
             "steve"

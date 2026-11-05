@@ -28,7 +28,7 @@ use steve_store::{Decision, NewDecision, Tx, uid};
 use tokio::task::JoinHandle;
 
 use crate::adapter::SendMeta;
-use crate::drafts::{self, FAIL_OPTIONS, MSG_ALREADY_SENT, MSG_EDITED, SUBJECT_TYPE, content_hash};
+use crate::drafts::{self, FAIL_OPTIONS, SUBJECT_TYPE, content_hash};
 use crate::error::{AdapterError, MailError, MailResult};
 use crate::repo::{self, DraftRow, MessageRow, Rcpt, ThreadRow};
 use crate::store::{self, Mailbox};
@@ -174,7 +174,7 @@ impl MailDraftHandler {
         let now = self.0.now();
         let mut draft = own(tx, cx.ws, &d.subject_id)?;
         if draft.status != "pending" || draft.decision_id.as_deref() != Some(d.id.as_str()) {
-            return Err(ApiError::conflict("这封邮件已经处理过了").into());
+            return Err(ApiError::conflict(steve_i18n::t!("mail.draft.already_handled")).into());
         }
         let mut result = choice_result(cx);
         match cx.choice {
@@ -189,7 +189,7 @@ impl MailDraftHandler {
                     repo::update_draft_content(tx, &draft, now)?;
                 } else if content_hash(&draft) != draft.content_hash {
                     self.0.mark_stale(&draft.id);
-                    return Err(ApiError::conflict(MSG_EDITED).into());
+                    return Err(ApiError::conflict(steve_i18n::t!("mail.draft.edited")).into());
                 }
                 let delay = repo::settings(tx, &draft.connection_id)?
                     .unwrap_or_default()
@@ -259,7 +259,7 @@ impl MailDraftHandler {
         let draft = own(tx, cx.ws, &d.subject_id)?;
         let uncertain = draft.status == "unknown";
         if draft.status != "failed" && !uncertain {
-            return Err(ApiError::conflict("这封邮件已经处理过了").into());
+            return Err(ApiError::conflict(steve_i18n::t!("mail.draft.already_handled")).into());
         }
         if uncertain {
             // Normal REST callers are authenticated users; autonomous decisions use synthetic actors.
@@ -269,7 +269,9 @@ impl MailDraftHandler {
                 [cx.actor, cx.ws], |r| r.get(0),
             )?;
             if cx.actor == YOLO_ACTOR || cx.actor == "steve" || !member {
-                return Err(ApiError::rule("发送结果不明，只能由登录用户核实后处理").into());
+                return Err(
+                    ApiError::rule(steve_i18n::t!("mail.decision.unknown_needs_user")).into(),
+                );
             }
         }
         match cx.choice {
@@ -307,7 +309,7 @@ impl DecisionHandler for MailDraftHandler {
         match d.kind.as_str() {
             "approve" => self.approve(tx, cx, d),
             "fail" => self.failed(tx, cx, d),
-            _ => Err(ApiError::rule("不认识这种决定").into()),
+            _ => Err(ApiError::rule(steve_i18n::t!("mail.decision.unknown_kind")).into()),
         }
         .map_err(api)
     }
@@ -337,9 +339,9 @@ impl DecisionHandler for MailDraftHandler {
                 repo::set_draft_send_at(tx, &draft.id, None).map_err(api)?;
                 Ok(())
             }
-            _ if ["sending", "sent"].contains(&draft.status.as_str()) => {
-                Err(ApiError::conflict(MSG_ALREADY_SENT))
-            }
+            _ if ["sending", "sent"].contains(&draft.status.as_str()) => Err(ApiError::conflict(
+                steve_i18n::t!("mail.draft.already_sent"),
+            )),
             _ => Ok(()),
         }
     }
@@ -350,7 +352,7 @@ pub(crate) fn undo_approval(tx: &Tx, d: &DraftRow, now: i64) -> MailResult<()> {
     match d.status.as_str() {
         "approved" if d.send_at.is_some_and(|t| now < t) => {
             if !repo::draft_transition(tx, &d.id, &["approved"], "pending", now)? {
-                return Err(ApiError::conflict(MSG_ALREADY_SENT).into());
+                return Err(ApiError::conflict(steve_i18n::t!("mail.draft.already_sent")).into());
             }
             repo::set_draft_send_at(tx, &d.id, None)?;
             if let Some(t) = &d.thread_id {
@@ -358,8 +360,10 @@ pub(crate) fn undo_approval(tx: &Tx, d: &DraftRow, now: i64) -> MailResult<()> {
             }
             Ok(())
         }
-        "approved" | "sending" | "sent" => Err(ApiError::conflict(MSG_ALREADY_SENT).into()),
-        _ => Err(ApiError::conflict("这封邮件没有在等待发出").into()),
+        "approved" | "sending" | "sent" => {
+            Err(ApiError::conflict(steve_i18n::t!("mail.draft.already_sent")).into())
+        }
+        _ => Err(ApiError::conflict(steve_i18n::t!("mail.draft.not_waiting")).into()),
     }
 }
 

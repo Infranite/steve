@@ -1,0 +1,4 @@
+{
+  "i18n.test.hello": "你好，%{name}",
+  "i18n.test.count": "共 %{n} 个"
+}

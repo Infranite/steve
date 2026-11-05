@@ -57,10 +57,14 @@ impl DecisionHandler for FlowStepDecisions {
             .flatten();
         let Some((mode, matcher)) = waiting.filter(|_| decision_of_wait.as_deref() == Some(&d.id))
         else {
-            return Err(ApiError::conflict("这一步已经不在等你了"));
+            return Err(ApiError::conflict(steve_i18n::t!(
+                "flow.decision.not_waiting"
+            )));
         };
         if mode != "decision" {
-            return Err(ApiError::conflict("这一步已经不在等你了"));
+            return Err(ApiError::conflict(steve_i18n::t!(
+                "flow.decision.not_waiting"
+            )));
         }
         engine::release_held_outcome(&mut run);
         let resume = if matcher["kind"] == "gate" {
@@ -70,7 +74,9 @@ impl DecisionHandler for FlowStepDecisions {
             json!({ "output": { "choice": cx.choice, "text": cx.text }, "branch": cx.choice })
         };
         if !engine::resume_in(tx, run, node, resume)? {
-            return Err(ApiError::conflict("这一步已经不在等你了"));
+            return Err(ApiError::conflict(steve_i18n::t!(
+                "flow.decision.not_waiting"
+            )));
         }
         let _ = self.followups.send(Followup::Drive {
             run_id: run_id.into(),
@@ -82,7 +88,7 @@ impl DecisionHandler for FlowStepDecisions {
 
     /// The run has moved on: an answer cannot be taken back.
     fn before_undo(&self, _tx: &Tx, _d: &Decision) -> ApiResult<()> {
-        Err(ApiError::rule("流程已经按你的选择继续了，不能撤销"))
+        Err(ApiError::rule(steve_i18n::t!("flow.decision.no_undo")))
     }
 
     /// An approval nobody gave in time ends the run.
@@ -200,7 +206,7 @@ pub async fn to_item(cx: &FlowCx, ws: &str, event_id: &str) -> FlowResult<String
             [],
             |r| r.get::<_, String>(0),
         ))?
-        .ok_or_else(|| ApiError::rule("没有主 Bot"))
+        .ok_or_else(|| ApiError::rule(steve_i18n::t!("flow.decision.no_main_bot")))
     })?;
     let summary = ev["summary"].as_str().unwrap_or("").to_string();
     let text = ev["payload"]["text"].as_str().unwrap_or("");
@@ -228,7 +234,7 @@ pub async fn to_item(cx: &FlowCx, ws: &str, event_id: &str) -> FlowResult<String
             run_id: String::new(),
         })
         .await
-        .map_err(|e| ApiError::rule(format!("建事项失败：{e}")))?;
+        .map_err(|e| ApiError::rule(steve_i18n::t!("flow.decision.item_failed", error = e)))?;
     cx.store().transaction(|tx| -> FlowResult<()> {
         links::add(
             tx,
@@ -256,7 +262,7 @@ pub async fn to_item(cx: &FlowCx, ws: &str, event_id: &str) -> FlowResult<String
 /// approval for that step).
 pub(crate) fn retry(tx: &Tx, run: &mut runs::RunRow) -> FlowResult<()> {
     if run.status != "failed" || run.cursor.is_none() {
-        return Err(ApiError::conflict("这次运行已经不能重试了"));
+        return Err(ApiError::conflict(steve_i18n::t!("flow.decision.no_retry")));
     }
     let cur = run.cursor.clone().unwrap_or_default();
     run.context["approved"][&cur] = json!(true);

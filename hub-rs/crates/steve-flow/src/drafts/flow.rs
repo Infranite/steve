@@ -17,7 +17,7 @@ use steve_modules::{ApiError, ApiResult, Registry};
 use steve_store::Tx;
 use steve_store::base::{Change, Viewer, show};
 
-use super::{UNRECOGNIZED, parse_bool, text_of};
+use super::{parse_bool, text_of, unrecognized, unrecognized_value};
 use crate::flows::{self, DESCRIPTION_MAX, FlowRow, NAME_MAX};
 use crate::flows_api::check_graph;
 use crate::graph::{Edge, Graph, Node};
@@ -27,7 +27,6 @@ pub const KIND: &str = "flow";
 
 /// Note of the version a confirmed draft saves, and of the one its undo saves.
 pub const NOTE: &str = "按你说的修改";
-const SCHEDULE_HERE: &str = "定时任务请在定时任务页修改";
 
 pub fn register(r: &mut Registry, late: Arc<LateFlow>) {
     r.target(KIND, Box::new(FlowTarget(late.clone())))
@@ -39,31 +38,51 @@ pub fn register(r: &mut Registry, late: Arc<LateFlow>) {
 fn own_flow(c: &Connection, ws: &str, id: &str) -> ApiResult<FlowRow> {
     let f = flows::own(c, ws, id)?;
     if f.kind == "schedule" {
-        return Err(ApiError::rule(SCHEDULE_HERE));
+        return Err(ApiError::rule(steve_i18n::t!(
+            "flow.draft.schedule_elsewhere"
+        )));
     }
     Ok(f)
 }
 
+/// For the model (field values it reads and writes back).
 fn yes_no(b: bool) -> &'static str {
     if b { "是" } else { "否" }
 }
 
+/// For the card, in the request's language.
+fn yes_no_shown(b: bool) -> String {
+    if b {
+        steve_i18n::t!("flow.draft.yes")
+    } else {
+        steve_i18n::t!("flow.draft.no")
+    }
+}
+
 fn quoted(g: &Graph, id: &str) -> String {
-    format!("「{}」", g.node(id).map_or(id, Node::name))
+    steve_i18n::t!(
+        "flow.draft.quoted",
+        name = g.node(id).map_or(id, Node::name)
+    )
 }
 
 fn edge_text(g: &Graph, e: &Edge) -> String {
-    let label = if e.label.is_empty() {
-        String::new()
+    let (from, to) = (quoted(g, &e.from), quoted(g, &e.to));
+    if e.label.is_empty() {
+        steve_i18n::t!("flow.draft.edge", from = from, to = to)
     } else {
-        format!("（{}）", e.label)
-    };
-    format!("{} → {}{label}", quoted(g, &e.from), quoted(g, &e.to))
+        steve_i18n::t!(
+            "flow.draft.edge_labelled",
+            from = from,
+            to = to,
+            label = e.label
+        )
+    }
 }
 
 fn value_text(v: &Value) -> String {
     match v {
-        Value::Null => "（空）".into(),
+        Value::Null => steve_i18n::t!("flow.draft.empty"),
         Value::String(s) => show(s),
         v => show(&v.to_string()),
     }
@@ -144,12 +163,9 @@ impl<'k> GraphEdit<'k> {
         }
     }
 
-    fn unknown(&mut self, label: &str, said: &str) {
-        self.changes.push(Change::new(
-            label,
-            "—",
-            format!("（没认出：{}）", show(said)),
-        ));
+    fn unknown(&mut self, label: String, said: &str) {
+        self.changes
+            .push(Change::new(label, "—", unrecognized_value(said)));
     }
 
     /// One edit; `false` if `op` is not a graph edit at all.
@@ -185,10 +201,16 @@ impl<'k> GraphEdit<'k> {
         id: Option<&str>,
     ) {
         if self.graph.node(after).is_none() {
-            return self.unknown("新增节点", &format!("接在 {after} 后面"));
+            return self.unknown(
+                steve_i18n::t!("flow.draft.node_add"),
+                &steve_i18n::t!("flow.draft.after_node", node = after),
+            );
         }
         if kind == "trigger" || !self.kinds.contains(&kind) {
-            return self.unknown("新增节点", &format!("节点种类 {kind}"));
+            return self.unknown(
+                steve_i18n::t!("flow.draft.node_add"),
+                &steve_i18n::t!("flow.draft.node_kind", kind = kind),
+            );
         }
         let id = fresh_id(&self.graph, id, kind);
         let config = config
@@ -215,18 +237,27 @@ impl<'k> GraphEdit<'k> {
             label: label.into(),
         });
         let shown = if title.is_empty() { &id } else { title };
-        let on = if label.is_empty() {
-            String::new()
+        let after = quoted(&self.graph, after);
+        let line = if label.is_empty() {
+            steve_i18n::t!(
+                "flow.draft.node_added",
+                title = shown,
+                kind = kind,
+                after = after
+            )
         } else {
-            format!("的「{label}」")
+            steve_i18n::t!(
+                "flow.draft.node_added_on",
+                title = shown,
+                kind = kind,
+                after = after,
+                label = label
+            )
         };
         self.changes.push(Change::new(
-            "新增节点",
+            steve_i18n::t!("flow.draft.node_add"),
             "—",
-            format!(
-                "「{shown}」（{kind}），接在{}{on}后面",
-                quoted(&self.graph, after)
-            ),
+            line,
         ));
         self.changed = true;
     }
@@ -235,10 +266,10 @@ impl<'k> GraphEdit<'k> {
     /// (`null` removes a key). A line per changed key.
     fn update(&mut self, id: &str, set: &Value) {
         let Some(i) = self.graph.nodes.iter().position(|n| n.id == id) else {
-            return self.unknown("修改节点", id);
+            return self.unknown(steve_i18n::t!("flow.draft.node_update"), id);
         };
         let Some(set) = set.as_object() else {
-            return self.unknown("修改节点", &set.to_string());
+            return self.unknown(steve_i18n::t!("flow.draft.node_update"), &set.to_string());
         };
         let name = quoted(&self.graph, id);
         let mut lines = Vec::new();
@@ -248,16 +279,18 @@ impl<'k> GraphEdit<'k> {
                 "title" | "note" => {
                     let new = text_of(v).unwrap_or_default();
                     let (field, label) = if k == "title" {
-                        (&mut node.title, "标题")
+                        (
+                            &mut node.title,
+                            steve_i18n::t!("flow.draft.node_title", node = name),
+                        )
                     } else {
-                        (&mut node.note, "说明")
+                        (
+                            &mut node.note,
+                            steve_i18n::t!("flow.draft.node_note", node = name),
+                        )
                     };
                     if *field != new {
-                        lines.push(Change::new(
-                            format!("节点{name}的{label}"),
-                            show(field),
-                            show(&new),
-                        ));
+                        lines.push(Change::new(label, show(field), show(&new)));
                         *field = new;
                     }
                 }
@@ -265,7 +298,7 @@ impl<'k> GraphEdit<'k> {
                     let new = v.as_str().map(String::from);
                     if node.on_fail != new {
                         lines.push(Change::new(
-                            format!("节点{name}的出错处理"),
+                            steve_i18n::t!("flow.draft.node_on_fail", node = name),
                             node.on_fail.as_deref().unwrap_or("stop"),
                             new.as_deref().unwrap_or("stop"),
                         ));
@@ -282,7 +315,7 @@ impl<'k> GraphEdit<'k> {
                             continue;
                         }
                         lines.push(Change::new(
-                            format!("节点{name}的 {ck}"),
+                            steve_i18n::t!("flow.draft.node_config", node = name, key = ck),
                             value_text(&old),
                             value_text(cv),
                         ));
@@ -296,13 +329,14 @@ impl<'k> GraphEdit<'k> {
                     }
                 }
                 _ => lines.push(Change::new(
-                    UNRECOGNIZED,
+                    unrecognized(),
                     "—",
                     show(&format!("{id}.{k}: {v}")),
                 )),
             }
         }
-        self.changed |= lines.iter().any(|l| l.label != UNRECOGNIZED);
+        let unrecognized = unrecognized();
+        self.changed |= lines.iter().any(|l| l.label != unrecognized);
         self.changes.extend(lines);
     }
 
@@ -310,10 +344,13 @@ impl<'k> GraphEdit<'k> {
     /// successor; otherwise what hung only below it goes too (listed at [`GraphEdit::finish`]).
     fn remove(&mut self, id: &str) {
         let Some(node) = self.graph.node(id).cloned() else {
-            return self.unknown("删除节点", id);
+            return self.unknown(steve_i18n::t!("flow.draft.node_remove"), id);
         };
         if node.kind == "trigger" {
-            return self.unknown("删除节点", &format!("{id}（触发节点不能删）"));
+            return self.unknown(
+                steve_i18n::t!("flow.draft.node_remove"),
+                &steve_i18n::t!("flow.draft.trigger_kept", node = id),
+            );
         }
         let outs: Vec<Edge> = self.graph.outs(id).cloned().collect();
         let ins: Vec<Edge> = self
@@ -323,7 +360,11 @@ impl<'k> GraphEdit<'k> {
             .filter(|e| e.to == id)
             .cloned()
             .collect();
-        let line = Change::new("删除节点", quoted(&self.graph, id), "—");
+        let line = Change::new(
+            steve_i18n::t!("flow.draft.node_remove"),
+            quoted(&self.graph, id),
+            "—",
+        );
         if outs.len() == 1 {
             for e in &ins {
                 let joined = Edge {
@@ -347,7 +388,10 @@ impl<'k> GraphEdit<'k> {
 
     fn edge_add(&mut self, from: &str, to: &str, label: &str) {
         if self.graph.node(from).is_none() || self.graph.node(to).is_none() {
-            return self.unknown("新增连线", &format!("{from} → {to}"));
+            return self.unknown(
+                steve_i18n::t!("flow.draft.edge_add"),
+                &format!("{from} → {to}"),
+            );
         }
         let e = Edge {
             from: from.into(),
@@ -357,8 +401,11 @@ impl<'k> GraphEdit<'k> {
         if self.graph.edges.contains(&e) {
             return;
         }
-        self.changes
-            .push(Change::new("新增连线", "—", edge_text(&self.graph, &e)));
+        self.changes.push(Change::new(
+            steve_i18n::t!("flow.draft.edge_add"),
+            "—",
+            edge_text(&self.graph, &e),
+        ));
         self.graph.edges.push(e);
         self.changed = true;
     }
@@ -367,11 +414,17 @@ impl<'k> GraphEdit<'k> {
         let Some(i) = self.graph.edges.iter().position(|e| {
             e.from == from && e.to == to && label.is_none_or(|l| e.label == l.trim())
         }) else {
-            return self.unknown("删除连线", &format!("{from} → {to}"));
+            return self.unknown(
+                steve_i18n::t!("flow.draft.edge_remove"),
+                &format!("{from} → {to}"),
+            );
         };
         let e = self.graph.edges.remove(i);
-        self.changes
-            .push(Change::new("删除连线", edge_text(&self.graph, &e), "—"));
+        self.changes.push(Change::new(
+            steve_i18n::t!("flow.draft.edge_remove"),
+            edge_text(&self.graph, &e),
+            "—",
+        ));
         self.changed = true;
     }
 
@@ -389,8 +442,11 @@ impl<'k> GraphEdit<'k> {
             .map(|n| n.id.clone())
             .collect();
         for id in &gone {
-            self.changes
-                .push(Change::new("删除节点", quoted(&self.graph, id), "—"));
+            self.changes.push(Change::new(
+                steve_i18n::t!("flow.draft.node_remove"),
+                quoted(&self.graph, id),
+                "—",
+            ));
         }
         self.graph.nodes.retain(|n| !gone.contains(&n.id));
         self.graph
@@ -446,7 +502,7 @@ impl DraftTarget for FlowTarget {
         Ok(Prepared {
             target_id: Some(f.id.clone()),
             revision: Some(f.updated),
-            title: format!("流程「{}」", f.name),
+            title: steve_i18n::t!("flow.draft.flow_title", name = f.name),
             href: format!("#/auto/rule/{}", f.id),
             subject: format!(
                 "the automation flow \"{}\". Its current graph (node ids are what the graph operations refer to): {}",
@@ -482,32 +538,41 @@ impl DraftTarget for FlowTarget {
                 continue;
             }
             if op["op"] != "set" {
-                meta.push(Change::new(UNRECOGNIZED, "—", show(&op.to_string())));
+                meta.push(Change::new(unrecognized(), "—", show(&op.to_string())));
                 continue;
             }
             let key = op["key"].as_str().unwrap_or("");
             let said = text_of(&op["value"]).unwrap_or_default();
-            let bad = |label: &str| Change::new(label, "—", format!("（没认出：{}）", show(&said)));
+            let bad = |label: String| Change::new(label, "—", unrecognized_value(&said));
+            let (name_l, desc_l, enabled_l) = (
+                steve_i18n::t!("flow.draft.flow_name"),
+                steve_i18n::t!("flow.draft.flow_description"),
+                steve_i18n::t!("flow.draft.enabled"),
+            );
             match key {
                 "name" if (1..=NAME_MAX).contains(&said.chars().count()) => {
-                    meta.push(Change::new("名字", show(&f.name), show(&said)));
+                    meta.push(Change::new(name_l, show(&f.name), show(&said)));
                     set.insert("name".into(), json!(said));
                 }
-                "name" => meta.push(bad("名字")),
+                "name" => meta.push(bad(name_l)),
                 "description" if said.chars().count() <= DESCRIPTION_MAX => {
-                    meta.push(Change::new("说明", show(&f.description), show(&said)));
+                    meta.push(Change::new(desc_l, show(&f.description), show(&said)));
                     set.insert("description".into(), json!(said));
                 }
-                "description" => meta.push(bad("说明")),
+                "description" => meta.push(bad(desc_l)),
                 "enabled" => match parse_bool(&said) {
                     Some(v) => {
-                        meta.push(Change::new("启用", yes_no(f.enabled), yes_no(v)));
+                        meta.push(Change::new(
+                            enabled_l,
+                            yes_no_shown(f.enabled),
+                            yes_no_shown(v),
+                        ));
                         set.insert("enabled".into(), json!(v));
                     }
-                    None => meta.push(bad("启用")),
+                    None => meta.push(bad(enabled_l)),
                 },
                 _ => meta.push(Change::new(
-                    UNRECOGNIZED,
+                    unrecognized(),
                     "—",
                     show(&format!("{key}: {said}")),
                 )),
@@ -525,9 +590,11 @@ impl DraftTarget for FlowTarget {
                 }
                 Err(ApiError::Internal(e)) => return Err(ApiError::Internal(e)),
                 // nothing half-done goes into the draft: the reason is the only line
-                Err(e) => plan
-                    .changes
-                    .push(Change::new("流程", "—", format!("（改不成：{e}）"))),
+                Err(e) => plan.changes.push(Change::new(
+                    steve_i18n::t!("flow.draft.flow"),
+                    "—",
+                    steve_i18n::t!("flow.draft.cannot_change", reason = e),
+                )),
             }
         } else {
             plan.changes.extend(edit.changes);

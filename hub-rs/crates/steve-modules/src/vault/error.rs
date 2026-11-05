@@ -10,39 +10,51 @@ use super::crypto::CryptoError;
 use super::keystore::KeyStoreError;
 use crate::ApiError;
 
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VaultError {
     /// `400`: nothing to read or rotate yet.
-    #[error("保险箱还没有启用")]
     NotInitialized,
     /// `409`: `POST /vault/init` twice.
-    #[error("保险箱已经启用过了")]
     AlreadyInitialized,
     /// `409`: the key store already has a different key under the name we would write. Never
     /// overwritten: it may belong to another copy of the database.
-    #[error("钥匙串里已经有另一把同名的主密钥，没有覆盖它")]
     KeyExists,
     /// `409`: a rotation is still re-wrapping data keys.
-    #[error("主密钥正在轮换，请稍后再试")]
     Rotating,
     /// `400`: bad format, checksum, or no `vault_keys` row with that fingerprint.
-    #[error("恢复码不对")]
     BadRecoveryCode,
     /// `503`.
-    #[error("保险箱暂时打不开：Mac mini 的钥匙串被锁了")]
     Locked,
     /// `503`: the key is gone from the key store (new machine, keychain reset); recover with the code.
-    #[error("保险箱暂时打不开：钥匙串里没有主密钥，请用恢复码恢复")]
     KeyMissing,
     /// `503`: the keychain refused this binary.
-    #[error("保险箱暂时打不开：钥匙串没有授权这个版本的 Steve 读取主密钥（发布时没有用固定签名）")]
     Denied,
     /// `401`: registering a passkey needs a login from the last 10 minutes.
-    #[error("请重新登录后再登记")]
     StaleLogin,
-    #[error("{0}")]
     Api(ApiError),
 }
+
+/// The message in the request's language (zh-CN: "保险箱还没有启用").
+impl std::fmt::Display for VaultError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use steve_i18n::t;
+        let m = match self {
+            Self::NotInitialized => t!("modules.vault.not_initialized"),
+            Self::AlreadyInitialized => t!("modules.vault.already_initialized"),
+            Self::KeyExists => t!("modules.vault.key_exists"),
+            Self::Rotating => t!("modules.vault.rotating"),
+            Self::BadRecoveryCode => t!("modules.vault.bad_recovery_code"),
+            Self::Locked => t!("modules.vault.locked"),
+            Self::KeyMissing => t!("modules.vault.key_missing"),
+            Self::Denied => t!("modules.vault.denied"),
+            Self::StaleLogin => t!("modules.vault.stale_login"),
+            Self::Api(e) => return e.fmt(f),
+        };
+        f.write_str(&m)
+    }
+}
+
+impl std::error::Error for VaultError {}
 
 impl VaultError {
     pub fn status(&self) -> u16 {

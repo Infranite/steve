@@ -1,0 +1,4 @@
+{
+  "i18n.test.hello": "Hello, %{name}",
+  "i18n.test.count": "%{n} in all"
+}

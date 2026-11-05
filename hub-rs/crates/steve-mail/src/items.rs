@@ -138,24 +138,25 @@ impl Mail {
             Some(_) => return Err(ApiError::invalid("mode").into()),
         };
         let (mm, w, t, bot) = (self.clone(), who.clone(), thread.to_string(), p.bot.clone());
-        let prep = tokio::task::spawn_blocking(move || mm.to_item_prepare(&w, &t, bot))
-            .await
-            .map_err(|e| MailError::Other(format!("task failed: {e}")))??;
+        let prep =
+            tokio::task::spawn_blocking(steve_i18n::carry(move || mm.to_item_prepare(&w, &t, bot)))
+                .await
+                .map_err(|e| MailError::Other(format!("task failed: {e}")))??;
         let (req, orig) = match prep {
             Ok(id) => return Ok(id),
             Err(x) => x,
         };
         let req = ItemRequest { propose, ..req };
-        let item = self
-            .0
-            .items
-            .create_item(req)
-            .await
-            .map_err(|e| ApiError::rule(format!("建事项失败：{e}")))?;
+        let item =
+            self.0.items.create_item(req).await.map_err(|e| {
+                ApiError::rule(steve_i18n::t!("mail.item.create_failed", error = e))
+            })?;
         let (mm, w, t, it) = (self.clone(), who.clone(), thread.to_string(), item.clone());
-        tokio::task::spawn_blocking(move || mm.to_item_link(&w, &t, &it, orig.as_ref()))
-            .await
-            .map_err(|e| MailError::Other(format!("task failed: {e}")))??;
+        tokio::task::spawn_blocking(steve_i18n::carry(move || {
+            mm.to_item_link(&w, &t, &it, orig.as_ref())
+        }))
+        .await
+        .map_err(|e| MailError::Other(format!("task failed: {e}")))??;
         self.0.notify.thread(&who.ws, thread);
         Ok(item)
     }
@@ -182,8 +183,9 @@ impl Mail {
                 }
                 None => match repo::bot(c, &who.ws, "mail")? {
                     Some(_) => "mail".to_string(),
-                    None => repo::main_bot(c, &who.ws)?
-                        .ok_or_else(|| MailError::Api(ApiError::rule("没有主 Bot")))?,
+                    None => repo::main_bot(c, &who.ws)?.ok_or_else(|| {
+                        MailError::Api(ApiError::rule(steve_i18n::t!("mail.item.no_main_bot")))
+                    })?,
                 },
             };
             let orig = drafts::reply_target(c, &t.id)?;
@@ -284,24 +286,24 @@ pub struct MailPanel;
 /// Panel id prefix.
 pub const PANEL: &str = "mail.thread";
 
-fn state_badge(state: &str) -> Option<&'static str> {
-    match state {
-        "needs_reply" => Some("待回复"),
-        "waiting" => Some("等对方"),
-        "done" => Some("已完成"),
-        "muted" => Some("已静音"),
-        _ => None,
-    }
+fn state_badge(state: &str) -> Option<String> {
+    Some(match state {
+        "needs_reply" => steve_i18n::t!("mail.badge.needs_reply"),
+        "waiting" => steve_i18n::t!("mail.badge.waiting"),
+        "done" => steve_i18n::t!("mail.badge.done"),
+        "muted" => steve_i18n::t!("mail.badge.muted"),
+        _ => return None,
+    })
 }
 
-fn draft_badge(status: &str) -> Option<&'static str> {
-    match status {
-        "pending" => Some("草稿待批准"),
-        "approved" | "sending" => Some("即将发出"),
-        "unknown" => Some("发送结果不明，待核实"),
-        "failed" => Some("发送失败"),
-        _ => None,
-    }
+fn draft_badge(status: &str) -> Option<String> {
+    Some(match status {
+        "pending" => steve_i18n::t!("mail.badge.draft_pending"),
+        "approved" | "sending" => steve_i18n::t!("mail.badge.draft_sending"),
+        "unknown" => steve_i18n::t!("mail.badge.draft_unknown"),
+        "failed" => steve_i18n::t!("mail.badge.draft_failed"),
+        _ => return None,
+    })
 }
 
 /// The panels of an item for `viewer`.
@@ -310,16 +312,13 @@ pub fn item_panels(c: &Connection, viewer: &Viewer, item: &str) -> MailResult<Ve
     for t in visible_item_threads(c, viewer, item)? {
         let href = format!("#/mail/t/{}", t.id);
         let msgs = repo::thread_messages(c, &t.id)?;
-        let mut badges: Vec<String> = state_badge(&t.state)
-            .into_iter()
-            .map(String::from)
-            .collect();
+        let mut badges: Vec<String> = state_badge(&t.state).into_iter().collect();
         if let Some(b) = repo::thread_drafts(c, &t.id)?
             .iter()
             .rev()
             .find_map(|d| draft_badge(&d.status))
         {
-            badges.push(b.into());
+            badges.push(b);
         }
         let rows = msgs
             .last()
@@ -336,7 +335,7 @@ pub fn item_panels(c: &Connection, viewer: &Viewer, item: &str) -> MailResult<Ve
                         RowState::Pending
                     },
                     text: if m.direction == "out" {
-                        format!("我 → {}", rcpt_names(&m.to_addrs))
+                        steve_i18n::t!("mail.panel.me_to", names = rcpt_names(&m.to_addrs))
                     } else {
                         who
                     },
@@ -348,10 +347,10 @@ pub fn item_panels(c: &Connection, viewer: &Viewer, item: &str) -> MailResult<Ve
         out.push(Panel {
             id: format!("{PANEL}:{}", t.id),
             plugin: "mail".into(),
-            title: "往来邮件".into(),
+            title: steve_i18n::t!("mail.panel.title"),
             head: Some(PanelHead {
                 text: if t.subject.trim().is_empty() {
-                    "（无主题）".into()
+                    steve_i18n::t!("mail.subject.none")
                 } else {
                     t.subject.clone()
                 },
@@ -359,10 +358,13 @@ pub fn item_panels(c: &Connection, viewer: &Viewer, item: &str) -> MailResult<Ve
                 badges,
             }),
             rows,
-            foot: Some(format!("共 {} 封", t.count.max(msgs.len() as i64))),
+            foot: Some(steve_i18n::t!(
+                "mail.panel.count",
+                n = t.count.max(msgs.len() as i64)
+            )),
             actions: vec![PanelAction {
                 id: "open".into(),
-                label: "打开往来".into(),
+                label: steve_i18n::t!("mail.panel.open"),
                 href: Some(href),
             }],
             updated: msgs.last().map_or(t.last_at, |m| m.date),
@@ -386,7 +388,7 @@ fn rcpt_names(v: &serde_json::Value) -> String {
             })
         })
         .collect();
-    names.join("、")
+    names.join(&steve_i18n::t!("mail.list_sep"))
 }
 
 fn api(e: MailError) -> ApiError {

@@ -225,7 +225,7 @@ fn parse_ref(inner: &str) -> Option<Result<(String, String), String>> {
         Some((i, f)) if !i.trim().is_empty() && !f.trim().is_empty() => {
             Ok((i.trim().to_string(), f.trim().to_string()))
         }
-        _ => Err(SECRET_FORM.to_string()),
+        _ => Err(steve_i18n::t!("flow.node.secret_form")),
     })
 }
 
@@ -255,7 +255,7 @@ fn refs_in_value(v: &Value, out: &mut Vec<(String, String)>) -> Result<(), Strin
         Value::Object(m) => {
             for (k, x) in m {
                 if !refs_in(k)?.is_empty() {
-                    return Err(SECRETS_PLACE.into());
+                    return Err(steve_i18n::t!("flow.node.secrets_place"));
                 }
                 refs_in_value(x, out)?;
             }
@@ -541,24 +541,24 @@ impl NodeKind for Http {
     fn validate(&self, cfg: &Value) -> Result<(), String> {
         let m = method_of(cfg);
         if !METHODS.contains(&m.as_str()) {
-            return Err(format!("不支持的请求方法：{m}"));
+            return Err(steve_i18n::t!("flow.node.http_method", method = m));
         }
         match cfg.get("effect") {
             None | Some(Value::Null) | Some(Value::Bool(_)) => {}
-            Some(_) => return Err("effect 只能是 true 或 false".into()),
+            Some(_) => return Err(steve_i18n::t!("flow.node.http_effect")),
         }
         if !effect_of(cfg) && m != "GET" {
-            return Err(GET_ONLY.into());
+            return Err(steve_i18n::t!("flow.node.get_only"));
         }
-        let url = req_str(cfg, "url", "网址", URL_MAX)?;
+        let url = req_str(cfg, "url", super::Required::Url, URL_MAX)?;
         if has_secret_ref(url) || opt_str(cfg, "method")?.is_some_and(has_secret_ref) {
-            return Err(SECRETS_PLACE.into());
+            return Err(steve_i18n::t!("flow.node.secrets_place"));
         }
         crate::expr::check_template(url)?;
         if !url.contains("{{") {
-            let u = Url::parse(url).map_err(|_| format!("网址不对：{url}"))?;
+            let u = Url::parse(url).map_err(|_| steve_i18n::t!("flow.node.http_url", url = url))?;
             if !matches!(u.scheme(), "http" | "https") {
-                return Err("网址只能是 http 或 https".into());
+                return Err(steve_i18n::t!("flow.node.http_scheme"));
             }
         }
         match cfg.get("headers") {
@@ -566,15 +566,15 @@ impl NodeKind for Http {
             Some(Value::Object(h)) => {
                 for (k, v) in h {
                     if HeaderName::from_bytes(k.as_bytes()).is_err() || has_secret_ref(k) {
-                        return Err(format!("请求头名字不对：{k}"));
+                        return Err(steve_i18n::t!("flow.node.header_name", name = k));
                     }
                     let Some(v) = v.as_str() else {
-                        return Err(format!("请求头「{k}」的值只能是文字"));
+                        return Err(steve_i18n::t!("flow.node.header_value", name = k));
                     };
                     refs_in(v)?;
                 }
             }
-            Some(_) => return Err("headers 只能是「名字: 值」".into()),
+            Some(_) => return Err(steve_i18n::t!("flow.node.headers")),
         }
         if let Some(b) = cfg.get("body") {
             let mut v = Vec::new();

@@ -25,6 +25,7 @@ pub const MAX_LIMIT: usize = 100;
 pub const MAX_INLINE: usize = 5 * 1024 * 1024;
 pub const MAX_INLINE_TOTAL: usize = 15 * 1024 * 1024;
 /// The original is past the local retention.
+/// The zh-CN text of `mail.original.purged`.
 pub const PURGED: &str = "原件已经过了本地保留期，请先重新取原件";
 
 /// The views of the list (需要处理 · 收件箱 · 等对方 · 已发送 · 草稿, and all).
@@ -617,7 +618,7 @@ impl Mail {
     /// `GET /mail/messages/:id/raw`: the original (`message/rfc822`); `410` once purged.
     pub fn message_raw(&self, who: &Caller, id: &str) -> MailResult<Result<Vec<u8>, Refused>> {
         let (_, raw) = self.own_message(who, id)?;
-        Ok(raw.ok_or_else(|| Refused::new(410, PURGED)))
+        Ok(raw.ok_or_else(|| Refused::new(410, steve_i18n::t!("mail.original.purged"))))
     }
 
     /// `GET /mail/messages/:id/html`: the sanitized HTML body with inline images as `data:` URLs,
@@ -633,7 +634,10 @@ impl Mail {
             return Err(ApiError::not_found("HTML 正文").into());
         }
         let Some(raw) = raw else {
-            return Ok(Err(Refused::new(410, PURGED)));
+            return Ok(Err(Refused::new(
+                410,
+                steve_i18n::t!("mail.original.purged"),
+            )));
         };
         let html = parse::html_body(&raw).ok_or_else(|| ApiError::not_found("HTML 正文"))?;
         let atts = self.0.m.store.reader(|c| parts_of(c, &m.id))?;
@@ -677,7 +681,10 @@ impl Mail {
             .find(|a| a.content_id.as_deref() == Some(cid))
             .ok_or_else(|| MailError::from(ApiError::not_found("图片")))?;
         let Some(raw) = raw else {
-            return Ok(Err(Refused::new(410, PURGED)));
+            return Ok(Err(Refused::new(
+                410,
+                steve_i18n::t!("mail.original.purged"),
+            )));
         };
         let bytes = parse::attachment_bytes(&raw, &a.part)
             .ok_or_else(|| MailError::from(ApiError::not_found("图片")))?;

@@ -742,10 +742,14 @@ impl DecisionHandler for UseDecisions {
             .filter(|u| u.workspace_id == cx.ws)
             .ok_or_else(|| ApiError::not_found("使用记录"))?;
         if u.status != "pending" {
-            return Err(ApiError::conflict("这次使用已经处理过了"));
+            return Err(ApiError::conflict(steve_i18n::t!(
+                "modules.vault.use_handled"
+            )));
         }
         let Some(p) = lock(&inner.pending).get(&u.id).cloned() else {
-            return Err(ApiError::conflict("这个请求已经失效，请让 Bot 重新发起"));
+            return Err(ApiError::conflict(steve_i18n::t!(
+                "modules.vault.use_expired"
+            )));
         };
         let at = now();
         let mut result = choice_result(cx);
@@ -803,7 +807,9 @@ impl DecisionHandler for UseDecisions {
     }
 
     fn before_undo(&self, _: &Tx, _: &Decision) -> ApiResult<()> {
-        Err(ApiError::rule("机密使用的决定不能撤销"))
+        Err(ApiError::rule(steve_i18n::t!(
+            "modules.vault.use_not_undoable"
+        )))
     }
 
     fn expire(&self, tx: &Tx, d: &Decision) -> ApiResult<()> {

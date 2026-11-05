@@ -35,6 +35,7 @@ pub const MAX_FILES: usize = 10;
 pub const MAX_SUBJECT_CHARS: usize = 998;
 pub const MAX_BODY_CHARS: usize = 100_000;
 
+/// The zh-CN texts of `mail.draft.edited` and `mail.draft.already_sent`.
 pub const MSG_EDITED: &str = "草稿在你批准前被改过，请再看一遍";
 pub const MSG_ALREADY_SENT: &str = "邮件已经发出，不能撤回";
 
@@ -596,10 +597,10 @@ impl Mail {
                 total += row.4;
             }
             if adapter == "outlook" && total > 3 * 1024 * 1024 {
-                return Err(ApiError::rule("Outlook 账号一次最多发 3 MB 附件").into());
+                return Err(ApiError::rule(steve_i18n::t!("mail.draft.outlook_limit")).into());
             }
             if total > crate::send::MAX_ATTACHMENTS_BYTES {
-                return Err(ApiError::rule("附件合计不能超过 20 MB").into());
+                return Err(ApiError::rule(steve_i18n::t!("mail.draft.attachments_total")).into());
             }
             Ok(())
         })
@@ -664,7 +665,7 @@ impl Mail {
     pub fn update_draft(&self, who: &Caller, id: &str, p: DraftPatch) -> MailResult<DraftOut> {
         let mut d = self.own_draft(who, id)?;
         if !["draft", "pending"].contains(&d.status.as_str()) {
-            return Err(ApiError::conflict("这封邮件已经不能改了").into());
+            return Err(ApiError::conflict(steve_i18n::t!("mail.draft.locked")).into());
         }
         if let Some(c) = p.connection_id.filter(|c| *c != d.connection_id) {
             self.own_mailbox(who, &c)?;
@@ -707,7 +708,7 @@ impl Mail {
             let cur =
                 repo::draft(tx, id)?.ok_or_else(|| MailError::Api(ApiError::not_found("草稿")))?;
             if cur.status != d.status {
-                return Err(ApiError::conflict("这封邮件已经不能改了").into());
+                return Err(ApiError::conflict(steve_i18n::t!("mail.draft.locked")).into());
             }
             repo::update_draft_content(tx, &d, now)?;
             base::audit(tx, &who.ws, &who.me, "mail_draft.update", id, &json!({}))?;
@@ -751,9 +752,9 @@ impl Mail {
             )? {
                 let st = repo::draft(tx, id)?.map(|d| d.status).unwrap_or_default();
                 return Err(ApiError::conflict(if st == "discarded" {
-                    "这封邮件已经丢弃了"
+                    steve_i18n::t!("mail.draft.discarded")
                 } else {
-                    MSG_ALREADY_SENT
+                    steve_i18n::t!("mail.draft.already_sent")
                 })
                 .into());
             }
@@ -772,14 +773,16 @@ impl Mail {
     pub fn send_draft(&self, who: &Caller, id: &str) -> MailResult<DraftOut> {
         let d = self.own_draft(who, id)?;
         if d.to.is_empty() && d.cc.is_empty() && d.bcc.is_empty() {
-            return Err(ApiError::rule("还没有收件人").into());
+            return Err(ApiError::rule(steve_i18n::t!("mail.draft.no_recipients")).into());
         }
         let now = self.now();
         let dec = self.0.m.store.transaction(|tx| -> MailResult<String> {
             let mut d =
                 repo::draft(tx, id)?.ok_or_else(|| MailError::Api(ApiError::not_found("草稿")))?;
             if !["draft", "pending", "failed"].contains(&d.status.as_str()) {
-                return Err(ApiError::conflict("这封邮件已经处理过了").into());
+                return Err(
+                    ApiError::conflict(steve_i18n::t!("mail.draft.already_handled")).into(),
+                );
             }
             open_approval(tx, &mut d, &who.me, now)
         })?;
@@ -830,7 +833,9 @@ impl Mail {
                 let mut d = repo::draft(tx, draft_id)?
                     .ok_or_else(|| MailError::Api(ApiError::not_found("草稿")))?;
                 if !["draft", "pending", "failed"].contains(&d.status.as_str()) {
-                    return Err(ApiError::conflict("这封邮件已经处理过了").into());
+                    return Err(
+                        ApiError::conflict(steve_i18n::t!("mail.draft.already_handled")).into(),
+                    );
                 }
                 let author = d.author.clone();
                 let id = open_approval(tx, &mut d, &author, now)?;

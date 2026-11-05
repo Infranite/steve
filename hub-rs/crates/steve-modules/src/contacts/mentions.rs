@@ -81,9 +81,9 @@ pub fn sub(c: &Connection, viewer: &Viewer, p: &Party) -> ApiResult<String> {
         "team" => {
             let n =
                 super::teams::repo::headcount(c, &viewer.ws, &p.id, prepo::is_chart(c, &p.id)?)?;
-            format!("团队 · {n} 人")
+            steve_i18n::t!("modules.mentions.team", n = n)
         }
-        "org" => "组织".into(),
+        "org" => steve_i18n::t!("modules.mentions.org"),
         _ => match jobs(c, viewer, &p.id)?.into_iter().find(|j| j.to.is_none()) {
             Some(j) => match j.title.filter(|t| !t.is_empty()) {
                 Some(t) => format!("{} · {t}", j.org_name),

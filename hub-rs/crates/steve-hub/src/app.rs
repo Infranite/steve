@@ -129,7 +129,7 @@ async fn maintenance_gate(State(st): State<AppState>, req: Request, next: Next) 
             let Some(permit) = continuation else {
                 return json_response(
                     503,
-                    &json!({"error":"正在准备升级，请稍后重试；对话消息仍可排队", "maintenance":true}),
+                    &json!({"error": steve_i18n::t!("hub.maintenance.preparing"), "maintenance": true}),
                 );
             };
             permit
@@ -235,6 +235,29 @@ pub fn app(
         .layer(compression())
         .layer(middleware::from_fn(vary_encoding))
         .layer(middleware::from_fn(slow_requests))
+        .layer(middleware::from_fn(locale))
+}
+
+/// The language of the text this request answers with (steve-i18n): `?lang=` (the SSE stream, which can't set
+/// a header), else `Accept-Language`, else zh-CN. `/mcp` is always zh-CN: what it answers goes to a model.
+async fn locale(req: Request, next: Next) -> Response {
+    let path = req.uri().path();
+    let lang = if path.starts_with("/mcp") {
+        steve_i18n::ZH_CN
+    } else {
+        let query = req.uri().query().unwrap_or_default();
+        query
+            .split('&')
+            .find_map(|kv| kv.strip_prefix("lang="))
+            .and_then(steve_i18n::match_tag)
+            .unwrap_or_else(|| {
+                req.headers()
+                    .get(header::ACCEPT_LANGUAGE)
+                    .and_then(|v| v.to_str().ok())
+                    .map_or(steve_i18n::ZH_CN, steve_i18n::from_accept_language)
+            })
+    };
+    steve_i18n::scope(lang, next.run(req)).await
 }
 
 /// Every compressible answer varies by `Accept-Encoding`, also the ones sent as is (a HEAD, a small body), so a

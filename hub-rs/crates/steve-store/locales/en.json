@@ -1,0 +1,20 @@
+{
+  "store.list_sep": ", ",
+  "store.kinds.missing": "An item needs one category tag (pick one of %{names})",
+  "store.kinds.several": "An item can have only one category tag, but it has %{tags}; to change the category, just pick the new one",
+  "store.kinds.desc.bug": "Fixing errors, failures or unexpected behavior",
+  "store.kinds.desc.feat": "New capabilities, interactions or feature improvements",
+  "store.kinds.desc.doc": "Writing and updating docs, proposals and explanations",
+  "store.kinds.desc.refactor": "Code restructuring that doesn't change external behavior",
+  "store.kinds.desc.ops": "Deployment, upgrades, operations and environment setup",
+  "store.kinds.desc.chore": "Dependency upkeep, tool configuration and other chores",
+  "store.tag.not_a_kind": "“%{cat}” holds only the six category tags %{names}; put new tags in another category, such as a domain or topic",
+  "store.tag.kind_rename": "A category tag can't be renamed",
+  "store.tag.kind_recategorize": "A category tag can't be moved to another category",
+  "store.tag.kind_name": "%{name} is the name of a category tag",
+  "store.tag.kind_delete": "A category tag can't be deleted",
+  "store.tag.kind_merge": "Category tags can't be merged",
+  "store.item.end_by_lifecycle": "Only the item's lifecycle can end it (%{status})",
+  "store.item.closed": "This item has already ended; start a new cycle if you need one",
+  "store.show.empty": "(empty)"
+}

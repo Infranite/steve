@@ -1,0 +1,15 @@
+[package]
+name = "steve-i18n"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+description = "The language of the request (Accept-Language) and the t!() macro over each crate's locales/*.json"
+
+[dependencies]
+rust-i18n = "=4.2.4"
+tokio = { version = "=1.54.1", features = ["rt"] }
+
+[dev-dependencies]
+regex = "=1.13.1"
+serde_json = "=1.0.154"
+tokio = { version = "=1.54.1", features = ["rt", "macros"] }

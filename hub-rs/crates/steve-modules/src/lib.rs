@@ -29,6 +29,8 @@
 //!    `registry.contexts()` in `startSession` and `answer`, [`panels::panels`] / [`panels::action`]
 //!    behind `GET /api/items/:id/panels` and `POST /api/items/:id/panels/:panel/actions/:action`.
 
+steve_i18n::init!();
+
 pub mod accounts;
 pub mod changes;
 pub mod clock;
@@ -42,6 +44,7 @@ pub mod hooks;
 pub mod net;
 pub mod outbound;
 pub mod panels;
+pub mod shown;
 pub mod sse;
 pub mod testkit;
 pub mod vault;
@@ -276,7 +279,7 @@ impl Modules {
         f: impl FnOnce(&Modules) -> ApiResult<R> + Send + 'static,
     ) -> ApiResult<R> {
         let m = self.clone();
-        tokio::task::spawn_blocking(move || f(&m))
+        tokio::task::spawn_blocking(steve_i18n::carry(move || f(&m)))
             .await
             .map_err(|e| ApiError::Internal(format!("task failed: {e}")))?
     }

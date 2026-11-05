@@ -16,8 +16,6 @@ use crate::service;
 use crate::sources::{self, folder};
 
 pub const NOUN_FILE: &str = "附件";
-/// The same attachment is already in the knowledge base, added by someone the caller cannot see.
-pub const TAKEN: &str = "这个附件已经被别人加进知识库了";
 
 /// `data/files/<workspace>/<sha256[..2]>/<id>`, as files.ts `blobPath` and steve-core's
 /// `attachments::blob_path`.
@@ -107,7 +105,7 @@ pub fn add(m: &Modules, who: &Caller, b: &FileBody) -> ApiResult<(String, bool)>
             return if viewer.sees(&d.eff_visibility(&src), &d.created_by) {
                 Ok((d.id, false))
             } else {
-                Err(ApiError::conflict(TAKEN))
+                Err(ApiError::conflict(steve_i18n::t!("knowledge.files.taken")))
             };
         }
         if let Some(v) = &b.visibility

@@ -33,7 +33,7 @@ use crate::index;
 use crate::notes::{self, NewNote};
 use crate::repo::{self, DocFilter, DocRow, SourceRow};
 use crate::service::own_doc;
-use crate::sources::folder::{self, OWNER_ONLY, SourceBody, SourcePatch, check_path};
+use crate::sources::folder::{self, SourceBody, SourcePatch, check_path};
 use crate::sources::{self, is_builtin};
 use crate::state::Knowledge;
 use crate::sync;
@@ -47,8 +47,6 @@ pub const OP_MEM_ADD: &str = "kb.mem.add";
 pub const OP_NOTE_CREATE: &str = "kb.note.create";
 pub const OP_DOC_PATCH: &str = "kb.doc.patch";
 
-const UNRECOGNIZED: &str = "（没认出）";
-const SECRET: &str = "这段话里像是有密码或令牌，草稿不处理机密，请在页面上填写";
 const MEM_KINDS: [(&str, &str); 4] = [
     ("fact", "事实"),
     ("preference", "偏好"),
@@ -65,7 +63,6 @@ const PRIVATE: &str = "只有我";
 const WORKSPACE: &str = "工作空间";
 const SYNCING: &str = "同步中";
 const PAUSED: &str = "已暂停";
-const FOLLOW: &str = "跟随来源";
 
 /// Registers both targets and the five operations.
 pub fn register(r: &mut Registry, kb: Knowledge) {
@@ -101,6 +98,94 @@ fn parse_level(s: &str) -> Option<Level> {
 
 fn paused_label(p: bool) -> &'static str {
     if p { PAUSED } else { SYNCING }
+}
+
+/// The card's text for the model-facing labels above, in the request's language. The Chinese labels
+/// stay as they are for the field specs (the model reads them and writes them back).
+fn level_text(l: Level) -> String {
+    match l {
+        Level::Public => steve_i18n::t!("knowledge.level.public"),
+        Level::Conclusion => steve_i18n::t!("knowledge.level.conclusion"),
+        Level::Reasoning => steve_i18n::t!("knowledge.level.reasoning"),
+        Level::Never => steve_i18n::t!("knowledge.level.never"),
+    }
+}
+
+fn paused_text(p: bool) -> String {
+    if p {
+        steve_i18n::t!("knowledge.source.paused")
+    } else {
+        steve_i18n::t!("knowledge.source.syncing")
+    }
+}
+
+fn mem_kind_text(code: &str) -> String {
+    match code {
+        "preference" => steve_i18n::t!("knowledge.mem_kind.preference"),
+        "rule" => steve_i18n::t!("knowledge.mem_kind.rule"),
+        "event" => steve_i18n::t!("knowledge.mem_kind.event"),
+        _ => steve_i18n::t!("knowledge.mem_kind.fact"),
+    }
+}
+
+/// A field a preview line is about.
+#[derive(Clone, Copy)]
+enum Field {
+    Name,
+    Paused,
+    Visibility,
+    Level,
+    Include,
+    Exclude,
+    Kind,
+}
+
+impl Field {
+    fn list(key: &str) -> Self {
+        if key == "include" {
+            Self::Include
+        } else {
+            Self::Exclude
+        }
+    }
+
+    fn label(self) -> String {
+        match self {
+            Self::Name => steve_i18n::t!("knowledge.draft.field.name"),
+            Self::Paused => steve_i18n::t!("knowledge.draft.field.paused"),
+            Self::Visibility => steve_i18n::t!("knowledge.draft.field.visibility"),
+            Self::Level => steve_i18n::t!("knowledge.draft.field.level"),
+            Self::Include => steve_i18n::t!("knowledge.draft.field.include"),
+            Self::Exclude => steve_i18n::t!("knowledge.draft.field.exclude"),
+            Self::Kind => steve_i18n::t!("knowledge.draft.field.kind"),
+        }
+    }
+
+    /// “没有改<field>”.
+    fn unchanged(self) -> String {
+        match self {
+            Self::Name => steve_i18n::t!("knowledge.draft.unchanged.name"),
+            Self::Paused => steve_i18n::t!("knowledge.draft.unchanged.paused"),
+            Self::Visibility => steve_i18n::t!("knowledge.draft.unchanged.visibility"),
+            Self::Level => steve_i18n::t!("knowledge.draft.unchanged.level"),
+            Self::Include => steve_i18n::t!("knowledge.draft.unchanged.include"),
+            Self::Exclude => steve_i18n::t!("knowledge.draft.unchanged.exclude"),
+            Self::Kind => steve_i18n::t!("knowledge.draft.unchanged.kind"),
+        }
+    }
+}
+
+fn unrecognized() -> String {
+    steve_i18n::t!("knowledge.draft.unrecognized")
+}
+
+/// Text the guard flags is never drafted (a preview line and the refusal at apply).
+fn secret() -> String {
+    steve_i18n::t!("knowledge.draft.secret")
+}
+
+fn list_text(xs: &[String]) -> String {
+    show(&xs.join(&steve_i18n::t!("knowledge.list_sep")))
 }
 
 fn parse_paused(s: &str) -> Option<bool> {
@@ -142,6 +227,26 @@ pub fn vis_label(c: &Connection, v: &Visibility) -> String {
         Visibility::Space(id) => format!(
             "空间「{}」",
             name("SELECT name FROM spaces WHERE id = ?", id)
+        ),
+    }
+}
+
+/// [`vis_label`] for the card, in the request's language.
+fn vis_text(c: &Connection, v: &Visibility) -> String {
+    let name = |sql: &str, id: &str| -> String {
+        c.query_row(sql, [id], |r| r.get::<_, String>(0))
+            .unwrap_or_else(|_| id.to_string())
+    };
+    match v {
+        Visibility::Private => steve_i18n::t!("knowledge.vis.private"),
+        Visibility::Workspace => steve_i18n::t!("knowledge.vis.workspace"),
+        Visibility::Team(id) => steve_i18n::t!(
+            "knowledge.vis.team",
+            name = name("SELECT name FROM parties WHERE id = ?", id)
+        ),
+        Visibility::Space(id) => steve_i18n::t!(
+            "knowledge.vis.space",
+            name = name("SELECT name FROM spaces WHERE id = ?", id)
         ),
     }
 }
@@ -197,12 +302,12 @@ fn list_of(v: &Value) -> Option<Vec<String>> {
     }
 }
 
-fn unknown(what: &str, said: &str) -> Change {
-    Change::new(
-        format!("（没认出：{}）", said.trim()),
-        "—",
-        format!("没有改{what}"),
-    )
+fn unrecognized_said(said: &str) -> String {
+    steve_i18n::t!("knowledge.draft.unrecognized_said", said = said.trim())
+}
+
+fn unknown(what: Field, said: &str) -> Change {
+    Change::new(unrecognized_said(said), "—", what.unchanged())
 }
 
 /// The operation name as the model wrote it, without the optional `kb.` prefix.
@@ -286,7 +391,7 @@ impl DraftTarget for SourceTarget {
         Ok(Prepared {
             target_id: Some(s.id.clone()),
             revision: Some(s.revision),
-            title: format!("知识来源「{}」", s.name),
+            title: steve_i18n::t!("knowledge.draft.source_title", name = s.name),
             href: source_href(&s.id),
             subject: format!("the knowledge source \"{}\"", s.name),
             fields,
@@ -329,7 +434,7 @@ impl DraftTarget for SourceTarget {
                     .unwrap_or_default(),
                 _ => {
                     plan.changes
-                        .push(Change::new(UNRECOGNIZED, "—", show(&op.to_string())));
+                        .push(Change::new(unrecognized(), "—", show(&op.to_string())));
                     continue;
                 }
             };
@@ -375,75 +480,84 @@ fn patch_field(
 ) -> ApiResult<Option<Change>> {
     let raw = text_of(v).unwrap_or_default();
     let folder = s.kind == "folder";
-    let owner_only =
-        |label: &str, from: String| Change::new(label, from, format!("（没有改：{OWNER_ONLY}）"));
+    let owner_only = |what: Field, from: String| {
+        Change::new(
+            what.label(),
+            from,
+            steve_i18n::t!("knowledge.draft.not_changed", reason = folder::owner_only()),
+        )
+    };
     let may_rescope = !is_builtin(&s.kind) || folder::is_owner(c, &viewer.ws, &viewer.user)?;
     Ok(match key {
         "name" => {
             let n: String = raw.trim().to_string();
             if !(1..=40).contains(&n.chars().count()) {
-                return Ok(Some(unknown("名字", &raw)));
+                return Ok(Some(unknown(Field::Name, &raw)));
             }
             if n == s.name {
                 return Ok(None);
             }
             patch.name = Some(n.clone());
-            Some(Change::new("名字", show(&s.name), show(&n)))
+            Some(Change::new(Field::Name.label(), show(&s.name), show(&n)))
         }
         "paused" => {
             let Some(p) = parse_paused(&raw) else {
-                return Ok(Some(unknown("状态", &raw)));
+                return Ok(Some(unknown(Field::Paused, &raw)));
             };
             if p == s.paused {
                 return Ok(None);
             }
             patch.paused = Some(p);
-            Some(Change::new("状态", paused_label(s.paused), paused_label(p)))
+            Some(Change::new(
+                Field::Paused.label(),
+                paused_text(s.paused),
+                paused_text(p),
+            ))
         }
         "visibility" => {
             let Some(vis) = parse_vis(c, viewer, &raw)? else {
-                return Ok(Some(unknown("可见范围", &raw)));
+                return Ok(Some(unknown(Field::Visibility, &raw)));
             };
             if vis == s.visibility {
                 return Ok(None);
             }
-            let from = vis_label(c, &s.visibility);
+            let from = vis_text(c, &s.visibility);
             if !may_rescope {
-                return Ok(Some(owner_only("可见范围", from)));
+                return Ok(Some(owner_only(Field::Visibility, from)));
             }
-            let to = vis_label(c, &vis);
+            let to = vis_text(c, &vis);
             patch.visibility = Some(vis);
-            Some(Change::new("可见范围", from, to))
+            Some(Change::new(Field::Visibility.label(), from, to))
         }
         "level" => {
             let Some(l) = parse_level(&raw) else {
-                return Ok(Some(unknown("披露级别", &raw)));
+                return Ok(Some(unknown(Field::Level, &raw)));
             };
             if l == s.level {
                 return Ok(None);
             }
             if !may_rescope {
-                return Ok(Some(owner_only("披露级别", level_label(s.level).into())));
+                return Ok(Some(owner_only(Field::Level, level_text(s.level))));
             }
             patch.level = Some(l);
             Some(Change::new(
-                "披露级别",
-                level_label(s.level),
-                level_label(l),
+                Field::Level.label(),
+                level_text(s.level),
+                level_text(l),
             ))
         }
         "include" | "exclude" if folder => {
-            let label = if key == "include" { "包含" } else { "排除" };
+            let field = Field::list(key);
             let max = if key == "include" { 20 } else { 50 };
             let list = match list_of(v) {
                 Some(l) if l.len() <= max && l.iter().all(|x| crate::scan::valid_pattern(x)) => l,
-                _ => return Ok(Some(unknown(label, &v.to_string()))),
+                _ => return Ok(Some(unknown(field, &v.to_string()))),
             };
             let cur: Vec<String> = s.config.get(key).and_then(list_of_ref).unwrap_or_default();
             if list == cur {
                 return Ok(None);
             }
-            let line = Change::new(label, show(&cur.join("、")), show(&list.join("、")));
+            let line = Change::new(field.label(), list_text(&cur), list_text(&list));
             if key == "include" {
                 patch.include = Some(list);
             } else {
@@ -454,7 +568,7 @@ fn patch_field(
         _ => {
             let said = text_of(v).unwrap_or_else(|| v.to_string());
             Some(Change::new(
-                UNRECOGNIZED,
+                unrecognized(),
                 "—",
                 show(&format!("{key}: {said}")),
             ))
@@ -482,7 +596,7 @@ impl ChangeOp for SourcePatchOp {
         let who = cx_caller(cx);
         let old = folder::own_source(c, &who, &id)?;
         if folder::owner_refuses(c, &who, &old, &patch)? {
-            return Err(ApiError::forbidden(OWNER_ONLY));
+            return Err(ApiError::forbidden(folder::owner_only()));
         }
         Ok(())
     }
@@ -530,7 +644,7 @@ fn create_prepared() -> Prepared {
     Prepared {
         target_id: None,
         revision: None,
-        title: "新增知识来源".into(),
+        title: steve_i18n::t!("knowledge.draft.new_source_title"),
         href: "#/knowledge?tab=sources".into(),
         subject: "the user's knowledge sources (a new folder)".into(),
         fields: vec![],
@@ -553,7 +667,7 @@ impl DraftTarget for KnowledgeTarget {
         Ok(Prepared {
             target_id: None,
             revision: None,
-            title: "知识库".into(),
+            title: steve_i18n::t!("knowledge.draft.knowledge_title"),
             href: "#/knowledge".into(),
             subject: "the user's knowledge base (memories, notes, documents, sources)".into(),
             fields: vec![],
@@ -618,7 +732,7 @@ fn plan_ops(
         let name = op_name(&op);
         if !allowed.contains(&name.as_str()) {
             plan.changes
-                .push(Change::new(UNRECOGNIZED, "—", show(&op.to_string())));
+                .push(Change::new(unrecognized(), "—", show(&op.to_string())));
             continue;
         }
         let (stored, lines) = match name.as_str() {
@@ -650,14 +764,14 @@ fn scope_of(c: &Connection, viewer: &Viewer, op: &Value) -> ApiResult<Result<Sco
         None => None,
         Some(s) => match parse_vis(c, viewer, &s)? {
             Some(v) => Some(v),
-            None => return Ok(Err(unknown("可见范围", &s))),
+            None => return Ok(Err(unknown(Field::Visibility, &s))),
         },
     };
     let level = match op.get("level").and_then(text_of).filter(|s| !s.is_empty()) {
         None => None,
         Some(s) => match parse_level(&s) {
             Some(l) => Some(l),
-            None => return Ok(Err(unknown("披露级别", &s))),
+            None => return Ok(Err(unknown(Field::Level, &s))),
         },
     };
     Ok(Ok((vis, level)))
@@ -688,7 +802,11 @@ fn plan_create(kb: &Knowledge, c: &Connection, viewer: &Viewer, op: &Value) -> A
     if said.is_empty() {
         return Ok((
             None,
-            vec![Change::new("（没说清楚）", "—", "缺少文件夹路径")],
+            vec![Change::new(
+                unclear(),
+                "—",
+                steve_i18n::t!("knowledge.draft.missing_path"),
+            )],
         ));
     }
     let raw = expand_home(kb, &said);
@@ -696,7 +814,7 @@ fn plan_create(kb: &Knowledge, c: &Connection, viewer: &Viewer, op: &Value) -> A
         Ok((
             None,
             vec![Change::new(
-                format!("新增知识来源 {raw}"),
+                steve_i18n::t!("knowledge.draft.new_source", path = raw),
                 "—",
                 folder::refusal(&why),
             )],
@@ -721,13 +839,7 @@ fn plan_create(kb: &Knowledge, c: &Connection, viewer: &Viewer, op: &Value) -> A
                     lists.insert(key.into(), json!(l));
                 }
                 _ => {
-                    return Ok((
-                        None,
-                        vec![unknown(
-                            if key == "include" { "包含" } else { "排除" },
-                            &v.to_string(),
-                        )],
-                    ));
+                    return Ok((None, vec![unknown(Field::list(key), &v.to_string())]));
                 }
             }
         }
@@ -741,12 +853,13 @@ fn plan_create(kb: &Knowledge, c: &Connection, viewer: &Viewer, op: &Value) -> A
     let level = level.unwrap_or(Level::Conclusion);
     let shown = path.to_string_lossy().into_owned();
     let line = Change::new(
-        format!("新增知识来源 {shown}"),
+        steve_i18n::t!("knowledge.draft.new_source", path = shown),
         "—",
-        format!(
-            "「{name}」 · {} · {}",
-            vis_label(c, &vis),
-            level_label(level)
+        steve_i18n::t!(
+            "knowledge.draft.new_source_detail",
+            name = name,
+            vis = vis_text(c, &vis),
+            level = level_text(level)
         ),
     );
     let mut stored = json!({
@@ -818,14 +931,14 @@ fn resolve_about(
                 }
             }
             0 => lines.push(Change::new(
-                format!("（没认出：{n}）"),
+                unrecognized_said(n),
                 "—",
-                "没有加进“关于”",
+                steve_i18n::t!("knowledge.draft.about_not_added"),
             )),
             k => lines.push(Change::new(
-                format!("（没认出：{n}）"),
+                unrecognized_said(n),
                 "—",
-                format!("有 {k} 个同名的，没有自动选"),
+                steve_i18n::t!("knowledge.draft.about_ambiguous", count = k),
             )),
         }
     }
@@ -839,12 +952,12 @@ fn mem_kind(s: &str) -> Option<&'static str> {
         .map(|(code, _)| *code)
 }
 
-fn mem_kind_label(code: &str) -> &'static str {
-    MEM_KINDS
-        .iter()
-        .find(|(c, _)| *c == code)
-        .map(|(_, l)| *l)
-        .unwrap_or("事实")
+fn unclear() -> String {
+    steve_i18n::t!("knowledge.draft.unclear")
+}
+
+fn not_saved() -> String {
+    steve_i18n::t!("knowledge.draft.not_saved")
 }
 
 /// `mem.add`: one line “新记忆 — <text> · <种类> · <级别> · <范围> · 关于 …”.
@@ -853,11 +966,15 @@ fn plan_mem(kb: &Knowledge, c: &Connection, viewer: &Viewer, op: &Value) -> ApiR
     if !(1..=2000).contains(&text.chars().count()) {
         return Ok((
             None,
-            vec![Change::new("（没说清楚）", "—", "缺少要记住的内容")],
+            vec![Change::new(
+                unclear(),
+                "—",
+                steve_i18n::t!("knowledge.draft.missing_mem_text"),
+            )],
         ));
     }
     if !kb.guard.scan(&text).is_empty() {
-        return Ok((None, vec![Change::new("（没有记下）", "—", SECRET)]));
+        return Ok((None, vec![Change::new(not_saved(), "—", secret())]));
     }
     let kind_said = op.get("kind").and_then(text_of).unwrap_or_default();
     let kind = if kind_said.is_empty() {
@@ -865,7 +982,7 @@ fn plan_mem(kb: &Knowledge, c: &Connection, viewer: &Viewer, op: &Value) -> ApiR
     } else {
         match mem_kind(&kind_said) {
             Some(k) => k,
-            None => return Ok((None, vec![unknown("种类", &kind_said)])),
+            None => return Ok((None, vec![unknown(Field::Kind, &kind_said)])),
         }
     };
     let (vis, level) = match scope_of(c, viewer, op)? {
@@ -877,18 +994,35 @@ fn plan_mem(kb: &Knowledge, c: &Connection, viewer: &Viewer, op: &Value) -> ApiR
     let about = about.into_iter().take(10).collect::<Vec<_>>();
     let vis = vis.unwrap_or(Visibility::Private);
     let level = level.unwrap_or(Level::Conclusion);
-    let mut to = format!(
-        "{} · {} · {} · {}",
+    let (text_s, kind_s, level_s, vis_s) = (
         show(&text),
-        mem_kind_label(kind),
-        level_label(level),
-        vis_label(c, &vis)
+        mem_kind_text(kind),
+        level_text(level),
+        vis_text(c, &vis),
     );
-    if !about.is_empty() {
+    let to = if about.is_empty() {
+        steve_i18n::t!(
+            "knowledge.draft.mem_detail",
+            text = text_s,
+            kind = kind_s,
+            level = level_s,
+            vis = vis_s
+        )
+    } else {
         let names: Vec<&str> = about.iter().map(|(_, n)| n.as_str()).collect();
-        to.push_str(&format!(" · 关于 {}", names.join("、")));
-    }
-    lines.insert(0, Change::new("新记忆", "—", to));
+        steve_i18n::t!(
+            "knowledge.draft.mem_detail_about",
+            text = text_s,
+            kind = kind_s,
+            level = level_s,
+            vis = vis_s,
+            names = names.join(&steve_i18n::t!("knowledge.list_sep"))
+        )
+    };
+    lines.insert(
+        0,
+        Change::new(steve_i18n::t!("knowledge.draft.new_mem"), "—", to),
+    );
     let refs: Vec<&ObjRef> = about.iter().map(|(r, _)| r).collect();
     Ok((
         Some(json!({
@@ -918,11 +1052,15 @@ fn plan_note(kb: &Knowledge, c: &Connection, viewer: &Viewer, op: &Value) -> Api
     if title.is_empty() || title.chars().count() > 120 || body.len() > 200_000 {
         return Ok((
             None,
-            vec![Change::new("（没说清楚）", "—", "笔记缺少标题或太长")],
+            vec![Change::new(
+                unclear(),
+                "—",
+                steve_i18n::t!("knowledge.draft.note_unclear"),
+            )],
         ));
     }
     if !kb.guard.scan(&title).is_empty() || !kb.guard.scan(&body).is_empty() {
-        return Ok((None, vec![Change::new("（没有记下）", "—", SECRET)]));
+        return Ok((None, vec![Change::new(not_saved(), "—", secret())]));
     }
     let (vis, level) = match scope_of(c, viewer, op)? {
         Ok(x) => x,
@@ -930,17 +1068,21 @@ fn plan_note(kb: &Knowledge, c: &Connection, viewer: &Viewer, op: &Value) -> Api
     };
     let mut to = show(&title);
     if let Some(l) = level {
-        to.push_str(&format!(" · {}", level_label(l)));
+        to.push_str(&format!(" · {}", level_text(l)));
     }
     if let Some(v) = &vis {
-        to.push_str(&format!(" · {}", vis_label(c, v)));
+        to.push_str(&format!(" · {}", vis_text(c, v)));
     }
     Ok((
         Some(json!({
             "op": OP_NOTE_CREATE, "title": title, "body": body,
             "visibility": vis, "level": level,
         })),
-        vec![Change::new("新建笔记", "—", to)],
+        vec![Change::new(
+            steve_i18n::t!("knowledge.draft.new_note"),
+            "—",
+            to,
+        )],
     ))
 }
 
@@ -958,7 +1100,11 @@ fn plan_doc(c: &Connection, viewer: &Viewer, op: &Value) -> ApiResult<Planned> {
     if title.is_empty() {
         return Ok((
             None,
-            vec![Change::new("（没说清楚）", "—", "没说是哪篇文档")],
+            vec![Change::new(
+                unclear(),
+                "—",
+                steve_i18n::t!("knowledge.draft.which_doc"),
+            )],
         ));
     }
     let f = DocFilter {
@@ -976,9 +1122,9 @@ fn plan_doc(c: &Connection, viewer: &Viewer, op: &Value) -> ApiResult<Planned> {
             return Ok((
                 None,
                 vec![Change::new(
-                    format!("（没认出：{title}）"),
+                    unrecognized_said(&title),
                     "—",
-                    "没有这篇文档",
+                    steve_i18n::t!("knowledge.draft.no_such_doc"),
                 )],
             ));
         }
@@ -986,9 +1132,9 @@ fn plan_doc(c: &Connection, viewer: &Viewer, op: &Value) -> ApiResult<Planned> {
             return Ok((
                 None,
                 vec![Change::new(
-                    format!("（没认出：{title}）"),
+                    unrecognized_said(&title),
                     "—",
-                    format!("有 {} 篇同名的，没有自动选", many.len()),
+                    steve_i18n::t!("knowledge.draft.doc_ambiguous", count = many.len()),
                 )],
             ));
         }
@@ -1007,15 +1153,17 @@ fn plan_doc(c: &Connection, viewer: &Viewer, op: &Value) -> ApiResult<Planned> {
             parse_vis(c, viewer, &said)?.map(Some)
         };
         match new {
-            None => lines.push(unknown("可见范围", &said)),
+            None => lines.push(unknown(Field::Visibility, &said)),
             Some(v) if v != d.visibility => {
                 let to = match &v {
-                    Some(v) => vis_label(c, v),
-                    None => format!("{FOLLOW}（{}）", vis_label(c, &s.visibility)),
+                    Some(v) => vis_text(c, v),
+                    None => {
+                        steve_i18n::t!("knowledge.draft.follow", label = vis_text(c, &s.visibility))
+                    }
                 };
                 lines.push(Change::new(
-                    format!("「{}」的可见范围", d.title),
-                    vis_label(c, &d.eff_visibility(&s)),
+                    steve_i18n::t!("knowledge.draft.doc_visibility", title = d.title),
+                    vis_text(c, &d.eff_visibility(&s)),
                     to,
                 ));
                 set.insert("visibility".into(), json!(v));
@@ -1030,15 +1178,15 @@ fn plan_doc(c: &Connection, viewer: &Viewer, op: &Value) -> ApiResult<Planned> {
             parse_level(&said).map(Some)
         };
         match new {
-            None => lines.push(unknown("披露级别", &said)),
+            None => lines.push(unknown(Field::Level, &said)),
             Some(l) if l != d.level => {
                 let to = match l {
-                    Some(l) => level_label(l).to_string(),
-                    None => format!("{FOLLOW}（{}）", level_label(s.level)),
+                    Some(l) => level_text(l),
+                    None => steve_i18n::t!("knowledge.draft.follow", label = level_text(s.level)),
                 };
                 lines.push(Change::new(
-                    format!("「{}」的披露级别", d.title),
-                    level_label(d.eff_level(&s)),
+                    steve_i18n::t!("knowledge.draft.doc_level", title = d.title),
+                    level_text(d.eff_level(&s)),
                     to,
                 ));
                 set.insert("level".into(), json!(l));
@@ -1155,7 +1303,7 @@ impl ChangeOp for MemAddOp {
     fn validate(&self, c: &Connection, cx: &OpCx, op: &Value) -> ApiResult<()> {
         let a = mem_args(op)?;
         if !self.0.guard.scan(&a.text).is_empty() {
-            return Err(ApiError::rule(SECRET));
+            return Err(ApiError::rule(secret()));
         }
         if !repo::scope_exists(c, cx.ws, &a.visibility)? {
             return Err(ApiError::not_found("团队"));

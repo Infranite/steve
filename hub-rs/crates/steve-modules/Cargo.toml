@@ -9,6 +9,8 @@ description = "Shared base of the new Hub modules (contacts, vault, flows, chann
 steve-store = { path = "../steve-store" }
 # V4: the session redactor and the paste guard.
 steve-vault = { path = "../steve-vault" }
+rust-i18n = "=4.2.4"
+steve-i18n = { path = "../steve-i18n" }
 async-trait = "=0.1.92"
 chacha20poly1305 = "=0.11.0"
 data-encoding = "=2.11.1"

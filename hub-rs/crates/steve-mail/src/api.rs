@@ -22,6 +22,13 @@ use crate::{Mail, repo};
 impl IntoResponse for MailError {
     fn into_response(self) -> Response {
         let api = match self {
+            // the noun stays in the error; the sentence is made here, in the request's language
+            MailError::Api(ApiError::NotFound(noun)) => match crate::error::not_found_text(&noun) {
+                Some(msg) => {
+                    return (StatusCode::NOT_FOUND, Json(json!({ "error": msg }))).into_response();
+                }
+                None => ApiError::NotFound(noun),
+            },
             MailError::Api(a) => a,
             MailError::Adapter(
                 AdapterError::Auth(m)
@@ -31,7 +38,7 @@ impl IntoResponse for MailError {
                 | AdapterError::Transient(m),
             ) => ApiError::Rule(m),
             MailError::Adapter(AdapterError::Unsupported) => {
-                ApiError::rule("这个接入方式不支持这个操作")
+                ApiError::rule(steve_i18n::t!("mail.adapter.unsupported"))
             }
             e => ApiError::Internal(e.to_string()),
         };
@@ -230,7 +237,7 @@ async fn cancel_draft(
 async fn blocking<R: Send + 'static>(
     f: impl FnOnce() -> MailResult<R> + Send + 'static,
 ) -> MailResult<R> {
-    tokio::task::spawn_blocking(f)
+    tokio::task::spawn_blocking(steve_i18n::carry(f))
         .await
         .map_err(|e| MailError::Other(format!("task failed: {e}")))?
 }
@@ -333,7 +340,7 @@ async fn to_knowledge(
 
 /// `GET /mail/presets`: the IMAP presets of the new-mailbox dialog.
 async fn presets() -> Json<Value> {
-    Json(json!(crate::adapters::PRESETS))
+    Json(json!(crate::adapters::imap::presets()))
 }
 
 /// The query of `GET /mail/threads`, parsed here so a bad value is `400 参数不对：<key>`.

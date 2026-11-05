@@ -17,7 +17,7 @@ use steve_stats::views::{self, Bucket, Metric};
 use steve_stats::{Price, catalog, default_prices};
 use steve_store::{Store, StoreError, now, stats_changed};
 
-use super::{ApiResult, Ctx, blocking, body, ok};
+use super::{ApiResult, Ctx, Noun, blocking, body, ok};
 use crate::bus::Bus;
 use crate::error::{ApiError, json_response};
 
@@ -149,7 +149,7 @@ fn query(c: &Connection, ws: &str, p: &Params) -> Result<StatsQuery, ApiError> {
             .optional()
             .map_err(sql)?;
         if w.as_deref() != Some(ws) {
-            return Err(ApiError::not_found("没有这个项目"));
+            return Err(ApiError::not_found(Noun::Project.missing()));
         }
     }
     if let Some(id) = get("bot") {
@@ -161,7 +161,7 @@ fn query(c: &Connection, ws: &str, p: &Params) -> Result<StatsQuery, ApiError> {
             )
             .map_err(sql)?;
         if !member {
-            return Err(ApiError::not_found("没有这个 Bot"));
+            return Err(ApiError::not_found(Noun::Bot.missing()));
         }
     }
     if let Some(s) = get("source")
@@ -205,9 +205,11 @@ fn zone_name(c: &Connection, ws: &str) -> Result<String, ApiError> {
         .unwrap_or_else(|| "local".into()))
 }
 
+/// The cache key: the cached bodies hold translated labels, so the language is part of it.
 fn key(ws: &str, what: &str, p: &Params) -> String {
     let sorted: BTreeMap<&String, &String> = p.iter().collect();
-    format!("{ws}\u{1}{what}\u{1}{sorted:?}")
+    let lang = steve_i18n::current();
+    format!("{ws}\u{1}{what}\u{1}{lang}\u{1}{sorted:?}")
 }
 
 /// A summary as JSON with its range in `range`.
@@ -431,7 +433,7 @@ async fn item(
             Some((ws, d)) if ws == c.ws => {
                 ok(serde_json::to_value(d).map_err(|e| ApiError::internal(e.to_string()))?)
             }
-            _ => Err(ApiError::not_found("没有这个事项")),
+            _ => Err(ApiError::not_found(Noun::Item.missing())),
         },
     )
     .await
@@ -446,7 +448,7 @@ async fn session(
         Some((ws, s)) if ws == c.ws => {
             ok(serde_json::to_value(s).map_err(|e| ApiError::internal(e.to_string()))?)
         }
-        _ => Err(ApiError::not_found("没有这个会话")),
+        _ => Err(ApiError::not_found(Noun::Session.missing())),
     })
     .await
 }
@@ -681,11 +683,14 @@ async fn prices_sync(State(api): State<StatsApi>) -> ApiResult {
     let Some(url) = api.0.price_url.clone() else {
         return Ok(json_response(
             409,
-            &json!({ "error": "价格同步已关闭（STEVE_PRICE_CATALOG_URL=off）" }),
+            &json!({ "error": steve_i18n::t!("hub.prices.sync_off") }),
         ));
     };
     let Ok(_running) = RUNNING.try_lock() else {
-        return Ok(json_response(409, &json!({ "error": "正在同步，稍等" })));
+        return Ok(json_response(
+            409,
+            &json!({ "error": steve_i18n::t!("hub.prices.syncing") }),
+        ));
     };
     let r = crate::price_sync::sync_once(&api.0.store, &crate::price_sync::client(), &url).await;
     api.forget();
@@ -696,7 +701,7 @@ async fn prices_sync(State(api): State<StatsApi>) -> ApiResult {
         Ok(crate::price_sync::Synced::Unchanged) => ok(json!({ "ok": true, "unchanged": true })),
         Err(e) => Ok(json_response(
             502,
-            &json!({ "error": format!("{e}；继续使用上次同步的价格") }),
+            &json!({ "error": steve_i18n::t!("hub.prices.sync_failed", error = e) }),
         )),
     }
 }
@@ -746,7 +751,7 @@ async fn rebuild(State(api): State<StatsApi>, Extension(c): Extension<Ctx>) -> A
     if !owner {
         return Ok(json_response(
             403,
-            &json!({ "error": "只有工作空间的所有者能重建统计" }),
+            &json!({ "error": steve_i18n::t!("hub.stats.owner_only") }),
         ));
     }
     api.forget();
@@ -757,6 +762,15 @@ async fn rebuild(State(api): State<StatsApi>, Extension(c): Extension<Ctx>) -> A
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn the_cache_key_has_the_language() {
+        let p: Params = [("from".to_string(), "2026-11-01".to_string())].into();
+        let zh = key("ws_1", "summary", &p);
+        let en = steve_i18n::scope(steve_i18n::EN, async { key("ws_1", "summary", &p) }).await;
+        assert_ne!(zh, en);
+        assert_eq!(zh, key("ws_1", "summary", &p));
+    }
 
     #[test]
     fn prices_name_the_bad_field() {

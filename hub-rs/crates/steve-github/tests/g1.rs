@@ -696,6 +696,10 @@ async fn without_a_usable_vault_the_manifest_code_is_not_spent() {
     .await;
     assert_eq!(decode(&loc), steve_github::manifest::VAULT_NEEDED);
     assert!(
+        loc.ends_with("&error_code=vault_needed"),
+        "the web branches on the code, not the text: {loc}"
+    );
+    assert!(
         h.fake.calls_to("POST", "/app-manifests/").is_empty(),
         "the conversion was not called"
     );

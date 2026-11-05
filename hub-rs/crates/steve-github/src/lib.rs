@@ -76,6 +76,8 @@
 //!     resource with `resource_label`;
 //! 22. web: `#/github/:repo` reads `GET /github/repos/:id`; Issue rows' “转成事项” posts to-item.
 
+steve_i18n::init!();
+
 pub mod accept;
 pub mod adapters;
 pub mod after;

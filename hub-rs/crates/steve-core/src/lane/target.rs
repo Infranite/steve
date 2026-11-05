@@ -98,7 +98,7 @@ pub fn target_of(dir: &Path, branch: Option<&str>) -> Result<Target, String> {
         match pick {
             Some(x) if x.starts_with("file:") => local(dir, &x["file:".len()..])?,
             Some(x) => x.clone(),
-            None => return Err(format!("origin 的地址认不出来：{used}")),
+            None => return Err(steve_i18n::t!("core.lane.origin_unread", url = used)),
         }
     } else {
         local(dir, ".")?
@@ -155,14 +155,14 @@ fn default_branch(dir: &Path, has_origin: bool) -> Result<String, String> {
                 return Ok(b.into());
             }
         }
-        return Err("远端没有默认分支（origin/HEAD、main、master 都没有）".into());
+        return Err(steve_i18n::t!("core.lane.no_default_branch"));
     }
     for b in ["main", "master"] {
         if exists(&format!("refs/heads/{b}"))? {
             return Ok(b.into());
         }
     }
-    Err("仓库没有 main 或 master 分支".into())
+    Err(steve_i18n::t!("core.lane.no_main"))
 }
 
 #[cfg(test)]

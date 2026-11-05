@@ -23,7 +23,8 @@ use crate::spaces::Mode;
 
 /// Rules per account or space.
 pub const MAX_RULES: usize = 20;
-/// `400` for `reply` on your own account (trigger words are the only exception).
+/// `400` for `reply` on your own account (trigger words are the only exception); the zh-CN text of
+/// `channels.error.self_no_reply`.
 pub const SELF_NO_REPLY: &str = "以你本人接入时不能直接回复，只能起草";
 /// Keywords per rule, and their length.
 pub const MAX_WORDS: usize = 20;
@@ -368,7 +369,9 @@ pub fn parse(v: &Value, mode: Mode) -> ChannelResult<Vec<Rule>> {
     }
     c.done()?;
     if mode == Mode::Own && out.iter().any(|r| r.act == Act::Reply) {
-        return Err(ApiError::rule(SELF_NO_REPLY));
+        return Err(ApiError::rule(steve_i18n::t!(
+            "channels.error.self_no_reply"
+        )));
     }
     Ok(out)
 }
@@ -1005,16 +1008,19 @@ pub fn to_flow(
     if let Some(f) = &set.flow_id
         && steve_flow::flows::get(tx, f)?.is_some_and(|f| !f.deleted)
     {
-        return Err(ApiError::conflict(format!(
-            "已经转成流程「{}」了",
-            steve_flow::flows::name_of(tx, f)?
+        return Err(ApiError::conflict(steve_i18n::t!(
+            "channels.error.already_flow",
+            flow = steve_flow::flows::name_of(tx, f)?
         )));
     }
     if set.attention >= crate::spaces::Attention::Quiet {
-        return Err(ApiError::rule(format!(
-            "这个空间设为{}，消息不会触发流程；先改回实时或静默",
-            set.attention.label()
-        )));
+        return Err(ApiError::rule(
+            if set.attention == crate::spaces::Attention::Blocked {
+                steve_i18n::t!("channels.error.to_flow_blocked")
+            } else {
+                steve_i18n::t!("channels.error.to_flow_quiet")
+            },
+        ));
     }
     let ws = &viewer.ws;
     let (_, mode) = crate::bindings::connection_account(tx, ws, &s.connection_id)?;

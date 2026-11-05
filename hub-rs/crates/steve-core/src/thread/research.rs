@@ -442,7 +442,7 @@ impl Core {
                         ..Default::default()
                     },
                 )?
-                .ok_or_else(|| crate::error::msg("恢复回合不存在"))?
+                .ok_or_else(|| crate::error::msg(steve_i18n::t!("core.thread.resume_missing")))?
             } else {
                 th.run_add(&steve_store::NewThreadRun {
                     workspace_id: ws.into(),

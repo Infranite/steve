@@ -36,7 +36,7 @@ fn body(b: &Bytes) -> ApiResult<Value> {
 }
 
 async fn run(f: impl FnOnce() -> ApiResult<Value> + Send + 'static) -> ApiResult<Json<Value>> {
-    tokio::task::spawn_blocking(f)
+    tokio::task::spawn_blocking(steve_i18n::carry(f))
         .await
         .map_err(|e| ApiError::Internal(format!("task failed: {e}")))?
         .map(Json)

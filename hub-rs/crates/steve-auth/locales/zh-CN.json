@@ -1,0 +1,6 @@
+{
+  "auth.login.expired": "登录已过期，请重新登录",
+  "auth.login.not_invited": "这个账号还没有被邀请使用 Steve",
+  "auth.login.failed": "登录失败",
+  "auth.dev.owner_exists": "已有所有者，本机登录不可用"
+}

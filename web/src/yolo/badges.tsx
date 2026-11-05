@@ -64,9 +64,9 @@ export function YoloBadge({ decision, result, subject }: { decision: string; res
   )
   if (a.outcome === "declined") return (
     <div className={LINE} data-yolo-badge="declined" title={a.reason}>
-      <YoloMark /><span className="line-clamp-2 min-w-0 break-words">{t("yolo:badge.declined", { reason: a.reason.replace(/^硬限制：/, "") })}</span></div>
+      <YoloMark /><span className="line-clamp-2 min-w-0 break-words">{t("yolo:badge.declined", { reason: a.limit_what ?? a.reason })}</span></div>
   )
-  if (a.outcome === "cancelled" && a.reason === "你选择自己来定") return (
+  if (a.outcome === "cancelled" && a.user_took_over) return (
     <div className={LINE} data-yolo-badge="yours"><YoloMark /><span>{t("yolo:badge.yours")}</span></div>
   )
   return null

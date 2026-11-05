@@ -68,6 +68,37 @@ impl Kind {
             Self::CredentialsLost => "credentials_lost",
         }
     }
+    /// The kind of a stored `error_kind` code.
+    pub fn from_code(code: &str) -> Option<Self> {
+        [
+            Self::Denied,
+            Self::Expired,
+            Self::Network,
+            Self::Provider,
+            Self::VerifyFailed,
+            Self::Conflict,
+            Self::MemberGone,
+            Self::CredentialsLost,
+        ]
+        .into_iter()
+        .find(|k| k.code() == code)
+    }
+
+    /// [`Kind::text`] in the request's language, for API answers.
+    pub fn message(self) -> String {
+        match self {
+            Self::Denied => steve_i18n::t!("channels.registration.denied"),
+            Self::Expired => steve_i18n::t!("channels.registration.expired"),
+            Self::Network => steve_i18n::t!("channels.registration.network"),
+            Self::Provider => steve_i18n::t!("channels.registration.provider"),
+            Self::VerifyFailed => steve_i18n::t!("channels.registration.verify_failed"),
+            Self::Conflict => steve_i18n::t!("channels.registration.conflict"),
+            Self::MemberGone => steve_i18n::t!("channels.registration.member_gone"),
+            Self::CredentialsLost => steve_i18n::t!("channels.registration.credentials_lost"),
+        }
+    }
+
+    /// The text stored in `error` (zh-CN); answers show [`Kind::message`] for its `error_kind`.
     pub fn text(self) -> &'static str {
         match self {
             Self::Denied => "你在飞书里拒绝了创建应用",
@@ -187,7 +218,12 @@ impl Row {
         }
         put("connection_id", &self.connection_id);
         put("account_id", &self.account_id);
-        put("error", &self.error);
+        // the stored text is zh-CN: an answer words a known kind in the request's language
+        let error = match self.error_kind.as_deref().and_then(Kind::from_code) {
+            Some(k) if self.error.is_some() => Some(k.message()),
+            _ => self.error.clone(),
+        };
+        put("error", &error);
         put("error_kind", &self.error_kind);
         v
     }
@@ -379,7 +415,7 @@ impl Registrations {
         }
         // preflight before anything leaves the Hub: a member here, and a vault that can seal
         if !self.read(|c| is_member(c, &who.ws, &who.me))? {
-            return Err(ApiError::forbidden("你不在这个工作空间里").into());
+            return Err(ApiError::forbidden(steve_i18n::t!("channels.error.not_member")).into());
         }
         drop(
             self.conns
@@ -400,13 +436,13 @@ impl Registrations {
         let (status, v) = self
             .post(&url, &form, BEGIN_TIMEOUT)
             .await
-            .map_err(|k| ApiError::rule(k.text()))?;
+            .map_err(|k| ApiError::rule(k.message()))?;
         let b = (status < 400)
             .then(|| parse_begin(&v, &self.bases, brand))
             .flatten()
             .ok_or_else(|| {
                 tracing::warn!(status, "feishu app registration: begin refused");
-                ApiError::rule(Kind::Provider.text())
+                ApiError::rule(Kind::Provider.message())
             })?;
         // the ticket is sealed now and written with the row (never in plain text)
         let ticket = self
@@ -488,7 +524,9 @@ impl Registrations {
     pub fn retry(&self, who: &Caller, id: &str) -> VaultResult<Value> {
         let r = self.own(who, id)?;
         if r.state != state::SAVED {
-            return Err(ApiError::conflict("这次注册没有可以重试的凭据").into());
+            return Err(
+                ApiError::conflict(steve_i18n::t!("channels.error.nothing_to_retry")).into(),
+            );
         }
         self.spawn_verify(r.id.clone());
         Ok(self.own(who, id)?.out())

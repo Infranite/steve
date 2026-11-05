@@ -41,13 +41,13 @@ const MAX_SKIPPED_CANDIDATES: usize = 10_000;
 /// Errors shown to the user as `400 <message>`.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum CronError {
-    #[error("不支持这种 cron 写法：{0}")]
+    #[error("{}", steve_i18n::t!("flow.cron.unsupported", cron = .0))]
     Unsupported(String),
-    #[error("最短间隔 5 分钟")]
+    #[error("{}", steve_i18n::t!("flow.cron.too_frequent"))]
     TooFrequent,
-    #[error("这个 cron 不会运行：{0}")]
+    #[error("{}", steve_i18n::t!("flow.cron.never", cron = .0))]
     Never(String),
-    #[error("不支持的时区：{0}")]
+    #[error("{}", steve_i18n::t!("flow.cron.unknown_tz", tz = .0))]
     UnknownTz(String),
 }
 
@@ -247,10 +247,20 @@ impl CronExpr {
         Ok(())
     }
 
-    /// Chinese description for the UI, or `按 cron「…」` when the
+    /// Description for the UI in the request's language, or `按 cron「…」` when the
     /// combination has no short wording.
     pub fn describe(&self) -> String {
-        describe_shapes(&self.shapes).unwrap_or_else(|| format!("按 cron「{}」", self.expr))
+        self.describe_in(steve_i18n::current())
+    }
+
+    /// The zh-CN description, for what is stored (a schedule's `when`) or read by a model.
+    pub fn describe_zh(&self) -> String {
+        self.describe_in(steve_i18n::ZH_CN)
+    }
+
+    fn describe_in(&self, l: &str) -> String {
+        describe_shapes(&self.shapes, l)
+            .unwrap_or_else(|| t_in!(l, "flow.cron.raw", cron = self.expr))
     }
 }
 
@@ -366,58 +376,83 @@ fn value(s: &str, kind: Kind) -> Option<u8> {
 
 // ---- describe ----
 
-const WEEKDAY_ZH: [&str; 7] = ["日", "一", "二", "三", "四", "五", "六"];
+fn weekday_name(l: &str, v: u8) -> String {
+    match v {
+        1 => t_in!(l, "flow.cron.weekday_1"),
+        2 => t_in!(l, "flow.cron.weekday_2"),
+        3 => t_in!(l, "flow.cron.weekday_3"),
+        4 => t_in!(l, "flow.cron.weekday_4"),
+        5 => t_in!(l, "flow.cron.weekday_5"),
+        6 => t_in!(l, "flow.cron.weekday_6"),
+        _ => t_in!(l, "flow.cron.weekday_0"),
+    }
+}
 
-fn describe_shapes(s: &[Shape; 5]) -> Option<String> {
+/// The wording in language `l`; the English one starts with a capital.
+fn describe_shapes(s: &[Shape; 5], l: &str) -> Option<String> {
     let [minute, hour, dom, month, dow] = s;
     if *month != Shape::Any {
         return None;
     }
-    let day = day_phrase(dom, dow)?;
-    let (time, interval) = time_phrase(minute, hour)?;
-    Some(match (day.as_str(), interval) {
-        ("每天", true) => time,
-        _ => format!("{day} {time}"),
+    let (day, every_day) = day_phrase(dom, dow, l)?;
+    let (time, interval) = time_phrase(minute, hour, l)?;
+    let text = match (every_day, interval) {
+        (true, true) => time,
+        (_, true) => t_in!(l, "flow.cron.day_interval", day = day, time = time),
+        (_, false) => t_in!(l, "flow.cron.day_time", day = day, time = time),
+    };
+    let mut cs = text.chars();
+    Some(match cs.next() {
+        Some(c) => c.to_uppercase().chain(cs).collect(),
+        None => text,
     })
 }
 
-fn day_phrase(dom: &Shape, dow: &Shape) -> Option<String> {
+/// The day wording and whether it is "every day".
+fn day_phrase(dom: &Shape, dow: &Shape, l: &str) -> Option<(String, bool)> {
     let all_week: BTreeSet<u8> = (0..7).collect();
+    let sep = t_in!(l, "flow.cron.list_sep");
     match (dom, dow) {
-        (Shape::Any, Shape::Any) => Some("每天".into()),
-        (Shape::Any, Shape::Set(d)) if *d == all_week => Some("每天".into()),
-        (Shape::Any, Shape::Set(d)) if *d == (1..=5).collect() => Some("工作日".into()),
-        (Shape::Any, Shape::Set(d)) if *d == BTreeSet::from([0, 6]) => Some("周末".into()),
+        (Shape::Any, Shape::Any) => Some((t_in!(l, "flow.cron.every_day"), true)),
+        (Shape::Any, Shape::Set(d)) if *d == all_week => {
+            Some((t_in!(l, "flow.cron.every_day"), true))
+        }
+        (Shape::Any, Shape::Set(d)) if *d == (1..=5).collect() => {
+            Some((t_in!(l, "flow.cron.workdays"), false))
+        }
+        (Shape::Any, Shape::Set(d)) if *d == BTreeSet::from([0, 6]) => {
+            Some((t_in!(l, "flow.cron.weekends"), false))
+        }
         (Shape::Any, Shape::Set(d)) => {
             // Monday first, Sunday last, as people say it.
             let mut order: Vec<u8> = d.iter().copied().filter(|&v| v != 0).collect();
             if d.contains(&0) {
                 order.push(0);
             }
-            let names: Vec<&str> = order.iter().map(|&v| WEEKDAY_ZH[usize::from(v)]).collect();
-            Some(format!("每周{}", names.join("、")))
+            let names: Vec<String> = order.iter().map(|&v| weekday_name(l, v)).collect();
+            Some((t_in!(l, "flow.cron.weekly", days = names.join(&sep)), false))
         }
-        (Shape::Last, Shape::Any) => Some("每月最后一天".into()),
+        (Shape::Last, Shape::Any) => Some((t_in!(l, "flow.cron.last_of_month"), false)),
         (Shape::Set(d), Shape::Any) if d.len() <= 6 => {
             let days: Vec<String> = d.iter().map(u8::to_string).collect();
-            Some(format!("每月 {} 日", days.join("、")))
+            Some((t_in!(l, "flow.cron.monthly", days = days.join(&sep)), false))
         }
         _ => None,
     }
 }
 
 /// Returns the wording and whether it is an interval (which reads fine without "每天").
-fn time_phrase(minute: &Shape, hour: &Shape) -> Option<(String, bool)> {
+fn time_phrase(minute: &Shape, hour: &Shape, l: &str) -> Option<(String, bool)> {
     match (minute, hour) {
-        (Shape::Any, Shape::Any) => Some(("每分钟".into(), true)),
-        (Shape::Step(n), Shape::Any) => Some((format!("每 {n} 分钟"), true)),
+        (Shape::Any, Shape::Any) => Some((t_in!(l, "flow.cron.every_minute"), true)),
+        (Shape::Step(n), Shape::Any) => Some((t_in!(l, "flow.cron.every_n_minutes", n = n), true)),
         (m, Shape::Any) => {
             let m = m.single()?;
             Some((
                 if m == 0 {
-                    "每小时（整点）".into()
+                    t_in!(l, "flow.cron.hourly")
                 } else {
-                    format!("每小时第 {m} 分")
+                    t_in!(l, "flow.cron.hourly_at", m = m)
                 },
                 true,
             ))
@@ -426,9 +461,9 @@ fn time_phrase(minute: &Shape, hour: &Shape) -> Option<(String, bool)> {
             let m = m.single()?;
             Some((
                 if m == 0 {
-                    format!("每 {n} 小时（整点）")
+                    t_in!(l, "flow.cron.every_n_hours", n = n)
                 } else {
-                    format!("每 {n} 小时（第 {m} 分）")
+                    t_in!(l, "flow.cron.every_n_hours_at", n = n, m = m)
                 },
                 true,
             ))
@@ -436,7 +471,7 @@ fn time_phrase(minute: &Shape, hour: &Shape) -> Option<(String, bool)> {
         (m, Shape::Set(hours)) if hours.len() <= 6 => {
             let m = m.single()?;
             let times: Vec<String> = hours.iter().map(|h| format!("{h:02}:{m:02}")).collect();
-            Some((times.join("、"), false))
+            Some((times.join(&t_in!(l, "flow.cron.list_sep")), false))
         }
         _ => None,
     }
@@ -755,5 +790,42 @@ mod tests {
             let e = CronExpr::parse(cron).unwrap();
             assert_eq!(e.describe(), format!("按 cron「{}」", e.as_str()), "{cron}");
         }
+    }
+
+    #[tokio::test]
+    async fn describe_and_errors_in_english() {
+        steve_i18n::scope(steve_i18n::EN, async {
+            for (cron, text) in [
+                ("30 8 * * *", "Every day at 08:30"),
+                ("0 9 * * 1-5", "Weekdays at 09:00"),
+                ("0 9 * * 1,3,5", "Every Mon, Wed, Fri at 09:00"),
+                ("0 9 * * 0,6", "Weekends at 09:00"),
+                ("0 10 1,15 * *", "Day 1, 15 of every month at 10:00"),
+                ("0 18 L * *", "The last day of every month at 18:00"),
+                ("0 */2 * * 1-5", "Weekdays, every 2 hours (on the hour)"),
+                ("*/15 * * * *", "Every 15 minutes"),
+                ("20 * * * *", "Every hour at minute 20"),
+                ("0 9,18 * * *", "Every day at 09:00, 18:00"),
+            ] {
+                let e = CronExpr::parse(cron).unwrap();
+                assert_eq!(e.describe(), text, "{cron}");
+            }
+            // what is stored stays zh-CN inside an English request
+            let e = CronExpr::parse("0 9 * * 1,3,5").unwrap();
+            assert_eq!(e.describe_zh(), "每周一、三、五 09:00");
+            let raw = CronExpr::parse("0 9 1 1 *").unwrap();
+            assert_eq!(raw.describe(), "cron \"0 9 1 1 *\"");
+            assert_eq!(raw.describe_zh(), "按 cron「0 9 1 1 *」");
+            assert_eq!(
+                CronError::TooFrequent.to_string(),
+                "The shortest interval is 5 minutes"
+            );
+            assert_eq!(
+                CronError::Unsupported("5#2".into()).to_string(),
+                "Unsupported cron expression: 5#2"
+            );
+        })
+        .await;
+        assert_eq!(CronError::TooFrequent.to_string(), "最短间隔 5 分钟");
     }
 }

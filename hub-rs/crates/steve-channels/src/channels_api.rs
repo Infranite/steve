@@ -206,7 +206,11 @@ async fn start_user(
                 .collect();
             match bots.as_slice() {
                 [one] => one.clone(),
-                [] => return Err(ApiError::rule("先接入飞书应用机器人，再授权你本人").into()),
+                [] => {
+                    return Err(
+                        ApiError::rule(steve_i18n::t!("channels.error.app_bot_first")).into(),
+                    );
+                }
                 _ => return Err(ApiError::invalid("app_connection").into()),
             }
         }

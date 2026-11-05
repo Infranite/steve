@@ -13,7 +13,7 @@ use axum::response::Response;
 use serde_json::{Value, json};
 use steve_core::git::{git, is_git};
 
-use super::{ApiResult, AppState, Ctx, blocking, ok, own, str_of};
+use super::{ApiResult, AppState, Ctx, Noun, blocking, ok, own, str_of};
 use crate::backend::BackendError;
 use crate::config::home_dir;
 use crate::error::{ApiError, json_response};
@@ -47,12 +47,12 @@ async fn load(st: &AppState, ws: &str, id: &str, art: &str) -> Result<Out, ApiEr
         st.cfg.clone(),
     );
     st.read(move |r| {
-        let i = own(r.item_get(&id)?, &ws, "事项")?;
+        let i = own(r.item_get(&id)?, &ws, Noun::Item)?;
         let a = r
             .artifacts_list(&id)?
             .into_iter()
             .find(|a| str_of(a, "id") == art)
-            .ok_or_else(|| BackendError::not_found("没有这个产出"))?;
+            .ok_or_else(|| BackendError::not_found(steve_i18n::t!("hub.not_found.output")))?;
         let opt = |o: &crate::backend::Obj, k: &str| {
             o.get(k)
                 .and_then(Value::as_str)
@@ -110,7 +110,7 @@ pub async fn raw(
     let sub = q.get("path").cloned();
     let p = blocking(move || match locate(&o, sub.as_deref()) {
         Ok(Found::Disk(p, _)) if p.is_file() => Ok(p),
-        Ok(_) => Err(ApiError::not_found("这个产出不是可以直接打开的文件")),
+        Ok(_) => Err(ApiError::not_found(steve_i18n::t!("hub.output.not_a_file"))),
         Err(e) => Err(ApiError::not_found(e)),
     })
     .await?;
@@ -118,11 +118,14 @@ pub async fn raw(
     if size > RAW_MAX {
         return Err(ApiError::Json(
             413,
-            format!("文件太大（{}），不在这里打开", human(size)),
+            steve_i18n::t!("hub.output.too_large", size = human(size)),
         ));
     }
     let Ok(file) = tokio::fs::File::open(&p).await else {
-        return Ok(json_response(404, &json!({ "error": "文件不见了" })));
+        return Ok(json_response(
+            404,
+            &json!({ "error": steve_i18n::t!("hub.output.file_gone") }),
+        ));
     };
     let name = p
         .file_name()
@@ -142,7 +145,10 @@ pub async fn raw(
     };
     // only the requested span is read, as it is sent
     let Ok(body) = stream_file(file, start as u64, len as u64).await else {
-        return Ok(json_response(404, &json!({ "error": "文件不见了" })));
+        return Ok(json_response(
+            404,
+            &json!({ "error": steve_i18n::t!("hub.output.file_gone") }),
+        ));
     };
     let mut res = Response::new(body);
     *res.status_mut() = axum::http::StatusCode::from_u16(status).unwrap_or_default();
@@ -266,7 +272,7 @@ fn inside(p: &FsPath, roots: &[PathBuf]) -> bool {
 /// Where the output is, and the entry `sub` below it when it is a folder.
 pub(crate) fn locate(o: &Out, sub: Option<&str>) -> Result<Found, String> {
     let Some(loc) = o.loc.as_deref().map(str::trim).filter(|l| !l.is_empty()) else {
-        return Err("这个产出没有记录位置，只有标题".into());
+        return Err(steve_i18n::t!("hub.output.no_location"));
     };
     let loc = super::projects::expand(loc);
     let abs = FsPath::new(&loc).is_absolute();
@@ -293,25 +299,23 @@ pub(crate) fn locate(o: &Out, sub: Option<&str>) -> Result<Found, String> {
                 }
             }
         }
-        return Err(format!(
-            "找不到 {loc}：文件可能已被清理（临时目录或已收起的工作区）"
-        ));
+        return Err(steve_i18n::t!("hub.output.cleaned_up", loc = loc));
     };
     let base = base.canonicalize().map_err(|e| e.to_string())?;
     if !inside(&base, &o.roots) {
-        return Err("这个位置不在事项的工作目录、项目或临时目录里，不在这里打开".into());
+        return Err(steve_i18n::t!("hub.output.outside_roots"));
     }
     let shown = home_tilde(&base);
     match sub.filter(|s| !s.is_empty()) {
         None => Ok(Found::Disk(base, shown)),
         Some(s) => {
-            let rel = plain(s).ok_or("路径不对")?;
+            let rel = plain(s).ok_or_else(|| steve_i18n::t!("hub.output.bad_path"))?;
             let p = base
                 .join(&rel)
                 .canonicalize()
-                .map_err(|_| format!("找不到 {s}"))?;
+                .map_err(|_| steve_i18n::t!("hub.output.path_missing", path = s))?;
             if !p.starts_with(&base) {
-                return Err("路径不对".into());
+                return Err(steve_i18n::t!("hub.output.bad_path"));
             }
             Ok(Found::Disk(
                 p,
@@ -558,13 +562,13 @@ fn commit(o: &Out) -> Value {
     .into_iter()
     .find(|h| is_hash(h));
     let Some(hash) = hash else {
-        return json!({ "type": "missing", "reason": "标题里没有提交号" });
+        return json!({ "type": "missing", "reason": steve_i18n::t!("hub.output.no_commit_hash") });
     };
     let Some(g) = git_dir(o) else {
-        return json!({ "type": "missing", "reason": "事项没有可读的 git 仓库" });
+        return json!({ "type": "missing", "reason": steve_i18n::t!("hub.output.no_repo") });
     };
     let Ok(meta) = git(&g, &["show", "-s", "--format=%H%x1f%an%x1f%ct%x1f%B", hash]) else {
-        return json!({ "type": "missing", "reason": format!("仓库里没有提交 {hash}（可能被 rebase 改写了）") });
+        return json!({ "type": "missing", "reason": steve_i18n::t!("hub.output.commit_gone", hash = hash) });
     };
     let f: Vec<&str> = meta.splitn(4, '\u{1f}').collect();
     let stat = unquoted(&g, &["show", "--format=", "--stat=120", hash]);
@@ -586,7 +590,7 @@ fn commit(o: &Out) -> Value {
 
 fn branch(o: &Out) -> Value {
     let Some(g) = git_dir(o) else {
-        return json!({ "type": "missing", "reason": "事项没有可读的 git 仓库" });
+        return json!({ "type": "missing", "reason": steve_i18n::t!("hub.output.no_repo") });
     };
     let has = |b: &str| {
         git(
@@ -611,7 +615,7 @@ fn branch(o: &Out) -> Value {
         } else {
             named
         };
-        return json!({ "type": "missing", "reason": format!("分支 {shown} 已经不在了（发布后会收起）") });
+        return json!({ "type": "missing", "reason": steve_i18n::t!("hub.output.branch_gone", branch = shown) });
     };
     let base = ["main", "master"]
         .into_iter()

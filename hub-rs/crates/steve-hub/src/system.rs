@@ -117,7 +117,12 @@ impl Runtimes {
         self.cache.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
+    /// The harness list, its notes in the request's language (the cache keeps note codes).
     pub async fn get(&self, fresh: bool) -> Value {
+        shown(self.list(fresh).await)
+    }
+
+    async fn list(&self, fresh: bool) -> Value {
         if !fresh && let Some((at, list)) = self.cached() {
             if at.elapsed() >= RUNTIMES_MAX_AGE
                 && self
@@ -148,6 +153,26 @@ impl Runtimes {
             Some((Instant::now(), list.clone()));
         list
     }
+}
+
+/// A probed list as the web shows it: each `note` code (see [`probe`]) as text, a missing path as "not found".
+fn shown(mut list: Value) -> Value {
+    for r in list.as_array_mut().into_iter().flatten() {
+        let note = match r["note"].as_str().unwrap_or_default() {
+            "no_claude" => steve_i18n::t!("hub.runtime.no_claude"),
+            "no_codex" => steve_i18n::t!("hub.runtime.no_codex"),
+            "acp" => steve_i18n::t!("hub.runtime.via_acp"),
+            code => match code.strip_prefix("no_adapter:") {
+                Some(adapter) => steve_i18n::t!("hub.runtime.no_adapter", adapter = adapter),
+                None => code.to_string(),
+            },
+        };
+        r["note"] = json!(note);
+        if r["id"] == "codex" && r["path"] == "" {
+            r["path"] = json!(steve_i18n::t!("hub.runtime.path_missing"));
+        }
+    }
+    list
 }
 
 /// `<bin> --version` when the file exists, `""` otherwise.
@@ -188,15 +213,16 @@ async fn probe(cfg: &Config) -> Value {
             "version": claude_v.split(' ').next().unwrap_or(""),
             "models": steve_core::models::CLAUDE_MODELS,
             "ok": !claude_v.is_empty() && claude_adapter,
-            "note": if claude_v.is_empty() { "没有找到 claude" } else if !claude_adapter { "缺少 ACP 适配器 @agentclientprotocol/claude-agent-acp" } else { "通过 ACP 适配器运行" },
+            // a code: [`shown`] puts it in the request's language
+            "note": if claude_v.is_empty() { "no_claude" } else if !claude_adapter { "no_adapter:@agentclientprotocol/claude-agent-acp" } else { "acp" },
         },
         {
-            "id": "codex", "name": "Codex", "path": if codex_bin.is_empty() { "未找到" } else { codex_bin },
+            "id": "codex", "name": "Codex", "path": codex_bin,
             "version": codex_version,
             // ids codex-acp offers in its "model" config option (from the user's model catalog); the first is Codex's default
             "models": steve_core::models::CODEX_MODELS,
             "ok": !codex_v.is_empty() && codex_adapter,
-            "note": if codex_v.is_empty() { "没有找到 codex" } else if !codex_adapter { "缺少 ACP 适配器 @zed-industries/codex-acp" } else { "通过 ACP 适配器运行" },
+            "note": if codex_v.is_empty() { "no_codex" } else if !codex_adapter { "no_adapter:@zed-industries/codex-acp" } else { "acp" },
         }
     ])
 }
@@ -605,11 +631,11 @@ fn codex_events(text: &str) -> Vec<(String, Value)> {
 /// The database side of `importLocal` (under the write lock): returns the new session id or the TS error.
 pub fn import_prepared(r: &dyn Repo, bus: &Bus, ws: &str, p: Prepared) -> BResult<String> {
     let key = match &p {
-        Prepared::Missing => return Err(BackendError::msg("本机记录不存在了")),
+        Prepared::Missing => return Err(BackendError::msg(steve_i18n::t!("hub.import.gone"))),
         Prepared::Unreadable { key } | Prepared::Ready { key, .. } => key.clone(),
     };
     if r.import_keys()?.contains(&key) {
-        return Err(BackendError::msg("已经导入过了"));
+        return Err(BackendError::msg(steve_i18n::t!("hub.import.already")));
     }
     let Prepared::Ready {
         peek,
@@ -618,7 +644,7 @@ pub fn import_prepared(r: &dyn Repo, bus: &Bus, ws: &str, p: Prepared) -> BResul
         ..
     } = p
     else {
-        return Err(BackendError::msg("读不出这个会话"));
+        return Err(BackendError::msg(steve_i18n::t!("hub.import.unreadable")));
     };
     let id = r.session_insert_imported(&ImportedSession {
         workspace_id: ws.into(),
@@ -649,7 +675,9 @@ pub fn remove_imported(r: &dyn Repo, id: &str) -> BResult<()> {
         .session_get(id)?
         .is_some_and(|s| js::truthy(s.get("readonly")));
     if !ro {
-        return Err(BackendError::msg("只能移除导入的会话"));
+        return Err(BackendError::msg(steve_i18n::t!(
+            "hub.import.only_imported"
+        )));
     }
     // the store publishes `session` after the delete
     r.session_delete(id)

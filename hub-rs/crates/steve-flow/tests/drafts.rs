@@ -101,6 +101,55 @@ async fn create_from_a_sentence() {
     assert_eq!(list, json!([]));
 }
 
+/// An English request gets an English card; what is stored and what the model reads stay zh-CN.
+#[tokio::test]
+async fn create_from_a_sentence_in_english() {
+    let e = env();
+    let me = caller(WS, ME);
+    e.env.gateway.reply(
+        r#"{"ops":[{"op":"schedule.create","name":"整理周报","cron":"0 9 * * 5","what":"整理周报","bot":"Steve","mode":"建事项，自动验收","budget_usd":2}]}"#,
+    );
+    let p = steve_i18n::scope(
+        steve_i18n::EN,
+        changes::draft(
+            &e.env.modules,
+            &me,
+            "schedule",
+            None,
+            "Every Friday 9:00, weekly report",
+            Origin::default(),
+        ),
+    )
+    .await
+    .unwrap();
+    // the draft is stored for every member to read (changeset list, decision cards): its card stays zh-CN
+    assert_eq!(p.title, "新建定时任务");
+    assert_eq!(
+        p.changes,
+        vec![
+            Change::new("名字", "—", "整理周报"),
+            Change::new("时间", "—", "每周五 09:00（0 9 * * 5）"),
+            Change::new("做什么", "—", "整理周报"),
+            Change::new("交给谁", "—", "Steve"),
+            Change::new("方式", "—", "建事项，自动验收"),
+            Change::new("错过了怎么办", "—", "补一次"),
+            Change::new("上一次没结束", "—", "跳过"),
+            Change::new("每次预算", "—", "$2.00"),
+        ]
+    );
+    let prompt = e.env.gateway.last_prompt().unwrap();
+    assert!(prompt.contains("建事项，自动验收"), "{prompt}");
+    changes::apply(&e.env.modules, &me, &p.id).unwrap().unwrap();
+    let (_, list) = steve_i18n::scope(
+        steve_i18n::EN,
+        call(&e.router(), Some(&me), "GET", "/schedules", None),
+    )
+    .await;
+    // the phrase saved from the cron is zh-CN; the description is in the request's language
+    assert_eq!(list[0]["when"], "每周五 09:00");
+    assert_eq!(list[0]["describe"], "Every Fri at 09:00");
+}
+
 #[tokio::test]
 async fn patch_time_and_missed() {
     let e = env();

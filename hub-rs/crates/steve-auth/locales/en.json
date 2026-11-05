@@ -1,0 +1,6 @@
+{
+  "auth.login.expired": "Your sign-in expired, please sign in again",
+  "auth.login.not_invited": "This account hasn't been invited to Steve yet",
+  "auth.login.failed": "Sign-in failed",
+  "auth.dev.owner_exists": "This Hub already has an owner, local sign-in is off"
+}

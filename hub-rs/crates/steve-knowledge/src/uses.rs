@@ -9,8 +9,6 @@ use steve_modules::{ApiError, ApiResult, Caller, Modules};
 use steve_store::Result;
 use steve_store::base::{Level, Viewer, bind};
 
-/// Shown instead of the title and label of a hit that is gone or no longer visible.
-pub const DELETED: &str = "已删除";
 pub const CONSUMERS: [&str; 5] = ["session", "chat", "draft", "flow", "search"];
 
 /// One stored hit (`kb_uses.hits[]`).
@@ -196,8 +194,8 @@ pub fn list(m: &Modules, who: &Caller, p: UsesParams) -> ApiResult<Value> {
                 let now = current(c, &viewer, h)?;
                 let deleted = now.is_none();
                 let cur = now.unwrap_or_else(|| Current {
-                    title: DELETED.into(),
-                    label: DELETED.into(),
+                    title: steve_i18n::t!("knowledge.uses.deleted"),
+                    label: steve_i18n::t!("knowledge.uses.deleted"),
                     href: String::new(),
                     heading: String::new(),
                 });

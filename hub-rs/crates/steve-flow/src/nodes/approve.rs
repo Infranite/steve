@@ -44,12 +44,12 @@ impl NodeKind for Approve {
     }
 
     fn validate(&self, cfg: &Value) -> Result<(), String> {
-        req_str(cfg, "question", "要问的问题", 500)?;
+        req_str(cfg, "question", super::Required::Question, 500)?;
         if let Some(d) = cfg.get("draft")
             && !d.is_null()
             && !d.is_string()
         {
-            return Err("draft 只能是文字".into());
+            return Err(steve_i18n::t!("flow.node.approve_draft"));
         }
         let opts = str_list(cfg, "options")?;
         if opts.len() > 6
@@ -57,7 +57,7 @@ impl NodeKind for Approve {
                 .iter()
                 .any(|o| o.trim().is_empty() || o.chars().count() > 20)
         {
-            return Err("选项最多 6 个，每个 1–20 字".into());
+            return Err(steve_i18n::t!("flow.node.approve_options"));
         }
         Ok(())
     }

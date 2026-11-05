@@ -50,8 +50,12 @@ fn patch<T: DeserializeOwned>(p: &Obj) -> BResult<T> {
         .map_err(|e| BackendError::msg(format!("patch: {e}")))
 }
 
+/// `没有这个工作空间` / `没有这个 Bot` (500), in the request's language.
 fn gone(what: &str) -> BackendError {
-    BackendError::msg(format!("没有这个{what}"))
+    BackendError::msg(match what {
+        "bot" => crate::api::Noun::Bot.missing(),
+        _ => steve_i18n::t!("hub.not_found.workspace"),
+    })
 }
 
 /// Forwards store change events to the Hub bus (the two enums serialize identically).
@@ -324,7 +328,7 @@ impl Repo for StoreBackend {
             .patch(id, &patch(p)?)
             .map_err(err)?
             .map(obj)
-            .unwrap_or_else(|| Err(gone("工作空间")))
+            .unwrap_or_else(|| Err(gone("workspace")))
     }
     fn workspace_is_member(&self, id: &str, user: &str) -> BResult<bool> {
         self.0.workspaces().is_member(id, user).map_err(err)
@@ -438,7 +442,7 @@ impl Repo for StoreBackend {
             .create(ws, &nb, author)
             .map_err(err)?
             .map(obj)
-            .unwrap_or_else(|| Err(gone(" Bot")))
+            .unwrap_or_else(|| Err(gone("bot")))
     }
     fn bot_patch(&self, id: &str, p: &Obj, author: &str) -> BResult<Obj> {
         self.0
@@ -446,7 +450,7 @@ impl Repo for StoreBackend {
             .patch(id, &patch(p)?, author)
             .map_err(err)?
             .map(obj)
-            .unwrap_or_else(|| Err(gone(" Bot")))
+            .unwrap_or_else(|| Err(gone("bot")))
     }
     fn bot_restore(&self, id: &str) -> BResult<()> {
         self.0.bots().restore(id).map_err(err)

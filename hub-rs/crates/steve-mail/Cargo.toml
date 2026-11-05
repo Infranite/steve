@@ -14,6 +14,8 @@ steve-modules = { path = "../steve-modules" }
 steve-store = { path = "../steve-store" }
 steve-knowledge = { path = "../steve-knowledge" }
 steve-flow = { path = "../steve-flow" }
+steve-i18n = { path = "../steve-i18n" }
+rust-i18n = "=4.2.4"
 ammonia = "=4.2.4"
 async-imap = { version = "=0.12.0", default-features = false, features = ["runtime-tokio"] }
 async-trait = "=0.1.92"

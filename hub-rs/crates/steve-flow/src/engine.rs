@@ -743,7 +743,7 @@ pub fn open_run(
     let trigger = Graph::from_value(&graph)
         .ok()
         .and_then(|g| g.trigger().map(|t| t.id.clone()))
-        .ok_or_else(|| ApiError::rule("流程要有且只有一个触发节点"))?;
+        .ok_or_else(|| ApiError::rule(steve_i18n::t!("flow.graph.one_trigger")))?;
     if context.get("steps").is_none() {
         context["steps"] = json!({});
     }

@@ -259,8 +259,8 @@ pub struct AccountOut {
 pub fn out(c: &rusqlite::Connection, viewer: &Viewer, a: &Account) -> ApiResult<AccountOut> {
     let system = match repo::system(c, &a.workspace_id, &a.system_id)? {
         Some(s) => SystemRef {
+            name: crate::shown::system_name(&s.id, s.builtin, &s.name),
             id: s.id,
-            name: s.name,
             kind: s.kind,
         },
         None => SystemRef {
@@ -297,7 +297,7 @@ pub fn out(c: &rusqlite::Connection, viewer: &Viewer, a: &Account) -> ApiResult<
         verified: a.verified,
         confidence: a.confidence,
         source: a.source.clone(),
-        source_label: a.source_label.clone(),
+        source_label: crate::shown::source_label(&a.source_label),
         connection: repo::connection_of(c, &a.id)?,
         vault_items: repo::vault_items_of(c, &a.id, &viewer.user)?,
         revision: a.revision,
@@ -366,7 +366,11 @@ pub fn get(m: &Modules, who: &Caller, id: &str) -> ApiResult<AccountOut> {
 /// `GET /systems`.
 pub fn systems(m: &Modules, who: &Caller) -> ApiResult<Vec<System>> {
     start(m, who)?;
-    Ok(m.store.reader(|c| repo::systems(c, &who.ws))?)
+    let mut xs = m.store.reader(|c| repo::systems(c, &who.ws))?;
+    for s in &mut xs {
+        s.name = crate::shown::system_name(&s.id, s.builtin, &s.name);
+    }
+    Ok(xs)
 }
 
 // ---------------------------------------------------------------- writes
@@ -398,9 +402,10 @@ pub(crate) fn taken(
     let name = owner
         .filter(|p| viewer.sees(&p.visibility, &p.created_by))
         .map(|p| p.name)
-        .unwrap_or_else(|| "其他人".into());
-    Ok(ApiError::conflict(format!(
-        "这个账号已经记在「{name}」名下"
+        .unwrap_or_else(|| steve_i18n::t!("modules.accounts.someone_else"));
+    Ok(ApiError::conflict(steve_i18n::t!(
+        "modules.accounts.taken",
+        name = name
     )))
 }
 
@@ -518,9 +523,9 @@ pub fn patch_tx(
         Some(p) if *p != a.party_id => {
             let p = own_owner(tx, viewer, p)?;
             if repo::connection_of(tx, &a.id)?.is_some() && !may_connect(&p) {
-                return Err(ApiError::rule(
-                    "已接入 Steve 的账号只能属于你、本公司或团队",
-                ));
+                return Err(ApiError::rule(steve_i18n::t!(
+                    "modules.accounts.connected_owner"
+                )));
             }
             Some(p)
         }
@@ -606,7 +611,9 @@ pub fn patch(m: &Modules, who: &Caller, id: &str, b: AccountPatchBody) -> ApiRes
 /// Removes an account inside a transaction: refused while connected, its vault items stay unlinked.
 pub fn delete_tx(tx: &Tx, ws: &str, actor: &str, a: &Account) -> ApiResult<()> {
     if repo::connection_of(tx, &a.id)?.is_some() {
-        return Err(ApiError::conflict("先断开 Steve 的接入"));
+        return Err(ApiError::conflict(steve_i18n::t!(
+            "modules.accounts.disconnect_first"
+        )));
     }
     repo::delete(tx, &a.id)?;
     base::audit(

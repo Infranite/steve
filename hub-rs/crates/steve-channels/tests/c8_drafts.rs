@@ -889,3 +889,53 @@ async fn a_disconnected_space_can_only_be_viewed() {
     assert_eq!(st, 409, "{v}");
     assert_eq!(v["error"], spaces::DISCONNECTED);
 }
+
+/// With an English request the card (title, labels, values, rules in words) is the same zh-CN as for anyone:
+/// it is stored with the changeset and read by every member. The prompt the model reads is Chinese too.
+#[tokio::test(flavor = "multi_thread")]
+async fn english_request_zh_cn_card_and_prompt() {
+    let ops = json!({"ops": [
+        set("rules", json!([
+            {"when": {"kind": "mention_or_dm"}, "act": "reply"},
+            {"when": {"kind": "all"}, "act": "record"}
+        ])),
+        set("disclosure", json!("仅用于推理")),
+        set("collab", json!("开")),
+        set("persona", json!("没有这个人")),
+    ]});
+    let request = "only reply when mentioned, keep other groups private";
+    let zh = {
+        let h = setup();
+        let g1 = space_of(&h, &h.con, "G1", "m1").await;
+        draft(&h, "space", &g1, request, ops.clone()).await
+    };
+    let h = setup();
+    let g1 = space_of(&h, &h.con, "G1", "m1").await;
+    let p = steve_i18n::scope(steve_i18n::EN, draft(&h, "space", &g1, request, ops)).await;
+    let prompt = h.env.gateway.last_prompt().expect("prompt");
+    assert!(prompt.contains(DISCLOSURE_LABEL), "{prompt}");
+    assert!(
+        prompt.contains("跟随账号（被 @ 或私聊时直接回复）"),
+        "{prompt}"
+    );
+
+    assert_eq!(p.title, zh.title);
+    assert_ne!(p.title, "Settings of 运维群");
+    assert_eq!(p.changes, zh.changes);
+    assert_eq!(p.changes.len(), 4);
+    assert_eq!(p.changes[3].to, "（没认出：没有这个人）");
+
+    // a refusal from the domain comes in the same language
+    let err = steve_i18n::scope(steve_i18n::EN, async {
+        steve_channels::rules::parse(
+            &json!([{"when": {"kind": "dm"}, "act": "reply"}]),
+            spaces::Mode::Own,
+        )
+        .expect_err("own reply")
+    })
+    .await;
+    assert_eq!(
+        err.to_string(),
+        "An account connected as you can't reply directly, only draft"
+    );
+}

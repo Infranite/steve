@@ -46,7 +46,7 @@ impl TimelineSource for MailTimeline {
                 let (thread, ts, dir, subject): (String, i64, String, String) =
                     (r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?);
                 let subject = if subject.is_empty() {
-                    "（无主题）".to_string()
+                    steve_i18n::t!("mail.subject.none")
                 } else {
                     subject
                 };
@@ -54,9 +54,9 @@ impl TimelineSource for MailTimeline {
                     ts,
                     kind: "mail".into(),
                     text: if dir == "out" {
-                        format!("发出邮件：{subject}")
+                        steve_i18n::t!("mail.timeline.sent", subject = subject)
                     } else {
-                        format!("收到邮件：{subject}")
+                        steve_i18n::t!("mail.timeline.received", subject = subject)
                     },
                     href: format!("#/mail/t/{thread}"),
                 })

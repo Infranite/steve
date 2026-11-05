@@ -9,7 +9,9 @@ use axum::http::header;
 use axum::response::IntoResponse;
 use serde_json::{Map, Value, json};
 
-use super::{ApiResult, AppState, Ctx, body, objs, ok, ok_true, opt_obj, own, set_cookie, str_of};
+use super::{
+    ApiResult, AppState, Ctx, Noun, body, objs, ok, ok_true, opt_obj, own, set_cookie, str_of,
+};
 use crate::backend::{Obj, Tier};
 use crate::error::ApiError;
 use crate::validate::{Check, Num, Str};
@@ -39,7 +41,7 @@ pub async fn me(State(st): State<AppState>, Extension(c): Extension<Ctx>) -> Api
 /// staleness of what changes without an event: the 7-day `recent` window, adapter busy flags, runtimes).
 const STATE_TTL: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// One cached `/api/state` body per (user, workspace).
+/// One cached `/api/state` body per (user, workspace, language): the body carries text in the request's language.
 pub struct StateCached {
     generation: u64,
     /// the change-log head read before the body was computed (`x-steve-cursor`)
@@ -50,13 +52,13 @@ pub struct StateCached {
 
 pub type StateCache = std::sync::Mutex<
     std::collections::HashMap<
-        (String, String),
+        (String, String, &'static str),
         std::sync::Arc<tokio::sync::Mutex<Option<StateCached>>>,
     >,
 >;
 
 /// `/api/state` is the hottest endpoint and a pure function of the database (plus a few in-memory flags):
-/// computed once per (user, workspace) until the bus publishes anything; concurrent requests wait for the one
+/// computed once per (user, workspace, language) until the bus publishes anything; concurrent requests wait for the one
 /// computation instead of repeating it.
 ///
 /// The response carries the bus change-log head as `x-steve-cursor: <epoch>:<n>`, a watermark a client can
@@ -70,7 +72,9 @@ pub type StateCache = std::sync::Mutex<
 pub async fn state(State(st): State<AppState>, Extension(c): Extension<Ctx>) -> ApiResult {
     let slot = {
         let mut m = st.state_cache.lock().unwrap_or_else(|e| e.into_inner());
-        m.entry((c.me.clone(), c.ws.clone())).or_default().clone()
+        m.entry((c.me.clone(), c.ws.clone(), steve_i18n::current()))
+            .or_default()
+            .clone()
     };
     let mut cached = slot.lock().await;
     if let Some(x) = cached.as_ref()
@@ -280,7 +284,9 @@ pub async fn workspace_patch(
         .read(move |r| Ok(r.workspace_is_member(&i, &me)?))
         .await?
     {
-        return Err(ApiError::not_found("没有这个工作空间"));
+        return Err(ApiError::not_found(steve_i18n::t!(
+            "hub.not_found.workspace"
+        )));
     }
     let p = workspace_in(&body(&b)?, true)?;
     st.write(move |r| ok(Value::Object(r.workspace_patch(&id, &p)?)))
@@ -297,7 +303,9 @@ pub async fn workspace_switch(
         .read(move |r| Ok(r.workspace_is_member(&i, &c.me)?))
         .await?
     {
-        return Err(ApiError::not_found("没有这个工作空间"));
+        return Err(ApiError::not_found(steve_i18n::t!(
+            "hub.not_found.workspace"
+        )));
     }
     let cookie = set_cookie(
         "steve_ws",
@@ -401,7 +409,7 @@ pub async fn thread_search(
 ) -> ApiResult {
     let text = q.q.unwrap_or_default().trim().to_string();
     if text.is_empty() || text.chars().count() > 200 {
-        return Err(ApiError::bad_request("参数不对：q"));
+        return Err(ApiError::Invalid(vec!["q".into()]));
     }
     let limit = q.limit.unwrap_or(50).clamp(1, 200);
     st.read(move |r| {
@@ -410,9 +418,6 @@ pub async fn thread_search(
     })
     .await
 }
-
-/// The answer when a queued message has already gone to Steve.
-const QUEUED_GONE: &str = "这条消息已经发给 Steve 了，不能再改或撤回";
 
 /// `PATCH /api/thread/queued/:id {text}`: rewrite a message still waiting for the turn before it.
 pub async fn thread_queued_edit(
@@ -427,16 +432,14 @@ pub async fn thread_queued_edit(
     k.finish()?;
     let text = text.trim().to_string();
     if text.is_empty() {
-        return Err(ApiError::bad_request("参数不对：text"));
+        return Err(ApiError::Invalid(vec!["text".into()]));
     }
     // V4 paste guard: what is sent is guarded, so is what it is changed to
     if steve_vault::guard::intercept(&text).blocked {
-        return Err(ApiError::bad_request(
-            "里面像有密码或令牌，不能这样改；撤回后重新发送",
-        ));
+        return Err(ApiError::bad_request(steve_i18n::t!("hub.queued.secret")));
     }
     if !st.domain.thread_queued_edit(&c.ws, &id, &text).await? {
-        return Err(ApiError::Json(409, QUEUED_GONE.into()));
+        return Err(ApiError::Json(409, steve_i18n::t!("hub.queued.gone")));
     }
     ok_true()
 }
@@ -450,7 +453,7 @@ pub async fn thread_queued_withdraw(
 ) -> ApiResult {
     match st.domain.thread_queued_withdraw(&c.ws, &id).await? {
         Some(m) => ok(Value::Object(m)),
-        None => Err(ApiError::Json(409, QUEUED_GONE.into())),
+        None => Err(ApiError::Json(409, steve_i18n::t!("hub.queued.gone"))),
     }
 }
 
@@ -505,7 +508,10 @@ pub async fn thread_promote(
 fn thread_result((o, already): (Obj, bool)) -> ApiResult {
     if already {
         let mut v = o;
-        v.insert("error".into(), json!("已经处理过了"));
+        v.insert(
+            "error".into(),
+            json!(steve_i18n::t!("hub.thread.already_handled")),
+        );
         return Ok(crate::error::json_response(409, &Value::Object(v)));
     }
     ok(Value::Object(o))
@@ -619,7 +625,7 @@ pub async fn item_thread_follow(
         return Err(ApiError::Invalid(vec!["follow".into()]));
     };
     if !st.domain.thread_follow(&c.ws, &id, follow).await? {
-        return Err(ApiError::not_found("没有这个事项"));
+        return Err(ApiError::not_found(Noun::Item.missing()));
     }
     ok_true()
 }
@@ -633,7 +639,7 @@ pub async fn decision_resolve(
     b: Bytes,
 ) -> ApiResult {
     let (i, ws) = (id.clone(), c.ws.clone());
-    st.read(move |r| Ok(own(r.decision_get(&i)?, &ws, "决定")?))
+    st.read(move |r| Ok(own(r.decision_get(&i)?, &ws, Noun::Decision)?))
         .await?;
     let v = body(&b)?;
     let mut k = Check::object(&v);
@@ -651,9 +657,9 @@ pub async fn decision_resolve(
             choice.clone(),
             text.clone().unwrap_or_default(),
         );
-        let r = tokio::task::spawn_blocking(move || {
+        let r = tokio::task::spawn_blocking(steve_i18n::carry(move || {
             steve_modules::decisions::dispatch(&m, &caller, &id2, &ch, &tx)
-        })
+        }))
         .await
         .ok()
         .flatten();
@@ -680,7 +686,7 @@ pub async fn decision_dismiss(
 ) -> ApiResult {
     let (i, ws) = (id.clone(), c.ws.clone());
     let d = st
-        .read(move |r| Ok(own(r.decision_get(&i)?, &ws, "决定")?))
+        .read(move |r| Ok(own(r.decision_get(&i)?, &ws, Noun::Decision)?))
         .await?;
     // a reply waiting for your approval that no longer needs handling is not sent: its draft is
     // discarded like 不发出, so the conversation it belongs to stops waiting (and undo puts it back)
@@ -696,9 +702,9 @@ pub async fn decision_dismiss(
             },
             id.clone(),
         );
-        let r = tokio::task::spawn_blocking(move || {
+        let r = tokio::task::spawn_blocking(steve_i18n::carry(move || {
             steve_modules::decisions::dispatch(&m, &caller, &id2, "no", "")
-        })
+        }))
         .await
         .ok()
         .flatten();
@@ -720,7 +726,7 @@ pub async fn decision_undo(
     Path(id): Path<String>,
 ) -> ApiResult {
     let (i, ws) = (id.clone(), c.ws.clone());
-    st.read(move |r| Ok(own(r.decision_get(&i)?, &ws, "决定")?))
+    st.read(move |r| Ok(own(r.decision_get(&i)?, &ws, Noun::Decision)?))
         .await?;
     ok(Value::Object(st.domain.undo_decision(&id, &c.me).await?))
 }
@@ -766,7 +772,7 @@ pub async fn tag_create(
     st.write(move |r| {
         let name = str_of(&p, "name");
         if r.tag_by_name(&c.ws, &name)?.is_some() {
-            return Err(ApiError::bad_request("已有同名标签"));
+            return Err(ApiError::bad_request(steve_i18n::t!("hub.tag.duplicate")));
         }
         ok(Value::Object(r.tag_create(
             &c.ws,
@@ -786,7 +792,7 @@ pub async fn tag_patch(
     b: Bytes,
 ) -> ApiResult {
     let i = id.clone();
-    st.read(move |r| Ok(own(r.tag_get(&i)?, &c.ws, "标签")?))
+    st.read(move |r| Ok(own(r.tag_get(&i)?, &c.ws, Noun::Tag)?))
         .await?;
     let p = tag_in(&body(&b)?, true)?;
     st.write(move |r| ok(opt_obj(r.tag_patch(&id, &p)?))).await
@@ -798,7 +804,7 @@ pub async fn tag_remove(
     Path(id): Path<String>,
 ) -> ApiResult {
     st.write(move |r| {
-        own(r.tag_get(&id)?, &c.ws, "标签")?;
+        own(r.tag_get(&id)?, &c.ws, Noun::Tag)?;
         r.tag_remove(&id)?;
         ok_true()
     })
@@ -812,14 +818,14 @@ pub async fn tag_merge(
     b: Bytes,
 ) -> ApiResult {
     let (i, ws) = (id.clone(), c.ws.clone());
-    st.read(move |r| Ok(own(r.tag_get(&i)?, &ws, "标签")?))
+    st.read(move |r| Ok(own(r.tag_get(&i)?, &ws, Noun::Tag)?))
         .await?;
     let v = body(&b)?;
     let mut k = Check::object(&v);
     let into = k.str("into", Str::ANY);
     k.finish()?;
     st.write(move |r| {
-        own(r.tag_get(&into)?, &c.ws, "标签")?;
+        own(r.tag_get(&into)?, &c.ws, Noun::Tag)?;
         r.tag_merge(&id, &into)?;
         ok_true()
     })
@@ -854,7 +860,12 @@ pub async fn settings_patch(
             Some(spec) if spec.values.contains(&s) => {
                 values.insert(key.clone(), json!(s));
             }
-            _ => return Err(ApiError::bad_request(format!("设置项不对：{key}"))),
+            _ => {
+                return Err(ApiError::bad_request(steve_i18n::t!(
+                    "hub.settings.bad_key",
+                    key = key
+                )));
+            }
         }
     }
     st.write(move |r| {
@@ -975,11 +986,11 @@ async fn module_change(
         },
         id.to_string(),
     );
-    let r = tokio::task::spawn_blocking(move || match act {
+    let r = tokio::task::spawn_blocking(steve_i18n::carry(move || match act {
         Act::Apply => steve_modules::changes::apply(&m, &caller, &cid),
         Act::Undo => steve_modules::changes::undo(&m, &caller, &cid),
         Act::Drop => steve_modules::changes::drop_draft(&m, &caller, &cid),
-    })
+    }))
     .await
     .ok()??;
     Some(match r {
@@ -1056,7 +1067,9 @@ pub async fn system_models(
         .catalog
         .get(&h, q.fresh.as_deref() == Some("1"))
         .await
-        .ok_or_else(|| ApiError::bad_request(format!("没有这个 harness：{h}")))?;
+        .ok_or_else(|| {
+            ApiError::bad_request(steve_i18n::t!("hub.models.no_harness", harness = h))
+        })?;
     let used = st
         .domain
         .models_used(&c.ws, &h)
@@ -1072,7 +1085,10 @@ fn instance_owner(c: &Ctx) -> Result<(), ApiError> {
     if c.user.get("role").and_then(Value::as_str) == Some("owner") {
         Ok(())
     } else {
-        Err(ApiError::Json(403, "仅实例管理员可查看和回收工作区".into()))
+        Err(ApiError::Json(
+            403,
+            steve_i18n::t!("hub.workspaces.owner_only"),
+        ))
     }
 }
 

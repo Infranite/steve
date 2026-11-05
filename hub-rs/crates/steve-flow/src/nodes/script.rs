@@ -43,9 +43,9 @@ impl NodeKind for Script {
     }
 
     fn validate(&self, cfg: &Value) -> Result<(), String> {
-        let code = req_str(cfg, "code", "脚本", CODE_LIMIT)?;
+        let code = req_str(cfg, "code", super::Required::Script, CODE_LIMIT)?;
         if !code.contains("handler") {
-            return Err(NO_HANDLER.into());
+            return Err(steve_i18n::t!("flow.node.no_handler"));
         }
         Ok(())
     }

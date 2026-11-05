@@ -253,7 +253,7 @@ pub fn repo_out(c: &rusqlite::Connection, r: &RepoRow) -> rusqlite::Result<Value
         "connection": {"id": r.connection_id, "kind": if adapter == github_app::ID { "app" } else { "pat" }, "account": account},
         "project": project, "ingest": r.ingest,
         "healthy": r.enabled && status == "ok",
-        "problem": if lost { json!("GitHub App 不再能访问这个仓库") } else { Value::Null },
+        "problem": if lost { json!(steve_i18n::t!("github.repo.lost_access")) } else { Value::Null },
         "last_delivery": r.last_delivery, "settings": Settings::of(&r.settings).to_json(),
         "open_prs": open_prs, "open_issues": open_issues, "enabled": r.enabled, "revision": r.revision,
     }))
@@ -426,7 +426,9 @@ impl GitHub {
                     .map_err(ApiError::from)?
                     .is_some()
                 {
-                    return Err(ApiError::conflict("这个仓库已经关联过了").into());
+                    return Err(
+                        ApiError::conflict(steve_i18n::t!("github.repo.already_linked")).into(),
+                    );
                 }
                 Ok::<_, steve_modules::vault::VaultError>(())
             })
@@ -487,7 +489,7 @@ impl GitHub {
                 check_project(tx, &ws, p, None)?;
             }
             if repo::repo_by_gh(tx, &ws, gh_id).map_err(ApiError::from)?.is_some() {
-                return Err(ApiError::conflict("这个仓库已经关联过了").into());
+                return Err(ApiError::conflict(steve_i18n::t!("github.repo.already_linked")).into());
             }
             repo::insert_repo(tx, &row).map_err(ApiError::from)?;
             base::audit(
@@ -760,9 +762,9 @@ pub(crate) fn check_project(
     if let Some(other) = repo::repo_of_project(c, ws, project)?
         && Some(other.id.as_str()) != except
     {
-        return Err(ApiError::conflict(format!(
-            "这个项目已经关联了 {}",
-            other.full_name
+        return Err(ApiError::conflict(steve_i18n::t!(
+            "github.repo.project_taken",
+            repo = other.full_name
         )));
     }
     Ok(())

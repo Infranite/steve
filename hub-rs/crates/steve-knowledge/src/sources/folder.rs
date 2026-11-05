@@ -27,10 +27,6 @@ use crate::service;
 use crate::sources::{is_builtin, source_json};
 use crate::state::Knowledge;
 
-/// Prefix of every refused path.
-pub const PATH_REFUSED: &str = "这个目录不能加入知识库";
-/// A folder outside `$HOME` and `/Volumes` (coordinator decision, 2026-11-01).
-pub const OUTSIDE_HOME: &str = "只能添加你主目录或外接磁盘里的文件夹";
 /// `kb_docs.error` of a file over 2 MB.
 pub const TOO_BIG: &str = "文件超过 2 MB，没有索引";
 /// A file that resolves outside the folder (a link swapped after the scan).
@@ -72,54 +68,60 @@ impl FolderPolicy {
     }
 }
 
-/// The path rules. Returns the canonical directory, or the Chinese reason it is refused.
+/// The path rules. Returns the canonical directory, or the reason it is refused (in the request's
+/// language: zh-CN in the background scan, which stores it).
 /// Overlap with existing folder sources is [`overlap`].
 pub fn check_path(policy: &FolderPolicy, raw: &str) -> std::result::Result<PathBuf, String> {
     let p = Path::new(raw.trim());
     if raw.trim().is_empty() || !p.is_absolute() {
-        return Err("需要绝对路径".into());
+        return Err(steve_i18n::t!("knowledge.folder.need_absolute"));
     }
     if p.components().any(|c| matches!(c, Component::ParentDir)) {
-        return Err("路径里不能有 ..".into());
+        return Err(steve_i18n::t!("knowledge.folder.parent_dir"));
     }
     let meta = match std::fs::metadata(p) {
         Ok(m) => m,
-        Err(_) => return Err("目录不存在".into()),
+        Err(_) => return Err(steve_i18n::t!("knowledge.folder.missing")),
     };
     if !meta.is_dir() {
-        return Err("这不是一个目录".into());
+        return Err(steve_i18n::t!("knowledge.folder.not_dir"));
     }
-    let c = std::fs::canonicalize(p).map_err(|_| "目录不存在".to_string())?;
+    let c = std::fs::canonicalize(p).map_err(|_| steve_i18n::t!("knowledge.folder.missing"))?;
     if c.parent().is_none() {
-        return Err("不能是根目录".into());
+        return Err(steve_i18n::t!("knowledge.folder.root"));
     }
     if c == policy.home {
-        return Err("不能是整个主目录".into());
+        return Err(steve_i18n::t!("knowledge.folder.whole_home"));
     }
     if c.starts_with(&policy.steve_home) {
-        return Err("不能是 Steve 自己的数据目录".into());
+        return Err(steve_i18n::t!("knowledge.folder.steve_data"));
     }
     if policy.steve_home.starts_with(&c) {
-        return Err("里面包含 Steve 自己的数据目录".into());
+        return Err(steve_i18n::t!("knowledge.folder.contains_steve_data"));
     }
     for d in [".ssh", ".gnupg", "Library"] {
         if c.starts_with(policy.home.join(d)) {
-            return Err(format!("不能是 ~/{d} 或其中的目录"));
+            return Err(steve_i18n::t!("knowledge.folder.private_dir", dir = d));
         }
     }
     if !(c.starts_with(&policy.home) || c.starts_with("/Volumes")) {
-        return Err(OUTSIDE_HOME.into());
+        return Err(outside_home());
     }
     Ok(c)
 }
 
-/// The whole message of a refused path: [`OUTSIDE_HOME`] stands alone, the other reasons follow
-/// [`PATH_REFUSED`].
+/// A folder outside `$HOME` and `/Volumes` (coordinator decision, 2026-11-01).
+fn outside_home() -> String {
+    steve_i18n::t!("knowledge.folder.outside_home")
+}
+
+/// The whole message of a refused path: the outside-home reason stands alone, the others follow
+/// “这个目录不能加入知识库：”.
 pub fn refusal(reason: &str) -> String {
-    if reason == OUTSIDE_HOME {
+    if reason == outside_home() {
         reason.to_string()
     } else {
-        format!("{PATH_REFUSED}：{reason}")
+        steve_i18n::t!("knowledge.folder.refused", reason = reason)
     }
 }
 
@@ -762,7 +764,7 @@ fn default_include() -> Vec<String> {
 /// The reason `path` would overlap an existing folder source of `ws`, if it does.
 pub fn overlap_reason(c: &Connection, ws: &str, path: &Path) -> Result<Option<String>> {
     let others = repo::folder_sources(c, Some(ws))?;
-    Ok(overlap(path, &others).map(|o| format!("和已有的文件夹来源“{}”重叠", o.name)))
+    Ok(overlap(path, &others).map(|o| steve_i18n::t!("knowledge.folder.overlap", name = o.name)))
 }
 
 /// Inserts a checked folder source in `tx` (overlap and scope checked here, inside the write).
@@ -810,7 +812,9 @@ pub fn create(m: &Modules, kb: &Knowledge, who: &Caller, b: SourceBody) -> ApiRe
 }
 
 /// `403` for a visibility or level change of a built-in source by anyone but the owner.
-pub const OWNER_ONLY: &str = "只有工作空间的所有者能改内置来源";
+pub fn owner_only() -> String {
+    steve_i18n::t!("knowledge.folder.owner_only")
+}
 
 /// Is `user` the owner of `ws`?
 pub fn is_owner(c: &Connection, ws: &str, user: &str) -> ApiResult<bool> {
@@ -903,7 +907,7 @@ pub fn patch_tx(tx: &Tx, who: &Caller, id: &str, b: &SourcePatch, now: i64) -> A
     let folder = old.kind == "folder";
     // built-in sources are the whole workspace's: only its owner widens or narrows them
     if owner_refuses(tx, who, &old, b)? {
-        return Err(ApiError::forbidden(OWNER_ONLY));
+        return Err(ApiError::forbidden(owner_only()));
     }
     Check::new()
         .that("include", folder || b.include.is_none())
@@ -1002,7 +1006,9 @@ pub fn patch(
 pub fn delete_tx(tx: &Tx, who: &Caller, id: &str) -> ApiResult<()> {
     let s = own_source(tx, who, id)?;
     if is_builtin(&s.kind) {
-        return Err(ApiError::rule("内置来源不能删除，可以暂停"));
+        return Err(ApiError::rule(steve_i18n::t!(
+            "knowledge.source.builtin_delete"
+        )));
     }
     let docs = repo::docs_of_source(tx, &s.id)?;
     for d in &docs {
@@ -1033,10 +1039,49 @@ pub fn delete(m: &Modules, kb: &Knowledge, who: &Caller, id: &str) -> ApiResult<
 pub fn request_sync(m: &Modules, who: &Caller, id: &str) -> ApiResult<SourceRow> {
     let s = m.store.reader(|c| own_source(c, who, id))?;
     if s.kind != "folder" {
-        return Err(ApiError::rule("只有文件夹来源需要手动同步"));
+        return Err(ApiError::rule(steve_i18n::t!(
+            "knowledge.source.sync_folder_only"
+        )));
     }
     if s.paused {
-        return Err(ApiError::rule("这个来源已暂停，恢复后才能同步"));
+        return Err(ApiError::rule(steve_i18n::t!(
+            "knowledge.source.sync_paused"
+        )));
     }
-    claim(m, id)?.ok_or_else(|| ApiError::conflict("正在同步"))
+    claim(m, id)?.ok_or_else(|| ApiError::conflict(steve_i18n::t!("knowledge.source.syncing_now")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn refusals_in_the_request_language() {
+        let p = FolderPolicy::new(
+            PathBuf::from("/srv/demo"),
+            PathBuf::from("/srv/demo/.steve"),
+        );
+        let zh = check_path(&p, "relative").map_err(|r| refusal(&r));
+        assert_eq!(zh, Err("这个目录不能加入知识库：需要绝对路径".into()));
+        let en = steve_i18n::scope(steve_i18n::EN, async {
+            (
+                check_path(&p, "relative").map_err(|r| refusal(&r)),
+                refusal(&outside_home()),
+                owner_only(),
+            )
+        })
+        .await;
+        assert_eq!(
+            en.0,
+            Err(
+                "This folder can't be added to the knowledge base: the path must be absolute"
+                    .into()
+            )
+        );
+        assert_eq!(
+            en.1,
+            "You can only add folders in your home folder or on an external disk"
+        );
+        assert_eq!(en.2, "Only the workspace owner can change built-in sources");
+    }
 }

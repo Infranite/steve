@@ -744,7 +744,7 @@ impl DecisionHandler for PrOpenDecisions {
 
     /// The branch may be pushed and the PR open by now; there is nothing to take back.
     fn before_undo(&self, _tx: &Tx, _d: &Decision) -> ApiResult<()> {
-        Err(ApiError::rule("已经按你的选择处理了，不能撤销"))
+        Err(ApiError::rule(steve_i18n::t!("github.decision.no_undo")))
     }
 }
 
@@ -759,10 +759,10 @@ impl DecisionHandler for PrMergeDecisions {
             .filter(|p| p.workspace_id == cx.ws)
             .ok_or_else(|| ApiError::not_found("PR"))?;
         if pr.state != "open" {
-            return Err(ApiError::conflict("PR 已经关闭了"));
+            return Err(ApiError::conflict(steve_i18n::t!("github.pr.closed")));
         }
         if cx.choice == "yes" && pr.checks_state != "success" {
-            return Err(ApiError::conflict("PR 有新的提交，等检查重新通过"));
+            return Err(ApiError::conflict(steve_i18n::t!("github.pr.new_commits")));
         }
         let mut out = choice_result(cx);
         out["sha"] = json!(pr.head_sha);
@@ -773,7 +773,7 @@ impl DecisionHandler for PrMergeDecisions {
     }
 
     fn before_undo(&self, _tx: &Tx, _d: &Decision) -> ApiResult<()> {
-        Err(ApiError::rule("已经按你的选择处理了，不能撤销"))
+        Err(ApiError::rule(steve_i18n::t!("github.decision.no_undo")))
     }
 }
 

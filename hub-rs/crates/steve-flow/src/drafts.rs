@@ -55,10 +55,39 @@ fn overlap_label(o: OverlapPolicy) -> &'static str {
     }
 }
 
+/// The card's wording of a missed policy, in the request's language.
+fn missed_shown(m: MissedPolicy) -> String {
+    match m {
+        MissedPolicy::CatchUpOnce => steve_i18n::t!("flow.draft.missed_catch_up_once"),
+        MissedPolicy::Skip => steve_i18n::t!("flow.draft.missed_skip"),
+    }
+}
+
+/// The card's wording of an overlap policy, in the request's language.
+fn overlap_shown(o: OverlapPolicy) -> String {
+    match o {
+        OverlapPolicy::Skip => steve_i18n::t!("flow.draft.overlap_skip"),
+        OverlapPolicy::Run => steve_i18n::t!("flow.draft.overlap_run"),
+    }
+}
+
+/// The card's wording of a cron, in the request's language.
 fn describe(cron: &str) -> String {
     CronExpr::parse(cron)
         .map(|e| e.describe())
+        .unwrap_or_else(|_| steve_i18n::t!("flow.cron.raw", cron = cron))
+}
+
+/// The zh-CN wording of a cron, for the model.
+fn describe_zh(cron: &str) -> String {
+    CronExpr::parse(cron)
+        .map(|e| e.describe_zh())
         .unwrap_or_else(|_| format!("按 cron「{cron}」"))
+}
+
+/// “（没认出：X）” in the request's language.
+fn unrecognized_value(said: &str) -> String {
+    steve_i18n::t!("flow.draft.unrecognized_value", value = show(said))
 }
 
 fn bot_name(c: &Connection, id: &str) -> String {
@@ -135,13 +164,18 @@ fn parse_budget(s: &str) -> Option<f64> {
     (0.0..=MAX_BUDGET_USD).contains(&n).then_some(n)
 }
 
-/// A `when` phrase (or a cron) → `(cron, describe)` by the rules only; `None` = not understood.
-fn time_of(said: &str, tz: &str, now: i64) -> Option<(String, String)> {
+/// A `when` phrase (or a cron) → `(cron, zh-CN describe, describe for the card)` by the rules only;
+/// `None` = not understood.
+fn time_of(said: &str, tz: &str, now: i64) -> Option<(String, String, String)> {
     let tz = parse_tz(tz).ok()?;
     let now = DateTime::from_timestamp_millis(now)?;
     let rule = rule_cron(said).ok()??;
     let expr = validate(&rule.cron, tz, now).ok()?;
-    Some((expr.as_str().to_string(), expr.describe()))
+    Some((
+        expr.as_str().to_string(),
+        expr.describe_zh(),
+        expr.describe(),
+    ))
 }
 
 /// One field of a schedule as the model may set it, checked. `Err` = a “（没认出…）” line.
@@ -161,7 +195,10 @@ enum Field {
     Budget(f64),
 }
 
-const UNRECOGNIZED: &str = "（没认出）";
+/// The label of a line the model wrote that fits nothing (“（没认出）”), in the request's language.
+fn unrecognized() -> String {
+    steve_i18n::t!("flow.draft.unrecognized")
+}
 
 fn field(
     c: &Connection,
@@ -172,38 +209,49 @@ fn field(
     v: &Value,
 ) -> Result<Field, Change> {
     let raw = text_of(v).unwrap_or_default();
-    let bad = |label: &str| Change::new(label, "—", format!("（没认出：{}）", show(&raw)));
+    let bad = |label: String| Change::new(label, "—", unrecognized_value(&raw));
     Ok(match key {
         "name" if (1..=40).contains(&raw.chars().count()) => Field::Name(raw),
-        "name" => return Err(bad("名字")),
+        "name" => return Err(bad(steve_i18n::t!("flow.draft.schedule_name"))),
         "when" | "cron" => match time_of(&raw, tz, now) {
-            Some((cron, describe)) => Field::Time {
-                when: if key == "when" {
-                    raw.clone()
-                } else {
-                    describe.clone()
-                },
+            Some((cron, zh, describe)) => Field::Time {
+                when: if key == "when" { raw.clone() } else { zh },
                 cron,
                 describe,
             },
-            None => return Err(Change::new("时间", "—", format!("（没看懂时间：{raw}）"))),
+            None => {
+                return Err(Change::new(
+                    steve_i18n::t!("flow.draft.schedule_time"),
+                    "—",
+                    steve_i18n::t!("flow.draft.time_not_understood", value = raw),
+                ));
+            }
         },
         "what" if (1..=2000).contains(&raw.chars().count()) => Field::What(raw),
-        "what" => return Err(bad("做什么")),
+        "what" => return Err(bad(steve_i18n::t!("flow.draft.schedule_what"))),
         "bot" => match find_bot(c, ws, &raw).ok().flatten() {
             Some(id) => Field::Bot(id),
-            None => return Err(bad("交给谁")),
+            None => return Err(bad(steve_i18n::t!("flow.draft.schedule_bot"))),
         },
-        "mode" => Field::Mode(parse_mode(&raw).ok_or_else(|| bad("方式"))?),
-        "enabled" => Field::Enabled(parse_bool(&raw).ok_or_else(|| bad("启用"))?),
-        "missed" => Field::Missed(parse_missed(&raw).ok_or_else(|| bad("错过了怎么办"))?),
-        "overlap" => Field::Overlap(parse_overlap(&raw).ok_or_else(|| bad("上一次没结束"))?),
-        "budget_usd" | "budget" => {
-            Field::Budget(parse_budget(&raw).ok_or_else(|| bad("每次预算"))?)
-        }
+        "mode" => Field::Mode(
+            parse_mode(&raw).ok_or_else(|| bad(steve_i18n::t!("flow.draft.schedule_mode")))?,
+        ),
+        "enabled" => Field::Enabled(
+            parse_bool(&raw).ok_or_else(|| bad(steve_i18n::t!("flow.draft.enabled")))?,
+        ),
+        "missed" => Field::Missed(
+            parse_missed(&raw).ok_or_else(|| bad(steve_i18n::t!("flow.draft.schedule_missed")))?,
+        ),
+        "overlap" => Field::Overlap(
+            parse_overlap(&raw)
+                .ok_or_else(|| bad(steve_i18n::t!("flow.draft.schedule_overlap")))?,
+        ),
+        "budget_usd" | "budget" => Field::Budget(
+            parse_budget(&raw).ok_or_else(|| bad(steve_i18n::t!("flow.draft.schedule_budget")))?,
+        ),
         _ => {
             return Err(Change::new(
-                UNRECOGNIZED,
+                unrecognized(),
                 "—",
                 show(&format!("{key}: {raw}")),
             ));
@@ -217,7 +265,11 @@ fn patch_line(c: &Connection, s: &Schedule, f: &Field, set: &mut Map<String, Val
     match f {
         Field::Name(n) => {
             set.insert("name".into(), json!(n));
-            Change::new("名字", show(&s.name), show(n))
+            Change::new(
+                steve_i18n::t!("flow.draft.schedule_name"),
+                show(&s.name),
+                show(n),
+            )
         }
         Field::Time {
             when,
@@ -226,37 +278,67 @@ fn patch_line(c: &Connection, s: &Schedule, f: &Field, set: &mut Map<String, Val
         } => {
             set.insert("when".into(), json!(when));
             set.insert("cron".into(), json!(cron));
-            Change::new("时间", describe(&sp.cron), format!("{d}（{cron}）"))
+            Change::new(
+                steve_i18n::t!("flow.draft.schedule_time"),
+                describe(&sp.cron),
+                steve_i18n::t!("flow.draft.time_with_cron", describe = d, cron = cron),
+            )
         }
         Field::What(w) => {
             set.insert("what".into(), json!(w));
-            Change::new("做什么", show(&sp.what), show(w))
+            Change::new(
+                steve_i18n::t!("flow.draft.schedule_what"),
+                show(&sp.what),
+                show(w),
+            )
         }
         Field::Bot(b) => {
             set.insert("bot".into(), json!(b));
-            Change::new("交给谁", bot_name(c, &sp.bot), bot_name(c, b))
+            Change::new(
+                steve_i18n::t!("flow.draft.schedule_bot"),
+                bot_name(c, &sp.bot),
+                bot_name(c, b),
+            )
         }
         Field::Mode(m) => {
             set.insert("mode".into(), json!(m.as_str()));
-            Change::new("方式", sp.mode.label(), m.label())
+            Change::new(
+                steve_i18n::t!("flow.draft.schedule_mode"),
+                sp.mode.shown(),
+                m.shown(),
+            )
         }
         Field::Enabled(e) => {
             set.insert("enabled".into(), json!(e));
-            let l = |b: bool| if b { "启用" } else { "停用" };
-            Change::new("启用", l(s.enabled), l(*e))
+            let l = |b: bool| {
+                if b {
+                    steve_i18n::t!("flow.draft.on")
+                } else {
+                    steve_i18n::t!("flow.draft.off")
+                }
+            };
+            Change::new(steve_i18n::t!("flow.draft.enabled"), l(s.enabled), l(*e))
         }
         Field::Missed(m) => {
             set.insert("missed".into(), json!(m.as_str()));
-            Change::new("错过了怎么办", missed_label(sp.missed), missed_label(*m))
+            Change::new(
+                steve_i18n::t!("flow.draft.schedule_missed"),
+                missed_shown(sp.missed),
+                missed_shown(*m),
+            )
         }
         Field::Overlap(o) => {
             set.insert("overlap".into(), json!(o.as_str()));
-            Change::new("上一次没结束", overlap_label(sp.overlap), overlap_label(*o))
+            Change::new(
+                steve_i18n::t!("flow.draft.schedule_overlap"),
+                overlap_shown(sp.overlap),
+                overlap_shown(*o),
+            )
         }
         Field::Budget(b) => {
             set.insert("budget_usd".into(), json!(b));
             Change::new(
-                "每次预算",
+                steve_i18n::t!("flow.draft.schedule_budget"),
                 crate::budget::usd(sp.budget_usd),
                 crate::budget::usd(*b),
             )
@@ -311,7 +393,7 @@ impl DraftTarget for ScheduleTarget {
             return Ok(Prepared {
                 target_id: None,
                 revision: None,
-                title: "新建定时任务".into(),
+                title: steve_i18n::t!("flow.draft.schedule_new_title"),
                 href: "#/auto/schedules".into(),
                 subject: "a new scheduled task".into(),
                 fields: vec![],
@@ -331,7 +413,7 @@ impl DraftTarget for ScheduleTarget {
         Ok(Prepared {
             target_id: Some(s.id.clone()),
             revision: Some(s.updated),
-            title: format!("定时任务「{}」", s.name),
+            title: steve_i18n::t!("flow.draft.schedule_title", name = s.name),
             href: format!("#/auto/schedules?id={}", s.id),
             subject: format!("the scheduled task \"{}\"", s.name),
             fields: vec![
@@ -340,7 +422,7 @@ impl DraftTarget for ScheduleTarget {
                     "when",
                     "时间（中文说法，例如 每天 09:00）",
                     "text",
-                    json!(describe(&sp.cron)),
+                    json!(describe_zh(&sp.cron)),
                 ),
                 FieldSpec::new("what", "做什么", "text", json!(sp.what)),
                 FieldSpec::new("bot", "交给谁", "ref", json!(bot_name(c, &sp.bot))),
@@ -399,7 +481,7 @@ impl DraftTarget for ScheduleTarget {
                 for op in raw {
                     if op["op"] != "set" {
                         plan.changes
-                            .push(Change::new(UNRECOGNIZED, "—", show(&op.to_string())));
+                            .push(Change::new(unrecognized(), "—", show(&op.to_string())));
                         continue;
                     }
                     let key = op["key"].as_str().unwrap_or("");
@@ -417,7 +499,7 @@ impl DraftTarget for ScheduleTarget {
                 for op in raw {
                     if op["op"] != "schedule.create" {
                         plan.changes
-                            .push(Change::new(UNRECOGNIZED, "—", show(&op.to_string())));
+                            .push(Change::new(unrecognized(), "—", show(&op.to_string())));
                         continue;
                     }
                     let (o, lines) = plan_create(c, &viewer.ws, &tz, now, &op)?;
@@ -522,44 +604,64 @@ fn plan_create(
             Field::Enabled(_) => {}
         }
     }
-    let missing = |what: &str| {
+    let missing = |why: String| {
         Ok((
             None,
-            vec![Change::new("（没说清楚）", "—", format!("缺少{what}"))],
+            vec![Change::new(steve_i18n::t!("flow.draft.unclear"), "—", why)],
         ))
     };
     let Some((when, cron, d)) = time else {
-        return missing("时间");
+        return missing(steve_i18n::t!("flow.draft.missing_time"));
     };
     let Some(what) = what else {
-        return missing("要做什么");
+        return missing(steve_i18n::t!("flow.draft.missing_what"));
     };
     let name = name.unwrap_or_else(|| what.chars().take(40).collect());
     let Some(bot) = bot.or(main_bot(c)?) else {
-        return missing("交给谁");
+        return missing(steve_i18n::t!("flow.draft.missing_bot"));
     };
     spec["when"] = json!(when);
     spec["cron"] = json!(cron);
     spec["what"] = json!(what);
     spec["bot"] = json!(bot);
     let parsed: Spec = serde_json::from_value(spec.clone())?;
-    lines.push(Change::new("名字", "—", show(&name)));
-    lines.push(Change::new("时间", "—", format!("{d}（{cron}）")));
-    lines.push(Change::new("做什么", "—", show(&what)));
-    lines.push(Change::new("交给谁", "—", bot_name(c, &bot)));
-    lines.push(Change::new("方式", "—", parsed.mode.label()));
     lines.push(Change::new(
-        "错过了怎么办",
+        steve_i18n::t!("flow.draft.schedule_name"),
         "—",
-        missed_label(parsed.missed),
+        show(&name),
     ));
     lines.push(Change::new(
-        "上一次没结束",
+        steve_i18n::t!("flow.draft.schedule_time"),
         "—",
-        overlap_label(parsed.overlap),
+        steve_i18n::t!("flow.draft.time_with_cron", describe = d, cron = cron),
     ));
     lines.push(Change::new(
-        "每次预算",
+        steve_i18n::t!("flow.draft.schedule_what"),
+        "—",
+        show(&what),
+    ));
+    lines.push(Change::new(
+        steve_i18n::t!("flow.draft.schedule_bot"),
+        "—",
+        bot_name(c, &bot),
+    ));
+    lines.push(Change::new(
+        steve_i18n::t!("flow.draft.schedule_mode"),
+        "—",
+        parsed.mode.shown(),
+    ));
+    lines.push(Change::new(
+        steve_i18n::t!("flow.draft.schedule_missed"),
+        "—",
+        missed_shown(parsed.missed),
+    ));
+    lines.push(Change::new(
+        steve_i18n::t!("flow.draft.schedule_overlap"),
+        "—",
+        overlap_shown(parsed.overlap),
+    ));
+    lines.push(Change::new(
+        steve_i18n::t!("flow.draft.schedule_budget"),
         "—",
         crate::budget::usd(parsed.budget_usd),
     ));

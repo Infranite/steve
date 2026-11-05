@@ -48,7 +48,8 @@ impl Core {
         msg_id: &str,
         a: A2uiAction,
     ) -> Result<A2uiActed> {
-        let bad = |f: &str| CoreError::Status(400, format!("参数不对：{f}"));
+        let bad =
+            |f: &str| CoreError::Status(400, steve_i18n::t!("core.error.invalid", fields = f));
         let ok_id = |s: &str, max: usize| !s.is_empty() && s.chars().count() <= max;
         if !ok_id(&a.block, 16) || !a.block.chars().all(|c| c.is_ascii_alphanumeric()) {
             return Err(bad("block"));
@@ -74,12 +75,15 @@ impl Core {
         if m.author != "steve" || m.space != super::MAIN {
             return Err(CoreError::Status(
                 400,
-                "只有主线对话里 Steve 的回复能提交界面".into(),
+                steve_i18n::t!("core.a2ui.main_only"),
             ));
         }
         let surface_json = serde_json::to_string(&a.surface).unwrap_or_default();
         if !has_block(&m.text) || !m.text.contains(&surface_json) {
-            return Err(CoreError::Status(400, "这条回复里没有这个界面".into()));
+            return Err(CoreError::Status(
+                400,
+                steve_i18n::t!("core.a2ui.no_surface"),
+            ));
         }
         let key = format!("{}:{}", a.block, a.surface);
         if let Some(r) = m.meta.get("a2ui").and_then(|x| x.get(&key)) {

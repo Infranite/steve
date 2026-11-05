@@ -92,7 +92,9 @@ pub fn dispatch(
             .filter(|d| d.workspace_id == caller.ws)
             .ok_or_else(|| ApiError::not_found("决定"))?;
         if d.status != "open" {
-            return Err(ApiError::conflict("这个决定已经处理过了"));
+            return Err(ApiError::conflict(steve_i18n::t!(
+                "modules.decision.already_handled"
+            )));
         }
         if !d.options.is_empty() && !d.options.iter().any(|o| o == choice) {
             return Err(ApiError::invalid("choice"));
@@ -142,7 +144,7 @@ pub fn undo(
     Some(m.store.transaction(|tx| {
         let d = base::decisions::get(tx, id)?
             .filter(|d| undoable(d))
-            .ok_or_else(|| ApiError::rule("这个决定不能撤销"))?;
+            .ok_or_else(|| ApiError::rule(steve_i18n::t!("modules.decision.not_undoable")))?;
         handler.before_undo(tx, &d)?;
         tx.execute(
             "UPDATE decisions SET status = 'open', result = NULL, resolved = NULL, undo = NULL WHERE id = ?",

@@ -89,6 +89,23 @@ pub fn origin_label(origin: &str) -> &'static str {
     }
 }
 
+/// The stored `origin_label` as the UI shows it: the standard label of `origin` in the request's language,
+/// any other label (a plugin's own) as stored.
+pub fn origin_label_shown(origin: &str, stored: &str) -> String {
+    use steve_i18n::t;
+    if stored != origin_label(origin) {
+        return stored.to_string();
+    }
+    match origin {
+        "me" => t!("flow.origin.me"),
+        "steve" => t!("flow.origin.steve"),
+        "correction" => t!("flow.origin.correction"),
+        o if o.starts_with("plugin:") => t!("flow.origin.plugin"),
+        o if o.starts_with("template:") => t!("flow.origin.template"),
+        _ => stored.to_string(),
+    }
+}
+
 /// A flow to insert (its graph already validated).
 pub struct NewFlow<'a> {
     pub kind: &'a str,
@@ -381,7 +398,7 @@ pub fn summary(c: &Connection, f: &FlowRow, now: i64) -> FlowResult<Value> {
         "enabled": f.enabled,
         "version": f.version,
         "origin": f.origin,
-        "origin_label": f.origin_label,
+        "origin_label": origin_label_shown(&f.origin, &f.origin_label),
         "trigger": trigger,
         "uses_ai": graph.uses_ai(),
         "outcomes": graph.nodes.iter().filter(|n| n.kind == "action").count(),
