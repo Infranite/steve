@@ -102,7 +102,8 @@ pub fn create_job_in(
 }
 
 /// Adds the next attempt of an open job (the Hub's fallback to another model) with its
-/// `start_job` command. The previous attempt must be finished and the ordinal must follow it.
+/// `start_job` command. The previous attempt must be finished and the ordinal must follow it, and
+/// no attempt of the job may have been cancelled: a cancelled job never falls back.
 pub fn next_attempt_in(
     tx: &Tx<'_>,
     job: &str,
@@ -148,14 +149,19 @@ fn insert_attempt(
     if state != "open" {
         return Err(conflict("job is finished"));
     }
-    let (open, next): (bool, i64) = tx.query_row(
+    let (open, cancelled, next): (bool, bool, i64) = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM runtime_job_attempts WHERE job_id=?1 AND state<>'finished'),
+                EXISTS(SELECT 1 FROM runtime_job_attempts WHERE job_id=?1 AND cancel_requested=1),
                 COALESCE((SELECT MAX(ordinal)+1 FROM runtime_job_attempts WHERE job_id=?1),0)",
         [job],
-        |r| Ok((r.get(0)?, r.get(1)?)),
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
     )?;
     if open {
         return Err(conflict("job already has an open attempt"));
+    }
+    // the caller gave the job up; its error or transient end is not a reason to run it again
+    if cancelled {
+        return Err(conflict("job was cancelled"));
     }
     if a.ordinal != next {
         return Err(conflict("job attempt ordinal out of sequence"));
@@ -193,16 +199,23 @@ pub struct NewJobCommand<'a> {
 }
 
 /// Queues the command as `pending`. A duplicate operation id must carry exactly the same envelope.
+/// A `start_job` is only accepted under the attempt's own operation id, so an attempt is started
+/// once; any other id is a conflict.
 pub fn insert_job_command_in(tx: &Tx<'_>, c: &NewJobCommand<'_>, now: i64) -> Result<bool> {
     let request = to_json(c.request)?;
-    let node: String = tx
+    let (node, operation): (String, String) = tx
         .query_row(
-            "SELECT node_id FROM runtime_job_attempts WHERE attempt_id=?",
+            "SELECT node_id,operation_id FROM runtime_job_attempts WHERE attempt_id=?",
             [c.attempt],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?
         .ok_or_else(|| conflict("command targets an unknown job attempt"))?;
+    if c.method == START_JOB && c.operation != operation {
+        return Err(conflict(
+            "a job attempt starts only under its own operation id",
+        ));
+    }
     let same: Option<bool> = tx
         .query_row(
             "SELECT node_id=? AND method=? AND request=? AND digest=? AND target_job_attempt IS ? AND target_attempt IS NULL AND dependency_operation IS NULL FROM node_commands WHERE operation_id=?",

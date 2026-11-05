@@ -553,3 +553,73 @@ fn prune_takes_a_whole_job_with_every_attempt_and_command() {
         })
         .unwrap();
 }
+
+#[test]
+fn an_attempt_is_started_only_under_its_own_operation_id() {
+    let t = fresh();
+    t.store
+        .transaction::<_, StoreError>(|tx| {
+            create(tx, "j")?;
+            let s = spec("j", "j-a0");
+            let second = NewJobCommand {
+                operation: "j-op-again",
+                attempt: "j-a0",
+                method: START_JOB,
+                request: &s.request,
+                digest: "d",
+            };
+            is_conflict(
+                insert_job_command_in(tx, &second, 2),
+                "only under its own operation id",
+            );
+            // the attempt's own start again is the idempotent replay
+            let own = NewJobCommand {
+                operation: "j-op0",
+                ..second
+            };
+            assert!(!insert_job_command_in(tx, &own, 2)?);
+            assert_eq!(
+                count(
+                    tx,
+                    "SELECT count(*) FROM node_commands WHERE target_job_attempt='j-a0'"
+                ),
+                1
+            );
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn a_cancelled_job_never_falls_back() {
+    let t = fresh();
+    t.store
+        .transaction::<_, StoreError>(|tx| {
+            create(tx, "j")?;
+            assert!(cancel_attempt_in(tx, "j-a0", 2)?);
+            // the cancelled attempt ends the way a fallback would react to
+            assert!(apply_attempt_in(
+                tx,
+                "j-a0",
+                AttemptState::Finished,
+                None,
+                Some(&json!({"error":{"kind":"transient"}})),
+                3
+            )?);
+            is_conflict(next(tx, "j", 1), "job was cancelled");
+            assert_eq!(attempts_of_job_in(tx, "j")?.len(), 1);
+            assert_eq!(
+                count(
+                    tx,
+                    "SELECT count(*) FROM node_commands WHERE operation_id LIKE 'j-%'"
+                ),
+                1
+            );
+            // an uncancelled job still falls back
+            create(tx, "k")?;
+            assert!(finish(tx, "k-a0")?);
+            assert!(next(tx, "k", 1)?);
+            Ok(())
+        })
+        .unwrap();
+}
