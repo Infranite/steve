@@ -1550,3 +1550,41 @@ async fn a_failed_processing_is_tried_again() {
         json!("ok")
     );
 }
+
+/// Panics on every notice: a processing that crashes after its commit.
+struct PanickingNotifier;
+
+impl steve_github::GhNotifier for PanickingNotifier {
+    fn gh(&self, _: &str, _: &str) {
+        panic!("test notifier panic");
+    }
+}
+
+/// A processing that panics counts as a failed attempt: still `received`, attempts up by one and
+/// backing off, so the recovery doesn't queue it again on every tick (it would panic each time and
+/// never reach `failed`).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_panicking_processing_counts_as_a_failed_attempt() {
+    let (h, _app, _repo) = ready().await;
+    h.gh.set_notifier(Arc::new(PanickingNotifier));
+    let d = h
+        .fake
+        .emit_fixture("pull_request.opened")
+        .await
+        .expect("emit");
+    assert_eq!(d.status, 202);
+    h.gh.settle().await;
+    assert_eq!(
+        q(
+            &h,
+            "SELECT d.status || '|' || i.attempts || '|' || d.error FROM gh_deliveries d JOIN gh_delivery_inputs i USING (delivery_id) WHERE delivery_id = ?",
+            &[&d.id]
+        ),
+        json!("received|1|处理时崩溃")
+    );
+    assert_eq!(
+        h.gh.recover_deliveries(),
+        0,
+        "backing off, not queued again at once"
+    );
+}

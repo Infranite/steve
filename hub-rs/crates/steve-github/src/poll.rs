@@ -12,6 +12,7 @@ use std::sync::Weak;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+use futures::StreamExt;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use steve_modules::ApiError;
@@ -27,6 +28,8 @@ pub const STALE_MS: i64 = 6 * 3_600_000;
 /// Deliveries are kept (for dedupe and the debug list) this long.
 pub const DELIVERY_KEEP_MS: i64 = 7 * 24 * 3_600_000;
 const TICK: Duration = Duration::from_secs(30);
+/// Repos polled at the same time.
+const POLL_CONCURRENCY: usize = 4;
 
 /// What one poll did.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -80,12 +83,17 @@ impl GitHub {
                 return 0;
             }
         };
-        for id in &due {
-            if let Err(e) = self.poll_repo(id).await {
-                tracing::warn!(repo = %id, error = %e, "github poll failed");
-            }
-        }
-        due.len()
+        let n = due.len();
+        // A few repos at a time, so one slow repo does not hold up the rest; each repo still
+        // polls in one task, in order.
+        futures::stream::iter(due)
+            .for_each_concurrent(POLL_CONCURRENCY, |id| async move {
+                if let Err(e) = self.poll_repo(&id).await {
+                    tracing::warn!(repo = %id, error = %e, "github poll failed");
+                }
+            })
+            .await;
+        n
     }
 
     /// Polls one repo in the background (`POST /github/repos/:id/sync`, after linking). Counted by
@@ -134,7 +142,10 @@ impl GitHub {
         } else {
             new_etag = res.etag.clone();
             // Oldest first, so transitions apply in order.
-            let mut list = res.body.as_array().cloned().unwrap_or_default();
+            let mut list = match res.body {
+                Value::Array(v) => v,
+                _ => Vec::new(),
+            };
             list.reverse();
             for pr in list {
                 let (Some(n), Some(u)) = (pr["number"].as_i64(), pr["updated_at"].as_str()) else {
@@ -165,19 +176,20 @@ impl GitHub {
             })
             .map_err(|e| e.to_string())?;
         for sha in shas {
-            let runs = conn
-                .get(&format!(
-                    "/repos/{}/commits/{sha}/check-runs?per_page=100",
-                    r.full_name
-                ))
-                .await
-                .map_err(|e| e.to_string())?;
-            let status = conn
-                .get(&format!("/repos/{}/commits/{sha}/status", r.full_name))
-                .await
-                .map_err(|e| e.to_string())?;
-            let runs = runs["check_runs"].as_array().cloned().unwrap_or_default();
-            let statuses = status["statuses"].as_array().cloned().unwrap_or_default();
+            let runs_path = format!(
+                "/repos/{}/commits/{sha}/check-runs?per_page=100",
+                r.full_name
+            );
+            let status_path = format!("/repos/{}/commits/{sha}/status", r.full_name);
+            let (mut runs, mut status) =
+                tokio::try_join!(conn.get(&runs_path), conn.get(&status_path))
+                    .map_err(|e| e.to_string())?;
+            let take_list = |v: &mut Value, k: &str| match v.get_mut(k).map(Value::take) {
+                Some(Value::Array(a)) => a,
+                _ => Vec::new(),
+            };
+            let runs = take_list(&mut runs, "check_runs");
+            let statuses = take_list(&mut status, "statuses");
             let mut h = Sha256::new();
             for c in &runs {
                 h.update(format!("{}|{}|{}\n", c["id"], c["status"], c["conclusion"]));
@@ -208,7 +220,11 @@ impl GitHub {
                 .get_if_changed(&path, None)
                 .await
                 .map_err(|e| e.to_string())?;
-            for i in res.body.as_array().cloned().unwrap_or_default() {
+            let list = match res.body {
+                Value::Array(v) => v,
+                _ => Vec::new(),
+            };
+            for i in list {
                 if !i["pull_request"].is_null() {
                     continue;
                 }

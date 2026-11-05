@@ -22,6 +22,7 @@
 //! forged request leaves every table as it was, cold cache or not.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
@@ -31,9 +32,10 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Extension, Router};
+use futures::FutureExt;
 use serde_json::Value;
 use steve_modules::ApiError;
-use tokio::sync::{Notify, mpsc};
+use tokio::sync::{Notify, Semaphore, mpsc};
 use zeroize::Zeroizing;
 
 use steve_store::outbox;
@@ -665,14 +667,73 @@ impl GitHub {
     }
 }
 
+/// Lanes processing deliveries at the same time.
+const LANES_AT_ONCE: usize = 4;
+
+/// The ordering domain of a job: one App installation or one PAT connection (each its own rate
+/// limit). Jobs of one lane run in order; different lanes do not wait on each other.
+fn lane_of(job: &Job) -> String {
+    match &job.source {
+        Source::App { ws } => format!("app:{ws}:{}", job.payload["installation"]["id"]),
+        Source::Conn { connection_id, .. } => format!("conn:{connection_id}"),
+        Source::Poll { repo_id } => format!("poll:{repo_id}"),
+    }
+}
+
+/// Hands each job to its lane, started on first use. Lanes live as long as the worker (there is
+/// one per installation or connection, so few).
 async fn worker(inner: Weak<Inner>, mut rx: mpsc::UnboundedReceiver<Job>) {
+    let permits = Arc::new(Semaphore::new(LANES_AT_ONCE));
+    let mut lanes: HashMap<String, mpsc::UnboundedSender<Job>> = HashMap::new();
+    while let Some(job) = rx.recv().await {
+        let key = lane_of(&job);
+        let tx = lanes.entry(key).or_insert_with(|| {
+            let (t, r) = mpsc::unbounded_channel();
+            tokio::spawn(lane(inner.clone(), r, permits.clone()));
+            t
+        });
+        if let Err(e) = tx.send(job) {
+            // the lane is gone (the service is being dropped): still count the job as over
+            if let Some(inner) = inner.upgrade() {
+                GitHub(inner).done_one(&e.0.delivery_id);
+            }
+        }
+    }
+}
+
+/// One lane: its jobs one at a time, each while holding one of the shared permits.
+async fn lane(inner: Weak<Inner>, mut rx: mpsc::UnboundedReceiver<Job>, permits: Arc<Semaphore>) {
     while let Some(job) = rx.recv().await {
         let Some(inner) = inner.upgrade() else {
             break;
         };
         let gh = GitHub(inner);
         let id = job.delivery_id.clone();
-        gh.run_job(job).await;
+        let event = job.event.clone();
+        let Ok(_permit) = permits.acquire().await else {
+            gh.done_one(&id);
+            break;
+        };
+        // a panicking job must not take the lane down or leave its id queued for good; it counts
+        // as a failed attempt (back-off, `failed` after MAX_ATTEMPTS) so the recovery doesn't
+        // queue it again on every tick
+        if AssertUnwindSafe(gh.run_job(job))
+            .catch_unwind()
+            .await
+            .is_err()
+        {
+            tracing::error!(delivery = %id, "github delivery panicked");
+            gh.delivered(
+                &id,
+                &event,
+                &crate::sync::Outcome {
+                    status: "failed",
+                    error: Some("处理时崩溃".into()),
+                    ws: None,
+                    repo_id: None,
+                },
+            );
+        }
         gh.done_one(&id);
     }
 }
