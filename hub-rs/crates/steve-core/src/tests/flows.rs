@@ -984,6 +984,33 @@ fn a_late_end_drops_a_mark_of_its_own_turn() {
     assert_eq!(k.open_kinds(&i.id), vec!["fail"]);
 }
 
+/// B2b review: one end covers a turn and the follow-ups that took the queue behind it, and names
+/// the last of them. A mark made in an earlier link of that chain is still the chain's: its end,
+/// with nothing running, uses it (as the legacy runner always did), so no stall card.
+#[test]
+fn a_mark_made_before_a_follow_up_counts_for_the_end_of_the_chain() {
+    let k = Kit::new();
+    let i = new_item(&k, "g");
+    let s = only_session(&k, &i.id);
+    let a1 = k.rt.st().attempts[&s.id].clone();
+    k.core
+        .tool_request_approval(&s, "推送到 main", "git push")
+        .unwrap();
+    assert_eq!(
+        k.core
+            .session_message(&s.id, "顺便看看测试", false, &[])
+            .unwrap(),
+        crate::Prompted::Queued
+    );
+    // a1 ends and the queue goes on as its follow-up: no end is told for a1
+    k.rt.end_turn(&k.core, &s.id, "end_turn", None);
+    let a2 = k.rt.st().attempts[&s.id].clone();
+    assert_ne!(a1, a2);
+    k.rt.end_turn(&k.core, &s.id, "end_turn", None);
+    assert!(k.open_fails(&i.id).is_empty());
+    assert_eq!(k.open_kinds(&i.id), vec!["approve"]);
+}
+
 #[test]
 fn the_same_turn_end_told_twice_is_handled_once() {
     let k = Kit::new();

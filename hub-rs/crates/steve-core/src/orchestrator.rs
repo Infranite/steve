@@ -3327,13 +3327,23 @@ impl Tx<'_> {
         if s.status == "ended" {
             self.db().session_patch(sid, patch![status: "idle"])?;
         }
-        // false with the row gone means a turn took the queue in between: the message went anyway;
-        // false with the row still queued means nothing took it (a session opening, say)
-        // nothing to send means a turn took the queue in between: the message went anyway
-        match self.rt().flush(sid, None) {
-            Flushed::Started(_) | Flushed::Empty => {}
-            Flushed::Busy => return Ok(SendNow::Waiting(steve_i18n::t!("core.queue.wait_starting"))),
-            Flushed::Held => return Ok(SendNow::Waiting(steve_i18n::t!("core.queue.wait_later"))),
+        // nothing to send, or busy or held with the row gone, means a turn took the queue in
+        // between (the one that just ended, as its follow-up): the message went anyway. Only
+        // while the row is still queued does it wait
+        let waiting = match self.rt().flush(sid, None) {
+            Flushed::Started(_) | Flushed::Empty => None,
+            Flushed::Busy => Some(steve_i18n::t!("core.queue.wait_starting")),
+            Flushed::Held => Some(steve_i18n::t!("core.queue.wait_later")),
+        };
+        if let Some(why) = waiting
+            && self
+                .db()
+                .store()
+                .queued()
+                .get(qid)?
+                .is_some_and(|q| q.session_id == sid)
+        {
+            return Ok(SendNow::Waiting(why));
         }
         self.db().event_add(sid, "queued_sent_now", ev(false))?;
         self.reactivate(s.item_id.as_deref())?;

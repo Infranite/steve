@@ -23,6 +23,9 @@ struct Ends(
     std::sync::OnceLock<Store>,
     /// The attempt each turn end named, in the order of `.0`.
     Mutex<Vec<Option<String>>>,
+    /// While set, `attempt_finished` holds the apply worker there (mid-pass); `.6` says it does.
+    std::sync::atomic::AtomicBool,
+    std::sync::atomic::AtomicBool,
 );
 
 impl NodeDomain for Ends {
@@ -61,6 +64,10 @@ impl NodeDomain for Ends {
             acp_stats::node_attempt_finished(store, session, attempt, c, f, at);
         }
         self.2.lock().unwrap().push(f.clone());
+        while self.5.load(std::sync::atomic::Ordering::SeqCst) {
+            self.6.store(true, std::sync::atomic::Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
     fn permission_asked(&self, _: &str, decision: &str, _: &PermissionRequest) {
         self.3.lock().unwrap().push(decision.into());
@@ -2730,6 +2737,51 @@ async fn cancel_in_retry_wait_with_nothing_queued_tells_the_item_once() {
     assert_eq!(h.phase(), "ready");
     assert!(!h.rt.is_busy(S));
     assert!(!h.rt.cancel(S).unwrap(), "nothing left to cancel");
+}
+
+/// B2b review: a turn ended by a local cancel is told before a newer turn whose end the same
+/// apply pass reaches. The worker is held mid-pass; meanwhile the waiting retry is cancelled here
+/// (its end is left for the worker), a new turn runs and finishes. The item hears the cancelled
+/// turn first, then the new one: never an older end after a newer one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_locally_settled_end_is_told_before_a_newer_turns_end() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let h = hub();
+    h.bind();
+    h.rt.prompt(S, "one", "user", &[]).unwrap();
+    until("started", || h.count("start_turn") == 1).await;
+    let first = h.attempts()[0].clone();
+    h.ends.5.store(true, SeqCst);
+    h.transient_failure(&first).await;
+    until("worker held", || h.ends.6.load(SeqCst)).await;
+    let retry = h.attempts()[1].clone();
+
+    assert!(h.rt.cancel(S).unwrap(), "the waiting retry is settled here");
+    assert_eq!(
+        h.rt.prompt(S, "two", "user", &[]).unwrap(),
+        Planned::Created
+    );
+    until("second sent", || h.count("start_turn") == 2).await;
+    let second = h.attempts().last().unwrap().clone();
+    assert!(
+        !h.rt
+            .same_turn(retry.attempt().as_str(), second.attempt().as_str())
+            .unwrap()
+    );
+    h.node.finish(&second, build::done()).await.unwrap();
+    h.ends.5.store(false, SeqCst);
+
+    until("both ends", || h.ends().len() == 2).await;
+    assert_eq!(
+        *h.ends.4.lock().unwrap(),
+        [
+            Some(retry.attempt().to_string()),
+            Some(second.attempt().to_string())
+        ],
+        "in commit order"
+    );
+    assert_eq!(h.ends()[0].1, "cancelled");
+    assert_eq!(h.ends()[1].1, "end_turn");
 }
 
 /// Issue: a start_turn the Node refused before accepting (no capacity), stopped while it waits to

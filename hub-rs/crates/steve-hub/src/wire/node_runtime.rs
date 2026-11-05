@@ -163,6 +163,10 @@ pub struct NodeRuntime {
     /// `ended_later` only once it committed, so the apply worker never sees it earlier (it would
     /// book a row the store does not show finished yet) and never sees one rolled back.
     staged: Mutex<(Vec<After>, Vec<End>)>,
+    /// Held across [`Self::tx`]'s transaction and the move of what it settled, so a transaction
+    /// that starts after another committed finds that one's settles already queued (turn ends are
+    /// told in commit order).
+    commit: Mutex<()>,
     /// Streams with events to apply.
     dirty: Mutex<HashSet<(String, String)>>,
     /// Why this Node cannot run anything (its host failed to start): its sessions then refuse
@@ -258,6 +262,7 @@ impl NodeRuntime {
             ended_later: Mutex::new(vec![]),
             settled_later: Mutex::new(vec![]),
             staged: Mutex::new((vec![], vec![])),
+            commit: Mutex::new(()),
             dirty: Mutex::new(HashSet::new()),
             stopped: Mutex::new(None),
             turn_limit: std::sync::atomic::AtomicI64::new(TURN_LIMIT_MS),
@@ -363,6 +368,7 @@ impl NodeRuntime {
 
     fn tx<T>(&self, f: impl FnOnce(&Tx) -> Result<T, StoreError>) -> Result<T, StoreError> {
         // transactions are serial (one writer), so what is staged while one is open is its own
+        let _commit = self.commit.lock().unwrap();
         let (out, (settled, ended)) = self.store.transaction(|tx| {
             let take = || std::mem::take(&mut *self.staged.lock().unwrap());
             take();
@@ -2073,7 +2079,12 @@ impl NodeRuntime {
                     stream: &stream,
                     epoch: &epoch,
                 };
+                // turn ends settled outside this worker (a local cancel) before this event's
+                // commit are told before its end: taken under the write lock, so every one comes
+                // from a transaction that is over, and the item hears its turns in commit order
+                let mut earlier = (vec![], vec![]);
                 let r = self.tx(|tx| {
+                    earlier = self.take_settled();
                     let Some(p) = rt::next_event_in(tx, k)? else {
                         return Ok(None);
                     };
@@ -2093,6 +2104,7 @@ impl NodeRuntime {
                     rt::mark_applied_in(tx, k, p.seq)?;
                     Ok(Some((out, ask)))
                 });
+                self.book(earlier);
                 match r {
                     Ok(Some((end, ask))) => {
                         any = true;
@@ -2126,10 +2138,20 @@ impl NodeRuntime {
     /// of), after the commit: the attempts' statistics rows end, then their turns are told.
     /// Only committed settles are queued here ([`Self::tx`]), so each is booked as it is.
     fn book_settled(&self) {
-        let settled: Vec<After> = std::mem::take(&mut *self.settled_later.lock().unwrap());
+        self.book(self.take_settled());
+    }
+
+    /// The committed settles queued so far ([`Self::book_settled`]).
+    fn take_settled(&self) -> (Vec<After>, Vec<End>) {
+        (
+            std::mem::take(&mut *self.settled_later.lock().unwrap()),
+            std::mem::take(&mut *self.ended_later.lock().unwrap()),
+        )
+    }
+
+    fn book(&self, (settled, ended): (Vec<After>, Vec<End>)) {
         self.after(settled);
-        let later: Vec<End> = std::mem::take(&mut *self.ended_later.lock().unwrap());
-        for end in later {
+        for end in ended {
             self.tell_end(end);
         }
     }

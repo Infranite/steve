@@ -41,6 +41,9 @@ pub struct FakeState {
     pub recovers_itself: HashSet<String>,
     /// `flush` takes nothing and answers false (a session still opening, say).
     pub flush_stuck: bool,
+    /// The next `stop` comes too late: the turn it names ended just before and took the queue as
+    /// its follow-up (a new attempt), so the stop reaches nothing.
+    pub follow_up_before_stop: bool,
 }
 
 /// acp.ts in miniature: turns are tracked, prompts queue behind a running turn or the hold, and a test
@@ -174,6 +177,16 @@ impl AgentRuntime for FakeRuntime {
     fn stop(&self, turn: &Running) -> Result<Stop> {
         let _gate = self.stop_gate.read().unwrap();
         let mut st = self.st();
+        if std::mem::take(&mut st.follow_up_before_stop) {
+            let taken = self.store.queue_take(&turn.session).unwrap();
+            let msgs: Vec<_> = taken.into_iter().map(|q| (q.text, q.via)).collect();
+            self.run(&mut st, &turn.session, &msgs);
+            self.store
+                .store()
+                .queued()
+                .submitted(&turn.session)
+                .unwrap();
+        }
         let stop = if st.attempts.get(&turn.session) == Some(&turn.attempt) {
             st.cancelled.push(turn.session.clone());
             Stop::Requested
