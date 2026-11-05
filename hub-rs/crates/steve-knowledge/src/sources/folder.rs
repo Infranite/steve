@@ -293,7 +293,7 @@ impl DocLoader for FolderLoader {
                 NodeRead::TooBig => return Loaded::Skipped(TOO_BIG.into()),
                 NodeRead::Refused(why) => return Loaded::Failed(why.into()),
                 NodeRead::Changed => return Loaded::Retry { now: true },
-                NodeRead::Offline => return Loaded::Retry { now: false },
+                NodeRead::Offline | NodeRead::Unsettled => return Loaded::Retry { now: false },
             }
             let Some(root) = root else {
                 return Loaded::Failed("这个来源没有设置文件夹".into());

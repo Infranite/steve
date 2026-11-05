@@ -8,7 +8,7 @@
 //! Node cut short, a Node gone offline before the last page, a page that does not belong to the
 //! scan: the sync fails with the reason and no document is touched.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -80,6 +80,9 @@ pub(crate) struct NodeFolders {
     /// The version a queued document's file had in the scan that queued it: its read answers
     /// `conflict` once the file changed. In memory only (after a restart a read takes what is there).
     versions: Mutex<HashMap<String, Revision>>,
+    /// Documents queued again at once because their file changed while read: one that changes
+    /// again on that read is left for the next scan instead of looping on a file still written.
+    requeued: Mutex<HashSet<String>>,
 }
 
 impl NodeFolders {
@@ -94,7 +97,12 @@ impl NodeFolders {
 
     pub(crate) fn remember(&self, versions: impl IntoIterator<Item = (String, Revision)>) {
         let mut v = self.versions.lock().unwrap_or_else(|e| e.into_inner());
-        v.extend(versions);
+        let mut q = self.requeued.lock().unwrap_or_else(|e| e.into_inner());
+        for (doc, rev) in versions {
+            // a new scan: its read may be queued again once more
+            q.remove(&doc);
+            v.insert(doc, rev);
+        }
     }
 
     fn take_version(&self, doc: &str) -> Option<Revision> {
@@ -114,7 +122,19 @@ impl NodeFolders {
             Err(_) => return NodeRead::Offline,
         };
         let expected = self.take_version(doc);
-        read(&place, rel, expected).await
+        let got = read(&place, rel, expected).await;
+        let mut q = self.requeued.lock().unwrap_or_else(|e| e.into_inner());
+        match got {
+            NodeRead::Changed if !q.insert(doc.to_string()) => {
+                q.remove(doc);
+                NodeRead::Unsettled
+            }
+            NodeRead::Changed => NodeRead::Changed,
+            other => {
+                q.remove(doc);
+                other
+            }
+        }
     }
 }
 
@@ -125,8 +145,10 @@ pub(crate) enum NodeRead {
     Gone,
     TooBig,
     Refused(&'static str),
-    /// It changed since the scan: read it again.
+    /// It changed since the scan, or while it was read: read it again.
     Changed,
+    /// It changed again on the read queued after [`NodeRead::Changed`]: leave it for the next scan.
+    Unsettled,
     /// Its device could not be reached: leave it for the next scan.
     Offline,
     /// No Node holds it here after all: read it on the Hub.
@@ -145,7 +167,10 @@ fn under(place: &RootPath, rel: &str) -> Option<RootPath> {
     })
 }
 
-async fn read(place: &FolderPlace, rel: &str, expected: Option<Revision>) -> NodeRead {
+/// Reads the file chunk by chunk, every chunk at one version: `expected` (the scan's), or else the
+/// version the Node lists for it once the file turns out longer than one chunk. Chunks of two
+/// versions are never put together.
+async fn read(place: &FolderPlace, rel: &str, mut expected: Option<Revision>) -> NodeRead {
     let Some(at) = under(&place.root, rel).filter(|_| plain(rel)) else {
         return NodeRead::Refused(super::folder::OUTSIDE);
     };
@@ -173,7 +198,39 @@ async fn read(place: &FolderPlace, rel: &str, expected: Option<Revision>) -> Nod
             // no progress and no end: never loop on it
             return NodeRead::Refused(UNREADABLE);
         }
+        if expected.is_none() {
+            // more than one chunk and no version to hold them together: take the file's version
+            // now and read it again from the start at that version
+            match version_of(place, &at).await {
+                Ok(Some(v)) => {
+                    expected = Some(v);
+                    bytes.clear();
+                }
+                // not listed as a file any more: the read again tells what it is now
+                Ok(None) => return NodeRead::Changed,
+                Err(e) if e.code == ErrorCode::Offline => return NodeRead::Offline,
+                Err(e) if e.code == ErrorCode::Invalid => return NodeRead::Changed,
+                Err(e) => {
+                    tracing::debug!("kb.folder: list through the Node: {}", e.safe_detail);
+                    return NodeRead::Refused(UNREADABLE);
+                }
+            }
+        }
     }
+}
+
+/// The version the Node lists for the file at `at` (`None`: no such file there now).
+async fn version_of(place: &FolderPlace, at: &RootPath) -> Result<Option<Revision>, ApiError> {
+    let parent = at.rel.as_str().rsplit_once('/').map_or("", |(dir, _)| dir);
+    let dir = RootPath {
+        root: at.root.clone(),
+        rel: RelPath::new(parent).map_err(|e| ApiError::new(ErrorCode::Invalid, e.to_string()))?,
+    };
+    let items = list(place, dir).await?;
+    Ok(items
+        .into_iter()
+        .find(|f| !f.is_dir && f.path.as_str() == at.rel.as_str())
+        .map(|f| f.version))
 }
 
 /// Only plain relative names (no `..`, no absolute path), as the Hub's own read allows.

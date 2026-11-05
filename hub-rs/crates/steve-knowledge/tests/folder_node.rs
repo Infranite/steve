@@ -29,6 +29,9 @@ struct Faulty {
     /// Rewritten with these bytes right before their first read.
     /// (`None`: removed instead.)
     rewrite: Mutex<Option<(String, Option<Vec<u8>>)>>,
+    /// Rewritten with these bytes right after a read of it that did not reach its end (once, or
+    /// after every such read when the flag is set).
+    rewrite_between: Mutex<Option<(String, Vec<u8>, bool)>>,
     reads: AtomicUsize,
 }
 
@@ -94,7 +97,23 @@ impl WorkspaceExecutor for Faulty {
             Some((rel, None)) => self.fake.remove_file("kb", &rel),
             None => {}
         }
-        self.fake.read_file(q).await
+        let rel_read = at.rel.as_str().to_string();
+        let got = self.fake.read_file(q).await;
+        if got.as_ref().is_ok_and(|c| !c.eof) {
+            let mut r = self.rewrite_between.lock().unwrap();
+            if let Some((rel, bytes, always)) = r.as_ref()
+                && *rel == rel_read
+            {
+                // a different length each time, so every rewrite is a new version
+                let mut b = bytes.clone();
+                b.extend(std::iter::repeat_n(b'.', self.reads.load(Ordering::SeqCst)));
+                self.fake.put_file("kb", rel, &b);
+                if !*always {
+                    r.take();
+                }
+            }
+        }
+        got
     }
     async fn scan(&self, c: Command<ScanSpec>) -> ApiResult<Receipt> {
         self.up()?;
@@ -173,6 +192,7 @@ fn setup() -> Env {
         offline: AtomicBool::new(false),
         reads_offline: AtomicBool::new(false),
         rewrite: Mutex::new(None),
+        rewrite_between: Mutex::new(None),
         reads: AtomicUsize::new(0),
     });
     let places = Arc::new(Places {
@@ -442,4 +462,67 @@ async fn a_file_gone_before_its_read_is_deleted() {
     e.sync(&id).await.unwrap();
     assert_eq!(e.doc(&id, "sub/deeper/h.md").status, "deleted");
     assert_eq!(e.doc(&id, "sub/d.md").status, "active");
+}
+
+/// More than one read chunk (the Hub asks for 96 KiB at a time).
+fn big(line: &str) -> Vec<u8> {
+    line.repeat(160 * 1024 / line.len()).into_bytes()
+}
+
+async fn settled(e: &Env, doc: &str, want: &str) {
+    for _ in 0..200 {
+        if e.texts(doc).contains(want) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("never indexed {want}");
+}
+
+#[tokio::test]
+async fn a_file_rewritten_between_two_chunks_is_never_put_together() {
+    let e = setup();
+    let worker = index::spawn_worker(e.env.modules.clone(), e.kb.clone()).unwrap();
+    let id = e.indexed().await;
+    e.fake.put_file("kb", "c.md", &big("first text line\n"));
+    // the scan's version is stale at its read, so the read queued again has no version to hold;
+    // the file is rewritten between its first and second chunk
+    *e.files.rewrite.lock().unwrap() = Some(("c.md".into(), Some(big("older text line\n"))));
+    *e.files.rewrite_between.lock().unwrap() =
+        Some(("c.md".into(), big("newer text line\n"), false));
+    e.sync(&id).await.unwrap();
+    let c = e.doc(&id, "c.md");
+    settled(&e, &c.id, "newer").await;
+    let text = e.texts(&c.id);
+    assert!(
+        !text.contains("older") && !text.contains("first"),
+        "chunks of two versions put together"
+    );
+    assert_eq!(e.doc(&id, "c.md").status, "active");
+    worker.abort();
+}
+
+#[tokio::test]
+async fn a_file_written_all_the_time_is_left_for_the_next_scan() {
+    let e = setup();
+    let worker = index::spawn_worker(e.env.modules.clone(), e.kb.clone()).unwrap();
+    let id = e.indexed().await;
+    e.fake.put_file("kb", "c.md", &big("first text line\n"));
+    *e.files.rewrite_between.lock().unwrap() =
+        Some(("c.md".into(), big("newer text line\n"), true));
+    e.sync(&id).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let reads = e.files.reads.load(Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(e.files.reads.load(Ordering::SeqCst), reads, "still reading");
+    let c = e.doc(&id, "c.md");
+    assert_eq!((c.status.as_str(), c.mtime), ("active", None), "{c:?}");
+    assert!(e.texts(&c.id).contains("樱桃"), "the old text stays");
+
+    // quiet again: the next scan reads it whole
+    e.files.rewrite_between.lock().unwrap().take();
+    e.sync(&id).await.unwrap();
+    settled(&e, &c.id, "newer").await;
+    assert!(!e.texts(&c.id).contains("first"));
+    worker.abort();
 }
