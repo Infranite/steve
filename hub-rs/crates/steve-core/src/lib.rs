@@ -52,10 +52,12 @@ pub use gateway::{ClaudeCli, Fallback, LocalPrint, ModelGateway, OneModel, Share
 pub use orchestrator::{
     CreateItem, Forked, ItemAction, RESUMED_NOTE, SendNow, SupplementMode, resumed_text,
 };
-pub use runtime::{AgentRuntime, Check, McpEndpoint, Output, Prompted, Running, Stop, TurnEnd};
+pub use runtime::{
+    AgentRuntime, Check, Flushed, McpEndpoint, Output, Prompted, Running, Stop, TurnEnd,
+};
 
 use repo::Db;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 /// The domain layer. Cheap to clone; all clones share one state.
@@ -105,9 +107,13 @@ pub(crate) struct Releasing {
 /// In-memory state of the TS module globals (lost on restart there too).
 #[derive(Default)]
 pub(crate) struct State {
-    pending: HashMap<String, Mark>,
+    /// The session's last Steve tool call, with the turn it was made in (`None`: none ran then).
+    pending: HashMap<String, (Mark, Option<runtime::Running>)>,
     tokens: HashMap<String, String>,
-    resumed: HashSet<String>,
+    /// Sessions resumed after a restart, with the turn the resume started.
+    resumed: HashMap<String, runtime::Running>,
+    /// The last turn end each session had (its attempt): the same end told again is ignored.
+    ended: HashMap<String, String>,
     /// Boot resumes scheduled by `recover` and not yet run: (batch, sessions); each batch runs once.
     resumes: Vec<(u64, Vec<String>)>,
     resume_batch: u64,

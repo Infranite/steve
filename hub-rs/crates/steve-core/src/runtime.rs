@@ -41,10 +41,32 @@ pub enum Stop {
     NotRunning,
 }
 
+/// What [`AgentRuntime::flush`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Flushed {
+    /// A turn started: this one.
+    Started(Running),
+    /// The session is in a turn already, or not ready for one (opening, say): it waits.
+    Busy,
+    /// New turns are held (release, maintenance), or the backend could not take it now.
+    Held,
+    /// Nothing to send.
+    Empty,
+}
+
+impl Flushed {
+    pub fn started(&self) -> bool {
+        matches!(self, Flushed::Started(_))
+    }
+}
+
 /// A finished turn, as acp.ts hands it to the orchestrator's turn-end handler.
 #[derive(Debug, Clone)]
 pub struct TurnEnd {
     pub session_id: String,
+    /// The turn that ended, as [`AgentRuntime::running`] named it while it ran (after a gateway
+    /// retry or queued follow-ups, the last of them). `None` when the backend cannot tell.
+    pub attempt: Option<String>,
     /// `end_turn`, `cancelled`, `error`, …
     pub stop_reason: String,
     pub error: Option<String>,
@@ -91,8 +113,12 @@ pub trait AgentRuntime: Send + Sync {
     /// Turns in flight (including ones waiting for a permission answer or a retry).
     fn running_turns(&self) -> usize;
     /// Run what is queued for a session as one turn, optionally led by Steve's own message;
-    /// identical texts are sent once. False if busy, holding, or nothing to send.
-    fn flush(&self, session_id: &str, lead: Option<(&str, &str)>) -> bool;
+    /// identical texts are sent once. The turn it started, or why none did.
+    fn flush(&self, session_id: &str, lead: Option<(&str, &str)>) -> Flushed;
+    /// `a` and `b` name the same turn (a gateway retry is a new attempt of the same turn).
+    fn same_turn(&self, a: &Running, b: &Running) -> bool {
+        a == b
+    }
     /// Switch a live session's permission mode (`session/set_mode`); false when no adapter runs (the
     /// next start applies the mode anyway).
     fn set_mode(&self, session_id: &str, mode: &str) -> bool {

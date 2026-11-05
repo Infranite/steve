@@ -736,6 +736,7 @@ fn a_session_without_an_item_gets_answerable_cards() {
     k.core
         .on_turn_end(crate::TurnEnd {
             session_id: s.id.clone(),
+            attempt: None,
             stop_reason: "end_turn".into(),
             error: None,
         })
@@ -916,6 +917,84 @@ fn a_deferred_stop_reaches_only_the_turn_it_was_asked_for() {
     assert_ne!(k.phase(&i.id), "closed");
     k.rt.end_turn(&k.core, &s.id, "end_turn", None);
     assert!(k.wait(|| k.phase(&i.id) == "closed"));
+}
+
+/// The runtime ends the session's turn without telling the core (its end comes later), and the
+/// next message starts a new turn.
+fn next_turn_before_the_end_is_told(k: &Kit, sid: &str) -> (String, String) {
+    let a1 = {
+        let mut st = k.rt.st();
+        st.turning.remove(sid);
+        st.attempts.remove(sid).unwrap()
+    };
+    assert_eq!(
+        k.core.session_message(sid, "下一条", false, &[]).unwrap(),
+        crate::Prompted::Sent
+    );
+    let a2 = k.rt.st().attempts[sid].clone();
+    assert_ne!(a1, a2);
+    (a1, a2)
+}
+
+fn end_of(sid: &str, attempt: &str, stop: &str) -> crate::TurnEnd {
+    crate::TurnEnd {
+        session_id: sid.into(),
+        attempt: Some(attempt.into()),
+        stop_reason: stop.into(),
+        error: None,
+    }
+}
+
+#[test]
+fn a_late_end_of_an_earlier_turn_keeps_the_running_turns_mark() {
+    let k = Kit::new();
+    let i = new_item(&k, "g");
+    let s = only_session(&k, &i.id);
+    let (a1, _) = next_turn_before_the_end_is_told(&k, &s.id);
+    // a2 asks for an approval, then a1's end arrives
+    k.core
+        .tool_request_approval(&s, "推送到 main", "git push")
+        .unwrap();
+    k.core.on_turn_end(end_of(&s.id, &a1, "end_turn")).unwrap();
+    assert!(k.open_fails(&i.id).is_empty(), "a1's end judged nothing");
+    assert_eq!(k.open_kinds(&i.id), vec!["approve"]);
+    assert_eq!(k.status(&i.id).2, "在等你批准");
+    // a2's own end still finds its approval: no stall card
+    k.rt.end_turn(&k.core, &s.id, "end_turn", None);
+    assert!(k.open_fails(&i.id).is_empty());
+    assert_eq!(k.open_kinds(&i.id), vec!["approve"]);
+}
+
+#[test]
+fn a_late_end_drops_a_mark_of_its_own_turn() {
+    let k = Kit::new();
+    let i = new_item(&k, "g");
+    let s = only_session(&k, &i.id);
+    k.core
+        .tool_request_approval(&s, "推送到 main", "git push")
+        .unwrap();
+    let d = k.db().decisions_of_item(&i.id).unwrap().pop().unwrap();
+    k.core.resolve(&d.id, "yes", "", "me").unwrap();
+    let (a1, _) = next_turn_before_the_end_is_told(&k, &s.id);
+    k.core.on_turn_end(end_of(&s.id, &a1, "end_turn")).unwrap();
+    // a2 (and the answer queued behind it) asked nothing: a1's approval does not cover its end
+    while k.rt.st().turning.contains(&s.id) {
+        k.rt.end_turn(&k.core, &s.id, "end_turn", None);
+    }
+    assert_eq!(k.open_kinds(&i.id), vec!["fail"]);
+}
+
+#[test]
+fn the_same_turn_end_told_twice_is_handled_once() {
+    let k = Kit::new();
+    let i = new_item(&k, "g");
+    let s = only_session(&k, &i.id);
+    let a1 = k.rt.st().attempts[&s.id].clone();
+    k.rt.end_turn(&k.core, &s.id, "end_turn", None);
+    let cards = k.db().decisions_of_item(&i.id).unwrap().len();
+    assert_eq!(k.open_kinds(&i.id), vec!["fail"]);
+    k.core.on_turn_end(end_of(&s.id, &a1, "end_turn")).unwrap();
+    assert_eq!(k.db().decisions_of_item(&i.id).unwrap().len(), cards);
 }
 
 #[test]

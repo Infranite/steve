@@ -761,6 +761,28 @@ fn a_successful_resume_ends_like_any_turn() {
 }
 
 #[test]
+fn only_the_resumed_turns_end_says_whether_the_resume_worked() {
+    let k = Kit::new();
+    let i = k.item("run", "执行", None);
+    let s = k.session(&i, "running");
+    k.core.recover().unwrap();
+    k.core.fire_resume();
+    assert_eq!(k.user_texts(&s), vec![RESUME]);
+    // an end from before the resume, told late, is not the resume failing
+    k.core
+        .on_turn_end(crate::TurnEnd {
+            session_id: s.clone(),
+            attempt: Some("a0".into()),
+            stop_reason: "error".into(),
+            error: Some("old".into()),
+        })
+        .unwrap();
+    assert!(k.open_fails(&i).is_empty());
+    k.rt.end_turn(&k.core, &s, "error", Some("spawn failed"));
+    assert!(k.open_fails(&i)[0].contains("自动继续没有成功：spawn failed"));
+}
+
+#[test]
 fn undoing_an_acceptance_before_the_close_takes_it_back() {
     let k = Kit::new();
     let x = k.delivered(false);

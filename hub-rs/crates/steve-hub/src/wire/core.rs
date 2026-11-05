@@ -457,6 +457,7 @@ impl Host for HubHost {
     fn turn_end(&self, t: steve_acp::TurnEnd) {
         let Some(core) = self.core.get() else { return };
         let t = steve_core::TurnEnd {
+            attempt: Some(legacy_turn(t.turn)),
             session_id: t.session_id,
             stop_reason: t.stop_reason,
             error: t.error,
@@ -483,6 +484,10 @@ pub struct AcpRuntime(pub Acp);
 
 /// How a legacy turn token reads as a [`steve_core::Running::attempt`].
 const LEGACY_TURN: &str = "legacy:";
+
+fn legacy_turn(token: u64) -> String {
+    format!("{LEGACY_TURN}{token}")
+}
 
 impl steve_core::AgentRuntime for AcpRuntime {
     fn prompt(
@@ -512,7 +517,7 @@ impl steve_core::AgentRuntime for AcpRuntime {
     fn running(&self, session_id: &str) -> Option<steve_core::Running> {
         self.0.current(session_id).map(|t| steve_core::Running {
             session: session_id.to_string(),
-            attempt: format!("{LEGACY_TURN}{t}"),
+            attempt: legacy_turn(t),
         })
     }
     fn stop(&self, turn: &steve_core::Running) -> steve_core::Result<steve_core::Stop> {
@@ -543,15 +548,21 @@ impl steve_core::AgentRuntime for AcpRuntime {
     fn running_turns(&self) -> usize {
         self.0.running_turns()
     }
-    fn flush(&self, session_id: &str, lead: Option<(&str, &str)>) -> bool {
-        self.0.flush(
-            session_id,
-            lead.map(|(text, via)| Message {
-                text: text.into(),
-                via: via.into(),
-                files: vec![],
+    fn flush(&self, session_id: &str, lead: Option<(&str, &str)>) -> steve_core::Flushed {
+        let lead = lead.map(|(text, via)| Message {
+            text: text.into(),
+            via: via.into(),
+            files: vec![],
+        });
+        match self.0.flush_turn(session_id, lead) {
+            steve_acp::Flushed::Started(t) => steve_core::Flushed::Started(steve_core::Running {
+                session: session_id.to_string(),
+                attempt: legacy_turn(t),
             }),
-        )
+            steve_acp::Flushed::Busy => steve_core::Flushed::Busy,
+            steve_acp::Flushed::Held => steve_core::Flushed::Held,
+            steve_acp::Flushed::Empty => steve_core::Flushed::Empty,
+        }
     }
     fn set_mode(&self, session_id: &str, mode: &str) -> bool {
         self.0.set_mode(session_id, mode)
@@ -736,10 +747,17 @@ impl super::node_runtime::NodeDomain for HubHost {
             }
         }
     }
-    fn turn_ended(&self, session: &str, stop_reason: &str, error: Option<String>) {
+    fn turn_ended(
+        &self,
+        session: &str,
+        attempt: Option<&str>,
+        stop_reason: &str,
+        error: Option<String>,
+    ) {
         let Some(core) = self.core.get() else { return };
         let t = steve_core::TurnEnd {
             session_id: session.into(),
+            attempt: attempt.map(String::from),
             stop_reason: stop_reason.into(),
             error,
         };
@@ -1012,14 +1030,41 @@ impl steve_core::AgentRuntime for RoutedRuntime {
     fn node_working(&self) -> usize {
         self.node.as_ref().map_or(0, |n| n.working())
     }
-    fn flush(&self, session_id: &str, lead: Option<(&str, &str)>) -> bool {
-        match self.node_for(session_id) {
-            Some(n) => n
-                .flush(session_id, lead)
-                .inspect_err(|e| tracing::error!("flush {session_id}: {e}"))
-                .is_ok_and(|p| p == super::node_runtime::Planned::Created),
-            None if self.parked(session_id) => false,
-            None => self.legacy.flush(session_id, lead),
+    fn flush(&self, session_id: &str, lead: Option<(&str, &str)>) -> steve_core::Flushed {
+        use super::node_runtime::Planned;
+        match self.route(session_id) {
+            Backend::Node(n) => match n.flush_turn(session_id, lead) {
+                Ok((Planned::Created, Some(attempt))) => {
+                    steve_core::Flushed::Started(steve_core::Running {
+                        session: session_id.to_string(),
+                        attempt,
+                    })
+                }
+                Ok((Planned::Created, None)) | Ok((Planned::Busy, _)) => steve_core::Flushed::Busy,
+                Ok((Planned::Held, _)) => steve_core::Flushed::Held,
+                Ok((Planned::Empty, _)) => steve_core::Flushed::Empty,
+                Err(e) => {
+                    tracing::error!("flush {session_id}: {e}");
+                    steve_core::Flushed::Held
+                }
+            },
+            // a parked session's queue waits for its Node
+            Backend::Parked => steve_core::Flushed::Held,
+            Backend::Legacy => self.legacy.flush(session_id, lead),
+        }
+    }
+    /// Node attempts of one turn (a gateway retry) are the same turn; a store that cannot tell
+    /// says they are not.
+    fn same_turn(&self, a: &steve_core::Running, b: &steve_core::Running) -> bool {
+        if a == b {
+            return true;
+        }
+        match self.route(&a.session) {
+            Backend::Node(n) if a.session == b.session => n
+                .same_turn(&a.attempt, &b.attempt)
+                .inspect_err(|e| tracing::error!("same turn {}: {e}", a.session))
+                .unwrap_or(false),
+            _ => false,
         }
     }
     fn set_mode(&self, session_id: &str, mode: &str) -> bool {

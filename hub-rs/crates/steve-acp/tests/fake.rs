@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use common::*;
 use serde_json::json;
-use steve_acp::{Acp, Prompted};
+use steve_acp::{Acp, Flushed, Prompted};
 
 fn turn_ends(h: &MemHost) -> usize {
     h.rec(|r| r.turn_ends.len())
@@ -233,6 +233,38 @@ async fn cancel_if_with_a_stale_token_is_a_no_op() {
     acp.shutdown(Duration::from_secs(2)).await;
 }
 
+/// The turn end names the turn that ended: after a queued follow-up, the follow-up (the turn the
+/// end callback stands for); a flush says which turn it started, or why none.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_turn_end_carries_the_last_turn_token() {
+    let f = Fake::new(&[]);
+    let h = host();
+    h.with(f.session("s1", "claude-code"));
+    let acp = Acp::new(f.config(), h.clone());
+    acp.hold(true);
+    assert_eq!(acp.prompt("s1", "a", "me").await.unwrap(), Prompted::Queued);
+    assert_eq!(acp.flush_turn("s1", None), Flushed::Held);
+    acp.hold(false);
+    let Flushed::Started(t1) = acp.flush_turn("s1", None) else {
+        panic!("a turn starts");
+    };
+    assert_eq!(acp.current("s1"), Some(t1));
+    assert_eq!(acp.flush_turn("s1", None), Flushed::Busy);
+    wait_for("turn end", 10, || turn_ends(&h) == 1).await;
+    h.rec(|r| assert_eq!(r.turn_ends[0].turn, t1));
+    assert_eq!(acp.flush_turn("s1", None), Flushed::Empty);
+
+    acp.prompt("s1", "@sleep 600", "me").await.unwrap();
+    let t2 = acp.current("s1").unwrap();
+    acp.prompt("s1", "@sleep 600", "me").await.unwrap();
+    wait_for("the follow-up", 10, || f.prompts().len() == 3).await;
+    let t3 = acp.current("s1").unwrap();
+    assert_ne!(t2, t3);
+    wait_for("turn end", 10, || turn_ends(&h) == 2).await;
+    h.rec(|r| assert_eq!(r.turn_ends[1].turn, t3));
+    acp.shutdown(Duration::from_secs(2)).await;
+}
+
 /// A gateway retry is the same turn: the token taken before it still stops it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_retry_keeps_the_turn_token() {
@@ -249,6 +281,7 @@ async fn a_retry_keeps_the_turn_token() {
     assert!(acp.cancel_if("s1", t));
     assert!(!acp.is_busy("s1"));
     h.rec(|r| assert_eq!(r.turn_ends[0].stop_reason, "cancelled"));
+    h.rec(|r| assert_eq!(r.turn_ends[0].turn, t, "its end names the same turn"));
     acp.shutdown(Duration::from_secs(2)).await;
 }
 

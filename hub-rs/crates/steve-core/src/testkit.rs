@@ -4,7 +4,7 @@
 use crate::error::{Result, msg};
 use crate::gateway::{ModelGateway, Tier};
 use crate::repo::{Db as Store, HubEvent};
-use crate::runtime::{AgentRuntime, Prompted, Running, Stop, TurnEnd};
+use crate::runtime::{AgentRuntime, Flushed, Prompted, Running, Stop, TurnEnd};
 use crate::{Core, CoreConfig};
 use async_trait::async_trait;
 use serde_json::json;
@@ -94,10 +94,10 @@ impl FakeRuntime {
     }
     /// End the running turn like acp.ts `runTurn`: queued rows run next (no turn-end callback), else the core hears about it.
     pub fn end_turn(&self, core: &Core, sid: &str, stop: &str, error: Option<&str>) {
-        let next = {
+        let (next, attempt) = {
             let mut st = self.st();
             st.turning.remove(sid);
-            st.attempts.remove(sid);
+            let attempt = st.attempts.remove(sid);
             let _ = self.store.session_patch(
                 sid,
                 crate::patch![status: if stop == "error" { "error" } else { "idle" }],
@@ -115,13 +115,17 @@ impl FakeRuntime {
                 self.run(&mut st, sid, &msgs);
                 return;
             }
-            st.holding && !self.store.queued(sid).unwrap().is_empty()
+            (
+                st.holding && !self.store.queued(sid).unwrap().is_empty(),
+                attempt,
+            )
         };
         if next {
             return;
         }
         core.on_turn_end(TurnEnd {
             session_id: sid.into(),
+            attempt,
             stop_reason: stop.into(),
             error: error.map(String::from),
         })
@@ -210,7 +214,7 @@ impl AgentRuntime for FakeRuntime {
     fn recovers_itself(&self, sid: &str) -> bool {
         self.st().recovers_itself.contains(sid)
     }
-    fn flush(&self, sid: &str, lead: Option<(&str, &str)>) -> bool {
+    fn flush(&self, sid: &str, lead: Option<(&str, &str)>) -> Flushed {
         let sent = self.flush_now(sid, lead);
         self.flushed.notify_one();
         sent
@@ -218,12 +222,15 @@ impl AgentRuntime for FakeRuntime {
 }
 
 impl FakeRuntime {
-    fn flush_now(&self, sid: &str, lead: Option<(&str, &str)>) -> bool {
+    fn flush_now(&self, sid: &str, lead: Option<(&str, &str)>) -> Flushed {
         let mut st = self.st();
         st.flush_in_runtime
             .push(tokio::runtime::Handle::try_current().is_ok());
-        if st.turning.contains(sid) || st.holding || st.flush_stuck {
-            return false;
+        if st.turning.contains(sid) {
+            return Flushed::Busy;
+        }
+        if st.holding || st.flush_stuck {
+            return Flushed::Held;
         }
         let mut seen = HashSet::new();
         let mut msgs: Vec<(String, String)> = lead
@@ -237,11 +244,14 @@ impl FakeRuntime {
         msgs.extend(taken.into_iter().map(|q| (q.text, q.via)));
         msgs.retain(|(t, _)| seen.insert(t.clone()));
         if msgs.is_empty() {
-            return false;
+            return Flushed::Empty;
         }
         self.run(&mut st, sid, &msgs);
         self.store.store().queued().submitted(sid).unwrap();
-        true
+        Flushed::Started(Running {
+            session: sid.into(),
+            attempt: st.attempts[sid].clone(),
+        })
     }
 }
 

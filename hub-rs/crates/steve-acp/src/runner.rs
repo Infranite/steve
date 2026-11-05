@@ -94,8 +94,24 @@ pub struct PermissionRequest {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TurnEnd {
     pub session_id: String,
+    /// The token of the turn that ended ([`Acp::current`] while it ran); after queued follow-ups,
+    /// the last of them.
+    pub turn: u64,
     pub stop_reason: String,
     pub error: Option<String>,
+}
+
+/// What [`Acp::flush_turn`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Flushed {
+    /// A turn started, under this token.
+    Started(u64),
+    /// A turn is running already.
+    Busy,
+    /// Turns are held (release hold, maintenance), or the lead could not be queued.
+    Held,
+    /// Nothing to run.
+    Empty,
 }
 
 /// Passed to [`Host::turn_begin`] before every `session/prompt`: the first try, each gateway retry and
@@ -371,10 +387,11 @@ struct State {
 
 impl State {
     /// The session's turn is over (or never started): it leaves `turning`, and a cancel meant for it is moot.
-    fn end_turning(&mut self, sid: &str) {
+    /// Returns the token of the turn that ended, if one ran.
+    fn end_turning(&mut self, sid: &str) -> Option<u64> {
         self.turning.remove(sid);
-        self.turns.remove(sid);
         self.cancel_pending.remove(sid);
+        self.turns.remove(sid)
     }
 
     /// The session starts a turn (it is in `turning` from now on), under a new turn token.
@@ -714,21 +731,29 @@ impl Acp {
     /// Run what is queued for a session as one turn, optionally led by Steve's own message;
     /// identical messages (text and attachment ids) are sent once. False when a turn is running, while holding, or with nothing to run.
     pub fn flush(&self, session_id: &str, lead: Option<Message>) -> bool {
-        let msgs = {
+        matches!(self.flush_turn(session_id, lead), Flushed::Started(_))
+    }
+
+    /// [`Self::flush`], saying why nothing started, or which turn did.
+    pub fn flush_turn(&self, session_id: &str, lead: Option<Message>) -> Flushed {
+        let (msgs, token) = {
             let mut st = self.st();
-            if st.turning.contains(session_id) || st.holding || self.host().maintenance() {
-                return false;
+            if st.turning.contains(session_id) {
+                return Flushed::Busy;
+            }
+            if st.holding || self.host().maintenance() {
+                return Flushed::Held;
             }
             if let Some(m) = &lead
                 && let Err(e) = self.host().queue_add(session_id, &m.text, &m.via, &m.files)
             {
                 tracing::error!("queue {session_id}: {e}");
-                return false;
+                return Flushed::Held;
             }
             let mut seen = HashSet::new();
             let claimed = self.host().queue_take(session_id);
             if claimed.is_empty() {
-                return false;
+                return Flushed::Empty;
             }
             let msgs: Vec<Message> = lead
                 .into_iter()
@@ -739,13 +764,13 @@ impl Acp {
                 })
                 .collect();
             if msgs.is_empty() {
-                return false;
+                return Flushed::Empty;
             }
             st.begin_turning(session_id);
-            msgs
+            (msgs, st.turns[session_id])
         };
         self.start_turn(session_id.to_owned(), msgs);
-        true
+        Flushed::Started(token)
     }
 
     /// The synchronous start of a turn (TS `runTurn` up to its first await): `user` events on the first
@@ -796,7 +821,7 @@ impl Acp {
                 Ok(x) => x,
                 Err(e) => {
                     self.turn_close(&sid, turn, None, None, "error", Some(e.clone()), false);
-                    self.st().end_turning(&sid);
+                    let token = self.st().end_turning(&sid);
                     self.host().set_status(&sid, "error");
                     self.host().add_event(
                         &sid,
@@ -805,6 +830,7 @@ impl Acp {
                     );
                     self.host().turn_end(TurnEnd {
                         session_id: sid,
+                        turn: token.unwrap_or_default(),
                         stop_reason: "error".into(),
                         error: Some(e),
                     });
@@ -1058,7 +1084,7 @@ impl Acp {
             );
             self.host()
                 .add_event(&sid, "turn_end", json!({ "stopReason": stop_reason }));
-            let (next, held) = {
+            let (next, held, ended) = {
                 let mut st = self.st();
                 let next = if st.holding || self.host().maintenance() {
                     vec![]
@@ -1067,6 +1093,7 @@ impl Acp {
                 };
                 // a cancel that came after the prompt returned was for this turn, not the next
                 st.cancel_pending.remove(&sid);
+                let ended = st.turns.get(&sid).copied().unwrap_or_default();
                 if next.is_empty() {
                     st.turning.remove(&sid);
                     st.turns.remove(&sid);
@@ -1080,7 +1107,7 @@ impl Acp {
                     st.begin_turning(&sid);
                 }
                 let held = st.holding && self.host().queue_len(&sid) > 0;
-                (next, held)
+                (next, held, ended)
             };
             if !next.is_empty() {
                 // a queued follow-up replaces this turn's end callback
@@ -1095,6 +1122,7 @@ impl Acp {
             self.expire_waits(&sid, None);
             self.host().turn_end(TurnEnd {
                 session_id: sid,
+                turn: ended,
                 stop_reason,
                 error,
             });
@@ -1664,6 +1692,7 @@ impl Acp {
             } else {
                 self.host().queue_take(session_id)
             };
+            let ended = st.turns.get(session_id).copied().unwrap_or_default();
             if next.is_empty() {
                 st.end_turning(session_id);
             } else {
@@ -1684,6 +1713,7 @@ impl Acp {
             if next.is_empty() {
                 h.turn_end(TurnEnd {
                     session_id: session_id.to_owned(),
+                    turn: ended,
                     stop_reason: "cancelled".into(),
                     error: None,
                 });

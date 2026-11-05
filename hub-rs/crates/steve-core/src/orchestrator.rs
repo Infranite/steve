@@ -10,7 +10,7 @@ use crate::repo::{
     Bot, BotExt, Decision, FileRef, Item, ItemExt, NewDecision, NewItem, NewSession, Parent,
     PlanStep, Queued, Session, WS,
 };
-use crate::runtime::{Check, McpEndpoint, Output, Prompted, TurnEnd};
+use crate::runtime::{Check, Flushed, McpEndpoint, Output, Prompted, Running, TurnEnd};
 use crate::thread::flowback::{Update, flow_quiet, recover_quiet};
 use crate::util::{js_head, js_len, js_tail, now, or, token};
 use crate::{Core, Mark, Tx};
@@ -1267,7 +1267,7 @@ impl Tx<'_> {
                 draft: draft.clone(),
                 requested_by: Self::by(s),
             })?;
-            self.st.pending.insert(s.id.clone(), Mark::Asked);
+            self.mark(&s.id, Mark::Asked);
             return Ok(());
         };
         supersede(self.db(), item, &["ask", "fail"], "Bot 提了新的问题")?;
@@ -1294,7 +1294,7 @@ impl Tx<'_> {
                 ..Default::default()
             },
         );
-        self.st.pending.insert(s.id.clone(), Mark::Asked);
+        self.mark(&s.id, Mark::Asked);
         settle(self.db(), item)
     }
 
@@ -1317,7 +1317,7 @@ impl Tx<'_> {
                 options: Some(vec!["yes".into(), "no".into()]),
                 requested_by: Self::by(s),
             })?;
-            self.st.pending.insert(s.id.clone(), Mark::Approval);
+            self.mark(&s.id, Mark::Approval);
             return Ok(());
         };
         supersede(self.db(), item, &["ask", "fail"], "Bot 继续往下做了")?;
@@ -1344,7 +1344,7 @@ impl Tx<'_> {
                 ..Default::default()
             },
         );
-        self.st.pending.insert(s.id.clone(), Mark::Approval);
+        self.mark(&s.id, Mark::Approval);
         settle(self.db(), item)
     }
 
@@ -1428,7 +1428,7 @@ impl Tx<'_> {
             }
             _ => crate::cycle::Policy::Human,
         };
-        self.st.pending.insert(s.id.clone(), Mark::Delivered);
+        self.mark(&s.id, Mark::Delivered);
         let (back, full) = crate::thread::flowback::delivery(self.db(), item_id, summary)?;
         if policy != crate::cycle::Policy::Human {
             flow_quiet(
@@ -1563,7 +1563,7 @@ impl Tx<'_> {
             requested_by: Self::by(s),
         })?;
         self.db().item_patch(item_id, patch![now: "等你批准发布"])?;
-        self.st.pending.insert(s.id.clone(), Mark::Approval);
+        self.mark(&s.id, Mark::Approval);
         settle(self.db(), item_id)
     }
 
@@ -1595,15 +1595,56 @@ impl Tx<'_> {
             "请求发布，但分支上没有需要发布的改动",
             Some(&s.id),
         )?;
-        self.st.pending.insert(s.id.clone(), Mark::Delivered);
+        self.mark(&s.id, Mark::Delivered);
         self.release_unproven(&item.id)?;
         Err(msg(format!(
             "{NOTHING_TO_RELEASE}，不用发布；已请用户确认它是否已经上线。结束这一回合即可。"
         )))
     }
 
+    /// What a Steve tool call leaves for the turn end, with the turn it was made in.
+    fn mark(&mut self, sid: &str, m: Mark) {
+        let turn = self.rt().running(sid);
+        self.st.pending.insert(sid.to_string(), (m, turn));
+    }
+
+    /// `turn` (taken when a mark or a resume was set) is the one the session runs now.
+    fn runs_now(&self, turn: Option<&Running>, now: Option<&Running>) -> bool {
+        matches!((turn, now), (Some(t), Some(n)) if self.rt().same_turn(t, n))
+    }
+
     /// A turn ended: if the agent neither asked, delivered nor is waiting, it stalled — tell the user.
     pub(crate) fn on_turn_end(&mut self, t: TurnEnd) -> Result<()> {
+        let end = t.attempt.as_ref().map(|a| Running {
+            session: t.session_id.clone(),
+            attempt: a.clone(),
+        });
+        if let Some(e) = &end {
+            // the same end told twice (a redelivery): handled once
+            if self.st.ended.get(&e.session) == Some(&e.attempt) {
+                return Ok(());
+            }
+            self.st.ended.insert(e.session.clone(), e.attempt.clone());
+        }
+        // the end of a turn that is not the one running now came late: that newer turn has its
+        // own end, which judges the item; what its tool calls left is kept for it
+        let now = end.as_ref().and_then(|_| self.rt().running(&t.session_id));
+        if let (Some(e), Some(n)) = (&end, &now)
+            && !self.rt().same_turn(e, n)
+        {
+            let sid = &t.session_id;
+            if let Some((_, turn)) = self.st.pending.get(sid)
+                && !self.runs_now(turn.as_ref(), now.as_ref())
+            {
+                self.st.pending.remove(sid);
+            }
+            if let Some(turn) = self.st.resumed.get(sid)
+                && !self.runs_now(Some(turn), now.as_ref())
+            {
+                self.st.resumed.remove(sid);
+            }
+            return Ok(());
+        }
         let Some(session) = self.db().session(&t.session_id)? else {
             return Ok(());
         };
@@ -1611,8 +1652,9 @@ impl Tx<'_> {
             self.st.pending.remove(&session.id);
             return Ok(());
         };
-        let mark = self.st.pending.remove(&session.id);
-        let was_resume = self.st.resumed.remove(&session.id);
+        let mark = self.st.pending.remove(&session.id).map(|(m, _)| m);
+        // the resumed turn's end (with what was queued behind it) says whether the resume worked
+        let was_resume = self.st.resumed.remove(&session.id).is_some();
         /* the turn answered something forwarded from the conversation: its reply goes back there */
         if t.stop_reason != "cancelled"
             && let Some(r) = self.c.forwarded_take(item_id)
@@ -3287,20 +3329,11 @@ impl Tx<'_> {
         }
         // false with the row gone means a turn took the queue in between: the message went anyway;
         // false with the row still queued means nothing took it (a session opening, say)
-        let went = self.rt().flush(sid, None);
-        if !went
-            && self
-                .db()
-                .store()
-                .queued()
-                .get(qid)?
-                .is_some_and(|q| q.session_id == sid)
-        {
-            return Ok(SendNow::Waiting(if self.busy(sid) {
-                steve_i18n::t!("core.queue.wait_starting")
-            } else {
-                steve_i18n::t!("core.queue.wait_later")
-            }));
+        // nothing to send means a turn took the queue in between: the message went anyway
+        match self.rt().flush(sid, None) {
+            Flushed::Started(_) | Flushed::Empty => {}
+            Flushed::Busy => return Ok(SendNow::Waiting(steve_i18n::t!("core.queue.wait_starting"))),
+            Flushed::Held => return Ok(SendNow::Waiting(steve_i18n::t!("core.queue.wait_later"))),
         }
         self.db().event_add(sid, "queued_sent_now", ev(false))?;
         self.reactivate(s.item_id.as_deref())?;
@@ -3350,7 +3383,7 @@ impl Tx<'_> {
             .db()
             .session(sid)?
             .ok_or_else(|| msg(steve_i18n::t!("core.conversation.not_found")))?;
-        self.st.pending.insert(s.id.clone(), Mark::Approval);
+        self.mark(&s.id, Mark::Approval);
         if let Some(item) = s.item_id.as_deref() {
             supersede(self.db(), item, &["ask", "fail"], "Bot 继续往下做了")?;
             self.db().item_patch(item, patch![now: "在等你批准"])?;
@@ -3787,10 +3820,11 @@ impl Tx<'_> {
             if !permitted {
                 continue;
             }
-            self.st.resumed.insert(id.clone());
-            if !self.rt().flush(id, Some((RESUME, "steve"))) {
-                self.st.resumed.remove(id);
-            } else if let Ok(Some(s)) = self.db().session(id)
+            let Flushed::Started(turn) = self.rt().flush(id, Some((RESUME, "steve"))) else {
+                continue;
+            };
+            self.st.resumed.insert(id.clone(), turn);
+            if let Ok(Some(s)) = self.db().session(id)
                 && let Some(i) = s.item_id
             {
                 let _ = self.db().timeline_add(

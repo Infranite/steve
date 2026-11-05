@@ -46,8 +46,16 @@ const ACCEPT_WINDOW_MS: i64 = 10 * 60_000;
 /// A worker's hold on a command it sends.
 const LEASE_MS: i64 = 60_000;
 
-/// A turn's end for the business side (session, stop reason, error), told after its commit.
-type End = (String, String, Option<String>);
+/// A turn's end for the business side, told after its commit.
+#[derive(Debug)]
+struct End {
+    session: String,
+    /// The turn's last attempt (after gateway retries, the retry that ended it); `None` for a
+    /// failed open with no turn waiting on it.
+    attempt: Option<String>,
+    stop: String,
+    error: Option<String>,
+}
 
 fn now() -> i64 {
     steve_store::now()
@@ -72,8 +80,16 @@ where
 /// What the coordinator tells the business side (the core).
 pub trait NodeDomain: Send + Sync + 'static {
     /// The session's logical turn is over and nothing follows it: the turn end of the item's
-    /// lifecycle. Called once per turn, after its end is committed.
-    fn turn_ended(&self, session: &str, stop_reason: &str, error: Option<String>);
+    /// lifecycle. Called once per turn, after its end is committed. `attempt`: the turn's last
+    /// attempt (after gateway retries, the retry that ended it); `None` when an open failed with
+    /// no turn waiting on it.
+    fn turn_ended(
+        &self,
+        session: &str,
+        attempt: Option<&str>,
+        stop_reason: &str,
+        error: Option<String>,
+    );
     /// An attempt began running (committed), once.
     /// `user_seq`: the `user` entry the attempt answers (the first attempt of a turn only).
     fn attempt_started(
@@ -582,8 +598,17 @@ impl NodeRuntime {
     /// Plans a turn from what is queued, if the session can take one (T1), led by Steve's own
     /// message when there is one (identical texts go once); otherwise nothing changes.
     pub fn flush(&self, session: &str, lead: Option<(&str, &str)>) -> Result<Planned, StoreError> {
+        Ok(self.flush_turn(session, lead)?.0)
+    }
+
+    /// [`Self::flush`], with the attempt it planned when it planned one.
+    pub fn flush_turn(
+        &self,
+        session: &str,
+        lead: Option<(&str, &str)>,
+    ) -> Result<(Planned, Option<String>), StoreError> {
         self.running()?;
-        let planned = self.tx(|tx| {
+        let (planned, attempt) = self.tx(|tx| {
             // a released session takes the lead too: once something is queued it opens again
             let released = self.may_plan()
                 && !self.is_holding()
@@ -591,7 +616,7 @@ impl NodeRuntime {
                     .is_some_and(|(p, a)| p == "released" && a.is_none());
             let p = self.plan_state_in(tx, session)?;
             if !released && matches!(p, Planned::Busy | Planned::Held) {
-                return Ok(p);
+                return Ok((p, None));
             }
             if let Some((text, via)) = lead {
                 let (first, waiting): (Option<i64>, bool) = tx.query_row(
@@ -603,12 +628,38 @@ impl NodeRuntime {
                     queue_in(tx, session, text, via, &[], first.map_or(now(), |t| t - 1))?;
                 }
             }
-            self.plan_in(tx, session)
+            let p = self.plan_in(tx, session)?;
+            let attempt = if p == Planned::Created {
+                tx.query_row(
+                    "SELECT active_attempt FROM runtime_sessions WHERE session_id=?",
+                    [session],
+                    |r| r.get(0),
+                )?
+            } else {
+                None
+            };
+            Ok((p, attempt))
         })?;
         if planned == Planned::Created {
             self.wake_send.notify_one();
         }
-        Ok(planned)
+        Ok((planned, attempt))
+    }
+
+    /// Attempts `a` and `b` belong to the same turn (one is a gateway retry of the other).
+    pub fn same_turn(&self, a: &str, b: &str) -> Result<bool, StoreError> {
+        self.store.reader(|c| {
+            Ok(c.query_row(
+                "SELECT EXISTS(SELECT 1 FROM runtime_attempts x JOIN runtime_attempts y ON y.turn_id = x.turn_id WHERE x.attempt_id=?1 AND y.attempt_id=?2)",
+                [a, b],
+                |r| r.get(0),
+            )?)
+        })
+    }
+
+    fn tell_end(&self, e: End) {
+        self.domain
+            .turn_ended(&e.session, e.attempt.as_deref(), &e.stop, e.error);
     }
 
     /// [`Self::plan_state_in`], and a released session with messages waiting is opened again
@@ -1142,12 +1193,11 @@ impl NodeRuntime {
         if settled {
             status_in(tx, session, settled_status(&completion.stop_reason))?;
         }
-        let ended = settled.then(|| {
-            (
-                session.to_string(),
-                completion.stop_reason.clone(),
-                completion.error.as_ref().map(|e| e.safe_detail.clone()),
-            )
+        let ended = settled.then(|| End {
+            session: session.to_string(),
+            attempt: Some(attempt.to_string()),
+            stop: completion.stop_reason.clone(),
+            error: completion.error.as_ref().map(|e| e.safe_detail.clone()),
         });
         let mut staged = self.staged.lock().unwrap();
         staged.0.push(finished);
@@ -1239,8 +1289,8 @@ impl NodeRuntime {
         });
         match r {
             Ok((end, stale)) => {
-                if let Some((s, stop, error)) = end {
-                    self.domain.turn_ended(&s, &stop, error);
+                if let Some(end) = end {
+                    self.tell_end(end);
                 }
                 if let Some(session) = stale {
                     // a configure refused for a stale revision: sent again with the Node's own
@@ -1503,13 +1553,14 @@ impl NodeRuntime {
             return Ok(None);
         }
         // the user hears why even when no turn waited (the queued message stays for the next try)
-        let mut end = Some((
-            s.to_string(),
-            "error".to_string(),
-            Some(format!(
+        let mut end = Some(End {
+            session: s.to_string(),
+            attempt: None,
+            stop: "error".to_string(),
+            error: Some(format!(
                 "the Node could not open the session again: {detail}"
             )),
-        ));
+        });
         if let Some(turn) = waiting {
             let c = Completion {
                 outcome: Outcome::Failed,
@@ -1524,11 +1575,12 @@ impl NodeRuntime {
                 acted: false,
             };
             self.turn_over_in(tx, s, &turn, &c)?;
-            end = Some((
-                s.to_string(),
-                c.stop_reason.clone(),
-                c.error.as_ref().map(|e| e.safe_detail.clone()),
-            ));
+            end = Some(End {
+                session: s.to_string(),
+                attempt: Some(last_attempt_in(tx, &turn)?),
+                stop: c.stop_reason.clone(),
+                error: c.error.as_ref().map(|e| e.safe_detail.clone()),
+            });
         }
         let rev = session_revision(tx, s)?;
         rt::session_cas_in(
@@ -1547,8 +1599,8 @@ impl NodeRuntime {
             s,
             &format!("Node 没能打开这个会话（{detail}），下一条消息会再试。"),
         )?;
-        if let Some((_, stop, _)) = &end {
-            status_in(tx, s, settled_status(stop))?;
+        if let Some(e) = &end {
+            status_in(tx, s, settled_status(&e.stop))?;
         }
         Ok(end)
     }
@@ -1906,8 +1958,8 @@ impl NodeRuntime {
                 Ok(changed)
             })
             .map_err(internal)?;
-        for (s, stop, error) in ends {
-            self.domain.turn_ended(&s, &stop, error);
+        for end in ends {
+            self.tell_end(end);
         }
         self.wake_apply.notify_one();
         Ok(changed)
@@ -2045,8 +2097,8 @@ impl NodeRuntime {
                     Ok(Some((end, ask))) => {
                         any = true;
                         self.after(ask);
-                        if let Some((session, stop, error)) = end {
-                            self.domain.turn_ended(&session, &stop, error);
+                        if let Some(end) = end {
+                            self.tell_end(end);
                         }
                     }
                     Ok(None) => {
@@ -2077,8 +2129,8 @@ impl NodeRuntime {
         let settled: Vec<After> = std::mem::take(&mut *self.settled_later.lock().unwrap());
         self.after(settled);
         let later: Vec<End> = std::mem::take(&mut *self.ended_later.lock().unwrap());
-        for (session, stop, error) in later {
-            self.domain.turn_ended(&session, &stop, error);
+        for end in later {
+            self.tell_end(end);
         }
     }
 
@@ -2372,11 +2424,7 @@ impl NodeRuntime {
     }
 
     /// One event's effects in `tx`. Returns a turn end to tell the business side after the commit.
-    fn apply_in(
-        &self,
-        tx: &Tx,
-        ev: &NodeEvent,
-    ) -> Result<Option<(String, String, Option<String>)>, StoreError> {
+    fn apply_in(&self, tx: &Tx, ev: &NodeEvent) -> Result<Option<End>, StoreError> {
         let session = match &ev.subject {
             Subject::Session { session } => Some(session.to_string()),
             Subject::Execution(ExecutionRef::Turn { session, .. }) => Some(session.to_string()),
@@ -2498,7 +2546,7 @@ impl NodeRuntime {
         session: &str,
         turn: &str,
         c: &Completion,
-    ) -> Result<Option<(String, String, Option<String>)>, StoreError> {
+    ) -> Result<Option<End>, StoreError> {
         let (ordinal, cancelled): (i64, bool) = tx.query_row(
             "SELECT t.retry_ordinal, EXISTS(SELECT 1 FROM runtime_attempts WHERE turn_id=t.turn_id AND cancel_requested=1) FROM runtime_turns t WHERE t.turn_id=?",
             [turn],
@@ -2584,9 +2632,12 @@ impl NodeRuntime {
             self.release_in(tx, session)?;
         }
         status_in(tx, session, settled_status(&c.stop_reason))?;
-        let stop = c.stop_reason.clone();
-        let error = c.error.as_ref().map(|e| e.safe_detail.clone());
-        Ok(Some((session.to_string(), stop, error)))
+        Ok(Some(End {
+            session: session.to_string(),
+            attempt: Some(last_attempt_in(tx, turn)?),
+            stop: c.stop_reason.clone(),
+            error: c.error.as_ref().map(|e| e.safe_detail.clone()),
+        }))
     }
 
     /// The turn and its dispatch receipts are over; the session is free.
@@ -2764,6 +2815,15 @@ pub enum Planned {
 
 /// The format of the events this coordinator writes: Steve's own, never a harness protocol.
 const V1: &str = "steve.v1";
+
+/// The turn's latest attempt (the one that ended it, once it is over).
+fn last_attempt_in(tx: &Tx, turn: &str) -> Result<String, StoreError> {
+    Ok(tx.query_row(
+        "SELECT attempt_id FROM runtime_attempts WHERE turn_id=? ORDER BY ordinal DESC LIMIT 1",
+        [turn],
+        |r| r.get(0),
+    )?)
+}
 
 /// Queues a message (with its `queued` event) at `created`.
 fn queue_in(

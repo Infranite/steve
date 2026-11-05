@@ -79,6 +79,7 @@ fn a_stopped_agent_is_continued_twice_before_you_hear_of_it_once() {
     k.core
         .on_turn_end(TurnEnd {
             session_id: sid.clone(),
+            attempt: None,
             stop_reason: "end_turn".into(),
             error: None,
         })
@@ -108,6 +109,7 @@ fn a_stop_reported_twice_is_continued_once() {
     k.core
         .on_turn_end(TurnEnd {
             session_id: sid.clone(),
+            attempt: None,
             stop_reason: "end_turn".into(),
             error: None,
         })

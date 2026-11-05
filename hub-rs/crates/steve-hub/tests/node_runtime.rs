@@ -21,14 +21,17 @@ struct Ends(
     Mutex<Vec<String>>,
     /// The store the attempts' statistics rows go to, as the wired Hub books them.
     std::sync::OnceLock<Store>,
+    /// The attempt each turn end named, in the order of `.0`.
+    Mutex<Vec<Option<String>>>,
 );
 
 impl NodeDomain for Ends {
-    fn turn_ended(&self, session: &str, stop: &str, error: Option<String>) {
+    fn turn_ended(&self, session: &str, attempt: Option<&str>, stop: &str, error: Option<String>) {
         self.0
             .lock()
             .unwrap()
             .push((session.into(), stop.into(), error));
+        self.5.lock().unwrap().push(attempt.map(String::from));
     }
     fn attempt_started(
         &self,
@@ -314,6 +317,53 @@ async fn a_passing_failure_with_no_tool_run_is_a_new_attempt_of_the_same_turn() 
     assert!(h.rt.is_busy(S), "the turn keeps its session while it waits");
     let wait: i64 = h.q("SELECT retry_at - created FROM node_commands WHERE method='start_turn' ORDER BY created DESC, rowid DESC LIMIT 1");
     assert!(wait >= 19_000, "the retry waits ({wait} ms)");
+}
+
+/// B2b: the item hears the end of a turn under its last attempt, the gateway retry that ended it,
+/// and a flush names the attempt it planned.
+#[tokio::test]
+async fn the_turn_end_names_the_last_attempt_of_its_retry_chain() {
+    let h = hub();
+    h.bind();
+    h.rt.prompt(S, "hello", "user", &[]).unwrap();
+    until("started", || h.count("start_turn") == 1).await;
+    let first = h.attempts()[0].clone();
+    h.transient_failure(&first).await;
+    let retry = h.attempts()[1].clone();
+    assert_eq!(
+        h.rt.active_attempt(S).unwrap().as_deref(),
+        Some(retry.attempt().as_str())
+    );
+    assert!(
+        h.rt.same_turn(first.attempt().as_str(), retry.attempt().as_str())
+            .unwrap()
+    );
+    // the retry goes now instead of after its wait
+    h.store
+        .transaction::<_, StoreError>(|tx| {
+            tx.execute(
+                "UPDATE node_commands SET retry_at=0 WHERE state='pending'",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    until("retry sent", || h.count("start_turn") == 2).await;
+    h.node.finish(&retry, build::done()).await.unwrap();
+    until("turn end", || !h.ends().is_empty()).await;
+    assert_eq!(h.ends().len(), 1, "one end for the turn");
+    assert_eq!(
+        *h.ends.5.lock().unwrap(),
+        [Some(retry.attempt().to_string())]
+    );
+
+    // the next turn, planned by a flush, is a turn of its own
+    h.store.queued().add(S, "next", "user", &[]).unwrap();
+    let (planned, next) = h.rt.flush_turn(S, None).unwrap();
+    assert_eq!(planned, Planned::Created);
+    let next = next.expect("the planned attempt");
+    assert_eq!(h.rt.active_attempt(S).unwrap(), Some(next.clone()));
+    assert!(!h.rt.same_turn(retry.attempt().as_str(), &next).unwrap());
 }
 
 #[tokio::test]
