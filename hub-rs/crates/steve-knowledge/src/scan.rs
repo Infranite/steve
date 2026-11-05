@@ -112,6 +112,29 @@ pub struct Entry {
     pub mtime: i64,
 }
 
+/// Why a walk did not see the whole folder. A walk with any of these must not be taken as
+/// proof that a file is gone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Gap {
+    /// A subdirectory could not be listed.
+    Unreadable,
+    /// A directory entry or its type could not be read.
+    Entry,
+    /// Wanted files beyond [`MAX_FILES`].
+    OverLimit,
+}
+
+impl Gap {
+    /// Stable code for stats and the API.
+    pub fn code(self) -> &'static str {
+        match self {
+            Gap::Unreadable => "unreadable",
+            Gap::Entry => "entry",
+            Gap::OverLimit => "over_limit",
+        }
+    }
+}
+
 /// What a walk found.
 #[derive(Debug, Default)]
 pub struct Walk {
@@ -122,6 +145,31 @@ pub struct Walk {
     pub over_limit: usize,
     /// Links pointing outside the root (or nowhere), not followed.
     pub links_refused: usize,
+    /// Wanted paths that exist but could not be looked at (a refused link, unreadable
+    /// metadata). Their documents are kept as they are.
+    pub held: Vec<String>,
+    /// Why parts of the folder were not seen (sorted, no repeats). Empty = complete.
+    pub gaps: Vec<Gap>,
+}
+
+impl Walk {
+    /// Did the walk see everything under the root? Only then may a document whose file was
+    /// not found be deleted.
+    pub fn complete(&self) -> bool {
+        self.gaps.is_empty()
+    }
+
+    fn hold(&mut self, rules: &Rules, rel: String) {
+        if rules.wants_file(&rel) {
+            self.held.push(rel);
+        }
+    }
+
+    fn gap(&mut self, g: Gap) {
+        if let Err(i) = self.gaps.binary_search(&g) {
+            self.gaps.insert(i, g);
+        }
+    }
 }
 
 fn mtime_ms(m: &fs::Metadata) -> i64 {
@@ -131,8 +179,8 @@ fn mtime_ms(m: &fs::Metadata) -> i64 {
         .map_or(0, |d| d.as_millis() as i64)
 }
 
-/// Walks `root` (canonical) in name order. Unreadable subdirectories are skipped; only an
-/// unreadable root is an error.
+/// Walks `root` (canonical) in name order. Unreadable subdirectories are skipped and recorded
+/// in [`Walk::gaps`]; only an unreadable root is an error.
 pub fn walk(root: &Path, rules: &Rules) -> io::Result<Walk> {
     let mut out = Walk::default();
     let mut stack: Vec<(PathBuf, String)> = vec![(root.to_path_buf(), String::new())];
@@ -143,11 +191,18 @@ pub fn walk(root: &Path, rules: &Rules) -> io::Result<Walk> {
             Err(e) if first => return Err(e),
             Err(e) => {
                 tracing::debug!(?dir, "kb.folder_scan: unreadable directory: {e}");
+                out.gap(Gap::Unreadable);
                 continue;
             }
         };
         first = false;
-        let mut entries: Vec<fs::DirEntry> = rd.filter_map(Result::ok).collect();
+        let mut entries: Vec<fs::DirEntry> = Vec::new();
+        for e in rd {
+            match e {
+                Ok(e) => entries.push(e),
+                Err(_) => out.gap(Gap::Entry),
+            }
+        }
         entries.sort_by_key(|e| e.file_name());
         let mut subdirs = Vec::new();
         for e in entries {
@@ -159,15 +214,23 @@ pub fn walk(root: &Path, rules: &Rules) -> io::Result<Walk> {
             } else {
                 format!("{prefix}/{name}")
             };
-            let Ok(ft) = e.file_type() else { continue };
+            let Ok(ft) = e.file_type() else {
+                out.gap(Gap::Entry); // could be a directory
+                continue;
+            };
             let (path, meta) = if ft.is_symlink() {
                 match fs::canonicalize(e.path()) {
                     Ok(t) if t.starts_with(root) => match fs::metadata(&t) {
                         Ok(m) if m.is_file() => (t, m),
-                        _ => continue, // linked directories are not entered
+                        Ok(_) => continue, // linked directories are not entered
+                        Err(_) => {
+                            out.hold(rules, rel);
+                            continue;
+                        }
                     },
                     _ => {
                         out.links_refused += 1;
+                        out.hold(rules, rel);
                         continue;
                     }
                 }
@@ -182,7 +245,10 @@ pub fn walk(root: &Path, rules: &Rules) -> io::Result<Walk> {
             } else if ft.is_file() {
                 match e.metadata() {
                     Ok(m) => (e.path(), m),
-                    Err(_) => continue,
+                    Err(_) => {
+                        out.hold(rules, rel);
+                        continue;
+                    }
                 }
             } else {
                 continue; // sockets, fifos, devices
@@ -200,6 +266,7 @@ pub fn walk(root: &Path, rules: &Rules) -> io::Result<Walk> {
                 out.too_big.push(entry);
             } else if out.files.len() >= MAX_FILES {
                 out.over_limit += 1;
+                out.gap(Gap::OverLimit);
             } else {
                 out.files.push(entry);
             }
@@ -257,5 +324,68 @@ mod tests {
         assert_eq!(rels, ["a.md", "b.md", "sub/c.md"]);
         assert_eq!(w.too_big.len(), 1);
         assert!(walk(&root.join("nope"), &Rules::default()).is_err());
+    }
+
+    #[test]
+    fn a_full_walk_is_complete() {
+        let d = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(d.path()).unwrap();
+        fs::create_dir_all(root.join("sub")).unwrap();
+        fs::write(root.join("sub/a.md"), "x").unwrap();
+        let w = walk(&root, &Rules::new(vec![], vec![])).unwrap();
+        assert!(w.complete() && w.held.is_empty(), "{w:?}");
+    }
+
+    #[test]
+    fn an_unreadable_subdirectory_makes_the_walk_incomplete() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(d.path()).unwrap();
+        for p in ["a.md", "locked/b.md"] {
+            let f = root.join(p);
+            fs::create_dir_all(f.parent().unwrap()).unwrap();
+            fs::write(&f, "x").unwrap();
+        }
+        let locked = root.join("locked");
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        let readable = fs::read_dir(&locked).is_ok(); // root ignores the mode
+        let w = walk(&root, &Rules::new(vec![], vec![])).unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        if readable {
+            return;
+        }
+        assert_eq!(w.files.len(), 1);
+        assert_eq!(w.gaps, [Gap::Unreadable]);
+        assert!(!w.complete());
+    }
+
+    #[test]
+    fn over_the_file_limit_is_incomplete() {
+        let d = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(d.path()).unwrap();
+        for i in 0..=MAX_FILES {
+            fs::write(root.join(format!("{i:05}.md")), "").unwrap();
+        }
+        let w = walk(&root, &Rules::new(vec![], vec![])).unwrap();
+        assert_eq!((w.files.len(), w.over_limit), (MAX_FILES, 1));
+        assert_eq!(w.gaps, [Gap::OverLimit]);
+    }
+
+    #[test]
+    fn refused_links_are_held_when_wanted() {
+        let d = tempfile::tempdir().unwrap();
+        let base = fs::canonicalize(d.path()).unwrap();
+        let (root, outside) = (base.join("root"), base.join("outside"));
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("s.md"), "x").unwrap();
+        let ln = |to: &Path, at: &str| std::os::unix::fs::symlink(to, root.join(at)).unwrap();
+        ln(&outside.join("s.md"), "out.md");
+        ln(&outside, "out-dir");
+        ln(&root.join("missing.md"), "dangling.md");
+        let w = walk(&root, &Rules::new(vec![], vec![])).unwrap();
+        assert_eq!(w.links_refused, 3);
+        assert_eq!(w.held, ["dangling.md", "out.md"]);
+        assert!(w.complete(), "a refused link is seen, not missed");
     }
 }

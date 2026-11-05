@@ -396,6 +396,11 @@ pub struct SyncReport {
     pub skipped: usize,
     /// Links pointing outside the folder.
     pub links_refused: usize,
+    /// Documents whose file was not found but which stayed, because the walk was incomplete
+    /// (see `incomplete`) or their path could not be looked at (a refused link).
+    pub kept: usize,
+    /// Why the walk was incomplete ([`scan::Gap::code`]); empty when it saw everything.
+    pub incomplete: Vec<&'static str>,
 }
 
 /// Marks a folder source as syncing. `Ok(None)` = already syncing, paused, or not a folder.
@@ -474,6 +479,7 @@ async fn run(
         files: walked.files.len(),
         skipped: walked.too_big.len() + walked.over_limit,
         links_refused: walked.links_refused,
+        incomplete: walked.gaps.iter().map(|g| g.code()).collect(),
         ..Default::default()
     };
     let bytes: u64 = walked.files.iter().map(|e| e.size).sum();
@@ -495,12 +501,28 @@ async fn run(
     let (docs, chunks) = index::blocking(move || store.reader(|c| repo::source_counts(c, &s)))
         .await
         .map_err(|e| e.to_string())?;
-    let stats = json!({"docs": docs, "chunks": chunks, "skipped": rep.skipped, "bytes": bytes});
+    let mut stats = json!({"docs": docs, "chunks": chunks, "skipped": rep.skipped, "bytes": bytes});
+    if rep.kept > 0 {
+        stats["kept"] = json!(rep.kept);
+    }
+    if !rep.incomplete.is_empty() {
+        stats["incomplete"] = json!(rep.incomplete);
+        tracing::info!(
+            source = %src.id,
+            kept = rep.kept,
+            "kb.folder_scan: incomplete walk ({}), nothing deleted",
+            rep.incomplete.join(", ")
+        );
+    }
     Ok((rep, stats))
 }
 
 /// Brings the documents in line with the walk: new files inserted, files whose `(mtime, size)`
 /// changed reactivated, vanished files `deleted` (index rows removed). Returns the ids to index.
+///
+/// Only a complete walk deletes: when part of the folder was not seen (an unreadable
+/// directory, over the file limit), a missing file is no proof it is gone, so its document is
+/// `kept`. Paths the walk saw but could not look at (`held`) are kept either way.
 fn reconcile(
     tx: &Tx,
     src: &SourceRow,
@@ -565,8 +587,13 @@ fn reconcile(
             index::fail_doc(tx, &d, "skipped", TOO_BIG, now)?;
         }
     }
+    let held: HashSet<&str> = w.held.iter().map(String::as_str).collect();
     for (rel, d) in &existing {
         if !seen.contains(rel.as_str()) && d.status != "deleted" {
+            if !w.complete() || held.contains(rel.as_str()) {
+                rep.kept += 1;
+                continue;
+            }
             index::remove(tx, "chunk", &d.id)?;
             repo::set_doc_indexed(tx, &d.id, "", 0, "deleted", None, now)?;
             rep.deleted += 1;

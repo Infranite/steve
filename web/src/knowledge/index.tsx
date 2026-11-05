@@ -235,6 +235,8 @@ function NewNoteDialog({ open, onClose }: { open: boolean; onClose: () => void }
 const statsLine = (s: KbSource) => {
   const x = s.stats ?? {}, parts = [tt("knowledge:sources.docs", { count: x.docs ?? 0 }), tt("knowledge:sources.chunks", { count: x.chunks ?? 0 })]
   if (x.skipped) parts.push(tt("knowledge:sources.skipped", { count: x.skipped }))
+  /* a scan that could not see everything deletes nothing */
+  if (x.kept) parts.push(tt("knowledge:sources.kept", { count: x.kept })); else if (x.incomplete?.length) parts.push(tt("knowledge:sources.incomplete"))
   /* built-in sources follow their objects as they change; only folders are scanned */
   if (s.status === "syncing") parts.push(tt("knowledge:sources.syncing")); else if (s.last_sync) parts.push(tt("knowledge:sources.lastSync", { time: tm(s.last_sync) })); else if (!s.builtin) parts.push(tt("knowledge:sources.neverSynced"))
   return parts.join(" · ")

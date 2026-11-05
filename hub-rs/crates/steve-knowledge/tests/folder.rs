@@ -893,3 +893,112 @@ async fn only_the_owner_rescopes_builtin_sources() {
         assert_eq!((st, v["level"].as_str()), (200, Some("reasoning")), "{v}");
     }
 }
+
+/// Is `dir` really unreadable after `chmod 000` (not when the tests run as root)?
+fn lock(dir: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(dir, fs::Permissions::from_mode(0o000)).unwrap();
+    fs::read_dir(dir).is_err()
+}
+
+fn unlock(dir: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(dir, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[tokio::test]
+async fn an_unreadable_subfolder_deletes_nothing() {
+    let e = setup();
+    write(&e.wiki().join("a.md"), "# 甲\n\n第一页。");
+    write(&e.wiki().join("gone.md"), "# 乙\n\n马上要删掉的一页。");
+    write(&e.wiki().join("私密/c.md"), "# 丙\n\n锁起来的一页。");
+    let s = e.add_folder(&e.wiki(), json!({})).await;
+    let id = s["id"].as_str().unwrap().to_string();
+    assert_eq!(
+        s["stats"],
+        json!({"docs": 3, "chunks": 3, "skipped": 0}),
+        "{s}"
+    );
+
+    // A file really removed while a subfolder cannot be read: nothing is deleted.
+    fs::remove_file(e.wiki().join("gone.md")).unwrap();
+    let locked = e.wiki().join("私密");
+    if !lock(&locked) {
+        unlock(&locked);
+        return; // running as root
+    }
+    let r = e.sync(&id).await;
+    unlock(&locked);
+    assert_eq!((r.files, r.deleted, r.kept), (1, 0, 2), "{r:?}");
+    assert_eq!(r.incomplete, ["unreadable"]);
+    for rel in ["a.md", "gone.md", "私密/c.md"] {
+        assert_eq!(e.doc_by_ref(&id, rel).status, "active", "{rel}");
+    }
+    assert_eq!(e.search(ME, "锁起来").await.len(), 1);
+    let s = e.wait(&id).await;
+    assert_eq!(s["status"], "ok", "{s}");
+    assert_eq!(s["stats"]["kept"], 2, "{s}");
+    assert_eq!(s["stats"]["incomplete"], json!(["unreadable"]), "{s}");
+
+    // Readable again: the complete walk deletes what is really gone, and the note goes away.
+    let r = e.sync(&id).await;
+    assert_eq!((r.files, r.deleted, r.kept), (2, 1, 0), "{r:?}");
+    assert!(r.incomplete.is_empty());
+    assert_eq!(e.doc_by_ref(&id, "gone.md").status, "deleted");
+    assert_eq!(e.doc_by_ref(&id, "私密/c.md").status, "active");
+    let s = e.wait(&id).await;
+    assert_eq!(
+        s["stats"],
+        json!({"docs": 2, "chunks": 2, "skipped": 0}),
+        "{s}"
+    );
+}
+
+#[tokio::test]
+async fn over_the_file_limit_deletes_nothing() {
+    let e = setup();
+    write(&e.wiki().join("old/a.md"), "# 旧\n\n很早以前的一页。");
+    let s = e.add_folder(&e.wiki(), json!({})).await;
+    let id = s["id"].as_str().unwrap().to_string();
+    assert_eq!(e.doc_by_ref(&id, "old/a.md").status, "active");
+
+    // The old page is gone, and the folder now holds one file more than a source may have.
+    fs::remove_dir_all(e.wiki().join("old")).unwrap();
+    let many = e.wiki().join("many");
+    fs::create_dir_all(&many).unwrap();
+    for i in 0..=steve_knowledge::scan::MAX_FILES {
+        fs::write(many.join(format!("{i:05}.txt")), "").unwrap();
+    }
+    let r = e.sync(&id).await;
+    assert_eq!(
+        (r.files, r.skipped, r.deleted, r.kept),
+        (steve_knowledge::scan::MAX_FILES, 1, 0, 1),
+        "{r:?}"
+    );
+    assert_eq!(r.incomplete, ["over_limit"]);
+    assert_eq!(e.doc_by_ref(&id, "old/a.md").status, "active");
+}
+
+#[tokio::test]
+async fn a_file_turned_into_an_outside_link_is_kept_and_counted() {
+    let e = setup();
+    let outside = e.home.join("outside");
+    write(&outside.join("secret.md"), "外面的秘密：工资表");
+    write(&e.wiki().join("a.md"), "# 甲\n\n部署脚本在 ops 仓库。");
+    write(&e.wiki().join("b.md"), "# 乙\n\n会被删掉的一页。");
+    let s = e.add_folder(&e.wiki(), json!({})).await;
+    let id = s["id"].as_str().unwrap().to_string();
+
+    fs::remove_file(e.wiki().join("a.md")).unwrap();
+    std::os::unix::fs::symlink(outside.join("secret.md"), e.wiki().join("a.md")).unwrap();
+    fs::remove_file(e.wiki().join("b.md")).unwrap();
+    let r = e.sync(&id).await;
+    // The walk itself was complete: the really vanished file is deleted, the link is not read.
+    assert_eq!((r.links_refused, r.kept, r.deleted), (1, 1, 1), "{r:?}");
+    assert!(r.incomplete.is_empty());
+    assert_eq!(e.doc_by_ref(&id, "a.md").status, "active");
+    assert_eq!(e.doc_by_ref(&id, "b.md").status, "deleted");
+    assert!(e.search(ME, "工资表").await.is_empty());
+    let s = e.wait(&id).await;
+    assert_eq!(s["stats"]["kept"], 1, "{s}");
+}
