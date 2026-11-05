@@ -42,10 +42,54 @@ pub struct NodeConfig {
     pub acp: AcpConfig,
     pub roots: Vec<Root>,
     pub capacity: Capacity,
+    pub storage: Storage,
 }
 
-/// Events the Hub has not taken yet, at most (bytes): past it the Node takes no new work.
-const JOURNAL_QUOTA: u64 = 256 << 20;
+/// How much disk the journal may take. The limit is the quota, or less when the filesystem of the
+/// home has less room than that past the reserve. At the limit the Node takes no new work
+/// (`exhausted`) until its journal is back under the low-water mark; stopping, releasing and
+/// answering keep a small margin past it, and the end of an attempt is always written.
+#[derive(Clone)]
+pub struct Storage {
+    /// Live journal bytes at most (events not taken yet, command history, sessions…).
+    pub quota: u64,
+    /// Free space left on the home's filesystem (for the WAL, checkpoints and everything else).
+    pub reserve: u64,
+    /// After the limit was reached, new work is taken again below this share of it (percent).
+    pub low_water: u8,
+    /// Tests: the filesystem's free bytes, instead of asking it.
+    #[doc(hidden)]
+    pub free_space: Option<Arc<dyn Fn() -> u64 + Send + Sync>>,
+}
+
+impl Default for Storage {
+    fn default() -> Storage {
+        Storage {
+            quota: 256 << 20,
+            reserve: 512 << 20,
+            low_water: 80,
+            free_space: None,
+        }
+    }
+}
+
+/// Past the limit, what stops or answers work may still be written (bytes).
+const CONTROL_MARGIN: u64 = 8 << 20;
+
+/// High-water with hysteresis. `used`: live journal bytes; `need`: what the command adds. Once full,
+/// new work waits until usage is back under `low_water` percent of the limit. Returns whether it is
+/// taken and whether the journal counts as full afterwards.
+fn admit(full: bool, used: u64, need: u64, limit: u64, low_water: u8) -> (bool, bool) {
+    let low = limit / 100 * u64::from(low_water.min(100));
+    if full && used >= low {
+        return (false, true);
+    }
+    if used.saturating_add(need) >= limit {
+        return (false, true);
+    }
+    (true, false)
+}
+
 /// How long a delivery may take, and how often an idle Node checks the Hub is there.
 const HUB_TIMEOUT: Duration = Duration::from_secs(15);
 const HEARTBEAT: Duration = Duration::from_secs(10);
@@ -100,6 +144,8 @@ pub(crate) struct Inner {
     closed: AtomicBool,
     /// The journal failed: no new work until a restart.
     faulted: AtomicBool,
+    /// The journal reached its limit: no new work until it is under the low-water mark.
+    full: AtomicBool,
     /// Since when the Hub does not take events (for the offline lease).
     hub_down_since: Mutex<Option<i64>>,
     /// What each session's harness sent during its running attempt (bytes, as it arrived).
@@ -137,6 +183,33 @@ impl Inner {
     pub(crate) fn reset_output(&self, session: &SessionId) {
         self.output_counter(session).store(0, Ordering::SeqCst);
     }
+
+    /// The journal's limit now (bytes of live pages): the quota, or the room the filesystem has
+    /// past the reserve. Pages SQLite freed inside the file count as room.
+    pub(crate) fn journal_limit(&self, t: &Tx) -> ApiResult<u64> {
+        let s = &self.cfg.storage;
+        let free = match &s.free_space {
+            Some(f) => Some(f()),
+            None => journal::free_bytes(&self.cfg.home),
+        };
+        let Some(free) = free else {
+            return Ok(s.quota);
+        };
+        let room = t
+            .file_bytes()?
+            .saturating_add(free)
+            .saturating_sub(s.reserve);
+        Ok(s.quota.min(room))
+    }
+
+    /// The journal is at its limit (and then counts as full): running work stops.
+    pub(crate) fn over_limit(&self, t: &Tx) -> ApiResult<bool> {
+        let over = t.payload_bytes()? >= self.journal_limit(t)?;
+        if over {
+            self.full.store(true, Ordering::SeqCst);
+        }
+        Ok(over)
+    }
 }
 
 /// Which attempt a session runs now, for the tool endpoint (from the journal).
@@ -154,8 +227,21 @@ impl tools::Current for CurrentOf {
     }
 }
 
+/// The stream a subject's events go to.
+pub(crate) fn stream_of(subject: &Subject) -> String {
+    match subject {
+        Subject::Session { session } => derived_id("session", session.as_str()),
+        Subject::Execution(ExecutionRef::Turn { session, .. }) => {
+            derived_id("session", session.as_str())
+        }
+        Subject::Execution(ExecutionRef::Job { job, .. }) => derived_id("job", job.as_str()),
+        Subject::Operation { operation } => derived_id("op", operation.as_str()),
+    }
+}
+
 /// Journal events in `t` (numbered in their streams as part of the transaction).
 pub(crate) fn emit_all(inner: &Inner, t: &Tx, evs: Vec<(Subject, EventBody)>) -> ApiResult<()> {
+    let mut limit = None;
     for (subject, body) in evs {
         let data = match &body {
             EventBody::OperationChanged { .. }
@@ -167,24 +253,23 @@ pub(crate) fn emit_all(inner: &Inner, t: &Tx, evs: Vec<(Subject, EventBody)>) ->
             EventBody::Usage { report } => report.measurement != Measurement::Final,
             _ => true,
         };
-        if data
-            && t.payload_bytes()?
+        if data {
+            let limit = match limit {
+                Some(l) => l,
+                None => *limit.insert(inner.journal_limit(t)?),
+            };
+            if t.payload_bytes()?
                 .saturating_add(serde_json::to_vec(&body).map_err(internal)?.len() as u64 + 16384)
-                > JOURNAL_QUOTA
-        {
-            return Err(ApiError::new(
-                ErrorCode::Exhausted,
-                "journal data budget reached",
-            ));
-        }
-        let stream: StreamId = id(match &subject {
-            Subject::Session { session } => derived_id("session", session.as_str()),
-            Subject::Execution(ExecutionRef::Turn { session, .. }) => {
-                derived_id("session", session.as_str())
+                > limit
+            {
+                inner.full.store(true, Ordering::SeqCst);
+                return Err(ApiError::new(
+                    ErrorCode::Exhausted,
+                    "journal data budget reached",
+                ));
             }
-            Subject::Execution(ExecutionRef::Job { job, .. }) => derived_id("job", job.as_str()),
-            Subject::Operation { operation } => derived_id("op", operation.as_str()),
-        })?;
+        }
+        let stream: StreamId = id(stream_of(&subject))?;
         let n = t.bump("event")?;
         let event_id: EventId = id(format!("ev_{}_{}_{n}", inner.j.id(), inner.incarnation))?;
         t.record(&stream, |cursor| NodeEvent {
@@ -882,6 +967,7 @@ impl LocalNode {
             delivering: AtomicBool::new(false),
             closed: AtomicBool::new(false),
             faulted: AtomicBool::new(false),
+            full: AtomicBool::new(false),
             hub_down_since: Mutex::new(Some(now())),
             output: Mutex::new(HashMap::new()),
             tools: tools::Endpoint::new(Arc::new(CurrentOf(weak.clone()))),
@@ -895,6 +981,13 @@ impl LocalNode {
 
     pub fn incarnation(&self) -> u64 {
         self.0.incarnation
+    }
+
+    /// Tests: caps the journal file at `pages` (`PRAGMA max_page_count`), so the next write that
+    /// needs a new page fails as on a full disk. Returns the cap SQLite took.
+    #[doc(hidden)]
+    pub fn cap_journal_pages(&self, pages: u64) -> ApiResult<u64> {
+        self.0.j.cap_pages(pages)
     }
 
     /// Where events go and where attachments come from (the Hub). Starts delivering what is waiting.
@@ -1038,8 +1131,16 @@ impl LocalNode {
                 "cancel" | "abandon" | "recover" | "release_session" | "resolve_permission"
             );
             let bytes = serde_json::to_vec(&c.body).map_err(internal)?.len() as u64;
-            let budget = JOURNAL_QUOTA + if control { 8 << 20 } else { 0 };
-            if bytes > 1 << 20 || t.payload_bytes()?.saturating_add(bytes) >= budget {
+            let (used, limit) = (t.payload_bytes()?, self.0.journal_limit(t)?);
+            let taken = if control {
+                used.saturating_add(bytes) < limit.saturating_add(CONTROL_MARGIN)
+            } else {
+                let full = self.0.full.load(Ordering::SeqCst);
+                let (taken, full) = admit(full, used, bytes, limit, self.0.cfg.storage.low_water);
+                self.0.full.store(full, Ordering::SeqCst);
+                taken
+            };
+            if bytes > 1 << 20 || !taken {
                 return Err(ApiError::new(
                     ErrorCode::Exhausted,
                     "journal admission budget reached",
@@ -1417,7 +1518,7 @@ impl SessionExecutor for LocalNode {
             Self::check_policy(&tu.run.policy)?;
             Self::check_limits(&tu.run.limits)?;
             Self::idle(t, &tu.session)?;
-            if t.unacked_bytes()? > JOURNAL_QUOTA {
+            if t.unacked_bytes()? > self.0.cfg.storage.quota {
                 return Err(ApiError::new(
                     ErrorCode::Exhausted,
                     "the hub has not taken this node's events: no new work until it does",
@@ -2364,5 +2465,24 @@ mod binding_tests {
         std::fs::remove_file(root.path().join("parent")).unwrap();
         symlink(outside.path(), root.path().join("parent")).unwrap();
         assert!(inside(root.path(), &w, "parent/new").is_none());
+    }
+}
+
+#[cfg(test)]
+mod storage_tests {
+    use super::admit;
+
+    #[test]
+    fn the_limit_holds_until_usage_is_under_low_water() {
+        // under the limit: taken
+        assert_eq!(admit(false, 50, 10, 100, 80), (true, false));
+        // reaching it: refused, and full from now on
+        assert_eq!(admit(false, 95, 10, 100, 80), (false, true));
+        // full: a small command that would fit still waits while usage is above low water
+        assert_eq!(admit(true, 85, 1, 100, 80), (false, true));
+        // under low water again: taken, no longer full
+        assert_eq!(admit(true, 79, 1, 100, 80), (true, false));
+        // no room at all (the disk is past its reserve)
+        assert_eq!(admit(false, 0, 1, 0, 80), (false, true));
     }
 }
