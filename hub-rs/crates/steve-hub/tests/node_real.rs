@@ -16,11 +16,16 @@
 //! 2. a Steve tool call (read-only) goes through ToolService, with its row in the host journal;
 //! 3. a Bash permission card answered allow_once runs; a second one rejected does not;
 //! 4. a cancel mid-turn ends the turn;
-//! 5. the Bot's model and effort reach the harness (the open carries them, claude answers with it);
+//! 5. a permission-mode change at idle (YOLO on: `default` → `acceptEdits`) is configured on the
+//!    Node and the next edit asks nothing; the Bot's model and effort reach the harness with the
+//!    open. Pending: a model/effort change at idle, which has no Hub trigger yet (see the case);
 //! 6. a release (the Hub stopped at idle) then a reopen continues the same conversation;
 //! 7. an image attachment arrives through HubFiles;
 //! 8. the Hub killed mid-turn: the attempt is unknown and never re-run; Stop abandons it and the
 //!    next message runs.
+//!
+//! Two checks of the harness itself run on the scripted agent and are not ignored: the test project
+//! is a Node root from the first turn, and case 5's configure path.
 //!
 //! Cases 9 (a drain waits for the turn) and 10 (YOLO arms from the Node's own_pids) come once
 //! their Hub side lands.
@@ -69,6 +74,9 @@ struct Home {
     /// The tokens in the project's `notes.txt` and `secret.txt` (cases 3 and 8).
     note: String,
     secret: String,
+    /// `Some(log)`: the scripted ACP agent (`steve-acp/tests/fake-acp.js`, logging to `log`) stands
+    /// in for claude, for the non-ignored checks of the harness itself.
+    fake: Option<PathBuf>,
 }
 
 impl Home {
@@ -110,8 +118,14 @@ impl Home {
             project,
             note,
             secret,
+            fake: None,
             dir,
         }
+    }
+    fn fake() -> Home {
+        let mut h = Home::new();
+        h.fake = Some(h.dir.path().join("acp.log"));
+        h
     }
     fn steve(&self) -> PathBuf {
         self.dir.path().join("steve")
@@ -197,7 +211,8 @@ impl Drop for Hub {
 }
 
 /// The real Hub with the local Node on. Both switch names are set: `STEVE_NODE` (D5) and
-/// `STEVE_NODE_MODE` (its N2 name).
+/// `STEVE_NODE_MODE` (its N2 name). On a [`Home::fake`] the scripted agent replaces claude and
+/// `HOME` is the temp dir, so nothing of the user's login is read.
 fn spawn(h: &Home) -> Hub {
     let mut c = Command::new(env!("CARGO_BIN_EXE_steve-hub"));
     c.env("STEVE_HOME", h.steve())
@@ -215,6 +230,7 @@ fn spawn(h: &Home) -> Hub {
         .env("STEVE_ADAPTER_CODEX", "/usr/bin/false")
         .env_remove("STEVE_NODE_TURN_LIMIT_MS")
         .env_remove("STEVE_NO_RESUME")
+        .env_remove("STEVE_YOLO")
         .env_remove("STEVE_UPGRADE_ID")
         .env_remove("CODEX_HOME")
         .env_remove("STEVE_KB_STORE")
@@ -231,6 +247,17 @@ fn spawn(h: &Home) -> Hub {
                 .expect("hub log"),
         )
         .process_group(0);
+    if let Some(log) = &h.fake {
+        let fake = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../steve-acp/tests/fake-acp.js"
+        );
+        c.env("HOME", h.dir.path())
+            .env("FAKE_ACP_LOG", log)
+            .env("CLAUDE_CODE_EXECUTABLE", "/usr/bin/false")
+            .env("STEVE_ADAPTER_CLAUDE", fake)
+            .env_remove("CLAUDE_CONFIG_DIR");
+    }
     Hub(c.spawn().expect("spawn hub"))
 }
 
@@ -271,7 +298,30 @@ async fn serving(h: &Home) {
 fn hub_log(h: &Home) -> String {
     let s = std::fs::read_to_string(h.dir.path().join("hub.log")).unwrap_or_default();
     let lines: Vec<&str> = s.lines().collect();
-    lines[lines.len().saturating_sub(60)..].join("\n")
+    let mut out = lines[lines.len().saturating_sub(60)..].join("\n");
+    // the Node's side, which the Hub's log may not tell: its commands and their receipts
+    if let Ok(db) = rusqlite::Connection::open_with_flags(
+        h.steve().join("data/steve.sqlite3"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    ) {
+        let rows = db
+            .prepare("SELECT method, state, COALESCE(receipt,'') FROM node_commands ORDER BY created, rowid")
+            .and_then(|mut q| {
+                q.query_map([], |r| {
+                    Ok(format!(
+                        "{} {} {}",
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()
+            })
+            .unwrap_or_default();
+        out.push_str("\nnode_commands:\n");
+        out.push_str(&rows.join("\n"));
+    }
+    out
 }
 
 struct Client {
@@ -384,18 +434,20 @@ fn effort() -> String {
 
 impl Real {
     async fn start() -> Real {
-        let h = Home::new();
+        Real::start_on(Home::new()).await
+    }
+
+    async fn start_on(h: Home) -> Real {
         let hub = spawn(&h);
         serving(&h).await;
         let c = Client::login(&h).await;
-        let bot = c
-            .ok(
-                "POST",
-                "/api/bots",
-                json!({"name": "A7 实测", "harness": "claude-code", "model": model(),
-                    "reasoning_effort": effort(), "perm_mode": "default"}),
-            )
-            .await["id"]
+        let mut bot = json!({"name": "A7 实测", "harness": "claude-code", "perm_mode": "default"});
+        // the scripted agent reports no effort to set: it would refuse the open
+        if h.fake.is_none() {
+            bot["model"] = json!(model());
+            bot["reasoning_effort"] = json!(effort());
+        }
+        let bot = c.ok("POST", "/api/bots", bot).await["id"]
             .as_str()
             .expect("bot id")
             .to_string();
@@ -410,6 +462,10 @@ impl Real {
             .expect("project id")
             .to_string();
         eprintln!("A7 home {}", h.dir.path().display());
+        // No restart is needed although the Node's roots are read at boot (wire/node_binding.rs
+        // `roots`) and the project sits outside them: creating the item makes its worktree under
+        // STEVE_HOME/worktrees, a boot root, and the Node prepares that existing directory. The
+        // first non-ignored check below keeps it so.
         Real {
             h,
             hub,
@@ -513,6 +569,43 @@ impl Real {
             "SELECT COUNT(*) FROM runtime_attempts a JOIN runtime_turns t USING(turn_id) WHERE t.session_id=? AND a.state=?",
             &[&sid, &state],
         )
+    }
+
+    /// `configure_session` commands of `sid` the Node finished with success, with `permissions`.
+    fn configured(&self, sid: &str, permissions: &str) -> i64 {
+        self.h.count(
+            "SELECT COUNT(*) FROM node_commands WHERE method='configure_session' AND json_extract(request,'$.body.session')=? AND json_extract(request,'$.body.policy.permissions')=? AND state='finished' AND json_extract(receipt,'$.success')=1",
+            &[&sid, &permissions],
+        )
+    }
+
+    /// Switches YOLO on for the workspace. With the Bot's `default` mode and the item in its own
+    /// worktree, the session's harness mode becomes `acceptEdits`: today the only Hub path to
+    /// `set_mode`, hence to the Node's `configure_session`.
+    async fn yolo_on(&self) {
+        self.c.ok("PUT", "/api/yolo", json!({"on": true})).await;
+    }
+
+    /// Waits for the session's permission mode to be configured on the Node, failing with the log.
+    async fn configure_over(&self, sid: &str, permissions: &str) {
+        assert!(
+            wait(60, || self.configured(sid, permissions) == 1).await,
+            "configured {permissions} on the Node; log:\n{}",
+            hub_log(&self.h)
+        );
+        assert!(
+            wait(30, || self
+                .h
+                .one(
+                    "SELECT phase FROM runtime_sessions WHERE session_id=?",
+                    &[&sid]
+                )
+                .as_deref()
+                == Some("ready"))
+            .await,
+            "ready again after the configure; log:\n{}",
+            hub_log(&self.h)
+        );
     }
 
     /// Waits for `n` finished turns, failing with the log.
@@ -637,6 +730,55 @@ fn cwd(r: &Real, sid: &str) -> PathBuf {
         r.h.one("SELECT cwd FROM sessions WHERE id=?", &[&sid])
             .expect("cwd"),
     )
+}
+
+/// The harness itself, on the scripted agent (no model call, so not ignored): an item on the test
+/// project, created after boot, runs on the Node from its first turn. The Node's roots are read at
+/// boot and do not hold the project; this holds because the item's worktree is made under
+/// STEVE_HOME/worktrees (a boot root) and the Node prepares it as an existing directory. If that
+/// changes, every real case would fail before its first turn ("not a root this node allows").
+#[tokio::test(flavor = "multi_thread")]
+async fn the_test_project_is_a_node_root_from_the_first_turn() {
+    let r = Real::start_on(Home::fake()).await;
+    let sid = r.item("A7 根目录 @say rooted-A7").await;
+    r.turn_over(&sid, 1, "first turn").await;
+    assert!(r.said(&sid, 0, "rooted-A7") > 0, "the turn ran on the Node");
+    assert_eq!(
+        r.h.count(
+            "SELECT COUNT(*) FROM node_commands WHERE method='prepare_workspace' AND state='finished' AND json_extract(receipt,'$.success')=1",
+            &[]
+        ),
+        1,
+        "the workspace prepared on the Node; log:\n{}",
+        hub_log(&r.h)
+    );
+    let dir = cwd(&r, &sid);
+    assert!(
+        dir.starts_with(r.h.steve().join("worktrees"))
+            || dir.starts_with(r.h.steve().canonicalize().expect("home").join("worktrees")),
+        "a worktree of the project: {}",
+        dir.display()
+    );
+    assert!(
+        dir.join("notes.txt").exists(),
+        "checked out from the project"
+    );
+}
+
+/// Case 5's plumbing, on the scripted agent: YOLO switched on at idle reaches the Node session as
+/// a `configure_session` to `accept_edits`, and the next turn runs.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_mode_change_at_idle_configures_the_node_session() {
+    let r = Real::start_on(Home::fake()).await;
+    let sid = r.item("A7 配置 @say first-A7").await;
+    r.turn_over(&sid, 1, "first turn").await;
+    assert_eq!(r.configured(&sid, "accept_edits"), 0);
+    r.yolo_on().await;
+    r.configure_over(&sid, "accept_edits").await;
+    let seq = r.seq(&sid);
+    r.c.say(&sid, "A7 配置之后 @say second-A7").await;
+    r.turn_over(&sid, 2, "after the configure").await;
+    assert!(r.said(&sid, seq, "second-A7") > 0, "the next turn ran");
 }
 
 /// 1. A hello turn is stored as steve.v1, with its usage and cost.
@@ -811,11 +953,16 @@ async fn a_cancel_mid_turn_ends_it() {
     assert!(r.said(&sid, seq, &pong) > 0);
 }
 
-/// 5. The Bot's model and effort reach the harness: the open carries them and claude answers with
-/// that model. (A change at idle for an open Node session has no trigger on the Hub yet.)
+/// 5. A change at idle applies: the permission mode switched at idle (YOLO on: `default` becomes
+/// `acceptEdits`) is configured on the Node, and the next turn writes a file with no card. The
+/// Bot's model and effort reach the harness with the open (claude answers with that model).
+///
+/// TODO(model/effort at idle): no Hub trigger sends a model or effort change to an open Node session
+/// yet (`RoutedRuntime` configures only from `set_mode`); assert it here once the step that adds
+/// the Hub trigger lands.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "real claude: costs model calls"]
-async fn the_bots_model_and_effort_reach_the_harness() {
+async fn a_change_at_idle_applies_and_the_bots_model_reaches_the_harness() {
     let r = Real::start().await;
     let pong = token("MODEL");
     let sid = r
@@ -834,12 +981,43 @@ async fn the_bots_model_and_effort_reach_the_harness() {
     eprintln!("case 5: open {open}");
     assert!(open.contains(&model()), "the open carries the model");
     assert!(open.contains(&effort()), "the open carries the effort");
+    assert!(
+        open.contains("\"ask\""),
+        "opened asking for every permission"
+    );
     let models = transcript_models(&cwd(&r, &sid).display().to_string());
     eprintln!("case 5: transcript models {models:?}");
     assert!(
         models.iter().any(|m| m.contains(&model())),
         "claude answered with {}: {models:?}",
         model()
+    );
+
+    // at idle: the mode change goes to the Node now, not with a later open
+    r.yolo_on().await;
+    r.configure_over(&sid, "accept_edits").await;
+    let opens = r.h.count(
+        "SELECT COUNT(*) FROM node_commands WHERE method='open_session'",
+        &[],
+    );
+    assert_eq!(opens, 1, "configured in place, not reopened");
+    let mark = token("A7EDIT");
+    r.c.say(
+        &sid,
+        &format!(
+            "Use the Write tool to create the file a7-edit-5.txt in the current directory with \
+             exactly this content: {mark}\nThen reply DONE. Use no other tool."
+        ),
+    )
+    .await;
+    r.turn_over(&sid, 2, "edit under acceptEdits").await;
+    assert_eq!(r.cards(&sid), 0, "acceptEdits: the edit asked nothing");
+    assert_eq!(
+        std::fs::read_to_string(cwd(&r, &sid).join("a7-edit-5.txt"))
+            .unwrap_or_default()
+            .trim(),
+        mark,
+        "the edit ran"
     );
 }
 
