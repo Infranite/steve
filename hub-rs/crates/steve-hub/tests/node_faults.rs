@@ -190,18 +190,23 @@ impl EventSink for Gate {
 
 // ── Steve's tools, counted ──
 
+fn update_catalog() -> Vec<ToolDescriptor> {
+    vec![ToolDescriptor {
+        name: "steve_update".into(),
+        description: "Update the item.".into(),
+        input_schema: serde_json::json!({"type": "object"}),
+        read_only: false,
+    }]
+}
+
+/// Answers every call; counts how many times it ran.
 #[derive(Default)]
 struct Counted(AtomicUsize);
 
 #[async_trait]
 impl Service for Counted {
     fn catalog(&self) -> Vec<ToolDescriptor> {
-        vec![ToolDescriptor {
-            name: "steve_update".into(),
-            description: "Update the item.".into(),
-            input_schema: serde_json::json!({"type": "object"}),
-            read_only: false,
-        }]
+        update_catalog()
     }
     async fn call(
         &self,
@@ -211,6 +216,134 @@ impl Service for Counted {
     ) -> Result<String, String> {
         self.0.fetch_add(1, Ordering::SeqCst);
         Ok("Steve updated the item.".into())
+    }
+}
+
+/// Starts every call (counted) and never finishes it: a call in flight when the Hub goes away.
+#[derive(Default)]
+struct Stuck(AtomicUsize);
+
+#[async_trait]
+impl Service for Stuck {
+    fn catalog(&self) -> Vec<ToolDescriptor> {
+        update_catalog()
+    }
+    async fn call(
+        &self,
+        _: steve_store::Session,
+        _: &str,
+        _: serde_json::Value,
+    ) -> Result<String, String> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        std::future::pending().await
+    }
+}
+
+/// The Hub's tool host as the Node reaches it. The ledger ([`NodeTools`]) runs on a runtime of its
+/// own, so [`ToolHost::crash`] ends it mid-call the way the Hub process dies and opens it again on
+/// the same file; every [`ToolCall`] the Node sends is kept, so a case can send the very same one
+/// (same ToolKey) again.
+struct ToolHost {
+    store: Store,
+    home: PathBuf,
+    service: Arc<dyn Service>,
+    hub: Mutex<Option<(Arc<NodeTools>, tokio::runtime::Runtime)>>,
+    sent: Mutex<Vec<ToolCall>>,
+}
+
+impl ToolHost {
+    async fn open(store: Store, home: PathBuf, service: Arc<dyn Service>) -> Arc<ToolHost> {
+        let host = Arc::new(ToolHost {
+            store,
+            home,
+            service,
+            hub: Mutex::new(None),
+            sent: Mutex::new(vec![]),
+        });
+        host.start().await;
+        host
+    }
+
+    /// Opens the ledger (marking calls left running as unknown) once the last owner let it go.
+    async fn start(&self) {
+        let t0 = Instant::now();
+        let tools = loop {
+            match NodeTools::open(self.store.clone(), NodeId::new(NODE).unwrap(), &self.home) {
+                Ok(t) => break t,
+                Err(e) if e.code == ErrorCode::Busy && t0.elapsed() < Duration::from_secs(20) => {
+                    tokio::time::sleep(Duration::from_millis(20)).await
+                }
+                Err(e) => panic!("open the tool ledger: {e:?}"),
+            }
+        };
+        tools.install(self.service.clone()).unwrap();
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        *self.hub.lock().unwrap() = Some((tools, rt));
+    }
+
+    /// The Hub process dies (its calls in flight with it) and starts again on the same ledger.
+    async fn crash(&self) {
+        let (tools, rt) = self.hub.lock().unwrap().take().unwrap();
+        let old = Arc::downgrade(&tools);
+        drop(tools);
+        rt.shutdown_background();
+        until("the old tool host gone", || old.upgrade().is_none()).await;
+        self.start().await;
+    }
+
+    /// The `ToolCall`s the Node sent, in order.
+    fn sent(&self) -> Vec<ToolCall> {
+        self.sent.lock().unwrap().clone()
+    }
+
+    async fn on_hub<T: Send + 'static, F>(
+        &self,
+        f: impl FnOnce(Arc<NodeTools>) -> F,
+    ) -> ApiResult<T>
+    where
+        F: std::future::Future<Output = ApiResult<T>> + Send + 'static,
+    {
+        let (tools, handle) = match &*self.hub.lock().unwrap() {
+            Some((t, rt)) => (t.clone(), rt.handle().clone()),
+            None => return Err(ApiError::new(ErrorCode::Offline, "the Hub is down")),
+        };
+        handle
+            .spawn(f(tools))
+            .await
+            .unwrap_or_else(|_| Err(ApiError::new(ErrorCode::Offline, "the Hub went down")))
+    }
+}
+
+impl Drop for ToolHost {
+    fn drop(&mut self) {
+        // the test's runtime is async: let the Hub's go without blocking on it
+        if let Some((_, rt)) = self.hub.lock().unwrap().take() {
+            rt.shutdown_background();
+        }
+    }
+}
+
+#[async_trait]
+impl HubTools for ToolHost {
+    async fn catalog(&self, execution: ExecutionRef) -> ApiResult<Catalog> {
+        self.on_hub(|t| async move { t.catalog(execution).await })
+            .await
+    }
+    async fn call(&self, q: ToolCall) -> ApiResult<ToolResult> {
+        self.sent.lock().unwrap().push(q.clone());
+        self.on_hub(|t| async move { t.call(q).await }).await
+    }
+    async fn call_status(&self, key: ToolKey) -> ApiResult<ToolResult> {
+        self.on_hub(|t| async move { t.call_status(key).await })
+            .await
+    }
+    async fn cancel_call(&self, key: ToolKey) -> ApiResult<ToolResult> {
+        self.on_hub(|t| async move { t.cancel_call(key).await })
+            .await
     }
 }
 
@@ -224,7 +357,7 @@ struct Rig {
     gate: Arc<Gate>,
     rt: Arc<NodeRuntime>,
     ends: Arc<Ends>,
-    tools: Mutex<Option<Arc<NodeTools>>>,
+    tools: Mutex<Option<Arc<ToolHost>>>,
 }
 
 fn adapter(root: &Path) -> PathBuf {
@@ -347,15 +480,17 @@ impl Rig {
         until("reconciled", || self.rt.is_reconciled()).await;
     }
 
-    /// Steve's tools for the Node's harnesses, answered by a counting service.
-    async fn with_tools(&mut self) -> Arc<Counted> {
-        let tools =
-            NodeTools::open(self.store.clone(), NodeId::new(NODE).unwrap(), &self.home()).unwrap();
-        let service = Arc::new(Counted::default());
-        tools.install(service.clone()).unwrap();
-        *self.tools.lock().unwrap() = Some(tools.clone());
-        self.node.n().unwrap().connect_tools(tools).await.unwrap();
-        service
+    /// Steve's tools for the Node's harnesses, answered by `service`.
+    async fn with_tools(&mut self, service: Arc<dyn Service>) -> Arc<ToolHost> {
+        let host = ToolHost::open(self.store.clone(), self.home(), service).await;
+        *self.tools.lock().unwrap() = Some(host.clone());
+        self.node
+            .n()
+            .unwrap()
+            .connect_tools(host.clone())
+            .await
+            .unwrap();
+        host
     }
 
     /// `start_turn` commands the Node's journal accepted.
@@ -707,10 +842,8 @@ async fn a_node_restarted_before_its_ack_sends_again_and_nothing_is_stored_twice
 
 // ── Steve's tools ──
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_tool_call_runs_once_through_a_node_restart() {
-    let mut r = Rig::new().await;
-    let service = r.with_tools().await;
+/// A turn that may use Steve's tools, its agent waiting; the tool endpoint and token it was given.
+async fn tool_turn(r: &Rig) -> (String, String) {
     let mut policy = build::policy();
     policy.tools = GrantId::new("hub").unwrap();
     r.bind_with(policy);
@@ -731,25 +864,108 @@ async fn a_tool_call_runs_once_through_a_node_restart() {
         .strip_prefix("Bearer ")
         .unwrap()
         .to_string();
-    let (_, called) = mcp(
-        &url,
-        &token,
-        serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
-            "params": {"name": "steve_update", "arguments": {"now": "x"}}}),
-    )
-    .await;
+    (url, token)
+}
+
+fn update_call() -> serde_json::Value {
+    serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "steve_update", "arguments": {"now": "x"}}})
+}
+
+/// The Node, then the Hub, restart under a turn; the attempt is unknown and never run again.
+async fn restart_both(r: &mut Rig, host: &ToolHost) {
+    r.close_node().await;
+    host.crash().await;
+    r.open_node().await;
+    r.restart_hub().await;
+    until("unknown", || r.attempts() == ["unknown"]).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_tool_call_runs_once_through_a_node_restart() {
+    let mut r = Rig::new().await;
+    let service = Arc::new(Counted::default());
+    let host = r.with_tools(service.clone()).await;
+    let (url, token) = tool_turn(&r).await;
+    let (_, called) = mcp(&url, &token, update_call()).await;
     assert_eq!(
         called["result"]["content"][0]["text"], "Steve updated the item.",
         "{called}"
     );
     assert_eq!(service.0.load(Ordering::SeqCst), 1);
-    // the Node and the Hub restart; the attempt is unknown and its call is not made again
-    r.close_node().await;
-    r.open_node().await;
-    r.restart_hub().await;
-    until("unknown", || r.attempts() == ["unknown"]).await;
+    let sent = host.sent();
+    assert_eq!(sent.len(), 1, "the Node sent the call once");
+    let q = sent[0].clone();
+    let done = host.call(q.clone()).await.unwrap();
+    assert!(
+        matches!(&done, ToolResult::Completed { parts, .. }
+            if parts == &[Part::Text { text: "Steve updated the item.".into() }]),
+        "the same ToolKey again is the saved result: {done:?}"
+    );
+    assert_eq!(service.0.load(Ordering::SeqCst), 1, "not run again");
+
+    restart_both(&mut r, &host).await;
+    // the same ToolKey after both restarts (a reopened ledger): still the saved result
+    assert_eq!(host.call(q.clone()).await.unwrap(), done);
+    assert_eq!(host.call_status(q.key()).await.unwrap(), done);
+    // the harness sends its request again: the session that issued the token is gone with the
+    // attempt, so nothing runs (the Node mints a new CallId per request, never the JSON-RPC id)
+    let before = host.sent().len();
+    let (status, again) = mcp(&url, &token, update_call()).await;
+    assert_eq!(status, 401, "{again}");
+    assert_eq!(
+        host.sent().len(),
+        before,
+        "the harness resend never reached the Hub"
+    );
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(service.0.load(Ordering::SeqCst), 1);
+    assert_eq!(r.prompts("tool"), 1);
+    r.stored_once().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_tool_call_in_flight_when_both_restart_is_unknown_never_rerun() {
+    let mut r = Rig::new().await;
+    let service = Arc::new(Stuck::default());
+    let host = r.with_tools(service.clone()).await;
+    let (url, token) = tool_turn(&r).await;
+    let waiting = tokio::spawn({
+        let (url, token) = (url.clone(), token.clone());
+        async move { mcp(&url, &token, update_call()).await }
+    });
+    until("the call running", || service.0.load(Ordering::SeqCst) == 1).await;
+    let q = host.sent()[0].clone();
+    assert!(matches!(
+        host.call(q.clone()).await.unwrap(),
+        ToolResult::Running { .. }
+    ));
+
+    restart_both(&mut r, &host).await;
+    let (_, lost) = waiting.await.unwrap();
+    assert_eq!(
+        lost["result"]["isError"], true,
+        "the harness hears an error: {lost}"
+    );
+    let unknown = host.call(q.clone()).await.unwrap();
+    assert!(
+        matches!(unknown, ToolResult::Unknown { .. }),
+        "running when the Hub died: unknown, {unknown:?}"
+    );
+    assert!(matches!(
+        host.call_status(q.key()).await.unwrap(),
+        ToolResult::Unknown { .. }
+    ));
+    let before = host.sent().len();
+    let (status, again) = mcp(&url, &token, update_call()).await;
+    assert_eq!(status, 401, "{again}");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(service.0.load(Ordering::SeqCst), 1, "never invoked again");
+    assert_eq!(
+        host.sent().len(),
+        before,
+        "the harness resend never reached the Hub"
+    );
     assert_eq!(r.prompts("tool"), 1);
     r.stored_once().await;
 }
