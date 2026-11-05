@@ -650,8 +650,7 @@ impl Actor {
                         Ok(v) => {
                             row.view = v.clone();
                             row.acp_id = v.resume.as_ref().map(ToString::to_string);
-                            row.view.revision = Revision::new(format!("r{}", t.bump("revision")?))
-                                .map_err(internal)?;
+                            row.view.revision = Revision::new(t.revision()?).map_err(internal)?;
                             row.view.phase = SessionPhase::Ready;
                             done_state(OperationResult::Session(row.view.clone()))
                         }
@@ -737,8 +736,7 @@ impl Actor {
                             row.view.effective = l.view.effective.clone();
                             row.view.effective_permissions = l.view.effective_permissions;
                             row.view.resume = l.view.resume.clone();
-                            row.view.revision = Revision::new(format!("r{}", t.bump("revision")?))
-                                .map_err(internal)?;
+                            row.view.revision = Revision::new(t.revision()?).map_err(internal)?;
                             t.put_session(&row)
                         });
                         self.live = Some(l.into());

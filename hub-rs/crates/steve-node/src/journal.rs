@@ -48,8 +48,19 @@ CREATE TABLE IF NOT EXISTS answers (
   op TEXT PRIMARY KEY, permission TEXT NOT NULL, resolution TEXT NOT NULL);
 ";
 
+/// The journal's schema version (`PRAGMA user_version`). 3: the journal has its own identity.
+const VERSION: i64 = 3;
+
 pub(crate) struct Journal {
     db: Mutex<Connection>,
+    /// This journal's identity, fixed when it was made: a new journal in the same home (deleted or
+    /// recreated) is another one, so its streams and event ids never repeat what the Hub holds.
+    id: String,
+}
+
+/// The printed form of a journal id (the random value kept in meta).
+fn journal_tag(v: i64) -> String {
+    format!("{:016x}", v as u64)
 }
 
 /// One transaction on the journal.
@@ -125,14 +136,17 @@ impl Journal {
         let version: i64 = c
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .map_err(internal)?;
-        if version > 2 {
+        if version > VERSION {
             return Err(ApiError::new(
                 ErrorCode::Unsupported,
                 "journal needs a newer Node",
             ));
         }
-        let j = Journal { db: Mutex::new(c) };
-        let incarnation =
+        let mut j = Journal {
+            db: Mutex::new(c),
+            id: String::new(),
+        };
+        let (incarnation, id) =
             j.tx(|t| {
                 // Schema and recovery are one commit. A failed migration must not consume an
                 // incarnation or change any receipt. Version zero includes the original journal.
@@ -145,14 +159,29 @@ impl Journal {
                         .execute_batch("ALTER TABLE procs ADD COLUMN started INTEGER")
                         .map_err(internal)?;
                 }
+                // v3: the journal's identity. Streams made before it keep their epoch ('e1'), so
+                // the positions the Hub holds for them stay valid.
                 t.c()
-                    .pragma_update(None, "user_version", 2)
+                    .execute(
+                        "INSERT OR IGNORE INTO meta (key, value) VALUES ('journal_id', random())",
+                        [],
+                    )
+                    .map_err(internal)?;
+                let id = t.journal_id()?;
+                t.c()
+                    .pragma_update(None, "user_version", VERSION)
                     .map_err(internal)?;
                 let inc = t.bump("incarnation")?;
                 t.mark_unknown()?;
-                Ok(inc)
+                Ok((inc, id))
             })?;
+        j.id = id;
         Ok((j, incarnation))
+    }
+
+    /// This journal's identity (part of every epoch and event id it makes).
+    pub fn id(&self) -> &str {
+        &self.id
     }
 
     /// One write transaction (IMMEDIATE: it holds the write lock from the start).
@@ -198,6 +227,23 @@ impl Tx<'_> {
             .query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| r.get(0))
             .map_err(internal)?;
         Ok(v as u64)
+    }
+
+    /// The next session or workspace revision. It names this journal: a journal made again in the
+    /// same home never hands out a revision the Hub holds from the old one.
+    pub fn revision(&self) -> ApiResult<String> {
+        let n = self.bump("revision")?;
+        Ok(format!("r{}_{n}", self.journal_id()?))
+    }
+
+    fn journal_id(&self) -> ApiResult<String> {
+        let v: i64 = self
+            .c()
+            .query_row("SELECT value FROM meta WHERE key = 'journal_id'", [], |r| {
+                r.get(0)
+            })
+            .map_err(internal)?;
+        Ok(journal_tag(v))
     }
 
     pub(crate) fn mark_unknown(&self) -> ApiResult<()> {
@@ -447,13 +493,15 @@ impl Tx<'_> {
         let (epoch, produced) = match row {
             Some((e, p)) => (e, p as u64),
             None => {
+                // a new stream belongs to this journal: another journal never reuses its positions
+                let epoch = format!("j{}", self.journal_id()?);
                 self.c()
                     .execute(
-                        "INSERT INTO streams (stream, epoch, produced, acknowledged) VALUES (?1, 'e1', 0, 0)",
-                        [stream.as_str()],
+                        "INSERT INTO streams (stream, epoch, produced, acknowledged) VALUES (?1, ?2, 0, 0)",
+                        params![stream.as_str(), epoch],
                     )
                     .map_err(internal)?;
-                ("e1".into(), 0)
+                (epoch, 0)
             }
         };
         let seq = produced + 1;

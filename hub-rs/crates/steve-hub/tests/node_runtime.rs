@@ -2596,6 +2596,64 @@ async fn an_attempt_the_node_has_no_record_of_ends_on_stop() {
     assert!(h.rt.cancel(S).is_ok_and(|x| !x), "nothing left to stop");
 }
 
+/// N1-3: the Node's journal is made again mid-session (its home deleted). What the Hub sent is no
+/// record there, so reconciling makes the running attempt unknown and never sends it again; the
+/// new journal's events on the same session stream come in a new epoch with new ids, so the Hub
+/// takes them beside the old ones without a conflict and the Node's delivery drains.
+#[tokio::test]
+async fn a_new_node_journal_mid_session_is_taken_in_without_a_conflict() {
+    let mut h = hub();
+    h.bind();
+    h.one_turn("hello").await;
+    h.rt.prompt(S, "second", "user", &[]).unwrap();
+    until("running", || {
+        h.q::<i64>("SELECT COUNT(*) FROM runtime_attempts WHERE state='running'") == 1
+    })
+    .await;
+    let old_epochs: Vec<String> = h
+        .store
+        .reader(|c| {
+            let mut st = c.prepare("SELECT DISTINCT epoch FROM node_event_inbox")?;
+            let v = st
+                .query_map([], |r| r.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok::<_, StoreError>(v)
+        })
+        .unwrap();
+    assert_eq!(old_epochs, ["e1"]);
+
+    h.node.reset_journal();
+    h.restart_hub().await;
+    assert_eq!(
+        h.q::<String>(
+            "SELECT state FROM runtime_attempts ORDER BY created DESC, rowid DESC LIMIT 1"
+        ),
+        "unknown",
+        "the Node has no record of the running attempt"
+    );
+    assert!(h.rt.is_busy(S));
+
+    // the new journal speaks on the same session stream again, from seq 1
+    let failures = h.node.delivery_failures();
+    build::ready(&h.node, S).await;
+    until("delivered", || h.node.unacked() == 0).await;
+    assert_eq!(h.node.delivery_failures(), failures, "no batch was refused");
+    let stream = derived_id("session", S);
+    let fresh: i64 = h.q(&format!(
+        "SELECT COUNT(*) FROM node_event_inbox WHERE stream='{stream}' AND epoch='j1' AND seq=1"
+    ));
+    assert_eq!(fresh, 1, "the new epoch is taken in");
+    let old: i64 = h.q(&format!(
+        "SELECT COUNT(*) FROM node_event_inbox WHERE stream='{stream}' AND epoch='e1' AND seq=1"
+    ));
+    assert_eq!(old, 1, "beside the old one");
+    assert_eq!(
+        h.count("start_turn"),
+        2,
+        "the unknown attempt is never sent again"
+    );
+}
+
 /// Issue: an AttemptStarted applied after reconciliation made the attempt unknown leaves it
 /// unknown (Stop still abandons it).
 #[tokio::test]
@@ -2779,6 +2837,68 @@ async fn an_attempt_unknown_before_it_started_keeps_the_session_running() {
     assert_eq!(h.session_status(), "running");
     // what the Node said before its restart arrives late (its AttemptStarted among it): it
     // changes nothing, and the stream goes on
+
+/// N1-3 review: a recreated journal hands out revisions the old one also had. A `Released` of the
+/// new journal from before the last open, delivered late, says nothing of that open, even when
+/// the old journal holds a view with the open's revision: the session open now does not go.
+#[tokio::test]
+async fn a_late_release_of_a_new_journal_does_not_let_a_reopened_session_go() {
+    let mut h = hub();
+    h.bind();
+    // the old journal: a turn, a release, a reopen (its views stay in the Hub's inbox)
+    h.one_turn("hello").await;
+    assert!(h.rt.release(S).unwrap());
+    until("released", || h.phase() == "released").await;
+    let reopen = |h: &H, text: &str| {
+        h.rt.prompt(S, text, "user", &[]).unwrap();
+        h.store
+            .transaction::<_, StoreError>(|tx| {
+                tx.execute("DELETE FROM queued", [])?;
+                Ok(())
+            })
+            .unwrap();
+    };
+    reopen(&h, "x");
+    until("ready", || h.phase() == "ready").await;
+    let old: Vec<String> = h
+        .store
+        .reader(|c| {
+            let mut st = c.prepare(
+                "SELECT json_extract(payload,'$.body.view.revision') FROM node_event_inbox WHERE json_extract(payload,'$.body.type')='session_changed'",
+            )?;
+            let v = st
+                .query_map([], |r| r.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok::<_, StoreError>(v)
+        })
+        .unwrap();
+
+    // the same again on a new journal, its stream late from the release on
+    h.node.reset_journal();
+    h.restart_hub().await;
+    assert_eq!(h.phase(), "released");
+    // the new journal has the workspace again (the Hub making it again is not this case)
+    h.node
+        .prepare_workspace(build::cmd(
+            "op_prep_again",
+            build::prepare(&format!("item:{S}")),
+        ))
+        .await
+        .unwrap();
+    h.one_turn("again").await;
+    *h.seen.stash.lock().unwrap() = Some(vec![]);
+    assert!(h.rt.release(S).unwrap());
+    until("released", || h.phase() == "released").await;
+    reopen(&h, "y");
+    until("ready", || h.phase() == "ready").await;
+    let opened: String = h.q(
+        "SELECT json_extract(receipt,'$.payload.state.result.revision') FROM node_commands WHERE method='open_session' ORDER BY created DESC, rowid DESC LIMIT 1",
+    );
+    assert!(
+        !old.contains(&opened),
+        "a new journal's revision {opened} is none of the old journal's {old:?}"
+    );
+    let late = h.seen.stash.lock().unwrap().take().unwrap();
     assert!(!late.is_empty());
     for b in late {
         h.seen.to.commit(b).await.unwrap();
@@ -2811,4 +2931,11 @@ async fn a_first_turn_is_starting_until_its_attempt_starts() {
         h.seen.to.commit(b).await.unwrap();
     }
     until("running", || h.session_status() == "running").await;
+
+    until("applied", || {
+        h.q::<i64>("SELECT COUNT(*) FROM node_streams WHERE durable > applied") == 0
+    })
+    .await;
+    assert_eq!(h.phase(), "ready", "the old view says nothing of this open");
+    assert_eq!(h.count("release_session"), 2);
 }

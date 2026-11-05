@@ -103,6 +103,9 @@ struct State {
     streams: BTreeMap<StreamId, Stream>,
     log: Vec<(&'static str, OperationId)>,
     next_event: u64,
+    /// Which journal this is (0: the first). A new journal numbers its streams in its own epoch
+    /// and its events with its own ids, as LocalNode's journal identity does.
+    journal: u64,
     capacity: Option<Capacity>,
     delivery_failures: u64,
     /// Refusals the test asked for, by method, used up in order.
@@ -217,6 +220,25 @@ impl FakeNode {
         for s in st.sessions.values_mut() {
             s.view.phase = SessionPhase::Released;
         }
+    }
+
+    /// As a Node whose home was deleted or made again: a new, empty journal. Nothing it accepted,
+    /// ran or kept is known any more (no event says so); streams start again in a new epoch and
+    /// event ids are new. The log and what the test scripted stay.
+    pub fn reset_journal(&self) {
+        let mut st = self.st();
+        let old = std::mem::take(&mut *st);
+        *st = State {
+            now: old.now,
+            journal: old.journal + 1,
+            log: old.log,
+            capacity: old.capacity,
+            delivery_failures: old.delivery_failures,
+            refusals: old.refusals,
+            refused: old.refused,
+            scripted: old.scripted,
+            ..Default::default()
+        };
     }
 
     /// Limit concurrent sessions and jobs (unlimited by default).
@@ -362,8 +384,16 @@ impl FakeNode {
         st.next_event += 1;
         let n = st.next_event;
         let at = Timestamp(st.now);
+        let journal = st.journal;
+        let event_id = match journal {
+            0 => format!("ev_{n}"),
+            j => format!("ev_j{j}_{n}"),
+        };
         let s = st.streams.entry(stream.clone()).or_insert_with(|| Stream {
-            epoch: id("e1"),
+            epoch: id(match journal {
+                0 => "e1".to_string(),
+                j => format!("j{j}"),
+            }),
             produced: 0,
             acknowledged: 0,
             kept: vec![],
@@ -371,7 +401,7 @@ impl FakeNode {
         s.produced += 1;
         let ev = NodeEvent {
             schema: crate::EVENT_SCHEMA,
-            id: id(format!("ev_{n}")),
+            id: id(event_id),
             at,
             cursor: Watermark {
                 stream,
@@ -613,8 +643,13 @@ impl FakeNode {
         st.counter
     }
 
+    /// A revision of this fake journal: a new journal never repeats one of an older journal.
     fn revision(st: &mut State) -> Revision {
-        id(format!("r{}", Self::next(st)))
+        let n = Self::next(st);
+        match st.journal {
+            0 => id(format!("r{n}")),
+            j => id(format!("r{j}_{n}")),
+        }
     }
 
     /// What this Node can enforce: no sandbox guarantee at all.
@@ -1421,6 +1456,13 @@ impl EventSink for RecordingSink {
             }
             seen.insert(k, e);
         }
+        // the ack covers the streams of this batch only, as the Hub's: an epoch of an older
+        // journal it still holds is none of this Node's business
+        let touched: BTreeSet<(StreamId, Epoch)> = batch
+            .events
+            .iter()
+            .map(|e| (e.cursor.stream.clone(), e.cursor.epoch.clone()))
+            .collect();
         for e in batch.events {
             let k = (
                 e.cursor.stream.clone(),
@@ -1432,6 +1474,9 @@ impl EventSink for RecordingSink {
         // contiguous frontier per (stream, epoch)
         let mut frontier: BTreeMap<(StreamId, Epoch), u64> = BTreeMap::new();
         for (s, ep, seq) in held.keys() {
+            if !touched.contains(&(s.clone(), ep.clone())) {
+                continue;
+            }
             let f = frontier.entry((s.clone(), ep.clone())).or_insert(0);
             if *seq == *f + 1 {
                 *f = *seq;
