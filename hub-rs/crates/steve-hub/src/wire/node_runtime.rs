@@ -948,7 +948,7 @@ impl NodeRuntime {
                 // it may be on its way or at the Node: a cancel now could reach the Node first and
                 // be refused for a target it does not know yet. The cancel goes once the Node is
                 // known to hold it (receipt_in); a send refused before acceptance settles it here
-                // (send_one); a refusal ends it anyway. Once it started on the Node (its stream
+                // (send_one) unless an earlier send was uncertain; a refusal ends it anyway. Once it started on the Node (its stream
                 // said so), the Node holds it and the cancel goes now
                 Some((st, true)) if st == "pending" && state == "planned" => return Ok(true),
                 _ => {}
@@ -1133,9 +1133,11 @@ impl NodeRuntime {
                 // not refused for good, or maybe accepted: the very same command again later
                 let uncertain = e.retry != RetryClass::SameOperation;
                 rt::retry_command_in(tx, &lease, now(), now() + 1_000, uncertain)?;
-                // a start_turn the user stopped meanwhile, now refused before acceptance: it
-                // provably never ran, so it ends here instead of going out again
+                // a start_turn the user stopped meanwhile, refused before acceptance every time
+                // it went: it provably never ran, so it ends here instead of going out again. One
+                // earlier uncertain send may still arrive: the cancel waits for the Node instead
                 if !uncertain
+                    && !lease.maybe_sent
                     && lease.method == "start_turn"
                     && let Some((attempt, session)) = cancelled_start_in(tx, &lease.operation)?
                 {
