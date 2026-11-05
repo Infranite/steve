@@ -1067,13 +1067,20 @@ impl Tx<'_> {
             Some(b) => b,
             None => self.db().main_bot()?,
         };
-        let (cwd, branch) = match item
+        /* a worktree its backend makes is only named here: made off the lock before the session opens */
+        let (cwd, branch, planned) = match item
             .cwd
             .as_deref()
             .filter(|c| !c.is_empty() && Path::new(c).exists())
         {
-            Some(c) => (c.to_string(), item.branch.clone()),
-            None => self.prepare_cwd(&item)?,
+            Some(c) => (c.to_string(), item.branch.clone(), false),
+            None => match self.planned_worktree(&item)? {
+                Some((wt, br)) => (wt, Some(br), true),
+                None => {
+                    let (c, b) = self.prepare_cwd(&item)?;
+                    (c, b, false)
+                }
+            },
         };
         self.db().item_patch(item_id, patch![cwd: cwd.as_str(), branch: branch.as_deref(), stage: "执行", status: "run", now: "正在开始"])?;
         let tok = token();
@@ -1095,6 +1102,13 @@ impl Tx<'_> {
         })?;
         self.st.tokens.insert(s.id.clone(), tok);
         self.rt().created(&s.id, after.as_deref());
+        if planned && !self.rt().makes_workspace(&s.id) {
+            /* not bound where the worktree is made after all: made here, as without it */
+            if let Err(e) = self.prepare_cwd(&item) {
+                self.db().session_patch(&s.id, patch![status: "ended"])?;
+                return Err(e);
+            }
+        }
         self.db().timeline_add(
             item_id,
             "steve",
@@ -1896,6 +1910,10 @@ impl Tx<'_> {
         if !shed.is_empty() {
             self.c.purge_soon();
         }
+        /* a worktree its backend made is given back by it (off the lock); what it did is told later */
+        if self.tidy_by_backend(&i, &p, branch, cwd)? {
+            return Ok(true);
+        }
         /* an archived item gives back a clean worktree even when its branch is not in main: the branch
          * stays, and the worktree can be made again from it */
         let (wt, br) = git::tidy_worktree(
@@ -1937,6 +1955,7 @@ impl Tx<'_> {
             && i.cwd
                 .as_deref()
                 .is_some_and(|c| !c.is_empty() && !Path::new(c).exists())
+            && !self.backend_remakes(item_id)?
             && let Err(e) = self.prepare_cwd(&i)
         {
             tracing::error!("worktree {e}");

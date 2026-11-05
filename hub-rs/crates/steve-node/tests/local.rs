@@ -1769,6 +1769,7 @@ async fn worktree_git_is_registered_before_effects_and_reaped_after() {
             },
             branch: "topic".into(),
             base: None,
+            at: None,
         },
     };
     n.prepare_workspace(now_cmd("git_rejected", prepare.clone()))
@@ -2383,4 +2384,189 @@ async fn acknowledged_bodies_go_but_an_unknown_prepare_keeps_its_own_for_recover
     all_acknowledged(&n).await;
     assert!(spec_ops(&db).is_empty(), "{:?}", spec_ops(&db));
     n.shutdown().await;
+}
+
+fn git(dir: &Path, args: &[&str]) -> String {
+    let o = std::process::Command::new("git")
+        .current_dir(dir)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "git {args:?}: {o:?}");
+    String::from_utf8_lossy(&o.stdout).trim().to_string()
+}
+
+fn worktree_at(resource: &str, branch: &str, rel: &str) -> Prepare {
+    Prepare {
+        resource: resource.into(),
+        kind: PrepareKind::Worktree {
+            repository: RootPath {
+                root: RootId::new("work").unwrap(),
+                rel: RelPath::new("repo").unwrap(),
+            },
+            branch: branch.into(),
+            base: None,
+            at: Some(RootPath {
+                root: RootId::new("work").unwrap(),
+                rel: RelPath::new(rel).unwrap(),
+            }),
+        },
+    }
+}
+
+fn view_of(s: &Observed) -> WorkspaceView {
+    match s {
+        Observed::Finished {
+            result: Some(OperationResult::Workspace(v)),
+            ..
+        } => v.clone(),
+        other => panic!("no workspace: {other:?}"),
+    }
+}
+
+/// N0e-E11a: an item's worktree goes where the Hub names it, below the disk floor only when its
+/// branch is there already, is adopted only when it is that worktree, and comes back after a tidy.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_worktree_goes_where_it_is_named_above_the_disk_floor_and_comes_back_after_a_tidy() {
+    let t = T::new(&[]);
+    let repo = t.root.join("work/repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-q", "-b", "main"]);
+    git(&repo, &["config", "user.email", "t@t"]);
+    git(&repo, &["config", "user.name", "t"]);
+    git(&repo, &["config", "commit.gpgsign", "false"]);
+    std::fs::write(repo.join("a.txt"), "a\n").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "a"]);
+    std::fs::create_dir_all(t.root.join("work/wt")).unwrap();
+    let free = Arc::new(AtomicU64::new(0));
+    let mut cfg = t.config();
+    cfg.storage.worktree_floor = 1 << 30;
+    cfg.storage.worktree_free = Some({
+        let free = free.clone();
+        Arc::new(move || free.load(Ordering::SeqCst))
+    });
+    let n = LocalNode::open(cfg).unwrap();
+    n.connect(t.sink.clone(), None);
+    let wt = t.root.join("work/wt/ST-1");
+
+    // a new branch below the floor: refused as out of room, nothing made
+    n.prepare_workspace(now_cmd(
+        "op_w1",
+        worktree_at("item:ST-1", "steve/st-1", "wt/ST-1"),
+    ))
+    .await
+    .unwrap();
+    match finished(&n, "op_w1").await {
+        Observed::Finished {
+            outcome: Outcome::Failed,
+            error: Some(e),
+            ..
+        } => assert_eq!(e.code, ErrorCode::Exhausted, "{e:?}"),
+        other => panic!("{other:?}"),
+    }
+    assert!(!wt.exists());
+
+    // room again: made right there, on its branch
+    free.store(2 << 30, Ordering::SeqCst);
+    n.prepare_workspace(now_cmd(
+        "op_w2",
+        worktree_at("item:ST-1", "steve/st-1", "wt/ST-1"),
+    ))
+    .await
+    .unwrap();
+    let v = view_of(&finished(&n, "op_w2").await);
+    assert_eq!(v.branch.as_deref(), Some("steve/st-1"));
+    assert_eq!(
+        git(&wt, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        "steve/st-1"
+    );
+    assert_eq!(
+        n.local_dir(&v.workspace).unwrap().path,
+        wt.canonicalize().unwrap()
+    );
+
+    // a stale tidy is refused; the current one removes it and keeps the branch
+    let stale = Tidy {
+        workspace: v.workspace.clone(),
+        expected: Revision::new("r_old").unwrap(),
+        keep_branch: true,
+    };
+    let e = n.tidy_workspace(now_cmd("op_t0", stale)).await.unwrap_err();
+    assert_eq!(e.code, ErrorCode::Conflict);
+    assert!(wt.exists());
+    let tidy = Tidy {
+        workspace: v.workspace.clone(),
+        expected: v.revision.clone(),
+        keep_branch: true,
+    };
+    n.tidy_workspace(now_cmd("op_t1", tidy)).await.unwrap();
+    assert!(ok(&finished(&n, "op_t1").await));
+    assert!(!wt.exists());
+    git(&repo, &["rev-parse", "--verify", "steve/st-1"]);
+
+    // its branch is there: it comes back below the floor too (its sources, megabytes)
+    free.store(0, Ordering::SeqCst);
+    n.prepare_workspace(now_cmd(
+        "op_w3",
+        worktree_at("item:ST-1", "steve/st-1", "wt/ST-1"),
+    ))
+    .await
+    .unwrap();
+    assert!(ok(&finished(&n, "op_w3").await));
+    assert_eq!(
+        git(&wt, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        "steve/st-1"
+    );
+    free.store(2 << 30, Ordering::SeqCst);
+
+    // one made before (by git, as the Hub did) is adopted; a plain directory is never replaced
+    git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "steve/st-2",
+            &t.root.join("work/wt/ST-2").to_string_lossy(),
+        ],
+    );
+    n.prepare_workspace(now_cmd(
+        "op_w4",
+        worktree_at("item:ST-2", "steve/st-2", "wt/ST-2"),
+    ))
+    .await
+    .unwrap();
+    assert!(ok(&finished(&n, "op_w4").await));
+    std::fs::create_dir_all(t.root.join("work/wt/ST-3")).unwrap();
+    std::fs::write(t.root.join("work/wt/ST-3/mine.txt"), "x").unwrap();
+    n.prepare_workspace(now_cmd(
+        "op_w5",
+        worktree_at("item:ST-3", "steve/st-3", "wt/ST-3"),
+    ))
+    .await
+    .unwrap();
+    assert!(!ok(&finished(&n, "op_w5").await));
+    assert!(t.root.join("work/wt/ST-3/mine.txt").exists());
+
+    // never outside the roots: a symlink out, a missing parent, the root itself
+    std::os::unix::fs::symlink(t.root.join("elsewhere"), t.root.join("work/wt/out")).unwrap();
+    std::fs::create_dir_all(t.root.join("elsewhere")).unwrap();
+    for (op, rel) in [
+        ("op_x1", "wt/out"),
+        ("op_x2", "nowhere/ST-4"),
+        ("op_x3", ""),
+    ] {
+        let e = n
+            .prepare_workspace(now_cmd(
+                op,
+                worktree_at(&format!("item:{op}"), "steve/x", rel),
+            ))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(e.code, ErrorCode::Denied | ErrorCode::Invalid),
+            "{rel}: {e:?}"
+        );
+    }
 }

@@ -353,6 +353,7 @@ async fn a_readonly_root_refuses_prepare_exec_and_git_apply() {
             repository: at("notes", "repo"),
             branch: "steve/b".into(),
             base: None,
+            at: None,
         },
     };
     assert_eq!(

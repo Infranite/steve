@@ -40,12 +40,14 @@ mod heads;
 mod ledger;
 mod perm;
 mod recover;
+mod workspace;
 
 pub use config::{ConfigChange, Configured};
 pub use heads::{
     CaughtUp, NodeSnapshot, Pull, Receive, ReplayCheck, catch_up_streams, read_snapshot,
 };
 pub use ledger::LedgerEntry;
+pub use workspace::WorkspaceFact;
 
 /// Retries of a turn after a passing failure (gateway 5xx) with no tool run, and their waits.
 const RETRY_DELAYS_MS: [i64; 2] = [20_000, 60_000];
@@ -134,6 +136,11 @@ pub trait NodeDomain: Send + Sync + 'static {
     fn permission_asked(&self, session: &str, decision: &str, request: &PermissionRequest) {
         let _ = (session, decision, request);
     }
+    /// A workspace prepare or tidy is over (committed). Must return promptly and never call back
+    /// into the coordinator synchronously.
+    fn workspace_changed(&self, fact: WorkspaceFact) {
+        let _ = fact;
+    }
 }
 
 /// How a session runs on its Node (fixed when it is bound).
@@ -183,6 +190,8 @@ pub struct NodeRuntime {
     /// `ended_later` only once it committed, so the apply worker never sees it earlier (it would
     /// book a row the store does not show finished yet) and never sees one rolled back.
     staged: Mutex<(Vec<After>, Vec<End>)>,
+    /// The workspace facts the open transaction found, told once it committed.
+    staged_workspace: Mutex<Vec<WorkspaceFact>>,
     /// Held across [`Self::tx`]'s transaction and the move of what it settled, so a transaction
     /// that starts after another committed finds that one's settles already queued (turn ends are
     /// told in commit order).
@@ -311,6 +320,7 @@ impl NodeRuntime {
             ended_later: Mutex::new(vec![]),
             settled_later: Mutex::new(vec![]),
             staged: Mutex::new((vec![], vec![])),
+            staged_workspace: Mutex::new(vec![]),
             commit: Mutex::new(()),
             dirty: Mutex::new(HashSet::new()),
             stopped: Mutex::new(None),
@@ -467,14 +477,17 @@ impl NodeRuntime {
 
     fn tx<T>(&self, f: impl FnOnce(&Tx) -> Result<T, StoreError>) -> Result<T, StoreError> {
         // transactions are serial (one writer), so what is staged while one is open is its own
-        let _commit = self.commit.lock().unwrap();
-        let (out, (settled, ended)) = self.store.transaction(|tx| {
+        let commit = self.commit.lock().unwrap();
+        let (out, (settled, ended), facts) = self.store.transaction(|tx| {
             let take = || std::mem::take(&mut *self.staged.lock().unwrap());
+            let take_ws = || std::mem::take(&mut *self.staged_workspace.lock().unwrap());
             take();
+            take_ws();
             match f(tx) {
-                Ok(out) => Ok((out, take())),
+                Ok(out) => Ok((out, take(), take_ws())),
                 Err(e) => {
                     take();
+                    take_ws();
                     Err(e)
                 }
             }
@@ -484,6 +497,10 @@ impl NodeRuntime {
             self.settled_later.lock().unwrap().extend(settled);
             self.ended_later.lock().unwrap().extend(ended);
             self.wake_apply.notify_one();
+        }
+        drop(commit);
+        for f in facts {
+            self.domain.workspace_changed(f);
         }
         Ok(out)
     }
@@ -600,6 +617,12 @@ impl NodeRuntime {
         session: &str,
         dependency: Option<&str>,
     ) -> Result<(), StoreError> {
+        // a worktree it made that was tidied since, or that it could not make: made again first
+        let again = match dependency {
+            None => self.prepare_again_in(tx, session)?,
+            Some(_) => None,
+        };
+        let dependency = again.as_deref().or(dependency);
         let mut open = self.open_of(tx, session)?;
         self.fold_desired_in(tx, session, &mut open)?;
         open.resume = resume_of_in(tx, &self.node_id, session)?;
@@ -1584,6 +1607,13 @@ impl NodeRuntime {
                         self.opened_in(tx, &s, false, &e.safe_detail)?
                     }
                     "abandon" => self.abandon_failed_in(tx, &lease.operation, Some(e))?,
+                    "prepare_workspace" => {
+                        self.prepare_failed_in(tx, &lease.operation, Some(e), &e.safe_detail)?
+                    }
+                    "tidy_workspace" => {
+                        self.tidied_in(tx, &lease.operation, false, &e.safe_detail)?;
+                        None
+                    }
                     "resolve_permission" => {
                         self.answer_receipt_in(tx, &lease.operation, false, Some(e))?;
                         None
@@ -1741,6 +1771,12 @@ impl NodeRuntime {
             self.configure_receipt_in(tx, op, state, success, receipt)?;
         }
         match (method.as_str(), state) {
+            ("prepare_workspace", ReceiptState::Finished) => {
+                return self.prepared_in(tx, op, receipt, &detail);
+            }
+            ("tidy_workspace", ReceiptState::Finished) => {
+                self.tidied_in(tx, op, success, &detail)?;
+            }
             ("release_session", ReceiptState::Finished) => {
                 let s = command_session_in(tx, op)?;
                 self.released_in(tx, &s, op, success)?;
@@ -1947,7 +1983,14 @@ impl NodeRuntime {
                 },
                 now(),
             )?;
-            if self.plan_after_in(tx, s)? != Planned::Created {
+            // an item paused while its session was opening (its workspace being prepared, say)
+            // starts nothing: what is queued waits for it to continue
+            let planned = if workspace::item_paused_in(tx, s)? {
+                Planned::Empty
+            } else {
+                self.plan_after_in(tx, s)?
+            };
+            if planned != Planned::Created {
                 self.release_if_ended_in(tx, s)?;
             }
             return Ok(None);

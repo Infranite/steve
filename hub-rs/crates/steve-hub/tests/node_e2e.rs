@@ -976,3 +976,157 @@ async fn healthz_counts_a_new_session_left_on_the_legacy_runner() {
         "{before} -> {n}"
     );
 }
+
+fn git(dir: &std::path::Path, args: &[&str]) -> String {
+    let o = Command::new("git")
+        .current_dir(dir)
+        .args(args)
+        .output()
+        .expect("git");
+    assert!(o.status.success(), "git {args:?}: {o:?}");
+    String::from_utf8_lossy(&o.stdout).trim().to_string()
+}
+
+/// N0e-E11a: with the local Node on, a new item of a git project gets its worktree from the Node
+/// (made off the core's lock, where Steve keeps worktrees, on `steve/<id>`) and its agent works
+/// there; dropped, its clean worktree (and merged branch) is given back by the Node and the
+/// timeline says so.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_git_items_worktree_is_made_and_given_back_by_the_node() {
+    let h = Home::new();
+    let repo = h.dir.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("repo");
+    git(&repo, &["init", "-q", "-b", "main"]);
+    git(&repo, &["config", "user.email", "t@t"]);
+    git(&repo, &["config", "user.name", "t"]);
+    git(&repo, &["config", "commit.gpgsign", "false"]);
+    std::fs::write(repo.join("a.txt"), "a\n").expect("file");
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "a"]);
+    let _hub = spawn(&h, true, &[]);
+    serving(&h).await;
+    let c = Client::login(&h).await;
+    node_health_until(&h, 30, |n| n["reconciled"] == true).await;
+    let (st, p) = c
+        .call(
+            "POST",
+            "/api/projects",
+            Some(json!({"name": "repo", "path": repo.to_string_lossy()})),
+        )
+        .await;
+    assert_eq!(st, 200, "{p}");
+    let (_, state) = c.call("GET", "/api/state", None).await;
+    let bot = state["bots"]
+        .as_array()
+        .and_then(|bs| bs.iter().find(|b| b["harness"] == "claude-code"))
+        .and_then(|b| b["id"].as_str())
+        .expect("a claude-code bot")
+        .to_string();
+    let (st, i) = c
+        .call(
+            "POST",
+            "/api/items",
+            Some(json!({"goal": "@say in-worktree-8K", "title": "工作区", "bot": bot, "project": p["id"]})),
+        )
+        .await;
+    assert_eq!(st, 200, "{i}");
+    let item = i["id"].as_str().expect("item").to_string();
+    let mut sid = None;
+    assert!(
+        wait(30, || {
+            sid = h.one("SELECT id FROM sessions WHERE item_id=?", &item);
+            sid.is_some()
+        })
+        .await
+    );
+    let sid = sid.expect("session");
+    let wt = h.steve().join("worktrees").join(&item);
+    assert!(
+        wait(60, || attempts(&h, &sid, "finished") >= 1).await,
+        "the agent ran; log:\n{}",
+        hub_log(&h)
+    );
+    assert!(wt.join("a.txt").exists(), "the worktree is there");
+    assert_eq!(
+        h.one("SELECT cwd FROM items WHERE id=?", &item).as_deref(),
+        Some(wt.to_string_lossy().as_ref())
+    );
+    assert_eq!(
+        git(&wt, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        format!("steve/{}", item.to_lowercase())
+    );
+    // the Node made it: its prepare names the place, and the agent opened there
+    let kind = h
+        .one(
+            "SELECT json_extract(request,'$.body.kind.type') FROM node_commands WHERE method='prepare_workspace' AND json_extract(request,'$.body.resource')=?",
+            &format!("item:{item}"),
+        )
+        .expect("a prepare");
+    assert_eq!(kind, "worktree");
+    let real = wt
+        .canonicalize()
+        .expect("worktree")
+        .to_string_lossy()
+        .to_string();
+    assert!(
+        h.lines()
+            .iter()
+            .any(|m| m["method"] == "session/new"
+                && m["params"]["cwd"].as_str() == Some(real.as_str())),
+        "the agent works in the worktree"
+    );
+
+    // dropped: the clean worktree goes back through the Node
+    let (st, v) = c
+        .call(
+            "POST",
+            &format!("/api/items/{item}/actions"),
+            Some(json!({"action": "drop"})),
+        )
+        .await;
+    assert_eq!(st, 200, "{v}");
+    // what the ten-minute watcher does, now: once the harness is let go, the Node gives it back
+    let mut gone = false;
+    for _ in 0..60 {
+        let (st, v) = c.call("POST", "/api/system/workspaces/reclaim", None).await;
+        assert_eq!(st, 200, "{v}");
+        if wait(1, || !wt.exists()).await {
+            gone = true;
+            break;
+        }
+    }
+    assert!(gone, "the worktree is given back; log:\n{}", hub_log(&h));
+    assert!(
+        wait(10, || h.count(
+            "SELECT COUNT(*) FROM timeline WHERE item_id=? AND text LIKE '删除了工作区%'",
+            &item
+        ) == 1)
+        .await
+    );
+    assert_eq!(
+        h.count(
+            "SELECT COUNT(*) FROM node_commands WHERE method='tidy_workspace' AND json_extract(request,'$.subject')=?",
+            &format!("tidy:{item}")
+        ),
+        1
+    );
+    // nothing was committed on it: its branch is merged, and goes with it, as without the Node
+    assert_eq!(
+        git(
+            &repo,
+            &[
+                "branch",
+                "--list",
+                &format!("steve/{}", item.to_lowercase())
+            ]
+        ),
+        ""
+    );
+    assert_eq!(
+        h.count(
+            "SELECT COUNT(*) FROM timeline WHERE item_id=? AND text LIKE '%删除了已合并的分支%'",
+            &item
+        ),
+        1
+    );
+}

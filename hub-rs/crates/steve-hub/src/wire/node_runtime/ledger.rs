@@ -1,5 +1,6 @@
 //! The Hub's ledger of workspace operations that change things and must not run twice: a command
-//! run (`exec`) and a git action (`git_apply`: a merge, a rebase, a push). Each one is written to
+//! run (`exec`), a git action (`git_apply`: a merge, a rebase, a push) and giving a worktree back
+//! (`tidy_workspace`). Each one is written to
 //! `node_commands` with what it is for (its subject, kept in the stored request: D10, no
 //! migration) before it is sent, and goes out through the coordinator's sender like every other
 //! command.
@@ -14,10 +15,10 @@ use super::*;
 use serde::Serialize;
 
 /// The methods that go through the ledger.
-pub(super) const LEDGER_METHODS: [&str; 2] = ["exec", "git_apply"];
+pub(super) const LEDGER_METHODS: [&str; 3] = ["exec", "git_apply", "tidy_workspace"];
 
 /// What a ledger operation may be for.
-const SUBJECTS: [&str; 4] = ["flow_run:", "vault_use:", "push:", "lane:"];
+const SUBJECTS: [&str; 5] = ["flow_run:", "vault_use:", "push:", "lane:", "tidy:"];
 
 fn valid_subject(s: &str) -> bool {
     SUBJECTS
@@ -168,6 +169,7 @@ impl NodeRuntime {
         match l.method.as_str() {
             "exec" => self.node.exec(parse(&l.request)?).await,
             "git_apply" => self.node.git_apply(parse(&l.request)?).await,
+            "tidy_workspace" => self.node.tidy_workspace(parse(&l.request)?).await,
             other => Err(ApiError::new(
                 ErrorCode::Unsupported,
                 format!("{other} is not a ledger operation"),
@@ -182,7 +184,13 @@ mod tests {
 
     #[test]
     fn subjects_name_what_the_operation_is_for() {
-        for s in ["flow_run:r1", "vault_use:u1", "push:i1", "lane:l1:u2"] {
+        for s in [
+            "flow_run:r1",
+            "vault_use:u1",
+            "push:i1",
+            "lane:l1:u2",
+            "tidy:i1",
+        ] {
             assert!(valid_subject(s), "{s}");
         }
         for s in ["", "flow_run:", "push", "other:x", "session:s1"] {

@@ -811,6 +811,7 @@ async fn workspaces_are_bound_to_their_node_and_spec() {
             },
             branch: "steve/st-1".into(),
             base: None,
+            at: None,
         },
     };
     assert_eq!(
@@ -1236,4 +1237,40 @@ async fn an_unknown_execution_is_abandoned_not_cancelled() {
     n.start_turn(cmd("op_t2", turn("s_1", "t_2", "a_2", "y")))
         .await
         .unwrap();
+}
+
+/// N0e-E11a: a worktree prepare may name where it goes; one that does not is encoded as before
+/// (the same digest, so a prepare made by an older Hub is still the same spec), and an older peer's
+/// encoding decodes.
+#[test]
+fn a_worktree_target_is_optional_on_the_wire() {
+    let repo = RootPath {
+        root: RootId::new("code").unwrap(),
+        rel: RelPath::new("steve").unwrap(),
+    };
+    let old = serde_json::json!({"type": "worktree", "repository": {"root": "code", "rel": "steve"}, "branch": "steve/st-1"});
+    let k: PrepareKind = serde_json::from_value(old.clone()).unwrap();
+    assert_eq!(
+        k,
+        PrepareKind::Worktree {
+            repository: repo.clone(),
+            branch: "steve/st-1".into(),
+            base: None,
+            at: None,
+        }
+    );
+    assert_eq!(serde_json::to_value(&k).unwrap(), old);
+    let at = PrepareKind::Worktree {
+        repository: repo,
+        branch: "steve/st-1".into(),
+        base: None,
+        at: Some(RootPath {
+            root: RootId::new("wt").unwrap(),
+            rel: RelPath::new("ST-1").unwrap(),
+        }),
+    };
+    let v = serde_json::to_value(&at).unwrap();
+    assert_eq!(v["at"], serde_json::json!({"root": "wt", "rel": "ST-1"}));
+    assert_eq!(serde_json::from_value::<PrepareKind>(v).unwrap(), at);
+    assert_ne!(digest_of(&at).unwrap(), digest_of(&k).unwrap());
 }

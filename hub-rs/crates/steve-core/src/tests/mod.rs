@@ -28,6 +28,7 @@ mod supersede;
 mod takeover;
 mod thread;
 mod workspace;
+mod worktrees;
 
 use crate::repo::{NewDecision, NewItem, NewSession, Release, WS};
 use crate::testkit::Kit;

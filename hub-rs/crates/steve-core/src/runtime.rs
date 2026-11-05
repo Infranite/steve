@@ -198,6 +198,25 @@ pub trait AgentRuntime: Send + Sync {
         let _ = session_id;
         None
     }
+    /// New sessions of items on a git worktree may be bound to a backend that makes the worktree
+    /// itself (the local Node prepares it off the core's lock, before the session opens): the
+    /// core then only names where it goes ([`crate::Core::workspace_ready`] says when it is there).
+    fn makes_worktrees(&self) -> bool {
+        false
+    }
+    /// `session_id`'s backend makes the worktree it works in (once [`Self::created`] bound it),
+    /// and makes it again when the session opens after a tidy.
+    fn makes_workspace(&self, session_id: &str) -> bool {
+        let _ = session_id;
+        false
+    }
+    /// Gives back the worktree `session_id` works in through its backend; `keep_branch`: its
+    /// branch stays. `Ok(true)`: on its way ([`crate::Core::workspace_tidied`] tells what came of
+    /// it). `Ok(false)`: the backend has no worktree of it now; nothing was done.
+    fn tidy(&self, session_id: &str, keep_branch: bool) -> Result<bool> {
+        let _ = (session_id, keep_branch);
+        Ok(false)
+    }
 }
 
 /// The MCP endpoint handed to an adapter when it starts (orchestrator `mcpEndpoint`).

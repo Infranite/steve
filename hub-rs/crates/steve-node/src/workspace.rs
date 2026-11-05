@@ -72,6 +72,39 @@ pub(crate) fn resolve(roots: &[Root], at: &RootPath, write: bool) -> ApiResult<P
     Ok(real)
 }
 
+/// Where a directory that may not exist yet goes: `at` names a read-write root and a relative
+/// path of plain names (at least one) inside it. Its parent must exist and resolve inside the root
+/// (symlinks included); the directory itself, when it is there, must resolve to the same place.
+pub(crate) fn target(roots: &[Root], at: &RootPath) -> ApiResult<PathBuf> {
+    let rel = Path::new(at.rel.as_str());
+    let name = rel.file_name().ok_or_else(|| {
+        ApiError::new(
+            ErrorCode::Invalid,
+            "a directory inside the root, not the root",
+        )
+    })?;
+    let parent = RootPath {
+        root: at.root.clone(),
+        rel: RelPath::new(
+            rel.parent()
+                .and_then(Path::to_str)
+                .unwrap_or_default()
+                .to_string(),
+        )
+        .map_err(|e| ApiError::new(ErrorCode::Invalid, e.to_string()))?,
+    };
+    let p = resolve(roots, &parent, true)?.join(name);
+    if p.exists() {
+        let real = p
+            .canonicalize()
+            .map_err(|e| ApiError::new(ErrorCode::Invalid, e.to_string()))?;
+        if real != p {
+            return Err(ApiError::new(ErrorCode::Denied, "outside the root"));
+        }
+    }
+    Ok(p)
+}
+
 pub(crate) fn control_session(op: &OperationId) -> SessionId {
     SessionId::new(derived_id("workspace-control", op.as_str())).expect("derived id")
 }
@@ -239,6 +272,45 @@ pub(crate) fn add_worktree(
             )
             .map(|_| ())
     }
+}
+
+/// How many bytes are free where a worktree goes (`None`: it cannot be told).
+pub(crate) type FreeBytes = Box<dyn Fn() -> Option<u64> + Send>;
+
+/// [`add_worktree`], refused (`exhausted`, "disk low") when the worktree would be new on a new
+/// branch while fewer than the floor's bytes are free there: a new item waits for disk space, one
+/// whose branch is there gets its sources back (megabytes).
+pub(crate) fn add_worktree_above(
+    commands: &Commands,
+    repo: &Path,
+    path: &Path,
+    branch: &str,
+    base: Option<&str>,
+    floor: Option<(u64, FreeBytes)>,
+) -> ApiResult<()> {
+    if let Some((floor, free)) = floor
+        && !path.exists()
+        && commands
+            .git(
+                repo,
+                &[
+                    "rev-parse",
+                    "--verify",
+                    "--quiet",
+                    &format!("refs/heads/{branch}"),
+                ],
+            )
+            .is_err()
+        && let Some(free) = free()
+        && free < floor
+    {
+        return Err(ApiError::new(
+            ErrorCode::Exhausted,
+            format!("disk low: {free} bytes free, the floor is {floor}"),
+        ));
+    }
+    add_worktree(commands, repo, path, branch, base)
+        .map_err(|e| ApiError::new(ErrorCode::Invalid, format!("git worktree: {e}")))
 }
 
 /// `path` is a worktree of `repo` with `branch` checked out.

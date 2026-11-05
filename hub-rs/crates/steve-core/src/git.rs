@@ -294,20 +294,17 @@ pub enum BranchTidy {
     Absent,
 }
 
-/// After an item is done or dropped: remove its worktree when it is clean (and, if `only_merged`, when the
-/// branch's work is in `base`), and delete the branch when it is fully merged into `base`. Unmerged work is
-/// never deleted.
-///
-/// "In `base`" also counts a branch that landed rebased or squashed (a PR merged by rebase gives its commits
-/// new ids, so `merge-base --is-ancestor` alone kept such worktrees forever); its branch stays, since
-/// `branch -d` only deletes what is an ancestor of `base`, and the worktree can be made again from it.
-pub fn tidy_worktree(
-    repo: &Path,
-    worktree: &Path,
-    branch: &str,
-    only_merged: bool,
-    base: &str,
-) -> (WorktreeTidy, BranchTidy) {
+/// What a tidy decides on about an item's branch (git reads only).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BranchFacts {
+    pub exists: bool,
+    /// An ancestor of the base (`branch -d` deletes it).
+    pub merged: bool,
+    /// Its work is in the base: merged, or landed rebased or squashed ([`landed`]).
+    pub landed: bool,
+}
+
+pub fn branch_facts(repo: &Path, branch: &str, base: &str) -> BranchFacts {
     let exists = succeeds(
         repo,
         &[
@@ -327,7 +324,32 @@ pub fn tidy_worktree(
                 base,
             ],
         );
-    let landed = merged || (exists && landed(repo, branch, base));
+    BranchFacts {
+        exists,
+        merged,
+        landed: merged || (exists && landed(repo, branch, base)),
+    }
+}
+
+/// After an item is done or dropped: remove its worktree when it is clean (and, if `only_merged`, when the
+/// branch's work is in `base`), and delete the branch when it is fully merged into `base`. Unmerged work is
+/// never deleted.
+///
+/// "In `base`" also counts a branch that landed rebased or squashed (a PR merged by rebase gives its commits
+/// new ids, so `merge-base --is-ancestor` alone kept such worktrees forever); its branch stays, since
+/// `branch -d` only deletes what is an ancestor of `base`, and the worktree can be made again from it.
+pub fn tidy_worktree(
+    repo: &Path,
+    worktree: &Path,
+    branch: &str,
+    only_merged: bool,
+    base: &str,
+) -> (WorktreeTidy, BranchTidy) {
+    let BranchFacts {
+        exists,
+        merged,
+        landed,
+    } = branch_facts(repo, branch, base);
     let mut wt = WorktreeTidy::Absent;
     if worktree.exists() {
         /* `git worktree remove` without --force refuses modified or untracked files */

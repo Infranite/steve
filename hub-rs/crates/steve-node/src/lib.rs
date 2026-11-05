@@ -61,6 +61,13 @@ pub struct Storage {
     /// Tests: the filesystem's free bytes, instead of asking it.
     #[doc(hidden)]
     pub free_space: Option<Arc<dyn Fn() -> u64 + Send + Sync>>,
+    /// Below this many free bytes where a worktree goes, no worktree on a new branch is made
+    /// (`exhausted`, "disk low"); one on a branch that is there already (its work coming back)
+    /// still is. 0: no floor.
+    pub worktree_floor: u64,
+    /// Tests: the free bytes where worktrees go, instead of asking the filesystem.
+    #[doc(hidden)]
+    pub worktree_free: Option<Arc<dyn Fn() -> u64 + Send + Sync>>,
 }
 
 impl Default for Storage {
@@ -70,6 +77,8 @@ impl Default for Storage {
             reserve: 512 << 20,
             low_water: 80,
             free_space: None,
+            worktree_floor: 0,
+            worktree_free: None,
         }
     }
 }
@@ -1264,6 +1273,26 @@ impl LocalNode {
         Ok(())
     }
 
+    /// The disk floor for a worktree at `path`: the floor and how to read the free bytes there
+    /// (`None`: no floor).
+    fn worktree_floor(&self, path: &Path) -> Option<(u64, workspace::FreeBytes)> {
+        let s = &self.0.cfg.storage;
+        if s.worktree_floor == 0 {
+            return None;
+        }
+        let free: workspace::FreeBytes = match &s.worktree_free {
+            Some(f) => {
+                let f = f.clone();
+                Box::new(move || Some(f()))
+            }
+            None => {
+                let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
+                Box::new(move || journal::free_bytes(&dir))
+            }
+        };
+        Some((s.worktree_floor, free))
+    }
+
     fn repo_lock(&self, repo: &Path) -> Arc<tokio::sync::Mutex<()>> {
         self.0
             .repos
@@ -2053,8 +2082,11 @@ impl WorkspaceExecutor for LocalNode {
                 PrepareKind::Existing { dir } => {
                     workspace::resolve(&self.0.roots(), dir, true)?;
                 }
-                PrepareKind::Worktree { repository, .. } => {
+                PrepareKind::Worktree { repository, at, .. } => {
                     workspace::resolve(&self.0.roots(), repository, true)?;
+                    if let Some(at) = at {
+                        workspace::target(&self.0.roots(), at)?;
+                    }
                 }
                 PrepareKind::Scratch => {}
             }
@@ -2084,30 +2116,41 @@ impl WorkspaceExecutor for LocalNode {
                     repository,
                     branch,
                     base,
-                } => match workspace::resolve(&me.0.roots(), repository, true) {
-                    Ok(repo) => {
-                        let lock = me.repo_lock(&repo);
-                        let _g = lock.lock().await;
-                        let p = home.join("worktrees").join(&name);
-                        let (r2, p2, b2, base2) =
-                            (repo.clone(), p.clone(), branch.clone(), base.clone());
-                        let commands = workspace::Commands {
-                            inner: me.0.clone(),
-                            op: op.clone(),
-                        };
-                        tokio::task::spawn_blocking(move || {
-                            workspace::add_worktree(&commands, &r2, &p2, &b2, base2.as_deref())
-                        })
-                        .await
-                        .map_err(|e| e.to_string())
-                        .and_then(|r| r)
-                        .map(|_| (p, Some(repo), Some(branch.clone())))
-                        .map_err(|e| {
-                            ApiError::new(ErrorCode::Invalid, format!("git worktree: {e}"))
-                        })
+                    at,
+                } => {
+                    let place = match at {
+                        Some(at) => workspace::target(&me.0.roots(), at),
+                        None => Ok(home.join("worktrees").join(&name)),
+                    };
+                    match (workspace::resolve(&me.0.roots(), repository, true), place) {
+                        (Ok(repo), Ok(p)) => {
+                            let lock = me.repo_lock(&repo);
+                            let _g = lock.lock().await;
+                            let (r2, p2, b2, base2) =
+                                (repo.clone(), p.clone(), branch.clone(), base.clone());
+                            let commands = workspace::Commands {
+                                inner: me.0.clone(),
+                                op: op.clone(),
+                            };
+                            let floor = me.worktree_floor(&p);
+                            tokio::task::spawn_blocking(move || {
+                                workspace::add_worktree_above(
+                                    &commands,
+                                    &r2,
+                                    &p2,
+                                    &b2,
+                                    base2.as_deref(),
+                                    floor,
+                                )
+                            })
+                            .await
+                            .map_err(|e| ApiError::new(ErrorCode::Internal, e.to_string()))
+                            .and_then(|r| r)
+                            .map(|_| (p, Some(repo), Some(branch.clone())))
+                        }
+                        (Err(e), _) | (_, Err(e)) => Err(e),
                     }
-                    Err(e) => Err(e),
-                },
+                }
             };
             let resource = body.resource.clone();
             if me

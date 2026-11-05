@@ -39,6 +39,7 @@ pub mod thread;
 pub mod upstream;
 pub mod util;
 pub mod workspace;
+mod worktrees;
 pub mod yolo;
 
 #[cfg(test)]

@@ -44,6 +44,22 @@ pub fn binding_for(
     perm: Option<&str>,
     allows: &dyn Fn(&RootPath) -> bool,
 ) -> Option<Binding> {
+    binding_with(store, session, perm, allows, None)
+}
+
+/// [`binding_for`] on a Node that makes the items' worktrees (`worktrees`: Steve's worktrees
+/// directory, one of its roots). An item of a git project working on its own worktree there
+/// (`<worktrees>/<item id>` on its branch, made or not yet) gets a worktree plan at that very place:
+/// the Node makes it, adopts one that is there already only if it is that worktree, and makes it
+/// again after a tidy. An item whose workspace the Node first prepared as an existing directory
+/// keeps that plan (the same resource is never prepared otherwise).
+pub fn binding_with(
+    store: &Store,
+    session: &str,
+    perm: Option<&str>,
+    allows: &dyn Fn(&RootPath) -> bool,
+    worktrees: Option<&Path>,
+) -> Option<Binding> {
     let s = store.sessions().get(session).ok()??;
     if s.status == "ended" || s.readonly != 0 || s.device_id != "hub" || s.source != "Steve" {
         return None;
@@ -75,6 +91,7 @@ pub fn binding_for(
     } else {
         item.cwd.as_deref().filter(|p| !p.is_empty())
     };
+    let resource = format!("item:{}", item.id);
     let prepare = if let Some(cwd) = cwd {
         // Never replace a legacy workspace containing user changes with a fresh worktree.
         let path = Path::new(cwd);
@@ -88,7 +105,11 @@ pub fn binding_for(
         } else {
             at(cwd)?
         };
-        PrepareKind::Existing { dir }
+        let existing = PrepareKind::Existing { dir };
+        match worktrees.and_then(|w| item_worktree(store, &item, &s.workspace_id, path, w)) {
+            Some(wt) if prepared_as(store, &resource).is_none_or(|k| k != existing) => wt,
+            _ => existing,
+        }
     } else if let Some(pid) = &item.project_id {
         let p = store.projects().get(pid).ok()??;
         if p.workspace_id != s.workspace_id || p.device_id != "hub" || p.archived {
@@ -99,6 +120,13 @@ pub fn binding_for(
                 repository: at(&p.path)?,
                 branch: format!("steve/{}", item.id.to_lowercase()),
                 base: None,
+                at: match worktrees {
+                    Some(w) => Some(RootPath {
+                        root: root_id(w)?,
+                        rel: RelPath::new(item.id.clone()).ok()?,
+                    }),
+                    None => None,
+                },
             }
         } else {
             PrepareKind::Existing { dir: at(&p.path)? }
@@ -116,7 +144,7 @@ pub fn binding_for(
     }
     Some(Binding {
         session: s.id,
-        resource: format!("item:{}", item.id),
+        resource,
         prepare,
         choice: HarnessChoice {
             harness: s.harness,
@@ -133,6 +161,60 @@ pub fn binding_for(
             tools: GrantId::new("hub").ok()?,
         },
     })
+}
+
+/// The worktree plan of an item working at `cwd` when that is its own worktree in `worktrees`
+/// (`<worktrees>/<item id>`, on its branch, of its git project on the Hub's device).
+fn item_worktree(
+    store: &Store,
+    item: &steve_store::Item,
+    workspace: &str,
+    cwd: &Path,
+    worktrees: &Path,
+) -> Option<PrepareKind> {
+    let branch = item.branch.as_deref().filter(|b| !b.is_empty())?;
+    if cwd != worktrees.join(&item.id) {
+        return None;
+    }
+    let p = store.projects().get(item.project_id.as_deref()?).ok()??;
+    if p.workspace_id != workspace
+        || p.device_id != "hub"
+        || p.archived
+        || p.kind != "git"
+        || !p.worktree
+    {
+        return None;
+    }
+    Some(PrepareKind::Worktree {
+        repository: at(&p.path)?,
+        branch: branch.to_string(),
+        base: None,
+        at: Some(RootPath {
+            root: root_id(worktrees)?,
+            rel: RelPath::new(item.id.clone()).ok()?,
+        }),
+    })
+}
+
+/// How the local Node last prepared `resource`, as the Hub asked it (`None`: never).
+fn prepared_as(store: &Store, resource: &str) -> Option<PrepareKind> {
+    let request: String = store
+        .reader(|c| {
+            use rusqlite::OptionalExtension;
+            Ok::<_, StoreError>(
+                c.query_row(
+                    "SELECT request FROM node_commands WHERE node_id='local' AND method='prepare_workspace'
+                      AND json_extract(request,'$.body.resource')=? ORDER BY rowid DESC LIMIT 1",
+                    [resource],
+                    |r| r.get(0),
+                )
+                .optional()?,
+            )
+        })
+        .ok()??;
+    serde_json::from_str::<Command<Prepare>>(&request)
+        .ok()
+        .map(|c| c.body.kind)
 }
 
 /// The binding of a new session to the paired remote Node `node` (`STEVE_NODE_BIND`), or `None`
@@ -695,6 +777,7 @@ mod host_tests {
                 None,
                 vec![],
             ),
+            worktrees: None,
         };
         let bound = |sid: &str| -> i64 {
             store
