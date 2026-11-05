@@ -4,12 +4,12 @@
 use crate::error::{Result, msg};
 use crate::gateway::{ModelGateway, Tier};
 use crate::repo::{Db as Store, HubEvent};
-use crate::runtime::{AgentRuntime, Prompted, TurnEnd};
+use crate::runtime::{AgentRuntime, Prompted, Running, Stop, TurnEnd};
 use crate::{Core, CoreConfig};
 use async_trait::async_trait;
 use serde_json::json;
-use std::collections::HashSet;
-use std::sync::{Arc, Mutex};
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 #[derive(Default)]
@@ -17,7 +17,13 @@ pub struct FakeState {
     /// (session, text, via) of every turn started
     pub prompts: Vec<(String, String, String)>,
     pub turning: HashSet<String>,
+    /// The attempt each turning session runs now (`a1`, `a2`, … across the runtime).
+    pub attempts: HashMap<String, String>,
+    pub next_attempt: u64,
+    /// Sessions whose running turn a stop reached.
     pub cancelled: Vec<String>,
+    /// Every `stop` and what it did.
+    pub stops: Vec<(Running, Stop)>,
     pub released: Vec<String>,
     /// decision id → still answerable
     pub permissions: HashSet<String>,
@@ -44,6 +50,8 @@ pub struct FakeRuntime {
     pub s: Mutex<FakeState>,
     /// Signalled after every `flush`.
     pub flushed: tokio::sync::Notify,
+    /// Every `stop` takes it shared first: a test holding it exclusively delays the stops.
+    pub stop_gate: RwLock<()>,
 }
 
 impl FakeRuntime {
@@ -52,6 +60,9 @@ impl FakeRuntime {
     }
     fn run(&self, st: &mut FakeState, sid: &str, msgs: &[(String, String)]) {
         st.turning.insert(sid.into());
+        st.next_attempt += 1;
+        let attempt = format!("a{}", st.next_attempt);
+        st.attempts.insert(sid.into(), attempt);
         for (t, v) in msgs {
             let _ = self
                 .store
@@ -86,6 +97,7 @@ impl FakeRuntime {
         let next = {
             let mut st = self.st();
             st.turning.remove(sid);
+            st.attempts.remove(sid);
             let _ = self.store.session_patch(
                 sid,
                 crate::patch![status: if stop == "error" { "error" } else { "idle" }],
@@ -149,10 +161,23 @@ impl AgentRuntime for FakeRuntime {
         self.run(&mut st, sid, &[(text.into(), via.into())]);
         Ok(Prompted::Sent)
     }
-    fn cancel(&self, sid: &str) -> bool {
+    fn running(&self, sid: &str) -> Option<Running> {
+        self.st().attempts.get(sid).map(|a| Running {
+            session: sid.into(),
+            attempt: a.clone(),
+        })
+    }
+    fn stop(&self, turn: &Running) -> Result<Stop> {
+        let _gate = self.stop_gate.read().unwrap();
         let mut st = self.st();
-        st.cancelled.push(sid.into());
-        st.turning.contains(sid)
+        let stop = if st.attempts.get(&turn.session) == Some(&turn.attempt) {
+            st.cancelled.push(turn.session.clone());
+            Stop::Requested
+        } else {
+            Stop::NotRunning
+        };
+        st.stops.push((turn.clone(), stop));
+        Ok(stop)
     }
     fn is_busy(&self, sid: &str) -> bool {
         self.st().turning.contains(sid)
@@ -311,6 +336,7 @@ impl Kit {
             store: store.clone(),
             s: Mutex::new(FakeState::default()),
             flushed: tokio::sync::Notify::new(),
+            stop_gate: RwLock::new(()),
         });
         let gw = Arc::new(FakeGateway {
             script: Mutex::new(Box::new(|_, _| Err(msg("no model in tests")))),

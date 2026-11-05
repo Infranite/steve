@@ -936,18 +936,42 @@ impl NodeRuntime {
             .unwrap_or(true)
     }
 
-    /// Asks the Node to cancel the attempt running now (frozen as the target here, never looked up
-    /// again when the command goes out). `true`: there was one, the cancel is on its way.
+    /// The attempt the session runs now (not finished yet), if any.
+    pub fn active_attempt(&self, session: &str) -> Result<Option<String>, StoreError> {
+        self.store.reader(|c| {
+            Ok(c.query_row(
+                "SELECT a.attempt_id FROM runtime_sessions s JOIN runtime_attempts a ON a.attempt_id = s.active_attempt WHERE s.session_id=? AND a.state<>'finished'",
+                [session],
+                |r| r.get(0),
+            )
+            .optional()?)
+        })
+    }
+
+    /// Asks the Node to cancel the attempt running now ([`Self::cancel_attempt`] of it).
     pub fn cancel(&self, session: &str) -> Result<bool, StoreError> {
+        match self.active_attempt(session)? {
+            Some(a) => self.cancel_attempt(session, &a),
+            None => {
+                self.running()?;
+                Ok(false)
+            }
+        }
+    }
+
+    /// Asks the Node to cancel `attempt`, only while it is still the session's running one (frozen
+    /// as the target here, never looked up again when the command goes out). `true`: it was, the
+    /// cancel is on its way; `false`: it is over or another one runs now, and nothing is queued.
+    pub fn cancel_attempt(&self, session: &str, attempt: &str) -> Result<bool, StoreError> {
         self.running()?;
         let r = self.tx(|tx| {
             let row: Option<(String, String, i64)> = tx
                 .query_row(
-                    "SELECT a.attempt_id, a.operation_id, a.revision FROM runtime_sessions s JOIN runtime_attempts a ON a.attempt_id = s.active_attempt WHERE s.session_id=? AND a.state<>'finished'",
-                    [session],
+                    "SELECT a.attempt_id, a.operation_id, a.revision FROM runtime_sessions s JOIN runtime_attempts a ON a.attempt_id = s.active_attempt WHERE s.session_id=?1 AND a.attempt_id=?2 AND a.state<>'finished'",
+                    [session, attempt],
                     |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
                 )
-                .ok();
+                .optional()?;
             let Some((attempt, target, rev)) = row else {
                 return Ok(false);
             };

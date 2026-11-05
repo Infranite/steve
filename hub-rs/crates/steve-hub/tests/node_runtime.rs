@@ -360,6 +360,34 @@ async fn cancel_targets_the_attempt_running_when_asked() {
 }
 
 #[tokio::test]
+async fn cancel_attempt_with_an_old_attempt_queues_nothing() {
+    let h = hub();
+    h.bind();
+    h.rt.prompt(S, "hello", "user", &[]).unwrap();
+    until("started", || h.methods().contains(&"start_turn")).await;
+    let exec = h.attempts()[0].clone();
+    let a1 = h.rt.active_attempt(S).unwrap().expect("a1 runs");
+    h.rt.prompt(S, "next", "user", &[]).unwrap();
+    h.node.finish(&exec, build::done()).await.unwrap();
+    until("the next turn", || h.attempts().len() == 2).await;
+    let a2 = h.rt.active_attempt(S).unwrap().expect("a2 runs");
+    assert_ne!(a1, a2);
+    until("a2 sent", || {
+        h.methods().iter().filter(|m| **m == "start_turn").count() == 2
+    })
+    .await;
+    assert!(!h.rt.cancel_attempt(S, &a1).unwrap(), "a1 is over");
+    assert!(!h.rt.cancel_attempt(S, "att_nobody").unwrap());
+    let cancels =
+        || h.q::<i64>("SELECT COUNT(*) FROM node_commands WHERE method IN ('cancel','abandon')");
+    assert_eq!(cancels(), 0, "no command for a stale attempt");
+    assert!(h.rt.is_busy(S), "a2 still runs");
+    assert!(h.rt.cancel_attempt(S, &a2).unwrap());
+    // queued now, or once the Node is known to hold a2's start
+    until("a2's cancel", || cancels() == 1).await;
+}
+
+#[tokio::test]
 async fn the_same_events_again_are_stored_once() {
     let h = hub();
     h.bind();

@@ -892,6 +892,33 @@ fn deliver_queued_sends_the_queue_now_or_keeps_it_while_busy() {
 }
 
 #[test]
+fn a_deferred_stop_reaches_only_the_turn_it_was_asked_for() {
+    let k = Kit::new();
+    let i = new_item(&k, "g");
+    let s = only_session(&k, &i.id);
+    let a1 = k.rt.st().attempts[&s.id].clone();
+    k.core.session_message(&s.id, "下一条", false, &[]).unwrap();
+    // the stop is queued for a1; its worker only runs once a1 ended and the queued a2 started
+    let gate = k.rt.stop_gate.write().unwrap();
+    k.core.item_action(&i.id, ItemAction::Drop, "me").unwrap();
+    k.rt.end_turn(&k.core, &s.id, "end_turn", None);
+    let a2 = k.rt.st().attempts[&s.id].clone();
+    assert_ne!(a1, a2);
+    drop(gate);
+    assert!(k.wait(|| !k.rt.st().stops.is_empty()));
+    let st = k.rt.st();
+    assert_eq!(st.stops[0].0.attempt, a1);
+    assert_eq!(st.stops[0].1, crate::Stop::NotRunning);
+    assert!(st.cancelled.is_empty(), "a2 was not interrupted");
+    assert_eq!(st.attempts.get(&s.id), Some(&a2), "a2 still runs");
+    drop(st);
+    // the close still waits for the turn running now, and follows its end
+    assert_ne!(k.phase(&i.id), "closed");
+    k.rt.end_turn(&k.core, &s.id, "end_turn", None);
+    assert!(k.wait(|| k.phase(&i.id) == "closed"));
+}
+
+#[test]
 fn item_actions() {
     let k = Kit::new();
     let i = new_item(&k, "g");

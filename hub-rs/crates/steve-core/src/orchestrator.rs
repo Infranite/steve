@@ -2421,7 +2421,7 @@ impl Tx<'_> {
                             Some(json!({"status": before.status, "now": before.now})),
                         )?;
                         if let Some(sid) = &sid {
-                            self.rt().cancel(sid);
+                            self.stop_now(sid);
                         }
                         self.db()
                             .item_patch(&i, patch![status: "pause", now: "你在查看，已暂停"])?;
@@ -2618,7 +2618,7 @@ impl Tx<'_> {
                 if choice == "continue" {
                     send(self, or(text, "请继续。"))?;
                 } else if let (true, Some(s)) = (choice == "look", &s) {
-                    self.rt().cancel(&s.id);
+                    self.stop_now(&s.id);
                 }
             }
             _ => {
@@ -2923,7 +2923,7 @@ impl Tx<'_> {
             }
         }
         if mode == SupplementMode::Steer && self.busy(&s.id) {
-            self.rt().cancel(&s.id);
+            self.stop_now(&s.id);
         }
         self.rt_prompt(&s.id, &format!("补充信息：{text}"), "me", files)?;
         Ok(())
@@ -2947,7 +2947,7 @@ impl Tx<'_> {
 
     /// End a session, its adapter released (it idles out if a turn is still finishing).
     pub(crate) fn end_and_release(&self, sid: &str) -> Result<()> {
-        self.rt().cancel(sid);
+        self.stop_now(sid);
         self.db().session_patch(sid, patch![status: "ended"])?;
         self.rt().release(sid);
         Ok(())
@@ -2974,7 +2974,7 @@ impl Tx<'_> {
                     return Err(crate::cycle::conflict(crate::cycle::closed_msg()));
                 }
                 if let Some(s) = &s {
-                    self.rt().cancel(&s.id);
+                    self.stop_now(&s.id);
                 }
                 self.db()
                     .item_patch(id, patch![status: "pause", now: "你暂停了"])?;
@@ -2995,8 +2995,12 @@ impl Tx<'_> {
                     .timeline_add(id, actor, "me", action.label(), None)?;
                 /* you are the acceptor; the running turn is stopped (outside the lock) and the close
                  * waits until it has */
-                if let Some(s) = s.as_ref().filter(|s| s.status != "ended") {
-                    self.st.cancels.push((s.id.clone(), id.into()));
+                if let Some(turn) = s
+                    .as_ref()
+                    .filter(|s| s.status != "ended")
+                    .and_then(|s| self.rt().running(&s.id))
+                {
+                    self.st.cancels.push((turn, id.into()));
                 }
                 self.lc_request_complete(
                     id,
@@ -3192,7 +3196,7 @@ impl Tx<'_> {
             self.db().session_patch(sid, patch![status: "idle"])?;
         }
         if interrupt && self.busy(sid) {
-            self.rt().cancel(sid);
+            self.stop_now(sid);
         }
         self.rt_prompt(sid, text, "me", files)
     }
@@ -3270,7 +3274,7 @@ impl Tx<'_> {
         let ev = |interrupted: bool| json!({"id": qid, "text": q.text, "interrupted": interrupted});
         // a cancel while the adapter is still starting goes right after its prompt; false means the
         // turn ended just now (and took the queue, or left it for the flush below)
-        if self.busy(sid) && self.rt().cancel(sid) {
+        if self.busy(sid) && self.stop_now(sid) {
             self.db().event_add(sid, "queued_sent_now", ev(true))?;
             self.reactivate(s.item_id.as_deref())?;
             return Ok(SendNow::Interrupted);

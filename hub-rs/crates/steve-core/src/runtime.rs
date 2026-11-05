@@ -23,6 +23,23 @@ impl Prompted {
     }
 }
 
+/// The turn a session runs now, frozen when it was looked at: a stop aimed at it reaches that turn
+/// and never the next one. `attempt` is opaque and only means something to the backend that minted it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Running {
+    pub session: String,
+    pub attempt: String,
+}
+
+/// What [`AgentRuntime::stop`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stop {
+    /// The turn was still running: it is being interrupted.
+    Requested,
+    /// That turn is over (or another one runs now): nothing was done.
+    NotRunning,
+}
+
 /// A finished turn, as acp.ts hands it to the orchestrator's turn-end handler.
 #[derive(Debug, Clone)]
 pub struct TurnEnd {
@@ -49,8 +66,18 @@ pub trait AgentRuntime: Send + Sync {
         via: &str,
         files: &[FileRef],
     ) -> Result<Prompted>;
-    /// Interrupt the running turn (or a pending gateway retry); false if nothing was running.
-    fn cancel(&self, session_id: &str) -> bool;
+    /// The turn running now (or its pending gateway retry), if any.
+    fn running(&self, session_id: &str) -> Option<Running>;
+    /// Interrupt that turn, only while it is still the one running; [`Stop::NotRunning`] otherwise.
+    /// Errors when the backend cannot tell (its store failed, its Node is stopped).
+    fn stop(&self, turn: &Running) -> Result<Stop>;
+    /// Interrupt whatever runs now ([`Self::running`] then [`Self::stop`]).
+    fn cancel(&self, session_id: &str) -> Result<Stop> {
+        match self.running(session_id) {
+            Some(r) => self.stop(&r),
+            None => Ok(Stop::NotRunning),
+        }
+    }
     /// A turn is in flight, including adapter start and the gateway-retry wait.
     fn is_busy(&self, session_id: &str) -> bool;
     /// Stop the adapter process if it is idle; the next prompt starts it again with `session/load`.

@@ -332,6 +332,10 @@ struct State {
     live: HashMap<String, Live>,
     /// sessions with a turn in flight, also while the adapter is still starting or a retry waits
     turning: HashSet<String>,
+    /// the turn each session in `turning` runs now: a token minted when it entered `turning` and for
+    /// every follow-up turn after it (a gateway retry keeps it), so a stop meant for one turn never
+    /// reaches the next ([`Acp::cancel_if`])
+    turns: HashMap<String, u64>,
     retrying: HashMap<String, u64>,
     /// decision id → (session id, rpc id). Like the TS, entries outlive the process that asked.
     /// decision id → (session, the asking request's rpc id, the adapter process generation that asked,
@@ -369,7 +373,15 @@ impl State {
     /// The session's turn is over (or never started): it leaves `turning`, and a cancel meant for it is moot.
     fn end_turning(&mut self, sid: &str) {
         self.turning.remove(sid);
+        self.turns.remove(sid);
         self.cancel_pending.remove(sid);
+    }
+
+    /// The session starts a turn (it is in `turning` from now on), under a new turn token.
+    fn begin_turning(&mut self, sid: &str) {
+        self.turning.insert(sid.to_owned());
+        let t = self.token();
+        self.turns.insert(sid.to_owned(), t);
     }
 }
 
@@ -665,7 +677,7 @@ impl Acp {
             if msgs.is_empty() {
                 return Err(AcpError::Other("无法持久保存消息，请重试".into()));
             }
-            st.turning.insert(session_id.to_owned());
+            st.begin_turning(session_id);
             drop(st);
             self.start_turn(session_id.to_owned(), msgs);
         }
@@ -729,7 +741,7 @@ impl Acp {
             if msgs.is_empty() {
                 return false;
             }
-            st.turning.insert(session_id.to_owned());
+            st.begin_turning(session_id);
             msgs
         };
         self.start_turn(session_id.to_owned(), msgs);
@@ -869,6 +881,7 @@ impl Acp {
                 }
                 st.cancelled.remove(&ptoken);
                 st.turning.remove(&sid);
+                st.turns.remove(&sid);
                 st.tallies.remove(&sid);
                 if let Some(l) = st.live.get_mut(&sid).filter(|l| l.generation == generation) {
                     l.busy = false;
@@ -1056,11 +1069,15 @@ impl Acp {
                 st.cancel_pending.remove(&sid);
                 if next.is_empty() {
                     st.turning.remove(&sid);
+                    st.turns.remove(&sid);
                     let token = st.token();
                     if let Some(l) = st.live.get_mut(&sid) {
                         l.idle = Some(token);
                         self.arm_idle(sid.clone(), token);
                     }
+                }
+                if !next.is_empty() {
+                    st.begin_turning(&sid);
                 }
                 let held = st.holding && self.host().queue_len(&sid) > 0;
                 (next, held)
@@ -1610,7 +1627,26 @@ impl Acp {
     /// prompt not written yet) the cancel waits and goes right after the prompt, so the agent has seen
     /// the message it interrupts. False when no turn is in flight.
     pub fn cancel(&self, session_id: &str) -> bool {
-        let mut st = self.st();
+        self.cancel_in(self.st(), session_id)
+    }
+
+    /// The token of the turn the session runs now (also while its adapter starts or a gateway retry
+    /// waits); `None` when no turn is in flight. Tokens live in memory only: no turn survives a restart.
+    pub fn current(&self, session_id: &str) -> Option<u64> {
+        self.st().turns.get(session_id).copied()
+    }
+
+    /// [`Self::cancel`], only while the session still runs the turn `token` names: a stale token
+    /// (that turn is over, maybe another one runs now) is a no-op and returns false.
+    pub fn cancel_if(&self, session_id: &str, token: u64) -> bool {
+        let st = self.st();
+        if st.turns.get(session_id) != Some(&token) {
+            return false;
+        }
+        self.cancel_in(st, session_id)
+    }
+
+    fn cancel_in(&self, mut st: MutexGuard<'_, State>, session_id: &str) -> bool {
         if st.retrying.remove(session_id).is_some() {
             let stale: Vec<String> = st
                 .waits
@@ -1630,6 +1666,8 @@ impl Acp {
             };
             if next.is_empty() {
                 st.end_turning(session_id);
+            } else {
+                st.begin_turning(session_id);
             }
             drop(st);
             let h = self.host();

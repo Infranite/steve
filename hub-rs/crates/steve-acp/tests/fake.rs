@@ -204,6 +204,54 @@ async fn cancel_ends_the_running_turn() {
     acp.shutdown(Duration::from_secs(2)).await;
 }
 
+/// A stop aimed at one turn (its token) never reaches the turn queued behind it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancel_if_with_a_stale_token_is_a_no_op() {
+    let f = Fake::new(&[]);
+    let h = host();
+    h.with(f.session("s1", "claude-code"));
+    let acp = Acp::new(f.config(), h.clone());
+    assert_eq!(acp.current("s1"), None);
+    acp.prompt("s1", "@sleep 600", "me").await.unwrap();
+    let t1 = acp.current("s1").expect("a turn runs");
+    assert_eq!(
+        acp.prompt("s1", "@sleep 20000", "me").await.unwrap(),
+        Prompted::Queued
+    );
+    wait_for("the queued turn", 10, || f.prompts().len() == 2).await;
+    let t2 = acp.current("s1").expect("the follow-up runs");
+    assert_ne!(t1, t2);
+    assert!(!acp.cancel_if("s1", t1), "t1 is over");
+    assert!(!f.methods().contains(&"session/cancel".to_owned()));
+    assert!(h.system().is_empty());
+    assert!(acp.is_busy("s1"), "t2 still runs");
+    assert!(acp.cancel_if("s1", t2));
+    wait_for("turn end", 5, || turn_ends(&h) == 1).await;
+    h.rec(|r| assert_eq!(r.turn_ends[0].stop_reason, "cancelled"));
+    assert_eq!(acp.current("s1"), None);
+    assert!(!acp.cancel_if("s1", t2), "nothing runs any more");
+    acp.shutdown(Duration::from_secs(2)).await;
+}
+
+/// A gateway retry is the same turn: the token taken before it still stops it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_retry_keeps_the_turn_token() {
+    let f = Fake::new(&[]);
+    let h = host();
+    h.with(f.session("s1", "claude-code"));
+    let mut cfg = f.config();
+    cfg.retry_delays = vec![Duration::from_millis(1500)];
+    let acp = Acp::new(cfg, h.clone());
+    acp.prompt("s1", "@fail 1 503", "me").await.unwrap();
+    let t = acp.current("s1").unwrap();
+    wait_for("retry scheduled", 10, || h.system().len() == 2).await;
+    assert_eq!(acp.current("s1"), Some(t));
+    assert!(acp.cancel_if("s1", t));
+    assert!(!acp.is_busy("s1"));
+    h.rec(|r| assert_eq!(r.turn_ends[0].stop_reason, "cancelled"));
+    acp.shutdown(Duration::from_secs(2)).await;
+}
+
 /// A cancel while the adapter is still starting is not lost: it goes right after the prompt (the agent
 /// has seen the message it interrupts), and the queue in order is the next turn (send-now, 插话).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

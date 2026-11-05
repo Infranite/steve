@@ -481,6 +481,9 @@ impl Host for HubHost {
 /// The core's view of the ACP runner.
 pub struct AcpRuntime(pub Acp);
 
+/// How a legacy turn token reads as a [`steve_core::Running::attempt`].
+const LEGACY_TURN: &str = "legacy:";
+
 impl steve_core::AgentRuntime for AcpRuntime {
     fn prompt(
         &self,
@@ -505,8 +508,22 @@ impl steve_core::AgentRuntime for AcpRuntime {
             Err(e) => Err(CoreError::Msg(e.to_string())),
         }
     }
-    fn cancel(&self, session_id: &str) -> bool {
-        self.0.cancel(session_id)
+    /// The runner's in-memory turn token, as `legacy:<token>` (no legacy turn survives a restart).
+    fn running(&self, session_id: &str) -> Option<steve_core::Running> {
+        self.0.current(session_id).map(|t| steve_core::Running {
+            session: session_id.to_string(),
+            attempt: format!("{LEGACY_TURN}{t}"),
+        })
+    }
+    fn stop(&self, turn: &steve_core::Running) -> steve_core::Result<steve_core::Stop> {
+        let token = turn
+            .attempt
+            .strip_prefix(LEGACY_TURN)
+            .and_then(|t| t.parse().ok());
+        Ok(match token {
+            Some(t) if self.0.cancel_if(&turn.session, t) => steve_core::Stop::Requested,
+            _ => steve_core::Stop::NotRunning,
+        })
     }
     fn is_busy(&self, session_id: &str) -> bool {
         self.0.is_busy(session_id)
@@ -896,14 +913,33 @@ impl steve_core::AgentRuntime for RoutedRuntime {
             Err(e) => Err(CoreError::Msg(e.to_string())),
         }
     }
-    fn cancel(&self, session_id: &str) -> bool {
-        match self.node_for(session_id) {
-            Some(n) => n.cancel(session_id).unwrap_or_else(|e| {
-                tracing::error!("cancel {session_id}: {e}");
-                false
+    fn running(&self, session_id: &str) -> Option<steve_core::Running> {
+        match self.route(session_id) {
+            Backend::Node(n) => match n.active_attempt(session_id) {
+                Ok(a) => a.map(|attempt| steve_core::Running {
+                    session: session_id.to_string(),
+                    attempt,
+                }),
+                Err(e) => {
+                    tracing::error!("running turn of {session_id}: {e}");
+                    None
+                }
+            },
+            Backend::Parked => None,
+            Backend::Legacy => self.legacy.running(session_id),
+        }
+    }
+    /// A Node session's stop goes to its coordinator, only for the attempt it names; never to the
+    /// legacy runner.
+    fn stop(&self, turn: &steve_core::Running) -> steve_core::Result<steve_core::Stop> {
+        match self.route(&turn.session) {
+            Backend::Node(n) => Ok(if n.cancel_attempt(&turn.session, &turn.attempt)? {
+                steve_core::Stop::Requested
+            } else {
+                steve_core::Stop::NotRunning
             }),
-            None if self.parked(session_id) => false,
-            None => self.legacy.cancel(session_id),
+            Backend::Parked => Ok(steve_core::Stop::NotRunning),
+            Backend::Legacy => self.legacy.stop(turn),
         }
     }
     fn is_busy(&self, session_id: &str) -> bool {
@@ -1337,7 +1373,8 @@ impl Domain for CoreDomain {
         let (c, sid) = (self.core.clone(), session.to_string());
         tokio::task::spawn_blocking(move || c.cancel_turn(&sid))
             .await
-            .map_err(|e| BackendError::msg(format!("task failed: {e}")))
+            .map_err(|e| BackendError::msg(format!("task failed: {e}")))?
+            .map_err(|e| BackendError::msg(e.to_string()))
     }
     async fn hold_status(&self) -> BResult<Value> {
         let c = self.core.clone();
