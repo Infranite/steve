@@ -318,7 +318,12 @@ async fn route_eval_real_model() {
             let r = crate::stats::tagged(
                 "route",
                 "",
-                gw.call(&prompt, Tier::Fast, Duration::from_secs(60), &[]),
+                gw.call(
+                    &prompt,
+                    Tier::Fast,
+                    Duration::from_secs(60),
+                    &gateway::ThinkTools::None,
+                ),
             )
             .await;
             let ms = t0.elapsed().as_millis() as u64;

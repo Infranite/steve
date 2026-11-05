@@ -1405,8 +1405,22 @@ fn attachments_for_an_agent_inline_small_images_only() {
         "- .steve/attachments/{}-log.txt（text/plain，1 KB）",
         &txt.id[4..]
     )));
-    let b = crate::attachments::for_agent(k.db(), &cfg.data_dir, &cwd, &[img], false).unwrap();
+    // only the text file needs the Read tool; the image is in the message
+    let readable = |id: &str, name: &str| crate::gateway::Readable {
+        file_id: id.into(),
+        rel_path: format!(".steve/attachments/{}-{name}", &id[4..]),
+    };
+    assert_eq!(a.readable, vec![readable(&txt.id, "log.txt")]);
+    let b = crate::attachments::for_agent(
+        k.db(),
+        &cfg.data_dir,
+        &cwd,
+        std::slice::from_ref(&img),
+        false,
+    )
+    .unwrap();
     assert!(b.images.is_empty() && !b.note.contains("图片也直接附在"));
+    assert_eq!(b.readable, vec![readable(&img.id, "shot.png")]);
 }
 
 /// The id of one of the six item categories.
