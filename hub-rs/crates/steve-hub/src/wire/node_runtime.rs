@@ -1006,6 +1006,7 @@ impl NodeRuntime {
         self.close_cards_of_attempt_in(tx, attempt)?;
         self.turn_over_in(tx, session, &turn, completion)?;
         if self.plan_after_in(tx, session)? != Planned::Created {
+            status_in(tx, session, settled_status(&completion.stop_reason))?;
             self.ended_later.lock().unwrap().push((
                 session.to_string(),
                 completion.stop_reason.clone(),
@@ -1357,6 +1358,9 @@ impl NodeRuntime {
             s,
             &format!("Node 没能打开这个会话（{detail}），下一条消息会再试。"),
         )?;
+        if let Some((_, stop, _)) = &end {
+            status_in(tx, s, settled_status(stop))?;
+        }
         Ok(end)
     }
 
@@ -1983,9 +1987,17 @@ impl NodeRuntime {
                         )?;
                     }
                 }
+                // the resume handle is the harness's own session id (ACP `sessionId`), what ST-28
+                // shows and the legacy runner keeps too
                 tx.execute(
-                    "UPDATE sessions SET model = COALESCE(?, model), reasoning_effort = COALESCE(?, reasoning_effort), updated = ? WHERE id = ?",
-                    rusqlite::params![view.effective.model, view.effective.effort, now(), session],
+                    "UPDATE sessions SET model = COALESCE(?, model), reasoning_effort = COALESCE(?, reasoning_effort), acp_session_id = COALESCE(?, acp_session_id), updated = ? WHERE id = ?",
+                    rusqlite::params![
+                        view.effective.model,
+                        view.effective.effort,
+                        view.resume.as_ref().map(|r| r.to_string()),
+                        now(),
+                        session
+                    ],
                 )?;
                 tx.publish(steve_store::ChangeEvent::Session {
                     id: session,
@@ -2002,6 +2014,7 @@ impl NodeRuntime {
                         [x.attempt().as_str()],
                         |r| r.get(0),
                     )?;
+                    status_in(tx, &session, "running")?;
                     // the turn's first message: the first `user` entry since the last turn ended
                     let user_seq: Option<i64> = tx.query_row(
                         "SELECT MIN(seq) FROM events WHERE session_id=?1 AND kind='user' AND seq > (SELECT COALESCE(MAX(seq), 0) FROM events WHERE session_id=?1 AND kind='turn_end')",
@@ -2338,6 +2351,7 @@ impl NodeRuntime {
         if ended {
             self.release_in(tx, session)?;
         }
+        status_in(tx, session, settled_status(&c.stop_reason))?;
         let stop = c.stop_reason.clone();
         let error = c.error.as_ref().map(|e| e.safe_detail.clone());
         Ok(Some((session.to_string(), stop, error)))
@@ -2618,6 +2632,31 @@ fn command_session_in(tx: &Tx, op: &str) -> Result<String, StoreError> {
 }
 
 /// A `system` entry of the session, for the people reading it.
+/// `sessions.status` once a turn is over and nothing follows it: the legacy runner's values.
+fn settled_status(stop_reason: &str) -> &'static str {
+    if stop_reason == "error" {
+        "error"
+    } else {
+        "idle"
+    }
+}
+
+/// Sets `sessions.status` the way the legacy runner does (`running` from an attempt's start until
+/// the turn is over). A session the business side ended stays ended.
+fn status_in(tx: &Tx, session: &str, status: &str) -> Result<(), StoreError> {
+    let n = tx.execute(
+        "UPDATE sessions SET status=?1, updated=?2 WHERE id=?3 AND status NOT IN ('ended', ?1)",
+        rusqlite::params![status, now(), session],
+    )?;
+    if n > 0 {
+        tx.publish(steve_store::ChangeEvent::Session {
+            id: session.into(),
+            item_id: None,
+        });
+    }
+    Ok(())
+}
+
 fn system_in(tx: &Tx, session: &str, text: &str) -> Result<(), StoreError> {
     rt::add_event_in(
         tx,

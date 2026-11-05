@@ -637,6 +637,18 @@ impl super::node_runtime::NodeDomain for HubHost {
             user_seq,
             at,
         );
+        // the coordinator set the session running: a “它停下了” card of its item no longer
+        // applies (as with the legacy set_status)
+        if let Some(core) = self.core.get().cloned()
+            && let Ok(h) = tokio::runtime::Handle::try_current()
+        {
+            let sid = session.to_string();
+            h.spawn_blocking(move || {
+                if let Err(e) = core.expire_stall(&sid) {
+                    tracing::error!("expire stall {sid}: {e}");
+                }
+            });
+        }
     }
     fn attempt_finished(
         &self,

@@ -664,3 +664,63 @@ async fn an_idle_node_session_is_not_resumed_after_a_restart() {
     }
     assert_eq!(fails(), fails_before, "no failure card");
 }
+
+/// A Node session's row shows its run like a legacy one (running during a turn, idle after), and
+/// ST-28's resume info names the harness's own session id.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_node_session_shows_its_status_and_harness_id() {
+    let h = Home::new();
+    let quiet = [("STEVE_TAKEOVER_CONTINUES", "0")];
+    let _hub = spawn(&h, true, &quiet);
+    serving(&h).await;
+    let c = Client::login(&h).await;
+    let sid = c.item(&h, "状态验收 @say status-node-5S").await;
+    assert!(
+        wait(30, || steve_v1(&h, &sid, "status-node-5S") > 0).await,
+        "the first turn ran; log:\n{}",
+        hub_log(&h)
+    );
+    let status = |v: &Value| v["status"].as_str().unwrap_or_default().to_string();
+    let get = || async {
+        let (st, v) = c.call("GET", &format!("/api/sessions/{sid}"), None).await;
+        assert_eq!(st, 200, "{v}");
+        v
+    };
+    assert!(
+        until(10, || async { status(&get().await) == "idle" }).await,
+        "idle after the turn: {}",
+        get().await
+    );
+
+    c.say(&sid, "状态验收-运行 @sleep 600000").await;
+    assert!(wait(30, || h.got("状态验收-运行") == 1).await);
+    assert!(
+        until(10, || async { status(&get().await) == "running" }).await,
+        "running during the turn: {}",
+        get().await
+    );
+
+    // the id the fake agent's prompts carry is the one ST-28 shows
+    let acp = h
+        .lines()
+        .iter()
+        .rev()
+        .find(|m| m["method"] == "session/prompt")
+        .and_then(|m| m["params"]["sessionId"].as_str().map(str::to_string))
+        .expect("a prompt with its session id");
+    let (st, v) = c
+        .call("GET", &format!("/api/sessions/{sid}/resume"), None)
+        .await;
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["id"].as_str(), Some(acp.as_str()), "resume info: {v}");
+
+    let (st, v) = c
+        .call("POST", &format!("/api/sessions/{sid}/cancel"), None)
+        .await;
+    assert_eq!((st, &v["ok"]), (200, &json!(true)), "cancel: {v}");
+    assert!(
+        until(30, || async { status(&get().await) == "idle" }).await,
+        "idle after the cancel: {}",
+        get().await
+    );
+}
