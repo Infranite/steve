@@ -154,14 +154,17 @@ impl Engine {
         let subject = match (d.kind.as_str(), d.subject_type.as_str()) {
             ("approve", "tool_call") => match self.tool_input(&d.id) {
                 Some(t) => Subject::Tool(Tool {
-                    own_pids: self.own_pids(d, &t.raw),
+                    own_pids: t
+                        .own_pids
+                        .clone()
+                        .unwrap_or_else(|| self.own_pids(d, &t.raw)),
                     kind: t.kind,
                     title: d.question.trim_start_matches("允许执行：").to_string(),
                     raw: t.raw,
                     truncated: false,
                     locations: t.locations,
                     options: judge::tool_options(&d.options),
-                    cwd: own,
+                    cwd: t.own_dir.as_deref().map(super::limits::canonical).or(own),
                     project_dir,
                     branch,
                 }),

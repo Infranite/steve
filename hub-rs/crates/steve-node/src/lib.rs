@@ -569,6 +569,8 @@ pub(crate) struct PermissionContext {
     workspace: WorkspaceRef,
     row: WorkspaceRow,
     roots: Vec<Root>,
+    /// The session's harness process group, to tell which processes it started.
+    proc: Option<journal::Proc>,
 }
 impl PermissionContext {
     fn dir(&self) -> ApiResult<PathBuf> {
@@ -584,6 +586,7 @@ pub(crate) fn permission_context(
     session: &SessionId,
 ) -> ApiResult<PermissionContext> {
     inner.j.read(|t| {
+        let proc = t.proc_of(session)?;
         let session = t
             .session(session)?
             .ok_or_else(|| internal("session gone"))?;
@@ -594,6 +597,7 @@ pub(crate) fn permission_context(
             workspace: session.open.workspace,
             row,
             roots: inner.cfg.roots.clone(),
+            proc,
         })
     })
 }
@@ -732,6 +736,15 @@ pub(crate) fn bind_permission(
         });
     }
     let digest = permission_digest(&action, &pre)?;
+    // Which processes are the harness's own, for judging `kill <pid>` (not part of the digest).
+    let own_pids = match &action {
+        Action::Exec { command, .. } if command.contains("kill") => context
+            .proc
+            .as_ref()
+            .map(|p| procs::started_by(p.pgid, p.started))
+            .unwrap_or_default(),
+        _ => vec![],
+    };
     Ok(PermissionRequest {
         // one request instance: the operation and the adapter's request id
         id: id(derived_id(op.as_str(), &rpc_id.to_string()))?,
@@ -744,6 +757,7 @@ pub(crate) fn bind_permission(
         digest,
         choices: asked.choices.iter().map(|(d, _)| *d).collect(),
         expires_at: deadline,
+        own_pids,
     })
 }
 
@@ -825,6 +839,16 @@ fn failed(e: ApiError) -> Observed {
 
 #[derive(Clone)]
 pub struct LocalNode(Arc<Inner>);
+
+/// A bound workspace's directory on this machine, for a Hub running on the same machine as its
+/// Node (see [`LocalNode::local_dir`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalDir {
+    /// Canonical, checked against the Node's roots when asked.
+    pub path: PathBuf,
+    /// The Node made it (a worktree or scratch dir), rather than adopting an existing directory.
+    pub owned: bool,
+}
 
 impl LocalNode {
     /// Takes the home (one Node per journal), opens the journal (a new incarnation: what was running
@@ -936,6 +960,22 @@ impl LocalNode {
         let tx = Actor::spawn(self.0.clone(), session.clone());
         a.insert(session.clone(), tx.clone());
         tx
+    }
+
+    /// Host bridge for a Node on the Hub's own machine: where `w` is, so the Hub can judge a
+    /// permission request against the real directory. Not on the [`Node`] trait and never sent over
+    /// the transport: a remote Node has none, and the Hub then asks. `None` when the workspace is
+    /// another Node's, unknown, gone or no longer inside the roots.
+    pub fn local_dir(&self, w: &WorkspaceRef) -> Option<LocalDir> {
+        self.mine(w).ok()?;
+        let row = self.0.j.read(|t| t.workspace(&w.id)).ok()??;
+        let existing = matches!(row.kind, PrepareKind::Existing { .. });
+        let path =
+            workspace::still_valid(Path::new(&row.path), &self.0.cfg.roots, existing).ok()?;
+        Some(LocalDir {
+            path,
+            owned: !existing,
+        })
     }
 
     fn mine(&self, w: &WorkspaceRef) -> ApiResult<()> {

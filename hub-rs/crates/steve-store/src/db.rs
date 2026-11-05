@@ -81,6 +81,10 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/034.sql"),
     // 35: indexes only, for lookups that scanned whole tables (send queue, tokens, subjects, stats polls).
     include_str!("../migrations/035.sql"),
+    // 36: indexes for the coordinator's lookups in the Node event inbox and its pruning by age.
+    include_str!("../migrations/036.sql"),
+    // 37: Node permission cards (expiry, one answer each) and a Node session's desired config.
+    include_str!("../migrations/037.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).

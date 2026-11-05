@@ -144,6 +144,10 @@ fn fresh_database_is_ts_schema_plus_module_migrations() {
             only.execute_batch(statement).unwrap();
         }
     }
+    // 036 and later: module tables only
+    for m in &db::MIGRATIONS[35..] {
+        only.execute_batch(m).unwrap();
+    }
     let stub = |t: &str| STUBS.contains(&t) || READ_STUBS.iter().any(|(n, _)| *n == t);
     let added = objects(&only).into_iter().filter(|(ty, name, tbl, _)| {
         !(ty == "table" && stub(name) || name.starts_with("sqlite_autoindex_") && stub(tbl))
@@ -163,8 +167,8 @@ fn fresh_database_is_ts_schema_plus_module_migrations() {
 
 #[test]
 fn migrations_are_the_ts_strings() {
-    assert_eq!(db::MIGRATIONS.len(), 35);
-    assert_eq!(db::SCHEMA_VERSION, 35);
+    assert_eq!(db::MIGRATIONS.len(), 37);
+    assert_eq!(db::SCHEMA_VERSION, 37);
     assert!(db::MIGRATIONS[0].starts_with("\n  CREATE TABLE workspaces (id TEXT PRIMARY KEY, name TEXT NOT NULL, created INTEGER NOT NULL);"));
     assert!(
         db::MIGRATIONS[1]

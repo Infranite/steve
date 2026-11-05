@@ -12,7 +12,10 @@ pub mod core;
 pub mod mcp;
 pub mod mcp_extra;
 pub mod modules;
+pub mod node_binding;
+pub mod node_files;
 pub mod node_runtime;
+pub mod node_tools;
 pub mod outbox;
 pub mod ports;
 pub mod research;
@@ -53,6 +56,9 @@ pub struct Wired {
     pub yolo: steve_core::yolo::Yolo,
     /// The YOLO executor (its event and tick loops are in `jobs`).
     pub yolo_engine: steve_core::yolo::Engine,
+    /// Steve's tools as a Node reaches them (in-crate tests drive the bridge with them).
+    #[cfg(test)]
+    pub(crate) tool_service: Arc<tool_service::ToolService>,
 }
 
 /// Process-wide SQLite settings, before the first connection: no memory statistics. With them on (the
@@ -117,6 +123,94 @@ fn acp_config(cfg: &Config) -> steve_acp::AcpConfig {
 /// a map in tests).
 pub type Vars = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 
+/// The opt-in local host: the coordinator, and the tools port that gets its ToolService once
+/// core/modules exist.
+struct NodeHost {
+    runtime: Arc<node_runtime::NodeRuntime>,
+    /// The Node itself, for the same-machine host bridge (where a bound workspace is).
+    node: Arc<steve_node::LocalNode>,
+    tools: Arc<node_tools::NodeTools>,
+}
+
+/// Construct the opt-in local host. Initialization errors fail boot rather than silently routing
+/// persisted Node sessions to legacy. ToolService is installed later, once core/modules exist;
+/// the returned startup job connects its endpoint before dispatch workers begin.
+fn node_runtime(
+    cfg: &Config,
+    store: &steve_store::Store,
+    domain: Arc<dyn node_runtime::NodeDomain>,
+    vars: &Vars,
+    jobs: &mut Vec<modules::Job>,
+) -> Result<Option<NodeHost>, BackendError> {
+    if vars("STEVE_NODE").as_deref() != Some("local") {
+        return Ok(None);
+    }
+    if cfg.no_resume {
+        return Err(BackendError::msg(
+            "STEVE_NODE=local is disabled on STEVE_NO_RESUME copies",
+        ));
+    }
+    let node_id = steve_node_api::NodeId::new("local").expect("constant node id");
+    let home = cfg.data_dir.join("node");
+    let tools = node_tools::NodeTools::open(store.clone(), node_id.clone(), &home)
+        .map_err(|e| BackendError::msg(e.to_string()))?;
+    let node = Arc::new(
+        steve_node::LocalNode::open(steve_node::NodeConfig {
+            node: node_id.clone(),
+            home,
+            acp: acp_config(cfg),
+            roots: node_binding::roots(store, cfg).map_err(|e| BackendError::msg(e.to_string()))?,
+            capacity: steve_node_api::Capacity {
+                sessions: 64,
+                jobs: 0,
+                execs: 0,
+            },
+        })
+        .map_err(|e| BackendError::msg(e.to_string()))?,
+    );
+    let runtime = node_runtime::NodeRuntime::new(store.clone(), node.clone(), domain);
+    // an attempt's deadline (default 6 h); the end-to-end tests shorten it to see a card expire
+    if let Some(ms) = vars("STEVE_NODE_TURN_LIMIT_MS").and_then(|v| v.trim().parse::<i64>().ok()) {
+        runtime.set_turn_limit(ms);
+    }
+    node.connect(
+        Arc::new(node_runtime::Sink(Arc::downgrade(&runtime))),
+        Some(Arc::new(node_files::NodeFiles::new(
+            store.clone(),
+            node_id,
+            cfg.data_dir.clone(),
+        ))),
+    );
+    jobs.push(Box::pin(start_node(
+        runtime.clone(),
+        node.clone(),
+        tools.clone(),
+    )));
+    Ok(Some(NodeHost {
+        runtime,
+        tools,
+        node,
+    }))
+}
+
+/// The local Node's startup job: its tools endpoint, then the coordinator's workers. A Node
+/// whose tools cannot connect runs nothing: the coordinator is stopped (its sessions refuse
+/// work visibly instead of queueing commands nobody sends) and the Node shut down.
+async fn start_node(
+    runtime: Arc<node_runtime::NodeRuntime>,
+    node: Arc<steve_node::LocalNode>,
+    tools: Arc<node_tools::NodeTools>,
+) {
+    match node.connect_tools(tools).await {
+        Ok(()) => runtime.start(),
+        Err(e) => {
+            tracing::error!("local Node tools failed; dispatch remains stopped: {e}");
+            runtime.stop(&format!("its tools did not connect ({e})"));
+            node.shutdown().await;
+        }
+    }
+}
+
 /// [`wire_with`] on the process environment.
 pub fn wire(cfg: &Arc<Config>, bus: &Bus) -> Result<Wired, BackendError> {
     wire_with(cfg, bus, Arc::new(|k: &str| std::env::var(k).ok()))
@@ -143,6 +237,7 @@ pub fn wire_with(cfg: &Arc<Config>, bus: &Bus, vars: Vars) -> Result<Wired, Back
         core: std::sync::OnceLock::new(),
         flow: std::sync::OnceLock::new(),
         yolo: std::sync::OnceLock::new(),
+        local_node: std::sync::OnceLock::new(),
         user_seqs: Default::default(),
         transcripts: Default::default(),
     });
@@ -175,12 +270,17 @@ pub fn wire_with(cfg: &Arc<Config>, bus: &Bus, vars: Vars) -> Result<Wired, Back
         }),
         db.clone(),
     ));
+    let mut node_jobs = vec![];
+    let node_host = node_runtime(cfg, &db, host.clone(), &vars, &mut node_jobs)?;
+    if let Some(h) = &node_host {
+        let _ = host.local_node.set(h.node.clone());
+    }
     let core = steve_core::Core::new(
         steve_core::repo::Db::new(db.clone()),
         Arc::new(core::RoutedRuntime {
             legacy: core::AcpRuntime(acp.clone()),
-            // no session is bound to a Node until the switch (D5)
-            node: None,
+            node: node_host.as_ref().map(|h| h.runtime.clone()),
+            store: db.clone(),
         }),
         gateway,
         core_cfg,
@@ -228,6 +328,7 @@ pub fn wire_with(cfg: &Arc<Config>, bus: &Bus, vars: Vars) -> Result<Wired, Back
     engine.set_recall(built.recall.clone());
     let _ = host.yolo.set(engine.clone());
     let mut jobs = built.jobs;
+    jobs.extend(node_jobs);
     jobs.push(Box::pin(
         engine.clone().run_events(bus.tap(&["decision", "yolo"])),
     ));
@@ -242,6 +343,19 @@ pub fn wire_with(cfg: &Arc<Config>, bus: &Bus, vars: Vars) -> Result<Wired, Back
         kb: built.kb.clone(),
         tools: built.tools.clone(),
     };
+    let tool_service = Arc::new(tool_service::ToolService {
+        mcp: Arc::new(core::CoreMcp {
+            store: db.clone(),
+            core: core.clone(),
+        }),
+        extra: extra.clone(),
+    });
+    let local_node = node_host.as_ref().map(|h| h.node.clone());
+    if let Some(NodeHost { tools, .. }) = node_host {
+        tools
+            .install(tool_service.clone())
+            .map_err(|e| BackendError::msg(e.to_string()))?;
+    }
     let mcp = steve_mcp::router(Arc::new(core::CoreMcp {
         store: db.clone(),
         core: core.clone(),
@@ -277,7 +391,11 @@ pub fn wire_with(cfg: &Arc<Config>, bus: &Bus, vars: Vars) -> Result<Wired, Back
         .merge(crate::api::yolo::routes(engine.clone()));
     Ok(Wired {
         backend,
-        domain: Arc::new(core::CoreDomain { core, acp }),
+        domain: Arc::new(core::CoreDomain {
+            core,
+            acp,
+            node: local_node,
+        }),
         auth: auth.router(),
         mcp: Some(mcp),
         modules: Some(built.modules),
@@ -288,5 +406,7 @@ pub fn wire_with(cfg: &Arc<Config>, bus: &Bus, vars: Vars) -> Result<Wired, Back
         jobs,
         yolo,
         yolo_engine: engine,
+        #[cfg(test)]
+        tool_service,
     })
 }

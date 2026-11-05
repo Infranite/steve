@@ -95,6 +95,9 @@ pub struct HubHost {
     /// The YOLO executor: gets the full input of each tool permission request, and answers it once
     /// the runner waits for it (set once the core exists).
     pub yolo: OnceLock<steve_core::yolo::Engine>,
+    /// The local Node (`STEVE_NODE=local`), so YOLO can judge its requests against the bound
+    /// workspace's real directory. Unset (a remote Node, or none): YOLO asks.
+    pub local_node: OnceLock<std::sync::Arc<steve_node::LocalNode>>,
     /// The first `user` event of the turn being started, for `agent_turns.user_seq`.
     pub user_seqs: super::acp_stats::UserSeqs,
     /// Per session, what the runner's turn said so far (its tool updates carry only what changed),
@@ -422,6 +425,8 @@ impl Host for HubHost {
             raw: req.raw,
             kind: req.kind,
             locations: req.locations,
+            own_dir: None,
+            own_pids: None,
         };
         match self.store.decisions().create(&d) {
             Ok(x) => x.map(|x| {
@@ -539,8 +544,169 @@ impl steve_core::AgentRuntime for AcpRuntime {
     }
 }
 
+/// What YOLO's tool guard reads of a Node's permission request: the action as Steve states it,
+/// its paths under the bound workspace's real directory on this machine (`dir`, from the local
+/// Node), the Node-reported processes of the harness. A path into another workspace, or any path
+/// while the directory is unknown (a remote or stale Node), becomes `other`: the guard asks rather
+/// than judge words against a guessed base. `own_pids` is always the Node's (never this machine's
+/// `ps`), and the directory counts as YOLO's own only if the Node made it.
+pub(crate) fn yolo_input(
+    bound: Option<&steve_node_api::WorkspaceRef>,
+    dir: Option<&steve_node::LocalDir>,
+    r: &steve_node_api::PermissionRequest,
+) -> steve_core::yolo::ToolInput {
+    use steve_node_api::Action;
+    let root = dir.filter(|_| bound.is_some());
+    let abs = |p: &steve_node_api::PathRef| -> Option<String> {
+        let root = root?;
+        (Some(&p.workspace) == bound).then(|| {
+            root.path
+                .join(p.rel.as_str())
+                .to_string_lossy()
+                .into_owned()
+        })
+    };
+    let all =
+        |ps: &[steve_node_api::PathRef]| -> Option<Vec<String>> { ps.iter().map(abs).collect() };
+    let other = |what: String| ("other", serde_json::json!({ "summary": what }), vec![]);
+    let unknown = |what: &str| other(format!("Node 工作区的本机目录未知：{what}"));
+    let (kind, raw, locations): (&str, Value, Vec<String>) = match &r.action {
+        Action::Exec {
+            command, cwd: c, ..
+        } => match (root, c.as_ref().map(abs)) {
+            (None, _) | (_, Some(None)) => unknown(command),
+            // the base of relative shell words is always the real directory, never the item's cwd
+            (Some(root), c) => (
+                "execute",
+                serde_json::json!({
+                    "command": command,
+                    "cwd": c.flatten().unwrap_or_else(|| root.path.to_string_lossy().into_owned()),
+                }),
+                vec![],
+            ),
+        },
+        Action::Write { paths, .. } => match all(paths) {
+            Some(ls) if !ls.is_empty() => ("edit", serde_json::json!({ "file_path": ls[0] }), ls),
+            _ => unknown(&r.title),
+        },
+        Action::Delete { paths } => match all(paths) {
+            Some(ls) if !ls.is_empty() => ("delete", serde_json::json!({}), ls),
+            _ => unknown(&r.title),
+        },
+        Action::Move { from, to } => match (abs(from), abs(to)) {
+            (Some(f), Some(t)) => (
+                "move",
+                serde_json::json!({ "source": f, "destination": t }),
+                vec![],
+            ),
+            _ => unknown(&r.title),
+        },
+        Action::Read { paths } => match all(paths) {
+            Some(ls) if !ls.is_empty() => ("read", serde_json::json!({}), ls),
+            _ => unknown(&r.title),
+        },
+        Action::Search { query } => ("search", serde_json::json!({ "query": query }), vec![]),
+        Action::Fetch { url } => ("fetch", serde_json::json!({ "url": url }), vec![]),
+        Action::Tool { args, .. } => ("other", args.clone(), vec![]),
+        Action::Unknown { summary } => other(summary.clone()),
+    };
+    steve_core::yolo::ToolInput {
+        raw,
+        kind: Some(kind.into()),
+        locations,
+        own_dir: root.filter(|d| d.owned).map(|d| d.path.clone()),
+        own_pids: Some(r.own_pids.clone()),
+    }
+}
+
 /// Turn ends of Node sessions reach the core the same way the ACP runner's do.
 impl super::node_runtime::NodeDomain for HubHost {
+    fn attempt_started(
+        &self,
+        session: &str,
+        attempt: &str,
+        ordinal: i64,
+        user_seq: Option<i64>,
+        at: i64,
+    ) {
+        super::acp_stats::node_attempt_started(
+            &self.store,
+            session,
+            attempt,
+            ordinal,
+            user_seq,
+            at,
+        );
+    }
+    fn attempt_finished(
+        &self,
+        session: &str,
+        attempt: &str,
+        completion: &steve_node_api::Completion,
+        facts: &super::node_runtime::AttemptFacts,
+        at: i64,
+    ) {
+        super::acp_stats::node_attempt_finished(
+            &self.store,
+            session,
+            attempt,
+            completion,
+            facts,
+            at,
+        );
+    }
+    fn cost_changed(&self, session: &str) {
+        if let Some(flow) = self.flow.get().cloned()
+            && let Ok(h) = tokio::runtime::Handle::try_current()
+        {
+            let sid = session.to_string();
+            h.spawn(async move { steve_flow::on_session_cost(&flow, &sid).await });
+        }
+    }
+    fn permission_arming(
+        &self,
+        session: &str,
+        decision: &str,
+        request: &steve_node_api::PermissionRequest,
+    ) {
+        let Some(engine) = self.yolo.get() else {
+            return;
+        };
+        // the binding, not `sessions.cwd`: a fresh Node workspace lives where only the Node knows
+        let bound = self
+            .store
+            .reader(|c| steve_store::runtime::workspace_ref_of(c, session))
+            .ok()
+            .flatten()
+            .and_then(|w| serde_json::from_str::<steve_node_api::WorkspaceRef>(&w).ok());
+        let dir = bound
+            .as_ref()
+            .and_then(|w| self.local_node.get()?.local_dir(w));
+        engine.stash(decision, yolo_input(bound.as_ref(), dir.as_ref(), request));
+        // the Node waits for the answer from the moment it asked
+        engine.arm(decision);
+    }
+    fn permission_asked(
+        &self,
+        session: &str,
+        decision: &str,
+        request: &steve_node_api::PermissionRequest,
+    ) {
+        let _ = (session, request);
+        // its tool input was armed before the commit (permission_arming)
+        let Some(engine) = self.yolo.get().cloned() else {
+            return;
+        };
+        let id = decision.to_string();
+        match tokio::runtime::Handle::try_current() {
+            Ok(h) => {
+                h.spawn_blocking(move || engine.kick(&id));
+            }
+            Err(_) => {
+                std::thread::spawn(move || engine.kick(&id));
+            }
+        }
+    }
     fn turn_ended(&self, session: &str, stop_reason: &str, error: Option<String>) {
         let Some(core) = self.core.get() else { return };
         let t = steve_core::TurnEnd {
@@ -559,15 +725,58 @@ impl super::node_runtime::NodeDomain for HubHost {
 pub struct RoutedRuntime {
     pub legacy: AcpRuntime,
     pub node: Option<Arc<super::node_runtime::NodeRuntime>>,
+    /// Where bindings are read when no Node is enabled here (rollback: parked sessions).
+    pub store: steve_store::Store,
+}
+
+/// Which backend a session goes to.
+enum Backend<'a> {
+    Legacy,
+    Node(&'a super::node_runtime::NodeRuntime),
+    /// Bound to a Node that is not enabled here (STEVE_NODE off): its messages wait in the queue
+    /// and nothing else happens; it is never handed to the legacy runner.
+    Parked,
 }
 
 impl RoutedRuntime {
+    fn route(&self, session_id: &str) -> Backend<'_> {
+        match self.node.as_deref() {
+            Some(n) if n.owns(session_id) => Backend::Node(n),
+            Some(_) => Backend::Legacy,
+            None if super::node_runtime::bound(&self.store, session_id) => Backend::Parked,
+            None => Backend::Legacy,
+        }
+    }
+
     fn node_for(&self, session_id: &str) -> Option<&super::node_runtime::NodeRuntime> {
-        self.node.as_deref().filter(|n| n.owns(session_id))
+        match self.route(session_id) {
+            Backend::Node(n) => Some(n),
+            _ => None,
+        }
+    }
+
+    fn parked(&self, session_id: &str) -> bool {
+        matches!(self.route(session_id), Backend::Parked)
     }
 }
 
 impl steve_core::AgentRuntime for RoutedRuntime {
+    /// With a Node enabled here, a new session is bound to it when its binding can be planned
+    /// (otherwise, e.g. a permission mode the Node path cannot express, it stays on the legacy
+    /// runner). Existing sessions are never bound; without a Node nothing changes.
+    fn created(&self, session_id: &str) {
+        let Some(n) = &self.node else { return };
+        match super::node_binding::binding_for(&self.store, session_id) {
+            Some(b) => {
+                if let Err(e) = n.bind(&b) {
+                    tracing::error!(
+                        "bind {session_id} to the Node: {e}; it stays on the legacy runner"
+                    );
+                }
+            }
+            None => tracing::info!("{session_id}: no Node binding can be planned; legacy runner"),
+        }
+    }
     fn prompt(
         &self,
         session_id: &str,
@@ -575,8 +784,10 @@ impl steve_core::AgentRuntime for RoutedRuntime {
         via: &str,
         files: &[steve_core::repo::FileRef],
     ) -> steve_core::Result<steve_core::Prompted> {
-        let Some(n) = self.node_for(session_id) else {
-            return self.legacy.prompt(session_id, text, via, files);
+        let n = match self.route(session_id) {
+            Backend::Node(n) => Some(n),
+            Backend::Parked => None,
+            Backend::Legacy => return self.legacy.prompt(session_id, text, via, files),
         };
         let files: Vec<steve_store::FileRef> = files
             .iter()
@@ -587,6 +798,11 @@ impl steve_core::AgentRuntime for RoutedRuntime {
                 size: f.size,
             })
             .collect();
+        let Some(n) = n else {
+            return super::node_runtime::park(&self.store, session_id, text, via, &files)
+                .map(|()| steve_core::Prompted::Queued)
+                .map_err(|e| CoreError::Msg(e.to_string()));
+        };
         match n.prompt(session_id, text, via, &files) {
             Ok(super::node_runtime::Planned::Created) => Ok(steve_core::Prompted::Sent),
             Ok(_) => Ok(steve_core::Prompted::Queued),
@@ -599,23 +815,47 @@ impl steve_core::AgentRuntime for RoutedRuntime {
                 tracing::error!("cancel {session_id}: {e}");
                 false
             }),
+            None if self.parked(session_id) => false,
             None => self.legacy.cancel(session_id),
         }
     }
     fn is_busy(&self, session_id: &str) -> bool {
-        match self.node_for(session_id) {
-            Some(n) => n.is_busy(session_id),
-            None => self.legacy.is_busy(session_id),
+        match self.route(session_id) {
+            Backend::Node(n) => n.is_busy(session_id),
+            Backend::Parked => true,
+            Backend::Legacy => self.legacy.is_busy(session_id),
         }
     }
     fn release(&self, session_id: &str) {
-        // a Node session's harness is released by the coordinator's own chain (not yet)
-        if self.node_for(session_id).is_none() {
-            self.legacy.release(session_id)
+        match self.route(session_id) {
+            // idle only; a busy one that the business side ended is let go when its turn is over
+            Backend::Node(n) => match n.release(session_id) {
+                Ok(true) => {}
+                Ok(false) => tracing::debug!("release {session_id}: kept, busy or not open"),
+                Err(e) => tracing::error!("release {session_id}: {e}"),
+            },
+            Backend::Parked => {}
+            Backend::Legacy => self.legacy.release(session_id),
         }
     }
     fn answer_permission(&self, decision_id: &str, option_id: Option<&str>) -> bool {
-        // Node permissions are answered as operations of their own (not yet): only the runner's here
+        if let Some(n) = &self.node
+            && let Some(sid) = n.decision_session(decision_id)
+            && n.owns(&sid)
+        {
+            return n
+                .answer_permission(decision_id, option_id)
+                .unwrap_or_else(|e| {
+                    tracing::error!("answer {decision_id}: {e}");
+                    false
+                });
+        }
+        if self.node.is_none()
+            && let Some(sid) = super::node_runtime::decision_session(&self.store, decision_id)
+            && self.parked(&sid)
+        {
+            return false;
+        }
         self.legacy.answer_permission(decision_id, option_id)
     }
     fn hold(&self, on: bool) {
@@ -627,6 +867,10 @@ impl steve_core::AgentRuntime for RoutedRuntime {
     fn is_holding(&self) -> bool {
         self.legacy.is_holding() || self.node.as_ref().is_some_and(|n| n.is_holding())
     }
+    fn uncertain(&self, session_id: &str) -> bool {
+        self.node_for(session_id)
+            .is_some_and(|n| n.is_uncertain(session_id))
+    }
     fn running_turns(&self) -> usize {
         self.legacy.running_turns() + self.node.as_ref().map_or(0, |n| n.running_turns())
     }
@@ -636,18 +880,39 @@ impl steve_core::AgentRuntime for RoutedRuntime {
                 .flush(session_id, lead)
                 .inspect_err(|e| tracing::error!("flush {session_id}: {e}"))
                 .is_ok_and(|p| p == super::node_runtime::Planned::Created),
+            None if self.parked(session_id) => false,
             None => self.legacy.flush(session_id, lead),
         }
     }
     fn set_mode(&self, session_id: &str, mode: &str) -> bool {
         match self.node_for(session_id) {
-            Some(_) => false,
+            // through the Node's configure, at the session's next idle boundary
+            Some(n) => match super::node_binding::permission_mode(mode) {
+                Some(p) => n
+                    .configure(
+                        session_id,
+                        &super::node_runtime::ConfigChange {
+                            permissions: Some(p),
+                            ..Default::default()
+                        },
+                    )
+                    .inspect_err(|e| tracing::error!("set_mode {session_id}: {e}"))
+                    .is_ok(),
+                None => {
+                    tracing::warn!(session = %session_id, mode, "a mode the Node path cannot express: unchanged");
+                    false
+                }
+            },
+            None if self.parked(session_id) => false,
             None => self.legacy.set_mode(session_id, mode),
         }
     }
     fn agent_pid(&self, session_id: &str) -> Option<u32> {
         match self.node_for(session_id) {
+            // a Node's pids are in its own namespace: they reach YOLO as the Node reported them
+            // (`PermissionRequest.own_pids`), never through a `ps` here
             Some(_) => None,
+            None if self.parked(session_id) => None,
             None => self.legacy.agent_pid(session_id),
         }
     }
@@ -658,7 +923,12 @@ impl steve_core::AgentRuntime for RoutedRuntime {
 pub struct CoreDomain {
     pub core: Core,
     pub acp: Acp,
+    /// The opt-in local Node (`STEVE_NODE=local`): stopped with the Hub, its harnesses with it.
+    pub node: Option<Arc<steve_node::LocalNode>>,
 }
+
+/// How long the Hub's shutdown waits for the local Node to stop its harnesses.
+const NODE_SHUTDOWN: Duration = Duration::from_secs(5);
 
 fn refs(files: Vec<Value>) -> BResult<Vec<steve_core::repo::FileRef>> {
     files.into_iter().map(from_json).collect()
@@ -756,12 +1026,24 @@ impl Domain for CoreDomain {
         blocking(move || c.report_release()).await
     }
     async fn shutdown(&self) {
-        let (research_stopped, ()) = tokio::join!(
+        let node = async {
+            match &self.node {
+                Some(n) => tokio::time::timeout(NODE_SHUTDOWN, n.shutdown())
+                    .await
+                    .is_ok(),
+                None => true,
+            }
+        };
+        let (research_stopped, (), node_stopped) = tokio::join!(
             self.core.shutdown_research(Duration::from_secs(5)),
             self.acp.shutdown(Duration::from_millis(500)),
+            node,
         );
         if !research_stopped {
             tracing::error!("research process groups did not confirm shutdown before deadline");
+        }
+        if !node_stopped {
+            tracing::error!("the local Node did not stop its harnesses before the deadline");
         }
     }
     fn spawn_background(&self) -> bool {
@@ -940,7 +1222,11 @@ impl Domain for CoreDomain {
         )
     }
     async fn cancel(&self, session: &str) -> BResult<bool> {
-        Ok(self.acp.cancel(session))
+        // routed: a Node session's stop goes to its coordinator, never to the legacy runner
+        let (c, sid) = (self.core.clone(), session.to_string());
+        tokio::task::spawn_blocking(move || c.cancel_turn(&sid))
+            .await
+            .map_err(|e| BackendError::msg(format!("task failed: {e}")))
     }
     async fn hold_status(&self) -> BResult<Value> {
         let c = self.core.clone();
@@ -1404,5 +1690,164 @@ impl steve_mcp::Backend for CoreMcp {
     ) -> ToolResult {
         let (c, s) = (self.core.clone(), s.clone());
         tool(move || c.tool_publish(&s, &branch, &summary)).await
+    }
+}
+
+#[cfg(test)]
+mod yolo_input_tests {
+    use super::yolo_input;
+    use std::path::PathBuf;
+    use steve_node::LocalDir;
+    use steve_node_api::testkit::build;
+    use steve_node_api::*;
+
+    fn ws(id: &str) -> WorkspaceRef {
+        WorkspaceRef {
+            node: NodeId::new("local").unwrap(),
+            id: WorkspaceId::new(id).unwrap(),
+        }
+    }
+    fn at(w: &WorkspaceRef, rel: &str) -> PathRef {
+        PathRef {
+            workspace: w.clone(),
+            rel: RelPath::new(rel).unwrap(),
+        }
+    }
+    fn req(action: Action, own_pids: Vec<u32>) -> PermissionRequest {
+        let exec = ExecutionRef::Turn {
+            session: SessionId::new("s1").unwrap(),
+            turn: TurnId::new("t1").unwrap(),
+            attempt: AttemptId::new("a1").unwrap(),
+        };
+        let mut r = build::permission("p1", exec, "x");
+        r.action = action;
+        r.own_pids = own_pids;
+        r
+    }
+    fn write(w: &WorkspaceRef, rel: &str) -> Action {
+        Action::Write {
+            paths: vec![at(w, rel)],
+            change_summary: "edit".into(),
+            change: None,
+        }
+    }
+
+    /// The Node's directory, not the session's cwd (which the Hub never trusts for a Node session).
+    #[test]
+    fn paths_land_under_the_nodes_directory() {
+        let w = ws("w1");
+        let root = PathBuf::from("/node/worktrees/w1");
+        let dir = LocalDir {
+            path: root.clone(),
+            owned: true,
+        };
+        let t = yolo_input(Some(&w), Some(&dir), &req(write(&w, "src/x.rs"), vec![7]));
+        assert_eq!(t.kind.as_deref(), Some("edit"));
+        assert_eq!(t.raw["file_path"], "/node/worktrees/w1/src/x.rs");
+        assert_eq!(t.locations, vec!["/node/worktrees/w1/src/x.rs".to_string()]);
+        assert_eq!(t.own_dir, Some(root.clone()));
+        assert_eq!(t.own_pids, Some(vec![7]));
+
+        let exec = |cwd: Option<PathRef>| Action::Exec {
+            command: "cargo test".into(),
+            cwd,
+            network: NetworkScope::Unrestricted,
+        };
+        let t = yolo_input(Some(&w), Some(&dir), &req(exec(None), vec![]));
+        assert_eq!(t.kind.as_deref(), Some("execute"));
+        assert_eq!(t.raw["cwd"], "/node/worktrees/w1");
+        assert_eq!(t.own_pids, Some(vec![]), "never the Hub's `ps`");
+        let t = yolo_input(
+            Some(&w),
+            Some(&dir),
+            &req(exec(Some(at(&w, "hub-rs"))), vec![]),
+        );
+        assert_eq!(t.raw["cwd"], "/node/worktrees/w1/hub-rs");
+
+        let t = yolo_input(
+            Some(&w),
+            Some(&dir),
+            &req(
+                Action::Read {
+                    paths: vec![at(&w, "a")],
+                },
+                vec![],
+            ),
+        );
+        assert_eq!(t.kind.as_deref(), Some("read"));
+        assert_eq!(t.locations, vec!["/node/worktrees/w1/a".to_string()]);
+    }
+
+    #[test]
+    fn another_workspace_or_an_unknown_directory_is_other() {
+        let w = ws("w1");
+        let elsewhere = ws("w2");
+        let dir = LocalDir {
+            path: PathBuf::from("/node/worktrees/w1"),
+            owned: true,
+        };
+        let t = yolo_input(Some(&w), Some(&dir), &req(write(&elsewhere, "a"), vec![]));
+        assert_eq!(t.kind.as_deref(), Some("other"));
+        assert!(t.locations.is_empty());
+        // a remote or stale Node: no directory here
+        for action in [
+            write(&w, "a"),
+            Action::Read {
+                paths: vec![at(&w, "a")],
+            },
+            Action::Exec {
+                command: "rm -rf build".into(),
+                cwd: None,
+                network: NetworkScope::Unrestricted,
+            },
+        ] {
+            let t = yolo_input(Some(&w), None, &req(action, vec![]));
+            assert_eq!(t.kind.as_deref(), Some("other"), "{:?}", t.raw);
+            assert_eq!(t.own_dir, None);
+        }
+        // not bound: the directory is not used
+        let t = yolo_input(None, Some(&dir), &req(write(&w, "a"), vec![]));
+        assert_eq!(t.kind.as_deref(), Some("other"));
+    }
+
+    #[test]
+    fn an_adopted_directory_is_not_yolos_own() {
+        let w = ws("w1");
+        let dir = LocalDir {
+            path: PathBuf::from("/src/proj"),
+            owned: false,
+        };
+        let t = yolo_input(Some(&w), Some(&dir), &req(write(&w, "a"), vec![]));
+        assert_eq!(t.raw["file_path"], "/src/proj/a");
+        assert_eq!(t.own_dir, None);
+    }
+
+    /// What the guard makes of these: unknown is asked, never judged against a guessed base.
+    #[test]
+    fn the_guard_asks_when_the_directory_is_unknown() {
+        use steve_core::yolo::{guard, judge};
+        let w = ws("w1");
+        let t = yolo_input(Some(&w), None, &req(write(&w, "a"), vec![]));
+        let tool = judge::Tool {
+            kind: t.kind,
+            title: "编辑 a".into(),
+            raw: t.raw,
+            truncated: false,
+            locations: t.locations,
+            options: vec![("once".into(), "allow_once".into())],
+            cwd: t.own_dir,
+            project_dir: None,
+            branch: None,
+            own_pids: t.own_pids.unwrap_or_default(),
+        };
+        let env = judge::Env {
+            steve_home: PathBuf::from("/nonexistent/steve"),
+            home: PathBuf::from("/nonexistent"),
+            tmp: vec![],
+        };
+        assert!(
+            !matches!(guard::check(&tool, &[], &env), guard::Guard::Allow { .. }),
+            "asked"
+        );
     }
 }

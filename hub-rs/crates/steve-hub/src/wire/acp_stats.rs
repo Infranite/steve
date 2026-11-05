@@ -277,6 +277,141 @@ pub fn interrupt_open(store: &Store, at: i64) {
     }
 }
 
+// ── attempts on a Node ──
+
+/// A Node attempt began: its statistics row, found again by the attempt at its end.
+pub fn node_attempt_started(
+    store: &Store,
+    session: &str,
+    attempt: &str,
+    ordinal: i64,
+    user_seq: Option<i64>,
+    at: i64,
+) {
+    let Some(o) = owner(store, session) else {
+        return;
+    };
+    let r = store.stats().turn_begin(&steve_store::TurnBegin {
+        workspace_id: o.s.workspace_id.clone(),
+        session_id: o.s.id.clone(),
+        item_id: o.s.item_id.clone(),
+        bot_id: o.s.bot_id.clone(),
+        project_id: o.project.clone(),
+        harness: o.s.harness.clone(),
+        user_seq,
+        attempt: ordinal,
+        started: at,
+    });
+    let linked = r.and_then(|id| {
+        store.with_conn(|c| {
+            c.execute(
+                "UPDATE agent_turns SET node_attempt_id = ? WHERE id = ?",
+                rusqlite::params![attempt, id],
+            )?;
+            Ok(())
+        })
+    });
+    if let Err(e) = linked {
+        tracing::error!("stats attempt begin {session}: {e}");
+    }
+}
+
+/// A Node attempt ended: its row gets what it did and what it cost.
+pub fn node_attempt_finished(
+    store: &Store,
+    session: &str,
+    attempt: &str,
+    c: &steve_node_api::Completion,
+    f: &super::node_runtime::AttemptFacts,
+    at: i64,
+) {
+    let Some(o) = owner(store, session) else {
+        return;
+    };
+    let turn: Option<String> = store
+        .with_conn(|c| {
+            Ok(c.query_row(
+                "SELECT id FROM agent_turns WHERE node_attempt_id = ?",
+                [attempt],
+                |r| r.get(0),
+            )
+            .ok())
+        })
+        .ok()
+        .flatten();
+    let Some(turn_id) = turn else {
+        return;
+    };
+    let ws = &o.s.workspace_id;
+    // a final figure replaces the attempt's deltas; deltas add up
+    let tokens_of = |t: &steve_node_api::Tokens| Tokens {
+        input: t.input.map(|x| x as i64),
+        output: t.output.map(|x| x as i64),
+        cache_read: t.cache_read.map(|x| x as i64),
+        cache_write: t.cache_write.map(|x| x as i64),
+        reasoning: None,
+    };
+    let finals: Vec<&steve_node_api::UsageReport> = f
+        .usage
+        .iter()
+        .filter(|u| u.measurement == steve_node_api::Measurement::Final)
+        .collect();
+    let mut usage: Vec<ModelUsage> = if finals.is_empty() {
+        f.usage
+            .iter()
+            .filter(|u| u.measurement == steve_node_api::Measurement::Delta)
+            .map(|u| ModelUsage {
+                model: o.model(u.model.as_deref().or(f.model.as_deref())),
+                tokens: tokens_of(&u.tokens),
+                cost_reported: None,
+                detail: json!({ "scope": u.scope }),
+            })
+            .collect()
+    } else {
+        finals
+            .iter()
+            .map(|u| ModelUsage {
+                model: o.model(u.model.as_deref().or(f.model.as_deref())),
+                tokens: tokens_of(&u.tokens),
+                cost_reported: None,
+                detail: json!({ "scope": u.scope }),
+            })
+            .collect()
+    };
+    if let Some(cost) = f.cost.filter(|c| *c > 0.0) {
+        if usage.is_empty() {
+            usage.push(ModelUsage {
+                model: o.model(f.model.as_deref()),
+                tokens: Tokens::default(),
+                cost_reported: None,
+                detail: json!({ "scope": "main" }),
+            });
+        }
+        usage[0].cost_reported = Some(cost);
+    }
+    let model = usage
+        .first()
+        .map(|u| u.model.clone())
+        .unwrap_or_else(|| o.model(f.model.as_deref()));
+    let r = store.stats().turn_finish(&steve_store::TurnFinish {
+        turn_id,
+        ended: at,
+        day: day(store, ws, at),
+        model,
+        stop_reason: Some(c.stop_reason.clone()),
+        error: c.error.as_ref().map(|e| e.safe_detail.clone()),
+        transient: c.transient,
+        tools: f.tools,
+        tool_errors: f.tool_errors,
+        tool_kinds: f.tool_kinds.clone(),
+        permissions: f.permissions,
+        usage,
+    });
+    if let Err(e) = r {
+        tracing::error!("stats attempt finish {session}: {e}");
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::type_complexity)]
 mod tests {

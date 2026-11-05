@@ -380,8 +380,8 @@ fn leases_fence_stale_workers_and_wait_for_successful_dependencies() {
             assert!(lease_command_in(tx, "other", 2, 11)?.is_none());
             let b = lease_command_in(tx, "worker", 10, 20)?.unwrap();
             assert!(b.generation > a.generation);
-            assert!(!retry_command_in(tx, &a, 11, 12)?);
-            assert!(retry_command_in(tx, &b, 11, 12)?);
+            assert!(!retry_command_in(tx, &a, 11, 12, true)?);
+            assert!(retry_command_in(tx, &b, 11, 12, true)?);
             assert!(lease_command_in(tx, "x", 11, 20)?.is_none());
             merge_receipt_in(tx, "open", ReceiptState::Finished, true, &json!({}), 12)?;
             assert_eq!(lease_command_in(tx, "x", 12, 22)?.unwrap().operation, "run");
@@ -491,6 +491,112 @@ fn projection_cas_terminal_and_identity_guards() {
             assert_eq!(next_event_in(tx, k)?.unwrap().seq, 1);
             mark_applied_in(tx, k, 1)?;
             assert_eq!(next_event_in(tx, k)?.unwrap().payload, json!({"seq":2}));
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn permission_rows_replay_cas_due_and_per_attempt() {
+    let t = fresh();
+    ready(&t);
+    t.store
+        .transaction::<_, StoreError>(|tx| {
+            claim_in(tx, "s", "t", 2)?;
+            attempt(tx)?;
+            let p =
+                |decision: &'static str, permission: &'static str, expires_at: i64| NewPermission {
+                    decision,
+                    node: "n",
+                    session: "s",
+                    attempt: "a",
+                    permission,
+                    request: &serde_json::Value::Null,
+                    expires_at,
+                };
+            assert!(insert_permission_in(tx, &p("d1", "p1", 100), 1)?);
+            // the same request of the same attempt again (a replay) is not a second card
+            assert!(!insert_permission_in(tx, &p("d1b", "p1", 100), 1)?);
+            assert!(insert_permission_in(tx, &p("d2", "p2", 500), 1)?);
+            let r = permission_in(tx, "n", "a", "p1")?.unwrap();
+            assert_eq!((r.decision.as_str(), r.state.as_str()), ("d1", "waiting"));
+            assert!(permission_in(tx, "n", "other", "p1")?.is_none());
+            let due: Vec<String> = due_permissions_in(tx, 200, 10)?
+                .into_iter()
+                .map(|r| r.decision)
+                .collect();
+            assert_eq!(due, ["d1"]);
+            assert!(permission_cas_in(
+                tx,
+                "d1",
+                r.revision,
+                "answering",
+                None,
+                2
+            )?);
+            // a stale revision changes nothing
+            assert!(!permission_cas_in(
+                tx, "d1", r.revision, "expired", None, 2
+            )?);
+            assert!(
+                due_permissions_in(tx, 1_000, 10)?
+                    .iter()
+                    .all(|r| r.decision == "d2")
+            );
+            assert_eq!(permissions_of_attempt_in(tx, "a")?.len(), 2);
+            let r2 = permission_of_decision_in(tx, "d2")?.unwrap();
+            assert!(permission_cas_in(
+                tx,
+                "d2",
+                r2.revision,
+                "applied",
+                None,
+                3
+            )?);
+            let open: Vec<String> = permissions_of_attempt_in(tx, "a")?
+                .into_iter()
+                .map(|r| r.decision)
+                .collect();
+            assert_eq!(open, ["d1"]);
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn desired_config_round_trip_leaves_the_revision_and_configuring_is_a_phase() {
+    let t = fresh();
+    ready(&t);
+    t.store
+        .transaction::<_, StoreError>(|tx| {
+            assert_eq!(desired_config_in(tx, "s")?, None);
+            let rev: i64 = tx.query_row(
+                "SELECT revision FROM runtime_sessions WHERE session_id='s'",
+                [],
+                |r| r.get(0),
+            )?;
+            set_desired_config_in(tx, "s", Some(&json!({"x": 1})), 5)?;
+            assert_eq!(desired_config_in(tx, "s")?, Some(json!({"x": 1})));
+            let after: i64 = tx.query_row(
+                "SELECT revision FROM runtime_sessions WHERE session_id='s'",
+                [],
+                |r| r.get(0),
+            )?;
+            assert_eq!(rev, after);
+            set_desired_config_in(tx, "s", None, 6)?;
+            assert_eq!(desired_config_in(tx, "s")?, None);
+            let configuring = SessionUpdate {
+                phase: "configuring",
+                active_attempt: None,
+                release_pending: false,
+            };
+            assert!(session_cas_in(tx, "s", after, &configuring, 7)?);
+            let bad = SessionUpdate {
+                phase: "nonsense",
+                active_attempt: None,
+                release_pending: false,
+            };
+            assert!(session_cas_in(tx, "s", after + 1, &bad, 7).is_err());
             Ok(())
         })
         .unwrap();

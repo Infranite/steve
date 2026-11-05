@@ -34,6 +34,11 @@ pub struct TurnEnd {
 
 /// The ACP runner (acp.ts): per-session adapter processes, the prompt queue, permissions, and the release hold.
 pub trait AgentRuntime: Send + Sync {
+    /// A session was just created (before its first prompt): the runtime may fix its backend now.
+    /// Only new sessions are ever bound here; existing ones keep the backend they have.
+    fn created(&self, session_id: &str) {
+        let _ = session_id;
+    }
     /// Send now or queue behind the running turn (or behind the release hold). Writes the `queued`
     /// row/event itself (with the files). Attachments are copied into the session cwd and named in the
     /// prompt (see [`crate::attachments::for_agent`]). Errors only when the session does not exist (`no session`).
@@ -64,6 +69,11 @@ pub trait AgentRuntime: Send + Sync {
     /// next start applies the mode anyway).
     fn set_mode(&self, session_id: &str, mode: &str) -> bool {
         let _ = (session_id, mode);
+        false
+    }
+    /// The session's last attempt has an outcome nobody can tell yet (reconciliation decides).
+    fn uncertain(&self, session_id: &str) -> bool {
+        let _ = session_id;
         false
     }
     /// The pid of the session's live agent adapter (its process group leader), if one runs.

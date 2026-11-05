@@ -29,6 +29,10 @@ pub struct FakeState {
     pub files: Vec<(String, Vec<crate::repo::FileRef>)>,
     /// Per `flush`: whether it ran inside a tokio runtime (the real runtime spawns the turn there).
     pub flush_in_runtime: Vec<bool>,
+    /// Sessions whose last attempt's outcome nobody can tell ([`AgentRuntime::uncertain`]).
+    pub uncertain: HashSet<String>,
+    /// `flush` takes nothing and answers false (a session still opening, say).
+    pub flush_stuck: bool,
 }
 
 /// acp.ts in miniature: turns are tracked, prompts queue behind a running turn or the hold, and a test
@@ -173,6 +177,9 @@ impl AgentRuntime for FakeRuntime {
     fn running_turns(&self) -> usize {
         self.st().turning.len()
     }
+    fn uncertain(&self, sid: &str) -> bool {
+        self.st().uncertain.contains(sid)
+    }
     fn flush(&self, sid: &str, lead: Option<(&str, &str)>) -> bool {
         let sent = self.flush_now(sid, lead);
         self.flushed.notify_one();
@@ -185,7 +192,7 @@ impl FakeRuntime {
         let mut st = self.st();
         st.flush_in_runtime
             .push(tokio::runtime::Handle::try_current().is_ok());
-        if st.turning.contains(sid) || st.holding {
+        if st.turning.contains(sid) || st.holding || st.flush_stuck {
             return false;
         }
         let mut seen = HashSet::new();

@@ -41,6 +41,11 @@ pub(crate) struct Endpoint {
     tokens: Mutex<HashMap<String, SessionId>>,
     current: Arc<dyn Current>,
     calls: AtomicU64,
+    /// Random per process. The Hub keys its durable tool journal by (execution, CallId), and an
+    /// execution can outlive this process (it is in the Node journal), so a bare counter would
+    /// repeat `mcp0` after a restart and get the earlier call's result back for a call that never
+    /// ran. With the boot id in it, a CallId is never issued twice.
+    boot: String,
 }
 
 impl Endpoint {
@@ -50,7 +55,14 @@ impl Endpoint {
             tokens: Mutex::new(HashMap::new()),
             current,
             calls: AtomicU64::new(0),
+            boot: boot_id(),
         })
+    }
+
+    /// A CallId unique across restarts of this Node: `mcp-<boot>-<n>`.
+    fn next_call(&self) -> Result<CallId, BadId> {
+        let n = self.calls.fetch_add(1, Ordering::SeqCst);
+        CallId::new(format!("mcp-{}-{n}", self.boot))
     }
 
     pub fn connect(&self, hub: Arc<dyn HubTools>) {
@@ -99,6 +111,28 @@ impl Endpoint {
         });
         Ok(format!("http://{addr}/mcp"))
     }
+}
+
+/// 128 random bits from the OS; if that is unavailable, a digest of the clock, pid and an address,
+/// which still differs between two processes.
+fn boot_id() -> String {
+    use sha2::Digest as _;
+    use std::io::Read as _;
+    let mut b = [0u8; 16];
+    if std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut b))
+        .is_ok()
+    {
+        return hex::encode(b);
+    }
+    let local = 0u8;
+    let seed = format!(
+        "{:?}:{}:{:p}",
+        std::time::SystemTime::now(),
+        std::process::id(),
+        &local
+    );
+    hex::encode(&sha2::Sha256::digest(seed.as_bytes())[..16])
 }
 
 #[derive(Clone)]
@@ -255,8 +289,9 @@ impl ServerHandler for Handler {
         let session = Self::authed(&ctx)?;
         let exec = self.execution(&session)?;
         let hub = self.hub()?;
-        let n = self.ep.calls.fetch_add(1, Ordering::SeqCst);
-        let id = CallId::new(format!("mcp{n}"))
+        let id = self
+            .ep
+            .next_call()
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         let catalog = hub
             .catalog(exec.clone())
@@ -281,5 +316,32 @@ impl ServerHandler for Handler {
             Err(e) => CallToolResult::error(text(e.safe_detail)),
         };
         Ok(CallToolResponse::Complete(result))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Nobody;
+    impl Current for Nobody {
+        fn execution(&self, _: &SessionId) -> Option<ExecutionRef> {
+            None
+        }
+    }
+
+    /// A restarted Node (a new Endpoint) must not hand out a CallId the previous process already
+    /// used: the Hub would return that call's saved result for a call that never ran.
+    #[test]
+    fn call_ids_do_not_repeat_across_restarts() {
+        let a = Endpoint::new(Arc::new(Nobody));
+        let first: Vec<CallId> = (0..3).map(|_| a.next_call().unwrap()).collect();
+        drop(a);
+        let b = Endpoint::new(Arc::new(Nobody));
+        let again: Vec<CallId> = (0..3).map(|_| b.next_call().unwrap()).collect();
+        for id in &again {
+            assert!(!first.contains(id), "{id} reused after restart");
+        }
+        assert_ne!(first[0], first[1]);
     }
 }
