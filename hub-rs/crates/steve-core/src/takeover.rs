@@ -13,7 +13,8 @@
 //!
 //! A required release of a project with a completion rule is the rule itself: met when the remote shows
 //! it, re-checked while the item waits to close. The build the tag starts is followed on its own
-//! ([`OP_BUILD`]): it never holds the close, and only a failed build is worth telling you about.
+//! ([`OP_BUILD`]): it holds the close only when the item's goal asks for the build to pass
+//! ([`crate::proof`]), and only a failed build is worth telling you about.
 
 use std::path::Path;
 use std::time::Duration;
@@ -319,10 +320,15 @@ impl Tx<'_> {
                 {
                     return Ok(());
                 }
-                if p.met {
+                /* the goal asks for an actual operation: the remote alone is not that evidence (`proof`) */
+                let operate = self.needs_of(&i)?.operate;
+                if p.met && !operate {
                     return self.takeover_close(&i, rule, &p);
                 }
-                let text = continue_text(&stop, Some(rule), Some(&p), &i);
+                let mut text = continue_text(&stop, Some(rule), Some(&p), &i);
+                if p.met {
+                    text.push_str("这个事项的目标还要求实际操作验证：在运行中的环境里亲手操作一遍，用 steve_deliver 交付，并把那条检查标成 `operated: true`。");
+                }
                 if let Some(why) = self.takeover_continue(&i, &session, stop.why(), &text)? {
                     let why = format!("{why}（Steve 核对：{}）", p.summary());
                     self.fail(item_id, &why)?;
@@ -379,7 +385,8 @@ impl Tx<'_> {
                 &format!("Steve 核对：{what}；按约定（{}）算完成", rule_text(rule)),
                 None,
             )?;
-            self.track_build(i, &p)?;
+            let required = self.build_required(i)?;
+            self.track_build(i, &p, required)?;
             return Ok(());
         }
         /* not there yet: the agent hears once what is missing; Steve keeps looking while it waits */
@@ -398,10 +405,15 @@ impl Tx<'_> {
                     item: Some(i.id.clone()),
                 },
             };
+            let build = if self.build_required(i)? {
+                "Release 构建不用在回合里等，Steve 会跟踪；这个事项的目标要求构建通过，构建成功后才算完成"
+            } else {
+                "Release 构建不用等，Steve 会单独跟踪"
+            };
             self.send(
                 &to,
                 &format!(
-                    "验收通过。按这个项目的约定，{}后事项才算完成；现在还差：{}。推送、开 PR、合并、打 tag 是对外动作，先用 steve_request_approval 请求批准；Release 构建不用等，Steve 会单独跟踪。做完后结束这一回合即可，Steve 会自己核对远端。",
+                    "验收通过。按这个项目的约定，{}后事项才算完成；现在还差：{}。推送、开 PR、合并、打 tag 是对外动作，先用 steve_request_approval 请求批准；{build}。做完后结束这一回合即可，Steve 会自己核对远端。",
                     rule_text(rule),
                     p.summary()
                 ),
@@ -410,28 +422,33 @@ impl Tx<'_> {
         Ok(())
     }
 
-    /// The build the completion tag started is followed from now on (once per tag).
-    fn track_build(&mut self, i: &Item, p: &Probe) -> Result<()> {
+    /// The build the completion tag started is followed from now on: once per tag, or, `required` by the
+    /// item's goal, once per result it has to prove.
+    fn track_build(&mut self, i: &Item, p: &Probe, required: bool) -> Result<()> {
         let (Some((tag, commit)), Some(slug)) = (&p.tag, &p.slug) else {
             return Ok(());
+        };
+        let key = if required {
+            format!("{OP_BUILD}:{tag}:{}:{}", i.cycle, i.revision)
+        } else {
+            format!("{OP_BUILD}:{tag}")
         };
         let (_, new) = self.lc_op_add(
             i,
             OP_BUILD,
-            Some(&format!("{OP_BUILD}:{tag}")),
-            false,
+            Some(&key),
+            required,
             "running",
             &format!("Release 构建（{tag}）"),
             json!({"tag": tag, "commit": commit, "slug": slug, "since": now()}),
         )?;
         if new {
-            self.db().timeline_add(
-                &i.id,
-                "steve",
-                "sys",
-                &format!("开始单独跟踪 {tag} 的 Release 构建；它的结果不影响事项完成"),
-                None,
-            )?;
+            let line = if required {
+                format!("开始跟踪 {tag} 的 Release 构建；事项目标要求构建通过，构建成功后才算完成")
+            } else {
+                format!("开始单独跟踪 {tag} 的 Release 构建；它的结果不影响事项完成")
+            };
+            self.db().timeline_add(&i.id, "steve", "sys", &line, None)?;
         }
         Ok(())
     }
@@ -506,6 +523,14 @@ impl Tx<'_> {
                 true,
             ),
         };
+        /* the goal asked for this build (`proof`): giving up on it is no evidence that it passed */
+        let o = self.db().store().items().operation(op)?;
+        let required = o.as_ref().is_some_and(|o| o.required);
+        let status = if required && status == "waived" {
+            "failed"
+        } else {
+            status
+        };
         /* a status is set once: a second look at the same outcome changes and tells nothing */
         let changed = self
             .db()
@@ -516,6 +541,16 @@ impl Tx<'_> {
             return Ok(());
         }
         self.db().timeline_add(item, "steve", "sys", &line, None)?;
+        if required {
+            /* only the result it was asked for waits on it: a result delivered since has its own */
+            let current = self.db().item(item)?.is_some_and(|i| {
+                i.phase == CLOSING && o.as_ref().is_some_and(|o| o.revision == i.revision)
+            });
+            if current {
+                return self.build_settled(item, &line, status != "succeeded");
+            }
+            return Ok(());
+        }
         if tell {
             flow_quiet(
                 self.db(),

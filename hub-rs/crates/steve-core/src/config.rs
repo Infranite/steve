@@ -47,6 +47,11 @@ pub struct CoreConfig {
     pub takeover_continues: u32,
     /// `STEVE_GH`: the GitHub CLI that follows Release builds.
     pub gh: PathBuf,
+    /// The version this Hub runs (`dev` when unknown): what an item whose goal asks for it to run here
+    /// is checked against (`proof`).
+    pub version: String,
+    /// The commit this Hub was built from, when the build says.
+    pub commit: Option<String>,
     /// Disk thresholds for the worktrees' volume (`workspace`).
     pub disk: crate::workspace::DiskPolicy,
 }
@@ -120,6 +125,7 @@ impl CoreConfig {
         c.no_resume = std::env::var("STEVE_NO_RESUME").is_ok_and(|v| v == "1");
         c.debug_route = std::env::var("STEVE_DEBUG_ROUTE").is_ok_and(|v| !v.is_empty());
         c.disk = crate::workspace::DiskPolicy::from_env();
+        c.version = env("STEVE_VERSION", "dev");
         c
     }
 
@@ -148,6 +154,8 @@ impl CoreConfig {
             no_resume: false,
             takeover_continues: 2,
             gh: gh_cli(),
+            version: "dev".into(),
+            commit: None,
             disk: Default::default(),
         }
     }

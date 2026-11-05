@@ -220,6 +220,7 @@ fn a_no_to_the_release_holds_for_every_later_result_of_the_cycle() {
                     &[Check {
                         name: "tests".into(),
                         passed: true,
+                        operated: false,
                     }],
                     &[],
                 )
@@ -457,6 +458,7 @@ fn auto_accepted_with_a_release_pending_is_not_done_either() {
             &[Check {
                 name: "tests".into(),
                 passed: true,
+                operated: false,
             }],
             &[],
         )
@@ -489,6 +491,7 @@ fn auto_accept_without_release_finishes_and_failed_checks_ask() {
             &[Check {
                 name: "tests".into(),
                 passed: false,
+                operated: false,
             }],
             &[],
         )
@@ -521,6 +524,7 @@ fn auto_accept_without_release_finishes_and_failed_checks_ask() {
     let pass = Check {
         name: "tests".into(),
         passed: true,
+        operated: false,
     };
     k.core.tool_deliver(&s, "ok3", &[], &[pass], &[]).unwrap();
     assert_eq!(k.status(&x.id).0, "done");

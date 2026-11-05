@@ -1215,6 +1215,7 @@ impl steve_mcp::Backend for CoreMcp {
             .map(|x| steve_core::Check {
                 name: x.name,
                 passed: x.passed,
+                operated: x.operated,
             })
             .collect();
         let unfinished = unfinished.unwrap_or_default();

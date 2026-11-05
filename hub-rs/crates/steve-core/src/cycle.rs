@@ -52,7 +52,8 @@ pub const CLOSED_MSG: &str = "这个事项已经结束了，需要时先新建�
 /// Operation kinds the core knows. Modules' wrap-ups (a PR merge) run as `hooks.accepted`.
 pub const OP_RELEASE: &str = "release";
 pub const OP_HOOKS: &str = "hooks.accepted";
-/// A build the completion tag triggered (a GitHub Release): followed on its own, never holds a close.
+/// A build the completion tag triggered (a GitHub Release): followed on its own; it holds the close
+/// only when the item's goal asks for the build to pass (`proof`, then it is required).
 pub const OP_BUILD: &str = "release.build";
 
 /// A closing intent while `phase = closing`.
@@ -448,6 +449,8 @@ impl Tx<'_> {
             }
         }
         self.release_requirement(&i, &c)?;
+        /* what the item's own goal asks to be shown (ST-57): the result running here */
+        self.deploy_requirement(&i, &c)?;
         Ok(())
     }
 
@@ -722,6 +725,15 @@ impl Tx<'_> {
         }
         for o in self.db().store().items().operations(&i.id, i.cycle)? {
             if o.kind == OP_BUILD {
+                /* followed on its own, unless the goal asks for the build to pass: then this result's build
+                 * is one of its requirements */
+                if c.kind == COMPLETE
+                    && o.required
+                    && o.revision == i.revision
+                    && !matches!(o.status.as_str(), "succeeded" | "waived")
+                {
+                    g.operation = true;
+                }
                 continue;
             }
             /* any effect of this cycle still in flight or of unknown result holds every kind of closing, whatever
@@ -1082,6 +1094,16 @@ pub(crate) fn lifecycle_view(t: &Tx, i: &Item) -> Result<Value> {
         }
         for o in t.db().store().items().operations(&i.id, i.cycle)? {
             match o.status.as_str() {
+                /* the evidence the item's goal asks for, said by name (ST-57) */
+                "pending" | "running"
+                    if o.required
+                        && o.revision == i.revision
+                        && i.phase == CLOSING
+                        && matches!(o.kind.as_str(), OP_BUILD | crate::proof::OP_DEPLOY) =>
+                {
+                    let done = if o.kind == OP_BUILD { "成功" } else { "" };
+                    push("operation", format!("正在结束：等{}{done}", o.label))
+                }
                 "running" if o.kind == OP_BUILD => {}
                 "running" => active += 1,
                 "unknown" => push("unknown_effect", format!("{}：结果未知，待核对", o.label)),

@@ -865,7 +865,7 @@ impl Tx<'_> {
                 .filter(|r| *r == crate::upstream::DONE_MERGE || *r == crate::upstream::DONE_TAG)
             {
                 lines.push(format!(
-                    "- Done in this project means: {}. Once the user accepted your delivery, that is all that is left; a CI or Release build it starts is followed by Steve on its own — do not wait for it, end your turn. Steve checks the remote itself; never merge, tag or push again what already is there.",
+                    "- Done in this project means: {}. Once the user accepted your delivery, that is all that is left unless this item's goal asks for more (below); a CI or Release build it starts is followed by Steve on its own — do not wait for it, end your turn. Steve checks the remote itself; never merge, tag or push again what already is there.",
                     if rule == crate::upstream::DONE_TAG {
                         "your commits are merged into the remote's default branch (the PR is merged) and a tag containing them is pushed"
                     } else {
@@ -873,6 +873,10 @@ impl Tx<'_> {
                     }
                 ));
             }
+        }
+        /* what the item's own goal asks to be shown before it closes (ST-57) */
+        if let Some(l) = self.proof_line(item)? {
+            lines.push(l);
         }
         lines.push("Do the work yourself; do not stop to ask for confirmation you don't need. Reply to the user in Chinese.".into());
         lines.retain(|l| !l.is_empty());
@@ -1336,6 +1340,10 @@ impl Tx<'_> {
                 open.join("; ")
             )));
         }
+        /* the goal asks for an actual operation: a delivery shows one (ST-57) */
+        if let Some(why) = self.proof_refused(&item, checks)? {
+            return Err(msg(why));
+        }
         /* a new delivery also replaces an older one still waiting for acceptance */
         supersede(
             self.db(),
@@ -1371,7 +1379,7 @@ impl Tx<'_> {
                 "\n\n检查：{}",
                 checks
                     .iter()
-                    .map(|c| format!("{} {}", if c.passed { "✓" } else { "✗" }, c.name))
+                    .map(crate::proof::check_line)
                     .collect::<Vec<_>>()
                     .join("；")
             )
@@ -1380,10 +1388,7 @@ impl Tx<'_> {
             .timeline_add(item_id, &Self::by(s), "sys", "交付，等你验收", Some(&s.id))?;
         /* the acceptance policy: automatic needs evidence (checks, all passed) and nothing left open;
          * without it a human decides. Waived records that nobody confirmed. */
-        let evidence: Vec<String> = checks
-            .iter()
-            .map(|c| format!("{} {}", if c.passed { "✓" } else { "✗" }, c.name))
-            .collect();
+        let evidence: Vec<String> = checks.iter().map(crate::proof::check_line).collect();
         let policy = match self.accept_of(&item)?.as_str() {
             "waived" => crate::cycle::Policy::Waived,
             "auto" if !checks.is_empty() && checks.iter().all(|c| c.passed) && left.is_empty() => {

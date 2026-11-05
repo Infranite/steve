@@ -101,4 +101,7 @@ pub struct Output {
 pub struct Check {
     pub name: String,
     pub passed: bool,
+    /// Something the agent actually did on the running thing, not a build or a test (`proof`).
+    #[serde(default)]
+    pub operated: bool,
 }
