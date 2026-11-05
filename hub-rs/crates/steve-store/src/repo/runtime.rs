@@ -317,8 +317,10 @@ pub struct CommandLease {
 /// Leases are worker fences, not execution identities. Only pending commands are sent. Accepted or
 /// unknown commands require operation lookup/reconciliation, not a fresh execution. A dependency
 /// must have a successful final receipt; the caller explicitly sets success via merge_receipt_in.
+/// Only `node`'s commands: one coordinator per Node shares the store with the others.
 pub fn lease_command_in(
     tx: &Tx<'_>,
+    node: &str,
     owner: &str,
     now: i64,
     until: i64,
@@ -327,8 +329,8 @@ pub fn lease_command_in(
         return Err(conflict("invalid lease"));
     }
     let row: Option<(String,String,String,String,String,i64)>=tx.query_row(
-        "SELECT c.operation_id,c.node_id,c.method,c.request,c.digest,c.lease_generation FROM node_commands c WHERE c.state='pending' AND c.retry_at<=? AND (c.lease_until IS NULL OR c.lease_until<=?) AND (c.dependency_operation IS NULL OR EXISTS(SELECT 1 FROM node_commands d WHERE d.operation_id=c.dependency_operation AND d.state='finished' AND json_extract(d.receipt,'$.success')=1)) ORDER BY c.created,c.rowid LIMIT 1",
-        params![now,now],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?))).optional()?;
+        "SELECT c.operation_id,c.node_id,c.method,c.request,c.digest,c.lease_generation FROM node_commands c WHERE c.node_id=? AND c.state='pending' AND c.retry_at<=? AND (c.lease_until IS NULL OR c.lease_until<=?) AND (c.dependency_operation IS NULL OR EXISTS(SELECT 1 FROM node_commands d WHERE d.operation_id=c.dependency_operation AND d.state='finished' AND json_extract(d.receipt,'$.success')=1)) ORDER BY c.created,c.rowid LIMIT 1",
+        params![node,now,now],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?))).optional()?;
     let Some((operation, node, method, request, digest, generation)) = row else {
         return Ok(None);
     };
@@ -781,12 +783,17 @@ pub fn permission_cas_in(
     )? == 1)
 }
 
-/// Waiting requests whose expiry has come, oldest first.
-pub fn due_permissions_in(tx: &Tx<'_>, now: i64, limit: i64) -> Result<Vec<PermissionRow>> {
+/// `node`'s waiting requests whose expiry has come, oldest first.
+pub fn due_permissions_in(
+    tx: &Tx<'_>,
+    node: &str,
+    now: i64,
+    limit: i64,
+) -> Result<Vec<PermissionRow>> {
     permissions(
         tx,
-        "WHERE state='waiting' AND expires_at<=? ORDER BY expires_at LIMIT ?",
-        params![now, limit],
+        "WHERE node_id=? AND state='waiting' AND expires_at<=? ORDER BY expires_at LIMIT ?",
+        params![node, now, limit],
     )
 }
 

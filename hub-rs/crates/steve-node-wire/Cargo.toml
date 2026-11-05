@@ -1,0 +1,26 @@
+[package]
+name = "steve-node-wire"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+description = "The Hub-Node transport: one WebSocket per Node carrying the steve-node-api ports as RPC both ways. No store, no core, no agent protocol."
+
+[dependencies]
+async-trait = "=0.1.92"
+ed25519-dalek = "=2.2.0"
+futures-util = { version = "=0.3.34", default-features = false, features = ["sink", "std"] }
+getrandom = "=0.3.4"
+hex = "=0.4.3"
+rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std", "logging", "tls12"] }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = { version = "=1.0.154", features = ["preserve_order"] }
+sha2 = "=0.11.1"
+steve-node-api = { path = "../steve-node-api" }
+tokio = { version = "=1.54.1", features = ["rt", "sync", "time", "macros", "net", "io-util"] }
+tokio-tungstenite = { version = "=0.30.0", default-features = false, features = ["connect", "handshake", "rustls-tls-webpki-roots"] }
+tracing = "=0.1.44"
+webpki-roots = "=0.26.11"
+
+[dev-dependencies]
+steve-node-api = { path = "../steve-node-api", features = ["testkit"] }
+tokio = { version = "=1.54.1", features = ["rt-multi-thread", "macros", "time", "sync", "test-util"] }

@@ -63,7 +63,9 @@ async fn main() -> anyhow::Result<()> {
     let bus = Bus::new();
     let w = steve_hub::wire::wire(&cfg, &bus)?;
     *supervised_domain.lock().unwrap_or_else(|e| e.into_inner()) = Some(w.domain.clone());
-    let st = AppState::new(cfg.clone(), w.backend, w.domain, bus).with_modules(w.modules);
+    let st = AppState::new(cfg.clone(), w.backend, w.domain, bus)
+        .with_modules(w.modules)
+        .with_nodes(w.nodes);
     steve_hub::app::boot(&st).await?;
 
     for job in w.jobs {

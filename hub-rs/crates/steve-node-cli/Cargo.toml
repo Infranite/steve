@@ -1,0 +1,30 @@
+[package]
+name = "steve-node-cli"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+description = "The steve-node binary: a LocalNode on this machine, paired with a Hub and dialling it over steve-node-wire."
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "steve-node"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "=1.0.104"
+hex = "=0.4.3"
+reqwest = { version = "=0.12.28", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = { version = "=1.0.154", features = ["preserve_order"] }
+steve-acp = { path = "../steve-acp" }
+steve-node = { path = "../steve-node" }
+steve-node-api = { path = "../steve-node-api" }
+steve-node-wire = { path = "../steve-node-wire" }
+tokio = { version = "=1.54.1", features = ["rt-multi-thread", "macros", "time", "sync", "signal", "io-std", "io-util"] }
+tracing = "=0.1.44"
+tracing-subscriber = { version = "=0.3.23", features = ["env-filter", "fmt"] }
+
+[dev-dependencies]
+tempfile = "=3.27.0"

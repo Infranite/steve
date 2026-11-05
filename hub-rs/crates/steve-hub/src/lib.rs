@@ -13,6 +13,7 @@ pub mod error;
 pub mod files;
 pub mod jobs;
 pub mod js;
+pub mod nodes;
 pub mod notify;
 pub mod price_sync;
 pub mod recovery;

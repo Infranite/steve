@@ -108,9 +108,7 @@ impl AcpConfig {
                 ("claude-code".to_owned(), claude),
                 ("codex".to_owned(), codex),
             ]),
-            // `STEVE_NODE=local` switches on the local Steve Node; it is not a Node.js binary
             node: var("STEVE_NODE")
-                .filter(|v| v.as_os_str() != "local")
                 .or_else(|| which("node"))
                 .unwrap_or_else(|| PathBuf::from("node")),
             claude_executable: var("CLAUDE_CODE_EXECUTABLE")

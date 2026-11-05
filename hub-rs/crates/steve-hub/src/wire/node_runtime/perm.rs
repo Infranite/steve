@@ -322,7 +322,7 @@ impl NodeRuntime {
     pub(super) fn expire_due(&self) -> bool {
         let r = self.tx(|tx| {
             let mut queued = false;
-            for row in rt::due_permissions_in(tx, now(), SWEEP)? {
+            for row in rt::due_permissions_in(tx, self.node_id.as_str(), now(), SWEEP)? {
                 queued |= self.expire_card_in(tx, &row, EXPIRED)?;
             }
             Ok(queued)

@@ -134,6 +134,8 @@ pub struct NodeRuntime {
     wake_send: Arc<tokio::sync::Notify>,
     wake_apply: Arc<tokio::sync::Notify>,
     holding: AtomicBool,
+    /// The owner paused the Node ([`Self::set_paused`]).
+    paused: AtomicBool,
     /// Set once the Hub has reconciled with the Node since it started: nothing is planned before.
     reconciled: AtomicBool,
     /// Turn ends settled outside the apply worker (a local cancel), told by it after the commit.
@@ -228,6 +230,7 @@ impl NodeRuntime {
             wake_send: Arc::new(tokio::sync::Notify::new()),
             wake_apply: Arc::new(tokio::sync::Notify::new()),
             holding: AtomicBool::new(false),
+            paused: AtomicBool::new(false),
             reconciled: AtomicBool::new(false),
             ended_later: Mutex::new(vec![]),
             dirty: Mutex::new(HashSet::new()),
@@ -519,8 +522,8 @@ impl NodeRuntime {
         self.store
             .reader(|c| {
                 Ok::<_, StoreError>(c.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM runtime_sessions WHERE session_id=?)",
-                    [session],
+                    "SELECT EXISTS(SELECT 1 FROM runtime_sessions WHERE session_id=? AND node_id=?)",
+                    [session, self.node_id.as_str()],
                     |r| r.get::<_, bool>(0),
                 )?)
             })
@@ -808,8 +811,8 @@ impl NodeRuntime {
             .reader(|c| {
                 Ok::<_, StoreError>(c.query_row(
                     // a harness restarting for a configure counts: a drain waits for it
-                    "SELECT (SELECT COUNT(*) FROM runtime_turns WHERE state<>'finished') + (SELECT COUNT(*) FROM runtime_sessions WHERE phase='configuring')",
-                    [],
+                    "SELECT (SELECT COUNT(*) FROM runtime_turns t JOIN runtime_sessions s USING(session_id) WHERE s.node_id=?1 AND t.state<>'finished') + (SELECT COUNT(*) FROM runtime_sessions WHERE node_id=?1 AND phase='configuring')",
+                    [self.node_id.as_str()],
                     |r| r.get::<_, i64>(0),
                 )?)
             })
@@ -820,8 +823,33 @@ impl NodeRuntime {
         self.holding.store(on, Ordering::SeqCst);
     }
 
+    /// The owner paused this Node: nothing new is planned for it until it is resumed. Kept apart
+    /// from [`Self::hold`] (the Hub's release hold), so that one never lifts the other.
+    pub fn set_paused(self: &Arc<Self>, on: bool) {
+        if self.paused.swap(on, Ordering::SeqCst) == on || on {
+            return;
+        }
+        // resumed: what waited in the queue meanwhile is planned now (once reconciled)
+        if self.reconciled.load(Ordering::SeqCst) {
+            let me = self.clone();
+            match tokio::runtime::Handle::try_current() {
+                Ok(h) => {
+                    h.spawn_blocking(move || me.plan_waiting());
+                }
+                Err(_) => me.plan_waiting(),
+            }
+        }
+    }
+
     pub fn is_holding(&self) -> bool {
-        self.holding.load(Ordering::SeqCst) || self.store.maintenance()
+        self.holding.load(Ordering::SeqCst)
+            || self.paused.load(Ordering::SeqCst)
+            || self.store.maintenance()
+    }
+
+    /// The Node this coordinator drives.
+    pub fn node_id(&self) -> &NodeId {
+        &self.node_id
     }
 
     /// The session's open turn has an outcome nobody can tell yet (reconciliation decides).
@@ -1019,15 +1047,22 @@ impl NodeRuntime {
 
     /// Leases one command, sends it and merges what came back. False: nothing to send.
     async fn send_one(&self) -> bool {
-        let lease =
-            match self.tx(|tx| rt::lease_command_in(tx, &self.owner, now(), now() + LEASE_MS)) {
-                Ok(Some(l)) => l,
-                Ok(None) => return false,
-                Err(e) => {
-                    tracing::error!("node command lease: {e}");
-                    return false;
-                }
-            };
+        let lease = match self.tx(|tx| {
+            rt::lease_command_in(
+                tx,
+                self.node_id.as_str(),
+                &self.owner,
+                now(),
+                now() + LEASE_MS,
+            )
+        }) {
+            Ok(Some(l)) => l,
+            Ok(None) => return false,
+            Err(e) => {
+                tracing::error!("node command lease: {e}");
+                return false;
+            }
+        };
         let sent = self.send(&lease).await;
         // a turn end to report, and a session whose configure was refused for a stale revision
         let r = self.tx(|tx| match &sent {
@@ -1502,6 +1537,24 @@ impl NodeRuntime {
         self.may_plan()
     }
 
+    /// The Node restarted (a new incarnation) while this Hub ran: nothing new is planned until the
+    /// Hub has reconciled with it again (what it cannot tell the end of becomes `unknown`, never
+    /// re-run); then what waited in the queue goes.
+    pub async fn reconcile_again(self: &Arc<Self>) -> ApiResult<usize> {
+        self.reconciled.store(false, Ordering::SeqCst);
+        let n = self.reconcile().await?;
+        if n > 0 {
+            tracing::info!(
+                "node {}: reconciled after its restart, {n} changed",
+                self.node_id
+            );
+        }
+        self.reconciled.store(true, Ordering::SeqCst);
+        let me = self.clone();
+        let _ = tokio::task::spawn_blocking(move || me.plan_waiting()).await;
+        Ok(n)
+    }
+
     /// What waited in the queue while the Hub was not reconciled goes now.
     fn plan_waiting(&self) {
         let sessions: Vec<String> = self
@@ -1594,16 +1647,22 @@ impl NodeRuntime {
             .tx(|tx| {
                 let mut changed = 0;
                 // 1. commands: what the Node says of each one in flight
-                let cmds: Vec<(String, String, String)> = {
+                let cmds: Vec<(String, String, String, String)> = {
                     let mut st = tx.prepare(
-                        "SELECT operation_id, state, digest FROM node_commands WHERE node_id=? AND state IN ('pending','accepted','active','unknown') ORDER BY created, rowid",
+                        "SELECT operation_id, state, method, request FROM node_commands WHERE node_id=? AND state IN ('pending','accepted','active','unknown') ORDER BY created, rowid",
                     )?;
                     st.query_map([self.node_id.as_str()], |r| {
-                        Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+                        Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
                     })?
                     .collect::<Result<Vec<_>, _>>()?
                 };
-                for (op, state, digest) in cmds {
+                for (op, state, method, request) in cmds {
+                    // the Node keeps the command's content hash as it computes it (method and
+                    // business fields, not the id), not the Hub's hash of the stored envelope
+                    let digest = serde_json::from_str::<Command<Value>>(&request)
+                        .map_err(conflict)?
+                        .digest(&method)
+                        .map_err(conflict)?;
                     let unknown = |reason: &str| -> Result<Receipt, StoreError> {
                         Ok(Receipt {
                             operation: idv(op.clone())?,
@@ -1613,7 +1672,7 @@ impl NodeRuntime {
                         })
                     };
                     let receipt = match entries.get(&op) {
-                        Some(e) if e.digest.as_str() == digest => e.receipt.clone(),
+                        Some(e) if e.digest == digest && e.method == method => e.receipt.clone(),
                         Some(_) => unknown("the Node holds another command under this id")?,
                         // never got there: the sender sends the very same command
                         None if state == "pending" => continue,
@@ -2659,7 +2718,7 @@ pub fn bound(store: &Store, session: &str) -> bool {
         .unwrap_or(true)
 }
 
-/// A message for a Node-bound session while its Node is not enabled here (STEVE_NODE off): it is
+/// A message for a Node-bound session while its Node is not enabled here (STEVE_NODE_MODE off): it is
 /// queued, never given to another backend, and goes once the Node is back and reconciled.
 pub fn park(
     store: &Store,
@@ -2680,7 +2739,7 @@ pub fn park(
                 tx,
                 session,
                 "system",
-                json!({ "text": "该会话绑定在 Node 上，但 Node 未启用（STEVE_NODE），消息已排队，不会交给旧运行器。", "parked": true }),
+                json!({ "text": "该会话绑定在 Node 上，但 Node 未启用（STEVE_NODE_MODE），消息已排队，不会交给旧运行器。", "parked": true }),
                 V1,
                 None,
                 now(),

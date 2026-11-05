@@ -47,6 +47,8 @@ pub struct Inner {
     pub state_cache: misc::StateCache,
     /// The new modules (steve-modules), for config drafts and decisions they own.
     pub modules: Option<steve_modules::Modules>,
+    /// Remote Nodes (`STEVE_NODE_LISTEN=1`): pairing, the `/node/ws` listener, their coordinators.
+    pub nodes: Option<Arc<crate::nodes::NodeService>>,
 }
 
 impl std::ops::Deref for AppState {
@@ -74,6 +76,7 @@ impl AppState {
             runtimes,
             state_cache: Default::default(),
             modules: None,
+            nodes: None,
         }))
     }
 
@@ -82,6 +85,17 @@ impl AppState {
         match Arc::try_unwrap(self.0) {
             Ok(mut inner) => {
                 inner.modules = modules;
+                AppState(Arc::new(inner))
+            }
+            Err(shared) => AppState(shared),
+        }
+    }
+
+    /// The same state with the remote Nodes' service attached (as wired).
+    pub fn with_nodes(self, nodes: Option<Arc<crate::nodes::NodeService>>) -> Self {
+        match Arc::try_unwrap(self.0) {
+            Ok(mut inner) => {
+                inner.nodes = nodes;
                 AppState(Arc::new(inner))
             }
             Err(shared) => AppState(shared),
