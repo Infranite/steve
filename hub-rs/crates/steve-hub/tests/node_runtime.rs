@@ -4480,7 +4480,7 @@ async fn stop_retires_an_unknown_release_and_the_next_message_reopens() {
     h.bind();
     until("ready", || h.phase() == "ready").await;
     h.node.script_once("release_session", Scripted::Unknown);
-    assert!(h.rt.release(S).unwrap());
+    assert!(matches!(h.rt.release(S).unwrap(), Release::Pending(_)));
     until("unknown", || h.last_state("release_session") == "unknown").await;
     assert_eq!(h.phase(), "releasing");
     assert!(h.rt.user_stop(S).unwrap());

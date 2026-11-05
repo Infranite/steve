@@ -681,7 +681,8 @@ impl NodeRuntime {
                 if still.is_none() {
                     return Ok(false);
                 }
-                self.release_in(tx, &s)
+                // only a release that goes out lets a harness go
+                Ok(matches!(self.release_in(tx, &s)?, Release::Pending(_)))
             });
             match r {
                 Ok(true) => {
