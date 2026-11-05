@@ -34,7 +34,6 @@ const REPLAY_BYTES: u32 = steve_node_wire::envelope::BULK_CAP as u32;
 /// reconcile completes for the rest.
 pub(super) const APPLY_WAIT: Duration = Duration::from_secs(30);
 
-
 /// The Node's ledger and stream heads, as of the one moment of one snapshot (all its pages).
 pub struct NodeSnapshot {
     /// By operation id.

@@ -704,7 +704,10 @@ mod tests {
                 "{what:?}"
             );
         }
-        assert!(super::super::node_binding::binding_for(&t.store, "s9", None, &|p| t.node.allows(p)).is_none());
+        assert!(
+            super::super::node_binding::binding_for(&t.store, "s9", None, &|p| t.node.allows(p))
+                .is_none()
+        );
     }
 
     struct Quiet;

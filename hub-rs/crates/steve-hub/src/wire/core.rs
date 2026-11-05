@@ -2067,7 +2067,12 @@ mod routed_tests {
             node: None,
             fleet: None,
             bind_remote: None,
-            workspaces: super::super::workspaces::Workspaces::new(store.clone(), None, None, vec![]),
+            workspaces: super::super::workspaces::Workspaces::new(
+                store.clone(),
+                None,
+                None,
+                vec![],
+            ),
             store,
         }
     }

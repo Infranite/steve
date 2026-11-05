@@ -505,11 +505,7 @@ impl NodeRuntime {
                 self.plan_after_in(tx, &session)?;
             }
             ReceiptState::Unknown => {
-                system_in(
-                    tx,
-                    &session,
-                    &steve_i18n::t!("hub.node.config_unknown"),
-                )?;
+                system_in(tx, &session, &steve_i18n::t!("hub.node.config_unknown"))?;
             }
             _ => {}
         }

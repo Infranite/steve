@@ -689,7 +689,12 @@ mod host_tests {
             host,
             // no local face: the roots are not built again before a bind, so a directory added
             // after boot is still outside them (what `allows` guards)
-            workspaces: super::super::workspaces::Workspaces::new(store.clone(), None, None, vec![]),
+            workspaces: super::super::workspaces::Workspaces::new(
+                store.clone(),
+                None,
+                None,
+                vec![],
+            ),
         };
         let bound = |sid: &str| -> i64 {
             store
