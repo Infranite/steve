@@ -7,6 +7,8 @@ description = "A Steve Node: hosts harnesses on this machine and runs what the H
 
 [dependencies]
 async-trait = "=0.1.92"
+axum = "=0.8.9"
+rmcp = { version = "=3.8.0", default-features = false, features = ["server", "transport-streamable-http-server"] }
 hex = "=0.4.3"
 rusqlite = { version = "=0.40.2", features = ["bundled"] }
 serde = { version = "=1.0.229", features = ["derive"] }
@@ -14,10 +16,11 @@ serde_json = { version = "=1.0.154", features = ["preserve_order"] }
 sha2 = "=0.11.1"
 steve-acp = { path = "../steve-acp" }
 steve-node-api = { path = "../steve-node-api" }
-tokio = { version = "=1.54.1", features = ["rt", "sync", "time", "macros", "process", "fs"] }
+tokio = { version = "=1.54.1", features = ["rt", "sync", "time", "macros", "process", "fs", "net"] }
 tracing = "=0.1.44"
 
 [dev-dependencies]
 steve-node-api = { path = "../steve-node-api", features = ["testkit"] }
+async-trait = "=0.1.92"
 tempfile = "=3.27.0"
 tokio = { version = "=1.54.1", features = ["rt-multi-thread", "macros", "time", "sync"] }

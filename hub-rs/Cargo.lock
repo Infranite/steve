@@ -4987,7 +4987,9 @@ name = "steve-node"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "axum",
  "hex",
+ "rmcp",
  "rusqlite",
  "serde",
  "serde_json",

@@ -9,6 +9,7 @@
 //! `unknown` instead of forgetting it.
 
 mod journal;
+mod tools;
 pub mod workspace;
 
 use std::collections::HashMap;
@@ -97,6 +98,20 @@ struct Inner {
     files: Mutex<Option<Arc<dyn HubFiles>>>,
     wake: tokio::sync::Notify,
     delivering: AtomicBool,
+    /// Steve's tools for this Node's harnesses, and where they reach them.
+    tools: Arc<tools::Endpoint>,
+    tools_url: Mutex<Option<String>>,
+}
+
+/// Which attempt a session runs now, for the tool endpoint.
+struct CurrentOf(std::sync::Weak<Inner>);
+
+impl tools::Current for CurrentOf {
+    fn execution(&self, session: &SessionId) -> Option<ExecutionRef> {
+        let inner = self.0.upgrade()?;
+        let st = inner.st.lock().unwrap_or_else(|e| e.into_inner());
+        st.runs.get(session).map(|r| r.exec.clone())
+    }
 }
 
 /// What a new command's handler decided.
@@ -131,7 +146,7 @@ impl LocalNode {
         std::fs::create_dir_all(&cfg.home)
             .map_err(|e| ApiError::new(ErrorCode::Internal, format!("node home: {e}")))?;
         let (j, incarnation) = Journal::open(&cfg.home.join("node.sqlite3"))?;
-        Ok(LocalNode(Arc::new(Inner {
+        Ok(LocalNode(Arc::new_cyclic(|weak| Inner {
             cfg,
             j,
             incarnation,
@@ -140,7 +155,20 @@ impl LocalNode {
             files: Mutex::new(None),
             wake: tokio::sync::Notify::new(),
             delivering: AtomicBool::new(false),
+            tools: tools::Endpoint::new(Arc::new(CurrentOf(weak.clone()))),
+            tools_url: Mutex::new(None),
         })))
+    }
+
+    /// Serve Steve's tools to this Node's harnesses, answered by `hub`. Sessions started after this
+    /// get them; until then harnesses run without Steve's tools.
+    pub async fn connect_tools(&self, hub: Arc<dyn HubTools>) -> std::io::Result<()> {
+        self.0.tools.connect(hub);
+        if self.0.tools_url.lock().unwrap().is_none() {
+            let url = self.0.tools.serve().await?;
+            *self.0.tools_url.lock().unwrap() = Some(url);
+        }
+        Ok(())
     }
 
     pub fn incarnation(&self) -> u64 {
@@ -426,8 +454,7 @@ impl LocalNode {
                 client_version: &self.0.cfg.acp.version,
                 cwd,
                 resume: row.acp_id.as_deref(),
-                // Steve's tools come through the Node's own endpoint (not wired yet)
-                mcp_servers: json!([]),
+                mcp_servers: self.mcp_servers(&sid),
                 mode: Self::mode(harness, row.open.policy.permissions),
                 model: row.open.choice.model.as_deref(),
                 effort: row.open.choice.effort.as_deref(),
@@ -483,6 +510,20 @@ impl LocalNode {
             },
         );
         Ok((conn, generation, opened.acp_id, opened.image))
+    }
+
+    /// Steve's tool server for a new adapter process of `session` (a fresh token; the old ones go).
+    fn mcp_servers(&self, session: &SessionId) -> Value {
+        let url = self.0.tools_url.lock().unwrap().clone();
+        match url {
+            Some(url) => {
+                self.0.tools.revoke_session(session);
+                let token = self.0.tools.token(session);
+                json!([{ "type": "http", "name": "steve", "url": url,
+                    "headers": [{ "name": "Authorization", "value": format!("Bearer {token}") }] }])
+            }
+            None => json!([]),
+        }
     }
 
     /// Prompt blocks: the text, attachments put into the workspace (from the Hub), images inline.
@@ -1235,6 +1276,7 @@ impl SessionExecutor for LocalNode {
             if let Some(l) = st.live.remove(&c.body) {
                 l.conn.kill();
             }
+            me.0.tools.revoke_session(&c.body);
             row.view.phase = SessionPhase::Released;
             me.0.j.put_session(&row)?;
             let mut d = Decided::done(OperationResult::Unit);

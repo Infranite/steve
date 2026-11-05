@@ -444,3 +444,154 @@ async fn paths_stay_inside_the_roots() {
         .unwrap_err();
     assert_eq!(e.code, ErrorCode::Denied);
 }
+
+// ── Steve's tools through the Node's endpoint ──
+
+#[derive(Default)]
+struct Tools {
+    calls: std::sync::Mutex<Vec<ToolCall>>,
+}
+
+#[async_trait::async_trait]
+impl HubTools for Tools {
+    async fn catalog(&self, _e: ExecutionRef) -> ApiResult<Catalog> {
+        Ok(Catalog {
+            revision: Revision::new("c1").unwrap(),
+            tools: vec![ToolDescriptor {
+                name: "steve_update".into(),
+                description: "Update the item.".into(),
+                input_schema: serde_json::json!({"type": "object", "properties": {"now": {"type": "string"}}}),
+                read_only: false,
+            }],
+        })
+    }
+    async fn call(&self, q: ToolCall) -> ApiResult<ToolResult> {
+        self.calls.lock().unwrap().push(q);
+        Ok(ToolResult::Completed {
+            parts: vec![Part::Text {
+                text: "Steve updated the item.".into(),
+            }],
+            structured: None,
+            end_turn: false,
+        })
+    }
+    async fn call_status(&self, _k: ToolKey) -> ApiResult<ToolResult> {
+        Err(ApiError::new(ErrorCode::Unsupported, "x"))
+    }
+    async fn cancel_call(&self, _k: ToolKey) -> ApiResult<ToolResult> {
+        Err(ApiError::new(ErrorCode::Unsupported, "x"))
+    }
+}
+
+/// A JSON-RPC POST to an MCP endpoint over plain HTTP/1.1.
+async fn mcp(url: &str, token: &str, body: serde_json::Value) -> (u16, serde_json::Value) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let rest = url.strip_prefix("http://").unwrap();
+    let (host, path) = rest.split_once('/').unwrap();
+    let mut s = tokio::net::TcpStream::connect(host).await.unwrap();
+    let b = body.to_string();
+    let req = format!(
+        "POST /{path} HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\nMcp-Protocol-Version: 2025-06-18\r\nAuthorization: Bearer {token}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{b}",
+        b.len()
+    );
+    s.write_all(req.as_bytes()).await.unwrap();
+    let mut out = String::new();
+    s.read_to_string(&mut out).await.unwrap();
+    let status: u16 = out.split_whitespace().nth(1).unwrap().parse().unwrap();
+    let body = out.split("\r\n\r\n").nth(1).unwrap_or("");
+    // chunked or not: take the JSON object in it
+    let v = body
+        .find('{')
+        .and_then(|i| body.rfind('}').map(|j| &body[i..=j]))
+        .and_then(|j| serde_json::from_str(j).ok())
+        .unwrap_or(serde_json::Value::Null);
+    (status, v)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn steves_tools_reach_the_hub_as_the_running_attempt() {
+    let t = T::new(&[]);
+    let n = t.node();
+    let tools = Arc::new(Tools::default());
+    n.connect_tools(tools.clone()).await.unwrap();
+    ready(&n, "s_1").await;
+    n.start_turn(now_cmd("op_t", turn("s_1", "t_1", "a_1", "@sleep 3000")))
+        .await
+        .unwrap();
+    t.until("the prompt", |t| t.sent("session/prompt") == 1)
+        .await;
+    // what the adapter was given at session/new
+    let log = std::fs::read_to_string(&t.log).unwrap();
+    let new = log
+        .lines()
+        .find(|l| l.contains("\"method\":\"session/new\""))
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_str(new).unwrap();
+    let server = &v["params"]["mcpServers"][0];
+    let url = server["url"].as_str().unwrap().to_string();
+    let token = server["headers"][0]["value"]
+        .as_str()
+        .unwrap()
+        .strip_prefix("Bearer ")
+        .unwrap()
+        .to_string();
+    assert!(url.starts_with("http://127.0.0.1:"));
+    let (s, list) = mcp(
+        &url,
+        &token,
+        serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
+    )
+    .await;
+    assert_eq!(s, 200, "{list}");
+    assert_eq!(list["result"]["tools"][0]["name"], "steve_update");
+    let (_, called) = mcp(
+        &url,
+        &token,
+        serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {"name": "steve_update", "arguments": {"now": "写测试"}}}),
+    )
+    .await;
+    assert_eq!(
+        called["result"]["content"][0]["text"],
+        "Steve updated the item."
+    );
+    let calls = tools.calls.lock().unwrap().clone();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        calls[0].execution,
+        ExecutionRef::Turn {
+            session: SessionId::new("s_1").unwrap(),
+            turn: TurnId::new("t_1").unwrap(),
+            attempt: AttemptId::new("a_1").unwrap(),
+        }
+    );
+    assert_eq!(calls[0].args["now"], "写测试");
+    // a wrong token is refused
+    let (s, _) = mcp(
+        &url,
+        "nope",
+        serde_json::json!({"jsonrpc": "2.0", "id": 3, "method": "tools/list"}),
+    )
+    .await;
+    assert_eq!(s, 401);
+    // once the attempt is over, the session's token calls nothing
+    n.cancel(now_cmd(
+        "op_c",
+        Cancel {
+            target: OperationId::new("op_t").unwrap(),
+            reason: "x".into(),
+        },
+    ))
+    .await
+    .unwrap();
+    t.until("the end", |t| !t.ended().is_empty()).await;
+    let (_, after) = mcp(
+        &url,
+        &token,
+        serde_json::json!({"jsonrpc": "2.0", "id": 4, "method": "tools/call",
+            "params": {"name": "steve_update", "arguments": {"now": "x"}}}),
+    )
+    .await;
+    assert!(after.get("error").is_some(), "{after}");
+    assert_eq!(tools.calls.lock().unwrap().len(), 1);
+}
