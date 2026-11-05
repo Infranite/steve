@@ -39,7 +39,7 @@ const NODE: &str = "local";
 struct Ends(Mutex<Vec<(String, String, Option<String>)>>);
 
 impl NodeDomain for Ends {
-    fn turn_ended(&self, session: &str, stop: &str, error: Option<String>) {
+    fn turn_ended(&self, session: &str, _: Option<&str>, stop: &str, error: Option<String>) {
         self.0
             .lock()
             .unwrap()

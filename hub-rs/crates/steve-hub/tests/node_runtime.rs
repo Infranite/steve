@@ -23,7 +23,7 @@ struct Ends(
     std::sync::OnceLock<Store>,
     /// The attempt each turn end named, in the order of `.0`.
     Mutex<Vec<Option<String>>>,
-    /// While set, `attempt_finished` holds the apply worker there (mid-pass); `.6` says it does.
+    /// While set, `attempt_finished` holds the apply worker there (mid-pass); `.7` says it does.
     std::sync::atomic::AtomicBool,
     std::sync::atomic::AtomicBool,
 );
@@ -64,8 +64,8 @@ impl NodeDomain for Ends {
             acp_stats::node_attempt_finished(store, session, attempt, c, f, at);
         }
         self.2.lock().unwrap().push(f.clone());
-        while self.5.load(std::sync::atomic::Ordering::SeqCst) {
-            self.6.store(true, std::sync::atomic::Ordering::SeqCst);
+        while self.6.load(std::sync::atomic::Ordering::SeqCst) {
+            self.7.store(true, std::sync::atomic::Ordering::SeqCst);
             std::thread::sleep(Duration::from_millis(5));
         }
     }
@@ -2751,9 +2751,9 @@ async fn a_locally_settled_end_is_told_before_a_newer_turns_end() {
     h.rt.prompt(S, "one", "user", &[]).unwrap();
     until("started", || h.count("start_turn") == 1).await;
     let first = h.attempts()[0].clone();
-    h.ends.5.store(true, SeqCst);
+    h.ends.6.store(true, SeqCst);
     h.transient_failure(&first).await;
-    until("worker held", || h.ends.6.load(SeqCst)).await;
+    until("worker held", || h.ends.7.load(SeqCst)).await;
     let retry = h.attempts()[1].clone();
 
     assert!(h.rt.cancel(S).unwrap(), "the waiting retry is settled here");
@@ -2769,11 +2769,11 @@ async fn a_locally_settled_end_is_told_before_a_newer_turns_end() {
             .unwrap()
     );
     h.node.finish(&second, build::done()).await.unwrap();
-    h.ends.5.store(false, SeqCst);
+    h.ends.6.store(false, SeqCst);
 
     until("both ends", || h.ends().len() == 2).await;
     assert_eq!(
-        *h.ends.4.lock().unwrap(),
+        *h.ends.5.lock().unwrap(),
         [
             Some(retry.attempt().to_string()),
             Some(second.attempt().to_string())
@@ -3447,4 +3447,25 @@ async fn working_counts_a_configuring_harness() {
     until("unknown", || h.cfg_states() == ["unknown"]).await;
     assert_eq!(h.phase(), "configuring");
     assert_eq!(h.rt.working(), 1);
+}
+
+/// Only this Node's work holds its drain count: a turn of a session bound to another Node (a
+/// remote one, which outlives the Hub's restart) is not this coordinator's.
+#[tokio::test]
+async fn working_counts_only_this_nodes_sessions() {
+    let h = hub();
+    h.bind();
+    h.ready().await;
+    let _exec = h.running("hello").await;
+    assert_eq!(h.rt.working(), 1);
+    h.store
+        .transaction::<_, StoreError>(|tx| {
+            tx.execute(
+                "UPDATE runtime_sessions SET node_id='elsewhere' WHERE session_id=?",
+                [S],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(h.rt.working(), 0, "another Node's turn");
 }

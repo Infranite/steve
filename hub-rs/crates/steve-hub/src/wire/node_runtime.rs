@@ -929,6 +929,7 @@ impl NodeRuntime {
     /// until it is answered or expires, retrying, or unknown until settled or abandoned), plus each
     /// session whose harness is opening, configuring or releasing with no open turn. A read error
     /// counts as work: the drain then waits rather than seal under a running turn.
+    /// Only this Node's sessions count: a remote Node's turns outlive the Hub's restart.
     /// A stopped Node counts nothing: it runs nothing and refuses the Stop that would settle its
     /// open turns, so a restart cuts nothing (its unknown turns stay unknown across it).
     pub fn working(&self) -> usize {
@@ -938,12 +939,13 @@ impl NodeRuntime {
         self.store
             .reader(|c| {
                 Ok::<_, StoreError>(c.query_row(
-                    "SELECT (SELECT COUNT(*) FROM runtime_turns WHERE state<>'finished')
+                    "SELECT (SELECT COUNT(*) FROM runtime_turns t JOIN runtime_sessions s USING(session_id)
+                               WHERE s.node_id=?1 AND t.state<>'finished')
                           + (SELECT COUNT(*) FROM runtime_sessions s
-                               WHERE s.phase IN ('opening','configuring','releasing')
+                               WHERE s.node_id=?1 AND s.phase IN ('opening','configuring','releasing')
                                  AND NOT EXISTS(SELECT 1 FROM runtime_turns t
                                                 WHERE t.session_id=s.session_id AND t.state<>'finished'))",
-                    [],
+                    [self.node_id.as_str()],
                     |r| r.get::<_, i64>(0),
                 )?)
             })
@@ -3188,7 +3190,7 @@ mod tests {
     }
 
     impl NodeDomain for Seen {
-        fn turn_ended(&self, session: &str, _: &str, _: Option<String>) {
+        fn turn_ended(&self, session: &str, _: Option<&str>, _: &str, _: Option<String>) {
             self.ended.lock().unwrap().push(session.into());
         }
         fn attempt_started(&self, _: &str, attempt: &str, _: i64, _: Option<i64>, _: i64) {

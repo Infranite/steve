@@ -819,9 +819,9 @@ enum Backend {
 /// it to another backend.
 fn node_of(store: &steve_store::Store, session: &str) -> Option<String> {
     node_of_strict(store, session).unwrap_or_else(|e| {
-            tracing::error!("binding of {session}: {e}");
-            Some(String::new())
-        })
+        tracing::error!("binding of {session}: {e}");
+        Some(String::new())
+    })
 }
 
 /// [`node_of`], with a read error as an error.
@@ -1987,6 +1987,8 @@ mod routed_tests {
         super::RoutedRuntime {
             legacy: super::AcpRuntime(steve_acp::Acp::new(cfg, host)),
             node: None,
+            fleet: None,
+            bind_remote: None,
             store,
         }
     }
