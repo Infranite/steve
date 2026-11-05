@@ -167,6 +167,8 @@ fn node_runtime(
                 jobs: 0,
                 execs: 0,
             },
+            // a 256 MiB journal at most, 512 MiB left free on the disk, new work again below 80%
+            storage: steve_node::Storage::default(),
         })
         .map_err(|e| BackendError::msg(e.to_string()))?,
     );

@@ -12,20 +12,21 @@
 //! Points: before and after the Node accepts (a journal `ops` abort, a lost reply), before and
 //! after the harness starts (a `procs` abort, the Node closed and opened again mid-turn), before
 //! and after an event is written (a journal `events` abort, a Hub inbox abort), and the Hub
-//! committed but the Node never heard the ack (acks dropped, or the Node restarted first).
+//! committed but the Node never heard the ack (acks dropped, or the Node restarted first), and the
+//! Node's disk full (it refuses new work until there is room).
 //! Gaps that later steps close (pruned redelivery, journal identity, quarantine…) are not asserted
 //! here; their steps add their cases.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use steve_hub::wire::node_runtime::{Binding, NodeDomain, NodeRuntime, Sink};
 use steve_hub::wire::node_tools::{NodeTools, Service};
-use steve_node::{LocalNode, NodeConfig, Root};
+use steve_node::{LocalNode, NodeConfig, Root, Storage};
 use steve_node_api::testkit::{FakeNode, Point, build};
 use steve_node_api::*;
 use steve_store::{FnPublisher, Store, StoreError};
@@ -358,6 +359,8 @@ struct Rig {
     rt: Arc<NodeRuntime>,
     ends: Arc<Ends>,
     tools: Mutex<Option<Arc<ToolHost>>>,
+    /// The free bytes the Node's filesystem reports.
+    free: Arc<AtomicU64>,
 }
 
 fn adapter(root: &Path) -> PathBuf {
@@ -411,6 +414,7 @@ impl Rig {
             rt,
             ends,
             tools: Mutex::new(None),
+            free: Arc::new(AtomicU64::new(1 << 40)),
         };
         r.open_node().await;
         r.rt.start();
@@ -446,6 +450,13 @@ impl Rig {
                 sessions: 4,
                 jobs: 0,
                 execs: 0,
+            },
+            storage: Storage {
+                free_space: Some({
+                    let free = self.free.clone();
+                    Arc::new(move || free.load(Ordering::SeqCst))
+                }),
+                ..Storage::default()
             },
         }
     }
@@ -816,6 +827,34 @@ async fn a_batch_the_hub_cannot_take_comes_again_and_is_stored_once() {
     r.stored_once().await;
     let text: String = r.q("SELECT group_concat(json_extract(payload,'$.body.text'),'') FROM (SELECT payload FROM node_event_inbox WHERE json_extract(payload,'$.body.type')='text_delta' ORDER BY seq)");
     assert_eq!(text, "refusedagain");
+}
+
+// ── the Node's disk is full ──
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_turn_sent_while_the_nodes_disk_is_full_runs_once_when_room_returns() {
+    let r = Rig::new().await;
+    r.ready().await;
+    // less free space than the Node's reserve: it takes no new work (exhausted)
+    r.free.store(0, Ordering::SeqCst);
+    r.rt.prompt(S, "@say spaced", "user", &[]).unwrap();
+    until("sent", || r.starts() == 1).await;
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(
+        r.journal_starts(),
+        0,
+        "nothing accepted while the disk is full"
+    );
+    assert_eq!(r.prompts("spaced"), 0);
+    assert!(r.ends().is_empty());
+    // room again: the same command is taken, and runs once
+    r.free.store(1 << 40, Ordering::SeqCst);
+    until("the end", || !r.ends().is_empty()).await;
+    assert_eq!(r.ends()[0].1, "end_turn");
+    assert_eq!(r.prompts("spaced"), 1);
+    assert_eq!((r.starts(), r.journal_starts()), (1, 1));
+    assert_eq!(r.attempts(), ["finished"]);
+    r.stored_once().await;
 }
 
 // ── the Hub committed, the Node restarted before it heard the ack ──

@@ -121,6 +121,7 @@ fn local_config(root: &Path, node: &NodeId) -> (NodeConfig, PathBuf) {
                 jobs: 0,
                 execs: 0,
             },
+            storage: Default::default(),
         },
         log,
     )

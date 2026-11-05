@@ -149,6 +149,7 @@ impl Home {
                 jobs: 0,
                 execs: 0,
             },
+            storage: steve_node::Storage::default(),
         })
     }
 }

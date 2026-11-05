@@ -63,6 +63,21 @@ fn journal_tag(v: i64) -> String {
     format!("{:016x}", v as u64)
 }
 
+/// Free bytes on the filesystem of `dir` for an unprivileged writer; `None` if it cannot be read.
+/// Advisory: another process may take the space before the journal writes.
+pub(crate) fn free_bytes(dir: &Path) -> Option<u64> {
+    use std::os::unix::ffi::OsStrExt;
+    let path = std::ffi::CString::new(dir.as_os_str().as_bytes()).ok()?;
+    let mut st = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    // SAFETY: `path` is NUL-terminated and `st` is written by statvfs before it is read.
+    if unsafe { libc::statvfs(path.as_ptr(), st.as_mut_ptr()) } != 0 {
+        return None;
+    }
+    let st = unsafe { st.assume_init() };
+    #[allow(clippy::unnecessary_cast)] // the field types differ between platforms
+    Some((st.f_bavail as u64).saturating_mul(st.f_frsize as u64))
+}
+
 /// One transaction on the journal.
 pub(crate) struct Tx<'a>(Transaction<'a>);
 
@@ -177,6 +192,15 @@ impl Journal {
             })?;
         j.id = id;
         Ok((j, incarnation))
+    }
+
+    /// Tests: caps the journal's file at `pages` (or its size now, if larger), as a full disk would.
+    pub fn cap_pages(&self, pages: u64) -> ApiResult<u64> {
+        let c = self.db.lock().unwrap_or_else(|e| e.into_inner());
+        let n: i64 = c
+            .pragma_update_and_check(None, "max_page_count", pages as i64, |r| r.get(0))
+            .map_err(internal)?;
+        Ok(n as u64)
     }
 
     /// This journal's identity (part of every epoch and event id it makes).
@@ -592,6 +616,70 @@ impl Tx<'_> {
                     .map_err(internal)?;
             }
         }
+        self.compact()
+    }
+
+    /// Drops what finished operations no longer need: the body of one whose final state the Hub
+    /// has taken, the answer of one that finished. The final state is on the operation's stream
+    /// (`OperationChanged`) or, for an execution, on its session's or job's (`AttemptEnded`); it is
+    /// taken once every event of those streams is acknowledged. An operation that is not finished
+    /// (running or unknown) keeps its body for recovery; the ops rows (id, digest, receipt) stay
+    /// for idempotency.
+    fn compact(&self) -> ApiResult<()> {
+        let specs: Vec<(String, String, Option<String>)> = self.rows(
+            "SELECT o.id, o.receipt, o.execution FROM command_specs s JOIN ops o ON o.id = s.op",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?;
+        'specs: for (op, receipt, execution) in specs {
+            let r: Receipt = from(&receipt).map_err(internal)?;
+            if !r.state.is_finished() {
+                continue;
+            }
+            let mut streams = vec![crate::stream_of(&Subject::Operation {
+                operation: OperationId::new(op.clone()).map_err(internal)?,
+            })];
+            if let Some(e) = execution {
+                streams.push(crate::stream_of(&Subject::Execution(
+                    from(&e).map_err(internal)?,
+                )));
+            }
+            let mut any = false;
+            for stream in streams {
+                let taken: Option<bool> = self
+                    .c()
+                    .query_row(
+                        "SELECT produced = acknowledged FROM streams WHERE stream = ?1",
+                        [stream],
+                        |r| r.get(0),
+                    )
+                    .optional()
+                    .map_err(internal)?;
+                match taken {
+                    Some(false) => continue 'specs,
+                    Some(true) => any = true,
+                    None => {}
+                }
+            }
+            if any {
+                self.c()
+                    .execute("DELETE FROM command_specs WHERE op = ?1", [&op])
+                    .map_err(internal)?;
+            }
+        }
+        let answers: Vec<(String, String)> = self.rows(
+            "SELECT o.id, o.receipt FROM answers a JOIN ops o ON o.id = a.op",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        for (op, receipt) in answers {
+            let r: Receipt = from(&receipt).map_err(internal)?;
+            if r.state.is_finished() {
+                self.c()
+                    .execute("DELETE FROM answers WHERE op = ?1", [&op])
+                    .map_err(internal)?;
+            }
+        }
         Ok(())
     }
 
@@ -883,6 +971,19 @@ impl Tx<'_> {
             .pragma_query_value(None, "freelist_count", |r| r.get(0))
             .map_err(internal)?;
         Ok(((count - free).max(0) * page) as u64)
+    }
+
+    /// The journal file's pages (live and free), in bytes.
+    pub fn file_bytes(&self) -> ApiResult<u64> {
+        let page: i64 = self
+            .c()
+            .pragma_query_value(None, "page_size", |r| r.get(0))
+            .map_err(internal)?;
+        let count: i64 = self
+            .c()
+            .pragma_query_value(None, "page_count", |r| r.get(0))
+            .map_err(internal)?;
+        Ok((count.max(0) * page) as u64)
     }
 
     /// Bytes of events the Hub has not acknowledged yet.
