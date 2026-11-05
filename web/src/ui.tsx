@@ -310,12 +310,16 @@ export function Sidebar({ route: full }: { route: string }) {
         </SidebarMenu>
         <SidebarSeparator className="mx-0" />
         <div className="flex items-center justify-between px-1 pb-1 group-data-[collapsible=icon]:hidden"><span className="type-footnote text-muted-foreground">外观</span><ThemeSwitch /></div>
+        {/* ST-21: this page's frontend and the Hub's backend, at a glance; the full numbers are in 设置 · 关于 */}
+        <a href="#/settings/about" title={`前端 ${LOADED_WEB_VERSION} · 后端 ${st.version || "正在获取"}`} className="block truncate rounded-lg px-2 py-0.5 type-footnote tabular-nums text-muted-foreground hover:bg-muted group-data-[collapsible=icon]:hidden" data-sidebar-versions>前端 {shortVersion(LOADED_WEB_VERSION)} · 后端 {st.version ? shortVersion(st.version) : "…"}</a>
         {!!st.webVersion && st.webVersion !== LOADED_WEB_VERSION && <a href="#/settings/about" className="block rounded-lg px-2 py-1 type-footnote text-primary hover:bg-muted group-data-[collapsible=icon]:hidden" data-sidebar-web-update>前端有更新 · 查看</a>}
       </SidebarFooter>
       <SidebarRail />
     </UISidebar>
   )
 }
+/** A version short enough for the sidebar: a release build (`YYYYMMDD-HHMMSS-<commit>`) by its commit, anything else as is. */
+const shortVersion = (v: string) => /^\d{8}-\d{6}-([0-9a-f]{7})/i.exec(v)?.[1] ?? v
 export function MobileTabs({ route: full }: { route: string }) {
   const route = full.split("?")[0]
   const n = pendingCards().length

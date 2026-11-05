@@ -175,7 +175,7 @@ v5 用了一套风格强烈的组件库，问题集中在“同时说话的东�
 | 下拉选择 | Select | 描边小号触发器，选项带勾 |
 | 表单 | Field、Field Group、Field Label、Field Description | 标签在上，说明在下；单选用“选择卡片”（Radio Group + Field Label） |
 | 状态 | 圆点 + 文字；标签用 Badge（outline） | 颜色只表达状态；“AI”“需审批”“内置”“只读”用灰色描边 Badge |
-| 头像 | agent-robot-avatar（Web Component） | 对话页顶部是 136px 的动画头像，翻看历史时缩成一行；其他地方是静止的小头像 |
+| 头像 | agent-robot-avatar（Web Component） | 对话页顶栏一行（52px，ST-50）里是 28px 的动态头像，旁边写当前状态；其他地方是静止的小头像 |
 | 对话 | 气泡 | 不挂头像；Steve 的回复不用气泡，直接排在页面上；你的消息是浅灰气泡靠右（圆角 20）；消息之间间距 24 |
 | agent 过程 | Trace、Code Block | 单色图标和次要文字；运行中一行带流光；输出放在可展开的代码块里 |
 | 验收、审批、提议 | Card（Header / Content / Footer） | 说明在上，操作在右下；主按钮在最右，次要操作是描边或纯文字按钮 |

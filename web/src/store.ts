@@ -7,7 +7,7 @@ import { useEffect, useRef, useSyncExternalStore } from "react"
 import { toast as sonner } from "sonner"
 import { promptNeedle, withDecisionNotes } from "./decision-notes"
 import { blockSlots, type FeedRow } from "./feed-order"
-import { api, setPageWorkspace, stream, Unauthenticated, type State, type RItem, type RItemDetail, type RSession, type RDecision, type RBot, type REvent, type RProject, type Proposal, type LocalSession, type HubEvent, type RNotice } from "./api"
+import { api, setPageWorkspace, stream, Unauthenticated, type State, type RItem, type RItemDetail, type RSession, type RDecision, type RBot, type REvent, type RProject, type ProjectPatch, type Proposal, type LocalSession, type HubEvent, type RNotice } from "./api"
 import { cue } from "./bus"
 import type { RFile, PlanStep, RHold, RQueued, RKindReview, SuggestChoice, A2uiRecord, A2uiSubmit, RAnnotation } from "./api"
 import type { Cite } from "./api/knowledge"
@@ -972,7 +972,7 @@ export async function switchWorkspace(id: string) {
 }
 export async function newWorkspace(name: string, description: string, item_prefix?: string) { const w = await call(api.newWs({ name, description, item_prefix })); if (w) await switchWorkspace(w.id) }
 export async function newProject(p: { name: string; path: string; description?: string; worktree?: boolean; default_bot?: string | null }) { const r = await call(api.newProject(p), `已添加项目「${p.name}」`); return r?.id }
-export function patchProject(id: string, p: Partial<RProject>, msg = "已保存") { void call(api.patchProject(id, p), msg) }
+export function patchProject(id: string, p: ProjectPatch, msg = "已保存") { void call(api.patchProject(id, p), msg) }
 
 /* ───────── tags ───────── */
 export const tag = (id: string) => st.tags.find((t) => t.id === id)
