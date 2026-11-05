@@ -202,7 +202,7 @@ fn a_running_session_hears_of_a_switch_with_its_next_message_and_its_mode_change
     assert_eq!(say(&k, &sid, "好"), format!("{}\n\n好", agent::NOTE_OFF));
 }
 
-/// A mode switch that fails is not lost: the session stays marked and the next sync tries again.
+/// A mode switch that fails is not lost: the next sync tries again, and the note is made once.
 #[test]
 fn a_failed_mode_switch_is_tried_again_by_the_next_sync() {
     let k = Kit::new();
@@ -218,6 +218,64 @@ fn a_failed_mode_switch_is_tried_again_by_the_next_sync() {
     assert_eq!(k.core.yolo_sync(WS), vec![sid.clone()]);
     assert_eq!(k.rt.st().modes, vec![(sid.clone(), "auto".to_string())]);
     assert!(k.core.yolo_sync(WS).is_empty(), "told once");
+    assert_eq!(say(&k, &sid, "继续"), format!("{}\n\n继续", agent::NOTE_ON));
+}
+
+/// A failed switch, then YOLO off again before any retry: the session never heard of it, so it
+/// hears nothing (no stale 已开启 while YOLO is off), and its mode is put back.
+#[test]
+fn a_failed_switch_turned_back_leaves_no_note() {
+    let k = Kit::new();
+    let y = yolo(&k);
+    switch(&y, false);
+    let (_, sid) = started(&k, &k.home().join("ops/release.sh"));
+    switch(&y, true);
+    k.rt.st().mode_error = true;
+    assert!(k.core.yolo_sync(WS).is_empty(), "not switched");
+    switch(&y, false);
+    assert!(k.core.yolo_sync(WS).is_empty(), "still failing");
+    k.rt.st().mode_error = false;
+    assert_eq!(
+        k.core.yolo_sync(WS),
+        vec![sid.clone()],
+        "the mode is retried"
+    );
+    assert!(k.core.yolo_sync(WS).is_empty(), "once");
+    assert_eq!(say(&k, &sid, "继续"), "继续");
+}
+
+/// A failed switch whose note is used up by a message before the retry: the retry only switches
+/// the mode; the session is not told twice.
+#[test]
+fn a_retried_switch_after_its_note_was_heard_is_not_told_again() {
+    let k = Kit::new();
+    let y = yolo(&k);
+    switch(&y, false);
+    let (_, sid) = started(&k, &k.home().join("ops/release.sh"));
+    switch(&y, true);
+    k.rt.st().mode_error = true;
+    assert!(k.core.yolo_sync(WS).is_empty(), "not switched");
+    assert_eq!(say(&k, &sid, "继续"), format!("{}\n\n继续", agent::NOTE_ON));
+    k.rt.st().mode_error = false;
+    assert_eq!(k.core.yolo_sync(WS), vec![sid.clone()]);
+    assert_eq!(k.rt.st().modes, vec![(sid.clone(), "auto".to_string())]);
+    assert_eq!(say(&k, &sid, "再看看"), "再看看", "told once");
+}
+
+/// A mode the backend cannot express is not an error to retry: asked once, the change counts
+/// as told, and later syncs leave it alone.
+#[test]
+fn an_unsupported_mode_is_asked_once() {
+    let k = Kit::new();
+    let y = yolo(&k);
+    switch(&y, false);
+    let (_, sid) = started(&k, &k.home().join("ops/release.sh"));
+    switch(&y, true);
+    k.rt.st().mode_unsupported = true;
+    assert_eq!(k.core.yolo_sync(WS), vec![sid.clone()]);
+    assert!(k.core.yolo_sync(WS).is_empty());
+    assert!(k.core.yolo_sync(WS).is_empty());
+    assert_eq!(k.rt.st().modes.len(), 1, "not asked again every tick");
     assert_eq!(say(&k, &sid, "继续"), format!("{}\n\n继续", agent::NOTE_ON));
 }
 

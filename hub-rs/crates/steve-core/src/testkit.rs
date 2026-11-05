@@ -39,6 +39,8 @@ pub struct FakeState {
     pub modes: Vec<(String, String)>,
     /// Every `set_mode` fails (not recorded in `modes`).
     pub mode_error: bool,
+    /// Every `set_mode` is a mode the backend cannot express (recorded in `modes`).
+    pub mode_unsupported: bool,
     /// (session, files) of every prompt sent right away
     pub files: Vec<(String, Vec<crate::repo::FileRef>)>,
     /// Per `flush`: whether it ran inside a tokio runtime (the real runtime spawns the turn there).
@@ -234,7 +236,11 @@ impl AgentRuntime for FakeRuntime {
             return Err(msg("store unavailable"));
         }
         st.modes.push((sid.into(), mode.into()));
-        Ok(Configured::Applied)
+        Ok(if st.mode_unsupported {
+            Configured::Unsupported
+        } else {
+            Configured::Applied
+        })
     }
     fn is_holding(&self) -> bool {
         self.st().holding

@@ -81,6 +81,9 @@ pub enum Configured {
     Pending,
     /// No adapter runs for the session: its next start applies the mode anyway.
     NotRunning,
+    /// The backend cannot express the mode for this session (a Node path without it): unchanged,
+    /// and asking again would not help.
+    Unsupported,
 }
 
 /// A finished turn, as acp.ts hands it to the orchestrator's turn-end handler.
@@ -144,7 +147,7 @@ pub trait AgentRuntime: Send + Sync {
         a == b
     }
     /// Switch a live session's permission mode (`session/set_mode`). Errors when the change could
-    /// not be taken (a store error, a Node away, a mode it cannot express): nothing changed.
+    /// not be taken this time (a store error, say): nothing changed, and asking again may work.
     fn set_mode(&self, session_id: &str, mode: &str) -> Result<Configured> {
         let _ = (session_id, mode);
         Ok(Configured::NotRunning)

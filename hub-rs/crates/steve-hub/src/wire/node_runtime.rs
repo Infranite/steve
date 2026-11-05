@@ -473,7 +473,8 @@ impl NodeRuntime {
     }
 
     /// The session a decision belongs to.
-    pub fn decision_session(&self, decision: &str) -> Option<String> {
+    /// The session a decision card belongs to (`None`: no such card, or not a session's).
+    pub fn decision_session(&self, decision: &str) -> Result<Option<String>, StoreError> {
         decision_session(&self.store, decision)
     }
 
@@ -568,15 +569,18 @@ impl NodeRuntime {
 
     /// Whether `session` runs on a Node.
     pub fn owns(&self, session: &str) -> bool {
-        self.store
-            .reader(|c| {
-                Ok::<_, StoreError>(c.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM runtime_sessions WHERE session_id=? AND node_id=?)",
-                    [session, self.node_id.as_str()],
-                    |r| r.get::<_, bool>(0),
-                )?)
-            })
-            .unwrap_or(false)
+        self.owns_strict(session).unwrap_or(false)
+    }
+
+    /// [`Self::owns`], with a read error as an error: for a decision that must not rest on a guess.
+    pub fn owns_strict(&self, session: &str) -> Result<bool, StoreError> {
+        self.store.reader(|c| {
+            Ok::<_, StoreError>(c.query_row(
+                "SELECT EXISTS(SELECT 1 FROM runtime_sessions WHERE session_id=? AND node_id=?)",
+                [session, self.node_id.as_str()],
+                |r| r.get::<_, bool>(0),
+            )?)
+        })
     }
 
     // ── what the core asks (AgentRuntime for Node sessions) ──
@@ -3010,17 +3014,18 @@ fn system_in(tx: &Tx, session: &str, text: &str) -> Result<(), StoreError> {
 }
 
 /// The session a decision belongs to.
-pub fn decision_session(store: &Store, decision: &str) -> Option<String> {
-    store
-        .reader(|c| {
-            Ok::<_, StoreError>(c.query_row(
+pub fn decision_session(store: &Store, decision: &str) -> Result<Option<String>, StoreError> {
+    store.reader(|c| {
+        Ok::<_, StoreError>(
+            c.query_row(
                 "SELECT session_id FROM decisions WHERE id=?",
                 [decision],
                 |r| r.get::<_, Option<String>>(0),
-            )?)
-        })
-        .ok()
-        .flatten()
+            )
+            .optional()?
+            .flatten(),
+        )
+    })
 }
 
 /// `decision` is the card of a Node turn still waiting for its answer.

@@ -818,27 +818,42 @@ enum Backend {
 /// The Node `session` is bound to. A read error counts as bound to an unknown Node: never hand
 /// it to another backend.
 fn node_of(store: &steve_store::Store, session: &str) -> Option<String> {
-    use rusqlite::OptionalExtension;
-    store
-        .reader(|c| {
-            Ok::<_, steve_store::StoreError>(
-                c.query_row(
-                    "SELECT node_id FROM runtime_sessions WHERE session_id=?",
-                    [session],
-                    |r| r.get::<_, String>(0),
-                )
-                .optional()?,
-            )
-        })
-        .unwrap_or_else(|e| {
+    node_of_strict(store, session).unwrap_or_else(|e| {
             tracing::error!("binding of {session}: {e}");
             Some(String::new())
         })
 }
 
+/// [`node_of`], with a read error as an error.
+fn node_of_strict(
+    store: &steve_store::Store,
+    session: &str,
+) -> Result<Option<String>, steve_store::StoreError> {
+    use rusqlite::OptionalExtension;
+    store.reader(|c| {
+        Ok::<_, steve_store::StoreError>(
+            c.query_row(
+                "SELECT node_id FROM runtime_sessions WHERE session_id=?",
+                [session],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?,
+        )
+    })
+}
+
 impl RoutedRuntime {
     fn route(&self, session_id: &str) -> Backend {
-        let Some(node) = node_of(&self.store, session_id) else {
+        self.route_to(node_of(&self.store, session_id))
+    }
+
+    /// [`Self::route`], with an unreadable binding as an error.
+    fn route_strict(&self, session_id: &str) -> Result<Backend, steve_store::StoreError> {
+        Ok(self.route_to(node_of_strict(&self.store, session_id)?))
+    }
+
+    fn route_to(&self, node: Option<String>) -> Backend {
+        let Some(node) = node else {
             return Backend::Legacy;
         };
         if let Some(n) = &self.node
@@ -993,22 +1008,28 @@ impl steve_core::AgentRuntime for RoutedRuntime {
     }
     /// A Node session's answer is a queued command ([`steve_core::Answered::Pending`]); a store
     /// error is returned, so the card stays open and the Node keeps waiting for a real answer.
+    /// That holds for the lookups that pick the backend too: an unreadable card or binding never
+    /// falls through to the legacy runner (which would call it gone).
     fn answer_permission(
         &self,
         decision_id: &str,
         option_id: Option<&str>,
     ) -> steve_core::Result<steve_core::Answered> {
-        if let Some(sid) = super::node_runtime::decision_session(&self.store, decision_id) {
-            match self.route(&sid) {
+        use steve_core::Answered;
+        // the card's session and its binding are read strictly: a store error is returned (the
+        // card stays open) rather than falling through to the legacy runner's Gone
+        if let Some(sid) = super::node_runtime::decision_session(&self.store, decision_id)? {
+            match self.route_strict(&sid)? {
                 Backend::Node(n) => {
                     let queued = n.answer_permission(decision_id, option_id)?;
                     return Ok(if queued {
-                        steve_core::Answered::Pending
+                        Answered::Pending
                     } else {
-                        steve_core::Answered::Gone
+                        Answered::Gone
                     });
                 }
-                Backend::Parked => return Ok(steve_core::Answered::Gone),
+                // parked: its Node is not enabled here, nobody can take the answer now
+                Backend::Parked => return Ok(Answered::Gone),
                 Backend::Legacy => {}
             }
         }
@@ -1104,13 +1125,11 @@ impl steve_core::AgentRuntime for RoutedRuntime {
                         Node::OnReopen => Configured::NotRunning,
                     },
                 ),
-                None => Err(CoreError::Msg(format!(
-                    "set_mode {session_id}: the Node path cannot express {mode}: unchanged"
-                ))),
+                // permanent: trying again would not help
+                None => Ok(Configured::Unsupported),
             },
-            None if self.parked(session_id) => Err(CoreError::Msg(format!(
-                "set_mode {session_id}: its Node is away: unchanged"
-            ))),
+            // its Node is not enabled here: nothing runs for it now (as before D5)
+            None if self.parked(session_id) => Ok(Configured::NotRunning),
             None => self.legacy.set_mode(session_id, mode),
         }
     }
@@ -1933,6 +1952,84 @@ mod recovery_tests {
             "messages still park on doubt"
         );
         assert!(!super::parked_for_recovery(&store, "s1"));
+    }
+}
+
+#[cfg(test)]
+mod routed_tests {
+    use std::sync::{Arc, OnceLock};
+    use steve_core::{AgentRuntime, Answered, Configured};
+    use steve_store::{NoPublisher, Store};
+
+    fn routed(dir: &std::path::Path) -> super::RoutedRuntime {
+        let store = Store::open(dir.join("hub.sqlite3"), NoPublisher).unwrap();
+        let host = Arc::new(super::HubHost {
+            store: store.clone(),
+            data_dir: dir.into(),
+            core: OnceLock::new(),
+            flow: OnceLock::new(),
+            yolo: OnceLock::new(),
+            local_node: OnceLock::new(),
+            user_seqs: Default::default(),
+            transcripts: Default::default(),
+        });
+        let cfg = steve_acp::AcpConfig {
+            adapters: Default::default(),
+            node: "node".into(),
+            claude_executable: "claude".into(),
+            steve_home: dir.into(),
+            codex_home: dir.join("codex"),
+            user_home: dir.into(),
+            version: "test".into(),
+            idle_release: std::time::Duration::from_secs(600),
+            retry_delays: vec![],
+        };
+        super::RoutedRuntime {
+            legacy: super::AcpRuntime(steve_acp::Acp::new(cfg, host)),
+            node: None,
+            store,
+        }
+    }
+
+    /// The lookups that pick the backend for an answer are strict: an unreadable card or binding
+    /// is an error (the card stays open), never the legacy runner's "gone" (expired).
+    #[test]
+    fn an_unreadable_card_or_binding_is_not_an_expired_answer() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = routed(dir.path());
+        rt.store
+            .with_conn(|c| {
+                Ok(c.execute(
+                    "INSERT INTO decisions(id,workspace_id,kind,subject_type,subject_id,session_id,question,status,requested_by,created)
+                     VALUES('d1','w','permission','session','s1','s1','?','open','agent',0)",
+                    [],
+                )?)
+            })
+            .unwrap();
+        // readable, not bound to a Node: the legacy runner, which never saw it
+        assert_eq!(
+            rt.answer_permission("d1", Some("allow")).unwrap(),
+            Answered::Gone
+        );
+        rt.store
+            .with_conn(|c| Ok(c.execute_batch("DROP TABLE runtime_sessions")?))
+            .unwrap();
+        assert!(
+            rt.answer_permission("d1", Some("allow")).is_err(),
+            "binding unreadable"
+        );
+        // a session that may be parked has no runner now: not an error to retry every sync
+        assert_eq!(
+            rt.set_mode("s1", "default").unwrap(),
+            Configured::NotRunning
+        );
+        rt.store
+            .with_conn(|c| Ok(c.execute_batch("DROP TABLE decisions")?))
+            .unwrap();
+        assert!(
+            rt.answer_permission("d1", Some("allow")).is_err(),
+            "card unreadable"
+        );
     }
 }
 
