@@ -2949,6 +2949,101 @@ async fn a_conflict_on_one_stream_quarantines_it_and_the_others_go_on() {
     assert_eq!(h.count("start_turn"), 2, "A is never run again meanwhile");
 }
 
+/// Review of N1-6: a session whose stream faults while it is idle starts nothing new on the Node
+/// until reconciliation (what it ran would never be applied): its next message stays queued, while
+/// another session still plans.
+#[tokio::test]
+async fn an_idle_session_on_a_faulted_stream_plans_no_turn() {
+    const B: &str = "s2";
+    let h = hub();
+    h.store
+        .transaction::<_, StoreError>(|tx| {
+            tx.execute(
+                "INSERT INTO sessions(id,workspace_id,harness,cwd,status,created,updated) VALUES (?,'default','claude-code','.','active',1,1)",
+                [B],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    h.bind();
+    h.rt.bind(&Binding {
+        session: B.into(),
+        resource: format!("item:{B}"),
+        prepare: PrepareKind::Scratch,
+        choice: build::choice(),
+        policy: build::policy(),
+    })
+    .unwrap();
+    h.rt.prompt(S, "a", "user", &[]).unwrap();
+    until("A started", || {
+        h.attempts().len() == 1 && h.count("start_turn") == 1
+    })
+    .await;
+    let a = h.attempts()[0].clone();
+    let (s, t) = text(&a, "first");
+    h.node.emit(s, t).await.unwrap();
+    h.node.finish(&a, build::done()).await.unwrap();
+    until("A's turn ends", || h.ends().iter().any(|e| e.0 == S)).await;
+    until("delivered", || h.node.unacked() == 0).await;
+    assert!(!h.rt.is_busy(S), "A is idle");
+
+    // A's journal forgets its last event: the next one on A's stream conflicts while A is idle
+    let view = h
+        .seen
+        .seen
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .find_map(|e| match &e.body {
+            EventBody::SessionChanged { view }
+                if e.subject
+                    == (Subject::Session {
+                        session: SessionId::new(S).unwrap(),
+                    }) =>
+            {
+                Some(view.clone())
+            }
+            _ => None,
+        })
+        .unwrap();
+    h.node.rewind(S);
+    h.node
+        .emit(
+            Subject::Session {
+                session: SessionId::new(S).unwrap(),
+            },
+            EventBody::SessionChanged { view },
+        )
+        .await
+        .unwrap();
+    until("delivered", || h.node.unacked() == 0).await;
+    let stream = derived_id("session", S);
+    assert_eq!(
+        h.q::<String>(&format!(
+            "SELECT fault FROM node_streams WHERE stream='{stream}'"
+        )),
+        "conflict"
+    );
+    assert!(h.rt.is_uncertain(S));
+
+    assert_eq!(h.rt.prompt(S, "next", "user", &[]).unwrap(), Planned::Held);
+    assert_eq!(h.rt.flush(S, None).unwrap(), Planned::Held);
+    assert_eq!(
+        h.rt.flush(S, Some(("lead", "steve"))).unwrap(),
+        Planned::Held
+    );
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(h.count("start_turn"), 1, "nothing new starts on A");
+    let queued: i64 = h.q(&format!(
+        "SELECT COUNT(*) FROM queued WHERE session_id='{S}' AND text='next'"
+    ));
+    assert_eq!(queued, 1, "the message waits in the queue");
+
+    assert_eq!(h.rt.prompt(B, "b", "user", &[]).unwrap(), Planned::Created);
+    until("B started", || h.count("start_turn") == 2).await;
+}
+
 /// Issue: an AttemptStarted applied after reconciliation made the attempt unknown leaves it
 /// unknown (Stop still abandons it).
 #[tokio::test]

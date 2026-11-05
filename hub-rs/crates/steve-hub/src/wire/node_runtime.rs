@@ -638,6 +638,11 @@ impl NodeRuntime {
             // not reconciled with the Node yet: it waits in the queue
             return Ok(Planned::Busy);
         }
+        // a faulted stream waits for reconciliation: what the Node does for this session now would
+        // never be applied, so nothing new starts there (and a released session is not reopened)
+        if faulted(tx, &self.node_id, session)? {
+            return Ok(Planned::Held);
+        }
         let (phase, active): (String, Option<String>) = tx.query_row(
             "SELECT phase, active_attempt FROM runtime_sessions WHERE session_id=?",
             [session],
@@ -904,13 +909,10 @@ impl NodeRuntime {
         self.store
             .reader(|c| {
                 Ok::<_, StoreError>(c.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM runtime_turns t LEFT JOIN runtime_attempts a ON a.turn_id=t.turn_id AND a.state<>'finished' WHERE t.session_id=?1 AND t.state<>'finished' AND (t.state='unknown' OR a.state='unknown'))
-                     OR EXISTS(SELECT 1 FROM node_streams s WHERE s.node_id=?2 AND s.fault IS NOT NULL AND (
-                          EXISTS(SELECT 1 FROM node_event_quarantine q WHERE q.node_id=s.node_id AND q.stream=s.stream AND q.epoch=s.epoch AND json_extract(q.payload,'$.subject.session')=?1)
-                       OR EXISTS(SELECT 1 FROM node_event_inbox e WHERE e.node_id=s.node_id AND e.stream=s.stream AND e.epoch=s.epoch AND json_extract(e.payload,'$.subject.session')=?1)))",
-                    rusqlite::params![session, self.node_id.as_str()],
+                    "SELECT EXISTS(SELECT 1 FROM runtime_turns t LEFT JOIN runtime_attempts a ON a.turn_id=t.turn_id AND a.state<>'finished' WHERE t.session_id=?1 AND t.state<>'finished' AND (t.state='unknown' OR a.state='unknown'))",
+                    [session],
                     |r| r.get::<_, bool>(0),
-                )?)
+                )? || faulted(c, &self.node_id, session)?)
             })
             .unwrap_or(true)
     }
@@ -2743,7 +2745,7 @@ pub enum Planned {
     Created,
     /// The session is opening, running or releasing: it waits.
     Busy,
-    /// Turns are held (release, maintenance).
+    /// Turns are held (release, maintenance, or the session's stream is faulted).
     Held,
     /// Nothing is queued.
     Empty,
@@ -2831,6 +2833,18 @@ fn receipt_state(s: &Observed) -> (ReceiptState, bool) {
 }
 
 /// The session's phase and active attempt; `None`: not bound.
+/// One of this Node's streams that carries `session`'s events (any epoch the Hub holds for it)
+/// is faulted: its events wait for reconciliation.
+fn faulted(c: &rusqlite::Connection, node: &NodeId, session: &str) -> Result<bool, StoreError> {
+    Ok(c.query_row(
+        "SELECT EXISTS(SELECT 1 FROM node_streams s WHERE s.node_id=?2 AND s.fault IS NOT NULL AND (
+              EXISTS(SELECT 1 FROM node_event_quarantine q WHERE q.node_id=s.node_id AND q.stream=s.stream AND q.epoch=s.epoch AND json_extract(q.payload,'$.subject.session')=?1)
+           OR EXISTS(SELECT 1 FROM node_event_inbox e WHERE e.node_id=s.node_id AND e.stream=s.stream AND e.epoch=s.epoch AND json_extract(e.payload,'$.subject.session')=?1)))",
+        rusqlite::params![session, node.as_str()],
+        |r| r.get(0),
+    )?)
+}
+
 fn phase_in(tx: &Tx, session: &str) -> Result<Option<(String, Option<String>)>, StoreError> {
     Ok(tx
         .query_row(
