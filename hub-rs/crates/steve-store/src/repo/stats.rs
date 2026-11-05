@@ -160,6 +160,8 @@ impl Stats<'_> {
 
     /// Ends every open turn as `interrupted` (Hub restart) at its session's last event, never later than
     /// `ended` (the boot); `day` maps a workspace id and a time to the local day. Returns how many turns were closed.
+    /// A turn run on a Node (`node_attempt_id` set) is left open: the restart did not cut it, and its
+    /// row ends with the attempt's real outcome when the Node reports it or the Hub settles it.
     pub fn interrupt_open(&self, ended: i64, day: impl Fn(&str, i64) -> String) -> Result<usize> {
         self.0.write(|w| {
             let tx = w.tx()?;
@@ -167,7 +169,7 @@ impl Stats<'_> {
             let open: Vec<(String, String, i64)> = tx
                 .prepare_cached(
                     "SELECT t.id, t.workspace_id, MAX(t.started, COALESCE((SELECT MAX(e.ts) FROM events e WHERE e.session_id = t.session_id AND e.ts <= ?1), t.started))
-                     FROM agent_turns t WHERE t.ended IS NULL",
+                     FROM agent_turns t WHERE t.ended IS NULL AND t.node_attempt_id IS NULL",
                 )?
                 .query_map([ended], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
                 .collect::<rusqlite::Result<_>>()?;

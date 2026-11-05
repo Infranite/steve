@@ -138,6 +138,9 @@ pub struct NodeRuntime {
     reconciled: AtomicBool,
     /// Turn ends settled outside the apply worker (a local cancel), told by it after the commit.
     ended_later: Mutex<Vec<(String, String, Option<String>)>>,
+    /// Attempts the Hub settled on its own word (no AttemptEnded comes for them): their
+    /// statistics row ends after the commit, as one the Node reported would.
+    settled_later: Mutex<Vec<After>>,
     /// Streams with events to apply.
     dirty: Mutex<HashSet<(String, String)>>,
     /// Why this Node cannot run anything (its host failed to start): its sessions then refuse
@@ -230,6 +233,7 @@ impl NodeRuntime {
             holding: AtomicBool::new(false),
             reconciled: AtomicBool::new(false),
             ended_later: Mutex::new(vec![]),
+            settled_later: Mutex::new(vec![]),
             dirty: Mutex::new(HashSet::new()),
             stopped: Mutex::new(None),
             turn_limit: std::sync::atomic::AtomicI64::new(TURN_LIMIT_MS),
@@ -1005,6 +1009,13 @@ impl NodeRuntime {
         )?;
         self.close_cards_of_attempt_in(tx, attempt)?;
         self.turn_over_in(tx, session, &turn, completion)?;
+        // the attempt's statistics row, if it had started, ends with this outcome
+        self.settled_later.lock().unwrap().push(After::Finished {
+            session: session.to_string(),
+            attempt: attempt.to_string(),
+            completion: completion.clone(),
+            at: now(),
+        });
         if self.plan_after_in(tx, session)? != Planned::Created {
             self.ended_later.lock().unwrap().push((
                 session.to_string(),
@@ -1844,6 +1855,16 @@ impl NodeRuntime {
                 }
             }
         }
+        // attempts settled outside this worker, booked after their commit (one whose
+        // transaction rolled back is not finished and is left alone)
+        let settled: Vec<After> = std::mem::take(&mut *self.settled_later.lock().unwrap())
+            .into_iter()
+            .filter(|a| match a {
+                After::Finished { attempt, .. } => self.is_finished(attempt),
+                _ => true,
+            })
+            .collect();
+        self.after(settled);
         // turn ends settled outside this worker (a local cancel), told after their commit
         let later: Vec<_> = std::mem::take(&mut *self.ended_later.lock().unwrap());
         for (session, stop, error) in later {
@@ -2033,6 +2054,22 @@ impl NodeRuntime {
             _ => {}
         }
         Ok(out)
+    }
+
+    /// Whether the attempt is finished in the Hub's store.
+    fn is_finished(&self, attempt: &str) -> bool {
+        self.store
+            .reader(|c| {
+                Ok::<_, StoreError>(
+                    c.query_row(
+                        "SELECT state FROM runtime_attempts WHERE attempt_id=?",
+                        [attempt],
+                        |r| r.get::<_, String>(0),
+                    )
+                    .optional()?,
+                )
+            })
+            .is_ok_and(|s| s.as_deref() == Some("finished"))
     }
 
     /// What one attempt did, for its statistics row: from the Node's own events of it.
