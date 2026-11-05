@@ -3,8 +3,8 @@
 
 use crate::usage::{claude_usage, money};
 use crate::{
-    GATEWAY_SYSTEM, Hooks, Image, PrintError, PrintRun, Ran, Reply, ToolMode, command, jstr,
-    read_to_exit, truthy, untracked,
+    GATEWAY_SYSTEM, Hooks, Image, PrintError, PrintRun, Ran, Reply, Stderr, ToolMode, command,
+    jstr, read_to_exit, truthy, untracked,
 };
 use serde_json::{Value, json};
 use std::process::Stdio;
@@ -199,7 +199,6 @@ async fn once(run: &PrintRun<'_>) -> Ran {
 /// With `--output-format stream-json --include-partial-messages`: text deltas go to the text hook as
 /// they arrive, the closing `result` line is the reply.
 async fn streaming(run: &PrintRun<'_>, hooks: Hooks<'_>) -> Ran {
-    use tokio::io::AsyncReadExt;
     let images = !run.images.is_empty();
     let mut cmd = command(run.executable, run.cwd, hooks.spawned.is_some());
     cmd.args(claude_args(run, true))
@@ -228,14 +227,10 @@ async fn streaming(run: &PrintRun<'_>, hooks: Hooks<'_>) -> Ran {
             let _ = w.shutdown().await;
         });
     }
-    let (Some(stdout), Some(mut stderr)) = (child.stdout.take(), child.stderr.take()) else {
+    let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
         return Ran::failed(PrintError::NoOutput);
     };
-    let err = tokio::spawn(async move {
-        let mut s = String::new();
-        let _ = stderr.read_to_string(&mut s).await;
-        s
-    });
+    let err = Stderr::read(stderr);
     let read = async {
         let mut s = Streamed::default();
         let status = read_to_exit(stdout, &mut child, hooks.spawned.is_some(), |l| {
@@ -256,7 +251,7 @@ async fn streaming(run: &PrintRun<'_>, hooks: Hooks<'_>) -> Ran {
     match s.result {
         Some(d) => of(&d, run.model),
         None if !status.success() => {
-            let e = err.await.unwrap_or_default();
+            let e = err.after_exit(hooks.spawned.is_some()).await;
             Ran::failed(PrintError::Failed(e.trim().to_string()))
         }
         None => Ran::failed(PrintError::NoResult),

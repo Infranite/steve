@@ -204,40 +204,84 @@ pub(crate) async fn stop_reaped(pgid: i64) -> Stopped {
     state()
 }
 
+/// What a stop sees of a group while it stops it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Seen {
+    Gone,
+    /// Alive, and its leader is the one recorded.
+    Ours,
+    /// Alive, its leader gone: once the Node signalled the group, its members still dying.
+    Leaderless,
+    /// Not signalable for now (EPERM; on macOS a dying member can cause it for a moment).
+    Unsignalable,
+    /// Its leader is another process than the one recorded (or none was recorded).
+    Other,
+}
+
+fn seen(pgid: i64, started: Option<u64>) -> Seen {
+    match probe(pgid) {
+        Probe::Gone => Seen::Gone,
+        Probe::Uncertain => Seen::Unsignalable,
+        Probe::Alive => match (start_time(pgid), started) {
+            (Some(now), Some(then)) if now == then => Seen::Ours,
+            (None, Some(_)) => Seen::Leaderless,
+            _ => Seen::Other,
+        },
+    }
+}
+
 /// Stops the group (TERM, then KILL) and says what became of it.
 pub(crate) async fn stop(pgid: i64, started: Option<u64>) -> Stopped {
     stop_checked(
-        || state(pgid, started),
+        || seen(pgid, started),
         |signal| unsafe { libc::kill(-(pgid as libc::pid_t), signal) == 0 },
     )
     .await
 }
 
+/// Only a group whose recorded leader is proven is signalled first. Once it was, its leader dying
+/// before the rest is what a stop looks like: while any member lives the group's id is not given
+/// to another group, so a leaderless group is still the one signalled and is waited out (and
+/// KILLed). A leader that is another process stops everything.
 async fn stop_checked(
-    mut state: impl FnMut() -> Stopped,
+    mut seen: impl FnMut() -> Seen,
     mut signal: impl FnMut(i32) -> bool,
 ) -> Stopped {
+    match seen() {
+        Seen::Ours => {}
+        Seen::Gone => return Stopped::Gone,
+        _ => return Stopped::Uncertain,
+    }
     for sig in [libc::SIGTERM, libc::SIGKILL] {
-        match state() {
-            Stopped::Alive => {}
-            other => return other,
-        }
-        if !signal(sig) {
-            return if state().gone() {
-                Stopped::Gone
-            } else {
-                Stopped::Uncertain
-            };
+        match seen() {
+            Seen::Gone => return Stopped::Gone,
+            Seen::Other => return Stopped::Uncertain,
+            Seen::Ours | Seen::Leaderless => {
+                if !signal(sig) {
+                    return if seen() == Seen::Gone {
+                        Stopped::Gone
+                    } else {
+                        Stopped::Uncertain
+                    };
+                }
+            }
+            // waited out below, never signalled
+            Seen::Unsignalable => {}
         }
         for _ in 0..30 {
-            match state() {
-                Stopped::Alive => {}
-                other => return other,
+            match seen() {
+                Seen::Gone => return Stopped::Gone,
+                Seen::Other => return Stopped::Uncertain,
+                _ => {}
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
-    state()
+    match seen() {
+        Seen::Gone => Stopped::Gone,
+        Seen::Ours | Seen::Leaderless => Stopped::Alive,
+        Seen::Unsignalable | Seen::Other => Stopped::Uncertain,
+    }
 }
 
 #[cfg(test)]
@@ -300,11 +344,7 @@ mod tests {
         let stopped = stop_checked(
             || {
                 probes += 1;
-                if probes == 1 {
-                    Stopped::Alive
-                } else {
-                    Stopped::Uncertain
-                }
+                if probes <= 2 { Seen::Ours } else { Seen::Other }
             },
             |s| {
                 signals.push(s);
@@ -315,6 +355,68 @@ mod tests {
         assert_eq!(stopped, Stopped::Uncertain);
         assert_eq!(signals, vec![libc::SIGTERM]);
         assert!(!ours(std::process::id() as i64, None));
+    }
+
+    #[tokio::test]
+    async fn a_leaderless_group_is_waited_out_and_killed() {
+        // the leader dies on TERM, a member it left ignores TERM
+        let mut probes = 0;
+        let signals = std::cell::RefCell::new(vec![]);
+        let stopped = stop_checked(
+            || {
+                probes += 1;
+                match probes {
+                    1 | 2 => Seen::Ours,
+                    3..=6 => Seen::Leaderless,
+                    7 => Seen::Unsignalable,
+                    _ if signals.borrow().len() < 2 => Seen::Leaderless,
+                    _ => Seen::Gone,
+                }
+            },
+            |s| {
+                signals.borrow_mut().push(s);
+                true
+            },
+        )
+        .await;
+        assert_eq!(stopped, Stopped::Gone);
+        assert_eq!(signals.into_inner(), vec![libc::SIGTERM, libc::SIGKILL]);
+        // an unproven leader is never signalled first
+        let mut signals = vec![];
+        let stopped = stop_checked(
+            || Seen::Leaderless,
+            |s| {
+                signals.push(s);
+                true
+            },
+        )
+        .await;
+        assert_eq!(stopped, Stopped::Uncertain);
+        assert!(signals.is_empty());
+    }
+
+    /// The leader exits on TERM before the rest of its group does.
+    #[tokio::test]
+    async fn a_group_whose_leader_dies_first_is_stopped() {
+        use std::os::unix::process::CommandExt;
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "(trap '' TERM; exec sleep 30) & wait"])
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let pid = child.id() as i64;
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
+        let started = start_time(pid);
+        // the member is there before the stop
+        for _ in 0..100 {
+            if !started_by(pid, started).is_empty() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(stop(pid, started).await, Stopped::Gone);
     }
 
     #[tokio::test]

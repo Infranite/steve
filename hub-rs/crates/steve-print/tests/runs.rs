@@ -442,3 +442,34 @@ async fn a_supervised_run_has_its_own_group_and_numbered_messages() {
     assert!(matches!(r.reply, Err(PrintError::Io(_))), "{:?}", r.reply);
     assert!(t0.elapsed() < Duration::from_secs(5));
 }
+
+/// A supervised run that fails without a result still fails promptly with what its stderr said,
+/// even when a process it left behind keeps the stderr pipe open.
+#[tokio::test]
+async fn a_supervised_failure_does_not_wait_on_a_held_stderr() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path();
+    // the grandchild holds stderr (not stdout) open for 30s
+    let claude_exe = script(
+        cwd,
+        "claude",
+        "echo nope >&2; (sleep 30 >/dev/null 2>&2 &) ; exit 2",
+    );
+    let codex_exe = script(
+        cwd,
+        "codex",
+        "cat > /dev/null; echo boom >&2; (sleep 30 >/dev/null 2>&2 &) ; exit 3",
+    );
+    for (run, said) in [
+        (claude(&claude_exe, cwd), "nope"),
+        (codex(&codex_exe, cwd), "boom"),
+    ] {
+        let t0 = Instant::now();
+        let r = steve_print::run_supervised(&run, &|_| true, &|_, _| {}).await;
+        assert!(
+            matches!(&r.reply, Err(PrintError::Failed(e)) if e == said),
+            "{r:?}"
+        );
+        assert!(t0.elapsed() < Duration::from_secs(8), "{:?}", t0.elapsed());
+    }
+}

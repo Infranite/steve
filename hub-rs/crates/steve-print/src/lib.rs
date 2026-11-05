@@ -270,6 +270,48 @@ pub(crate) async fn read_to_exit<R: tokio::io::AsyncRead + Unpin>(
     }
 }
 
+/// The child's stderr, read in the background as it comes.
+pub(crate) struct Stderr {
+    seen: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Stderr {
+    pub(crate) fn read<R: tokio::io::AsyncRead + Unpin + Send + 'static>(mut err: R) -> Self {
+        use tokio::io::AsyncReadExt;
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let into = seen.clone();
+        let task = tokio::spawn(async move {
+            let mut buf = [0u8; 4096];
+            while let Ok(n) = err.read(&mut buf).await
+                && n > 0
+            {
+                into.lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .extend_from_slice(&buf[..n]);
+            }
+        });
+        Self { seen, task }
+    }
+
+    /// What the child wrote, once it exited. Supervised, like [`read_to_exit`], the read ends after
+    /// [`AFTER_EXIT`] with what came so far even when another process still holds the pipe open.
+    pub(crate) async fn after_exit(mut self, supervised: bool) -> String {
+        if supervised {
+            if tokio::time::timeout(AFTER_EXIT, &mut self.task)
+                .await
+                .is_err()
+            {
+                self.task.abort();
+            }
+        } else {
+            let _ = (&mut self.task).await;
+        }
+        let seen = std::mem::take(&mut *self.seen.lock().unwrap_or_else(|p| p.into_inner()));
+        String::from_utf8_lossy(&seen).into_owned()
+    }
+}
+
 /// `group`: the process leads a process group of its own.
 fn command(exe: &Path, cwd: &Path, group: bool) -> tokio::process::Command {
     let mut cmd = tokio::process::Command::new(exe);

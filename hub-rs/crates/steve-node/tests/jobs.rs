@@ -4,7 +4,7 @@
 #![cfg(unix)]
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -65,7 +65,7 @@ echo '{"type":"turn.completed","usage":{"input_tokens":10,"cached_input_tokens":
 "#;
 
 struct T {
-    _dir: tempfile::TempDir,
+    _dir: Option<tempfile::TempDir>,
     root: PathBuf,
     log: PathBuf,
     sink: Arc<RecordingSink>,
@@ -75,7 +75,14 @@ struct T {
 impl T {
     fn new() -> T {
         let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().canonicalize().unwrap();
+        let mut t = T::at(&dir.path().canonicalize().unwrap());
+        t._dir = Some(dir);
+        t
+    }
+
+    /// On a directory someone else keeps (the parent of a child-process Node).
+    fn at(root: &Path) -> T {
+        let root = root.to_path_buf();
         let log = root.join("fake");
         for (name, body) in [("claude", CLAUDE), ("codex", CODEX)] {
             let body = body.replace("\"$FAKE_LOG\"", &format!("'{}'", log.display()));
@@ -85,7 +92,7 @@ impl T {
             std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
         T {
-            _dir: dir,
+            _dir: None,
             root,
             log,
             sink: Arc::new(RecordingSink::default()),
@@ -636,6 +643,88 @@ async fn a_restart_leaves_the_job_unknown_until_it_is_abandoned() {
     assert_eq!(c.outcome, Outcome::Interrupted);
     t.until("the end", |t| !t.ended().is_empty()).await;
     assert_eq!(t.ended()[0].outcome, Outcome::Interrupted);
+}
+
+/// Runs in a child process (see `a_killed_node_leaves_its_job_group_until_it_is_abandoned`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn child_job_node_process() {
+    let Ok(root) = std::env::var("STEVE_NODE_JOB_CHILD_ROOT") else {
+        return;
+    };
+    let t = T::at(Path::new(&root));
+    let n = t.node();
+    n.start_job(now_cmd("op_j", think("a_1", "claude-code", "@hang")))
+        .await
+        .unwrap();
+    t.until("the harness", |t| !t.read("pid").is_empty()).await;
+    std::fs::write(Path::new(&root).join("ready"), "").unwrap();
+    tokio::time::sleep(Duration::from_secs(120)).await;
+}
+
+/// A Node killed mid-job leaves the harness's group running, recorded under the old incarnation:
+/// the job is unknown after the restart, and the Hub's abandon stops that group before it ends.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_killed_node_leaves_its_job_group_until_it_is_abandoned() {
+    let t = T::new();
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "child_job_node_process", "--nocapture"])
+        .env("STEVE_NODE_JOB_CHILD_ROOT", &t.root)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let t0 = Instant::now();
+    while !t.root.join("ready").exists() {
+        assert!(
+            t0.elapsed() < Duration::from_secs(20),
+            "child never got ready"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    child.kill().unwrap();
+    child.wait().unwrap();
+    let pid: i64 = t.read("pid").trim().parse().unwrap();
+    assert!(!gone(pid), "the harness outlived the Node");
+    let n = t.node();
+    assert!(n.incarnation() >= 2);
+    let r = n
+        .operation(OperationId::new("op_j").unwrap())
+        .await
+        .unwrap();
+    assert!(matches!(r.state, Observed::Unknown { .. }), "{r:?}");
+    assert!(!gone(pid), "a restart does not stop it by itself");
+    n.abandon(now_cmd(
+        "op_ab",
+        Abandon {
+            target: OperationId::new("op_j").unwrap(),
+            reason: "node crashed".into(),
+        },
+    ))
+    .await
+    .unwrap();
+    let ab = finished(&n, "op_ab").await;
+    assert!(
+        matches!(
+            ab,
+            Observed::Finished {
+                outcome: Outcome::Succeeded,
+                ..
+            }
+        ),
+        "{ab:?}"
+    );
+    let c = completion(finished(&n, "op_j").await);
+    assert_eq!(c.outcome, Outcome::Interrupted);
+    assert!(gone(pid), "the abandon stopped the harness");
+    // its `sleep` child too: nothing is left in its group
+    assert!(unsafe { libc::kill(-(pid as libc::pid_t), 0) } != 0);
+    assert_eq!(t.spawns(), 1, "nothing ran it again");
+    // and forgotten once gone
+    let db = rusqlite::Connection::open(t.root.join("node/node.sqlite3")).unwrap();
+    let procs: i64 = db
+        .query_row("SELECT count(*) FROM procs", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(procs, 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
