@@ -477,10 +477,10 @@ impl Core {
                 tracing::error!("reclaim {e}");
             }
         });
-        Err(crate::error::msg(format!(
-            "磁盘空间不足：工作区所在的磁盘只剩 {}，低于开工下限 {}。Steve 正在回收已完成和闲置事项的构建缓存，稍后重试；也可以先清理磁盘。",
-            human(free),
-            human(pol.floor)
+        Err(crate::error::msg(steve_i18n::t!(
+            "core.workspace.disk_low",
+            free = human(free),
+            floor = human(pol.floor)
         )))
     }
 

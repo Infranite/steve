@@ -39,6 +39,9 @@ export type RYoloAction = {
   due_at: number | null; done_at: number | null; undo: { kind: UndoKind } | null; undone: number | null; created: number
   /** the card's question, its status now, and the undo it offers now (null: none) */
   question: string | null; decision_status: string | null; can_undo: UndoKind | null
+  /** `reason` is display text in the UI language; these are what the web branches on:
+   *  the user clicked 我来定, and the hard limit's own text when the row was stopped by one */
+  user_took_over?: boolean; limit_what?: string | null
 }
 export type RYoloWindow = {
   id: string; started: number; ended: number | null; ended_why: "off" | "tripped" | null

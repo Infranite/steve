@@ -10,6 +10,8 @@ steve-store = { path = "../steve-store" }
 steve-modules = { path = "../steve-modules" }
 # the paste guard behind `TokenGuard`
 steve-vault = { path = "../steve-vault" }
+steve-i18n = { path = "../steve-i18n" }
+rust-i18n = "=4.2.4"
 async-trait = "=0.1.92"
 chrono = { version = "=0.4.45", default-features = false, features = ["clock"] }
 axum = { version = "=0.8.9", default-features = false, features = ["json", "query"] }

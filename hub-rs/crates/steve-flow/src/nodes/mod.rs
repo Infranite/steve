@@ -250,10 +250,10 @@ pub(crate) fn str_list(cfg: &Value, key: &str) -> Result<Vec<String>, String> {
             .map(|x| {
                 x.as_str()
                     .map(String::from)
-                    .ok_or_else(|| format!("{key} 只能是文字列表"))
+                    .ok_or_else(|| steve_i18n::t!("flow.node.text_list_only", key = key))
             })
             .collect(),
-        Some(_) => Err(format!("{key} 只能是文字列表")),
+        Some(_) => Err(steve_i18n::t!("flow.node.text_list_only", key = key)),
     }
 }
 
@@ -262,7 +262,58 @@ pub(crate) fn opt_str<'v>(cfg: &'v Value, key: &str) -> Result<Option<&'v str>, 
     match cfg.get(key) {
         None | Some(Value::Null) => Ok(None),
         Some(Value::String(s)) => Ok(Some(s.as_str())),
-        Some(_) => Err(format!("{key} 只能是文字")),
+        Some(_) => Err(steve_i18n::t!("flow.node.text_only", key = key)),
+    }
+}
+
+/// A required text field of a node's config, for its two errors (each a whole sentence).
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Required {
+    /// `flow.flow_id`
+    Flow,
+    /// `approve.question`
+    Question,
+    /// `notify.text`
+    Reminder,
+    /// `script.code`
+    Script,
+    /// `http.url`
+    Url,
+    /// `cmd.command`
+    Command,
+    /// `cmd.project_id`
+    Project,
+    /// `bot.instruction`
+    Instruction,
+}
+
+impl Required {
+    fn missing(self) -> String {
+        use steve_i18n::t;
+        match self {
+            Required::Flow => t!("flow.node.missing_flow"),
+            Required::Question => t!("flow.node.missing_question"),
+            Required::Reminder => t!("flow.node.missing_reminder"),
+            Required::Script => t!("flow.node.missing_script"),
+            Required::Url => t!("flow.node.missing_url"),
+            Required::Command => t!("flow.node.missing_command"),
+            Required::Project => t!("flow.node.missing_project"),
+            Required::Instruction => t!("flow.node.missing_instruction"),
+        }
+    }
+
+    fn too_long(self, max: usize) -> String {
+        use steve_i18n::t;
+        match self {
+            Required::Flow => t!("flow.node.too_long_flow", max = max),
+            Required::Question => t!("flow.node.too_long_question", max = max),
+            Required::Reminder => t!("flow.node.too_long_reminder", max = max),
+            Required::Script => t!("flow.node.too_long_script", max = max),
+            Required::Url => t!("flow.node.too_long_url", max = max),
+            Required::Command => t!("flow.node.too_long_command", max = max),
+            Required::Project => t!("flow.node.too_long_project", max = max),
+            Required::Instruction => t!("flow.node.too_long_instruction", max = max),
+        }
     }
 }
 
@@ -270,15 +321,15 @@ pub(crate) fn opt_str<'v>(cfg: &'v Value, key: &str) -> Result<Option<&'v str>, 
 pub(crate) fn req_str<'v>(
     cfg: &'v Value,
     key: &str,
-    label: &str,
+    field: Required,
     max: usize,
 ) -> Result<&'v str, String> {
     let s = opt_str(cfg, key)?.map(str::trim).unwrap_or("");
     if s.is_empty() {
-        return Err(format!("要填{label}"));
+        return Err(field.missing());
     }
     if s.chars().count() > max {
-        return Err(format!("{label}太长了（最多 {max} 字）"));
+        return Err(field.too_long(max));
     }
     Ok(s)
 }

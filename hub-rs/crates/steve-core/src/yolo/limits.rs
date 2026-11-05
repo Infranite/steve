@@ -40,9 +40,12 @@ impl Limit {
     }
     /// `硬限制：<what>`
     pub fn reason(&self) -> String {
-        format!("硬限制：{}", self.what)
+        format!("{REASON_PREFIX}{}", self.what)
     }
 }
+
+/// The stored prefix of a hard limit's reason ([`Limit::reason`]).
+pub const REASON_PREFIX: &str = "硬限制：";
 
 static MONEY: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(

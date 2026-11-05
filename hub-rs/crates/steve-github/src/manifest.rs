@@ -1,6 +1,8 @@
 //! Creating and installing the GitHub App: the three endpoints of the manifest
 //! flow. All three are top-level browser steps of the signed-in user; the two GETs answer with a
-//! `302` to the web app (`/#/github…`), errors as `/#/github?error=<中文>`.
+//! `302` to the web app (`/#/github…`), errors as `/#/github?error=<text>` (plus `&error_code=<code>`
+//! where the web acts on the error: the redirect is a top-level navigation from GitHub, so its
+//! text follows the browser's language, not the one picked in Steve).
 //!
 //! 1. `POST /github/app/manifest {owner?}` → `{action, manifest, state}` for an auto-submitted form;
 //! 2. `GET /github/app/manifest/callback?code&state` → the conversion; the App's key and secrets
@@ -54,11 +56,15 @@ pub fn routes(gh: GitHub) -> Router<Modules> {
         .layer(Extension(gh))
 }
 
-/// `/#/github?error=<中文>`.
+/// `/#/github?error=<text>`.
 pub fn error_location(msg: &str) -> String {
     let q: String = url::form_urlencoded::byte_serialize(msg.as_bytes()).collect();
     format!("/#/github?error={q}")
 }
+
+/// The `error_code` of a callback that stopped because the vault can't take the App's secrets
+/// (the web links to the vault and renders its own text for it).
+pub const VAULT_NEEDED_CODE: &str = "vault_needed";
 
 fn redirect(loc: String) -> Response {
     (
@@ -145,6 +151,7 @@ fn conversion(mut v: Value) -> Option<Conversion> {
 
 /// The App's key and secrets go to the vault: without a usable vault the one-time code must not
 /// be spent (GitHub would keep an App nobody can use).
+/// The zh-CN text of `github.manifest.vault_needed`.
 pub const VAULT_NEEDED: &str = "先启用保险箱，再创建 GitHub App";
 
 impl GitHub {
@@ -153,10 +160,10 @@ impl GitHub {
         use steve_modules::vault::Keychain;
         match self.0.conns.vault().status(ws) {
             Ok(s) if s.initialized && s.keychain == Keychain::Ok => Ok(()),
-            Ok(_) => Err(VAULT_NEEDED.into()),
+            Ok(_) => Err(steve_i18n::t!("github.manifest.vault_needed")),
             Err(e) => {
                 tracing::warn!("github manifest: vault status: {e}");
-                Err(VAULT_NEEDED.into())
+                Err(steve_i18n::t!("github.manifest.vault_needed"))
             }
         }
     }
@@ -213,6 +220,10 @@ impl GitHub {
     ) -> String {
         match self.convert(who, code, state).await {
             Ok(()) => "/#/github?app=created".into(),
+            // same locale as the text `convert` returned, so the comparison is exact
+            Err(msg) if msg == steve_i18n::t!("github.manifest.vault_needed") => {
+                format!("{}&error_code={VAULT_NEEDED_CODE}", error_location(&msg))
+            }
             Err(msg) => error_location(&msg),
         }
     }
@@ -223,13 +234,13 @@ impl GitHub {
         code: Option<&str>,
         state: Option<&str>,
     ) -> Result<(), String> {
-        const EXPIRED: &str = "这个链接已经失效，请重新创建 GitHub App";
-        let who = who.ok_or("请先登录 Steve，再重新创建 GitHub App")?;
+        let expired = || steve_i18n::t!("github.manifest.expired");
+        let who = who.ok_or_else(|| steve_i18n::t!("github.manifest.login_to_create"))?;
         let flow = state
             .and_then(|s| self.0.flows.take(self.now(), s))
-            .ok_or(EXPIRED)?;
+            .ok_or_else(expired)?;
         if flow.ws != who.ws || flow.user != who.me {
-            return Err(EXPIRED.into());
+            return Err(expired());
         }
         let code = code
             .filter(|c| {
@@ -238,13 +249,13 @@ impl GitHub {
                     && c.chars()
                         .all(|x| x.is_ascii_alphanumeric() || x == '-' || x == '_')
             })
-            .ok_or("GitHub 没有给出创建结果，请重新创建 GitHub App")?;
+            .ok_or_else(|| steve_i18n::t!("github.manifest.no_result"))?;
         // before the conversion: it spends the code and creates the App for good
         {
             let (gh, ws) = (self.clone(), who.ws.clone());
-            tokio::task::spawn_blocking(move || gh.vault_ready(&ws))
+            tokio::task::spawn_blocking(steve_i18n::carry(move || gh.vault_ready(&ws)))
                 .await
-                .map_err(|_| VAULT_NEEDED.to_string())??;
+                .map_err(|_| steve_i18n::t!("github.manifest.vault_needed"))??;
         }
         let r = self
             .client()
@@ -258,17 +269,19 @@ impl GitHub {
             .await
             .map_err(|e| match e {
                 GhError::Status { status: 404, .. } | GhError::Status { status: 422, .. } => {
-                    EXPIRED.to_string()
+                    expired()
                 }
-                e => format!("创建 GitHub App 失败：{e}"),
+                e => steve_i18n::t!("github.manifest.create_failed_because", error = e),
             })?;
-        let conv = conversion(r.body).ok_or("创建 GitHub App 失败：GitHub 的回答看不懂")?;
+        let conv = conversion(r.body)
+            .ok_or_else(|| steve_i18n::t!("github.manifest.create_failed_unreadable"))?;
         let (ws, me) = (who.ws.clone(), who.me.clone());
         let gh = self.clone();
-        let res = tokio::task::spawn_blocking(move || gh.save_app(&ws, &me, conv))
-            .await
-            .map_err(|_| "创建 GitHub App 失败".to_string())?;
-        res.map_err(|e| format!("创建 GitHub App 失败：{e}"))
+        let res =
+            tokio::task::spawn_blocking(steve_i18n::carry(move || gh.save_app(&ws, &me, conv)))
+                .await
+                .map_err(|_| steve_i18n::t!("github.manifest.create_failed"))?;
+        res.map_err(|e| steve_i18n::t!("github.manifest.create_failed_because", error = e))
     }
 
     /// The vault item first, then the `gh_apps` row; the item is destroyed again if the row fails.
@@ -298,7 +311,9 @@ impl GitHub {
         };
         let r = self.store().transaction(|tx| {
             if repo::app_by_app_id(tx, row.app_id)?.is_some() {
-                return Err(ApiError::conflict("这个 GitHub App 已经登记过了").into());
+                return Err(
+                    ApiError::conflict(steve_i18n::t!("github.manifest.app_exists")).into(),
+                );
             }
             repo::insert_app(tx, &row).map_err(ApiError::from)?;
             base::audit(
@@ -344,12 +359,12 @@ impl GitHub {
         installation_id: Option<&str>,
         setup_action: Option<&str>,
     ) -> Result<(), String> {
-        let who = who.ok_or("请先登录 Steve，再从 GitHub 重新安装")?;
+        let who = who.ok_or_else(|| steve_i18n::t!("github.manifest.login_to_install"))?;
         let Some(inst) = installation_id.and_then(|s| s.trim().parse::<u64>().ok()) else {
             return Err(if setup_action == Some("request") {
-                "已经向组织管理员申请安装，管理员批准后再回来".into()
+                steve_i18n::t!("github.manifest.install_requested")
             } else {
-                "GitHub 没有给出安装编号".into()
+                steve_i18n::t!("github.manifest.no_installation_id")
             });
         };
         let ws = who.ws.clone();
@@ -358,7 +373,7 @@ impl GitHub {
             .reader(|c| repo::apps(c, &ws).map_err(ApiError::from))
             .map_err(|e| e.to_string())?;
         if apps.is_empty() {
-            return Err("这个工作空间还没有创建 GitHub App".into());
+            return Err(steve_i18n::t!("github.manifest.no_app"));
         }
         let client = self.client();
         let mut found = None;
@@ -370,10 +385,11 @@ impl GitHub {
                     break;
                 }
                 Ok(_) | Err(GhError::Status { status: 404, .. }) | Err(GhError::Unauthorized) => {}
-                Err(e) => return Err(format!("没能核对这个安装：{e}")),
+                Err(e) => return Err(steve_i18n::t!("github.manifest.check_failed", error = e)),
             }
         }
-        let (app, v) = found.ok_or("这个安装不属于本工作空间的 GitHub App")?;
+        let (app, v) =
+            found.ok_or_else(|| steve_i18n::t!("github.manifest.foreign_installation"))?;
         // One installation per App for now: its account is `<slug>[bot]`, one connection per account.
         let current = self
             .store()
@@ -389,12 +405,16 @@ impl GitHub {
             match auth::get_installation(&client, &bearer, old as u64).await {
                 Err(GhError::Status { status: 404, .. }) => {}
                 Ok(o) => {
-                    let login = o["account"]["login"].as_str().unwrap_or("另一个账号");
-                    return Err(format!(
-                        "这个 GitHub App 已经装在 {login} 上了，一个 App 目前只能接一个安装"
+                    let login = match o["account"]["login"].as_str() {
+                        Some(l) => l.to_string(),
+                        None => steve_i18n::t!("github.manifest.another_account"),
+                    };
+                    return Err(steve_i18n::t!(
+                        "github.manifest.already_installed",
+                        login = login
                     ));
                 }
-                Err(e) => return Err(format!("没能核对这个安装：{e}")),
+                Err(e) => return Err(steve_i18n::t!("github.manifest.check_failed", error = e)),
             }
         }
         let secrets = self

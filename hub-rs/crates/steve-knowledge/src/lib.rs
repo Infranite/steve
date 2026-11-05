@@ -2,6 +2,8 @@
 //!
 //! Empty skeleton (slice I0); slices add their `mod` lines here.
 
+steve_i18n::init!();
+
 // K0: tokenizing, chunking, extraction, evaluation.
 pub mod chunk;
 pub mod eval;

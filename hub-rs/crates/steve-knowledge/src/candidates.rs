@@ -256,7 +256,9 @@ fn candidate_row(c: &Connection, mem_id: &str) -> ApiResult<Option<CandidateRow>
 fn pending(c: &Connection, ws: &str, id: &str) -> ApiResult<Mem> {
     match mems::get(c, id)? {
         Some(m) if m.workspace_id == ws && m.status == "candidate" => Ok(m),
-        Some(m) if m.workspace_id == ws => Err(ApiError::conflict("这条记忆已经处理过了")),
+        Some(m) if m.workspace_id == ws => Err(ApiError::conflict(steve_i18n::t!(
+            "knowledge.mem.already_handled"
+        ))),
         _ => Err(ApiError::not_found(NOUN)),
     }
 }
@@ -335,10 +337,14 @@ impl DecisionHandler for MemDecisions {
     /// the memory, so it cannot be undone.
     fn before_undo(&self, tx: &Tx, d: &Decision) -> ApiResult<()> {
         if d.result.get("choice").and_then(Value::as_str) != Some("yes") {
-            return Err(ApiError::rule("这条记忆已经删除，不能撤销"));
+            return Err(ApiError::rule(steve_i18n::t!(
+                "knowledge.mem.deleted_no_undo"
+            )));
         }
         let Some(mem) = mems::get(tx, &d.subject_id)? else {
-            return Err(ApiError::rule("这条记忆已经删除，不能撤销"));
+            return Err(ApiError::rule(steve_i18n::t!(
+                "knowledge.mem.deleted_no_undo"
+            )));
         };
         let now = steve_store::now();
         mems::patch(

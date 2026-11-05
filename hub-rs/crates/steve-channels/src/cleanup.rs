@@ -136,7 +136,9 @@ async fn run_route(
     Body(r): Body<Request>,
 ) -> ApiResult<Json<Summary>> {
     if !r.confirm {
-        return Err(ApiError::rule("清理要确认：请求里带上 confirm: true"));
+        return Err(ApiError::rule(steve_i18n::t!(
+            "channels.error.cleanup_confirm"
+        )));
     }
     let v = ch.modules().viewer(&who)?;
     let t = target(&ch, &who, &r)?;
@@ -689,7 +691,7 @@ pub async fn run(
     decision_ids: Vec<String>,
 ) -> ApiResult<Summary> {
     let (ch2, v2, t2) = (ch.clone(), v.clone(), t.clone());
-    tokio::task::spawn_blocking(move || -> ApiResult<Summary> {
+    tokio::task::spawn_blocking(steve_i18n::carry(move || -> ApiResult<Summary> {
         let (ch, v, t) = (ch2, v2, t2);
         // fail before the backup when there is nothing to clean
         ch.store().reader(|c| plan(c, &v, &t, level).map(|_| ()))?;
@@ -700,7 +702,7 @@ pub async fn run(
             let mut expected = decision_ids.clone(); expected.sort(); expected.dedup();
             let mut actual = p.decisions.clone(); actual.sort();
             if expected != actual {
-                return Err(ApiError::rule("关联决定已变化，请重新预览并确认清理"));
+                return Err(ApiError::rule(steve_i18n::t!("channels.error.cleanup_changed")));
             }
             let yolo_actions = strings(tx,
                 "SELECT id FROM yolo_actions WHERE decision_id IN (SELECT value FROM json_each(?1))",
@@ -737,7 +739,7 @@ pub async fn run(
         out.backup = Some(file);
         tracing::info!(level = ?level, spaces = out.spaces, messages = out.messages, contacts = out.contacts, "channels: cleanup done");
         Ok(out)
-    })
+    }))
     .await
     .map_err(|_| ApiError::Internal("任务失败".into()))?
 }

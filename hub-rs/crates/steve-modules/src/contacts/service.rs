@@ -122,7 +122,7 @@ impl From<&AttrValue> for Attr {
             key: v.key.clone(),
             label: v.label.clone(),
             value: v.value.clone(),
-            source_label: v.source_label.clone(),
+            source_label: crate::shown::source_label(&v.source_label),
             level: v.level,
             status: v.status.clone(),
         }
@@ -826,7 +826,9 @@ pub fn confirm_contact(m: &Modules, who: &Caller, id: &str) -> ApiResult<Contact
     m.store.transaction(|tx| {
         let p = own_party(tx, &viewer, &id, "contact", "联系人", true)?;
         if p.contact_kind.as_deref() != Some("unconfirmed") {
-            return Err(ApiError::conflict("这个联系人已经确认过了"));
+            return Err(ApiError::conflict(steve_i18n::t!(
+                "modules.contacts.already_confirmed"
+            )));
         }
         let patch = PartyPatch {
             contact_kind: Some("real".into()),
@@ -856,7 +858,9 @@ pub fn delete_contact(m: &Modules, ports: &Ports, who: &Caller, id: &str) -> Api
     m.store.transaction(|tx| {
         let p = own_party(tx, &viewer, &id, "contact", "联系人", true)?;
         if p.is_me() {
-            return Err(ApiError::rule("不能删除你自己"));
+            return Err(ApiError::rule(steve_i18n::t!(
+                "modules.contacts.not_yourself"
+            )));
         }
         let attrs = repo::values_delete_of(tx, &who.ws, &p.id)?;
         let mems = super::memory::delete_only_about(tx, &who.ws, &p.id)?;
@@ -935,7 +939,9 @@ pub fn add_job(m: &Modules, who: &Caller, id: &str, b: NewJob) -> ApiResult<Cont
         let mut props = job_props(b.title.as_deref(), b.dept.as_deref(), b.from.as_deref());
         let before = match links::get(tx, &who.ws, &key)? {
             Some(old) if old.props.get("to").is_none_or(Value::is_null) => {
-                return Err(ApiError::conflict("已经在这个组织任职"));
+                return Err(ApiError::conflict(steve_i18n::t!(
+                    "modules.contacts.job_exists"
+                )));
             }
             Some(old) => {
                 let mut history = old
@@ -1351,7 +1357,9 @@ pub fn create_def(m: &Modules, who: &Caller, b: NewDefBody) -> ApiResult<AttrDef
     ck.done()?;
     m.store.transaction(|tx| {
         if repo::def_by_key(tx, &who.ws, &b.key)?.is_some() {
-            return Err(ApiError::conflict("已有这个属性"));
+            return Err(ApiError::conflict(steve_i18n::t!(
+                "modules.contacts.attr_exists"
+            )));
         }
         let d = repo::def_insert(
             tx,
@@ -1389,7 +1397,9 @@ pub struct DefPatch {
 /// A definition of the caller's workspace for writes: missing or foreign → 404, built-in → 400.
 fn own_def(tx: &Tx, ws: &str, id: &str) -> ApiResult<AttrDef> {
     match repo::def_get(tx, id)? {
-        Some(d) if d.builtin => Err(ApiError::rule("内置属性不能修改")),
+        Some(d) if d.builtin => Err(ApiError::rule(steve_i18n::t!(
+            "modules.contacts.attr_builtin"
+        ))),
         Some(d) if d.workspace_id == ws => Ok(d),
         _ => Err(ApiError::not_found("属性")),
     }
@@ -1433,7 +1443,10 @@ pub fn delete_def(m: &Modules, who: &Caller, id: &str) -> ApiResult<()> {
         let d = own_def(tx, &who.ws, id)?;
         let n = repo::def_usage(tx, &who.ws, &d.key)?;
         if n > 0 {
-            return Err(ApiError::conflict(format!("还有 {n} 个联系人在用这个属性")));
+            return Err(ApiError::conflict(steve_i18n::t!(
+                "modules.contacts.attr_in_use",
+                n = n
+            )));
         }
         repo::def_delete(tx, &d.id)?;
         base::audit(
@@ -1476,7 +1489,10 @@ fn check_domains(tx: &Tx, ws: &str, org: Option<&str>, raw: &[String]) -> ApiRes
     for d in &out {
         if let Some(owner) = repo::domain_owner(tx, ws, d)?.filter(|o| Some(o.as_str()) != org) {
             let name = repo::get(tx, &owner)?.map(|o| o.name).unwrap_or_default();
-            return Err(ApiError::conflict(format!("这个域名已经属于「{name}」")));
+            return Err(ApiError::conflict(steve_i18n::t!(
+                "modules.contacts.domain_taken",
+                name = name
+            )));
         }
     }
     Ok(out)
@@ -1576,7 +1592,9 @@ pub fn patch_org(m: &Modules, who: &Caller, id: &str, b: OrgPatch) -> ApiResult<
         }
         ck.done()?;
         if o.is_self_org() && b.kind.is_some() {
-            return Err(ApiError::rule("本公司不能改类型"));
+            return Err(ApiError::rule(steve_i18n::t!(
+                "modules.contacts.self_org_kind"
+            )));
         }
         let patch = PartyPatch {
             name: b
@@ -1639,7 +1657,9 @@ pub fn delete_org(m: &Modules, who: &Caller, id: &str) -> ApiResult<()> {
     m.store.transaction(|tx| {
         let o = own_party(tx, &viewer, id, "org", "组织", true)?;
         if o.is_self_org() {
-            return Err(ApiError::rule("本公司不能删除"));
+            return Err(ApiError::rule(steve_i18n::t!(
+                "modules.contacts.self_org_delete"
+            )));
         }
         let month = this_month();
         let mut closed = 0;

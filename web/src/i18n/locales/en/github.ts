@@ -27,6 +27,7 @@ export default {
     sub: "Repositories, PRs and checks. Once a repository is linked to a project, Steve asks whether to open a PR when you accept work, and hands failing check logs to the item to fix",
     addRepo: "Add repository",
     notDone: "Didn't finish",
+    vaultNeeded: "Turn on the vault before creating a GitHub App",
     enableVault: "Enable the vault",
     appCreated: "GitHub App created",
     appCreatedSub: "Next, install it on the repositories you want Steve to manage. GitHub brings you back here when it's done.",

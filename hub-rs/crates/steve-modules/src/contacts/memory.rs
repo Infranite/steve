@@ -58,7 +58,7 @@ impl From<&Mem> for MemOut {
             id: m.id.clone(),
             kind: m.kind.clone(),
             text: m.text.clone(),
-            source_label: m.source_label.clone(),
+            source_label: crate::shown::source_label(&m.source_label),
             level: m.level,
             status: m.status.clone(),
             visibility: m.visibility.clone(),

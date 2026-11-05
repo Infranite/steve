@@ -31,6 +31,8 @@ steve-node-api = { path = "../steve-node-api" }
 steve-node = { path = "../steve-node" }
 steve-node-wire = { path = "../steve-node-wire" }
 steve-transcript = { path = "../steve-transcript", features = ["legacy"] }
+steve-i18n = { path = "../steve-i18n" }
+rust-i18n = "=4.2.4"
 anyhow = "=1.0.104"
 async-trait = "=0.1.92"
 axum = { version = "=0.8.9", features = ["http1", "json", "query", "tokio", "macros", "multipart", "ws"] }

@@ -20,7 +20,6 @@ use crate::state::Knowledge;
 use crate::sync;
 
 /// `400` for a search text that looks like a secret.
-pub const SECRET_QUERY: &str = "检索词里像是有密码或令牌";
 pub const NOUN_DOC: &str = "文档";
 pub const NOUN_NOTE: &str = "笔记";
 
@@ -89,7 +88,9 @@ pub fn search(m: &Modules, kb: &Knowledge, who: &Caller, p: SearchParams) -> Api
     };
     Check::new().len("q", q.trim(), 1, 200).done()?;
     if !kb.guard.scan(&q).is_empty() {
-        return Err(ApiError::rule(SECRET_QUERY));
+        return Err(ApiError::rule(steve_i18n::t!(
+            "knowledge.search.secret_query"
+        )));
     }
     prepare(m, who)?;
     let kinds: Option<Vec<String>> = p
@@ -342,18 +343,18 @@ pub fn delete_doc(m: &Modules, kb: &Knowledge, who: &Caller, id: &str) -> ApiRes
         let (d, s) = own_doc(tx, &viewer, id, NOUN_DOC)?;
         match s.kind.as_str() {
             "notes" | "files" => {}
-            "folder" => return Err(ApiError::rule("这篇来自文件夹，请在原处删除或在来源里排除")),
+            "folder" => {
+                return Err(ApiError::rule(steve_i18n::t!(
+                    "knowledge.doc.delete_folder"
+                )));
+            }
             "items" => {
-                return Err(ApiError::rule(
-                    "这篇跟随事项，不能单独删除，可以把级别改成“不可使用”",
-                ));
+                return Err(ApiError::rule(steve_i18n::t!("knowledge.doc.delete_item")));
             }
             "chat" => {
-                return Err(ApiError::rule(
-                    "这篇跟随对话，不能单独删除，可以把级别改成“不可使用”",
-                ));
+                return Err(ApiError::rule(steve_i18n::t!("knowledge.doc.delete_chat")));
             }
-            _ => return Err(ApiError::rule("这篇不能单独删除")),
+            _ => return Err(ApiError::rule(steve_i18n::t!("knowledge.doc.delete_other"))),
         }
         index::delete_doc(tx, &d.id)?;
         let action = if s.kind == "notes" {

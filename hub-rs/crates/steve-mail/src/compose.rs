@@ -242,8 +242,9 @@ impl Mail {
                 Some(id) => repo::message(c, id)?
                     .filter(|m| m.thread_id == thread.id)
                     .ok_or_else(|| MailError::Api(ApiError::not_found("邮件")))?,
-                None => drafts::reply_target(c, &thread.id)?
-                    .ok_or_else(|| MailError::Api(ApiError::rule("这串往来里还没有邮件")))?,
+                None => drafts::reply_target(c, &thread.id)?.ok_or_else(|| {
+                    MailError::Api(ApiError::rule(steve_i18n::t!("mail.compose.no_messages")))
+                })?,
             };
             // the bot: asked for, else the mail bot, else the main bot
             let bot_id = match &q.bot {
@@ -385,7 +386,7 @@ impl Mail {
             return Err(ApiError::invalid("instruction").into());
         }
         let (m, w, qq) = (self.clone(), who.clone(), q.clone());
-        let g = tokio::task::spawn_blocking(move || m.gather(&w, &qq))
+        let g = tokio::task::spawn_blocking(steve_i18n::carry(move || m.gather(&w, &qq)))
             .await
             .map_err(|e| MailError::Other(format!("task failed: {e}")))??;
         let text = prompt(&g.parts);
@@ -397,17 +398,19 @@ impl Mail {
         .await
         .map_err(|e| {
             tracing::info!(error = %e, "mail quick draft: gateway");
-            MailError::Api(ApiError::rule("起草失败：模型没有回答，请再试一次"))
+            MailError::Api(ApiError::rule(steve_i18n::t!("mail.compose.no_answer")))
         })?;
         let md = parse_output(&out.text)
             .filter(|d| !d.body.is_empty())
-            .ok_or_else(|| MailError::Api(ApiError::rule("邮件 Bot 没有写出草稿，请再试一次")))?;
+            .ok_or_else(|| {
+                MailError::Api(ApiError::rule(steve_i18n::t!("mail.compose.no_draft")))
+            })?;
 
         // recipients and subject are the server's; the model only picks reply / reply_all
         let all = q.reply_all.unwrap_or(md.reply_all);
         let (to, cc) = reply_recipients(&g.orig, all, &g.mine);
         if to.is_empty() && cc.is_empty() {
-            return Err(ApiError::rule("找不到可以回复的人").into());
+            return Err(ApiError::rule(steve_i18n::t!("mail.compose.no_recipient")).into());
         }
         let base_subject = if g.orig.subject.trim().is_empty() {
             g.thread_subject.clone()

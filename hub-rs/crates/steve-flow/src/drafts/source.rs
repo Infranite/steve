@@ -13,7 +13,7 @@ use steve_modules::{ApiError, ApiResult, Registry};
 use steve_store::base::{Change, Viewer, show};
 use steve_store::{ChangeEvent, Tx};
 
-use super::{UNRECOGNIZED, bot_name, find_bot, parse_bool, text_of};
+use super::{bot_name, find_bot, parse_bool, text_of, unrecognized, unrecognized_value};
 use crate::LateFlow;
 use crate::sources::{
     self, ScopeMode, ScopeSetting, SourcePatch, TypeSetting, check_patch, connections_of,
@@ -49,16 +49,48 @@ fn parse_scope_mode(s: &str) -> Option<ScopeMode> {
     }
 }
 
+/// The card's wording of a scope mode, in the request's language.
+fn mode_shown(m: ScopeMode) -> String {
+    match m {
+        ScopeMode::Receive => steve_i18n::t!("flow.draft.scope_receive"),
+        ScopeMode::Record => steve_i18n::t!("flow.draft.scope_record"),
+        ScopeMode::Ignore => steve_i18n::t!("flow.draft.scope_ignore"),
+    }
+}
+
+/// For the model (field values it reads and writes back).
 fn yes_no(b: bool) -> &'static str {
     if b { "是" } else { "否" }
 }
 
+fn yes_no_shown(b: bool) -> String {
+    if b {
+        steve_i18n::t!("flow.draft.yes")
+    } else {
+        steve_i18n::t!("flow.draft.no")
+    }
+}
+
+/// For the model.
 fn on_off(b: bool) -> &'static str {
     if b { ON } else { OFF }
 }
 
+fn on_off_shown(b: bool) -> String {
+    if b {
+        steve_i18n::t!("flow.draft.type_on")
+    } else {
+        steve_i18n::t!("flow.draft.type_off")
+    }
+}
+
+/// For the model.
 fn triage_name(c: &Connection, bot: Option<&str>) -> String {
     bot.map_or_else(|| MAIN_BOT.to_string(), |b| bot_name(c, b))
+}
+
+fn triage_shown(c: &Connection, bot: Option<&str>) -> String {
+    bot.map_or_else(|| steve_i18n::t!("flow.draft.main_bot"), |b| bot_name(c, b))
 }
 
 /// The state of the adapter's connections `me` sees, as the source page shows it (the first
@@ -69,8 +101,8 @@ struct Current {
     triage_bot: Option<String>,
     /// `(key, label, on)` per event type of the adapter.
     types: Vec<(String, String, bool)>,
-    /// `(field key, label, connection_id, ext_id, mode)` per scope.
-    scopes: Vec<(String, String, String, String, ScopeMode)>,
+    /// `(field key, label for the model, label for the card, connection_id, ext_id, mode)` per scope.
+    scopes: Vec<(String, String, String, String, String, ScopeMode)>,
 }
 
 fn current(
@@ -105,14 +137,21 @@ fn current(
             } else {
                 &x.name
             };
-            let label = if many {
-                format!("范围「{name}」（{}）", conn.name)
+            let (label, shown) = if many {
+                (
+                    format!("范围「{name}」（{}）", conn.name),
+                    steve_i18n::t!("flow.draft.scope_of", name = name, connection = conn.name),
+                )
             } else {
-                format!("范围「{name}」")
+                (
+                    format!("范围「{name}」"),
+                    steve_i18n::t!("flow.draft.scope", name = name),
+                )
             };
             scopes.push((
                 format!("scope:{}:{}", conn.id, x.ext_id),
                 label,
+                shown,
                 conn.id.clone(),
                 x.ext_id.clone(),
                 x.mode,
@@ -164,7 +203,7 @@ impl DraftTarget for SourceTarget {
                 .values(&[ON, OFF]),
             );
         }
-        for (key, label, _, _, mode) in &cur.scopes {
+        for (key, label, _, _, _, mode) in &cur.scopes {
             fields.push(
                 FieldSpec::new(key, label, "enum", json!(mode_label(*mode))).values(&[
                     "接收",
@@ -176,7 +215,7 @@ impl DraftTarget for SourceTarget {
         Ok(Prepared {
             target_id: Some(adapter.to_string()),
             revision: Some(revision_of(c, &viewer.ws, adapter)?),
-            title: format!("事件源「{}」", cur.name),
+            title: steve_i18n::t!("flow.draft.source_title", name = cur.name),
             href: format!("#/auto/source/{adapter}"),
             subject: format!("the event source \"{}\"", cur.name),
             fields,
@@ -202,20 +241,24 @@ impl DraftTarget for SourceTarget {
         for op in raw {
             if op["op"] != "set" {
                 plan.changes
-                    .push(Change::new(UNRECOGNIZED, "—", show(&op.to_string())));
+                    .push(Change::new(unrecognized(), "—", show(&op.to_string())));
                 continue;
             }
             let key = op["key"].as_str().unwrap_or("");
             let said = text_of(&op["value"]).unwrap_or_default();
-            let bad = |label: &str| Change::new(label, "—", format!("（没认出：{}）", show(&said)));
+            let bad = |label: String| Change::new(label, "—", unrecognized_value(&said));
             if key == "paused" {
+                let label = steve_i18n::t!("flow.draft.paused");
                 match parse_bool(&said) {
                     Some(v) => {
                         patch.insert("paused".into(), json!(v));
-                        plan.changes
-                            .push(Change::new("暂停接收", yes_no(cur.paused), yes_no(v)));
+                        plan.changes.push(Change::new(
+                            label,
+                            yes_no_shown(cur.paused),
+                            yes_no_shown(v),
+                        ));
                     }
-                    None => plan.changes.push(bad("暂停接收")),
+                    None => plan.changes.push(bad(label)),
                 }
             } else if key == "triage_bot" {
                 let to = if op["value"].is_null() || said.is_empty() || said == MAIN_BOT {
@@ -223,43 +266,45 @@ impl DraftTarget for SourceTarget {
                 } else {
                     find_bot(c, &viewer.ws, &said)?.map(Some)
                 };
+                let label = steve_i18n::t!("flow.draft.triage_bot");
                 match to {
                     Some(b) => {
                         plan.changes.push(Change::new(
-                            "先交给谁判断",
-                            triage_name(c, cur.triage_bot.as_deref()),
-                            triage_name(c, b.as_deref()),
+                            label,
+                            triage_shown(c, cur.triage_bot.as_deref()),
+                            triage_shown(c, b.as_deref()),
                         ));
                         patch.insert("triage_bot".into(), json!(b));
                     }
-                    None => plan.changes.push(bad("先交给谁判断")),
+                    None => plan.changes.push(bad(label)),
                 }
             } else if let Some((tk, label, on)) = key
                 .strip_prefix("type:")
                 .and_then(|k| cur.types.iter().find(|t| t.0 == k))
             {
-                let label = format!("接收「{label}」");
+                let label = steve_i18n::t!("flow.draft.receive_type", label = label);
                 match parse_bool(&said) {
                     Some(v) => {
                         types.insert(tk.clone(), json!({ "on": v }));
                         plan.changes
-                            .push(Change::new(label, on_off(*on), on_off(v)));
+                            .push(Change::new(label, on_off_shown(*on), on_off_shown(v)));
                     }
-                    None => plan.changes.push(bad(&label)),
+                    None => plan.changes.push(bad(label)),
                 }
-            } else if let Some((_, label, conn, ext, mode)) = cur.scopes.iter().find(|s| s.0 == key)
+            } else if let Some((_, _, label, conn, ext, mode)) =
+                cur.scopes.iter().find(|s| s.0 == key)
             {
                 match parse_scope_mode(&said) {
                     Some(m) => {
                         scopes.push(json!({ "connection_id": conn, "ext_id": ext, "mode": m }));
                         plan.changes
-                            .push(Change::new(label, mode_label(*mode), mode_label(m)));
+                            .push(Change::new(label, mode_shown(*mode), mode_shown(m)));
                     }
-                    None => plan.changes.push(bad(label)),
+                    None => plan.changes.push(bad(label.clone())),
                 }
             } else {
                 plan.changes.push(Change::new(
-                    UNRECOGNIZED,
+                    unrecognized(),
                     "—",
                     show(&format!("{key}: {said}")),
                 ));

@@ -5,16 +5,18 @@ use axum::body::Bytes;
 use axum::extract::{Path, State};
 use serde_json::{Value, json};
 
-use super::{ApiResult, AppState, Ctx, body, objs, ok, ok_true, opt_obj, own, str_of, summary};
+use super::{
+    ApiResult, AppState, Ctx, Noun, body, objs, ok, ok_true, opt_obj, own, str_of, summary,
+};
 use crate::backend::{CreateItem, Obj};
 use crate::error::ApiError;
 use crate::js;
 use crate::validate::{Check, Num, Str};
 
-/// `own(c, items.get(id), "事项")` on the read pool.
+/// `own(c, items.get(id), Noun::Item)` on the read pool.
 async fn own_item(st: &AppState, ws: &str, id: &str) -> Result<Obj, ApiError> {
     let (id, ws) = (id.to_string(), ws.to_string());
-    st.read(move |r| Ok(own(r.item_get(&id)?, &ws, "事项")?))
+    st.read(move |r| Ok(own(r.item_get(&id)?, &ws, Noun::Item)?))
         .await
 }
 
@@ -94,7 +96,7 @@ pub async fn get_one(
     own_item(&st, &c.ws, &id).await?;
     let lifecycle = st.domain.lifecycle_view(&id).await?;
     st.read(move |r| {
-        let i = own(r.item_get(&id)?, &c.ws, "事项")?;
+        let i = own(r.item_get(&id)?, &c.ws, Noun::Item)?;
         let mut out = summary(r, i)?;
         if let Some(l) = lifecycle {
             out.insert("lifecycle".into(), l);
@@ -224,13 +226,13 @@ pub async fn patch_one(
 
     st.write(move |r| {
         // re-read under the lock: the TS handler ran all of this synchronously
-        let i = own(r.item_get(&id)?, &c.ws, "事项")?;
+        let i = own(r.item_get(&id)?, &c.ws, Noun::Item)?;
         let me = c.me.as_str();
         let project_id = rest.get("project_id").cloned();
         if let Some(Value::String(p)) = &project_id
             && !p.is_empty()
         {
-            own(r.project_get(p)?, &c.ws, "项目")?;
+            own(r.project_get(p)?, &c.ws, Noun::Project)?;
         }
         // tags first, before anything is written: the store drops other workspaces' tags and refuses
         // (409) a set without exactly one category, so removing the only one or adding a second fails
@@ -333,9 +335,11 @@ pub async fn delete_one(
     Path(id): Path<String>,
 ) -> ApiResult {
     st.write(move |r| {
-        let i = own(r.item_get(&id)?, &c.ws, "事项")?;
+        let i = own(r.item_get(&id)?, &c.ws, Noun::Item)?;
         if !js::truthy(i.get("archived")) {
-            return Err(ApiError::bad_request("先归档，才能永久删除"));
+            return Err(ApiError::bad_request(steve_i18n::t!(
+                "hub.item.archive_first"
+            )));
         }
         r.item_remove(&id)?;
         r.audit(
@@ -482,7 +486,7 @@ pub async fn panel_action(
 ) -> ApiResult {
     own_item(&st, &c.ws, &id).await?;
     let Some(m) = st.modules.clone() else {
-        return Err(ApiError::not_found("没有这个面板"));
+        return Err(ApiError::not_found(steve_i18n::t!("hub.not_found.panel")));
     };
     let caller = steve_modules::Caller {
         ws: c.ws.clone(),
@@ -539,7 +543,7 @@ pub async fn lifecycle(
     }
     let lifecycle = st.domain.lifecycle_view(&id).await?;
     st.read(move |r| {
-        let i = own(r.item_get(&id)?, &c.ws, "事项")?;
+        let i = own(r.item_get(&id)?, &c.ws, Noun::Item)?;
         let mut out = summary(r, i)?;
         if let Some(l) = lifecycle {
             out.insert("lifecycle".into(), l);

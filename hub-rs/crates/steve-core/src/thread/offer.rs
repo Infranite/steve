@@ -39,7 +39,7 @@ pub(crate) fn confirms(text: &str) -> bool {
 }
 
 pub(crate) fn not_found() -> CoreError {
-    CoreError::Status(404, "没有这条消息".into())
+    CoreError::Status(404, steve_i18n::t!("core.message.not_found"))
 }
 
 /// What a new item made from the conversation needs.
@@ -325,7 +325,10 @@ impl Core {
             .filter(|m| m.workspace_id == ws)
             .ok_or_else(not_found)?;
         let Some(o) = m.meta.get("offer").filter(|o| o.is_object()).cloned() else {
-            return Err(CoreError::Status(400, "这条消息没有提议".into()));
+            return Err(CoreError::Status(
+                400,
+                steve_i18n::t!("core.message.no_offer"),
+            ));
         };
         if o["state"] != "open" {
             let item = o["item"]

@@ -9,7 +9,7 @@ use axum::extract::{Path, Query, State};
 use serde_json::{Value, json};
 
 use super::misc::FAST;
-use super::{ApiResult, AppState, Ctx, blocking, body, ok, own, own_bot};
+use super::{ApiResult, AppState, Ctx, Noun, blocking, body, ok, own, own_bot};
 use crate::backend::{NewProject, Obj};
 use crate::config::home_dir;
 use crate::error::ApiError;
@@ -115,11 +115,16 @@ pub async fn create(
     let (dir_ok, git) =
         blocking(move || Ok((exists(&p) && is_dir(&p), exists(&join(&p, ".git"))))).await?;
     if !dir_ok {
-        return Err(ApiError::bad_request(format!("目录不存在：{raw}")));
+        return Err(ApiError::bad_request(steve_i18n::t!(
+            "hub.project.dir_missing",
+            path = raw
+        )));
     }
     st.write(move |r| {
         if r.project_by_path(&c.ws, &path)?.is_some() {
-            return Err(ApiError::bad_request("这个目录已经是一个项目"));
+            return Err(ApiError::bad_request(steve_i18n::t!(
+                "hub.project.already_project"
+            )));
         }
         let x = r.project_create(
             &c.ws,
@@ -158,7 +163,7 @@ pub async fn patch_one(
     b: Bytes,
 ) -> ApiResult {
     let (i, ws) = (id.clone(), c.ws.clone());
-    st.read(move |r| Ok(own(r.project_get(&i)?, &ws, "项目")?))
+    st.read(move |r| Ok(own(r.project_get(&i)?, &ws, Noun::Project)?))
         .await?;
     let v = body(&b)?;
     let mut k = Check::object(&v);
@@ -199,9 +204,7 @@ pub async fn patch_one(
                 .and_then(|o| o.get("release").cloned())
                 .filter(|v| !v.is_null())
                 .and_then(|v| serde_json::from_value(v).ok())
-                .ok_or_else(|| {
-                    ApiError::bad_request("这个项目没有设置发布方式，完成条件无从说起")
-                })?;
+                .ok_or_else(|| ApiError::bad_request(steve_i18n::t!("hub.project.no_release")))?;
             release.done_when = dw;
             p.insert("release".into(), json!(release));
         }
@@ -220,10 +223,12 @@ pub async fn lane(
 ) -> ApiResult {
     let ws = c.ws.clone();
     let p = st
-        .read(move |r| Ok(own(r.project_get(&id)?, &ws, "项目")?))
+        .read(move |r| Ok(own(r.project_get(&id)?, &ws, Noun::Project)?))
         .await?;
     if p.get("kind").and_then(Value::as_str) != Some("git") {
-        return Err(ApiError::bad_request("只有 git 项目有合并通道"));
+        return Err(ApiError::bad_request(steve_i18n::t!(
+            "hub.project.lanes_git_only"
+        )));
     }
     let path = p
         .get("path")
@@ -238,7 +243,10 @@ pub async fn lane(
     blocking(move || {
         let dir = FsPath::new(&path);
         if !dir.is_dir() {
-            return Err(ApiError::bad_request(format!("项目目录不存在：{path}")));
+            return Err(ApiError::bad_request(steve_i18n::t!(
+                "hub.project.project_dir_missing",
+                path = path
+            )));
         }
         let fetch = steve_core::lane::precheck::fetch(dir).err();
         let prof = steve_core::lane::profile::profile(dir, None, release.as_ref(), &gh)
@@ -292,7 +300,10 @@ pub async fn describe(
     let path = expand(&raw);
     let p = path.clone();
     if !blocking(move || Ok(exists(&p))).await? {
-        return Err(ApiError::bad_request(format!("目录不存在：{raw}")));
+        return Err(ApiError::bad_request(steve_i18n::t!(
+            "hub.project.dir_missing",
+            path = raw
+        )));
     }
     let p = path.clone();
     let (list, readme) = blocking(move || describe_input(&p)).await?;

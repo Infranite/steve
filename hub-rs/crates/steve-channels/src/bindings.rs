@@ -170,7 +170,9 @@ pub fn set_space(tx: &Tx, space: &SpaceRow, persona: Option<&str>, now: i64) -> 
     match persona {
         Some(p) => {
             if mode == Mode::Own {
-                return Err(ApiError::rule(SELF_NO_PERSONA));
+                return Err(ApiError::rule(steve_i18n::t!(
+                    "channels.error.self_no_persona"
+                )));
             }
             personas::own(tx, ws, p)?;
             upsert(tx, ws, &account, &space.id, p, now)?;
@@ -199,7 +201,9 @@ pub fn set_account_default(
     let ws = &viewer.ws;
     let (account, mode) = connection_account(tx, ws, conn)?;
     if mode == Mode::Own {
-        return Err(ApiError::rule(SELF_NO_PERSONA));
+        return Err(ApiError::rule(steve_i18n::t!(
+            "channels.error.self_no_persona"
+        )));
     }
     personas::own(tx, ws, persona)?;
     personas::ensure_default(tx, ws, now)?;

@@ -17,7 +17,9 @@ use super::engine::Engine;
 use crate::ItemAction;
 
 /// What the API says when there is nothing to undo.
-pub const CANNOT: &str = "这个决定不能撤销";
+pub fn cannot() -> String {
+    steve_i18n::t!("core.decision.not_undoable")
+}
 /// The reason a scheduled answer the user took over keeps: the card stays theirs.
 pub const USER_CANCEL: &str = "你选择自己来定";
 const DAY_MS: i64 = 24 * 60 * 60_000;
@@ -116,7 +118,7 @@ impl Engine {
     pub fn undo(&self, ws: &str, me: &str, id: &str, text: Option<&str>) -> ApiResult<ActionRow> {
         let a = self.own_action(ws, id)?;
         let Some(kind) = self.undo_kind(&a) else {
-            return Err(ApiError::rule(CANNOT));
+            return Err(ApiError::rule(cannot()));
         };
         let core = self.core();
         let decision = a.decision_id.clone().unwrap_or_default();
@@ -130,9 +132,9 @@ impl Engine {
                     .store()
                     .decision(&decision)
                     .map_err(ce)?
-                    .ok_or_else(|| ApiError::rule(CANNOT))?;
+                    .ok_or_else(|| ApiError::rule(cannot()))?;
                 let prev = d.result["prev"].as_str().unwrap_or_default().to_string();
-                let item = d.item_id.clone().ok_or_else(|| ApiError::rule(CANNOT))?;
+                let item = d.item_id.clone().ok_or_else(|| ApiError::rule(cannot()))?;
                 let log = core.rollback_release(&item, &prev, &a.id).map_err(ce)?;
                 detail["prev"] = json!(prev);
                 detail["log"] = json!(log);
@@ -142,11 +144,11 @@ impl Engine {
                     .store()
                     .decision(&decision)
                     .map_err(ce)?
-                    .ok_or_else(|| ApiError::rule(CANNOT))?;
+                    .ok_or_else(|| ApiError::rule(cannot()))?;
                 let r = self
                     .recall_slot()
                     .get()
-                    .ok_or_else(|| ApiError::rule(CANNOT))?;
+                    .ok_or_else(|| ApiError::rule(cannot()))?;
                 r.recall(ws, me, &d.subject_id)?;
             }
             "reanswer" => {
@@ -168,12 +170,12 @@ impl Engine {
                 detail["text"] = json!(t);
             }
             "pause" => {
-                let item = a.item_id.clone().ok_or_else(|| ApiError::rule(CANNOT))?;
+                let item = a.item_id.clone().ok_or_else(|| ApiError::rule(cannot()))?;
                 let it = core.item_action(&item, ItemAction::Pause, me).map_err(ce)?;
                 self.yolo()
                     .item_off(ws, &item, &it.title, "你在 YOLO 摘要里暂停了这件")?;
             }
-            _ => return Err(ApiError::rule(CANNOT)),
+            _ => return Err(ApiError::rule(cannot())),
         }
         self.yolo().store().transaction(|tx| {
             audit(
@@ -200,12 +202,16 @@ impl Engine {
     pub fn run_now(&self, ws: &str, id: &str) -> ApiResult<ActionRow> {
         let a = self.own_action(ws, id)?;
         if a.outcome != "scheduled" {
-            return Err(ApiError::conflict("这个代办已经不在冷静期了"));
+            return Err(ApiError::conflict(steve_i18n::t!(
+                "core.yolo.cooldown_over"
+            )));
         }
         let now = self.yolo().now();
         self.yolo().postpone(&a.id, now, &a.reason)?;
         let a = self.own_action(ws, id)?;
-        match self.run_due_row(a)? {
+        // the ledger row, its failure text and the breaker's reason are read by every member:
+        // written in zh-CN, not the clicking user's language (the caller translates the row)
+        match steve_i18n::stored(|| self.run_due_row(a))? {
             Some(a) => Ok(a),
             None => self.own_action(ws, id),
         }
@@ -215,7 +221,9 @@ impl Engine {
     pub fn cancel(&self, ws: &str, id: &str) -> ApiResult<ActionRow> {
         let a = self.own_action(ws, id)?;
         if !self.yolo().finish(&a.id, "cancelled", Some(USER_CANCEL))? {
-            return Err(ApiError::conflict("这个代办已经不在冷静期了"));
+            return Err(ApiError::conflict(steve_i18n::t!(
+                "core.yolo.cooldown_over"
+            )));
         }
         self.own_action(ws, id)
     }

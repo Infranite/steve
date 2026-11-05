@@ -19,7 +19,7 @@ use crate::cron::{DEFAULT_TZ, parse_tz};
 
 /// `GET /signals` returns at most this many.
 pub const MAX_LIST: i64 = 500;
-/// `410` of `GET /signals/:id/raw` after the retention period.
+/// `410` of `GET /signals/:id/raw` after the retention period (zh-CN; the answer is `flow.signal.raw_gone`).
 pub const RAW_GONE: &str = "原文已过保留期限，只剩处理结果和摘要";
 /// SSE `signal` events of one workspace within this window collapse into the last one.
 pub const COALESCE: Duration = Duration::from_millis(500);

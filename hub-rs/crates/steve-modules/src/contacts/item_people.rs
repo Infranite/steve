@@ -39,6 +39,18 @@ pub fn role_label(role: &str) -> &'static str {
     }
 }
 
+/// [`role_label`] in the request's language, for what the pages show.
+pub fn role_shown(role: &str) -> String {
+    use steve_i18n::t;
+    match role {
+        "raised_by" => t!("modules.item_people.role.raised_by"),
+        "waiting_on" => t!("modules.item_people.role.waiting_on"),
+        "about" => t!("modules.item_people.role.about"),
+        "attendee" => t!("modules.item_people.role.attendee"),
+        _ => t!("modules.item_people.role.other"),
+    }
+}
+
 fn item_ref(id: &str) -> ObjRef {
     ObjRef::new(ITEM, id)
 }
@@ -64,6 +76,16 @@ pub fn display_name(p: &Party) -> String {
         ("team", "dissolved") => "已解散的团队".into(),
         ("org", "deleted") => "已删除的组织".into(),
         (_, "deleted") => "已删除的联系人".into(),
+        _ => p.name.clone(),
+    }
+}
+
+/// [`display_name`] in the request's language, for an API answer (timeline lines keep the zh-CN one).
+pub fn shown_name(p: &Party) -> String {
+    match (p.kind.as_str(), p.status.as_str()) {
+        ("team", "dissolved") => steve_i18n::t!("modules.item_people.dissolved_team"),
+        ("org", "deleted") => steve_i18n::t!("modules.item_people.deleted_org"),
+        (_, "deleted") => steve_i18n::t!("modules.item_people.deleted_contact"),
         _ => p.name.clone(),
     }
 }
@@ -97,7 +119,7 @@ fn people_of(c: &Connection, viewer: &Viewer, item: &str) -> ApiResult<Vec<ItemP
         if let Some(p) = visible_party(c, viewer, &l.object_id)? {
             out.push(ItemPerson {
                 party_id: p.id.clone(),
-                name: display_name(&p),
+                name: shown_name(&p),
                 kind: p.kind,
                 role: l.predicate,
                 source: l.source,
@@ -493,7 +515,12 @@ pub fn timeline(
             .map(|l| TimelineEntry {
                 ts: l.created,
                 kind: "item".into(),
-                text: format!("{} {}（{}）", l.item_id, l.title, role_label(&l.role)),
+                text: steve_i18n::t!(
+                    "modules.item_people.timeline_item",
+                    id = l.item_id,
+                    title = l.title,
+                    role = role_shown(&l.role)
+                ),
                 href: format!("#/items/{}", l.item_id),
             })
             .take(limit)

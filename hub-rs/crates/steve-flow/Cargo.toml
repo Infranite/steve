@@ -10,6 +10,8 @@ steve-modules = { path = "../steve-modules" }
 steve-store = { path = "../steve-store" }
 # Work's published facts: `work.item.done` starts item-triggered flows (outbox consumer).
 steve-work-api = { path = "../steve-work-api" }
+steve-i18n = { path = "../steve-i18n" }
+rust-i18n = "=4.2.4"
 async-trait = "=0.1.92"
 axum = { version = "=0.8.9", default-features = false, features = ["json", "query"] }
 chrono = { version = "=0.4.45", default-features = false, features = ["std"] }

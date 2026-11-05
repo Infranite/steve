@@ -12,6 +12,8 @@
 //! `POST /api/stats/rebuild` calls `refresh::rebuild`; the REST reads call `metrics::summary` /
 //! `metrics::breakdown` on a read connection.
 
+steve_i18n::init!();
+
 pub mod backfill;
 pub mod catalog;
 pub mod day;

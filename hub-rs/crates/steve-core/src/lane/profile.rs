@@ -127,7 +127,10 @@ pub fn profile(
     } else if crate::git::git_test(dir, &["rev-parse", "--verify", "--quiet", &local])? {
         local
     } else {
-        return Err(format!("没有 {} 分支", target.branch));
+        return Err(steve_i18n::t!(
+            "core.lane.no_branch",
+            branch = target.branch
+        ));
     };
     let commit = git(dir, &["rev-parse", &at])?;
     let reads = format!(
@@ -195,8 +198,13 @@ fn github_rules(gh: &Path, slug: &str, branch: &str) -> Result<Rules, String> {
     let mut r = Rules::default();
     let b = encode(branch);
     /* rulesets */
-    let rules = gh_api(gh, &[&format!("repos/{slug}/rules/branches/{b}")])
-        .map_err(|e| format!("读不到 GitHub 上 {branch} 的规则：{}", e.text()))?;
+    let rules = gh_api(gh, &[&format!("repos/{slug}/rules/branches/{b}")]).map_err(|e| {
+        steve_i18n::t!(
+            "core.lane.gh_rules_unread",
+            branch = branch,
+            error = e.text()
+        )
+    })?;
     for x in rules.as_array().into_iter().flatten() {
         match x["type"].as_str() {
             Some("merge_queue") => r.queue = true,
@@ -217,8 +225,13 @@ fn github_rules(gh: &Path, slug: &str, branch: &str) -> Result<Rules, String> {
     }
     /* classic branch protection: `protected` is also true for rulesets alone, whose branch then has
     no classic protection to read (404) */
-    let br = gh_api(gh, &[&format!("repos/{slug}/branches/{b}")])
-        .map_err(|e| format!("读不到 GitHub 上的 {branch} 分支：{}", e.text()))?;
+    let br = gh_api(gh, &[&format!("repos/{slug}/branches/{b}")]).map_err(|e| {
+        steve_i18n::t!(
+            "core.lane.gh_branch_unread",
+            branch = branch,
+            error = e.text()
+        )
+    })?;
     if br["protected"].as_bool() == Some(true) {
         match gh_api(gh, &[&format!("repos/{slug}/branches/{b}/protection")]) {
             Ok(p) => {
@@ -236,8 +249,10 @@ fn github_rules(gh: &Path, slug: &str, branch: &str) -> Result<Rules, String> {
                 }
             }
             Err(GhError::NotFound(_)) => {}
-            Err(GhError::Other(e)) => r.partial.push(format!(
-                "{branch} 的经典分支保护读不到细节（需要仓库管理员权限）：{e}"
+            Err(GhError::Other(e)) => r.partial.push(steve_i18n::t!(
+                "core.lane.gh_protection_partial",
+                branch = branch,
+                error = e
             )),
         }
     }
@@ -261,25 +276,29 @@ fn github_rules(gh: &Path, slug: &str, branch: &str) -> Result<Rules, String> {
             Ok(v) if v["data"]["repository"].is_object() => {
                 r.queue = v["data"]["repository"]["mergeQueue"].is_object();
             }
-            Ok(v) => r.partial.push(format!(
-                "查不到 {branch} 有没有合并队列：{}",
-                crate::util::js_head(&v.to_string(), 200)
+            Ok(v) => r.partial.push(steve_i18n::t!(
+                "core.lane.gh_queue_unread",
+                branch = branch,
+                error = crate::util::js_head(&v.to_string(), 200)
             )),
-            Err(e) => r
-                .partial
-                .push(format!("查不到 {branch} 有没有合并队列：{}", e.text())),
+            Err(e) => r.partial.push(steve_i18n::t!(
+                "core.lane.gh_queue_unread",
+                branch = branch,
+                error = e.text()
+            )),
         }
     }
     if r.queue {
-        r.evidence.push(format!("GitHub：{branch} 开了合并队列"));
+        r.evidence
+            .push(steve_i18n::t!("core.lane.gh_queue_on", branch = branch));
     }
     if r.pr {
         r.evidence
-            .push(format!("GitHub：{branch} 要求经过 PR 合并"));
+            .push(steve_i18n::t!("core.lane.gh_pr_required", branch = branch));
     }
     if !r.queue && !r.pr && r.partial.is_empty() {
         r.evidence
-            .push(format!("GitHub：{branch} 没有要求 PR，也没有合并队列"));
+            .push(steve_i18n::t!("core.lane.gh_open", branch = branch));
     }
     Ok(r)
 }
@@ -301,7 +320,7 @@ fn merge_fact(host: &Host, rules: Option<&Result<Rules, String>>) -> Fact<Merge>
         (Host::Local, _) => Fact {
             value: Merge::Push,
             how: How::Found,
-            evidence: vec!["只在本机，没有托管方".into()],
+            evidence: vec![steve_i18n::t!("core.lane.local_only")],
         },
         (_, Some(Ok(r))) => Fact {
             value: if r.queue {
@@ -316,15 +335,16 @@ fn merge_fact(host: &Host, rules: Option<&Result<Rules, String>>) -> Fact<Merge>
                 How::Found
             } else {
                 How::Unknown {
-                    why: r.partial.join("；"),
+                    why: r.partial.join(&steve_i18n::t!("core.lane.why_sep")),
                 }
             },
             evidence: r.evidence.clone(),
         },
         (_, Some(Err(e))) => unknown(Merge::Push, e.clone()),
-        (Host::Other(h), None) | (Host::GitHub(h), None) => {
-            unknown(Merge::Push, format!("还认不出 {h} 上的合并设置"))
-        }
+        (Host::Other(h), None) | (Host::GitHub(h), None) => unknown(
+            Merge::Push,
+            steve_i18n::t!("core.lane.host_merge_unknown", host = h),
+        ),
     }
 }
 
@@ -376,7 +396,10 @@ fn checks_fact(
             });
         }
         if !r.required.is_empty() {
-            evidence.push(format!("GitHub 要求通过：{}", join(&r.required)));
+            evidence.push(steve_i18n::t!(
+                "core.lane.gh_required",
+                checks = join(&r.required)
+            ));
         }
     }
     let mut unread = vec![];
@@ -389,7 +412,11 @@ fn checks_fact(
                     .cloned()
                     .collect();
                 if !events.is_empty() {
-                    evidence.push(format!("{} 在 {} 时运行", w.file, events.join("、")));
+                    evidence.push(steve_i18n::t!(
+                        "core.lane.workflow_runs_on",
+                        file = w.file,
+                        events = events.join(&steve_i18n::t!("core.lane.list_sep"))
+                    ));
                     value.push(Check {
                         name: w.file.clone(),
                         from: "workflow",
@@ -398,7 +425,7 @@ fn checks_fact(
                 }
             }
             None => {
-                evidence.push(format!("认不出 {} 的触发条件", w.file));
+                evidence.push(steve_i18n::t!("core.lane.triggers_unread", files = w.file));
                 unread.push(w.file.as_str());
             }
         }
@@ -415,19 +442,22 @@ fn checks_fact(
     let how = match (host, rules) {
         (_, Some(Err(e))) => How::Unknown { why: e.clone() },
         (_, Some(Ok(r))) if !r.partial.is_empty() => How::Unknown {
-            why: r.partial.join("；"),
+            why: r.partial.join(&steve_i18n::t!("core.lane.why_sep")),
         },
         (Host::Other(h), _) => How::Unknown {
-            why: format!("还认不出 {h} 上合并前要过的检查"),
+            why: steve_i18n::t!("core.lane.host_checks_unknown", host = h),
         },
         _ if !unread.is_empty() => How::Unknown {
-            why: format!("认不出 {} 的触发条件", unread.join("、")),
+            why: steve_i18n::t!(
+                "core.lane.triggers_unread",
+                files = unread.join(&steve_i18n::t!("core.lane.list_sep"))
+            ),
         },
         _ if found => How::Found,
         _ => How::Default,
     };
     if how == How::Default {
-        evidence.insert(0, "合并前没有托管方的检查：集成成功就算可合并".into());
+        evidence.insert(0, steve_i18n::t!("core.lane.no_host_checks"));
     }
     Fact {
         value,
@@ -457,7 +487,7 @@ fn suggested(
             };
             out.push((
                 format!("cargo test{at} --workspace"),
-                format!("{f} 是 Rust 工作区"),
+                steve_i18n::t!("core.lane.rust_workspace", file = f),
             ));
         }
     }
@@ -485,7 +515,7 @@ fn suggested(
                             format!("run {s}")
                         }
                     ),
-                    format!("{f} 有 {s} 脚本"),
+                    steve_i18n::t!("core.lane.npm_script", file = f, script = s),
                 ));
             }
         }
@@ -748,21 +778,21 @@ fn ship_fact(release: Option<&Release>, workflows: &[Workflow]) -> Fact<Ship> {
         .collect();
     let mut evidence: Vec<String> = tag_flows
         .iter()
-        .map(|f| format!("{f} 在推送 tag 时运行"))
+        .map(|f| steve_i18n::t!("core.lane.workflow_on_tag", file = f))
         .collect();
     let done = release.and_then(|r| r.done_when.as_deref());
     let cmd = release.map(|r| r.cmd.trim()).filter(|c| !c.is_empty());
     let value = match (done, cmd) {
         (Some(d), _) if d == crate::upstream::DONE_TAG => {
-            evidence.insert(0, "项目设置：完成标准是 PR 合并并推送 tag".into());
+            evidence.insert(0, steve_i18n::t!("core.lane.done_tag"));
             Ship::Tag
         }
         (Some(d), _) if d == crate::upstream::DONE_MERGE => {
-            evidence.insert(0, "项目设置：完成标准是 PR 合并".into());
+            evidence.insert(0, steve_i18n::t!("core.lane.done_merge"));
             Ship::Merge
         }
         (_, Some(c)) => {
-            evidence.insert(0, format!("项目设置：发布命令 {c}"));
+            evidence.insert(0, steve_i18n::t!("core.lane.release_cmd", cmd = c));
             Ship::Script
         }
         _ if !tag_flows.is_empty() => Ship::Tag,
@@ -775,9 +805,9 @@ fn ship_fact(release: Option<&Release>, workflows: &[Workflow]) -> Fact<Ship> {
             return Fact {
                 value: Ship::Merge,
                 how: How::Unknown {
-                    why: format!(
-                        "认不出 {} 的触发条件，不知道是不是按 tag 发布",
-                        unread.join("、")
+                    why: steve_i18n::t!(
+                        "core.lane.triggers_unread_tag",
+                        files = unread.join(&steve_i18n::t!("core.lane.list_sep"))
                     ),
                 },
                 evidence: vec![],
@@ -787,7 +817,7 @@ fn ship_fact(release: Option<&Release>, workflows: &[Workflow]) -> Fact<Ship> {
             return Fact {
                 value: Ship::Merge,
                 how: How::Default,
-                evidence: vec!["没有发布命令，也没有按 tag 发布的 workflow：合并就算完成".into()],
+                evidence: vec![steve_i18n::t!("core.lane.ship_on_merge")],
             };
         }
     };
@@ -815,11 +845,11 @@ fn numbered(dir: &Path, files: &[String]) -> Vec<Numbered> {
         out.push(Numbered {
             kind: "version",
             path: "tag vX.Y.Z".into(),
-            evidence: format!("最新 {last}，共 {} 个", tags.len()),
+            evidence: steve_i18n::t!("core.lane.tags", last = last, n = tags.len()),
             handling: if cut {
-                "发布时由 ops/cut-release.py 取下一个号".into()
+                steve_i18n::t!("core.lane.version_by_tool")
             } else {
-                "没有发布工具：谁打 tag 谁定版本，可能撞号".into()
+                steve_i18n::t!("core.lane.version_by_hand")
             },
         });
     }
@@ -841,11 +871,11 @@ fn numbered(dir: &Path, files: &[String]) -> Vec<Numbered> {
         out.push(Numbered {
             kind: "notes",
             path: format!("{d}/"),
-            evidence: format!("{n} 份按版本写的说明"),
+            evidence: steve_i18n::t!("core.lane.notes", n = n),
             handling: if fragments {
-                format!("片段写在 {d}/unreleased/，发布时拼成一份")
+                steve_i18n::t!("core.lane.notes_fragments", dir = d)
             } else {
-                "在分支上按版本写，会撞号".into()
+                steve_i18n::t!("core.lane.notes_by_version")
             },
         });
     }
@@ -856,8 +886,8 @@ fn numbered(dir: &Path, files: &[String]) -> Vec<Numbered> {
         out.push(Numbered {
             kind: "notes",
             path: f.clone(),
-            evidence: "所有改动都写同一个文件".into(),
-            handling: "合并时容易冲突".into(),
+            evidence: steve_i18n::t!("core.lane.changelog"),
+            handling: steve_i18n::t!("core.lane.changelog_conflicts"),
         });
     }
 
@@ -887,13 +917,20 @@ fn numbered(dir: &Path, files: &[String]) -> Vec<Numbered> {
         out.push(Numbered {
             kind: "migrations",
             path: format!("{d}/"),
-            evidence: format!(
-                "{} 个，最新 {}{}",
-                names.len(),
-                names.last().map(String::as_str).unwrap_or(""),
-                if lock { "，有 LOCK" } else { "" }
-            ),
-            handling: "合并时取下一个空号".into(),
+            evidence: if lock {
+                steve_i18n::t!(
+                    "core.lane.migrations_locked",
+                    n = names.len(),
+                    last = names.last().map(String::as_str).unwrap_or("")
+                )
+            } else {
+                steve_i18n::t!(
+                    "core.lane.migrations",
+                    n = names.len(),
+                    last = names.last().map(String::as_str).unwrap_or("")
+                )
+            },
+            handling: steve_i18n::t!("core.lane.migrations_next"),
         });
     }
 
@@ -914,8 +951,8 @@ fn numbered(dir: &Path, files: &[String]) -> Vec<Numbered> {
             out.push(Numbered {
                 kind: "lockfile",
                 path: f.clone(),
-                evidence: "依赖锁文件".into(),
-                handling: "冲突时用工具重新生成，不手改".into(),
+                evidence: steve_i18n::t!("core.lane.lockfile"),
+                handling: steve_i18n::t!("core.lane.lockfile_regen"),
             });
         }
     }
@@ -1028,7 +1065,7 @@ fn join<'a>(xs: impl IntoIterator<Item = &'a String>) -> String {
     xs.into_iter()
         .map(String::as_str)
         .collect::<Vec<_>>()
-        .join("、")
+        .join(&steve_i18n::t!("core.lane.list_sep"))
 }
 
 #[cfg(test)]

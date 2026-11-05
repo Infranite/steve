@@ -27,6 +27,11 @@ pub const CHART_READONLY: &str = "组织架构团队跟随同步，不能改这�
 /// `400` of `POST /teams/sync` without a directory connection (verbatim).
 pub const NO_DIRECTORY: &str = "还没有接入能读通讯录的账号";
 
+/// [`CHART_READONLY`] in the request's language.
+pub fn chart_readonly() -> String {
+    steve_i18n::t!("modules.teams.chart_readonly")
+}
+
 const ROLES: [&str; 2] = ["lead", "member"];
 
 /// Spaces (groups) of the channels module, for `PATCH /teams/:id {space_id}`. Without it only `null` is
@@ -172,22 +177,22 @@ pub struct TeamList {
 /// The header sentence of a directory state.
 pub fn directory_note(s: &crate::contacts::sync::DirectoryState) -> Option<String> {
     if !s.missing_scopes.is_empty() {
-        return Some(format!(
-            "通讯录缺权限：{}，开通后会自动重新同步",
-            s.missing_scopes.join("、")
+        return Some(steve_i18n::t!(
+            "modules.teams.note.missing_scopes",
+            scopes = s
+                .missing_scopes
+                .join(&steve_i18n::t!("modules.error.list_sep"))
         ));
     }
     if let Some(e) = &s.error {
-        return Some(format!("上次同步没有成功：{e}"));
+        return Some(steve_i18n::t!("modules.teams.note.sync_failed", error = e));
     }
     match s.scope {
         Some(sc) if !sc.whole => Some(match (sc.departments, sc.users) {
-            (0, 0) => {
-                "应用的通讯录可见范围是空的，在开放平台把可见范围设为全员或需要的部门".to_string()
-            }
-            (d, 0) => format!("应用可见范围只包含 {d} 个部门"),
-            (0, u) => format!("应用可见范围只包含 {u} 个人"),
-            (d, u) => format!("应用可见范围只包含 {d} 个部门和 {u} 个人"),
+            (0, 0) => steve_i18n::t!("modules.teams.note.scope_empty"),
+            (d, 0) => steve_i18n::t!("modules.teams.note.scope_departments", departments = d),
+            (0, u) => steve_i18n::t!("modules.teams.note.scope_users", users = u),
+            (d, u) => steve_i18n::t!("modules.teams.note.scope_both", departments = d, users = u),
         }),
         _ => None,
     }
@@ -206,7 +211,7 @@ fn sync_label(c: &Connection, ports: &Ports, ws: &str, conn: &str) -> ApiResult<
         Some(s) => s.label(c, ws, conn)?,
         None => None,
     };
-    Ok(l.unwrap_or_else(|| "通讯录".into()))
+    Ok(l.unwrap_or_else(|| steve_i18n::t!("modules.teams.directory")))
 }
 
 /// “你建的 · 10-08”, “飞书通讯录 · 10-31 06:00 同步” (prototype `people-data.ts`).
@@ -214,17 +219,25 @@ fn source_label(c: &Connection, ports: &Ports, p: &Party, d: &Details) -> ApiRes
     if let (Some(conn), true) = (&d.sync_connection, d.is_chart()) {
         let label = sync_label(c, ports, &p.workspace_id, conn)?;
         return Ok(match d.synced {
-            Some(t) => format!("{label} · {} 同步", local(t, "%m-%d %H:%M")),
+            Some(t) => steve_i18n::t!(
+                "modules.teams.source.synced_at",
+                label = label,
+                at = local(t, "%m-%d %H:%M")
+            ),
             None => label,
         });
     }
     let who = match p.source.as_str() {
-        "sync" => "同步来的",
-        "chat" => "对话里建的",
-        "steve" => "Steve 建的",
-        _ => "你建的",
+        "sync" => steve_i18n::t!("modules.teams.source.sync"),
+        "chat" => steve_i18n::t!("modules.teams.source.chat"),
+        "steve" => steve_i18n::t!("modules.teams.source.steve"),
+        _ => steve_i18n::t!("modules.teams.source.me"),
     };
-    Ok(format!("{who} · {}", local(p.created, "%m-%d")))
+    Ok(steve_i18n::t!(
+        "modules.teams.source.created_at",
+        who = who,
+        at = local(p.created, "%m-%d")
+    ))
 }
 
 fn members(c: &Connection, viewer: &Viewer, team: &str) -> ApiResult<Vec<TeamMember>> {
@@ -537,7 +550,7 @@ pub fn patch_team(
             .filter(|n| *n != p.name);
         let visibility = b.visibility.clone().filter(|v| *v != p.visibility);
         if d.is_chart() && (name.is_some() || visibility.is_some()) {
-            return Err(ApiError::rule(CHART_READONLY));
+            return Err(ApiError::rule(chart_readonly()));
         }
         if let Some(v) = &visibility {
             check_visibility(tx, &who.ws, v)?;
@@ -621,7 +634,7 @@ pub fn put_members(
     m.store.transaction(|tx| {
         let (p, d) = own_team(tx, &viewer, id, true)?;
         if d.is_chart() {
-            return Err(ApiError::rule(CHART_READONLY));
+            return Err(ApiError::rule(chart_readonly()));
         }
         let new = resolve_members(tx, &viewer, &me, "members", &b, false)?;
         let old = repo::member_rows(tx, &who.ws, &p.id)?;
@@ -678,7 +691,7 @@ pub fn dissolve_team(m: &Modules, who: &Caller, id: &str) -> ApiResult<()> {
     m.store.transaction(|tx| {
         let (p, d) = own_team(tx, &viewer, id, true)?;
         if d.is_chart() {
-            return Err(ApiError::rule(CHART_READONLY));
+            return Err(ApiError::rule(chart_readonly()));
         }
         let patch = PartyPatch {
             status: Some("dissolved".into()),
@@ -707,9 +720,9 @@ pub struct SyncBody {
 pub fn sync_teams(m: &Modules, ports: &Ports, who: &Caller, b: SyncBody) -> ApiResult<String> {
     start(m, who)?;
     let Some(sync) = &ports.sync else {
-        return Err(ApiError::rule(NO_DIRECTORY));
+        return Err(ApiError::rule(steve_i18n::t!("modules.teams.no_directory")));
     };
     m.store
         .reader(|c| sync.schedule(c, &who.ws, &who.me, b.connection_id.as_deref()))?
-        .ok_or_else(|| ApiError::rule(NO_DIRECTORY))
+        .ok_or_else(|| ApiError::rule(steve_i18n::t!("modules.teams.no_directory")))
 }

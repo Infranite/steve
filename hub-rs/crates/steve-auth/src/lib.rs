@@ -15,6 +15,8 @@
 //! Handlers then take [`CurrentUser`] (the router state must give `Auth<St>: FromRef<_>`, e.g. a
 //! `#[derive(FromRef)]` field). `/auth/dev` needs `ConnectInfo<SocketAddr>` (loopback only).
 
+steve_i18n::init!();
+
 mod config;
 mod cookies;
 mod oidc;
@@ -112,11 +114,11 @@ impl<St> Clone for Auth<St> {
 
 /// `c.text(msg, code)`: Hono labels plain text `text/plain; charset=UTF-8` (axum's default is
 /// lowercase `utf-8`); the contract test compares the header byte for byte.
-fn text(code: StatusCode, msg: &'static str) -> Response {
+fn text(code: StatusCode, msg: impl Into<String>) -> Response {
     (
         code,
         [(header::CONTENT_TYPE, "text/plain; charset=UTF-8")],
-        msg,
+        msg.into(),
     )
         .into_response()
 }
@@ -317,7 +319,10 @@ async fn callback<St: UserStore>(State(a): State<Auth<St>>, req: Request) -> Res
         }
     });
     let Some(l) = pending else {
-        return text(StatusCode::BAD_REQUEST, "登录已过期，请重新登录");
+        return text(
+            StatusCode::BAD_REQUEST,
+            steve_i18n::t!("auth.login.expired"),
+        );
     };
     let clear = cookies::clear(LOGIN, "/auth");
     let mut res = match finish(&a, &parts, &l).await {
@@ -327,10 +332,13 @@ async fn callback<St: UserStore>(State(a): State<Auth<St>>, req: Request) -> Res
             cookies::append(&mut r, session_cookie);
             return r;
         }
-        Ok(None) => text(StatusCode::FORBIDDEN, "这个账号还没有被邀请使用 Steve"),
+        Ok(None) => text(
+            StatusCode::FORBIDDEN,
+            steve_i18n::t!("auth.login.not_invited"),
+        ),
         Err(e) => {
             tracing::error!("oidc callback {e}");
-            text(StatusCode::BAD_REQUEST, "登录失败")
+            text(StatusCode::BAD_REQUEST, steve_i18n::t!("auth.login.failed"))
         }
     };
     cookies::append(&mut res, clear);
@@ -408,7 +416,10 @@ async fn dev<St: UserStore>(State(a): State<Auth<St>>, req: Request) -> Response
         Err(e) => return internal_error("dev login", e),
     };
     let Some(id) = id else {
-        return text(StatusCode::FORBIDDEN, "已有所有者，本机登录不可用");
+        return text(
+            StatusCode::FORBIDDEN,
+            steve_i18n::t!("auth.dev.owner_exists"),
+        );
     };
     match a.start_session(&id) {
         Ok(cookie) => {

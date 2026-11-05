@@ -21,7 +21,7 @@ pub fn integration(identity: &str) -> steve_modules::accounts::connections::Inte
         identity: identity.into(),
         capabilities: vec![
             CapSpec::supported("repo", &["repo.read", WRITE_CAP])
-                .with_note("关联仓库、开 PR、接收检查和评论事件"),
+                .with_note(&steve_i18n::t!("github.provider.note")),
         ],
     }
 }

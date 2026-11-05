@@ -77,9 +77,9 @@ pub enum SendNow {
 
 /// The 409 for a queued message a turn already took.
 fn already_sent() -> CoreError {
-    CoreError::Module(steve_modules::ApiError::Conflict(
-        "这条消息已经发出，不能再改".into(),
-    ))
+    CoreError::Module(steve_modules::ApiError::Conflict(steve_i18n::t!(
+        "core.queue.already_sent"
+    )))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -504,13 +504,17 @@ impl Core {
         let mut t = self.tx();
         let i = t.item(item)?;
         if i.cycle != expected_cycle || i.revision != expected_revision {
-            return Err(crate::cycle::conflict(format!(
-                "事项已经变了（现在是第 {} 周期、第 {} 版），请刷新后再操作",
-                i.cycle, i.revision
+            return Err(crate::cycle::conflict(steve_i18n::t!(
+                "core.item.stale",
+                cycle = i.cycle,
+                revision = i.revision
             )));
         }
         if command == "fail" && reason.is_none_or(|r| r.trim().is_empty()) {
-            return Err(CoreError::Status(400, "标记失败要写明原因".into()));
+            return Err(CoreError::Status(
+                400,
+                steve_i18n::t!("core.item.fail_needs_reason"),
+            ));
         }
         t.db().audit(
             actor,
@@ -525,9 +529,13 @@ impl Core {
                     .filter(|c| {
                         i.phase == crate::cycle::CLOSING && c.kind == crate::cycle::COMPLETE
                     })
-                    .ok_or_else(|| crate::cycle::conflict("这个事项没有在等验收"))?;
+                    .ok_or_else(|| {
+                        crate::cycle::conflict(steve_i18n::t!("core.item.not_awaiting_acceptance"))
+                    })?;
                 if c.accepted {
-                    return Err(crate::cycle::conflict("已经验收过了"));
+                    return Err(crate::cycle::conflict(steve_i18n::t!(
+                        "core.item.already_accepted"
+                    )));
                 }
                 match c.decision.as_deref() {
                     Some(d) if t.db().decision(d)?.is_some_and(|d| d.status == "open") => {
@@ -556,7 +564,9 @@ impl Core {
                 let why = reason
                     .map(str::trim)
                     .filter(|r| !r.is_empty())
-                    .ok_or_else(|| CoreError::Status(400, "标记失败要写明原因".into()))?;
+                    .ok_or_else(|| {
+                        CoreError::Status(400, steve_i18n::t!("core.item.fail_needs_reason"))
+                    })?;
                 t.db()
                     .timeline_add(item, actor, "me", &format!("标记失败：{why}"), None)?;
                 t.lc_stop(item, crate::cycle::FAIL, actor, why, None)?;
@@ -564,7 +574,12 @@ impl Core {
             "new_cycle" => {
                 t.lc_new_cycle(item, actor, goal)?;
             }
-            _ => return Err(CoreError::Status(400, "参数不对：command".into())),
+            _ => {
+                return Err(CoreError::Status(
+                    400,
+                    steve_i18n::t!("core.error.invalid", fields = "command"),
+                ));
+            }
         }
         t.item(item)
     }
@@ -677,7 +692,9 @@ impl Core {
 }
 impl Tx<'_> {
     pub(crate) fn item(&self, id: &str) -> Result<Item> {
-        self.db().item(id)?.ok_or_else(|| msg("没有这个事项"))
+        self.db()
+            .item(id)?
+            .ok_or_else(|| msg(steve_i18n::t!("core.item.not_found")))
     }
 
     /// `void acp.prompt(…)`: fire and forget, but log a refusal.
@@ -893,7 +910,10 @@ impl Tx<'_> {
         };
         let path = Path::new(&p.path);
         if !path.exists() {
-            return Err(msg(format!("项目目录不存在：{}", p.path)));
+            return Err(msg(steve_i18n::t!(
+                "core.project.dir_missing",
+                path = p.path
+            )));
         }
         if p.kind != "git" || !p.worktree || !git::is_git(path) {
             return Ok((p.path.clone(), None));
@@ -982,10 +1002,7 @@ impl Tx<'_> {
             })?;
             db.item_patch(&item.id, patch![now: "等你确认后开始"])?;
         } else {
-            if let Err(e) = self.start_session_files(&item.id, n.opening.as_deref(), None, &n.files)
-            {
-                self.fail(&item.id, &format!("开不了会话：{e}"))?;
-            }
+            self.start_or_fail_files(&item.id, n.opening.as_deref(), None, &n.files)?;
         }
         self.hook(Point::Created, &item.id)?;
         self.item(&item.id)
@@ -998,10 +1015,25 @@ impl Tx<'_> {
         opening: Option<&str>,
         bot: Option<&str>,
     ) -> Result<()> {
-        if let Err(e) = self.start_session(item, opening, bot) {
-            self.fail(item, &format!("开不了会话：{e}"))?;
-        }
-        Ok(())
+        self.start_or_fail_files(item, opening, bot, &[])
+    }
+
+    /// [`Self::start_or_fail`] with attachments. The start runs in zh-CN: its error becomes the fail card,
+    /// the timeline line and the flow update, stored for every member (and compared to find the same card).
+    pub(crate) fn start_or_fail_files(
+        &mut self,
+        item: &str,
+        opening: Option<&str>,
+        bot: Option<&str>,
+        files: &[FileRef],
+    ) -> Result<()> {
+        // the error is formatted inside too: an `ApiError`'s text is rendered when displayed
+        steve_i18n::stored(
+            || match self.start_session_files(item, opening, bot, files) {
+                Err(e) => self.fail(item, &format!("开不了会话：{e}")),
+                Ok(_) => Ok(()),
+            },
+        )
     }
 
     pub(crate) fn start_session(
@@ -1936,7 +1968,7 @@ impl Tx<'_> {
             return Ok(());
         }
         if self.reaches(dep, item_id, &mut HashSet::new())? {
-            return Err(msg("会形成循环依赖，没有添加"));
+            return Err(msg(steve_i18n::t!("core.item.dep_cycle")));
         }
         self.db().dep_add(item_id, dep)?;
         self.db()
@@ -2011,7 +2043,7 @@ impl Tx<'_> {
         let d = db
             .decision(id)?
             .filter(|d| d.status == "open")
-            .ok_or_else(|| msg("这个决定已经处理过了"))?;
+            .ok_or_else(|| msg(steve_i18n::t!("core.decision.handled")))?;
         db.audit(
             actor,
             "decision.resolve",
@@ -2042,7 +2074,11 @@ impl Tx<'_> {
                 .map(|s| s.id.clone()),
             item: item_id.clone(),
         };
-        let iid = || item_id.clone().ok_or_else(|| msg("没有这个事项"));
+        let iid = || {
+            item_id
+                .clone()
+                .ok_or_else(|| msg(steve_i18n::t!("core.item.not_found")))
+        };
         let reget = |t: &Tx| t.db().decision(id).map(|d| d.expect("decision exists"));
         let tl = |t: &Tx, item: &str, text: &str| t.answer_line(item, actor, text, sid.as_deref());
         match (d.kind.as_str(), d.subject_type.as_str()) {
@@ -2238,11 +2274,7 @@ impl Tx<'_> {
                         // from a conversation: with what it would have started with right away
                         None => match self.c.thread_start(&before)? {
                             Some((opening, files)) => {
-                                if let Err(e) =
-                                    self.start_session_files(&i, Some(&opening), None, &files)
-                                {
-                                    self.fail(&i, &format!("开不了会话：{e}"))?;
-                                }
+                                self.start_or_fail_files(&i, Some(&opening), None, &files)?;
                             }
                             None => self.start_or_fail(&i, None, None)?,
                         },
@@ -2598,7 +2630,8 @@ impl Tx<'_> {
                 )?;
             }
         }
-        db.decision(id)?.ok_or_else(|| msg("这个决定已经处理过了"))
+        db.decision(id)?
+            .ok_or_else(|| msg(steve_i18n::t!("core.decision.handled")))
     }
 
     /// Undo a decision within 24 hours, when nothing irreversible happened because of it.
@@ -2610,7 +2643,7 @@ impl Tx<'_> {
                 && d.resolved.is_some_and(|r| r != 0 && now() - r <= DAY)
         };
         let Some(d) = d.filter(|d| undoable(d)) else {
-            return Err(msg("这个决定不能撤销"));
+            return Err(msg(steve_i18n::t!("core.decision.not_undoable")));
         };
         /* a closed cycle stays as it closed: nothing of it is taken back. The one exception is a
          * proposal you declined before anything started: taking that back is a new cycle, the declined
@@ -2622,9 +2655,9 @@ impl Tx<'_> {
                 && item.outcome.as_deref() == Some("cancelled")
                 && item.revision == 0;
             if !declined {
-                return Err(crate::cycle::conflict(
-                    "事项已经结束了，这个决定不能再撤销；需要时新建周期",
-                ));
+                return Err(crate::cycle::conflict(steve_i18n::t!(
+                    "core.decision.undo_closed"
+                )));
             }
             self.lc_new_cycle(i, actor, None)?;
             self.db().item_patch(i, patch![stage: "规划"])?;
@@ -2660,7 +2693,7 @@ impl Tx<'_> {
         }
         self.db()
             .decision(id)?
-            .ok_or_else(|| msg("这个决定不能撤销"))
+            .ok_or_else(|| msg(steve_i18n::t!("core.decision.not_undoable")))
     }
 
     /// An acceptance was taken back: dependents it unblocked go back to waiting, unless they already started a turn.
@@ -2734,7 +2767,7 @@ impl Tx<'_> {
             .db()
             .decision(id)?
             .filter(|d| d.status == "open")
-            .ok_or_else(|| msg("这个决定已经处理过了"))?;
+            .ok_or_else(|| msg(steve_i18n::t!("core.decision.handled")))?;
         self.db()
             .audit(actor, "decision.dismiss", id, &json!({}), &d.workspace_id)?;
         let i = match &d.item_id {
@@ -2780,7 +2813,7 @@ impl Tx<'_> {
         }
         self.db()
             .decision(id)?
-            .ok_or_else(|| msg("这个决定已经处理过了"))
+            .ok_or_else(|| msg(steve_i18n::t!("core.decision.handled")))
     }
 
     /* ── user actions on items and sessions ── */
@@ -2938,7 +2971,7 @@ impl Tx<'_> {
         match action {
             ItemAction::Pause => {
                 if i.is_finished() {
-                    return Err(crate::cycle::conflict(crate::cycle::CLOSED_MSG));
+                    return Err(crate::cycle::conflict(crate::cycle::closed_msg()));
                 }
                 if let Some(s) = &s {
                     self.rt().cancel(&s.id);
@@ -2948,10 +2981,13 @@ impl Tx<'_> {
             }
             ItemAction::Finish => {
                 if i.is_finished() {
-                    return Err(steve_modules::ApiError::conflict("这个事项已经结束了").into());
+                    return Err(steve_modules::ApiError::conflict(steve_i18n::t!(
+                        "core.item.ended"
+                    ))
+                    .into());
                 }
                 if crate::cycle::stopping(&i) {
-                    return Err(crate::cycle::conflict("这个事项正在取消或标记失败"));
+                    return Err(crate::cycle::conflict(steve_i18n::t!("core.item.ending")));
                 }
                 let busy = s.as_ref().is_some_and(|s| self.busy(&s.id));
                 self.st.marked_done.insert(id.into(), MarkedDone { busy });
@@ -2976,7 +3012,9 @@ impl Tx<'_> {
             ItemAction::Unfinish => {
                 if i.is_finished() {
                     self.st.marked_done.remove(id);
-                    return Err(crate::cycle::conflict("已经结束了，需要时新建周期"));
+                    return Err(crate::cycle::conflict(steve_i18n::t!(
+                        "core.item.ended_new_cycle"
+                    )));
                 }
                 let m = self
                     .st
@@ -2984,7 +3022,11 @@ impl Tx<'_> {
                     .get(id)
                     .filter(|_| i.phase == crate::cycle::CLOSING)
                     .cloned()
-                    .ok_or_else(|| steve_modules::ApiError::conflict("只能撤销刚才的标记完成"))?;
+                    .ok_or_else(|| {
+                        steve_modules::ApiError::conflict(steve_i18n::t!(
+                            "core.item.unfinish_only_marked"
+                        ))
+                    })?;
                 self.st.marked_done.remove(id);
                 self.lc_invalidate(id, "你撤销了标记完成")?;
                 self.db()
@@ -3013,10 +3055,10 @@ impl Tx<'_> {
             }
             ItemAction::Resume | ItemAction::Reopen => {
                 if i.is_finished() {
-                    return Err(crate::cycle::conflict(crate::cycle::CLOSED_MSG));
+                    return Err(crate::cycle::conflict(crate::cycle::closed_msg()));
                 }
                 if crate::cycle::stopping(&i) {
-                    return Err(crate::cycle::conflict("这个事项正在取消或标记失败"));
+                    return Err(crate::cycle::conflict(steve_i18n::t!("core.item.ending")));
                 }
                 supersede(self.db(), id, &["fail"], "你让它继续了")?;
                 recover_quiet(self.db(), id);
@@ -3093,7 +3135,7 @@ impl Tx<'_> {
         }
         let b = match self.db().bot(bot_id)? {
             Some(b) if self.db().bot_in_workspace(bot_id, &i.workspace_id)? => b,
-            _ => return Err(msg("这个 Bot 不在当前工作空间")),
+            _ => return Err(msg(steve_i18n::t!("core.bot.not_in_workspace"))),
         };
         let s = self.active_session(id)?;
         let handoff = match &s {
@@ -3134,7 +3176,10 @@ impl Tx<'_> {
         interrupt: bool,
         files: &[FileRef],
     ) -> Result<Prompted> {
-        let s = self.db().session(sid)?.ok_or_else(|| msg("没有这个会话"))?;
+        let s = self
+            .db()
+            .session(sid)?
+            .ok_or_else(|| msg(steve_i18n::t!("core.conversation.not_found")))?;
         if let Some(i) = s.item_id.as_deref() {
             self.lc_guard_open(i)?;
             self.db()
@@ -3153,7 +3198,10 @@ impl Tx<'_> {
     }
 
     pub(crate) fn queued_edit(&mut self, sid: &str, qid: &str, text: &str) -> Result<Queued> {
-        let s = self.db().session(sid)?.ok_or_else(|| msg("没有这个会话"))?;
+        let s = self
+            .db()
+            .session(sid)?
+            .ok_or_else(|| msg(steve_i18n::t!("core.conversation.not_found")))?;
         let (before, after) = self
             .db()
             .queue_edit(sid, qid, text)?
@@ -3176,7 +3224,10 @@ impl Tx<'_> {
     }
 
     pub(crate) fn queued_remove(&mut self, sid: &str, qid: &str) -> Result<Queued> {
-        let s = self.db().session(sid)?.ok_or_else(|| msg("没有这个会话"))?;
+        let s = self
+            .db()
+            .session(sid)?
+            .ok_or_else(|| msg(steve_i18n::t!("core.conversation.not_found")))?;
         let q = self.db().queue_remove(sid, qid)?.ok_or_else(already_sent)?;
         self.db()
             .event_add(sid, "queued_removed", json!({"id": qid, "text": q.text}))?;
@@ -3193,23 +3244,28 @@ impl Tx<'_> {
     }
 
     pub(crate) fn queued_send_now(&mut self, sid: &str, qid: &str) -> Result<SendNow> {
-        let s = self.db().session(sid)?.ok_or_else(|| msg("没有这个会话"))?;
+        let s = self
+            .db()
+            .session(sid)?
+            .ok_or_else(|| msg(steve_i18n::t!("core.conversation.not_found")))?;
         if let Some(i) = s.item_id.as_deref() {
             self.lc_guard_open(i)?;
         }
         let q = self.db().queue_front(sid, qid)?.ok_or_else(already_sent)?;
         if self.holding() {
-            return Ok(SendNow::Waiting("Hub 正在准备发布，发布后发送".into()));
+            return Ok(SendNow::Waiting(steve_i18n::t!("core.queue.wait_release")));
         }
         if self.db().store().maintenance() {
-            return Ok(SendNow::Waiting("Hub 正在维护，维护结束后发送".into()));
+            return Ok(SendNow::Waiting(steve_i18n::t!(
+                "core.queue.wait_maintenance"
+            )));
         }
         // moving on from a turn nobody can tell the end of is a decision of its own (中断), not
         // part of a reorder: the message stays first and goes once reconciliation settles it
         if self.rt().uncertain(sid) {
-            return Ok(SendNow::Waiting(
-                "上一轮的结果还不确定，确认后再发送".into(),
-            ));
+            return Ok(SendNow::Waiting(steve_i18n::t!(
+                "core.queue.wait_uncertain"
+            )));
         }
         let ev = |interrupted: bool| json!({"id": qid, "text": q.text, "interrupted": interrupted});
         // a cancel while the adapter is still starting goes right after its prompt; false means the
@@ -3220,9 +3276,7 @@ impl Tx<'_> {
             return Ok(SendNow::Interrupted);
         }
         if !cwd_usable(Path::new(&s.cwd)) {
-            return Ok(SendNow::Waiting(
-                "会话的工作目录不可用，暂时发不出去".into(),
-            ));
+            return Ok(SendNow::Waiting(steve_i18n::t!("core.queue.wait_cwd")));
         }
         if s.status == "ended" {
             self.db().session_patch(sid, patch![status: "idle"])?;
@@ -3238,14 +3292,11 @@ impl Tx<'_> {
                 .get(qid)?
                 .is_some_and(|q| q.session_id == sid)
         {
-            return Ok(SendNow::Waiting(
-                if self.busy(sid) {
-                    "会话正在准备，就绪后发送"
-                } else {
-                    "暂时发不出去，稍后自动发送"
-                }
-                .into(),
-            ));
+            return Ok(SendNow::Waiting(if self.busy(sid) {
+                steve_i18n::t!("core.queue.wait_starting")
+            } else {
+                steve_i18n::t!("core.queue.wait_later")
+            }));
         }
         self.db().event_add(sid, "queued_sent_now", ev(false))?;
         self.reactivate(s.item_id.as_deref())?;
@@ -3291,7 +3342,10 @@ impl Tx<'_> {
     }
 
     pub(crate) fn mark_awaiting_approval(&mut self, sid: &str) -> Result<()> {
-        let s = self.db().session(sid)?.ok_or_else(|| msg("没有这个会话"))?;
+        let s = self
+            .db()
+            .session(sid)?
+            .ok_or_else(|| msg(steve_i18n::t!("core.conversation.not_found")))?;
         self.st.pending.insert(s.id.clone(), Mark::Approval);
         if let Some(item) = s.item_id.as_deref() {
             supersede(self.db(), item, &["ask", "fail"], "Bot 继续往下做了")?;
@@ -3357,7 +3411,10 @@ impl Tx<'_> {
         as_session: bool,
         actor: &str,
     ) -> Result<Forked> {
-        let s = self.db().session(sid)?.ok_or_else(|| msg("没有这个会话"))?;
+        let s = self
+            .db()
+            .session(sid)?
+            .ok_or_else(|| msg(steve_i18n::t!("core.conversation.not_found")))?;
         let ctx = self.transcript_up_to(sid, seq)?;
         let g = or(goal, "从这里继续另一件事");
         let opening =
@@ -3422,12 +3479,12 @@ impl Tx<'_> {
             .db()
             .bot(id)?
             .filter(|b| !b.main)
-            .ok_or_else(|| msg("主 Bot 不能删除"))?;
+            .ok_or_else(|| msg(steve_i18n::t!("core.bot.main_undeletable")))?;
         let target0 = self
             .db()
             .bot(to)?
             .filter(|_| to != id)
-            .ok_or_else(|| msg("没有接手的 Bot"))?;
+            .ok_or_else(|| msg(steve_i18n::t!("core.bot.no_heir")))?;
         let mut moved = vec![];
         let mut heirs: Vec<(String, String)> = vec![];
         for w in self.db().bot_workspaces(id)? {

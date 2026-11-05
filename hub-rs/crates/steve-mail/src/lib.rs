@@ -29,6 +29,8 @@
 //! Integrator: `Mail::builder(..).knowledge(kb)`; `Knowledge::with_loaders(guard, notify,
 //! vec![Arc::new(ThreadLoader), Arc::new(FilesLoader::new(data_dir))])`; `config::targets::register(r)`.
 
+steve_i18n::init!();
+
 pub mod adapter;
 pub mod adapters;
 pub mod api;

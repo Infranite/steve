@@ -298,7 +298,7 @@ impl Change {
 /// `show(v)` from changes.ts: empty → “（空）”, longer than 40 characters → cut with “…”.
 pub fn show(v: &str) -> String {
     if v.is_empty() {
-        return "（空）".into();
+        return steve_i18n::t!("store.show.empty");
     }
     // JS counts UTF-16 units; for the CJK and Latin text shown here that is the char count.
     if v.encode_utf16().count() > 40 {

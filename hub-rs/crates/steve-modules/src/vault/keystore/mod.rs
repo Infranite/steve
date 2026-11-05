@@ -74,7 +74,7 @@ pub trait KeyStore: Send + Sync {
     /// Where the keys are, for people: `macOS 钥匙串`, `目录 /srv/steve-keys`, …
     fn label(&self) -> String {
         Kind::parse(self.kind())
-            .map(|k| k.label().to_string())
+            .map(|k| k.label())
             .unwrap_or_else(|| self.kind().to_string())
     }
     /// `Ok(None)` when there is no entry for `account`.
@@ -119,12 +119,13 @@ impl Kind {
         }
     }
 
-    pub fn label(self) -> &'static str {
+    /// For people, in the request's language (“macOS 钥匙串”).
+    pub fn label(self) -> String {
         match self {
-            Self::Keychain => "macOS 钥匙串",
-            Self::SecretService => "Linux 密钥环（Secret Service）",
-            Self::Dir => "密钥目录",
-            Self::File => "测试用密钥文件（不受保护）",
+            Self::Keychain => steve_i18n::t!("modules.keystore.keychain"),
+            Self::SecretService => steve_i18n::t!("modules.keystore.secret_service"),
+            Self::Dir => steve_i18n::t!("modules.keystore.dir"),
+            Self::File => steve_i18n::t!("modules.keystore.file"),
         }
     }
 }

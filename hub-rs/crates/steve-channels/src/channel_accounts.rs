@@ -13,7 +13,7 @@ use steve_store::base::{self, Viewer};
 use steve_store::{ChangeEvent, Tx};
 
 use crate::adapters::feishu::auth::{APP_ADAPTER, USER_ADAPTER};
-use crate::bindings::{self, PersonaRef, SELF_NO_PERSONA};
+use crate::bindings::{self, PersonaRef};
 use crate::channel::ChannelFeatures;
 use crate::spaces::{self, Mode};
 use crate::{ChannelResult, Channels};
@@ -405,10 +405,14 @@ pub fn patch(
     let ws = &viewer.ws;
     let (_, mode) = bindings::connection_account(tx, ws, conn)?;
     if p.persona_id.is_some() && mode == Mode::Own {
-        return Err(ApiError::rule(SELF_NO_PERSONA));
+        return Err(ApiError::rule(steve_i18n::t!(
+            "channels.error.self_no_persona"
+        )));
     }
     if p.trigger.is_some() && mode == Mode::Bot {
-        return Err(ApiError::rule(BOT_NO_TRIGGER));
+        return Err(ApiError::rule(steve_i18n::t!(
+            "channels.error.trigger_self_only"
+        )));
     }
     let fields = p.fields();
     if fields.is_empty() {
@@ -459,14 +463,11 @@ pub fn patch(
                         && spaces::settings(tx, &s.id)
                             .is_ok_and(|x| x.attention == spaces::Attention::Blocked)
                     {
-                        return Err(ApiError::rule(format!(
-                            "「{}」已屏蔽，触发语在那里不生效；先取消屏蔽",
-                            if s.name.trim().is_empty() {
-                                "这个空间"
-                            } else {
-                                s.name.trim()
-                            }
-                        )));
+                        return Err(ApiError::rule(if s.name.trim().is_empty() {
+                            steve_i18n::t!("channels.error.trigger_blocked_unnamed")
+                        } else {
+                            steve_i18n::t!("channels.error.trigger_blocked", space = s.name.trim())
+                        }));
                     }
                     if !out.contains(&w) {
                         out.push(w);

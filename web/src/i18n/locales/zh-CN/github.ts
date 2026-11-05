@@ -27,6 +27,7 @@ export default {
     sub: "仓库、PR 和检查。关联到项目后，Steve 在验收时问你要不要开 PR，检查失败时把日志交给事项去修",
     addRepo: "添加仓库",
     notDone: "没有完成",
+    vaultNeeded: "先启用保险箱，再创建 GitHub App",
     enableVault: "去启用保险箱",
     appCreated: "GitHub App 已创建",
     appCreatedSub: "下一步把它安装到要让 Steve 管的仓库上；装好后 GitHub 会带你回到这里。",

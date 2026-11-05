@@ -133,7 +133,7 @@ impl Core {
         if item.status == "done" {
             return Err(CoreError::Status(
                 409,
-                "这件事项已经验收，不能改回对话".into(),
+                steve_i18n::t!("core.thread.accepted_no_chat"),
             ));
         }
         if item.status == "drop" {
@@ -238,7 +238,7 @@ impl Core {
             .store()
             .item(item)?
             .filter(|i| i.workspace_id == ws)
-            .ok_or_else(|| CoreError::Status(404, "没有这个事项".into()))?;
+            .ok_or_else(|| CoreError::Status(404, steve_i18n::t!("core.item.not_found")))?;
         let om = self.store().message(origin)?.ok_or_else(not_found)?;
         self.forward(&it.id, &om.text, &files_of(&om, "files"), origin)?;
         self.store()
@@ -304,7 +304,7 @@ impl Core {
     /// clicking again (or from another tab, or while routing) returns the same one. Counts as a correction
     /// (`to_item`) unless the answer offered that work.
     pub async fn promote(&self, ws: &str, msg_id: &str) -> Result<Item> {
-        let refuse = || crate::error::msg("这条消息不能转成事项");
+        let refuse = || crate::error::msg(steve_i18n::t!("core.thread.not_promotable"));
         let m = self
             .store()
             .message(msg_id)?

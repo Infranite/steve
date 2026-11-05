@@ -30,29 +30,29 @@ impl NodeKind for Trigger {
     fn validate(&self, cfg: &Value) -> Result<(), String> {
         let source = opt_str(cfg, "source")?.unwrap_or("").trim();
         if source.is_empty() {
-            return Err("要选触发来源".into());
+            return Err(steve_i18n::t!("flow.node.trigger_source"));
         }
         if source.chars().count() > 40 {
-            return Err("触发来源太长了".into());
+            return Err(steve_i18n::t!("flow.node.trigger_source_long"));
         }
         for k in ["types", "connections", "scopes", "spaces"] {
             let xs = str_list(cfg, k)?;
             if xs.len() > 50 {
-                return Err(format!("{k} 最多 50 个"));
+                return Err(steve_i18n::t!("flow.node.trigger_list_max", key = k));
             }
         }
         if source == "time" {
             let cron = opt_str(cfg, "cron")?.unwrap_or("");
-            CronExpr::parse(cron).map_err(|_| "定时触发要有正确的 cron".to_string())?;
+            CronExpr::parse(cron).map_err(|_| steve_i18n::t!("flow.node.trigger_cron"))?;
             if let Some(tz) = opt_str(cfg, "tz")? {
-                parse_tz(tz).map_err(|_| format!("不认识的时区：{tz}"))?;
+                parse_tz(tz).map_err(|_| steve_i18n::t!("flow.node.trigger_tz", tz = tz))?;
             }
         }
         if let Some(m) = opt_str(cfg, "missed")?
             && m != "catch_up_once"
             && m != "skip"
         {
-            return Err("missed 只能是 catch_up_once 或 skip".into());
+            return Err(steve_i18n::t!("flow.node.trigger_missed"));
         }
         Ok(())
     }

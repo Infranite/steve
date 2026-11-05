@@ -8,7 +8,7 @@ use axum::body::Bytes;
 use axum::extract::{Path, State};
 use serde_json::{Map, Value, json};
 
-use super::{ApiResult, AppState, Ctx, body, ok, ok_true, own, str_of};
+use super::{ApiResult, AppState, Ctx, Noun, body, ok, ok_true, own, str_of};
 use crate::backend::Obj;
 use crate::error::ApiError;
 use crate::validate::{Check, Str};
@@ -18,7 +18,7 @@ const QUOTE_MAX: usize = 2000;
 
 async fn own_item(st: &AppState, ws: &str, id: &str) -> Result<Obj, ApiError> {
     let (id, ws) = (id.to_string(), ws.to_string());
-    st.read(move |r| Ok(own(r.item_get(&id)?, &ws, "事项")?))
+    st.read(move |r| Ok(own(r.item_get(&id)?, &ws, Noun::Item)?))
         .await
 }
 
@@ -88,9 +88,11 @@ pub async fn add(
     let anchor = v
         .get("anchor")
         .and_then(anchor_of)
-        .ok_or_else(|| ApiError::bad_request("参数不对：anchor"))?;
+        .ok_or_else(|| ApiError::Invalid(vec!["anchor".into()]))?;
     if note.trim().is_empty() {
-        return Err(ApiError::bad_request("批注不能是空的"));
+        return Err(ApiError::bad_request(steve_i18n::t!(
+            "hub.annotation.empty"
+        )));
     }
     st.write(move |r| {
         if !r
@@ -98,7 +100,7 @@ pub async fn add(
             .iter()
             .any(|a| str_of(a, "id") == art)
         {
-            return Err(ApiError::not_found("没有这个产出"));
+            return Err(ApiError::not_found(steve_i18n::t!("hub.not_found.output")));
         }
         ok(Value::Object(r.annotation_add(
             &id,
@@ -123,11 +125,16 @@ pub async fn edit(
     let note = k.str("note", Str::len(1, NOTE_MAX));
     k.finish()?;
     if note.trim().is_empty() {
-        return Err(ApiError::bad_request("批注不能是空的"));
+        return Err(ApiError::bad_request(steve_i18n::t!(
+            "hub.annotation.empty"
+        )));
     }
     st.write(move |r| match r.annotation_edit(&id, &ann, note.trim())? {
         Some(a) => ok(Value::Object(a)),
-        None => Err(ApiError::Json(409, "这条批注已经发送，不能再改".into())),
+        None => Err(ApiError::Json(
+            409,
+            steve_i18n::t!("hub.annotation.sent_no_edit"),
+        )),
     })
     .await
 }
@@ -142,7 +149,10 @@ pub async fn remove(
         if r.annotation_remove(&id, &ann)? {
             ok_true()
         } else {
-            Err(ApiError::Json(409, "这条批注已经发送，不能删除".into()))
+            Err(ApiError::Json(
+                409,
+                steve_i18n::t!("hub.annotation.sent_no_delete"),
+            ))
         }
     })
     .await
@@ -263,9 +273,14 @@ pub async fn send(
     k.finish()?;
     // a send runs to its end even when the request goes away (a reload, a dropped connection), so its
     // drafts are never left taken but unsettled
-    tokio::spawn(send_now(st, id, ids, key))
+    tokio::spawn(steve_i18n::bind(send_now(st, id, ids, key)))
         .await
-        .map_err(|e| ApiError::Json(500, format!("发送中断：{e}")))?
+        .map_err(|e| {
+            ApiError::Json(
+                500,
+                steve_i18n::t!("hub.annotation.send_interrupted", error = e),
+            )
+        })?
 }
 
 fn line_id(t: &Obj) -> i64 {
@@ -290,7 +305,7 @@ async fn send_now(st: AppState, id: String, ids: Vec<String>, key: String) -> Ap
     if taken.is_empty() {
         return Err(ApiError::Json(
             409,
-            "这些批注已经发送过，或者已经删除".into(),
+            steve_i18n::t!("hub.annotation.none_to_send"),
         ));
     }
     let text = message(&taken, &arts);

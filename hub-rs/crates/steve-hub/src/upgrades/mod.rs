@@ -192,7 +192,7 @@ impl Updates {
                     std::env::var("STEVE_VAULT_KEYSTORE").as_deref(),
                     Ok("dir") | Ok("file")
                 ) {
-                Some("macOS Keychain/自定义签名安装不能使用通用预编译升级；需先显式迁移到独立dir密钥存储，升级器不会修改密钥".into())
+                Some(steve_i18n::t!("hub.upgrade.reason.keychain"))
             } else {
                 None
             },
@@ -206,7 +206,7 @@ impl Updates {
     pub fn execution_reason(&self) -> Option<String> {
         if !self.managed {
             // the kind doesn't depend on the checkout, only the commands do
-            return self.install(Path::new("")).reason().map(Into::into);
+            return self.install(Path::new("")).reason();
         }
         self.blocked_reason.clone()
     }
@@ -294,7 +294,7 @@ impl Updates {
             return self
                 .cached_check()
                 .map(|cached| cached.result)
-                .context("版本检查正在进行，请稍后重试");
+                .context(steve_i18n::t!("hub.upgrade.check_running"));
         }
         if let Some(cached) = self.cached_check()
             && now().saturating_sub(cached.result.checked_at) < cached.ttl()
@@ -385,7 +385,7 @@ impl Updates {
                             .active()?
                             .is_some_and(|active| active.id != op.id && !active.terminal())
                         {
-                            bail!("孤立升级操作与当前活动操作冲突，请先处理当前操作")
+                            bail!("{}", steve_i18n::t!("hub.upgrade.orphan_conflict"))
                         }
                         atomic(&self.dir().join("active.json"), &json!({"id":op.id}))?;
                     }
@@ -411,7 +411,7 @@ impl Updates {
             )?;
         }
         if self.active()?.is_some_and(|o| !o.terminal()) {
-            bail!("已有升级操作进行中")
+            bail!("{}", steve_i18n::t!("hub.upgrade.in_progress"))
         }
         let op = Operation {
             id: uuid::Uuid::new_v4().to_string(),
@@ -443,19 +443,19 @@ impl Updates {
         let _guard = lock(&self.dir().join("journal.lock"))?;
         let mut op = self.operation(id)?;
         if self.active()?.as_ref().map(|active| active.id.as_str()) != Some(id) {
-            bail!("该操作不是当前活动升级请求")
+            bail!("{}", steve_i18n::t!("hub.upgrade.not_active"))
         }
         if op.phase == "awaiting_approval" {
             if now().saturating_sub(op.created_at) > 86_400_000 {
                 self.phase(&mut op, "failed", Some("升级审批请求已过期".into()))?;
-                bail!("升级审批请求已过期")
+                bail!("{}", steve_i18n::t!("hub.upgrade.expired"))
             }
 
             op.approved_by = Some(who.into());
             op.approved_at = Some(now());
             self.phase(&mut op, "staging", None)?
         } else if op.phase != "staging" {
-            bail!("操作已批准或已结束")
+            bail!("{}", steve_i18n::t!("hub.upgrade.already_decided"))
         };
         Ok(op)
     }
@@ -463,7 +463,7 @@ impl Updates {
         let _guard = lock(&self.dir().join("journal.lock"))?;
         let mut op = self.operation(id)?;
         if op.phase != "awaiting_approval" {
-            bail!("只有待审批的升级请求可以拒绝")
+            bail!("{}", steve_i18n::t!("hub.upgrade.reject_pending_only"))
         }
         self.phase(&mut op, "failed", Some("实例管理员拒绝了升级请求".into()))?;
         Ok(op)

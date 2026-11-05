@@ -64,10 +64,10 @@ pub struct NoPasskeys;
 #[async_trait]
 impl RevealGate for NoPasskeys {
     async fn start(&self, _: &RevealTarget) -> VaultResult<Value> {
-        Err(ApiError::rule(NEED_PASSKEY).into())
+        Err(ApiError::rule(steve_i18n::t!("modules.vault.need_passkey")).into())
     }
     async fn finish(&self, _: &RevealTarget, _: &Value) -> VaultResult<Verified> {
-        Err(ApiError::rule(NEED_PASSKEY).into())
+        Err(ApiError::rule(steve_i18n::t!("modules.vault.need_passkey")).into())
     }
 }
 
@@ -81,7 +81,9 @@ impl Vault {
                 .find(|f| f.id == t.field_id)
                 .ok_or_else(|| ApiError::not_found("字段"))?;
             if !f.secret {
-                return Err(ApiError::rule("这个字段不是机密，不需要验证").into());
+                return Err(
+                    ApiError::rule(steve_i18n::t!("modules.vault.field_not_secret")).into(),
+                );
             }
             Ok::<_, VaultError>(())
         })

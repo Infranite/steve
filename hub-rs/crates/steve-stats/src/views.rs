@@ -88,42 +88,43 @@ pub fn today(c: &Connection, ws: &str, now: i64) -> Result<String> {
 
 /* ── labels ── */
 
-/// Chinese names of the fixed keys (sources, purposes, harnesses, fail reasons, decision kinds).
-pub fn fixed_label(key: &str) -> Option<&'static str> {
+/// Names of the fixed keys (sources, purposes, harnesses, fail reasons, decision kinds), in the
+/// request's language.
+pub fn fixed_label(key: &str) -> Option<String> {
     Some(match key {
-        "agent" => "Agent 回合",
-        "gateway" => "网关调用",
-        "backfill" => "回填（会话级）",
-        "turn" => "回合",
-        "autonomous" => "后台回合",
-        "route" => "分流",
-        "chat" => "对话回答",
-        "research" => "就地研究",
-        "title" => "起标题",
-        "draft" => "草稿/配置",
-        "extract" => "记忆提取",
-        "compose" => "渠道回复",
-        "mail" => "邮件起草",
-        "disclosure" => "披露检查",
-        "intent" => "意图识别",
-        "flow" => "流程 Bot 节点",
-        "yolo" => "YOLO 代答",
-        "digest" => "汇报",
-        "other" => "其他",
-        "claude-code" => "Claude Code",
-        "codex" => "Codex",
-        "claude-cli" => "claude -p",
-        "codex-cli" => "codex exec",
-        "stall" => "停滞",
-        "error" => "会话出错",
-        "restart" => "Hub 重启",
-        "release" => "发布失败",
-        "accept" => "验收",
-        "ask" => "提问",
-        "approve" => "批准",
-        "fail" => "失败卡",
-        "propose" => "提议",
-        "confirm" => "确认",
+        "agent" => steve_i18n::t!("stats.label.agent"),
+        "gateway" => steve_i18n::t!("stats.label.gateway"),
+        "backfill" => steve_i18n::t!("stats.label.backfill"),
+        "turn" => steve_i18n::t!("stats.label.turn"),
+        "autonomous" => steve_i18n::t!("stats.label.autonomous"),
+        "route" => steve_i18n::t!("stats.label.route"),
+        "chat" => steve_i18n::t!("stats.label.chat"),
+        "research" => steve_i18n::t!("stats.label.research"),
+        "title" => steve_i18n::t!("stats.label.title"),
+        "draft" => steve_i18n::t!("stats.label.draft"),
+        "extract" => steve_i18n::t!("stats.label.extract"),
+        "compose" => steve_i18n::t!("stats.label.compose"),
+        "mail" => steve_i18n::t!("stats.label.mail"),
+        "disclosure" => steve_i18n::t!("stats.label.disclosure"),
+        "intent" => steve_i18n::t!("stats.label.intent"),
+        "flow" => steve_i18n::t!("stats.label.flow"),
+        "yolo" => steve_i18n::t!("stats.label.yolo"),
+        "digest" => steve_i18n::t!("stats.label.digest"),
+        "other" => steve_i18n::t!("stats.label.other"),
+        "claude-code" => steve_i18n::t!("stats.label.claude_code"),
+        "codex" => steve_i18n::t!("stats.label.codex"),
+        "claude-cli" => steve_i18n::t!("stats.label.claude_cli"),
+        "codex-cli" => steve_i18n::t!("stats.label.codex_cli"),
+        "stall" => steve_i18n::t!("stats.label.stall"),
+        "error" => steve_i18n::t!("stats.label.error"),
+        "restart" => steve_i18n::t!("stats.label.restart"),
+        "release" => steve_i18n::t!("stats.label.release"),
+        "accept" => steve_i18n::t!("stats.label.accept"),
+        "ask" => steve_i18n::t!("stats.label.ask"),
+        "approve" => steve_i18n::t!("stats.label.approve"),
+        "fail" => steve_i18n::t!("stats.label.fail"),
+        "propose" => steve_i18n::t!("stats.label.propose"),
+        "confirm" => steve_i18n::t!("stats.label.confirm"),
         _ => return None,
     })
 }
@@ -152,15 +153,13 @@ impl Names {
     /// The label of `key` in dimension `dim` (`model`, `bot`, `project`, `source`, `purpose`, …).
     pub fn label(&self, dim: &str, key: &str) -> String {
         match (dim, key) {
-            ("bot", "") => "无 Bot".into(),
-            ("project", "") => "无项目".into(),
-            ("model", "") => "未知模型".into(),
+            ("bot", "") => steve_i18n::t!("stats.label.no_bot"),
+            ("project", "") => steve_i18n::t!("stats.label.no_project"),
+            ("model", "") => steve_i18n::t!("stats.label.unknown_model"),
             ("bot", k) => self.bots.get(k).cloned().unwrap_or_else(|| k.into()),
             ("project", k) => self.projects.get(k).cloned().unwrap_or_else(|| k.into()),
             ("model", k) | ("day", k) => k.into(),
-            (_, k) => fixed_label(k)
-                .map(str::to_string)
-                .unwrap_or_else(|| k.into()),
+            (_, k) => fixed_label(k).unwrap_or_else(|| k.into()),
         }
     }
 }
@@ -284,7 +283,7 @@ impl Acc {
         keys.into_iter()
             .map(|(k, v)| Line {
                 label: if k == "other" {
-                    "其他".into()
+                    steve_i18n::t!("stats.label.other")
                 } else {
                     names.label(dim, &k)
                 },
@@ -388,15 +387,15 @@ fn lines(
     let names = Names::load(c, &q.workspace_id)?;
     let mut acc = Acc::default();
     let total_label = |m: Metric| match m {
-        Metric::Tokens => "tokens",
-        Metric::Cost => "估算费用",
-        Metric::Done => "完成",
-        Metric::Created => "新建",
-        Metric::Wip => "进行中",
-        Metric::Lead => "前置时间",
-        Metric::HitRate => "缓存命中率",
-        Metric::Turns => "回合",
-        Metric::Decisions => "决定",
+        Metric::Tokens => steve_i18n::t!("stats.total.tokens"),
+        Metric::Cost => steve_i18n::t!("stats.total.cost"),
+        Metric::Done => steve_i18n::t!("stats.total.done"),
+        Metric::Created => steve_i18n::t!("stats.total.created"),
+        Metric::Wip => steve_i18n::t!("stats.total.wip"),
+        Metric::Lead => steve_i18n::t!("stats.total.lead"),
+        Metric::HitRate => steve_i18n::t!("stats.total.hit_rate"),
+        Metric::Turns => steve_i18n::t!("stats.total.turns"),
+        Metric::Decisions => steve_i18n::t!("stats.total.decisions"),
     };
     let mut rate = false;
     let mut order: &[&str] = &[];
@@ -550,7 +549,10 @@ fn lines(
                     .map(|v| percentile(v, q).map(|x| x as f64))
                     .collect(),
             };
-            return Ok(vec![line("p50", "中位数", 0.5), line("p85", "p85", 0.85)]);
+            return Ok(vec![
+                line("p50", &steve_i18n::t!("stats.label.median"), 0.5),
+                line("p85", "p85", 0.85),
+            ]);
         }
     }
     let dim = if group == "none" { "total" } else { group };
@@ -564,7 +566,7 @@ fn lines(
             });
         }
         for l in &mut series {
-            l.label = total_label(metric).into();
+            l.label = total_label(metric);
         }
     }
     Ok(series)
@@ -979,7 +981,7 @@ pub fn item_detail(
             rate(&mut u, b);
             ModelOut {
                 label: if model.is_empty() {
-                    "未知模型".into()
+                    steve_i18n::t!("stats.label.unknown_model")
                 } else {
                     model.clone()
                 },
@@ -1090,7 +1092,7 @@ pub fn count_rows(s: &Summary, by: &str) -> Vec<Value> {
             per.into_iter()
                 .map(|(k, n)| {
                     let resp = s.human.response_by_kind.get(k).cloned().unwrap_or_else(|| P::of(&[]));
-                    json!({"key": k, "label": fixed_label(k).unwrap_or(k), "count": n, "response": resp,
+                    json!({"key": k, "label": fixed_label(k).unwrap_or_else(|| k.to_string()), "count": n, "response": resp,
                            "subjects": s.human.by_kind.iter().filter(|(x, _)| x.split('/').next() == Some(k))
                                .map(|(x, n)| (x.split_once('/').map_or("", |p| p.1).to_string(), *n)).collect::<BTreeMap<_, _>>()})
                 })
@@ -1100,7 +1102,7 @@ pub fn count_rows(s: &Summary, by: &str) -> Vec<Value> {
             .quality
             .fails
             .iter()
-            .map(|(k, n)| json!({"key": k, "label": fixed_label(k).unwrap_or(k), "count": n}))
+            .map(|(k, n)| json!({"key": k, "label": fixed_label(k).unwrap_or_else(|| k.to_string()), "count": n}))
             .collect(),
         _ => vec![],
     };
@@ -1111,6 +1113,16 @@ pub fn count_rows(s: &Summary, by: &str) -> Vec<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn labels_in_english() {
+        let en = |f: fn() -> String| steve_i18n::scope(steve_i18n::EN, async move { f() });
+        assert_eq!(en(|| fixed_label("chat").unwrap()).await, "Chat answers");
+        assert_eq!(fixed_label("chat").as_deref(), Some("对话回答"));
+        assert_eq!(en(|| Names::default().label("bot", "")).await, "No bot");
+        assert_eq!(Names::default().label("bot", ""), "无 Bot");
+        assert_eq!(fixed_label("nope"), None);
+    }
 
     #[test]
     fn ranges() {

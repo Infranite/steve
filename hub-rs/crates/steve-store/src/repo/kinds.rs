@@ -22,6 +22,29 @@ pub const KINDS: [(&str, &str); 6] = [
     ("chore", "依赖维护、工具配置等杂项"),
 ];
 
+/// What category `name` is for, in the request's language, for display. [`KINDS`] keeps the Chinese
+/// text that is seeded into `tags.description` and given to the router; `None` for any other name.
+pub fn description(name: &str) -> Option<String> {
+    Some(match name {
+        "bug" => steve_i18n::t!("store.kinds.desc.bug"),
+        "feat" => steve_i18n::t!("store.kinds.desc.feat"),
+        "doc" => steve_i18n::t!("store.kinds.desc.doc"),
+        "refactor" => steve_i18n::t!("store.kinds.desc.refactor"),
+        "ops" => steve_i18n::t!("store.kinds.desc.ops"),
+        "chore" => steve_i18n::t!("store.kinds.desc.chore"),
+        _ => return None,
+    })
+}
+
+/// A category tag's stored description for display: the seeded Chinese text becomes [`description`];
+/// a description someone edited is shown as written.
+pub fn shown_description(name: &str, stored: &str) -> String {
+    match KINDS.iter().find(|(k, _)| *k == name) {
+        Some((_, seed)) if *seed == stored => description(name).unwrap_or_else(|| stored.into()),
+        _ => stored.into(),
+    }
+}
+
 pub fn is_kind(name: &str) -> bool {
     KINDS.iter().any(|(k, _)| *k == name)
 }
@@ -110,17 +133,17 @@ pub(crate) fn checked(c: &Connection, ws: &str, ids: &[String]) -> Result<Vec<St
     }
     match kinds.len() {
         1 => Ok(kinds.into_iter().map(|(id, _)| id).chain(rest).collect()),
-        0 => Err(StoreError::Conflict(format!(
-            "事项必须有一个分类标签（{} 选一个）",
-            names()
+        0 => Err(StoreError::Conflict(steve_i18n::t!(
+            "store.kinds.missing",
+            names = names()
         ))),
-        _ => Err(StoreError::Conflict(format!(
-            "事项只能有一个分类标签，现在有 {}；换分类请直接选新的",
-            kinds
+        _ => Err(StoreError::Conflict(steve_i18n::t!(
+            "store.kinds.several",
+            tags = kinds
                 .iter()
                 .map(|(_, n)| n.as_str())
                 .collect::<Vec<_>>()
-                .join("、")
+                .join(&steve_i18n::t!("store.list_sep"))
         ))),
     }
 }
@@ -128,4 +151,34 @@ pub(crate) fn checked(c: &Connection, ws: &str, ids: &[String]) -> Result<Vec<St
 /// `bug/feat/doc/refactor/ops/chore`
 pub fn names() -> String {
     KINDS.map(|(k, _)| k).join("/")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn en<R>(f: impl FnOnce() -> R) -> R {
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(steve_i18n::scope(steve_i18n::EN, async { f() }))
+    }
+
+    #[test]
+    fn descriptions_match_the_seeds_in_zh_and_translate_in_en() {
+        for (name, seed) in KINDS {
+            assert_eq!(description(name).as_deref(), Some(seed));
+            assert_eq!(shown_description(name, seed), seed);
+            assert_ne!(en(|| shown_description(name, seed)), seed);
+        }
+        assert_eq!(
+            en(|| shown_description("bug", "自己写的说明")),
+            "自己写的说明"
+        );
+        assert_eq!(description("domain"), None);
+        assert_eq!(
+            en(|| description("bug")).as_deref(),
+            Some("Fixing errors, failures or unexpected behavior")
+        );
+    }
 }

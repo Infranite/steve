@@ -33,7 +33,7 @@ use super::service::{
     dedup, ensure_base, event, jobs, normalize_domain, own_party, pref, revise, this_month,
 };
 use super::teams::repo::{self as trepo, Details};
-use super::teams::{CHART_READONLY, own_team};
+use super::teams::{chart_readonly, own_team};
 use crate::changes::{Candidate, ChangeOp, DraftTarget, FieldSpec, OpCx, OpSpec, Plan, Prepared};
 use crate::{ApiError, ApiResult, Caller, Check, Registry, own, parse};
 
@@ -126,8 +126,66 @@ fn labels(table: &[(&'static str, &'static str)]) -> Vec<&'static str> {
     table.iter().map(|(_, l)| *l).collect()
 }
 
+// The tables above are what the model reads and answers with; a preview line shows a code in the
+// request's language instead (a custom value is shown as it is).
+
+fn rel_shown(code: &str) -> String {
+    use steve_i18n::t;
+    match code {
+        "me" => t!("modules.contacts_draft.rel.me"),
+        "colleague" => t!("modules.contacts_draft.rel.colleague"),
+        "manager" => t!("modules.contacts_draft.rel.manager"),
+        "customer" => t!("modules.contacts_draft.rel.customer"),
+        "partner" => t!("modules.contacts_draft.rel.partner"),
+        "friend" => t!("modules.contacts_draft.rel.friend"),
+        "family" => t!("modules.contacts_draft.rel.family"),
+        "supplier" => t!("modules.contacts_draft.rel.supplier"),
+        x => x.to_string(),
+    }
+}
+
+fn org_kind_shown(code: &str) -> String {
+    use steve_i18n::t;
+    match code {
+        "customer" => t!("modules.contacts_draft.org_kind.customer"),
+        "supplier" => t!("modules.contacts_draft.org_kind.supplier"),
+        "partner" => t!("modules.contacts_draft.org_kind.partner"),
+        "other" => t!("modules.contacts_draft.org_kind.other"),
+        x => x.to_string(),
+    }
+}
+
+fn mem_kind_shown(code: &str) -> String {
+    use steve_i18n::t;
+    match code {
+        "fact" => t!("modules.contacts_draft.mem_kind.fact"),
+        "preference" => t!("modules.contacts_draft.mem_kind.preference"),
+        "rule" => t!("modules.contacts_draft.mem_kind.rule"),
+        "event" => t!("modules.contacts_draft.mem_kind.event"),
+        x => x.to_string(),
+    }
+}
+
+fn system_shown(code: &str) -> String {
+    use steve_i18n::t;
+    match code {
+        "mail" => t!("modules.contacts_draft.system.mail"),
+        "phone" => t!("modules.contacts_draft.system.phone"),
+        x => label_of(&ACCOUNT_SYSTEMS, x),
+    }
+}
+
+fn yes_no(b: bool) -> String {
+    if b {
+        steve_i18n::t!("modules.contacts_draft.yes")
+    } else {
+        steve_i18n::t!("modules.contacts_draft.no")
+    }
+}
+
+/// A list on a preview line ("a、b" / "a, b").
 fn join(xs: &[String]) -> String {
-    xs.join("、")
+    xs.join(&steve_i18n::t!("modules.contacts_draft.list_sep"))
 }
 
 fn same(a: &str, b: &str) -> bool {
@@ -197,10 +255,14 @@ fn find_org(c: &Connection, viewer: &Viewer, name: &str) -> ApiResult<Found> {
 /// The line for a name that did not resolve to exactly one party.
 fn unknown(name: &str, found: &Found) -> Change {
     let to = match found {
-        Found::Many(n) => format!("有 {n} 个同名的，没有自动选"),
-        _ => "没有改动".into(),
+        Found::Many(n) => steve_i18n::t!("modules.contacts_draft.ambiguous", n = n),
+        _ => steve_i18n::t!("modules.contacts_draft.no_change"),
     };
-    Change::new(format!("（没认出：{}）", name.trim()), "—", to)
+    Change::new(
+        steve_i18n::t!("modules.contacts_draft.unrecognized", name = name.trim()),
+        "—",
+        to,
+    )
 }
 
 // ---------------------------------------------------------------- the model's raw operations
@@ -373,9 +435,13 @@ fn mem_op(d: &mut Draft, about: &str, kind: Option<String>, txt: &str, level: Op
         "level": level.unwrap_or(Level::Conclusion),
     }));
     d.line(
-        "Steve 记得的",
+        steve_i18n::t!("modules.contacts_draft.label.memory"),
         "—",
-        format!("{}（{}）", show(txt), label_of(&MEM_KINDS, &kind)),
+        steve_i18n::t!(
+            "modules.contacts_draft.memory_value",
+            text = show(txt),
+            kind = mem_kind_shown(&kind)
+        ),
     );
 }
 
@@ -447,6 +513,10 @@ fn contact_of(c: &Connection, viewer: &Viewer, id: Option<&str>) -> ApiResult<Pa
 
 fn rel_labels(rels: &[String]) -> Vec<String> {
     rels.iter().map(|r| label_of(&RELS, r)).collect()
+}
+
+fn rels_shown(rels: &[String]) -> Vec<String> {
+    rels.iter().map(|r| rel_shown(r)).collect()
 }
 
 /// The open jobs of a contact with their organizations (for `job.close` and the prompt).
@@ -546,7 +616,7 @@ impl DraftTarget for ContactTarget {
         Ok(Prepared {
             target_id: Some(p.id.clone()),
             revision: Some(p.revision),
-            title: format!("{} 的资料", p.name),
+            title: steve_i18n::t!("modules.contacts_draft.title.profile", name = p.name),
             href: format!("#/contacts/{}", if p.is_me() { "me" } else { &p.id }),
             subject,
             fields,
@@ -591,9 +661,9 @@ impl DraftTarget for ContactTarget {
                     d.ops
                         .push(json!({ "op": "job.close", "contact": p.id, "org": o.id, "to": to }));
                     d.line(
-                        "任职",
+                        steve_i18n::t!("modules.contacts_draft.label.job"),
                         job_text(&o.name, j["title"].as_str()),
-                        format!("已离开（到 {to}）"),
+                        steve_i18n::t!("modules.contacts_draft.job_left", to = to),
                     );
                 }
                 Raw::JobOpen { org, title, dept } => {
@@ -642,9 +712,9 @@ impl DraftTarget for ContactTarget {
                         .unwrap_or_else(|| "—".into());
                     let mut to = job_text(&org_name, title.as_deref());
                     if created {
-                        to.push_str("（新建组织）");
+                        to = steve_i18n::t!("modules.contacts_draft.job_new_org", job = to);
                     }
-                    d.line("任职", from, to);
+                    d.line(steve_i18n::t!("modules.contacts_draft.label.job"), from, to);
                 }
                 Raw::AttrSet {
                     key,
@@ -662,7 +732,15 @@ impl DraftTarget for ContactTarget {
                         continue;
                     }
                     d.ops.push(json!({ "op": "account.add", "party": p.id, "system": sys.0, "handle": handle }));
-                    d.line("新账号", "—", format!("{} {handle}", sys.1));
+                    d.line(
+                        steve_i18n::t!("modules.contacts_draft.label.new_account"),
+                        "—",
+                        steve_i18n::t!(
+                            "modules.contacts_draft.account_value",
+                            system = system_shown(sys.0),
+                            handle = handle
+                        ),
+                    );
                 }
                 Raw::MemAdd { kind, text, level } => mem_op(&mut d, &p.id, kind, &text, level),
                 _ => {}
@@ -709,7 +787,11 @@ fn set_party_field(
     match key {
         "name" => {
             if let Some(n) = text(value).filter(|n| len_ok(n, 1, 80) && *n != p.name) {
-                d.line("名字", show(&p.name), show(&n));
+                d.line(
+                    steve_i18n::t!("modules.contacts_draft.label.name"),
+                    show(&p.name),
+                    show(&n),
+                );
                 fields.insert("name".into(), json!(n));
             }
         }
@@ -717,7 +799,11 @@ fn set_party_field(
             if let Some(a) = list(value)
                 .filter(|a| a.len() <= 10 && a.iter().all(|x| len_ok(x, 1, 80)) && *a != p.aliases)
             {
-                d.line("别名", show(&join(&p.aliases)), show(&join(&a)));
+                d.line(
+                    steve_i18n::t!("modules.contacts_draft.label.aliases"),
+                    show(&join(&p.aliases)),
+                    show(&join(&a)),
+                );
                 fields.insert("aliases".into(), json!(a));
             }
         }
@@ -731,17 +817,20 @@ fn set_party_field(
             );
             if rels.len() <= 5 && rels.iter().all(|r| len_ok(r, 1, 20)) && rels != p.rels {
                 d.line(
-                    "和你的关系",
-                    show(&join(&rel_labels(&p.rels))),
-                    show(&join(&rel_labels(&rels))),
+                    steve_i18n::t!("modules.contacts_draft.label.rels"),
+                    show(&join(&rels_shown(&p.rels))),
+                    show(&join(&rels_shown(&rels))),
                 );
                 fields.insert("rels".into(), json!(rels));
             }
         }
         "important" if p.kind == "contact" => {
             if let Some(b) = boolean(value).filter(|b| *b != p.important) {
-                let yn = |b: bool| if b { "是" } else { "否" };
-                d.line("重要", yn(p.important), yn(b));
+                d.line(
+                    steve_i18n::t!("modules.contacts_draft.label.important"),
+                    yes_no(p.important),
+                    yes_no(b),
+                );
                 fields.insert("important".into(), json!(b));
             }
         }
@@ -751,9 +840,9 @@ fn set_party_field(
                 .filter(|k| Some(k) != p.org_kind.as_ref())
             {
                 d.line(
-                    "类型",
-                    show(&label_of(&ORG_KINDS, p.org_kind.as_deref().unwrap_or(""))),
-                    label_of(&ORG_KINDS, &k),
+                    steve_i18n::t!("modules.contacts_draft.label.org_kind"),
+                    show(&org_kind_shown(p.org_kind.as_deref().unwrap_or(""))),
+                    org_kind_shown(&k),
                 );
                 fields.insert("kind".into(), json!(k));
             }
@@ -763,7 +852,11 @@ fn set_party_field(
                 let n = appended(&p.note, &n);
                 if n != p.note && len_ok(&n, 0, 2000) {
                     let added = n.strip_prefix(p.note.as_str()).unwrap_or(&n).trim();
-                    d.line("备注（追加）", show(&p.note), show(added));
+                    d.line(
+                        steve_i18n::t!("modules.contacts_draft.label.note_appended"),
+                        show(&p.note),
+                        show(added),
+                    );
                     fields.insert("note".into(), json!(n));
                 }
             }
@@ -806,7 +899,7 @@ impl DraftTarget for OrgTarget {
         Ok(Prepared {
             target_id: Some(o.id.clone()),
             revision: Some(o.revision),
-            title: format!("{} 的资料", o.name),
+            title: steve_i18n::t!("modules.contacts_draft.title.profile", name = o.name),
             href: format!("#/orgs/{}", o.id),
             subject: format!("the organization \"{}\"", o.name),
             fields,
@@ -826,6 +919,7 @@ impl DraftTarget for OrgTarget {
         let id = prepared.target_id.as_deref().unwrap_or_default();
         let o = own_party(c, viewer, id, "org", "组织", true)?;
         let mut d = Draft::default();
+        let mut taken = false;
         let mut fields = Map::new();
         for r in raw_ops(raw) {
             let Raw::Set { key, value } = r else { continue };
@@ -846,16 +940,21 @@ impl DraftTarget for OrgTarget {
                 if let Some(owner) = repo::domain_owner(c, &viewer.ws, x)?.filter(|w| *w != o.id) {
                     let name = repo::get(c, &owner)?.map(|p| p.name).unwrap_or_default();
                     d.line(
-                        format!("（域名 {x}）"),
+                        steve_i18n::t!("modules.contacts_draft.label.domain_taken", domain = x),
                         "—",
-                        format!("这个域名已经属于「{name}」"),
+                        steve_i18n::t!("modules.contacts.domain_taken", name = name),
                     );
+                    taken = true;
                 }
             }
-            if d.changes.iter().any(|ch| ch.label.starts_with("（域名")) {
+            if taken {
                 continue;
             }
-            d.line("域名", show(&join(&old)), show(&join(&new)));
+            d.line(
+                steve_i18n::t!("modules.contacts_draft.label.domains"),
+                show(&join(&old)),
+                show(&join(&new)),
+            );
             fields.insert("domains".into(), json!(new));
         }
         Ok(d.done(patch_op("org.patch", &o.id, fields)))
@@ -887,7 +986,7 @@ impl DraftTarget for TeamTarget {
             return Ok(Prepared {
                 target_id: None,
                 revision: None,
-                title: "新虚拟团队".into(),
+                title: steve_i18n::t!("modules.contacts_draft.title.new_team"),
                 href: "#/contacts".into(),
                 subject: "a new virtual team (the user is always a member and its lead)".into(),
                 fields: Vec::new(),
@@ -915,7 +1014,7 @@ impl DraftTarget for TeamTarget {
         Ok(Prepared {
             target_id: Some(p.id.clone()),
             revision: Some(p.revision),
-            title: format!("团队「{}」", p.name),
+            title: steve_i18n::t!("modules.contacts_draft.title.team", name = p.name),
             href: format!("#/teams/{}", p.id),
             subject: format!(
                 "the {} team \"{}\" (members: {})",
@@ -1014,21 +1113,41 @@ fn plan_new_team(c: &Connection, viewer: &Viewer, raw: Vec<Value>) -> ApiResult<
         .map(|p| p.trim().to_string())
         .filter(|p| len_ok(p, 1, 400));
     if !len_ok(&name, 1, 40) {
-        d.line("（没说团队叫什么）", "—", "没有改动");
+        d.line(
+            steve_i18n::t!("modules.contacts_draft.label.team_unnamed"),
+            "—",
+            steve_i18n::t!("modules.contacts_draft.no_change"),
+        );
         return Ok(d.done(None));
     }
     if members.is_empty() {
-        d.line("（成员不够）", "—", "虚拟团队至少要两个人");
+        d.line(
+            steve_i18n::t!("modules.contacts_draft.label.too_few_members"),
+            "—",
+            steve_i18n::t!("modules.contacts_draft.team_min_two"),
+        );
         return Ok(d.done(None));
     }
     let ids: Vec<&str> = members.iter().map(|p| p.id.as_str()).collect();
     d.ops.push(json!({ "op": "team.create", "name": name, "purpose": purpose, "members": ids, "as": "team" }));
-    d.line("新团队", "—", format!("{name} · 虚拟团队"));
-    let mut who = vec!["我".to_string()];
+    d.line(
+        steve_i18n::t!("modules.contacts_draft.label.new_team"),
+        "—",
+        steve_i18n::t!("modules.contacts_draft.virtual_team", name = name),
+    );
+    let mut who = vec![steve_i18n::t!("modules.contacts_draft.me")];
     who.extend(members.iter().map(|p| p.name.clone()));
-    d.line("成员", "—", join(&who));
+    d.line(
+        steve_i18n::t!("modules.contacts_draft.label.members"),
+        "—",
+        join(&who),
+    );
     if let Some(p) = &purpose {
-        d.line("用途", show(""), show(p));
+        d.line(
+            steve_i18n::t!("modules.contacts_draft.label.purpose"),
+            show(""),
+            show(p),
+        );
     }
     Ok(d.done(None))
 }
@@ -1050,10 +1169,18 @@ fn plan_team(
                     continue;
                 };
                 if det.is_chart() {
-                    d.line("（不能改：名字）", "—", CHART_READONLY);
+                    d.line(
+                        steve_i18n::t!("modules.contacts_draft.label.readonly_name"),
+                        "—",
+                        chart_readonly(),
+                    );
                     continue;
                 }
-                d.line("名字", show(&p.name), show(&n));
+                d.line(
+                    steve_i18n::t!("modules.contacts_draft.label.name"),
+                    show(&p.name),
+                    show(&n),
+                );
                 fields.insert("name".into(), json!(n));
             }
             Raw::Set { key, value } if key == "purpose" => {
@@ -1063,15 +1190,22 @@ fn plan_team(
                 let n = appended(&det.purpose, &x);
                 if n != det.purpose && len_ok(&n, 0, 400) {
                     let added = n.strip_prefix(det.purpose.as_str()).unwrap_or(&n).trim();
-                    d.line("用途（追加）", show(&det.purpose), show(added));
+                    d.line(
+                        steve_i18n::t!("modules.contacts_draft.label.purpose_appended"),
+                        show(&det.purpose),
+                        show(added),
+                    );
                     fields.insert("purpose".into(), json!(n));
                 }
             }
             Raw::MembersAdd { names } | Raw::MembersRemove { names } if det.is_chart() => {
                 d.line(
-                    format!("（不能改：成员 {}）", join(&names)),
+                    steve_i18n::t!(
+                        "modules.contacts_draft.label.readonly_members",
+                        names = join(&names)
+                    ),
                     "—",
-                    CHART_READONLY,
+                    chart_readonly(),
                 );
             }
             Raw::MembersAdd { names } => add.extend(names),
@@ -1094,15 +1228,15 @@ fn plan_team(
         let after = before + add.len() as i64 - remove.len() as i64;
         let mut what = Vec::new();
         if !add.is_empty() {
-            what.push(format!(
-                "加入 {}",
-                join(&add.iter().map(|x| x.name.clone()).collect::<Vec<_>>())
+            what.push(steve_i18n::t!(
+                "modules.contacts_draft.members_added",
+                names = join(&add.iter().map(|x| x.name.clone()).collect::<Vec<_>>())
             ));
         }
         if !remove.is_empty() {
-            what.push(format!(
-                "移出 {}",
-                join(&remove.iter().map(|x| x.name.clone()).collect::<Vec<_>>())
+            what.push(steve_i18n::t!(
+                "modules.contacts_draft.members_removed",
+                names = join(&remove.iter().map(|x| x.name.clone()).collect::<Vec<_>>())
             ));
         }
         d.ops.push(json!({
@@ -1111,9 +1245,13 @@ fn plan_team(
             "remove": remove.iter().map(|x| &x.id).collect::<Vec<_>>(),
         }));
         d.line(
-            "成员",
-            format!("{before} 人"),
-            format!("{after} 人（{}）", what.join("；")),
+            steve_i18n::t!("modules.contacts_draft.label.members"),
+            steve_i18n::t!("modules.contacts_draft.headcount", n = before),
+            steve_i18n::t!(
+                "modules.contacts_draft.headcount_changed",
+                n = after,
+                what = what.join(&steve_i18n::t!("modules.contacts_draft.clause_sep"))
+            ),
         );
     }
     Ok(d.done(patch_op("team.patch", &p.id, fields)))
@@ -1256,7 +1394,9 @@ fn check_party_fields(p: &Party, f: &Map<String, Value>) -> ApiResult<()> {
     }
     ck.done()?;
     if p.is_self_org() && f.contains_key("kind") {
-        return Err(ApiError::rule("本公司不能改类型"));
+        return Err(ApiError::rule(steve_i18n::t!(
+            "modules.contacts.self_org_kind"
+        )));
     }
     Ok(())
 }
@@ -1418,7 +1558,10 @@ fn check_domains(c: &Connection, ws: &str, org: &str, raw: &Value) -> ApiResult<
     for d in &out {
         if let Some(owner) = repo::domain_owner(c, ws, d)?.filter(|o| o != org) {
             let name = repo::get(c, &owner)?.map(|o| o.name).unwrap_or_default();
-            return Err(ApiError::conflict(format!("这个域名已经属于「{name}」")));
+            return Err(ApiError::conflict(steve_i18n::t!(
+                "modules.contacts.domain_taken",
+                name = name
+            )));
         }
     }
     Ok(out)
@@ -2012,7 +2155,7 @@ impl TeamPatchOp {
         ck.opt_len("purpose", a.purpose.as_deref(), 0, 400).done()?;
         let (p, d) = own_team(c, &viewer(c, cx)?, &a.id, true)?;
         if d.is_chart() && a.name.as_ref().is_some_and(|n| n.trim() != p.name) {
-            return Err(ApiError::rule(CHART_READONLY));
+            return Err(ApiError::rule(chart_readonly()));
         }
         Ok((p, d))
     }
@@ -2102,7 +2245,7 @@ impl TeamMembersOp {
         let v = viewer(c, cx)?;
         let (p, d) = own_team(c, &v, &a.id, true)?;
         if d.is_chart() {
-            return Err(ApiError::rule(CHART_READONLY));
+            return Err(ApiError::rule(chart_readonly()));
         }
         for id in &a.add {
             own_party(c, &v, id, "contact", "联系人", true)?;

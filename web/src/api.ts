@@ -1,5 +1,5 @@
 /* Hub API: raw shapes (mirroring hub/src/repo.ts) and calls. store.ts maps them onto the view model. */
-import { t } from "@/i18n"
+import { lang, t } from "@/i18n"
 export type ItemStatus = "prop" | "run" | "wait" | "pause" | "done" | "drop" | "block"
 export type PlanStep = { step: string; done: boolean; left?: boolean }
 export type RItem = {
@@ -95,7 +95,8 @@ export const fileUrl = (id: string, download = false) => withWs(`/api/files/${en
  * switching workspace must never redirect another page's requests (the Hub refuses a browser write without it) */
 let pageWs = ""
 export const setPageWorkspace = (id: string) => { pageWs = id }
-export const wsHeaders = (h: Record<string, string> = {}): Record<string, string> => (pageWs ? { ...h, "x-steve-ws": pageWs } : h)
+/* and the UI language, so the Hub answers errors and labels in it (the Hub falls back to zh-CN) */
+export const wsHeaders = (h: Record<string, string> = {}): Record<string, string> => ({ ...h, "accept-language": lang(), ...(pageWs ? { "x-steve-ws": pageWs } : {}) })
 /** the same for what can't carry a header (an EventSource, an <img>, a download link): `?ws=` */
 export const withWs = (url: string) => (pageWs ? `${url}${url.includes("?") ? "&" : "?"}ws=${encodeURIComponent(pageWs)}` : url)
 
@@ -214,7 +215,7 @@ export function stream(on: (e: HubEvent) => void, onOpen: () => void) {
   let es: EventSource | null = null, retry = 1000, closed = false
   const open = () => {
     if (closed) return // a retry scheduled before close must not reopen
-    es = new EventSource(withWs("/api/stream")) // the workspace at each (re)connect
+    es = new EventSource(withWs(`/api/stream?lang=${encodeURIComponent(lang())}`)) // the workspace and language at each (re)connect
     es.onopen = () => { retry = 1000; onOpen() }
     es.onmessage = (m) => { try { on(JSON.parse(m.data)) } catch {} }
     es.onerror = () => { es?.close(); if (!closed) setTimeout(open, retry = Math.min(retry * 2, 15000)) }

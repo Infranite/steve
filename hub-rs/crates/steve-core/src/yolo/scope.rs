@@ -74,10 +74,10 @@ impl Forced {
         }
     }
     /// The `409` text and the banner line.
-    pub fn message(self) -> &'static str {
+    pub fn message(self) -> String {
         match self {
-            Forced::Env => "YOLO 被环境变量 STEVE_YOLO=off 关掉了",
-            Forced::NoResume => "这个 Hub 开在生产库副本上（STEVE_NO_RESUME=1），YOLO 自带关闭",
+            Forced::Env => steve_i18n::t!("core.yolo.forced.env"),
+            Forced::NoResume => steve_i18n::t!("core.yolo.forced.no_resume"),
         }
     }
 }

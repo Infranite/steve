@@ -55,7 +55,17 @@ impl Mode {
         })
     }
 
-    /// How the conversational config shows it.
+    /// The draft card's wording, in the request's language.
+    pub fn shown(self) -> String {
+        match self {
+            Mode::ItemAuto => steve_i18n::t!("flow.schedule.mode_item_auto"),
+            Mode::Item => steve_i18n::t!("flow.schedule.mode_item"),
+            Mode::Propose => steve_i18n::t!("flow.schedule.mode_propose"),
+            Mode::Report => steve_i18n::t!("flow.schedule.mode_report"),
+        }
+    }
+
+    /// How the conversational config's model sees it and says it back (zh-CN, matched by `parse_mode`).
     pub fn label(self) -> &'static str {
         match self {
             Mode::ItemAuto => "建事项，自动验收",
@@ -430,7 +440,7 @@ pub fn view(c: &Connection, s: &Schedule) -> FlowResult<ScheduleView> {
         .spec
         .expr()
         .map(|e| e.describe())
-        .unwrap_or_else(|_| format!("按 cron「{}」", s.spec.cron));
+        .unwrap_or_else(|_| steve_i18n::t!("flow.cron.raw", cron = s.spec.cron));
     Ok(ScheduleView {
         id: s.id.clone(),
         name: s.name.clone(),

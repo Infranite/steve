@@ -202,17 +202,27 @@ fn sealed_field(
     })
 }
 
+/// A vault's name as shown: the seeded “个人” / “共享” / “系统” in the request's language, a renamed one as is.
+fn vault_name(stored: &str, scope: &str) -> String {
+    match (scope, stored) {
+        ("personal", "个人") => steve_i18n::t!("modules.vault.name.personal"),
+        ("shared", "共享") => steve_i18n::t!("modules.vault.name.shared"),
+        ("system", "系统") => steve_i18n::t!("modules.vault.name.system"),
+        _ => stored.to_string(),
+    }
+}
+
 /// The scope of a grant in words: `项目 steve`, `网站 github.com`, `没有项目的事项`.
 fn scope_label(c: &rusqlite::Connection, ws: &str, scope: &Value) -> steve_store::Result<String> {
     if let Some(p) = scope.get("project_id").and_then(Value::as_str) {
         let name = repo::project_name(c, ws, p)?.unwrap_or_else(|| p.to_string());
-        return Ok(format!("项目 {name}"));
+        return Ok(steve_i18n::t!("modules.vault.scope.project", name = name));
     }
     if let Some(s) = scope.get("site").and_then(Value::as_str) {
-        return Ok(format!("网站 {s}"));
+        return Ok(steve_i18n::t!("modules.vault.scope.site", site = s));
     }
     if scope.get("scratch").and_then(Value::as_bool) == Some(true) {
-        return Ok("没有项目的事项".into());
+        return Ok(steve_i18n::t!("modules.vault.scope.scratch"));
     }
     Ok(String::new())
 }
@@ -262,7 +272,7 @@ pub(crate) fn item_out(
         id: item.id.clone(),
         vault: VaultRef {
             id: vault.id.clone(),
-            name: vault.name.clone(),
+            name: vault_name(&vault.name, &vault.scope),
             scope: vault.scope.clone(),
         },
         template: item.template.clone(),
@@ -377,7 +387,7 @@ impl Vault {
                 .map(|v| VaultOut {
                     items: counts.iter().find(|x| x.0 == v.id).map_or(0, |x| x.1),
                     id: v.id,
-                    name: v.name,
+                    name: vault_name(&v.name, &v.scope),
                     scope: v.scope,
                     backend: v.backend,
                 })
@@ -395,6 +405,10 @@ impl Vault {
             .reader(|c| repo::templates(c, ws))?
             .into_iter()
             .filter(|t| t.id != CONNECTION_CREDENTIAL)
+            .map(|mut t| {
+                t.name = super::templates::shown_name(&t.id, &t.source, &t.name);
+                t
+            })
             .collect())
     }
 
@@ -484,9 +498,11 @@ impl Vault {
                 .iter()
                 .any(|g| g.label.trim() == f.label.trim())
             {
-                return Err(
-                    ApiError::rule(format!("已经有叫「{}」的字段了", f.label.trim())).into(),
-                );
+                return Err(ApiError::rule(steve_i18n::t!(
+                    "modules.vault.field_exists",
+                    label = f.label.trim()
+                ))
+                .into());
             }
         }
         let sensitivity = n
@@ -494,7 +510,9 @@ impl Vault {
             .clone()
             .unwrap_or_else(|| template.default_sensitivity.clone());
         if template.id == BANK_CARD && sensitivity != template.default_sensitivity {
-            return Err(ApiError::rule("银行卡条目的敏感度不能修改").into());
+            return Err(
+                ApiError::rule(steve_i18n::t!("modules.vault.bank_card_sensitivity")).into(),
+            );
         }
         let id = uid("vi");
         let key = self.new_item_key(ws, &id)?;
@@ -563,7 +581,7 @@ impl Vault {
             }
             if let Some(s) = &p.sensitivity {
                 if before.template == BANK_CARD && *s != before.sensitivity {
-                    return Err(ApiError::rule("银行卡条目的敏感度不能修改").into());
+                    return Err(ApiError::rule(steve_i18n::t!("modules.vault.bank_card_sensitivity")).into());
                 }
                 after.sensitivity = s.clone();
             }
@@ -615,7 +633,11 @@ impl Vault {
             return Err(ApiError::invalid("fields").into());
         }
         if existing.iter().any(|x| x.label == f.label.trim()) {
-            return Err(ApiError::rule(format!("已经有叫「{}」的字段了", f.label.trim())).into());
+            return Err(ApiError::rule(steve_i18n::t!(
+                "modules.vault.field_exists",
+                label = f.label.trim()
+            ))
+            .into());
         }
         let dek = self.dek_of(&item)?;
         let sort = existing.iter().map(|x| x.sort).max().map_or(0, |s| s + 1);

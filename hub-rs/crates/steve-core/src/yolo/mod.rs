@@ -216,7 +216,7 @@ impl Yolo {
             .filter(|s| s.object_type != WORKSPACE)
             .map(|s| {
                 json!({ "object_type": s.object_type, "object_id": s.object_id, "mode": s.mode,
-                        "reason": s.reason, "updated": s.updated })
+                        "reason": judge::reason_shown(&s.reason), "updated": s.updated })
             })
             .collect();
         for p in projects.iter().filter(|p| real_dir(p)) {
@@ -226,7 +226,7 @@ impl Yolo {
             {
                 list.push(
                     json!({ "object_type": PROJECT, "object_id": p.id, "mode": "off",
-                                  "reason": REAL_DIR_REASON, "default": true }),
+                                  "reason": judge::reason_shown(REAL_DIR_REASON), "default": true }),
                 );
             }
         }
@@ -257,7 +257,10 @@ impl Yolo {
             }
             if let Some(p) = row.as_ref().and_then(|r| r.paused.as_ref()) {
                 let why = p.get("reason").and_then(Value::as_str).unwrap_or("");
-                return Err(ApiError::conflict(format!("YOLO 已暂停：{why}；先点恢复")));
+                return Err(ApiError::conflict(steve_i18n::t!(
+                    "core.yolo.paused_why",
+                    why = why
+                )));
             }
             if s.preview {
                 return self.preview(ws);
@@ -460,7 +463,7 @@ impl Yolo {
     pub fn resume(&self, ws: &str, me: &str) -> ApiResult<Value> {
         let row = self.ws_row(ws)?;
         let Some(row) = row.filter(|r| r.paused.is_some()) else {
-            return Err(ApiError::conflict("YOLO 没有暂停"));
+            return Err(ApiError::conflict(steve_i18n::t!("core.yolo.not_paused")));
         };
         let now = self.now();
         self.store()

@@ -16,7 +16,10 @@ fn owner(cx: &Ctx) -> Result<(), ApiError> {
     if cx.user.get("role").and_then(Value::as_str) == Some("owner") {
         Ok(())
     } else {
-        Err(ApiError::Json(403, "仅实例管理员可升级 Steve".into()))
+        Err(ApiError::Json(
+            403,
+            steve_i18n::t!("hub.upgrade.owner_only"),
+        ))
     }
 }
 pub async fn status(
@@ -31,7 +34,7 @@ pub async fn status(
         // paths on this machine are the instance manager's
         v["install"] = json!({"kind": v["install"]["kind"]});
         v["backup"] = Value::Null;
-        v["capability"]["reason"] = json!("仅实例管理员可批准和执行升级");
+        v["capability"]["reason"] = json!(steve_i18n::t!("hub.upgrade.owner_only_reason"));
         if v["operation"].is_object() {
             v["operation"]["previous"] = Value::Null;
             v["operation"]["target"] = Value::Null;

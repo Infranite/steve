@@ -22,18 +22,19 @@ impl NodeKind for Filter {
         let rules = match cfg.get("rules") {
             None | Some(Value::Null) => &[][..],
             Some(Value::Array(a)) => a.as_slice(),
-            Some(_) => return Err("rules 只能是列表".into()),
+            Some(_) => return Err(steve_i18n::t!("flow.node.filter_rules")),
         };
         if rules.len() > MAX_RULES {
-            return Err(format!("条件最多 {MAX_RULES} 条"));
+            return Err(steve_i18n::t!("flow.node.filter_max", max = MAX_RULES));
         }
         for (i, r) in rules.iter().enumerate() {
             let label = r["label"].as_str().unwrap_or("").trim();
             if label.is_empty() {
-                return Err(format!("第 {} 条条件要有分支名", i + 1));
+                return Err(steve_i18n::t!("flow.node.filter_label", n = i + 1));
             }
             let when = r["when"].as_str().unwrap_or("");
-            expr::parse(when).map_err(|e| format!("第 {} 条条件：{e}", i + 1))?;
+            expr::parse(when)
+                .map_err(|e| steve_i18n::t!("flow.node.filter_rule", n = i + 1, error = e))?;
         }
         opt_str(cfg, "else_label")?;
         Ok(())

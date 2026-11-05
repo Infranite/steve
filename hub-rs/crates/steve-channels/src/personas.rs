@@ -487,7 +487,9 @@ pub fn delete(tx: &Tx, viewer: &Viewer, id: &str, now: i64) -> ChannelResult<Mov
     let ws = &viewer.ws;
     let p = own(tx, ws, id)?;
     if p.is_default {
-        return Err(ApiError::rule("默认身份不能删除"));
+        return Err(ApiError::rule(steve_i18n::t!(
+            "channels.error.default_persona_kept"
+        )));
     }
     let fallback = ensure_default(tx, ws, now)?.ok_or_else(|| ApiError::not_found("对外身份"))?;
     let moved = bindings::release(tx, ws, id, &fallback.id, now)?;

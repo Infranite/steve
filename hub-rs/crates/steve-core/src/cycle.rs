@@ -46,8 +46,10 @@ pub const COMPLETE: &str = "complete";
 pub const CANCEL: &str = "cancel";
 pub const FAIL: &str = "fail";
 
-/// The user-facing refusal for anything sent to a closed item.
-pub const CLOSED_MSG: &str = "这个事项已经结束了，需要时先新建周期";
+/// The user-facing refusal for anything sent to a closed item, in the request's language.
+pub fn closed_msg() -> String {
+    steve_i18n::t!("core.item.closed")
+}
 
 /// Operation kinds the core knows. Modules' wrap-ups (a PR merge) run as `hooks.accepted`.
 pub const OP_RELEASE: &str = "release";
@@ -262,8 +264,8 @@ impl Tx<'_> {
         let ws = i.workspace_id.clone();
         let id = i.id.clone();
         self.db().store().transaction(|tx| -> Result<Item> {
-            let item =
-                steve_store::lifecycle_write_in(tx, &id, &w)?.ok_or_else(|| msg("没有这个事项"))?;
+            let item = steve_store::lifecycle_write_in(tx, &id, &w)?
+                .ok_or_else(|| msg(steve_i18n::t!("core.item.not_found")))?;
             steve_store::outbox::emit(
                 tx,
                 &ws,
@@ -297,7 +299,7 @@ impl Tx<'_> {
     /// 409 for anything that would act on a closed item (a message, a supplement, a goal change).
     pub(crate) fn lc_guard_open(&self, item_id: &str) -> Result<()> {
         match self.db().item(item_id)? {
-            Some(i) if i.phase == CLOSED => Err(conflict(CLOSED_MSG)),
+            Some(i) if i.phase == CLOSED => Err(conflict(closed_msg())),
             _ => Ok(()),
         }
     }
@@ -330,11 +332,11 @@ impl Tx<'_> {
     ) -> Result<Item> {
         let i = self.item(item_id)?;
         match i.phase.as_str() {
-            CLOSED => return Err(conflict(CLOSED_MSG)),
+            CLOSED => return Err(conflict(closed_msg())),
             CLOSING => {
                 let c = closing_of(&i).unwrap_or_default();
                 if c.kind != COMPLETE {
-                    return Err(conflict("这个事项正在取消或标记失败，不能再请求完成"));
+                    return Err(conflict(steve_i18n::t!("core.item.ending_no_complete")));
                 }
                 /* a new delivery replaces the one waiting: its acceptance and operations go with it */
                 self.lc_invalidate(item_id, "有新的交付，上一次交付作废")?;
@@ -387,7 +389,9 @@ impl Tx<'_> {
         let i = self.item(item_id)?;
         let Some(mut c) = closing_of(&i).filter(|c| i.phase == CLOSING && c.kind == COMPLETE)
         else {
-            return Err(conflict("这个事项没有在等验收"));
+            return Err(conflict(steve_i18n::t!(
+                "core.item.not_awaiting_acceptance"
+            )));
         };
         if c.accepted {
             return Ok(());
@@ -410,7 +414,7 @@ impl Tx<'_> {
     pub(crate) fn lc_unaccept(&mut self, item_id: &str) -> Result<()> {
         let i = self.item(item_id)?;
         if i.phase == CLOSED {
-            return Err(conflict("已经结束了，验收不能再撤销；需要时新建周期"));
+            return Err(conflict(steve_i18n::t!("core.item.acceptance_undo_closed")));
         }
         let Some(mut c) = closing_of(&i).filter(|c| i.phase == CLOSING && c.kind == COMPLETE)
         else {
@@ -565,13 +569,13 @@ impl Tx<'_> {
     pub(crate) fn lc_new_input(&mut self, item_id: &str) -> Result<()> {
         let i = self.item(item_id)?;
         match i.phase.as_str() {
-            CLOSED => Err(conflict(CLOSED_MSG)),
+            CLOSED => Err(conflict(closed_msg())),
             CLOSING => match closing_of(&i).map(|c| c.kind).as_deref() {
                 Some(COMPLETE) => {
                     self.lc_invalidate(item_id, "收到新的消息")?;
                     Ok(())
                 }
-                _ => Err(conflict("这个事项正在取消或标记失败，不能再发消息")),
+                _ => Err(conflict(steve_i18n::t!("core.item.ending_no_message"))),
             },
             _ => Ok(()),
         }
@@ -589,13 +593,13 @@ impl Tx<'_> {
     ) -> Result<Item> {
         let i = self.item(item_id)?;
         if i.phase == CLOSED {
-            return Err(conflict(CLOSED_MSG));
+            return Err(conflict(closed_msg()));
         }
         if let Some(c) = closing_of(&i).filter(|c| c.kind != COMPLETE) {
             if c.kind == kind {
                 return Ok(i);
             }
-            return Err(conflict("这个事项已经在取消或标记失败了"));
+            return Err(conflict(steve_i18n::t!("core.item.already_ending")));
         }
         let c = Closing {
             kind: kind.into(),
@@ -650,7 +654,7 @@ impl Tx<'_> {
     ) -> Result<Item> {
         let i = self.item(item_id)?;
         if i.phase != CLOSED {
-            return Err(conflict("只有已经结束的事项才能新建周期"));
+            return Err(conflict(steve_i18n::t!("core.item.new_cycle_needs_closed")));
         }
         let mut w = LifecycleWrite {
             phase: READY.into(),
@@ -897,8 +901,8 @@ impl Tx<'_> {
             if let Some(n) = &note {
                 steve_store::timeline_add_in(tx, &id, "steve", "sys", n, None)?;
             }
-            let item =
-                steve_store::lifecycle_write_in(tx, &id, &w)?.ok_or_else(|| msg("没有这个事项"))?;
+            let item = steve_store::lifecycle_write_in(tx, &id, &w)?
+                .ok_or_else(|| msg(steve_i18n::t!("core.item.not_found")))?;
             if outcome == "completed" {
                 steve_store::item_patch_in(
                     tx,
@@ -1088,12 +1092,18 @@ pub(crate) fn lifecycle_view(t: &Tx, i: &Item) -> Result<Value> {
             }
             let q = crate::util::js_head(&d.question, 60).to_string();
             match (d.kind.as_str(), d.subject_type.as_str()) {
-                ("accept", _) => push("acceptance", format!("等你验收：{q}")),
-                ("approve", "tool_call") => push("permission", format!("等你授权：{q}")),
-                ("approve", _) => push("approval", format!("等你批准：{q}")),
-                ("ask", _) => push("question", format!("等你回答：{q}")),
-                ("fail", _) => push("failure", format!("卡住了，等你决定：{q}")),
-                ("propose", _) => push("approval", format!("等你确认开始：{q}")),
+                ("accept", _) => push(
+                    "acceptance",
+                    steve_i18n::t!("core.blocker.acceptance", q = q),
+                ),
+                ("approve", "tool_call") => push(
+                    "permission",
+                    steve_i18n::t!("core.blocker.permission", q = q),
+                ),
+                ("approve", _) => push("approval", steve_i18n::t!("core.blocker.approval", q = q)),
+                ("ask", _) => push("question", steve_i18n::t!("core.blocker.question", q = q)),
+                ("fail", _) => push("failure", steve_i18n::t!("core.blocker.failure", q = q)),
+                ("propose", _) => push("approval", steve_i18n::t!("core.blocker.propose", q = q)),
                 _ => push("question", q),
             }
         }
@@ -1108,25 +1118,29 @@ pub(crate) fn lifecycle_view(t: &Tx, i: &Item) -> Result<Value> {
             match o.status.as_str() {
                 "running" if o.kind == OP_BUILD => {}
                 "running" => active += 1,
-                "unknown" => push("unknown_effect", format!("{}：结果未知，待核对", o.label)),
-                "failed" if o.required && o.revision == i.revision && i.phase == CLOSING => {
-                    push("failure", format!("{}失败", o.label))
-                }
+                "unknown" => push(
+                    "unknown_effect",
+                    steve_i18n::t!("core.blocker.unknown_effect", label = o.label),
+                ),
+                "failed" if o.required && o.revision == i.revision && i.phase == CLOSING => push(
+                    "failure",
+                    steve_i18n::t!("core.blocker.operation_failed", label = o.label),
+                ),
                 _ => {}
             }
         }
         if i.status == "block" && !crate::lifecycle::deps_open(t.db(), &i.id)?.is_empty() {
-            push("dependency", "等前置事项完成".into());
+            push("dependency", steve_i18n::t!("core.blocker.dependency"));
         }
         if i.status == "pause" {
-            push("paused", "已暂停".into());
+            push("paused", steve_i18n::t!("core.blocker.paused"));
         }
         if let Some(g) = &gate {
             if g.turn {
-                push("turn", "正在结束：等 Agent 这一轮结束".into());
+                push("turn", steve_i18n::t!("core.blocker.turn"));
             }
             if g.operation {
-                push("operation", "正在结束：等必需操作完成".into());
+                push("operation", steve_i18n::t!("core.blocker.operation"));
             }
         }
     }

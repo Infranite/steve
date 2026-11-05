@@ -60,11 +60,12 @@ const NET_TIMEOUT: Duration = Duration::from_secs(30);
 /// LOGOUT is a courtesy: a server that does not answer it holds nothing up for long.
 const LOGOUT_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Provider presets for the new-mailbox dialog. `id` is the preset, not an adapter.
+/// Provider presets for the new-mailbox dialog. `id` is the preset, not an adapter. The texts are
+/// the zh-CN ones here; [`presets`] has them in the request's language.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-pub struct Preset {
+pub struct Preset<S = &'static str> {
     pub id: &'static str,
-    pub name: &'static str,
+    pub name: S,
     pub imap_host: &'static str,
     pub imap_port: u16,
     pub smtp_host: &'static str,
@@ -72,7 +73,7 @@ pub struct Preset {
     /// `tls` | `starttls`
     pub smtp_security: &'static str,
     /// How to get the app password.
-    pub hint: &'static str,
+    pub hint: S,
 }
 
 pub const PRESETS: &[Preset] = &[
@@ -127,6 +128,45 @@ pub const PRESETS: &[Preset] = &[
         hint: "在 Fastmail 设置的 Privacy & Security 里生成应用专用密码",
     },
 ];
+
+/// [`PRESETS`] with the names and hints in the request's language (`GET /mail/presets`).
+pub fn presets() -> Vec<Preset<String>> {
+    PRESETS
+        .iter()
+        .map(|p| {
+            let (name, hint) = match p.id {
+                "gmail" => (p.name.to_string(), steve_i18n::t!("mail.preset.gmail_hint")),
+                "icloud" => (
+                    p.name.to_string(),
+                    steve_i18n::t!("mail.preset.icloud_hint"),
+                ),
+                "qq" => (
+                    steve_i18n::t!("mail.preset.qq_name"),
+                    steve_i18n::t!("mail.preset.qq_hint"),
+                ),
+                "163" => (
+                    steve_i18n::t!("mail.preset.163_name"),
+                    steve_i18n::t!("mail.preset.163_hint"),
+                ),
+                "fastmail" => (
+                    p.name.to_string(),
+                    steve_i18n::t!("mail.preset.fastmail_hint"),
+                ),
+                _ => (p.name.to_string(), p.hint.to_string()),
+            };
+            Preset {
+                id: p.id,
+                name,
+                imap_host: p.imap_host,
+                imap_port: p.imap_port,
+                smtp_host: p.smtp_host,
+                smtp_port: p.smtp_port,
+                smtp_security: p.smtp_security,
+                hint,
+            }
+        })
+        .collect()
+}
 
 /// The IMAP + SMTP adapter. Register the same `Arc` with `Connections` and [`crate::Mail`].
 pub struct ImapAdapter {
@@ -1024,11 +1064,11 @@ impl ConnectionProvider for ImapAdapter {
         use steve_modules::accounts::connections::{CapSpec, Integration};
         Integration {
             provider: "mail".into(),
-            provider_name: "邮箱".into(),
+            provider_name: steve_i18n::t!("mail.provider.name"),
             identity: "account".into(),
             capabilities: vec![
                 CapSpec::supported("mail", &["mail.read", "mail.draft", "mail.send"])
-                    .with_note("收信、分诊、起草回复，经你批准发出"),
+                    .with_note(&steve_i18n::t!("mail.provider.note")),
             ],
         }
     }

@@ -90,11 +90,11 @@ pub fn parse_cell(s: &str) -> Result<Cell, String> {
         if let Some(rest) = s.strip_prefix(op) {
             let rest = rest.trim();
             if rest.is_empty() {
-                return Err(format!("单元格「{s}」不完整"));
+                return Err(steve_i18n::t!("flow.node.cell_incomplete", cell = s));
             }
             let v = literal(rest);
             if matches!(op, "<" | "<=" | ">" | ">=") && expr::number(&v).is_none() {
-                return Err(format!("单元格「{s}」要和数字比较"));
+                return Err(steve_i18n::t!("flow.node.cell_number", cell = s));
             }
             return Ok(Cell::Cmp(op, v));
         }
@@ -102,7 +102,7 @@ pub fn parse_cell(s: &str) -> Result<Cell, String> {
     let parts = split_list(s);
     if parts.len() > 1 {
         if parts.iter().any(String::is_empty) {
-            return Err(format!("单元格「{s}」的列表写得不对"));
+            return Err(steve_i18n::t!("flow.node.cell_list", cell = s));
         }
         return Ok(Cell::OneOf(parts.iter().map(|p| literal(p)).collect()));
     }
@@ -143,13 +143,13 @@ fn rows(cfg: &Value) -> Result<Vec<Vec<String>>, String> {
             .iter()
             .map(|r| {
                 r.as_array()
-                    .ok_or_else(|| "每一行要是列表".to_string())?
+                    .ok_or_else(|| steve_i18n::t!("flow.node.row_list"))?
                     .iter()
-                    .map(|c| cell_text(c).ok_or_else(|| "单元格只能是文字".to_string()))
+                    .map(|c| cell_text(c).ok_or_else(|| steve_i18n::t!("flow.node.cell_text")))
                     .collect()
             })
             .collect(),
-        _ => Err("要有至少一行".into()),
+        _ => Err(steve_i18n::t!("flow.node.rows_none")),
     }
 }
 
@@ -162,35 +162,36 @@ impl NodeKind for Table {
     fn validate(&self, cfg: &Value) -> Result<(), String> {
         match cfg["hit"].as_str().unwrap_or("first") {
             "first" | "collect" => {}
-            _ => return Err("hit 只能是 first 或 collect".into()),
+            _ => return Err(steve_i18n::t!("flow.node.table_hit")),
         }
         let inputs = str_list(cfg, "inputs")?;
         let outputs = str_list(cfg, "outputs")?;
         if inputs.is_empty() || outputs.is_empty() {
-            return Err("要有输入列和输出列".into());
+            return Err(steve_i18n::t!("flow.node.table_columns"));
         }
         if inputs.len() + outputs.len() > MAX_COLS {
-            return Err(format!("最多 {MAX_COLS} 列"));
+            return Err(steve_i18n::t!("flow.node.table_max_cols", max = MAX_COLS));
         }
         if let Some(p) = inputs.iter().find(|p| !expr::valid_path(p)) {
-            return Err(format!("输入列「{p}」写得不对"));
+            return Err(steve_i18n::t!("flow.node.table_input", path = p));
         }
         if outputs.iter().any(|k| k.trim().is_empty()) {
-            return Err("输出列要有名字".into());
+            return Err(steve_i18n::t!("flow.node.table_output"));
         }
         let rs = rows(cfg)?;
         if rs.is_empty() {
-            return Err("要有至少一行".into());
+            return Err(steve_i18n::t!("flow.node.rows_none"));
         }
         if rs.len() > MAX_ROWS {
-            return Err(format!("最多 {MAX_ROWS} 行"));
+            return Err(steve_i18n::t!("flow.node.table_max_rows", max = MAX_ROWS));
         }
         for (i, r) in rs.iter().enumerate() {
             if r.len() != inputs.len() + outputs.len() {
-                return Err(format!("第 {} 行的列数不对", i + 1));
+                return Err(steve_i18n::t!("flow.node.row_width", n = i + 1));
             }
             for c in &r[..inputs.len()] {
-                parse_cell(c).map_err(|e| format!("第 {} 行：{e}", i + 1))?;
+                parse_cell(c)
+                    .map_err(|e| steve_i18n::t!("flow.node.row_error", n = i + 1, error = e))?;
             }
         }
         Ok(())

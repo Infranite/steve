@@ -64,7 +64,51 @@ pub fn role_label(r: &str) -> &str {
         .unwrap_or(r)
 }
 
-/// `accounts.kind` as the pages say it.
+/// [`type_label`] in the request's language, for the pages (`/mcp` answers in zh-CN anyway).
+pub fn type_shown(t: &str) -> String {
+    use steve_i18n::t;
+    match t {
+        "account" => t!("modules.stewards.type.account"),
+        "connection" => t!("modules.stewards.type.connection"),
+        "device" => t!("modules.stewards.type.device"),
+        "bot" => t!("modules.stewards.type.bot"),
+        "persona" => t!("modules.stewards.type.persona"),
+        "party" => t!("modules.stewards.type.party"),
+        "space" => t!("modules.stewards.type.space"),
+        x => x.to_string(),
+    }
+}
+
+/// [`role_label`] in the request's language.
+pub fn role_shown(r: &str) -> String {
+    use steve_i18n::t;
+    match r {
+        "owner" => t!("modules.stewards.role.owner"),
+        "maintainer" => t!("modules.stewards.role.maintainer"),
+        "user" => t!("modules.stewards.role.user"),
+        x => x.to_string(),
+    }
+}
+
+/// `accounts.kind` as the pages say it, in the request's language.
+pub fn account_kind_shown(k: &str) -> String {
+    use steve_i18n::t;
+    match k {
+        "personal" => t!("modules.account_kind.personal"),
+        "work_email" => t!("modules.account_kind.work_email"),
+        "app_bot" => t!("modules.account_kind.app_bot"),
+        "shared_mailbox" => t!("modules.account_kind.shared_mailbox"),
+        "bank_card" => t!("modules.account_kind.bank_card"),
+        "service" => t!("modules.account_kind.service"),
+        "phone" => t!("modules.account_kind.phone"),
+        "bot" => t!("modules.account_kind.bot"),
+        "calendar" => t!("modules.account_kind.calendar"),
+        "root" => t!("modules.account_kind.root"),
+        _ => t!("modules.account_kind.other"),
+    }
+}
+
+/// `accounts.kind` as the pages say it (zh-CN).
 pub fn account_kind_label(k: &str) -> &str {
     match k {
         "personal" => "个人账号",
@@ -286,7 +330,7 @@ impl ObjectInfo {
         Self {
             object_type: t.into(),
             object_id: id.into(),
-            type_label: type_label(t).into(),
+            type_label: type_shown(t),
             name,
             kind: None,
             detail: String::new(),
@@ -295,12 +339,14 @@ impl ObjectInfo {
     }
 }
 
+/// A system's name as the pages show it (a built-in one in the request's language).
 fn system_name(c: &Connection, ws: &str, system: &str) -> ApiResult<String> {
     Ok(c.prepare_cached(
-        "SELECT name FROM systems WHERE id = ? AND workspace_id IN (?, '*') ORDER BY workspace_id = '*' LIMIT 1",
+        "SELECT name, workspace_id = '*' FROM systems WHERE id = ? AND workspace_id IN (?, '*') ORDER BY workspace_id = '*' LIMIT 1",
     )?
-    .query_row(params![system, ws], |r| r.get(0))
+    .query_row(params![system, ws], |r| Ok((r.get::<_, String>(0)?, r.get::<_, bool>(1)?)))
     .optional()?
+    .map(|(name, builtin)| crate::shown::system_name(system, builtin, &name))
     .unwrap_or_else(|| system.to_string()))
 }
 
@@ -334,7 +380,7 @@ pub fn object_info(
                 o.detail = format!(
                     "{} · {} · {}",
                     system_name(c, ws, &system)?,
-                    account_kind_label(&kind),
+                    account_kind_shown(&kind),
                     handle
                 );
                 o.kind = Some(kind);
@@ -373,7 +419,7 @@ pub fn object_info(
                 let mut o = ObjectInfo::new("device", id, name);
                 o.detail = serde_json::from_str::<Vec<String>>(&roles)
                     .unwrap_or_default()
-                    .join("、");
+                    .join(&steve_i18n::t!("modules.error.list_sep"));
                 o
             }),
         "bot" => c
@@ -405,11 +451,10 @@ pub fn object_info(
                 let mut o = ObjectInfo::new("party", id, p.name.clone());
                 if p.contact_kind.as_deref() != Some("bot") {
                     o.type_label = match p.kind.as_str() {
-                        "org" => "组织",
-                        "team" => "团队",
-                        _ => "联系人",
-                    }
-                    .into();
+                        "org" => steve_i18n::t!("modules.stewards.type.org"),
+                        "team" => steve_i18n::t!("modules.stewards.type.team"),
+                        _ => steve_i18n::t!("modules.stewards.type.contact"),
+                    };
                 }
                 o.kind = p.contact_kind.clone().or(p.org_kind.clone());
                 o.party_id = Some(p.id);
@@ -445,7 +490,9 @@ pub fn person(c: &Connection, viewer: &Viewer, id: &str) -> ApiResult<Party> {
         "联系人",
     )?;
     if p.contact_kind.as_deref() == Some("bot") {
-        return Err(ApiError::rule("机器人不能做负责人"));
+        return Err(ApiError::rule(steve_i18n::t!(
+            "modules.stewards.bot_cannot_own"
+        )));
     }
     Ok(p)
 }
@@ -494,7 +541,7 @@ fn steward_out(c: &Connection, s: &Steward) -> ApiResult<StewardOut> {
         person_name: p.as_ref().map(|p| p.name.clone()).unwrap_or_default(),
         is_me: p.as_ref().is_some_and(Party::is_me),
         role: s.role.clone(),
-        role_label: role_label(&s.role).into(),
+        role_label: role_shown(&s.role),
         source: s.source.clone(),
         status: s.status.clone(),
         confidence: s.confidence,
@@ -580,7 +627,7 @@ pub fn accounts_of(c: &Connection, ws: &str, party: &str) -> ApiResult<Vec<Accou
             id,
             handle,
             name,
-            kind_label: account_kind_label(&kind).into(),
+            kind_label: account_kind_shown(&kind),
             kind,
         };
         match out.iter_mut().find(|g| g.system_id == system) {
@@ -609,7 +656,7 @@ pub fn holdings_of(c: &Connection, viewer: &Viewer, p: &Party) -> ApiResult<Hold
             .collect::<ApiResult<_>>()?;
         responsible.push(Holding {
             object,
-            role_label: role_label(&s.role).into(),
+            role_label: role_shown(&s.role),
             role: s.role,
             source: s.source,
             status: s.status,
@@ -776,16 +823,21 @@ fn check_role(role: Option<&str>) -> ApiResult<String> {
     }
 }
 
-fn names(c: &Connection, rows: &[&Steward]) -> ApiResult<String> {
-    let mut v = Vec::new();
-    for s in rows {
-        v.push(name_of(c, &s.person_id)?);
-    }
-    Ok(if v.is_empty() {
-        "（空）".into()
+fn name_list(c: &Connection, rows: &[&Steward]) -> ApiResult<Vec<String>> {
+    rows.iter().map(|s| name_of(c, &s.person_id)).collect()
+}
+
+/// The stewards on a preview line: "A、B", or “（空）”.
+fn shown_names(v: &[String]) -> String {
+    if v.is_empty() {
+        steve_i18n::t!("modules.stewards.none")
     } else {
-        v.join("、")
-    })
+        v.join(&steve_i18n::t!("modules.error.list_sep"))
+    }
+}
+
+fn names(c: &Connection, rows: &[&Steward]) -> ApiResult<String> {
+    Ok(shown_names(&name_list(c, rows)?))
 }
 
 fn set_op(o: &ObjectInfo, person: &str, role: &str) -> Value {
@@ -810,7 +862,13 @@ fn record(
     let prepared = Prepared {
         target_id: Some(href_person.to_string()),
         revision: None,
-        title: format!("「{}」的{}", o.name, role_label("owner")),
+        title: steve_i18n::stored(|| {
+            steve_i18n::t!(
+                "modules.stewards.line",
+                name = o.name,
+                role = role_shown("owner")
+            )
+        }),
         href: format!("#/contacts/{href_person}"),
         subject: format!("the stewards of {} \"{}\"", o.object_type, o.name),
         fields: Vec::new(),
@@ -835,46 +893,52 @@ pub fn set(
 ) -> ApiResult<Changed> {
     let (viewer, _) = super::service::start(m, who)?;
     let role = check_role(b.role.as_deref())?;
-    let (o, plan, person) = m.store.reader(|c| {
-        let o = own_object(c, &who.ws, object_type, id)?;
-        let p = person(c, &viewer, b.person_id.trim())?;
-        if o.object_type == "party" && o.object_id == p.id {
-            return Err(ApiError::rule("不能做自己的负责人"));
-        }
-        let rows = of_object(c, &who.ws, object_type, id)?;
-        let same: Vec<&Steward> = rows.iter().filter(|s| s.role == role).collect();
-        let mut plan = Plan::default();
-        if b.replace.unwrap_or(true) {
-            for s in same.iter().filter(|s| s.person_id != p.id) {
-                plan.ops.push(remove_op(s));
+    // the preview line is stored with the changeset: zh-CN (changes::stored)
+    let (o, plan, person) = changes::stored(|| {
+        m.store.reader(|c| {
+            let o = own_object(c, &who.ws, object_type, id)?;
+            let p = person(c, &viewer, b.person_id.trim())?;
+            if o.object_type == "party" && o.object_id == p.id {
+                return Err(ApiError::rule(steve_i18n::t!(
+                    "modules.stewards.not_own_steward"
+                )));
             }
-        }
-        let current = same.iter().find(|s| s.person_id == p.id);
-        if current.is_none_or(|s| s.status != "confirmed") {
-            plan.ops.push(set_op(&o, &p.id, &role));
-        }
-        if !plan.ops.is_empty() {
-            let after: Vec<&Steward> = if b.replace.unwrap_or(true) {
-                Vec::new()
-            } else {
-                same.iter()
-                    .filter(|s| s.person_id != p.id)
-                    .copied()
-                    .collect()
-            };
-            let mut to = names(c, &after)?;
-            to = if to == "（空）" {
-                p.name.clone()
-            } else {
-                format!("{to}、{}", p.name)
-            };
-            plan.changes.push(Change::new(
-                format!("「{}」的{}", o.name, role_label(&role)),
-                names(c, &same)?,
-                to,
-            ));
-        }
-        Ok((o, plan, p))
+            let rows = of_object(c, &who.ws, object_type, id)?;
+            let same: Vec<&Steward> = rows.iter().filter(|s| s.role == role).collect();
+            let mut plan = Plan::default();
+            if b.replace.unwrap_or(true) {
+                for s in same.iter().filter(|s| s.person_id != p.id) {
+                    plan.ops.push(remove_op(s));
+                }
+            }
+            let current = same.iter().find(|s| s.person_id == p.id);
+            if current.is_none_or(|s| s.status != "confirmed") {
+                plan.ops.push(set_op(&o, &p.id, &role));
+            }
+            if !plan.ops.is_empty() {
+                let after: Vec<&Steward> = if b.replace.unwrap_or(true) {
+                    Vec::new()
+                } else {
+                    same.iter()
+                        .filter(|s| s.person_id != p.id)
+                        .copied()
+                        .collect()
+                };
+                let mut to = name_list(c, &after)?;
+                to.push(p.name.clone());
+                let to = shown_names(&to);
+                plan.changes.push(Change::new(
+                    steve_i18n::t!(
+                        "modules.stewards.line",
+                        name = o.name,
+                        role = role_shown(&role)
+                    ),
+                    names(c, &same)?,
+                    to,
+                ));
+            }
+            Ok((o, plan, p))
+        })
     })?;
     let undo = record(m, who, &o, &person.id, plan)?;
     let now = m.store.reader(|c| object_stewards(c, &who.ws, o))?;
@@ -895,40 +959,46 @@ pub fn remove(
 ) -> ApiResult<Changed> {
     let (_, me) = super::service::start(m, who)?;
     let role = check_role(q.role.as_deref())?;
-    let (o, plan, href) = m.store.reader(|c| {
-        let o = own_object(c, &who.ws, object_type, id)?;
-        let rows = of_object(c, &who.ws, object_type, id)?;
-        let person = q
-            .person_id
-            .as_deref()
-            .map(|p| if p == "me" { me.id.as_str() } else { p });
-        let gone: Vec<&Steward> = rows
-            .iter()
-            .filter(|s| s.role == role && person.is_none_or(|p| p == s.person_id))
-            .collect();
-        let mut plan = Plan::default();
-        for s in &gone {
-            plan.ops.push(remove_op(s));
-        }
-        if !gone.is_empty() {
-            let left: Vec<&Steward> = rows
+    let (o, plan, href) = changes::stored(|| {
+        m.store.reader(|c| {
+            let o = own_object(c, &who.ws, object_type, id)?;
+            let rows = of_object(c, &who.ws, object_type, id)?;
+            let person = q
+                .person_id
+                .as_deref()
+                .map(|p| if p == "me" { me.id.as_str() } else { p });
+            let gone: Vec<&Steward> = rows
                 .iter()
-                .filter(|s| s.role == role && !gone.iter().any(|g| g.person_id == s.person_id))
+                .filter(|s| s.role == role && person.is_none_or(|p| p == s.person_id))
                 .collect();
-            plan.changes.push(Change::new(
-                format!("「{}」的{}", o.name, role_label(&role)),
-                names(
-                    c,
-                    &rows.iter().filter(|s| s.role == role).collect::<Vec<_>>(),
-                )?,
-                names(c, &left)?,
-            ));
-        }
-        let href = gone
-            .first()
-            .map(|s| s.person_id.clone())
-            .unwrap_or(me.id.clone());
-        Ok::<_, ApiError>((o, plan, href))
+            let mut plan = Plan::default();
+            for s in &gone {
+                plan.ops.push(remove_op(s));
+            }
+            if !gone.is_empty() {
+                let left: Vec<&Steward> = rows
+                    .iter()
+                    .filter(|s| s.role == role && !gone.iter().any(|g| g.person_id == s.person_id))
+                    .collect();
+                plan.changes.push(Change::new(
+                    steve_i18n::t!(
+                        "modules.stewards.line",
+                        name = o.name,
+                        role = role_shown(&role)
+                    ),
+                    names(
+                        c,
+                        &rows.iter().filter(|s| s.role == role).collect::<Vec<_>>(),
+                    )?,
+                    names(c, &left)?,
+                ));
+            }
+            let href = gone
+                .first()
+                .map(|s| s.person_id.clone())
+                .unwrap_or(me.id.clone());
+            Ok::<_, ApiError>((o, plan, href))
+        })
     })?;
     let undo = record(m, who, &o, &href, plan)?;
     let now = m.store.reader(|c| object_stewards(c, &who.ws, o))?;

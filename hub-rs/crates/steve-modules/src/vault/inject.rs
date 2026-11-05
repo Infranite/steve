@@ -136,16 +136,16 @@ impl RunOutput {
 pub fn resolve_cwd(workdir: &Path, cwd: Option<&str>) -> VaultResult<PathBuf> {
     let root = workdir
         .canonicalize()
-        .map_err(|_| ApiError::rule(CWD_OUTSIDE))?;
+        .map_err(|_| ApiError::rule(steve_i18n::t!("modules.vault.cwd_outside")))?;
     let want = match cwd.map(str::trim).filter(|c| !c.is_empty()) {
         Some(c) => root.join(c),
         None => root.clone(),
     };
     let real = want
         .canonicalize()
-        .map_err(|_| ApiError::rule(CWD_OUTSIDE))?;
+        .map_err(|_| ApiError::rule(steve_i18n::t!("modules.vault.cwd_outside")))?;
     if !real.starts_with(&root) || !real.is_dir() {
-        return Err(ApiError::rule(CWD_OUTSIDE).into());
+        return Err(ApiError::rule(steve_i18n::t!("modules.vault.cwd_outside")).into());
     }
     Ok(real)
 }

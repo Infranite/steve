@@ -22,7 +22,7 @@ use steve_modules::{ApiError, ApiResult, Body, Caller, Modules};
 
 use crate::FlowCx;
 use crate::cron::DEFAULT_TZ;
-use crate::signals::{self, Filter, RAW_GONE, Range};
+use crate::signals::{self, Filter, Range};
 use crate::sources::{self, SourcePatch};
 
 type Cx = Extension<Arc<FlowCx>>;
@@ -76,7 +76,11 @@ async fn raw(Extension(cx): Cx, who: Caller, Path(id): Path<String>) -> ApiResul
     Ok(
         match cx.store().reader(|c| signals::raw(c, &viewer, &id))? {
             Some(p) => Json(json!({ "payload": p })).into_response(),
-            None => (StatusCode::GONE, Json(json!({ "error": RAW_GONE }))).into_response(),
+            None => (
+                StatusCode::GONE,
+                Json(json!({ "error": steve_i18n::t!("flow.signal.raw_gone") })),
+            )
+                .into_response(),
         },
     )
 }

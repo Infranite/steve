@@ -99,3 +99,34 @@ impl From<MailError> for VaultError {
 }
 
 pub type MailResult<T> = Result<T, MailError>;
+
+/// The `404` sentence for a noun only this crate puts in [`ApiError::NotFound`], in the request's
+/// language. The error keeps the Chinese noun (tests compare it); the response is made from it in
+/// `api.rs`. `None` for the shared nouns, which steve-modules' `ApiError` translates itself.
+pub fn not_found_text(noun: &str) -> Option<String> {
+    use steve_i18n::t;
+    Some(match noun {
+        "往来" => t!("mail.not_found.thread"),
+        "邮件" => t!("mail.not_found.message"),
+        "HTML 正文" => t!("mail.not_found.html_body"),
+        "图片" => t!("mail.not_found.image"),
+        _ => return None,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::not_found_text;
+
+    #[tokio::test]
+    async fn not_found_in_the_request_language() {
+        assert_eq!(not_found_text("往来").as_deref(), Some("没有这个往来"));
+        assert_eq!(
+            not_found_text("HTML 正文").as_deref(),
+            Some("没有这个 HTML 正文")
+        );
+        assert_eq!(not_found_text("草稿"), None);
+        let en = steve_i18n::scope(steve_i18n::EN, async { not_found_text("往来") }).await;
+        assert_eq!(en.as_deref(), Some("No such email thread"));
+    }
+}

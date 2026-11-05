@@ -696,7 +696,7 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 fn api_err(e: ProviderError) -> ApiError {
     match e {
         ProviderError::Unsupported => ApiError::rule(e.to_string()),
-        e => ApiError::rule(format!("飞书设备码登录没有开始：{e}")),
+        e => ApiError::rule(steve_i18n::t!("channels.error.device_flow", error = e)),
     }
 }
 
@@ -877,7 +877,9 @@ impl DeviceFlows {
                 .ok_or_else(|| ApiError::not_found("连接"))?;
             // re-authorizing goes through the app it was made with, never moves it to another app
             if c.config.get("app_connection").and_then(Value::as_str) != Some(app_connection) {
-                return Err(ApiError::rule("重新授权要用这个连接原来的机器人应用"));
+                return Err(ApiError::rule(steve_i18n::t!(
+                    "channels.error.reauth_same_app"
+                )));
             }
             for s in &c.granted_scopes {
                 add(s);

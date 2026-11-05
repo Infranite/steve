@@ -89,6 +89,8 @@
 //! rt.spawn_watch(bus.tap(&["connection"]));
 //! ```
 
+steve_i18n::init!();
+
 pub mod adapters;
 pub mod api;
 pub mod arbiter;

@@ -132,7 +132,7 @@ impl steve_flow::Core for FlowCore {
                 .map_err(|e| e.to_string())?
             {
                 Some(i) if i.workspace_id == ws => {}
-                _ => return Err("没有这个事项".into()),
+                _ => return Err(crate::api::Noun::Item.missing()),
             }
             c.supplement(&id, &text, mode, &[])
                 .map_err(|e| e.to_string())

@@ -174,10 +174,10 @@ const TAG_BY_NAME: &str = "SELECT * FROM tags WHERE workspace_id = ? AND name = 
 pub(crate) const ITEM_TAGS: &str = "SELECT it.tag_id FROM item_tags it LEFT JOIN tags t ON t.id = it.tag_id WHERE it.item_id = ? ORDER BY coalesce(t.cat = '类型', 0) DESC, it.rowid";
 
 fn not_a_kind() -> StoreError {
-    StoreError::Conflict(format!(
-        "“{}”只放 {} 六个分类标签；新标签请选领域、主题等类别",
-        kinds::KIND_CAT,
-        kinds::names()
+    StoreError::Conflict(steve_i18n::t!(
+        "store.tag.not_a_kind",
+        cat = kinds::KIND_CAT,
+        names = kinds::names()
     ))
 }
 
@@ -246,18 +246,22 @@ impl Tags<'_> {
             if let Some(t) = one(w.c, TAG, [id], Tag::from_row)? {
                 let kind = t.cat == kinds::KIND_CAT;
                 if kind && p.name.as_ref().is_some_and(|n| *n != t.name) {
-                    return Err(StoreError::Conflict("分类标签不能改名".into()));
+                    return Err(StoreError::Conflict(steve_i18n::t!(
+                        "store.tag.kind_rename"
+                    )));
                 }
                 if kind && p.cat.as_ref().is_some_and(|c| c != kinds::KIND_CAT) {
-                    return Err(StoreError::Conflict("分类标签不能改类别".into()));
+                    return Err(StoreError::Conflict(steve_i18n::t!(
+                        "store.tag.kind_recategorize"
+                    )));
                 }
                 if !kind && p.cat.as_deref() == Some(kinds::KIND_CAT) {
                     return Err(not_a_kind());
                 }
                 if !kind && p.name.as_deref().is_some_and(kinds::is_kind) {
-                    return Err(StoreError::Conflict(format!(
-                        "{} 是分类标签的名字",
-                        p.name.as_deref().unwrap_or_default()
+                    return Err(StoreError::Conflict(steve_i18n::t!(
+                        "store.tag.kind_name",
+                        name = p.name.as_deref().unwrap_or_default()
                     )));
                 }
             }
@@ -280,7 +284,9 @@ impl Tags<'_> {
     pub fn remove(&self, id: &str) -> Result<()> {
         self.0.write(|w| {
             if kinds::is_kind_tag(w.c, id)? {
-                return Err(StoreError::Conflict("分类标签不能删除".into()));
+                return Err(StoreError::Conflict(steve_i18n::t!(
+                    "store.tag.kind_delete"
+                )));
             }
             let tx = w.tx()?;
             tx.run("DELETE FROM item_tags WHERE tag_id = ?", [id])?;
@@ -298,7 +304,7 @@ impl Tags<'_> {
     pub fn merge(&self, from: &str, into: &str) -> Result<()> {
         self.0.write(|w| {
             if kinds::is_kind_tag(w.c, from)? || kinds::is_kind_tag(w.c, into)? {
-                return Err(StoreError::Conflict("分类标签不能合并".into()));
+                return Err(StoreError::Conflict(steve_i18n::t!("store.tag.kind_merge")));
             }
             let tx = w.tx()?;
             tx.run("INSERT OR IGNORE INTO item_tags (item_id, tag_id) SELECT item_id, ? FROM item_tags WHERE tag_id = ?", [into, from])?;

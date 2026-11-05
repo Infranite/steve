@@ -144,7 +144,9 @@ pub fn set_voice(
     if let Some(v) = voice
         && !identities(tx, space)?.iter().any(|i| i.connection_id == v)
     {
-        return Err(ApiError::rule(VOICE_NOT_HERE));
+        return Err(ApiError::rule(steve_i18n::t!(
+            "channels.error.voice_not_here"
+        )));
     }
     tx.execute(
         "INSERT INTO space_prefs (space_id, workspace_id, voice, updated) VALUES (?1, ?2, ?3, ?4)
@@ -498,7 +500,9 @@ pub const DISCONNECTED: &str = "这个空间的接入账号已经断开，只能
 /// `409` unless the space still has its connection: a disconnected space is kept for its history only.
 pub fn writable(s: &SpaceRow) -> ChannelResult<()> {
     if s.connection_id.is_empty() {
-        return Err(ApiError::conflict(DISCONNECTED));
+        return Err(ApiError::conflict(steve_i18n::t!(
+            "channels.error.disconnected"
+        )));
     }
     Ok(())
 }
@@ -1344,9 +1348,9 @@ pub fn patch(
     let rules = match &p.rules {
         Some(Some(v)) => {
             if let Some(f) = &before.flow_id {
-                return Err(ApiError::conflict(format!(
-                    "这个空间已经转成流程「{}」，先改回规则",
-                    steve_flow::flows::name_of(tx, f)?
+                return Err(ApiError::conflict(steve_i18n::t!(
+                    "channels.error.space_is_flow",
+                    flow = steve_flow::flows::name_of(tx, f)?
                 )));
             }
             let mode = crate::bindings::connection_account(tx, ws, &s.connection_id)?.1;

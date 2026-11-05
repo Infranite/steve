@@ -42,9 +42,6 @@ pub const UNDO_NOTE: &str = "撤销纠正";
 pub const HIT: &str = "例外";
 pub const ELSE: &str = "其他";
 
-pub const NO_KEY: &str = "这条信号认不出同类，没法按这个范围纠正";
-pub const HAS_ITEM: &str = "这条信号已经转成事项了";
-
 /// What the correction does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
@@ -69,10 +66,18 @@ impl Action {
             Self::ToItem => "to_item",
         }
     }
+    /// For the stored rule text and node titles (zh-CN).
     fn verb(self) -> &'static str {
         match self {
             Self::Remind => "提醒你",
             _ => "忽略",
+        }
+    }
+    /// For the card, in the request's language.
+    fn verb_shown(self) -> String {
+        match self {
+            Self::Remind => steve_i18n::t!("flow.correction.remind"),
+            _ => steve_i18n::t!("flow.correction.ignore"),
         }
     }
 }
@@ -206,33 +211,44 @@ fn lit(s: &str) -> String {
     serde_json::to_string(s).unwrap_or_else(|_| "\"\"".into())
 }
 
-/// The exception's condition and its description (“同组（acme）”).
-fn condition(ev: &Ev, scope: Scope) -> ApiResult<(String, String)> {
+/// The exception's condition and its description (“同组（acme）”), zh-CN for the node title and in the
+/// request's language for the card.
+fn condition(ev: &Ev, scope: Scope) -> ApiResult<(String, String, String)> {
     match scope {
         Scope::Group => {
             if let Some(g) = &ev.group_key {
                 return Ok((
                     format!("event.group_key == {}", lit(g)),
                     format!("同组（{g}）"),
+                    steve_i18n::t!("flow.correction.same_group", group = g),
                 ));
             }
             // no group: the same sender
             let a = ev
                 .actor_account_id
                 .as_ref()
-                .ok_or_else(|| ApiError::rule(NO_KEY))?;
+                .ok_or_else(|| ApiError::rule(steve_i18n::t!("flow.correction.no_key")))?;
+            let shown = match &ev.actor_name {
+                Some(n) => steve_i18n::t!("flow.correction.from", who = n),
+                None => steve_i18n::t!("flow.correction.from_sender"),
+            };
             let who = ev.actor_name.clone().unwrap_or_else(|| "这个发件人".into());
             Ok((
                 format!("event.actor_account_id == {}", lit(a)),
                 format!("来自 {who}"),
+                shown,
             ))
         }
         Scope::One => {
             let t = ev
                 .thread_key
                 .as_ref()
-                .ok_or_else(|| ApiError::rule(NO_KEY))?;
-            Ok((format!("event.thread_key == {}", lit(t)), "同一往来".into()))
+                .ok_or_else(|| ApiError::rule(steve_i18n::t!("flow.correction.no_key")))?;
+            Ok((
+                format!("event.thread_key == {}", lit(t)),
+                "同一往来".into(),
+                steve_i18n::t!("flow.correction.same_thread"),
+            ))
         }
     }
 }
@@ -351,7 +367,9 @@ pub async fn correct(
     let ev = cx.store().reader(|c| load_event(c, &viewer, event_id))?;
     if action == Action::ToItem {
         if ev.outcome == "item" {
-            return Err(ApiError::conflict(HAS_ITEM));
+            return Err(ApiError::conflict(steve_i18n::t!(
+                "flow.correction.has_item"
+            )));
         }
         let item = crate::decisions::to_item(cx, &who.ws, &ev.id).await?;
         let id = record(cx, who, &ev, action, scope, None, None, None, Some(&item))?;
@@ -362,7 +380,8 @@ pub async fn correct(
             flow_id: None,
         });
     }
-    let (when, describe) = condition(&ev, scope)?;
+    // the card (title, preview lines) is stored with the changeset and read by every member: zh-CN
+    let (when, describe, describe_shown) = changes::stored(|| condition(&ev, scope))?;
     let target = cx
         .store()
         .reader(|c| -> FlowResult<Option<flows::FlowRow>> {
@@ -385,7 +404,7 @@ pub async fn correct(
             (
                 g,
                 json!({ "op": OP_FLOW, "flow_id": f.id, "version": f.version }),
-                format!("流程「{}」", f.name),
+                steve_i18n::stored(|| steve_i18n::t!("flow.draft.flow_title", name = f.name)),
                 f.id.clone(),
             )
         }
@@ -394,7 +413,7 @@ pub async fn correct(
             (
                 starter(&ev),
                 json!({ "op": OP_FLOW, "flow_id": new_id, "create": { "name": name, "description": rule_text } }),
-                format!("新流程「{name}」"),
+                steve_i18n::stored(|| steve_i18n::t!("flow.correction.new_flow", name = name)),
                 new_id.clone(),
             )
         }
@@ -409,20 +428,36 @@ pub async fn correct(
         "event_id": ev.id,
         "connection_id": ev.connection_id,
     });
-    let exception = format!("例外：{describe} → {}", action.verb());
+    let exception = steve_i18n::stored(|| {
+        steve_i18n::t!(
+            "flow.correction.exception",
+            describe = describe_shown,
+            verb = action.verb_shown()
+        )
+    });
     let changes = vec![
         Change::new(
             prepared_title.clone(),
-            if target.is_some() { "" } else { "（没有）" },
+            if target.is_some() {
+                String::new()
+            } else {
+                steve_i18n::stored(|| steve_i18n::t!("flow.correction.none"))
+            },
             exception,
         ),
-        Change::new("规则记忆", "", rule_text.clone()),
+        Change::new(
+            steve_i18n::stored(|| steve_i18n::t!("flow.correction.rule_memory")),
+            "",
+            rule_text.clone(),
+        ),
     ];
     let prepared = Prepared {
         target_id: Some(flow_id.clone()),
         // applied right away: no staleness window
         revision: None,
-        title: format!("纠正：{}", cut(&ev.summary, 30)),
+        title: steve_i18n::stored(|| {
+            steve_i18n::t!("flow.correction.title", summary = cut(&ev.summary, 30))
+        }),
         href: format!("#/auto/rule/{flow_id}"),
         subject: prepared_title,
         fields: Vec::new(),

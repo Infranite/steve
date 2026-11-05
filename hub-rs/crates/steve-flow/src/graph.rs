@@ -84,7 +84,7 @@ fn id_re() -> &'static Regex {
 
 impl Graph {
     pub fn from_value(v: &Value) -> Result<Self, String> {
-        serde_json::from_value(v.clone()).map_err(|_| "图的格式不对".to_string())
+        serde_json::from_value(v.clone()).map_err(|_| steve_i18n::t!("flow.graph.bad_format"))
     }
 
     pub fn to_value(&self) -> Value {
@@ -149,80 +149,80 @@ impl Graph {
 pub fn validate(v: &Value, reg: &NodeRegistry) -> Result<Graph, String> {
     let g = Graph::from_value(v)?;
     if g.nodes.is_empty() {
-        return Err("流程要有且只有一个触发节点".into());
+        return Err(steve_i18n::t!("flow.graph.one_trigger"));
     }
     if g.nodes.len() > MAX_NODES {
-        return Err(format!("节点太多了（最多 {MAX_NODES} 个）"));
+        return Err(steve_i18n::t!("flow.graph.too_many_nodes", max = MAX_NODES));
     }
     let mut ids = HashSet::new();
     for n in &g.nodes {
         if !id_re().is_match(&n.id) {
-            return Err(format!(
-                "节点 id「{}」不合规：小写字母开头，只能有小写字母、数字和下划线，最多 16 个字符",
-                n.id
-            ));
+            return Err(steve_i18n::t!("flow.graph.bad_id", id = n.id));
         }
         if !ids.insert(n.id.as_str()) {
-            return Err(format!("节点 id「{}」重复了", n.id));
+            return Err(steve_i18n::t!("flow.graph.duplicate_id", id = n.id));
         }
         if n.title.chars().count() > 60 || n.note.chars().count() > 200 {
-            return Err(format!("节点「{}」的标题或说明太长了", n.name()));
+            return Err(steve_i18n::t!("flow.graph.text_too_long", node = n.name()));
         }
     }
     let triggers: Vec<&Node> = g.nodes.iter().filter(|n| n.kind == "trigger").collect();
     if triggers.len() != 1 {
-        return Err("流程要有且只有一个触发节点".into());
+        return Err(steve_i18n::t!("flow.graph.one_trigger"));
     }
     let trigger = triggers[0].id.clone();
     let mut seen_edges = HashSet::new();
     for e in &g.edges {
         for end in [&e.from, &e.to] {
             if !ids.contains(end.as_str()) {
-                return Err(format!("连线指向不存在的节点「{end}」"));
+                return Err(steve_i18n::t!("flow.graph.edge_to_nowhere", node = end));
             }
         }
         if e.to == trigger {
-            return Err("触发节点不能有连进来的线".into());
+            return Err(steve_i18n::t!("flow.graph.edge_into_trigger"));
         }
         if e.from == e.to {
-            return Err(format!(
-                "流程里不能有环（经过「{}」）",
-                name_of(&g, &e.from)
+            return Err(steve_i18n::t!(
+                "flow.graph.cycle",
+                node = name_of(&g, &e.from)
             ));
         }
         if e.label.chars().count() > 40 {
-            return Err("连线的名字太长了".into());
+            return Err(steve_i18n::t!("flow.graph.edge_label_too_long"));
         }
         if !seen_edges.insert((e.from.as_str(), e.to.as_str(), e.label.as_str())) {
-            return Err(format!("「{}」有重复的连线", name_of(&g, &e.from)));
+            return Err(steve_i18n::t!(
+                "flow.graph.duplicate_edge",
+                node = name_of(&g, &e.from)
+            ));
         }
     }
     for n in &g.nodes {
         let Some(k) = reg.get(&n.kind) else {
-            return Err(format!("不认识的节点种类：{}", n.kind));
+            return Err(steve_i18n::t!("flow.graph.unknown_kind", kind = n.kind));
         };
         if !n.config.is_object() {
-            return Err(format!("节点「{}」：配置的格式不对", n.name()));
+            return Err(steve_i18n::t!("flow.graph.bad_config", node = n.name()));
         }
         k.validate(&n.config)
-            .map_err(|e| format!("节点「{}」：{e}", n.name()))?;
+            .map_err(|e| steve_i18n::t!("flow.graph.node_error", node = n.name(), error = e))?;
         if let Some(f) = &n.on_fail {
             let ok = f == "stop"
                 || f == "continue"
                 || f.strip_prefix("branch:")
                     .is_some_and(|l| !l.is_empty() && g.outs(&n.id).any(|e| e.label == l));
             if !ok {
-                return Err(format!("节点「{}」的出错处理不对", n.name()));
+                return Err(steve_i18n::t!("flow.graph.bad_on_fail", node = n.name()));
             }
         }
     }
     if let Some(at) = cycle(&g) {
-        return Err(format!("流程里不能有环（经过「{}」）", name_of(&g, &at)));
+        return Err(steve_i18n::t!("flow.graph.cycle", node = name_of(&g, &at)));
     }
     let reach = reachable(&g, &trigger);
     let lost = g.nodes.len() - reach.len();
     if lost > 0 {
-        return Err(format!("有 {lost} 个节点没有连上"));
+        return Err(steve_i18n::t!("flow.graph.unreachable", count = lost));
     }
     Ok(g)
 }

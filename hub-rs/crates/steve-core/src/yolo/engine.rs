@@ -95,9 +95,10 @@ fn ce(e: crate::CoreError) -> ApiError {
     }
 }
 
-/// Someone (the user) answered first.
+/// Someone (the user) answered first. The refusal is in the request's language (`core.decision.handled`).
 fn already_handled(e: &ApiError) -> bool {
-    e.to_string().contains("已经处理过了")
+    let s = e.to_string();
+    s.contains("已经处理过了") || s.contains("already been handled")
 }
 
 /// Same answer: same choice by the same rule.

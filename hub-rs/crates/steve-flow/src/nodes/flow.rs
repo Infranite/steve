@@ -21,7 +21,7 @@ impl NodeKind for SubFlow {
 
     /// The child decides for itself: its effectful nodes are gated in its own run.
     fn validate(&self, cfg: &Value) -> Result<(), String> {
-        req_str(cfg, "flow_id", "要调用的流程", 64)?;
+        req_str(cfg, "flow_id", super::Required::Flow, 64)?;
         Ok(())
     }
 

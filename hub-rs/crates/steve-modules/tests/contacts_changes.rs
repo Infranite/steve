@@ -833,3 +833,46 @@ async fn global_candidates() {
         Some("team:new — 新建虚拟团队")
     );
 }
+
+// ---------------------------------------------------------------- language
+
+/// A draft is stored for every member to read: its card is zh-CN whatever the asker's language, and an error
+/// still comes back in the asker's language.
+#[tokio::test]
+async fn a_draft_is_stored_in_zh_cn_from_an_english_request() {
+    let t = env();
+    let r = app(&t);
+    let w = world(&r).await;
+    let p = steve_i18n::scope(
+        steve_i18n::EN,
+        draft(
+            &t,
+            "contact",
+            Some(&w.sarah),
+            "Sarah is important",
+            json!([{ "op": "set", "key": "important", "value": "是" }]),
+        ),
+    )
+    .await;
+    assert_eq!(p.title, "Sarah Chen 的资料");
+    assert_eq!(lines(&p), vec![line("重要", "否", "是")]);
+    let title: String = scalar(
+        &t,
+        &format!("SELECT title FROM changesets WHERE id = '{}'", p.id),
+    );
+    assert_eq!(title, "Sarah Chen 的资料");
+    let e = steve_i18n::scope(
+        steve_i18n::EN,
+        changes::draft(
+            &t.modules,
+            &me(),
+            "contact",
+            Some("ct_nope"),
+            "x",
+            Origin::default(),
+        ),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(e, ApiError::NotFound(_)), "{e:?}");
+}

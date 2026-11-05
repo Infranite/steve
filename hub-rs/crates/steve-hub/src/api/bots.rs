@@ -6,7 +6,9 @@ use axum::extract::{Path, State};
 use serde_json::{Value, json};
 
 use super::misc::{SMART, js_num};
-use super::{ApiResult, AppState, Ctx, body, bot_out, objs, ok, ok_true, own, own_bot, str_of};
+use super::{
+    ApiResult, AppState, Ctx, Noun, body, bot_out, objs, ok, ok_true, own, own_bot, str_of,
+};
 use crate::backend::Obj;
 use crate::error::ApiError;
 use crate::js;
@@ -132,7 +134,7 @@ pub async fn prompt(
     st.read(move |r| {
         own_bot(r, &id, &c.ws)?;
         let Some(b) = r.bot_get(&id)? else {
-            return Err(ApiError::not_found("没有这个 Bot"));
+            return Err(ApiError::not_found(Noun::Bot.missing()));
         };
         let custom = b.get("prompt").cloned().unwrap_or(Value::Null);
         let mut g = b;
@@ -195,7 +197,7 @@ pub async fn draft(
     let name = if js::truthy(r.get("name")) {
         js::string(&r["name"])
     } else {
-        "新 Bot".into()
+        steve_i18n::t!("hub.bot.draft_name")
     };
     let model = match get("model").map(js::string).as_deref() {
         Some("opus") => json!("claude-opus-5-5"),
@@ -243,7 +245,7 @@ pub async fn patch_one(
         if let Some(Value::String(dp)) = p.get("default_project")
             && !dp.is_empty()
         {
-            own(r.project_get(dp)?, &c.ws, "项目")?;
+            own(r.project_get(dp)?, &c.ws, Noun::Project)?;
         }
         let b = r.bot_patch(&id, &p, &c.me)?;
         ok(Value::Object(bot_out(r, b, &c.ws)?))
@@ -269,7 +271,9 @@ pub async fn set_workspaces(
             .map(|w| str_of(w, "id"))
             .collect();
         if ids.iter().any(|x| !mine.contains(x)) {
-            return Err(ApiError::not_found("没有这个工作空间"));
+            return Err(ApiError::not_found(steve_i18n::t!(
+                "hub.not_found.workspace"
+            )));
         }
         r.bot_set_workspaces(&id, &ids)?;
         ok_true()
@@ -285,7 +289,7 @@ pub async fn duplicate(
     st.write(move |r| {
         own_bot(r, &id, &c.ws)?;
         let Some(mut b) = r.bot_get(&id)? else {
-            return Err(ApiError::not_found("没有这个 Bot"));
+            return Err(ApiError::not_found(Noun::Bot.missing()));
         };
         let name = format!("{} 副本", str_of(&b, "name"));
         b.insert("name".into(), json!(name));
@@ -397,7 +401,7 @@ pub async fn memory_edit(
 ) -> ApiResult {
     let text = memory_text(&body(&b)?)?;
     st.write(move |r| {
-        own(r.memory_get(&id)?, &c.ws, "记忆")?;
+        own(r.memory_get(&id)?, &c.ws, Noun::Memory)?;
         r.memory_edit(&id, &text)?;
         ok_true()
     })
@@ -410,7 +414,7 @@ pub async fn memory_remove(
     Path(id): Path<String>,
 ) -> ApiResult {
     st.write(move |r| {
-        own(r.memory_get(&id)?, &c.ws, "记忆")?;
+        own(r.memory_get(&id)?, &c.ws, Noun::Memory)?;
         r.memory_remove(&id)?;
         ok_true()
     })

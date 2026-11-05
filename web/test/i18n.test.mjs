@@ -147,7 +147,6 @@ const ALLOW = {
   "ui.tsx": [["新事项", "新项目", "汇报", "新", "（附件）", "未确认", "允许执行", "："], `slash command names the Hub accepts, attachment placeholder, contact kind, permission question prefix: ${HUB}`],
   "decision-notes.ts": [["不发布", "：", "批准", "拒绝", "。补充：", "。原因：", "添加标签", "移除标签", "稍后提醒", "暂停", "放弃", "归档", "恢复", "撤销了决定", "同意开始", "不需要", "批准发布", "回答", "返工"], "parses and rebuilds the Hub's decision timeline text"],
   "devices.tsx": [["暂停接活", "正常"], `device status: ${HUB}`],
-  "github/index.tsx": [["保险箱"], "matched in the Hub's error to link to the vault"],
   "graph.tsx": [["派生", "交接", "依赖", "项目"], "edge kinds from store.ts, mapped to t() labels"],
   "store.ts": [["高", "中", "低", "你", "开始会话", "分流", "规划", "收尾", "交付与验收", "发布", "正在开始", "刚开始", "定义", "执行", "不", "排队", "插话", "删除", "导出", "项目", "类型", "领域", "客户", "主题", "交接", "依赖", "派生"], `priorities, tag categories, stage and edge ids, timeline text: ${HUB}`],
   "views.tsx": [["接收", "分流", "定义", "规划", "准备", "执行", "交付与验收", "收尾", "高", "中", "低", "无", "今天", "明天", "周五", "下周一", "全部", "等你", "进行中", "动态", "产出", "关系图", "派生", "交付", "目标更新", "前置", "开新会话", "交接", "自动开始", "暂停", "放弃", "继续", "关联", "发布", "冲突", "失败", "回到", "补充信息：", "（附件）", "：", "插话", "排队", "本机"], `stage, priority and due values (labels via t()), tab ids, timeline keywords, queued-comment prefix: ${HUB}`],
@@ -162,7 +161,6 @@ const ALLOW = {
   "stats/tables.tsx": [["　"], "an ideographic space that keeps an empty footer one line tall"],
   "vault/new-item.tsx": [["私钥", "恢复码", "内容"], "matched in the Hub's field labels"],
   "version.tsx": [["拒绝", "升级已提交"], "matched in the Hub's upgrade error"],
-  "yolo/badges.tsx": [["硬限制：", "你选择自己来定"], `YOLO reason text: ${HUB}`],
 }
 
 const sources = (d) => readdirSync(d).flatMap((n) => {

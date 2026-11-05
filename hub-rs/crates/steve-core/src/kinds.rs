@@ -26,6 +26,29 @@ const SURE: f64 = 0.7;
 /// Items per classification call.
 const BATCH: usize = 20;
 
+/// Why the rules picked a category, as stored in the review list (shown through [`why_shown`]).
+const WHY_KEYWORDS: &str = "按标题和目标里的关键词";
+const WHY_NO_CLUE: &str = "没有明显线索";
+
+/// A stored reason as the UI shows it: the rules' fixed reasons in the request's language, a model's own
+/// words as they are.
+fn why_shown(why: String) -> String {
+    match why.as_str() {
+        WHY_KEYWORDS => steve_i18n::t!("core.kinds.why_keywords"),
+        WHY_NO_CLUE => steve_i18n::t!("core.kinds.why_no_clue"),
+        _ => why,
+    }
+}
+
+fn reviews_shown(list: Vec<Review>) -> Vec<Review> {
+    list.into_iter()
+        .map(|r| Review {
+            why: why_shown(r.why),
+            ..r
+        })
+        .collect()
+}
+
 /// What [`guess`] read from a title and goal.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Guess {
@@ -403,9 +426,9 @@ impl Core {
                         confidence: if sure { 0.7 } else { 0.4 },
                         uncertain: !sure,
                         why: if sure {
-                            "按标题和目标里的关键词".into()
+                            WHY_KEYWORDS.into()
                         } else {
-                            "没有明显线索".into()
+                            WHY_NO_CLUE.into()
                         },
                         had: if had.len() > 1 { had } else { vec![] },
                     }
@@ -435,6 +458,9 @@ impl Core {
                 }
                 self.save_review(ws, &list)?;
             }
+        }
+        for f in &mut out.filled {
+            f.why = why_shown(std::mem::take(&mut f.why));
         }
         Ok(out)
     }
@@ -510,6 +536,11 @@ impl Core {
     /// The filled-in categories still to look at: an item whose category changed since (the user
     /// picked another) or that is gone has been looked at.
     pub fn kinds_review(&self, ws: &str) -> Result<Vec<Review>> {
+        Ok(reviews_shown(self.reviews_open(ws)?))
+    }
+
+    /// [`Core::kinds_review`] as stored.
+    fn reviews_open(&self, ws: &str) -> Result<Vec<Review>> {
         let db = self.store();
         let kinds = db.kinds(ws)?;
         let mut out = vec![];
@@ -528,14 +559,14 @@ impl Core {
     /// The user looked at these items' categories (kept or changed): they leave the list.
     pub fn kinds_reviewed(&self, ws: &str, ids: &[String]) -> Result<Vec<Review>> {
         let left: Vec<Review> = self
-            .kinds_review(ws)?
+            .reviews_open(ws)?
             .into_iter()
             .filter(|r| !ids.contains(&r.id))
             .collect();
         if left.len() != self.review_list(ws)?.len() {
             self.save_review(ws, &left)?;
         }
-        Ok(left)
+        Ok(reviews_shown(left))
     }
 }
 

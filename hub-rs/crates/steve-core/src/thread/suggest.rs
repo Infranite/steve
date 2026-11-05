@@ -3,7 +3,7 @@
 //! conversation (not in the inbox), never taken by YOLO, greyed out after 24 hours but still clickable.
 
 use super::offer::{Handled, ThreadItem, not_found};
-use super::research::{Inline, InlineJob, QUEUE_FULL};
+use super::research::{Inline, InlineJob};
 use super::{decide::Decision, lock, meta_of};
 use crate::Core;
 use crate::error::{CoreError, Result};
@@ -105,7 +105,10 @@ impl Core {
     /// of its own.
     pub fn suggest(&self, ws: &str, msg_id: &str, choice: &str) -> Result<Handled> {
         if !matches!(choice, "here" | "item" | "new") {
-            return Err(CoreError::Status(400, "参数不对：choice".into()));
+            return Err(CoreError::Status(
+                400,
+                steve_i18n::t!("core.error.invalid", fields = "choice"),
+            ));
         }
         let _one = lock(&self.0.thread.acting);
         let m = self
@@ -114,7 +117,10 @@ impl Core {
             .filter(|m| m.workspace_id == ws)
             .ok_or_else(not_found)?;
         let Some(card) = m.meta.get("suggest").filter(|s| s.is_object()).cloned() else {
-            return Err(CoreError::Status(400, "这条消息不是建议卡".into()));
+            return Err(CoreError::Status(
+                400,
+                steve_i18n::t!("core.message.not_suggestion"),
+            ));
         };
         if !matches!(card["state"].as_str(), Some("open" | "expired")) {
             let item = card["item"]
@@ -139,7 +145,7 @@ impl Core {
             .as_array()
             .and_then(|cs| cs.iter().find(|c| c["id"] == choice))
             .cloned()
-            .ok_or_else(|| CoreError::Status(400, "这张建议卡没有这个选项".into()))?;
+            .ok_or_else(|| CoreError::Status(400, steve_i18n::t!("core.message.no_choice")))?;
         let mut meta = meta_of(&m);
         meta["suggest"]["state"] = json!("chosen");
         meta["suggest"]["chosen"] = json!(choice);
@@ -164,7 +170,10 @@ impl Core {
                 space: m.space.clone(),
             };
             if !self.enqueue_inline(ws, job)? {
-                return Err(CoreError::Status(409, QUEUE_FULL.into()));
+                return Err(CoreError::Status(
+                    409,
+                    steve_i18n::t!("core.thread.queue_full"),
+                ));
             }
             self.store()
                 .message_patch_meta(msg_id, &Value::Object(meta))?;

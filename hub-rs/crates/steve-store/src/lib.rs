@@ -12,6 +12,8 @@
 //! The API is synchronous like better-sqlite3; calls take microseconds,
 //! async callers can run them inline or in `spawn_blocking` for the big reads.
 
+steve_i18n::init!();
+
 pub mod base;
 mod bus;
 pub mod db;

@@ -28,7 +28,7 @@ fn cerr(e: CoreError) -> BackendError {
             message: match e {
                 steve_modules::ApiError::Internal(m) => {
                     tracing::error!("module: {m}");
-                    "出了点问题，请稍后再试".into()
+                    steve_i18n::t!("hub.error.generic")
                 }
                 e => e.to_string(),
             },
@@ -62,11 +62,11 @@ fn from_json<T: DeserializeOwned>(v: Value) -> BResult<T> {
     serde_json::from_value(v).map_err(|e| BackendError::msg(e.to_string()))
 }
 
-/// Runs a synchronous core call on the blocking pool.
+/// Runs a synchronous core call on the blocking pool, in the request's language.
 async fn blocking<T: Send + 'static>(
     f: impl FnOnce() -> Result<T, CoreError> + Send + 'static,
 ) -> BResult<T> {
-    tokio::task::spawn_blocking(f)
+    tokio::task::spawn_blocking(steve_i18n::carry(f))
         .await
         .map_err(|e| BackendError::msg(format!("task failed: {e}")))?
         .map_err(cerr)
@@ -1064,9 +1064,9 @@ impl Domain for CoreDomain {
         } else if action == "cancel" {
             // If adapters were already quiesced, their groups must really be gone before reopen.
             if !self.acp.reopen() && (!self.acp.quiesce().await || !self.acp.reopen()) {
-                return Err(BackendError::msg(
-                    "智能体进程组尚未退出，维护状态保留，请重试解除",
-                ));
+                return Err(BackendError::msg(steve_i18n::t!(
+                    "hub.maintenance.agents_alive"
+                )));
             }
             store
                 .maintenance_set(false)
@@ -1432,7 +1432,7 @@ impl Domain for CoreDomain {
             .bots()
             .get(id)
             .map_err(|e| BackendError::msg(e.to_string()))?
-            .ok_or_else(|| BackendError::not_found("没有这个 Bot"))?;
+            .ok_or_else(|| BackendError::not_found(crate::api::Noun::Bot.missing()))?;
         b.prompt = bot
             .get("prompt")
             .and_then(Value::as_str)
@@ -1541,7 +1541,7 @@ impl Domain for CoreDomain {
     async fn reroute(&self, ws: &str, message: &str, to: &str) -> BResult<(Obj, bool)> {
         let to = steve_core::thread::RerouteTo::parse(to).ok_or_else(|| BackendError {
             status: 400,
-            message: "参数不对：to".into(),
+            message: steve_i18n::t!("hub.error.invalid", fields = "to"),
         })?;
         handled(self.core.reroute(ws, message, to).await.map_err(cerr)?)
     }

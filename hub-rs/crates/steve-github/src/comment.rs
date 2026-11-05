@@ -431,7 +431,7 @@ impl DecisionHandler for CommentDecisions {
 
     /// The comment may be out by now; there is nothing to take back.
     fn before_undo(&self, _tx: &Tx, _d: &Decision) -> ApiResult<()> {
-        Err(ApiError::rule("已经按你的选择处理了，不能撤销"))
+        Err(ApiError::rule(steve_i18n::t!("github.decision.no_undo")))
     }
 }
 

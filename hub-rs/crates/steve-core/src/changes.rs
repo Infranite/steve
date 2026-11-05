@@ -377,25 +377,199 @@ fn blank_bot(ws: &str, name: &str) -> Bot {
     }
 }
 
+/// A field's label as a card shows it, in the request's language. The Chinese labels of the fields are what the
+/// model reads; `full` is the label with its note (“模型（opus、sonnet…）”), else the name only. `fallback` is
+/// the model's label for a field without a key of its own.
+fn field_shown(kind: &str, key: &str, full: bool, fallback: &str) -> String {
+    let shown = match (kind, key) {
+        ("bot", "model") if full => Some(steve_i18n::t!("core.draft.bot.model_hint")),
+        ("bot", k) => bot_field_shown(k),
+        ("project", k) => project_field_shown(k),
+        ("settings", "item_prefix") if full => {
+            Some(steve_i18n::t!("core.draft.setting.item_prefix_hint"))
+        }
+        ("settings", "item_prefix") => Some(steve_i18n::t!("core.draft.setting.item_prefix")),
+        ("settings", k) => setting_label_shown(k),
+        ("models", k) => models_field_shown(k),
+        _ => None,
+    };
+    shown.unwrap_or_else(|| fallback.to_string())
+}
+
+fn bot_field_shown(key: &str) -> Option<String> {
+    Some(match key {
+        "name" => steve_i18n::t!("core.draft.bot.name"),
+        "role" => steve_i18n::t!("core.draft.bot.role"),
+        "persona" => steve_i18n::t!("core.draft.bot.persona"),
+        "proactive" => steve_i18n::t!("core.draft.bot.proactive"),
+        "rules" => steve_i18n::t!("core.draft.bot.rules"),
+        "reasoning_effort" => steve_i18n::t!("core.draft.bot.reasoning_effort"),
+        "accept_mode" => steve_i18n::t!("core.draft.bot.accept_mode"),
+        "model" => steve_i18n::t!("core.draft.bot.model"),
+        "perm_mode" => steve_i18n::t!("core.draft.bot.perm_mode"),
+        "default_project" => steve_i18n::t!("core.draft.bot.default_project"),
+        "enabled" => steve_i18n::t!("core.draft.bot.enabled"),
+        _ => return None,
+    })
+}
+
+fn project_field_shown(key: &str) -> Option<String> {
+    Some(match key {
+        "name" => steve_i18n::t!("core.draft.project.name"),
+        "description" => steve_i18n::t!("core.draft.project.description"),
+        "default_bot" => steve_i18n::t!("core.draft.project.default_bot"),
+        "worktree" => steve_i18n::t!("core.draft.project.worktree"),
+        "archived" => steve_i18n::t!("core.draft.project.archived"),
+        _ => return None,
+    })
+}
+
+/// A setting's name as the UI shows it, in the request's language.
+fn setting_label_shown(key: &str) -> Option<String> {
+    Some(match key {
+        "lang" => steve_i18n::t!("core.draft.setting.lang"),
+        "home" => steve_i18n::t!("core.draft.setting.home"),
+        "awayH" => steve_i18n::t!("core.draft.setting.awayH"),
+        "tz" => steve_i18n::t!("core.draft.setting.tz"),
+        "accDefault" => steve_i18n::t!("core.draft.setting.accDefault"),
+        "depsAfter" => steve_i18n::t!("core.draft.setting.depsAfter"),
+        "handoff" => steve_i18n::t!("core.draft.setting.handoff"),
+        "archDays" => steve_i18n::t!("core.draft.setting.archDays"),
+        "quiet" => steve_i18n::t!("core.draft.setting.quiet"),
+        "digestAt" => steve_i18n::t!("core.draft.setting.digestAt"),
+        "fontSize" => steve_i18n::t!("core.draft.setting.fontSize"),
+        "reduceMotion" => steve_i18n::t!("core.draft.setting.reduceMotion"),
+        "keepSess" => steve_i18n::t!("core.draft.setting.keepSess"),
+        "keepRaw" => steve_i18n::t!("core.draft.setting.keepRaw"),
+        "keepMail" => steve_i18n::t!("core.draft.setting.keepMail"),
+        _ => return None,
+    })
+}
+
+/// The `models` target's field names as a card lists them.
+fn models_field_shown(key: &str) -> Option<String> {
+    use crate::models::{HARNESSES, PURPOSES, purpose_label};
+    if let Some(h) = key.strip_prefix("agent.") {
+        let (_, name, _) = HARNESSES.iter().find(|(x, ..)| *x == h)?;
+        return Some(steve_i18n::t!(
+            "core.draft.models.agent_default_listed",
+            harness = name
+        ));
+    }
+    if let Some(p) = key.strip_suffix(".effort") {
+        return Some(steve_i18n::t!(
+            "core.draft.models.effort",
+            purpose = purpose_label(p)
+        ));
+    }
+    let p = key.strip_suffix(".harness").unwrap_or(key);
+    PURPOSES
+        .iter()
+        .any(|x| x.key == p)
+        .then(|| purpose_label(p))
+}
+
+/// A field's value as a card shows it, in the request's language: the fixed choices (and （空）) are
+/// translated; names, free text and model ids stay as they are. `s` is [`show`]'s output.
+fn value_shown(kind: &str, key: &str, s: String) -> String {
+    if s == "（空）" {
+        return steve_i18n::t!("core.draft.value.empty");
+    }
+    match (kind, key) {
+        ("bot", "default_project") | ("project", "default_bot") if s == "无" => {
+            steve_i18n::t!("core.draft.value.none")
+        }
+        ("bot", "proactive" | "reasoning_effort" | "accept_mode" | "perm_mode" | "enabled")
+        | ("project", "worktree" | "archived")
+        | ("settings", _) => choice_shown(s),
+        ("models", k) if k.ends_with(".harness") || k.ends_with(".effort") => choice_shown(s),
+        _ => s,
+    }
+}
+
+/// A fixed choice (a setting value, an enum label) in the request's language; anything else as it is.
+fn choice_shown(s: String) -> String {
+    let n = |suffix: &str| {
+        s.strip_suffix(suffix)
+            .filter(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+            .map(str::to_string)
+    };
+    if let Some(n) = n(" 天") {
+        return steve_i18n::t!("core.draft.value.days", n = n);
+    }
+    if let Some(n) = n(" 小时") {
+        return steve_i18n::t!("core.draft.value.hours", n = n);
+    }
+    match s.as_str() {
+        "（空）" => steve_i18n::t!("core.draft.value.empty"),
+        "默认" => steve_i18n::t!("core.draft.value.default"),
+        "无" => steve_i18n::t!("core.draft.value.none"),
+        "启用" => steve_i18n::t!("core.draft.value.enabled"),
+        "停用" => steve_i18n::t!("core.draft.value.disabled"),
+        "开" => steve_i18n::t!("core.draft.value.on"),
+        "关" => steve_i18n::t!("core.draft.value.off"),
+        "使用中" => steve_i18n::t!("core.draft.value.in_use"),
+        "已归档" => steve_i18n::t!("core.draft.value.archived"),
+        "只在必要时" => steve_i18n::t!("core.draft.value.pro_low"),
+        "适中" => steve_i18n::t!("core.draft.value.pro_mid"),
+        "积极" => steve_i18n::t!("core.draft.value.pro_high"),
+        "跟随全局" => steve_i18n::t!("core.draft.value.acc_inherit"),
+        "需要你验收" => steve_i18n::t!("core.draft.value.acc_manual"),
+        "自动验收" => steve_i18n::t!("core.draft.value.acc_auto"),
+        "只读：只出方案，不改文件" => steve_i18n::t!("core.draft.value.perm_plan"),
+        "每次改文件或运行命令都问你" => {
+            steve_i18n::t!("core.draft.value.perm_default")
+        }
+        "可以改项目目录里的文件，运行命令要问你" => {
+            steve_i18n::t!("core.draft.value.perm_accept_edits")
+        }
+        "可以改文件、运行命令；对外操作仍需你批准" => {
+            steve_i18n::t!("core.draft.value.perm_auto")
+        }
+        "跟随 Steve" => steve_i18n::t!("core.draft.value.follow"),
+        "对话" => steve_i18n::t!("core.draft.value.home_chat"),
+        "待处理" => steve_i18n::t!("core.draft.value.home_inbox"),
+        "事项" => steve_i18n::t!("core.draft.value.home_items"),
+        "自动开始" => steve_i18n::t!("core.draft.value.deps_auto"),
+        "提醒我开始" => steve_i18n::t!("core.draft.value.deps_remind"),
+        "关闭" => steve_i18n::t!("core.draft.value.closed"),
+        "不发" => steve_i18n::t!("core.draft.value.no_send"),
+        "标准" => steve_i18n::t!("core.draft.value.font_standard"),
+        "大" => steve_i18n::t!("core.draft.value.font_large"),
+        "永久" => steve_i18n::t!("core.draft.value.forever"),
+        "不汇报" => steve_i18n::t!("core.draft.value.no_report"),
+        "不自动归档" => steve_i18n::t!("core.draft.value.no_archive"),
+        "1 年" => steve_i18n::t!("core.draft.value.one_year"),
+        "最低" => steve_i18n::t!("core.draft.value.effort_minimal"),
+        "低" => steve_i18n::t!("core.draft.value.effort_low"),
+        "中" => steve_i18n::t!("core.draft.value.effort_medium"),
+        "高" => steve_i18n::t!("core.draft.value.effort_high"),
+        "很高" => steve_i18n::t!("core.draft.value.effort_xhigh"),
+        "最高" => steve_i18n::t!("core.draft.value.effort_max"),
+        _ => s,
+    }
+}
+
 fn new_bot_title(name: &str) -> String {
     if name.is_empty() {
-        "新建 Bot".into()
+        steve_i18n::t!("core.draft.title.new_bot")
     } else {
-        format!("新建 Bot · {name}")
+        steve_i18n::t!("core.draft.title.new_bot_named", name = name)
     }
 }
 
 /// The choice of a purpose that has no override.
 const FOLLOW: &str = "跟随 Steve";
 
-fn cat_title(cat: &str) -> &'static str {
+/// A settings category's name, in the request's language.
+fn cat_title(cat: &str) -> String {
     match cat {
-        "general" => "通用",
-        "items" => "事项与验收",
-        "notify" => "通知",
-        "look" => "外观",
-        "data" => "数据与隐私",
-        _ => "undefined",
+        "general" => steve_i18n::t!("core.settings_cat.general"),
+        "items" => steve_i18n::t!("core.settings_cat.items"),
+        "notify" => steve_i18n::t!("core.settings_cat.notify"),
+        "look" => steve_i18n::t!("core.settings_cat.look"),
+        "data" => steve_i18n::t!("core.settings_cat.data"),
+        _ => "undefined".into(),
     }
 }
 
@@ -489,18 +663,11 @@ fn model_fields(m: &crate::models::Models, ws: &str) -> Vec<FieldSpec> {
 fn model_patch(
     m: &crate::models::Models,
     ws: &str,
-    fs: &[FieldSpec],
     said: &[(String, Value)],
 ) -> (Vec<Change>, Map<String, Value>) {
     use crate::models::{HARNESSES, JUDGE_HARNESSES, PURPOSES, efforts, validate};
     let (mut changes, mut patch) = (vec![], Map::new());
     let get = |k: &str| said.iter().find(|(x, _)| x == k).map(|(_, v)| v);
-    let label = |k: &str| {
-        fs.iter()
-            .find(|f| f.key == k)
-            .map(|f| f.label.split('（').next().unwrap_or(&f.label).to_string())
-            .unwrap_or_default()
-    };
     for p in &PURPOSES {
         let stored = m.custom(ws, p.key);
         let cur = stored.clone().unwrap_or_default();
@@ -551,15 +718,15 @@ fn model_patch(
         };
         let Ok(v) = validate(&body) else { continue };
         let show_choice = |c: Option<&crate::models::Choice>| match c {
-            None => FOLLOW.to_string(),
-            Some(c) => {
-                let e = c.effort.as_deref().and_then(crate::models::effort_label);
-                format!(
-                    "{}{}",
-                    c.describe(),
-                    e.map(|e| format!(" · 推理{e}")).unwrap_or_default()
-                )
-            }
+            None => steve_i18n::t!("core.draft.value.follow"),
+            Some(c) => match c.effort.as_deref().and_then(crate::models::effort_shown) {
+                Some(e) => steve_i18n::t!(
+                    "core.draft.models.choice_effort",
+                    choice = c.describe_shown(),
+                    effort = e
+                ),
+                None => c.describe_shown(),
+            },
         };
         let to = (!follows).then(|| crate::models::Choice {
             harness: h.clone(),
@@ -567,7 +734,10 @@ fn model_patch(
             effort: effort.clone(),
         });
         changes.push(Change {
-            label: format!("{} · 由谁来做", label(&hk)),
+            label: steve_i18n::t!(
+                "core.draft.models.runner",
+                purpose = crate::models::purpose_label(p.key)
+            ),
             from: show_choice(stored.as_ref()),
             to: show_choice(to.as_ref()),
         });
@@ -585,10 +755,17 @@ fn model_patch(
         let Ok(v) = validate(&json!({"agents": {*h: to}})) else {
             continue;
         };
+        let shown = |s: &str| {
+            if s.is_empty() {
+                steve_i18n::t!("core.draft.value.default")
+            } else {
+                show(&json!(s))
+            }
+        };
         changes.push(Change {
-            label: format!("{name} 新会话默认模型"),
-            from: show(&json!(cur)).replace("（空）", "默认"),
-            to: show(&json!(to)).replace("（空）", "默认"),
+            label: steve_i18n::t!("core.draft.models.agent_default", harness = name),
+            from: shown(&cur),
+            to: shown(&to),
         });
         patch.extend(v);
     }
@@ -732,10 +909,12 @@ impl Core {
             .get(cat)
             .and_then(Value::as_array)
             .cloned()
-            .ok_or_else(|| msg("没有这类设置"))?;
+            .ok_or_else(|| msg(steve_i18n::t!("core.settings.no_category")))?;
         let mut cur = setting_defaults();
         cur.extend(db.settings_all(ws)?);
-        let w = db.workspace(ws)?.ok_or_else(|| msg("没有这个工作空间"))?;
+        let w = db
+            .workspace(ws)?
+            .ok_or_else(|| msg(steve_i18n::t!("core.space.not_found")))?;
         let mut fs: Vec<FieldSpec> = specs
             .iter()
             .map(|s| {
@@ -776,9 +955,14 @@ impl Core {
     pub fn describe(&self, ws: &str, target: &Target) -> Result<(String, String, Vec<Current>)> {
         let db = self.store();
         let tid = target.id.clone().unwrap_or_default();
-        let listed = |fs: &[FieldSpec]| -> Vec<Current> {
+        let listed = |kind: &str, fs: &[FieldSpec]| -> Vec<Current> {
             fs.iter()
-                .map(|f| (short_label(&f.label), show(&f.current)))
+                .map(|f| {
+                    (
+                        field_shown(kind, &f.key, false, &short_label(&f.label)),
+                        value_shown(kind, &f.key, show(&f.current)),
+                    )
+                })
                 .collect()
         };
         Ok(match target.kind.as_str() {
@@ -790,28 +974,28 @@ impl Core {
             "bot" => {
                 let b = match db.bot(&tid)? {
                     Some(b) if db.bot_in_workspace(&b.id, ws)? => b,
-                    _ => return Err(msg("没有这个 Bot")),
+                    _ => return Err(msg(steve_i18n::t!("core.bot.not_found"))),
                 };
                 let fs: Vec<FieldSpec> = bot_fields(&b, &db.projects(ws)?)
                     .into_iter()
                     .map(|f| f.spec)
                     .collect();
                 (
-                    format!("{} 的设置", b.display()),
+                    steve_i18n::t!("core.draft.title.bot", bot = b.display()),
                     format!("#/bots/{}", b.id),
-                    listed(&fs),
+                    listed("bot", &fs),
                 )
             }
             "project" => {
                 let p = db
                     .project(Some(&tid))?
                     .filter(|p| p.workspace_id == ws)
-                    .ok_or_else(|| msg("没有这个项目"))?;
+                    .ok_or_else(|| msg(steve_i18n::t!("core.project.not_found")))?;
                 let fs = project_fields(&p, &db.bots(ws)?);
                 (
-                    format!("项目 {}", p.name),
+                    steve_i18n::t!("core.draft.title.project", name = p.name),
                     format!("#/projects/{}", p.id),
-                    listed(&fs),
+                    listed("project", &fs),
                 )
             }
             "settings" => {
@@ -821,19 +1005,23 @@ impl Core {
                     .iter()
                     .map(|f| {
                         (
-                            short_label(&f.label),
-                            show(&setting_shown(&specs, &f.key, &f.current)),
+                            field_shown("settings", &f.key, false, &short_label(&f.label)),
+                            value_shown(
+                                "settings",
+                                &f.key,
+                                show(&setting_shown(&specs, &f.key, &f.current)),
+                            ),
                         )
                     })
                     .collect();
                 (
-                    format!("设置 · {}", cat_title(&cat)),
+                    steve_i18n::t!("core.draft.title.settings", cat = cat_title(&cat)),
                     format!("#/settings/{cat}"),
                     cur,
                 )
             }
             "tags" => (
-                "标签".into(),
+                steve_i18n::t!("core.draft.title.tags"),
                 "#/settings/tags".into(),
                 db.tags(ws)?
                     .into_iter()
@@ -848,15 +1036,17 @@ impl Core {
                     .collect(),
             ),
             "models" => (
-                "设置 · 模型".into(),
+                steve_i18n::t!("core.draft.title.models"),
                 "#/settings/models".into(),
-                model_fields(self.models(), ws)
-                    .iter()
-                    .filter(|f| !f.current.as_str().is_some_and(str::is_empty))
-                    .map(|f| (short_label(&f.label), show(&f.current)))
-                    .collect(),
+                listed(
+                    "models",
+                    &model_fields(self.models(), ws)
+                        .into_iter()
+                        .filter(|f| !f.current.as_str().is_some_and(str::is_empty))
+                        .collect::<Vec<_>>(),
+                ),
             ),
-            _ => return Err(msg("没有这项设置")),
+            _ => return Err(msg(steve_i18n::t!("core.settings.not_found"))),
         })
     }
 
@@ -884,7 +1074,9 @@ impl Core {
                 let fresh = new_bot_name(&id);
                 let b = match fresh {
                     Some(n) => blank_bot(ws, n),
-                    None => db.bot(&id)?.ok_or_else(|| msg("没有这个 Bot"))?,
+                    None => db
+                        .bot(&id)?
+                        .ok_or_else(|| msg(steve_i18n::t!("core.bot.not_found")))?,
                 };
                 let mut fs = bot_fields(&b, &db.projects(ws)?);
                 /* a new bot starts enabled */
@@ -908,13 +1100,13 @@ impl Core {
                     }
                     let to = f.dec.as_ref().map(|d| d(&v)).unwrap_or_else(|| v.clone());
                     changes.push(Change {
-                        label: f.spec.label.clone(),
+                        label: field_shown("bot", &k, true, &f.spec.label),
                         from: if fresh.is_some() {
                             "—".into()
                         } else {
-                            show(&f.spec.current)
+                            value_shown("bot", &k, show(&f.spec.current))
                         },
-                        to: show(&to),
+                        to: value_shown("bot", &k, show(&to)),
                     });
                     patch.insert(k, v);
                 }
@@ -927,16 +1119,16 @@ impl Core {
                         .trim()
                         .to_string();
                     if name.is_empty() {
-                        return Err(msg("新 Bot 要有个名字"));
+                        return Err(msg(steve_i18n::t!("core.bot.new_needs_name")));
                     }
                     if db.bots(ws)?.iter().any(|x| x.name == name) {
-                        return Err(msg(format!("已经有叫「{name}」的 Bot，改它就行")));
+                        return Err(msg(steve_i18n::t!("core.bot.name_taken", name = name)));
                     }
                     if !patch.contains_key("name") {
                         changes.insert(
                             0,
                             Change {
-                                label: "名字".into(),
+                                label: field_shown("bot", "name", true, "名字"),
                                 from: "—".into(),
                                 to: name.clone(),
                             },
@@ -947,7 +1139,9 @@ impl Core {
             }
             "project" => {
                 let id = target.id.clone().unwrap_or_default();
-                let p = db.project(Some(&id))?.ok_or_else(|| msg("没有这个项目"))?;
+                let p = db
+                    .project(Some(&id))?
+                    .ok_or_else(|| msg(steve_i18n::t!("core.project.not_found")))?;
                 let bs = db.bots(ws)?;
                 let fs = project_fields(&p, &bs);
                 let pv = serde_json::to_value(&p)?;
@@ -975,9 +1169,9 @@ impl Core {
                         continue;
                     }
                     changes.push(Change {
-                        label: short_label(&f.label),
-                        from: show(&f.current),
-                        to: show(&value),
+                        label: field_shown("project", &k, false, &short_label(&f.label)),
+                        from: value_shown("project", &k, show(&f.current)),
+                        to: value_shown("project", &k, show(&value)),
                     });
                     patch.insert(k, v);
                 }
@@ -1008,9 +1202,17 @@ impl Core {
                         continue;
                     }
                     changes.push(Change {
-                        label: plain_label(&f.label),
-                        from: show(&setting_shown(&specs, &k, &f.current)),
-                        to: show(&setting_shown(&specs, &k, &json!(v))),
+                        label: field_shown("settings", &k, true, &plain_label(&f.label)),
+                        from: value_shown(
+                            "settings",
+                            &k,
+                            show(&setting_shown(&specs, &k, &f.current)),
+                        ),
+                        to: value_shown(
+                            "settings",
+                            &k,
+                            show(&setting_shown(&specs, &k, &json!(v))),
+                        ),
                     });
                     patch.insert(k, json!(v));
                 }
@@ -1019,7 +1221,7 @@ impl Core {
             "models" => {
                 let fs = model_fields(self.models(), ws);
                 let said = draft_fields(gw, "Steve settings · models", &fs, request).await?;
-                (changes, patch) = model_patch(self.models(), ws, &fs, &said);
+                (changes, patch) = model_patch(self.models(), ws, &said);
             }
             _ => {}
         }
@@ -1092,12 +1294,13 @@ impl Core {
             .collect();
         for t in &create {
             changes.push(Change {
-                label: format!("新建标签 · {}", jstr(&t["cat"])),
+                label: steve_i18n::t!("core.draft.tag.create", cat = jstr(&t["cat"])),
                 from: "—".into(),
-                to: format!(
-                    "{}：{}",
-                    jstr(&t["name"]),
-                    t.get("description")
+                to: steve_i18n::t!(
+                    "core.draft.tag.create_to",
+                    name = jstr(&t["name"]),
+                    description = t
+                        .get("description")
                         .map(jstr)
                         .unwrap_or_else(|| "undefined".into())
                 ),
@@ -1117,7 +1320,7 @@ impl Core {
                 .filter(|n| *n != t.name && !ts.iter().any(|x| x.name == *n));
             if let Some(n) = new_name {
                 changes.push(Change {
-                    label: format!("改名 · {}", t.name),
+                    label: steve_i18n::t!("core.draft.tag.rename", name = t.name),
                     from: t.name.clone(),
                     to: n.clone(),
                 });
@@ -1129,7 +1332,7 @@ impl Core {
                 .filter(|c| TAG_CATS.contains(c) && *c != t.cat);
             if let Some(c) = cat {
                 changes.push(Change {
-                    label: format!("分类 · {}", t.name),
+                    label: steve_i18n::t!("core.draft.tag.cat", name = t.name),
                     from: t.cat.clone(),
                     to: c.into(),
                 });
@@ -1142,9 +1345,9 @@ impl Core {
                 .filter(|d| *d != t.description);
             if let Some(d) = d {
                 changes.push(Change {
-                    label: format!("描述 · {}", t.name),
-                    from: show(&json!(t.description)),
-                    to: show(&json!(d)),
+                    label: steve_i18n::t!("core.draft.tag.description", name = t.name),
+                    from: value_shown("tags", "description", show(&json!(t.description))),
+                    to: value_shown("tags", "description", show(&json!(d))),
                 });
                 keep.insert("description".into(), json!(d));
             }
@@ -1161,14 +1364,14 @@ impl Core {
             let used = db.tag_used(&t.id)?;
             if used > 0 {
                 changes.push(Change {
-                    label: format!("删除 · {}", t.name),
+                    label: steve_i18n::t!("core.draft.tag.remove_named", name = t.name),
                     from: t.name.clone(),
-                    to: format!("（没有删：还有 {used} 处在用，可以在标签页合并到别的标签）"),
+                    to: steve_i18n::t!("core.draft.tag.in_use", used = used),
                 });
                 continue;
             }
             changes.push(Change {
-                label: "删除标签".into(),
+                label: steve_i18n::t!("core.draft.tag.remove"),
                 from: t.name.clone(),
                 to: "—".into(),
             });
@@ -1364,7 +1567,7 @@ impl Core {
         ask: bool,
     ) -> Result<Drafted> {
         let (Some(m), Some(me)) = (self.modules(), who) else {
-            return Err(msg("没有这项设置"));
+            return Err(msg(steve_i18n::t!("core.settings.not_found")));
         };
         let caller = steve_modules::Caller {
             ws: ws.into(),
@@ -1473,7 +1676,7 @@ impl Core {
         let mut t = self.tx();
         let p = match t.st.drafts.get(id) {
             Some(p) if p.ws == ws => p.clone(),
-            _ => return Err(msg("这份草稿已经失效，请重新说一次")),
+            _ => return Err(msg(steve_i18n::t!("core.draft.stale"))),
         };
         t.st.drafts.remove(id);
         let db = t.db();
@@ -1487,7 +1690,10 @@ impl Core {
                 before.insert("created".into(), json!(b.id));
             }
             "bot" => {
-                let b = serde_json::to_value(db.bot(&tid)?.ok_or_else(|| msg("没有这个 Bot"))?)?;
+                let b = serde_json::to_value(
+                    db.bot(&tid)?
+                        .ok_or_else(|| msg(steve_i18n::t!("core.bot.not_found")))?,
+                )?;
                 for k in p.patch.keys() {
                     before.insert(k.clone(), b.get(k).cloned().unwrap_or(Value::Null));
                 }
@@ -1495,7 +1701,8 @@ impl Core {
             }
             "project" => {
                 let x = serde_json::to_value(
-                    db.project(Some(&tid))?.ok_or_else(|| msg("没有这个项目"))?,
+                    db.project(Some(&tid))?
+                        .ok_or_else(|| msg(steve_i18n::t!("core.project.not_found")))?,
                 )?;
                 for k in p.patch.keys() {
                     before.insert(k.clone(), x.get(k).cloned().unwrap_or(Value::Null));
@@ -1516,7 +1723,7 @@ impl Core {
                 if let Some(pre) = prefix.filter(truthy) {
                     let w = db
                         .workspace(&p.ws)?
-                        .ok_or_else(|| msg("没有这个工作空间"))?;
+                        .ok_or_else(|| msg(steve_i18n::t!("core.space.not_found")))?;
                     before.insert("item_prefix".into(), json!(w.item_prefix));
                     db.workspace_patch(&p.ws, patch![item_prefix: jstr(&pre)])?;
                 }
@@ -1628,7 +1835,7 @@ impl Core {
         let mut t = self.tx();
         let a = match t.st.applied.get(id) {
             Some(a) if a.ws == ws => a.clone(),
-            _ => return Err(msg("这次改动已经不能撤销了")),
+            _ => return Err(msg(steve_i18n::t!("core.draft.not_undoable"))),
         };
         t.st.applied.remove(id);
         let tid = a.target.id.clone().unwrap_or_default();

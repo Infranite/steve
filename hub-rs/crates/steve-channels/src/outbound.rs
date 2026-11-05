@@ -1800,9 +1800,11 @@ impl Outbox {
         let a = ch
             .adapter(&adapter)
             .filter(|a| a.features().recall)
-            .ok_or_else(|| ApiError::rule(ERR_NO_RECALL))?;
+            .ok_or_else(|| ApiError::rule(steve_i18n::t!("channels.error.no_recall")))?;
         if row.status != "sent" {
-            return Err(ApiError::conflict("这条消息没有发出，不能撤回"));
+            return Err(ApiError::conflict(steve_i18n::t!(
+                "channels.error.not_sent"
+            )));
         }
         let ext: Option<String> = ch.store().reader(|c| {
             c.query_row(
@@ -1812,14 +1814,15 @@ impl Outbox {
             )
             .map_err(steve_store::StoreError::from)
         })?;
-        let ext = ext.ok_or_else(|| ApiError::conflict("这条消息没有发出，不能撤回"))?;
+        let ext =
+            ext.ok_or_else(|| ApiError::conflict(steve_i18n::t!("channels.error.not_sent")))?;
         let cx = ch
             .connections()
             .cx_for(ws, &space.connection_id, None)
             .map_err(|e| ApiError::rule(e.to_string()))?;
-        a.recall(&cx, &ext)
-            .await
-            .map_err(|e| ApiError::rule(format!("没有撤回：{e}")))?;
+        a.recall(&cx, &ext).await.map_err(|e| {
+            ApiError::rule(steve_i18n::t!("channels.error.recall_failed", error = e))
+        })?;
         ch.store().transaction(|tx| -> ChannelResult<()> {
             tx.execute(
                 "UPDATE chan_messages SET status = 'recalled' WHERE id = ?",
@@ -1951,7 +1954,7 @@ impl MessageDecisions {
         let now = self.0.now();
         let row = own_out(tx, cx.ws, &d.subject_id)?;
         if row.status != "draft" || row.decision_id.as_deref() != Some(d.id.as_str()) {
-            return Err(ApiError::conflict(MSG_HANDLED));
+            return Err(ApiError::conflict(steve_i18n::t!("channels.error.handled")));
         }
         let mut result = choice_result(cx);
         match cx.choice {
@@ -1967,7 +1970,7 @@ impl MessageDecisions {
                     row.text.clone()
                 };
                 if text.trim().is_empty() {
-                    return Err(ApiError::rule("要先写好回复的内容"));
+                    return Err(ApiError::rule(steve_i18n::t!("channels.error.reply_empty")));
                 }
                 let send_at = now + self.0.delay();
                 tx.execute(
@@ -2012,7 +2015,7 @@ impl MessageDecisions {
         let now = self.0.now();
         let row = own_out(tx, cx.ws, &d.subject_id)?;
         if row.decision_id.as_deref() != Some(d.id.as_str()) {
-            return Err(ApiError::conflict(MSG_HANDLED));
+            return Err(ApiError::conflict(steve_i18n::t!("channels.error.handled")));
         }
         let mut result = choice_result(cx);
         match (cx.choice, row.status.as_str()) {
@@ -2049,7 +2052,7 @@ impl MessageDecisions {
             }
             // a blocked message stays blocked; “discard” only closes the card
             ("discard", "blocked") => {}
-            _ => return Err(ApiError::conflict(MSG_HANDLED)),
+            _ => return Err(ApiError::conflict(steve_i18n::t!("channels.error.handled"))),
         }
         base::audit(
             tx,
@@ -2093,7 +2096,9 @@ impl DecisionHandler for MessageDecisions {
             "approve" => self.approve(tx, cx, d),
             "fail" => self.failed(tx, cx, d),
             "ask" => self.handoff(tx, cx, d),
-            _ => Err(ApiError::rule("不认识这种决定")),
+            _ => Err(ApiError::rule(steve_i18n::t!(
+                "channels.error.unknown_decision"
+            ))),
         }
     }
 
@@ -2151,7 +2156,11 @@ impl DecisionHandler for MessageDecisions {
                 set_status(tx, &row.id, &[DISCARDED], "failed")?;
             }
             ("fail", "discard") if row.status == "blocked" => {}
-            _ => return Err(ApiError::conflict(MSG_ALREADY_SENT)),
+            _ => {
+                return Err(ApiError::conflict(steve_i18n::t!(
+                    "channels.error.already_sent"
+                )));
+            }
         }
         base::audit(
             tx,

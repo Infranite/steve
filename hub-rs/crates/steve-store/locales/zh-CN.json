@@ -1,0 +1,20 @@
+{
+  "store.list_sep": "、",
+  "store.kinds.missing": "事项必须有一个分类标签（%{names} 选一个）",
+  "store.kinds.several": "事项只能有一个分类标签，现在有 %{tags}；换分类请直接选新的",
+  "store.kinds.desc.bug": "修复错误、故障或不符合预期的行为",
+  "store.kinds.desc.feat": "新增能力、交互或功能改进",
+  "store.kinds.desc.doc": "文档、方案、说明的编写与更新",
+  "store.kinds.desc.refactor": "不改变外部行为的代码重构",
+  "store.kinds.desc.ops": "部署、升级、运维与环境配置",
+  "store.kinds.desc.chore": "依赖维护、工具配置等杂项",
+  "store.tag.not_a_kind": "“%{cat}”只放 %{names} 六个分类标签；新标签请选领域、主题等类别",
+  "store.tag.kind_rename": "分类标签不能改名",
+  "store.tag.kind_recategorize": "分类标签不能改类别",
+  "store.tag.kind_name": "%{name} 是分类标签的名字",
+  "store.tag.kind_delete": "分类标签不能删除",
+  "store.tag.kind_merge": "分类标签不能合并",
+  "store.item.end_by_lifecycle": "事项的结束只能由生命周期提交（%{status}）",
+  "store.item.closed": "这个事项已经结束了，需要时先新建周期",
+  "store.show.empty": "（空）"
+}

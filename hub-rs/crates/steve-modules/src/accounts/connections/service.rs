@@ -336,7 +336,11 @@ fn perr(e: ProviderError) -> VaultError {
 }
 
 fn not_configured(spec_name: &str) -> VaultError {
-    ApiError::rule(format!("还没有配置 {spec_name} 的 OAuth 应用")).into()
+    ApiError::rule(steve_i18n::t!(
+        "modules.connections.oauth_not_configured",
+        provider = spec_name
+    ))
+    .into()
 }
 
 fn merge(into: &mut Value, from: &Value) {
@@ -475,7 +479,7 @@ impl Connections {
         f: impl FnOnce(&Connections) -> VaultResult<R> + Send + 'static,
     ) -> VaultResult<R> {
         let c = self.clone();
-        tokio::task::spawn_blocking(move || f(&c))
+        tokio::task::spawn_blocking(steve_i18n::carry(move || f(&c)))
             .await
             .map_err(|e| VaultError::Api(ApiError::Internal(format!("task failed: {e}"))))?
     }
@@ -721,7 +725,11 @@ impl Connections {
                 tracing::info!(adapter, "connection verify failed");
                 self.forget_tokens(&cx.id);
                 self.destroy_items(&who.ws, &who.me, vec![item]).await;
-                return Err(ApiError::rule(format!("验证没有通过：{e}")).into());
+                return Err(ApiError::rule(steve_i18n::t!(
+                    "modules.connections.verify_failed",
+                    error = e
+                ))
+                .into());
             }
         };
         let (w, it, pid, cid) = (who.clone(), item.clone(), p.clone(), cx.id.clone());
@@ -846,7 +854,11 @@ impl Connections {
             Err(e) => {
                 tracing::info!(adapter, "connection verify failed (credential kept)");
                 self.forget_tokens(&cx.id);
-                return Err(ApiError::rule(format!("验证没有通过：{e}")).into());
+                return Err(ApiError::rule(steve_i18n::t!(
+                    "modules.connections.verify_failed",
+                    error = e
+                ))
+                .into());
             }
         };
         let (w, it, pid, cid) = (who.clone(), item.to_string(), p.clone(), cx.id.clone());
@@ -1005,8 +1017,9 @@ impl Connections {
         let ws = viewer.ws.as_str();
         let now = self.now();
         let system = own_system(tx, ws, p.system())?;
-        let h = normalize(&system, &u.info.handle)
-            .ok_or_else(|| ApiError::rule("验证没有通过：没有拿到账号"))?;
+        let h = normalize(&system, &u.info.handle).ok_or_else(|| {
+            ApiError::rule(steve_i18n::t!("modules.connections.verify_no_account"))
+        })?;
         let known = arepo::by_handle(tx, ws, &system.family, &h.handle)?;
         let owner = match &u.info.owner {
             Owner::Me => people::me_of(tx, ws, actor)?,
@@ -1077,14 +1090,16 @@ impl Connections {
             && let Some(c) = &existing
             && c.created_by != actor
         {
-            return Err(ApiError::conflict("这个账号已经由另一位成员接入，没有替换").into());
+            return Err(
+                ApiError::conflict(steve_i18n::t!("modules.connections.other_member")).into(),
+            );
         }
         if let Some(r) = &u.reauth_of
             && existing.as_ref().is_none_or(|c| &c.id != r)
         {
-            return Err(ApiError::rule(format!(
-                "这次授权的是另一个账号（{}），请用原来的账号重新授权",
-                h.display
+            return Err(ApiError::rule(steve_i18n::t!(
+                "modules.connections.other_account",
+                account = h.display
             ))
             .into());
         }
@@ -1114,17 +1129,18 @@ impl Connections {
         };
         let (done, old) = match existing {
             Some(c) if u.fresh_only => {
-                return Err(ApiError::conflict(format!(
-                    "这个应用已经接入了（连接 {}），没有替换它",
-                    c.id
+                return Err(ApiError::conflict(steve_i18n::t!(
+                    "modules.connections.app_connected",
+                    id = c.id
                 ))
                 .into());
             }
             Some(mut c) => {
                 if c.adapter != p.id() {
-                    return Err(ApiError::conflict(format!(
-                        "这个账号已经通过「{}」接入了",
-                        self.provider(&c.adapter)
+                    return Err(ApiError::conflict(steve_i18n::t!(
+                        "modules.connections.connected_via",
+                        adapter = self
+                            .provider(&c.adapter)
                             .map(|x| x.name().to_string())
                             .unwrap_or(c.adapter.clone())
                     ))
@@ -1301,29 +1317,31 @@ impl Connections {
         code: Option<&str>,
         error: Option<&str>,
     ) -> Result<String, String> {
-        const STALE: &str = "授权链接已经失效，请重新接入";
+        let stale = || steve_i18n::t!("modules.connections.callback.stale");
         let flow = state
             .and_then(|s| self.0.flows.take(self.now(), s))
-            .ok_or_else(|| STALE.to_string())?;
+            .ok_or_else(stale)?;
         let who = who.ok_or_else(|| "请先登录 Steve，再重新接入".to_string())?;
         if who.ws != flow.ws || who.me != flow.user {
-            return Err(STALE.into());
+            return Err(stale());
         }
-        let p = self
-            .provider(&flow.adapter)
-            .ok_or_else(|| STALE.to_string())?;
-        let spec = p.oauth().cloned().ok_or_else(|| STALE.to_string())?;
+        let p = self.provider(&flow.adapter).ok_or_else(stale)?;
+        let spec = p.oauth().cloned().ok_or_else(stale)?;
         let spec = with_extra_scopes(spec, &flow.config);
         if let Some(e) = error {
             return Err(if e == "access_denied" {
-                format!("你在 {} 那边取消了授权", spec.provider_name)
+                steve_i18n::t!(
+                    "modules.connections.callback.denied",
+                    provider = spec.provider_name
+                )
             } else {
-                format!("授权没有完成（{}）", e.chars().take(60).collect::<String>())
+                steve_i18n::t!(
+                    "modules.connections.callback.failed",
+                    error = e.chars().take(60).collect::<String>()
+                )
             });
         }
-        let code = code
-            .filter(|c| !c.is_empty())
-            .ok_or_else(|| STALE.to_string())?;
+        let code = code.filter(|c| !c.is_empty()).ok_or_else(stale)?;
         let client = p
             .oauth_client(&StartCx {
                 conns: self,
@@ -1332,7 +1350,12 @@ impl Connections {
             })
             .await
             .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("还没有配置 {} 的 OAuth 应用", spec.provider_name))?;
+            .ok_or_else(|| {
+                steve_i18n::t!(
+                    "modules.connections.oauth_not_configured",
+                    provider = spec.provider_name
+                )
+            })?;
         let set = oauth::exchange_code(
             self.http(),
             &spec,
@@ -1342,7 +1365,7 @@ impl Connections {
             &flow.verifier,
         )
         .await
-        .map_err(|e| format!("换取令牌失败：{e}"))?;
+        .map_err(|e| steve_i18n::t!("modules.connections.callback.exchange_failed", error = e))?;
         let scopes = scopes_of(&set, &spec.scopes);
         let (fields, _, _) = token_fields(&set, None, None, self.now());
         let done = self
@@ -1375,7 +1398,11 @@ impl Connections {
         let spec = match (p.auth(), p.oauth()) {
             (AuthKind::OAuth, Some(s)) if s.device_url.is_some() => s.clone(),
             (AuthKind::OAuth, Some(s)) => {
-                return Err(ApiError::rule(format!("{} 不支持设备码登录", s.provider_name)).into());
+                return Err(ApiError::rule(steve_i18n::t!(
+                    "modules.connections.no_device_flow",
+                    provider = s.provider_name
+                ))
+                .into());
             }
             _ => return Err(ApiError::invalid("adapter").into()),
         };
@@ -1548,7 +1575,7 @@ impl Connections {
         let r = self.0.m.store.reader(|c| self.own(c, &viewer, id))?;
         let p = self.provider_or_404(&r.adapter)?;
         if !matches!(p.auth(), AuthKind::Credential | AuthKind::Managed) {
-            return Err(ApiError::rule("这个连接要重新授权，不能直接填凭据").into());
+            return Err(ApiError::rule(steve_i18n::t!("modules.connections.needs_reauth")).into());
         }
         let mut config = r.config.clone();
         let secrets = Self::split_fields(p.as_ref(), fields, &mut config)?;
@@ -1621,7 +1648,10 @@ impl Connections {
             match paused {
                 Some(true) if r.status != "paused" => {
                     if r.status == "revoked" {
-                        return Err(ApiError::conflict("这个连接已经断开了").into());
+                        return Err(ApiError::conflict(steve_i18n::t!(
+                            "modules.connections.revoked"
+                        ))
+                        .into());
                     }
                     r.status = "paused".into();
                 }

@@ -54,11 +54,11 @@ pub fn routes() -> Router<Modules> {
 }
 
 /// Schedules are edited on their own page (their graph is generated from the form).
-const SCHEDULE_HERE: &str = "定时任务请在定时任务页修改";
-
 fn not_schedule(f: &FlowRow) -> ApiResult<()> {
     if f.kind == "schedule" {
-        return Err(ApiError::rule(SCHEDULE_HERE));
+        return Err(ApiError::rule(steve_i18n::t!(
+            "flow.draft.schedule_elsewhere"
+        )));
     }
     Ok(())
 }
@@ -72,9 +72,9 @@ pub fn check_graph(c: &Connection, cx: &FlowCx, ws: &str, v: &Value) -> ApiResul
             && let Some(id) = n.config["flow_id"].as_str()
             && flows::own(c, ws, id).is_err()
         {
-            return Err(ApiError::rule(format!(
-                "节点「{}」：没有这个流程",
-                n.name()
+            return Err(ApiError::rule(steve_i18n::t!(
+                "flow.graph.no_such_flow",
+                node = n.name()
             )));
         }
         // `bot` of actions, `bot_id` of `bot` nodes
@@ -89,9 +89,9 @@ pub fn check_graph(c: &Connection, cx: &FlowCx, ws: &str, v: &Value) -> ApiResul
                 |r| r.get(0),
             )?;
             if !ok {
-                return Err(ApiError::rule(format!(
-                    "节点「{}」：没有这个 Bot",
-                    n.name()
+                return Err(ApiError::rule(steve_i18n::t!(
+                    "flow.graph.no_such_bot",
+                    node = n.name()
                 )));
             }
         }
@@ -498,7 +498,7 @@ async fn run_now(
         .and_then(|t| t.config["source"].as_str())
         .unwrap_or("");
     if source != "manual" && source != "time" {
-        return Err(ApiError::rule("这条流程由事件触发，不能手动运行"));
+        return Err(ApiError::rule(steve_i18n::t!("flow.run.not_manual")));
     }
     let now = cx.now();
     let run = cx.store().transaction(|tx| {
@@ -581,7 +581,7 @@ async fn cancel(Extension(cx): Cx, who: Caller, Path(id): Path<String>) -> ApiRe
             .filter(|r| r.workspace_id == who.ws)
             .ok_or_else(|| ApiError::not_found("运行"))?;
         if !engine::cancel(tx, &r, now)? {
-            return Err(ApiError::conflict("这次运行已经结束了"));
+            return Err(ApiError::conflict(steve_i18n::t!("flow.run.already_ended")));
         }
         steve_store::base::audit(tx, &who.ws, &who.me, "run.cancel", &id, &json!({}))?;
         Ok(r.event_id.filter(|_| !r.dry_run))

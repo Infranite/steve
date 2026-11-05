@@ -78,8 +78,14 @@ pub const FAMILIES: [&str; 13] = [
     "GLM",
     "Qwen",
     "MiniMax",
-    "其他",
+    OTHER,
 ];
+
+/// The catch-all family. The cached list keeps the zh-CN words; [`with_usage`] shows them in the request's language.
+const OTHER: &str = "其他";
+/// Where a list came from, when it isn't the CLI's own (`codex debug models`).
+const BUILTIN: &str = "内置列表";
+const CLAUDE_PICKER: &str = "Claude Code 的模型选择器（~/.claude/settings.json）";
 
 /// `kiro/claude-opus-5-5` → (`kiro`, `claude-opus-5-5`); ids without a known route prefix as they are.
 fn split_via(id: &str) -> (Option<&str>, &str) {
@@ -113,7 +119,7 @@ pub fn family(base: &str) -> &'static str {
     ]
     .iter()
     .find(|(p, _)| b.starts_with(p))
-    .map_or("其他", |(_, f)| f)
+    .map_or(OTHER, |(_, f)| f)
 }
 
 /// The one key of Claude Code's settings this module reads. Every other key (`apiKeyHelper`, `env`, …)
@@ -254,7 +260,7 @@ impl Catalog {
                 Some(m) => (m, "codex debug models"),
                 None => (
                     CODEX_MODELS.iter().map(|m| Entry::new(m, None)).collect(),
-                    "内置列表",
+                    BUILTIN,
                 ),
             };
             (
@@ -269,10 +275,10 @@ impl Catalog {
                 .ok()
                 .flatten();
             let (models, source) = match picked {
-                Some(m) => (m, "Claude Code 的模型选择器（~/.claude/settings.json）"),
+                Some(m) => (m, CLAUDE_PICKER),
                 None => (
                     CLAUDE_MODELS.iter().map(|m| Entry::new(m, None)).collect(),
-                    "内置列表",
+                    BUILTIN,
                 ),
             };
             (models, source, self.claude_default.clone())
@@ -327,8 +333,36 @@ impl Catalog {
 }
 
 /// Adds what the statistics saw (`used`: model → `{calls, ok_at, failed_at}`) to a list: each listed
-/// model gets its `used`, and a model used this week that the list lacks is appended with a note.
-pub fn with_usage(mut list: Value, used: &Value) -> Value {
+/// model gets its `used`, and a model used this week that the list lacks is appended with a note. The
+/// list's own words (source, the catch-all family) come out in the request's language.
+pub fn with_usage(list: Value, used: &Value) -> Value {
+    shown(add_usage(list, used))
+}
+
+/// The source and the catch-all family in the request's language.
+fn shown(mut list: Value) -> Value {
+    let other = || steve_i18n::t!("hub.models.family_other");
+    match list["source"].as_str() {
+        Some(BUILTIN) => list["source"] = json!(steve_i18n::t!("hub.models.source_builtin")),
+        Some(CLAUDE_PICKER) => {
+            list["source"] = json!(steve_i18n::t!("hub.models.source_claude_picker"))
+        }
+        _ => {}
+    }
+    for f in list["families"].as_array_mut().into_iter().flatten() {
+        if f == OTHER {
+            *f = json!(other());
+        }
+    }
+    for m in list["models"].as_array_mut().into_iter().flatten() {
+        if m["family"] == OTHER {
+            m["family"] = json!(other());
+        }
+    }
+    list
+}
+
+fn add_usage(mut list: Value, used: &Value) -> Value {
     let Some(used) = used.as_object() else {
         return list;
     };
@@ -343,7 +377,7 @@ pub fn with_usage(mut list: Value, used: &Value) -> Value {
     for (id, u) in used {
         if !models.iter().any(|m| m["id"] == *id) && steve_core::models::valid_model(id) {
             let mut e = Entry::new(id, None);
-            e.note = Some("最近用过，不在列表里".into());
+            e.note = Some(steve_i18n::t!("hub.models.recent_unlisted"));
             let mut v = e.json();
             v["used"] = u.clone();
             models.push(v);

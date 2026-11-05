@@ -115,6 +115,27 @@ const BUILTIN: &[Seed] = &[
     (CONNECTION_CREDENTIAL, "连接凭据", "sensitive", &[]),
 ];
 
+/// A template's name as `GET /vault/templates` shows it: a built-in one still under its seeded name in the
+/// request's language. Field labels stay as stored: they are copied into items and decide which fields
+/// are secret.
+pub fn shown_name(id: &str, source: &str, stored: &str) -> String {
+    use steve_i18n::t;
+    let seeded = source == "builtin" && BUILTIN.iter().any(|(i, n, ..)| *i == id && *n == stored);
+    if !seeded {
+        return stored.to_string();
+    }
+    match id {
+        "login" => t!("modules.vault.template.login"),
+        "bank_card" => t!("modules.vault.template.bank_card"),
+        "api_credential" => t!("modules.vault.template.api_credential"),
+        "id_document" => t!("modules.vault.template.id_document"),
+        "secure_note" => t!("modules.vault.template.secure_note"),
+        "ssh_key" => t!("modules.vault.template.ssh_key"),
+        "recovery_codes" => t!("modules.vault.template.recovery_codes"),
+        _ => stored.to_string(),
+    }
+}
+
 /// The built-in templates, in display order.
 pub fn builtin() -> Vec<Template> {
     BUILTIN

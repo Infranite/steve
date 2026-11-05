@@ -141,7 +141,7 @@ impl Vault {
         f: impl FnOnce(&Vault) -> VaultResult<R> + Send + 'static,
     ) -> VaultResult<R> {
         let v = self.clone();
-        tokio::task::spawn_blocking(move || f(&v))
+        tokio::task::spawn_blocking(steve_i18n::carry(move || f(&v)))
             .await
             .map_err(|e| VaultError::internal(format!("task failed: {e}")))?
     }

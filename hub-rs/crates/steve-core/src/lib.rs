@@ -9,6 +9,8 @@
 //! `tool_*` methods from its own tasks. Git commands run inside the critical section, like `execFileSync`
 //! in TS, because their result decides what the same operation does next.
 
+steve_i18n::init!();
+
 pub mod attachments;
 pub mod changes;
 pub mod config;

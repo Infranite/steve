@@ -177,7 +177,7 @@ impl Db {
         self.s
             .bots()
             .main()?
-            .ok_or_else(|| crate::error::msg("没有主 Bot"))
+            .ok_or_else(|| crate::error::msg(steve_i18n::t!("core.bot.no_main")))
     }
     pub fn bot_workspaces(&self, id: &str) -> Result<Vec<String>> {
         Ok(self
@@ -206,7 +206,7 @@ impl Db {
         self.s
             .bots()
             .create(ws, &serde_json::from_value(b)?, author)?
-            .ok_or_else(|| crate::error::msg("没有这个 Bot"))
+            .ok_or_else(|| crate::error::msg(steve_i18n::t!("core.bot.not_found")))
     }
     pub fn bot_patch(&self, id: &str, p: &Map<String, Value>, author: &str) -> Result<()> {
         self.s.bots().patch(id, &decode(p.clone())?, author)?;
@@ -312,7 +312,7 @@ impl Db {
         self.s
             .items()
             .create(ws, p)?
-            .ok_or_else(|| crate::error::msg("没有这个事项"))
+            .ok_or_else(|| crate::error::msg(steve_i18n::t!("core.item.not_found")))
     }
     /// `items.patch` with a JSON object of column → value (also a stored decision `undo`).
     pub fn item_patch(&self, id: &str, p: Map<String, Value>) -> Result<()> {
@@ -551,7 +551,7 @@ impl Db {
         self.s
             .decisions()
             .create(&p)?
-            .ok_or_else(|| crate::error::msg("没有这个决定"))
+            .ok_or_else(|| crate::error::msg(steve_i18n::t!("core.decision.not_found")))
     }
     /// Resolve an open decision (no-op if it is not open); `undo` is the item patch that reverses it.
     pub fn decision_resolve(

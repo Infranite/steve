@@ -7,14 +7,16 @@ use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
 use serde_json::{Value, json};
 
-use super::{ApiResult, AppState, Ctx, blocking, body, objs, ok, ok_true, own, sess_out, str_of};
+use super::{
+    ApiResult, AppState, Ctx, Noun, blocking, body, objs, ok, ok_true, own, sess_out, str_of,
+};
 use crate::backend::Obj;
 use crate::error::ApiError;
 use crate::validate::{Check, Num, Str};
 
 async fn own_session(st: &AppState, ws: &str, id: &str) -> Result<Obj, ApiError> {
     let (id, ws) = (id.to_string(), ws.to_string());
-    st.read(move |r| Ok(own(r.session_get(&id)?, &ws, "会话")?))
+    st.read(move |r| Ok(own(r.session_get(&id)?, &ws, Noun::Session)?))
         .await
 }
 
@@ -41,7 +43,7 @@ pub async fn get_one(
 ) -> ApiResult {
     let d = st.domain.clone();
     st.read(move |r| {
-        let s = own(r.session_get(&id)?, &c.ws, "会话")?;
+        let s = own(r.session_get(&id)?, &c.ws, Noun::Session)?;
         ok(Value::Object(sess_out(r, d.as_ref(), s)?))
     })
     .await
@@ -68,7 +70,7 @@ pub async fn events(
     let after = after_bound(q.get("after").map(String::as_str));
     let bounded = q.get("page").is_some_and(|v| v == "bounded");
     st.read(move |r| {
-        own(r.session_get(&id)?, &c.ws, "会话")?;
+        own(r.session_get(&id)?, &c.ws, Noun::Session)?;
         match after {
             Some(a) => {
                 let mut body = EventsBody::new();
@@ -170,7 +172,9 @@ pub async fn message(
 ) -> ApiResult {
     let s = own_session(&st, &c.ws, &id).await?;
     if crate::js::truthy(s.get("readonly")) {
-        return Err(ApiError::bad_request("导入的会话是只读的"));
+        return Err(ApiError::bad_request(steve_i18n::t!(
+            "hub.session.imported_readonly"
+        )));
     }
     let v = body(&b)?;
     let mut k = Check::object(&v);
@@ -229,7 +233,7 @@ pub async fn delete_one(
     Path(id): Path<String>,
 ) -> ApiResult {
     st.write(move |r| {
-        own(r.session_get(&id)?, &c.ws, "会话")?;
+        own(r.session_get(&id)?, &c.ws, Noun::Session)?;
         crate::system::remove_imported(r, &id)?;
         ok_true()
     })
@@ -268,7 +272,7 @@ pub async fn link(
     let item = k.str("item", Str::ANY);
     k.finish()?;
     st.write(move |r| {
-        let i = own(r.item_get(&item)?, &c.ws, "事项")?;
+        let i = own(r.item_get(&item)?, &c.ws, Noun::Item)?;
         let iid = str_of(&i, "id");
         let mut p = Obj::new();
         p.insert("item_id".into(), json!(iid));
@@ -294,7 +298,7 @@ pub async fn drop_queued(
                 .queued_get(&qid)?
                 .map(|q| str_of(&q, "session_id"))
                 .unwrap_or_default();
-            own(r.session_get(&sid)?, &ws, "排队消息")?;
+            own(r.session_get(&sid)?, &ws, Noun::Queued)?;
             Ok(sid)
         })
         .await?;
@@ -326,7 +330,7 @@ pub async fn queued_edit(
     k.finish()?;
     let text = text.trim().to_string();
     if text.is_empty() {
-        return Err(ApiError::bad_request("参数不对：text"));
+        return Err(ApiError::Invalid(vec!["text".into()]));
     }
     ok(json!(st.domain.queued_edit(&id, &qid, &text).await?))
 }
@@ -349,7 +353,9 @@ pub async fn queued_send_now(
 ) -> ApiResult {
     let s = own_session(&st, &c.ws, &id).await?;
     if crate::js::truthy(s.get("readonly")) {
-        return Err(ApiError::bad_request("导入的会话是只读的"));
+        return Err(ApiError::bad_request(steve_i18n::t!(
+            "hub.session.imported_readonly"
+        )));
     }
     ok(json!(st.domain.queued_send_now(&id, &qid).await?))
 }
