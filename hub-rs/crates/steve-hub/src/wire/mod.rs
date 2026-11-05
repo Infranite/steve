@@ -171,6 +171,8 @@ fn node_runtime(
         .map_err(|e| BackendError::msg(e.to_string()))?,
     );
     let runtime = node_runtime::NodeRuntime::new(store.clone(), node.clone(), domain);
+    // legacy's idle kill: an idle session's harness goes after STEVE_IDLE_RELEASE_MS (10 min)
+    runtime.set_idle_release(cfg.idle_release_ms as i64);
     // an attempt's deadline (default 6 h); the end-to-end tests shorten it to see a card expire
     if let Some(ms) = turn_limit(vars) {
         runtime.set_turn_limit(ms);
@@ -237,6 +239,7 @@ fn remote_nodes(
     if let Some(ms) = turn_limit(vars) {
         fleet.set_turn_limit(ms);
     }
+    fleet.set_idle_release(cfg.idle_release_ms as i64);
     let svc = crate::nodes::from_vars(store, fleet, |k| vars(k));
     let bind = match bind.map(|v| steve_node_api::NodeId::new(v.trim())) {
         Some(Ok(id)) if svc.is_some() => Some(id),

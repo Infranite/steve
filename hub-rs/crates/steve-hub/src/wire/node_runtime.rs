@@ -175,6 +175,9 @@ pub struct NodeRuntime {
     /// How long an attempt (and so a permission it asks) may take, in ms. 6 h unless the host
     /// sets it ([`Self::set_turn_limit`]).
     turn_limit: std::sync::atomic::AtomicI64,
+    /// How long an open session may sit idle before its harness is let go, in ms
+    /// ([`Self::set_idle_release`]; legacy's 10 minutes by default).
+    idle_release: std::sync::atomic::AtomicI64,
 }
 
 /// How long applied Node events stay in the inbox (what is still needed stays longer).
@@ -187,6 +190,21 @@ const PRUNE_BATCH: i64 = 500;
 const AFTER_TURN: i64 = i64::MAX;
 /// An attempt's deadline by default.
 const TURN_LIMIT_MS: i64 = 6 * 3_600_000;
+/// How long a session stays open with nothing to do, by default (legacy's idle kill).
+const IDLE_RELEASE_MS: i64 = 600_000;
+/// How often the apply worker looks for idle sessions.
+const IDLE_EVERY: Duration = Duration::from_secs(1);
+/// The sessions of node ?1 idle since before ?2 (ms), all of them or only ?3: open with nothing
+/// running, no turn open or over since then, nothing queued and no open card.
+const IDLE_SESSIONS_SQL: &str = "SELECT s.session_id FROM runtime_sessions s
+   WHERE s.node_id=?1 AND s.phase='ready' AND s.active_attempt IS NULL AND s.updated<=?2
+     AND (?3 IS NULL OR s.session_id=?3)
+     AND NOT EXISTS (SELECT 1 FROM runtime_turns t WHERE t.session_id=s.session_id
+           AND (t.state<>'finished' OR t.updated>?2))
+     AND NOT EXISTS (SELECT 1 FROM queued q WHERE q.session_id=s.session_id)
+     AND NOT EXISTS (SELECT 1 FROM decisions d WHERE d.session_id=s.session_id
+           AND d.subject_type='tool_call' AND d.status='open')
+   ORDER BY s.updated LIMIT 64";
 /// ?1 node, ?2 received before, ?3 at most. The json_extract terms match migration 036's indexes.
 const PRUNE_INBOX_SQL: &str = "DELETE FROM node_event_inbox WHERE rowid IN (
   SELECT e.rowid FROM node_event_inbox e JOIN node_streams s USING(node_id, stream, epoch)
@@ -269,6 +287,7 @@ impl NodeRuntime {
             dirty: Mutex::new(HashSet::new()),
             stopped: Mutex::new(None),
             turn_limit: std::sync::atomic::AtomicI64::new(TURN_LIMIT_MS),
+            idle_release: std::sync::atomic::AtomicI64::new(IDLE_RELEASE_MS),
         })
     }
 
@@ -276,6 +295,12 @@ impl NodeRuntime {
     pub fn set_turn_limit(&self, ms: i64) {
         self.turn_limit
             .store(ms.max(1), std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// An open session idle for `ms` (nothing running, queued or waiting on a card) is let go;
+    /// the next message opens it again, resuming the conversation (`STEVE_IDLE_RELEASE_MS`).
+    pub fn set_idle_release(&self, ms: i64) {
+        self.idle_release.store(ms.max(0), Ordering::Relaxed);
     }
 
     /// The Node cannot run anything (its host did not come up): from now on its sessions refuse
@@ -346,12 +371,20 @@ impl NodeRuntime {
         let (weak, wake) = (Arc::downgrade(self), self.wake_apply.clone());
         tokio::spawn(async move {
             let mut pruned = std::time::Instant::now() - PRUNE_EVERY;
+            let mut idled = std::time::Instant::now();
             loop {
                 let Some(me) = weak.upgrade() else { return };
                 let prune = pruned.elapsed() >= PRUNE_EVERY;
+                let idle = idled.elapsed() >= IDLE_EVERY;
+                if idle {
+                    idled = std::time::Instant::now();
+                }
                 let applied = tokio::task::spawn_blocking(move || {
                     let applied = me.apply_some();
                     me.expire_due();
+                    if idle {
+                        me.release_idle();
+                    }
                     if !applied && prune {
                         me.prune_inbox(now());
                     }
@@ -537,6 +570,59 @@ impl NodeRuntime {
             self.wake_send.notify_one();
         }
         Ok(r)
+    }
+
+    /// Lets go every session idle for [`Self::set_idle_release`] (once the Hub has reconciled
+    /// with the Node). Returns how many releases were planned.
+    fn release_idle(&self) -> usize {
+        if !self.may_plan() || self.running().is_err() || self.store.maintenance() {
+            return 0;
+        }
+        let before = now() - self.idle_release.load(Ordering::Relaxed);
+        let node = self.node_id.as_str();
+        let idle = self.store.reader(|c| {
+            let mut st = c.prepare(IDLE_SESSIONS_SQL)?;
+            let v = st
+                .query_map(rusqlite::params![node, before, None::<String>], |r| {
+                    r.get::<_, String>(0)
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok::<_, StoreError>(v)
+        });
+        let idle = match idle {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::error!("node {}: idle sessions: {e}", self.node_id);
+                return 0;
+            }
+        };
+        let mut n = 0;
+        for s in idle {
+            // checked again in the release's own transaction: a message may have come meanwhile
+            let r = self.tx(|tx| {
+                let still: Option<String> = tx
+                    .query_row(IDLE_SESSIONS_SQL, rusqlite::params![node, before, s], |r| {
+                        r.get(0)
+                    })
+                    .optional()?;
+                if still.is_none() {
+                    return Ok(false);
+                }
+                self.release_in(tx, &s)
+            });
+            match r {
+                Ok(true) => {
+                    tracing::info!(session = %s, "node {}: idle, released", self.node_id);
+                    n += 1;
+                }
+                Ok(false) => {}
+                Err(e) => tracing::error!("node {}: release idle {s}: {e}", self.node_id),
+            }
+        }
+        if n > 0 {
+            self.wake_send.notify_one();
+        }
+        n
     }
 
     /// [`Self::release`] inside `tx`.
