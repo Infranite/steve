@@ -121,13 +121,36 @@ impl Journal {
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;",
         )
         .map_err(internal)?;
-        c.execute_batch(SCHEMA).map_err(internal)?;
+        let version: i64 = c
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .map_err(internal)?;
+        if version > 1 {
+            return Err(ApiError::new(
+                ErrorCode::Unsupported,
+                "journal needs a newer Node",
+            ));
+        }
         let j = Journal { db: Mutex::new(c) };
-        let incarnation = j.tx(|t| {
-            let inc = t.bump("incarnation")?;
-            t.mark_unknown()?;
-            Ok(inc)
-        })?;
+        let incarnation =
+            j.tx(|t| {
+                // Schema and recovery are one commit. A failed migration must not consume an
+                // incarnation or change any receipt. Version zero includes the original journal.
+                t.c().execute_batch(SCHEMA).map_err(internal)?;
+                let has_started: bool = t.c().query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('procs') WHERE name='started')",
+                [], |r| r.get(0)).map_err(internal)?;
+                if !has_started {
+                    t.c()
+                        .execute_batch("ALTER TABLE procs ADD COLUMN started INTEGER")
+                        .map_err(internal)?;
+                }
+                t.c()
+                    .pragma_update(None, "user_version", 1)
+                    .map_err(internal)?;
+                let inc = t.bump("incarnation")?;
+                t.mark_unknown()?;
+                Ok(inc)
+            })?;
         Ok((j, incarnation))
     }
 
@@ -863,5 +886,72 @@ impl Tx<'_> {
             )
             .optional()
             .map_err(internal)
+    }
+}
+
+#[cfg(test)]
+mod migration_tests {
+    use super::*;
+    fn old(path: &Path) -> Connection {
+        let c = Connection::open(path).unwrap();
+        c.execute_batch(&SCHEMA.replace(
+            "reports INTEGER NOT NULL DEFAULT 0,\n  started INTEGER",
+            "reports INTEGER NOT NULL DEFAULT 0",
+        ))
+        .unwrap();
+        c.execute("INSERT INTO meta VALUES ('incarnation',7)", [])
+            .unwrap();
+        c.execute(
+            "INSERT INTO procs(session,pgid,generation,incarnation,meter) VALUES ('s',42,1,7,'m')",
+            [],
+        )
+        .unwrap();
+        c
+    }
+    #[test]
+    fn old_journal_is_upgraded_without_inventing_process_identity() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("node.db");
+        drop(old(&p));
+        let (j, inc) = Journal::open(&p).unwrap();
+        assert_eq!(inc, 8);
+        j.read(|t| {
+            let ps = t.procs()?;
+            assert_eq!(ps.len(), 1);
+            assert_eq!(ps[0].started, None);
+            Ok(())
+        })
+        .unwrap();
+        drop(j);
+        assert_eq!(Journal::open(&p).unwrap().1, 9);
+    }
+    #[test]
+    fn failed_recovery_rolls_back_schema_and_incarnation() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("node.db");
+        let c = old(&p);
+        c.execute("INSERT INTO ops(id,method,digest,receipt,accepted) VALUES ('bad','x','x','not-json',1)", []).unwrap();
+        assert!(Journal::open(&p).is_err());
+        assert_eq!(
+            c.query_row("SELECT value FROM meta WHERE key='incarnation'", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .unwrap(),
+            7
+        );
+        assert_eq!(
+            c.query_row(
+                "SELECT count(*) FROM pragma_table_info('procs') WHERE name='started'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            c.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
     }
 }
