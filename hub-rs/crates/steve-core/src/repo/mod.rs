@@ -262,7 +262,7 @@ impl Db {
     }
     /// How many items and other objects (contacts, teams, spaces…) carry the tag.
     pub fn tag_used(&self, id: &str) -> Result<i64> {
-        Ok(self.s.with_conn(|c| {
+        Ok(self.s.reader::<_, steve_store::StoreError>(|c| {
             Ok(c.query_row(
                 "SELECT (SELECT count(*) FROM item_tags WHERE tag_id = ?1) + (SELECT count(*) FROM entity_tags WHERE tag_id = ?1)",
                 [id],
@@ -296,6 +296,17 @@ impl Db {
     }
     pub fn item(&self, id: &str) -> Result<Option<Item>> {
         Ok(self.s.items().get(id)?)
+    }
+    /// Ids of the task items of `ws` at work (`run`, active, not archived), most recently updated first.
+    pub fn items_running(&self, ws: &str) -> Result<Vec<String>> {
+        Ok(self.s.reader::<_, steve_store::StoreError>(|c| {
+            let mut st = c.prepare(
+                "SELECT id FROM items WHERE workspace_id = ? AND kind = 'task' AND status = 'run' AND archived = 0
+                   AND phase = 'active' ORDER BY updated DESC",
+            )?;
+            let v = st.query_map([ws], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+            Ok(v)
+        })?)
     }
     pub fn item_create(&self, ws: &str, p: &NewItem) -> Result<Item> {
         self.s
@@ -428,7 +439,7 @@ impl Db {
     /// up directly, however many events the session has.
     pub fn last_marker_ts(&self, session: &str, marker: &str) -> Result<Option<i64>> {
         let path = format!("$.{marker}");
-        Ok(self.s.with_conn(|c| {
+        Ok(self.s.reader::<_, steve_store::StoreError>(|c| {
             Ok(c.query_row(
                 "SELECT ts FROM events WHERE session_id = ? AND kind = 'system' AND json_extract(data, ?) = 1
                   ORDER BY seq DESC LIMIT 1",
@@ -440,7 +451,7 @@ impl Db {
     }
     /// `ts` of the session's newest event.
     pub fn last_event_ts(&self, session: &str) -> Result<Option<i64>> {
-        Ok(self.s.with_conn(|c| {
+        Ok(self.s.reader::<_, steve_store::StoreError>(|c| {
             Ok(c.query_row(
                 "SELECT ts FROM events WHERE session_id = ? ORDER BY seq DESC LIMIT 1",
                 [session],
@@ -451,7 +462,7 @@ impl Db {
     }
     /// The text of the session's newest `system` event.
     pub fn last_system_text(&self, session: &str) -> Result<Option<String>> {
-        let data: Option<String> = self.s.with_conn(|c| {
+        let data: Option<String> = self.s.reader::<_, steve_store::StoreError>(|c| {
             Ok(c.query_row(
                 "SELECT data FROM events WHERE session_id = ? AND kind = 'system' ORDER BY seq DESC LIMIT 1",
                 [session],
@@ -465,7 +476,7 @@ impl Db {
     }
     /// Any event of the session at or after `ts`.
     pub fn has_events_since(&self, session: &str, ts: i64) -> Result<bool> {
-        Ok(self.s.with_conn(|c| {
+        Ok(self.s.reader::<_, steve_store::StoreError>(|c| {
             Ok(c.query_row(
                 "SELECT 1 FROM events WHERE session_id = ? AND ts >= ? LIMIT 1",
                 rusqlite::params![session, ts],
@@ -517,7 +528,7 @@ impl Db {
     }
     /// Sessions that are not ended and have queued rows.
     pub fn sessions_with_queue(&self) -> Result<Vec<String>> {
-        Ok(self.s.with_conn(|c| {
+        Ok(self.s.reader::<_, steve_store::StoreError>(|c| {
             let mut st = c.prepare(
                 "SELECT DISTINCT q.session_id id FROM queued q JOIN sessions s ON s.id = q.session_id WHERE s.status != 'ended'",
             )?;

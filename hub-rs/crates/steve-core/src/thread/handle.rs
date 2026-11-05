@@ -13,8 +13,7 @@ use crate::repo::{FileRef, HubEvent, ItemExt};
 use crate::util::{js_head, now};
 use regex::Regex;
 use serde_json::{Map, Value, json};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{LazyLock, Mutex};
 use steve_modules::contacts::item_people::Mention;
 use steve_store::NewRouteLog;
 
@@ -63,7 +62,7 @@ impl Core {
         );
         let space = j.conv.space.as_str();
         let lane = super::lane_key(ws, space);
-        let flag = Arc::new(AtomicBool::new(false));
+        let flag = super::Stop::default();
         lock(&self.0.thread.inflight).insert(lane.clone(), flag.clone());
         /* the web's “thinking” line is about your conversation only */
         let quiet = j.conv.guest();
@@ -78,7 +77,7 @@ impl Core {
         let steps = Mutex::new(Steps::default());
         let t0 = now();
         let reply = |t: &str, item: Option<&str>, meta: Option<Value>| {
-            if flag.load(Ordering::SeqCst) {
+            if flag.is_stopped() {
                 return None;
             }
             let mut m = match meta {
@@ -173,7 +172,7 @@ impl Core {
         mentions: &[Mention],
         j_to: &super::SayTo,
         conv: &super::Conv,
-        flag: &AtomicBool,
+        flag: &super::Stop,
         reply: Reply<'_>,
         steps: &Mutex<Steps>,
     ) -> Result<()> {
@@ -275,10 +274,10 @@ impl Core {
         /* stopping does not wait for the router: nothing has happened yet */
         let r = tokio::select! {
             r = self.route_in(ws, &routed, &history, false, guest) => r?,
-            _ = super::until_stopped(flag) => return Ok(()),
+            _ = flag.stopped() => return Ok(()),
         };
         let ms = now() - r0;
-        if flag.load(Ordering::SeqCst) {
+        if flag.is_stopped() {
             return Ok(());
         }
         /* “@名字 …” picks the bot explicitly */
@@ -340,7 +339,7 @@ impl Core {
                     offer: d.offer.clone(),
                     reply_to: None,
                     run: None,
-                    stop: Arc::new(AtomicBool::new(false)),
+                    stop: super::Stop::default(),
                     t0: now(),
                     resume,
                     space: conv.space.clone(),

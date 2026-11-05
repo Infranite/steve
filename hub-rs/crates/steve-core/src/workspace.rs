@@ -799,7 +799,7 @@ impl Tx<'_> {
 
     /// Why a closed item's worktree stays.
     fn why_kept(&self, item: &str, wt: &Path) -> String {
-        let dirty = git::git(wt, &["status", "--porcelain"]).map(|s| !s.is_empty());
+        let dirty = git::git_read(wt, &["status", "--porcelain"]).map(|s| !s.is_empty());
         let archived = self
             .db()
             .item(item)

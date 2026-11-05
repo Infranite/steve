@@ -182,9 +182,16 @@ pub(crate) fn same_result(frozen: &str, now: &str) -> bool {
     matches!((a.own, b.own), (Some((_, x)), Some((_, y))) if x == y)
 }
 
-/// The worktree moved away from the frozen fingerprint `frozen` (no frozen fingerprint: never).
-pub(crate) fn result_moved(cwd: Option<&str>, frozen: Option<&str>) -> bool {
-    frozen.is_some_and(|f| !fingerprint(cwd).is_some_and(|n| same_result(f, &n)))
+/// The worktree, whose fingerprint is `now` (`None`: no worktree any more), moved away from the frozen
+/// fingerprint `frozen` (no frozen fingerprint: never).
+pub(crate) fn result_moved(now: Option<&str>, frozen: Option<&str>) -> bool {
+    frozen.is_some_and(|f| !now.is_some_and(|n| same_result(f, n)))
+}
+
+/// Whether the gate of closing `c` compares the worktree with what was frozen: a completion still on
+/// its frozen revision with a frozen fingerprint (a new revision is a change already).
+fn looks_at_worktree(i: &Item, c: &Closing) -> bool {
+    c.kind == COMPLETE && c.fingerprint.is_some() && c.frozen_revision == i.revision
 }
 
 /// What blocks a closing commit, for the projection (`closing.waiting`) and the logs.
@@ -701,6 +708,13 @@ impl Tx<'_> {
 
     /// What still holds the item's closing.
     pub(crate) fn lc_gate(&self, i: &Item, c: &Closing) -> Result<Gate> {
+        let now = looks_at_worktree(i, c).then(|| fingerprint(i.cwd.as_deref()));
+        self.lc_gate_at(i, c, now.as_ref().map(Option::as_deref))
+    }
+
+    /// [`Self::lc_gate`] with the worktree's fingerprint `now` already taken (`Some(None)`: no worktree);
+    /// `None` leaves the worktree out, so `changed` then only sees a new revision.
+    fn lc_gate_at(&self, i: &Item, c: &Closing, now: Option<Option<&str>>) -> Result<Gate> {
         let mut g = Gate::default();
         let resume = self.db().store().queued().resume_ids()?;
         for s in self.db().sessions_of_item(&i.id)? {
@@ -747,7 +761,7 @@ impl Tx<'_> {
                     && (d.kind == "ask" || (d.kind == "approve" && d.subject_type != "tool_call"))
             });
             if c.frozen_revision != i.revision
-                || result_moved(i.cwd.as_deref(), c.fingerprint.as_deref())
+                || now.is_some_and(|n| result_moved(n, c.fingerprint.as_deref()))
             {
                 g.changed = true;
             }
@@ -769,11 +783,19 @@ impl Tx<'_> {
         if c.kind == COMPLETE && c.accepted {
             self.lc_accepted(item_id)?;
         }
-        let g = self.lc_gate(&i, &c)?;
+        /* the worktree is fingerprinted once (it runs `git add --all` over all of it), for the gate and
+         * for saying what moved */
+        let now = looks_at_worktree(&i, &c).then(|| fingerprint(i.cwd.as_deref()));
+        let g = self.lc_gate_at(&i, &c, now.as_ref().map(Option::as_deref))?;
         if g.changed && !g.turn {
             /* the frozen result moved after it was frozen (and nothing is still at work on it): say what
              * moved, and tell the agent, which may well believe its delivery still stands */
-            let what = match (&c.fingerprint, fingerprint(i.cwd.as_deref())) {
+            let now = match now {
+                Some(n) => n,
+                None if c.fingerprint.is_some() => fingerprint(i.cwd.as_deref()),
+                None => None,
+            };
+            let what = match (&c.fingerprint, now) {
                 (Some(f), Some(n)) => crate::upstream::describe_change(
                     Path::new(i.cwd.as_deref().unwrap_or("")),
                     f,
@@ -1053,8 +1075,10 @@ pub(crate) fn lifecycle_view(t: &Tx, i: &Item) -> Result<Value> {
         }
     };
     let mut active = 0;
+    /* the projection shows only what the gate waits for, never whether the result moved, so it leaves
+     * the worktree alone: fingerprinting it is a `git add --all` per closing item on every look */
     let gate = match &c {
-        Some(c) if i.phase == CLOSING => Some(t.lc_gate(i, c)?),
+        Some(c) if i.phase == CLOSING => Some(t.lc_gate_at(i, c, None)?),
         _ => None,
     };
     if i.phase != CLOSED {

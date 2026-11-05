@@ -11,8 +11,6 @@ use crate::gateway::Route;
 use crate::repo::{FileRef, Item};
 use crate::util::now;
 use serde_json::{Value, json};
-use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 
 /// After this long an unanswered card is `expired` (§3.4).
 const EXPIRES: i64 = 24 * 3600 * 1000;
@@ -160,7 +158,7 @@ impl Core {
                 offer: None,
                 reply_to: Some(msg_id.into()),
                 run: None,
-                stop: Arc::new(AtomicBool::new(false)),
+                stop: super::Stop::default(),
                 t0: now(),
                 resume: None,
                 space: m.space.clone(),

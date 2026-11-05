@@ -800,3 +800,58 @@ async fn an_a2ui_action_is_said_once_per_surface() {
     /* the action is a turn like any message: Steve answers it */
     settle(&k, 4).await;
 }
+
+/// A message whose routing panics loses that message only: the conversation's lane stays, and the
+/// next message is answered (it used to go unanswered until a restart).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_routing_that_panics_does_not_take_the_conversation_down() {
+    let k = Kit::new();
+    k.gw.set(|_, _| panic!("router blew up"));
+    k.core.say(WS, "第一件", &[]).unwrap();
+    assert!(
+        k.wait(|| !k.core.main_busy(WS).unwrap()),
+        "the panic is cleared up"
+    );
+    k.gw.script.clear_poison();
+    k.core.say(WS, "/汇报", &[]).unwrap();
+    let ms = settle(&k, 3).await;
+    assert_eq!(ms[2].text, "现在：0 件等你，0 件在进行，今天完成 0 件。");
+}
+
+/// An answer that panics ends its turn: the message waiting behind it is routed and answered.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_answer_that_panics_ends_its_turn() {
+    let k = Kit::new();
+    let r = json!({"kind": "answer", "confidence": 0.9}).to_string();
+    k.gw.set(move |p, _| {
+        if p.starts_with("You are the router of Steve") {
+            Ok(r.clone())
+        } else {
+            panic!("answer blew up")
+        }
+    });
+    k.core.say(WS, "答一下", &[]).unwrap();
+    assert!(k.wait(|| !k.core.main_busy(WS).unwrap()), "the turn ended");
+    k.gw.script.clear_poison();
+    k.core.say(WS, "/汇报", &[]).unwrap();
+    let ms = settle(&k, 3).await;
+    assert_eq!(
+        ms.last().unwrap().text,
+        "现在：0 件等你，0 件在进行，今天完成 0 件。"
+    );
+}
+
+/// A conversation's lanes go when idle, and the next message starts them again.
+#[tokio::test(flavor = "multi_thread")]
+async fn idle_lanes_go_and_come_back() {
+    let k = Kit::new();
+    router(&k, json!({"kind": "answer", "confidence": 0.9}), "答好了");
+    k.core.say(WS, "问一下", &[]).unwrap();
+    settle(&k, 2).await;
+    assert!(k.wait(|| !k.core.main_busy(WS).unwrap()));
+    assert_eq!(k.core.lanes_open(), (1, 1));
+    assert!(k.wait(|| k.core.lanes_open() == (0, 0)), "idle lanes went");
+    k.core.say(WS, "再问", &[]).unwrap();
+    let ms = settle(&k, 4).await;
+    assert_eq!(ms[3].text, "答好了");
+}

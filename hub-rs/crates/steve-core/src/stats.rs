@@ -58,7 +58,7 @@ pub fn record(store: &Store, a: &Attempt, tag: &CallTag) -> steve_store::Result<
     let day = steve_stats::day(ts, steve_stats::tz(tz.as_deref()));
     let (bot_id, project_id) = match &tag.item_id {
         Some(item) => store
-            .with_conn(|c| {
+            .reader::<_, steve_store::StoreError>(|c| {
                 Ok(c.query_row(
                     "SELECT bot_id, project_id FROM items WHERE id = ?",
                     [item],

@@ -13,7 +13,6 @@ use crate::repo::{FileRef, Item, Message};
 use crate::util::now;
 use serde_json::{Value, json};
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 use tokio::sync::OnceCell;
 
 /// Where a correction sends a message.
@@ -207,7 +206,7 @@ impl Core {
             offer: None,
             reply_to: reply_to.map(String::from),
             run: None,
-            stop: Arc::new(AtomicBool::new(false)),
+            stop: super::Stop::default(),
             t0: now(),
             resume: None,
             space: om.space.clone(),

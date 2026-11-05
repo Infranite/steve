@@ -24,6 +24,7 @@ steve-transcript = { path = "../steve-transcript" }
 sha2 = "=0.11.1"
 thiserror = "=2.0.21"
 tokio = { version = "=1.54.1", features = ["rt", "rt-multi-thread", "macros", "process", "time", "sync", "fs", "io-util"] }
+tokio-util = "=0.7.20"
 tracing = "=0.1.44"
 uuid = { version = "=1.29.0", features = ["v4"] }
 
