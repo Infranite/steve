@@ -16,7 +16,7 @@
 //! ([`super::node_runtime::NodeRuntime::submit`]) of [`Placement::runtime`].
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use rusqlite::OptionalExtension;
 use serde_json::Value;
@@ -133,6 +133,9 @@ pub struct Workspaces {
     fleet: Option<Arc<NodeFleet>>,
     /// [`configured`], for building the local roots again.
     extra: Vec<PathBuf>,
+    /// Held from reading the store to setting the roots, so a rebuild that read earlier never
+    /// replaces a later one ([`Workspaces::follow`] and a session's bind both rebuild).
+    rebuild: Mutex<()>,
 }
 
 /// Where a thing is, as the store says, before any Node is asked.
@@ -153,21 +156,24 @@ impl Workspaces {
             local,
             fleet,
             extra,
+            rebuild: Mutex::new(()),
         })
     }
 
     /// The Node and the place of `what`.
     pub fn placement_of(&self, what: Subject<'_>) -> Result<Placement, PlacementError> {
-        let (device, at) = match self.place(what)? {
+        let (place, workspace) = self.place(what)?;
+        let (device, at) = match place {
             Place::Device(d, at) => (d, at),
             Place::Bound(node, w) => (node, At::Workspace(w)),
         };
-        self.on(&device, at)
+        self.on(&device, at, &workspace)
     }
 
     /// `at` on the Node of a device: the local one for `hub` (and its node id `local`), else a
-    /// paired, active and linked remote Node.
-    fn on(&self, device: &str, at: At) -> Result<Placement, PlacementError> {
+    /// paired, active and linked remote Node that may get `workspace`'s work
+    /// ([`super::node_binding::node_takes`]: paired by an owner of the workspace).
+    fn on(&self, device: &str, at: At, workspace: &str) -> Result<Placement, PlacementError> {
         let offline = || PlacementError::Offline {
             device: device.into(),
         };
@@ -186,13 +192,11 @@ impl Workspaces {
         let (Some(fleet), Ok(id)) = (&self.fleet, NodeId::new(device)) else {
             return Err(offline());
         };
-        let active = self.store.reader(|c| {
-            Ok::<_, StoreError>(
-                steve_store::nodes::get(c, id.as_str())?.is_some_and(|n| n.state == "active"),
-            )
-        })?;
+        let takes = self
+            .store
+            .reader(|c| super::node_binding::node_takes(c, id.as_str(), workspace))?;
         let remote = fleet.remote(&id);
-        if !active || remote.generation().is_none() {
+        if !takes || remote.generation().is_none() {
             return Err(offline());
         }
         let runtime = fleet.start(&id).ok_or_else(offline)?;
@@ -210,25 +214,41 @@ impl Workspaces {
             .is_some_and(|l| l.runtime.node_id().as_str() == node)
     }
 
-    fn place(&self, what: Subject<'_>) -> Result<Place, PlacementError> {
-        let found = self.store.reader(|c| {
-            Ok::<_, StoreError>(match what {
+    /// The place of `what` and the workspace it belongs to.
+    fn place(&self, what: Subject<'_>) -> Result<(Place, String), PlacementError> {
+        let (found, workspace) = self.store.reader(|c| {
+            let (table, id) = match what {
+                Subject::Project(id) => ("projects", id),
+                Subject::Session(id) => ("sessions", id),
+                Subject::Item(id) => ("items", id),
+                Subject::KbSource(id) => ("kb_sources", id),
+            };
+            let workspace: Option<String> = c
+                .query_row(
+                    &format!("SELECT workspace_id FROM {table} WHERE id=?"),
+                    [id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let found = match what {
                 Subject::Project(id) => project_in(c, id)?,
                 Subject::Session(id) => session_in(c, id)?,
                 Subject::Item(id) => item_in(c, id)?,
                 Subject::KbSource(id) => kb_source_in(c, id)?,
-            })
+            };
+            Ok::<_, StoreError>((found, workspace))
         })?;
-        match found {
-            Found::Missing => Err(PlacementError::NotFound(what.kind())),
-            Found::Nowhere => Err(PlacementError::NoWorkspace),
-            Found::At(p) => Ok(p),
+        match (found, workspace) {
+            (Found::Missing, _) | (_, None) => Err(PlacementError::NotFound(what.kind())),
+            (Found::Nowhere, _) => Err(PlacementError::NoWorkspace),
+            (Found::At(p), Some(w)) => Ok((p, w)),
         }
     }
 
     /// Builds the local Node's roots again from the store (nothing without a local Node).
     pub fn refresh_roots(&self) -> Result<(), StoreError> {
         if let Some(l) = &self.local {
+            let _one = self.rebuild.lock().unwrap_or_else(|e| e.into_inner());
             l.node
                 .set_roots(super::node_binding::roots(&self.store, &self.extra)?);
         }
@@ -310,17 +330,20 @@ fn session_in(c: &rusqlite::Connection, id: &str) -> Result<Found, StoreError> {
     if let Some(p) = bound_in(c, id)? {
         return Ok(Found::At(p));
     }
-    let row: Option<(String, String)> = c
+    let row: Option<(String, String, bool)> = c
         .query_row(
-            "SELECT device_id, cwd FROM sessions WHERE id=?",
+            "SELECT s.device_id, s.cwd, COALESCE(p.archived, 0) FROM sessions s
+              LEFT JOIN items i ON i.id=s.item_id LEFT JOIN projects p ON p.id=i.project_id
+              WHERE s.id=?",
             [id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .optional()?;
     Ok(match row {
         None => Found::Missing,
-        Some((_, cwd)) if cwd.is_empty() => Found::Nowhere,
-        Some((device, cwd)) => dir_on(device, &cwd),
+        // an archived project's directories are no roots any more, its items' included
+        Some((_, cwd, archived)) if cwd.is_empty() || archived => Found::Nowhere,
+        Some((device, cwd, _)) => dir_on(device, &cwd),
     })
 }
 
@@ -339,14 +362,17 @@ fn bound_in(c: &rusqlite::Connection, session: &str) -> Result<Option<Place>, St
 }
 
 /// An item's latest bound session's workspace; else its own directory (on the Hub); else its
-/// project's.
+/// project's. An archived project's item has no directory any more (as [`project_in`]).
 fn item_in(c: &rusqlite::Connection, id: &str) -> Result<Found, StoreError> {
-    let row: Option<(Option<String>, Option<String>)> = c
-        .query_row("SELECT cwd, project_id FROM items WHERE id=?", [id], |r| {
-            Ok((r.get(0)?, r.get(1)?))
-        })
+    let row: Option<(Option<String>, Option<String>, bool)> = c
+        .query_row(
+            "SELECT i.cwd, i.project_id, COALESCE(p.archived, 0) FROM items i
+              LEFT JOIN projects p ON p.id=i.project_id WHERE i.id=?",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
         .optional()?;
-    let Some((cwd, project)) = row else {
+    let Some((cwd, project, archived)) = row else {
         return Ok(Found::Missing);
     };
     let latest: Option<String> = c
@@ -361,6 +387,9 @@ fn item_in(c: &rusqlite::Connection, id: &str) -> Result<Found, StoreError> {
         && let Some(p) = bound_in(c, &s)?
     {
         return Ok(Found::At(p));
+    }
+    if archived {
+        return Ok(Found::Nowhere);
     }
     if let Some(cwd) = cwd.filter(|p| !p.is_empty()) {
         return Ok(dir_on(HUB_DEVICE.into(), &cwd));
@@ -641,16 +670,108 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         assert!(taken, "the new project's root was never allowed");
-        // archived: its root goes
+        // a dir project's item and session work in the project's directory (core's prepare_cwd)
+        exec(
+            &t.store,
+            &format!(
+                "INSERT INTO items(id,workspace_id,no,title,status,stage,cwd,project_id,created,updated) VALUES ('i9','default',9,'t','run','执行','{c}','p9',1,1);
+                 INSERT INTO sessions(id,workspace_id,item_id,harness,cwd,status,created,updated) VALUES ('s9','default','i9','claude-code','{c}','active',1,1);",
+                c = p.display()
+            ),
+        );
+        t.ws.refresh_roots().unwrap();
+        assert!(matches!(
+            super::super::node_binding::binding_for(&t.store, "s9")
+                .unwrap()
+                .prepare,
+            PrepareKind::Existing { .. }
+        ));
+        // archived: its root goes, and its items' and sessions' directories with it
         exec(&t.store, "UPDATE projects SET archived=1 WHERE id='p9'");
         t.ws.refresh_roots().unwrap();
         assert_eq!(
             prepare(&t.node, "op_c", at).await.unwrap_err().code,
             ErrorCode::Denied
         );
+        for what in [
+            Subject::Project("p9"),
+            Subject::Item("i9"),
+            Subject::Session("s9"),
+        ] {
+            assert!(
+                matches!(t.ws.placement_of(what), Err(PlacementError::NoWorkspace)),
+                "{what:?}"
+            );
+        }
+        assert!(super::super::node_binding::binding_for(&t.store, "s9").is_none());
+    }
+
+    struct Quiet;
+    #[async_trait::async_trait]
+    impl steve_node_wire::Handler for Quiet {
+        async fn handle(&self, method: &str, _: Value) -> ApiResult<Value> {
+            Err(steve_node_wire::conn::unsupported(method))
+        }
+    }
+
+    /// Links the remote Node `id` of `fleet` to a peer that answers nothing; keep the peer.
+    fn link(fleet: &NodeFleet, id: &str) -> Arc<steve_node_wire::Conn> {
+        let (h, n) = steve_node_wire::testkit::pair();
+        let opts = |side| steve_node_wire::ConnOptions {
+            side,
+            ..Default::default()
+        };
+        let hub = steve_node_wire::Conn::spawn(h.sink, h.stream, 1, Arc::new(Quiet), opts("h"));
+        let peer = steve_node_wire::Conn::spawn(n.sink, n.stream, 1, Arc::new(Quiet), opts("n"));
+        assert!(fleet.remote(&NodeId::new(id).unwrap()).attach(hub, false));
+        peer
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_remote_node_gets_only_work_of_a_workspace_its_pairer_owns() {
+        let t = local(false);
+        let fleet = NodeFleet::new(
+            t.store.clone(),
+            t.dir.path().to_path_buf(),
+            Some(Arc::new(Ends)),
+            None,
+        );
+        let ws = Workspaces::new(t.store.clone(), None, Some(fleet.clone()), vec![]);
+        exec(
+            &t.store,
+            "INSERT INTO users(id,workspace_id,subject,name,role,created) VALUES ('u','default','sub_u','u','owner',1),('m','default','sub_m','m','member',1);
+             INSERT INTO workspace_members(workspace_id,user_id,role,created) VALUES ('default','u','owner',1),('default','m','member',1);
+             INSERT INTO nodes(node_id,owner,name,pubkey,fingerprint,state,created) VALUES ('n_u','u','u',zeroblob(32),'fu','active',1),('n_m','m','m',zeroblob(32),'fm','active',1);
+",
+        );
+        project(&t, "pu", "n_u", "work/repo");
+        project(&t, "pm", "n_m", "work/repo");
+        exec(
+            &t.store,
+            "INSERT INTO items(id,workspace_id,no,title,status,stage,project_id,created,updated) VALUES ('iu','default',1,'t','run','执行','pu',1,1),('im','default',2,'t','run','执行','pm',1,1);",
+        );
+        let _peers = [link(&fleet, "n_u"), link(&fleet, "n_m")];
+        // the owner's linked Node has the owner's workspace's project and items
+        for what in [Subject::Project("pu"), Subject::Item("iu")] {
+            let p = ws.placement_of(what).unwrap();
+            assert_eq!(p.node_id.as_str(), "n_u");
+        }
+        // a Node a plain member paired is offline for it, linked and active as it is
+        for what in [Subject::Project("pm"), Subject::Item("im")] {
+            let e = ws.placement_of(what).err().unwrap();
+            assert!(
+                matches!(e, PlacementError::Offline { .. }),
+                "{what:?}: {e:?}"
+            );
+        }
+        // and so is the owner's once paused
+        exec(
+            &t.store,
+            "UPDATE nodes SET state='paused' WHERE node_id='n_u'",
+        );
         assert!(matches!(
-            t.ws.placement_of(Subject::Project("p9")),
-            Err(PlacementError::NoWorkspace)
+            ws.placement_of(Subject::Project("pu")),
+            Err(PlacementError::Offline { .. })
         ));
     }
 }
