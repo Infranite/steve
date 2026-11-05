@@ -43,6 +43,10 @@ pub enum Point {
     AfterAccept(&'static str),
     /// Events are about to go to the Hub.
     BeforeCommit,
+    /// The Hub answered the batch (committed or refused), the Node has not looked at it yet.
+    AfterCommit,
+    /// The Hub committed the batch, its ack not applied yet (events still kept).
+    BeforeAck,
 }
 
 type Hook = Arc<dyn Fn(Point) + Send + Sync>;
@@ -388,8 +392,11 @@ impl FakeNode {
         let sink = self.sink.lock().unwrap().clone();
         let Some(sink) = sink else { return };
         self.at(Point::BeforeCommit);
-        match sink.commit(EventBatch { events }).await {
+        let committed = sink.commit(EventBatch { events }).await;
+        self.at(Point::AfterCommit);
+        match committed {
             Ok(ack) => {
+                self.at(Point::BeforeAck);
                 let _ = self.apply_ack(&ack);
             }
             Err(_) => self.st().delivery_failures += 1,
