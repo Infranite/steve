@@ -402,7 +402,16 @@ impl Actor {
             Some(l) => (l.pgid, l.started),
             None => match self.inner.j.read(|t| t.proc_of(&self.session)) {
                 Ok(Some(p)) => (p.pgid, p.started),
-                Ok(None) => return Stopped::Gone,
+                Ok(None) => {
+                    return match self
+                        .inner
+                        .j
+                        .read(|t| t.reservation(&format!("spawn:{}", self.session)))
+                    {
+                        Ok(None) => Stopped::Gone,
+                        _ => Stopped::Uncertain,
+                    };
+                }
                 Err(_) => return Stopped::Uncertain,
             },
         };
@@ -466,10 +475,9 @@ impl Actor {
                     row.view.phase = SessionPhase::Released;
                     t.put_session(&row)?;
                 }
-                let state = failed_state(ApiError::new(
-                    ErrorCode::Busy,
-                    "the session's old harness did not stop",
-                ));
+                let state = Observed::Unknown {
+                    reason: "the session's old harness did not stop".into(),
+                };
                 t.set_state(&op, &state)?;
                 crate::emit_all(&self.inner, t, vec![op_changed(&op, state)])
             });
@@ -526,7 +534,13 @@ impl Actor {
                         }
                         Err(e) => {
                             row.view.phase = SessionPhase::Released;
-                            failed_state(e.clone())
+                            if e.code == ErrorCode::OutcomeUnknown {
+                                Observed::Unknown {
+                                    reason: e.safe_detail.clone(),
+                                }
+                            } else {
+                                failed_state(e.clone())
+                            }
                         }
                     };
                     t.put_session(&row)?;
@@ -609,6 +623,9 @@ impl Actor {
                         self.prepare(tok);
                     }
                     Err(e) => {
+                        if e.code == ErrorCode::OutcomeUnknown {
+                            return self.unknown_end(&e.safe_detail);
+                        }
                         let outcome = if e.code == ErrorCode::Offline {
                             Outcome::Interrupted
                         } else {
@@ -1419,6 +1436,10 @@ async fn open_harness(
     let generation = inner.generation.fetch_add(1, Ordering::SeqCst) + 1;
     let (tx1, tx2) = (tx.clone(), tx);
     let counter = inner.output_counter(session);
+    let launch = format!("spawn:{session}");
+    let launch_id = OperationId::new(derived_id("spawn", &format!("{session}.{generation}")))
+        .map_err(internal)?;
+    inner.j.tx(|t| t.reserve(&launch, &launch_id))?;
     let conn = Conn::spawn(
         Spawn {
             program,
@@ -1464,7 +1485,10 @@ async fn open_harness(
             let _ = tx2.send(Msg::Exited { generation });
         },
     )
-    .map_err(|e| ApiError::new(ErrorCode::Unsupported, e.message))?;
+    .map_err(|e| {
+        let _ = inner.j.tx(|t| t.unreserve(&launch));
+        ApiError::new(ErrorCode::Unsupported, e.message)
+    })?;
     let pgid = conn.pid() as i64;
     let started = procs::start_time(pgid);
     let meter = derived_id(
@@ -1479,11 +1503,18 @@ async fn open_harness(
             inner.incarnation,
             &meter,
             started,
-        )
+        )?;
+        t.unreserve(&launch)
     }) {
-        // not recorded: it must not run on
-        procs::stop(pgid, started).await;
-        return Err(e);
+        if procs::stop(pgid, started).await.gone() {
+            inner.j.tx(|t| t.unreserve(&launch))?;
+            return Err(e);
+        }
+        inner.fault();
+        return Err(ApiError::new(
+            ErrorCode::OutcomeUnknown,
+            "unregistered process not confirmed stopped; launch reservation retained",
+        ));
     }
     #[derive(Default)]
     struct Seen(std::sync::Mutex<(Option<String>, Option<String>, Option<String>)>);
@@ -1521,9 +1552,13 @@ async fn open_harness(
     let opened = match opened {
         Ok(o) => o,
         Err(e) => {
-            if procs::stop(pgid, started).await.gone() {
-                let _ = inner.j.tx(|t| t.drop_proc(session, pgid));
+            if !procs::stop(pgid, started).await.gone() {
+                return Err(ApiError::new(
+                    ErrorCode::OutcomeUnknown,
+                    "failed handshake did not stop",
+                ));
             }
+            inner.j.tx(|t| t.drop_proc(session, pgid))?;
             return Err(ApiError::new(ErrorCode::Unsupported, e.message));
         }
     };
@@ -1544,9 +1579,13 @@ async fn open_harness(
         .transpose()
         .map_err(internal)?;
     if conn.has_exited() {
-        if procs::stop(pgid, started).await.gone() {
-            inner.j.tx(|t| t.drop_proc(session, pgid))?;
+        if !procs::stop(pgid, started).await.gone() {
+            return Err(ApiError::new(
+                ErrorCode::OutcomeUnknown,
+                "exited adapter group not confirmed stopped",
+            ));
         }
+        inner.j.tx(|t| t.drop_proc(session, pgid))?;
         return Err(ApiError::new(ErrorCode::Offline, "adapter exited"));
     }
     Ok(LiveNew {

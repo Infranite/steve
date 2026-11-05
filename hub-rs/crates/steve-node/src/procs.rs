@@ -68,7 +68,18 @@ pub(crate) fn start_time(pid: i64) -> Option<u64> {
         // field 22 of /proc/<pid>/stat, after the command in parentheses
         let s = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
         let rest = &s[s.rfind(')')? + 2..];
-        rest.split_whitespace().nth(19)?.parse().ok()
+        let ticks: u64 = rest.split_whitespace().nth(19)?.parse().ok()?;
+        let boot: u64 = std::fs::read_to_string("/proc/stat")
+            .ok()?
+            .lines()
+            .find_map(|l| l.strip_prefix("btime "))?
+            .parse()
+            .ok()?;
+        let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+        if hz <= 0 {
+            return None;
+        }
+        boot.checked_mul(hz as u64)?.checked_add(ticks)
     }
 }
 
@@ -78,7 +89,9 @@ pub(crate) fn start_time(pid: i64) -> Option<u64> {
 fn ours(pgid: i64, started: Option<u64>) -> bool {
     match (start_time(pgid), started) {
         (Some(now), Some(then)) => now == then,
-        (None, _) => true,
+        // A missing or unreadable leader is not proof of group ownership. Without a
+        // durable group handle (e.g. a cgroup) leave it uncertain for reconciliation.
+        (None, _) => false,
         (Some(_), None) => false,
     }
 }
@@ -95,31 +108,67 @@ pub(crate) fn state(pgid: i64, started: Option<u64>) -> Stopped {
 
 /// Stops the group (TERM, then KILL) and says what became of it.
 pub(crate) async fn stop(pgid: i64, started: Option<u64>) -> Stopped {
-    match state(pgid, started) {
-        Stopped::Alive => {}
-        other => return other,
-    }
-    unsafe { libc::kill(-(pgid as libc::pid_t), libc::SIGTERM) };
-    for _ in 0..30 {
-        if let Probe::Gone = probe(pgid) {
-            return Stopped::Gone;
+    stop_checked(
+        || state(pgid, started),
+        |signal| unsafe { libc::kill(-(pgid as libc::pid_t), signal) == 0 },
+    )
+    .await
+}
+
+async fn stop_checked(
+    mut state: impl FnMut() -> Stopped,
+    mut signal: impl FnMut(i32) -> bool,
+) -> Stopped {
+    for sig in [libc::SIGTERM, libc::SIGKILL] {
+        match state() {
+            Stopped::Alive => {}
+            other => return other,
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    unsafe { libc::kill(-(pgid as libc::pid_t), libc::SIGKILL) };
-    for _ in 0..30 {
-        match probe(pgid) {
-            Probe::Gone => return Stopped::Gone,
-            Probe::Uncertain => return Stopped::Uncertain,
-            Probe::Alive => tokio::time::sleep(Duration::from_millis(100)).await,
+        if !signal(sig) {
+            return if state().gone() {
+                Stopped::Gone
+            } else {
+                Stopped::Uncertain
+            };
+        }
+        for _ in 0..30 {
+            match state() {
+                Stopped::Alive => {}
+                other => return other,
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
-    Stopped::Alive
+    state()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn lost_identity_prevents_escalation() {
+        let mut probes = 0;
+        let mut signals = vec![];
+        let stopped = stop_checked(
+            || {
+                probes += 1;
+                if probes == 1 {
+                    Stopped::Alive
+                } else {
+                    Stopped::Uncertain
+                }
+            },
+            |s| {
+                signals.push(s);
+                true
+            },
+        )
+        .await;
+        assert_eq!(stopped, Stopped::Uncertain);
+        assert_eq!(signals, vec![libc::SIGTERM]);
+        assert!(!ours(std::process::id() as i64, None));
+    }
 
     #[tokio::test]
     async fn a_group_is_stopped_with_proof() {
