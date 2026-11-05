@@ -51,7 +51,7 @@ export function PersonasSection({ bot }: { bot?: string }) {
   if (L.s === "error") return <Empty title={L.err} />
   const xs = bot ? L.data.filter((p) => p.bot_id === bot) : L.data
   const create = async () => {
-    const p = await act(() => channelsApi.newPersona({ name: "新身份", bot_id: bot ?? "steve", intro: "我是新身份。", reveal: { name: true, role: true, ai: true, steve: false, owner: false } }))
+    const p = await act(() => channelsApi.newPersona({ name: t("channels:persona.newName"), bot_id: bot ?? "steve", intro: t("channels:persona.newIntro"), reveal: { name: true, role: true, ai: true, steve: false, owner: false } }))
     if (p) go("#/channels/personas/" + p.id)
   }
   return (

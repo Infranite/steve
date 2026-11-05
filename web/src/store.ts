@@ -112,7 +112,7 @@ export const HARNESS: Record<string, string> = { "claude-code": "Claude Code", c
 export const ACC: Record<string, string> = live(["inherit", "manual", "auto"] as const, (k) => t(`core:acc.${k}`))
 export const PERM: Record<string, string> = live(["plan", "default", "acceptEdits", "auto"] as const, (k) => t(`core:perm.${k}`))
 /* a label in the current language, or the Hub value itself */
-const accKey = (label: string) => Object.keys(ACC).find((k) => ACC[k] === label) ?? (label in ACC ? label : "inherit")
+export const accKey = (label: string) => Object.keys(ACC).find((k) => ACC[k] === label) ?? (label in ACC ? label : "inherit")
 
 /* ───────── time labels ───────── */
 export const tm = (ts: number | null | undefined) => pastTime(ts)
