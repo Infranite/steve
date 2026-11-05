@@ -34,6 +34,16 @@ pub enum Part {
         artifact: ArtifactRef,
         name: String,
     },
+    /// A change to one file, as shown to people: `path` relative to the workspace when it is inside,
+    /// the texts bounded (a preview, not the file).
+    Diff {
+        path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        old: Option<String>,
+        new: String,
+        added: u32,
+        removed: u32,
+    },
 }
 
 /// A blob the Hub keeps; a Node fetches its bytes ([`crate::ports::HubFiles`]) and checks the hash.

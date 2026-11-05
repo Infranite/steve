@@ -93,6 +93,10 @@ pub enum EventBody {
     Usage {
         report: UsageReport,
     },
+    /// The agent's plan as it stands (replaces the previous one).
+    Plan {
+        entries: Vec<PlanEntry>,
+    },
     WorkspaceChanged {
         workspace: WorkspaceRef,
         revision: Revision,
@@ -106,6 +110,13 @@ pub enum EventBody {
         code: String,
         safe_text: String,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanEntry {
+    pub content: String,
+    /// `pending`, `in_progress`, `completed`.
+    pub status: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -272,6 +283,9 @@ pub struct ToolView {
     pub name: String,
     pub category: ToolCategory,
     pub title: String,
+    /// What it works on, for people: a path relative to the workspace, a command, a query.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
     pub phase: ToolPhase,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action: Option<Action>,
