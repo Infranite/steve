@@ -57,8 +57,53 @@ struct Sub {
     ping: Interval,
     /// `None`: a legacy subscriber (no cursor), served exactly as before
     resume: Option<Resume>,
-    /// chunks to write before anything else (a replay)
-    pending: VecDeque<Bytes>,
+    /// what to write before anything else (a replay)
+    pending: Pending,
+}
+
+/// One queued piece of a replay.
+enum Part {
+    /// a replayed frame, written as `id: <epoch>:<id>` + its bytes when its chunk is built
+    Frame(Arc<Frame>, u64),
+    /// bytes written as they are (the trailing gap, a reset)
+    Bytes(Bytes),
+}
+
+/// A replay waiting to be written. It holds the frames the log handed out (shared `Arc`s), not copies of
+/// their bytes: chunks of about [`CHUNK`] bytes are built one at a time as the stream is polled, so a resume
+/// from the start of a full window costs one chunk of memory per subscriber, not the whole window.
+#[derive(Default)]
+struct Pending {
+    parts: VecDeque<Part>,
+    /// the bus epoch the `id:` lines carry (constant for a bus)
+    epoch: Arc<str>,
+}
+
+impl Pending {
+    fn push(&mut self, p: Part) {
+        self.parts.push_back(p);
+    }
+
+    /// The next chunk: queued parts gathered until it reaches [`CHUNK`] bytes; `None` when nothing waits.
+    fn pop_front(&mut self) -> Option<Bytes> {
+        let first = self.parts.pop_front()?;
+        let mut buf: Vec<u8> = Vec::new();
+        let mut part = Some(first);
+        while let Some(p) = part.take() {
+            match p {
+                Part::Frame(f, id) => {
+                    buf.extend_from_slice(format!("id: {}:{id}\n", self.epoch).as_bytes());
+                    buf.extend_from_slice(&f.bytes);
+                }
+                Part::Bytes(b) => buf.extend_from_slice(&b),
+            }
+            if buf.len() >= CHUNK {
+                break;
+            }
+            part = self.parts.pop_front();
+        }
+        Some(Bytes::from(buf))
+    }
 }
 
 fn with_id(epoch: &str, id: u64, bytes: &[u8]) -> Vec<u8> {
@@ -93,7 +138,7 @@ impl Sub {
                 bus: bus.clone(),
                 last: 0,
             }),
-            pending: VecDeque::new(),
+            pending: Pending::default(),
         };
         sub.write_replay(replay);
         sub
@@ -104,28 +149,26 @@ impl Sub {
         let Some(r) = self.resume.as_mut() else {
             return;
         };
-        let epoch = r.bus.epoch().to_string();
+        if *self.pending.epoch != *r.bus.epoch() {
+            self.pending.epoch = r.bus.epoch().into();
+        }
         match replay {
             Replay::Frames { frames, head } => {
-                let mut buf: Vec<u8> = Vec::new();
+                // only the Arcs are kept here; bytes are copied chunk by chunk in `Pending::pop_front`
                 for f in frames {
                     let Some(id) = f.id else { continue };
                     if id <= r.last || !f.visible_to(&self.ws) {
                         continue;
                     }
-                    buf.extend_from_slice(&with_id(&epoch, id, &f.bytes));
-                    if buf.len() >= CHUNK {
-                        self.pending
-                            .push_back(Bytes::from(std::mem::take(&mut buf)));
-                    }
+                    self.pending.push(Part::Frame(f, id));
                 }
-                buf.extend_from_slice(gap_frame());
-                self.pending.push_back(Bytes::from(buf));
+                self.pending
+                    .push(Part::Bytes(Bytes::from_static(gap_frame())));
                 r.last = r.last.max(head);
             }
             Replay::Reset { head } => {
                 self.pending
-                    .push_back(Bytes::from(reset_frame(&epoch, head)));
+                    .push(Part::Bytes(Bytes::from(reset_frame(r.bus.epoch(), head))));
                 r.last = head;
             }
         }
@@ -243,7 +286,7 @@ pub fn events(
             ws,
             ping: interval_at(Instant::now() + PING_EVERY, PING_EVERY),
             resume: None,
-            pending: VecDeque::new(),
+            pending: Pending::default(),
         },
     };
     stream::unfold(sub, Sub::next)
@@ -310,7 +353,7 @@ mod tests {
             rx,
             ping: interval_at(Instant::now() + PING_EVERY, PING_EVERY),
             resume: None,
-            pending: VecDeque::new(),
+            pending: Pending::default(),
         };
         tx.send(frame(Scope::All)).unwrap();
         let first = sub.rx.recv().await.unwrap().bytes.clone();
@@ -337,7 +380,7 @@ mod tests {
             rx,
             ping: interval_at(Instant::now() + PING_EVERY, PING_EVERY),
             resume: None,
-            pending: VecDeque::new(),
+            pending: Pending::default(),
         };
         tx.send(Arc::new(Frame {
             bytes: Bytes::from_static(b"data: secret\n\n"),
@@ -409,7 +452,7 @@ mod tests {
                 rx: bus.subscribe(),
                 ping: interval_at(Instant::now() + PING_EVERY, PING_EVERY),
                 resume: None,
-                pending: VecDeque::new(),
+                pending: Pending::default(),
             };
             let mut watch = bus.subscribe();
             item(&bus, "ST-1");
@@ -537,7 +580,7 @@ mod tests {
                     bus: bus.clone(),
                     last: c.n,
                 }),
-                pending: VecDeque::new(),
+                pending: Pending::default(),
             };
             let out = drain(&mut sub);
             assert!(!out.contains("\"type\":\"workspace\""), "{out}");
@@ -549,6 +592,49 @@ mod tests {
                 out.ends_with("data: {\"type\":\"stream.gap\"}\n\n"),
                 "{out}"
             );
+        }
+
+        #[tokio::test]
+        async fn a_large_replay_is_queued_as_shared_frames_and_written_chunk_by_chunk() {
+            let bus = Bus::with_window(64, usize::MAX);
+            let mut watch = bus.subscribe();
+            let c = bus.cursor();
+            let big = "x".repeat(100 * 1024);
+            for i in 0..40 {
+                in_ws(&bus, &format!("{i}-{big}"), "a");
+            }
+            let frames = sent(&mut watch, 40).await;
+            let mut sub = Sub::resumed(&bus, "a".into(), &c.to_string());
+            // resuming copies no frame bytes: the queue holds the bus's own Arcs
+            let queued: Vec<&Arc<Frame>> = sub
+                .pending
+                .parts
+                .iter()
+                .filter_map(|p| match p {
+                    Part::Frame(f, _) => Some(f),
+                    Part::Bytes(_) => None,
+                })
+                .collect();
+            assert_eq!(queued.len(), 40);
+            for (q, f) in queued.iter().zip(&frames) {
+                assert!(Arc::ptr_eq(q, f));
+            }
+            // chunks are built one at a time, each about CHUNK bytes
+            let e = bus.epoch().to_string();
+            let mut out: Vec<u8> = vec![];
+            let mut chunks = 0;
+            while let Some(b) = sub.pending.pop_front() {
+                assert!(b.len() < CHUNK + 110 * 1024, "{}", b.len());
+                out.extend_from_slice(&b);
+                chunks += 1;
+            }
+            assert!(chunks > 10, "{chunks}");
+            let mut want: Vec<u8> = vec![];
+            for f in &frames {
+                want.extend_from_slice(&with_id(&e, f.id.unwrap(), &f.bytes));
+            }
+            want.extend_from_slice(gap_frame());
+            assert!(out == want, "replayed bytes differ");
         }
 
         #[tokio::test]
