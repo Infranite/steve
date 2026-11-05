@@ -454,9 +454,16 @@ impl Actor {
                     let Some(mut row) = t.session(&session)? else {
                         return Ok(());
                     };
+                    let current = t.open_ops_of(&session)?.into_iter().any(|(id, _)| id == op);
+                    if row.view.phase != SessionPhase::Opening || !current {
+                        return Err(ApiError::new(ErrorCode::Stale, "obsolete open result"));
+                    }
                     let state = match &view {
                         Ok(v) => {
                             row.view = v.clone();
+                            row.acp_id = v.resume.as_ref().map(ToString::to_string);
+                            row.view.revision = Revision::new(format!("r{}", t.bump("revision")?))
+                                .map_err(internal)?;
                             row.view.phase = SessionPhase::Ready;
                             done_state(OperationResult::Session(row.view.clone()))
                         }
@@ -493,7 +500,38 @@ impl Actor {
                 }
                 match result {
                     Ok(l) => {
+                        let exec = self.run.as_ref().expect("checked").exec.clone();
+                        let saved = self.tx(|t| {
+                            let mut row = t
+                                .session(&self.session)?
+                                .ok_or_else(|| ApiError::new(ErrorCode::Stale, "session gone"))?;
+                            if row.view.active.as_ref() != Some(&exec) {
+                                return Err(ApiError::new(
+                                    ErrorCode::Stale,
+                                    "obsolete start result",
+                                ));
+                            }
+                            row.acp_id = Some(l.acp_id.clone());
+                            row.view.effective = l.view.effective.clone();
+                            row.view.effective_permissions = l.view.effective_permissions;
+                            row.view.resume = l.view.resume.clone();
+                            row.view.revision = Revision::new(format!("r{}", t.bump("revision")?))
+                                .map_err(internal)?;
+                            t.put_session(&row)
+                        });
                         self.live = Some(l.into());
+                        if saved.is_err() {
+                            if self.stop_process().await.gone() {
+                                self.end(failure(
+                                    Outcome::Failed,
+                                    internal("cannot save opened session"),
+                                    false,
+                                ));
+                            } else {
+                                self.unknown_end("cannot save or stop opened session");
+                            }
+                            return;
+                        }
                         self.prepare(tok);
                     }
                     Err(e) => {
@@ -1389,53 +1427,36 @@ async fn open_harness(
         }
     };
     let (new_id, model, effort) = seen.0.into_inner().unwrap();
-    let saved = inner.j.tx(|t| {
-        let Some(mut r) = t.session(session)? else {
-            return Err(ApiError::new(ErrorCode::Invalid, "the session is gone"));
-        };
-        if let Some(a) = new_id {
-            r.acp_id = Some(a);
-        }
-        // what was asked and confirmed by the handshake; what the harness reported where it did
-        r.view.effective = r.open.choice.clone();
-        if model.is_some() {
-            r.view.effective.model = model;
-        }
-        if effort.is_some() {
-            r.view.effective.effort = effort;
-        }
-        r.view.effective_permissions = r.open.policy.permissions;
-        r.view.resume = r
-            .acp_id
-            .clone()
-            .map(ResumeHandle::new)
-            .transpose()
-            .ok()
-            .flatten();
-        r.view.revision = Revision::new(format!("r{}", t.bump("revision")?)).map_err(internal)?;
-        t.put_session(&r)?;
-        Ok(r.view)
-    });
-    let failed_after = match saved {
-        Ok(view) if !conn.has_exited() => {
-            inner.wake.notify_one();
-            return Ok(LiveNew {
-                conn,
-                generation,
-                acp_id: opened.acp_id,
-                image: opened.image,
-                pgid,
-                started,
-                view,
-            });
-        }
-        Ok(_) => ApiError::new(ErrorCode::Offline, "adapter exited"),
-        Err(e) => e,
-    };
-    if procs::stop(pgid, started).await.gone() {
-        let _ = inner.j.tx(|t| t.drop_proc(session, pgid));
+    // Tasks return candidates only. The actor commits them against its operation/attempt fence.
+    let mut view = row.view;
+    view.effective = row.open.choice;
+    if model.is_some() {
+        view.effective.model = model;
     }
-    Err(failed_after)
+    if effort.is_some() {
+        view.effective.effort = effort;
+    }
+    view.effective_permissions = row.open.policy.permissions;
+    view.resume = new_id
+        .or(Some(opened.acp_id.clone()))
+        .map(ResumeHandle::new)
+        .transpose()
+        .map_err(internal)?;
+    if conn.has_exited() {
+        if procs::stop(pgid, started).await.gone() {
+            inner.j.tx(|t| t.drop_proc(session, pgid))?;
+        }
+        return Err(ApiError::new(ErrorCode::Offline, "adapter exited"));
+    }
+    Ok(LiveNew {
+        conn,
+        generation,
+        acp_id: opened.acp_id,
+        image: opened.image,
+        pgid,
+        started,
+        view,
+    })
 }
 
 /// The token figures of the prompt's answer: the main loop's, and per model everything.

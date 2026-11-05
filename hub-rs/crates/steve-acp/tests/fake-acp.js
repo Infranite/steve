@@ -99,7 +99,7 @@ process.stdin.on("data", (d) => {
     log(m)
     if (m.id != null && !m.method) { const w = waiting.get(m.id); waiting.delete(m.id); w?.(m.error ? { error: m.error } : m.result); continue }
     if (m.method === "initialize") send({ id: m.id, result: { protocolVersion: 1, agentCapabilities: { loadSession: true, ...(process.env.FAKE_ACP_IMAGE ? { promptCapabilities: { image: true } } : {}) } } })
-    else if (m.method === "session/new") { sid = "fake-" + Math.random().toString(36).slice(2); send({ id: m.id, result: { sessionId: sid, ...session() } }) }
+    else if (m.method === "session/new") { sid = "fake-" + Math.random().toString(36).slice(2); setTimeout(() => send({ id: m.id, result: { sessionId: sid, ...session() } }), Number(process.env.FAKE_ACP_OPEN_DELAY || 0)) }
     else if (m.method === "session/load") { sid = m.params.sessionId; say("replayed history"); send({ id: m.id, result: session() }) }
     else if (m.method === "session/prompt") turn(m.params.prompt.map((p) => p.text).join("\n")).then((result) => send({ id: m.id, result }), (e) => send({ id: m.id, error: { code: -32000, message: e.message } }))
     else if (m.method === "session/cancel") cancel?.()

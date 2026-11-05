@@ -1004,3 +1004,42 @@ async fn reads_that_cannot_be_confined_are_refused() {
     let e = n.open_session(now_cmd("op_o", o)).await.unwrap_err();
     assert_eq!(e.code, ErrorCode::Unsupported);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn opening_reserves_session_and_workspace_until_handshake_finishes() {
+    let t = T::new(&[("FAKE_ACP_OPEN_DELAY", "400")]);
+    let n = t.node();
+    n.prepare_workspace(now_cmd("prep", prepare_proj()))
+        .await
+        .unwrap();
+    assert!(ok(&finished(&n, "prep").await));
+    n.open_session(now_cmd("open", open_body("s")))
+        .await
+        .unwrap();
+    t.until("handshake blocked", |t| t.sent("session/new") == 1)
+        .await;
+    assert_eq!(
+        n.release_session(now_cmd("release", SessionId::new("s").unwrap()))
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::Busy
+    );
+    let w = n.workspace(ws()).await.unwrap();
+    assert_eq!(
+        n.tidy_workspace(now_cmd(
+            "tidy",
+            Tidy {
+                workspace: ws(),
+                expected: w.revision,
+                keep_branch: true
+            }
+        ))
+        .await
+        .unwrap_err()
+        .code,
+        ErrorCode::Busy
+    );
+    assert!(ok(&finished(&n, "open").await));
+    n.shutdown().await;
+}

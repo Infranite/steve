@@ -295,7 +295,7 @@ impl Tx<'_> {
             .collect()
     }
 
-    /// Executions of `session` that have not finished (running, waiting or unknown).
+    /// Every unfinished session operation, including open/configure/release and unknown.
     pub fn open_ops_of(&self, session: &SessionId) -> ApiResult<Vec<(OperationId, Op)>> {
         let rows: Vec<(String, Op)> = self.rows(
             "SELECT method, digest, receipt, execution, workspace, cancel, id FROM ops WHERE session = ?1",
@@ -303,7 +303,7 @@ impl Tx<'_> {
             |r| Ok((r.get(6)?, Self::op_row(r)?)),
         )?;
         rows.into_iter()
-            .filter(|(_, o)| o.execution.is_some() && !o.receipt.state.is_finished())
+            .filter(|(_, o)| !o.receipt.state.is_finished())
             .map(|(id, o)| Ok((OperationId::new(id).map_err(internal)?, o)))
             .collect()
     }
