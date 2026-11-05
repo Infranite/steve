@@ -927,6 +927,86 @@ async fn a_refused_reopen_does_not_wedge_the_session() {
     assert_eq!(queued, 0);
 }
 
+/// Issue: an applied event pruned from the inbox and delivered again (the Node never heard the ack)
+/// was stored again and applied a second time. It is acknowledged and nothing happens.
+#[tokio::test]
+async fn a_pruned_event_delivered_again_is_acknowledged_and_not_applied_again() {
+    let h = hub();
+    h.bind();
+    h.rt.prompt(S, "hello", "user", &[]).unwrap();
+    until("attempt", || h.attempts().len() == 1).await;
+    let exec = h.attempts()[0].clone();
+    until("running", || h.phase() == "active").await;
+    let (s, b) = text(&exec, "x");
+    h.node.emit(s, b).await.unwrap();
+    h.node.finish(&exec, build::done()).await.unwrap();
+    until("turn end", || h.ends().len() == 1).await;
+    until("applied", || {
+        h.q::<i64>("SELECT COUNT(*) FROM node_streams WHERE applied < durable") == 0
+    })
+    .await;
+    h.rt.prune_inbox(steve_store::now() + 8 * 24 * 3600 * 1000);
+    let inbox: i64 = h.q("SELECT COUNT(*) FROM node_event_inbox");
+    let events: i64 = h.q("SELECT COUNT(*) FROM events");
+    let marks: Vec<(String, i64, i64)> = h
+        .store
+        .reader(|c| {
+            let mut st =
+                c.prepare("SELECT stream,durable,applied FROM node_streams ORDER BY stream")?;
+            let v = st
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok::<_, StoreError>(v)
+        })
+        .unwrap();
+
+    let replay = h.seen.seen.lock().unwrap().clone();
+    let ack = h
+        .seen
+        .to
+        .commit(EventBatch {
+            events: replay.clone(),
+        })
+        .await
+        .unwrap();
+    let streams: std::collections::HashSet<_> =
+        replay.iter().map(|e| e.cursor.stream.clone()).collect();
+    assert_eq!(
+        ack.durable.len(),
+        streams.len(),
+        "every stream acknowledged"
+    );
+    for w in &ack.durable {
+        let top = replay
+            .iter()
+            .filter(|e| e.cursor.stream == w.stream)
+            .map(|e| e.cursor.seq)
+            .max()
+            .unwrap();
+        assert_eq!(w.seq, top);
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(h.q::<i64>("SELECT COUNT(*) FROM node_event_inbox"), inbox);
+    assert_eq!(h.q::<i64>("SELECT COUNT(*) FROM events"), events);
+    assert_eq!(
+        h.q::<i64>("SELECT COUNT(*) FROM node_event_inbox WHERE applied=0"),
+        0
+    );
+    let again: Vec<(String, i64, i64)> = h
+        .store
+        .reader(|c| {
+            let mut st =
+                c.prepare("SELECT stream,durable,applied FROM node_streams ORDER BY stream")?;
+            let v = st
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok::<_, StoreError>(v)
+        })
+        .unwrap();
+    assert_eq!(again, marks);
+    assert_eq!(h.ends().len(), 1, "the turn ended once");
+}
+
 /// Applied events past the retention go, except what is read again: the last resume handle of
 /// the session and the last cumulative cost of its harness process.
 #[tokio::test]
@@ -2469,6 +2549,49 @@ async fn a_cancel_after_an_uncertain_send_goes_once_the_node_holds_the_turn() {
     until("cancel sent", || h.count("cancel") == 1).await;
     let op: String = h.q("SELECT operation_id FROM node_commands WHERE method='start_turn'");
     assert!(h.node.cancel_requested(&OperationId::try_from(op).unwrap()));
+}
+
+/// Issue: a start_turn whose first send was uncertain and whose next send was refused before
+/// acceptance (busy) was settled by a stop as never sent, though the first send may have reached the
+/// Node: the cancel goes to the Node instead, and the attempt is not ended here.
+#[tokio::test]
+async fn a_refusal_after_an_uncertain_send_still_sends_the_cancel() {
+    let h = hub();
+    h.bind();
+    h.ready().await;
+    // the Node's stream is late: nothing says the turn started
+    *h.seen.stash.lock().unwrap() = Some(vec![]);
+    h.node.script_once("start_turn", Scripted::DropReply);
+    h.rt.prompt(S, "hello", "user", &[]).unwrap();
+    let uncertain = "SELECT COUNT(*) FROM node_commands WHERE method='start_turn' AND state='pending' AND lease_owner IS NULL AND maybe_sent=1";
+    until("uncertain", || h.q::<i64>(uncertain) == 1).await;
+    let generation: i64 =
+        h.q("SELECT lease_generation FROM node_commands WHERE method='start_turn'");
+    assert!(h.rt.cancel(S).unwrap());
+    assert_eq!(
+        h.commands("cancel"),
+        0,
+        "held back: the Node may not know it yet"
+    );
+    h.node.refuse("start_turn", Some(ErrorCode::Busy));
+    until("refused", || {
+        h.q::<i64>(&format!(
+            "SELECT COUNT(*) FROM node_commands WHERE method='start_turn' AND lease_owner IS NULL AND lease_generation>{generation}"
+        )) == 1
+    })
+    .await;
+    assert_eq!(h.q::<i64>(uncertain), 1, "still maybe sent");
+    assert!(h.ends().is_empty(), "never settled here");
+    assert!(h.rt.is_busy(S));
+    h.node.refuse("start_turn", None);
+    let late = h.seen.stash.lock().unwrap().take().unwrap();
+    for b in late {
+        h.seen.to.commit(b).await.unwrap();
+    }
+    until("cancel sent", || h.count("cancel") == 1).await;
+    let op: String = h.q("SELECT operation_id FROM node_commands WHERE method='start_turn'");
+    assert!(h.node.cancel_requested(&OperationId::try_from(op).unwrap()));
+    assert_eq!(h.count("start_turn"), 1, "it ran once");
 }
 
 /// Issue: Stop after a cancel the Node refused asks again with a new operation.

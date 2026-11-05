@@ -270,6 +270,87 @@ fn inbox_conflicts_gaps_duplicates_and_transactional_apply() {
         .unwrap();
 }
 
+/// Issue: an applied event pruned from the inbox and delivered again was stored again (applied=0),
+/// to be applied a second time.
+#[test]
+fn a_pruned_redelivery_is_not_stored_again() {
+    let t = fresh();
+    let k = StreamKey {
+        node: "n",
+        stream: "s",
+        epoch: "e",
+    };
+    t.store
+        .transaction::<_, StoreError>(|tx| {
+            assert!(inbox_insert_in(tx, k, 1, "e1", &json!({"n":1}), 1)?);
+            assert!(inbox_insert_in(tx, k, 2, "e2", &json!({"n":2}), 1)?);
+            assert!(mark_applied_in(tx, k, 1)?);
+            assert!(mark_applied_in(tx, k, 2)?);
+            // as the retention prune does
+            tx.execute(
+                "DELETE FROM node_event_inbox WHERE node_id='n' AND applied=1 AND seq=1",
+                [],
+            )?;
+            assert!(!inbox_insert_in(tx, k, 1, "e1", &json!({"n":1}), 9)?);
+            // its payload can no longer be compared: nothing is stored either way
+            assert!(!inbox_insert_in(tx, k, 1, "e1", &json!({"n":99}), 9)?);
+            let rows: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM node_event_inbox WHERE node_id='n' AND seq=1",
+                [],
+                |r| r.get(0),
+            )?;
+            assert_eq!(rows, 0);
+            assert_eq!(
+                watermarks_in(tx, k)?,
+                Watermarks {
+                    durable: 2,
+                    applied: 2
+                }
+            );
+            // the kept row still compares, and the next position is new
+            assert!(inbox_insert_in(tx, k, 2, "e2", &json!({"n":99}), 9).is_err());
+            assert!(inbox_insert_in(tx, k, 3, "e3", &json!({"n":3}), 9)?);
+            assert_eq!(watermarks_in(tx, k)?.durable, 3);
+            Ok(())
+        })
+        .unwrap();
+}
+
+/// Issue: a send refused after an uncertain one reset maybe_sent to 0, so a stop settled on the Hub
+/// a command whose first send may still reach the Node.
+#[test]
+fn maybe_sent_stays_once_a_send_was_uncertain() {
+    let t = fresh();
+    let maybe_sent = |tx: &steve_store::Tx<'_>| -> Result<i64> {
+        Ok(tx.query_row(
+            "SELECT maybe_sent FROM node_commands WHERE operation_id='op'",
+            [],
+            |r| r.get(0),
+        )?)
+    };
+    t.store
+        .transaction::<_, StoreError>(|tx| {
+            command(tx, "op", None)?;
+            assert_eq!(maybe_sent(tx)?, 0);
+            // refused before acceptance: never sent
+            let l = lease_command_in(tx, "w", 1, 10)?.unwrap();
+            assert!(!l.maybe_sent);
+            assert_eq!(maybe_sent(tx)?, 1, "in flight");
+            assert!(retry_command_in(tx, &l, 2, 2, false)?);
+            assert_eq!(maybe_sent(tx)?, 0);
+            // uncertain, then refused: still maybe sent
+            let l = lease_command_in(tx, "w", 3, 10)?.unwrap();
+            assert!(retry_command_in(tx, &l, 4, 4, true)?);
+            assert_eq!(maybe_sent(tx)?, 1);
+            let l = lease_command_in(tx, "w", 5, 10)?.unwrap();
+            assert!(l.maybe_sent);
+            assert!(retry_command_in(tx, &l, 6, 6, false)?);
+            assert_eq!(maybe_sent(tx)?, 1);
+            Ok(())
+        })
+        .unwrap();
+}
+
 #[test]
 fn receipts_never_regress_and_terminal_conflicts_are_visible() {
     let t = fresh();
