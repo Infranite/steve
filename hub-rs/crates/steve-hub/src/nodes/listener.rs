@@ -184,6 +184,7 @@ pub async fn serve(svc: Arc<NodeService>, mut sink: FrameSink, mut stream: Frame
     let Some(paused) = install_link(&svc, &node, conn.clone(), restarted).await else {
         return;
     };
+    svc.fleet.linked(&node, hello.proto);
     if paused != admitted.paused {
         // paused or resumed since the welcome went out
         conn.notify("paused", serde_json::json!({ "paused": paused }));

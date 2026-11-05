@@ -456,6 +456,66 @@ async fn a_model_that_does_not_take_fails_the_open() {
     assert_eq!(t.sent("session/prompt"), 0, "nothing ran on another model");
 }
 
+/// The adapter's `session/set_mode` calls, in order.
+fn modes_sent(t: &T) -> Vec<String> {
+    std::fs::read_to_string(&t.log)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter(|m| m["method"] == "session/set_mode")
+        .filter_map(|m| m["params"]["modeId"].as_str().map(str::to_string))
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn auto_is_a_mode_of_its_own_at_open_and_configure() {
+    let t = T::new(&[]);
+    let n = t.node();
+    n.prepare_workspace(now_cmd("op_prep", prepare_proj()))
+        .await
+        .unwrap();
+    assert!(ok(&finished(&n, "op_prep").await));
+    let mut o = open_body("s_1");
+    o.policy.permissions = PermissionMode::Auto;
+    n.open_session(now_cmd("op_open", o)).await.unwrap();
+    let s = finished(&n, "op_open").await;
+    assert!(ok(&s), "{s:?}");
+    let v = n.session(SessionId::new("s_1").unwrap()).await.unwrap();
+    assert_eq!(v.effective_permissions, PermissionMode::Auto);
+    assert_eq!(modes_sent(&t), ["auto"], "Claude Code's own auto mode");
+    // away and back: Ask is set explicitly, then auto again
+    for (op, p) in [
+        ("op_cfg_ask", PermissionMode::Ask),
+        ("op_cfg_auto", PermissionMode::Auto),
+    ] {
+        let v = n.session(SessionId::new("s_1").unwrap()).await.unwrap();
+        let mut policy = policy();
+        policy.permissions = p;
+        n.configure_session(now_cmd(
+            op,
+            ConfigureSession {
+                session: SessionId::new("s_1").unwrap(),
+                expected: v.revision,
+                choice: choice(),
+                policy,
+            },
+        ))
+        .await
+        .unwrap();
+        let s = finished(&n, op).await;
+        assert!(ok(&s), "{op}: {s:?}");
+        let v = n.session(SessionId::new("s_1").unwrap()).await.unwrap();
+        assert_eq!(v.effective_permissions, p);
+    }
+    assert_eq!(modes_sent(&t), ["auto", "default", "auto"]);
+    // a turn runs in it
+    let mut tu = turn("s_1", "t_1", "a_1", "@say auto");
+    tu.run.policy.permissions = PermissionMode::Auto;
+    n.start_turn(now_cmd("op_t1", tu)).await.unwrap();
+    t.until("the end", |t| !t.ended().is_empty()).await;
+    assert_eq!(t.text(), "auto");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_crashed_adapter_interrupts_and_the_next_attempt_starts_fresh() {
     let t = T::new(&[]);

@@ -293,6 +293,10 @@ impl Client {
             .and_then(|b| b["id"].as_str())
             .expect("a claude-code bot")
             .to_string();
+        self.item_on(h, goal, &bot).await
+    }
+    /// A new item (no project) on `bot`, and the session it opened.
+    async fn item_on(&self, h: &Home, goal: &str, bot: &str) -> String {
         let (st, i) = self
             .call(
                 "POST",
@@ -981,4 +985,96 @@ async fn another_nodes_session_is_refused() {
     // and A's turn is untouched
     assert_eq!(n.got("iso-3M"), 1);
     assert_eq!(attempts(&h, &sid, "unknown"), 0);
+}
+
+/// B1a: a Node of an earlier release (protocol 0.1) cannot decode the `auto` permission mode. A
+/// new session of an `auto` Bot is not bound to it (it would refuse the open, and every later
+/// message with it), while other Bots' sessions still are; once the Node links speaking the
+/// protocol that has `auto`, the next `auto` session is bound to it.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_auto_bot_session_skips_a_remote_node_that_predates_auto() {
+    let h = Home::new();
+    let mut hub = spawn_hub(&h, None);
+    serving(&h).await;
+    let c = Client::login(&h).await;
+    let id = Identity::generate().expect("key");
+    let node = pair_in_process(&h, &c, &id).await;
+    hub.kill();
+    let _hub = spawn_hub(&h, Some(node.as_str()));
+    serving(&h).await;
+    let c = Client::login(&h).await;
+    let hub_id = h
+        .one(
+            "SELECT value FROM settings WHERE workspace_id='default' AND key=?",
+            "node.hub_id",
+        )
+        .expect("hub id");
+    let ws = format!("ws://127.0.0.1:{}/node/ws", h.port);
+    let old = (PROTOCOL.0, AUTO_MODE.1 - 1);
+    let fake = FakeNode::new(node.as_str());
+    let link = node_harness::dial_url_as(&ws, &hub_id, &id, &node, fake.clone(), 1, old)
+        .await
+        .expect("an older Node links");
+    fake.connect(Arc::new(RemoteSink(link.link.clone())));
+    let bot = |perm: &'static str| {
+        let c = &c;
+        async move {
+            let (st, v) = c
+                .call(
+                    "POST",
+                    "/api/bots",
+                    Some(json!({"name": format!("B1a {perm}"), "harness": "claude-code", "perm_mode": perm})),
+                )
+                .await;
+            assert_eq!(st, 200, "{v}");
+            v["id"].as_str().expect("bot id").to_string()
+        }
+    };
+    let (auto, ask) = (bot("auto").await, bot("default").await);
+    let on_node = |sid: &str| {
+        h.count(
+            &format!(
+                "SELECT COUNT(*) FROM runtime_sessions WHERE session_id=?1 AND node_id='{node}'"
+            ),
+            sid,
+        )
+    };
+
+    let plain = c.item_on(&h, "B1a 普通", &ask).await;
+    assert!(
+        wait(30, || on_node(&plain) == 1).await,
+        "a default Bot's session goes to the older Node; hub:\n{}",
+        h.log()
+    );
+    let sid = c.item_on(&h, "B1a 自动", &auto).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(
+        on_node(&sid),
+        0,
+        "an auto Bot's session stays off the older Node; hub:\n{}",
+        h.log()
+    );
+    assert_eq!(
+        h.count(
+            "SELECT COUNT(*) FROM node_commands WHERE json_extract(request,'$.body.policy.permissions')='auto' AND node_id=?",
+            node.as_str()
+        ),
+        0,
+        "nothing in auto is ever sent to it"
+    );
+
+    // the same Node, upgraded: its next link speaks auto
+    link.conn
+        .close(None, steve_node_wire::close::GOODBYE, "upgrade");
+    let fake = FakeNode::new(node.as_str());
+    let link = node_harness::dial_url(&ws, &hub_id, &id, &node, fake.clone(), 2)
+        .await
+        .expect("the upgraded Node links");
+    fake.connect(Arc::new(RemoteSink(link.link.clone())));
+    let sid = c.item_on(&h, "B1a 自动 升级后", &auto).await;
+    assert!(
+        wait(30, || on_node(&sid) == 1).await,
+        "an auto Bot's session goes to a Node that speaks auto; hub:\n{}",
+        h.log()
+    );
 }

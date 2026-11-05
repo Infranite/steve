@@ -105,6 +105,9 @@ pub enum PermissionMode {
     Ask,
     /// Edits in the workspace go through; the rest asks.
     AcceptEdits,
+    /// The harness's own judgement decides (Claude Code's `auto`: routine work goes through, the risky
+    /// rest asks). Wider than AcceptEdits, narrower than FullAccess.
+    Auto,
     /// Nothing asks. The Hub chose it and records it. It only means "no questions" within the policy:
     /// roots, network, sandbox, lease and the Hub's check of Steve's tools all still hold.
     FullAccess,

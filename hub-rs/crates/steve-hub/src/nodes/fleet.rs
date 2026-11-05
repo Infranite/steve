@@ -24,6 +24,8 @@ struct Entry {
     remote: Arc<RemoteNode>,
     runtime: Option<Arc<NodeRuntime>>,
     tools: Option<Arc<dyn HubTools>>,
+    /// The protocol of the Node's latest link since the Hub started (`None`: not linked yet).
+    proto: Option<(u16, u16)>,
 }
 
 pub struct NodeFleet {
@@ -137,6 +139,7 @@ impl NodeFleet {
             remote: RemoteNode::new(node.clone()),
             runtime: None,
             tools: None,
+            proto: None,
         });
         f(e)
     }
@@ -144,6 +147,19 @@ impl NodeFleet {
     /// The Hub's handle on the Node, linked or not.
     pub fn remote(&self, node: &NodeId) -> Arc<RemoteNode> {
         self.entry(node, |e| e.remote.clone())
+    }
+
+    /// Records the protocol the Node's hello said, for each link it opens.
+    pub fn linked(&self, node: &NodeId, proto: (u16, u16)) {
+        self.entry(node, |e| e.proto = Some(proto));
+    }
+
+    /// Whether the Node is known to speak `since` or later: its latest link said so. A Node not
+    /// linked since the Hub started counts as not, so what a minor added is never sent to it.
+    pub fn speaks(&self, node: &NodeId, since: (u16, u16)) -> bool {
+        self.entry(node, |e| {
+            e.proto.is_some_and(|p| p.0 == since.0 && p >= since)
+        })
     }
 
     /// Starts the Node's coordinator (once).

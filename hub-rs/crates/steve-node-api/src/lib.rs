@@ -33,7 +33,11 @@ pub use run::*;
 pub use tools::*;
 pub use workspace::*;
 
-/// Major.minor of this contract. A major change refuses the connection; a minor one only adds.
-pub const PROTOCOL: (u16, u16) = (0, 1);
+/// Major.minor of this contract. A major change refuses the connection; a minor one only adds, and
+/// the Hub sends what a minor added only to a Node whose hello says that minor (see [`AUTO_MODE`]).
+pub const PROTOCOL: (u16, u16) = (0, 2);
+/// The first protocol with [`PermissionMode::Auto`]: an older Node cannot decode it, so the Hub
+/// never opens or configures a session in `auto` on one.
+pub const AUTO_MODE: (u16, u16) = (0, 2);
 /// Version of [`events::NodeEvent`] bodies, separate from the transport.
 pub const EVENT_SCHEMA: u16 = 1;
