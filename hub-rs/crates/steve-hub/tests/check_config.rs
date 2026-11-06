@@ -35,7 +35,9 @@ fn check(env: &[(&str, &str)]) -> (i32, serde_json::Value, std::path::PathBuf) {
         std::net::TcpStream::connect(("127.0.0.1", port)).is_err(),
         "--check-config must not listen"
     );
-    assert!(!tmp.join("data/steve.sqlite3").exists(), "no database");
+    for d in ["data", "worktrees", "scratch", "updates"] {
+        assert!(!tmp.join(d).exists(), "{d}/ is not made");
+    }
     let code = out.status.code().expect("exit code");
     (code, report, tmp)
 }

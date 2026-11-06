@@ -38,9 +38,14 @@ pub fn check(get: impl Fn(&str) -> Option<String> + Send + Sync + 'static) -> Re
             };
         }
     };
-    for d in [&cfg.data_dir, &cfg.worktrees, &cfg.scratch] {
-        if d.exists() && !d.is_dir() {
-            errors.push(format!("STEVE_HOME: {} is not a directory", d.display()));
+    for d in [
+        &cfg.data_dir,
+        &cfg.worktrees,
+        &cfg.scratch,
+        &cfg.home.join("updates"),
+    ] {
+        if let Err(e) = creatable(d) {
+            errors.push(format!("STEVE_HOME: {e}"));
         }
     }
     if let Err(e) = crate::wire::local_node_mode(&vars, cfg.no_resume) {
@@ -48,6 +53,14 @@ pub fn check(get: impl Fn(&str) -> Option<String> + Send + Sync + 'static) -> Re
     }
     if let Err(e) = steve_modules::vault::keystore::from_env(&cfg.home, |k| vars(k)) {
         errors.push(format!("vault key store (STEVE_VAULT_KEYSTORE): {e}"));
+    }
+    if let Err(e) = steve_auth::AuthConfig::from_vars(|k| vars(k)) {
+        errors.push(format!(
+            "auth config (STEVE_OIDC_CLIENT_SECRET_FILE / STEVE_OIDC_*): {e}"
+        ));
+    }
+    if let Err(e) = steve_mail::MailConfig::from_env(|k| vars(k)) {
+        errors.push(format!("mail config: {e}"));
     }
     for h in &cfg.listen.hosts {
         if let Err(e) = std::net::TcpListener::bind((h.as_str(), 0)) {
@@ -61,6 +74,38 @@ pub fn check(get: impl Fn(&str) -> Option<String> + Send + Sync + 'static) -> Re
         errors,
         listen: cfg.listen.urls().split(", ").map(str::to_string).collect(),
     }
+}
+
+/// A start makes `d` (`create_dir_all`): it is a directory already, or its nearest existing
+/// ancestor is a directory this user can write in.
+fn creatable(d: &std::path::Path) -> Result<(), String> {
+    if d.exists() {
+        return match d.is_dir() {
+            true => Ok(()),
+            false => Err(format!("{} is not a directory", d.display())),
+        };
+    }
+    let Some(up) = d.ancestors().skip(1).find(|a| a.exists()) else {
+        return Ok(());
+    };
+    if !up.is_dir() {
+        return Err(format!(
+            "{} cannot be made: {} is not a directory",
+            d.display(),
+            up.display()
+        ));
+    }
+    use std::os::unix::ffi::OsStrExt;
+    let c = std::ffi::CString::new(up.as_os_str().as_bytes()).map_err(|e| e.to_string())?;
+    // SAFETY: a NUL-terminated path that lives through the call
+    if unsafe { libc::access(c.as_ptr(), libc::W_OK | libc::X_OK) } != 0 {
+        return Err(format!(
+            "{} cannot be made: {} is not writable by this user",
+            d.display(),
+            up.display()
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -124,6 +169,25 @@ mod tests {
         );
         let r = run(&[("STEVE_PORT", "nope")]);
         assert!(r.errors[0].starts_with("STEVE_PORT"), "{r:?}");
+        let tmp = tempfile::tempdir().expect("tmp");
+        let file = tmp.path().join("a-file");
+        std::fs::write(&file, "").expect("file");
+        let home = file.join("home").to_string_lossy().into_owned();
+        let r = run(&[
+            ("STEVE_HOME", home.as_str()),
+            ("STEVE_VAULT_KEYSTORE", "dir"),
+        ]);
+        assert!(
+            r.errors.iter().any(|e| e.contains("is not a directory")),
+            "{r:?}"
+        );
+        let r = run(&[("STEVE_OIDC_CLIENT_SECRET_FILE", "")]);
+        assert!(
+            r.errors
+                .iter()
+                .any(|e| e.contains("STEVE_OIDC_CLIENT_SECRET_FILE")),
+            "{r:?}"
+        );
         let r = run(&[("STEVE_VAULT_KEYSTORE", "dir")]);
         assert!(
             r.errors.iter().any(|e| e.contains("STEVE_VAULT_KEY_DIR")),

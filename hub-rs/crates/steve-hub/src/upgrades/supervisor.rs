@@ -122,7 +122,7 @@ pub(super) async fn check_candidate(
         })
         .unwrap_or_else(|| String::from_utf8_lossy(&out.stderr).trim().to_string());
     bail!(
-        "{} 按当前环境（steve.env）启动不了，没有排空也没有切换，当前版本照常运行。改好以下设置再升级：{errors}",
+        "{} 按当前环境（steve.env）启动不了，没有排空也没有切换，当前版本照常运行。改好 steve.env 里的以下设置，重启 Steve 服务（托管模式只在启动时读取 steve.env）后再升级：{errors}",
         manifest.version
     )
 }

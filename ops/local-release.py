@@ -412,15 +412,20 @@ def check_config(candidate, info):
     if not info.get("check_config"):
         log(f"{candidate.name} has no --check-config; its startup checks are left to the probe")
         return
-    r = subprocess.run([str(candidate / "bin/steve-hub"), "--check-config"], env=hub_env(candidate),
-                       capture_output=True, text=True, timeout=120)
+    try:
+        r = subprocess.run([str(candidate / "bin/steve-hub"), "--check-config"], env=hub_env(candidate),
+                           capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise Refused(f"不能切到 {candidate.name}：它的 --check-config 没能跑完（{e}），没有排空也没有停止，当前版本照常运行")
     try:
         report = json.loads(r.stdout)
     except ValueError:
+        report = None
+    if not isinstance(report, dict):
         report = dict(ok=False, errors=[(r.stdout + r.stderr).strip() or f"exit {r.returncode}"])
-    if r.returncode == 0 and report.get("ok"):
+    if r.returncode == 0 and report.get("ok") is True:
         return
-    errors = report.get("errors") or [f"exit {r.returncode}"]
+    errors = [str(e) for e in report.get("errors") or []] or [f"exit {r.returncode}"]
     hint = f"。{ANY_HOST_HINT}" if any(e.startswith("STEVE_HOST: 0.0.0.0") for e in errors) else ""
     raise Refused(f"不能切到 {candidate.name}：它按 {HOME / 'steve.env'} 启动不了，没有排空也没有停止，当前版本照常运行。"
                   f"改好 steve.env 再部署：{'；'.join(errors)}{hint}")
