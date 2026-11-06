@@ -242,14 +242,15 @@ impl LocalNode {
         let mut tick = tokio::time::interval(POLL);
         // the prompt's files and images, from the Hub for this execution, while the job is wanted
         for part in &spec.run.prompt {
-            let (artifact, name) = match part {
+            let (artifact, name, earlier) = match part {
                 Part::File { artifact, name } => (
                     artifact,
                     name.strip_prefix(ATTACHMENTS_DIR)
                         .unwrap_or(name)
                         .to_string(),
+                    job.earlier.contains(name),
                 ),
-                Part::Image { artifact } => (artifact, image_name(artifact)),
+                Part::Image { artifact } => (artifact, image_name(artifact), false),
                 _ => continue,
             };
             let fetch = crate::fetch(&inner, &exec, artifact);
@@ -271,7 +272,7 @@ impl LocalNode {
                     name,
                     mime: artifact.mime.clone(),
                     size: artifact.size,
-                    earlier: false,
+                    earlier,
                 }),
                 Err(e) => {
                     let failed = r::RunStatus::Failed(format!("research attachments: {e}"));

@@ -52,7 +52,9 @@ pub use heads::{
 pub use ledger::LedgerEntry;
 #[cfg(test)]
 pub(crate) use ledger::PUSH_DEADLINE;
-pub use node_jobs::NodePrint;
+pub use node_jobs::{
+    News, NodePrint, RESEARCH_GRANT, ResearchAttempt, ResearchFile, ResearchJobRun,
+};
 pub use workspace::WorkspaceFact;
 
 /// Retries of a turn after a passing failure (gateway 5xx) with no tool run, and their waits.

@@ -1,18 +1,115 @@
 //! The thread's research seam (`steve_core::thread::Researcher`) on the read-only executor of
 //! steve-research (thread-routing R2): the prompt is filled from what the thread collected, the run's
 //! events become drafts and tool rows, and its end becomes the thread's `RunEnd`.
+//!
+//! With `STEVE_NODE_JOBS=research` (and the local Node) each attempt of a run is a job on the
+//! local Node instead (N0d-9): the Hub keeps the policy (admission, the attempts in order, the
+//! prompt, the answer's shape, the statistics row, the audit), the Node runs one model per job with
+//! the same three read-only layers, and Steve's research tools reach the Hub through the Node's
+//! endpoint with the job's grant.
 
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use steve_core::thread::{ResearchOutcome, ResearchRequest, ResearchSink, RunEnd, ToolSeen};
+use steve_node_api as api;
 use steve_research as r;
+
+use super::node_runtime::{News, NodeRuntime, ResearchAttempt, ResearchFile};
+
+/// How long a run on the Node may take when the setting names no wall time: the turn limit. Only a
+/// backstop (the Node needs a deadline); the idle detector ends a stuck run long before.
+const NODE_DEADLINE: Duration = Duration::from_secs(6 * 3600);
+
+/// Research on the local Node's jobs.
+pub struct NodeResearch {
+    pub runtime: Arc<NodeRuntime>,
+    /// The local Node's roots now: a run's directories are named under them.
+    pub roots: Arc<dyn Fn() -> Vec<steve_node::Root> + Send + Sync>,
+}
 
 pub struct ResearchAdapter {
     pub researcher: r::Researcher,
     pub db: steve_core::repo::Db,
     pub data_dir: PathBuf,
+    node: Option<NodeResearch>,
+    admission: Admission,
+}
+
+/// The runs admitted on the Node path: one per workspace, `max_global` at once, none once closed
+/// (what [`r::Researcher::start`] enforces in process).
+#[derive(Default)]
+struct Admission(Mutex<Admitted>);
+
+#[derive(Default)]
+struct Admitted {
+    closed: bool,
+    /// run → (workspace, its shutdown flag)
+    runs: HashMap<String, (String, Arc<AtomicBool>)>,
+}
+
+/// A run's place in the [`Admission`], given back when dropped.
+struct Slot<'a> {
+    admission: &'a Admission,
+    run: String,
+    halt: Arc<AtomicBool>,
+}
+
+impl Drop for Slot<'_> {
+    fn drop(&mut self) {
+        self.admission.0.lock().unwrap().runs.remove(&self.run);
+    }
+}
+
+impl Admission {
+    fn admit(&self, run: &str, ws: &str, max: usize) -> Result<Slot<'_>, r::ResearchError> {
+        let mut a = self.0.lock().unwrap();
+        if a.closed {
+            return Err(r::ResearchError::Closed);
+        }
+        if let Some((rid, _)) = a.runs.iter().find(|(_, (w, _))| w == ws) {
+            return Err(r::ResearchError::Busy {
+                run_id: rid.clone(),
+            });
+        }
+        if a.runs.len() >= max {
+            return Err(r::ResearchError::Full);
+        }
+        let halt = Arc::new(AtomicBool::new(false));
+        a.runs
+            .insert(run.to_string(), (ws.to_string(), halt.clone()));
+        Ok(Slot {
+            admission: self,
+            run: run.to_string(),
+            halt,
+        })
+    }
+
+    /// No new run; the running ones are told to stop.
+    fn close(&self) {
+        let mut a = self.0.lock().unwrap();
+        a.closed = true;
+        for (_, halt) in a.runs.values() {
+            halt.store(true, Ordering::SeqCst);
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.0.lock().unwrap().runs.is_empty()
+    }
+}
+
+/// The message for a run that was not admitted (zh-CN, stored with the answer).
+fn refused(e: &r::ResearchError) -> String {
+    match e {
+        r::ResearchError::Busy { .. } => "这个工作空间已经有一个研究在跑".into(),
+        r::ResearchError::Closed => "服务正在关闭，研究已停止".into(),
+        r::ResearchError::Full => "同时在跑的研究太多，稍后再问".into(),
+    }
 }
 
 impl ResearchAdapter {
@@ -24,7 +121,15 @@ impl ResearchAdapter {
             researcher: r::Researcher::new(cfg),
             db,
             data_dir,
+            node: None,
+            admission: Admission::default(),
         }
+    }
+
+    /// Runs research as jobs on the local Node (`STEVE_NODE_JOBS=research`).
+    pub fn on_node(mut self, node: NodeResearch) -> Self {
+        self.node = Some(node);
+        self
     }
 
     fn request(&self, q: &ResearchRequest) -> r::ResearchRequest {
@@ -112,30 +217,14 @@ impl ResearchAdapter {
 
 impl ResearchAdapter {
     /// Books the run's tokens as a `research` call (stats.md §2.4), on the model that ran it.
-    fn record(&self, ws: &str, out: &r::ResearchOutcome) {
+    fn record(
+        &self,
+        ws: &str,
+        out: &r::ResearchOutcome,
+        usage: Vec<steve_core::gateway::ModelUsage>,
+        codex: bool,
+    ) {
         let model = out.model.clone().unwrap_or_default();
-        let codex = out.result.as_ref().is_some_and(|d| d["harness"] == "codex");
-        let usage = match out.result.as_ref() {
-            // Codex reports one usage object for the turn, input counting the cached part
-            Some(d) if codex => d
-                .get("usage")
-                .filter(|u| u.is_object())
-                .map(|u| {
-                    vec![steve_core::gateway::ModelUsage {
-                        model: model.clone(),
-                        tokens: steve_stats::normalize(
-                            "codex",
-                            steve_stats::RawUsage::from_json(u),
-                            true,
-                        ),
-                        cost_reported: None,
-                        detail: serde_json::json!({"scope": "main"}),
-                    }]
-                })
-                .unwrap_or_default(),
-            Some(d) => steve_core::gateway::usage_of(d, &model),
-            None => vec![],
-        };
         let ok = matches!(out.status, r::RunStatus::Done);
         let a = steve_core::gateway::Attempt {
             result: if ok {
@@ -163,54 +252,45 @@ impl ResearchAdapter {
             tracing::warn!("stats: research usage not recorded: {e}");
         }
     }
-}
 
-#[async_trait]
-impl steve_core::thread::Researcher for ResearchAdapter {
-    async fn shutdown(&self, grace: Duration) -> bool {
-        self.researcher.shutdown(grace).await
-    }
-    async fn research(&self, q: ResearchRequest, sink: &dyn ResearchSink) -> ResearchOutcome {
-        let mut run = match self.researcher.start(self.request(&q)) {
-            Ok(run) => run,
-            Err(e) => {
-                return ResearchOutcome {
-                    end: RunEnd::Failed,
-                    error: Some(match e {
-                        r::ResearchError::Busy { .. } => "这个工作空间已经有一个研究在跑".into(),
-                        r::ResearchError::Closed => "服务正在关闭，研究已停止".into(),
-                        r::ResearchError::Full => "同时在跑的研究太多，稍后再问".into(),
-                    }),
-                    ..Default::default()
-                };
-            }
+    /// The tokens of an in-process run, from the harness's closing result.
+    fn usage_of_result(out: &r::ResearchOutcome) -> (Vec<steve_core::gateway::ModelUsage>, bool) {
+        let model = out.model.clone().unwrap_or_default();
+        let codex = out.result.as_ref().is_some_and(|d| d["harness"] == "codex");
+        let usage = match out.result.as_ref() {
+            // Codex reports one usage object for the turn, input counting the cached part
+            Some(d) if codex => d
+                .get("usage")
+                .filter(|u| u.is_object())
+                .map(|u| {
+                    vec![steve_core::gateway::ModelUsage {
+                        model: model.clone(),
+                        tokens: steve_stats::normalize(
+                            "codex",
+                            steve_stats::RawUsage::from_json(u),
+                            true,
+                        ),
+                        cost_reported: None,
+                        detail: serde_json::json!({"scope": "main"}),
+                    }]
+                })
+                .unwrap_or_default(),
+            Some(d) => steve_core::gateway::usage_of(d, &model),
+            None => vec![],
         };
-        let stopper = run.stopper();
-        let mut stopped = false;
-        loop {
-            tokio::select! {
-                ev = run.next_event() => match ev {
-                    None => break,
-                    Some(r::ResearchEvent::Text { text }) => sink.text(&text),
-                    Some(r::ResearchEvent::ToolDone(t)) => sink.tool(&ToolSeen {
-                        name: t.name,
-                        brief: t.brief,
-                        ok: t.ok.unwrap_or(true),
-                        error: t.error.map(|e| e.code().to_string()),
-                        ms: t.ms as i64,
-                    }),
-                    Some(_) => {}
-                },
-                _ = tokio::time::sleep(Duration::from_millis(50)) => {
-                    if !stopped && q.stop.load(std::sync::atomic::Ordering::SeqCst) {
-                        stopped = true;
-                        stopper.stop();
-                    }
-                }
-            }
-        }
-        let out = run.finish().await;
-        self.record(&q.ws, &out);
+        (usage, codex)
+    }
+
+    /// The run's end for the thread: its statistics row, the audit of a violation, and the
+    /// thread's outcome.
+    fn conclude(
+        &self,
+        q: &ResearchRequest,
+        out: r::ResearchOutcome,
+        usage: Vec<steve_core::gateway::ModelUsage>,
+        codex: bool,
+    ) -> ResearchOutcome {
+        self.record(&q.ws, &out, usage, codex);
         let (end, error) = match &out.status {
             r::RunStatus::Done => (RunEnd::Done, None),
             r::RunStatus::Stopped => (RunEnd::Stopped, None),
@@ -242,6 +322,417 @@ impl steve_core::thread::Researcher for ResearchAdapter {
             turns: out.turns as i64,
             first_text_ms: out.first_text_ms.map(|m| m as i64),
             error,
+        }
+    }
+
+    /// A run in this process ([`r::Researcher`]).
+    async fn in_process(&self, q: &ResearchRequest, sink: &dyn ResearchSink) -> ResearchOutcome {
+        let mut run = match self.researcher.start(self.request(q)) {
+            Ok(run) => run,
+            Err(e) => {
+                return ResearchOutcome {
+                    end: RunEnd::Failed,
+                    error: Some(refused(&e)),
+                    ..Default::default()
+                };
+            }
+        };
+        let stopper = run.stopper();
+        let mut stopped = false;
+        loop {
+            tokio::select! {
+                ev = run.next_event() => match ev {
+                    None => break,
+                    Some(r::ResearchEvent::Text { text }) => sink.text(&text),
+                    Some(r::ResearchEvent::ToolDone(t)) => sink.tool(&ToolSeen {
+                        name: t.name,
+                        brief: t.brief,
+                        ok: t.ok.unwrap_or(true),
+                        error: t.error.map(|e| e.code().to_string()),
+                        ms: t.ms as i64,
+                    }),
+                    Some(_) => {}
+                },
+                _ = tokio::time::sleep(Duration::from_millis(50)) => {
+                    if !stopped && q.stop.load(Ordering::SeqCst) {
+                        stopped = true;
+                        stopper.stop();
+                    }
+                }
+            }
+        }
+        let out = run.finish().await;
+        let (usage, codex) = Self::usage_of_result(&out);
+        self.conclude(q, out, usage, codex)
+    }
+
+    /// A run as jobs on the local Node: admitted here, its attempts planned here
+    /// ([`r::plan`]) and tried in order ([`r::drive`]), one job per attempt. A run whose
+    /// directories are under none of the Node's roots runs in process.
+    async fn on_local_node(
+        &self,
+        node: &NodeResearch,
+        q: &ResearchRequest,
+        sink: &dyn ResearchSink,
+    ) -> ResearchOutcome {
+        let cfg = self.researcher.config();
+        let slot = match self.admission.admit(&q.run, &q.ws, cfg.max_global) {
+            Ok(s) => s,
+            Err(e) => {
+                return ResearchOutcome {
+                    end: RunEnd::Failed,
+                    error: Some(refused(&e)),
+                    ..Default::default()
+                };
+            }
+        };
+        let req = self.request(q);
+        let roots = (node.roots)();
+        let place = |p: &Path| super::workspaces::within(&roots, p);
+        let cwd = req.cwd.as_deref().map(place);
+        let readable: Vec<_> = req.add_dirs.iter().map(|p| place(p)).collect();
+        if cwd.as_ref().is_some_and(Option::is_none) || readable.iter().any(Option::is_none) {
+            tracing::warn!(
+                run = %q.run,
+                "research: a directory is under none of the local Node's roots; it runs in process"
+            );
+            let out = self.in_process(q, sink).await;
+            drop(slot);
+            return out;
+        }
+        let budget = req.budget.unwrap_or(cfg.budget);
+        let deadline = steve_store::now()
+            + i64::try_from(budget.hard.unwrap_or(NODE_DEADLINE).as_millis())
+                .unwrap_or(i64::MAX / 2);
+        // the guarantee a research job asks the Node's sandbox for (sandbox-exec, files read-only)
+        let fs = || vec!["fs-readonly".to_string()];
+        let sandbox = match cfg.sandbox {
+            r::SandboxMode::Off => api::SandboxRequirement::None,
+            r::SandboxMode::Auto => api::SandboxRequirement::AllowFallback {
+                preferred: fs(),
+                acceptable: vec![],
+            },
+            r::SandboxMode::Required => api::SandboxRequirement::Required { guarantees: fs() },
+        };
+        let base = ResearchAttempt {
+            run: q.run.clone(),
+            workspace: q.ws.clone(),
+            harness: req.harness.clone(),
+            model: String::new(),
+            effort: req.effort.clone(),
+            prompt: String::new(),
+            resume: None,
+            files: self.files(q),
+            cwd: cwd.flatten(),
+            readable: readable.into_iter().flatten().collect(),
+            budget: api::ResearchBudget {
+                max_turns: budget.max_turns,
+                max_tools: budget.max_tools,
+                idle_ms: u64::try_from(budget.idle.as_millis())
+                    .unwrap_or(u64::MAX)
+                    .max(1),
+            },
+            sandbox,
+            steve_tools: q.mcp.is_some(),
+            deadline,
+        };
+        let plans = r::plan(&req, cfg);
+        let mut runner = OnNode {
+            runtime: node.runtime.clone(),
+            base,
+            sink,
+            stop: q.stop.clone(),
+            halt: slot.halt.clone(),
+            t0: std::time::Instant::now(),
+            stopped: false,
+            first_text_ms: None,
+            model: None,
+            last: None,
+            usage: vec![],
+        };
+        let last_err = r::drive(&plans, &mut runner).await;
+        let ms = runner.t0.elapsed().as_millis() as u64;
+        let codex = req.harness == "codex" && !runner.usage.is_empty();
+        let usage = std::mem::take(&mut runner.usage)
+            .into_iter()
+            .map(steve_core::gateway::model_usage)
+            .collect();
+        let out = runner.outcome(&q.run, &q.question, last_err, ms);
+        let out = self.conclude(q, out, usage, codex);
+        drop(slot);
+        out
+    }
+
+    /// The question's attachments (then those of the message it follows up on) as the job's
+    /// files, each under a plain name of its own.
+    fn files(&self, q: &ResearchRequest) -> Vec<ResearchFile> {
+        let own = q.files.iter().map(|f| (f, false));
+        let earlier = q.earlier_files.iter().map(|f| (f, true));
+        let mut used: Vec<String> = vec![];
+        own.chain(earlier)
+            .enumerate()
+            .filter_map(|(n, (f, earlier))| {
+                let row = self.db.file(&f.id).ok().flatten()?;
+                let mut name = file_name(&row.name, n);
+                if used.contains(&name) {
+                    name = format!("{}-{name}", n + 1);
+                }
+                used.push(name.clone());
+                Some(ResearchFile {
+                    id: row.id,
+                    name,
+                    earlier,
+                })
+            })
+            .collect()
+    }
+}
+
+/// A name the Node keeps a file under: one plain path segment (separators and leading dots go,
+/// as the run's own copies are named), else a neutral one.
+fn file_name(name: &str, n: usize) -> String {
+    let s: String = name
+        .chars()
+        .map(|c| {
+            if matches!(c, '/' | '\\' | '\0') {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    let s = s.trim().trim_start_matches('.').to_string();
+    let ok = !s.is_empty() && api::RelPath::new(format!("{}{s}", api::ATTACHMENTS_DIR)).is_ok();
+    if ok {
+        s
+    } else {
+        format!("attachment-{}", n + 1)
+    }
+}
+
+/// The attempts of one run on the Node, one job each, into one view of the run.
+struct OnNode<'a> {
+    runtime: Arc<NodeRuntime>,
+    /// What every attempt shares (the plan fills in model, prompt and session).
+    base: ResearchAttempt,
+    sink: &'a dyn ResearchSink,
+    /// The user's stop.
+    stop: Arc<AtomicBool>,
+    /// The Hub's shutdown.
+    halt: Arc<AtomicBool>,
+    t0: std::time::Instant,
+    /// The Hub asked the Node to stop the attempt.
+    stopped: bool,
+    first_text_ms: Option<u64>,
+    /// The model of the last attempt.
+    model: Option<String>,
+    /// The last attempt's end.
+    last: Option<api::Completion>,
+    /// The last attempt's usage (the statistics book the attempt that ended the run).
+    usage: Vec<api::UsageReport>,
+}
+
+impl r::AttemptRunner for OnNode<'_> {
+    async fn run(&mut self, plan: &r::AttemptPlan) -> r::Attempted {
+        self.model = Some(plan.model.clone());
+        self.last = None;
+        self.usage.clear();
+        if self.stopped {
+            return r::Attempted {
+                killed: true,
+                ..Default::default()
+            };
+        }
+        let a = ResearchAttempt {
+            model: plan.model.clone(),
+            prompt: plan.prompt.clone(),
+            resume: plan.resume.clone(),
+            ..self.base.clone()
+        };
+        let mut job = match self.runtime.start_research(a).await {
+            Ok(j) => j,
+            Err(e) => {
+                return r::Attempted {
+                    error: Some(format!("Node 没能接下这次研究：{e}")),
+                    ..Default::default()
+                };
+            }
+        };
+        let mut progressed = false;
+        let mut ids = std::collections::HashSet::new();
+        let mut tick = tokio::time::interval(Duration::from_millis(50));
+        let end = loop {
+            tokio::select! {
+                n = job.next() => match n {
+                    Some(News::Text(t)) => {
+                        if !t.is_empty() {
+                            progressed = true;
+                            self.first_text_ms
+                                .get_or_insert(self.t0.elapsed().as_millis() as u64);
+                        }
+                        self.sink.text(&t);
+                    }
+                    Some(News::Tool(v)) => {
+                        progressed = true;
+                        let ok = match v.phase {
+                            api::ToolPhase::Succeeded => true,
+                            api::ToolPhase::Failed => false,
+                            _ => continue,
+                        };
+                        self.sink.tool(&ToolSeen {
+                            name: v.name,
+                            brief: v.target.unwrap_or_default(),
+                            ok,
+                            error: v.error,
+                            ms: v.duration_ms.unwrap_or(0) as i64,
+                        });
+                    }
+                    Some(News::Usage(u)) => {
+                        if ids.insert(u.report_id.clone()) {
+                            self.usage.push(u);
+                        }
+                    }
+                    Some(News::End(c)) => break Some(c),
+                    None => break None,
+                },
+                _ = tick.tick() => {
+                    if !self.stopped
+                        && (self.stop.load(Ordering::SeqCst) || self.halt.load(Ordering::SeqCst))
+                    {
+                        self.stopped = true;
+                        job.cancel();
+                    }
+                }
+            }
+        };
+        let Some(c) = end else {
+            return r::Attempted {
+                killed: self.stopped,
+                progressed,
+                error: Some("Node 没有回报这次研究的结果".into()),
+                ..Default::default()
+            };
+        };
+        let report = c.job.as_ref().map(|j| &j.end);
+        let killed = self.stopped
+            || matches!(
+                report,
+                Some(
+                    api::JobEnd::Stopped
+                        | api::JobEnd::Budget { .. }
+                        | api::JobEnd::Violated { .. }
+                )
+            );
+        let error = (c.outcome != api::Outcome::Succeeded).then(|| {
+            c.error
+                .as_ref()
+                .map(|e| e.safe_detail.clone())
+                .unwrap_or_else(|| c.stop_reason.clone())
+        });
+        let result = matches!(report, Some(api::JobEnd::Done)).then_some(Ok(()));
+        self.last = Some(c);
+        r::Attempted {
+            killed,
+            progressed,
+            result,
+            error,
+        }
+    }
+}
+
+impl OnNode<'_> {
+    /// The run's outcome from its last attempt, shaped as an in-process run's
+    /// ([`r::present`]: the answer without its offer line, the end mark, the citations).
+    fn outcome(&self, run: &str, question: &str, last_err: String, ms: u64) -> r::ResearchOutcome {
+        let c = self.last.as_ref();
+        let report = c.and_then(|c| c.job.as_ref());
+        let status = match report.map(|j| &j.end) {
+            Some(api::JobEnd::Done) => r::RunStatus::Done,
+            Some(api::JobEnd::Failed) => r::RunStatus::Failed(last_err),
+            Some(api::JobEnd::Stopped) => r::RunStatus::Stopped,
+            Some(api::JobEnd::Budget { hit }) => r::RunStatus::Budget(match hit {
+                api::BudgetHit::Time => r::BudgetHit::Time,
+                api::BudgetHit::Turns => r::BudgetHit::Turns,
+                api::BudgetHit::Tools => r::BudgetHit::Tools,
+                api::BudgetHit::Idle => r::BudgetHit::Idle,
+            }),
+            Some(api::JobEnd::Violated { rule, tool, target }) => {
+                let (tool, path) = (tool.clone(), target.clone().unwrap_or_default());
+                r::RunStatus::Violated(match rule {
+                    api::ViolationRule::Tool => r::Violation::Tool { tool },
+                    api::ViolationRule::OutOfScope => r::Violation::OutOfScope { tool, path },
+                    api::ViolationRule::Sensitive => r::Violation::Sensitive { tool, path },
+                    api::ViolationRule::BadInput => r::Violation::BadInput { tool },
+                })
+            }
+            // ended by the Hub before the Node ran it
+            None if self.stopped && c.is_some_and(|c| c.outcome == api::Outcome::Cancelled) => {
+                r::RunStatus::Stopped
+            }
+            None => r::RunStatus::Failed(last_err),
+        };
+        let raw: String = c
+            .map(|c| {
+                c.result
+                    .iter()
+                    .filter_map(|p| match p {
+                        api::Part::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let files_read = report.map(|j| j.files_read.clone()).unwrap_or_default();
+        let (answer, offer, citations) = r::present(&status, &raw, question, &files_read);
+        r::ResearchOutcome {
+            run_id: run.to_string(),
+            status,
+            model: self.model.clone(),
+            claude_session: c
+                .and_then(|c| c.continuation.as_ref())
+                .map(|h| h.to_string()),
+            answer,
+            offer,
+            citations,
+            files_read,
+            tools: vec![],
+            turns: report.map_or(0, |j| j.turns),
+            ms,
+            first_text_ms: self.first_text_ms,
+            cost_usd: None,
+            sandboxed: report.is_some_and(|j| j.sandboxed),
+            result: None,
+            raw,
+        }
+    }
+}
+
+#[async_trait]
+impl steve_core::thread::Researcher for ResearchAdapter {
+    async fn shutdown(&self, grace: Duration) -> bool {
+        if self.node.is_none() {
+            return self.researcher.shutdown(grace).await;
+        }
+        let deadline = tokio::time::Instant::now() + grace;
+        self.admission.close();
+        let in_process = self.researcher.shutdown(grace);
+        let on_node = async {
+            // each run ends once the Node said its attempt ended (its processes are gone by then)
+            while !self.admission.is_empty() {
+                if tokio::time::Instant::now() >= deadline {
+                    return false;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            true
+        };
+        let (a, b) = tokio::join!(in_process, on_node);
+        a && b
+    }
+    async fn research(&self, q: ResearchRequest, sink: &dyn ResearchSink) -> ResearchOutcome {
+        match &self.node {
+            Some(node) => self.on_local_node(node, &q, sink).await,
+            None => self.in_process(&q, sink).await,
         }
     }
 }

@@ -69,6 +69,7 @@ fn research_in_projects() -> JobSpec {
             idle_ms: 600_000,
         },
         steve_tools: true,
+        earlier: vec![],
     });
     j
 }
