@@ -17,6 +17,13 @@ English · [简体中文](README.zh-CN.md)
 
 [Features](#features) · [How it works](#how-it-works) · [Quick start](#quick-start) · [Deployment](docs/deployment.md) · [Contributing](CONTRIBUTING.md)
 
+<br>
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/screenshots/chat-dark.webp">
+  <img src="docs/assets/screenshots/chat.webp" alt="Steve's main conversation: a research answer with a suggested follow-up item, and items waiting on you" width="100%">
+</picture>
+
 </div>
 
 ---
@@ -33,6 +40,21 @@ Steve is the layer above the agents. It runs on your own machine, owns the state
 - **Bring your world in.** Feishu/Lark, email, GitHub, contacts and a knowledge base feed the same workspace, so agents work with real context.
 
 Everything stays on infrastructure you control: a single Rust binary, a SQLite database and an encrypted vault.
+
+## A look inside
+
+<table>
+<tr>
+<td width="50%"><img src="docs/assets/screenshots/inbox.webp" alt="Inbox"><br><b>Inbox</b>: deliveries to accept, pushes to approve, questions to answer, all in one place.</td>
+<td width="50%"><img src="docs/assets/screenshots/item.webp" alt="Item"><br><b>Item</b>: goal, lifecycle stage, plan, delivery with the checks that were run, and who is on it.</td>
+</tr>
+<tr>
+<td><img src="docs/assets/screenshots/session.webp" alt="Agent session"><br><b>Agent session</b>: files changed, tools used, cost and context, and a one-line command to resume in the harness.</td>
+<td><img src="docs/assets/screenshots/items.webp" alt="Items"><br><b>Items</b>: what's waiting on you, what's running and what was just delivered.</td>
+</tr>
+</table>
+
+<sub>Screenshots are from a demo workspace. They were taken from the real Hub and web UI, with agents scripted for the demo. The interface is shown in Chinese; switch to English in Settings → Appearance.</sub>
 
 ## Features
 

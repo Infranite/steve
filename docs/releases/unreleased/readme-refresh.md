@@ -1,1 +1,1 @@
-- README 重写：功能介绍、架构图、可直接跑通的快速开始（含本机登录 `STEVE_DEV_LOGIN=1` 和智能体适配器安装），并新增简体中文版 README.zh-CN.md。部署和升级的详细说明移到 docs/deployment.md，开发检查和发布规则移到 CONTRIBUTING.md。
+- README 重写：功能介绍、真实界面截图（演示工作区，浅色 / 深色）、架构图、可直接跑通的快速开始（含本机登录 `STEVE_DEV_LOGIN=1` 和智能体适配器安装），并新增简体中文版 README.zh-CN.md。部署和升级的详细说明移到 docs/deployment.md，开发检查和发布规则移到 CONTRIBUTING.md。
