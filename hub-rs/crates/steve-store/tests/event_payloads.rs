@@ -347,9 +347,10 @@ fn compaction_drops_images_and_big_outputs_and_their_payloads_once() {
         .add(&id, "agent_message_chunk", json!({"text": "完成了"}))
         .unwrap();
     assert!(count(s, "event_payloads") >= 1);
-    assert!(!s.events().compacted(&id).unwrap());
-    assert_eq!(s.events().compact(&id).unwrap(), 2);
-    assert!(s.events().compacted(&id).unwrap());
+    assert_eq!(s.events().compacted_upto(&id).unwrap(), 0);
+    let last = s.events().last_seq(&id).unwrap();
+    assert_eq!(s.events().compact(&id, last, || Some(())).unwrap(), Some(2));
+    assert_eq!(s.events().compacted_upto(&id).unwrap(), last);
     assert_eq!(
         count(s, "event_payloads"),
         0,
@@ -373,8 +374,58 @@ fn compaction_drops_images_and_big_outputs_and_their_payloads_once() {
         "conversation text is untouched"
     );
     assert_eq!(
-        s.events().compact(&id).unwrap(),
-        0,
+        s.events().compact(&id, last, || Some(())).unwrap(),
+        Some(0),
         "a second pass changes nothing"
     );
+}
+
+/// Audit: a compaction pass stops when the session stops being due between pages, and leaves alone
+/// what was appended after the seq it was found due at; a later pass takes up only what came after.
+#[test]
+fn compaction_stops_when_no_longer_due_and_stays_within_its_seq() {
+    let t = fresh();
+    let s = &t.store;
+    let id = session(s);
+    let shot = || json!({"text": "截图", "images": [{"type": "image", "data": "QUJD".repeat(1000), "mimeType": "image/png"}]});
+    for _ in 0..450 {
+        s.events().add(&id, "user", shot()).unwrap();
+    }
+    let has_image = |e: &steve_store::Event| e.data["images"][0].get("data").is_some();
+    let all = |s: &Store| s.events().up_to(&id, i64::MAX).unwrap();
+    // due for the first page only: the pass stops, records nothing, and leaves the rest whole
+    let last = s.events().last_seq(&id).unwrap();
+    let mut pages = 0;
+    let stopped = s
+        .events()
+        .compact(&id, last, || {
+            pages += 1;
+            (pages == 1).then_some(())
+        })
+        .unwrap();
+    assert_eq!(stopped, None);
+    assert_eq!(s.events().compacted_upto(&id).unwrap(), 0);
+    let ev = all(s);
+    assert_eq!(
+        ev.iter().filter(|e| !has_image(e)).count(),
+        200,
+        "one page written"
+    );
+    assert!(ev[200..].iter().all(has_image));
+    // events appended after the seq the pass was given are not touched
+    let upto = s.events().last_seq(&id).unwrap();
+    s.events().add(&id, "user", shot()).unwrap();
+    assert_eq!(
+        s.events().compact(&id, upto, || Some(())).unwrap(),
+        Some(250)
+    );
+    assert_eq!(s.events().compacted_upto(&id).unwrap(), upto);
+    let ev = all(s);
+    assert!(ev[..450].iter().all(|e| !has_image(e)));
+    assert!(has_image(&ev[450]), "appended after the pass was due");
+    // a later pass (archived again) takes up only what came after
+    let last = s.events().last_seq(&id).unwrap();
+    assert_eq!(s.events().compact(&id, last, || Some(())).unwrap(), Some(1));
+    assert_eq!(s.events().compacted_upto(&id).unwrap(), last);
+    assert!(all(s).iter().all(|e| !has_image(e)));
 }

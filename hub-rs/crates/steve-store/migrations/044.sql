@@ -2,9 +2,11 @@
 -- failures began (NULL: not failing, or failing since before this column).
 ALTER TABLE outbox_leases ADD COLUMN failing_since INTEGER;
 -- Sessions of archived items whose event log was compacted under the workspace's keepSess (images to
--- placeholders, big tool outputs to their head and tail), so a pass looks at each one once.
+-- placeholders, big tool outputs to their head and tail): up to which seq, so a later pass (after the
+-- item was taken back up and archived again) compacts only what came after.
 CREATE TABLE session_compactions (
   session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+  upto INTEGER NOT NULL,
   events INTEGER NOT NULL,
   at INTEGER NOT NULL);
 -- keepSess 90 天 / 1 年 used to do nothing (the old settings page said so); from this release they compact.

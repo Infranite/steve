@@ -1591,11 +1591,71 @@ fn housekeeping_compacts_archived_sessions_only_per_keep_sess() {
     age(&k, 400);
     k.core.housekeeping().unwrap();
     assert!(!image(&k), "compacted");
-    assert!(k.db().store().events().compacted(&s.id).unwrap());
+    assert_eq!(
+        k.db().store().events().compacted_upto(&s.id).unwrap(),
+        k.db().store().events().last_seq(&s.id).unwrap()
+    );
     assert_eq!(
         k.db().store().events().after(&s.id, 0, 10).unwrap()[0].data["text"],
         "截图"
     );
+    // taken back up and archived again: what came after is compacted too
+    let shot = json!({"text": "又一张", "images": [{"type": "image", "data": "QUJD".repeat(100), "mimeType": "image/png"}]});
+    k.db().event_add(&s.id, "user", shot).unwrap();
+    age(&k, 400);
+    k.core.housekeeping().unwrap();
+    let ev = k.db().store().events().after(&s.id, 0, 10).unwrap();
+    assert!(
+        ev[1].data["images"][0].get("data").is_none(),
+        "{:?}",
+        ev[1].data
+    );
+}
+
+/// Audit: a session found due for compaction whose item is taken back up before the compaction runs is
+/// left whole.
+#[test]
+fn compaction_rechecks_that_the_session_is_still_due() {
+    let k = Kit::new();
+    let item = k.item("done", "收尾", None);
+    let s = k
+        .db()
+        .session_create(&steve_store::NewSession {
+            workspace_id: WS.into(),
+            item_id: Some(item.clone()),
+            harness: "fake".into(),
+            cwd: "/tmp".into(),
+            token: "t".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    let shot = json!({"text": "截图", "images": [{"type": "image", "data": "QUJD".repeat(100), "mimeType": "image/png"}]});
+    k.db().event_add(&s.id, "user", shot).unwrap();
+    k.db()
+        .settings_set(
+            WS,
+            &json!({"keepSess": "90 天"}).as_object().unwrap().clone(),
+            "me",
+        )
+        .unwrap();
+    k.db()
+        .exec(
+            "UPDATE items SET archived = 1, updated = ? WHERE id = ?",
+            &[
+                &(now() - 100 * 24 * 3_600_000) as &dyn rusqlite::ToSql,
+                &item,
+            ],
+        )
+        .unwrap();
+    let due = k.core.archive_pass().unwrap();
+    assert_eq!(due.len(), 1);
+    // taken back up between the pass and the compaction
+    k.db().item_patch(&item, patch![archived: false]).unwrap();
+    let (sid, upto) = &due[0];
+    k.core.compact_session(sid, *upto);
+    let ev = k.db().store().events().after(&s.id, 0, 10).unwrap();
+    assert!(ev[0].data["images"][0].get("data").is_some(), "left whole");
+    assert_eq!(k.db().store().events().compacted_upto(&s.id).unwrap(), 0);
 }
 
 #[test]

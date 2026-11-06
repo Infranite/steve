@@ -433,19 +433,28 @@ impl Events<'_> {
     }
 
     /// Compacts the event log of session `session_id` ([`crate::compact`]: images to placeholders, a
-    /// tool's big outputs to head and tail) and marks it compacted, in pages of [`COMPACT_PAGE`] events,
-    /// each its own transaction. Lossy, and only for archived items whose workspace asked for it. Returns
-    /// the events changed.
-    pub fn compact(&self, session_id: &str) -> Result<usize> {
-        let mut after = 0;
+    /// tool's big outputs to head and tail) from where the last compaction stopped up to `upto` (the
+    /// last seq when the session was found due; events appended later are left whole), in pages of
+    /// [`COMPACT_PAGE`] events, each its own transaction, and records `upto`. Lossy, and only for
+    /// archived items whose workspace asked for it. Every page is written, and `upto` recorded, while
+    /// holding what `still_due` returns: `None` (the item was taken back up meanwhile) stops the pass
+    /// before it writes anything more, and the pass returns `None`. Otherwise it returns the events
+    /// changed.
+    pub fn compact<G>(
+        &self,
+        session_id: &str,
+        upto: i64,
+        mut still_due: impl FnMut() -> Option<G>,
+    ) -> Result<Option<usize>> {
+        let mut after = self.compacted_upto(session_id)?;
         let mut changed = 0;
         loop {
             let page: Vec<Event> = self.0.read(|c| {
                 let tx = c.unchecked_transaction()?;
                 let mut events: Vec<Event> = all(
                     &tx,
-                    "SELECT seq, ts, kind, data FROM events WHERE session_id = ? AND seq > ? ORDER BY seq LIMIT ?",
-                    params![session_id, after, COMPACT_PAGE],
+                    "SELECT seq, ts, kind, data FROM events WHERE session_id = ? AND seq > ? AND seq <= ? ORDER BY seq LIMIT ?",
+                    params![session_id, after, upto, COMPACT_PAGE],
                     event_row,
                 )?;
                 for e in &mut events {
@@ -468,6 +477,9 @@ impl Events<'_> {
             if todo.is_empty() {
                 continue;
             }
+            let Some(_due) = still_due() else {
+                return Ok(None);
+            };
             changed += todo.len();
             self.0.write(|w| {
                 let tx = w.tx()?;
@@ -484,25 +496,39 @@ impl Events<'_> {
                 Ok(())
             })?;
         }
+        let Some(_due) = still_due() else {
+            return Ok(None);
+        };
         self.0.write(|w| {
             w.c.run(
-                "INSERT INTO session_compactions (session_id, events, at) VALUES (?1, ?2, ?3)
-                 ON CONFLICT (session_id) DO UPDATE SET events = events + ?2, at = ?3",
-                params![session_id, changed as i64, now()],
+                "INSERT INTO session_compactions (session_id, upto, events, at) VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT (session_id) DO UPDATE SET upto = max(upto, ?2), events = events + ?3, at = ?4",
+                params![session_id, upto, changed as i64, now()],
             )?;
             Ok(())
         })?;
-        Ok(changed)
+        Ok(Some(changed))
     }
 
-    /// Whether session `session_id` was compacted already.
-    pub fn compacted(&self, session_id: &str) -> Result<bool> {
+    /// The last seq of session `session_id` compacted already (0: never compacted).
+    pub fn compacted_upto(&self, session_id: &str) -> Result<i64> {
         self.0.read(|c| {
-            exists(
-                c,
-                "SELECT 1 FROM session_compactions WHERE session_id = ?",
+            Ok(c.query_row(
+                "SELECT COALESCE(MAX(upto), 0) FROM session_compactions WHERE session_id = ?",
                 [session_id],
-            )
+                |r| r.get(0),
+            )?)
+        })
+    }
+
+    /// The seq of session `session_id`'s last event (0: none).
+    pub fn last_seq(&self, session_id: &str) -> Result<i64> {
+        self.0.read(|c| {
+            Ok(c.query_row(
+                "SELECT COALESCE(MAX(seq), 0) FROM events WHERE session_id = ?",
+                [session_id],
+                |r| r.get(0),
+            )?)
         })
     }
 

@@ -484,5 +484,6 @@ fn migration_44_adds_the_failure_clock_and_the_compaction_table() {
     };
     assert_eq!(col("outbox_leases", "failing_since"), 1);
     assert!(has_table(&c, "session_compactions"));
+    assert_eq!(col("session_compactions", "upto"), 1);
     assert_eq!(count(&c, "SELECT v FROM schema_version"), 44);
 }
