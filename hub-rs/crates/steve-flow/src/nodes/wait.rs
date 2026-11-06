@@ -9,7 +9,7 @@ use chrono::{DateTime, Datelike, NaiveTime, TimeZone, Utc, Weekday};
 use chrono_tz::Tz;
 use serde_json::{Value, json};
 
-use super::{NodeKind, NodeOutcome, RunCx, WaitSpec, opt_str};
+use super::{NodeKind, NodeOutcome, Rule, RunCx, WaitSpec, one_of, opt_str};
 use crate::cron::parse_tz;
 use crate::expr;
 
@@ -17,6 +17,8 @@ pub struct Wait;
 
 /// Longest wait or timeout.
 pub const MAX_MS: i64 = 90 * 24 * 3_600_000;
+/// `mode` of a wait.
+pub const MODES: [&str; 3] = ["delay", "until", "event"];
 
 /// `30m`, `2h`, `3d`, `1h30m`, `45s`, also `30 分钟`, `2 小时`, `3 天`. Milliseconds.
 pub fn parse_duration(s: &str) -> Option<i64> {
@@ -124,6 +126,30 @@ fn check_until(v: &Value) -> bool {
 impl NodeKind for Wait {
     fn kind(&self) -> &'static str {
         "wait"
+    }
+
+    fn rules(&self) -> Vec<Rule> {
+        vec![
+            Rule::new(
+                &["flow.node.wait_mode"],
+                format!("mode 只能是 {}", one_of(&MODES)),
+            ),
+            Rule::new(
+                &["flow.node.wait_delay", "flow.node.wait_timeout"],
+                format!(
+                    "delay 和 timeout 写成 30m、2h、3d、1h30m 这样（单位 s/m/h/d），最多 {} 天",
+                    MAX_MS / 86_400_000
+                ),
+            ),
+            Rule::new(
+                &["flow.node.wait_until"],
+                "until 写成 HH:MM、tomorrow HH:MM 或 next_workday HH:MM",
+            ),
+            Rule::new(
+                &["flow.node.wait_event", "flow.node.wait_when"],
+                "mode 为 event 时 match 要有 source 或 type，match.when 是条件表达式",
+            ),
+        ]
     }
 
     fn validate(&self, cfg: &Value) -> Result<(), String> {

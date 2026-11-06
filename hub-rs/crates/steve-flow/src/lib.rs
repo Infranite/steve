@@ -73,6 +73,7 @@ pub mod corrections;
 pub mod cron;
 pub mod decisions;
 pub mod digest;
+mod draft_repair;
 pub mod drafts;
 pub mod engine;
 mod events_api;

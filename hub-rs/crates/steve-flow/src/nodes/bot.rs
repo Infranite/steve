@@ -23,7 +23,7 @@ use serde_json::{Map, Value, json};
 use steve_modules::Tier;
 use steve_modules::changes::first_json;
 
-use super::{NodeKind, NodeOutcome, RunCx, opt_str, req_str, str_list};
+use super::{NodeKind, NodeOutcome, Rule, RunCx, one_of, opt_str, req_str, str_list};
 use crate::FlowResult;
 
 /// The node kind's name.
@@ -37,8 +37,13 @@ pub const REDACTED: &str = "［已拦下的机密］";
 /// The start of every judgement prompt (tests script the fake gateway by it).
 pub const PROMPT_START: &str = "你是「";
 
-const BRANCHES_MAX: usize = 10;
-const FIELDS_MAX: usize = 10;
+pub const BRANCHES_MAX: usize = 10;
+pub const FIELDS_MAX: usize = 10;
+/// Branch and field names of at most this many characters.
+pub const NAME_MAX: usize = 40;
+/// Output keys of every bot node, so no field may take them.
+pub const RESERVED_FIELDS: [&str; 2] = ["branch", "reason"];
+const INSTRUCTION_MAX: usize = 2000;
 const REASON_MAX: usize = 200;
 
 /// `steve_vault::guard::scan` as this node needs it: byte ranges of things that look like
@@ -317,8 +322,44 @@ impl NodeKind for BotNode {
         KIND
     }
 
+    fn rules(&self) -> Vec<Rule> {
+        vec![
+            Rule::new(
+                &[
+                    "flow.node.missing_instruction",
+                    "flow.node.too_long_instruction",
+                ],
+                format!("instruction 必填，最多 {INSTRUCTION_MAX} 字"),
+            ),
+            Rule::new(
+                &["flow.node.bot_branches", "flow.node.bot_branch_twice"],
+                format!("branches 最多 {BRANCHES_MAX} 个，每个 1–{NAME_MAX} 字，不能重复"),
+            ),
+            Rule::new(
+                &["flow.node.bot_fields"],
+                format!("fields 最多 {FIELDS_MAX} 个，每个 1–{NAME_MAX} 字"),
+            ),
+            Rule::new(
+                &["flow.node.bot_field_reserved"],
+                format!(
+                    "fields 不能叫 {}：Bot 节点本来就输出 {{{{steps.<id>.branch}}}}（选的分支）和 {{{{steps.<id>.reason}}}}（理由），要提取 Git 分支名之类就叫 branch_name",
+                    one_of(&RESERVED_FIELDS)
+                ),
+            ),
+            Rule::new(
+                &["flow.graph.no_such_bot"],
+                "bot_id 只能是下面列出的 Bot id，不确定就不填",
+            ),
+        ]
+    }
+
     fn validate(&self, cfg: &Value) -> Result<(), String> {
-        let instruction = req_str(cfg, "instruction", super::Required::Instruction, 2000)?;
+        let instruction = req_str(
+            cfg,
+            "instruction",
+            super::Required::Instruction,
+            INSTRUCTION_MAX,
+        )?;
         crate::expr::check_template(instruction)?;
         if let Some(b) = opt_str(cfg, "bot_id")? {
             crate::expr::check_template(b)?;
@@ -327,7 +368,7 @@ impl NodeKind for BotNode {
         if branches.len() > BRANCHES_MAX
             || branches
                 .iter()
-                .any(|b| b.trim().is_empty() || b.chars().count() > 40)
+                .any(|b| b.trim().is_empty() || b.chars().count() > NAME_MAX)
         {
             return Err(steve_i18n::t!("flow.node.bot_branches", max = BRANCHES_MAX));
         }
@@ -340,11 +381,11 @@ impl NodeKind for BotNode {
         if fields.len() > FIELDS_MAX
             || fields
                 .iter()
-                .any(|f| f.trim().is_empty() || f.chars().count() > 40)
+                .any(|f| f.trim().is_empty() || f.chars().count() > NAME_MAX)
         {
             return Err(steve_i18n::t!("flow.node.bot_fields", max = FIELDS_MAX));
         }
-        if fields.iter().any(|f| f == "branch" || f == "reason") {
+        if fields.iter().any(|f| RESERVED_FIELDS.contains(&f.as_str())) {
             return Err(steve_i18n::t!("flow.node.bot_field_reserved"));
         }
         Ok(())

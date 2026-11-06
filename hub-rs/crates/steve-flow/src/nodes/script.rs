@@ -15,7 +15,7 @@ use rquickjs::context::intrinsic;
 use rquickjs::{CatchResultExt, CaughtError, Context, Ctx, Function, Module, Runtime, Value as Js};
 use serde_json::Value;
 
-use super::{NodeKind, NodeOutcome, RunCx, req_str};
+use super::{NodeKind, NodeOutcome, Rule, RunCx, req_str};
 
 /// CPU budget of one run.
 pub const TIME_LIMIT: Duration = Duration::from_secs(1);
@@ -40,6 +40,17 @@ pub struct Script;
 impl NodeKind for Script {
     fn kind(&self) -> &'static str {
         "script"
+    }
+
+    fn rules(&self) -> Vec<Rule> {
+        vec![Rule::new(
+            &[
+                "flow.node.missing_script",
+                "flow.node.too_long_script",
+                "flow.node.no_handler",
+            ],
+            format!("code 必填，最多 {CODE_LIMIT} 字，要导出 handler"),
+        )]
     }
 
     fn validate(&self, cfg: &Value) -> Result<(), String> {

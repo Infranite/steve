@@ -9,13 +9,15 @@
 use async_trait::async_trait;
 use serde_json::{Map, Value};
 
-use super::{NodeKind, NodeOutcome, RunCx, str_list};
+use super::{NodeKind, NodeOutcome, Rule, RunCx, one_of, str_list};
 use crate::expr::{self, compare, loose_eq};
 
 pub struct Table;
 
 pub const MAX_ROWS: usize = 200;
 pub const MAX_COLS: usize = 20;
+/// `hit` of a table.
+pub const HITS: [&str; 2] = ["first", "collect"];
 
 /// A parsed input cell.
 #[derive(Debug, Clone, PartialEq)]
@@ -159,10 +161,48 @@ impl NodeKind for Table {
         "table"
     }
 
+    fn rules(&self) -> Vec<Rule> {
+        vec![
+            Rule::new(
+                &["flow.node.table_hit"],
+                format!("hit 只能是 {}", one_of(&HITS)),
+            ),
+            Rule::new(
+                &[
+                    "flow.node.table_columns",
+                    "flow.node.table_max_cols",
+                    "flow.node.table_input",
+                    "flow.node.table_output",
+                ],
+                format!(
+                    "inputs 和 outputs 都不能空，合计最多 {MAX_COLS} 列；inputs 是 event.x、steps.<id>.x 这样的路径，outputs 是非空的名字"
+                ),
+            ),
+            Rule::new(
+                &[
+                    "flow.node.rows_none",
+                    "flow.node.table_max_rows",
+                    "flow.node.row_list",
+                    "flow.node.row_width",
+                    "flow.node.cell_text",
+                ],
+                format!("rows 有 1 到 {MAX_ROWS} 行，每行是文字列表，列数等于 inputs 加 outputs"),
+            ),
+            Rule::new(
+                &[
+                    "flow.node.row_error",
+                    "flow.node.cell_incomplete",
+                    "flow.node.cell_number",
+                    "flow.node.cell_list",
+                ],
+                "输入单元格：空或 - 是任意；<、<=、>、>= 后面是数字；==、!= 后面要有值；列表用逗号分隔，不能有空项",
+            ),
+        ]
+    }
+
     fn validate(&self, cfg: &Value) -> Result<(), String> {
-        match cfg["hit"].as_str().unwrap_or("first") {
-            "first" | "collect" => {}
-            _ => return Err(steve_i18n::t!("flow.node.table_hit")),
+        if !HITS.contains(&cfg["hit"].as_str().unwrap_or("first")) {
+            return Err(steve_i18n::t!("flow.node.table_hit"));
         }
         let inputs = str_list(cfg, "inputs")?;
         let outputs = str_list(cfg, "outputs")?;
