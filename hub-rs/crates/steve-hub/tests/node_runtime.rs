@@ -4579,7 +4579,12 @@ async fn stop_retires_an_unknown_configure_and_the_reopen_carries_the_change() {
         1,
         "the target is never sent again"
     );
-    assert_eq!(h.cfg_states(), ["finished"]);
+    // the target's end comes on the Node's event stream, not with the recover's answer that
+    // reopened the session: it may be applied after the queued turn started
+    until("the target's end applied", || {
+        h.cfg_states() == ["finished"]
+    })
+    .await;
     assert_eq!(h.count("open_session"), 2);
     assert_eq!(
         h.last_mode(),

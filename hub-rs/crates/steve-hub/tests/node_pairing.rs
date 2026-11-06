@@ -140,6 +140,12 @@ async fn only_the_owner_confirms_and_a_pending_node_is_refused() {
     assert_eq!(s, 200);
     let l = dial(&h, &id, &node, fake, 1).await.unwrap();
     assert_eq!(l.generation, 1);
+    // the Hub installs the link after its welcome went out: the Node may be through the handshake
+    // before the list says linked
+    until("linked", 5, || {
+        h.svc.registry.current(node.as_str()).is_some()
+    })
+    .await;
     // the confirm page shows the fingerprint the CLI printed
     let r = reqwest::Client::new()
         .get(format!("{}/api/nodes", h.url()))
