@@ -1,10 +1,12 @@
 //! Send idempotency for `POST /thread` and `POST /items`: the Web gives each draft one
 //! `client_id` and sends it again on every retry (a lost response, a reload, a second click).
 //! The first request with an id runs; a repeat within [`TTL`] gets the first one's answer
-//! without doing anything, and a repeat while the first is still running waits for it. A failed
-//! or abandoned first run leaves nothing behind, so the retry really retries. Kept in memory:
-//! after a Hub restart an old id runs once more, which only matters for a retry that straddles
-//! the restart.
+//! without doing anything, and a repeat while the first is still running waits for it. The run
+//! is detached from its request: when the connection drops mid-send the send still finishes
+//! (the message is stored, the item made), so the retry waits for it and gets its answer instead
+//! of sending again. Only a run that fails leaves nothing behind, so that retry really retries.
+//! Kept in memory: after a Hub restart an old id runs once more, which only matters for a retry
+//! that straddles the restart.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -26,21 +28,27 @@ enum Slot {
     Done(Instant, Arc<Value>),
 }
 
+type Slots = Arc<Mutex<HashMap<Key, Slot>>>;
+
 #[derive(Default)]
 pub struct Dedupe {
-    slots: Mutex<HashMap<Key, Slot>>,
+    slots: Slots,
 }
 
-/// Removes a still-running slot when its run fails or its request is dropped.
-struct Abandon<'a> {
-    dedupe: &'a Dedupe,
+fn lock(slots: &Mutex<HashMap<Key, Slot>>) -> std::sync::MutexGuard<'_, HashMap<Key, Slot>> {
+    slots.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Removes a still-running slot when its run fails (or panics).
+struct Abandon {
+    slots: Slots,
     key: Option<Key>,
 }
 
-impl Drop for Abandon<'_> {
+impl Drop for Abandon {
     fn drop(&mut self) {
         if let Some(key) = self.key.take() {
-            let mut slots = self.dedupe.lock();
+            let mut slots = lock(&self.slots);
             if matches!(slots.get(&key), Some(Slot::Running(_))) {
                 slots.remove(&key);
             }
@@ -49,12 +57,14 @@ impl Drop for Abandon<'_> {
 }
 
 impl Dedupe {
+    #[cfg(test)]
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<Key, Slot>> {
-        self.slots.lock().unwrap_or_else(|e| e.into_inner())
+        lock(&self.slots)
     }
 
     /// Run `f` once per `(ws, user, route, client_id)` within [`TTL`]; without a client id it
-    /// just runs.
+    /// just runs. With one, `f` runs in its own task, so dropping this future (the client went
+    /// away) does not stop or forget a send that has started.
     pub async fn once<E, F, Fut>(
         &self,
         ws: &str,
@@ -64,8 +74,9 @@ impl Dedupe {
         f: F,
     ) -> Result<Value, E>
     where
-        F: FnOnce() -> Fut,
-        Fut: Future<Output = Result<Value, E>>,
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = Result<Value, E>> + Send + 'static,
+        E: Send + 'static,
     {
         let Some(id) = client_id else {
             return f().await;
@@ -73,7 +84,7 @@ impl Dedupe {
         let key: Key = (ws.to_string(), user.to_string(), route, id);
         let tx = loop {
             let mut rx = {
-                let mut slots = self.lock();
+                let mut slots = lock(&self.slots);
                 let now = Instant::now();
                 slots.retain(|_, s| match s {
                     Slot::Done(at, _) => now.duration_since(*at) < TTL,
@@ -97,16 +108,25 @@ impl Dedupe {
             }
         };
         let mut abandon = Abandon {
-            dedupe: self,
+            slots: self.slots.clone(),
             key: Some(key),
         };
-        let v = Arc::new(f().await?);
-        if let Some(key) = abandon.key.take() {
-            self.lock()
-                .insert(key, Slot::Done(Instant::now(), v.clone()));
+        let run = tokio::spawn(async move {
+            let v = Arc::new(f().await?);
+            if let Some(key) = abandon.key.take() {
+                lock(&abandon.slots).insert(key, Slot::Done(Instant::now(), v.clone()));
+            }
+            let _ = tx.send(Some(v.clone()));
+            Ok((*v).clone())
+        });
+        match run.await {
+            Ok(r) => r,
+            // a panic in `f` stays a panic of this request, as when it ran inline
+            Err(e) => match e.try_into_panic() {
+                Ok(p) => std::panic::resume_unwind(p),
+                Err(e) => panic!("send task cancelled: {e}"),
+            },
         }
-        let _ = tx.send(Some(v.clone()));
-        Ok((*v).clone())
     }
 }
 
@@ -118,9 +138,9 @@ mod tests {
     #[tokio::test]
     async fn repeats_get_the_first_answer() {
         let d = Dedupe::default();
-        let runs = AtomicUsize::new(0);
+        let runs = Arc::new(AtomicUsize::new(0));
         let run = |n: usize| {
-            let runs = &runs;
+            let runs = runs.clone();
             move || async move {
                 runs.fetch_add(1, Ordering::SeqCst);
                 Ok::<_, ()>(Value::from(n))
@@ -145,7 +165,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_failed_or_dropped_run_can_be_retried() {
+    async fn a_failed_run_can_be_retried() {
         let d = Dedupe::default();
         let id = || Some("c".to_string());
         let r = d
@@ -154,18 +174,82 @@ mod tests {
             })
             .await;
         assert_eq!(r, Err("down"));
-        // the request went away mid-run (client disconnect)
-        let pending = d.once("w", "u", "thread", id(), || {
-            std::future::pending::<Result<Value, ()>>()
+        let r = d
+            .once("w", "u", "thread", id(), || async {
+                Ok::<_, &str>(Value::from("sent"))
+            })
+            .await;
+        assert_eq!(r, Ok("sent".into()));
+    }
+
+    /// The client disconnects while the send is still running: the send goes on, and the
+    /// browser's retry waits for it and gets its answer without sending a second time.
+    #[tokio::test]
+    async fn a_dropped_request_still_finishes_and_its_retry_does_not_run_again() {
+        let d = Dedupe::default();
+        let id = || Some("c".to_string());
+        let runs = Arc::new(AtomicUsize::new(0));
+        let (go, wait) = tokio::sync::oneshot::channel::<()>();
+        let first = d.once("w", "u", "thread", id(), {
+            let runs = runs.clone();
+            move || async move {
+                runs.fetch_add(1, Ordering::SeqCst);
+                let _ = wait.await;
+                Ok::<_, ()>(Value::from("first"))
+            }
         });
+        // the request went away mid-run (client disconnect): its future is dropped
         assert!(
-            tokio::time::timeout(Duration::from_millis(20), pending)
+            tokio::time::timeout(Duration::from_millis(20), first)
                 .await
                 .is_err()
         );
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+        let retry = d.once("w", "u", "thread", id(), {
+            let runs = runs.clone();
+            move || async move {
+                runs.fetch_add(1, Ordering::SeqCst);
+                Ok::<_, ()>(Value::from("second"))
+            }
+        });
+        tokio::pin!(retry);
+        // still running: the retry waits instead of sending again
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut retry)
+                .await
+                .is_err()
+        );
+        go.send(()).expect("the first run is still alive");
+        assert_eq!(retry.await, Ok("first".into()));
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+        // and once finished, later repeats get the answer straight away
+        let again = d
+            .once("w", "u", "thread", id(), || async {
+                Ok::<_, ()>(Value::from("third"))
+            })
+            .await;
+        assert_eq!(again, Ok("first".into()));
+    }
+
+    /// A send whose request was dropped and which then fails leaves nothing behind.
+    #[tokio::test]
+    async fn a_dropped_request_that_fails_can_be_retried() {
+        let d = Dedupe::default();
+        let id = || Some("c".to_string());
+        let (go, wait) = tokio::sync::oneshot::channel::<()>();
+        let first = d.once("w", "u", "thread", id(), move || async move {
+            let _ = wait.await;
+            Err::<Value, _>("down")
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), first)
+                .await
+                .is_err()
+        );
+        go.send(()).expect("the first run is still alive");
         let r = d
             .once("w", "u", "thread", id(), || async {
-                Ok::<_, ()>(Value::from("sent"))
+                Ok::<_, &str>(Value::from("sent"))
             })
             .await;
         assert_eq!(r, Ok("sent".into()));

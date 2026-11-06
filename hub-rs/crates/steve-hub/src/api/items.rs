@@ -36,11 +36,13 @@ pub async fn create(
         .unwrap_or_else(|| "start".into());
     let client_id = k.opt_str("client_id", Str::len(1, 80));
     k.finish()?;
-    // a retry of the same form (`client_id`) gets the item the first request made
+    // a retry of the same form (`client_id`) gets the item the first request made; the creation
+    // runs on even if this request goes away, so it needs its own state
+    let (st2, c2) = (st.clone(), c.clone());
     let item = st
         .dedupe
-        .once(&c.ws, &c.me, "items", client_id, || {
-            create_now(&st, &c, goal, title, bot, project, mode)
+        .once(&c.ws, &c.me, "items", client_id, move || async move {
+            create_now(&st2, &c2, goal, title, bot, project, mode).await
         })
         .await?;
     ok(item)

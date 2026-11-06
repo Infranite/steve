@@ -359,10 +359,13 @@ pub async fn thread_say(
         }
         checked = ms;
     }
-    // a retry of the same draft (`client_id`) answers like the first send and sends nothing
+    // a retry of the same draft (`client_id`) answers like the first send and sends nothing; the
+    // send runs on even if this request goes away, so it needs its own state
+    let (st2, c2) = (st.clone(), c.clone());
     let v = st
         .dedupe
-        .once(&c.ws, &c.me, "thread", client_id, || async {
+        .once(&c.ws, &c.me, "thread", client_id, move || async move {
+            let (st, c) = (st2, c2);
             // V4 paste guard: a password or token is stored replaced and never reaches the router
             let guarded = steve_vault::guard::intercept(&text);
             if guarded.blocked {
