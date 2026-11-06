@@ -16,6 +16,8 @@ npm run test:web
 
 The full Rust test suite also requires `zsh` at `/bin/zsh` for the existing source-release fixtures (on Debian/Ubuntu, install the `zsh` package). The boundary scripts require Python 3.11+. macOS keychain integration tests are explicitly opt-in and create temporary signing resources; ordinary development must not use production credentials. The TypeScript `hub/` workspace is retained for compatibility; the default managed backend is Rust.
 
+The release workflow runs the Rust tests with [cargo-nextest](https://nexte.st) instead, one process per test: `cargo nextest run --manifest-path hub-rs/Cargo.toml --workspace --profile ci --retries 2`, then `cargo test --doc`. A test that passes only on a retry does not block the release, but the job summary lists it (`scripts/nextest-summary.py`); fix it rather than relying on the retry.
+
 ## Changes and releases
 
 A version is chosen when it is released, never ahead on a branch:
