@@ -480,6 +480,21 @@ export default {
     gone_other: "已回收 {{count}} 个工作区，事项继续时从分支重建。",
     git: "Git {{git}} · 每 10 分钟检查一次。",
     gitMissing: "未找到",
+    scratch: "临时目录",
+    scratchSub_other: "{{count}} 个没有项目的事项，缓存 {{cache}}",
+    scratchSubEnded_other: "{{count}} 个没有项目的事项，缓存 {{cache}}，其中已结束事项的 {{ended}} 在磁盘紧张时回收",
+    scratchPolicy: "没有项目的事项在临时目录里工作：事项结束后，只在磁盘紧张时回收其中的 node_modules、target 这类缓存目录，其他文件不动。",
+  },
+  /* outbox-settings.tsx: dead background deliveries */
+  outbox: {
+    title: "后台投递",
+    deadSub_other: "{{count}} 条没能送达，已停止自动重试",
+    deadSubWhy_other: "{{count}} 条没能送达，已停止自动重试 · {{why}}",
+    revive: "重新投递",
+    reviving: "正在投递…",
+    revived_other: "已重新投递 {{count}} 条",
+    nothingRevived: "没有需要重新投递的",
+    note: "事件被拒收，或连续失败一天后，Steve 不再自动重试。原因排除后重新投递；送达是幂等的，不会重复生效。",
   },
   /* api.ts: request errors the page shows when the Hub gave no message */
   http: {

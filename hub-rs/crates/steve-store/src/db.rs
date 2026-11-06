@@ -101,6 +101,8 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/043.sql"),
     // 44: the `message` row that began a Node message, by session and message id (a text delta's role).
     include_str!("../migrations/044.sql"),
+    // 45: when a failing outbox delivery began failing; archived sessions compacted under keepSess.
+    include_str!("../migrations/045.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).

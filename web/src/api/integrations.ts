@@ -36,7 +36,7 @@ export type FeishuUserDetail = { app_connection: string | null; missing: Missing
 export type IIdentity = { kind: "steve" | "you"; connection: IConnection }
 export type IInstallation = { id: string; provider: string; provider_name: string; name: string; status: ConnStatus; missing: number; identities: IIdentity[] }
 export type IProvider = {
-  id: string; name: string; status: "supported" | "planned"; adapters: IAdapter[]; planned: { name: string; areas: AreaId[]; note?: string }[]
+  id: string; name: string; status: "supported"; adapters: IAdapter[]
   areas: { area: AreaId; state: "supported" | "planned" }[]; connections: IConnection[]
 }
 export type Integrations = { areas: { id: AreaId; label: string }[]; providers: IProvider[]; callback_urls: string[]; installations?: IInstallation[] }

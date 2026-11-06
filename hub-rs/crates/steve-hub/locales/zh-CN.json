@@ -61,6 +61,8 @@
   "hub.models.source_claude_picker": "Claude Code 的模型选择器（~/.claude/settings.json）",
   "hub.models.recent_unlisted": "最近用过，不在列表里",
   "hub.workspaces.owner_only": "仅实例管理员可查看和回收工作区",
+  "hub.outbox.owner_only": "仅实例管理员可查看和重新投递后台事件",
+  "hub.outbox.none": "这个 Hub 没有后台投递",
   "hub.prices.sync_off": "价格同步已关闭（STEVE_PRICE_CATALOG_URL=off）",
   "hub.prices.syncing": "正在同步，稍等",
   "hub.prices.sync_failed": "%{error}；继续使用上次同步的价格",

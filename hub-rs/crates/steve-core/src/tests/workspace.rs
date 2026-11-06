@@ -404,3 +404,76 @@ fn one_pass_at_a_time() {
     assert!(!k.core.reclaim_workspaces().unwrap().skipped);
     assert!(!wt.join("target").exists());
 }
+
+/// An item without a project in its scratch directory, with a node and a Rust cache (1 MB each), its own
+/// files, and a plain `build/` nothing marks as a cache.
+fn scratch_item(k: &Kit, status: &str) -> (String, PathBuf) {
+    let stage = if status == "run" { "执行" } else { "收尾" };
+    let id = k.item(status, stage, None);
+    let dir = k.core.config().scratch.join(&id);
+    fs::create_dir_all(&dir).unwrap();
+    k.db()
+        .item_patch(&id, patch![cwd: dir.to_string_lossy().to_string()])
+        .unwrap();
+    caches(&dir);
+    fs::write(dir.join("report.md"), "结论\n").unwrap();
+    fs::create_dir_all(dir.join("build")).unwrap();
+    fs::write(dir.join("build/out.bin"), vec![3u8; 4096]).unwrap();
+    (id, dir)
+}
+
+fn pressure(low: u64) -> Kit {
+    Kit::with(move |c| {
+        c.disk = DiskPolicy {
+            floor: 0,
+            low,
+            idle_ms: i64::MAX,
+        }
+    })
+}
+
+#[test]
+fn under_pressure_an_ended_scratch_item_gives_back_only_its_marked_caches() {
+    let k = pressure(u64::MAX);
+    let (ended, dir) = scratch_item(&k, "done");
+    let (open, open_dir) = scratch_item(&k, "run");
+    let res = k.core.reclaim_workspaces().unwrap();
+    if workspace::process_dirs().is_some() {
+        assert!(freed_of(&res, &ended) >= 2 << 20, "{res:?}");
+        assert!(!dir.join("target").exists() && !dir.join("node_modules").exists());
+    }
+    assert!(dir.join("report.md").exists(), "its own files stay");
+    assert!(
+        dir.join("build/out.bin").exists(),
+        "an unmarked directory stays"
+    );
+    assert_eq!(
+        freed_of(&res, &open),
+        0,
+        "an open item keeps its scratch caches"
+    );
+    assert!(open_dir.join("target/debug/big").exists());
+}
+
+#[test]
+fn without_pressure_scratch_caches_stay() {
+    let k = pressure(0);
+    let (ended, dir) = scratch_item(&k, "done");
+    let res = k.core.reclaim_workspaces().unwrap();
+    assert_eq!(freed_of(&res, &ended), 0, "{res:?}");
+    assert!(dir.join("target/debug/big").exists() && dir.join("node_modules/x/index.js").exists());
+}
+
+#[test]
+fn the_report_lists_scratch_directories_with_their_caches() {
+    let k = pressure(0);
+    let (id, _) = scratch_item(&k, "done");
+    let rep = k.core.disk_report().unwrap();
+    assert!(rep.entries.iter().all(|e| e.item != id), "not a worktree");
+    let e = rep.scratch.iter().find(|e| e.item == id).unwrap();
+    assert!(
+        e.exists && e.cache_bytes >= 2 << 20 && e.bytes > e.cache_bytes,
+        "{e:?}"
+    );
+    assert_eq!(e.caches, vec!["node_modules", "target"]);
+}

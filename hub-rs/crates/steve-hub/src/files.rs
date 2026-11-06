@@ -222,6 +222,8 @@ pub struct NewFile {
 }
 
 /// Validates and stores (under the write lock); the same bytes under the same name in a workspace are stored once.
+/// A stored copy whose length differs from the row (cut short by a power loss before blobs were written
+/// atomically) is written again from these bytes, which have the same hash.
 pub fn store(
     r: &dyn Repo,
     data_dir: &Path,
@@ -232,9 +234,11 @@ pub fn store(
 ) -> BResult<Obj> {
     let (mime, name) = validate(b, name)?;
     let sha256 = hex::encode(Sha256::digest(b));
-    if let Some(dup) = r.file_same(ws, &sha256, &name)?
-        && blob_path(data_dir, &dup).exists()
-    {
+    if let Some(dup) = r.file_same(ws, &sha256, &name)? {
+        let p = blob_path(data_dir, &dup);
+        if std::fs::metadata(&p).map(|m| m.len()).ok() != Some(b.len() as u64) {
+            write_blob(&p, b).map_err(|e| BackendError::msg(e.to_string()))?;
+        }
         return Ok(dup);
     }
     let row = NewFile {
@@ -259,19 +263,36 @@ pub fn store(
     r.file_create(&row)
 }
 
+/// Atomically: a temporary file next to it, synced, then renamed over `p`, so a crash or power loss
+/// leaves either no blob or the whole one, never a truncated one.
 fn write_blob(p: &Path, b: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
-    if let Some(d) = p.parent() {
-        std::fs::create_dir_all(d)?;
+    let dir = p
+        .parent()
+        .ok_or_else(|| std::io::Error::other("a blob path has a parent"))?;
+    std::fs::create_dir_all(dir)?;
+    let name = p
+        .file_name()
+        .map(|n| n.to_string_lossy())
+        .unwrap_or_default();
+    let tmp = dir.join(format!(".{name}.{}.tmp", uuid::Uuid::new_v4().simple()));
+    let written = (|| {
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&tmp)?;
+        f.write_all(b)?;
+        f.sync_all()?;
+        std::fs::rename(&tmp, p)
+    })();
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
     }
-    let mut f = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(p)?;
-    f.write_all(b)
+    written?;
+    // the rename itself survives a power loss once the directory is synced
+    std::fs::File::open(dir).and_then(|d| d.sync_all())
 }
 
 /// `FileRef` = `{id, name, mime, size}`, the copy every other place stores.
