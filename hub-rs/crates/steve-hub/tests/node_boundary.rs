@@ -252,7 +252,7 @@ const ALLOWED: &[Entry] = &[
     e(Dir, "steve-knowledge/src/sources/folder.rs", 1, NoNode, "the knowledge folder walk with no Node"),
     e(Fs, "steve-hub/src/api/outputs.rs", 2, NoNode, "an output read from disk when no Node holds the item"),
     e(Fs, "steve-knowledge/src/sources/folder.rs", 1, NoNode, "a knowledge folder file read with no Node"),
-    e(Fs, "steve-core/src/cycle.rs", 2, NoNode, "the worktree fingerprint for items no Node holds"),
+    e(Fs, "steve-core/src/cycle.rs", 3, NoNode, "the worktree fingerprint for items no Node holds (its throwaway index and the lock a killed git leaves)"),
     e(Fs, "steve-github/src/push.rs", 1, NoNode, "the Hub-side push borrows the project's git objects"),
     e(Fs, "steve-core/src/lane/exec.rs", 1, Later("E12 lanes on the Node"), "a lane's worktree removed"),
     e(Fs, "steve-core/src/workspace.rs", 5, Later("E14 disk housekeeping (D13)"),
