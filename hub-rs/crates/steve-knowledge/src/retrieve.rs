@@ -364,3 +364,70 @@ pub fn record_use(
     ])?;
     Ok(id)
 }
+
+/// The knowledge a disclosure basis names (`entries` of `reply_basis` / a mail draft's basis), read again
+/// for a later check of the same text: a retrieved piece by its index position (`seq`), a memory shown
+/// by id by its id. The flag says whether every entry could be read again; when one cannot (removed
+/// since, or a basis written before pieces were recorded) the later check has less than the first one
+/// had and must not pass on that ([`steve_modules::outbound::R_BASIS_GONE`]).
+pub fn knowledge_again(
+    c: &Connection,
+    ws: &str,
+    entries: &[serde_json::Value],
+) -> Result<(Vec<steve_modules::outbound::KnowledgeUse>, bool)> {
+    use rusqlite::OptionalExtension;
+    use steve_modules::outbound::KnowledgeUse;
+    let mut out = Vec::new();
+    let mut complete = true;
+    for e in entries {
+        let kind = e["source_type"].as_str().unwrap_or("");
+        if kind == "span" {
+            continue;
+        }
+        let id = e["source_id"].as_str().unwrap_or("");
+        let label = e["source_label"].as_str().unwrap_or("").to_string();
+        let found = match e["seq"].as_i64() {
+            Some(seq) => c
+                .query_row(
+                    "SELECT text, level, visibility FROM kb_chunks
+                      WHERE workspace_id = ? AND obj_type = ? AND obj_id = ? AND seq = ?",
+                    params![ws, kind, id, seq],
+                    |r| {
+                        Ok(KnowledgeUse {
+                            source_type: kind.into(),
+                            source_id: id.into(),
+                            source_label: label.clone(),
+                            level: Level::from_db(&r.get::<_, String>(1)?),
+                            visibility: r.get(2)?,
+                            text: r.get(0)?,
+                            seq: Some(seq),
+                        })
+                    },
+                )
+                .optional()?,
+            None if kind == "mem" => {
+                mems::get(c, id)?
+                    .filter(|m| m.workspace_id == ws)
+                    .map(|m| KnowledgeUse {
+                        source_type: "mem".into(),
+                        source_id: m.id.clone(),
+                        source_label: if label.is_empty() {
+                            "记忆".into()
+                        } else {
+                            label.clone()
+                        },
+                        level: m.level,
+                        visibility: m.visibility.code(),
+                        text: m.text.clone(),
+                        seq: None,
+                    })
+            }
+            None => None,
+        };
+        match found {
+            Some(k) => out.push(k),
+            None => complete = false,
+        }
+    }
+    Ok((out, complete))
+}

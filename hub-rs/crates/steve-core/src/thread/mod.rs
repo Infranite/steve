@@ -69,6 +69,15 @@ struct Job {
     to: SayTo,
     /// the conversation it was said in
     conv: Conv,
+    /// Its way is fixed without the router (`/汇报`, sent to an item, quoting one, `#ST-n`): it goes on
+    /// its own lane and does not wait for the turn in progress. Worked out again whenever it is queued.
+    #[serde(skip)]
+    direct: bool,
+}
+
+/// The lane of a conversation's messages whose way is fixed ([`Job::direct`]).
+pub(crate) fn direct_lane(ws: &str, space: &str) -> String {
+    format!("{}\u{1f}direct", lane_key(ws, space))
 }
 
 /// The web conversation's `messages.space`.
@@ -352,6 +361,7 @@ impl Core {
                 mentions: vec![],
                 to: SayTo::default(),
                 conv,
+                direct: false,
             },
         );
         Ok(mid)
@@ -445,8 +455,9 @@ impl Core {
         if let Some(i) = &to.item {
             meta.insert("to".into(), json!(i));
         }
-        /* said while Steve is still on a turn: it waits, visibly, and can be edited or withdrawn until then */
-        if self.main_busy(ws)? {
+        /* said while Steve is still on a turn: it waits, visibly, and can be edited or withdrawn until then;
+        one whose way is fixed (to an item, `/汇报`) does not wait */
+        if !self.direct_way(ws, text, &to, false)? && self.main_busy(ws)? {
             meta.insert("held".into(), json!(true));
         }
         let meta = (!meta.is_empty()).then_some(Value::Object(meta));
@@ -463,6 +474,7 @@ impl Core {
                 mentions: mentions.to_vec(),
                 to,
                 conv: Conv::main(),
+                direct: false,
             },
         );
         Ok(mid)
@@ -483,6 +495,12 @@ impl Core {
                 |r| r.get::<_, bool>(0),
             )?)
         })?)
+    }
+
+    /// The main conversation's turn is on (a message being routed on its lane, an answer or research) —
+    /// what a message with a fixed way passes without waiting.
+    pub(crate) fn main_busy_besides(&self, ws: &str) -> bool {
+        lock(&self.0.thread.inflight).contains_key(ws) || self.inline_busy(ws)
     }
 
     /// How many routing and inline lanes are running.
@@ -634,8 +652,39 @@ impl Core {
         Ok(Some((job.text, job.files)))
     }
 
-    /// Queues a stored message on its conversation's routing lane.
-    fn enqueue(&self, ws: &str, job: Job) {
+    /// Whether a message's way is fixed without the router, as [`Core::handle`] takes it: `/汇报`, sent to an
+    /// item of this workspace (focus bar) or quoting one of its messages, or `#ST-n …` (a bare `ST-n …`
+    /// unless it asks about it) of an item that exists. Never in a guest conversation.
+    fn direct_way(&self, ws: &str, text: &str, to: &SayTo, guest: bool) -> Result<bool> {
+        if guest {
+            return Ok(false);
+        }
+        if text.trim() == "/汇报" {
+            return Ok(true);
+        }
+        let db = self.store();
+        let here =
+            |id: &str| -> Result<bool> { Ok(db.item(id)?.is_some_and(|i| i.workspace_id == ws)) };
+        let target = match (&to.item, &to.reply_to) {
+            (Some(i), _) => Some(i.clone()),
+            (None, Some(r)) => db.message(r)?.and_then(|m| m.item_id),
+            _ => None,
+        };
+        if let Some(id) = target
+            && here(&id)?
+        {
+            return Ok(true);
+        }
+        if let Some(c) = REF.captures(text)
+            && (text.starts_with('#') || !decide::pure_question(text))
+        {
+            return here(&c[1]);
+        }
+        Ok(false)
+    }
+
+    /// Queues a stored message on its conversation's routing lane (its own lane when its way is fixed).
+    fn enqueue(&self, ws: &str, mut job: Job) {
         // Persist only the waiting routing work. Once routing starts, its outcome can be
         // effectful; a crash must not blindly replay it. Planned drain waits for that permit.
         let key = format!("thread.pending.{}", job.mid);
@@ -653,9 +702,19 @@ impl Core {
         if !lock(&self.0.thread.admitted).insert(job.mid.clone()) {
             return;
         }
+        job.direct = self
+            .direct_way(ws, &job.text, &job.to, job.conv.guest())
+            .unwrap_or_else(|e| {
+                tracing::warn!("thread lane of {}: {e}", job.mid);
+                false
+            });
         /* sent under the map's lock: an idle lane only goes under it too, and only with nothing queued */
         let mut lanes = lock(&self.0.thread.lanes);
-        let key = lane_key(ws, &job.conv.space);
+        let key = if job.direct {
+            direct_lane(ws, &job.conv.space)
+        } else {
+            lane_key(ws, &job.conv.space)
+        };
         let tx = lanes
             .entry(key.clone())
             .or_insert_with(|| self.routing_lane(ws, &key));
@@ -694,12 +753,13 @@ impl Core {
                         return;
                     }
                 };
-                if !j.conv.guest() {
+                if !j.conv.guest() && !j.direct {
                     core.turn_done(&w).await;
                 }
                 let _activity = core.store().store().activity("thread_router").await;
+                let direct = j.direct;
                 let j = match core.claim(&w, &j.mid) {
-                    Ok(Some(job)) => job,
+                    Ok(Some(job)) => Job { direct, ..job },
                     Ok(None) => {
                         /* withdrawn while it waited */
                         lock(&core.0.thread.admitted).remove(&j.mid);

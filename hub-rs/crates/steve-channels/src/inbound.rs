@@ -8,8 +8,7 @@
 //!    page has it;
 //! 3. loop guard: a message from the connection's own account is not processed (a self account's
 //!    trigger words are C6's to check), one from another bot is only recorded unless the space has
-//!    `collab`; more than 20 messages sent by Steve in a space within 10 minutes mute it and open a
-//!    `fail` decision.
+//!    `collab`. Nothing here mutes a space by itself: a space is muted only when you set it so.
 //!
 //! What comes back ([`Inbound::next`]) tells steps 4–7 whether to evaluate the rules;
 //! [`Channels::on_message`] runs them (C3):

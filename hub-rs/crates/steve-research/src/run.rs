@@ -19,8 +19,12 @@ use tracing::Instrument;
 
 /// A run whose harness says nothing (no text, no tool call, no event at all) for this long is stuck and is
 /// ended. This is not a limit on how long a conversation may take: a run that keeps working never ends by
-/// time. Setting `thread.research.idle_seconds` overrides it.
+/// time. It is the same rule for every harness (API retries and context compaction can be silent for
+/// minutes); setting `thread.research.idle_seconds` overrides it.
 pub const DEFAULT_IDLE: Duration = Duration::from_secs(600);
+/// After the harness closed its output it is ending: by default it gets this long to exit before it
+/// counts as stuck ([`Budget::exit_wait`]).
+pub const EXIT_WAIT: Duration = Duration::from_secs(45);
 /// Default research models (`STEVE_MODELS_RESEARCH`), non-kiro.
 pub const DEFAULT_MODELS: &str = "claude-sonnet-5-5,claude-opus-5-5";
 
@@ -39,6 +43,8 @@ pub struct Budget {
     pub max_tools: Option<u32>,
     /// No output from the harness for this long: stuck, ended.
     pub idle: Duration,
+    /// After the harness closed its output, how long it may take to exit before it counts as stuck.
+    pub exit_wait: Duration,
 }
 
 impl Default for Budget {
@@ -49,6 +55,7 @@ impl Default for Budget {
             max_turns: None,
             max_tools: None,
             idle: DEFAULT_IDLE,
+            exit_wait: EXIT_WAIT,
         }
     }
 }
@@ -65,6 +72,7 @@ impl Budget {
             max_turns: n("turns").map(|x| x as u32).or(d.max_turns),
             max_tools: n("tools").map(|x| x as u32).or(d.max_tools),
             idle: n("idle_seconds").map_or(d.idle, Duration::from_secs),
+            exit_wait: d.exit_wait,
         }
     }
 }
@@ -1057,7 +1065,8 @@ async fn attempt(
     let _ = ctx.tx.send(ResearchEvent::Started { model });
     let mut lines = tokio::io::BufReader::new(stdout).lines();
     let mut stop_open = true;
-    let mut quiet_until = Instant::now() + ctx.budget.idle;
+    let idle = ctx.budget.idle;
+    let mut quiet_until = Instant::now() + idle;
     loop {
         tokio::select! {
             biased;
@@ -1074,7 +1083,7 @@ async fn attempt(
                 break;
             }
             _ = tokio::time::sleep_until(quiet_until) => {
-                tracing::warn!(idle = ?ctx.budget.idle, "research: the harness said nothing for too long");
+                tracing::warn!(?idle, "research: the harness said nothing for too long");
                 st.kill = Some(Kill::Budget(BudgetHit::Idle));
                 break;
             }
@@ -1084,7 +1093,7 @@ async fn attempt(
             }
             l = lines.next_line() => match l {
                 Ok(Some(l)) => {
-                    quiet_until = Instant::now() + ctx.budget.idle;
+                    quiet_until = Instant::now() + idle;
                     for item in parse(&l) {
                         if let Some(k) = on_item(ctx, st, item) {
                             st.kill = Some(k);
@@ -1104,8 +1113,8 @@ async fn attempt(
     }
     // its output is closed: it is ending; a process that does not is as stuck as a silent one
     let wait_until = match ctx.deadline {
-        Some(d) => d.min(Instant::now() + ctx.budget.idle),
-        None => Instant::now() + ctx.budget.idle,
+        Some(d) => d.min(Instant::now() + ctx.budget.exit_wait),
+        None => Instant::now() + ctx.budget.exit_wait,
     };
     let status = match tokio::time::timeout_at(wait_until, child.wait()).await {
         Ok(Ok(s)) => s,
@@ -1378,6 +1387,8 @@ mod tests {
         let d = Budget::default();
         assert_eq!((d.hard, d.max_turns, d.max_tools), (None, None, None));
         assert_eq!(d.idle, DEFAULT_IDLE);
+        assert_eq!(d.exit_wait, EXIT_WAIT);
+        assert!((30..=60).contains(&EXIT_WAIT.as_secs()));
         assert_eq!(Budget::from_setting(&json!({})), d);
         // a limit in the setting is honoured as given, there is no ceiling above it
         let b = Budget::from_setting(

@@ -50,6 +50,24 @@ pub struct Opts {
     pub smtp_tls: TlsMode,
     pub secrets: Option<Arc<dyn steve_mail::SecretScan>>,
     pub hooks: Option<Arc<dyn steve_mail::DraftHooks>>,
+    /// The outbound check to register (none: every draft is `unchecked`).
+    pub check: Option<Arc<dyn steve_modules::outbound::OutboundCheck>>,
+}
+
+/// A shared check, registered by value.
+struct SharedCheck(Arc<dyn steve_modules::outbound::OutboundCheck>);
+
+#[async_trait::async_trait]
+impl steve_modules::outbound::OutboundCheck for SharedCheck {
+    async fn check(
+        &self,
+        cx: &steve_modules::outbound::CheckCx,
+        audience: &steve_modules::outbound::Audience,
+        text: &str,
+        knowledge: &[steve_modules::outbound::KnowledgeUse],
+    ) -> steve_modules::outbound::CheckResult {
+        self.0.check(cx, audience, text, knowledge).await
+    }
 }
 
 impl Default for Opts {
@@ -59,6 +77,7 @@ impl Default for Opts {
             smtp_tls: TlsMode::Implicit,
             secrets: None,
             hooks: None,
+            check: None,
         }
     }
 }
@@ -70,7 +89,11 @@ pub async fn setup() -> H {
 pub async fn setup_with(o: Opts) -> H {
     let link = steve_mail::DraftLink::new();
     let l2 = link.clone();
+    let check = o.check.clone();
     let env = TestEnv::new(move |r| {
+        if let Some(c) = &check {
+            r.outbound_check(Box::new(SharedCheck(c.clone())));
+        }
         steve_modules::accounts::connections::register(r);
         r.decision(steve_mail::drafts::SUBJECT_TYPE, l2.handler());
         steve_mail::config::targets::register(r);

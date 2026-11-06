@@ -611,19 +611,25 @@ impl Mail {
         let p = tokio::task::spawn_blocking(move || m.draft_prepare(&c2, &a2))
             .await
             .map_err(|e| format!("task failed: {e}"))??;
-        let check = outbound::check(
-            &self.0.m,
-            &CheckCx {
-                ws: cx.ws.clone(),
-                actor: cx.bot_id.clone(),
-                draft_model: None,
-                audience_said: None,
-            },
-            &p.audience,
-            &format!("{}\n\n{}", p.subject, p.body),
-            &[],
-        )
-        .await;
+        let skip_model = !self.model_check_now(&cx.ws, cx.item_id.as_deref());
+        let check = drafts::local_only(
+            outbound::check(
+                &self.0.m,
+                &CheckCx {
+                    ws: cx.ws.clone(),
+                    actor: cx.bot_id.clone(),
+                    draft_model: None,
+                    audience_said: None,
+                    skip_model,
+                    internal_skip: false,
+                },
+                &p.audience,
+                &format!("{}\n\n{}", p.subject, p.body),
+                &[],
+            )
+            .await,
+            skip_model,
+        );
         let (m, c2) = (self.clone(), cx.clone());
         let d = tokio::task::spawn_blocking(move || m.draft_write(&c2, p, check))
             .await

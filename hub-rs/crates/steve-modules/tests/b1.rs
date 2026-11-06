@@ -408,12 +408,15 @@ async fn the_registered_outbound_check_is_used() {
         level: Level::Reasoning,
         visibility: "private".into(),
         text: "预算 30 万".into(),
+        seq: None,
     }];
     let cx = CheckCx {
         ws: WS.into(),
         actor: "steve".into(),
         draft_model: None,
         audience_said: None,
+        skip_model: false,
+        internal_skip: false,
     };
     let ext = Audience {
         external: true,

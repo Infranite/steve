@@ -580,6 +580,7 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
         .reactor(outbox.clone())
         // IM spaces converse through steve-core's thread (channels §2.12)
         .thread(Arc::new(super::chan::CoreThread(core.clone())))
+        .yolo(Arc::new(super::chan::ChanYolo(core.clone())))
         .build();
     channels.set_knowledge_store(kstore.clone());
     late.set(&channels);

@@ -105,6 +105,8 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/045.sql"),
     // 46: Steve's own seeded project releases through the merge lane, not ops/release.sh.
     include_str!("../migrations/046.sql"),
+    // 47: a channel account's undo window before an approved message goes out (`send_delay_s`).
+    include_str!("../migrations/047.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).

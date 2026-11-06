@@ -224,11 +224,12 @@ async fn thread_routing_api() {
     let (s, v) = e.call("GET", &format!("/api/items/{item}"), None).await;
     assert_eq!((s, v["status"].as_str()), (200, Some("drop")));
 
-    /* a question is answered with an offer; taking it twice: the second is 409 with the same item */
+    /* a question is answered with an offer; taking it twice: the second is 409 with the same item
+    (a request in it, so the router sees it: a plain question would be researched without it) */
     e.call(
         "POST",
         "/api/thread",
-        Some(json!({"text": "评论支持 markdown 吗"})),
+        Some(json!({"text": "评论支持 markdown 吗，你看看"})),
     )
     .await;
     let t = e.settle(5).await;

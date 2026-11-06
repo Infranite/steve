@@ -460,10 +460,11 @@ async fn while_research_runs_messages_wait_and_can_be_changed_or_withdrawn() {
                     .map(String::from)
             })
             .collect();
+    /* a plain question needs no router (#52, guard q) */
+    assert_eq!(route_log(&k, &q1).guard.as_deref(), Some("q"));
     assert_eq!(
         routed,
         vec![
-            "User message: \"问题一是什么？\"",
             "User message: \"修登录页\"",
             "User message: \"问题二改过了？\"",
         ],
@@ -1073,7 +1074,8 @@ async fn screenshots_reach_research_answers_and_follow_ups() {
         assert!(seen[0].earlier_files.is_empty());
     }
     /* a follow-up answered directly: the screenshot it is about goes inline */
-    k.core.say(WS, "这样你也看不出来吗？", &[]).unwrap();
+    /* not a plain question (a plain one is researched without the router, #52) */
+    k.core.say(WS, "这样你也看不出来", &[]).unwrap();
     settle(&k, 4).await;
     let calls = k.gw.calls.lock().unwrap().clone();
     let route = calls
