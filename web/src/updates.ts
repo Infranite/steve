@@ -2,6 +2,17 @@ import { modReq } from "@/api"
 import type { Health, Install } from "@/upgrade-guide"
 import { t } from "@/i18n"
 
+/** Release builds are named `YYYYMMDD-HHMMSS-<commit>`; anything else (dev, a hand-set STEVE_VERSION) is shown as is. */
+export function readableVersion(v: string): { when?: string; commit?: string; raw: string } {
+  const m = /^(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})\d{2}-([0-9a-f]{6,40})(.*)$/i.exec(v)
+  return m ? { when: `${m[1]}-${m[2]}-${m[3]} ${m[4]}:${m[5]}`, commit: m[6].slice(0, 8) + m[7], raw: v } : { raw: v }
+}
+
+/** A version short enough for one line (the sidebar, ST-21): a release build by its commit, anything else as is. */
+export function shortVersion(v: string): string {
+  return readableVersion(v).commit ?? v
+}
+
 export type UpdatePhase = "awaiting_approval" | "staging" | "ready" | "draining" | "stopping" | "backing_up" | "restarting" | "verifying" | "committed" | "succeeded" | "rolling_back" | "rolled_back_pending_health" | "rolled_back" | "failed"
 export type UpdateCheck = { status: "available" | "up_to_date" | "ahead" | "unknown_current" | "no_release" | "error" | "unsupported_platform"; checked_at: number; version: string | null; release_url: string | null; notes: string | null; error: string | null }
 export type UpdateOperation = { id: string; idempotency_key: string; version: string; phase: UpdatePhase; created_at: number; updated_at: number; requested_by: string; approved_by?: string | null; approved_at?: number | null; error: string | null; previous: string | null; target: string | null }
