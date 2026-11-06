@@ -50,7 +50,7 @@ import { MODULE_CARDS } from "@/vault/decisions"
 import { OutContext } from "@/channels/out-context"
 import { MailDraftCard } from "@/mail/draft"
 import { useMentions } from "@/people/mention"
-import { clearSentDraft, readDraft, saveDraft } from "@/composer-draft"
+import { clearSentDraft, draftToSend, readDraft, saveDraft } from "@/composer-draft"
 import { isPeopleDecision, PeopleDecisionBody } from "@/people/pending"
 import { usePeopleOn } from "@/api/people"
 
@@ -403,7 +403,8 @@ export type ComposerHandle = { empty: () => boolean; fill: (text: string, files:
 type ComposerProps = {
   handle?: { current: ComposerHandle | null }
   draftKey?: string
-  placeholder: string; onSend: (t: string, files: string[], refs: RFile[], mentions: { kind: "party" | "bot"; id: string }[]) => void | boolean | Promise<void | boolean>; model?: string; onModel?: (m: string) => void; left?: ReactNode; autoFocus?: boolean; className?: string; testId?: string; disabled?: boolean
+  /** `clientId`: the same for every retry of one unchanged draft (send idempotency) */
+  placeholder: string; onSend: (t: string, files: string[], refs: RFile[], mentions: { kind: "party" | "bot"; id: string }[], clientId: string) => void | boolean | Promise<void | boolean>; model?: string; onModel?: (m: string) => void; left?: ReactNode; autoFocus?: boolean; className?: string; testId?: string; disabled?: boolean
   /** `busy`: the other side is working. With `onStop` there is a stop button beside send (and Esc), and sending still
    * works: the page queues what is sent meanwhile */
   busy?: boolean; onStop?: () => void | Promise<void>; onCommand?: (c: string) => void
@@ -444,11 +445,10 @@ function ComposerInput({ placeholder, onSend, model, left, autoFocus, className,
   const send = async () => {
     const t = v.trim()
     if (disabled || (busy && !onStop) || inFlight.current || up.uploading || (!t && !up.ready.length)) return
-    const sentDraft = { text: v, files: up.ready, mentions: men.snapshot() }
-    saveDraft(draftKey, sentDraft)
+    const sentDraft = draftToSend(draftKey, { text: v, files: up.ready, mentions: men.snapshot() })
     inFlight.current = true; setSending(true)
     try {
-      const sent = await onSend(t || "（附件）", up.ready.map((f) => f.id), up.ready, men.take(t))
+      const sent = await onSend(t || "（附件）", up.ready.map((f) => f.id), up.ready, men.take(t), sentDraft.clientId)
       if (sent === false) return
       if (clearSentDraft(draftKey, sentDraft)) { setV(""); up.clear(); men.clear(); setMenu(null) }
     } catch { /* the action reports its error; keep the draft for retry */ }

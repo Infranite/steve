@@ -4,11 +4,102 @@
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 
-/// Where the Hub listens.
+/// Where the Hub listens: every host in `STEVE_HOST` (comma-separated) on one port.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Listen {
-    pub host: String,
+    /// Never empty; IPv6 literals without brackets.
+    pub hosts: Vec<String>,
     pub port: u16,
+}
+
+impl Listen {
+    /// `STEVE_HOST`: a comma-separated list, default `127.0.0.1`. A wildcard (`0.0.0.0`, `::`)
+    /// exposes the Hub to the whole network and needs `STEVE_ALLOW_ANY_HOST=1`.
+    pub fn parse(raw: &str, port: u16, allow_any: bool) -> Result<Self, ConfigError> {
+        let mut hosts: Vec<String> = Vec::new();
+        for h in raw.split(',').map(str::trim).filter(|h| !h.is_empty()) {
+            let h = h
+                .strip_prefix('[')
+                .and_then(|h| h.strip_suffix(']'))
+                .unwrap_or(h);
+            if !hosts.iter().any(|x| x == h) {
+                hosts.push(h.to_string());
+            }
+        }
+        if hosts.is_empty() {
+            hosts.push("127.0.0.1".into());
+        }
+        let listen = Self { hosts, port };
+        if listen.any() && !allow_any {
+            return Err(ConfigError::Invalid {
+                var: "STEVE_HOST",
+                msg: "0.0.0.0 / :: listens on every network; list the addresses instead \
+                      (e.g. 127.0.0.1,100.64.0.2) or set STEVE_ALLOW_ANY_HOST=1"
+                    .into(),
+            });
+        }
+        Ok(listen)
+    }
+
+    /// Whether some host is a wildcard address.
+    pub fn any(&self) -> bool {
+        self.hosts.iter().any(|h| {
+            h.parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_unspecified())
+        })
+    }
+
+    /// The value to hand a child Hub as `STEVE_HOST`.
+    pub fn env_value(&self) -> String {
+        self.hosts.join(",")
+    }
+
+    /// The host (URL form) a process on this machine uses to reach the Hub: a loopback host if
+    /// one is listed, else the first one; a wildcard is reached over loopback.
+    pub fn local_host(&self) -> String {
+        let loopback = |h: &str| {
+            h == "localhost"
+                || h.parse::<std::net::IpAddr>()
+                    .is_ok_and(|ip| ip.is_loopback())
+        };
+        let h = self
+            .hosts
+            .iter()
+            .find(|h| loopback(h))
+            .unwrap_or(&self.hosts[0]);
+        match h.as_str() {
+            "0.0.0.0" => "127.0.0.1".into(),
+            "::" => "[::1]".into(),
+            h if h.contains(':') => format!("[{h}]"),
+            h => h.into(),
+        }
+    }
+
+    /// `http://host:port` for every host, for the startup line.
+    pub fn urls(&self) -> String {
+        self.hosts
+            .iter()
+            .map(|h| match h.contains(':') {
+                true => format!("http://[{h}]:{}", self.port),
+                false => format!("http://{h}:{}", self.port),
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    /// Bind every host; fails (naming the address) if any one cannot be bound.
+    pub async fn bind(&self) -> std::io::Result<Vec<tokio::net::TcpListener>> {
+        let mut out = Vec::with_capacity(self.hosts.len());
+        for h in &self.hosts {
+            let l = tokio::net::TcpListener::bind((h.as_str(), self.port))
+                .await
+                .map_err(|e| {
+                    std::io::Error::new(e.kind(), format!("listen on {h}:{}: {e}", self.port))
+                })?;
+            out.push(l);
+        }
+        Ok(out)
+    }
 }
 
 /// OIDC client settings; all unset means OIDC login is off.
@@ -330,10 +421,11 @@ impl Config {
             data_dir: home.join("data"),
             worktrees: home.join("worktrees"),
             scratch: home.join("scratch"),
-            listen: Listen {
-                host: env("STEVE_HOST", "127.0.0.1"),
-                port: port_n as u16,
-            },
+            listen: Listen::parse(
+                &env("STEVE_HOST", "127.0.0.1"),
+                port_n as u16,
+                get("STEVE_ALLOW_ANY_HOST").as_deref() == Some("1"),
+            )?,
             public_url,
             public_urls,
             web_dir: get("STEVE_WEB_DIR").map(PathBuf::from).unwrap_or_else(|| {
@@ -452,7 +544,7 @@ mod tests {
         assert_eq!(
             c.listen,
             Listen {
-                host: "127.0.0.1".into(),
+                hosts: vec!["127.0.0.1".into()],
                 port: 8440
             }
         );
@@ -466,6 +558,57 @@ mod tests {
         assert_eq!(c.version, "dev");
         assert!(!c.dev_login);
         assert!(!c.secure_cookies());
+    }
+
+    #[test]
+    fn steve_host_is_a_list_and_refuses_wildcards() {
+        let c = cfg(&[("STEVE_HOST", " 127.0.0.1, 100.64.0.2 ,,[::1],127.0.0.1")]);
+        assert_eq!(c.listen.hosts, vec!["127.0.0.1", "100.64.0.2", "::1"]);
+        assert_eq!(c.listen.env_value(), "127.0.0.1,100.64.0.2,::1");
+        assert_eq!(
+            c.listen.urls(),
+            "http://127.0.0.1:8440, http://100.64.0.2:8440, http://[::1]:8440"
+        );
+        assert!(!c.listen.any());
+        assert_eq!(cfg(&[("STEVE_HOST", "")]).listen.hosts, vec!["127.0.0.1"]);
+
+        // local callers prefer a loopback host over the first one
+        let l = |raw: &str| Listen::parse(raw, 1, true).expect("listen");
+        assert_eq!(l("100.64.0.2,127.0.0.1").local_host(), "127.0.0.1");
+        assert_eq!(l("100.64.0.2,::1").local_host(), "[::1]");
+        assert_eq!(l("100.64.0.2").local_host(), "100.64.0.2");
+        assert_eq!(l("0.0.0.0").local_host(), "127.0.0.1");
+        assert_eq!(l("::").local_host(), "[::1]");
+
+        for any in ["0.0.0.0", "127.0.0.1,0.0.0.0", "::", "[::]"] {
+            let e = Config::from_vars(|k| match k {
+                "STEVE_HOST" => Some(any.into()),
+                "STEVE_ADAPTER_CLAUDE" | "STEVE_ADAPTER_CODEX" => Some("/x".into()),
+                _ => None,
+            })
+            .expect_err(any);
+            assert!(e.to_string().starts_with("STEVE_HOST: "), "{e}");
+        }
+        let c = cfg(&[("STEVE_HOST", "0.0.0.0"), ("STEVE_ALLOW_ANY_HOST", "1")]);
+        assert!(c.listen.any());
+    }
+
+    #[tokio::test]
+    async fn binds_every_listed_host() {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .and_then(|l| l.local_addr())
+            .expect("free port")
+            .port();
+        let l = Listen::parse("127.0.0.1,localhost", port, false).expect("listen");
+        let bound = l.bind().await.expect("bind");
+        assert!(!bound.is_empty());
+        // a second Hub on the same port is refused, naming the address
+        let e = Listen::parse("127.0.0.1", port, false)
+            .expect("listen")
+            .bind()
+            .await
+            .expect_err("taken");
+        assert!(e.to_string().contains(&format!("127.0.0.1:{port}")), "{e}");
     }
 
     #[test]

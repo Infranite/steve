@@ -3,6 +3,7 @@
 
 mod annotations;
 mod bots;
+pub mod dedupe;
 mod files;
 mod items;
 mod misc;
@@ -45,6 +46,8 @@ pub struct Inner {
     /// The models each harness offers (`/system/models`).
     pub catalog: crate::catalog::Catalog,
     pub state_cache: misc::StateCache,
+    /// `client_id` of recent sends (`POST /thread`, `POST /items`), so a retry does not send twice.
+    pub dedupe: dedupe::Dedupe,
     /// The new modules (steve-modules), for config drafts and decisions they own.
     pub modules: Option<steve_modules::Modules>,
     /// Remote Nodes (`STEVE_NODE_LISTEN=1`): pairing, the `/node/ws` listener, their coordinators.
@@ -79,6 +82,7 @@ impl AppState {
             bus,
             runtimes,
             state_cache: Default::default(),
+            dedupe: Default::default(),
             modules: None,
             nodes: None,
             node: None,
