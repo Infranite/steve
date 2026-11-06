@@ -81,6 +81,36 @@ pub fn of_node(body: &EventBody, role: Option<Role>) -> Option<Entry> {
     }
 }
 
+/// The entries of an imported history (a Node's `import_page` events, in order), as the Hub stores
+/// them: a user's message is the Hub's own `user` row (`{text, via: "me"}`), the agent's texts,
+/// tools and plans are entries of their own. Message boundaries are not kept (as with old rows),
+/// and nothing else of the events is (usage, attempts: history never counts as new work).
+pub fn of_history(events: &[steve_node_api::NodeEvent]) -> Vec<Entry> {
+    let mut roles = std::collections::HashMap::new();
+    let mut out = vec![];
+    for e in events {
+        match &e.body {
+            EventBody::MessageStarted { message, role, .. } => {
+                roles.insert(message.clone(), *role);
+            }
+            EventBody::TextDelta { message, text, .. } => match roles.get(message) {
+                Some(Role::User) => {
+                    out.push(Entry::new("user", json!({ "text": text, "via": "me" })))
+                }
+                r => out.extend(of_node(
+                    &e.body,
+                    Some(r.copied().unwrap_or(Role::Assistant)),
+                )),
+            },
+            EventBody::ToolChanged { .. } | EventBody::Plan { .. } => {
+                out.extend(of_node(&e.body, None))
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
 /// The longest text a transcript keeps of a tool's action (a command, a Steve tool's arguments),
 /// in characters: the same bound as a tool's output preview.
 pub const TEXT_MAX: usize = 4000;

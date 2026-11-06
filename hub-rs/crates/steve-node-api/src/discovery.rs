@@ -83,10 +83,14 @@ pub struct HistoryEntry {
     pub directory: Option<String>,
     pub updated: Timestamp,
     pub version: Revision,
+    /// The transcript's size in bytes, when the Node knows it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
 }
 
-/// Where a history entry is, for people and for resuming. Only a key the Node listed itself is
-/// located; any other (a key made up by a client) is refused.
+/// Where a history entry is, for people and for resuming. Only a key the Node listed itself, or
+/// `session:<harness session id>` (looked up in the harness's own session store, never a path),
+/// is located; any other (a key made up by a client) is refused.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HistoryLocation {
     pub source: HistoryRef,
@@ -95,6 +99,14 @@ pub struct HistoryLocation {
     /// The harness session it continues, when the harness can resume it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resume: Option<ResumeHandle>,
+    /// When the transcript last changed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated: Option<Timestamp>,
+    /// The session id and working directory the transcript itself records, when it does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recorded_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recorded_cwd: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

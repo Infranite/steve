@@ -19,6 +19,7 @@ steve-acp = { path = "../steve-acp" }
 steve-node-api = { path = "../steve-node-api" }
 tokio = { version = "=1.54.1", features = ["rt", "sync", "time", "macros", "process", "fs", "net"] }
 tracing = "=0.1.44"
+uuid = { version = "=1.29.0", features = ["v4"] }
 
 [dev-dependencies]
 steve-node-api = { path = "../steve-node-api", features = ["testkit"] }

@@ -109,6 +109,11 @@ impl AppState {
     pub fn with_node(self, node: Option<Arc<crate::wire::node_runtime::NodeRuntime>>) -> Self {
         match Arc::try_unwrap(self.0) {
             Ok(mut inner) => {
+                // the local Node runs the harness binaries for the harness list and Codex's models
+                if let Some(n) = &node {
+                    inner.runtimes.set_node(n.node());
+                    inner.catalog.set_node(n.node());
+                }
                 inner.node = node;
                 AppState(Arc::new(inner))
             }

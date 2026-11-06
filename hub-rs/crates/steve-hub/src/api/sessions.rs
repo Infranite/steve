@@ -369,13 +369,28 @@ pub async fn resume(
 ) -> ApiResult {
     let s = own_session(&st, &c.ws, &id).await?;
     let homes = crate::resume::Homes::of(&st.cfg);
+    // the local Node on: it finds the transcript, the Hub reads no harness files
+    if let Some(node) = st.node.as_ref().map(|n| n.node()) {
+        return ok(crate::resume::info_on(&homes, &s, node.as_ref()).await);
+    }
     let v = blocking(move || Ok(crate::resume::info(&homes, &s))).await?;
     ok(v)
 }
 
 pub async fn local(State(st): State<AppState>) -> ApiResult {
-    let home = st.cfg.home.clone();
-    let files = blocking(move || Ok(crate::system::local_candidates(&home, 60))).await?;
+    let files = match st.node.as_ref().map(|n| n.node()) {
+        // the local Node on: its own list, the Hub reads no harness files
+        Some(node) => crate::system::node_candidates(node.as_ref(), 60)
+            .await
+            .map_err(|e| {
+                tracing::warn!("history of the local Node: {e}");
+                ApiError::internal(steve_i18n::t!("hub.import.list_failed"))
+            })?,
+        None => {
+            let home = st.cfg.home.clone();
+            blocking(move || Ok(crate::system::local_candidates(&home, 60))).await?
+        }
+    };
     st.read(move |r| {
         let done = r.import_keys()?;
         let out: Vec<Value> = files
@@ -404,14 +419,20 @@ pub async fn import(
     let keys = k.str_array("keys", Some(1), Some(50));
     k.finish()?;
     let (home, bus) = (st.cfg.home.clone(), st.bus.clone());
-    // file reads first, outside the core lock
-    let prepared = blocking(move || {
-        Ok(keys
-            .iter()
-            .map(|k| crate::system::prepare_import(&home, k))
-            .collect::<Vec<_>>())
-    })
-    .await?;
+    // file reads first, outside the core lock; with the local Node on, it reads them, and only
+    // what it lists
+    let prepared = match st.node.as_ref().map(|n| n.node()) {
+        Some(node) => crate::system::node_prepare(node.as_ref(), &keys).await,
+        None => {
+            blocking(move || {
+                Ok(keys
+                    .iter()
+                    .map(|k| crate::system::prepare_import(&home, k))
+                    .collect::<Vec<_>>())
+            })
+            .await?
+        }
+    };
     st.write(move |r| {
         let out: Vec<Value> = prepared
             .into_iter()

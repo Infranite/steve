@@ -2,13 +2,11 @@
 //! harnesses it finds, and imports local harness history (Claude Code, Codex) as read-only sessions.
 //! External commands run through `tokio::process` with the TS 8 s timeout; file scans run on the blocking pool.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
-use regex::Regex;
-use serde::Serialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
@@ -101,6 +99,8 @@ pub struct Runtimes {
     refreshing: Arc<AtomicBool>,
     /// callers that must wait for a probe (nothing cached yet, or `fresh`) probe one at a time
     probing: Mutex<()>,
+    /// The local Node (`STEVE_NODE_MODE=local`): it runs the harness binaries, not the Hub.
+    node: std::sync::OnceLock<Arc<dyn steve_node_api::Node>>,
 }
 
 impl Runtimes {
@@ -110,7 +110,13 @@ impl Runtimes {
             cache: Arc::default(),
             refreshing: Arc::default(),
             probing: Mutex::new(()),
+            node: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Probe through the local Node from now on.
+    pub fn set_node(&self, node: Arc<dyn steve_node_api::Node>) {
+        let _ = self.node.set(node);
     }
 
     fn cached(&self) -> Option<(Instant, Value)> {
@@ -130,13 +136,14 @@ impl Runtimes {
                     .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
                     .is_ok()
             {
-                let (cfg, cache, refreshing) = (
+                let (cfg, cache, refreshing, node) = (
                     self.cfg.clone(),
                     self.cache.clone(),
                     self.refreshing.clone(),
+                    self.node.get().cloned(),
                 );
                 tokio::spawn(async move {
-                    let list = probe(&cfg).await;
+                    let list = probe(&cfg, node.as_deref(), false).await;
                     *cache.lock().unwrap_or_else(|e| e.into_inner()) = Some((Instant::now(), list));
                     refreshing.store(false, Ordering::SeqCst);
                 });
@@ -148,7 +155,7 @@ impl Runtimes {
         if !fresh && let Some((_, list)) = self.cached() {
             return list;
         }
-        let list = probe(&self.cfg).await;
+        let list = probe(&self.cfg, self.node.get().map(|n| n.as_ref()), fresh).await;
         *self.cache.lock().unwrap_or_else(|e| e.into_inner()) =
             Some((Instant::now(), list.clone()));
         list
@@ -184,15 +191,37 @@ async fn version_of(bin: &str) -> String {
     }
 }
 
-async fn probe(cfg: &Config) -> Value {
+/// The versions the local Node's probe reports (`claude-code`, `codex`), `""` when it has none.
+async fn node_versions(node: &dyn steve_node_api::Node, fresh: bool) -> (String, String) {
+    let caps = match node.probe(fresh).await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("probe of the local Node: {e}");
+            return Default::default();
+        }
+    };
+    let of = |name: &str| {
+        caps.harnesses
+            .iter()
+            .find(|h| h.name == name)
+            .map(|h| h.version.clone())
+            .unwrap_or_default()
+    };
+    (of("claude-code"), of("codex"))
+}
+
+/// The harness list. `node`: the local Node runs the binaries (`fresh`: it probes again).
+async fn probe(cfg: &Config, node: Option<&dyn steve_node_api::Node>, fresh: bool) -> Value {
     let exists = |p: &str| Path::new(p).exists();
     let codex_bin = ["/opt/homebrew/bin/codex", "/usr/local/bin/codex"]
         .into_iter()
         .find(|p| exists(p))
         .unwrap_or("");
     // two CLI start-ups, side by side
-    let (claude_v, codex_v) =
-        tokio::join!(version_of(&cfg.claude_executable), version_of(codex_bin));
+    let (claude_v, codex_v) = match node {
+        Some(n) => node_versions(n, fresh).await,
+        None => tokio::join!(version_of(&cfg.claude_executable), version_of(codex_bin)),
+    };
     let claude_adapter = cfg
         .adapters
         .get("claude-code")
@@ -229,224 +258,26 @@ async fn probe(cfg: &Config) -> Value {
 
 // ── local harness history ──
 
-/// One importable local session (`imported` is added by the API).
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct LocalSession {
-    pub key: String,
-    pub harness: String,
-    pub title: String,
-    pub cwd: String,
-    /// `mtimeMs`, a float in Node.
-    #[serde(serialize_with = "js_float")]
-    pub when: f64,
-    pub size: u64,
-}
+pub use steve_node::history::LocalSession;
+use steve_node_api::{
+    Command, Discovery, ErrorCode, GrantId, HistoryEntry, HistoryImport, NodeEvent, Observed,
+    OperationId, OperationResult, PageRequest, Timestamp,
+};
 
-fn js_float<S: serde::Serializer>(f: &f64, s: S) -> Result<S::Ok, S::Error> {
-    if f.fract() == 0.0 && f.abs() < 9e15 {
-        s.serialize_i64(*f as i64)
-    } else {
-        s.serialize_f64(*f)
+/// Where this machine's harnesses keep their history, as the Hub reads it itself (the local Node off).
+fn homes(steve_home: &Path) -> steve_node::history::Homes {
+    let user_home = home_dir();
+    steve_node::history::Homes {
+        claude_dir: user_home.join(".claude"),
+        codex_home: user_home.join(".codex"),
+        user_home,
+        steve_home: steve_home.to_path_buf(),
     }
-}
-
-/// Node's `stat.mtimeMs`: `sec * 1e3 + nsec / 1e6` in f64.
-fn mtime_ms(p: &Path) -> Option<f64> {
-    let m = std::fs::metadata(p).ok()?.modified().ok()?;
-    let d = m.duration_since(UNIX_EPOCH).ok()?;
-    Some(d.as_secs() as f64 * 1e3 + d.subsec_nanos() as f64 / 1e6)
-}
-
-/// `readdirSync` order (libuv sorts by name bytes).
-fn read_dir_sorted(d: &Path) -> std::io::Result<Vec<String>> {
-    let mut names: Vec<String> = std::fs::read_dir(d)?
-        .filter_map(|e| e.ok())
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .collect();
-    names.sort();
-    Ok(names)
-}
-
-fn real_user_text(t: &str) -> bool {
-    !t.is_empty()
-        && !t.starts_with('<')
-        && !t.starts_with("# AGENTS.md")
-        && !t.starts_with("Caveat:")
-}
-
-/// The first `max` bytes as UTF-8 (a cut character becomes U+FFFD, like `Buffer.toString`), split on `\n`.
-fn first_lines(file: &Path, max: usize) -> std::io::Result<Vec<String>> {
-    let buf = std::fs::read(file)?;
-    let end = buf.len().min(max);
-    Ok(String::from_utf8_lossy(&buf[..end])
-        .split('\n')
-        .map(str::to_string)
-        .collect())
-}
-
-fn claude_files(home: &Path) -> Vec<PathBuf> {
-    let root = home.join(".claude/projects");
-    let Ok(dirs) = read_dir_sorted(&root) else {
-        return vec![];
-    };
-    dirs.into_iter()
-        .flat_map(|d| {
-            let dir = root.join(&d);
-            read_dir_sorted(&dir)
-                .map(|fs| {
-                    fs.into_iter()
-                        .filter(|f| f.ends_with(".jsonl"))
-                        .map(|f| dir.join(f))
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default()
-        })
-        .collect()
-}
-
-fn codex_files(home: &Path) -> Vec<PathBuf> {
-    fn walk(d: &Path, depth: usize, out: &mut Vec<PathBuf>) {
-        if depth > 4 || !d.exists() {
-            return;
-        }
-        for f in read_dir_sorted(d).unwrap_or_default() {
-            let p = d.join(&f);
-            if f.ends_with(".jsonl") {
-                out.push(p);
-            } else if depth < 3 && p.is_dir() {
-                walk(&p, depth + 1, out);
-            }
-        }
-    }
-    let mut out = vec![];
-    walk(&home.join(".codex/sessions"), 0, &mut out);
-    out
-}
-
-fn is_steve(steve_home: &Path, cwd: &str) -> bool {
-    [
-        steve_home.to_string_lossy().as_ref(),
-        "/tmp/steve",
-        "/private/tmp/steve",
-    ]
-    .iter()
-    .any(|d| cwd.starts_with(d))
-}
-
-fn str_field<'a>(v: &'a Value, path: &[&str]) -> Option<&'a Value> {
-    path.iter().try_fold(v, |acc, k| acc.get(k))
-}
-
-/// `content?.map((c) => c.text ?? "").join("") ?? ""`.
-fn codex_text(p: &Value) -> String {
-    match p.get("content") {
-        Some(Value::Array(a)) => a
-            .iter()
-            .map(|c| match c.get("text") {
-                None | Some(Value::Null) => String::new(),
-                Some(t) => js::string(t),
-            })
-            .collect(),
-        _ => String::new(),
-    }
-}
-
-fn peek_claude(steve_home: &Path, file: &Path) -> Option<LocalSession> {
-    let (mut title, mut cwd) = (String::new(), String::new());
-    for l in first_lines(file, 200_000).ok()? {
-        if l.is_empty() {
-            continue;
-        }
-        let Ok(m) = serde_json::from_str::<Value>(&l) else {
-            continue;
-        };
-        if cwd.is_empty() && js::truthy(m.get("cwd")) {
-            cwd = js::string(&m["cwd"]);
-        }
-        if m.get("type").and_then(Value::as_str) == Some("user")
-            && let Some(Value::String(c)) = str_field(&m, &["message", "content"])
-            && real_user_text(c)
-        {
-            title = c.clone();
-            break;
-        }
-    }
-    if title.is_empty() || is_steve(steve_home, &cwd) {
-        return None;
-    }
-    Some(LocalSession {
-        key: format!("cc:{}", file.display()),
-        harness: "Claude Code".into(),
-        title: js::slice(&title, 80),
-        cwd,
-        when: mtime_ms(file)?,
-        size: std::fs::metadata(file).ok()?.len(),
-    })
-}
-
-fn peek_codex(steve_home: &Path, file: &Path) -> Option<LocalSession> {
-    let (mut title, mut cwd) = (String::new(), String::new());
-    for l in first_lines(file, 400_000).ok()? {
-        if l.is_empty() {
-            continue;
-        }
-        let Ok(m) = serde_json::from_str::<Value>(&l) else {
-            continue;
-        };
-        let ty = m.get("type").and_then(Value::as_str);
-        if ty == Some("session_meta") {
-            cwd = match str_field(&m, &["payload", "cwd"]) {
-                None | Some(Value::Null) => String::new(),
-                Some(c) => js::string(c),
-            };
-        }
-        if ty == Some("response_item")
-            && let Some(p) = m.get("payload")
-            && p.get("type").and_then(Value::as_str) == Some("message")
-            && p.get("role").and_then(Value::as_str) == Some("user")
-        {
-            let t = codex_text(p);
-            if real_user_text(&t) {
-                title = t;
-                break;
-            }
-        }
-    }
-    if title.is_empty() || is_steve(steve_home, &cwd) {
-        return None;
-    }
-    Some(LocalSession {
-        key: format!("cx:{}", file.display()),
-        harness: "Codex".into(),
-        title: js::slice(&title, 80),
-        cwd,
-        when: mtime_ms(file)?,
-        size: std::fs::metadata(file).ok()?.len(),
-    })
 }
 
 /// `localSessions(limit)` without the `imported` flag: newest first, Steve's own runs skipped. Blocking.
 pub fn local_candidates(steve_home: &Path, limit: usize) -> Vec<LocalSession> {
-    let home = home_dir();
-    let mut files: Vec<(bool, PathBuf, f64)> = claude_files(&home)
-        .into_iter()
-        .map(|f| (true, f))
-        .chain(codex_files(&home).into_iter().map(|f| (false, f)))
-        .filter_map(|(cc, f)| mtime_ms(&f).map(|t| (cc, f, t)))
-        .collect();
-    files.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
-    files
-        .into_iter()
-        .take(limit * 2)
-        .filter_map(|(cc, f, _)| {
-            if cc {
-                peek_claude(steve_home, &f)
-            } else {
-                peek_codex(steve_home, &f)
-            }
-        })
-        .take(limit)
-        .collect()
+    steve_node::history::candidates(&homes(steve_home), limit)
 }
 
 /// The file side of `importLocal`, done before taking the write lock.
@@ -456,195 +287,222 @@ pub enum Prepared {
     Unreadable {
         key: String,
     },
+    /// A key the Node does not list (a path a client made up): nothing was read.
+    NotListed,
+    /// Read by the Hub: ACP-shaped rows, read into Steve's terms when stored.
     Ready {
         key: String,
         peek: LocalSession,
         harness: String,
         events: Vec<(String, Value)>,
     },
+    /// Read by the Node: already Steve's entries.
+    Converted {
+        key: String,
+        peek: LocalSession,
+        harness: String,
+        entries: Vec<steve_transcript::Entry>,
+    },
 }
 
 /// Reads and converts a local session file (blocking).
 pub fn prepare_import(steve_home: &Path, key: &str) -> Prepared {
-    let (kind, file) = match key.split_once(':') {
-        Some((k, f)) => (k, f),
-        None => (key, ""),
-    };
-    let path = Path::new(file);
-    if file.is_empty() || !path.exists() {
-        return Prepared::Missing;
-    }
-    let cc = kind == "cc";
-    let peek = if cc {
-        peek_claude(steve_home, path)
-    } else {
-        peek_codex(steve_home, path)
-    };
-    let Some(peek) = peek else {
-        return Prepared::Unreadable { key: key.into() };
-    };
-    let Ok(text) = std::fs::read(path).map(|b| String::from_utf8_lossy(&b).into_owned()) else {
-        return Prepared::Unreadable { key: key.into() };
-    };
-    let events = if cc {
-        claude_events(&text)
-    } else {
-        codex_events(&text)
-    };
-    Prepared::Ready {
-        key: key.into(),
-        peek,
-        harness: if cc { "claude-code" } else { "codex" }.into(),
-        events,
+    match steve_node::history::read(steve_home, key) {
+        steve_node::history::Read::Missing => Prepared::Missing,
+        steve_node::history::Read::Unreadable => Prepared::Unreadable { key: key.into() },
+        steve_node::history::Read::Ready {
+            peek,
+            harness,
+            rows,
+        } => Prepared::Ready {
+            key: key.into(),
+            peek,
+            harness,
+            events: rows,
+        },
     }
 }
 
-fn agent_chunk(text: &str) -> (String, Value) {
-    (
-        "agent_message_chunk".into(),
-        json!({ "sessionUpdate": "agent_message_chunk", "content": { "type": "text", "text": text } }),
-    )
+/// The entries of the Node's history an import looks through for its keys: first as many as the
+/// import list shows, then (a key not among them) this many.
+const NODE_HISTORY_LIST: usize = 60;
+const NODE_HISTORY_MAX: usize = 500;
+const NODE_HISTORY_PAGE: u32 = 500;
+/// Events per page of an import.
+const IMPORT_PAGE: u32 = 500;
+
+/// A history entry of the Node as the import list shows it.
+fn listed_session(e: &HistoryEntry) -> LocalSession {
+    LocalSession {
+        key: e.source.key.clone(),
+        harness: steve_core::models::harness_name(&e.source.harness).to_string(),
+        title: e.title.clone(),
+        cwd: e.directory.clone().unwrap_or_default(),
+        when: e.updated.0 as f64,
+        size: e.size.unwrap_or(0),
+    }
 }
 
-fn claude_events(text: &str) -> Vec<(String, Value)> {
-    let read = Regex::new("Read|Grep|Glob").ok();
-    let edit = Regex::new("Edit|Write").ok();
+/// The Node's history, newest first, at most `max` entries.
+async fn node_history(node: &dyn Discovery, max: usize) -> Result<Vec<HistoryEntry>, String> {
     let mut out = vec![];
-    for l in text.split('\n') {
-        if l.is_empty() {
-            continue;
+    let mut cursor = None;
+    while out.len() < max {
+        let p = node
+            .history(PageRequest {
+                cursor,
+                limit: NODE_HISTORY_PAGE.min((max - out.len()) as u32),
+            })
+            .await
+            .map_err(|e| e.safe_detail)?;
+        out.extend(p.items);
+        match p.next {
+            Some(c) => cursor = Some(c),
+            None => break,
         }
-        let Ok(m) = serde_json::from_str::<Value>(l) else {
+    }
+    out.truncate(max);
+    Ok(out)
+}
+
+/// What the Hub's own device's Node lists for import (the local Node on): `limit` newest.
+pub async fn node_candidates(
+    node: &dyn Discovery,
+    limit: usize,
+) -> Result<Vec<LocalSession>, String> {
+    Ok(node_history(node, limit)
+        .await?
+        .iter()
+        .map(listed_session)
+        .collect())
+}
+
+/// The file side of an import through the Node: each key is matched against the Node's own list,
+/// never read as a path, then the Node reads and converts it.
+pub async fn node_prepare(node: &dyn Discovery, keys: &[String]) -> Vec<Prepared> {
+    let mut listed = node_history(node, NODE_HISTORY_LIST).await;
+    if let Ok(l) = &listed
+        && l.len() == NODE_HISTORY_LIST
+        && !keys.iter().all(|k| l.iter().any(|e| &e.source.key == k))
+    {
+        listed = node_history(node, NODE_HISTORY_MAX).await;
+    }
+    let listed = match listed {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::warn!("history of the local Node: {e}");
+            return keys
+                .iter()
+                .map(|k| Prepared::Unreadable { key: k.clone() })
+                .collect();
+        }
+    };
+    let mut out = vec![];
+    for key in keys {
+        let Some(entry) = listed.iter().find(|e| &e.source.key == key) else {
+            out.push(Prepared::NotListed);
             continue;
         };
-        let ty = m.get("type").and_then(Value::as_str);
-        if ty == Some("user")
-            && let Some(Value::String(c)) = str_field(&m, &["message", "content"])
-            && real_user_text(c)
-        {
-            out.push(("user".into(), json!({ "text": c, "via": "me" })));
-        }
-        if ty == Some("assistant")
-            && let Some(Value::Array(cs)) = str_field(&m, &["message", "content"])
-        {
-            for c in cs {
-                let cty = c.get("type").and_then(Value::as_str);
-                if cty == Some("text") && js::truthy(c.get("text")) {
-                    out.push(agent_chunk(&js::string(&c["text"])));
-                }
-                if cty == Some("tool_use") {
-                    let name = c
-                        .get("name")
-                        .map(js::string)
-                        .unwrap_or_else(|| "undefined".into());
-                    let input = c.get("input");
-                    let extra = if js::truthy(input.and_then(|i| i.get("command"))) {
-                        format!(
-                            " {}",
-                            js::slice(
-                                &js::string(
-                                    &input.map(|i| i["command"].clone()).unwrap_or_default()
-                                ),
-                                120
-                            )
-                        )
-                    } else if js::truthy(input.and_then(|i| i.get("file_path"))) {
-                        format!(
-                            " {}",
-                            js::string(&input.map(|i| i["file_path"].clone()).unwrap_or_default())
-                        )
-                    } else {
-                        String::new()
-                    };
-                    let kind = if read.as_ref().is_some_and(|r| r.is_match(&name)) {
-                        "read"
-                    } else if edit.as_ref().is_some_and(|r| r.is_match(&name)) {
-                        "edit"
-                    } else {
-                        "execute"
-                    };
-                    let mut call = serde_json::Map::new();
-                    call.insert("sessionUpdate".into(), json!("tool_call"));
-                    // `toolCallId: undefined` drops the key
-                    if let Some(id) = c.get("id") {
-                        call.insert("toolCallId".into(), id.clone());
-                    }
-                    call.insert("title".into(), json!(format!("{name}{extra}")));
-                    call.insert("kind".into(), json!(kind));
-                    call.insert("status".into(), json!("completed"));
-                    out.push(("tool_call".into(), Value::Object(call)));
-                }
-            }
-        }
+        out.push(match node_import(node, entry).await {
+            Ok(events) => Prepared::Converted {
+                key: key.clone(),
+                peek: listed_session(entry),
+                harness: entry.source.harness.clone(),
+                entries: steve_transcript::of_history(&events),
+            },
+            Err(ErrorCode::Stale) => Prepared::Missing,
+            Err(_) => Prepared::Unreadable { key: key.clone() },
+        });
     }
     out
 }
 
-fn codex_events(text: &str) -> Vec<(String, Value)> {
-    let mut out = vec![];
-    for l in text.split('\n') {
-        if l.is_empty() {
-            continue;
-        }
-        let Ok(m) = serde_json::from_str::<Value>(l) else {
-            continue;
-        };
-        if m.get("type").and_then(Value::as_str) != Some("response_item") {
-            continue;
-        }
-        let Some(p) = m.get("payload") else { continue };
-        let pty = p.get("type").and_then(Value::as_str);
-        if pty == Some("message") {
-            let t = codex_text(p);
-            let role = p.get("role").and_then(Value::as_str);
-            if role == Some("user") && real_user_text(&t) {
-                out.push(("user".into(), json!({ "text": t, "via": "me" })));
-            }
-            if role == Some("assistant") && !t.is_empty() {
-                out.push(agent_chunk(&t));
-            }
-        }
-        if pty == Some("custom_tool_call") || pty == Some("function_call") {
-            let id = match p.get("call_id") {
-                None | Some(Value::Null) => json!(uid("t")),
-                Some(v) => v.clone(),
-            };
-            let arg = [p.get("input"), p.get("arguments")]
-                .into_iter()
-                .flatten()
-                .find(|v| !v.is_null())
-                .map(js::string)
-                .unwrap_or_default();
-            let name = p
-                .get("name")
-                .map(js::string)
-                .unwrap_or_else(|| "undefined".into());
-            out.push((
-                "tool_call".into(),
-                json!({ "sessionUpdate": "tool_call", "toolCallId": id, "title": format!("{name} {}", js::slice(&arg, 120)), "kind": "execute", "status": "completed" }),
-            ));
+/// One entry's events, read page by page.
+async fn node_import(
+    node: &dyn Discovery,
+    entry: &HistoryEntry,
+) -> Result<Vec<NodeEvent>, ErrorCode> {
+    let now = steve_store::now();
+    let op = OperationId::new(uid("imp")).map_err(|_| ErrorCode::Internal)?;
+    let r = node
+        .import_history(Command {
+            id: op.clone(),
+            issued_at: Timestamp(now),
+            accept_before: Timestamp(now + 60_000),
+            grant: GrantId::new("hub").map_err(|_| ErrorCode::Internal)?,
+            body: HistoryImport {
+                source: entry.source.clone(),
+                expected: entry.version.clone(),
+            },
+        })
+        .await
+        .map_err(|e| e.code)?;
+    let pages = match r.state {
+        Observed::Finished {
+            result: Some(OperationResult::Pages { operation }),
+            ..
+        } => operation,
+        Observed::Finished { error: Some(e), .. } => return Err(e.code),
+        _ => return Err(ErrorCode::Internal),
+    };
+    let mut events = vec![];
+    let mut cursor = None;
+    loop {
+        let p = node
+            .import_page(
+                pages.clone(),
+                PageRequest {
+                    cursor,
+                    limit: IMPORT_PAGE,
+                },
+            )
+            .await
+            .map_err(|e| e.code)?;
+        events.extend(p.events);
+        match p.next {
+            Some(c) => cursor = Some(c),
+            None => break,
         }
     }
-    out
+    Ok(events)
 }
 
 /// The database side of `importLocal` (under the write lock): returns the new session id or the TS error.
 pub fn import_prepared(r: &dyn Repo, bus: &Bus, ws: &str, p: Prepared) -> BResult<String> {
     let key = match &p {
         Prepared::Missing => return Err(BackendError::msg(steve_i18n::t!("hub.import.gone"))),
-        Prepared::Unreadable { key } | Prepared::Ready { key, .. } => key.clone(),
+        Prepared::NotListed => {
+            return Err(BackendError::msg(steve_i18n::t!("hub.import.not_listed")));
+        }
+        Prepared::Unreadable { key }
+        | Prepared::Ready { key, .. }
+        | Prepared::Converted { key, .. } => key.clone(),
     };
     if r.import_keys()?.contains(&key) {
         return Err(BackendError::msg(steve_i18n::t!("hub.import.already")));
     }
-    let Prepared::Ready {
-        peek,
-        harness,
-        events,
-        ..
-    } = p
-    else {
-        return Err(BackendError::msg(steve_i18n::t!("hub.import.unreadable")));
+    let (peek, harness, rows) = match p {
+        Prepared::Ready {
+            peek,
+            harness,
+            events,
+            ..
+        } => {
+            // stored in Steve's own terms, like everything written now
+            let mut reader = steve_transcript::LegacyReader::new(&peek.cwd);
+            let rows: Vec<steve_transcript::Entry> = events
+                .iter()
+                .flat_map(|(kind, data)| reader.read(kind, data))
+                .collect();
+            (peek, harness, rows)
+        }
+        Prepared::Converted {
+            peek,
+            harness,
+            entries,
+            ..
+        } => (peek, harness, entries),
+        _ => return Err(BackendError::msg(steve_i18n::t!("hub.import.unreadable"))),
     };
     let id = r.session_insert_imported(&ImportedSession {
         workspace_id: ws.into(),
@@ -655,12 +513,8 @@ pub fn import_prepared(r: &dyn Repo, bus: &Bus, ws: &str, p: Prepared) -> BResul
         import_key: key,
         created: peek.when,
     })?;
-    // stored in Steve's own terms, like everything written now
-    let mut reader = steve_transcript::LegacyReader::new(&peek.cwd);
-    for (kind, data) in &events {
-        for x in reader.read(kind, data) {
-            r.events_add(&id, &x.kind, &x.data)?;
-        }
+    for x in &rows {
+        r.events_add(&id, &x.kind, &x.data)?;
     }
     bus.publish(HubEvent::Session {
         id: id.clone(),
@@ -686,6 +540,10 @@ pub fn remove_imported(r: &dyn Repo, id: &str) -> BResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use regex::Regex;
+    use steve_node::history::{
+        claude_rows as claude_events, codex_rows as codex_events, peek_claude,
+    };
 
     #[test]
     fn uid_format() {
