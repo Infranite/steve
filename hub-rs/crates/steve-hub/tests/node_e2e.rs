@@ -1857,12 +1857,19 @@ async fn a_node_sessions_attachments_are_placed_by_the_node() {
     )
     .expect("remove blob");
     c.say_with(&sid, "附件验收-G4 @say went-on", &[&lost]).await;
+    // wait for the prompt itself: the user's own message (which names `went-on`) is a steve.v1
+    // event the moment it is sent, before the agent has seen anything
+    let mut blocks = None;
     assert!(
-        wait(30, || steve_v1(&h, &sid, "went-on") > 0).await,
+        wait(30, || {
+            blocks = prompt_blocks(&h, "附件验收-G4");
+            blocks.is_some()
+        })
+        .await,
         "the turn ran; log:\n{}",
         hub_log(&h)
     );
-    let text = prompt_blocks(&h, "附件验收-G4").expect("prompt")[0]["text"]
+    let text = blocks.expect("prompt")[0]["text"]
         .as_str()
         .expect("text")
         .to_string();
