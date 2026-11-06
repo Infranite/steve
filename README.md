@@ -88,7 +88,7 @@ Steve runs a command with the secret and gives the agent only redacted output. T
 
 #### 🙊 Disclosure-aware by default
 
-Every piece of knowledge has a level: public, *paraphrase only*, *reasoning only* or never. Outgoing messages pass a rule check and a separate model review before anything is sent.
+Every piece of knowledge has a level: public, *paraphrase only*, *reasoning only* or never. Messages to the outside world pass a rule check and a review by a second model before they go out.
 
 </td>
 <td width="33%" valign="top">
@@ -131,7 +131,6 @@ Configuration made by talking to Steve, corrections to automations, contact merg
 </tr>
 </table>
 
-
 ### 🤖 A team of bots
 
 - **Bots** each have a harness (Claude Code or Codex), a model and thinking effort, a role, a persona, rules, a permission mode, an acceptance mode and a default project. Describe a bot in one sentence and Steve drafts it.
@@ -142,7 +141,6 @@ Configuration made by talking to Steve, corrections to automations, contact merg
 
 <p align="center"><img src="docs/assets/screenshots/session.webp" alt="Agent session: changed files, tools, cost and context, and the command to resume it in the harness" width="85%"><br><sub><b>Agent session</b>: changed files, tools, cost and context, and the command to resume it in the harness</sub></p>
 
-
 ### 🟢 YOLO: autonomy with brakes
 
 - **What it can decide:** tool permissions inside the item's own directory, local approvals, acceptance by checks, continuing stalled agents, answering agents' questions (only when confident), starting items whose dependencies are done, and releasing your own Steve (rate-limited).
@@ -152,7 +150,6 @@ Configuration made by talking to Steve, corrections to automations, contact merg
 - **Record and undo.** Every decision is recorded per window and item, with its cost. There are five kinds of undo: revert the decision, roll back the release, recall the message, re-answer, or pause the item.
 
 <p align="center"><img src="docs/assets/screenshots/inbox.webp" alt="Inbox: acceptances, approvals and questions in one place; YOLO picks up the routine ones" width="85%"><br><sub><b>Inbox</b>: acceptances, approvals and questions in one place; YOLO picks up the routine ones</sub></p>
-
 
 ### 🚚 Delivery: merge lanes and releases
 
@@ -198,13 +195,12 @@ Configuration made by talking to Steve, corrections to automations, contact merg
 <br><sub><b>Mail triage flow</b> on the canvas: notifications are filtered out before any model call, and a bot node branches the rest</sub>
 </p>
 
-
 ### 📊 Stats and platform
 
 - **Stats:** tokens (including cache and reasoning), cache hit rate, estimated cost against what the harness reports, money saved by the cache, items started and finished, lead/cycle/wait time, first-pass rate and rework. You can filter by project, bot, model and source.
 - **Workspaces and sign-in:** OIDC with PKCE. Workspaces are data boundaries with their own item prefix.
 - **Live everywhere:** one SSE stream with resumable cursors, and phones reconnect the moment the page becomes visible again.
-- **Operations:** in-place upgrades with backup and rollback, daily verified backups, signed macOS releases that keep the vault key across rebuilds, a <kbd>⌘</kbd> <kbd>K</kbd> command palette, light and dark themes, and English or 简体中文.
+- **Operations:** in-place upgrades with backup and rollback, daily backups for macOS source installs, signed macOS releases that keep the vault key across rebuilds, a <kbd>⌘</kbd> <kbd>K</kbd> command palette, light and dark themes, and English or 简体中文.
 
 <sub>Screenshots come from a demo workspace on the real Hub and web UI, with scripted agents. The UI is shown in Chinese; switch to English in Settings → Appearance.</sub>
 
@@ -223,7 +219,7 @@ Steve does not have a runtime plugin store yet. The Plugins page is a placeholde
 
 ## Experimental and planned
 
-So that it's clear what you can rely on today:
+What you can rely on today, and what's still on the way:
 
 - **Multiple devices (experimental, off by default).** A `steve-node` on another machine can pair with the Hub and run harnesses there. The Node always dials out, pairing uses a one-time code and a fingerprint check, and each Node keeps an execution journal for reconciliation. It is enabled with `STEVE_NODE_LISTEN=1` / `STEVE_NODE_BIND` / `STEVE_NODE_MODE=local`, pairing is CLI-only for now, and the design is still in progress ([docs/hub-node-client.md](docs/hub-node-client.md)).
 - **Plugins page:** planned. Use the extension points above.
