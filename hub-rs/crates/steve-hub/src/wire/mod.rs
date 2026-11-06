@@ -175,6 +175,7 @@ fn node_runtime(
         .map_err(|e| BackendError::msg(e.to_string()))?;
     let node = Arc::new(
         steve_node::LocalNode::open(steve_node::NodeConfig {
+            ceiling: steve_node::PolicyCeiling::unlimited(),
             node: node_id.clone(),
             home,
             acp: acp_config(cfg),
@@ -226,6 +227,7 @@ fn node_runtime(
     let runtime = node_runtime::NodeRuntime::new(store.clone(), node.clone(), domain);
     // legacy's idle kill: an idle session's harness goes after STEVE_IDLE_RELEASE_MS (10 min)
     runtime.set_idle_release(cfg.idle_release_ms as i64);
+    runtime.set_cost_caps(cost_caps(vars));
     // an attempt's deadline (default 6 h); the end-to-end tests shorten it to see a card expire
     if let Some(ms) = turn_limit(vars) {
         runtime.set_turn_limit(ms);
@@ -336,6 +338,21 @@ fn turn_limit(vars: &Vars) -> Option<i64> {
     vars("STEVE_NODE_TURN_LIMIT_MS").and_then(|v| v.trim().parse::<i64>().ok())
 }
 
+/// What one usage report and one attempt of a Node may add to a session's cost at most
+/// (`STEVE_NODE_COST_REPORT_MAX`, `STEVE_NODE_COST_ATTEMPT_MAX`; 100 and 1000 unless set).
+fn cost_caps(vars: &Vars) -> node_runtime::CostCaps {
+    let d = node_runtime::CostCaps::default();
+    let num = |k: &str, d: f64| {
+        vars(k)
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .unwrap_or(d)
+    };
+    node_runtime::CostCaps::new(
+        num("STEVE_NODE_COST_REPORT_MAX", d.report),
+        num("STEVE_NODE_COST_ATTEMPT_MAX", d.attempt),
+    )
+}
+
 /// Remote Nodes, only with `STEVE_NODE_LISTEN=1`: the service (pairing, listener) over a fleet of
 /// coordinators reporting to `domain`, and the Node new sessions are bound to (`STEVE_NODE_BIND`,
 /// a paired Node's id; unset: none, sessions go where they went before).
@@ -361,6 +378,7 @@ fn remote_nodes(
         fleet.set_turn_limit(ms);
     }
     fleet.set_idle_release(cfg.idle_release_ms as i64);
+    fleet.set_cost_caps(cost_caps(vars));
     let svc = crate::nodes::from_vars(store, fleet, |k| vars(k));
     let bind = match bind.map(|v| steve_node_api::NodeId::new(v.trim())) {
         Some(Ok(id)) if svc.is_some() => Some(id),

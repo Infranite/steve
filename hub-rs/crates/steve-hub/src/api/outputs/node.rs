@@ -968,6 +968,7 @@ mod tests {
     fn local_node(dir: &FsPath) -> Arc<steve_node::LocalNode> {
         Arc::new(
             steve_node::LocalNode::open(steve_node::NodeConfig {
+                ceiling: steve_node::PolicyCeiling::unlimited(),
                 node: na::NodeId::new("local").unwrap(),
                 home: dir.join("node"),
                 acp: steve_acp::AcpConfig {

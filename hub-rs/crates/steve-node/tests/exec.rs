@@ -37,6 +37,7 @@ impl T {
     fn config(&self, execs: u32) -> NodeConfig {
         let root = self.root.clone();
         NodeConfig {
+            ceiling: steve_node::PolicyCeiling::unlimited(),
             node: NodeId::new("hub").unwrap(),
             home: root.join("node"),
             acp: AcpConfig {

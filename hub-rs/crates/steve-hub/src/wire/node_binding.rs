@@ -292,9 +292,9 @@ fn prepared_as(store: &Store, resource: &str) -> Option<PrepareKind> {
 /// when it must stay where it would go otherwise. A remote Node has none of the Hub's directories,
 /// so only an item without a project qualifies, in a fresh scratch workspace on that Node, and only
 /// while every earlier session of the item ran there too (its files are there, not on the Hub).
-/// The Node must be paired and active (a paused or revoked Node takes no new work), and paired by
-/// an owner of the session's workspace: any signed-in user can pair a Node, and the Node sees the
-/// session's prompts, tool output and files, so a member's own machine never gets others' work.
+/// The Node must be paired and active (a paused or revoked Node takes no new work), and take the
+/// workspace's work ([`remote_refusal`]: paired by its owner, who is its only member): the Node
+/// runs the session with its owner's own logins, unsandboxed, so it only ever runs its owner's work.
 /// `speaks_auto`: the Node is known to speak [`AUTO_MODE`]; a session in `auto` goes to it only
 /// then (an older Node would refuse to open it, for good), and otherwise stays where it would go.
 /// `perm`: as for [`binding_for`].
@@ -335,20 +335,68 @@ pub fn remote_binding_for(
     Some(b)
 }
 
-/// Whether the paired remote Node `node` may get `workspace`'s work: it is active (a paused or
-/// revoked Node takes none), and the user who paired it owns the workspace. Any signed-in user can
-/// pair a Node, and a member's own machine never gets others' work.
+/// Why a paired remote Node may not get a workspace's work ([`remote_refusal`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteRefusal {
+    /// Unknown, pending, paused or revoked.
+    Inactive,
+    /// The user who paired it does not own the workspace.
+    NotOwner,
+    /// The workspace has members besides the Node's owner, so a run there may be any of theirs.
+    Shared,
+}
+
+impl RemoteRefusal {
+    /// Why, in the current language (inside [`steve_i18n::stored`] for stored text).
+    pub fn why(&self) -> String {
+        match self {
+            RemoteRefusal::Inactive => steve_i18n::t!("hub.workspaces.offline"),
+            RemoteRefusal::NotOwner => steve_i18n::t!("hub.node.remote.not_owner"),
+            RemoteRefusal::Shared => steve_i18n::t!("hub.node.remote.shared"),
+        }
+    }
+}
+
+/// Whether the paired remote Node `node` may get `workspace`'s work now, and why not (H1). A
+/// remote Node runs its sessions, jobs and commands with its owner's own home and logins, unsandboxed
+/// and under whatever policy the Hub sends, so until runs are sandboxed it takes only its owner's
+/// own work: it is active, the user who paired it (`nodes.owner`) owns the workspace, and nobody
+/// else is a member of it. The Hub records no user per run (an agent works for the workspace's
+/// owner, [`super::mcp_extra::owner`]), and any member of a workspace can start or steer a run in
+/// it, so the only runs that are surely the owner's are those of a workspace that is theirs alone.
+pub(crate) fn remote_refusal(
+    c: &rusqlite::Connection,
+    node: &str,
+    workspace: &str,
+) -> Result<Option<RemoteRefusal>, StoreError> {
+    use rusqlite::OptionalExtension;
+    let row: Option<(String, bool, i64)> = c
+        .query_row(
+            "SELECT n.state,
+                    EXISTS(SELECT 1 FROM workspace_members m WHERE m.workspace_id=?2 AND m.user_id=n.owner AND m.role='owner'),
+                    (SELECT COUNT(*) FROM workspace_members m WHERE m.workspace_id=?2 AND m.user_id<>n.owner)
+               FROM nodes n WHERE n.node_id=?1",
+            rusqlite::params![node, workspace],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    Ok(match row {
+        None => Some(RemoteRefusal::Inactive),
+        Some((state, _, _)) if state != "active" => Some(RemoteRefusal::Inactive),
+        Some((_, false, _)) => Some(RemoteRefusal::NotOwner),
+        Some((_, true, others)) if others > 0 => Some(RemoteRefusal::Shared),
+        Some(_) => None,
+    })
+}
+
+/// Whether the paired remote Node `node` may get `workspace`'s work: [`remote_refusal`] has nothing
+/// against it.
 pub(crate) fn node_takes(
     c: &rusqlite::Connection,
     node: &str,
     workspace: &str,
 ) -> Result<bool, StoreError> {
-    Ok(c.query_row(
-        "SELECT EXISTS(SELECT 1 FROM nodes n JOIN workspace_members m ON m.user_id=n.owner
-          WHERE n.node_id=?1 AND n.state='active' AND m.workspace_id=?2 AND m.role='owner')",
-        rusqlite::params![node, workspace],
-        |r| r.get(0),
-    )?)
+    Ok(remote_refusal(c, node, workspace)?.is_none())
 }
 
 /// The local Node's allowlist: explicit configured roots (`extra`: the scratch and worktree
@@ -516,7 +564,7 @@ mod remote_tests {
                 "INSERT INTO items(id,workspace_id,no,title,status,stage,cwd,created,updated) VALUES ('i1','default',1,'t','run','执行','{c}',1,1);
                  INSERT INTO sessions(id,workspace_id,item_id,harness,cwd,status,created,updated) VALUES ('s1','default','i1','claude-code','{c}','active',1,1);
                  INSERT INTO users(id,workspace_id,subject,name,role,created) VALUES ('u','default','sub_u','u','owner',1),('m','default','sub_m','m','member',1);
-                 INSERT INTO workspace_members(workspace_id,user_id,role,created) VALUES ('default','u','owner',1),('default','m','member',1);
+                 INSERT INTO workspace_members(workspace_id,user_id,role,created) VALUES ('default','u','owner',1);
                  INSERT INTO nodes(node_id,owner,name,pubkey,fingerprint,state,created) VALUES ('n_a','u','a',zeroblob(32),'fa','active',1);
                  INSERT INTO nodes(node_id,owner,name,pubkey,fingerprint,state,created) VALUES ('n_p','u','p',zeroblob(32),'fp','paused',1);
                  INSERT INTO nodes(node_id,owner,name,pubkey,fingerprint,state,created) VALUES ('n_m','m','m',zeroblob(32),'fm','active',1);",
@@ -554,6 +602,19 @@ mod remote_tests {
             "INSERT INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,updated) VALUES ('s0','n_a','{}','s0','r','released',0);",
         );
         assert!(remote_binding_for(&store, "s1", None, &a, true).is_some());
+        // H1: another member in the workspace, and the run may be theirs: not on the owner's Node
+        exec(
+            &store,
+            "INSERT INTO workspace_members(workspace_id,user_id,role,created) VALUES ('default','m','member',2);",
+        );
+        assert!(remote_binding_for(&store, "s1", None, &a, true).is_none());
+        let why = |n: &str| store.reader(|c| remote_refusal(c, n, "default")).unwrap();
+        assert_eq!(why("n_a"), Some(RemoteRefusal::Shared));
+        assert_eq!(why("n_m"), Some(RemoteRefusal::NotOwner));
+        assert_eq!(why("n_p"), Some(RemoteRefusal::Inactive));
+        assert_eq!(why("n_none"), Some(RemoteRefusal::Inactive));
+        exec(&store, "DELETE FROM workspace_members WHERE user_id='m';");
+        assert_eq!(why("n_a"), None);
         // a project's directories are on the Hub
         exec(
             &store,

@@ -210,10 +210,10 @@ pub fn node_attempt_finished(
     let ws = &o.s.workspace_id;
     // a final figure replaces the attempt's deltas; deltas add up
     let tokens_of = |t: &steve_node_api::Tokens| Tokens {
-        input: t.input.map(|x| x as i64),
-        output: t.output.map(|x| x as i64),
-        cache_read: t.cache_read.map(|x| x as i64),
-        cache_write: t.cache_write.map(|x| x as i64),
+        input: t.input.and_then(super::node_runtime::usage_tokens),
+        output: t.output.and_then(super::node_runtime::usage_tokens),
+        cache_read: t.cache_read.and_then(super::node_runtime::usage_tokens),
+        cache_write: t.cache_write.and_then(super::node_runtime::usage_tokens),
         reasoning: None,
     };
     // the per-model figures for everything (scope `all`) when there are any, else the main

@@ -61,6 +61,7 @@ impl T {
     fn config(&self) -> NodeConfig {
         let root = self.root.clone();
         NodeConfig {
+            ceiling: steve_node::PolicyCeiling::unlimited(),
             node: NodeId::new("hub").unwrap(),
             home: self.home.clone(),
             acp: AcpConfig {
@@ -3610,4 +3611,118 @@ async fn a_rebase_applies_only_on_the_facts_it_was_decided_on() {
     };
     assert_eq!(e.code, ErrorCode::Busy);
     assert_eq!(std::fs::read(repo.join("b.txt")).unwrap(), b"dirty\n");
+}
+
+/// H1: the owner's ceiling holds whatever the Hub asks. The default one takes no FullAccess
+/// (`bypassPermissions`), no commands and no jobs, and is refused before anything is accepted;
+/// what is under it runs as before. Without the open network allowed nothing opens.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_owners_ceiling_refuses_what_is_over_it() {
+    let t = T::new(&[]);
+    let mut cfg = t.config();
+    cfg.ceiling = steve_node::PolicyCeiling::default();
+    cfg.capacity.execs = 2;
+    cfg.capacity.jobs = 2;
+    let n = LocalNode::open(cfg).unwrap();
+    n.connect(t.sink.clone(), None);
+    // under the ceiling: as before
+    ready(&n, "s_1").await;
+    let mut o = open_body("s_2");
+    o.policy.permissions = PermissionMode::FullAccess;
+    let e = n.open_session(now_cmd("op_o2", o)).await.unwrap_err();
+    assert_eq!(e.code, ErrorCode::Denied, "{e:?}");
+    assert!(e.safe_detail.contains("full_access"), "{e:?}");
+    let v = n.session(SessionId::new("s_1").unwrap()).await.unwrap();
+    let mut wide = policy();
+    wide.permissions = PermissionMode::FullAccess;
+    let e = n
+        .configure_session(now_cmd(
+            "op_t1",
+            ConfigureSession {
+                session: SessionId::new("s_1").unwrap(),
+                expected: v.revision,
+                choice: choice(),
+                policy: wide,
+            },
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::Denied, "{e:?}");
+    // nothing of either was taken
+    assert!(
+        n.operation(OperationId::new("op_o2").unwrap())
+            .await
+            .is_err()
+    );
+    assert!(
+        n.operation(OperationId::new("op_t1").unwrap())
+            .await
+            .is_err()
+    );
+    let e = n
+        .exec(now_cmd(
+            "op_x",
+            ExecSpec {
+                workspace: ws(),
+                command: "true".into(),
+                cwd: None,
+                policy: policy(),
+                limits: limits(),
+                env: vec![],
+                secrets: vec![],
+            },
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::Denied, "{e:?}");
+    let e = n
+        .start_job(now_cmd(
+            "op_j",
+            steve_node_api::testkit::build::job("j1", "ja1", "hi"),
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::Denied, "{e:?}");
+    // a turn under it still runs
+    n.start_turn(now_cmd("op_t2", turn("s_1", "t_2", "a_2", "@say ok")))
+        .await
+        .unwrap();
+    t.until("the end", |t| !t.ended().is_empty()).await;
+    n.shutdown().await;
+
+    // the owner widens it: FullAccess is taken
+    let t = T::new(&[]);
+    let mut cfg = t.config();
+    cfg.ceiling = steve_node::PolicyCeiling {
+        max_permissions: PermissionMode::FullAccess,
+        ..Default::default()
+    };
+    let n = LocalNode::open(cfg).unwrap();
+    n.connect(t.sink.clone(), None);
+    n.prepare_workspace(now_cmd("op_prep", prepare_proj()))
+        .await
+        .unwrap();
+    assert!(ok(&finished(&n, "op_prep").await));
+    let mut o = open_body("s_3");
+    o.policy.permissions = PermissionMode::FullAccess;
+    n.open_session(now_cmd("op_o3", o)).await.unwrap();
+    let s = finished(&n, "op_o3").await;
+    assert!(ok(&s), "{s:?}");
+    n.shutdown().await;
+
+    // no open network: nothing opens (a harness's network cannot be narrowed yet)
+    let t = T::new(&[]);
+    let mut cfg = t.config();
+    cfg.ceiling = steve_node::PolicyCeiling {
+        full_network: false,
+        ..Default::default()
+    };
+    let n = LocalNode::open(cfg).unwrap();
+    n.connect(t.sink.clone(), None);
+    let e = n
+        .open_session(now_cmd("op_o4", open_body("s_4")))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::Denied, "{e:?}");
+    n.shutdown().await;
 }

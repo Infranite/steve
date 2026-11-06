@@ -278,6 +278,7 @@ impl Hub {
         }];
         let node = Arc::new(
             steve_node::LocalNode::open(steve_node::NodeConfig {
+                ceiling: steve_node::PolicyCeiling::unlimited(),
                 node: NodeId::new("local").unwrap(),
                 home: base.join("node"),
                 acp: steve_acp::AcpConfig {

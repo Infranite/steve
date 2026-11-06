@@ -149,5 +149,8 @@
   "hub.node.unbound.off": "the local Node is off (STEVE_NODE_MODE=off)",
   "hub.node.unbound.stopped": "the local Node is not running",
   "hub.node.unbound.unreadable": "its records could not be read just now",
-  "hub.node.unbound.bind_failed": "binding it to the Node failed"
+  "hub.node.unbound.bind_failed": "binding it to the Node failed",
+  "hub.node.remote.not_owner": "a remote Node only runs its owner's own work, and this Node was not paired by the owner of this workspace",
+  "hub.node.remote.shared": "until remote Nodes are sandboxed they only run their owner's own work, and this workspace has other members, so Steve cannot tell the work is the Node owner's",
+  "hub.node.remote.refused": "The remote Node %{node} does not take this work: %{why}"
 }

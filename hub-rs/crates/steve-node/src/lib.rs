@@ -55,6 +55,120 @@ pub struct NodeConfig {
     pub storage: Storage,
     /// The CLIs think jobs run with (none: no harness runs jobs, whatever `capacity.jobs` says).
     pub jobs: JobHarnesses,
+    /// The most any Hub may ask of this Node, whatever it sends ([`PolicyCeiling`]).
+    pub ceiling: PolicyCeiling,
+}
+
+/// What this Node's owner lets a Hub ask of it at most: the widest permission mode, whether a run
+/// may have the open network, whether commands and jobs run at all. A command over it is refused
+/// (`denied`) before it is accepted, so a Hub (or whoever speaks for one) can only ask for less.
+/// Remote sessions run with the owner's own home and logins until runs are sandboxed, so the
+/// default is narrow: no [`PermissionMode::FullAccess`] (`bypassPermissions`), no commands, no
+/// jobs; the network as before (a harness's network cannot be restricted yet, so turning it off
+/// refuses every run). The Hub's own local Node is [`PolicyCeiling::unlimited`].
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PolicyCeiling {
+    #[serde(default = "PolicyCeiling::default_permissions")]
+    pub max_permissions: PermissionMode,
+    #[serde(default = "PolicyCeiling::yes")]
+    pub full_network: bool,
+    #[serde(default)]
+    pub exec: bool,
+    #[serde(default)]
+    pub jobs: bool,
+}
+
+impl Default for PolicyCeiling {
+    fn default() -> PolicyCeiling {
+        PolicyCeiling {
+            max_permissions: Self::default_permissions(),
+            full_network: true,
+            exec: false,
+            jobs: false,
+        }
+    }
+}
+
+impl PolicyCeiling {
+    /// Everything the Hub may ask: the Hub's own local Node, which runs as the Hub does.
+    pub fn unlimited() -> PolicyCeiling {
+        PolicyCeiling {
+            max_permissions: PermissionMode::FullAccess,
+            full_network: true,
+            exec: true,
+            jobs: true,
+        }
+    }
+    fn default_permissions() -> PermissionMode {
+        PermissionMode::Auto
+    }
+    fn yes() -> bool {
+        true
+    }
+
+    /// How wide a mode is: each one allows what the ones before it do.
+    fn rank(p: PermissionMode) -> u8 {
+        match p {
+            PermissionMode::Plan => 0,
+            PermissionMode::Ask => 1,
+            PermissionMode::AcceptEdits => 2,
+            PermissionMode::Auto => 3,
+            PermissionMode::FullAccess => 4,
+        }
+    }
+
+    /// Refused (`denied`) when `p` asks more than this ceiling allows.
+    pub fn check(&self, p: &ExecutionPolicy) -> ApiResult<()> {
+        if Self::rank(p.permissions) > Self::rank(self.max_permissions) {
+            return Err(ApiError::new(
+                ErrorCode::Denied,
+                format!(
+                    "this node's owner allows at most permission mode {} here (asked: {})",
+                    mode_name(self.max_permissions),
+                    mode_name(p.permissions)
+                ),
+            ));
+        }
+        if p.network == NetworkScope::Unrestricted && !self.full_network {
+            return Err(ApiError::new(
+                ErrorCode::Denied,
+                "this node's owner does not allow runs with the open network",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Refused (`denied`) unless the owner lets commands run here.
+    pub fn check_exec(&self) -> ApiResult<()> {
+        if self.exec {
+            Ok(())
+        } else {
+            Err(ApiError::new(
+                ErrorCode::Denied,
+                "this node's owner does not allow commands here",
+            ))
+        }
+    }
+
+    /// Refused (`denied`) unless the owner lets jobs run here.
+    pub fn check_jobs(&self) -> ApiResult<()> {
+        if self.jobs {
+            Ok(())
+        } else {
+            Err(ApiError::new(
+                ErrorCode::Denied,
+                "this node's owner does not allow jobs here",
+            ))
+        }
+    }
+}
+
+fn mode_name(p: PermissionMode) -> String {
+    serde_json::to_value(p)
+        .ok()
+        .and_then(|v| v.as_str().map(String::from))
+        .unwrap_or_default()
 }
 
 /// How much disk the journal may take. The limit is the quota, or less when the filesystem of the
@@ -1313,8 +1427,10 @@ impl LocalNode {
         Ok(r)
     }
 
-    /// What this Node can enforce; anything else is refused before it is accepted.
-    fn check_policy(p: &ExecutionPolicy) -> ApiResult<()> {
+    /// What this Node can enforce and its owner allows ([`PolicyCeiling`]); anything else is
+    /// refused before it is accepted.
+    fn check_policy(&self, p: &ExecutionPolicy) -> ApiResult<()> {
+        self.0.cfg.ceiling.check(p)?;
         if let SandboxRequirement::Required { guarantees } = &p.sandbox
             && !guarantees.is_empty()
         {
@@ -1733,7 +1849,7 @@ impl SessionExecutor for LocalNode {
         let (r, fresh) = self.accept("open_session", &c, |t| {
             let o = &c.body;
             self.check_harness(&o.choice.harness)?;
-            Self::check_policy(&o.policy)?;
+            self.check_policy(&o.policy)?;
             let w = t
                 .workspace(&o.workspace.id)?
                 .ok_or_else(|| ApiError::new(ErrorCode::Invalid, "no such workspace"))?;
@@ -1817,7 +1933,7 @@ impl SessionExecutor for LocalNode {
                     "another harness needs another session",
                 ));
             }
-            Self::check_policy(&b.policy)?;
+            self.check_policy(&b.policy)?;
             row.open.choice = b.choice.clone();
             row.open.policy = b.policy.clone();
             row.view.phase = SessionPhase::Opening;
@@ -1866,7 +1982,7 @@ impl SessionExecutor for LocalNode {
                 ));
             }
             Self::workspace_free(t, &w.resource)?;
-            Self::check_policy(&tu.run.policy)?;
+            self.check_policy(&tu.run.policy)?;
             Self::check_limits(&tu.run.limits)?;
             Self::idle(t, &tu.session)?;
             if t.unacked_bytes()? > self.0.cfg.storage.quota {
@@ -1950,6 +2066,7 @@ impl JobExecutor for LocalNode {
     /// Accepted running; a think job runs its one model in a scratch directory of its own and
     /// ends with its answer; a research job is [`Self::start_research`]'s.
     async fn start_job(&self, c: Command<JobSpec>) -> ApiResult<Receipt> {
+        self.0.cfg.ceiling.check_jobs()?;
         if let JobWork::Research(_) = &c.body.work {
             return self.start_research(c).await;
         }
@@ -1972,7 +2089,7 @@ impl JobExecutor for LocalNode {
                     format!("no harness {} runs jobs on this node", j.run.choice.harness),
                 ));
             }
-            Self::check_policy(&j.run.policy)?;
+            self.check_policy(&j.run.policy)?;
             Self::check_limits(&j.run.limits)?;
             if t.unacked_bytes()? > self.0.cfg.storage.quota {
                 return Err(ApiError::new(
@@ -2909,11 +3026,12 @@ impl WorkspaceExecutor for LocalNode {
     /// restart while it ran: it is never run again (recover stops what is left).
     async fn exec(&self, c: Command<ExecSpec>) -> ApiResult<Receipt> {
         self.mine(&c.body.workspace)?;
+        self.0.cfg.ceiling.check_exec().map_err(|e| e.on(&c.id))?;
         if self.0.cfg.capacity.execs == 0 {
             return unsupported("commands");
         }
         secrets::check(&c.body.secrets, &c.body.env).map_err(|e| e.on(&c.id))?;
-        Self::check_policy(&c.body.policy)?;
+        self.check_policy(&c.body.policy)?;
         Self::check_limits(&c.body.limits)?;
         if c.body.command.trim().is_empty() || c.body.command.contains('\0') {
             return Err(ApiError::new(ErrorCode::Invalid, "no command").on(&c.id));

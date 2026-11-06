@@ -141,6 +141,7 @@ pub(super) fn offline() -> ApiError {
 pub(super) fn placement_error(e: PlacementError) -> ApiError {
     match e {
         PlacementError::Offline { .. } => offline(),
+        e @ PlacementError::NotOwners { .. } => ApiError::Json(403, e.to_string()),
         e => ApiError::internal(e.to_string()),
     }
 }

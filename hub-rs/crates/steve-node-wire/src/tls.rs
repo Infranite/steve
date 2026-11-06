@@ -37,30 +37,54 @@ pub fn pin_of(cert_der: &[u8]) -> String {
     format!("sha256:{}", hex::encode(crate::identity::sha256(cert_der)))
 }
 
-fn host_of(url: &str) -> Option<&str> {
-    let rest = url.split_once("://")?.1;
-    let auth = rest.split(['/', '?']).next()?;
-    let host = auth.rsplit_once('@').map(|(_, h)| h).unwrap_or(auth);
-    if let Some(v6) = host.strip_prefix('[') {
-        return v6.split(']').next();
+/// The host a `ws://` or `wss://` URL connects to, read by the parser the connection itself uses
+/// (`http::Uri`, what tungstenite dials), brackets of an IPv6 literal taken off. Refused outright:
+/// userinfo (`@`), a fragment (`#`), percent escapes, backslashes, whitespace and control
+/// characters anywhere in it. Parsers disagree on exactly those (`ws://evil#@127.0.0.1/` is
+/// `evil` to the connection and was `127.0.0.1` to a hand-made split), and a Hub URL never needs
+/// them.
+pub fn host_of(url: &str) -> Result<String, String> {
+    if url.contains('@') {
+        return Err("the hub url must not contain userinfo (@)".into());
     }
-    Some(host.rsplit_once(':').map(|(h, _)| h).unwrap_or(host))
+    if url.contains('#') {
+        return Err("the hub url must not contain a fragment (#)".into());
+    }
+    if url
+        .chars()
+        .any(|c| c == '%' || c == '\\' || c.is_whitespace() || c.is_control())
+    {
+        return Err("the hub url must not contain %, \\, spaces or control characters".into());
+    }
+    let uri: http::Uri = url
+        .parse()
+        .map_err(|e| format!("the hub url does not parse: {e}"))?;
+    let host = uri
+        .authority()
+        .map(|a| a.host())
+        .filter(|h| !h.is_empty())
+        .ok_or("the hub url has no host")?;
+    let host = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host);
+    Ok(host.to_string())
 }
 
 /// The trust a URL gets. `allow_plaintext` is `STEVE_NODE_LOOPBACK_PLAINTEXT=1`.
 pub fn policy(url: &str, pin: Option<&str>, allow_plaintext: bool) -> Result<Trust, String> {
-    if url.starts_with("wss://") {
+    let plain = url.starts_with("ws://");
+    if !plain && !url.starts_with("wss://") {
+        return Err("the hub url must be wss:// (or ws:// to loopback)".into());
+    }
+    let host = host_of(url)?;
+    if !plain {
         return match pin {
             Some(p) => Ok(Trust::Pin(parse_pin(p)?)),
             None => Ok(Trust::WebPki),
         };
     }
-    if !url.starts_with("ws://") {
-        return Err("the hub url must be wss:// (or ws:// to loopback)".into());
-    }
-    let loopback = host_of(url)
-        .and_then(|h| h.parse::<IpAddr>().ok())
-        .is_some_and(|ip| ip.is_loopback());
+    let loopback = host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback());
     if !loopback {
         return Err("plain ws:// is only allowed to a literal 127.0.0.1 or ::1".into());
     }
@@ -199,5 +223,65 @@ mod tests {
             Ok(Trust::Pin([0xab; 32]))
         );
         assert!(policy("wss://hub.example/", Some("sha256:zz"), false).is_err());
+    }
+
+    /// M2: the guard reads the host the connection dials, and what parsers disagree on is refused.
+    #[test]
+    fn plaintext_guard_cannot_be_tricked_into_a_remote_host() {
+        // the connection (http::Uri) goes to evil.example here; a hand-made split saw 127.0.0.1
+        let uri: http::Uri = "ws://evil.example#@127.0.0.1/".parse().unwrap();
+        assert_eq!(uri.host(), Some("evil.example"));
+        for url in [
+            "ws://evil.example#@127.0.0.1/",
+            "ws://evil.example#@127.0.0.1:7777/node/ws",
+            "ws://evil.example/#@127.0.0.1",
+            "ws://127.0.0.1#@evil.example/",
+            "ws://user@127.0.0.1/",
+            "ws://user:pw@127.0.0.1:7777/node/ws",
+            "ws://evil.example@127.0.0.1/",
+            "ws://127.0.0.1@evil.example/",
+            "ws://evil.example%40127.0.0.1/",
+            "ws://127.0.0.1%40evil.example/",
+            "ws://127.0.0.1%2f@evil.example/",
+            "ws://127.0.0.1\\@evil.example/",
+            "ws://127.0.0.1\\evil.example/",
+            "ws://127.0.0.1 @evil.example/",
+            "ws://127.0.0.1./",
+            "ws://127.0.0.1.:7777/node/ws",
+            "ws://127.1/",
+            "ws://0x7f.0.0.1/",
+            "ws://2130706433/",
+            "ws://[::ffff:127.0.0.1]/",
+            "ws://[::1%25lo0]/",
+            "ws://[::1]@evil.example/",
+            "ws://evil.example?@127.0.0.1/",
+            "ws:///127.0.0.1/",
+            "ws://",
+        ] {
+            assert!(
+                policy(url, None, true).is_err(),
+                "{url} must not count as loopback"
+            );
+        }
+        for url in [
+            "ws://127.0.0.1/",
+            "ws://127.0.0.2:7777/node/ws",
+            "ws://[::1]/node/ws",
+            "ws://[0:0:0:0:0:0:0:1]:7777/node/ws",
+        ] {
+            assert_eq!(
+                policy(url, None, true),
+                Ok(Trust::LoopbackPlaintext),
+                "{url}"
+            );
+        }
+        // userinfo and fragments are refused over TLS too: the hub url never needs them
+        assert!(policy("wss://user@hub.example/", None, false).is_err());
+        assert!(policy("wss://hub.example/#x", None, false).is_err());
+        assert_eq!(
+            host_of("wss://hub.example:8443/node/ws"),
+            Ok("hub.example".into())
+        );
+        assert_eq!(host_of("ws://[::1]:7777/"), Ok("::1".into()));
     }
 }

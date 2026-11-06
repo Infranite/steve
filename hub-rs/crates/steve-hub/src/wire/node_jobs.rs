@@ -163,6 +163,7 @@ impl NodeRuntime {
                 "" => steve_store::WS.to_string(),
                 w => w.to_string(),
             });
+        self.store.reader(|c| self.owners_work_in(c, &workspace))?;
         let mut prompt = vec![Part::Text {
             text: t.message.to_string(),
         }];
@@ -888,6 +889,8 @@ impl NodeRuntime {
     /// stopped right away.
     fn start_research_in(&self, attempt: &str, a: &ResearchAttempt) -> Result<(), StoreError> {
         self.running()?;
+        self.store
+            .reader(|c| self.owners_work_in(c, &a.workspace))?;
         let mut prompt = vec![Part::Text {
             text: a.prompt.clone(),
         }];
