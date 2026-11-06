@@ -1130,3 +1130,193 @@ async fn a_git_items_worktree_is_made_and_given_back_by_the_node() {
         1
     );
 }
+
+/// B5: sessions the legacy runner ran before the Node was switched on move to it at an idle
+/// boundary, on the same conversation. An idle one moves at its next message (`session/load` of
+/// the harness session id the legacy runner kept); one cut mid-turn by the restart is first
+/// resumed on the legacy runner and moves at its next message after that; one that can never
+/// run on the Node (its directory is gone) is ended at boot with why, once. With the Node off
+/// again a moved session is parked, never handed back to the legacy runner.
+#[tokio::test(flavor = "multi_thread")]
+async fn legacy_sessions_move_to_the_node_at_an_idle_boundary() {
+    let h = Home::new();
+    let env = [("STEVE_TAKEOVER_CONTINUES", "0")];
+    let mut hub = spawn(&h, false, &env);
+    serving(&h).await;
+    let c = Client::login(&h).await;
+    let idle_acp = |sid: &str| {
+        h.one(
+            "SELECT acp_session_id FROM sessions WHERE id=? AND status='idle'",
+            sid,
+        )
+    };
+    let a = c.item(&h, "旧会话甲 @say legacy-a-B5").await;
+    let b = c.item(&h, "旧会话乙 @say legacy-b-B5").await;
+    assert!(
+        wait(30, || idle_acp(&a).is_some() && idle_acp(&b).is_some()).await,
+        "both ran on the legacy runner; log:\n{}",
+        hub_log(&h)
+    );
+    let a_conv = idle_acp(&a).expect("a's conversation");
+    let r = c.item(&h, "旧会话丙 @sleep 6000").await;
+    assert!(wait(30, || h.got("旧会话丙") == 1).await, "r's turn runs");
+    let r_conv = h
+        .one("SELECT acp_session_id FROM sessions WHERE id=?", &r)
+        .expect("r's conversation");
+    assert_eq!(
+        h.count("SELECT COUNT(*) FROM runtime_sessions WHERE ?<>''", "-"),
+        0,
+        "the Node is off: nothing bound"
+    );
+    hub.kill();
+    drop(hub);
+    // b's directory is gone while the Hub is down
+    {
+        let db = rusqlite::Connection::open(h.steve().join("data/steve.sqlite3")).expect("db");
+        db.execute(
+            "UPDATE sessions SET cwd='/nonexistent-steve-b5/gone' WHERE id=?",
+            [&b],
+        )
+        .expect("cwd");
+        // and a message waits for it that nothing can ever send there
+        db.execute(
+            "INSERT INTO queued(id,session_id,text,via,created) VALUES ('q-b5',?,'旧会话乙-排队','me',1)",
+            [&b],
+        )
+        .expect("queued");
+    }
+
+    let hub = spawn(&h, true, &env);
+    serving(&h).await;
+    let n = node_health_until(&h, 30, |n| n["retired"] == 1).await;
+    assert_eq!(n["retired"], 1, "{n}");
+    assert_eq!(
+        h.one("SELECT status FROM sessions WHERE id=?", &b)
+            .as_deref(),
+        Some("ended")
+    );
+    assert_eq!(
+        h.count(
+            "SELECT COUNT(*) FROM events WHERE session_id=? AND json_extract(data,'$.retired')=1 AND instr(data,'工作目录已不存在')>0",
+            &b
+        ),
+        1,
+        "b says why, once"
+    );
+    assert_eq!(
+        h.count("SELECT COUNT(*) FROM queued WHERE session_id=?", &b),
+        0,
+        "its queue goes with it"
+    );
+    assert_eq!(
+        h.count(
+            "SELECT COUNT(*) FROM events WHERE session_id=? AND kind='queued_removed'",
+            &b
+        ),
+        1,
+        "the dropped message is said"
+    );
+    // a retired session is never woken: a message to it is refused, never run by the legacy
+    // runner in a directory that is gone, and it is not retired a second time
+    let (st, v) = c
+        .call(
+            "POST",
+            &format!("/api/sessions/{b}/messages"),
+            Some(json!({"text": "旧会话乙-续 @say revived-b-B5"})),
+        )
+        .await;
+    assert_ne!(st, 200, "refused: {v}");
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(h.got("旧会话乙-续"), 0, "never to the legacy runner");
+    assert_eq!(
+        h.one("SELECT status FROM sessions WHERE id=?", &b)
+            .as_deref(),
+        Some("ended")
+    );
+    assert_eq!(
+        h.count(
+            "SELECT COUNT(*) FROM events WHERE session_id=? AND json_extract(data,'$.retired')=1 AND kind='system'",
+            &b
+        ),
+        1,
+        "retired once"
+    );
+    // r's cut turn is resumed where it ran, then r moves at its next message
+    assert!(
+        wait(30, || h.got("Hub 刚重启") == 1).await,
+        "r resumed on the legacy runner; log:\n{}",
+        hub_log(&h)
+    );
+    assert!(
+        wait(60, || idle_acp(&r).is_some()
+            && h.count(
+                "SELECT COUNT(*) FROM session_resume WHERE session_id=?",
+                &r
+            ) == 0)
+        .await,
+        "r's resumed turn ended; log:\n{}",
+        hub_log(&h)
+    );
+    for s in [&a, &r] {
+        assert_eq!(
+            h.count(
+                "SELECT COUNT(*) FROM runtime_sessions WHERE session_id=?",
+                s
+            ),
+            0,
+            "nothing moves before a message"
+        );
+    }
+    let spawns = h.spawns();
+    c.say(&a, "旧会话甲-续 @say moved-a-B5").await;
+    c.say(&r, "旧会话丙-续 @say moved-r-B5").await;
+    for (s, conv) in [(&a, &a_conv), (&r, &r_conv)] {
+        assert!(
+            wait(30, || attempts(&h, s, "finished") >= 1).await,
+            "{s} ran on the Node; log:\n{}",
+            hub_log(&h)
+        );
+        assert_eq!(
+            h.count(
+                "SELECT COUNT(*) FROM runtime_sessions WHERE session_id=? AND node_id='local'",
+                s
+            ),
+            1
+        );
+        assert!(
+            h.lines().iter().any(|m| m["method"] == "session/load"
+                && m["params"]["sessionId"] == conv.as_str()),
+            "{s} continues its own conversation"
+        );
+        assert_eq!(
+            h.count(
+                "SELECT COUNT(*) FROM events WHERE session_id=? AND json_extract(data,'$.adopted')=1",
+                s
+            ),
+            1,
+            "{s} hears it once"
+        );
+    }
+    assert_eq!(h.got("旧会话甲-续"), 1);
+    assert_eq!(h.got("旧会话丙-续"), 1);
+    assert_eq!(h.spawns(), spawns + 2, "one Node harness each");
+    let n = node_health(&h).await;
+    assert_eq!(n["adopted"], 2, "{n}");
+    drop(hub);
+
+    // the Node off again: parked, never handed back to the legacy runner
+    let _hub = spawn(&h, false, &env);
+    serving(&h).await;
+    c.say(&a, "旧会话甲-停 @say parked-a-B5").await;
+    assert!(
+        wait(30, || h.count(
+            "SELECT COUNT(*) FROM events WHERE session_id=? AND json_extract(data,'$.parked')=1",
+            &a
+        ) == 1)
+        .await,
+        "parked; log:\n{}",
+        hub_log(&h)
+    );
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(h.got("旧会话甲-停"), 0, "never to the legacy runner");
+}

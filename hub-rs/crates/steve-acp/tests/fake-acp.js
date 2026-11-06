@@ -21,6 +21,7 @@
 //   @fsread                asks the client for fs/read_text_file; says the error it got
 // $FAKE_ACP_CODEX=1 reports the model as a config option instead of `models`.
 // $FAKE_ACP_GRANDCHILD=<file> starts `sleep 300` (same process group) and writes its pid there.
+// $FAKE_ACP_STUBBORN=<file> does the same with a `sleep 300` that ignores SIGTERM.
 import { appendFileSync, writeFileSync } from "node:fs"
 import { spawn } from "node:child_process"
 
@@ -29,6 +30,10 @@ log({ spawn: { argv: process.argv.slice(2), cwd: process.cwd(), claude: process.
 if (process.env.FAKE_ACP_GRANDCHILD) {
   const c = spawn("sleep", ["300"], { stdio: "ignore" })
   writeFileSync(process.env.FAKE_ACP_GRANDCHILD, String(c.pid))
+}
+if (process.env.FAKE_ACP_STUBBORN) {
+  const c = spawn("sh", ["-c", "trap '' TERM; exec sleep 300"], { stdio: "ignore" })
+  writeFileSync(process.env.FAKE_ACP_STUBBORN, String(c.pid))
 }
 
 let buf = "", sid = "", cancel = null, nextId = 1000, mode = "default"

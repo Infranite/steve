@@ -506,22 +506,32 @@ pub fn wire_assembly(
             workspaces.clone().follow(bus.tap(&["project", "kb"])),
         ));
     }
+    let routed = Arc::new(core::RoutedRuntime {
+        legacy: core::AcpRuntime(acp.clone()),
+        node: node_host.as_ref().map(|h| h.runtime.clone()),
+        fleet: fleet.clone(),
+        bind_remote,
+        store: db.clone(),
+        host: host.clone(),
+        workspaces: workspaces.clone(),
+        worktrees: node_host.as_ref().map(|_| cfg.worktrees.clone()),
+    });
     let core = steve_core::Core::new(
         steve_core::repo::Db::new(db.clone()),
-        Arc::new(core::RoutedRuntime {
-            legacy: core::AcpRuntime(acp.clone()),
-            node: node_host.as_ref().map(|h| h.runtime.clone()),
-            fleet: fleet.clone(),
-            bind_remote,
-            store: db.clone(),
-            host: host.clone(),
-            workspaces: workspaces.clone(),
-            worktrees: node_host.as_ref().map(|_| cfg.worktrees.clone()),
-        }),
+        routed.clone(),
         gateway,
         core_cfg,
     );
     let _ = host.core.set(core.clone());
+    if node_host.is_some() {
+        // legacy sessions from before this boot that can never run on the local Node end, with
+        // why (B5); the others move to it at their next message
+        node_jobs.push(Box::pin(core::retire_unadoptable(
+            routed,
+            core.clone(),
+            steve_store::now(),
+        )));
+    }
     /* an item bound to a Node has its git read there (N0e-E11b); without any Node, nothing changes */
     if node_host.is_some() || fleet.is_some() {
         core.set_node_git(Arc::new(item_git::ItemGit::new(workspaces.clone())));

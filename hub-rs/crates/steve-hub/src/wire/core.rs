@@ -1070,6 +1070,14 @@ impl RoutedRuntime {
 impl RoutedRuntime {
     /// The binding `session_id` gets on the local Node, planned only (nothing bound or written).
     fn local_binding(&self, session_id: &str) -> Option<super::node_runtime::Binding> {
+        self.local_plan(session_id).ok()
+    }
+
+    /// [`Self::local_binding`], saying why there is none.
+    fn local_plan(
+        &self,
+        session_id: &str,
+    ) -> Result<super::node_runtime::Binding, super::node_binding::Unbound> {
         // a project added a moment ago is a root before its first session is prepared
         if let Err(e) = self.workspaces.refresh_roots() {
             tracing::error!("local Node roots before binding {session_id}: {e}");
@@ -1077,7 +1085,7 @@ impl RoutedRuntime {
         let perm = self.perm_mode(session_id);
         let local = self.host.local_node.get();
         let allows = |at: &steve_node_api::RootPath| local.is_some_and(|l| l.allows(at));
-        super::node_binding::binding_with(
+        super::node_binding::plan(
             &self.store,
             session_id,
             perm.as_deref(),
@@ -1085,6 +1093,201 @@ impl RoutedRuntime {
             self.worktrees.as_deref(),
         )
     }
+
+    /// Whether a session still on the legacy runner can move to the local Node now (B5), and its
+    /// binding when it can. `Err(None)`: not now, asked again at a later idle boundary (the Node
+    /// is off or stopped, a turn of it is in flight or held, a dispatch or a resume of it is
+    /// pending, a card of it is open, or a row of it could not be read). `Err(Some(why))`: never,
+    /// as it is (stored text, zh-CN).
+    fn adoptable(&self, sid: &str) -> Result<super::node_runtime::Binding, Option<String>> {
+        let Some(n) = &self.node else {
+            return Err(None);
+        };
+        if n.is_stopped()
+            || self.legacy.0.is_busy(sid)
+            || self.legacy.0.is_holding()
+            || self.store.maintenance()
+        {
+            return Err(None);
+        }
+        if legacy_work(&self.store, sid).unwrap_or(true) {
+            return Err(None);
+        }
+        let s = match self.store.sessions().get(sid) {
+            Ok(Some(s)) => s,
+            _ => return Err(None),
+        };
+        if s.status == "ended" {
+            return Err(None);
+        }
+        // it continues where it worked: a directory gone since is none the Node could open
+        if s.readonly == 0 && !s.cwd.is_empty() && !std::path::Path::new(&s.cwd).is_dir() {
+            return Err(Some(steve_i18n::stored(|| {
+                steve_i18n::t!("hub.node.unbound.missing_cwd")
+            })));
+        }
+        use super::node_binding::Unbound;
+        self.local_plan(sid).map_err(|u| {
+            let why = match u {
+                Unbound::Unreadable | Unbound::Missing | Unbound::Ended => return None,
+                Unbound::ReadOnly => steve_i18n::t!("hub.node.unbound.read_only"),
+                Unbound::NotHere => steve_i18n::t!("hub.node.unbound.not_here"),
+                Unbound::NoItem => steve_i18n::t!("hub.node.unbound.no_item"),
+                Unbound::Archived => steve_i18n::t!("hub.node.unbound.archived"),
+                Unbound::Bot => steve_i18n::t!("hub.node.unbound.bot"),
+                Unbound::Mode(m) => steve_i18n::t!("hub.node.unbound.mode", mode = m),
+                Unbound::OutsideRoots => steve_i18n::t!("hub.node.unbound.outside_roots"),
+            };
+            Some(steve_i18n::stored(|| why))
+        })
+    }
+
+    /// Why a session still on the legacy runner can never move to the local Node, as it is
+    /// (`None`: it can, or it may later). What [`retire_unadoptable`] ends it for.
+    pub fn refusal(&self, sid: &str) -> Option<String> {
+        if node_of_strict(&self.store, sid).ok()?.is_some() {
+            return None;
+        }
+        self.adoptable(sid).err().flatten()
+    }
+
+    /// At an idle boundary (a message for it, or a flush of its queue), a session still on the
+    /// legacy runner moves to the local Node when it can (B5): its idle harness is let go, then it
+    /// is bound there, opening on the same conversation (`sessions.acp_session_id`, the resume
+    /// handle the legacy runner kept). `None`: it stays on the legacy runner for now (busy,
+    /// pending work, the Node off, a session that cannot run there, a failed bind); a later
+    /// boundary asks again. Never mid-turn: only a harness the legacy runner holds idle goes.
+    fn adopt(&self, sid: &str) -> Option<Arc<super::node_runtime::NodeRuntime>> {
+        let n = self.node.clone()?;
+        let b = self.adoptable(sid).ok()?;
+        // the old harness must be gone before the Node opens the same conversation: two
+        // processes never hold it at once (one not seen gone in time is asked after at the next
+        // boundary, the session staying on the legacy runner meanwhile)
+        if !self.legacy.0.release_gone(sid, RELEASE_WAIT) {
+            tracing::warn!("{sid}: its legacy harness is not gone yet; adopted later");
+            return None;
+        }
+        let resume = match self.store.sessions().get(sid) {
+            Ok(Some(s)) => s.acp_session_id,
+            _ => return None,
+        };
+        match n.adopt(&b, resume.as_deref()) {
+            Ok(_) => {
+                tracing::info!(
+                    session = sid,
+                    resumed = resume.is_some(),
+                    "legacy session adopted by the local Node"
+                );
+                Some(n)
+            }
+            Err(e) => {
+                tracing::error!("adopt {sid} onto the Node: {e}; it stays on the legacy runner");
+                None
+            }
+        }
+    }
+
+    /// [`Self::route`], a legacy session moving to the local Node first when it can ([`Self::adopt`]).
+    fn route_adopting(&self, session_id: &str) -> Backend {
+        match self.route(session_id) {
+            Backend::Legacy => self
+                .adopt(session_id)
+                .map_or(Backend::Legacy, Backend::Node),
+            b => b,
+        }
+    }
+}
+
+/// Whether the legacy runner has work of `session` in hand that a move to the Node would cut: a
+/// claimed or submitted dispatch, a resume after a restart, or an open permission card.
+fn legacy_work(store: &steve_store::Store, session: &str) -> Result<bool, steve_store::StoreError> {
+    store.reader(|c| {
+        Ok::<_, steve_store::StoreError>(c.query_row(
+            "SELECT EXISTS(SELECT 1 FROM session_dispatch WHERE session_id=?1 AND backend='legacy' AND state IN ('claimed','submitted'))
+                 OR EXISTS(SELECT 1 FROM session_resume WHERE session_id=?1)
+                 OR EXISTS(SELECT 1 FROM decisions WHERE session_id=?1 AND subject_type='tool_call' AND status='open')",
+            [session],
+            |r| r.get::<_, bool>(0),
+        )?)
+    })
+}
+
+/// How long an adoption waits for the legacy harness it let go to exit (SIGKILLed halfway).
+const RELEASE_WAIT: Duration = Duration::from_secs(4);
+
+/// How often idle legacy sessions that cannot move to the local Node are looked for.
+const RETIRE_EVERY: Duration = Duration::from_secs(300);
+
+/// With the local Node on, ends each idle session left on the legacy runner from before this
+/// boot that can never move to the Node ([`RoutedRuntime::refusal`]), with why as its last
+/// event (B5): such a session is never left waiting for a runner that will be gone. Runs once the
+/// Node has reconciled, then every [`RETIRE_EVERY`]. Sessions with work in hand wait for an idle
+/// pass; ones that can move are moved at their next message. Sessions made since boot are left
+/// alone (a new session the Node could not take is a fallback, counted on `/healthz`).
+pub async fn retire_unadoptable(routed: Arc<RoutedRuntime>, core: Core, boot: i64) {
+    let Some(n) = routed.node.clone() else { return };
+    while !n.is_reconciled() {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    loop {
+        let (r, c, node) = (routed.clone(), core.clone(), n.clone());
+        let done = blocking(move || Ok(retire_pass(&r, &c, &node, boot))).await;
+        if let Ok(k) = done
+            && k > 0
+        {
+            tracing::info!("{k} legacy session(s) that cannot run on the Node ended");
+        }
+        tokio::time::sleep(RETIRE_EVERY).await;
+    }
+}
+
+/// One pass of [`retire_unadoptable`]: how many sessions it ended.
+pub fn retire_pass(
+    routed: &RoutedRuntime,
+    core: &Core,
+    node: &super::node_runtime::NodeRuntime,
+    boot: i64,
+) -> usize {
+    if node.is_stopped() {
+        return 0;
+    }
+    let ids = routed.store.reader(|c| {
+        // `running`/`starting` before boot recovery ran: a cut turn it resumes first
+        let mut st = c.prepare(
+            "SELECT s.id FROM sessions s
+              WHERE s.status NOT IN ('ended','running','starting') AND s.created < ?1
+                AND NOT EXISTS(SELECT 1 FROM runtime_sessions r WHERE r.session_id=s.id)
+              ORDER BY s.created",
+        )?;
+        let v = st
+            .query_map([boot], |r| r.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok::<_, steve_store::StoreError>(v)
+    });
+    let ids = match ids {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!("legacy sessions to retire: {e}");
+            return 0;
+        }
+    };
+    let mut k = 0;
+    for sid in ids {
+        let Some(why) = routed.refusal(&sid) else {
+            continue;
+        };
+        let note = steve_i18n::stored(|| steve_i18n::t!("hub.node.retired", why = why));
+        match core.retire_session(&sid, &note) {
+            Ok(true) => {
+                node.retired_one();
+                tracing::info!(session = %sid, "legacy session cannot run on the Node: ended ({why})");
+                k += 1;
+            }
+            Ok(false) => {}
+            Err(e) => tracing::error!("retire {sid}: {e}"),
+        }
+    }
+    k
 }
 
 impl steve_core::AgentRuntime for RoutedRuntime {
@@ -1122,8 +1325,9 @@ impl steve_core::AgentRuntime for RoutedRuntime {
     /// A new session is bound to the remote Node named by `STEVE_NODE_BIND` when it can run there;
     /// otherwise, with the local Node enabled here, to it when its binding can be planned
     /// (otherwise, e.g. a permission mode the Node path cannot express, a directory outside its
-    /// roots or a Node that stopped, it stays on the legacy runner). Existing sessions are never
-    /// bound; with neither configured nothing changes.
+    /// roots or a Node that stopped, it stays on the legacy runner). Sessions already on the legacy
+    /// runner move to the local Node only at an idle boundary ([`RoutedRuntime::adopt`]); with
+    /// neither configured nothing changes.
     /// `after` (a predecessor's release on its way): a Node-bound session opens only once it is
     /// done; a legacy one starts right away, as before.
     fn created(&self, session_id: &str, after: Option<&str>) {
@@ -1153,7 +1357,7 @@ impl steve_core::AgentRuntime for RoutedRuntime {
         via: &str,
         files: &[steve_core::repo::FileRef],
     ) -> steve_core::Result<steve_core::Prompted> {
-        let n = match self.route(session_id) {
+        let n = match self.route_adopting(session_id) {
             Backend::Node(n) => Some(n),
             Backend::Parked => None,
             Backend::Legacy => return self.legacy.prompt(session_id, text, via, files),
@@ -1308,7 +1512,7 @@ impl steve_core::AgentRuntime for RoutedRuntime {
     }
     fn flush(&self, session_id: &str, lead: Option<(&str, &str)>) -> steve_core::Flushed {
         use super::node_runtime::Planned;
-        match self.route(session_id) {
+        match self.route_adopting(session_id) {
             Backend::Node(n) => match n.flush_turn(session_id, lead) {
                 Ok((Planned::Created, Some(attempt))) => {
                     steve_core::Flushed::Started(steve_core::Running {
@@ -2345,6 +2549,186 @@ mod routed_tests {
             rt.set_mode("s1", "auto").unwrap(),
             steve_core::Configured::Unsupported
         ));
+    }
+
+    /// A RoutedRuntime with the local Node on (a fake one), item `i1` with an idle legacy session
+    /// `s1` that ran on the legacy runner (its harness's conversation `acp-legacy-1`), working in
+    /// a scratch workspace (no directory of its own, so no root is needed).
+    fn with_node(dir: &std::path::Path) -> super::RoutedRuntime {
+        let mut rt = routed(dir);
+        rt.store.ensure_workspace().unwrap();
+        let node = steve_node_api::testkit::FakeNode::new("local");
+        let n = super::super::node_runtime::NodeRuntime::new(
+            rt.store.clone(),
+            node.clone(),
+            Arc::new(super::super::node_tools::tests::Ends),
+        );
+        node.connect(Arc::new(super::super::node_runtime::Sink(Arc::downgrade(
+            &n,
+        ))));
+        n.start();
+        rt.node = Some(n);
+        exec(
+            &rt.store,
+            "INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated) VALUES ('i1','default',1,'t','run','执行',1,1);
+             INSERT INTO sessions(id,workspace_id,item_id,harness,cwd,status,acp_session_id,created,updated) VALUES ('s1','default','i1','claude-code','','idle','acp-legacy-1',1,1);",
+        );
+        rt
+    }
+
+    fn exec(store: &Store, sql: &str) {
+        store.with_conn(|c| Ok(c.execute_batch(sql)?)).unwrap();
+    }
+
+    fn one<T: rusqlite::types::FromSql>(store: &Store, sql: &str) -> T {
+        store
+            .reader(|c| Ok::<_, steve_store::StoreError>(c.query_row(sql, [], |r| r.get(0))?))
+            .unwrap()
+    }
+
+    fn bound(rt: &super::RoutedRuntime) -> bool {
+        one::<i64>(
+            &rt.store,
+            "SELECT COUNT(*) FROM runtime_sessions WHERE session_id='s1'",
+        ) == 1
+    }
+
+    /// B5: an idle legacy session's next message moves it to the Node, which opens it on the same
+    /// conversation; the message goes there, not to the legacy runner.
+    #[tokio::test]
+    async fn an_idle_legacy_sessions_next_message_moves_it_to_the_node() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = with_node(dir.path());
+        assert!(!bound(&rt), "nothing moves before a boundary");
+        rt.prompt("s1", "接着做", "me", &[]).unwrap();
+        assert!(bound(&rt));
+        let resume: Option<String> = one(
+            &rt.store,
+            "SELECT json_extract(request,'$.body.resume') FROM node_commands WHERE method='open_session'",
+        );
+        assert_eq!(resume.as_deref(), Some("acp-legacy-1"));
+        let queued: i64 = one(
+            &rt.store,
+            "SELECT COUNT(*) FROM queued WHERE session_id='s1' AND text='接着做'",
+        );
+        assert_eq!(
+            queued, 1,
+            "the message waits for the Node's open, not the legacy runner"
+        );
+        assert!(rt.legacy.0.adapter_pid("s1").is_none());
+        assert_eq!(rt.node.as_ref().unwrap().adopted(), 1);
+        assert_eq!(rt.refusal("s1"), None, "bound: nothing to retire");
+    }
+
+    /// B5: a queue flushed at an idle boundary moves the session too.
+    #[tokio::test]
+    async fn a_flush_moves_an_idle_legacy_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = with_node(dir.path());
+        exec(
+            &rt.store,
+            "INSERT INTO queued(id,session_id,text,via,created) VALUES ('q1','s1','排队的','me',1)",
+        );
+        let _ = rt.flush("s1", None);
+        assert!(bound(&rt));
+    }
+
+    /// B5: work the legacy runner has in hand keeps the session there until it is done: a claimed
+    /// or submitted dispatch, a resume after a restart, an open permission card, a hold.
+    #[tokio::test]
+    async fn legacy_work_in_hand_keeps_a_session_on_the_legacy_runner() {
+        for (what, sql, undo) in [
+            (
+                "claimed",
+                "INSERT INTO session_dispatch(id,session_id,text,via,created,files,state,updated) VALUES ('d1','s1','x','me',1,'[]','claimed',1)",
+                "DELETE FROM session_dispatch",
+            ),
+            (
+                "submitted",
+                "INSERT INTO session_dispatch(id,session_id,text,via,created,files,state,updated) VALUES ('d1','s1','x','me',1,'[]','submitted',1)",
+                "DELETE FROM session_dispatch",
+            ),
+            (
+                "resume",
+                "INSERT INTO session_resume(session_id,created) VALUES ('s1',1)",
+                "DELETE FROM session_resume",
+            ),
+            (
+                "card",
+                "INSERT INTO decisions(id,workspace_id,kind,subject_type,subject_id,session_id,question,status,requested_by,created) VALUES ('c1','default','approve','tool_call','t1','s1','?','open','agent',1)",
+                "DELETE FROM decisions",
+            ),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let rt = with_node(dir.path());
+            exec(&rt.store, sql);
+            assert!(rt.adopt("s1").is_none(), "{what}");
+            assert_eq!(rt.refusal("s1"), None, "{what}: waits, never retired");
+            assert!(!bound(&rt), "{what}");
+            exec(&rt.store, undo);
+            assert!(rt.adopt("s1").is_some(), "{what}: once done, it moves");
+            assert!(bound(&rt), "{what}");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let rt = with_node(dir.path());
+        rt.legacy.0.hold(true);
+        assert!(rt.adopt("s1").is_none(), "held");
+        rt.legacy.0.hold(false);
+        assert!(rt.adopt("s1").is_some());
+    }
+
+    /// B5: with the Node off, or stopped, nothing moves.
+    #[tokio::test]
+    async fn without_a_running_node_nothing_moves() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut rt = with_node(dir.path());
+        rt.node.as_ref().unwrap().stop("tools did not connect");
+        assert!(rt.adopt("s1").is_none());
+        assert_eq!(rt.refusal("s1"), None);
+        rt.node = None;
+        assert!(rt.adopt("s1").is_none());
+        assert_eq!(rt.refusal("s1"), None);
+        assert!(!bound(&rt));
+    }
+
+    /// B5: a session that can never run on the Node stays where it is, and says why (what it is
+    /// ended for): a mode the Node cannot express, a directory gone, a bot gone, an archived
+    /// project, an item moved away, an import. One whose row cannot be read only waits.
+    #[tokio::test]
+    async fn a_session_that_cannot_move_says_why() {
+        let gone = "/nonexistent-steve-b5/i1";
+        for (sql, why) in [
+            (
+                "INSERT INTO bots(id,workspace_id,name,harness,perm_mode,updated) VALUES ('b1','default','b','claude-code','dontAsk',1); UPDATE sessions SET bot_id='b1'".to_string(),
+                "dontAsk",
+            ),
+            (format!("UPDATE sessions SET cwd='{gone}'"), "工作目录已不存在"),
+            ("UPDATE sessions SET bot_id='nobody'".to_string(), "Bot"),
+            (
+                "INSERT INTO projects(id,workspace_id,name,path,kind,archived,created,updated) VALUES ('p1','default','p','/nonexistent-steve-b5','dir',1,1,1); UPDATE items SET project_id='p1'".to_string(),
+                "归档",
+            ),
+            ("UPDATE sessions SET item_id=NULL".to_string(), "事项"),
+            ("UPDATE sessions SET readonly=1".to_string(), "只读"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let rt = with_node(dir.path());
+            exec(&rt.store, &sql);
+            let r = rt.refusal("s1");
+            assert!(r.as_deref().is_some_and(|r| r.contains(why)), "{sql}: {r:?}");
+            assert!(rt.adopt("s1").is_none(), "{sql}");
+            assert!(!bound(&rt), "{sql}");
+        }
+        // an ended session is not one to retire (a message revives it, and it moves then)
+        let dir = tempfile::tempdir().unwrap();
+        let rt = with_node(dir.path());
+        exec(&rt.store, "UPDATE sessions SET status='ended'");
+        assert_eq!(rt.refusal("s1"), None);
+        exec(&rt.store, "UPDATE sessions SET status='idle'");
+        // unreadable: maybe only for now
+        exec(&rt.store, "ALTER TABLE items RENAME TO items_gone");
+        assert_eq!(rt.refusal("s1"), None);
+        assert!(rt.adopt("s1").is_none());
     }
 }
 

@@ -60,32 +60,94 @@ pub fn binding_with(
     allows: &dyn Fn(&RootPath) -> bool,
     worktrees: Option<&Path>,
 ) -> Option<Binding> {
-    let s = store.sessions().get(session).ok()??;
-    if s.status == "ended" || s.readonly != 0 || s.device_id != "hub" || s.source != "Steve" {
-        return None;
+    plan(store, session, perm, allows, worktrees).ok()
+}
+
+/// Why a session has no binding on the local Node ([`plan`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Unbound {
+    /// Its rows could not be read, or a name in them is no valid id: maybe only for now.
+    Unreadable,
+    /// No such session.
+    Missing,
+    Ended,
+    /// Imported from a harness's history: read only.
+    ReadOnly,
+    /// Not a session of Steve's on this machine.
+    NotHere,
+    /// It belongs to no item, or its item is in another workspace (or gone).
+    NoItem,
+    /// Its item's project is archived.
+    Archived,
+    /// Its bot is gone, disabled or in another workspace.
+    Bot,
+    /// A permission mode the Node path cannot express.
+    Mode(String),
+    /// Its directory is not one the Node takes (none of its roots).
+    OutsideRoots,
+}
+
+impl Unbound {
+    /// Whether this holds for good: a session that is not bound now never will be, as it is.
+    /// An unreadable row may read fine the next time.
+    pub fn is_permanent(&self) -> bool {
+        !matches!(self, Unbound::Unreadable)
     }
-    let item = store.items().get(s.item_id.as_deref()?).ok()??;
+}
+
+/// [`binding_with`], saying why when there is no binding.
+pub fn plan(
+    store: &Store,
+    session: &str,
+    perm: Option<&str>,
+    allows: &dyn Fn(&RootPath) -> bool,
+    worktrees: Option<&Path>,
+) -> Result<Binding, Unbound> {
+    use Unbound::*;
+    let s = store
+        .sessions()
+        .get(session)
+        .map_err(|_| Unreadable)?
+        .ok_or(Missing)?;
+    if s.status == "ended" {
+        return Err(Ended);
+    }
+    if s.readonly != 0 {
+        return Err(ReadOnly);
+    }
+    if s.device_id != "hub" || s.source != "Steve" {
+        return Err(NotHere);
+    }
+    let item = store
+        .items()
+        .get(s.item_id.as_deref().ok_or(NoItem)?)
+        .map_err(|_| Unreadable)?
+        .ok_or(NoItem)?;
     if item.workspace_id != s.workspace_id {
-        return None;
+        return Err(NoItem);
     }
     // an archived project's directories are no roots any more ([`roots`]), its items' included
     if let Some(pid) = &item.project_id
-        && let Ok(Some(p)) = store.projects().get(pid)
-        && p.archived
+        && store
+            .projects()
+            .get(pid)
+            .map_err(|_| Unreadable)?
+            .is_some_and(|p| p.archived)
     {
-        return None;
+        return Err(Archived);
     }
     let bot = match s.bot_id.as_deref() {
-        Some(id) => Some(store.bots().get(id).ok()??),
+        Some(id) => Some(store.bots().get(id).map_err(|_| Unreadable)?.ok_or(Bot)?),
         None => None,
     };
     if bot
         .as_ref()
         .is_some_and(|b| b.workspace_id != s.workspace_id || !b.enabled)
     {
-        return None;
+        return Err(Bot);
     }
-    let permissions = permission_mode(perm.unwrap_or("default"))?;
+    let mode = perm.unwrap_or("default");
+    let permissions = permission_mode(mode).ok_or_else(|| Mode(mode.to_string()))?;
     let cwd = if !s.cwd.is_empty() {
         Some(s.cwd.as_str())
     } else {
@@ -99,11 +161,11 @@ pub fn binding_with(
             && (item.project_id.is_none() || item.branch.is_some())
         {
             RootPath {
-                root: root_id(path.parent()?)?,
-                rel: RelPath::new(item.id.clone()).ok()?,
+                root: path.parent().and_then(root_id).ok_or(OutsideRoots)?,
+                rel: RelPath::new(item.id.clone()).map_err(|_| Unreadable)?,
             }
         } else {
-            at(cwd)?
+            at(cwd).ok_or(OutsideRoots)?
         };
         let existing = PrepareKind::Existing { dir };
         match worktrees.and_then(|w| item_worktree(store, &item, &s.workspace_id, path, w)) {
@@ -111,25 +173,34 @@ pub fn binding_with(
             _ => existing,
         }
     } else if let Some(pid) = &item.project_id {
-        let p = store.projects().get(pid).ok()??;
-        if p.workspace_id != s.workspace_id || p.device_id != "hub" || p.archived {
-            return None;
+        let p = store
+            .projects()
+            .get(pid)
+            .map_err(|_| Unreadable)?
+            .ok_or(NoItem)?;
+        if p.workspace_id != s.workspace_id || p.device_id != "hub" {
+            return Err(NotHere);
+        }
+        if p.archived {
+            return Err(Archived);
         }
         if p.kind == "git" && p.worktree {
             PrepareKind::Worktree {
-                repository: at(&p.path)?,
+                repository: at(&p.path).ok_or(OutsideRoots)?,
                 branch: format!("steve/{}", item.id.to_lowercase()),
                 base: None,
                 at: match worktrees {
                     Some(w) => Some(RootPath {
-                        root: root_id(w)?,
-                        rel: RelPath::new(item.id.clone()).ok()?,
+                        root: root_id(w).ok_or(OutsideRoots)?,
+                        rel: RelPath::new(item.id.clone()).map_err(|_| Unreadable)?,
                     }),
                     None => None,
                 },
             }
         } else {
-            PrepareKind::Existing { dir: at(&p.path)? }
+            PrepareKind::Existing {
+                dir: at(&p.path).ok_or(OutsideRoots)?,
+            }
         }
     } else {
         PrepareKind::Scratch
@@ -137,12 +208,12 @@ pub fn binding_with(
     match &prepare {
         PrepareKind::Existing { dir: at } | PrepareKind::Worktree { repository: at, .. } => {
             if !allows(at) {
-                return None;
+                return Err(OutsideRoots);
             }
         }
         PrepareKind::Scratch => {}
     }
-    Some(Binding {
+    Ok(Binding {
         session: s.id,
         resource,
         prepare,
@@ -153,12 +224,12 @@ pub fn binding_with(
         },
         policy: ExecutionPolicy {
             revision: Revision::new(format!("host-{}", bot.as_ref().map_or(0, |b| b.revision)))
-                .ok()?,
+                .map_err(|_| Unreadable)?,
             permissions,
             sandbox: SandboxRequirement::None,
             readable: vec![],
             network: NetworkScope::Unrestricted,
-            tools: GrantId::new("hub").ok()?,
+            tools: GrantId::new("hub").map_err(|_| Unreadable)?,
         },
     })
 }

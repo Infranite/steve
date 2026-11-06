@@ -655,6 +655,15 @@ impl Core {
     pub fn end_session(&self, session_id: &str) -> Result<()> {
         self.tx().end_session(session_id)
     }
+    /// Ends an idle session its runtime cannot take any more, with `note` (zh-CN, stored) as its
+    /// last system event, once: it is never woken again (a message to it is refused, one in its
+    /// item starts a new session). False, with nothing changed: no such session, ended or retired
+    /// already, or it has work in hand (a turn in flight, queued messages, a pending resume): it
+    /// is asked again at a later idle boundary. Queued messages of a session whose directory is
+    /// unusable never go (nothing flushes them): they are dropped with it, each one said.
+    pub fn retire_session(&self, session_id: &str, note: &str) -> Result<bool> {
+        self.tx().retire_session(session_id, note)
+    }
     pub fn fork(
         &self,
         ws: &str,
@@ -2600,6 +2609,12 @@ impl Tx<'_> {
         let db = self.db().clone();
         let send = |t: &Tx, m: &str| -> Result<()> {
             let Some(s) = &s else { return Ok(()) };
+            // a retired session is never woken: the answer is said there, not sent
+            if s.status == "ended" && t.retired(&s.id)? {
+                let why = steve_i18n::stored(|| steve_i18n::t!("core.conversation.retired"));
+                t.db().event_add(&s.id, "system", json!({"text": why}))?;
+                return Ok(());
+            }
             if s.status == "ended" {
                 t.db().session_patch(&s.id, patch![status: "idle"])?;
             }
@@ -3320,6 +3335,7 @@ impl Tx<'_> {
             .db()
             .session(sid)?
             .ok_or_else(|| msg(steve_i18n::t!("core.conversation.not_found")))?;
+        self.refuse_retired(&s)?;
         if let Some(i) = s.item_id.as_deref() {
             self.lc_guard_open(i)?;
             self.db()
@@ -3388,6 +3404,7 @@ impl Tx<'_> {
             .db()
             .session(sid)?
             .ok_or_else(|| msg(steve_i18n::t!("core.conversation.not_found")))?;
+        self.refuse_retired(&s)?;
         if let Some(i) = s.item_id.as_deref() {
             self.lc_guard_open(i)?;
         }
@@ -3492,6 +3509,61 @@ impl Tx<'_> {
             supersede(self.db(), item, &["ask", "fail"], "Bot 继续往下做了")?;
             self.db().item_patch(item, patch![now: "在等你批准"])?;
             settle(self.db(), item)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn retire_session(&mut self, sid: &str, note: &str) -> Result<bool> {
+        let Some(s) = self.db().session(sid)? else {
+            return Ok(false);
+        };
+        if s.status == "ended"
+            || self.retired(sid)?
+            || self.busy(sid)
+            || self.st.pending.contains_key(sid)
+        {
+            return Ok(false);
+        }
+        // queued messages wait for the flush that sends them, unless the session's directory is
+        // unusable: nothing ever flushes those, so they go with the session, each one said
+        let queued = self.db().queued(sid)?;
+        if !queued.is_empty() && cwd_usable(Path::new(&s.cwd)) {
+            return Ok(false);
+        }
+        self.end_and_release(sid)?;
+        let mut dropped = 0;
+        for q in queued {
+            if let Some(q) = self.db().queue_remove(sid, &q.id)? {
+                self.db().event_add(
+                    sid,
+                    "queued_removed",
+                    json!({"id": q.id, "text": q.text, "retired": true}),
+                )?;
+                dropped += 1;
+            }
+        }
+        let note = if dropped == 0 {
+            note.to_string()
+        } else {
+            let more = steve_i18n::stored(|| {
+                steve_i18n::t!("core.conversation.retired_queue", n = dropped)
+            });
+            format!("{note}{more}")
+        };
+        self.db()
+            .event_add(sid, "system", json!({"text": note, "retired": true}))?;
+        Ok(true)
+    }
+
+    /// The session was ended for good by [`Self::retire_session`]: it is never woken again.
+    pub(crate) fn retired(&self, sid: &str) -> Result<bool> {
+        Ok(self.db().last_marker_ts(sid, "retired")?.is_some())
+    }
+
+    /// An error for a message to a retired session ([`Self::retired`]), which is never woken.
+    fn refuse_retired(&self, s: &Session) -> Result<()> {
+        if s.status == "ended" && self.retired(&s.id)? {
+            return Err(msg(steve_i18n::t!("core.conversation.retired")));
         }
         Ok(())
     }
