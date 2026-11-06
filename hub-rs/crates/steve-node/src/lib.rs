@@ -1068,10 +1068,11 @@ impl LocalNode {
         tx
     }
 
-    /// Host bridge for a Node on the Hub's own machine: where `w` is, so the Hub can judge a
-    /// permission request against the real directory. Not on the [`Node`] trait and never sent over
-    /// the transport: a remote Node has none, and the Hub then asks. `None` when the workspace is
-    /// another Node's, unknown, gone or no longer inside the roots.
+    /// Host bridge for a Node on the Hub's own machine: where `w` is, checked against the roots
+    /// now. Not on the [`Node`] trait and never sent over the transport. The Hub no longer reads it
+    /// (N0e-E11c: YOLO takes the directory from the workspace view the prepare returned); kept for
+    /// tests and host tools. `None` when the workspace is another Node's, unknown, gone or no
+    /// longer inside the roots.
     pub fn local_dir(&self, w: &WorkspaceRef) -> Option<LocalDir> {
         self.mine(w).ok()?;
         let row = self.0.j.read(|t| t.workspace(&w.id)).ok()??;
