@@ -12,16 +12,19 @@
 //! confirmed gone ([`procs`]).
 
 mod actor;
+mod exec;
+pub mod git;
 pub mod history;
 mod journal;
 mod procs;
 mod scan;
+mod secrets;
 mod tools;
 pub mod workspace;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -153,6 +156,8 @@ pub(crate) struct Inner {
     actors: Mutex<HashMap<SessionId, mpsc::UnboundedSender<Msg>>>,
     sink: Mutex<Option<Arc<dyn EventSink>>>,
     files: Mutex<Option<Arc<dyn HubFiles>>>,
+    /// Where a command's secrets come from (the Hub).
+    secrets: Mutex<Option<Arc<dyn HubSecrets>>>,
     wake: tokio::sync::Notify,
     delivering: AtomicBool,
     closed: AtomicBool,
@@ -172,6 +177,10 @@ pub(crate) struct Inner {
     /// The manifests of finished scans, read page by page, gone after a restart.
     scans: Mutex<scan::Scans>,
     cache_n: AtomicU64,
+    /// Commands ([`exec`]) and pushes running now, against `capacity.execs`.
+    execs: AtomicUsize,
+    /// How long a push may take (ms).
+    push_timeout: AtomicU64,
     tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     /// Where the harnesses' history is and which binaries a probe asks; none until the host turns
     /// discovery on ([`LocalNode::set_discovery`]): history is then `unsupported` and a probe runs
@@ -969,6 +978,10 @@ impl LocalNode {
         std::fs::create_dir_all(&cfg.home)
             .map_err(|e| ApiError::new(ErrorCode::Internal, format!("node home: {e}")))?;
         let lock = HomeLock::take(&cfg.home)?;
+        // a command's secret files a crash left behind
+        secrets::cleanup(&cfg.home);
+        // and the throwaway repositories of pushes
+        git::cleanup(&cfg.home);
         let (j, incarnation) = Journal::open(&cfg.home.join("node.sqlite3"))?;
         // a group of the old incarnation that is surely gone holds nothing
         j.tx(|t| {
@@ -992,6 +1005,7 @@ impl LocalNode {
             actors: Mutex::new(HashMap::new()),
             sink: Mutex::new(None),
             files: Mutex::new(None),
+            secrets: Mutex::new(None),
             wake: tokio::sync::Notify::new(),
             delivering: AtomicBool::new(false),
             closed: AtomicBool::new(false),
@@ -1005,6 +1019,8 @@ impl LocalNode {
             snapshots: Mutex::new(HashMap::new()),
             scans: Mutex::new(scan::Scans::default()),
             cache_n: AtomicU64::new(0),
+            execs: AtomicUsize::new(0),
+            push_timeout: AtomicU64::new(git::PUSH_TIMEOUT.as_millis() as u64),
             tasks: Mutex::new(Vec::new()),
         })))
     }
@@ -1028,6 +1044,12 @@ impl LocalNode {
             self.spawn_owned(deliver_loop(Arc::downgrade(&self.0)));
         }
         self.0.wake.notify_one();
+    }
+
+    /// Where commands' secrets come from ([`HubSecrets`], bound to this Node). Without it a command
+    /// that needs one fails without running.
+    pub fn connect_secrets(&self, secrets: Arc<dyn HubSecrets>) {
+        *self.0.secrets.lock().unwrap() = Some(secrets);
     }
 
     /// Serve Steve's tools to this Node's harnesses, answered by `hub`. Sessions started after this
@@ -1062,13 +1084,15 @@ impl LocalNode {
         self.0.wake.notify_one();
     }
 
-    fn spawn_owned(&self, work: impl std::future::Future<Output = ()> + Send + 'static) {
+    /// False: the Node is shutting down and `work` was not started.
+    fn spawn_owned(&self, work: impl std::future::Future<Output = ()> + Send + 'static) -> bool {
         let mut tasks = self.0.tasks.lock().unwrap();
         if self.0.closed.load(Ordering::SeqCst) {
-            return;
+            return false;
         }
         tasks.retain(|task| !task.is_finished());
         tasks.push(tokio::spawn(work));
+        true
     }
 
     fn actor(&self, session: &SessionId) -> mpsc::UnboundedSender<Msg> {
@@ -1131,6 +1155,14 @@ impl LocalNode {
             .unwrap()
             .clone()
             .map_or_else(|| unsupported("history"), Ok)
+    }
+
+    /// Tests: how long a push may take before its process group is killed (5 minutes).
+    #[doc(hidden)]
+    pub fn set_push_timeout(&self, d: Duration) {
+        self.0
+            .push_timeout
+            .store(d.as_millis() as u64, Ordering::SeqCst);
     }
 
     fn mine(&self, w: &WorkspaceRef) -> ApiResult<()> {
@@ -1373,6 +1405,111 @@ impl LocalNode {
             } else {
                 return;
             }
+        }
+    }
+}
+
+impl LocalNode {
+    /// Runs an accepted push to its end ([`WorkspaceExecutor::git_apply`]).
+    async fn push(
+        &self,
+        op: &OperationId,
+        dir: PathBuf,
+        apply: GitApply,
+        deadline: i64,
+    ) -> Observed {
+        let not_run = |code, m: String| failed(ApiError::new(code, m));
+        let auth = match &apply.action {
+            GitAction::Push { auth, .. } => auth.clone(),
+            _ => return not_run(ErrorCode::Unsupported, "not a push".into()),
+        };
+        let checked = {
+            let (dir, apply) = (dir.clone(), apply.clone());
+            tokio::task::spawn_blocking(move || git::check_push(&dir, &apply)).await
+        };
+        let plan = match checked {
+            Ok(Ok(p)) => p,
+            Ok(Err(e)) => return failed(e),
+            Err(e) => return not_run(ErrorCode::Internal, e.to_string()),
+        };
+        // taken now, under this operation, once: a resend was answered by its receipt
+        let (header, mask) = match &auth {
+            None => (None, None),
+            Some(r) => {
+                let hub = self.0.secrets.lock().unwrap().clone();
+                match secrets::header(hub, op, r).await {
+                    Ok((h, m)) => (Some(h), Some(m)),
+                    Err(e) => return not_run(ErrorCode::Denied, format!("not pushed: {e}")),
+                }
+            }
+        };
+        debug_assert_eq!(plan.header.is_some(), header.is_some());
+        let inner = self.0.clone();
+        let op2 = op.clone();
+        let ran = tokio::task::spawn_blocking(move || {
+            let bare = git::bare(&inner.cfg.home, &op2, &plan)?;
+            let run = git::push_run(&bare, &plan, header, mask, deadline);
+            let ran = exec::run(&inner, &op2, &run);
+            // the repository goes once git (and all it started) is done
+            if !ran.as_ref().is_ok_and(|r| r.gone) {
+                std::mem::forget(bare);
+            }
+            ran
+        })
+        .await
+        .map_err(|e| e.to_string())
+        .and_then(|r| r);
+        match ran {
+            Err(e) => not_run(ErrorCode::Internal, format!("the push did not start: {e}")),
+            Ok(ran) if !ran.gone => Observed::Unknown {
+                reason: "the push's processes were not confirmed gone".into(),
+            },
+            Ok(ran) => match ran.ended {
+                exec::Ended::Exited(Some(0)) => {
+                    let after = tokio::task::spawn_blocking(move || {
+                        git::facts(
+                            &dir,
+                            &GitQuery {
+                                workspace: apply.workspace,
+                                refs: vec![],
+                                ranges: vec![],
+                                fetch: false,
+                                no_status: false,
+                                reads: vec![],
+                            },
+                        )
+                    })
+                    .await;
+                    Observed::Finished {
+                        outcome: Outcome::Succeeded,
+                        result: Some(match after {
+                            Ok(Ok(f)) => OperationResult::Git(f),
+                            _ => OperationResult::Unit,
+                        }),
+                        error: None,
+                    }
+                }
+                exec::Ended::Exited(_) => failed(ApiError::new(
+                    ErrorCode::Denied,
+                    format!("git push: {}", git::complaint(&ran.stderr)),
+                )),
+                exec::Ended::TimedOut => Observed::Finished {
+                    outcome: Outcome::TimedOut,
+                    result: None,
+                    error: Some(ApiError::new(
+                        ErrorCode::OutcomeUnknown,
+                        "the push did not end in time: it may have landed",
+                    )),
+                },
+                exec::Ended::Stopped => Observed::Finished {
+                    outcome: Outcome::Interrupted,
+                    result: None,
+                    error: Some(ApiError::new(
+                        ErrorCode::OutcomeUnknown,
+                        "the push was stopped: it may have landed",
+                    )),
+                },
+            },
         }
     }
 }
@@ -2295,6 +2432,12 @@ impl WorkspaceExecutor for LocalNode {
             if row.view.revision != c.body.expected {
                 return Err(ApiError::new(ErrorCode::Conflict, "changed since"));
             }
+            if t.open_execs_in(&w)? > 0 {
+                return Err(ApiError::new(
+                    ErrorCode::Busy,
+                    "a command runs in it or is unknown: recover it first",
+                ));
+            }
             for s in t.sessions_in(&w)? {
                 Self::idle(t, &s)?;
                 sessions.push(s);
@@ -2433,14 +2576,205 @@ impl WorkspaceExecutor for LocalNode {
         Ok(r)
     }
 
-    async fn git_facts(&self, _q: GitQuery) -> ApiResult<GitFacts> {
-        unsupported("git")
+    /// Read on the spot, in the workspace as it is now ([`git::facts`]); no fetch.
+    async fn git_facts(&self, q: GitQuery) -> ApiResult<GitFacts> {
+        self.mine(&q.workspace)?;
+        let dir = workspace_dir(&self.0, &q.workspace)?;
+        tokio::task::spawn_blocking(move || git::facts(&dir, &q))
+            .await
+            .map_err(internal)?
     }
-    async fn git_apply(&self, _c: Command<GitApply>) -> ApiResult<Receipt> {
-        unsupported("git")
+
+    /// A push ([`git`]): refused before it is accepted when its preconditions do not hold (the
+    /// remote, the branch at `expected_local`, HEAD and the refs at what the Hub saw), checked
+    /// again right before it runs; then a command in a throwaway repository like [`Self::exec`],
+    /// with its credential taken once. Succeeded: git took it (its facts after). Failed: git
+    /// refused it (its complaint, masked). Timed out, interrupted or unknown: it may have
+    /// landed, and it is never pushed again. Rebase and merge: not on this Node yet.
+    async fn git_apply(&self, c: Command<GitApply>) -> ApiResult<Receipt> {
+        self.mine(&c.body.workspace)?;
+        if self.0.cfg.capacity.execs == 0 {
+            return unsupported("push");
+        }
+        git::check_push_shape(&c.body.action).map_err(|e| e.on(&c.id))?;
+        // a resend of one it has is answered by its receipt, whatever git says now
+        let known = self.0.j.read(|t| t.op(&c.id))?.is_some();
+        if !known {
+            let dir = workspace_dir(&self.0, &c.body.workspace)?;
+            let body = c.body.clone();
+            tokio::task::spawn_blocking(move || git::check_push(&dir, &body))
+                .await
+                .map_err(internal)?
+                .map_err(|e| e.on(&c.id))?;
+        }
+        let w = c.body.workspace.clone();
+        let mut dir = PathBuf::new();
+        let mut counted = false;
+        let accepted = self.accept("git_apply", &c, |t| {
+            let row = t
+                .workspace(&w.id)?
+                .ok_or_else(|| ApiError::new(ErrorCode::Invalid, "no such workspace"))?;
+            Self::workspace_free(t, &row.resource)?;
+            let existing = matches!(row.kind, PrepareKind::Existing { .. });
+            dir = workspace::still_valid(Path::new(&row.path), &self.0.roots(), existing)?;
+            if self.0.execs.fetch_add(1, Ordering::SeqCst) >= self.0.cfg.capacity.execs as usize {
+                self.0.execs.fetch_sub(1, Ordering::SeqCst);
+                return Err(ApiError::new(ErrorCode::Exhausted, "no command capacity"));
+            }
+            counted = true;
+            let mut d = Decided::accepted();
+            d.workspace = Some(w.clone());
+            Ok(d)
+        });
+        let r = match accepted {
+            Ok((r, true)) => r,
+            other => {
+                if counted {
+                    self.0.execs.fetch_sub(1, Ordering::SeqCst);
+                }
+                return other.map(|(r, _)| r);
+            }
+        };
+        let me = self.clone();
+        let op = c.id.clone();
+        let apply = c.body.clone();
+        let deadline = now() + self.0.push_timeout.load(Ordering::SeqCst) as i64;
+        let spawned = self.spawn_owned(async move {
+            let state = me.push(&op, dir, apply, deadline).await;
+            me.complete(&op, state, |_| Ok(())).await;
+            me.0.execs.fetch_sub(1, Ordering::SeqCst);
+        });
+        if !spawned {
+            // shutting down: it never starts, and the restart reports it unknown
+            self.0.execs.fetch_sub(1, Ordering::SeqCst);
+        }
+        Ok(r)
     }
-    async fn exec(&self, _c: Command<ExecSpec>) -> ApiResult<Receipt> {
-        unsupported("exec")
+    /// Accepted now (the workspace still valid, a command slot free); finished once the command
+    /// ended and its whole process group is confirmed gone, with its exit code and bounded output
+    /// ([`exec`]). Any exit code is `succeeded` (the command ran to its end); the deadline is
+    /// `timed_out`. A group that could not be confirmed gone leaves it `unknown`, and so does a
+    /// restart while it ran: it is never run again (recover stops what is left).
+    async fn exec(&self, c: Command<ExecSpec>) -> ApiResult<Receipt> {
+        self.mine(&c.body.workspace)?;
+        if self.0.cfg.capacity.execs == 0 {
+            return unsupported("commands");
+        }
+        secrets::check(&c.body.secrets, &c.body.env).map_err(|e| e.on(&c.id))?;
+        Self::check_policy(&c.body.policy)?;
+        Self::check_limits(&c.body.limits)?;
+        if c.body.command.trim().is_empty() || c.body.command.contains('\0') {
+            return Err(ApiError::new(ErrorCode::Invalid, "no command").on(&c.id));
+        }
+        if c.body
+            .env
+            .iter()
+            .any(|(k, v)| k.is_empty() || k.contains('=') || k.contains('\0') || v.contains('\0'))
+        {
+            return Err(ApiError::new(ErrorCode::Invalid, "a bad environment variable").on(&c.id));
+        }
+        let w = c.body.workspace.clone();
+        let mut dir = PathBuf::new();
+        let mut counted = false;
+        let accepted = self.accept("exec", &c, |t| {
+            let row = t
+                .workspace(&w.id)?
+                .ok_or_else(|| ApiError::new(ErrorCode::Invalid, "no such workspace"))?;
+            Self::workspace_free(t, &row.resource)?;
+            let existing = matches!(row.kind, PrepareKind::Existing { .. });
+            let base = workspace::still_valid(Path::new(&row.path), &self.0.roots(), existing)?;
+            dir = match &c.body.cwd {
+                None => base,
+                Some(rel) => workspace::below(&base, rel)?,
+            };
+            if self.0.execs.fetch_add(1, Ordering::SeqCst) >= self.0.cfg.capacity.execs as usize {
+                self.0.execs.fetch_sub(1, Ordering::SeqCst);
+                return Err(ApiError::new(ErrorCode::Exhausted, "no command capacity"));
+            }
+            counted = true;
+            let mut d = Decided::accepted();
+            d.workspace = Some(w.clone());
+            Ok(d)
+        });
+        let r = match accepted {
+            Ok((r, true)) => r,
+            other => {
+                if counted {
+                    self.0.execs.fetch_sub(1, Ordering::SeqCst);
+                }
+                return other.map(|(r, _)| r);
+            }
+        };
+        let me = self.clone();
+        let op = c.id.clone();
+        let mut run = exec::Run {
+            dir,
+            command: c.body.command.clone(),
+            env: c.body.env.clone(),
+            deadline: c.body.limits.deadline.0,
+            cap: (c.body.limits.max_output_bytes as usize).min(1 << 20),
+            secret_env: vec![],
+            stdin: None,
+            mask: None,
+        };
+        let refs = c.body.secrets.clone();
+        let spawned = self.spawn_owned(async move {
+            let inner = me.0.clone();
+            let op2 = op.clone();
+            // taken now, under this operation, once: a resend was answered by its receipt above
+            let hub = me.0.secrets.lock().unwrap().clone();
+            let ran = match secrets::take(hub, &me.0.cfg.home, &op, &refs).await {
+                Err(e) => Err(e),
+                Ok(given) => {
+                    run.secret_env = given.env;
+                    run.stdin = given.stdin;
+                    run.mask = given.mask;
+                    let temp = given.temp;
+                    tokio::task::spawn_blocking(move || {
+                        let ran = exec::run(&inner, &op2, &run);
+                        // the files go once the command (and its whole group) is done
+                        drop(temp);
+                        ran
+                    })
+                    .await
+                    .map_err(|e| e.to_string())
+                    .and_then(|r| r)
+                }
+            };
+            let state = match ran {
+                Err(e) => failed(ApiError::new(
+                    ErrorCode::Invalid,
+                    format!("the command did not start: {e}"),
+                )),
+                Ok(ran) if !ran.gone => Observed::Unknown {
+                    reason: "the command's processes were not confirmed gone".into(),
+                },
+                Ok(ran) => {
+                    let (outcome, exit_code) = match ran.ended {
+                        exec::Ended::Exited(code) => (Outcome::Succeeded, code),
+                        exec::Ended::TimedOut => (Outcome::TimedOut, None),
+                        exec::Ended::Stopped => (Outcome::Interrupted, None),
+                    };
+                    Observed::Finished {
+                        outcome,
+                        result: Some(OperationResult::Exec(ExecResult {
+                            exit_code,
+                            stdout: ran.stdout,
+                            stderr: ran.stderr,
+                            truncated: ran.truncated,
+                        })),
+                        error: None,
+                    }
+                }
+            };
+            me.complete(&op, state, |_| Ok(())).await;
+            me.0.execs.fetch_sub(1, Ordering::SeqCst);
+        });
+        if !spawned {
+            // shutting down: it never starts, and the restart reports it unknown
+            self.0.execs.fetch_sub(1, Ordering::SeqCst);
+        }
+        Ok(r)
     }
     /// What is right in a directory of a workspace.
     async fn list_dir(&self, p: PathRef, page: PageRequest) -> ApiResult<Page<FileInfo>> {
@@ -2676,7 +3010,8 @@ impl Discovery for LocalNode {
                 })
                 .collect(),
             capacity: self.0.cfg.capacity.clone(),
-            features: vec![],
+            // a command's secret as a temp file on this machine
+            features: vec![FEATURE_SECRET_FILE.into()],
         })
     }
     /// Newest first; the cursor is the position in that order.

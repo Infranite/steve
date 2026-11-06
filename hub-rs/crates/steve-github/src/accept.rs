@@ -233,22 +233,33 @@ impl GitHub {
         let Some((r, path, summary, _prefix)) = pre else {
             return Ok(false);
         };
-        let Some(cwd) = item
-            .cwd
-            .clone()
-            .filter(|c| !c.is_empty())
-            .or(path)
-            .filter(|c| !c.is_empty())
-        else {
-            return Ok(false);
+        let on_node = match self.git_nodes() {
+            Some(n) => n.ahead(&item.id, &r.default_branch, &branch).await,
+            None => None,
         };
-        let (base, b) = (r.default_branch.clone(), branch.clone());
-        let ahead =
-            tokio::task::spawn_blocking(move || push::ahead(std::path::Path::new(&cwd), &base, &b))
+        let ahead = match on_node {
+            Some(a) => a.map_err(|e| e.to_string())?,
+            None => {
+                let Some(cwd) = item
+                    .cwd
+                    .clone()
+                    .filter(|c| !c.is_empty())
+                    .or(path)
+                    .filter(|c| !c.is_empty())
+                else {
+                    return Ok(false);
+                };
+                let (base, b) = (r.default_branch.clone(), branch.clone());
+                tokio::task::spawn_blocking(move || {
+                    push::ahead(std::path::Path::new(&cwd), &base, &b)
+                })
                 .await
                 .map_err(|e| e.to_string())?
-                .map_err(|e| e.to_string())?;
-        if ahead == 0 {
+                .map_err(|e| e.to_string())?
+                    > 0
+            }
+        };
+        if !ahead {
             return Ok(false);
         }
         let title = cut(item.title.trim(), TITLE_MAX);
@@ -391,24 +402,30 @@ impl GitHub {
         let r = r
             .filter(|r| r.enabled)
             .ok_or("项目没有关联可用的仓库".to_string())?;
-        let cwd = item
-            .cwd
-            .clone()
-            .filter(|c| !c.is_empty())
-            .or(path)
-            .ok_or("事项没有工作目录".to_string())?;
+        let nodes = self.git_nodes();
+        let cwd = item.cwd.clone().filter(|c| !c.is_empty()).or(path);
         let settings = Settings::of(&r.settings);
         let conn = self.effect_conn(&ws, &r.connection_id)?;
         let sha = match e.result["sha"].as_str() {
             Some(s) => s.to_string(),
             None => {
-                let (c, b) = (cwd.clone(), branch.clone());
-                let head = tokio::task::spawn_blocking(move || {
-                    push::head_of(std::path::Path::new(&c), &b)
-                })
-                .await
-                .map_err(|e| e.to_string())?
-                .map_err(|e| e.to_string())?;
+                let on_node = match &nodes {
+                    Some(n) => n.head_of(item_id, &branch).await,
+                    None => None,
+                };
+                let head = match on_node {
+                    Some(h) => h.map_err(|e| e.to_string())?,
+                    None => {
+                        let c = cwd.clone().ok_or("事项没有工作目录".to_string())?;
+                        let b = branch.clone();
+                        tokio::task::spawn_blocking(move || {
+                            push::head_of(std::path::Path::new(&c), &b)
+                        })
+                        .await
+                        .map_err(|e| e.to_string())?
+                        .map_err(|e| e.to_string())?
+                    }
+                };
                 self.effect_intent(&d.id, &json!({"sha": head, "branch": branch}))?;
                 head
             }
@@ -428,20 +445,55 @@ impl GitHub {
                     branch.clone(),
                     sha.clone(),
                 );
-                // the approved commit, or nothing; pushing it again is harmless
-                tokio::task::spawn_blocking(move || {
-                    push::push(&PushSpec {
-                        cwd: std::path::Path::new(&cwd),
-                        branch: &b,
-                        full_name: &full,
-                        git_base: &git_base,
-                        token: token.expose(),
-                        expect: Some(&want),
-                    })
-                })
-                .await
-                .map_err(|e| e.to_string())?
-                .map_err(|e| e.to_string())?;
+                let on_node = match &nodes {
+                    Some(n) => {
+                        if !push::branch_ok(&b) {
+                            return Err(push::PushError::BadBranch(b).to_string().into());
+                        }
+                        push::check_git_base(&git_base).map_err(|e| e.to_string())?;
+                        let url = format!("{}/{full}.git", git_base.trim_end_matches('/'));
+                        n.push(&push::NodePush {
+                            item: item_id,
+                            key: &d.id,
+                            branch: &b,
+                            full_name: &full,
+                            url: &url,
+                            token: token.expose(),
+                            expect: &want,
+                        })
+                        .await
+                    }
+                    None => None,
+                };
+                match on_node {
+                    Some(Ok(_)) => {}
+                    // whether it landed is what the branch on GitHub says now; never pushed again
+                    Some(Err(push::PushError::Lost)) => {
+                        self.landed(&conn, &r, &branch, &sha).await?;
+                    }
+                    // it may still land: this run's end is unknown, the next one asks again
+                    Some(Err(e @ push::PushError::Running)) => {
+                        return Err(Fail::unknown(e.to_string()));
+                    }
+                    Some(Err(e)) => return Err(e.to_string().into()),
+                    None => {
+                        let cwd = cwd.ok_or("事项没有工作目录".to_string())?;
+                        // the approved commit, or nothing; pushing it again is harmless
+                        tokio::task::spawn_blocking(move || {
+                            push::push(&PushSpec {
+                                cwd: std::path::Path::new(&cwd),
+                                branch: &b,
+                                full_name: &full,
+                                git_base: &git_base,
+                                token: token.expose(),
+                                expect: Some(&want),
+                            })
+                        })
+                        .await
+                        .map_err(|e| e.to_string())?
+                        .map_err(|e| e.to_string())?;
+                    }
+                }
                 let (title, body) = title_body(d);
                 let draft = wants_draft(d, &settings);
                 self.effect_sending(&d.id)?;
@@ -492,6 +544,32 @@ impl GitHub {
         self.after_commit(&ws, &r.connection_id, fx).await;
         tracing::info!(repo = %r.full_name, number = pr.number, item = %item_id, "github PR opened");
         Ok((pr, settings))
+    }
+
+    /// After a push through a Node whose end is not known: `Ok` when GitHub's `branch` is at
+    /// `sha` (it landed), else a refusal (it is not pushed a second time).
+    async fn landed(
+        &self,
+        conn: &crate::api::GhConn,
+        r: &RepoRow,
+        branch: &str,
+        sha: &str,
+    ) -> Result<(), Fail> {
+        let at = match conn
+            .get(&format!("/repos/{}/git/ref/heads/{branch}", r.full_name))
+            .await
+        {
+            Ok(v) => v["object"]["sha"].as_str().map(str::to_string),
+            Err(GhError::Status { status: 404, .. }) => None,
+            Err(e) => return Err(e.into()),
+        };
+        if at.as_deref() == Some(sha) {
+            return Ok(());
+        }
+        Err(Fail::definite(format!(
+            "{}；GitHub 上的分支 {branch} 不是批准的提交，需要重新确认",
+            push::PushError::Lost
+        )))
     }
 
     /// The PR GitHub has from `branch` at `sha` (any state: a PR can't be deleted, so none means

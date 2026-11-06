@@ -229,6 +229,13 @@ pub struct Env<'a> {
     /// The router, when the local Node is on: knowledge folders are then scanned and read by
     /// their Node (`None`: on the Hub, as before).
     pub workspaces: Option<Arc<super::workspaces::Workspaces>>,
+    /// Where `cmd` flow steps run when the project is on a Node (`None`: on the Hub, as before).
+    pub cmd_node: Option<Arc<dyn steve_flow::nodes::cmd::CmdNode>>,
+    /// Where a session's secret uses run when it works on a Node (`None`: on the Hub, as before).
+    pub use_nodes: Option<Arc<dyn steve_modules::vault::UseNodes>>,
+    /// Where GitHub reads and pushes an item's branch when it is on a Node (`None`: the Hub's own
+    /// git, as before).
+    pub git_nodes: Option<Arc<dyn steve_github::push::GitNodes>>,
 }
 
 /// Registers every module, builds [`Modules`] and the flow context, and collects the routes.
@@ -245,6 +252,9 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
         yolo_forced,
         openviking,
         workspaces,
+        cmd_node,
+        use_nodes,
+        git_nodes,
     } = env;
     use super::ports::{self as hp, VaultGuard};
     let guard = Arc::new(VaultGuard);
@@ -309,6 +319,9 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
         steve_home,
         Arc::new(hp::CoreSessions(core.clone())),
     );
+    if let Some(n) = use_nodes {
+        uses.set_nodes(n);
+    }
     registry.decision(
         steve_modules::vault::r#use::SUBJECT,
         uses.decision_handler(),
@@ -411,6 +424,9 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
     let conns = conns.build();
     let gh = steve_github::GitHub::new(conns.clone(), gh_env);
     gh_slot.bind(&gh);
+    if let Some(n) = git_nodes {
+        gh.set_git_nodes(n);
+    }
     gh.set_core(Arc::new(hp::GhItems(core.clone())));
     gh.set_session_sink(Arc::new(hp::CoreSessions(core.clone())));
 
@@ -440,7 +456,13 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
         .connections(conns.clone())
         .guard(guard.clone())
         .node(Arc::new(steve_flow::nodes::http::Http::new(vault.clone())))
-        .node(Arc::new(steve_flow::nodes::cmd::Cmd::new(steve_home)))
+        .node(Arc::new({
+            let cmd = steve_flow::nodes::cmd::Cmd::new(steve_home);
+            match cmd_node {
+                Some(n) => cmd.with_node(n),
+                None => cmd,
+            }
+        }))
         .node(Arc::new(steve_flow::nodes::bot::BotNode::new(
             guard.clone(),
         )));

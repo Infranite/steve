@@ -5009,8 +5009,11 @@ dependencies = [
  "rust-i18n",
  "serde",
  "serde_json",
+ "steve-acp",
  "steve-i18n",
  "steve-modules",
+ "steve-node",
+ "steve-node-api",
  "steve-store",
  "steve-work-api",
  "tempfile",
@@ -5045,6 +5048,7 @@ dependencies = [
  "steve-flow",
  "steve-i18n",
  "steve-modules",
+ "steve-node-api",
  "steve-store",
  "tempfile",
  "thiserror 2.0.21",
@@ -5111,6 +5115,7 @@ dependencies = [
  "tracing-subscriber",
  "unicode-normalization",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]
@@ -5280,10 +5285,12 @@ dependencies = [
  "steve-acp",
  "steve-knowledge",
  "steve-node-api",
+ "steve-vault",
  "tempfile",
  "tokio",
  "tracing",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]
@@ -5297,6 +5304,7 @@ dependencies = [
  "sha2 0.11.1",
  "steve-node-api",
  "tokio",
+ "zeroize",
 ]
 
 [[package]]

@@ -17,7 +17,7 @@ use async_trait::async_trait;
 use rusqlite::params;
 use serde_json::{Value, json};
 use steve_flow::NodeKind;
-use steve_flow::nodes::cmd::Cmd;
+use steve_flow::nodes::cmd::{Cmd, CmdNode};
 use steve_flow::nodes::http::{ALLOW_PRIVATE, Http, Lookup};
 use steve_flow::testkit::FlowEnv;
 use steve_modules::testkit::{ME, WS, call, caller};
@@ -187,6 +187,11 @@ struct Env {
 }
 
 fn env() -> Env {
+    env_with(|_| None)
+}
+
+/// [`env`], with `cmd` steps on the Node `node` gives for the project directory.
+fn env_with(node: impl FnOnce(&std::path::Path) -> Option<Arc<dyn CmdNode>>) -> Env {
     LazyLock::force(&LOGS);
     // under STEVE_FORBID_REAL_HOSTS=1 the guard only knows loopback by name; these fake names are
     // answered by FakeDns above (loopback, or for meta.test an internal address the resolver refuses),
@@ -197,6 +202,7 @@ fn env() -> Env {
     unsafe { std::env::set_var("STEVE_VAULT_KEYSTORE", "file") };
     let keys = tempfile::tempdir().unwrap();
     let work = tempfile::tempdir().unwrap();
+    let on_node = node(work.path());
     let slot: Arc<Mutex<Option<Vault>>> = Arc::default();
     let kp = keys.path().to_path_buf();
     let s2 = slot.clone();
@@ -211,7 +217,11 @@ fn env() -> Env {
                 .with_lookup(Arc::new(FakeDns))
                 .with_timeout(Duration::from_secs(5)),
         );
-        let cmd: Arc<dyn NodeKind> = Arc::new(Cmd::new(env.dir.path()));
+        let cmd = Cmd::new(env.dir.path());
+        let cmd: Arc<dyn NodeKind> = Arc::new(match on_node {
+            Some(n) => cmd.with_node(n),
+            None => cmd,
+        });
         vec![http, cmd]
     });
     let vault = slot.lock().unwrap().clone().unwrap();
@@ -697,9 +707,14 @@ async fn effect_requests_need_approval_or_a_grant() {
     assert_eq!(settled(&e, &run).await, "done");
     assert_eq!(got.lock().unwrap().len(), 2);
 
+    cmd_steps(&e, work.path()).await;
+}
+
+/// The `cmd` steps: approval, grants, a failing command, the timeout.
+async fn cmd_steps(e: &FlowEnv, work: &std::path::Path) {
     // cmd: approval, then runs in the project dir; event text is one shell word
     let f = create_flow(
-        &e,
+        e,
         "写文件",
         one_node(
             "cmd",
@@ -709,31 +724,28 @@ async fn effect_requests_need_approval_or_a_grant() {
     )
     .await;
     let name = "x'; touch pwned; echo '";
-    let run = start(&e, &f, json!({"name": name})).await;
-    assert_eq!(settled(&e, &run).await, "waiting");
-    assert!(!work.path().join("out.txt").exists());
-    let (dec, question, _) = open_gate(&e, &run).unwrap();
+    let run = start(e, &f, json!({"name": name})).await;
+    assert_eq!(settled(e, &run).await, "waiting");
+    assert!(!work.join("out.txt").exists());
+    let (dec, question, _) = open_gate(e, &run).unwrap();
     assert_eq!(
         question,
         "「写文件」要执行「写下名字」，这是对外动作。要执行吗？"
     );
-    answer(&e, &dec, "执行").await;
-    assert_eq!(settled(&e, &run).await, "done");
-    assert_eq!(
-        std::fs::read_to_string(work.path().join("out.txt")).unwrap(),
-        name
-    );
-    assert!(!work.path().join("pwned").exists());
-    let (_, out, _) = step(&e, &run);
+    answer(e, &dec, "执行").await;
+    assert_eq!(settled(e, &run).await, "done");
+    assert_eq!(std::fs::read_to_string(work.join("out.txt")).unwrap(), name);
+    assert!(!work.join("pwned").exists());
+    let (_, out, _) = step(e, &run);
     assert_eq!(out["exit_code"], 0);
     assert_eq!(out["stdout"], "ok\n");
 
     // cmd.run grant on the project: direct; a failing command fails the step with its stderr
-    grant(&e, &f, "cmd.run", "project", "prj_t");
-    let run = start(&e, &f, json!({"name": "again"})).await;
-    assert_eq!(settled(&e, &run).await, "done");
+    grant(e, &f, "cmd.run", "project", "prj_t");
+    let run = start(e, &f, json!({"name": "again"})).await;
+    assert_eq!(settled(e, &run).await, "done");
     let f2 = create_flow(
-        &e,
+        e,
         "失败",
         one_node(
             "cmd",
@@ -742,14 +754,14 @@ async fn effect_requests_need_approval_or_a_grant() {
         ),
     )
     .await;
-    grant(&e, &f2, "cmd.run", "project", "*");
-    let run = start(&e, &f2, json!({})).await;
-    assert_eq!(settled(&e, &run).await, "failed");
-    assert_eq!(step(&e, &run).2.as_deref(), Some("命令退出码 3：nope"));
+    grant(e, &f2, "cmd.run", "project", "*");
+    let run = start(e, &f2, json!({})).await;
+    assert_eq!(settled(e, &run).await, "failed");
+    assert_eq!(step(e, &run).2.as_deref(), Some("命令退出码 3：nope"));
 
     // a timeout kills it
     let f3 = create_flow(
-        &e,
+        e,
         "太久",
         one_node(
             "cmd",
@@ -758,12 +770,12 @@ async fn effect_requests_need_approval_or_a_grant() {
         ),
     )
     .await;
-    grant(&e, &f3, "cmd.run", "project", "prj_t");
+    grant(e, &f3, "cmd.run", "project", "prj_t");
     let t = Instant::now();
-    let run = start(&e, &f3, json!({})).await;
-    assert_eq!(settled(&e, &run).await, "failed");
+    let run = start(e, &f3, json!({})).await;
+    assert_eq!(settled(e, &run).await, "failed");
     assert!(t.elapsed() < Duration::from_secs(5));
-    assert_eq!(step(&e, &run).2.as_deref(), Some("命令超过 1 秒，已停止"));
+    assert_eq!(step(e, &run).2.as_deref(), Some("命令超过 1 秒，已停止"));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -811,4 +823,289 @@ async fn effect_approval_names_the_secrets_it_releases() {
         question.ends_with("要执行吗？会用到机密：vi_missing·key"),
         "{question}"
     );
+}
+
+// ── `cmd` on a Node ──
+
+mod on_node {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use steve_flow::nodes::cmd::{CmdRan, CmdRequest, NO_SECRETS, OFFLINE, UNKNOWN};
+    use steve_node::{LocalNode, NodeConfig, Root, Storage};
+    use steve_node_api::testkit::RecordingSink;
+    use steve_node_api::testkit::build::policy;
+    use steve_node_api::*;
+
+    fn wall() -> i64 {
+        steve_store::now()
+    }
+
+    fn command<B>(op: &str, body: B) -> Command<B> {
+        Command {
+            id: OperationId::new(op).unwrap(),
+            issued_at: Timestamp(wall()),
+            accept_before: Timestamp(wall() + 60_000),
+            grant: GrantId::new("hub").unwrap(),
+            body,
+        }
+    }
+
+    async fn finished(n: &LocalNode, op: &OperationId) -> Observed {
+        loop {
+            let r = n.operation(op.clone()).await.unwrap();
+            if r.state.is_finished() {
+                return r.state;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// The Hub's side reduced to what a `cmd` step needs of the Node: the project directory as a
+    /// workspace, one command per run and step.
+    pub struct LocalCmd {
+        node: LocalNode,
+        pub runs: AtomicUsize,
+        _home: TempDir,
+    }
+
+    impl LocalCmd {
+        pub fn open(project: &std::path::Path) -> Arc<LocalCmd> {
+            let home = tempfile::tempdir().unwrap();
+            let node = LocalNode::open(NodeConfig {
+                node: NodeId::new("local").unwrap(),
+                home: home.path().join("node"),
+                acp: steve_acp::AcpConfig {
+                    adapters: HashMap::new(),
+                    node: "node".into(),
+                    claude_executable: "/usr/bin/false".into(),
+                    steve_home: home.path().join("steve"),
+                    codex_home: home.path().join("codex"),
+                    user_home: home.path().to_path_buf(),
+                    version: "test".into(),
+                    idle_release: Duration::from_secs(600),
+                    retry_delays: vec![],
+                },
+                roots: vec![Root {
+                    id: RootId::new("prj").unwrap(),
+                    path: project.to_path_buf(),
+                    display: "prj".into(),
+                    access: RootAccess::ReadWrite,
+                }],
+                capacity: Capacity {
+                    sessions: 0,
+                    jobs: 0,
+                    execs: 4,
+                },
+                storage: Storage::default(),
+            })
+            .unwrap();
+            node.connect(Arc::new(RecordingSink::default()), None);
+            Arc::new(LocalCmd {
+                node,
+                runs: AtomicUsize::new(0),
+                _home: home,
+            })
+        }
+    }
+
+    #[async_trait]
+    impl CmdNode for LocalCmd {
+        async fn run(&self, req: CmdRequest) -> CmdRan {
+            self.runs.fetch_add(1, Ordering::SeqCst);
+            let resource = format!("project:{}", req.project_id);
+            let prep = command(
+                &derived_id("op_prep", &format!("{}/{}", req.run_id, req.step)),
+                Prepare {
+                    resource,
+                    kind: PrepareKind::Existing {
+                        dir: RootPath {
+                            root: RootId::new("prj").unwrap(),
+                            rel: RelPath::new("").unwrap(),
+                        },
+                    },
+                },
+            );
+            self.node.prepare_workspace(prep.clone()).await.unwrap();
+            let Observed::Finished {
+                result: Some(OperationResult::Workspace(w)),
+                ..
+            } = finished(&self.node, &prep.id).await
+            else {
+                return CmdRan::NotRun("prepare".into());
+            };
+            let c = command(
+                &derived_id("op_cmd", &format!("{}/{}", req.run_id, req.step)),
+                ExecSpec {
+                    workspace: w.workspace,
+                    command: req.command,
+                    cwd: None,
+                    policy: policy(),
+                    limits: Limits {
+                        deadline: Timestamp(wall() + req.timeout.as_millis() as i64),
+                        offline_until: Timestamp(wall() + req.timeout.as_millis() as i64),
+                        max_output_bytes: 64 * 1024,
+                        max_tokens: None,
+                        max_cost: None,
+                    },
+                    env: vec![],
+                    secrets: vec![],
+                },
+            );
+            if let Err(e) = self.node.exec(c.clone()).await {
+                return CmdRan::NotRun(e.to_string());
+            }
+            match finished(&self.node, &c.id).await {
+                Observed::Finished {
+                    outcome: Outcome::TimedOut,
+                    ..
+                } => CmdRan::TimedOut,
+                Observed::Finished {
+                    outcome: Outcome::Succeeded,
+                    result: Some(OperationResult::Exec(r)),
+                    ..
+                } => CmdRan::Ended {
+                    exit_code: r.exit_code,
+                    stdout: r.stdout,
+                    stderr: r.stderr,
+                },
+                Observed::Finished { error: Some(e), .. } => CmdRan::NotRun(e.to_string()),
+                _ => CmdRan::Unknown,
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cmd_steps_are_the_same_on_the_local_node() {
+        let slot: Arc<Mutex<Option<Arc<LocalCmd>>>> = Arc::default();
+        let s2 = slot.clone();
+        let Env { e, work, .. } = env_with(move |dir| {
+            let n = LocalCmd::open(dir);
+            *s2.lock().unwrap() = Some(n.clone());
+            Some(n)
+        });
+        cmd_steps(&e, work.path()).await;
+        let n = slot.lock().unwrap().clone().unwrap();
+        assert_eq!(
+            n.runs.load(Ordering::SeqCst),
+            4,
+            "every step that ran went to the Node"
+        );
+    }
+
+    /// Answers every step with what it was given, counting the asks.
+    struct Says(CmdRan, AtomicUsize);
+
+    #[async_trait]
+    impl CmdNode for Says {
+        async fn run(&self, _: CmdRequest) -> CmdRan {
+            self.1.fetch_add(1, Ordering::SeqCst);
+            self.0.clone()
+        }
+    }
+
+    /// Hangs on the first ask (the Hub "restarts" while it runs), then answers; keeps every ask.
+    struct Hangs(Mutex<Vec<CmdRequest>>);
+
+    #[async_trait]
+    impl CmdNode for Hangs {
+        async fn run(&self, req: CmdRequest) -> CmdRan {
+            let first = {
+                let mut got = self.0.lock().unwrap();
+                got.push(req);
+                got.len() == 1
+            };
+            if first {
+                std::future::pending::<()>().await;
+            }
+            CmdRan::Ended {
+                exit_code: Some(0),
+                stdout: "again\n".into(),
+                stderr: String::new(),
+            }
+        }
+    }
+
+    /// A restart cut a step on a Node short, and you asked for it to run again: it is asked anew
+    /// (a new rerun, so a new operation), never answered with the interrupted one's outcome.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_retry_after_a_restart_runs_the_step_anew() {
+        let hangs = Arc::new(Hangs(Mutex::new(vec![])));
+        let h2 = hangs.clone();
+        let Env { e, .. } = env_with(move |_| Some(h2 as Arc<dyn CmdNode>));
+        let f = create_flow(
+            &e,
+            "跑",
+            one_node(
+                "cmd",
+                "写",
+                json!({"command": "true", "project_id": "prj_t"}),
+            ),
+        )
+        .await;
+        grant(&e, &f, "cmd.run", "project", "prj_t");
+        let run = start(&e, &f, json!({})).await;
+        for _ in 0..200 {
+            if !hangs.0.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(hangs.0.lock().unwrap().len(), 1);
+        // the Hub restarts: the run stopped inside its cmd step, and you are asked
+        assert!(steve_flow::engine::recover(&e.flow).unwrap().is_empty());
+        assert_eq!(status(&e, &run), "failed");
+        let dec: String = q(
+            &e,
+            "SELECT id FROM decisions WHERE subject_type = 'flow_run' AND subject_id = ? AND status = 'open'",
+            [&run],
+        );
+        answer(&e, &dec, steve_flow::engine::RETRY).await;
+        assert_eq!(settled(&e, &run).await, "done");
+        let got = hangs.0.lock().unwrap().clone();
+        assert_eq!(got.len(), 2);
+        assert_eq!((got[0].rerun, got[1].rerun), (0, 1));
+        assert_eq!((&got[1].run_id, &got[1].step), (&run, &"n".to_string()));
+        assert_eq!(step(&e, &run).1["stdout"], "again\n");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_offline_or_lost_node_fails_the_step_once() {
+        for (said, error) in [(CmdRan::Offline, OFFLINE), (CmdRan::Unknown, UNKNOWN)] {
+            let says = Arc::new(Says(said, AtomicUsize::new(0)));
+            let s2 = says.clone();
+            let Env { e, work, .. } = env_with(move |_| Some(s2 as Arc<dyn CmdNode>));
+            let f = create_flow(
+                &e,
+                "跑",
+                one_node(
+                    "cmd",
+                    "写",
+                    json!({"command": "touch here", "project_id": "prj_t"}),
+                ),
+            )
+            .await;
+            grant(&e, &f, "cmd.run", "project", "prj_t");
+            let run = start(&e, &f, json!({})).await;
+            assert_eq!(settled(&e, &run).await, "failed");
+            assert_eq!(step(&e, &run).2.as_deref(), Some(error));
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            assert_eq!(says.1.load(Ordering::SeqCst), 1, "asked once, never again");
+            assert!(!work.path().join("here").exists(), "not run on the Hub");
+            // a secret in the command is still refused before anything is asked
+            let (st, v) = api(
+                &e,
+                "POST",
+                "/flows",
+                Some(json!({"name": "机密", "graph": one_node(
+                    "cmd",
+                    "带机密",
+                    json!({"command": "echo {{secrets.vi_1.token}}", "project_id": "prj_t"}),
+                )})),
+            )
+            .await;
+            assert_eq!(st, 400, "{v}");
+            assert!(v.to_string().contains(NO_SECRETS), "{v}");
+            assert_eq!(says.1.load(Ordering::SeqCst), 1);
+        }
+    }
 }

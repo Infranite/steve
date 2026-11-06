@@ -109,6 +109,30 @@ pub(crate) fn control_session(op: &OperationId) -> SessionId {
     SessionId::new(derived_id("workspace-control", op.as_str())).expect("derived id")
 }
 
+/// The directory `rel` below `base` (a workspace's own directory), resolved and still inside it.
+pub(crate) fn below(base: &Path, rel: &RelPath) -> ApiResult<PathBuf> {
+    let r = Path::new(rel.as_str());
+    if r.components()
+        .any(|c| !matches!(c, Component::Normal(_) | Component::CurDir))
+    {
+        return Err(ApiError::new(
+            ErrorCode::Invalid,
+            "a relative path inside the workspace",
+        ));
+    }
+    let real = base
+        .join(r)
+        .canonicalize()
+        .map_err(|_| ApiError::new(ErrorCode::Invalid, "no such directory"))?;
+    if !real.starts_with(base) {
+        return Err(ApiError::new(ErrorCode::Denied, "outside the workspace"));
+    }
+    if !real.is_dir() {
+        return Err(ApiError::new(ErrorCode::Invalid, "not a directory"));
+    }
+    Ok(real)
+}
+
 /// Every git process waits on a pipe until its identity is durable. A Node crash before recording
 /// closes the pipe: the shell exits without executing git. After recording, recovery can stop it.
 pub(crate) struct Commands {

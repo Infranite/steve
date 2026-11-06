@@ -78,6 +78,11 @@ pub struct GitQuery {
     /// Further reads, answered in [`GitFacts::reads`] in the same order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reads: Vec<GitRead>,
+    /// Leave the worktree's status out: [`GitFacts::dirty`] is then `false` without being read
+    /// (a full `git status` is the slow part of a query that only asks for refs or reads). A
+    /// Node that does not know the field reads it anyway.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_status: bool,
 }
 
 /// A commit range: `from..to`, or everything reachable from `to` when `from` is `None`.
@@ -113,6 +118,8 @@ pub enum GitRead {
     Fingerprint,
     /// Whether `rel` is ignored, and whether anything under it is tracked.
     TrackedIgnored { rel: RelPath },
+    /// The URL a remote is configured with (as written, not rewritten by `insteadOf`).
+    Remote { name: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -173,6 +180,11 @@ pub enum GitAnswer {
         ignored: bool,
         tracked: bool,
     },
+    /// `None`: no such remote, or one without a URL.
+    Remote {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        url: Option<String>,
+    },
 }
 
 /// A read with its answer and the commit it was answered at: the resolved `rev` of a `Show`, the
@@ -190,7 +202,9 @@ pub struct RangeFacts {
     pub to: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merge_base: Option<String>,
+    /// Commits of `to` that `from` lacks (`from..to`).
     pub ahead: u32,
+    /// Commits of `from` that `to` lacks (`to..from`).
     pub behind: u32,
     /// Files both sides touched (for the merge lane's overlap check).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -203,6 +217,7 @@ pub struct RangeFacts {
 /// What git says, with the revision it was observed at (an apply checks it again).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GitFacts {
+    /// Changes whenever HEAD or any ref (branches, remote-tracking refs, tags) moves.
     pub revision: Revision,
     pub head: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -235,7 +250,11 @@ pub enum GitAction {
         back_out_on_conflict: bool,
     },
     /// Pushes the local `branch` (which must be at `expected_local`) to the same branch at `url`.
-    /// `expected_remote` is the remote ref's sha the push may replace (`None`: it must not exist).
+    /// `expected_remote` is the remote ref's sha the push may replace, whatever it is (a lease);
+    /// `None` is a plain push, which the remote takes as a new branch or a fast-forward only. The
+    /// push runs from a throwaway repository that borrows the workspace's objects, with no system
+    /// or global git config: the workspace's own config (hooks, `insteadOf`, credential helpers)
+    /// plays no part.
     Push {
         remote: String,
         branch: String,
@@ -296,7 +315,7 @@ pub enum SecretDelivery {
 }
 
 /// The bytes of a secret on their way to the one operation that uses them. Never printed: `Debug`
-/// shows its length only.
+/// shows its length only; wiped on drop.
 #[derive(PartialEq, Eq, Serialize, Deserialize)]
 pub struct SecretBytes(#[serde(with = "crate::blob::hexbytes")] Vec<u8>);
 
@@ -306,6 +325,13 @@ impl SecretBytes {
     }
     pub fn expose(&self) -> &[u8] {
         &self.0
+    }
+}
+
+/// The bytes are wiped when it goes.
+impl Drop for SecretBytes {
+    fn drop(&mut self) {
+        zeroize::Zeroize::zeroize(&mut self.0);
     }
 }
 
@@ -472,4 +498,31 @@ impl ScanPage {
     pub fn is_consistent(&self) -> bool {
         !self.complete || (self.next.is_none() && !self.issues.iter().any(ScanIssue::hides_files))
     }
+}
+
+/// `owner/name` of a GitHub remote URL (https, `git@github.com:`, `ssh://`, `git://`), lowercased;
+/// `None` for anything else.
+pub fn github_repo(url: &str) -> Option<String> {
+    let u = url.trim();
+    let rest = u
+        .strip_prefix("https://github.com/")
+        .or_else(|| u.strip_prefix("http://github.com/"))
+        .or_else(|| u.strip_prefix("git@github.com:"))
+        .or_else(|| u.strip_prefix("ssh://git@github.com/"))
+        .or_else(|| u.strip_prefix("git://github.com/"))
+        .or_else(|| {
+            // https://user@github.com/o/r
+            u.strip_prefix("https://")
+                .and_then(|r| r.split_once('@'))
+                .and_then(|(_, r)| r.strip_prefix("github.com/"))
+        })?;
+    let rest = rest.trim_end_matches('/');
+    let rest = rest.strip_suffix(".git").unwrap_or(rest);
+    let (o, n) = rest.split_once('/')?;
+    let ok = |s: &str| {
+        !s.is_empty()
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+    };
+    (ok(o) && ok(n) && !n.contains('/')).then(|| format!("{o}/{n}").to_lowercase())
 }

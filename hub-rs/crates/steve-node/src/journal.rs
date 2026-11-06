@@ -417,6 +417,20 @@ impl Tx<'_> {
             .collect()
     }
 
+    /// How many commands ([`crate::exec`]) in `w` are not finished (running, or unknown since a
+    /// restart).
+    pub fn open_execs_in(&self, w: &WorkspaceRef) -> ApiResult<usize> {
+        let rows: Vec<Op> = self.rows(
+            "SELECT method, digest, receipt, execution, workspace, cancel FROM ops WHERE method = 'exec' AND workspace = ?1",
+            [json(w)],
+            Self::op_row,
+        )?;
+        Ok(rows
+            .iter()
+            .filter(|o| !o.receipt.state.is_finished())
+            .count())
+    }
+
     pub fn accept(
         &self,
         id: &OperationId,

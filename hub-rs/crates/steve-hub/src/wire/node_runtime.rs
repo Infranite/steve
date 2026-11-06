@@ -48,6 +48,8 @@ pub use heads::{
 };
 pub use ledger::LedgerEntry;
 pub use workspace::WorkspaceFact;
+#[cfg(test)]
+pub(crate) use ledger::PUSH_DEADLINE;
 
 /// Retries of a turn after a passing failure (gateway 5xx) with no tool run, and their waits.
 const RETRY_DELAYS_MS: [i64; 2] = [20_000, 60_000];
@@ -226,6 +228,8 @@ const TURN_LIMIT_MS: i64 = 6 * 3_600_000;
 const IDLE_RELEASE_MS: i64 = 600_000;
 /// How often the apply worker looks for idle sessions.
 const IDLE_EVERY: Duration = Duration::from_secs(1);
+/// How often the apply worker looks for lost commands past their deadline.
+const LOST_EXECS_EVERY: Duration = Duration::from_secs(2);
 /// The sessions of node ?1 idle since before ?2 (ms), all of them or only ?3: open with nothing
 /// running, no turn open or over since then, nothing queued and no open card.
 const IDLE_SESSIONS_SQL: &str = "SELECT s.session_id FROM runtime_sessions s
@@ -445,6 +449,7 @@ impl NodeRuntime {
         tokio::spawn(async move {
             let mut pruned = std::time::Instant::now() - PRUNE_EVERY;
             let mut idled = std::time::Instant::now();
+            let mut swept = std::time::Instant::now() - LOST_EXECS_EVERY;
             loop {
                 let Some(me) = weak.upgrade() else { return };
                 let prune = pruned.elapsed() >= PRUNE_EVERY;
@@ -452,9 +457,17 @@ impl NodeRuntime {
                 if idle {
                     idled = std::time::Instant::now();
                 }
+                // lost commands are known only once the Hub has reconciled with the Node
+                let sweep = swept.elapsed() >= LOST_EXECS_EVERY && me.is_reconciled();
+                if sweep {
+                    swept = std::time::Instant::now();
+                }
                 let applied = tokio::task::spawn_blocking(move || {
                     let applied = me.apply_some();
                     me.expire_due();
+                    if sweep && let Err(e) = me.recover_lost_execs(now()) {
+                        tracing::warn!("node {}: lost commands: {e}", me.node_id);
+                    }
                     if idle {
                         me.release_idle();
                     }

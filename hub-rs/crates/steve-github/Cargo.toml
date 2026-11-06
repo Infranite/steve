@@ -20,6 +20,7 @@ fake = [
 [dependencies]
 steve-flow = { path = "../steve-flow" }
 steve-modules = { path = "../steve-modules" }
+steve-node-api = { path = "../steve-node-api" }
 steve-store = { path = "../steve-store" }
 steve-i18n = { path = "../steve-i18n" }
 rust-i18n = "=4.2.4"

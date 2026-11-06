@@ -2569,6 +2569,8 @@ async fn a_worktree_goes_where_it_is_named_above_the_disk_floor_and_comes_back_a
             "{rel}: {e:?}"
         );
     }
+}
+
 // ── the files face: scans, listings, reads ──
 
 /// `t` with a read-only root `kb` at `<root>/kb` besides `work`.

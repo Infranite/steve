@@ -167,6 +167,7 @@ async fn faces(n: Arc<dyn Node>) -> Vec<String> {
             refs: vec![],
             ranges: vec![],
             fetch: false,
+            no_status: false,
             reads: vec![GitRead::Status],
         })
         .await,
@@ -578,6 +579,7 @@ async fn an_older_peer_is_never_sent_what_it_would_ignore() {
         refs: vec![],
         ranges: vec![],
         fetch: false,
+        no_status: false,
         reads,
     };
     let raw = hub
@@ -718,6 +720,7 @@ async fn an_answer_of_a_newer_kind_is_uncertain_not_unsupported() {
             refs: vec![],
             ranges: vec![],
             fetch: false,
+            no_status: false,
             reads: vec![GitRead::Status],
         })
         .await
