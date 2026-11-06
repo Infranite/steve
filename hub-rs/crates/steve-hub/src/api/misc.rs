@@ -117,6 +117,7 @@ async fn compute_state(st: &AppState, c: Ctx) -> Result<Value, ApiError> {
     let runtimes = st.runtimes.get(false).await;
     let version = st.cfg.version.clone();
     let web_version = crate::web::web_version(&st.cfg);
+    let update = crate::upgrades::available(&st.cfg);
     let domain = st.domain.clone();
     let hold = domain.hold_status().await?;
     let lifecycles = domain.lifecycle_views(&c.ws).await?;
@@ -129,6 +130,14 @@ async fn compute_state(st: &AppState, c: Ctx) -> Result<Value, ApiError> {
         let mut out = Map::new();
         out.insert("version".into(), json!(version));
         out.insert("web_version".into(), json!(web_version));
+        // a newer release the last version check found: the page's update notice
+        if let Some(version) = update {
+            let owner = c.user.get("role").and_then(Value::as_str) == Some("owner");
+            out.insert(
+                "update".into(),
+                json!({ "version": version, "owner": owner }),
+            );
+        }
         // `workspace: undefined` drops the key
         if let Some(x) = r.workspace_get(w)? {
             out.insert("workspace".into(), Value::Object(x));

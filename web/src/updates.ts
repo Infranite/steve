@@ -15,10 +15,10 @@ export function shortVersion(v: string): string {
 
 export type UpdatePhase = "awaiting_approval" | "staging" | "ready" | "draining" | "stopping" | "backing_up" | "restarting" | "verifying" | "committed" | "succeeded" | "rolling_back" | "rolled_back_pending_health" | "rolled_back" | "failed"
 export type UpdateCheck = { status: "available" | "up_to_date" | "ahead" | "unknown_current" | "no_release" | "error" | "unsupported_platform"; checked_at: number; version: string | null; release_url: string | null; notes: string | null; error: string | null }
-export type UpdateOperation = { id: string; idempotency_key: string; version: string; phase: UpdatePhase; created_at: number; updated_at: number; requested_by: string; approved_by?: string | null; approved_at?: number | null; error: string | null; previous: string | null; target: string | null }
+export type UpdateOperation = { id: string; idempotency_key: string; version: string; phase: UpdatePhase; created_at: number; updated_at: number; requested_by: string; approved_by?: string | null; approved_at?: number | null; error: string | null; previous: string | null; target: string | null; runner?: { kind: string; log?: string | null } | null; backup?: string | null }
 /** `backup.database`: the verified copy the supervisor took before switching, once it exists. */
 export type UpdateBackup = { database: string | null; dir: string }
-export type UpdateState = { repository: string; current: { hub: string; web: string }; capability: { managed: boolean; can_execute: boolean; reason: string }; check: UpdateCheck | null; operation: UpdateOperation | null; install?: Install; backup?: UpdateBackup | null }
+export type UpdateState = { repository: string; current: { hub: string; web: string }; capability: { managed: boolean; can_execute: boolean; reason: string; owner?: boolean }; check: UpdateCheck | null; operation: UpdateOperation | null; install?: Install; backup?: UpdateBackup | null }
 export const updates = {
   status: () => modReq<UpdateState>("GET", "/updates", undefined, AbortSignal.timeout(8000)),
   check: () => modReq<UpdateCheck>("POST", "/updates/check", {}, AbortSignal.timeout(30_000)),
@@ -32,6 +32,7 @@ export const updates = {
     return r.json()
   },
 }
+export { CHECK_STALE_MS, checkStale, committedFailure } from "@/upgrade-guide"
 export const updateActive = (op: UpdateOperation | null) => !!op && !["succeeded", "rolled_back", "failed"].includes(op.phase)
 // A retry, another tab, or a reload must refer to the same intended version upgrade.
 export const updateKey = (repository: string, version: string, retryOf?: string) => `web-upgrade:${repository}:${version}${retryOf ? `:retry:${retryOf}` : ""}`

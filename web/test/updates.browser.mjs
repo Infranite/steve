@@ -11,7 +11,7 @@ page.on("pageerror", e => errors.push(e.message))
 const check = status => ({ status, checked_at: Date.now(), version: "v1.2.0", release_url: "https://github.com/Infranite/steve/releases/tag/v1.2.0", notes: "# Steve v1.2.0\n\n测试更新说明\n\n- **加粗的要点** 和 `GET /api/x`", error: null })
 let state = { repository: "Infranite/steve", current: { hub: "v1.1.0", web: "v1.1.0" }, capability: { managed: false, can_execute: false, reason: "source checkout" }, check: null, operation: null }
 let denyExecute = false, unrecordedPost = false, failCheck = false, hangStatus = false
-let disconnected = false, dropPost = false, checkStatus = "available", approvals = 0, rejections = 0, gets = 0
+let disconnected = false, dropPost = false, checkStatus = "available", approvals = 0, rejections = 0, gets = 0, checks = 0
 // what the restarted Hub answers on /healthz; the fixture page itself loads as "dev" unless ?web= names a version
 let health = { ok: true, version: "v1.2.0", web_version: "v1.2.0", drain: false, recovery: { state: "ok" } }, healthDown = false
 const operation = (phase = "staging") => ({ id: "up_fixture", idempotency_key: "agent-request", version: "v1.2.0", phase, requested_by: "test-agent", created_at: Date.now(), updated_at: Date.now(), error: null, previous: "v1.1.0", target: "v1.2.0" })
@@ -22,7 +22,7 @@ await page.route("**/*", async route => {
   if (!u.pathname.startsWith("/api/")) return route.continue()
   let data
   if (u.pathname === "/api/updates" && req.method() === "GET") { gets++; if (hangStatus) return; if (disconnected) return route.abort("connectionfailed"); data = state }
-  else if (u.pathname === "/api/updates/check") { if (failCheck) return route.fulfill({ status: 403, contentType: "application/json", body: JSON.stringify({ error: "检查权限不足" }) }); state.check = check(checkStatus); data = state.check }
+  else if (u.pathname === "/api/updates/check") { checks++; if (failCheck) return route.fulfill({ status: 403, contentType: "application/json", body: JSON.stringify({ error: "检查权限不足" }) }); state.check = check(checkStatus); data = state.check }
   else if (u.pathname === "/api/updates" && req.method() === "POST") { if (denyExecute) return route.fulfill({ status: 403, contentType: "application/json", body: JSON.stringify({ error: "此实例不允许自动升级" }) }); writes.push(req.postDataJSON()); if (unrecordedPost) return route.abort("connectionfailed"); state.operation = { ...operation(), ...req.postDataJSON() }; if (dropPost) return route.abort("connectionfailed"); data = state.operation }
   else if (u.pathname === "/api/updates/up_fixture/reject") { rejections++; state.operation = { ...operation("failed"), error: "实例管理员拒绝了升级请求" }; data = state.operation }
   else if (u.pathname === "/api/updates/up_fixture/approve") { approvals++; state.operation = operation(); data = state.operation }
@@ -174,7 +174,7 @@ try {
   assert.match(unavailable, /^不能在这里一键升级 · 本机签名构建/)
   assert.ok(unavailable.includes(localReason), "the Hub's reason is shown, not swallowed")
   assert.match(unavailable, /按下方步骤在这台机器上升级/)
-  assert.match(await page.locator("[data-upgrade-enable]").innerText(), /STEVE_VAULT_KEYSTORE=dir.*run-managed\.sh/)
+  assert.equal(await page.locator("[data-upgrade-enable]").count(), 0, "a local build is not told to migrate its keys any more")
   const commands = await page.locator("[data-upgrade-command] pre").allInnerTexts()
   assert.deepEqual(commands.map(c => c.trim()).slice(1), [`python3 ${repo}/ops/local-release.py build v1.2.0`, `python3 ${repo}/ops/local-release.py deploy ${home}/releases/1.2.0-local-*`])
   assert.match(await page.locator("[data-upgrade-backup]").innerText(), /\/Users\/example\/\.steve\/backups/)
@@ -241,6 +241,57 @@ try {
   assert.equal(await page.locator("[data-upgrade-refresh]").count(), 0)
   assert.equal(await page.locator('[data-upgrade-progress] [data-stage="done"]').count(), 7, "the last step completes with the read-back")
   if (process.env.STEVE_TEST_ARTIFACTS) await page.screenshot({ path: process.env.STEVE_TEST_ARTIFACTS + "/upgrade-mobile.png", fullPage: true })
+
+  // A local build (ops/local-release.py) that has everything: found on its own, one click, followed across the restart.
+  const runnerLog = `${home}/logs/release/upgrade-1.2.0-up_local.log`
+  const localOp = (phase, extra = {}) => ({ ...operation(phase), id: "up_local", idempotency_key: "web-upgrade:Infranite/steve:v1.2.0", requested_by: "owner", runner: { kind: "local_release", log: runnerLog }, ...extra })
+  state = { repository: "Infranite/steve", current: { hub: "1.1.0", web: "1.1.0" }, capability: { managed: false, can_execute: true, owner: true, reason: "local_release runner" }, install: { kind: "local_release", home, release: "1.1.0-local-51826fc", repo }, check: null, operation: null, backup: null }
+  checkStatus = "available"; const checksBefore = checks, writesBefore = writes.length
+  await page.goto(base + "/test/fixtures/updates.html?update=1.2.0")
+  await page.locator('[data-sidebar-hub-update="1.2.0"]').getByText("新版本 1.2.0 可升级").waitFor()
+  await page.locator('[data-upgrade-check-status="available"]').waitFor()
+  assert.equal(checks, checksBefore + 1, "the owner's page checked by itself, once")
+  assert.match(await page.locator('[data-upgrade-capability][data-install-kind="local_release"]').innerText(), /本机签名构建：可在这里升级/)
+  assert.equal(await page.locator("[data-upgrade-unavailable]").count(), 0)
+  assert.equal(await page.locator("[data-upgrade-guide]").count(), 0, "a button, not commands")
+  await page.locator("[data-upgrade-execute]").click()
+  await phase("staging")
+  assert.equal(writes.length, writesBefore + 1)
+  assert.deepEqual([writes.at(-1).version, writes.at(-1).idempotency_key], ["v1.2.0", "web-upgrade:Infranite/steve:v1.2.0"])
+  state.operation = localOp("staging")
+  await page.locator('[data-upgrade-progress] [data-stage="current"]').getByText("拉取标签并本机构建").waitFor()
+  await page.locator("[data-upgrade-recovery]").getByText(`升级日志：${runnerLog}`).waitFor()
+  // the deploy stops this Hub: the page says it reconnects, then shows where the new one got to
+  state.operation = localOp("backing_up", { backup: `${home}/backups/pre-1.2.0.sqlite3` }); state.backup = { database: `${home}/backups/pre-1.2.0.sqlite3`, dir: `${home}/backups` }
+  disconnected = true
+  await page.locator("[data-upgrade-connection]").waitFor()
+  disconnected = false
+  await page.locator('[data-upgrade-progress] [data-stage="current"]').getByText("备份数据库").waitFor()
+  assert.equal(writes.length, writesBefore + 1, "reconnecting never repeats the upgrade")
+  if (process.env.STEVE_TEST_ARTIFACTS) await page.screenshot({ path: process.env.STEVE_TEST_ARTIFACTS + "/upgrade-local-progress.png", fullPage: true })
+  // each result, plainly
+  state.operation = localOp("rolled_back", { error: "probe 失败（RuntimeError: boom），已恢复到 1.1.0-local-51826fc", previous: `${home}/releases/1.1.0-local-51826fc` })
+  await phase("rolled_back")
+  const back = await page.locator('[data-upgrade-recovery="rolled_back"]').innerText()
+  assert.match(back, /pre-1\.2\.0\.sqlite3/); assert.match(back, /已自动恢复/); assert.match(back, /upgrade-1\.2\.0-up_local\.log/)
+  await page.locator("[data-upgrade-retry]").waitFor()
+  state.operation = localOp("failed", { error: `升级已提交：1.2.0 启动后没有正常起来；发布前的备份在 ${home}/backups/pre-1.2.0.sqlite3` })
+  await page.locator('[data-upgrade-recovery="failed"]').filter({ hasText: "按设计不自动回退" }).waitFor()
+  state.operation = localOp("failed", { error: "本机构建失败（退出码 101），当前版本没有改动。" }); state.backup = { database: null, dir: `${home}/backups` }
+  await page.locator('[data-upgrade-recovery="failed"]').filter({ hasText: "旧版本和数据库没有改动" }).waitFor()
+  await page.getByText("本机构建失败（退出码 101）", { exact: false }).first().waitFor()
+  state.operation = localOp("succeeded"); state.current = { hub: "1.2.0", web: "1.2.0" }; state.check = check("up_to_date")
+  health = { ok: true, version: "v1.2.0", web_version: "v1.2.0", drain: false, recovery: { state: "ok" } }
+  await page.goto(base + "/test/fixtures/updates.html?web=1.2.0"); await phase("succeeded")
+  await page.locator('[data-upgrade-verify="passed"]').waitFor({ timeout: 8000 })
+  assert.equal(await page.locator("[data-sidebar-hub-update]").count(), 0, "no notice once nothing newer is known")
+  // someone else: no check of their own, no button
+  state.capability = { managed: false, can_execute: false, owner: false, reason: "仅实例管理员可批准和执行升级" }; state.check = null; state.operation = null
+  const checksNow = checks
+  await page.reload(); await page.locator("[data-upgrade-unavailable]").waitFor()
+  assert.equal(await page.locator("[data-upgrade-check]").isDisabled(), true)
+  await page.waitForTimeout(500)
+  assert.equal(checks, checksNow, "a member's page never spends the GitHub allowance")
   assert.deepEqual(errors, [])
-  console.log(JSON.stringify({ passed: true, scenarios: ["source check only", "owner capability", "agent approve and reject", "ambiguous POST recovery", "restart disconnect", "reload without POST", "stable version key", "manual refresh preserves draft", "rollback and explicit retry", "ahead and unknown versions", "390px layout", "keychain capability reason", "drain and rollback health phases", "unrelated receipt cannot clear errors", "definite 4xx", "8s status timeout recovery", "same-version paired repair after old success", "stable repair intent", "repair refresh never POSTs", "later explicit repair gets fresh key", "local-release commands with this machine's paths", "read-back retries through restart and outage", "old page needs reload", "non-owner gets no paths", "per-install guides", "managed progress steps", "rollback backup and recovery", "committed failure keeps new database", "pre-switch failure untouched", "upgraded only after health and versions agree"], gets, writes: writes.length, approvals, rejections }))
+  console.log(JSON.stringify({ passed: true, scenarios: ["source check only", "owner capability", "agent approve and reject", "ambiguous POST recovery", "restart disconnect", "reload without POST", "stable version key", "manual refresh preserves draft", "rollback and explicit retry", "ahead and unknown versions", "390px layout", "keychain capability reason", "drain and rollback health phases", "unrelated receipt cannot clear errors", "definite 4xx", "8s status timeout recovery", "same-version paired repair after old success", "stable repair intent", "repair refresh never POSTs", "later explicit repair gets fresh key", "local-release commands with this machine's paths", "read-back retries through restart and outage", "old page needs reload", "non-owner gets no paths", "per-install guides", "managed progress steps", "rollback backup and recovery", "committed failure keeps new database", "pre-switch failure untouched", "upgraded only after health and versions agree", "local: found by itself", "local: sidebar notice", "local: one click, no commands", "local: build step and log", "local: progress across restart", "local: rolled back with backup", "local: committed failure", "local: refused before switch", "local: upgraded", "member: no check, no button"], gets, writes: writes.length, approvals, rejections }))
 } catch (e) { console.error(await page.locator("body").innerText(), errors); throw e } finally { await browser.close() }

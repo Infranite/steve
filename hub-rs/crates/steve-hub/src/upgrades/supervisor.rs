@@ -580,6 +580,10 @@ Server(('127.0.0.1',int(os.environ['STEVE_PORT'])),Handler).serve_forever()
             blocked_reason: None,
             client: reqwest::Client::new(),
             api_base: String::new(),
+            web_base: String::new(),
+            repo: PathBuf::new(),
+            kind: None,
+            launch: crate::upgrades::runner::Launch::Launchd,
         };
         let mut op = u.request("0.2.0", "integration", "owner", true).unwrap();
         op.target = Some(new.to_string_lossy().into());

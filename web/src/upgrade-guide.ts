@@ -1,5 +1,6 @@
 // What finishing an upgrade takes, per installation. node --test loads this directly, so imports carry .ts extensions.
 import { t } from "./i18n/index.ts"
+import type { UpdateOperation, UpdateState } from "@/updates"
 
 /** How the Hub was installed (Hub `upgrades/install.rs`). Paths are only sent to the instance manager. */
 export type InstallKind = "managed" | "local_release" | "release_script" | "source" | "external"
@@ -10,9 +11,10 @@ export type Guide = { label: string; summary: string; steps: GuideStep[]; backup
 /** the name of an installation kind, in the UI language */
 export const installLabel = (kind: InstallKind) => t(`pages:guide.install.${kind}`)
 
-/** What it takes before Settings · 关于 can upgrade this installation itself. */
+/** What it takes before Settings · 关于 can upgrade this installation itself (a local_release install says
+ * what it lacks in the Hub's reason). */
 export const enableOneClick = (kind: InstallKind): string | undefined =>
-  kind === "local_release" || kind === "release_script" ? t(`pages:guide.enable.${kind}`) : undefined
+  kind === "release_script" ? t(`pages:guide.enable.${kind}`) : undefined
 
 const sh = (s: string) => /^[\w@%+=:,./~-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`
 
@@ -80,7 +82,7 @@ export function upgradeGuide(install: Install, version: string): Guide {
   }
 }
 
-/** The managed supervisor's journal phases, as steps a person can follow. */
+/** The upgrade journal's phases (the managed supervisor's, or a local build's runner), as steps a person can follow. */
 const stage = <K extends string, P extends readonly string[]>(key: K, phases: P) => ({ key, phases, get label() { return t(`pages:guide.stage.${key}` as "pages:guide.stage.staging") } })
 export const upgradeStages = [
   stage("staging", ["staging", "ready"] as const),
@@ -91,6 +93,9 @@ export const upgradeStages = [
   stage("verifying", ["verifying", "committed"] as const),
   stage("succeeded", ["succeeded"] as const),
 ] as const
+/** a step's name for this installation: a local build's first step is the build, not a download */
+export const stageLabel = (key: (typeof upgradeStages)[number]["key"], kind?: InstallKind) =>
+  key === "staging" && kind === "local_release" ? t("pages:guide.stage.stagingLocal") : upgradeStages.find(s => s.key === key)!.label
 export const stageIndex = (phase: string) => upgradeStages.findIndex(s => (s.phases as readonly string[]).includes(phase))
 
 export type Health = { ok?: boolean; version?: string; web_version?: string; drain?: boolean | null; recovery?: { state?: string } | null }
@@ -111,3 +116,10 @@ export function verifyUpgrade(target: string, health: Health | null, loadedWeb: 
   const served = items.slice(0, 3).every(i => i.ok)
   return { items, done: items.every(i => i.ok), needsReload: served && !items[3].ok }
 }
+
+/** A version check older than this is repeated when the instance manager opens the page (the Hub caches it 10 minutes). */
+export const CHECK_STALE_MS = 3600_000
+export const checkStale = (state: Pick<UpdateState, "capability" | "check" | "operation">, now = Date.now()) =>
+  state.capability.owner === true && !(state.operation && !["succeeded", "rolled_back", "failed"].includes(state.operation.phase)) && (!state.check || now - state.check.checked_at > CHECK_STALE_MS)
+/** A failure after the switch: the new version stays (supervisor and ops/local-release.py both say so). */
+export const committedFailure = (op: UpdateOperation) => op.phase === "failed" && !!op.error && /升级已提交|Upgrade committed/.test(op.error)

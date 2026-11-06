@@ -101,6 +101,8 @@ export default {
     acceptedAwaitRelease: "Accepted, waiting for it to request a release",
   },
   toast: {
+    updateAvailable: "Steve {{version}} is available",
+    updateView: "Upgrade",
     undo: "Undo",
     undone: "Undone",
     applied: "Applied",
@@ -228,6 +230,7 @@ export default {
     webUpdate: "Web update available · View",
     versions: "Frontend {{web}} · Backend {{hub}}",
     versionUnknown: "…",
+    hubUpdate: "Steve {{version}} is available · View",
   },
   cmd: {
     newItem: "New item",

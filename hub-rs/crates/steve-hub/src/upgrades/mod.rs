@@ -1,6 +1,7 @@
 //! Instance updates. The journal is deliberately outside SQLite: rollback must not erase its receipt.
 mod client;
 pub mod install;
+pub mod runner;
 pub mod supervisor;
 #[cfg(test)]
 mod tests;
@@ -97,6 +98,12 @@ pub struct Operation {
     pub error: Option<String>,
     pub previous: Option<String>,
     pub target: Option<String>,
+    /// A local_release upgrade: what the one-shot runner job builds and deploys (`runner.rs`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runner: Option<runner::Spec>,
+    /// The verified database copy a local deploy took before switching (`ops/local-release.py`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup: Option<String>,
 }
 impl Operation {
     pub fn terminal(&self) -> bool {
@@ -113,6 +120,13 @@ pub struct Updates {
     pub blocked_reason: Option<String>,
     pub client: reqwest::Client,
     pub api_base: String,
+    /// github.com, for the rate-limit fallback and the tag a local runner fetches.
+    pub web_base: String,
+    /// STEVE_REPO: the checkout a local_release upgrade builds from.
+    pub repo: PathBuf,
+    /// The installation kind, when not detected from where this process runs (tests).
+    pub kind: Option<&'static str>,
+    pub launch: runner::Launch,
 }
 pub fn now() -> u64 {
     SystemTime::now()
@@ -165,22 +179,67 @@ pub fn platform() -> String {
         }
     )
 }
+/// STEVE_UPDATE_REPOSITORY (`owner/name`), the only place releases are taken from.
+fn repository() -> Result<String> {
+    let repository =
+        std::env::var("STEVE_UPDATE_REPOSITORY").unwrap_or_else(|_| "Infranite/steve".into());
+    let parts: Vec<_> = repository.split('/').collect();
+    if parts.len() != 2
+        || parts.iter().any(|p| {
+            p.is_empty()
+                || p.starts_with('.')
+                || !p
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || b"-_.".contains(&c))
+        })
+    {
+        bail!("invalid STEVE_UPDATE_REPOSITORY");
+    }
+    Ok(repository)
+}
+
+/// The newer release the last version check found for exactly this Hub and Web, if any: what the
+/// page's update notice shows (`/api/state`). Reads the cached check only, never the network.
+pub fn available(cfg: &Config) -> Option<String> {
+    let cached: CachedCheck = read(&cfg.home.join("updates/check.json")).ok()?;
+    (cached.repository == repository().ok()?
+        && cached.current_hub == cfg.version
+        && cached.current_web == crate::web::web_version(cfg)
+        && cached.result.status == "available")
+        .then_some(cached.result.version)
+        .flatten()
+}
+
+/// Checks for a newer release shortly after start and then every six hours, so the page can say so
+/// without anyone opening Settings. Off in debug builds unless STEVE_UPDATE_CHECK=1; STEVE_UPDATE_CHECK=0
+/// turns it off. Uses the same cache and lock as a check from the page.
+pub fn spawn_auto_check(cfg: Config) {
+    let on = match std::env::var("STEVE_UPDATE_CHECK").as_deref() {
+        Ok("0") => false,
+        Ok("1") => true,
+        _ => !cfg!(debug_assertions),
+    };
+    if !on {
+        return;
+    }
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        loop {
+            match Updates::new(&cfg) {
+                Ok(u) => match u.check().await {
+                    Ok(c) => tracing::info!("update check: {} {:?}", c.status, c.version),
+                    Err(e) => tracing::info!("update check: {e:#}"),
+                },
+                Err(e) => tracing::warn!("update check: {e:#}"),
+            }
+            tokio::time::sleep(Duration::from_secs(6 * 3600)).await;
+        }
+    });
+}
+
 impl Updates {
     pub fn new(cfg: &Config) -> Result<Self> {
-        let repository =
-            std::env::var("STEVE_UPDATE_REPOSITORY").unwrap_or_else(|_| "Infranite/steve".into());
-        let parts: Vec<_> = repository.split('/').collect();
-        if parts.len() != 2
-            || parts.iter().any(|p| {
-                p.is_empty()
-                    || p.starts_with('.')
-                    || !p
-                        .bytes()
-                        .all(|c| c.is_ascii_alphanumeric() || b"-_.".contains(&c))
-            })
-        {
-            bail!("invalid STEVE_UPDATE_REPOSITORY");
-        }
+        let repository = repository()?;
         Ok(Self {
             home: cfg.home.clone(),
             repository,
@@ -201,14 +260,45 @@ impl Updates {
                 .timeout(std::time::Duration::from_secs(120))
                 .build()?,
             api_base: "https://api.github.com".into(),
+            web_base: "https://github.com".into(),
+            repo: cfg.steve_repo.clone(),
+            kind: None,
+            launch: runner::Launch::Launchd,
         })
     }
-    pub fn execution_reason(&self) -> Option<String> {
-        if !self.managed {
-            // the kind doesn't depend on the checkout, only the commands do
-            return self.install(Path::new("")).reason();
+    /// Only the journal, for the runner process: no network, no installation probe.
+    pub fn journal(home: &Path) -> Self {
+        Self {
+            home: home.into(),
+            repository: String::new(),
+            current_hub: String::new(),
+            current_web: String::new(),
+            managed: false,
+            blocked_reason: None,
+            client: reqwest::Client::new(),
+            api_base: String::new(),
+            web_base: String::new(),
+            repo: PathBuf::new(),
+            kind: None,
+            launch: runner::Launch::Launchd,
         }
-        self.blocked_reason.clone()
+    }
+    /// Why this page can't upgrade this installation itself; `None` when it can.
+    pub fn execution_reason(&self) -> Option<String> {
+        if self.managed {
+            return self.blocked_reason.clone();
+        }
+        let install = self.install(&self.repo);
+        if install.kind == "local_release" {
+            let missing = runner::local_missing(self);
+            return (!missing.is_empty()).then(|| {
+                steve_i18n::t!(
+                    "hub.upgrade.reason.local_missing",
+                    missing = missing.join(steve_i18n::t!("hub.error.list_sep").as_str())
+                )
+            });
+        }
+        install.reason()
     }
     pub fn dir(&self) -> PathBuf {
         self.home.join("updates")
@@ -245,28 +335,45 @@ impl Updates {
         self.save(op)
     }
     pub fn status(&self) -> Result<Value> {
-        let operation = self.active()?;
+        let mut operation = self.active()?;
+        if let Some(op) = operation.as_mut() {
+            runner::reap(self, op)?;
+        }
         let backup = operation.as_ref().map(|op| self.backup(op));
+        let kind = self.install(&self.repo).kind;
+        let ready = if kind == "local_release" {
+            "local_release runner"
+        } else {
+            "managed supervisor"
+        };
         Ok(
-            json!({"repository":self.repository,"current":{"hub":self.current_hub,"web":self.current_web},"capability":{"managed":self.managed,"reason":self.execution_reason().unwrap_or_else(||"managed supervisor".into())},"install":{"kind":self.install(Path::new("")).kind},"check":self.cached_check().map(|cached|cached.result),"operation":operation,"backup":backup}),
+            json!({"repository":self.repository,"current":{"hub":self.current_hub,"web":self.current_web},"capability":{"managed":self.managed,"reason":self.execution_reason().unwrap_or_else(||ready.into())},"install":{"kind":kind},"check":self.cached_check().map(|cached|cached.result),"operation":operation,"backup":backup}),
         )
     }
-    /// Where the supervisor keeps what a failed upgrade is recovered from: the verified database copy
-    /// taken before the switch (`null` until it exists) and the journal directory.
+    /// Where what a failed upgrade is recovered from is kept: the verified database copy taken before
+    /// the switch (`null` until it exists) and the directory beside it.
     fn backup(&self, op: &Operation) -> Value {
+        if op.runner.is_some() {
+            // ops/local-release.py backs up into $STEVE_HOME/backups and names the copy in the journal
+            return json!({"database": op.backup, "dir": self.home.join("backups").to_string_lossy()});
+        }
         let database = self.dir().join(format!("{}.sqlite3", op.id));
         json!({"database": database.exists().then(|| database.to_string_lossy().into_owned()), "dir": self.dir().to_string_lossy()})
     }
     /// `repo`: STEVE_REPO, where release scripts run from.
     pub fn install(&self, repo: &Path) -> install::Install {
-        install::detect(&install::Probe {
+        let mut install = install::detect(&install::Probe {
             managed: self.managed,
             blocked: self.blocked_reason.is_some(),
             home: &self.home,
             exe: std::env::current_exe().ok(),
             repo,
             forced: std::env::var("STEVE_INSTALL_KIND").ok(),
-        })
+        });
+        if let Some(kind) = self.kind {
+            install.kind = kind;
+        }
+        install
     }
     fn cached_check(&self) -> Option<CachedCheck> {
         read::<CachedCheck>(&self.dir().join("check.json"))
@@ -309,7 +416,13 @@ impl Updates {
             notes: None,
             error: None,
         };
-        match self.latest().await {
+        // the unauthenticated API allows 60 calls an hour per address: on any failure ask github.com
+        // which tag `latest` is, which isn't counted
+        let latest = match self.latest().await {
+            Err(error) => self.latest_web().await.map_err(|_| error),
+            found => found,
+        };
+        match latest {
             Ok(None) => c.status = "no_release".into(),
             Ok(Some(release)) => {
                 c.release_url = Some(release.html_url.clone());
@@ -320,8 +433,9 @@ impl Updates {
                         c.version = Some(version.to_string());
                         match self.inspect_release(&release).await {
                             Err(error) => c.error = Some(error.to_string()),
-                            Ok(false) => c.status = "unsupported_platform".into(),
-                            Ok(true) => {
+                            // only the managed supervisor installs the prebuilt bundle
+                            Ok(false) if self.managed => c.status = "unsupported_platform".into(),
+                            Ok(_) => {
                                 c.status = match semver::Version::parse(
                                     self.current_hub.trim_start_matches('v'),
                                 ) {
@@ -366,7 +480,11 @@ impl Updates {
         if let Some(reason) = self.execution_reason() {
             bail!("{reason}")
         };
-        let version = semver::Version::parse(version.trim_start_matches('v'))?.to_string();
+        let parsed = semver::Version::parse(version.trim_start_matches('v'))?;
+        if !parsed.pre.is_empty() || !parsed.build.is_empty() {
+            bail!("{}", steve_i18n::t!("hub.upgrade.stable_only"))
+        }
+        let version = parsed.to_string();
         if key.is_empty() || key.len() > 200 {
             bail!("idempotency_key required (1..200 bytes)")
         }
@@ -413,6 +531,12 @@ impl Updates {
         if self.active()?.is_some_and(|o| !o.terminal()) {
             bail!("{}", steve_i18n::t!("hub.upgrade.in_progress"))
         }
+        let local = !self.managed && self.install(&self.repo).kind == "local_release";
+        let runner = if local {
+            Some(runner::prepare(self, &parsed)?)
+        } else {
+            None
+        };
         let op = Operation {
             id: uuid::Uuid::new_v4().to_string(),
             idempotency_key: key.into(),
@@ -431,6 +555,8 @@ impl Updates {
             error: None,
             previous: None,
             target: None,
+            runner,
+            backup: None,
         };
         self.save(&op)?;
         atomic(&self.dir().join("active.json"), &json!({"id":op.id}))?;
@@ -467,6 +593,24 @@ impl Updates {
         }
         self.phase(&mut op, "failed", Some("实例管理员拒绝了升级请求".into()))?;
         Ok(op)
+    }
+    /// Start an approved upgrade: a local build runs in its own launchd job (this Hub is the process the
+    /// deploy replaces), a managed one is staged here for the supervisor.
+    pub fn start(&self, op: Operation) {
+        if op.runner.is_some() {
+            let this = self.clone();
+            tokio::spawn(async move {
+                let mut op = op;
+                if let Err(e) = runner::launch(&this, &mut op).await
+                    && let Ok(mut now) = this.operation(&op.id)
+                    && !now.terminal()
+                {
+                    let _ = this.phase(&mut now, "failed", Some(format!("{e:#}")));
+                }
+            });
+        } else {
+            self.spawn_stage(op)
+        }
     }
     pub fn spawn_stage(&self, op: Operation) {
         let this = self.clone();

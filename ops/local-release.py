@@ -2,7 +2,7 @@
 """Build a signed Steve release from a tagged commit and switch this machine's Steve to it.
 
     local-release.py build <commit> [--version X.Y.Z]   build $STEVE_HOME/releases/<version>-local-<sha7>
-    local-release.py deploy <release dir>               switch the running Steve to it (newer or older)
+    local-release.py deploy <release dir> [--operation <id>]  switch the running Steve to it (newer or older)
 
 build: the version is the vX.Y.Z tag on the commit unless given. The Hub is built with cargo (STEVE_CARGO, else
 cargo on PATH) into $STEVE_HOME/build/cargo-target, signed with the "Steve Hub" identity in
@@ -22,12 +22,21 @@ deploy, in order; any failure before the switch leaves the running version as it
      A failure after the switch is not undone: the database may be migrated, the new version stays and the
      result says so (exit 3), with the backup named.
 
+--operation <id>: also write each step into the Hub's upgrade journal ($STEVE_HOME/updates/operations/<id>.json,
+the phases the managed supervisor uses), so Settings · 关于 can follow a one-click upgrade across the restart. The
+Hub's runner job (hub-rs upgrades/runner.rs) passes it; the result there is one of succeeded, rolled_back, failed
+("升级已提交…" once the switch happened: not undone).
+
+build and deploy hold the fcntl lock on $STEVE_HOME/releases/.release.lock, the one ops/release.sh takes: one release
+at a time, whichever way it was started.
+
 Identities come from $STEVE_HOME/signing/identity.json, written once per machine:
   {"label": "<launchd label>", "hub_identifier": "...", "keyhelper_identifier": "...", "vault_service": "..."}
 and are checked against the installed Hub and steve-keyhelper signatures before anything is built or switched.
 Results: $STEVE_HOME/logs/release/local-<version>-<time>.json.
 """
 import argparse
+import fcntl
 import hashlib
 import json
 import os
@@ -55,6 +64,48 @@ PLIST_DIR = pathlib.Path.home() / "Library/LaunchAgents"
 
 class Refused(Exception):
     """Stopped before anything changed for the running Steve."""
+
+
+class Journal:
+    """The Hub's record of a one-click upgrade (--operation): each step, then the result. Without an id it does
+    nothing. Written the way the Hub writes it: the whole operation, to a temporary file, renamed, mode 0600."""
+
+    def __init__(self, op_id):
+        self.path = None
+        if op_id:
+            uuid.UUID(op_id)  # a path component: only an operation id
+            self.path = HOME / "updates/operations" / f"{op_id}.json"
+            if not self.path.exists():
+                raise Refused(f"no upgrade operation {op_id}")
+
+    def __call__(self, phase, error=None, **fields):
+        if not self.path:
+            return
+        op = json.loads(self.path.read_text())
+        op.update(fields, phase=phase, error=error, updated_at=int(time.time() * 1000))
+        tmp = self.path.with_name(f".{uuid.uuid4()}.tmp")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(json.dumps(op, indent=2, ensure_ascii=False))
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, self.path)
+
+    def terminal(self):
+        return bool(self.path) and json.loads(self.path.read_text()).get("phase") in ("succeeded", "failed", "rolled_back")
+
+
+def release_lock():
+    """ops/release.sh's lock (zsystem flock, an fcntl lock): held until this process exits."""
+    p = HOME / "releases/.release.lock"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    f = open(p, "a")
+    try:
+        fcntl.lockf(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        f.close()
+        raise Refused(f"另一个发布正在进行（{p} 被占用）")
+    return f
 
 
 def log(msg):
@@ -301,7 +352,7 @@ def probe(candidate, version):
             op.unlink(missing_ok=True)
 
 
-def deploy(args):
+def deploy(args, journal=Journal(None)):
     ident = identity()
     candidate = pathlib.Path(args.release).resolve()
     manifest = json.loads((candidate / "release.json").read_text())
@@ -341,6 +392,7 @@ def deploy(args):
     phase, backup = "drain", None
     try:
         log("drain")
+        journal("draining", target=str(candidate))
         done["drain"] = True
         control("POST")
         until, st = time.monotonic() + args.drain_s, {}
@@ -354,8 +406,10 @@ def deploy(args):
         log(f"drained: {st}")
 
         phase = "backup"
+        journal("stopping")
         done["stopped"] = True  # even a bootout that fails halfway may have stopped it
         launchd("stop", ident)
+        journal("backing_up")
         backup = HOME / f"backups/pre-{candidate.name}-{stamp}.sqlite3"
         backup.parent.mkdir(parents=True, exist_ok=True)
         src, dst = sqlite3.connect(DB), sqlite3.connect(backup)
@@ -369,6 +423,7 @@ def deploy(args):
         if check != "ok":
             raise Refused(f"the backup does not check out ({check})")
         save(backup=str(backup))
+        journal("backing_up", backup=str(backup))
         log(f"backup {backup}")
 
         phase = "probe"
@@ -376,6 +431,7 @@ def deploy(args):
         log(f"probe passed: {probe(candidate, version)}")
 
         phase = "switch"
+        journal("restarting", previous=str(old_hub))
         # a link is replaced atomically: it changed only once link() returned
         link(HOME / "current", candidate)
         done["hub_link"] = True
@@ -383,8 +439,10 @@ def deploy(args):
         done["web_link"] = True
         done["started"] = True  # the new version may run business from here: no going back
         launchd("start", ident)
+        journal("verifying")
         if not wait_health(lambda h: h.get("version") == version and h.get("build_commit") == manifest["commit"], 60):
             raise RuntimeError(f"{version} did not answer /healthz")
+        journal("committed")
         lift()
         h = wait_health(lambda h: h.get("version") == h.get("web_version") == version and h.get("drain") is not True
                         and (h.get("recovery") or {}).get("state") != "failed", 60)
@@ -395,18 +453,26 @@ def deploy(args):
             err = (f"{version} 启动后没有正常起来（{e}）；数据库可能已迁移（{schema_gate.state(DB)}），没有回滚，新版本保留，"
                    f"排空可能仍开着。发布前的备份在 {backup}")
             save(ok=False, degraded=True, phase=phase, error=err, db_after=schema_gate.state(DB))
+            journal("failed", error=f"升级已提交：{err}；结果见 {out}")
             log(err)
             return 3
         recovered, steps = restore(done, old_hub, old_web, old_manifest, backup, candidate, stamp, ident)
         save(ok=False, phase=phase, error=f"{type(e).__name__}: {e}", recovered=recovered, recovery=steps)
         if recovered:
             log(f"✗ {phase}: {e}; {old_hub.name} runs as before ({'; '.join(steps)})")
+            if done["stopped"]:
+                journal("rolled_back", error=f"{phase} 失败（{type(e).__name__}: {e}），已恢复到 {old_hub.name}：{'；'.join(steps)}。结果见 {out}")
+            else:
+                journal("failed", error=f"{phase} 失败（{type(e).__name__}: {e}），旧版本没有停止，没有改动。结果见 {out}")
             return 1
         log(f"✗ {phase}: {e}; and the old version did not come back: {'; '.join(steps)}")
+        journal("failed", error=f"{phase} 失败（{type(e).__name__}: {e}），旧版本没有恢复，需要手动处理：{'；'.join(steps)}。"
+                         f"发布前的备份：{backup or '尚未备份'}；结果见 {out}")
         return 2
     if helper_sha and sha256(helper) != helper_sha:
         log("warning: steve-keyhelper changed during the deploy")
     save(ok=True, health=h, db_after=schema_gate.state(DB), finished=time.strftime("%Y%m%d-%H%M%S"))
+    journal("succeeded")
     log(f"live: {h}")
     print(json.dumps(result, ensure_ascii=False))
     return 0
@@ -480,11 +546,21 @@ def main():
     d = sub.add_parser("deploy")
     d.add_argument("release")
     d.add_argument("--drain-s", type=int, default=600)
+    d.add_argument("--operation", help="the Hub's upgrade operation id: write each step into its journal")
     args = ap.parse_args()
+    journal = Journal(None)
     try:
-        return build(args) if args.cmd == "build" else deploy(args)
+        if args.cmd == "deploy":
+            journal = Journal(args.operation)
+        lock = release_lock()
+        try:
+            return build(args) if args.cmd == "build" else deploy(args, journal)
+        finally:
+            lock.close()
     except Refused as e:
         log(f"✗ {e}")
+        if journal.path and not journal.terminal():
+            journal("failed", error=f"没有改动：{e}")
         return 1
 
 

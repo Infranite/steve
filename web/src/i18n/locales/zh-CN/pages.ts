@@ -113,6 +113,8 @@ export default {
     reading: "正在读取升级信息…",
     wait: "请稍候…",
     check: "检查更新",
+    local: "本机签名构建：可在这里升级。会在这台机器上用 Release 标签构建（约 10–20 分钟，期间 Steve 照常服务），然后排空任务、备份数据库、切换并重启，服务会短暂中断。切换前出错会自动恢复旧版本和数据。",
+    runnerLog: "升级日志：{{log}}",
     managed: "托管安装：可在这里升级。升级前备份数据库，新版本验证不通过会自动恢复旧版本和数据。",
     checkedAt: "检查时间：{{time}}",
     releaseNotes: "查看 Release 说明",
@@ -166,7 +168,6 @@ export default {
   guide: {
     install: { managed: "托管安装", local_release: "本机签名构建", release_script: "发布脚本部署", source: "源码运行", external: "外部部署" },
     enable: {
-      local_release: "想以后在这里一键升级：先把保险箱密钥从 Keychain 迁到独立的 dir 存储（STEVE_VAULT_KEYSTORE=dir），再把服务改为运行 ops/run-managed.sh。密钥迁移需要单独规划，见 README 的「Managed Release bundles and automatic upgrades」一节；在那之前用本机构建方式升级。",
       release_script: "想以后在这里一键升级：把服务改为运行 ops/run-managed.sh（托管安装）；macOS 上还要先把密钥从 Keychain 迁到独立的 dir 存储。见 README 的「Managed Release bundles and automatic upgrades」一节。",
     },
     /* placeholders inside a command, for what Steve does not know */
@@ -226,6 +227,7 @@ export default {
     },
     stage: {
       staging: "下载并校验",
+      stagingLocal: "拉取标签并本机构建",
       draining: "等待任务停止",
       stopping: "停止旧版本",
       backingUp: "备份数据库",

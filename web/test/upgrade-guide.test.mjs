@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { stageIndex, upgradeGuide, upgradeStages, verifyUpgrade } from "../src/upgrade-guide.ts"
+import { checkStale, committedFailure, enableOneClick, stageIndex, stageLabel, upgradeGuide, upgradeStages, verifyUpgrade } from "../src/upgrade-guide.ts"
 
 const home = "/Users/example/.steve", repo = "/Users/example/Agents/steve"
 
@@ -53,4 +53,32 @@ test("upgraded only when the Hub, the served web, this page and health all agree
   assert.equal(verifyUpgrade("0.2.20", { ...healthy, recovery: { state: "partial" } }, "0.2.20").done, true)
   const down = verifyUpgrade("0.2.20", null, "0.2.20")
   assert.deepEqual([down.done, down.items[0].detail], [false, "暂时连不上服务"])
+})
+
+test("a local build's first step is the build, and it needs no migration to upgrade here", () => {
+  assert.equal(stageLabel("staging", "local_release"), "拉取标签并本机构建")
+  assert.equal(stageLabel("staging", "managed"), "下载并校验")
+  assert.equal(stageLabel("backingUp", "local_release"), "备份数据库")
+  assert.equal(enableOneClick("local_release"), undefined, "no Keychain migration asked of a local build any more")
+  assert.match(enableOneClick("release_script"), /run-managed\.sh/)
+})
+
+test("the instance manager's page checks by itself when the last answer is missing or old, never during an upgrade", () => {
+  const now = 10 * 3600_000
+  const capability = { managed: false, can_execute: true, reason: "", owner: true }
+  const check = (age) => ({ status: "up_to_date", checked_at: now - age, version: "0.2.0", release_url: null, notes: null, error: null })
+  assert.equal(checkStale({ capability, check: null, operation: null }, now), true)
+  assert.equal(checkStale({ capability, check: check(60_000), operation: null }, now), false)
+  assert.equal(checkStale({ capability, check: check(2 * 3600_000), operation: null }, now), true)
+  assert.equal(checkStale({ capability: { ...capability, owner: false }, check: null, operation: null }, now), false, "a check is the owner's to spend")
+  assert.equal(checkStale({ capability: { ...capability, owner: undefined }, check: null, operation: null }, now), false, "an older Hub doesn't say")
+  assert.equal(checkStale({ capability, check: null, operation: { phase: "staging" } }, now), false)
+  assert.equal(checkStale({ capability, check: null, operation: { phase: "failed" } }, now), true)
+})
+
+test("a failure after the switch is recognised in either language", () => {
+  assert.equal(committedFailure({ phase: "failed", error: "升级已提交：0.3.0 启动后没有正常起来" }), true)
+  assert.equal(committedFailure({ phase: "failed", error: "Upgrade committed, but the new version didn't come up" }), true)
+  assert.equal(committedFailure({ phase: "failed", error: "部署在切换前停止" }), false)
+  assert.equal(committedFailure({ phase: "rolled_back", error: "升级已提交" }), false)
 })

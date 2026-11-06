@@ -1,5 +1,6 @@
-//! How this Hub was installed, which decides how it is upgraded. Only a managed supervisor upgrades
-//! itself; the others get the commands for their own way (Settings · 关于 composes them with the version).
+//! How this Hub was installed, which decides how it is upgraded. A managed supervisor upgrades itself and
+//! a local_release install is upgraded by a one-shot runner job (`runner.rs`); the others get the commands
+//! for their own way (Settings · 关于 composes them with the version).
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
@@ -20,11 +21,11 @@ pub struct Install {
 impl Install {
     /// Why this page can't upgrade it itself, in the words Settings · 关于 and `steve_upgrade` show (the
     /// request's language; `/mcp` is zh-CN).
-    /// `None` for `managed`; a managed install the generic bundle can't serve has its own reason.
+    /// `None` for `managed` and `local_release`: whether those can run is decided by what the machine
+    /// has (`Updates::execution_reason`); a managed install the generic bundle can't serve has its own reason.
     pub fn reason(&self) -> Option<String> {
         Some(match self.kind {
-            "managed" => return None,
-            "local_release" => steve_i18n::t!("hub.upgrade.reason.local_release"),
+            "managed" | "local_release" => return None,
             "release_script" => steve_i18n::t!("hub.upgrade.reason.release_script"),
             "source" => steve_i18n::t!("hub.upgrade.reason.source"),
             _ => steve_i18n::t!("hub.upgrade.reason.external"),
@@ -202,8 +203,8 @@ mod tests {
             repo: None,
         };
         assert_eq!(install("managed").reason(), None);
+        assert_eq!(install("local_release").reason(), None);
         for (kind, says) in [
-            ("local_release", "Keychain"),
             ("release_script", "ops/release.sh"),
             ("source", "源码"),
             ("external", "部署系统"),

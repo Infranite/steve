@@ -311,7 +311,7 @@ export function SettingsView() {
     <nav className="flex flex-col gap-0.5" data-settings-nav>
       {CATS.map(([id, l, I, d]) => (
         <a key={id} href={"#/settings/" + id} data-settings-cat={id} className={cn("flex items-center gap-3 rounded-lg px-2.5 py-2 type-callout transition-colors hover:bg-accent", cur === id && "bg-accent font-medium")}>
-          <I className="size-4 shrink-0 text-muted-foreground" strokeWidth={1.5} /><span className="min-w-0 flex-1"><span className="block">{l}</span><span className="block truncate type-footnote font-normal text-muted-foreground md:hidden">{d}</span></span><ChevronRightIcon className="size-4 text-tertiary md:hidden" />
+          <I className="size-4 shrink-0 text-muted-foreground" strokeWidth={1.5} /><span className="min-w-0 flex-1"><span className="flex items-center gap-1.5">{l}{id === "about" && st.update && <span className="size-1.5 rounded-full bg-attention" data-settings-update-dot />}</span><span className="block truncate type-footnote font-normal text-muted-foreground md:hidden">{d}</span></span><ChevronRightIcon className="size-4 text-tertiary md:hidden" />
         </a>))}
     </nav>
   )

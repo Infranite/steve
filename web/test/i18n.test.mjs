@@ -160,7 +160,8 @@ const ALLOW = {
   "outputs.tsx": [["预览", "源码", "逐张", "连续"], "view mode ids (labels via t()); data-gallery in browser tests"],
   "stats/tables.tsx": [["　"], "an ideographic space that keeps an empty footer one line tall"],
   "vault/new-item.tsx": [["私钥", "恢复码", "内容"], "matched in the Hub's field labels"],
-  "version.tsx": [["拒绝", "升级已提交"], "matched in the Hub's upgrade error"],
+  "version.tsx": [["拒绝"], "matched in the Hub's upgrade error"],
+  "upgrade-guide.ts": [["升级已提交"], "matched in the Hub's upgrade error"],
 }
 
 const sources = (d) => readdirSync(d).flatMap((n) => {

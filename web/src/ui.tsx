@@ -327,17 +327,26 @@ export function Sidebar({ route: full }: { route: string }) {
         <div className="flex items-center justify-between px-1 pb-1 group-data-[collapsible=icon]:hidden"><span className="type-footnote text-muted-foreground">{t("core:sidebar.appearance")}</span><ThemeSwitch /></div>
         {/* ST-21: this page's frontend and the Hub's backend; the full numbers are in 设置 · 关于 */}
         <a href="#/settings/about" title={t("core:sidebar.versions", { web: LOADED_WEB_VERSION, hub: st.version || t("pages:version.fetching") })} className="block truncate rounded-lg px-2 py-0.5 type-footnote tabular-nums text-muted-foreground hover:bg-muted group-data-[collapsible=icon]:hidden" data-sidebar-versions>{t("core:sidebar.versions", { web: shortVersion(LOADED_WEB_VERSION), hub: st.version ? shortVersion(st.version) : t("core:sidebar.versionUnknown") })}</a>
+        <HubUpdateNotice />
         {!!st.webVersion && st.webVersion !== LOADED_WEB_VERSION && <a href="#/settings/about" className="block rounded-lg px-2 py-1 type-footnote text-primary hover:bg-muted group-data-[collapsible=icon]:hidden" data-sidebar-web-update>{t("core:sidebar.webUpdate")}</a>}
       </SidebarFooter>
       <SidebarRail />
     </UISidebar>
   )
 }
+/** A newer Steve release the Hub found on its own: leads to Settings · 关于, where it is installed. */
+export function HubUpdateNotice() {
+  const t = useT()
+  if (!st.update) return null
+  return <a href="#/settings/about" className="flex items-center gap-2 rounded-lg px-2 py-1 type-footnote text-primary hover:bg-muted group-data-[collapsible=icon]:hidden" data-sidebar-hub-update={st.update.version}>
+    <span className="size-1.5 shrink-0 rounded-full bg-attention" aria-hidden />{t("core:sidebar.hubUpdate", { version: st.update.version })}
+  </a>
+}
 export function MobileTabs({ route: full }: { route: string }) {
   const tr = useT()
   const route = full.split("?")[0]
   const n = pendingCards().length
-  const tabs = [{ h: "", l: tr("core:nav.chat"), I: MessageCircleIcon }, { h: "inbox", l: tr("core:nav.inbox"), I: InboxIcon, b: n }, { h: "items", l: tr("core:nav.items"), I: ListTodoIcon }, { h: "more", l: tr("core:nav.mine"), I: UserIcon }]
+  const tabs = [{ h: "", l: tr("core:nav.chat"), I: MessageCircleIcon }, { h: "inbox", l: tr("core:nav.inbox"), I: InboxIcon, b: n }, { h: "items", l: tr("core:nav.items"), I: ListTodoIcon }, { h: "more", l: tr("core:nav.mine"), I: UserIcon, dot: !!st.update }]
   const more = ["more", "projects", "sessions", "stats", "mail", "signals", "settings", "bots", "design", "auto", "plugins", "personas", "contacts", "orgs", "teams", "accounts", "vault", "devices", "knowledge", "github", "yolo"]
   return (
     <nav className="fixed inset-x-0 bottom-0 z-40 flex h-[60px] border-t bg-background/85 pb-[env(safe-area-inset-bottom)] backdrop-blur-xl md:hidden">
@@ -347,6 +356,7 @@ export function MobileTabs({ route: full }: { route: string }) {
           <a key={t.h} href={"#/" + t.h} data-tab={t.h || "chat"} className={cn("relative flex flex-1 flex-col items-center justify-center gap-1 text-[10.5px] font-medium", on ? "text-blue" : "text-muted-foreground")}>
             <t.I className="size-[22px]" strokeWidth={on ? 1.9 : 1.5} />{t.l}
             {t.b ? <span className="absolute left-1/2 top-1.5 ml-2 flex h-4 min-w-4 items-center justify-center rounded-full bg-attention px-1 text-[10px] font-semibold text-white">{t.b}</span> : null}
+            {"dot" in t && t.dot ? <span className="absolute left-1/2 top-2 ml-2.5 size-2 rounded-full bg-attention" data-tab-update-dot /> : null}
           </a>
         )
       })}
