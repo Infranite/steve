@@ -15,6 +15,7 @@ use steve_store::Store;
 use crate::ChannelResult;
 use crate::channel::{ChannelAdapter, InboundMessage, ProfileAdapter, SpaceEvent};
 use crate::conversations::Thread;
+use crate::ext::ChannelDecl;
 use crate::inbound::Inbound;
 use crate::media::MediaFetch;
 use crate::membership::SpaceChange;
@@ -53,6 +54,7 @@ struct Inner {
     gens: crate::conversations::Generations,
     profiles: BTreeMap<String, Arc<dyn ProfileAdapter>>,
     media: BTreeMap<String, Arc<dyn MediaFetch>>,
+    decls: BTreeMap<String, ChannelDecl>,
     party_hooks: Vec<Arc<dyn PartyHooks>>,
     names: Names,
     /// Where replies' knowledge is searched (the Hub sets the workspace's store; SQLite until then).
@@ -80,6 +82,7 @@ pub struct ChannelsBuilder {
     thread: Option<Arc<dyn Thread>>,
     profiles: BTreeMap<String, Arc<dyn ProfileAdapter>>,
     media: BTreeMap<String, Arc<dyn MediaFetch>>,
+    decls: BTreeMap<String, ChannelDecl>,
     party_hooks: Vec<Arc<dyn PartyHooks>>,
 }
 
@@ -95,6 +98,13 @@ impl ChannelsBuilder {
     /// the resources of messages its connections received are fetched.
     pub fn media(mut self, m: Arc<dyn MediaFetch>) -> Self {
         self.media.insert(m.adapter_id().to_string(), m);
+        self
+    }
+
+    /// Registers how a channel side behaves ([`ChannelDecl`]), under its adapter id: whether its
+    /// messages carry provider ids, how precise their times are, the system of its senders.
+    pub fn decl(mut self, d: ChannelDecl) -> Self {
+        self.decls.insert(d.adapter.clone(), d);
         self
     }
 
@@ -176,6 +186,7 @@ impl ChannelsBuilder {
             gens: Default::default(),
             profiles: self.profiles,
             media: self.media,
+            decls: self.decls,
             party_hooks: self.party_hooks,
             names: Names::default(),
             knowledge: std::sync::OnceLock::new(),
@@ -203,6 +214,7 @@ impl Channels {
             thread: None,
             profiles: BTreeMap::new(),
             media: BTreeMap::new(),
+            decls: BTreeMap::new(),
             party_hooks: vec![Arc::new(steve_modules::accounts::AccountHooks)],
         }
     }
@@ -308,6 +320,17 @@ impl Channels {
     /// The adapters whose messages' resources can be fetched.
     pub fn media_adapter_ids(&self) -> Vec<String> {
         self.0.media.keys().cloned().collect()
+    }
+
+    /// The declaration of the channel side serving `connections.adapter = id`, when one was
+    /// registered.
+    pub fn decl(&self, id: &str) -> Option<&ChannelDecl> {
+        self.0.decls.get(id)
+    }
+
+    /// The declared channel sides, by adapter id.
+    pub fn decls(&self) -> impl Iterator<Item = &ChannelDecl> {
+        self.0.decls.values()
     }
 
     pub(crate) fn party_hooks(&self) -> &[Arc<dyn PartyHooks>] {

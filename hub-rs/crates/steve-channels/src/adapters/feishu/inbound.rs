@@ -444,6 +444,7 @@ pub fn parse_receive(env: &Value, bot_open_id: &str) -> Result<Option<InboundMes
             .unwrap_or_else(steve_store::now),
         via: Some("ws".into()),
         raw: env.clone(),
+        source_id: None,
     }))
 }
 

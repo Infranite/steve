@@ -96,6 +96,9 @@ pub const MIGRATIONS: &[&str] = &[
     // 42: the connection a message was sent through, the provider's create time of a send, and
     // the remote's delivery ids per connection (`chan_message_seen`).
     include_str!("../migrations/042.sql"),
+    // 43: the content key of a message (matching copies without a provider id) and the connection
+    // that supplied a copy without one.
+    include_str!("../migrations/043.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).

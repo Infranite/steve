@@ -18,6 +18,7 @@ use steve_channels::channel::{ActAsUser, ActTarget, MessageRef, OutContent, Send
 use steve_channels::compose::H_SAFETY;
 use steve_channels::deliver::{Auth, Delivered, Generation, OutRequest, OutTarget, Purpose};
 use steve_channels::disclosure::{CHECK_HEAD, Disclosure, REWRITE_HEAD};
+use steve_channels::ext::{ChannelDecl, MessageIds};
 use steve_channels::fake::channel::FakeChannel;
 use steve_channels::flow_actions::{LateChannels, ReplyAs, SendToSpace, plan_of};
 use steve_channels::inbound::{LABEL_ECHO, LABEL_QUIET};
@@ -225,6 +226,11 @@ async fn setup() -> H {
 }
 
 async fn setup_with(as_user: Option<Arc<dyn ActAsUser>>) -> H {
+    setup_full(as_user, None).await
+}
+
+/// [`setup_with`], with a declaration of the fake channel side.
+async fn setup_full(as_user: Option<Arc<dyn ActAsUser>>, decl: Option<ChannelDecl>) -> H {
     let core = Arc::new(FakeCore::default());
     let flow_setup = FlowSetup::new(core.clone());
     let disclosure = Disclosure::with_models(Vec::new());
@@ -276,11 +282,14 @@ async fn setup_with(as_user: Option<Arc<dyn ActAsUser>>) -> H {
         .action(Arc::new(ReplyAs::new(replies.clone(), late.clone())))
         .action(Arc::new(SendToSpace::new(replies.clone(), late.clone())))
         .build(env.modules.clone(), Arc::new(LinearExecutor));
-    let ch = Channels::builder(env.modules.clone(), conns, Arc::new(flow.clone()))
+    let mut ch = Channels::builder(env.modules.clone(), conns, Arc::new(flow.clone()))
         .adapter(fake.clone())
         .responder(replies.clone())
-        .flow(flow.clone())
-        .build();
+        .flow(flow.clone());
+    if let Some(d) = decl {
+        ch = ch.decl(d);
+    }
+    let ch = ch.build();
     late.set(&ch);
     let api = api::routes(ch.clone()).with_state(env.modules.clone());
 
@@ -1933,6 +1942,47 @@ async fn a_send_without_a_message_id_is_found_and_recalled_by_its_delivery_id() 
     assert_eq!(*u.0.lock().unwrap(), vec![r]);
     assert!(h.fake.recalled.lock().unwrap().is_empty());
     assert_eq!(status(&h, &m), "recalled");
+}
+
+/// A send without a message id read back: through the connection it went out on, by its delivery
+/// id; through the bot, by its content (the bot's copy gives it the provider id); neither is a
+/// new message.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_send_without_a_message_id_read_back_is_an_echo_and_takes_the_provider_id() {
+    let decl = ChannelDecl::new(FakeChannel::ID)
+        .handle_system(FakeChannel::SYSTEM)
+        .message_ids(MessageIds::None);
+    let h = setup_full(Some(Arc::new(NoIds::default())), Some(decl)).await;
+    let m = sent_as_you(&h).await;
+    let messages = || count(&h, "SELECT count(*) FROM chan_messages", &[]);
+    let before = messages();
+    let you = || steve_channels::channel::Sender::new(FakeChannel::handle("upx"));
+
+    // your side reads it back under the delivery id the send returned
+    let back =
+        InboundMessage::without_id("C_DEV", you(), "在的", 1_700_000_000_500).source_id("dlv_1");
+    let r = push(&h, &h.me.clone(), back).await;
+    assert!(r.duplicate, "{r:?}");
+    assert_eq!(r.message_id, m);
+    assert_eq!(r.next, Next::Record(LABEL_ECHO));
+    assert_eq!(messages(), before);
+
+    // the bot sees it with a provider id: the same send, which now has the id
+    let mut seen = FakeChannel::message("C_DEV", "om_9", "upx", "在的");
+    seen.created = 1_700_000_000_700;
+    let oncall = h.oncall.clone();
+    let r = h.ch.on_inbound(WS, &oncall, seen).await.expect("inbound");
+    assert!(r.duplicate, "{r:?}");
+    assert_eq!(r.message_id, m);
+    assert_eq!(messages(), before);
+    assert_eq!(
+        row(
+            &h,
+            "SELECT external_id, status FROM chan_messages WHERE id = ?",
+            &[&m]
+        ),
+        vec![json!("om_9"), json!("sent")]
+    );
 }
 
 /// The thread a send reports fills an empty `thread_key` only (the test above): a reply in a

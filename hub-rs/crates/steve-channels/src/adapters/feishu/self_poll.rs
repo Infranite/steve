@@ -942,6 +942,7 @@ fn map_message(m: &Value, chat: &ChatRow, ids: &Ids) -> InboundMessage {
         created: ms(m, "create_time").unwrap_or_else(steve_store::now),
         via: Some(VIA.into()),
         raw: json!(m),
+        source_id: None,
     }
 }
 

@@ -38,6 +38,10 @@ pub struct NewInbound<'a> {
     pub attachments: &'a Value,
     pub mentions: &'a Value,
     pub created: i64,
+    /// [`crate::fallback::key_of`].
+    pub content_key: Option<&'a str>,
+    /// The connection that supplied it without a provider id.
+    pub fallback_from: Option<&'a str>,
 }
 
 /// Stores an inbound message; `None` when `(space, external_id)` is already there (the unique index
@@ -46,8 +50,8 @@ pub fn insert_inbound(tx: &Tx, n: &NewInbound) -> ChannelResult<Option<String>> 
     let id = uid("cm");
     let added = tx.execute(
         "INSERT OR IGNORE INTO chan_messages (id, workspace_id, space_id, external_id, thread_key, reply_to, direction,
-            sender_account_id, sender_party_id, text, attachments, mentions, status, created)
-         VALUES (?, ?, ?, ?, ?, ?, 'in', ?, ?, ?, ?, ?, 'received', ?)",
+            sender_account_id, sender_party_id, text, attachments, mentions, status, created, content_key, fallback_from)
+         VALUES (?, ?, ?, ?, ?, ?, 'in', ?, ?, ?, ?, ?, 'received', ?, ?, ?)",
         params![
             id,
             n.ws,
@@ -60,7 +64,9 @@ pub fn insert_inbound(tx: &Tx, n: &NewInbound) -> ChannelResult<Option<String>> 
             n.text,
             n.attachments.to_string(),
             n.mentions.to_string(),
-            n.created
+            n.created,
+            n.content_key,
+            n.fallback_from
         ],
     )?;
     if added == 0 {
@@ -344,7 +350,7 @@ fn msg_row(r: &rusqlite::Row) -> rusqlite::Result<ChanMessage> {
         mentions: jv(r.get(10)?),
         status: r.get(11)?,
         thread_key: r.get(12)?,
-        reply_to: r.get(13)?,
+        reply_to: crate::fallback::platform(r.get(13)?),
         event_id: r.get(14)?,
         work_item_id: r.get(15)?,
         decision_id: r.get(16)?,
@@ -393,7 +399,7 @@ pub(crate) fn message_ref(
             let handle: Option<String> = r.get(5)?;
             Ok(crate::channel::MessageRef {
                 space_ext_id: r.get(0)?,
-                ext_id: r.get::<_, Option<String>>(1)?.filter(|x| !x.is_empty()),
+                ext_id: crate::fallback::platform(r.get(1)?),
                 created: r.get(2)?,
                 created_exact: r.get(3)?,
                 sender: system

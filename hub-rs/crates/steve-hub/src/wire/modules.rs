@@ -539,6 +539,10 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
     for m in &declared.media {
         channels = channels.media(m.clone());
     }
+    // how each channel side's messages are told apart (provider ids, time precision, senders)
+    for d in declared.decls() {
+        channels = channels.decl(d.clone());
+    }
     let channels = channels
         .party_hooks(ports.hooks.clone())
         .flow(flow.clone())

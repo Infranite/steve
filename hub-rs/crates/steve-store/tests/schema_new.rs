@@ -68,7 +68,7 @@ fn at_version(v: usize) -> (tempfile::TempDir, std::path::PathBuf) {
 
 #[test]
 fn schema_version_is_23() {
-    assert_eq!(db::SCHEMA_VERSION, 42);
+    assert_eq!(db::SCHEMA_VERSION, 43);
 }
 
 #[test]
@@ -399,6 +399,40 @@ fn migration_42_records_how_a_message_was_sent() {
     )
     .unwrap();
     assert_eq!(count(&c, "SELECT count(*) FROM chan_message_seen"), 0);
+    // opening again runs nothing twice
+    db::migrate(&c).unwrap();
+    assert_eq!(
+        count(&c, "SELECT v FROM schema_version"),
+        db::SCHEMA_VERSION
+    );
+}
+
+#[test]
+fn migration_43_keeps_content_keys_of_messages() {
+    let (_dir, path) = at_version(42);
+    let c = Connection::open(&path).unwrap();
+    assert!(!columns(&c, "chan_messages").contains(&"content_key".to_string()));
+    db::migrate(&c).unwrap();
+    let cols = columns(&c, "chan_messages");
+    assert!(cols.contains(&"content_key".to_string()), "{cols:?}");
+    assert!(cols.contains(&"fallback_from".to_string()), "{cols:?}");
+    assert_eq!(
+        count(
+            &c,
+            "SELECT count(*) FROM sqlite_master WHERE type = 'index' AND name = 'chan_messages_content_key'"
+        ),
+        1
+    );
+    // a lookup by space and key uses the index
+    let plan: String = c
+        .query_row(
+            "EXPLAIN QUERY PLAN SELECT id FROM chan_messages
+              WHERE space_id = 'sp1' AND content_key = 'v1:k' AND created BETWEEN 1 AND 2",
+            [],
+            |r| r.get(3),
+        )
+        .unwrap();
+    assert!(plan.contains("chan_messages_content_key"), "{plan}");
     // opening again runs nothing twice
     db::migrate(&c).unwrap();
     assert_eq!(
