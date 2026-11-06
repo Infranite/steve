@@ -1326,7 +1326,7 @@ async fn a_refused_reopen_does_not_wedge_the_session() {
     until("refused open reported", || h.ends().len() == ends + 1).await;
     let (session, stop, error) = h.ends().last().unwrap().clone();
     assert_eq!((session.as_str(), stop.as_str()), (S, "error"));
-    assert!(error.unwrap().contains("could not open"));
+    assert!(error.unwrap().contains("没能重新打开会话"));
     assert_eq!(h.phase(), "released", "back where it was, not opening");
     let state: String = h.q(
         "SELECT state FROM node_commands WHERE method='open_session' ORDER BY created DESC, rowid DESC LIMIT 1",

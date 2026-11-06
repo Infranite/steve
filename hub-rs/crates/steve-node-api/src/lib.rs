@@ -18,6 +18,7 @@ pub mod glob;
 pub mod ids;
 pub mod ports;
 pub mod run;
+pub mod stop;
 pub mod tools;
 pub mod workspace;
 
@@ -31,6 +32,7 @@ pub use events::*;
 pub use ids::*;
 pub use ports::*;
 pub use run::*;
+pub use stop::*;
 pub use tools::*;
 pub use workspace::*;
 

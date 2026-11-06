@@ -630,18 +630,12 @@ fn ended(
         Some(Stop::Offline) => {
             c.outcome = Outcome::TimedOut;
             c.stop_reason = "offline".into();
-            c.error = Some(ApiError::new(
-                ErrorCode::Offline,
-                "the Hub was unreachable past the lease",
-            ));
+            c.error = Some(NodeStop::HubUnreachable.error());
         }
         Some(Stop::Output) => {
             c.outcome = Outcome::Cancelled;
             c.stop_reason = "max_output".into();
-            c.error = Some(ApiError::new(
-                ErrorCode::Exhausted,
-                "the output limit was reached",
-            ));
+            c.error = Some(NodeStop::OutputLimit.error());
         }
         Some(Stop::Cancel | Stop::Deadline) | None => {}
     }
@@ -662,23 +656,17 @@ fn completion(
         r::RunStatus::Budget(r::BudgetHit::Time) => (
             Outcome::TimedOut,
             "deadline",
-            Some(ApiError::new(ErrorCode::Expired, "past the job's deadline")),
+            Some(NodeStop::JobDeadline.error()),
         ),
         r::RunStatus::Budget(r::BudgetHit::Idle) => (
             Outcome::TimedOut,
             "idle",
-            Some(ApiError::new(
-                ErrorCode::Expired,
-                "the harness said nothing for too long",
-            )),
+            Some(NodeStop::HarnessIdle.error()),
         ),
         r::RunStatus::Budget(_) => (
             Outcome::Failed,
             "max_turns",
-            Some(ApiError::new(
-                ErrorCode::Exhausted,
-                "research budget reached",
-            )),
+            Some(NodeStop::ResearchBudget.error()),
         ),
         r::RunStatus::Violated(v) => (
             Outcome::Failed,
