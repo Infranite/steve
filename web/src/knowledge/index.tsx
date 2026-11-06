@@ -18,7 +18,7 @@ import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui
 import { Page, SectionLabel, Group, Row, Segmented, Chips, Empty, StatusDot, go } from "@/ui"
 import { toast, tm } from "@/store"
 import { useUploads } from "@/attach"
-import { kb, levelLabel, visLabel, memKind, recordOf, MEM_KINDS, SOURCE_KIND, LEVEL_DOT, type Candidate, type DocBrief, type Hit, type KbSource, type Mem } from "@/api/knowledge"
+import { kb, levelLabel, visLabel, memKind, recordOf, MEM_KINDS, SOURCE_KIND, LEVEL_DOT, type Candidate, type ExpiredCandidate, type DocBrief, type Hit, type KbSource, type Mem } from "@/api/knowledge"
 import { KbGate, LevelSel, VisSel, errMsg } from "@/knowledge/fields"
 import { DocView, NoteView } from "@/knowledge/doc"
 import { t as tt, useT } from "@/i18n"
@@ -26,7 +26,7 @@ import { t as tt, useT } from "@/i18n"
 /* tab values are ids (also data-seg / data-kb-tab); the labels come from knowledge:tab.* */
 type Tab = "搜索" | "长期记忆" | "知识条目" | "笔记与文档" | "来源" | "待确认"
 type RecordName = "长期记忆" | "知识条目"
-let tab: Tab = "长期记忆", query = ""
+let tab: Tab = "长期记忆", query = "", tabHash = ""
 
 /** `#/knowledge`, `#/knowledge?mem=…`, `#/knowledge/doc/:id?seq=`, `#/knowledge/note/:id` */
 export function KnowledgeView({ sub, id }: { sub?: string; id?: string }) {
@@ -41,6 +41,9 @@ function KnowledgeHome() {
   const [, f] = useState(0), r = () => f((x) => x + 1)
   const focusMem = hashParam("mem")
   if (focusMem && tab !== "长期记忆" && tab !== "知识条目") tab = "长期记忆"
+  /* 待处理's line “N 条记忆待确认” opens the batch page (once per visit of that link) */
+  if (hashParam("tab") === "pending" && tabHash !== location.hash) { tab = "待确认"; tabHash = location.hash }
+  else if (hashParam("tab") !== "pending") tabHash = ""
   const [pend, setPend] = useState(0)
   const loadPend = useCallback(() => { kb.candidates().then((xs) => setPend(xs.length), () => {}) }, [])
   useEffect(loadPend, [loadPend])
@@ -349,7 +352,7 @@ function CandidatesTab({ onChange }: { onChange: (n: number) => void }) {
   }
   if (err) return <Empty title={t("knowledge:cand.failed")} sub={err} />
   if (!xs) return <Loading />
-  if (!xs.length) return <Empty title={t("knowledge:cand.noneTitle")} sub={t("knowledge:cand.noneSub")} />
+  if (!xs.length) return <><Empty title={t("knowledge:cand.noneTitle")} sub={t("knowledge:cand.noneSub")} /><ExpiredCandidates onRestored={load} /></>
   /* the batch call takes at most 50 ids */
   const ids = xs.slice(0, 50).map((c) => c.mem.id)
   return (
@@ -366,6 +369,32 @@ function CandidatesTab({ onChange }: { onChange: (n: number) => void }) {
           </span>
         </Row>))}</Group>
       <div className="mt-2 px-1 type-footnote text-muted-foreground">{t("knowledge:cand.footer")}</div>
+      <ExpiredCandidates onRestored={load} />
+    </section>
+  )
+}
+
+/** candidates that expired unanswered, folded away; one click puts one back */
+function ExpiredCandidates({ onRestored }: { onRestored: () => void }) {
+  const t = useT()
+  const [xs, setXs] = useState<ExpiredCandidate[]>([]), [open, setOpen] = useState(false), [busy, setBusy] = useState(false)
+  const load = useCallback(() => kb.expired().then(setXs, () => setXs([])), [])
+  useEffect(() => { void load() }, [load])
+  useHubEvents(["mm"], () => void load())
+  if (!xs.length) return null
+  const restore = async (id: string) => {
+    if (busy) return
+    setBusy(true)
+    try { await kb.restore(id); toast(t("knowledge:cand.restored")); await load(); onRestored() } catch (e) { toast(errMsg(e)) } finally { setBusy(false) }
+  }
+  return (
+    <section className="mt-6" data-cand-expired>
+      <button type="button" className="px-1 type-footnote text-muted-foreground hover:underline" onClick={() => setOpen((o) => !o)} data-cand-expired-toggle>{t("knowledge:cand.expired", { count: xs.length })}</button>
+      {open && <Group className="mt-2">{xs.map((c) => (
+        <Row key={c.mem.id} data-cand-expired-row={c.mem.id} className={STACK} title={c.mem.text}
+          sub={<span className="flex flex-col gap-0.5"><span>{t("knowledge:cand.source", { kind: memKind(c.mem.kind), source: c.origin_label || c.mem.source_label })}</span>{c.evidence && <span className="break-words">{t("knowledge:cand.evidence", { evidence: c.evidence })}</span>}</span>}>
+          <Button size="xs" variant="outline" disabled={busy} onClick={() => void restore(c.mem.id)} data-cand-restore>{t("knowledge:cand.restore")}</Button>
+        </Row>))}</Group>}
     </section>
   )
 }

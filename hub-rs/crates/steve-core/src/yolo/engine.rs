@@ -7,8 +7,12 @@
 //!   runs it when it is due, after checking again that the card is still open, YOLO still applies and
 //!   the judgement is the same — otherwise it is cancelled. Scheduled rows live in the database, so a
 //!   restart picks them up; each runs once.
-//! - Right before answering, the facts are gathered and judged again; a different answer for an
-//!   immediate verdict means the executor is confused and trips breaker B5.
+//! - Right before answering, the facts are gathered and judged again. An immediate verdict that
+//!   turned into “not now” (the user typed meanwhile) is left for the next look, one that turned
+//!   into “leave it to you” is recorded so; only a different answer means the executor is confused
+//!   and trips breaker B5. Errors before anything was answered trip it when they repeat
+//!   ([`B5_ERRORS`] within [`B5_WINDOW_MS`]); a failure answering a card, or recording an answer
+//!   already given, trips it at once.
 //! - Tool permission requests are answered only while the runner waits for them: the Hub hands the
 //!   full tool input over ([`Engine::stash`]) and arms it once the runner registered the request
 //!   ([`Engine::arm`]); after a restart those requests are gone anyway.
@@ -34,6 +38,10 @@ use crate::repo::Decision;
 pub const TICK: Duration = Duration::from_secs(15);
 /// The workspace setting with the user's [`Policy`] (JSON; missing keys keep their default).
 pub const POLICY_KEY: &str = "yolo.policy";
+/// B5: this many executor errors before answering anything…
+pub const B5_ERRORS: usize = 3;
+/// …within this window trip the breaker.
+pub const B5_WINDOW_MS: i64 = 10 * 60_000;
 
 /// The untruncated tool call of a permission request (steve-acp `PermissionRequest`).
 #[derive(Debug, Clone, PartialEq)]
@@ -69,6 +77,8 @@ struct Inner {
     recall: std::sync::OnceLock<Arc<dyn super::undo::Recall>>,
     /// Decisions being looked at right now (an event and the tick may arrive together).
     inflight: Mutex<HashSet<String>>,
+    /// When the executor failed before answering, per workspace (B5; not kept over a restart).
+    errors: Mutex<HashMap<String, Vec<i64>>>,
 }
 
 /// The executor. Cheap to clone.
@@ -129,6 +139,7 @@ impl Engine {
             answers: Mutex::new(HashMap::new()),
             recall: std::sync::OnceLock::new(),
             inflight: Mutex::new(HashSet::new()),
+            errors: Mutex::new(HashMap::new()),
         }))
     }
 
@@ -199,7 +210,7 @@ impl Engine {
         }
     }
 
-    /// [`Engine::consider`] for a background caller: errors trip B5 and are logged.
+    /// [`Engine::consider`] for a background caller: errors are logged and trip B5 when they repeat.
     pub fn kick(&self, id: &str) -> Option<ActionRow> {
         let _permit = self.core().store().store().try_activity("yolo")?;
         match self.consider(id) {
@@ -211,7 +222,7 @@ impl Engine {
         }
     }
 
-    fn fail_hard(&self, id: &str, e: &ApiError) {
+    pub(super) fn fail_hard(&self, id: &str, e: &ApiError) {
         let ws = self
             .core()
             .store()
@@ -219,14 +230,59 @@ impl Engine {
             .ok()
             .flatten()
             .map(|d| d.workspace_id);
-        match ws {
-            Some(ws) => {
-                if let Err(e2) = self.yolo().executor_failed(&ws, &e.to_string()) {
-                    tracing::error!("yolo trip after {e}: {e2}");
-                }
-            }
-            None => tracing::error!("yolo {id}: {e}"),
+        let Some(ws) = ws else {
+            tracing::error!("yolo {id}: {e}");
+            return;
+        };
+        tracing::error!("yolo executor in {ws} on {id}: {e}");
+        let now = self.yolo().now();
+        let n = {
+            let mut errs = lock(&self.0.errors);
+            let xs = errs.entry(ws.clone()).or_default();
+            xs.retain(|t| now - *t < B5_WINDOW_MS);
+            xs.push(now);
+            xs.len()
+        };
+        if n < B5_ERRORS {
+            return;
         }
+        lock(&self.0.errors).remove(&ws);
+        if let Err(e2) = self.yolo().executor_failed(&ws, &e.to_string()) {
+            tracing::error!("yolo trip after {e}: {e2}");
+        }
+    }
+
+    /// Records `v` (a decline) for `d`: the card is left to the user, and a stuck item leaves YOLO.
+    fn leave(
+        &self,
+        d: &Decision,
+        window: Option<&str>,
+        v: &Verdict,
+        progress: &Value,
+    ) -> ApiResult<ActionRow> {
+        let Verdict::Decline { rule, reason } = v else {
+            return Err(ApiError::Internal("not a decline".into()));
+        };
+        let a = self.yolo().record(&ledger::new_action(
+            d, window, v, "declined", None, progress,
+        ))?;
+        let item_out = match rule.as_str() {
+            "continue.stuck" | "accept.stuck" => Some(STUCK_REASON),
+            "release.rebase" => Some(REBASE_REASON),
+            _ => None,
+        };
+        if let (Some(why), Some(item)) = (item_out, d.item_id.as_deref()) {
+            let title = self
+                .core()
+                .store()
+                .item(item)
+                .map_err(ce)?
+                .map(|i| i.title)
+                .unwrap_or_default();
+            self.yolo().item_off(&d.workspace_id, item, &title, why)?;
+        }
+        tracing::info!(decision = d.id, rule, reason, "yolo leaves it to you");
+        Ok(a)
     }
 
     /// Looks at decision `id` once: answers it, schedules it, leaves it to the user (recorded once),
@@ -303,33 +359,7 @@ impl Engine {
         let window = window.map(|w| w.id);
         match &v {
             Verdict::Off | Verdict::Wait { .. } => Ok(None),
-            Verdict::Decline { rule, reason } => {
-                let a = self.yolo().record(&ledger::new_action(
-                    &d,
-                    window.as_deref(),
-                    &v,
-                    "declined",
-                    None,
-                    &g.progress,
-                ))?;
-                let item_out = match rule.as_str() {
-                    "continue.stuck" | "accept.stuck" => Some(STUCK_REASON),
-                    "release.rebase" => Some(REBASE_REASON),
-                    _ => None,
-                };
-                if let (Some(why), Some(item)) = (item_out, d.item_id.as_deref()) {
-                    let title = self
-                        .core()
-                        .store()
-                        .item(item)
-                        .map_err(ce)?
-                        .map(|i| i.title)
-                        .unwrap_or_default();
-                    self.yolo().item_off(&d.workspace_id, item, &title, why)?;
-                }
-                tracing::info!(decision = id, rule, reason, "yolo leaves it to you");
-                Ok(Some(a))
-            }
+            Verdict::Decline { .. } => self.leave(&d, window.as_deref(), &v, &g.progress).map(Some),
             Verdict::Mute { .. } => Ok(Some(self.yolo().record(&ledger::new_action(
                 &d,
                 window.as_deref(),
@@ -349,19 +379,19 @@ impl Engine {
                     &g.progress,
                 ))?))
             }
-            Verdict::Auto { .. } => self.execute(&d, &v, window.as_deref(), None).map(Some),
+            Verdict::Auto { .. } => self.execute(&d, &v, window.as_deref(), None),
         }
     }
 
     /// Answers `d` as judged in `v` (`scheduled`: the row written when it was scheduled). Judges
-    /// again first; returns the settled action.
-    fn execute(
+    /// again first; returns the settled action (none: an immediate answer that is “not now” after all).
+    pub(super) fn execute(
         &self,
         d: &Decision,
         v: &Verdict,
         window: Option<&str>,
         scheduled: Option<ActionRow>,
-    ) -> ApiResult<ActionRow> {
+    ) -> ApiResult<Option<ActionRow>> {
         let policy = self.policy(&d.workspace_id);
         let again = self.gather(d, &policy)?;
         let v2 = judge(&again.facts, &policy, self.yolo().env());
@@ -376,7 +406,7 @@ impl Engine {
             {
                 let due = self.yolo().now() + (*delay_s).max(1) as i64 * 1000;
                 self.yolo().postpone(&a.id, due, reason)?;
-                return self.reread(&a.id);
+                return self.reread(&a.id).map(Some);
             }
             if let Some(a) = scheduled {
                 let why = match &v2 {
@@ -386,16 +416,29 @@ impl Engine {
                     _ => "执行前复查结果变了".to_string(),
                 };
                 self.yolo().finish(&a.id, "cancelled", Some(&why))?;
-                return self.reread(&a.id);
+                return self.reread(&a.id).map(Some);
             }
-            let msg = format!(
-                "「{}」判定为 {}，执行前复查为 {}",
-                d.question,
-                v.rule(),
-                v2.rule()
-            );
-            self.yolo().executor_failed(&d.workspace_id, &msg)?;
-            return Err(ApiError::Internal(msg));
+            match &v2 {
+                // not now (the user typed meanwhile, YOLO went off): the next look judges it again
+                Verdict::Wait { .. } | Verdict::Off => return Ok(None),
+                // left to you after all: recorded like any decline
+                Verdict::Decline { .. } => {
+                    return self.leave(d, window, &v2, &again.progress).map(Some);
+                }
+                // the same answer by another rule: answered as judged now
+                Verdict::Auto { choice, .. } if matches!(v, Verdict::Auto { choice: c, .. } if c == choice) =>
+                    {}
+                _ => {
+                    let msg = format!(
+                        "「{}」判定为 {}，执行前复查为 {}",
+                        d.question,
+                        v.rule(),
+                        v2.rule()
+                    );
+                    self.yolo().executor_failed(&d.workspace_id, &msg)?;
+                    return Ok(None);
+                }
+            }
         }
         let Verdict::Auto { choice, text, .. } = &v2 else {
             return Err(ApiError::Internal("not an answer".into()));
@@ -415,13 +458,26 @@ impl Engine {
             }
         };
         match self.answer(d, choice, text.as_deref().unwrap_or("")) {
-            Ok(after) if after.status == "expired" => {
-                self.yolo()
-                    .finish(&a.id, "cancelled", Some("权限请求已经失效"))?;
-            }
+            /* the card was answered: a failure recording it trips B5 at once, as a failure
+            answering it does (only errors before anything was answered wait for a repeat) */
             Ok(after) => {
-                self.record_answer(&after, &a)?;
-                self.yolo().finish(&a.id, "decided", None)?;
+                let settled = if after.status == "expired" {
+                    self.yolo()
+                        .finish(&a.id, "cancelled", Some("权限请求已经失效"))
+                        .map(drop)
+                } else {
+                    self.record_answer(&after, &a)
+                        .and_then(|()| self.yolo().finish(&a.id, "decided", None).map(drop))
+                };
+                if let Err(e) = settled {
+                    self.forget_tool(&d.id);
+                    self.yolo().executor_failed(
+                        &d.workspace_id,
+                        &format!("「{}」已经回答，记录时出错：{e}", d.question),
+                    )?;
+                    /* tripped here: not counted again as an error before answering */
+                    return self.reread(&a.id).map(Some);
+                }
             }
             Err(e) if already_handled(&e) => {
                 self.yolo()
@@ -435,7 +491,7 @@ impl Engine {
             }
         }
         self.forget_tool(&d.id);
-        self.reread(&a.id)
+        self.reread(&a.id).map(Some)
     }
 
     fn reread(&self, action: &str) -> ApiResult<ActionRow> {
@@ -512,7 +568,7 @@ impl Engine {
             checks: a.checks.clone(),
         };
         let window = a.window_id.clone();
-        self.execute(&d, &v, window.as_deref(), Some(a)).map(Some)
+        self.execute(&d, &v, window.as_deref(), Some(a))
     }
 
     /// One pass: scheduled actions that are due, then every open card where YOLO may apply (cards

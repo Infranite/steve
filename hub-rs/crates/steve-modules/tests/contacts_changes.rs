@@ -876,3 +876,50 @@ async fn a_draft_is_stored_in_zh_cn_from_an_english_request() {
     .unwrap_err();
     assert!(matches!(e, ApiError::NotFound(_)), "{e:?}");
 }
+
+/// The lost update: a field edited by hand after the change is kept by its undo (and named); the
+/// others still holding what the change wrote go back.
+#[tokio::test]
+async fn an_undo_keeps_a_field_edited_since() {
+    let t = env();
+    let r = app(&t);
+    let w = world(&r).await;
+    let p = draft(
+        &t,
+        "contact",
+        Some(&w.lilei),
+        "李雷是同事，很重要",
+        json!([{ "op": "set", "key": "rels", "value": ["同事"] }, { "op": "set", "key": "important", "value": "是" }]),
+    )
+    .await;
+    apply(&t, &p.id).unwrap();
+    ok(
+        &r,
+        "PATCH",
+        &format!("/contacts/{}", w.lilei),
+        json!({ "important": false }),
+    )
+    .await;
+    ok(
+        &r,
+        "PATCH",
+        &format!("/contacts/{}", w.lilei),
+        json!({ "rels": ["friend"] }),
+    )
+    .await;
+    // the rels went back to what they were after this; the importance is what the change wrote again
+    ok(
+        &r,
+        "PATCH",
+        &format!("/contacts/{}", w.lilei),
+        json!({ "important": true }),
+    )
+    .await;
+    let out = changes::undo(&t.modules, &me(), &p.id)
+        .expect("stored changeset")
+        .expect("undo");
+    assert_eq!(out["kept"], json!(["和你的关系"]));
+    let c = ok(&r, "GET", &format!("/contacts/{}", w.lilei), Value::Null).await;
+    assert_eq!(c["rels"], json!(["friend"]), "your edit is kept");
+    assert_eq!(c["important"], false, "still the change's value: put back");
+}

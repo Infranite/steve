@@ -1022,3 +1022,170 @@ fn a_closing_left_waiting_despite_a_recorded_no_closes_on_the_next_check() {
     let i = k.db().item(&x.id).unwrap().unwrap();
     assert_eq!((i.status.as_str(), i.phase.as_str()), ("done", "closed"));
 }
+
+/// [`delivered_in_git`] delivered again with the worktree as it is, so the closing holds its frozen
+/// fingerprint (as `steve_deliver` leaves it); a release script that waits. Returns the acceptance.
+fn frozen_in_git(k: &Kit) -> (super::Delivered, std::path::PathBuf, String) {
+    let (x, wt) = delivered_in_git(k, true);
+    std::fs::write(
+        k.home().join("release.sh"),
+        super::fake_release_script("exit 0\n"),
+    )
+    .unwrap();
+    k.core.tx().lc_invalidate(&x.id, "有新的交付").unwrap();
+    let d = k.decision(
+        &x.id,
+        Some(&x.session),
+        "accept",
+        "item",
+        &["pass", "rework"],
+    );
+    k.core
+        .tx()
+        .lc_request_complete(
+            &x.id,
+            "dev",
+            crate::cycle::Policy::Human,
+            false,
+            "交付",
+            Some(d.clone()),
+            vec![],
+        )
+        .unwrap();
+    (x, wt, d)
+}
+
+fn release_cards(k: &Kit, item: &str) -> Vec<crate::repo::Decision> {
+    k.db()
+        .decisions_of_item(item)
+        .unwrap()
+        .into_iter()
+        .filter(|d| d.kind == "approve" && d.subject_type == "release")
+        .collect()
+}
+
+#[test]
+fn accept_and_release_starts_the_release_without_a_round_of_the_agent() {
+    let k = Kit::new();
+    let (x, _, d) = frozen_in_git(&k);
+    let prompts = k.rt.prompts_of(&x.session).len();
+    k.core
+        .resolve(&d, "pass", crate::orchestrator::ACCEPT_AND_RELEASE, "me")
+        .unwrap();
+    let cards = release_cards(&k, &x.id);
+    assert_eq!(cards.len(), 1);
+    let r = &cards[0];
+    assert_eq!(r.status, "resolved");
+    assert_eq!(r.result["approved"], true);
+    assert_eq!(r.result["with_accept"], true);
+    assert_eq!(r.result["outcome"], "releasing");
+    assert_eq!(
+        k.db().decision(&d).unwrap().unwrap().result["release"],
+        "started"
+    );
+    let frozen = crate::cycle::closing_of(&k.db().item(&x.id).unwrap().unwrap())
+        .unwrap()
+        .fingerprint;
+    assert_eq!(r.result["fingerprint"].as_str(), frozen.as_deref());
+    assert!(
+        k.core
+            .tx()
+            .st
+            .releasing
+            .as_ref()
+            .is_some_and(|r| r.item == x.id)
+    );
+    // the agent is not asked to publish: no new prompt, a note waits for its next message
+    assert_eq!(k.rt.prompts_of(&x.session).len(), prompts);
+    assert!(
+        k.core
+            .with_steve_note(&x.session, "")
+            .contains("已经开始发布")
+    );
+    assert_eq!(k.status(&x.id).2, "正在发布");
+    assert!(
+        k.timeline_texts(&x.id)
+            .iter()
+            .any(|t| t.starts_with("验收并发布 "))
+    );
+    k.core.tx().st.releasing = None;
+}
+
+#[test]
+fn accept_and_release_falls_back_to_the_agent_when_the_branch_moved_or_a_release_runs() {
+    // the worktree changed after the delivery was frozen: the agent's own request (a card) decides
+    let k = Kit::new();
+    let (x, wt, d) = frozen_in_git(&k);
+    std::fs::write(wt.join("x.txt"), "changed\n").unwrap();
+    k.core
+        .resolve(&d, "pass", crate::orchestrator::ACCEPT_AND_RELEASE, "me")
+        .unwrap();
+    assert!(release_cards(&k, &x.id).is_empty());
+    assert!(k.core.tx().st.releasing.is_none());
+
+    // another release is running
+    let k = Kit::new();
+    let (x, _, d) = frozen_in_git(&k);
+    k.core.tx().st.releasing = Some(crate::Releasing {
+        token: "t".into(),
+        item: "ST-99".into(),
+        generation: 1,
+        hold_since: None,
+    });
+    k.core
+        .resolve(&d, "pass", crate::orchestrator::ACCEPT_AND_RELEASE, "me")
+        .unwrap();
+    assert!(release_cards(&k, &x.id).is_empty());
+    assert!(
+        k.rt.prompts_of(&x.session)
+            .last()
+            .unwrap()
+            .starts_with("验收通过。确认改动都已提交到 steve/"),
+        "the agent is asked to request it"
+    );
+    k.core.tx().st.releasing = None;
+}
+
+#[test]
+fn accept_without_release_waives_it() {
+    let k = Kit::new();
+    let (x, _, d) = frozen_in_git(&k);
+    k.core.resolve(&d, "pass", "no-release", "me").unwrap();
+    assert!(release_cards(&k, &x.id).is_empty());
+    assert!(
+        k.db()
+            .store()
+            .items()
+            .operations(&x.id, k.db().item(&x.id).unwrap().unwrap().cycle)
+            .unwrap()
+            .iter()
+            .any(|o| o.kind == "release" && o.status == "waived")
+    );
+}
+
+#[test]
+fn accept_and_release_with_a_rebase_conflict_sends_the_agent_to_steve_publish_only() {
+    let k = Kit::new();
+    let (x, _, d) = frozen_in_git(&k);
+    // main moved under the branch's own file: the rebase before the release conflicts
+    let r = k.home().join("repo");
+    std::fs::write(r.join("x.txt"), "theirs\n").unwrap();
+    g(&r, &["add", "."]);
+    g(&r, &["commit", "-q", "-m", "main x"]);
+    k.core
+        .resolve(&d, "pass", crate::orchestrator::ACCEPT_AND_RELEASE, "me")
+        .unwrap();
+    assert!(k.core.tx().st.releasing.is_none());
+    let last = k.rt.prompts_of(&x.session).last().cloned().unwrap();
+    assert!(
+        last.contains("有冲突") && last.contains("再用 steve_publish 请求发布"),
+        "{last}"
+    );
+    assert!(!last.contains("已经开始发布"), "{last}");
+    // and nothing waits to tell it later that the release started
+    assert_eq!(k.core.with_steve_note(&x.session, "next"), "next");
+    assert_eq!(
+        release_cards(&k, &x.id)[0].result["outcome"],
+        "not_released"
+    );
+}

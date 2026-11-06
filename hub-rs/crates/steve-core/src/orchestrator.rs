@@ -27,6 +27,10 @@ const PRO: [&str; 3] = ["只在必要时", "适中", "积极"];
 const DAY: i64 = 24 * 3_600_000;
 const INTERRUPTED: &str = "Hub 重启时这个会话正在运行，这一回合被中断了";
 
+/// The `text` of an acceptance's `pass` that also starts the release (验收并发布); `no-release`
+/// accepts it without one (验收，先不发布).
+pub const ACCEPT_AND_RELEASE: &str = "release";
+
 /// Put before a message the agent had already been given when the Hub stopped (its dispatch was
 /// submitted): it may be done or half done, so it comes back to be checked, never redone blindly.
 pub const RESUMED_NOTE: &str = "（以下是 Hub 重启前已经发给你的消息，你可能已经做了一部分或全部。只用来核对进度：先确认它的结果，已经做完的不要重做，没做完的接着做。）";
@@ -1804,10 +1808,14 @@ impl Tx<'_> {
             return Ok(());
         };
         let mark = self.st.pending.remove(&session.id).map(|(m, _)| m);
-        /* the turn answered something forwarded from the conversation: its reply goes back there */
+        /* the turn answered something forwarded from the conversation: its reply goes back there.
+         * A question you asked it there (not an instruction) is answered on purpose, not continued */
+        let mut answered_you = false;
         if t.stop_reason != "cancelled"
-            && let Some(r) = self.c.forwarded_take(item_id)
+            && let Some(f) = self.c.forwarded_take(item_id)
         {
+            answered_you = f.asked;
+            let r = f.mid;
             let last = self.last_agent_text(&session.id)?;
             if !last.is_empty() {
                 flow_quiet(
@@ -1857,7 +1865,12 @@ impl Tx<'_> {
                 };
                 let why = format!("Agent 停下来了，没有交付也没有提问{tail}");
                 /* Steve looks first: done by the project's rule, or worth another go */
-                let stop = crate::takeover::Stop::Stopped { why, last };
+                let stop = crate::takeover::Stop::Stopped {
+                    why,
+                    whole: self.last_turn_agent_text(&session.id, crate::takeover::WHOLE_CHARS)?,
+                    last,
+                    answered_you,
+                };
                 match self.takeover(item_id, &session.id, stop)? {
                     Some(why) => why,
                     None => return Ok(()),
@@ -1868,15 +1881,28 @@ impl Tx<'_> {
     }
 
     pub(crate) fn last_agent_text(&self, sid: &str) -> Result<String> {
+        self.agent_text_back(sid, 400, false)
+    }
+
+    /// What the agent said in the turn that just ended (since the last message it was sent), up to
+    /// about `n` characters of its end: never words of an earlier turn.
+    pub(crate) fn last_turn_agent_text(&self, sid: &str, n: usize) -> Result<String> {
+        self.agent_text_back(sid, n, true)
+    }
+
+    /// The agent's last words, at least `n` characters of them when there are; `this_turn`: only
+    /// those after the last message it was sent.
+    fn agent_text_back(&self, sid: &str, n: usize, this_turn: bool) -> Result<String> {
         let evs = self.db().events_after(sid, 0)?;
         let mut tail: Vec<String> = vec![];
         let mut len = 0;
         for t in evs
             .iter()
             .rev()
+            .take_while(|e| !(this_turn && e.kind == "user"))
             .filter_map(|e| steve_transcript::assistant_text(&e.kind, &e.data))
         {
-            if len >= 400 {
+            if len >= n {
                 break;
             }
             let t = t.to_string();
@@ -2292,10 +2318,34 @@ impl Tx<'_> {
                 self.answer_line(&i, actor, "验收通过", None)?;
                 if before.phase == crate::cycle::CLOSING {
                     /* what this result still needs (a release, the modules' wrap-up) is recorded and
-                     * started; the close commits once all of it is done and the work has stopped */
-                    self.lc_accept(&i, crate::cycle::Policy::Human, Some("你验收通过"))?;
+                     * started; the close commits once all of it is done and the work has stopped.
+                     * 验收并发布: the release starts here, without a round of the agent. A project
+                     * done by its rule (merged, tagged) has no release to choose: that rule is the
+                     * completion, never waived or started from an acceptance */
+                    let text = if self.done_rule(&before)?.is_some() {
+                        ""
+                    } else {
+                        text
+                    };
+                    if text == ACCEPT_AND_RELEASE {
+                        self.st.release_with_accept = Some((i.clone(), actor.to_string()));
+                    }
+                    let accepted =
+                        self.lc_accept(&i, crate::cycle::Policy::Human, Some("你验收通过"));
+                    self.st.release_with_accept = None;
+                    accepted?;
+                    /* the card's answer says whether the release started with it */
+                    if text == ACCEPT_AND_RELEASE
+                        && self.st.releasing.as_ref().is_some_and(|r| r.item == i)
+                    {
+                        self.db()
+                            .store()
+                            .decisions()
+                            .merge_result(id, &json!({"release": "started"}))?;
+                    }
                     if text == "no-release"
                         && let Some(op) = self.lc_open_op(&i, crate::cycle::OP_RELEASE)?
+                        && op.evidence.get("rule").is_none()
                     {
                         self.lc_op_set(&op.id, "waived", json!({"note": "你选择不发布"}))?;
                     }

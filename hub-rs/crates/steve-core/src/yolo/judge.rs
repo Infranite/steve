@@ -293,8 +293,8 @@ pub struct Release {
     pub accepted: bool,
     /// Another release is running or the Hub holds for one.
     pub releasing: bool,
-    /// Releases are not coming too often (the executor's spacing rule).
-    pub spacing_ok: bool,
+    /// Seconds until the last YOLO release is 15 minutes ago (the executor's spacing rule; 0: none).
+    pub spacing_wait_s: u64,
     /// Times a rebase conflict was handed back to the bot for this item.
     pub rebase_returns: u32,
 }
@@ -652,8 +652,7 @@ pub fn reason_shown(reason: &str) -> String {
             steve_i18n::t!("core.yolo.reason.release_rebase")
         }
         "分支不对或事项还没验收" => steve_i18n::t!("core.yolo.reason.release_state"),
-        "发布太频繁（每小时最多 3 次、每次至少隔 15 分钟），这次留给你" =>
-        {
+        "两次发布至少隔 15 分钟，到时间再发" => {
             steve_i18n::t!("core.yolo.reason.release_rate")
         }
         "发布你自己的 Steve，健康检查失败会自动回滚" => {
@@ -754,7 +753,9 @@ pub fn judge(f: &Facts, p: &Policy, env: &Env) -> Verdict {
     if let Some(l) = limits::check(f, env) {
         return decline(&l.rule(), l.reason());
     }
-    if f.present && !matches!(f.subject, Subject::Muted) {
+    // a tool call inside the worktree is the guard's to judge: waiting for the user there only holds
+    // the agent the user just told what to do (and a message queued behind the call waits for it)
+    if f.present && !matches!(f.subject, Subject::Muted | Subject::Tool(_)) {
         return Verdict::Wait {
             rule: "presence".into(),
             reason: "你刚在这件事项上操作过，先等你".into(),
@@ -830,11 +831,12 @@ fn table(f: &Facts, p: &Policy, env: &Env) -> Verdict {
             if !r.branch_ok || !r.accepted && !r.batch {
                 return decline("release.state", "分支不对或事项还没验收");
             }
-            if !r.spacing_ok {
-                return decline(
-                    "release.spacing",
-                    "发布太频繁（每小时最多 3 次、每次至少隔 15 分钟），这次留给你",
-                );
+            if r.spacing_wait_s > 0 {
+                return Verdict::Wait {
+                    rule: "release.spacing".into(),
+                    reason: "两次发布至少隔 15 分钟，到时间再发".into(),
+                    delay_s: r.spacing_wait_s,
+                };
             }
             auto(
                 "yes",

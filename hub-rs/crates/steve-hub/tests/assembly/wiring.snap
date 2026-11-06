@@ -58,6 +58,7 @@ api GET /github/prs
 api GET /github/repos/x
 api GET /items/x/people
 api GET /kb/candidates
+api GET /kb/candidates/expired
 api GET /kb/docs
 api GET /kb/docs/x
 api GET /kb/mems
@@ -177,6 +178,7 @@ api POST /github/repos
 api POST /github/repos/x/sync
 api POST /items/x/people
 api POST /kb/candidates/resolve
+api POST /kb/candidates/x/restore
 api POST /kb/files
 api POST /kb/mems
 api POST /kb/notes

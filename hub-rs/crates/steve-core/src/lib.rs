@@ -119,6 +119,9 @@ pub(crate) struct State {
     ended: HashMap<String, String>,
     releasing: Option<Releasing>,
     release_generation: u64,
+    /// An acceptance answered with 验收并发布 `(item, who)`: its release requirement starts the
+    /// release right away instead of asking the agent (`release.rs` `release_with_accept`).
+    release_with_accept: Option<(String, String)>,
     drafts: HashMap<String, changes::Proposal>,
     applied: HashMap<String, changes::Applied>,
     /// Item hook calls collected in this critical section, run once the lock is gone.

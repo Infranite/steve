@@ -58,7 +58,7 @@ export default {
   /* the YOLO record, #/yolo */
   digest: {
     title: "YOLO 记录",
-    sub: "你不在时 Steve 替你做的每个决定，按每次打开分段。能撤销的可以撤；1 小时内撤销 2 次，YOLO 会暂停。",
+    sub: "你不在时 Steve 替你做的每个决定，按每次打开分段。能撤销的可以撤；撤销后那件事项不再交给 YOLO，1 小时内在 3 件事项上撤销（或同一条规则在 2 件上被撤销、撤回 2 条消息），整个 YOLO 会暂停。",
     noYolo: "这台 Hub 没有 YOLO",
     never: "还没开过 YOLO",
     neverSub: "打开后，Steve 替你做的每个决定都会记在这里。",

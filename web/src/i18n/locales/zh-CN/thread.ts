@@ -96,6 +96,8 @@ export default {
     sendRework: "发回返工",
     rework: "返工…",
     pass: "验收通过",
+    passRelease: "验收并发布",
+    passNoRelease: "验收，先不发布",
   },
   /* the bars above the composer */
   composer: {

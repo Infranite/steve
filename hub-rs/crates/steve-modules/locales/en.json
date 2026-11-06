@@ -96,6 +96,7 @@
   "modules.contacts_draft.title.profile": "%{name}'s profile",
   "modules.contacts_draft.title.new_team": "New virtual team",
   "modules.contacts_draft.title.team": "Team \"%{name}\"",
+  "modules.contacts_draft.label.note": "Note",
   "modules.contacts_draft.label.name": "Name",
   "modules.contacts_draft.label.aliases": "Aliases",
   "modules.contacts_draft.label.rels": "Relationship to you",

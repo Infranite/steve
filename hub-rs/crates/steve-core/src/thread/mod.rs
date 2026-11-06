@@ -272,6 +272,13 @@ impl Stop {
 }
 
 /// Per-conversation lanes, the reply being prepared, inline queues and promotions in flight.
+/// A conversation message forwarded to an item: `mid`, and whether it `asked` something (a
+/// follow-up question, not an instruction), so the turn answering it ends on purpose.
+pub(crate) struct Forwarded {
+    pub(crate) mid: String,
+    pub(crate) asked: bool,
+}
+
 #[derive(Default)]
 pub(crate) struct Lanes {
     /// routing, one message at a time per conversation ([`lane_key`])
@@ -285,7 +292,7 @@ pub(crate) struct Lanes {
     /// the read-only research executor (R2); without one, research falls back to a direct answer
     researcher: OnceLock<Arc<dyn Researcher>>,
     /// item → the conversation message last forwarded to it, until its turn ends
-    forwarded: Mutex<HashMap<String, String>>,
+    forwarded: Mutex<HashMap<String, Forwarded>>,
     /// offers, suggestion cards and corrections are handled one at a time (a double click is one click)
     acting: Mutex<()>,
     /// the owner of guest conversations (IM spaces)
@@ -755,12 +762,19 @@ impl Core {
         mid: &str,
     ) -> Result<()> {
         self.supplement(item, text, crate::orchestrator::SupplementMode::Auto, files)?;
-        lock(&self.0.thread.forwarded).insert(item.into(), mid.into());
+        let asked = decide::pure_question(text);
+        lock(&self.0.thread.forwarded).insert(
+            item.into(),
+            Forwarded {
+                mid: mid.into(),
+                asked,
+            },
+        );
         Ok(())
     }
 
     /// The forwarded message an item's turn answered, once.
-    pub(crate) fn forwarded_take(&self, item: &str) -> Option<String> {
+    pub(crate) fn forwarded_take(&self, item: &str) -> Option<Forwarded> {
         lock(&self.0.thread.forwarded).remove(item)
     }
 

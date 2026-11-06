@@ -3,7 +3,9 @@
 //! the agent tool `steve_remember`.
 //!
 //! A candidate is a `mems` row with `status=candidate` plus its `mem_candidates` row (origin, quote,
-//! the memory it would replace). It never takes effect by itself: only a `yes` confirms it.
+//! the memory it would replace). It takes effect only with a `yes` — the owner's, or, when the
+//! owner's own words in their conversation say to keep it (“记住…”, “以后…”) and it replaces nothing,
+//! Steve's at once (settled as a `yes` the owner can undo). An expired candidate can be restored.
 
 use std::time::Duration;
 
@@ -112,6 +114,49 @@ pub struct NewCandidate {
     pub why: String,
     /// Where it applies, for the card.
     pub scope: String,
+    /// The owner's own words say to keep it (“记住…”, “以后…”): it is confirmed at once, unless it
+    /// replaces a memory (that still asks). See [`owner_said`].
+    pub owner_said: bool,
+}
+
+/// Words with which the owner says to keep something.
+pub const SAY_KEEP: [&str; 2] = ["记住", "以后"];
+
+/// `evidence` (quotes joined with “ / ”) is all the owner's own words in `text`, the lines that start
+/// with `owner_head` (`我（` in a day of chat), and one quote says to keep it ([`SAY_KEEP`]).
+pub fn owner_said(text: &str, owner_head: &str, evidence: &str) -> bool {
+    let norm = |s: &str| -> String {
+        s.chars()
+            .filter(|c| c.is_alphanumeric())
+            .flat_map(char::to_lowercase)
+            .collect()
+    };
+    let owner: Vec<String> = text
+        .lines()
+        .filter(|l| l.trim_start().starts_with(owner_head))
+        .map(norm)
+        .collect();
+    let quotes: Vec<&str> = evidence
+        .split(" / ")
+        .map(str::trim)
+        .filter(|q| !q.is_empty())
+        .collect();
+    !quotes.is_empty()
+        && quotes.iter().all(|q| {
+            let pieces: Vec<String> = q
+                .split(['…', '⋯'])
+                .flat_map(|p| p.split("..."))
+                .map(norm)
+                .filter(|p| p.chars().count() >= 2)
+                .collect();
+            !pieces.is_empty()
+                && owner
+                    .iter()
+                    .any(|l| pieces.iter().all(|p| l.contains(p.as_str())))
+        })
+        && quotes
+            .iter()
+            .any(|q| SAY_KEEP.iter().any(|w| q.contains(w)))
 }
 
 fn cut(s: &str, n: usize) -> String {
@@ -160,7 +205,8 @@ pub fn propose(tx: &Tx, o: &Origin, c: &NewCandidate) -> ApiResult<Mem> {
         mem.created
     ])?;
     let mut mem = mem;
-    if open_mem_confirms(tx, &o.ws)? < MAX_OPEN_CONFIRMS {
+    let auto = c.owner_said && c.supersedes.is_none();
+    if auto || open_mem_confirms(tx, &o.ws)? < MAX_OPEN_CONFIRMS {
         let mut draft = format!("类型：{} · {}", record_name(&c.kind), kind_name(&c.kind));
         for (head, v) in [(WHY, &c.why), (SCOPE, &c.scope)] {
             if !v.trim().is_empty() {
@@ -195,6 +241,28 @@ pub fn propose(tx: &Tx, o: &Origin, c: &NewCandidate) -> ApiResult<Mem> {
             },
         )?
         .ok_or_else(|| ApiError::not_found(NOUN))?;
+    }
+    if auto {
+        // you said so yourself: kept now, the card settled as yours, undoable like your own yes
+        answer(tx, &o.ws, "steve", &mem.id, "yes", "")?;
+        if let Some(d) = mem.decision_id.as_deref() {
+            base::decisions::settle(
+                tx,
+                d,
+                &json!({"choice": "yes", "auto": "owner_said"}),
+                "resolved",
+                &json!({"auto": true}),
+            )?;
+        }
+        base::audit(
+            tx,
+            &o.ws,
+            "steve",
+            "mm.auto_confirm",
+            &mem.id,
+            &json!({"origin": o.kind.code(), "origin_id": o.id}),
+        )?;
+        mem = mems::get(tx, &mem.id)?.ok_or_else(|| ApiError::not_found(NOUN))?;
     }
     base::audit(
         tx,
@@ -399,6 +467,23 @@ pub fn routes() -> Router<Modules> {
     Router::new()
         .route("/kb/candidates", get(list_route))
         .route("/kb/candidates/resolve", post(resolve_route))
+        .route("/kb/candidates/expired", get(expired_route))
+        .route("/kb/candidates/{id}/restore", post(restore_route))
+}
+
+async fn expired_route(
+    axum::extract::State(m): axum::extract::State<Modules>,
+    who: Caller,
+) -> ApiResult<Json<Value>> {
+    m.blocking(move |m| expired(m, &who).map(Json)).await
+}
+
+async fn restore_route(
+    axum::extract::State(m): axum::extract::State<Modules>,
+    who: Caller,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> ApiResult<Json<Value>> {
+    m.blocking(move |m| restore(m, &who, &id).map(Json)).await
 }
 
 async fn list_route(
@@ -530,6 +615,71 @@ pub fn resolve_many(m: &Modules, who: &Caller, b: &ResolveBody) -> ApiResult<Val
 }
 
 // ---------------------------------------------------------------- expiry
+
+/// Candidates of the caller that expired unanswered (and were not confirmed since), newest first:
+/// `[{mem, origin_label, evidence, expired}]`, at most 50.
+pub fn expired(m: &Modules, who: &Caller) -> ApiResult<Value> {
+    prepare(m, who)?;
+    let viewer = m.viewer(who)?;
+    m.store.reader(|c| {
+        let scope = viewer.sql("m");
+        let sql = format!(
+            "SELECT m.id, max(a.ts) FROM mems m JOIN mem_candidates k ON k.mem_id = m.id
+               JOIN audit a ON a.workspace_id = m.workspace_id AND a.target = m.id AND a.action = 'mm.expire'
+              WHERE m.workspace_id = ? AND m.status = 'stale' AND {}
+                AND NOT EXISTS (SELECT 1 FROM audit b WHERE b.target = m.id AND b.action = 'mm.confirm' AND b.id > a.id)
+              GROUP BY m.id ORDER BY max(a.ts) DESC LIMIT 50",
+            scope.sql
+        );
+        let mut p: Vec<rusqlite::types::Value> = vec![viewer.ws.clone().into()];
+        p.extend(scope.params);
+        let rows: Vec<(String, i64)> = c
+            .prepare(&sql)?
+            .query_map(rusqlite::params_from_iter(p), |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut out = Vec::with_capacity(rows.len());
+        for (id, at) in rows {
+            let (Some(mem), Some((_, label, evidence, _))) = (mems::get(c, &id)?, candidate_row(c, &id)?) else {
+                continue;
+            };
+            out.push(json!({ "mem": mem_json(c, &mem), "origin_label": label, "evidence": evidence, "expired": at }));
+        }
+        Ok(Value::Array(out))
+    })
+}
+
+/// `POST /kb/candidates/:id/restore`: an expired candidate waits for an answer again (for another 30
+/// days); `{ok:true}`. Anything else that is not a candidate any more: `409`.
+pub fn restore(m: &Modules, who: &Caller, id: &str) -> ApiResult<Value> {
+    let viewer = m.viewer(who)?;
+    let listed = expired(m, who)?;
+    let ok = listed
+        .as_array()
+        .is_some_and(|xs| xs.iter().any(|x| x["mem"]["id"] == id));
+    m.store.transaction(|tx| {
+        if mems::visible(tx, &viewer, id)?.is_none() {
+            return Err(ApiError::not_found(NOUN));
+        }
+        if !ok {
+            return Err(ApiError::conflict(steve_i18n::t!(
+                "knowledge.mem.already_handled"
+            )));
+        }
+        let now = steve_store::now();
+        mems::patch(
+            tx,
+            id,
+            &MemPatch {
+                status: Some("candidate".into()),
+                ..Default::default()
+            },
+        )?;
+        tx.prepare_cached("UPDATE mem_candidates SET created = ? WHERE mem_id = ?")?
+            .execute(params![now, id])?;
+        base::audit(tx, &who.ws, &who.me, "mm.restore", id, &json!({}))?;
+        Ok(json!({"ok": true}))
+    })
+}
 
 /// `kb.candidates_expire`: candidates older than 30 days at `now` become `stale`, their open
 /// decisions `expired`. Returns how many.
@@ -688,6 +838,7 @@ pub fn remember(m: &Modules, kb: &Knowledge, cx: &McpCx, args: &Value) -> Result
                     supersedes: None,
                     why: String::new(),
                     scope: String::new(),
+                    owner_said: false,
                 },
             )
         })

@@ -114,6 +114,7 @@ impl Env {
                                 about: vec![],
                                 level: Level::Conclusion,
                                 evidence: String::new(),
+                                owner_said: false,
                                 supersedes: None,
                                 why: String::new(),
                                 scope: String::new(),
@@ -670,6 +671,34 @@ async fn chat_days_are_documents_and_extracted_once() {
     assert_eq!(got.len(), 1);
     assert_eq!(got[0].source_type, "message");
     assert_eq!(got[0].source_label, "10-31 的对话");
+    // you said “以后…” yourself: kept at once, its card settled and undoable, one notice says so
+    assert_eq!(got[0].status, "confirmed");
+    let d = e.decision(got[0].decision_id.as_deref().unwrap());
+    assert_eq!(
+        (d.status.as_str(), d.result["choice"].as_str()),
+        ("resolved", Some("yes"))
+    );
+    assert!(!d.undo.is_null());
+    assert_eq!(e.open_confirms(), 0);
+    let notices: Vec<String> = e
+        .env
+        .store()
+        .with_conn(|c| {
+            let mut st = c.prepare("SELECT text FROM messages WHERE space = 'notify'")?;
+            let v = st
+                .query_map([], |r| r.get(0))?
+                .collect::<rusqlite::Result<Vec<String>>>()?;
+            Ok(v)
+        })
+        .unwrap();
+    assert_eq!(notices.len(), 1);
+    assert!(notices[0].contains("周五下午不安排部署"), "{notices:?}");
+    decisions::undo(m, &d.id, ME, |d| {
+        d.status == "resolved" && !d.undo.is_null()
+    })
+    .expect("ours")
+    .expect("undone");
+    assert_eq!(e.mem(&got[0].id).unwrap().status, "candidate");
     assert!(
         chat::extract_day(m, &e.kb, WS, "2026-10-31")
             .await
@@ -686,4 +715,95 @@ async fn chat_days_are_documents_and_extracted_once() {
         })
         .unwrap();
     assert_eq!(chat::sync_day(m, &e.kb, WS, "2026-10-31").unwrap(), None);
+}
+
+#[test]
+fn only_the_owners_own_words_saying_to_keep_it_count() {
+    let day = "我（10:00）：以后周五下午不安排部署\n\nSteve（10:01）：好的，记住了：周五下午不部署。\n\n我（10:02）：这个页面改宽一点";
+    let said = |q: &str| candidates::owner_said(day, "我（", q);
+    assert!(said("以后周五下午不安排部署"));
+    assert!(said("以后周五…不安排部署"));
+    // Steve's words, even with 记住
+    assert!(!said("好的，记住了：周五下午不部署"));
+    // yours, but not saying to keep it
+    assert!(!said("这个页面改宽一点"));
+    // one quote of Steve's spoils it
+    assert!(!said("以后周五下午不安排部署 / 好的，记住了"));
+    assert!(!said(""));
+}
+
+#[tokio::test]
+async fn replacing_a_memory_still_asks_even_when_you_said_so() {
+    let e = setup();
+    let old = e.propose(1).remove(0);
+    let d = old.decision_id.clone().unwrap();
+    decisions::dispatch(&e.env.modules, &caller(WS, ME), &d, "yes", "")
+        .expect("ours")
+        .expect("ok");
+    let o = e.origin(7);
+    let made = e
+        .env
+        .store()
+        .transaction(|tx| {
+            let c = |supersedes: Option<String>| NewCandidate {
+                kind: "rule".into(),
+                text: "周五不部署".into(),
+                about: vec![],
+                level: Level::Conclusion,
+                evidence: "以后周五不部署".into(),
+                owner_said: true,
+                supersedes,
+                why: String::new(),
+                scope: String::new(),
+            };
+            Ok::<_, steve_modules::ApiError>((
+                candidates::propose(tx, &o, &c(Some(old.id.clone())))?,
+                candidates::propose(tx, &o, &c(None))?,
+            ))
+        })
+        .unwrap();
+    assert_eq!(made.0.status, "candidate");
+    assert_eq!(
+        e.decision(made.0.decision_id.as_deref().unwrap()).status,
+        "open"
+    );
+    assert_eq!(e.mem(&old.id).unwrap().status, "confirmed");
+    assert_eq!(made.1.status, "confirmed");
+}
+
+#[tokio::test]
+async fn an_expired_candidate_can_be_restored() {
+    let e = setup();
+    let x = e.propose(1).remove(0);
+    let m = &e.env.modules;
+    e.env.clock.advance(EXPIRE_AFTER_MS + 1000);
+    assert_eq!(candidates::expire(m, m.clock.now()).unwrap(), 1);
+    let (code, list) = e.me("GET", "/kb/candidates/expired", None).await;
+    assert_eq!(code, 200);
+    assert_eq!(list[0]["mem"]["id"], x.id.as_str());
+    let (code, _) = e
+        .me("POST", &format!("/kb/candidates/{}/restore", x.id), None)
+        .await;
+    assert_eq!(code, 200);
+    assert_eq!(e.mem(&x.id).unwrap().status, "candidate");
+    let (_, list) = e.me("GET", "/kb/candidates", None).await;
+    assert_eq!(list[0]["mem"]["id"], x.id.as_str());
+    let (_, list) = e.me("GET", "/kb/candidates/expired", None).await;
+    assert_eq!(list, json!([]));
+    // waits another 30 days from now: the next hourly run leaves it alone
+    assert_eq!(candidates::expire(m, steve_store::now() + 1000).unwrap(), 0);
+    // a second restore: nothing expired any more
+    let (code, _) = e
+        .me("POST", &format!("/kb/candidates/{}/restore", x.id), None)
+        .await;
+    assert_eq!(code, 409);
+    // and it can be answered as usual
+    let (code, r) = e
+        .me(
+            "POST",
+            "/kb/candidates/resolve",
+            Some(json!({"ids": [x.id], "choice": "yes"})),
+        )
+        .await;
+    assert_eq!((code, r["done"].clone()), (200, json!(1)));
 }

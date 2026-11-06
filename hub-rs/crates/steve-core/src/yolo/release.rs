@@ -15,13 +15,8 @@ use crate::repo::{Decision, Item};
 
 /// The rule of a release YOLO approved.
 pub const RULE: &str = "release.self";
-/// At most this many YOLO releases per hour…
-pub const PER_HOUR: usize = 3;
-/// …and per window…
-pub const PER_WINDOW: usize = 12;
-/// …at least this far apart (ms).
+/// YOLO releases are at least this far apart (ms); a release card that comes sooner waits for the gap.
 pub const MIN_GAP_MS: i64 = 15 * 60_000;
-const HOUR_MS: i64 = 60 * 60_000;
 
 /// What the timeline says when a rebase before a release was handed back (release.rs `rebase_for_release`).
 pub const REBASE_RETURNED: &str = "rebase 到 main 有冲突";
@@ -30,12 +25,13 @@ const BUSY: &str = "另一个发布（";
 const NO_SCRIPT: &str = "这个项目的发布脚本不存在";
 const NOT_STARTED: &str = "发布脚本没有启动";
 
-/// Whether one more YOLO release fits: `done` = when earlier YOLO releases were approved (ms), `in_window`
-/// = how many of them fall in the current window.
-pub fn spacing_ok(done: &[i64], in_window: usize, now: i64) -> bool {
-    let last_hour = done.iter().filter(|t| now - **t < HOUR_MS).count();
-    let last = done.iter().copied().max();
-    last_hour < PER_HOUR && in_window < PER_WINDOW && last.is_none_or(|t| now - t >= MIN_GAP_MS)
+/// How long one more YOLO release has to wait (ms, 0: it may go now): `done` = when earlier YOLO
+/// releases were approved (ms).
+pub fn spacing_wait_ms(done: &[i64], now: i64) -> i64 {
+    done.iter()
+        .copied()
+        .max()
+        .map_or(0, |t| (t + MIN_GAP_MS - now).max(0))
 }
 
 /// The version a failed release went back to, from the note the release report left (`已回到 <v>`).
@@ -157,20 +153,12 @@ impl Engine {
         })?)
     }
 
-    /// The spacing rule: 3 an hour, 12 a window, 15 minutes apart.
-    pub fn release_spacing_ok(&self, ws: &str) -> ApiResult<bool> {
-        let window = self
-            .yolo()
-            .store()
-            .reader(|c| repo::window_current(c, ws))?
-            .map(|w| w.id);
+    /// The spacing rule: YOLO releases 15 minutes apart. Seconds still to wait (0: none).
+    pub fn release_spacing_wait_s(&self, ws: &str) -> ApiResult<u64> {
         let all = self.yolo_releases(ws, None)?;
         let done: Vec<i64> = all.iter().map(|a| a.done_at.unwrap_or(a.created)).collect();
-        let in_window = all
-            .iter()
-            .filter(|a| window.is_some() && a.window_id == window)
-            .count();
-        Ok(spacing_ok(&done, in_window, self.yolo().now()))
+        let ms = spacing_wait_ms(&done, self.yolo().now());
+        Ok(((ms + 999) / 1000) as u64)
     }
 
     /// Rebase conflicts handed back to the bot for this item since the window began.
@@ -268,23 +256,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn three_an_hour_fifteen_minutes_apart_twelve_a_window() {
+    fn fifteen_minutes_apart_and_no_cap_per_hour() {
         let m = 60_000;
-        let now = 10 * HOUR_MS;
-        assert!(spacing_ok(&[], 0, now));
-        assert!(!spacing_ok(&[now - 10 * m], 1, now));
-        assert!(spacing_ok(&[now - 15 * m], 1, now));
-        assert!(!spacing_ok(
-            &[now - 20 * m, now - 40 * m, now - 59 * m],
-            3,
-            now
-        ));
-        assert!(spacing_ok(
-            &[now - 20 * m, now - 40 * m, now - 61 * m],
-            3,
-            now
-        ));
-        assert!(!spacing_ok(&[now - 5 * HOUR_MS], 12, now));
+        let now = 10 * 60 * m;
+        assert_eq!(spacing_wait_ms(&[], now), 0);
+        assert_eq!(spacing_wait_ms(&[now - 10 * m], now), 5 * m);
+        assert_eq!(spacing_wait_ms(&[now - 15 * m], now), 0);
+        // four in the last hour, the last one 15 minutes ago: it may go
+        assert_eq!(
+            spacing_wait_ms(
+                &[now - 15 * m, now - 30 * m, now - 45 * m, now - 59 * m],
+                now
+            ),
+            0
+        );
     }
 
     #[test]

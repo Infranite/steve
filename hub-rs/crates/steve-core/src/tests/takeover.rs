@@ -128,6 +128,119 @@ fn a_question_in_plain_words_is_for_you() {
     assert!(steve_lines(&k, &item).is_empty());
 }
 
+/// ST-49: the agent stopped to lay out a plan for you (a heading says so), far above its last words.
+#[test]
+fn a_plan_it_stopped_to_report_is_for_you() {
+    let k = kit(2);
+    let (item, sid) = started(&k);
+    let filler = "这一段是背景说明。".repeat(80);
+    stop(
+        &k,
+        &sid,
+        &format!("## 方案\n1. 先把分支推到 GitHub\n2. 开 PR 等 CI\n\n{filler}\n以上。"),
+    );
+    assert_eq!(k.open_fails(&item).len(), 1);
+    assert!(steve_lines(&k, &item).is_empty(), "not continued");
+}
+
+/// ST-54: the agent stopped with a list of things for you to confirm.
+#[test]
+fn something_it_stopped_for_you_to_confirm_is_for_you() {
+    let k = kit(2);
+    let (item, sid) = started(&k);
+    stop(
+        &k,
+        &sid,
+        "改好了一半。\n\n**待确认**\n- 旧接口是否直接删掉\n- 迁移要不要保留回退",
+    );
+    assert_eq!(k.open_fails(&item).len(), 1);
+    assert!(steve_lines(&k, &item).is_empty());
+}
+
+/// You asked the item something from the conversation: its answer ends the turn on purpose.
+#[test]
+fn an_answer_to_what_you_asked_from_the_conversation_is_not_continued() {
+    let k = kit(2);
+    let (item, sid) = started(&k);
+    // the first turn was cut short by you: the session waits, nothing open
+    k.rt.end_turn(&k.core, &sid, "cancelled", None);
+    k.core
+        .forward(&item, "现在进展到哪了？", &[], "m_1")
+        .unwrap();
+    assert!(
+        k.rt.prompts_of(&sid)
+            .iter()
+            .any(|p| p.contains("现在进展到哪了"))
+    );
+    stop(&k, &sid, "测试都过了，还差文档。");
+    assert!(steve_lines(&k, &item).is_empty(), "not continued");
+    assert_eq!(k.open_fails(&item).len(), 1);
+}
+
+/// A plan from an earlier turn, already answered, does not make a later silent stop a report.
+#[test]
+fn a_plan_of_an_earlier_turn_does_not_hold_a_later_stop() {
+    let k = kit(2);
+    let (item, sid) = started(&k);
+    stop(&k, &sid, "## 方案\n1. 先改接口\n2. 再补测试");
+    let d = k.db().decisions_of_item(&item).unwrap().pop().unwrap();
+    k.core.resolve(&d.id, "continue", "", "me").unwrap();
+    stop(&k, &sid, "还在改。");
+    assert_eq!(steve_lines(&k, &item).len(), 1, "continued");
+    assert!(k.open_fails(&item).is_empty());
+}
+
+/// An instruction you sent it from the conversation is not a question: its turn is continued.
+#[test]
+fn an_instruction_forwarded_from_the_conversation_is_still_continued() {
+    let k = kit(2);
+    let (item, sid) = started(&k);
+    k.rt.end_turn(&k.core, &sid, "cancelled", None);
+    k.core
+        .forward(&item, "再把按钮改成蓝色", &[], "m_1")
+        .unwrap();
+    stop(&k, &sid, "改好了一半。");
+    assert_eq!(steve_lines(&k, &item).len(), 1, "continued");
+    assert!(k.open_fails(&item).is_empty());
+}
+
+/// A project done by its rule (merged): the acceptance has no release to choose, so neither
+/// 验收，先不发布 nor 验收并发布 from a card can waive or start what the rule waits for.
+#[test]
+fn a_done_when_project_ignores_the_release_choice_of_an_acceptance() {
+    for text in ["no-release", crate::orchestrator::ACCEPT_AND_RELEASE] {
+        let k = kit(2);
+        let x = remote(&k, upstream::DONE_MERGE, false);
+        k.core.resolve(&x.decision, "pass", text, "me").unwrap();
+        assert!(k.wait(|| k.core.tx().st.probing.is_empty()));
+        assert_eq!(k.phase(&x.item), "closing", "{text}");
+        assert_eq!(
+            op_states(&k, &x.item),
+            vec![(OP_RELEASE.to_string(), "pending".to_string())],
+            "{text}"
+        );
+        assert!(k.core.tx().st.releasing.is_none(), "{text}");
+        assert!(
+            !k.db()
+                .decisions_of_item(&x.item)
+                .unwrap()
+                .iter()
+                .any(|d| d.subject_type == "release"),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn only_a_heading_counts_as_a_report() {
+    use crate::takeover::stopped_to_report;
+    assert!(stopped_to_report("## 方案\n1. x"));
+    assert!(stopped_to_report("前面\n**待你确认**\n- x"));
+    assert!(stopped_to_report("修复方案：\n- x"));
+    assert!(!stopped_to_report("方案已经实现了，正在跑测试。"));
+    assert!(!stopped_to_report("## 测试结果\n全部通过"));
+}
+
 #[test]
 fn an_idle_session_is_continued_but_one_you_interrupted_is_not() {
     let k = kit(2);

@@ -865,7 +865,7 @@ fn release_facts(pl: &Place, cmd: &str) -> Release {
         branch_ok: true,
         accepted: true,
         releasing: false,
-        spacing_ok: true,
+        spacing_wait_s: 0,
         rebase_returns: 0,
     }
 }
@@ -1571,11 +1571,15 @@ fn delays_texts_and_undo() {
 #[test]
 fn presence_waits_and_scope_comes_first() {
     let pl = place();
-    let mut f = cmd(&pl, "cargo test");
+    let mut f = accept_facts(&[("t", true)], &[], None, false);
     f.present = true;
     assert!(matches!(run(&f, &pl), Verdict::Wait { delay_s: 180, .. }));
     f.in_scope = false;
     assert_eq!(run(&f, &pl), Verdict::Off);
+    // a tool call inside the worktree does not wait for the user: the guard judges it now
+    let mut f = cmd(&pl, "cargo test");
+    f.present = true;
+    assert_eq!(run(&f, &pl).rule(), "tool.worktree");
     // a hard limit is reported even when the user is around
     let mut f = cmd(&pl, "git push");
     f.present = true;
