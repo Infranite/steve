@@ -333,6 +333,7 @@
   "core.release.no_script_rollback": "这个项目的发布脚本不存在，没法回滚",
   "core.release.busy_rollback": "另一个发布（%{item}）正在进行，等它结束再回滚",
   "core.release.rollback_not_started": "回滚脚本没有启动（%{error}）",
+  "core.release.remote_rollback": "这个项目在设备 %{device} 上；发布脚本只能在 Hub 所在的设备上运行，没法回滚",
   "core.workspace.disk_low": "磁盘空间不足：工作区所在的磁盘只剩 %{free}，低于开工下限 %{floor}。Steve 正在回收已完成和闲置事项的构建缓存，稍后重试；也可以先清理磁盘。",
   "core.a2ui.main_only": "只有主线对话里 Steve 的回复能提交界面",
   "core.a2ui.no_surface": "这条回复里没有这个界面",

@@ -3,6 +3,10 @@
 //!
 //! Hand-off: the script builds first, then asks this Hub over loopback (with a one-off token) to drain — no new
 //! turns, new prompts queue — and polls until the running turns have ended (bounded by the script), then restarts.
+//!
+//! The script is a Hub-host operation: it runs on the Hub's own machine, outlives the Hub and restarts it, so
+//! only a project on the Hub's device (`projects.device_id = "hub"`) can release or roll back. A project on a
+//! remote Node is refused before anything runs; an in-process Node dies with the Hub, so it can't host it either.
 
 use crate::cycle::{Closing, OP_RELEASE, fingerprint_head};
 use crate::error::Result;
@@ -18,6 +22,9 @@ use serde::Serialize;
 use serde_json::{Map, Value, json};
 use std::path::Path;
 use std::time::{Duration, SystemTime};
+
+/// The Hub's own device (`projects.device_id`), the only one a release script runs for.
+const HUB_DEVICE: &str = "hub";
 
 /// The outcome of an approved release whose script is running.
 const RELEASING: &str = "releasing";
@@ -180,6 +187,10 @@ impl Tx<'_> {
         let Some(p) = self.db().project(i.project_id.as_deref())? else {
             return Ok(false);
         };
+        if p.device_id != HUB_DEVICE {
+            /* its paths name the other device's files: git here can't tell; the release request is refused */
+            return Ok(false);
+        }
         let wt = i
             .cwd
             .as_deref()
@@ -198,6 +209,15 @@ impl Tx<'_> {
         let Some(i) = self.db().item(item_id)? else {
             return Ok(true);
         };
+        /* a project on another device: its cwd is that device's, the Hub touches no git here and
+        start_release refuses it */
+        if self
+            .db()
+            .project(i.project_id.as_deref())?
+            .is_some_and(|p| p.device_id != HUB_DEVICE)
+        {
+            return Ok(true);
+        }
         let Some(cwd) = i
             .cwd
             .as_deref()
@@ -359,6 +379,20 @@ impl Tx<'_> {
             return Ok(());
         };
         let p = self.db().project(item.project_id.as_deref())?;
+        /* before the script lookup: its path names a file on the other device, not on this one */
+        if let Some(device) = p
+            .as_ref()
+            .map(|p| p.device_id.as_str())
+            .filter(|d| *d != HUB_DEVICE)
+        {
+            return self.refuse_release(
+                item_id,
+                &format!("项目在设备 {device} 上，发布脚本只能在 Hub 所在的设备上运行"),
+                &format!(
+                    "这个项目在设备 {device} 上；发布脚本只能在 Hub 所在的设备上运行，无法发布"
+                ),
+            );
+        }
         let script = p
             .as_ref()
             .and_then(|p| p.release.as_ref())
@@ -482,6 +516,16 @@ impl Tx<'_> {
         }
         let item = self.item(item_id)?;
         let p = self.db().project(item.project_id.as_deref())?;
+        if let Some(device) = p
+            .as_ref()
+            .map(|p| p.device_id.as_str())
+            .filter(|d| *d != HUB_DEVICE)
+        {
+            return Err(crate::error::msg(steve_i18n::t!(
+                "core.release.remote_rollback",
+                device = device
+            )));
+        }
         let script = p
             .as_ref()
             .and_then(|p| p.release.as_ref())
