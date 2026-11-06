@@ -1,9 +1,9 @@
 //! What a unit's merge does in git (stage 2, direct push): its batch branch is built in a worktree of its
 //! own from the target's tip, its members merged in, in order; a member that conflicts with the ones
-//! before it is backed out and leaves (the others go on); the lane's checks run on the result; the
-//! result is pushed, fast-forward only. Member branches are never rewritten.
+//! before it is backed out and leaves (the others go on); the result is pushed, fast-forward only.
+//! Member branches are never rewritten.
 //!
-//! Plain git and the lane's own commands: no store, no lock. The caller fetches first and records the
+//! Plain git and the repository's own release step: no store, no lock. The caller fetches first and records the
 //! outcome ([`super::store`]).
 
 use std::io::Read;
@@ -132,36 +132,6 @@ pub fn integrate(
         .map(|m| m.id.clone())
         .collect();
     Ok(Integrated { tip, merged, left })
-}
-
-/// Run the lane's checks in `wt`, in order; the first that fails, with the end of its output.
-pub fn checks(wt: &Path, commands: &[String]) -> Result<(), String> {
-    for c in commands {
-        let out = Command::new("/bin/sh")
-            .arg("-c")
-            .arg(c)
-            .current_dir(wt)
-            .stdin(Stdio::null())
-            .output()
-            .map_err(|e| format!("{c}：{e}"))?;
-        if !out.status.success() {
-            let text = format!(
-                "{}{}",
-                String::from_utf8_lossy(&out.stdout),
-                String::from_utf8_lossy(&out.stderr)
-            );
-            let tail: String = text
-                .chars()
-                .rev()
-                .take(600)
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev()
-                .collect();
-            return Err(format!("检查没有通过：{c}\n{}", js_head(tail.trim(), 600)));
-        }
-    }
-    Ok(())
 }
 
 /// How long the lane lets `ops/cut-release.py cut` wait for CI on the merged head (`--ci-wait`), shorter
@@ -412,27 +382,6 @@ mod tests {
         run(&clone, &["commit", "--quiet", "-m", "other"]);
         run(&clone, &["push", "--quiet", "origin", "HEAD:main"]);
         assert!(crate::upstream::push_head(&wt, "main").is_err());
-    }
-
-    #[test]
-    fn checks_run_in_order_and_the_failing_one_is_named() {
-        let t = tempfile::tempdir().unwrap();
-        assert!(checks(t.path(), &[]).is_ok(), "no checks: nothing to fail");
-        assert!(checks(t.path(), &["true".into()]).is_ok());
-        let e = checks(
-            t.path(),
-            &[
-                "true".into(),
-                "echo nope; exit 3".into(),
-                "touch never".into(),
-            ],
-        )
-        .unwrap_err();
-        assert!(e.contains("echo nope; exit 3") && e.contains("nope"), "{e}");
-        assert!(
-            !t.path().join("never").exists(),
-            "stops at the first failure"
-        );
     }
 
     #[test]

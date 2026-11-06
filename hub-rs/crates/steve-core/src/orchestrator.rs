@@ -2720,7 +2720,13 @@ impl Tx<'_> {
                 let (lane, unit) =
                     crate::lane::drive::parse_subject(&d.subject_id).expect("checked");
                 let yes = choice == "yes";
-                db.decision_resolve(id, json!({"approved": yes}), "resolved", None)?;
+                /* only an answer that took: a card a newer one replaced (a request joined) is not acted on */
+                let took = db
+                    .decision_resolve(id, json!({"approved": yes}), "resolved", None)?
+                    .is_some_and(|d| d.status == "resolved");
+                if !took {
+                    return Err(msg(steve_i18n::t!("core.decision.handled")));
+                }
                 /* git and checks run off the lock; the answer is the batch's, not one item's */
                 let c = self.c.clone();
                 crate::detach(move || c.lane_answered(&lane, unit, yes));

@@ -37,6 +37,16 @@ export type RLane = {
   ship: RLaneFact<"tag" | "script" | "merge">
   numbered: { kind: "version" | "notes" | "migrations" | "lockfile"; path: string; evidence: string; handling: string }[]
   pace: { days: number; landed: number; releases: number; authors: number }
+  /** the lane itself; `null` until a request first went into it or you set its limits */
+  lane: RLaneState | null
+}
+export type RLaneMember = { id: string; item_id: string | null; branch: string; label: string }
+/** a batch: `approved` false while its card waits for you (what arrives then joins it) */
+export type RLaneUnit = { no: number; members: RLaneMember[]; deferred: RLaneMember[]; opened_at: number; closed: boolean; merged: boolean; approved: boolean }
+export type RLaneLimits = { window_ms: number; max_members: number }
+export type RLaneState = {
+  id: string; policy: RLaneLimits; set: { window_ms: number | null; max_members: number | null }; defaults: RLaneLimits
+  running: RLaneUnit | null; collecting: (RLaneUnit & { closes_at: number }) | null; queued: RLaneMember[]
 }
 export type RProject = { id: string; workspace_id: string; name: string; description: string; device_id: string; path: string; kind: "git" | "dir"; worktree: boolean; default_bot: string | null; release: { kind: string; cmd: string; done_when?: "merge" | "tag" } | null; archived: boolean; created: number; updated: number }
 export type RWorkspace = { id: string; name: string; description: string; item_prefix: string; sort: number; created: number; role?: string }
@@ -203,6 +213,8 @@ export const api = {
   addMemory: (id: string, text: string) => post(`/bots/${id}/memories`, { text }), editMemory: (id: string, text: string) => patch(`/memories/${id}`, { text }), deleteMemory: (id: string) => del(`/memories/${id}`), clearMemories: () => del("/memories"),
   newProject: (p: { name: string; path: string; description?: string; worktree?: boolean; default_bot?: string | null }) => post<RProject>("/projects", p), patchProject: (id: string, p: Partial<RProject>) => patch<RProject>("/projects/" + id, p),
   lane: (id: string) => get<RLane>(`/projects/${encodeURIComponent(id)}/lane`),
+  lanePolicy: (id: string, p: { window_min: number | null; max_members: number | null }) => patch<{ lane: RLaneState | null }>(`/projects/${encodeURIComponent(id)}/lane`, p),
+  laneNow: (id: string) => post<{ closed: boolean; lane: RLaneState | null }>(`/projects/${encodeURIComponent(id)}/lane/now`),
   describeProject: (path: string) => post<{ name: string; description: string; git: boolean }>("/projects/describe", { path }), dirs: (path: string) => get<string[]>(`/fs/dirs?path=${encodeURIComponent(path)}`),
   newTag: (p: { name: string; cat: string; description: string }) => post<RTag>("/tags", p), patchTag: (id: string, p: Partial<RTag>) => patch("/tags/" + id, p), deleteTag: (id: string) => del("/tags/" + id), mergeTag: (id: string, into: string) => post(`/tags/${id}/merge`, { into }),
   kindsReview: () => get<RKindReview[]>("/tags/kinds/review"), kindsReviewed: (ids: string[]) => post<RKindReview[]>("/tags/kinds/review", { ids }),

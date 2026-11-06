@@ -155,9 +155,9 @@ No setting can widen these limits, and they are property-tested: money, high-sen
 
 ### 🚚 Merging and releases
 
-Each target branch has a merge lane. Requests that arrive while a merge is in flight are batched, and you approve one card per batch. Conflicting members are backed out one at a time. Pushes are fast-forward only, and after a restart nothing merges or releases twice. The project page shows the lane profile Steve found (merge queue, required checks, release method) and the evidence for each.
+Each target branch has a merge lane. Requests that arrive while a merge is in flight are batched, and you approve one card per batch; a request that arrives before you answer joins that batch and its card. The project page sets the batch window and size and has a *merge and release now* button. Conflicting members are backed out one at a time. Pushes are fast-forward only, a branch whose host requires a pull request or a merge queue is never pushed to directly, and after a restart nothing merges or releases twice. The project page also shows the lane profile Steve found (merge queue, required checks, release method) and the evidence for each.
 
-On GitHub, Steve asks before opening a PR after you accept, and again before merging. Effects go through a durable queue that reconciles with GitHub before retrying. Projects on the Hub's own machine, Steve included, can be released by script: build, drain running work, restart, and report the outcome once it's back. Rollback is refused when the old version can't read the current database.
+On GitHub, Steve asks before opening a PR after you accept, and again before merging. For a private repository you can let accepting the item open a draft PR from its own branch without asking, once its commits pass a leak check. Effects go through a durable queue that reconciles with GitHub before retrying. Projects on the Hub's own machine, Steve included, can be released by script: build, drain running work, restart, and report the outcome once it's back. Rollback is refused when the old version can't read the current database.
 
 ### 🔌 Connections
 
