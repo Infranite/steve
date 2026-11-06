@@ -71,6 +71,10 @@ struct Fx {
 
 fn fixture(snapshot: Snapshot) -> Fx {
     let t = TestEnv::new(accounts::register);
+    // six hours after the daily run, not the real time: within the catch-up delays before 06:00 the
+    // daily run would come first (CI runs at 05:4x UTC failed on that)
+    t.clock
+        .set(next_daily(t.clock.now(), DAILY_HOUR) + 6 * 3_600_000);
     let dir = Arc::new(FakeDirectory::new("feishu", snapshot));
     let d = dir.clone();
     let conns = TableConnections::new().with(

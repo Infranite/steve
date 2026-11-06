@@ -1739,7 +1739,7 @@ impl Tx<'_> {
         /* a closing waits for this turn (among others): look at it again; what it still waits on is said */
         if item.phase == crate::cycle::CLOSING {
             /* the turn may have merged or tagged: a completion rule is looked up afresh */
-            self.st.probed.remove(item_id);
+            self.forget_probe(item_id);
             if !self.lc_try_close(item_id)? {
                 self.release_not_requested(item_id)?;
             }
