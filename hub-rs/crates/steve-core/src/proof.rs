@@ -3,10 +3,12 @@
 //! instance, yet both closed on "merged and tagged" with the build and the running version left open.
 //!
 //! The title and every goal of the item are read for three kinds of evidence ([`needs`]):
-//! - **build** — the build passes. With a tag rule the Release build the tag starts becomes a required
-//!   operation ([`OP_BUILD`](crate::cycle::OP_BUILD)): the close waits for it to succeed; a failure, or no result within the
-//!   follow-up window, goes to the agent to fix and to you. Without a tag the agent's own build check is
-//!   the evidence.
+//! - **build** — the build passes. A delivery shows the build the agent ran: a passed check that names
+//!   one ([`is_build_check`]). With a tag rule on GitHub the Release build the tag starts also becomes
+//!   a required operation ([`OP_BUILD`](crate::cycle::OP_BUILD)): the close waits for it to succeed; a
+//!   failure, or no result within the follow-up window, goes to the agent to fix and to you. Where Steve
+//!   can't follow that build (a merge rule, a remote not on GitHub), an agent that stopped without
+//!   delivering is continued to deliver its build check instead of closed on the remote.
 //! - **deploy** — the result runs where it is used. For Steve's own project (on the Hub's device) with a
 //!   completion rule, the required operation [`OP_DEPLOY`] holds the close until this Hub runs a version
 //!   that contains the result; it is looked at again before every look at the gate, so the close follows
@@ -134,6 +136,21 @@ pub fn check_line(c: &Check) -> String {
     )
 }
 
+/// A check that shows a build: its name says so (`构建`, `编译`, `build`, `compile`, `CI`).
+pub fn is_build_check(c: &Check) -> bool {
+    let n = c.name.to_lowercase();
+    ["构建", "编译", "流水线", "build", "compile"]
+        .iter()
+        .any(|w| n.contains(w))
+        || n.split(|ch: char| !ch.is_ascii_alphanumeric())
+            .any(|w| w == "ci")
+}
+
+/// Steve follows the Release build a probe's tag starts: a tag rule, and a remote on GitHub.
+pub(crate) fn build_followed(rule: &str, p: &crate::upstream::Probe) -> bool {
+    rule == DONE_TAG && p.slug.is_some()
+}
+
 /// The numbers of a release version or tag (`v0.2.45`, `0.2.45`): exactly three.
 fn numbers(v: &str) -> Option<[u64; 3]> {
     let core = v.trim().trim_start_matches('v');
@@ -232,9 +249,9 @@ impl Tx<'_> {
         let mut parts = vec![];
         if n.build {
             parts.push(if tagged {
-                "the build passes: the item closes only after the Release build the tag starts succeeded (Steve follows it; don't wait for it in a turn, and fix it when Steve tells you it failed)"
+                "the build passes: steve_deliver needs a passed check for the build you ran, named as one (构建 or build; a delivery without it is refused); when the remote is on GitHub, the item also closes only after the Release build the tag starts succeeded (Steve follows it; don't wait for it in a turn, and fix it when Steve tells you it failed)"
             } else {
-                "the build passes: list the build you ran among the checks"
+                "the build passes: steve_deliver needs a passed check for the build you ran, named as one (构建 or build; a delivery without it is refused)"
             });
         }
         if n.deploy {
@@ -255,28 +272,48 @@ impl Tx<'_> {
         )))
     }
 
-    /// Why a delivery lacks the goal's evidence of an actual operation; `None` when it has it.
+    /// Why a delivery lacks the evidence the goal asks for (an actual operation, the build it ran);
+    /// `None` when it has it.
     pub(crate) fn proof_refused(&self, i: &Item, checks: &[Check]) -> Result<Option<String>> {
         let n = self.needs_of(i)?;
         let wanted = n.operate || (n.deploy && !self.deploy_checked(i)?);
-        if !wanted || checks.iter().any(|c| c.operated && c.passed) {
-            return Ok(None);
+        if wanted && !checks.iter().any(|c| c.operated && c.passed) {
+            return Ok(Some(format!(
+                "Not delivered: this item's goal asks for {} to be shown, and none of the checks is an actual operation. Do it on the running thing yourself (open the page and click through, run the upgrade, call the live API), then deliver again with that check marked `operated: true` and named with what you saw. Builds and tests don't count. If you can't do it here, say why with steve_ask instead.",
+                n.words().join("、")
+            )));
         }
-        Ok(Some(format!(
-            "Not delivered: this item's goal asks for {} to be shown, and none of the checks is an actual operation. Do it on the running thing yourself (open the page and click through, run the upgrade, call the live API), then deliver again with that check marked `operated: true` and named with what you saw. Builds and tests don't count. If you can't do it here, say why with steve_ask instead.",
-            n.words().join("、")
-        )))
+        if n.build && !checks.iter().any(|c| c.passed && is_build_check(c)) {
+            return Ok(Some(
+                "Not delivered: this item's goal asks for the build to pass, and none of the checks is a passed build. Run the build, then deliver again with it among the checks, named as one (for example \"构建：cargo build --release 通过\"). If it can't be built here, say why with steve_ask instead.".into(),
+            ));
+        }
+        Ok(None)
     }
 
-    /// The remote alone is not the evidence the goal asks for: an agent that stopped after merging and
-    /// tagging is continued to show the actual operation (`Some` with what it hears).
-    pub(crate) fn proof_continue(&self, i: &Item) -> Result<Option<&'static str>> {
+    /// The remote alone is not the evidence the goal asks for: an agent that stopped after merging (and
+    /// tagging) without delivering is continued to show it (`Some` with what it hears). A build Steve
+    /// follows itself ([`build_followed`]) needs no delivery.
+    pub(crate) fn proof_continue(
+        &self,
+        i: &Item,
+        rule: &str,
+        p: &crate::upstream::Probe,
+    ) -> Result<Option<String>> {
         let n = self.needs_of(i)?;
-        Ok(
-            (n.operate || (n.deploy && !self.deploy_checked(i)?)).then_some(
-                "这个事项的目标还要求实际操作验证：在运行中的环境里亲手操作一遍，用 steve_deliver 交付，并把那条检查标成 `operated: true`。",
-            ),
-        )
+        let mut more = vec![];
+        if n.operate || (n.deploy && !self.deploy_checked(i)?) {
+            more.push("这个事项的目标还要求实际操作验证：在运行中的环境里亲手操作一遍，用 steve_deliver 交付，并把那条检查标成 `operated: true`。".to_string());
+        }
+        if n.build && !build_followed(rule, p) {
+            let why = if rule == DONE_TAG {
+                "远端不在 GitHub 上，Steve 跟踪不了 tag 触发的 Release 构建"
+            } else {
+                "这个项目合并就算完成，Steve 不跟踪构建"
+            };
+            more.push(format!("这个事项的目标还要求构建通过，{why}：跑一遍构建，用 steve_deliver 交付，把它作为一条通过的检查列进去（名字写明“构建”或 build）。"));
+        }
+        Ok((!more.is_empty()).then(|| more.concat()))
     }
 
     /// The deploy requirement of an accepted result, once the remote showed it: met when this Hub runs
@@ -439,6 +476,27 @@ mod tests {
         };
         assert_eq!(check_line(&c(false)), "✓ 设置·关于点检查更新");
         assert_eq!(check_line(&c(true)), "✓ 实际操作：设置·关于点检查更新");
+    }
+
+    #[test]
+    fn a_build_check_says_it_is_one() {
+        let c = |name: &str| Check {
+            name: name.into(),
+            passed: true,
+            operated: false,
+        };
+        for yes in [
+            "构建通过",
+            "cargo build --release",
+            "npm run build",
+            "CI 全绿",
+            "编译",
+        ] {
+            assert!(is_build_check(&c(yes)), "{yes}");
+        }
+        for no in ["cargo test", "decision 页面", "precision"] {
+            assert!(!is_build_check(&c(no)), "{no}");
+        }
     }
 
     #[test]

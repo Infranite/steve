@@ -221,6 +221,11 @@ fn remote(k: &Kit, rule: &str, accept: bool) -> Remote {
 
 /// [`remote`] for an item whose goal also says `goal`.
 pub(super) fn remote_for(k: &Kit, rule: &str, accept: bool, goal: Option<&str>) -> Remote {
+    remote_at(k, rule, accept, goal, "https://github.com/acme/app.git")
+}
+
+/// [`remote_for`] with an `origin` that answers as `url`.
+fn remote_at(k: &Kit, rule: &str, accept: bool, goal: Option<&str>, url: &str) -> Remote {
     let r = repo(k.home());
     let bare = k.home().join("origin.git");
     g(
@@ -233,7 +238,6 @@ pub(super) fn remote_for(k: &Kit, rule: &str, accept: bool, goal: Option<&str>) 
             &bare.to_string_lossy(),
         ],
     );
-    let url = "https://github.com/acme/app.git";
     g(
         &r,
         &[
@@ -899,4 +903,129 @@ fn a_goal_that_asks_for_an_actual_operation_needs_one_in_the_delivery() {
     assert_eq!(k.phase(&x.item), "active");
     let p = k.rt.prompts_of(&x.session).pop().unwrap();
     assert!(p.contains("还要求实际操作验证"), "{p}");
+}
+
+/// An item whose goal asks for the build to pass, delivered in a project with `rule` on `url`,
+/// back to work: the agent stops after merging (and tagging `tag`) without delivering again.
+fn stopped_after_merging(rule: &str, url: &str, tag: Option<&str>) -> (Kit, Remote) {
+    let k = kit(2);
+    // ST-53: "修复偶发失败的测试，并确认构建通过"
+    let x = remote_at(
+        &k,
+        rule,
+        false,
+        Some("修复偶发失败的测试，并确认构建通过"),
+        url,
+    );
+    k.rt.end_turn(&k.core, &x.session, "end_turn", None);
+    k.core.tx().lc_invalidate(&x.item, "有新的交付").unwrap();
+    merge_and_tag(&x, tag);
+    stop(&k, &x.session, "合并了。");
+    assert!(k.wait(|| !steve_lines(&k, &x.item).is_empty()));
+    (k, x)
+}
+
+#[test]
+fn a_goal_that_asks_for_the_build_to_pass_needs_a_build_in_the_delivery() {
+    let k = kit(2);
+    let x = remote_for(&k, upstream::DONE_MERGE, false, Some("确认构建通过"));
+    let s = k.db().session(&x.session).unwrap().unwrap();
+    let check = |name: &str, passed: bool| crate::Check {
+        name: name.into(),
+        passed,
+        operated: false,
+    };
+    for checks in [
+        vec![],
+        vec![check("cargo test", true)],
+        vec![check("构建：cargo build", false)],
+    ] {
+        let e = k
+            .core
+            .tool_deliver(&s, "ok", &[], &checks, &[])
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("Not delivered") && e.contains("build"), "{e}");
+    }
+    k.core
+        .tool_deliver(
+            &s,
+            "ok",
+            &[],
+            &[
+                check("cargo test", true),
+                check("构建：cargo build --release", true),
+            ],
+            &[],
+        )
+        .unwrap();
+    let i = k.db().item(&x.item).unwrap().unwrap();
+    let line = k.core.tx().proof_line(&i).unwrap().unwrap();
+    assert!(
+        line.contains("a passed check for the build you ran"),
+        "{line}"
+    );
+    assert!(!line.contains("Release build"), "{line}");
+}
+
+#[test]
+fn a_build_goal_in_a_merge_rule_project_is_not_closed_on_the_merge_alone() {
+    let (k, x) = stopped_after_merging(
+        upstream::DONE_MERGE,
+        "https://github.com/acme/app.git",
+        None,
+    );
+    assert_eq!(k.phase(&x.item), "active", "{:?}", k.status(&x.item));
+    let p = k.rt.prompts_of(&x.session).pop().unwrap();
+    assert!(
+        p.contains("还要求构建通过") && p.contains("合并就算完成，Steve 不跟踪构建"),
+        "{p}"
+    );
+}
+
+#[test]
+fn a_build_goal_whose_tag_build_cant_be_followed_rests_on_the_delivery() {
+    let url = "https://git.example.com/acme/app.git";
+    // stopped after merging and tagging: no Release build to follow, so not closed on the tag alone
+    let (k, x) = stopped_after_merging(upstream::DONE_TAG, url, Some("v2.0.0"));
+    assert_eq!(k.phase(&x.item), "active", "{:?}", k.status(&x.item));
+    let p = k.rt.prompts_of(&x.session).pop().unwrap();
+    assert!(
+        p.contains("还要求构建通过") && p.contains("跟踪不了 tag 触发的 Release 构建"),
+        "{p}"
+    );
+    assert!(!p.contains("构建成功后才算完成"), "{p}");
+    let i = k.db().item(&x.item).unwrap().unwrap();
+    let line = k.core.tx().proof_line(&i).unwrap().unwrap();
+    assert!(
+        line.contains("a passed check for the build you ran") && line.contains("on GitHub"),
+        "{line}"
+    );
+    // an accepted delivery (with its build check) closes on the tag, and says what stood for the build
+    let k = kit(2);
+    let x = remote_at(&k, upstream::DONE_TAG, true, Some("确认构建通过"), url);
+    merge_and_tag(&x, Some("v2.1.0"));
+    k.core.tx().st.probed.clear();
+    k.core.lifecycle_tick().unwrap();
+    assert!(k.wait(|| {
+        let _ = k.core.lifecycle_tick();
+        !op_states(&k, &x.item).is_empty() && op_states(&k, &x.item)[0].1 == "succeeded"
+    }));
+    k.rt.end_turn(&k.core, &x.session, "end_turn", None);
+    assert!(
+        k.wait(|| {
+            let _ = k.core.lifecycle_tick();
+            k.phase(&x.item) == "closed"
+        }),
+        "{:?} {:?}",
+        k.status(&x.item),
+        blockers(&k, &x.item)
+    );
+    assert_eq!(
+        op_states(&k, &x.item),
+        vec![(OP_RELEASE.to_string(), "succeeded".to_string())]
+    );
+    assert!(k.timeline_texts(&x.item).iter().any(|l| l.contains(
+        "跟踪不了 v2.1.0 的 Release 构建；事项目标要求的构建通过以交付里的构建检查为准"
+    )));
 }
