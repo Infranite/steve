@@ -394,3 +394,82 @@ async fn codex_failures_are_typed() {
         Err(PrintError::Timeout(_))
     ));
 }
+
+/// A supervised run leads its own process group, is told before it runs on, and numbers messages.
+#[tokio::test]
+async fn a_supervised_run_has_its_own_group_and_numbered_messages() {
+    let dir = tempfile::tempdir().unwrap();
+    let pgid = dir.path().join("pgid");
+    let body = [
+        format!("ps -o pgid= -p $$ | tr -d ' ' > '{}'", pgid.display()),
+        START.into(),
+        delta("先"),
+        delta("看"),
+        START.into(),
+        delta("答案"),
+        r#"echo '{"type":"result","is_error":false,"result":"答案"}'"#.into(),
+    ]
+    .join("\n");
+    let exe = script(dir.path(), "claude", &body);
+    let pid = Mutex::new(None);
+    let seen = Mutex::new(vec![]);
+    let r = steve_print::run_supervised(
+        &claude(&exe, dir.path()),
+        &|p| {
+            *pid.lock().unwrap() = Some(p);
+            true
+        },
+        &|m, t| seen.lock().unwrap().push((m, t.to_string())),
+    )
+    .await;
+    assert_eq!(text(&r), "答案");
+    let pid = pid.into_inner().unwrap().expect("told the pid");
+    let group: u32 = std::fs::read_to_string(&pgid)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    assert_eq!(group, pid, "the harness leads its own group");
+    assert_eq!(
+        seen.into_inner().unwrap(),
+        [(1, "先".into()), (1, "先看".into()), (2, "答案".into())]
+    );
+
+    // a process the host cannot record is killed and the run fails
+    let exe = script(dir.path(), "slow", "sleep 30");
+    let t0 = Instant::now();
+    let r = steve_print::run_supervised(&claude(&exe, dir.path()), &|_| false, &|_, _| {}).await;
+    assert!(matches!(r.reply, Err(PrintError::Io(_))), "{:?}", r.reply);
+    assert!(t0.elapsed() < Duration::from_secs(5));
+}
+
+/// A supervised run that fails without a result still fails promptly with what its stderr said,
+/// even when a process it left behind keeps the stderr pipe open.
+#[tokio::test]
+async fn a_supervised_failure_does_not_wait_on_a_held_stderr() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path();
+    // the grandchild holds stderr (not stdout) open for 30s
+    let claude_exe = script(
+        cwd,
+        "claude",
+        "echo nope >&2; (sleep 30 >/dev/null 2>&2 &) ; exit 2",
+    );
+    let codex_exe = script(
+        cwd,
+        "codex",
+        "cat > /dev/null; echo boom >&2; (sleep 30 >/dev/null 2>&2 &) ; exit 3",
+    );
+    for (run, said) in [
+        (claude(&claude_exe, cwd), "nope"),
+        (codex(&codex_exe, cwd), "boom"),
+    ] {
+        let t0 = Instant::now();
+        let r = steve_print::run_supervised(&run, &|_| true, &|_, _| {}).await;
+        assert!(
+            matches!(&r.reply, Err(PrintError::Failed(e)) if e == said),
+            "{r:?}"
+        );
+        assert!(t0.elapsed() < Duration::from_secs(8), "{:?}", t0.elapsed());
+    }
+}

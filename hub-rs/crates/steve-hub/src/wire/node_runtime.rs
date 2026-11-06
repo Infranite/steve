@@ -37,7 +37,10 @@ use steve_store::{FileRef, Store, StoreError, Tx};
 
 mod config;
 mod heads;
+// the job half of the coordinator lives next to it (wire/node_jobs.rs), with its fields in reach
 mod ledger;
+#[path = "node_jobs.rs"]
+mod node_jobs;
 mod perm;
 mod recover;
 mod workspace;
@@ -50,6 +53,7 @@ pub use ledger::LedgerEntry;
 pub use workspace::WorkspaceFact;
 #[cfg(test)]
 pub(crate) use ledger::PUSH_DEADLINE;
+pub use node_jobs::NodePrint;
 
 /// Retries of a turn after a passing failure (gateway 5xx) with no tool run, and their waits.
 const RETRY_DELAYS_MS: [i64; 2] = [20_000, 60_000];
@@ -212,6 +216,8 @@ pub struct NodeRuntime {
     /// New sessions left on the legacy runner since boot although this Node was on (no binding
     /// could be planned, or the bind failed): `/healthz` shows them, so they don't hide.
     fallbacks: std::sync::atomic::AtomicU64,
+    /// The callers waiting on think jobs of this Node ([`NodePrint`]).
+    jobs: node_jobs::Waiters,
 }
 
 /// How long applied Node events stay in the inbox (what is still needed stays longer).
@@ -331,6 +337,7 @@ impl NodeRuntime {
             turn_limit: std::sync::atomic::AtomicI64::new(TURN_LIMIT_MS),
             idle_release: std::sync::atomic::AtomicI64::new(IDLE_RELEASE_MS),
             fallbacks: std::sync::atomic::AtomicU64::new(0),
+            jobs: node_jobs::Waiters::default(),
         })
     }
 
@@ -425,6 +432,10 @@ impl NodeRuntime {
                         if n > 0 {
                             tracing::info!("node {}: reconciled, {n} changed", me.node_id);
                         }
+                        // job attempts of an earlier run have no caller any more
+                        let jobs = me.clone();
+                        let _ =
+                            tokio::task::spawn_blocking(move || jobs.settle_orphan_jobs()).await;
                         me.reconciled.store(true, Ordering::SeqCst);
                         me.plan_waiting();
                         break;
@@ -473,6 +484,7 @@ impl NodeRuntime {
                     }
                     if !applied && prune {
                         me.prune_inbox(now());
+                        me.prune_jobs(now() - INBOX_KEEP_MS);
                     }
                     applied
                 })
@@ -1600,6 +1612,16 @@ impl NodeRuntime {
                 {
                     self.cancel_unsent_in(tx, &session, &attempt, &lease.operation)?;
                 }
+                // a job start given up meanwhile, every send of it refused: it never ran either
+                if !uncertain
+                    && !lease.maybe_sent
+                    && lease.method == "start_job"
+                    && let Some(attempt) = node_jobs::job_attempt_of(tx, &lease.operation)?
+                    && steve_store::jobs::attempt_in(tx, &attempt)?
+                        .is_some_and(|a| a.cancel_requested)
+                {
+                    self.stop_job_in(tx, &attempt)?;
+                }
                 Ok((None, None))
             }
             Err(e) => {
@@ -1612,6 +1634,10 @@ impl NodeRuntime {
                     now(),
                 )?;
                 // refused before it was accepted: it certainly did not run
+                if let Some(attempt) = node_jobs::job_attempt_of(tx, &lease.operation)? {
+                    self.job_refused_in(tx, &lease.method, &attempt, e)?;
+                    return Ok((None, None));
+                }
                 let end = match lease.method.as_str() {
                     "start_turn" => self.refused_attempt_in(tx, &lease.operation, e)?,
                     "release_session" => {
@@ -1718,6 +1744,7 @@ impl NodeRuntime {
             "prepare_workspace" => n.prepare_workspace(parse(&l.request)?).await,
             "open_session" => n.open_session(parse(&l.request)?).await,
             "start_turn" => n.start_turn(parse(&l.request)?).await,
+            "start_job" => n.start_job(parse(&l.request)?).await,
             "cancel" => n.cancel(parse(&l.request)?).await,
             "release_session" => n.release_session(parse(&l.request)?).await,
             "configure_session" => n.configure_session(parse(&l.request)?).await,
@@ -1756,6 +1783,10 @@ impl NodeRuntime {
             now(),
         )?;
         if !moved {
+            return Ok(None);
+        }
+        if let Some(attempt) = node_jobs::job_attempt_of(tx, op)? {
+            self.job_receipt_in(tx, op, &method, &attempt, receipt)?;
             return Ok(None);
         }
         let detail = match &receipt.state {
@@ -2975,6 +3006,10 @@ impl NodeRuntime {
 
     /// One event's effects in `tx`. Returns a turn end to tell the business side after the commit.
     fn apply_in(&self, tx: &Tx, ev: &NodeEvent) -> Result<Option<End>, StoreError> {
+        if let Subject::Execution(ExecutionRef::Job { attempt, .. }) = &ev.subject {
+            self.job_event_in(tx, ev, attempt.as_str())?;
+            return Ok(None);
+        }
         let session = match &ev.subject {
             Subject::Session { session } => Some(session.to_string()),
             Subject::Execution(ExecutionRef::Turn { session, .. }) => Some(session.to_string()),

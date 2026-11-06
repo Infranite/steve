@@ -5100,6 +5100,7 @@ dependencies = [
  "steve-node-api",
  "steve-node-cli",
  "steve-node-wire",
+ "steve-print",
  "steve-research",
  "steve-stats",
  "steve-store",
@@ -5278,6 +5279,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
+ "base64 0.23.1",
  "hex",
  "libc",
  "rmcp",
@@ -5288,6 +5290,7 @@ dependencies = [
  "steve-acp",
  "steve-knowledge",
  "steve-node-api",
+ "steve-print",
  "steve-vault",
  "tempfile",
  "tokio",

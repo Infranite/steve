@@ -62,6 +62,39 @@ pub struct Image {
 /// Told what the model has written so far in its current message, each time it changes.
 pub type OnText<'a> = &'a (dyn Fn(&str) + Send + Sync);
 
+/// Told the model's current message each time it changes: its number in the run (a new number is a
+/// new message, whose text replaces the last one's) and its text so far.
+pub type OnMessage<'a> = &'a (dyn Fn(u32, &str) + Send + Sync);
+
+/// Told the harness's process id as soon as it runs, before any of its output is read. The process
+/// leads a process group of its own (the id is the group's). False: the caller could not keep track
+/// of it; the process is killed and the run fails.
+pub type OnSpawn<'a> = &'a (dyn Fn(u32) -> bool + Send + Sync);
+
+/// How a run reports back (crate-internal): its text, and its process when a host supervises it.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct Hooks<'a> {
+    pub text: Option<OnMessage<'a>>,
+    pub spawned: Option<OnSpawn<'a>>,
+}
+
+impl Hooks<'_> {
+    /// The new process is known to the host (or there is none to tell); false: kill it.
+    pub(crate) fn spawned(&self, child: &tokio::process::Child) -> bool {
+        match self.spawned {
+            None => true,
+            Some(f) => child.id().is_some_and(f),
+        }
+    }
+}
+
+/// A process the host would not keep (see [`OnSpawn`]).
+pub(crate) fn untracked() -> PrintError {
+    PrintError::Io(std::io::Error::other(
+        "the harness process could not be recorded",
+    ))
+}
+
 /// One run with one model.
 #[derive(Debug, Clone)]
 pub struct PrintRun<'a> {
@@ -157,18 +190,138 @@ impl Ran {
 /// Runs `run` once. Text goes to `on_text` as it is written (Claude Code: deltas through stream-json,
 /// used when `on_text` is given or there are images; Codex: each whole message).
 pub async fn run(run: &PrintRun<'_>, on_text: Option<OnText<'_>>) -> Ran {
+    let text = on_text.map(|f| move |_: u32, t: &str| f(t));
+    let hooks = Hooks {
+        text: text.as_ref().map(|f| f as OnMessage<'_>),
+        spawned: None,
+    };
+    run_with(run, hooks).await
+}
+
+/// Runs `run` once for a host that supervises the process (a Node): the harness leads its own
+/// process group and `spawned` hears its id before anything else happens, so the host can stop the
+/// whole group and prove it gone. The text always streams, message by message, to `on_message`.
+pub async fn run_supervised(
+    run: &PrintRun<'_>,
+    spawned: OnSpawn<'_>,
+    on_message: OnMessage<'_>,
+) -> Ran {
+    run_with(
+        run,
+        Hooks {
+            text: Some(on_message),
+            spawned: Some(spawned),
+        },
+    )
+    .await
+}
+
+async fn run_with(run: &PrintRun<'_>, hooks: Hooks<'_>) -> Ran {
     match run.harness {
-        Harness::Claude => claude::run(run, on_text).await,
-        Harness::Codex => codex::run(run, on_text).await,
+        Harness::Claude => claude::run(run, hooks).await,
+        Harness::Codex => codex::run(run, hooks).await,
     }
 }
 
-fn command(exe: &Path, cwd: &Path) -> tokio::process::Command {
+/// How long a supervised run's output is still read after its process exited.
+const AFTER_EXIT: Duration = Duration::from_secs(2);
+
+/// Reads the child's output line by line (each to `line`) and waits for it. Supervised, the child's
+/// exit ends the reading after [`AFTER_EXIT`] even when the pipe is still open: a process forked
+/// elsewhere in the host meanwhile may have inherited its write end, and a host stopping a run
+/// must not wait on a process it did not start.
+pub(crate) async fn read_to_exit<R: tokio::io::AsyncRead + Unpin>(
+    out: R,
+    child: &mut tokio::process::Child,
+    supervised: bool,
+    mut line: impl FnMut(&str),
+) -> std::io::Result<std::process::ExitStatus> {
+    use tokio::io::AsyncBufReadExt;
+    let mut lines = tokio::io::BufReader::new(out).lines();
+    if !supervised {
+        while let Some(l) = lines.next_line().await? {
+            line(&l);
+        }
+        return child.wait().await;
+    }
+    let mut exited = None;
+    loop {
+        let next = match exited {
+            Some(_) => match tokio::time::timeout(AFTER_EXIT, lines.next_line()).await {
+                Ok(r) => r?,
+                Err(_) => break,
+            },
+            None => tokio::select! {
+                r = lines.next_line() => r?,
+                s = child.wait() => {
+                    exited = Some(s?);
+                    continue;
+                }
+            },
+        };
+        match next {
+            Some(l) => line(&l),
+            None => break,
+        }
+    }
+    match exited {
+        Some(s) => Ok(s),
+        None => child.wait().await,
+    }
+}
+
+/// The child's stderr, read in the background as it comes.
+pub(crate) struct Stderr {
+    seen: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Stderr {
+    pub(crate) fn read<R: tokio::io::AsyncRead + Unpin + Send + 'static>(mut err: R) -> Self {
+        use tokio::io::AsyncReadExt;
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let into = seen.clone();
+        let task = tokio::spawn(async move {
+            let mut buf = [0u8; 4096];
+            while let Ok(n) = err.read(&mut buf).await
+                && n > 0
+            {
+                into.lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .extend_from_slice(&buf[..n]);
+            }
+        });
+        Self { seen, task }
+    }
+
+    /// What the child wrote, once it exited. Supervised, like [`read_to_exit`], the read ends after
+    /// [`AFTER_EXIT`] with what came so far even when another process still holds the pipe open.
+    pub(crate) async fn after_exit(mut self, supervised: bool) -> String {
+        if supervised {
+            if tokio::time::timeout(AFTER_EXIT, &mut self.task)
+                .await
+                .is_err()
+            {
+                self.task.abort();
+            }
+        } else {
+            let _ = (&mut self.task).await;
+        }
+        let seen = std::mem::take(&mut *self.seen.lock().unwrap_or_else(|p| p.into_inner()));
+        String::from_utf8_lossy(&seen).into_owned()
+    }
+}
+
+/// `group`: the process leads a process group of its own.
+fn command(exe: &Path, cwd: &Path, group: bool) -> tokio::process::Command {
     let mut cmd = tokio::process::Command::new(exe);
     for key in SCRUBBED_ENV {
         cmd.env_remove(key);
     }
     cmd.current_dir(cwd).kill_on_drop(true);
+    if group {
+        cmd.process_group(0);
+    }
     cmd
 }
 

@@ -69,6 +69,7 @@ fn setup(codex: &str) -> T {
             execs: 0,
         },
         storage: Storage::default(),
+        jobs: Default::default(),
     };
     let node = LocalNode::open(cfg).unwrap();
     script(&root.join("bin/claude"), "echo '2.1.0 (Claude Code)'");

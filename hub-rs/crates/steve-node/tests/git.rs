@@ -120,6 +120,7 @@ impl T {
                 execs: 4,
             },
             storage: Storage::default(),
+            jobs: Default::default(),
         })
         .unwrap();
         n.connect(Arc::new(RecordingSink::default()), None);

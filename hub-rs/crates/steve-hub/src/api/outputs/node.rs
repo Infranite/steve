@@ -993,6 +993,7 @@ mod tests {
                     execs: 0,
                 },
                 storage: Default::default(),
+                jobs: Default::default(),
             })
             .unwrap(),
         )
