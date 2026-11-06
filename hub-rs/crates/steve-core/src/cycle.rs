@@ -1208,6 +1208,7 @@ pub(crate) fn lifecycle_view(t: &Tx, i: &Item) -> Result<Value> {
                 active += 1;
             }
         }
+        let mut evidence = Vec::new();
         for o in t.db().store().items().operations(&i.id, i.cycle)? {
             /* the evidence the item's goal asks for, said by name (ST-57) */
             if matches!(o.status.as_str(), "pending" | "running")
@@ -1224,7 +1225,8 @@ pub(crate) fn lifecycle_view(t: &Tx, i: &Item) -> Result<Value> {
                     (_, Some(t)) => steve_i18n::t!("core.blocker.deploy", tag = t),
                     (_, None) => steve_i18n::t!("core.blocker.deploy_result"),
                 };
-                push("operation", label);
+                // the build before this instance, whichever operation was opened first
+                evidence.push((o.kind != OP_BUILD, label));
                 named = true;
             }
             match o.status.as_str() {
@@ -1240,6 +1242,10 @@ pub(crate) fn lifecycle_view(t: &Tx, i: &Item) -> Result<Value> {
                 ),
                 _ => {}
             }
+        }
+        evidence.sort_by_key(|(after, _)| *after);
+        for (_, label) in evidence {
+            push("operation", label);
         }
         if i.status == "block" && !crate::lifecycle::deps_open(t.db(), &i.id)?.is_empty() {
             push("dependency", steve_i18n::t!("core.blocker.dependency"));
