@@ -28,6 +28,8 @@ mod stats_marks;
 mod supersede;
 mod takeover;
 mod thread;
+mod workflow;
+mod workflow_review;
 mod workspace;
 mod worktrees;
 

@@ -35,6 +35,7 @@ export type Item = {
   due?: string; pri?: "高" | "中" | "低"; arch?: boolean; snooze?: string; snoozeUntil?: number; tags?: string[]; branch: string | null; cwd: string | null; projNext?: boolean; detail: boolean; dependents: string[]; created: number; updated: number
   /** the last approved release of this item and what became of it */
   rel?: Rel
+  workflow?: RItemDetail["workflow"]
 }
 export type Tag = { id: string; name: string; cat: string; desc: string; by: "Steve" | "你"; created: string }
 export type Bot = { id: string; main?: boolean; n: string; a: string; role: string; pers: string; pro: number; h: string; harness: string; m: string; model: string | null; on: boolean; acc: string; ws: string; project: string | null; perm: string; permMode: string; rule: string; prompt: string | null
@@ -417,6 +418,7 @@ function itemOf(i: RItem): Item {
     id: i.id, t: i.title, b: i.bot_id ?? "steve", st: i.status, deps: i.deps, src: i.source, ws: proj?.name ?? "—", project: i.project_id, up: tm(i.updated), star: i.star, acc: ACC[i.accept_mode ?? "inherit"] ?? ACC.inherit,
     goals: det ? det.goalsList.map((g) => g.text) : [i.goal], now: i.now || "", plan: i.plan.length ? steps(i.plan) : undefined,
     rounds: (det?.planRounds ?? []).map((r) => ({ n: r.round, steps: steps(r.steps), end: r.end, at: tm(r.created) })),
+    workflow: det?.workflow,
     wait: open.length ? waitOf(open[0]) : undefined, waits: open.map(waitOf), ss: i.sessionIds, tl, outs: det ? det.artifacts.map((a): Out => [a.kind, a.title, a.location, a.id, a.created, det.artifactRoles?.[a.id] as Out[5]]) : [], anns: det?.annotations ?? [],
     q: act?.queued ?? [], qs: act?.id ?? null,
     parent: i.parent?.item ? { item: i.parent.item, s: i.parent.session ?? undefined, at: undefined } : null, due: i.due ?? undefined, pri: (i.priority as Item["pri"]) ?? "中", arch: i.archived, snooze: snoozed, snoozeUntil: snoozed ? i.snooze!.until : undefined, tags: i.tags,

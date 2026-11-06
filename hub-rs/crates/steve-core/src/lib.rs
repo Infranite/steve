@@ -41,6 +41,7 @@ pub mod takeover;
 pub mod thread;
 pub mod upstream;
 pub mod util;
+pub mod workflow;
 pub mod workspace;
 mod worktrees;
 pub mod yolo;

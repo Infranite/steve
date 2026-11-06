@@ -1,4 +1,5 @@
 import { api } from "@/api"
+import { WorkflowPanel } from "@/workflow-panel"
 import { usePeopleOn } from "@/api/people"
 import { Files } from "@/attach"
 import { SessionCards } from "@/chat2"
@@ -463,6 +464,7 @@ export function ItemView({ id }: { id: string }) {
             {i.rel && <RelNote rel={i.rel} box={i.rel.tone !== "ok"} className="mt-2" onClose={i.rel.tone === "fail" ? () => closeRel(i) : undefined} />}
             {(i.plan || i.rounds.length > 0) && <Plan i={i} />}
           </section>
+          {i.workflow && <WorkflowPanel item={i.id} workflow={i.workflow} />}
           {/* 3 — activity, newest at the bottom, older entries folded */}
           <section className="flex flex-col gap-3">
             <div className="flex flex-wrap items-center justify-between gap-2 border-b pb-2">

@@ -62,6 +62,8 @@ pub struct FakeState {
     pub follow_up_before_stop: bool,
     /// The backend makes items' worktrees ([`AgentRuntime::makes_worktrees`]).
     pub makes_worktrees: bool,
+    /// Explicit opt-in only for collaboration state-machine tests; no real process is started.
+    pub workflow_execution_ready: bool,
     /// `created` binds the session where its worktree is made (else it stays with the core).
     pub binds_worktrees: bool,
     /// `created` binds the session to a directory it only opens (its item was first prepared
@@ -91,6 +93,13 @@ pub struct FakeRuntime {
 }
 
 impl FakeRuntime {
+    fn workflow_blocker(&self, sid: &str) -> Result<Option<String>> {
+        Ok(self
+            .store
+            .store()
+            .reader(|c| steve_store::workflow_gate::session_blocker(c, sid))?)
+    }
+
     pub fn st(&self) -> std::sync::MutexGuard<'_, FakeState> {
         self.s.lock().unwrap()
     }
@@ -141,7 +150,7 @@ impl FakeRuntime {
             let _ = self
                 .store
                 .event_add(sid, "turn_end", json!({"stopReason": stop}));
-            let q = if st.holding {
+            let q = if st.holding || self.workflow_blocker(sid).unwrap().is_some() {
                 vec![]
             } else {
                 self.store.queue_take(sid).unwrap()
@@ -174,6 +183,13 @@ impl FakeRuntime {
 }
 
 impl AgentRuntime for FakeRuntime {
+    fn check_workflow_execution(&self, _item: &str) -> Result<()> {
+        if self.st().workflow_execution_ready {
+            Ok(())
+        } else {
+            Err(msg("测试运行器未启用隔离协作执行"))
+        }
+    }
     fn prompt(
         &self,
         sid: &str,
@@ -181,6 +197,9 @@ impl AgentRuntime for FakeRuntime {
         via: &str,
         files: &[crate::repo::FileRef],
     ) -> Result<Prompted> {
+        if let Some(why) = self.workflow_blocker(sid)? {
+            return Err(msg(why));
+        }
         let s = self.store.session(sid)?.ok_or_else(|| msg("no session"))?;
         let mut st = self.st();
         if st.turning.contains(sid) || st.holding {
@@ -336,6 +355,9 @@ impl AgentRuntime for FakeRuntime {
 
 impl FakeRuntime {
     fn flush_now(&self, sid: &str, lead: Option<(&str, &str)>) -> Flushed {
+        if self.workflow_blocker(sid).unwrap().is_some() {
+            return Flushed::Held;
+        }
         let mut st = self.st();
         st.flush_in_runtime
             .push(tokio::runtime::Handle::try_current().is_ok());

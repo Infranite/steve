@@ -1,5 +1,21 @@
 /* English strings for the "views" namespace: the same keys as ../zh-CN/views.ts. Conventions: web/src/i18n/index.ts */
 export default {
+  workflow: {
+    title: "Bot collaboration",
+    progress: "Required work {{done}}/{{total}} · Running {{running}}/{{max}} · Plan revision {{revision}}",
+    pending: "Waiting for dependencies", ready: "Ready", running: "Running", passed: "Passed", failed: "Failed",
+    cancelled: "Cancelled", blocked: "Blocked", paused: "Paused",
+    work: "Work", review: "Independent review", integrate: "Integration acceptance", optional: "Optional",
+    pause: "Pause workflow", resume: "Resume workflow", retry: "Retry",
+    pauseHint: "The workflow is paused. Resume to continue with the current plan.",
+    blockers: "The parent item cannot finish yet",
+    attempt: "Attempt {{n}}/{{max}}",
+    depends: "Depends on: {{names}}", resources: "Shared scope: {{names}}",
+    details: "Goal and delivery", outputs: "Shared outputs",
+    checkPassed: "Passed", checkFailed: "Failed", operated: "Actually operated",
+    history_one: "Plan changes ({{count}})", history_other: "Plan changes ({{count}})", revision: "Revision {{n}}",
+    reason: { pause: "The user paused the workflow from the item page", resume: "The user resumed the workflow from the item page", retry: "The user retried failed work from the item page" },
+  },
   inbox: {
     title: "Inbox",
     tabPending: "Pending",

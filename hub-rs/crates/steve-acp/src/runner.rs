@@ -488,8 +488,9 @@ static CODEX_TOOL: LazyLock<Regex> = LazyLock::new(|| {
 /// see, save a candidate the user still confirms, or (`steve_mail_draft`) only draft and open an
 /// approval; none reaches outside Steve. Not here: `steve_secret_use` (runs commands) and the
 /// GitHub comment / open-PR tools.
-const OWN_TOOLS: [&str; 19] = [
+const OWN_TOOLS: [&str; 20] = [
     "steve_update",
+    "steve_workflow",
     "steve_ask",
     "steve_deliver",
     "steve_request_approval",
@@ -1925,6 +1926,29 @@ impl Acp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workflow_tool_uses_the_session_scoped_steve_permission() {
+        let request = |name: &str| {
+            json!({
+                "toolCall": {"name": name},
+                "options": [
+                    {"optionId": "always", "kind": "allow_always"},
+                    {"optionId": "once", "kind": "allow_once"}
+                ]
+            })
+        };
+        assert_eq!(
+            auto_allow(&request("mcp__steve__steve_workflow")).as_deref(),
+            Some("once")
+        );
+        assert_eq!(auto_allow(&request("mcp__other__steve_workflow")), None);
+        let title_only = json!({
+            "toolCall": {"title": "mcp__steve__steve_workflow", "rawInput": {"command": "echo steve_workflow"}},
+            "options": [{"optionId": "once", "kind": "allow_once"}]
+        });
+        assert_eq!(auto_allow(&title_only), None);
+    }
 
     fn cc(tool: &str) -> Value {
         json!({ "toolCall": { "toolCallId": "t1", "title": "mcp__steve__x", "_meta": { "claudeCode": { "toolName": tool } } },

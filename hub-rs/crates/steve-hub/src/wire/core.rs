@@ -973,12 +973,59 @@ fn node_of_strict(
 
 impl RoutedRuntime {
     fn route(&self, session_id: &str) -> Backend {
-        self.route_to(node_of(&self.store, session_id))
+        let node = node_of(&self.store, session_id);
+        if node.is_none() && self.workflow_item(session_id).map_or(true, |i| i.is_some()) {
+            return Backend::Parked;
+        }
+        self.route_to(node)
     }
 
     /// [`Self::route`], with an unreadable binding as an error.
     fn route_strict(&self, session_id: &str) -> Result<Backend, steve_store::StoreError> {
-        Ok(self.route_to(node_of_strict(&self.store, session_id)?))
+        let node = node_of_strict(&self.store, session_id)?;
+        if node.is_none() && self.workflow_item(session_id)?.is_some() {
+            return Ok(Backend::Parked);
+        }
+        Ok(self.route_to(node))
+    }
+
+    /// An unbound work unit must never inherit the legacy Hub runner. Read failures likewise
+    /// cannot establish that a session is ordinary work, so callers keep it parked or return them.
+    fn workflow_item(&self, session_id: &str) -> Result<Option<String>, steve_store::StoreError> {
+        let Some(item) = self
+            .store
+            .sessions()
+            .get(session_id)?
+            .and_then(|s| s.item_id)
+        else {
+            return Ok(None);
+        };
+        // Reset/replan may detach an old attempt from the live graph. Its durable source marker
+        // still prevents an old child/session from gaining the ordinary item's legacy fallback.
+        if self.store.workflows().by_child(&item)?.is_some()
+            || self
+                .store
+                .items()
+                .get(&item)?
+                .is_some_and(|i| i.source.1 == "workflow")
+        {
+            Ok(Some(item))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn check_workflow_session(&self, session_id: &str) -> steve_core::Result<()> {
+        if let Some(why) = self
+            .store
+            .reader(|c| steve_store::workflow_gate::session_blocker(c, session_id))?
+        {
+            return Err(CoreError::Msg(why));
+        }
+        let Some(item) = self.workflow_item(session_id)? else {
+            return Ok(());
+        };
+        steve_core::AgentRuntime::check_workflow_execution(self, &item)
     }
 
     fn route_to(&self, node: Option<String>) -> Backend {
@@ -1127,6 +1174,12 @@ impl steve_core::AgentRuntime for RoutedRuntime {
     /// `after` (a predecessor's release on its way): a Node-bound session opens only once it is
     /// done; a legacy one starts right away, as before.
     fn created(&self, session_id: &str, after: Option<&str>) {
+        // The current Node protocol has no execution principal and its session driver cannot
+        // enforce a nonempty Required sandbox. Never bind, prepare or fall back for these units.
+        if let Err(e) = self.check_workflow_session(session_id) {
+            tracing::warn!(session_id, "协作运行未就绪：{e}");
+            return;
+        }
         if self.bind_remote(session_id, after) {
             return;
         }
@@ -1153,6 +1206,7 @@ impl steve_core::AgentRuntime for RoutedRuntime {
         via: &str,
         files: &[steve_core::repo::FileRef],
     ) -> steve_core::Result<steve_core::Prompted> {
+        self.check_workflow_session(session_id)?;
         let n = match self.route(session_id) {
             Backend::Node(n) => Some(n),
             Backend::Parked => None,
@@ -1308,6 +1362,10 @@ impl steve_core::AgentRuntime for RoutedRuntime {
     }
     fn flush(&self, session_id: &str, lead: Option<(&str, &str)>) -> steve_core::Flushed {
         use super::node_runtime::Planned;
+        if let Err(e) = self.check_workflow_session(session_id) {
+            tracing::warn!(session_id, "协作队列等待隔离 Node：{e}");
+            return steve_core::Flushed::Held;
+        }
         match self.route(session_id) {
             Backend::Node(n) => match n.flush_turn(session_id, lead) {
                 Ok((Planned::Created, Some(attempt))) => {
@@ -1648,6 +1706,14 @@ impl Domain for CoreDomain {
     async fn lifecycle_view(&self, id: &str) -> BResult<Option<Value>> {
         let (c, id) = (self.core.clone(), id.to_string());
         blocking(move || c.lifecycle_view(&id).map(Some)).await
+    }
+    async fn workflow_get(&self, id: &str) -> BResult<Value> {
+        let (c, id) = (self.core.clone(), id.to_string());
+        blocking(move || c.workflow_get(&id)).await
+    }
+    async fn workflow_change(&self, id: &str, args: Value, actor: &str) -> BResult<Value> {
+        let (c, id, actor) = (self.core.clone(), id.to_string(), actor.to_string());
+        blocking(move || c.workflow_change(&id, args, &actor)).await
     }
     async fn lifecycle_views(&self, ws: &str) -> BResult<std::collections::HashMap<String, Value>> {
         let (c, ws) = (self.core.clone(), ws.to_string());

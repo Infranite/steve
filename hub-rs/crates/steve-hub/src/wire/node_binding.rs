@@ -68,6 +68,17 @@ pub fn binding_with(
     if item.workspace_id != s.workspace_id {
         return None;
     }
+    // This is a pure plan, not permission to dispatch it: RoutedRuntime's workflow preflight
+    // also requires a verified execution principal before a binding can be persisted. Keep the
+    // requested sandbox explicit so a future Node cannot silently interpret ACP modes as one.
+    let sandbox =
+        if item.source.1 == "workflow" || store.workflows().by_child(&item.id).ok()?.is_some() {
+            SandboxRequirement::Required {
+                guarantees: vec!["os-sandbox".into(), "principal-isolation".into()],
+            }
+        } else {
+            SandboxRequirement::None
+        };
     // an archived project's directories are no roots any more ([`roots`]), its items' included
     if let Some(pid) = &item.project_id
         && let Ok(Some(p)) = store.projects().get(pid)
@@ -155,7 +166,7 @@ pub fn binding_with(
             revision: Revision::new(format!("host-{}", bot.as_ref().map_or(0, |b| b.revision)))
                 .ok()?,
             permissions,
-            sandbox: SandboxRequirement::None,
+            sandbox,
             readable: vec![],
             network: NetworkScope::Unrestricted,
             tools: GrantId::new("hub").ok()?,
@@ -900,5 +911,176 @@ mod host_tests {
         assert_eq!(permission_mode("auto"), Some(PermissionMode::Auto));
         assert_eq!(permission_mode(""), None);
         assert_eq!(permission_mode("dontAsk"), None);
+    }
+
+    /// A work graph cannot turn the legacy ACP runner into an isolation boundary. Check the real
+    /// routed runtime, including a retired attempt whose row a replan no longer keeps.
+    #[tokio::test]
+    async fn workflow_sessions_require_isolation_and_never_fall_back() {
+        use steve_core::AgentRuntime;
+
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = crate::config::Config::from_vars(|k| match k {
+            "STEVE_HOME" => Some(dir.path().join("steve").to_string_lossy().into()),
+            "STEVE_REPO" => Some(dir.path().join("unused").to_string_lossy().into()),
+            _ => None,
+        })
+        .unwrap();
+        let store = Store::open(dir.path().join("hub.sqlite3"), steve_store::NoPublisher).unwrap();
+        store.ensure_workspace().unwrap();
+        store.transaction::<_, StoreError>(|tx| {
+            tx.execute_batch(
+                "INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated)
+                 VALUES ('parent','default',1,'主事项','run','执行',1,1),
+                        ('child','default',2,'工作单元','run','执行',1,1);
+                 INSERT INTO item_goals(item_id,version,text,created)
+                 VALUES ('parent',1,'验证运行隔离',1);
+                 INSERT INTO sessions(id,workspace_id,item_id,harness,cwd,status,created,updated)
+                 VALUES ('work','default','child','unused-acp','','active',1,1);
+                 INSERT INTO workflows(item_id,revision,max_parallel,max_attempts,created,updated)
+                 VALUES ('parent',1,2,3,1,1);
+                 INSERT INTO workflow_units(workflow_id,id,position,spec,status,item_id,session_id)
+                 VALUES ('parent','work',0,'{\"id\":\"work\",\"title\":\"工作单元\",\"goal\":\"验证隔离\",\"bot_id\":\"test\"}','running','child','work');"
+            )?;
+            Ok(())
+        }).unwrap();
+        let host = Arc::new(super::super::core::HubHost {
+            store: store.clone(),
+            data_dir: cfg.data_dir.clone(),
+            core: Default::default(),
+            flow: Default::default(),
+            yolo: Default::default(),
+            local_node: Default::default(),
+            user_seqs: Default::default(),
+            transcripts: Default::default(),
+        });
+        let routed = super::super::core::RoutedRuntime {
+            legacy: super::super::core::AcpRuntime(steve_acp::Acp::new(
+                super::super::acp_config(&cfg),
+                host.clone(),
+            )),
+            node: None,
+            fleet: None,
+            bind_remote: None,
+            store: store.clone(),
+            host,
+            workspaces: super::super::workspaces::Workspaces::new(
+                store.clone(),
+                None,
+                None,
+                vec![],
+            ),
+            worktrees: None,
+        };
+        for (change, restore, message) in [
+            (
+                "UPDATE items SET cycle=2 WHERE id='parent'",
+                "UPDATE items SET cycle=1 WHERE id='parent'",
+                "目标或周期已变化",
+            ),
+            (
+                "UPDATE item_goals SET version=2 WHERE item_id='parent'",
+                "UPDATE item_goals SET version=1 WHERE item_id='parent'",
+                "目标或周期已变化",
+            ),
+            (
+                "UPDATE workflows SET paused=1",
+                "UPDATE workflows SET paused=0",
+                "已暂停",
+            ),
+            (
+                "UPDATE items SET status='pause' WHERE id='parent'",
+                "UPDATE items SET status='run' WHERE id='parent'",
+                "已暂停",
+            ),
+            (
+                "UPDATE items SET phase='closed' WHERE id='parent'",
+                "UPDATE items SET phase='active' WHERE id='parent'",
+                "已结束",
+            ),
+            (
+                "UPDATE items SET phase='closing',closing='{\"kind\":\"cancel\"}' WHERE id='parent'",
+                "UPDATE items SET phase='active',closing=NULL WHERE id='parent'",
+                "正在停止",
+            ),
+            (
+                "UPDATE workflow_units SET status='succeeded'",
+                "UPDATE workflow_units SET status='running'",
+                "已经停止或交付",
+            ),
+            (
+                "UPDATE workflow_units SET status='cancelled'",
+                "UPDATE workflow_units SET status='running'",
+                "已经停止或交付",
+            ),
+            (
+                "UPDATE workflow_units SET session_id=NULL",
+                "UPDATE workflow_units SET session_id='work'",
+                "当前的执行会话",
+            ),
+            (
+                "UPDATE sessions SET status='ended' WHERE id='work'",
+                "UPDATE sessions SET status='active' WHERE id='work'",
+                "当前的执行会话",
+            ),
+        ] {
+            store
+                .transaction::<_, StoreError>(|tx| {
+                    tx.execute_batch(change)?;
+                    Ok(())
+                })
+                .unwrap();
+            assert!(
+                routed
+                    .prompt("work", "排队的下一回合", "user", &[])
+                    .unwrap_err()
+                    .to_string()
+                    .contains(message),
+                "{change}"
+            );
+            assert_eq!(routed.flush("work", None), steve_core::Flushed::Held);
+            assert_eq!(routed.running_turns(), 0);
+            store
+                .transaction::<_, StoreError>(|tx| {
+                    tx.execute_batch(restore)?;
+                    Ok(())
+                })
+                .unwrap();
+        }
+        for detached in [false, true] {
+            if detached {
+                store.transaction::<_, StoreError>(|tx| {
+                    tx.execute("UPDATE items SET source='[\"协作工作\",\"workflow\"]' WHERE id='child'", [])?;
+                    tx.execute("DELETE FROM workflow_units WHERE item_id='child'", [])?;
+                    Ok(())
+                }).unwrap();
+            }
+            let planned = binding_for(&store, "work", None, &|_| true).unwrap();
+            assert_eq!(
+                planned.policy.sandbox,
+                SandboxRequirement::Required {
+                    guarantees: vec!["os-sandbox".into(), "principal-isolation".into()],
+                },
+            );
+            routed.created("work", None);
+            assert!(!super::super::node_runtime::bound(&store, "work"));
+            let error = routed
+                .prompt("work", "必须不能启动", "user", &[])
+                .unwrap_err()
+                .to_string();
+            if detached {
+                assert!(error.contains("已被替换"));
+            } else {
+                assert!(error.contains("OS 沙箱") && error.contains("主体"));
+            }
+            assert_eq!(routed.flush("work", None), steve_core::Flushed::Held);
+            assert!(routed.is_busy("work"), "unbound work is parked, not legacy");
+            assert_eq!(routed.running_turns(), 0);
+            assert_eq!(routed.agent_pid("work"), None);
+            assert!(
+                !cfg.data_dir.exists(),
+                "the Hub must not prepare a workspace"
+            );
+        }
     }
 }

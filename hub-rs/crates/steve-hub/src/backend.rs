@@ -697,6 +697,14 @@ pub trait Domain: Send + Sync + 'static {
     async fn item_action(&self, id: &str, action: &str, actor: &str) -> BResult<Obj> {
         todo_backend!("item_action")
     }
+    /// The durable work graph beneath one item; `null` when no graph has been planned.
+    async fn workflow_get(&self, id: &str) -> BResult<Value> {
+        Ok(Value::Null)
+    }
+    /// Plan, pause, resume or change a work unit under an optimistic revision check.
+    async fn workflow_change(&self, id: &str, args: Value, actor: &str) -> BResult<Value> {
+        todo_backend!("workflow_change")
+    }
     /// The lifecycle commands (`accept` | `cancel` | `fail` | `new_cycle`), checked against the cycle
     /// and revision the caller saw; returns the item.
     #[allow(clippy::too_many_arguments)]

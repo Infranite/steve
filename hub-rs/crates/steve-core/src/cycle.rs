@@ -67,6 +67,10 @@ pub struct Closing {
     pub by: String,
     pub at: i64,
     pub frozen_revision: i64,
+    /// A parent acceptance is for exactly this graph. A committed replan followed by a crash
+    /// cannot resurrect the previous acceptance after the new work finishes.
+    #[serde(default)]
+    pub workflow_revision: Option<i64>,
     /// The worktree's `HEAD` and changes when the result was frozen; `None` without a git worktree.
     #[serde(default)]
     pub fingerprint: Option<String>,
@@ -335,6 +339,31 @@ impl Tx<'_> {
         decision: Option<String>,
         evidence: Vec<String>,
     ) -> Result<Item> {
+        self.lc_request_complete_with(
+            item_id,
+            by,
+            policy,
+            accepted,
+            reason,
+            decision,
+            evidence,
+            |_, _| Ok(()),
+        )
+    }
+
+    /// Work-unit result evidence and its frozen completion intent commit in the same transaction.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn lc_request_complete_with(
+        &mut self,
+        item_id: &str,
+        by: &str,
+        policy: Policy,
+        accepted: bool,
+        reason: &str,
+        decision: Option<String>,
+        evidence: Vec<String>,
+        extra: impl FnOnce(&steve_store::Tx, &Item) -> Result<()>,
+    ) -> Result<Item> {
         let i = self.item(item_id)?;
         match i.phase.as_str() {
             CLOSED => return Err(conflict(closed_msg())),
@@ -365,6 +394,12 @@ impl Tx<'_> {
             by: by.into(),
             at: crate::util::now(),
             frozen_revision: rev,
+            workflow_revision: self
+                .db()
+                .store()
+                .workflows()
+                .get(item_id)?
+                .map(|g| g.revision),
             fingerprint: print,
             print_pending,
             policy: policy.as_str().into(),
@@ -386,7 +421,7 @@ impl Tx<'_> {
             }
             .into(),
         );
-        let i = self.lc_write(&i, w, "closing_requested", reason, |_, _| Ok(()))?;
+        let i = self.lc_write(&i, w, "closing_requested", reason, extra)?;
         if accepted {
             self.lc_accepted(&i.id)?;
         }
@@ -451,11 +486,28 @@ impl Tx<'_> {
     /// the accepted closing and its operations is completed before anything can close over it.
     fn lc_accepted(&mut self, item_id: &str) -> Result<()> {
         let i = self.item(item_id)?;
+        // Unit success is a local checkpoint, never permission to merge, publish or deploy.
+        if self.workflow_child(&i)? {
+            return Ok(());
+        }
+        if !self.workflow_blockers(item_id, true)?.is_empty() {
+            return Ok(());
+        }
         let Some(c) =
             closing_of(&i).filter(|c| i.phase == CLOSING && c.kind == COMPLETE && c.accepted)
         else {
             return Ok(());
         };
+        if c.workflow_revision
+            != self
+                .db()
+                .store()
+                .workflows()
+                .get(item_id)?
+                .map(|g| g.revision)
+        {
+            return Ok(());
+        }
         if self.hooked() {
             let (op, new) = self.lc_op_add(
                 &i,
@@ -624,6 +676,7 @@ impl Tx<'_> {
             by: by.into(),
             at: crate::util::now(),
             frozen_revision: i.revision,
+            workflow_revision: None,
             fingerprint: None,
             print_pending: false,
             policy: String::new(),
@@ -745,6 +798,12 @@ impl Tx<'_> {
     /// `None` leaves the worktree out, so `changed` then only sees a new revision.
     fn lc_gate_at(&self, i: &Item, c: &Closing, now: Option<Option<&str>>) -> Result<Gate> {
         let mut g = Gate::default();
+        if !self
+            .workflow_blockers(&i.id, c.kind == COMPLETE)?
+            .is_empty()
+        {
+            g.operation = true;
+        }
         let resume = self.db().store().queued().resume_ids()?;
         for s in self.db().sessions_of_item(&i.id)? {
             if s.status == "ended" {
@@ -799,6 +858,13 @@ impl Tx<'_> {
                     && (d.kind == "ask" || (d.kind == "approve" && d.subject_type != "tool_call"))
             });
             if c.frozen_revision != i.revision
+                || c.workflow_revision
+                    != self
+                        .db()
+                        .store()
+                        .workflows()
+                        .get(&i.id)?
+                        .map(|g| g.revision)
                 || now.is_some_and(|n| result_moved(n, c.fingerprint.as_deref()))
             {
                 g.changed = true;
