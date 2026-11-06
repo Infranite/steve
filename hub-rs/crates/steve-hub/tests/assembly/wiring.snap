@@ -186,6 +186,7 @@ api POST /mail/accounts/x/sync
 api POST /mail/attachments/x/file
 api POST /mail/drafts
 api POST /mail/drafts/x/cancel
+api POST /mail/drafts/x/check
 api POST /mail/drafts/x/send
 api POST /mail/threads/x/archive
 api POST /mail/threads/x/draft

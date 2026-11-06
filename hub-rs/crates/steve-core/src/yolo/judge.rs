@@ -51,7 +51,11 @@ pub struct Policy {
     pub presence_s: u64,
     pub release_delay_s: u64,
     pub propose_chat_delay_s: u64,
+    /// The cooling-off before a message or mail goes out as the user (`chan.self_ai`, `mail.self_ai`).
     pub chan_delay_s: u64,
+    /// The cooling-off before a bot account's first send to an internal audience (`chan.bot_internal`):
+    /// nobody reads it as the user, and it can still be recalled.
+    pub chan_bot_delay_s: u64,
     pub chan_retry_delay_s: u64,
 }
 
@@ -73,6 +77,7 @@ impl Default for Policy {
             release_delay_s: 180,
             propose_chat_delay_s: 120,
             chan_delay_s: 600,
+            chan_bot_delay_s: 60,
             chan_retry_delay_s: 300,
         }
     }
@@ -97,6 +102,7 @@ impl Policy {
             release_delay_s: 0,
             propose_chat_delay_s: 0,
             chan_delay_s: 0,
+            chan_bot_delay_s: 0,
             chan_retry_delay_s: 0,
         }
     }
@@ -1086,7 +1092,7 @@ fn outbound(o: &Outbound, p: &Policy, what: &str) -> Verdict {
                     if retry {
                         ("chan.retry", p.chan_retry_delay_s)
                     } else {
-                        ("chan.bot_internal", p.chan_delay_s)
+                        ("chan.bot_internal", p.chan_bot_delay_s)
                     }
                 }
                 Identity::SelfAccount | Identity::Proxy => {

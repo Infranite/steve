@@ -196,7 +196,7 @@ impl LocalNode {
             soft: Duration::ZERO,
             max_turns: job.budget.max_turns,
             max_tools: job.budget.max_tools,
-            idle: Duration::from_millis(job.budget.idle_ms),
+            idle: Some(Duration::from_millis(job.budget.idle_ms)),
         };
         let prompt = run
             .prompt

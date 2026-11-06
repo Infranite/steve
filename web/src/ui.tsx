@@ -1018,7 +1018,7 @@ export function DecisionCard({ i, w = i.wait!, showItem = true }: { i: Item; w?:
     {head(w.q)}
     <CardContent className="pb-4">{draft}{rework && <Textarea autoFocus className="mt-3 min-h-16 rounded-lg" placeholder={t("core:card.rejectPlaceholder")} value={txt} onChange={(e) => setTxt(e.target.value)} />}</CardContent>
     {foot(rework ? <><Button variant="ghost" onClick={() => setRework(false)}>{t("common:action.cancel")}</Button><Button variant="outline" disabled={busy} onClick={() => act("no", txt.trim())}>{t("core:card.reject")}</Button></>
-      : <><Button variant="ghost" className="mr-auto text-muted-foreground" onClick={() => setRework(true)}>{t("core:card.rejectMore")}</Button><Button disabled={busy} onClick={() => act("yes")} data-approve>{t(w.subject === "release" ? "core:card.approveRelease" : "core:card.approve")}</Button></>)}
+      : <><Button variant="ghost" className="mr-auto text-muted-foreground" onClick={() => setRework(true)}>{t("core:card.rejectMore")}</Button>{w.subject === "chan_message" && w.options.includes("rewrite") && <Button variant="outline" disabled={busy} onClick={() => act("rewrite")} data-rewrite>{t("core:card.rewriteFirst")}</Button>}<Button disabled={busy} onClick={() => act("yes")} data-approve>{t(w.subject === "release" ? "core:card.approveRelease" : "core:card.approve")}</Button></>)}
   </>
   else if (w.type === "propose") body = <>
     {head(w.q)}

@@ -221,6 +221,14 @@ impl Core {
         self.0.yolo.get()
     }
 
+    /// YOLO decides for the user in `ws` now (for `item`'s decisions when given): `false` without YOLO
+    /// wired or when the setting can't be read.
+    pub fn yolo_applies(&self, ws: &str, item: Option<&str>) -> bool {
+        self.yolo()
+            .and_then(|y| y.effective(ws, item).ok())
+            .is_some_and(|e| e.on)
+    }
+
     /// The database (the domain layer's adapter; `.store()` on it gives the raw `steve_store::Store`).
     pub fn store(&self) -> &Db {
         &self.0.store

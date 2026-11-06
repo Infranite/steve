@@ -303,3 +303,63 @@ async fn failed_mcp_diagnostics_are_classified_without_retaining_secrets() {
     assert!(!serialized.contains("private-token-must-not-persist"));
     assert!(!format!("{events:?}").contains("private-token-must-not-persist"));
 }
+
+/// #36: someone besides the owner reads the answer: the Codex run starts in an empty directory with its
+/// shell and image viewer off, whatever project the request named; Steve's tools stay, and the
+/// question's images still reach the model. The owner's own runs are as before.
+#[tokio::test]
+async fn a_shared_codex_run_reads_no_files() {
+    let e = env();
+    let listing = e.root.join("listing.txt");
+    let body = format!(
+        "for a; do case \"$p\" in -C) ls -A \"$a\" > '{l}'; printf '%s' \"$a\" > '{l}.dir';; esac; p=\"$a\"; done\n{}",
+        emit(&[msg("i1", "我只能查 Steve 的记录。"), done()]),
+        l = listing.display()
+    );
+    let exe = codex(&e, &body);
+    let mut q = req(&e, &["gpt-6-luna"]);
+    q.shared = true;
+    q.add_dirs = vec![e.home.clone()];
+    q.mcp = Some(McpAccess {
+        url: "http://127.0.0.1:9/mcp".into(),
+        token: "run-token-xyz".into(),
+    });
+    let out = Researcher::new(cfg(&e, &exe))
+        .start(q)
+        .unwrap()
+        .finish()
+        .await;
+    assert_eq!(out.status, RunStatus::Done, "{out:?}");
+    let a = &runs(&e)[0];
+    let joined = a.join(" ");
+    assert!(
+        joined.contains("--disable shell_tool --disable view_image"),
+        "{joined}"
+    );
+    assert!(
+        a.iter().any(|x| x.starts_with("mcp_servers.steve.url=")),
+        "{a:?}"
+    );
+    let dir = std::fs::read_to_string(listing.with_extension("txt.dir")).unwrap();
+    assert!(dir.ends_with("/empty"), "{dir}");
+    assert!(!dir.starts_with(&*e.proj.to_string_lossy()), "{dir}");
+    assert_eq!(
+        std::fs::read_to_string(&listing).unwrap(),
+        "",
+        "nothing in it"
+    );
+
+    // the owner reads it: the project, and the shell the guard watches
+    let e = env();
+    let exe = codex(&e, &emit(&[msg("i1", "好"), done()]));
+    let out = Researcher::new(cfg(&e, &exe))
+        .start(req(&e, &["gpt-6-luna"]))
+        .unwrap()
+        .finish()
+        .await;
+    assert_eq!(out.status, RunStatus::Done, "{out:?}");
+    let a = &runs(&e)[0];
+    assert!(!a.iter().any(|x| x == "shell_tool"), "{a:?}");
+    let at = a.iter().position(|x| x == "-C").unwrap();
+    assert_eq!(a[at + 1], e.proj.to_string_lossy());
+}

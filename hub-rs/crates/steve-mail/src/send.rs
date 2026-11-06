@@ -84,6 +84,13 @@ pub trait DraftHooks: Send + Sync {
     fn awaiting_approval(&self, ws: &str, session_id: &str, item_id: Option<&str>) {
         let _ = (ws, session_id, item_id);
     }
+    /// YOLO decides drafts of `item_id` (or of the workspace) now: the check model then runs as the draft
+    /// is written; otherwise only the local checks do and the card offers the model check. Without the
+    /// hook the model always runs.
+    fn yolo_on(&self, ws: &str, item_id: Option<&str>) -> bool {
+        let _ = (ws, item_id);
+        true
+    }
 }
 
 pub struct NoHooks;

@@ -28,6 +28,8 @@ import { useT } from "@/i18n"
 
 const Note = ({ children }: { children: React.ReactNode }) => <div className="mt-2 px-1 type-footnote text-muted-foreground">{children}</div>
 const TRIGGER_WORD = /^\/[A-Za-z0-9_]{1,20}$/
+/** the undo windows an account can choose (seconds; the Hub takes 0–60) */
+const SEND_DELAYS = [0, 3, 5, 10, 20, 30, 60]
 
 export function AccountView({ id }: { id: string }) {
   const t = useT()
@@ -77,6 +79,11 @@ export function AccountView({ id }: { id: string }) {
             {rules && <div className="mt-2 flex gap-2"><Button size="sm" disabled={busy || !rules.every(ruleOk)} onClick={() => void patch({ rules }, t("channels:word.rulesSaved")).then((ok) => ok && setRules(null))} data-acc-rules-save>{t("channels:word.saveRules")}</Button><Button size="sm" variant="ghost" onClick={() => setRules(null)}>{t("channels:word.revert")}</Button></div>}
           </> : a.rules ? <><Group>{a.rules.map((r, n) => <Row key={n} title={ruleText(r, me)} />)}</Group><Note>{a.editable ? "" : t("channels:account.rulesReadonly")}</Note></>
             : <div className="rounded-xl border border-dashed px-4 py-3.5 type-callout text-muted-foreground">{t("channels:account.rulesUnknown")}</div>}</section>
+        {a.editable && a.sendDelay && <section><SectionLabel>{t("channels:account.sendDelay")}</SectionLabel>
+          <Group><Row title={t("channels:account.sendDelayTitle")} sub={t("channels:account.sendDelaySub")}>
+            <Select align="end" testId="acc-send-delay" value={a.sendDelay.set === null ? "default" : String(a.sendDelay.set)}
+              onChange={(v) => void patch({ send_delay_s: v === "default" ? null : Number(v) }, t("channels:account.sendDelaySaved"))}
+              options={[{ v: "default", l: t("channels:account.sendDelayDefault", { n: a.sendDelay.def }) }, ...SEND_DELAYS.map((n) => ({ v: String(n), l: t("channels:account.sendDelaySeconds", { n }) }))]} /></Row></Group></section>}
         {me && <TriggerSection a={a} onSave={(x) => patch({ trigger: x }, t("channels:account.triggerSaved"))} busy={busy} />}
         {side && <section><SectionLabel>{t("channels:word.you")}</SectionLabel>
           {self.length ? <Group>{self.map((s) => <Row key={s.id} icon={<PersonaAvatar bot={null} size={28} />} title={t("channels:account.selfAuthorized")} sub={t("channels:account.selfAuthorizedSub", { status: CONN_STATUS[s.status]?.[0] ?? s.status })} onClick={() => go("#/channels/acc/" + s.id)}><ChevronRightIcon className="size-4 text-tertiary" /></Row>)}</Group>

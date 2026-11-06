@@ -80,6 +80,10 @@ pub struct CheckCx {
     /// for the check only: it tells what they already know, it is not knowledge, grants no level and
     /// changes no rule. `None` when the text answers nothing (email, comments, a new message).
     pub audience_said: Option<String>,
+    /// Only the local checks (secrets, never-level knowledge, the rule check), no check model: a fixed
+    /// receipt no model wrote, or an email draft the model checks only on request. A result without
+    /// spans then has no `check_model`.
+    pub skip_model: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

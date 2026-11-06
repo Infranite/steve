@@ -1,7 +1,7 @@
 //! The code-side guards on the router: the model proposes, these rules have the last
 //! word, so a wrong model never quietly turns a question into an item. Pure functions, table-tested.
 
-use crate::gateway::{Offer, Route};
+use crate::gateway::{FocusItem, Offer, Route};
 use regex::Regex;
 use std::sync::LazyLock;
 
@@ -148,6 +148,63 @@ pub fn pure_question(text: &str) -> bool {
     asks && !CHANGE.is_match(t)
 }
 
+/// An item number anywhere in the text (`ST-12`, `st-3`).
+static ITEM_REF: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)(^|[^A-Za-z])[A-Z]{1,6}-\d+").expect("valid regex"));
+
+/// Words of Steve's own settings: a question about them gets the settings as they are (router kind
+/// `config`), not research.
+static CONFIG: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)设置|配置|开关|免打扰|提醒|通知|汇报|yolo|模型|权限|规则|默认|偏好|定时|Bot|机器人",
+    )
+    .expect("valid regex")
+});
+
+/// Asking Steve to do something, even as a question (“给我讲一下”, “你看看怎么设计”): the router may see
+/// work in it and offer it as an item.
+static REQUEST: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"帮我|给我|替我|你看看|你看下|你来|需要|优化|设计|整理|方案|做个|弄个|搞个|写个|出个|安排",
+    )
+    .expect("valid regex")
+});
+
+/// What a message must not have for the router to be skipped: attachments, `@Bot`, explicit item words,
+/// an item number, a progress question, a spoken correction (“别建事项…”), words of a setting, a request,
+/// or an open item of the conversation it names (its number, or its title of 4+ characters).
+fn needs_router(text: &str, files: bool, focus: &[FocusItem]) -> bool {
+    let t = text.trim();
+    files
+        || t.starts_with('@')
+        || explicit_item(t)
+        || ITEM_REF.is_match(t)
+        || super::handle::PROGRESS.is_match(t)
+        || super::handle::TO_INLINE.is_match(t)
+        || CONFIG.is_match(t)
+        || REQUEST.is_match(t)
+        || focus.iter().any(|f| {
+            names_item(t, &f.id)
+                || (f.title.trim().chars().count() >= 4 && t.contains(f.title.trim()))
+        })
+}
+
+/// #52: the kind a message gets without the router (`route_log.guard = "q"`) when it is a plain question
+/// ([`pure_question`], nothing in it the router would act on): researched in your own conversation,
+/// answered in a guest one (where `for_owner` still researches the owner's private chat). `None`: the
+/// router decides. Decided by the user on 2026-11-06.
+pub fn without_router(
+    text: &str,
+    files: bool,
+    guest: bool,
+    focus: &[FocusItem],
+) -> Option<&'static str> {
+    if text.trim().is_empty() || needs_router(text, files, focus) || !pure_question(text) {
+        return None;
+    }
+    Some(if guest { "answer" } else { "research" })
+}
+
 /// Apply the guards in order. Rule 6, the router failing, is already in `route.fallback`.
 pub fn decide(r: &Route, text: &str, cx: DecideCtx) -> Decision {
     let model = r.kind.as_str();
@@ -207,6 +264,47 @@ pub fn decide(r: &Route, text: &str, cx: DecideCtx) -> Decision {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plain_questions_skip_the_router() {
+        let focus = [FocusItem {
+            id: "ST-40".into(),
+            title: "事项页面改版".into(),
+            ..FocusItem::default()
+        }];
+        let go = |t: &str, files: bool, guest: bool| without_router(t, files, guest, &focus);
+        assert_eq!(go("检索是怎么打分的？", false, false), Some("research"));
+        assert_eq!(
+            go("现在 steve 的知识系统是怎么运作的", false, false),
+            Some("research")
+        );
+        // the router still decides
+        for t in [
+            "把登录页的按钮改成蓝色",
+            "帮我建个事项：检索怎么打分？",
+            "@运维 部署是怎么回事？",
+            "ST-12 为什么停了？",
+            "st-3 是什么情况？",
+            "那个事项进展怎么样了？",
+            "别建事项，直接在这告诉我为什么？",
+            "事项页面改版做到哪一步了？",
+            "st40 为什么还没好？",
+            "现在免打扰是几点？",
+            "YOLO 现在怎么设置的？",
+            "现在steve的知识系统是怎么运作的？给我讲一下",
+            "事项页面信息太散了，得优化一下，你看看怎么设计一下",
+            "",
+        ] {
+            assert_eq!(go(t, false, false), None, "{t}");
+        }
+        assert_eq!(go("这张图是什么？", true, false), None, "attachments");
+        // a guest's plain question is answered; anything else goes to the router
+        assert_eq!(go("为什么周四的会议推迟了？", false, true), Some("answer"));
+        assert_eq!(go("@Steve 为什么推迟了？", false, true), None);
+        assert_eq!(go("把告警脚本修一下", false, true), None);
+        assert_eq!(go("以后都直接回滚吧", false, true), None);
+        assert_eq!(go("谢谢", false, false), None, "not a question");
+    }
 
     fn route(kind: &str, conf: f64, signals: &[&str]) -> Route {
         Route {

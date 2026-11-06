@@ -242,6 +242,7 @@ impl GitHub {
                 actor: cx.bot_id.clone(),
                 draft_model: None,
                 audience_said: None,
+                skip_model: false,
             },
             &Audience {
                 external: true,

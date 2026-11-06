@@ -188,7 +188,13 @@ pub struct CodexPlan<'a> {
     pub effort: Option<&'a str>,
     /// Images of the question, given to the model as image input (`-i`).
     pub images: &'a [PathBuf],
+    /// No way to read files ([`CODEX_NO_FILES`] off as well): someone besides the owner reads the answer.
+    pub no_files: bool,
 }
+
+/// What reads files in Codex besides the shell `unified_exec` already turns off: the shell tool itself and
+/// the image viewer (it opens any path). Off when someone besides the owner reads the answer.
+pub const CODEX_NO_FILES: [&str; 2] = ["shell_tool", "view_image"];
 
 /// `codex exec` for one research attempt. Layer 1 is Codex's own read-only sandbox: commands cannot
 /// write anywhere or reach the network. No web search, no MCP server but Steve's, nothing persisted.
@@ -218,6 +224,11 @@ pub fn codex_invocation(p: &CodexPlan<'_>) -> Invocation {
     ]);
     for f in CODEX_OFF {
         args.extend(["--disable".into(), f.into()]);
+    }
+    if p.no_files {
+        for f in CODEX_NO_FILES {
+            args.extend(["--disable".into(), f.into()]);
+        }
     }
     let mut env = vec![(
         "TMPDIR".to_string(),
@@ -277,6 +288,7 @@ mod tests {
             mcp: Some(("http://127.0.0.1:1/mcp", "sekrit-123")),
             effort: Some("low"),
             images: &[PathBuf::from("/f/a.png")],
+            no_files: false,
         });
         assert_eq!(inv.program, PathBuf::from("/bin/codex"));
         let a = inv.args.join(" ");
@@ -303,6 +315,7 @@ mod tests {
             mcp: None,
             effort: None,
             images: &[],
+            no_files: false,
         });
         assert!(
             !bare
@@ -310,6 +323,33 @@ mod tests {
                 .iter()
                 .any(|x| x == "-m" || x.contains("mcp_servers.steve"))
         );
+        // the owner reads it: Codex keeps its shell (the guard checks each command)
+        assert!(!a.contains("--disable shell_tool"));
+    }
+
+    /// #36: someone besides the owner reads the answer: no shell and no image viewer, so nothing reads a
+    /// file; Steve's tools stay.
+    #[test]
+    fn a_shared_codex_run_cannot_read_files() {
+        let inv = codex_invocation(&CodexPlan {
+            executable: Path::new("/bin/codex"),
+            prompt: "Q",
+            model: "",
+            cwd: Path::new("/s/r/empty"),
+            run_dir: Path::new("/s/r"),
+            mcp: Some(("http://127.0.0.1:1/mcp", "t")),
+            effort: None,
+            images: &[],
+            no_files: true,
+        });
+        let a = inv.args.join(" ");
+        assert!(
+            a.contains("--disable shell_tool --disable view_image"),
+            "{a}"
+        );
+        assert!(a.contains("--disable unified_exec"), "{a}");
+        assert!(a.contains("-C /s/r/empty"), "{a}");
+        assert!(a.contains("mcp_servers.steve.url"), "{a}");
     }
 
     #[test]

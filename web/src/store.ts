@@ -848,7 +848,7 @@ const DECIDED_BY_SUBJECT: Record<string, readonly string[] | ((c: string) => str
   mem: ["yes", "no"],
   party_merge: ["merge", "not_same"],
   release: ["no"],
-  chan_message: ["yes", "no"],
+  chan_message: ["yes", "no", "rewrite"],
 }
 const DECIDED_ANY = ["pass", "rework", "yes", "no", "continue", "delivered", "look", "tosteve", "drop", "deny"]
 function decidedText(w: Wait, c: string, bot: string | null) {

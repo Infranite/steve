@@ -17,10 +17,16 @@ use tokio::sync::{mpsc, watch};
 use tokio::time::Instant;
 use tracing::Instrument;
 
-/// A run whose harness says nothing (no text, no tool call, no event at all) for this long is stuck and is
-/// ended. This is not a limit on how long a conversation may take: a run that keeps working never ends by
-/// time. Setting `thread.research.idle_seconds` overrides it.
-pub const DEFAULT_IDLE: Duration = Duration::from_secs(600);
+/// A Claude Code run that says nothing (no text, no thinking, no tool call, no event at all: it streams
+/// partial messages, so a working run is never this quiet) for this long is stuck and is ended. This is not
+/// a limit on how long a conversation may take: a run that keeps working never ends by time. Setting
+/// `thread.research.idle_seconds` overrides it (both harnesses). Decided by the user on 2026-11-06.
+pub const CLAUDE_IDLE: Duration = Duration::from_secs(180);
+/// The same for a Codex run, which reports a whole step at a time and can be silent for long while it
+/// works.
+pub const CODEX_IDLE: Duration = Duration::from_secs(600);
+/// After the harness closed its output it is ending: it gets this long to exit before it counts as stuck.
+pub const EXIT_WAIT: Duration = Duration::from_secs(45);
 /// Default research models (`STEVE_MODELS_RESEARCH`), non-kiro.
 pub const DEFAULT_MODELS: &str = "claude-sonnet-5-5,claude-opus-5-5";
 
@@ -37,8 +43,17 @@ pub struct Budget {
     pub max_turns: Option<u32>,
     /// Tool calls counted by the Hub. `None`: none.
     pub max_tools: Option<u32>,
-    /// No output from the harness for this long: stuck, ended.
-    pub idle: Duration,
+    /// No output from the harness for this long: stuck, ended. `None`: the harness's own
+    /// ([`CLAUDE_IDLE`], [`CODEX_IDLE`]).
+    pub idle: Option<Duration>,
+}
+
+impl Budget {
+    /// The stall limit of a run on Codex (`codex`) or Claude Code.
+    pub fn idle_for(&self, codex: bool) -> Duration {
+        self.idle
+            .unwrap_or(if codex { CODEX_IDLE } else { CLAUDE_IDLE })
+    }
 }
 
 impl Default for Budget {
@@ -48,7 +63,7 @@ impl Default for Budget {
             soft: Duration::from_secs(90),
             max_turns: None,
             max_tools: None,
-            idle: DEFAULT_IDLE,
+            idle: None,
         }
     }
 }
@@ -64,7 +79,7 @@ impl Budget {
             soft: n("soft_seconds").map_or(d.soft, Duration::from_secs),
             max_turns: n("turns").map(|x| x as u32).or(d.max_turns),
             max_tools: n("tools").map(|x| x as u32).or(d.max_tools),
-            idle: n("idle_seconds").map_or(d.idle, Duration::from_secs),
+            idle: n("idle_seconds").map(Duration::from_secs).or(d.idle),
         }
     }
 }
@@ -182,6 +197,10 @@ pub struct ResearchRequest {
     pub effort: Option<String>,
     /// `claude-code` (default) or `codex` (设置 · 模型: Steve's harness or the research override).
     pub harness: String,
+    /// Someone besides the workspace's owner reads the answer (a shared chat). A Codex run then has no
+    /// way to read files: it runs in an empty directory with its shell and image viewer off, and has only
+    /// Steve's tools (scoped to that audience by the run's token) and the question's images.
+    pub shared: bool,
 }
 
 impl ResearchRequest {
@@ -204,6 +223,7 @@ impl ResearchRequest {
             models: None,
             effort: None,
             harness: "claude-code".into(),
+            shared: false,
         }
     }
 }
@@ -781,13 +801,28 @@ async fn execute_plans(
             return failed_outcome(run_id, format!("research attachments: {e}"));
         }
     };
-    let cwd = req.cwd.clone().unwrap_or_else(|| run_dir.clone());
-    let mut add_dirs = req.add_dirs.clone();
-    add_dirs.extend(files.dir.clone());
+    let codex = req.harness == "codex";
+    // Codex reads files through its shell, which only a best-effort parser checks: where anyone besides
+    // the owner reads the answer it gets no files at all (decided by the user on 2026-11-06)
+    let walled = codex && req.shared;
+    let cwd = if walled {
+        let empty = run_dir.join("empty");
+        if let Err(e) = tokio::fs::create_dir_all(&empty).await {
+            return failed_outcome(run_id, format!("research dir: {e}"));
+        }
+        empty
+    } else {
+        req.cwd.clone().unwrap_or_else(|| run_dir.clone())
+    };
+    let mut add_dirs = if walled {
+        Vec::new()
+    } else {
+        req.add_dirs.clone()
+    };
+    add_dirs.extend(files.dir.clone().filter(|_| !walled));
     let mut readable = add_dirs.clone();
     readable.push(run_dir.clone());
     let scope = Scope::new(&cwd, &readable, &cfg.home);
-    let codex = req.harness == "codex";
     // Codex sandboxes its commands with Seatbelt itself, which cannot be nested in sandbox-exec
     let sandboxed = match (codex, sandbox::decide(cfg.sandbox)) {
         (true, None) => {
@@ -941,6 +976,7 @@ async fn run_plan(
             mcp: req.mcp.as_ref().map(|m| (m.url.as_str(), m.token.as_str())),
             effort: req.effort.as_deref(),
             images: &ctx.files.image_files,
+            no_files: req.shared,
         }),
         _ => command::invocation(&CommandPlan {
             executable: &ctx.cfg.executable,
@@ -1060,7 +1096,8 @@ async fn attempt(
     let _ = ctx.tx.send(ResearchEvent::Started { model });
     let mut lines = tokio::io::BufReader::new(stdout).lines();
     let mut stop_open = true;
-    let mut quiet_until = Instant::now() + ctx.budget.idle;
+    let idle = ctx.budget.idle_for(ctx.codex);
+    let mut quiet_until = Instant::now() + idle;
     loop {
         tokio::select! {
             biased;
@@ -1077,7 +1114,7 @@ async fn attempt(
                 break;
             }
             _ = tokio::time::sleep_until(quiet_until) => {
-                tracing::warn!(idle = ?ctx.budget.idle, "research: the harness said nothing for too long");
+                tracing::warn!(?idle, "research: the harness said nothing for too long");
                 st.kill = Some(Kill::Budget(BudgetHit::Idle));
                 break;
             }
@@ -1087,7 +1124,7 @@ async fn attempt(
             }
             l = lines.next_line() => match l {
                 Ok(Some(l)) => {
-                    quiet_until = Instant::now() + ctx.budget.idle;
+                    quiet_until = Instant::now() + idle;
                     for item in parse(&l) {
                         if let Some(k) = on_item(ctx, st, item) {
                             st.kill = Some(k);
@@ -1107,8 +1144,8 @@ async fn attempt(
     }
     // its output is closed: it is ending; a process that does not is as stuck as a silent one
     let wait_until = match ctx.deadline {
-        Some(d) => d.min(Instant::now() + ctx.budget.idle),
-        None => Instant::now() + ctx.budget.idle,
+        Some(d) => d.min(Instant::now() + EXIT_WAIT),
+        None => Instant::now() + EXIT_WAIT,
     };
     let status = match tokio::time::timeout_at(wait_until, child.wait()).await {
         Ok(Ok(s)) => s,
@@ -1380,7 +1417,13 @@ mod tests {
         // by default a run is not cut off by time, turns or tool calls; only the stall detector is on
         let d = Budget::default();
         assert_eq!((d.hard, d.max_turns, d.max_tools), (None, None, None));
-        assert_eq!(d.idle, DEFAULT_IDLE);
+        assert_eq!(d.idle, None);
+        assert_eq!(
+            (d.idle_for(false), d.idle_for(true)),
+            (CLAUDE_IDLE, CODEX_IDLE)
+        );
+        assert_eq!(CLAUDE_IDLE, Duration::from_secs(180));
+        assert!((30..=60).contains(&EXIT_WAIT.as_secs()));
         assert_eq!(Budget::from_setting(&json!({})), d);
         // a limit in the setting is honoured as given, there is no ceiling above it
         let b = Budget::from_setting(
@@ -1388,7 +1431,12 @@ mod tests {
         );
         assert_eq!(b.hard, Some(Duration::from_secs(999)));
         assert_eq!((b.max_tools, b.max_turns), (Some(500), Some(10)));
-        assert_eq!(b.idle, Duration::from_secs(30));
+        assert_eq!(b.idle, Some(Duration::from_secs(30)));
+        assert_eq!(
+            b.idle_for(true),
+            Duration::from_secs(30),
+            "the setting counts for both"
+        );
     }
 
     fn cfg() -> ResearchConfig {

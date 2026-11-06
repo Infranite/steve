@@ -520,6 +520,8 @@ async fn messages_are_handled_in_order() {
     });
     k.core.say(WS, "/汇报", &[]).unwrap();
     k.core.say(WS, "第二件事", &[]).unwrap();
+    /* `/汇报` has a lane of its own (#51): it does not wait for a message being routed */
+    settle(&k, 4).await;
     k.core.say(WS, "/汇报", &[]).unwrap();
     let ms = settle(&k, 6).await;
     let steve: Vec<&str> = ms
@@ -892,4 +894,97 @@ async fn idle_lanes_go_and_come_back() {
     k.core.say(WS, "再问", &[]).unwrap();
     let ms = settle(&k, 4).await;
     assert_eq!(ms[3].text, "答好了");
+}
+
+/// #51: a message whose way is fixed (to an item, `#ST-n`, `/汇报`) does not wait behind the answer in
+/// progress: it is not held, and its acknowledgement comes while the answer still runs.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_to_an_item_passes_the_answer_in_progress() {
+    let k = Kit::new();
+    router(&k, json!({"kind": "answer", "confidence": 0.9}), "答好了");
+    *k.gw.slow.lock().unwrap() = Some((
+        "You are Steve, the user's assistant.",
+        Duration::from_secs(30),
+    ));
+    let i = k.item("run", "执行", None);
+    let s = k.session(&i, "idle");
+    k.core.say(WS, "慢慢答", &[]).unwrap();
+    assert!(k.wait(|| k.core.inline_busy(WS)));
+    let to = k.core.say(WS, &format!("#{i} 记得加测试"), &[]).unwrap();
+    assert!(
+        k.db()
+            .message(&to)
+            .unwrap()
+            .unwrap()
+            .meta
+            .get("held")
+            .is_none()
+    );
+    let report = k.core.say(WS, "/汇报", &[]).unwrap();
+    /* the question, both messages and both replies */
+    let ms = settle(&k, 5).await;
+    assert!(k.core.inline_busy(WS), "the answer still runs");
+    let acks: Vec<&str> = ms
+        .iter()
+        .filter(|m| m.author == "steve")
+        .map(|m| m.text.as_str())
+        .collect();
+    assert!(
+        acks.contains(&format!("已作为补充送到 {i}。").as_str()),
+        "{acks:?}"
+    );
+    assert!(acks.iter().any(|t| t.starts_with("现在：")), "{acks:?}");
+    assert_eq!(k.rt.prompts_of(&s), vec!["补充信息：记得加测试"]);
+    assert!(
+        k.db()
+            .message(&report)
+            .unwrap()
+            .unwrap()
+            .meta
+            .get("held")
+            .is_none()
+    );
+    // a message the router has to see still waits for the turn
+    let next = k.core.say(WS, "然后呢", &[]).unwrap();
+    assert_eq!(k.db().message(&next).unwrap().unwrap().meta["held"], true);
+    assert!(k.core.stop(WS).unwrap());
+    *k.gw.slow.lock().unwrap() = None;
+    settle(&k, 7).await;
+}
+
+/// #52: a plain question is researched without asking the router (route_log `guard = "q"`); one that
+/// names an item or asks for work still goes to the router.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_plain_question_skips_the_router() {
+    let k = Kit::new();
+    let routed = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let r2 = routed.clone();
+    k.gw.set(move |p, _| {
+        if p.starts_with("You are the router of Steve") {
+            r2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(r#"{"kind":"answer","confidence":0.9}"#.into())
+        } else {
+            Ok("答好了".into())
+        }
+    });
+    let q = k.core.say(WS, "检索是怎么打分的？", &[]).unwrap();
+    settle(&k, 2).await;
+    assert_eq!(
+        routed.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "no router"
+    );
+    let log = k
+        .db()
+        .store()
+        .thread()
+        .route_of(&q)
+        .unwrap()
+        .expect("route log");
+    assert_eq!(log.guard.as_deref(), Some("q"));
+    assert_eq!(log.model, None);
+    // asking for work: the router decides
+    k.core.say(WS, "把检索的打分改成按时间加权", &[]).unwrap();
+    settle(&k, 4).await;
+    assert_eq!(routed.load(std::sync::atomic::Ordering::SeqCst), 1);
 }

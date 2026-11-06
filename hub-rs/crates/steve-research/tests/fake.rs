@@ -289,7 +289,7 @@ async fn a_run_that_keeps_working_is_never_cut_off() {
         (c.budget.hard, c.budget.max_turns, c.budget.max_tools),
         (None, None, None)
     );
-    c.budget.idle = Duration::from_secs(2);
+    c.budget.idle = Some(Duration::from_secs(2));
     let t0 = Instant::now();
     let out = Researcher::new(c)
         .start(req(&e, "ws"))
@@ -320,7 +320,7 @@ async fn a_silent_harness_is_ended_as_stuck() {
         ),
     );
     let mut c = cfg(&e, &exe);
-    c.budget.idle = Duration::from_secs(2);
+    c.budget.idle = Some(Duration::from_secs(2));
     let t0 = Instant::now();
     let out = Researcher::new(c)
         .start(req(&e, "ws"))
