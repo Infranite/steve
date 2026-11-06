@@ -3,6 +3,11 @@
 //! ([`steve_modules::vault::keystore::signing`]). The Hub moves it once at start; the one-click
 //! upgrade's runner (the signed Hub again) reads it there and hands it to `local-release.py build` on
 //! its stdin. An install not moved yet keeps working from the file.
+//!
+//! Moving the password does not take back copies of the file: the daily backups made before carry
+//! it, and an agent may have read it already. So once the store holds it, the Hub changes the
+//! keychain's password to a new one (`security -i`, the passwords on stdin), and the old one opens
+//! nothing.
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -18,16 +23,192 @@ pub const FILE: &str = "signing/keychain-pass";
 pub enum Moved {
     /// No file: nothing to move.
     Nothing,
-    /// The password is in the key store and the file is gone.
-    Moved,
+    /// The password is in the key store and the file is gone; whether it was changed after.
+    Moved(Rotated),
     /// The file stays, and why.
     Kept(String),
 }
 
-/// Moves `signing/keychain-pass` into `store`: written, read back, then the file is removed. A file
-/// whose password the key store already holds is removed; one that differs from what the store holds,
-/// or is not of the storable form, stays.
-pub fn migrate(home: &Path, store: &dyn KeyStore) -> Moved {
+/// What [`rotate`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Rotated {
+    /// The keychain has a new password, the one in the key store; the old one opens nothing.
+    Yes,
+    /// The keychain keeps the password it had, and why.
+    No(String),
+}
+
+/// The signing keychain, as far as a rotation needs it.
+pub trait Keychain {
+    /// Changes its password from `old` to `new`.
+    fn change(&self, old: &str, new: &str) -> Result<()>;
+    /// Whether `pass` unlocks it (locked again right after).
+    fn opens(&self, pass: &str) -> bool;
+}
+
+/// `signing/steve-signing.keychain-db` through `security -i`: the passwords go on its stdin, never
+/// on a command line (`ps` shows those to every process of the user).
+pub struct Security {
+    pub bin: PathBuf,
+    pub keychain: PathBuf,
+}
+
+impl Security {
+    pub fn of(home: &Path) -> Self {
+        Self {
+            bin: PathBuf::from("/usr/bin/security"),
+            keychain: home.join(KEYCHAIN),
+        }
+    }
+
+    /// Runs one `security -i` line; its status.
+    fn line(&self, line: &str) -> Result<bool> {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        let path = self.keychain.to_string_lossy();
+        // what a `security -i` line can carry: no quoting inside it
+        if path.contains(['"', '\\', '\n']) {
+            anyhow::bail!(
+                "{} can't be named on a security line",
+                self.keychain.display()
+            )
+        }
+        let mut child = Command::new(&self.bin)
+            .arg("-i")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()?;
+        if let Some(mut stdin) = child.stdin.take() {
+            let l = Zeroizing::new(format!("{line} \"{path}\"\n"));
+            stdin.write_all(l.as_bytes())?;
+        }
+        Ok(child.wait()?.success())
+    }
+
+    fn lock(&self) {
+        let _ = std::process::Command::new(&self.bin)
+            .arg("lock-keychain")
+            .arg(&self.keychain)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+}
+
+impl Keychain for Security {
+    fn change(&self, old: &str, new: &str) -> Result<()> {
+        for p in [old, new] {
+            if !signing::storable(p) {
+                anyhow::bail!("not a password of sign-setup.sh's form")
+            }
+        }
+        let changed = self.line(&format!("set-keychain-password -o {old} -p {new}"));
+        self.lock();
+        if !changed? {
+            anyhow::bail!("security set-keychain-password failed")
+        }
+        Ok(())
+    }
+
+    fn opens(&self, pass: &str) -> bool {
+        if !signing::storable(pass) {
+            return false;
+        }
+        let opened = self
+            .line(&format!("unlock-keychain -p {pass}"))
+            .unwrap_or(false);
+        self.lock();
+        opened
+    }
+}
+
+/// The signing keychain sign-setup.sh makes, relative to `STEVE_HOME`.
+pub const KEYCHAIN: &str = "signing/steve-signing.keychain-db";
+
+/// Gives `kc` a new password: kept in `store` first (as the next one), then set on the keychain,
+/// checked to open it, and only then made the password. A rotation cut short (a crash, a failed
+/// `security`) is finished or undone here on the next call: whichever of the two opens the keychain
+/// stays. Never leaves the key store without a password that opens it.
+pub fn rotate(home: &Path, store: &dyn KeyStore, kc: &dyn Keychain) -> Rotated {
+    let no = |why: String| Rotated::No(why);
+    // one rotation at a time (a second Hub on this home, a probe during a deploy)
+    let _guard = match lock(&home.join("signing/.rotate.lock")) {
+        Ok(g) => g,
+        Err(e) => return no(format!("lock: {e}")),
+    };
+    let old = match signing::get(store) {
+        Ok(Some(p)) => p,
+        Ok(None) => return no("the key store holds no password".into()),
+        Err(e) => return no(e.to_string()),
+    };
+    match signing::get_next(store) {
+        Ok(Some(next)) if kc.opens(&next) => {
+            // cut short after the keychain changed: finish it
+            return match signing::set(store, &next) {
+                Ok(()) => {
+                    let _ = signing::clear_next(store);
+                    Rotated::Yes
+                }
+                Err(e) => no(e.to_string()),
+            };
+        }
+        Ok(Some(_)) if !kc.opens(&old) => {
+            return no("neither the password nor the next one opens the keychain".into());
+        }
+        Ok(Some(_)) => {
+            if let Err(e) = signing::clear_next(store) {
+                return no(e.to_string());
+            }
+        }
+        Ok(None) => {}
+        Err(e) => return no(e.to_string()),
+    }
+    if !kc.opens(&old) {
+        return no("the stored password does not open the keychain".into());
+    }
+    let new = match signing::generate() {
+        Ok(p) => p,
+        Err(e) => return no(e.to_string()),
+    };
+    if let Err(e) = signing::set_next(store, &new) {
+        return no(e.to_string());
+    }
+    let changed = kc.change(&old, &new);
+    if !kc.opens(&new) {
+        // unchanged: the next one goes; changed but not opening is left for the next start to sort out
+        if kc.opens(&old) {
+            let _ = signing::clear_next(store);
+        }
+        return no(match changed {
+            Err(e) => e.to_string(),
+            Ok(()) => "the new password does not open the keychain".into(),
+        });
+    }
+    if let Err(e) = signing::set(store, &new) {
+        // the keychain takes the next one: the next start finishes this
+        return no(e.to_string());
+    }
+    let _ = signing::clear_next(store);
+    Rotated::Yes
+}
+
+fn lock(p: &Path) -> std::io::Result<fs::File> {
+    let f = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(p)?;
+    f.lock()?;
+    Ok(f)
+}
+
+/// Moves `signing/keychain-pass` into `store`: written, read back, then (with `kc`) the keychain's
+/// password changed, then the file removed. A file whose password the key store already holds is
+/// removed; one that differs from what the store holds, or is not of the storable form, stays. The
+/// file goes even when the change fails: it is the copy every agent can read.
+pub fn migrate(home: &Path, store: &dyn KeyStore, kc: Option<&dyn Keychain>) -> Moved {
     let file = home.join(FILE);
     let text = match fs::read_to_string(&file) {
         Ok(t) => Zeroizing::new(t),
@@ -46,8 +227,13 @@ pub fn migrate(home: &Path, store: &dyn KeyStore) -> Moved {
         }
         Err(e) => return Moved::Kept(e.to_string()),
     }
+    drop(text);
+    let rotated = match kc {
+        Some(kc) => rotate(home, store, kc),
+        None => Rotated::No("no keychain to change".into()),
+    };
     match fs::remove_file(&file) {
-        Ok(()) => Moved::Moved,
+        Ok(()) => Moved::Moved(rotated),
         Err(e) => Moved::Kept(format!("remove {FILE}: {e}")),
     }
 }
@@ -91,19 +277,50 @@ pub fn helper(_home: &Path) -> Option<Box<dyn KeyStore>> {
     None
 }
 
-/// At start: moves the password when there is a file and a helper (off the runtime).
+/// steve-keyhelper of `home` itself (`bin/steve-keyhelper`), whatever `STEVE_KEYHELPER` says: the
+/// upgrade runner's, whose environment is its caller's to choose.
+#[cfg(target_os = "macos")]
+pub fn installed_helper(home: &Path) -> Option<Box<dyn KeyStore>> {
+    steve_modules::vault::keystore::HelperStore::find(home, None)
+        .map(|h| Box::new(h) as Box<dyn KeyStore>)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn installed_helper(_home: &Path) -> Option<Box<dyn KeyStore>> {
+    None
+}
+
+/// At start: moves the password when there is a file and a helper, and changes it (off the
+/// runtime); finishes a change cut short. Not while a release holds `releases/.release.lock`: its
+/// build may be about to unlock the keychain with the password it has.
 pub fn spawn_migrate(home: PathBuf) {
-    if !home.join(FILE).is_file() {
-        return;
-    }
+    let file = home.join(FILE).is_file();
     tokio::task::spawn_blocking(move || {
+        if super::runner::held(&home.join("releases/.release.lock")) {
+            return;
+        }
         let Some(store) = helper(&home) else {
             return;
         };
-        match migrate(&home, store.as_ref()) {
+        let kc = Security::of(&home);
+        if !file {
+            if matches!(signing::get_next(store.as_ref()), Ok(Some(_))) {
+                match rotate(&home, store.as_ref(), &kc) {
+                    Rotated::Yes => {
+                        tracing::info!("signing: the keychain password change finished")
+                    }
+                    Rotated::No(why) => tracing::warn!("signing: keychain password change: {why}"),
+                }
+            }
+            return;
+        }
+        match migrate(&home, store.as_ref(), Some(&kc)) {
             Moved::Nothing => {}
-            Moved::Moved => tracing::info!(
-                "signing: the keychain password moved from {FILE} into the key store"
+            Moved::Moved(Rotated::Yes) => tracing::info!(
+                "signing: the keychain password moved from {FILE} into the key store and was changed"
+            ),
+            Moved::Moved(Rotated::No(why)) => tracing::warn!(
+                "signing: the keychain password moved from {FILE} into the key store, not changed: {why}"
             ),
             Moved::Kept(why) => tracing::warn!("signing: {FILE} stays: {why}"),
         }
@@ -113,6 +330,7 @@ pub fn spawn_migrate(home: PathBuf) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
     use steve_modules::vault::keystore::{FileKeyStore, KeyStoreError};
     use steve_modules::vault::secret::Kek;
 
@@ -134,6 +352,39 @@ mod tests {
         }
     }
 
+    /// A keychain with a password, that may refuse to change it.
+    struct Fake {
+        pass: Mutex<String>,
+        refuse: Mutex<bool>,
+    }
+
+    impl Fake {
+        fn with(p: &str) -> Self {
+            Self {
+                pass: Mutex::new(p.into()),
+                refuse: Mutex::new(false),
+            }
+        }
+    }
+
+    impl Keychain for Fake {
+        fn change(&self, old: &str, new: &str) -> Result<()> {
+            let mut p = self.pass.lock().unwrap();
+            if *self.refuse.lock().unwrap() || *p != old {
+                anyhow::bail!("refused")
+            }
+            *p = new.into();
+            Ok(())
+        }
+        fn opens(&self, pass: &str) -> bool {
+            *self.pass.lock().unwrap() == pass
+        }
+    }
+
+    fn stored(store: &dyn KeyStore) -> String {
+        signing::get(store).unwrap().unwrap().as_str().to_owned()
+    }
+
     fn pass() -> String {
         "0123456789abcdef".repeat(4)
     }
@@ -149,7 +400,7 @@ mod tests {
     #[test]
     fn nothing_to_move_without_the_file() {
         let (h, store) = home();
-        assert_eq!(migrate(h.path(), &store), Moved::Nothing);
+        assert_eq!(migrate(h.path(), &store, None), Moved::Nothing);
         assert!(!present(h.path(), Some(&store)));
         assert!(password(h.path(), Some(&store)).unwrap().is_none());
     }
@@ -162,15 +413,21 @@ mod tests {
             present(h.path(), None),
             "the file alone is enough before the move"
         );
-        assert_eq!(migrate(h.path(), &store), Moved::Moved);
+        let kc = Fake::with(&pass());
+        assert_eq!(
+            migrate(h.path(), &store, Some(&kc)),
+            Moved::Moved(Rotated::Yes)
+        );
         assert!(
             !h.path().join(FILE).exists(),
             "no agent-readable copy is left"
         );
-        assert_eq!(
-            signing::get(&store).unwrap().as_deref().map(|p| p.as_str()),
-            Some(pass().as_str())
-        );
+        // a copy of the file (a backup from before, one an agent took) opens nothing any more
+        let now = stored(&store);
+        assert_ne!(now, pass());
+        assert!(signing::storable(&now));
+        assert!(kc.opens(&now) && !kc.opens(&pass()));
+        assert!(signing::get_next(&store).unwrap().is_none());
         assert!(present(h.path(), Some(&store)));
         assert!(!present(h.path(), None), "only the key store has it now");
         assert_eq!(
@@ -178,10 +435,103 @@ mod tests {
                 .unwrap()
                 .as_deref()
                 .map(|p| p.as_str()),
-            Some(pass().as_str())
+            Some(now.as_str())
         );
         // once moved, a second start has nothing to do
-        assert_eq!(migrate(h.path(), &store), Moved::Nothing);
+        assert_eq!(migrate(h.path(), &store, Some(&kc)), Moved::Nothing);
+    }
+
+    #[test]
+    fn a_keychain_that_refuses_the_change_keeps_its_password() {
+        let (h, store) = home();
+        fs::write(h.path().join(FILE), pass()).unwrap();
+        let kc = Fake::with(&pass());
+        *kc.refuse.lock().unwrap() = true;
+        assert!(matches!(
+            migrate(h.path(), &store, Some(&kc)),
+            Moved::Moved(Rotated::No(_))
+        ));
+        // the file still goes; the store keeps the password that opens the keychain
+        assert!(!h.path().join(FILE).exists());
+        assert_eq!(stored(&store), pass());
+        assert!(kc.opens(&pass()));
+        assert!(signing::get_next(&store).unwrap().is_none());
+        // a later rotation does it
+        *kc.refuse.lock().unwrap() = false;
+        assert_eq!(rotate(h.path(), &store, &kc), Rotated::Yes);
+        assert!(kc.opens(&stored(&store)) && !kc.opens(&pass()));
+    }
+
+    #[test]
+    fn a_change_cut_short_is_finished_or_undone_next_time() {
+        // the keychain changed, the store was not told (the Hub stopped in between)
+        let (h, store) = home();
+        signing::set(&store, &pass()).unwrap();
+        let next = "f".repeat(64);
+        signing::set_next(&store, &next).unwrap();
+        let kc = Fake::with(&next);
+        assert_eq!(rotate(h.path(), &store, &kc), Rotated::Yes);
+        assert_eq!(stored(&store), next, "the one the keychain takes is kept");
+        assert!(signing::get_next(&store).unwrap().is_none());
+        // the keychain did not change: the next one goes, and this rotation goes through
+        let (h, store) = home();
+        signing::set(&store, &pass()).unwrap();
+        signing::set_next(&store, &next).unwrap();
+        let kc = Fake::with(&pass());
+        assert_eq!(rotate(h.path(), &store, &kc), Rotated::Yes);
+        let now = stored(&store);
+        assert!(now != pass() && now != next && kc.opens(&now));
+        // neither opens it: nothing is thrown away
+        let (h, store) = home();
+        signing::set(&store, &pass()).unwrap();
+        signing::set_next(&store, &next).unwrap();
+        let kc = Fake::with(&"e".repeat(64));
+        assert!(matches!(rotate(h.path(), &store, &kc), Rotated::No(_)));
+        assert_eq!(stored(&store), pass());
+        assert!(signing::get_next(&store).unwrap().is_some());
+    }
+
+    /// A `security` that records its arguments and stdin, for [`Security`].
+    #[cfg(unix)]
+    #[test]
+    fn security_gets_the_passwords_on_stdin_never_as_arguments() {
+        use std::os::unix::fs::PermissionsExt;
+        let h = tempfile::tempdir().unwrap();
+        let bin = h.path().join("security");
+        let log = h.path().join("log");
+        fs::write(
+            &bin,
+            format!(
+                "#!/bin/sh\necho \"args: $*\" >> {log}\nif [ \"$1\" = -i ]; then cat >> {log}; fi\n",
+                log = log.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+        let kc = Security {
+            bin,
+            keychain: h.path().join("signing/steve-signing.keychain-db"),
+        };
+        let new = "f".repeat(64);
+        kc.change(&pass(), &new).unwrap();
+        assert!(kc.opens(&new));
+        let got = fs::read_to_string(&log).unwrap();
+        for line in got.lines().filter(|l| l.starts_with("args:")) {
+            assert!(!line.contains(&pass()) && !line.contains(&new), "{line}");
+        }
+        assert!(got.contains(&format!(
+            "set-keychain-password -o {} -p {new} \"{}\"",
+            pass(),
+            kc.keychain.display()
+        )));
+        assert!(got.contains("args: lock-keychain"), "locked again: {got}");
+        // a keychain path a security line can't carry is refused, not passed
+        let odd = Security {
+            bin: kc.bin.clone(),
+            keychain: h.path().join("a\"b"),
+        };
+        assert!(odd.change(&pass(), &new).is_err());
+        assert!(!odd.opens(&new));
     }
 
     #[test]
@@ -189,7 +539,10 @@ mod tests {
         let (h, store) = home();
         signing::set(&store, &pass()).unwrap();
         fs::write(h.path().join(FILE), pass()).unwrap();
-        assert_eq!(migrate(h.path(), &store), Moved::Moved);
+        assert_eq!(
+            migrate(h.path(), &store, None),
+            Moved::Moved(Rotated::No("no keychain to change".into()))
+        );
         assert!(!h.path().join(FILE).exists());
     }
 
@@ -198,7 +551,7 @@ mod tests {
         // a password sign-setup.sh did not make
         let (h, store) = home();
         fs::write(h.path().join(FILE), "hunter22").unwrap();
-        assert!(matches!(migrate(h.path(), &store), Moved::Kept(_)));
+        assert!(matches!(migrate(h.path(), &store, None), Moved::Kept(_)));
         assert!(h.path().join(FILE).exists());
         assert_eq!(
             password(h.path(), Some(&store))
@@ -211,7 +564,7 @@ mod tests {
         // a locked keychain: the file stays and still serves a build; without it, the error says why
         let (h, _) = home();
         fs::write(h.path().join(FILE), pass()).unwrap();
-        assert!(matches!(migrate(h.path(), &Locked), Moved::Kept(m) if m.contains("locked")));
+        assert!(matches!(migrate(h.path(), &Locked, None), Moved::Kept(m) if m.contains("locked")));
         assert!(h.path().join(FILE).exists());
         assert_eq!(
             password(h.path(), Some(&Locked))
@@ -227,7 +580,7 @@ mod tests {
         let (h, store) = home();
         signing::set(&store, &"f".repeat(64)).unwrap();
         fs::write(h.path().join(FILE), pass()).unwrap();
-        assert!(matches!(migrate(h.path(), &store), Moved::Kept(_)));
+        assert!(matches!(migrate(h.path(), &store, None), Moved::Kept(_)));
         assert!(h.path().join(FILE).exists());
     }
 }

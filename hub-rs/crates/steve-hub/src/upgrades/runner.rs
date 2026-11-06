@@ -48,7 +48,7 @@ fn busy(p: &Path) -> bool {
 
 /// Whether a live process holds the fcntl lock on `p`: ops/release.sh and ops/local-release.py both take
 /// it on `releases/.release.lock` (`zsystem flock`, `fcntl.lockf`).
-fn held(p: &Path) -> bool {
+pub(super) fn held(p: &Path) -> bool {
     use std::os::fd::AsRawFd;
     let Ok(file) = OpenOptions::new().read(true).write(true).open(p) else {
         return false;
@@ -124,6 +124,142 @@ pub(super) fn find_python(
         .find(|p| python_ok(p))
 }
 
+/// Where a Python that gets the signing keychain's password lives: the system's and Homebrew's
+/// directories, never one a journal, `STEVE_PYTHON` or a `PATH` names.
+pub(super) const PYTHON_DIRS: [&str; 4] = [
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+    "/Library/Frameworks/Python.framework/Versions/Current/bin",
+    "/usr/bin",
+];
+
+/// What the runner holds a build to before it hands it the signing keychain's password. Whoever can
+/// run the signed Hub (any process of the user, an agent's shell among them) can start
+/// `steve-hub --upgrade-runner <home> <id>` with a journal and an environment of their own, so neither
+/// decides: the home is the account's `~/.steve`, steve-keyhelper the one in it (not
+/// `STEVE_KEYHELPER`), the Python one of [`PYTHON_DIRS`], and the source and commit those of the
+/// release manifest of the configured repository, read again here rather than taken from the journal.
+/// What this can't rule out, as long as agents run unconfined as the same user: a build whose inputs
+/// they changed (the checkout's objects, `~/.cargo`, Homebrew's directory, `STEVE_UPDATE_REPOSITORY`
+/// in the caller's environment) still gets signed as the Hub. That takes an OS sandbox around the
+/// agents, not checks here.
+pub(super) struct Trust {
+    /// The one `STEVE_HOME` whose password a build gets.
+    pub home: Option<PathBuf>,
+    pub python_dirs: Vec<PathBuf>,
+    /// For a version: the repository's git URL and the commit its release manifest names.
+    #[allow(clippy::type_complexity)]
+    pub release: Box<dyn Fn(&str) -> Result<(String, String)>>,
+}
+
+impl Trust {
+    /// What only this binary decides.
+    pub(super) fn installed() -> Self {
+        Self {
+            home: account_home().map(|h| h.join(".steve")),
+            python_dirs: PYTHON_DIRS.map(PathBuf::from).to_vec(),
+            release: Box::new(released),
+        }
+    }
+
+    /// Why the build of `spec` (release `version`, `commit`) in `home` does not get the password.
+    fn refuses(&self, home: &Path, version: &str, spec: &Spec, commit: &str) -> Option<String> {
+        let real = |p: &Path| fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        let ours = self.home.as_deref().map(real);
+        if ours.as_deref() != Some(real(home).as_path()) {
+            return Some(steve_i18n::t!(
+                "hub.upgrade.local.untrusted_home",
+                home = ours
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+                    .as_str(),
+                got = home.to_string_lossy().as_ref()
+            ));
+        }
+        let python = Path::new(&spec.python);
+        let named = python
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| ["python3.13", "python3.12", "python3"].contains(&n));
+        if !named
+            || !python
+                .parent()
+                .is_some_and(|d| self.python_dirs.iter().any(|t| t == d))
+        {
+            return Some(steve_i18n::t!(
+                "hub.upgrade.local.untrusted_python",
+                python = spec.python.as_str()
+            ));
+        }
+        match (self.release)(version) {
+            Ok((source, manifest)) if source == spec.source && manifest == commit => None,
+            Ok((source, manifest)) => Some(steve_i18n::t!(
+                "hub.upgrade.local.release_other",
+                version = version,
+                source = source.as_str(),
+                commit = manifest.as_str()
+            )),
+            Err(e) => Some(steve_i18n::t!(
+                "hub.upgrade.local.release_unconfirmed",
+                version = version,
+                error = format!("{e:#}").as_str()
+            )),
+        }
+    }
+}
+
+/// This user's home directory as the account database has it (not `HOME`, which a caller sets).
+fn account_home() -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
+    let mut buf = vec![0 as libc::c_char; 16 * 1024];
+    // SAFETY: a zeroed passwd is a valid out-parameter; getpwuid_r writes only into it and `buf`
+    let mut pw: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut out: *mut libc::passwd = std::ptr::null_mut();
+    // SAFETY: every pointer is valid for the call, `buf.len()` is its size
+    let rc = unsafe {
+        libc::getpwuid_r(
+            libc::getuid(),
+            &mut pw,
+            buf.as_mut_ptr(),
+            buf.len(),
+            &mut out,
+        )
+    };
+    if rc != 0 || out.is_null() || pw.pw_dir.is_null() {
+        return None;
+    }
+    // SAFETY: pw_dir points into `buf`, NUL-terminated, while `buf` lives
+    let dir = unsafe { std::ffi::CStr::from_ptr(pw.pw_dir) };
+    let dir = PathBuf::from(std::ffi::OsStr::from_bytes(dir.to_bytes()));
+    dir.is_absolute().then_some(dir)
+}
+
+/// The configured repository's git URL and the commit of `version`'s release manifest, from GitHub.
+fn released(version: &str) -> Result<(String, String)> {
+    let repository = repository()?;
+    let version = version.to_owned();
+    // the runner runs inside the Hub binary's runtime; this blocks on a runtime of its own
+    std::thread::spawn(move || -> Result<(String, String)> {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        let u = Updates {
+            repository: repository.clone(),
+            client: reqwest::Client::builder()
+                .user_agent("Steve-updater/1")
+                .timeout(std::time::Duration::from_secs(120))
+                .build()?,
+            api_base: "https://api.github.com".into(),
+            web_base: "https://github.com".into(),
+            ..Updates::journal(Path::new("/"))
+        };
+        let (_, manifest) = rt.block_on(u.resolve(&version))?;
+        Ok((format!("{}/{repository}.git", u.web_base), manifest.commit))
+    })
+    .join()
+    .map_err(|_| anyhow::anyhow!("the release check stopped"))?
+}
+
 /// The tools a local build needs, found the way the runner's environment will find them; the names of
 /// those missing otherwise.
 fn tools(u: &Updates) -> std::result::Result<Tools, Vec<String>> {
@@ -147,20 +283,14 @@ fn tools(u: &Updates) -> std::result::Result<Tools, Vec<String>> {
                 .map(|h| PathBuf::from(h).join(".cargo/bin/cargo"))
                 .filter(|p| p.is_file())
         });
-    let python = find_python(
-        env_file("STEVE_PYTHON"),
-        std::env::var_os("PATH"),
-        &[
-            PathBuf::from("/opt/homebrew/bin"),
-            PathBuf::from("/usr/local/bin"),
-        ],
-    );
+    // the build gets the signing keychain's password: only a Python of the system's directories
+    let python = find_python(None, None, &PYTHON_DIRS.map(PathBuf::from));
     let mut missing = vec![];
     if cargo.is_none() {
         missing.push("cargo (STEVE_CARGO)".to_owned());
     }
     if python.is_none() {
-        missing.push("python3 ≥3.12 (STEVE_PYTHON)".to_owned());
+        missing.push(format!("python3 ≥3.12 ({})", PYTHON_DIRS.join(", ")));
     }
     for tool in ["git", "npm"] {
         if on_path(tool).is_none() {
@@ -323,8 +453,8 @@ fn job_env(u: &Updates, spec: &Spec) -> Vec<(String, String)> {
         "STEVE_PORT",
         "CARGO_HOME",
         "RUSTUP_HOME",
-        // where the runner finds steve-keyhelper for the signing password (a path, never a secret)
-        "STEVE_KEYHELPER",
+        // the repository the runner reads the release manifest from again
+        "STEVE_UPDATE_REPOSITORY",
     ]
     .iter()
     .filter_map(|k| std::env::var(k).ok().map(|v| ((*k).to_owned(), v)))
@@ -471,7 +601,9 @@ fn say(msg: impl std::fmt::Display) {
 }
 
 fn git(repo: &Path, args: &[&str]) -> Result<std::process::Output> {
+    // a replace ref (`refs/replace/<commit>`) would make the release commit read as another
     Ok(Command::new("git")
+        .env("GIT_NO_REPLACE_OBJECTS", "1")
         .arg("-C")
         .arg(repo)
         .args(args)
@@ -492,6 +624,11 @@ fn git_commit(repo: &Path, rev: &str) -> Option<String> {
 
 /// `steve-hub --upgrade-runner <home> <id>`: the job launchd starts. Exit 0 once the journal has a result.
 pub fn main(home: &Path, id: &str) -> i32 {
+    main_with(home, id, &Trust::installed())
+}
+
+/// [`main`], holding the build to `trust`.
+pub(super) fn main_with(home: &Path, id: &str, trust: &Trust) -> i32 {
     let u = Updates::journal(home);
     let Ok(guard) = lock_file(&runner_lock(&u)) else {
         say("another runner holds the runner lock");
@@ -509,7 +646,7 @@ pub fn main(home: &Path, id: &str) -> i32 {
         return 0;
     }
     let ops = u.dir().join("runner").join(format!("{id}-ops"));
-    let result = run(&u, &mut op, &ops);
+    let result = run(&u, &mut op, &ops, trust);
     let _ = fs::remove_dir_all(&ops);
     let code = match result {
         Ok(()) => 0,
@@ -546,7 +683,7 @@ fn lock_file(p: &Path) -> Result<File> {
     Ok(f)
 }
 
-fn run(u: &Updates, op: &mut Operation, ops: &Path) -> Result<()> {
+fn run(u: &Updates, op: &mut Operation, ops: &Path, trust: &Trust) -> Result<()> {
     let spec = op.runner.clone().context("not a local upgrade")?;
     let commit = spec
         .commit
@@ -675,10 +812,14 @@ fn run(u: &Updates, op: &mut Operation, ops: &Path) -> Result<()> {
             spec.cargo
         ));
         // the signing keychain's password, over a pipe: the runner is the signed Hub, the one
-        // process steve-keyhelper gives it to (a script from before this reads signing/keychain-pass)
+        // process steve-keyhelper gives it to (a script from before this reads signing/keychain-pass),
+        // and only to a build of what the Hub would build itself
         let piped = fs::read_to_string(&script).is_ok_and(|s| s.contains("--keychain-pass-stdin"));
         let pass = if piped {
-            let store = super::signing::helper(&u.home);
+            if let Some(why) = trust.refuses(&u.home, &version, &spec, &commit) {
+                bail!("{why}")
+            }
+            let store = super::signing::installed_helper(&u.home);
             Some(
                 super::signing::password(&u.home, store.as_deref())?
                     .context("no signing keychain password (ops/sign-setup.sh)")?,

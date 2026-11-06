@@ -9,10 +9,12 @@ use std::path::{Path, PathBuf};
 
 /// The parts of `STEVE_HOME` no agent reads, relative to it. A trailing `/` is a directory (all of it),
 /// a trailing `*` a name prefix.
-pub const PROTECTED: [&str; 13] = [
+pub const PROTECTED: [&str; 14] = [
     "signing/",
     "secrets/",
     "backups/",
+    // the upgrade journal: the control token's file, the supervisor's database copies, runner jobs
+    "updates/",
     "steve.env*",
     "steve.db*",
     "data/steve.sqlite3*",
@@ -184,8 +186,15 @@ mod tests {
             rules
                 .contains(&"Read(//nonexistent-steve-home/.steve/data/steve.sqlite3*)".to_string())
         );
-        // raw mail and the Hub's per-Node state are the owner's too
-        for dir in ["data/mail", "data/nodes", "data/files", "data/node/secrets"] {
+        // raw mail, the Hub's per-Node state and the upgrade journal (control token, database
+        // copies) are the owner's too
+        for dir in [
+            "data/mail",
+            "data/nodes",
+            "data/files",
+            "data/node/secrets",
+            "updates",
+        ] {
             let want = format!("Read(//nonexistent-steve-home/.steve/{dir}/**)");
             assert!(rules.contains(&want), "{want}");
         }
@@ -232,6 +241,10 @@ mod tests {
         );
         assert!(
             fs.contains(r#""/nonexistent-steve-home/.st\"eve/steve.env*"="deny""#),
+            "{fs}"
+        );
+        assert!(
+            fs.contains(r#""/nonexistent-steve-home/.st\"eve/updates"="deny""#),
             "{fs}"
         );
         assert_eq!(fs.matches("=\"deny\"").count(), PROTECTED.len());
