@@ -1,5 +1,6 @@
 //! Attachments (files.ts): validation by content (not by the name or the claimed type), storage under
-//! `data/files`, and what an agent gets (copied into its working directory, images also inline).
+//! `data/files`. The Hub never copies them into a working directory: the Node fetches what a turn
+//! was granted (`wire/node_files.rs`) and places it there itself.
 
 use std::path::{Path, PathBuf};
 
@@ -14,8 +15,6 @@ pub const MAX_FILE: usize = 20 * 1024 * 1024;
 pub const MAX_FILES: usize = 10;
 /// Image types a model takes inline; everything else only goes by path.
 pub const INLINE_IMAGES: [&str; 4] = ["image/png", "image/jpeg", "image/gif", "image/webp"];
-/// The Messages API takes base64 images up to 5 MB; larger ones are read from disk by the agent.
-const MAX_INLINE: u64 = 3_750_000;
 
 /// A file kind Steve accepts: its MIME type and the extensions that name it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -302,89 +301,6 @@ pub fn is_inline_image(mime: &str) -> bool {
     INLINE_IMAGES.contains(&mime)
 }
 
-/// `kb(n)`: `1.3 MB` (toFixed(1), half up) or `12 KB` (Math.round, at least 1).
-pub fn kb(n: u64) -> String {
-    const MB: u64 = 1024 * 1024;
-    if n >= MB {
-        let tenths = (n * 20 + MB) / (2 * MB);
-        format!("{}.{} MB", tenths / 10, tenths % 10)
-    } else {
-        format!("{} KB", ((n + 512) / 1024).max(1))
-    }
-}
-
-/// What an agent gets: the note appended to the prompt and the inline image blocks.
-#[derive(Debug, Clone, PartialEq, Default)]
-pub struct ForAgent {
-    pub note: String,
-    pub images: Vec<Value>,
-}
-
-/// Copies attachments into `<cwd>/.steve/attachments` (ignored by git) and says where they are; images that
-/// fit also go inline when the adapter takes images. Blocking.
-pub fn for_agent(
-    r: &dyn Repo,
-    data_dir: &Path,
-    cwd: &str,
-    refs: &[Value],
-    inline_images: bool,
-) -> BResult<ForAgent> {
-    use base64::Engine;
-    if refs.is_empty() {
-        return Ok(ForAgent::default());
-    }
-    let io = |e: std::io::Error| BackendError::msg(e.to_string());
-    let dir = Path::new(cwd).join(".steve/attachments");
-    std::fs::create_dir_all(&dir).map_err(io)?;
-    let ign = dir.join(".gitignore");
-    if !ign.exists() {
-        std::fs::write(&ign, "*\n").map_err(io)?;
-    }
-    let (mut lines, mut images) = (vec![], vec![]);
-    for rf in refs {
-        let Some(f) = r.file_get(rf.get("id").and_then(Value::as_str).unwrap_or_default())? else {
-            continue;
-        };
-        let s = |k: &str| {
-            f.get(k)
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string()
-        };
-        let (id, name, mime) = (s("id"), s("name"), s("mime"));
-        let size = f.get("size").and_then(Value::as_u64).unwrap_or(0);
-        let rel = format!(".steve/attachments/{}-{name}", id.get(4..).unwrap_or(""));
-        let dst = Path::new(cwd).join(&rel);
-        let blob = blob_path(data_dir, &f);
-        if !dst.exists() {
-            std::fs::copy(&blob, &dst).map_err(io)?;
-        }
-        let inline = inline_images && is_inline_image(&mime) && size <= MAX_INLINE;
-        if inline {
-            let data = std::fs::read(&blob).map_err(io)?;
-            images.push(json!({ "type": "image", "data": base64::engine::general_purpose::STANDARD.encode(data), "mimeType": mime }));
-        }
-        let main = mime.split(';').next().unwrap_or("");
-        lines.push(format!(
-            "- {rel}（{main}，{}{}）",
-            kb(size),
-            if inline {
-                "，图片也直接附在这条消息里"
-            } else {
-                ""
-            }
-        ));
-    }
-    Ok(ForAgent {
-        note: format!(
-            "\n\n用户附带了 {} 个附件，已保存在工作目录里（绝对路径前缀 {cwd}/），需要时直接读取：\n{}",
-            lines.len(),
-            lines.join("\n")
-        ),
-        images,
-    })
-}
-
 /// `encodeURIComponent`.
 pub fn encode_uri_component(s: &str) -> String {
     let mut out = String::new();
@@ -507,9 +423,6 @@ mod tests {
 
     #[test]
     fn sizes_and_headers() {
-        assert_eq!(kb(10), "1 KB");
-        assert_eq!(kb(1536), "2 KB");
-        assert_eq!(kb(1024 * 1024 + 256 * 1024), "1.3 MB");
         assert_eq!(
             encode_uri_component("截图 a.png"),
             "%E6%88%AA%E5%9B%BE%20a.png"

@@ -650,6 +650,32 @@ async fn steves_lead_goes_first_once_and_attachments_go_by_hash() {
     );
 }
 
+/// N0e-E9: a message whose attachment the Hub no longer has (an old queued message of a session
+/// that moved to the Node, say) goes without it, as on the legacy runner, instead of staying queued.
+#[tokio::test]
+async fn a_message_whose_file_is_gone_goes_without_it() {
+    let h = hub();
+    h.bind();
+    let f = FileRef {
+        id: "f_gone".into(),
+        name: "gone.txt".into(),
+        mime: "text/plain".into(),
+        size: 3,
+    };
+    h.rt.prompt(S, "still here", "user", std::slice::from_ref(&f))
+        .unwrap();
+    until("attempt", || h.attempts().len() == 1).await;
+    let spec: String = h.q("SELECT spec FROM runtime_attempts");
+    let spec: TurnSpec = serde_json::from_str(&spec).unwrap();
+    assert!(
+        matches!(&spec.run.prompt[..], [Part::Text { text }] if text == "still here"),
+        "{:?}",
+        spec.run.prompt
+    );
+    let queued: i64 = h.q("SELECT COUNT(*) FROM queued");
+    assert_eq!(queued, 0, "not left queued");
+}
+
 #[tokio::test]
 async fn a_permission_is_a_card_and_its_answer_goes_to_the_very_request() {
     let h = hub();

@@ -55,6 +55,10 @@ pub struct ForAgent {
 
 /// Copy attachments into `<cwd>/.steve/attachments` (ignored by git) and say where they are;
 /// images that fit also go inline. Rows the Hub no longer knows are skipped, like the TS.
+///
+/// Legacy runner only (it copies Hub blobs into the session's directory from the Hub process). A
+/// session on a Node gets its attachments through `HubFiles` and the Node places them itself
+/// (`steve-node` attachments.rs); nothing else may call this, and it goes with the legacy runner.
 pub fn for_agent(
     cwd: &str,
     refs: &[FileRef],

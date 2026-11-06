@@ -1130,3 +1130,239 @@ async fn a_git_items_worktree_is_made_and_given_back_by_the_node() {
         1
     );
 }
+
+/// A 1×1 PNG (RGB, no filter), for the attachment case.
+fn png(rgb: [u8; 3]) -> Vec<u8> {
+    use std::io::Write as _;
+    fn crc(bytes: &[u8]) -> u32 {
+        let mut c = 0xFFFF_FFFFu32;
+        for b in bytes {
+            c ^= u32::from(*b);
+            for _ in 0..8 {
+                c = if c & 1 == 1 {
+                    0xEDB8_8320 ^ (c >> 1)
+                } else {
+                    c >> 1
+                };
+            }
+        }
+        !c
+    }
+    fn chunk(out: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
+        out.extend((data.len() as u32).to_be_bytes());
+        let mut body = kind.to_vec();
+        body.extend(data);
+        out.extend(&body);
+        out.extend(crc(&body).to_be_bytes());
+    }
+    let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    z.write_all(&[0, rgb[0], rgb[1], rgb[2]]).expect("zlib");
+    let idat = z.finish().expect("zlib");
+    let mut ihdr = Vec::new();
+    ihdr.extend(1u32.to_be_bytes());
+    ihdr.extend(1u32.to_be_bytes());
+    ihdr.extend([8, 2, 0, 0, 0]);
+    let mut out = b"\x89PNG\r\n\x1a\n".to_vec();
+    chunk(&mut out, b"IHDR", &ihdr);
+    chunk(&mut out, b"IDAT", &idat);
+    chunk(&mut out, b"IEND", &[]);
+    out
+}
+
+fn sha256_hex(b: &[u8]) -> String {
+    use sha2::Digest as _;
+    hex::encode(sha2::Sha256::digest(b))
+}
+
+impl Client {
+    async fn upload(&self, name: &str, bytes: Vec<u8>) -> String {
+        let r = self
+            .http
+            .post(format!("{}/api/files?name={name}", self.base))
+            .header("cookie", &self.cookie)
+            .header("content-type", "application/octet-stream")
+            .body(bytes)
+            .send()
+            .await
+            .expect("upload");
+        let st = r.status().as_u16();
+        let v: Value = r.json().await.expect("upload json");
+        assert_eq!(st, 200, "upload: {v}");
+        v["id"].as_str().expect("file id").to_string()
+    }
+    async fn say_with(&self, sid: &str, text: &str, files: &[&str]) -> Value {
+        let (st, v) = self
+            .call(
+                "POST",
+                &format!("/api/sessions/{sid}/messages"),
+                Some(json!({"text": text, "files": files})),
+            )
+            .await;
+        assert_eq!(st, 200, "message: {v}");
+        v
+    }
+}
+
+/// The prompt blocks the agent got for the message carrying `token`.
+fn prompt_blocks(h: &Home, token: &str) -> Option<Vec<Value>> {
+    h.lines()
+        .into_iter()
+        .filter(|m| m["method"] == "session/prompt")
+        .filter_map(|m| m["params"]["prompt"].as_array().cloned())
+        .find(|ps| {
+            ps.iter()
+                .any(|p| p["text"].as_str().is_some_and(|t| t.contains(token)))
+        })
+}
+
+/// N0e-E9: a Node session's attachments come to the agent through the Node. It fetches them from
+/// the Hub (HubFiles, by hash) and places them in the session's workspace under
+/// `.steve/attachments` with the ignore file; the image also goes inline. An attachment the Hub no
+/// longer has does not hold the turn up: it goes without it, and the agent is told.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_node_sessions_attachments_are_placed_by_the_node() {
+    let h = Home::new();
+    let _hub = spawn(&h, true, &[("FAKE_ACP_IMAGE", "1")]);
+    serving(&h).await;
+    let c = Client::login(&h).await;
+    node_health_until(&h, 30, |n| n["reconciled"] == true).await;
+    let sid = c.item(&h, "附件验收 @say ready-A1").await;
+    assert!(
+        wait(30, || steve_v1(&h, &sid, "ready-A1") > 0).await,
+        "the first turn; log:\n{}",
+        hub_log(&h)
+    );
+    assert_eq!(
+        h.count(
+            "SELECT COUNT(*) FROM runtime_sessions WHERE session_id=? AND node_id='local'",
+            &sid
+        ),
+        1,
+        "bound to the local Node"
+    );
+
+    let notes = "第一行\nline two\n".repeat(50).into_bytes();
+    let image = png([200, 30, 30]);
+    let txt = c.upload("notes.txt", notes.clone()).await;
+    let pic = c.upload("截图.png", image.clone()).await;
+    c.say_with(&sid, "附件验收-F3 @say got-files", &[&txt, &pic])
+        .await;
+    let mut blocks = None;
+    assert!(
+        wait(30, || {
+            blocks = prompt_blocks(&h, "附件验收-F3");
+            blocks.is_some()
+        })
+        .await,
+        "the prompt reached the agent; log:\n{}",
+        hub_log(&h)
+    );
+    let blocks = blocks.expect("blocks");
+    let text = blocks[0]["text"].as_str().expect("text").to_string();
+    let cwd = h
+        .one("SELECT cwd FROM sessions WHERE id=?", &sid)
+        .expect("cwd");
+    let cwd = PathBuf::from(cwd).canonicalize().expect("cwd exists");
+    assert!(
+        text.contains("用户附带了 2 个附件，已保存在工作目录里"),
+        "{text}"
+    );
+    for (id, name, bytes) in [(&txt, "notes.txt", &notes), (&pic, "截图.png", &image)] {
+        let rel = format!(".steve/attachments/{}-{name}", &id[4..]);
+        assert!(text.contains(&format!("- {rel}（")), "{rel} named: {text}");
+        let placed = std::fs::read(cwd.join(&rel)).unwrap_or_else(|e| panic!("{rel}: {e}"));
+        assert_eq!(
+            sha256_hex(&placed),
+            sha256_hex(bytes),
+            "{rel}: the same bytes"
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(cwd.join(".steve/attachments/.gitignore")).expect("ignore file"),
+        "*\n"
+    );
+    assert!(
+        text.contains("图片也直接附在这条消息里"),
+        "the image is inline: {text}"
+    );
+    assert!(
+        blocks
+            .iter()
+            .any(|b| b["type"] == "image" && b["mimeType"] == "image/png"),
+        "an image block: {blocks:?}"
+    );
+    // fetched by the Node: the bytes are in its cache, by hash
+    for bytes in [&notes, &image] {
+        let cached = h.steve().join("node/blobs").join(sha256_hex(bytes));
+        let cached = if cached.exists() {
+            cached
+        } else {
+            walk(&h.steve())
+                .into_iter()
+                .find(|p| {
+                    p.parent().and_then(|d| d.file_name()) == Some("blobs".as_ref())
+                        && p.file_name() == Some(sha256_hex(bytes).as_ref())
+                })
+                .unwrap_or_else(|| panic!("no cached blob under {}", h.steve().display()))
+        };
+        assert_eq!(
+            sha256_hex(&std::fs::read(cached).expect("cache")),
+            sha256_hex(bytes)
+        );
+    }
+    assert!(wait(30, || steve_v1(&h, &sid, "got-files") > 0).await);
+
+    // the blob is gone from the Hub: the turn goes on without it, and says so
+    let lost = c.upload("lost.txt", b"never placed".to_vec()).await;
+    let (ws, sha): (String, String) = h
+        .db()
+        .query_row(
+            "SELECT workspace_id, sha256 FROM files WHERE id=?",
+            [&lost],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .expect("file row");
+    std::fs::remove_file(
+        h.steve()
+            .join("data/files")
+            .join(&ws)
+            .join(&sha[..2])
+            .join(&lost),
+    )
+    .expect("remove blob");
+    c.say_with(&sid, "附件验收-G4 @say went-on", &[&lost]).await;
+    assert!(
+        wait(30, || steve_v1(&h, &sid, "went-on") > 0).await,
+        "the turn ran; log:\n{}",
+        hub_log(&h)
+    );
+    let text = prompt_blocks(&h, "附件验收-G4").expect("prompt")[0]["text"]
+        .as_str()
+        .expect("text")
+        .to_string();
+    assert!(
+        text.contains("（用户还附带了 1 个附件，但没能取到：lost.txt）"),
+        "{text}"
+    );
+    assert!(
+        !cwd.join(format!(".steve/attachments/{}-lost.txt", &lost[4..]))
+            .exists()
+    );
+}
+
+/// Every file under `dir`.
+fn walk(dir: &std::path::Path) -> Vec<PathBuf> {
+    let mut out = vec![];
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return out;
+    };
+    for e in rd.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            out.extend(walk(&p));
+        } else {
+            out.push(p);
+        }
+    }
+    out
+}

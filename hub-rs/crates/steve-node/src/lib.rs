@@ -12,6 +12,7 @@
 //! confirmed gone ([`procs`]).
 
 mod actor;
+mod attachments;
 mod exec;
 pub mod git;
 pub mod history;
@@ -32,8 +33,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
+use steve_acp::AcpConfig;
 use steve_acp::permission::Asked;
-use steve_acp::{AcpConfig, FileRef, StoredFile};
 use steve_node_api::*;
 use tokio::sync::mpsc;
 
@@ -377,8 +378,11 @@ pub(crate) fn revoke_tools(inner: &Inner, session: &SessionId) {
     inner.tools.revoke_session(session);
 }
 
-/// Prompt blocks: the text, attachments put into the workspace (from the Hub, for this execution),
-/// images inline.
+/// Prompt blocks: the text, attachments put into the workspace (fetched from the Hub for this
+/// execution and placed here, [`attachments::place`]), images inline. An attachment the Hub no
+/// longer has is left out and named in a note; one that cannot be
+/// placed in the workspace turns into a note too (the legacy runner's behaviour). Anything else
+/// (offline, past the deadline) fails the preparation.
 pub(crate) async fn prompt(
     inner: &Arc<Inner>,
     exec: &ExecutionRef,
@@ -387,8 +391,8 @@ pub(crate) async fn prompt(
     image: bool,
 ) -> ApiResult<Value> {
     let mut text = vec![];
-    let mut refs = vec![];
-    let mut stored: HashMap<String, StoredFile> = HashMap::new();
+    let mut fetched = vec![];
+    let mut missing = vec![];
     for p in parts {
         match p {
             Part::Text { text: t } => text.push(t.clone()),
@@ -397,37 +401,54 @@ pub(crate) async fn prompt(
                     Part::File { name, .. } => name.clone(),
                     _ => format!("image-{}", &artifact.sha256.as_str()[7..15]),
                 };
-                let path = fetch(inner, exec, artifact).await?;
-                refs.push(FileRef {
-                    id: artifact.id.to_string(),
-                    name: name.clone(),
-                    mime: artifact.mime.clone(),
-                    size: artifact.size,
-                });
-                stored.insert(
-                    artifact.id.to_string(),
-                    StoredFile {
+                match fetch(inner, exec, artifact).await {
+                    Ok(blob) => fetched.push(attachments::Fetched {
                         id: artifact.id.to_string(),
                         name,
                         mime: artifact.mime.clone(),
                         size: artifact.size,
-                        path,
-                    },
-                );
+                        sha256: artifact.sha256.as_str().to_string(),
+                        blob,
+                    }),
+                    Err(e) if gone(&e) => {
+                        tracing::warn!(
+                            "attachment {} left out: {}",
+                            artifact.id.as_str(),
+                            e.safe_detail
+                        );
+                        missing.push(attachments::file_name(&name));
+                    }
+                    Err(e) => return Err(e),
+                }
             }
             Part::Diff { .. } => {}
         }
     }
-    let a = steve_acp::for_agent(&cwd.to_string_lossy(), &refs, image, |i| {
-        stored.get(i).cloned()
-    })
-    .map_err(|e| ApiError::new(ErrorCode::Internal, e))?;
-    let body = text.join("\n\n") + &a.note;
+    let count = fetched.len();
+    let dir = cwd.to_path_buf();
+    let placed = tokio::task::spawn_blocking(move || attachments::place(&dir, &fetched, image))
+        .await
+        .map_err(internal)?;
+    let (note, images) = match placed {
+        Ok(a) => (a.note, a.images),
+        Err(e) => {
+            tracing::warn!("attachments not placed: {e}");
+            (attachments::failed_note(count, &e), vec![])
+        }
+    };
+    let body = text.join("\n\n") + &note + &attachments::missing_note(&missing);
     Ok(Value::Array(
         std::iter::once(json!({"type": "text", "text": body}))
-            .chain(a.images)
+            .chain(images)
             .collect(),
     ))
+}
+
+/// A fetch error that will not go away by trying again: the Hub no longer has the artifact
+/// (`conflict`), or what it sent is not the bytes it granted (`invalid`). A denial (the execution
+/// is no longer live, say) is not one: it fails the preparation.
+fn gone(e: &ApiError) -> bool {
+    matches!(e.code, ErrorCode::Conflict | ErrorCode::Invalid)
 }
 
 /// An attachment's bytes, from the cache (checked) or the Hub (for this execution; size, progress
