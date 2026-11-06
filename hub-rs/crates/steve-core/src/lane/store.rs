@@ -165,13 +165,48 @@ fn apply_in(tx: &steve_store::Tx, id: &str, ev: Event) -> Result<Vec<Work>, Stor
             }
         }
     }
-    // the one card of a unit that took more requests lists them (none yet: it is made with them)
+    // the one card of a unit that took more requests lists them: a new card in place of the open one
+    // (none yet: it is made with them, [`ask`])
     for unit in added {
         let (q, d) = card_text(unit, &merging(tx, &row.id, unit)?);
-        lanes::batch_card_text(tx, &subject(&row.id, unit), &q, &d)?;
+        lanes::batch_card_renew(tx, &subject(&row.id, unit), &q, &d)?;
     }
     lanes::lane_save(tx, &row.id, &serde_json::to_string(&lane)?)?;
     Ok(work)
+}
+
+/// The approval card of unit `unit` of `lane`, made listing the requests it holds, read in the same
+/// transaction (a request joining meanwhile either is listed or finds the card and renews it). Those
+/// requests; empty when nothing is to merge or its card is already open.
+pub fn ask(store: &Store, lane: &str, unit: u64) -> Result<Vec<LaneRequest>, StoreError> {
+    store.transaction(|tx| {
+        let reqs = merging(tx, lane, unit)?;
+        let open = lanes::batch_card(tx, &subject(lane, unit), "approve")?
+            .is_some_and(|(status, _)| status == "open");
+        if reqs.is_empty() || open {
+            return Ok(vec![]);
+        }
+        let ws = reqs
+            .iter()
+            .find_map(|r| r.workspace_id.clone())
+            .unwrap_or_else(|| steve_store::WS.into());
+        let (question, draft) = card_text(unit, &reqs);
+        steve_store::decision_create_in(
+            tx,
+            &steve_store::NewDecision {
+                workspace_id: ws,
+                kind: "approve".into(),
+                subject_type: "delivery_batch".into(),
+                subject_id: subject(lane, unit),
+                question,
+                draft: Some(draft),
+                options: Some(vec!["yes".into(), "no".into()]),
+                requested_by: "steve".into(),
+                ..Default::default()
+            },
+        )?;
+        Ok(reqs)
+    })
 }
 
 /// A merge request into target (`upstream`, `branch`): recorded and put into its lane.
@@ -552,21 +587,33 @@ mod tests {
             .unwrap()
     }
 
+    fn open_card(s: &Store, lane: &str, unit: u64) -> Option<steve_store::Decision> {
+        s.decisions()
+            .open("default")
+            .unwrap()
+            .into_iter()
+            .find(|d| d.subject_type == "delivery_batch" && d.subject_id == subject(lane, unit))
+    }
+
     #[test]
-    fn a_request_while_the_card_is_open_joins_the_unit_and_its_card_lists_it() {
+    fn a_request_while_the_card_is_open_joins_the_unit_and_a_new_card_lists_it() {
         let (_d, s) = store();
         let (a, _) = request(&s, "u", "main", &req("ST-1")).unwrap();
         let d = card(&s, &a.lane_id, 1);
         let (b, w) = request(&s, "u", "main", &req("ST-2")).unwrap();
         assert!(w.is_empty(), "the card is already there");
         assert_eq!(state(&s, &b.id), ("merging".into(), Some(1), None));
-        let d = s.decisions().get(&d.id).unwrap().unwrap();
+        // the card you had loaded is no longer open: no answer to it merges ST-2 unseen
+        let old = s.decisions().get(&d.id).unwrap().unwrap();
+        assert_eq!(old.status, "expired");
+        let d = open_card(&s, &a.lane_id, 1).expect("a new card");
         assert_eq!(d.question, "合并 MQ-1（2 项）");
         assert!(
             d.draft.contains("ST-1") && d.draft.contains("ST-2"),
             "{}",
             d.draft
         );
+        assert_eq!(d.options, vec!["yes".to_string(), "no".to_string()]);
         // answered (its step not run yet): under way, the next one collects
         s.decisions()
             .resolve(
@@ -580,9 +627,35 @@ mod tests {
         assert_eq!(state(&s, &c.id), ("collecting".into(), Some(2), None));
         let d = s.decisions().get(&d.id).unwrap().unwrap();
         assert_eq!(
-            d.question, "合并 MQ-1（2 项）",
-            "an answered card is not rewritten"
+            (d.status.as_str(), d.question.as_str()),
+            ("resolved", "合并 MQ-1（2 项）"),
+            "an answered card is not replaced"
         );
+    }
+
+    #[test]
+    fn a_request_that_joins_before_the_card_is_made_is_listed_on_it() {
+        let (_d, s) = store();
+        let (a, w) = request(&s, "u", "main", &req("ST-1")).unwrap();
+        assert!(matches!(w.as_slice(), [Work::Merge { unit: 1, .. }]));
+        // between the unit starting and its card: ST-2 goes in with it
+        let (b, _) = request(&s, "u", "main", &req("ST-2")).unwrap();
+        assert_eq!(state(&s, &b.id), ("merging".into(), Some(1), None));
+        let listed = ask(&s, &a.lane_id, 1).unwrap();
+        assert_eq!(listed.len(), 2);
+        let d = open_card(&s, &a.lane_id, 1).expect("the card");
+        assert_eq!(d.question, "合并 MQ-1（2 项）");
+        assert!(d.draft.contains("ST-1") && d.draft.contains("ST-2"));
+        // asked again (recovery, a second trigger): the one card stays
+        assert!(ask(&s, &a.lane_id, 1).unwrap().is_empty());
+        let n = s
+            .decisions()
+            .open("default")
+            .unwrap()
+            .iter()
+            .filter(|d| d.subject_type == "delivery_batch")
+            .count();
+        assert_eq!(n, 1);
     }
 
     #[test]

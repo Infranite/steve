@@ -251,6 +251,7 @@ pub fn unit_set(
 }
 
 /// The newest card of `kind` about a batch (`subject`: `lane:<lane>:<unit>`): its status and result.
+/// A card replaced by a newer one ([`batch_card_renew`]) does not count.
 pub fn batch_card(
     c: &Connection,
     subject: &str,
@@ -259,7 +260,9 @@ pub fn batch_card(
     Ok(c
         .query_row(
             "SELECT status, coalesce(result, 'null') FROM decisions
-              WHERE subject_type = 'delivery_batch' AND subject_id = ? AND kind = ? ORDER BY created DESC LIMIT 1",
+              WHERE subject_type = 'delivery_batch' AND subject_id = ? AND kind = ?
+                AND NOT (status = 'expired' AND json_extract(coalesce(result, '{}'), '$.renewed') IS NOT NULL)
+              ORDER BY created DESC, rowid DESC LIMIT 1",
             params![subject, kind],
             |r| {
                 let raw: String = r.get(1)?;
@@ -269,34 +272,45 @@ pub fn batch_card(
         .optional()?)
 }
 
-/// The text of a batch's approval card while it is still open (`subject`: `lane:<lane>:<unit>`): a
-/// request joined the batch before you answered. `false` when no card of it is open.
-pub fn batch_card_text(
+/// A request joined a batch whose approval card is still open (`subject`: `lane:<lane>:<unit>`): that
+/// card is expired (`renewed`) and a new one asks with `question` and `draft`, in the caller's
+/// transaction. A new card, not the old one rewritten: an answer is only ever to a card that listed
+/// exactly what merges, and an answer to the card you loaded before the request joined is refused
+/// (it is no longer open). The new card's id; `None` when no card of it is open.
+pub fn batch_card_renew(
     tx: &crate::Tx<'_>,
     subject: &str,
     question: &str,
     draft: &str,
-) -> Result<bool> {
-    let id: Option<String> = tx
+) -> Result<Option<String>> {
+    let old: Option<(String, String, String)> = tx
         .query_row(
-            "SELECT id FROM decisions WHERE subject_type = 'delivery_batch' AND subject_id = ?
-              AND kind = 'approve' AND status = 'open' ORDER BY created DESC LIMIT 1",
+            "SELECT id, workspace_id, requested_by FROM decisions
+              WHERE subject_type = 'delivery_batch' AND subject_id = ? AND kind = 'approve' AND status = 'open'
+              ORDER BY created DESC, rowid DESC LIMIT 1",
             [subject],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .optional()?;
-    let Some(id) = id else {
-        return Ok(false);
+    let Some((id, ws, by)) = old else {
+        return Ok(None);
     };
-    tx.execute(
-        "UPDATE decisions SET question = ?, draft = ? WHERE id = ?",
-        params![question, draft, id],
+    crate::decision_resolve_in(tx, &id, &serde_json::json!({"renewed": true}), "expired")?;
+    let d = crate::decision_create_in(
+        tx,
+        &crate::NewDecision {
+            workspace_id: ws,
+            kind: "approve".into(),
+            subject_type: "delivery_batch".into(),
+            subject_id: subject.into(),
+            question: question.into(),
+            draft: Some(draft.into()),
+            options: Some(vec!["yes".into(), "no".into()]),
+            requested_by: by,
+            ..Default::default()
+        },
     )?;
-    tx.publish(crate::ChangeEvent::Decision {
-        id,
-        item_id: Some(None),
-    });
-    Ok(true)
+    Ok(Some(d.id))
 }
 
 /// Marks the newest resolved card of a batch (`subject`, `kind`) as acted on: recovery after a

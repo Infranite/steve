@@ -109,6 +109,10 @@ fn an_item_released_through_its_lane_merges_after_one_card_for_the_batch() {
     let sid = k.session(&i, "idle");
     let s = k.db().session(&sid).unwrap().unwrap();
     k.core.tool_publish(&s, branch, "改了 a").unwrap();
+    assert!(
+        k.wait(|| batch_card(&k, "approve").is_some()),
+        "the batch card"
+    );
     // in the lane, straight through: one card for the batch, no per-item release card
     let req = k
         .db()
@@ -189,6 +193,10 @@ fn a_batch_you_turn_down_sends_its_members_back() {
     let s = k.db().session(&sid).unwrap().unwrap();
     let main_before = run(&origin, &["rev-parse", "main"]);
     k.core.tool_publish(&s, branch, "改了 a").unwrap();
+    assert!(
+        k.wait(|| batch_card(&k, "approve").is_some()),
+        "the batch card"
+    );
     let card = k
         .db()
         .decisions_open(WS)
@@ -253,7 +261,15 @@ fn publishing_twice_is_one_request_in_the_lane() {
     let sid = k.session(&i, "idle");
     let s = k.db().session(&sid).unwrap().unwrap();
     k.core.tool_publish(&s, branch, "改了 a").unwrap();
+    assert!(
+        k.wait(|| batch_card(&k, "approve").is_some()),
+        "the batch card"
+    );
     k.core.tool_publish(&s, branch, "改了 a").unwrap();
+    assert!(
+        k.wait(|| batch_card(&k, "approve").is_some()),
+        "the batch card"
+    );
     let all = k
         .db()
         .store()
@@ -306,6 +322,10 @@ fn published(branch: &str) -> (Kit, String, String, PathBuf) {
     let sid = k.session(&i, "idle");
     let s = k.db().session(&sid).unwrap().unwrap();
     k.core.tool_publish(&s, branch, "改了 a").unwrap();
+    assert!(
+        k.wait(|| batch_card(&k, "approve").is_some()),
+        "the batch card"
+    );
     let req = k
         .db()
         .store()
@@ -470,6 +490,15 @@ fn batch_card(k: &Kit, kind: &str) -> Option<crate::repo::Decision> {
         .find(|d| d.subject_type == "delivery_batch" && d.kind == kind)
 }
 
+/// The open approval card of the batch, once it is there (it is made off the lock).
+fn approve_card(k: &Kit) -> crate::repo::Decision {
+    assert!(
+        k.wait(|| batch_card(k, "approve").is_some()),
+        "the batch card"
+    );
+    batch_card(k, "approve").unwrap()
+}
+
 fn has_branch(dir: &Path, b: &str) -> bool {
     git(
         dir,
@@ -509,10 +538,9 @@ fn a_target_that_takes_changes_only_through_a_pr_is_never_pushed_to() {
             url,
         ],
     );
-    let i = publish_item(&k, &clone, &wt, branch, "merge");
     let main_before = run(&origin, &["rev-parse", "main"]);
-    let card = batch_card(&k, "approve").expect("the batch card");
-    k.core.resolve(&card.id, "yes", "", "me").unwrap();
+    let i = publish_item(&k, &clone, &wt, branch, "merge");
+    // refused before any card: you are told on the item, its agent is not sent back
     assert!(
         k.wait(|| k
             .db()
@@ -523,6 +551,31 @@ fn a_target_that_takes_changes_only_through_a_pr_is_never_pushed_to() {
         "{:?}",
         timeline(&k, &i)
     );
+    assert!(
+        k.wait(|| k.open_kinds(&i).contains(&"fail".to_string())),
+        "{:?}",
+        k.open_kinds(&i)
+    );
+    let all = k.db().decisions_of_item(&i).unwrap();
+    let fail = all
+        .iter()
+        .find(|d| d.kind == "fail" && d.status == "open")
+        .unwrap();
+    assert!(fail.question.contains("只能经PR合入"), "{}", fail.question);
+    let batch_cards: steve_store::Result<i64> = k.db().store().reader(|c| {
+        Ok(c.query_row(
+            "SELECT count(*) FROM decisions WHERE subject_type = 'delivery_batch'",
+            [],
+            |r| r.get(0),
+        )?)
+    });
+    assert_eq!(
+        batch_cards.unwrap(),
+        0,
+        "no approval card for a batch that cannot merge"
+    );
+    let item = k.db().item(&i).unwrap().unwrap();
+    assert_ne!(item.status, "run", "not reopened to its agent");
     assert_eq!(
         run(&origin, &["rev-parse", "main"]),
         main_before,
@@ -544,7 +597,7 @@ fn a_unit_that_is_over_leaves_no_worktree_or_batch_branch_behind() {
         .reader(|c| lanes::request_of_item(c, &i))
         .unwrap()
         .unwrap();
-    let card = batch_card(&k, "approve").unwrap();
+    let card = approve_card(&k);
     k.core.resolve(&card.id, "yes", "", "me").unwrap();
     let mq = k
         .home()
@@ -598,7 +651,7 @@ fn a_failed_release_keeps_its_worktree_for_the_retry_and_giving_up_removes_it() 
         .reader(|c| lanes::request_of_item(c, &i))
         .unwrap()
         .expect("in the lane");
-    let card = batch_card(&k, "approve").unwrap();
+    let card = approve_card(&k);
     k.core.resolve(&card.id, "yes", "", "me").unwrap();
     assert!(
         k.wait(|| batch_card(&k, "fail").is_some()),
@@ -626,6 +679,7 @@ fn an_item_arriving_while_the_card_waits_joins_that_batch_and_merges_with_it() {
     let k = Kit::new();
     let (origin, clone, wt) = repos(&k, "steve/st-10");
     let a = publish_item(&k, &clone, &wt, "steve/st-10", "merge");
+    let first = approve_card(&k);
     let wt2 = k.home().join("lane-repos/wt2");
     run(
         &clone,
@@ -668,6 +722,12 @@ fn an_item_arriving_while_the_card_waits_joins_that_batch_and_merges_with_it() {
             .iter()
             .any(|x| x.contains("并入还在等你批准的 MQ-1"))
     );
+    // the card you loaded before b joined did not list it: it takes no answer, nothing merges by it
+    assert!(!first.draft.contains(&b), "{}", first.draft);
+    assert!(k.core.resolve(&first.id, "yes", "", "me").is_err());
+    assert_ne!(open[0].id, first.id, "a new card in its place");
+    let old = k.db().decision(&first.id).unwrap().unwrap();
+    assert_eq!(old.status, "expired");
     k.core.resolve(&open[0].id, "yes", "", "me").unwrap();
     for i in [&a, &b] {
         assert!(

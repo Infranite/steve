@@ -2,10 +2,13 @@
 //! the lane's checks take time), and the outcome recorded back, which may leave more to do.
 //!
 //! - a unit about to merge first asks you once (one card per batch, `approve` / `delivery_batch`); yes
-//!   merges it, no sends its members back; what arrives before you answer joins it and its card;
-//! - merging: the target's host is asked first: a branch that takes changes only through a pull
-//!   request or a merge queue is never pushed to directly (an owner allowed to bypass that would skip
-//!   its reviews and checks); then fetch, integrate on the target's tip ([`super::exec::integrate`]),
+//!   merges it, no sends its members back; what arrives before you answer joins it, and a new card
+//!   listing all of them takes the place of the open one (an answer is always to the list that merges);
+//! - the target's host is asked before the card and again right before the push: a branch that takes
+//!   changes only through a pull request or a merge queue is never pushed to directly (an owner allowed
+//!   to bypass that would skip its reviews and checks). Its members leave the lane and you are told,
+//!   with a card per item: their agents cannot change that rule, so they are not sent back to them;
+//! - merging: fetch, integrate on the target's tip ([`super::exec::integrate`]),
 //!   push fast-forward; a target that moved meanwhile is integrated again (twice at most). The lane
 //!   runs no checks of its own: each member passed its own build when it was delivered, and the
 //!   release tag's CI runs on the result;
@@ -119,7 +122,7 @@ impl Core {
                 match req.state.as_str() {
                     // nothing to start: it went in with a unit whose card waits for you
                     "merging" if work.is_empty() => {
-                        format!("并入还在等你批准的 {unit}，同一张卡")
+                        format!("并入还在等你批准的 {unit}，批准卡换成一起列出它的新卡")
                     }
                     "merging" => format!("现在没有别的合并，直接合并（{unit}）"),
                     "collecting" => format!("和同一目标的其他合并一起成批（{unit}）"),
@@ -189,9 +192,9 @@ impl Core {
         for w in work {
             match w {
                 Work::Merge { lane, unit, .. } => {
-                    if let Err(e) = self.lane_ask(&lane, unit) {
-                        tracing::warn!(lane, unit, "lane: approval card: {e}");
-                    }
+                    // the host's rules are asked first (`gh`, off the lock)
+                    let c = self.clone();
+                    detach(move || c.lane_ask(&lane, unit));
                 }
                 Work::Release {
                     lane,
@@ -217,33 +220,73 @@ impl Core {
             .collect()
     }
 
-    /// The batch's one approval card, listing what the unit holds now (more may join it until you
-    /// answer: [`store`] rewrites it then).
-    fn lane_ask(&self, lane: &str, unit: u64) -> Result<()> {
-        let reqs = self
-            .store()
-            .store()
-            .reader(|c| store::merging(c, lane, unit))?;
-        let ws = reqs
-            .iter()
-            .find_map(|r| r.workspace_id.clone())
-            .unwrap_or_else(|| crate::repo::WS.into());
-        let (question, draft) = store::card_text(unit, &reqs);
-        self.store().decision_create(NewDecision {
-            workspace_id: ws,
-            kind: "approve".into(),
-            subject_type: "delivery_batch".into(),
-            subject_id: subject(lane, unit),
-            question,
-            draft: Some(draft),
-            options: Some(vec!["yes".into(), "no".into()]),
-            requested_by: "steve".into(),
-            ..Default::default()
-        })?;
-        for r in &reqs {
-            self.lane_note(r, &format!("MQ-{unit} 等你批准合并"));
+    /// The batch's one approval card, listing what the unit holds now (what joins it until you answer
+    /// gets a new card listing all of them: [`store`]); none when its target takes no direct push.
+    fn lane_ask(&self, lane: &str, unit: u64) {
+        let s = self.store().store();
+        let Ok(Some(row)) = s.reader(|c| lanes::lane_get(c, lane)) else {
+            return;
+        };
+        if let Some(why) = self.host_refuses(&row) {
+            let reqs = s
+                .reader(|c| store::merging(c, lane, unit))
+                .unwrap_or_default();
+            for r in &reqs {
+                self.lane_refused(lane, unit, r, &why);
+            }
+            return;
         }
-        Ok(())
+        match store::ask(s, lane, unit) {
+            Ok(reqs) => {
+                for r in &reqs {
+                    self.lane_note(r, &format!("MQ-{unit} 等你批准合并"));
+                }
+            }
+            Err(e) => tracing::warn!(lane, unit, "lane: approval card: {e}"),
+        }
+    }
+
+    /// Why the lane's target takes no direct push: its host requires a pull request or its merge
+    /// queue (as found, not assumed). `None`: it may be pushed to.
+    fn host_refuses(&self, row: &lanes::LaneRow) -> Option<String> {
+        let target = Target {
+            upstream: row.upstream.clone(),
+            branch: row.branch.clone(),
+        };
+        let merge = super::profile::merge_of(&target, &self.config().gh);
+        if merge.how != How::Found || merge.value == Merge::Push {
+            return None;
+        }
+        let how = if merge.value == Merge::HostQueue {
+            "托管方的合并队列"
+        } else {
+            "PR"
+        };
+        Some(format!(
+            "目标分支 {} 规定只能经{how}合入，合并通道不直接推送到它。执行者改不了这条规则，所以没有退回给它：可以改用 PR 合并，或在托管方调整分支规则后再试",
+            row.branch
+        ))
+    }
+
+    /// A request leaves its lane for a reason only you can change: you are told with a card on the
+    /// item; its agent is not sent back to work.
+    fn lane_refused(&self, lane: &str, unit: u64, r: &LaneRequest, why: &str) {
+        self.lane_note(r, &format!("退出 MQ-{unit}：{why}"));
+        match store::left(self.store().store(), lane, unit, &r.id, why) {
+            Ok(w) => self.lane_run(w),
+            Err(e) => tracing::warn!(lane, unit, "lane: left: {e}"),
+        }
+        self.lane_sweep(lane);
+        if let Some(i) = &r.item_id
+            && let Err(e) = self.tx().release_failed(
+                i,
+                "合并通道没有合并，等你处理",
+                &format!("合并通道没有合并：{why}"),
+                serde_json::json!({"lane": true}),
+            )
+        {
+            tracing::warn!(item = i, "lane: refused: {e}");
+        }
     }
 
     /// You answered a batch's card: yes merges it, no sends its members back.
@@ -322,29 +365,12 @@ impl Core {
         };
         let wt = self.worktree(lane, unit);
         let branch = format!("steve/merge/{}/MQ-{unit}", row.branch);
-        // a branch whose host takes changes only through a pull request or its merge queue is not
-        // pushed to: with the rights to bypass it, a push would skip the reviews and checks it asks for
-        let target = Target {
-            upstream: row.upstream.clone(),
-            branch: row.branch.clone(),
-        };
-        let merge = super::profile::merge_of(&target, &self.config().gh);
-        if merge.how == How::Found && merge.value != Merge::Push {
-            let how = if merge.value == Merge::HostQueue {
-                "托管方的合并队列"
-            } else {
-                "PR"
-            };
+        // asked again right before the push (the rules may have changed since the card): a branch whose
+        // host takes changes only through a pull request or its merge queue is not pushed to; with the
+        // rights to bypass it, a push would skip the reviews and checks it asks for
+        if let Some(why) = self.host_refuses(&row) {
             for r in &reqs {
-                self.lane_left(
-                    lane,
-                    unit,
-                    r,
-                    &format!(
-                        "目标分支 {} 规定只能经{how}合入，Steve 不直接推送到它；请改为经 PR 合并",
-                        row.branch
-                    ),
-                );
+                self.lane_refused(lane, unit, r, &why);
             }
             return;
         }
@@ -631,12 +657,9 @@ impl Core {
                                 let any = reqs
                                     .iter()
                                     .any(|r| r.unit == Some(u.no) && r.state == "merging");
-                                if any && let Err(e) = self.lane_ask(&l.id, no) {
-                                    tracing::warn!(
-                                        lane = l.id,
-                                        unit = no,
-                                        "lane recover: card: {e}"
-                                    );
+                                if any {
+                                    let (c, lane) = (self.clone(), l.id.clone());
+                                    detach(move || c.lane_ask(&lane, no));
                                 }
                             }
                         }
