@@ -7,11 +7,15 @@
 //! its text and the kinds of its attachments. A copy that has no provider id, or whose other copy
 //! has none, is matched by it within the time precision of the sides that see the space, nearest
 //! first; a connection never matches a message it supplied itself, so two identical messages stay
-//! two. A copy with a provider id upgrades the message to it. Messages stored without one get an
-//! id of the Hub's own (`fp:…`), which never leaves the Hub.
+//! two. When the sender's party has other handles than the one its key was made of (a side that
+//! reported a handle of another system first), a copy without a key match also tries the keys made
+//! of each of them. A copy with a provider id upgrades the message to it. Messages stored without
+//! one get an id of the Hub's own (`fp:…`), which never leaves the Hub.
 //!
-//! Known costs: two identical messages without a delivery id, from one connection within the
-//! precision, are taken for one; an edit's new text is not applied.
+//! Known costs: a redelivery without a delivery id is a new message, as two identical messages
+//! are, since a connection never matches its own copies: an adapter without platform ids gives a
+//! `source_id` or keeps its own cursor so it does not deliver a message twice. An edit's new text
+//! is not applied.
 
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;
@@ -217,16 +221,59 @@ const CANDIDATE: &str = "FROM spaces s JOIN chan_messages m ON m.space_id = s.id
 /// The other copy of the message by content key: within the tolerance (wider for a send whose
 /// provider time is unknown), the nearest in time, then the oldest.
 pub fn by_content(c: &Connection, p: &Probe) -> ChannelResult<Option<Found>> {
+    by_keys(c, p, &[p.key.to_string()])
+}
+
+/// The keys the same message may have been stored under by a side that named its sender by
+/// another handle (one of another system, before the party had one in the side's): one for each
+/// handle of the sender's party, other than the probe's own key.
+pub fn other_keys(
+    c: &Connection,
+    p: &Probe,
+    text: &str,
+    attachments: &[Value],
+) -> ChannelResult<Vec<String>> {
+    let Some(party) = p.party else {
+        return Ok(Vec::new());
+    };
+    let mut st = c.prepare_cached(
+        "SELECT a.system_id, a.handle FROM accounts a WHERE a.workspace_id = ?1 AND a.party_id = ?2
+         UNION
+         SELECT a.system_id, h.handle FROM account_handles h JOIN accounts a ON a.id = h.account_id
+          WHERE a.workspace_id = ?1 AND h.workspace_id = ?1 AND a.party_id = ?2
+         LIMIT 64",
+    )?;
+    let handles = st
+        .query_map(params![p.ws, party], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut keys: Vec<String> = handles
+        .iter()
+        .map(|(s, h)| key_of(s, h.trim(), text, attachments))
+        .filter(|k| k != p.key)
+        .collect();
+    keys.sort();
+    keys.dedup();
+    Ok(keys)
+}
+
+/// [`by_content`] for any of `keys`.
+pub fn by_keys(c: &Connection, p: &Probe, keys: &[String]) -> ChannelResult<Option<Found>> {
+    if keys.is_empty() {
+        return Ok(None);
+    }
+    let keys = serde_json::to_string(keys).unwrap_or_else(|_| "[]".into());
     let slack = p.tol + SEND_SLACK_MS;
     // a message's time: the provider's when known, else the Hub's send time (a draft's row is made
     // long before it goes out)
     let at = "coalesce(m.ext_created, CASE WHEN m.direction = 'out' THEN coalesce(m.sent, m.created) ELSE m.created END)";
     let mut st = c.prepare_cached(&format!(
         "SELECT m.id, m.space_id, m.direction = 'out', {at},
-                m.direction = 'out' AND m.ext_created IS NULL, m.created
+                m.direction = 'out' AND m.ext_created IS NULL, m.created, m.rowid
            {CANDIDATE}
-            AND m.content_key = ?7 AND {at} BETWEEN ?8 - ?9 AND ?8 + ?9
-          ORDER BY m.created DESC, m.id LIMIT 100"
+            AND m.content_key IN (SELECT value FROM json_each(?7)) AND {at} BETWEEN ?8 - ?9 AND ?8 + ?9
+          ORDER BY m.created DESC, m.rowid DESC LIMIT 100"
     ))?;
     let rows = st
         .query_map(
@@ -237,7 +284,7 @@ pub fn by_content(c: &Connection, p: &Probe) -> ChannelResult<Option<Found>> {
                 p.own,
                 p.has_id,
                 p.conn,
-                p.key,
+                keys,
                 p.created,
                 slack
             ],
@@ -250,7 +297,7 @@ pub fn by_content(c: &Connection, p: &Probe) -> ChannelResult<Option<Found>> {
                     },
                     r.get::<_, i64>(3)?,
                     r.get::<_, bool>(4)?,
-                    r.get::<_, i64>(5)?,
+                    (r.get::<_, i64>(5)?, r.get::<_, i64>(6)?),
                 ))
             },
         )?
@@ -261,7 +308,8 @@ pub fn by_content(c: &Connection, p: &Probe) -> ChannelResult<Option<Found>> {
             let d = (t - p.created).abs();
             (d <= if loose { slack } else { p.tol }).then_some((d, created, f))
         })
-        .min_by(|a, b| (a.0, a.1, &a.2.id).cmp(&(b.0, b.1, &b.2.id)))
+        // the oldest: by the time stored, then the order stored in
+        .min_by_key(|(d, created, _)| (*d, *created))
         .map(|(_, _, f)| f))
 }
 
@@ -306,14 +354,28 @@ pub fn by_exact_time(c: &Connection, p: &Probe) -> ChannelResult<Option<Found>> 
 }
 
 /// The Hub's own id for a message without a provider id in `space`:
-/// `fp:v1:{hash}:{created}:{n}`, `n` counting the ones before it with the same key and time.
+/// `fp:v1:{hash}:{created}:{n}`, `n` one past the highest in use with the same key and time (a
+/// message upgraded to a provider id no longer holds its Hub-made one, so counting them could give
+/// one still in use).
 pub fn new_id(c: &Connection, space: &str, key: &str, created: i64) -> ChannelResult<String> {
     let base = format!("{FP}{key}:{created}:");
-    let n: i64 = c.query_row(
-        "SELECT count(*) FROM chan_messages WHERE space_id = ? AND substr(external_id, 1, ?) = ?",
-        params![space, base.len() as i64, base],
+    let mut n: i64 = c.query_row(
+        "SELECT coalesce(max(CAST(substr(external_id, length(?2) + 1) AS INTEGER)) + 1, 0)
+           FROM chan_messages WHERE space_id = ?1 AND substr(external_id, 1, length(?2)) = ?2",
+        params![space, base],
         |r| r.get(0),
     )?;
+    // never one in use, whatever the stored ones look like
+    let taken = |id: &str| -> rusqlite::Result<bool> {
+        c.query_row(
+            "SELECT EXISTS (SELECT 1 FROM chan_messages WHERE space_id = ? AND external_id = ?)",
+            params![space, id],
+            |r| r.get(0),
+        )
+    };
+    while taken(&format!("{base}{n}"))? {
+        n += 1;
+    }
     Ok(format!("{base}{n}"))
 }
 
