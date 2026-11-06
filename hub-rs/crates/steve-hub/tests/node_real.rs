@@ -9,7 +9,11 @@
 //! (`STEVE_ADAPTER_CLAUDE` / `CLAUDE_CODE_EXECUTABLE` from the environment, else the Hub's own
 //! defaults), and `HOME` / `CLAUDE_CONFIG_DIR` are passed through so claude finds its login.
 //! `STEVE_NO_RESUME` is unset: a copy cannot run the Node. `A7_MODEL` / `A7_EFFORT` pick the test
-//! Bot's model and effort (default `haiku`, `low`).
+//! Bot's model and effort (default `claude-haiku-5-5`, `low`): an id as the model picker lists it,
+//! since the Node holds the harness to exactly the id asked (an alias such as `haiku` comes back as
+//! the full id it maps to, and the open is refused). A Hub started from inside a Claude Code session
+//! would hand its session variables (`CLAUDECODE`, `CLAUDE_CODE_SESSION_ID`, …) down to the harness;
+//! they are removed, as under launchd.
 //!
 //! Cases:
 //! 1. a hello turn is stored as steve.v1, with its usage and cost in agent_turns / usage_records;
@@ -22,13 +26,15 @@
 //! 6. a release (the Hub stopped at idle) then a reopen continues the same conversation;
 //! 7. an image attachment arrives through HubFiles;
 //! 8. the Hub killed mid-turn: the attempt is unknown and never re-run; Stop abandons it and the
-//!    next message runs.
+//!    next message runs;
+//! 9. an upgrade drain waits for a Node turn (its Bash card open, then its command running), a
+//!    message sent meanwhile waits, and lifting the drain sends it;
+//! 10. YOLO answers a Node session's cards from the Node's facts: `sleep` in the Node's worktree,
+//!     `kill` of a process the harness started (the request's `own_pids`), and leaves `kill` of
+//!     any other process to the user.
 //!
 //! Three checks of the harness itself run on the scripted agent and are not ignored: the test
 //! project is a Node root from the first turn, case 5's configure path, and a Bot in `auto` mode.
-//!
-//! Cases 9 (a drain waits for the turn) and 10 (YOLO arms from the Node's own_pids) come once
-//! their Hub side lands.
 
 use std::io::Write as _;
 use std::os::unix::process::CommandExt;
@@ -81,7 +87,9 @@ struct Home {
 
 impl Home {
     fn new() -> Home {
-        let dir = tempfile::tempdir().expect("tmp");
+        let mut dir = tempfile::tempdir().expect("tmp");
+        // `A7_KEEP=1`: the home stays for a look after the run (its path is printed)
+        dir.disable_cleanup(std::env::var_os("A7_KEEP").is_some());
         let web = dir.path().join("web");
         std::fs::create_dir_all(&web).expect("web");
         std::fs::write(web.join("index.html"), "<html><head></head></html>").expect("index");
@@ -228,6 +236,8 @@ fn spawn(h: &Home) -> Hub {
         .env_remove("STEVE_NODE")
         .env("STEVE_NODE_MODE", "local")
         .env("STEVE_ADAPTER_CODEX", "/usr/bin/false")
+        // no "you ended without delivering" follow-up turn: each case counts its own turns
+        .env("STEVE_TAKEOVER_CONTINUES", "0")
         .env_remove("STEVE_NODE_TURN_LIMIT_MS")
         .env_remove("STEVE_NO_RESUME")
         .env_remove("STEVE_YOLO")
@@ -247,6 +257,18 @@ fn spawn(h: &Home) -> Hub {
                 .expect("hub log"),
         )
         .process_group(0);
+    // the variables of a Claude Code session this test may run in: a Hub under launchd has none
+    for (k, _) in std::env::vars_os() {
+        let k = k.to_string_lossy();
+        if k == "CLAUDECODE"
+            || k == "CLAUDE_PID"
+            || k == "CLAUDE_EFFORT"
+            || k == "AI_AGENT"
+            || (k.starts_with("CLAUDE_CODE_") && k != "CLAUDE_CODE_EXECUTABLE")
+        {
+            c.env_remove(k.as_ref());
+        }
+    }
     if let Some(log) = &h.fake {
         let fake = concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -259,6 +281,14 @@ fn spawn(h: &Home) -> Hub {
             .env_remove("CLAUDE_CONFIG_DIR");
     }
     Hub(c.spawn().expect("spawn hub"))
+}
+
+/// Now, in ms since the epoch (the clock the Hub stamps rows with).
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_millis() as i64
 }
 
 async fn until<F: std::future::Future<Output = bool>>(secs: u64, mut f: impl FnMut() -> F) -> bool {
@@ -425,7 +455,7 @@ struct Real {
 }
 
 fn model() -> String {
-    std::env::var("A7_MODEL").unwrap_or_else(|_| "haiku".into())
+    std::env::var("A7_MODEL").unwrap_or_else(|_| "claude-haiku-5-5".into())
 }
 
 fn effort() -> String {
@@ -531,12 +561,22 @@ impl Real {
         )
     }
 
-    /// steve.v1 events of `sid` after `since`, not the user's own, that contain `needle`.
+    /// steve.v1 events of `sid` after `since`, not the user's own, that contain `needle`. The
+    /// harness's reply streams as `text` chunks (a token may be cut across two), so their texts
+    /// count as one, joined in order.
     fn said(&self, sid: &str, since: i64, needle: &str) -> i64 {
-        self.h.count(
-            "SELECT COUNT(*) FROM events WHERE session_id=? AND seq>? AND format='steve.v1' AND kind NOT IN ('user','queued') AND instr(data, ?) > 0",
+        let other = self.h.count(
+            "SELECT COUNT(*) FROM events WHERE session_id=? AND seq>? AND format='steve.v1' AND kind NOT IN ('user','queued','text') AND instr(data, ?) > 0",
             &[&sid, &since, &needle],
-        )
+        );
+        let text = self
+            .h
+            .one(
+                "SELECT group_concat(t, '') FROM (SELECT COALESCE(json_extract(data,'$.text'),'') AS t FROM events WHERE session_id=? AND seq>? AND format='steve.v1' AND kind='text' ORDER BY seq)",
+                &[&sid, &since],
+            )
+            .unwrap_or_default();
+        other + i64::from(text.contains(needle))
     }
 
     fn turns(&self, sid: &str) -> i64 {
@@ -615,23 +655,44 @@ impl Real {
 
     /// Waits for `n` finished turns, failing with the log.
     async fn turn_over(&self, sid: &str, n: i64, what: &str) {
+        let since = now_ms();
+        let mut failed = None;
+        let over = wait(TURN, || {
+            failed = self.failed(sid, since);
+            failed.is_some() || self.done(sid, n)
+        })
+        .await;
         assert!(
-            wait(TURN, || self.done(sid, n)).await,
-            "{what}: turn {n} over; log:\n{}",
+            over && failed.is_none(),
+            "{what}: turn {n} over (failed: {failed:?}); log:\n{}",
             hub_log(&self.h)
         );
     }
 
+    /// The session of `sid` broke since `since` (ms): the text of its item's open `fail` card for a
+    /// session error (a refused open, a harness that died). It ends a wait at once rather than
+    /// after [`TURN`]. A turn that ends without a delivery opens a `fail` card too; that one is
+    /// the item's business, not the session's, and does not count.
+    fn failed(&self, sid: &str, since: i64) -> Option<String> {
+        self.h.one(
+            "SELECT d.question FROM decisions d JOIN sessions s ON s.item_id=d.item_id WHERE s.id=? AND d.kind='fail' AND d.status='open' AND d.created>=? AND instr(d.question, '会话出错')=1 ORDER BY d.created LIMIT 1",
+            &[&sid, &since],
+        )
+    }
+
     /// Waits for a permission card of `sid`.
     async fn card(&self, sid: &str, what: &str) -> String {
-        let mut card = None;
+        let since = now_ms();
+        let (mut card, mut failed) = (None, None);
         assert!(
             wait(TURN, || {
                 card = self.open_card(sid);
-                card.is_some()
+                failed = self.failed(sid, since);
+                card.is_some() || failed.is_some()
             })
-            .await,
-            "{what}: a permission card; log:\n{}",
+            .await
+                && failed.is_none(),
+            "{what}: a permission card (failed: {failed:?}); log:\n{}",
             hub_log(&self.h)
         );
         card.expect("card")
@@ -640,7 +701,11 @@ impl Real {
     /// Waits for `n` finished turns, allowing once every card on the way (Steve's own tools may ask).
     async fn allowing_until_over(&self, sid: &str, n: i64, what: &str) {
         let end = tokio::time::Instant::now() + Duration::from_secs(TURN);
+        let since = now_ms();
         while tokio::time::Instant::now() < end {
+            if let Some(f) = self.failed(sid, since) {
+                panic!("{what}: failed: {f}; log:\n{}", hub_log(&self.h));
+            }
             if self.done(sid, n) {
                 return;
             }
@@ -660,18 +725,20 @@ fn transcript_models(cwd: &str) -> Vec<String> {
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(std::env::var("HOME").expect("HOME")).join(".claude"))
         .join("projects");
-    let base = Path::new(cwd)
-        .file_name()
-        .map(|b| {
-            b.to_string_lossy()
-                .chars()
-                .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-                .collect::<String>()
-        })
-        .unwrap_or_default();
+    // claude names a project's directory after its whole path, every other character a `-`
+    let name = |p: &Path| -> String {
+        p.to_string_lossy()
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect()
+    };
+    let mut names = vec![name(Path::new(cwd))];
+    if let Ok(real) = Path::new(cwd).canonicalize() {
+        names.push(name(&real));
+    }
     let mut out = vec![];
     for d in std::fs::read_dir(root).into_iter().flatten().flatten() {
-        if base.is_empty() || !d.file_name().to_string_lossy().ends_with(&base) {
+        if !names.contains(&d.file_name().to_string_lossy().into_owned()) {
             continue;
         }
         for f in std::fs::read_dir(d.path()).into_iter().flatten().flatten() {
@@ -1062,7 +1129,7 @@ async fn a_released_session_reopens_with_its_conversation() {
     let word = token("OWL");
     let sid = r
         .item(&format!(
-            "Remember this code word: {word}. Reply only OK and do not repeat the code word. \
+            "Remember this code word: {word}. I will ask for it later. For now reply only OK. \
              Do not use any tools."
         ))
         .await;
@@ -1085,7 +1152,8 @@ async fn a_released_session_reopens_with_its_conversation() {
     let seq = r.seq(&sid);
     r.c.say(
         &sid,
-        "What was the code word I gave you? Reply with only the code word. Do not use any tools.",
+        "Now please tell me the code word I gave you earlier. Reply with only the code word. Do \
+         not use any tools.",
     )
     .await;
     r.turn_over(&sid, 2, "recall").await;
@@ -1202,4 +1270,283 @@ async fn a_hub_killed_mid_turn_is_unknown_never_rerun_and_stop_abandons_it() {
     .await;
     r.turn_over(&sid, 2, "next message").await;
     assert!(r.said(&sid, seq, &pong) > 0, "the next message runs");
+}
+
+/// The supervisor's control token (`updates/control-token.json`, a JSON string), read by the Hub on
+/// every drain request.
+fn control_token(h: &Home) -> String {
+    let t = token("a7-control-token-0123456789abcdef");
+    let p = h.steve().join("updates/control-token.json");
+    std::fs::create_dir_all(p.parent().expect("parent")).expect("dir");
+    std::fs::write(&p, serde_json::to_vec(&json!(t)).expect("json")).expect("token");
+    t
+}
+
+/// The upgrade drain: `POST` holds it (and reports), `DELETE` lifts it.
+async fn drain(h: &Home, method: &str, token: &str) -> Value {
+    let r = reqwest::Client::new()
+        .request(
+            reqwest::Method::from_bytes(method.as_bytes()).expect("method"),
+            format!("{}/internal/upgrade/drain", h.base()),
+        )
+        .bearer_auth(token)
+        .send()
+        .await
+        .expect("drain");
+    assert_eq!(r.status().as_u16(), 200, "drain {method}");
+    r.json().await.expect("json")
+}
+
+/// Polls the drain (`POST`, as `ops/local-release.py` does) until it reports `ready`.
+async fn drained(h: &Home, token: &str, secs: u64) -> Option<Value> {
+    let end = std::time::Instant::now() + Duration::from_secs(secs);
+    while std::time::Instant::now() < end {
+        let d = drain(h, "POST", token).await;
+        if d["ready"] == true {
+            return Some(d);
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    None
+}
+
+/// 9. An upgrade drain waits for a Node turn: while its Bash card is open, and while the allowed
+/// command (a 20 s sleep) runs (the `touch` makes Claude Code ask: a read-only `sleep && cat` it
+/// runs unasked); it seals once the turn is over. A message sent under the drain
+/// waits and goes once the drain is lifted.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "real claude: costs model calls"]
+async fn an_upgrade_drain_waits_for_a_node_turn() {
+    let r = Real::start().await;
+    let control = control_token(&r.h);
+    let sid = r
+        .item(
+            "Use the Bash tool to run exactly this command: touch a7-mark-9.txt && sleep 20 && cat notes.txt\n\
+             Then reply with its output and nothing else. If the command is refused, reply \
+             REFUSED and use no other tool.",
+        )
+        .await;
+    let card = r.card(&sid, "Bash before the drain").await;
+    let d = drain(&r.h, "POST", &control).await;
+    eprintln!("case 9: drain with the card open {d}");
+    assert_eq!(d["maintenance"], true, "{d}");
+    assert_eq!(
+        (&d["ready"], &d["node"]),
+        (&json!(false), &json!(1)),
+        "a permission wait holds the drain: {d}"
+    );
+    let pong = token("QUEUED");
+    let q =
+        r.c.say(
+            &sid,
+            &format!("Reply with exactly the word {pong} and nothing else. Do not use any tools."),
+        )
+        .await;
+    assert_eq!(q["result"], "queued", "{q}");
+    let answered = std::time::Instant::now();
+    r.c.answer(&card, "allow_once").await;
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    let d = drain(&r.h, "POST", &control).await;
+    eprintln!("case 9: drain 5 s into the command {d}");
+    assert_eq!(
+        (&d["ready"], &d["node"]),
+        (&json!(false), &json!(1)),
+        "a running turn holds the drain: {d}"
+    );
+    let d = drained(&r.h, &control, TURN).await;
+    let held = answered.elapsed();
+    eprintln!("case 9: sealed {held:?} after the answer: {d:?}");
+    let d = d.unwrap_or_else(|| panic!("sealed once the turn is over; log:\n{}", hub_log(&r.h)));
+    assert_eq!(d["node"], 0, "{d}");
+    assert!(
+        held >= Duration::from_secs(20),
+        "not before the command is over"
+    );
+    assert!(r.done(&sid, 1), "the turn is over");
+    assert!(
+        r.said(&sid, 0, &r.h.note) > 0,
+        "the turn finished under the drain with the command's output"
+    );
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(r.turns(&sid), 1, "the queued message waits while sealed");
+
+    let seq = r.seq(&sid);
+    let d = drain(&r.h, "DELETE", &control).await;
+    assert_eq!(d["maintenance"], false, "{d}");
+    r.turn_over(&sid, 2, "after the drain").await;
+    assert!(
+        r.said(&sid, seq, &pong) > 0,
+        "the queued message went once lifted"
+    );
+}
+
+/// YOLO's word on the latest permission card of `sid` created since `since` (ms): (card, status,
+/// outcome, rule, reason, card question).
+fn yolo_word(r: &Real, sid: &str, since: i64) -> Option<[String; 6]> {
+    r.h.db()
+        .query_row(
+            "SELECT d.id, d.status, a.outcome, a.rule, a.reason, d.question FROM decisions d JOIN yolo_actions a ON a.decision_id=d.id WHERE d.session_id=? AND d.subject_type='tool_call' AND d.created>=? AND a.outcome IN ('decided','declined') ORDER BY d.created DESC, a.rowid DESC LIMIT 1",
+            rusqlite::params![sid, since],
+            |x| {
+                Ok([
+                    x.get(0)?,
+                    x.get(1)?,
+                    x.get(2)?,
+                    x.get(3)?,
+                    x.get(4)?,
+                    x.get(5)?,
+                ])
+            },
+        )
+        .ok()
+}
+
+/// The pid of the process whose whole command line is `cmd`, if one runs.
+fn pid_of(cmd: &str) -> Option<u32> {
+    let out = Command::new("pgrep").args(["-fx", cmd]).output().ok()?;
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .find_map(|l| l.trim().parse().ok())
+}
+
+fn alive(pid: u32) -> bool {
+    unsafe { libc::kill(pid as i32, 0) == 0 }
+}
+
+/// 10. YOLO on a Node session judges from the Node's facts. With YOLO on (the user's presence
+/// window and YOLO's own "continue a stalled agent" off, which no API sets: written to the test's
+/// own database, so each case turn is one turn), a background `sleep` in the Node's worktree runs
+/// (Claude Code may not even ask for it); `kill` of that sleep, which the Node reports among the
+/// harness's `own_pids`, is answered by YOLO and the process ends; `kill` of a process the test
+/// started (not the harness's) is left to the user, who rejects it. The model may refuse that last
+/// one by itself (Steve's prompt says to stop only its own processes): then no card is asked and
+/// the process must simply live.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "real claude: costs model calls"]
+async fn yolo_answers_a_node_session_from_the_nodes_facts() {
+    let r = Real::start().await;
+    {
+        let db = rusqlite::Connection::open(r.h.steve().join("data/steve.sqlite3")).expect("db");
+        db.busy_timeout(Duration::from_secs(5)).expect("timeout");
+        db.execute(
+            "INSERT INTO settings (workspace_id, key, value, updated) VALUES ('default', 'yolo.policy', ?, ?) ON CONFLICT(workspace_id, key) DO UPDATE SET value=excluded.value",
+            rusqlite::params![
+                json!({"presence_s": 0, "continue_stalls": false}).to_string(),
+                now_ms()
+            ],
+        )
+        .expect("policy");
+    }
+    r.yolo_on().await;
+    let secs = 86_400 + (now_ms() % 10_000);
+    let bg = format!("sleep {secs}");
+    let since = now_ms();
+    let sid = r
+        .item(&format!(
+            "Use the Bash tool with run_in_background set to true to start exactly this command: \
+             {bg}\nDo not wait for it and do not check on it. Then reply STARTED and nothing else. \
+             If the command is refused, reply REFUSED. Use no other tool."
+        ))
+        .await;
+    r.turn_over(&sid, 1, "background sleep").await;
+    let first = yolo_word(&r, &sid, since);
+    eprintln!("case 10: the sleep's card {first:?}");
+    if let Some(w) = &first {
+        assert_eq!(
+            (w[1].as_str(), w[2].as_str()),
+            ("resolved", "decided"),
+            "YOLO answered the sleep: {w:?}"
+        );
+    }
+    let mut own = None;
+    assert!(
+        wait(30, || {
+            own = pid_of(&bg);
+            own.is_some()
+        })
+        .await,
+        "the harness started `{bg}`; log:\n{}",
+        hub_log(&r.h)
+    );
+    let own = own.expect("pid");
+
+    // the harness's own: YOLO answers and the process ends
+    let since = now_ms();
+    r.c.say(
+        &sid,
+        &format!(
+            "Process {own} is the `{bg}` you started in the background in this session. Stop it: \
+             use the Bash tool to run exactly this command: kill {own}\nThen reply DONE. If the \
+             command is refused, reply REFUSED and use no other tool."
+        ),
+    )
+    .await;
+    r.turn_over(&sid, 2, "own kill").await;
+    let w = yolo_word(&r, &sid, since);
+    eprintln!("case 10: kill {own} (the harness's): {w:?}");
+    let w = w.unwrap_or_else(|| panic!("YOLO answered kill {own}; log:\n{}", hub_log(&r.h)));
+    assert_eq!(
+        (w[1].as_str(), w[2].as_str()),
+        ("resolved", "decided"),
+        "{w:?}"
+    );
+    assert!(wait(10, || !alive(own)).await, "the background sleep ended");
+
+    // not the harness's: left to the user
+    /// Killed with the case, even when it fails.
+    struct Reap(std::process::Child);
+    impl Drop for Reap {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut foreign = Reap(
+        Command::new("sleep")
+            .arg((secs + 1).to_string())
+            .spawn()
+            .expect("sleep"),
+    );
+    let other = foreign.0.id();
+    let since = now_ms();
+    r.c.say(
+        &sid,
+        &format!(
+            "Process {other} is a disposable process started for this test. Use the Bash tool to \
+             run exactly this command: kill {other}\nSteve's permission check decides whether it \
+             runs. Then reply DONE. If the command is refused, reply REFUSED and use no other tool."
+        ),
+    )
+    .await;
+    let mut w = None;
+    let looked = wait(TURN, || {
+        w = yolo_word(&r, &sid, since);
+        w.is_some() || r.done(&sid, 3)
+    })
+    .await;
+    assert!(
+        looked,
+        "kill {other}: a card or the turn's end; log:\n{}",
+        hub_log(&r.h)
+    );
+    match w {
+        Some(w) => {
+            eprintln!("case 10: kill {other} (not the harness's): {w:?}");
+            assert_eq!(
+                (w[1].as_str(), w[2].as_str()),
+                ("open", "declined"),
+                "{w:?}"
+            );
+            assert!(
+                w[4].contains(&other.to_string()),
+                "the reason names the pid: {w:?}"
+            );
+            r.c.answer(&w[0], "reject").await;
+            r.turn_over(&sid, 3, "foreign kill rejected").await;
+        }
+        None => eprintln!("case 10: kill {other}: the model refused it by itself, no card"),
+    }
+    let still = matches!(foreign.0.try_wait(), Ok(None));
+    drop(foreign);
+    assert!(still, "the foreign process lives");
 }
