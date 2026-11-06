@@ -714,6 +714,12 @@ cmd = sys.argv[1]
 if cmd == "build":
     commit, version = sys.argv[2], sys.argv[4]
     d = HOME / "releases" / f"{version}-local-{commit[:7]}"
+    if (HOME / "fake-build-raced").exists():
+        # another local-release.py took the lock first and is building this directory: refused untouched
+        (d / "bin").mkdir(parents=True)
+        print("12:00:00 ✗ another release is running", flush=True)
+        sys.exit(1)
+    print(f"12:00:00 build {version} from {commit} into {d}", flush=True)
     (d / "bin").mkdir(parents=True)
     (d / "web/dist").mkdir(parents=True)
     (d / "bin/steve-hub").write_text("")
@@ -837,6 +843,17 @@ fn the_runner_builds_the_tagged_commit_with_its_own_scripts_and_reports_each_res
     assert!(done.error.unwrap().contains("没有改动"));
     assert!(!candidate.exists());
 
+    // a build another process started after the runner's check is not this run's to remove
+    fs::remove_file(home.path().join("fake-build-fails")).unwrap();
+    fs::write(home.path().join("fake-build-raced"), "").unwrap();
+    let raced = runner_op(&u, "build-raced", &commit, &python);
+    let (code, done) = finish(&raced);
+    assert_eq!((code, done.phase.as_str()), (1, "failed"));
+    assert!(
+        candidate.join("bin").is_dir(),
+        "the other build's directory is left alone"
+    );
+
     // a runner started for an operation that is no longer staging does nothing
     let (code, again) = finish(&op);
     assert_eq!((code, again.phase.as_str()), (0, "failed"));
@@ -944,4 +961,41 @@ async fn a_rate_limited_api_falls_back_to_the_github_release_redirect() {
         "{c:?}"
     );
     server.abort();
+}
+
+/// A fake interpreter: exits `code` for anything, the data_filter probe included.
+#[cfg(unix)]
+fn fake_python(dir: &Path, name: &str, code: i32) {
+    use std::os::unix::fs::PermissionsExt;
+    let p = dir.join(name);
+    fs::write(&p, format!("#!/bin/sh\nexit {code}\n")).unwrap();
+    fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn a_python3_without_data_filter_is_not_offered_for_a_local_upgrade() {
+    let old = tempfile::tempdir().unwrap();
+    let brew = tempfile::tempdir().unwrap();
+    // macOS's /usr/bin/python3 (3.9): on PATH, but local-release.py can't run on it
+    fake_python(old.path(), "python3", 1);
+    let path = Some(old.path().as_os_str().to_owned());
+    assert_eq!(runner::find_python(None, path.clone(), &[]), None);
+    // nor through STEVE_PYTHON
+    assert_eq!(
+        runner::find_python(Some(old.path().join("python3")), path.clone(), &[]),
+        None
+    );
+    // Homebrew's python3.13 with no python3 link, outside the PATH: found and preferred
+    fake_python(brew.path(), "python3.13", 0);
+    assert_eq!(
+        runner::find_python(None, path.clone(), &[brew.path().into()]),
+        Some(brew.path().join("python3.13"))
+    );
+    // a versioned python on PATH comes before a bare python3 there
+    fake_python(old.path(), "python3.12", 0);
+    assert_eq!(
+        runner::find_python(None, path, &[]),
+        Some(old.path().join("python3.12"))
+    );
 }

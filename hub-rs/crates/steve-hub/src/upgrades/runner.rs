@@ -73,6 +73,57 @@ struct Tools {
     cargo: PathBuf,
 }
 
+/// Whether `python` has what local-release.py needs: `tarfile.data_filter` (Python 3.12+). The answer is
+/// remembered per path and modification time, since the update page asks on every load.
+fn python_ok(python: &Path) -> bool {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    type Probed = (Option<std::time::SystemTime>, bool);
+    static SEEN: OnceLock<Mutex<HashMap<PathBuf, Probed>>> = OnceLock::new();
+    let stamp = fs::metadata(python).and_then(|m| m.modified()).ok();
+    let seen = SEEN.get_or_init(Default::default);
+    if let Some((at, ok)) = seen.lock().unwrap_or_else(|e| e.into_inner()).get(python)
+        && *at == stamp
+    {
+        return *ok;
+    }
+    let ok = Command::new(python)
+        .args(["-I", "-c", "import tarfile; tarfile.data_filter"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success());
+    seen.lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(python.to_owned(), (stamp, ok));
+    ok
+}
+
+/// The first python new enough for local-release.py: `STEVE_PYTHON`, then python3.13, python3.12 and
+/// python3 on `path`, then the same names in `extra` (Homebrew's bin, which launchd's PATH may lack and
+/// which has no `python3` link when only a versioned formula is installed). A bare `python3` is often
+/// macOS's 3.9, which can't run it.
+pub(super) fn find_python(
+    steve_python: Option<PathBuf>,
+    path: Option<std::ffi::OsString>,
+    extra: &[PathBuf],
+) -> Option<PathBuf> {
+    let dirs: Vec<PathBuf> = path
+        .map(|p| std::env::split_paths(&p).collect())
+        .unwrap_or_default();
+    let names = ["python3.13", "python3.12", "python3"];
+    steve_python
+        .into_iter()
+        .chain(
+            dirs.iter()
+                .chain(extra)
+                .flat_map(|d| names.iter().map(move |n| d.join(n))),
+        )
+        .filter(|p| p.is_file())
+        .find(|p| python_ok(p))
+}
+
 /// The tools a local build needs, found the way the runner's environment will find them; the names of
 /// those missing otherwise.
 fn tools(u: &Updates) -> std::result::Result<Tools, Vec<String>> {
@@ -96,13 +147,20 @@ fn tools(u: &Updates) -> std::result::Result<Tools, Vec<String>> {
                 .map(|h| PathBuf::from(h).join(".cargo/bin/cargo"))
                 .filter(|p| p.is_file())
         });
-    let python = env_file("STEVE_PYTHON").or_else(|| on_path("python3"));
+    let python = find_python(
+        env_file("STEVE_PYTHON"),
+        std::env::var_os("PATH"),
+        &[
+            PathBuf::from("/opt/homebrew/bin"),
+            PathBuf::from("/usr/local/bin"),
+        ],
+    );
     let mut missing = vec![];
     if cargo.is_none() {
         missing.push("cargo (STEVE_CARGO)".to_owned());
     }
     if python.is_none() {
-        missing.push("python3 (STEVE_PYTHON)".to_owned());
+        missing.push("python3 ≥3.12 (STEVE_PYTHON)".to_owned());
     }
     for tool in ["git", "npm"] {
         if on_path(tool).is_none() {
@@ -501,14 +559,8 @@ fn run(u: &Updates, op: &mut Operation, ops: &Path) -> Result<()> {
         op.id
     ));
 
-    // a python whose tarfile has the safe extraction filter local-release.py uses
-    let python_ok = Command::new(&spec.python)
-        .args(["-I", "-c", "import tarfile; tarfile.data_filter"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success());
-    if !python_ok {
+    // a python whose tarfile has the safe extraction filter local-release.py uses (prepare checked it too)
+    if !python_ok(Path::new(&spec.python)) {
         bail!(
             "{}",
             steve_i18n::t!(
@@ -617,7 +669,7 @@ fn run(u: &Updates, op: &mut Operation, ops: &Path) -> Result<()> {
             candidate.display(),
             spec.cargo
         ));
-        let status = Command::new(&spec.python)
+        let mut child = Command::new(&spec.python)
             .arg("-I")
             .arg(&script)
             .args([
@@ -629,10 +681,31 @@ fn run(u: &Updates, op: &mut Operation, ops: &Path) -> Result<()> {
                 &spec.repo,
             ])
             .stdin(Stdio::null())
-            .status()?;
+            .stdout(Stdio::piped())
+            .spawn()?;
+        // local-release.py prints this line once it holds releases/.release.lock and has found no
+        // candidate, just before it makes the directory: only then is the directory this run's
+        let started = format!(
+            " build {version} from {commit} into {}",
+            candidate.display()
+        );
+        let mut ours = false;
+        if let Some(out) = child.stdout.take() {
+            use std::io::{BufRead, Write};
+            for line in std::io::BufReader::new(out).lines() {
+                let Ok(line) = line else { break };
+                ours |= line.ends_with(&started);
+                println!("{line}");
+                let _ = std::io::stdout().flush();
+            }
+        }
+        let status = child.wait()?;
         if !status.success() || !built(&candidate) {
-            // this run made it: a half-built directory would only block the next attempt
-            let _ = fs::remove_dir_all(&candidate);
+            // a half-built directory of this run would only block the next attempt; one another build
+            // made (it took the lock between the check above and this build) is left alone
+            if ours {
+                let _ = fs::remove_dir_all(&candidate);
+            }
             bail!(
                 "{}",
                 steve_i18n::t!(
