@@ -13,8 +13,10 @@ in the order they arrived on the branch into `docs/releases/X.Y.Z.md`, removes t
 `vX.Y.Z` and pushes the commit and the tag together (`--atomic`): both land or neither does. When
 someone else pushed or released first, it starts again from the new state, a few times at most.
 
-Only a tested commit is tagged: `cut` first asks GitHub (`gh`) for the CI workflow's run (`.github/workflows/
-ci.yml`) on the branch head it is about to release. It waits while that run is queued or running (up to
+Only a tested commit is tagged: `cut` first asks GitHub (`gh`: $STEVE_GH, else on PATH, else in /opt/homebrew/bin,
+/usr/local/bin or /usr/bin, as the Hub finds it) for the CI workflow's run (`.github/workflows/
+ci.yml`) pushed to the branch at the head it is about to release (a pull request's run of the same commit
+does not count: it tests Linux only). It waits while that run is queued or running (up to
 `--ci-wait` seconds, default 45 minutes), and refuses when it failed or there is none, naming the run and how to
 run its failed jobs again (`gh run rerun <id> --failed`) when it was only a flake. `--skip-ci` releases without
 that check, on purpose (it says so). `--dry-run` does not ask.
@@ -31,6 +33,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -47,6 +50,9 @@ CI_WORKFLOW = "ci.yml"
 CI_WAIT = 45 * 60
 CI_POLL = 30
 CI_APPEAR = 180  # a push's run shows up within seconds; one that never does is no run
+# where gh is when PATH is launchd's bare one (the Hub's merge lane runs `cut` with its environment); the same
+# places the Hub looks (steve-core config.rs gh_cli())
+GH_PLACES = ("/opt/homebrew/bin/gh", "/usr/local/bin/gh", "/usr/bin/gh")
 
 
 class Refused(Exception):
@@ -98,13 +104,24 @@ def default_branch(repo):
     raise Refused("origin has no default branch (origin/HEAD, main, master)")
 
 
+def gh_path():
+    """$STEVE_GH, else `gh` on PATH, else the usual install places; None when there is none."""
+    if g := os.environ.get("STEVE_GH"):
+        return g
+    return shutil.which("gh") or next((p for p in GH_PLACES if os.access(p, os.X_OK)), None)
+
+
 def gh(*args, cwd):
     """`gh` in the repository: `{owner}/{repo}` is its GitHub remote (or GH_REPO)."""
+    exe = gh_path()
+    if exe is None:
+        raise Refused(f"can't check CI: no `gh` on PATH, in {', '.join(GH_PLACES)} or $STEVE_GH "
+                      f"(install and log in, or --skip-ci to release untested)")
     try:
-        r = subprocess.run(["gh", *args], cwd=str(cwd), capture_output=True, text=True, timeout=NET_TIMEOUT,
+        r = subprocess.run([exe, *args], cwd=str(cwd), capture_output=True, text=True, timeout=NET_TIMEOUT,
                            env=dict(os.environ, GH_PROMPT_DISABLED="1", NO_COLOR="1"))
     except FileNotFoundError:
-        raise Refused("can't check CI: no `gh` on PATH (install and log in, or --skip-ci to release untested)")
+        raise Refused(f"can't check CI: no `gh` at {exe} (install and log in, or --skip-ci to release untested)")
     except subprocess.TimeoutExpired:
         raise Refused(f"gh {args[0]} timed out after {NET_TIMEOUT}s")
     if r.returncode != 0:
@@ -112,15 +129,17 @@ def gh(*args, cwd):
     return r.stdout
 
 
-def ci_run(repo, sha):
-    """The newest run of the CI workflow on `sha`, or None."""
-    out = gh("api", f"repos/{{owner}}/{{repo}}/actions/workflows/{CI_WORKFLOW}/runs?head_sha={sha}&per_page=20",
-             cwd=repo)
+def ci_run(repo, sha, branch):
+    """The newest run of the CI workflow pushed to `branch` at `sha`, or None. Only a push run: a pull
+    request's run of the same commit tests Linux alone."""
+    out = gh("api", f"repos/{{owner}}/{{repo}}/actions/workflows/{CI_WORKFLOW}/runs"
+             f"?head_sha={sha}&event=push&branch={branch}&per_page=20", cwd=repo)
     try:
         runs = json.loads(out).get("workflow_runs") or []
     except (ValueError, AttributeError):
         raise Refused(f"can't read CI from GitHub: unexpected answer {out.strip()[:200]!r}")
-    runs = [r for r in runs if r.get("head_sha") == sha]
+    runs = [r for r in runs if r.get("head_sha") == sha and r.get("event") == "push"
+            and r.get("head_branch") in (None, branch)]
     return max(runs, key=lambda r: (r.get("run_number") or 0, r.get("id") or 0), default=None)
 
 
@@ -129,18 +148,18 @@ def rerun_hint(run):
             f"(then cut again once it passes); otherwise fix it on main.")
 
 
-def ci_gate(repo, sha, wait):
+def ci_gate(repo, sha, branch, wait):
     """Return once the CI workflow passed on `sha`; refuse when it failed, is missing, or still runs after
     `wait` seconds."""
     short = sha[:7]
     start = time.monotonic()
     said = None
     while True:
-        run = ci_run(repo, sha)
+        run = ci_run(repo, sha, branch)
         waited = time.monotonic() - start
         if run is None:
             if waited >= min(wait, CI_APPEAR):
-                raise Refused(f"CI ({CI_WORKFLOW}) has no run on {short}: only a tested commit is released "
+                raise Refused(f"CI ({CI_WORKFLOW}) has no push run on {short}: only a tested commit is released "
                               f"(push it to the branch and wait for CI, or --skip-ci to release untested)")
             state = "no run yet"
         elif run.get("status") == "completed":
@@ -219,7 +238,7 @@ def cut_once(repo, branch, version_arg, minor, dry, ci_wait=CI_WAIT):
                 print(text, end="")
                 return version
             if ci_wait is not None:
-                ci_gate(repo, head, ci_wait)
+                ci_gate(repo, head, branch, ci_wait)
             for p, _ in parts:
                 if p != f"{NOTES}/{version}.md":
                     git("rm", "--quiet", "--", p, cwd=wt)

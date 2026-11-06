@@ -10,25 +10,30 @@ import tempfile
 from pathlib import Path
 
 CUT = Path(__file__).resolve().parent / "cut-release.py"
-ENV = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@example.com",
+ENV = dict({k: v for k, v in os.environ.items() if k != "STEVE_GH"}, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@example.com",
            GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@example.com")
 
 # GitHub's answer for the CI workflow's runs on a commit, from $FAKE_GH_CI: {"conclusion": ..., "status": ...}
-# for every commit, or {"none": true}; each call is logged to $FAKE_GH_LOG.
+# for the push run of every commit, or {"none": true} (only a pull request's run); each call is logged to
+# $FAKE_GH_LOG.
 FAKE_GH = r"""#!/usr/bin/env python3
 import json, os, re, sys
 open(os.environ["FAKE_GH_LOG"], "a").write(" ".join(sys.argv[1:]) + "\n")
 ci = json.load(open(os.environ["FAKE_GH_CI"]))
-m = re.search(r"workflows/ci\.yml/runs\?head_sha=([0-9a-f]{40})", " ".join(sys.argv[1:]))
+m = re.search(r"workflows/ci\.yml/runs\?head_sha=([0-9a-f]{40})&event=push&branch=main&", " ".join(sys.argv[1:]))
 if sys.argv[1:2] != ["api"] or not m:
     sys.exit("fake gh: unexpected " + " ".join(sys.argv[1:]))
 if ci.get("down"):
     sys.exit("HTTP 502")
-runs = [] if ci.get("none") else [
-    {"id": 7, "run_number": 1, "head_sha": m.group(1), "status": "completed", "conclusion": "failure",
-     "html_url": "https://github.example/runs/7"},
-    {"id": 42, "run_number": 2, "head_sha": m.group(1), "status": ci.get("status", "completed"),
-     "conclusion": ci.get("conclusion"), "html_url": "https://github.example/runs/42"}]
+# a green pull-request run of the same commit (Linux only) is always there, and newer: it never counts
+pr = {"id": 99, "run_number": 3, "head_sha": m.group(1), "event": "pull_request", "head_branch": "feature",
+      "status": "completed", "conclusion": "success", "html_url": "https://github.example/runs/99"}
+runs = [pr] if ci.get("none") else [
+    {"id": 7, "run_number": 1, "head_sha": m.group(1), "event": "push", "head_branch": "main",
+     "status": "completed", "conclusion": "failure", "html_url": "https://github.example/runs/7"},
+    {"id": 42, "run_number": 2, "head_sha": m.group(1), "event": "push", "head_branch": "main",
+     "status": ci.get("status", "completed"), "conclusion": ci.get("conclusion"),
+     "html_url": "https://github.example/runs/42"}, pr]
 print(json.dumps({"total_count": len(runs), "workflow_runs": runs}))
 """
 
@@ -131,18 +136,27 @@ def main():
         assert r.returncode == 1 and "still in_progress" in r.stderr and "runs/42" in r.stderr, r
         set_ci(none=True)
         r = cut(a, "cut", "--ci-wait", "0")
-        assert r.returncode == 1 and "has no run on" in r.stderr, r
+        assert r.returncode == 1 and "has no push run on" in r.stderr, r
+        assert git(origin, "tag", "-l", "v0.2.25") == ""
         set_ci(down=True)
         r = cut(a, "cut", "--ci-wait", "0")
         assert r.returncode == 1 and "can't read CI" in r.stderr, r
         assert git(origin, "tag", "-l", "v0.2.25") == ""
-        ok("CI still running, no run, or GitHub unreadable: no release")
+        ok("CI still running, no push run (a green pull-request run does not count), or GitHub unreadable: no release")
 
         only_git = Path(tmp, "only-git")
         only_git.mkdir()
         (only_git / "git").symlink_to(shutil.which("git"))
         no_gh = dict(ENV, PATH=f"{only_git}{os.pathsep}/usr/bin{os.pathsep}/bin")
-        if not any(Path(d, "gh").exists() for d in ("/usr/bin", "/bin")):
+        fake = str(Path(tmp, "bin", "gh"))
+        # launchd's PATH has no gh: $STEVE_GH (what the Hub uses) still finds it
+        set_ci(conclusion="failure")
+        r = subprocess.run([sys.executable, str(CUT), "--repo", str(a), "cut", "--ci-wait", "0"], capture_output=True,
+                           text=True, env=dict(no_gh, STEVE_GH=fake))
+        assert r.returncode == 1 and f"failure on {head[:7]}" in r.stderr, r
+        ok("no gh on PATH: $STEVE_GH is used")
+        places = ("/opt/homebrew/bin/gh", "/usr/local/bin/gh", "/usr/bin/gh", "/bin/gh")
+        if not any(Path(p).exists() for p in places):
             r = subprocess.run([sys.executable, str(CUT), "--repo", str(a), "cut"], capture_output=True, text=True,
                                env=no_gh)
             assert r.returncode == 1 and "no `gh` on PATH" in r.stderr and "--skip-ci" in r.stderr, r
@@ -255,7 +269,7 @@ def main():
         git(b, "push", "-q", "origin", "main")
         real_run, seen = m.ci_run, []
 
-        def finishes(repo, sha):
+        def finishes(repo, sha, branch):
             seen.append(sha)
             states = [None, {"id": 9, "status": "queued"}, {"id": 9, "status": "in_progress"},
                       {"id": 9, "status": "completed", "conclusion": "success"}]
@@ -265,7 +279,7 @@ def main():
         assert len(seen) == 4 and set(seen) == {git(origin, "rev-parse", "v0.2.31^{commit}^")}, seen
         seen.clear()
 
-        def never(repo, sha):
+        def never(repo, sha, branch):
             seen.append(sha)
             return {"id": 9, "status": "in_progress", "html_url": "https://github.example/runs/9"}
         m.ci_run = never
@@ -280,6 +294,18 @@ def main():
         assert git(origin, "tag", "-l", "v0.2.32") == ""
         m.ci_run, m.CI_POLL = real_run, 30
         ok("CI queued or running on the head: cut waits for it, and gives up after --ci-wait")
+
+        # launchd's PATH and no $STEVE_GH: gh in its usual install place (Homebrew's) is found
+        saved = os.environ.get("PATH"), m.GH_PLACES
+        os.environ["PATH"] = str(only_git)
+        m.GH_PLACES = (str(Path(tmp, "nowhere", "gh")), str(Path(tmp, "bin", "gh")))
+        try:
+            assert m.gh_path() == str(Path(tmp, "bin", "gh")), m.gh_path()
+            m.GH_PLACES = (str(Path(tmp, "nowhere", "gh")),)
+            assert m.gh_path() is None
+        finally:
+            os.environ["PATH"], m.GH_PLACES = saved
+        ok("no gh on PATH nor $STEVE_GH: the usual install places are looked in")
 
         commit(b, {"docs/releases/unreleased/ST-8.md": "- Eighth.\n"}, "eight")
         subprocess.run(["git", "-C", str(b), "pull", "-q", "--rebase", "origin", "main"], check=True, env=ENV)

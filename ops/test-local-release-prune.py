@@ -3,6 +3,7 @@
 healthy deploy, and which never do. Nothing is built, deployed or started."""
 import fcntl
 import importlib.util
+import json
 import os
 import pathlib
 import subprocess
@@ -142,6 +143,39 @@ class Prune(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual(self.names(self.releases),
                          [".release.lock", "0.4.2-local-0000002", "0.4.3-local-0000003", "0.4.4-local-0000004"])
+
+    def test_prune_command_keeps_the_previous_release_of_the_last_healthy_deploy(self):
+        # the first local deploy came over an ops/release.sh dir (ranked below any local build), then 3 builds
+        # were made and not deployed: the rollback target is outside the newest 3
+        self.release("20261103-002107-c2ee544c", "0.5.0-local-0000000", "0.5.1-local-0000001",
+                     "0.5.2-local-0000002", "0.5.3-local-0000003")
+        (self.home / "current").symlink_to(self.releases / "0.5.0-local-0000000")
+        logs = self.home / "logs/release"
+        logs.mkdir(parents=True)
+        (logs / "local-0.4.9-20261101-100000.json").write_text(json.dumps(
+            dict(ok=True, previous=str(self.releases / "0.4.8-local-gone000"), finished="20261101-100500")))
+        (logs / "local-0.5.0-20261104-100000.json").write_text(json.dumps(
+            dict(ok=True, previous=str(self.releases / "20261103-002107-c2ee544c"), finished="20261104-100500")))
+        (logs / "local-0.5.1-20261105-100000.json").write_text(json.dumps(
+            dict(ok=False, previous=str(self.releases / "0.5.0-local-0000000"))))
+        r = self.run_script("prune")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.names(self.releases), [
+            ".release.lock", "0.5.0-local-0000000", "0.5.1-local-0000001", "0.5.2-local-0000002", "0.5.3-local-0000003",
+            "20261103-002107-c2ee544c"])
+
+    def test_prune_command_without_local_deploys_keeps_release_sh_previous(self):
+        self.release("20261101-020547-1d16430c", "20261102-020547-2d16430c", "20261103-002107-c2ee544c",
+                     *[f"0.6.{n}-local-{n:07x}" for n in range(3)])
+        (self.home / "current").symlink_to(self.releases / "20261103-002107-c2ee544c")
+        (self.releases / "history.jsonl").write_text("\n".join(json.dumps(h) for h in [
+            dict(kind="hub", ok=True, prev="20261101-020547-1d16430c"),
+            dict(kind="web", ok=True, prev="x"),
+            dict(kind="hub", ok=False, prev="20261102-020547-2d16430c")]) + "\n")
+        self.assertEqual(self.m.last_previous(), self.releases / "20261101-020547-1d16430c")
+        r = self.run_script("prune")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(r.stdout.strip(), f"removed {self.releases / '20261102-020547-2d16430c'}")
 
 
 if __name__ == "__main__":

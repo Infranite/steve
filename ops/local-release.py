@@ -25,7 +25,9 @@ deploy, in order; any failure before the switch leaves the running version as it
 
 After a healthy deploy (and with `prune`), old copies go: of the pre-release backups this script takes
 (backups/pre-<version>-local-<sha7>-<stamp>.sqlite3, with their -shm/-wal) the newest 8 stay; of the release dirs
-(<version>-local-<sha7>, and ops/release.sh's <stamp>-<sha>) `current`, the previous one and the newest 3 stay.
+(<version>-local-<sha7>, and ops/release.sh's <stamp>-<sha>) `current`, the previous one and the newest 3 stay. The
+previous one is what the last healthy deploy replaced: from its result in logs/release/, else from ops/release.sh's
+releases/history.jsonl.
 Nothing else in backups/ is touched (pre-rust, pre-purge, pre-takeover, daily copies, failed-probe-*). A deploy that
 did not end healthy removes nothing. The one-click upgrade (hub-rs upgrades/runner.rs) runs this deploy, so it
 prunes the same way.
@@ -611,6 +613,35 @@ def prune(keep=(), dry=False):
     return removed
 
 
+def last_previous():
+    """The release dir the last healthy deploy replaced (its rollback target): from the newest successful
+    logs/release/local-*.json, else (a machine that only ever used ops/release.sh) the last healthy hub line of
+    releases/history.jsonl. None when neither says."""
+    results = []
+    for f in (HOME / "logs/release").glob("local-*.json"):
+        try:
+            r = json.loads(f.read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(r, dict) and r.get("ok") is True and r.get("previous"):
+            results.append((str(r.get("finished") or r.get("started") or ""), f.name, r["previous"]))
+    if results:
+        return pathlib.Path(max(results)[2])
+    prev = None
+    try:
+        lines = (HOME / "releases/history.jsonl").read_text().splitlines()
+    except OSError:
+        lines = []
+    for line in lines:
+        try:
+            h = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(h, dict) and h.get("kind") == "hub" and h.get("ok") is True and h.get("prev"):
+            prev = HOME / "releases" / pathlib.Path(h["prev"]).name
+    return prev
+
+
 def prune_after(previous, save):
     """prune() once a deploy is healthy: a failure here is logged, never the deploy's result."""
     try:
@@ -645,7 +676,8 @@ def main():
         lock = release_lock()
         try:
             if args.cmd == "prune":
-                for p in prune(dry=args.dry_run):
+                prev = last_previous()
+                for p in prune(keep=[prev] if prev else [], dry=args.dry_run):
                     print(("would remove " if args.dry_run else "removed ") + p)
                 return 0
             return build(args) if args.cmd == "build" else deploy(args, journal)
