@@ -173,8 +173,12 @@ fn node_runtime(
                 jobs: 0,
                 execs: 0,
             },
-            // a 256 MiB journal at most, 512 MiB left free on the disk, new work again below 80%
-            storage: steve_node::Storage::default(),
+            // a 256 MiB journal at most, 512 MiB left free on the disk, new work again below 80%;
+            // no new item's worktree below Steve's disk floor
+            storage: steve_node::Storage {
+                worktree_floor: cfg.disk.floor,
+                ..steve_node::Storage::default()
+            },
         })
         .map_err(|e| BackendError::msg(e.to_string()))?,
     );
@@ -400,6 +404,7 @@ pub fn wire_with(cfg: &Arc<Config>, bus: &Bus, vars: Vars) -> Result<Wired, Back
             store: db.clone(),
             host: host.clone(),
             workspaces: workspaces.clone(),
+            worktrees: node_host.as_ref().map(|_| cfg.worktrees.clone()),
         }),
         gateway,
         core_cfg,

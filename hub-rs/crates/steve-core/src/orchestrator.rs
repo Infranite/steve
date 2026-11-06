@@ -1067,13 +1067,20 @@ impl Tx<'_> {
             Some(b) => b,
             None => self.db().main_bot()?,
         };
-        let (cwd, branch) = match item
+        /* a worktree its backend makes is only named here: made off the lock before the session opens */
+        let (cwd, branch, planned) = match item
             .cwd
             .as_deref()
             .filter(|c| !c.is_empty() && Path::new(c).exists())
         {
-            Some(c) => (c.to_string(), item.branch.clone()),
-            None => self.prepare_cwd(&item)?,
+            Some(c) => (c.to_string(), item.branch.clone(), false),
+            None => match self.planned_worktree(&item)? {
+                Some((wt, br)) => (wt, Some(br), true),
+                None => {
+                    let (c, b) = self.prepare_cwd(&item)?;
+                    (c, b, false)
+                }
+            },
         };
         self.db().item_patch(item_id, patch![cwd: cwd.as_str(), branch: branch.as_deref(), stage: "执行", status: "run", now: "正在开始"])?;
         let tok = token();
@@ -1094,7 +1101,17 @@ impl Tx<'_> {
             token: tok.clone(),
         })?;
         self.st.tokens.insert(s.id.clone(), tok);
+        /* a session its backend binds otherwise (a directory it only opens) gets the worktree
+         * before it is bound, as without it: the backend opens it right away */
+        let core_makes = planned && !self.rt().would_make_workspace(&s.id);
+        if core_makes {
+            self.unplan_on_err(&item, &s.id, self.prepare_cwd(&item))?;
+        }
         self.rt().created(&s.id, after.as_deref());
+        if planned && !core_makes && !self.rt().makes_workspace(&s.id) {
+            /* not bound where the worktree is made after all: made here, as without it */
+            self.unplan_on_err(&item, &s.id, self.prepare_cwd(&item))?;
+        }
         self.db().timeline_add(
             item_id,
             "steve",
@@ -1114,6 +1131,19 @@ impl Tx<'_> {
         };
         self.rt().prompt(&s.id, &text, "steve", files)?;
         Ok(s)
+    }
+
+    /// A start whose worktree the core could not make after it named it leaves nothing named: the
+    /// session ends and the item is back as it was (a worktree never made is no worktree to
+    /// restore, so a retry still waits for disk space).
+    fn unplan_on_err<T>(&self, before: &Item, session: &str, r: Result<T>) -> Result<()> {
+        let Err(e) = r else { return Ok(()) };
+        self.db().session_patch(session, patch![status: "ended"])?;
+        self.db().item_patch(
+            &before.id,
+            patch![cwd: before.cwd.as_deref(), branch: before.branch.as_deref(), stage: before.stage.as_str(), status: before.status.as_str(), now: before.now.as_str()],
+        )?;
+        Err(e)
     }
 
     /// Session tokens live only in memory: after a restart each session gets a fresh one on its next start.
@@ -1896,6 +1926,10 @@ impl Tx<'_> {
         if !shed.is_empty() {
             self.c.purge_soon();
         }
+        /* a worktree its backend made is given back by it (off the lock); what it did is told later */
+        if self.tidy_by_backend(&i, &p, branch, cwd)? {
+            return Ok(true);
+        }
         /* an archived item gives back a clean worktree even when its branch is not in main: the branch
          * stays, and the worktree can be made again from it */
         let (wt, br) = git::tidy_worktree(
@@ -1937,6 +1971,7 @@ impl Tx<'_> {
             && i.cwd
                 .as_deref()
                 .is_some_and(|c| !c.is_empty() && !Path::new(c).exists())
+            && !self.backend_remakes(item_id)?
             && let Err(e) = self.prepare_cwd(&i)
         {
             tracing::error!("worktree {e}");

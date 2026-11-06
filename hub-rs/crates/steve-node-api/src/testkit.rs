@@ -1792,6 +1792,12 @@ impl WorkspaceExecutor for FakeNode {
             {
                 return Err(ApiError::new(ErrorCode::Denied, "a readonly root"));
             }
+            if let PrepareKind::Worktree { at: Some(at), .. } = &c.body.kind
+                && !st.roots.is_empty()
+                && Self::root_access(st, &at.root)? == RootAccess::ReadOnly
+            {
+                return Err(ApiError::new(ErrorCode::Denied, "a readonly root"));
+            }
             let spec = digest_of(&c.body.kind)?;
             let wid: WorkspaceId = id(derived_id("w", &c.body.resource));
             let view = match st.workspaces.get(&wid) {

@@ -21,12 +21,16 @@ pub enum PrepareKind {
     Existing { dir: RootPath },
     /// A fresh scratch directory owned by the Node.
     Scratch,
-    /// A worktree of `repository` on `branch` (created from `base` when the branch is new).
+    /// A worktree of `repository` on `branch` (created from `base` when the branch is new), at
+    /// `at` when given (a directory that need not exist yet, under a read-write root; one that is
+    /// there already is adopted only if it is that worktree), else where the Node keeps its own.
     Worktree {
         repository: RootPath,
         branch: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         base: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at: Option<RootPath>,
     },
 }
 
