@@ -2,7 +2,10 @@
 //! call into a [`ToolCall`] to the Hub ([`HubTools`]). The Hub defines, authorizes, runs and audits
 //! the tools; this only speaks MCP to the agent. A token stands for one session of this Node, and a
 //! call counts for the attempt that session runs at that moment (none running: refused); or for one
-//! job attempt, valid until that job ends.
+//! job attempt, valid until that job ends. Listing the tools is not a call: a harness lists them
+//! when it connects, which can be before its session's first turn (Claude Code keeps what it got
+//! then), so a session's list waits for its attempt a while, or answers from the catalog this Node
+//! last had from the Hub.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -51,6 +54,9 @@ pub(crate) struct Endpoint {
     tokens: Mutex<HashMap<String, Holder>>,
     current: Arc<dyn Current>,
     calls: AtomicU64,
+    /// The catalog the Hub last gave (it is the Hub's, the same for every execution): what a
+    /// session lists while it runs no attempt. Calls always fetch it anew.
+    catalog: Mutex<Option<Catalog>>,
     /// Random per process. The Hub keys its durable tool journal by (execution, CallId), and an
     /// execution can outlive this process (it is in the Node journal), so a bare counter would
     /// repeat `mcp0` after a restart and get the earlier call's result back for a call that never
@@ -65,6 +71,7 @@ impl Endpoint {
             tokens: Mutex::new(HashMap::new()),
             current,
             calls: AtomicU64::new(0),
+            catalog: Mutex::new(None),
             boot: boot_id(),
         })
     }
@@ -162,6 +169,10 @@ fn boot_id() -> String {
     hex::encode(&sha2::Sha256::digest(seed.as_bytes())[..16])
 }
 
+/// How long a session's tool list waits for the session's first attempt when the Node has no
+/// catalog yet: the Hub starts the turn right after the open, so this is a race of a second or so.
+const LIST_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
 #[derive(Clone)]
 struct Authed(Holder);
 
@@ -237,6 +248,41 @@ impl Handler {
             .ok_or_else(|| McpError::internal_error("the hub is not connected", None))
     }
 
+    /// The Hub's catalog for `exec`, kept for listing at idle.
+    async fn catalog(&self, hub: &dyn HubTools, exec: ExecutionRef) -> Result<Catalog, McpError> {
+        let c = hub
+            .catalog(exec)
+            .await
+            .map_err(|e| McpError::internal_error(e.safe_detail, None))?;
+        *self.ep.catalog.lock().unwrap() = Some(c.clone());
+        Ok(c)
+    }
+
+    /// What a holder lists: the catalog for its running attempt; for a session running none, the
+    /// last catalog this Node had, else (none yet) the catalog once its attempt starts, waiting
+    /// up to [`LIST_WAIT`]. A job's token lists only while the job lives.
+    async fn listing(&self, holder: &Holder) -> Result<Catalog, McpError> {
+        let hub = self.hub()?;
+        let session = match (self.execution(holder), holder) {
+            (Ok(exec), _) => return self.catalog(&*hub, exec).await,
+            (Err(e), Holder::Job(_)) => return Err(e),
+            (Err(e), Holder::Session(s)) => {
+                if let Some(c) = self.ep.catalog.lock().unwrap().clone() {
+                    return Ok(c);
+                }
+                (s.clone(), e)
+            }
+        };
+        let end = tokio::time::Instant::now() + LIST_WAIT;
+        while tokio::time::Instant::now() < end {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            if let Some(exec) = self.ep.current.execution(&session.0) {
+                return self.catalog(&*hub, exec).await;
+            }
+        }
+        Err(session.1)
+    }
+
     /// The attempt a call counts for: the session's running one, or the job's own (checked again
     /// against the token, which goes when the job ends).
     fn execution(&self, holder: &Holder) -> Result<ExecutionRef, McpError> {
@@ -296,12 +342,7 @@ impl ServerHandler for Handler {
         ctx: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
         let holder = Self::authed(&ctx)?;
-        let exec = self.execution(&holder)?;
-        let catalog = self
-            .hub()?
-            .catalog(exec)
-            .await
-            .map_err(|e| McpError::internal_error(e.safe_detail, None))?;
+        let catalog = self.listing(&holder).await?;
         let tools = catalog
             .tools
             .into_iter()
@@ -328,10 +369,7 @@ impl ServerHandler for Handler {
             .ep
             .next_call()
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        let catalog = hub
-            .catalog(exec.clone())
-            .await
-            .map_err(|e| McpError::internal_error(e.safe_detail, None))?;
+        let catalog = self.catalog(&*hub, exec.clone()).await?;
         let call = ToolCall {
             id,
             execution: exec,
