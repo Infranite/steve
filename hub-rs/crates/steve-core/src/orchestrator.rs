@@ -26,6 +26,10 @@ const PRO: [&str; 3] = ["只在必要时", "适中", "积极"];
 const DAY: i64 = 24 * 3_600_000;
 const INTERRUPTED: &str = "Hub 重启时这个会话正在运行，这一回合被中断了";
 
+/// The `text` of an acceptance's `pass` that also starts the release (验收并发布); `no-release`
+/// accepts it without one (验收，先不发布).
+pub const ACCEPT_AND_RELEASE: &str = "release";
+
 /// Put before a message the agent had already been given when the Hub stopped (its dispatch was
 /// submitted): it may be done or half done, so it comes back to be checked, never redone blindly.
 pub const RESUMED_NOTE: &str = "（以下是 Hub 重启前已经发给你的消息，你可能已经做了一部分或全部。只用来核对进度：先确认它的结果，已经做完的不要重做，没做完的接着做。）";
@@ -2241,8 +2245,15 @@ impl Tx<'_> {
                 self.answer_line(&i, actor, "验收通过", None)?;
                 if before.phase == crate::cycle::CLOSING {
                     /* what this result still needs (a release, the modules' wrap-up) is recorded and
-                     * started; the close commits once all of it is done and the work has stopped */
-                    self.lc_accept(&i, crate::cycle::Policy::Human, Some("你验收通过"))?;
+                     * started; the close commits once all of it is done and the work has stopped.
+                     * 验收并发布: the release starts here, without a round of the agent */
+                    if text == ACCEPT_AND_RELEASE {
+                        self.st.release_with_accept = Some((i.clone(), actor.to_string()));
+                    }
+                    let accepted =
+                        self.lc_accept(&i, crate::cycle::Policy::Human, Some("你验收通过"));
+                    self.st.release_with_accept = None;
+                    accepted?;
                     if text == "no-release"
                         && let Some(op) = self.lc_open_op(&i, crate::cycle::OP_RELEASE)?
                     {

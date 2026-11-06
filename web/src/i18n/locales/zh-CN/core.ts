@@ -114,6 +114,8 @@ export default {
     releaseApproved: "已批准发布",
     acceptedNothingToRelease: "已验收，没有需要发布的改动，事项完成",
     acceptedAwaitRelease: "已验收，等它申请发布",
+    acceptedReleasing: "已验收，开始发布",
+    acceptedNoRelease: "已验收，这次不发布",
   },
   toast: {
     updateAvailable: "Steve 有新版本 {{version}}",
@@ -344,6 +346,8 @@ export default {
     sendRework: "发回返工",
     rework: "返工…",
     pass: "验收通过",
+    passRelease: "验收并发布",
+    passNoRelease: "验收，先不发布",
     allowTool: "允许这次工具调用？",
     deny: "拒绝",
     allowAlways: "总是允许",

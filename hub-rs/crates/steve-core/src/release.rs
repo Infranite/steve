@@ -1295,7 +1295,7 @@ impl Tx<'_> {
                 if new {
                     if self.nothing_to_release(i)? {
                         self.release_unproven(&i.id)?;
-                    } else {
+                    } else if !self.release_with_accept(i, c)? {
                         self.await_release_for(&i.id)?;
                     }
                 }
@@ -1362,6 +1362,81 @@ impl Tx<'_> {
         self.db()
             .item_patch(item_id, patch![now: "发布结果未知，等你核对"])?;
         Ok(())
+    }
+
+    /// 验收并发布: the acceptance that is being recorded asked for the release too, so the Hub
+    /// rebases and starts it now — approved by whoever accepted, for the result as it was accepted
+    /// (the frozen fingerprint, kept on the release decision). `false` leaves it to the agent's own
+    /// release request (a separate card): the branch moved since, another release is running, the
+    /// worktree is on a Node or on another device, or this acceptance did not ask.
+    fn release_with_accept(&mut self, i: &Item, c: &Closing) -> Result<bool> {
+        let Some((_, who)) = self
+            .st
+            .release_with_accept
+            .clone()
+            .filter(|(item, _)| *item == i.id)
+        else {
+            return Ok(false);
+        };
+        let Some(branch) = i.branch.clone().filter(|b| !b.is_empty()) else {
+            return Ok(false);
+        };
+        let Some(p) = self.db().project(i.project_id.as_deref())? else {
+            return Ok(false);
+        };
+        if p.device_id != HUB_DEVICE || self.git_on_node(&i.id) || self.st.releasing.is_some() {
+            return Ok(false);
+        }
+        /* the result accepted is the one released: nothing moved since it was frozen */
+        let Some(frozen) = c.fingerprint.clone() else {
+            return Ok(false);
+        };
+        if crate::cycle::result_moved(
+            crate::cycle::fingerprint(i.cwd.as_deref()).as_deref(),
+            Some(&frozen),
+        ) {
+            return Ok(false);
+        }
+        let d = self.db().decision_create(crate::repo::NewDecision {
+            workspace_id: i.workspace_id.clone(),
+            kind: "approve".into(),
+            subject_type: "release".into(),
+            subject_id: branch.clone(),
+            item_id: Some(i.id.clone()),
+            session_id: self.active_session(&i.id)?.map(|s| s.id),
+            question: format!("发布新版本（{} · 分支 {branch}）", p.name),
+            draft: Some("验收时一起批准的发布。".into()),
+            options: Some(vec!["yes".into(), "no".into()]),
+            requested_by: "steve".into(),
+        })?;
+        self.db().decision_resolve(
+            &d.id,
+            json!({"approved": true, "text": "", "with_accept": true, "fingerprint": frozen}),
+            "resolved",
+            None,
+        )?;
+        self.db()
+            .timeline_add(&i.id, &who, "me", &format!("验收并发布 {branch}"), None)?;
+        let to = match self.active_session(&i.id)?.filter(|s| s.status != "ended") {
+            Some(s) => {
+                /* told with its next message: no round of its own for this */
+                self.c.steve_note(
+                    &s.id,
+                    &format!("（Steve）用户验收通过并批准了发布，Steve 已经开始发布 {branch}，不用再用 steve_publish 请求。"),
+                );
+                To::Session(s.id)
+            }
+            None => To::Decision {
+                live: None,
+                item: Some(i.id.clone()),
+            },
+        };
+        self.db()
+            .item_patch(&i.id, patch![stage: "收尾", now: "正在发布"])?;
+        if self.rebase_for_release(&i.id, &branch, &to)? {
+            self.start_release(&branch, &i.id)?;
+        }
+        Ok(true)
     }
 
     /// Asks the agent of the item to publish (the required release of an accepted result).

@@ -865,7 +865,7 @@ function decidedText(w: Wait, c: string, bot: string | null) {
   return w.type === "ask" ? t("core:decided.toldBot", { bot: botName(bot) }) : w.subject === "tool_call" ? t("core:decided.allowed") : t("core:decided.handled")
 }
 /** accepted, but the project still has a release to go: the item is not finished yet */
-const releaseAhead = (i?: Item) => !!i?.branch && !!st.projects.find((p) => p.id === i.project)?.release
+export const releaseAhead = (i?: Item) => !!i?.branch && !!st.projects.find((p) => p.id === i.project)?.release
 export async function decide(id: string, c: string, text?: string, decision?: string) {
   const { i, w } = cardOf(id, decision); if (!w) return
   const key = "decision:" + w.decision
@@ -878,12 +878,14 @@ export async function decide(id: string, c: string, text?: string, decision?: st
       if (d) { const rel = relOf(d); toast(rel?.text ?? t("core:decided.releaseApproved")); if (rel?.tone === "fail") cue("failure") }
       return
     }
-    if (c === "pass" && w.type === "accept" && text !== "no-release" && releaseAhead(i) && i) {
-      /* the Hub finishes an item with nothing on its branch right away: say so instead of waiting for a release */
+    if (c === "pass" && w.type === "accept" && releaseAhead(i) && i) {
+      /* the Hub finishes an item with nothing on its branch right away: say so instead of waiting for a release;
+       * 验收并发布 starts it on the Hub unless the branch moved or a release runs (then the agent asks for it) */
       if (!(await call(api.decide(w.decision, c, text)))) return
       cue("success")
       const after = await api.item(i.id).catch(() => null)
-      toast(after?.status === "done" ? t("core:decided.acceptedNothingToRelease") : t("core:decided.acceptedAwaitRelease"))
+      toast(after?.status === "done" ? (text === "no-release" ? t("core:decided.acceptedNoRelease") : t("core:decided.acceptedNothingToRelease"))
+        : after?.now === "正在发布" ? t("core:decided.acceptedReleasing") : t("core:decided.acceptedAwaitRelease"))
       return
     }
     const result = await call(api.decide(w.decision, c, text), decidedText(w, c, i?.b ?? null))

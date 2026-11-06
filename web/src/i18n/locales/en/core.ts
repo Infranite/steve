@@ -99,6 +99,8 @@ export default {
     releaseApproved: "Release approved",
     acceptedNothingToRelease: "Accepted, nothing to release, item done",
     acceptedAwaitRelease: "Accepted, waiting for it to request a release",
+    acceptedReleasing: "Accepted, releasing",
+    acceptedNoRelease: "Accepted, not released this time",
   },
   toast: {
     updateAvailable: "Steve {{version}} is available",
@@ -350,6 +352,8 @@ export default {
     sendRework: "Send back for rework",
     rework: "Rework…",
     pass: "Accept",
+    passRelease: "Accept and release",
+    passNoRelease: "Accept, don't release yet",
     allowTool: "Allow this tool call?",
     deny: "Deny",
     allowAlways: "Always allow",
