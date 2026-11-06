@@ -373,6 +373,17 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
     )));
 
     let modules = Modules::new(store.clone(), core.module_gateway(), registry);
+    // the handle systems the extensions declared, there before anything names a sender in one
+    if !declared.systems.is_empty() {
+        store
+            .transaction(|tx| -> steve_store::Result<()> {
+                for (id, label, ext) in &declared.systems {
+                    steve_modules::accounts::repo::upsert_declared(tx, id, label, ext)?;
+                }
+                Ok(())
+            })
+            .map_err(|e| BackendError::msg(format!("declared handle systems: {e}")))?;
+    }
     kb_hooks.bind(modules.clone());
     // an item's knowledge document goes in the transaction that deletes the item
     store.on_item_deleted(|tx, ws, id| {
