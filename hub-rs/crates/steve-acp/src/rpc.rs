@@ -2,12 +2,16 @@
 //!
 //! One [`Conn`] per adapter process. A reader task dispatches stdout lines: responses resolve
 //! pending requests, everything else goes to the caller's [`Incoming`] sink in arrival order.
+//! A bounded sink may hand back a [`Backpressure`]: the reader reads nothing more until it is done,
+//! so an adapter that outruns its consumer blocks on its own stdout write instead of being cut off.
 //! A writer task serialises stdin writes. When the process exits every pending request fails
 //! with `adapter exited (<code>)`, exactly like the TS `exit` handler.
 
 use std::collections::HashMap;
 use std::ffi::OsString;
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -77,6 +81,11 @@ pub enum Incoming {
     },
 }
 
+/// What the reader waits for before it reads the adapter's next line: the sink's consumer is
+/// behind. It owns what it needs (never the [`Conn`]), and must end by itself when the consumer
+/// goes away or gives up, or the reader (and so the adapter, blocked on its stdout) waits forever.
+pub type Backpressure = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
+
 /// What to spawn. `.js` entry points are run by the caller's Node (see [`crate::AcpConfig::node`]).
 pub struct Spawn {
     pub program: PathBuf,
@@ -120,7 +129,16 @@ impl Conn {
         on_incoming: impl Fn(&Conn, Incoming) + Send + Sync + 'static,
         on_exit: impl FnOnce() + Send + 'static,
     ) -> Result<Arc<Conn>, RpcError> {
-        Self::spawn_bounded(sp, usize::MAX, |_| true, on_incoming, on_exit)
+        Self::spawn_bounded(
+            sp,
+            usize::MAX,
+            |_| true,
+            move |c, i| {
+                on_incoming(c, i);
+                None
+            },
+            on_exit,
+        )
     }
 
     /// Spawn a waiting shell, record its process identity, then let it exec the adapter. If the
@@ -131,7 +149,7 @@ impl Conn {
         max_frame_bytes: usize,
         admit: impl Fn(usize) -> bool + Send + Sync + 'static,
         registered: impl FnOnce(u32) -> Result<(), RpcError>,
-        on_incoming: impl Fn(&Conn, Incoming) + Send + Sync + 'static,
+        on_incoming: impl Fn(&Conn, Incoming) -> Option<Backpressure> + Send + Sync + 'static,
         on_exit: impl FnOnce() + Send + 'static,
     ) -> Result<Arc<Conn>, RpcError> {
         let mut args: Vec<OsString> = vec![
@@ -156,11 +174,12 @@ impl Conn {
 
     /// Node driver ingress boundary. Called on the reader before JSON parsing, including replies
     /// and permission requests. Legacy spawn retains its original framing and admission behavior.
+    /// The [`Backpressure`] `on_incoming` returns is awaited before the next line is read.
     pub fn spawn_bounded(
         sp: Spawn,
         max_frame_bytes: usize,
         admit: impl Fn(usize) -> bool + Send + Sync + 'static,
-        on_incoming: impl Fn(&Conn, Incoming) + Send + Sync + 'static,
+        on_incoming: impl Fn(&Conn, Incoming) -> Option<Backpressure> + Send + Sync + 'static,
         on_exit: impl FnOnce() + Send + 'static,
     ) -> Result<Arc<Conn>, RpcError> {
         let mut cmd = Command::new(&sp.program);
@@ -243,7 +262,12 @@ impl Conn {
                     }
                     break;
                 }
-                c.dispatch(&String::from_utf8_lossy(&line), &on_incoming);
+                let wait = c.dispatch(&String::from_utf8_lossy(&line), &on_incoming);
+                // not held while waiting: the Conn goes when its owner lets it go
+                drop(c);
+                if let Some(wait) = wait {
+                    wait.await;
+                }
             }
         });
 
@@ -269,12 +293,16 @@ impl Conn {
         Ok(conn)
     }
 
-    fn dispatch(&self, line: &str, sink: &(impl Fn(&Conn, Incoming) + Send + Sync)) {
+    fn dispatch(
+        &self,
+        line: &str,
+        sink: &(impl Fn(&Conn, Incoming) -> Option<Backpressure> + Send + Sync),
+    ) -> Option<Backpressure> {
         if line.trim().is_empty() {
-            return;
+            return None;
         }
         let Ok(Value::Object(mut m)) = serde_json::from_str::<Value>(line) else {
-            return;
+            return None;
         };
         let id = m.remove("id").filter(|v| !v.is_null());
         let method = m.get("method").and_then(Value::as_str).map(str::to_owned);
@@ -294,9 +322,9 @@ impl Conn {
                 _ => Ok(m.remove("result").unwrap_or(Value::Null)),
             };
             let _ = tx.send(r);
-            return;
+            return None;
         }
-        let Some(method) = method else { return };
+        let method = method?;
         let params = m.remove("params").unwrap_or(Value::Null);
         match id {
             Some(id) => sink(self, Incoming::Request { id, method, params }),
@@ -546,6 +574,55 @@ mod control_tests {
             .await
             .unwrap();
         assert!(dir.path().join("clean").exists());
+    }
+}
+
+#[cfg(test)]
+mod backpressure_tests {
+    use super::*;
+
+    /// The reader reads no further line while the sink's consumer is behind, and goes on once it
+    /// has room again: nothing is skipped.
+    #[tokio::test]
+    async fn the_reader_waits_for_a_sink_that_is_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let line = r#"{"jsonrpc":"2.0","method":"n","params":{}}"#;
+        let sp = Spawn {
+            program: "/bin/sh".into(),
+            args: vec![
+                "-c".into(),
+                format!("for i in 1 2 3; do echo '{line}'; done; sleep 5").into(),
+            ],
+            cwd: dir.path().into(),
+            env: vec![],
+            log_tag: "test".into(),
+        };
+        let seen = Arc::new(AtomicU64::new(0));
+        let room = Arc::new(tokio::sync::Semaphore::new(0));
+        let (s, r) = (seen.clone(), room.clone());
+        let conn = Conn::spawn_bounded(
+            sp,
+            1 << 20,
+            |_| true,
+            move |_, _| {
+                s.fetch_add(1, Ordering::SeqCst);
+                let r = r.clone();
+                Some(Box::pin(async move {
+                    r.acquire().await.unwrap().forget();
+                }))
+            },
+            || {},
+        )
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(seen.load(Ordering::SeqCst), 1, "read on while behind");
+        room.add_permits(3);
+        let t0 = std::time::Instant::now();
+        while seen.load(Ordering::SeqCst) < 3 {
+            assert!(t0.elapsed() < Duration::from_secs(3), "lines lost");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        conn.kill();
     }
 }
 
