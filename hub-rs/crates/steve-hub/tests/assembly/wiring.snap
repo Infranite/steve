@@ -235,6 +235,8 @@ api PUT /yolo
 api PUT /yolo/scopes/x/x
 as_user feishu_user
 channel feishu_app
+decl feishu_app platform 1ms
+decl feishu_user platform 1ms
 event_source github_app
 event_source github_pat
 jobs 14

@@ -115,5 +115,6 @@
   "channels.rules.act.handoff": "转给你",
   "channels.error.run_stopped": "这个连接的这次运行已经停止，不再接收消息",
   "channels.error.cursor_not_ext": "游标「%{container}」不属于这个适配器",
+  "channels.error.message_id_reserved": "以“fp:”开头的消息 id 由 Hub 保留，渠道不能使用",
   "channels.error.run_panicked": "接收消息的任务意外中止，稍后自动重试"
 }

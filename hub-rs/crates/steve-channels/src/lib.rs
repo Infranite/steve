@@ -115,6 +115,7 @@ pub mod drafts;
 pub mod ext;
 #[cfg(feature = "fake")]
 pub mod fake;
+pub mod fallback;
 pub mod flow_actions;
 pub mod inbound;
 pub mod lifecycle;

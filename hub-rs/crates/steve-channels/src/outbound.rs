@@ -65,7 +65,7 @@ use crate::personas::{self, PersonaRow};
 use crate::respond::{self, DRAFT_OPTIONS, SUBJECT_MESSAGE};
 use crate::rules::{self, Act, ItemMode, Trigger};
 use crate::spaces::{self, Mode, SpaceRow};
-use crate::{ChannelResult, Channels, bindings, compose, messages, send_state};
+use crate::{ChannelResult, Channels, bindings, compose, fallback, messages, send_state};
 
 /// How long an approved message waits before it goes out (undo window).
 pub const SEND_DELAY_MS: i64 = 10_000;
@@ -1286,7 +1286,9 @@ impl Outbox {
             }
             _ => match ch.adapter(&adapter) {
                 Some(a) => {
-                    let to = match &row.reply_to {
+                    // a message only the Hub has an id for can't be replied to at the provider:
+                    // the answer goes to the space
+                    let to = match row.reply_to.as_ref().filter(|r| !fallback::is_fallback(r)) {
                         Some(r) => SendTarget::Reply {
                             ext_msg_id: r.clone(),
                             in_thread,
@@ -1310,13 +1312,16 @@ impl Outbox {
         match sent {
             Ok(out) => {
                 let now = ch.now();
-                let ext = out.ext_id.clone().filter(|x| !x.is_empty());
+                let ext = fallback::platform(out.ext_id.clone());
                 let ours = ch.store().transaction(|tx| -> ChannelResult<bool> {
                     // `sent_via`: recalled through the same connection later, whatever the space's
-                    // voice is by then
+                    // voice is by then. The content key: a copy read back without a provider id,
+                    // or of a send without one, is this message.
+                    let key = fallback::out_key(ch, tx, &row.ws, &space.connection_id, &text)?;
                     if tx.execute(
                         "UPDATE chan_messages SET status = 'sent', external_id = ?, text = ?, sent = ?,
-                                sent_via = ?, ext_created = ?, thread_key = coalesce(thread_key, ?)
+                                sent_via = ?, ext_created = ?, thread_key = coalesce(thread_key, ?),
+                                content_key = ?
                           WHERE id = ? AND status = 'pending' AND sent = ?",
                         params![
                             ext,
@@ -1325,6 +1330,7 @@ impl Outbox {
                             space.connection_id,
                             out.created,
                             out.thread_key,
+                            key,
                             row.id,
                             claim
                         ],
@@ -1887,12 +1893,8 @@ impl Outbox {
             .cx_for(ws, &conn, None)
             .map_err(|e| ApiError::rule(e.to_string()))?;
         let done = match recaller {
-            Recaller::AsUser(u) => {
-                if msg.ext_id.is_none() && msg.source_id.is_none() {
-                    return Err(not_sent());
-                }
-                u.recall(&cx, &msg).await
-            }
+            // without ids the adapter still has the time (`created_exact`) and the text to find it by
+            Recaller::AsUser(u) => u.recall(&cx, &msg).await,
             Recaller::Adapter(a) => {
                 let ext = msg.ext_id.clone().ok_or_else(not_sent)?;
                 a.recall(&cx, &ext).await
@@ -1949,7 +1951,9 @@ fn replied_ref(c: &Connection, space: &str, conn: &str, ext: &str) -> ChannelRes
                 [space],
                 |r| r.get(0),
             )?;
-            Ok(MessageRef::platform(space_ext, ext))
+            let mut m = MessageRef::platform(space_ext, ext);
+            m.ext_id = fallback::platform(m.ext_id);
+            Ok(m)
         }
     }
 }

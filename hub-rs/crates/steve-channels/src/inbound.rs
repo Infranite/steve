@@ -34,10 +34,11 @@ use steve_modules::accounts::{AnyHandle, ExtraHandle, Hints, Identified, identif
 use steve_store::Tx;
 
 use crate::channel::{HandleRef, InboundMessage, MemberInfo, Sender, SpaceInfo, SpaceKind};
+use crate::ext::MessageIds;
 use crate::respond::{self, Plan, Response};
 use crate::rules::{self, ContextLine, Facts, GatewayJudge};
 use crate::spaces::{self, Attention, Mode, NewSpace};
-use crate::{ChannelResult, Channels, messages};
+use crate::{ChannelResult, Channels, fallback, messages};
 
 /// `ext_events.source` of channel messages.
 pub const SOURCE: &str = "im";
@@ -297,16 +298,28 @@ impl Channels {
         conn: &str,
         msg: InboundMessage,
     ) -> ChannelResult<Inbound> {
-        let mut c = steve_modules::Check::new();
-        c.len("space_ext_id", &msg.space_ext_id, 1, 500).len(
-            "external_id",
-            &msg.external_id,
-            1,
-            500,
-        );
-        c.done()?;
         let store = self.store().clone();
         let facts = store.reader(|c| conn_facts(c, ws, conn))?;
+        // a message without a provider id only from a side that has none; the Hub's own ids
+        // (`fp:`) are never an adapter's
+        let without_ids = self
+            .decl(&facts.adapter)
+            .is_some_and(|d| d.message_ids == MessageIds::None);
+        let mut c = steve_modules::Check::new();
+        c.len("space_ext_id", &msg.space_ext_id, 1, 500)
+            .len(
+                "external_id",
+                &msg.external_id,
+                if without_ids { 0 } else { 1 },
+                500,
+            )
+            .len("source_id", msg.source_id.as_deref().unwrap_or(""), 0, 500);
+        c.done()?;
+        if fallback::is_fallback(&msg.external_id) {
+            return Err(ApiError::rule(steve_i18n::t!(
+                "channels.error.message_id_reserved"
+            )));
+        }
         let (existing, known) = store.reader(|c| -> ChannelResult<_> {
             Ok((
                 spaces::find(c, ws, conn, &msg.space_ext_id)?,
@@ -419,10 +432,16 @@ impl Channels {
         let rf = store.reader(|c| rule_facts(c, ws, &facts, &inbound, &msg))?;
 
         // Step 2, second half: the signal.
+        // a message without a provider id is its event by the Hub's message id
+        let event_ext = if msg.external_id.is_empty() {
+            inbound.message_id.clone()
+        } else {
+            msg.external_id.clone()
+        };
         let mut ev = RawEvent::new(
             SOURCE,
             inbound.type_key.clone(),
-            msg.external_id.clone(),
+            event_ext,
             msg.created,
             summary(&written.sender_name, &msg),
         );
@@ -647,35 +666,105 @@ impl Channels {
             mentions.push(json!({ "account_id": account, "name": m.name }));
         }
 
-        // 2. the message (a redelivery stops here, and so does one stored through the other
-        // connection to the same chat: it only fills in fields)
-        let first = match messages::by_external(tx, &space.id, &msg.external_id)? {
-            Some(id) => {
-                messages::complete(tx, &id, msg.thread_key.as_deref(), msg.reply_to.as_deref())?;
-                Some((id, space.id.clone(), "重复的消息"))
+        // 2. the message. A redelivery stops here, and so does a copy stored through another
+        // connection to the same chat: it only fills in fields. Looked for in this order: the
+        // delivery id this connection gave it before, the provider id, the content key (when one
+        // of the two copies has no provider id), the exact time (every side to the ms), the same
+        // provider id under another connection, Steve's own send read back.
+        let has_id = !msg.external_id.is_empty();
+        let source = msg.source_id.as_deref().filter(|s| !s.trim().is_empty());
+        let key = {
+            let want = fallback::key_system(self, &facts.adapter, &msg.sender.handle.system);
+            let (sys, handle) =
+                fallback::key_sender(tx, ws, sender_party.as_deref(), &want, &msg.sender.handle)?;
+            fallback::key_of(&sys, &handle, &msg.text, &msg.attachments)
+        };
+        let mut first: Option<(String, String, &'static str)> = None;
+        if let Some(src) = source
+            && let Some(f) = fallback::by_source(tx, conn, src)?
+        {
+            if has_id {
+                fallback::upgrade(tx, &f.id, &msg.external_id)?;
             }
-            None => match messages::seen_elsewhere(
+            let label = if f.out {
+                LABEL_ECHO
+            } else {
+                messages::complete(
+                    tx,
+                    &f.id,
+                    msg.thread_key.as_deref(),
+                    msg.reply_to.as_deref(),
+                )?;
+                "重复的消息"
+            };
+            first = Some((f.id, f.space_id, label));
+        }
+        if first.is_none()
+            && has_id
+            && let Some(id) = messages::by_external(tx, &space.id, &msg.external_id)?
+        {
+            messages::complete(tx, &id, msg.thread_key.as_deref(), msg.reply_to.as_deref())?;
+            first = Some((id, space.id.clone(), "重复的消息"));
+        }
+        if first.is_none() {
+            let probe = fallback::Probe {
+                ws,
+                conn,
+                space_id: &space.id,
+                space_ext: &msg.space_ext_id,
+                own: mode == Mode::Own,
+                key: &key,
+                created: msg.created,
+                tol: fallback::tolerance(self, tx, ws, &facts.adapter, &msg.space_ext_id)?,
+                has_id,
+                party: sender_party.as_deref(),
+            };
+            let found = match fallback::by_content(tx, &probe)? {
+                Some(f) => Some(f),
+                None => fallback::by_exact_time(tx, &probe)?,
+            };
+            if let Some(f) = found {
+                if has_id {
+                    fallback::upgrade(tx, &f.id, &msg.external_id)?;
+                }
+                let label = if f.out {
+                    fallback::fill_created(tx, &f.id, msg.created)?;
+                    LABEL_ECHO
+                } else {
+                    messages::complete_from(
+                        tx,
+                        &f.id,
+                        msg.thread_key.as_deref(),
+                        msg.reply_to.as_deref(),
+                        sender_account.as_deref(),
+                        sender_party.as_deref(),
+                    )?;
+                    LABEL_ELSEWHERE
+                };
+                first = Some((f.id, f.space_id, label));
+            }
+        }
+        if first.is_none()
+            && has_id
+            && let Some((id, sp)) = messages::seen_elsewhere(
                 tx,
                 ws,
                 conn,
                 mode == Mode::Own,
                 &msg.space_ext_id,
                 &msg.external_id,
-            )? {
-                Some((id, sp)) => {
-                    messages::complete_from(
-                        tx,
-                        &id,
-                        msg.thread_key.as_deref(),
-                        msg.reply_to.as_deref(),
-                        sender_account.as_deref(),
-                        sender_party.as_deref(),
-                    )?;
-                    Some((id, sp, LABEL_ELSEWHERE))
-                }
-                None => None,
-            },
-        };
+            )?
+        {
+            messages::complete_from(
+                tx,
+                &id,
+                msg.thread_key.as_deref(),
+                msg.reply_to.as_deref(),
+                sender_account.as_deref(),
+                sender_party.as_deref(),
+            )?;
+            first = Some((id, sp, LABEL_ELSEWHERE));
+        }
         // Steve's own message read back (sent as you, or by our bot): not a new message. Only
         // what one of Steve's identities could have sent is compared.
         let first = match first {
@@ -698,7 +787,7 @@ impl Channels {
                     now - ECHO_WINDOW_MS,
                 )? {
                     Some((id, sp)) => {
-                        if sp == space.id {
+                        if sp == space.id && has_id {
                             tx.execute(
                                 "UPDATE chan_messages SET external_id = coalesce(external_id, ?) WHERE id = ?",
                                 params![msg.external_id, id],
@@ -711,6 +800,9 @@ impl Channels {
             }
             None => None,
         };
+        if let Some((id, _, _)) = &first {
+            fallback::supplied(tx, id, conn, source, !has_id)?;
+        }
         if let Some((id, space_id, label)) = first {
             return Ok(Written {
                 inbound: Inbound {
@@ -735,12 +827,17 @@ impl Channels {
         }
         let mentions = Value::Array(mentions);
         let attachments = Value::Array(msg.attachments.clone());
+        let external_id = if has_id {
+            msg.external_id.clone()
+        } else {
+            fallback::new_id(tx, &space.id, &key, msg.created)?
+        };
         let Some(message_id) = messages::insert_inbound(
             tx,
             &messages::NewInbound {
                 ws,
                 space_id: &space.id,
-                external_id: &msg.external_id,
+                external_id: &external_id,
                 thread_key: msg.thread_key.as_deref(),
                 reply_to: msg.reply_to.as_deref(),
                 sender_account_id: sender_account.as_deref(),
@@ -749,11 +846,14 @@ impl Channels {
                 attachments: &attachments,
                 mentions: &mentions,
                 created: msg.created,
+                content_key: Some(&key),
+                fallback_from: (!has_id).then_some(conn),
             },
         )?
         else {
             return Err(ApiError::conflict("这条消息已经记下了"));
         };
+        fallback::supplied(tx, &message_id, conn, source, false)?;
         spaces::touch(tx, &space.id, msg.created.max(now), msg.sender.external)?;
 
         let kind = chat_kind(msg, &space.kind, info.kind);

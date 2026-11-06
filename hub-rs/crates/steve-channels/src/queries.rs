@@ -88,11 +88,19 @@ impl ConnQueries {
         }))
     }
 
-    /// The message is already stored (through any connection of the workspace), by its provider
-    /// id. A message without one is never known this way.
+    /// The message is already stored: by its provider id (through any connection of the
+    /// workspace), or, for a message without one, by the delivery id this connection gave it
+    /// ([`InboundMessage::source_id`]). A message without either is never known this way.
     pub fn known(&self, msg: &InboundMessage) -> ChannelResult<bool> {
         if msg.external_id.is_empty() {
-            return Ok(false);
+            return match msg.source_id.as_deref().filter(|s| !s.is_empty()) {
+                Some(src) => Ok(self
+                    .channels
+                    .store()
+                    .reader(|c| crate::fallback::by_source(c, &self.conn, src))?
+                    .is_some()),
+                None => Ok(false),
+            };
         }
         self.channels.store().reader(|c| -> ChannelResult<bool> {
             Ok(c.query_row(
@@ -107,7 +115,7 @@ impl ConnQueries {
     /// Stored message `ext` of space `space_ext`, if there is one: by its provider id, else by the
     /// delivery id this connection knows it by ([`Self::message_ref_by_source`]).
     pub fn message_ref(&self, space_ext: &str, ext: &str) -> ChannelResult<Option<MessageRef>> {
-        if ext.is_empty() {
+        if ext.is_empty() || crate::fallback::is_fallback(ext) {
             return Ok(None);
         }
         match self.by_external(space_ext, ext)? {

@@ -498,15 +498,19 @@ pub struct Mention {
     pub is_connection: bool,
 }
 
-/// One message as an adapter saw it, before it is stored.
+/// One message as an adapter saw it, before it is stored. Build it with [`InboundMessage::text`]
+/// or [`InboundMessage::without_id`] and set the fields, so fields added later don't break
+/// adapters.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct InboundMessage {
     /// The space at the provider (Feishu `chat_id`).
     pub space_ext_id: String,
     /// What the payload says about the space, used when `space_info` is not available.
     pub space_kind: Option<SpaceKind>,
     pub space_name: Option<String>,
-    /// The message id at the provider (`om_…`); unique per space.
+    /// The message id at the provider (`om_…`); unique per space. `""` only for an adapter
+    /// without platform message ids ([`crate::ext::MessageIds::None`]).
     pub external_id: String,
     /// The provider's delivery id (Feishu `header.event_id`), for logs.
     pub event_id: Option<String>,
@@ -528,6 +532,11 @@ pub struct InboundMessage {
     pub via: Option<String>,
     /// The provider's payload, kept as the event's original until the retention period ends.
     pub raw: Value,
+    /// The remote's stable id of this delivery (an event id or a sequence number): redeliveries
+    /// carry the same one. Opaque, per connection, never shown. The Hub drops a delivery it already
+    /// stored with this id, and acts on the message again through it
+    /// ([`MessageRef::source_id`]).
+    pub source_id: Option<String>,
 }
 
 impl InboundMessage {
@@ -555,7 +564,29 @@ impl InboundMessage {
             created,
             via: None,
             raw: Value::Null,
+            source_id: None,
         }
+    }
+
+    /// A text message of an adapter without platform message ids
+    /// ([`crate::ext::MessageIds::None`]): the Hub tells it apart by its [`Self::source_id`] and,
+    /// failing that, by space, sender, content and time.
+    pub fn without_id(
+        space_ext_id: impl Into<String>,
+        sender: Sender,
+        text: impl Into<String>,
+        created: i64,
+    ) -> Self {
+        let mut m = Self::text(space_ext_id, "", sender.handle.clone(), text, created);
+        m.sender = sender;
+        m
+    }
+
+    /// The remote's delivery id ([`Self::source_id`]); an empty one is none.
+    pub fn source_id(mut self, id: impl Into<String>) -> Self {
+        let id = id.into();
+        self.source_id = (!id.trim().is_empty()).then_some(id);
+        self
     }
 
     /// The connection's account is @-mentioned.

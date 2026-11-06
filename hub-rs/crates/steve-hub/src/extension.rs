@@ -347,6 +347,11 @@ impl Declare<'_> {
         Ok(())
     }
 
+    /// The declarations of the channel sides registered so far.
+    pub(crate) fn decls(&self) -> impl Iterator<Item = &ChannelDecl> {
+        self.decls.values()
+    }
+
     /// A provider whose connections need a pair of an adapter nobody registered would never run.
     fn check_pairings(&self) -> Result<(), ExtensionError> {
         for p in &self.providers {

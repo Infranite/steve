@@ -115,5 +115,6 @@
   "channels.rules.act.handoff": "hand off to you",
   "channels.error.run_stopped": "This run of the connection has stopped and no longer takes messages",
   "channels.error.cursor_not_ext": "The cursor “%{container}” does not belong to this adapter",
+  "channels.error.message_id_reserved": "Message ids starting with “fp:” are reserved for the Hub",
   "channels.error.run_panicked": "The task receiving messages stopped unexpectedly; it is retried shortly"
 }
