@@ -3,7 +3,8 @@
 //!
 //! - [`BotHook`], for each `feishu_app` connection that is `ok` / `error`: its long connection, and
 //!   right after it (re)starts, [`super::sync_bot_chats`] (the groups the bot is already in become
-//!   spaces). A new credential (re-entered App Secret) restarts it.
+//!   spaces). A new credential (re-entered App Secret) restarts it. Each time the long connection
+//!   is up it reports the connection healthy, so a failed start that was retried clears.
 //! - [`SelfPollHook`], for each `feishu_user` connection that is `ok` / `error` with `msg.receive`:
 //!   its self poller.
 //!
@@ -15,13 +16,13 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use steve_flow::AdapterError;
-use steve_modules::accounts::connections::ProviderError;
+use steve_modules::accounts::connections::{Health, ProviderError};
 
 use super::auth::{APP_SECRET, FeishuUser};
 use super::client;
 use super::inbound::LongConnection;
 use super::self_poll::SelfPoller;
-use super::ws::WsOptions;
+use super::ws::{WsOptions, WsState};
 use crate::Channels;
 use crate::lifecycle::{ConnRun, ConnectionHook};
 
@@ -49,14 +50,29 @@ impl ConnectionHook for BotHook {
         let lc = LongConnection::start_with(&self.channels, ws, id, opts, &bot_open_id)
             .map_err(|e| ProviderError::Transient(e.to_string()))?;
         tracing::info!(conn = id, "feishu: long connection started");
-        tokio::select! {
-            r = super::sync_bot_chats(&self.channels, ws, id) => match r {
+        let sync = async {
+            match super::sync_bot_chats(&self.channels, ws, id).await {
                 Ok(n) => tracing::info!(conn = id, synced = n, "feishu: bot chats synced"),
                 Err(e) => tracing::warn!(conn = id, "feishu: bot chats not synced: {e}"),
-            },
+            }
+        };
+        // connected (again): healthy
+        let mut state = lc.ws.subscribe();
+        let healthy = async {
+            loop {
+                let up = matches!(*state.borrow_and_update(), WsState::Connected { .. });
+                if up {
+                    cx.report(Health::Ok).await;
+                }
+                if state.changed().await.is_err() {
+                    return std::future::pending::<()>().await;
+                }
+            }
+        };
+        tokio::select! {
+            _ = async { tokio::join!(sync, healthy) } => {}
             _ = run.stop.cancelled() => {}
         }
-        run.stop.cancelled().await;
         // queued messages are still processed before the run returns
         let _ = lc.stop().await;
         Ok(())

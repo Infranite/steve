@@ -107,6 +107,8 @@ enum How {
     IgnoreStop,
     /// Until stopped, then `Err(Auth)` (a credential destroyed under it).
     FailWhenStopped,
+    /// `Err(Auth)` when the test says so (`Probe::fail_now`), before it is stopped; or until stopped.
+    FailOnSignal,
 }
 
 #[derive(Default)]
@@ -115,6 +117,7 @@ struct Probe {
     log: Mutex<Vec<String>>,
     sinks: Mutex<Vec<(String, ConnSink)>>,
     states: Mutex<Vec<ConnState>>,
+    fail_now: tokio::sync::Notify,
 }
 
 impl Probe {
@@ -179,6 +182,10 @@ impl ConnectionHook for Probe {
                 run.stop.cancelled().await;
                 Err(ProviderError::Auth("credential gone".into()).into())
             }
+            How::FailOnSignal => tokio::select! {
+                _ = self.fail_now.notified() => Err(ProviderError::Auth("credential gone".into()).into()),
+                _ = run.stop.cancelled() => Ok(()),
+            },
         };
         guard.2 = true;
         self.push(format!("{id}:end"));
@@ -425,6 +432,41 @@ async fn what_a_stopped_run_returns_is_not_reported() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_run_failing_on_a_credential_replaced_before_its_event_is_not_reported() {
+    let mut h = setup(fast());
+    h.add("con_a", "test_bot", json!({}));
+    h.probe.set("con_a", How::FailOnSignal);
+    h.start();
+    h.until("runs", |h| h.probe.count("con_a:start") == 1).await;
+    // the credential replaced (the old item destroyed): the run fails on it before the event
+    // has reached the runtime
+    h.exec("UPDATE connections SET credential_item = 'vi_con_a_2' WHERE id = 'con_a'");
+    h.probe.fail_now.notify_one();
+    // not reported, and the run follows the new credential without waiting for the event
+    h.until("started with the new credential", |h| {
+        h.probe.count("con_a:start") == 2
+    })
+    .await;
+    assert_eq!(
+        h.probe.states.lock().unwrap()[1].credential.as_deref(),
+        Some("vi_con_a_2")
+    );
+    // the event arrives late: nothing more to do
+    h.event("con_a");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(h.probe.count("con_a:start"), 2);
+    assert_eq!(
+        h.one("SELECT status FROM connections WHERE id = 'con_a'"),
+        "ok"
+    );
+    assert_eq!(
+        h.one("SELECT coalesce(json_extract(health, '$.last_error'), '') FROM connections WHERE id = 'con_a'"),
+        ""
+    );
+    h.rt.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn failures_and_panics_are_retried_and_reported() {
     let mut h = setup(fast());
     h.add("con_f", "test_bot", json!({}));
@@ -582,6 +624,26 @@ async fn shutdown_aborts_a_run_that_does_not_stop() {
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(h.probe.count("con_a:start"), 1);
     let _ = &h.ch;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn shutdown_during_a_restart_waits_only_the_shutdown_grace() {
+    let mut h = setup(fast());
+    h.add("con_a", "test_bot", json!({}));
+    h.probe.set("con_a", How::IgnoreStop);
+    h.start();
+    h.until("runs", |h| h.probe.count("con_a:start") == 1).await;
+    // a restart: its supervisor waits up to the stop grace (2 s) for the old run …
+    h.exec("UPDATE connections SET credential_item = 'vi_con_a_2' WHERE id = 'con_a'");
+    h.event("con_a");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    // … but a shutdown meanwhile bounds it by the shutdown grace (200 ms)
+    let t0 = std::time::Instant::now();
+    h.rt.shutdown().await;
+    assert!(t0.elapsed() < Duration::from_secs(1), "{:?}", t0.elapsed());
+    assert!(h.rt.running().is_empty());
+    assert_eq!(h.probe.count("con_a:dropped"), 1);
+    assert_eq!(h.probe.count("con_a:start"), 1, "the new run never started");
 }
 
 // ---------------------------------------------------------------------------------------------
