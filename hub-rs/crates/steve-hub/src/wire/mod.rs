@@ -180,7 +180,7 @@ fn node_runtime(
                 .map_err(|e| BackendError::msg(e.to_string()))?,
             capacity: steve_node_api::Capacity {
                 sessions: 64,
-                jobs: if kinds.think { JOB_CAPACITY } else { 0 },
+                jobs: if kinds.think { LOCAL_JOB_CAPACITY } else { 0 },
                 execs: 0,
             },
             // a 256 MiB journal at most, 512 MiB left free on the disk, new work again below 80%
@@ -237,8 +237,12 @@ fn local_node_mode(vars: &Vars) -> bool {
     }
 }
 
-/// Think jobs the local Node may run at once (the in-process gateway has no limit of its own).
-const JOB_CAPACITY: u32 = 16;
+/// Think jobs the local Node may run at once: no limit, as in process. A bound here would turn a
+/// burst of calls into start_jobs refused as exhausted and backed off (2 s doubling) with nothing
+/// waking them when a slot frees, so a call that answers in process today could time out and fall
+/// back instead; a start left unknown after a refused abandon would also hold its slot until the
+/// next boot.
+pub const LOCAL_JOB_CAPACITY: u32 = u32::MAX;
 
 /// Which of Steve's own model work may run as local Node jobs (`STEVE_NODE_JOBS=think,research`,
 /// on top of `STEVE_NODE_MODE=local`). Off unless named.

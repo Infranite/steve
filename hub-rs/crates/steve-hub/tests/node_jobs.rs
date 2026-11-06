@@ -23,7 +23,7 @@ use steve_store::{FnPublisher, Store, StoreError};
 /// process to `<log>.spawns`, stdin (images) to `<log>.stdin`. `--model m-busy` is a 503 with the
 /// tokens it spent; `@hang` writes its pid to `<log>.pid` and waits; `@read` answers with the
 /// attachment; otherwise two messages, the second the answer. With stream-json it streams, else it
-/// prints the result object only.
+/// prints the result object only. `@slow` answers after 3 s.
 const CLAUDE: &str = r#"#!/bin/sh
 log="$FAKE_LOG"
 echo "$$" >> "$log.spawns"
@@ -35,6 +35,11 @@ model=""; prev=""
 for a in "$@"; do if [ "$prev" = "--model" ]; then model="$a"; fi; prev="$a"; done
 msg() { if [ $stream = 1 ]; then echo '{"type":"stream_event","event":{"type":"message_start","message":{}}}'; fi; }
 delta() { if [ $stream = 1 ]; then printf '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"%s"}}}\n' "$1"; fi; }
+case "$*" in *@slow*)
+  sleep 3
+  printf '{"type":"result","is_error":false,"result":"慢答"}\n'
+  exit 0;;
+esac
 case "$*" in *@hang*)
   echo "$$" > "$log.pid"
   msg; delta "写到一半"
@@ -183,7 +188,7 @@ impl Local {
                 roots: vec![],
                 capacity: Capacity {
                     sessions: 0,
-                    jobs: 4,
+                    jobs: steve_hub::wire::LOCAL_JOB_CAPACITY,
                     execs: 0,
                 },
                 storage: steve_node::Storage::default(),
@@ -269,6 +274,37 @@ impl Local {
 fn alive(pid: i32) -> bool {
     // SAFETY: signal 0 only checks that the process exists
     unsafe { libc::kill(pid, 0) == 0 }
+}
+
+/// More think calls at once than any small job bound (the local Node used to stop at 16): all of
+/// them run at once and answer within their timeout, as in process, none refused as exhausted,
+/// backed off and timed out into a fallback.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_burst_of_calls_all_answer_within_their_timeout() {
+    let h = Local::new().await;
+    let gw = h.node(&["m1"]);
+    let t0 = Instant::now();
+    let calls = (0..24).map(|_| {
+        gw.attempt(
+            "@slow",
+            Tier::Smart,
+            Duration::from_secs(8),
+            &ThinkTools::None,
+            None,
+        )
+    });
+    let out = futures::future::join_all(calls).await;
+    for a in &out {
+        assert_eq!(
+            a.result.as_ref().map(|p| p.text.as_str()).ok(),
+            Some("慢答"),
+            "failures: {:?}",
+            a.failures
+        );
+        assert_eq!(a.attempts, 1);
+    }
+    assert!(t0.elapsed() < Duration::from_secs(8), "{:?}", t0.elapsed());
+    assert_eq!(h.spawns(), 24);
 }
 
 /// A busy first model, then the next: the same answer, attempts, failures and spent tokens as in
