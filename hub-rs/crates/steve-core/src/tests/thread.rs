@@ -507,7 +507,8 @@ async fn stop_ends_an_answer_at_once_and_the_queue_goes_next() {
         (ms[2].id.as_str(), ms[3].text.as_str()),
         (next.as_str(), "答好了")
     );
-    assert!(!k.core.main_busy(WS).unwrap());
+    // the answer is written before its turn lets go of the thread
+    assert!(k.wait(|| !k.core.main_busy(WS).unwrap()));
 }
 
 #[tokio::test]

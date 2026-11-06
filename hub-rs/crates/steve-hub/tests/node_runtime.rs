@@ -650,6 +650,32 @@ async fn steves_lead_goes_first_once_and_attachments_go_by_hash() {
     );
 }
 
+/// N0e-E9: a message whose attachment the Hub no longer has (an old queued message of a session
+/// that moved to the Node, say) goes without it, as on the legacy runner, instead of staying queued.
+#[tokio::test]
+async fn a_message_whose_file_is_gone_goes_without_it() {
+    let h = hub();
+    h.bind();
+    let f = FileRef {
+        id: "f_gone".into(),
+        name: "gone.txt".into(),
+        mime: "text/plain".into(),
+        size: 3,
+    };
+    h.rt.prompt(S, "still here", "user", std::slice::from_ref(&f))
+        .unwrap();
+    until("attempt", || h.attempts().len() == 1).await;
+    let spec: String = h.q("SELECT spec FROM runtime_attempts");
+    let spec: TurnSpec = serde_json::from_str(&spec).unwrap();
+    assert!(
+        matches!(&spec.run.prompt[..], [Part::Text { text }] if text == "still here"),
+        "{:?}",
+        spec.run.prompt
+    );
+    let queued: i64 = h.q("SELECT COUNT(*) FROM queued");
+    assert_eq!(queued, 0, "not left queued");
+}
+
 #[tokio::test]
 async fn a_permission_is_a_card_and_its_answer_goes_to_the_very_request() {
     let h = hub();
@@ -4834,4 +4860,66 @@ async fn a_lifecycle_cancel_never_retires_an_unknown_prepare() {
         "the open still waits on its prepare"
     );
     assert_eq!(h.systems("已撤回"), 0);
+}
+
+/// B5: a session the legacy runner ran moves here opening on its own conversation (the harness's
+/// session id the legacy runner kept is the open's resume handle), hears it once, and is then
+/// an ordinary Node session. Adopting it again changes nothing.
+#[tokio::test]
+async fn an_adopted_legacy_session_opens_on_its_own_conversation_once() {
+    let h = hub();
+    let b = Binding {
+        session: S.into(),
+        resource: format!("item:{S}"),
+        prepare: PrepareKind::Scratch,
+        choice: build::choice(),
+        policy: build::policy(),
+    };
+    assert!(h.rt.adopt(&b, Some("acp-legacy-1")).unwrap());
+    assert!(
+        !h.rt.adopt(&b, Some("acp-legacy-1")).unwrap(),
+        "bound already"
+    );
+    assert_eq!(h.rt.adopted(), 1);
+    h.one_turn("hello").await;
+    assert_eq!(
+        h.methods(),
+        ["prepare_workspace", "open_session", "start_turn"],
+        "one prepare and one open"
+    );
+    let resume: Option<String> = h.q(
+        "SELECT json_extract(request,'$.body.resume') FROM node_commands WHERE method='open_session'",
+    );
+    assert_eq!(resume.as_deref(), Some("acp-legacy-1"));
+    let told: i64 = h.q(
+        "SELECT COUNT(*) FROM events WHERE kind='system' AND json_extract(data,'$.adopted')=1 AND instr(json_extract(data,'$.text'),'接着原来的对话')>0",
+    );
+    assert_eq!(told, 1, "said once, in zh-CN");
+}
+
+/// B5: a legacy session that never got a conversation of its harness starts a new one, and says so.
+#[tokio::test]
+async fn an_adopted_legacy_session_without_a_conversation_starts_a_new_one() {
+    let h = hub();
+    assert!(h.rt.adopt(&on_the_item(S), None).unwrap());
+    h.one_turn("hello").await;
+    let resume: Option<String> = h.q(
+        "SELECT json_extract(request,'$.body.resume') FROM node_commands WHERE method='open_session'",
+    );
+    assert_eq!(resume, None);
+    let told: i64 = h.q(
+        "SELECT COUNT(*) FROM events WHERE kind='system' AND json_extract(data,'$.adopted')=1 AND instr(json_extract(data,'$.text'),'从新对话开始')>0",
+    );
+    assert_eq!(told, 1);
+}
+
+/// B5: a stopped Node adopts nothing (the session stays where it was).
+#[tokio::test]
+async fn a_stopped_node_adopts_nothing() {
+    let h = hub();
+    h.rt.stop("tools did not connect");
+    assert!(h.rt.adopt(&on_the_item(S), Some("acp-legacy-1")).is_err());
+    let bound: i64 = h.q("SELECT COUNT(*) FROM runtime_sessions");
+    assert_eq!(bound, 0);
+    assert_eq!(h.rt.adopted(), 0);
 }

@@ -285,6 +285,7 @@ fn job(attempt: &str, model: &str, text: &str) -> JobSpec {
                 idle_ms: 600_000,
             },
             steve_tools: false,
+            earlier: vec![],
         }),
     }
 }

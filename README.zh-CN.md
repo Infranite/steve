@@ -220,7 +220,8 @@ Steve 还没有运行时插件商店，“插件”页面目前只是占位。�
 
 ## 实验中与计划中
 
-- **多设备**（实验中，默认关闭）：另一台机器上的 `steve-node` 可以和 Hub 配对，在那台机器上跑 harness。Node 总是主动向外连，配对用一次性码加指纹确认，每个 Node 都有执行日志用来对账。用 `STEVE_NODE_LISTEN=1` / `STEVE_NODE_BIND` / `STEVE_NODE_MODE=local` 开启。配对目前只能走命令行，设计还在调整（[docs/hub-node-client.md](docs/hub-node-client.md)）。
+- **会话在 Node 上运行**：Hub 不再自己拉起 agent 进程，所有会话、Steve 自己的判断调用和就地研究都在本机 Node 上运行，本机 Node 默认开启（`STEVE_NODE_MODE=off` 时会话只排队）。
+- **多设备**（实验中，默认关闭）：另一台机器上的 `steve-node` 可以和 Hub 配对，在那台机器上跑 harness。Node 总是主动向外连，配对用一次性码加指纹确认，每个 Node 都有执行日志用来对账。远程 Node 用 `STEVE_NODE_LISTEN=1` / `STEVE_NODE_BIND` 开启。配对目前只能走命令行，设计还在调整（[docs/hub-node-client.md](docs/hub-node-client.md)）。
 - **还没做的**：插件页面（先用上面的扩展点）、免打扰和每日汇报（设置里标着“接入推送后生效”）、Gmail 和 Outlook API 邮件适配器、飞书文档 / 日历 / 审批，以及外部保险箱后端（1Password、Bitwarden）。
 
 ## 工作原理
@@ -323,7 +324,8 @@ Steve 从环境变量读取配置。作为服务运行时写在 `$STEVE_HOME/ste
 | `STEVE_YOLO` | 设为 `off` 在整个实例上关闭 YOLO |
 | `STEVE_KB_STORE` | 设为 `openviking` 使用可选的向量后端（默认 SQLite FTS） |
 | `STEVE_VAULT_KEYSTORE` | `auto`（钥匙串 / Secret Service）、`dir`（配合 `STEVE_VAULT_KEY_DIR`），或测试用的 `file` |
-| `STEVE_NODE_LISTEN`、`STEVE_NODE_BIND`、`STEVE_NODE_MODE` | 实验中的多设备 Node，默认关闭 |
+| `STEVE_NODE_MODE` | `local`（默认）在本机 Node 上运行会话；`off` 时会话只排队 |
+| `STEVE_NODE_LISTEN`、`STEVE_NODE_BIND` | 实验中的多设备 Node，默认关闭 |
 
 > [!IMPORTANT]
 > 把监听地址暴露到本机以外之前，请先检查认证配置。Steve 下运行的智能体拥有你本机用户的权限。
@@ -356,7 +358,7 @@ hub-rs/          Rust workspace：Hub 可执行文件和各 crate
   crates/steve-flow       信号、流程、定时
   crates/steve-vault      脱敏和粘贴守卫；steve-keyhelper 持有 macOS 密钥
   crates/steve-stats      用量、花费和交付指标
-  crates/steve-node*      Hub–Node 协议和 Node 运行时（实验中）
+  crates/steve-node*      Hub–Node 协议和运行所有会话的 Node 运行时
   crates/steve-store      SQLite 表结构和迁移
 web/             React + Vite + Tailwind 界面
 ops/             安装、发布、备份、服务和 OpenViking 脚本

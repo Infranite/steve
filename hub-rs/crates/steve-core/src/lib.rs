@@ -53,9 +53,7 @@ mod tests;
 pub use config::CoreConfig;
 pub use error::{CoreError, Result};
 pub use gateway::{ClaudeCli, Fallback, LocalPrint, ModelGateway, OneModel, SharedGateway, Tier};
-pub use orchestrator::{
-    CreateItem, Forked, ItemAction, RESUMED_NOTE, SendNow, SupplementMode, resumed_text,
-};
+pub use orchestrator::{CreateItem, Forked, ItemAction, RESUMED_NOTE, SendNow, SupplementMode};
 pub use runtime::{
     AgentRuntime, Answered, Check, Configured, Flushed, McpEndpoint, Output, Prompted, Released,
     Running, Stop, TurnEnd,
@@ -117,13 +115,8 @@ pub(crate) struct State {
     /// The session's last Steve tool call, with the turn it was made in (`None`: none ran then).
     pending: HashMap<String, (Mark, Option<runtime::Running>)>,
     tokens: HashMap<String, String>,
-    /// Sessions resumed after a restart, with the turn the resume started.
-    resumed: HashMap<String, runtime::Running>,
     /// The last turn end each session had (its attempt): the same end told again is ignored.
     ended: HashMap<String, String>,
-    /// Boot resumes scheduled by `recover` and not yet run: (batch, sessions); each batch runs once.
-    resumes: Vec<(u64, Vec<String>)>,
-    resume_batch: u64,
     releasing: Option<Releasing>,
     release_generation: u64,
     drafts: HashMap<String, changes::Proposal>,
@@ -257,12 +250,6 @@ impl Core {
         let mut st = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
         st.tx_seq += 1;
         Tx { c: self, st }
-    }
-
-    /// Run every pending boot resume now, as if its timer fired (a timer firing later finds nothing left).
-    #[cfg(test)]
-    pub(crate) fn fire_resume(&self) {
-        self.tx().resume(None)
     }
 }
 

@@ -101,6 +101,7 @@ fn spawn_hub(
         .env("STEVE_VAULT_KEYSTORE", "file")
         .env("STEVE_FORBID_REAL_HOSTS", "1")
         .env("STEVE_NO_RESUME", "1")
+        .env("STEVE_NODE_MODE", "off")
         .env("CLAUDE_CODE_EXECUTABLE", fake)
         .env("STEVE_ADAPTER_CLAUDE", "/usr/bin/false")
         .env("STEVE_ADAPTER_CODEX", "/usr/bin/false")
@@ -635,8 +636,9 @@ async fn a_module_decision_is_undone_through_the_route() {
     );
 }
 
-/// An item whose session (its adapter fails to start, which is fine here) gets the bearer token
-/// `test-token`; returns an MCP caller with that token.
+/// An item whose session gets the bearer token `test-token`; returns an MCP caller with that token.
+/// No Node runs here (`STEVE_NODE_MODE=off`), so the new session is refused and ended at once;
+/// it is made idle again, which is all its Steve tools need.
 async fn agent_session(
     hub: &Hub,
     c: &Client,
@@ -665,7 +667,7 @@ async fn agent_session(
     db.busy_timeout(Duration::from_secs(5)).expect("timeout");
     let hash = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(b"test-token"));
     db.execute(
-        "UPDATE sessions SET token_hash = ? WHERE id = ?",
+        "UPDATE sessions SET token_hash = ?, status = 'idle' WHERE id = ?",
         [&hash, &sid],
     )
     .expect("token");

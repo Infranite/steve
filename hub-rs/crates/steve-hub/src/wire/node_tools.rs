@@ -8,7 +8,9 @@ use rusqlite::{Connection, OptionalExtension, params};
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
 use steve_node_api::*;
-use steve_store::{Session, Store, StoreError};
+use steve_store::{Session, Store, StoreError, ThreadRun};
+
+use super::node_runtime::RESEARCH_GRANT;
 
 pub(crate) fn internal(e: impl std::fmt::Display) -> ApiError {
     tracing::error!("node host: {e}");
@@ -94,6 +96,71 @@ pub(crate) fn authorize(
     Ok((s, spec))
 }
 
+/// A research job of this Node (grant [`RESEARCH_GRANT`]) and its thread run: the job attempt must
+/// be the one the Hub froze, its run of the job's workspace. Fresh calls (`active`) also need the
+/// attempt live (not cancelled, finished or unknown) and its thread run still `running`, as the
+/// in-process run's token is valid only while the run is (thread-routing §7.4).
+pub(crate) fn authorize_research(
+    store: &Store,
+    node: &NodeId,
+    exec: &ExecutionRef,
+    active: bool,
+) -> ApiResult<ThreadRun> {
+    let ExecutionRef::Job { job, attempt } = exec else {
+        return Err(denied());
+    };
+    let row = store.reader(|c| {
+        Ok::<_, StoreError>(c.query_row(
+            "SELECT a.execution,a.spec,a.state,a.cancel_requested,j.kind,j.thread_run_id,j.workspace_id,j.state FROM runtime_job_attempts a JOIN runtime_jobs j ON j.job_id=a.job_id WHERE a.attempt_id=?1 AND a.job_id=?2 AND a.node_id=?3 AND j.node_id=?3",
+            params![attempt.as_str(), job.as_str(), node.as_str()],
+            |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,bool>(3)?,r.get::<_,String>(4)?,r.get::<_,Option<String>>(5)?,r.get::<_,String>(6)?,r.get::<_,String>(7)?)),
+        ).optional()?)
+    }).map_err(internal)?.ok_or_else(denied)?;
+    let (saved, spec, state, cancelled, kind, run, workspace, job_state) = row;
+    let saved: ExecutionRef = serde_json::from_str(&saved).map_err(internal)?;
+    let spec: JobSpec = serde_json::from_str(&spec).map_err(internal)?;
+    let steve_tools = matches!(&spec.work, JobWork::Research(r) if r.steve_tools);
+    if saved != *exec
+        || kind != "research"
+        || !steve_tools
+        || spec.job != *job
+        || spec.run.attempt != *attempt
+        || spec.run.policy.tools.as_str() != RESEARCH_GRANT
+    {
+        return Err(denied());
+    }
+    if active
+        && (cancelled || job_state != "open" || matches!(state.as_str(), "finished" | "unknown"))
+    {
+        return Err(denied());
+    }
+    let run = store
+        .thread()
+        .run(run.as_deref().ok_or_else(denied)?)
+        .map_err(internal)?
+        .ok_or_else(denied)?;
+    if run.workspace_id != workspace || (active && run.status != "running") {
+        return Err(denied());
+    }
+    Ok(run)
+}
+
+/// Who a Steve tool call is for: a session's turn, or a research job's thread run.
+#[derive(Clone)]
+pub enum Caller {
+    Session(Session),
+    Research(ThreadRun),
+}
+
+impl Caller {
+    fn ids(&self) -> (&str, &str) {
+        match self {
+            Caller::Session(s) => (&s.id, &s.workspace_id),
+            Caller::Research(r) => (&r.id, &r.workspace_id),
+        }
+    }
+}
+
 /// Injectable only at the bridge boundary: production always uses the existing ToolService.
 #[async_trait]
 pub trait Service: Send + Sync {
@@ -104,6 +171,20 @@ pub trait Service: Send + Sync {
         name: &str,
         args: serde_json::Value,
     ) -> Result<String, String>;
+    /// The tools a research job sees: read-only ones only.
+    fn research_catalog(&self) -> Vec<ToolDescriptor> {
+        vec![]
+    }
+    /// Runs research tool `name` for thread run `run`; anything else is refused.
+    async fn research_call(
+        &self,
+        run: ThreadRun,
+        name: &str,
+        args: serde_json::Value,
+    ) -> Result<String, String> {
+        let _ = (run, name, args);
+        Err(super::research_mcp::REFUSED.into())
+    }
 }
 #[async_trait]
 impl Service for ToolService {
@@ -117,6 +198,17 @@ impl Service for ToolService {
         args: serde_json::Value,
     ) -> Result<String, String> {
         self.call(session, name, args).await
+    }
+    fn research_catalog(&self) -> Vec<ToolDescriptor> {
+        super::research_mcp::descriptors()
+    }
+    async fn research_call(
+        &self,
+        run: ThreadRun,
+        name: &str,
+        args: serde_json::Value,
+    ) -> Result<String, String> {
+        super::research_mcp::call_tool(&self.extra, run, name, args).await
     }
 }
 struct Ledger {
@@ -195,8 +287,11 @@ impl NodeTools {
             .cloned()
             .ok_or_else(|| ApiError::new(ErrorCode::Offline, "tool service not ready"))
     }
-    fn catalog_of(service: &dyn Service) -> ApiResult<Catalog> {
-        let tools = service.catalog();
+    fn catalog_of(service: &dyn Service, caller: &Caller) -> ApiResult<Catalog> {
+        let tools = match caller {
+            Caller::Session(_) => service.catalog(),
+            Caller::Research(_) => service.research_catalog(),
+        };
         let digest = digest_of(&tools)?;
         Ok(Catalog {
             revision: Revision::new(derived_id("catalog", digest.as_str())).map_err(internal)?,
@@ -207,19 +302,30 @@ impl NodeTools {
         serde_json::to_string(key).map_err(internal)
     }
     /// Authorizes `exec` (historically, or as the running attempt) on a blocking thread.
-    async fn authorized(&self, exec: &ExecutionRef, active: bool) -> ApiResult<Session> {
+    async fn authorized(&self, exec: &ExecutionRef, active: bool) -> ApiResult<Caller> {
         let (store, node, exec) = (self.store.clone(), self.node.clone(), exec.clone());
-        blocking(move || authorize(&store, &node, &exec, active).map(|(s, _)| s)).await
+        blocking(move || caller(&store, &node, &exec, active)).await
     }
     /// What the ledger holds for `key`, for an execution authorized historically.
     async fn saved(&self, key: &ToolKey, digest: Option<Digest>) -> ApiResult<Option<ToolResult>> {
         let (store, node, ledger) = (self.store.clone(), self.node.clone(), self.ledger.clone());
         let (exec, encoded) = (key.execution.clone(), Self::key(key)?);
         blocking(move || {
-            authorize(&store, &node, &exec, false)?;
+            caller(&store, &node, &exec, false)?;
             saved(&ledger.db.lock().unwrap(), &encoded, digest.as_ref())
         })
         .await
+    }
+}
+/// [`authorize`] for a turn, [`authorize_research`] for a job.
+fn caller(store: &Store, node: &NodeId, exec: &ExecutionRef, active: bool) -> ApiResult<Caller> {
+    match exec {
+        ExecutionRef::Turn { .. } => {
+            authorize(store, node, exec, active).map(|(s, _)| Caller::Session(s))
+        }
+        ExecutionRef::Job { .. } => {
+            authorize_research(store, node, exec, active).map(Caller::Research)
+        }
     }
 }
 fn saved(db: &Connection, key: &str, digest: Option<&Digest>) -> ApiResult<Option<ToolResult>> {
@@ -257,8 +363,8 @@ fn saved(db: &Connection, key: &str, digest: Option<&Digest>) -> ApiResult<Optio
 #[async_trait]
 impl HubTools for NodeTools {
     async fn catalog(&self, execution: ExecutionRef) -> ApiResult<Catalog> {
-        self.authorized(&execution, true).await?;
-        Self::catalog_of(&*self.service()?)
+        let caller = self.authorized(&execution, true).await?;
+        Self::catalog_of(&*self.service()?, &caller)
     }
     async fn call(&self, q: ToolCall) -> ApiResult<ToolResult> {
         let key = q.key();
@@ -274,7 +380,7 @@ impl HubTools for NodeTools {
         })?;
         let session = self.authorized(&q.execution, true).await?;
         let service = self.service()?;
-        let catalog = Self::catalog_of(&*service)?;
+        let catalog = Self::catalog_of(&*service, &session)?;
         if catalog.revision != q.catalog {
             return Err(ApiError::new(ErrorCode::Stale, "tool catalog changed"));
         }
@@ -311,7 +417,8 @@ impl HubTools for NodeTools {
                 if let Some(r) = saved(&db, &encoded, Some(&digest))? {
                     return Ok(Some(r));
                 }
-                db.execute("INSERT INTO calls(key,digest,operation,node,session,workspace,name,catalog,deadline,created,updated,state) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?10,'running')",params![encoded,digest.as_str(),operation.as_str(),node.as_str(),session.id,session.workspace_id,name,catalog.as_str(),deadline,steve_store::now()]).map_err(internal)?;
+                let (holder, workspace) = session.ids();
+                db.execute("INSERT INTO calls(key,digest,operation,node,session,workspace,name,catalog,deadline,created,updated,state) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?10,'running')",params![encoded,digest.as_str(),operation.as_str(),node.as_str(),holder,workspace,name,catalog.as_str(),deadline,steve_store::now()]).map_err(internal)?;
                 Ok(None)
             })
             .await?
@@ -348,7 +455,7 @@ impl HubTools for NodeTools {
             let authorized = if cancelled {
                 Ok(())
             } else {
-                blocking(move || authorize(&store, &node, &exec, true).map(|_| ())).await
+                blocking(move || caller(&store, &node, &exec, true).map(|_| ())).await
             };
             let result = match authorized {
                 _ if cancelled => ToolResult::Failed {
@@ -361,7 +468,10 @@ impl HubTools for NodeTools {
                 Ok(_) if steve_store::now() >= q.deadline.0 => ToolResult::Failed {
                     error: ApiError::new(ErrorCode::Expired, "tool expired before invocation"),
                 },
-                Ok(_) => match service.call(session, &q.name, q.args).await {
+                Ok(_) => match match session {
+                    Caller::Session(s) => service.call(s, &q.name, q.args).await,
+                    Caller::Research(r) => service.research_call(r, &q.name, q.args).await,
+                } {
                     Ok(text) => ToolResult::Completed {
                         end_turn: text.ends_with(steve_mcp::tools::END),
                         parts: vec![Part::Text { text }],
@@ -411,7 +521,7 @@ impl HubTools for NodeTools {
         let (store, node, ledger) = (self.store.clone(), self.node.clone(), self.ledger.clone());
         let encoded = Self::key(&key)?;
         let result = blocking(move || {
-            authorize(&store, &node, &key.execution, false)?;
+            caller(&store, &node, &key.execution, false)?;
             let db = ledger.db.lock().unwrap();
             let result = saved(&db, &encoded, None)?
                 .ok_or_else(|| ApiError::new(ErrorCode::Invalid, "unknown ToolKey"))?;
@@ -780,6 +890,8 @@ pub(crate) mod tests {
             ("STEVE_ADAPTER_CLAUDE", "/usr/bin/false".into()),
             ("STEVE_ADAPTER_CODEX", "/usr/bin/false".into()),
             ("STEVE_WEB_DIR", h.join("no-web").display().to_string()),
+            // the test opens the Node's tools port itself, so the Hub builds no Node
+            ("STEVE_NODE_MODE", "off".into()),
         ]
         .into_iter()
         .collect();
@@ -788,7 +900,7 @@ pub(crate) mod tests {
         for d in [&cfg.data_dir, &cfg.worktrees, &cfg.scratch] {
             std::fs::create_dir_all(d).unwrap();
         }
-        // STEVE_NODE_MODE is unset: the Hub's ToolService as it would be installed for a Node
+        // STEVE_NODE_MODE=off: the Hub's ToolService as it would be installed for a Node
         let w = super::super::wire_with(&cfg, &crate::bus::Bus::new(), Arc::new(get)).unwrap();
         let store = Store::open(cfg.db_path(), steve_store::FnPublisher(|_| {})).unwrap();
         let home = cfg.data_dir.join("node");

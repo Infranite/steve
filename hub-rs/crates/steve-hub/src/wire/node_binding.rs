@@ -34,10 +34,10 @@ pub(crate) fn permission_mode(perm: &str) -> Option<PermissionMode> {
 
 /// A binding is only a plan. The coordinator must bind it before routing a new session. Imported,
 /// ended, read-only, cross-workspace or unrecognized permission settings fail closed.
-/// `perm`: the harness mode the legacy runner would start the session in (the bot's `perm_mode`
-/// as YOLO sets it, `Core::session_perm_mode`; `None`: the harness default), so a session gets the
-/// same permissions on either path. `allows`: whether the Node takes a directory (its roots);
-/// a directory it does not take plans nothing, and the session stays where it would go otherwise.
+/// `perm`: the harness mode the session is meant to start in (the bot's `perm_mode` as YOLO sets
+/// it, `Core::session_perm_mode`; `None`: the harness default), the same the legacy runner gave
+/// it. `allows`: whether the Node takes a directory (its roots); a directory it does not take
+/// plans nothing, and the session is refused.
 pub fn binding_for(
     store: &Store,
     session: &str,
@@ -60,32 +60,94 @@ pub fn binding_with(
     allows: &dyn Fn(&RootPath) -> bool,
     worktrees: Option<&Path>,
 ) -> Option<Binding> {
-    let s = store.sessions().get(session).ok()??;
-    if s.status == "ended" || s.readonly != 0 || s.device_id != "hub" || s.source != "Steve" {
-        return None;
+    plan(store, session, perm, allows, worktrees).ok()
+}
+
+/// Why a session has no binding on the local Node ([`plan`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Unbound {
+    /// Its rows could not be read, or a name in them is no valid id: maybe only for now.
+    Unreadable,
+    /// No such session.
+    Missing,
+    Ended,
+    /// Imported from a harness's history: read only.
+    ReadOnly,
+    /// Not a session of Steve's on this machine.
+    NotHere,
+    /// It belongs to no item, or its item is in another workspace (or gone).
+    NoItem,
+    /// Its item's project is archived.
+    Archived,
+    /// Its bot is gone, disabled or in another workspace.
+    Bot,
+    /// A permission mode the Node path cannot express.
+    Mode(String),
+    /// Its directory is not one the Node takes (none of its roots).
+    OutsideRoots,
+}
+
+impl Unbound {
+    /// Whether this holds for good: a session that is not bound now never will be, as it is.
+    /// An unreadable row may read fine the next time.
+    pub fn is_permanent(&self) -> bool {
+        !matches!(self, Unbound::Unreadable)
     }
-    let item = store.items().get(s.item_id.as_deref()?).ok()??;
+}
+
+/// [`binding_with`], saying why when there is no binding.
+pub fn plan(
+    store: &Store,
+    session: &str,
+    perm: Option<&str>,
+    allows: &dyn Fn(&RootPath) -> bool,
+    worktrees: Option<&Path>,
+) -> Result<Binding, Unbound> {
+    use Unbound::*;
+    let s = store
+        .sessions()
+        .get(session)
+        .map_err(|_| Unreadable)?
+        .ok_or(Missing)?;
+    if s.status == "ended" {
+        return Err(Ended);
+    }
+    if s.readonly != 0 {
+        return Err(ReadOnly);
+    }
+    if s.device_id != "hub" || s.source != "Steve" {
+        return Err(NotHere);
+    }
+    let item = store
+        .items()
+        .get(s.item_id.as_deref().ok_or(NoItem)?)
+        .map_err(|_| Unreadable)?
+        .ok_or(NoItem)?;
     if item.workspace_id != s.workspace_id {
-        return None;
+        return Err(NoItem);
     }
     // an archived project's directories are no roots any more ([`roots`]), its items' included
     if let Some(pid) = &item.project_id
-        && let Ok(Some(p)) = store.projects().get(pid)
-        && p.archived
+        && store
+            .projects()
+            .get(pid)
+            .map_err(|_| Unreadable)?
+            .is_some_and(|p| p.archived)
     {
-        return None;
+        return Err(Archived);
     }
     let bot = match s.bot_id.as_deref() {
-        Some(id) => Some(store.bots().get(id).ok()??),
+        Some(id) => Some(store.bots().get(id).map_err(|_| Unreadable)?.ok_or(Bot)?),
         None => None,
     };
     if bot
         .as_ref()
         .is_some_and(|b| b.workspace_id != s.workspace_id || !b.enabled)
     {
-        return None;
+        return Err(Bot);
     }
-    let permissions = permission_mode(perm.unwrap_or("default"))?;
+    let mode = perm.unwrap_or("default");
+    let permissions = permission_mode(mode).ok_or_else(|| Mode(mode.to_string()))?;
     let cwd = if !s.cwd.is_empty() {
         Some(s.cwd.as_str())
     } else {
@@ -99,11 +161,11 @@ pub fn binding_with(
             && (item.project_id.is_none() || item.branch.is_some())
         {
             RootPath {
-                root: root_id(path.parent()?)?,
-                rel: RelPath::new(item.id.clone()).ok()?,
+                root: path.parent().and_then(root_id).ok_or(OutsideRoots)?,
+                rel: RelPath::new(item.id.clone()).map_err(|_| Unreadable)?,
             }
         } else {
-            at(cwd)?
+            at(cwd).ok_or(OutsideRoots)?
         };
         let existing = PrepareKind::Existing { dir };
         match worktrees.and_then(|w| item_worktree(store, &item, &s.workspace_id, path, w)) {
@@ -111,25 +173,34 @@ pub fn binding_with(
             _ => existing,
         }
     } else if let Some(pid) = &item.project_id {
-        let p = store.projects().get(pid).ok()??;
-        if p.workspace_id != s.workspace_id || p.device_id != "hub" || p.archived {
-            return None;
+        let p = store
+            .projects()
+            .get(pid)
+            .map_err(|_| Unreadable)?
+            .ok_or(NoItem)?;
+        if p.workspace_id != s.workspace_id || p.device_id != "hub" {
+            return Err(NotHere);
+        }
+        if p.archived {
+            return Err(Archived);
         }
         if p.kind == "git" && p.worktree {
             PrepareKind::Worktree {
-                repository: at(&p.path)?,
+                repository: at(&p.path).ok_or(OutsideRoots)?,
                 branch: format!("steve/{}", item.id.to_lowercase()),
                 base: None,
                 at: match worktrees {
                     Some(w) => Some(RootPath {
-                        root: root_id(w)?,
-                        rel: RelPath::new(item.id.clone()).ok()?,
+                        root: root_id(w).ok_or(OutsideRoots)?,
+                        rel: RelPath::new(item.id.clone()).map_err(|_| Unreadable)?,
                     }),
                     None => None,
                 },
             }
         } else {
-            PrepareKind::Existing { dir: at(&p.path)? }
+            PrepareKind::Existing {
+                dir: at(&p.path).ok_or(OutsideRoots)?,
+            }
         }
     } else {
         PrepareKind::Scratch
@@ -137,12 +208,12 @@ pub fn binding_with(
     match &prepare {
         PrepareKind::Existing { dir: at } | PrepareKind::Worktree { repository: at, .. } => {
             if !allows(at) {
-                return None;
+                return Err(OutsideRoots);
             }
         }
         PrepareKind::Scratch => {}
     }
-    Some(Binding {
+    Ok(Binding {
         session: s.id,
         resource,
         prepare,
@@ -153,12 +224,12 @@ pub fn binding_with(
         },
         policy: ExecutionPolicy {
             revision: Revision::new(format!("host-{}", bot.as_ref().map_or(0, |b| b.revision)))
-                .ok()?,
+                .map_err(|_| Unreadable)?,
             permissions,
             sandbox: SandboxRequirement::None,
             readable: vec![],
             network: NetworkScope::Unrestricted,
-            tools: GrantId::new("hub").ok()?,
+            tools: GrantId::new("hub").map_err(|_| Unreadable)?,
         },
     })
 }
@@ -519,7 +590,7 @@ mod bot_tests {
         assert_eq!(b.policy.revision.as_str(), "host-3");
     }
 
-    /// The Node path starts a session with the permissions the legacy runner would give it: the
+    /// The Node path starts a session with the permissions the legacy runner gave it: the
     /// mode `Core::session_perm_mode` computes (the bot's, as YOLO widens it) for every bot mode ×
     /// YOLO level × directory, and a read-only session never binds.
     #[test]
@@ -570,7 +641,7 @@ mod bot_tests {
         for (n, bot) in bots.iter().enumerate() {
             for (level, own) in levels {
                 for ro in [false, true] {
-                    // what Core::session_perm_mode hands the legacy runner (HubHost::session)
+                    // what Core::session_perm_mode gives (HubHost::perm_mode)
                     let legacy = if ro {
                         perm_mode(*bot, false)
                     } else {
@@ -667,7 +738,7 @@ mod host_tests {
         }
     }
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn default_off_and_real_local_host_with_fake_adapter() {
+    async fn explicit_off_and_real_local_host_with_fake_adapter() {
         let dir = tempfile::tempdir().unwrap();
         let mut cfg = crate::config::Config::from_vars(|k| match k {
             "STEVE_HOME" => Some(dir.path().join("steve").to_string_lossy().into()),
@@ -677,7 +748,9 @@ mod host_tests {
         .unwrap();
         let store = Store::open(dir.path().join("hub.sqlite3"), steve_store::NoPublisher).unwrap();
         store.ensure_workspace().unwrap();
-        let off: Vars = Arc::new(|_| None);
+        // the rollback: STEVE_NODE_MODE=off builds no Node; neither does an unset mode on a
+        // STEVE_NO_RESUME copy
+        let off: Vars = Arc::new(|k| (k == "STEVE_NODE_MODE").then(|| "off".into()));
         let mut jobs = vec![];
         assert!(
             super::super::node_runtime(
@@ -691,6 +764,21 @@ mod host_tests {
             .unwrap()
             .is_none()
         );
+        let unset: Vars = Arc::new(|_| None);
+        cfg.no_resume = true;
+        assert!(
+            super::super::node_runtime(
+                &cfg,
+                &store,
+                Arc::new(Ends),
+                &unset,
+                &super::super::node_secrets::NodeSecrets::new(),
+                &mut jobs
+            )
+            .unwrap()
+            .is_none()
+        );
+        cfg.no_resume = false;
         assert!(jobs.is_empty());
         assert!(!cfg.data_dir.join("node").exists());
         let on: Vars = Arc::new(|k| (k == "STEVE_NODE_MODE").then(|| "local".into()));
@@ -786,11 +874,11 @@ mod host_tests {
         assert!(gone, "the adapter outlived the Hub's shutdown");
     }
 
-    /// A new session the local Node cannot run stays on the legacy runner instead of becoming a
-    /// dead Node session: a project directory added after the Node started (not among its roots)
+    /// A new session the local Node cannot run is refused, said why, instead of becoming a dead
+    /// Node session: a project directory added after the Node started (not among its roots)
     /// plans no binding, and once the Node stopped its bind is refused.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_session_the_local_node_cannot_run_stays_legacy() {
+    async fn a_session_the_local_node_cannot_run_is_refused() {
         use steve_core::AgentRuntime;
         let dir = tempfile::tempdir().unwrap();
         let cfg = crate::config::Config::from_vars(|k| match k {
@@ -828,15 +916,9 @@ mod host_tests {
             flow: Default::default(),
             yolo: Default::default(),
             local_node: Default::default(),
-            user_seqs: Default::default(),
-            transcripts: Default::default(),
         });
         let _ = host.local_node.set(node.clone());
         let routed = super::super::core::RoutedRuntime {
-            legacy: super::super::core::AcpRuntime(steve_acp::Acp::new(
-                super::super::acp_config(&cfg),
-                host.clone(),
-            )),
             node: Some(rt.clone()),
             fleet: None,
             bind_remote: None,
@@ -875,12 +957,24 @@ mod host_tests {
         assert!(binding_for(&store, "s1", None, &|_| true).is_some());
         assert!(binding_for(&store, "s1", None, &|p| node.allows(p)).is_none());
         routed.created("s1", None);
-        assert_eq!(bound("s1"), 0, "a directory outside the roots stays legacy");
+        assert_eq!(
+            bound("s1"),
+            0,
+            "a directory outside the roots is bound nowhere"
+        );
+        let why = routed.refusal("s1").expect("refused");
+        assert!(why.contains("不在 Node 可用的目录里"), "{why}");
+        assert!(
+            routed.prompt("s1", "做事", "me", &[]).is_err(),
+            "never run on the Hub"
+        );
         // a scratch session could run there, but the Node stopped
         assert!(binding_for(&store, "s2", None, &|p| node.allows(p)).is_some());
         rt.stop("its tools did not connect");
         routed.created("s2", None);
         assert_eq!(bound("s2"), 0, "a stopped Node binds nothing");
+        let why = routed.refusal("s2").expect("refused");
+        assert!(why.contains("本机 Node 没有在运行"), "{why}");
         assert!(!super::super::node_runtime::bound(&store, "s2"));
         node.shutdown().await;
     }

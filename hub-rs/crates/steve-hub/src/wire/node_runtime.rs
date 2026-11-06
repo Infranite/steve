@@ -52,7 +52,9 @@ pub use heads::{
 pub use ledger::LedgerEntry;
 #[cfg(test)]
 pub(crate) use ledger::PUSH_DEADLINE;
-pub use node_jobs::NodePrint;
+pub use node_jobs::{
+    News, NodePrint, RESEARCH_GRANT, ResearchAttempt, ResearchFile, ResearchJobRun,
+};
 pub use workspace::WorkspaceFact;
 
 /// Retries of a turn after a passing failure (gateway 5xx) with no tool run, and their waits.
@@ -213,9 +215,16 @@ pub struct NodeRuntime {
     /// How long an open session may sit idle before its harness is let go, in ms
     /// ([`Self::set_idle_release`]; legacy's 10 minutes by default).
     idle_release: std::sync::atomic::AtomicI64,
-    /// New sessions left on the legacy runner since boot although this Node was on (no binding
-    /// could be planned, or the bind failed): `/healthz` shows them, so they don't hide.
+    /// New sessions bound nowhere since boot although this Node was on (no binding could be
+    /// planned, or the bind failed), so refused: `/healthz` shows them, so they don't hide.
     fallbacks: std::sync::atomic::AtomicU64,
+    /// Sessions of the (removed) legacy runner moved onto this Node since boot ([`Self::adopt`]).
+    adopted: std::sync::atomic::AtomicU64,
+    /// Sessions of the (removed) legacy runner ended since boot because they cannot run on this Node.
+    retired: std::sync::atomic::AtomicU64,
+    /// Research runs that went in process since boot although research runs on this Node (a
+    /// directory under none of its roots, or the roots unreadable): `/healthz` shows them too.
+    research_fallbacks: AtomicU64,
     /// The callers waiting on think jobs of this Node ([`NodePrint`]).
     jobs: node_jobs::Waiters,
 }
@@ -228,6 +237,9 @@ const PRUNE_BATCH: i64 = 500;
 /// The `retry_at` of a release queued for when its session's turn is over: never leased until
 /// [`NodeRuntime::release_in`] sends it.
 const AFTER_TURN: i64 = i64::MAX;
+/// The `retry_at` of the first prepare and open of a session adopted idle: never leased until a
+/// message reopens it ([`NodeRuntime::adopt_idle`]).
+const UNTIL_NEEDED: i64 = i64::MAX - 1;
 /// An attempt's deadline by default.
 const TURN_LIMIT_MS: i64 = 6 * 3_600_000;
 /// How long a session stays open with nothing to do, by default (legacy's idle kill).
@@ -337,6 +349,9 @@ impl NodeRuntime {
             turn_limit: std::sync::atomic::AtomicI64::new(TURN_LIMIT_MS),
             idle_release: std::sync::atomic::AtomicI64::new(IDLE_RELEASE_MS),
             fallbacks: std::sync::atomic::AtomicU64::new(0),
+            adopted: std::sync::atomic::AtomicU64::new(0),
+            retired: std::sync::atomic::AtomicU64::new(0),
+            research_fallbacks: AtomicU64::new(0),
             jobs: node_jobs::Waiters::default(),
         })
     }
@@ -383,7 +398,7 @@ impl NodeRuntime {
         self.stopped.lock().unwrap().is_some()
     }
 
-    /// A new session stayed on the legacy runner although this Node is on.
+    /// A new session was bound nowhere although this Node is on (it is refused).
     pub fn fell_back(&self) {
         self.fallbacks.fetch_add(1, Ordering::Relaxed);
     }
@@ -391,6 +406,31 @@ impl NodeRuntime {
     /// How many new sessions [`Self::fell_back`] since boot.
     pub fn fallbacks(&self) -> u64 {
         self.fallbacks.load(Ordering::Relaxed)
+    }
+
+    /// How many legacy sessions were [`Self::adopt`]ed since boot.
+    pub fn adopted(&self) -> u64 {
+        self.adopted.load(Ordering::Relaxed)
+    }
+
+    /// A legacy session that cannot run on this Node was ended.
+    pub fn retired_one(&self) {
+        self.retired.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// How many legacy sessions were [`Self::retired_one`] since boot.
+    pub fn retired(&self) -> u64 {
+        self.retired.load(Ordering::Relaxed)
+    }
+
+    /// A research run went in process although research runs on this Node.
+    pub fn research_fell_back(&self) {
+        self.research_fallbacks.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// How many research runs [`Self::research_fell_back`] since boot.
+    pub fn research_fallbacks(&self) -> u64 {
+        self.research_fallbacks.load(Ordering::Relaxed)
     }
 
     /// An error if [`Self::stop`] was called.
@@ -542,6 +582,52 @@ impl NodeRuntime {
     /// never open at once (they share the item's worktree). A release that fails is asked again
     /// and the session waits for that one instead ([`Self::release_again_in`]).
     pub fn bind_after(&self, b: &Binding, after: Option<&str>) -> Result<(), StoreError> {
+        self.bind_with(b, after, None, false).map(|_| ())
+    }
+
+    /// A session the legacy runner ran moves onto this Node (B5; at boot since B7, as nothing
+    /// runs it any more). It opens continuing the same conversation, `resume` being the harness's
+    /// own session id the legacy runner kept (`sessions.acp_session_id`; `None`: it never got one,
+    /// so it starts a new one). The session hears it once. Idempotent: a session bound already is
+    /// left as it is (false).
+    pub fn adopt(&self, b: &Binding, resume: Option<&str>) -> Result<bool, StoreError> {
+        self.adopt_with(b, resume, false)
+    }
+
+    /// [`Self::adopt`] for a session with nothing to do now: bound as one this Node let go, its
+    /// workspace prepared and its harness opened only once a message comes ([`UNTIL_NEEDED`]).
+    /// So a boot that moves many idle sessions starts no harness for any of them.
+    pub fn adopt_idle(&self, b: &Binding, resume: Option<&str>) -> Result<bool, StoreError> {
+        self.adopt_with(b, resume, true)
+    }
+
+    fn adopt_with(
+        &self,
+        b: &Binding,
+        resume: Option<&str>,
+        idle: bool,
+    ) -> Result<bool, StoreError> {
+        let resume = match resume.filter(|r| !r.is_empty()) {
+            Some(r) => Some(ResumeHandle::try_from(r.to_string()).map_err(conflict)?),
+            None => None,
+        };
+        let fresh = self.bind_with(b, None, Some(resume), idle)?;
+        if fresh {
+            self.adopted.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(fresh)
+    }
+
+    /// [`Self::bind_after`]; `adopted`: a legacy session moving here, with what it resumes.
+    /// `idle`: its prepare and open wait until it is needed ([`Self::adopt_idle`]). Whether the
+    /// binding is new.
+    fn bind_with(
+        &self,
+        b: &Binding,
+        after: Option<&str>,
+        adopted: Option<Option<ResumeHandle>>,
+        idle: bool,
+    ) -> Result<bool, StoreError> {
         self.running()?;
         let workspace = WorkspaceRef {
             node: self.node_id.clone(),
@@ -552,9 +638,9 @@ impl NodeRuntime {
             workspace: workspace.clone(),
             choice: b.choice.clone(),
             policy: b.policy.clone(),
-            resume: None,
+            resume: adopted.clone().flatten(),
         };
-        self.tx(|tx| {
+        let fresh = self.tx(|tx| {
             let fresh = rt::bind_session_in(
                 tx,
                 &rt::SessionBinding {
@@ -567,7 +653,7 @@ impl NodeRuntime {
                 now(),
             )?;
             if !fresh {
-                return Ok(());
+                return Ok(false);
             }
             let (prep, prep_d) = command(
                 &format!("op_prep_{}", b.session),
@@ -605,22 +691,77 @@ impl NodeRuntime {
                 },
                 now(),
             )?;
+            if idle {
+                tx.execute(
+                    "UPDATE node_commands SET retry_at=?1 WHERE operation_id IN (?2, ?3) AND state='pending'",
+                    rusqlite::params![UNTIL_NEEDED, prep_op, open_op],
+                )?;
+            }
             let rev = session_revision(tx, &b.session)?;
             rt::session_cas_in(
                 tx,
                 &b.session,
                 rev,
                 &rt::SessionUpdate {
-                    phase: "opening",
+                    // as a session this Node let go: the next message opens it
+                    phase: if idle { "released" } else { "opening" },
                     active_attempt: None,
                     release_pending: false,
                 },
                 now(),
             )?;
-            Ok(())
+            if let Some(resume) = &adopted {
+                let text = steve_i18n::stored(|| match resume {
+                    Some(_) => steve_i18n::t!("hub.node.adopted"),
+                    None => steve_i18n::t!("hub.node.adopted_fresh"),
+                });
+                rt::add_event_in(
+                    tx,
+                    &b.session,
+                    "system",
+                    json!({ "text": text, "adopted": true }),
+                    V1,
+                    None,
+                    now(),
+                )?;
+            }
+            Ok(true)
         })?;
-        self.wake_send.notify_one();
-        Ok(())
+        if fresh && !idle {
+            self.wake_send.notify_one();
+        }
+        Ok(fresh)
+    }
+
+    /// The prepare and open of a session adopted idle ([`Self::adopt_idle`]) go now, as its
+    /// reopen; false: it has none waiting (it was opened since, or never adopted so).
+    fn open_deferred_in(&self, tx: &Tx, session: &str) -> Result<bool, StoreError> {
+        let n = tx.execute(
+            "UPDATE node_commands SET retry_at=0, updated=?1
+              WHERE operation_id IN (?2, ?3) AND state='pending' AND retry_at=?4",
+            rusqlite::params![
+                now(),
+                format!("op_prep_{session}"),
+                format!("op_open_{session}"),
+                UNTIL_NEEDED
+            ],
+        )?;
+        if n == 0 {
+            return Ok(false);
+        }
+        let rev = session_revision(tx, session)?;
+        rt::session_cas_in(
+            tx,
+            session,
+            rev,
+            &rt::SessionUpdate {
+                phase: "opening",
+                active_attempt: None,
+                release_pending: false,
+            },
+            now(),
+        )?;
+        Ok(true)
     }
 
     /// The session a decision belongs to.
@@ -642,6 +783,10 @@ impl NodeRuntime {
         session: &str,
         dependency: Option<&str>,
     ) -> Result<(), StoreError> {
+        // adopted idle: its first prepare and open, never sent, go now
+        if self.open_deferred_in(tx, session)? {
+            return Ok(());
+        }
         // a worktree it made that was tidied since, or that it could not make: made again first
         let again = match dependency {
             None => self.prepare_again_in(tx, session)?,
@@ -1049,7 +1194,14 @@ impl NodeRuntime {
                 now(),
             )?;
             for f in &m.files {
-                prompt.push(file_part(tx, f)?);
+                match file_part(tx, f)? {
+                    Some(p) => prompt.push(p),
+                    // the file is gone from the Hub (its row too): the message goes without it,
+                    // as on the legacy runner, instead of staying queued for good
+                    None => {
+                        tracing::warn!("{session}: attachment {} is gone; sent without it", f.id)
+                    }
+                }
             }
         }
         self.attempt_in(tx, session, &turn, 0, prompt)?;
@@ -3457,14 +3609,19 @@ fn message_event(text: &str, via: &str, files: &[FileRef]) -> Value {
     v
 }
 
-/// An attachment for the Node to fetch from the Hub by hash.
-fn file_part(tx: &Tx, f: &FileRef) -> Result<Part, StoreError> {
-    let (sha, size, mime): (String, i64, String) = tx.query_row(
-        "SELECT sha256, size, mime FROM files WHERE id=?",
-        [&f.id],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-    )?;
-    Ok(Part::File {
+/// An attachment for the Node to fetch from the Hub by hash (none when the Hub has no such file).
+fn file_part(tx: &Tx, f: &FileRef) -> Result<Option<Part>, StoreError> {
+    let Some((sha, size, mime)) = tx
+        .query_row(
+            "SELECT sha256, size, mime FROM files WHERE id=?",
+            [&f.id],
+            |r| Ok::<(String, i64, String), _>((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(Part::File {
         artifact: ArtifactRef {
             id: idv(f.id.clone())?,
             sha256: idv(if sha.starts_with("sha256:") {
@@ -3476,7 +3633,7 @@ fn file_part(tx: &Tx, f: &FileRef) -> Result<Part, StoreError> {
             mime,
         },
         name: f.name.clone(),
-    })
+    }))
 }
 
 fn receipt_state(s: &Observed) -> (ReceiptState, bool) {
@@ -3657,12 +3814,17 @@ fn system_in(tx: &Tx, session: &str, text: &str) -> Result<(), StoreError> {
 ///   not finished, plus harnesses restarting for a configure (what a drain waits for);
 /// - `unknown`: attempts whose outcome nobody can tell (a person gives them up);
 /// - `parked`: sessions with queued messages bound to a Node that is not enabled here;
-/// - `legacy.sessions`: sessions the legacy runner would still run (not ended, not read-only,
-///   bound to no Node); `legacy.busy`: legacy sessions with work in hand (queued messages, a
-///   claimed or submitted dispatch, a pending resume). Removing the runner needs both at 0.
+/// - `legacy.sessions`: sessions bound to no Node that have not ended (not read-only): ones the
+///   removed legacy runner left that boot could not move yet (the local Node off or stopped, a row
+///   unreadable). With the local Node on they are 0 after boot (B7: each is moved or ended);
+///   `legacy.busy`: those with work in hand (queued messages, a claimed or submitted dispatch, a
+///   pending resume).
 ///
-/// `fallbacks` (since boot) counts new sessions left on the legacy runner although the local Node
-/// was on. Public: no reason text, ids or paths, only states and counts.
+/// `fallbacks` (since boot) counts new sessions bound nowhere although the local Node was on (they
+/// are refused); `research_fallbacks` (since boot) research runs that went in process although
+/// research runs on the local Node. `adopted` / `retired` (since boot): legacy sessions moved onto
+/// the local Node / ended because they cannot run there. Public: no reason text, ids or paths,
+/// only states and counts.
 pub fn health(
     store: &Store,
     local: Option<&NodeRuntime>,
@@ -3708,6 +3870,9 @@ pub fn health(
         "stopped": local.is_some_and(|n| n.is_stopped()),
         "holding": local.is_some_and(|n| n.is_holding()),
         "fallbacks": local.map_or(0, |n| n.fallbacks()),
+        "adopted": local.map_or(0, |n| n.adopted()),
+        "retired": local.map_or(0, |n| n.retired()),
+        "research_fallbacks": local.map_or(0, |n| n.research_fallbacks()),
         "sessions": sessions,
         "open": open,
         "running": running,

@@ -68,7 +68,6 @@ impl Tx<'_> {
                     continue;
                 };
                 if self.busy(&s.id)
-                    || self.st.resumes.iter().any(|(_, ids)| ids.contains(&s.id))
                     || !self.db().queued(&s.id)?.is_empty()
                     || self
                         .db()
