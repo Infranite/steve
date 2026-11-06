@@ -41,6 +41,8 @@ pub struct Ask {
     pub ranges: Vec<(String, String)>,
     pub fetch: bool,
     pub reads: Vec<na::GitRead>,
+    /// HEAD and the branch only: no status scan (see [`na::GitQuery::heads_only`]).
+    pub heads_only: bool,
 }
 
 /// How a git action on a Node ended.

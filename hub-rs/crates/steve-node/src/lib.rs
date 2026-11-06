@@ -1084,6 +1084,25 @@ impl LocalNode {
         })
     }
 
+    /// Host bridge for a Node on the Hub's own machine: whether `path` (where the Hub's ledger
+    /// says `w` was prepared) is still `w`'s directory now. The Node's journal still has `w`, at
+    /// that same directory, and the roots check it passes when it is used holds now: an adopted
+    /// directory is still inside a read-write root. Not on the [`Node`] trait and never sent over
+    /// the transport.
+    pub fn holds(&self, w: &WorkspaceRef, path: &Path) -> bool {
+        if self.mine(w).is_err() {
+            return false;
+        }
+        let Ok(Some(row)) = self.0.j.read(|t| t.workspace(&w.id)) else {
+            return false;
+        };
+        let existing = matches!(row.kind, PrepareKind::Existing { .. });
+        let Ok(real) = workspace::still_valid(path, &self.0.roots(), existing) else {
+            return false;
+        };
+        Path::new(&row.path).canonicalize().is_ok_and(|p| p == real)
+    }
+
     /// Host bridge: whether a prepare of `at` would pass the roots check now (a read-write root
     /// this Node has now, the directory there and inside it), so the Hub plans no session it
     /// would refuse. Reads the filesystem, creates nothing.

@@ -916,6 +916,33 @@ fn other_cards_of_a_node_item_ask_only_for_its_head() {
     );
     let asked = remote.asked.lock().unwrap().clone();
     assert_eq!(asked.len(), 1, "no range for a head: {asked:?}");
+    // the head alone: no status scan, no refs
+    assert!(asked[0].heads_only, "{asked:?}");
+    assert!(asked[0].refs.is_empty() && asked[0].ranges.is_empty());
+}
+
+/// A permission card of an item on a Node never waits on the Node: its verdict has no use for the
+/// progress snapshot, so YOLO asks no git there (consider and execute alike).
+#[test]
+fn a_permission_of_a_node_item_asks_its_node_nothing() {
+    let t = t();
+    let (item, sid, remote) = remote_item(&t, far(false, 2, false));
+    let input = ToolInput {
+        raw: json!({"file_path": "a.txt"}),
+        kind: Some("edit".into()),
+        locations: vec![],
+        own_dir: None,
+        own_pids: None,
+    };
+    let d = t.permission(&item, &sid, input);
+    let g = t
+        .engine
+        .gather(&t.decision(&d), &Policy::default())
+        .unwrap();
+    assert!(matches!(g.facts.subject, judge::Subject::Tool(_)));
+    let _ = t.engine.consider(&d);
+    let asked = remote.asked.lock().unwrap().clone();
+    assert!(asked.is_empty(), "{asked:?}");
 }
 
 #[test]

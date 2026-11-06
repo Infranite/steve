@@ -593,17 +593,16 @@ impl steve_core::AgentRuntime for AcpRuntime {
 /// [`steve_node_api::WorkspaceView`] its finished prepare returned to the Hub's ledger: on the
 /// Hub's own machine its display is the path, `~` for the home. Owned unless it was an existing
 /// directory the Node adopted. `None` for another Node's workspace (its display is no address
-/// here), one never prepared, or one that is no directory now. A store read only: it runs inside
-/// the transaction making the permission card and never asks the Node.
+/// here), one never prepared, one that is no directory now, and one the Node no longer stands
+/// behind there ([`steve_node::LocalNode::holds`]: tidied or forgotten, or an adopted directory
+/// whose root was taken away). A store read and the local Node's own journal: never a command.
 pub(crate) fn prepared_dir(
     store: &Store,
-    local: Option<&steve_node_api::NodeId>,
+    local: Option<&steve_node::LocalNode>,
     w: &steve_node_api::WorkspaceRef,
 ) -> Option<steve_node::LocalDir> {
     use steve_node_api::{Command, Observed, OperationResult, Prepare, PrepareKind, Receipt};
-    if local != Some(&w.node) {
-        return None;
-    }
+    let local = local.filter(|n| steve_node_api::Node::id(*n) == &w.node)?;
     let rows: Vec<(String, String)> = store
         .reader(|c| {
             let mut st = c.prepare_cached(
@@ -636,7 +635,7 @@ pub(crate) fn prepared_dir(
     })?;
     let home = std::env::var("HOME").ok();
     let path = std::fs::canonicalize(display_path(&view.display, home.as_deref())?).ok()?;
-    path.is_dir().then_some(steve_node::LocalDir {
+    (path.is_dir() && local.holds(w, &path)).then_some(steve_node::LocalDir {
         path,
         owned: !matches!(kind, PrepareKind::Existing { .. }),
     })
@@ -802,13 +801,10 @@ impl super::node_runtime::NodeDomain for HubHost {
             .flatten()
             .and_then(|w| serde_json::from_str::<steve_node_api::WorkspaceRef>(&w).ok());
         // where the Node said it prepared it (N0e-E11c): a directory here only on the local Node
-        let local = self
-            .local_node
-            .get()
-            .map(|n| steve_node_api::Node::id(&**n).clone());
+        let local = self.local_node.get().map(|n| &**n);
         let dir = bound
             .as_ref()
-            .and_then(|w| prepared_dir(&self.store, local.as_ref(), w));
+            .and_then(|w| prepared_dir(&self.store, local, w));
         engine.stash(decision, yolo_input(bound.as_ref(), dir.as_ref(), request));
         // the Node waits for the answer from the moment it asked
         engine.arm(decision);
@@ -2550,7 +2546,7 @@ mod prepared_dir_tests {
     async fn a_scratch_workspace_is_owned_and_its_paths_are_not_the_sessions_cwd() {
         let t = t();
         let v = prepare(&t, "op_s", PrepareKind::Scratch).await;
-        let dir = prepared_dir(&t.store, Some(&local()), &v.workspace).expect("a directory");
+        let dir = prepared_dir(&t.store, Some(&t.node), &v.workspace).expect("a directory");
         assert!(dir.owned);
         assert!(
             dir.path
@@ -2585,7 +2581,7 @@ mod prepared_dir_tests {
             },
         )
         .await;
-        let dir = prepared_dir(&t.store, Some(&local()), &v.workspace).expect("a directory");
+        let dir = prepared_dir(&t.store, Some(&t.node), &v.workspace).expect("a directory");
         assert!(!dir.owned);
         assert_eq!(
             dir.path,
@@ -2595,7 +2591,70 @@ mod prepared_dir_tests {
         assert_eq!(input.own_dir, None, "the item's cwd rule decides");
         // gone now: nothing to judge against
         std::fs::remove_dir_all(t.dir.path().join("projects/p1")).unwrap();
-        assert!(prepared_dir(&t.store, Some(&local()), &v.workspace).is_none());
+        assert!(prepared_dir(&t.store, Some(&t.node), &v.workspace).is_none());
+    }
+
+    fn adopt() -> PrepareKind {
+        PrepareKind::Existing {
+            dir: RootPath {
+                root: RootId::new("projects").unwrap(),
+                rel: RelPath::new("p1").unwrap(),
+            },
+        }
+    }
+
+    /// The adopted directory stays on disk once its root is taken away (D11): YOLO has no
+    /// directory for it, and the guard asks instead of judging paths under it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_adopted_directory_whose_root_is_gone_has_no_directory_here() {
+        let t = t();
+        let v = prepare(&t, "op_e", adopt()).await;
+        assert!(prepared_dir(&t.store, Some(&t.node), &v.workspace).is_some());
+        t.node.set_roots(vec![]);
+        assert!(t.dir.path().join("projects/p1").is_dir());
+        let dir = prepared_dir(&t.store, Some(&t.node), &v.workspace);
+        assert!(dir.is_none(), "{dir:?}");
+        let input = yolo_input(
+            Some(&v.workspace),
+            dir.as_ref(),
+            &write(&v.workspace, "src/x.rs"),
+        );
+        assert_eq!(input.kind.as_deref(), Some("other"));
+        assert!(input.locations.is_empty());
+    }
+
+    /// A workspace the Node tidied (its journal forgot it) has no directory here, though the
+    /// adopted directory is still there and the ledger still has its prepare.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_tidied_workspace_has_no_directory_here() {
+        let t = t();
+        let v = prepare(&t, "op_e", adopt()).await;
+        let c = Command {
+            id: OperationId::new("op_t").unwrap(),
+            issued_at: Timestamp(steve_store::now()),
+            accept_before: Timestamp(steve_store::now() + 60_000),
+            grant: GrantId::new("hub").unwrap(),
+            body: Tidy {
+                workspace: v.workspace.clone(),
+                expected: v.revision.clone(),
+                keep_branch: true,
+            },
+        };
+        let r = t.node.tidy_workspace(c).await.unwrap();
+        let done = loop {
+            let r = t.node.operation(r.operation.clone()).await.unwrap();
+            if r.state.is_finished() {
+                break r;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        assert!(
+            matches!(done.state, Observed::Finished { error: None, .. }),
+            "{:?}",
+            done.state
+        );
+        assert!(t.dir.path().join("projects/p1").is_dir());
+        assert!(prepared_dir(&t.store, Some(&t.node), &v.workspace).is_none());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2608,12 +2667,12 @@ mod prepared_dir_tests {
             node: NodeId::new("n_far").unwrap(),
             id: v.workspace.id.clone(),
         };
-        assert!(prepared_dir(&t.store, Some(&local()), &remote).is_none());
+        assert!(prepared_dir(&t.store, Some(&t.node), &remote).is_none());
         let unknown = WorkspaceRef {
             node: local(),
             id: WorkspaceId::new("w_none").unwrap(),
         };
-        assert!(prepared_dir(&t.store, Some(&local()), &unknown).is_none());
+        assert!(prepared_dir(&t.store, Some(&t.node), &unknown).is_none());
     }
 
     #[test]

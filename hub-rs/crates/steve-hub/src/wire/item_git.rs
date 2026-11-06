@@ -61,7 +61,7 @@ impl NodeGit for ItemGit {
                 ranges: q.ranges,
                 fetch: q.fetch,
                 reads: q.reads,
-                heads_only: false,
+                heads_only: q.heads_only,
             })
             .await
     }

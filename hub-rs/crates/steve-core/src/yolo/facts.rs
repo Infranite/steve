@@ -100,8 +100,10 @@ fn branch_state(dir: &Path) -> (bool, bool) {
     (clean, ahead)
 }
 
-/// How long YOLO waits for an item's Node to say where its branch stands.
+/// How long YOLO waits for an item's Node to say where its branch stands (an acceptance).
 const NODE_FACTS_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+/// How long YOLO waits for an item's Node to name its `HEAD` alone (a stall's progress).
+const NODE_HEAD_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// What YOLO reads of an item's branch: `HEAD` (the progress snapshot) and `(clean, ahead of
 /// main)`. `None`: there is no checkout to read (or its Node could not tell).
@@ -114,6 +116,22 @@ struct BranchFacts {
 /// [`branch_state`] and `HEAD` of an item whose workspace is on a Node, asked of that Node
 /// (N0e-E11c): no git runs here. An offline Node, or one not answering in time, tells nothing.
 async fn node_branch(port: &dyn NodeGit, item: &str, state: bool) -> BranchFacts {
+    if !state {
+        // the head alone: no status scan, no refs
+        let head = port
+            .facts(
+                item,
+                Ask {
+                    heads_only: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .ok()
+            .map(|f| f.head)
+            .filter(|h| !h.is_empty());
+        return BranchFacts { head, state: None };
+    }
     let Ok(f) = port
         .facts(
             item,
@@ -132,12 +150,6 @@ async fn node_branch(port: &dyn NodeGit, item: &str, state: bool) -> BranchFacts
         .filter(|(_, sha)| sha.is_some())
         .map(|(b, _)| (b.clone(), "HEAD".to_string()))
         .collect();
-    if !state {
-        return BranchFacts {
-            head: Some(f.head.clone()).filter(|h| !h.is_empty()),
-            state: None,
-        };
-    }
     let ahead = !bases.is_empty()
         && port
             .facts(
@@ -159,8 +171,13 @@ async fn node_branch(port: &dyn NodeGit, item: &str, state: bool) -> BranchFacts
 /// Node when it is on one, else the Hub's own git in `items.cwd` (as before).
 fn branch_facts(core: &crate::Core, item: &Item, state: bool) -> BranchFacts {
     if let Some(port) = core.node_git().filter(|p| p.on_node(&item.id)) {
+        let deadline = if state {
+            NODE_FACTS_DEADLINE
+        } else {
+            NODE_HEAD_DEADLINE
+        };
         return block_on(async {
-            tokio::time::timeout(NODE_FACTS_DEADLINE, node_branch(&*port, &item.id, state))
+            tokio::time::timeout(deadline, node_branch(&*port, &item.id, state))
                 .await
                 .unwrap_or_default()
         })
@@ -206,8 +223,15 @@ impl Engine {
             None => None,
         };
         let accepting = (d.kind.as_str(), d.subject_type.as_str()) == ("accept", "item");
+        // the progress snapshot counts only for the verdicts that send the agent back (an
+        // acceptance, a stall): any other card reads no branch, so a slow Node never holds up a
+        // permission answer
+        let continues = accepting
+            || (d.kind == "fail"
+                && (d.subject_type == "item" || d.subject_type == crate::stall::STALL));
         let branch_now = item
             .as_ref()
+            .filter(|_| continues)
             .map(|i| branch_facts(self.core(), i, accepting && i.branch.is_some()));
         let progress = match (&item, &branch_now) {
             (Some(i), Some(b)) => json!({
