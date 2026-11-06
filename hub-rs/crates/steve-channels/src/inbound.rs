@@ -721,7 +721,13 @@ impl Channels {
             };
             let found = match fallback::by_content(tx, &probe)? {
                 Some(f) => Some(f),
-                None => fallback::by_exact_time(tx, &probe)?,
+                None => {
+                    let others = fallback::other_keys(tx, &probe, &msg.text, &msg.attachments)?;
+                    match fallback::by_keys(tx, &probe, &others)? {
+                        Some(f) => Some(f),
+                        None => fallback::by_exact_time(tx, &probe)?,
+                    }
+                }
             };
             if let Some(f) = found {
                 if has_id {

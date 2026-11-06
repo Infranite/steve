@@ -1,7 +1,9 @@
 //! Messages of an adapter without platform message ids: a redelivery is dropped by its delivery id
 //! (`source_id`); a copy without an id and the bot's copy with one are one message, whichever comes
-//! first, and the message takes the provider id; two identical messages stay two; two messages with
-//! provider ids never merge; an edit is no new message when every side times to the ms; the Hub's
+//! first (also when the side first named the sender by a handle of another system), and the
+//! message takes the provider id; two identical messages stay two, and so does a redelivery
+//! without a delivery id; a Hub-made id is never one in use; two messages with provider ids never
+//! merge; an edit is no new message when every side times to the ms; the Hub's
 //! own ids never leave it.
 
 use std::sync::Arc;
@@ -379,4 +381,65 @@ async fn ids_the_hub_makes_never_leave_it_and_are_never_an_adapters() {
             .expect_err("ours");
     assert!(matches!(e, ApiError::Rule(_)), "{e:?}");
     assert_eq!(stored(&h).len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_hub_made_id_is_never_one_in_use_after_an_upgrade() {
+    let h = setup(1000);
+    let a1 = push(&h, &h.mine, own_copy("好的", T, Some("ev1"))).await;
+    let a2 = push(&h, &h.mine, own_copy("好的", T, Some("ev2"))).await;
+    assert_ne!(a1.message_id, a2.message_id);
+    // the bot's copy of the first takes its Hub-made id away
+    let b1 = push(&h, &h.bot, bot_copy("om_1", "好的", T)).await;
+    assert_eq!((b1.duplicate, b1.message_id), (true, a1.message_id));
+    // a third identical one at the same time gets an id of its own
+    let a3 = push(&h, &h.mine, own_copy("好的", T, Some("ev3"))).await;
+    assert!(!a3.duplicate, "{a3:?}");
+    assert_ne!(a3.message_id, a2.message_id);
+    let ext = stored(&h);
+    assert_eq!(ext.len(), 3);
+    assert_eq!(ext[0], "om_1");
+    assert!(ext[1].ends_with(":1") && ext[2].ends_with(":2"), "{ext:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_redelivery_without_a_delivery_id_is_another_message() {
+    // a connection never matches its own copies: without a source_id the adapter must not
+    // deliver a message twice
+    let h = setup(1000);
+    let a = push(&h, &h.mine, own_copy("今天发布吗", T, None)).await;
+    let b = push(&h, &h.mine, own_copy("今天发布吗", T, None)).await;
+    assert!(!a.duplicate && !b.duplicate);
+    assert_ne!(a.message_id, b.message_id);
+    assert_eq!(stored(&h).len(), 2);
+    assert!(
+        !queries(&h, &h.mine)
+            .known(&own_copy("今天发布吗", T, None))
+            .expect("known")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_copy_from_a_sender_first_known_by_another_system_is_still_one_message() {
+    let h = setup(1000);
+    // your side sees her first, by an id of another system and her email: she has no handle in
+    // the side's handle system yet
+    let sender = Sender::new(HandleRef::new("github", "carol-gh"))
+        .alias(HandleRef::new("mail", "carol@example.com"));
+    let a = push(
+        &h,
+        &h.mine,
+        InboundMessage::without_id("G1", sender, "今天发布吗", T + 400).source_id("ev1"),
+    )
+    .await;
+    assert!(!a.duplicate);
+    // the bot knows her (new to it) by her chat handle and her email: the same person, the same message
+    let mut m = bot_copy("om_1", "今天发布吗", T + 123);
+    m.sender = Sender::new(FakeChannel::handle("ucarol"))
+        .alias(HandleRef::new("mail", "carol@example.com"));
+    let b = push(&h, &h.bot, m).await;
+    assert!(b.duplicate, "{b:?}");
+    assert_eq!(b.message_id, a.message_id);
+    assert_eq!(b.sender_party_id, a.sender_party_id);
+    assert_eq!(stored(&h), ["om_1"]);
 }
