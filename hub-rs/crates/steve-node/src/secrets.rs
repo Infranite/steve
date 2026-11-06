@@ -203,3 +203,34 @@ pub(crate) async fn take(
     given.mask = Some(Redactor::new(pats));
     Ok(given)
 }
+
+/// A push's credential ([`SecretDelivery::Header`]), taken from the Hub for `op` once: the header
+/// line `<name>: <value>` for git, and the mask of its value. `Err`: why the push does not run.
+pub(crate) async fn header(
+    hub: Option<Arc<dyn HubSecrets>>,
+    op: &OperationId,
+    r: &SecretRef,
+) -> Result<(Zeroizing<Vec<u8>>, Redactor), String> {
+    let SecretDelivery::Header { name } = &r.how else {
+        return Err("a push credential goes as a header".into());
+    };
+    let Some(hub) = hub else {
+        return Err("no secrets from the Hub here".into());
+    };
+    let v = hub
+        .take(op.clone(), r.id.clone())
+        .await
+        .map_err(|e| format!("secret {}: {}", r.id, e))?;
+    let value = Zeroizing::new(v.expose().to_vec());
+    drop(v);
+    // one header line: a value that would start another is refused
+    if value.is_empty() || value.iter().any(|b| matches!(b, b'\n' | b'\r' | 0)) {
+        return Err(format!("secret {}: not a header value", r.id));
+    }
+    let mut line = Zeroizing::new(Vec::with_capacity(name.len() + 2 + value.len()));
+    line.extend_from_slice(name.as_bytes());
+    line.extend_from_slice(b": ");
+    line.extend_from_slice(&value);
+    let mask = Redactor::new([(r.id.as_str(), value.as_slice())]);
+    Ok((line, mask))
+}

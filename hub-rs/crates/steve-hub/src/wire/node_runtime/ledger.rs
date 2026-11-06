@@ -144,8 +144,8 @@ impl NodeRuntime {
         })
     }
 
-    /// `op`, a ledger `exec` the Node can no longer tell the end of, stopped now rather than at
-    /// its deadline (you asked for what it was for to run again): a recover stops what is left of
+    /// `op`, a ledger `exec` or push the Node can no longer tell the end of, stopped now rather
+    /// than at its deadline (you asked for what it was for to run again, or a push is compared): a recover stops what is left of
     /// it and it ends interrupted. True: it is not unknown any more, or a recover of it is on its
     /// way or was planned now.
     pub fn stop_lost(&self, op: &str) -> Result<bool, StoreError> {

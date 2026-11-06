@@ -162,7 +162,7 @@ impl NodeRuntime {
         Ok(())
     }
 
-    /// A recover of `op`, a ledger `exec` the Node can no longer tell the end of (a restart cut it
+    /// A recover of `op`, a ledger `exec` or push (`git_apply`) the Node can no longer tell the end of (a restart cut it
     /// off): its process group, still running perhaps, is stopped and it ends interrupted (the
     /// command is never run again). Nothing new while one is on its way or one retired it already,
     /// and at most [`EXEC_RECOVERS`] in all (one the Node could not finish is asked again, a
@@ -173,11 +173,11 @@ impl NodeRuntime {
         op: &str,
         reason: &str,
     ) -> Result<bool, StoreError> {
-        let Some(request) = tx
+        let Some((method, request)) = tx
             .query_row(
-                "SELECT request FROM node_commands WHERE operation_id=? AND node_id=? AND method='exec' AND state='unknown'",
+                "SELECT method, request FROM node_commands WHERE operation_id=? AND node_id=? AND method IN ('exec','git_apply') AND state='unknown'",
                 [op, self.node_id.as_str()],
-                |r| r.get::<_, String>(0),
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
             )
             .optional()?
         else {
@@ -192,7 +192,7 @@ impl NodeRuntime {
         if live || all >= EXEC_RECOVERS {
             return Ok(false);
         }
-        self.plan_recover_in(tx, op, "exec", &request, None, reason)?;
+        self.plan_recover_in(tx, op, &method, &request, None, reason)?;
         Ok(true)
     }
 

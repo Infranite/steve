@@ -1055,3 +1055,102 @@ async fn an_approved_write_waits_for_a_paused_connection() {
     assert_eq!(effect(&h, &dec).0, "done");
     assert_eq!(h.fake.pulls_of(REPO, BRANCH), 1);
 }
+
+/// A Node whose push ends unknown ([`push::PushError::Lost`]); it may have landed first. Reads
+/// are the Hub's own git (`None`).
+struct LostPush {
+    land: Option<std::path::PathBuf>,
+    work: std::path::PathBuf,
+    pushes: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl steve_github::push::GitNodes for LostPush {
+    async fn ahead(
+        &self,
+        _item: &str,
+        _base: &str,
+        _branch: &str,
+    ) -> Option<Result<bool, steve_github::push::PushError>> {
+        None
+    }
+    async fn head_of(
+        &self,
+        _item: &str,
+        _branch: &str,
+    ) -> Option<Result<String, steve_github::push::PushError>> {
+        None
+    }
+    async fn push(
+        &self,
+        p: &steve_github::push::NodePush<'_>,
+    ) -> Option<Result<String, steve_github::push::PushError>> {
+        self.pushes
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!((p.branch, p.full_name), (BRANCH, REPO));
+        if let Some(bare) = &self.land {
+            git(
+                &self.work,
+                &["push", "-q", &bare.display().to_string(), BRANCH],
+            );
+        }
+        Some(Err(steve_github::push::PushError::Lost))
+    }
+    async fn origin(&self, _project: &str) -> Option<Option<String>> {
+        None
+    }
+}
+
+/// N0e-E8: a push through a Node whose end is not known is never pushed again; GitHub's branch
+/// says whether it landed. It did: the PR is opened from it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_lost_push_that_landed_opens_the_pr() {
+    let h = setup().await;
+    let nodes = Arc::new(LostPush {
+        land: Some(h.fake.bare_remote(REPO).expect("bare")),
+        work: h.work.path().to_path_buf(),
+        pushes: Default::default(),
+    });
+    h.gh.set_git_nodes(nodes.clone());
+    let id = item(&h, 1, Some(BRANCH));
+    assert!(accepted(&h, &id).await);
+    let (dec, _, _) = open_decision(&h, accept::PR_OPEN).expect("asked");
+    answer(&h, &dec, "yes", "fix: 保留 return_to\n登录后回到原页面。")
+        .await
+        .expect("yes");
+    let sha = git(h.work.path(), &["rev-parse", BRANCH]);
+    assert_eq!(pushed(&h).as_deref(), Some(sha.as_str()));
+    assert_eq!(nodes.pushes.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(effect(&h, &dec).0, "done");
+    assert_eq!(h.fake.pulls_of(REPO, BRANCH), 1);
+}
+
+/// It did not land: refused, the item failed with why, and nothing is pushed by the Hub instead.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_lost_push_that_did_not_land_is_not_pushed_again() {
+    let h = setup().await;
+    let nodes = Arc::new(LostPush {
+        land: None,
+        work: h.work.path().to_path_buf(),
+        pushes: Default::default(),
+    });
+    h.gh.set_git_nodes(nodes.clone());
+    let id = item(&h, 1, Some(BRANCH));
+    assert!(accepted(&h, &id).await);
+    let (dec, _, _) = open_decision(&h, accept::PR_OPEN).expect("asked");
+    answer(&h, &dec, "yes", "fix: 保留 return_to\n登录后回到原页面。")
+        .await
+        .expect("yes");
+    assert_eq!(pushed(&h), None, "not pushed by anyone");
+    assert_eq!(nodes.pushes.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(effect(&h, &dec).0, "failed");
+    assert_eq!(h.fake.pulls_of(REPO, BRANCH), 0);
+    assert!(
+        h.core
+            .calls()
+            .iter()
+            .any(|c| matches!(c, CoreCall::Fail { why, .. } if why.contains("推送的结果未知"))),
+        "{:?}",
+        h.core.calls()
+    );
+}

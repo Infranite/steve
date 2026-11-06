@@ -10,6 +10,10 @@
 //! - the target is the canonical `<git_base>/<owner>/<name>.git`, not whatever `origin` says.
 //!
 //! Synchronous (`std::process`, every git call under a deadline); call it from `spawn_blocking`.
+//!
+//! With the Hub's local Node on (`STEVE_NODE_MODE=local`), the item's git is read and its branch
+//! pushed on the Node that holds its workspace instead ([`GitNodes`], N0e-E8), with the same
+//! rules; this module's own git is what runs with it off.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -39,6 +43,46 @@ pub enum PushError {
     /// Refused by the test guard (`STEVE_FORBID_REAL_HOSTS=1`), nothing pushed.
     #[error("{0}")]
     HostForbidden(String),
+    /// The workspace's Node could not be asked (offline, or no workspace there): nothing pushed.
+    #[error("{0}")]
+    Node(String),
+    /// A push through a Node whose end is not known (a restart, the deadline): it may have landed,
+    /// and is never pushed again; what the remote branch is says.
+    #[error("推送的结果未知，不会再推送一次")]
+    Lost,
+}
+
+/// A push through a Node ([`GitNodes::push`]).
+pub struct NodePush<'a> {
+    pub item: &'a str,
+    /// What the push is for (the decision): asked again, never pushed twice.
+    pub key: &'a str,
+    pub branch: &'a str,
+    /// `owner/name` of the linked repo.
+    pub full_name: &'a str,
+    /// `<git_base>/<owner>/<name>.git`.
+    pub url: &'a str,
+    /// Installation token or PAT.
+    pub token: &'a str,
+    /// The commit the branch must be at.
+    pub expect: &'a str,
+}
+
+/// An item's (or a project's) git on the Node that holds it (the Hub's own machine included),
+/// for a Hub whose local Node is on. Every answer `None`: not on a Node here (the local Node is
+/// off), use this module's own git.
+#[async_trait::async_trait]
+pub trait GitNodes: Send + Sync {
+    /// Whether the item's `branch` has commits `base` lacks (`origin/<base>` when the workspace
+    /// has it, else `<base>`).
+    async fn ahead(&self, item: &str, base: &str, branch: &str) -> Option<Result<bool, PushError>>;
+    /// The commit the item's `branch` is at.
+    async fn head_of(&self, item: &str, branch: &str) -> Option<Result<String, PushError>>;
+    /// Pushes the item's branch; the pushed sha.
+    async fn push(&self, p: &NodePush<'_>) -> Option<Result<String, PushError>>;
+    /// `owner/name` of the project directory's `origin`, when it is a GitHub repository (`None`
+    /// on any problem).
+    async fn origin(&self, project: &str) -> Option<Option<String>>;
 }
 
 /// One push.
@@ -202,7 +246,7 @@ fn objects_dir(cwd: &Path) -> Result<PathBuf, PushError> {
 
 /// The test guard on the push target: a local path (a test's bare remotes) is fine, a URL must be
 /// on loopback when `STEVE_FORBID_REAL_HOSTS=1`.
-fn check_git_base(base: &str) -> Result<(), PushError> {
+pub(crate) fn check_git_base(base: &str) -> Result<(), PushError> {
     if Path::new(base).is_absolute() {
         return Ok(());
     }

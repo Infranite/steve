@@ -202,6 +202,8 @@ struct Inner {
     /// Wakes the effect runner ([`effects`]) after an answer queued a write.
     effect_wake: Arc<tokio::sync::Notify>,
     sessions: RwLock<Option<Arc<dyn SessionSink>>>,
+    /// Items' git on their Nodes ([`push::GitNodes`]); none: the Hub's own git.
+    git_nodes: RwLock<Option<Arc<dyn push::GitNodes>>>,
 }
 
 impl GitHub {
@@ -221,6 +223,7 @@ impl GitHub {
             flow: RwLock::new(None),
             effect_wake: Default::default(),
             sessions: RwLock::new(None),
+            git_nodes: RwLock::new(None),
         }))
     }
 
@@ -241,6 +244,20 @@ impl GitHub {
     /// or not, a comment posted or not). Default: logged and dropped.
     pub fn set_session_sink(&self, s: Arc<dyn SessionSink>) {
         *self.0.sessions.write().unwrap_or_else(|e| e.into_inner()) = Some(s);
+    }
+
+    /// Reads and pushes items' branches on the Nodes that hold them (a Hub with its local Node
+    /// on). Default: the Hub's own git ([`push`]).
+    pub fn set_git_nodes(&self, n: Arc<dyn push::GitNodes>) {
+        *self.0.git_nodes.write().unwrap_or_else(|e| e.into_inner()) = Some(n);
+    }
+
+    pub(crate) fn git_nodes(&self) -> Option<Arc<dyn push::GitNodes>> {
+        self.0
+            .git_nodes
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// Tells the agent's session how its request ended.

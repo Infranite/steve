@@ -5048,6 +5048,7 @@ dependencies = [
  "steve-flow",
  "steve-i18n",
  "steve-modules",
+ "steve-node-api",
  "steve-store",
  "tempfile",
  "thiserror 2.0.21",
@@ -5114,6 +5115,7 @@ dependencies = [
  "tracing-subscriber",
  "unicode-normalization",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]

@@ -230,6 +230,9 @@ pub struct Env<'a> {
     pub cmd_node: Option<Arc<dyn steve_flow::nodes::cmd::CmdNode>>,
     /// Where a session's secret uses run when it works on a Node (`None`: on the Hub, as before).
     pub use_nodes: Option<Arc<dyn steve_modules::vault::UseNodes>>,
+    /// Where GitHub reads and pushes an item's branch when it is on a Node (`None`: the Hub's own
+    /// git, as before).
+    pub git_nodes: Option<Arc<dyn steve_github::push::GitNodes>>,
 }
 
 /// Registers every module, builds [`Modules`] and the flow context, and collects the routes.
@@ -247,6 +250,7 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
         openviking,
         cmd_node,
         use_nodes,
+        git_nodes,
     } = env;
     use super::ports::{self as hp, VaultGuard};
     let guard = Arc::new(VaultGuard);
@@ -413,6 +417,9 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
     let conns = conns.build();
     let gh = steve_github::GitHub::new(conns.clone(), gh_env);
     gh_slot.bind(&gh);
+    if let Some(n) = git_nodes {
+        gh.set_git_nodes(n);
+    }
     gh.set_core(Arc::new(hp::GhItems(core.clone())));
     gh.set_session_sink(Arc::new(hp::CoreSessions(core.clone())));
 

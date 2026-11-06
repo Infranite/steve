@@ -56,7 +56,7 @@ fn op_of(prefix: &str, req: &CmdRequest, rerun: u32) -> String {
 
 /// The workspace resource of `project` at `dir`: the directory is part of it, so a project whose
 /// path changed gets a workspace of its new directory, never a conflict with the old one.
-fn resource_of(project: &str, dir: &RootPath) -> String {
+pub(super) fn resource_of(project: &str, dir: &RootPath) -> String {
     format!("project:{project}:{}", dir_digest(dir))
 }
 

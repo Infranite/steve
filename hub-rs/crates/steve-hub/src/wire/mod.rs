@@ -10,6 +10,7 @@ pub mod auth;
 pub mod chan;
 pub mod core;
 pub mod flow_cmd;
+pub mod git_push;
 pub mod mcp;
 pub mod mcp_extra;
 pub mod modules;
@@ -454,6 +455,11 @@ pub fn wire_with(cfg: &Arc<Config>, bus: &Bus, vars: Vars) -> Result<Wired, Back
         use_nodes: node_host.as_ref().map(|_| {
             node_secrets::VaultNodes::new(db.clone(), workspaces.clone(), secrets.clone())
                 as Arc<dyn steve_modules::vault::UseNodes>
+        }),
+        // and GitHub's pushes from the Node that holds the item (N0e-E8)
+        git_nodes: node_host.as_ref().map(|_| {
+            git_push::GitPush::new(workspaces.clone(), secrets.clone())
+                as Arc<dyn steve_github::push::GitNodes>
         }),
     })?;
     let _ = host.flow.set(built.flow.clone());

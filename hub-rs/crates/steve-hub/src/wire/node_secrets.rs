@@ -75,7 +75,13 @@ impl NodeSecrets {
     }
 
     /// `op`, a command for `node`, may take `ids` once each, from `values`.
-    fn give(&self, op: &str, node: NodeId, ids: Vec<String>, values: Arc<dyn UseValues>) {
+    pub(super) fn give(
+        &self,
+        op: &str,
+        node: NodeId,
+        ids: Vec<String>,
+        values: Arc<dyn UseValues>,
+    ) {
         self.held.lock().unwrap_or_else(|e| e.into_inner()).insert(
             op.into(),
             Held {
@@ -88,7 +94,7 @@ impl NodeSecrets {
     }
 
     /// `op` ended (or was never sent): nothing of it may be taken any more.
-    fn end(&self, op: &str) {
+    pub(super) fn end(&self, op: &str) {
         if self
             .held
             .lock()
