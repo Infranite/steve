@@ -24,7 +24,6 @@ use std::sync::Arc;
 use anyhow::Context;
 use axum::Router;
 use serde_json::Value;
-use steve_channels::adapters::feishu::FeishuUser;
 use steve_channels::channel::ActAsUser;
 use steve_channels::ext::{ChannelDecl, ChannelSide, ConnectionHook, MediaFetch, Queries};
 use steve_channels::{ChannelAdapter, MessageSink, ProfileAdapter};
@@ -115,7 +114,7 @@ impl Assembly {
     pub fn builtin() -> Self {
         let list: Vec<Arc<dyn Extension>> = vec![
             Arc::new(builtin::FeishuBot),
-            Arc::new(builtin::FeishuSelf),
+            Arc::new(builtin::FeishuSelf::default()),
             Arc::new(builtin::MailImap),
             Arc::new(builtin::GitHub),
         ];
@@ -204,7 +203,6 @@ impl Assembly {
             media: Vec::new(),
             mail: Vec::new(),
             event_sources: Vec::new(),
-            feishu_user: None,
         };
         for e in &self.list {
             let id = e.ext.id();
@@ -314,8 +312,6 @@ pub struct Declare<'a> {
     pub(crate) media: Vec<Arc<dyn MediaFetch>>,
     pub(crate) mail: Vec<Arc<dyn steve_mail::MailAdapter>>,
     pub(crate) event_sources: Vec<Arc<dyn steve_flow::EventAdapter>>,
-    /// The built-in `feishu.self` provider, for the channels routes and the Feishu runtime.
-    pub(crate) feishu_user: Option<Arc<FeishuUser>>,
 }
 
 impl Declare<'_> {
@@ -431,16 +427,10 @@ pub struct Started {
     /// Environment variables (a map in tests).
     pub vars: Vars,
     pub(crate) channels: steve_channels::Channels,
-    pub(crate) feishu_user: Option<Arc<FeishuUser>>,
 }
 
 impl Started {
-    pub(crate) fn new(
-        channels: &steve_channels::Channels,
-        bus: &Bus,
-        vars: &Vars,
-        feishu_user: Option<Arc<FeishuUser>>,
-    ) -> Self {
+    pub(crate) fn new(channels: &steve_channels::Channels, bus: &Bus, vars: &Vars) -> Self {
         Self {
             modules: channels.modules().clone(),
             connections: channels.connections().clone(),
@@ -449,7 +439,6 @@ impl Started {
             bus: BusTap(bus.clone()),
             vars: vars.clone(),
             channels: channels.clone(),
-            feishu_user,
         }
     }
 }

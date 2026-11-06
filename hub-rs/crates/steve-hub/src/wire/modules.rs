@@ -570,8 +570,7 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
         .push(Arc::new(steve_mail::timeline::MailTimeline));
 
     // the extensions' step two: their routes (merged with the modules' below) and jobs
-    let started =
-        crate::extension::Started::new(&channels, bus, vars, declared.feishu_user.clone());
+    let started = crate::extension::Started::new(&channels, bus, vars);
     let routes = Router::new()
         .merge(steve_knowledge::routes(kb.clone()))
         .merge(steve_modules::contacts::routes(ports))
