@@ -24,18 +24,18 @@ English · [简体中文](README.zh-CN.md)
 
 ## Why Steve
 
-Coding agents are good at doing the work. They aren't good at **keeping track of it**. You end up with a dozen terminal tabs, lost context, forgotten approvals and no record of what was delivered.
+Coding agents are good at the work itself. Run more than two or three of them and the bookkeeping falls apart: a dozen terminal tabs, context lost between sessions, permission prompts nobody answered, and no record of what was actually delivered or whether the checks passed.
 
-Steve is the layer above the agents. It runs on your own machine, owns the state, and gives you one place to:
+Steve sits above Claude Code and Codex and keeps that record. It is one Rust binary on your own machine, with a SQLite database and an encrypted vault. You talk to it in a single chat. For each message it decides whether to answer directly, research your code and documents read-only, open a tracked item, or pass the message on to work already in progress. Items go to bots, and each item runs in its own git worktree.
 
-- **Hand things off in plain language.** One chat routes each message for you. Steve answers directly, researches inline, creates a tracked item, or forwards a follow-up to work already in progress.
-- **Let a team of bots do the work.** Each bot has its own harness, model, role, rules and memories. Items run in their own git worktrees, depend on each other, fork and hand off.
-- **Stay in control of what matters.** Approvals, acceptances and questions arrive in one Inbox. YOLO mode decides routine things while you're away. It works within hard limits, and every decision it makes can be undone.
-- **Bring your world in.** Feishu/Lark, email, GitHub, contacts and a knowledge base feed the same workspace, so agents work with real context. Each piece of knowledge carries a disclosure level, so it isn't repeated where it shouldn't be.
-
-Everything stays on infrastructure you control: a single Rust binary, a SQLite database and an encrypted vault.
-
-## From one sentence to shipped work
+| | 😵 Agents in terminal tabs | ✨ With Steve |
+|---|---|---|
+| **Keeping track** | Tabs, scrollback and memory | Items with a goal, plan, stage and delivery |
+| **Isolation** | Agents share one checkout | One git worktree and `steve/<id>` branch per item |
+| **Permission prompts** | Whichever tab you happen to look at | One Inbox, or YOLO within hard limits |
+| **"Done"** | The agent says so | Checks passed, plan closed, proof from the goal |
+| **Merging** | By hand, one branch at a time | Merge lanes: batched, fast-forward only |
+| **Secrets** | Pasted into the prompt | Used through the vault, output redacted |
 
 <div align="center">
 
@@ -46,33 +46,31 @@ Everything stays on infrastructure you control: a single Rust binary, a SQLite d
 
 </div>
 
-Every message goes through the same pipeline. Steve decides what it is, the right bot does the work in its own worktree, and you only step in where it matters. With YOLO on, Steve covers the routine steps too.
+Approvals, acceptances and agents' questions come to one Inbox. If you turn on YOLO mode, Steve makes the routine calls while you're away. It stays inside limits written in code, and every decision it makes can be undone. Feishu/Lark, email, GitHub, contacts and a knowledge base feed the same workspace, so agents work with real context. Each piece of knowledge has a disclosure level, so it isn't repeated where it shouldn't be.
 
 ## Design principles
-
-A few rules run through the whole codebase. They are why Steve can be left alone with real work.
 
 <table>
 <tr>
 <td width="33%" valign="top">
 
-#### ⚖️ Code has the last word
+#### ⚖️ The model proposes, code decides
 
-The model proposes and tested rules decide. Routing guards stop a question from silently becoming an item. A delivery is refused while plan steps are still open. "Done" may require proof of a build, a deploy or a real check.
+Routing guards stop a question from quietly turning into an item. A delivery is refused while plan steps are still open. "Done" can require proof of a build, a deploy or a real check.
 
 </td>
 <td width="33%" valign="top">
 
 #### 🔁 Nothing runs twice
 
-Agent tools *send and end the turn*, so nothing waits in memory. External effects carry stable ids. Flows commit each step before the next one runs. After a crash, an uncertain result is marked for reconciliation and never re-run blindly.
+Agent tools send and end the turn, so nothing waits in memory. External effects carry stable ids, and flows commit each step before the next one runs. After a crash, an uncertain result is marked for reconciliation and never re-run blindly.
 
 </td>
 <td width="33%" valign="top">
 
-#### 🛑 Autonomy with hard limits
+#### 🛑 Autonomy has hard limits
 
-YOLO decides what stays on your machine and can be undone. Money, high-sensitivity secrets, pushing, publishing and speaking as you are out of reach whatever the settings say. Breakers pause it when things go wrong.
+YOLO only decides things that stay on your machine and can be undone. Money, high-sensitivity secrets, pushing, publishing and speaking as you are out of reach whatever the settings say. Breakers pause it when things go wrong.
 
 </td>
 </tr>
@@ -81,21 +79,21 @@ YOLO decides what stays on your machine and can be undone. Money, high-sensitivi
 
 #### 🗝️ Agents use secrets without seeing them
 
-Steve runs a command with the secret and gives the agent only redacted output. The redactor also catches base64, URL, hex and JSON-escaped copies.
+Steve runs the command with the secret and hands the agent redacted output. The redactor also catches base64, URL, hex and JSON-escaped copies.
 
 </td>
 <td width="33%" valign="top">
 
-#### 🙊 Disclosure-aware by default
+#### 🙊 Knowledge has a disclosure level
 
-Every piece of knowledge has a level: public, *paraphrase only*, *reasoning only* or never. Messages to the outside world pass a rule check and a review by a second model before they go out.
+Public, paraphrase only, reasoning only, or never. Messages to the outside pass a rule check and a second model's review before they are sent.
 
 </td>
 <td width="33%" valign="top">
 
-#### ↩️ Every change can be undone
+#### ↩️ Changes can be undone
 
-Configuration made by talking to Steve, corrections to automations, contact merges and YOLO decisions all come back as changesets you can undo.
+Configuration done through chat, corrections to automations, contact merges and YOLO decisions are all stored as changesets you can revert.
 
 </td>
 </tr>
@@ -103,26 +101,27 @@ Configuration made by talking to Steve, corrections to automations, contact merg
 
 ## Features
 
-### 💬 A conversation that knows what to do
+### 💬 Chat and routing
 
-- **Routing** sorts each message into one of nine kinds: answer, research, item, suggest, ask, supplement, status, config or reroute. Code-level guards can overrule the model, and a routing eval of real messages runs in CI.
-- **Inline research** answers questions about your code and documents in the chat. Read-only is enforced three times: a tool allowlist (Read, Grep, Glob), a Hub guard that stops the run at the first non-read tool, and on macOS a `sandbox-exec` profile. Answers cite `path:line`.
-- **Offers instead of interruptions.** An answer can end with *"Make it an item: …"*. You click it or just reply "do it". When Steve isn't sure whether a message is new work or belongs to an existing item, it asks.
-- **One living card per item.** The card in the chat updates in place (running, waiting, delivered, released) and only moves to the bottom when it needs you.
-- **Configure by talking.** For example: *"Use Opus for the frontend bot, and switch on YOLO except for billing-api."* Steve drafts field-level changes to bots, projects, models, tags, flows and contacts; you apply them with one click and can undo for 24 hours.
-- **Agent-drawn UI.** Replies can render A2UI surfaces: forms, choices, tabs and charts. Nothing the agent writes runs as code, and each form is submitted only once, even across tabs and reloads.
+Each message is sorted into one of nine routes: answer, research, item, suggest, ask, supplement, status, config or reroute. Code-level guards can overrule the model, and CI runs a routing eval built from real messages. When Steve can't tell whether a message is new work or belongs to an existing item, it asks.
 
-### 📋 Items: a real work model
+- **Inline research** answers questions about your code and documents in the chat, citing `path:line`. Read-only is enforced three times: a tool allowlist (Read, Grep, Glob), a Hub guard that stops the run at the first non-read tool, and a `sandbox-exec` profile on macOS.
+- An answer can end with *"Make it an item: …"*. Click it or just reply "do it".
+- Each item has one card in the chat. It updates in place (running, waiting, delivered, released) and only moves to the bottom when it needs you.
+- You can configure Steve by talking to it: *"Use Opus for the frontend bot, and switch on YOLO except for billing-api."* It drafts field-level changes to bots, projects, models, tags, flows and contacts. You apply them with one click and can undo for 24 hours.
+- Replies can render A2UI surfaces: forms, choices, tabs and charts. Nothing the agent writes runs as code, and a form is submitted once, even across tabs and reloads.
 
-- **Lifecycle with a closing gate.** Items move from ready to active to closing to closed. Closing freezes the result, waits for running turns and external operations to finish, and commits only if nothing changed in between. A new round starts a new **cycle**, and earlier cycles are kept.
-- **Versioned goals and plans.** A small change to the goal is passed on to the running session. A rewrite starts a fresh session with a handoff summary. Replaced plans stay visible as earlier rounds.
-- **Acceptance you can trust.** Acceptance is manual, auto or waived. *Auto* only accepts when every check passed and no plan step is open. **Proof** is read from the goal itself: if it says "deploy", the item closes only once the running Hub contains the commit.
-- **Steve takes over first.** When an agent stops without delivering, Steve checks the remote for the completion rule (merged, or merged and tagged), then continues the agent a few times. Only after that does it ask you. Idle sessions get a single *continue / I'll look / give up* card.
-- **Relations.** Dependencies are checked for cycles, and blocked items start by themselves when their dependencies finish, with a summary of what those did. You can **fork** any point of a session into a new session or a child item. The **relation graph** shows runs, handoffs, dependencies and forks.
-- **List, board and graph** views, filters, bulk actions, categories and tags (the category is picked by the router or a keyword guesser, and unsure picks go to a review list), snooze, star and due dates, plus automatic archiving.
-- **Outputs, versioned.** Each output opens in its own viewer: rendered documents, highlighted code, CSV tables, PDFs, media, folders and branch diffs. **Annotate** a region, a passage or a whole file, then send all your notes as one message.
-- **Message queue per session.** You can edit or withdraw a queued message, *send now* to steer the running turn, or send it to a new session. Messages delivered just before a restart come back marked "check, don't redo".
-- **Worktrees and disk.** Every item gets `steve/<id>` in its own worktree. Build caches are given back when items close or sit idle, and no new worktree is made below a free-space floor. Deletion is crash-safe.
+### 📋 Items
+
+An item moves from ready to active to closing to closed. Closing is a gate: it freezes the result, waits for running turns and external operations to finish, and commits only if nothing changed in between. Another round opens a new cycle and keeps the earlier ones. A small edit to the goal goes to the running session; a rewrite starts a fresh session with a handoff summary, and the replaced plan stays visible.
+
+Acceptance is manual, auto or waived. Auto only accepts when every check passed and no plan step is open. What counts as done is read from the goal: if it says "deploy", the item closes only once the running Hub contains the commit. When an agent stops without delivering, Steve checks the remote against the completion rule (merged, or merged and tagged) and has the agent continue a few times before it asks you. An idle session gets a single *continue / I'll look / give up* card.
+
+- **Dependencies** are checked for cycles. A blocked item starts by itself when its dependencies finish, with a summary of what they did. Any point of a session can be **forked** into a new session or a child item, and the relation graph shows runs, handoffs, dependencies and forks.
+- **Outputs** are versioned and open in their own viewers: rendered documents, highlighted code, CSV tables, PDFs, media, folders and branch diffs. Annotate a region, a passage or a whole file, then send all the notes as one message.
+- **Each session has a message queue.** Edit or withdraw a queued message, *send now* to steer the running turn, or send it to a new session. Messages delivered just before a restart come back marked "check, don't redo".
+- **Worktrees.** Every item gets the branch `steve/<id>` in its own worktree. Build caches are given back when items close or sit idle, no new worktree is made below a free-space floor, and deletion is crash-safe.
+- List, board and graph views, with filters, bulk actions, tags, snooze, stars, due dates and automatic archiving. Categories are picked by the router or a keyword guesser, and unsure picks go to a review list.
 
 <table>
 <tr>
@@ -131,61 +130,64 @@ Configuration made by talking to Steve, corrections to automations, contact merg
 </tr>
 </table>
 
-### 🤖 A team of bots
+### 🤖 Bots
 
-- **Bots** each have a harness (Claude Code or Codex), a model and thinking effort, a role, a persona, rules, a permission mode, an acceptance mode and a default project. Describe a bot in one sentence and Steve drafts it.
-- **Handoff.** `@Bot` hands work to that bot. Reassigning an item stops the old session and passes on the last progress. A bot can serve several workspaces with a different duty in each, and it sees only that workspace's data.
-- **Memories you approve.** Steve proposes memories from finished items, chat days, mail and agents, each with the quote it came from and the memory it would replace. Nothing takes effect until you confirm it.
-- **Models per purpose.** Routing, chat, research, titles, extraction, YOLO, drafting, flows and mail each have their own model, with ordered fallbacks and effort. Prices sync daily from Models.dev, and past estimates keep the prices of their day.
-- **Harness-friendly.** Steve answers permission prompts *once* and never writes "always allow" into your harness settings. It never edits your Codex config. It shows the command to resume any session in the harness itself, and it can import your local Claude Code and Codex history.
+A bot is a harness (Claude Code or Codex) plus a model and thinking effort, a role, a persona, rules, a permission mode, an acceptance mode and a default project. Describe one in a sentence and Steve drafts it. `@Bot` hands work to that bot. Reassigning an item stops the old session and passes on the last progress. A bot can serve several workspaces with a different duty in each, and only sees the data of the one it is working in.
+
+Steve stays out of your harness settings. It answers a permission prompt for that one call and never writes "always allow". It never edits your Codex config. Every session shows the command to resume it in the harness itself, and you can import your local Claude Code and Codex history.
+
+- **Memories** are proposed from finished items, chat days, mail and agents, each with the quote it came from and the memory it would replace. Nothing takes effect until you confirm it.
+- **Models per purpose.** Routing, chat, research, titles, extraction, YOLO, drafting, flows and mail each have their own model, effort and ordered fallbacks. Prices sync daily from Models.dev, and past estimates keep the prices of their day.
 
 <p align="center"><img src="docs/assets/screenshots/session.webp" alt="Agent session: changed files, tools, cost and context, and the command to resume it in the harness" width="85%"><br><sub><b>Agent session</b>: changed files, tools, cost and context, and the command to resume it in the harness</sub></p>
 
-### 🟢 YOLO: autonomy with brakes
+### 🟢 YOLO mode
 
-- **What it can decide:** tool permissions inside the item's own directory, local approvals, acceptance by checks, continuing stalled agents, answering agents' questions (only when confident), starting items whose dependencies are done, and releasing your own Steve (rate-limited).
-- **Hard limits no setting can widen:** money, high-sensitivity vault items, speaking as you without an `[AI]` mark, anything outside the item's directory, pushing or publishing, and anything the disclosure check flagged. These limits are property-tested.
-- **Shell guard.** Default deny, with its own POSIX shell reader: `eval`, `sh -c`, `sudo` and command substitution are refused, and `kill` only works on processes the agent started.
-- **Countdowns and breakers.** YOLO waits while you're active and gives you *Now* and *I'll decide* buttons. It pauses the workspace after repeated failures, repeated undos, or a release that went wrong.
-- **Record and undo.** Every decision is recorded per window and item, with its cost. There are five kinds of undo: revert the decision, roll back the release, recall the message, re-answer, or pause the item.
+With YOLO on, Steve decides tool permissions inside the item's own directory, local approvals, acceptance by checks, whether to continue a stalled agent, answers to agents' questions (only when confident), starting items whose dependencies are done, and releases of your own Steve (rate-limited).
+
+No setting can widen these limits, and they are property-tested: money, high-sensitivity vault items, speaking as you without an `[AI]` mark, anything outside the item's directory, pushing or publishing, and anything the disclosure check flagged.
+
+- **Shell guard.** Default deny, with its own POSIX shell parser. `eval`, `sh -c`, `sudo` and command substitution are refused, and `kill` only works on processes the agent started.
+- **Countdowns and breakers.** While you're active, YOLO waits and shows *Now* and *I'll decide* buttons. It pauses the workspace after repeated failures, repeated undos, or a release it approved that went wrong.
+- **Record and undo.** Every decision is recorded per window and item, with its cost. Five kinds of undo: revert the decision, roll back the release, recall the message, re-answer, or pause the item.
 
 <p align="center"><img src="docs/assets/screenshots/inbox.webp" alt="Inbox: acceptances, approvals and questions in one place; YOLO picks up the routine ones" width="85%"><br><sub><b>Inbox</b>: acceptances, approvals and questions in one place; YOLO picks up the routine ones</sub></p>
 
-### 🚚 Delivery: merge lanes and releases
+### 🚚 Merging and releases
 
-- **Merge lanes** per target branch. Requests that arrive while a merge is in flight are batched, and you approve one card per batch. Conflicting members are backed out one by one. Pushes are fast-forward only. After a restart nothing merges or releases twice.
-- **Lane profile** on the project page: merge queue, required checks and release method, each with the evidence it was found from.
-- **GitHub wrap-up.** After you accept, Steve asks before opening a PR and again before merging. Effects go through a durable queue that reconciles with GitHub before retrying.
-- **Release by script** for projects on the Hub's machine, Steve itself included: build, drain running work, restart, then report the outcome after it comes back. Rollback is refused when the old version can't read the current database.
+Each target branch has a merge lane. Requests that arrive while a merge is in flight are batched, and you approve one card per batch. Conflicting members are backed out one at a time. Pushes are fast-forward only, and after a restart nothing merges or releases twice. The project page shows the lane profile Steve found (merge queue, required checks, release method) and the evidence for each.
+
+On GitHub, Steve asks before opening a PR after you accept, and again before merging. Effects go through a durable queue that reconciles with GitHub before retrying. Projects on the Hub's own machine, Steve included, can be released by script: build, drain running work, restart, and report the outcome once it's back. Rollback is refused when the old version can't read the current database.
 
 ### 🔌 Connections
 
-- **Feishu / Lark:** create a bot by scanning one QR code. Steve can work as the bot or, through OAuth, as you, and it receives messages over the long connection. Each chat becomes a **space** with an attention level (live / muted / blocked) and **response rules** (mention, DM, keyword, intent…) that can turn into flows. **Personas** set how much a reply reveals (name, role, that it's an AI, that it's Steve, who the owner is). A loop guard mutes runaway spaces.
-- **Outgoing messages** take one path: disclosure check, then authorization, the send itself, a record of which knowledge was used and at what level, and an audit entry. Your own account never sends without approval, and messages sent on your behalf are marked as such.
-- **Email** (IMAP/SMTP with presets): IDLE push sync and views for *needs action*, *waiting on them* and drafts. HTML renders in a sandbox with remote images blocked. Sending always goes through an approval card bound to the content, and the server computes the recipients, so agents can't add any. A triage flow installs with your first mailbox and drops notification mail before any model call.
-- **GitHub:** a GitHub App (manifest flow) or a fine-grained token. Webhooks are HMAC-verified and deduplicated, with polling as a fallback. PRs link to items automatically, issues can become items, and a *PR checks failed* flow feeds failures back into the item. Agents get status, CI logs, comments (behind time-boxed grants) and `open_pr`.
+Every outgoing message takes the same path: disclosure check, authorization, the send itself, a record of which knowledge was used at what level, and an audit entry. Your own account never sends without approval, and messages sent on your behalf say so.
+
+- **Feishu / Lark.** Create a bot by scanning one QR code. Steve works as the bot or, through OAuth, as you, and receives messages over the long connection. Each chat becomes a space with an attention level (live, muted, blocked) and response rules (mention, DM, keyword, intent…) that can turn into flows. Personas set how much a reply reveals: name, role, that it's an AI, that it's Steve, who the owner is. A loop guard mutes runaway spaces.
+- **Email** over IMAP/SMTP, with presets. IDLE push sync, and views for *needs action*, *waiting on them* and drafts. HTML renders in a sandbox with remote images blocked. Sending always goes through an approval card bound to the content, and the server computes the recipients, so agents can't add any. Your first mailbox comes with a triage flow that drops notification mail before any model call.
+- **GitHub** through a GitHub App (manifest flow) or a fine-grained token. Webhooks are HMAC-verified and deduplicated, with polling as a fallback. PRs link to items automatically, issues can become items, and a *PR checks failed* flow feeds failures back into the item. Agents get status, CI logs, comments (behind time-boxed grants) and `open_pr`.
 - **Disconnecting** shows a dry run first, backs up the database and removes everything in one transaction.
 
 ### 📚 Knowledge and people
 
-- **Knowledge base** from notes, files, items, chat, memories and read-only folders (a wiki or an Obsidian vault). Chunking is heading-aware, and search works for both Chinese and English text. Citations like `[K1]` highlight the exact passage, and any citation that wasn't actually given to the model is removed.
-- **Disclosure levels** on every entry decide whether it can be quoted, paraphrased, used only for reasoning, or not used at all. Secrets and *never* entries are not indexed.
-- **Contacts, organizations and teams.** Identities are matched by handle, then email, then name. A name match only *proposes* a merge, and merges can be split exactly. Teams can be virtual or synced from the Feishu org chart, and a team can serve as a visibility scope. *Holdings* and *stewards* record who owns which bot, mailbox or device.
+The knowledge base takes notes, files, items, chat, memories and read-only folders such as a wiki or an Obsidian vault. Chunking follows headings, and search handles Chinese and English. A citation like `[K1]` highlights the exact passage, and any citation that wasn't actually given to the model is removed. Each entry's disclosure level decides whether it can be quoted, paraphrased, used only for reasoning, or not used at all. Secrets and *never* entries aren't indexed.
+
+Steve keeps contacts, organizations and teams. Identities are matched by handle, then email, then name. A name match only *proposes* a merge, and a merge can be split back exactly. Teams can be virtual or synced from the Feishu org chart, and a team can serve as a visibility scope. *Holdings* and *stewards* record who owns which bot, mailbox or device.
 
 ### 🔐 Vault
 
-- **Encryption.** Each workspace has a master key in the OS key store (macOS Keychain, Linux Secret Service, or a protected directory). Each item has its own data key, and fields are encrypted with XChaCha20-Poly1305.
-- **Templates** for logins, cards, API credentials, SSH keys and more. The template, not the client, decides which fields are secret.
-- **Revealing a secret requires a passkey** (Touch ID or Face ID), with a single-use challenge bound to the field.
-- **Bots use secrets without reading them** through `steve_secret_use`. Each use needs an approval or a time-boxed grant, is recorded, and returns redacted output. Cards and high-sensitivity items can never be granted. A paste guard strips card numbers, API tokens and private keys before anything reaches a model.
+Each workspace has a master key in the OS key store (macOS Keychain, Linux Secret Service, or a protected directory). Each item has its own data key, and fields are encrypted with XChaCha20-Poly1305. Templates cover logins, cards, API credentials, SSH keys and more, and the template, not the client, decides which fields are secret. Revealing a secret takes a passkey (Touch ID or Face ID) with a single-use challenge bound to that field.
+
+Bots use secrets through `steve_secret_use` without reading them. Each use needs an approval or a time-boxed grant, is recorded, and returns redacted output. Cards and high-sensitivity items can never be granted. A paste guard strips card numbers, API tokens and private keys before anything reaches a model.
 
 ### ⚡ Automation
 
-- **Flows** are graphs built from 11 node kinds: trigger, filter, decision table, sub-flow, wait, approve, action, script, command, HTTP and bot. Every step is committed before the next one, so a restart resumes from where it stopped.
-- **Safe by construction.** Effects need an upstream approval or a stored grant. Scripts run in a QuickJS sandbox with no network or files. HTTP is protected against SSRF across redirects and DNS, and secrets go only into headers and body. Command arguments are shell-quoted. Every run has a cost budget.
-- **Authoring.** Draft a flow from a sentence, ask Steve to change it on the canvas, or edit it from the chat. Saves are versioned and dry runs touch nothing. A canvas trace lights up the path a run took.
-- **Signals and corrections.** Incoming events are deduplicated and grouped. One click (*remind me / ignore / make an item*) applies the correction, adds an exception filter to the flow and remembers the rule, and the whole change can be undone.
-- **Schedules in plain language** ("every weekday at 9"), with daylight-saving handling, catch-up policies and overlap protection.
+A flow is a graph of 11 node kinds: trigger, filter, decision table, sub-flow, wait, approve, action, script, command, HTTP and bot. Each step is committed before the next, so a restart picks up where the run stopped.
+
+- Effects need an upstream approval or a stored grant. Scripts run in a QuickJS sandbox with no network or files. HTTP is protected against SSRF across redirects and DNS, and secrets go only into headers and body. Command arguments are shell-quoted. Every run has a cost budget.
+- Draft a flow from a sentence, ask Steve to change it on the canvas, or edit it from the chat. Saves are versioned and dry runs touch nothing. The canvas lights up the path a run took.
+- Incoming events are deduplicated and grouped into signals. One click (*remind me / ignore / make an item*) applies the correction, adds an exception filter to the flow and remembers the rule, and the whole change can be undone.
+- Schedules are written in plain language ("every weekday at 9"), with daylight-saving handling, catch-up policies and overlap protection.
 
 <p align="center">
 <picture>
@@ -195,35 +197,31 @@ Configuration made by talking to Steve, corrections to automations, contact merg
 <br><sub><b>Mail triage flow</b> on the canvas: notifications are filtered out before any model call, and a bot node branches the rest</sub>
 </p>
 
-### 📊 Stats and platform
+### 📊 Stats and the rest
 
-- **Stats:** tokens (including cache and reasoning), cache hit rate, estimated cost against what the harness reports, money saved by the cache, items started and finished, lead/cycle/wait time, first-pass rate and rework. You can filter by project, bot, model and source.
-- **Workspaces and sign-in:** OIDC with PKCE. Workspaces are data boundaries with their own item prefix.
-- **Live everywhere:** one SSE stream with resumable cursors, and phones reconnect the moment the page becomes visible again.
-- **Operations:** in-place upgrades with backup and rollback, daily backups for macOS source installs, signed macOS releases that keep the vault key across rebuilds, a <kbd>⌘</kbd> <kbd>K</kbd> command palette, light and dark themes, and English or 简体中文.
+The stats page counts tokens (cache and reasoning included), cache hit rate, estimated cost next to what the harness reports, money the cache saved, items started and finished, lead, cycle and wait time, first-pass rate and rework. Filter by project, bot, model and source.
+
+Sign-in is OIDC with PKCE. Workspaces are data boundaries, each with its own item prefix. The UI stays live over one SSE stream with resumable cursors, and a phone reconnects as soon as the page is visible again. There are in-place upgrades with backup and rollback, daily backups for macOS source installs, signed macOS releases that keep the vault key across rebuilds, a <kbd>⌘</kbd> <kbd>K</kbd> command palette, light and dark themes, and English or 简体中文.
 
 <sub>Screenshots come from a demo workspace on the real Hub and web UI, with scripted agents. The UI is shown in Chinese; switch to English in Settings → Appearance.</sub>
 
 ## Extending Steve
 
-Steve does not have a runtime plugin store yet. The Plugins page is a placeholder for a later phase. What exists today are typed extension points in the Hub:
+There is no runtime plugin store yet; the Plugins page is a placeholder. Today you extend the Hub through typed extension points:
 
 | Extension point | What you can add |
 |---|---|
 | **Hub Extension API** (`steve-hub/src/extension.rs`) | Connection providers, channel adapters, mail adapters, flow event sources, API routes and background jobs. Build a binary with `Assembly::builtin().with(MyExt)`. Conflicts stop the Hub at startup, naming the extension. Feishu, IMAP mail and GitHub are built this way. |
 | **Flow seams** (`FlowSetup`) | Custom node kinds, actions, item finders and event adapters. |
 | **Module seams** (`steve-modules`) | Item lifecycle hooks, declarative **item panels** in the sidebar (GitHub's *PR & checks* and the mail panel use them), prompt context and outbound checks. |
-| **MCP tools for agents** | A single loopback `steve` MCP server whose tokens are scoped to one item. It covers progress, questions, approvals, delivery and publishing, plus knowledge, mail, GitHub, contacts and secrets. |
-| **Webhooks** | `POST /hooks/:connection_id`, verified by signature before anything is written. |
+| **MCP tools for agents** | One loopback `steve` MCP server, with tokens scoped to a single item. It covers progress, questions, approvals, delivery and publishing, plus knowledge, mail, GitHub, contacts and secrets. |
+| **Webhooks** | `POST /hooks/:connection_id`, signature-checked before anything is written. |
 | **Knowledge store port** | SQLite FTS by default. [OpenViking](ops/openviking) is an optional vector backend (`STEVE_KB_STORE=openviking`). Every hit is re-checked against the Hub's own access rules. |
 
 ## Experimental and planned
 
-What you can rely on today, and what's still on the way:
-
-- **Multiple devices (experimental, off by default).** A `steve-node` on another machine can pair with the Hub and run harnesses there. The Node always dials out, pairing uses a one-time code and a fingerprint check, and each Node keeps an execution journal for reconciliation. It is enabled with `STEVE_NODE_LISTEN=1` / `STEVE_NODE_BIND` / `STEVE_NODE_MODE=local`, pairing is CLI-only for now, and the design is still in progress ([docs/hub-node-client.md](docs/hub-node-client.md)).
-- **Plugins page:** planned. Use the extension points above.
-- **Planned, not built yet:** quiet hours and a daily digest (marked *Works once push is connected* in Settings), Gmail and Outlook API mail adapters, Feishu docs, calendar and approval areas, and external vault backends (1Password, Bitwarden).
+- **Multiple devices** (experimental, off by default). A `steve-node` on another machine can pair with the Hub and run harnesses there. The Node always dials out, pairing uses a one-time code and a fingerprint check, and each Node keeps an execution journal for reconciliation. Turn it on with `STEVE_NODE_LISTEN=1` / `STEVE_NODE_BIND` / `STEVE_NODE_MODE=local`. Pairing is CLI-only for now, and the design is still moving ([docs/hub-node-client.md](docs/hub-node-client.md)).
+- **Not built yet:** the Plugins page (use the extension points above), quiet hours and a daily digest (marked *Works once push is connected* in Settings), Gmail and Outlook API mail adapters, Feishu docs, calendar and approvals, and external vault backends (1Password, Bitwarden).
 
 ## How it works
 
@@ -257,10 +255,10 @@ flowchart LR
     CC & CX --- WT
 ```
 
-- **The Hub is the brain.** It is the single source of truth and the only place decisions are made: what runs, on which model, which permissions are granted, what's next in the queue. It also handles authentication, the vault, channels and stats.
-- **Harnesses do the work.** Agent protocols (ACP, MCP, stream-json) end inside the runtime driver. The rest of Steve only sees its own vocabulary: sessions, turns, events, tool calls and approvals. Supporting another harness is meant to take one more driver.
-- **Modules plug into the Hub.** Channels, mail, GitHub, knowledge, flows and the vault register through the extension and module seams [described above](#extending-steve). Events between modules travel through a durable outbox.
-- **Clients are windows.** Everyone in a workspace, on every device, sees the same state live.
+- **Hub.** The single source of truth and the only place decisions are made: what runs, on which model, which permissions are granted, what's next in the queue. Authentication, the vault, channels and stats live here too.
+- **Runtime drivers.** Agent protocols (ACP, MCP, stream-json) stop at the driver. The rest of Steve only deals in sessions, turns, events, tool calls and approvals, so a new harness should need one more driver and nothing else.
+- **Modules.** Channels, mail, GitHub, knowledge, flows and the vault register through the [extension points above](#extending-steve). Events between modules go through a durable outbox.
+- **Clients.** Everyone in a workspace, on every device, sees the same state live.
 
 The design is in [docs/hub-node-client.md](docs/hub-node-client.md) and the wire contract in [docs/node-protocol.md](docs/node-protocol.md).
 
@@ -292,7 +290,7 @@ Steve talks to harnesses through their ACP adapters. It finds them in the global
 npm install -g @agentclientprotocol/claude-agent-acp @zed-industries/codex-acp
 ```
 
-Install only the ones you use. If `claude` isn't at `/opt/homebrew/bin/claude`, set `CLAUDE_CODE_EXECUTABLE`. To point at adapters elsewhere, set `STEVE_ADAPTER_CLAUDE` / `STEVE_ADAPTER_CODEX`.
+Install the ones you use. If `claude` isn't at `/opt/homebrew/bin/claude`, set `CLAUDE_CODE_EXECUTABLE`. To point at adapters elsewhere, set `STEVE_ADAPTER_CLAUDE` / `STEVE_ADAPTER_CODEX`.
 
 ### 3. Run
 
@@ -304,10 +302,10 @@ STEVE_WEB_DIR="$PWD/web/dist" \
   hub-rs/target/debug/steve-hub
 ```
 
-Open **http://127.0.0.1:8440** and sign in. `STEVE_DEV_LOGIN=1` enables a one-click local owner login that is accepted **from loopback only**. Use it to try Steve. For anything long-lived, configure OIDC instead (see below).
+Open **http://127.0.0.1:8440** and sign in. `STEVE_DEV_LOGIN=1` adds a one-click owner login that only works **from loopback**. It's for trying Steve out; for anything long-lived, set up OIDC (below).
 
 > [!TIP]
-> `STEVE_HOME` keeps this instance's data separate. It defaults to `~/.steve`.
+> `STEVE_HOME` keeps this instance's data separate from `~/.steve`, the default. On Linux without a desktop keyring (Secret Service), the vault refuses to start: set `STEVE_VAULT_KEYSTORE=dir` and point `STEVE_VAULT_KEY_DIR` at a `0700` directory outside `STEVE_HOME`.
 
 ## Configuration
 
@@ -321,7 +319,7 @@ Steve reads its settings from the environment. For a service, put them in `$STEV
 | `STEVE_PUBLIC_URL` | A URL your integrations can reach, only needed for callbacks. No shared hosted endpoint is provided. |
 | `STEVE_OIDC_ISSUER`, `STEVE_OIDC_CLIENT_ID`, `STEVE_OIDC_CLIENT_SECRET_FILE` | Sign-in through your OIDC provider |
 | `STEVE_DISK_FLOOR_GB`, `STEVE_DISK_LOW_GB`, `STEVE_WORKTREE_IDLE_HOURS` | Disk guards for item worktrees |
-| `STEVE_UPDATE_CHECK` | `0` turns off the periodic release check |
+| `STEVE_UPDATE_CHECK` | `0` turns off the periodic release check. Debug builds don't check unless it is `1` |
 | `STEVE_YOLO` | `off` disables YOLO for the whole instance |
 | `STEVE_KB_STORE` | `openviking` to use the optional vector backend (default: SQLite FTS) |
 | `STEVE_VAULT_KEYSTORE` | `auto` (Keychain / Secret Service), `dir` with `STEVE_VAULT_KEY_DIR`, or `file` for tests |
