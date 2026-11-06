@@ -203,6 +203,7 @@ impl Assembly {
             media: Vec::new(),
             mail: Vec::new(),
             event_sources: Vec::new(),
+            systems: Vec::new(),
         };
         for e in &self.list {
             let id = e.ext.id();
@@ -210,6 +211,7 @@ impl Assembly {
             e.ext.declare(&mut d).map_err(|err| err.of(id))?;
         }
         d.check_pairings()?;
+        d.check_systems()?;
         Ok(d)
     }
 
@@ -312,6 +314,8 @@ pub struct Declare<'a> {
     pub(crate) media: Vec<Arc<dyn MediaFetch>>,
     pub(crate) mail: Vec<Arc<dyn steve_mail::MailAdapter>>,
     pub(crate) event_sources: Vec<Arc<dyn steve_flow::EventAdapter>>,
+    /// Handle systems declared by the extensions: `(id, label, extension)`.
+    pub(crate) systems: Vec<(String, String, String)>,
 }
 
 impl Declare<'_> {
@@ -358,6 +362,67 @@ impl Declare<'_> {
                     "adapter {} needs one of {} in the assembly",
                     p.id(),
                     pairing.with.join(", ")
+                ))
+                .of(&owner));
+            }
+        }
+        Ok(())
+    }
+
+    /// A handle system that is not one of the Hub's own (`systems.id`, for example an adapter's
+    /// internal user ids), named `label`: a [`steve_channels::channel::Sender`]'s handle or aliases
+    /// may use it, and [`ChannelDecl::handle_system`] may name it. Upserted into `systems` at every
+    /// boot, owned by this extension. The id is lowercase letters, digits and `_`; one the Hub
+    /// seeds, or one another extension declared, is an error.
+    pub fn system(&mut self, id: &str, label: &str) -> Result<(), ExtensionError> {
+        let id = id.trim();
+        let label = label.trim();
+        if id.is_empty()
+            || !id
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+        {
+            return Err(ExtensionError::new(format!(
+                "handle system {id:?}: an id is lowercase letters, digits and '_'"
+            )));
+        }
+        if label.is_empty() {
+            return Err(ExtensionError::new(format!(
+                "handle system {id} without a label"
+            )));
+        }
+        if steve_modules::accounts::repo::BUILTIN_SYSTEMS
+            .iter()
+            .any(|b| b.0 == id)
+        {
+            return Err(ExtensionError::new(format!(
+                "handle system {id} is one of the Hub's own"
+            )));
+        }
+        if let Some((_, _, owner)) = self.systems.iter().find(|(x, _, _)| x == id) {
+            return Err(ExtensionError::new(format!(
+                "handle system {id} is already declared by {owner}"
+            )));
+        }
+        self.systems
+            .push((id.to_string(), label.to_string(), self.ext.clone()));
+        Ok(())
+    }
+
+    /// Every channel side names its people in a system the Hub seeds or an extension declared
+    /// (in any order).
+    fn check_systems(&self) -> Result<(), ExtensionError> {
+        for d in self.decls.values() {
+            let s = d.handle_system.as_str();
+            let known = steve_modules::accounts::repo::BUILTIN_SYSTEMS
+                .iter()
+                .any(|b| b.0 == s)
+                || self.systems.iter().any(|(x, _, _)| x == s);
+            if !known {
+                let owner = self.owners.get(&d.adapter).cloned().unwrap_or_default();
+                return Err(ExtensionError::new(format!(
+                    "adapter {} names its people in handle system {s}, which nobody declares",
+                    d.adapter
                 ))
                 .of(&owner));
             }

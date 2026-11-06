@@ -333,6 +333,10 @@ struct Probe {
     hooks: Vec<&'static str>,
     /// Registers [`NeedsPair`].
     needs_pair: bool,
+    /// Handle systems it declares: `(id, label)`.
+    systems: Vec<(&'static str, &'static str)>,
+    /// A channel side (the fake channel) naming its people in this system.
+    side_system: Option<&'static str>,
 }
 
 impl Extension for Probe {
@@ -353,6 +357,24 @@ impl Extension for Probe {
         }
         if self.needs_pair {
             d.provider(Arc::new(NeedsPair))?;
+        }
+        for (id, label) in &self.systems {
+            d.system(id, label)?;
+        }
+        if let Some(sys) = self.side_system {
+            use steve_channels::ChannelAdapter;
+            use steve_channels::ext::{ChannelDecl, ChannelSide};
+            use steve_channels::fake::channel::FakeChannel;
+            let fake = Arc::new(FakeChannel::new());
+            d.channel(
+                ChannelSide::new(
+                    ChannelDecl::new(FakeChannel::ID)
+                        .handle_system(sys)
+                        .features(fake.features()),
+                    fake.clone(),
+                )
+                .adapter(fake),
+            )?;
         }
         if self.stray_source {
             let src = steve_hub::wire::signals::GithubSource(Arc::new(steve_github::GitHubApp));
@@ -571,4 +593,92 @@ async fn an_empty_assembly_still_wires_the_hub() {
     // the built-in extensions' two (registrations resumed, the connection runtime) are gone
     assert_eq!(w.jobs.len(), 12);
     assert!(w.lifecycle.is_none());
+}
+
+#[tokio::test]
+async fn an_extension_declares_its_own_handle_systems() {
+    // refused: a seeded id, a bad id, one declared twice, a side naming an undeclared system
+    let e = wire_err(Assembly::empty().with(Probe {
+        systems: vec![("feishu", "飞书")],
+        ..probe("probe")
+    }));
+    assert!(
+        e.contains("extension probe: handle system feishu is one of the Hub's own"),
+        "{e}"
+    );
+    let e = wire_err(Assembly::empty().with(Probe {
+        systems: vec![("Lark-1", "x")],
+        ..probe("probe")
+    }));
+    assert!(
+        e.contains("an id is lowercase letters, digits and '_'"),
+        "{e}"
+    );
+    let e = wire_err(
+        Assembly::empty()
+            .with(Probe {
+                systems: vec![("probe_internal", "内部账号")],
+                ..probe("probe")
+            })
+            .with(Probe {
+                systems: vec![("probe_internal", "又一个")],
+                ..probe("probe2")
+            }),
+    );
+    assert!(
+        e.contains("extension probe2: handle system probe_internal is already declared by probe"),
+        "{e}"
+    );
+    let e = wire_err(Assembly::empty().with(Probe {
+        side_system: Some("probe_internal"),
+        ..probe("probe")
+    }));
+    assert!(
+        e.contains(
+            "extension probe: adapter fake_chan names its people in handle system probe_internal, which nobody declares"
+        ),
+        "{e}"
+    );
+
+    // declared (after the side that names it): in `systems` for every workspace, owned by the
+    // extension; a second boot of the same home updates it in place
+    let h = home();
+    let asm = |label: &'static str| {
+        Assembly::empty().with(Probe {
+            side_system: Some("probe_internal"),
+            systems: vec![("probe_internal", label)],
+            ..probe("probe")
+        })
+    };
+    let rows = |w: &steve_hub::wire::Wired| -> Vec<(String, String, String, String)> {
+        w.seams
+            .channels
+            .store()
+            .reader(|c| {
+                let mut st = c.prepare(
+                    "SELECT workspace_id, name, family, plugin FROM systems WHERE id = 'probe_internal'",
+                )?;
+                let rows = st
+                    .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok::<_, steve_store::StoreError>(rows)
+            })
+            .expect("systems")
+    };
+    let w = steve_hub::wire::wire_assembly(&h.cfg, &Bus::new(), h.vars.clone(), &asm("内部账号"))
+        .expect("wire");
+    assert_eq!(
+        rows(&w),
+        [(
+            "*".to_string(),
+            "内部账号".to_string(),
+            "probe_internal".to_string(),
+            "ext:probe".to_string()
+        )]
+    );
+    drop(w);
+    let w = steve_hub::wire::wire_assembly(&h.cfg, &Bus::new(), h.vars.clone(), &asm("内部 ID"))
+        .expect("wire again");
+    assert_eq!(rows(&w).len(), 1);
+    assert_eq!(rows(&w)[0].1, "内部 ID");
 }

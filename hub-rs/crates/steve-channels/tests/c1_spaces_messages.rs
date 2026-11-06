@@ -1022,3 +1022,36 @@ async fn a_sender_known_by_an_alias_lands_on_the_contact_holding_it() {
         vec![json!(party)]
     );
 }
+
+/// A sender named first in a handle system an extension declared (not one the Hub seeds), with an
+/// email: matched to the contact holding the email, and the declared handle attached to it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_sender_in_a_declared_system_lands_on_the_contact_holding_its_alias() {
+    use steve_channels::HandleRef;
+    use steve_channels::channel::Sender;
+    use steve_modules::accounts::{Hints, identify, repo};
+    let h = setup();
+    h.env
+        .store()
+        .transaction(|tx| repo::upsert_declared(tx, "probe_internal", "内部账号", "probe"))
+        .expect("declared");
+    let alice = h
+        .env
+        .store()
+        .transaction(|tx| identify(tx, WS, ME, "mail", "alice@example.com", &Hints::default()))
+        .expect("identify");
+    let mut m = FakeChannel::message("G1", "m1", "u_int_1", "你好");
+    m.sender = Sender::new(HandleRef::new("probe_internal", "U-Int-1"))
+        .alias(HandleRef::new("mail", "alice@example.com"));
+    let r = push(&h, m).await;
+    assert_eq!(r.sender_party_id.as_deref(), Some(alice.party_id.as_str()));
+    // kept as given (no normalization), in the system's own family
+    assert_eq!(
+        one(
+            &h,
+            "SELECT party_id || ' ' || family FROM accounts WHERE system_id = 'probe_internal' AND handle = 'U-Int-1'",
+            &[]
+        ),
+        vec![json!(format!("{} probe_internal", alice.party_id))]
+    );
+}
