@@ -327,6 +327,23 @@ fn builtin_ids_and_without() {
 }
 
 #[tokio::test]
+async fn feishu_self_is_refused_without_feishu_bot() {
+    let asm = Assembly::builtin().without("feishu.bot").expect("known id");
+    let e = wire_err(asm);
+    assert!(
+        e.contains("extension feishu.self: needs feishu.bot in the assembly"),
+        "{e}"
+    );
+    // without both, the rest still wires
+    let h = home();
+    let asm = Assembly::builtin()
+        .without("feishu.bot")
+        .and_then(|a| a.without("feishu.self"))
+        .expect("known ids");
+    assert!(steve_hub::wire::wire_assembly(&h.cfg, &Bus::new(), h.vars.clone(), &asm).is_ok());
+}
+
+#[tokio::test]
 async fn conflicts_are_refused_at_startup_with_the_extension_id() {
     let e = wire_err(Assembly::builtin().with(probe("github")));
     assert!(e.contains("extension github: registered twice"), "{e}");
