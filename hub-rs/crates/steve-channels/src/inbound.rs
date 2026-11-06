@@ -832,7 +832,8 @@ impl Channels {
             });
         }
         let mentions = Value::Array(mentions);
-        let attachments = Value::Array(msg.attachments.clone());
+        // each resource names the adapter its key belongs to (a merged copy keeps the first's)
+        let attachments = Value::Array(crate::media::stamped(&msg.attachments, &facts.adapter));
         let external_id = if has_id {
             msg.external_id.clone()
         } else {

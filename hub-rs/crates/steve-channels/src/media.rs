@@ -325,25 +325,29 @@ fn effective(c: &Connection, r: &Row) -> (Option<String>, Value) {
         return unchanged;
     };
     let raw = &payload["raw"];
-    let conn = connection_of(c, r);
+    let conn = connection_of(c, r, None);
     let Some(msg) = r.message_ref(c, conn.as_ref().map(|(x, _)| x.as_str())) else {
         return unchanged;
     };
     // the view of the connection's adapter; once that connection is gone, the view that knows
     // this raw event as this very message (each refuses another message's event)
     let read = match conn {
-        Some((_, a)) => view(&a).and_then(|m| m.reparse(&msg, raw)),
-        None => views().iter().find_map(|m| m.reparse(&msg, raw)),
+        Some((_, a)) => view(&a).and_then(|m| m.reparse(&msg, raw).map(|x| (a, x))),
+        None => views().iter().find_map(|m| {
+            m.reparse(&msg, raw)
+                .map(|x| (m.adapter_id().to_string(), x))
+        }),
     };
     match read {
-        Some((t, atts)) => (Some(t), Value::Array(atts)),
+        Some((a, (t, atts))) => (Some(t), Value::Array(stamped(&atts, &a))),
         None => unchanged,
     }
 }
 
 /// The connection to fetch as: the one whose event recorded the message, else the one the space
-/// was first seen through, else its voice. `(connection, adapter)`; `None` when none is left.
-fn connection_of(c: &Connection, r: &Row) -> Option<(String, String)> {
+/// was first seen through, else its voice; with `want`, only a connection of that adapter (the
+/// one the resource's key belongs to). `(connection, adapter)`; `None` when none is left.
+fn connection_of(c: &Connection, r: &Row, want: Option<&str>) -> Option<(String, String)> {
     let mut cands: Vec<String> = Vec::new();
     if let Some(ev) = &r.event_id
         && let Ok(Some(Some(conn))) = c
@@ -373,6 +377,7 @@ fn connection_of(c: &Connection, r: &Row) -> Option<(String, String)> {
             .optional()
             .ok()
             .flatten()
+            .filter(|a| want.is_none_or(|w| w == a))
             .map(|a| (conn, a))
         })
 }
@@ -404,10 +409,37 @@ fn is_resource(a: &Value) -> bool {
     matches!(a["type"].as_str(), Some("image" | "file"))
 }
 
+/// The key of a stored resource entry naming the `connections.adapter` its `key` belongs to.
+const ADAPTER_STAMP: &str = "adapter";
+
+/// `atts` as stored for a message received through `adapter`: every resource entry names it, so
+/// only that adapter's [`MediaFetch`] is ever handed its key (whatever an entry said before).
+pub(crate) fn stamped(atts: &[Value], adapter: &str) -> Vec<Value> {
+    atts.iter()
+        .map(|a| {
+            let mut a = a.clone();
+            if is_resource(&a)
+                && let Some(o) = a.as_object_mut()
+            {
+                o.insert(ADAPTER_STAMP.into(), json!(adapter));
+            }
+            a
+        })
+        .collect()
+}
+
+/// The adapter a stored resource entry names; `None` for one stored before entries were stamped.
+fn stamp_of(a: &Value) -> Option<&str> {
+    a.get(ADAPTER_STAMP)
+        .and_then(Value::as_str)
+        .filter(|x| !x.is_empty())
+}
+
 /// The public form of one stored resource entry.
 fn public_entry(msg: &str, i: usize, a: &Value, why: Option<MediaError>) -> Value {
     let mut o = a.as_object().cloned().unwrap_or_default();
     o.remove("key");
+    o.remove(ADAPTER_STAMP);
     o.entry("source").or_insert(json!("message"));
     if a["type"] == "file" {
         o.entry("kind").or_insert(json!("file"));
@@ -438,7 +470,6 @@ pub fn present(c: &Connection, id: &str) -> Option<(Option<String>, Value)> {
     let Some(xs) = atts.as_array().filter(|x| !x.is_empty()) else {
         return Some((text, json!([])));
     };
-    let conn = connection_of(c, &r);
     let out = xs
         .iter()
         .enumerate()
@@ -449,7 +480,7 @@ pub fn present(c: &Connection, id: &str) -> Option<(Option<String>, Value)> {
             let why = blocked(&r, a).or(if r.direction != "in" {
                 Some(MediaError::Unsupported)
             } else {
-                match &conn {
+                match &connection_of(c, &r, stamp_of(a)) {
                     None => Some(MediaError::Disconnected),
                     Some((_, ad)) if !supported(ad) => Some(MediaError::Unsupported),
                     _ => None,
@@ -607,7 +638,7 @@ fn plan(c: &Connection, r: &Row, index: usize) -> Result<Plan, MediaError> {
     if let Some(e) = blocked(r, a) {
         return Err(e);
     }
-    let (conn, adapter) = connection_of(c, r).ok_or(MediaError::Disconnected)?;
+    let (conn, adapter) = connection_of(c, r, stamp_of(a)).ok_or(MediaError::Disconnected)?;
     if !supported(&adapter) {
         return Err(MediaError::Unsupported);
     }
