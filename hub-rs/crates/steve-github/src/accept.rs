@@ -408,9 +408,20 @@ impl GitHub {
         .map_err(|e| e.to_string())?;
         match checked {
             Ok((head, found)) if found.is_empty() => Ok(head),
+            Ok((_, found)) if found.iter().all(|k| k == "binary") => {
+                Err("提交里有二进制改动，泄露检查看不了，开 PR 前要你确认".into())
+            }
             Ok((_, found)) => Err(format!(
                 "泄露检查在提交里发现疑似机密（{}），开 PR 前要你确认",
-                found.join("、")
+                found
+                    .iter()
+                    .map(|k| if k == "binary" {
+                        "二进制改动"
+                    } else {
+                        k.as_str()
+                    })
+                    .collect::<Vec<_>>()
+                    .join("、")
             )),
             Err(e) => Err(format!("泄露检查没做成（{e}），开 PR 前要你确认")),
         }
