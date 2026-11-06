@@ -101,6 +101,14 @@ fn note(from: Level, to: Level) -> Option<&'static str> {
     }
 }
 
+/// What the floor read of a tool call update at once, when it came in: the session's turn then,
+/// and whether the harness had asked about the call ([`Core::yolo_saw`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SeenTurn {
+    turn: u64,
+    asked: bool,
+}
+
 /// What each running session was last told about YOLO, the note waiting for its next message, and
 /// the sessions whose harness mode switch did not go through yet.
 #[derive(Default)]
@@ -111,10 +119,14 @@ pub(crate) struct Sessions {
     /// The mode switch failed (a store error, say): the next sync tries it again, whatever the
     /// note did meanwhile. Apart from `told`, so a retry never makes a note again.
     mode_pending: Mutex<HashSet<String>>,
-    /// Tool calls (`session`, call id) that stopped their turn already.
-    stopped: Mutex<HashSet<(String, String)>>,
+    /// Tool calls (`session`, call id) that stopped their turn already, with the turn.
+    stopped: Mutex<HashMap<(String, String), u64>>,
     /// Tool calls (`session`, call id) the harness asked permission for: the guard judged them.
-    asked: Mutex<HashSet<(String, String)>>,
+    asked: Mutex<HashMap<(String, String), u64>>,
+    /// Tool calls (`session`, call id) the floor saw, with the turn it first saw them in.
+    seen: Mutex<HashMap<(String, String), u64>>,
+    /// Each session's turn, counted up when one is over.
+    turns: Mutex<HashMap<String, u64>>,
     /// Why Steve stopped the session's last turn, for the agent's next message.
     stop_notes: Mutex<HashMap<String, String>>,
 }
@@ -135,7 +147,11 @@ impl Sessions {
     }
     /// Records that call `call` of `sid` stopped its turn; false when it did already.
     fn stop_once(&self, sid: &str, call: &str, note: String) -> bool {
-        if !lock(&self.stopped).insert((sid.into(), call.into())) {
+        let turn = self.turn(sid);
+        if lock(&self.stopped)
+            .insert((sid.into(), call.into()), turn)
+            .is_some()
+        {
             return false;
         }
         lock(&self.stop_notes).insert(sid.into(), note);
@@ -144,16 +160,41 @@ impl Sessions {
     fn take_stop_note(&self, sid: &str) -> Option<String> {
         lock(&self.stop_notes).remove(sid)
     }
+    fn turn(&self, sid: &str) -> u64 {
+        lock(&self.turns).get(sid).copied().unwrap_or(0)
+    }
     fn asked(&self, sid: &str, call: &str) {
-        lock(&self.asked).insert((sid.into(), call.into()));
+        let turn = self.turn(sid);
+        lock(&self.asked).insert((sid.into(), call.into()), turn);
     }
     fn was_asked(&self, sid: &str, call: &str) -> bool {
-        lock(&self.asked).contains(&(sid.to_string(), call.to_string()))
+        lock(&self.asked).contains_key(&(sid.to_string(), call.to_string()))
     }
-    /// The turn of `sid` is over: its calls are not seen again.
+    /// A tool call update of `sid` came in: the turn it belongs to and whether the harness asked
+    /// about it, read at once (before any slower look). `None`: the call was first seen in a turn
+    /// that is over (a late update), and nothing is done about it now.
+    fn saw(&self, sid: &str, call: &str) -> Option<SeenTurn> {
+        let turn = self.turn(sid);
+        let first = *lock(&self.seen)
+            .entry((sid.into(), call.into()))
+            .or_insert(turn);
+        (first == turn).then(|| SeenTurn {
+            turn,
+            asked: self.was_asked(sid, call),
+        })
+    }
+    /// The turn of `sid` is over: a call of it is not looked at again. What the turn just over
+    /// kept stays one turn more, so its late updates are still known as its own.
     fn turn_over(&self, sid: &str) {
-        lock(&self.asked).retain(|(s, _)| s != sid);
-        lock(&self.stopped).retain(|(s, _)| s != sid);
+        let turn = {
+            let mut turns = lock(&self.turns);
+            let t = turns.entry(sid.into()).or_insert(0);
+            *t += 1;
+            *t
+        };
+        for m in [&self.asked, &self.stopped, &self.seen] {
+            lock(m).retain(|(s, _), t| s != sid || *t + 1 >= turn);
+        }
     }
     /// Records the level; the level the session was told before when it differs (unknown = off,
     /// the protocol of a session started before YOLO).
@@ -273,9 +314,16 @@ impl Core {
         self.0.yolo_sessions.asked(session, call);
     }
 
-    /// The turn of `session` is over (what [`Self::yolo_asked`] and the stops kept goes).
+    /// The turn of `session` is over: calls of it are no longer looked at.
     pub fn yolo_turn_over(&self, session: &str) {
         self.0.yolo_sessions.turn_over(session);
+    }
+
+    /// A tool call update of `session` came in: read its turn and whether it was asked about now,
+    /// before [`Self::yolo_seen`] looks at it on another thread (the turn may end meanwhile).
+    /// `None`: it belongs to a turn that is over.
+    pub fn yolo_saw(&self, session: &str, call: &str) -> Option<SeenTurn> {
+        self.0.yolo_sessions.saw(session, call)
     }
 
     /// A harness tool call of `session` as its ACP `tool_call` updates report it (`call`: its id,
@@ -286,7 +334,8 @@ impl Core {
     /// permission mode). With YOLO on a pending call is left until it starts, since the harness may
     /// still ask, and then the guard has it. One that crosses the floor stops the turn: the user is
     /// told, and the agent hears why with its next message. True when it stopped the turn. Nothing
-    /// happens with YOLO off.
+    /// happens with YOLO off, nor for a call of a turn that is over by now (`seen`: what
+    /// [`Self::yolo_saw`] read when the update came).
     pub fn yolo_seen(
         &self,
         session: &str,
@@ -294,11 +343,17 @@ impl Core {
         title: &str,
         pending: bool,
         input: super::ToolInput,
+        seen: SeenTurn,
     ) -> bool {
         let (Some(y), Some((item, level))) = (self.yolo(), self.watched_item(session)) else {
             return false;
         };
-        if self.0.yolo_sessions.was_asked(session, call) || (pending && level != Level::Full) {
+        let sessions = &self.0.yolo_sessions;
+        let over = || sessions.turn(session) != seen.turn;
+        if over() || seen.asked || sessions.was_asked(session, call) {
+            return false;
+        }
+        if pending && level != Level::Full {
             return false;
         }
         let own = y.own_dir(item.cwd.as_deref());
@@ -325,7 +380,8 @@ impl Core {
             "（Steve 停下了你上一轮：没有经过用户确认就做了这件事——{}（{}）。不要再试；需要的话用 steve_request_approval 交给用户。）",
             limit.what, title
         );
-        if !self.0.yolo_sessions.stop_once(session, call, note) {
+        // the turn may have ended while the floor looked: then there is nothing to stop
+        if over() || !sessions.stop_once(session, call, note) {
             return false;
         }
         tracing::warn!(session, call, rule = %limit.rule(), "yolo floor: stopping the turn");

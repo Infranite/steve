@@ -317,6 +317,11 @@ impl super::node_runtime::NodeDomain for HubHost {
         let (Some(core), Some(_)) = (self.core.get().cloned(), self.yolo.get()) else {
             return;
         };
+        // the turn and whether the call was asked about, read now: the turn may end (and forget
+        // both) before the work below gets to it
+        let Some(seen) = core.yolo_saw(session, tool.id.as_str()) else {
+            return;
+        };
         let store = self.store.clone();
         let local = self.local_node.get().cloned();
         let (sid, tool) = (session.to_string(), tool.clone());
@@ -334,7 +339,7 @@ impl super::node_runtime::NodeDomain for HubHost {
                 .and_then(|w| prepared_dir(&store, local.as_deref(), w));
             if let Some(input) = seen_input(bound.as_ref(), dir.as_ref(), &tool) {
                 let pending = tool.phase == steve_node_api::ToolPhase::Pending;
-                core.yolo_seen(&sid, tool.id.as_str(), &tool.title, pending, input);
+                core.yolo_seen(&sid, tool.id.as_str(), &tool.title, pending, input, seen);
             }
         };
         match tokio::runtime::Handle::try_current() {

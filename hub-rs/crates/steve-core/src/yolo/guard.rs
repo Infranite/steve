@@ -207,6 +207,8 @@ const NPX_TOOLS: &[&str] = &[
     "oxlint",
     "knip",
 ];
+/// Scoped packages `npx` may run, and the program each one is.
+const NPX_SCOPED: &[(&str, &str)] = &[("@biomejs/biome", "biome")];
 /// Inline code that may reach outside: outward words, network and process calls.
 static OUTWARD_CODE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)推送|发布|发送|删除|部署|上线|\b(push|publish|deploy|release|send|sendmail|upload|delete|unlink|rmtree|remove|email|smtp|socket|subprocess|child_process|system|popen|spawn|exec|execsync|fetch|requests|urllib|httpx|aiohttp|axios|https?|curl|wget|ssh|xmlhttprequest|websocket)\b")
@@ -340,15 +342,98 @@ fn inline_code<'a>(p: &str, args: &'a [String]) -> Option<&'a str> {
     args.get(i + 1).map(String::as_str)
 }
 
+/// An awk command line read the way awk reads it: the program texts (`-e`/`--source`, or the first
+/// operand) and the operands after them; `None` when the program is in a file (`-f`).
+fn awk_parts(args: &[String]) -> Option<(Vec<&str>, Vec<&String>)> {
+    let mut progs = Vec::new();
+    let mut i = 0;
+    while let Some(a) = args.get(i) {
+        let s = a.as_str();
+        match s {
+            "--" => {
+                i += 1;
+                break;
+            }
+            // options that take the next word as their value
+            "-v" | "-F" | "--assign" | "--field-separator" => i += 2,
+            "-e" | "--source" => {
+                progs.push(args.get(i + 1).map_or("", String::as_str));
+                i += 2;
+            }
+            _ if s.starts_with("-f") || s.starts_with("--file") => return None,
+            _ if s.starts_with("--source=") => {
+                progs.push(&s["--source=".len()..]);
+                i += 1;
+            }
+            _ if s.starts_with('-') && s != "-" => i += 1,
+            _ => break,
+        }
+    }
+    let rest = &args[i.min(args.len())..];
+    let (prog, files) = match (progs.is_empty(), rest.split_first()) {
+        (true, Some((p, f))) => (Some(p.as_str()), f),
+        _ => (None, rest),
+    };
+    progs.extend(prog);
+    Some((progs, files.iter().collect()))
+}
+
+/// An interpreter that reads its program from standard input (`… | python3`, `… | node -`): no inline
+/// code, no module and no script operand.
+fn program_from_stdin(p: &str, args: &[String]) -> bool {
+    let valued: &[&str] = match p {
+        "python" | "python3" => &["-W", "-X", "-Q"],
+        "node" | "bun" | "tsx" | "ts-node" => &[
+            "-r",
+            "--require",
+            "--import",
+            "-C",
+            "--conditions",
+            "--loader",
+            "--experimental-loader",
+            "--input-type",
+        ],
+        "ruby" => &["-I", "-r", "-C", "-E", "-F"],
+        "perl" => &["-I", "-M", "-m"],
+        "deno" => {
+            let ops = operands(args);
+            return match ops.first().map(|s| s.as_str()) {
+                None | Some("-") => true,
+                Some("run") => ops.get(1).is_none_or(|s| *s == "-"),
+                _ => false,
+            };
+        }
+        _ => return false,
+    };
+    if inline_code(p, args).is_some()
+        || matches!(p, "python" | "python3") && args.iter().any(|a| a == "-m")
+    {
+        return false;
+    }
+    let mut i = 0;
+    while let Some(a) = args.get(i) {
+        match a.as_str() {
+            "-" => return true,
+            "--" => return args.get(i + 1).is_none_or(|s| s == "-"),
+            s if valued.contains(&s) => i += 2,
+            s if s.starts_with('-') => i += 1,
+            _ => return false,
+        }
+    }
+    true
+}
+
 /// Why an awk program is more than a reader: it runs commands (`system()`, a pipe) or writes files.
 fn awk_runs(args: &[String]) -> Option<String> {
-    if args.iter().any(|a| a == "-f" || a.starts_with("--file")) {
+    let Some((progs, _)) = awk_parts(args) else {
         return Some("awk 的程序在文件里，看不出会做什么".into());
-    }
-    let prog = operands(args).first().map(|s| s.as_str()).unwrap_or("");
+    };
     static WRITES: LazyLock<Regex> =
         LazyLock::new(|| Regex::new(r#"(print|printf)[^;{}]*>"#).expect("valid regex"));
-    if prog.contains("system") || prog.contains('|') || WRITES.is_match(prog) {
+    if progs
+        .iter()
+        .any(|p| p.contains("system") || p.contains('|') || WRITES.is_match(p))
+    {
         return Some("awk 程序里有 system()、管道或写文件，会执行或改别的东西".into());
     }
     None
@@ -446,6 +531,9 @@ fn command(cmd: &str, pl: &Places, cx: &Cx) -> Result<Vec<String>, String> {
                 "here-document 喂给 {}，看不出会执行什么",
                 a.program
             ));
+        }
+        if c.piped && program_from_stdin(&a.program, &a.args) {
+            return Err(format!("管道把程序喂给 {}，看不出会执行什么", a.program));
         }
         if matches!(a.program.as_str(), "cd" | "pushd") {
             let target = a.args.first().map(String::as_str).unwrap_or("~");
@@ -634,11 +722,12 @@ fn simple(a: &Argv, pl: &Places, cx: &Cx) -> Result<(), String> {
             {
                 return Err(why);
             }
-            // grep/rg/awk/jq take a pattern or program first
-            let skip = usize::from(matches!(
-                p,
-                "grep" | "egrep" | "fgrep" | "rg" | "awk" | "jq"
-            ));
+            if p == "awk" {
+                let files = awk_parts(args).map(|(_, f)| f).unwrap_or_default();
+                return readable_all(files);
+            }
+            // grep/rg/jq take a pattern first
+            let skip = usize::from(matches!(p, "grep" | "egrep" | "fgrep" | "rg" | "jq"));
             readable_all(operands(args).into_iter().skip(skip).collect())
         }
         _ if TOOLCHAIN.contains(&p) => Ok(()),
@@ -669,13 +758,26 @@ fn npx(args: &[String], pl: &Places, cx: &Cx) -> Result<(), String> {
     let Some(pkg) = ops.first() else {
         return Err("npx 没有给要运行的包".into());
     };
-    // `@scope/name@1.2` → `name`
-    let name = pkg.rsplit('/').next().unwrap_or(pkg);
-    let name = match name.split_once('@') {
-        Some((n, _)) if !n.is_empty() => n,
-        _ => name,
+    // `name@1.2` → `name`, `@scope/name@1.2` → `@scope/name`; a scope is someone's own packages, so
+    // a known tool's name under another scope (`@x/eslint`) is a different package
+    let spec = match pkg.strip_prefix('@') {
+        Some(rest) => pkg.len() - rest.len() + rest.find('@').unwrap_or(rest.len()),
+        None => pkg.find('@').unwrap_or(pkg.len()),
     };
-    if !(NPX_TOOLS.contains(&name) || cx.extra.iter().any(|x| x == name)) {
+    let spec = &pkg[..spec];
+    let listed = |n: &str| cx.extra.iter().any(|x| x == n);
+    let name = match NPX_SCOPED.iter().find(|(s, _)| *s == spec) {
+        Some((_, n)) => *n,
+        // a path, a URL or `github:user/repo` is not a package name at all
+        None if spec.contains(['/', ':', '\\']) || spec.starts_with('.') => {
+            if !listed(spec) {
+                return Err(format!("npx 会下载并运行 {pkg}，留给你"));
+            }
+            spec
+        }
+        None => spec,
+    };
+    if !(NPX_TOOLS.contains(&name) || listed(name) || listed(spec)) {
         return Err(format!("npx 会下载并运行 {pkg}，留给你"));
     }
     let a = Argv {
@@ -790,7 +892,25 @@ fn git(args: &[String], pl: &Places, extra: &[String]) -> Result<(), String> {
         // local only: reads of the repository, and changes that stay in the item's own checkout
         "ls-tree" | "for-each-ref" | "name-rev" | "check-ignore" | "diff-tree" | "diff-index"
         | "diff-files" | "count-objects" | "var" | "version" | "help" | "cherry" | "range-diff"
-        | "whatchanged" | "bisect" | "cherry-pick" | "revert" | "apply" => true,
+        | "whatchanged" | "cherry-pick" | "revert" | "apply" => true,
+        // `git bisect run CMD` runs any program on every step
+        "bisect" => rest.first().is_none_or(|x| {
+            matches!(
+                x.as_str(),
+                "start"
+                    | "good"
+                    | "bad"
+                    | "new"
+                    | "old"
+                    | "skip"
+                    | "reset"
+                    | "log"
+                    | "visualize"
+                    | "view"
+                    | "terms"
+                    | "help"
+            )
+        }),
         "tag" => !rest
             .iter()
             .any(|x| x == "-d" || x == "--delete" || x == "-f" || x == "--force"),

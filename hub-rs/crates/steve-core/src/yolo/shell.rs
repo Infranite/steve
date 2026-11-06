@@ -16,6 +16,8 @@ pub struct Simple {
     pub expands: bool,
     /// The body of a here-document (`<<EOF` … `EOF`) fed to the command, as written.
     pub stdin: Option<String>,
+    /// Its standard input is the output of the command before it (`a | b`, `a |& b`).
+    pub piped: bool,
 }
 
 /// What [`parse`] found.
@@ -76,6 +78,9 @@ impl Builder {
         let c = std::mem::take(&mut self.cur);
         if !c.words.is_empty() || !c.writes.is_empty() {
             self.out.cmds.push(c);
+        } else {
+            // `a |` then a newline: the pipe still feeds the next command
+            self.cur.piped = c.piped;
         }
     }
 
@@ -193,10 +198,12 @@ pub fn parse(src: &str) -> Result<Parsed, ParseError> {
                 b.end_cmd();
             }
             '|' => {
+                let pipe = cs.get(i + 1) != Some(&'|');
                 if matches!(cs.get(i + 1), Some('|' | '&')) {
                     i += 1;
                 }
                 b.end_cmd();
+                b.cur.piped = pipe;
             }
             '(' | ')' => {
                 b.flag("(…)");
@@ -549,6 +556,12 @@ mod tests {
         assert!(p.opaque.is_empty(), "{p:?}");
         assert_eq!(p.cmds[0].stdin.as_deref(), Some("hi\n"));
         assert_eq!(parse("cat <<< hi").unwrap().opaque, vec!["<<<"]);
+        let p = parse("cat <<EOF | python3\nimport os\nEOF").unwrap();
+        assert_eq!(p.cmds.len(), 2, "{p:?}");
+        assert!(!p.cmds[0].piped && p.cmds[1].piped, "{p:?}");
+        assert!(parse("a |\n b").unwrap().cmds[1].piped);
+        assert!(parse("a |& b").unwrap().cmds[1].piped);
+        assert!(!parse("a || b").unwrap().cmds[1].piped);
         assert_eq!(parse("sleep 1 &").unwrap().opaque, vec!["&"]);
         assert!(parse("echo $HOME").unwrap().cmds[0].expands);
         assert!(!parse("echo '$HOME'").unwrap().cmds[0].expands);

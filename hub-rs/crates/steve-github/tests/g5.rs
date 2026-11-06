@@ -650,7 +650,8 @@ async fn an_issue_becomes_an_item_once_with_a_from_link() {
     assert!(!r.propose);
     assert!(
         r.goal.starts_with(&format!(
-            "GitHub Issue steve-test/demo#{}：登录后跳回首页",
+            "{}\nGitHub Issue steve-test/demo#{}：登录后跳回首页",
+            steve_modules::outbound::UNTRUSTED_OPEN,
             h.issue_no
         )),
         "{}",

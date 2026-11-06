@@ -516,15 +516,7 @@ fn text_limits(text: &str, pl: &Places) -> Option<Limit> {
 /// [`text_limits`]; `release`: Steve's release script counts too (full access leaves it out: a
 /// project's own `release.sh` is not Steve's, and the dialog promises only the rest).
 fn steve_text(text: &str, pl: &Places, release: bool) -> Option<Limit> {
-    let mut t = text.to_string();
-    // the item's own directory may sit under STEVE_HOME; naming it is fine
-    if let Some(c) = &pl.cwd {
-        let c = c.to_string_lossy();
-        t = t.replace(&*c, "<cwd>");
-        if let Ok(rel) = Path::new(&*c).strip_prefix(&pl.home) {
-            t = t.replace(&format!("~/{}", rel.to_string_lossy()), "<cwd>");
-        }
-    }
+    let t = own_dir_masked(text, pl);
     if t.contains("8440") {
         return Some(Limit::new(4, "碰到端口 8440（正在运行的 Steve）"));
     }
@@ -534,7 +526,26 @@ fn steve_text(text: &str, pl: &Places, release: bool) -> Option<Limit> {
     if release && t.contains("release.sh") {
         return Some(Limit::new(4, "Steve 的发布脚本"));
     }
-    if STEVE_NAMED.is_match(&t)
+    steve_named(&t, pl)
+}
+
+/// `text` with the item's own directory (which may sit under STEVE_HOME; naming it is fine)
+/// replaced by `<cwd>`.
+fn own_dir_masked(text: &str, pl: &Places) -> String {
+    let mut t = text.to_string();
+    if let Some(c) = &pl.cwd {
+        let c = c.to_string_lossy();
+        t = t.replace(&*c, "<cwd>");
+        if let Ok(rel) = Path::new(&*c).strip_prefix(&pl.home) {
+            t = t.replace(&format!("~/{}", rel.to_string_lossy()), "<cwd>");
+        }
+    }
+    t
+}
+
+/// `STEVE_HOME` named in `t` (as `~/.steve`, `$STEVE_HOME` or its path).
+fn steve_named(t: &str, pl: &Places) -> Option<Limit> {
+    if STEVE_NAMED.is_match(t)
         || pl
             .protected
             .iter()
@@ -543,6 +554,23 @@ fn steve_text(text: &str, pl: &Places, release: bool) -> Option<Limit> {
         return Some(Limit::new(4, "碰到 STEVE_HOME"));
     }
     None
+}
+
+/// Port 8440 as a port: `:8440` (a URL, `lsof -i :8440`), `--port 8440`, `-p 8440`, `PORT=8440`.
+/// Not any 8440 in a line (`rg 8440`, `sed -n 8440p`, port 18440).
+static PORT_8440: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)(?::|--port[= ]|(?:^|\s)-p ?|\bport=)8440\b").expect("valid regex")
+});
+
+/// The floor's look at a whole command line: port 8440 used as a port, and `STEVE_HOME` named.
+/// launchd is the program `launchctl` ([`full_program`]); a plain read or search that only
+/// mentions it, or 8440, is left alone.
+fn floor_text(text: &str, pl: &Places) -> Option<Limit> {
+    let t = own_dir_masked(text, pl);
+    if PORT_8440.is_match(&t) {
+        return Some(Limit::new(4, "碰到端口 8440（正在运行的 Steve）"));
+    }
+    steve_named(&t, pl)
 }
 
 /// The limits a shell command line hits.
@@ -1477,7 +1505,7 @@ pub fn floor(t: &Tool, env: &Env) -> Option<Limit> {
         return None;
     }
     let cmd = tool_command(t)?;
-    if let Some(l) = steve_text(&cmd, &pl, false) {
+    if let Some(l) = floor_text(&cmd, &pl) {
         return Some(l);
     }
     match shell::parse(&cmd) {
@@ -1498,6 +1526,12 @@ fn full_parsed(p: &Parsed, pl: &Places, depth: u8) -> Option<Limit> {
             {
                 return Some(Limit::new(4, format!("碰到 STEVE_HOME：{w}")));
             }
+        }
+        if c.writes
+            .iter()
+            .any(|w| w.contains("LaunchAgents") || w.contains("LaunchDaemons"))
+        {
+            return Some(Limit::new(4, "碰到 launchd（LaunchAgents）"));
         }
         if let Some(body) = &c.stdin
             && let Ok(n) = shell::parse(body)
@@ -1531,6 +1565,19 @@ fn full_program(a: &Argv, pl: &Places, depth: u8) -> Option<Limit> {
         |words: Vec<String>| shell::argv(&words).and_then(|a| full_program(&a, pl, depth + 1));
     match p {
         "pkill" | "killall" => Some(Limit::new(4, format!("{p} 会按名字停掉别人的进程"))),
+        "launchctl" => Some(Limit::new(4, "碰到 launchd（launchctl）")),
+        // a raw connection to 8440 (`nc localhost 8440`)
+        "nc" | "ncat" | "netcat" | "telnet" | "socat" if args.iter().any(|x| x == "8440") => {
+            Some(Limit::new(4, "碰到端口 8440（正在运行的 Steve）"))
+        }
+        // installing a launchd job
+        "cp" | "mv" | "ln" | "tee" | "install" | "rsync"
+            if operands(args)
+                .last()
+                .is_some_and(|d| d.contains("LaunchAgents") || d.contains("LaunchDaemons")) =>
+        {
+            Some(Limit::new(4, "碰到 launchd（LaunchAgents）"))
+        }
         "gh" => gh(args),
         "git" => full_git(args),
         "npx" | "bunx" | "pnpx" | "uvx" | "pipx" => {
