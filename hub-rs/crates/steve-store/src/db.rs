@@ -99,6 +99,8 @@ pub const MIGRATIONS: &[&str] = &[
     // 43: the content key of a message (matching copies without a provider id) and the connection
     // that supplied a copy without one.
     include_str!("../migrations/043.sql"),
+    // 44: the model a turn is booked under (`agent_turns.model`), for the rebuild and the hourly view.
+    include_str!("../migrations/044.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).

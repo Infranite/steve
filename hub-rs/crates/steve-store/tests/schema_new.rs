@@ -68,7 +68,7 @@ fn at_version(v: usize) -> (tempfile::TempDir, std::path::PathBuf) {
 
 #[test]
 fn schema_version_is_23() {
-    assert_eq!(db::SCHEMA_VERSION, 43);
+    assert_eq!(db::SCHEMA_VERSION, 44);
 }
 
 #[test]
@@ -400,6 +400,34 @@ fn migration_42_records_how_a_message_was_sent() {
     .unwrap();
     assert_eq!(count(&c, "SELECT count(*) FROM chan_message_seen"), 0);
     // opening again runs nothing twice
+    db::migrate(&c).unwrap();
+    assert_eq!(
+        count(&c, "SELECT v FROM schema_version"),
+        db::SCHEMA_VERSION
+    );
+}
+
+#[test]
+fn migration_44_adds_the_model_of_a_turn() {
+    let (_dir, path) = at_version(43);
+    let c = Connection::open(&path).unwrap();
+    assert!(!columns(&c, "agent_turns").contains(&"model".to_string()));
+    c.execute_batch(
+        "INSERT INTO agent_turns (id, workspace_id, session_id, harness, user_seq, attempt, started, ended)
+         VALUES ('tn_old', 'default', 'ses_1', 'claude-code', 1, 0, 1, 2);",
+    )
+    .unwrap();
+    db::migrate(&c).unwrap();
+    assert!(columns(&c, "agent_turns").contains(&"model".to_string()));
+    // a turn ended before keeps no model: it is attributed as before
+    let m: Option<String> = c
+        .query_row(
+            "SELECT model FROM agent_turns WHERE id = 'tn_old'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(m, None);
     db::migrate(&c).unwrap();
     assert_eq!(
         count(&c, "SELECT v FROM schema_version"),
