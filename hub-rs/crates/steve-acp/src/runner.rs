@@ -360,6 +360,9 @@ struct State {
     /// every spawned adapter, including ones still starting, so shutdown leaves no orphans
     procs: HashMap<u64, Arc<Conn>>,
     drain_groups: HashSet<u32>,
+    /// per session, the process group of an adapter [`Acp::release_gone`] let go that was not yet
+    /// seen gone: the session's next release waits for it first
+    releasing: HashMap<String, u32>,
     /// Sessions whose turn a drain cut while it only waited for a permission answer: their prompt
     /// returns with nothing reported (no error, no turn end), the restart resumes them. Kept after the
     /// prompt returned (`cut`) until the restart, or a cancelled drain, continues them.
@@ -383,6 +386,13 @@ struct State {
     tallies: HashMap<String, Tally>,
     /// per session, the live adapter's cost total (stats)
     costs: HashMap<String, Cost>,
+}
+
+/// No process of the group `pid` leads is left (EPERM counts as alive).
+fn group_gone(pid: u32) -> bool {
+    // SAFETY: signal 0 only probes the process group
+    let r = unsafe { libc::kill(-(pid as libc::pid_t), 0) };
+    r != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
 }
 
 impl State {
@@ -1794,6 +1804,52 @@ impl Acp {
             l.conn.kill();
         }
         !st.turning.contains(session_id) && !st.live.contains_key(session_id)
+    }
+
+    /// [`Self::release`], then waits (blocking, up to `within`) until the adapter it let go is gone:
+    /// its whole process group, not only the leader, SIGKILLed after half of `within`. True: no
+    /// adapter of the session runs any more, so another process may open its conversation now.
+    /// False: a turn is in flight, or the group was not seen gone in time (the next call waits
+    /// for it again).
+    pub fn release_gone(&self, session_id: &str, within: Duration) -> bool {
+        let pid = {
+            let mut st = self.st();
+            if st.live.get(session_id).is_some_and(|l| !l.busy)
+                && let Some(l) = st.live.remove(session_id)
+            {
+                l.conn.kill();
+                if l.conn.pid() != 0 {
+                    st.releasing.insert(session_id.to_owned(), l.conn.pid());
+                }
+            }
+            if st.turning.contains(session_id) || st.live.contains_key(session_id) {
+                return false;
+            }
+            match st.releasing.get(session_id) {
+                Some(p) => *p,
+                None => return true,
+            }
+        };
+        let start = std::time::Instant::now();
+        let mut killed = false;
+        loop {
+            if group_gone(pid) {
+                self.st().releasing.remove(session_id);
+                return true;
+            }
+            let spent = start.elapsed();
+            if spent >= within {
+                return false;
+            }
+            if !killed && spent >= within / 2 {
+                killed = true;
+                // SAFETY: a negative pid addresses the process group this runner created
+                unsafe {
+                    libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
+                }
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 
     /// A turn is in flight: adapter start, prompt, or gateway-retry wait.

@@ -1178,6 +1178,12 @@ async fn legacy_sessions_move_to_the_node_at_an_idle_boundary() {
             [&b],
         )
         .expect("cwd");
+        // and a message waits for it that nothing can ever send there
+        db.execute(
+            "INSERT INTO queued(id,session_id,text,via,created) VALUES ('q-b5',?,'旧会话乙-排队','me',1)",
+            [&b],
+        )
+        .expect("queued");
     }
 
     let hub = spawn(&h, true, &env);
@@ -1196,6 +1202,44 @@ async fn legacy_sessions_move_to_the_node_at_an_idle_boundary() {
         ),
         1,
         "b says why, once"
+    );
+    assert_eq!(
+        h.count("SELECT COUNT(*) FROM queued WHERE session_id=?", &b),
+        0,
+        "its queue goes with it"
+    );
+    assert_eq!(
+        h.count(
+            "SELECT COUNT(*) FROM events WHERE session_id=? AND kind='queued_removed'",
+            &b
+        ),
+        1,
+        "the dropped message is said"
+    );
+    // a retired session is never woken: a message to it is refused, never run by the legacy
+    // runner in a directory that is gone, and it is not retired a second time
+    let (st, v) = c
+        .call(
+            "POST",
+            &format!("/api/sessions/{b}/messages"),
+            Some(json!({"text": "旧会话乙-续 @say revived-b-B5"})),
+        )
+        .await;
+    assert_ne!(st, 200, "refused: {v}");
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(h.got("旧会话乙-续"), 0, "never to the legacy runner");
+    assert_eq!(
+        h.one("SELECT status FROM sessions WHERE id=?", &b)
+            .as_deref(),
+        Some("ended")
+    );
+    assert_eq!(
+        h.count(
+            "SELECT COUNT(*) FROM events WHERE session_id=? AND json_extract(data,'$.retired')=1 AND kind='system'",
+            &b
+        ),
+        1,
+        "retired once"
     );
     // r's cut turn is resumed where it ran, then r moves at its next message
     assert!(

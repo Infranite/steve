@@ -1160,7 +1160,11 @@ impl RoutedRuntime {
     fn adopt(&self, sid: &str) -> Option<Arc<super::node_runtime::NodeRuntime>> {
         let n = self.node.clone()?;
         let b = self.adoptable(sid).ok()?;
-        if !self.legacy.0.release(sid) {
+        // the old harness must be gone before the Node opens the same conversation: two
+        // processes never hold it at once (one not seen gone in time is asked after at the next
+        // boundary, the session staying on the legacy runner meanwhile)
+        if !self.legacy.0.release_gone(sid, RELEASE_WAIT) {
+            tracing::warn!("{sid}: its legacy harness is not gone yet; adopted later");
             return None;
         }
         let resume = match self.store.sessions().get(sid) {
@@ -1208,6 +1212,9 @@ fn legacy_work(store: &steve_store::Store, session: &str) -> Result<bool, steve_
     })
 }
 
+/// How long an adoption waits for the legacy harness it let go to exit (SIGKILLed halfway).
+const RELEASE_WAIT: Duration = Duration::from_secs(4);
+
 /// How often idle legacy sessions that cannot move to the local Node are looked for.
 const RETIRE_EVERY: Duration = Duration::from_secs(300);
 
@@ -1250,7 +1257,6 @@ pub fn retire_pass(
             "SELECT s.id FROM sessions s
               WHERE s.status NOT IN ('ended','running','starting') AND s.created < ?1
                 AND NOT EXISTS(SELECT 1 FROM runtime_sessions r WHERE r.session_id=s.id)
-                AND NOT EXISTS(SELECT 1 FROM queued q WHERE q.session_id=s.id)
               ORDER BY s.created",
         )?;
         let v = st

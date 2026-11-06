@@ -390,5 +390,7 @@
   "core.lane.lockfile_regen": "On conflict, regenerate it with the tool instead of editing by hand",
   "core.lane.origin_unread": "The origin address is not recognized: %{url}",
   "core.lane.no_default_branch": "The remote has no default branch (no origin/HEAD, main or master)",
-  "core.lane.no_main": "The repository has no main or master branch"
+  "core.lane.no_main": "The repository has no main or master branch",
+  "core.conversation.retired": "This conversation has ended for good and cannot continue; a message in its item starts a new conversation.",
+  "core.conversation.retired_queue": "%{n} queued message(s) were not sent."
 }

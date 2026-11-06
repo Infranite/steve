@@ -672,6 +672,38 @@ async fn idle_adapters_are_released_and_resume_with_load() {
     acp.shutdown(Duration::from_secs(2)).await;
 }
 
+/// A release that must see the adapter gone (B5: before another process opens its conversation)
+/// waits for its whole process group, a member that ignores SIGTERM SIGKILLed; a plain release
+/// does not wait.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn release_gone_waits_for_the_whole_process_group() {
+    let f = Fake::new(&[]);
+    let stubborn = f.dir.path().join("stubborn.pid");
+    let f = Fake::new(&[("FAKE_ACP_STUBBORN", stubborn.to_str().unwrap())]);
+    let h = host();
+    h.with(f.session("s1", "claude-code"));
+    let acp = Acp::new(f.config(), h.clone());
+    acp.prompt("s1", "x", "me").await.unwrap();
+    wait_for("turn end", 10, || turn_ends(&h) == 1).await;
+    wait_for("stubborn child", 5, || stubborn.exists()).await;
+    let gc: u32 = std::fs::read_to_string(&stubborn)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    assert!(alive(gc));
+    let a = acp.clone();
+    let gone = tokio::task::spawn_blocking(move || a.release_gone("s1", Duration::from_secs(4)))
+        .await
+        .unwrap();
+    assert!(gone, "SIGKILLed in time");
+    assert!(acp.adapter_pid("s1").is_none());
+    assert!(!alive(gc), "nothing of its group is left when it says gone");
+    // nothing left to wait for
+    assert!(acp.release_gone("s1", Duration::from_secs(1)));
+    acp.shutdown(Duration::from_secs(2)).await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn release_spares_a_busy_adapter() {
     let f = Fake::new(&[]);
