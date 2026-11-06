@@ -1,17 +1,11 @@
 <div align="center">
 
-# Steve
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/art/banner-en-dark.svg">
+  <img src="docs/assets/art/banner-en.svg" alt="Steve: say it once, it gets done" width="100%">
+</picture>
 
-**Your self-hosted assistant that turns a sentence into delivered work.**
-
-Talk to Steve the way you'd talk to a capable colleague. It answers what it can, looks things up when it needs to,<br>
-and hands real work to coding agents like Claude Code and Codex. It keeps every item moving, and it asks you only when it matters.
-
-[![Release](https://img.shields.io/github/v/release/Infranite/steve?sort=semver&label=release&color=111)](https://github.com/Infranite/steve/releases)
-[![License: MIT](https://img.shields.io/badge/license-MIT-111)](LICENSE)
-[![Rust](https://img.shields.io/badge/hub-Rust-111?logo=rust)](hub-rs)
-[![React](https://img.shields.io/badge/web-React-111?logo=react)](web)
-[![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Linux-111)](#requirements)
+[![Release](https://img.shields.io/github/v/release/Infranite/steve?sort=semver&style=for-the-badge&label=release&color=7aa7c7)](https://github.com/Infranite/steve/releases) [![License: MIT](https://img.shields.io/badge/license-MIT-8c7ae6?style=for-the-badge)](LICENSE) [![Rust](https://img.shields.io/badge/hub-Rust-5fb39a?style=for-the-badge&logo=rust&logoColor=white)](hub-rs) [![React](https://img.shields.io/badge/web-React-7aa7c7?style=for-the-badge&logo=react&logoColor=white)](web) [![Platforms](https://img.shields.io/badge/macOS%20%7C%20Linux-self--hosted-8c7ae6?style=for-the-badge)](#requirements)
 
 English · [简体中文](README.zh-CN.md)
 
@@ -41,33 +35,71 @@ Steve is the layer above the agents. It runs on your own machine, owns the state
 
 Everything stays on infrastructure you control: a single Rust binary, a SQLite database and an encrypted vault.
 
-## A look inside
+## From one sentence to shipped work
 
-<table>
-<tr>
-<td width="50%"><img src="docs/assets/screenshots/inbox.webp" alt="Inbox"><br><b>Inbox</b>: deliveries to accept, pushes to approve, questions to answer, all in one place.</td>
-<td width="50%"><img src="docs/assets/screenshots/item.webp" alt="Item"><br><b>Item</b>: goal, lifecycle stage, plan, delivery with the checks that were run, and who is on it.</td>
-</tr>
-<tr>
-<td><img src="docs/assets/screenshots/session.webp" alt="Agent session"><br><b>Agent session</b>: files changed, tools used, cost and context, and a one-line command to resume in the harness.</td>
-<td><img src="docs/assets/screenshots/items.webp" alt="Items"><br><b>Items</b>: what's waiting on you, what's running and what was just delivered.</td>
-</tr>
-</table>
+<div align="center">
 
-<sub>Screenshots are from a demo workspace. They were taken from the real Hub and web UI, with agents scripted for the demo. The interface is shown in Chinese; switch to English in Settings → Appearance.</sub>
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/art/flow-en-dark.svg">
+  <img src="docs/assets/art/flow-en.svg" alt="You say it, Steve routes it, an item is created, a bot works, it delivers with checks, it is accepted, merged through a lane and shipped" width="100%">
+</picture>
+
+</div>
+
+Every message goes through the same pipeline. Steve decides what it is, the right bot does the work in its own worktree, and you only step in where it matters. With YOLO on, Steve covers the routine steps too.
 
 ## Design principles
 
 A few rules run through the whole codebase. They are why Steve can be left alone with real work.
 
-| Principle | What it means in practice |
-|---|---|
-| **Code has the last word** | The model proposes and tested rules decide. Routing guards stop a question from silently becoming an item. A delivery is refused while plan steps are still open. "Done" may require proof of a build, a deploy or a real check. |
-| **Nothing runs twice** | Agent tools *send and end the turn*, so nothing waits in memory. External effects carry stable ids. Flows commit each step before the next one runs. After a crash, an uncertain result is marked for reconciliation and never re-run blindly. |
-| **Autonomy with hard limits** | YOLO decides what stays on your machine and can be undone. Money, high-sensitivity secrets, pushing, publishing and speaking as you are out of reach whatever the settings say. Breakers pause it when things go wrong. |
-| **Agents use secrets without seeing them** | Steve runs a command with the secret and gives the agent only redacted output. The redactor also catches base64, URL, hex and JSON-escaped copies. |
-| **Disclosure-aware by default** | Every piece of knowledge has a level: public, *paraphrase only*, *reasoning only* or never. Outgoing messages pass a rule check and a separate model review before anything is sent. |
-| **Every change can be undone** | Configuration made by talking to Steve, corrections to automations, contact merges and YOLO decisions all come back as changesets you can undo. |
+<table>
+<tr>
+<td width="33%" valign="top">
+
+#### ⚖️ Code has the last word
+
+The model proposes and tested rules decide. Routing guards stop a question from silently becoming an item. A delivery is refused while plan steps are still open. "Done" may require proof of a build, a deploy or a real check.
+
+</td>
+<td width="33%" valign="top">
+
+#### 🔁 Nothing runs twice
+
+Agent tools *send and end the turn*, so nothing waits in memory. External effects carry stable ids. Flows commit each step before the next one runs. After a crash, an uncertain result is marked for reconciliation and never re-run blindly.
+
+</td>
+<td width="33%" valign="top">
+
+#### 🛑 Autonomy with hard limits
+
+YOLO decides what stays on your machine and can be undone. Money, high-sensitivity secrets, pushing, publishing and speaking as you are out of reach whatever the settings say. Breakers pause it when things go wrong.
+
+</td>
+</tr>
+<tr>
+<td width="33%" valign="top">
+
+#### 🗝️ Agents use secrets without seeing them
+
+Steve runs a command with the secret and gives the agent only redacted output. The redactor also catches base64, URL, hex and JSON-escaped copies.
+
+</td>
+<td width="33%" valign="top">
+
+#### 🙊 Disclosure-aware by default
+
+Every piece of knowledge has a level: public, *paraphrase only*, *reasoning only* or never. Outgoing messages pass a rule check and a separate model review before anything is sent.
+
+</td>
+<td width="33%" valign="top">
+
+#### ↩️ Every change can be undone
+
+Configuration made by talking to Steve, corrections to automations, contact merges and YOLO decisions all come back as changesets you can undo.
+
+</td>
+</tr>
+</table>
 
 ## Features
 
@@ -92,6 +124,14 @@ A few rules run through the whole codebase. They are why Steve can be left alone
 - **Message queue per session.** You can edit or withdraw a queued message, *send now* to steer the running turn, or send it to a new session. Messages delivered just before a restart come back marked "check, don't redo".
 - **Worktrees and disk.** Every item gets `steve/<id>` in its own worktree. Build caches are given back when items close or sit idle, and no new worktree is made below a free-space floor. Deletion is crash-safe.
 
+<table>
+<tr>
+<td width="50%"><img src="docs/assets/screenshots/item.webp" alt="An item: goal, stage, plan and a delivery with its checks"><br><sub><b>An item</b>: goal, stage, plan and a delivery with its checks</sub></td>
+<td width="50%"><img src="docs/assets/screenshots/graph.webp" alt="Relation graph: runs, handoffs, dependencies and forks"><br><sub><b>Relation graph</b>: runs, handoffs, dependencies and forks</sub></td>
+</tr>
+</table>
+
+
 ### 🤖 A team of bots
 
 - **Bots** each have a harness (Claude Code or Codex), a model and thinking effort, a role, a persona, rules, a permission mode, an acceptance mode and a default project. Describe a bot in one sentence and Steve drafts it.
@@ -100,6 +140,9 @@ A few rules run through the whole codebase. They are why Steve can be left alone
 - **Models per purpose.** Routing, chat, research, titles, extraction, YOLO, drafting, flows and mail each have their own model, with ordered fallbacks and effort. Prices sync daily from Models.dev, and past estimates keep the prices of their day.
 - **Harness-friendly.** Steve answers permission prompts *once* and never writes "always allow" into your harness settings. It never edits your Codex config. It shows the command to resume any session in the harness itself, and it can import your local Claude Code and Codex history.
 
+<p align="center"><img src="docs/assets/screenshots/session.webp" alt="Agent session: changed files, tools, cost and context, and the command to resume it in the harness" width="85%"><br><sub><b>Agent session</b>: changed files, tools, cost and context, and the command to resume it in the harness</sub></p>
+
+
 ### 🟢 YOLO: autonomy with brakes
 
 - **What it can decide:** tool permissions inside the item's own directory, local approvals, acceptance by checks, continuing stalled agents, answering agents' questions (only when confident), starting items whose dependencies are done, and releasing your own Steve (rate-limited).
@@ -107,6 +150,9 @@ A few rules run through the whole codebase. They are why Steve can be left alone
 - **Shell guard.** Default deny, with its own POSIX shell reader: `eval`, `sh -c`, `sudo` and command substitution are refused, and `kill` only works on processes the agent started.
 - **Countdowns and breakers.** YOLO waits while you're active and gives you *Now* and *I'll decide* buttons. It pauses the workspace after repeated failures, repeated undos, or a release that went wrong.
 - **Record and undo.** Every decision is recorded per window and item, with its cost. There are five kinds of undo: revert the decision, roll back the release, recall the message, re-answer, or pause the item.
+
+<p align="center"><img src="docs/assets/screenshots/inbox.webp" alt="Inbox: acceptances, approvals and questions in one place; YOLO picks up the routine ones" width="85%"><br><sub><b>Inbox</b>: acceptances, approvals and questions in one place; YOLO picks up the routine ones</sub></p>
+
 
 ### 🚚 Delivery: merge lanes and releases
 
@@ -144,12 +190,23 @@ A few rules run through the whole codebase. They are why Steve can be left alone
 - **Signals and corrections.** Incoming events are deduplicated and grouped. One click (*remind me / ignore / make an item*) applies the correction, adds an exception filter to the flow and remembers the rule, and the whole change can be undone.
 - **Schedules in plain language** ("every weekday at 9"), with daylight-saving handling, catch-up policies and overlap protection.
 
+<p align="center">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/screenshots/flow-dark.webp">
+  <img src="docs/assets/screenshots/flow.webp" alt="Mail triage flow on the canvas: notifications are filtered out before any model call, and a bot node branches the rest" width="100%">
+</picture>
+<br><sub><b>Mail triage flow</b> on the canvas: notifications are filtered out before any model call, and a bot node branches the rest</sub>
+</p>
+
+
 ### 📊 Stats and platform
 
 - **Stats:** tokens (including cache and reasoning), cache hit rate, estimated cost against what the harness reports, money saved by the cache, items started and finished, lead/cycle/wait time, first-pass rate and rework. You can filter by project, bot, model and source.
 - **Workspaces and sign-in:** OIDC with PKCE. Workspaces are data boundaries with their own item prefix.
 - **Live everywhere:** one SSE stream with resumable cursors, and phones reconnect the moment the page becomes visible again.
 - **Operations:** in-place upgrades with backup and rollback, daily verified backups, signed macOS releases that keep the vault key across rebuilds, a <kbd>⌘</kbd> <kbd>K</kbd> command palette, light and dark themes, and English or 简体中文.
+
+<sub>Screenshots come from a demo workspace on the real Hub and web UI, with scripted agents. The UI is shown in Chinese; switch to English in Settings → Appearance.</sub>
 
 ## Extending Steve
 

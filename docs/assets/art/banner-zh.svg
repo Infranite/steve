@@ -1,0 +1,91 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 440" width="1280" height="440" role="img" aria-label="Steve">
+<defs>
+  <path id="head" d="M 120.00 30.00 L 132.78 30.21 L 139.79 30.58 L 145.50 31.07 L 150.49 31.65 L 154.99 32.33 L 159.11 33.10 L 162.92 33.94 L 166.50 34.87 L 169.87 35.87 L 173.04 36.94 L 176.05 38.09 L 178.93 39.32 L 181.66 40.62 L 184.27 42.00 L 186.76 43.45 L 189.15 44.99 L 191.44 46.60 L 193.63 48.30 L 195.73 50.07 L 197.74 51.95 L 199.67 53.91 L 201.51 55.96 L 203.27 58.12 L 204.95 60.37 L 206.55 62.73 L 208.07 65.21 L 209.52 67.81 L 210.89 70.54 L 212.19 73.42 L 213.40 76.45 L 214.52 79.65 L 215.57 83.06 L 216.53 86.68 L 217.39 90.55 L 218.16 94.73 L 218.82 99.29 L 219.35 104.35 L 219.74 110.13 L 219.93 114.25 L 220.00 120.00 L 219.93 125.75 L 219.74 129.87 L 219.35 135.65 L 218.82 140.71 L 218.16 145.27 L 217.39 149.45 L 216.53 153.32 L 215.57 156.94 L 214.52 160.35 L 213.40 163.55 L 212.19 166.58 L 210.89 169.46 L 209.52 172.19 L 208.07 174.79 L 206.55 177.27 L 204.95 179.63 L 203.27 181.88 L 201.51 184.04 L 199.67 186.09 L 197.74 188.05 L 195.73 189.93 L 193.63 191.70 L 191.44 193.40 L 189.15 195.01 L 186.76 196.55 L 184.27 198.00 L 181.66 199.38 L 178.93 200.68 L 176.05 201.91 L 173.04 203.06 L 169.87 204.13 L 166.50 205.13 L 162.92 206.06 L 159.11 206.90 L 154.99 207.67 L 150.49 208.35 L 145.50 208.93 L 139.79 209.42 L 132.78 209.79 L 120.00 210.00 L 107.22 209.79 L 100.21 209.42 L 94.50 208.93 L 89.51 208.35 L 85.01 207.67 L 80.89 206.90 L 77.08 206.06 L 73.50 205.13 L 70.13 204.13 L 66.96 203.06 L 63.95 201.91 L 61.07 200.68 L 58.34 199.38 L 55.73 198.00 L 53.24 196.55 L 50.85 195.01 L 48.56 193.40 L 46.37 191.70 L 44.27 189.93 L 42.26 188.05 L 40.33 186.09 L 38.49 184.04 L 36.73 181.88 L 35.05 179.63 L 33.45 177.27 L 31.93 174.79 L 30.48 172.19 L 29.11 169.46 L 27.81 166.58 L 26.60 163.55 L 25.48 160.35 L 24.43 156.94 L 23.47 153.32 L 22.61 149.45 L 21.84 145.27 L 21.18 140.71 L 20.65 135.65 L 20.26 129.87 L 20.07 125.75 L 20.00 120.00 L 20.07 114.25 L 20.26 110.13 L 20.65 104.35 L 21.18 99.29 L 21.84 94.73 L 22.61 90.55 L 23.47 86.68 L 24.43 83.06 L 25.48 79.65 L 26.60 76.45 L 27.81 73.42 L 29.11 70.54 L 30.48 67.81 L 31.93 65.21 L 33.45 62.73 L 35.05 60.37 L 36.73 58.12 L 38.49 55.96 L 40.33 53.91 L 42.26 51.95 L 44.27 50.07 L 46.37 48.30 L 48.56 46.60 L 50.85 44.99 L 53.24 43.45 L 55.73 42.00 L 58.34 40.62 L 61.07 39.32 L 63.95 38.09 L 66.96 36.94 L 70.13 35.87 L 73.50 34.87 L 77.08 33.94 L 80.89 33.10 L 85.01 32.33 L 89.51 31.65 L 94.50 31.07 L 100.21 30.58 L 107.22 30.21 Z"/>
+  <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ffffff"/><stop offset="1" stop-color="#f2f6fa"/></linearGradient>
+  <filter id="blur" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="60"/></filter>
+  <pattern id="dots" width="24" height="24" patternUnits="userSpaceOnUse"><circle cx="2" cy="2" r="1.2" fill="#d8e0e8"/></pattern>
+  <clipPath id="clip"><rect width="1280" height="440" rx="24"/></clipPath>
+</defs>
+<style>
+
+.bob{animation:bob 4.6s ease-in-out infinite}
+.eye{transform-box:fill-box;transform-origin:center;animation:blink 5.2s infinite}
+.eyes{animation:look 9s ease-in-out infinite}
+.ant{transform-box:fill-box;transform-origin:center;animation:ping 2.6s ease-in-out infinite}
+@keyframes bob{0%,100%{transform:translateY(0)}50%{transform:translateY(-7px)}}
+@keyframes blink{0%,90%,100%{transform:scaleY(1)}93%{transform:scaleY(.08)}96%{transform:scaleY(1)}}
+@keyframes look{0%,35%{transform:translateX(0)}42%,58%{transform:translateX(-11px)}65%,82%{transform:translateX(11px)}90%,100%{transform:translateX(0)}}
+@keyframes ping{0%,100%{transform:scale(1)}50%{transform:scale(1.18)}}
+
+.glow{animation:drift 14s ease-in-out infinite}
+@keyframes drift{0%,100%{transform:translate(0,0)}50%{transform:translate(40px,-24px)}}
+.wire{stroke-dasharray:6 8;animation:dash 1.6s linear infinite}
+@keyframes dash{to{stroke-dashoffset:-28}}
+.row{opacity:0;animation:rise .8s ease-out forwards}
+@keyframes rise{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
+.pulse{transform-box:fill-box;transform-origin:center;animation:pulse 1.4s ease-in-out infinite}
+@keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.45;transform:scale(1.35)}}
+.caret{animation:caret 1s steps(1) infinite}
+@keyframes caret{50%{opacity:0}}
+</style>
+<g clip-path="url(#clip)">
+  <rect width="1280" height="440" fill="url(#bg)"/>
+  <rect width="1280" height="440" fill="url(#dots)" opacity=".55"/>
+  <g filter="url(#blur)" opacity="0.3">
+    <circle class="glow" cx="240" cy="180" r="170" fill="#7aa7c7"/>
+    <circle class="glow" style="animation-delay:-5s" cx="80" cy="380" r="120" fill="#8c7ae6"/>
+    <circle class="glow" style="animation-delay:-9s" cx="470" cy="380" r="120" fill="#5fb39a"/>
+    <circle class="glow" style="animation-delay:-3s" cx="1100" cy="60" r="160" fill="#7aa7c7"/>
+  </g>
+  <path class="wire" d="M228 270 C 158 300, 156 260, 96 290" fill="none" stroke="#8c7ae6" stroke-width="3" stroke-linecap="round" opacity=".7"/>
+  <path class="wire" d="M308 270 C 378 300, 380 260, 440 290" fill="none" stroke="#5fb39a" stroke-width="3" stroke-linecap="round" opacity=".7"/>
+  <g><rect x="-9" y="-6" width="18" height="12" rx="4" fill="#8c7ae6" opacity=".95"/>
+  <animateMotion dur="3.2s" begin="0.0s" repeatCount="indefinite" path="M228 270 C 158 300, 156 260, 96 290" keyPoints="0;1" keyTimes="0;1" calcMode="linear"/></g><g><rect x="-9" y="-6" width="18" height="12" rx="4" fill="#8c7ae6" opacity=".95"/>
+  <animateMotion dur="3.2s" begin="1.6s" repeatCount="indefinite" path="M228 270 C 158 300, 156 260, 96 290" keyPoints="0;1" keyTimes="0;1" calcMode="linear"/></g><g><rect x="-9" y="-6" width="18" height="12" rx="4" fill="#5fb39a" opacity=".95"/>
+  <animateMotion dur="3.2s" begin="0.8s" repeatCount="indefinite" path="M308 270 C 378 300, 380 260, 440 290" keyPoints="0;1" keyTimes="0;1" calcMode="linear"/></g><g><rect x="-9" y="-6" width="18" height="12" rx="4" fill="#5fb39a" opacity=".95"/>
+  <animateMotion dur="3.2s" begin="2.4000000000000004s" repeatCount="indefinite" path="M308 270 C 378 300, 380 260, 440 290" keyPoints="0;1" keyTimes="0;1" calcMode="linear"/></g>
+  <g transform="translate(163.0 65.0) scale(0.8750)"><g class="bob" style="animation-delay:0s">
+  <circle class="ant" style="animation-delay:0s" cx="120" cy="12" r="15" fill="#7aa7c7"/>
+  <use href="#head" fill="#7aa7c7" transform="translate(7.2 7.2) scale(.94)"/>
+  <g class="eyes" style="animation-delay:0.00s">
+    <ellipse class="eye" style="animation-delay:0.00s" cx="86" cy="126" rx="27" ry="29" fill="#fff"/>
+    <ellipse class="eye" style="animation-delay:0.00s" cx="154" cy="126" rx="27" ry="29" fill="#fff"/>
+  </g></g></g>
+  <g transform="translate(37.0 291.0) scale(0.4917)"><g class="bob" style="animation-delay:0.9s">
+  <circle class="ant" style="animation-delay:0.9s" cx="120" cy="12" r="15" fill="#8c7ae6"/>
+  <use href="#head" fill="#8c7ae6" transform="translate(7.2 7.2) scale(.94)"/>
+  <g class="eyes" style="animation-delay:1.53s">
+    <ellipse class="eye" style="animation-delay:2.07s" cx="86" cy="126" rx="27" ry="29" fill="#fff"/>
+    <ellipse class="eye" style="animation-delay:2.07s" cx="154" cy="126" rx="27" ry="29" fill="#fff"/>
+  </g></g></g>
+  <g transform="translate(381.0 291.0) scale(0.4917)"><g class="bob" style="animation-delay:1.7s">
+  <circle class="ant" style="animation-delay:1.7s" cx="120" cy="12" r="15" fill="#5fb39a"/>
+  <use href="#head" fill="#5fb39a" transform="translate(7.2 7.2) scale(.94)"/>
+  <g class="eyes" style="animation-delay:2.89s">
+    <ellipse class="eye" style="animation-delay:3.91s" cx="86" cy="126" rx="27" ry="29" fill="#fff"/>
+    <ellipse class="eye" style="animation-delay:3.91s" cx="154" cy="126" rx="27" ry="29" fill="#fff"/>
+  </g></g></g>
+  <text x="636" y="132" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="92" font-weight="800" letter-spacing="-3" fill="#0f172a">Steve</text>
+  <text x="640" y="182" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="30" font-weight="600" fill="#0f172a">一句话交代，交付回来。<tspan class="caret" fill="#7aa7c7">▍</tspan></text>
+  <text x="640" y="218" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="18" fill="#64748b">自托管的工作台：一组智能体替你把事情做完。</text>
+  <g class="row" style="animation-delay:0.4s">
+  <rect x="640" y="250" width="560" height="44" rx="12" fill="#ffffff" stroke="#d8e0e8"/>
+  <circle cx="664" cy="272" r="6" fill="#f59e0b"/>
+  <text x="682" y="277" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="14" fill="#64748b">AC-2</text>
+  <text x="732" y="277" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="16" font-weight="600" fill="#0f172a">设置页加深色模式</text>
+  <text x="1184" y="277" text-anchor="end" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="14" fill="#64748b">做完了，等你验收</text>
+</g><g class="row" style="animation-delay:0.65s">
+  <rect x="640" y="304" width="560" height="44" rx="12" fill="#ffffff" stroke="#d8e0e8"/>
+  <circle cx="664" cy="326" r="6" fill="#f59e0b"/>
+  <text x="682" y="331" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="14" fill="#64748b">AC-3</text>
+  <text x="732" y="331" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="16" font-weight="600" fill="#0f172a">修结账页优惠券偶发失败</text>
+  <text x="1184" y="331" text-anchor="end" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="14" fill="#64748b">推送前等你批准</text>
+</g><g class="row" style="animation-delay:0.9s">
+  <rect x="640" y="358" width="560" height="44" rx="12" fill="#ffffff" stroke="#d8e0e8"/>
+  <circle class="pulse" cx="664" cy="380" r="6" fill="#3b82f6"/>
+  <text x="682" y="385" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="14" fill="#64748b">AC-5</text>
+  <text x="732" y="385" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="16" font-weight="600" fill="#0f172a">acme-web 升级到 React 19</text>
+  <text x="1184" y="385" text-anchor="end" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="14" fill="#64748b">在修类型错误 · 6 / 14</text>
+</g>
+</g>
+</svg>
