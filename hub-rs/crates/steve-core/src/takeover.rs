@@ -492,10 +492,21 @@ impl Tx<'_> {
             };
             let build =
                 build_text(crate::proof::build_followed(rule, &p) && self.build_required(i)?);
+            let lane = self
+                .db()
+                .project(i.project_id.as_deref())?
+                .is_some_and(|p| crate::orchestrator::lane_releases(&p));
+            let how = if lane {
+                /* the lane merges, checks and tags: the agent only hands the branch over */
+                crate::orchestrator::publish_text(true, i.branch.as_deref().unwrap_or_default())
+            } else {
+                "推送、开 PR、合并、打 tag 是对外动作，先用 steve_request_approval 请求批准；"
+                    .into()
+            };
             self.send(
                 &to,
                 &format!(
-                    "验收通过。按这个项目的约定，{}后事项才算完成；现在还差：{}。推送、开 PR、合并、打 tag 是对外动作，先用 steve_request_approval 请求批准；{build}。做完后结束这一回合即可，Steve 会自己核对远端。",
+                    "验收通过。按这个项目的约定，{}后事项才算完成；现在还差：{}。{how}{build}。做完后结束这一回合即可，Steve 会自己核对远端。",
                     rule_text(rule),
                     p.summary()
                 ),

@@ -103,6 +103,8 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/044.sql"),
     // 45: when a failing outbox delivery began failing; archived sessions compacted under keepSess.
     include_str!("../migrations/045.sql"),
+    // 46: Steve's own seeded project releases through the merge lane, not ops/release.sh.
+    include_str!("../migrations/046.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).

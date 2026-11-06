@@ -3,6 +3,7 @@
 
     local-release.py build <commit> [--version X.Y.Z]   build $STEVE_HOME/releases/<version>-local-<sha7>
     local-release.py deploy <release dir> [--operation <id>]  switch the running Steve to it (newer or older)
+    local-release.py prune [--dry-run]                   remove old release dirs and pre-release backups now
 
 build: the version is the vX.Y.Z tag on the commit unless given. The Hub is built with cargo (STEVE_CARGO, else
 cargo on PATH) into $STEVE_HOME/build/cargo-target, signed with the "Steve Hub" identity in
@@ -22,6 +23,15 @@ deploy, in order; any failure before the switch leaves the running version as it
      A failure after the switch is not undone: the database may be migrated, the new version stays and the
      result says so (exit 3), with the backup named.
 
+After a healthy deploy (and with `prune`), old copies go: of the pre-release backups this script takes
+(backups/pre-<version>-local-<sha7>-<stamp>.sqlite3, with their -shm/-wal) the newest 8 stay; of the release dirs
+(<version>-local-<sha7>, and ops/release.sh's <stamp>-<sha>) `current`, the previous one and the newest 3 stay. The
+previous one is what the last healthy deploy replaced: from its result in logs/release/, else from ops/release.sh's
+releases/history.jsonl.
+Nothing else in backups/ is touched (pre-rust, pre-purge, pre-takeover, daily copies, failed-probe-*). A deploy that
+did not end healthy removes nothing. The one-click upgrade (hub-rs upgrades/runner.rs) runs this deploy, so it
+prunes the same way.
+
 --operation <id>: also write each step into the Hub's upgrade journal ($STEVE_HOME/updates/operations/<id>.json,
 the phases the managed supervisor uses), so Settings · 关于 can follow a one-click upgrade across the restart. The
 Hub's runner job (hub-rs upgrades/runner.rs) passes it; the result there is one of succeeded, rolled_back, failed
@@ -39,6 +49,7 @@ import argparse
 import base64
 import contextlib
 import fcntl
+import re
 import hashlib
 import json
 import os
@@ -557,6 +568,7 @@ def deploy(args, journal=Journal(None)):
     save(ok=True, health=h, db_after=schema_gate.state(DB), finished=time.strftime("%Y%m%d-%H%M%S"))
     journal("succeeded")
     log(f"live: {h}")
+    prune_after(old_hub, save)
     print(json.dumps(result, ensure_ascii=False))
     return 0
 
@@ -619,6 +631,112 @@ def lift(seconds=120):
     raise RuntimeError(f"the drain could not be lifted in {seconds}s ({last})")
 
 
+# ── prune ──
+
+KEEP_BACKUPS = 8
+KEEP_RELEASES = 3
+# pre-<version>-local-<sha7>-<YYYYmmdd-HHMMSS>.sqlite3 (deploy below), with SQLite's side files
+BACKUP_RE = re.compile(r"^(pre-(\d+\.\d+\.\d+)-local-[0-9a-f]{7}-(\d{8}-\d{6})\.sqlite3)(-shm|-wal|-journal)?$")
+LOCAL_DIR_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)-local-[0-9a-f]{7}$")
+SCRIPT_DIR_RE = re.compile(r"^(\d{8}-\d{6})-[0-9a-f]{7,40}$")  # ops/release.sh's
+
+
+def prune(keep=(), dry=False):
+    """Old pre-release backups and release dirs, as the module docstring says. `keep`: release dirs that stay
+    whatever their rank (the previous one of a deploy). Returns what was removed (or would be, `dry`)."""
+    removed = []
+
+    def rm(p):
+        removed.append(str(p))
+        if dry:
+            return
+        try:
+            if p.is_dir() and not p.is_symlink():
+                shutil.rmtree(p)
+            else:
+                p.unlink()
+        except FileNotFoundError:
+            pass
+
+    backups = HOME / "backups"
+    if backups.is_dir():
+        groups = {}
+        for f in backups.iterdir():
+            m = BACKUP_RE.match(f.name)
+            if m and not f.is_symlink() and f.is_file():
+                groups.setdefault(m.group(1), []).append(f)
+        whole = sorted((b for b in groups if (backups / b) in groups[b]),
+                       key=lambda b: (BACKUP_RE.match(b).group(3), b), reverse=True)
+        for base in sorted(groups):
+            # beyond the newest, and a -shm/-wal whose database is gone (of no use to anyone)
+            if base not in whole[:KEEP_BACKUPS]:
+                for f in sorted(groups[base]):
+                    rm(f)
+
+    releases = HOME / "releases"
+    if releases.is_dir():
+        protect = {pathlib.Path(k).resolve() for k in keep}
+        for link in (HOME / "current", HOME / "previous", HOME / "web/current"):
+            if link.exists():
+                target = link.resolve()
+                protect.update(p for p in (target, *target.parents) if p.parent == releases.resolve())
+        ranked = []
+        for d in releases.iterdir():
+            if d.is_symlink() or not d.is_dir():
+                continue
+            if m := LOCAL_DIR_RE.match(d.name):
+                ranked.append(((1, tuple(int(x) for x in m.groups()), d.name), d))
+            elif m := SCRIPT_DIR_RE.match(d.name):
+                ranked.append(((0, (), m.group(1)), d))  # older than any local build
+        ranked.sort(key=lambda r: r[0], reverse=True)
+        for _, d in ranked[KEEP_RELEASES:]:
+            if d.resolve() not in protect:
+                rm(d)
+    return removed
+
+
+def last_previous():
+    """The release dir the last healthy deploy replaced (its rollback target): from the newest successful
+    logs/release/local-*.json, else (a machine that only ever used ops/release.sh) the last healthy hub line of
+    releases/history.jsonl. None when neither says."""
+    results = []
+    for f in (HOME / "logs/release").glob("local-*.json"):
+        try:
+            r = json.loads(f.read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(r, dict) and r.get("ok") is True and r.get("previous"):
+            results.append((str(r.get("finished") or r.get("started") or ""), f.name, r["previous"]))
+    if results:
+        return pathlib.Path(max(results)[2])
+    prev = None
+    try:
+        lines = (HOME / "releases/history.jsonl").read_text().splitlines()
+    except OSError:
+        lines = []
+    for line in lines:
+        try:
+            h = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(h, dict) and h.get("kind") == "hub" and h.get("ok") is True and h.get("prev"):
+            prev = HOME / "releases" / pathlib.Path(h["prev"]).name
+    return prev
+
+
+def prune_after(previous, save):
+    """prune() once a deploy is healthy: a failure here is logged, never the deploy's result."""
+    try:
+        removed = prune(keep=[previous])
+    except Exception as e:  # noqa: BLE001 - the release is live; tidying up must not say otherwise
+        log(f"warning: pruning old releases failed: {type(e).__name__}: {e}")
+        save(pruned_error=f"{type(e).__name__}: {e}")
+        return
+    if removed:
+        log(f"pruned {len(removed)}: {', '.join(pathlib.Path(p).name for p in removed)}")
+    save(pruned=removed)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -632,6 +750,8 @@ def main():
     d.add_argument("release")
     d.add_argument("--drain-s", type=int, default=600)
     d.add_argument("--operation", help="the Hub's upgrade operation id: write each step into its journal")
+    pr = sub.add_parser("prune")
+    pr.add_argument("--dry-run", action="store_true", help="only list what would be removed")
     args = ap.parse_args()
     journal = Journal(None)
     try:
@@ -639,6 +759,11 @@ def main():
             journal = Journal(args.operation)
         lock = release_lock()
         try:
+            if args.cmd == "prune":
+                prev = last_previous()
+                for p in prune(keep=[prev] if prev else [], dry=args.dry_run):
+                    print(("would remove " if args.dry_run else "removed ") + p)
+                return 0
             return build(args) if args.cmd == "build" else deploy(args, journal)
         finally:
             lock.close()

@@ -153,8 +153,12 @@ fn fresh_database_is_ts_schema_plus_module_migrations() {
     }
     // 044 indexes the TS `events` table: the TS side
     ts.execute_batch(db::MIGRATIONS[43]).unwrap();
-    // 045 and later: module tables only
-    for m in &db::MIGRATIONS[44..] {
+    // 045: module tables (and settings rows, none here)
+    only.execute_batch(db::MIGRATIONS[44]).unwrap();
+    // 046: rows of a TS table (projects), no schema change
+    ts.execute_batch(db::MIGRATIONS[45]).unwrap();
+    // 047 and later: module tables only
+    for m in &db::MIGRATIONS[46..] {
         only.execute_batch(m).unwrap();
     }
     let stub = |t: &str| STUBS.contains(&t) || READ_STUBS.iter().any(|(n, _)| *n == t);
@@ -176,8 +180,8 @@ fn fresh_database_is_ts_schema_plus_module_migrations() {
 
 #[test]
 fn migrations_are_the_ts_strings() {
-    assert_eq!(db::MIGRATIONS.len(), 45);
-    assert_eq!(db::SCHEMA_VERSION, 45);
+    assert_eq!(db::MIGRATIONS.len(), 46);
+    assert_eq!(db::SCHEMA_VERSION, 46);
     assert!(db::MIGRATIONS[0].starts_with("\n  CREATE TABLE workspaces (id TEXT PRIMARY KEY, name TEXT NOT NULL, created INTEGER NOT NULL);"));
     assert!(
         db::MIGRATIONS[1]

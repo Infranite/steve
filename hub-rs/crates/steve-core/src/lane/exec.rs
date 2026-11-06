@@ -6,8 +6,10 @@
 //! Plain git and the lane's own commands: no store, no lock. The caller fetches first and records the
 //! outcome ([`super::store`]).
 
+use std::io::Read;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use crate::git::git;
 use crate::util::js_head;
@@ -162,33 +164,113 @@ pub fn checks(wt: &Path, commands: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// How long the lane lets `ops/cut-release.py cut` wait for CI on the merged head (`--ci-wait`), shorter
+/// than the script's own 45 minutes: the unit's release holds the lane until it returns. A run still
+/// going after this is refused ("cut again once it has passed"), and the retry card picks it up.
+pub const LANE_CI_WAIT: Duration = Duration::from_secs(30 * 60);
+/// On top of the CI wait: fetching, pushing, and another attempt when origin moved meanwhile. The release
+/// step is stopped after this, whatever it is doing (a push that did land is found by
+/// [`already_released`] before the next try).
+const RELEASE_SLACK: Duration = Duration::from_secs(15 * 60);
+
 /// Release the target the repository's own way when it has one: `ops/cut-release.py cut` (the version
 /// is chosen there, main and its tag pushed together). `Ok(None)`: no release step of its own (merged
 /// is released). The version cut, when one was.
+///
+/// The script tags only a head whose CI passed and waits while CI runs, so this returns about one CI run
+/// after the merge: at most [`LANE_CI_WAIT`] for CI (passed as `--ci-wait` when the script takes it),
+/// the whole step at most [`RELEASE_SLACK`] more. A refusal leads the error (the progress lines follow):
+/// a failed run names `gh run rerun <id> --failed`, and retrying the release before that run passes is
+/// refused the same way.
 pub fn release(wt: &Path, branch: &str) -> Result<Option<String>, String> {
+    release_within(wt, branch, LANE_CI_WAIT, LANE_CI_WAIT + RELEASE_SLACK)
+}
+
+fn release_within(
+    wt: &Path,
+    branch: &str,
+    ci_wait: Duration,
+    deadline: Duration,
+) -> Result<Option<String>, String> {
     let script = wt.join("ops/cut-release.py");
     if !script.is_file() {
         return Ok(None);
     }
-    let out = Command::new("python3")
-        .arg(&script)
-        .args(["cut", "--branch", branch])
+    let mut cmd = Command::new("python3");
+    cmd.arg(&script).args(["cut", "--branch", branch]);
+    // an older script without the CI gate takes no --ci-wait
+    if std::fs::read_to_string(&script).is_ok_and(|t| t.contains("--ci-wait")) {
+        cmd.args(["--ci-wait", &ci_wait.as_secs().to_string()]);
+    }
+    let mut child = cmd
         .current_dir(wt)
         .stdin(Stdio::null())
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|e| e.to_string())?;
-    let text = String::from_utf8_lossy(&out.stdout).to_string();
-    if !out.status.success() {
-        return Err(js_head(
-            &format!("{text}{}", String::from_utf8_lossy(&out.stderr)),
-            600,
-        )
-        .to_string());
+    let drain = |r: Option<Box<dyn Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut b = Vec::new();
+            if let Some(mut r) = r {
+                let _ = r.read_to_end(&mut b);
+            }
+            String::from_utf8_lossy(&b).into_owned()
+        })
+    };
+    let out = drain(child.stdout.take().map(|r| Box::new(r) as _));
+    let err = drain(child.stderr.take().map(|r| Box::new(r) as _));
+    let start = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(s)) => break Some(s),
+            Ok(None) if start.elapsed() < deadline => {
+                std::thread::sleep(Duration::from_millis(200))
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+        }
+    };
+    let Some(status) = status else {
+        // not waited for: what the script started may still hold its output open
+        return Err(format!(
+            "发布脚本 {} 分钟还没结束，已停止；确认 CI 和 origin 的状态后再重试。",
+            deadline.as_secs().div_ceil(60)
+        ));
+    };
+    let (text, err) = (
+        out.join().unwrap_or_default(),
+        err.join().unwrap_or_default(),
+    );
+    if !status.success() {
+        return Err(refusal(&format!("{text}{err}")));
     }
     Ok(text
         .lines()
         .rev()
         .find_map(|l| l.trim().strip_prefix("released v").map(str::to_string)))
+}
+
+/// The release script's output for the retry card: what refused first (`✗ …`, with a line in Chinese
+/// on what to do before retrying when it is about CI), then the rest, cut to 600 characters.
+fn refusal(output: &str) -> String {
+    let (why, rest): (Vec<&str>, Vec<&str>) = output
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .partition(|l| l.trim_start().starts_with('✗'));
+    let what = why.join("\n");
+    let lead = if what.contains("gh run rerun") {
+        "CI 没有通过：偶发失败就先用下面的 gh run rerun 重跑失败的任务，等它通过后再重试；否则先在主分支上修好。\n"
+    } else if what.contains("CI") && what.contains("is still") {
+        "CI 还在跑：等它通过后再重试。\n"
+    } else {
+        ""
+    };
+    let all = format!("{lead}{}", [what, rest.join("\n")].join("\n"));
+    js_head(all.trim(), 600).to_string()
 }
 
 /// The version a release of `heads` already went out as: the oldest of the remote's `vX.Y.Z` tags
@@ -357,6 +439,69 @@ mod tests {
     fn a_repository_without_its_own_release_step_is_released_by_the_merge() {
         let t = tempfile::tempdir().unwrap();
         assert_eq!(release(t.path(), "main"), Ok(None));
+    }
+
+    /// `ops/cut-release.py` in a fresh directory: `body` is the script (Python), its argv lands in `argv`.
+    fn script(body: &str) -> tempfile::TempDir {
+        let t = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(t.path().join("ops")).unwrap();
+        let head = "import sys, time, pathlib\npathlib.Path(__file__).with_name('argv').write_text(' '.join(sys.argv[1:]))\n";
+        std::fs::write(t.path().join("ops/cut-release.py"), format!("{head}{body}")).unwrap();
+        t
+    }
+
+    fn argv(t: &tempfile::TempDir) -> String {
+        std::fs::read_to_string(t.path().join("ops/argv")).unwrap()
+    }
+
+    #[test]
+    fn the_lane_bounds_the_ci_wait_of_a_script_that_takes_one() {
+        let t = script("# --ci-wait S\nprint('released v1.2.3')\n");
+        assert_eq!(release(t.path(), "main"), Ok(Some("1.2.3".into())));
+        assert_eq!(
+            argv(&t),
+            format!("cut --branch main --ci-wait {}", LANE_CI_WAIT.as_secs())
+        );
+        assert!(LANE_CI_WAIT < Duration::from_secs(45 * 60));
+        // a script without the CI gate is run as before
+        let t = script("print('released v1.2.4')\n");
+        assert_eq!(release(t.path(), "main"), Ok(Some("1.2.4".into())));
+        assert_eq!(argv(&t), "cut --branch main");
+    }
+
+    #[test]
+    fn a_failed_ci_leads_the_retry_card_with_the_rerun_hint() {
+        // many progress lines first, as a long wait prints them; the refusal comes last
+        let t = script(concat!(
+            "# --ci-wait\n",
+            "for i in range(40): print(f'waiting for CI on abc1234 (in_progress {i})', file=sys.stderr)\n",
+            "print('✗ CI (ci.yml) failure on abc1234: https://example.invalid/runs/42. ',\n",
+            "      'If it was a flake, run its failed jobs again: gh run rerun 42 --failed', file=sys.stderr)\n",
+            "sys.exit(1)\n",
+        ));
+        let e = release(t.path(), "main").unwrap_err();
+        assert!(e.starts_with("CI 没有通过"), "{e}");
+        assert!(e.contains("gh run rerun 42 --failed"), "{e}");
+        assert!(
+            e.find("✗").unwrap() < e.find("waiting for CI").unwrap(),
+            "{e}"
+        );
+        assert!(crate::util::js_len(&e) <= 600);
+    }
+
+    #[test]
+    fn a_release_step_that_does_not_end_is_stopped() {
+        let t = script("time.sleep(60)\n");
+        let start = Instant::now();
+        let e = release_within(
+            t.path(),
+            "main",
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+        )
+        .unwrap_err();
+        assert!(start.elapsed() < Duration::from_secs(20), "stopped in time");
+        assert!(e.contains("已停止"), "{e}");
     }
 
     #[test]
