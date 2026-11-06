@@ -287,7 +287,10 @@ impl Addr {
         }
     }
 
-    /// `len` bytes from `offset` (fewer at the end), of the file at `expected` when given.
+    /// `len` bytes from `offset` (fewer at the end), of the file at `expected` when given. Once
+    /// the first answer tells how much the Node's link gives per read, up to [`READ_WINDOW`]
+    /// reads go at once (a remote Node's chunks are small: one at a time would wait a round trip
+    /// for each).
     async fn read(
         &self,
         expected: Option<na::Revision>,
@@ -295,27 +298,48 @@ impl Addr {
         len: u64,
     ) -> Result<Vec<u8>, na::ApiError> {
         let mut out = vec![];
+        let mut step: Option<u64> = None;
         while (out.len() as u64) < len {
-            let want = (len - out.len() as u64).min(u32::MAX as u64) as u32;
-            let c = self
-                .node
-                .read_file(na::FileRead {
+            let at = offset + out.len() as u64;
+            let left = len - out.len() as u64;
+            let each = step.unwrap_or(left).max(1);
+            let n = match step {
+                Some(_) => left.div_ceil(each).min(READ_WINDOW) as usize,
+                None => 1,
+            };
+            let reads = (0..n as u64).map(|i| {
+                self.node.read_file(na::FileRead {
                     path: self.file(),
                     expected: expected.clone(),
-                    offset: offset + out.len() as u64,
-                    max: want,
+                    offset: at + i * each,
+                    max: (left - i * each).min(each).min(u32::MAX as u64) as u32,
                 })
-                .await?;
-            let none = c.bytes.is_empty();
-            out.extend(c.bytes);
-            if c.eof || none {
-                break;
+            });
+            let chunks = futures::future::join_all(reads).await;
+            for (i, c) in chunks.into_iter().enumerate() {
+                // a short read before this one: what follows is asked again from there
+                if at + i as u64 * each != offset + out.len() as u64 {
+                    break;
+                }
+                let c = c?;
+                let none = c.bytes.is_empty();
+                if step.is_none() {
+                    step = Some(c.bytes.len() as u64);
+                }
+                out.extend(c.bytes);
+                if c.eof || none {
+                    out.truncate(len as usize);
+                    return Ok(out);
+                }
             }
         }
         out.truncate(len as usize);
         Ok(out)
     }
 }
+
+/// Reads of one file in flight at once ([`Addr::read`]).
+const READ_WINDOW: u64 = 4;
 
 /// Where the outputs of `item` are read, or `None` when the Hub reads its own disk as always (the
 /// local Node is off and the item is on the Hub's device).

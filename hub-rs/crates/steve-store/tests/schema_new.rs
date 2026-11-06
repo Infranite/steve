@@ -68,7 +68,7 @@ fn at_version(v: usize) -> (tempfile::TempDir, std::path::PathBuf) {
 
 #[test]
 fn schema_version_is_23() {
-    assert_eq!(db::SCHEMA_VERSION, 43);
+    assert_eq!(db::SCHEMA_VERSION, 44);
 }
 
 #[test]
@@ -434,6 +434,36 @@ fn migration_43_keeps_content_keys_of_messages() {
         .unwrap();
     assert!(plan.contains("chan_messages_content_key"), "{plan}");
     // opening again runs nothing twice
+    db::migrate(&c).unwrap();
+    assert_eq!(
+        count(&c, "SELECT v FROM schema_version"),
+        db::SCHEMA_VERSION
+    );
+}
+
+#[test]
+fn migration_44_finds_the_start_of_a_message_by_index() {
+    let (_dir, path) = at_version(43);
+    let c = Connection::open(&path).unwrap();
+    db::migrate(&c).unwrap();
+    assert_eq!(
+        count(
+            &c,
+            "SELECT count(*) FROM sqlite_master WHERE type = 'index' AND name = 'events_message_start'"
+        ),
+        1
+    );
+    // the role lookup of a text delta goes by the index, not back through the session's rows
+    let plan: String = c
+        .query_row(
+            "EXPLAIN QUERY PLAN SELECT json_extract(data,'$.role') FROM events
+              WHERE session_id = 's1' AND kind = 'message' AND format = 'steve.v1'
+                AND json_extract(data,'$.message') = 'm1' ORDER BY seq DESC LIMIT 1",
+            [],
+            |r| r.get(3),
+        )
+        .unwrap();
+    assert!(plan.contains("events_message_start"), "{plan}");
     db::migrate(&c).unwrap();
     assert_eq!(
         count(&c, "SELECT v FROM schema_version"),

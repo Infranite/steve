@@ -11,9 +11,18 @@ use steve_node_api::{ApiError, ApiResult, ErrorCode};
 pub const MAX_FRAME: usize = 288 * 1024;
 /// Largest control envelope (handshake, heartbeat, fencing).
 pub const CONTROL_CAP: usize = 64 * 1024;
-/// Largest payload of an event batch, a blob or a file chunk: [`crate::RemoteSink`] splits batches
-/// above it so that every ack still covers a contiguous watermark.
+/// Largest payload of an event batch or a replay page (a single event stays within it); batches are
+/// cut much smaller ([`EVENTS_FRAME`]), every ack still covering a contiguous watermark.
 pub const BULK_CAP: usize = 256 * 1024;
+/// Largest frame of a blob or file chunk. A frame being written cannot be overtaken, and the writer
+/// takes the next one while the socket still sends the last: a permission answer behind file
+/// chunks waits for about two of them, some 70 ms at 10 Mbit/s (with 64 KiB frames, 120 ms).
+pub const BULK_FRAME: usize = 48 * 1024;
+/// The size [`crate::RemoteSink`] cuts event batches at (events go before chunks). A single bigger
+/// event still goes, alone.
+pub const EVENTS_FRAME: usize = 64 * 1024;
+/// The most raw bytes of one blob or file chunk: hex doubles them, the envelope adds a little.
+pub const CHUNK_BYTES: u32 = (BULK_FRAME / 2) as u32 - 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

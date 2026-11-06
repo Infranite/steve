@@ -12,6 +12,7 @@ futures-util = { version = "=0.3.34", default-features = false, features = ["sin
 getrandom = "=0.3.4"
 hex = "=0.4.3"
 http = "=1.5.0"
+libc = "=0.2.191"
 rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std", "logging", "tls12"] }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = { version = "=1.0.154", features = ["preserve_order"] }

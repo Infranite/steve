@@ -232,7 +232,16 @@ pub struct NodeRuntime {
     research_fallbacks: AtomicU64,
     /// The callers waiting on think jobs of this Node ([`NodePrint`]).
     jobs: node_jobs::Waiters,
+    /// The role of each message seen lately, by (session, message): a text delta takes its role
+    /// from the `message` row that began it, and a message's role never changes. What is not
+    /// here (after a restart, or once the map was cleared at [`ROLES_KEPT`]) is looked up by index.
+    roles: Mutex<HashMap<(String, String), Role>>,
 }
+
+/// The most events of one stream applied in one transaction ([`NodeRuntime::apply_some`]).
+const APPLY_RUN: usize = 128;
+/// How many message roles the coordinator keeps in memory before it starts over.
+const ROLES_KEPT: usize = 4096;
 
 /// How long applied Node events stay in the inbox (what is still needed stays longer).
 const INBOX_KEEP_MS: i64 = 7 * 24 * 3600 * 1000;
@@ -359,6 +368,7 @@ impl NodeRuntime {
             retired: std::sync::atomic::AtomicU64::new(0),
             research_fallbacks: AtomicU64::new(0),
             jobs: node_jobs::Waiters::default(),
+            roles: Mutex::new(HashMap::new()),
         })
     }
 
@@ -2769,9 +2779,10 @@ impl NodeRuntime {
                 let seq = e.cursor.seq as i64;
                 let payload = serde_json::to_value(e).map_err(conflict)?;
                 // a conflict is set aside on its own stream (D5: acknowledged once it is durably
-                // quarantined), so the rest of the batch and every other stream go on
+                // quarantined), so the rest of the batch and every other stream go on; the
+                // durable prefix moves once per stream, after the whole batch is in
                 if let rt::Inboxed::Conflict(why) =
-                    rt::inbox_insert_in(tx, k, seq, e.id.as_str(), &payload, now())?
+                    rt::inbox_put_in(tx, k, seq, e.id.as_str(), &payload, now())?
                 {
                     let q = rt::quarantine_in(tx, k, seq, e.id.as_str(), &payload, why, now())?;
                     if q.new {
@@ -2794,14 +2805,13 @@ impl NodeRuntime {
             }
             let mut durable = vec![];
             for (stream, epoch) in &touched {
-                let acked = rt::acked_in(
-                    tx,
-                    StreamKey {
-                        node: &node,
-                        stream,
-                        epoch,
-                    },
-                )?;
+                let k = StreamKey {
+                    node: &node,
+                    stream,
+                    epoch,
+                };
+                rt::extend_durable_in(tx, k)?;
+                let acked = rt::acked_in(tx, k)?;
                 if acked > 0 {
                     durable.push(Watermark {
                         stream: idv(stream.clone())?,
@@ -2841,29 +2851,47 @@ impl NodeRuntime {
 
     // ── T4: applying ──
 
-    /// Applies what is ready on every dirty stream. False: nothing was. Each event is one
-    /// transaction; what the Hub does about it (statistics, YOLO, the turn's end) follows that
-    /// event's commit, not the end of the whole pass.
+    /// Applies what is ready on every dirty stream. False: nothing was.
+    ///
+    /// A stream's events go in runs of up to [`APPLY_RUN`] per transaction, the streams taking
+    /// turns, so one long message neither costs a commit per delta nor keeps the other sessions
+    /// (and their permission cards) waiting. A run is the stream's flow (text, tools, plans) and
+    /// ends with the first other event, or the first the Hub does something about after its
+    /// commit (statistics, YOLO, the turn's end, a settle): what follows an event's commit still
+    /// follows that event's own commit, in order. A run that fails is rolled back and its stream
+    /// goes one event per transaction for the rest of the pass, so the events before a bad one are
+    /// still applied and the bad one stops its stream as before.
     fn apply_some(&self) -> bool {
-        let streams: Vec<(String, String)> = self.dirty.lock().unwrap().iter().cloned().collect();
+        let mut streams: std::collections::VecDeque<(String, String)> =
+            self.dirty.lock().unwrap().iter().cloned().collect();
         let node = self.node_id.to_string();
         let mut any = false;
-        for (stream, epoch) in streams {
-            loop {
-                let k = StreamKey {
-                    node: &node,
-                    stream: &stream,
-                    epoch: &epoch,
+        let mut one_by_one: HashSet<(String, String)> = HashSet::new();
+        while let Some((stream, epoch)) = streams.pop_front() {
+            let k = StreamKey {
+                node: &node,
+                stream: &stream,
+                epoch: &epoch,
+            };
+            let key = (stream.clone(), epoch.clone());
+            let limit = if one_by_one.contains(&key) {
+                1
+            } else {
+                APPLY_RUN
+            };
+            // turn ends settled outside this worker (a local cancel) before this run's commit are
+            // told before its events' ends: taken under the write lock, so every one comes from a
+            // transaction that is over, and the item hears its turns in commit order
+            let mut earlier = (vec![], vec![]);
+            let r = self.tx(|tx| {
+                earlier = self.take_settled();
+                let pending = rt::next_events_in(tx, k, limit)?;
+                let Some(last) = pending.last().map(|p| p.seq) else {
+                    return Ok(None);
                 };
-                // turn ends settled outside this worker (a local cancel) before this event's
-                // commit are told before its end: taken under the write lock, so every one comes
-                // from a transaction that is over, and the item hears its turns in commit order
-                let mut earlier = (vec![], vec![]);
-                let r = self.tx(|tx| {
-                    earlier = self.take_settled();
-                    let Some(p) = rt::next_event_in(tx, k)? else {
-                        return Ok(None);
-                    };
+                let mut told = Vec::with_capacity(pending.len());
+                let mut through = last;
+                for p in pending {
                     let ev: NodeEvent = serde_json::from_value(p.payload)?;
                     let mut ask: Vec<After> =
                         self.permission_event_in(tx, &ev)?.into_iter().collect();
@@ -2877,30 +2905,50 @@ impl NodeRuntime {
                     }
                     ask.extend(self.facts_in(tx, &ev)?);
                     let out = self.apply_in(tx, &ev)?;
-                    rt::mark_applied_in(tx, k, p.seq)?;
-                    Ok(Some((out, ask)))
-                });
-                self.book(earlier);
-                match r {
-                    Ok(Some((end, ask))) => {
-                        any = true;
+                    // only the stream's flow (text, tools, plans) runs on; anything else (an
+                    // attempt's end, a card, a receipt) is the last of its run
+                    let flow = matches!(
+                        ev.body,
+                        EventBody::TextDelta { .. }
+                            | EventBody::MessageStarted { .. }
+                            | EventBody::MessageCompleted { .. }
+                            | EventBody::ToolChanged { .. }
+                            | EventBody::Plan { .. }
+                    );
+                    let tells = out.is_some() || !ask.is_empty() || self.staged_any();
+                    told.push((out, ask));
+                    if tells || !flow {
+                        through = p.seq;
+                        break;
+                    }
+                }
+                rt::mark_applied_through_in(tx, k, through)?;
+                Ok(Some(told))
+            });
+            self.book(earlier);
+            match r {
+                Ok(Some(told)) => {
+                    any = true;
+                    for (end, ask) in told {
                         self.after(ask);
                         if let Some(end) = end {
                             self.tell_end(end);
                         }
                     }
-                    Ok(None) => {
-                        self.dirty
-                            .lock()
-                            .unwrap()
-                            .remove(&(stream.clone(), epoch.clone()));
-                        self.caught_up_on(&stream, &epoch);
-                        break;
-                    }
-                    Err(e) => {
-                        tracing::error!("apply {stream}: {e}");
-                        break;
-                    }
+                    // its turn again once the others had theirs
+                    streams.push_back(key);
+                }
+                Ok(None) => {
+                    self.dirty.lock().unwrap().remove(&key);
+                    self.caught_up_on(&stream, &epoch);
+                }
+                Err(e) if limit > 1 => {
+                    tracing::debug!("apply {stream}: {e}; one event at a time");
+                    one_by_one.insert(key.clone());
+                    streams.push_front(key);
+                }
+                Err(e) => {
+                    tracing::error!("apply {stream}: {e}");
                 }
             }
         }
@@ -2909,6 +2957,14 @@ impl NodeRuntime {
             self.wake_send.notify_one();
         }
         any
+    }
+
+    /// The open transaction settled something the apply worker tells after its commit.
+    fn staged_any(&self) -> bool {
+        let (settled, ended) = &*self.staged.lock().unwrap();
+        !settled.is_empty()
+            || !ended.is_empty()
+            || !self.staged_workspace.lock().unwrap().is_empty()
     }
 
     /// What the Hub settled on its own word (a local cancel, an abandon the Node has no record
@@ -3334,7 +3390,12 @@ impl NodeRuntime {
     /// The session's Steve event, once (the Node's stream position is its identity).
     fn store_event_in(&self, tx: &Tx, session: &str, ev: &NodeEvent) -> Result<(), StoreError> {
         let role = match &ev.body {
-            EventBody::TextDelta { message, .. } => role_of_in(tx, session, message)?,
+            EventBody::TextDelta { message, .. } => self.role_in(tx, session, message)?,
+            EventBody::MessageStarted { message, role, .. } => {
+                // a rolled-back start comes again with the same role: keeping it early is harmless
+                self.remember_role(session, message, *role);
+                None
+            }
             _ => None,
         };
         let Some(entry) = steve_transcript::of_node(&ev.body, role) else {
@@ -3355,6 +3416,28 @@ impl NodeRuntime {
             ev.at.0,
         )?;
         Ok(())
+    }
+
+    /// The role of a message: from memory, else from its `message` row (by index, however long
+    /// the message is).
+    fn role_in(&self, tx: &Tx, session: &str, message: &str) -> Result<Option<Role>, StoreError> {
+        let key = (session.to_string(), message.to_string());
+        if let Some(r) = self.roles.lock().unwrap().get(&key) {
+            return Ok(Some(*r));
+        }
+        let role = role_of_in(tx, session, message)?;
+        if let Some(r) = role {
+            self.remember_role(session, message, r);
+        }
+        Ok(role)
+    }
+
+    fn remember_role(&self, session: &str, message: &str, role: Role) {
+        let mut roles = self.roles.lock().unwrap();
+        if roles.len() >= ROLES_KEPT {
+            roles.clear();
+        }
+        roles.insert((session.to_string(), message.to_string()), role);
     }
 
     /// An attempt is over: the Hub decides. A passing failure with no tool run is tried again as a
@@ -4028,18 +4111,29 @@ fn turn_revision(tx: &Tx, turn: &str) -> Result<i64, StoreError> {
     )?)
 }
 
+/// The `message` row that began a message (migration 044's index `events_message_start`).
+const ROLE_SQL: &str = "SELECT json_extract(data,'$.role') FROM events WHERE session_id=?1 AND kind='message' AND format='steve.v1' AND json_extract(data,'$.message')=?2 ORDER BY seq DESC LIMIT 1";
+
 /// The role of a message, from the `message` entry that began it.
 fn role_of_in(tx: &Tx, session: &str, message: &str) -> Result<Option<Role>, StoreError> {
-    let r: Option<String> = match tx.query_row(
-        "SELECT json_extract(data,'$.role') FROM events WHERE session_id=? AND kind='message' AND format='steve.v1' AND json_extract(data,'$.message')=? ORDER BY seq DESC LIMIT 1",
-        [session, message],
-        |r| r.get(0),
-    ) {
-        Ok(x) => x,
-        Err(rusqlite::Error::QueryReturnedNoRows) => None,
-        Err(e) => return Err(e.into()),
-    };
-    Ok(r.and_then(|r| serde_json::from_value(Value::String(r)).ok()))
+    Ok(role_lookup_in(tx, session, message)?.0)
+}
+
+/// [`role_of_in`] and the SQLite VM steps it took (tests check they do not grow with the message).
+fn role_lookup_in(
+    tx: &Tx,
+    session: &str,
+    message: &str,
+) -> Result<(Option<Role>, i32), StoreError> {
+    let mut st = tx.prepare_cached(ROLE_SQL)?;
+    st.reset_status(rusqlite::StatementStatus::VmStep);
+    let r: Option<Option<String>> = st.query_row([session, message], |r| r.get(0)).optional()?;
+    let steps = st.get_status(rusqlite::StatementStatus::VmStep);
+    Ok((
+        r.flatten()
+            .and_then(|r| serde_json::from_value(Value::String(r)).ok()),
+        steps,
+    ))
 }
 
 /// Where the session's conversation continues: the resume handle of the Node's last view of it.
@@ -4220,6 +4314,145 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert_eq!(seen.finished.lock().unwrap().len(), 1);
         assert_eq!(seen.ended.lock().unwrap().len(), 1);
+    }
+
+    /// The role of a delta is found at the same cost however long its message already is: from
+    /// memory, else through the index on `message` rows (never walking back through the deltas).
+    #[test]
+    fn a_deltas_role_costs_the_same_however_long_its_message() {
+        const S: &str = "s1";
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            Store::open(dir.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
+        store.ensure_workspace().unwrap();
+        let add = |tx: &Tx, kind: &str, data: Value| {
+            rt::add_event_in(tx, S, kind, data, V1, None, 1).map(|_| ())
+        };
+        let steps = |n_before: usize| -> (Option<Role>, i32) {
+            store
+                .transaction::<_, StoreError>(|tx| {
+                    for i in 0..n_before {
+                        add(
+                            tx,
+                            "text",
+                            json!({"role": "thought", "message": "m1", "text": format!("t{i} ")}),
+                        )?;
+                    }
+                    role_lookup_in(tx, S, "m1")
+                })
+                .unwrap()
+        };
+        store
+            .transaction::<_, StoreError>(|tx| {
+                tx.execute(
+                    "INSERT INTO sessions(id,workspace_id,harness,cwd,status,created,updated) VALUES (?,'default','claude-code','.','active',1,1)",
+                    [S],
+                )?;
+                add(tx, "message", json!({"message": "m0", "role": "user"}))?;
+                add(tx, "message", json!({"message": "m1", "role": "thought"}))
+            })
+            .unwrap();
+        let (role, short) = steps(10);
+        assert_eq!(role, Some(Role::Thought));
+        let (role, long) = steps(5000);
+        assert_eq!(role, Some(Role::Thought));
+        assert_eq!(
+            long, short,
+            "VM steps after 5010 deltas ({long}) and after 10 ({short})"
+        );
+        // another session's or another message's rows do not count either
+        let (role, _) = store
+            .transaction::<_, StoreError>(|tx| role_lookup_in(tx, S, "m0"))
+            .unwrap();
+        assert_eq!(role, Some(Role::User));
+    }
+
+    /// A delta's role comes from memory while the coordinator remembers its message, from the
+    /// store once it does not (a restart): either way the one its message began with.
+    #[tokio::test]
+    async fn a_delta_keeps_its_messages_role_with_or_without_memory() {
+        const S: &str = "s1";
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            Store::open(dir.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
+        store.ensure_workspace().unwrap();
+        store
+            .transaction::<_, StoreError>(|tx| {
+                tx.execute(
+                    "INSERT INTO sessions(id,workspace_id,harness,cwd,status,created,updated) VALUES (?,'default','claude-code','.','active',1,1)",
+                    [S],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let node = FakeNode::new("n1");
+        let seen = Arc::new(Seen::default());
+        let rt = NodeRuntime::new(store.clone(), node.clone(), seen.clone());
+        node.connect(Arc::new(Sink(Arc::downgrade(&rt))));
+        rt.start();
+        rt.bind(&Binding {
+            session: S.into(),
+            resource: format!("item:{S}"),
+            prepare: PrepareKind::Scratch,
+            choice: build::choice(),
+            policy: build::policy(),
+        })
+        .unwrap();
+        rt.prompt(S, "first", "user", &[]).unwrap();
+        until("started", || !seen.started.lock().unwrap().is_empty()).await;
+        let exec: ExecutionRef = store
+            .reader(|c| {
+                Ok::<_, StoreError>(c.query_row(
+                    "SELECT execution FROM runtime_attempts",
+                    [],
+                    |r| r.get::<_, String>(0),
+                )?)
+            })
+            .map(|s| serde_json::from_str(&s).unwrap())
+            .unwrap();
+        let subject = Subject::Execution(exec);
+        node.emit(
+            subject.clone(),
+            EventBody::MessageStarted {
+                message: "m1".into(),
+                block: "b1".into(),
+                role: Role::Thought,
+            },
+        )
+        .await
+        .unwrap();
+        let delta = |at: u64| EventBody::TextDelta {
+            message: "m1".into(),
+            block: "b1".into(),
+            utf8_offset: at,
+            text: "x".into(),
+        };
+        node.emit(subject.clone(), delta(0)).await.unwrap();
+        let roles = || -> Vec<String> {
+            store
+                .reader(|c| {
+                    let mut st = c.prepare(
+                        "SELECT json_extract(data,'$.role') FROM events WHERE kind='text' ORDER BY seq",
+                    )?;
+                    let v = st
+                        .query_map([], |r| r.get::<_, String>(0))?
+                        .collect::<Result<Vec<_>, _>>()?;
+                    Ok::<_, StoreError>(v)
+                })
+                .unwrap()
+        };
+        until("first delta", || roles().len() == 1).await;
+        assert!(
+            rt.roles
+                .lock()
+                .unwrap()
+                .contains_key(&(S.to_string(), "m1".to_string()))
+        );
+        // forgotten (as after a restart): found again in the store
+        rt.roles.lock().unwrap().clear();
+        node.emit(subject.clone(), delta(1)).await.unwrap();
+        until("second delta", || roles().len() == 2).await;
+        assert_eq!(roles(), ["thought", "thought"]);
     }
 
     #[test]

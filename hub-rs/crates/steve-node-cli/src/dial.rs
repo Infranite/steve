@@ -164,7 +164,8 @@ pub async fn serve(node: LocalNode, p: &Pairing, id: &Identity, trust: &Trust) -
             Err(Stop::Retry(e)) => tracing::info!("hub link: {e}"),
         }
         link.set(None);
-        tokio::time::sleep(backoff).await;
+        // spread out: every Node of a restarted Hub dials again at once otherwise
+        tokio::time::sleep(steve_node_wire::jitter(backoff)).await;
         backoff = (backoff * 2).min(Duration::from_secs(30));
     }
 }

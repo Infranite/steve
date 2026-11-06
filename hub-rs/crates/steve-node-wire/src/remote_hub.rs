@@ -13,7 +13,7 @@ use serde::de::DeserializeOwned;
 use steve_node_api::*;
 
 use crate::conn::{Conn, answer_of, to_value};
-use crate::envelope::BULK_CAP;
+use crate::envelope::{CHUNK_BYTES, EVENTS_FRAME};
 use crate::methods::{self, *};
 
 #[derive(Default)]
@@ -58,15 +58,16 @@ pub struct RemoteTools(pub Arc<HubLink>);
 pub struct RemoteFiles(pub Arc<HubLink>);
 pub struct RemoteSecrets(pub Arc<HubLink>);
 
-/// Cuts a batch into contiguous runs whose encoded events stay within [`BULK_CAP`]. A single event
-/// over the cap goes alone (and is refused by the frame limit if it really is too big).
+/// Cuts a batch into contiguous runs whose encoded events stay within [`EVENTS_FRAME`]. A single
+/// event over it goes alone (up to [`crate::envelope::BULK_CAP`]; the Node keeps every event
+/// within that).
 pub fn split(batch: EventBatch) -> Vec<EventBatch> {
     let mut out = vec![];
     let mut cur = EventBatch::default();
     let mut size = 0usize;
     for e in batch.events {
         let n = serde_json::to_string(&e).map(|s| s.len()).unwrap_or(0) + 1;
-        if !cur.events.is_empty() && size + n > BULK_CAP {
+        if !cur.events.is_empty() && size + n > EVENTS_FRAME {
             out.push(std::mem::take(&mut cur));
             size = 0;
         }
@@ -154,8 +155,8 @@ impl HubFiles for RemoteFiles {
         offset: u64,
         max: u32,
     ) -> ApiResult<ReadChunk> {
-        // hex doubles the bytes: keep a chunk's frame within the cap
-        let max = max.min((BULK_CAP / 2) as u32 - 1024);
+        // hex doubles the bytes: keep a chunk's frame within a bulk frame
+        let max = max.min(CHUNK_BYTES);
         let a = FetchArgs {
             access,
             id,

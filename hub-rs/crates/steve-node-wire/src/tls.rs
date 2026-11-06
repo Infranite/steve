@@ -183,10 +183,29 @@ pub async fn connect(url: &str, trust: &Trust) -> std::io::Result<(FrameSink, Fr
         Some(c) => Connector::Rustls(c),
         None => Connector::Plain,
     };
-    let (ws, _) = tokio_tungstenite::connect_async_tls_with_config(
-        url,
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let req = url
+        .into_client_request()
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    let uri = req.uri();
+    let host = uri
+        .host()
+        .ok_or_else(|| std::io::Error::other("no host in the hub url"))?;
+    let port = uri
+        .port_u16()
+        .or(match uri.scheme_str() {
+            Some("wss") => Some(443),
+            Some("ws") => Some(80),
+            _ => None,
+        })
+        .ok_or_else(|| std::io::Error::other("unsupported hub url scheme"))?;
+    // an IPv6 host keeps its brackets here: "[::1]:443"
+    let tcp = tokio::net::TcpStream::connect(format!("{host}:{port}")).await?;
+    crate::sock::low_water(&tcp);
+    let (ws, _) = tokio_tungstenite::client_async_tls_with_config(
+        req,
+        tcp,
         Some(crate::ws::config()),
-        false,
         Some(connector),
     )
     .await
