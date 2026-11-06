@@ -46,5 +46,5 @@ pub use hooks::{BotHook, SelfPollHook};
 pub use resource::FeishuMedia;
 pub use self_poll::{RoundReport, SelfPoller, SelfPollers};
 pub use send::{Sent, at_handle, reply_in_thread};
-pub use user_oauth::{FeishuIds, SelfClaims, identify_sender, user_routes};
+pub use user_oauth::{FeishuIds, identify_sender, user_routes};
 pub use verify::{PermissionCheck, Status as PermissionStatus};

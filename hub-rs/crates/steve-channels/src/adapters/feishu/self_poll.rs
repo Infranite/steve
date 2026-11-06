@@ -933,6 +933,7 @@ fn map_message(m: &Value, chat: &ChatRow, ids: &Ids) -> InboundMessage {
             handle,
             display_name,
             is_bot: is_app,
+            aliases: Vec::new(),
             external: !chat.tenant_key.is_empty() && !stk.is_empty() && stk != chat.tenant_key,
         },
         text,

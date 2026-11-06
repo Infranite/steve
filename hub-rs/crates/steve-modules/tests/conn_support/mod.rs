@@ -299,6 +299,13 @@ impl ConnectionProvider for FeishuUser {
     fn reauth_question(&self, _: &str) -> String {
         "飞书需要重新授权".into()
     }
+    /// Paired with the app's bot connection (`config.app_connection`), not required.
+    fn pairing(&self) -> Option<steve_modules::accounts::connections::Pairing> {
+        Some(steve_modules::accounts::connections::Pairing {
+            with: vec!["feishu_app".into()],
+            required: false,
+        })
+    }
     /// The app connection's App ID and Secret, not `STEVE_OAUTH_FEISHU_*`.
     async fn oauth_client(&self, cx: &StartCx<'_>) -> Result<Option<OAuthClient>, ProviderError> {
         let Some(app) = cx.config.get("app_connection").and_then(Value::as_str) else {

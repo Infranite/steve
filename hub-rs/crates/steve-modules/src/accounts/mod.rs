@@ -9,6 +9,7 @@
 //! - [`repo`] — the SQL (tables of migration 5, owned by steve-store);
 //! - [`service`] — the rules, shared by REST, the change operations and identification;
 //! - [`identify`] — identification of a handle as a contact;
+//! - [`claim`] — your own identity claimed into “我” when you connect it;
 //! - [`ops`] — `account.add` / `account.patch` change operations;
 //! - [`api`] — the REST handlers; [`routes`] is what the integrator mounts under `/api`.
 //!
@@ -20,6 +21,7 @@
 //!    deleting/merging/splitting a contact takes its accounts along in the same transaction.
 
 pub mod api;
+pub mod claim;
 pub mod connections;
 pub mod enrich;
 pub mod identify;
@@ -38,7 +40,7 @@ use crate::{ApiError, ApiResult, Registry};
 
 pub use api::routes;
 pub use enrich::{Enriched, Enrichment, TenantHint, enrich, looks_like_handle, tenant_org};
-pub use identify::{ExtraHandle, Hints, Identified, identify};
+pub use identify::{AnyHandle, ExtraHandle, Hints, Identified, identify, identify_any};
 
 /// Registers the module's change operations.
 pub fn register(reg: &mut Registry) {

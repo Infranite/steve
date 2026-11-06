@@ -433,7 +433,10 @@ pub enum PushOutcome {
 
 /// Who sent an inbound message.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Sender {
+    /// The primary handle, in any system: the declared `handle_system`, or one of the adapter's own
+    /// (its internal user id) when it has none there.
     pub handle: HandleRef,
     /// Chat nickname, when the payload carries one (Feishu's does not: [`crate::Channels`] looks it
     /// up in the members list).
@@ -442,6 +445,47 @@ pub struct Sender {
     pub is_bot: bool,
     /// Of another organization (Feishu: another `tenant_key`).
     pub external: bool,
+    /// More handles of the same person, in other systems (an email). The Hub matches an existing
+    /// contact through the primary handle and every alias before it makes a new unconfirmed one,
+    /// and attaches the handles it did not know to that contact.
+    pub aliases: Vec<HandleRef>,
+}
+
+impl Sender {
+    /// A person known by `handle` (in any system); no name, not a bot, not external, no aliases.
+    pub fn new(handle: HandleRef) -> Self {
+        Self {
+            handle,
+            display_name: None,
+            is_bot: false,
+            external: false,
+            aliases: Vec::new(),
+        }
+    }
+
+    /// One more handle of the same person, in another system (or another one in the same).
+    pub fn alias(mut self, h: HandleRef) -> Self {
+        if !h.handle.trim().is_empty() && h != self.handle && !self.aliases.contains(&h) {
+            self.aliases.push(h);
+        }
+        self
+    }
+
+    pub fn display_name(mut self, name: impl Into<String>) -> Self {
+        let name = name.into();
+        self.display_name = (!name.trim().is_empty()).then_some(name);
+        self
+    }
+
+    pub fn bot(mut self, is_bot: bool) -> Self {
+        self.is_bot = is_bot;
+        self
+    }
+
+    pub fn external(mut self, external: bool) -> Self {
+        self.external = external;
+        self
+    }
 }
 
 /// Someone @-mentioned in a message.
@@ -504,12 +548,7 @@ impl InboundMessage {
             thread_key: None,
             reply_to: None,
             root_id: None,
-            sender: Sender {
-                handle: sender,
-                display_name: None,
-                is_bot: false,
-                external: false,
-            },
+            sender: Sender::new(sender),
             text: text.into(),
             attachments: Vec::new(),
             mentions: Vec::new(),

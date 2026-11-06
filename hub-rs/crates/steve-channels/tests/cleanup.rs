@@ -68,7 +68,7 @@ async fn setup() -> (H, String, String) {
         .adapter(app)
         .build();
     let api = connections::routes(conns)
-        .merge(channels_api::routes(ch, None))
+        .merge(channels_api::routes(ch))
         .with_state(env.modules.clone());
     let h = H {
         env,

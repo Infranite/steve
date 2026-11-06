@@ -13,10 +13,9 @@
 //! `ChannelAccount` (see [`crate::channel_accounts::AccountOut`]) carries the permission check of
 //! `verify`: `permissions`, `missing_permissions`, `self_built`, `permissions_checked_at`.
 //!
-//! Mount: `api.merge(steve_channels::channels_api::routes(channels.clone(), Some(feishu_user.clone())))`.
+//! Mount: `api.merge(steve_channels::channels_api::routes(channels.clone()))`.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
 
 use axum::extract::{Path, Query};
 use axum::http::HeaderMap;
@@ -29,32 +28,24 @@ use steve_modules::{ApiError, ApiResult, Body, Caller, Modules};
 use steve_store::base::Viewer;
 use zeroize::Zeroizing;
 
-use crate::adapters::feishu::FeishuUser;
 use crate::adapters::feishu::auth::{APP_ADAPTER, USER_ADAPTER};
-use crate::adapters::feishu::user_oauth::SELF_CLAIM;
 use crate::channel_accounts::{self as accounts, ChannelPatch};
 use crate::{Channels, members, spaces};
 
 #[derive(Clone)]
 struct Api {
     ch: Channels,
-    user: Option<Arc<FeishuUser>>,
 }
 
 type Cx = Extension<Api>;
 
-/// The channel account and member routes. `user`: the `feishu_user` provider (the one registered
-/// with `Connections`), so “授权你本人” through `POST /channels` also merges the contact the bot
-/// already made for you into “我”; without it the OAuth flow runs without that merge.
-pub fn routes(ch: Channels, user: Option<Arc<FeishuUser>>) -> Router<Modules> {
+/// The channel account and member routes.
+pub fn routes(ch: Channels) -> Router<Modules> {
     Router::new()
         .route("/channels", get(list).post(create))
         .route("/channels/{id}", get(detail).patch(patch))
         .route("/spaces/{id}/members", get(members_page))
-        .layer(Extension(Api {
-            ch: ch.clone(),
-            user,
-        }))
+        .layer(Extension(Api { ch: ch.clone() }))
         .merge(crate::cleanup::routes(ch))
 }
 
@@ -215,10 +206,7 @@ async fn start_user(
             }
         }
     };
-    let mut config = json!({"app_connection": app});
-    if let Some(u) = &a.user {
-        config[SELF_CLAIM] = json!(u.claims().issue(who, a.ch.now())?);
-    }
+    let config = json!({"app_connection": app});
     let origin = conns.origin(headers);
     let url = conns
         .oauth_start(who, &origin, USER_ADAPTER, b.caps, config, None)

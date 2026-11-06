@@ -178,6 +178,7 @@ pub struct StewardHint {
 
 /// What `verify` learned about the account behind a credential.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct AccountInfo {
     /// The primary handle, before normalization (email, `union_id`, `app_id`, login).
     pub handle: String,
@@ -192,6 +193,10 @@ pub struct AccountInfo {
     pub config: Value,
     /// For [`Owner::Bot`]: who the provider says is responsible.
     pub steward_hint: Option<StewardHint>,
+    /// The same identity's handles in other systems, as `(system, handle)` (an email next to an
+    /// internal user id): recorded as accounts of the same owner when nobody holds them yet, and
+    /// claimed into “我” with the primary handle ([`ConnectionProvider::claims_self`]).
+    pub aliases: Vec<(String, String)>,
 }
 
 impl AccountInfo {
@@ -204,7 +209,49 @@ impl AccountInfo {
             extra_handles: Vec::new(),
             config: Value::Null,
             steward_hint: None,
+            aliases: Vec::new(),
         }
+    }
+
+    /// One more handle of the same identity in another system.
+    pub fn alias(mut self, system: &str, handle: &str) -> Self {
+        let (system, handle) = (system.trim(), handle.trim());
+        if !system.is_empty()
+            && !handle.is_empty()
+            && !self.aliases.iter().any(|(s, h)| s == system && h == handle)
+        {
+            self.aliases.push((system.to_string(), handle.to_string()));
+        }
+        self
+    }
+
+    pub fn kind(mut self, kind: impl Into<String>) -> Self {
+        self.kind = kind.into();
+        self
+    }
+
+    pub fn owner(mut self, owner: Owner) -> Self {
+        self.owner = owner;
+        self
+    }
+
+    /// A handle valid only under this connection ([`Self::extra_handles`]).
+    pub fn extra_handle(mut self, h: impl Into<String>) -> Self {
+        let h = h.into();
+        if !h.trim().is_empty() && !self.extra_handles.contains(&h) {
+            self.extra_handles.push(h);
+        }
+        self
+    }
+
+    pub fn config(mut self, config: Value) -> Self {
+        self.config = config;
+        self
+    }
+
+    pub fn steward_hint(mut self, hint: StewardHint) -> Self {
+        self.steward_hint = Some(hint);
+        self
     }
 }
 
@@ -375,6 +422,16 @@ pub trait ConnectionProvider: Send + Sync + 'static {
     /// Default: none.
     fn pairing(&self) -> Option<Pairing> {
         None
+    }
+
+    /// Whether a verified connection may claim contacts into “我”: before its account is attached,
+    /// an unconfirmed contact already holding its primary handle (or an extra handle, or an alias)
+    /// is merged into the connecting user's “我”. Default: a `self` identity
+    /// ([`Integration::identity`]) authorized by OAuth (code or device flow), where the provider
+    /// proved who signed in. A [`AuthKind::Credential`] provider returning `true` attests
+    /// [`AccountInfo::handle`] itself (from its paired connection, [`ConnCx::paired`]).
+    fn claims_self(&self) -> bool {
+        self.auth() == AuthKind::OAuth && self.integration().identity == "self"
     }
 
     /// Revokes at the provider on disconnect (best effort). Default: RFC 7009 at the spec's

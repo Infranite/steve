@@ -77,11 +77,7 @@ impl Extension for FeishuSelf {
     }
 
     fn declare(&self, d: &mut Declare<'_>) -> Result<(), ExtensionError> {
-        let user = Arc::new(
-            FeishuEnv::from_env(|k| (d.vars)(k))
-                .user_provider(Domain::Feishu)
-                .with_party_hooks(d.party_hooks.clone()),
-        );
+        let user = Arc::new(FeishuEnv::from_env(|k| (d.vars)(k)).user_provider(Domain::Feishu));
         d.channel(
             ChannelSide::new(
                 ChannelDecl::new(user.id())
@@ -118,10 +114,7 @@ impl Extension for FeishuSelf {
             s.connections.clone(),
             user.clone(),
         ))
-        .merge(feishu::user_routes(
-            s.connections.clone(),
-            user.claims().clone(),
-        ));
+        .merge(feishu::user_routes(s.connections.clone()));
         Ok(Mounted::default().routes(api_routes).lifecycle(
             feishu::auth::USER_ADAPTER,
             Arc::new(feishu::SelfPollHook::new(s.channels.clone(), user)),

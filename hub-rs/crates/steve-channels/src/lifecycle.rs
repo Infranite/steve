@@ -462,26 +462,11 @@ impl ConnectionRuntime {
             .connections()
             .provider(&adapter)
             .and_then(|p| p.pairing());
-        let paired = match (&pairing, config.get(PAIR_KEY).and_then(Value::as_str)) {
-            (Some(pairing), Some(with)) => {
-                let other = inner.channels.store().reader(|c| -> ChannelResult<_> {
-                    Ok(c.query_row(
-                        "SELECT adapter, status FROM connections WHERE id = ? AND workspace_id = ?",
-                        params![with, ws],
-                        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
-                    )
-                    .optional()?)
-                })?;
-                other
-                    .filter(|(a, _)| pairing.with.contains(a))
-                    .map(|(adapter, status)| Paired {
-                        id: with.to_string(),
-                        adapter,
-                        ok: matches!(status.as_str(), "ok" | "error"),
-                    })
-            }
-            _ => None,
-        };
+        let paired = inner
+            .channels
+            .connections()
+            .paired(&ws, &adapter, &config)
+            .map_err(|e| ChannelError::Internal(e.to_string()))?;
         let receive_cap = inner
             .hooks
             .get(&adapter)
