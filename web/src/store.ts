@@ -11,7 +11,7 @@ import { api, cursorOf, setPageWorkspace, stream, Unauthenticated, type State, t
 import { cue } from "./bus"
 import { elapsed, pastTime, span } from "./i18n/format"
 import i18n, { t } from "./i18n"
-import type { RFile, PlanStep, RHold, RQueued, RKindReview, SuggestChoice, A2uiRecord, A2uiSubmit, RAnnotation } from "./api"
+import type { StateUpdate, RFile, PlanStep, RHold, RQueued, RKindReview, SuggestChoice, A2uiRecord, A2uiSubmit, RAnnotation } from "./api"
 import type { Cite } from "./api/knowledge"
 import { yoloApi, type RYolo, type RYoloAction } from "./api/yolo"
 
@@ -124,7 +124,7 @@ export const LOADED_WEB_VERSION = document.querySelector('meta[name="steve-web-v
 
 /* ───────── the store ───────── */
 export const st = {
-  ready: false, error: "" as string, login: null as string | null, version: "", webVersion: "",
+  ready: false, error: "" as string, login: null as string | null, version: "", webVersion: "", update: null as StateUpdate | null,
   workspace: null as State["workspace"] | null, workspaces: [] as State["workspaces"],
   bots: {} as Record<string, Bot>, allBots: [] as State["allBots"], S: {} as Record<string, Sess>, items: [] as Item[], projects: [] as Project[],
   thread: [] as Msg[], queue: [] as Msg[], done: [] as Done[], tags: [] as Tag[], tagUses: {} as Record<string, number>,
@@ -151,6 +151,13 @@ const ls = new Set<() => void>()
 export function emit() { st.ver++; ls.forEach((f) => f()) }
 export function useStore() { return useSyncExternalStore((cb) => { ls.add(cb); return () => ls.delete(cb) }, () => st.ver) }
 export function toast(t: string, opts?: Parameters<typeof sonner>[1]) { sonner(t, opts) }
+/** Tell the instance manager once per version (per browser) that a newer Steve can be installed from Settings · 关于. */
+export function announceUpdate(update: StateUpdate | null) {
+  if (!update?.owner) return
+  const key = "steve-update-announced"
+  try { if (localStorage.getItem(key) === update.version) return; localStorage.setItem(key, update.version) } catch { return }
+  toast(t("core:toast.updateAvailable", { version: update.version }), { action: { label: t("core:toast.updateView"), onClick: () => { location.hash = "#/settings/about" } } })
+}
 const fail = (e: unknown) => { if (e instanceof Unauthenticated) { st.login = e.login; emit(); return } toast((e as Error).message || t("core:error.generic")) }
 /** run an API call; refresh afterwards; report errors as a toast */
 async function call<T>(p: Promise<T>, ok?: string): Promise<T | undefined> {
@@ -450,7 +457,7 @@ export function proposalOf(p: Proposal, state: "draft" | "applied" | "dropped" =
 function build() {
   const s = raw.state; if (!s) return
   st.hold = s.hold ?? null
-  st.version = s.version; st.webVersion = s.web_version ?? ""; st.workspace = s.workspace; st.workspaces = s.workspaces; st.prefix = s.workspace.item_prefix; st.projects = s.projects
+  st.version = s.version; st.webVersion = s.web_version ?? ""; st.update = s.update ?? null; announceUpdate(st.update); st.workspace = s.workspace; st.workspaces = s.workspaces; st.prefix = s.workspace.item_prefix; st.projects = s.projects
   st.noSeq = Math.max(0, ...s.items.map((i) => (i.id.startsWith(st.prefix + "-") ? i.no : 0)))
   const openDec = s.decisions, openSess = new Set(openDec.map((d) => d.session_id).filter(Boolean) as string[])
   sessionIndex = new Map(s.sessions.map((x) => [x.id, x])); itemIndex = new Map(s.items.map((x) => [x.id, x])); itemPosition = new Map(s.items.map((x, n) => [x.id, n]))

@@ -43,6 +43,7 @@ jobs:
       - name: Release gate
         run: |
           python3 ops/test-schema-gate.py
+          python3 ops/test-local-release-journal.py
           python3 -m py_compile ops/local-release.py ops/test-local-release.py
           bash ops/check-migration-lock.sh "$GITHUB_REF_NAME"
       - run: npm ci

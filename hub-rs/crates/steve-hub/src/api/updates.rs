@@ -29,20 +29,28 @@ pub async fn status(
     let u = service(&st)?;
     let mut v = u.status().map_err(err)?;
     v["capability"]["can_execute"] = json!(u.execution_reason().is_none() && owner(&cx).is_ok());
+    v["capability"]["owner"] = json!(owner(&cx).is_ok());
     v["install"] = json!(u.install(&st.cfg.steve_repo));
     if owner(&cx).is_err() {
         // paths on this machine are the instance manager's
         v["install"] = json!({"kind": v["install"]["kind"]});
         v["backup"] = Value::Null;
         v["capability"]["reason"] = json!(steve_i18n::t!("hub.upgrade.owner_only_reason"));
-        if v["operation"].is_object() {
-            v["operation"]["previous"] = Value::Null;
-            v["operation"]["target"] = Value::Null;
+        if let Some(op) = v["operation"].as_object_mut() {
+            op.insert("previous".into(), Value::Null);
+            op.insert("target".into(), Value::Null);
+            op.remove("runner");
+            op.remove("backup");
         }
     };
     Ok(Json(v))
 }
-pub async fn check(State(st): State<AppState>) -> Result<Json<crate::upgrades::Check>, ApiError> {
+/// Owner only: a check spends the instance's share of GitHub's unauthenticated rate limit.
+pub async fn check(
+    State(st): State<AppState>,
+    Extension(cx): Extension<Ctx>,
+) -> Result<Json<crate::upgrades::Check>, ApiError> {
+    owner(&cx)?;
     Ok(Json(service(&st)?.check().await.map_err(err)?))
 }
 #[derive(Deserialize)]
@@ -61,7 +69,7 @@ pub async fn request(
         .request(&body.version, &body.idempotency_key, &cx.me, true)
         .map_err(err)?;
     if op.phase == "staging" {
-        u.spawn_stage(op.clone())
+        u.start(op.clone())
     };
     Ok((axum::http::StatusCode::ACCEPTED, Json(op)))
 }
@@ -74,6 +82,8 @@ pub async fn get(
     if owner(&cx).is_err() {
         op.previous = None;
         op.target = None;
+        op.runner = None;
+        op.backup = None;
     }
     Ok(Json(op))
 }
@@ -85,7 +95,7 @@ pub async fn approve(
     owner(&cx)?;
     let u = service(&st)?;
     let op = u.approve(&id, &cx.me).map_err(err)?;
-    u.spawn_stage(op.clone());
+    u.start(op.clone());
     Ok((axum::http::StatusCode::ACCEPTED, Json(op)))
 }
 

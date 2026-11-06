@@ -1,7 +1,7 @@
 import { HubError, Unauthenticated } from "@/api"
 import { useEffect, useRef, useState } from "react"
-import { readableVersion, updates, updateActive, updateKey, repairKey, sameReleaseVersion, updatePhaseLabel, type UpdateBackup, type UpdateState, type UpdateOperation } from "@/updates"
-import { enableOneClick, installLabel, stageIndex, upgradeGuide, upgradeStages, verifyUpgrade, type Health, type Install } from "@/upgrade-guide"
+import { readableVersion, updates, updateActive, updateKey, repairKey, sameReleaseVersion, updatePhaseLabel, checkStale, committedFailure, type UpdateBackup, type UpdateState, type UpdateOperation } from "@/updates"
+import { enableOneClick, installLabel, stageIndex, stageLabel, upgradeGuide, upgradeStages, verifyUpgrade, type Health, type Install, type InstallKind } from "@/upgrade-guide"
 import { CheckIcon, CircleAlertIcon, CopyIcon, LoaderCircleIcon, RefreshCwIcon } from "lucide-react"
 import { Markdown } from "@/components/markdown"
 import { Button } from "@/components/ui/button"
@@ -62,7 +62,7 @@ export function UpgradeSettings() {
   const [connection, setConnection] = useState("")
   const [error, setError] = useState("")
   const pendingReceipt = useRef<PendingReceipt | null>(null)
-  const generation = useRef(0), mounted = useRef(false), mutating = useRef(false)
+  const generation = useRef(0), mounted = useRef(false), mutating = useRef(false), autoChecked = useRef(false)
   useEffect(() => {
     mounted.current = true
     let stopped = false, timer: ReturnType<typeof setTimeout>
@@ -71,12 +71,23 @@ export function UpgradeSettings() {
       if (!mutating.current) {
         try {
           const next = await updates.status()
-          if (!stopped && epoch === generation.current) { setState(next); setConnection(""); if (confirmsReceipt(pendingReceipt.current, next.operation)) { pendingReceipt.current = null; setError("") } }
+          if (!stopped && epoch === generation.current) {
+            setState(next); setConnection(""); if (confirmsReceipt(pendingReceipt.current, next.operation)) { pendingReceipt.current = null; setError("") }
+            // the instance manager opening this page sees a current answer without clicking 检查更新
+            if (!autoChecked.current && checkStale(next)) { autoChecked.current = true; void checkQuietly() }
+          }
         } catch {
           if (!stopped && epoch === generation.current) setConnection(t("pages:upgrade.reconnecting"))
         }
       }
       if (!stopped) timer = setTimeout(read, 2000)
+    }
+    const checkQuietly = async () => {
+      if (mutating.current) return
+      mutating.current = true; setBusy(true)
+      try { const check = await updates.check(); if (!stopped) setState(s => s && ({ ...s, check })) }
+      catch { /* the cached answer stays; 检查更新 shows the error */ }
+      finally { mutating.current = false; if (!stopped) setBusy(false) }
     }
     void read()
     return () => { stopped = true; mounted.current = false; clearTimeout(timer) }
@@ -109,7 +120,8 @@ export function UpgradeSettings() {
     } finally { mutating.current = false; if (mounted.current) setBusy(false) }
   }
   const op = state?.operation ?? null, active = updateActive(op)
-  const canExecute = state?.capability.managed && state.capability.can_execute
+  const canExecute = !!state?.capability.can_execute
+  const owner = state?.capability.owner !== false
   const check = state?.check
   const install = state?.install
   // the instance manager gets this machine's commands; others only learn who upgrades
@@ -130,13 +142,13 @@ export function UpgradeSettings() {
     <SectionLabel>{t("pages:upgrade.section")}</SectionLabel>
     <Group>
       <Row title="GitHub Release" sub={state?.repository ?? t("pages:upgrade.reading")}>
-        <Button size="sm" variant="outline" disabled={!state || busy || active || !!connection} onClick={() => void action("check")} data-upgrade-check><RefreshCwIcon />{busy ? t("pages:upgrade.wait") : t("pages:upgrade.check")}</Button>
+        <Button size="sm" variant="outline" disabled={!state || !owner || busy || active || !!connection} onClick={() => void action("check")} data-upgrade-check><RefreshCwIcon />{busy ? t("pages:upgrade.wait") : t("pages:upgrade.check")}</Button>
       </Row>
     </Group>
     {connection && <p role="status" className="mt-2 type-footnote text-muted-foreground" data-upgrade-connection>{connection}</p>}
     {state && <div className="mt-3 space-y-3 type-callout">
       {canExecute
-        ? <p className="text-muted-foreground" data-upgrade-capability data-install-kind={install?.kind}>{t("pages:upgrade.managed")}</p>
+        ? <p className="text-muted-foreground" data-upgrade-capability data-install-kind={install?.kind}>{install?.kind === "local_release" ? t("pages:upgrade.local") : t("pages:upgrade.managed")}</p>
         : <UpgradeUnavailable state={state} manual={manual} />}
       {check && <div data-upgrade-check-status={check.status}>
         <p>{messages[check.status]}</p>
@@ -147,12 +159,12 @@ export function UpgradeSettings() {
         {canExecute && repair && !active && <Button className="mt-3" size="sm" disabled={busy || !!connection} onClick={() => void action("repair")} data-upgrade-repair>{t("pages:upgrade.repairBtn", { version: check.version })}</Button>}
         {canExecute && !repair && check.status === "available" && check.version && !active && op?.version !== check.version && <Button className="mt-3" size="sm" disabled={busy || !!connection} onClick={() => void action("execute")} data-upgrade-execute>{t("pages:upgrade.executeBtn", { version: check.version })}</Button>}
       </div>}
-      {manual && install && check?.status === "available" && check.version && <ManualGuide install={install} version={check.version} onVerify={() => setVerifying(check.version)} />}
+      {!canExecute && manual && install && check?.status === "available" && check.version && <ManualGuide install={install} version={check.version} onVerify={() => setVerifying(check.version)} />}
       {verifying && <UpgradeVerify target={verifying} onClose={() => setVerifying(null)} />}
       {op && <div className="rounded-lg border p-3 space-y-2" data-upgrade-phase={op.phase} role="status">
         <p>{updatePhaseLabel[op.phase]} · <span className="font-mono break-all">{op.version}</span></p>
         {op.phase === "awaiting_approval" && <><p className="text-muted-foreground">{t("pages:upgrade.requested", { who: op.requested_by })}</p>{canExecute && <div className="flex flex-wrap gap-2"><Button size="sm" disabled={busy || !!connection} onClick={() => void action("approve")} data-upgrade-approve>{t("pages:upgrade.approve")}</Button><Button size="sm" variant="outline" disabled={busy || !!connection} onClick={() => void action("reject")} data-upgrade-reject>{t("pages:upgrade.reject")}</Button></div>}</>}
-        {(active || op.phase === "succeeded") && stageIndex(op.phase) >= 0 && <UpgradeProgress phase={op.phase} verified={verified === op.id} />}
+        {(active || op.phase === "succeeded") && stageIndex(op.phase) >= 0 && <UpgradeProgress phase={op.phase} verified={verified === op.id} kind={install?.kind} />}
         {active && op.phase !== "awaiting_approval" && <p className="text-muted-foreground">{t("pages:upgrade.restartNote")}</p>}
         {canExecute && !repair && ["failed", "rolled_back"].includes(op.phase) && check?.status === "available" && check.version === op.version && <Button size="sm" variant="outline" disabled={busy || !!connection} onClick={() => void action("retry")} data-upgrade-retry>{t("pages:upgrade.retry")}</Button>}
         {op.error && <p className="text-destructive break-words">{op.error}</p>}
@@ -221,7 +233,7 @@ function ManualGuide({ install, version, onVerify }: { install: Install; version
 }
 
 /** The supervisor's journal as steps; the last one is this page's own check after reconnecting. */
-function UpgradeProgress({ phase, verified }: { phase: string; verified: boolean }) {
+function UpgradeProgress({ phase, verified, kind }: { phase: string; verified: boolean; kind?: InstallKind }) {
   const t = useT()
   const at = verified ? upgradeStages.length : stageIndex(phase)
   return <ol className="grid gap-1.5 sm:grid-cols-2" data-upgrade-progress aria-label={t("pages:upgrade.progressAria")}>
@@ -229,17 +241,17 @@ function UpgradeProgress({ phase, verified }: { phase: string; verified: boolean
       const state = n < at ? "done" : n === at ? "current" : "pending"
       return <li key={s.key} className={cn("flex items-center gap-2 type-footnote", state === "pending" && "text-muted-foreground")} data-stage={state}>
         {state === "done" ? <CheckIcon className="size-3.5 text-success" /> : state === "current" ? <LoaderCircleIcon className="size-3.5 animate-spin text-primary" /> : <span className="size-3.5 flex items-center justify-center"><span className="size-1.5 rounded-full bg-muted-foreground/40" /></span>}
-        {s.label}
+        {stageLabel(s.key, kind)}
       </li>
     })}
   </ol>
 }
 
-/** Where a managed upgrade's data is and what happened to it; the instance manager gets the paths. */
+/** Where an upgrade's data is and what happened to it; the instance manager gets the paths. */
 function UpgradeRecovery({ op, backup, install }: { op: UpdateOperation; backup: UpdateBackup | null; install?: Install }) {
   const t = useT()
   const db = backup?.database, home = install?.home
-  const committed = op.phase === "failed" && !!op.error?.includes("升级已提交")
+  const committed = committedFailure(op)
   const lines: string[] = []
   if (db) lines.push(t("pages:upgrade.recovery.backup", { db }))
   else if (["staging", "ready", "draining", "stopping"].includes(op.phase)) lines.push(t("pages:upgrade.recovery.beforeStop"))
@@ -247,6 +259,7 @@ function UpgradeRecovery({ op, backup, install }: { op: UpdateOperation; backup:
   if (op.phase === "rolled_back") lines.push(t("pages:upgrade.recovery.rolledBack", { prev: op.previous ? t("pages:upgrade.recovery.prevParen", { v: op.previous }) : "", dir: backup?.dir ?? t("pages:upgrade.recovery.dirFallback") }))
   else if (committed) lines.push(t("pages:upgrade.recovery.committed", { log: home ? `${home}/logs/hub.log` : t("pages:upgrade.recovery.logFallback"), prev: op.previous ?? t("pages:upgrade.recovery.prevFallback") }))
   else if (op.phase === "failed") lines.push(db ? t("pages:upgrade.recovery.failedWithDb") : t("pages:upgrade.recovery.failedNoDb"))
+  if (op.runner?.log && (updateActive(op) || ["failed", "rolled_back"].includes(op.phase))) lines.push(t("pages:upgrade.runnerLog", { log: op.runner.log }))
   if (!lines.length) return null
   return <div className="space-y-1 type-footnote text-muted-foreground break-words" data-upgrade-recovery={op.phase}>{lines.map((l, n) => <p key={n}>{l}</p>)}</div>
 }

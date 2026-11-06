@@ -116,6 +116,8 @@ export default {
     acceptedAwaitRelease: "已验收，等它申请发布",
   },
   toast: {
+    updateAvailable: "Steve 有新版本 {{version}}",
+    updateView: "去升级",
     undo: "撤销",
     undone: "已撤销",
     applied: "已应用",
@@ -234,6 +236,7 @@ export default {
     /* ST-21: this page's frontend and the Hub's backend, at a glance */
     versions: "前端 {{web}} · 后端 {{hub}}",
     versionUnknown: "…",
+    hubUpdate: "新版本 {{version}} 可升级 · 查看",
   },
   /* the composer's slash commands: the zh-CN name is also the token the Hub reads ("/汇报") */
   cmd: {

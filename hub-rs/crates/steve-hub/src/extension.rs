@@ -405,6 +405,17 @@ pub async fn run(asm: Assembly) -> anyhow::Result<()> {
         );
         return Ok(());
     }
+    // the one-shot launchd job of a one-click local upgrade (upgrades/runner.rs); needs no Config
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("--upgrade-runner") {
+        let (Some(home), Some(id)) = (args.get(2), args.get(3)) else {
+            anyhow::bail!("usage: steve-hub --upgrade-runner <home> <operation id>")
+        };
+        std::process::exit(crate::upgrades::runner::main(
+            std::path::Path::new(home),
+            id,
+        ));
+    }
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_env("STEVE_LOG")
@@ -462,6 +473,7 @@ pub async fn run(asm: Assembly) -> anyhow::Result<()> {
     for job in w.jobs {
         tokio::spawn(job);
     }
+    crate::upgrades::spawn_auto_check((*cfg).clone());
     let app = crate::app::app(st.clone(), w.auth, w.mcp, w.module_routes, w.root_routes);
     let listener = tokio::net::TcpListener::bind((cfg.listen.host.as_str(), cfg.listen.port))
         .await

@@ -116,6 +116,8 @@ export default {
     reading: "Reading upgrade info…",
     wait: "Please wait…",
     check: "Check for updates",
+    local: "Locally signed build: you can upgrade here. The Release tag is built on this machine (about 10–20 minutes, Steve keeps serving meanwhile), then tasks are drained, the database is backed up and the service switches and restarts, a short outage. A failure before the switch restores the old version and data automatically.",
+    runnerLog: "Upgrade log: {{log}}",
     managed: "Managed install: you can upgrade here. The database is backed up first, and if the new version fails verification the old version and data are restored automatically.",
     checkedAt: "Checked: {{time}}",
     releaseNotes: "View release notes",
@@ -168,7 +170,6 @@ export default {
   guide: {
     install: { managed: "Managed install", local_release: "Locally signed build", release_script: "Release script deploy", source: "Run from source", external: "External deploy" },
     enable: {
-      local_release: "To upgrade here with one click later: first move the vault key from Keychain to a separate dir store (STEVE_VAULT_KEYSTORE=dir), then switch the service to run ops/run-managed.sh. The key migration needs its own plan, see “Managed Release bundles and automatic upgrades” in the README; until then, upgrade with a local build.",
       release_script: "To upgrade here with one click later: switch the service to run ops/run-managed.sh (managed install); on macOS, also move the key from Keychain to a separate dir store first. See “Managed Release bundles and automatic upgrades” in the README.",
     },
     repoPlaceholder: "<Steve source dir>",
@@ -227,6 +228,7 @@ export default {
     },
     stage: {
       staging: "Download and verify",
+      stagingLocal: "Fetch the tag and build locally",
       draining: "Wait for tasks to stop",
       stopping: "Stop the old version",
       backingUp: "Back up the database",

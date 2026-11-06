@@ -105,6 +105,123 @@ impl Updates {
         }
         Ok(bytes)
     }
+    /// Which tag `latest` is, from github.com's redirect (not the rate-limited API), with the
+    /// manifest published beside it. No release notes: those only come from the API.
+    pub(super) async fn latest_web(&self) -> Result<Option<Release>> {
+        let client = reqwest::Client::builder()
+            .user_agent("Steve-updater/1")
+            .timeout(std::time::Duration::from_secs(30))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()?;
+        let r = client
+            .get(format!(
+                "{}/{}/releases/latest",
+                self.web_base, self.repository
+            ))
+            .send()
+            .await?;
+        if r.status() == 404 {
+            return Ok(None);
+        }
+        if !r.status().is_redirection() {
+            bail!("github.com answered {} for the latest release", r.status())
+        }
+        let location = r
+            .headers()
+            .get("location")
+            .and_then(|v| v.to_str().ok())
+            .context("no redirect target for the latest release")?;
+        let tag = location
+            .rsplit_once("/releases/tag/")
+            .map(|(_, tag)| tag.trim_end_matches('/'))
+            .context("the latest release redirect names no tag")?;
+        let version = semver::Version::parse(tag.trim_start_matches('v'))?;
+        Ok(Some(self.web_release(&version).await?.0))
+    }
+    /// A published release read from its download URLs only: the manifest names its assets.
+    async fn web_release(&self, version: &semver::Version) -> Result<(Release, Manifest)> {
+        let download = format!(
+            "{}/{}/releases/download/v{version}",
+            self.web_base, self.repository
+        );
+        let manifest: Manifest = serde_json::from_slice(
+            &self
+                .fetch(&format!("{download}/steve-release.json"), 1024 * 1024)
+                .await?,
+        )?;
+        validate_manifest(&manifest, &version.to_string())?;
+        let mut assets = vec![RemoteAsset {
+            name: "steve-release.json".into(),
+            browser_download_url: format!("{download}/steve-release.json"),
+        }];
+        assets.extend(manifest.assets.iter().map(|a| RemoteAsset {
+            name: a.name.clone(),
+            browser_download_url: format!("{download}/{}", a.name),
+        }));
+        let release = Release {
+            tag_name: format!("v{version}"),
+            html_url: format!(
+                "{}/{}/releases/tag/v{version}",
+                self.web_base, self.repository
+            ),
+            body: None,
+            draft: false,
+            prerelease: !version.pre.is_empty(),
+            assets,
+        };
+        Ok((release, manifest))
+    }
+    /// The release `v{version}` of the configured repository and its validated manifest: a stable,
+    /// published release, not older than this Hub. The selection is never taken from the caller.
+    pub(super) async fn resolve(&self, version: &str) -> Result<(Release, Manifest)> {
+        let api = async {
+            let r: Release = self
+                .client
+                .get(format!(
+                    "{}/repos/{}/releases/tags/v{}",
+                    self.api_base, self.repository, version
+                ))
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            anyhow::Ok(r)
+        };
+        let (r, manifest) = match api.await {
+            Ok(r) => {
+                if r.draft || r.prerelease {
+                    bail!("release is not a stable target")
+                }
+                let remote = r
+                    .assets
+                    .iter()
+                    .find(|a| a.name == "steve-release.json")
+                    .context("release has no steve-release.json")?;
+                let manifest: Manifest = serde_json::from_slice(
+                    &self
+                        .fetch(&remote.browser_download_url, 1024 * 1024)
+                        .await?,
+                )?;
+                (r, manifest)
+            }
+            // rate limited: the download URLs exist only for a published (not draft) release
+            Err(error) => match self.web_release(&semver::Version::parse(version)?).await {
+                Ok(found) => found,
+                Err(_) => return Err(error),
+            },
+        };
+        if r.draft || r.prerelease || r.version()?.to_string() != version {
+            bail!("release is not a stable target")
+        }
+        if let Ok(current) = semver::Version::parse(self.current_hub.trim_start_matches('v'))
+            && r.version()? < current
+        {
+            bail!("automatic downgrade is not supported")
+        }
+        validate_manifest(&manifest, version)?;
+        Ok((r, manifest))
+    }
     pub(super) async fn stage(&self, op: &mut Operation) -> Result<()> {
         let stage_lock = OpenOptions::new()
             .create(true)
@@ -118,37 +235,7 @@ impl Updates {
         if self.operation(&op.id)?.phase != "staging" {
             return Ok(());
         }
-        // The immutable selection is resolved from this configured repository, never from caller URLs.
-        let r: Release = self
-            .client
-            .get(format!(
-                "{}/repos/{}/releases/tags/v{}",
-                self.api_base, self.repository, op.version
-            ))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        if r.draft || r.prerelease || r.version()?.to_string() != op.version {
-            bail!("release is not a stable target")
-        }
-        if let Ok(current) = semver::Version::parse(self.current_hub.trim_start_matches('v'))
-            && r.version()? < current
-        {
-            bail!("automatic downgrade is not supported")
-        }
-        let remote = r
-            .assets
-            .iter()
-            .find(|a| a.name == "steve-release.json")
-            .context("release has no steve-release.json")?;
-        let manifest: Manifest = serde_json::from_slice(
-            &self
-                .fetch(&remote.browser_download_url, 1024 * 1024)
-                .await?,
-        )?;
-        validate_manifest(&manifest, &op.version)?;
+        let (r, manifest) = self.resolve(&op.version).await?;
         let asset = manifest
             .assets
             .iter()
