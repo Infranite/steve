@@ -5291,6 +5291,7 @@ dependencies = [
  "steve-knowledge",
  "steve-node-api",
  "steve-print",
+ "steve-research",
  "steve-vault",
  "tempfile",
  "tokio",

@@ -45,7 +45,8 @@ pub use guard::{Scope, Violation, research_guard};
 pub use prompt::{DirInfo, PromptInput};
 pub use run::{
     AttemptPlan, AttemptRunner, Attempted, Budget, BudgetHit, DEFAULT_IDLE, DEFAULT_MODELS,
-    McpAccess, ResearchConfig, ResearchError, ResearchEvent, ResearchOutcome, ResearchRequest,
-    ResearchRun, Researcher, Resume, RunStatus, StopHandle, ToolSeen, drive, models_from_env, plan,
+    McpAccess, OneAttempt, ResearchConfig, ResearchError, ResearchEvent, ResearchOutcome,
+    ResearchRequest, ResearchRun, Researcher, Resume, RunStatus, SpawnHook, StopHandle, ToolSeen,
+    drive, models_from_env, plan, present, run_attempt,
 };
 pub use sandbox::SandboxMode;

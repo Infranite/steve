@@ -18,6 +18,7 @@ pub mod history;
 mod job;
 mod journal;
 mod procs;
+mod research;
 mod scan;
 mod secrets;
 mod tools;
@@ -194,6 +195,7 @@ pub(crate) struct Inner {
     discovery: std::sync::RwLock<Option<Arc<history::DiscoveryConfig>>>,
     probes: history::Probes,
     imports: history::Imports,
+    research: research::Research,
 }
 
 impl Inner {
@@ -1033,6 +1035,7 @@ impl LocalNode {
             execs: AtomicUsize::new(0),
             push_timeout: AtomicU64::new(git::PUSH_TIMEOUT.as_millis() as u64),
             tasks: Mutex::new(Vec::new()),
+            research: Default::default(),
         })))
     }
 
@@ -1924,8 +1927,11 @@ impl SessionExecutor for LocalNode {
 #[async_trait]
 impl JobExecutor for LocalNode {
     /// Accepted running; a think job runs its one model in a scratch directory of its own and
-    /// ends with its answer (research jobs are not on this Node yet).
+    /// ends with its answer; a research job is [`Self::start_research`]'s.
     async fn start_job(&self, c: Command<JobSpec>) -> ApiResult<Receipt> {
+        if let JobWork::Research(_) = &c.body.work {
+            return self.start_research(c).await;
+        }
         if self.0.cfg.capacity.jobs == 0 || self.0.cfg.jobs.names().is_empty() {
             return Err(ApiError::new(
                 ErrorCode::Unsupported,
@@ -1939,9 +1945,6 @@ impl JobExecutor for LocalNode {
         let (r, fresh) = self.accept("start_job", &c, |t| {
             let j = &c.body;
             j.check()?;
-            if !matches!(j.work, JobWork::Think(_)) {
-                return unsupported("research jobs");
-            }
             if self.0.cfg.jobs.executable(&j.run.choice.harness).is_none() {
                 return Err(ApiError::new(
                     ErrorCode::Unsupported,
@@ -2031,12 +2034,13 @@ impl ExecutionControl for LocalNode {
     }
 
     /// Accepted now; finished once the execution's processes are confirmed gone: it then ends as
-    /// interrupted and its session is free to be opened again. One abandon per target; only
+    /// interrupted and its session (or its job's slot) is free again. One abandon per target; only
     /// executions are abandoned (other unknown operations are found out otherwise).
     async fn abandon(&self, c: Command<Abandon>) -> ApiResult<Receipt> {
         let target = c.body.target.clone();
         let mut session = None;
         let mut job = None;
+        let mut research = false;
         let (r, fresh) = self.accept("abandon", &c, |t| {
             let op = t
                 .op(&target)?
@@ -2049,8 +2053,13 @@ impl ExecutionControl for LocalNode {
             }
             match &op.execution {
                 Some(ExecutionRef::Turn { session: s, .. }) => session = Some(s.clone()),
-                // a job's group is recorded under its attempt
-                Some(ExecutionRef::Job { attempt, .. }) => job = Some(job::group_key(attempt)),
+                Some(ExecutionRef::Job { attempt, .. }) => {
+                    job = Some(job::group_key(attempt));
+                    // every end of a research attempt carries its report
+                    research = t.spec(&target)?.is_some_and(|b| {
+                        b.pointer("/work/kind").and_then(Value::as_str) == Some("research")
+                    });
+                }
                 None => {
                     return Err(ApiError::new(
                         ErrorCode::Unsupported,
@@ -2111,7 +2120,12 @@ impl ExecutionControl for LocalNode {
                         continuation: None,
                         transient: false,
                         acted: true,
-                        job: None,
+                        job: research.then(|| JobReport {
+                            end: JobEnd::Stopped,
+                            turns: 0,
+                            files_read: vec![],
+                            sandboxed: false,
+                        }),
                     };
                     // only if it still is the unknown one this was for
                     if !matches!(o.receipt.state, Observed::Unknown { .. }) {
@@ -2145,6 +2159,11 @@ impl ExecutionControl for LocalNode {
                                 EventBody::AttemptEnded { completion },
                             )],
                         )?;
+                    }
+                    if let Some(exec) = &o.execution
+                        && job.is_some()
+                    {
+                        inner.tools.revoke_job(exec);
                     }
                     if let Some(s) = &session
                         && let Some(mut row) = t.session(s)?
