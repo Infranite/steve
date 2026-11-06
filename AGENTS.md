@@ -1,6 +1,6 @@
 # Working in this repository
 
-Read the "Development checks" and "Changes and releases" sections of `README.md`. For an agent, they come down to:
+Read the "Development checks" and "Changes and releases" sections of `CONTRIBUTING.md`. For an agent, they come down to:
 
 - Never choose a version. Do not write `docs/releases/X.Y.Z.md`, bump a version, or create a tag by hand.
 - Describe your change for the user in `docs/releases/unreleased/<item>.md` (for example `ST-38.md`), with no version and no title. Run `python3 ops/cut-release.py lint` before delivering.
