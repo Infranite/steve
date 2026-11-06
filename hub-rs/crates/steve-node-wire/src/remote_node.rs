@@ -256,7 +256,9 @@ impl WorkspaceExecutor for RemoteNode {
         self.go(FS_LIST_ROOT, &ListRootArgs { at, page }, None, false)
             .await
     }
-    async fn read_file(&self, q: FileRead) -> ApiResult<ReadChunk> {
+    async fn read_file(&self, mut q: FileRead) -> ApiResult<ReadChunk> {
+        // hex doubles the bytes: keep a chunk's frame within a bulk frame
+        q.max = q.max.min(crate::envelope::CHUNK_BYTES);
         self.go(FS_READ, &q, None, false).await
     }
     async fn scan(&self, c: Command<ScanSpec>) -> ApiResult<Receipt> {

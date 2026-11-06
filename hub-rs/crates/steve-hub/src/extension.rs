@@ -651,6 +651,11 @@ pub async fn run(asm: Assembly) -> anyhow::Result<()> {
         std::process::exit(0);
     });
 
+    // a Node's link is one of these connections: little unsent data in the kernel lets a
+    // permission answer overtake file chunks (steve_node_wire::sock)
+    use axum::serve::ListenerExt as _;
+    let listener =
+        listener.tap_io(|tcp: &mut tokio::net::TcpStream| steve_node_wire::sock::low_water(tcp));
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),

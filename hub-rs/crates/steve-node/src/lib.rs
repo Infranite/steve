@@ -396,9 +396,99 @@ pub(crate) fn stream_of(subject: &Subject) -> String {
     }
 }
 
+/// The largest event the Node journals, encoded: well inside a frame
+/// (`steve_node_wire::envelope::BULK_CAP`), so one event can never be too big to deliver and stop
+/// its stream. A text delta over it is cut into several; anything else has its long strings cut
+/// (marked), and failing that is replaced by a diagnostic saying so.
+pub const EVENT_CAP: usize = 192 * 1024;
+/// The most text of one delta piece when a delta over [`EVENT_CAP`] is cut (JSON escaping may
+/// grow text up to six times).
+const PIECE: usize = 24 * 1024;
+/// How long a string stays in an event cut down to fit, in characters.
+const CUT_TEXT: usize = 4000;
+const CUT_MARK: &str = "…[cut by the node: too long for one event]";
+
+/// `body` as events that each fit [`EVENT_CAP`].
+fn fit(subject: &Subject, body: EventBody) -> Vec<EventBody> {
+    let size = |b: &EventBody| serde_json::to_vec(b).map(|v| v.len()).unwrap_or(usize::MAX);
+    // the subject and the envelope's other fields are small, but they count too
+    let budget =
+        EVENT_CAP.saturating_sub(serde_json::to_vec(subject).map(|v| v.len()).unwrap_or(0) + 512);
+    if size(&body) <= budget {
+        return vec![body];
+    }
+    if let EventBody::TextDelta {
+        message,
+        block,
+        utf8_offset,
+        text,
+    } = body
+    {
+        let mut out = vec![];
+        let mut at = 0usize;
+        while at < text.len() {
+            let mut end = (at + PIECE).min(text.len());
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            out.push(EventBody::TextDelta {
+                message: message.clone(),
+                block: block.clone(),
+                utf8_offset: utf8_offset + at as u64,
+                text: text[at..end].to_string(),
+            });
+            at = end;
+        }
+        return out;
+    }
+    let kind = serde_json::to_value(&body)
+        .ok()
+        .and_then(|v| v.get("type").and_then(Value::as_str).map(String::from))
+        .unwrap_or_default();
+    let was = size(&body);
+    for keep in [CUT_TEXT, CUT_TEXT / 8] {
+        let Ok(mut v) = serde_json::to_value(&body) else {
+            break;
+        };
+        cut_strings(&mut v, keep);
+        if let Ok(b) = serde_json::from_value::<EventBody>(v)
+            && size(&b) <= budget
+        {
+            tracing::warn!("{kind} event of {was} bytes cut to fit one event");
+            return vec![b];
+        }
+    }
+    tracing::warn!("{kind} event of {was} bytes dropped: too big for one event");
+    vec![EventBody::Diagnostic {
+        severity: Severity::Warning,
+        code: "event_too_large".into(),
+        safe_text: format!("a {kind} event of {was} bytes was too big to report"),
+    }]
+}
+
+fn cut_strings(v: &mut Value, keep: usize) {
+    match v {
+        Value::String(s) if s.chars().count() > keep => {
+            let cut: String = s.chars().take(keep).collect();
+            *s = format!("{cut}{CUT_MARK}");
+        }
+        Value::Array(a) => a.iter_mut().for_each(|x| cut_strings(x, keep)),
+        Value::Object(o) => o.values_mut().for_each(|x| cut_strings(x, keep)),
+        _ => {}
+    }
+}
+
 /// Journal events in `t` (numbered in their streams as part of the transaction).
 pub(crate) fn emit_all(inner: &Inner, t: &Tx, evs: Vec<(Subject, EventBody)>) -> ApiResult<()> {
     let mut limit = None;
+    let evs = evs
+        .into_iter()
+        .flat_map(|(subject, body)| {
+            fit(&subject, body)
+                .into_iter()
+                .map(move |b| (subject.clone(), b))
+        })
+        .collect::<Vec<_>>();
     for (subject, body) in evs {
         let data = match &body {
             EventBody::OperationChanged { .. }
@@ -565,6 +655,27 @@ fn gone(e: &ApiError) -> bool {
     matches!(e.code, ErrorCode::Conflict | ErrorCode::Invalid)
 }
 
+/// Attachment chunks asked of the Hub ahead of the one being taken ([`fetch`]).
+const FETCH_WINDOW: usize = 4;
+
+/// Chunks asked ahead, by offset; what is still out when they are not needed any more is stopped.
+#[derive(Default)]
+struct Ahead(std::collections::VecDeque<(u64, tokio::task::JoinHandle<ApiResult<ReadChunk>>)>);
+
+impl Ahead {
+    fn clear(&mut self) {
+        for (_, h) in self.0.drain(..) {
+            h.abort();
+        }
+    }
+}
+
+impl Drop for Ahead {
+    fn drop(&mut self) {
+        self.clear();
+    }
+}
+
 /// An attachment's bytes, from the cache (checked) or the Hub (for this execution; size, progress
 /// and hash checked; written to a file of its own, then published whole).
 pub(crate) async fn fetch(
@@ -591,15 +702,50 @@ pub(crate) async fn fetch(
     };
     let mut bytes: Vec<u8> = Vec::with_capacity(a.size.min(1 << 26) as usize);
     let mut hasher = sha2::Sha256::new();
+    // once the first chunk tells how much the link gives at a time, the next ones are asked
+    // ahead, in order (a round trip each, one at a time, is slow on a remote link)
+    let mut ahead = Ahead::default();
+    let mut step: Option<u64> = None;
+    let get = |offset: u64, max: u32| {
+        let (files, access, id) = (
+            files.clone(),
+            FileAccess::Execution(exec.clone()),
+            a.id.clone(),
+        );
+        tokio::spawn(async move { files.fetch(access, id, offset, max).await })
+    };
     loop {
-        let c = files
-            .fetch(
-                FileAccess::Execution(exec.clone()),
-                a.id.clone(),
-                bytes.len() as u64,
-                1 << 20,
-            )
-            .await?;
+        let at = bytes.len() as u64;
+        if let Some(step) = step {
+            let mut next = ahead.0.back().map_or(at, |(o, _)| o + step);
+            while ahead.0.len() < FETCH_WINDOW && next < a.size {
+                ahead.0.push_back((next, get(next, step as u32)));
+                next += step;
+            }
+        }
+        let c = match ahead.0.pop_front() {
+            Some((o, h)) if o == at => h
+                .await
+                .map_err(|e| ApiError::new(ErrorCode::Internal, e.to_string()))??,
+            other => {
+                // nothing asked ahead, or a short chunk put the rest off: ask from here
+                if let Some((_, h)) = other {
+                    h.abort();
+                }
+                ahead.clear();
+                files
+                    .fetch(
+                        FileAccess::Execution(exec.clone()),
+                        a.id.clone(),
+                        at,
+                        1 << 20,
+                    )
+                    .await?
+            }
+        };
+        if step.is_none() && !c.bytes.is_empty() {
+            step = Some(c.bytes.len() as u64);
+        }
         if c.offset != bytes.len() as u64 {
             return Err(ApiError::new(
                 ErrorCode::Invalid,
@@ -1759,62 +1905,147 @@ impl LocalNode {
 /// Delivers journaled events to the Hub. Every call is bounded; while there is nothing to send the
 /// Node still checks the Hub is there (an empty batch), so a Hub that went silent is noticed for the
 /// offline lease.
+/// Batches of the journal's unacknowledged events in flight to the Hub at once. Each is answered
+/// with the Hub's durable prefix per stream, as one at a time was: a later batch the Hub happens
+/// to take first is covered once the earlier one is in (the prefix then runs through both).
+const IN_FLIGHT: usize = 4;
+/// Events per batch (a batch over the frame budget is cut again by the sink).
+const BATCH: usize = 200;
+
+/// What a batch in flight answered.
+type Delivered = (
+    Vec<Watermark>,
+    Result<ApiResult<EventAck>, tokio::time::error::Elapsed>,
+);
+
 async fn deliver_loop(inner: std::sync::Weak<Inner>) {
     let mut backoff = Duration::from_millis(100);
     let mut last_ok = std::time::Instant::now();
+    let mut flight: tokio::task::JoinSet<Delivered> = tokio::task::JoinSet::new();
+    // per stream, the last position in a batch out: the next batch starts past it
+    let mut sent: HashMap<String, u64> = HashMap::new();
+    // an answer fell short (an error, a timeout, an ack that does not cover its batch): nothing
+    // more goes out until every batch in flight is answered, then what is left is sent again
+    let mut short = false;
+    let mut progress = false;
     loop {
         let Some(me) = inner.upgrade() else { return };
         if me.closed.load(Ordering::SeqCst) {
             return;
         }
-        let batch = me.j.read(|t| t.unacked(200)).unwrap_or_else(|e| {
-            tracing::error!("node delivery: {e}");
-            vec![]
-        });
-        if batch.is_empty() && last_ok.elapsed() < HEARTBEAT {
+        let sink = me.sink.lock().unwrap().clone();
+        if !short && let Some(sink) = &sink {
+            while flight.len() < IN_FLIGHT {
+                let batch =
+                    me.j.read(|t| t.unacked_past(&sent, BATCH))
+                        .unwrap_or_else(|e| {
+                            tracing::error!("node delivery: {e}");
+                            vec![]
+                        });
+                // an empty commit now and then, when idle, tells the Node the Hub is there
+                if batch.is_empty() && (!flight.is_empty() || last_ok.elapsed() < HEARTBEAT) {
+                    break;
+                }
+                let mut marks: Vec<Watermark> = vec![];
+                for e in &batch {
+                    sent.insert(e.cursor.stream.to_string(), e.cursor.seq);
+                    match marks.iter_mut().find(|m| m.stream == e.cursor.stream) {
+                        Some(m) => m.seq = m.seq.max(e.cursor.seq),
+                        None => marks.push(e.cursor.clone()),
+                    }
+                }
+                let sink = sink.clone();
+                let empty = batch.is_empty();
+                flight.spawn(async move {
+                    let r = tokio::time::timeout(
+                        HUB_TIMEOUT,
+                        sink.commit(EventBatch { events: batch }),
+                    )
+                    .await;
+                    (marks, r)
+                });
+                if empty {
+                    break;
+                }
+            }
+        }
+        if flight.is_empty() {
+            if sink.is_none() {
+                me.hub_down_since.lock().unwrap().get_or_insert_with(now);
+            }
+            let (was_short, moved) = (short, progress);
+            short = false;
+            progress = false;
+            sent.clear();
+            if was_short || sink.is_none() {
+                drop(me);
+                tokio::time::sleep(if sink.is_none() {
+                    Duration::from_millis(200)
+                } else {
+                    backoff
+                })
+                .await;
+                if sink.is_some() {
+                    backoff = if moved {
+                        Duration::from_millis(100)
+                    } else {
+                        (backoff * 2).min(Duration::from_secs(10))
+                    };
+                }
+                continue;
+            }
             let _ = tokio::time::timeout(Duration::from_secs(2), me.wake.notified()).await;
             continue;
         }
-        let sink = me.sink.lock().unwrap().clone();
-        let Some(sink) = sink else {
-            me.hub_down_since.lock().unwrap().get_or_insert_with(now);
-            drop(me);
-            tokio::time::sleep(Duration::from_millis(200)).await;
+        let room = flight.len() < IN_FLIGHT && !short;
+        let done = tokio::select! {
+            d = flight.join_next() => d,
+            _ = me.wake.notified(), if room => continue,
+        };
+        let Some(Ok((marks, answered))) = done else {
+            short = true;
             continue;
         };
-        let sent =
-            tokio::time::timeout(HUB_TIMEOUT, sink.commit(EventBatch { events: batch })).await;
-        match sent {
+        match answered {
             Ok(Ok(ack)) => {
                 last_ok = std::time::Instant::now();
                 *me.hub_down_since.lock().unwrap() = None;
-                let progress = me.j.tx(|t| {
+                let moved = me.j.tx(|t| {
                     let before: u64 = t.heads()?.iter().map(|h| h.acknowledged).sum();
                     t.ack(&ack)?;
                     let after: u64 = t.heads()?.iter().map(|h| h.acknowledged).sum();
                     Ok(after > before)
                 });
-                if matches!(progress, Ok(true)) {
-                    backoff = Duration::from_millis(100);
-                } else {
-                    if let Err(e) = progress {
+                match moved {
+                    Ok(m) => progress |= m,
+                    Err(e) => {
                         tracing::error!("node ack: {e}");
+                        short = true;
                     }
-                    drop(me);
-                    tokio::time::sleep(backoff).await;
-                    backoff = (backoff * 2).min(Duration::from_secs(10));
+                }
+                // what this batch carried must be covered now (by its own ack or an earlier one)
+                let heads = me.j.read(|t| t.heads()).unwrap_or_default();
+                let covered = marks.iter().all(|m| {
+                    heads
+                        .iter()
+                        .find(|h| h.stream == m.stream)
+                        .is_none_or(|h| h.epoch != m.epoch || h.acknowledged >= m.seq)
+                });
+                if !covered {
+                    short = true;
+                } else if progress && flight.is_empty() {
+                    backoff = Duration::from_millis(100);
                 }
             }
             Ok(Err(e)) => {
                 tracing::warn!("hub did not take events: {e}");
                 me.hub_down_since.lock().unwrap().get_or_insert_with(now);
-                drop(me);
-                tokio::time::sleep(backoff).await;
-                backoff = (backoff * 2).min(Duration::from_secs(10));
+                short = true;
             }
             Err(_) => {
                 tracing::warn!("hub did not answer");
                 me.hub_down_since.lock().unwrap().get_or_insert_with(now);
+                short = true;
             }
         }
     }
@@ -3563,5 +3794,92 @@ mod storage_tests {
         assert_eq!(admit(true, 79, 1, 100, 80), (true, false));
         // no room at all (the disk is past its reserve)
         assert_eq!(admit(false, 0, 1, 0, 80), (false, true));
+    }
+}
+
+#[cfg(test)]
+mod fit_tests {
+    use super::*;
+
+    fn subject() -> Subject {
+        Subject::Session {
+            session: SessionId::new("s_1").unwrap(),
+        }
+    }
+
+    fn size(b: &EventBody) -> usize {
+        serde_json::to_vec(b).unwrap().len()
+    }
+
+    #[test]
+    fn a_small_event_is_kept_as_it_is() {
+        let b = EventBody::Plan {
+            entries: vec![PlanEntry {
+                content: "x".into(),
+                status: "pending".into(),
+            }],
+        };
+        assert_eq!(fit(&subject(), b.clone()), vec![b]);
+    }
+
+    #[test]
+    fn a_text_delta_too_big_for_one_event_goes_as_several_with_the_same_text() {
+        // multi-byte text and characters JSON escapes, so pieces are cut on char boundaries
+        let text = "中文\"\\\n".repeat(60_000);
+        let out = fit(
+            &subject(),
+            EventBody::TextDelta {
+                message: "m".into(),
+                block: "b".into(),
+                utf8_offset: 7,
+                text: text.clone(),
+            },
+        );
+        assert!(out.len() > 1);
+        let mut at = 7u64;
+        let mut joined = String::new();
+        for b in &out {
+            assert!(size(b) <= EVENT_CAP, "{}", size(b));
+            let EventBody::TextDelta {
+                utf8_offset, text, ..
+            } = b
+            else {
+                panic!("{b:?}")
+            };
+            assert_eq!(*utf8_offset, at);
+            at += text.len() as u64;
+            joined.push_str(text);
+        }
+        assert_eq!(joined, text);
+    }
+
+    #[test]
+    fn another_event_too_big_has_its_long_strings_cut_or_becomes_a_diagnostic() {
+        let out = fit(
+            &subject(),
+            EventBody::Plan {
+                entries: vec![PlanEntry {
+                    content: "y".repeat(1 << 20),
+                    status: "pending".into(),
+                }],
+            },
+        );
+        let [EventBody::Plan { entries }] = out.as_slice() else {
+            panic!("{out:?}")
+        };
+        assert!(entries[0].content.ends_with(CUT_MARK));
+        assert!(entries[0].content.len() < 5000);
+        // nothing long to cut: too many entries
+        let many = (0..40_000)
+            .map(|i| PlanEntry {
+                content: format!("step {i}"),
+                status: "pending".into(),
+            })
+            .collect();
+        let out = fit(&subject(), EventBody::Plan { entries: many });
+        assert!(
+            matches!(out.as_slice(), [EventBody::Diagnostic { code, .. }] if code == "event_too_large"),
+            "{out:?}"
+        );
     }
 }

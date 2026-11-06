@@ -4,6 +4,7 @@
 //   @say <text>            agent_message_chunk
 //   @flood [ms]            2000 chunks of 4 KiB at once; with ms, a pause of ms after every 8 (a fast
 //                          harness a reader keeps up with, instead of one that overruns it)
+//   @drip <n> <ms>         n short chunks ("t<i> "), a pause of ms after each (a model streaming tokens)
 //   @usage <used> <size> <cost> [model] [origin]   usage_update (model → _meta._claude/model)
 //   @tally <in> <out> <cacheRead> <cacheWrite>   the response's `usage` (also on a cancel)
 //   @quota <model>:<in>:<out>:<cr>:<cw>,…        the response's `_meta.quota.model_usage`
@@ -51,7 +52,7 @@ let toolN = 0
 async function turn(text) {
   const n = (failures.get(text) ?? 0) + 1; failures.set(text, n)
   const out = { stopReason: "end_turn" }
-  for (const [, cmd, arg] of text.matchAll(/@(flood|bigperm|bigreply|sleep|say|usage|tally|quota|tool|later|fail|crash|perm|permtool|permexec|codexperm|fsread)\b([^@\n]*)/g)) {
+  for (const [, cmd, arg] of text.matchAll(/@(flood|drip|bigperm|bigreply|sleep|say|usage|tally|quota|tool|later|fail|crash|perm|permtool|permexec|codexperm|fsread)\b([^@\n]*)/g)) {
     const a = arg.trim()
     if (cmd === "sleep" && (await sleep(Number(a) || 1000))) return { ...out, stopReason: "cancelled" }
     if (cmd === "say") say(a)
@@ -61,6 +62,7 @@ async function turn(text) {
       say("x".repeat(4096))
       if (a && i % 8 === 7 && (await sleep(Number(a)))) return { ...out, stopReason: "cancelled" }
     }
+    if (cmd === "drip") { const [n, ms] = a.split(" ").map(Number); for (let i = 0; i < n; i++) { say(`t${i} `); if (await sleep(ms)) return { ...out, stopReason: "cancelled" } } }
     if (cmd === "bigreply") out.padding = "x".repeat(2 << 20)
     if (cmd === "bigperm") await ask("session/request_permission", {sessionId: sid, options, toolCall: {toolCallId:"large", rawInput:{data:"x".repeat(2 << 20)}}})
     if (cmd === "usage") {

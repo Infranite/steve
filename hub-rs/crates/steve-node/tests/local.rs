@@ -3724,5 +3724,173 @@ async fn the_owners_ceiling_refuses_what_is_over_it() {
         .await
         .unwrap_err();
     assert_eq!(e.code, ErrorCode::Denied, "{e:?}");
+}
+
+/// What the harness says in small chunks goes out as fewer, bigger deltas of the very same text,
+/// soon (within the hold, not at the end of the turn), and in order with what follows it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn chunks_said_together_go_out_as_one_delta_soon() {
+    let t = T::new(&[]);
+    let n = t.node();
+    ready(&n, "s_1").await;
+    let words: Vec<String> = (1..=20).map(|i| format!("w{i}.")).collect();
+    let said: String = words.concat();
+    let prompt = format!(
+        "{} @sleep 1500 @say delta @tool read Read",
+        words
+            .iter()
+            .map(|w| format!("@say {w}"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+    n.start_turn(now_cmd("op_t1", turn("s_1", "t_1", "a_1", &prompt)))
+        .await
+        .unwrap();
+    // seen while the harness still sleeps: held text is not kept until the turn ends
+    t.until("the first text", |t| t.text() == said).await;
+    assert!(t.ended().is_empty(), "before the end of the turn");
+    t.until("the end", |t| !t.ended().is_empty()).await;
+    let deltas: Vec<(u64, String)> = t
+        .sink
+        .events()
+        .into_iter()
+        .filter_map(|e| match e.body {
+            EventBody::TextDelta {
+                utf8_offset, text, ..
+            } => Some((utf8_offset, text)),
+            _ => None,
+        })
+        .collect();
+    // the same bytes, contiguous, in far fewer deltas than the 21 chunks
+    let mut at = 0;
+    for (off, text) in &deltas {
+        assert_eq!(*off, at, "{deltas:?}");
+        at += text.len() as u64;
+    }
+    assert_eq!(t.text(), format!("{said}delta"));
+    assert!(deltas.len() <= 4, "{deltas:?}");
+    assert_eq!(
+        deltas.last().unwrap().1,
+        "delta",
+        "said after the pause: its own delta"
+    );
+    // the text came before the tool the harness reported after it
+    let kinds = t.kinds();
+    let last_text = kinds.iter().rposition(|k| k == "text_delta").unwrap();
+    let tool = kinds.iter().position(|k| k == "tool_changed").unwrap();
+    assert!(last_text < tool, "{kinds:?}");
+    n.shutdown().await;
+}
+
+/// A Hub that takes a while per batch, counting how many it is given at once.
+#[derive(Default)]
+struct Slow {
+    hub: RecordingSink,
+    now: std::sync::atomic::AtomicUsize,
+    most: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl EventSink for Slow {
+    async fn commit(&self, batch: EventBatch) -> ApiResult<EventAck> {
+        let n = self.now.fetch_add(1, Ordering::SeqCst) + 1;
+        self.most.fetch_max(n, Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        let ack = self.hub.commit(batch).await;
+        self.now.fetch_sub(1, Ordering::SeqCst);
+        ack
+    }
+}
+
+/// Several batches are in flight at once, and every event still arrives once in its stream's
+/// order, all of them acknowledged.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn batches_go_several_at_a_time_and_all_are_acknowledged() {
+    let t = T::new(&[]);
+    let n = LocalNode::open(t.config()).unwrap();
+    let slow = Arc::new(Slow::default());
+    n.connect(slow.clone(), None);
+    ready(&n, "s_1").await;
+    // paced, so the harness never outruns the actor's ingress
+    let group = ["@tool read Read"; 10].join(" ");
+    let prompt = vec![format!("{group} @sleep 30"); 60].join(" ");
+    let mut spec = turn("s_1", "t_1", "a_1", &prompt);
+    spec.run.limits.max_output_bytes = 64 << 20;
+    n.start_turn(now_cmd("op_t1", spec)).await.unwrap();
+    let t0 = Instant::now();
+    while !slow
+        .hub
+        .events()
+        .iter()
+        .any(|e| matches!(e.body, EventBody::AttemptEnded { .. }))
+    {
+        assert!(t0.elapsed() < Duration::from_secs(30), "the end");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    all_acknowledged(&n).await;
+    let tools = slow
+        .hub
+        .events()
+        .iter()
+        .filter(|e| matches!(e.body, EventBody::ToolChanged { .. }))
+        .count();
+    let end: Vec<_> = slow
+        .hub
+        .events()
+        .into_iter()
+        .filter_map(|e| match e.body {
+            EventBody::AttemptEnded { completion } => Some(completion),
+            _ => None,
+        })
+        .collect();
+    assert!(tools >= 1200, "{tools}: {end:?}");
+    assert!(
+        slow.most.load(Ordering::SeqCst) > 1,
+        "more than one batch at a time"
+    );
+    // each stream's positions are contiguous from 1 (the sink holds each once)
+    let mut last: HashMap<String, u64> = HashMap::new();
+    for e in slow.hub.events() {
+        let l = last.entry(e.cursor.stream.to_string()).or_insert(0);
+        assert_eq!(e.cursor.seq, *l + 1, "{:?}", e.cursor);
+        *l = e.cursor.seq;
+    }
+    n.shutdown().await;
+}
+
+/// How many text events a streaming harness costs: chunks at a model's pace (1000 chunks, one
+/// every `PERF_DRIP_MS` ms, 10 by default). Run by hand:
+/// `cargo test --release -p steve-node --test local drip_cost -- --ignored --nocapture`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore]
+async fn drip_cost() {
+    let ms: u64 = std::env::var("PERF_DRIP_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(10);
+    let t = T::new(&[]);
+    let n = t.node();
+    ready(&n, "s_1").await;
+    let mut spec = turn("s_1", "t_1", "a_1", &format!("@drip 1000 {ms}"));
+    spec.run.limits.max_output_bytes = 64 << 20;
+    let t0 = Instant::now();
+    n.start_turn(now_cmd("op_t1", spec)).await.unwrap();
+    while t.ended().is_empty() {
+        assert!(t0.elapsed() < Duration::from_secs(120));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let deltas = t
+        .sink
+        .events()
+        .iter()
+        .filter(|e| matches!(e.body, EventBody::TextDelta { .. }))
+        .count();
+    let want: String = (0..1000).map(|i| format!("t{i} ")).collect();
+    assert_eq!(t.text(), want);
+    println!(
+        "1000 chunks, one every {ms} ms: {deltas} text events journaled and sent ({:.1} chunks per event), {} events in all",
+        1000.0 / deltas as f64,
+        t.sink.events().len()
+    );
     n.shutdown().await;
 }

@@ -714,6 +714,12 @@ async fn another_nodes_session_is_refused() {
         "node:\n{}",
         n.log()
     );
+    // what the harness said is in before the count below is taken
+    assert!(
+        wait(60, || said(&h, &sid, "iso-3M") >= 1).await,
+        "node:\n{}",
+        n.log()
+    );
     let exec: ExecutionRef = serde_json::from_str(
         &h.one(
             "SELECT a.execution FROM runtime_attempts a JOIN runtime_turns t USING(turn_id) WHERE t.session_id=?",
