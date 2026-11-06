@@ -164,6 +164,17 @@ pub fn profile(
     })
 }
 
+/// How changes get into `target` by its host's rules alone (the lane asks before it pushes): the
+/// GitHub branch rules through `gh`, a local repository takes pushes, another host is not known.
+pub fn merge_of(target: &Target, gh: &Path) -> Fact<Merge> {
+    let host = host_of(target);
+    let rules = match &host {
+        Host::GitHub(slug) => Some(github_rules(gh, slug, &target.branch)),
+        _ => None,
+    };
+    merge_fact(&host, rules.as_ref())
+}
+
 /* ── the host ── */
 
 enum Host {

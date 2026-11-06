@@ -3,6 +3,13 @@
 //! (`gh_pr_merge`). Pushing, opening and merging are outward effects: they happen only after your
 //! `yes`, never from the hook or the sync.
 //!
+//! The one exception is yours to grant, per repository: `after_accept=open_pr` takes accepting the
+//! item as the `yes` to its PR, only for a private repository, only as a draft, only from the item's
+//! own branch, and only when what the push would publish passed the leak check; the `gh_pr_open`
+//! decision is opened and answered in one transaction, so the push goes through the same effect
+//! queue and its history shows it. Anything else (a public repository, a hit, an item on a Node)
+//! gets the card. Merging always asks.
+//!
 //! Decision handlers run inside the answer's transaction and cannot reach GitHub, so they only
 //! check the answer and record the write ([`crate::effects`]); the runner does it after the commit,
 //! reconciling first when an earlier try may have happened.
@@ -92,13 +99,27 @@ pub fn agent_question(full_name: &str, title: &str, draft: bool) -> String {
 const DRAFT_ASK: &str = "在验收前开一个草稿 PR";
 const PLAIN_ASK: &str = "在验收前开一个 PR";
 
-/// The draft flag of a `gh_pr_open`: Steve's own follow the repo's `draft_pr`; an agent's say it
-/// in the question.
+/// `auto` of a `gh_pr_open` answered by accepting the item (`after_accept=open_pr`).
+pub const AUTO: &str = "after_accept";
+
+/// The draft flag of a `gh_pr_open`: one opened without asking is a draft; Steve's own follow the
+/// repo's `draft_pr`; an agent's say it in the question.
 fn wants_draft(d: &Decision, settings: &Settings) -> bool {
-    if d.requested_by == STEVE {
+    if d.result["auto"] == AUTO {
+        true
+    } else if d.requested_by == STEVE {
         settings.draft_pr
     } else {
         !d.question.starts_with(PLAIN_ASK)
+    }
+}
+
+/// What a card about a write through a PAT connection adds: it goes out as your own account.
+pub fn pat_note(login: &str) -> String {
+    if login.is_empty() {
+        "（以你的 GitHub 账号发出）".into()
+    } else {
+        format!("（以你的 GitHub 账号 {login} 发出）")
     }
 }
 
@@ -200,9 +221,10 @@ impl GitHub {
     }
 
     /// `on_item_accepted`: offers a PR (and takes the wrap-up over) when the item's project is
-    /// linked, `after_accept=ask_pr`, the item has a branch with commits the base lacks, the project
-    /// has no release action, and no PR from that branch is open. Opens the `gh_pr_open` decision;
-    /// pushes nothing.
+    /// linked, `after_accept` is `ask_pr` or `open_pr`, the item has a branch with commits the base
+    /// lacks, the project has no release action, and no PR from that branch is open. Opens the
+    /// `gh_pr_open` decision and pushes nothing; with `open_pr` and everything [`Self::auto_pr`]
+    /// asks for, answers it yes at once (a draft, through the effect queue).
     pub async fn offer_pr(&self, item: &Item) -> Result<bool, String> {
         let ws = item.workspace_id.clone();
         let (Some(branch), Some(project)) = (
@@ -217,8 +239,10 @@ impl GitHub {
                 let Some(r) = repo::repo_of_project(c, &ws, &project)?.filter(|r| r.enabled) else {
                     return Ok(None);
                 };
-                if Settings::of(&r.settings).after_accept != "ask_pr"
-                    || repo::project_release(c, &ws, &project)?.is_some()
+                if !matches!(
+                    Settings::of(&r.settings).after_accept.as_str(),
+                    "ask_pr" | "open_pr"
+                ) || repo::project_release(c, &ws, &project)?.is_some()
                     || repo::has_open_pr_from(c, &r.id, &branch)?
                     || base_decisions::open_for(c, &ws, PR_OPEN, &item.id)?.is_some()
                 {
@@ -226,27 +250,31 @@ impl GitHub {
                 }
                 let path = repo::project(c, &ws, &project)?.map(|p| p.path);
                 let summary = repo::delivery_summary(c, &item.id)?;
-                let prefix = repo::item_prefix(c, &ws)?;
-                Ok::<_, ApiError>(Some((r, path, summary, prefix)))
+                let (adapter, account, _) =
+                    repo::connection_label(c, &r.connection_id)?.unwrap_or_default();
+                let pat = (adapter == crate::adapters::github_pat::ID).then_some(account);
+                Ok::<_, ApiError>(Some((r, path, summary, pat)))
             })
             .map_err(|e| e.to_string())?;
-        let Some((r, path, summary, _prefix)) = pre else {
+        let Some((r, path, summary, pat)) = pre else {
             return Ok(false);
         };
+        let settings = Settings::of(&r.settings);
         let on_node = match self.git_nodes() {
             Some(n) => n.ahead(&item.id, &r.default_branch, &branch).await,
             None => None,
         };
+        let local = on_node.is_none();
+        let cwd = item
+            .cwd
+            .clone()
+            .filter(|c| !c.is_empty())
+            .or(path)
+            .filter(|c| !c.is_empty());
         let ahead = match on_node {
             Some(a) => a.map_err(|e| e.to_string())?,
             None => {
-                let Some(cwd) = item
-                    .cwd
-                    .clone()
-                    .filter(|c| !c.is_empty())
-                    .or(path)
-                    .filter(|c| !c.is_empty())
-                else {
+                let Some(cwd) = cwd.clone() else {
                     return Ok(false);
                 };
                 let (base, b) = (r.default_branch.clone(), branch.clone());
@@ -268,6 +296,23 @@ impl GitHub {
             body.push_str("\n\n");
         }
         body.push_str(&format!("{} · 由 Steve 开出", item.id));
+        let mut question = format!("在 {} 开 PR：{title}", r.full_name);
+        let auto = if settings.after_accept == "open_pr" {
+            let cwd = cwd.filter(|_| local);
+            match self.auto_pr(&r, &branch, cwd.as_deref()).await {
+                Ok(head) => Some(head),
+                Err(why) => {
+                    question.push_str(&format!("（{why}）"));
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        // a PAT posts as you: the card says so
+        if let Some(login) = pat.filter(|_| auto.is_none()) {
+            question.push_str(&pat_note(&login));
+        }
         let d = NewDecision {
             workspace_id: ws.clone(),
             kind: DecisionKind::Approve.code().into(),
@@ -275,11 +320,51 @@ impl GitHub {
             subject_id: item.id.clone(),
             item_id: Some(item.id.clone()),
             session_id: None,
-            question: format!("在 {} 开 PR：{title}", r.full_name),
+            question,
             draft: Some(format!("{title}\n\n{body}")),
             options: Some(OPTIONS.map(String::from).to_vec()),
             requested_by: STEVE.into(),
         };
+        if let Some(head) = auto {
+            // your grant answers it: opened and answered together, the push is the effect queue's,
+            // and only the commit that passed the check is pushed (a branch that moved is refused)
+            let now = self.now();
+            self.store()
+                .transaction(|tx| {
+                    let opened = base_decisions::open(tx, &d)?;
+                    base_decisions::settle(
+                        tx,
+                        &opened.id,
+                        &json!({"choice": "yes", "text": "", "auto": AUTO}),
+                        "resolved",
+                        &Value::Null,
+                    )?;
+                    effects::queue(tx, self, &ws, &opened.id, effects::OPEN)?;
+                    repo::effect_intent(tx, &opened.id, &json!({"sha": head, "branch": branch}))?;
+                    repo::add_timeline(
+                        tx,
+                        &item.id,
+                        &format!(
+                            "验收后自动开草稿 PR（{}：私有仓库，提交已过泄露检查）",
+                            r.full_name
+                        ),
+                        now,
+                    )?;
+                    tx.publish(steve_store::ChangeEvent::Item {
+                        id: item.id.clone(),
+                    });
+                    Ok::<_, ApiError>(())
+                })
+                .map_err(|e| e.to_string())?;
+            if let Err(e) = self
+                .core()
+                .progress(&ws, &item.id, "收尾", "验收通过，正在开草稿 PR")
+                .await
+            {
+                tracing::warn!(item = %item.id, error = %e, "github: item progress not set");
+            }
+            return Ok(true);
+        }
         self.store()
             .transaction(|tx| base_decisions::open(tx, &d).map_err(ApiError::from))
             .map_err(|e| e.to_string())?;
@@ -291,6 +376,44 @@ impl GitHub {
             tracing::warn!(item = %item.id, error = %e, "github: item progress not set");
         }
         Ok(true)
+    }
+
+    /// Whether accepting the item may open its PR without asking (`after_accept=open_pr`): the
+    /// repository is private, the branch is the item's own (not the default one), its worktree is
+    /// here to look at, and what the push would publish passed the leak check
+    /// ([`push::leaks`]). The commit checked, or why it asks instead (said on the card).
+    async fn auto_pr(
+        &self,
+        r: &RepoRow,
+        branch: &str,
+        cwd: Option<&str>,
+    ) -> Result<String, String> {
+        if !r.private {
+            return Err("公开仓库：推送后收不回，开 PR 前要你确认".into());
+        }
+        if branch == r.default_branch || !push::branch_ok(branch) {
+            return Err(format!("{branch} 不是事项自己的分支"));
+        }
+        let Some(cwd) = cwd.map(str::to_string) else {
+            return Err("事项不在这台机器上，没法先做泄露检查".into());
+        };
+        let (base, b) = (r.default_branch.clone(), branch.to_string());
+        let checked = tokio::task::spawn_blocking(move || {
+            let dir = std::path::Path::new(&cwd);
+            let head = push::head_of(dir, &b)?;
+            let found = push::leaks(dir, &base, &head)?;
+            Ok::<_, push::PushError>((head, found))
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+        match checked {
+            Ok((head, found)) if found.is_empty() => Ok(head),
+            Ok((_, found)) => Err(format!(
+                "泄露检查在提交里发现疑似机密（{}），开 PR 前要你确认",
+                found.join("、")
+            )),
+            Err(e) => Err(format!("泄露检查没做成（{e}），开 PR 前要你确认")),
+        }
     }
 
     /// After a `gh_pr_open` answer: `yes` pushes the branch and opens the PR; `no` finishes the

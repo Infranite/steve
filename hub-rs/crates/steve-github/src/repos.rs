@@ -44,7 +44,8 @@ pub const REPO_HOOK_EVENTS: [&str; 8] = [
 /// The repo settings, with defaults.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settings {
-    /// `ask_pr|none`.
+    /// `ask_pr|open_pr|none`. `open_pr`: accepting the item opens its draft PR without asking, for a
+    /// private repository whose push passed the leak check (anything else still asks).
     pub after_accept: String,
     /// `accepted|merged`.
     pub finish_on: String,
@@ -57,7 +58,7 @@ pub struct Settings {
 }
 
 const ENUMS: [(&str, &[&str]); 4] = [
-    ("after_accept", &["ask_pr", "none"]),
+    ("after_accept", &["ask_pr", "open_pr", "none"]),
     ("finish_on", &["accepted", "merged"]),
     ("merge_method", &["squash", "merge", "rebase"]),
     ("ci_fail", &["supplement", "signal"]),

@@ -470,3 +470,67 @@ async fn with_the_local_node_a_link_out_of_a_root_is_not_read() {
         .await;
     assert_eq!((s, v), (200, json!([])));
 }
+
+#[tokio::test]
+async fn the_lane_limits_are_yours_to_set_and_now_has_nothing_to_close_on_an_idle_lane() {
+    let e = start().await;
+    let repo = e.home.join("solo");
+    std::fs::create_dir_all(&repo).unwrap();
+    g(&repo, &["init", "-q", "-b", "main"]);
+    std::fs::write(repo.join("a.txt"), "a\n").unwrap();
+    g(&repo, &["add", "-A"]);
+    g(&repo, &["commit", "-q", "-m", "base"]);
+    let (s, p) = e
+        .call(
+            "POST",
+            "/api/projects",
+            Some(json!({"name": "Solo", "path": repo.to_string_lossy()})),
+        )
+        .await;
+    assert_eq!(s, 200, "{p}");
+    let id = p["id"].as_str().unwrap().to_string();
+    let path = format!("/api/projects/{id}/lane");
+    let (s, v) = e.call("GET", &path, None).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["lane"], Value::Null, "nothing went into it yet");
+
+    let (s, v) = e
+        .call(
+            "PATCH",
+            &path,
+            Some(json!({"window_min": 15, "max_members": 4})),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["lane"]["policy"]["window_ms"], 15 * 60_000);
+    assert_eq!(v["lane"]["set"]["max_members"], 4);
+    let (_, v) = e.call("GET", &path, None).await;
+    assert_eq!(v["lane"]["policy"]["max_members"], 4, "kept");
+    // back to the defaults
+    let (s, v) = e
+        .call(
+            "PATCH",
+            &path,
+            Some(json!({"window_min": null, "max_members": null})),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["lane"]["set"]["window_ms"], Value::Null);
+    assert_eq!(
+        v["lane"]["policy"]["window_ms"],
+        v["lane"]["defaults"]["window_ms"]
+    );
+    for bad in [
+        json!({"window_min": 0, "max_members": null}),
+        json!({"window_min": 2000, "max_members": null}),
+        json!({"window_min": null, "max_members": 0}),
+        json!({"window_min": 1.5, "max_members": null}),
+    ] {
+        let (s, v) = e.call("PATCH", &path, Some(bad.clone())).await;
+        assert_eq!(s, 400, "{bad} {v}");
+    }
+
+    let (s, v) = e.call("POST", &format!("{path}/now"), None).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["closed"], false);
+}

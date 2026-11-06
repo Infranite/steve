@@ -14,8 +14,6 @@ pub struct LaneRow {
     pub branch: String,
     pub window_ms: Option<i64>,
     pub max_members: Option<i64>,
-    /// Commands a batch must pass before it merges (JSON list of strings), as you set them.
-    pub checks: String,
     /// The state machine's snapshot (JSON).
     pub state: String,
     pub created: i64,
@@ -60,7 +58,6 @@ fn lane(r: &rusqlite::Row<'_>) -> rusqlite::Result<LaneRow> {
         branch: r.get("branch")?,
         window_ms: r.get("window_ms")?,
         max_members: r.get("max_members")?,
-        checks: r.get("checks")?,
         state: r.get("state")?,
         created: r.get("created")?,
         updated: r.get("updated")?,
@@ -217,15 +214,6 @@ pub fn request_set(
     Ok(())
 }
 
-/// The commands a lane's batches must pass (empty: none).
-pub fn lane_checks_set(c: &Connection, id: &str, checks: &[String]) -> Result<()> {
-    c.execute(
-        "UPDATE lanes SET checks = ?, updated = ? WHERE id = ?",
-        params![serde_json::to_string(checks)?, now(), id],
-    )?;
-    Ok(())
-}
-
 /// A request's head moved (the item was reworked and delivered again before it merged).
 pub fn request_head(c: &Connection, id: &str, head: &str) -> Result<()> {
     c.execute(
@@ -279,6 +267,36 @@ pub fn batch_card(
             },
         )
         .optional()?)
+}
+
+/// The text of a batch's approval card while it is still open (`subject`: `lane:<lane>:<unit>`): a
+/// request joined the batch before you answered. `false` when no card of it is open.
+pub fn batch_card_text(
+    tx: &crate::Tx<'_>,
+    subject: &str,
+    question: &str,
+    draft: &str,
+) -> Result<bool> {
+    let id: Option<String> = tx
+        .query_row(
+            "SELECT id FROM decisions WHERE subject_type = 'delivery_batch' AND subject_id = ?
+              AND kind = 'approve' AND status = 'open' ORDER BY created DESC LIMIT 1",
+            [subject],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(id) = id else {
+        return Ok(false);
+    };
+    tx.execute(
+        "UPDATE decisions SET question = ?, draft = ? WHERE id = ?",
+        params![question, draft, id],
+    )?;
+    tx.publish(crate::ChangeEvent::Decision {
+        id,
+        item_id: Some(None),
+    });
+    Ok(true)
 }
 
 /// Marks the newest resolved card of a batch (`subject`, `kind`) as acted on: recovery after a

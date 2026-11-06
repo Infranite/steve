@@ -239,6 +239,63 @@ pub fn ahead(cwd: &Path, base: &str, branch: &str) -> Result<u64, PushError> {
         .map_err(|_| PushError::Git("rev-list".into()))
 }
 
+/// What the commits up to `head` (a full commit id) that `base` lacks would publish and looks like a
+/// secret: the lines they add and their messages, through the paste guard (tokens, private keys,
+/// card numbers, "密码是…") and the values injected into any live session. One entry per kind found
+/// (`token`, `private_key`, `card`, `said`, `vault:<label>`); empty when nothing was. The same base
+/// as [`ahead`]; the commit, not the branch, so what is checked is what gets pushed.
+pub fn leaks(cwd: &Path, base: &str, head: &str) -> Result<Vec<String>, PushError> {
+    if head.len() < 40 || !head.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(PushError::Git(format!("不是提交号：{head}")));
+    }
+    if !branch_ok(base) {
+        return Err(PushError::BadBranch(base.into()));
+    }
+    let has = |r: &str| {
+        let mut c = git(cwd);
+        c.args(["rev-parse", "--verify", "--quiet", r]);
+        run(c).is_ok()
+    };
+    let from = if has(&format!("refs/remotes/origin/{base}")) {
+        format!("refs/remotes/origin/{base}")
+    } else {
+        format!("refs/heads/{base}")
+    };
+    let to = head;
+    let mut c = git(cwd);
+    c.args([
+        "-c",
+        "core.quotePath=false",
+        "diff",
+        "--no-color",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--unified=0",
+        &format!("{from}...{to}"),
+    ]);
+    let diff = run(c)?;
+    let mut c = git(cwd);
+    c.args(["log", "--format=%B", &format!("{from}..{to}")]);
+    let messages = run(c)?;
+    let added: String = diff
+        .lines()
+        .filter(|l| l.starts_with('+') && !l.starts_with("+++"))
+        .map(|l| &l[1..])
+        .chain(messages.lines())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut found: Vec<String> = Vec::new();
+    for s in steve_vault::guard::scan(&added) {
+        if !found.iter().any(|k| k == s.kind) {
+            found.push(s.kind.to_string());
+        }
+    }
+    for l in steve_vault::redact::find_labels(&added) {
+        found.push(format!("vault:{l}"));
+    }
+    Ok(found)
+}
+
 /// The object directory of the worktree's repository (shared by all its worktrees).
 fn objects_dir(cwd: &Path) -> Result<PathBuf, PushError> {
     let mut c = git(cwd);

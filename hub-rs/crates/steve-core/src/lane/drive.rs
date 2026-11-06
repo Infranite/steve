@@ -2,11 +2,17 @@
 //! the lane's checks take time), and the outcome recorded back, which may leave more to do.
 //!
 //! - a unit about to merge first asks you once (one card per batch, `approve` / `delivery_batch`); yes
-//!   merges it, no sends its members back;
-//! - merging: fetch, integrate on the target's tip ([`super::exec::integrate`]), the lane's checks,
-//!   push fast-forward; a target that moved meanwhile is integrated again (twice at most);
+//!   merges it, no sends its members back; what arrives before you answer joins it and its card;
+//! - merging: the target's host is asked first: a branch that takes changes only through a pull
+//!   request or a merge queue is never pushed to directly (an owner allowed to bypass that would skip
+//!   its reviews and checks); then fetch, integrate on the target's tip ([`super::exec::integrate`]),
+//!   push fast-forward; a target that moved meanwhile is integrated again (twice at most). The lane
+//!   runs no checks of its own: each member passed its own build when it was delivered, and the
+//!   release tag's CI runs on the result;
 //! - releasing: the repository's own release step ([`super::exec::release`]); the items then close by
-//!   their project's completion rule (merged and tagged), as for any merge.
+//!   their project's completion rule (merged and tagged), as for any merge;
+//! - a unit that is over (released, given up, emptied, or merged with its release put off) has its
+//!   worktree and batch branch removed; a failed release keeps them for its retry.
 //!
 //! Each item in a lane is told on its timeline where it is.
 
@@ -15,7 +21,9 @@ use std::path::{Path, PathBuf};
 use steve_store::lanes::{self, LaneRequest, NewRequest};
 
 use super::exec::{self, Member};
-use super::store::{self, Work};
+use super::profile::{How, Merge};
+use super::store::{self, Work, label, subject};
+use super::target::Target;
 use crate::error::{Result, msg};
 use crate::repo::{Item, NewDecision};
 use crate::{Core, detach};
@@ -51,23 +59,11 @@ impl Drop for Hold {
     }
 }
 
-/// `subject_id` of a batch's approval card.
-fn subject(lane: &str, unit: u64) -> String {
-    format!("lane:{lane}:{unit}")
-}
-
 /// The (lane, unit) of a batch approval card's `subject_id`.
 pub fn parse_subject(s: &str) -> Option<(String, u64)> {
     let rest = s.strip_prefix("lane:")?;
     let (lane, unit) = rest.rsplit_once(':')?;
     Some((lane.into(), unit.parse().ok()?))
-}
-
-fn label(r: &LaneRequest) -> String {
-    match &r.item_id {
-        Some(i) => format!("{i}（{}）", r.branch),
-        None => r.branch.clone(),
-    }
 }
 
 impl Core {
@@ -121,6 +117,10 @@ impl Core {
                 target.upstream,
                 target.branch,
                 match req.state.as_str() {
+                    // nothing to start: it went in with a unit whose card waits for you
+                    "merging" if work.is_empty() => {
+                        format!("并入还在等你批准的 {unit}，同一张卡")
+                    }
                     "merging" => format!("现在没有别的合并，直接合并（{unit}）"),
                     "collecting" => format!("和同一目标的其他合并一起成批（{unit}）"),
                     _ => "排在当前批次之后".into(),
@@ -129,6 +129,52 @@ impl Core {
         );
         self.lane_run(work);
         Ok(req)
+    }
+
+    /// What the project page shows of the lane of (`upstream`, `branch`) ([`store::view`]).
+    pub fn lane_view(&self, upstream: &str, branch: &str) -> Result<Option<serde_json::Value>> {
+        Ok(store::view(self.store().store(), upstream, branch)?)
+    }
+
+    /// Your limits for the lane of (`upstream`, `branch`) (`None`: the default); the lane as shown.
+    pub fn lane_policy(
+        &self,
+        upstream: &str,
+        branch: &str,
+        window_ms: Option<i64>,
+        max_members: Option<i64>,
+    ) -> Result<Option<serde_json::Value>> {
+        let s = self.store().store();
+        store::set_policy(s, upstream, branch, window_ms, max_members)?;
+        // a shorter window may be over already
+        self.lane_run(store::tick(s)?);
+        self.lane_view(upstream, branch)
+    }
+
+    /// "Merge and release now" on the lane of (`upstream`, `branch`): its collecting batch closes and
+    /// starts as soon as nothing is in flight (its approval card still asks you). `false`: there was
+    /// no batch collecting.
+    pub fn lane_now(&self, upstream: &str, branch: &str) -> Result<bool> {
+        let s = self.store().store();
+        let Some(l) = s
+            .reader(lanes::lanes_all)?
+            .into_iter()
+            .find(|l| l.upstream == upstream && l.branch == branch)
+        else {
+            return Ok(false);
+        };
+        let (closed, work) = store::now(s, &l.id)?;
+        if closed {
+            for r in s
+                .reader(|c| lanes::requests_of(c, &l.id, true))?
+                .iter()
+                .filter(|r| r.state == "collecting")
+            {
+                self.lane_note(r, "你要求立即合并发布：这一批不再等合批窗口");
+            }
+        }
+        self.lane_run(work);
+        Ok(closed)
     }
 
     /// Time passed: lanes whose window is due close and start.
@@ -142,12 +188,8 @@ impl Core {
     pub(crate) fn lane_run(&self, work: Vec<Work>) {
         for w in work {
             match w {
-                Work::Merge {
-                    lane,
-                    unit,
-                    requests,
-                } => {
-                    if let Err(e) = self.lane_ask(&lane, unit, &requests) {
+                Work::Merge { lane, unit, .. } => {
+                    if let Err(e) = self.lane_ask(&lane, unit) {
                         tracing::warn!(lane, unit, "lane: approval card: {e}");
                     }
                 }
@@ -175,28 +217,25 @@ impl Core {
             .collect()
     }
 
-    /// The batch's one approval card.
-    fn lane_ask(&self, lane: &str, unit: u64, ids: &[String]) -> Result<()> {
-        let reqs = self.requests(ids);
+    /// The batch's one approval card, listing what the unit holds now (more may join it until you
+    /// answer: [`store`] rewrites it then).
+    fn lane_ask(&self, lane: &str, unit: u64) -> Result<()> {
+        let reqs = self
+            .store()
+            .store()
+            .reader(|c| store::merging(c, lane, unit))?;
         let ws = reqs
             .iter()
             .find_map(|r| r.workspace_id.clone())
             .unwrap_or_else(|| crate::repo::WS.into());
-        let names: Vec<String> = reqs.iter().map(label).collect();
+        let (question, draft) = store::card_text(unit, &reqs);
         self.store().decision_create(NewDecision {
             workspace_id: ws,
             kind: "approve".into(),
             subject_type: "delivery_batch".into(),
             subject_id: subject(lane, unit),
-            question: format!("合并 MQ-{unit}（{} 项）", reqs.len()),
-            draft: Some(format!(
-                "这一批一起合并、一起检查、一起发布：\n{}",
-                names
-                    .iter()
-                    .map(|n| format!("- {n}"))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            )),
+            question,
+            draft: Some(draft),
             options: Some(vec!["yes".into(), "no".into()]),
             requested_by: "steve".into(),
             ..Default::default()
@@ -210,6 +249,10 @@ impl Core {
     /// You answered a batch's card: yes merges it, no sends its members back.
     pub(crate) fn lane_answered(&self, lane: &str, unit: u64, yes: bool) {
         if yes {
+            // under way from here: what arrives now waits for the next batch
+            if let Err(e) = store::approved(self.store().store(), lane, unit) {
+                tracing::warn!(lane, unit, "lane: approved: {e}");
+            }
             let (c, lane) = (self.clone(), lane.to_string());
             detach(move || c.lane_merge(&lane, unit));
             return;
@@ -233,6 +276,7 @@ impl Core {
             Ok(w) => self.lane_run(w),
             Err(e) => tracing::warn!(lane, unit, "lane: left: {e}"),
         }
+        self.lane_sweep(lane);
         // the item goes back to its agent, as a failed release does: reopened, a card says why
         if let Some(i) = &r.item_id
             && let Err(e) = self.lane_sent_back(i, &format!("合并通道 MQ-{unit} 退回：{why}"))
@@ -276,9 +320,34 @@ impl Core {
             }
             return;
         };
-        let checks: Vec<String> = serde_json::from_str(&row.checks).unwrap_or_default();
         let wt = self.worktree(lane, unit);
         let branch = format!("steve/merge/{}/MQ-{unit}", row.branch);
+        // a branch whose host takes changes only through a pull request or its merge queue is not
+        // pushed to: with the rights to bypass it, a push would skip the reviews and checks it asks for
+        let target = Target {
+            upstream: row.upstream.clone(),
+            branch: row.branch.clone(),
+        };
+        let merge = super::profile::merge_of(&target, &self.config().gh);
+        if merge.how == How::Found && merge.value != Merge::Push {
+            let how = if merge.value == Merge::HostQueue {
+                "托管方的合并队列"
+            } else {
+                "PR"
+            };
+            for r in &reqs {
+                self.lane_left(
+                    lane,
+                    unit,
+                    r,
+                    &format!(
+                        "目标分支 {} 规定只能经{how}合入，Steve 不直接推送到它；请改为经 PR 合并",
+                        row.branch
+                    ),
+                );
+            }
+            return;
+        }
         for attempt in 0..=MOVED_RETRIES {
             if let Err(e) = crate::upstream::fetch(&repo) {
                 for r in &reqs {
@@ -330,13 +399,6 @@ impl Core {
             if reqs.is_empty() {
                 return;
             }
-            if let Err(e) = exec::checks(&wt, &checks) {
-                // which member broke it is stage 3's bisect; until then the whole batch goes back
-                for r in &reqs {
-                    self.lane_left(lane, unit, r, &format!("整批{e}"));
-                }
-                return;
-            }
             match crate::upstream::push_head(&wt, &row.branch) {
                 Ok(()) => {
                     let _ = s.transaction(|tx| {
@@ -349,6 +411,8 @@ impl Core {
                         Ok(w) => self.lane_run(w),
                         Err(e) => tracing::warn!(lane, unit, "lane: merged: {e}"),
                     }
+                    // its release put off into the next batch: this unit is over
+                    self.lane_sweep(lane);
                     return;
                 }
                 Err(e) if attempt < MOVED_RETRIES => {
@@ -420,6 +484,33 @@ impl Core {
         match store::released(s, lane, unit, outcome, version.as_deref()) {
             Ok(w) => self.lane_run(w),
             Err(e) => tracing::warn!(lane, unit, "lane: released: {e}"),
+        }
+        self.lane_sweep(lane);
+    }
+
+    /// The worktrees and batch branches of `lane`'s units that are over (state `done`: released, given
+    /// up, emptied, or merged with the release put off) go; a unit still merging, releasing or
+    /// waiting for a retry of its failed release keeps them. By state, never by age.
+    pub(crate) fn lane_sweep(&self, lane: &str) {
+        let s = self.store().store();
+        let (Ok(Some(row)), Ok(units)) = (
+            s.reader(|c| lanes::lane_get(c, lane)),
+            s.reader(|c| lanes::units_of(c, lane)),
+        ) else {
+            return;
+        };
+        for u in units.iter().filter(|u| u.state == "done") {
+            let wt = self.worktree(lane, u.no as u64);
+            if !wt.exists() {
+                continue;
+            }
+            let branch = u
+                .branch
+                .clone()
+                .unwrap_or_else(|| format!("steve/merge/{}/MQ-{}", row.branch, u.no));
+            if let Err(e) = remove_worktree(&wt, &branch) {
+                tracing::warn!(lane, unit = u.no, "lane: worktree not removed: {e}");
+            }
         }
     }
 
@@ -501,6 +592,7 @@ impl Core {
             Ok(w) => self.lane_run(w),
             Err(e) => tracing::warn!(lane, unit, "lane: gave up: {e}"),
         }
+        self.lane_sweep(lane);
     }
 
     /// After a restart: batches you approved that did not finish merging merge again (against the
@@ -536,14 +628,10 @@ impl Core {
                             }
                             Some(_) => {} // waits for you
                             None => {
-                                let ids: Vec<String> = reqs
+                                let any = reqs
                                     .iter()
-                                    .filter(|r| r.unit == Some(u.no) && r.state == "merging")
-                                    .map(|r| r.id.clone())
-                                    .collect();
-                                if !ids.is_empty()
-                                    && let Err(e) = self.lane_ask(&l.id, no, &ids)
-                                {
+                                    .any(|r| r.unit == Some(u.no) && r.state == "merging");
+                                if any && let Err(e) = self.lane_ask(&l.id, no) {
                                     tracing::warn!(
                                         lane = l.id,
                                         unit = no,
@@ -593,6 +681,8 @@ impl Core {
                     _ => {}
                 }
             }
+            // what a unit that ended before this left behind
+            self.lane_sweep(&l.id);
         }
     }
 
@@ -604,4 +694,31 @@ impl Core {
             tracing::warn!(item = i, "lane note: {e}");
         }
     }
+}
+
+/// Remove the worktree `wt` from the repository it belongs to, and its branch `branch` there.
+fn remove_worktree(wt: &Path, branch: &str) -> std::result::Result<(), String> {
+    let common = crate::git::git(
+        wt,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    );
+    let wt_s = wt.to_string_lossy();
+    // only when `wt` is itself a worktree's top (not a stray directory inside some other repository)
+    let top = crate::git::git(wt, &["rev-parse", "--show-toplevel"])
+        .ok()
+        .and_then(|t| PathBuf::from(t).canonicalize().ok());
+    let ours = top.is_some() && top == wt.canonicalize().ok();
+    let repo = common.ok().filter(|_| ours).map(PathBuf::from);
+    if let Some(repo) = &repo {
+        let _ = crate::git::git(repo, &["worktree", "remove", "--force", &wt_s]);
+    }
+    // not a worktree any more (its repository went), or git would not: the directory goes anyway
+    if wt.exists() {
+        std::fs::remove_dir_all(wt).map_err(|e| e.to_string())?;
+    }
+    if let Some(repo) = &repo {
+        let _ = crate::git::git(repo, &["worktree", "prune"]);
+        let _ = crate::git::git(repo, &["branch", "-D", branch]);
+    }
+    Ok(())
 }

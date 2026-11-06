@@ -256,7 +256,7 @@ impl GitHub {
             return Err("The comment contains a secret value and was not posted.".into());
         }
         let now = self.now();
-        let (grant, bot_name) = self
+        let (grant, bot_name, pat) = self
             .store()
             .reader(|c| {
                 let g = if cx.bot_id.is_empty() {
@@ -265,7 +265,10 @@ impl GitHub {
                     repo::comment_grant(c, &ws, &cx.bot_id, &t.repo.id, now)?
                 };
                 let name = repo::bot_name(c, &cx.bot_id)?;
-                Ok::<_, ApiError>((g, name))
+                let (adapter, account, _) =
+                    repo::connection_label(c, &t.repo.connection_id)?.unwrap_or_default();
+                let pat = (adapter == crate::adapters::github_pat::ID).then_some(account);
+                Ok::<_, ApiError>((g, name, pat))
             })
             .map_err(|e| e.to_string())?;
         if let Some(g) = grant.filter(|_| check.verdict != Verdict::Leak) {
@@ -281,6 +284,10 @@ impl GitHub {
         }
         let bot = bot_name.unwrap_or_else(|| "Bot".into());
         let mut question = format!("{bot} 想在 {} 评论", t.label());
+        // through a PAT the comment, and every one the 8-hour grant lets through, is yours on GitHub
+        if let Some(login) = &pat {
+            question.push_str(&crate::accept::pat_note(login));
+        }
         if check.verdict == Verdict::Leak {
             question.push_str("（披露检查提示可能泄露内部信息）");
         }

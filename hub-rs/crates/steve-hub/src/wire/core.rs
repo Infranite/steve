@@ -1428,6 +1428,24 @@ impl Domain for CoreDomain {
         let c = self.core.clone();
         blocking(move || c.lifecycle_tick()).await
     }
+    async fn lane_view(&self, upstream: &str, branch: &str) -> BResult<Option<Value>> {
+        let (c, u, b) = (self.core.clone(), upstream.to_string(), branch.to_string());
+        blocking(move || c.lane_view(&u, &b)).await
+    }
+    async fn lane_policy(
+        &self,
+        upstream: &str,
+        branch: &str,
+        window_ms: Option<i64>,
+        max_members: Option<i64>,
+    ) -> BResult<Option<Value>> {
+        let (c, u, b) = (self.core.clone(), upstream.to_string(), branch.to_string());
+        blocking(move || c.lane_policy(&u, &b, window_ms, max_members)).await
+    }
+    async fn lane_now(&self, upstream: &str, branch: &str) -> BResult<bool> {
+        let (c, u, b) = (self.core.clone(), upstream.to_string(), branch.to_string());
+        blocking(move || c.lane_now(&u, &b)).await
+    }
     async fn revise_goal(&self, id: &str, text: &str) -> BResult<()> {
         let (c, id, text) = (self.core.clone(), id.to_string(), text.to_string());
         blocking(move || c.revise_goal(&id, &text)).await

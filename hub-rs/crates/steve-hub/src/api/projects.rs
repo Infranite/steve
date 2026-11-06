@@ -15,7 +15,7 @@ use crate::backend::{NewProject, Obj};
 use crate::config::home_dir;
 use crate::error::ApiError;
 use crate::js;
-use crate::validate::{Check, Str};
+use crate::validate::{Check, Num, Str};
 use crate::wire::workspaces::{At, PlacementError, Subject};
 use steve_node_api as na;
 
@@ -445,14 +445,13 @@ pub async fn patch_one(
     .await
 }
 
-/// `GET /api/projects/:id/lane`: what Steve recognizes about the target the project merges into (a
-/// read-only profile with its evidence). Fetches first; a fetch that fails is said and the profile
-/// is of the branch as last fetched.
-pub async fn lane(
-    State(st): State<AppState>,
-    Extension(c): Extension<Ctx>,
-    Path(id): Path<String>,
-) -> ApiResult {
+/// The project `id` of the caller's workspace whose merge lane is asked about: its directory on this
+/// machine and its release setting. Refused for a project on another device and for a non-git one.
+async fn lane_project(
+    st: &AppState,
+    c: &Ctx,
+    id: String,
+) -> Result<(String, Option<steve_store::Release>), ApiError> {
     let ws = c.ws.clone();
     let i = id.clone();
     let p = st
@@ -498,23 +497,116 @@ pub async fn lane(
         .get("release")
         .filter(|v| !v.is_null())
         .and_then(|v| serde_json::from_value(v.clone()).ok());
+    Ok((path, release))
+}
+
+/// The project's directory, which has to be there.
+fn lane_dir(path: &str) -> Result<&FsPath, ApiError> {
+    let dir = FsPath::new(path);
+    if !dir.is_dir() {
+        return Err(ApiError::bad_request(steve_i18n::t!(
+            "hub.project.project_dir_missing",
+            path = path
+        )));
+    }
+    Ok(dir)
+}
+
+/// The target the project at `path` merges into (local git, off the runtime).
+fn lane_target(path: &str) -> Result<steve_core::lane::target::Target, ApiError> {
+    steve_core::lane::target::target_of(lane_dir(path)?, None).map_err(ApiError::bad_request)
+}
+
+/// `GET /api/projects/:id/lane`: what Steve recognizes about the target the project merges into (a
+/// read-only profile with its evidence), and the lane itself: your limits, the unit in flight, the batch
+/// collecting. Fetches first; a fetch that fails is said and the profile
+/// is of the branch as last fetched.
+pub async fn lane(
+    State(st): State<AppState>,
+    Extension(c): Extension<Ctx>,
+    Path(id): Path<String>,
+) -> ApiResult {
+    let (path, release) = lane_project(&st, &c, id).await?;
     let gh = st.cfg.gh.clone().unwrap_or_else(steve_core::config::gh_cli);
-    blocking(move || {
-        let dir = FsPath::new(&path);
-        if !dir.is_dir() {
-            return Err(ApiError::bad_request(steve_i18n::t!(
-                "hub.project.project_dir_missing",
-                path = path
-            )));
-        }
+    let mut v = blocking(move || {
+        let dir = lane_dir(&path)?;
         let fetch = steve_core::lane::precheck::fetch(dir).err();
         let prof = steve_core::lane::profile::profile(dir, None, release.as_ref(), &gh)
             .map_err(ApiError::bad_request)?;
         let mut v = json!(prof);
         v["fetch_error"] = json!(fetch);
-        ok(v)
+        Ok(v)
     })
-    .await
+    .await?;
+    let (up, br) = (
+        js::string(&v["target"]["upstream"]),
+        js::string(&v["target"]["branch"]),
+    );
+    v["lane"] = json!(st.domain.lane_view(&up, &br).await?);
+    ok(v)
+}
+
+/// The longest merge window you may set, in minutes (a day).
+const LANE_WINDOW_MAX_MIN: f64 = 1440.0;
+/// The most requests a batch may take.
+const LANE_MEMBERS_MAX: f64 = 50.0;
+
+/// `PATCH /api/projects/:id/lane` `{window_min, max_members}` (`null`: the default): how long a batch
+/// of the project's lane collects and how many requests it takes. The lane as shown after.
+pub async fn lane_policy(
+    State(st): State<AppState>,
+    Extension(c): Extension<Ctx>,
+    Path(id): Path<String>,
+    b: Bytes,
+) -> ApiResult {
+    let v = body(&b)?;
+    let mut k = Check::object(&v);
+    let window = k.nullable_num(
+        "window_min",
+        Num {
+            int: true,
+            min: Some(1.0),
+            max: Some(LANE_WINDOW_MAX_MIN),
+            gt: None,
+        },
+    );
+    let members = k.nullable_num(
+        "max_members",
+        Num {
+            int: true,
+            min: Some(1.0),
+            max: Some(LANE_MEMBERS_MAX),
+            gt: None,
+        },
+    );
+    k.finish()?;
+    let (path, _) = lane_project(&st, &c, id).await?;
+    let t = blocking(move || lane_target(&path)).await?;
+    let lane = st
+        .domain
+        .lane_policy(
+            &t.upstream,
+            &t.branch,
+            window.map(|m| m as i64 * 60_000),
+            members.map(|m| m as i64),
+        )
+        .await?;
+    ok(json!({ "lane": lane }))
+}
+
+/// `POST /api/projects/:id/lane/now`: merge and release now. The lane's collecting batch closes at
+/// once and starts as soon as nothing is in flight (its approval card still asks you). `closed`:
+/// whether a batch was collecting.
+pub async fn lane_now(
+    State(st): State<AppState>,
+    Extension(c): Extension<Ctx>,
+    Path(id): Path<String>,
+) -> ApiResult {
+    let (path, _) = lane_project(&st, &c, id).await?;
+    let t = blocking(move || lane_target(&path)).await?;
+    let closed = st.domain.lane_now(&t.upstream, &t.branch).await?;
+    let lane = st.domain.lane_view(&t.upstream, &t.branch).await?;
+    ok(json!({ "closed": closed, "lane": lane }))
 }
 
 /// What `describe` shows the model: the file list and the start of the usual readme files.
