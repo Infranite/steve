@@ -88,6 +88,15 @@ pub trait UseNodes: Send + Sync {
     async fn run(&self, u: NodeUse, values: Arc<dyn UseValues>) -> RunOutput;
 }
 
+/// Whether `command` holds a secret written into it (the paste guard's hits, but a `$VAR` after
+/// `password=` is a reference, not a value). A Node keeps the command it runs as it is (the Hub's
+/// ledger, the Node's journal), so such a command is not run on one.
+pub fn pasted_secret(command: &str) -> bool {
+    steve_vault::guard::scan(command)
+        .iter()
+        .any(|s| !(s.kind == "said" && command[s.range()].starts_with('$')))
+}
+
 /// The Node a session works on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NodePlace {
@@ -584,6 +593,13 @@ impl SecretUses {
         let (cwd, node) = match place {
             None => (resolve_cwd(Path::new(&workdir), r.cwd.as_deref())?, None),
             Some(p) => {
+                // the Node keeps the command as it is: a token in it would be stored
+                if pasted_secret(&r.command) {
+                    return Err(ApiError::rule(steve_i18n::t!(
+                        "modules.vault.command_secret_node"
+                    ))
+                    .into());
+                }
                 if !p.files && injections.iter().any(|i| i.how == How::File) {
                     return Err(ApiError::rule(steve_i18n::t!("modules.vault.files_remote")).into());
                 }

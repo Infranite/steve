@@ -240,6 +240,7 @@
   "modules.connections.needs_reauth": "This connection needs to be authorized again, credentials can't be entered directly",
   "modules.connections.revoked": "This connection has already been disconnected",
   "modules.vault.grant_high": "Top-secret items can't be granted, you approve every use",
+  "modules.vault.command_secret_node": "The command contains something that looks like a secret. This conversation's commands are recorded as they are on the device that runs them, so don't write a secret into the command; inject it with env or stdin instead",
   "modules.vault.cwd_outside": "The directory isn't in this conversation's workspace",
   "modules.vault.files_remote": "This conversation runs on another device, so a secret can't be handed to it as a file; use env or stdin instead",
   "modules.vault.need_passkey": "Register Touch ID or a passkey on this device first",

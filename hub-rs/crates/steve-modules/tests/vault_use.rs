@@ -937,6 +937,27 @@ async fn a_session_on_a_node_runs_there_and_a_remote_one_gets_no_files() {
         "这个会话在另一台设备上运行，机密不能以文件方式交给它；请改用 env 或 stdin"
     );
     assert_eq!(count(&e), (0, 0));
+    // a token written into the command: the Node would keep it, so refused the same way
+    let err = e
+        .tool(
+            mcp::USE,
+            json!({"item": item, "purpose": "x", "env": {"T": "令牌"},
+                   "command": "curl -H 'Authorization: Bearer ghp_PastedIntoTheCommand0123456789abcd' x"}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err,
+        "命令里有像机密的内容。这个会话的命令会原样记录在运行它的设备上，请不要把机密写进命令，改用 env 或 stdin 注入"
+    );
+    assert_eq!(count(&e), (0, 0));
+    assert!(steve_modules::vault::pasted_secret("x --password=hunter22"));
+    assert!(!steve_modules::vault::pasted_secret(
+        "x --password=$GH_TOKEN"
+    ));
+    assert!(!steve_modules::vault::pasted_secret(
+        "x --password=\"${GH_TOKEN}\""
+    ));
     // a directory leaving the workspace, relative or absolute
     for bad in ["..", "sub/../..", "/tmp", "/"] {
         let err = e

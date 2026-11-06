@@ -51,5 +51,6 @@ pub use service::{
 };
 pub use steve_vault::{guard, redact};
 pub use r#use::{
-    NodePlace, NodeUse, SecretUses, SessionSink, UseCx, UseNodes, UseOutcome, UseRequest, UseValues,
+    NodePlace, NodeUse, SecretUses, SessionSink, UseCx, UseNodes, UseOutcome, UseRequest,
+    UseValues, pasted_secret,
 };

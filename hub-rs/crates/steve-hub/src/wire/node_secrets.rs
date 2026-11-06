@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use steve_modules::vault::inject::{How, RunOutput};
-use steve_modules::vault::{NodePlace, NodeUse, UseNodes, UseValues, VaultResult};
+use steve_modules::vault::{NodePlace, NodeUse, UseNodes, UseValues, VaultResult, pasted_secret};
 use steve_node_api::*;
 use steve_store::Store;
 
@@ -39,6 +39,9 @@ const UNKNOWN: &str = "命令的结果未知：它可能已经运行过，不会
 const NO_FILES: &str = "这台设备不接受以文件方式交付的机密";
 /// The session's Node runs no commands.
 const NO_EXECS: &str = "这台设备不运行命令，不能在它上面使用机密";
+/// A command with a secret written into it: the ledger and the Node's journal keep the command as
+/// it is (the vault refuses it when asked; this is the last stop before either).
+const PASTED: &str = "命令里有像机密的内容，不会在设备上运行；请改用 env 或 stdin 注入";
 /// As the vault says it (`modules.vault.cwd_outside`, zh-CN: a tool result).
 const CWD_OUTSIDE: &str = "目录不在这个会话的工作区里";
 
@@ -280,6 +283,9 @@ impl UseNodes for VaultNodes {
     }
 
     async fn run(&self, u: NodeUse, values: Arc<dyn UseValues>) -> RunOutput {
+        if pasted_secret(&u.command) {
+            return failed(PASTED.into());
+        }
         // the roots may have changed since it was asked (an approval can take a day)
         if let Err(e) = self.workspaces.refresh_roots() {
             return failed(e.to_string());
@@ -662,6 +668,53 @@ mod tests {
             assert!(!contains(&kept, &form), "a value on disk");
         }
         let _ = t.store;
+    }
+
+    /// A token written into the command itself is never sent: the ledger and the Node's journal
+    /// keep the command as it is. A `$VAR` after `password=` is a reference and runs.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_token_pasted_into_the_command_is_not_sent_or_stored() {
+        let tmp = tempfile::tempdir().unwrap();
+        let t = hub_at(tmp.path());
+        let pasted = "ghp_PastedIntoTheCommand0123456789abcd";
+        let values = Arc::new(Values::default());
+        let out = t
+            .uses
+            .run(
+                use_of(
+                    "su_p",
+                    &format!("curl -H 'Authorization: Bearer {pasted}' -H \"X: $TOK\" x"),
+                    vec![inj("TOK", How::Env)],
+                ),
+                values.clone(),
+            )
+            .await;
+        assert_eq!(out.error.as_deref(), Some(PASTED), "{out:?}");
+        assert!(t.runtime.ledger(&op_of("su_p")).unwrap().is_none());
+        assert_eq!(values.0.load(Ordering::SeqCst), 0);
+
+        let out = t
+            .uses
+            .run(
+                use_of("su_r", "echo \"password=$TOK\"", vec![inj("TOK", How::Env)]),
+                values.clone(),
+            )
+            .await;
+        assert_eq!(out.exit_code, Some(0), "{out:?}");
+        assert_eq!(out.stdout, "password=[已打码：令牌]\n");
+
+        t._node.shutdown().await;
+        let all = all_bytes(&t.root);
+        assert!(
+            contains(&all, b"vault_use:su_r"),
+            "the ledger was looked at"
+        );
+        let node = all_bytes(&t.root.join("node"));
+        assert!(
+            contains(&node, b"password=$TOK"),
+            "the journal was looked at"
+        );
+        assert!(!contains(&all, pasted.as_bytes()), "a pasted token on disk");
     }
 
     /// Runs in a child process (see `a_hub_that_dies_mid_use_never_runs_it_again`).
