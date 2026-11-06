@@ -3811,9 +3811,10 @@ async fn batches_go_several_at_a_time_and_all_are_acknowledged() {
     let slow = Arc::new(Slow::default());
     n.connect(slow.clone(), None);
     ready(&n, "s_1").await;
-    // paced, so the harness never outruns the actor's ingress
-    let group = ["@tool read Read"; 10].join(" ");
-    let prompt = vec![format!("{group} @sleep 30"); 60].join(" ");
+    // paced, so the harness never outruns the actor's ingress even on a slow CI runner (bursts of
+    // 10 calls every 30 ms overflowed its 64-slot queue there): small bursts, a longer pause
+    let group = ["@tool read Read"; 5].join(" ");
+    let prompt = vec![format!("{group} @sleep 60"); 120].join(" ");
     let mut spec = turn("s_1", "t_1", "a_1", &prompt);
     spec.run.limits.max_output_bytes = 64 << 20;
     n.start_turn(now_cmd("op_t1", spec)).await.unwrap();
