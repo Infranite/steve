@@ -833,9 +833,12 @@ fn another_project_is_not_checked_against_this_instance() {
     assert!(line.contains("check it there"), "{line}");
     merge_and_tag(&x, Some("v1.0.0"));
     k.core.tx().st.probed.clear();
-    k.core.lifecycle_tick().unwrap();
+    // the remote is looked at in the background; a tick after it answered closes the item
     assert!(
-        k.wait(|| k.phase(&x.item) == "closed"),
+        k.wait(|| {
+            let _ = k.core.lifecycle_tick();
+            k.phase(&x.item) == "closed"
+        }),
         "{:?}",
         k.status(&x.item)
     );
