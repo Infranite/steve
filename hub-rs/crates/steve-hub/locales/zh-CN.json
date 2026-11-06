@@ -54,7 +54,6 @@
   "hub.project.project_dir_missing": "项目目录不存在：%{path}",
   "hub.session.imported_readonly": "导入的会话是只读的",
   "hub.queued.gone": "这条消息已经发给 Steve 了，不能再改或撤回",
-  "hub.queued.secret": "里面像有密码或令牌，不能这样改；撤回后重新发送",
   "hub.settings.bad_key": "设置项不对：%{key}",
   "hub.models.no_harness": "没有这个 harness：%{harness}",
   "hub.models.family_other": "其他",

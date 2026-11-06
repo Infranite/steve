@@ -730,6 +730,13 @@ impl Core {
     /// A message the paste guard caught: stored with the secrets replaced, answered with
     /// the fixed reply (linking the vault), and not routed: no model sees it (`guarded`, so a
     /// restart does not take it for a message the routing lane lost).
+    /// A note of Steve's in the main conversation, linking to `href` (the paste guard's, under a
+    /// message whose secret was replaced before it went on).
+    pub fn say_note(&self, ws: &str, text: &str, href: &str) -> Result<String> {
+        self.store()
+            .message_add(ws, "steve", text, None, Some(&json!({"href": href})))
+    }
+
     pub fn say_guarded(&self, ws: &str, stored: &str, reply: &str, href: &str) -> Result<String> {
         let mid =
             self.store()

@@ -8,23 +8,35 @@
 #   identifier "io.github.infranite.steve.hub" and certificate leaf = H"<this certificate>"
 #
 # The identity sits in its own keychain file under $STEVE_HOME/signing (not the login keychain), unlocked
-# with a random password kept next to it (0600), so signing never needs the user's login password.
+# with a random password written next to it (0600), so signing never needs the user's login password. The Hub
+# then moves that password into the login keychain through steve-keyhelper (only the signed Hub reads it there
+# unasked; agents can read files) and removes the file.
 # The certificate is self-signed and not trusted system-wide; codesign signs with it anyway and the keychain
 # matches on the certificate hash, not on trust. Idempotent: does nothing if the identity exists.
 set -eu
 HOME_DIR=${STEVE_HOME:-$HOME/.steve}
 DIR=$HOME_DIR/signing KC=$HOME_DIR/signing/steve-signing.keychain-db NAME=${STEVE_SIGN_IDENTITY:-Steve Hub}
 mkdir -p $DIR && chmod 700 $DIR
-if [[ -f $KC && -f $DIR/keychain-pass ]]; then
-  security unlock-keychain -p "$(<$DIR/keychain-pass)" $KC
+if [[ -f $KC ]]; then
+  if [[ -f $DIR/keychain-pass ]]; then
+    PASS=$(<$DIR/keychain-pass)
+  else
+    # moved into the login keychain by the Hub: macOS asks before handing it to `security`
+    B64=$(security find-generic-password -s ${STEVE_KEYHELPER_SERVICE:-io.github.infranite.steve.vault} \
+      -a steve/signing/keychain-pass -w) || { print -u2 -r -- "$KC exists but its password did not open"; exit 1 }
+    PASS=$(print -r -- $B64 | base64 -D | od -An -v -tx1 | tr -d ' \n')
+  fi
+  security unlock-keychain -p "$PASS" $KC
   if security find-identity -p codesigning $KC | grep -q "\"$NAME\""; then
     print -r -- "signing identity \"$NAME\" already in $KC"; exit 0
   fi
 fi
 umask 077
 TMP=$(mktemp -d); trap 'rm -rf $TMP' EXIT
-[[ -f $DIR/keychain-pass ]] || openssl rand -hex 32 >$DIR/keychain-pass
-PASS=$(<$DIR/keychain-pass)
+if [[ -z ${PASS:-} ]]; then
+  [[ -f $DIR/keychain-pass ]] || openssl rand -hex 32 >$DIR/keychain-pass
+  PASS=$(<$DIR/keychain-pass)
+fi
 cat >$TMP/cert.cnf <<EOF
 [req]
 distinguished_name=dn

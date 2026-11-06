@@ -3726,3 +3726,38 @@ async fn the_owners_ceiling_refuses_what_is_over_it() {
     assert_eq!(e.code, ErrorCode::Denied, "{e:?}");
     n.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn claude_code_is_told_to_deny_the_hubs_secret_files() {
+    let t = T::new(&[]);
+    let n = t.node();
+    ready(&n, "s_1").await;
+    n.start_turn(now_cmd("op_t1", turn("s_1", "t_1", "a_1", "@say hello")))
+        .await
+        .unwrap();
+    t.until("the end", |t| !t.ended().is_empty()).await;
+    let log = std::fs::read_to_string(&t.log).unwrap();
+    let new = log
+        .lines()
+        .find(|l| l.contains("\"method\":\"session/new\""))
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_str(new).unwrap();
+    let deny: Vec<&str> = v["params"]["_meta"]["claudeCode"]["options"]["settings"]["permissions"]
+        ["deny"]
+        .as_array()
+        .expect("deny rules")
+        .iter()
+        .filter_map(|r| r.as_str())
+        .collect();
+    let home = t.root.join("steve");
+    for want in [
+        format!("Read(/{}/signing/**)", home.display()),
+        format!("Read(/{}/secrets/**)", home.display()),
+        format!("Read(/{}/steve.env*)", home.display()),
+        format!("Read(/{}/backups/**)", home.display()),
+    ] {
+        assert!(deny.contains(&want.as_str()), "{want} not in {deny:?}");
+    }
+    // the workspace stays the agent's
+    assert!(!deny.iter().any(|r| r.contains("/work")), "{deny:?}");
+}

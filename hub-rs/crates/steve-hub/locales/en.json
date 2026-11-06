@@ -54,7 +54,6 @@
   "hub.project.project_dir_missing": "Project directory doesn't exist: %{path}",
   "hub.session.imported_readonly": "Imported conversations are read-only",
   "hub.queued.gone": "This message has already gone to Steve and can't be edited or withdrawn",
-  "hub.queued.secret": "This looks like it contains a password or token, so it can't be changed this way. Withdraw it and send again.",
   "hub.settings.bad_key": "Invalid setting: %{key}",
   "hub.models.no_harness": "No such harness: %{harness}",
   "hub.models.family_other": "Other",

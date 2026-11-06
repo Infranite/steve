@@ -358,16 +358,16 @@ pub async fn thread_say(
         }
         checked = ms;
     }
-    // V4 paste guard: a password or token is stored replaced and never reaches the router
+    // V4 paste guard: a password or token is replaced before the message is stored or routed; the
+    // rest of it goes on as usual, with Steve's note on where to keep the secret
     let guarded = steve_vault::guard::intercept(&text);
-    if guarded.blocked {
-        st.domain.say_guarded(&c.ws, &guarded.text).await?;
-        return ok_true();
-    }
     let refs = super::files::refs(&st, &c.ws, files).await?;
     st.domain
-        .say_to(&c.ws, &c.me, &text, refs, checked, item, reply_to)
+        .say_to(&c.ws, &c.me, &guarded.text, refs, checked, item, reply_to)
         .await?;
+    if guarded.blocked {
+        st.domain.say_guard_note(&c.ws).await?;
+    }
     ok_true()
 }
 
@@ -443,11 +443,13 @@ pub async fn thread_queued_edit(
     if text.is_empty() {
         return Err(ApiError::Invalid(vec!["text".into()]));
     }
-    // V4 paste guard: what is sent is guarded, so is what it is changed to
-    if steve_vault::guard::intercept(&text).blocked {
-        return Err(ApiError::bad_request(steve_i18n::t!("hub.queued.secret")));
-    }
-    if !st.domain.thread_queued_edit(&c.ws, &id, &text).await? {
+    // V4 paste guard: what is sent is guarded, so is what it is changed to (the secret replaced)
+    let guarded = steve_vault::guard::intercept(&text);
+    if !st
+        .domain
+        .thread_queued_edit(&c.ws, &id, &guarded.text)
+        .await?
+    {
         return Err(ApiError::Json(409, steve_i18n::t!("hub.queued.gone")));
     }
     ok_true()

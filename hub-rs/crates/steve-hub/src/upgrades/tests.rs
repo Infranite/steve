@@ -459,6 +459,9 @@ fn status_names_the_backup_a_failed_upgrade_recovers_from() {
     );
 }
 
+/// The signing keychain's password in these homes (ops/sign-setup.sh's form).
+const SIGNING_PASS: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
 /// A local_release install as `ops/local-release.py` leaves it: the signing identity and keychain files and
 /// a checkout. The runner job is recorded, never started.
 /// A Hub ready for a one-click local build. Only on macOS: elsewhere `runner::local_missing` names
@@ -471,7 +474,7 @@ fn local(home: &Path, repo: &Path, api_base: String) -> (Updates, Arc<Mutex<Vec<
     )
     .unwrap();
     fs::write(home.join("signing/steve-signing.keychain-db"), "").unwrap();
-    fs::write(home.join("signing/keychain-pass"), "").unwrap();
+    fs::write(home.join("signing/keychain-pass"), SIGNING_PASS).unwrap();
     fs::create_dir_all(repo.join(".git")).unwrap();
     let started = Arc::new(Mutex::new(vec![]));
     let u = Updates {
@@ -552,7 +555,7 @@ async fn local_release_upgrades_only_to_a_newer_stable_tag_one_at_a_time_outside
     let reason = u.execution_reason().unwrap();
     assert!(reason.contains("signing/keychain-pass"), "{reason}");
     assert!(u.request("0.3.0", "k0", "owner", true).is_err());
-    fs::write(home.path().join("signing/keychain-pass"), "").unwrap();
+    fs::write(home.path().join("signing/keychain-pass"), SIGNING_PASS).unwrap();
 
     // tags only: stable, strictly newer than what runs
     for refused in ["0.2.0", "0.1.9", "0.3.0-rc.1", "main", "v0.3.0+local"] {
@@ -723,6 +726,8 @@ HOME = pathlib.Path(__HOME__)
 cmd = sys.argv[1]
 if cmd == "build":
     commit, version = sys.argv[2], sys.argv[4]
+    if "--keychain-pass-stdin" in sys.argv:
+        (HOME / "got-pass").write_text(sys.stdin.readline())
     d = HOME / "releases" / f"{version}-local-{commit[:7]}"
     if (HOME / "fake-build-raced").exists():
         # another local-release.py took the lock first and is building this directory: refused untouched
@@ -820,6 +825,11 @@ fn the_runner_builds_the_tagged_commit_with_its_own_scripts_and_reports_each_res
     assert!(
         !u.dir().join(format!("runner/{}-ops", op.id)).exists(),
         "the tag's scripts are cleaned up"
+    );
+    // the signing password went to the build over its stdin, never as an argument
+    assert_eq!(
+        fs::read_to_string(home.path().join("got-pass")).unwrap(),
+        format!("{SIGNING_PASS}\n")
     );
     assert_eq!(
         sh(repo.path(), &["status", "--porcelain"]),

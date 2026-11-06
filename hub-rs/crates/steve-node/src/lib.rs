@@ -474,6 +474,18 @@ pub(crate) fn mode(harness: &str, p: PermissionMode) -> Option<String> {
     }
 }
 
+/// The `_meta` of `session/new|load` for `harness`: Claude Code is told to deny reads and edits of
+/// the Hub's secret files under `steve_home` in every permission mode. Codex gets none: a Codex
+/// permission profile with deny entries replaces the adapter's modes, and a command the user
+/// approved would then still run in the sandbox.
+pub(crate) fn harness_meta(harness: &str, steve_home: &Path) -> Option<Value> {
+    (harness == "claude-code").then(|| {
+        json!({ "claudeCode": { "options": {
+            "settings": steve_vault::harness::claude_settings(steve_home),
+        } } })
+    })
+}
+
 /// Steve's tool server for a new adapter process of `session` (a fresh token; the old ones go).
 pub(crate) fn mcp_servers(inner: &Inner, session: &SessionId) -> Value {
     let url = inner.tools_url.lock().unwrap().clone();

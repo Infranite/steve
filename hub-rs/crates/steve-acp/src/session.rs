@@ -85,6 +85,18 @@ pub async fn open(
     reports: &dyn Reports,
     strictness: Strictness,
 ) -> Result<Opened, RpcError> {
+    open_with_meta(l, c, None, reports, strictness).await
+}
+
+/// [`open`], with `meta` as the `_meta` of `session/new|load` (Claude Code's adapter reads its
+/// options there, `claudeCode.options.settings` among them).
+pub async fn open_with_meta(
+    l: &Conn,
+    c: OpenConfig<'_>,
+    meta: Option<Value>,
+    reports: &dyn Reports,
+    strictness: Strictness,
+) -> Result<Opened, RpcError> {
     let strict = strictness == Strictness::Strict;
     let init = json!({
         "protocolVersion": 1,
@@ -100,22 +112,22 @@ pub async fn open(
         .is_some_and(truthy);
     let (r, acp_id) = match c.resume {
         Some(id) => {
+            let mut p = json!({ "sessionId": id, "cwd": c.cwd, "mcpServers": c.mcp_servers });
+            if let Some(m) = &meta {
+                p["_meta"] = m.clone();
+            }
             let r = l
-                .request(
-                    "session/load",
-                    json!({ "sessionId": id, "cwd": c.cwd, "mcpServers": c.mcp_servers }),
-                    Some(Duration::from_secs(120)),
-                )
+                .request("session/load", p, Some(Duration::from_secs(120)))
                 .await?;
             (r, id.to_string())
         }
         None => {
+            let mut p = json!({ "cwd": c.cwd, "mcpServers": c.mcp_servers });
+            if let Some(m) = meta {
+                p["_meta"] = m;
+            }
             let r = l
-                .request(
-                    "session/new",
-                    json!({ "cwd": c.cwd, "mcpServers": c.mcp_servers }),
-                    Some(Duration::from_secs(120)),
-                )
+                .request("session/new", p, Some(Duration::from_secs(120)))
                 .await?;
             let id = js_str(r.get("sessionId"));
             reports.new_session(&id);

@@ -36,6 +36,7 @@ and are checked against the installed Hub and steve-keyhelper signatures before 
 Results: $STEVE_HOME/logs/release/local-<version>-<time>.json.
 """
 import argparse
+import base64
 import fcntl
 import hashlib
 import json
@@ -160,6 +161,30 @@ def sha256(path):
 
 # ── build ──
 
+SIGNING_ACCOUNT = "steve/signing/keychain-pass"  # hub-rs steve-modules vault/keystore/signing.rs
+
+
+def signing_password(ident, from_stdin=False):
+    """The signing keychain's password: the first line of stdin (the Hub's runner), the 0600 file sign-setup.sh
+    writes, or the login keychain entry the Hub moved it into (`security` asks the user for that one)."""
+    if from_stdin:
+        password = sys.stdin.readline().strip()
+        if not password:
+            raise Refused("--keychain-pass-stdin: no password on stdin")
+        return password
+    file = HOME / "signing/keychain-pass"
+    if file.exists():
+        return file.read_text().strip()
+    got = subprocess.run(["security", "find-generic-password", "-s", ident["vault_service"], "-a", SIGNING_ACCOUNT, "-w"],
+                         capture_output=True, text=True)
+    if got.returncode != 0:
+        raise Refused("no signing keychain password: not in signing/keychain-pass, and the keychain entry "
+                      f"{SIGNING_ACCOUNT} did not open (run the upgrade from Steve's settings, or allow the prompt)")
+    try:
+        return base64.b64decode(got.stdout.strip(), validate=True).hex()
+    except ValueError:
+        raise Refused(f"the keychain entry {SIGNING_ACCOUNT} is not a signing password")
+
 def build(args):
     ident = identity()
     repo = pathlib.Path(args.repo).resolve()
@@ -175,8 +200,11 @@ def build(args):
     if candidate.exists():
         raise Refused(f"{candidate} exists: inspect it rather than overwrite")
     keychain = HOME / "signing/steve-signing.keychain-db"
-    if not keychain.exists() or not (keychain.parent / "keychain-pass").exists():
+    if not keychain.exists():
         raise Refused(f"no signing keychain at {keychain} (ops/sign-setup.sh): an ad-hoc signed Hub can't read the vault")
+    # the keychain's password: from the Hub over stdin (the one-click upgrade), else signing/keychain-pass, else the
+    # key store entry the Hub moved it into (a macOS prompt: only the signed Hub reads it unasked)
+    password = signing_password(ident, from_stdin=args.keychain_pass_stdin)
     log(f"build {version} from {commit} into {candidate}")
     candidate.mkdir(parents=True)
     try:
@@ -199,7 +227,6 @@ def build(args):
         binary = candidate / "bin/steve-hub"
         binary.parent.mkdir(exist_ok=True)
         shutil.copy2(target_dir / "release/steve-hub", binary)
-        password = (keychain.parent / "keychain-pass").read_text().strip()
         unlocked = subprocess.run(["security", "unlock-keychain", "-p", password, str(keychain)], capture_output=True)
         del password
         if unlocked.returncode != 0:
@@ -231,6 +258,24 @@ def build(args):
 
 
 # ── deploy ──
+
+def private_backups():
+    """backups/ holds copies of the database: 0700, everything in it the owner's alone, also what older releases
+    left readable; the same for steve.env and its stray copies (steve.env.bak-*)."""
+    d = HOME / "backups"
+    d.mkdir(parents=True, exist_ok=True)
+    os.chmod(d, 0o700)
+    for root, dirs, files in os.walk(d):
+        for n in dirs:
+            os.chmod(os.path.join(root, n), 0o700)
+        for n in files:
+            p = os.path.join(root, n)
+            if not os.path.islink(p):
+                os.chmod(p, 0o600)
+    for p in HOME.glob("steve.env*"):
+        if p.is_file() and not p.is_symlink():
+            os.chmod(p, 0o600)
+
 
 def control(method):
     """The Hub's maintenance drain (loopback, control token)."""
@@ -412,7 +457,7 @@ def deploy(args, journal=Journal(None)):
         launchd("stop", ident)
         journal("backing_up")
         backup = HOME / f"backups/pre-{candidate.name}-{stamp}.sqlite3"
-        backup.parent.mkdir(parents=True, exist_ok=True)
+        private_backups()
         src, dst = sqlite3.connect(DB), sqlite3.connect(backup)
         try:
             src.backup(dst)
@@ -544,6 +589,8 @@ def main():
     b.add_argument("commit")
     b.add_argument("--version")
     b.add_argument("--repo", default=str(OPS.parent))
+    b.add_argument("--keychain-pass-stdin", action="store_true",
+                   help="read the signing keychain's password from the first line of stdin (the Hub's upgrade runner)")
     d = sub.add_parser("deploy")
     d.add_argument("release")
     d.add_argument("--drain-s", type=int, default=600)

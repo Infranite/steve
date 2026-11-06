@@ -1820,7 +1820,8 @@ async fn open_harness(
     }
     let seen = Seen::default();
     let mode = crate::mode(&harness, row.open.policy.permissions);
-    let handshake = acp_session::open(
+    let meta = crate::harness_meta(&harness, &inner.cfg.acp.steve_home);
+    let handshake = acp_session::open_with_meta(
         &conn,
         OpenConfig {
             client_version: &inner.cfg.acp.version,
@@ -1831,6 +1832,7 @@ async fn open_harness(
             model: row.open.choice.model.as_deref(),
             effort: row.open.choice.effort.as_deref(),
         },
+        meta,
         &seen,
         Strictness::Strict,
     );

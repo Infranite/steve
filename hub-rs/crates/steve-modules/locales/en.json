@@ -50,6 +50,7 @@
   "modules.vault.already_initialized": "The vault is already set up",
   "modules.vault.key_exists": "The keychain already holds a different master key under this name, so it wasn't overwritten",
   "modules.vault.rotating": "The master key is being rotated, please try again later",
+  "modules.vault.rotate_unreadable": "%{n} item(s) have a data key that does not open; the master key was not rotated",
   "modules.vault.bad_recovery_code": "Wrong recovery code",
   "modules.vault.locked": "The vault can't be opened right now: the Mac mini's keychain is locked",
   "modules.vault.key_missing": "The vault can't be opened right now: the master key isn't in the keychain, restore it with the recovery code",

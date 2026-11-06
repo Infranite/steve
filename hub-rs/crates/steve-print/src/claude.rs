@@ -79,7 +79,18 @@ pub fn claude_args(run: &PrintRun<'_>, stream: bool) -> Vec<String> {
     if let Some(e) = run.effort {
         a.extend(["--effort", e]);
     }
-    a.into_iter().map(String::from).collect()
+    let mut a: Vec<String> = a.into_iter().map(String::from).collect();
+    // a run that reads may not read the Hub's secret files (a call without tools reads nothing)
+    if run.tools == ToolMode::ReadOnly {
+        a.push("--settings".into());
+        a.push(deny_settings().to_string());
+    }
+    a
+}
+
+/// `--settings` of a run with tools: Claude Code denies the Hub's secret files under `STEVE_HOME`.
+pub fn deny_settings() -> Value {
+    steve_vault::harness::claude_settings(&steve_vault::harness::steve_home_from_env())
 }
 
 /// The stream-json user message of a call with images: the text, then the images as base64 blocks.
@@ -325,7 +336,9 @@ mod tests {
                 "--setting-sources",
                 "user",
                 "--effort",
-                "high"
+                "high",
+                "--settings",
+                deny_settings().to_string().as_str(),
             ]
         );
         // with images the message is not an argument: it goes to stdin
@@ -337,6 +350,24 @@ mod tests {
         assert_eq!(a[..3], ["-p", "--input-format", "stream-json"]);
         assert!(!a.contains(&"message".to_string()));
         assert!(a.contains(&GATEWAY_SYSTEM.to_string()));
+        assert!(
+            !a.contains(&"--settings".to_string()),
+            "no tools, nothing to deny"
+        );
+    }
+
+    #[test]
+    fn a_run_that_reads_is_denied_the_hubs_secret_files() {
+        let a = claude_args(&run("message", None, ToolMode::ReadOnly, &[]), false);
+        let i = a
+            .iter()
+            .position(|x| x == "--settings")
+            .expect("--settings");
+        let s: Value = serde_json::from_str(&a[i + 1]).unwrap();
+        let home = steve_vault::harness::steve_home_from_env();
+        let deny = s["permissions"]["deny"].as_array().unwrap();
+        let want = format!("Read(/{}/signing/**)", home.display());
+        assert!(deny.iter().any(|r| r == want.as_str()), "{deny:?}");
     }
 
     #[test]

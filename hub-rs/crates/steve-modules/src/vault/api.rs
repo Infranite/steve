@@ -83,13 +83,10 @@ async fn recover(
 async fn rotate(State(v): State<Vault>, who: Caller) -> VaultResult<Response> {
     let r = v.rotate(&who.ws, &who.me).await?;
     Ok(no_store(
-        StatusCode::ACCEPTED,
+        StatusCode::OK,
         code_body(
             r.recovery_code.expose(),
-            &[
-                ("job_id", json!(r.job_id)),
-                ("kek_version", json!(r.version)),
-            ],
+            &[("kek_version", json!(r.version))],
         ),
     ))
 }

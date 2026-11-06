@@ -343,38 +343,15 @@ fn moved_ciphertext_does_not_open() {
 fn rotation_rewraps_everything_and_retires_the_old_key() {
     let e = setup();
     let code1 = e.vault.init(WS, ME).expect("init");
-    // more than two batches
     let items: Vec<_> = (0..230)
         .map(|i| (e.item(&e.vault, &format!("secret-{i}")), i))
         .collect();
-    assert_eq!(
-        e.vault.rewrap(WS).expect("nothing to do"),
-        RewrapReport::default()
-    );
+    // a data key prepared before the rotation, inserted after it
+    let stale = e.vault.new_item_key(WS, "vi_stale").expect("key");
 
-    let r = e.vault.begin_rotation(WS, ME).expect("rotate");
+    let r = e.vault.rotate_now(WS, ME).expect("rotate");
     assert_eq!(r.version, 2);
-    assert!(r.job_id.starts_with("job_"));
-    let s = e.vault.status(WS).expect("status");
-    assert!(s.rotating);
-    assert_eq!(s.kek_version, Some(2));
-    assert_eq!(
-        e.vault.begin_rotation(WS, ME).err(),
-        Some(VaultError::Rotating)
-    );
-    // during the rotation: old items still readable, new items go to v2
-    assert_eq!(
-        e.read(&e.vault, &items[0].0.0, &items[0].0.1)
-            .expect("read"),
-        "secret-0"
-    );
-    let (late, late_f) = e.item(&e.vault, "late");
-
-    let rep = e.vault.rewrap(WS).expect("rewrap");
-    assert_eq!(rep.rewrapped, 230);
-    assert!(rep.failed.is_empty());
-    assert_eq!(rep.retired, vec![1]);
-
+    // done when it returns: nothing left to re-wrap, nothing rotating, the old key gone
     let rows = e.key_rows();
     assert_eq!(rows[0].status, "retired");
     assert!(rows[0].retired.is_some());
@@ -383,7 +360,27 @@ fn rotation_rewraps_everything_and_retires_the_old_key() {
         e.ks.get(&account_name(WS, 1)).expect("get").is_none(),
         "old KEK deleted"
     );
-    assert!(!e.vault.status(WS).expect("status").rotating);
+    let s = e.vault.status(WS).expect("status");
+    assert!(!s.rotating);
+    assert_eq!(s.kek_version, Some(2));
+    let on_v1: i64 = e
+        .env
+        .store()
+        .with_conn(|c| {
+            Ok(c.query_row(
+                "SELECT count(*) FROM vault_items WHERE kek_version = 1",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .expect("count");
+    assert_eq!(on_v1, 0);
+    let r2 = e
+        .env
+        .store()
+        .transaction(|tx| ensure_active(tx, WS, stale.kek_version));
+    assert_eq!(r2.err(), Some(VaultError::Rotating));
+    let (late, late_f) = e.item(&e.vault, "late");
 
     // everything readable, including after a restart (only v2 left in the key store)
     let v = e.restart();
@@ -409,14 +406,15 @@ fn rotation_rewraps_everything_and_retires_the_old_key() {
     );
 
     // and again: v3
-    let r3 = e.vault.begin_rotation(WS, ME).expect("rotate again");
-    assert_eq!(r3.version, 3);
-    assert_eq!(e.vault.rewrap(WS).expect("rewrap").retired, vec![2]);
+    let v = e.restart();
+    assert_eq!(v.rotate_now(WS, ME).expect("rotate again").version, 3);
+    assert_eq!(e.key_rows()[1].status, "retired");
+    assert!(e.ks.get(&account_name(WS, 2)).expect("get").is_none());
     assert_eq!(e.read(&e.restart(), &late, &late_f).expect("late"), "late");
 }
 
 #[test]
-fn rotation_keeps_the_old_key_when_an_item_fails() {
+fn rotation_changes_nothing_when_an_item_does_not_open() {
     let e = setup();
     e.vault.init(WS, ME).expect("init");
     let (good, gf) = e.item(&e.vault, "good");
@@ -431,19 +429,16 @@ fn rotation_keeps_the_old_key_when_an_item_fails() {
             Ok(())
         })
         .expect("corrupt");
-    e.vault.begin_rotation(WS, ME).expect("rotate");
-    let rep = e.vault.rewrap(WS).expect("rewrap");
-    assert_eq!(rep.rewrapped, 1);
-    assert_eq!(rep.failed, vec![bad.clone()]);
-    assert!(rep.retired.is_empty());
-    assert_eq!(e.key_rows()[0].status, "retiring");
+    let err = e.vault.rotate_now(WS, ME).expect_err("refused");
+    assert!(err.to_string().contains("1 个条目"), "{err}");
+    // the whole transaction rolled back, and the new key left the key store again
+    let rows = e.key_rows();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].status, "active");
+    assert!(e.ks.get(&account_name(WS, 2)).expect("get").is_none());
     assert!(e.ks.get(&account_name(WS, 1)).expect("get").is_some());
     assert_eq!(e.read(&e.restart(), &good, &gf).expect("good"), "good");
-    assert_eq!(
-        e.vault.begin_rotation(WS, ME).err(),
-        Some(VaultError::Rotating)
-    );
-    // destroying the bad item (V2's delete clears dek_wrapped) lets the rotation finish
+    // destroying the bad item (V2's delete clears dek_wrapped) lets it rotate
     e.env
         .store()
         .with_conn(|c| {
@@ -454,20 +449,55 @@ fn rotation_keeps_the_old_key_when_an_item_fails() {
             Ok(())
         })
         .expect("destroy");
-    assert_eq!(e.vault.rewrap(WS).expect("rewrap").retired, vec![1]);
+    assert_eq!(e.vault.rotate_now(WS, ME).expect("rotate").version, 2);
+    assert_eq!(e.read(&e.restart(), &good, &gf).expect("good"), "good");
 }
 
+/// What a rotation of an earlier Hub (a background re-wrap that was never resumed) left: v2 active, v1
+/// `retiring`, every item still on v1. `tidy_keys` at the next start finishes it.
 #[test]
-fn ensure_active_refuses_a_stale_version() {
+fn tidy_keys_finishes_a_rotation_an_earlier_hub_left_retiring() {
     let e = setup();
     e.vault.init(WS, ME).expect("init");
-    let stale = e.vault.new_item_key(WS, "vi_x").expect("key");
-    e.vault.begin_rotation(WS, ME).expect("rotate");
-    let r = e
-        .env
+    let items: Vec<_> = (0..3)
+        .map(|i| (e.item(&e.vault, &format!("secret-{i}")), i))
+        .collect();
+    let k2 = Kek::generate().expect("kek");
+    e.ks.set(&account_name(WS, 2), &k2).expect("store v2");
+    let fp = super::crypto::fingerprint(&k2);
+    e.env
         .store()
-        .transaction(|tx| ensure_active(tx, WS, stale.kek_version));
-    assert_eq!(r.err(), Some(VaultError::Rotating));
+        .transaction(|tx| {
+            repo::set_key_status(tx, WS, 1, repo::RETIRING, None)?;
+            repo::insert_key(tx, WS, 2, &account_name(WS, 2), &fp, repo::ACTIVE, now())?;
+            Ok::<_, VaultError>(())
+        })
+        .expect("leave it retiring");
+    assert!(e.vault.status(WS).expect("status").rotating);
+    let v = e.restart();
+    // with the keychain locked at start, nothing changes and nothing fails
+    e.ks.locked.store(true, Ordering::SeqCst);
+    v.tidy_keys().expect("tidy");
+    e.ks.locked.store(false, Ordering::SeqCst);
+    assert_eq!(e.key_rows()[0].status, "retiring");
+
+    e.restart().tidy_keys().expect("tidy");
+    let rows = e.key_rows();
+    assert_eq!(
+        (rows[0].status.as_str(), rows[1].status.as_str()),
+        ("retired", "active")
+    );
+    assert!(e.ks.get(&account_name(WS, 1)).expect("get").is_none());
+    let v = e.restart();
+    assert!(!v.status(WS).expect("status").rotating);
+    for ((item, field), i) in &items {
+        assert_eq!(
+            e.read(&v, item, field).expect("read"),
+            format!("secret-{i}")
+        );
+    }
+    // a second start has nothing to do
+    v.tidy_keys().expect("tidy again");
 }
 
 async fn send(
@@ -550,19 +580,12 @@ async fn api_status_init_recover_rotate() {
     assert_eq!((s, cc.as_deref()), (200, Some("no-store")));
     assert_eq!(b, serde_json::json!({"ok": true, "kek_version": 1}));
 
-    // rotate: 202 with a job id and a new code; the background job finishes
+    // rotate: done when it answers, with the new code
     let (s, cc, b) = send(&r, "POST", "/vault/rotate", None).await;
-    assert_eq!((s, cc.as_deref()), (202, Some("no-store")));
-    assert!(b["job_id"].as_str().expect("job").starts_with("job_"));
+    assert_eq!((s, cc.as_deref()), (200, Some("no-store")));
+    assert!(b.get("job_id").is_none());
     assert_eq!(b["kek_version"], 2);
     assert_ne!(b["recovery_code"].as_str(), Some(code.as_str()));
-    for _ in 0..200 {
-        let (_, _, s) = send(&r, "GET", "/vault/status", None).await;
-        if s["rotating"] == false {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
     assert_eq!(e.key_rows()[0].status, "retired");
     assert_eq!(
         e.read(&e.restart(), &item, &field).expect("read"),

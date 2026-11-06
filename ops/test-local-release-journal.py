@@ -90,6 +90,75 @@ class Journal(unittest.TestCase):
             holder.kill()
             holder.wait()
 
+    def test_backups_become_the_owners_alone(self):
+        b = self.home / "backups"
+        (b / "failed-probe-x").mkdir(parents=True)
+        os.chmod(b, 0o755)
+        for f in (b / "pre-0.2.1.sqlite3", b / "failed-probe-x/steve.sqlite3", self.home / "steve.env.bak-1"):
+            f.write_text("x")
+            os.chmod(f, 0o644)
+        self.module().private_backups()
+        mode = lambda p: stat.S_IMODE(p.stat().st_mode)
+        self.assertEqual((mode(b), mode(b / "failed-probe-x")), (0o700, 0o700))
+        self.assertEqual(mode(b / "pre-0.2.1.sqlite3"), 0o600)
+        self.assertEqual(mode(b / "failed-probe-x/steve.sqlite3"), 0o600)
+        self.assertEqual(mode(self.home / "steve.env.bak-1"), 0o600)
+
+
+class SigningPassword(unittest.TestCase):
+    """Where build gets the signing keychain's password: the Hub's pipe, the old file, the keychain entry. The
+    keychain is a fake `security` on PATH: the real one is never asked."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.home = pathlib.Path(self.tmp.name)
+        (self.home / "signing").mkdir()
+        self.bin = self.home / "bin"
+        self.bin.mkdir()
+        self.path = os.environ.get("PATH", "")
+        os.environ["PATH"] = f"{self.bin}:{self.path}"
+        self.m = Journal.module(self)
+        self.ident = {"vault_service": "test.steve.vault"}
+
+    def tearDown(self):
+        os.environ["PATH"] = self.path
+        self.tmp.cleanup()
+
+    def security(self, script):
+        f = self.bin / "security"
+        f.write_text("#!/bin/sh\n" + script)
+        f.chmod(0o755)
+
+    def test_the_hubs_pipe_comes_first(self):
+        import io
+        (self.home / "signing/keychain-pass").write_text("from-file\n")
+        old, sys.stdin = sys.stdin, io.StringIO("from-hub\n")
+        try:
+            self.assertEqual(self.m.signing_password(self.ident, from_stdin=True), "from-hub")
+            sys.stdin = io.StringIO("")
+            with self.assertRaises(self.m.Refused):
+                self.m.signing_password(self.ident, from_stdin=True)
+        finally:
+            sys.stdin = old
+
+    def test_an_install_not_moved_yet_uses_the_file(self):
+        self.security("exit 44\n")
+        (self.home / "signing/keychain-pass").write_text("from-file\n")
+        self.assertEqual(self.m.signing_password(self.ident), "from-file")
+
+    def test_a_moved_password_comes_from_the_keychain_entry(self):
+        pw = "0123456789abcdef" * 4
+        import base64
+        b64 = base64.b64encode(bytes.fromhex(pw)).decode()
+        args = self.home / "args"
+        self.security(f'echo "$@" > {args}\necho {b64}\n')
+        self.assertEqual(self.m.signing_password(self.ident), pw)
+        self.assertEqual(args.read_text().split(),
+                         ["find-generic-password", "-s", "test.steve.vault", "-a", "steve/signing/keychain-pass", "-w"])
+        self.security("exit 44\n")
+        with self.assertRaises(self.m.Refused):
+            self.m.signing_password(self.ident)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -195,10 +195,13 @@ pub fn local_missing(u: &Updates) -> Vec<String> {
     if identity_label(&u.home).is_err() {
         missing.push("signing/identity.json".to_owned());
     }
-    for f in ["signing/steve-signing.keychain-db", "signing/keychain-pass"] {
-        if !u.home.join(f).is_file() {
-            missing.push(f.to_owned());
-        }
+    if !u.home.join("signing/steve-signing.keychain-db").is_file() {
+        missing.push("signing/steve-signing.keychain-db".to_owned());
+    }
+    // the keychain's password: in the key store once the Hub moved it there, else still the file
+    let store = super::signing::helper(&u.home);
+    if !super::signing::present(&u.home, store.as_deref()) {
+        missing.push(super::signing::FILE.to_owned());
     }
     if !u.repo.join(".git").exists() {
         missing.push(format!("STEVE_REPO ({})", u.repo.display()));
@@ -320,6 +323,8 @@ fn job_env(u: &Updates, spec: &Spec) -> Vec<(String, String)> {
         "STEVE_PORT",
         "CARGO_HOME",
         "RUSTUP_HOME",
+        // where the runner finds steve-keyhelper for the signing password (a path, never a secret)
+        "STEVE_KEYHELPER",
     ]
     .iter()
     .filter_map(|k| std::env::var(k).ok().map(|v| ((*k).to_owned(), v)))
@@ -669,7 +674,20 @@ fn run(u: &Updates, op: &mut Operation, ops: &Path) -> Result<()> {
             candidate.display(),
             spec.cargo
         ));
-        let mut child = Command::new(&spec.python)
+        // the signing keychain's password, over a pipe: the runner is the signed Hub, the one
+        // process steve-keyhelper gives it to (a script from before this reads signing/keychain-pass)
+        let piped = fs::read_to_string(&script).is_ok_and(|s| s.contains("--keychain-pass-stdin"));
+        let pass = if piped {
+            let store = super::signing::helper(&u.home);
+            Some(
+                super::signing::password(&u.home, store.as_deref())?
+                    .context("no signing keychain password (ops/sign-setup.sh)")?,
+            )
+        } else {
+            None
+        };
+        let mut build = Command::new(&spec.python);
+        build
             .arg("-I")
             .arg(&script)
             .args([
@@ -680,9 +698,19 @@ fn run(u: &Updates, op: &mut Operation, ops: &Path) -> Result<()> {
                 "--repo",
                 &spec.repo,
             ])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .spawn()?;
+            .stdout(Stdio::piped());
+        if pass.is_some() {
+            build.arg("--keychain-pass-stdin").stdin(Stdio::piped());
+        } else {
+            build.stdin(Stdio::null());
+        }
+        let mut child = build.spawn()?;
+        if let (Some(p), Some(mut stdin)) = (pass, child.stdin.take()) {
+            use std::io::Write;
+            let line = zeroize::Zeroizing::new(format!("{}\n", p.as_str()));
+            // a script that exits before reading it only closes the pipe early
+            let _ = stdin.write_all(line.as_bytes());
+        }
         // local-release.py prints this line once it holds releases/.release.lock and has found no
         // candidate, just before it makes the directory: only then is the directory this run's
         let started = format!(
