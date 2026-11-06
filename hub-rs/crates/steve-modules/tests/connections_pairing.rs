@@ -658,3 +658,97 @@ async fn a_connection_stored_under_another_version_waits_for_a_new_authorization
     );
     assert_eq!(h.conns.check_versions().expect("check"), 0);
 }
+
+/// A connection whose adapter is not installed (its extension left the assembly) is still listed,
+/// marked not installed, under the provider of its system; testing it says why it can't be;
+/// disconnecting it works. The adapters list says who pairs with whom.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_connection_without_its_adapter_is_listed_as_not_installed() {
+    let (h, _bot, _me) = sides(Side::me("test_self", false, false, "on_me"));
+    let (s, v) = create(&h, "test_bot", json!({})).await;
+    assert_eq!(s, 200, "{v}");
+    let (s, v) = create(&h, "test_self", json!({})).await;
+    assert_eq!(s, 200, "{v}");
+    let mine = v["id"].as_str().expect("id").to_string();
+    let get = |path: String| {
+        let api = h.api.clone();
+        async move {
+            let (s, v, _) = send(&api, Some(&caller(WS, ME)), "GET", &path, None, None).await;
+            (s, v)
+        }
+    };
+    let (_, ig) = get("/connections/integrations".into()).await;
+    let adapters: Vec<&Value> = ig["providers"]
+        .as_array()
+        .expect("providers")
+        .iter()
+        .flat_map(|p| p["adapters"].as_array().expect("adapters"))
+        .collect();
+    let me = adapters
+        .iter()
+        .find(|a| a["id"] == "test_self")
+        .expect("test_self");
+    assert_eq!(
+        me["pairing"],
+        json!({"with": ["test_bot"], "required": false})
+    );
+    assert_eq!(me["channel"], Value::Null, "no channel side declared here");
+    let bot = adapters
+        .iter()
+        .find(|a| a["id"] == "test_bot")
+        .expect("test_bot");
+    assert_eq!(bot["pairing"], Value::Null);
+
+    // the adapter goes away (another id took its place)
+    h.env
+        .store()
+        .transaction(|tx| {
+            tx.execute(
+                "UPDATE connections SET adapter = 'test_gone' WHERE id = ?",
+                [&mine],
+            )?;
+            Ok::<_, steve_store::StoreError>(())
+        })
+        .expect("update");
+    let (s, one) = get(format!("/connections/{mine}")).await;
+    assert_eq!(s, 200, "{one}");
+    assert_eq!(one["installed"], false);
+    let (_, ig) = get("/connections/integrations".into()).await;
+    let listed: Vec<&Value> = ig["providers"]
+        .as_array()
+        .expect("providers")
+        .iter()
+        .flat_map(|p| p["connections"].as_array().expect("connections"))
+        .filter(|c| c["id"] == mine.as_str())
+        .collect();
+    assert_eq!(listed.len(), 1, "{ig}");
+    assert_eq!(listed[0]["installed"], false);
+    assert_eq!(listed[0]["adapter"], "test_gone");
+    assert_eq!(listed[0]["capabilities"], json!([]));
+    let (s, v, _) = send(
+        &h.api,
+        Some(&caller(WS, ME)),
+        "POST",
+        &format!("/connections/{mine}/test"),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(s, 400, "{v}");
+    assert!(
+        v["error"]
+            .as_str()
+            .is_some_and(|e| e.starts_with("适配器未安装（test_gone）")),
+        "{v}"
+    );
+    let (s, v, _) = send(
+        &h.api,
+        Some(&caller(WS, ME)),
+        "DELETE",
+        &format!("/connections/{mine}"),
+        None,
+        None,
+    )
+    .await;
+    assert!(s == 200 || s == 204, "{s} {v}");
+}

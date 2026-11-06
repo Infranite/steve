@@ -15,9 +15,10 @@ import { Select } from "@/view-shared"
 import { t as tr, useT } from "@/i18n"
 import { tm, toast } from "@/store"
 import { useBusy } from "@/accounts/load"
-import { accountsApi, CONN_STATUS } from "@/api/accounts"
+import { accountsApi, CONN_STATUS, connStatusOf } from "@/api/accounts"
+import { selfSideOf } from "@/integrations/sides"
 import { channelsApi, type ChannelAccount, type Rule, type Space } from "@/api/channels"
-import { areaLabel, feishuGrantUrl, type FeishuAppDetail, type FeishuUserDetail, type IConnection, type IInstallation, type IProvider, type MissingRow } from "@/api/integrations"
+import { areaLabel, feishuGrantUrl, type FeishuAppDetail, type FeishuUserDetail, type IAdapter, type IConnection, type IInstallation, type IProvider, type MissingRow } from "@/api/integrations"
 import { ProviderIcon } from "@/integrations/index"
 import { FeishuConnectDialog, SelfButtons } from "@/integrations/feishu"
 import { CleanupDialog, DisconnectDialog, type Leaving } from "@/integrations/disconnect"
@@ -109,16 +110,16 @@ export function InstallationCard({ inst, p, chans, onChange }: { inst: IInstalla
 function Enable({ kind, p, inst }: { kind: "steve" | "you"; p: IProvider; inst: IInstallation }) {
   const t = useT()
   const [dlg, setDlg] = useState(false)
-  const feishu = isFeishu(p.id)
+  const feishu = isFeishu(p.id), side = selfSideOf(p.adapters) as IAdapter | null
   return (
     <div className="px-4 py-4" data-identity={kind} data-identity-state="off">
-      {dlg && <FeishuConnectDialog bots={[]} onClose={() => setDlg(false)} />}
+      {dlg && <FeishuConnectDialog bots={[]} onClose={() => setDlg(false)} side={side} />}
       <div className="flex flex-wrap items-center gap-2"><span className="type-headline">{kind === "steve" ? t("integrations:inst.titleSteveBot") : t("integrations:inst.titleYouFeishu")}</span><Badge variant="outline" className="font-normal text-muted-foreground">{t("integrations:inst.optionalOff")}</Badge></div>
       <Line className="mt-1">{kind === "you"
         ? t("integrations:inst.enableYou")
         : t("integrations:inst.enableSteve")}</Line>
-      {feishu && <div className="mt-3 flex flex-wrap gap-2">{kind === "you"
-        ? <SelfButtons app={inst.id} variant="outline" />
+      {feishu && (kind === "steve" || side) && <div className="mt-3 flex flex-wrap gap-2">{kind === "you"
+        ? <SelfButtons app={inst.id} variant="outline" side={side} />
         : <Button size="sm" variant="outline" onClick={() => setDlg(true)} data-enable-bot>{t("integrations:inst.enableBot")}</Button>}</div>}
       {kind === "you" && feishu && <div className="mt-2 type-footnote text-muted-foreground">{t("integrations:inst.enableYouNote")}</div>}
     </div>
@@ -128,7 +129,7 @@ function Enable({ kind, p, inst }: { kind: "steve" | "you"; p: IProvider; inst: 
 /* ───────── one identity ───────── */
 function Identity({ kind, c, p, chan, app, appConn, onLeave }: { kind: "steve" | "you"; c: IConnection; p: IProvider; chan: ChannelAccount | null; app?: FeishuAppDetail; appConn?: IConnection; onLeave: () => void }) {
   const t = useT()
-  const feishu = isFeishu(p.id), [s, dot] = CONN_STATUS[c.status] ?? [c.status, "idle"], [clean, setClean] = useState(false)
+  const feishu = isFeishu(p.id), [s, dot] = connStatusOf(c), [clean, setClean] = useState(false)
   const name = c.name || c.handle
   const live = c.capabilities.filter((a) => a.state !== "planned"), planned = c.capabilities.filter((a) => a.state === "planned")
   const channelHref = live.some((a) => a.area === "channel") ? "#/channels/acc/" + c.id : "#/accounts/" + c.account_id
@@ -145,7 +146,8 @@ function Identity({ kind, c, p, chan, app, appConn, onLeave }: { kind: "steve" |
           <span className="inline-flex items-center gap-1 type-footnote text-muted-foreground"><StatusDot s={dot} />{s}</span></div>
         <Line className="mt-1">{what}</Line>
       </div>
-      {c.status === "reauth" && <Blocked data-blocked="reauth">{kind === "you" ? t("integrations:inst.reauthYou") : t("integrations:inst.reauthSteve")}</Blocked>}
+      {c.installed === false && <Blocked data-blocked="not_installed">{t("api:notInstalledNote")}</Blocked>}
+      {c.installed !== false && c.status === "reauth" && <Blocked data-blocked="reauth">{kind === "you" ? t("integrations:inst.reauthYou") : t("integrations:inst.reauthSteve")}</Blocked>}
       {c.status === "paused" && <Blocked data-blocked="paused">{t("integrations:inst.paused")}</Blocked>}
       {c.status === "error" && <Blocked data-blocked="error">{c.health.last_error ? t("integrations:inst.errorWith", { error: c.health.last_error }) : t("integrations:inst.errorPlain")}</Blocked>}
       <Group>
@@ -157,7 +159,7 @@ function Identity({ kind, c, p, chan, app, appConn, onLeave }: { kind: "steve" |
         <Row title={t("integrations:inst.owner")} data-conn-owner><OwnerChip objectType="connection" objectId={c.id} /></Row>
       </Group>
       <Capabilities c={c} kind={kind} feishu={feishu} planned={planned.map((a) => areaLabel(a.area))} />
-      {feishu && (kind === "steve" ? <BotPermissions c={c} app={app} /> : <UserPermissions c={c} app={app} appConn={appConn} />)}
+      {feishu && c.installed !== false && (kind === "steve" ? <BotPermissions c={c} app={app} /> : <UserPermissions c={c} app={app} appConn={appConn} side={selfSideOf(p.adapters) as IAdapter | null} />)}
       {!feishu && missingOf(c).length > 0 && <Blocked>{t("integrations:inst.missingScopes", { list: join(missingOf(c).map((m) => m.scope)) })}</Blocked>}
       {c.warning && <Blocked data-blocked="warning">{c.warning}</Blocked>}
       {clean && <CleanupDialog target={{ connection_id: c.id }} name={name} onClose={() => setClean(false)} onDone={() => setClean(false)} />}
@@ -276,7 +278,7 @@ function BotPermissions({ c, app }: { c: IConnection; app?: FeishuAppDetail }) {
 }
 
 /** your permissions: re-authorize with the missing scopes; the console link when the app hasn't enabled them */
-function UserPermissions({ c, app, appConn }: { c: IConnection; app?: FeishuAppDetail; appConn?: IConnection }) {
+function UserPermissions({ c, app, appConn, side }: { c: IConnection; app?: FeishuAppDetail; appConn?: IConnection; side?: IAdapter | null }) {
   const t = useT()
   const rows = missingOf(c), d = userOf(c), via = d?.app_connection ?? appConn?.id
   const need = rows.length > 0 || c.status === "reauth"
@@ -286,7 +288,7 @@ function UserPermissions({ c, app, appConn }: { c: IConnection; app?: FeishuAppD
       <div className="type-callout font-medium">{rows.length ? t("integrations:inst.youMissing", { count: rows.length }) : t("integrations:inst.reauthExpired")}</div>
       {rows.length > 0 && <MissingList rows={rows} />}
       <div className="flex flex-wrap items-center gap-2">
-        <SelfButtons app={via ?? ""} disabled={!via} label={t("integrations:inst.reauth")} scopes={rows.map((x) => x.scope)} reauthOf={c.id} />
+        <SelfButtons app={via ?? ""} disabled={!via} label={t("integrations:inst.reauth")} scopes={rows.map((x) => x.scope)} reauthOf={c.id} side={side} />
         <span className="type-footnote text-muted-foreground">{rows.length ? t("integrations:inst.reauthMissing") : t("integrations:inst.reauthToken")}</span>
       </div>
       {rows.length > 0 && app && <div className="type-footnote text-muted-foreground"><Trans t={t} i18nKey="integrations:inst.consoleHint" components={{ a: <a className="text-blue hover:underline" href={feishuGrantUrl(app.domain, app.app_id, rows.map((x) => x.scope), false)} target="_blank" rel="noreferrer noopener" data-user-grant-link /> }} /></div>}

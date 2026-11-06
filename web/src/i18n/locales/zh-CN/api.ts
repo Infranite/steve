@@ -34,7 +34,10 @@ export default {
     error: "出错了",
     paused: "已暂停",
     revoked: "已断开",
+    notInstalled: "适配器未安装",
   },
+  /* a connection whose adapter this Hub doesn't have (its extension isn't assembled) */
+  notInstalledNote: "这个连接的适配器没有安装：可以断开，装回适配器之前不能测试或重新授权，期间令牌不会刷新，装回后可能要重新授权。群、消息和联系人都还在。",
   /* disclosure levels (api/channels.ts, api/knowledge.ts): the name and what it allows */
   level: {
     public: "公开",

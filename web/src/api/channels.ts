@@ -76,6 +76,8 @@ export type ChannelAccount = {
   /** whether this Hub can change the account's persona, rules and trigger (`PATCH /channels/:id`) */
   editable: boolean
   spaces: Space[]; permissions: PermissionCheck[] | null
+  /** how its messages come in, as its side declares (`poll`, `long_connection`…); `null` when the Hub doesn't say */
+  receive?: string | null
 }
 
 export type FeishuRegistration = {
@@ -85,14 +87,14 @@ export type FeishuRegistration = {
   connection_id?: string; account_id?: string; error?: string; error_kind?: string; app_may_exist?: boolean
 }
 
-export const FEISHU_APP = "feishu_app", FEISHU_USER = "feishu_user"
+export const FEISHU_APP = "feishu_app"
 type Providers = ReturnType<typeof providerByAdapter>
 /** the integrations list's view of the adapters; `{}` on a Hub without it */
 const providers = (): Promise<Providers> => integrationsApi.all().then(providerByAdapter, () => ({}))
 const MSG = ["msg.receive", "msg.send", "msg.send_as_user"]
 /** a connection that carries messages: its adapter has the 渠道 area, or (older Hubs) it has a message cap */
 export const isChannelConn = (c: RConnection, ps: Providers = {}) => ps[c.adapter]?.channel ?? [...c.caps, ...c.available_caps].some((x) => MSG.includes(x))
-const modeOf = (c: RConnection, ps: Providers): "bot" | "self" => (ps[c.adapter]?.identity === "self" || c.adapter === FEISHU_USER ? "self" : "bot")
+const modeOf = (c: RConnection, ps: Providers): "bot" | "self" => (ps[c.adapter]?.identity === "self" ? "self" : "bot")
 /** the verify result, wherever the Hub puts it on a connection */
 export const permissionsOf = (x: unknown): PermissionCheck[] | null => { const o = x as any; const p = o?.permissions ?? o?.config?.permissions; return Array.isArray(p) ? p : null }
 
@@ -104,7 +106,7 @@ function personaOfAccount(ps: Persona[], account: string): PersonaRef | null {
 /** the account's rules as the spaces that follow it see them */
 const inheritedRules = (ss: Space[]) => ss.find((s) => s.rules === null)?.effective_rules ?? null
 
-type SpecAccount = { connection_id: string; persona: PersonaRef | null; rules: Rule[]; trigger: Trigger | null }
+type SpecAccount = { connection_id: string; persona: PersonaRef | null; rules: Rule[]; trigger: Trigger | null; receive?: string | null }
 
 async function compose(c: RConnection, ps: Persona[], all: Space[], pv: Providers): Promise<ChannelAccount> {
   const [account, spec] = await Promise.all([accountsApi.account(c.account_id), optional(get<SpecAccount>("/channels/" + e(c.id)))])
@@ -113,7 +115,7 @@ async function compose(c: RConnection, ps: Persona[], all: Space[], pv: Provider
   const persona = mode === "self" ? null : spec ? spec.persona : personaOfAccount(ps, c.account_id)
   return {
     connection: c, account, mode, name: account.display_name || account.handle, provider, persona, personaBot: persona ? ps.find((p) => p.id === persona.id)?.bot_id ?? null : null,
-    rules: spec?.rules ?? inheritedRules(spaces), trigger: spec?.trigger ?? null, editable: !!spec, spaces, permissions: permissionsOf(spec) ?? permissionsOf(c),
+    rules: spec?.rules ?? inheritedRules(spaces), trigger: spec?.trigger ?? null, editable: !!spec, spaces, permissions: permissionsOf(spec) ?? permissionsOf(c), receive: spec?.receive ?? null,
   }
 }
 

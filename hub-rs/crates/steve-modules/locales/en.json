@@ -239,6 +239,7 @@
   "modules.connections.no_device_flow": "%{provider} doesn't support device code sign-in",
   "modules.connections.needs_reauth": "This connection needs to be authorized again, credentials can't be entered directly",
   "modules.connections.revoked": "This connection has already been disconnected",
+  "modules.connections.not_installed": "Adapter not installed (%{adapter}): it can be tested and re-authorized once the adapter is back; you can disconnect it meanwhile",
   "modules.connections.pair.not_paired": "This kind of connection doesn't pair with another one",
   "modules.connections.pair.wrong": "%{name} can't be paired with this connection",
   "modules.connections.pair.revoked": "The connection to pair with has been disconnected",

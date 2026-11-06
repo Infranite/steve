@@ -33,7 +33,9 @@ export default {
     error: "Error",
     paused: "Paused",
     revoked: "Disconnected",
+    notInstalled: "Adapter not installed",
   },
+  notInstalledNote: "This connection's adapter isn't installed: you can disconnect it, but it can't be tested or reauthorized until the adapter is back. Its tokens aren't refreshed meanwhile, so it may need reauthorizing then. Its groups, messages and contacts stay.",
   level: {
     public: "Public",
     publicSub: "Original text and details can be shared",
