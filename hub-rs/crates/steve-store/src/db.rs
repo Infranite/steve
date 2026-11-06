@@ -91,6 +91,8 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/039.sql"),
     // 40: Node jobs (think calls, research runs), their one-model attempts, and commands that target them (N0d).
     include_str!("../migrations/040.sql"),
+    // 41: an extension adapter's own poll cursors (`chan_cursors.token`).
+    include_str!("../migrations/041.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).

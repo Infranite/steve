@@ -157,6 +157,8 @@ pub struct Built {
     pub jobs: Vec<Job>,
     /// Recalls a channel message (YOLO's `recall` undo).
     pub recall: Arc<dyn steve_core::yolo::undo::Recall>,
+    /// What runs for each connection of an adapter with a hook (started by one of `jobs`).
+    pub lifecycle: Option<steve_channels::lifecycle::ConnectionRuntime>,
 }
 
 /// The objects the event producers call, exactly as wired: G2's sink, E1's events, C1's inbound.
@@ -573,9 +575,22 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
             declared.feishu_user.clone(),
         ))
         .merge(super::chan::routes(channels.clone(), outbox.clone()));
-    let (routes, ext_jobs) = assembly
-        .start(&started, routes)
+    let crate::extension::StartedAll {
+        routes,
+        jobs: ext_jobs,
+        hooks,
+    } = assembly
+        .start(&started, &declared, routes)
         .map_err(|e| BackendError::msg(e.to_string()))?;
+    // what runs for each connection of an adapter with a hook: the events are tapped now, before
+    // the runtime lists the connections
+    let lifecycle = (!hooks.is_empty()).then(|| {
+        let mut rt = steve_channels::lifecycle::ConnectionRuntime::builder(channels.clone());
+        for h in hooks {
+            rt = rt.hook(&h.adapter, h.decl, h.hook);
+        }
+        (rt.build(), bus.tap(&["connection"]))
+    });
     let routes = routes
         .with_state(modules.clone())
         .merge(steve_modules::vault::routes(vault.clone()))
@@ -629,9 +644,16 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
         Box::pin(steve_flow::retention::run(flow.clone())),
         Box::pin(steve_channels::messages::retention(modules.clone())),
     ];
-    // the extensions' (built in: Feishu app registrations resumed, the Feishu long connections
-    // and self pollers)
+    // the extensions' (built in: Feishu app registrations resumed) and the connection runtime
+    // (built in: the Feishu long connections and self pollers)
     jobs.extend(ext_jobs);
+    let lifecycle = lifecycle.map(|(rt, events)| {
+        let run = rt.clone();
+        jobs.push(Box::pin(async move {
+            let _ = run.start(events).await;
+        }));
+        rt
+    });
     let seams = Seams {
         flow: flow.clone(),
         github: gh_sink,
@@ -706,5 +728,6 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
             ch: channels.clone(),
             outbox: outbox.clone(),
         }),
+        lifecycle,
     })
 }

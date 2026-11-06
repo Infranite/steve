@@ -527,6 +527,14 @@ impl ConnectionProvider for FeishuUser {
     fn caps(&self) -> &[&'static str] {
         &["msg.receive", "msg.send_as_user"]
     }
+    /// Paired with the bot of the same app (`config.app_connection`); not required: the device flow
+    /// signs you in without one.
+    fn pairing(&self) -> Option<steve_modules::accounts::connections::Pairing> {
+        Some(steve_modules::accounts::connections::Pairing {
+            with: vec![APP_ADAPTER.to_string()],
+            required: false,
+        })
+    }
     fn integration(&self) -> Integration {
         user_integration()
     }

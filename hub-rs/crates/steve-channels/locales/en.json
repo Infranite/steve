@@ -112,5 +112,8 @@
   "channels.rules.act.draft": "draft for your approval",
   "channels.rules.act.record": "only record",
   "channels.rules.act.create_item": "create an item",
-  "channels.rules.act.handoff": "hand off to you"
+  "channels.rules.act.handoff": "hand off to you",
+  "channels.error.run_stopped": "This run of the connection has stopped and no longer takes messages",
+  "channels.error.cursor_not_ext": "The cursor “%{container}” does not belong to this adapter",
+  "channels.error.run_panicked": "The task receiving messages stopped unexpectedly; it is retried shortly"
 }
