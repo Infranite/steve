@@ -1225,34 +1225,7 @@ async fn secrets_always_grants_normal_items_never_high_ones() {
     assert_eq!(got.lock().unwrap().len(), 2);
 
     // a high item: approve each time, no grant offered
-    let shared = vault
-        .list_vaults(WS, ME)
-        .unwrap()
-        .into_iter()
-        .find(|v| v.scope == "shared")
-        .unwrap()
-        .id;
-    let high = vault
-        .create_item(
-            WS,
-            ME,
-            NewItem {
-                vault_id: shared,
-                template: "api_credential".into(),
-                title: "要紧的令牌".into(),
-                site: Some("api.test".into()),
-                account_id: None,
-                sensitivity: Some("high".into()),
-                fields: vec![NewField {
-                    label: "令牌".into(),
-                    kind: "password".into(),
-                    secret: false,
-                    value: Zeroizing::new(TOKEN.into()),
-                }],
-            },
-        )
-        .unwrap()
-        .id;
+    let high = high_item(&vault);
     let f2 = create_flow(&e, "要紧", one_node("http", "查询报销单", cfg(&high))).await;
     let run = start(&e, &f2, json!({})).await;
     assert_eq!(settled(&e, &run).await, "waiting");
@@ -1289,6 +1262,128 @@ async fn an_approve_node_on_the_path_releases_the_secrets() {
         open_gate(&e, &run).is_none(),
         "no second card for the secret"
     );
+    assert_eq!(got.lock().unwrap().len(), 1);
+}
+
+/// A `high` item in the shared vault with a 令牌 field.
+fn high_item(vault: &Vault) -> String {
+    let shared = vault
+        .list_vaults(WS, ME)
+        .unwrap()
+        .into_iter()
+        .find(|v| v.scope == "shared")
+        .unwrap()
+        .id;
+    vault
+        .create_item(
+            WS,
+            ME,
+            NewItem {
+                vault_id: shared,
+                template: "api_credential".into(),
+                title: "要紧的令牌".into(),
+                site: Some("api.test".into()),
+                account_id: None,
+                sensitivity: Some("high".into()),
+                fields: vec![NewField {
+                    label: "令牌".into(),
+                    kind: "password".into(),
+                    secret: false,
+                    value: Zeroizing::new(TOKEN.into()),
+                }],
+            },
+        )
+        .unwrap()
+        .id
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn always_on_an_effect_with_secrets_grants_the_secrets_too() {
+    let Env { e, item, vault, .. } = env();
+    let (port, got) = server().await;
+    let cfg = |item: &str| {
+        json!({
+            "method": "POST",
+            "url": format!("http://api.test:{port}/claims"),
+            "effect": true,
+            "headers": {"Authorization": format!("Bearer {{{{secrets.{item}.令牌}}}}")},
+        })
+    };
+    let f = create_flow(
+        &e,
+        "提交报销",
+        one_node("http", "提交到报销系统", cfg(&item)),
+    )
+    .await;
+    let run = start(&e, &f, json!({})).await;
+    assert_eq!(settled(&e, &run).await, "waiting");
+    let (dec, _, _) = open_gate(&e, &run).expect("an approval");
+    assert_eq!(
+        options_of(&e, &dec),
+        vec!["执行", steve_flow::engine::GATE_ALWAYS, "不执行"]
+    );
+    answer(&e, &dec, steve_flow::engine::GATE_ALWAYS).await;
+    assert_eq!(settled(&e, &run).await, "done");
+    let n: i64 = q(
+        &e,
+        "SELECT COUNT(*) FROM grants WHERE subject_type = 'flow' AND subject_id = ? AND decision_id = ?
+           AND ((capability = 'http.effect' AND resource_id = 'api.test')
+             OR (capability = 'secret.use' AND resource_id = ?))",
+        params![f, dec, item],
+    );
+    assert_eq!(n, 2, "the host and the secret");
+
+    // the next run of the same version: no card at all
+    let run2 = start(&e, &f, json!({})).await;
+    assert_eq!(settled(&e, &run2).await, "done");
+    assert!(open_gate(&e, &run2).is_none());
+    assert_eq!(got.lock().unwrap().len(), 2);
+    assert_eq!(
+        got.lock().unwrap()[1].2["authorization"],
+        format!("Bearer {TOKEN}")
+    );
+
+    // a high item: the effect's card offers no grant
+    let high = high_item(&vault);
+    let f2 = create_flow(&e, "要紧", one_node("http", "提交", cfg(&high))).await;
+    let run = start(&e, &f2, json!({})).await;
+    assert_eq!(settled(&e, &run).await, "waiting");
+    let (dec, _, _) = open_gate(&e, &run).expect("an approval");
+    assert_eq!(options_of(&e, &dec), vec!["执行", "不执行"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_approve_node_does_not_release_a_high_item() {
+    let Env { e, vault, .. } = env();
+    let (port, got) = server().await;
+    let high = high_item(&vault);
+    let graph = json!({
+        "nodes": [
+            {"id": "t", "kind": "trigger", "config": {"source": "manual"}},
+            {"id": "a", "kind": "approve", "title": "要查吗", "config": {"question": "要查吗？", "options": ["查", "不查"]}},
+            {"id": "n", "kind": "http", "title": "查询报销单", "config": {
+                "url": format!("http://api.test:{port}/echo"),
+                "headers": {"Authorization": format!("Bearer {{{{secrets.{high}.令牌}}}}")},
+            }}
+        ],
+        "edges": [{"from": "t", "to": "a"}, {"from": "a", "to": "n", "label": "查"}]
+    });
+    let f = create_flow(&e, "要紧", graph).await;
+    let run = start(&e, &f, json!({})).await;
+    assert_eq!(settled(&e, &run).await, "waiting");
+    let dec: String = q(
+        &e,
+        "SELECT id FROM decisions WHERE subject_type = 'flow_step' AND subject_id = ? AND status = 'open'",
+        [format!("{run}:a")],
+    );
+    answer(&e, &dec, "查").await;
+    // the step's own card, naming the item
+    assert_eq!(settled(&e, &run).await, "waiting");
+    let (dec, question, _) = open_gate(&e, &run).expect("the step's own card");
+    assert!(question.contains("要紧的令牌"), "{question}");
+    assert!(got.lock().unwrap().is_empty());
+    answer(&e, &dec, "执行").await;
+    assert_eq!(settled(&e, &run).await, "done");
     assert_eq!(got.lock().unwrap().len(), 1);
 }
 

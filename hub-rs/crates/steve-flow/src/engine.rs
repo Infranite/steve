@@ -550,13 +550,14 @@ async fn drive_inner(cx: &FlowCx, run_id: &str) -> FlowResult<RunStatus> {
                     rcx.effects.outcome = Some("need".into());
                     rcx.effects.label = Some(format!("等你批准：{}", node.name()));
                     let note = kind.gate_note(&rcx, &node.config);
+                    let grants = kind.gate_grants(&rcx, &node.config).unwrap_or_default();
                     Step::Wait(Box::new(gate_wait(
                         &run,
                         &flow_name,
                         node,
                         &rcx.render_value(&node.config, &input),
                         note.as_deref(),
-                        grant.as_ref(),
+                        &grants,
                     )))
                 }
             }
@@ -755,9 +756,8 @@ fn gate_wait(
     node: &crate::graph::Node,
     cfg: &Value,
     note: Option<&str>,
-    grant: Option<&crate::nodes::Grant>,
+    grants: &[crate::nodes::Grant],
 ) -> WaitSpec {
-    let grants: Vec<crate::nodes::Grant> = grant.into_iter().cloned().collect();
     let draft: String = serde_json::to_string_pretty(cfg)
         .unwrap_or_default()
         .chars()
@@ -766,7 +766,7 @@ fn gate_wait(
     WaitSpec {
         mode: "decision",
         until: None,
-        matcher: gate_matcher(&grants),
+        matcher: gate_matcher(grants),
         decision: Some(NewDecision {
             workspace_id: run.workspace_id.clone(),
             kind: "approve".into(),

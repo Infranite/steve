@@ -497,6 +497,47 @@ impl NodeKind for Http {
         Some(Grant::new("http.effect", "host", &host_of(cfg)?))
     }
 
+    /// The host grant, and a `secret.use` grant for each item the step uses that no grant covers
+    /// yet; `None` when the host is templated or an item is not grantable (`high`, bank card,
+    /// unreadable).
+    fn gate_grants(&self, cx: &RunCx<'_>, cfg: &Value) -> Option<Vec<Grant>> {
+        let mut grants = vec![self.grant(cfg)?];
+        let mut items: Vec<String> = Vec::new();
+        for (item, _) in secret_refs(cfg) {
+            if !items.contains(&item) {
+                items.push(item);
+            }
+        }
+        if items.is_empty() {
+            return Some(grants);
+        }
+        let vault = self.vault.as_ref()?;
+        let (_, owner) = flow_meta(cx);
+        for item in &items {
+            let c = vault
+                .check_flow_use(&FlowSecretRequest {
+                    ws: &cx.run.workspace_id,
+                    flow_id: &cx.run.flow_id,
+                    flow_version: cx.run.flow_version,
+                    flow_owner: &owner,
+                    run_id: &cx.run.id,
+                    item_id: item,
+                    labels: &[],
+                    purpose: "",
+                    command: "",
+                    approved: false,
+                })
+                .ok()?;
+            if !c.grantable {
+                return None;
+            }
+            if c.grant_id.is_none() {
+                grants.push(Grant::new("secret.use", "vault_item", item));
+            }
+        }
+        Some(grants)
+    }
+
     /// “会用到机密：<条目>·<字段>、…”: the secrets approving this step releases, in template order,
     /// once each. <条目> is the vault item's title (what you see in the vault), or the reference as
     /// written when the item can't be read.
@@ -686,13 +727,14 @@ impl NodeKind for Http {
                 return NodeOutcome::Fail(NO_VAULT.into());
             };
             let (flow_name, owner) = flow_meta(cx);
-            // your approval of this step, or an `approve` node earlier on the path
-            let approved = cx.run.context["approved"][&cx.node.id] == json!(true)
-                || cx
-                    .run
-                    .context
-                    .get("approved_by")
-                    .is_some_and(|v| !v.is_null());
+            // your approval of this step; an `approve` node earlier on the path stands in for it
+            // only for grantable items (its card names neither the secrets nor the host)
+            let step_approved = cx.run.context["approved"][&cx.node.id] == json!(true);
+            let path_approved = cx
+                .run
+                .context
+                .get("approved_by")
+                .is_some_and(|v| !v.is_null());
             let mut items: Vec<(String, Vec<String>)> = Vec::new();
             for r in &sw.refs {
                 match items.iter_mut().find(|(i, _)| *i == r.item) {
@@ -719,18 +761,22 @@ impl NodeKind for Http {
                 labels: &[],
                 purpose: &purpose,
                 command: &command,
-                approved,
+                approved: step_approved,
             };
             let mut need: Vec<String> = Vec::new();
             let mut grants: Vec<Grant> = Vec::new();
             let mut all_grantable = true;
+            // per item: does the path's approval release it
+            let mut by_path: Vec<bool> = Vec::new();
             for (item, labels) in &items {
-                match vault.check_flow_use(&FlowSecretRequest {
+                let check = vault.check_flow_use(&FlowSecretRequest {
                     item_id: item,
                     labels,
                     ..base.clone()
-                }) {
-                    Ok(c) if c.allowed => {}
+                });
+                by_path.push(matches!(&check, Ok(c) if c.grantable && path_approved));
+                match check {
+                    Ok(c) if c.allowed || (c.grantable && path_approved) => {}
                     Ok(c) => {
                         all_grantable &= c.grantable;
                         grants.push(Grant::new("secret.use", "vault_item", item));
@@ -756,10 +802,11 @@ impl NodeKind for Http {
                     cx, &flow_name, &need, draft, &grants,
                 )));
             }
-            for (item, labels) in &items {
+            for ((item, labels), path) in items.iter().zip(&by_path) {
                 match vault.use_for_flow(&FlowSecretRequest {
                     item_id: item,
                     labels,
+                    approved: step_approved || *path,
                     ..base.clone()
                 }) {
                     Ok(FlowSecretOutcome::Released { use_id, values: vs }) => {
