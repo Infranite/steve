@@ -201,6 +201,7 @@ impl Assembly {
             profiles: Vec::new(),
             act_as_user: Vec::new(),
             media: Vec::new(),
+            history: Vec::new(),
             mail: Vec::new(),
             event_sources: Vec::new(),
             systems: Vec::new(),
@@ -312,6 +313,7 @@ pub struct Declare<'a> {
     pub(crate) profiles: Vec<Arc<dyn ProfileAdapter>>,
     pub(crate) act_as_user: Vec<Arc<dyn ActAsUser>>,
     pub(crate) media: Vec<Arc<dyn MediaFetch>>,
+    pub(crate) history: Vec<Arc<dyn steve_channels::ext::HistoryRead>>,
     pub(crate) mail: Vec<Arc<dyn steve_mail::MailAdapter>>,
     pub(crate) event_sources: Vec<Arc<dyn steve_flow::EventAdapter>>,
     /// Handle systems declared by the extensions: `(id, label, extension)`.
@@ -344,6 +346,7 @@ impl Declare<'_> {
         self.profiles.extend(side.profiles);
         self.act_as_user.extend(side.act_as_user);
         self.media.extend(side.media);
+        self.history.extend(side.history);
         Ok(())
     }
 

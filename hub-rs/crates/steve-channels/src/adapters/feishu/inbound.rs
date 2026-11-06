@@ -415,6 +415,9 @@ pub fn parse_receive(env: &Value, bot_open_id: &str) -> Result<Option<InboundMes
     let thread_key = opt(m, "thread_id")
         .or_else(|| opt(m, "root_id"))
         .unwrap_or_else(|| message_id.to_string());
+    let created = ms(m, "create_time")
+        .or_else(|| ms(header, "create_time"))
+        .unwrap_or_else(steve_store::now);
     Ok(Some(InboundMessage {
         space_ext_id: chat_id.into(),
         space_kind: match s(m, "chat_type") {
@@ -439,12 +442,11 @@ pub fn parse_receive(env: &Value, bot_open_id: &str) -> Result<Option<InboundMes
         text,
         attachments,
         mentions,
-        created: ms(m, "create_time")
-            .or_else(|| ms(header, "create_time"))
-            .unwrap_or_else(steve_store::now),
+        created,
         via: Some("ws".into()),
         raw: env.clone(),
         source_id: None,
+        edited: edited_at(ms(m, "update_time"), created),
     }))
 }
 
@@ -789,6 +791,12 @@ impl LongConnections {
             None => false,
         }
     }
+}
+
+/// Feishu's `update_time` as the time of an edit: only when it is later than the create time (an
+/// unedited message carries its create time there).
+pub(crate) fn edited_at(update: Option<i64>, created: i64) -> Option<i64> {
+    update.filter(|u| *u > created + 1000)
 }
 
 #[cfg(test)]

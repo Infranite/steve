@@ -23,6 +23,7 @@ const READ_ONLY: &[&str] = &[
     "steve_knowledge_get",
     "steve_contacts_search",
     "steve_contact_get",
+    "steve_im_read",
 ];
 
 impl ToolService {

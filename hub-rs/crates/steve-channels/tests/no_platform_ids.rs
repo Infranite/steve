@@ -51,6 +51,8 @@ fn setup(precision: i64) -> H {
         flow_setup.register(r);
         connections::register(r);
     });
+    // the Hub's clock where the messages are: they are news, not history
+    env.clock.set(T);
     let keys = tempfile::tempdir().expect("tmp");
     let vault = Vault::new(
         env.store().clone(),

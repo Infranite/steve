@@ -93,6 +93,11 @@ pub struct AccountOut {
     pub send_delay_s: Option<i64>,
     /// The window it has now: the setting, or the identity's default (bot 3 s, you 10 s).
     pub send_delay_default_s: i64,
+    /// How late a message may arrive and still be acted on, in minutes.
+    pub late_minutes: i64,
+    /// Messages only recorded as history: `{before, late, at}` (written before the connection was
+    /// on, arrived too late, the last one's time).
+    pub history: Value,
 }
 
 /// `system` and `provider` of an adapter: its provider's integration (the adapters of one provider
@@ -252,6 +257,18 @@ pub fn out(
         params![ws, conn],
         |r| r.get(0),
     )?;
+    let (late_ms, before, late, at): (Option<i64>, i64, i64, Option<i64>) = c
+        .query_row(
+            "SELECT late_ms, history_before, history_late, history_at FROM channel_settings WHERE connection_id = ?",
+            [conn],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .optional()?
+        .unwrap_or((None, 0, 0, None));
+    let late_minutes = late_ms
+        .filter(|l| crate::inbound::LATE_MS.contains(l))
+        .unwrap_or(crate::inbound::DEFAULT_LATE_MS)
+        / 60_000;
     let (system, provider) = provider_of(ch, &f.adapter);
     let platform_name = match mode {
         Mode::Bot => format!("{}（应用机器人）", f.name),
@@ -301,6 +318,8 @@ pub fn out(
         revision,
         send_delay_s,
         send_delay_default_s: crate::outbound::default_send_delay_ms(mode) / 1000,
+        late_minutes,
+        history: json!({"before": before, "late": late, "at": at}),
     })
 }
 
@@ -369,6 +388,8 @@ pub struct ChannelPatch {
     /// The undo window in seconds (0–60); `null` puts back the identity's default.
     #[serde(default, deserialize_with = "present")]
     pub send_delay_s: Option<Option<i64>>,
+    /// How late a message may arrive and still be acted on, in minutes (1 … 10080; default 30).
+    pub late_minutes: Option<i64>,
 }
 
 /// A key that is there, `null` included (`Some(None)`); absent stays `None`.
@@ -411,6 +432,12 @@ impl ChannelPatch {
         if let Some(Some(d)) = self.send_delay_s {
             c.that("send_delay_s", (0..=60).contains(&d));
         }
+        if let Some(m) = self.late_minutes {
+            c.that(
+                "late_minutes",
+                crate::inbound::LATE_MS.contains(&m.saturating_mul(60_000)),
+            );
+        }
         if let Some(t) = &self.trigger {
             if let Some(w) = &t.words {
                 c.that("trigger.words", w.len() <= 10);
@@ -432,6 +459,7 @@ impl ChannelPatch {
             ("trigger", self.trigger.is_some()),
             ("persona_id", self.persona_id.is_some()),
             ("send_delay_s", self.send_delay_s.is_some()),
+            ("late_minutes", self.late_minutes.is_some()),
         ]
         .into_iter()
         .filter_map(|(k, on)| on.then_some(k))
@@ -566,6 +594,12 @@ pub fn patch(
             conn
         ],
     )?;
+    if let Some(m) = p.late_minutes {
+        tx.execute(
+            "UPDATE channel_settings SET late_ms = ? WHERE connection_id = ?",
+            params![m * 60_000, conn],
+        )?;
+    }
     let snap = |persona: &Option<String>,
                 duty: &str,
                 rules: &Value,

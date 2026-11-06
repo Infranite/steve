@@ -1459,6 +1459,8 @@ impl Connections {
                 put_key(&mut c.config, CONFIG_VERSION_KEY, version);
                 c.health = health;
                 repo::update(tx, &c, now)?;
+                // connected again: what it missed meanwhile is history, not news
+                repo::set_enabled_at(tx, &c.id, now)?;
                 self.settle_decision(tx, ws, &c.id, json!({"reauthorized": true}))?;
                 base::audit(
                     tx,
@@ -2056,6 +2058,11 @@ impl Connections {
             }
             if (r.status.clone(), r.caps.clone()) != before {
                 repo::update(tx, &r, now)?;
+                // resumed, or a capability turned on: what comes from before now is history
+                let resumed = before.0 == "paused" && r.status != "paused";
+                if resumed || r.caps.iter().any(|c| !before.1.contains(c)) {
+                    repo::set_enabled_at(tx, &r.id, now)?;
+                }
                 base::audit(
                     tx,
                     &viewer.ws,

@@ -678,7 +678,13 @@ async fn a_channel_round_trip_on_the_fake_feishu() {
         "long connection up"
     );
     let before = fake.sent().len();
-    fake.ws_push_envelope(fixture("message_p2p_text").expect("fixture"));
+    // written just now: a message from before the bot was connected would only be history
+    let mut envelope = fixture("message_p2p_text").expect("fixture");
+    let now = steve_store::now().to_string();
+    envelope["header"]["create_time"] = json!(now);
+    envelope["event"]["message"]["create_time"] = json!(now);
+    envelope["event"]["message"]["update_time"] = json!(now);
+    fake.ws_push_envelope(envelope);
     if !until(20, || async { fake.sent().len() > before }).await {
         let c = rusqlite::Connection::open(&e.db).expect("db");
         let dump = |sql: &str| -> Vec<String> {

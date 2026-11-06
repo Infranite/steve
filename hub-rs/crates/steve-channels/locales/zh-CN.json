@@ -115,5 +115,17 @@
   "channels.error.run_stopped": "这个连接的这次运行已经停止，不再接收消息",
   "channels.error.cursor_not_ext": "游标「%{container}」不属于这个适配器",
   "channels.error.message_id_reserved": "以“fp:”开头的消息 id 由 Hub 保留，渠道不能使用",
-  "channels.error.run_panicked": "接收消息的任务意外中止，稍后自动重试"
+  "channels.error.run_panicked": "接收消息的任务意外中止，稍后自动重试",
+  "channels.im_read.description": "读取一个聊天会话（群聊或私聊）在某段时间里的消息，作为当前任务的上下文。由你决定读哪个会话、哪段时间。只读：不会回复这些消息，也不会触发规则、流程或任何动作。结果带有这个会话的披露级别，照它使用。",
+  "channels.im_read.arg.space": "会话 id（spc_…），或你能看到的会话的准确名称",
+  "channels.im_read.arg.from": "从什么时候开始：毫秒时间戳，或 RFC 3339，或工作区时区的“YYYY-MM-DD HH:MM”；默认是 to 之前 24 小时",
+  "channels.im_read.arg.to": "到什么时候为止，格式同 from；默认是现在",
+  "channels.im_read.arg.limit": "最多几条，不超过 %{max}（默认 %{n}）",
+  "channels.im_read.error.arg": "参数 %{arg} 不对",
+  "channels.im_read.error.no_space_arg": "请给出要读的会话：id（spc_…）或准确名称。",
+  "channels.im_read.error.no_space": "没有找到会话“%{space}”，或者你看不到它。",
+  "channels.im_read.error.which_space": "“%{space}”对应不到唯一的会话，请改用 id：%{candidates}",
+  "channels.im_read.error.not_readable": "这个会话设为不可使用（屏蔽或披露级别为不使用），不能读取。",
+  "channels.im_read.error.range": "时间范围不对：from 要早于 to。",
+  "channels.im_read.error.range_long": "时间范围太长：一次最多读 %{days} 天。"
 }

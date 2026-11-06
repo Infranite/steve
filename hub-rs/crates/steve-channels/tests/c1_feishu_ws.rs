@@ -50,6 +50,8 @@ async fn setup() -> H {
         flow_setup.register(r);
         connections::register(r);
     });
+    // the Hub's clock just before the fixtures were written: connected then, they are news
+    env.clock.set(1_761_899_000_000);
     let keys = tempfile::tempdir().expect("tmp");
     let vault = Vault::new(
         env.store().clone(),

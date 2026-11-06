@@ -117,6 +117,8 @@ pub mod ext;
 pub mod fake;
 pub mod fallback;
 pub mod flow_actions;
+pub mod history;
+pub mod im_mcp;
 pub mod inbound;
 pub mod lifecycle;
 pub mod media;

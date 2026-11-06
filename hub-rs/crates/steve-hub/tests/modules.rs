@@ -707,9 +707,17 @@ async fn contacts_tools_are_served_over_mcp() {
         "steve_deliver",
         "steve_contacts_find",
         "steve_contacts_remember",
+        "steve_im_read",
     ] {
         assert!(list.contains(t), "{t} missing: {list}");
     }
+    // the chat reading tool is routed: a conversation the session cannot see is an error it reads
+    let (s, out) = mcp(json!({ "jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": { "name": "steve_im_read", "arguments": { "space": "spc_nope" } } })).await;
+    assert_eq!(s, 200, "{out}");
+    assert!(
+        out.contains("\"isError\":true") && out.contains("spc_nope"),
+        "{out}"
+    );
     let (s, found) = mcp(json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": { "name": "steve_contacts_find", "arguments": { "query": "赵六" } } })).await;
     assert_eq!(s, 200, "{found}");
     assert!(found.contains("赵六"), "{found}");
