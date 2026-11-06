@@ -38,7 +38,7 @@ import { Markdown } from "@/components/markdown"
 import { PermissionDetails, PermissionRecord } from "@/components/permission"
 import { LOADED_WEB_VERSION, permissionDecision, useStore } from "@/store"
 import { shortVersion } from "@/updates"
-import { st, emit, briefHead, pendingCards, releaseAhead, ST, SS, WT, FAIL_CHOICE, SNOOZE_KEYS, snoozeLabel, tagCatLabel, botName, decide, dismiss, setSt, snooze, tag, isKind, kindColor, sortTags, loadEvents, type Item, type Reply, type Rel, type Sess } from "@/store"
+import { st, emit, briefHead, pendingCards, acceptChoosesRelease, ST, SS, WT, FAIL_CHOICE, SNOOZE_KEYS, snoozeLabel, tagCatLabel, botName, decide, dismiss, setSt, snooze, tag, isKind, kindColor, sortTags, loadEvents, type Item, type Reply, type Rel, type Sess } from "@/store"
 import { YoloBadge } from "@/yolo/badges"
 import { YoloPill } from "@/yolo/switch"
 import { WorkspaceSwitcher } from "@/workspace-switcher"
@@ -1001,7 +1001,7 @@ export function DecisionCard({ i, w = i.wait!, showItem = true }: { i: Item; w?:
     <CardContent className="pb-4">{draft}
       {rework && <Textarea autoFocus className="mt-3 min-h-20 rounded-lg" placeholder={t("core:card.reworkPlaceholder", { bot: botName(i.b) })} value={txt} onChange={(e) => setTxt(e.target.value)} data-rework />}</CardContent>
     {foot(rework ? <><Button variant="ghost" onClick={() => setRework(false)}>{t("common:action.cancel")}</Button><Button disabled={busy} onClick={() => act("rework", txt.trim())}>{t("core:card.sendRework")}</Button></>
-      : <><Button variant="outline" onClick={() => setRework(true)}>{t("core:card.rework")}</Button>{releaseAhead(i)
+      : <><Button variant="outline" onClick={() => setRework(true)}>{t("core:card.rework")}</Button>{acceptChoosesRelease(i)
         ? <><Button variant="outline" disabled={busy} onClick={() => act("pass", "no-release")} data-pass-no-release>{t("core:card.passNoRelease")}</Button><Button disabled={busy} onClick={() => act("pass", "release")} data-pass data-pass-release><CheckIcon />{t("core:card.passRelease")}</Button></>
         : <Button disabled={busy} onClick={() => act("pass")} data-pass><CheckIcon />{t("core:card.pass")}</Button>}</>)}
   </>

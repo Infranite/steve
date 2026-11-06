@@ -9,7 +9,7 @@ import { Spinner } from "@/components/ui/spinner"
 import { TraceLine, TraceIcon, TraceTitle, TraceDescription } from "@/components/ui/trace"
 import { Markdown } from "@/components/markdown"
 import { Textarea } from "@/components/ui/textarea"
-import { st, tm, emit, chatSend, takeOffer, chooseSuggest, cancelQueued, stopRun, clearFocus, focusItem, quoteMsg, decisionDraft, decide, releaseAhead, botName, alertClosed, closeAlerts, type Msg, type SuggestChoice, type Steps, type Update, type Item, type ItemCardState } from "@/store"
+import { st, tm, emit, chatSend, takeOffer, chooseSuggest, cancelQueued, stopRun, clearFocus, focusItem, quoteMsg, decisionDraft, decide, acceptChoosesRelease, botName, alertClosed, closeAlerts, type Msg, type SuggestChoice, type Steps, type Update, type Item, type ItemCardState } from "@/store"
 import { ItemRef, DecisionCard, ItemNo, StatusDot, AlertClose, go } from "@/ui"
 import { jumpToMsg, threadMsg } from "@/thread/history"
 import { Trans } from "react-i18next"
@@ -226,7 +226,7 @@ function AcceptRow({ i, decision }: { i: Item; decision: string }) {
       {rework && <Textarea autoFocus className="min-h-16 rounded-lg" placeholder={t("thread:card.reworkPlaceholder", { bot: botName(i.b) })} value={txt} onChange={(e) => setTxt(e.target.value)} data-rework />}
       <div className="flex flex-wrap justify-end gap-2">{rework
         ? <><Button size="sm" variant="ghost" onClick={() => setRework(false)}>{t("common:action.cancel")}</Button><Button size="sm" disabled={busy} onClick={() => void act("rework", txt.trim())}>{t("thread:card.sendRework")}</Button></>
-        : <><Button size="sm" variant="outline" onClick={() => setRework(true)}>{t("thread:card.rework")}</Button>{releaseAhead(i)
+        : <><Button size="sm" variant="outline" onClick={() => setRework(true)}>{t("thread:card.rework")}</Button>{acceptChoosesRelease(i)
           ? <><Button size="sm" variant="outline" disabled={busy} onClick={() => void act("pass", "no-release")} data-pass-no-release>{t("thread:card.passNoRelease")}</Button><Button size="sm" disabled={busy} onClick={() => void act("pass", "release")} data-pass data-pass-release><CheckIcon />{t("thread:card.passRelease")}</Button></>
           : <Button size="sm" disabled={busy} onClick={() => void act("pass")} data-pass><CheckIcon />{t("thread:card.pass")}</Button>}</>}</div>
     </div>

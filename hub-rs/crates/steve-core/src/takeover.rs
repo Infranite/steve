@@ -52,7 +52,7 @@ pub(crate) const WHOLE_CHARS: usize = 6000;
 #[derive(Debug, Clone)]
 pub(crate) enum Stop {
     /// A turn ended without a delivery, a question or a pending card: `why` is the card's text,
-    /// `last` the agent's last words (their tail), `whole` all of its last message (up to
+    /// `last` the agent's last words (their tail), `whole` what it said in the turn that ended (up to
     /// [`WHOLE_CHARS`]), `answered_you` the turn answered what you asked it from the conversation.
     Stopped {
         why: String,

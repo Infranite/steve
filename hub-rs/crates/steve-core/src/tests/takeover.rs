@@ -177,6 +177,60 @@ fn an_answer_to_what_you_asked_from_the_conversation_is_not_continued() {
     assert_eq!(k.open_fails(&item).len(), 1);
 }
 
+/// A plan from an earlier turn, already answered, does not make a later silent stop a report.
+#[test]
+fn a_plan_of_an_earlier_turn_does_not_hold_a_later_stop() {
+    let k = kit(2);
+    let (item, sid) = started(&k);
+    stop(&k, &sid, "## 方案\n1. 先改接口\n2. 再补测试");
+    let d = k.db().decisions_of_item(&item).unwrap().pop().unwrap();
+    k.core.resolve(&d.id, "continue", "", "me").unwrap();
+    stop(&k, &sid, "还在改。");
+    assert_eq!(steve_lines(&k, &item).len(), 1, "continued");
+    assert!(k.open_fails(&item).is_empty());
+}
+
+/// An instruction you sent it from the conversation is not a question: its turn is continued.
+#[test]
+fn an_instruction_forwarded_from_the_conversation_is_still_continued() {
+    let k = kit(2);
+    let (item, sid) = started(&k);
+    k.rt.end_turn(&k.core, &sid, "cancelled", None);
+    k.core
+        .forward(&item, "再把按钮改成蓝色", &[], "m_1")
+        .unwrap();
+    stop(&k, &sid, "改好了一半。");
+    assert_eq!(steve_lines(&k, &item).len(), 1, "continued");
+    assert!(k.open_fails(&item).is_empty());
+}
+
+/// A project done by its rule (merged): the acceptance has no release to choose, so neither
+/// 验收，先不发布 nor 验收并发布 from a card can waive or start what the rule waits for.
+#[test]
+fn a_done_when_project_ignores_the_release_choice_of_an_acceptance() {
+    for text in ["no-release", crate::orchestrator::ACCEPT_AND_RELEASE] {
+        let k = kit(2);
+        let x = remote(&k, upstream::DONE_MERGE, false);
+        k.core.resolve(&x.decision, "pass", text, "me").unwrap();
+        assert!(k.wait(|| k.core.tx().st.probing.is_empty()));
+        assert_eq!(k.phase(&x.item), "closing", "{text}");
+        assert_eq!(
+            op_states(&k, &x.item),
+            vec![(OP_RELEASE.to_string(), "pending".to_string())],
+            "{text}"
+        );
+        assert!(k.core.tx().st.releasing.is_none(), "{text}");
+        assert!(
+            !k.db()
+                .decisions_of_item(&x.item)
+                .unwrap()
+                .iter()
+                .any(|d| d.subject_type == "release"),
+            "{text}"
+        );
+    }
+}
+
 #[test]
 fn only_a_heading_counts_as_a_report() {
     use crate::takeover::stopped_to_report;

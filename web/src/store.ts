@@ -869,7 +869,13 @@ function decidedText(w: Wait, c: string, bot: string | null) {
   return w.type === "ask" ? t("core:decided.toldBot", { bot: botName(bot) }) : w.subject === "tool_call" ? t("core:decided.allowed") : t("core:decided.handled")
 }
 /** accepted, but the project still has a release to go: the item is not finished yet */
-export const releaseAhead = (i?: Item) => !!i?.branch && !!st.projects.find((p) => p.id === i.project)?.release
+const releaseAhead = (i?: Item) => !!i?.branch && !!st.projects.find((p) => p.id === i.project)?.release
+/** the acceptance chooses whether to release (验收并发布 / 验收，先不发布): a release script runs on accept. A project
+ * done by its rule (release.done_when merge/tag) is finished by that rule, so its acceptance has nothing to choose */
+export const acceptChoosesRelease = (i?: Item) => {
+  const r = releaseAhead(i) ? st.projects.find((p) => p.id === i!.project)?.release : null
+  return !!r?.cmd && !r.done_when
+}
 export async function decide(id: string, c: string, text?: string, decision?: string) {
   const { i, w } = cardOf(id, decision); if (!w) return
   const key = "decision:" + w.decision

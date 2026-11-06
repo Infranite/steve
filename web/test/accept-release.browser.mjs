@@ -24,6 +24,11 @@ try {
     await page.goto(base + "/test/fixtures/accept-release.html?norelease"); await page.locator("[data-pass]").waitFor()
     assert.equal(await page.locator("[data-pass-release]").count(), 0)
     assert.equal(await page.locator("[data-pass]").innerText(), "验收通过")
+    // a project done by its merge rule: the rule is the completion, nothing to choose on the card
+    await page.goto(base + "/test/fixtures/accept-release.html?donewhen"); await page.locator("[data-pass]").waitFor()
+    assert.equal(await page.locator("[data-pass-release]").count(), 0)
+    assert.equal(await page.locator("[data-pass-no-release]").count(), 0)
+    assert.equal(await page.locator("[data-pass]").innerText(), "验收通过")
     assert.deepEqual(errors, [])
     await page.close()
   }
