@@ -77,6 +77,9 @@ pub struct AskHint {
 pub struct Check {
     pub name: String,
     pub passed: bool,
+    /// The agent actually operated the running thing (not a build or a test).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub operated: bool,
 }
 
 /// What the MCP server needs from the Hub. `Session` is the session row as of the request.

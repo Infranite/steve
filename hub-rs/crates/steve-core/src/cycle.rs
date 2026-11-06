@@ -54,7 +54,8 @@ pub fn closed_msg() -> String {
 /// Operation kinds the core knows. Modules' wrap-ups (a PR merge) run as `hooks.accepted`.
 pub const OP_RELEASE: &str = "release";
 pub const OP_HOOKS: &str = "hooks.accepted";
-/// A build the completion tag triggered (a GitHub Release): followed on its own, never holds a close.
+/// A build the completion tag triggered (a GitHub Release): followed on its own; it holds the close
+/// only when the item's goal asks for the build to pass (`proof`: then it is required).
 pub const OP_BUILD: &str = "release.build";
 
 /// A closing intent while `phase = closing`.
@@ -473,6 +474,8 @@ impl Tx<'_> {
             }
         }
         self.release_requirement(&i, &c)?;
+        /* what the item's own goal asks to be shown (ST-57): the result running here */
+        self.deploy_requirement(&i, &c)?;
         Ok(())
     }
 
@@ -762,6 +765,15 @@ impl Tx<'_> {
         }
         for o in self.db().store().items().operations(&i.id, i.cycle)? {
             if o.kind == OP_BUILD {
+                /* followed on its own, unless the item's goal asks for the build to pass: then this
+                 * result's build is one of its requirements (`proof`) */
+                if c.kind == COMPLETE
+                    && o.required
+                    && o.revision == i.revision
+                    && !matches!(o.status.as_str(), "succeeded" | "waived")
+                {
+                    g.operation = true;
+                }
                 continue;
             }
             /* any effect of this cycle still in flight or of unknown result holds every kind of closing, whatever
@@ -933,7 +945,7 @@ impl Tx<'_> {
                 // a module's result (a mail that went out) says what happened
                 "automatic" if c.by == "steve" => c.reason.clone(),
                 "automatic" => "已自动验收".to_string(),
-                _ if c.reason == "你标记了完成" => c.reason.clone(),
+                _ if c.reason == crate::proof::MARKED => c.reason.clone(),
                 _ => "已验收".to_string(),
             },
             FAIL => format!("失败：{}", c.reason),
@@ -1159,6 +1171,8 @@ pub(crate) fn lifecycle_view(t: &Tx, i: &Item) -> Result<Value> {
         }
     };
     let mut active = 0;
+    /* a required operation already said by name stands for the generic "waiting for operations" */
+    let mut named = false;
     /* the projection shows only what the gate waits for, never whether the result moved, so it leaves
      * the worktree alone: fingerprinting it is a `git add --all` per closing item on every look */
     let gate = match &c {
@@ -1195,6 +1209,24 @@ pub(crate) fn lifecycle_view(t: &Tx, i: &Item) -> Result<Value> {
             }
         }
         for o in t.db().store().items().operations(&i.id, i.cycle)? {
+            /* the evidence the item's goal asks for, said by name (ST-57) */
+            if matches!(o.status.as_str(), "pending" | "running")
+                && o.required
+                && o.revision == i.revision
+                && i.phase == CLOSING
+                && matches!(o.kind.as_str(), OP_BUILD | crate::proof::OP_DEPLOY)
+            {
+                let tag = o.evidence["tag"].as_str();
+                let label = match (o.kind.as_str(), tag) {
+                    (OP_BUILD, t) => {
+                        steve_i18n::t!("core.blocker.build", tag = t.unwrap_or_default())
+                    }
+                    (_, Some(t)) => steve_i18n::t!("core.blocker.deploy", tag = t),
+                    (_, None) => steve_i18n::t!("core.blocker.deploy_result"),
+                };
+                push("operation", label);
+                named = true;
+            }
             match o.status.as_str() {
                 "running" if o.kind == OP_BUILD => {}
                 "running" => active += 1,
@@ -1219,7 +1251,7 @@ pub(crate) fn lifecycle_view(t: &Tx, i: &Item) -> Result<Value> {
             if g.turn {
                 push("turn", steve_i18n::t!("core.blocker.turn"));
             }
-            if g.operation {
+            if g.operation && !named {
                 push("operation", steve_i18n::t!("core.blocker.operation"));
             }
         }

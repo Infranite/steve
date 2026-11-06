@@ -103,6 +103,8 @@ fn core_config(cfg: &Config) -> steve_core::CoreConfig {
     c.no_resume = cfg.no_resume;
     c.debug_route = cfg.debug_route;
     c.disk = cfg.disk;
+    c.version = cfg.version.clone();
+    c.commit = crate::build_identity().map(|(_, commit)| commit.to_owned());
     if let Some(n) = cfg.takeover_continues {
         c.takeover_continues = n;
     }

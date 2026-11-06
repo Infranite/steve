@@ -258,6 +258,7 @@ async fn auto_acceptance_asks_the_hooks_too() {
             &[Check {
                 name: "tests".into(),
                 passed: true,
+                operated: false,
             }],
             &[],
         )

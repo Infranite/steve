@@ -205,16 +205,22 @@ fn a_rebase_or_a_reset_onto_the_merged_copy_is_the_same_result_a_new_file_is_not
 
 /* ── the completion rule, against a remote ── */
 
-struct Remote {
-    repo: PathBuf,
-    item: String,
-    session: String,
+pub(super) struct Remote {
+    pub(super) repo: PathBuf,
+    pub(super) item: String,
+    pub(super) session: String,
+    pub(super) decision: String,
     wt: PathBuf,
 }
 
 /// A project whose completion rule is `rule`, an `origin` it pushes to (a bare repo that answers as
 /// `github.com/acme/app`), and an item delivered on its own branch; `accept` = the user accepted it.
 fn remote(k: &Kit, rule: &str, accept: bool) -> Remote {
+    remote_for(k, rule, accept, None)
+}
+
+/// [`remote`] for an item whose goal also says `goal`.
+pub(super) fn remote_for(k: &Kit, rule: &str, accept: bool, goal: Option<&str>) -> Remote {
     let r = repo(k.home());
     let bare = k.home().join("origin.git");
     g(
@@ -257,6 +263,9 @@ fn remote(k: &Kit, rule: &str, accept: bool) -> Remote {
         )
         .unwrap();
     let x = k.delivered(false);
+    if let Some(goal) = goal {
+        k.db().add_goal(&x.id, goal).unwrap();
+    }
     let (name, wt) = branch_with(&r, &k.core.config().worktrees, &x.id, "x.txt", "x\n");
     k.db()
         .item_patch(&x.id, crate::patch![project_id: p.id.as_str(), cwd: wt.to_string_lossy().to_string(), branch: name.as_str()])
@@ -268,12 +277,13 @@ fn remote(k: &Kit, rule: &str, accept: bool) -> Remote {
         repo: r,
         item: x.id,
         session: x.session,
+        decision: x.decision,
         wt,
     }
 }
 
 /// What GitHub does on a rebase merge and a tag push: a copy of the branch's commits on `main`, tagged.
-fn merge_and_tag(x: &Remote, tag: Option<&str>) {
+pub(super) fn merge_and_tag(x: &Remote, tag: Option<&str>) {
     let tip = g(&x.wt, &["rev-parse", "HEAD"]);
     g(&x.repo, &["cherry-pick", "-x", &tip]);
     g(&x.repo, &["push", "-q", "origin", "main"]);
@@ -283,7 +293,7 @@ fn merge_and_tag(x: &Remote, tag: Option<&str>) {
     }
 }
 
-fn op_states(k: &Kit, item: &str) -> Vec<(String, String)> {
+pub(super) fn op_states(k: &Kit, item: &str) -> Vec<(String, String)> {
     let i = k.db().item(item).unwrap().unwrap();
     k.db()
         .store()
@@ -549,4 +559,344 @@ fn a_build_is_followed_once_and_only_a_failure_is_told() {
         k.db().item(&x.item).unwrap().unwrap().outcome.as_deref(),
         Some("completed")
     );
+}
+
+/* ── what the item's own goal asks to be shown (ST-57) ── */
+
+/// A `gh` that answers with what the returned file holds.
+fn fake_gh() -> (tempfile::TempDir, PathBuf, PathBuf) {
+    let gh = tempfile::tempdir().unwrap();
+    let script = gh.path().join("gh");
+    let answer = gh.path().join("runs.json");
+    std::fs::write(&script, format!("#!/bin/sh\ncat '{}'\n", answer.display())).unwrap();
+    std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    (gh, script, answer)
+}
+
+fn runs_json(commit: &str, status: &str, conclusion: &str) -> String {
+    json!([{"status": status, "conclusion": conclusion, "headSha": commit, "url": "https://ci/7", "databaseId": 7, "workflowName": "Release"}]).to_string()
+}
+
+pub(super) fn blockers(k: &Kit, item: &str) -> Vec<String> {
+    k.core.lifecycle_view(item).unwrap()["blockers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| b["label"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// An accepted item whose goal asks for the build to pass, merged and tagged `tag`, its build
+/// followed by a `gh` that answers with the returned file.
+fn tagged_with_build(tag: &str) -> (Kit, Remote, PathBuf, tempfile::TempDir) {
+    let (gh, script, answer) = fake_gh();
+    let k = Kit::with(|c| {
+        c.takeover_continues = 2;
+        c.gh = script.clone();
+    });
+    // ST-53: "修复 Release 流水线，并确认构建通过"
+    let x = remote_for(
+        &k,
+        upstream::DONE_TAG,
+        true,
+        Some("修复偶发失败的测试，并确认构建通过"),
+    );
+    assert!(k.wait(|| {
+        k.rt.prompts_of(&x.session)
+            .last()
+            .is_some_and(|p| p.contains("按这个项目的约定"))
+    }));
+    let p = k.rt.prompts_of(&x.session).pop().unwrap();
+    assert!(
+        p.contains("事项的目标要求构建通过，构建成功后才算完成"),
+        "{p}"
+    );
+    // merged and tagged while the agent's turn still runs: then it ends
+    merge_and_tag(&x, Some(tag));
+    k.core.tx().st.probed.clear();
+    k.core.lifecycle_tick().unwrap();
+    assert!(k.wait(|| {
+        let _ = k.core.lifecycle_tick();
+        op_states(&k, &x.item).len() == 2
+    }));
+    k.rt.end_turn(&k.core, &x.session, "end_turn", None);
+    k.core.lifecycle_tick().unwrap();
+    (k, x, answer, gh)
+}
+
+#[test]
+fn a_goal_that_asks_for_the_build_to_pass_stays_open_while_it_runs_and_when_it_failed() {
+    let (k, x, answer, _gh) = tagged_with_build("v1.1.0");
+    // merged and tagged, the build still running: not done, and it says what it waits for
+    assert_eq!(k.phase(&x.item), "closing");
+    let b = blockers(&k, &x.item);
+    assert_eq!(b, ["正在结束：等 Release 构建（v1.1.0）成功"], "{b:?}");
+    // in the language of the request
+    let en = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap()
+        .block_on(steve_i18n::scope(steve_i18n::EN, async {
+            blockers(&k, &x.item)
+        }));
+    assert_eq!(
+        en,
+        ["Ending: waiting for the Release build (v1.1.0) to pass"]
+    );
+    assert!(
+        k.timeline_texts(&x.item)
+            .iter()
+            .any(|l| l.contains("事项目标要求构建通过，构建成功后才算完成"))
+    );
+    // the build fails: the agent hears it, you hear it, the item stays open
+    let commit = g(&x.repo, &["rev-parse", "main"]);
+    std::fs::write(&answer, runs_json(&commit, "completed", "failure")).unwrap();
+    assert_eq!(k.core.check_builds().unwrap(), 1);
+    assert_eq!(k.phase(&x.item), "closing");
+    let p = k.rt.prompts_of(&x.session).pop().unwrap();
+    assert!(
+        p.contains("Release 构建失败") && p.contains("目标要求构建通过"),
+        "{p}"
+    );
+    assert_eq!(
+        k.status(&x.item).2,
+        "Release 构建没有通过，事项目标要求构建通过"
+    );
+    assert!(
+        blockers(&k, &x.item)
+            .iter()
+            .any(|b| b == "Release 构建（v1.1.0）失败")
+    );
+    // you decide it needs no build after all: marking it done is the evidence
+    k.finish(&x.item).unwrap();
+    k.rt.end_turn(&k.core, &x.session, "cancelled", None);
+    k.core.tx().st.probed.clear();
+    k.core.lifecycle_tick().unwrap();
+    assert!(
+        k.wait(|| {
+            let _ = k.core.lifecycle_tick();
+            k.phase(&x.item) == "closed"
+        }),
+        "{:?} {:?}",
+        k.status(&x.item),
+        blockers(&k, &x.item)
+    );
+}
+
+#[test]
+fn a_goal_that_asks_for_the_build_to_pass_closes_once_it_passed() {
+    let (k, x, answer, _gh) = tagged_with_build("v1.2.0");
+    assert_eq!(k.phase(&x.item), "closing");
+    let commit = g(&x.repo, &["rev-parse", "main"]);
+    std::fs::write(&answer, runs_json(&commit, "in_progress", "")).unwrap();
+    assert_eq!(k.core.check_builds().unwrap(), 1);
+    assert_eq!(k.phase(&x.item), "closing");
+    std::fs::write(&answer, runs_json(&commit, "completed", "success")).unwrap();
+    k.core.tx().st.build_checked.clear();
+    assert_eq!(k.core.check_builds().unwrap(), 1);
+    assert_eq!(k.phase(&x.item), "closed");
+    assert_eq!(
+        op_states(&k, &x.item),
+        vec![
+            (OP_RELEASE.to_string(), "succeeded".to_string()),
+            (OP_BUILD.to_string(), "succeeded".to_string())
+        ]
+    );
+}
+
+#[test]
+fn a_required_build_without_a_result_in_time_goes_back_to_the_agent() {
+    let (k, x, answer, _gh) = tagged_with_build("v1.4.0");
+    // started more than 3 hours ago, still running
+    let i = k.db().item(&x.item).unwrap().unwrap();
+    let op = k
+        .db()
+        .store()
+        .items()
+        .operations(&x.item, i.cycle)
+        .unwrap()
+        .into_iter()
+        .find(|o| o.kind == OP_BUILD)
+        .unwrap();
+    assert!(op.required);
+    let mut ev = op.evidence.clone();
+    ev["since"] = json!(crate::util::now() - 4 * 3_600_000);
+    k.db()
+        .store()
+        .transaction(|tx| steve_store::operation_set_in(tx, &op.id, "running", &ev))
+        .unwrap();
+    let commit = g(&x.repo, &["rev-parse", "main"]);
+    std::fs::write(&answer, runs_json(&commit, "in_progress", "")).unwrap();
+    assert_eq!(k.core.check_builds().unwrap(), 1);
+    assert_eq!(
+        op_states(&k, &x.item)[1].1,
+        "failed",
+        "giving up is no pass"
+    );
+    assert_eq!(k.phase(&x.item), "closing");
+    let p = k.rt.prompts_of(&x.session).pop().unwrap();
+    assert!(
+        p.contains("超过 3 小时还没结束") && p.contains("修好"),
+        "{p}"
+    );
+}
+
+#[test]
+fn a_goal_that_asks_for_this_instance_waits_until_it_runs_the_tag() {
+    for (version, closes) in [("0.2.35", false), ("1.3.0", true)] {
+        let k = Kit::with(|c| {
+            c.takeover_continues = 2;
+            c.steve_repo = c.home.join("repo");
+            c.version = version.into();
+        });
+        // ST-55: the upgrade entry, on the instance the user runs
+        let x = remote_for(&k, upstream::DONE_TAG, true, Some("恢复当前实例的升级入口"));
+        let i = k.db().item(&x.item).unwrap().unwrap();
+        let line = k.core.tx().proof_line(&i).unwrap().unwrap();
+        assert!(line.contains("runs on this Steve instance"), "{line}");
+        merge_and_tag(&x, Some("v1.3.0"));
+        k.core.tx().st.probed.clear();
+        k.core.lifecycle_tick().unwrap();
+        assert!(k.wait(|| {
+            let _ = k.core.lifecycle_tick();
+            !op_states(&k, &x.item).is_empty() && op_states(&k, &x.item)[0].1 == "succeeded"
+        }));
+        k.rt.end_turn(&k.core, &x.session, "end_turn", None);
+        k.core.lifecycle_tick().unwrap();
+        let i = k.db().item(&x.item).unwrap().unwrap();
+        let deploy = k
+            .db()
+            .store()
+            .items()
+            .operations(&x.item, i.cycle)
+            .unwrap()
+            .into_iter()
+            .find(|o| o.kind == crate::proof::OP_DEPLOY)
+            .expect("the deploy requirement is recorded");
+        assert_eq!(deploy.label, "本机运行包含 v1.3.0 的版本");
+        if closes {
+            assert_eq!(
+                k.phase(&x.item),
+                "closed",
+                "{version} {:?} {:?} {:?}",
+                blockers(&k, &x.item),
+                op_states(&k, &x.item),
+                deploy
+            );
+            assert_eq!(deploy.status, "succeeded");
+            assert!(
+                k.timeline_texts(&x.item)
+                    .iter()
+                    .any(|l| l.contains("本机已运行 1.3.0"))
+            );
+            continue;
+        }
+        assert_eq!(k.phase(&x.item), "closing", "{version}");
+        assert_eq!(deploy.status, "pending");
+        assert_eq!(k.status(&x.item).2, "等本机运行包含 v1.3.0 的版本");
+        assert_eq!(
+            blockers(&k, &x.item),
+            ["正在结束：等本机运行包含 v1.3.0 的版本"]
+        );
+        // looked at again on every tick, said once
+        k.core.lifecycle_tick().unwrap();
+        let t = k.timeline_texts(&x.item);
+        let lines: Vec<_> = t
+            .iter()
+            .filter(|l| l.starts_with("事项目标要求在本机生效：本机现在运行 0.2.35"))
+            .collect();
+        assert_eq!(lines.len(), 1, "said once: {t:#?}");
+        // you mark it done yourself: that is the evidence
+        k.finish(&x.item).unwrap();
+        assert!(k.wait(|| k.core.tx().st.probing.is_empty()));
+        k.core.lifecycle_tick().unwrap();
+        assert!(
+            k.wait(|| k.phase(&x.item) == "closed"),
+            "{:?}",
+            k.status(&x.item)
+        );
+    }
+}
+
+#[test]
+fn another_project_is_not_checked_against_this_instance() {
+    let k = Kit::with(|c| {
+        c.takeover_continues = 2;
+        c.version = "0.0.1".into();
+    });
+    let x = remote_for(&k, upstream::DONE_TAG, true, Some("部署到线上环境"));
+    let i = k.db().item(&x.item).unwrap().unwrap();
+    let line = k.core.tx().proof_line(&i).unwrap().unwrap();
+    assert!(line.contains("check it there"), "{line}");
+    merge_and_tag(&x, Some("v1.0.0"));
+    k.core.tx().st.probed.clear();
+    k.core.lifecycle_tick().unwrap();
+    assert!(
+        k.wait(|| k.phase(&x.item) == "closed"),
+        "{:?}",
+        k.status(&x.item)
+    );
+}
+
+#[test]
+fn a_goal_that_asks_for_an_actual_operation_needs_one_in_the_delivery() {
+    let k = kit(2);
+    let x = remote_for(
+        &k,
+        upstream::DONE_TAG,
+        false,
+        Some("验证检查更新、升级备份与重启"),
+    );
+    let s = k.db().session(&x.session).unwrap().unwrap();
+    let check = |name: &str, operated: bool| crate::Check {
+        name: name.into(),
+        passed: true,
+        operated,
+    };
+    let e = k
+        .core
+        .tool_deliver(&s, "ok", &[], &[check("cargo test", false)], &[])
+        .unwrap_err()
+        .to_string();
+    assert!(
+        e.contains("Not delivered") && e.contains("operated: true"),
+        "{e}"
+    );
+    k.core
+        .tool_deliver(
+            &s,
+            "ok",
+            &[],
+            &[
+                check("cargo test", false),
+                check("设置·关于点检查更新，显示 v1.0.1", true),
+            ],
+            &[],
+        )
+        .unwrap();
+    let d = k
+        .db()
+        .decisions_of_item(&x.item)
+        .unwrap()
+        .into_iter()
+        .find(|d| d.status == "open" && d.kind == "accept")
+        .unwrap();
+    assert!(
+        d.draft
+            .contains("✓ 实际操作：设置·关于点检查更新，显示 v1.0.1"),
+        "{}",
+        d.draft
+    );
+    // the protocol says what the goal asks for
+    let i = k.db().item(&x.item).unwrap().unwrap();
+    let line = k.core.tx().proof_line(&i).unwrap().unwrap();
+    assert!(line.contains("`operated: true`"), "{line}");
+    // stopped after merging and tagging: the remote alone is not that evidence, the agent goes on
+    k.rt.end_turn(&k.core, &x.session, "end_turn", None);
+    k.core.tx().lc_invalidate(&x.item, "有新的交付").unwrap();
+    merge_and_tag(&x, Some("v1.0.1"));
+    stop(&k, &x.session, "合并了，tag 推了。");
+    assert!(k.wait(|| !steve_lines(&k, &x.item).is_empty()));
+    assert_eq!(k.phase(&x.item), "active");
+    let p = k.rt.prompts_of(&x.session).pop().unwrap();
+    assert!(p.contains("还要求实际操作验证"), "{p}");
 }

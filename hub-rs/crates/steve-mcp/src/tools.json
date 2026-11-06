@@ -142,6 +142,10 @@
               },
               "passed": {
                 "type": "boolean"
+              },
+              "operated": {
+                "type": "boolean",
+                "description": "true when you actually used the running thing yourself (opened the page and clicked through, ran the upgrade, called the live API), not a build or a test; name the check with what you saw"
               }
             },
             "required": [
