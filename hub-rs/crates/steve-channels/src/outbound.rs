@@ -1082,12 +1082,13 @@ impl Outbox {
         let mut res = b1::check(ch.modules(), &cx, &audience, &text, &knowledge).await;
         let mut rewrites: Vec<Rewrite> = Vec::new();
         // a text that waits for the owner whatever the check says is not rewritten: they see the original
-        // with the parts marked, and the card offers the rewrite
+        // with the parts marked, and the card offers the rewrite. Unless YOLO decides the card: it never
+        // approves a flagged text, so the one rewrite comes first, as for a direct reply
         let will_draft = req.approve || !direct_ok(p.mode, &req.auth);
         if res.verdict == Verdict::Leak
             && req.generation.is_some()
             && !unchecked(&res)
-            && !will_draft
+            && (!will_draft || ch.yolo_on(&t.ws))
         {
             for _ in 0..MAX_REWRITES {
                 let Some(new) = rewrite_text(

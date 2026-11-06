@@ -189,10 +189,14 @@ fn needs_router(text: &str, files: bool, focus: &[FocusItem]) -> bool {
         })
 }
 
+/// The longest guest question (in characters) answered without the router: “短句” in the decision. A
+/// longer one goes to the router, which may still pick research where the space allows it.
+pub const GUEST_SHORT: usize = 30;
+
 /// #52: the kind a message gets without the router (`route_log.guard = "q"`) when it is a plain question
 /// ([`pure_question`], nothing in it the router would act on): researched in your own conversation,
-/// answered in a guest one (where `for_owner` still researches the owner's private chat). `None`: the
-/// router decides. Decided by the user on 2026-11-06.
+/// answered in a guest one when it is short ([`GUEST_SHORT`]; `for_owner` still researches the owner's
+/// private chat). `None`: the router decides. Decided by the user on 2026-11-06.
 pub fn without_router(
     text: &str,
     files: bool,
@@ -202,7 +206,10 @@ pub fn without_router(
     if text.trim().is_empty() || needs_router(text, files, focus) || !pure_question(text) {
         return None;
     }
-    Some(if guest { "answer" } else { "research" })
+    if !guest {
+        return Some("research");
+    }
+    (text.trim().chars().count() <= GUEST_SHORT).then_some("answer")
 }
 
 /// Apply the guards in order. Rule 6, the router failing, is already in `route.fallback`.
@@ -301,6 +308,15 @@ mod tests {
         // a guest's plain question is answered; anything else goes to the router
         assert_eq!(go("为什么周四的会议推迟了？", false, true), Some("answer"));
         assert_eq!(go("@Steve 为什么推迟了？", false, true), None);
+        // a long guest question is not a “短句”: the router decides (research where the space allows it)
+        let long = "为什么我们上周把订单服务的数据库从 MySQL 迁到 PostgreSQL 之后，夜间批处理的耗时反而变长了一倍多？";
+        assert!(long.chars().count() > GUEST_SHORT);
+        assert_eq!(go(long, false, true), None, "long guest question");
+        assert_eq!(
+            go(long, false, false),
+            Some("research"),
+            "owner: any length"
+        );
         assert_eq!(go("把告警脚本修一下", false, true), None);
         assert_eq!(go("以后都直接回滚吧", false, true), None);
         assert_eq!(go("谢谢", false, false), None, "not a question");

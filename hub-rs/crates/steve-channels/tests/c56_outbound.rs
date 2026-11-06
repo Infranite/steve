@@ -231,6 +231,23 @@ async fn setup_with(as_user: Option<Arc<dyn ActAsUser>>) -> H {
 
 /// [`setup_with`], with a declaration of the fake channel side.
 async fn setup_full(as_user: Option<Arc<dyn ActAsUser>>, decl: Option<ChannelDecl>) -> H {
+    setup_yolo(as_user, decl, false).await
+}
+
+/// YOLO's switch, as steve-core sets it.
+struct Yolo(bool);
+impl steve_channels::YoloSwitch for Yolo {
+    fn on(&self, _: &str) -> bool {
+        self.0
+    }
+}
+
+/// [`setup_full`], with YOLO deciding the workspace's cards or not.
+async fn setup_yolo(
+    as_user: Option<Arc<dyn ActAsUser>>,
+    decl: Option<ChannelDecl>,
+    yolo: bool,
+) -> H {
     let core = Arc::new(FakeCore::default());
     let flow_setup = FlowSetup::new(core.clone());
     let disclosure = Disclosure::with_models(Vec::new());
@@ -285,7 +302,8 @@ async fn setup_full(as_user: Option<Arc<dyn ActAsUser>>, decl: Option<ChannelDec
     let mut ch = Channels::builder(env.modules.clone(), conns, Arc::new(flow.clone()))
         .adapter(fake.clone())
         .responder(replies.clone())
-        .flow(flow.clone());
+        .flow(flow.clone())
+        .yolo(Arc::new(Yolo(yolo)));
     if let Some(d) = decl {
         ch = ch.decl(d);
     }
@@ -3188,6 +3206,61 @@ async fn a_draft_is_not_rewritten_until_you_ask() {
     h.env.clock.advance(11_000);
     assert_eq!(h.outbox.send_due(&h.ch).await, 1);
     assert_eq!(sent(&h)[0].1, "预算的事我这边还不清楚，确认后告诉你。");
+}
+
+/// #14 under YOLO: it never approves a flagged text, so a draft it decides is rewritten once first, as a
+/// direct reply is; the card then carries `rewritten`, which YOLO may approve after its cooling-off.
+#[tokio::test(flavor = "multi_thread")]
+async fn under_yolo_a_flagged_draft_is_rewritten_first() {
+    let h = setup_yolo(None, None, true).await;
+    checks_pass(&h);
+    h.env.gateway.script(
+        REWRITE_HEAD,
+        r#"{"text": "预算的事我这边还不清楚，确认后告诉你。"}"#,
+    );
+    let mem = acme(&h);
+    let me = h.me.clone();
+    let plan = recorded(&h, &me, "C_DEV", "d1", "ulilei", "预算多少").await;
+    let d = h
+        .outbox
+        .deliver(
+            &h.ch,
+            &out(&plan, "Acme 的预算有 30 万。", Auth::None, generation(&mem)),
+        )
+        .await
+        .unwrap();
+    let Delivered::Drafted {
+        message_id,
+        decision_id,
+    } = d
+    else {
+        panic!("{d:?}")
+    };
+    let rewrites = h
+        .env
+        .gateway
+        .prompts
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|p| p.starts_with(REWRITE_HEAD))
+        .count();
+    assert_eq!(rewrites, 1, "rewritten once before the card");
+    let q = row(
+        &h,
+        "SELECT draft, options FROM decisions WHERE id = ?",
+        &[&decision_id],
+    );
+    assert_eq!(q[0], "预算的事我这边还不清楚，确认后告诉你。");
+    assert_eq!(q[1], json!(r#"["yes","no"]"#));
+    let b = h
+        .env
+        .store()
+        .reader(|c| steve_channels::basis::of_message(c, WS, &message_id))
+        .unwrap()
+        .unwrap();
+    assert_eq!(b.verdict, "rewritten", "YOLO may approve it");
+    nothing_sent(&h);
 }
 
 /// Y4: the connection is checked when the message goes out, not when it was approved: approved
