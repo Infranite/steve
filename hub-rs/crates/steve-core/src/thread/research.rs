@@ -106,9 +106,6 @@ pub struct ResearchRequest {
     pub models: crate::models::Choice,
     /// answered in the web's main conversation: the answer may draw an A2UI interface ([`crate::gateway::A2UI_HINT`])
     pub ui: bool,
-    /// only the workspace's owner reads the answer ([`own_reader`]); otherwise the executor gives the run
-    /// no way to read files (on Codex: no shell, an empty directory), only Steve's tools for that audience
-    pub own: bool,
 }
 
 /// A follow-up within [`RESUME_WINDOW`] of a research answer continues that run's harness session.
@@ -881,7 +878,6 @@ impl Core {
             }),
             models: self.models().for_purpose(ws, "research"),
             ui: j.space == super::MAIN,
-            own,
         };
         let steps = Mutex::new(Steps {
             route: j.route.clone(),

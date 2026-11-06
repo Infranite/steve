@@ -1372,3 +1372,108 @@ async fn the_model_check_waits_for_you_unless_yolo_decides() {
     assert_eq!(*noted.0.lock().unwrap(), [false]);
     assert_eq!(d.basis.as_ref().unwrap()["verdict"], "pass");
 }
+
+/// A check that passes everything and records what it was given.
+#[derive(Default)]
+struct Seen(Mutex<Vec<(Vec<steve_modules::outbound::KnowledgeUse>, Option<String>)>>);
+
+#[async_trait::async_trait]
+impl steve_modules::outbound::OutboundCheck for Seen {
+    async fn check(
+        &self,
+        cx: &steve_modules::outbound::CheckCx,
+        _: &steve_modules::outbound::Audience,
+        _: &str,
+        knowledge: &[steve_modules::outbound::KnowledgeUse],
+    ) -> steve_modules::outbound::CheckResult {
+        self.0
+            .lock()
+            .unwrap()
+            .push((knowledge.to_vec(), cx.draft_model.clone()));
+        steve_modules::outbound::CheckResult {
+            verdict: steve_modules::outbound::Verdict::Pass,
+            entries: Vec::new(),
+            spans: Vec::new(),
+            check_model: Some("check-1".into()),
+        }
+    }
+}
+
+/// #42: “检查披露” checks with what the drafting check had: the retrieved pieces the basis names (not
+/// only memories) read again, and the model that wrote the draft (so the check runs on another one). A
+/// piece that cannot be read again any more does not let the draft pass.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_check_on_request_has_the_drafting_knowledge_and_model() {
+    let seen = Arc::new(Seen::default());
+    let h = setup_with(Opts {
+        check: Some(seen.clone()),
+        hooks: Some(Arc::new(Yolo(false))),
+        ..Default::default()
+    })
+    .await;
+    let (_, thread) = with_thread(&h).await;
+    let d = quick(&h, &thread).await;
+    let model = d.basis.as_ref().unwrap()["answer_model"]
+        .as_str()
+        .expect("the drafting model is kept")
+        .to_string();
+    assert!(!model.is_empty());
+    // the drafting check had a retrieved note
+    h.env
+        .store()
+        .with_conn(|c| {
+            c.execute_batch(
+                "INSERT INTO kb_chunks (workspace_id, obj_type, obj_id, seq, heading, text, visibility, level, created_by, source_kind, label, updated)
+                 VALUES ('default', 'chunk', 'kd_acme', 3, '', 'Acme 的预算是 30万', 'private', 'reasoning', 'usr_dev', 'note', '笔记 · Acme', 1);",
+            )?;
+            c.execute(
+                "UPDATE mail_drafts SET basis = json_set(basis, '$.entries', json(?)) WHERE id = ?",
+                rusqlite::params![
+                    r#"[{"source_type":"chunk","source_id":"kd_acme","source_label":"笔记 · Acme","level":"reasoning","effective":"reasoning","used":true,"out":"reasoning","seq":3}]"#,
+                    d.id
+                ],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let out = h.mail.check_draft(&me(), &d.id).await.expect("check");
+    {
+        let s = seen.0.lock().unwrap();
+        let (k, m) = s.last().unwrap();
+        assert_eq!(m.as_deref(), Some(model.as_str()), "the drafting model");
+        assert_eq!(k.len(), 1, "{k:?}");
+        assert_eq!(k[0].text, "Acme 的预算是 30万");
+        assert_eq!(k[0].visibility, "private");
+        assert_eq!(k[0].seq, Some(3));
+    }
+    let b = out.basis.as_ref().unwrap();
+    assert_eq!(b["verdict"], "pass");
+    assert_eq!(b["answer_model"], model.as_str(), "kept for the next check");
+
+    // the note is gone: the check has less than the draft was written with and does not pass
+    h.env
+        .store()
+        .with_conn(|c| {
+            c.execute_batch("DELETE FROM kb_chunks WHERE obj_id = 'kd_acme';")?;
+            c.execute(
+                "UPDATE mail_drafts SET basis = json_set(basis, '$.entries', json(?)) WHERE id = ?",
+                rusqlite::params![
+                    r#"[{"source_type":"chunk","source_id":"kd_acme","source_label":"笔记 · Acme","level":"reasoning","effective":"reasoning","used":true,"out":"reasoning","seq":3}]"#,
+                    d.id
+                ],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let out = h.mail.check_draft(&me(), &d.id).await.expect("check");
+    let b = out.basis.as_ref().unwrap();
+    assert_eq!(b["verdict"], "leak", "{b}");
+    assert!(
+        b["spans"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["reason"] == steve_modules::outbound::R_BASIS_GONE),
+        "{b}"
+    );
+}

@@ -2893,6 +2893,7 @@ async fn only_you_reading_skips_the_model_check_but_not_secrets() {
         draft_model: None,
         audience_said: Some("你不是在我的设备上吗".into()),
         skip_model: false,
+        internal_skip: false,
     };
     let you = Audience {
         scopes: vec!["space:spc_me".into(), "workspace".into(), "private".into()],
@@ -2933,6 +2934,7 @@ async fn only_you_reading_skips_the_model_check_but_not_secrets() {
         level: steve_store::base::Level::Never,
         visibility: "private".into(),
         text: "张三月薪五万".into(),
+        seq: None,
     };
     let r = d.check(&cx, &you, "张三月薪五万。", &[never]).await;
     assert_eq!(r.verdict, Verdict::Leak, "{r:?}");
@@ -2950,9 +2952,10 @@ async fn only_you_reading_skips_the_model_check_but_not_secrets() {
     assert_eq!(asked(), 1);
 }
 
-/// #13: an audience made only of the workspace's own people, with every piece of knowledge public for
-/// them (or none at all), is not asked about by the check model; knowledge they may only hear as a
-/// conclusion still is, and so is anyone outside.
+/// #13: a bot's message to an audience made only of the workspace's own people, with every piece of its
+/// tracked knowledge public for them, is not asked about by the check model; knowledge they may only hear
+/// as a conclusion still is, and so is anyone outside, a text with no knowledge at all (nothing was
+/// tracked: an agent's or a flow's text) and one the caller does not vouch for (sent as you).
 #[tokio::test(flavor = "multi_thread")]
 async fn the_workspaces_own_people_with_public_knowledge_skip_the_model() {
     use steve_modules::outbound::{Audience, CheckCx, KnowledgeUse, OutboundCheck, Verdict};
@@ -2966,6 +2969,7 @@ async fn the_workspaces_own_people_with_public_knowledge_skip_the_model() {
     let cx = CheckCx {
         ws: WS.into(),
         actor: "steve".into(),
+        internal_skip: true,
         ..CheckCx::default()
     };
     let asked = || {
@@ -2990,9 +2994,9 @@ async fn the_workspaces_own_people_with_public_knowledge_skip_the_model() {
         level,
         visibility: visibility.into(),
         text: "我们周四发布".into(),
+        seq: None,
     };
     for knowledge in [
-        vec![],
         vec![k(Level::Public, "private")],
         vec![k(Level::Reasoning, "workspace")],
     ] {
@@ -3001,6 +3005,26 @@ async fn the_workspaces_own_people_with_public_knowledge_skip_the_model() {
         assert!(r.check_model.is_none(), "{r:?}");
     }
     assert_eq!(asked(), 0, "the check model is not asked");
+    // no knowledge at all is not public knowledge: the model looks
+    let r = d.check(&cx, &team, "我们周四发布。", &[]).await;
+    assert_eq!(r.verdict, Verdict::Leak, "{r:?}");
+    assert_eq!(asked(), 1);
+    // said as you (or on your behalf): the caller does not vouch, the model looks
+    let as_you = CheckCx {
+        actor: "me".into(),
+        internal_skip: false,
+        ..cx.clone()
+    };
+    let r = d
+        .check(
+            &as_you,
+            &team,
+            "我们周四发布。",
+            &[k(Level::Public, "workspace")],
+        )
+        .await;
+    assert_eq!(r.verdict, Verdict::Leak, "{r:?}");
+    assert_eq!(asked(), 2);
     // reasoning-only knowledge from a narrower scope: the model looks
     let r = d
         .check(
@@ -3011,14 +3035,20 @@ async fn the_workspaces_own_people_with_public_knowledge_skip_the_model() {
         )
         .await;
     assert_eq!(r.verdict, Verdict::Leak, "{r:?}");
-    assert_eq!(asked(), 1);
+    assert_eq!(asked(), 3);
     // someone outside reads it: the model looks
     let outside = Audience {
         external: true,
         ..team.clone()
     };
-    d.check(&cx, &outside, "我们周四发布。", &[]).await;
-    assert_eq!(asked(), 2);
+    d.check(
+        &cx,
+        &outside,
+        "我们周四发布。",
+        &[k(Level::Public, "workspace")],
+    )
+    .await;
+    assert_eq!(asked(), 4);
     // the caller says it is a fixed receipt: rules only, whoever reads it
     let receipt = CheckCx {
         skip_model: true,
@@ -3028,7 +3058,7 @@ async fn the_workspaces_own_people_with_public_knowledge_skip_the_model() {
         .check(&receipt, &outside, "收到，已记为 ST-3。", &[])
         .await;
     assert_eq!(r.verdict, Verdict::Pass, "{r:?}");
-    assert_eq!(asked(), 2);
+    assert_eq!(asked(), 4);
 }
 
 /// #13: an item's receipt (“收到，已记为 …”) is a fixed template: it goes out on a bot's rule without the
@@ -3446,4 +3476,207 @@ async fn the_undo_window_follows_the_account() {
     assert_eq!(h.outbox.send_due(&h.ch).await, 0);
     h.env.clock.advance(7_000);
     assert_eq!(h.outbox.send_due(&h.ch).await, 1);
+}
+
+/// Choose “改写后再看” on `decision` and wait for the new card.
+async fn rewrite_and_wait(h: &H, message_id: &str, decision: &str) -> String {
+    decide(h, decision, "rewrite", "").expect("rewrite");
+    h.outbox.send_due(&h.ch).await;
+    for _ in 0..300 {
+        let again = decision_of(h, message_id);
+        if again != decision {
+            return again;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("no new card")
+}
+
+/// #14: “改写后再看” checks the rewrite against the same knowledge the first check had, a retrieved
+/// piece that is not a memory included (it used to reload memories only, so a rewrite that kept the
+/// flagged part passed as rewritten); knowledge that cannot be read again any more does not let it pass.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rewrite_is_checked_against_the_retrieved_knowledge_too() {
+    let h = setup().await;
+    checks_pass(&h);
+    // the rewrite keeps what was flagged
+    h.env
+        .gateway
+        .script(REWRITE_HEAD, r#"{"text": "Acme 那边的预算大概 30 万。"}"#);
+    acme(&h);
+    exec(
+        &h,
+        "INSERT INTO kb_chunks (workspace_id, obj_type, obj_id, seq, heading, text, visibility, level, created_by, source_kind, label, updated)
+         VALUES ('default', 'chunk', 'kd_acme', 2, '', 'Acme 的预算是 30万，下周签', 'space:spc_acme', 'reasoning', 'usr_dev', 'note', '笔记 · Acme', 1);",
+    );
+    let hit = steve_knowledge::Hit {
+        n: 1,
+        obj_type: "chunk".into(),
+        obj_id: "kd_acme".into(),
+        seq: 2,
+        title: "Acme".into(),
+        heading: String::new(),
+        text: "Acme 的预算是 30万，下周签".into(),
+        label: "笔记 · Acme".into(),
+        source_kind: "note".into(),
+        level: Level::Reasoning,
+        visibility: Visibility::Space("spc_acme".into()),
+        score: 1.0,
+        href: String::new(),
+        about: Vec::new(),
+    };
+    let g = Generation {
+        model: "smart-1".into(),
+        hits: vec![hit],
+        ..Generation::default()
+    };
+    let me = h.me.clone();
+    let plan = recorded(&h, &me, "C_DEV", "d1", "ulilei", "预算多少").await;
+    let d = h
+        .outbox
+        .deliver(
+            &h.ch,
+            &out(&plan, "Acme 的预算有 30 万。", Auth::None, Some(g)),
+        )
+        .await
+        .unwrap();
+    let Delivered::Drafted {
+        message_id,
+        decision_id,
+    } = d
+    else {
+        panic!("{d:?}")
+    };
+    let basis = |h: &H| {
+        h.env
+            .store()
+            .reader(|c| steve_channels::basis::of_message(c, WS, &message_id))
+            .unwrap()
+            .unwrap()
+    };
+    assert_eq!(basis(&h).verdict, "drafted");
+
+    let again = rewrite_and_wait(&h, &message_id, &decision_id).await;
+    let b = basis(&h);
+    assert_eq!(b.verdict, "drafted", "the flagged part is still there");
+    assert!(
+        b.entries
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["source_id"] == "kd_acme" && e["seq"] == 2),
+        "{:?}",
+        b.entries
+    );
+    let q = row(
+        &h,
+        "SELECT question, options FROM decisions WHERE id = ?",
+        &[&again],
+    );
+    assert!(q[0].as_str().unwrap().contains("仍可能泄露"), "{q:?}");
+    nothing_sent(&h);
+
+    // the piece is gone from the index: the next rewrite cannot be checked against it and does not pass
+    h.env
+        .gateway
+        .script(REWRITE_HEAD, r#"{"text": "预算的事我确认后告诉你。"}"#);
+    exec(&h, "DELETE FROM kb_chunks WHERE obj_id = 'kd_acme'");
+    rewrite_and_wait(&h, &message_id, &again).await;
+    let b = basis(&h);
+    assert_eq!(b.verdict, "drafted");
+    assert!(
+        b.spans
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["reason"] == steve_modules::outbound::R_BASIS_GONE),
+        "{:?}",
+        b.spans
+    );
+    nothing_sent(&h);
+}
+
+/// #13: an agent's own text (no generation: nothing tracked) to the workspace's own people is still
+/// checked by the model, on a bot and above all as you; so is a bot's reply on your behalf.
+#[tokio::test(flavor = "multi_thread")]
+async fn untracked_or_as_you_text_to_your_own_people_is_checked_by_the_model() {
+    let h = setup().await;
+    checks_pass(&h);
+    let asked = |h: &H| {
+        h.env
+            .gateway
+            .prompts
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|p| p.starts_with(CHECK_HEAD))
+            .count()
+    };
+    let me = h.me.clone();
+    let plan = recorded(&h, &me, "C_DEV", "d1", "ulilei", "进度怎样").await;
+    let bot = recorded(&h, &h.oncall.clone(), "C_DEV", "o1", "ulilei", "进度怎样").await;
+    // everyone in it is a recorded user of the workspace
+    exec(
+        &h,
+        "INSERT INTO parties (id, workspace_id, type, name, created_by, created, updated)
+           SELECT 'pt_' || a.id, 'default', 'contact', a.id, 'usr_dev', 1, 1 FROM accounts a
+            WHERE a.party_id IS NULL AND a.id IN (SELECT sm.account_id FROM space_members sm JOIN spaces s ON s.id = sm.space_id WHERE s.external_id = 'C_DEV');
+         UPDATE accounts SET party_id = 'pt_' || id
+            WHERE party_id IS NULL AND id IN (SELECT sm.account_id FROM space_members sm JOIN spaces s ON s.id = sm.space_id WHERE s.external_id = 'C_DEV');
+         INSERT INTO users (id, workspace_id, subject, name, role, created)
+           SELECT 'usr_' || p.id, 'default', 'sub_' || p.id, p.name, 'member', 1 FROM parties p
+            WHERE p.user_id IS NULL AND p.id IN (SELECT a.party_id FROM accounts a JOIN space_members sm ON sm.account_id = a.id JOIN spaces s ON s.id = sm.space_id WHERE s.external_id = 'C_DEV');
+         UPDATE parties SET user_id = coalesce(user_id, 'usr_' || id)
+            WHERE id IN (SELECT a.party_id FROM accounts a JOIN space_members sm ON sm.account_id = a.id JOIN spaces s ON s.id = sm.space_id WHERE s.external_id = 'C_DEV');
+         UPDATE spaces SET member_count = (SELECT count(*) FROM space_members sm JOIN accounts a ON a.id = sm.account_id
+            WHERE sm.space_id = spaces.id AND a.kind NOT IN ('app_bot', 'bot')), has_external = 0 WHERE external_id = 'C_DEV';",
+    );
+    let mut r = out(&plan, "我们周四发布。", Auth::None, None);
+    r.purpose = Purpose::Source;
+    h.outbox.deliver(&h.ch, &r).await.unwrap();
+    assert_eq!(asked(&h), 1, "as you, nothing tracked: the model looks");
+    // as you with tracked public knowledge: still the model
+    let mem = h
+        .env
+        .store()
+        .transaction(|tx| {
+            mems::create(
+                tx,
+                WS,
+                &NewMem {
+                    kind: "fact".into(),
+                    text: "我们周四发布".into(),
+                    source_label: "发布安排".into(),
+                    visibility: Visibility::Workspace,
+                    level: Level::Public,
+                    status: "confirmed".into(),
+                    created_by: ME.into(),
+                    ..NewMem::default()
+                },
+            )
+        })
+        .expect("mem")
+        .id;
+    h.outbox
+        .deliver(
+            &h.ch,
+            &out(&plan, "我们周四发布。", Auth::None, generation(&mem)),
+        )
+        .await
+        .unwrap();
+    assert_eq!(asked(&h), 2, "as you: the model looks");
+    // the same place on a bot: its own tracked public knowledge skips the model (so the place is the
+    // workspace's own people), an agent's text with nothing tracked does not
+    h.outbox
+        .deliver(
+            &h.ch,
+            &out(&bot, "我们周四发布。", rule(&bot), generation(&mem)),
+        )
+        .await
+        .unwrap();
+    assert_eq!(asked(&h), 2, "a bot's tracked public knowledge: no model");
+    let mut r = out(&bot, "我们周四发布。", rule(&bot), None);
+    r.purpose = Purpose::Source;
+    h.outbox.deliver(&h.ch, &r).await.unwrap();
+    assert_eq!(asked(&h), 3, "nothing tracked: the model looks");
 }

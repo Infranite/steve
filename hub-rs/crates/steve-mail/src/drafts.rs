@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use steve_modules::accounts::service::current_party;
-use steve_modules::outbound::{self, Audience, CheckCx, CheckResult, KnowledgeUse, Verdict};
+use steve_modules::outbound::{self, Audience, CheckCx, CheckResult, Verdict};
 use steve_modules::{ApiError, Caller, decisions};
 use steve_store::base::{self, Viewer, Visibility};
 use steve_store::{FileRef, NewDecision, Tx, uid};
@@ -559,48 +559,50 @@ impl Mail {
         if !["draft", "pending"].contains(&d.status.as_str()) {
             return Err(ApiError::conflict(steve_i18n::t!("mail.draft.locked")).into());
         }
-        let (audience, knowledge) = self.0.m.store.reader(|c| -> MailResult<_> {
+        let (audience, knowledge, complete) = self.0.m.store.reader(|c| -> MailResult<_> {
             let a = audience_of_draft(c, &d)?;
-            // what the basis names and can be read again (memories)
-            let mut k = Vec::new();
+            // the same knowledge the drafting check had (retrieved pieces and memories), read again
             let entries = d
                 .basis
                 .as_ref()
-                .and_then(|b| b["entries"].as_array().cloned());
-            for e in entries.unwrap_or_default() {
-                if e["source_type"] != "mem" {
-                    continue;
-                }
-                if let Some(m) = base::mems::get(c, e["source_id"].as_str().unwrap_or(""))? {
-                    k.push(KnowledgeUse {
-                        source_type: "mem".into(),
-                        source_id: m.id.clone(),
-                        source_label: e["source_label"].as_str().unwrap_or("记忆").to_string(),
-                        level: m.level,
-                        visibility: m.visibility.code(),
-                        text: m.text.clone(),
-                    });
-                }
-            }
-            Ok((a, k))
+                .and_then(|b| b["entries"].as_array().cloned())
+                .unwrap_or_default();
+            let (k, complete) =
+                steve_knowledge::retrieve::knowledge_again(c, &d.workspace_id, &entries)?;
+            Ok((a, k, complete))
         })?;
-        let check = outbound::check(
+        let draft_model = d
+            .basis
+            .as_ref()
+            .and_then(|b| b["answer_model"].as_str())
+            .filter(|m| !m.is_empty())
+            .map(str::to_string);
+        let mut check = outbound::check(
             &self.0.m,
             &CheckCx {
                 ws: who.ws.clone(),
                 actor: d.author.clone(),
-                draft_model: None,
+                draft_model,
                 audience_said: None,
                 skip_model: false,
+                internal_skip: false,
             },
             &audience,
             &format!("{}\n\n{}", d.subject, d.body),
             &knowledge,
         )
         .await;
+        // checked against less than it was written with: it does not pass on that
+        if !complete && check.verdict == Verdict::Pass {
+            check.verdict = Verdict::Leak;
+            check.spans.push(outbound::Span {
+                text: String::new(),
+                reason: outbound::R_BASIS_GONE.into(),
+            });
+        }
         let mut basis = serde_json::to_value(&check).unwrap_or(Value::Null);
         if let (Some(Value::Object(old)), Value::Object(new)) = (&d.basis, &mut basis) {
-            for k in ["why", "needs_attention", "cites"] {
+            for k in ["why", "needs_attention", "cites", "answer_model"] {
                 if let Some(v) = old.get(k) {
                     new.insert(k.into(), v.clone());
                 }

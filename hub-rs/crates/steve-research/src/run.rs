@@ -197,10 +197,6 @@ pub struct ResearchRequest {
     pub effort: Option<String>,
     /// `claude-code` (default) or `codex` (设置 · 模型: Steve's harness or the research override).
     pub harness: String,
-    /// Someone besides the workspace's owner reads the answer (a shared chat). A Codex run then has no
-    /// way to read files: it runs in an empty directory with its shell and image viewer off, and has only
-    /// Steve's tools (scoped to that audience by the run's token) and the question's images.
-    pub shared: bool,
 }
 
 impl ResearchRequest {
@@ -223,7 +219,6 @@ impl ResearchRequest {
             models: None,
             effort: None,
             harness: "claude-code".into(),
-            shared: false,
         }
     }
 }
@@ -801,28 +796,13 @@ async fn execute_plans(
             return failed_outcome(run_id, format!("research attachments: {e}"));
         }
     };
-    let codex = req.harness == "codex";
-    // Codex reads files through its shell, which only a best-effort parser checks: where anyone besides
-    // the owner reads the answer it gets no files at all (decided by the user on 2026-11-06)
-    let walled = codex && req.shared;
-    let cwd = if walled {
-        let empty = run_dir.join("empty");
-        if let Err(e) = tokio::fs::create_dir_all(&empty).await {
-            return failed_outcome(run_id, format!("research dir: {e}"));
-        }
-        empty
-    } else {
-        req.cwd.clone().unwrap_or_else(|| run_dir.clone())
-    };
-    let mut add_dirs = if walled {
-        Vec::new()
-    } else {
-        req.add_dirs.clone()
-    };
-    add_dirs.extend(files.dir.clone().filter(|_| !walled));
+    let cwd = req.cwd.clone().unwrap_or_else(|| run_dir.clone());
+    let mut add_dirs = req.add_dirs.clone();
+    add_dirs.extend(files.dir.clone());
     let mut readable = add_dirs.clone();
     readable.push(run_dir.clone());
     let scope = Scope::new(&cwd, &readable, &cfg.home);
+    let codex = req.harness == "codex";
     // Codex sandboxes its commands with Seatbelt itself, which cannot be nested in sandbox-exec
     let sandboxed = match (codex, sandbox::decide(cfg.sandbox)) {
         (true, None) => {
@@ -976,7 +956,6 @@ async fn run_plan(
             mcp: req.mcp.as_ref().map(|m| (m.url.as_str(), m.token.as_str())),
             effort: req.effort.as_deref(),
             images: &ctx.files.image_files,
-            no_files: req.shared,
         }),
         _ => command::invocation(&CommandPlan {
             executable: &ctx.cfg.executable,

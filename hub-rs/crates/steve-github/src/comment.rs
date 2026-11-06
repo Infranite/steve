@@ -243,6 +243,7 @@ impl GitHub {
                 draft_model: None,
                 audience_said: None,
                 skip_model: false,
+                internal_skip: false,
             },
             &Audience {
                 external: true,

@@ -621,6 +621,7 @@ impl Mail {
                     draft_model: None,
                     audience_said: None,
                     skip_model,
+                    internal_skip: false,
                 },
                 &p.audience,
                 &format!("{}\n\n{}", p.subject, p.body),

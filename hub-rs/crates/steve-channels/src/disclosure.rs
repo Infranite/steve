@@ -16,8 +16,9 @@
 //!    reply, the audience, each piece of knowledge with its effective level →
 //!    `{"verdict":"pass|leak","spans":[…]}`. It also catches combinations and “根据之前和 Acme 的讨论”.
 //!
-//! Step 3 is skipped for a fixed receipt ([`CheckCx::skip_model`]) and for an audience made only of the
-//! workspace's own people when every piece of knowledge is public for them.
+//! Step 3 is skipped for a fixed receipt ([`CheckCx::skip_model`]) and, for a bot's own message whose
+//! knowledge was all tracked ([`CheckCx::internal_skip`]), for an audience made only of the workspace's
+//! own people when every piece of that knowledge (at least one) is public for them.
 //!
 //! Any span → [`Verdict::Leak`]. A failing or unreadable check model is a leak too, so a broken check
 //! never lets text through. Rewriting is the caller's: channels rewrite up to [`MAX_REWRITES`] times
@@ -452,6 +453,7 @@ pub fn entries(
                     }
                 }
                 .into(),
+                seq: k.seq,
             }
         })
         .collect()
@@ -760,9 +762,10 @@ impl OutboundCheck for Disclosure {
         }
 
         // 3. the model check, except where it cannot find more than the rules did: a fixed receipt no model
-        // wrote (the caller says so), or an audience made only of the workspace's own people for whom every
-        // piece of knowledge the reply was written with counts as public (decided by the user on 2026-11-06)
-        if cx.skip_model || internal_public(audience, knowledge) {
+        // wrote (the caller says so), or a bot's message whose knowledge was all tracked, to an audience made
+        // only of the workspace's own people for whom every piece of it counts as public (decided by the
+        // user on 2026-11-06). Knowledge nobody tracked (none given) is not public knowledge: the model looks.
+        if cx.skip_model || (cx.internal_skip && internal_public(audience, knowledge)) {
             let verdict = if spans.is_empty() {
                 Verdict::Pass
             } else {
@@ -819,11 +822,12 @@ impl OutboundCheck for Disclosure {
 }
 
 /// Everyone who reads it is a recorded user of the workspace (`workspace` among the scopes, nobody outside)
-/// and every piece of knowledge is public for them: nothing the check model could flag that the rules
-/// would not.
+/// and there is knowledge, every piece of it public for them: nothing the check model could flag that the
+/// rules would not. No knowledge at all says nothing was tracked, not that it was public.
 fn internal_public(a: &Audience, knowledge: &[KnowledgeUse]) -> bool {
     !a.external
         && a.scopes.iter().any(|s| s == "workspace")
+        && !knowledge.is_empty()
         && knowledge.iter().all(|k| effective(k, a) == Level::Public)
 }
 
@@ -940,6 +944,7 @@ mod tests {
             level,
             visibility: vis.into(),
             text: text.into(),
+            seq: None,
         }
     }
 
@@ -1050,6 +1055,7 @@ mod tests {
             level: Level::Conclusion,
             visibility: "workspace".into(),
             text: "x".into(),
+            seq: None,
         };
         let ks = vec![k("事项 ST-23")];
         let (leak, s) = judge_check(

@@ -198,7 +198,6 @@ impl ResearchAdapter {
         }
         req.effort = q.models.effort.clone();
         req.harness = q.models.harness.clone();
-        req.shared = !q.own;
         /* the question's own files, then the ones of the message it follows up on */
         let own = q.files.iter().map(|f| (f, false));
         let earlier = q.earlier_files.iter().map(|f| (f, true));
@@ -875,7 +874,6 @@ mod tests {
             mcp: None,
             models,
             ui: true,
-            own: true,
         };
         let out = a.research(req("tr_1", Default::default()), &seen).await;
         assert_eq!(out.end, RunEnd::Done, "{out:?}");
@@ -922,12 +920,6 @@ mod tests {
         let argv = std::fs::read_to_string(&args).unwrap();
         assert_eq!(flag(&argv, "--model").as_deref(), Some("claude-opus-5-5"));
         assert_eq!(flag(&argv, "--effort").as_deref(), Some("max"));
-
-        /* #36: who reads the answer reaches the executor (a shared chat walls a Codex run off) */
-        assert!(!a.request(&req("tr_3", Default::default())).shared);
-        let mut shared = req("tr_4", Default::default());
-        shared.own = false;
-        assert!(a.request(&shared).shared);
 
         /* both runs are in the statistics as research, on the model that ran */
         let rows: Vec<(String, String)> =

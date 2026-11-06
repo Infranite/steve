@@ -462,6 +462,7 @@ impl Mail {
                 level: h.level,
                 visibility: h.visibility.code(),
                 text: h.text.clone(),
+                seq: Some(h.seq),
             })
             .collect();
         let skip_model = !self.model_check_now(&who.ws, q.item_id.as_deref());
@@ -474,6 +475,7 @@ impl Mail {
                     draft_model: Some(out.model.clone()),
                     audience_said: None,
                     skip_model,
+                    internal_skip: false,
                 },
                 &audience,
                 &format!("{subject}\n\n{body}"),
@@ -513,9 +515,11 @@ impl Mail {
             sent: None,
         };
         let mut d = self.insert_pending(d, &check)?;
-        // why / needs_attention / cites ride along on the basis (the card shows them with it)
+        // why / needs_attention / cites ride along on the basis (the card shows them with it), and the
+        // model that wrote it (a later check uses another one)
         if let Some(Value::Object(b)) = d.basis.as_mut() {
             b.insert("why".into(), Value::String(md.why.clone()));
+            b.insert("answer_model".into(), Value::String(out.model.clone()));
             b.insert("needs_attention".into(), Value::Bool(md.needs_attention));
             b.insert(
                 "cites".into(),

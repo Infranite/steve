@@ -348,6 +348,7 @@ fn knowledge_of(c: &Connection, g: Option<&Generation>) -> ChannelResult<Vec<Kno
             level: h.level,
             visibility: h.visibility.code(),
             text: h.text.clone(),
+            seq: Some(h.seq),
         })
         .collect();
     for a in &g.anchors {
@@ -369,6 +370,7 @@ fn knowledge_of(c: &Connection, g: Option<&Generation>) -> ChannelResult<Vec<Kno
                 level: m.level,
                 visibility: m.visibility.code(),
                 text: m.text.clone(),
+                seq: None,
             });
         }
     }
@@ -566,6 +568,7 @@ async fn rewrite_draft(
         Vec<KnowledgeUse>,
         Option<String>,
         basis::BasisOut,
+        bool,
     );
     let loaded = ch.store().reader(|c| -> ChannelResult<Option<Loaded>> {
         let Some(row) = out_row(c, message_id)? else {
@@ -590,23 +593,9 @@ async fn rewrite_draft(
             row.persona_id.as_deref(),
         )?;
         let a = disclosure::space_audience(c, &p.space, &p.account, &p.owner_user)?;
-        // the knowledge the basis names that can be read again (memories)
-        let mut k = Vec::new();
-        for e in b.entries.as_array().into_iter().flatten() {
-            if e["source_type"] != "mem" {
-                continue;
-            }
-            if let Some(m) = mems::get(c, e["source_id"].as_str().unwrap_or(""))? {
-                k.push(KnowledgeUse {
-                    source_type: "mem".into(),
-                    source_id: m.id.clone(),
-                    source_label: e["source_label"].as_str().unwrap_or("记忆").to_string(),
-                    level: m.level,
-                    visibility: m.visibility.code(),
-                    text: m.text.clone(),
-                });
-            }
-        }
+        // the same knowledge the first check had (retrieved pieces and memories), read again
+        let entries = b.entries.as_array().cloned().unwrap_or_default();
+        let (k, complete) = steve_knowledge::retrieve::knowledge_again(c, &row.ws, &entries)?;
         let said = match &row.reply_to {
             Some(src) => c
                 .query_row(
@@ -618,9 +607,9 @@ async fn rewrite_draft(
                 .optional()?,
             None => None,
         };
-        Ok(Some((row, p, a, k, said, b)))
+        Ok(Some((row, p, a, k, said, b, complete)))
     })?;
-    let Some((row, p, audience, knowledge, said, b)) = loaded else {
+    let Some((row, p, audience, knowledge, said, b, complete)) = loaded else {
         return Ok(());
     };
     let spans: Vec<steve_modules::outbound::Span> =
@@ -643,9 +632,22 @@ async fn rewrite_draft(
         draft_model: b.answer_model.clone(),
         audience_said: said,
         skip_model: false,
+        // the model may be left out only when the knowledge is all here, as in the first check
+        internal_skip: complete && p.mode == Mode::Bot && row.on_behalf != "proxy",
     };
     let checked = match &new {
-        Some(t) => Some(b1::check(ch.modules(), &cx, &audience, t, &knowledge).await),
+        Some(t) => {
+            let mut r = b1::check(ch.modules(), &cx, &audience, t, &knowledge).await;
+            // checked against less than it was written with: it does not pass on that
+            if !complete && r.verdict == Verdict::Pass {
+                r.verdict = Verdict::Leak;
+                r.spans.push(steve_modules::outbound::Span {
+                    text: String::new(),
+                    reason: steve_modules::outbound::R_BASIS_GONE.into(),
+                });
+            }
+            Some(r)
+        }
         None => None,
     };
     let now = ch.now();
@@ -1068,6 +1070,12 @@ impl Outbox {
             audience_said: said,
             // a fixed receipt (“收到，已记为 …”, “我请 … 来看。”) no model wrote: secrets and the rules only
             skip_model: template(req),
+            // a bot's own reply whose knowledge was tracked (a generation) may skip the model for the
+            // workspace's own people; text without one (an agent's, a flow's) and anything said as you
+            // or on your behalf may not
+            internal_skip: req.generation.is_some()
+                && p.mode == Mode::Bot
+                && req.purpose != Purpose::Trigger,
         };
 
         // 1. disclosure (and the rewrites)
