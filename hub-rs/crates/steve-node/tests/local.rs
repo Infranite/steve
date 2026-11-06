@@ -973,6 +973,78 @@ async fn steves_tools_reach_the_hub_as_the_running_attempt() {
     assert_eq!(tools.calls.lock().unwrap().len(), 1);
 }
 
+/// The tool server the adapter was given at session/new: its URL and token.
+fn tool_server(t: &T) -> (String, String) {
+    let log = std::fs::read_to_string(&t.log).unwrap();
+    let new = log
+        .lines()
+        .find(|l| l.contains("\"method\":\"session/new\""))
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_str(new).unwrap();
+    let server = &v["params"]["mcpServers"][0];
+    let token = server["headers"][0]["value"]
+        .as_str()
+        .unwrap()
+        .strip_prefix("Bearer ")
+        .unwrap()
+        .to_string();
+    (server["url"].as_str().unwrap().to_string(), token)
+}
+
+/// A harness lists Steve's tools as soon as it connects to the server, which may be before the
+/// first turn (Claude Code does, when its connection wins the race with the first prompt; it then
+/// keeps the empty list for good). The list waits for the attempt instead of failing, and once the
+/// Node knows the catalog it is listed at idle at once. Calls still need the running attempt.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn steves_tools_are_listed_before_the_first_turn_and_at_idle() {
+    let t = T::new(&[]);
+    let n = t.node();
+    let tools = Arc::new(Tools::default());
+    n.connect_tools(tools.clone()).await.unwrap();
+    ready(&n, "s_1").await;
+    let (url, token) = tool_server(&t);
+    let list = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"});
+    let early = tokio::spawn({
+        let (url, token, list) = (url.clone(), token.clone(), list.clone());
+        async move { mcp(&url, &token, list).await }
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    n.start_turn(now_cmd("op_t", turn("s_1", "t_1", "a_1", "@sleep 3000")))
+        .await
+        .unwrap();
+    let (s, early) = early.await.unwrap();
+    assert_eq!(s, 200, "{early}");
+    assert_eq!(
+        early["result"]["tools"][0]["name"], "steve_update",
+        "listed before the first turn: {early}"
+    );
+    n.cancel(now_cmd(
+        "op_c",
+        Cancel {
+            target: OperationId::new("op_t").unwrap(),
+            reason: "x".into(),
+        },
+    ))
+    .await
+    .unwrap();
+    t.until("the end", |t| !t.ended().is_empty()).await;
+    let (s, idle) =
+        tokio::time::timeout(std::time::Duration::from_secs(2), mcp(&url, &token, list))
+            .await
+            .expect("answered at once at idle");
+    assert_eq!(s, 200, "{idle}");
+    assert_eq!(idle["result"]["tools"][0]["name"], "steve_update", "{idle}");
+    let (_, call) = mcp(
+        &url,
+        &token,
+        serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {"name": "steve_update", "arguments": {"now": "x"}}}),
+    )
+    .await;
+    assert!(call.get("error").is_some(), "no call at idle: {call}");
+    assert!(tools.calls.lock().unwrap().is_empty());
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_permission_is_bound_to_the_file_as_it_was() {
     let t = T::new(&[]);
