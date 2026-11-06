@@ -344,17 +344,18 @@ impl Tx<'_> {
                 {
                     return Ok(());
                 }
-                /* the goal asks for an actual operation: the remote alone is not that evidence (`proof`) */
-                let more = self.proof_continue(&i)?;
+                /* the goal asks for an actual operation, or for a build Steve can't follow: the remote
+                 * alone is not that evidence (`proof`) */
+                let more = self.proof_continue(&i, rule, &p)?;
                 if p.met && more.is_none() {
                     return self.takeover_close(&i, rule, &p);
                 }
-                let build = rule == DONE_TAG && self.needs_of(&i)?.build;
+                let build = crate::proof::build_followed(rule, &p) && self.needs_of(&i)?.build;
                 let mut text = continue_text(&stop, Some(rule), Some(&p), build, &i);
                 if p.met
                     && let Some(more) = more
                 {
-                    text.push_str(more);
+                    text.push_str(&more);
                 }
                 if let Some(why) = self.takeover_continue(&i, &session, stop.why(), &text)? {
                     let why = format!("{why}（Steve 核对：{}）", p.summary());
@@ -444,7 +445,8 @@ impl Tx<'_> {
                     item: Some(i.id.clone()),
                 },
             };
-            let build = build_text(rule == DONE_TAG && self.build_required(i)?);
+            let build =
+                build_text(crate::proof::build_followed(rule, &p) && self.build_required(i)?);
             self.send(
                 &to,
                 &format!(
@@ -460,7 +462,20 @@ impl Tx<'_> {
     /// The build the completion tag started is followed from now on: once per tag, or, `required` by
     /// the item's goal (`proof`), once per result that has to show it.
     fn track_build(&mut self, i: &Item, p: &Probe, required: bool) -> Result<()> {
-        let (Some((tag, commit)), Some(slug)) = (&p.tag, &p.slug) else {
+        let Some((tag, commit)) = &p.tag else {
+            return Ok(());
+        };
+        let Some(slug) = &p.slug else {
+            /* not on GitHub: nothing to follow; the delivery's build check is the goal's evidence */
+            if required {
+                self.db().timeline_add(
+                    &i.id,
+                    "steve",
+                    "sys",
+                    &format!("远端不在 GitHub 上，Steve 跟踪不了 {tag} 的 Release 构建；事项目标要求的构建通过以交付里的构建检查为准"),
+                    None,
+                )?;
+            }
             return Ok(());
         };
         let key = if required {
