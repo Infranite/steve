@@ -856,6 +856,40 @@ fn errors_before_answering_trip_b5_only_when_they_repeat() {
 }
 
 #[test]
+fn an_error_recording_an_answer_already_given_trips_b5_at_once() {
+    let t = t();
+    let (item, sid, cwd) = t.item();
+    let file = cwd.join("notes.txt").to_string_lossy().to_string();
+    let d = t.permission(
+        &item,
+        &sid,
+        ToolInput {
+            raw: json!({"file_path": file, "content": "x"}),
+            kind: Some("edit".into()),
+            locations: vec![file.clone()],
+            own_dir: None,
+            own_pids: None,
+        },
+    );
+    // the ledger cannot settle the action once the card is answered
+    rusqlite::Connection::open(t.kit.home().join("data/steve.sqlite3"))
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER yolo_no_decided BEFORE UPDATE OF outcome ON yolo_actions
+               WHEN NEW.outcome = 'decided' BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END;",
+        )
+        .unwrap();
+    let a = t.engine.consider(&d).unwrap().expect("an action");
+    assert_ne!(a.outcome, "decided", "not settled");
+    assert_eq!(
+        t.kit.rt.st().answered,
+        vec![(d.clone(), Some("once".to_string()))]
+    );
+    // one error, after the answer: tripped, not counted towards a repeat
+    assert_eq!(t.paused().expect("paused")["code"], "B5");
+}
+
+#[test]
 fn nothing_happens_while_switched_off() {
     let t = t();
     t.yolo

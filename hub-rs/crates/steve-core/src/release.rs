@@ -1418,14 +1418,7 @@ impl Tx<'_> {
         self.db()
             .timeline_add(&i.id, &who, "me", &format!("验收并发布 {branch}"), None)?;
         let to = match self.active_session(&i.id)?.filter(|s| s.status != "ended") {
-            Some(s) => {
-                /* told with its next message: no round of its own for this */
-                self.c.steve_note(
-                    &s.id,
-                    &format!("（Steve）用户验收通过并批准了发布，Steve 已经开始发布 {branch}，不用再用 steve_publish 请求。"),
-                );
-                To::Session(s.id)
-            }
+            Some(s) => To::Session(s.id),
             None => To::Decision {
                 live: None,
                 item: Some(i.id.clone()),
@@ -1433,8 +1426,20 @@ impl Tx<'_> {
         };
         self.db()
             .item_patch(&i.id, patch![stage: "收尾", now: "正在发布"])?;
-        if self.rebase_for_release(&i.id, &branch, &to)? {
-            self.start_release(&branch, &i.id)?;
+        if !self.rebase_for_release(&i.id, &branch, &to)? {
+            return Ok(true);
+        }
+        self.start_release(&branch, &i.id)?;
+        /* told with its next message, and only once the release really runs: a rebase that
+        stopped or a refused start sends the agent back to steve_publish instead */
+        if let (To::Session(sid), true) = (
+            &to,
+            self.st.releasing.as_ref().is_some_and(|r| r.item == i.id),
+        ) {
+            self.c.steve_note(
+                sid,
+                &format!("（Steve）用户验收通过并批准了发布，Steve 已经开始发布 {branch}，不用再用 steve_publish 请求。"),
+            );
         }
         Ok(true)
     }

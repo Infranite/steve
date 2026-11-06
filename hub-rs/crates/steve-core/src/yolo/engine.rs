@@ -11,7 +11,8 @@
 //!   turned into “not now” (the user typed meanwhile) is left for the next look, one that turned
 //!   into “leave it to you” is recorded so; only a different answer means the executor is confused
 //!   and trips breaker B5. Errors before anything was answered trip it when they repeat
-//!   ([`B5_ERRORS`] within [`B5_WINDOW_MS`]); a failure answering a card trips it at once.
+//!   ([`B5_ERRORS`] within [`B5_WINDOW_MS`]); a failure answering a card, or recording an answer
+//!   already given, trips it at once.
 //! - Tool permission requests are answered only while the runner waits for them: the Hub hands the
 //!   full tool input over ([`Engine::stash`]) and arms it once the runner registered the request
 //!   ([`Engine::arm`]); after a restart those requests are gone anyway.
@@ -457,13 +458,26 @@ impl Engine {
             }
         };
         match self.answer(d, choice, text.as_deref().unwrap_or("")) {
-            Ok(after) if after.status == "expired" => {
-                self.yolo()
-                    .finish(&a.id, "cancelled", Some("权限请求已经失效"))?;
-            }
+            /* the card was answered: a failure recording it trips B5 at once, as a failure
+            answering it does (only errors before anything was answered wait for a repeat) */
             Ok(after) => {
-                self.record_answer(&after, &a)?;
-                self.yolo().finish(&a.id, "decided", None)?;
+                let settled = if after.status == "expired" {
+                    self.yolo()
+                        .finish(&a.id, "cancelled", Some("权限请求已经失效"))
+                        .map(drop)
+                } else {
+                    self.record_answer(&after, &a)
+                        .and_then(|()| self.yolo().finish(&a.id, "decided", None).map(drop))
+                };
+                if let Err(e) = settled {
+                    self.forget_tool(&d.id);
+                    self.yolo().executor_failed(
+                        &d.workspace_id,
+                        &format!("「{}」已经回答，记录时出错：{e}", d.question),
+                    )?;
+                    /* tripped here: not counted again as an error before answering */
+                    return self.reread(&a.id).map(Some);
+                }
             }
             Err(e) if already_handled(&e) => {
                 self.yolo()

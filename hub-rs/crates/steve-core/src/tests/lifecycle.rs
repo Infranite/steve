@@ -1097,6 +1097,11 @@ fn accept_and_release_starts_the_release_without_a_round_of_the_agent() {
     );
     // the agent is not asked to publish: no new prompt, a note waits for its next message
     assert_eq!(k.rt.prompts_of(&x.session).len(), prompts);
+    assert!(
+        k.core
+            .with_steve_note(&x.session, "")
+            .contains("已经开始发布")
+    );
     assert_eq!(k.status(&x.id).2, "正在发布");
     assert!(
         k.timeline_texts(&x.id)
@@ -1155,5 +1160,32 @@ fn accept_without_release_waives_it() {
             .unwrap()
             .iter()
             .any(|o| o.kind == "release" && o.status == "waived")
+    );
+}
+
+#[test]
+fn accept_and_release_with_a_rebase_conflict_sends_the_agent_to_steve_publish_only() {
+    let k = Kit::new();
+    let (x, _, d) = frozen_in_git(&k);
+    // main moved under the branch's own file: the rebase before the release conflicts
+    let r = k.home().join("repo");
+    std::fs::write(r.join("x.txt"), "theirs\n").unwrap();
+    g(&r, &["add", "."]);
+    g(&r, &["commit", "-q", "-m", "main x"]);
+    k.core
+        .resolve(&d, "pass", crate::orchestrator::ACCEPT_AND_RELEASE, "me")
+        .unwrap();
+    assert!(k.core.tx().st.releasing.is_none());
+    let last = k.rt.prompts_of(&x.session).last().cloned().unwrap();
+    assert!(
+        last.contains("有冲突") && last.contains("再用 steve_publish 请求发布"),
+        "{last}"
+    );
+    assert!(!last.contains("已经开始发布"), "{last}");
+    // and nothing waits to tell it later that the release started
+    assert_eq!(k.core.with_steve_note(&x.session, "next"), "next");
+    assert_eq!(
+        release_cards(&k, &x.id)[0].result["outcome"],
+        "not_released"
     );
 }
