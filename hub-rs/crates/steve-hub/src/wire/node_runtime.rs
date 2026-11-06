@@ -216,6 +216,10 @@ pub struct NodeRuntime {
     /// New sessions left on the legacy runner since boot although this Node was on (no binding
     /// could be planned, or the bind failed): `/healthz` shows them, so they don't hide.
     fallbacks: std::sync::atomic::AtomicU64,
+    /// Sessions of the legacy runner moved onto this Node since boot ([`Self::adopt`]).
+    adopted: std::sync::atomic::AtomicU64,
+    /// Sessions of the legacy runner ended since boot because they cannot run on this Node.
+    retired: std::sync::atomic::AtomicU64,
     /// The callers waiting on think jobs of this Node ([`NodePrint`]).
     jobs: node_jobs::Waiters,
 }
@@ -337,6 +341,8 @@ impl NodeRuntime {
             turn_limit: std::sync::atomic::AtomicI64::new(TURN_LIMIT_MS),
             idle_release: std::sync::atomic::AtomicI64::new(IDLE_RELEASE_MS),
             fallbacks: std::sync::atomic::AtomicU64::new(0),
+            adopted: std::sync::atomic::AtomicU64::new(0),
+            retired: std::sync::atomic::AtomicU64::new(0),
             jobs: node_jobs::Waiters::default(),
         })
     }
@@ -391,6 +397,21 @@ impl NodeRuntime {
     /// How many new sessions [`Self::fell_back`] since boot.
     pub fn fallbacks(&self) -> u64 {
         self.fallbacks.load(Ordering::Relaxed)
+    }
+
+    /// How many legacy sessions were [`Self::adopt`]ed since boot.
+    pub fn adopted(&self) -> u64 {
+        self.adopted.load(Ordering::Relaxed)
+    }
+
+    /// A legacy session that cannot run on this Node was ended.
+    pub fn retired_one(&self) {
+        self.retired.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// How many legacy sessions were [`Self::retired_one`] since boot.
+    pub fn retired(&self) -> u64 {
+        self.retired.load(Ordering::Relaxed)
     }
 
     /// An error if [`Self::stop`] was called.
@@ -542,6 +563,34 @@ impl NodeRuntime {
     /// never open at once (they share the item's worktree). A release that fails is asked again
     /// and the session waits for that one instead ([`Self::release_again_in`]).
     pub fn bind_after(&self, b: &Binding, after: Option<&str>) -> Result<(), StoreError> {
+        self.bind_with(b, after, None).map(|_| ())
+    }
+
+    /// A session the legacy runner ran so far moves onto this Node (B5), at an idle boundary: the
+    /// caller let its idle harness go first. It opens continuing the same conversation, `resume`
+    /// being the harness's own session id the legacy runner kept (`sessions.acp_session_id`;
+    /// `None`: it never got one, so it starts a new one). The session hears it once. Idempotent:
+    /// a session bound already is left as it is (false).
+    pub fn adopt(&self, b: &Binding, resume: Option<&str>) -> Result<bool, StoreError> {
+        let resume = match resume.filter(|r| !r.is_empty()) {
+            Some(r) => Some(ResumeHandle::try_from(r.to_string()).map_err(conflict)?),
+            None => None,
+        };
+        let fresh = self.bind_with(b, None, Some(resume))?;
+        if fresh {
+            self.adopted.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(fresh)
+    }
+
+    /// [`Self::bind_after`]; `adopted`: a legacy session moving here, with what it resumes.
+    /// Whether the binding is new.
+    fn bind_with(
+        &self,
+        b: &Binding,
+        after: Option<&str>,
+        adopted: Option<Option<ResumeHandle>>,
+    ) -> Result<bool, StoreError> {
         self.running()?;
         let workspace = WorkspaceRef {
             node: self.node_id.clone(),
@@ -552,9 +601,9 @@ impl NodeRuntime {
             workspace: workspace.clone(),
             choice: b.choice.clone(),
             policy: b.policy.clone(),
-            resume: None,
+            resume: adopted.clone().flatten(),
         };
-        self.tx(|tx| {
+        let fresh = self.tx(|tx| {
             let fresh = rt::bind_session_in(
                 tx,
                 &rt::SessionBinding {
@@ -567,7 +616,7 @@ impl NodeRuntime {
                 now(),
             )?;
             if !fresh {
-                return Ok(());
+                return Ok(false);
             }
             let (prep, prep_d) = command(
                 &format!("op_prep_{}", b.session),
@@ -617,10 +666,27 @@ impl NodeRuntime {
                 },
                 now(),
             )?;
-            Ok(())
+            if let Some(resume) = &adopted {
+                let text = steve_i18n::stored(|| match resume {
+                    Some(_) => steve_i18n::t!("hub.node.adopted"),
+                    None => steve_i18n::t!("hub.node.adopted_fresh"),
+                });
+                rt::add_event_in(
+                    tx,
+                    &b.session,
+                    "system",
+                    json!({ "text": text, "adopted": true }),
+                    V1,
+                    None,
+                    now(),
+                )?;
+            }
+            Ok(true)
         })?;
-        self.wake_send.notify_one();
-        Ok(())
+        if fresh {
+            self.wake_send.notify_one();
+        }
+        Ok(fresh)
     }
 
     /// The session a decision belongs to.
@@ -3662,7 +3728,8 @@ fn system_in(tx: &Tx, session: &str, text: &str) -> Result<(), StoreError> {
 ///   claimed or submitted dispatch, a pending resume). Removing the runner needs both at 0.
 ///
 /// `fallbacks` (since boot) counts new sessions left on the legacy runner although the local Node
-/// was on. Public: no reason text, ids or paths, only states and counts.
+/// was on. `adopted` / `retired` (since boot): legacy sessions moved onto the local Node at an idle
+/// boundary / ended because they cannot run there (B5). Public: no reason text, ids or paths, only states and counts.
 pub fn health(
     store: &Store,
     local: Option<&NodeRuntime>,
@@ -3708,6 +3775,8 @@ pub fn health(
         "stopped": local.is_some_and(|n| n.is_stopped()),
         "holding": local.is_some_and(|n| n.is_holding()),
         "fallbacks": local.map_or(0, |n| n.fallbacks()),
+        "adopted": local.map_or(0, |n| n.adopted()),
+        "retired": local.map_or(0, |n| n.retired()),
         "sessions": sessions,
         "open": open,
         "running": running,

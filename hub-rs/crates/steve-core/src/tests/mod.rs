@@ -22,6 +22,7 @@ mod queued;
 mod release_cleanup;
 mod release_outcome;
 mod restart;
+mod retire;
 mod routing;
 mod stall;
 mod stats_marks;

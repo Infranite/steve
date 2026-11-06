@@ -119,5 +119,16 @@
   "hub.node.recovered_prepare": "Retracted %{what}, whose outcome was unknown; what it did on the Node is still unknown (not counted as a success). The workspace is prepared again before the session opens.",
   "hub.node.recovered_abandon": "Retracted %{what}, whose outcome was unknown; this run's outcome is still unknown. Press Stop again to give it up.",
   "hub.node.recovered_permission": "Retracted %{what}, whose outcome was unknown; whether the permission took effect is still unknown.",
-  "hub.node.outcome_unknown": "Outcome unknown"
+  "hub.node.outcome_unknown": "Outcome unknown",
+  "hub.node.adopted": "This session moved from the legacy runner to the Node and continues the same conversation.",
+  "hub.node.adopted_fresh": "This session moved from the legacy runner to the Node. The legacy runner left no conversation to continue, so it starts a new one.",
+  "hub.node.retired": "This session cannot move to the Node (%{why}), so it has ended. A message in the item starts a new session.",
+  "hub.node.unbound.read_only": "it is a read-only imported session",
+  "hub.node.unbound.not_here": "it is not a Steve session on this machine",
+  "hub.node.unbound.no_item": "it belongs to no item in this workspace",
+  "hub.node.unbound.archived": "its project is archived",
+  "hub.node.unbound.bot": "its bot is disabled, deleted or in another workspace",
+  "hub.node.unbound.mode": "the Node does not support its permission mode %{mode}",
+  "hub.node.unbound.outside_roots": "its working directory is not one the Node may use",
+  "hub.node.unbound.missing_cwd": "its working directory no longer exists"
 }

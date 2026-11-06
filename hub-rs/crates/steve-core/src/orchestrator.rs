@@ -655,6 +655,13 @@ impl Core {
     pub fn end_session(&self, session_id: &str) -> Result<()> {
         self.tx().end_session(session_id)
     }
+    /// Ends an idle session its runtime cannot take any more, with `note` (zh-CN, stored) as its
+    /// last system event, once. False, with nothing changed: no such session, ended already, or
+    /// it has work in hand (a turn in flight, queued messages, a pending resume): it is asked
+    /// again at a later idle boundary.
+    pub fn retire_session(&self, session_id: &str, note: &str) -> Result<bool> {
+        self.tx().retire_session(session_id, note)
+    }
     pub fn fork(
         &self,
         ws: &str,
@@ -3494,6 +3501,23 @@ impl Tx<'_> {
             settle(self.db(), item)?;
         }
         Ok(())
+    }
+
+    pub(crate) fn retire_session(&mut self, sid: &str, note: &str) -> Result<bool> {
+        let Some(s) = self.db().session(sid)? else {
+            return Ok(false);
+        };
+        if s.status == "ended"
+            || self.busy(sid)
+            || self.st.pending.contains_key(sid)
+            || !self.db().queued(sid)?.is_empty()
+        {
+            return Ok(false);
+        }
+        self.end_and_release(sid)?;
+        self.db()
+            .event_add(sid, "system", json!({"text": note, "retired": true}))?;
+        Ok(true)
     }
 
     pub(crate) fn end_session(&mut self, sid: &str) -> Result<()> {
