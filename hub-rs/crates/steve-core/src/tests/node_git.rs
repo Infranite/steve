@@ -297,13 +297,13 @@ fn a_delivery_on_a_node_is_frozen_and_checked_there() {
     let now = crate::cycle::fingerprint(wt.to_str()).unwrap();
     let words = crate::upstream::describe_change(&wt, &frozen, &now);
     assert!(!k.core.tx().lc_try_close(&i).unwrap());
-    assert!(k.wait(|| k.phase(&i) == "active"));
+    // the phase changes first, the timeline line is written a moment later: wait for both
+    let moved = format!("冻结之后结果又变了：{words}");
+    assert!(k.wait(
+        || k.phase(&i) == "active" && k.timeline_texts(&i).iter().any(|t| t.contains(&moved))
+    ));
     let tl = k.timeline_texts(&i);
-    assert!(
-        tl.iter()
-            .any(|t| t.contains(&format!("冻结之后结果又变了：{words}"))),
-        "{tl:?}"
-    );
+    assert!(tl.iter().any(|t| t.contains(&moved)), "{tl:?}");
     assert_eq!(words, "改了 c.txt");
 }
 
