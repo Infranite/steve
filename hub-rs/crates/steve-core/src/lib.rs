@@ -7,7 +7,8 @@
 //! interleaves). The lock is never held across an `.await`: model calls happen outside it and re-enter.
 //! Agent turns run inside the [`AgentRuntime`], which reports back through [`Core::on_turn_end`] and the
 //! `tool_*` methods from its own tasks. Git commands run inside the critical section, like `execFileSync`
-//! in TS, because their result decides what the same operation does next.
+//! in TS, because their result decides what the same operation does next — except for an item on a
+//! Node, whose git is gathered off the lock ([`node_git`]).
 
 steve_i18n::init!();
 
@@ -25,6 +26,7 @@ pub mod lifecycle;
 mod marks;
 pub mod models;
 mod modules;
+pub mod node_git;
 pub mod notify;
 mod occupancy;
 mod orchestrator;
@@ -86,6 +88,8 @@ pub(crate) struct Inner {
     steve_notes: Mutex<HashMap<String, String>>,
     /// A reclaim pass or trash purge is running (`workspace`): one at a time.
     reclaiming: std::sync::atomic::AtomicBool,
+    /// The way to items' Nodes, once wired (`node_git`); unset: the Hub's own git everywhere.
+    node_git: OnceLock<Arc<dyn node_git::NodeGit>>,
 }
 
 /// What a session's last Steve tool call left behind, consumed at its turn end.
@@ -142,6 +146,15 @@ pub(crate) struct State {
     /// Items handing over to a new session while the old one's release is on its way: the
     /// release (`Released::Pending`) the item's next session waits for, taken when it starts.
     handoffs: HashMap<String, String>,
+    /// Git facts of items on a Node, gathered off the lock (`node_git`).
+    git: node_git::Slots,
+    /// Release reports waiting for an item's facts to prove what they shipped (`node_git`).
+    git_proofs: HashMap<String, Vec<node_git::PendingProof>>,
+    /// Critical sections entered so far (facts taken in one may be read again in the same one).
+    tx_seq: u64,
+    /// The periodic closing check is running: what it asks of a Node is no new event, so it
+    /// doesn't outdate a gathering of the same facts already running (`node_git`).
+    git_polling: bool,
 }
 
 /// One critical section: the core plus the held state lock.
@@ -172,6 +185,7 @@ impl Core {
             yolo_sessions: Default::default(),
             steve_notes: Default::default(),
             reclaiming: Default::default(),
+            node_git: OnceLock::new(),
         }))
     }
 
@@ -237,10 +251,9 @@ impl Core {
 
     /// Enter the critical section.
     pub(crate) fn tx(&self) -> Tx<'_> {
-        Tx {
-            c: self,
-            st: self.0.state.lock().unwrap_or_else(|e| e.into_inner()),
-        }
+        let mut st = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
+        st.tx_seq += 1;
+        Tx { c: self, st }
     }
 
     /// Run every pending boot resume now, as if its timer fired (a timer firing later finds nothing left).

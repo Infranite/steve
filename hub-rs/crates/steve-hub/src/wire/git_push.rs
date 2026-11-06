@@ -182,9 +182,9 @@ impl GitPush {
             refs,
             ranges: vec![],
             fetch: false,
-            // nothing here reads `dirty`, and a full status is the slow part
-            no_status: true,
             reads,
+            // nothing here reads `dirty`, and a full status is the slow part
+            heads_only: true,
         })
         .await
     }
@@ -489,8 +489,8 @@ impl GitPush {
             &placed.node,
             &w,
             vec![],
-            vec![GitRead::Remote {
-                name: "origin".into(),
+            vec![GitRead::RemoteUrl {
+                remote: "origin".into(),
             }],
         )
         .await;
@@ -498,7 +498,7 @@ impl GitPush {
             return Some(None);
         };
         Some(match f.reads.into_iter().next().map(|r| r.answer) {
-            Some(GitAnswer::Remote { url: Some(u) }) => github_repo(&u),
+            Some(GitAnswer::RemoteUrl { url: Some(u) }) => github_repo(&u),
             _ => None,
         })
     }

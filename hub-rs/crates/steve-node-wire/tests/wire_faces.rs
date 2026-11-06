@@ -167,8 +167,8 @@ async fn faces(n: Arc<dyn Node>) -> Vec<String> {
             refs: vec![],
             ranges: vec![],
             fetch: false,
-            no_status: false,
             reads: vec![GitRead::Status],
+            heads_only: false,
         })
         .await,
     ));
@@ -385,6 +385,21 @@ async fn every_new_kind_crosses_the_wire_unchanged() {
         GitRead::Status,
         GitRead::Fingerprint,
         GitRead::TrackedIgnored { rel: rel("target") },
+        GitRead::ChangedPaths {
+            from: "t1".into(),
+            to: "t2".into(),
+            max: 10,
+        },
+        GitRead::Landed {
+            commit: "c".into(),
+            onto: "origin/main".into(),
+        },
+        GitRead::RemoteTags {
+            remote: "origin".into(),
+        },
+        GitRead::RemoteUrl {
+            remote: "origin".into(),
+        },
     ] {
         crosses(&c, r).await;
     }
@@ -393,6 +408,7 @@ async fn every_new_kind_crosses_the_wire_unchanged() {
         subject: "s".into(),
         author: "a".into(),
         time: Timestamp(9),
+        abbrev: None,
         body: None,
     };
     for a in [
@@ -418,7 +434,29 @@ async fn every_new_kind_crosses_the_wire_unchanged() {
         },
         GitAnswer::IsAncestor { yes: false },
         GitAnswer::Status { entries: vec![] },
-        GitAnswer::Fingerprint { tree: "t".into() },
+        GitAnswer::Fingerprint {
+            tree: "t".into(),
+            own: None,
+        },
+        GitAnswer::Fingerprint {
+            tree: "t".into(),
+            own: Some(OwnChange {
+                base: "b".into(),
+                patch: "-".into(),
+            }),
+        },
+        GitAnswer::ChangedPaths {
+            paths: vec!["a.rs".into()],
+            truncated: false,
+        },
+        GitAnswer::Landed { commit: None },
+        GitAnswer::Landed {
+            commit: Some("c".into()),
+        },
+        GitAnswer::RemoteTags {
+            tags: vec![("v1".into(), "c".into())],
+        },
+        GitAnswer::RemoteUrl { url: None },
         GitAnswer::TrackedIgnored {
             ignored: false,
             tracked: true,
@@ -579,8 +617,8 @@ async fn an_older_peer_is_never_sent_what_it_would_ignore() {
         refs: vec![],
         ranges: vec![],
         fetch: false,
-        no_status: false,
         reads,
+        heads_only: false,
     };
     let raw = hub
         .call(
@@ -720,8 +758,8 @@ async fn an_answer_of_a_newer_kind_is_uncertain_not_unsupported() {
             refs: vec![],
             ranges: vec![],
             fetch: false,
-            no_status: false,
             reads: vec![GitRead::Status],
+            heads_only: false,
         })
         .await
         .unwrap_err();

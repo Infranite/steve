@@ -17,6 +17,7 @@ use super::judge::{
 };
 use super::ledger::{self, Streak};
 use crate::git::git;
+use crate::node_git::{Ask, NodeGit, block_on};
 use crate::repo::{Decision, Item};
 
 /// The facts, and the progress snapshot automatic continues are compared by.
@@ -99,16 +100,113 @@ fn branch_state(dir: &Path) -> (bool, bool) {
     (clean, ahead)
 }
 
+/// How long YOLO waits for an item's Node to say where its branch stands (an acceptance).
+const NODE_FACTS_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+/// How long YOLO waits for an item's Node to name its `HEAD` alone (a stall's progress).
+const NODE_HEAD_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// What YOLO reads of an item's branch: `HEAD` (the progress snapshot) and `(clean, ahead of
+/// main)`. `None`: there is no checkout to read (or its Node could not tell).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct BranchFacts {
+    head: Option<String>,
+    state: Option<(bool, bool)>,
+}
+
+/// [`branch_state`] and `HEAD` of an item whose workspace is on a Node, asked of that Node
+/// (N0e-E11c): no git runs here. An offline Node, or one not answering in time, tells nothing.
+async fn node_branch(port: &dyn NodeGit, item: &str, state: bool) -> BranchFacts {
+    if !state {
+        // the head alone: no status scan, no refs
+        let head = port
+            .facts(
+                item,
+                Ask {
+                    heads_only: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .ok()
+            .map(|f| f.head)
+            .filter(|h| !h.is_empty());
+        return BranchFacts { head, state: None };
+    }
+    let Ok(f) = port
+        .facts(
+            item,
+            Ask {
+                refs: vec!["main".into(), "master".into()],
+                ..Default::default()
+            },
+        )
+        .await
+    else {
+        return BranchFacts::default();
+    };
+    let bases: Vec<(String, String)> = f
+        .refs
+        .iter()
+        .filter(|(_, sha)| sha.is_some())
+        .map(|(b, _)| (b.clone(), "HEAD".to_string()))
+        .collect();
+    let ahead = !bases.is_empty()
+        && port
+            .facts(
+                item,
+                Ask {
+                    ranges: bases,
+                    ..Default::default()
+                },
+            )
+            .await
+            .is_ok_and(|r| r.ranges.iter().any(|r| r.ahead > 0));
+    BranchFacts {
+        head: Some(f.head.clone()).filter(|h| !h.is_empty()),
+        state: Some((!f.dirty, ahead)),
+    }
+}
+
+/// The item's branch as YOLO reads it (`state`: its cleanliness too, for an acceptance): through its
+/// Node when it is on one, else the Hub's own git in `items.cwd` (as before).
+fn branch_facts(core: &crate::Core, item: &Item, state: bool) -> BranchFacts {
+    if let Some(port) = core.node_git().filter(|p| p.on_node(&item.id)) {
+        let deadline = if state {
+            NODE_FACTS_DEADLINE
+        } else {
+            NODE_HEAD_DEADLINE
+        };
+        return block_on(async {
+            tokio::time::timeout(deadline, node_branch(&*port, &item.id, state))
+                .await
+                .unwrap_or_default()
+        })
+        .unwrap_or_default();
+    }
+    match git_dir(item) {
+        Some(dir) => BranchFacts {
+            head: git(&dir, &["rev-parse", "HEAD"]).ok(),
+            state: state.then(|| branch_state(&dir)),
+        },
+        None => BranchFacts::default(),
+    }
+}
+
 impl Engine {
     /// The processes the agent of `d`'s session started, looked up only for a command that kills.
     fn own_pids(&self, d: &Decision, raw: &Value) -> Vec<u32> {
         let mentions_kill = raw
             .get("command")
             .is_some_and(|c| c.to_string().contains("kill"));
+        // an item on a Node: its processes are the Node's to tell (the request's), never a `ps` here
+        let on_node = d
+            .item_id
+            .as_deref()
+            .is_some_and(|i| self.core().node_git().is_some_and(|p| p.on_node(i)));
         let pid = d
             .session_id
             .as_deref()
-            .filter(|_| mentions_kill)
+            .filter(|_| mentions_kill && !on_node)
             .and_then(|s| self.core().0.runtime.agent_pid(s));
         pid.map(super::procs::live_started_by).unwrap_or_default()
     }
@@ -124,12 +222,23 @@ impl Engine {
             Some(p) => db.project(Some(p)).map_err(ce)?,
             None => None,
         };
-        let progress = match &item {
-            Some(i) => json!({
+        let accepting = (d.kind.as_str(), d.subject_type.as_str()) == ("accept", "item");
+        // the progress snapshot counts only for the verdicts that send the agent back (an
+        // acceptance, a stall): any other card reads no branch, so a slow Node never holds up a
+        // permission answer
+        let continues = accepting
+            || (d.kind == "fail"
+                && (d.subject_type == "item" || d.subject_type == crate::stall::STALL));
+        let branch_now = item
+            .as_ref()
+            .filter(|_| continues)
+            .map(|i| branch_facts(self.core(), i, accepting && i.branch.is_some()));
+        let progress = match (&item, &branch_now) {
+            (Some(i), Some(b)) => json!({
                 "done": i.plan.iter().filter(|p| p.done).count(),
-                "head": git_dir(i).and_then(|d| git(&d, &["rev-parse", "HEAD"]).ok()),
+                "head": b.head,
             }),
-            None => Value::Null,
+            _ => Value::Null,
         };
         let streak = match &item {
             Some(i) => {
@@ -179,8 +288,8 @@ impl Engine {
                         .filter(|p| !p.done)
                         .map(|p| p.step.clone())
                         .collect(),
-                    branch: match (&i.branch, git_dir(i)) {
-                        (Some(_), Some(dir)) => Some(branch_state(&dir)),
+                    branch: match (&i.branch, branch_now.as_ref().and_then(|b| b.state)) {
+                        (Some(_), Some(state)) => Some(state),
                         (Some(_), None) => Some((false, false)),
                         _ => None,
                     },

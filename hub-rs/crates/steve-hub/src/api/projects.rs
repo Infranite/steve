@@ -1,7 +1,8 @@
 //! `/api/projects*` and `/api/fs/dirs`.
 
-use std::collections::HashMap;
-use std::path::Path as FsPath;
+use std::collections::{BTreeSet, HashMap};
+use std::path::{Path as FsPath, PathBuf};
+use std::sync::Arc;
 
 use axum::Extension;
 use axum::body::Bytes;
@@ -15,6 +16,8 @@ use crate::config::home_dir;
 use crate::error::ApiError;
 use crate::js;
 use crate::validate::{Check, Str};
+use crate::wire::workspaces::{At, PlacementError, Subject};
+use steve_node_api as na;
 
 /// `path.normalize`: folds `.`/`..` and repeated slashes, keeps a trailing slash.
 pub fn normalize(p: &str) -> String {
@@ -90,6 +93,229 @@ fn exists(p: &str) -> bool {
     FsPath::new(p).exists()
 }
 
+/* ── reading a directory of the Hub's own device ──
+With the local Node on (`STEVE_NODE_MODE=local`) a directory under one of its roots is read through
+its files face, and `dirs` browses only toward those roots (D11: no "anywhere under ~"). A directory
+under none of them is one being made a project, so a new root: no Node allows it yet, and the Hub
+checks it on its own disk (the machine is the same; the root follows once the project exists).
+Without the local Node the Hub reads its own disk as always. */
+
+/// Who reads a directory of the Hub's own device.
+enum Via {
+    /// The Hub itself: the local Node is off.
+    Hub,
+    /// The local Node, at this place under one of its roots.
+    Node(Arc<dyn na::Node>, na::RootPath),
+    /// Under none of the local Node's roots, which are these paths: a new root being chosen.
+    Outside(Vec<PathBuf>),
+}
+
+async fn via(st: &AppState, path: &str) -> Result<Via, ApiError> {
+    let Some(ws) = st.workspaces.clone() else {
+        return Ok(Via::Hub);
+    };
+    let path = PathBuf::from(normalize(path));
+    blocking(move || match ws.hub_path(&path) {
+        Ok(p) => match p.at {
+            At::Root(at) => Ok(Via::Node(p.node, at)),
+            At::Workspace(_) => Err(ApiError::internal("a directory placed in a workspace")),
+        },
+        Err(PlacementError::LocalOff) => Ok(Via::Hub),
+        Err(PlacementError::Outside) => Ok(Via::Outside(
+            ws.local_roots()
+                .map_err(placement_error)?
+                .into_iter()
+                .map(|r| r.path)
+                .collect(),
+        )),
+        Err(e) => Err(placement_error(e)),
+    })
+    .await
+}
+
+/// `设备离线` is a 503: the device may come back, the request was fine.
+pub(super) fn offline() -> ApiError {
+    ApiError::Json(503, steve_i18n::t!("hub.workspaces.offline"))
+}
+
+pub(super) fn placement_error(e: PlacementError) -> ApiError {
+    match e {
+        PlacementError::Offline { .. } => offline(),
+        e => ApiError::internal(e.to_string()),
+    }
+}
+
+/// How a Node read went wrong, for the caller to answer as it always has.
+#[derive(Debug, PartialEq)]
+enum Miss {
+    /// The Node has no files face yet: the Hub reads its own disk (the local Node only).
+    Unsupported,
+    /// Not there, not a directory, or refused (outside its roots, through a link).
+    Gone,
+    Fail(ApiError),
+}
+
+fn miss(e: na::ApiError) -> Miss {
+    match e.code {
+        na::ErrorCode::Unsupported => Miss::Unsupported,
+        na::ErrorCode::Invalid | na::ErrorCode::Denied => Miss::Gone,
+        na::ErrorCode::Offline => Miss::Fail(offline()),
+        _ => Miss::Fail(ApiError::internal(e.safe_detail)),
+    }
+}
+
+/// Entries listed of one directory at most: as many as a person could choose among.
+const LIST_MAX: usize = 10_000;
+
+/// The names right below `at`, sorted, dotfiles included, with whether each is a directory (a
+/// linked directory is not one: the Node does not follow it).
+async fn node_list(node: &dyn na::Node, at: &na::RootPath) -> Result<Vec<(String, bool)>, Miss> {
+    let mut out = vec![];
+    let mut cursor = None;
+    loop {
+        let page = node
+            .list_root(
+                at.clone(),
+                na::PageRequest {
+                    cursor,
+                    limit: 1000,
+                },
+            )
+            .await
+            .map_err(miss)?;
+        for f in page.items {
+            let name = f.path.as_str().rsplit('/').next().unwrap_or_default();
+            out.push((name.to_string(), f.is_dir));
+        }
+        cursor = page.next;
+        if cursor.is_none() || out.len() >= LIST_MAX {
+            break;
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
+fn has_git(names: &[(String, bool)]) -> bool {
+    names.iter().any(|(n, _)| n == ".git")
+}
+
+fn below(at: &na::RootPath, name: &str) -> Option<na::RootPath> {
+    let rel = match at.rel.as_str() {
+        "" => name.to_string(),
+        base => format!("{base}/{name}"),
+    };
+    Some(na::RootPath {
+        root: at.root.clone(),
+        rel: na::RelPath::new(rel).ok()?,
+    })
+}
+
+/// The first `max` bytes of a file (or all of a shorter one); `None` when it is not there.
+async fn node_head(
+    node: &dyn na::Node,
+    at: na::RootPath,
+    max: usize,
+) -> Result<Option<Vec<u8>>, Miss> {
+    let mut out: Vec<u8> = vec![];
+    loop {
+        let r = node
+            .read_file(na::FileRead {
+                path: na::FileAddress::Root(at.clone()),
+                expected: None,
+                offset: out.len() as u64,
+                max: (max - out.len()) as u32,
+            })
+            .await;
+        let chunk = match r {
+            Ok(c) => c,
+            Err(e) => {
+                return match miss(e) {
+                    Miss::Gone => Ok(None),
+                    m => Err(m),
+                };
+            }
+        };
+        let none = chunk.bytes.is_empty();
+        out.extend(chunk.bytes);
+        if chunk.eof || none || out.len() >= max {
+            return Ok(Some(out));
+        }
+    }
+}
+
+/// The readme files `describe` shows, in order.
+const README: [&str; 4] = ["README.md", "readme.md", "AGENTS.md", "package.json"];
+/// The start of each readme the model sees, in UTF-16 units ([`js::slice`]).
+const README_CHARS: usize = 2500;
+
+/// [`describe_input`] through the Node, and whether the directory is a git checkout. A readme is
+/// read only as far as its first [`README_CHARS`] need (four bytes each at most).
+async fn node_describe(
+    node: &dyn na::Node,
+    at: &na::RootPath,
+) -> Result<(String, String, bool), Miss> {
+    let names = node_list(node, at).await?;
+    let list = names
+        .iter()
+        .map(|(n, _)| n.as_str())
+        .filter(|f| !f.starts_with('.'))
+        .take(60)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut readme = vec![];
+    for f in README {
+        let Some(file) = below(at, f) else { continue };
+        // asked by name, as the Hub opens it: a case-insensitive disk finds `readme.md` too
+        if let Some(text) = node_head(node, file, README_CHARS * 4).await? {
+            readme.push(format!(
+                "{f}:\n{}",
+                js::slice(&String::from_utf8_lossy(&text), README_CHARS)
+            ));
+        }
+    }
+    Ok((list, readme.join("\n\n"), has_git(&names)))
+}
+
+/// What `dirs` lists of `base` on the Node: its directories, not hidden, the first 200.
+async fn node_dirs(
+    node: &dyn na::Node,
+    at: &na::RootPath,
+    base: &str,
+) -> Result<Vec<String>, Miss> {
+    let home = home_dir().to_string_lossy().into_owned();
+    Ok(node_list(node, at)
+        .await?
+        .into_iter()
+        .filter(|(n, d)| *d && !n.starts_with('.'))
+        .take(200)
+        .map(|(n, _)| join(base, &n).replacen(&home, "~", 1))
+        .collect())
+}
+
+/// What `dirs` lists of a `base` no root holds: the way down to the roots below it, one directory
+/// at a time (only configured roots are browsed, D11).
+fn toward_roots(roots: &[PathBuf], base: &str) -> Vec<String> {
+    let home = home_dir().to_string_lossy().into_owned();
+    let from = PathBuf::from(normalize(base));
+    let next: BTreeSet<String> = roots
+        .iter()
+        .filter_map(|r| r.strip_prefix(&from).ok()?.components().next())
+        .filter_map(|c| c.as_os_str().to_str().map(String::from))
+        .filter(|n| !n.starts_with('.'))
+        .collect();
+    next.into_iter()
+        .take(200)
+        .map(|n| join(base, &n).replacen(&home, "~", 1))
+        .collect()
+}
+
+/// Whether `path` is a directory, and a git checkout, as the Hub's disk says.
+async fn hub_dir_and_git(path: &str) -> Result<(bool, bool), ApiError> {
+    let p = path.to_string();
+    blocking(move || Ok((exists(&p) && is_dir(&p), exists(&join(&p, ".git"))))).await
+}
+
 pub async fn create(
     State(st): State<AppState>,
     Extension(c): Extension<Ctx>,
@@ -111,9 +337,15 @@ pub async fn create(
         st.read(move |r| Ok(own_bot(r, &bot, &ws)?)).await?;
     }
     let path = expand(&raw);
-    let p = path.clone();
-    let (dir_ok, git) =
-        blocking(move || Ok((exists(&p) && is_dir(&p), exists(&join(&p, ".git"))))).await?;
+    let (dir_ok, git) = match via(&st, &path).await? {
+        Via::Hub | Via::Outside(_) => hub_dir_and_git(&path).await?,
+        Via::Node(node, at) => match node_list(&*node, &at).await {
+            Ok(names) => (true, has_git(&names)),
+            Err(Miss::Gone) => (false, false),
+            Err(Miss::Unsupported) => hub_dir_and_git(&path).await?,
+            Err(Miss::Fail(e)) => return Err(e),
+        },
+    };
     if !dir_ok {
         return Err(ApiError::bad_request(steve_i18n::t!(
             "hub.project.dir_missing",
@@ -222,9 +454,36 @@ pub async fn lane(
     Path(id): Path<String>,
 ) -> ApiResult {
     let ws = c.ws.clone();
+    let i = id.clone();
     let p = st
-        .read(move |r| Ok(own(r.project_get(&id)?, &ws, Noun::Project)?))
+        .read(move |r| Ok(own(r.project_get(&i)?, &ws, Noun::Project)?))
         .await?;
+    // a project on another device is never read off the Hub's disk: its `path` is a place on that
+    // device. Only the local Node's own device is read here (the same machine); a remote Node's
+    // lane waits for the profile to be read through its git face (E5b)
+    if let Some(ws) = st.workspaces.clone()
+        && p.get("device_id").and_then(Value::as_str) != Some(crate::wire::workspaces::HUB_DEVICE)
+    {
+        let placed = blocking(move || {
+            Ok(match ws.placement_of(Subject::Project(&id)) {
+                Ok(pl) => Ok(ws.is_local_placement(&pl)),
+                Err(e) => Err(e),
+            })
+        })
+        .await?;
+        match placed {
+            Ok(true) => {}
+            Ok(false) => {
+                return Err(ApiError::bad_request(steve_i18n::t!(
+                    "hub.project.lane_remote"
+                )));
+            }
+            Err(e @ (PlacementError::Offline { .. } | PlacementError::Store(_))) => {
+                return Err(placement_error(e));
+            }
+            Err(e) => return Err(ApiError::bad_request(e.to_string())),
+        }
+    }
     if p.get("kind").and_then(Value::as_str) != Some("git") {
         return Err(ApiError::bad_request(steve_i18n::t!(
             "hub.project.lanes_git_only"
@@ -298,15 +557,29 @@ pub async fn describe(
     let raw = k.str("path", Str::min(1));
     k.finish()?;
     let path = expand(&raw);
-    let p = path.clone();
-    if !blocking(move || Ok(exists(&p))).await? {
-        return Err(ApiError::bad_request(steve_i18n::t!(
-            "hub.project.dir_missing",
-            path = raw
-        )));
-    }
-    let p = path.clone();
-    let (list, readme) = blocking(move || describe_input(&p)).await?;
+    let missing = || ApiError::bad_request(steve_i18n::t!("hub.project.dir_missing", path = raw));
+    // the Node's answer has the git check in it; the Hub's own disk is asked after, as always
+    let from_node = match via(&st, &path).await? {
+        Via::Hub | Via::Outside(_) => None,
+        Via::Node(node, at) => match node_describe(&*node, &at).await {
+            Ok(v) => Some(v),
+            Err(Miss::Gone) => return Err(missing()),
+            Err(Miss::Unsupported) => None,
+            Err(Miss::Fail(e)) => return Err(e),
+        },
+    };
+    let (list, readme, node_git) = match from_node {
+        Some((list, readme, git)) => (list, readme, Some(git)),
+        None => {
+            let p = path.clone();
+            if !blocking(move || Ok(exists(&p))).await? {
+                return Err(missing());
+            }
+            let p = path.clone();
+            let (list, readme) = blocking(move || describe_input(&p)).await?;
+            (list, readme, None)
+        }
+    };
     let prompt = format!(
         "Describe this project directory for an assistant that routes tasks to projects. Chinese, one or two sentences: what it is and what kind of work happens there. ONLY JSON {{\"name\":\"<= 12 chars\",\"description\":\"\"}}\nPath: {path}\nFiles: {list}\n\n{readme}"
     );
@@ -320,20 +593,38 @@ pub async fn describe(
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let p = path.clone();
-    let git = blocking(move || Ok(exists(&join(&p, ".git")))).await?;
+    let git = match node_git {
+        Some(git) => git,
+        None => {
+            let p = path.clone();
+            blocking(move || Ok(exists(&join(&p, ".git")))).await?
+        }
+    };
     ok(
         json!({ "name": get("name").unwrap_or(base), "description": get("description").unwrap_or_default(), "git": git }),
     )
 }
 
-pub async fn dirs(Query(q): Query<HashMap<String, String>>) -> ApiResult {
+pub async fn dirs(
+    State(st): State<AppState>,
+    Query(q): Query<HashMap<String, String>>,
+) -> ApiResult {
     let raw = q
         .get("path")
         .filter(|p| !p.is_empty())
         .cloned()
         .unwrap_or_else(|| "~/".into());
     let base = expand(&raw);
+    match via(&st, &base).await? {
+        Via::Hub => {}
+        Via::Outside(roots) => return ok(json!(toward_roots(&roots, &base))),
+        Via::Node(node, at) => match node_dirs(&*node, &at, &base).await {
+            Ok(out) => return ok(json!(out)),
+            Err(Miss::Gone) => return ok(json!([])),
+            Err(Miss::Unsupported) => {}
+            Err(Miss::Fail(e)) => return Err(e),
+        },
+    }
     let out = blocking(move || {
         if !exists(&base) {
             return Ok(vec![]);
@@ -396,5 +687,120 @@ mod tests {
                 f.display()
             ))
         );
+    }
+
+    /* ── through a Node (FakeNode: what the local Node answers once it has a files face) ── */
+
+    use steve_node_api::testkit::FakeNode;
+
+    fn fake(files: &[(&str, &[u8])]) -> (Arc<FakeNode>, na::RootPath) {
+        let n = FakeNode::new("n1");
+        n.set_roots(vec![na::RootInfo {
+            id: na::RootId::new("r1").unwrap(),
+            display: "~/code".into(),
+            access: na::RootAccess::ReadWrite,
+        }]);
+        for (rel, bytes) in files {
+            n.put_file("r1", rel, bytes);
+        }
+        let at = na::RootPath {
+            root: na::RootId::new("r1").unwrap(),
+            rel: na::RelPath::new("app").unwrap(),
+        };
+        (n, at)
+    }
+
+    #[tokio::test]
+    async fn describe_through_the_node_reads_what_the_hub_did() {
+        let (n, at) = fake(&[
+            ("app/README.md", b"# Hi"),
+            ("app/.hidden", b""),
+            ("app/src/main.rs", b""),
+        ]);
+        let (list, readme, git) = node_describe(&*n, &at).await.unwrap();
+        // the same as describe_reads_list_and_readme on the Hub's disk
+        assert_eq!(list, "README.md, src");
+        assert_eq!(readme, "README.md:\n# Hi");
+        assert!(!git);
+        n.put_file("r1", "app/.git/HEAD", b"ref: refs/heads/main\n");
+        assert!(node_describe(&*n, &at).await.unwrap().2);
+    }
+
+    #[tokio::test]
+    async fn a_long_readme_is_cut_where_the_hub_cut_it() {
+        // three bytes a character, past what the model sees
+        let long = "说明".repeat(2000);
+        let (n, at) = fake(&[
+            ("app/AGENTS.md", long.as_bytes()),
+            ("app/package.json", b"{}"),
+        ]);
+        let (_, readme, _) = node_describe(&*n, &at).await.unwrap();
+        assert_eq!(
+            readme,
+            format!(
+                "AGENTS.md:\n{}\n\npackage.json:\n{{}}",
+                js::slice(&long, README_CHARS)
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn dirs_through_the_node_lists_directories_not_hidden() {
+        let (n, at) = fake(&[
+            ("app/b/x", b""),
+            ("app/a/y", b""),
+            ("app/.cache/z", b""),
+            ("app/file.txt", b""),
+        ]);
+        let out = node_dirs(&*n, &at, "/w/app").await.unwrap();
+        assert_eq!(out, vec!["/w/app/a", "/w/app/b"]);
+    }
+
+    #[tokio::test]
+    async fn a_root_the_node_does_not_allow_is_gone_not_a_failure() {
+        let (n, mut at) = fake(&[("app/README.md", b"x")]);
+        at.root = na::RootId::new("elsewhere").unwrap();
+        assert_eq!(node_list(&*n, &at).await.unwrap_err(), Miss::Gone);
+        assert_eq!(node_describe(&*n, &at).await.unwrap_err(), Miss::Gone);
+    }
+
+    #[tokio::test]
+    async fn an_offline_node_is_a_503_device_offline() {
+        let e = na::ApiError::new(na::ErrorCode::Offline, "link down");
+        assert_eq!(miss(e), Miss::Fail(ApiError::Json(503, "设备离线".into())));
+        let en = steve_i18n::scope("en", async {
+            miss(na::ApiError::new(na::ErrorCode::Offline, "x"))
+        })
+        .await;
+        assert_eq!(en, Miss::Fail(ApiError::Json(503, "Device offline".into())));
+        assert_eq!(
+            placement_error(PlacementError::Offline { device: "n".into() }),
+            ApiError::Json(503, "设备离线".into())
+        );
+        assert_eq!(
+            miss(na::ApiError::new(na::ErrorCode::Unsupported, "files")),
+            Miss::Unsupported
+        );
+        assert_eq!(
+            miss(na::ApiError::new(na::ErrorCode::Denied, "outside")),
+            Miss::Gone
+        );
+    }
+
+    #[test]
+    fn outside_the_roots_dirs_shows_the_way_down_to_them() {
+        let roots = [
+            PathBuf::from("/w/code/steve"),
+            PathBuf::from("/w/code/app"),
+            PathBuf::from("/w/notes"),
+            PathBuf::from("/w/.secret/x"),
+            PathBuf::from("/elsewhere"),
+        ];
+        assert_eq!(toward_roots(&roots, "/w/"), vec!["/w/code", "/w/notes"]);
+        assert_eq!(
+            toward_roots(&roots, "/w/code"),
+            vec!["/w/code/app", "/w/code/steve"]
+        );
+        assert!(toward_roots(&roots, "/nowhere").is_empty());
     }
 }

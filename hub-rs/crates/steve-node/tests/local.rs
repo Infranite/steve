@@ -3102,3 +3102,432 @@ async fn a_scan_read_after_a_restart_is_scanned_again() {
         .unwrap_err();
     assert_eq!(e.code, ErrorCode::Expired);
 }
+
+fn git_in(dir: &Path, args: &[&str]) -> String {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .env("GIT_AUTHOR_NAME", "t")
+        .env("GIT_AUTHOR_EMAIL", "t@example.com")
+        .env("GIT_COMMITTER_NAME", "t")
+        .env("GIT_COMMITTER_EMAIL", "t@example.com")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "git {args:?}");
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn git_facts_reads_files_commits_logs_and_diffs_of_a_workspace() {
+    let t = T::new(&[]);
+    let repo = t.root.join("work/proj");
+    git_in(&repo, &["init", "-q", "-b", "main"]);
+    put(&t.root, "work/proj/a.txt", b"a\n");
+    git_in(&repo, &["add", "."]);
+    git_in(&repo, &["commit", "-q", "-m", "a"]);
+    git_in(&repo, &["checkout", "-q", "-b", "steve/st-1"]);
+    put(
+        &t.root,
+        "work/proj/docs/方案.md",
+        b"# \xe6\x96\xb9\xe6\xa1\x88\n",
+    );
+    git_in(&repo, &["add", "."]);
+    git_in(&repo, &["commit", "-q", "-m", "加方案"]);
+    let tip = git_in(&repo, &["rev-parse", "HEAD"]);
+    git_in(&repo, &["checkout", "-q", "main"]);
+    let n = t.node();
+    n.prepare_workspace(now_cmd("op_prep", prepare_proj()))
+        .await
+        .unwrap();
+    assert!(ok(&finished(&n, "op_prep").await));
+
+    let range = |from: Option<&str>, to: &str| RevRange {
+        from: from.map(str::to_string),
+        to: to.into(),
+    };
+    let reads = vec![
+        GitRead::Show {
+            rev: "steve/st-1".into(),
+            path: Some(RelPath::new("docs/方案.md").unwrap()),
+            max: 1000,
+        },
+        GitRead::Show {
+            rev: "main".into(),
+            path: Some(RelPath::new("docs/方案.md").unwrap()),
+            max: 1000,
+        },
+        GitRead::Show {
+            rev: tip[..7].into(),
+            path: None,
+            max: 1000,
+        },
+        GitRead::Log {
+            range: range(Some("main"), "steve/st-1"),
+            max: 200,
+        },
+        GitRead::Diff {
+            range: range(Some("main"), "steve/st-1"),
+            max: 20,
+        },
+    ];
+    let f = n
+        .git_facts(GitQuery {
+            workspace: ws(),
+            refs: vec!["refs/heads/main".into(), "refs/heads/gone".into()],
+            ranges: vec![],
+            fetch: false,
+            reads: reads.clone(),
+            heads_only: false,
+        })
+        .await
+        .unwrap();
+    assert_eq!(f.branch.as_deref(), Some("main"));
+    assert!(!f.dirty);
+    assert_eq!(f.refs[0].1.as_deref(), Some(f.head.as_str()));
+    assert_eq!(f.refs[1].1, None);
+    let a: Vec<&GitAnswer> = f.reads.iter().map(|r| &r.answer).collect();
+    assert_eq!(f.reads[0].observed, tip);
+    assert!(
+        matches!(a[0], GitAnswer::Blob { found: true, bytes, truncated: false } if bytes == "# 方案\n".as_bytes()),
+        "{:?}",
+        a[0]
+    );
+    assert!(matches!(a[1], GitAnswer::Blob { found: false, .. }));
+    let GitAnswer::Commit {
+        commit,
+        stat,
+        patch,
+        truncated,
+    } = a[2]
+    else {
+        panic!("{:?}", a[2])
+    };
+    assert_eq!(commit.sha, tip);
+    assert_eq!(commit.subject, "加方案");
+    assert_eq!(commit.body.as_deref().map(str::trim), Some("加方案"));
+    assert!(stat.contains("docs/方案.md"), "{stat}");
+    assert!(patch.contains("diff --git a/docs/方案.md"), "{patch}");
+    assert!(!truncated);
+    let GitAnswer::Log { commits, truncated } = a[3] else {
+        panic!("{:?}", a[3])
+    };
+    assert_eq!((commits.len(), *truncated), (1, false));
+    assert_eq!(commits[0].subject, "加方案");
+    assert_eq!(commits[0].abbrev.as_deref(), Some(&tip[..7]));
+    let GitAnswer::Diff {
+        stat,
+        patch,
+        truncated,
+    } = a[4]
+    else {
+        panic!("{:?}", a[4])
+    };
+    assert!(stat.contains("docs/方案.md"));
+    assert!(patch.len() <= 20 && *truncated, "{patch}");
+
+    // a revision is never an option; a changed tree is another revision
+    let q = |rev: &str| GitQuery {
+        workspace: ws(),
+        refs: vec![],
+        ranges: vec![],
+        fetch: false,
+        reads: vec![GitRead::Show {
+            rev: rev.into(),
+            path: None,
+            max: 10,
+        }],
+        heads_only: false,
+    };
+    assert_eq!(
+        n.git_facts(q("--output=x")).await.unwrap_err().code,
+        ErrorCode::Invalid
+    );
+    // a revision that names no commit is an answer, not a failure (the checkout is there)
+    let none = n.git_facts(q("1234567")).await.unwrap();
+    assert!(
+        matches!(&none.reads[0].answer, GitAnswer::Blob { found: false, .. }),
+        "{:?}",
+        none.reads
+    );
+    put(&t.root, "work/proj/new.txt", b"x");
+    let g = n.git_facts(q("HEAD")).await.unwrap();
+    assert!(g.dirty);
+    assert_ne!(g.revision, f.revision);
+    // heads only: no tree scan, a revision of another kind than one with the tree in it
+    let h = n
+        .git_facts(GitQuery {
+            heads_only: true,
+            ..q("HEAD")
+        })
+        .await
+        .unwrap();
+    assert!(!h.dirty);
+    assert_eq!(h.head, g.head);
+    assert_ne!(h.revision, g.revision);
+    // the hash as git abbreviates it here, which follows core.abbrev
+    git_in(&repo, &["config", "core.abbrev", "10"]);
+    let h = n
+        .git_facts(GitQuery {
+            heads_only: true,
+            ..q("HEAD")
+        })
+        .await
+        .unwrap();
+    let GitAnswer::Commit { commit, .. } = &h.reads[0].answer else {
+        panic!("{:?}", h.reads)
+    };
+    assert_eq!(commit.abbrev.as_deref(), Some(&commit.sha[..10]));
+    assert!(!repo.join("x").exists());
+}
+
+/// A repository at `work/proj` on `main` with `a.txt`, a branch `steve/st-1` with one commit of
+/// its own checked out, an identity for commits the Node makes, and the Node's workspace on it.
+async fn branch_repo(t: &T) -> (LocalNode, PathBuf) {
+    let repo = t.root.join("work/proj");
+    git_in(&repo, &["init", "-q", "-b", "main"]);
+    git_in(&repo, &["config", "user.name", "t"]);
+    git_in(&repo, &["config", "user.email", "t@example.com"]);
+    put(&t.root, "work/proj/a.txt", b"a\n");
+    git_in(&repo, &["add", "."]);
+    git_in(&repo, &["commit", "-q", "-m", "a"]);
+    git_in(&repo, &["checkout", "-q", "-b", "steve/st-1"]);
+    put(&t.root, "work/proj/b.txt", b"b\n");
+    git_in(&repo, &["add", "."]);
+    git_in(&repo, &["commit", "-q", "-m", "b"]);
+    let n = t.node();
+    n.prepare_workspace(now_cmd("op_prep", prepare_proj()))
+        .await
+        .unwrap();
+    assert!(ok(&finished(&n, "op_prep").await));
+    (n, repo)
+}
+
+fn query(reads: Vec<GitRead>) -> GitQuery {
+    GitQuery {
+        workspace: ws(),
+        refs: vec![],
+        ranges: vec![],
+        fetch: false,
+        reads,
+        heads_only: false,
+    }
+}
+
+#[tokio::test]
+async fn git_facts_answer_the_tree_its_own_change_ranges_and_where_it_landed() {
+    let t = T::new(&[]);
+    let (n, repo) = branch_repo(&t).await;
+    let main = git_in(&repo, &["rev-parse", "main"]);
+    put(&t.root, "work/proj/new.txt", b"n\n");
+    let mut q = query(vec![
+        GitRead::Status,
+        GitRead::Fingerprint,
+        GitRead::IsAncestor {
+            ancestor: "main".into(),
+            of: "HEAD".into(),
+        },
+        GitRead::ChangedPaths {
+            from: "main".into(),
+            to: "HEAD".into(),
+            max: 10,
+        },
+        GitRead::Landed {
+            commit: "HEAD".into(),
+            onto: "main".into(),
+        },
+        GitRead::RemoteUrl {
+            remote: "origin".into(),
+        },
+    ]);
+    q.ranges = vec![("main".into(), "HEAD".into())];
+    let f = n.git_facts(q.clone()).await.unwrap();
+    assert_eq!(f.ranges[0].ahead, 1);
+    assert_eq!(f.ranges[0].behind, 0);
+    assert_eq!(f.ranges[0].merge_base.as_deref(), Some(main.as_str()));
+    let a: Vec<&GitAnswer> = f.reads.iter().map(|r| &r.answer).collect();
+    let GitAnswer::Status { entries } = a[0] else {
+        panic!("{:?}", a[0])
+    };
+    assert_eq!(entries[0].code, "??");
+    assert_eq!(entries[0].path.as_str(), "new.txt");
+    let GitAnswer::Fingerprint {
+        tree,
+        own: Some(own),
+    } = a[1]
+    else {
+        panic!("{:?}", a[1])
+    };
+    assert_eq!(own.base, main);
+    assert_ne!(own.patch, "-");
+    // the untracked file is in the tree; the workspace's own index is untouched
+    let listed = git_in(&repo, &["ls-tree", "--name-only", tree]);
+    assert!(listed.lines().any(|l| l == "new.txt"), "{listed}");
+    assert!(git_in(&repo, &["status", "--porcelain"]).contains("?? new.txt"));
+    assert_eq!(a[2], &GitAnswer::IsAncestor { yes: true });
+    assert_eq!(
+        a[3],
+        &GitAnswer::ChangedPaths {
+            paths: vec!["b.txt".into()],
+            truncated: false
+        }
+    );
+    assert_eq!(a[4], &GitAnswer::Landed { commit: None });
+    assert_eq!(a[5], &GitAnswer::RemoteUrl { url: None });
+
+    // squashed onto main, the change has landed there; the URL comes without its credential
+    git_in(&repo, &["checkout", "-q", "main"]);
+    git_in(&repo, &["merge", "-q", "--squash", "steve/st-1"]);
+    git_in(&repo, &["commit", "-q", "-m", "squash"]);
+    let squash = git_in(&repo, &["rev-parse", "HEAD"]);
+    git_in(&repo, &["checkout", "-q", "steve/st-1"]);
+    git_in(
+        &repo,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://u:secret@example.com/o/r.git",
+        ],
+    );
+    let f = n.git_facts(q).await.unwrap();
+    assert_eq!(
+        f.reads[4].answer,
+        GitAnswer::Landed {
+            commit: Some(squash)
+        }
+    );
+    assert_eq!(
+        f.reads[5].answer,
+        GitAnswer::RemoteUrl {
+            url: Some("https://example.com/o/r.git".into())
+        }
+    );
+}
+
+#[tokio::test]
+async fn a_fetch_and_the_remotes_tags_come_from_origin() {
+    let t = T::new(&[]);
+    let (n, repo) = branch_repo(&t).await;
+    let origin = t.root.join("origin.git");
+    git_in(&t.root, &["init", "-q", "--bare", origin.to_str().unwrap()]);
+    git_in(
+        &repo,
+        &["remote", "add", "origin", origin.to_str().unwrap()],
+    );
+    git_in(&repo, &["push", "-q", "origin", "main"]);
+    git_in(&repo, &["tag", "-a", "-m", "v", "v1.0.0", "main"]);
+    git_in(&repo, &["push", "-q", "origin", "v1.0.0"]);
+    git_in(&repo, &["tag", "local-only", "main"]);
+    let main = git_in(&repo, &["rev-parse", "main"]);
+    let mut q = query(vec![GitRead::RemoteTags {
+        remote: "origin".into(),
+    }]);
+    q.fetch = true;
+    q.refs = vec!["refs/remotes/origin/main".into()];
+    let f = n.git_facts(q).await.unwrap();
+    assert_eq!(f.refs[0].1.as_deref(), Some(main.as_str()));
+    assert_eq!(
+        f.reads[0].answer,
+        GitAnswer::RemoteTags {
+            tags: vec![("v1.0.0".into(), main)]
+        }
+    );
+    // a remote that is not there: the fetch says so, nothing else is answered
+    git_in(
+        &repo,
+        &["remote", "set-url", "origin", "/nonexistent/x.git"],
+    );
+    let mut q = query(vec![]);
+    q.fetch = true;
+    assert_eq!(n.git_facts(q).await.unwrap_err().code, ErrorCode::Invalid);
+}
+
+fn rebase_onto(f: &GitFacts, onto: &str) -> GitApply {
+    GitApply {
+        workspace: ws(),
+        expected: f.revision.clone(),
+        expected_head: f.head.clone(),
+        action: GitAction::Rebase { onto: onto.into() },
+    }
+}
+
+#[tokio::test]
+async fn a_rebase_applies_only_on_the_facts_it_was_decided_on() {
+    let t = T::new(&[]);
+    let (n, repo) = branch_repo(&t).await;
+    git_in(&repo, &["checkout", "-q", "main"]);
+    put(&t.root, "work/proj/c.txt", b"c\n");
+    git_in(&repo, &["add", "."]);
+    git_in(&repo, &["commit", "-q", "-m", "c"]);
+    git_in(&repo, &["checkout", "-q", "steve/st-1"]);
+    let f = n.git_facts(query(vec![])).await.unwrap();
+
+    // HEAD moved since the facts: refused, nothing done
+    put(&t.root, "work/proj/b.txt", b"b2\n");
+    git_in(&repo, &["commit", "-q", "-am", "b2"]);
+    let moved = git_in(&repo, &["rev-parse", "HEAD"]);
+    let e = n
+        .git_apply(now_cmd("op_rb1", rebase_onto(&f, "main")))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::Stale);
+    assert_eq!(git_in(&repo, &["rev-parse", "HEAD"]), moved);
+
+    // on the facts as they are: rebased, the new facts in the result; the same command again is
+    // the same answer, not a second rebase
+    let f = n.git_facts(query(vec![])).await.unwrap();
+    let rb2 = now_cmd("op_rb2", rebase_onto(&f, "main"));
+    n.git_apply(rb2.clone()).await.unwrap();
+    let Observed::Finished {
+        outcome: Outcome::Succeeded,
+        result: Some(OperationResult::Git(after)),
+        ..
+    } = finished(&n, "op_rb2").await
+    else {
+        panic!("not rebased")
+    };
+    assert_ne!(after.head, f.head);
+    assert_eq!(git_in(&repo, &["rev-parse", "HEAD"]), after.head);
+    git_in(&repo, &["merge-base", "--is-ancestor", "main", "HEAD"]);
+    let again = n.git_apply(rb2).await.unwrap();
+    assert!(again.state.is_finished());
+    assert_eq!(git_in(&repo, &["rev-parse", "HEAD"]), after.head);
+
+    // a conflict is backed out and named
+    git_in(&repo, &["checkout", "-q", "main"]);
+    put(&t.root, "work/proj/b.txt", b"main\n");
+    git_in(&repo, &["add", "."]);
+    git_in(&repo, &["commit", "-q", "-m", "main b"]);
+    git_in(&repo, &["checkout", "-q", "steve/st-1"]);
+    let f = n.git_facts(query(vec![])).await.unwrap();
+    n.git_apply(now_cmd("op_rb3", rebase_onto(&f, "main")))
+        .await
+        .unwrap();
+    let Observed::Finished {
+        outcome: Outcome::Failed,
+        error: Some(e),
+        ..
+    } = finished(&n, "op_rb3").await
+    else {
+        panic!("a conflict rebased")
+    };
+    assert_eq!(
+        (e.code, e.safe_detail.as_str()),
+        (ErrorCode::Conflict, "b.txt")
+    );
+    assert_eq!(git_in(&repo, &["rev-parse", "HEAD"]), f.head);
+    assert_eq!(git_in(&repo, &["status", "--porcelain"]), "");
+
+    // uncommitted tracked changes: not touched
+    put(&t.root, "work/proj/b.txt", b"dirty\n");
+    let f = n.git_facts(query(vec![])).await.unwrap();
+    n.git_apply(now_cmd("op_rb4", rebase_onto(&f, "main")))
+        .await
+        .unwrap();
+    let Observed::Finished { error: Some(e), .. } = finished(&n, "op_rb4").await else {
+        panic!("a dirty tree rebased")
+    };
+    assert_eq!(e.code, ErrorCode::Busy);
+    assert_eq!(std::fs::read(repo.join("b.txt")).unwrap(), b"dirty\n");
+}

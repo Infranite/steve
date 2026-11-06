@@ -51,6 +51,8 @@ pub struct Inner {
     pub nodes: Option<Arc<crate::nodes::NodeService>>,
     /// The local Node's coordinator (`STEVE_NODE_MODE=local`), for `/healthz`.
     pub node: Option<Arc<crate::wire::node_runtime::NodeRuntime>>,
+    /// Where projects' and items' files are (which Node); `None` reads the Hub's own disk.
+    pub workspaces: Option<Arc<crate::wire::workspaces::Workspaces>>,
 }
 
 impl std::ops::Deref for AppState {
@@ -80,6 +82,7 @@ impl AppState {
             modules: None,
             nodes: None,
             node: None,
+            workspaces: None,
         }))
     }
 
@@ -115,6 +118,20 @@ impl AppState {
                     inner.catalog.set_node(n.node());
                 }
                 inner.node = node;
+                AppState(Arc::new(inner))
+            }
+            Err(shared) => AppState(shared),
+        }
+    }
+
+    /// The same state with the workspace router attached (as wired).
+    pub fn with_workspaces(
+        self,
+        workspaces: Option<Arc<crate::wire::workspaces::Workspaces>>,
+    ) -> Self {
+        match Arc::try_unwrap(self.0) {
+            Ok(mut inner) => {
+                inner.workspaces = workspaces;
                 AppState(Arc::new(inner))
             }
             Err(shared) => AppState(shared),

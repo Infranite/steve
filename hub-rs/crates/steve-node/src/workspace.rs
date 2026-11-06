@@ -135,19 +135,120 @@ pub(crate) fn below(base: &Path, rel: &RelPath) -> ApiResult<PathBuf> {
 
 /// Every git process waits on a pipe until its identity is durable. A Node crash before recording
 /// closes the pipe: the shell exits without executing git. After recording, recovery can stop it.
+/// Why a git under the pipe gave no output.
+#[derive(Debug)]
+pub(crate) enum Failed {
+    /// Git ran and refused (its stderr): no such revision, not a repository.
+    Git(String),
+    /// Git did not finish under the pipe: cancelled, past its deadline, not started or not reaped.
+    Pipe(String),
+}
+
+impl From<Failed> for String {
+    fn from(f: Failed) -> String {
+        match f {
+            Failed::Git(s) | Failed::Pipe(s) => s,
+        }
+    }
+}
+
 pub(crate) struct Commands {
     pub inner: std::sync::Arc<crate::Inner>,
     pub op: OperationId,
 }
 impl Commands {
-    fn git(&self, dir: &Path, args: &[&str]) -> Result<String, String> {
+    pub(crate) fn git(&self, dir: &Path, args: &[&str]) -> Result<String, String> {
+        match self.run(dir, args, &[], 1 << 20)? {
+            (_, true) => Err("git output limit".into()),
+            (out, false) => Ok(String::from_utf8_lossy(&out).trim().to_string()),
+        }
+    }
+
+    /// A git that only reads: no optional lock taken, no missing object fetched, no prompt. Its
+    /// stdout as it is, the first `cap` bytes of it with whether there was more.
+    pub(crate) fn read(
+        &self,
+        dir: &Path,
+        args: &[&str],
+        cap: usize,
+    ) -> Result<(Vec<u8>, bool), Failed> {
+        const READ_ENV: [(&str, &str); 3] = [
+            ("GIT_OPTIONAL_LOCKS", "0"),
+            ("GIT_NO_LAZY_FETCH", "1"),
+            ("GIT_TERMINAL_PROMPT", "0"),
+        ];
+        self.run(dir, args, &READ_ENV, cap)
+    }
+
+    /// A git that only reads, as [`Commands::read`], with more environment (`GIT_INDEX_FILE` for a
+    /// throwaway index), `input` on its stdin and its own deadline: its exit code (`None`: it did
+    /// not finish), stdout and whether it was cut, and stderr. Only a failure of the pipe is an
+    /// error.
+    pub(crate) fn read_with(
+        &self,
+        dir: &Path,
+        args: &[&str],
+        env: &[(&str, &str)],
+        input: &[u8],
+        cap: usize,
+        deadline: std::time::Duration,
+    ) -> Result<Ran, Failed> {
+        let mut all: Vec<(&str, &str)> = vec![
+            ("GIT_OPTIONAL_LOCKS", "0"),
+            ("GIT_NO_LAZY_FETCH", "1"),
+            ("GIT_TERMINAL_PROMPT", "0"),
+        ];
+        all.extend_from_slice(env);
+        self.run_full(dir, args, &all, input, cap, deadline)
+    }
+
+    /// A git that changes the repository (a rebase, its abort, a fetch), under the pipe with the
+    /// deadline given: as [`Commands::read_with`] without the read-only environment.
+    pub(crate) fn write_with(
+        &self,
+        dir: &Path,
+        args: &[&str],
+        env: &[(&str, &str)],
+        deadline: std::time::Duration,
+    ) -> Result<Ran, Failed> {
+        let mut all: Vec<(&str, &str)> = vec![("GIT_TERMINAL_PROMPT", "0"), ("GIT_EDITOR", "true")];
+        all.extend_from_slice(env);
+        self.run_full(dir, args, &all, &[], 1 << 20, deadline)
+    }
+
+    /// `git args` in `dir` under the pipe: stdout (the first `cap` bytes, the rest drained and
+    /// dropped) and whether it was cut; a failure is its stderr.
+    fn run(
+        &self,
+        dir: &Path,
+        args: &[&str],
+        env: &[(&str, &str)],
+        cap: usize,
+    ) -> Result<(Vec<u8>, bool), Failed> {
+        let r = self.run_full(dir, args, env, &[], cap, DEADLINE)?;
+        match r.code {
+            Some(0) => Ok((r.stdout, r.truncated)),
+            Some(_) => Err(Failed::Git(r.stderr)),
+            None => Err(Failed::Pipe("git cancelled or timed out".into())),
+        }
+    }
+
+    fn run_full(
+        &self,
+        dir: &Path,
+        args: &[&str],
+        env: &[(&str, &str)],
+        input: &[u8],
+        cap: usize,
+        limit: std::time::Duration,
+    ) -> Result<Ran, Failed> {
         use std::io::{Read, Write};
         use std::os::{fd::AsRawFd, unix::process::CommandExt};
         use std::process::Stdio;
         use std::sync::atomic::Ordering;
         let session = control_session(&self.op);
         if self.inner.closed.load(Ordering::SeqCst) {
-            return Err("node shutting down".into());
+            return Err(Failed::Pipe("node shutting down".into()));
         }
         let mut child = Command::new("/bin/sh")
             .args([
@@ -156,13 +257,14 @@ impl Commands {
                 "steve-git",
             ])
             .args(args)
+            .envs(env.iter().copied())
             .current_dir(dir)
             .process_group(0)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| Failed::Pipe(e.to_string()))?;
         let pid = child.id() as i64;
         let started = crate::procs::start_time(pid);
         if let Err(e) = self.inner.j.tx(|t| {
@@ -178,11 +280,18 @@ impl Commands {
             drop(child.stdin.take());
             let _ = child.kill();
             let _ = child.wait();
-            return Err(e.to_string());
+            return Err(Failed::Pipe(e.to_string()));
         }
-        let mut input = child.stdin.take().expect("pipe");
-        let sent = input.write_all(b"go\n");
-        drop(input);
+        let mut pipe = child.stdin.take().expect("pipe");
+        let sent = pipe.write_all(b"go\n");
+        // what git reads comes after the go line, written on a thread of its own so a git that
+        // writes as it reads never waits on this one
+        let feeding = (sent.is_ok() && !input.is_empty()).then(|| {
+            let data = input.to_vec();
+            std::thread::spawn(move || {
+                let _ = pipe.write_all(&data);
+            })
+        });
         let mut out = child.stdout.take().expect("pipe");
         let mut err = child.stderr.take().expect("pipe");
         for fd in [out.as_raw_fd(), err.as_raw_fd()] {
@@ -196,33 +305,37 @@ impl Commands {
                 }
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err("cannot bound git pipes; process evidence retained".into());
+                return Err(Failed::Pipe(
+                    "cannot bound git pipes; process evidence retained".into(),
+                ));
             }
         }
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let deadline = std::time::Instant::now() + limit;
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let mut truncated = false;
-        let mut drain = |reader: &mut dyn Read, dest: &mut Vec<u8>| {
+        // whether `dest` had to drop some of what came, past `cap`
+        let drain = |reader: &mut dyn Read, dest: &mut Vec<u8>, cap: usize| -> bool {
+            let mut cut = false;
             let mut buf = [0; 4096];
             // Per tick budget; a continuously writable pipe must not starve timeout checks.
             for _ in 0..64 {
                 match reader.read(&mut buf) {
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
-                        if dest.len() + n <= 1 << 20 {
-                            dest.extend_from_slice(&buf[..n]);
-                        } else {
-                            truncated = true;
-                            break;
-                        }
+                        // past the cap the rest is read and dropped, so git can finish
+                        let keep = n.min(cap.saturating_sub(dest.len()));
+                        dest.extend_from_slice(&buf[..keep]);
+                        cut |= keep < n;
                     }
                 }
             }
+            cut
         };
+        const ERR_CAP: usize = 64 * 1024;
         let status = loop {
-            drain(&mut out, &mut stdout);
-            drain(&mut err, &mut stderr);
+            truncated |= drain(&mut out, &mut stdout, cap);
+            drain(&mut err, &mut stderr, ERR_CAP);
             if let Ok(Some(status)) = child.try_wait() {
                 break Some(status);
             }
@@ -243,26 +356,37 @@ impl Commands {
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         };
-        drain(&mut out, &mut stdout);
-        drain(&mut err, &mut stderr);
+        truncated |= drain(&mut out, &mut stdout, cap);
+        drain(&mut err, &mut stderr, ERR_CAP);
         if !crate::procs::state(pid, started).gone() {
-            return Err("git group stop uncertain".into());
+            return Err(Failed::Pipe("git group stop uncertain".into()));
         }
         self.inner
             .j
             .tx(|t| t.drop_proc(&session, pid))
-            .map_err(|e| e.to_string())?;
-        if truncated {
-            return Err("git output limit".into());
+            .map_err(|e| Failed::Pipe(e.to_string()))?;
+        if let Some(f) = feeding {
+            let _ = f.join();
         }
-        match status {
-            Some(status) if status.success() => {
-                Ok(String::from_utf8_lossy(&stdout).trim().to_string())
-            }
-            Some(_) => Err(String::from_utf8_lossy(&stderr).trim().to_string()),
-            None => Err("git cancelled or timed out".into()),
-        }
+        Ok(Ran {
+            code: status.map(|s| s.code().unwrap_or(-1)),
+            stdout,
+            truncated,
+            stderr: String::from_utf8_lossy(&stderr).trim().to_string(),
+        })
     }
+}
+
+/// How long a git under the pipe may take, unless its caller says otherwise.
+const DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// What one git under the pipe did.
+pub(crate) struct Ran {
+    /// `None`: it did not finish (cancelled, past its deadline).
+    pub code: Option<i32>,
+    pub stdout: Vec<u8>,
+    pub truncated: bool,
+    pub stderr: String,
 }
 
 /// A worktree of `repo` at `path` on `branch` (created from `base`, else HEAD, when new). One that

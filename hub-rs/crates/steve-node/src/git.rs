@@ -1,36 +1,807 @@
-//! Git in a workspace (N0e-E8): the facts the Hub decides on ([`facts`]) and the push
-//! ([`GitAction::Push`]).
+//! Git in a workspace on this machine.
 //!
-//! Every git here runs with the system and global config off, no prompts, and nothing in the
-//! environment that points it elsewhere (`GIT_DIR`, `GIT_CONFIG_PARAMETERS`…). Reads are bounded
-//! in time and output and kill their whole process group when they end.
+//! [`steve_node_api::WorkspaceExecutor::git_facts`]: what git says in a workspace, read through the
+//! workspace's [`Commands`] pipe (registered, bounded by its deadline, never a lazy fetch). Only
+//! fixed read commands; a ref or revision never becomes an option. A fetch (and `RemoteTags`)
+//! talks to the remote under [`NET_DEADLINE`]. A rebase ([`rebase`]) runs through the same pipe.
 //!
-//! The push, as the Hub's own did it:
+//! The push (N0e-E8, [`GitAction::Push`]), as the Hub's own did it:
 //! - the workspace's remote must point at `origin_must_be` (`github.com/<owner>/<name>`, the URL
 //!   as configured, not rewritten by `insteadOf`), else it is refused;
-//! - the branch must be at `expected_local`, and HEAD and the refs as the Hub saw them;
+//! - the branch must be at `expected_local`, and HEAD and the revision as the Hub saw them;
 //! - it runs from a throwaway bare repository under the Node's home (`push/<op>`) that borrows the
 //!   workspace's objects (`objects/info/alternates`), so the workspace's own config (hooks,
 //!   `http.proxy`, `insteadOf`, credential helpers) plays no part;
-//! - the credential, taken from the Hub ([`HubSecrets`]) once, right before, goes in as
+//! - the credential, taken from the Hub ([`crate::secrets`]) once, right before, goes in as
 //!   `http.<url>.extraheader` through `GIT_CONFIG_COUNT` environment variables: not on the command
 //!   line, not in a file, not in the journal, and masked in what git prints;
 //! - the target is the canonical `url`, as a fast-forward or under the `expected_remote` lease;
 //! - it is a command like [`crate::exec`]: its process group is journaled before git starts, killed
 //!   at the deadline, and a Node that died while it ran leaves it `unknown` (never pushed again).
 //!
-//! With `STEVE_FORBID_REAL_HOSTS=1` (the test guard) a push to anything but a local path or a
-//! loopback address is refused here too, whatever the Hub let through.
+//! The git that sets up the bare repository runs with the system and global config off, no
+//! prompts, and nothing in the environment that points it elsewhere (`GIT_DIR`,
+//! `GIT_CONFIG_PARAMETERS`…). With `STEVE_FORBID_REAL_HOSTS=1` (the test guard) a push to anything
+//! but a local path or a loopback address is refused here too, whatever the Hub let through.
 
 use std::io::Read;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 
+use sha2::Digest as _;
 use steve_node_api::*;
 use steve_vault::redact::Redactor;
 use zeroize::Zeroizing;
+
+use crate::workspace::{Commands, Failed};
+
+/// What one fixed command may print before it is cut (a patch or a file is cut at the read's own
+/// `max`, well below this).
+const OUT_CAP: usize = 8 << 20;
+/// Bytes of a patch read past `max`, so the cut is made after git's leading blank line is trimmed.
+const SLACK: usize = 4096;
+/// What a patch fed to `patch-id` may be (a branch's whole upstream log, for `Landed`).
+const PATCH_CAP: usize = 64 << 20;
+/// How long a fetch or `ls-remote` may take.
+pub(crate) const NET_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
+/// How long one local read may take.
+const READ_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The refs a branch may have started from, most authoritative first (as the Hub's own git has
+/// always looked for them).
+const BASES: &[&str] = &[
+    "refs/remotes/origin/HEAD",
+    "refs/remotes/origin/main",
+    "refs/remotes/origin/master",
+    "refs/heads/main",
+    "refs/heads/master",
+];
+
+fn invalid(what: impl Into<String>) -> ApiError {
+    ApiError::new(ErrorCode::Invalid, what)
+}
+
+/// A ref or revision the Hub names: never empty, never an option, no NUL, no space.
+fn rev(s: &str) -> ApiResult<&str> {
+    if s.is_empty() || s.starts_with('-') || s.chars().any(|c| c.is_whitespace() || c == '\0') {
+        return Err(invalid("not a revision"));
+    }
+    Ok(s)
+}
+
+fn text(b: &[u8]) -> String {
+    String::from_utf8_lossy(b).trim().to_string()
+}
+
+/// `s` cut to at most `max` bytes at a character, and whether it was.
+fn cut(mut s: String, max: usize, more: bool) -> (String, bool) {
+    if s.len() <= max {
+        return (s, more);
+    }
+    let mut end = max;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s.truncate(end);
+    (s, true)
+}
+
+struct Git<'a> {
+    c: &'a Commands,
+    dir: &'a Path,
+}
+
+impl Git<'_> {
+    /// What git printed. Git refusing is `invalid`; git not finishing under the pipe (its deadline,
+    /// a cancel) is `internal`, never mistaken for an answer.
+    fn out(&self, args: &[&str], cap: usize) -> ApiResult<(Vec<u8>, bool)> {
+        self.c.read(self.dir, args, cap).map_err(|f| match f {
+            Failed::Git(e) => invalid(e),
+            Failed::Pipe(e) => ApiError::new(ErrorCode::Internal, e),
+        })
+    }
+    /// What git printed, or `None` when git refused.
+    fn may(&self, args: &[&str]) -> ApiResult<Option<String>> {
+        match self.line(args) {
+            Ok(s) => Ok(Some(s)),
+            Err(e) if e.code == ErrorCode::Invalid => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+    fn line(&self, args: &[&str]) -> ApiResult<String> {
+        Ok(text(&self.out(args, 64 * 1024)?.0))
+    }
+    /// The commit `r` names, or `None` when it names none.
+    fn commit(&self, r: &str) -> ApiResult<Option<String>> {
+        let spec = format!("{}^{{commit}}", rev(r)?);
+        Ok(self
+            .may(&["rev-parse", "--verify", "--quiet", &spec])?
+            .filter(|s| !s.is_empty()))
+    }
+    fn must(&self, r: &str) -> ApiResult<String> {
+        self.commit(r)?
+            .ok_or_else(|| invalid(format!("no such revision: {r}")))
+    }
+    /// A git that answers with its exit status (`merge-base --is-ancestor`): 0 yes, 1 no, anything
+    /// else an error, never a no.
+    fn test(&self, args: &[&str]) -> ApiResult<bool> {
+        let r = self.ran(args, &[], &[], 64 * 1024, READ_DEADLINE)?;
+        match r.code {
+            Some(0) => Ok(true),
+            Some(1) => Ok(false),
+            _ => Err(invalid(r.stderr)),
+        }
+    }
+    /// One git under the pipe as it ran; only a git that did not finish is an error (`internal`).
+    fn ran(
+        &self,
+        args: &[&str],
+        env: &[(&str, &str)],
+        input: &[u8],
+        cap: usize,
+        deadline: std::time::Duration,
+    ) -> ApiResult<crate::workspace::Ran> {
+        let r = self
+            .c
+            .read_with(self.dir, args, env, input, cap, deadline)
+            .map_err(|f| ApiError::new(ErrorCode::Internal, String::from(f)))?;
+        if r.code.is_none() {
+            return Err(ApiError::new(
+                ErrorCode::Internal,
+                "git cancelled or timed out",
+            ));
+        }
+        Ok(r)
+    }
+    /// The merge base of two commits: `None` when they share no history.
+    fn merge_base(&self, a: &str, b: &str) -> ApiResult<Option<String>> {
+        let r = self.ran(&["merge-base", a, b], &[], &[], 64 * 1024, READ_DEADLINE)?;
+        match r.code {
+            Some(0) => Ok(Some(text(&r.stdout))),
+            Some(1) if r.stderr.is_empty() => Ok(None),
+            _ => Err(invalid(r.stderr)),
+        }
+    }
+    fn count(&self, span: &str) -> ApiResult<u32> {
+        self.line(&["rev-list", "--count", span])?
+            .parse()
+            .map_err(|_| invalid("rev-list printed no count"))
+    }
+    /// `(patch id, commit)` of each commit (or the one diff) `args` prints, through
+    /// `patch-id --stable`; empty when there is no change. A patch past [`PATCH_CAP`] is an error:
+    /// part of it would give another id.
+    fn patch_ids(&self, args: &[&str]) -> ApiResult<Vec<(String, String)>> {
+        let src = self.ran(args, &[], &[], PATCH_CAP, READ_DEADLINE)?;
+        if src.code != Some(0) {
+            return Err(invalid(src.stderr));
+        }
+        if src.truncated {
+            return Err(invalid("the patch is too big to compare"));
+        }
+        let ids = self.ran(
+            &["patch-id", "--stable"],
+            &[],
+            &src.stdout,
+            1 << 20,
+            READ_DEADLINE,
+        )?;
+        if ids.code != Some(0) {
+            return Err(invalid(ids.stderr));
+        }
+        Ok(String::from_utf8_lossy(&ids.stdout)
+            .lines()
+            .filter_map(|l| {
+                let mut p = l.split_whitespace();
+                Some((p.next()?.to_string(), p.next()?.to_string()))
+            })
+            .collect())
+    }
+    /// Where `head`'s branch left the line it came from: its merge base with the nearest of the
+    /// default branches there are.
+    fn base_of(&self, head: &str) -> ApiResult<Option<String>> {
+        let mut refs = vec![];
+        for r in BASES {
+            if self.commit(r)?.is_some() {
+                refs.push(*r);
+            }
+        }
+        if refs.is_empty() {
+            return Ok(None);
+        }
+        let mut args = vec!["merge-base", head];
+        args.extend(refs);
+        Ok(self.may(&args)?.filter(|b| !b.is_empty()))
+    }
+    /// The tree the working directory would commit as, untracked files included, through a
+    /// throwaway index (the workspace's own index is never touched), and the own change in it.
+    fn fingerprint(&self, head: &str) -> ApiResult<GitAnswer> {
+        let index = std::env::temp_dir().join(format!(
+            "steve-node-fingerprint-{}-{}",
+            std::process::id(),
+            FINGERPRINTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let out = self.tree_with(&index);
+        let _ = std::fs::remove_file(&index);
+        let tree = out?;
+        let own = match self.base_of(head)? {
+            Some(base) => {
+                let patch = self
+                    .patch_ids(&["diff-tree", "-p", "--no-color", &base, &tree])?
+                    .into_iter()
+                    .next()
+                    .map(|(p, _)| p)
+                    .unwrap_or_else(|| "-".into());
+                Some(OwnChange { base, patch })
+            }
+            None => None,
+        };
+        Ok(GitAnswer::Fingerprint { tree, own })
+    }
+    fn tree_with(&self, index: &Path) -> ApiResult<String> {
+        let ix = index.to_string_lossy().to_string();
+        let env = [("GIT_INDEX_FILE", ix.as_str())];
+        let step = |args: &[&str]| -> ApiResult<String> {
+            let r = self.ran(args, &env, &[], 64 * 1024, READ_DEADLINE)?;
+            match r.code {
+                Some(0) => Ok(text(&r.stdout)),
+                _ => Err(invalid(r.stderr)),
+            }
+        };
+        // start from the workspace's index (its stat cache keeps this fast), then take in the tree
+        let real = self.may(&["rev-parse", "--path-format=absolute", "--git-path", "index"])?;
+        match real.filter(|r| Path::new(r).exists()) {
+            Some(r) => {
+                std::fs::copy(&r, index)
+                    .map_err(|e| ApiError::new(ErrorCode::Internal, e.to_string()))?;
+            }
+            None => {
+                step(&["read-tree", "HEAD"])?;
+            }
+        }
+        step(&["add", "--all"])?;
+        step(&["write-tree"])
+    }
+    /// The commit on `up` that brought `head`'s change in (the Hub's `upstream::presence`).
+    fn landed(&self, head: &str, up: &str) -> ApiResult<Option<String>> {
+        if self.test(&["merge-base", "--is-ancestor", head, up])? {
+            return Ok(Some(head.into()));
+        }
+        // no shared history: it can't be on `up`
+        let Some(mb) = self.merge_base(head, up)? else {
+            return Ok(None);
+        };
+        let range = format!("{mb}..{up}");
+        let upstream = self.patch_ids(&["log", "--no-merges", "-p", "--no-color", &range])?;
+        let find = |pid: &str| {
+            upstream
+                .iter()
+                .find(|(p, _)| p == pid)
+                .map(|(_, c)| c.clone())
+        };
+        let cherry = self.line(&["cherry", up, head])?;
+        if !cherry.is_empty() && cherry.lines().all(|l| l.starts_with('-')) {
+            let tip = self.patch_ids(&["show", "-p", "--no-color", "--format=commit %H", head])?;
+            if let Some(c) = tip.first().and_then(|(p, _)| find(p)) {
+                return Ok(Some(c));
+            }
+        }
+        // squash merge: one upstream commit with the whole change
+        let all = self.patch_ids(&["diff-tree", "-p", "--no-color", &mb, head])?;
+        Ok(all.first().and_then(|(p, _)| find(p)))
+    }
+    /// The working tree's changes, as `status --porcelain -z` lists them.
+    fn status(&self) -> ApiResult<Vec<StatusEntry>> {
+        let (out, _) = self.out(&["status", "--porcelain", "-z"], OUT_CAP)?;
+        Ok(porcelain(&out))
+    }
+    /// Stat and patch of `cmd … spec` (`show --format= <sha>`, `diff <a>...<b>`) with paths as they
+    /// are (`docs/对话.md`), the patch cut at `max`.
+    fn stat_patch(&self, cmd: &[&str], spec: &str, max: u32) -> ApiResult<(String, String, bool)> {
+        fn with<'a>(cmd: &[&'a str], extra: &[&'a str], spec: &'a str) -> Vec<&'a str> {
+            let mut all = vec!["-c", "core.quotePath=false"];
+            all.extend_from_slice(cmd);
+            all.extend_from_slice(extra);
+            all.push(spec);
+            all
+        }
+        let stat = text(&self.out(&with(cmd, &["--stat=120"], spec), OUT_CAP)?.0);
+        let (patch, more) = self.out(
+            &with(cmd, &["--patch", "--no-color"], spec),
+            (max as usize + SLACK).min(OUT_CAP),
+        )?;
+        let (patch, truncated) = cut(text(&patch), max as usize, more);
+        Ok((stat, patch, truncated))
+    }
+
+    fn answer(&self, r: &GitRead) -> ApiResult<(String, GitAnswer)> {
+        Ok(match r {
+            GitRead::Show {
+                rev: at,
+                path: Some(path),
+                max,
+            } => {
+                let Some(sha) = self.commit(at)? else {
+                    return Ok((String::new(), not_found()));
+                };
+                let spec = format!("{sha}:{}", path.as_str());
+                match self.out(&["show", &spec], *max as usize) {
+                    Ok((bytes, truncated)) => (
+                        sha,
+                        GitAnswer::Blob {
+                            found: true,
+                            bytes,
+                            truncated,
+                        },
+                    ),
+                    Err(e) if e.code == ErrorCode::Invalid => (sha, not_found()),
+                    Err(e) => return Err(e),
+                }
+            }
+            GitRead::Show {
+                rev: at,
+                path: None,
+                max,
+            } => {
+                let Some(sha) = self.commit(at)? else {
+                    return Ok((String::new(), not_found()));
+                };
+                let meta = self.line(&[
+                    "show",
+                    "-s",
+                    "--format=%H%x1f%h%x1f%s%x1f%an%x1f%ct%x1f%B",
+                    &sha,
+                ])?;
+                let f: Vec<&str> = meta.splitn(6, '\u{1f}').collect();
+                let (stat, patch, truncated) =
+                    self.stat_patch(&["show", "--format="], &sha, *max)?;
+                let commit = CommitInfo {
+                    sha: f.first().copied().unwrap_or(&sha).to_string(),
+                    abbrev: f.get(1).map(|h| h.to_string()),
+                    subject: f.get(2).copied().unwrap_or_default().to_string(),
+                    author: f.get(3).copied().unwrap_or_default().to_string(),
+                    time: Timestamp(
+                        f.get(4).and_then(|t| t.parse::<i64>().ok()).unwrap_or(0) * 1000,
+                    ),
+                    body: Some(f.get(5).copied().unwrap_or_default().to_string()),
+                };
+                (
+                    sha,
+                    GitAnswer::Commit {
+                        commit,
+                        stat,
+                        patch,
+                        truncated,
+                    },
+                )
+            }
+            GitRead::Log { range, max } => {
+                let to = self.must(&range.to)?;
+                let span = match &range.from {
+                    Some(from) => format!("{}..{to}", self.must(from)?),
+                    None => to.clone(),
+                };
+                // one more than asked: whether there are more
+                let n = (u64::from(*max) + 1).to_string();
+                let log = self.line(&[
+                    "log",
+                    "--no-color",
+                    "-n",
+                    &n,
+                    "--format=%H%x1f%h%x1f%s%x1f%an%x1f%ct",
+                    &span,
+                ])?;
+                let mut commits: Vec<CommitInfo> = log
+                    .lines()
+                    .filter(|l| !l.is_empty())
+                    .map(|l| {
+                        let f: Vec<&str> = l.splitn(5, '\u{1f}').collect();
+                        CommitInfo {
+                            sha: f.first().copied().unwrap_or_default().to_string(),
+                            abbrev: f.get(1).map(|h| h.to_string()),
+                            subject: f.get(2).copied().unwrap_or_default().to_string(),
+                            author: f.get(3).copied().unwrap_or_default().to_string(),
+                            time: Timestamp(
+                                f.get(4).and_then(|t| t.parse::<i64>().ok()).unwrap_or(0) * 1000,
+                            ),
+                            body: None,
+                        }
+                    })
+                    .collect();
+                let truncated = commits.len() > *max as usize;
+                commits.truncate(*max as usize);
+                (to, GitAnswer::Log { commits, truncated })
+            }
+            GitRead::Diff { range, max } => {
+                let Some(from) = &range.from else {
+                    return Err(ApiError::new(
+                        ErrorCode::Unsupported,
+                        "a diff needs the side it is from",
+                    ));
+                };
+                let to = self.must(&range.to)?;
+                // what `to` changed since it left `from` (its commits of the log above)
+                let span = format!("{}...{to}", self.must(from)?);
+                let (stat, patch, truncated) = self.stat_patch(&["diff"], &span, *max)?;
+                (
+                    to,
+                    GitAnswer::Diff {
+                        stat,
+                        patch,
+                        truncated,
+                    },
+                )
+            }
+            GitRead::IsAncestor { ancestor, of } => {
+                let a = self.must(ancestor)?;
+                let of = self.must(of)?;
+                let yes = self.test(&["merge-base", "--is-ancestor", &a, &of])?;
+                (of, GitAnswer::IsAncestor { yes })
+            }
+            GitRead::Status => (
+                self.must("HEAD")?,
+                GitAnswer::Status {
+                    entries: self.status()?,
+                },
+            ),
+            GitRead::Fingerprint => {
+                let head = self.must("HEAD")?;
+                let a = self.fingerprint(&head)?;
+                (head, a)
+            }
+            GitRead::ChangedPaths { from, to, max } => {
+                let (from, to) = (rev(from)?, rev(to)?);
+                let (out, more) = self.out(&["diff", "--name-only", "-z", from, to], OUT_CAP)?;
+                let mut paths: Vec<String> = out
+                    .split(|b| *b == 0)
+                    .filter(|p| !p.is_empty())
+                    .map(|p| String::from_utf8_lossy(p).to_string())
+                    .collect();
+                let truncated = more || paths.len() > *max as usize;
+                paths.truncate(*max as usize);
+                (to.to_string(), GitAnswer::ChangedPaths { paths, truncated })
+            }
+            GitRead::Landed { commit, onto } => {
+                let commit = self.must(commit)?;
+                let up = self.must(onto)?;
+                let landed = self.landed(&commit, &up)?;
+                (up, GitAnswer::Landed { commit: landed })
+            }
+            GitRead::RemoteTags { remote } => {
+                let remote = rev(remote)?;
+                let r = self.ran(
+                    &["ls-remote", "--tags", remote],
+                    &[],
+                    &[],
+                    OUT_CAP,
+                    NET_DEADLINE,
+                )?;
+                if r.code != Some(0) {
+                    return Err(invalid(r.stderr));
+                }
+                (
+                    String::new(),
+                    GitAnswer::RemoteTags {
+                        tags: remote_tags(&String::from_utf8_lossy(&r.stdout)),
+                    },
+                )
+            }
+            GitRead::RemoteUrl { remote } => {
+                let key = format!("remote.{}.url", rev(remote)?);
+                let url = self
+                    .may(&["config", "--get", &key])?
+                    .map(|u| no_credentials(&u));
+                (String::new(), GitAnswer::RemoteUrl { url })
+            }
+            GitRead::TrackedIgnored { .. } => {
+                return Err(ApiError::new(
+                    ErrorCode::Unsupported,
+                    "this git read is not served here yet",
+                ));
+            }
+        })
+    }
+
+    /// What `from..to` holds each way, and where they met.
+    fn range(&self, from: &str, to: &str) -> ApiResult<RangeFacts> {
+        let a = self.must(from)?;
+        let b = self.must(to)?;
+        let merge_base = self.merge_base(&a, &b)?;
+        // the paths both sides changed since they met
+        let mut overlap = vec![];
+        if let Some(mb) = &merge_base {
+            let changed = |side: &str| -> ApiResult<Vec<RelPath>> {
+                let o = self.out(
+                    &["diff", "--name-only", "-z", "--no-renames", mb, side],
+                    OUT_CAP,
+                )?;
+                Ok(names(&o.0))
+            };
+            let theirs = changed(&b)?;
+            overlap = changed(&a)?
+                .into_iter()
+                .filter(|p| theirs.contains(p))
+                .collect();
+        }
+        // exit 0: it merges cleanly; 1: the conflicted paths follow the tree
+        let m = self.ran(
+            &[
+                "merge-tree",
+                "--write-tree",
+                "--name-only",
+                "--no-messages",
+                "-z",
+                &a,
+                &b,
+            ],
+            &[],
+            &[],
+            OUT_CAP,
+            READ_DEADLINE,
+        )?;
+        let conflicts = match m.code {
+            Some(0) => vec![],
+            Some(1) => {
+                let mut parts = m.stdout.splitn(2, |b| *b == 0);
+                parts.next();
+                names(parts.next().unwrap_or_default())
+            }
+            _ => return Err(invalid(format!("merge-tree: {}", m.stderr))),
+        };
+        Ok(RangeFacts {
+            merge_base,
+            ahead: self.count(&format!("{a}..{b}"))?,
+            behind: self.count(&format!("{b}..{a}"))?,
+            from: a,
+            to: b,
+            overlap,
+            conflicts,
+        })
+    }
+}
+
+fn not_found() -> GitAnswer {
+    GitAnswer::Blob {
+        found: false,
+        bytes: vec![],
+        truncated: false,
+    }
+}
+
+static FINGERPRINTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// `-z` names, as relative paths (one that is no valid relative path is left out).
+fn names(bytes: &[u8]) -> Vec<RelPath> {
+    bytes
+        .split(|b| *b == 0)
+        .filter(|n| !n.is_empty())
+        .filter_map(|n| RelPath::new(String::from_utf8_lossy(n).into_owned()).ok())
+        .collect()
+}
+
+/// `status --porcelain -z` as entries: a rename's or copy's old path (the field after it) is
+/// skipped, a directory's trailing `/` dropped; a path that is no relative path is left out.
+fn porcelain(out: &[u8]) -> Vec<StatusEntry> {
+    let mut entries = vec![];
+    let mut fields = out.split(|b| *b == 0).filter(|f| !f.is_empty());
+    while let Some(f) = fields.next() {
+        if f.len() < 4 {
+            continue;
+        }
+        let code = String::from_utf8_lossy(&f[..2]).to_string();
+        let path = String::from_utf8_lossy(&f[3..]);
+        if code.contains('R') || code.contains('C') {
+            fields.next();
+        }
+        if let Ok(path) = RelPath::new(path.trim_end_matches('/')) {
+            entries.push(StatusEntry { path, code });
+        }
+    }
+    entries
+}
+
+/// `ls-remote --tags` as `(name, commit)`: the peeled line (`^{}`) of an annotated tag names its
+/// commit.
+fn remote_tags(out: &str) -> Vec<(String, String)> {
+    let mut tags: Vec<(String, String)> = vec![];
+    for l in out.lines() {
+        let Some((sha, r)) = l.split_once('\t') else {
+            continue;
+        };
+        let Some(name) = r.strip_prefix("refs/tags/") else {
+            continue;
+        };
+        let (name, peeled) = match name.strip_suffix("^{}") {
+            Some(n) => (n, true),
+            None => (name, false),
+        };
+        match tags.iter_mut().find(|(n, _)| n == name) {
+            Some(t) if peeled => t.1 = sha.into(),
+            Some(_) => {}
+            None => tags.push((name.into(), sha.into())),
+        }
+    }
+    tags
+}
+
+/// A remote URL without what may be a credential in it (`https://user:token@host/…`).
+fn no_credentials(url: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return url.to_string();
+    };
+    let (auth, path) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
+    match auth.rsplit_once('@') {
+        Some((_, host)) => format!("{scheme}://{host}{path}"),
+        None => url.to_string(),
+    }
+}
+
+/// The facts `q` asks for in the checkout at `dir`, after fetching `origin` (with its tags) when it
+/// asks for that. A `dir` that is no checkout with a commit, or a read git refuses, is `invalid`; a
+/// fetch the remote refuses is `invalid` with git's words; git not finishing (its deadline) is
+/// `internal`.
+pub(crate) fn facts(c: &Commands, dir: &Path, q: &GitQuery) -> ApiResult<GitFacts> {
+    let g = Git { c, dir };
+    if q.fetch {
+        let r = c
+            .write_with(
+                dir,
+                &["fetch", "--quiet", "--tags", "origin"],
+                &[],
+                NET_DEADLINE,
+            )
+            .map_err(|f| ApiError::new(ErrorCode::Internal, String::from(f)))?;
+        match r.code {
+            Some(0) => {}
+            Some(_) => return Err(invalid(format!("fetch: {}", r.stderr))),
+            None => return Err(ApiError::new(ErrorCode::Internal, "fetch timed out")),
+        }
+    }
+    let (head, branch, status, revision) = observe(&g, q.heads_only)?;
+    let mut refs = vec![];
+    for r in &q.refs {
+        refs.push((r.clone(), g.commit(r)?));
+    }
+    let mut ranges = vec![];
+    for (from, to) in &q.ranges {
+        ranges.push(g.range(from, to)?);
+    }
+    let mut reads = vec![];
+    for r in &q.reads {
+        let (observed, answer) = g.answer(r)?;
+        reads.push(GitReadFact {
+            read: r.clone(),
+            observed,
+            answer,
+        });
+    }
+    Ok(GitFacts {
+        revision,
+        head,
+        branch,
+        dirty: !status.is_empty(),
+        refs,
+        ranges,
+        reads,
+    })
+}
+
+/// HEAD, the branch, the working tree's status and the revision they make (what a decision made
+/// on them checks again).
+fn observe(g: &Git, heads_only: bool) -> ApiResult<(String, Option<String>, Vec<u8>, Revision)> {
+    let head = g
+        .commit("HEAD")?
+        .ok_or_else(|| invalid("not a git checkout with a commit"))?;
+    let branch = g
+        .may(&["symbolic-ref", "--short", "-q", "HEAD"])?
+        .filter(|b| !b.is_empty());
+    // a preview reads no working tree: no untracked-file scan for it
+    let status = match heads_only {
+        true => vec![],
+        false => g.out(&["status", "--porcelain", "-z"], OUT_CAP)?.0,
+    };
+    let mut h = sha2::Sha256::new();
+    h.update(head.as_bytes());
+    h.update([0]);
+    h.update(branch.as_deref().unwrap_or_default().as_bytes());
+    h.update([0]);
+    h.update(&status);
+    let kind = if heads_only { "h" } else { "g" };
+    let revision = Revision::new(format!("{kind}{}", &hex::encode(h.finalize())[..32]))
+        .map_err(|e| ApiError::new(ErrorCode::Internal, e.to_string()))?;
+    Ok((head, branch, status, revision))
+}
+
+/// The facts of the checkout at `dir` with nothing asked beyond them (what an apply checks).
+pub(crate) fn now(c: &Commands, dir: &Path) -> ApiResult<GitFacts> {
+    let (head, branch, status, revision) = observe(&Git { c, dir }, false)?;
+    Ok(GitFacts {
+        revision,
+        head,
+        branch,
+        dirty: !status.is_empty(),
+        refs: vec![],
+        ranges: vec![],
+        reads: vec![],
+    })
+}
+
+/// How long a rebase may take (its hooks included).
+const REBASE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Rebases the branch checked out at `dir` onto `onto`, if the checkout is still at `expected`
+/// and `expected_head` (`stale` otherwise). Uncommitted changes to tracked files are `busy`; a
+/// conflict is backed out and is `conflict` with the paths, one per line; `onto` already under
+/// HEAD changes nothing. The facts after it.
+pub(crate) fn rebase(
+    c: &Commands,
+    dir: &Path,
+    onto: &str,
+    expected: &Revision,
+    expected_head: &str,
+) -> ApiResult<GitFacts> {
+    let g = Git { c, dir };
+    let before = now(c, dir)?;
+    if before.revision != *expected || before.head != expected_head {
+        return Err(ApiError::new(ErrorCode::Stale, "changed since"));
+    }
+    let onto = g.must(onto)?;
+    let tracked = text(
+        &g.out(&["status", "--porcelain", "--untracked-files=no"], OUT_CAP)?
+            .0,
+    );
+    if !tracked.is_empty() {
+        let lines: Vec<&str> = tracked.lines().take(10).collect();
+        return Err(ApiError::new(ErrorCode::Busy, lines.join("\n")));
+    }
+    if g.test(&["merge-base", "--is-ancestor", &onto, "HEAD"])? {
+        return Ok(before);
+    }
+    let pipe = |f| ApiError::new(ErrorCode::Internal, String::from(f));
+    let r = c
+        .write_with(dir, &["rebase", &onto], &[], REBASE_DEADLINE)
+        .map_err(pipe)?;
+    if r.code == Some(0) {
+        return now(c, dir);
+    }
+    let files = c
+        .write_with(
+            dir,
+            &["diff", "--name-only", "--diff-filter=U"],
+            &[],
+            READ_DEADLINE,
+        )
+        .map(|r| text(&r.stdout))
+        .unwrap_or_default();
+    let abort = c
+        .write_with(dir, &["rebase", "--abort"], &[], READ_DEADLINE)
+        .map_err(pipe)?;
+    if abort.code != Some(0)
+        && g.may(&[
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-path",
+            "rebase-merge",
+        ])?
+        .is_some_and(|p| Path::new(&p).exists())
+    {
+        return Err(ApiError::new(
+            ErrorCode::Internal,
+            format!("the rebase could not be backed out: {}", abort.stderr),
+        ));
+    }
+    Err(match (r.code, files.is_empty()) {
+        (None, _) => ApiError::new(
+            ErrorCode::Internal,
+            "the rebase timed out and was backed out",
+        ),
+        (_, false) => ApiError::new(ErrorCode::Conflict, files),
+        (_, true) => invalid(r.stderr),
+    })
+}
+
+// ── the push ──
 
 /// How long one read may take.
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
@@ -75,13 +846,9 @@ const PUSH_SH: &str = "exec git -c core.hooksPath=/dev/null push --quiet --no-ve
                        ${STEVE_PUSH_LEASE:+\"--force-with-lease=$STEVE_PUSH_LEASE\"} \
                        -- \"$STEVE_PUSH_URL\" \"$STEVE_PUSH_REFSPEC\"";
 
-fn bad(m: impl Into<String>) -> ApiError {
-    ApiError::new(ErrorCode::Invalid, m)
-}
-
 /// `git -C dir` with the system and global config off and no prompts.
-fn git(dir: &Path) -> Command {
-    let mut c = Command::new("git");
+fn git(dir: &Path) -> std::process::Command {
+    let mut c = std::process::Command::new("git");
     for k in UNSET {
         c.env_remove(k);
     }
@@ -109,14 +876,10 @@ fn git(dir: &Path) -> Command {
 
 struct Out {
     code: Option<i32>,
-    stdout: Vec<u8>,
     stderr: Vec<u8>,
 }
 
 impl Out {
-    fn text(&self) -> String {
-        String::from_utf8_lossy(&self.stdout).trim().to_string()
-    }
     fn complaint(&self) -> String {
         String::from_utf8_lossy(&self.stderr)
             .trim()
@@ -169,32 +932,10 @@ fn read(dir: &Path, args: &[&str]) -> ApiResult<Out> {
     }
     Ok(Out {
         code: status.code(),
-        stdout,
         stderr,
     })
 }
 
-/// A read that must succeed: its trimmed output.
-fn must(dir: &Path, args: &[&str]) -> ApiResult<String> {
-    let o = read(dir, args)?;
-    if o.code != Some(0) {
-        return Err(ApiError::new(
-            ErrorCode::Internal,
-            format!("git {}: {}", args[0], o.complaint()),
-        ));
-    }
-    Ok(o.text())
-}
-
-/// A ref, a branch or a revision expression the Hub may name: no option, no blank or control
-/// character, bounded.
-fn valid_ref(r: &str) -> bool {
-    !r.is_empty()
-        && r.len() <= 256
-        && !r.starts_with('-')
-        && !r.contains("..")
-        && r.chars().all(|c| !c.is_whitespace() && !c.is_control())
-}
 
 /// Branch names a push takes: `steve/st-12` and the like (as the Hub's own push did).
 pub(crate) fn branch_ok(b: &str) -> bool {
@@ -222,262 +963,6 @@ fn sha_ok(s: &str) -> bool {
     (s.len() == 40 || s.len() == 64) && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-/// The commit `r` names, `None` when it names none.
-fn resolve(dir: &Path, r: &str) -> ApiResult<Option<String>> {
-    if !valid_ref(r) {
-        return Err(bad(format!(
-            "not a ref: {}",
-            r.chars().take(40).collect::<String>()
-        )));
-    }
-    let o = read(
-        dir,
-        &[
-            "rev-parse",
-            "--verify",
-            "--quiet",
-            "--end-of-options",
-            &format!("{r}^{{commit}}"),
-        ],
-    )?;
-    Ok((o.code == Some(0))
-        .then(|| o.text())
-        .filter(|s| !s.is_empty()))
-}
-
-fn resolve_must(dir: &Path, r: &str) -> ApiResult<String> {
-    resolve(dir, r)?.ok_or_else(|| bad(format!("no such ref: {r}")))
-}
-
-/// HEAD (empty on an unborn branch), its branch, and the revision of HEAD and every ref.
-fn state(dir: &Path) -> ApiResult<(String, Option<String>, Revision)> {
-    use sha2::Digest as _;
-    let head = resolve(dir, "HEAD")?.unwrap_or_default();
-    let o = read(dir, &["symbolic-ref", "--quiet", "--short", "HEAD"])?;
-    let branch = (o.code == Some(0))
-        .then(|| o.text())
-        .filter(|b| !b.is_empty());
-    let refs = must(
-        dir,
-        &[
-            "for-each-ref",
-            "--format=%(refname) %(objectname)",
-            "refs/heads",
-            "refs/remotes",
-            "refs/tags",
-        ],
-    )?;
-    let mut h = sha2::Sha256::new();
-    for part in [
-        head.as_str(),
-        branch.as_deref().unwrap_or(""),
-        refs.as_str(),
-    ] {
-        h.update(part.as_bytes());
-        h.update([0]);
-    }
-    let rev = Revision::new(format!("g{}", &hex::encode(h.finalize())[..32]))
-        .map_err(|e| ApiError::new(ErrorCode::Internal, e.to_string()))?;
-    Ok((head, branch, rev))
-}
-
-/// `-z` names, as relative paths (one that is no valid relative path is left out).
-fn names(bytes: &[u8]) -> Vec<RelPath> {
-    bytes
-        .split(|b| *b == 0)
-        .filter(|n| !n.is_empty())
-        .filter_map(|n| RelPath::new(String::from_utf8_lossy(n).into_owned()).ok())
-        .collect()
-}
-
-fn range(dir: &Path, from: &str, to: &str) -> ApiResult<RangeFacts> {
-    let f = resolve_must(dir, from)?;
-    let t = resolve_must(dir, to)?;
-    let base = read(dir, &["merge-base", &f, &t])?;
-    let merge_base = (base.code == Some(0))
-        .then(|| base.text())
-        .filter(|s| !s.is_empty());
-    let counts = must(
-        dir,
-        &["rev-list", "--left-right", "--count", &format!("{f}...{t}")],
-    )?;
-    let mut n = counts
-        .split_whitespace()
-        .map(|x| x.parse::<u32>().unwrap_or(0));
-    let (behind, ahead) = (n.next().unwrap_or(0), n.next().unwrap_or(0));
-    let mut overlap = vec![];
-    if let Some(mb) = &merge_base {
-        let changed = |side: &str| -> ApiResult<Vec<RelPath>> {
-            let o = read(
-                dir,
-                &["diff", "--name-only", "-z", "--no-renames", mb, side],
-            )?;
-            if o.code != Some(0) {
-                return Err(ApiError::new(
-                    ErrorCode::Internal,
-                    format!("git diff: {}", o.complaint()),
-                ));
-            }
-            Ok(names(&o.stdout))
-        };
-        let theirs = changed(&t)?;
-        overlap = changed(&f)?
-            .into_iter()
-            .filter(|p| theirs.contains(p))
-            .collect();
-    }
-    // exit 0: it merges cleanly; 1: the conflicted paths follow the tree
-    let m = read(
-        dir,
-        &[
-            "merge-tree",
-            "--write-tree",
-            "--name-only",
-            "--no-messages",
-            "-z",
-            &f,
-            &t,
-        ],
-    )?;
-    let conflicts = match m.code {
-        Some(0) => vec![],
-        Some(1) => {
-            let mut parts = m.stdout.splitn(2, |b| *b == 0);
-            parts.next();
-            names(parts.next().unwrap_or_default())
-        }
-        _ => {
-            return Err(ApiError::new(
-                ErrorCode::Internal,
-                format!("git merge-tree: {}", m.complaint()),
-            ));
-        }
-    };
-    Ok(RangeFacts {
-        from: f,
-        to: t,
-        merge_base,
-        ahead,
-        behind,
-        overlap,
-        conflicts,
-    })
-}
-
-fn status(dir: &Path) -> ApiResult<Vec<StatusEntry>> {
-    let o = read(
-        dir,
-        &["status", "--porcelain=v1", "-z", "--untracked-files=normal"],
-    )?;
-    if o.code != Some(0) {
-        return Err(ApiError::new(
-            ErrorCode::Internal,
-            format!("git status: {}", o.complaint()),
-        ));
-    }
-    let mut out = vec![];
-    let mut parts = o.stdout.split(|b| *b == 0).filter(|p| !p.is_empty());
-    while let Some(p) = parts.next() {
-        if p.len() < 4 {
-            continue;
-        }
-        let code = String::from_utf8_lossy(&p[..2]).into_owned();
-        // a rename or copy names its source next
-        if matches!(p[0], b'R' | b'C') {
-            parts.next();
-        }
-        if let Ok(path) = RelPath::new(String::from_utf8_lossy(&p[3..]).into_owned()) {
-            out.push(StatusEntry { path, code });
-        }
-    }
-    Ok(out)
-}
-
-/// The configured URL of `remote`.
-fn remote_url(dir: &Path, remote: &str) -> ApiResult<Option<String>> {
-    if !remote_ok(remote) {
-        return Err(bad("not a remote name"));
-    }
-    let o = read(dir, &["config", "--get", &format!("remote.{remote}.url")])?;
-    Ok((o.code == Some(0))
-        .then(|| o.text())
-        .filter(|u| !u.is_empty()))
-}
-
-fn answer(dir: &Path, head: &str, r: &GitRead) -> ApiResult<GitReadFact> {
-    let (observed, answer) = match r {
-        GitRead::IsAncestor { ancestor, of } => {
-            let a = resolve_must(dir, ancestor)?;
-            let o = resolve_must(dir, of)?;
-            let x = read(dir, &["merge-base", "--is-ancestor", &a, &o])?;
-            let yes = match x.code {
-                Some(0) => true,
-                Some(1) => false,
-                _ => {
-                    return Err(ApiError::new(
-                        ErrorCode::Internal,
-                        format!("git merge-base: {}", x.complaint()),
-                    ));
-                }
-            };
-            (o, GitAnswer::IsAncestor { yes })
-        }
-        GitRead::Status => (
-            head.to_string(),
-            GitAnswer::Status {
-                entries: status(dir)?,
-            },
-        ),
-        GitRead::Remote { name } => (
-            head.to_string(),
-            GitAnswer::Remote {
-                url: remote_url(dir, name)?,
-            },
-        ),
-        _ => return Err(ApiError::new(ErrorCode::Unsupported, "this git read")),
-    };
-    Ok(GitReadFact {
-        read: r.clone(),
-        observed,
-        answer,
-    })
-}
-
-/// What `q` asks, in the workspace directory `dir`.
-pub(crate) fn facts(dir: &Path, q: &GitQuery) -> ApiResult<GitFacts> {
-    if q.fetch {
-        return Err(ApiError::new(
-            ErrorCode::Unsupported,
-            "this node does not fetch for facts",
-        ));
-    }
-    if q.refs.len() + q.ranges.len() + q.reads.len() > 64 {
-        return Err(bad("too many questions at once"));
-    }
-    let (head, branch, revision) = state(dir)?;
-    let dirty = !q.no_status && !status(dir)?.is_empty();
-    let mut refs = vec![];
-    for r in &q.refs {
-        refs.push((r.clone(), resolve(dir, r)?));
-    }
-    let mut ranges = vec![];
-    for (from, to) in &q.ranges {
-        ranges.push(range(dir, from, to)?);
-    }
-    let mut reads = vec![];
-    for r in &q.reads {
-        reads.push(answer(dir, &head, r)?);
-    }
-    Ok(GitFacts {
-        revision,
-        head,
-        branch,
-        dirty,
-        refs,
-        ranges,
-        reads,
-    })
-}
 
 /// The test guard's flag, as the Hub reads it: on only for `1`.
 fn forbid_real_hosts() -> bool {
@@ -537,17 +1022,17 @@ pub(crate) fn check_push_shape(a: &GitAction) -> ApiResult<()> {
     else {
         return Err(ApiError::new(
             ErrorCode::Unsupported,
-            "this node applies no rebase or merge yet",
+            "this node applies no merge yet",
         ));
     };
     if !branch_ok(branch) {
-        return Err(bad("not a branch Steve pushes"));
+        return Err(invalid("not a branch Steve pushes"));
     }
     if !remote_ok(remote) {
-        return Err(bad("not a remote name"));
+        return Err(invalid("not a remote name"));
     }
     if !sha_ok(expected_local) || expected_remote.as_deref().is_some_and(|s| !sha_ok(s)) {
-        return Err(bad("not a commit id"));
+        return Err(invalid("not a commit id"));
     }
     if url.is_empty()
         || url.len() > 2048
@@ -555,17 +1040,17 @@ pub(crate) fn check_push_shape(a: &GitAction) -> ApiResult<()> {
         || url.chars().any(|c| c.is_whitespace() || c.is_control())
         || !(url.starts_with('/') || url.contains("://"))
     {
-        return Err(bad("not a push URL"));
+        return Err(invalid("not a push URL"));
     }
     if origin_must_be
         .as_deref()
         .is_some_and(|o| github_repo(&format!("https://github.com/{o}")).is_none())
     {
-        return Err(bad("not owner/name"));
+        return Err(invalid("not owner/name"));
     }
     if let Some(a) = auth {
         let SecretDelivery::Header { name } = &a.how else {
-            return Err(bad("a push credential goes as a header"));
+            return Err(invalid("a push credential goes as a header"));
         };
         if a.id.is_empty()
             || a.id.len() > 256
@@ -575,7 +1060,7 @@ pub(crate) fn check_push_shape(a: &GitAction) -> ApiResult<()> {
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
         {
-            return Err(bad("a bad push header"));
+            return Err(invalid("a bad push header"));
         }
     }
     if !target_allowed(forbid_real_hosts(), url) {
@@ -584,8 +1069,10 @@ pub(crate) fn check_push_shape(a: &GitAction) -> ApiResult<()> {
     Ok(())
 }
 
-/// The push's preconditions in `dir`, now: the remote, the branch, HEAD and the refs.
-pub(crate) fn check_push(dir: &Path, apply: &GitApply) -> ApiResult<PushPlan> {
+/// The push's preconditions in `dir`, now: the remote, the branch, HEAD and the revision, read
+/// through the workspace's pipe as [`facts`] reads them. The revision is compared the way the Hub
+/// read it: heads only (`h…`, [`GitQuery::heads_only`]) or with the working tree.
+pub(crate) fn check_push(c: &Commands, dir: &Path, apply: &GitApply) -> ApiResult<PushPlan> {
     check_push_shape(&apply.action)?;
     let GitAction::Push {
         remote,
@@ -599,24 +1086,26 @@ pub(crate) fn check_push(dir: &Path, apply: &GitApply) -> ApiResult<PushPlan> {
     else {
         unreachable!("checked above");
     };
+    let g = Git { c, dir };
     if let Some(want) = origin_must_be {
-        let at = remote_url(dir, remote)?;
+        let at = g.may(&["config", "--get", &format!("remote.{remote}.url")])?;
         if at.as_deref().and_then(github_repo) != Some(want.to_lowercase()) {
             return Err(ApiError::new(ErrorCode::Denied, WRONG_REMOTE));
         }
     }
-    match resolve(dir, &format!("refs/heads/{branch}"))? {
+    match g.commit(&format!("refs/heads/{branch}"))? {
         None => return Err(ApiError::new(ErrorCode::Stale, NO_BRANCH)),
         Some(sha) if sha != *expected_local => {
             return Err(ApiError::new(ErrorCode::Stale, BRANCH_MOVED));
         }
         Some(_) => {}
     }
-    let (head, _, revision) = state(dir)?;
+    let heads_only = apply.expected.as_str().starts_with('h');
+    let (head, _, _, revision) = observe(&g, heads_only)?;
     if revision != apply.expected || head != apply.expected_head {
         return Err(ApiError::new(ErrorCode::Stale, "changed since"));
     }
-    let common = PathBuf::from(must(dir, &["rev-parse", "--git-common-dir"])?);
+    let common = PathBuf::from(g.line(&["rev-parse", "--git-common-dir"])?);
     let common = if common.is_absolute() {
         common
     } else {
@@ -668,7 +1157,6 @@ impl Drop for Bare {
 /// A bare repository for `op` that has the plan's branch at its commit, from the workspace's
 /// objects.
 pub(crate) fn bare(home: &Path, op: &OperationId, plan: &PushPlan) -> Result<Bare, String> {
-    use sha2::Digest as _;
     let name = hex::encode(sha2::Sha256::digest(op.as_str().as_bytes()));
     let dir = root(home).join(&name[..24]);
     let _ = std::fs::remove_dir_all(&dir);
@@ -765,6 +1253,53 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_revision_is_never_an_option() {
+        assert!(rev("main").is_ok());
+        assert!(rev("steve/st-1").is_ok());
+        for bad in ["", "-n", "--output=/tmp/x", "a b", "a\0b"] {
+            assert_eq!(rev(bad).unwrap_err().code, ErrorCode::Invalid, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_remote_url_never_carries_a_credential() {
+        assert_eq!(
+            no_credentials("https://x:tok@github.com/o/r.git"),
+            "https://github.com/o/r.git"
+        );
+        assert_eq!(no_credentials("ssh://git@host:22/o/r"), "ssh://host:22/o/r");
+        assert_eq!(
+            no_credentials("git@github.com:o/r.git"),
+            "git@github.com:o/r.git"
+        );
+        assert_eq!(no_credentials("/tmp/origin.git"), "/tmp/origin.git");
+    }
+
+    #[test]
+    fn porcelain_entries_skip_a_rename_source_and_a_trailing_slash() {
+        let e = porcelain(b" M a.rs\0R  new.rs\0old.rs\0?? dir/\0");
+        let got: Vec<(&str, &str)> = e
+            .iter()
+            .map(|e| (e.code.as_str(), e.path.as_str()))
+            .collect();
+        assert_eq!(got, [(" M", "a.rs"), ("R ", "new.rs"), ("??", "dir")]);
+    }
+
+    #[test]
+    fn remote_tags_take_the_peeled_commit() {
+        let t = remote_tags("a1\trefs/tags/v1\nb2\trefs/tags/v2\nc3\trefs/tags/v2^{}\n");
+        assert_eq!(t, [("v1".into(), "a1".into()), ("v2".into(), "c3".into())]);
+    }
+
+    #[test]
+    fn a_patch_is_cut_at_a_character() {
+        let (s, more) = cut("ab中".into(), 3, false);
+        assert_eq!((s.as_str(), more), ("ab", true));
+        assert_eq!(cut("abc".into(), 3, false), ("abc".into(), false));
+        assert_eq!(cut("abc".into(), 3, true), ("abc".into(), true));
+    }
+
+    #[test]
     fn the_guard_allows_local_and_loopback_targets_only() {
         for u in [
             "/tmp/remotes/o/r.git",
@@ -796,7 +1331,5 @@ mod tests {
         ] {
             assert!(!branch_ok(b), "{b}");
         }
-        assert!(valid_ref("origin/main") && valid_ref("HEAD"));
-        assert!(!valid_ref("--upload-pack=x") && !valid_ref("a b") && !valid_ref("a..b"));
     }
 }

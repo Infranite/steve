@@ -189,8 +189,8 @@ fn query(w: &WorkspaceRef) -> GitQuery {
         refs: vec![],
         ranges: vec![],
         fetch: false,
-        no_status: false,
         reads: vec![],
+        heads_only: false,
     }
 }
 
@@ -281,11 +281,11 @@ async fn facts_of_a_workspace() {
                     ancestor: "main".into(),
                     of: BRANCH.into(),
                 },
-                GitRead::Remote {
-                    name: "origin".into(),
+                GitRead::RemoteUrl {
+                    remote: "origin".into(),
                 },
-                GitRead::Remote {
-                    name: "upstream".into(),
+                GitRead::RemoteUrl {
+                    remote: "upstream".into(),
                 },
                 GitRead::Status,
             ],
@@ -313,10 +313,10 @@ async fn facts_of_a_workspace() {
         vec![
             GitAnswer::IsAncestor { yes: false },
             GitAnswer::IsAncestor { yes: true },
-            GitAnswer::Remote {
+            GitAnswer::RemoteUrl {
                 url: Some("https://github.com/o/r.git".into())
             },
-            GitAnswer::Remote { url: None },
+            GitAnswer::RemoteUrl { url: None },
             GitAnswer::Status { entries: vec![] },
         ]
     );
@@ -340,13 +340,15 @@ async fn facts_of_a_workspace() {
     // the status left out: not read, the rest the same
     let quick = n
         .git_facts(GitQuery {
-            no_status: true,
+            heads_only: true,
             ..query(&w)
         })
         .await
         .unwrap();
     assert!(!quick.dirty);
-    assert_eq!((&quick.revision, &quick.head), (&g.revision, &g.head));
+    assert_eq!(quick.head, g.head);
+    assert_ne!(quick.revision, g.revision, "never equal to one with the tree in it");
+    assert!(quick.revision.as_str().starts_with('h'));
     let r = &g.ranges[0];
     assert_eq!((r.ahead, r.behind), (1, 1));
     assert_eq!(r.overlap, vec![RelPath::new("b.txt").unwrap()]);
@@ -355,15 +357,7 @@ async fn facts_of_a_workspace() {
     std::fs::write(t.proj().join("new.txt"), "y").unwrap();
     assert_eq!(n.git_facts(query(&w)).await.unwrap().revision, g.revision);
 
-    // what it does not answer, or will not read
-    let e = n
-        .git_facts(GitQuery {
-            fetch: true,
-            ..query(&w)
-        })
-        .await
-        .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Unsupported);
+    // what it will not read
     let e = n
         .git_facts(GitQuery {
             refs: vec!["--output=/tmp/x".into()],
@@ -497,11 +491,12 @@ async fn a_push_whose_preconditions_do_not_hold_is_refused_before_it_is_taken() 
         (e.code, e.safe_detail.as_str()),
         (ErrorCode::Stale, steve_node::git::BRANCH_MOVED)
     );
-    // another ref moved: stale as well
+    // HEAD moved off it: stale as well
     let mut a = push(&n, &w, &url, false).await;
-    sh(&t.proj(), &["tag", "v1"]);
+    sh(&t.proj(), &["checkout", "-q", "main"]);
     let e = n.git_apply(now_cmd("op_p3", a.clone())).await.unwrap_err();
     assert_eq!(e.code, ErrorCode::Stale);
+    sh(&t.proj(), &["checkout", "-q", BRANCH]);
     // the branch is gone
     a = push(&n, &w, &url, false).await;
     sh(&t.proj(), &["checkout", "-q", "main"]);
@@ -560,8 +555,10 @@ async fn a_push_whose_preconditions_do_not_hold_is_refused_before_it_is_taken() 
     let e = n
         .git_apply(now_cmd(
             "op_merge",
-            base(GitAction::Rebase {
-                onto: "main".into(),
+            base(GitAction::Merge {
+                commit: "main".into(),
+                message: None,
+                back_out_on_conflict: true,
             }),
         ))
         .await

@@ -78,11 +78,13 @@ pub struct GitQuery {
     /// Further reads, answered in [`GitFacts::reads`] in the same order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reads: Vec<GitRead>,
-    /// Leave the worktree's status out: [`GitFacts::dirty`] is then `false` without being read
-    /// (a full `git status` is the slow part of a query that only asks for refs or reads). A
-    /// Node that does not know the field reads it anyway.
+    /// Leave the working tree out: no status scan, `dirty` is false and the revision is HEAD and
+    /// the branch only (never equal to one with the tree in it). For reads that never look at the
+    /// tree, such as a preview of a commit or a branch. A Node that does not know it scans as
+    /// before (a fuller revision, never a wrong one). A full `git status` is the slow part of a query
+    /// that only asks for refs or reads.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub no_status: bool,
+    pub heads_only: bool,
 }
 
 /// A commit range: `from..to`, or everything reachable from `to` when `from` is `None`.
@@ -99,6 +101,7 @@ pub struct RevRange {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum GitRead {
     /// A file at `rev` (`rev:path`), or with no path the commit itself (message, stat and patch).
+    /// A `rev` that names no commit answers a `Blob` with `found: false`, with or without a path.
     Show {
         rev: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -118,8 +121,17 @@ pub enum GitRead {
     Fingerprint,
     /// Whether `rel` is ignored, and whether anything under it is tracked.
     TrackedIgnored { rel: RelPath },
-    /// The URL a remote is configured with (as written, not rewritten by `insteadOf`).
-    Remote { name: String },
+    /// The paths that differ between two trees or commits (`diff --name-only`), at most `max`.
+    ChangedPaths { from: String, to: String, max: u32 },
+    /// The commit on `onto` that brought `commit`'s change in: `commit` itself when it is on
+    /// `onto`, the rebased copy of its last commit, or a squash of all of its own. What the Node
+    /// has locally (fetch first).
+    Landed { commit: String, onto: String },
+    /// The tags `remote` has and the commits they point at (annotated tags peeled), as the remote
+    /// says (`ls-remote`): a network call, under the fetch deadline.
+    RemoteTags { remote: String },
+    /// The URL `remote` is configured with (`insteadOf` not applied), never with credentials.
+    RemoteUrl { remote: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -128,6 +140,10 @@ pub struct CommitInfo {
     pub subject: String,
     pub author: String,
     pub time: Timestamp,
+    /// The hash as git abbreviates it in this repository (`%h`: its length grows with the
+    /// repository and follows `core.abbrev`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub abbrev: Option<String>,
     /// The full message, for a single commit's `Show`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
@@ -144,7 +160,8 @@ pub struct StatusEntry {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum GitAnswer {
-    /// `Show` with a path. A missing file at that revision is `found: false`.
+    /// `Show` with a path: a missing file at that revision is `found: false`. Also `Show` without
+    /// a path of a revision that names no commit.
     Blob {
         found: bool,
         #[serde(with = "crate::blob::hexbytes")]
@@ -175,16 +192,41 @@ pub enum GitAnswer {
     },
     Fingerprint {
         tree: String,
+        /// The item's own change in that tree: where its branch left the default branch (the
+        /// nearest of the remote's and the local one) and the patch id of the diff from there
+        /// (`-` for none). The same change rebased keeps its patch id. `None`: no such base.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        own: Option<OwnChange>,
     },
     TrackedIgnored {
         ignored: bool,
         tracked: bool,
     },
-    /// `None`: no such remote, or one without a URL.
-    Remote {
+    ChangedPaths {
+        paths: Vec<String>,
+        truncated: bool,
+    },
+    /// `commit: None`: the change is not on `onto`.
+    Landed {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        commit: Option<String>,
+    },
+    /// `(name, commit)` pairs, in the remote's order.
+    RemoteTags {
+        tags: Vec<(String, String)>,
+    },
+    /// `None`: no such remote.
+    RemoteUrl {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         url: Option<String>,
     },
+}
+
+/// See [`GitAnswer::Fingerprint`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OwnChange {
+    pub base: String,
+    pub patch: String,
 }
 
 /// A read with its answer and the commit it was answered at: the resolved `rev` of a `Show`, the
@@ -235,9 +277,10 @@ pub struct GitFacts {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum GitAction {
-    Rebase {
-        onto: String,
-    },
+    /// Rebases the branch checked out in the workspace onto `onto`. On a conflict the Node aborts
+    /// the rebase (the worktree as before) and the operation fails with `conflict`, its detail the
+    /// conflicting paths one per line; uncommitted changes to tracked files fail it with `busy`.
+    Rebase { onto: String },
     /// Merges `commit` into HEAD. On a conflict the Node aborts the merge when
     /// `back_out_on_conflict` (the worktree as before, the answer a `conflict`), or leaves it in
     /// progress for the session to resolve.

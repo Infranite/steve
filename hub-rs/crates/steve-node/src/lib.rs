@@ -1110,10 +1110,11 @@ impl LocalNode {
         tx
     }
 
-    /// Host bridge for a Node on the Hub's own machine: where `w` is, so the Hub can judge a
-    /// permission request against the real directory. Not on the [`Node`] trait and never sent over
-    /// the transport: a remote Node has none, and the Hub then asks. `None` when the workspace is
-    /// another Node's, unknown, gone or no longer inside the roots.
+    /// Host bridge for a Node on the Hub's own machine: where `w` is, checked against the roots
+    /// now. Not on the [`Node`] trait and never sent over the transport. The Hub no longer reads it
+    /// (N0e-E11c: YOLO takes the directory from the workspace view the prepare returned); kept for
+    /// tests and host tools. `None` when the workspace is another Node's, unknown, gone or no
+    /// longer inside the roots.
     pub fn local_dir(&self, w: &WorkspaceRef) -> Option<LocalDir> {
         self.mine(w).ok()?;
         let row = self.0.j.read(|t| t.workspace(&w.id)).ok()??;
@@ -1123,6 +1124,25 @@ impl LocalNode {
             path,
             owned: !existing,
         })
+    }
+
+    /// Host bridge for a Node on the Hub's own machine: whether `path` (where the Hub's ledger
+    /// says `w` was prepared) is still `w`'s directory now. The Node's journal still has `w`, at
+    /// that same directory, and the roots check it passes when it is used holds now: an adopted
+    /// directory is still inside a read-write root. Not on the [`Node`] trait and never sent over
+    /// the transport.
+    pub fn holds(&self, w: &WorkspaceRef, path: &Path) -> bool {
+        if self.mine(w).is_err() {
+            return false;
+        }
+        let Ok(Some(row)) = self.0.j.read(|t| t.workspace(&w.id)) else {
+            return false;
+        };
+        let existing = matches!(row.kind, PrepareKind::Existing { .. });
+        let Ok(real) = workspace::still_valid(path, &self.0.roots(), existing) else {
+            return false;
+        };
+        Path::new(&row.path).canonicalize().is_ok_and(|p| p == real)
     }
 
     /// Host bridge: whether a prepare of `at` would pass the roots check now (a read-write root
@@ -1356,6 +1376,16 @@ impl LocalNode {
         Some((s.worktree_floor, free))
     }
 
+    /// The facts a decision on the workspace at `dir` is checked against (HEAD, branch, tree).
+    async fn facts_now(&self, dir: &Path) -> ApiResult<GitFacts> {
+        let commands = workspace::Commands {
+            inner: self.0.clone(),
+            op: read_op(&self.0)?,
+        };
+        let dir = dir.to_path_buf();
+        blocking(move || git::now(&commands, &dir)).await
+    }
+
     fn repo_lock(&self, repo: &Path) -> Arc<tokio::sync::Mutex<()>> {
         self.0
             .repos
@@ -1410,6 +1440,74 @@ impl LocalNode {
 }
 
 impl LocalNode {
+    /// A push ([`git`]): refused before it is accepted when its preconditions do not hold (the
+    /// remote, the branch at `expected_local`, HEAD and the revision the Hub saw), checked again
+    /// right before it runs; then a command in a throwaway repository like [`Self::exec`], with
+    /// its credential taken once. Succeeded: git took it (its facts after). Failed: git refused
+    /// it (its complaint, masked). Timed out, interrupted or unknown: it may have landed, and it
+    /// is never pushed again.
+    async fn push_apply(&self, c: Command<GitApply>) -> ApiResult<Receipt> {
+        if self.0.cfg.capacity.execs == 0 {
+            return unsupported("push");
+        }
+        git::check_push_shape(&c.body.action).map_err(|e| e.on(&c.id))?;
+        // a resend of one it has is answered by its receipt, whatever git says now
+        let known = self.0.j.read(|t| t.op(&c.id))?.is_some();
+        if !known {
+            let dir = workspace_dir(&self.0, &c.body.workspace)?;
+            let body = c.body.clone();
+            let commands = workspace::Commands {
+                inner: self.0.clone(),
+                op: read_op(&self.0)?,
+            };
+            blocking(move || git::check_push(&commands, &dir, &body))
+                .await
+                .map_err(|e| e.on(&c.id))?;
+        }
+        let w = c.body.workspace.clone();
+        let mut dir = PathBuf::new();
+        let mut counted = false;
+        let accepted = self.accept("git_apply", &c, |t| {
+            let row = t
+                .workspace(&w.id)?
+                .ok_or_else(|| ApiError::new(ErrorCode::Invalid, "no such workspace"))?;
+            Self::workspace_free(t, &row.resource)?;
+            let existing = matches!(row.kind, PrepareKind::Existing { .. });
+            dir = workspace::still_valid(Path::new(&row.path), &self.0.roots(), existing)?;
+            if self.0.execs.fetch_add(1, Ordering::SeqCst) >= self.0.cfg.capacity.execs as usize {
+                self.0.execs.fetch_sub(1, Ordering::SeqCst);
+                return Err(ApiError::new(ErrorCode::Exhausted, "no command capacity"));
+            }
+            counted = true;
+            let mut d = Decided::accepted();
+            d.workspace = Some(w.clone());
+            Ok(d)
+        });
+        let r = match accepted {
+            Ok((r, true)) => r,
+            other => {
+                if counted {
+                    self.0.execs.fetch_sub(1, Ordering::SeqCst);
+                }
+                return other.map(|(r, _)| r);
+            }
+        };
+        let me = self.clone();
+        let op = c.id.clone();
+        let apply = c.body.clone();
+        let deadline = now() + self.0.push_timeout.load(Ordering::SeqCst) as i64;
+        let spawned = self.spawn_owned(async move {
+            let state = me.push(&op, dir, apply, deadline).await;
+            me.complete(&op, state, |_| Ok(())).await;
+            me.0.execs.fetch_sub(1, Ordering::SeqCst);
+        });
+        if !spawned {
+            // shutting down: it never starts, and the restart reports it unknown
+            self.0.execs.fetch_sub(1, Ordering::SeqCst);
+        }
+        Ok(r)
+    }
+
     /// Runs an accepted push to its end ([`WorkspaceExecutor::git_apply`]).
     async fn push(
         &self,
@@ -1423,14 +1521,20 @@ impl LocalNode {
             GitAction::Push { auth, .. } => auth.clone(),
             _ => return not_run(ErrorCode::Unsupported, "not a push".into()),
         };
-        let checked = {
-            let (dir, apply) = (dir.clone(), apply.clone());
-            tokio::task::spawn_blocking(move || git::check_push(&dir, &apply)).await
+        let checked = match read_op(&self.0) {
+            Ok(op) => {
+                let commands = workspace::Commands {
+                    inner: self.0.clone(),
+                    op,
+                };
+                let (dir, apply) = (dir.clone(), apply.clone());
+                blocking(move || git::check_push(&commands, &dir, &apply)).await
+            }
+            Err(e) => Err(e),
         };
         let plan = match checked {
-            Ok(Ok(p)) => p,
-            Ok(Err(e)) => return failed(e),
-            Err(e) => return not_run(ErrorCode::Internal, e.to_string()),
+            Ok(p) => p,
+            Err(e) => return failed(e),
         };
         // taken now, under this operation, once: a resend was answered by its receipt
         let (header, mask) = match &auth {
@@ -1466,24 +1570,11 @@ impl LocalNode {
             },
             Ok(ran) => match ran.ended {
                 exec::Ended::Exited(Some(0)) => {
-                    let after = tokio::task::spawn_blocking(move || {
-                        git::facts(
-                            &dir,
-                            &GitQuery {
-                                workspace: apply.workspace,
-                                refs: vec![],
-                                ranges: vec![],
-                                fetch: false,
-                                no_status: false,
-                                reads: vec![],
-                            },
-                        )
-                    })
-                    .await;
+                    let after = self.facts_now(&dir).await;
                     Observed::Finished {
                         outcome: Outcome::Succeeded,
                         result: Some(match after {
-                            Ok(Ok(f)) => OperationResult::Git(f),
+                            Ok(f) => OperationResult::Git(f),
                             _ => OperationResult::Unit,
                         }),
                         error: None,
@@ -1576,6 +1667,13 @@ async fn deliver_loop(inner: std::sync::Weak<Inner>) {
             }
         }
     }
+}
+
+/// The id a git read runs under (its own, never an operation's).
+fn read_op(inner: &Inner) -> ApiResult<OperationId> {
+    static READS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = READS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    id(format!("git-read-{}-{n}", inner.incarnation))
 }
 
 fn unsupported<T>(what: &str) -> ApiResult<T> {
@@ -2576,78 +2674,98 @@ impl WorkspaceExecutor for LocalNode {
         Ok(r)
     }
 
-    /// Read on the spot, in the workspace as it is now ([`git::facts`]); no fetch.
+    /// The read kinds of git in a workspace (show, log, diff), its HEAD, branch and refs. Each
+    /// git runs through the workspace pipe under a read id of its own.
     async fn git_facts(&self, q: GitQuery) -> ApiResult<GitFacts> {
         self.mine(&q.workspace)?;
         let dir = workspace_dir(&self.0, &q.workspace)?;
-        tokio::task::spawn_blocking(move || git::facts(&dir, &q))
-            .await
-            .map_err(internal)?
+        let commands = workspace::Commands {
+            inner: self.0.clone(),
+            op: read_op(&self.0)?,
+        };
+        blocking(move || git::facts(&commands, &dir, &q)).await
     }
 
-    /// A push ([`git`]): refused before it is accepted when its preconditions do not hold (the
-    /// remote, the branch at `expected_local`, HEAD and the refs at what the Hub saw), checked
-    /// again right before it runs; then a command in a throwaway repository like [`Self::exec`],
-    /// with its credential taken once. Succeeded: git took it (its facts after). Failed: git
-    /// refused it (its complaint, masked). Timed out, interrupted or unknown: it may have
-    /// landed, and it is never pushed again. Rebase and merge: not on this Node yet.
+    /// A rebase, or a push ([`Self::push_apply`]); a merge is not done here yet. A rebase is
+    /// refused `stale` when the workspace's facts moved off the ones it was decided on, checked
+    /// before it is accepted and again under the repository's lock before git runs; then finished
+    /// with the new facts, or failed: a conflict backed out (`conflict`, the paths), uncommitted
+    /// tracked changes (`busy`), or what git said.
     async fn git_apply(&self, c: Command<GitApply>) -> ApiResult<Receipt> {
         self.mine(&c.body.workspace)?;
-        if self.0.cfg.capacity.execs == 0 {
-            return unsupported("push");
+        if matches!(c.body.action, GitAction::Push { .. }) {
+            return self.push_apply(c).await;
         }
-        git::check_push_shape(&c.body.action).map_err(|e| e.on(&c.id))?;
-        // a resend of one it has is answered by its receipt, whatever git says now
-        let known = self.0.j.read(|t| t.op(&c.id))?.is_some();
-        if !known {
-            let dir = workspace_dir(&self.0, &c.body.workspace)?;
-            let body = c.body.clone();
-            tokio::task::spawn_blocking(move || git::check_push(&dir, &body))
-                .await
-                .map_err(internal)?
-                .map_err(|e| e.on(&c.id))?;
-        }
+        let GitAction::Rebase { onto } = c.body.action.clone() else {
+            return unsupported("git merge");
+        };
         let w = c.body.workspace.clone();
-        let mut dir = PathBuf::new();
-        let mut counted = false;
-        let accepted = self.accept("git_apply", &c, |t| {
-            let row = t
-                .workspace(&w.id)?
-                .ok_or_else(|| ApiError::new(ErrorCode::Invalid, "no such workspace"))?;
-            Self::workspace_free(t, &row.resource)?;
-            let existing = matches!(row.kind, PrepareKind::Existing { .. });
-            dir = workspace::still_valid(Path::new(&row.path), &self.0.roots(), existing)?;
-            if self.0.execs.fetch_add(1, Ordering::SeqCst) >= self.0.cfg.capacity.execs as usize {
-                self.0.execs.fetch_sub(1, Ordering::SeqCst);
-                return Err(ApiError::new(ErrorCode::Exhausted, "no command capacity"));
+        let known = self.0.j.read(|t| t.op(&c.id))?.is_some();
+        let dir = workspace_dir(&self.0, &w)?;
+        let row = self
+            .0
+            .j
+            .read(|t| t.workspace(&w.id))?
+            .ok_or_else(|| ApiError::new(ErrorCode::Invalid, "no such workspace"))?;
+        if !known {
+            let now = self.facts_now(&dir).await?;
+            if now.revision != c.body.expected || now.head != c.body.expected_head {
+                return Err(ApiError::new(ErrorCode::Stale, "changed since").on(&c.id));
             }
-            counted = true;
+        }
+        let resource = row.resource.clone();
+        let (r, fresh) = self.accept("git_apply", &c, |t| {
+            Self::workspace_free(t, &resource)?;
             let mut d = Decided::accepted();
             d.workspace = Some(w.clone());
             Ok(d)
-        });
-        let r = match accepted {
-            Ok((r, true)) => r,
-            other => {
-                if counted {
-                    self.0.execs.fetch_sub(1, Ordering::SeqCst);
-                }
-                return other.map(|(r, _)| r);
-            }
-        };
+        })?;
+        if !fresh {
+            return Ok(r);
+        }
         let me = self.clone();
         let op = c.id.clone();
-        let apply = c.body.clone();
-        let deadline = now() + self.0.push_timeout.load(Ordering::SeqCst) as i64;
-        let spawned = self.spawn_owned(async move {
-            let state = me.push(&op, dir, apply, deadline).await;
+        let (expected, expected_head) = (c.body.expected.clone(), c.body.expected_head.clone());
+        self.spawn_owned(async move {
+            let lock = me.repo_lock(Path::new(row.repo.as_deref().unwrap_or(&row.path)));
+            let _g = lock.lock().await;
+            let commands = workspace::Commands {
+                inner: me.0.clone(),
+                op: op.clone(),
+            };
+            let d = dir.clone();
+            let done = tokio::task::spawn_blocking(move || {
+                git::rebase(&commands, &d, &onto, &expected, &expected_head)
+            })
+            .await
+            .map_err(internal)
+            .and_then(|r| r);
+            if me
+                .0
+                .j
+                .read(|t| t.proc_of(&workspace::control_session(&op)))
+                .map_or(true, |p| p.is_some())
+            {
+                return me
+                    .complete(
+                        &op,
+                        Observed::Unknown {
+                            reason: "git process not confirmed stopped".into(),
+                        },
+                        |_| Ok(()),
+                    )
+                    .await;
+            }
+            let state = match done {
+                Ok(facts) => Observed::Finished {
+                    outcome: Outcome::Succeeded,
+                    result: Some(OperationResult::Git(facts)),
+                    error: None,
+                },
+                Err(e) => failed(e),
+            };
             me.complete(&op, state, |_| Ok(())).await;
-            me.0.execs.fetch_sub(1, Ordering::SeqCst);
         });
-        if !spawned {
-            // shutting down: it never starts, and the restart reports it unknown
-            self.0.execs.fetch_sub(1, Ordering::SeqCst);
-        }
         Ok(r)
     }
     /// Accepted now (the workspace still valid, a command slot free); finished once the command
