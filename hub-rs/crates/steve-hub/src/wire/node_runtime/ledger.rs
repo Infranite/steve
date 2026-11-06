@@ -16,8 +16,8 @@ use serde::Serialize;
 /// The methods that go through the ledger.
 pub(super) const LEDGER_METHODS: [&str; 2] = ["exec", "git_apply"];
 
-/// What a ledger operation may be for.
-const SUBJECTS: [&str; 4] = ["flow_run:", "vault_use:", "push:", "lane:"];
+/// What a ledger operation may be for (`release:<item>`: the rebase before an item's release).
+const SUBJECTS: [&str; 5] = ["flow_run:", "vault_use:", "push:", "lane:", "release:"];
 
 fn valid_subject(s: &str) -> bool {
     SUBJECTS
@@ -182,10 +182,16 @@ mod tests {
 
     #[test]
     fn subjects_name_what_the_operation_is_for() {
-        for s in ["flow_run:r1", "vault_use:u1", "push:i1", "lane:l1:u2"] {
+        for s in [
+            "flow_run:r1",
+            "vault_use:u1",
+            "push:i1",
+            "lane:l1:u2",
+            "release:i1",
+        ] {
             assert!(valid_subject(s), "{s}");
         }
-        for s in ["", "flow_run:", "push", "other:x", "session:s1"] {
+        for s in ["", "flow_run:", "push", "other:x", "session:s1", "release:"] {
             assert!(!valid_subject(s), "{s}");
         }
     }

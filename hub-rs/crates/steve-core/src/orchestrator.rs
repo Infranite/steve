@@ -162,6 +162,7 @@ pub enum Forked {
 }
 
 /// Where a decision's follow-up message goes (the `send` closures of orchestrator.ts).
+#[derive(Clone)]
 pub(crate) enum To {
     /// The decision's session, or a new session of its item; superseding stale cards first.
     Decision {
@@ -337,10 +338,17 @@ impl Core {
         checks: &[Check],
         unfinished: &[String],
     ) -> Result<()> {
+        /* an item on a Node: the result is frozen on what its Node says now */
+        if let Some(item) = &s.item_id {
+            self.git_before(item);
+        }
         self.tx()
             .tool_deliver(s, summary, outputs, checks, unfinished)
     }
     pub fn tool_publish(&self, s: &Session, branch: &str, summary: &str) -> Result<()> {
+        if let Some(item) = &s.item_id {
+            self.git_before(item);
+        }
         self.tx().tool_publish(s, branch, summary)
     }
 
@@ -356,6 +364,15 @@ impl Core {
         self.tx().rm_dep(item, dep)
     }
     pub fn resolve(&self, id: &str, choice: &str, text: &str, actor: &str) -> Result<Decision> {
+        /* an acceptance (or a release, or a failure's choice) decides on an item's result: on a
+         * Node, on what its Node says now */
+        if self.node_git().is_some()
+            && let Ok(Some(d)) = self.store().decision(id)
+            && matches!(d.kind.as_str(), "accept" | "approve" | "fail")
+            && let Some(item) = &d.item_id
+        {
+            self.git_before(item);
+        }
         self.tx().resolve(id, choice, text, actor)
     }
     pub fn undo_decision(&self, id: &str, actor: &str) -> Result<Decision> {

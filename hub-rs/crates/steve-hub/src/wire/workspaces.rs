@@ -12,6 +12,9 @@
 //! ([`Workspaces::refresh_roots`]), so a new project needs no restart (only configured roots,
 //! D11: no "anywhere under ~").
 //!
+//! An item's git (the closing gate, the release, the completion probe) is read in its bound
+//! workspace through [`super::item_git::ItemGit`] (N0e-E11b).
+//!
 //! Workspace operations that change things go through the ledger
 //! ([`super::node_runtime::NodeRuntime::submit`]) of [`Placement::runtime`].
 
@@ -228,6 +231,33 @@ impl Workspaces {
         let roots = self.local_roots()?;
         let at = within(&roots, path).ok_or(PlacementError::Outside)?;
         self.on(HUB_DEVICE, At::Root(at), "")
+    }
+
+    /// Whether an item's git is in a workspace on a Node: its latest session is bound to one, on
+    /// the local Node while it is on here or on a paired remote Node (reachable or not). A store
+    /// read only.
+    pub fn item_on_node(&self, item: &str) -> bool {
+        let bound = self.store.reader(|c| {
+            let latest: Option<String> = c
+                .query_row(
+                    "SELECT s.id FROM sessions s JOIN runtime_sessions r ON r.session_id=s.id
+                      WHERE s.item_id=? ORDER BY s.created DESC, s.rowid DESC LIMIT 1",
+                    [item],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            match latest {
+                Some(s) => bound_in(c, &s),
+                None => Ok(None),
+            }
+        });
+        match bound {
+            Ok(Some(Place::Bound(node, _))) => {
+                self.is_local(&node)
+                    || (node != HUB_DEVICE && node != "local" && self.fleet.is_some())
+            }
+            _ => false,
+        }
     }
 
     /// Whether `p` is on the local Node (the Hub's own machine).
@@ -656,6 +686,111 @@ mod tests {
             off.placement_of(Subject::Project("p1")),
             Err(PlacementError::LocalOff)
         ));
+    }
+
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let o = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "git {args:?}");
+        String::from_utf8_lossy(&o.stdout).trim().to_string()
+    }
+
+    /// N0e-E11b: an item's git is on its Node once a session of it is bound there; its facts are
+    /// read and a rebase applied in that workspace, the rebase through the ledger.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_items_git_is_read_and_rebased_on_its_node_once_bound() {
+        use steve_core::node_git::{Applied, Ask, NodeGit};
+        let t = local(false);
+        let cwd = t.dir.path().join("wt");
+        std::fs::create_dir_all(&cwd).unwrap();
+        for a in [
+            &["init", "-q", "-b", "main"][..],
+            &["config", "user.name", "t"],
+            &["config", "user.email", "t@example.com"],
+            &["commit", "-q", "--allow-empty", "-m", "a"],
+            &["checkout", "-q", "-b", "steve/i1"],
+            &["commit", "-q", "--allow-empty", "-m", "b"],
+            &["checkout", "-q", "main"],
+            &["commit", "-q", "--allow-empty", "-m", "c"],
+            &["checkout", "-q", "steve/i1"],
+        ] {
+            git(&cwd, a);
+        }
+        exec(
+            &t.store,
+            &format!(
+                "INSERT INTO items(id,workspace_id,no,title,status,stage,cwd,created,updated) VALUES ('i1','default',1,'t','run','执行','{c}',1,1);
+                 INSERT INTO sessions(id,workspace_id,item_id,harness,cwd,status,created,updated) VALUES ('s1','default','i1','claude-code','{c}','active',1,1);",
+                c = cwd.display(),
+            ),
+        );
+        t.ws.refresh_roots().unwrap();
+        let g = super::super::item_git::ItemGit::new(t.ws.clone());
+        // a legacy cwd: the Hub's own git, as before
+        assert!(!g.on_node("i1"));
+        let at = root_of(&t.ws.placement_of(Subject::Item("i1")).unwrap());
+        let r = prepare(&t.node, "op_i1", at).await.unwrap();
+        let w = loop {
+            match t.node.operation(r.operation.clone()).await.unwrap().state {
+                Observed::Finished {
+                    result: Some(OperationResult::Workspace(v)),
+                    ..
+                } => break v.workspace,
+                _ => tokio::time::sleep(Duration::from_millis(10)).await,
+            }
+        };
+        exec(
+            &t.store,
+            &format!(
+                "INSERT INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,updated) VALUES ('s1','local','{}','s1','r','ready',0);",
+                serde_json::to_string(&w).unwrap()
+            ),
+        );
+        assert!(g.on_node("i1"));
+        let f = g
+            .facts(
+                "i1",
+                Ask {
+                    reads: vec![GitRead::IsAncestor {
+                        ancestor: "main".into(),
+                        of: "HEAD".into(),
+                    }],
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(f.branch.as_deref(), Some("steve/i1"));
+        assert_eq!(f.reads[0].answer, GitAnswer::IsAncestor { yes: false });
+        let rt = t.ws.placement_of(Subject::Item("i1")).unwrap().runtime;
+        t.node.connect(
+            Arc::new(super::super::node_runtime::Sink(Arc::downgrade(&rt))),
+            None,
+        );
+        rt.start();
+        let rebase = || GitAction::Rebase {
+            onto: "main".into(),
+        };
+        let done = g.apply("i1", "rebase-d1", "release:i1", &f, rebase()).await;
+        let Applied::Done(after) = done else {
+            panic!("not rebased: {done:?}")
+        };
+        assert_eq!(git(&cwd, &["rev-parse", "HEAD"]), after.head);
+        git(&cwd, &["merge-base", "--is-ancestor", "main", "HEAD"]);
+        // on facts that moved since: refused, nothing done
+        let again = g.apply("i1", "rebase-d2", "release:i1", &f, rebase()).await;
+        let Applied::Failed(e) = again else {
+            panic!("applied on old facts: {again:?}")
+        };
+        assert_eq!(e.code, ErrorCode::Stale);
+        assert_eq!(git(&cwd, &["rev-parse", "HEAD"]), after.head);
+        // the local Node off: the Hub's own git again
+        let off = Workspaces::new(t.store.clone(), None, None, vec![]);
+        assert!(!super::super::item_git::ItemGit::new(off).on_node("i1"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

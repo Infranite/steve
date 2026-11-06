@@ -94,8 +94,9 @@ fn head_of(cwd: &str) -> Option<String> {
 impl Tx<'_> {
     /// The project's completion rule for this item, when it has one and works in a git worktree.
     pub(crate) fn done_rule(&self, i: &Item) -> Result<Option<String>> {
+        /* a worktree on a Node is looked at there, never on the Hub's disk */
         if i.branch.as_deref().is_none_or(str::is_empty)
-            || i.cwd.as_deref().is_none_or(|c| !Path::new(c).is_dir())
+            || (!self.git_on_node(&i.id) && i.cwd.as_deref().is_none_or(|c| !Path::new(c).is_dir()))
         {
             return Ok(None);
         }
@@ -251,11 +252,22 @@ impl Tx<'_> {
     /// time); the result comes back through [`Tx::probed`].
     /// `false` when it can't look (no worktree, no `HEAD`); `true` also when a look already runs.
     pub(crate) fn probe_async(&mut self, i: &Item, rule: &str, why: Probing) -> bool {
-        let Some(cwd) = i.cwd.clone() else {
-            return false;
+        let node = match self.c.node_git() {
+            Some(g) if g.on_node(&i.id) => Some(g),
+            _ => None,
         };
-        let Some(head) = head_of(&cwd) else {
-            return false;
+        /* on a Node its `HEAD` is read there with the rest, off the lock */
+        let (cwd, head) = match &node {
+            Some(_) => (String::new(), String::new()),
+            None => {
+                let Some(cwd) = i.cwd.clone() else {
+                    return false;
+                };
+                let Some(head) = head_of(&cwd) else {
+                    return false;
+                };
+                (cwd, head)
+            }
         };
         /* one look at a time: the stop or the wait it was for is still the same one */
         let t = now();
@@ -269,6 +281,18 @@ impl Tx<'_> {
         }
         self.st.probing.insert(i.id.clone(), t);
         let (core, item, rule) = (self.c.clone(), i.id.clone(), rule.to_string());
+        if let Some(g) = node {
+            detach(move || {
+                let (head, p) = crate::node_git::probe_now(&*g, &item, &rule);
+                if let Err(e) = core
+                    .tx()
+                    .probed(&item, &rule, head.unwrap_or_default(), p, why)
+                {
+                    tracing::warn!(item, "completion probe: {e}");
+                }
+            });
+            return true;
+        }
         detach(move || {
             let p = crate::upstream::probe(Path::new(&cwd), &rule);
             if let Err(e) = core.tx().probed(&item, &rule, head, p, why) {
@@ -334,6 +358,18 @@ impl Tx<'_> {
 
     /// The probe of this item's current `HEAD`, when it is fresh.
     fn fresh_probe(&self, i: &Item) -> Option<Probe> {
+        if self.git_on_node(&i.id) {
+            /* the `HEAD` it looked at, unless its Node said another one since (a look that could
+             * read none stands for its time only) */
+            let seen = self.git_seen(&i.id).map(|s| s.head.clone());
+            return self
+                .st
+                .probed
+                .get(&i.id)
+                .filter(|p| p.head.is_empty() || seen.is_none_or(|h| h == p.head))
+                .filter(|p| now() - p.at < PROBE_FRESH_MS)
+                .map(|p| p.probe.clone());
+        }
         let head = head_of(i.cwd.as_deref()?)?;
         self.st
             .probed

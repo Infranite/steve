@@ -9,6 +9,7 @@ pub mod acp_stats;
 pub mod auth;
 pub mod chan;
 pub mod core;
+pub mod item_git;
 pub mod mcp;
 pub mod mcp_extra;
 pub mod modules;
@@ -405,6 +406,10 @@ pub fn wire_with(cfg: &Arc<Config>, bus: &Bus, vars: Vars) -> Result<Wired, Back
         core_cfg,
     );
     let _ = host.core.set(core.clone());
+    /* an item bound to a Node has its git read there (N0e-E11b); without any Node, nothing changes */
+    if node_host.is_some() || fleet.is_some() {
+        core.set_node_git(Arc::new(item_git::ItemGit::new(workspaces.clone())));
+    }
     /* inline research (thread-routing R2): read-only claude runs; each run's models come from
     设置 · 模型 (default STEVE_MODELS_RESEARCH) with the request */
     let mut research = steve_research::ResearchConfig::new(

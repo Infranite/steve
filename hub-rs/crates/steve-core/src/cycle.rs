@@ -69,6 +69,10 @@ pub struct Closing {
     /// The worktree's `HEAD` and changes when the result was frozen; `None` without a git worktree.
     #[serde(default)]
     pub fingerprint: Option<String>,
+    /// The worktree is on a Node and its fingerprint was not there yet when the result was frozen:
+    /// it is taken when its facts come (`node_git`), and nothing closes before.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub print_pending: bool,
     /// `human` | `automatic` | `waived` (completion); empty for cancel / fail.
     #[serde(default)]
     pub policy: String,
@@ -345,13 +349,23 @@ impl Tx<'_> {
         }
         let i = self.item(item_id)?;
         let rev = i.revision + 1;
+        /* on a Node: the facts gathered for this delivery, or taken once they come */
+        let (print, print_pending) = if self.git_on_node(&i.id) {
+            match self.git_take(&i) {
+                Some(Ok(seen)) => (seen.map(|s| s.print), false),
+                _ => (None, true),
+            }
+        } else {
+            (fingerprint(i.cwd.as_deref()), false)
+        };
         let c = Closing {
             kind: COMPLETE.into(),
             reason: reason.into(),
             by: by.into(),
             at: crate::util::now(),
             frozen_revision: rev,
-            fingerprint: fingerprint(i.cwd.as_deref()),
+            fingerprint: print,
+            print_pending,
             policy: policy.as_str().into(),
             accepted,
             decision,
@@ -608,6 +622,7 @@ impl Tx<'_> {
             at: crate::util::now(),
             frozen_revision: i.revision,
             fingerprint: None,
+            print_pending: false,
             policy: String::new(),
             accepted: true,
             decision: None,
@@ -714,7 +729,12 @@ impl Tx<'_> {
 
     /// What still holds the item's closing.
     pub(crate) fn lc_gate(&self, i: &Item, c: &Closing) -> Result<Gate> {
-        let now = looks_at_worktree(i, c).then(|| fingerprint(i.cwd.as_deref()));
+        let now = match looks_at_worktree(i, c) {
+            false => None,
+            /* on a Node: what it said last, or the worktree left out */
+            true if self.git_on_node(&i.id) => self.git_seen(&i.id).map(|s| Some(s.print.clone())),
+            true => Some(fingerprint(i.cwd.as_deref())),
+        };
         self.lc_gate_at(i, c, now.as_ref().map(Option::as_deref))
     }
 
@@ -783,25 +803,69 @@ impl Tx<'_> {
         if i.phase != CLOSING {
             return Ok(i.phase == CLOSED);
         }
-        let Some(c) = closing_of(&i) else {
+        let Some(mut c) = closing_of(&i) else {
             return Ok(false);
         };
+        /* on a Node the worktree's facts are gathered off the lock: until they are here (or while
+         * its Node can't be reached) nothing is decided on them, the closing holds. Only when the
+         * gate uses them: a frozen result to compare, one to freeze, an accepted one to release */
+        let node = c.kind == COMPLETE
+            && (c.print_pending || c.accepted || looks_at_worktree(&i, &c))
+            && self.git_on_node(item_id);
+        /* `Some(None)`: its Node says there is no git checkout */
+        let seen = match node {
+            true => match self.git_take(&i) {
+                Some(Ok(seen)) => Some(seen),
+                Some(Err(e)) => {
+                    tracing::debug!(item = item_id, "closing check waits for its Node: {e}");
+                    return Ok(false);
+                }
+                None => return Ok(false),
+            },
+            false => None,
+        };
+        let print = seen.as_ref().map(|s| s.as_ref().map(|s| s.print.clone()));
+        if let Some(p) = &print
+            && c.print_pending
+            && c.frozen_revision == i.revision
+        {
+            /* the result frozen before its facts came: they are what was frozen */
+            c.fingerprint = p.clone();
+            c.print_pending = false;
+            let mut w = Self::base(&i);
+            w.closing = Some(serde_json::to_value(&c)?);
+            self.db()
+                .store()
+                .transaction(|tx| steve_store::lifecycle_write_in(tx, item_id, &w))?;
+        }
         if c.kind == COMPLETE && c.accepted {
             self.lc_accepted(item_id)?;
         }
         /* the worktree is fingerprinted once (it runs `git add --all` over all of it), for the gate and
          * for saying what moved */
-        let now = looks_at_worktree(&i, &c).then(|| fingerprint(i.cwd.as_deref()));
+        let now = match looks_at_worktree(&i, &c) {
+            false => None,
+            true if node => print.clone(),
+            true => Some(fingerprint(i.cwd.as_deref())),
+        };
         let g = self.lc_gate_at(&i, &c, now.as_ref().map(Option::as_deref))?;
         if g.changed && !g.turn {
             /* the frozen result moved after it was frozen (and nothing is still at work on it): say what
              * moved, and tell the agent, which may well believe its delivery still stands */
             let now = match now {
                 Some(n) => n,
+                None if node => print.clone().flatten(),
                 None if c.fingerprint.is_some() => fingerprint(i.cwd.as_deref()),
                 None => None,
             };
+            let moved = seen
+                .as_ref()
+                .and_then(|s| s.as_ref())
+                .and_then(|s| s.moved.clone());
             let what = match (&c.fingerprint, now) {
+                (Some(f), Some(n)) if node => {
+                    moved.unwrap_or_else(|| crate::upstream::describe_with(f, &n, |_, _| vec![]))
+                }
                 (Some(f), Some(n)) => crate::upstream::describe_change(
                     Path::new(i.cwd.as_deref().unwrap_or("")),
                     f,
