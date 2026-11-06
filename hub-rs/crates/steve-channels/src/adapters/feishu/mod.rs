@@ -14,7 +14,8 @@
 //! - [`user_oauth`], [`as_user`]: you — your Feishu account on “我”, sending as you (F6);
 //! - [`self_poll`]: you — your chats read with your user token about once a minute (F8);
 //! - [`profiles`]: names of people behind ids, through you first, then the bot;
-//! - [`runtime`]: long connections and self pollers started / stopped as connections change.
+//! - [`hooks`]: the long connection and the self poller of each connection, run by the connection
+//!   runtime ([`crate::lifecycle`]) as connections change.
 
 pub mod app_registration;
 pub mod as_user;
@@ -24,12 +25,12 @@ pub mod chats;
 pub mod client;
 pub mod crypto;
 pub mod directory;
+pub mod hooks;
 pub mod inbound;
 pub mod pbbp2;
 pub mod profiles;
 pub mod ratelimit;
 pub mod resource;
-pub mod runtime;
 pub mod self_poll;
 pub mod send;
 pub mod user_oauth;
@@ -41,7 +42,7 @@ pub use auth::{DeviceFlows, FeishuApp, FeishuUser, device_routes};
 pub use chats::{BotChat, parse_chat_event, sync_bot_chats};
 pub use client::{Domain, FeishuClient, FeishuEnv, FeishuError, TokenSource, VerifyTokens};
 pub use directory::FeishuDirectory;
-pub use runtime::{ConnectionHook, FeishuRuntime, Reaction};
+pub use hooks::{BotHook, SelfPollHook};
 pub use self_poll::{RoundReport, SelfPoller, SelfPollers};
 pub use send::{Sent, at_handle, reply_in_thread};
 pub use user_oauth::{FeishuIds, SelfClaims, identify_sender, user_routes};

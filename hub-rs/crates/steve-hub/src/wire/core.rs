@@ -1185,6 +1185,8 @@ pub struct CoreDomain {
     /// The local Node (`STEVE_NODE_MODE=local`, the default): stopped with the Hub, its harnesses
     /// with it.
     pub node: Option<Arc<steve_node::LocalNode>>,
+    /// The connections' runs (long connections, pollers): stopped with the Hub.
+    pub lifecycle: Option<steve_channels::lifecycle::ConnectionRuntime>,
 }
 
 /// How long the Hub's shutdown waits for the local Node to stop its harnesses.
@@ -1287,8 +1289,16 @@ impl Domain for CoreDomain {
                 None => true,
             }
         };
-        let (research_stopped, node_stopped) =
-            tokio::join!(self.core.shutdown_research(Duration::from_secs(5)), node,);
+        let lifecycle = async {
+            if let Some(rt) = &self.lifecycle {
+                rt.shutdown().await;
+            }
+        };
+        let (research_stopped, node_stopped, ()) = tokio::join!(
+            self.core.shutdown_research(Duration::from_secs(5)),
+            node,
+            lifecycle,
+        );
         if !research_stopped {
             tracing::error!("research process groups did not confirm shutdown before deadline");
         }

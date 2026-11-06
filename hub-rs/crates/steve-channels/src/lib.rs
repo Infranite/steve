@@ -84,9 +84,14 @@
 //! // long connections + self pollers, started at boot and whenever a connection changes
 //! // (connected, re-authorized, resumed → start, plus sync_bot_chats for a bot; paused, reauth,
 //! // disconnected → stop). No hook in Connections is needed: it publishes `connection` events.
-//! let rt = steve_channels::adapters::feishu::FeishuRuntime::new(channels.clone(), Some(feishu_user.clone()));
-//! rt.start_all().await;
-//! rt.spawn_watch(bus.tap(&["connection"]));
+//! use steve_channels::adapters::feishu::{BotHook, SelfPollHook};
+//! let events = bus.tap(&["connection"]);                              // tapped before listing
+//! let rt = steve_channels::lifecycle::ConnectionRuntime::builder(channels.clone())
+//!     .hook("feishu_app", Some(bot_decl), Arc::new(BotHook::new(channels.clone())))
+//!     .hook("feishu_user", Some(user_decl), Arc::new(SelfPollHook::new(channels.clone(), feishu_user.clone())))
+//!     .build();
+//! rt.start(events);
+//! // at shutdown: rt.shutdown().await
 //! ```
 
 steve_i18n::init!();
@@ -111,6 +116,7 @@ pub mod ext;
 pub mod fake;
 pub mod flow_actions;
 pub mod inbound;
+pub mod lifecycle;
 pub mod media;
 pub mod media_agent;
 pub mod members;
@@ -120,6 +126,7 @@ pub mod names;
 pub mod outbound;
 pub mod personas;
 mod personas_api;
+pub mod queries;
 pub mod reactions;
 pub mod replies;
 pub mod respond;
@@ -132,9 +139,9 @@ pub mod spaces;
 pub mod usage;
 
 pub use channel::{
-    ChannelAdapter, ChannelFeatures, HandleRef, InboundMessage, MemberInfo, Mention, OutContent,
-    Profile, ProfileAdapter, ProfileAnswer, ProfileQuery, PushOutcome, ReactionKind, SendTarget,
-    Sender, SpaceEvent, SpaceInfo, SpaceKind, TenantInfo,
+    ChannelAdapter, ChannelFeatures, HandleRef, InboundMessage, MemberInfo, Mention, MessageRef,
+    OutContent, Profile, ProfileAdapter, ProfileAnswer, ProfileQuery, PushOutcome, ReactionKind,
+    SendTarget, Sender, SpaceEvent, SpaceInfo, SpaceKind, TenantInfo,
 };
 pub use deliver::{Auth, Delivered, DraftOnly, OutRequest, OutTarget, Outbound};
 pub use disclosure::Disclosure;

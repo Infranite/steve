@@ -826,9 +826,14 @@ fn bot_spaces(c: &rusqlite::Connection, ws: &str) -> ChannelResult<HashSet<Strin
 
 /// The bot's recorded permission check says it receives every group message (`im:message.group_msg`).
 fn all_group_messages(config: &str) -> bool {
-    serde_json::from_str::<Value>(config)
-        .ok()
-        .and_then(|v| v.get("permissions").and_then(Value::as_array).cloned())
+    serde_json::from_str::<Value>(config).is_ok_and(|v| receives_all_groups(&v))
+}
+
+/// [`all_group_messages`] of a parsed bot `config`.
+pub(crate) fn receives_all_groups(config: &Value) -> bool {
+    config
+        .get("permissions")
+        .and_then(Value::as_array)
         .is_some_and(|ps| {
             ps.iter().any(|p| {
                 p.get("scope").and_then(Value::as_str) == Some("im:message.group_msg")

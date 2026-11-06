@@ -4,7 +4,8 @@
 //! holds it, one entry per line:
 //!
 //! - `provider <id> <adapter as GET /connections/adapters lists it>`, `channel <id>`,
-//!   `profiles <id>`, `as_user <id>`, `mail <id>`, `event_source <id>`, `jobs <n>`;
+//!   `profiles <id>`, `as_user <id>`, `mail <id>`, `event_source <id>`, `lifecycle <adapter>` (a
+//!   connection hook), `jobs <n>`;
 //! - `api <METHOD> <path>` and `root <METHOD> <path>`, path parameters written as `x`.
 //!
 //! The paths tried are every `.route("…")` literal and `/…` string constant in the workspace
@@ -139,6 +140,12 @@ fn registrations(w: &steve_hub::wire::Wired) -> BTreeSet<String> {
             .iter()
             .map(|a| format!("event_source {}", a.id())),
     );
+    out.extend(
+        w.lifecycle
+            .iter()
+            .flat_map(|rt| rt.adapters())
+            .map(|a| format!("lifecycle {a}")),
+    );
     out.insert(format!("jobs {}", w.jobs.len()));
     out
 }
@@ -245,6 +252,51 @@ async fn the_built_in_wiring_matches_the_snapshot() {
 
 use steve_hub::Assembly;
 use steve_hub::extension::{Declare, EXTENSION_API, Extension, ExtensionError, Mounted, Started};
+use steve_modules::accounts::connections::{
+    AccountInfo, AuthKind, ConnCx, ConnectionProvider, Pairing, ProviderError,
+};
+
+/// A provider whose connections need a pair of `probe_bot`, which nobody registers.
+struct NeedsPair;
+
+#[async_trait::async_trait]
+impl ConnectionProvider for NeedsPair {
+    fn id(&self) -> &str {
+        "probe_self"
+    }
+    fn system(&self) -> &str {
+        "probe"
+    }
+    fn name(&self) -> &str {
+        "probe"
+    }
+    fn caps(&self) -> &[&'static str] {
+        &["msg.receive"]
+    }
+    fn auth(&self) -> AuthKind {
+        AuthKind::Credential
+    }
+    fn pairing(&self) -> Option<Pairing> {
+        Some(Pairing {
+            with: vec!["probe_bot".into()],
+            required: true,
+        })
+    }
+    async fn verify(&self, _cx: &ConnCx) -> Result<AccountInfo, ProviderError> {
+        Err(ProviderError::Unsupported)
+    }
+}
+
+/// A connection hook that waits to be stopped.
+struct Idle;
+
+#[async_trait::async_trait]
+impl steve_channels::ext::ConnectionHook for Idle {
+    async fn run(&self, run: steve_channels::ext::ConnRun) -> Result<(), steve_flow::AdapterError> {
+        run.stop.cancelled().await;
+        Ok(())
+    }
+}
 
 /// A test extension: what it declares and mounts is chosen per test.
 #[derive(Default)]
@@ -259,6 +311,10 @@ struct Probe {
     stray_source: bool,
     /// `GET /hello` among its routes, and one job.
     hello: bool,
+    /// Connection hooks for these adapters.
+    hooks: Vec<&'static str>,
+    /// Registers [`NeedsPair`].
+    needs_pair: bool,
 }
 
 impl Extension for Probe {
@@ -277,6 +333,9 @@ impl Extension for Probe {
             use steve_channels::ext::{ChannelDecl, ChannelSide};
             d.channel(ChannelSide::new(ChannelDecl::new("probe_self"), pat))?;
         }
+        if self.needs_pair {
+            d.provider(Arc::new(NeedsPair))?;
+        }
         if self.stray_source {
             let src = steve_hub::wire::signals::GithubSource(Arc::new(steve_github::GitHubApp));
             d.event_source(Arc::new(src))?;
@@ -286,8 +345,12 @@ impl Extension for Probe {
     fn start(&self, _: &Started) -> Result<Mounted, ExtensionError> {
         let mut m = Mounted::default();
         if self.hello {
-            m.api_routes = Router::new().route("/hello", axum::routing::get(|| async { "hi" }));
-            m.jobs.push(Box::pin(async {}));
+            m = m
+                .routes(Router::new().route("/hello", axum::routing::get(|| async { "hi" })))
+                .job(Box::pin(async {}));
+        }
+        for a in &self.hooks {
+            m = m.lifecycle(a, Arc::new(Idle));
         }
         Ok(m)
     }
@@ -327,13 +390,20 @@ fn builtin_ids_and_without() {
 }
 
 #[tokio::test]
-async fn feishu_self_is_refused_without_feishu_bot() {
+async fn feishu_self_wires_without_feishu_bot() {
+    // you on Feishu runs its own self poller; the bot is an optional pair
+    let h = home();
     let asm = Assembly::builtin().without("feishu.bot").expect("known id");
-    let e = wire_err(asm);
-    assert!(
-        e.contains("extension feishu.self: needs feishu.bot in the assembly"),
-        "{e}"
+    let w =
+        steve_hub::wire::wire_assembly(&h.cfg, &Bus::new(), h.vars.clone(), &asm).expect("wire");
+    assert_eq!(
+        w.seams.channels.connections().provider_ids(),
+        ["feishu_user", "github_app", "github_pat", "imap"]
     );
+    let rt = w.lifecycle.as_ref().expect("a connection runtime");
+    assert_eq!(rt.adapters(), ["feishu_user"]);
+    // the base 12 and the connection runtime
+    assert_eq!(w.jobs.len(), 13);
     // without both, the rest still wires
     let h = home();
     let asm = Assembly::builtin()
@@ -352,7 +422,7 @@ async fn conflicts_are_refused_at_startup_with_the_extension_id() {
         ..probe("probe")
     }));
     assert!(
-        e.contains("extension probe: built for extension API 2, this Hub has 1"),
+        e.contains("extension probe: built for extension API 3, this Hub has 2"),
         "{e}"
     );
     let e = wire_err(Assembly::empty().with(probe("Probe/1")));
@@ -381,6 +451,51 @@ async fn conflicts_are_refused_at_startup_with_the_extension_id() {
         e.contains("extension probe: event source github_app without a registered adapter"),
         "{e}"
     );
+    // connection hooks: only for an adapter it registered, one per adapter
+    let e = wire_err(Assembly::builtin().with(Probe {
+        hooks: vec!["feishu_app"],
+        ..probe("probe")
+    }));
+    assert!(
+        e.contains(
+            "extension probe: a connection hook for adapter feishu_app, which it did not register"
+        ),
+        "{e}"
+    );
+    let e = wire_err(Assembly::empty().with(Probe {
+        github_pat: true,
+        hooks: vec!["github_pat", "github_pat"],
+        ..probe("probe")
+    }));
+    assert!(
+        e.contains("extension probe: a second connection hook for adapter github_pat"),
+        "{e}"
+    );
+    // a required pair nobody can provide
+    let e = wire_err(Assembly::empty().with(Probe {
+        needs_pair: true,
+        ..probe("probe")
+    }));
+    assert!(
+        e.contains("extension probe: adapter probe_self needs one of probe_bot in the assembly"),
+        "{e}"
+    );
+}
+
+#[tokio::test]
+async fn an_extension_runs_its_own_connection_hook() {
+    let h = home();
+    let asm = Assembly::empty().with(Probe {
+        github_pat: true,
+        hooks: vec!["github_pat"],
+        ..probe("probe")
+    });
+    let w =
+        steve_hub::wire::wire_assembly(&h.cfg, &Bus::new(), h.vars.clone(), &asm).expect("wire");
+    let rt = w.lifecycle.as_ref().expect("a connection runtime");
+    assert_eq!(rt.adapters(), ["github_pat"]);
+    // the base 12 and the connection runtime
+    assert_eq!(w.jobs.len(), 13);
 }
 
 #[tokio::test]
@@ -435,6 +550,7 @@ async fn an_empty_assembly_still_wires_the_hub() {
     assert!(w.seams.channels.connections().provider_ids().is_empty());
     assert!(w.tools.mail.adapter_ids().is_empty());
     assert!(w.seams.flow.events.all().is_empty());
-    // the built-in extensions' two (registrations resumed, the Feishu runtime) are gone
+    // the built-in extensions' two (registrations resumed, the connection runtime) are gone
     assert_eq!(w.jobs.len(), 12);
+    assert!(w.lifecycle.is_none());
 }

@@ -67,6 +67,9 @@ pub struct Wired {
     pub node: Option<Arc<node_runtime::NodeRuntime>>,
     /// Where projects', items', sessions' and knowledge folders' files are (which Node).
     pub workspaces: Arc<workspaces::Workspaces>,
+    /// What runs for each connection of an adapter with a connection hook (stopped by the
+    /// domain's shutdown).
+    pub lifecycle: Option<steve_channels::lifecycle::ConnectionRuntime>,
     /// Steve's tools as a Node reaches them (in-crate tests drive the bridge with them).
     #[cfg(test)]
     pub(crate) tool_service: Arc<tool_service::ToolService>,
@@ -711,6 +714,7 @@ pub fn wire_assembly(
             core,
             routed,
             node: local_node,
+            lifecycle: built.lifecycle.clone(),
         }),
         auth: auth.router(),
         mcp: Some(mcp),
@@ -725,6 +729,7 @@ pub fn wire_assembly(
         nodes,
         node: local_runtime,
         workspaces,
+        lifecycle: built.lifecycle,
         #[cfg(test)]
         tool_service,
     })

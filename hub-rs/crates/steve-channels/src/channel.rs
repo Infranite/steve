@@ -189,6 +189,49 @@ impl OutContent {
     }
 }
 
+/// One stored message, as an adapter needs it to act on it again (recall, react, fetch media).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct MessageRef {
+    /// The space at the provider.
+    pub space_ext_id: String,
+    /// The provider's message id; `None` for a message without one (never a Hub-made id).
+    pub ext_id: Option<String>,
+    /// Unix ms: the provider's time when known, otherwise the Hub's send time.
+    pub created: i64,
+    /// `created` is the provider's time; `false`: the Hub's send time, match with a window.
+    pub created_exact: bool,
+    /// Who sent it, when known.
+    pub sender: Option<HandleRef>,
+    /// Its text; `None` once purged.
+    pub text: Option<String>,
+    pub thread_key: Option<String>,
+    /// The remote's delivery id of the message ([`InboundMessage`]'s `source_id`, or the one a send
+    /// returned), when known. Opaque, per connection.
+    pub source_id: Option<String>,
+}
+
+impl MessageRef {
+    /// A message with a provider id; the rest unknown.
+    pub fn platform(space_ext_id: impl Into<String>, ext_id: impl Into<String>) -> Self {
+        Self {
+            space_ext_id: space_ext_id.into(),
+            ext_id: Some(ext_id.into()),
+            created: 0,
+            created_exact: false,
+            sender: None,
+            text: None,
+            thread_key: None,
+            source_id: None,
+        }
+    }
+
+    /// The provider's message id, if it has one.
+    pub fn id(&self) -> Option<&str> {
+        self.ext_id.as_deref()
+    }
+}
+
 /// A change of a space or its members, as an adapter saw it (Feishu `im.chat.member.*`,
 /// `im.chat.updated_v1`, `im.chat.disbanded_v1`). [`crate::Channels::on_space_event`]
 /// applies it.
@@ -359,6 +402,14 @@ pub trait ChannelAdapter: ConnectionProvider {
     ) -> Result<PushOutcome, AdapterError> {
         let _ = (cx, req);
         Err(ProviderError::Unsupported.into())
+    }
+
+    /// Whether a connection with this `config` receives every message of the spaces it is in (a
+    /// bot that only gets the messages that @ it does not). Messages of spaces covered this way need
+    /// not be read another way. Default: yes.
+    fn receives_all(&self, config: &Value) -> bool {
+        let _ = config;
+        true
     }
 
     /// Name, kind, member count, external members.

@@ -10,8 +10,8 @@
 //! ```
 //!
 //! Extensions are linked at compile time. Every conflict (an extension or adapter id twice, an
-//! [`Extension::api`] other than [`EXTENSION_API`], overlapping routes) stops the Hub at startup
-//! with the extension's id. These are messages for whoever assembles the Hub, in the language of
+//! [`Extension::api`] other than [`EXTENSION_API`], overlapping routes, a connection hook for an
+//! adapter the extension did not register) stops the Hub at startup with the extension's id. These are messages for whoever assembles the Hub, in the language of
 //! the Hub's other startup errors.
 
 mod builtin;
@@ -25,7 +25,7 @@ use anyhow::Context;
 use axum::Router;
 use serde_json::Value;
 use steve_channels::adapters::feishu::{FeishuUser, SendAsUser};
-use steve_channels::ext::ChannelSide;
+use steve_channels::ext::{ChannelDecl, ChannelSide, ConnectionHook, Queries};
 use steve_channels::{ChannelAdapter, MessageSink, ProfileAdapter};
 use steve_modules::Modules;
 use steve_modules::accounts::connections::{ConnectionProvider, Connections};
@@ -37,7 +37,7 @@ pub use crate::wire::Vars;
 pub use crate::wire::modules::Job;
 
 /// The extension API this Hub is built with; raised only on an incompatible change.
-pub const EXTENSION_API: u32 = 1;
+pub const EXTENSION_API: u32 = 2;
 
 /// Why an assembly was refused, with the extension it is about once the Hub knows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -181,12 +181,6 @@ impl Assembly {
                 .of(id));
             }
         }
-        // the built-in `feishu.self` connections are polled by the runtime `feishu.bot` starts;
-        // without it they would be accepted and never read
-        let builtin = |id: &str| self.list.iter().any(|e| e.builtin && e.ext.id() == id);
-        if builtin("feishu.self") && !builtin("feishu.bot") {
-            return Err(ExtensionError::new("needs feishu.bot in the assembly").of("feishu.self"));
-        }
         Ok(())
     }
 
@@ -201,6 +195,7 @@ impl Assembly {
             party_hooks,
             ext: String::new(),
             owners: BTreeMap::new(),
+            decls: BTreeMap::new(),
             providers: Vec::new(),
             channel_adapters: Vec::new(),
             profiles: Vec::new(),
@@ -214,21 +209,44 @@ impl Assembly {
             d.ext = id.to_string();
             e.ext.declare(&mut d).map_err(|err| err.of(id))?;
         }
+        d.check_pairings()?;
         Ok(d)
     }
 
     /// Step two for every extension: their routes merged into `routes` (an overlap names the
-    /// extension) and their jobs.
+    /// extension), their jobs and their connection hooks (each for an adapter the extension
+    /// registered, at most one per adapter).
     pub(crate) fn start(
         &self,
         s: &Started,
+        d: &Declare<'_>,
         mut routes: Router<Modules>,
-    ) -> Result<(Router<Modules>, Vec<Job>), ExtensionError> {
+    ) -> Result<StartedAll, ExtensionError> {
         let mut jobs = Vec::new();
+        let mut hooks: Vec<Lifecycle> = Vec::new();
         for e in &self.list {
             let id = e.ext.id();
             let m = e.ext.start(s).map_err(|err| err.of(id))?;
             jobs.extend(m.jobs);
+            for (adapter, hook) in m.lifecycle {
+                if d.owners.get(&adapter).map(String::as_str) != Some(id) {
+                    return Err(ExtensionError::new(format!(
+                        "a connection hook for adapter {adapter}, which it did not register"
+                    ))
+                    .of(id));
+                }
+                if hooks.iter().any(|h| h.adapter == adapter) {
+                    return Err(ExtensionError::new(format!(
+                        "a second connection hook for adapter {adapter}"
+                    ))
+                    .of(id));
+                }
+                hooks.push(Lifecycle {
+                    decl: d.decls.get(&adapter).cloned(),
+                    adapter,
+                    hook,
+                });
+            }
             let mine = if e.builtin {
                 m.api_routes
             } else if m.api_routes.has_routes() {
@@ -238,8 +256,26 @@ impl Assembly {
             };
             routes = merge_routes(routes, mine).map_err(|e| e.of(id))?;
         }
-        Ok((routes, jobs))
+        Ok(StartedAll {
+            routes,
+            jobs,
+            hooks,
+        })
     }
+}
+
+/// What step two collected from every extension.
+pub(crate) struct StartedAll {
+    pub(crate) routes: Router<Modules>,
+    pub(crate) jobs: Vec<Job>,
+    pub(crate) hooks: Vec<Lifecycle>,
+}
+
+/// One connection hook, with the declaration of its adapter when it is a channel side.
+pub(crate) struct Lifecycle {
+    pub(crate) adapter: String,
+    pub(crate) decl: Option<ChannelDecl>,
+    pub(crate) hook: Arc<dyn ConnectionHook>,
 }
 
 /// `routes` with `mine` merged in. axum refuses an overlapping route by panicking; this turns it
@@ -267,6 +303,8 @@ pub struct Declare<'a> {
     ext: String,
     /// Adapter id → the extension that registered it.
     owners: BTreeMap<String, String>,
+    /// Adapter id → its declaration, for the channel sides.
+    decls: BTreeMap<String, ChannelDecl>,
     pub(crate) providers: Vec<Arc<dyn ConnectionProvider>>,
     pub(crate) channel_adapters: Vec<Arc<dyn ChannelAdapter>>,
     pub(crate) profiles: Vec<Arc<dyn ProfileAdapter>>,
@@ -295,13 +333,31 @@ impl Declare<'_> {
     /// `Channels` and the outbox.
     pub fn channel(&mut self, side: ChannelSide) -> Result<(), ExtensionError> {
         side.check().map_err(ExtensionError::new)?;
-        let id = side.decl.adapter;
+        let id = side.decl.adapter.clone();
         self.claim(&id)?;
+        self.decls.insert(id.clone(), side.decl);
         self.providers.push(side.provider);
         self.channel_adapters.extend(side.adapter);
         self.profiles.extend(side.profiles);
         if let Some(a) = side.as_user {
             self.as_user.push((id, a));
+        }
+        Ok(())
+    }
+
+    /// A provider whose connections need a pair of an adapter nobody registered would never run.
+    fn check_pairings(&self) -> Result<(), ExtensionError> {
+        for p in &self.providers {
+            let Some(pairing) = p.pairing() else { continue };
+            if pairing.required && !pairing.with.iter().any(|a| self.owners.contains_key(a)) {
+                let owner = self.owners.get(p.id()).cloned().unwrap_or_default();
+                return Err(ExtensionError::new(format!(
+                    "adapter {} needs one of {} in the assembly",
+                    p.id(),
+                    pairing.with.join(", ")
+                ))
+                .of(&owner));
+            }
         }
         Ok(())
     }
@@ -355,12 +411,15 @@ impl BusTap {
 }
 
 /// What step two gets: the built services. `Channels` itself and the store's write transactions
-/// are not part of it; inbound messages go through `inbound`.
+/// are not part of it; inbound messages go through `inbound` (or a connection hook's own sink).
+#[non_exhaustive]
 pub struct Started {
     pub modules: Modules,
     pub connections: Connections,
     /// The channels' inbound entry point.
     pub inbound: Arc<dyn MessageSink>,
+    /// Read views, bound to one connection with [`Queries::for_cx`].
+    pub queries: Queries,
     pub bus: BusTap,
     /// Environment variables (a map in tests).
     pub vars: Vars,
@@ -379,6 +438,7 @@ impl Started {
             modules: channels.modules().clone(),
             connections: channels.connections().clone(),
             inbound: Arc::new(channels.clone()),
+            queries: Queries::new(channels.clone()),
             bus: BusTap(bus.clone()),
             vars: vars.clone(),
             channels: channels.clone(),
@@ -387,13 +447,36 @@ impl Started {
     }
 }
 
-/// What step two hands back.
+/// What step two hands back. Build it from [`Mounted::default`] with the builders.
 #[derive(Default)]
+#[non_exhaustive]
 pub struct Mounted {
     /// Merged under `/api` behind `require_user` and the `Caller` layer (an extension that is not
     /// built in: under `/api/channels/ext/{id}`).
     pub api_routes: Router<Modules>,
     pub jobs: Vec<Job>,
+    /// What runs for each connection of an adapter (`connections.adapter`, hook).
+    pub lifecycle: Vec<(String, Arc<dyn ConnectionHook>)>,
+}
+
+impl Mounted {
+    /// Routes merged with the ones given before.
+    pub fn routes(mut self, r: Router<Modules>) -> Self {
+        self.api_routes = self.api_routes.merge(r);
+        self
+    }
+
+    pub fn job(mut self, j: Job) -> Self {
+        self.jobs.push(j);
+        self
+    }
+
+    /// The hook run for each connection of `adapter`, which this extension must have registered;
+    /// one per adapter. The Hub starts, restarts and stops its runs as the connections change.
+    pub fn lifecycle(mut self, adapter: &str, h: Arc<dyn ConnectionHook>) -> Self {
+        self.lifecycle.push((adapter.to_string(), h));
+        self
+    }
 }
 
 /// Runs the Hub with `asm`: the whole of the `steve-hub` binary.

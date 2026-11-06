@@ -4,14 +4,13 @@
 use std::sync::Arc;
 
 use steve_channels::adapters::feishu::{self, Domain, FeishuApp, FeishuEnv};
-use steve_channels::ext::{ChannelDecl, ChannelSide};
+use steve_channels::ext::{ChannelDecl, ChannelSide, Mode, Receive};
 use steve_modules::accounts::connections::ConnectionProvider;
 
 use super::{Declare, Extension, ExtensionError, Job, Mounted, Started};
 
 /// `feishu.bot`: the bot's app (long connection, sending as the bot, its address book), the app
-/// registrations started from Steve, and the Feishu runtime: one long connection per bot
-/// connection and, with `feishu.self` in the assembly, one self poller per user connection.
+/// registrations started from Steve, and one long connection per bot connection.
 pub(crate) struct FeishuBot;
 
 impl Extension for FeishuBot {
@@ -22,9 +21,14 @@ impl Extension for FeishuBot {
     fn declare(&self, d: &mut Declare<'_>) -> Result<(), ExtensionError> {
         let app = Arc::new(FeishuApp::new());
         d.channel(
-            ChannelSide::new(ChannelDecl::new(app.id()), app.clone())
-                .adapter(app.clone())
-                .profiles(app),
+            ChannelSide::new(
+                ChannelDecl::new(app.id())
+                    .mode(Mode::Bot)
+                    .receive(Receive::LongConnection, None),
+                app.clone(),
+            )
+            .adapter(app.clone())
+            .profiles(app),
         )
     }
 
@@ -38,32 +42,25 @@ impl Extension for FeishuBot {
         let registrations =
             feishu::app_registration::Registrations::new(s.connections.clone(), bases);
         let api_routes = feishu::app_registration::routes(registrations.clone());
+        // app registrations a stop interrupted: polled until their own deadline, checks resumed
+        let resume: Job = Box::pin(async move {
+            match registrations.resume() {
+                Ok(n) if n > 0 => tracing::info!("feishu app registrations resumed: {n}"),
+                Ok(_) => {}
+                Err(e) => tracing::error!("feishu app registrations not resumed: {e}"),
+            }
+        });
         // none on a fresh STEVE_HOME; started and stopped as connections change
-        let rt = feishu::FeishuRuntime::new(s.channels.clone(), s.feishu_user.clone());
-        let changes = s.bus.tap(&["connection"]);
-        let jobs: Vec<Job> = vec![
-            // app registrations a stop interrupted: polled until their own deadline, checks resumed
-            Box::pin(async move {
-                match registrations.resume() {
-                    Ok(n) if n > 0 => tracing::info!("feishu app registrations resumed: {n}"),
-                    Ok(_) => {}
-                    Err(e) => tracing::error!("feishu app registrations not resumed: {e}"),
-                }
-            }),
-            Box::pin(async move {
-                let n = rt.start_all().await;
-                if n > 0 {
-                    tracing::info!("feishu: {n} long connections / pollers started");
-                }
-                let _ = rt.spawn_watch(changes).await;
-            }),
-        ];
-        Ok(Mounted { api_routes, jobs })
+        Ok(Mounted::default().routes(api_routes).job(resume).lifecycle(
+            feishu::auth::APP_ADAPTER,
+            Arc::new(feishu::BotHook::new(s.channels.clone())),
+        ))
     }
 }
 
 /// `feishu.self`: you on Feishu (F6), one provider for connections, the device flow, sending as
-/// you (C6) and looking people up as you (first, before the bot).
+/// you (C6), looking people up as you (first, before the bot), and one self poller per connection
+/// with `msg.receive`.
 pub(crate) struct FeishuSelf;
 
 impl Extension for FeishuSelf {
@@ -78,9 +75,14 @@ impl Extension for FeishuSelf {
                 .with_party_hooks(d.party_hooks.clone()),
         );
         d.channel(
-            ChannelSide::new(ChannelDecl::new(user.id()), user.clone())
-                .as_user(user.clone())
-                .profiles(user.clone()),
+            ChannelSide::new(
+                ChannelDecl::new(user.id())
+                    .mode(Mode::Own)
+                    .receive(Receive::Poll, Some("msg.receive")),
+                user.clone(),
+            )
+            .as_user(user.clone())
+            .profiles(user.clone()),
         )?;
         d.feishu_user = Some(user);
         Ok(())
@@ -99,10 +101,10 @@ impl Extension for FeishuSelf {
             s.connections.clone(),
             user.claims().clone(),
         ));
-        Ok(Mounted {
-            api_routes,
-            jobs: Vec::new(),
-        })
+        Ok(Mounted::default().routes(api_routes).lifecycle(
+            feishu::auth::USER_ADAPTER,
+            Arc::new(feishu::SelfPollHook::new(s.channels.clone(), user)),
+        ))
     }
 }
 

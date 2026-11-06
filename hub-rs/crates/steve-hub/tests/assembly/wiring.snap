@@ -238,6 +238,8 @@ channel feishu_app
 event_source github_app
 event_source github_pat
 jobs 14
+lifecycle feishu_app
+lifecycle feishu_user
 mail imap
 profiles feishu_app
 profiles feishu_user

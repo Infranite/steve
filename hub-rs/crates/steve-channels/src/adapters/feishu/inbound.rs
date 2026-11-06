@@ -71,6 +71,12 @@ impl ChannelAdapter for FeishuApp {
         }
     }
 
+    /// Every group message only with `im:message.group_msg` granted (the last permission check);
+    /// otherwise only the messages that @ the bot.
+    fn receives_all(&self, config: &Value) -> bool {
+        super::self_poll::receives_all_groups(config)
+    }
+
     fn send_dedup(&self) -> Option<std::time::Duration> {
         Some(super::send::UUID_DEDUP)
     }

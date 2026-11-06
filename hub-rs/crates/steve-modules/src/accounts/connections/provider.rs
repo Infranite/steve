@@ -27,6 +27,28 @@ pub const CAPS: [&str; 12] = [
     "events",
 ];
 
+/// The `config` key naming the connection a connection is paired with (a sending-as-you connection
+/// with the bot connection of the same app).
+pub const PAIR_KEY: &str = "app_connection";
+
+/// Which connections a provider's connections pair with ([`ConnectionProvider::pairing`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Pairing {
+    /// The adapters a pair may be of.
+    pub with: Vec<String>,
+    /// A connection without a working pair does not run.
+    pub required: bool,
+}
+
+/// The connection a connection is paired with, as it is now.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Paired {
+    pub id: String,
+    pub adapter: String,
+    /// It is usable: `ok` or `error`, not paused, revoked or waiting for a new authorization.
+    pub ok: bool,
+}
+
 /// How a connection is authorized (`connections.auth`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -347,6 +369,12 @@ pub trait ConnectionProvider: Send + Sync + 'static {
     async fn mint(&self, cx: &ConnCx) -> Result<Minted, ProviderError> {
         let _ = cx;
         Err(ProviderError::Unsupported)
+    }
+
+    /// The connections this provider's connections pair with (`config.app_connection`, [`PAIR_KEY`]).
+    /// Default: none.
+    fn pairing(&self) -> Option<Pairing> {
+        None
     }
 
     /// Revokes at the provider on disconnect (best effort). Default: RFC 7009 at the spec's

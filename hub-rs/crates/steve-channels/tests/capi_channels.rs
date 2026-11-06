@@ -1,8 +1,8 @@
 //! The channel REST gaps the web pages found (W11/W12), on the fake Feishu: `GET/POST/PATCH
 //! /channels…` (the ChannelAccount with its persona, rules, trigger and permission check), the
 //! “新群” decision (open / mute / undo, expired when the bot leaves), `GET /spaces/:id/members`,
-//! and the Feishu runtime starting the long connection, `sync_bot_chats` and the self poller as
-//! connections change.
+//! and the connection runtime with the Feishu hooks starting the long connection, `sync_bot_chats`
+//! and the self poller as connections change.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -11,8 +11,10 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, header};
 use serde_json::{Value, json};
-use steve_channels::adapters::feishu::{FeishuApp, FeishuRuntime, FeishuUser};
+use steve_channels::adapters::feishu::{BotHook, FeishuApp, FeishuUser, SelfPollHook};
+use steve_channels::ext::{ChannelDecl, Mode, Receive};
 use steve_channels::fake::feishu::{FakeFeishu, WsClientConfig, ids};
+use steve_channels::lifecycle::ConnectionRuntime;
 use steve_channels::{Channels, SpaceEvent, channels_api, space_decisions};
 use steve_flow::testkit::FakeCore;
 use steve_flow::{FlowSetup, LinearExecutor};
@@ -22,6 +24,7 @@ use steve_modules::vault::Vault;
 use steve_modules::vault::keystore::FileKeyStore;
 use steve_modules::{Caller, decisions};
 use tempfile::TempDir;
+use tokio::sync::mpsc;
 use tower::ServiceExt;
 
 const T: Duration = Duration::from_secs(10);
@@ -788,13 +791,34 @@ async fn members_of_your_own_spaces_are_yours_alone() {
 // ---------------------------------------------------------------------------------------------
 // The runtime.
 
-/// The connection events published so far, as the Hub's bus hands them to `spawn_watch`.
-fn events(h: &H) -> tokio::sync::mpsc::UnboundedReceiver<Value> {
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+/// The connection runtime with the built-in Feishu hooks, and the sender its events come on.
+fn runtime(h: &H) -> (ConnectionRuntime, mpsc::UnboundedSender<Value>) {
+    let rt = ConnectionRuntime::builder(h.ch.clone())
+        .hook(
+            "feishu_app",
+            Some(ChannelDecl::new("feishu_app")),
+            Arc::new(BotHook::new(h.ch.clone())),
+        )
+        .hook(
+            "feishu_user",
+            Some(
+                ChannelDecl::new("feishu_user")
+                    .mode(Mode::Own)
+                    .receive(Receive::Poll, Some("msg.receive")),
+            ),
+            Arc::new(SelfPollHook::new(h.ch.clone(), h.user.clone())),
+        )
+        .build();
+    let (tx, rx) = mpsc::unbounded_channel();
+    drop(rt.start(rx));
+    (rt, tx)
+}
+
+/// The change events published since the last call, as the Hub's bus hands them to the runtime.
+fn publish(h: &H, tx: &mpsc::UnboundedSender<Value>) {
     for e in h.env.take_events() {
         let _ = tx.send(serde_json::to_value(e).expect("json"));
     }
-    rx
 }
 
 async fn until(what: &str, mut f: impl FnMut() -> bool) {
@@ -805,15 +829,22 @@ async fn until(what: &str, mut f: impl FnMut() -> bool) {
     }
 }
 
+/// Polls `rt.running()` until it is `want` (sorted).
+async fn running(rt: &ConnectionRuntime, want: &[&str]) {
+    let mut want: Vec<String> = want.iter().map(|s| s.to_string()).collect();
+    want.sort();
+    until(&format!("running {want:?}"), || rt.running() == want).await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn connecting_starts_the_long_connection_and_syncs_chats_without_a_restart() {
     let h = setup().await;
-    let rt = FeishuRuntime::new(h.ch.clone(), Some(h.user.clone()));
     let _ = h.env.take_events();
+    let (rt, tx) = runtime(&h);
     let con = s(&h.connect_bot(None).await["connection_id"]);
 
-    // the connect's `connection` event reaches the watcher
-    let watch = rt.spawn_watch(events(&h));
+    // the connect's `connection` event reaches the runtime
+    publish(&h, &tx);
     assert!(h.fake.ws_wait_connections(1, T).await, "long connection up");
     until("the bot's groups became spaces", || {
         h.n("SELECT count(*) FROM spaces WHERE connection_id = ?", &con) == 3
@@ -827,12 +858,19 @@ async fn connecting_starts_the_long_connection_and_syncs_chats_without_a_restart
         ),
         0
     );
-    watch.await.expect("watch ends with its sender");
-    assert!(rt.long_connections().is_running(&con).await);
+    assert_eq!(rt.running(), [con.as_str()]);
+    assert_eq!(
+        h.n(
+            "SELECT count(*) FROM channel_settings WHERE connection_id = ? AND mode = 'bot'",
+            &con
+        ),
+        1
+    );
 
     // repeated events change nothing
-    let r = rt.on_connection(WS, &con).await;
-    assert!(!r.started && !r.stopped, "{r:?}");
+    publish(&h, &tx);
+    let _ = tx.send(json!({"type": "connection", "id": con, "ws": WS}));
+    tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(h.fake.ws_connects_total(), 1);
 
     // paused → stopped; resumed → started again and synced
@@ -844,18 +882,22 @@ async fn connecting_starts_the_long_connection_and_syncs_chats_without_a_restart
         )
         .await;
     assert_eq!(st, 200, "{v}");
-    let r = rt.on_connection(WS, &con).await;
-    assert!(r.stopped, "{r:?}");
-    assert!(!rt.long_connections().is_running(&con).await);
+    publish(&h, &tx);
+    running(&rt, &[]).await;
     h.call(
         "PATCH",
         &format!("/connections/{con}"),
         Some(json!({"paused": false})),
     )
     .await;
-    let r = rt.on_connection(WS, &con).await;
-    assert!(r.started, "{r:?}");
-    assert_eq!(r.synced, Some(0), "known groups are kept");
+    publish(&h, &tx);
+    running(&rt, &[&con]).await;
+    until("connected again", || h.fake.ws_connects_total() == 2).await;
+    // known groups are kept
+    assert_eq!(
+        h.n("SELECT count(*) FROM spaces WHERE connection_id = ?", &con),
+        3
+    );
 
     // disconnecting an account with spaces: the spaces stay, `left` (an archived one stays
     // archived), without settings or a connection; the long connection stops for good
@@ -920,23 +962,21 @@ async fn connecting_starts_the_long_connection_and_syncs_chats_without_a_restart
     assert_eq!(st, 404);
     let (st, _) = h.call("GET", &one, None).await;
     assert_eq!(st, 200);
-    let r = rt.on_connection(WS, &con).await;
-    assert!(r.stopped, "{r:?}");
-    assert!(!rt.long_connections().is_running(&con).await);
+    publish(&h, &tx);
+    running(&rt, &[]).await;
+    rt.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn authorizing_you_starts_your_self_poller() {
     let h = setup().await;
-    let rt = FeishuRuntime::new(h.ch.clone(), Some(h.user.clone()));
+    let (rt, tx) = runtime(&h);
     let bot = s(&h.connect_bot(None).await["connection_id"]);
-    let r = rt.on_connection(WS, &bot).await;
-    assert!(r.started);
+    publish(&h, &tx);
+    running(&rt, &[&bot]).await;
     let ucon = h.authorize_me().await;
-    let r = rt.on_connection(WS, &ucon).await;
-    assert!(r.started, "{r:?}");
-    let polls = rt.self_pollers().expect("pollers");
-    assert_eq!(polls.running().await, vec![ucon.clone()]);
+    publish(&h, &tx);
+    running(&rt, &[&bot, &ucon]).await;
     assert_eq!(
         h.n(
             "SELECT count(*) FROM channel_settings WHERE connection_id = ? AND mode = 'self'",
@@ -944,17 +984,14 @@ async fn authorizing_you_starts_your_self_poller() {
         ),
         1
     );
-    // boot: nothing new to start
-    assert_eq!(rt.start_all().await, 0);
     h.call(
         "PATCH",
         &format!("/connections/{ucon}"),
         Some(json!({"paused": true})),
     )
     .await;
-    let r = rt.on_connection(WS, &ucon).await;
-    assert!(r.stopped, "{r:?}");
-    assert!(polls.running().await.is_empty());
+    publish(&h, &tx);
+    running(&rt, &[&bot]).await;
     // resumed, then disconnected (no spaces): started, then stopped for good
     h.call(
         "PATCH",
@@ -962,7 +999,8 @@ async fn authorizing_you_starts_your_self_poller() {
         Some(json!({"paused": false})),
     )
     .await;
-    assert!(rt.on_connection(WS, &ucon).await.started);
+    publish(&h, &tx);
+    running(&rt, &[&bot, &ucon]).await;
     let (st, v) = h
         .call("DELETE", &format!("/connections/{ucon}"), None)
         .await;
@@ -974,13 +1012,11 @@ async fn authorizing_you_starts_your_self_poller() {
         ),
         0
     );
-    let r = rt.on_connection(WS, &ucon).await;
-    assert!(r.stopped, "{r:?}");
-    assert!(polls.running().await.is_empty());
+    publish(&h, &tx);
+    running(&rt, &[&bot]).await;
+    rt.shutdown().await;
+    assert!(rt.running().is_empty());
 }
-
-// ---------------------------------------------------------------------------------------------
-// The fake's device-code control route (UI tests finish “授权你本人” with it).
 
 #[tokio::test(flavor = "multi_thread")]
 async fn fake_device_codes_can_be_approved_over_http() {
