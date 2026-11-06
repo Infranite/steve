@@ -65,6 +65,16 @@ pub(crate) fn publish(m: &Arc<dyn MediaFetch>) {
         .insert(m.adapter_id().to_string(), m.clone());
 }
 
+/// Every published view, in adapter order.
+fn views() -> Vec<Arc<dyn MediaFetch>> {
+    VIEWS
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .values()
+        .cloned()
+        .collect()
+}
+
 fn view(adapter: &str) -> Option<Arc<dyn MediaFetch>> {
     VIEWS
         .read()
@@ -222,37 +232,27 @@ struct Row {
     space_id: String,
     direction: String,
     status: String,
-    external_id: Option<String>,
     event_id: Option<String>,
     text: Option<String>,
     attachments: Value,
     purged: Option<i64>,
-    created: i64,
-    thread_key: Option<String>,
-    space_ext: String,
 }
 
 impl Row {
-    /// The message as its adapter's [`MediaFetch`] sees it.
-    fn message_ref(&self) -> MessageRef {
-        MessageRef {
-            space_ext_id: self.space_ext.clone(),
-            ext_id: self.external_id.clone(),
-            created: self.created,
-            created_exact: self.direction == "in",
-            sender: None,
-            text: self.text.clone(),
-            thread_key: self.thread_key.clone(),
-            source_id: None,
-        }
+    /// The message as the [`MediaFetch`] of connection `conn` sees it: the same [`MessageRef`]
+    /// recall and reactions get (the delivery id that connection knows it by, the sender, the
+    /// provider's create time). `None` when the row is gone.
+    fn message_ref(&self, c: &Connection, conn: Option<&str>) -> Option<MessageRef> {
+        crate::messages::message_ref(c, &self.id, conn.unwrap_or_default())
+            .ok()
+            .flatten()
     }
 }
 
 fn load(c: &Connection, id: &str) -> rusqlite::Result<Option<Row>> {
     c.query_row(
-        "SELECT m.id, m.workspace_id, m.space_id, m.direction, m.status, m.external_id, m.event_id, m.text,
-                m.attachments, m.purged, m.created, m.thread_key, coalesce(s.external_id, '')
-           FROM chan_messages m LEFT JOIN spaces s ON s.id = m.space_id WHERE m.id = ?",
+        "SELECT id, workspace_id, space_id, direction, status, event_id, text, attachments, purged
+           FROM chan_messages WHERE id = ?",
         [id],
         |r| {
             Ok(Row {
@@ -261,17 +261,13 @@ fn load(c: &Connection, id: &str) -> rusqlite::Result<Option<Row>> {
                 space_id: r.get(2)?,
                 direction: r.get(3)?,
                 status: r.get(4)?,
-                external_id: r.get(5)?,
-                event_id: r.get(6)?,
-                text: r.get(7)?,
+                event_id: r.get(5)?,
+                text: r.get(6)?,
                 attachments: r
-                    .get::<_, Option<String>>(8)?
+                    .get::<_, Option<String>>(7)?
                     .and_then(|s| serde_json::from_str(&s).ok())
                     .unwrap_or_else(|| json!([])),
-                purged: r.get(9)?,
-                created: r.get(10)?,
-                thread_key: r.get(11)?,
-                space_ext: r.get(12)?,
+                purged: r.get(8)?,
             })
         },
     )
@@ -299,8 +295,9 @@ fn legacy_attachments(a: &Value) -> bool {
 /// The message as it reads now: `(text, attachments)`. An inbound message stored before cards and
 /// post media were read is read again from its own raw event, when the event is still kept for
 /// exactly this message (same workspace, space, message, provider message id) and nothing was
-/// purged, by the [`MediaFetch`] of the connection's adapter. Nothing is written, nothing
-/// replayed, nothing fetched.
+/// purged, by the [`MediaFetch`] of the connection's adapter — or, once no connection of the
+/// message is left, by the view that recognizes the event as this message. Nothing is written,
+/// nothing replayed, nothing fetched.
 fn effective(c: &Connection, r: &Row) -> (Option<String>, Value) {
     let unchanged = (r.text.clone(), r.attachments.clone());
     let (Some(text), Some(ev)) = (&r.text, &r.event_id) else {
@@ -327,10 +324,18 @@ fn effective(c: &Connection, r: &Row) -> (Option<String>, Value) {
     let Some(payload) = payload.and_then(|p| serde_json::from_str::<Value>(&p).ok()) else {
         return unchanged;
     };
-    let Some(m) = connection_of(c, r).and_then(|(_, a)| view(&a)) else {
+    let raw = &payload["raw"];
+    let conn = connection_of(c, r);
+    let Some(msg) = r.message_ref(c, conn.as_ref().map(|(x, _)| x.as_str())) else {
         return unchanged;
     };
-    match m.reparse(&r.message_ref(), &payload["raw"]) {
+    // the view of the connection's adapter; once that connection is gone, the view that knows
+    // this raw event as this very message (each refuses another message's event)
+    let read = match conn {
+        Some((_, a)) => view(&a).and_then(|m| m.reparse(&msg, raw)),
+        None => views().iter().find_map(|m| m.reparse(&msg, raw)),
+    };
+    match read {
         Some((t, atts)) => (Some(t), Value::Array(atts)),
         None => unchanged,
     }
@@ -606,12 +611,13 @@ fn plan(c: &Connection, r: &Row, index: usize) -> Result<Plan, MediaError> {
     if !supported(&adapter) {
         return Err(MediaError::Unsupported);
     }
+    let msg = r.message_ref(c, Some(&conn)).ok_or(MediaError::NotFound)?;
     Ok(Plan {
         space_id: r.space_id.clone(),
         conn,
         adapter,
         ws: r.ws.clone(),
-        msg: r.message_ref(),
+        msg,
         key: a["key"].as_str().unwrap_or_default().to_string(),
         kind: if a["type"] == "image" {
             ResourceKind::Image
