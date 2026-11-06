@@ -270,14 +270,21 @@ fn matching(b: &[u8], open: usize, l: u8, r: u8) -> usize {
     b.len() - 1
 }
 
-/// The end of the item starting at `from`: past its first `;` at depth 0, or its first `{..}`.
+/// The end of the item starting at `from`: past its first `;` at depth 0, or its first `{..}`. An
+/// attributed field or argument (`#[cfg(test)] tool_service,`) ends at its `,`, or before the
+/// bracket that closes its list.
 fn item_end(b: &[u8], from: usize) -> usize {
-    let mut depth = 0i32;
+    let (mut depth, mut angle) = (0i32, 0i32);
     let mut k = from;
     while k < b.len() {
         match b[k] {
             b'(' | b'[' => depth += 1,
+            b')' | b']' | b'}' if depth == 0 => return k,
             b')' | b']' => depth -= 1,
+            // generics (`fn f<A, B>`, `HashMap<K, V>`), not `->` or `=>`
+            b'<' => angle += 1,
+            b'>' if k > 0 && !matches!(b[k - 1], b'-' | b'=') => angle -= 1,
+            b',' if depth == 0 && angle <= 0 => return k + 1,
             b';' if depth == 0 => return k + 1,
             b'{' if depth == 0 => return matching(b, k, b'{', b'}') + 1,
             _ => {}
@@ -324,4 +331,113 @@ fn module_decls(raw: &str, code: &str) -> Vec<(String, Option<String>)> {
         out.push((name, path));
     }
     out
+}
+
+/// Every `use` declaration in the code, flattened to one path per imported name (`a::b::c`, or
+/// `a::b::c as d`, or `a::b::*`), each with the offset of its `use`. `use a::{b, c::{self, d as
+/// e}};` gives `a::b`, `a::c`, `a::c::d as e`.
+pub fn uses(code: &str) -> Vec<(usize, String)> {
+    let b = code.as_bytes();
+    let mut out = Vec::new();
+    for at in find_in(code, "use ") {
+        let end = code[at..].find(';').map_or(b.len(), |n| at + n);
+        let tree: String = squeeze(&code[at + 4..end]);
+        let mut paths = Vec::new();
+        flatten("", &tree, &mut paths);
+        out.extend(paths.into_iter().map(|p| (at, p)));
+    }
+    out
+}
+
+/// Whitespace removed, except one space around `as`.
+fn squeeze(tree: &str) -> String {
+    let words: Vec<&str> = tree.split_whitespace().collect();
+    let mut s = String::new();
+    for (k, w) in words.iter().enumerate() {
+        if *w == "as" || (k > 0 && words[k - 1] == "as") {
+            s.push(' ');
+        }
+        s.push_str(w);
+    }
+    s
+}
+
+fn flatten(prefix: &str, tree: &str, out: &mut Vec<String>) {
+    let tree = tree.trim().trim_start_matches("::");
+    let join = |a: &str, b: &str| {
+        let b = b.trim_end_matches("::");
+        match (a.is_empty(), b.is_empty()) {
+            (true, _) => b.to_string(),
+            (_, true) => a.to_string(),
+            _ => format!("{a}::{b}"),
+        }
+    };
+    if tree.is_empty() {
+        return;
+    }
+    let Some(open) = tree.find('{') else {
+        out.push(if tree == "self" {
+            prefix.to_string()
+        } else if let Some(alias) = tree.strip_prefix("self as ") {
+            format!("{prefix} as {alias}")
+        } else {
+            join(prefix, tree)
+        });
+        return;
+    };
+    let head = join(prefix, &tree[..open]);
+    let close = matching(tree.as_bytes(), open, b'{', b'}');
+    let inner = &tree[open + 1..close];
+    let (mut depth, mut from) = (0, 0);
+    for (k, c) in inner.char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => depth -= 1,
+            ',' if depth == 0 => {
+                flatten(&head, &inner[from..k], out);
+                from = k + 1;
+            }
+            _ => {}
+        }
+    }
+    flatten(&head, &inner[from..], out);
+}
+
+/// Whether the flattened import `flat` brings in `item` (a full path) under a name the call
+/// patterns may not see. `any`: the item itself, anything under it, or a renamed or glob import
+/// of a module above it. Otherwise only a rename of the item itself counts (its calls are found by
+/// its own name, `Command::new(`, so only a new name hides them).
+pub fn imports(flat: &str, item: &str, any: bool) -> bool {
+    let (path, alias) = match flat.split_once(" as ") {
+        Some((p, a)) => (p, Some(a)),
+        None => (flat, None),
+    };
+    let last = item.rsplit("::").next().unwrap_or(item);
+    let renamed = alias.is_some_and(|a| a != "_" && a != last);
+    if !any {
+        return path == item && renamed;
+    }
+    let (base, glob) = match path.strip_suffix("::*") {
+        Some(b) => (b, true),
+        None => (path, false),
+    };
+    let inside = base == item || base.starts_with(&format!("{item}::"));
+    let above = item.starts_with(&format!("{base}::"));
+    inside || (above && (glob || renamed))
+}
+
+/// The imported names in `sources` that `hit` picks, one site each.
+pub fn find_imports(sources: &[Source], hit: impl Fn(&str) -> bool) -> Vec<Site> {
+    let mut sites = Vec::new();
+    for s in sources {
+        for (at, flat) in uses(&s.code) {
+            if hit(&flat) {
+                sites.push(Site {
+                    file: s.rel.clone(),
+                    line: s.code[..at].matches('\n').count() + 1,
+                });
+            }
+        }
+    }
+    sites
 }
