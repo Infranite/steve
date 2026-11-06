@@ -7,9 +7,13 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use steve_store::NewDecision;
 
-use super::{NodeKind, NodeOutcome, RunCx, WaitSpec, req_str, str_list};
+use super::{NodeKind, NodeOutcome, Rule, RunCx, WaitSpec, req_str, str_list};
 
 pub struct Approve;
+
+const QUESTION_MAX: usize = 500;
+const OPTIONS_MAX: usize = 6;
+const OPTION_MAX: usize = 20;
 
 /// `subject_type` of decisions about one step of a run.
 pub const SUBJECT: &str = "flow_step";
@@ -43,8 +47,22 @@ impl NodeKind for Approve {
         "approve"
     }
 
+    fn rules(&self) -> Vec<Rule> {
+        vec![
+            Rule::new(
+                &["flow.node.missing_question", "flow.node.too_long_question"],
+                format!("question 必填，最多 {QUESTION_MAX} 字"),
+            ),
+            Rule::new(&["flow.node.approve_draft"], "draft 只能是文字"),
+            Rule::new(
+                &["flow.node.approve_options"],
+                format!("options 最多 {OPTIONS_MAX} 个，每个 1–{OPTION_MAX} 字"),
+            ),
+        ]
+    }
+
     fn validate(&self, cfg: &Value) -> Result<(), String> {
-        req_str(cfg, "question", super::Required::Question, 500)?;
+        req_str(cfg, "question", super::Required::Question, QUESTION_MAX)?;
         if let Some(d) = cfg.get("draft")
             && !d.is_null()
             && !d.is_string()
@@ -52,10 +70,10 @@ impl NodeKind for Approve {
             return Err(steve_i18n::t!("flow.node.approve_draft"));
         }
         let opts = str_list(cfg, "options")?;
-        if opts.len() > 6
+        if opts.len() > OPTIONS_MAX
             || opts
                 .iter()
-                .any(|o| o.trim().is_empty() || o.chars().count() > 20)
+                .any(|o| o.trim().is_empty() || o.chars().count() > OPTION_MAX)
         {
             return Err(steve_i18n::t!("flow.node.approve_options"));
         }

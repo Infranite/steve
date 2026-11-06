@@ -28,7 +28,7 @@ use async_trait::async_trait;
 use rusqlite::{Connection, OptionalExtension};
 use serde_json::{Value, json};
 use steve_flow::nodes::action::Action;
-use steve_flow::nodes::{Grant, NodeOutcome, RunCx};
+use steve_flow::nodes::{Grant, NodeOutcome, Rule, RunCx};
 use steve_modules::ApiError;
 
 use crate::compose::ComposeOpts;
@@ -288,6 +288,14 @@ impl Action for ReplyAs {
         }
         check_text(text)
     }
+    fn rules(&self) -> Vec<Rule> {
+        vec![Rule::new(
+            &[],
+            format!(
+                "要有 text（最多 {TEXT_MAX} 字）或 generate=true；generate、approve 只能是 true 或 false"
+            ),
+        )]
+    }
 
     fn outcome(&self) -> Option<&'static str> {
         Some("need")
@@ -409,6 +417,12 @@ impl Action for SendToSpace {
             return Err("要填发送的内容".into());
         }
         check_text(text)
+    }
+    fn rules(&self) -> Vec<Rule> {
+        vec![Rule::new(
+            &[],
+            format!("space_id 和 text（最多 {TEXT_MAX} 字）必填；approve 只能是 true 或 false"),
+        )]
     }
 
     fn outcome(&self) -> Option<&'static str> {

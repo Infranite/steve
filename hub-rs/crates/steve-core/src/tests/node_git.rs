@@ -297,13 +297,13 @@ fn a_delivery_on_a_node_is_frozen_and_checked_there() {
     let now = crate::cycle::fingerprint(wt.to_str()).unwrap();
     let words = crate::upstream::describe_change(&wt, &frozen, &now);
     assert!(!k.core.tx().lc_try_close(&i).unwrap());
-    assert!(k.wait(|| k.phase(&i) == "active"));
+    // the phase changes first, the timeline line is written a moment later: wait for both
+    let moved = format!("冻结之后结果又变了：{words}");
+    assert!(k.wait(
+        || k.phase(&i) == "active" && k.timeline_texts(&i).iter().any(|t| t.contains(&moved))
+    ));
     let tl = k.timeline_texts(&i);
-    assert!(
-        tl.iter()
-            .any(|t| t.contains(&format!("冻结之后结果又变了：{words}"))),
-        "{tl:?}"
-    );
+    assert!(tl.iter().any(|t| t.contains(&moved)), "{tl:?}");
     assert_eq!(words, "改了 c.txt");
 }
 
@@ -622,7 +622,7 @@ fn nothing_to_release_on_another_devices_node_asks_for_no_release() {
 
 #[test]
 fn a_goal_on_a_node_waits_for_its_build_and_for_this_instance_like_any_other() {
-    use super::takeover::{blockers, merge_and_tag, op_states, remote_for};
+    use super::takeover::{blockers, merge_and_tag, op_states, remote_for, told_what_is_missing};
     let k = Kit::with(|c| {
         c.steve_repo = c.home.join("repo");
         c.version = "0.0.1".into();
@@ -636,9 +636,10 @@ fn a_goal_on_a_node_waits_for_its_build_and_for_this_instance_like_any_other() {
     );
     port.put(&x.item);
     k.core.resolve(&x.decision, "pass", "", "me").unwrap();
+    told_what_is_missing(&k, &x);
     merge_and_tag(&x, Some("v1.5.0"));
     // the remote is looked at through the Node; the tag's build and this instance are still open
-    k.core.tx().st.probed.clear();
+    k.core.tx().forget_probe(&x.item);
     assert!(
         k.wait(|| {
             let _ = k.core.lifecycle_tick();

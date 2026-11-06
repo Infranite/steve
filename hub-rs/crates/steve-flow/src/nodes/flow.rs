@@ -6,7 +6,7 @@
 use async_trait::async_trait;
 use serde_json::Value;
 
-use super::{NodeKind, NodeOutcome, RunCx, req_str};
+use super::{NodeKind, NodeOutcome, Rule, RunCx, req_str};
 
 pub struct SubFlow;
 
@@ -20,6 +20,17 @@ impl NodeKind for SubFlow {
     }
 
     /// The child decides for itself: its effectful nodes are gated in its own run.
+    fn rules(&self) -> Vec<Rule> {
+        vec![Rule::new(
+            &[
+                "flow.node.missing_flow",
+                "flow.node.too_long_flow",
+                "flow.graph.no_such_flow",
+            ],
+            "flow_id 必填，只能是本工作空间已有流程的 id；不知道 id 就不要用 flow 节点",
+        )]
+    }
+
     fn validate(&self, cfg: &Value) -> Result<(), String> {
         req_str(cfg, "flow_id", super::Required::Flow, 64)?;
         Ok(())

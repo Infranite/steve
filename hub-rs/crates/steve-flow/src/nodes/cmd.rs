@@ -24,7 +24,7 @@ use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
 use steve_modules::vault::inject::{self, RunSpec};
 
-use super::{Grant, NodeKind, NodeOutcome, RunCx, req_str};
+use super::{Grant, NodeKind, NodeOutcome, Rule, RunCx, req_str};
 
 pub const MAX_TIMEOUT_S: u64 = inject::MAX_TIMEOUT_S;
 pub const DEFAULT_TIMEOUT_S: u64 = inject::DEFAULT_TIMEOUT_S;
@@ -179,6 +179,27 @@ impl NodeKind for Cmd {
     fn grant(&self, cfg: &Value) -> Option<Grant> {
         let p = cfg["project_id"].as_str()?.trim();
         (!p.is_empty()).then(|| Grant::new("cmd.run", "project", p))
+    }
+
+    fn rules(&self) -> Vec<Rule> {
+        vec![
+            Rule::new(
+                &[
+                    "flow.node.missing_command",
+                    "flow.node.too_long_command",
+                    "flow.node.no_secrets",
+                ],
+                format!("command 必填，最多 {COMMAND_MAX} 字，不能用 {{{{secrets.…}}}}"),
+            ),
+            Rule::new(
+                &["flow.node.missing_project", "flow.node.too_long_project"],
+                "project_id 必填，是项目的 id",
+            ),
+            Rule::new(
+                &["flow.node.cmd_timeout"],
+                format!("timeout_s 是 1 到 {MAX_TIMEOUT_S} 的数字"),
+            ),
+        ]
     }
 
     fn validate(&self, cfg: &Value) -> Result<(), String> {

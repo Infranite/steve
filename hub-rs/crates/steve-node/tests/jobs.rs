@@ -501,6 +501,15 @@ async fn images_go_on_claudes_stdin_and_to_codex_as_files() {
     assert_eq!(t.read("stdin"), "看图");
     let args = t.args();
     assert!(args.windows(2).any(|w| w == ["-m", "m1"]), "{args:?}");
+    // the operation reads finished as soon as its end is journaled; the attempt's events reach the
+    // sink after that, the end last
+    t.until("a_2's events delivered", |t| {
+        t.sink.events().into_iter().any(|e| {
+            e.subject == Subject::Execution(exec("a_2"))
+                && matches!(e.body, EventBody::AttemptEnded { .. })
+        })
+    })
+    .await;
     // two whole messages: two messages
     let started = t
         .sink

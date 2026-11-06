@@ -22,7 +22,9 @@
 // $FAKE_ACP_CODEX=1 reports the model as a config option instead of `models`.
 // $FAKE_ACP_GRANDCHILD=<file> starts `sleep 300` (same process group) and writes its pid there.
 // $FAKE_ACP_STUBBORN=<file> does the same with a `sleep 300` that ignores SIGTERM.
-import { appendFileSync, writeFileSync } from "node:fs"
+// $FAKE_ACP_FLOOD_GATE=<file>: @flood sends chunk i only once the number in <file> is above i (the
+// test raises it as the client keeps up, so the flood never outruns it however slow the machine).
+import { appendFileSync, readFileSync, writeFileSync } from "node:fs"
 import { spawn } from "node:child_process"
 
 const log = (o) => { if (process.env.FAKE_ACP_LOG) appendFileSync(process.env.FAKE_ACP_LOG, JSON.stringify(o) + "\n") }
@@ -54,6 +56,8 @@ async function turn(text) {
     if (cmd === "sleep" && (await sleep(Number(a) || 1000))) return { ...out, stopReason: "cancelled" }
     if (cmd === "say") say(a)
     if (cmd === "flood") for (let i = 0; i < 2000; i++) {
+      const gate = process.env.FAKE_ACP_FLOOD_GATE
+      while (gate && !(Number(readFileSync(gate, "utf8")) > i)) if (await sleep(5)) return { ...out, stopReason: "cancelled" }
       say("x".repeat(4096))
       if (a && i % 8 === 7 && (await sleep(Number(a)))) return { ...out, stopReason: "cancelled" }
     }

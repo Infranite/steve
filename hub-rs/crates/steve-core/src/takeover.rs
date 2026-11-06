@@ -71,6 +71,17 @@ pub(crate) enum Probing {
     Requirement,
 }
 
+/// A look at the remote under way.
+#[derive(Debug, Clone)]
+pub(crate) struct Looking {
+    /// When it started.
+    since: i64,
+    /// Which look it is (`State::probe_seq`).
+    seq: u64,
+    /// What it looks at may have moved since it started ([`Tx::forget_probe`]): its answer is not kept.
+    stale: bool,
+}
+
 /// A probe's result, kept for the `HEAD` it looked at.
 #[derive(Debug, Clone)]
 pub(crate) struct Probed {
@@ -270,24 +281,34 @@ impl Tx<'_> {
                 (cwd, head)
             }
         };
-        /* one look at a time: the stop or the wait it was for is still the same one */
+        /* one look at a time: the stop or the wait it was for is still the same one. A look begun
+         * before what it looks at moved is not that one: a fresh look starts when it comes back */
         let t = now();
         if self
             .st
             .probing
             .get(&i.id)
-            .is_some_and(|since| t - since < PROBE_STUCK_MS)
+            .is_some_and(|l| t - l.since < PROBE_STUCK_MS)
         {
             return true;
         }
-        self.st.probing.insert(i.id.clone(), t);
+        self.st.probe_seq += 1;
+        let seq = self.st.probe_seq;
+        self.st.probing.insert(
+            i.id.clone(),
+            Looking {
+                since: t,
+                seq,
+                stale: false,
+            },
+        );
         let (core, item, rule) = (self.c.clone(), i.id.clone(), rule.to_string());
         if let Some(g) = node {
             detach(move || {
                 let (head, p) = crate::node_git::probe_now(&*g, &item, &rule);
-                if let Err(e) = core
-                    .tx()
-                    .probed(&item, &rule, head.unwrap_or_default(), p, why)
+                if let Err(e) =
+                    core.tx()
+                        .probed(&item, seq, &rule, head.unwrap_or_default(), p, why)
                 {
                     tracing::warn!(item, "completion probe: {e}");
                 }
@@ -296,43 +317,67 @@ impl Tx<'_> {
         }
         detach(move || {
             let p = crate::upstream::probe(Path::new(&cwd), &rule);
-            if let Err(e) = core.tx().probed(&item, &rule, head, p, why) {
+            if let Err(e) = core.tx().probed(&item, seq, &rule, head, p, why) {
                 tracing::warn!(item, "completion probe: {e}");
             }
         });
         true
     }
 
-    /// A probe came back.
+    /// What the item's remote looked like may have changed (a turn ended: it may have merged or
+    /// tagged): the next check looks afresh, and a look already under way, which may have read the
+    /// remote before that, is not kept when it comes back.
+    pub(crate) fn forget_probe(&mut self, item_id: &str) {
+        self.st.probed.remove(item_id);
+        if let Some(l) = self.st.probing.get_mut(item_id) {
+            l.stale = true;
+        }
+    }
+
+    /// A probe came back (`seq`: which look it was).
     pub(crate) fn probed(
         &mut self,
         item_id: &str,
+        seq: u64,
         rule: &str,
         head: String,
         p: Probe,
         why: Probing,
     ) -> Result<()> {
-        self.st.probing.remove(item_id);
-        self.st.probed.insert(
-            item_id.into(),
-            Probed {
-                at: now(),
-                head,
-                probe: p.clone(),
-            },
-        );
+        /* a look overtaken by a newer one (begun after this one seemed lost) leaves the answer to it;
+         * one that was forgotten while it ran is not kept */
+        let (overtaken, keep) = match self.st.probing.get(item_id) {
+            Some(l) if l.seq == seq => {
+                let keep = !l.stale;
+                self.st.probing.remove(item_id);
+                (false, keep)
+            }
+            _ => (true, false),
+        };
+        if keep {
+            self.st.probed.insert(
+                item_id.into(),
+                Probed {
+                    at: now(),
+                    head,
+                    probe: p.clone(),
+                },
+            );
+        }
         let Some(i) = self.db().item(item_id)? else {
             return Ok(());
         };
         match why {
             Probing::Requirement => {
+                /* an answer not kept decides nothing: the closing is checked again, which looks afresh */
                 if i.phase == CLOSING {
                     self.lc_try_close(item_id)?;
                 }
             }
             Probing::Stall { session, stop } => {
                 /* something happened while Steve looked: it is not the stop that was looked at any more */
-                if i.phase != ACTIVE
+                if overtaken
+                    || i.phase != ACTIVE
                     || i.is_settled()
                     || self.busy(&session)
                     || !self.db().queued(&session)?.is_empty()

@@ -297,6 +297,21 @@ pub(super) fn merge_and_tag(x: &Remote, tag: Option<&str>) {
     }
 }
 
+/// Waits for the first look at the remote after the acceptance to come back, before anything was
+/// merged: the agent is told what is still missing, and its turn runs. Merging before that look
+/// answered would race it: it may read the remote before or after the push.
+pub(super) fn told_what_is_missing(k: &Kit, x: &Remote) {
+    assert!(
+        k.wait(|| {
+            k.rt.prompts_of(&x.session)
+                .last()
+                .is_some_and(|p| p.contains("按这个项目的约定"))
+        }),
+        "{:?}",
+        k.status(&x.item)
+    );
+}
+
 pub(super) fn op_states(k: &Kit, item: &str) -> Vec<(String, String)> {
     let i = k.db().item(item).unwrap().unwrap();
     k.db()
@@ -341,7 +356,7 @@ fn accepted_it_waits_for_the_merge_and_the_tag_then_closes_without_the_build() {
     // the tag is pushed: the close needs nothing else, the build is followed on its own
     g(&x.repo, &["tag", "-a", "v1.0.0", "-m", "v1.0.0", "main"]);
     g(&x.repo, &["push", "-q", "origin", "v1.0.0"]);
-    k.core.tx().st.probed.clear();
+    k.core.tx().forget_probe(&x.item);
     k.core.lifecycle_tick().unwrap();
     assert!(
         k.wait(|| k.phase(&x.item) == "closed"),
@@ -368,6 +383,37 @@ fn accepted_it_waits_for_the_merge_and_the_tag_then_closes_without_the_build() {
         t.iter()
             .any(|l| l.contains("开始单独跟踪 v1.0.0 的 Release 构建"))
     );
+}
+
+#[test]
+fn a_look_begun_before_a_turn_ended_is_not_kept_a_fresh_one_decides() {
+    let k = kit(2);
+    let x = remote(&k, upstream::DONE_TAG, true);
+    told_what_is_missing(&k, &x);
+    let seq = {
+        let mut t = k.core.tx();
+        // a look starts, and can't come back while this section holds the lock
+        t.forget_probe(&x.item);
+        t.lc_try_close(&x.item).unwrap();
+        assert!(t.st.probing.contains_key(&x.item));
+        let seq = t.st.probe_seq;
+        // meanwhile the agent merged and tagged, and its turn ended: what that look read is old
+        merge_and_tag(&x, Some("v1.0.0"));
+        t.forget_probe(&x.item);
+        seq
+    };
+    // its answer is not kept: the closing is checked again, with a look of its own (no tick needed)
+    assert!(
+        k.wait(|| {
+            k.core.tx().st.probing.is_empty()
+                && op_states(&k, &x.item)
+                    .first()
+                    .is_some_and(|o| o.1 == "succeeded")
+        }),
+        "{:?}",
+        op_states(&k, &x.item)
+    );
+    assert_eq!(k.core.tx().st.probe_seq, seq + 1, "one fresh look");
 }
 
 #[test]
@@ -605,11 +651,7 @@ fn tagged_with_build(tag: &str) -> (Kit, Remote, PathBuf, tempfile::TempDir) {
         true,
         Some("修复偶发失败的测试，并确认构建通过"),
     );
-    assert!(k.wait(|| {
-        k.rt.prompts_of(&x.session)
-            .last()
-            .is_some_and(|p| p.contains("按这个项目的约定"))
-    }));
+    told_what_is_missing(&k, &x);
     let p = k.rt.prompts_of(&x.session).pop().unwrap();
     assert!(
         p.contains("事项的目标要求构建通过，构建成功后才算完成"),
@@ -617,7 +659,7 @@ fn tagged_with_build(tag: &str) -> (Kit, Remote, PathBuf, tempfile::TempDir) {
     );
     // merged and tagged while the agent's turn still runs: then it ends
     merge_and_tag(&x, Some(tag));
-    k.core.tx().st.probed.clear();
+    k.core.tx().forget_probe(&x.item);
     k.core.lifecycle_tick().unwrap();
     assert!(k.wait(|| {
         let _ = k.core.lifecycle_tick();
@@ -673,7 +715,7 @@ fn a_goal_that_asks_for_the_build_to_pass_stays_open_while_it_runs_and_when_it_f
     // you decide it needs no build after all: marking it done is the evidence
     k.finish(&x.item).unwrap();
     k.rt.end_turn(&k.core, &x.session, "cancelled", None);
-    k.core.tx().st.probed.clear();
+    k.core.tx().forget_probe(&x.item);
     k.core.lifecycle_tick().unwrap();
     assert!(
         k.wait(|| {
@@ -757,8 +799,9 @@ fn a_goal_that_asks_for_this_instance_waits_until_it_runs_the_tag() {
         let i = k.db().item(&x.item).unwrap().unwrap();
         let line = k.core.tx().proof_line(&i).unwrap().unwrap();
         assert!(line.contains("runs on this Steve instance"), "{line}");
+        told_what_is_missing(&k, &x);
         merge_and_tag(&x, Some("v1.3.0"));
-        k.core.tx().st.probed.clear();
+        k.core.tx().forget_probe(&x.item);
         k.core.lifecycle_tick().unwrap();
         assert!(k.wait(|| {
             let _ = k.core.lifecycle_tick();
@@ -831,14 +874,10 @@ fn another_project_is_not_checked_against_this_instance() {
     let i = k.db().item(&x.item).unwrap().unwrap();
     let line = k.core.tx().proof_line(&i).unwrap().unwrap();
     assert!(line.contains("check it there"), "{line}");
+    told_what_is_missing(&k, &x);
     merge_and_tag(&x, Some("v1.0.0"));
-    k.core.tx().st.probed.clear();
-    // the remote is looked at in the background; once the release is seen there and the agent's
-    // turn has ended, a tick closes the item
-    assert!(k.wait(|| {
-        let _ = k.core.lifecycle_tick();
-        !op_states(&k, &x.item).is_empty() && op_states(&k, &x.item)[0].1 == "succeeded"
-    }));
+    // the agent's turn ends: the remote is looked at afresh in the background, and a tick after
+    // it answered closes the item
     k.rt.end_turn(&k.core, &x.session, "end_turn", None);
     assert!(
         k.wait(|| {
@@ -910,8 +949,16 @@ fn a_goal_that_asks_for_an_actual_operation_needs_one_in_the_delivery() {
     stop(&k, &x.session, "合并了，tag 推了。");
     assert!(k.wait(|| !steve_lines(&k, &x.item).is_empty()));
     assert_eq!(k.phase(&x.item), "active");
-    let p = k.rt.prompts_of(&x.session).pop().unwrap();
-    assert!(p.contains("还要求实际操作验证"), "{p}");
+    // the timeline line comes first, the prompt to the agent a moment later
+    assert!(
+        k.wait(|| k
+            .rt
+            .prompts_of(&x.session)
+            .last()
+            .is_some_and(|p| p.contains("还要求实际操作验证"))),
+        "{:?}",
+        k.rt.prompts_of(&x.session).last()
+    );
 }
 
 /// An item whose goal asks for the build to pass, delivered in a project with `rule` on `url`,
@@ -929,8 +976,12 @@ fn stopped_after_merging(rule: &str, url: &str, tag: Option<&str>) -> (Kit, Remo
     k.rt.end_turn(&k.core, &x.session, "end_turn", None);
     k.core.tx().lc_invalidate(&x.item, "有新的交付").unwrap();
     merge_and_tag(&x, tag);
+    let before = k.rt.prompts_of(&x.session).len();
     stop(&k, &x.session, "合并了。");
-    assert!(k.wait(|| !steve_lines(&k, &x.item).is_empty()));
+    // the timeline line comes first, the prompt to the agent a moment later: wait for both
+    assert!(k.wait(|| {
+        !steve_lines(&k, &x.item).is_empty() && k.rt.prompts_of(&x.session).len() > before
+    }));
     (k, x)
 }
 
@@ -1013,8 +1064,9 @@ fn a_build_goal_whose_tag_build_cant_be_followed_rests_on_the_delivery() {
     // an accepted delivery (with its build check) closes on the tag, and says what stood for the build
     let k = kit(2);
     let x = remote_at(&k, upstream::DONE_TAG, true, Some("确认构建通过"), url);
+    told_what_is_missing(&k, &x);
     merge_and_tag(&x, Some("v2.1.0"));
-    k.core.tx().st.probed.clear();
+    k.core.tx().forget_probe(&x.item);
     k.core.lifecycle_tick().unwrap();
     assert!(k.wait(|| {
         let _ = k.core.lifecycle_tick();

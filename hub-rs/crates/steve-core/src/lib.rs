@@ -129,8 +129,10 @@ pub(crate) struct State {
     /// (the gateway-retry wait ends with a turn end), so a lifecycle stop never cancels under the lock.
     /// The turn is frozen when the stop is asked for, so a turn started meanwhile is left alone.
     cancels: Vec<(runtime::Running, String)>,
-    /// Items whose completion rule is being checked against the remote now, since when (`takeover`).
-    probing: HashMap<String, i64>,
+    /// Items whose completion rule is being checked against the remote now (`takeover`).
+    probing: HashMap<String, takeover::Looking>,
+    /// Numbers the looks in `probing`, so a look that comes back is told from a newer one.
+    probe_seq: u64,
     /// The last completion probe of each item.
     probed: HashMap<String, takeover::Probed>,
     /// Followed builds: when each was last looked at.

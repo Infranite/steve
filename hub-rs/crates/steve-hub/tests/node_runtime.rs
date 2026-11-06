@@ -4188,6 +4188,8 @@ async fn reconcile_replays_what_the_hub_missed_before_the_first_new_plan() {
         "SELECT (SELECT MAX(rowid) FROM events WHERE kind='text') < (SELECT rowid FROM events WHERE kind='user' AND data LIKE '%second%')",
     );
     assert!(first, "applied before the next turn was planned");
+    // told after its event's commit: the next turn may be sent before that
+    until("turn end", || !h.ends().is_empty()).await;
     assert_eq!(h.ends(), [(S.to_string(), "end_turn".to_string(), None)]);
     let dup: i64 = h.q("SELECT COUNT(*) FROM (SELECT 1 FROM events WHERE source_node IS NOT NULL GROUP BY source_node,source_stream,source_epoch,source_seq HAVING COUNT(*)>1)");
     assert_eq!(dup, 0);
@@ -4443,6 +4445,8 @@ async fn reconcile_replays_an_event_bigger_than_a_page() {
     h.restart_hub().await;
     let bigs: i64 = h.q("SELECT COUNT(*) FROM events WHERE kind='text' AND data LIKE '%bigxxx%'");
     assert_eq!(bigs, 1, "replayed once");
+    // the end is told once its event's commit is over, which reconcile does not wait for
+    until("turn end", || !h.ends().is_empty()).await;
     assert_eq!(h.ends(), [(S.to_string(), "end_turn".to_string(), None)]);
     until("the journal drained", || h.node.unacked() == 0).await;
 }
@@ -4516,7 +4520,12 @@ async fn stop_retires_an_unknown_open_once_and_the_queued_message_opens_it_again
         "the target is never sent again"
     );
     assert_eq!(h.count("open_session"), 2, "opened again under a new id");
-    assert_eq!(h.state_of(&format!("op_open_{S}")), "finished");
+    // the target's end comes on the Node's event stream, not with the recover's answer that
+    // reopened the session: it may be applied after the queued turn started
+    until("the target's end applied", || {
+        h.state_of(&format!("op_open_{S}")) == "finished"
+    })
+    .await;
     assert_eq!(h.systems("不算成功"), 1, "never said to have succeeded");
     h.finish_last().await;
     assert_eq!(h.ends().len(), 1);
@@ -4596,7 +4605,12 @@ async fn stop_retires_an_unknown_configure_and_the_reopen_carries_the_change() {
         1,
         "the target is never sent again"
     );
-    assert_eq!(h.cfg_states(), ["finished"]);
+    // the target's end comes on the Node's event stream, not with the recover's answer that
+    // reopened the session: it may be applied after the queued turn started
+    until("the target's end applied", || {
+        h.cfg_states() == ["finished"]
+    })
+    .await;
     assert_eq!(h.count("open_session"), 2);
     assert_eq!(
         h.last_mode(),

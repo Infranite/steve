@@ -1,0 +1,12 @@
+# cargo-nextest, as the release workflow runs it (`--profile ci`). Every test runs in its own
+# process. A test that fails and then passes on a retry is reported, not hidden:
+# `scripts/nextest-summary.py` lists each one in the job summary.
+
+[profile.ci]
+retries = 2
+fail-fast = false
+failure-output = "immediate-final"
+
+[profile.ci.junit]
+# hub-rs/target/nextest/ci/junit.xml
+path = "junit.xml"

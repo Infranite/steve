@@ -46,10 +46,22 @@ jobs:
           python3 ops/test-local-release-journal.py
           python3 -m py_compile ops/local-release.py ops/test-local-release.py
           bash ops/check-migration-lock.sh "$GITHUB_REF_NAME"
+          python3 scripts/test-nextest-summary.py
       - run: npm ci
       - run: npm run check && npm run test:web && npm run build:web
+      - uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
+        with:
+          tool: cargo-nextest@0.9.151
+      # One process per test. A test that fails and then passes on a retry passes the gate and is
+      # listed in the job summary; a test that fails all three tries fails the release.
       - name: Rust tests
-        run: cargo test --locked --manifest-path hub-rs/Cargo.toml --workspace --no-fail-fast
+        id: rust-tests
+        run: cargo nextest run --locked --manifest-path hub-rs/Cargo.toml --workspace --profile ci --retries 2 --no-fail-fast
+      - name: Rust doctests
+        run: cargo test --locked --manifest-path hub-rs/Cargo.toml --workspace --doc
+      - name: Rust tests that passed only on retry
+        if: ${{ !cancelled() && steps.rust-tests.outcome != 'skipped' }}
+        run: python3 scripts/nextest-summary.py hub-rs/target/nextest/ci/junit.xml
       - name: Build Hub
         shell: bash
         run: STEVE_RELEASE_VERSION="${GITHUB_REF_NAME#v}" STEVE_RELEASE_COMMIT="$GITHUB_SHA" cargo build --locked --release --manifest-path hub-rs/Cargo.toml -p steve-hub

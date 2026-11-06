@@ -331,6 +331,11 @@ mod tests {
             Ok(())
         })
         .unwrap();
+        // the clock counts milliseconds: the tick must come at least one after the batch opened
+        let opened_by = steve_store::now();
+        while steve_store::now() <= opened_by {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
         let w = tick(&s).unwrap();
         assert_eq!(
             w,

@@ -22,6 +22,7 @@ use std::sync::{Arc, OnceLock, Weak};
 use async_trait::async_trait;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
+use steve_flow::nodes::Rule;
 use steve_flow::nodes::action::{ItemCreate, ItemLink};
 use steve_flow::{Action, FlowResult, FlowSetup, ItemFinder, NodeOutcome, RunCx};
 use steve_modules::Caller;
@@ -128,6 +129,12 @@ impl Action for DraftReply {
             Some(_) => Err("reply_all 只能是 true 或 false".into()),
         }
     }
+    fn rules(&self) -> Vec<Rule> {
+        vec![Rule::new(
+            &[],
+            "bot 是 Bot id，instruction 最多 2000 字，reply_all 只能是 true 或 false",
+        )]
+    }
 
     fn outcome(&self) -> Option<&'static str> {
         Some("need")
@@ -229,6 +236,9 @@ impl Action for Archive {
     fn validate(&self, cfg: &Value) -> Result<(), String> {
         no_config(cfg)
     }
+    fn rules(&self) -> Vec<Rule> {
+        vec![Rule::new(&[], "除了 action 没有别的配置")]
+    }
     async fn run(&self, cx: &mut RunCx<'_>, _cfg: &Value, _input: &Value) -> NodeOutcome {
         let ws = cx.ws().to_string();
         let (_, msg) = match self.mail.trigger_message(&ws, cx.event()) {
@@ -254,6 +264,9 @@ impl Action for MarkRead {
     }
     fn validate(&self, cfg: &Value) -> Result<(), String> {
         no_config(cfg)
+    }
+    fn rules(&self) -> Vec<Rule> {
+        vec![Rule::new(&[], "除了 action 没有别的配置")]
     }
     async fn run(&self, cx: &mut RunCx<'_>, _cfg: &Value, _input: &Value) -> NodeOutcome {
         let ws = cx.ws().to_string();
@@ -399,6 +412,9 @@ impl<A: Action> Action for WithMailLinks<A> {
     }
     fn validate(&self, cfg: &Value) -> Result<(), String> {
         self.0.validate(cfg)
+    }
+    fn rules(&self) -> Vec<Rule> {
+        self.0.rules()
     }
     fn outcome(&self) -> Option<&'static str> {
         self.0.outcome()

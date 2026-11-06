@@ -7,10 +7,16 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::nodes::NodeRegistry;
+use crate::nodes::{NodeRegistry, Rule};
 
 /// Nodes per graph.
 pub const MAX_NODES: usize = 60;
+/// Characters of a node's title, a node's note and an edge's label.
+pub const TITLE_MAX: usize = 60;
+pub const NOTE_MAX: usize = 200;
+pub const EDGE_LABEL_MAX: usize = 40;
+/// The node id pattern.
+pub const ID_PATTERN: &str = r"^[a-z][a-z0-9_]{0,15}$";
 
 /// One node.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -79,7 +85,7 @@ pub struct Graph {
 
 fn id_re() -> &'static Regex {
     static RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"^[a-z][a-z0-9_]{0,15}$").expect("id regex"))
+    RE.get_or_init(|| Regex::new(ID_PATTERN).expect("id regex"))
 }
 
 impl Graph {
@@ -145,6 +151,82 @@ impl Graph {
     }
 }
 
+/// Is this a valid node id?
+pub fn valid_id(id: &str) -> bool {
+    id_re().is_match(id)
+}
+
+/// What [`validate`] enforces of the graph as a whole, for the draft prompt.
+pub fn rules() -> Vec<Rule> {
+    vec![
+        Rule::new(
+            &["flow.graph.bad_format", "flow.graph.bad_config"],
+            "图的格式：{\"nodes\":[{\"id\",\"kind\",\"title\",\"note\",\"config\":{…},\"on_fail\"?}],\"edges\":[{\"from\",\"to\",\"label\"}]}，config 是对象",
+        ),
+        Rule::new(
+            &["flow.graph.one_trigger", "flow.graph.edge_into_trigger"],
+            "恰好一个 trigger 节点，且没有连进它的线",
+        ),
+        Rule::new(
+            &["flow.graph.bad_id", "flow.graph.duplicate_id"],
+            format!(
+                "id 唯一，匹配 {ID_PATTERN}（小写字母开头，只有小写字母、数字、下划线，最多 16 个字符）"
+            ),
+        ),
+        Rule::new(
+            &["flow.graph.text_too_long"],
+            format!("title 最多 {TITLE_MAX} 字，note 最多 {NOTE_MAX} 字"),
+        ),
+        Rule::new(
+            &[
+                "flow.graph.edge_to_nowhere",
+                "flow.graph.duplicate_edge",
+                "flow.graph.edge_label_too_long",
+            ],
+            format!("边两端的节点都要存在，同样的边不要重复，label 最多 {EDGE_LABEL_MAX} 字"),
+        ),
+        Rule::new(&["flow.graph.cycle"], "不能有环，也不能连到自己"),
+        Rule::new(&["flow.graph.unreachable"], "每个节点都要从 trigger 连到"),
+        Rule::new(
+            &["flow.graph.too_many_nodes"],
+            format!("最多 {MAX_NODES} 个节点"),
+        ),
+        Rule::new(
+            &["flow.graph.unknown_kind", "flow.graph.node_error"],
+            "kind 只能是下面列出的节点种类，config 要符合该种类的规则",
+        ),
+        Rule::new(
+            &[],
+            "filter、table、bot、approve 的出边 label 要和它们的分支名一致",
+        ),
+        Rule::new(
+            &["flow.graph.bad_on_fail"],
+            "on_fail 只能是 stop、continue 或 branch:<label>，branch 的 label 要是这个节点某条出边的 label",
+        ),
+        Rule::new(
+            &["flow.node.text_list_only", "flow.node.text_only"],
+            "config 里的文字字段只能是字符串，列表字段只能是字符串列表",
+        ),
+        Rule::new(
+            &[
+                "flow.expr.bad_template",
+                "flow.expr.unclosed_quote",
+                "flow.expr.bad_number",
+                "flow.expr.bad_word",
+                "flow.expr.bad_symbol",
+                "flow.expr.bad_regex",
+                "flow.expr.unclosed_paren",
+                "flow.expr.unclosed_list",
+                "flow.expr.incomplete",
+                "flow.expr.empty",
+                "flow.expr.too_long",
+                "flow.expr.trailing",
+            ],
+            "模板写 {{event.<路径>}}、{{steps.<id>.<路径>}}、{{sender.name}}，路径只有字母、数字、_、-；条件表达式的引号、括号、[] 要配对",
+        ),
+    ]
+}
+
 /// Validation; the error is the `400` text.
 pub fn validate(v: &Value, reg: &NodeRegistry) -> Result<Graph, String> {
     let g = Graph::from_value(v)?;
@@ -162,7 +244,7 @@ pub fn validate(v: &Value, reg: &NodeRegistry) -> Result<Graph, String> {
         if !ids.insert(n.id.as_str()) {
             return Err(steve_i18n::t!("flow.graph.duplicate_id", id = n.id));
         }
-        if n.title.chars().count() > 60 || n.note.chars().count() > 200 {
+        if n.title.chars().count() > TITLE_MAX || n.note.chars().count() > NOTE_MAX {
             return Err(steve_i18n::t!("flow.graph.text_too_long", node = n.name()));
         }
     }
@@ -187,7 +269,7 @@ pub fn validate(v: &Value, reg: &NodeRegistry) -> Result<Graph, String> {
                 node = name_of(&g, &e.from)
             ));
         }
-        if e.label.chars().count() > 40 {
+        if e.label.chars().count() > EDGE_LABEL_MAX {
             return Err(steve_i18n::t!("flow.graph.edge_label_too_long"));
         }
         if !seen_edges.insert((e.from.as_str(), e.to.as_str(), e.label.as_str())) {
