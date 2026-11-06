@@ -101,6 +101,7 @@ fn spawn_hub(
         .env("STEVE_VAULT_KEYSTORE", "file")
         .env("STEVE_FORBID_REAL_HOSTS", "1")
         .env("STEVE_NO_RESUME", "1")
+        .env("STEVE_NODE_MODE", "off")
         .env("CLAUDE_CODE_EXECUTABLE", fake)
         .env("STEVE_ADAPTER_CLAUDE", "/usr/bin/false")
         .env("STEVE_ADAPTER_CODEX", "/usr/bin/false")

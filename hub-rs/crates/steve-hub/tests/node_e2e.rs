@@ -1,4 +1,4 @@
-//! The local Node (`STEVE_NODE_MODE=local`), end to end on the real `steve-hub` binary: a temp
+//! The local Node (`STEVE_NODE_MODE=local`, the default), end to end on the real `steve-hub` binary: a temp
 //! STEVE_HOME, its own port, the fake ACP agent (`steve-acp/tests/fake-acp.js`, which logs every
 //! message it gets), real HTTP. Covers D5's acceptance on one Hub home:
 //! - a session created with the Node on is bound to it and its transcript is stored as `steve.v1`;
@@ -7,7 +7,9 @@
 //! - while held (upgrade drain), a message is queued and not drained, and goes once released;
 //! - the Hub killed mid-turn comes back with the attempt `unknown` (awaiting reconciliation),
 //!   which is never re-run;
-//! - with `STEVE_NODE_MODE` off, a Node-bound session is parked, never handed to the legacy runner.
+//! - with `STEVE_NODE_MODE` off, a Node-bound session is parked, never handed to the legacy runner;
+//! - with `STEVE_NODE_MODE` unset the Node is on (the default); a `STEVE_NO_RESUME` copy boots
+//!   with it off instead, and its Node-bound sessions are parked.
 //!
 //! And on a second home, with a short attempt deadline, a card nobody answers expires; on a
 //! third, an idle Node session goes through two Hub restarts without a resume or a restart notice.
@@ -149,7 +151,13 @@ impl Drop for Hub {
     }
 }
 
+/// The Hub with the local Node explicitly on (`local`) or off (`off`, the rollback).
 fn spawn(h: &Home, node: bool, extra: &[(&str, &str)]) -> Hub {
+    spawn_mode(h, Some(if node { "local" } else { "off" }), extra)
+}
+
+/// The Hub with `STEVE_NODE_MODE` set to `mode`, or unset (the default since B6) for `None`.
+fn spawn_mode(h: &Home, mode: Option<&str>, extra: &[(&str, &str)]) -> Hub {
     let fake = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../steve-acp/tests/fake-acp.js"
@@ -171,6 +179,8 @@ fn spawn(h: &Home, node: bool, extra: &[(&str, &str)]) -> Hub {
         .env("STEVE_ADAPTER_CLAUDE", fake)
         .env("STEVE_ADAPTER_CODEX", "/usr/bin/false")
         .env_remove("STEVE_NODE_MODE")
+        .env_remove("STEVE_NODE")
+        .env_remove("STEVE_NODE_JOBS")
         .env_remove("STEVE_NODE_TURN_LIMIT_MS")
         .env_remove("STEVE_IDLE_RELEASE_MS")
         .env_remove("STEVE_NO_RESUME")
@@ -191,8 +201,8 @@ fn spawn(h: &Home, node: bool, extra: &[(&str, &str)]) -> Hub {
                 .expect("hub log"),
         )
         .process_group(0);
-    if node {
-        c.env("STEVE_NODE_MODE", "local");
+    if let Some(mode) = mode {
+        c.env("STEVE_NODE_MODE", mode);
     }
     for (k, v) in extra {
         c.env(k, v);
@@ -941,6 +951,78 @@ async fn an_idle_node_session_is_let_go_and_the_next_message_resumes_it() {
     );
 }
 
+/// B6: with `STEVE_NODE_MODE` unset the local Node is on and a new session binds to it. A
+/// `STEVE_NO_RESUME` copy of that home boots with the Node off instead of failing, and parks the
+/// Node-bound session; an explicit `local` on such a copy refuses to boot.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_node_is_the_default() {
+    let h = Home::new();
+    let mut hub = spawn_mode(&h, None, &[]);
+    serving(&h).await;
+    let c = Client::login(&h).await;
+    let n = node_health_until(&h, 30, |n| n["reconciled"] == true).await;
+    assert_eq!(
+        (&n["enabled"], &n["reconciled"]),
+        (&json!(true), &json!(true)),
+        "healthz with STEVE_NODE_MODE unset: {n}"
+    );
+    let sid = c.item(&h, "默认验收 @say default-node-B6").await;
+    assert!(
+        wait(30, || steve_v1(&h, &sid, "default-node-B6") > 0).await,
+        "the reply stored as steve.v1; log:\n{}",
+        hub_log(&h)
+    );
+    assert_eq!(
+        h.count(
+            "SELECT COUNT(*) FROM runtime_sessions WHERE session_id=? AND node_id='local'",
+            &sid
+        ),
+        1,
+        "bound to the local Node"
+    );
+    hub.kill();
+    drop(hub);
+
+    // a STEVE_NO_RESUME copy: an explicit local is a boot error
+    let mut refused = spawn_mode(&h, Some("local"), &[("STEVE_NO_RESUME", "1")]);
+    assert!(
+        wait(30, || matches!(refused.0.try_wait(), Ok(Some(_)))).await,
+        "an explicit local on a STEVE_NO_RESUME copy exits"
+    );
+    assert!(
+        hub_log(&h).contains("STEVE_NO_RESUME"),
+        "says why; log:\n{}",
+        hub_log(&h)
+    );
+    drop(refused);
+
+    // unset: it boots with the Node off, and the bound session is parked
+    let spawns = h.spawns();
+    let _hub = spawn_mode(&h, None, &[("STEVE_NO_RESUME", "1")]);
+    serving(&h).await;
+    let c = Client::login(&h).await;
+    let n = node_health(&h).await;
+    assert_eq!(
+        n["enabled"], false,
+        "healthz on a STEVE_NO_RESUME copy: {n}"
+    );
+    let r = c.say(&sid, "副本验收-C6 @say copy").await;
+    assert_eq!(r["result"], "queued", "{r}");
+    assert!(
+        wait(10, || {
+            h.count(
+                "SELECT COUNT(*) FROM events WHERE session_id=? AND kind='system' AND json_extract(data,'$.parked')=1",
+                &sid,
+            ) > 0
+        })
+        .await,
+        "told it is parked"
+    );
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(h.got("副本验收-C6"), 0, "no runner got it");
+    assert_eq!(h.spawns(), spawns, "no adapter started for it");
+}
+
 /// A new session the Node path cannot express (its bot's permission mode is one the Node has no
 /// mode for, `dontAsk`) stays on the legacy runner with the Node on, and healthz counts it: a fallback since boot and a legacy
 /// session that could still run.
@@ -1186,7 +1268,8 @@ async fn legacy_sessions_move_to_the_node_at_an_idle_boundary() {
         .expect("queued");
     }
 
-    let hub = spawn(&h, true, &env);
+    // the upgrade as an install without STEVE_NODE_MODE sees it: the Node by default
+    let hub = spawn_mode(&h, None, &env);
     serving(&h).await;
     let n = node_health_until(&h, 30, |n| n["retired"] == 1).await;
     assert_eq!(n["retired"], 1, "{n}");

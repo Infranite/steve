@@ -890,6 +890,8 @@ pub(crate) mod tests {
             ("STEVE_ADAPTER_CLAUDE", "/usr/bin/false".into()),
             ("STEVE_ADAPTER_CODEX", "/usr/bin/false".into()),
             ("STEVE_WEB_DIR", h.join("no-web").display().to_string()),
+            // the test opens the Node's tools port itself, so the Hub builds no Node
+            ("STEVE_NODE_MODE", "off".into()),
         ]
         .into_iter()
         .collect();
@@ -898,7 +900,7 @@ pub(crate) mod tests {
         for d in [&cfg.data_dir, &cfg.worktrees, &cfg.scratch] {
             std::fs::create_dir_all(d).unwrap();
         }
-        // STEVE_NODE_MODE is unset: the Hub's ToolService as it would be installed for a Node
+        // STEVE_NODE_MODE=off: the Hub's ToolService as it would be installed for a Node
         let w = super::super::wire_with(&cfg, &crate::bus::Bus::new(), Arc::new(get)).unwrap();
         let store = Store::open(cfg.db_path(), steve_store::FnPublisher(|_| {})).unwrap();
         let home = cfg.data_dir.join("node");

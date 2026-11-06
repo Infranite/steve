@@ -1,0 +1,3 @@
+- 本机 Node 现在是默认的运行方式：不设置 `STEVE_NODE_MODE` 时就是 `local`，新会话在 Node 上运行。已有的旧运行器会话不需要手动处理，会在空闲时自动转到 Node 上（下一条消息到来时，用原来的 harness 会话 id 接着原来的对话），正在跑的一轮会先在旧运行器上走完再转。Steve 自己的判断调用和就地研究也默认作为 Node 任务运行（不设置 `STEVE_NODE_JOBS` 时等于 `think,research`；设为空或 `off` 则仍在 Hub 里运行）。
+- 需要回退时设置 `STEVE_NODE_MODE=off`：已经在 Node 上的会话这时只排队、不会交给旧运行器，重新开启后接着发。`STEVE_NODE_MODE` 只接受 `local` 和 `off`，写错时 Hub 不启动并提示原因，不会悄悄当成关闭。0.2.50 的写法 `STEVE_NODE=local` 仍然有效。
+- 用 `STEVE_NO_RESUME` 启动的数据库副本默认不开本机 Node，照常启动；在这样的副本上明确设置 `STEVE_NODE_MODE=local` 仍会拒绝启动。

@@ -160,16 +160,11 @@ fn node_runtime(
     jobs: &mut Vec<modules::Job>,
 ) -> Result<Option<NodeHost>, BackendError> {
     let kinds = node_jobs(vars);
-    if !local_node_mode(vars) {
-        if kinds != NodeJobs::default() {
-            tracing::warn!("STEVE_NODE_JOBS is ignored without STEVE_NODE_MODE=local");
+    if !local_node_mode(vars, cfg.no_resume)? {
+        if vars("STEVE_NODE_JOBS").is_some_and(|v| !v.trim().is_empty()) {
+            tracing::warn!("STEVE_NODE_JOBS is ignored while the local Node is off");
         }
         return Ok(None);
-    }
-    if cfg.no_resume {
-        return Err(BackendError::msg(
-            "STEVE_NODE_MODE=local is disabled on STEVE_NO_RESUME copies",
-        ));
     }
     let node_id = steve_node_api::NodeId::new("local").expect("constant node id");
     let home = cfg.data_dir.join("node");
@@ -254,17 +249,39 @@ fn node_runtime(
     }))
 }
 
-/// Whether the local Node is switched on: `STEVE_NODE_MODE=local`, or `STEVE_NODE=local` (how
-/// 0.2.50 spelled it, kept as a deprecated alias when STEVE_NODE_MODE is unset).
-fn local_node_mode(vars: &Vars) -> bool {
-    match vars("STEVE_NODE_MODE").filter(|v| !v.trim().is_empty()) {
-        Some(mode) => mode.trim() == "local",
-        None if vars("STEVE_NODE").as_deref() == Some("local") => {
+/// Whether the local Node is switched on. It is the default (B6): an unset `STEVE_NODE_MODE`
+/// means `local`, and `off` is the rollback (sessions already bound to the Node are parked then,
+/// never handed to the legacy runner). `STEVE_NODE=local`, how 0.2.50 spelled it, still counts as
+/// an explicit `local` when STEVE_NODE_MODE is unset. A `STEVE_NO_RESUME` copy (a DB copy that
+/// must not touch the live harnesses) resolves to off by default; an explicit `local` there is a
+/// boot error. Any other value is a boot error too, rather than a guess.
+fn local_node_mode(vars: &Vars, no_resume: bool) -> Result<bool, BackendError> {
+    let explicit_local = match vars("STEVE_NODE_MODE")
+        .map(|v| v.trim().to_ascii_lowercase())
+        .filter(|v| !v.is_empty())
+    {
+        Some(mode) => match mode.as_str() {
+            "local" => true,
+            "off" => return Ok(false),
+            other => {
+                return Err(BackendError::msg(format!(
+                    "STEVE_NODE_MODE={other:?} is not a mode: use local (the default) or off"
+                )));
+            }
+        },
+        None if vars("STEVE_NODE").as_deref().map(str::trim) == Some("local") => {
             tracing::warn!("STEVE_NODE=local is deprecated; set STEVE_NODE_MODE=local instead");
             true
         }
-        None => false,
+        // the default
+        None => return Ok(!no_resume),
+    };
+    if explicit_local && no_resume {
+        return Err(BackendError::msg(
+            "STEVE_NODE_MODE=local is disabled on STEVE_NO_RESUME copies",
+        ));
     }
+    Ok(explicit_local)
 }
 
 /// Think jobs the local Node may run at once: no limit, as in process. A bound here would turn a
@@ -274,8 +291,9 @@ fn local_node_mode(vars: &Vars) -> bool {
 /// next boot.
 pub const LOCAL_JOB_CAPACITY: u32 = u32::MAX;
 
-/// Which of Steve's own model work may run as local Node jobs (`STEVE_NODE_JOBS=think,research`,
-/// on top of `STEVE_NODE_MODE=local`). Off unless named.
+/// Which of Steve's own model work runs as local Node jobs while the local Node is on
+/// (`STEVE_NODE_JOBS`). Unset means both, `think,research` (B6); an empty value, `off` or `none`
+/// means neither, so they run in the Hub's process as before.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct NodeJobs {
     think: bool,
@@ -283,16 +301,18 @@ struct NodeJobs {
 }
 
 fn node_jobs(vars: &Vars) -> NodeJobs {
+    let Some(list) = vars("STEVE_NODE_JOBS") else {
+        return NodeJobs {
+            think: true,
+            research: true,
+        };
+    };
     let mut j = NodeJobs::default();
-    for k in vars("STEVE_NODE_JOBS")
-        .unwrap_or_default()
-        .split(',')
-        .map(str::trim)
-        .filter(|k| !k.is_empty())
-    {
+    for k in list.split(',').map(str::trim).filter(|k| !k.is_empty()) {
         match k {
             "think" => j.think = true,
             "research" => j.research = true,
+            "off" | "none" => {}
             other => tracing::warn!("STEVE_NODE_JOBS: unknown job kind {other:?}"),
         }
     }
@@ -714,12 +734,23 @@ mod tests {
     }
 
     #[test]
-    fn node_jobs_are_off_unless_named() {
-        assert_eq!(node_jobs(&vars(&[])), NodeJobs::default());
-        assert_eq!(
-            node_jobs(&vars(&[("STEVE_NODE_JOBS", "")])),
-            NodeJobs::default()
-        );
+    fn node_jobs_default_to_think_and_research() {
+        let both = NodeJobs {
+            think: true,
+            research: true,
+        };
+        // unset: both run on the Node (B6)
+        assert_eq!(node_jobs(&vars(&[])), both);
+        // named off: in process
+        let none: [&'static [(&str, &str)]; 4] = [
+            &[("STEVE_NODE_JOBS", "")],
+            &[("STEVE_NODE_JOBS", "off")],
+            &[("STEVE_NODE_JOBS", "none")],
+            &[("STEVE_NODE_JOBS", " , ")],
+        ];
+        for kv in none {
+            assert_eq!(node_jobs(&vars(kv)), NodeJobs::default(), "{kv:?}");
+        }
         assert_eq!(
             node_jobs(&vars(&[("STEVE_NODE_JOBS", "think")])),
             NodeJobs {
@@ -729,19 +760,16 @@ mod tests {
         );
         assert_eq!(
             node_jobs(&vars(&[("STEVE_NODE_JOBS", " research , think,bogus")])),
-            NodeJobs {
-                think: true,
-                research: true
-            }
+            both
         );
     }
 
-    /// With the local Node on, Steve's think calls go to it only when STEVE_NODE_JOBS names
-    /// `think`; otherwise they run in process and no job is written.
+    /// With the local Node on, Steve's think calls go to it when STEVE_NODE_JOBS is unset (the
+    /// default) or names `think`; with `research` alone they run in process and no job is written.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn think_runs_on_the_node_only_with_steve_node_jobs() {
         steve_modules::net::forbid_in_this_process();
-        for jobs in [None, Some("think")] {
+        for jobs in [Some("research"), Some("think"), None] {
             let dir = tempfile::tempdir().unwrap();
             let h = dir.path().canonicalize().unwrap();
             let claude = h.join("claude");
@@ -765,10 +793,10 @@ mod tests {
                 ("STEVE_ADAPTER_CLAUDE", "/usr/bin/false".into()),
                 ("STEVE_ADAPTER_CODEX", "/usr/bin/false".into()),
                 ("STEVE_WEB_DIR", h.join("no-web").display().to_string()),
-                ("STEVE_NODE_MODE", "local".into()),
             ]
             .into_iter()
             .collect();
+            // the local Node by default: STEVE_NODE_MODE unset
             if let Some(j) = jobs {
                 vars.insert("STEVE_NODE_JOBS", j.into());
             }
@@ -806,24 +834,52 @@ mod tests {
                     )?)
                 })
                 .unwrap();
-            assert_eq!(n, if jobs.is_some() { 1 } else { 0 }, "{jobs:?}");
+            let on_node = jobs != Some("research");
+            assert_eq!(n, if on_node { 1 } else { 0 }, "{jobs:?}");
         }
     }
 
     #[test]
+    fn the_local_node_is_the_default() {
+        let mode = |kv: &'static [(&'static str, &'static str)], no_resume: bool| {
+            local_node_mode(&vars(kv), no_resume).map_err(|e| e.to_string())
+        };
+        // unset → local; off → off
+        assert_eq!(mode(&[], false), Ok(true));
+        assert_eq!(mode(&[("STEVE_NODE_MODE", "")], false), Ok(true));
+        assert_eq!(mode(&[("STEVE_NODE_MODE", "off")], false), Ok(false));
+        assert_eq!(mode(&[("STEVE_NODE_MODE", " Local ")], false), Ok(true));
+        // a STEVE_NO_RESUME copy: off by default, an explicit local fails boot
+        assert_eq!(mode(&[], true), Ok(false));
+        assert_eq!(mode(&[("STEVE_NODE_MODE", "off")], true), Ok(false));
+        assert!(
+            mode(&[("STEVE_NODE_MODE", "local")], true)
+                .unwrap_err()
+                .contains("STEVE_NO_RESUME")
+        );
+        assert!(mode(&[("STEVE_NODE", "local")], true).is_err());
+        // a typo is not silently off (which would park every Node session) nor silently local
+        assert!(
+            mode(&[("STEVE_NODE_MODE", "loacl")], false)
+                .unwrap_err()
+                .contains("loacl")
+        );
+    }
+
+    #[test]
     fn local_node_mode_keeps_the_0_2_50_spelling() {
-        assert!(local_node_mode(&vars(&[("STEVE_NODE_MODE", "local")])));
+        let mode = |kv: &'static [(&'static str, &'static str)]| {
+            local_node_mode(&vars(kv), false).unwrap()
+        };
+        assert!(mode(&[("STEVE_NODE_MODE", "local")]));
         // a 0.2.50 config upgraded in place keeps its local Node
-        assert!(local_node_mode(&vars(&[("STEVE_NODE", "local")])));
-        // a Node.js path is not the switch, and STEVE_NODE_MODE wins when both are set
-        assert!(!local_node_mode(&vars(&[(
-            "STEVE_NODE",
-            "/opt/x/bin/node"
-        )])));
-        assert!(!local_node_mode(&vars(&[
+        assert!(mode(&[("STEVE_NODE", "local")]));
+        // a Node.js path is not the switch (the default applies), and STEVE_NODE_MODE wins when
+        // both are set
+        assert!(mode(&[("STEVE_NODE", "/opt/x/bin/node")]));
+        assert!(!mode(&[
             ("STEVE_NODE", "local"),
             ("STEVE_NODE_MODE", "off")
-        ])));
-        assert!(!local_node_mode(&vars(&[])));
+        ]));
     }
 }

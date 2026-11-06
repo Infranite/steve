@@ -83,6 +83,8 @@ async function startSide(name, kind, seedFirst = false) {
     STEVE_DEV_LOGIN: "1", STEVE_REPO: "/nonexistent", STEVE_VERSION: "contract", STEVE_VAULT_KEYSTORE: "file", STEVE_FORBID_REAL_HOSTS: "1", STEVE_WEB_DIR: web, CODEX_HOME: join(fake, ".codex"),
     CLAUDE_CODE_EXECUTABLE: join(here, "fake-claude.mjs"), STEVE_ADAPTER_CLAUDE: "/usr/bin/false", STEVE_ADAPTER_CODEX: "/usr/bin/false",
     STEVE_MODELS_FAST: "fake-fast", STEVE_MODELS_SMART: "fake-smart", STEVE_IDLE_RELEASE_MS: "600000",
+    // the legacy runner, as the TS Hub: the local Node is the default since B6
+    STEVE_NODE_MODE: "off",
   }
   for (const k of ["STEVE_PUBLIC_URLS", "STEVE_OIDC_ISSUER", "STEVE_OIDC_CLIENT_ID", "STEVE_OIDC_CLIENT_SECRET", "STEVE_OIDC_CLIENT_SECRET_FILE", "STEVE_DEBUG_ROUTE"]) delete env[k]
   const log = join(root, "hub.log")

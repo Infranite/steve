@@ -89,9 +89,8 @@ fn spawn(home: &Path, name: &str, node: bool) -> Hub {
                 .expect("hub log"),
         )
         .process_group(0);
-    if node {
-        c.env("STEVE_NODE_MODE", "local");
-    }
+    // off: the Hub reads the files itself (the local Node is the default since B6)
+    c.env("STEVE_NODE_MODE", if node { "local" } else { "off" });
     Hub {
         child: c.spawn().expect("spawn hub"),
         base,

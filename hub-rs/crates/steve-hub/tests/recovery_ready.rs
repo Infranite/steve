@@ -145,6 +145,8 @@ fn spawn(h: &Home, upgrade: Option<&str>) -> Hub {
         .env("STEVE_ADAPTER_CLAUDE", fake)
         .env("STEVE_ADAPTER_CODEX", "/usr/bin/false")
         .env_remove("STEVE_NO_RESUME")
+        // the legacy runner: the local Node is the default since B6
+        .env("STEVE_NODE_MODE", "off")
         .env_remove("STEVE_UPGRADE_ID")
         .env_remove("CLAUDE_CONFIG_DIR")
         .env_remove("CODEX_HOME")

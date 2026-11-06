@@ -738,7 +738,7 @@ mod host_tests {
         }
     }
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn default_off_and_real_local_host_with_fake_adapter() {
+    async fn explicit_off_and_real_local_host_with_fake_adapter() {
         let dir = tempfile::tempdir().unwrap();
         let mut cfg = crate::config::Config::from_vars(|k| match k {
             "STEVE_HOME" => Some(dir.path().join("steve").to_string_lossy().into()),
@@ -748,7 +748,9 @@ mod host_tests {
         .unwrap();
         let store = Store::open(dir.path().join("hub.sqlite3"), steve_store::NoPublisher).unwrap();
         store.ensure_workspace().unwrap();
-        let off: Vars = Arc::new(|_| None);
+        // the rollback: STEVE_NODE_MODE=off builds no Node; neither does an unset mode on a
+        // STEVE_NO_RESUME copy
+        let off: Vars = Arc::new(|k| (k == "STEVE_NODE_MODE").then(|| "off".into()));
         let mut jobs = vec![];
         assert!(
             super::super::node_runtime(
@@ -762,6 +764,21 @@ mod host_tests {
             .unwrap()
             .is_none()
         );
+        let unset: Vars = Arc::new(|_| None);
+        cfg.no_resume = true;
+        assert!(
+            super::super::node_runtime(
+                &cfg,
+                &store,
+                Arc::new(Ends),
+                &unset,
+                &super::super::node_secrets::NodeSecrets::new(),
+                &mut jobs
+            )
+            .unwrap()
+            .is_none()
+        );
+        cfg.no_resume = false;
         assert!(jobs.is_empty());
         assert!(!cfg.data_dir.join("node").exists());
         let on: Vars = Arc::new(|k| (k == "STEVE_NODE_MODE").then(|| "local".into()));

@@ -248,7 +248,7 @@ async fn finishing_through_the_api_runs_an_item_flow_once_through_the_outbox() {
     );
 }
 
-/// healthz's `node` block without a Node (STEVE_NODE_MODE unset): off, nothing reconciled, and the
+/// healthz's `node` block without a Node (a STEVE_NO_RESUME copy, STEVE_NODE_MODE unset): off, nothing reconciled, and the
 /// store's counts as they are: Node-bound sessions with queued messages are parked, and legacy
 /// sessions that could still run (and those with work in hand) are counted for the runner's removal.
 #[tokio::test(flavor = "multi_thread")]

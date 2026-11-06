@@ -87,6 +87,8 @@ async fn start() -> Env {
         ("STEVE_FORBID_REAL_HOSTS", "1".into()),
         // a fresh temp home, not a production copy: YOLO may be on
         ("STEVE_NO_RESUME", "0".into()),
+        // the legacy runner: the local Node is the default since B6
+        ("STEVE_NODE_MODE", "off".into()),
         ("CLAUDE_CODE_EXECUTABLE", "/usr/bin/false".into()),
         ("STEVE_ADAPTER_CLAUDE", fake.display().to_string()),
         ("STEVE_ADAPTER_CODEX", "/usr/bin/false".into()),
