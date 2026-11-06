@@ -2351,10 +2351,8 @@ impl EventSink for Counting {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sqlite_full_mid_turn_keeps_numbered_events_and_skips_no_seq() {
-    // gated: a flood that outruns the actor (one synchronous journal write per chunk, slow on a
-    // loaded machine) by a full ingress queue is stopped as an ingress overflow before the journal
-    // is ever full, which is not what this test is about. A pause alone does not bound that on a
-    // slow enough disk; the adapter sends a chunk only once fewer than `AHEAD` are not yet journaled.
+    // gated: the adapter sends a chunk only once fewer than `AHEAD` are not yet journaled, so how
+    // far the flood got when the disk fills does not depend on how fast the machine journals.
     const AHEAD: i64 = 24;
     let gate_dir = tempfile::tempdir().unwrap();
     let gate = gate_dir.path().join("flood-gate");
@@ -3811,10 +3809,10 @@ async fn batches_go_several_at_a_time_and_all_are_acknowledged() {
     let slow = Arc::new(Slow::default());
     n.connect(slow.clone(), None);
     ready(&n, "s_1").await;
-    // paced, so the harness never outruns the actor's ingress even on a slow CI runner (bursts of
-    // 10 calls every 30 ms overflowed its 64-slot queue there): small bursts, a longer pause
-    let group = ["@tool read Read"; 5].join(" ");
-    let prompt = vec![format!("{group} @sleep 60"); 120].join(" ");
+    // bursts of 10 calls every 30 ms: on a slow runner the actor falls behind them, and the
+    // harness waits for it (they once overflowed its 64-slot queue and cancelled the attempt)
+    let group = ["@tool read Read"; 10].join(" ");
+    let prompt = vec![format!("{group} @sleep 30"); 60].join(" ");
     let mut spec = turn("s_1", "t_1", "a_1", &prompt);
     spec.run.limits.max_output_bytes = 64 << 20;
     n.start_turn(now_cmd("op_t1", spec)).await.unwrap();
@@ -3856,6 +3854,137 @@ async fn batches_go_several_at_a_time_and_all_are_acknowledged() {
         assert_eq!(e.cursor.seq, *l + 1, "{:?}", e.cursor);
         *l = e.cursor.seq;
     }
+    n.shutdown().await;
+}
+
+/// A Node whose journal takes `ms` more for every write of data (as a slow disk's fsync does: each
+/// one asks for the free space first), blocking the session's actor meanwhile.
+fn slow_journal(t: &T, ms: u64) -> NodeConfig {
+    let mut cfg = t.config();
+    cfg.storage.free_space = Some(Arc::new(move || {
+        std::thread::sleep(Duration::from_millis(ms));
+        1 << 40
+    }));
+    cfg
+}
+
+/// A slow disk and a busy Hub put the Node behind a harness that writes a burst at once (100
+/// chunks, then 150 tool calls: several times what the actor's queue holds): the harness waits for it,
+/// and the attempt ends as it would have, every update delivered in order.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_slow_journal_and_hub_hold_the_harness_back_and_cancel_nothing() {
+    let t = T::new(&[]);
+    let n = LocalNode::open(slow_journal(&t, 2)).unwrap();
+    let slow = Arc::new(Slow::default());
+    n.connect(slow.clone(), None);
+    ready(&n, "s_1").await;
+    let prompt = format!("@drip 100 0 {}", ["@tool read Read"; 150].join(" "));
+    let mut spec = turn("s_1", "t_1", "a_1", &prompt);
+    spec.run.limits.max_output_bytes = 64 << 20;
+    n.start_turn(now_cmd("op_t1", spec)).await.unwrap();
+    let t0 = Instant::now();
+    let end = loop {
+        if let Some(c) = slow.hub.events().into_iter().find_map(|e| match e.body {
+            EventBody::AttemptEnded { completion } => Some(completion),
+            _ => None,
+        }) {
+            break c;
+        }
+        assert!(t0.elapsed() < Duration::from_secs(120), "the end");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    assert_eq!(end.outcome, Outcome::Succeeded, "{end:?}");
+    all_acknowledged(&n).await;
+    let events = slow.hub.events();
+    let text: String = events
+        .iter()
+        .filter_map(|e| match &e.body {
+            EventBody::TextDelta { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    let want: String = (0..100).map(|i| format!("t{i} ")).collect();
+    assert_eq!(text, want, "every chunk, in order");
+    let tools = events
+        .iter()
+        .filter(|e| matches!(e.body, EventBody::ToolChanged { .. }))
+        .count();
+    assert_eq!(tools, 300, "tool_call and its update, 150 times");
+    n.shutdown().await;
+}
+
+/// Control is never behind the harness's data: a cancel goes out at once and a shutdown ends
+/// while the harness waits on a full queue (the actor slowed by its journal); nothing waits forever.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cancel_and_a_shutdown_get_past_a_full_ingress_queue() {
+    let t = T::new(&[]);
+    let n = LocalNode::open(slow_journal(&t, 3)).unwrap();
+    n.connect(t.sink.clone(), None);
+    ready(&n, "s_1").await;
+    let mut spec = turn("s_1", "t_1", "a_1", "@flood 20");
+    spec.run.limits.max_output_bytes = 64 << 20;
+    n.start_turn(now_cmd("op_t1", spec)).await.unwrap();
+    t.until("the flood", |t| t.text().len() >= 16 * 4096).await;
+    let asked = Instant::now();
+    n.cancel(now_cmd(
+        "op_c",
+        Cancel {
+            target: OperationId::new("op_t1").unwrap(),
+            reason: "paused".into(),
+        },
+    ))
+    .await
+    .unwrap();
+    t.until("the cancel", |t| t.sent("session/cancel") == 1)
+        .await;
+    assert!(
+        asked.elapsed() < Duration::from_secs(3),
+        "{:?}",
+        asked.elapsed()
+    );
+    tokio::time::timeout(Duration::from_secs(15), n.shutdown())
+        .await
+        .expect("shutdown with the harness waiting on a full queue");
+    assert!(t.text().len() < 2000 * 4096, "cut short");
+}
+
+/// A harness the Node takes nothing from at all (its journal stuck, not slow) is still stopped,
+/// with why, once the queue was full for the stall limit; the actor is never wedged by it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_harness_stuck_behind_a_stuck_journal_is_stopped_with_why() {
+    let t = T::new(&[]);
+    let stuck: Arc<Mutex<Option<Instant>>> = Arc::default();
+    let mut cfg = t.config();
+    let s = stuck.clone();
+    cfg.storage.free_space = Some(Arc::new(move || {
+        // slow, and stuck for a while (past the stall limit); it comes back to end the attempt
+        std::thread::sleep(Duration::from_millis(1));
+        let until = *s.lock().unwrap();
+        while until.is_some_and(|u| Instant::now() < u) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        1 << 40
+    }));
+    cfg.storage.ingress_stall = Duration::from_secs(1);
+    let n = LocalNode::open(cfg).unwrap();
+    n.connect(t.sink.clone(), None);
+    ready(&n, "s_1").await;
+    let mut spec = turn("s_1", "t_1", "a_1", "@flood");
+    spec.run.limits.max_output_bytes = 64 << 20;
+    n.start_turn(now_cmd("op_t1", spec)).await.unwrap();
+    t.until("the flood", |t| t.text().len() > 64 * 4096).await;
+    *stuck.lock().unwrap() = Some(Instant::now() + Duration::from_secs(3));
+    t.until("the end", |t| !t.ended().is_empty()).await;
+    let end = &t.ended()[0];
+    assert_eq!(end.outcome, Outcome::Interrupted, "{end:?}");
+    let e = end.error.as_ref().unwrap();
+    assert_eq!(e.code, ErrorCode::Busy);
+    assert!(
+        e.safe_detail
+            .contains("took none of the harness's output for 1 s"),
+        "{e:?}"
+    );
+    assert!(t.text().len() < 2000 * 4096);
     n.shutdown().await;
 }
 

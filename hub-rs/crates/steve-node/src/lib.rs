@@ -193,6 +193,11 @@ pub struct Storage {
     /// Tests: the free bytes where worktrees go, instead of asking the filesystem.
     #[doc(hidden)]
     pub worktree_free: Option<Arc<dyn Fn() -> u64 + Send + Sync>>,
+    /// How long a running attempt's harness may wait for the Node to take any of its output (the
+    /// data queue full, not one slot freed) before the attempt is stopped: a journal or disk that is
+    /// stuck, not one that is slow. Being behind for less only slows the harness down (it blocks on
+    /// its stdout). 5 minutes.
+    pub ingress_stall: Duration,
 }
 
 impl Default for Storage {
@@ -204,6 +209,7 @@ impl Default for Storage {
             free_space: None,
             worktree_floor: 0,
             worktree_free: None,
+            ingress_stall: Duration::from_secs(300),
         }
     }
 }
