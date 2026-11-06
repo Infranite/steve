@@ -17,15 +17,13 @@ use tokio::sync::{mpsc, watch};
 use tokio::time::Instant;
 use tracing::Instrument;
 
-/// A Claude Code run that says nothing (no text, no thinking, no tool call, no event at all: it streams
-/// partial messages, so a working run is never this quiet) for this long is stuck and is ended. This is not
-/// a limit on how long a conversation may take: a run that keeps working never ends by time. Setting
-/// `thread.research.idle_seconds` overrides it (both harnesses). Decided by the user on 2026-11-06.
-pub const CLAUDE_IDLE: Duration = Duration::from_secs(180);
-/// The same for a Codex run, which reports a whole step at a time and can be silent for long while it
-/// works.
-pub const CODEX_IDLE: Duration = Duration::from_secs(600);
-/// After the harness closed its output it is ending: it gets this long to exit before it counts as stuck.
+/// A run whose harness says nothing (no text, no tool call, no event at all) for this long is stuck and is
+/// ended. This is not a limit on how long a conversation may take: a run that keeps working never ends by
+/// time. It is the same rule for every harness (API retries and context compaction can be silent for
+/// minutes); setting `thread.research.idle_seconds` overrides it.
+pub const DEFAULT_IDLE: Duration = Duration::from_secs(600);
+/// After the harness closed its output it is ending: by default it gets this long to exit before it
+/// counts as stuck ([`Budget::exit_wait`]).
 pub const EXIT_WAIT: Duration = Duration::from_secs(45);
 /// Default research models (`STEVE_MODELS_RESEARCH`), non-kiro.
 pub const DEFAULT_MODELS: &str = "claude-sonnet-5-5,claude-opus-5-5";
@@ -43,17 +41,10 @@ pub struct Budget {
     pub max_turns: Option<u32>,
     /// Tool calls counted by the Hub. `None`: none.
     pub max_tools: Option<u32>,
-    /// No output from the harness for this long: stuck, ended. `None`: the harness's own
-    /// ([`CLAUDE_IDLE`], [`CODEX_IDLE`]).
-    pub idle: Option<Duration>,
-}
-
-impl Budget {
-    /// The stall limit of a run on Codex (`codex`) or Claude Code.
-    pub fn idle_for(&self, codex: bool) -> Duration {
-        self.idle
-            .unwrap_or(if codex { CODEX_IDLE } else { CLAUDE_IDLE })
-    }
+    /// No output from the harness for this long: stuck, ended.
+    pub idle: Duration,
+    /// After the harness closed its output, how long it may take to exit before it counts as stuck.
+    pub exit_wait: Duration,
 }
 
 impl Default for Budget {
@@ -63,7 +54,8 @@ impl Default for Budget {
             soft: Duration::from_secs(90),
             max_turns: None,
             max_tools: None,
-            idle: None,
+            idle: DEFAULT_IDLE,
+            exit_wait: EXIT_WAIT,
         }
     }
 }
@@ -79,7 +71,8 @@ impl Budget {
             soft: n("soft_seconds").map_or(d.soft, Duration::from_secs),
             max_turns: n("turns").map(|x| x as u32).or(d.max_turns),
             max_tools: n("tools").map(|x| x as u32).or(d.max_tools),
-            idle: n("idle_seconds").map(Duration::from_secs).or(d.idle),
+            idle: n("idle_seconds").map_or(d.idle, Duration::from_secs),
+            exit_wait: d.exit_wait,
         }
     }
 }
@@ -1075,7 +1068,7 @@ async fn attempt(
     let _ = ctx.tx.send(ResearchEvent::Started { model });
     let mut lines = tokio::io::BufReader::new(stdout).lines();
     let mut stop_open = true;
-    let idle = ctx.budget.idle_for(ctx.codex);
+    let idle = ctx.budget.idle;
     let mut quiet_until = Instant::now() + idle;
     loop {
         tokio::select! {
@@ -1123,8 +1116,8 @@ async fn attempt(
     }
     // its output is closed: it is ending; a process that does not is as stuck as a silent one
     let wait_until = match ctx.deadline {
-        Some(d) => d.min(Instant::now() + EXIT_WAIT),
-        None => Instant::now() + EXIT_WAIT,
+        Some(d) => d.min(Instant::now() + ctx.budget.exit_wait),
+        None => Instant::now() + ctx.budget.exit_wait,
     };
     let status = match tokio::time::timeout_at(wait_until, child.wait()).await {
         Ok(Ok(s)) => s,
@@ -1396,12 +1389,8 @@ mod tests {
         // by default a run is not cut off by time, turns or tool calls; only the stall detector is on
         let d = Budget::default();
         assert_eq!((d.hard, d.max_turns, d.max_tools), (None, None, None));
-        assert_eq!(d.idle, None);
-        assert_eq!(
-            (d.idle_for(false), d.idle_for(true)),
-            (CLAUDE_IDLE, CODEX_IDLE)
-        );
-        assert_eq!(CLAUDE_IDLE, Duration::from_secs(180));
+        assert_eq!(d.idle, DEFAULT_IDLE);
+        assert_eq!(d.exit_wait, EXIT_WAIT);
         assert!((30..=60).contains(&EXIT_WAIT.as_secs()));
         assert_eq!(Budget::from_setting(&json!({})), d);
         // a limit in the setting is honoured as given, there is no ceiling above it
@@ -1410,12 +1399,7 @@ mod tests {
         );
         assert_eq!(b.hard, Some(Duration::from_secs(999)));
         assert_eq!((b.max_tools, b.max_turns), (Some(500), Some(10)));
-        assert_eq!(b.idle, Some(Duration::from_secs(30)));
-        assert_eq!(
-            b.idle_for(true),
-            Duration::from_secs(30),
-            "the setting counts for both"
-        );
+        assert_eq!(b.idle, Duration::from_secs(30));
     }
 
     fn cfg() -> ResearchConfig {
