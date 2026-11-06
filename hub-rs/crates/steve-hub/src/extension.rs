@@ -181,6 +181,12 @@ impl Assembly {
                 .of(id));
             }
         }
+        // the built-in `feishu.self` connections are polled by the runtime `feishu.bot` starts;
+        // without it they would be accepted and never read
+        let builtin = |id: &str| self.list.iter().any(|e| e.builtin && e.ext.id() == id);
+        if builtin("feishu.self") && !builtin("feishu.bot") {
+            return Err(ExtensionError::new("needs feishu.bot in the assembly").of("feishu.self"));
+        }
         Ok(())
     }
 
