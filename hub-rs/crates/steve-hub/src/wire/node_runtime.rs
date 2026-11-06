@@ -52,7 +52,9 @@ pub use heads::{
 pub use ledger::LedgerEntry;
 #[cfg(test)]
 pub(crate) use ledger::PUSH_DEADLINE;
-pub use node_jobs::NodePrint;
+pub use node_jobs::{
+    News, NodePrint, RESEARCH_GRANT, ResearchAttempt, ResearchFile, ResearchJobRun,
+};
 pub use workspace::WorkspaceFact;
 
 /// Retries of a turn after a passing failure (gateway 5xx) with no tool run, and their waits.
@@ -220,6 +222,9 @@ pub struct NodeRuntime {
     adopted: std::sync::atomic::AtomicU64,
     /// Sessions of the legacy runner ended since boot because they cannot run on this Node.
     retired: std::sync::atomic::AtomicU64,
+    /// Research runs that went in process since boot although research runs on this Node (a
+    /// directory under none of its roots, or the roots unreadable): `/healthz` shows them too.
+    research_fallbacks: AtomicU64,
     /// The callers waiting on think jobs of this Node ([`NodePrint`]).
     jobs: node_jobs::Waiters,
 }
@@ -343,6 +348,7 @@ impl NodeRuntime {
             fallbacks: std::sync::atomic::AtomicU64::new(0),
             adopted: std::sync::atomic::AtomicU64::new(0),
             retired: std::sync::atomic::AtomicU64::new(0),
+            research_fallbacks: AtomicU64::new(0),
             jobs: node_jobs::Waiters::default(),
         })
     }
@@ -412,6 +418,16 @@ impl NodeRuntime {
     /// How many legacy sessions were [`Self::retired_one`] since boot.
     pub fn retired(&self) -> u64 {
         self.retired.load(Ordering::Relaxed)
+    }
+
+    /// A research run went in process although research runs on this Node.
+    pub fn research_fell_back(&self) {
+        self.research_fallbacks.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// How many research runs [`Self::research_fell_back`] since boot.
+    pub fn research_fallbacks(&self) -> u64 {
+        self.research_fallbacks.load(Ordering::Relaxed)
     }
 
     /// An error if [`Self::stop`] was called.
@@ -3728,8 +3744,10 @@ fn system_in(tx: &Tx, session: &str, text: &str) -> Result<(), StoreError> {
 ///   claimed or submitted dispatch, a pending resume). Removing the runner needs both at 0.
 ///
 /// `fallbacks` (since boot) counts new sessions left on the legacy runner although the local Node
-/// was on. `adopted` / `retired` (since boot): legacy sessions moved onto the local Node at an idle
-/// boundary / ended because they cannot run there (B5). Public: no reason text, ids or paths, only states and counts.
+/// was on; `research_fallbacks` (since boot) research runs that went in process although research
+/// runs on the local Node. `adopted` / `retired` (since boot): legacy sessions moved onto the local
+/// Node at an idle boundary / ended because they cannot run there (B5). Public: no reason text, ids
+/// or paths, only states and counts.
 pub fn health(
     store: &Store,
     local: Option<&NodeRuntime>,
@@ -3777,6 +3795,7 @@ pub fn health(
         "fallbacks": local.map_or(0, |n| n.fallbacks()),
         "adopted": local.map_or(0, |n| n.adopted()),
         "retired": local.map_or(0, |n| n.retired()),
+        "research_fallbacks": local.map_or(0, |n| n.research_fallbacks()),
         "sessions": sessions,
         "open": open,
         "running": running,

@@ -171,9 +171,6 @@ fn node_runtime(
             "STEVE_NODE_MODE=local is disabled on STEVE_NO_RESUME copies",
         ));
     }
-    if kinds.research {
-        tracing::warn!("STEVE_NODE_JOBS=research: research does not run on the local Node yet");
-    }
     let node_id = steve_node_api::NodeId::new("local").expect("constant node id");
     let home = cfg.data_dir.join("node");
     let tools = node_tools::NodeTools::open(store.clone(), node_id.clone(), &home)
@@ -187,7 +184,12 @@ fn node_runtime(
                 .map_err(|e| BackendError::msg(e.to_string()))?,
             capacity: steve_node_api::Capacity {
                 sessions: 64,
-                jobs: if kinds.think { LOCAL_JOB_CAPACITY } else { 0 },
+                // think and research jobs share it
+                jobs: if kinds.think || kinds.research {
+                    LOCAL_JOB_CAPACITY
+                } else {
+                    0
+                },
                 // flow `cmd` steps (N0e-E6)
                 execs: 16,
             },
@@ -443,7 +445,10 @@ pub fn wire_assembly(
         core_cfg.models_research = list("STEVE_MODELS_RESEARCH");
     }
     core_cfg.models_check = list("STEVE_MODELS_CHECK");
-    let think_on_node = node_jobs(&vars).think;
+    let NodeJobs {
+        think: think_on_node,
+        research: research_on_node,
+    } = node_jobs(&vars);
     let mut node_jobs = vec![];
     let secrets = node_secrets::NodeSecrets::new();
     let node_host = node_runtime(cfg, &db, host.clone(), &vars, &secrets, &mut node_jobs)?;
@@ -544,11 +549,23 @@ pub fn wire_assembly(
     );
     research.models = core.config().models_research.clone();
     research.codex_executable = Some(cfg.codex_executable.clone().into());
-    core.set_researcher(Arc::new(research::ResearchAdapter::new(
-        research,
+    let mut adapter = research::ResearchAdapter::new(
+        research.clone(),
         steve_core::repo::Db::new(db.clone()),
         cfg.data_dir.clone(),
-    )));
+    );
+    // or each attempt as a job on the local Node (`STEVE_NODE_JOBS=research`), with the same
+    // harnesses, homes and limits; admission, the attempts' order and the books stay here
+    if let Some(h) = node_host.as_ref().filter(|_| research_on_node) {
+        tracing::info!("research runs as local Node jobs (STEVE_NODE_JOBS=research)");
+        h.node.enable_research(research);
+        let ws = workspaces.clone();
+        adapter = adapter.on_node(research::NodeResearch {
+            runtime: h.runtime.clone(),
+            roots: Arc::new(move || ws.local_roots().map_err(|e| e.to_string())),
+        });
+    }
+    core.set_researcher(Arc::new(adapter));
     let auth_cfg = steve_auth::AuthConfig::from_vars(|k| vars(k))
         .map_err(|e| BackendError::msg(format!("auth config: {e}")))?;
     let backend: Arc<dyn Backend> = Arc::new(store::StoreBackend::new(db.clone())?);

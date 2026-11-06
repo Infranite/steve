@@ -123,7 +123,7 @@ fn json_rpc(id: &Value, result: Value) -> Response {
 
 /// The user an agent works for. The Hub is single-user for now, so that is the workspace's owner (the
 /// first owner membership); with several users this becomes the item's requester.
-fn owner(store: &Store, ws: &str) -> Option<String> {
+pub(crate) fn owner(store: &Store, ws: &str) -> Option<String> {
     store
         .with_conn(|c| {
             use rusqlite::OptionalExtension;
