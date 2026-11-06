@@ -74,7 +74,8 @@ impl Extension for FeishuSelf {
             ChannelSide::new(feishu::user_decl(), user.clone())
                 .act_as_user(user.clone())
                 .profiles(user.clone())
-                .media(Arc::new(feishu::FeishuMedia::new(user.id()))),
+                .media(Arc::new(feishu::FeishuMedia::new(user.id())))
+                .history(user.clone()),
         )?;
         // the one its start goes with (an assembly wired again declares again)
         *self.user.lock().unwrap_or_else(|e| e.into_inner()) = Some(user);

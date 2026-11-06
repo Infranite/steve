@@ -44,6 +44,7 @@ api GET /contacts
 api GET /contacts/x
 api GET /conversations
 api GET /conversations/x/messages
+api GET /flow-settings/allow-private
 api GET /flows
 api GET /flows/x
 api GET /flows/x/runs
@@ -58,6 +59,7 @@ api GET /github/prs
 api GET /github/repos/x
 api GET /items/x/people
 api GET /kb/candidates
+api GET /kb/candidates/expired
 api GET /kb/docs
 api GET /kb/docs/x
 api GET /kb/mems
@@ -177,6 +179,7 @@ api POST /github/repos
 api POST /github/repos/x/sync
 api POST /items/x/people
 api POST /kb/candidates/resolve
+api POST /kb/candidates/x/restore
 api POST /kb/files
 api POST /kb/mems
 api POST /kb/notes
@@ -186,6 +189,7 @@ api POST /mail/accounts/x/sync
 api POST /mail/attachments/x/file
 api POST /mail/drafts
 api POST /mail/drafts/x/cancel
+api POST /mail/drafts/x/check
 api POST /mail/drafts/x/send
 api POST /mail/threads/x/archive
 api POST /mail/threads/x/draft
@@ -223,6 +227,7 @@ api POST /yolo/actions/x/now
 api POST /yolo/actions/x/undo
 api POST /yolo/resume
 api PUT /connections/x/credential
+api PUT /flow-settings/allow-private
 api PUT /flows/x
 api PUT /kb/notes/x
 api PUT /mail/drafts/x

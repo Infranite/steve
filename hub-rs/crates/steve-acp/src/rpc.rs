@@ -99,6 +99,18 @@ pub struct Conn {
     exited: watch::Receiver<bool>,
 }
 
+/// What an agent's harness never inherits from the Hub: the user's GitHub tokens and SSH agent,
+/// with which its shell could push or call GitHub as the user without going through Steve. The
+/// adapter outlives a YOLO switch, so they are left out whatever YOLO says; Steve's own pushes take
+/// their credential from the vault. `gh`'s own login (its keyring) is not touched.
+pub const AGENT_ENV_DROPPED: [&str; 5] = [
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "GH_ENTERPRISE_TOKEN",
+    "GITHUB_ENTERPRISE_TOKEN",
+    "SSH_AUTH_SOCK",
+];
+
 impl Conn {
     /// Spawns the adapter in its own process group, so that killing the group also takes down the
     /// harness it launches (claude under claude-agent-acp).
@@ -161,11 +173,20 @@ impl Conn {
             .process_group(0)
             // last line of defence if the runtime is dropped without shutdown()
             .kill_on_drop(true);
-        for key in [
-            "STEVE_UPGRADE_CONTROL_TOKEN",
-            "STEVE_SUPERVISOR_PID",
-            "STEVE_UPGRADE_ID",
-        ] {
+        // the upgrade channel, the key store and the secret files are the Hub's alone
+        let given = sp
+            .env
+            .iter()
+            .map(|(k, _)| std::ffi::OsString::from(k))
+            .filter(|k| {
+                k.to_str()
+                    .is_some_and(steve_vault::harness::hub_private_env)
+            });
+        for key in steve_vault::harness::hub_private_vars()
+            .into_iter()
+            .chain(given)
+            .chain(AGENT_ENV_DROPPED.into_iter().map(std::ffi::OsString::from))
+        {
             cmd.env_remove(key);
         }
         let mut child = cmd
@@ -490,6 +511,34 @@ mod control_tests {
             args: vec!["-c".into(), "test -z \"$STEVE_UPGRADE_CONTROL_TOKEN$STEVE_SUPERVISOR_PID$STEVE_UPGRADE_ID\" && touch clean".into()],
             cwd: dir.path().into(),
             env: ["STEVE_UPGRADE_CONTROL_TOKEN", "STEVE_SUPERVISOR_PID", "STEVE_UPGRADE_ID"].into_iter().map(|k|(k.into(), "synthetic".into())).collect(),
+            log_tag: "test".into(),
+        };
+        let conn = Conn::spawn(sp, |_, _| {}, || {}).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), conn.wait_exit())
+            .await
+            .unwrap();
+        assert!(dir.path().join("clean").exists());
+    }
+
+    #[tokio::test]
+    async fn adapters_never_receive_vault_or_secret_file_environment() {
+        let dir = tempfile::tempdir().unwrap();
+        let sp = Spawn {
+            program: "/bin/sh".into(),
+            args: vec![
+                "-c".into(),
+                "test -z \"$STEVE_OIDC_CLIENT_SECRET_FILE$STEVE_VAULT_KEYSTORE$OPENVIKING_KEY_FILE\" && test \"$KEEP\" = 1 && touch clean".into(),
+            ],
+            cwd: dir.path().into(),
+            env: [
+                ("STEVE_OIDC_CLIENT_SECRET_FILE", "/x/secrets/oidc"),
+                ("STEVE_VAULT_KEYSTORE", "keychain"),
+                ("OPENVIKING_KEY_FILE", "/x/secrets/ov"),
+                ("KEEP", "1"),
+            ]
+            .into_iter()
+            .map(|(k, v)| (k.into(), v.into()))
+            .collect(),
             log_tag: "test".into(),
         };
         let conn = Conn::spawn(sp, |_, _| {}, || {}).unwrap();

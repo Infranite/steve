@@ -45,11 +45,21 @@ const BUILD_EVERY_MS: i64 = 60_000;
 const BUILD_GIVE_UP_MS: i64 = 3 * 3_600_000;
 const GH_DEADLINE: Duration = Duration::from_secs(30);
 
+/// How much of the agent's last words is read for a report it stopped to give.
+pub(crate) const WHOLE_CHARS: usize = 6000;
+
 /// How the agent stopped.
 #[derive(Debug, Clone)]
 pub(crate) enum Stop {
-    /// A turn ended without a delivery, a question or a pending card: `why` is the card's text.
-    Stopped { why: String, last: String },
+    /// A turn ended without a delivery, a question or a pending card: `why` is the card's text,
+    /// `last` the agent's last words (their tail), `whole` what it said in the turn that ended (up to
+    /// [`WHOLE_CHARS`]), `answered_you` the turn answered what you asked it from the conversation.
+    Stopped {
+        why: String,
+        last: String,
+        whole: String,
+        answered_you: bool,
+    },
     /// The session sat idle with nothing going on (`crate::stall`).
     Idle { why: String },
 }
@@ -129,8 +139,17 @@ impl Tx<'_> {
         stop: Stop,
     ) -> Result<Option<String>> {
         let i = self.item(item_id)?;
-        if let Stop::Stopped { last, .. } = &stop
-            && crate::yolo::answer::looks_like_question(last).is_some()
+        /* it stopped on purpose — a question, an answer to what you asked it from the
+         * conversation, a plan or something for you to confirm — so it is yours, not continued */
+        if let Stop::Stopped {
+            last,
+            whole,
+            answered_you,
+            ..
+        } = &stop
+            && (crate::yolo::answer::looks_like_question(last).is_some()
+                || *answered_you
+                || stopped_to_report(whole))
         {
             return Ok(Some(stop.why().into()));
         }
@@ -492,10 +511,21 @@ impl Tx<'_> {
             };
             let build =
                 build_text(crate::proof::build_followed(rule, &p) && self.build_required(i)?);
+            let lane = self
+                .db()
+                .project(i.project_id.as_deref())?
+                .is_some_and(|p| crate::orchestrator::lane_releases(&p));
+            let how = if lane {
+                /* the lane merges, checks and tags: the agent only hands the branch over */
+                crate::orchestrator::publish_text(true, i.branch.as_deref().unwrap_or_default())
+            } else {
+                "推送、开 PR、合并、打 tag 是对外动作，先用 steve_request_approval 请求批准；"
+                    .into()
+            };
             self.send(
                 &to,
                 &format!(
-                    "验收通过。按这个项目的约定，{}后事项才算完成；现在还差：{}。推送、开 PR、合并、打 tag 是对外动作，先用 steve_request_approval 请求批准；{build}。做完后结束这一回合即可，Steve 会自己核对远端。",
+                    "验收通过。按这个项目的约定，{}后事项才算完成；现在还差：{}。{how}{build}。做完后结束这一回合即可，Steve 会自己核对远端。",
                     rule_text(rule),
                     p.summary()
                 ),
@@ -671,6 +701,35 @@ fn build_text(required: bool) -> &'static str {
     }
 }
 
+/// Words a heading of a report the agent stopped to give has: a plan, or something for the user to
+/// confirm or decide.
+const REPORT_HEADS: [&str; 6] = [
+    "方案",
+    "待确认",
+    "待你确认",
+    "需要你确认",
+    "待决定",
+    "需要你决定",
+];
+
+/// The agent's message has a heading of a plan or of something for you to confirm (`## 方案`,
+/// `**待确认**`, `方案：`): it stopped to report, not because it lost its way.
+pub(crate) fn stopped_to_report(text: &str) -> bool {
+    text.lines().any(|l| {
+        let l = l.trim();
+        let heading = l.starts_with('#')
+            || (l.starts_with("**") && l.ends_with("**") && l.len() > 4)
+            || ((l.ends_with('：') || l.ends_with(':')) && l.chars().count() <= 20);
+        if !heading {
+            return false;
+        }
+        let head = l
+            .trim_start_matches('#')
+            .trim_matches(|c: char| c == '*' || c == ':' || c == '：' || c.is_whitespace());
+        head.chars().count() <= 20 && REPORT_HEADS.iter().any(|w| head.contains(w))
+    })
+}
+
 /// What the continue says: why Steve stepped in, what it found, what is left, how not to repeat work.
 /// `build`: the goal asks for the build the tag starts to pass.
 fn continue_text(
@@ -684,6 +743,7 @@ fn continue_text(
         Stop::Stopped { .. } => "（Steve）你这一回合结束了，但没有交付也没有提问。".to_string(),
         Stop::Idle { .. } => "（Steve）会话停了一会儿，没有在运行，也没有交付或提问。".to_string(),
     };
+    s.push_str("如果你是有意停下来汇报、出方案或等用户决定，用 steve_ask 提问，不要直接结束回合。");
     if let (Some(rule), Some(p)) = (rule, p) {
         s.push_str(&format!(
             "按这个项目的约定，{}就算完成，{}；Steve 刚核对过远端：{}。",

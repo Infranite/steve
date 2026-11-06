@@ -51,6 +51,8 @@ export default {
     body: "正文",
     edited: "你改过正文，发出的是你改过的版本。",
     unchecked: "没有做披露检查",
+    check: "检查披露",
+    checked: "披露检查做完了",
     leak_other: "可能泄露 {{count}} 处",
     /* flagged by the check without any spans to count */
     leakUncounted: "可能泄露 处",

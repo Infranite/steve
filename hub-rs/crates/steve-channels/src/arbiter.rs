@@ -117,6 +117,104 @@ pub fn from_you(
     }
 }
 
+/// How many merges [`from_owner`] follows from a sender's contact (a chain is never this long).
+const MERGE_HOPS: usize = 16;
+
+/// Is the sender one of `users` (the owner of the receiving connection, the workspace's owner)
+/// however the adapter named them: the sender's contact is a user's “我” or was merged into one,
+/// or one of the sender's handles (primary, aliases, their per-connection ids) is a handle of an
+/// account of that “我” (or of a contact merged into it), one of its aliases, or the user's email.
+/// The core's backstop for adapters that hand your own messages over under a handle Steve did not
+/// know as yours.
+pub fn from_owner(
+    c: &Connection,
+    ws: &str,
+    users: &[String],
+    sender_party: Option<&str>,
+    sender: &crate::channel::Sender,
+) -> ChannelResult<bool> {
+    let mut mes: Vec<(String, String)> = Vec::new();
+    for u in users {
+        if let Some(id) = c
+            .query_row(
+                "SELECT id FROM parties WHERE workspace_id = ? AND user_id = ?",
+                rusqlite::params![ws, u],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?
+        {
+            mes.push((id, u.clone()));
+        }
+    }
+    if mes.is_empty() {
+        return Ok(false);
+    }
+    // the sender's contact, following merges
+    let mut cur = sender_party.map(String::from);
+    for _ in 0..MERGE_HOPS {
+        let Some(p) = cur else { break };
+        if mes.iter().any(|(m, _)| *m == p) {
+            return Ok(true);
+        }
+        cur = c
+            .query_row("SELECT merged_into FROM parties WHERE id = ?", [&p], |r| {
+                r.get::<_, Option<String>>(0)
+            })
+            .optional()?
+            .flatten();
+    }
+    // the sender's handles
+    let seen: Vec<String> = std::iter::once(&sender.handle)
+        .chain(sender.aliases.iter())
+        .flat_map(|h| std::iter::once(&h.handle).chain(h.extra.iter()))
+        .map(|h| h.trim().to_lowercase())
+        .filter(|h| !h.is_empty())
+        .collect();
+    if seen.is_empty() {
+        return Ok(false);
+    }
+    for (me, user) in &mes {
+        let mut known: Vec<String> = Vec::new();
+        let mut st = c.prepare_cached(
+            "WITH RECURSIVE ids(id) AS (SELECT ?2 UNION SELECT p.id FROM parties p JOIN ids ON p.merged_into = ids.id)
+             SELECT h.handle FROM account_handles h JOIN accounts a ON a.id = h.account_id
+              WHERE h.workspace_id = ?1 AND a.party_id IN (SELECT id FROM ids)
+             UNION SELECT a.handle FROM accounts a WHERE a.workspace_id = ?1 AND a.party_id IN (SELECT id FROM ids)",
+        )?;
+        for h in st.query_map(rusqlite::params![ws, me], |r| r.get::<_, String>(0))? {
+            known.push(h?.trim().to_lowercase());
+        }
+        let aliases: Option<String> = c
+            .query_row("SELECT aliases FROM parties WHERE id = ?", [me], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        known.extend(
+            aliases
+                .and_then(|a| serde_json::from_str::<Vec<String>>(&a).ok())
+                .unwrap_or_default()
+                .into_iter()
+                .map(|a| a.trim().to_lowercase()),
+        );
+        if let Some(email) = c
+            .query_row("SELECT email FROM users WHERE id = ?", [user], |r| {
+                r.get::<_, Option<String>>(0)
+            })
+            .optional()?
+            .flatten()
+        {
+            known.push(email.trim().to_lowercase());
+        }
+        if seen
+            .iter()
+            .any(|h| known.iter().any(|k| !k.is_empty() && k == h))
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// Your `/bot` command in `space`: the instruction after the trigger word, when the sender is you
 /// ([`from_you`]) — on your own account or received by a bot — the trigger is on and its scope (`*`,
 /// `dm:*`, space ids) covers this space. Leading mentions are skipped (`@Steve /bot …`); what Steve

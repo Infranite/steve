@@ -124,6 +124,11 @@ pub fn text(v: &Value) -> String {
 
 /// Expands `{{path}}` in `tpl`. `{{secrets.…}}` stays as written.
 pub fn render(tpl: &str, scope: &Scope) -> String {
+    render_with(tpl, scope, |v| v)
+}
+
+/// [`render`], with every expanded value passed through `wrap` (to quote what came from outside).
+pub fn render_with(tpl: &str, scope: &Scope, wrap: impl Fn(String) -> String) -> String {
     let mut out = String::with_capacity(tpl.len());
     let mut rest = tpl;
     while let Some(i) = rest.find("{{") {
@@ -137,7 +142,7 @@ pub fn render(tpl: &str, scope: &Scope) -> String {
         if path.starts_with("secrets.") {
             out.push_str(&rest[i..i + 2 + j + 2]);
         } else {
-            out.push_str(&text(&scope.get(path)));
+            out.push_str(&wrap(text(&scope.get(path))));
         }
         rest = &after[j + 2..];
     }

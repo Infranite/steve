@@ -1,7 +1,7 @@
 //! YOLO Y5 with a fake release script (it writes `releases/last.json` and exits, like ops/release.sh
 //! for a failure before the restart): the user's own Steve is released after the cool-down, a script
 //! elsewhere stays with the user, nothing is approved while a release runs, a failed release goes back
-//! to the bot once, B1 trips, and the spacing rule holds.
+//! to the bot once, B1 trips, and the spacing rule makes a card wait.
 
 use serde_json::{Value, json};
 use steve_store::yolo as repo;
@@ -371,7 +371,7 @@ fn a_release_without_a_result_trips_b1_at_once() {
 }
 
 #[test]
-fn spacing_and_rebase_returns_leave_the_card_with_you() {
+fn spacing_waits_and_rebase_returns_leave_the_card_with_you() {
     let t = t();
     let own = project(&t, &t.kit.home().join("ops"), "Steve");
     // a YOLO release approved five minutes ago
@@ -399,11 +399,18 @@ fn spacing_and_rebase_returns_leave_the_card_with_you() {
     t.yolo.finish(&a.id, "decided", None).unwrap();
     t.clock.advance(300_000);
     let (_, _, d) = releasing_item(&t, &own);
+    // too soon: the card waits for the gap, nothing is left to you
+    assert!(t.engine.consider(&d).unwrap().is_none());
+    assert!(t.actions(&d).is_empty());
+    assert_eq!(t.decision(&d).status, "open");
+    // the gap passed: the release is scheduled like any other
+    t.clock.advance(10 * 60_000);
     let x = t.engine.consider(&d).unwrap().unwrap();
     assert_eq!(
         (x.outcome.as_str(), x.rule.as_str()),
-        ("declined", "release.spacing")
+        ("scheduled", "release.self")
     );
+    t.engine.cancel(WS, &x.id).unwrap();
 
     // three rebase conflicts handed back: the fourth release card stays with you, the item leaves YOLO
     t.clock.advance(20 * 60_000);

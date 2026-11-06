@@ -77,6 +77,8 @@ export const flowApi = {
   runFlow: (id: string) => post<{ run_id: string }>(`/flows/${enc(id)}/run`),
   flowRuns: (id: string, limit = 10) => get<Run[]>(`/flows/${enc(id)}/runs` + qs({ limit })),
   run: (id: string) => get<Run>(`/runs/${enc(id)}`),
+  allowPrivate: () => get<{ hosts: string[] }>("/flow-settings/allow-private"),
+  setAllowPrivate: (hosts: string[]) => put<{ hosts: string[] }>("/flow-settings/allow-private", { hosts }),
   cancelRun: (id: string) => post<Run>(`/runs/${enc(id)}/cancel`),
 
   schedules: () => get<Schedule[]>("/schedules"),

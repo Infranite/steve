@@ -539,6 +539,28 @@ async fn a_timeout_reads_as_in_process() {
     until("the harness gone", || !alive(pid)).await;
 }
 
+/// #9: a timeout ends the fallback chain in process and on the Node alike: the next model is not tried
+/// (it would wait as long), and the failure says it timed out.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_timeout_ends_the_chain_on_both_paths() {
+    let h = Local::new().await;
+    let t = Duration::from_millis(1500);
+    for gw in [h.legacy(&["m1", "m2"]), h.node(&["m1", "m2"])] {
+        let a = gw
+            .attempt("@hang", Tier::Smart, t, &ThinkTools::None, None)
+            .await;
+        assert!(a.result.is_err());
+        assert_eq!(a.attempts, 1, "{:?}", a.failures);
+        assert_eq!(a.failures.len(), 1);
+        assert!(
+            a.failures[0].starts_with("m1: [timeout] Command timed out"),
+            "{:?}",
+            a.failures
+        );
+        h.reset();
+    }
+}
+
 /// The same calls over the fake Node, driven by hand: the draft as it is written, the answer from
 /// the completion, its usage booked.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

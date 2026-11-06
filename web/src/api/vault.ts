@@ -28,7 +28,7 @@ export const vaultApi = {
   /** the recovery code comes back once (cache-control: no-store); the caller shows it and drops it */
   init: () => mpost<{ recovery_code: string }>("/vault/init"),
   recover: (code: string) => mpost<{ ok: true; kek_version: number }>("/vault/recover", { code }),
-  rotate: () => mpost<{ job_id: string; kek_version: number; recovery_code: string }>("/vault/rotate"),
+  rotate: () => mpost<{ kek_version: number; recovery_code: string }>("/vault/rotate"),
   vaults: () => mget<RVault[]>("/vaults"),
   templates: () => mget<RTemplate[]>("/vault/templates"),
   items: (p: { vault?: string; template?: string; q?: string; account?: string } = {}) => mget<RItem[]>("/vault/items" + q(p)),

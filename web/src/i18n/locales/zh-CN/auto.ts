@@ -47,6 +47,13 @@ export default {
     outcomes_other: "{{count}} 种结果",
     runs24_other: "24 小时 {{count}} 次",
   },
+  allowPrivate: {
+    title: "允许访问的内网主机",
+    sub: "流程里的 http 节点默认不能访问本机、局域网和 Tailscale 地址。写在这里的主机例外。只有你能改这里，Steve 起草的流程不会动它。",
+    placeholder: "例如 nas.local, 192.168.1.10",
+    save: "保存",
+    saved: "已保存",
+  },
   sources: {
     paused: "已暂停",
     accounts_other: "{{count}} 个账号",
@@ -114,6 +121,8 @@ export default {
     other: "触发",
   },
   rule: {
+    warnEdge: "「{{node}}」的连线「{{label}}」对不上任何分支，这条线永远走不到",
+    warnBranch: "「{{node}}」的分支「{{label}}」没有连线，走到这里流程就停了",
     page: "流程",
     notFound: "流程不存在",
     notFoundSub: "可能已经删除。",

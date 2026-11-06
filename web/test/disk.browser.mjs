@@ -17,7 +17,16 @@ const report = (free, pressure, closedCache) => ({
     entry("ST-30", "已回收的工作区", { phase: "closed", status: "done", exists: false, bytes: 0 }),
   ],
   orphans: [{ path: "/home/example/.steve/worktrees/OLD-1", bytes: 0.3 * GB }],
+  scratch: [
+    entry("ST-54", "没有项目的调研，装了一堆依赖", { phase: "closed", status: "done", branch: null, path: "/home/example/.steve/scratch/ST-54", bytes: 3.2 * GB, cache_bytes: 2.1 * GB, caches: ["node_modules", "venv/target"] }),
+    entry("ST-60", "进行中的临时事项", { branch: null, path: "/home/example/.steve/scratch/ST-60", bytes: 0.2 * GB, cache_bytes: 0, caches: [] }),
+  ],
 })
+const outbox = () => ({ pending: 3, dead: revived ? 0 : 3, oldest: 1, groups: revived ? [] : [
+  { consumer: "github.after", topic: "github.after", count: 2, last_error: "GitHub 503 Service Unavailable: a long body ".repeat(8), updated: 2 },
+  { consumer: "automation.item_trigger", topic: "work.item.done", count: 1, last_error: null, updated: 1 },
+] })
+let revived = false, revivedBy = []
 let state = report(12 * GB, "floor", 11 * GB), reclaims = 0, forbid = false
 const errors = []
 try {
@@ -25,10 +34,17 @@ try {
     const page = await browser.newPage({ locale: "zh-CN", viewport: { width, height: width === 390 ? 844 : 1000 }, reducedMotion: "reduce", colorScheme: theme })
     page.on("pageerror", e => errors.push(e.message))
     state = report(12 * GB, "floor", 11 * GB)
+    revived = false
     await page.route(u => new URL(u).pathname.startsWith("/api/"), async route => {
       const req = route.request(), u = new URL(req.url())
       if (forbid) return route.fulfill({ status: 403, contentType: "application/json", body: JSON.stringify({ error: "仅实例管理员可查看和回收工作区" }) })
       if (u.pathname === "/api/system/workspaces" && req.method() === "GET") return route.fulfill({ contentType: "application/json", body: JSON.stringify(state) })
+      if (u.pathname === "/api/system/outbox" && req.method() === "GET") return route.fulfill({ contentType: "application/json", body: JSON.stringify(outbox()) })
+      if (u.pathname === "/api/system/outbox/revive" && req.method() === "POST") {
+        revivedBy.push(JSON.parse(req.postData() || "{}").consumer)
+        revived = true
+        return route.fulfill({ contentType: "application/json", body: JSON.stringify({ revived: 2 }) })
+      }
       if (u.pathname === "/api/system/workspaces/reclaim" && req.method() === "POST") {
         reclaims++
         state = report(23 * GB, "low", 0)
@@ -39,11 +55,20 @@ try {
     await page.goto(base + "/test/fixtures/disk.html")
     await page.locator('[data-disk-pressure="floor"]').waitFor()
     assert.match(await page.locator("[data-disk-pressure]").innerText(), /只剩 12 GB，低于下限 20 GB/)
-    assert.deepEqual(await page.locator("[data-disk-entry]").evaluateAll(xs => xs.map(x => x.getAttribute("data-disk-entry"))), ["ST-41", "ST-36", "ST-38"], "largest first; the reclaimed one only counts")
+    assert.deepEqual(await page.locator("[data-disk-entry]:not([data-disk-scratch])").evaluateAll(xs => xs.map(x => x.getAttribute("data-disk-entry"))), ["ST-41", "ST-36", "ST-38"], "largest first; the reclaimed one only counts")
     assert.equal(await page.locator('[data-disk-entry="ST-38"]').getAttribute("data-disk-state"), "in_use")
+    /* scratch directories of items without a project: their own list and summary */
+    assert.deepEqual(await page.locator("[data-disk-scratch-list] [data-disk-entry]").evaluateAll(xs => xs.map(x => x.getAttribute("data-disk-entry"))), ["ST-54", "ST-60"])
+    assert.match(await page.locator("[data-disk-scratch-total]").innerText(), /临时目录[\s\S]*2 个没有项目的事项，缓存 2\.1 GB，其中已结束事项的 2\.1 GB 在磁盘紧张时回收/)
+    /* dead background deliveries, one row per consumer */
+    await page.locator("[data-outbox-dead]").waitFor()
+    assert.equal(await page.locator("[data-outbox-group]").count(), 2)
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth)
     assert.equal(overflow, false, `no horizontal overflow at ${width}px`)
     if (shots) await page.screenshot({ path: `${shots}/disk-${width}-${theme}-floor.png`, fullPage: true })
+    await page.locator('[data-outbox-revive="github.after"]').click()
+    await page.getByText("已重新投递 2 条").waitFor()
+    await page.locator("[data-outbox-dead]").waitFor({ state: "detached" })
     await page.locator("[data-disk-reclaim]").click()
     await page.getByText("释放了 11 GB，2 个按规则保留").waitFor()
     await page.locator('[data-disk-pressure="low"]').waitFor()
@@ -58,6 +83,7 @@ try {
   await page.waitForTimeout(500)
   assert.equal(await page.locator("[data-workspace-disk]").count(), 0)
   assert.equal(reclaims, 4)
+  assert.deepEqual(revivedBy, ["github.after", "github.after", "github.after", "github.after"])
   assert.deepEqual(errors, [])
   console.log("disk.browser: ok")
 } finally {

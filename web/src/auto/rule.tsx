@@ -16,7 +16,7 @@ import { HubError } from "@/api"
 import { traceOf } from "@/auto/trace"
 import { lazyView } from "@/lazy"
 const FlowCanvas = lazyView(() => import("@/auto/canvas").then((m) => ({ default: m.FlowCanvas })))
-import { Inspector, toYaml, kindOf } from "@/auto/nodes"
+import { Inspector, toYaml, kindOf, branchWarnings } from "@/auto/nodes"
 import { Loading, Failed, Modal, Json, ms, RUN_STATUS } from "@/auto/common"
 import { t as tr, useT } from "@/i18n"
 
@@ -78,6 +78,8 @@ export function RuleView({ id }: { id: string }) {
     if (r) { setWork(r.graph); setDirty(true); setTrace(null); setUndo({ g: before, note: r.note }); setRev((x) => x + 1); const added = r.graph.nodes.find((x) => !before.nodes.some((y) => y.id === x.id)); if (added) { setSel(added.id); setFresh(added.id) } toast(t("auto:rule.steveDone")) }
   }
   const usesAI = work.nodes.some((x) => x.kind === "bot")
+  const warnings = branchWarnings(work)
+  const nodeName = (nid: string) => { const x = work.nodes.find((y) => y.id === nid); return x?.title?.trim() || nid }
   const step = trace && n ? [...(trace.run.steps ?? [])].reverse().find((s) => s.node_id === n.id) : undefined
 
   return (
@@ -119,6 +121,11 @@ export function RuleView({ id }: { id: string }) {
             <Segmented size="sm" value={view} onChange={setView} options={[["canvas", t("auto:rule.viewCanvas")], ["code", t("auto:rule.viewCode")]] as const} />
             {trace && <span className="inline-flex flex-wrap items-center gap-1.5 type-footnote text-muted-foreground" data-trace-banner><StatusDot s={trace.run.status === "failed" ? "fail" : "done"} />{t(trace.run.dry_run ? "auto:rule.traceDry" : "auto:rule.traceRun", { count: trace.path.length, label: trace.label })}<button type="button" className="text-blue hover:underline" onClick={() => setTrace(null)}>{t("auto:rule.clear")}</button></span>}
           </div>
+          {warnings.length > 0 && <ul className="flex flex-col gap-1 rounded-xl border px-4 py-2.5 type-footnote" data-branch-warnings>
+            {warnings.map((w) => <li key={w.kind + w.node + w.label} className="flex items-start gap-2" data-branch-warning={w.strong ? "strong" : "weak"}>
+              <StatusDot s={w.strong ? "fail" : "wait"} /><button type="button" className={"min-w-0 text-left hover:underline " + (w.strong ? "text-foreground" : "text-muted-foreground")} onClick={() => { setSel(w.node); setView("canvas") }}>
+                {t(w.kind === "edge" ? "auto:rule.warnEdge" : "auto:rule.warnBranch", { node: nodeName(w.node), label: w.label })}</button></li>)}
+          </ul>}
           {view === "canvas" ? <FlowCanvas g={work} sel={sel} onSel={(x) => { setSel(x); setFresh(null) }} fresh={fresh} trace={trace} />
             : <div className="flex flex-col gap-2" data-code-view>
                 <Textarea aria-label={t("auto:rule.codeAria")} className="min-h-[460px] rounded-xl bg-muted/50 font-mono text-[12px] leading-[19px]" value={toYaml(f.name, f.version, work)} readOnly />

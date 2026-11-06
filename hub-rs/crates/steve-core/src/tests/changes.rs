@@ -455,3 +455,45 @@ async fn describe_shows_settings_as_the_user_sees_them() {
             .is_err()
     );
 }
+
+/// An undo puts back only the fields that still hold what the change wrote; one edited since is
+/// kept, and named in the answer (no 409).
+#[tokio::test]
+async fn an_undo_keeps_a_field_changed_since() {
+    let k = Kit::new();
+    k.gw.set(|_, _| {
+        Ok(r#"{"changes":[{"key":"accept_mode","value":"自动验收"},{"key":"proactive","value":"积极"}]}"#.into())
+    });
+    let p = k
+        .core
+        .draft(WS, target("bot", Some("dev")), "以后自动验收，积极一点")
+        .await
+        .unwrap();
+    k.core.apply(&p.id, "me", WS).unwrap();
+    // you set the acceptance by hand afterwards
+    let mut m = serde_json::Map::new();
+    m.insert("accept_mode".into(), json!("manual"));
+    k.db().bot_patch("dev", &m, "me").unwrap();
+    let r = k.core.undo(&p.id, "me", WS).unwrap();
+    assert_eq!(r["kept"], json!(["交付验收"]));
+    let b = k.db().bot("dev").unwrap().unwrap();
+    assert_eq!((b.accept_mode.as_str(), b.proactive), ("manual", 1));
+
+    // settings: the same
+    k.gw.set(|_, _| {
+        Ok(r#"{"changes":[{"key":"depsAfter","value":"提醒我开始"},{"key":"archDays","value":"7"}]}"#.into())
+    });
+    let p = k
+        .core
+        .draft(WS, target("settings", Some("items")), "x")
+        .await
+        .unwrap();
+    k.core.apply(&p.id, "me", WS).unwrap();
+    let mut m = serde_json::Map::new();
+    m.insert("archDays".into(), json!("90"));
+    k.db().settings_set(WS, &m, "me").unwrap();
+    let r = k.core.undo(&p.id, "me", WS).unwrap();
+    assert_eq!(r["kept"].as_array().map(Vec::len), Some(1));
+    assert_eq!(k.db().setting(WS, "archDays", "x").unwrap(), "90");
+    assert_eq!(k.db().setting(WS, "depsAfter", "x").unwrap(), "自动开始");
+}

@@ -2,6 +2,7 @@
 import { useT } from "@/i18n"
 import { Trans } from "react-i18next"
 import { WorkspaceDisk } from "@/disk-settings"
+import { OutboxDead } from "@/outbox-settings"
 import { useEffect, useState, type ReactNode } from "react"
 import { cn } from "cn"
 import { ChevronRightIcon, PlusIcon, MoreHorizontalIcon, CopyIcon, TrashIcon, SparklesIcon, SlidersHorizontalIcon, ListChecksIcon, TagIcon, BellIcon, SunMoonIcon, DatabaseIcon, InfoIcon, PencilIcon, CheckIcon, LayersIcon, FolderIcon } from "lucide-react"
@@ -385,8 +386,11 @@ function Pane({ id }: { id: string }) {
       <Row title={t("manage:data.location")} sub={<span className="font-mono">~/.steve/data/steve.sqlite3</span>} />
       <Row title={t("manage:data.backup")} sub={t("manage:data.backupSub")} /></Group></section>
     <WorkspaceDisk />
+    <OutboxDead />
     <section><SectionLabel>{t("manage:data.retention")}</SectionLabel><Group>
-      <Row title={<>{t("manage:data.sessions")}<span className="ml-1.5 rounded bg-muted px-1.5 py-px text-[11px] font-normal text-muted-foreground">{t("manage:data.cleanupTodo")}</span></>}><Sel v={c.keepSess} o={[["90 天", t("common:dur.days", { count: 90 })], ["1 年", t("manage:data.keepYear")], ["永久", t("manage:data.keepForever")]]} on={(v) => setSetting({ keepSess: v })} /></Row></Group></section>
+      {/* read-only: whole logs are kept for good; a shorter keepSess (set by a confirmed config draft) compacts archived sessions */}
+      <Row title={t("manage:data.sessions")} sub={c.keepSess && c.keepSess !== "永久" ? t("manage:data.sessionsCompact", { period: c.keepSess === "1 年" ? t("manage:data.keepYear") : t("common:dur.days", { count: 90 }) }) : t("manage:data.sessionsForever")} data-keep-sess={c.keepSess || "永久"}>
+        <span className="type-callout text-muted-foreground">{c.keepSess === "1 年" ? t("manage:data.keepYear") : c.keepSess === "90 天" ? t("common:dur.days", { count: 90 }) : t("manage:data.keepForever")}</span></Row></Group></section>
     <section><SectionLabel>{t("manage:data.clean")}</SectionLabel><Group>
       <Row title={t("manage:data.clearMem")} sub={t("manage:data.clearMemSub")}><DangerBtn label={t("manage:data.clear")} what={t("manage:data.clearWhat")} onOk={() => void api.clearMemories().then(() => toast(t("manage:data.cleared")))} /></Row></Group></section>
   </div>

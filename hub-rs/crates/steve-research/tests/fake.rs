@@ -335,6 +335,35 @@ async fn a_silent_harness_is_ended_as_stuck() {
     assert!(out.answer.starts_with("写到一半"), "{}", out.answer);
 }
 
+/// A harness that closed its output but does not exit is ended after the exit wait, not after the
+/// (much longer) stall window.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_harness_that_closed_its_output_but_hangs_is_ended_after_the_exit_wait() {
+    let e = env();
+    let exe = harness(
+        &e,
+        &format!(
+            "{}\nexec >&-\nsleep 30",
+            emit(&[init(), start("m1"), text("写到一半")])
+        ),
+    );
+    let mut c = cfg(&e, &exe);
+    assert_eq!(c.budget.idle, steve_research::DEFAULT_IDLE);
+    c.budget.exit_wait = Duration::from_secs(2);
+    let t0 = Instant::now();
+    let out = Researcher::new(c)
+        .start(req(&e, "ws"))
+        .unwrap()
+        .finish()
+        .await;
+    assert!(
+        t0.elapsed() < Duration::from_secs(15),
+        "ended long before the 30 s sleep and the stall window"
+    );
+    assert_eq!(out.status, RunStatus::Budget(BudgetHit::Time));
+    assert!(out.answer.starts_with("写到一半"), "{}", out.answer);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn tool_budget_stops_at_the_limit() {
     let e = env();

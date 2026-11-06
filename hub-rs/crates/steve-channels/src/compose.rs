@@ -145,6 +145,8 @@ pub struct Layers {
     pub anchor_ids: Vec<String>,
     /// Layer 7.
     pub hits: Vec<Hit>,
+    /// Layer 7 was found without the meaning search (the knowledge store's semantic pass failed).
+    pub kb_semantic_down: bool,
     /// Oldest first: `(who, text)`, already through the guard.
     pub history: Vec<(String, String)>,
     pub sender: String,
@@ -236,6 +238,10 @@ pub fn prompt(l: &Layers) -> String {
     p.push('\n');
     let k = render_snippets(KNOWLEDGE_HEAD, KNOWLEDGE_RULES, "K", &l.hits);
     p.push_str(or_none(&k));
+    if l.kb_semantic_down {
+        p.push('\n');
+        p.push_str(steve_knowledge::retrieve::SEMANTIC_DOWN_NOTE);
+    }
     p.push_str("\n\n");
 
     p.push_str(H_HISTORY);
@@ -557,8 +563,11 @@ pub fn gather(
 
     // 7: retrieval as the owner, the sender and the space as anchors
     let kg = KbGuard(guard);
-    let hits = reply_hits(c, store, &kg, &viewer, &plan.text, &recent, &objs, now)
-        .map_err(|e| ApiError::Internal(e.to_string()))?
+    let found = reply_hits(c, store, &kg, &viewer, &plan.text, &recent, &objs, now)
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let kb_semantic_down = found.semantic_down;
+    let hits = found
+        .hits
         .into_iter()
         .filter(|h| !anchor_ids.contains(&format!("{}:{}", h.obj_type, h.obj_id)))
         .enumerate()
@@ -578,6 +587,7 @@ pub fn gather(
         anchors: anchors.join("\n\n"),
         anchor_ids,
         hits,
+        kb_semantic_down,
         history,
         sender: plan.sender_name.clone(),
         message: redact(guard, &plan.text),

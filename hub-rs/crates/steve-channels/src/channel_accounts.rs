@@ -89,6 +89,15 @@ pub struct AccountOut {
     pub self_built: Option<bool>,
     pub permissions_checked_at: Option<i64>,
     pub revision: i64,
+    /// The undo window after you approve a message, in seconds, as set (`null`: the default).
+    pub send_delay_s: Option<i64>,
+    /// The window it has now: the setting, or the identity's default (bot 3 s, you 10 s).
+    pub send_delay_default_s: i64,
+    /// How late a message may arrive and still be acted on, in minutes.
+    pub late_minutes: i64,
+    /// Messages only recorded as history: `{before, late, at}` (written before the connection was
+    /// on, arrived too late, the last one's time).
+    pub history: Value,
 }
 
 /// `system` and `provider` of an adapter: its provider's integration (the adapters of one provider
@@ -224,6 +233,7 @@ pub fn out(
     let ws = &viewer.ws;
     let (_, mode) = bindings::connection_account(c, ws, conn)?;
     let settings = spaces::channel_settings(c, ws, conn)?;
+    let send_delay_s = settings.as_ref().and_then(|s| s.send_delay_s);
     let (duty, rules, trigger, revision) = match settings {
         Some(s) => (s.duty, s.rules, s.trigger, s.revision),
         None => (
@@ -247,6 +257,18 @@ pub fn out(
         params![ws, conn],
         |r| r.get(0),
     )?;
+    let (late_ms, before, late, at): (Option<i64>, i64, i64, Option<i64>) = c
+        .query_row(
+            "SELECT late_ms, history_before, history_late, history_at FROM channel_settings WHERE connection_id = ?",
+            [conn],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .optional()?
+        .unwrap_or((None, 0, 0, None));
+    let late_minutes = late_ms
+        .filter(|l| crate::inbound::LATE_MS.contains(l))
+        .unwrap_or(crate::inbound::DEFAULT_LATE_MS)
+        / 60_000;
     let (system, provider) = provider_of(ch, &f.adapter);
     let platform_name = match mode {
         Mode::Bot => format!("{}（应用机器人）", f.name),
@@ -294,6 +316,10 @@ pub fn out(
             .get("permissions_checked_at")
             .and_then(Value::as_i64),
         revision,
+        send_delay_s,
+        send_delay_default_s: crate::outbound::default_send_delay_ms(mode) / 1000,
+        late_minutes,
+        history: json!({"before": before, "late": late, "at": at}),
     })
 }
 
@@ -359,6 +385,16 @@ pub struct ChannelPatch {
     pub rules: Option<Value>,
     pub trigger: Option<TriggerPatch>,
     pub persona_id: Option<String>,
+    /// The undo window in seconds (0–60); `null` puts back the identity's default.
+    #[serde(default, deserialize_with = "present")]
+    pub send_delay_s: Option<Option<i64>>,
+    /// How late a message may arrive and still be acted on, in minutes (1 … 10080; default 30).
+    pub late_minutes: Option<i64>,
+}
+
+/// A key that is there, `null` included (`Some(None)`); absent stays `None`.
+fn present<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Option<i64>>, D::Error> {
+    Option::<i64>::deserialize(d).map(Some)
 }
 
 /// `trigger` of [`ChannelPatch`]: only the keys given change.
@@ -393,6 +429,15 @@ impl ChannelPatch {
         if let Some(p) = &self.persona_id {
             c.len("persona_id", p, 1, 100);
         }
+        if let Some(Some(d)) = self.send_delay_s {
+            c.that("send_delay_s", (0..=60).contains(&d));
+        }
+        if let Some(m) = self.late_minutes {
+            c.that(
+                "late_minutes",
+                crate::inbound::LATE_MS.contains(&m.saturating_mul(60_000)),
+            );
+        }
         if let Some(t) = &self.trigger {
             if let Some(w) = &t.words {
                 c.that("trigger.words", w.len() <= 10);
@@ -413,6 +458,8 @@ impl ChannelPatch {
             ("rules", self.rules.is_some()),
             ("trigger", self.trigger.is_some()),
             ("persona_id", self.persona_id.is_some()),
+            ("send_delay_s", self.send_delay_s.is_some()),
+            ("late_minutes", self.late_minutes.is_some()),
         ]
         .into_iter()
         .filter_map(|(k, on)| on.then_some(k))
@@ -530,8 +577,9 @@ pub fn patch(
     }
     let persona_after = bindings::account_persona(tx, ws, conn)?.map(|x| x.id);
     let revision = before.revision + 1;
+    let send_delay_s = p.send_delay_s.unwrap_or(before.send_delay_s);
     tx.execute(
-        "UPDATE channel_settings SET duty = ?, rules = ?, trigger = ?, revision = ?, updated = ? WHERE connection_id = ?",
+        "UPDATE channel_settings SET duty = ?, rules = ?, trigger = ?, send_delay_s = ?, revision = ?, updated = ? WHERE connection_id = ?",
         params![
             duty,
             rules.to_string(),
@@ -540,12 +588,23 @@ pub fn patch(
                 // bots keep the column's default; it is never read for them
                 Mode::Bot => before.trigger_raw(),
             },
+            send_delay_s,
             revision,
             now,
             conn
         ],
     )?;
-    let snap = |persona: &Option<String>, duty: &str, rules: &Value, trigger: &Value| json!({"persona_id": persona, "duty": duty, "rules": rules, "trigger": trigger});
+    if let Some(m) = p.late_minutes {
+        tx.execute(
+            "UPDATE channel_settings SET late_ms = ? WHERE connection_id = ?",
+            params![m * 60_000, conn],
+        )?;
+    }
+    let snap = |persona: &Option<String>,
+                duty: &str,
+                rules: &Value,
+                trigger: &Value,
+                delay: Option<i64>| json!({"persona_id": persona, "duty": duty, "rules": rules, "trigger": trigger, "send_delay_s": delay});
     base::revision(
         tx,
         ws,
@@ -557,8 +616,9 @@ pub fn patch(
             &before.duty,
             &before.rules,
             &trigger_before,
+            before.send_delay_s,
         ),
-        &snap(&persona_after, &duty, &rules, &trigger),
+        &snap(&persona_after, &duty, &rules, &trigger, send_delay_s),
         &viewer.user,
     )?;
     base::audit(

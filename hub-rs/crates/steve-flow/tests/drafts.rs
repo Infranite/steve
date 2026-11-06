@@ -612,6 +612,17 @@ async fn flow_insert_update_and_patch_fields() {
                 "检查失败：{{event.summary}}"
             ),
             Change::new("修改节点", "—", "（没认出：zz）"),
+            // the new filter's branches have no edges of their names: said, not refused
+            Change::new(
+                "注意",
+                "—",
+                "「只看检查失败」的分支「失败」没有连线，走到这个分支时流程就停在这里"
+            ),
+            Change::new(
+                "注意",
+                "—",
+                "「只看检查失败」的分支「其余」没有连线，走到这个分支时流程就停在这里"
+            ),
             Change::new("启用", "否", "是"),
             Change::new("名字", "GitHub 通知", "GitHub 检查失败"),
         ]
@@ -789,5 +800,29 @@ async fn flow_stale_schedules_and_candidates() {
     assert!(
         !lines.iter().any(|l| l.starts_with(&format!("flow:{sid}"))),
         "{lines:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_drafted_item_schedule_without_a_budget_gets_the_item_default() {
+    let e = env();
+    let me = caller(WS, ME);
+    e.env.gateway.reply(
+        r#"{"ops":[{"op":"schedule.create","name":"整理周报","cron":"0 9 * * 5","what":"整理周报","bot":"Steve","mode":"建事项，自动验收"}]}"#,
+    );
+    let p = changes::draft(
+        &e.env.modules,
+        &me,
+        "schedule",
+        None,
+        "每周五 9 点整理周报交给 Steve",
+        Origin::default(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        p.changes.contains(&Change::new("每次预算", "—", "$20.00")),
+        "{:?}",
+        p.changes
     );
 }

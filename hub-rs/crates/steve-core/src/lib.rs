@@ -119,6 +119,9 @@ pub(crate) struct State {
     ended: HashMap<String, String>,
     releasing: Option<Releasing>,
     release_generation: u64,
+    /// An acceptance answered with 验收并发布 `(item, who)`: its release requirement starts the
+    /// release right away instead of asking the agent (`release.rs` `release_with_accept`).
+    release_with_accept: Option<(String, String)>,
     drafts: HashMap<String, changes::Proposal>,
     applied: HashMap<String, changes::Applied>,
     /// Item hook calls collected in this critical section, run once the lock is gone.
@@ -151,6 +154,9 @@ pub(crate) struct State {
     /// The periodic closing check is running: what it asks of a Node is no new event, so it
     /// doesn't outdate a gathering of the same facts already running (`node_git`).
     git_polling: bool,
+    /// The periodic closing check is running: it fingerprints a worktree only when nothing else
+    /// holds the closing (`cycle.rs`).
+    lc_ticking: bool,
 }
 
 /// One critical section: the core plus the held state lock.
@@ -219,6 +225,14 @@ impl Core {
 
     pub(crate) fn yolo(&self) -> Option<&yolo::Yolo> {
         self.0.yolo.get()
+    }
+
+    /// YOLO decides for the user in `ws` now (for `item`'s decisions when given): `false` without YOLO
+    /// wired or when the setting can't be read.
+    pub fn yolo_applies(&self, ws: &str, item: Option<&str>) -> bool {
+        self.yolo()
+            .and_then(|y| y.effective(ws, item).ok())
+            .is_some_and(|e| e.on)
     }
 
     /// The database (the domain layer's adapter; `.store()` on it gives the raw `steve_store::Store`).

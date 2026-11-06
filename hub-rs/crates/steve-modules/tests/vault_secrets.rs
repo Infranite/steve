@@ -293,7 +293,7 @@ async fn no_secret_in_logs_responses_errors_or_database() {
         .await,
     );
 
-    // rotation over HTTP, then wait for the background re-wrap
+    // rotation over HTTP: every data key is re-wrapped before it answers
     let rot = send(&r, "POST", "/vault/rotate", "").await;
     let code2 = rot
         .split("\"recovery_code\":\"")
@@ -302,15 +302,11 @@ async fn no_secret_in_logs_responses_errors_or_database() {
         .expect("code")
         .to_string();
     needles.extend(key_needles(keydir.path()));
-    for _ in 0..300 {
-        if send(&r, "GET", "/vault/status", "")
+    assert!(
+        send(&r, "GET", "/vault/status", "")
             .await
             .contains("\"rotating\":false")
-        {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
+    );
     // still readable after the re-wrap; then delete one item
     assert!(
         v.with_credential(WS, &item, "con_x", "测试", |c| c.text("密码")
@@ -369,7 +365,7 @@ async fn no_secret_in_logs_responses_errors_or_database() {
     let logs = String::from_utf8(cap.0.lock().expect("logs").clone()).expect("utf-8");
     assert!(
         logs.contains("vault initialized")
-            && logs.contains("vault rewrap finished")
+            && logs.contains("vault key rotated")
             && logs.contains("vault item created"),
         "logs captured: {logs}"
     );

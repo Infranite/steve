@@ -1,7 +1,7 @@
 //! The OpenViking store against a fake server (in-memory files and tags; "meaning" is shared
 //! characters): the index is mirrored by state (never chunks left out, removals followed), meaning
 //! fills in after keywords, what the server returns is read back under the scope, and a server that
-//! is down makes knowledge unavailable rather than falling back.
+//! is down leaves the keyword passes (flagged as such), and is skipped for a while after a failure.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use steve_knowledge::Knowledge;
 use steve_knowledge::openviking::{Hybrid, Mirror, OpenViking, OpenVikingConfig, TOPIC};
 use steve_knowledge::port::SqliteStore;
-use steve_knowledge::retrieve::{Purpose, Query, retrieve};
+use steve_knowledge::retrieve::{Purpose, Query, SEMANTIC_DOWN_NOTE, retrieve, retrieve_all};
 use steve_modules::testkit::{ME, OTHER, TestEnv, WS, call, caller};
 use steve_store::base::Viewer;
 use steve_store::outbox::Dispatcher;
@@ -286,26 +286,102 @@ async fn the_index_is_mirrored_and_meaning_fills_in_under_the_scope() {
     );
 }
 
+/// A server whose searches fail (500), counting them.
+async fn failing_server() -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+    let n: Arc<std::sync::atomic::AtomicUsize> = Arc::default();
+    let n2 = n.clone();
+    let app = Router::new().route(
+        "/api/v1/search/find",
+        post(move || {
+            let n = n2.clone();
+            async move {
+                n.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "down")
+            }
+        }),
+    );
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", l.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+    (url, n)
+}
+
 #[tokio::test(flavor = "multi_thread")]
-async fn a_server_that_is_down_makes_knowledge_unavailable() {
+async fn a_server_that_is_down_leaves_the_keywords_flagged_and_is_skipped_for_a_while() {
     let h = setup().await;
-    h.note(ME, "部署手册", "上线前先备份数据库。", json!({}))
+    let doc = h
+        .note(ME, "部署手册", "上线前先备份数据库。", json!({}))
         .await;
+    let (url, finds) = failing_server().await;
     let down = OpenViking::new(OpenVikingConfig {
-        url: "http://127.0.0.1:9".into(),
+        url,
         key: "k".into(),
         account: "steve".into(),
     });
     let store = Hybrid {
         keywords: SqliteStore,
-        meaning: down,
+        meaning: down.clone(),
     };
     let viewer = Viewer::bare(WS, ME);
-    let r = h
+    let search = || {
+        h.env
+            .store()
+            .reader(|c| retrieve_all(c, &Query::new(&store, &viewer, "部署", Purpose::Search)))
+    };
+    // keywords still answer, and the result says the meaning search was not there
+    let r = search().expect("no failure");
+    assert!(r.semantic_down);
+    assert_eq!(
+        r.hits.iter().map(|x| x.obj_id.as_str()).collect::<Vec<_>>(),
+        [doc.as_str()]
+    );
+    let tried = finds.load(std::sync::atomic::Ordering::SeqCst);
+    assert!(tried >= 1);
+    assert!(down.skipping());
+    // within the window the server is not asked again
+    let r = search().expect("no failure");
+    assert!(r.semantic_down && !r.hits.is_empty());
+    assert_eq!(finds.load(std::sync::atomic::Ordering::SeqCst), tried);
+    // `retrieve` keeps its hits
+    let hits = h
         .env
         .store()
-        .reader(|c| retrieve(c, &Query::new(&store, &viewer, "部署", Purpose::Search)));
-    assert!(r.is_err(), "no silent fall-back: {r:?}");
+        .reader(|c| retrieve(c, &Query::new(&store, &viewer, "部署", Purpose::Search)))
+        .unwrap();
+    assert_eq!(hits.len(), 1);
     assert!(h.ov.ready().is_ok());
+    // the working store is not flagged
+    let ok = h
+        .env
+        .store()
+        .reader(|c| {
+            retrieve_all(
+                c,
+                &Query::new(h.kb.store(), &viewer, "部署", Purpose::Search),
+            )
+        })
+        .unwrap();
+    assert!(!ok.semantic_down);
+
+    // the chat context says so, even when the keywords found nothing
+    let kb = Knowledge::new(Arc::new(steve_knowledge::NoGuard), |_| {});
+    kb.set_store(Arc::new(Hybrid {
+        keywords: SqliteStore,
+        meaning: down.clone(),
+    }));
+    let chat = h
+        .env
+        .store()
+        .reader(|c| {
+            steve_knowledge::chat_context(c, &kb, &viewer, "完全无关的问题", steve_store::now())
+        })
+        .unwrap()
+        .expect("a context that says the search was partial");
+    assert!(chat.hits.is_empty());
+    assert!(
+        chat.ctx.text.contains(SEMANTIC_DOWN_NOTE),
+        "{}",
+        chat.ctx.text
+    );
     let _ = TOPIC;
 }

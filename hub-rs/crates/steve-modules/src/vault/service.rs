@@ -1,22 +1,19 @@
-//! Key lifecycle: init, recover, rotate with background re-wrapping, and the
+//! Key lifecycle: init, recover, rotate (one transaction re-wraps every data key), and the
 //! data-key calls slice V2 builds on. Synchronous (store and key store both block); the API runs it
 //! with [`Vault::blocking`].
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 use serde_json::json;
-use steve_store::{Store, Tx, base, now, uid};
+use steve_store::{Store, Tx, base, now};
 
 use super::crypto::{self, fingerprint, recovery_code, unwrap_dek, wrap_dek};
 use super::error::{VaultError, VaultResult};
 use super::keystore::{KeyStore, KeyStoreError, account_name};
 use super::repo::{self, ACTIVE, RETIRED, RETIRING};
 use super::secret::{Dek, Kek, RecoveryCode};
-
-/// Items re-wrapped per transaction.
-const BATCH: usize = 100;
 
 /// The vault service. Cheap to clone; one per Hub process (the KEK cache lives here).
 #[derive(Clone)]
@@ -27,10 +24,8 @@ struct Inner {
     keys: Arc<dyn KeyStore>,
     /// `(workspace, version) → KEK`, filled on first use, gone when the process exits.
     cache: Mutex<HashMap<(String, i64), Arc<Kek>>>,
-    /// Serializes init / recover / starting a rotation, so two requests can't write the same entry.
+    /// Serializes init / recover / rotate / tidy, so two requests can't write the same entry.
     lifecycle: Mutex<()>,
-    /// Workspaces whose data keys are being re-wrapped right now.
-    rewrapping: Mutex<HashSet<String>>,
 }
 
 /// `GET /vault/status` keychain state.
@@ -67,23 +62,12 @@ pub struct Status {
     pub rotating: bool,
 }
 
-/// What `POST /vault/rotate` returns. The new recovery code replaces the old one, which stops working
-/// once the old version is retired.
+/// What `POST /vault/rotate` returns. The new recovery code replaces the old one, which stopped
+/// working with the old version.
 #[derive(Debug)]
 pub struct Rotation {
-    pub job_id: String,
     pub version: i64,
     pub recovery_code: RecoveryCode,
-}
-
-/// Outcome of one re-wrap pass.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct RewrapReport {
-    pub rewrapped: usize,
-    /// Items whose DEK did not open; their old version stays `retiring` (and in the key store).
-    pub failed: Vec<String>,
-    /// Versions moved to `retired` and deleted from the key store.
-    pub retired: Vec<i64>,
 }
 
 /// A new item's data key, wrapped under the active KEK.
@@ -94,15 +78,6 @@ pub struct NewItemKey {
     pub wrapped: Vec<u8>,
     /// For `vault_items.kek_version`; check it with [`ensure_active`] in the inserting transaction.
     pub kek_version: i64,
-}
-
-/// Removes the workspace from `rewrapping` when a pass ends, even on error.
-struct RewrapGuard<'a>(&'a Vault, String);
-
-impl Drop for RewrapGuard<'_> {
-    fn drop(&mut self) {
-        lock(&self.0.0.rewrapping).remove(&self.1);
-    }
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -120,6 +95,38 @@ pub fn ensure_active(tx: &Tx, ws: &str, version: i64) -> VaultResult<()> {
     }
 }
 
+/// Re-wraps, under `new` (version `target`), every data key of `ws` that another version wraps,
+/// opening each with its version's KEK from `old`. Returns how many moved and the items whose key did
+/// not open (they keep their old version).
+fn rewrap_all(
+    tx: &Tx,
+    ws: &str,
+    old: &HashMap<i64, Arc<Kek>>,
+    new: &Kek,
+    target: i64,
+) -> VaultResult<(usize, Vec<String>)> {
+    let mut failed = Vec::new();
+    let mut moved = 0;
+    for it in repo::items_to_rewrap(tx, ws, target, &[], i64::MAX as usize)? {
+        let dek = old
+            .get(&it.kek_version)
+            .ok_or(crypto::CryptoError::Open)
+            .and_then(|k| unwrap_dek(k, ws, &it.item_id, it.kek_version, &it.dek_wrapped));
+        match dek {
+            Ok(dek) => {
+                let w = wrap_dek(new, ws, &it.item_id, target, &dek)?;
+                repo::set_item_dek(tx, &it.item_id, &w, target)?;
+                moved += 1;
+            }
+            Err(_) => {
+                tracing::warn!(ws, item = %it.item_id, version = it.kek_version, "vault: data key did not open");
+                failed.push(it.item_id);
+            }
+        }
+    }
+    Ok((moved, failed))
+}
+
 impl Vault {
     pub fn new(store: Store, keys: Arc<dyn KeyStore>) -> Self {
         Self(Arc::new(Inner {
@@ -127,7 +134,6 @@ impl Vault {
             keys,
             cache: Mutex::default(),
             lifecycle: Mutex::new(()),
-            rewrapping: Mutex::default(),
         }))
     }
 
@@ -200,7 +206,7 @@ impl Vault {
         if !rows.is_empty() {
             return Err(VaultError::AlreadyInitialized);
         }
-        let kek = self.create_key(ws, 1, |tx, fp| {
+        let kek = self.create_key(ws, 1, |tx, fp, _| {
             repo::insert_key(tx, ws, 1, &account_name(ws, 1), fp, ACTIVE, now())?;
             base::audit(
                 tx,
@@ -254,144 +260,101 @@ impl Vault {
         Ok(row.version)
     }
 
-    /// First half of `POST /vault/rotate`: a new active version, the old one `retiring`. The caller
-    /// then runs [`Vault::rewrap`] (in the background, see [`Vault::rotate`]).
-    pub fn begin_rotation(&self, ws: &str, actor: &str) -> VaultResult<Rotation> {
+    /// `POST /vault/rotate`: a new KEK version. In one transaction every data key is re-wrapped
+    /// under it and the old versions are retired; once that committed, their key store entries go. A
+    /// data key that does not open refuses the whole rotation, and nothing changes.
+    pub fn rotate_now(&self, ws: &str, actor: &str) -> VaultResult<Rotation> {
         let _g = lock(&self.0.lifecycle);
-        if lock(&self.0.rewrapping).contains(ws) {
-            return Err(VaultError::Rotating);
-        }
         let rows = self.0.store.reader(|c| repo::keys(c, ws))?;
-        if rows.iter().any(|r| r.status == RETIRING) {
-            return Err(VaultError::Rotating);
-        }
         let active = rows
             .iter()
             .rev()
             .find(|r| r.status == ACTIVE)
-            .ok_or(VaultError::NotInitialized)?;
-        // the old key must be readable, or the items it wraps could never be re-wrapped
-        self.kek(ws, active.version)?;
+            .ok_or(VaultError::NotInitialized)?
+            .version;
+        // every version that may still wrap a data key must be readable (an old background rotation
+        // may have left one `retiring`)
+        let live: Vec<&repo::KeyRow> = rows.iter().filter(|r| r.status != RETIRED).collect();
+        let mut old: HashMap<i64, Arc<Kek>> = HashMap::new();
+        for r in &live {
+            old.insert(r.version, self.kek(ws, r.version)?);
+        }
         let next = rows.iter().map(|r| r.version).max().unwrap_or(0) + 1;
-        let job_id = uid("job");
-        let kek = self.create_key(ws, next, |tx, fp| {
-            repo::set_key_status(tx, ws, active.version, RETIRING, None)?;
+        let kek = self.create_key(ws, next, |tx, fp, new| {
+            for r in &live {
+                repo::set_key_status(tx, ws, r.version, RETIRED, Some(now()))?;
+            }
             repo::insert_key(tx, ws, next, &account_name(ws, next), fp, ACTIVE, now())?;
+            let (rewrapped, failed) = rewrap_all(tx, ws, &old, new, next)?;
+            if !failed.is_empty() {
+                return Err(VaultError::Api(crate::ApiError::rule(steve_i18n::t!(
+                    "modules.vault.rotate_unreadable",
+                    n = failed.len()
+                ))));
+            }
             base::audit(
                 tx,
                 ws,
                 actor,
                 "vault.rotate",
                 ws,
-                &json!({ "from": active.version, "to": next, "job_id": job_id, "fingerprint": fp }),
+                &json!({ "from": active, "to": next, "rewrapped": rewrapped, "fingerprint": fp }),
             )?;
             Ok(())
         })?;
-        tracing::info!(
-            ws,
-            from = active.version,
-            to = next,
-            job_id,
-            "vault rotation started"
-        );
+        tracing::info!(ws, from = active, to = next, "vault key rotated");
+        // committed: the old entries (and any a crash left of earlier ones) leave the key store
+        let retired: Vec<repo::KeyRow> = self
+            .0
+            .store
+            .reader(|c| repo::keys(c, ws))?
+            .into_iter()
+            .filter(|r| r.status == RETIRED)
+            .collect();
+        self.forget(ws, &retired);
         Ok(Rotation {
-            job_id,
             version: next,
             recovery_code: recovery_code(&kek),
         })
     }
 
-    /// `POST /vault/rotate`: [`Vault::begin_rotation`], then re-wraps in a background task.
+    /// `POST /vault/rotate` off the async runtime.
     pub async fn rotate(&self, ws: &str, actor: &str) -> VaultResult<Rotation> {
         let (w, a) = (ws.to_string(), actor.to_string());
-        let r = self.blocking(move |v| v.begin_rotation(&w, &a)).await?;
-        self.spawn_rewrap(ws.to_string(), r.job_id.clone());
-        Ok(r)
+        self.blocking(move |v| v.rotate_now(&w, &a)).await
     }
 
-    /// Resumes interrupted rotations; the integrator calls it once at startup.
-    pub fn resume_rotations(&self) -> VaultResult<()> {
+    /// At startup: finishes what a rotation of an earlier Hub (a background re-wrap) left `retiring`,
+    /// in one transaction per workspace, and removes retired versions from the key store. A workspace
+    /// whose keys can't be read now (a locked keychain) is left for the next start.
+    pub fn tidy_keys(&self) -> VaultResult<()> {
+        let _g = lock(&self.0.lifecycle);
         for ws in self.0.store.reader(repo::rotating_workspaces)? {
-            self.spawn_rewrap(ws, "resume".into());
+            if let Err(e) = self.finish_retiring(&ws) {
+                tracing::warn!(ws, error = %e, "vault: an interrupted rotation stays for the next start");
+            }
         }
         Ok(())
     }
 
-    fn spawn_rewrap(&self, ws: String, job_id: String) {
-        let v = self.clone();
-        tokio::task::spawn_blocking(move || match v.rewrap(&ws) {
-            Ok(r) => tracing::info!(
-                ws,
-                job_id,
-                rewrapped = r.rewrapped,
-                failed = r.failed.len(),
-                retired = ?r.retired,
-                "vault rewrap finished"
-            ),
-            Err(e) => tracing::warn!(ws, job_id, error = %e, "vault rewrap stopped"),
-        });
-    }
-
-    /// `vault.rewrap`: re-wraps every DEK still under a `retiring` version with the active KEK,
-    /// [`BATCH`] items per transaction; when none is left, the old versions become `retired` and are
-    /// deleted from the key store. Safe to rerun.
-    pub fn rewrap(&self, ws: &str) -> VaultResult<RewrapReport> {
-        if !lock(&self.0.rewrapping).insert(ws.to_string()) {
-            return Err(VaultError::Rotating);
-        }
-        let _g = RewrapGuard(self, ws.to_string());
+    fn finish_retiring(&self, ws: &str) -> VaultResult<()> {
         let rows = self.0.store.reader(|c| repo::keys(c, ws))?;
-        let mut report = RewrapReport::default();
-        let retiring: Vec<_> = rows.iter().filter(|r| r.status == RETIRING).collect();
-        if retiring.is_empty() {
-            return Ok(report);
-        }
         let active = rows
             .iter()
             .rev()
             .find(|r| r.status == ACTIVE)
-            .ok_or(VaultError::NotInitialized)?;
-        let new = self.kek(ws, active.version)?;
+            .ok_or(VaultError::NotInitialized)?
+            .version;
+        let retiring: Vec<&repo::KeyRow> = rows.iter().filter(|r| r.status == RETIRING).collect();
+        let new = self.kek(ws, active)?;
         let mut old: HashMap<i64, Arc<Kek>> = HashMap::new();
         for r in &retiring {
             old.insert(r.version, self.kek(ws, r.version)?);
         }
-        loop {
-            let n = self.0.store.transaction(|tx| {
-                let batch = repo::items_to_rewrap(tx, ws, active.version, &report.failed, BATCH)?;
-                for it in &batch {
-                    let dek = old
-                        .get(&it.kek_version)
-                        .ok_or(crypto::CryptoError::Open)
-                        .and_then(|k| {
-                            unwrap_dek(k, ws, &it.item_id, it.kek_version, &it.dek_wrapped)
-                        });
-                    match dek {
-                        Ok(dek) => {
-                            let w = wrap_dek(&new, ws, &it.item_id, active.version, &dek)?;
-                            repo::set_item_dek(tx, &it.item_id, &w, active.version)?;
-                            report.rewrapped += 1;
-                        }
-                        Err(_) => {
-                            tracing::warn!(ws, item = %it.item_id, version = it.kek_version, "vault rewrap: data key did not open");
-                            report.failed.push(it.item_id.clone());
-                        }
-                    }
-                }
-                Ok::<_, VaultError>(batch.len())
-            })?;
-            if n == 0 {
-                break;
-            }
-        }
-        if !report.failed.is_empty() {
-            return Ok(report);
-        }
-        let retired = self.0.store.transaction(|tx| {
-            let mut done = Vec::new();
-            for r in &retiring {
-                // an item wrapped under the old version after the loop (a racing insert) keeps it alive
-                if repo::count_on_version(tx, ws, r.version)? == 0 {
+        let failed = self.0.store.transaction(|tx| {
+            let (rewrapped, failed) = rewrap_all(tx, ws, &old, &new, active)?;
+            if failed.is_empty() {
+                for r in &retiring {
                     repo::set_key_status(tx, ws, r.version, RETIRED, Some(now()))?;
                     base::audit(
                         tx,
@@ -401,19 +364,33 @@ impl Vault {
                         ws,
                         &json!({ "version": r.version }),
                     )?;
-                    done.push(*r);
                 }
+            } else {
+                // what opened is re-wrapped; the old versions stay until the rest is destroyed
+                tracing::warn!(
+                    ws,
+                    rewrapped,
+                    failed = failed.len(),
+                    "vault: data keys that did not open keep their old version"
+                );
             }
-            Ok::<_, VaultError>(done)
+            Ok::<_, VaultError>(failed)
         })?;
-        for r in &retired {
+        if failed.is_empty() {
+            let retired: Vec<repo::KeyRow> = retiring.into_iter().cloned().collect();
+            self.forget(ws, &retired);
+        }
+        Ok(())
+    }
+
+    /// Removes retired versions from the key store and the cache (a missing entry is fine).
+    fn forget(&self, ws: &str, retired: &[repo::KeyRow]) {
+        for r in retired {
             if let Err(e) = self.0.keys.delete(&r.keychain_account) {
                 tracing::warn!(ws, version = r.version, error = %e, "vault: retired key not deleted from key store");
             }
             lock(&self.0.cache).remove(&(ws.to_string(), r.version));
-            report.retired.push(r.version);
         }
-        Ok(report)
     }
 
     /// A data key for a new item, wrapped under the active KEK (slice V2).
@@ -480,7 +457,7 @@ impl Vault {
         &self,
         ws: &str,
         version: i64,
-        record: impl FnOnce(&Tx, &str) -> steve_store::Result<()>,
+        record: impl FnOnce(&Tx, &str, &Kek) -> VaultResult<()>,
     ) -> VaultResult<Kek> {
         let account = account_name(ws, version);
         match self.0.keys.get(&account) {
@@ -491,10 +468,7 @@ impl Vault {
         let kek = Kek::generate()?;
         self.0.keys.set(&account, &kek)?;
         let fp = fingerprint(&kek);
-        let res = self
-            .0
-            .store
-            .transaction(|tx| record(tx, &fp).map_err(VaultError::from));
+        let res = self.0.store.transaction(|tx| record(tx, &fp, &kek));
         if let Err(e) = res {
             if let Err(d) = self.0.keys.delete(&account) {
                 tracing::warn!(ws, version, error = %d, "vault: could not remove an unrecorded key");

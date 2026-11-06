@@ -319,6 +319,15 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
     let keys = steve_modules::vault::keystore::from_env(steve_home, |k| vars(k))
         .map_err(|e| BackendError::msg(format!("vault keystore: {e}")))?;
     let vault = steve_modules::vault::Vault::new(store.clone(), keys);
+    // what an interrupted rotation of an earlier Hub left `retiring` is finished once, off the start
+    {
+        let v = vault.clone();
+        std::thread::spawn(move || {
+            if let Err(e) = v.tidy_keys() {
+                tracing::warn!("vault: tidy keys: {e}");
+            }
+        });
+    }
     let uses = steve_modules::vault::SecretUses::new(
         vault.clone(),
         steve_home,
@@ -557,6 +566,10 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
     for m in &declared.media {
         channels = channels.media(m.clone());
     }
+    // how an agent reads each adapter's conversations on demand (`steve_im_read`)
+    for h in &declared.history {
+        channels = channels.history(h.clone());
+    }
     // how each channel side's messages are told apart (provider ids, time precision, senders)
     for d in declared.decls() {
         channels = channels.decl(d.clone());
@@ -571,6 +584,7 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
         .reactor(outbox.clone())
         // IM spaces converse through steve-core's thread (channels §2.12)
         .thread(Arc::new(super::chan::CoreThread(core.clone())))
+        .yolo(Arc::new(super::chan::ChanYolo(core.clone())))
         .build();
     channels.set_knowledge_store(kstore.clone());
     late.set(&channels);

@@ -16,9 +16,13 @@
 //!    reply, the audience, each piece of knowledge with its effective level →
 //!    `{"verdict":"pass|leak","spans":[…]}`. It also catches combinations and “根据之前和 Acme 的讨论”.
 //!
+//! Step 3 is skipped for a fixed receipt ([`CheckCx::skip_model`]) and, for a bot's own message whose
+//! knowledge was all tracked ([`CheckCx::internal_skip`]), for an audience made only of the workspace's
+//! own people when every piece of that knowledge (at least one) is public for them.
+//!
 //! Any span → [`Verdict::Leak`]. A failing or unreadable check model is a leak too, so a broken check
 //! never lets text through. Rewriting is the caller's: channels rewrite up to [`MAX_REWRITES`] times
-//! ([`rewrite_prompt`]), email doesn't.
+//! ([`rewrite_prompt`]) when the text could go out without a draft, email doesn't.
 //!
 //! Wiring (integrator): the check is registered before `Modules` exists and bound after:
 //! ```ignore
@@ -49,14 +53,15 @@ use crate::compose::PinnedModel;
 pub const CHECK_HEAD: &str = "【披露检查】";
 /// The rewrite prompt starts with this.
 pub const REWRITE_HEAD: &str = "【改写回复】";
-/// Rewrites before a leaking reply becomes a draft.
-pub const MAX_REWRITES: usize = 2;
+/// Rewrites before a leaking reply that could go out directly becomes a draft (one that waits for the
+/// owner anyway is not rewritten: the card offers it).
+pub const MAX_REWRITES: usize = 1;
 /// The check model list (comma separated).
 pub const ENV_CHECK: &str = "STEVE_MODELS_CHECK";
 /// The fast list, the default source of check models.
 pub const ENV_FAST: &str = "STEVE_MODELS_FAST";
 /// The check model's time limit.
-pub const TIMEOUT: Duration = Duration::from_secs(60);
+pub const TIMEOUT: Duration = Duration::from_secs(20);
 /// A name shorter than this (in characters) is too common to count as a disclosure.
 const MIN_NAME: usize = 2;
 
@@ -448,6 +453,7 @@ pub fn entries(
                     }
                 }
                 .into(),
+                seq: k.seq,
             }
         })
         .collect()
@@ -755,7 +761,23 @@ impl OutboundCheck for Disclosure {
             }
         }
 
-        // 3. the model check
+        // 3. the model check, except where it cannot find more than the rules did: a fixed receipt no model
+        // wrote (the caller says so), or a bot's message whose knowledge was all tracked, to an audience made
+        // only of the workspace's own people for whom every piece of it counts as public (decided by the
+        // user on 2026-11-06). Knowledge nobody tracked (none given) is not public knowledge: the model looks.
+        if cx.skip_model || (cx.internal_skip && internal_public(audience, knowledge)) {
+            let verdict = if spans.is_empty() {
+                Verdict::Pass
+            } else {
+                Verdict::Leak
+            };
+            return result(
+                verdict,
+                entries(text, audience, knowledge, &names, &flagged),
+                spans,
+                None,
+            );
+        }
         let said = audience_said(secrets.as_ref(), &cx.ws, cx.audience_said.as_deref());
         let prompt = check_prompt_with(audience, text, &usable, said.as_deref());
         let (leak, model) = match self.run_model(cx, &prompt).await {
@@ -797,6 +819,16 @@ impl OutboundCheck for Disclosure {
             model,
         )
     }
+}
+
+/// Everyone who reads it is a recorded user of the workspace (`workspace` among the scopes, nobody outside)
+/// and there is knowledge, every piece of it public for them: nothing the check model could flag that the
+/// rules would not. No knowledge at all says nothing was tracked, not that it was public.
+fn internal_public(a: &Audience, knowledge: &[KnowledgeUse]) -> bool {
+    !a.external
+        && a.scopes.iter().any(|s| s == "workspace")
+        && !knowledge.is_empty()
+        && knowledge.iter().all(|k| effective(k, a) == Level::Public)
 }
 
 /// The only reader is the workspace's owner ([`space_audience`] adds `private` then) and nobody is outside.
@@ -912,6 +944,7 @@ mod tests {
             level,
             visibility: vis.into(),
             text: text.into(),
+            seq: None,
         }
     }
 
@@ -1022,6 +1055,7 @@ mod tests {
             level: Level::Conclusion,
             visibility: "workspace".into(),
             text: "x".into(),
+            seq: None,
         };
         let ks = vec![k("事项 ST-23")];
         let (leak, s) = judge_check(

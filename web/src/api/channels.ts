@@ -51,6 +51,8 @@ export type ChanMessage = {
   attachments?: ChannelAttachment[]
   id: string; space_id: string; direction: "in" | "out"; sender: { name: string; party_id: string | null; account_id?: string | null }; persona_id: string | null; on_behalf: "none" | "persona" | "proxy"
   text: string | null; status: "received" | "draft" | "pending" | "sent" | "failed" | "unknown" | "recalled" | "blocked"; work_item_id: string | null; decision_id: string | null; created: number; sent: number | null; purged: number | null; basis: Basis | null
+  /** only recorded as history when it came in: written before the connection was on, or arrived too late (newer Hubs) */
+  history?: "before" | "late" | null
 }
 export type SpaceDetail = Space & { recent: ChanMessage[] }
 export type Reveal = { name: boolean; role: boolean; ai: boolean; steve: boolean; owner: boolean }
@@ -78,6 +80,8 @@ export type ChannelAccount = {
   spaces: Space[]; permissions: PermissionCheck[] | null
   /** how its messages come in, as its side declares (`poll`, `long_connection`…); `null` when the Hub doesn't say */
   receive?: string | null
+  /** the wait after you approve a message before it goes out, in seconds: as set (`null`: the default) and the default; `null` when this Hub doesn't say */
+  sendDelay: { set: number | null; def: number } | null
 }
 
 export type FeishuRegistration = {
@@ -106,7 +110,7 @@ function personaOfAccount(ps: Persona[], account: string): PersonaRef | null {
 /** the account's rules as the spaces that follow it see them */
 const inheritedRules = (ss: Space[]) => ss.find((s) => s.rules === null)?.effective_rules ?? null
 
-type SpecAccount = { connection_id: string; persona: PersonaRef | null; rules: Rule[]; trigger: Trigger | null; receive?: string | null }
+type SpecAccount = { connection_id: string; persona: PersonaRef | null; rules: Rule[]; trigger: Trigger | null; receive?: string | null; send_delay_s?: number | null; send_delay_default_s?: number }
 
 async function compose(c: RConnection, ps: Persona[], all: Space[], pv: Providers): Promise<ChannelAccount> {
   const [account, spec] = await Promise.all([accountsApi.account(c.account_id), optional(get<SpecAccount>("/channels/" + e(c.id)))])
@@ -116,6 +120,7 @@ async function compose(c: RConnection, ps: Persona[], all: Space[], pv: Provider
   return {
     connection: c, account, mode, name: account.display_name || account.handle, provider, persona, personaBot: persona ? ps.find((p) => p.id === persona.id)?.bot_id ?? null : null,
     rules: spec?.rules ?? inheritedRules(spaces), trigger: spec?.trigger ?? null, editable: !!spec, spaces, permissions: permissionsOf(spec) ?? permissionsOf(c), receive: spec?.receive ?? null,
+    sendDelay: typeof spec?.send_delay_default_s === "number" ? { set: spec.send_delay_s ?? null, def: spec.send_delay_default_s } : null,
   }
 }
 
@@ -132,7 +137,7 @@ export const channelsApi = {
     if (!c) return null
     return compose(c, ps, await channelsApi.spaces({ connection: c.id }), pv)
   },
-  patchAccount: (connection: string, b: { duty?: string; rules?: Rule[]; trigger?: Partial<Trigger>; persona_id?: string }) => patch<SpecAccount>("/channels/" + e(connection), b),
+  patchAccount: (connection: string, b: { duty?: string; rules?: Rule[]; trigger?: Partial<Trigger>; persona_id?: string; send_delay_s?: number | null }) => patch<SpecAccount>("/channels/" + e(connection), b),
   /** connect the Feishu bot: `POST /channels` when the Hub has it (it also binds the default persona), else the plain connection */
   connectBot: async (fields: Record<string, string>, persona_id?: string): Promise<{ connection_id: string; account_id: string; permissions: PermissionCheck[] | null; bound: boolean }> => {
     const r = await optional(post<any>("/channels", { adapter: FEISHU_APP, fields, persona_id }))

@@ -281,6 +281,13 @@ pub fn update_repo(c: &Connection, r: &RepoRow) -> Result<()> {
     Ok(())
 }
 
+/// Records the repo's visibility as GitHub last said it.
+pub fn set_private(c: &Connection, id: &str, private: bool, now: i64) -> Result<()> {
+    c.prepare_cached("UPDATE gh_repos SET private = ?, updated = ? WHERE id = ?")?
+        .execute(params![private as i64, now, id])?;
+    Ok(())
+}
+
 pub fn repo_get(c: &Connection, id: &str) -> Result<Option<RepoRow>> {
     c.prepare_cached(&format!("SELECT {REPO_COLS} FROM gh_repos WHERE id = ?"))?
         .query_row(params![id], repo_row)

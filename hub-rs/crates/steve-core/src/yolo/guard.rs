@@ -11,9 +11,16 @@
 //! may be created and written but not deleted. Codex's requests come as `{command: [shell, -lc,
 //! script], cwd}` and `{changes: {path: {type, unified_diff, move_path}}}`; both are read. A compound
 //! line is allowed when every part is. `kill <pid>` only for processes this session's agent started.
+//!
+//! Closed bypasses (U3/U4, 2026-11-06): inline code (`python3 -c`, `node -e`…) that mentions anything
+//! outward, an awk program with `system()`, a pipe or a redirection, `npx` of a package that is not a
+//! known build tool, a web fetch with a query or a long path, and a here-document fed to anything but
+//! a reader all stay with the user.
 
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
+use regex::Regex;
 use serde_json::{Value, json};
 
 use super::judge::{Env, Tool};
@@ -170,6 +177,46 @@ const TOOLCHAIN: &[&str] = &[
     "ld",
 ];
 
+/// Packages `npx` (and `npm exec`, `pnpm dlx`…) may run unattended: the build and test tools of a
+/// project, which it runs from `node_modules`.
+const NPX_TOOLS: &[&str] = &[
+    "tsc",
+    "tsx",
+    "ts-node",
+    "vite",
+    "vitest",
+    "jest",
+    "eslint",
+    "prettier",
+    "biome",
+    "svelte-check",
+    "vue-tsc",
+    "astro",
+    "next",
+    "nuxt",
+    "webpack",
+    "rollup",
+    "esbuild",
+    "turbo",
+    "nx",
+    "mocha",
+    "ava",
+    "c8",
+    "nyc",
+    "stylelint",
+    "oxlint",
+    "knip",
+];
+/// Scoped packages `npx` may run, and the program each one is.
+const NPX_SCOPED: &[(&str, &str)] = &[("@biomejs/biome", "biome")];
+/// Inline code that may reach outside: outward words, network and process calls.
+static OUTWARD_CODE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)推送|发布|发送|删除|部署|上线|\b(push|publish|deploy|release|send|sendmail|upload|delete|unlink|rmtree|remove|email|smtp|socket|subprocess|child_process|system|popen|spawn|exec|execsync|fetch|requests|urllib|httpx|aiohttp|axios|https?|curl|wget|ssh|xmlhttprequest|websocket)\b")
+        .expect("valid regex")
+});
+/// A fetched URL's path longer than this may carry data out.
+const FETCH_PATH_MAX: usize = 100;
+
 /// Checks one permission request; `extra` = the user's additional programs.
 pub fn check(t: &Tool, extra: &[String], env: &Env) -> Guard {
     if t.truncated || t.raw.is_null() {
@@ -227,6 +274,9 @@ pub fn check(t: &Tool, extra: &[String], env: &Env) -> Guard {
             if !(url.starts_with("https://") || url.starts_with("http://")) {
                 return ask("不是网页地址");
             }
+            if let Some(why) = fetch_carries(url) {
+                return ask(why);
+            }
             allow(json!("get"), vec![])
         }
         "execute" => {
@@ -253,6 +303,140 @@ pub fn check(t: &Tool, extra: &[String], env: &Env) -> Guard {
         }
         other => ask(format!("不认识的工具类型 {other}")),
     }
+}
+
+/// Why fetching `url` may send data out (in its query or a long path); `None`: a plain page.
+fn fetch_carries(url: &str) -> Option<String> {
+    let rest = url.split_once("://").map_or(url, |(_, r)| r);
+    let rest = rest.split('#').next().unwrap_or("");
+    let (path, query) = match rest.split_once('?') {
+        Some((p, q)) => (p, q),
+        None => (rest, ""),
+    };
+    let path = path.split_once('/').map_or("", |(_, p)| p);
+    if !query.is_empty() {
+        return Some("网址带查询参数，可能把数据带出去，留给你".into());
+    }
+    if path.chars().count() > FETCH_PATH_MAX {
+        return Some("网址的路径很长，可能把数据带出去，留给你".into());
+    }
+    None
+}
+
+/// The inline code of an interpreter's command line (`python3 -c CODE`, `node -e CODE`, `deno eval
+/// CODE`…), when there is one.
+fn inline_code<'a>(p: &str, args: &'a [String]) -> Option<&'a str> {
+    let flags: &[&str] = match p {
+        "python" | "python3" => &["-c"],
+        "node" | "bun" | "tsx" | "ts-node" => &["-e", "--eval", "-p", "--print"],
+        "ruby" => &["-e"],
+        "perl" => &["-e", "-E"],
+        "deno" => {
+            return (args.first().map(String::as_str) == Some("eval"))
+                .then(|| operands(&args[1..]).first().map(|s| s.as_str()))
+                .flatten();
+        }
+        _ => return None,
+    };
+    let i = args.iter().position(|a| flags.contains(&a.as_str()))?;
+    args.get(i + 1).map(String::as_str)
+}
+
+/// An awk command line read the way awk reads it: the program texts (`-e`/`--source`, or the first
+/// operand) and the operands after them; `None` when the program is in a file (`-f`).
+fn awk_parts(args: &[String]) -> Option<(Vec<&str>, Vec<&String>)> {
+    let mut progs = Vec::new();
+    let mut i = 0;
+    while let Some(a) = args.get(i) {
+        let s = a.as_str();
+        match s {
+            "--" => {
+                i += 1;
+                break;
+            }
+            // options that take the next word as their value
+            "-v" | "-F" | "--assign" | "--field-separator" => i += 2,
+            "-e" | "--source" => {
+                progs.push(args.get(i + 1).map_or("", String::as_str));
+                i += 2;
+            }
+            _ if s.starts_with("-f") || s.starts_with("--file") => return None,
+            _ if s.starts_with("--source=") => {
+                progs.push(&s["--source=".len()..]);
+                i += 1;
+            }
+            _ if s.starts_with('-') && s != "-" => i += 1,
+            _ => break,
+        }
+    }
+    let rest = &args[i.min(args.len())..];
+    let (prog, files) = match (progs.is_empty(), rest.split_first()) {
+        (true, Some((p, f))) => (Some(p.as_str()), f),
+        _ => (None, rest),
+    };
+    progs.extend(prog);
+    Some((progs, files.iter().collect()))
+}
+
+/// An interpreter that reads its program from standard input (`… | python3`, `… | node -`): no inline
+/// code, no module and no script operand.
+fn program_from_stdin(p: &str, args: &[String]) -> bool {
+    let valued: &[&str] = match p {
+        "python" | "python3" => &["-W", "-X", "-Q"],
+        "node" | "bun" | "tsx" | "ts-node" => &[
+            "-r",
+            "--require",
+            "--import",
+            "-C",
+            "--conditions",
+            "--loader",
+            "--experimental-loader",
+            "--input-type",
+        ],
+        "ruby" => &["-I", "-r", "-C", "-E", "-F"],
+        "perl" => &["-I", "-M", "-m"],
+        "deno" => {
+            let ops = operands(args);
+            return match ops.first().map(|s| s.as_str()) {
+                None | Some("-") => true,
+                Some("run") => ops.get(1).is_none_or(|s| *s == "-"),
+                _ => false,
+            };
+        }
+        _ => return false,
+    };
+    if inline_code(p, args).is_some()
+        || matches!(p, "python" | "python3") && args.iter().any(|a| a == "-m")
+    {
+        return false;
+    }
+    let mut i = 0;
+    while let Some(a) = args.get(i) {
+        match a.as_str() {
+            "-" => return true,
+            "--" => return args.get(i + 1).is_none_or(|s| s == "-"),
+            s if valued.contains(&s) => i += 2,
+            s if s.starts_with('-') => i += 1,
+            _ => return false,
+        }
+    }
+    true
+}
+
+/// Why an awk program is more than a reader: it runs commands (`system()`, a pipe) or writes files.
+fn awk_runs(args: &[String]) -> Option<String> {
+    let Some((progs, _)) = awk_parts(args) else {
+        return Some("awk 的程序在文件里，看不出会做什么".into());
+    };
+    static WRITES: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r#"(print|printf)[^;{}]*>"#).expect("valid regex"));
+    if progs
+        .iter()
+        .any(|p| p.contains("system") || p.contains('|') || WRITES.is_match(p))
+    {
+        return Some("awk 程序里有 system()、管道或写文件，会执行或改别的东西".into());
+    }
+    None
 }
 
 /// Why `p` may not be read unattended; `None` = it may.
@@ -341,6 +525,16 @@ fn command(cmd: &str, pl: &Places, cx: &Cx) -> Result<Vec<String>, String> {
         if a.sudo {
             return Err("sudo 留给你".into());
         }
+        // a here-document is text for a reader (`cat <<EOF > file`), not a script for anything else
+        if c.stdin.is_some() && !(READERS.contains(&a.program.as_str()) || a.program == "tee") {
+            return Err(format!(
+                "here-document 喂给 {}，看不出会执行什么",
+                a.program
+            ));
+        }
+        if c.piped && program_from_stdin(&a.program, &a.args) {
+            return Err(format!("管道把程序喂给 {}，看不出会执行什么", a.program));
+        }
         if matches!(a.program.as_str(), "cd" | "pushd") {
             let target = a.args.first().map(String::as_str).unwrap_or("~");
             match pl.resolve(target) {
@@ -386,6 +580,14 @@ fn simple(a: &Argv, pl: &Places, cx: &Cx) -> Result<(), String> {
     }
     if a.xargs {
         return Err("xargs 的参数来自标准输入，看不出".into());
+    }
+    if let Some(code) = inline_code(p, args)
+        && let Some(m) = OUTWARD_CODE.find(code)
+    {
+        return Err(format!(
+            "内联代码里有对外或执行别的程序的字眼（{}），留给你",
+            m.as_str()
+        ));
     }
     let sub = operands(args).first().map(|s| s.as_str()).unwrap_or("");
     let inside_all = |list: Vec<&String>| -> Result<(), String> {
@@ -441,13 +643,18 @@ fn simple(a: &Argv, pl: &Places, cx: &Cx) -> Result<(), String> {
                     | "exec"
                     | ""
             ) || p == "yarn" && !matches!(sub, "global" | "publish" | "npm" | "dlx");
-            if ok {
-                Ok(())
-            } else {
-                Err(format!("{p} {sub} 留给你"))
+            if !ok {
+                return Err(format!("{p} {sub} 留给你"));
             }
+            if sub == "exec" {
+                // `npm exec X` runs package X like npx
+                let i = args.iter().position(|x| x == "exec").unwrap_or(0);
+                return npx(&args[i + 1..], pl, cx);
+            }
+            Ok(())
         }
-        "npx" => Ok(()),
+        "npx" | "pnpx" | "bunx" => npx(args, pl, cx),
+        "ps" | "pgrep" | "lsof" => Ok(()),
         "go" => {
             if matches!(sub, "install" | "env" | "get") {
                 Err(format!("go {sub} 会改工作区以外"))
@@ -510,16 +717,86 @@ fn simple(a: &Argv, pl: &Places, cx: &Cx) -> Result<(), String> {
         _ if WRITERS.contains(&p) => writable_all(operands(args)),
         "curl" => curl_local(args, pl),
         _ if READERS.contains(&p) => {
-            // grep/rg/awk/jq take a pattern or program first
-            let skip = usize::from(matches!(
-                p,
-                "grep" | "egrep" | "fgrep" | "rg" | "awk" | "jq"
-            ));
+            if p == "awk"
+                && let Some(why) = awk_runs(args)
+            {
+                return Err(why);
+            }
+            if p == "awk" {
+                let files = awk_parts(args).map(|(_, f)| f).unwrap_or_default();
+                return readable_all(files);
+            }
+            // grep/rg/jq take a pattern first
+            let skip = usize::from(matches!(p, "grep" | "egrep" | "fgrep" | "rg" | "jq"));
             readable_all(operands(args).into_iter().skip(skip).collect())
         }
         _ if TOOLCHAIN.contains(&p) => Ok(()),
         _ if extra.iter().any(|x| x == p) => Ok(()),
         _ => Err(format!("没见过的程序：{p}")),
+    }
+}
+
+/// `npx <package> …`: a known build or test tool (or one the user listed) runs as that program would;
+/// any other package may be downloaded and run, so it stays with the user.
+fn npx(args: &[String], pl: &Places, cx: &Cx) -> Result<(), String> {
+    // npx's own options come first (`-y`, `-p <pkg>`, `--`); the package's arguments stay as they are
+    let mut i = 0;
+    while let Some(x) = args.get(i) {
+        match x.as_str() {
+            "--" => {
+                i += 1;
+                break;
+            }
+            "-p" | "--package" | "-c" | "--call" => {
+                return Err("npx -p / -c 留给你".into());
+            }
+            s if s.starts_with('-') => i += 1,
+            _ => break,
+        }
+    }
+    let ops = &args[i.min(args.len())..];
+    let Some(pkg) = ops.first() else {
+        return Err("npx 没有给要运行的包".into());
+    };
+    // `name@1.2` → `name`, `@scope/name@1.2` → `@scope/name`; a scope is someone's own packages, so
+    // a known tool's name under another scope (`@x/eslint`) is a different package
+    let spec = match pkg.strip_prefix('@') {
+        Some(rest) => pkg.len() - rest.len() + rest.find('@').unwrap_or(rest.len()),
+        None => pkg.find('@').unwrap_or(pkg.len()),
+    };
+    let spec = &pkg[..spec];
+    let listed = |n: &str| cx.extra.iter().any(|x| x == n);
+    let name = match NPX_SCOPED.iter().find(|(s, _)| *s == spec) {
+        Some((_, n)) => *n,
+        // a path, a URL or `github:user/repo` is not a package name at all
+        None if spec.contains(['/', ':', '\\']) || spec.starts_with('.') => {
+            if !listed(spec) {
+                return Err(format!("npx 会下载并运行 {pkg}，留给你"));
+            }
+            spec
+        }
+        None => spec,
+    };
+    if !(NPX_TOOLS.contains(&name) || listed(name) || listed(spec)) {
+        return Err(format!("npx 会下载并运行 {pkg}，留给你"));
+    }
+    let a = Argv {
+        program: name.to_string(),
+        args: ops[1..].to_vec(),
+        sudo: false,
+        xargs: false,
+    };
+    if TOOLCHAIN.contains(&name) || READERS.contains(&name) {
+        simple(&a, pl, cx)
+    } else {
+        // a JavaScript build tool: what it is handed inline is still read
+        match inline_code("node", &a.args).and_then(|c| OUTWARD_CODE.find(c)) {
+            Some(m) => Err(format!(
+                "内联代码里有对外或执行别的程序的字眼（{}），留给你",
+                m.as_str()
+            )),
+            None => Ok(()),
+        }
     }
 }
 
@@ -612,6 +889,35 @@ fn git(args: &[String], pl: &Places, extra: &[String]) -> Result<(), String> {
         "status" | "diff" | "log" | "show" | "add" | "commit" | "checkout" | "switch" | "stash"
         | "rev-parse" | "ls-files" | "blame" | "grep" | "show-ref" | "describe" | "rev-list"
         | "merge-base" | "cat-file" | "shortlog" | "reflog" | "restore" | "mv" | "rm" => true,
+        // local only: reads of the repository, and changes that stay in the item's own checkout
+        "ls-tree" | "for-each-ref" | "name-rev" | "check-ignore" | "diff-tree" | "diff-index"
+        | "diff-files" | "count-objects" | "var" | "version" | "help" | "cherry" | "range-diff"
+        | "whatchanged" | "cherry-pick" | "revert" | "apply" => true,
+        // `git bisect run CMD` runs any program on every step
+        "bisect" => rest.first().is_none_or(|x| {
+            matches!(
+                x.as_str(),
+                "start"
+                    | "good"
+                    | "bad"
+                    | "new"
+                    | "old"
+                    | "skip"
+                    | "reset"
+                    | "log"
+                    | "visualize"
+                    | "view"
+                    | "terms"
+                    | "help"
+            )
+        }),
+        "tag" => !rest
+            .iter()
+            .any(|x| x == "-d" || x == "--delete" || x == "-f" || x == "--force"),
+        "worktree" => rest.first().is_some_and(|x| x == "list"),
+        "reset" => !rest
+            .iter()
+            .any(|x| matches!(x.as_str(), "--hard" | "--merge" | "--keep")),
         "branch" => !rest
             .iter()
             .any(|x| x == "-D" || x == "-d" || x == "--delete" || x == "-m" || x == "-M"),

@@ -219,7 +219,7 @@
   "core.yolo.reason.release_busy": "另一个发布正在进行，等它结束再判",
   "core.yolo.reason.release_rebase": "发布前的 rebase 已经交回 Bot 3 次",
   "core.yolo.reason.release_state": "分支不对或事项还没验收",
-  "core.yolo.reason.release_rate": "发布太频繁（每小时最多 3 次、每次至少隔 15 分钟），这次留给你",
+  "core.yolo.reason.release_rate": "两次发布至少隔 15 分钟，到时间再发",
   "core.yolo.reason.release_self": "发布你自己的 Steve，健康检查失败会自动回滚",
   "core.yolo.reason.propose_off": "设置里没有让 YOLO 开始事项",
   "core.yolo.reason.propose_deps": "前置事项都已完成",

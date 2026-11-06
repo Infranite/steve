@@ -7,13 +7,13 @@ use steve_store::base::Viewer;
 
 use super::mcp::{McpCx, names_lower, resolve_who, viewer};
 use super::repo::{self, Party};
-use super::stewards::{self as st, ObjectInfo, Proposed};
+use super::stewards::{self as st, ObjectInfo};
 use crate::{ApiError, ApiResult, Modules};
 
 /// Matches `steve_whois` returns.
 pub const WHOIS_LIMIT: usize = 5;
-/// The answer of `steve_steward_propose` when a proposal was opened.
-pub const PROPOSED: &str = "Saved as a proposal; the user will confirm it.";
+/// The answer of `steve_steward_propose` when it was recorded.
+pub const RECORDED: &str = "Recorded. The user sees it on the object and can undo it for 24 hours.";
 
 fn person_line(c: &Connection, s: &st::Steward) -> ApiResult<String> {
     let name = repo::get(c, &s.person_id)?
@@ -279,7 +279,8 @@ fn resolve_person(c: &Connection, viewer: &Viewer, who: &str) -> ApiResult<Party
 }
 
 /// `steve_steward_propose`: the object must resolve to exactly one; the person must be a contact who
-/// is not a bot. Opens the proposal and its confirm card.
+/// is not a bot. Recorded at once as a confirmed row (source `chat`; other stewards of that role
+/// stay), as one changeset the user can undo for 24 hours; a proposal still open for it is settled.
 pub fn propose(
     m: &Modules,
     cx: &McpCx,
@@ -293,10 +294,11 @@ pub fn propose(
     if q.is_empty() {
         return Err("Give the object's id, handle or exact name.".into());
     }
-    m.store
-        .transaction(|tx| {
+    let found = m
+        .store
+        .reader(|c| {
             // a bot's account and the bot party itself are one thing: the party is what gets a 负责人
-            let mut found = matches(tx, &viewer, q)?;
+            let mut found = matches(c, &viewer, q)?;
             let parties: Vec<String> = found
                 .iter()
                 .filter(|o| o.object_type == "party")
@@ -330,31 +332,55 @@ pub fn propose(
                     )));
                 }
             };
-            let p = resolve_person(tx, &viewer, person)?;
+            let p = resolve_person(c, &viewer, person)?;
             if p.contact_kind.as_deref() == Some("bot") {
                 return Err(ApiError::Rule(format!(
                     "{} is a bot; a person has to be responsible.",
                     p.name
                 )));
             }
-            let source_ref = cx.item_id.as_deref().or(cx.session_id.as_deref());
-            Ok(
-                match st::propose(tx, &viewer.ws, &o, &p, role, basis, &cx.bot_id, source_ref)? {
-                    Proposed::Opened(_) => PROPOSED.to_string(),
-                    Proposed::Pending(_) => {
-                        "Already proposed; waiting for the user to confirm.".to_string()
-                    }
-                    Proposed::Already => format!(
-                        "Already recorded: {} is {} of {}「{}」.",
-                        p.name,
-                        st::role_label(role),
-                        o.type_label,
-                        o.name
-                    ),
-                },
-            )
+            let k = st::Key {
+                object_type: o.object_type.clone(),
+                object_id: o.object_id.clone(),
+                person_id: p.id.clone(),
+                role: role.into(),
+            };
+            let already = st::get(c, &viewer.ws, &k)?.is_some_and(|s| s.status == "confirmed");
+            Ok((o, p, already))
         })
-        .map_err(|e: ApiError| e.to_string())
+        .map_err(|e: ApiError| e.to_string())?;
+    let (o, p, already) = found;
+    if already {
+        return Ok(format!(
+            "Already recorded: {} is {} of {}「{}」.",
+            p.name,
+            st::role_label(role),
+            o.type_label,
+            o.name
+        ));
+    }
+    let who = crate::Caller {
+        ws: viewer.ws.clone(),
+        me: cx.user.clone(),
+    };
+    st::set_from(
+        m,
+        &who,
+        &o.object_type,
+        &o.object_id,
+        st::SetBody {
+            person_id: p.id.clone(),
+            role: Some(role.into()),
+            replace: Some(false),
+        },
+        "chat",
+        crate::changes::Origin {
+            origin: "steve".into(),
+            basis: basis.trim().chars().take(500).collect(),
+        },
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(RECORDED.to_string())
 }
 
 /// What `steve_contacts_find` adds for a contact: a bot's 负责人, or what a person is responsible for.

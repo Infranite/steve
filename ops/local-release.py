@@ -3,6 +3,7 @@
 
     local-release.py build <commit> [--version X.Y.Z]   build $STEVE_HOME/releases/<version>-local-<sha7>
     local-release.py deploy <release dir> [--operation <id>]  switch the running Steve to it (newer or older)
+    local-release.py prune [--dry-run]                   remove old release dirs and pre-release backups now
 
 build: the version is the vX.Y.Z tag on the commit unless given. The Hub is built with cargo (STEVE_CARGO, else
 cargo on PATH) into $STEVE_HOME/build/cargo-target, signed with the "Steve Hub" identity in
@@ -22,6 +23,15 @@ deploy, in order; any failure before the switch leaves the running version as it
      A failure after the switch is not undone: the database may be migrated, the new version stays and the
      result says so (exit 3), with the backup named.
 
+After a healthy deploy (and with `prune`), old copies go: of the pre-release backups this script takes
+(backups/pre-<version>-local-<sha7>-<stamp>.sqlite3, with their -shm/-wal) the newest 8 stay; of the release dirs
+(<version>-local-<sha7>, and ops/release.sh's <stamp>-<sha>) `current`, the previous one and the newest 3 stay. The
+previous one is what the last healthy deploy replaced: from its result in logs/release/, else from ops/release.sh's
+releases/history.jsonl.
+Nothing else in backups/ is touched (pre-rust, pre-purge, pre-takeover, daily copies, failed-probe-*). A deploy that
+did not end healthy removes nothing. The one-click upgrade (hub-rs upgrades/runner.rs) runs this deploy, so it
+prunes the same way.
+
 --operation <id>: also write each step into the Hub's upgrade journal ($STEVE_HOME/updates/operations/<id>.json,
 the phases the managed supervisor uses), so Settings · 关于 can follow a one-click upgrade across the restart. The
 Hub's runner job (hub-rs upgrades/runner.rs) passes it; the result there is one of succeeded, rolled_back, failed
@@ -36,7 +46,10 @@ and are checked against the installed Hub and steve-keyhelper signatures before 
 Results: $STEVE_HOME/logs/release/local-<version>-<time>.json.
 """
 import argparse
+import base64
+import contextlib
 import fcntl
+import re
 import hashlib
 import json
 import os
@@ -160,6 +173,70 @@ def sha256(path):
 
 # ── build ──
 
+SIGNING_ACCOUNT = "steve/signing/keychain-pass"  # hub-rs steve-modules vault/keystore/signing.rs
+
+
+def signing_password(ident, from_stdin=False):
+    """The signing keychain's password: the first line of stdin (the Hub's runner), the 0600 file sign-setup.sh
+    writes, or the login keychain entry the Hub moved it into (`security` asks the user for that one)."""
+    if from_stdin:
+        password = sys.stdin.readline().strip()
+        if not password:
+            raise Refused("--keychain-pass-stdin: no password on stdin")
+        return password
+    file = HOME / "signing/keychain-pass"
+    if file.exists():
+        return file.read_text().strip()
+    # only the signed Hub reads the entry unasked; anyone else meets a macOS prompt, which only a person at a
+    # terminal should see (a Hub-run or agent-run build would block on it, or teach the user to click it away)
+    if not sys.stdin.isatty():
+        raise Refused(f"the signing keychain's password is in the login keychain ({SIGNING_ACCOUNT}), and only a run "
+                      "from a terminal asks macOS for it: upgrade from Steve's settings, or run this in Terminal")
+    log(f"macOS asks for the login keychain item {SIGNING_ACCOUNT}: click 允许 (Allow), never 始终允许 (Always Allow), "
+        "which would let every process read it unasked")
+    got = subprocess.run(["security", "find-generic-password", "-s", ident["vault_service"], "-a", SIGNING_ACCOUNT, "-w"],
+                         capture_output=True, text=True)
+    if got.returncode != 0:
+        raise Refused("no signing keychain password: not in signing/keychain-pass, and the keychain entry "
+                      f"{SIGNING_ACCOUNT} did not open (run the upgrade from Steve's settings, or allow the prompt)")
+    try:
+        return base64.b64decode(got.stdout.strip(), validate=True).hex()
+    except ValueError:
+        raise Refused(f"the keychain entry {SIGNING_ACCOUNT} is not a signing password")
+
+def quotable(password, keychain):
+    """What a `security -i` line can carry: no quoting inside it."""
+    if not password or any(c.isspace() or c in "\"'\\" for c in password) or any(c in "\"\\\n" for c in str(keychain)):
+        raise Refused("the signing keychain's password or path has a space, quote or backslash: not passed to security")
+
+
+@contextlib.contextmanager
+def keychain_unlocked(keychain, password):
+    """The signing keychain, unlocked for the block and locked again after it, failed or not: left unlocked, it lets
+    any process sign a binary as the Hub (and steve-keyhelper hands that binary the vault's keys). The password goes
+    to `security -i` on stdin, never on a command line (`ps` shows those to every process of the user). The keychain
+    also locks itself after 5 idle minutes and on sleep, should this process die inside the block."""
+    quotable(password, keychain)
+    unlocked = subprocess.run(["security", "-i"], input=f'unlock-keychain -p {password} "{keychain}"\n',
+                              capture_output=True, text=True)
+    if unlocked.returncode != 0:
+        raise Refused("the signing keychain did not unlock")
+    try:
+        subprocess.run(["security", "set-keychain-settings", "-l", "-u", "-t", "300", str(keychain)], capture_output=True)
+        yield
+    finally:
+        if subprocess.run(["security", "lock-keychain", str(keychain)], capture_output=True).returncode != 0:
+            log(f"could not lock {keychain} again")
+
+
+def sign(binary, keychain, password, identifier):
+    """codesign `binary` as `identifier` with the signing keychain unlocked only meanwhile."""
+    with keychain_unlocked(keychain, password):
+        subprocess.run(["codesign", "--force", "--sign", "Steve Hub", "--identifier", identifier,
+                        "--keychain", str(keychain), str(binary)], check=True)
+    subprocess.run(["codesign", "--verify", "--strict", str(binary)], check=True)
+
+
 def build(args):
     ident = identity()
     repo = pathlib.Path(args.repo).resolve()
@@ -175,8 +252,12 @@ def build(args):
     if candidate.exists():
         raise Refused(f"{candidate} exists: inspect it rather than overwrite")
     keychain = HOME / "signing/steve-signing.keychain-db"
-    if not keychain.exists() or not (keychain.parent / "keychain-pass").exists():
+    if not keychain.exists():
         raise Refused(f"no signing keychain at {keychain} (ops/sign-setup.sh): an ad-hoc signed Hub can't read the vault")
+    # the keychain's password: from the Hub over stdin (the one-click upgrade), else signing/keychain-pass, else the
+    # key store entry the Hub moved it into (a macOS prompt: only the signed Hub reads it unasked)
+    password = signing_password(ident, from_stdin=args.keychain_pass_stdin)
+    quotable(password, keychain)
     log(f"build {version} from {commit} into {candidate}")
     candidate.mkdir(parents=True)
     try:
@@ -199,14 +280,8 @@ def build(args):
         binary = candidate / "bin/steve-hub"
         binary.parent.mkdir(exist_ok=True)
         shutil.copy2(target_dir / "release/steve-hub", binary)
-        password = (keychain.parent / "keychain-pass").read_text().strip()
-        unlocked = subprocess.run(["security", "unlock-keychain", "-p", password, str(keychain)], capture_output=True)
+        sign(binary, keychain, password, ident["hub_identifier"])
         del password
-        if unlocked.returncode != 0:
-            raise Refused("the signing keychain did not unlock")
-        subprocess.run(["codesign", "--force", "--sign", "Steve Hub", "--identifier", ident["hub_identifier"],
-                        "--keychain", str(keychain), str(binary)], check=True)
-        subprocess.run(["codesign", "--verify", "--strict", str(binary)], check=True)
         info = build_info(binary)
         if info.get("version") != version or info.get("commit") != commit:
             raise Refused(f"--build-info says {info}, expected {version} {commit}")
@@ -231,6 +306,24 @@ def build(args):
 
 
 # ── deploy ──
+
+def private_backups():
+    """backups/ holds copies of the database: 0700, everything in it the owner's alone, also what older releases
+    left readable; the same for steve.env and its stray copies (steve.env.bak-*)."""
+    d = HOME / "backups"
+    d.mkdir(parents=True, exist_ok=True)
+    os.chmod(d, 0o700)
+    for root, dirs, files in os.walk(d):
+        for n in dirs:
+            os.chmod(os.path.join(root, n), 0o700)
+        for n in files:
+            p = os.path.join(root, n)
+            if not os.path.islink(p):
+                os.chmod(p, 0o600)
+    for p in HOME.glob("steve.env*"):
+        if p.is_file() and not p.is_symlink():
+            os.chmod(p, 0o600)
+
 
 def control(method):
     """The Hub's maintenance drain (loopback, control token)."""
@@ -412,7 +505,7 @@ def deploy(args, journal=Journal(None)):
         launchd("stop", ident)
         journal("backing_up")
         backup = HOME / f"backups/pre-{candidate.name}-{stamp}.sqlite3"
-        backup.parent.mkdir(parents=True, exist_ok=True)
+        private_backups()
         src, dst = sqlite3.connect(DB), sqlite3.connect(backup)
         try:
             src.backup(dst)
@@ -475,6 +568,7 @@ def deploy(args, journal=Journal(None)):
     save(ok=True, health=h, db_after=schema_gate.state(DB), finished=time.strftime("%Y%m%d-%H%M%S"))
     journal("succeeded")
     log(f"live: {h}")
+    prune_after(old_hub, save)
     print(json.dumps(result, ensure_ascii=False))
     return 0
 
@@ -537,6 +631,112 @@ def lift(seconds=120):
     raise RuntimeError(f"the drain could not be lifted in {seconds}s ({last})")
 
 
+# ── prune ──
+
+KEEP_BACKUPS = 8
+KEEP_RELEASES = 3
+# pre-<version>-local-<sha7>-<YYYYmmdd-HHMMSS>.sqlite3 (deploy below), with SQLite's side files
+BACKUP_RE = re.compile(r"^(pre-(\d+\.\d+\.\d+)-local-[0-9a-f]{7}-(\d{8}-\d{6})\.sqlite3)(-shm|-wal|-journal)?$")
+LOCAL_DIR_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)-local-[0-9a-f]{7}$")
+SCRIPT_DIR_RE = re.compile(r"^(\d{8}-\d{6})-[0-9a-f]{7,40}$")  # ops/release.sh's
+
+
+def prune(keep=(), dry=False):
+    """Old pre-release backups and release dirs, as the module docstring says. `keep`: release dirs that stay
+    whatever their rank (the previous one of a deploy). Returns what was removed (or would be, `dry`)."""
+    removed = []
+
+    def rm(p):
+        removed.append(str(p))
+        if dry:
+            return
+        try:
+            if p.is_dir() and not p.is_symlink():
+                shutil.rmtree(p)
+            else:
+                p.unlink()
+        except FileNotFoundError:
+            pass
+
+    backups = HOME / "backups"
+    if backups.is_dir():
+        groups = {}
+        for f in backups.iterdir():
+            m = BACKUP_RE.match(f.name)
+            if m and not f.is_symlink() and f.is_file():
+                groups.setdefault(m.group(1), []).append(f)
+        whole = sorted((b for b in groups if (backups / b) in groups[b]),
+                       key=lambda b: (BACKUP_RE.match(b).group(3), b), reverse=True)
+        for base in sorted(groups):
+            # beyond the newest, and a -shm/-wal whose database is gone (of no use to anyone)
+            if base not in whole[:KEEP_BACKUPS]:
+                for f in sorted(groups[base]):
+                    rm(f)
+
+    releases = HOME / "releases"
+    if releases.is_dir():
+        protect = {pathlib.Path(k).resolve() for k in keep}
+        for link in (HOME / "current", HOME / "previous", HOME / "web/current"):
+            if link.exists():
+                target = link.resolve()
+                protect.update(p for p in (target, *target.parents) if p.parent == releases.resolve())
+        ranked = []
+        for d in releases.iterdir():
+            if d.is_symlink() or not d.is_dir():
+                continue
+            if m := LOCAL_DIR_RE.match(d.name):
+                ranked.append(((1, tuple(int(x) for x in m.groups()), d.name), d))
+            elif m := SCRIPT_DIR_RE.match(d.name):
+                ranked.append(((0, (), m.group(1)), d))  # older than any local build
+        ranked.sort(key=lambda r: r[0], reverse=True)
+        for _, d in ranked[KEEP_RELEASES:]:
+            if d.resolve() not in protect:
+                rm(d)
+    return removed
+
+
+def last_previous():
+    """The release dir the last healthy deploy replaced (its rollback target): from the newest successful
+    logs/release/local-*.json, else (a machine that only ever used ops/release.sh) the last healthy hub line of
+    releases/history.jsonl. None when neither says."""
+    results = []
+    for f in (HOME / "logs/release").glob("local-*.json"):
+        try:
+            r = json.loads(f.read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(r, dict) and r.get("ok") is True and r.get("previous"):
+            results.append((str(r.get("finished") or r.get("started") or ""), f.name, r["previous"]))
+    if results:
+        return pathlib.Path(max(results)[2])
+    prev = None
+    try:
+        lines = (HOME / "releases/history.jsonl").read_text().splitlines()
+    except OSError:
+        lines = []
+    for line in lines:
+        try:
+            h = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(h, dict) and h.get("kind") == "hub" and h.get("ok") is True and h.get("prev"):
+            prev = HOME / "releases" / pathlib.Path(h["prev"]).name
+    return prev
+
+
+def prune_after(previous, save):
+    """prune() once a deploy is healthy: a failure here is logged, never the deploy's result."""
+    try:
+        removed = prune(keep=[previous])
+    except Exception as e:  # noqa: BLE001 - the release is live; tidying up must not say otherwise
+        log(f"warning: pruning old releases failed: {type(e).__name__}: {e}")
+        save(pruned_error=f"{type(e).__name__}: {e}")
+        return
+    if removed:
+        log(f"pruned {len(removed)}: {', '.join(pathlib.Path(p).name for p in removed)}")
+    save(pruned=removed)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -544,10 +744,14 @@ def main():
     b.add_argument("commit")
     b.add_argument("--version")
     b.add_argument("--repo", default=str(OPS.parent))
+    b.add_argument("--keychain-pass-stdin", action="store_true",
+                   help="read the signing keychain's password from the first line of stdin (the Hub's upgrade runner)")
     d = sub.add_parser("deploy")
     d.add_argument("release")
     d.add_argument("--drain-s", type=int, default=600)
     d.add_argument("--operation", help="the Hub's upgrade operation id: write each step into its journal")
+    pr = sub.add_parser("prune")
+    pr.add_argument("--dry-run", action="store_true", help="only list what would be removed")
     args = ap.parse_args()
     journal = Journal(None)
     try:
@@ -555,6 +759,11 @@ def main():
             journal = Journal(args.operation)
         lock = release_lock()
         try:
+            if args.cmd == "prune":
+                prev = last_previous()
+                for p in prune(keep=[prev] if prev else [], dry=args.dry_run):
+                    print(("would remove " if args.dry_run else "removed ") + p)
+                return 0
             return build(args) if args.cmd == "build" else deploy(args, journal)
         finally:
             lock.close()

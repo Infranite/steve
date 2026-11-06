@@ -19,7 +19,7 @@ import { Spinner } from "@/components/ui/spinner"
 import { Switch } from "@/components/ui/switch"
 import { Textarea } from "@/components/ui/textarea"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
-import { draftKey } from "@/composer-draft"
+import { draftKey, newClientId } from "@/composer-draft"
 import { GitHubMoreRow } from "@/github/index"
 import { SessionKnowledge } from "@/knowledge/parts"
 import { lazyView } from "@/lazy"
@@ -29,7 +29,7 @@ import { ItemPeopleProp } from "@/people/item-people"
 import { QueuedComment, queuedComments, queueNote, QueueStrip } from "@/queue"
 import { NativeIdLine, ResumeCard } from "@/resume"
 import { ItemStatsRows, SessionStats } from "@/stats/drill"
-import { ACC, accKey, accOf, active, addDep, archive, bulk, closeRel, deleteItem, depsOpen, doFork, gBuild, gComps, hm, importSessions, interrupt, it, itemThread, link, loadEvents, loadItem, loadLocalSessions, markDone, newItem, patchItem, pending, pendingCards, reassign, rmDep, saveGoal, sessPatch, sessRemove, sessSend, setAcc, setSt, setTags, setKind, kindOf, kindTags, isKind, DOMAIN_CATS, snoozed, st, stageOf, star, supp, tag, threadFollow, tm, toast, undoDecision, unsnooze, WT, type Item, type PlanRound, type Reply } from "@/store"
+import { ACC, accKey, accOf, active, addDep, archive, bulk, closeRel, deleteItem, depsOpen, doFork, gBuild, gComps, hm, importSessions, interrupt, it, itemThread, link, loadEvents, loadItem, loadLocalSessions, markDone, newItem, patchItem, pending, pendingCards, memCards, reassign, rmDep, saveGoal, sessPatch, sessRemove, sessSend, setAcc, setSt, setTags, setKind, kindOf, kindTags, isKind, DOMAIN_CATS, snoozed, st, stageOf, star, supp, tag, threadFollow, tm, toast, undoDecision, unsnooze, WT, type Item, type PlanRound, type Reply } from "@/store"
 import { BotAvatar, BotName, Chips, closeSheet, Composer, DecisionCard, Empty, go, Group, ItemNo, KindTag, Meta, openSheet, Page, RelNote, ReplyBlock, Row, RunBar, SectionLabel, Segmented, SessionBlock, Status, StatusDot, Tags, ThemeSwitch, Transcript, type ComposerHandle } from "@/ui"
 import { ChoiceCards, dueLabel, ItemRow, PlanBar, ProjectChip, Select, selected } from "@/view-shared"
 import { choiceText, YoloItemSwitch, YoloMark } from "@/yolo/badges"
@@ -61,7 +61,7 @@ let ibTab: "pending" | "done" = "pending"; let ibType = "all"
 export function InboxView() {
   const t = useT()
   const [, f] = useState(0); const r = () => f((x) => x + 1)
-  const p = pendingCards(), sz = snoozed()
+  const p = pendingCards(), sz = snoozed(), mems = memCards().length
   const types = ["accept", "approve", "ask", "propose", "fail", "confirm"] as const
   const typeKeys = ["all", ...types.filter((ty) => p.some((c) => c.w.type === ty))]
   const typeLabel = (k: string) => (k === "all" ? t("views:inbox.all") : WT[k])
@@ -72,7 +72,9 @@ export function InboxView() {
       {ibTab === "pending" && <>
         {yoloState(st.yolo) === "paused" && <RunState className="mb-6 rounded-lg bg-destructive/5 px-3 py-2" />}
         {p.length > 0 && <Chips className="mb-6" value={typeLabel(typeKeys.includes(ibType) ? ibType : "all")} onChange={(v) => { ibType = typeKeys.find((k) => typeLabel(k) === v) ?? "all"; r() }} options={typeKeys.map(typeLabel)} />}
-        {p.length === 0 && <Empty title={t("views:inbox.emptyTitle")} sub={t("views:inbox.emptySub")} />}
+        {p.length === 0 && !mems && <Empty title={t("views:inbox.emptyTitle")} sub={t("views:inbox.emptySub")} />}
+        {mems > 0 && <button type="button" onClick={() => go("#/knowledge?tab=pending")} className="mb-6 flex w-full items-center gap-2.5 rounded-xl border px-3 py-2.5 text-left type-callout transition-colors hover:bg-accent" data-inbox-mems>
+          <BookOpenIcon className="size-4 shrink-0 text-muted-foreground" strokeWidth={1.75} /><span className="min-w-0 flex-1">{t("views:inbox.mems", { count: mems })}</span><ChevronRightIcon className="size-4 shrink-0 text-muted-foreground" /></button>}
         <div className="flex flex-col gap-8">
           {types.map((ty) => {
             const g = xs.filter((c) => c.w.type === ty)
@@ -233,10 +235,17 @@ export function ForkDialog({ k, at }: { k: string; at: number }) {
 export function NewItemDialog({ project: pre }: { project?: string } = {}) {
   const t = useT()
   const [g, setG] = useState(""), [mode, setMode] = useState<"start" | "propose">("start"), [bot, setBot] = useState("auto"), [proj, setProj] = useState(pre ?? "auto"), [busy, setBusy] = useState(false)
+  /* one send idempotency key while the form stays the same: a retry after a lost answer makes no second item */
+  const sendKey = useRef<{ form: string; id: string } | null>(null)
+  const clientId = () => {
+    const form = JSON.stringify([g.trim(), bot, proj, mode])
+    if (sendKey.current?.form !== form) sendKey.current = { form, id: newClientId() }
+    return sendKey.current.id
+  }
   return (
     <Modal open title={t("views:newItem.title")} desc={t("views:newItem.desc")}
       footer={<><Button variant="outline" onClick={closeSheet}>{t("common:action.cancel")}</Button><Button data-testid="new-go" disabled={!g.trim() || busy} onClick={async () => {
-        setBusy(true); const id = await newItem(g.trim(), bot === "auto" ? undefined : bot, proj === "auto" ? undefined : proj === "none" ? null : proj, mode)
+        setBusy(true); const id = await newItem(g.trim(), bot === "auto" ? undefined : bot, proj === "auto" ? undefined : proj === "none" ? null : proj, mode, clientId())
         setBusy(false); if (id) { closeSheet(); go("#/items/" + id) } }}>{busy && <Spinner className="size-3.5" />}{t("views:newItem.create")}</Button></>}>
       <FieldGroup className="gap-4">
         <Field><FieldLabel htmlFor="new-goal">{t("views:newItem.goal")}</FieldLabel><Textarea id="new-goal" autoFocus className="min-h-24 rounded-lg" placeholder={t("views:newItem.goalPlaceholder")} value={g} onChange={(e) => setG(e.target.value)} /></Field>

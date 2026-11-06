@@ -7,7 +7,8 @@ The service is this script (`__service start|stop`, through STEVE_SERVICE_CMD) i
   - a deploy drains the running Hub, switches, and leaves no drain behind (business answers, /healthz drain false);
   - a release that can't open the database is refused before anything stops;
   - a release whose probe fails gets the backup put back, the old version restarted, the drain lifted;
-  - a switch that fails halfway (the web link) puts the links and the database back, restarts and lifts the drain.
+  - a switch that fails halfway (the web link) puts the links and the database back, restarts and lifts the drain;
+  - only a healthy deploy prunes old release dirs and pre-release backups.
 Never touches ~/.steve, launchd or port 8440.
 """
 import json
@@ -153,6 +154,11 @@ with tempfile.TemporaryDirectory(prefix="steve-local-release-") as tmp:
 
         print("── deploy b over a")
         b = bundle("0.9.0-b")
+        for n in range(5):
+            (home / "releases" / f"0.1.{n}-local-000000{n}").mkdir()
+        (home / "backups").mkdir(exist_ok=True)
+        for n in range(10):
+            (home / "backups" / f"pre-0.1.{n}-local-000000{n}-202611{n + 1:02d}-120000.sqlite3").write_text("x")
         r = deploy(b)
         assert r.returncode == 0, r.stdout + r.stderr
         assert (home / "current").resolve() == b.resolve()
@@ -166,6 +172,14 @@ with tempfile.TemporaryDirectory(prefix="steve-local-release-") as tmp:
         with sqlite3.connect(res["backup"]) as c:
             assert c.execute("PRAGMA quick_check").fetchone()[0] == "ok"
         ok("result file: ok, with a checked backup")
+        assert sorted(p.name for p in (home / "releases").glob("0.1.*")) == [
+            "0.1.2-local-0000002", "0.1.3-local-0000003", "0.1.4-local-0000004"], list((home / "releases").iterdir())
+        assert a.is_dir() and b.is_dir()
+        assert len(list((home / "backups").glob("pre-0.1.*"))) == 8 and pathlib.Path(res["backup"]).exists()
+        assert len(res["pruned"]) == 2 + 2, res["pruned"]
+        ok("a healthy deploy pruned the old release dirs and backups, kept a, b and its own backup")
+        stale = home / "releases/0.0.1-local-0000001"
+        stale.mkdir()
 
         print("── a release that can't open the database: refused, nothing stops")
         before = pid()
@@ -205,6 +219,8 @@ with tempfile.TemporaryDirectory(prefix="steve-local-release-") as tmp:
         assert res["recovered"] is True and res["phase"] == "switch", res
         assert any("current back" in x for x in res["recovery"]) and any("backup is back" in x for x in res["recovery"]), res
         ok("current and the database put back, b restarted, drain lifted, recorded as recovered")
+        assert stale.is_dir() and len(list((home / "backups").glob("pre-0.1.*"))) == 8
+        ok("deploys that did not end healthy pruned nothing")
     except BaseException:
         print((home / "hub.log").read_text()[-6000:], file=sys.stderr)
         raise

@@ -14,6 +14,8 @@
 //   @crash                 exit(3) mid-turn
 //   @perm <toolName>       Claude-style request_permission; says "perm:<outcome>:<optionId>"
 //   @permexec <command>    request_permission for an `execute` tool call running <command>
+//   @run <command>         an `execute` tool call running <command> without asking, whatever the mode
+//                          (no `_meta` of any harness): in_progress, 2 s, completed, says "ran:<command>"
 //   @codexperm <tool>      Codex-style MCP approval form for the steve server
 //   @permtool <kind> <path> request_permission for a `kind` tool call on `path` (rawInput.file_path, locations);
 //                          like a real harness, in mode bypassPermissions / full-access it asks nothing
@@ -52,7 +54,7 @@ let toolN = 0
 async function turn(text) {
   const n = (failures.get(text) ?? 0) + 1; failures.set(text, n)
   const out = { stopReason: "end_turn" }
-  for (const [, cmd, arg] of text.matchAll(/@(flood|drip|bigperm|bigreply|sleep|say|usage|tally|quota|tool|later|fail|crash|perm|permtool|permexec|codexperm|fsread)\b([^@\n]*)/g)) {
+  for (const [, cmd, arg] of text.matchAll(/@(flood|drip|bigperm|bigreply|sleep|say|usage|tally|quota|tool|later|fail|crash|perm|permtool|permexec|run|codexperm|fsread)\b([^@\n]*)/g)) {
     const a = arg.trim()
     if (cmd === "sleep" && (await sleep(Number(a) || 1000))) return { ...out, stopReason: "cancelled" }
     if (cmd === "say") say(a)
@@ -93,6 +95,14 @@ async function turn(text) {
     if (cmd === "permexec") {
       const r = await ask("session/request_permission", { sessionId: sid, options, toolCall: { toolCallId: `px-${n}`, title: a, kind: "execute", rawInput: { command: a } } })
       say(`perm:${r.outcome.outcome}:${r.outcome.optionId ?? ""}`)
+    }
+    if (cmd === "run") {
+      const id = "run-" + ++toolN
+      update({ sessionUpdate: "tool_call", toolCallId: id, kind: "execute", status: "pending", title: a, rawInput: { command: a } })
+      update({ sessionUpdate: "tool_call_update", toolCallId: id, status: "in_progress" })
+      if (await sleep(2000)) return { ...out, stopReason: "cancelled" }
+      update({ sessionUpdate: "tool_call_update", toolCallId: id, status: "completed" })
+      say(`ran:${a}`)
     }
     if (cmd === "codexperm") {
       const r = await ask("session/request_permission", { sessionId: sid, options: [{ optionId: "approved", name: "Allow", kind: "allow_once" }, { optionId: "abort", name: "Deny", kind: "reject_once" }],

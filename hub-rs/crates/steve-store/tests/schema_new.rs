@@ -68,7 +68,7 @@ fn at_version(v: usize) -> (tempfile::TempDir, std::path::PathBuf) {
 
 #[test]
 fn schema_version_is_23() {
-    assert_eq!(db::SCHEMA_VERSION, 44);
+    assert_eq!(db::SCHEMA_VERSION, 49);
 }
 
 #[test]
@@ -464,6 +464,84 @@ fn migration_44_finds_the_start_of_a_message_by_index() {
         )
         .unwrap();
     assert!(plan.contains("events_message_start"), "{plan}");
+    db::migrate(&c).unwrap();
+    assert_eq!(
+        count(&c, "SELECT v FROM schema_version"),
+        db::SCHEMA_VERSION
+    );
+}
+
+#[test]
+fn migration_45_adds_the_failure_clock_and_the_compaction_table() {
+    let (_dir, path) = at_version(44);
+    let c = Connection::open(&path).unwrap();
+    /* keepSess chosen while it did nothing must not start compacting after the upgrade */
+    c.execute_batch(
+        "INSERT INTO workspaces (id, name, created) VALUES ('w2', 'w2', 1), ('w3', 'w3', 1);
+         INSERT INTO settings (workspace_id, key, value, updated) VALUES
+           ('default', 'keepSess', '\"90 天\"', 1), ('w2', 'keepSess', '\"1 年\"', 1),
+           ('w3', 'keepSess', '\"永久\"', 1), ('default', 'keepRaw', '\"30\"', 1);",
+    )
+    .unwrap();
+    db::migrate(&c).unwrap();
+    assert_eq!(
+        count(
+            &c,
+            "SELECT count(*) FROM settings WHERE key = 'keepSess' AND value = '\"永久\"'"
+        ),
+        3
+    );
+    assert_eq!(
+        count(
+            &c,
+            "SELECT count(*) FROM settings WHERE key = 'keepSess' AND updated = 1"
+        ),
+        1,
+        "an untouched 永久 keeps its timestamp"
+    );
+    assert_eq!(
+        count(
+            &c,
+            "SELECT count(*) FROM settings WHERE key = 'keepRaw' AND value = '\"30\"'"
+        ),
+        1
+    );
+    let col = |t: &str, n: &str| {
+        count(
+            &c,
+            &format!("SELECT count(*) FROM pragma_table_info('{t}') WHERE name = '{n}'"),
+        )
+    };
+    assert_eq!(col("outbox_leases", "failing_since"), 1);
+    assert!(has_table(&c, "session_compactions"));
+    assert_eq!(col("session_compactions", "upto"), 1);
+    assert_eq!(
+        count(&c, "SELECT v FROM schema_version"),
+        db::SCHEMA_VERSION
+    );
+}
+
+#[test]
+fn migration_48_adds_the_model_of_a_turn() {
+    let (_dir, path) = at_version(47);
+    let c = Connection::open(&path).unwrap();
+    assert!(!columns(&c, "agent_turns").contains(&"model".to_string()));
+    c.execute_batch(
+        "INSERT INTO agent_turns (id, workspace_id, session_id, harness, user_seq, attempt, started, ended)
+         VALUES ('tn_old', 'default', 'ses_1', 'claude-code', 1, 0, 1, 2);",
+    )
+    .unwrap();
+    db::migrate(&c).unwrap();
+    assert!(columns(&c, "agent_turns").contains(&"model".to_string()));
+    // a turn ended before keeps no model: it is attributed as before
+    let m: Option<String> = c
+        .query_row(
+            "SELECT model FROM agent_turns WHERE id = 'tn_old'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(m, None);
     db::migrate(&c).unwrap();
     assert_eq!(
         count(&c, "SELECT v FROM schema_version"),

@@ -707,9 +707,17 @@ async fn contacts_tools_are_served_over_mcp() {
         "steve_deliver",
         "steve_contacts_find",
         "steve_contacts_remember",
+        "steve_im_read",
     ] {
         assert!(list.contains(t), "{t} missing: {list}");
     }
+    // the chat reading tool is routed: a conversation the session cannot see is an error it reads
+    let (s, out) = mcp(json!({ "jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": { "name": "steve_im_read", "arguments": { "space": "spc_nope" } } })).await;
+    assert_eq!(s, 200, "{out}");
+    assert!(
+        out.contains("\"isError\":true") && out.contains("spc_nope"),
+        "{out}"
+    );
     let (s, found) = mcp(json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": { "name": "steve_contacts_find", "arguments": { "query": "赵六" } } })).await;
     assert_eq!(s, 200, "{found}");
     assert!(found.contains("赵六"), "{found}");
@@ -952,21 +960,22 @@ async fn connections_passkeys_and_github_are_mounted() {
     let (_, adapters) = c.call("GET", "/api/connections/adapters", None, None).await;
     // the GitHub App connects through its manifest flow, so only the token form is listed
     assert!(adapters.to_string().contains("github_pat"), "{adapters}");
-    // 接入: every registered adapter under its provider, the planned ones marked, no connection yet
+    // 接入: every registered adapter under its provider, no provider without one, no connection yet
     let (s, ig) = c
         .call("GET", "/api/connections/integrations", None, None)
         .await;
     assert_eq!(s, 200, "{ig}");
     let ps = ig["providers"].as_array().expect("providers");
     let ids: Vec<_> = ps.iter().filter_map(|p| p["id"].as_str()).collect();
-    assert_eq!(ids, ["feishu", "github", "mail", "slack", "gcal"], "{ig}");
+    assert_eq!(ids, ["feishu", "github", "mail"], "{ig}");
     let status = |id: &str| {
         ps.iter()
             .find(|p| p["id"] == id)
             .map(|p| p["status"].clone())
     };
     assert_eq!(status("feishu"), Some(json!("supported")));
-    assert_eq!(status("slack"), Some(json!("planned")));
+    assert_eq!(status("mail"), Some(json!("supported")));
+    assert!(ps.iter().all(|p| p.get("planned").is_none()), "{ig}");
     let feishu = &ps[0];
     let adapters: Vec<_> = feishu["adapters"]
         .as_array()

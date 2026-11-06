@@ -782,7 +782,7 @@ async fn pasted_token_is_intercepted_and_no_value_reaches_the_database() {
             )?;
             c.execute(
                 "INSERT INTO messages (id, workspace_id, space, author, text, created) VALUES ('msg_2', ?, 'thread', 'steve', ?, 2)",
-                params![WS, guard::REPLY],
+                params![WS, guard::ROUTED],
             )?;
             c.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
             Ok(())

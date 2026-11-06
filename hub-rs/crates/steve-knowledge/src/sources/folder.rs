@@ -103,8 +103,13 @@ pub fn check_path(policy: &FolderPolicy, raw: &str) -> std::result::Result<PathB
     if policy.steve_home.starts_with(&c) {
         return Err(steve_i18n::t!("knowledge.folder.contains_steve_data"));
     }
+    for d in CLOUD_DIRS {
+        if c == policy.home.join(d) {
+            return Err(steve_i18n::t!("knowledge.folder.cloud_root", dir = d));
+        }
+    }
     for d in [".ssh", ".gnupg", "Library"] {
-        if c.starts_with(policy.home.join(d)) {
+        if c.starts_with(policy.home.join(d)) && !is_cloud(policy, &c) {
             return Err(steve_i18n::t!("knowledge.folder.private_dir", dir = d));
         }
     }
@@ -112,6 +117,62 @@ pub fn check_path(policy: &FolderPolicy, raw: &str) -> std::result::Result<PathB
         return Err(outside_home());
     }
     Ok(c)
+}
+
+/// The cloud-drive folders of `~/Library` (iCloud Drive, Dropbox, OneDrive, Google Drive …): a
+/// folder inside one may be a source (an Obsidian vault in iCloud), the folder itself may not, and
+/// only Markdown and text files are read from them ([`TEXT_EXTS`]).
+pub const CLOUD_DIRS: [&str; 2] = ["Library/Mobile Documents", "Library/CloudStorage"];
+/// The extensions an include rule of a cloud folder may name.
+pub const TEXT_EXTS: [&str; 3] = ["md", "markdown", "txt"];
+
+/// Is `c` (canonical) inside one of the [`CLOUD_DIRS`], not one of them?
+pub fn is_cloud(policy: &FolderPolicy, c: &Path) -> bool {
+    CLOUD_DIRS.iter().any(|d| {
+        let root = policy.home.join(d);
+        c != root && c.starts_with(&root)
+    })
+}
+
+/// Does an include rule name only Markdown or text files (`**/*.md`, `notes/*.txt`)?
+fn text_only(pattern: &str) -> bool {
+    let name = pattern.rsplit('/').next().unwrap_or(pattern);
+    name.rsplit_once('.')
+        .is_some_and(|(_, e)| TEXT_EXTS.contains(&e.to_ascii_lowercase().as_str()))
+}
+
+/// The include rules a cloud folder may use: refused when any names other files.
+fn check_cloud_include(policy: &FolderPolicy, path: &Path, include: &[String]) -> ApiResult<()> {
+    if is_cloud(policy, path) && !include.iter().all(|p| text_only(p)) {
+        return Err(refused(&steve_i18n::t!("knowledge.folder.cloud_text_only")));
+    }
+    Ok(())
+}
+
+/// A patch's include rules for the folder source `old` ([`CLOUD_DIRS`]: text files only).
+pub fn check_patch_include(
+    policy: &FolderPolicy,
+    old: &SourceRow,
+    b: &SourcePatch,
+) -> ApiResult<()> {
+    match (&b.include, folder_root(old)) {
+        (Some(i), Some(root)) if !i.is_empty() => check_cloud_include(policy, &root, i),
+        _ => Ok(()),
+    }
+}
+
+/// The include rules a scan uses: for a cloud folder only the text ones (an older source may hold
+/// others), the default when none is left.
+fn scan_include(policy: &FolderPolicy, root: &Path, include: Vec<String>) -> Vec<String> {
+    if !is_cloud(policy, root) {
+        return include;
+    }
+    let kept: Vec<String> = include.into_iter().filter(|p| text_only(p)).collect();
+    if kept.is_empty() {
+        default_include()
+    } else {
+        kept
+    }
 }
 
 /// A folder outside `$HOME` and `/Volumes` (coordinator decision, 2026-11-01).
@@ -478,7 +539,8 @@ async fn run(
     src: &SourceRow,
 ) -> std::result::Result<(SyncReport, Value), String> {
     let root = folder_root(src).ok_or("这个来源没有设置文件夹")?;
-    let rules = rules_of(src);
+    let include = scan_include(kb.folder_policy(), &root, str_list(&src.config, "include"));
+    let rules = Rules::new(include.clone(), str_list(&src.config, "exclude"));
     let place = match kb.folder_nodes().places() {
         Some(p) => p
             .place(&src.id, true)
@@ -507,12 +569,7 @@ async fn run(
     let (walked, versions) = match (walked, place) {
         (Some(w), _) => (w, None),
         (None, Some(place)) => {
-            let s = folder_node::scan(
-                &place,
-                str_list(&src.config, "include"),
-                str_list(&src.config, "exclude"),
-            )
-            .await?;
+            let s = folder_node::scan(&place, include, str_list(&src.config, "exclude")).await?;
             (s.walk, Some(s.versions))
         }
         (None, None) => return Err("扫描文件夹时出错".to_string()),
@@ -800,6 +857,7 @@ pub fn check_new(policy: &FolderPolicy, b: &SourceBody) -> ApiResult<NewFolder> 
         Some(i) if !i.is_empty() => i.clone(),
         _ => default_include(),
     };
+    check_cloud_include(policy, &path, &include)?;
     Ok(NewFolder {
         name: b.name.trim().to_string(),
         path,
@@ -1052,7 +1110,10 @@ pub fn patch(
 ) -> ApiResult<(Value, bool)> {
     check_patch(&b)?;
     let now = m.clock.now();
-    let p = m.store.transaction(|tx| patch_tx(tx, who, id, &b, now))?;
+    let p = m.store.transaction(|tx| {
+        check_patch_include(kb.folder_policy(), &own_source(tx, who, id)?, &b)?;
+        patch_tx(tx, who, id, &b, now)
+    })?;
     kb.notify(&who.ws, id);
     Ok((p.source, p.rescan))
 }

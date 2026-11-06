@@ -1,6 +1,6 @@
-//! The outbox (migration 21): facts only on commit, a receipt per consumer, leases with fencing,
-//! back-off and dead deliveries, paused consumers keeping what they owe, registration rules, wake-ups,
-//! and delivery after a restart.
+//! The outbox (migration 21): facts only on commit, a receipt per consumer, back-off and dead
+//! deliveries (by time, or at once when rejected), one notice per consumer, revive, paused consumers
+//! keeping what they owe, registration rules, wake-ups, and delivery after a restart.
 
 mod common;
 
@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::json;
 use steve_store::outbox::{
-    self, Applied, ConsumeError, Consumer, Dispatcher, Event, LEASE_MS, MAX_ATTEMPTS, Since,
+    self, Applied, ConsumeError, Consumer, DEAD_AFTER_MS, Dispatcher, Event, Since,
 };
 use steve_store::{Store, StoreError, Tx};
 
@@ -147,41 +147,49 @@ fn each_consumer_gets_each_event_once_with_a_receipt_in_its_workspace() {
 }
 
 #[test]
-fn a_lease_taken_over_meanwhile_fences_the_slow_dispatcher() {
+fn an_effect_that_delivers_again_meanwhile_still_applies_once() {
+    // no fencing: a second pass that overlaps (never in the Hub) is kept to one result by the receipt
     let t = common::fresh();
     let c = Counter::new("c");
     let slow = disp(std::slice::from_ref(&c));
     slow.register(&t.store).unwrap();
     emit(&t.store, "default", 1);
-    // while the slow one runs the effect, its lease expires and another dispatcher delivers
     let (store, c2) = (t.store.clone(), c.clone());
     *c.during_effect.lock().unwrap() = Some(Box::new(move || {
-        let fast = disp(&[c2]);
-        let p = fast.pump(&store, 1 + LEASE_MS + 1).unwrap();
-        assert_eq!(p.done, 1);
+        assert_eq!(disp(&[c2]).pump(&store, 1).unwrap().done, 1);
     }));
     let p = slow.pump(&t.store, 1).unwrap();
-    assert_eq!(p.fenced, 1, "{p:?}");
+    assert_eq!(p.done, 1, "{p:?}");
     assert_eq!(c.n(), 1, "one business result");
     assert_eq!(audits(&t.store), 1);
+    assert_eq!(
+        one::<i64>(&t.store, "SELECT count(*) FROM outbox_leases"),
+        0
+    );
 }
 
 #[test]
-fn a_failing_apply_rolls_back_its_writes_and_backs_off_until_dead() {
+fn a_failing_apply_rolls_back_and_backs_off_until_it_has_failed_for_a_day() {
     let t = common::fresh();
     let c = Counter::new("c");
     let d = disp(std::slice::from_ref(&c));
     d.register(&t.store).unwrap();
     emit(&t.store, "default", 1);
     *c.fail.lock().unwrap() = Some(ConsumeError::Retry("busy".into()));
-    let mut now = 1;
-    for attempt in 1..MAX_ATTEMPTS {
+    let start = 1;
+    let mut now = start;
+    let mut attempt = 1;
+    // many more attempts than the old count of 8, all within the day
+    while now - start < DEAD_AFTER_MS {
         let p = d.pump(&t.store, now).unwrap();
-        assert_eq!(p.retried, 1, "attempt {attempt}");
+        assert_eq!((p.retried, p.dead), (1, 0), "attempt {attempt} at {now}");
         assert_eq!(d.pump(&t.store, now).unwrap().retried, 0, "backing off");
         now += outbox::backoff(attempt) + 1;
+        attempt += 1;
     }
-    assert_eq!(d.pump(&t.store, now).unwrap().dead, 1);
+    assert!(attempt > 100, "{attempt}");
+    let p = d.pump(&t.store, now).unwrap();
+    assert_eq!(p.dead, 1, "{p:?}");
     assert_eq!(audits(&t.store), 0, "nothing of the failed attempts stays");
     assert_eq!(
         one::<i64>(&t.store, "SELECT count(*) FROM outbox_receipts"),
@@ -189,7 +197,7 @@ fn a_failing_apply_rolls_back_its_writes_and_backs_off_until_dead() {
     );
     *c.fail.lock().unwrap() = None;
     assert_eq!(
-        d.pump(&t.store, now + 10 * LEASE_MS).unwrap().done,
+        d.pump(&t.store, now + 10 * DEAD_AFTER_MS).unwrap().done,
         0,
         "dead is not retried"
     );
@@ -200,6 +208,24 @@ fn a_failing_apply_rolls_back_its_writes_and_backs_off_until_dead() {
         0,
         "dead is never pruned"
     );
+}
+
+#[test]
+fn a_success_after_failures_starts_the_failure_clock_over() {
+    let t = common::fresh();
+    let c = Counter::new("c");
+    let d = disp(std::slice::from_ref(&c));
+    d.register(&t.store).unwrap();
+    emit(&t.store, "default", 1);
+    *c.fail.lock().unwrap() = Some(ConsumeError::Retry("offline".into()));
+    assert_eq!(d.pump(&t.store, 1).unwrap().retried, 1);
+    *c.fail.lock().unwrap() = None;
+    assert_eq!(d.pump(&t.store, DEAD_AFTER_MS - 1).unwrap().done, 1);
+    // a later event failing once is not dead because the first one failed a day ago
+    emit(&t.store, "default", 2);
+    *c.fail.lock().unwrap() = Some(ConsumeError::Retry("offline".into()));
+    let p = d.pump(&t.store, DEAD_AFTER_MS + 10).unwrap();
+    assert_eq!((p.retried, p.dead), (1, 0), "{p:?}");
 }
 
 #[test]
@@ -216,6 +242,85 @@ fn a_rejected_delivery_is_dead_at_once() {
         "SELECT last_error FROM outbox_leases WHERE dead = 1",
     );
     assert_eq!(err, "另一个工作空间");
+}
+
+#[test]
+fn dead_deliveries_are_noticed_once_per_consumer_and_workspace_until_revived() {
+    let t = common::fresh();
+    let (a, b) = (Counter::new("a"), Counter::new("b"));
+    let d = disp(&[a.clone(), b.clone()]);
+    d.register(&t.store).unwrap();
+    for n in 0..3 {
+        emit(&t.store, "default", n);
+    }
+    emit(&t.store, "w2", 9);
+    *a.fail.lock().unwrap() = Some(ConsumeError::Reject("坏数据".into()));
+    let p = d.pump(&t.store, 1).unwrap();
+    assert_eq!((p.dead, p.done), (4, 4), "{p:?}");
+    let mut groups: Vec<(String, Option<String>)> = p
+        .newly_dead
+        .iter()
+        .map(|g| (g.consumer.clone(), g.workspace_id.clone()))
+        .collect();
+    groups.sort();
+    assert_eq!(
+        groups,
+        [
+            ("a".to_string(), Some("default".to_string())),
+            ("a".to_string(), Some("w2".to_string()))
+        ],
+        "one per (consumer, workspace), not one per event"
+    );
+    assert_eq!(p.newly_dead[0].topic, TOPIC);
+    // another event dying while the group is still dead: no new notice
+    emit(&t.store, "default", 4);
+    let p = d.pump(&t.store, 2).unwrap();
+    assert_eq!((p.dead, p.newly_dead.len()), (1, 0), "{p:?}");
+    // the view: one group per consumer over every workspace
+    let dead = t.store.reader(outbox::dead).unwrap();
+    assert_eq!(dead.len(), 1);
+    assert_eq!(
+        (
+            dead[0].consumer.as_str(),
+            dead[0].topic.as_str(),
+            dead[0].count
+        ),
+        ("a", TOPIC, 5)
+    );
+    assert_eq!(dead[0].last_error.as_deref(), Some("坏数据"));
+    assert_eq!(
+        outbox::revive(&t.store, Some("b")).unwrap(),
+        0,
+        "b has none"
+    );
+    // revived: delivered again once the cause is gone
+    *a.fail.lock().unwrap() = None;
+    assert_eq!(outbox::revive(&t.store, Some("a")).unwrap(), 5);
+    assert!(t.store.reader(outbox::dead).unwrap().is_empty());
+    assert_eq!(d.pump(&t.store, 3).unwrap().done, 5);
+    assert_eq!(a.n(), 5);
+    // a new failure after the revive is a new episode: noticed again
+    emit(&t.store, "default", 5);
+    *a.fail.lock().unwrap() = Some(ConsumeError::Reject("又坏了".into()));
+    assert_eq!(d.pump(&t.store, 4).unwrap().newly_dead.len(), 1);
+}
+
+#[test]
+fn a_revived_delivery_gets_a_fresh_day() {
+    let t = common::fresh();
+    let c = Counter::new("c");
+    let d = disp(std::slice::from_ref(&c));
+    d.register(&t.store).unwrap();
+    emit(&t.store, "default", 1);
+    *c.fail.lock().unwrap() = Some(ConsumeError::Retry("down".into()));
+    assert_eq!(d.pump(&t.store, 1).unwrap().retried, 1);
+    assert_eq!(d.pump(&t.store, 1 + DEAD_AFTER_MS).unwrap().dead, 1);
+    assert_eq!(outbox::revive(&t.store, None).unwrap(), 1);
+    let at = 2 + DEAD_AFTER_MS;
+    let p = d.pump(&t.store, at).unwrap();
+    assert_eq!((p.retried, p.dead), (1, 0), "{p:?}");
+    let attempts: i64 = one(&t.store, "SELECT attempts FROM outbox_leases");
+    assert_eq!(attempts, 1, "attempts start over");
 }
 
 #[test]

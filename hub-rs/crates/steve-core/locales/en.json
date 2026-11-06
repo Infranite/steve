@@ -219,7 +219,7 @@
   "core.yolo.reason.release_busy": "Another release is running; it will be judged once that ends",
   "core.yolo.reason.release_rebase": "The rebase before the release has gone back to the bot 3 times",
   "core.yolo.reason.release_state": "The branch is wrong or the item is not accepted yet",
-  "core.yolo.reason.release_rate": "Releases are too frequent (at most 3 an hour, at least 15 minutes apart), so this one is left to you",
+  "core.yolo.reason.release_rate": "Releases are at least 15 minutes apart; this one goes when the time is up",
   "core.yolo.reason.release_self": "Releases your own Steve; a failed health check rolls it back automatically",
   "core.yolo.reason.propose_off": "The settings do not let YOLO start items",
   "core.yolo.reason.propose_deps": "All prerequisite items are done",

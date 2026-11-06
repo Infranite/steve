@@ -998,3 +998,25 @@ async fn a_comment_not_found_after_a_failure_is_not_posted_again() {
         json!("unknown|1")
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_comment_through_a_pat_says_it_posts_as_your_account() {
+    let h = setup().await;
+    let id = item(&h, 1, Some(PROJECT), Some(BRANCH));
+    let (n, _) = pr_with_failure(&h, "ok\n").await;
+    // the repo's connection is a PAT: what it posts is yours on GitHub
+    h.env
+        .store()
+        .with_conn(|c| Ok(c.execute("UPDATE connections SET adapter = 'github_pat'", [])?))
+        .expect("pat");
+    let c = cx(Some(&id), BOT);
+    let o = tool(&h, &c, mcp::COMMENT, json!({"body": "修好了"}))
+        .await
+        .expect("comment");
+    assert!(o.awaiting_approval);
+    let (_, question, _) = open_decision(&h, comment::COMMENT).expect("asked");
+    assert!(
+        question.starts_with(&format!("前端 Bot 想在 PR #{n} 评论（以你的 GitHub 账号")),
+        "{question}"
+    );
+}

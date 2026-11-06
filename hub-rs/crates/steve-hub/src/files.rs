@@ -51,8 +51,15 @@ pub const TEXT: Kind = Kind {
     mime: "text/plain; charset=utf-8",
     ext: &[],
 };
+/// Bytes of no type Steve recognizes (a screen recording, an Office file of another kind, a binary): stored
+/// as they are, always served as a download, never shown inline. The name keeps its own extension.
+pub const OCTET: Kind = Kind {
+    mime: "application/octet-stream",
+    ext: &[],
+};
 
-/// The type of the bytes, or `None` when Steve doesn't accept it (executables, other archives; svg/html are text at most).
+/// The type of the bytes, or `None` when they are none of the types Steve recognizes (svg/html are text at
+/// most); [`validate`] stores those as [`OCTET`].
 pub fn sniff(b: &[u8]) -> Option<Kind> {
     let at = |off: usize, sig: &[u8]| b.len() >= off + sig.len() && &b[off..off + sig.len()] == sig;
     if at(0, &[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]) {
@@ -154,7 +161,7 @@ pub fn clean_name(raw: Option<&str>, kind: Kind) -> String {
         n = format!("{}.{}", or_file(&n), kind.ext[0]);
         ext = kind.ext[0].to_string();
     }
-    if kind.ext.is_empty() && ext.is_empty() {
+    if kind == TEXT && ext.is_empty() {
         n = format!("{}.txt", or_file(&n));
         ext = "txt".into();
     }
@@ -175,7 +182,8 @@ pub fn clean_name(raw: Option<&str>, kind: Kind) -> String {
     n
 }
 
-/// Checks an upload: 400 empty, 413 too large, 415 not an accepted type. Returns (mime, clean name).
+/// Checks an upload: 400 empty, 413 too large; bytes of an unknown type are `application/octet-stream`.
+/// Returns (mime, clean name).
 pub fn validate(b: &[u8], name: Option<&str>) -> BResult<(&'static str, String)> {
     if b.is_empty() {
         return Err(BackendError {
@@ -189,12 +197,7 @@ pub fn validate(b: &[u8], name: Option<&str>) -> BResult<(&'static str, String)>
             message: steve_i18n::t!("hub.file.too_large", mb = MAX_FILE / 1024 / 1024),
         });
     }
-    let Some(kind) = sniff(b) else {
-        return Err(BackendError {
-            status: 415,
-            message: steve_i18n::t!("hub.file.unsupported"),
-        });
-    };
+    let kind = sniff(b).unwrap_or(OCTET);
     Ok((kind.mime, clean_name(name, kind)))
 }
 
@@ -222,6 +225,8 @@ pub struct NewFile {
 }
 
 /// Validates and stores (under the write lock); the same bytes under the same name in a workspace are stored once.
+/// A stored copy whose length differs from the row (cut short by a power loss before blobs were written
+/// atomically) is written again from these bytes, which have the same hash.
 pub fn store(
     r: &dyn Repo,
     data_dir: &Path,
@@ -232,9 +237,11 @@ pub fn store(
 ) -> BResult<Obj> {
     let (mime, name) = validate(b, name)?;
     let sha256 = hex::encode(Sha256::digest(b));
-    if let Some(dup) = r.file_same(ws, &sha256, &name)?
-        && blob_path(data_dir, &dup).exists()
-    {
+    if let Some(dup) = r.file_same(ws, &sha256, &name)? {
+        let p = blob_path(data_dir, &dup);
+        if std::fs::metadata(&p).map(|m| m.len()).ok() != Some(b.len() as u64) {
+            write_blob(&p, b).map_err(|e| BackendError::msg(e.to_string()))?;
+        }
         return Ok(dup);
     }
     let row = NewFile {
@@ -259,19 +266,36 @@ pub fn store(
     r.file_create(&row)
 }
 
+/// Atomically: a temporary file next to it, synced, then renamed over `p`, so a crash or power loss
+/// leaves either no blob or the whole one, never a truncated one.
 fn write_blob(p: &Path, b: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
-    if let Some(d) = p.parent() {
-        std::fs::create_dir_all(d)?;
+    let dir = p
+        .parent()
+        .ok_or_else(|| std::io::Error::other("a blob path has a parent"))?;
+    std::fs::create_dir_all(dir)?;
+    let name = p
+        .file_name()
+        .map(|n| n.to_string_lossy())
+        .unwrap_or_default();
+    let tmp = dir.join(format!(".{name}.{}.tmp", uuid::Uuid::new_v4().simple()));
+    let written = (|| {
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&tmp)?;
+        f.write_all(b)?;
+        f.sync_all()?;
+        std::fs::rename(&tmp, p)
+    })();
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
     }
-    let mut f = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(p)?;
-    f.write_all(b)
+    written?;
+    // the rename itself survives a power loss once the directory is synced
+    std::fs::File::open(dir).and_then(|d| d.sync_all())
 }
 
 /// `FileRef` = `{id, name, mime, size}`, the copy every other place stores.
@@ -388,13 +412,21 @@ mod tests {
             validate(b"<svg onload=alert(1)>", Some("x.svg")).map(|x| x.0),
             Ok("text/plain; charset=utf-8")
         );
+        // unknown bytes are kept as a download: the name keeps its extension, no `.txt` is added
         assert_eq!(
-            validate(&[0xcf, 0xfa, 0xed, 0xfe, 0, 0, 0, 7], Some("tool")).map_err(|e| e.status),
-            Err(415)
+            validate(&[0xcf, 0xfa, 0xed, 0xfe, 0, 0, 0, 7], Some("tool")),
+            Ok(("application/octet-stream", "tool".to_string()))
         );
         assert_eq!(
-            validate(&[0xff, 0xfe, 0x00, 0x41], Some("a.txt")).map_err(|e| e.status),
-            Err(415)
+            validate(
+                &[0, 0, 0, 0x20, b'f', b't', b'y', b'p', b'q', b't'],
+                Some("录屏 2026.mov")
+            ),
+            Ok(("application/octet-stream", "录屏 2026.mov".to_string()))
+        );
+        assert_eq!(
+            validate(&[0xff, 0xfe, 0x00, 0x41], Some("a.txt")).map(|x| x.0),
+            Ok("application/octet-stream")
         );
         assert_eq!(validate(&[], Some("a.txt")).map_err(|e| e.status), Err(400));
         assert_eq!(

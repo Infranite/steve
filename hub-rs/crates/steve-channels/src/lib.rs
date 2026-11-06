@@ -117,6 +117,8 @@ pub mod ext;
 pub mod fake;
 pub mod fallback;
 pub mod flow_actions;
+pub mod history;
+pub mod im_mcp;
 pub mod inbound;
 pub mod lifecycle;
 pub mod media;
@@ -153,7 +155,7 @@ pub use membership::SpaceChange;
 pub use outbound::{OutLink, Outbox};
 pub use replies::Replies;
 pub use respond::{By, Plan, Responder, Response};
-pub use service::{Channels, ChannelsBuilder, MessageSink, OtherEvents, WeakChannels};
+pub use service::{Channels, ChannelsBuilder, MessageSink, OtherEvents, WeakChannels, YoloSwitch};
 
 /// Errors of this crate: the module API error (`400/404/409` with Chinese text, `500` otherwise).
 pub type ChannelError = steve_modules::ApiError;

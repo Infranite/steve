@@ -261,6 +261,7 @@ impl ConnectionsBuilder {
             locks: Mutex::new(HashMap::new()),
             minted: Mutex::new(HashMap::new()),
             forced: Mutex::new(HashSet::new()),
+            vault_wait: Mutex::default(),
             http,
         }))
     }
@@ -283,6 +284,9 @@ struct Inner {
     minted: Mutex<HashMap<String, (i64, Zeroizing<String>)>>,
     /// Connections whose stored token got a 401: refresh on next use.
     forced: Mutex<HashSet<String>>,
+    /// Connections whose credential the vault could not open (locked, key missing or refused):
+    /// later uses fail at once until the wait is over.
+    vault_wait: Mutex<super::cx::VaultWait>,
     http: reqwest::Client,
 }
 
@@ -292,6 +296,13 @@ pub struct Connections(Arc<Inner>);
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+impl Connections {
+    /// [`ConnCx::with_credential`]'s back-off while the key store can't be read.
+    pub(crate) fn vault_wait(&self) -> std::sync::MutexGuard<'_, super::cx::VaultWait> {
+        lock(&self.0.vault_wait)
+    }
 }
 
 /// A provider failure as an API error (400 with its message; vault trouble keeps its own code).
@@ -1448,6 +1459,8 @@ impl Connections {
                 put_key(&mut c.config, CONFIG_VERSION_KEY, version);
                 c.health = health;
                 repo::update(tx, &c, now)?;
+                // connected again: what it missed meanwhile is history, not news
+                repo::set_enabled_at(tx, &c.id, now)?;
                 self.settle_decision(tx, ws, &c.id, json!({"reauthorized": true}))?;
                 base::audit(
                     tx,
@@ -2045,6 +2058,11 @@ impl Connections {
             }
             if (r.status.clone(), r.caps.clone()) != before {
                 repo::update(tx, &r, now)?;
+                // resumed, or a capability turned on: what comes from before now is history
+                let resumed = before.0 == "paused" && r.status != "paused";
+                if resumed || r.caps.iter().any(|c| !before.1.contains(c)) {
+                    repo::set_enabled_at(tx, &r.id, now)?;
+                }
                 base::audit(
                     tx,
                     &viewer.ws,

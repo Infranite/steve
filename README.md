@@ -155,9 +155,9 @@ No setting can widen these limits, and they are property-tested: money, high-sen
 
 ### 🚚 Merging and releases
 
-Each target branch has a merge lane. Requests that arrive while a merge is in flight are batched, and you approve one card per batch. Conflicting members are backed out one at a time. Pushes are fast-forward only, and after a restart nothing merges or releases twice. The project page shows the lane profile Steve found (merge queue, required checks, release method) and the evidence for each.
+Each target branch has a merge lane. Requests that arrive while a merge is in flight are batched, and you approve one card per batch; a request that arrives before you answer joins that batch and its card. The project page sets the batch window and size and has a *merge and release now* button. Conflicting members are backed out one at a time. Pushes are fast-forward only, a branch whose host requires a pull request or a merge queue is never pushed to directly, and after a restart nothing merges or releases twice. The project page also shows the lane profile Steve found (merge queue, required checks, release method) and the evidence for each.
 
-On GitHub, Steve asks before opening a PR after you accept, and again before merging. Effects go through a durable queue that reconciles with GitHub before retrying. Projects on the Hub's own machine, Steve included, can be released by script: build, drain running work, restart, and report the outcome once it's back. Rollback is refused when the old version can't read the current database.
+On GitHub, Steve asks before opening a PR after you accept, and again before merging. For a private repository you can let accepting the item open a draft PR from its own branch without asking, once its commits pass a leak check. Effects go through a durable queue that reconciles with GitHub before retrying. Projects on the Hub's own machine, Steve included, can be released by script: build, drain running work, restart, and report the outcome once it's back. Rollback is refused when the old version can't read the current database.
 
 ### 🔌 Connections
 
@@ -315,7 +315,7 @@ Steve reads its settings from the environment. For a service, put them in `$STEV
 | Variable | Purpose |
 |---|---|
 | `STEVE_HOME` | Data directory (default `~/.steve`) |
-| `STEVE_HOST`, `STEVE_PORT` | Listen address (default `127.0.0.1:8440`) |
+| `STEVE_HOST`, `STEVE_PORT` | Listen addresses, comma-separated, on one port (default `127.0.0.1:8440`); for a proxy on another machine add the address it reaches, e.g. `127.0.0.1,100.64.0.2`. `0.0.0.0`/`::` is refused unless `STEVE_ALLOW_ANY_HOST=1` |
 | `STEVE_WEB_DIR` | The built web UI the Hub serves |
 | `STEVE_PUBLIC_URL` | A URL your integrations can reach, only needed for callbacks. No shared hosted endpoint is provided. |
 | `STEVE_OIDC_ISSUER`, `STEVE_OIDC_CLIENT_ID`, `STEVE_OIDC_CLIENT_SECRET_FILE` | Sign-in through your OIDC provider |

@@ -115,5 +115,17 @@
   "channels.error.run_stopped": "This run of the connection has stopped and no longer takes messages",
   "channels.error.cursor_not_ext": "The cursor “%{container}” does not belong to this adapter",
   "channels.error.message_id_reserved": "Message ids starting with “fp:” are reserved for the Hub",
-  "channels.error.run_panicked": "The task receiving messages stopped unexpectedly; it is retried shortly"
+  "channels.error.run_panicked": "The task receiving messages stopped unexpectedly; it is retried shortly",
+  "channels.im_read.description": "Read the messages of one chat conversation (a group or a direct chat) in a time range, as context for the current task. You choose the conversation and the range. Read only: nothing is replied to, and no rule, flow or action runs. The result carries the conversation's disclosure level; follow it.",
+  "channels.im_read.arg.space": "the conversation id (spc_…) or the exact name of a conversation you can see",
+  "channels.im_read.arg.from": "start: unix ms, RFC 3339, or \"YYYY-MM-DD HH:MM\" in the workspace's time zone; default 24 hours before to",
+  "channels.im_read.arg.to": "end, in the same formats as from; default now",
+  "channels.im_read.arg.limit": "at most this many messages, up to %{max} (default %{n})",
+  "channels.im_read.error.arg": "The argument %{arg} is not valid",
+  "channels.im_read.error.no_space_arg": "Say which conversation to read: its id (spc_…) or exact name.",
+  "channels.im_read.error.no_space": "No conversation \"%{space}\", or you cannot see it.",
+  "channels.im_read.error.which_space": "\"%{space}\" matches more than one conversation or none exactly; use an id: %{candidates}",
+  "channels.im_read.error.not_readable": "This conversation is set not to be used (blocked, or disclosure level never); it cannot be read.",
+  "channels.im_read.error.range": "The time range is not valid: from must be before to.",
+  "channels.im_read.error.range_long": "The time range is too long: at most %{days} days per read."
 }

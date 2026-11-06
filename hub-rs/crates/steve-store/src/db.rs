@@ -101,6 +101,17 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/043.sql"),
     // 44: the `message` row that began a Node message, by session and message id (a text delta's role).
     include_str!("../migrations/044.sql"),
+    // 45: when a failing outbox delivery began failing; archived sessions compacted under keepSess.
+    include_str!("../migrations/045.sql"),
+    // 46: Steve's own seeded project releases through the merge lane, not ops/release.sh.
+    include_str!("../migrations/046.sql"),
+    // 47: a channel account's undo window before an approved message goes out (`send_delay_s`).
+    include_str!("../migrations/047.sql"),
+    // 48: the model a turn is booked under (`agent_turns.model`), for the rebuild and the hourly view.
+    include_str!("../migrations/048.sql"),
+    // 49: the inbound watermark: when a connection was last turned on, how late a channel message
+    // may arrive, the history counts, and which messages were only recorded as history.
+    include_str!("../migrations/049.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).

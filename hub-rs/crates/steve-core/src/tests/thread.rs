@@ -232,9 +232,10 @@ async fn config_requests_are_drafted() {
     });
     k.core.say(WS, "完成 7 天后自动归档", &[]).unwrap();
     let ms = settle(&k, 2).await;
+    // a local setting said in the conversation: applied at once, the card offers the undo
     assert_eq!(
         ms[1].text,
-        "这是配置改动，我起草好了，确认后应用到「设置 · 事项与验收」："
+        "已经改好了「设置 · 事项与验收」，不对的话在卡片上撤销："
     );
     let p = &ms[1].meta["proposal"];
     assert_eq!(
@@ -242,8 +243,36 @@ async fn config_requests_are_drafted() {
         json!([{"label": "完成后自动归档", "from": "30 天", "to": "7 天"}])
     );
     assert_eq!(p["target"], json!({"kind": "settings", "id": "items"}));
-    k.core.apply(p["id"].as_str().unwrap(), "me", WS).unwrap();
+    let id = p["id"].as_str().unwrap();
+    assert_eq!(ms[1].meta["cfg_state"], json!({id: "applied"}));
     assert_eq!(k.db().setting(WS, "archDays", "30").unwrap(), "7");
+    k.core.undo(id, "me", WS).unwrap();
+    assert_eq!(k.db().setting(WS, "archDays", "x").unwrap(), "30");
+}
+
+#[tokio::test]
+async fn the_default_acceptance_and_retention_still_show_a_preview() {
+    let k = Kit::new();
+    k.gw.set(|p, _| {
+        if p.starts_with("You are the router") {
+            Ok(r#"{"kind":"config","title":"x"}"#.into())
+        } else if p.starts_with("Which Steve configuration") {
+            Ok(r#"{"target":"settings:items"}"#.into())
+        } else {
+            Ok(r#"{"changes":[{"key":"accDefault","value":"auto"},{"key":"archDays","value":"7"}]}"#.into())
+        }
+    });
+    k.core.say(WS, "以后自动验收，7 天归档", &[]).unwrap();
+    let ms = settle(&k, 2).await;
+    assert_eq!(
+        ms[1].text,
+        "这是配置改动，我起草好了，确认后应用到「设置 · 事项与验收」："
+    );
+    assert!(ms[1].meta.get("cfg_state").is_none());
+    assert_eq!(
+        k.db().setting(WS, "accDefault", "manual").unwrap(),
+        "manual"
+    );
 }
 
 #[tokio::test]
@@ -269,9 +298,10 @@ async fn one_message_drafts_several_settings_and_their_cards_remember_what_happe
         )
         .unwrap();
     let ms = settle(&k, 2).await;
+    // the quiet hours (local) applied at once, the bot is a card to apply
     assert_eq!(
         ms[1].text,
-        "这是配置改动，我起草好了 2 处，确认后分别应用："
+        "已经改好了「设置 · 通知」，不对的话在卡片上撤销：\n「Steve 开发 Bot 的设置」的改动起草好了，确认后应用："
     );
     let ps = ms[1].meta["proposals"].as_array().unwrap().clone();
     assert_eq!(ps.len(), 2, "a target named twice is drafted once");
@@ -281,7 +311,8 @@ async fn one_message_drafts_several_settings_and_their_cards_remember_what_happe
     );
     assert_eq!(ps[1]["target"], json!({"kind": "bot", "id": "dev"}));
     let (a, b) = (ps[0]["id"].as_str().unwrap(), ps[1]["id"].as_str().unwrap());
-    k.core.apply(a, "me", WS).unwrap();
+    assert_eq!(ms[1].meta["cfg_state"], json!({a: "applied"}));
+    assert_eq!(k.db().setting(WS, "quiet", "x").unwrap(), "22:00 – 09:00");
     k.core.drop_draft(b, WS).unwrap();
     let m = k.db().message(&ms[1].id).unwrap().unwrap();
     assert_eq!(m.meta["cfg_state"], json!({a: "applied", b: "dropped"}));
@@ -520,6 +551,8 @@ async fn messages_are_handled_in_order() {
     });
     k.core.say(WS, "/汇报", &[]).unwrap();
     k.core.say(WS, "第二件事", &[]).unwrap();
+    /* `/汇报` has a lane of its own (#51): it does not wait for a message being routed */
+    settle(&k, 4).await;
     k.core.say(WS, "/汇报", &[]).unwrap();
     let ms = settle(&k, 6).await;
     let steve: Vec<&str> = ms
@@ -892,4 +925,148 @@ async fn idle_lanes_go_and_come_back() {
     k.core.say(WS, "再问", &[]).unwrap();
     let ms = settle(&k, 4).await;
     assert_eq!(ms[3].text, "答好了");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_contact_field_said_in_the_conversation_is_applied_at_once() {
+    let k = Kit::new();
+    k.db()
+        .store()
+        .with_conn(|c| {
+            c.execute_batch(
+                "INSERT OR IGNORE INTO users (id, workspace_id, subject, name, role, created) VALUES ('usr_dev', 'default', 'dev', 'Dev', 'owner', 1);
+                 INSERT OR IGNORE INTO workspace_members (workspace_id, user_id, role, created) VALUES ('default', 'usr_dev', 'owner', 1);
+                 INSERT INTO parties (id, workspace_id, type, name, aliases, created_by, created, updated) VALUES
+                   ('ct_sarah', 'default', 'contact', 'Sarah Chen', '[\"Sarah\"]', 'usr_dev', 1, 1);",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let mut r = steve_modules::Registry::new();
+    steve_modules::contacts::changes::register(&mut r, &Default::default());
+    let m = steve_modules::Modules::new(k.db().store().clone(), k.core.module_gateway(), r);
+    k.core.attach_modules(m.clone());
+    k.gw.set(|p, _| {
+        if p.starts_with("You are the router") {
+            Ok(r#"{"kind":"config","title":"x"}"#.into())
+        } else if p.starts_with("Which Steve configuration") {
+            Ok(r#"{"targets":["contact:ct_sarah"]}"#.into())
+        } else if p.starts_with("You configure") {
+            Ok(r#"{"ops":[{"op":"set","key":"important","value":"是"}]}"#.into())
+        } else {
+            Err(msg("unexpected prompt"))
+        }
+    });
+    k.core
+        .say_as(WS, Some("usr_dev"), "Sarah 很重要", &[], &[])
+        .unwrap();
+    let ms = settle(&k, 2).await;
+    assert!(ms[1].text.starts_with("已经改好了「"), "{:?}", ms[1]);
+    let id = ms[1].meta["proposal"]["id"].as_str().unwrap().to_string();
+    assert_eq!(ms[1].meta["cfg_state"][&id], "applied");
+    let important: bool = k
+        .db()
+        .store()
+        .with_conn(|c| {
+            Ok(c.query_row(
+                "SELECT important FROM parties WHERE id = 'ct_sarah'",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    assert!(important);
+}
+
+/// #51: a message whose way is fixed (to an item, `#ST-n`, `/汇报`) does not wait behind the answer in
+/// progress: it is not held, and its acknowledgement comes while the answer still runs.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_to_an_item_passes_the_answer_in_progress() {
+    let k = Kit::new();
+    router(&k, json!({"kind": "answer", "confidence": 0.9}), "答好了");
+    *k.gw.slow.lock().unwrap() = Some((
+        "You are Steve, the user's assistant.",
+        Duration::from_secs(30),
+    ));
+    let i = k.item("run", "执行", None);
+    let s = k.session(&i, "idle");
+    k.core.say(WS, "慢慢答", &[]).unwrap();
+    assert!(k.wait(|| k.core.inline_busy(WS)));
+    let to = k.core.say(WS, &format!("#{i} 记得加测试"), &[]).unwrap();
+    assert!(
+        k.db()
+            .message(&to)
+            .unwrap()
+            .unwrap()
+            .meta
+            .get("held")
+            .is_none()
+    );
+    let report = k.core.say(WS, "/汇报", &[]).unwrap();
+    /* the question, both messages and both replies */
+    let ms = settle(&k, 5).await;
+    assert!(k.core.inline_busy(WS), "the answer still runs");
+    let acks: Vec<&str> = ms
+        .iter()
+        .filter(|m| m.author == "steve")
+        .map(|m| m.text.as_str())
+        .collect();
+    assert!(
+        acks.contains(&format!("已作为补充送到 {i}。").as_str()),
+        "{acks:?}"
+    );
+    assert!(acks.iter().any(|t| t.starts_with("现在：")), "{acks:?}");
+    assert_eq!(k.rt.prompts_of(&s), vec!["补充信息：记得加测试"]);
+    assert!(
+        k.db()
+            .message(&report)
+            .unwrap()
+            .unwrap()
+            .meta
+            .get("held")
+            .is_none()
+    );
+    // a message the router has to see still waits for the turn
+    let next = k.core.say(WS, "然后呢", &[]).unwrap();
+    assert_eq!(k.db().message(&next).unwrap().unwrap().meta["held"], true);
+    assert!(k.core.stop(WS).unwrap());
+    *k.gw.slow.lock().unwrap() = None;
+    settle(&k, 7).await;
+}
+
+/// #52: a plain question is researched without asking the router (route_log `guard = "q"`); one that
+/// names an item or asks for work still goes to the router.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_plain_question_skips_the_router() {
+    let k = Kit::new();
+    let routed = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let r2 = routed.clone();
+    k.gw.set(move |p, _| {
+        if p.starts_with("You are the router of Steve") {
+            r2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(r#"{"kind":"answer","confidence":0.9}"#.into())
+        } else {
+            Ok("答好了".into())
+        }
+    });
+    let q = k.core.say(WS, "检索是怎么打分的？", &[]).unwrap();
+    settle(&k, 2).await;
+    assert_eq!(
+        routed.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "no router"
+    );
+    let log = k
+        .db()
+        .store()
+        .thread()
+        .route_of(&q)
+        .unwrap()
+        .expect("route log");
+    assert_eq!(log.guard.as_deref(), Some("q"));
+    assert_eq!(log.model, None);
+    // asking for work: the router decides
+    k.core.say(WS, "把检索的打分改成按时间加权", &[]).unwrap();
+    settle(&k, 4).await;
+    assert_eq!(routed.load(std::sync::atomic::Ordering::SeqCst), 1);
 }

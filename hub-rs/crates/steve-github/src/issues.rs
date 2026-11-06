@@ -133,7 +133,8 @@ impl GitHub {
             .create_item(ItemRequest {
                 ws: ws.clone(),
                 title: cut(i.title.trim(), TITLE_MAX),
-                goal: goal_of(&r, &i, &body),
+                // the issue is somebody else's text: the agent reads it as data
+                goal: steve_modules::outbound::quote_untrusted(&goal_of(&r, &i, &body)),
                 bot,
                 project: r.project_id.clone(),
                 tag_ids: Vec::new(),

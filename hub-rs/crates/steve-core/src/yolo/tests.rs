@@ -865,7 +865,7 @@ fn release_facts(pl: &Place, cmd: &str) -> Release {
         branch_ok: true,
         accepted: true,
         releasing: false,
-        spacing_ok: true,
+        spacing_wait_s: 0,
         rebase_returns: 0,
     }
 }
@@ -930,6 +930,7 @@ fn every_row_of_the_table() {
                 repeated,
                 count: 0,
                 key: "用 a 还是 b".into(),
+                full: false,
             }),
         )
     };
@@ -1526,6 +1527,7 @@ fn delays_texts_and_undo() {
             repeated: false,
             count: 0,
             key: String::new(),
+            full: false,
         }),
     );
     let Verdict::Auto {
@@ -1557,7 +1559,7 @@ fn delays_texts_and_undo() {
         matches!(
             v,
             Verdict::Auto {
-                delay_s: 600,
+                delay_s: 60,
                 undo: Some(Undo::Recall),
                 ..
             }
@@ -1566,14 +1568,58 @@ fn delays_texts_and_undo() {
     );
 }
 
+/// #15: a bot's first send to an internal audience cools off for a minute; as the user (chat or mail)
+/// and every retry keep their own, longer delays.
+#[test]
+fn bot_first_send_cools_shorter_than_self() {
+    let pl = place();
+    let delay = |subject_type: &str, identity, stage| {
+        let o = outbound(identity, Disclosure::Pass, true, stage);
+        let subject = if subject_type == "mail_draft" {
+            Subject::Mail(o)
+        } else {
+            Subject::Chan(o)
+        };
+        match run(&facts("approve", subject_type, &["yes"], subject), &pl) {
+            Verdict::Auto { delay_s, rule, .. } => (rule, delay_s),
+            v => panic!("{v:?}"),
+        }
+    };
+    let p = Policy::default();
+    assert_eq!(p.chan_bot_delay_s, 60);
+    assert_eq!(
+        delay("chan_message", Identity::Bot, OutboundStage::Draft),
+        ("chan.bot_internal".into(), 60)
+    );
+    assert_eq!(
+        delay("chan_message", Identity::SelfAccount, OutboundStage::Draft),
+        ("chan.self_ai".into(), 600)
+    );
+    assert_eq!(
+        delay("mail_draft", Identity::SelfAccount, OutboundStage::Draft),
+        ("mail.self_ai".into(), 600)
+    );
+    assert_eq!(
+        delay("chan_message", Identity::Bot, OutboundStage::SendFailed),
+        ("chan.retry".into(), 300)
+    );
+    // a stored policy from before the setting keeps working and gets the new default
+    let old: Policy = serde_json::from_value(serde_json::json!({"chan_delay_s": 900})).unwrap();
+    assert_eq!((old.chan_delay_s, old.chan_bot_delay_s), (900, 60));
+}
+
 #[test]
 fn presence_waits_and_scope_comes_first() {
     let pl = place();
-    let mut f = cmd(&pl, "cargo test");
+    let mut f = accept_facts(&[("t", true)], &[], None, false);
     f.present = true;
     assert!(matches!(run(&f, &pl), Verdict::Wait { delay_s: 180, .. }));
     f.in_scope = false;
     assert_eq!(run(&f, &pl), Verdict::Off);
+    // a tool call inside the worktree does not wait for the user: the guard judges it now
+    let mut f = cmd(&pl, "cargo test");
+    f.present = true;
+    assert_eq!(run(&f, &pl).rule(), "tool.worktree");
     // a hard limit is reported even when the user is around
     let mut f = cmd(&pl, "git push");
     f.present = true;
@@ -1712,6 +1758,7 @@ fn arb_policy() -> impl Strategy<Value = Policy> {
             release_delay_s: delay,
             propose_chat_delay_s: delay,
             chan_delay_s: delay,
+            chan_bot_delay_s: delay,
             chan_retry_delay_s: delay,
         })
 }
