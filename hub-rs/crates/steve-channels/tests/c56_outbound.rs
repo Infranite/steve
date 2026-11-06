@@ -1843,6 +1843,126 @@ async fn recalling_as_you_needs_a_side_that_can() {
     assert_eq!(status(&h, &m), "sent");
 }
 
+/// Acts as you on a remote without message ids: every send gets a delivery id, a create time and
+/// the thread it landed in; recalls are recorded.
+#[derive(Default)]
+struct NoIds(Mutex<Vec<MessageRef>>);
+
+#[async_trait::async_trait]
+impl ActAsUser for NoIds {
+    fn adapter_id(&self) -> &str {
+        FakeChannel::ID
+    }
+
+    async fn send(
+        &self,
+        _: &ConnCx,
+        _: &ActTarget,
+        _: &OutContent,
+        _: &SendKey,
+    ) -> Result<Sent, AdapterError> {
+        Ok(Sent::without_id()
+            .source_id("dlv_1")
+            .created(1_700_000_000_500)
+            .thread_key("t_1"))
+    }
+
+    fn supports_recall(&self) -> bool {
+        true
+    }
+
+    async fn recall(&self, _: &ConnCx, msg: &MessageRef) -> Result<(), AdapterError> {
+        self.0.lock().unwrap().push(msg.clone());
+        Ok(())
+    }
+}
+
+/// A send without a provider message id is kept by its delivery id, under the connection it went
+/// out on: no `external_id`, the delivery id in `chan_message_seen`, found again by it, and
+/// recalled with it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_send_without_a_message_id_is_found_and_recalled_by_its_delivery_id() {
+    let u = Arc::new(NoIds::default());
+    let h = setup_with(Some(u.clone())).await;
+    let m = sent_as_you(&h).await;
+    assert_eq!(
+        row(
+            &h,
+            "SELECT external_id, sent_via, ext_created, thread_key FROM chan_messages WHERE id = ?",
+            &[&m]
+        ),
+        vec![
+            Value::Null,
+            json!(h.me),
+            json!(1_700_000_000_500i64),
+            json!("t_1")
+        ]
+    );
+    assert_eq!(
+        row(
+            &h,
+            "SELECT connection_id, source_id FROM chan_message_seen WHERE message_id = ?",
+            &[&m]
+        ),
+        vec![json!(h.me), json!("dlv_1")]
+    );
+
+    let cx = h.ch.connections().cx(WS, &h.me).expect("cx");
+    let mine = steve_channels::queries::Queries::new(h.ch.clone()).for_cx(&cx);
+    let r = mine
+        .message_ref_by_source("C_DEV", "dlv_1")
+        .expect("ref")
+        .expect("found");
+    assert_eq!((r.ext_id.as_deref(), r.id()), (None, None));
+    assert_eq!(r.source_id.as_deref(), Some("dlv_1"));
+    assert_eq!((r.created, r.created_exact), (1_700_000_000_500, true));
+    assert_eq!(r.thread_key.as_deref(), Some("t_1"));
+    assert_eq!(
+        mine.message_ref("C_DEV", "dlv_1").expect("ref"),
+        Some(r.clone())
+    );
+    // another connection does not know it by that id
+    let bot = h.ch.connections().cx(WS, &h.oncall).expect("cx");
+    let theirs = steve_channels::queries::Queries::new(h.ch.clone()).for_cx(&bot);
+    assert_eq!(
+        theirs.message_ref_by_source("C_DEV", "dlv_1").expect("ref"),
+        None
+    );
+
+    h.outbox.recall(&h.ch, WS, ME, &m).await.expect("recalled");
+    assert_eq!(*u.0.lock().unwrap(), vec![r]);
+    assert!(h.fake.recalled.lock().unwrap().is_empty());
+    assert_eq!(status(&h, &m), "recalled");
+}
+
+/// The thread a send reports fills an empty `thread_key` only (the test above): a reply in a
+/// thread keeps the thread it was written for.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_thread_a_send_reports_never_replaces_one() {
+    let h = setup_with(Some(Arc::new(NoIds::default()))).await;
+    checks_pass(&h);
+    h.env.gateway.script(H_SAFETY, REPLY);
+    let me = h.me.clone();
+    let mut q = msg("C_DEV", "d2", "ulilei", "@你 在吗", true);
+    q.thread_key = Some("t_own".into());
+    let r = push(&h, &me, q).await.response.unwrap();
+    let m = r.out_message_id.unwrap();
+    let thread = |h: &H| {
+        row(
+            h,
+            "SELECT thread_key FROM chan_messages WHERE id = ?",
+            &[&m],
+        )[0]
+        .clone()
+    };
+    assert_eq!(thread(&h), json!("t_own"));
+    decide(&h, &r.decision_id.unwrap(), "yes", "在的").unwrap();
+    h.env.clock.advance(11_000);
+    assert_eq!(h.outbox.send_due(&h.ch).await, 1);
+    assert_eq!(status(&h, &m), "sent");
+    assert_eq!(thread(&h), json!("t_own"));
+}
+
 /// YOLO: a message in your own name that YOLO approved goes out with
 /// `[AI] ` in front; the same message approved by you goes out as written, and a mark the text
 /// brought along is removed — only the outbound path puts it there.

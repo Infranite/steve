@@ -104,11 +104,19 @@ impl ConnQueries {
         })
     }
 
-    /// Stored message `ext` of space `space_ext`, if there is one.
+    /// Stored message `ext` of space `space_ext`, if there is one: by its provider id, else by the
+    /// delivery id this connection knows it by ([`Self::message_ref_by_source`]).
     pub fn message_ref(&self, space_ext: &str, ext: &str) -> ChannelResult<Option<MessageRef>> {
         if ext.is_empty() {
             return Ok(None);
         }
+        match self.by_external(space_ext, ext)? {
+            Some(m) => Ok(Some(m)),
+            None => self.message_ref_by_source(space_ext, ext),
+        }
+    }
+
+    fn by_external(&self, space_ext: &str, ext: &str) -> ChannelResult<Option<MessageRef>> {
         self.channels.store().reader(|c| -> ChannelResult<_> {
             let id: Option<String> = c
                 .query_row(

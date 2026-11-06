@@ -3,8 +3,10 @@
 
 use std::sync::Arc;
 
+use steve_channels::ChannelAdapter;
 use steve_channels::adapters::feishu::{self, Domain, FeishuApp, FeishuEnv};
-use steve_channels::ext::{ChannelDecl, ChannelSide, Mode, Receive};
+use steve_channels::channel::ChannelFeatures;
+use steve_channels::ext::{ChannelDecl, ChannelSide, MessageIds, Mode, Receive, StartMethod};
 use steve_modules::accounts::connections::ConnectionProvider;
 
 use super::{Declare, Extension, ExtensionError, Job, Mounted, Started};
@@ -23,8 +25,13 @@ impl Extension for FeishuBot {
         d.channel(
             ChannelSide::new(
                 ChannelDecl::new(app.id())
+                    .handle_system(feishu::auth::USER_SYSTEM)
                     .mode(Mode::Bot)
-                    .receive(Receive::LongConnection, None),
+                    .features(app.features())
+                    .receive(Receive::LongConnection, None)
+                    .message_ids(MessageIds::Platform)
+                    .created_precision_ms(1)
+                    .start(StartMethod::Form),
                 app.clone(),
             )
             .adapter(app.clone())
@@ -78,8 +85,20 @@ impl Extension for FeishuSelf {
         d.channel(
             ChannelSide::new(
                 ChannelDecl::new(user.id())
+                    .handle_system(feishu::auth::USER_SYSTEM)
                     .mode(Mode::Own)
-                    .receive(Receive::Poll, Some("msg.receive")),
+                    .features(ChannelFeatures {
+                        as_user: true,
+                        thread_reply: true,
+                        recall: true,
+                        reactions: true,
+                        ..ChannelFeatures::default()
+                    })
+                    .receive(Receive::Poll, Some("msg.receive"))
+                    .message_ids(MessageIds::Platform)
+                    .created_precision_ms(1)
+                    .start(StartMethod::OAuth)
+                    .start(StartMethod::Device),
                 user.clone(),
             )
             .act_as_user(user.clone())
