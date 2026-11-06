@@ -25,8 +25,14 @@ mod node;
 const TEXT_MAX: usize = 512 * 1024;
 /// A diff beyond this is cut.
 const DIFF_MAX: usize = 400 * 1024;
-/// Images, PDFs and media served as they are, up to this size.
+/// Images and Office files the page renders itself (it reads them whole): above this size the preview
+/// says the file is large and offers the download. `/raw` serves every size, video and audio by range.
 const RAW_MAX: u64 = 64 * 1024 * 1024;
+
+/// Is a file of `form` and `size` too large for the page to render itself (images, Office)?
+pub(crate) fn large(form: &str, size: u64) -> bool {
+    matches!(form, "image" | "office") && size > RAW_MAX
+}
 const LIST_MAX: usize = 500;
 
 /// One output with what is needed to find it.
@@ -170,12 +176,6 @@ pub async fn raw(
         ),
         Src::Node(a, e) => (e.size(), a.name()),
     };
-    if size > RAW_MAX {
-        return Err(ApiError::Json(
-            413,
-            steve_i18n::t!("hub.output.too_large", size = human(size)),
-        ));
-    }
     let file = match &src {
         Src::Disk(p) => match tokio::fs::File::open(p).await {
             Ok(f) => Some(f),
@@ -559,7 +559,7 @@ fn file(p: &FsPath, shown: &str) -> Value {
     let size = m.as_ref().map(|m| m.len()).unwrap_or(0);
     let mut v = match media(&name) {
         (Some(form), mime) => {
-            json!({ "type": form, "name": name, "mime": mime, "large": size > RAW_MAX })
+            json!({ "type": form, "name": name, "mime": mime, "large": large(form, size) })
         }
         (None, _) => {
             let mut buf = Vec::with_capacity(TEXT_MAX.min(size as usize) + 1);
@@ -750,14 +750,6 @@ fn branch(o: &Out) -> Value {
         "diff": diff,
         "truncated": cut,
     })
-}
-
-fn human(n: u64) -> String {
-    if n >= 1024 * 1024 {
-        format!("{:.1} MB", n as f64 / 1024.0 / 1024.0)
-    } else {
-        format!("{} KB", n.div_ceil(1024))
-    }
 }
 
 #[cfg(test)]

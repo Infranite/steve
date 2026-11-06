@@ -412,9 +412,8 @@ async fn stats_routes() {
     let (s, _) = e.call("POST", "/api/stats/rebuild", None).await;
     assert_eq!(s, 202);
 
-    /* SSE: four changes within a second reach the browser as one or two frames (the first at once if the
-     * workspace was quiet, the rest merged at the window's end), never two within 5 s */
-    tokio::time::sleep(Duration::from_secs(6)).await; // the rebuild's and the tz change's windows end
+    /* SSE: a change reaches the browser as a `stats` frame (the throttle's timing is the stream's own
+     * unit test's business, not this one's) */
     let r = e
         .http
         .get(format!("{}/api/stream", e.base))
@@ -423,18 +422,12 @@ async fn stats_routes() {
         .await
         .expect("stream");
     let mut body = r.bytes_stream();
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    for i in 0..4 {
-        let (s, _) = e
-            .call("PUT", "/api/stats/prices", Some(prices(4.0 + i as f64)))
-            .await;
-        assert_eq!(s, 200);
-    }
-    let start = tokio::time::Instant::now();
-    let deadline = start + Duration::from_millis(11_000);
-    let mut at = vec![];
+    let (s, _) = e.call("PUT", "/api/stats/prices", Some(prices(4.0))).await;
+    assert_eq!(s, 200);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(11);
+    let mut got = false;
     let mut buf = String::new();
-    while let Ok(Some(Ok(chunk))) = tokio::time::timeout_at(deadline, body.next()).await {
+    while !got && let Ok(Some(Ok(chunk))) = tokio::time::timeout_at(deadline, body.next()).await {
         buf.push_str(&String::from_utf8_lossy(&chunk));
         while let Some(i) = buf.find("\n\n") {
             let frame: String = buf.drain(..i + 2).collect();
@@ -444,16 +437,11 @@ async fn stats_routes() {
                 && v["type"] == "stats"
             {
                 assert_eq!(v["ws"], "default");
-                at.push(start.elapsed());
+                got = true;
             }
         }
     }
-    assert!((1..=2).contains(&at.len()), "{at:?}");
-    assert!(
-        at.windows(2)
-            .all(|w| w[1] - w[0] >= Duration::from_millis(4500)),
-        "{at:?}"
-    );
+    assert!(got, "no stats frame");
 }
 
 /// A Models.dev stand-in on loopback. `mode` 0 serves v1 (etag `"v1"`), 1 answers 500, 2 serves v2

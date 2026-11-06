@@ -10,7 +10,7 @@ import { Spinner } from "@/components/ui/spinner"
 import { t, useT } from "@/i18n"
 
 export const MAX_FILE = 20 * 1024 * 1024, MAX_FILES = 10
-export const ACCEPT = "image/png,image/jpeg,image/gif,image/webp,application/pdf,application/zip,.zip,.pdf,.txt,.log,.md,.csv,.json,.yaml,.yml,.xml,text/*"
+export const ACCEPT = "image/png,image/jpeg,image/gif,image/webp,application/pdf,application/zip,.zip,.docx,.xlsx,.pptx,.epub,.pdf,.txt,.log,.md,.csv,.json,.yaml,.yml,.xml,text/*"
 const IMG = ["image/png", "image/jpeg", "image/gif", "image/webp"]
 export const isImage = (mime: string) => IMG.includes(mime.split(";")[0])
 export const size = (n: number) => (n >= 1024 * 1024 ? (n / 1024 / 1024).toFixed(1) + " MB" : Math.max(1, Math.round(n / 1024)) + " KB")
