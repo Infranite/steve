@@ -34,10 +34,10 @@ pub(crate) fn permission_mode(perm: &str) -> Option<PermissionMode> {
 
 /// A binding is only a plan. The coordinator must bind it before routing a new session. Imported,
 /// ended, read-only, cross-workspace or unrecognized permission settings fail closed.
-/// `perm`: the harness mode the legacy runner would start the session in (the bot's `perm_mode`
-/// as YOLO sets it, `Core::session_perm_mode`; `None`: the harness default), so a session gets the
-/// same permissions on either path. `allows`: whether the Node takes a directory (its roots);
-/// a directory it does not take plans nothing, and the session stays where it would go otherwise.
+/// `perm`: the harness mode the session is meant to start in (the bot's `perm_mode` as YOLO sets
+/// it, `Core::session_perm_mode`; `None`: the harness default), the same the legacy runner gave
+/// it. `allows`: whether the Node takes a directory (its roots); a directory it does not take
+/// plans nothing, and the session is refused.
 pub fn binding_for(
     store: &Store,
     session: &str,
@@ -590,7 +590,7 @@ mod bot_tests {
         assert_eq!(b.policy.revision.as_str(), "host-3");
     }
 
-    /// The Node path starts a session with the permissions the legacy runner would give it: the
+    /// The Node path starts a session with the permissions the legacy runner gave it: the
     /// mode `Core::session_perm_mode` computes (the bot's, as YOLO widens it) for every bot mode ×
     /// YOLO level × directory, and a read-only session never binds.
     #[test]
@@ -641,7 +641,7 @@ mod bot_tests {
         for (n, bot) in bots.iter().enumerate() {
             for (level, own) in levels {
                 for ro in [false, true] {
-                    // what Core::session_perm_mode hands the legacy runner (HubHost::session)
+                    // what Core::session_perm_mode gives (HubHost::perm_mode)
                     let legacy = if ro {
                         perm_mode(*bot, false)
                     } else {
@@ -874,11 +874,11 @@ mod host_tests {
         assert!(gone, "the adapter outlived the Hub's shutdown");
     }
 
-    /// A new session the local Node cannot run stays on the legacy runner instead of becoming a
-    /// dead Node session: a project directory added after the Node started (not among its roots)
+    /// A new session the local Node cannot run is refused, said why, instead of becoming a dead
+    /// Node session: a project directory added after the Node started (not among its roots)
     /// plans no binding, and once the Node stopped its bind is refused.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_session_the_local_node_cannot_run_stays_legacy() {
+    async fn a_session_the_local_node_cannot_run_is_refused() {
         use steve_core::AgentRuntime;
         let dir = tempfile::tempdir().unwrap();
         let cfg = crate::config::Config::from_vars(|k| match k {
@@ -916,15 +916,9 @@ mod host_tests {
             flow: Default::default(),
             yolo: Default::default(),
             local_node: Default::default(),
-            user_seqs: Default::default(),
-            transcripts: Default::default(),
         });
         let _ = host.local_node.set(node.clone());
         let routed = super::super::core::RoutedRuntime {
-            legacy: super::super::core::AcpRuntime(steve_acp::Acp::new(
-                super::super::acp_config(&cfg),
-                host.clone(),
-            )),
             node: Some(rt.clone()),
             fleet: None,
             bind_remote: None,
@@ -963,12 +957,24 @@ mod host_tests {
         assert!(binding_for(&store, "s1", None, &|_| true).is_some());
         assert!(binding_for(&store, "s1", None, &|p| node.allows(p)).is_none());
         routed.created("s1", None);
-        assert_eq!(bound("s1"), 0, "a directory outside the roots stays legacy");
+        assert_eq!(
+            bound("s1"),
+            0,
+            "a directory outside the roots is bound nowhere"
+        );
+        let why = routed.refusal("s1").expect("refused");
+        assert!(why.contains("不在 Node 可用的目录里"), "{why}");
+        assert!(
+            routed.prompt("s1", "做事", "me", &[]).is_err(),
+            "never run on the Hub"
+        );
         // a scratch session could run there, but the Node stopped
         assert!(binding_for(&store, "s2", None, &|p| node.allows(p)).is_some());
         rt.stop("its tools did not connect");
         routed.created("s2", None);
         assert_eq!(bound("s2"), 0, "a stopped Node binds nothing");
+        let why = routed.refusal("s2").expect("refused");
+        assert!(why.contains("本机 Node 没有在运行"), "{why}");
         assert!(!super::super::node_runtime::bound(&store, "s2"));
         node.shutdown().await;
     }

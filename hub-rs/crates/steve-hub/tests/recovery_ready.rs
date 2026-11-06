@@ -1,12 +1,13 @@
-//! Listener-ready recovery, end to end on the real `steve-hub` binary: a temp STEVE_HOME, the fake
-//! ACP agent (`steve-acp/tests/fake-acp.js`, which logs every prompt it gets), real HTTP. The Hub is
-//! killed (SIGKILL, with its agent) in the middle of a turn and started again on the same home:
-//! - the message the agent had already been given comes back to be checked (wrapped in the
-//!   resumed note after the resume prompt), never again as a plain new request;
+//! Listener-ready recovery, end to end on the real `steve-hub` binary with the local Node (the
+//! default): a temp STEVE_HOME, the fake ACP agent (`steve-acp/tests/fake-acp.js`, which logs every
+//! prompt it gets), real HTTP. The Hub is killed (SIGKILL, with its Node and agent) and started
+//! again on the same home:
+//! - a turn the kill cut is never sent again: the Node's reconcile leaves its attempt unknown, and
+//!   nothing resumes it on the Hub (B7: there is no runner of its own to do that);
 //! - a recovery that fails does not stop the Hub: `/healthz` answers, `recovery` says what failed,
-//!   the rest of the recovery (the agent session) still runs;
-//! - behind an upgrade gate (maintenance) nothing resumes; once the operation is committed the Hub
-//!   leaves the gate, binds its listener and only then resumes.
+//!   the rest of the recovery (the Node's reconcile) still runs;
+//! - behind an upgrade gate (maintenance) nothing is sent; once the operation is committed, or the
+//!   maintenance lifted, the Hub binds its listener and only then sends what waited.
 //!
 //! No real host, no real agent.
 
@@ -18,9 +19,8 @@ use std::time::Duration;
 use serde_json::{Value, json};
 
 const TOKEN: &str = "恢复验证-UNIQ-7F3";
-/// What `steve-core` puts before the interrupted turn and before a message delivered before the stop.
+/// What the old boot resume put before an interrupted turn: never sent any more.
 const RESUME_HEAD: &str = "Hub 刚重启，上一回合被中断了";
-const RESUMED_HEAD: &str = "以下是 Hub 重启前已经发给你的消息";
 
 fn free_port() -> u16 {
     std::net::TcpListener::bind("127.0.0.1:0")
@@ -144,9 +144,12 @@ fn spawn(h: &Home, upgrade: Option<&str>) -> Hub {
         .env("CLAUDE_CODE_EXECUTABLE", "/usr/bin/false")
         .env("STEVE_ADAPTER_CLAUDE", fake)
         .env("STEVE_ADAPTER_CODEX", "/usr/bin/false")
+        // a turn that ends without a delivery is not continued by Steve: the queue stays the test's
+        .env("STEVE_TAKEOVER_CONTINUES", "0")
         .env_remove("STEVE_NO_RESUME")
-        // the legacy runner: the local Node is the default since B6
-        .env("STEVE_NODE_MODE", "off")
+        // the local Node, the default
+        .env_remove("STEVE_NODE_MODE")
+        .env_remove("STEVE_NODE")
         .env_remove("STEVE_UPGRADE_ID")
         .env_remove("CLAUDE_CONFIG_DIR")
         .env_remove("CODEX_HOME")
@@ -260,43 +263,105 @@ impl Client {
     }
 }
 
+/// The claude-code bot's id.
+async fn bot(c: &Client) -> String {
+    let (_, state) = c.call("GET", "/api/state", None).await;
+    state["bots"]
+        .as_array()
+        .and_then(|bs| bs.iter().find(|b| b["harness"] == "claude-code"))
+        .and_then(|b| b["id"].as_str())
+        .expect("a claude-code bot")
+        .to_string()
+}
+
+/// A new item running `goal`; its session once the fake agent got it.
+async fn item(h: &Home, c: &Client, goal: &str) -> String {
+    let bot = bot(c).await;
+    let (st, i) = c
+        .call(
+            "POST",
+            "/api/items",
+            Some(json!({"goal": goal, "title": "恢复验证", "bot": bot, "project": null})),
+        )
+        .await;
+    assert_eq!(st, 200, "{i}");
+    let item = i["id"].as_str().expect("item").to_string();
+    let needle = goal.split(' ').next().unwrap_or(goal).to_string();
+    assert!(
+        until(30, || async {
+            h.prompts().iter().any(|p| p.contains(&needle))
+        })
+        .await,
+        "the agent got the first turn"
+    );
+    one(h, "SELECT id FROM sessions WHERE item_id=?", &item).expect("session")
+}
+
+fn one(h: &Home, sql: &str, p: &str) -> Option<String> {
+    rusqlite::Connection::open(h.db())
+        .expect("db")
+        .query_row(sql, [p], |r| r.get(0))
+        .ok()
+}
+
+fn count(h: &Home, sql: &str, p: &str) -> i64 {
+    rusqlite::Connection::open(h.db())
+        .expect("db")
+        .query_row(sql, [p], |r| r.get(0))
+        .unwrap_or_else(|e| panic!("{sql}: {e}"))
+}
+
 /// First boot: an item whose first turn is running on the fake agent (sleeping), then the Hub dies.
 async fn interrupted_turn(h: &Home) -> String {
     let mut hub = spawn(h, None);
     serving(h).await;
     let c = Client::login(h).await;
-    let (_, state) = c.call("GET", "/api/state", None).await;
-    let bot = state["bots"]
-        .as_array()
-        .and_then(|bs| bs.iter().find(|b| b["harness"] == "claude-code"))
-        .and_then(|b| b["id"].as_str())
-        .expect("a claude-code bot")
-        .to_string();
-    let (st, i) = c
-        .call(
-            "POST",
-            "/api/items",
-            Some(json!({"goal": format!("{TOKEN} 做一件长任务 @sleep 600000"), "title": "恢复验证", "bot": bot, "project": null})),
-        )
-        .await;
-    assert_eq!(st, 200, "{i}");
-    let item = i["id"].as_str().expect("item").to_string();
+    let sid = item(h, &c, &format!("{TOKEN} 做一件长任务 @sleep 600000")).await;
+    hub.kill();
+    sid
+}
+
+/// First boot: an item whose first turn has ended (idle on the Node), then the Hub dies.
+async fn idle_session(h: &Home) -> String {
+    let mut hub = spawn(h, None);
+    serving(h).await;
+    let c = Client::login(h).await;
+    let sid = item(h, &c, "空闲验证-I4 @say done").await;
     assert!(
         until(30, || async {
-            h.prompts().iter().any(|p| p.contains(TOKEN))
+            count(
+                h,
+                "SELECT COUNT(*) FROM runtime_turns WHERE session_id=? AND state='finished'",
+                &sid,
+            ) >= 1
+                && count(
+                    h,
+                    "SELECT COUNT(*) FROM runtime_turns WHERE session_id=? AND state<>'finished'",
+                    &sid,
+                ) == 0
         })
         .await,
-        "the agent got the first turn"
+        "its turn ended"
     );
     hub.kill();
-    item
+    sid
+}
+
+/// [`idle_session`], with a message for it left queued, as one held for the restart is.
+async fn idle_with_a_queued_message(h: &Home, text: &str) -> String {
+    let sid = idle_session(h).await;
+    rusqlite::Connection::open(h.db())
+        .expect("db")
+        .execute(
+            "INSERT INTO queued(id,session_id,text,via,created) VALUES ('q-held',?1,?2,'me',1)",
+            [&sid, text],
+        )
+        .expect("queued");
+    sid
 }
 
 fn plain(h: &Home) -> usize {
-    h.prompts()
-        .iter()
-        .filter(|p| p.contains(TOKEN) && !p.contains(RESUMED_HEAD))
-        .count()
+    h.prompts().iter().filter(|p| p.contains(TOKEN)).count()
 }
 
 fn resumed(h: &Home) -> Vec<String> {
@@ -307,30 +372,31 @@ fn resumed(h: &Home) -> Vec<String> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_turn_cut_by_a_crash_resumes_after_ready_and_the_delivered_message_is_only_checked() {
+async fn a_turn_cut_by_a_crash_is_never_sent_again() {
     let h = Home::new();
-    interrupted_turn(&h).await;
+    let sid = interrupted_turn(&h).await;
     assert_eq!(plain(&h), 1);
     let _hub = spawn(&h, None);
     let v = serving(&h).await;
     assert_eq!(v["recovery"]["state"], "ok", "{v}");
+    health_until(&h, 30, |v| v["node"]["reconciled"] == true).await;
     assert!(
-        until(30, || async { !resumed(&h).is_empty() }).await,
-        "resumed after ready: {:?}",
-        h.prompts()
+        until(30, || async {
+            count(&h, "SELECT COUNT(*) FROM runtime_attempts a JOIN runtime_turns t USING(turn_id) WHERE t.session_id=? AND a.state='unknown'", &sid) == 1
+        })
+        .await,
+        "the cut attempt is unknown"
     );
-    let r = resumed(&h);
-    assert_eq!(r.len(), 1, "{r:?}");
-    assert!(
-        r[0].contains(RESUMED_HEAD) && r[0].contains(TOKEN),
-        "the delivered message comes back to be checked: {}",
-        r[0]
-    );
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(plain(&h), 1, "never sent again: {:?}", h.prompts());
+    assert!(resumed(&h).is_empty(), "no resume: {:?}", h.prompts());
     assert_eq!(
-        plain(&h),
-        1,
-        "never again as a plain new request: {:?}",
-        h.prompts()
+        count(
+            &h,
+            "SELECT COUNT(*) FROM session_resume WHERE session_id=?",
+            &sid
+        ),
+        0
     );
 }
 
@@ -350,12 +416,9 @@ async fn a_failing_recovery_is_reported_and_the_hub_still_serves() {
     let c = Client::login(&h).await;
     let (st, _) = c.call("GET", "/api/state", None).await;
     assert_eq!(st, 200, "the app serves");
-    // the agent session's recovery is not held back by the other one
-    assert!(
-        until(30, || async { !resumed(&h).is_empty() }).await,
-        "{:?}",
-        h.prompts()
-    );
+    // the Node's recovery is not held back by the other one
+    let n = health_until(&h, 30, |v| v["node"]["reconciled"] == true).await;
+    assert_eq!(n["node"]["unknown"], 1, "{n}");
 }
 
 fn atomic(p: &Path, v: &Value) {
@@ -366,9 +429,10 @@ fn atomic(p: &Path, v: &Value) {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn nothing_resumes_behind_the_upgrade_gate_and_it_resumes_once_committed() {
+async fn nothing_is_sent_behind_the_upgrade_gate_and_what_waited_goes_once_committed() {
     let h = Home::new();
-    interrupted_turn(&h).await;
+    let held = "门后排队-G7";
+    idle_with_a_queued_message(&h, held).await;
     // an upgrade operation in verification for this version (the gate's maintenance)
     let id = uuid::Uuid::new_v4().to_string();
     let target = h.steve().join("releases").join(format!("{VERSION}-test"));
@@ -397,17 +461,20 @@ async fn nothing_resumes_behind_the_upgrade_gate_and_it_resumes_once_committed()
         .expect("request");
     assert_eq!(r.status().as_u16(), 503, "no app behind the gate");
     tokio::time::sleep(Duration::from_secs(3)).await;
-    assert_eq!(h.prompts().len(), before, "nothing resumes in maintenance");
-    // committed: the gate opens, the app binds, then recovery runs
+    assert_eq!(h.prompts().len(), before, "nothing is sent in maintenance");
+    // committed: the gate opens, the app binds, then what waited goes
     atomic(&op_path, &op("committed"));
     let v = serving(&h).await;
     assert_eq!(v["recovery"]["state"], "ok", "{v}");
     assert!(
-        until(30, || async { !resumed(&h).is_empty() }).await,
+        until(30, || async {
+            h.prompts().iter().any(|p| p.contains(held))
+        })
+        .await,
         "{:?}",
         h.prompts()
     );
-    assert_eq!(plain(&h), 1);
+    assert!(resumed(&h).is_empty());
 }
 
 /// The supervisor's control token (`updates/control-token.json`, a JSON string).
@@ -432,34 +499,35 @@ async fn drain(h: &Home, method: &str, token: &str) -> Value {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_hub_stopped_in_maintenance_resumes_only_once_maintenance_is_lifted() {
+async fn a_hub_stopped_in_maintenance_sends_nothing_until_maintenance_is_lifted() {
     let h = Home::new();
     let token = control_token(&h);
-    // first boot: a turn is running when the upgrade drain starts, then the Hub dies
+    let held = "维护排队-M2";
+    // an idle session; then the upgrade drain starts, a message comes, and the Hub dies
+    let sid = idle_session(&h).await;
     let mut hub = spawn(&h, None);
     serving(&h).await;
-    let c = Client::login(&h).await;
-    let (_, state) = c.call("GET", "/api/state", None).await;
-    let bot = state["bots"]
-        .as_array()
-        .and_then(|bs| bs.iter().find(|b| b["harness"] == "claude-code"))
-        .and_then(|b| b["id"].as_str())
-        .expect("a claude-code bot")
-        .to_string();
-    let (st, i) = c
-        .call("POST", "/api/items", Some(json!({"goal": format!("{TOKEN} 维护前开始的长任务 @sleep 600000"), "title": "维护验证", "bot": bot, "project": null})))
-        .await;
-    assert_eq!(st, 200, "{i}");
-    assert!(
-        until(30, || async {
-            h.prompts().iter().any(|p| p.contains(TOKEN))
-        })
-        .await
-    );
     let d = drain(&h, "POST", &token).await;
     assert_eq!(d["maintenance"], true, "{d}");
+    assert_eq!(
+        (&d["acp"], &d["adapters_stopped"]),
+        (&json!(0), &json!(true)),
+        "{d}"
+    );
+    // a message during the drain waits in the queue
+    let c = Client::login(&h).await;
+    let (st, v) = c
+        .call(
+            "POST",
+            &format!("/api/sessions/{sid}/messages"),
+            Some(json!({ "text": held })),
+        )
+        .await;
+    assert_eq!(st, 200, "{v}");
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(!h.prompts().iter().any(|p| p.contains(held)), "held");
     hub.kill();
-    // the next boot is still in maintenance (durable): it serves, but resumes nothing
+    // the next boot is still in maintenance (durable): it serves, but sends nothing
     let _hub = spawn(&h, None);
     serving(&h).await;
     let before = h.prompts().len();
@@ -469,20 +537,19 @@ async fn a_hub_stopped_in_maintenance_resumes_only_once_maintenance_is_lifted() 
     assert_eq!(
         h.prompts().len(),
         before,
-        "nothing resumes in maintenance: {:?}",
+        "nothing is sent in maintenance: {:?}",
         h.prompts()
     );
-    assert!(resumed(&h).is_empty());
-    // lifted: ready runs, the cut turn resumes, the delivered message only to be checked
+    // lifted: what waited goes
     let d = drain(&h, "DELETE", &token).await;
     assert_eq!(d["maintenance"], false, "{d}");
     assert!(
-        until(30, || async { !resumed(&h).is_empty() }).await,
+        until(30, || async {
+            h.prompts().iter().any(|p| p.contains(held))
+        })
+        .await,
         "{:?}",
         h.prompts()
     );
-    let r = resumed(&h);
-    assert_eq!(r.len(), 1, "{r:?}");
-    assert!(r[0].contains(RESUMED_HEAD), "{}", r[0]);
-    assert_eq!(plain(&h), 1);
+    assert!(resumed(&h).is_empty());
 }

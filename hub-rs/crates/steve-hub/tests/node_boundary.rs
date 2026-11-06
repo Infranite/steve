@@ -24,9 +24,11 @@
 //! Every count must equal its entry in [`ALLOWED`]. A new call site fails the test: route it
 //! through the Node (a `WorkspaceExecutor`, `Discovery` or job face), or, if it is truly Hub-host
 //! work (the Hub's own data, the upgrader, the keychain, `gh` API calls), add it to the table with
-//! why. A removed call site fails too, so the table shrinks with the code: the entries marked
-//! [`Until::B7`] go with the legacy runner, those marked [`Until::N0d`] when think and research
-//! jobs are the only path, and [`Until::Later`] names the follow-up that moves the rest.
+//! why. A removed call site fails too, so the table shrinks with the code. The legacy runner's
+//! entries went with it (B7): nothing outside the Node starts a session's harness. Those marked
+//! [`Until::NoNode`] serve items no Node holds and go with `STEVE_NODE_MODE=off`, those marked
+//! [`Until::N0d`] when think and research jobs are the only path, and [`Until::Later`] names the
+//! follow-up that moves the rest.
 
 #[path = "node_boundary/scan.rs"]
 mod scan;
@@ -183,8 +185,10 @@ const FS_IMPORTS: [(&str, Import); 30] = [
 enum Until {
     /// Never: Hub-host work, not a project's or a harness's.
     Hub,
-    /// The legacy runner and the Hub-side paths of `STEVE_NODE_MODE=off` (B7 deletes them).
-    B7,
+    /// Items no Node holds, read on the Hub host: with `STEVE_NODE_MODE=off` (the rollback), or
+    /// an item whose sessions all ended on the legacy runner before B7 removed it. They go with
+    /// the off mode. No session runs without a Node any more.
+    NoNode,
     /// In-process think and research: `STEVE_NODE_JOBS=off`, and research whose directories the
     /// Node does not hold (N0d).
     N0d,
@@ -216,7 +220,7 @@ const fn e(rule: Rule, file: &'static str, count: usize, until: Until, why: &'st
 }
 
 use Rule::{Dir, Fs, Harness, Spawn};
-use Until::{B7, Hub, Later, Library, N0d};
+use Until::{Hub, Later, Library, N0d, NoNode};
 
 /// Every production call site outside the Node, per rule and file.
 #[rustfmt::skip]
@@ -227,13 +231,13 @@ const ALLOWED: &[Entry] = &[
     e(Spawn, "steve-research/src/run.rs", 1, Library, "one research harness attempt"),
     e(Spawn, "steve-acp/src/config.rs", 1, Hub, "`npm root -g`, to find the adapters"),
     e(Dir, "steve-knowledge/src/scan.rs", 1, Library, "the folder walk the Node's scan reuses"),
-    e(Fs, "steve-acp/src/attachments.rs", 4, Library, "attachments copied into a session's cwd"),
     e(Fs, "steve-acp/src/codex.rs", 4, Library, "CODEX_HOME config and the adapter's instructions file"),
+    e(Dir, "steve-acp/src/rollout.rs", 1, Library, "Codex rollout files: the Node's history, the stats repair"),
+    e(Fs, "steve-acp/src/rollout.rs", 1, Library, "Codex rollout files: the Node's history, the stats repair"),
     e(Fs, "steve-print/src/codex.rs", 6, Library, "`codex exec` image and instructions files"),
     e(Fs, "steve-research/src/attach.rs", 4, Library, "attachments in a research run's dir"),
     e(Fs, "steve-research/src/run.rs", 8, Library, "a research run's dir, sandbox profile and MCP config"),
     /* harness entry points outside the Node */
-    e(Harness, "steve-hub/src/wire/mod.rs", 1, B7, "Acp::new: the legacy ACP runner"),
     e(Harness, "steve-hub/src/wire/mod.rs", 1, N0d, "LocalPrint: the in-process think gateway"),
     e(Harness, "steve-core/src/gateway.rs", 4, N0d, "LocalPrint, its PrintRun and steve_print::run"),
     e(Harness, "steve-hub/src/wire/research.rs", 3, N0d,
@@ -241,17 +245,15 @@ const ALLOWED: &[Entry] = &[
     e(Spawn, "steve-hub/src/catalog.rs", 1, Later("the model catalogue from the Node"),
         "`codex debug models`, read-only in CODEX_HOME"),
     /* project directories on the Hub host */
-    e(Spawn, "steve-core/src/git.rs", 1, B7, "git for items with no Node (STEVE_NODE_MODE=off)"),
-    e(Spawn, "steve-github/src/push.rs", 1, B7, "the Hub-side push when no Node holds the item"),
-    e(Spawn, "steve-modules/src/vault/inject.rs", 1, B7, "a secret use with no Node"),
-    e(Dir, "steve-hub/src/api/outputs.rs", 1, B7, "the outputs listing with no Node"),
-    e(Dir, "steve-knowledge/src/sources/folder.rs", 1, B7, "the knowledge folder walk with no Node"),
-    e(Dir, "steve-acp/src/rollout.rs", 1, B7, "Codex rollout files of the legacy runner"),
-    e(Fs, "steve-acp/src/rollout.rs", 1, B7, "Codex rollout files of the legacy runner"),
-    e(Fs, "steve-hub/src/api/outputs.rs", 2, B7, "an output read from disk when no Node holds the item"),
-    e(Fs, "steve-knowledge/src/sources/folder.rs", 1, B7, "a knowledge folder file read with no Node"),
-    e(Fs, "steve-core/src/cycle.rs", 2, B7, "the worktree fingerprint for items with no Node"),
-    e(Fs, "steve-github/src/push.rs", 1, B7, "the Hub-side push borrows the project's git objects"),
+    e(Spawn, "steve-core/src/git.rs", 1, NoNode, "git for items no Node holds"),
+    e(Spawn, "steve-github/src/push.rs", 1, NoNode, "the Hub-side push when no Node holds the item"),
+    e(Spawn, "steve-modules/src/vault/inject.rs", 1, NoNode, "a secret use with no Node"),
+    e(Dir, "steve-hub/src/api/outputs.rs", 1, NoNode, "the outputs listing with no Node"),
+    e(Dir, "steve-knowledge/src/sources/folder.rs", 1, NoNode, "the knowledge folder walk with no Node"),
+    e(Fs, "steve-hub/src/api/outputs.rs", 2, NoNode, "an output read from disk when no Node holds the item"),
+    e(Fs, "steve-knowledge/src/sources/folder.rs", 1, NoNode, "a knowledge folder file read with no Node"),
+    e(Fs, "steve-core/src/cycle.rs", 2, NoNode, "the worktree fingerprint for items no Node holds"),
+    e(Fs, "steve-github/src/push.rs", 1, NoNode, "the Hub-side push borrows the project's git objects"),
     e(Fs, "steve-core/src/lane/exec.rs", 1, Later("E12 lanes on the Node"), "a lane's worktree removed"),
     e(Fs, "steve-core/src/workspace.rs", 5, Later("E14 disk housekeeping (D13)"),
         "workspace folders created and moved to the trash"),
@@ -523,16 +525,16 @@ fn not_test() { let _ = std::fs::read_dir("/"); }
     // listed: passes
     let listed = [
         e(Spawn, "steve-x/src/lib.rs", 1, Hub, "t"),
-        e(Harness, "steve-x/src/lib.rs", 1, B7, "t"),
+        e(Harness, "steve-x/src/lib.rs", 1, NoNode, "t"),
         e(Dir, "steve-x/src/lib.rs", 2, Hub, "t"),
     ];
     assert!(check(&found, &listed).is_empty());
     // one site more than listed fails, and so does an entry with no site left
     let short = [
         e(Spawn, "steve-x/src/lib.rs", 1, Hub, "t"),
-        e(Harness, "steve-x/src/lib.rs", 1, B7, "t"),
+        e(Harness, "steve-x/src/lib.rs", 1, NoNode, "t"),
         e(Dir, "steve-x/src/lib.rs", 1, Hub, "t"),
-        e(Spawn, "steve-y/src/gone.rs", 1, B7, "t"),
+        e(Spawn, "steve-y/src/gone.rs", 1, NoNode, "t"),
     ];
     let p = check(&found, &short);
     assert_eq!(p.len(), 2, "{p:?}");

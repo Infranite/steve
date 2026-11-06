@@ -1,5 +1,5 @@
 //! YOLO Y2 end to end on the wired Hub: a temp STEVE_HOME (fresh, so YOLO is not forced off), the
-//! scripted ACP agent of steve-acp (`fake-acp.js`) as the claude-code adapter, YOLO switched on over
+//! scripted ACP agent of steve-acp (`fake-acp.js`) as the claude-code adapter on the local Node, YOLO switched on over
 //! the API. A tool call inside the item's own directory is answered `allow_once` by YOLO and logged
 //! with `decided_by: "yolo"`; a delete outside it stays for the user. No real agent or host.
 
@@ -87,8 +87,8 @@ async fn start() -> Env {
         ("STEVE_FORBID_REAL_HOSTS", "1".into()),
         // a fresh temp home, not a production copy: YOLO may be on
         ("STEVE_NO_RESUME", "0".into()),
-        // the legacy runner: the local Node is the default since B6
-        ("STEVE_NODE_MODE", "off".into()),
+        // the local Node runs the sessions (the Hub runs none itself)
+        ("STEVE_NODE_MODE", "local".into()),
         ("CLAUDE_CODE_EXECUTABLE", "/usr/bin/false".into()),
         ("STEVE_ADAPTER_CLAUDE", fake.display().to_string()),
         ("STEVE_ADAPTER_CODEX", "/usr/bin/false".into()),
@@ -235,10 +235,15 @@ async fn yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest() {
     assert_eq!(r[0][0], "resolved");
     let result: Value = serde_json::from_str(r[0][1].as_str().unwrap()).unwrap();
     assert_eq!(result["decided_by"], "yolo", "{result}");
-    assert_eq!(result["optionId"], "once");
+    // the Node's answer is Steve's own (it picks the adapter's allow_once option itself)
+    assert_eq!(result["optionId"], "allow_once");
     assert_eq!(
         (r[0][2].clone(), r[0][3].clone(), r[0][4].clone()),
-        (json!("decided"), json!("tool.worktree"), json!("once"))
+        (
+            json!("decided"),
+            json!("tool.worktree"),
+            json!("allow_once")
+        )
     );
     let who = rows(
         &e.db,
@@ -275,7 +280,8 @@ async fn yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest() {
         (r[0][0].clone(), r[0][1].clone()),
         (json!("open"), json!("declined"))
     );
-    assert!(r[0][2].as_str().unwrap().starts_with("硬限制"), "{r:?}");
+    // the Node reports a delete as an action YOLO does not judge: it stays with you, said why
+    assert!(r[0][2].as_str().unwrap().contains("留给你"), "{r:?}");
     assert!(!texts(&e, &outside).await.contains("perm:selected"));
 
     // Y4: switching off while the adapter is live switches its mode in place (session/set_mode)

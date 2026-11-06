@@ -16,7 +16,6 @@
   "hub.workspace.reload": "页面需要刷新后才能继续操作",
   "hub.workspace.none": "你还没有加入任何空间",
   "hub.maintenance.preparing": "正在准备升级，请稍后重试；对话消息仍可排队",
-  "hub.maintenance.agents_alive": "智能体进程组尚未退出，维护状态保留，请重试解除",
   "hub.error.generic": "出了点问题，请稍后再试",
   "hub.file.too_large": "文件太大，最多 %{mb} MB",
   "hub.file.missing_field": "缺少文件（字段 file）",
@@ -145,5 +144,10 @@
   "hub.node.unbound.bot": "它的 Bot 已停用、删除或不在这个工作区",
   "hub.node.unbound.mode": "Node 不支持它的权限模式 %{mode}",
   "hub.node.unbound.outside_roots": "它的工作目录不在 Node 可用的目录里",
-  "hub.node.unbound.missing_cwd": "它的工作目录已不存在"
+  "hub.node.unbound.missing_cwd": "它的工作目录已不存在",
+  "hub.node.refused": "这个会话不能在 Node 上运行（%{why}）。Hub 自己不再运行会话，消息没有发出。",
+  "hub.node.unbound.off": "本机 Node 已关闭（STEVE_NODE_MODE=off）",
+  "hub.node.unbound.stopped": "本机 Node 没有在运行",
+  "hub.node.unbound.unreadable": "它的记录暂时读不出来",
+  "hub.node.unbound.bind_failed": "没能把它绑定到 Node 上"
 }

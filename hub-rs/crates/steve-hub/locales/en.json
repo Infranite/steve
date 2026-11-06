@@ -16,7 +16,6 @@
   "hub.workspace.reload": "Refresh the page to continue.",
   "hub.workspace.none": "You haven't joined any space yet.",
   "hub.maintenance.preparing": "Getting ready to upgrade. Try again shortly; conversation messages can still be queued.",
-  "hub.maintenance.agents_alive": "Agent processes haven't exited yet, so maintenance stays on. Try ending it again.",
   "hub.error.generic": "Something went wrong. Please try again later.",
   "hub.file.too_large": "File too large (max %{mb} MB)",
   "hub.file.missing_field": "No file (field file)",
@@ -145,5 +144,10 @@
   "hub.node.unbound.bot": "its bot is disabled, deleted or in another workspace",
   "hub.node.unbound.mode": "the Node does not support its permission mode %{mode}",
   "hub.node.unbound.outside_roots": "its working directory is not one the Node may use",
-  "hub.node.unbound.missing_cwd": "its working directory no longer exists"
+  "hub.node.unbound.missing_cwd": "its working directory no longer exists",
+  "hub.node.refused": "This session cannot run on a Node (%{why}). The Hub no longer runs sessions itself, so the message was not sent.",
+  "hub.node.unbound.off": "the local Node is off (STEVE_NODE_MODE=off)",
+  "hub.node.unbound.stopped": "the local Node is not running",
+  "hub.node.unbound.unreadable": "its records could not be read just now",
+  "hub.node.unbound.bind_failed": "binding it to the Node failed"
 }

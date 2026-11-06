@@ -42,7 +42,7 @@ fn an_idle_session_is_retired_once_with_why() {
         .add_unless_waiting(&sid, "等着", "me", &[])
         .unwrap();
     assert!(!k.core.retire_session(&sid, "不能再运行").unwrap());
-    k.db().store().queued().claim(&sid).unwrap();
+    k.db().store().queued().take(&sid).unwrap();
     assert!(retired(&k, &sid).is_empty());
 
     assert!(k.core.retire_session(&sid, "不能再运行").unwrap());
@@ -121,4 +121,65 @@ fn queued_messages_of_a_session_whose_directory_is_gone_go_with_it() {
         "{notes:?}"
     );
     assert_eq!(k.db().session(&sid).unwrap().unwrap().status, "ended");
+}
+
+#[test]
+fn a_session_nothing_will_run_again_ends_with_its_queue() {
+    let k = Kit::new();
+    let sid = started(&k);
+    k.rt.end_turn(&k.core, &sid, "end_turn", None);
+    k.db()
+        .store()
+        .queued()
+        .add_unless_waiting(&sid, "等着", "me", &[])
+        .unwrap();
+    // its directory is there, but nothing would ever flush the queue
+    assert!(k.core.end_unmovable(&sid, "不能再运行").unwrap());
+    assert!(k.db().queued(&sid).unwrap().is_empty());
+    assert_eq!(kinds(&k, &sid, "queued_removed"), 1, "said");
+    let last = retired(&k, &sid).pop().unwrap();
+    assert!(
+        last.starts_with("不能再运行") && last.contains('1'),
+        "{last}"
+    );
+    assert!(!k.core.end_unmovable(&sid, "不能再运行").unwrap(), "once");
+}
+
+/// B7: a new session no backend takes is ended at once, said in it and on its item, and the start
+/// fails with why; it never waits for a runner that is not there.
+#[test]
+fn a_new_session_no_backend_takes_is_refused_visibly() {
+    let k = Kit::new();
+    k.rt.st().refuse = Some("本机 Node 已关闭".into());
+    let e = k.core.create_item(CreateItem {
+        ws: WS.into(),
+        goal: "g".into(),
+        title: "标题".into(),
+        ..Default::default()
+    });
+    let i = match e {
+        Err(e) => {
+            assert!(e.to_string().contains("本机 Node 已关闭"), "{e}");
+            k.db()
+                .items(WS)
+                .unwrap()
+                .into_iter()
+                .find(|i| i.title == "标题")
+                .expect("the item is there")
+        }
+        Ok(i) => i,
+    };
+    let s = k.db().sessions_of_item(&i.id).unwrap().pop().unwrap();
+    assert_eq!(s.status, "ended");
+    assert!(k.rt.prompts_of(&s.id).is_empty(), "never prompted");
+    assert!(
+        k.db()
+            .events_after(&s.id, 0)
+            .unwrap()
+            .iter()
+            .any(|e| e.kind == "system" && e.data["refused"] == true)
+    );
+    let fails = k.open_fails(&i.id);
+    assert_eq!(fails.len(), 1, "one card: {fails:?}");
+    assert!(fails[0].contains("本机 Node 已关闭"), "{fails:?}");
 }

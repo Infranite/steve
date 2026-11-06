@@ -1,7 +1,6 @@
 //! hub/test/inbox.test.ts: a chat answer becomes at most one item, and every reminder in 待处理 can be cleared.
 
 use crate::ItemAction;
-use crate::orchestrator::RESUME;
 use crate::patch;
 use crate::repo::WS;
 use crate::testkit::Kit;
@@ -209,39 +208,28 @@ fn on_boot_a_question_older_than_a_delivery_expires() {
 }
 
 #[test]
-fn a_turn_cut_off_by_a_restart_continues_once_and_a_second_cut_waits_for_the_user() {
+fn a_turn_cut_off_by_a_restart_that_nothing_continues_shows_one_card() {
     let k = Kit::new();
     let i = k.item("run", "执行", None);
     let s = k.session(&i, "running");
     k.core.recover().unwrap();
     assert_eq!(k.db().session(&s).unwrap().unwrap().status, "idle");
-    assert!(k.open_kinds(&i).is_empty());
-    assert!(k.user_texts(&s).is_empty(), "not before the resume delay");
-    /* the delayed resume runs (once), then the Hub restarts during it */
-    k.core.fire_resume();
-    assert_eq!(k.user_texts(&s), vec![RESUME]);
-    k.core.fire_resume();
-    assert_eq!(k.rt.prompts_of(&s), vec![RESUME]);
-    k.rt.st().turning.clear();
+    assert_eq!(k.open_kinds(&i), vec!["fail"]);
+    k.core.ready();
+    assert!(k.rt.prompts_of(&s).is_empty(), "never resumed");
     k.db().session_patch(&s, patch![status: "running"]).unwrap();
     k.core.recover().unwrap();
-    assert_eq!(k.open_kinds(&i), vec!["fail"]);
-    k.core.fire_resume();
-    assert_eq!(
-        k.rt.prompts_of(&s),
-        vec![RESUME],
-        "the second cut waits for the user"
-    );
+    assert_eq!(k.open_kinds(&i), vec!["fail"], "the same card");
 }
 
-/// The Hub calls `recover` on a blocking thread of its tokio runtime; the timer must run the resume inside that
-/// runtime (the real agent runtime starts the turn with `tokio::spawn`, which panics on a bare thread).
+/// The Hub calls `recover` on a blocking thread of its tokio runtime; `ready` must flush inside that
+/// runtime (a backend may start the turn with `tokio::spawn`, which panics on a bare thread).
 #[tokio::test(flavor = "multi_thread")]
-async fn the_boot_resume_runs_inside_the_tokio_runtime() {
-    let k = Kit::with(|c| c.resume_delay = Duration::ZERO);
+async fn the_ready_flush_runs_inside_the_tokio_runtime() {
+    let k = Kit::new();
     let i = k.item("run", "执行", None);
-    let s = k.session(&i, "running");
-    let flushed = k.rt.flushed.notified();
+    let s = k.session(&i, "idle");
+    k.db().queue_add(&s, "排着的", "me", &[]).unwrap();
     let core = k.core.clone();
     tokio::task::spawn_blocking(move || core.recover())
         .await
@@ -251,11 +239,11 @@ async fn the_boot_resume_runs_inside_the_tokio_runtime() {
         k.rt.prompts_of(&s).is_empty(),
         "recover does not start a turn before listener ready"
     );
-    k.core.ready();
-    tokio::time::timeout(Duration::from_secs(10), flushed)
+    let core = k.core.clone();
+    tokio::task::spawn_blocking(move || core.ready())
         .await
-        .expect("the resume timer fired");
-    assert_eq!(k.rt.prompts_of(&s), vec![RESUME]);
+        .unwrap();
+    assert_eq!(k.rt.prompts_of(&s), vec!["排着的"]);
     assert_eq!(k.rt.st().flush_in_runtime, vec![true]);
 }
 
@@ -265,7 +253,7 @@ fn a_paused_item_is_not_resumed() {
     let i = k.item("pause", "执行", None);
     let s = k.session(&i, "running");
     k.core.recover().unwrap();
-    k.core.fire_resume();
+    k.core.ready();
     assert!(k.user_texts(&s).is_empty());
     let last = k.db().events_after(&s, 0).unwrap().pop().unwrap();
     assert_eq!(
@@ -299,7 +287,7 @@ fn no_resume_at_boot_when_switched_off() {
     let s = k.session(&i, "running");
     k.db().queue_add(&s, "排着的", "me", &[]).unwrap();
     k.core.recover().unwrap();
-    k.core.fire_resume();
+    k.core.ready();
     assert!(k.user_texts(&s).is_empty());
     assert!(k.rt.prompts_of(&s).is_empty());
     assert_eq!(k.db().session(&s).unwrap().unwrap().status, "idle");
@@ -321,7 +309,7 @@ fn no_resume_where_the_working_directory_is_gone() {
         )
         .unwrap();
     k.core.recover().unwrap();
-    k.core.fire_resume();
+    k.core.ready();
     assert!(k.rt.prompts_of(&s).is_empty());
     assert_eq!(
         k.open_fails(&i),

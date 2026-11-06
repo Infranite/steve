@@ -1,10 +1,10 @@
 //! Opening an ACP session on a started adapter: `initialize`, `session/new` or `session/load`, the
-//! permission mode, the model and the reasoning effort. Shared by the runner and the Node driver.
+//! permission mode, the model and the reasoning effort, for the Node's driver.
 //!
-//! What the adapter reports comes back through [`Reports`] at the moment it is known (the runner
-//! stores it right away, as before). How strict to be is the caller's [`Strictness`]: the runner
-//! logs a mode or model it could not set and goes on; a Node fails closed, since the Hub asked for a
-//! configuration and must not get another one silently.
+//! What the adapter reports comes back through [`Reports`] at the moment it is known. How strict
+//! to be is the caller's [`Strictness`]: lenient logs a mode or model it could not set and goes on
+//! (how the Hub's old runner worked); a Node fails closed, since the Hub asked for a configuration
+//! and must not get another one silently.
 
 use std::time::Duration;
 
@@ -178,7 +178,7 @@ pub async fn open(
                         }
                     }
                     // the adapter took it without saying what it runs: what was asked and accepted
-                    // is in force (strictly; the runner keeps what it last saw, as before)
+                    // is in force (strictly; leniently, what it last saw is kept)
                     None if strict => reports.model(model),
                     None => {}
                 }

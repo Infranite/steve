@@ -1,7 +1,7 @@
 //! Integration point: builds the storage backend, the domain, `/auth` and `/mcp` from the sibling crates.
 //!
 //! Wired: steve-store (storage, [`store::StoreBackend`]), steve-auth (`/auth`, [`auth::AuthStore`]),
-//! steve-core on the steve-acp runtime ([`core::CoreDomain`], [`core::CoreMcp`]), and the modules
+//! steve-core on the Nodes ([`core::CoreDomain`], [`core::CoreMcp`], [`core::RoutedRuntime`]), and the modules
 //! ([`modules::build`]: contacts, accounts + connections, vault + passkeys, schedules, knowledge,
 //! GitHub), whose MCP tools [`mcp_extra`] serves next to steve-mcp's.
 
@@ -250,8 +250,8 @@ fn node_runtime(
 }
 
 /// Whether the local Node is switched on. It is the default (B6): an unset `STEVE_NODE_MODE`
-/// means `local`, and `off` is the rollback (sessions already bound to the Node are parked then,
-/// never handed to the legacy runner). `STEVE_NODE=local`, how 0.2.50 spelled it, still counts as
+/// means `local`, and `off` is the rollback: sessions already bound to the Node are parked then,
+/// and nothing else runs (there is no in-process runner since B7, so a new session is refused). `STEVE_NODE=local`, how 0.2.50 spelled it, still counts as
 /// an explicit `local` when STEVE_NODE_MODE is unset. A `STEVE_NO_RESUME` copy (a DB copy that
 /// must not touch the live harnesses) resolves to off by default; an explicit `local` there is a
 /// boot error. Any other value is a boot error too, rather than a guess.
@@ -419,7 +419,7 @@ pub fn wire_with(cfg: &Arc<Config>, bus: &Bus, vars: Vars) -> Result<Wired, Back
 }
 
 /// Opens the database (`cfg.db_path()`, migrations) with the store's change events going to `bus`, and
-/// builds the runner, the core, `/auth` and `/mcp` on it, with the adapters of `asm`. Must run
+/// builds the runtime, the core, `/auth` and `/mcp` on it, with the adapters of `asm`. Must run
 /// inside the tokio runtime.
 pub fn wire_assembly(
     cfg: &Arc<Config>,
@@ -447,10 +447,7 @@ pub fn wire_assembly(
         flow: std::sync::OnceLock::new(),
         yolo: std::sync::OnceLock::new(),
         local_node: std::sync::OnceLock::new(),
-        user_seqs: Default::default(),
-        transcripts: Default::default(),
     });
-    let acp = steve_acp::Acp::new(acp_config(cfg), host.clone());
     let mut core_cfg = core_config(cfg);
     /* the research and disclosure defaults of 设置 · 模型 (as steve-research and the channels read them) */
     let list = |k: &str| -> Vec<String> {
@@ -532,7 +529,6 @@ pub fn wire_assembly(
         ));
     }
     let routed = Arc::new(core::RoutedRuntime {
-        legacy: core::AcpRuntime(acp.clone()),
         node: node_host.as_ref().map(|h| h.runtime.clone()),
         fleet: fleet.clone(),
         bind_remote,
@@ -549,10 +545,9 @@ pub fn wire_assembly(
     );
     let _ = host.core.set(core.clone());
     if node_host.is_some() {
-        // legacy sessions from before this boot that can never run on the local Node end, with
-        // why (B5); the others move to it at their next message
-        node_jobs.push(Box::pin(core::retire_unadoptable(
-            routed,
+        // sessions from before this boot that boot could not move to the local Node yet (B7)
+        node_jobs.push(Box::pin(core::move_legacy_later(
+            routed.clone(),
             core.clone(),
             steve_store::now(),
         )));
@@ -704,7 +699,7 @@ pub fn wire_assembly(
         core: core.clone(),
         domain: Arc::new(core::CoreDomain {
             core,
-            acp,
+            routed,
             node: local_node,
         }),
         auth: auth.router(),

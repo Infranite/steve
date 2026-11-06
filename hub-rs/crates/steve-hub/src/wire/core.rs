@@ -1,22 +1,22 @@
-//! steve-core and steve-acp wired together:
-//! - [`HubHost`]: steve-acp's [`Host`](steve_acp::Host) over steve-store; `turn_end` and `mcp_endpoint` go to the
-//!   core. Lock order is core → acp: the runner calls the store-only methods under its own lock, never the core.
-//! - [`AcpRuntime`]: steve-core's [`AgentRuntime`](steve_core::AgentRuntime) over [`Acp`].
+//! steve-core and the Nodes wired together:
+//! - [`HubHost`]: what the Nodes' coordinators report to ([`NodeDomain`](super::node_runtime::NodeDomain)):
+//!   turn ends, workspace facts and permission requests go to the core.
+//! - [`RoutedRuntime`]: steve-core's [`AgentRuntime`](steve_core::AgentRuntime) over the Nodes. There is no
+//!   in-process runner any more (B7): a session no Node takes is refused, never run on the Hub.
 //! - [`CoreDomain`]: the HTTP layer's [`Domain`] over [`Core`]. The core's mutating calls are synchronous (and
 //!   may run git under its lock), so they run on the blocking pool.
 //! - [`CoreMcp`]: steve-mcp's backend, the five tools → `core.tool_*`.
 
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
-use steve_acp::{Acp, Host, Message, PermissionRequest, SessionInfo, StoredFile, Usage};
 use steve_core::{Core, CoreError, ItemAction, SendNow, SupplementMode};
-use steve_store::{SessionPatch, Store};
+use steve_store::Store;
 
 use crate::backend::{BResult, BackendError, CreateItem, Domain, NewTag, Obj, Route, Tier};
 
@@ -82,10 +82,10 @@ fn block_here<T>(f: impl FnOnce() -> T) -> T {
     }
 }
 
-// ── steve-acp Host ──
+// ── the Hub side of the Nodes ──
 
-/// What the ACP runner needs from the Hub: sessions, events and the queue in the store; the core for
-/// turn ends and MCP tokens (set once the core exists, since the core needs the runner first).
+/// What the Nodes' coordinators need from the Hub: the store, and the core for turn ends and
+/// workspace facts (set once the core exists, since the core needs the runtime first).
 pub struct HubHost {
     pub store: Store,
     pub data_dir: PathBuf,
@@ -93,499 +93,26 @@ pub struct HubHost {
     /// Schedules count session costs against their budget (`on_session_cost` after every cost update).
     pub flow: OnceLock<std::sync::Arc<steve_flow::FlowCx>>,
     /// The YOLO executor: gets the full input of each tool permission request, and answers it once
-    /// the runner waits for it (set once the core exists).
+    /// the Node waits for it (set once the core exists).
     pub yolo: OnceLock<steve_core::yolo::Engine>,
     /// The local Node (`STEVE_NODE_MODE=local`): YOLO judges its requests against the directory
     /// its prepare reported ([`prepared_dir`]). Unset (a remote Node, or none): YOLO asks.
     pub local_node: OnceLock<std::sync::Arc<steve_node::LocalNode>>,
-    /// The first `user` event of the turn being started, for `agent_turns.user_seq`.
-    pub user_seqs: super::acp_stats::UserSeqs,
-    /// Per session, what the runner's turn said so far (its tool updates carry only what changed),
-    /// and when it last said something.
-    pub transcripts: std::sync::Mutex<Readers>,
 }
-
-pub type Readers = std::collections::HashMap<String, (steve_transcript::LegacyReader, Instant)>;
-
-/// How long a session's transcript reader is kept with nothing new from its runner.
-const TRANSCRIPT_IDLE: Duration = Duration::from_secs(3600);
 
 impl HubHost {
-    /// The runner's row as transcript entries: its ACP updates are read (with what its turn said
-    /// before), the Hub's own kinds pass. A tool update the reader never saw the beginning of (the
-    /// Hub restarted in between) is dropped rather than stored as a fragment that would replace
-    /// the tool's card.
-    fn transcript_of(
-        &self,
-        session_id: &str,
-        kind: &str,
-        data: Value,
-    ) -> Vec<steve_transcript::Entry> {
-        let mut readers = self.transcripts.lock().unwrap_or_else(|e| e.into_inner());
-        let now = Instant::now();
-        readers.retain(|_, (_, used)| now.duration_since(*used) < TRANSCRIPT_IDLE);
-        if !steve_transcript::is_legacy(kind, &data) {
-            if kind == "user" {
-                // a new turn: tool updates never cross one, what the reader kept is done with
-                readers.remove(session_id);
-            }
-            return vec![steve_transcript::Entry {
-                kind: kind.into(),
-                data,
-            }];
-        }
-        if !readers.contains_key(session_id) {
-            // the store is read without holding every session's readers
-            drop(readers);
-            let cwd = self
-                .store
-                .sessions()
-                .get(session_id)
-                .ok()
-                .flatten()
-                .map(|s| s.cwd)
-                .unwrap_or_default();
-            readers = self.transcripts.lock().unwrap_or_else(|e| e.into_inner());
-            readers
-                .entry(session_id.to_string())
-                .or_insert_with(|| (steve_transcript::LegacyReader::new(&cwd), now));
-        }
-        let Some((reader, used)) = readers.get_mut(session_id) else {
-            return vec![];
-        };
-        *used = now;
-        if !reader.knows(kind, &data) {
-            tracing::warn!(
-                "event {session_id} {kind}: an update of a tool not seen this turn, dropped"
-            );
-            return vec![];
-        }
-        reader.read(kind, &data)
-    }
-
-    fn patch(&self, sid: &str, p: SessionPatch) {
-        if let Err(e) = self.store.sessions().patch(sid, &p) {
-            tracing::error!("session {sid} patch: {e}");
-        }
-    }
-}
-
-impl Host for HubHost {
-    fn session(&self, session_id: &str) -> Option<SessionInfo> {
+    /// The harness mode `session_id` starts in: its bot's `perm_mode`, as YOLO widens it
+    /// (`default` to `acceptEdits` for an item with its own directory, never further).
+    pub fn perm_mode(&self, session_id: &str) -> Option<String> {
         let s = self.store.sessions().get(session_id).ok().flatten()?;
         let perm_mode = match &s.bot_id {
             Some(b) => self.store.bots().get(b).ok().flatten().map(|b| b.perm_mode),
             None => None,
         };
-        // YOLO widens `default` to `acceptEdits` for an item with its own directory (never further)
-        let perm_mode = match self.core.get() {
+        match self.core.get() {
             Some(c) => c.session_perm_mode(&s, perm_mode),
             None => perm_mode,
-        };
-        Some(SessionInfo {
-            id: s.id,
-            harness: s.harness,
-            cwd: s.cwd,
-            acp_session_id: s.acp_session_id,
-            model: s.model,
-            reasoning_effort: s.reasoning_effort,
-            perm_mode,
-            status: s.status,
-        })
-    }
-    fn set_status(&self, session_id: &str, status: &str) {
-        self.patch(
-            session_id,
-            SessionPatch {
-                status: Some(status.into()),
-                ..Default::default()
-            },
-        );
-        // a turn starts: a “它停下了” card of its item no longer applies. Off this call, which may run under
-        // the runner's lock or the core's.
-        if matches!(status, "running" | "starting")
-            && let Some(core) = self.core.get().cloned()
-            && let Ok(h) = tokio::runtime::Handle::try_current()
-        {
-            let sid = session_id.to_string();
-            h.spawn_blocking(move || {
-                if let Err(e) = core.expire_stall(&sid) {
-                    tracing::error!("expire stall {sid}: {e}");
-                }
-            });
         }
-    }
-    fn set_acp_session_id(&self, session_id: &str, acp_session_id: &str) {
-        self.patch(
-            session_id,
-            SessionPatch {
-                acp_session_id: Some(Some(acp_session_id.into())),
-                ..Default::default()
-            },
-        );
-    }
-    fn set_reasoning_effort(&self, session_id: &str, effort: &str) {
-        self.patch(
-            session_id,
-            SessionPatch {
-                reasoning_effort: Some(
-                    (effort != "default" && !effort.is_empty()).then(|| effort.into()),
-                ),
-                ..Default::default()
-            },
-        );
-    }
-    fn set_model(&self, session_id: &str, model: &str) {
-        self.patch(
-            session_id,
-            SessionPatch {
-                model: Some(Some(model.into())),
-                ..Default::default()
-            },
-        );
-    }
-    fn set_usage(&self, session_id: &str, u: Usage) {
-        let cost = u.cost.is_some();
-        self.patch(
-            session_id,
-            SessionPatch {
-                used: Some(u.used),
-                size: Some(u.size),
-                cost: u.cost.map(Some),
-                ..Default::default()
-            },
-        );
-        if cost
-            && let Some(flow) = self.flow.get().cloned()
-            && let Ok(h) = tokio::runtime::Handle::try_current()
-        {
-            let sid = session_id.to_string();
-            h.spawn(async move { steve_flow::on_session_cost(&flow, &sid).await });
-        }
-    }
-    fn add_event(&self, session_id: &str, kind: &str, data: Value) {
-        // the runner writes `permission` right after it registered the request: YOLO may answer now
-        let armed = (kind == "permission")
-            .then(|| data["decision"].as_str().map(String::from))
-            .flatten();
-        for x in self.transcript_of(session_id, kind, data) {
-            match self.store.events().add(session_id, &x.kind, x.data) {
-                Ok(seq) if kind == "user" => self.user_seqs.user_event(session_id, seq),
-                Ok(_) => {}
-                Err(e) => tracing::error!("event {session_id} {kind}: {e}"),
-            }
-        }
-        if let (Some(id), Some(engine)) = (armed, self.yolo.get()) {
-            engine.arm(&id);
-            let engine = engine.clone();
-            match tokio::runtime::Handle::try_current() {
-                Ok(h) => {
-                    h.spawn_blocking(move || engine.kick(&id));
-                }
-                Err(_) => {
-                    std::thread::spawn(move || engine.kick(&id));
-                }
-            }
-        }
-    }
-    fn queue_add(
-        &self,
-        session_id: &str,
-        text: &str,
-        via: &str,
-        files: &[steve_acp::FileRef],
-    ) -> Result<bool, String> {
-        let files: Vec<steve_store::FileRef> = files
-            .iter()
-            .map(|f| steve_store::FileRef {
-                id: f.id.clone(),
-                name: f.name.clone(),
-                mime: f.mime.clone(),
-                size: f.size as i64,
-            })
-            .collect();
-        match self
-            .store
-            .queued()
-            .add_unless_waiting(session_id, text, via, &files)
-        {
-            Ok(added) => Ok(added),
-            Err(e) => {
-                tracing::error!("queue {session_id}: {e}");
-                Err(e.to_string())
-            }
-        }
-    }
-    fn queue_take(&self, session_id: &str) -> Vec<Message> {
-        match self.store.queued().claim(session_id) {
-            Ok(rows) => rows
-                .into_iter()
-                .map(|q| {
-                    // delivered before the stop (maybe acted on): context to check, not a new request
-                    let (text, via) = steve_core::resumed_text(&q.via, &q.text);
-                    Message {
-                        text,
-                        via,
-                        files: q
-                            .files
-                            .into_iter()
-                            .map(|f| steve_acp::FileRef {
-                                id: f.id,
-                                name: f.name,
-                                mime: f.mime,
-                                size: f.size.max(0) as u64,
-                            })
-                            .collect(),
-                    }
-                })
-                .collect(),
-            Err(e) => {
-                tracing::error!("queue take {session_id}: {e}");
-                vec![]
-            }
-        }
-    }
-    fn dispatch_submitted(&self, session_id: &str) -> bool {
-        match self.store.queued().submitted(session_id) {
-            Ok(()) => true,
-            Err(e) => {
-                tracing::error!("dispatch receipt {session_id}: {e}");
-                false
-            }
-        }
-    }
-    fn maintenance(&self) -> bool {
-        self.store.maintenance()
-    }
-    fn dispatch_deferred(&self, session_id: &str) {
-        if let Err(e) = self.store.queued().defer_claimed(session_id) {
-            tracing::error!(
-                "dispatch defer {session_id}: {e}; durable claim retained for next boot"
-            );
-        }
-    }
-    fn dispatch_finished(&self, session_id: &str, state: &str) {
-        if let Err(e) = self.store.queued().receipt(session_id, state) {
-            tracing::error!("dispatch finish {session_id}: {e}");
-        }
-    }
-    fn queue_len(&self, session_id: &str) -> usize {
-        self.store
-            .queued()
-            .list(session_id)
-            .map(|q| q.len())
-            .unwrap_or(0)
-    }
-    fn file(&self, file_id: &str) -> Option<StoredFile> {
-        let f = self.store.files().get(file_id).ok().flatten()?;
-        let path = self
-            .data_dir
-            .join("files")
-            .join(&f.workspace_id)
-            .join(f.sha256.get(..2).unwrap_or(""))
-            .join(&f.id);
-        path.exists().then(|| StoredFile {
-            id: f.id,
-            name: f.name,
-            mime: f.mime,
-            size: f.size.max(0) as u64,
-            path,
-        })
-    }
-    fn mcp_endpoint(&self, session: &SessionInfo) -> steve_acp::McpEndpoint {
-        let Some(core) = self.core.get() else {
-            return steve_acp::McpEndpoint::default();
-        };
-        match block_here(|| core.mcp_endpoint(&session.id)) {
-            Ok(e) => steve_acp::McpEndpoint {
-                url: e.url,
-                token: e.token,
-            },
-            Err(e) => {
-                tracing::error!("mcp endpoint {}: {e}", session.id);
-                steve_acp::McpEndpoint::default()
-            }
-        }
-    }
-    fn permission_decision(&self, session_id: &str, req: PermissionRequest) -> Option<String> {
-        let s = self.store.sessions().get(session_id).ok().flatten()?;
-        let d = steve_store::NewDecision {
-            workspace_id: s.workspace_id,
-            kind: "approve".into(),
-            subject_type: "tool_call".into(),
-            subject_id: req.subject_id,
-            item_id: s.item_id,
-            session_id: Some(s.id),
-            question: req.question,
-            draft: Some(req.draft),
-            options: Some(req.options),
-            requested_by: s.bot_id.unwrap_or_else(|| "agent".into()),
-        };
-        let input = steve_core::yolo::ToolInput {
-            raw: req.raw,
-            kind: req.kind,
-            locations: req.locations,
-            own_dir: None,
-            own_pids: None,
-        };
-        match self.store.decisions().create(&d) {
-            Ok(x) => x.map(|x| {
-                if let Some(engine) = self.yolo.get() {
-                    engine.stash(&x.id, input);
-                }
-                x.id
-            }),
-            Err(e) => {
-                tracing::error!("permission decision {session_id}: {e}");
-                None
-            }
-        }
-    }
-    fn permissions_expired(&self, session_id: &str, decision_ids: &[String]) {
-        for id in decision_ids {
-            match self.store.decisions().resolve(
-                id,
-                &serde_json::json!({"superseded": "这一轮已经结束，授权不再需要"}),
-                "expired",
-                &serde_json::Value::Null,
-            ) {
-                Ok(_) => {}
-                Err(e) => tracing::warn!("expire permission {id} of {session_id}: {e}"),
-            }
-        }
-    }
-    fn turn_end(&self, t: steve_acp::TurnEnd) {
-        let Some(core) = self.core.get() else { return };
-        let t = steve_core::TurnEnd {
-            attempt: Some(legacy_turn(t.turn)),
-            session_id: t.session_id,
-            stop_reason: t.stop_reason,
-            error: t.error,
-        };
-        if let Err(e) = block_here(|| core.on_turn_end(t)) {
-            tracing::error!("turn end: {e}");
-        }
-    }
-    fn turn_begin(&self, b: steve_acp::TurnBegin) -> Option<String> {
-        super::acp_stats::turn_begin(&self.store, &self.user_seqs, b)
-    }
-    fn turn_finish(&self, f: steve_acp::TurnFinish) {
-        super::acp_stats::turn_finish(&self.store, f);
-    }
-    fn autonomous_usage(&self, u: steve_acp::AutonomousUsage) {
-        super::acp_stats::autonomous(&self.store, u);
-    }
-}
-
-// ── steve-core AgentRuntime ──
-
-/// The core's view of the ACP runner.
-pub struct AcpRuntime(pub Acp);
-
-/// How a legacy turn token reads as a [`steve_core::Running::attempt`].
-const LEGACY_TURN: &str = "legacy:";
-
-fn legacy_turn(token: u64) -> String {
-    format!("{LEGACY_TURN}{token}")
-}
-
-impl steve_core::AgentRuntime for AcpRuntime {
-    fn prompt(
-        &self,
-        session_id: &str,
-        text: &str,
-        via: &str,
-        files: &[steve_core::repo::FileRef],
-    ) -> steve_core::Result<steve_core::Prompted> {
-        let files = files
-            .iter()
-            .map(|f| steve_acp::FileRef {
-                id: f.id.clone(),
-                name: f.name.clone(),
-                mime: f.mime.clone(),
-                size: f.size.max(0) as u64,
-            })
-            .collect();
-        // prompt_files never awaits (it spawns the turn and returns), so it can be driven synchronously here
-        match futures::executor::block_on(self.0.prompt_files(session_id, text, via, files)) {
-            Ok(steve_acp::Prompted::Sent) => Ok(steve_core::Prompted::Sent),
-            Ok(steve_acp::Prompted::Queued) => Ok(steve_core::Prompted::Queued),
-            Err(e) => Err(CoreError::Msg(e.to_string())),
-        }
-    }
-    /// The runner's in-memory turn token, as `legacy:<token>` (no legacy turn survives a restart).
-    fn running(&self, session_id: &str) -> Option<steve_core::Running> {
-        self.0.current(session_id).map(|t| steve_core::Running {
-            session: session_id.to_string(),
-            attempt: legacy_turn(t),
-        })
-    }
-    fn stop(&self, turn: &steve_core::Running) -> steve_core::Result<steve_core::Stop> {
-        let token = turn
-            .attempt
-            .strip_prefix(LEGACY_TURN)
-            .and_then(|t| t.parse().ok());
-        Ok(match token {
-            Some(t) if self.0.cancel_if(&turn.session, t) => steve_core::Stop::Requested,
-            _ => steve_core::Stop::NotRunning,
-        })
-    }
-    fn is_busy(&self, session_id: &str) -> bool {
-        self.0.is_busy(session_id)
-    }
-    /// Idle: stopped now ([`steve_core::Released::Gone`]); in a turn: kept, it idles out later.
-    fn release(&self, session_id: &str) -> steve_core::Result<steve_core::Released> {
-        Ok(if self.0.release(session_id) {
-            steve_core::Released::Gone
-        } else {
-            steve_core::Released::Busy
-        })
-    }
-    fn answer_permission(
-        &self,
-        decision_id: &str,
-        option_id: Option<&str>,
-    ) -> steve_core::Result<steve_core::Answered> {
-        Ok(if self.0.answer_permission(decision_id, option_id) {
-            steve_core::Answered::Applied
-        } else {
-            steve_core::Answered::Gone
-        })
-    }
-    fn hold(&self, on: bool) {
-        self.0.hold(on)
-    }
-    fn is_holding(&self) -> bool {
-        self.0.is_holding()
-    }
-    fn running_turns(&self) -> usize {
-        self.0.running_turns()
-    }
-    fn flush(&self, session_id: &str, lead: Option<(&str, &str)>) -> steve_core::Flushed {
-        let lead = lead.map(|(text, via)| Message {
-            text: text.into(),
-            via: via.into(),
-            files: vec![],
-        });
-        match self.0.flush_turn(session_id, lead) {
-            steve_acp::Flushed::Started(t) => steve_core::Flushed::Started(steve_core::Running {
-                session: session_id.to_string(),
-                attempt: legacy_turn(t),
-            }),
-            steve_acp::Flushed::Busy => steve_core::Flushed::Busy,
-            steve_acp::Flushed::Held => steve_core::Flushed::Held,
-            steve_acp::Flushed::Empty => steve_core::Flushed::Empty,
-        }
-    }
-    fn set_mode(&self, session_id: &str, mode: &str) -> steve_core::Result<steve_core::Configured> {
-        Ok(if self.0.set_mode(session_id, mode) {
-            steve_core::Configured::Applied
-        } else {
-            steve_core::Configured::NotRunning
-        })
-    }
-    fn agent_pid(&self, session_id: &str) -> Option<u32> {
-        self.0.adapter_pid(session_id).filter(|p| *p > 1)
     }
 }
 
@@ -797,7 +324,7 @@ impl super::node_runtime::NodeDomain for HubHost {
             at,
         );
         // the coordinator set the session running: a “它停下了” card of its item no longer
-        // applies (as with the legacy set_status)
+        // applies
         if let Some(core) = self.core.get().cloned()
             && let Ok(h) = tokio::runtime::Handle::try_current()
         {
@@ -902,10 +429,12 @@ impl super::node_runtime::NodeDomain for HubHost {
 
 /// Each session runs on one backend, fixed when it is bound: the ones bound to a Node go to that
 /// Node's coordinator (`runtime_sessions.node_id`: the local Node, or a paired remote Node through
-/// the fleet), every other one to the ACP runner. Holds and counts cover them all.
+/// the fleet). A session bound to no Node runs nowhere: the Hub's own ACP runner is gone (B7). One
+/// it left from before moves to the local Node at boot, or ends with why ([`move_legacy`]); a new
+/// one no Node takes is refused ([`steve_core::AgentRuntime::refusal`]). Holds and counts cover
+/// every Node.
 pub struct RoutedRuntime {
-    pub legacy: AcpRuntime,
-    /// The local Node's coordinator (`STEVE_NODE_MODE=local`).
+    /// The local Node's coordinator (`STEVE_NODE_MODE=local`, the default).
     pub node: Option<Arc<super::node_runtime::NodeRuntime>>,
     /// The remote Nodes' coordinators (`STEVE_NODE_LISTEN=1`).
     pub fleet: Option<Arc<crate::nodes::NodeFleet>>,
@@ -913,23 +442,24 @@ pub struct RoutedRuntime {
     pub bind_remote: Option<steve_node_api::NodeId>,
     /// Where bindings are read.
     pub store: steve_store::Store,
-    /// The legacy runner's host: a binding starts in the mode it would start the session in, and
-    /// in a directory the local Node takes.
+    /// A binding starts in the mode the session is meant to have ([`HubHost::perm_mode`]), and in
+    /// a directory the local Node takes.
     pub host: Arc<HubHost>,
     /// The local Node's roots, built again before a session is bound to it.
     pub workspaces: Arc<super::workspaces::Workspaces>,
     /// Steve's worktrees directory, where the local Node makes the items' worktrees (set with the
-    /// local Node; unset, the core makes them as before).
+    /// local Node; unset, the core makes them).
     pub worktrees: Option<std::path::PathBuf>,
 }
 
-/// Whether boot recovery leaves `session` to a Node that is not enabled here: only when its
-/// binding was read; on a read error it keeps the legacy recovery (intent kept, notice written).
-fn parked_for_recovery(store: &steve_store::Store, session: &str) -> bool {
+/// Whether boot recovery leaves `session` to the Node it is bound to (enabled here or not: a
+/// Node's reconcile settles its attempts, a parked session waits for its Node): only when its
+/// binding was read; on a read error the core's recovery says the cut turn is not continued.
+fn bound_for_recovery(store: &steve_store::Store, session: &str) -> bool {
     super::node_runtime::bound_strict(store, session).unwrap_or_else(|e| {
         tracing::warn!(
             session,
-            "binding unreadable at recovery: {e}; recovered as legacy"
+            "binding unreadable at recovery: {e}; its cut turn is not continued"
         );
         false
     })
@@ -937,11 +467,12 @@ fn parked_for_recovery(store: &steve_store::Store, session: &str) -> bool {
 
 /// Which backend a session goes to.
 enum Backend {
-    Legacy,
     Node(Arc<super::node_runtime::NodeRuntime>),
     /// Bound to a Node that is not enabled here (STEVE_NODE_MODE or STEVE_NODE_LISTEN off): its
-    /// messages wait in the queue and nothing else happens; it is never handed to the legacy runner.
+    /// messages wait in the queue and nothing else happens.
     Parked,
+    /// Bound to no Node: nothing runs it ([`RoutedRuntime::refused`]).
+    Unbound,
 }
 
 /// The Node `session` is bound to. A read error counts as bound to an unknown Node: never hand
@@ -983,7 +514,7 @@ impl RoutedRuntime {
 
     fn route_to(&self, node: Option<String>) -> Backend {
         let Some(node) = node else {
-            return Backend::Legacy;
+            return Backend::Unbound;
         };
         if let Some(n) = &self.node
             && n.node_id().as_str() == node
@@ -1004,10 +535,6 @@ impl RoutedRuntime {
             Backend::Node(n) => Some(n),
             _ => None,
         }
-    }
-
-    fn parked(&self, session_id: &str) -> bool {
-        matches!(self.route(session_id), Backend::Parked)
     }
 
     /// Whether the Node `session_id` is bound to can be told [`steve_node_api::PermissionMode::Auto`]:
@@ -1031,9 +558,9 @@ impl RoutedRuntime {
         }
     }
 
-    /// The harness mode the legacy runner would start `session_id` in (YOLO's widening included).
+    /// The harness mode `session_id` is meant to start in (YOLO's widening included).
     fn perm_mode(&self, session_id: &str) -> Option<String> {
-        self.host.session(session_id).and_then(|s| s.perm_mode)
+        self.host.perm_mode(session_id)
     }
 
     /// Binds a new session to the configured remote Node when it can run there. False: it was not
@@ -1067,6 +594,22 @@ impl RoutedRuntime {
     }
 }
 
+/// Why the local Node cannot take a session, as text (in the current language: call it inside
+/// [`steve_i18n::stored`]). `None`: maybe only for now (a row unreadable, gone or ended).
+fn unbound_why(u: super::node_binding::Unbound) -> Option<String> {
+    use super::node_binding::Unbound;
+    Some(match u {
+        Unbound::Unreadable | Unbound::Missing | Unbound::Ended => return None,
+        Unbound::ReadOnly => steve_i18n::t!("hub.node.unbound.read_only"),
+        Unbound::NotHere => steve_i18n::t!("hub.node.unbound.not_here"),
+        Unbound::NoItem => steve_i18n::t!("hub.node.unbound.no_item"),
+        Unbound::Archived => steve_i18n::t!("hub.node.unbound.archived"),
+        Unbound::Bot => steve_i18n::t!("hub.node.unbound.bot"),
+        Unbound::Mode(m) => steve_i18n::t!("hub.node.unbound.mode", mode = m),
+        Unbound::OutsideRoots => steve_i18n::t!("hub.node.unbound.outside_roots"),
+    })
+}
+
 impl RoutedRuntime {
     /// The binding `session_id` gets on the local Node, planned only (nothing bound or written).
     fn local_binding(&self, session_id: &str) -> Option<super::node_runtime::Binding> {
@@ -1094,23 +637,15 @@ impl RoutedRuntime {
         )
     }
 
-    /// Whether a session still on the legacy runner can move to the local Node now (B5), and its
-    /// binding when it can. `Err(None)`: not now, asked again at a later idle boundary (the Node
-    /// is off or stopped, a turn of it is in flight or held, a dispatch or a resume of it is
-    /// pending, a card of it is open, or a row of it could not be read). `Err(Some(why))`: never,
-    /// as it is (stored text, zh-CN).
-    fn adoptable(&self, sid: &str) -> Result<super::node_runtime::Binding, Option<String>> {
+    /// Whether a session the legacy runner ran can move to the local Node now, and its binding
+    /// when it can. `Err(None)`: not now, asked again later (the Node is off or stopped, a row of
+    /// it could not be read). `Err(Some(why))`: never, as it is (stored text, zh-CN). An upgrade's
+    /// hold does not keep it: moved, it waits like any Node session ([`Self::adopt_as`]).
+    fn movable(&self, sid: &str) -> Result<super::node_runtime::Binding, Option<String>> {
         let Some(n) = &self.node else {
             return Err(None);
         };
-        if n.is_stopped()
-            || self.legacy.0.is_busy(sid)
-            || self.legacy.0.is_holding()
-            || self.store.maintenance()
-        {
-            return Err(None);
-        }
-        if legacy_work(&self.store, sid).unwrap_or(true) {
+        if n.is_stopped() {
             return Err(None);
         }
         let s = match self.store.sessions().get(sid) {
@@ -1126,168 +661,202 @@ impl RoutedRuntime {
                 steve_i18n::t!("hub.node.unbound.missing_cwd")
             })));
         }
-        use super::node_binding::Unbound;
-        self.local_plan(sid).map_err(|u| {
-            let why = match u {
-                Unbound::Unreadable | Unbound::Missing | Unbound::Ended => return None,
-                Unbound::ReadOnly => steve_i18n::t!("hub.node.unbound.read_only"),
-                Unbound::NotHere => steve_i18n::t!("hub.node.unbound.not_here"),
-                Unbound::NoItem => steve_i18n::t!("hub.node.unbound.no_item"),
-                Unbound::Archived => steve_i18n::t!("hub.node.unbound.archived"),
-                Unbound::Bot => steve_i18n::t!("hub.node.unbound.bot"),
-                Unbound::Mode(m) => steve_i18n::t!("hub.node.unbound.mode", mode = m),
-                Unbound::OutsideRoots => steve_i18n::t!("hub.node.unbound.outside_roots"),
-            };
-            Some(steve_i18n::stored(|| why))
-        })
+        self.local_plan(sid)
+            .map_err(|u| steve_i18n::stored(|| unbound_why(u)))
     }
 
-    /// Why a session still on the legacy runner can never move to the local Node, as it is
-    /// (`None`: it can, or it may later). What [`retire_unadoptable`] ends it for.
-    pub fn refusal(&self, sid: &str) -> Option<String> {
+    /// Why a session the legacy runner ran can never move to the local Node, as it is (`None`:
+    /// it can, or it may later; or it is bound already). What [`move_legacy`] ends it for.
+    pub fn never_movable(&self, sid: &str) -> Option<String> {
         if node_of_strict(&self.store, sid).ok()?.is_some() {
             return None;
         }
-        self.adoptable(sid).err().flatten()
+        self.movable(sid).err().flatten()
     }
 
-    /// At an idle boundary (a message for it, or a flush of its queue), a session still on the
-    /// legacy runner moves to the local Node when it can (B5): its idle harness is let go, then it
-    /// is bound there, opening on the same conversation (`sessions.acp_session_id`, the resume
-    /// handle the legacy runner kept). `None`: it stays on the legacy runner for now (busy,
-    /// pending work, the Node off, a session that cannot run there, a failed bind); a later
-    /// boundary asks again. Never mid-turn: only a harness the legacy runner holds idle goes.
-    fn adopt(&self, sid: &str) -> Option<Arc<super::node_runtime::NodeRuntime>> {
+    /// A session the legacy runner ran moves to the local Node, opening on the same conversation
+    /// (`sessions.acp_session_id`, the resume handle that runner kept). Nothing runs it any more,
+    /// so this is any time it is idle on the Hub's side: at boot ([`move_legacy`]), or at a message
+    /// to one boot could not move yet. `idle`: its harness opens only once it has something to do
+    /// ([`super::node_runtime::NodeRuntime::adopt_idle`]). `None`: it stays where it is (see
+    /// [`Self::movable`], or a failed bind); a later boundary asks again.
+    fn adopt_as(&self, sid: &str, idle: bool) -> Option<Arc<super::node_runtime::NodeRuntime>> {
         let n = self.node.clone()?;
-        let b = self.adoptable(sid).ok()?;
-        // the old harness must be gone before the Node opens the same conversation: two
-        // processes never hold it at once (one not seen gone in time is asked after at the next
-        // boundary, the session staying on the legacy runner meanwhile)
-        if !self.legacy.0.release_gone(sid, RELEASE_WAIT) {
-            tracing::warn!("{sid}: its legacy harness is not gone yet; adopted later");
-            return None;
-        }
+        let b = self.movable(sid).ok()?;
         let resume = match self.store.sessions().get(sid) {
             Ok(Some(s)) => s.acp_session_id,
             _ => return None,
         };
-        match n.adopt(&b, resume.as_deref()) {
+        let adopted = if idle {
+            n.adopt_idle(&b, resume.as_deref())
+        } else {
+            n.adopt(&b, resume.as_deref())
+        };
+        match adopted {
             Ok(_) => {
                 tracing::info!(
                     session = sid,
                     resumed = resume.is_some(),
                     "legacy session adopted by the local Node"
                 );
+                // a message that runner had delivered goes again, to be checked, not redone
+                if let Err(e) = self
+                    .store
+                    .queued()
+                    .unwrap_resumed(sid, steve_core::RESUMED_NOTE)
+                {
+                    tracing::error!("{sid}: delivered messages to check: {e}");
+                }
                 Some(n)
             }
             Err(e) => {
-                tracing::error!("adopt {sid} onto the Node: {e}; it stays on the legacy runner");
+                tracing::error!("adopt {sid} onto the Node: {e}; not moved yet");
                 None
             }
         }
     }
 
-    /// [`Self::route`], a legacy session moving to the local Node first when it can ([`Self::adopt`]).
+    /// [`Self::route`], a session the legacy runner ran moving to the local Node first when it can
+    /// ([`Self::adopt_as`]).
     fn route_adopting(&self, session_id: &str) -> Backend {
         match self.route(session_id) {
-            Backend::Legacy => self
-                .adopt(session_id)
-                .map_or(Backend::Legacy, Backend::Node),
+            // behind an upgrade's hold it opens only once the hold is over
+            Backend::Unbound => self
+                .adopt_as(session_id, self.store.maintenance())
+                .map_or(Backend::Unbound, Backend::Node),
             b => b,
         }
     }
-}
 
-/// Whether the legacy runner has work of `session` in hand that a move to the Node would cut: a
-/// claimed or submitted dispatch, a resume after a restart, or an open permission card.
-fn legacy_work(store: &steve_store::Store, session: &str) -> Result<bool, steve_store::StoreError> {
-    store.reader(|c| {
-        Ok::<_, steve_store::StoreError>(c.query_row(
-            "SELECT EXISTS(SELECT 1 FROM session_dispatch WHERE session_id=?1 AND backend='legacy' AND state IN ('claimed','submitted'))
-                 OR EXISTS(SELECT 1 FROM session_resume WHERE session_id=?1)
-                 OR EXISTS(SELECT 1 FROM decisions WHERE session_id=?1 AND subject_type='tool_call' AND status='open')",
-            [session],
-            |r| r.get::<_, bool>(0),
-        )?)
-    })
-}
-
-/// How long an adoption waits for the legacy harness it let go to exit (SIGKILLed halfway).
-const RELEASE_WAIT: Duration = Duration::from_secs(4);
-
-/// How often idle legacy sessions that cannot move to the local Node are looked for.
-const RETIRE_EVERY: Duration = Duration::from_secs(300);
-
-/// With the local Node on, ends each idle session left on the legacy runner from before this
-/// boot that can never move to the Node ([`RoutedRuntime::refusal`]), with why as its last
-/// event (B5): such a session is never left waiting for a runner that will be gone. Runs once the
-/// Node has reconciled, then every [`RETIRE_EVERY`]. Sessions with work in hand wait for an idle
-/// pass; ones that can move are moved at their next message. Sessions made since boot are left
-/// alone (a new session the Node could not take is a fallback, counted on `/healthz`).
-pub async fn retire_unadoptable(routed: Arc<RoutedRuntime>, core: Core, boot: i64) {
-    let Some(n) = routed.node.clone() else { return };
-    while !n.is_reconciled() {
-        tokio::time::sleep(Duration::from_secs(1)).await;
-    }
-    loop {
-        let (r, c, node) = (routed.clone(), core.clone(), n.clone());
-        let done = blocking(move || Ok(retire_pass(&r, &c, &node, boot))).await;
-        if let Ok(k) = done
-            && k > 0
-        {
-            tracing::info!("{k} legacy session(s) that cannot run on the Node ended");
-        }
-        tokio::time::sleep(RETIRE_EVERY).await;
+    /// Why nothing runs `session_id` (bound to no Node), as stored text (zh-CN).
+    fn refused(&self, session_id: &str) -> String {
+        steve_i18n::stored(|| {
+            let why = match &self.node {
+                None => steve_i18n::t!("hub.node.unbound.off"),
+                Some(n) if n.is_stopped() => steve_i18n::t!("hub.node.unbound.stopped"),
+                Some(_) => match self.movable(session_id) {
+                    Err(Some(why)) => why,
+                    Err(None) => steve_i18n::t!("hub.node.unbound.unreadable"),
+                    Ok(_) => steve_i18n::t!("hub.node.unbound.bind_failed"),
+                },
+            };
+            steve_i18n::t!("hub.node.refused", why = why)
+        })
     }
 }
 
-/// One pass of [`retire_unadoptable`]: how many sessions it ended.
-pub fn retire_pass(
-    routed: &RoutedRuntime,
-    core: &Core,
-    node: &super::node_runtime::NodeRuntime,
-    boot: i64,
-) -> usize {
-    if node.is_stopped() {
-        return 0;
+/// How often sessions the legacy runner left are looked at again after boot.
+const MOVE_EVERY: Duration = Duration::from_secs(300);
+
+/// What one [`move_legacy`] pass did.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Moved {
+    /// Moved onto the local Node.
+    pub adopted: usize,
+    /// Ended, with why: they can never run on it.
+    pub ended: usize,
+    /// Left as they are for now (the Node off or stopped, an upgrade holding, a row unreadable,
+    /// a failed bind): asked again at the next pass or at a message to them.
+    pub left: usize,
+}
+
+/// B7: the Hub's own ACP runner is gone, so no session may wait for it. At boot, before recovery
+/// (and behind the upgrade's drain, which stays on until the release lifts it), what that runner
+/// had in hand goes back to the queue, and every session it ran that has not ended (and is not an
+/// imported read-only one) moves to the local Node, to open there on the same conversation once
+/// it has something to do ([`steve_core::Core::moved_to_node`] then makes what the runner left
+/// right for it); one that can never run there ends, with why as its last event. The Hub always starts:
+/// with the local Node off (or stopped) nothing moves, and such sessions are refused when
+/// messaged. `before`: only sessions made before then (the later passes, so a session being made
+/// right now is not taken for a legacy one).
+pub fn move_legacy(routed: &RoutedRuntime, core: &Core, before: Option<i64>) -> Moved {
+    let mut m = Moved::default();
+    let Some(n) = routed.node.clone() else {
+        return m;
+    };
+    if n.is_stopped() {
+        return m;
+    }
+    match routed.store.queued().return_legacy_dispatches() {
+        Ok(0) => {}
+        Ok(k) => tracing::info!("{k} message(s) the legacy runner had in hand are queued again"),
+        Err(e) => tracing::error!("legacy dispatches: {e}"),
     }
     let ids = routed.store.reader(|c| {
-        // `running`/`starting` before boot recovery ran: a cut turn it resumes first
         let mut st = c.prepare(
             "SELECT s.id FROM sessions s
-              WHERE s.status NOT IN ('ended','running','starting') AND s.created < ?1
-                AND NOT EXISTS(SELECT 1 FROM runtime_sessions r WHERE r.session_id=s.id)
+              WHERE s.status <> 'ended' AND s.readonly = 0 AND s.created < ?1
+                AND NOT EXISTS(SELECT 1 FROM runtime_sessions r WHERE r.session_id = s.id)
               ORDER BY s.created",
         )?;
         let v = st
-            .query_map([boot], |r| r.get::<_, String>(0))?
+            .query_map([before.unwrap_or(i64::MAX)], |r| r.get::<_, String>(0))?
             .collect::<Result<Vec<_>, _>>()?;
         Ok::<_, steve_store::StoreError>(v)
     });
     let ids = match ids {
         Ok(v) => v,
         Err(e) => {
-            tracing::error!("legacy sessions to retire: {e}");
-            return 0;
+            tracing::error!("legacy sessions to move: {e}");
+            return m;
         }
     };
-    let mut k = 0;
     for sid in ids {
-        let Some(why) = routed.refusal(&sid) else {
-            continue;
-        };
-        let note = steve_i18n::stored(|| steve_i18n::t!("hub.node.retired", why = why));
-        match core.retire_session(&sid, &note) {
-            Ok(true) => {
-                node.retired_one();
-                tracing::info!(session = %sid, "legacy session cannot run on the Node: ended ({why})");
-                k += 1;
+        match routed.movable(&sid) {
+            Ok(_) => {
+                // its harness opens only when it has something to do: a boot that moves many
+                // starts none of the idle ones, and none at all behind an upgrade's hold (what
+                // is queued goes once the Node has reconciled and the hold is over)
+                if routed.adopt_as(&sid, true).is_none() {
+                    m.left += 1;
+                    continue;
+                }
+                m.adopted += 1;
+                match core.moved_to_node(&sid) {
+                    Ok(true) => {
+                        tracing::info!(session = %sid, "its cut turn continues on the Node")
+                    }
+                    Ok(false) => {}
+                    Err(e) => tracing::error!("{sid} moved to the Node: {e}"),
+                }
             }
-            Ok(false) => {}
-            Err(e) => tracing::error!("retire {sid}: {e}"),
+            Err(Some(why)) => {
+                let note = steve_i18n::stored(|| steve_i18n::t!("hub.node.retired", why = why));
+                match core.end_unmovable(&sid, &note) {
+                    Ok(true) => {
+                        n.retired_one();
+                        tracing::info!(session = %sid, "legacy session cannot run on the Node: ended ({why})");
+                        m.ended += 1;
+                    }
+                    Ok(false) => m.left += 1,
+                    Err(e) => {
+                        tracing::error!("end {sid}: {e}");
+                        m.left += 1;
+                    }
+                }
+            }
+            Err(None) => m.left += 1,
         }
     }
-    k
+    m
+}
+
+/// [`move_legacy`] again every [`MOVE_EVERY`] for sessions from before `boot` that the boot pass
+/// left (the Node was stopped then, a row could not be read).
+pub async fn move_legacy_later(routed: Arc<RoutedRuntime>, core: Core, boot: i64) {
+    loop {
+        tokio::time::sleep(MOVE_EVERY).await;
+        let (r, c) = (routed.clone(), core.clone());
+        if let Ok(m) = blocking(move || Ok(move_legacy(&r, &c, Some(boot)))).await
+            && (m.adopted > 0 || m.ended > 0)
+        {
+            tracing::info!(
+                "legacy sessions: {} moved to the Node, {} ended",
+                m.adopted,
+                m.ended
+            );
+        }
+    }
 }
 
 impl steve_core::AgentRuntime for RoutedRuntime {
@@ -1323,13 +892,10 @@ impl steve_core::AgentRuntime for RoutedRuntime {
         Ok(n.tidy_workspace(&item, keep_branch)?)
     }
     /// A new session is bound to the remote Node named by `STEVE_NODE_BIND` when it can run there;
-    /// otherwise, with the local Node enabled here, to it when its binding can be planned
-    /// (otherwise, e.g. a permission mode the Node path cannot express, a directory outside its
-    /// roots or a Node that stopped, it stays on the legacy runner). Sessions already on the legacy
-    /// runner move to the local Node only at an idle boundary ([`RoutedRuntime::adopt`]); with
-    /// neither configured nothing changes.
-    /// `after` (a predecessor's release on its way): a Node-bound session opens only once it is
-    /// done; a legacy one starts right away, as before.
+    /// otherwise, with the local Node enabled here, to it when its binding can be planned.
+    /// Otherwise (the local Node off or stopped, a permission mode no Node can express, a
+    /// directory outside its roots, a failed bind) it is bound nowhere, and [`Self::refusal`]
+    /// says why. `after` (a predecessor's release on its way): it opens only once that is done.
     fn created(&self, session_id: &str, after: Option<&str>) {
         if self.bind_remote(session_id, after) {
             return;
@@ -1339,17 +905,28 @@ impl steve_core::AgentRuntime for RoutedRuntime {
             Some(b) => {
                 if let Err(e) = n.bind_after(&b, after) {
                     n.fell_back();
-                    tracing::error!(
-                        "bind {session_id} to the Node: {e}; it stays on the legacy runner"
-                    );
+                    tracing::error!("bind {session_id} to the Node: {e}; refused");
                 }
             }
             None => {
                 n.fell_back();
-                tracing::info!("{session_id}: no Node binding can be planned; legacy runner")
+                tracing::info!("{session_id}: no Node binding can be planned; refused")
             }
         }
     }
+    fn refusal(&self, session_id: &str) -> Option<String> {
+        match node_of_strict(&self.store, session_id) {
+            Ok(Some(_)) => None,
+            Ok(None) => Some(self.refused(session_id)),
+            // not known: its messages park rather than run anywhere ([`node_of`])
+            Err(e) => {
+                tracing::error!("binding of {session_id}: {e}");
+                None
+            }
+        }
+    }
+    /// A session bound to no Node (one the legacy runner left that cannot move now, or one
+    /// nothing took) is refused, said in it: the Hub never runs a harness itself.
     fn prompt(
         &self,
         session_id: &str,
@@ -1360,7 +937,17 @@ impl steve_core::AgentRuntime for RoutedRuntime {
         let n = match self.route_adopting(session_id) {
             Backend::Node(n) => Some(n),
             Backend::Parked => None,
-            Backend::Legacy => return self.legacy.prompt(session_id, text, via, files),
+            Backend::Unbound => {
+                let why = self.refused(session_id);
+                if let Err(e) = self.store.events().add(
+                    session_id,
+                    "system",
+                    json!({ "text": why, "refused": true }),
+                ) {
+                    tracing::error!("refusal of {session_id}: {e}");
+                }
+                return Err(CoreError::Msg(why));
+            }
         };
         let files: Vec<steve_store::FileRef> = files
             .iter()
@@ -1394,12 +981,10 @@ impl steve_core::AgentRuntime for RoutedRuntime {
                     None
                 }
             },
-            Backend::Parked => None,
-            Backend::Legacy => self.legacy.running(session_id),
+            Backend::Parked | Backend::Unbound => None,
         }
     }
-    /// A Node session's stop goes to its coordinator, only for the attempt it names; never to the
-    /// legacy runner.
+    /// A Node session's stop goes to its coordinator, only for the attempt it names.
     fn stop(&self, turn: &steve_core::Running) -> steve_core::Result<steve_core::Stop> {
         match self.route(&turn.session) {
             Backend::Node(n) => Ok(if n.cancel_attempt(&turn.session, &turn.attempt)? {
@@ -1407,8 +992,7 @@ impl steve_core::AgentRuntime for RoutedRuntime {
             } else {
                 steve_core::Stop::NotRunning
             }),
-            Backend::Parked => Ok(steve_core::Stop::NotRunning),
-            Backend::Legacy => self.legacy.stop(turn),
+            Backend::Parked | Backend::Unbound => Ok(steve_core::Stop::NotRunning),
         }
     }
     /// The user's Stop: a Node may also retire a control of the session whose outcome is unknown.
@@ -1419,21 +1003,20 @@ impl steve_core::AgentRuntime for RoutedRuntime {
             } else {
                 steve_core::Stop::NotRunning
             }),
-            Backend::Parked => Ok(steve_core::Stop::NotRunning),
-            // the legacy runner has nothing to retire: its stop is its cancel
-            Backend::Legacy => self.legacy.cancel(session_id),
+            Backend::Parked | Backend::Unbound => Ok(steve_core::Stop::NotRunning),
         }
     }
     fn is_busy(&self, session_id: &str) -> bool {
         match self.route(session_id) {
             Backend::Node(n) => n.is_busy(session_id),
             Backend::Parked => true,
-            Backend::Legacy => self.legacy.is_busy(session_id),
+            Backend::Unbound => false,
         }
     }
     /// A Node session's release is a queued command ([`steve_core::Released::Pending`]); one the
     /// business side ended during a turn is queued for when the turn is over. A parked one keeps
-    /// whatever its Node holds ([`steve_core::Released::Busy`], as it counts as busy).
+    /// whatever its Node holds ([`steve_core::Released::Busy`], as it counts as busy); nothing
+    /// holds one bound to no Node.
     fn release(&self, session_id: &str) -> steve_core::Result<steve_core::Released> {
         use super::node_runtime::Release;
         use steve_core::Released;
@@ -1444,40 +1027,33 @@ impl steve_core::AgentRuntime for RoutedRuntime {
                 Release::Busy => Released::Busy,
             }),
             Backend::Parked => Ok(Released::Busy),
-            Backend::Legacy => self.legacy.release(session_id),
+            Backend::Unbound => Ok(Released::Gone),
         }
     }
     /// A Node session's answer is a queued command ([`steve_core::Answered::Pending`]); a store
     /// error is returned, so the card stays open and the Node keeps waiting for a real answer.
-    /// That holds for the lookups that pick the backend too: an unreadable card or binding never
-    /// falls through to the legacy runner (which would call it gone).
+    /// That holds for the lookups that pick the backend too.
     fn answer_permission(
         &self,
         decision_id: &str,
         option_id: Option<&str>,
     ) -> steve_core::Result<steve_core::Answered> {
         use steve_core::Answered;
-        // the card's session and its binding are read strictly: a store error is returned (the
-        // card stays open) rather than falling through to the legacy runner's Gone
-        if let Some(sid) = super::node_runtime::decision_session(&self.store, decision_id)? {
-            match self.route_strict(&sid)? {
-                Backend::Node(n) => {
-                    let queued = n.answer_permission(decision_id, option_id)?;
-                    return Ok(if queued {
-                        Answered::Pending
-                    } else {
-                        Answered::Gone
-                    });
-                }
-                // parked: its Node is not enabled here, nobody can take the answer now
-                Backend::Parked => return Ok(Answered::Gone),
-                Backend::Legacy => {}
-            }
+        let Some(sid) = super::node_runtime::decision_session(&self.store, decision_id)? else {
+            return Ok(Answered::Gone);
+        };
+        match self.route_strict(&sid)? {
+            Backend::Node(n) => Ok(if n.answer_permission(decision_id, option_id)? {
+                Answered::Pending
+            } else {
+                Answered::Gone
+            }),
+            // parked: its Node is not enabled here, nobody can take the answer now; unbound:
+            // the harness that asked is gone
+            Backend::Parked | Backend::Unbound => Ok(Answered::Gone),
         }
-        self.legacy.answer_permission(decision_id, option_id)
     }
     fn hold(&self, on: bool) {
-        self.legacy.hold(on);
         if let Some(n) = &self.node {
             n.hold(on);
         }
@@ -1486,8 +1062,7 @@ impl steve_core::AgentRuntime for RoutedRuntime {
         }
     }
     fn is_holding(&self) -> bool {
-        self.legacy.is_holding()
-            || self.node.as_ref().is_some_and(|n| n.is_holding())
+        self.node.as_ref().is_some_and(|n| n.is_holding())
             || self.fleet.as_ref().is_some_and(|f| f.is_holding())
     }
     fn uncertain(&self, session_id: &str) -> bool {
@@ -1495,16 +1070,12 @@ impl steve_core::AgentRuntime for RoutedRuntime {
             .is_some_and(|n| n.is_uncertain(session_id))
     }
     /// Not `route()`: its park-on-doubt suits messages (undone by a later call), but here a yes
-    /// drops the session's resume intent for good, so an unreadable binding counts as legacy.
+    /// drops the session's resume intent for good, so an unreadable binding counts as unbound.
     fn recovers_itself(&self, session_id: &str) -> bool {
-        match self.node.as_deref() {
-            Some(n) => n.owns(session_id),
-            None => parked_for_recovery(&self.store, session_id),
-        }
+        bound_for_recovery(&self.store, session_id)
     }
     fn running_turns(&self) -> usize {
-        self.legacy.running_turns()
-            + self.node.as_ref().map_or(0, |n| n.running_turns())
+        self.node.as_ref().map_or(0, |n| n.running_turns())
             + self.fleet.as_ref().map_or(0, |f| f.running_turns())
     }
     fn node_working(&self) -> usize {
@@ -1528,9 +1099,8 @@ impl steve_core::AgentRuntime for RoutedRuntime {
                     steve_core::Flushed::Held
                 }
             },
-            // a parked session's queue waits for its Node
-            Backend::Parked => steve_core::Flushed::Held,
-            Backend::Legacy => self.legacy.flush(session_id, lead),
+            // a parked session's queue waits for its Node; nothing takes an unbound one's
+            Backend::Parked | Backend::Unbound => steve_core::Flushed::Held,
         }
     }
     /// Node attempts of one turn (a gateway retry) are the same turn; a store that cannot tell
@@ -1586,19 +1156,14 @@ impl steve_core::AgentRuntime for RoutedRuntime {
                 // a mode no Node can express: permanent, trying again would not help
                 None => Ok(Configured::Unsupported),
             },
-            // its Node is not enabled here: nothing runs for it now (as before D5)
-            Backend::Parked => Ok(Configured::NotRunning),
-            Backend::Legacy => self.legacy.set_mode(session_id, mode),
+            // its Node is not enabled here, or none runs it: nothing runs for it now
+            Backend::Parked | Backend::Unbound => Ok(Configured::NotRunning),
         }
     }
-    fn agent_pid(&self, session_id: &str) -> Option<u32> {
-        match self.node_for(session_id) {
-            // a Node's pids are in its own namespace: they reach YOLO as the Node reported them
-            // (`PermissionRequest.own_pids`), never through a `ps` here
-            Some(_) => None,
-            None if self.parked(session_id) => None,
-            None => self.legacy.agent_pid(session_id),
-        }
+    /// A Node's pids are in its own namespace: they reach YOLO as the Node reported them
+    /// (`PermissionRequest.own_pids`), never through a `ps` here.
+    fn agent_pid(&self, _session_id: &str) -> Option<u32> {
+        None
     }
 }
 
@@ -1606,8 +1171,11 @@ impl steve_core::AgentRuntime for RoutedRuntime {
 
 pub struct CoreDomain {
     pub core: Core,
-    pub acp: Acp,
-    /// The opt-in local Node (`STEVE_NODE_MODE=local`): stopped with the Hub, its harnesses with it.
+    /// The runtime the core runs sessions on: boot moves the legacy runner's sessions to its
+    /// local Node ([`move_legacy`]).
+    pub routed: Arc<RoutedRuntime>,
+    /// The local Node (`STEVE_NODE_MODE=local`, the default): stopped with the Hub, its harnesses
+    /// with it.
     pub node: Option<Arc<steve_node::LocalNode>>,
 }
 
@@ -1625,10 +1193,20 @@ impl Domain for CoreDomain {
         blocking(move || c.seed()).await
     }
     async fn recover(&self) -> BResult<()> {
-        let c = self.core.clone();
+        let (c, routed) = (self.core.clone(), self.routed.clone());
         blocking(move || {
             // before anything resumes: turns left open were cut by the restart
             super::acp_stats::interrupt_open(c.store().store(), steve_store::now());
+            // B7: no session waits for the Hub's own runner, which is gone
+            let m = move_legacy(&routed, &c, None);
+            if m != Moved::default() {
+                tracing::info!(
+                    "legacy sessions at boot: {} moved to the Node, {} ended, {} left",
+                    m.adopted,
+                    m.ended,
+                    m.left
+                );
+            }
             c.recover()?;
             /* research runs cut off by the restart, and the one-time thread_items backfill */
             c.thread_recover()
@@ -1647,45 +1225,22 @@ impl Domain for CoreDomain {
                 .maintenance_hold(true)
                 .map_err(|e| BackendError::msg(e.to_string()))?;
         } else if action == "cancel" {
-            // If adapters were already quiesced, their groups must really be gone before reopen.
-            if !self.acp.reopen() && (!self.acp.quiesce().await || !self.acp.reopen()) {
-                return Err(BackendError::msg(steve_i18n::t!(
-                    "hub.maintenance.agents_alive"
-                )));
-            }
             store
                 .maintenance_set(false)
                 .map_err(|e| BackendError::msg(e.to_string()))?;
             self.core
                 .maintenance_hold(false)
                 .map_err(|e| BackendError::msg(e.to_string()))?;
-            // turns the drain cut while they waited for a permission: no restart came to resume them
-            for sid in self.acp.take_cut() {
-                if !self.acp.continue_cut(&sid) {
-                    tracing::warn!(session = %sid, "a turn the drain cut could not be continued");
-                }
-            }
             self.ready().await?;
         }
         let active = store.maintenance();
         let running = store.activities();
-        // a turn that only waits for your permission answer doesn't hold a drain: it is cut, the
-        // restart resumes it (it asks again)
-        let acp = self.acp.working_turns();
         // a Node turn has no cut-and-resume: it holds the drain, also while it waits for your
         // permission answer (until it is answered or expires), and while its outcome is unknown
         let node = self.core.node_working();
         let source_release_busy = self.core.source_release_busy();
-        let quiet = active
-            && running.values().sum::<usize>() == 0
-            && acp == 0
-            && node == 0
-            && !source_release_busy;
-        let adapters_stopped = if quiet {
-            self.acp.quiesce().await
-        } else {
-            false
-        };
+        let quiet =
+            active && running.values().sum::<usize>() == 0 && node == 0 && !source_release_busy;
         let unknown: i64 = store
             .with_conn(|c| {
                 Ok(c.query_row(
@@ -1695,12 +1250,9 @@ impl Domain for CoreDomain {
                 )?)
             })
             .map_err(|e| BackendError::msg(e.to_string()))?;
-        let sealed = quiet
-            && adapters_stopped
-            && self.acp.working_turns() == 0
-            && self.core.node_working() == 0
-            && store.maintenance_seal();
-        Ok(json!({"maintenance":active,"ready":sealed,"running":running,"acp":acp,"node":node,"adapters_stopped":adapters_stopped,"unknown_mail":unknown,"source_release_busy":source_release_busy}).as_object().unwrap().clone())
+        let sealed = quiet && self.core.node_working() == 0 && store.maintenance_seal();
+        // `acp` and `adapters_stopped` stay for older upgraders: the Hub runs no adapter itself
+        Ok(json!({"maintenance":active,"ready":sealed,"running":running,"acp":0,"node":node,"adapters_stopped":true,"unknown_mail":unknown,"source_release_busy":source_release_busy}).as_object().unwrap().clone())
     }
     /// Never fails the Hub: what could not be resumed is logged and reported on `/healthz`
     /// (`recovery`), and its durable intent stays for the next boot.
@@ -1727,11 +1279,8 @@ impl Domain for CoreDomain {
                 None => true,
             }
         };
-        let (research_stopped, (), node_stopped) = tokio::join!(
-            self.core.shutdown_research(Duration::from_secs(5)),
-            self.acp.shutdown(Duration::from_millis(500)),
-            node,
-        );
+        let (research_stopped, node_stopped) =
+            tokio::join!(self.core.shutdown_research(Duration::from_secs(5)), node,);
         if !research_stopped {
             tracing::error!("research process groups did not confirm shutdown before deadline");
         }
@@ -1915,7 +1464,7 @@ impl Domain for CoreDomain {
         )
     }
     async fn cancel(&self, session: &str) -> BResult<bool> {
-        // routed: a Node session's stop goes to its coordinator, never to the legacy runner
+        // routed: a Node session's stop goes to its coordinator
         let (c, sid) = (self.core.clone(), session.to_string());
         tokio::task::spawn_blocking(move || c.cancel_turn(&sid))
             .await
@@ -2396,12 +1945,12 @@ mod recovery_tests {
     use steve_store::{NoPublisher, Store};
 
     /// A binding that cannot be read parks messages (undoable) but never makes boot recovery
-    /// drop a legacy session's resume intent.
+    /// leave a cut turn to a backend unsaid.
     #[test]
-    fn an_unreadable_binding_is_not_parked_for_recovery() {
+    fn an_unreadable_binding_is_not_bound_for_recovery() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path().join("hub.sqlite3"), NoPublisher).unwrap();
-        assert!(!super::parked_for_recovery(&store, "s1"));
+        assert!(!super::bound_for_recovery(&store, "s1"));
         store
             .with_conn(|c| Ok(c.execute_batch("DROP TABLE runtime_sessions")?))
             .unwrap();
@@ -2410,7 +1959,7 @@ mod recovery_tests {
             super::super::node_runtime::bound(&store, "s1"),
             "messages still park on doubt"
         );
-        assert!(!super::parked_for_recovery(&store, "s1"));
+        assert!(!super::bound_for_recovery(&store, "s1"));
     }
 }
 
@@ -2429,22 +1978,8 @@ mod routed_tests {
             flow: OnceLock::new(),
             yolo: OnceLock::new(),
             local_node: OnceLock::new(),
-            user_seqs: Default::default(),
-            transcripts: Default::default(),
         });
-        let cfg = steve_acp::AcpConfig {
-            adapters: Default::default(),
-            node: "node".into(),
-            claude_executable: "claude".into(),
-            steve_home: dir.into(),
-            codex_home: dir.join("codex"),
-            user_home: dir.into(),
-            version: "test".into(),
-            idle_release: std::time::Duration::from_secs(600),
-            retry_delays: vec![],
-        };
         super::RoutedRuntime {
-            legacy: super::AcpRuntime(steve_acp::Acp::new(cfg, host.clone())),
             host,
             node: None,
             fleet: None,
@@ -2461,7 +1996,7 @@ mod routed_tests {
     }
 
     /// The lookups that pick the backend for an answer are strict: an unreadable card or binding
-    /// is an error (the card stays open), never the legacy runner's "gone" (expired).
+    /// is an error (the card stays open), never "gone" (expired).
     #[test]
     fn an_unreadable_card_or_binding_is_not_an_expired_answer() {
         let dir = tempfile::tempdir().unwrap();
@@ -2475,7 +2010,7 @@ mod routed_tests {
                 )?)
             })
             .unwrap();
-        // readable, not bound to a Node: the legacy runner, which never saw it
+        // readable, bound to no Node: the harness that asked is gone
         assert_eq!(
             rt.answer_permission("d1", Some("allow")).unwrap(),
             Answered::Gone
@@ -2593,8 +2128,8 @@ mod routed_tests {
         ) == 1
     }
 
-    /// B5: an idle legacy session's next message moves it to the Node, which opens it on the same
-    /// conversation; the message goes there, not to the legacy runner.
+    /// B5: an idle legacy session boot could not move yet moves at its next message, opening on
+    /// the same conversation; the message goes there.
     #[tokio::test]
     async fn an_idle_legacy_sessions_next_message_moves_it_to_the_node() {
         let dir = tempfile::tempdir().unwrap();
@@ -2611,13 +2146,10 @@ mod routed_tests {
             &rt.store,
             "SELECT COUNT(*) FROM queued WHERE session_id='s1' AND text='接着做'",
         );
-        assert_eq!(
-            queued, 1,
-            "the message waits for the Node's open, not the legacy runner"
-        );
-        assert!(rt.legacy.0.adapter_pid("s1").is_none());
+        assert_eq!(queued, 1, "the message waits for the Node's open");
         assert_eq!(rt.node.as_ref().unwrap().adopted(), 1);
-        assert_eq!(rt.refusal("s1"), None, "bound: nothing to retire");
+        assert_eq!(rt.never_movable("s1"), None, "bound: nothing to end");
+        assert_eq!(rt.refusal("s1"), None, "bound: it runs");
     }
 
     /// B5: a queue flushed at an idle boundary moves the session too.
@@ -2633,62 +2165,114 @@ mod routed_tests {
         assert!(bound(&rt));
     }
 
-    /// B5: work the legacy runner has in hand keeps the session there until it is done: a claimed
-    /// or submitted dispatch, a resume after a restart, an open permission card, a hold.
+    /// B7: nothing holds a session the legacy runner left any more: what it had in hand (a
+    /// claimed or submitted dispatch, a resume after a restart, an open permission card) does
+    /// not keep it from moving; delivered messages come back to be checked. Behind an upgrade's
+    /// hold it moves without opening.
     #[tokio::test]
-    async fn legacy_work_in_hand_keeps_a_session_on_the_legacy_runner() {
-        for (what, sql, undo) in [
+    async fn what_the_legacy_runner_left_in_hand_does_not_keep_a_session() {
+        for (what, sql) in [
             (
                 "claimed",
                 "INSERT INTO session_dispatch(id,session_id,text,via,created,files,state,updated) VALUES ('d1','s1','x','me',1,'[]','claimed',1)",
-                "DELETE FROM session_dispatch",
-            ),
-            (
-                "submitted",
-                "INSERT INTO session_dispatch(id,session_id,text,via,created,files,state,updated) VALUES ('d1','s1','x','me',1,'[]','submitted',1)",
-                "DELETE FROM session_dispatch",
             ),
             (
                 "resume",
                 "INSERT INTO session_resume(session_id,created) VALUES ('s1',1)",
-                "DELETE FROM session_resume",
             ),
             (
                 "card",
                 "INSERT INTO decisions(id,workspace_id,kind,subject_type,subject_id,session_id,question,status,requested_by,created) VALUES ('c1','default','approve','tool_call','t1','s1','?','open','agent',1)",
-                "DELETE FROM decisions",
             ),
         ] {
             let dir = tempfile::tempdir().unwrap();
             let rt = with_node(dir.path());
             exec(&rt.store, sql);
-            assert!(rt.adopt("s1").is_none(), "{what}");
-            assert_eq!(rt.refusal("s1"), None, "{what}: waits, never retired");
-            assert!(!bound(&rt), "{what}");
-            exec(&rt.store, undo);
-            assert!(rt.adopt("s1").is_some(), "{what}: once done, it moves");
+            assert!(rt.adopt_as("s1", false).is_some(), "{what}");
             assert!(bound(&rt), "{what}");
         }
         let dir = tempfile::tempdir().unwrap();
         let rt = with_node(dir.path());
-        rt.legacy.0.hold(true);
-        assert!(rt.adopt("s1").is_none(), "held");
-        rt.legacy.0.hold(false);
-        assert!(rt.adopt("s1").is_some());
+        exec(
+            &rt.store,
+            "INSERT INTO queued(id,session_id,text,via,created) VALUES ('q1','s1','发布一下','resumed:me',1)",
+        );
+        // behind an upgrade's hold a message moves it too, opening nothing until the hold is over
+        rt.store.maintenance_set(true).unwrap();
+        rt.prompt("s1", "升级中", "me", &[]).unwrap();
+        assert!(bound(&rt));
+        assert_eq!(
+            one::<String>(
+                &rt.store,
+                "SELECT phase FROM runtime_sessions WHERE session_id='s1'"
+            ),
+            "released"
+        );
+        assert_eq!(
+            one::<i64>(
+                &rt.store,
+                "SELECT COUNT(*) FROM node_commands WHERE retry_at<9223372036854775806 AND state='pending'"
+            ),
+            0,
+            "nothing goes to the Node yet"
+        );
+        rt.store.maintenance_set(false).unwrap();
+        let (text, via): (String, String) = rt
+            .store
+            .reader(|c| {
+                Ok::<_, steve_store::StoreError>(c.query_row(
+                    "SELECT text, via FROM queued WHERE id='q1'",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )?)
+            })
+            .unwrap();
+        assert!(text.starts_with(steve_core::RESUMED_NOTE) && text.ends_with("发布一下"));
+        assert_eq!(via, "me");
     }
 
-    /// B5: with the Node off, or stopped, nothing moves.
+    /// With the Node off, or stopped, nothing moves, nothing is ended for it, and a message is
+    /// refused, said in the session: it never runs on the Hub (B7).
     #[tokio::test]
-    async fn without_a_running_node_nothing_moves() {
+    async fn without_a_running_node_nothing_moves_and_a_message_is_refused() {
         let dir = tempfile::tempdir().unwrap();
         let mut rt = with_node(dir.path());
         rt.node.as_ref().unwrap().stop("tools did not connect");
-        assert!(rt.adopt("s1").is_none());
-        assert_eq!(rt.refusal("s1"), None);
+        assert!(rt.adopt_as("s1", false).is_none());
+        assert_eq!(rt.never_movable("s1"), None);
+        let e = rt
+            .prompt("s1", "还在吗", "me", &[])
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("本机 Node 没有在运行"), "{e}");
         rt.node = None;
-        assert!(rt.adopt("s1").is_none());
-        assert_eq!(rt.refusal("s1"), None);
+        assert!(rt.adopt_as("s1", false).is_none());
+        assert_eq!(rt.never_movable("s1"), None);
+        let e = rt
+            .prompt("s1", "还在吗", "me", &[])
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("STEVE_NODE_MODE=off"), "{e}");
         assert!(!bound(&rt));
+        assert_eq!(
+            one::<i64>(
+                &rt.store,
+                "SELECT COUNT(*) FROM events WHERE session_id='s1' AND kind='system' AND json_extract(data,'$.refused')=1"
+            ),
+            2,
+            "said each time"
+        );
+        assert_eq!(
+            one::<i64>(
+                &rt.store,
+                "SELECT COUNT(*) FROM queued WHERE session_id='s1'"
+            ),
+            0,
+            "nothing waits for a runner that is not there"
+        );
+        assert!(!rt.is_busy("s1"));
+        assert_eq!(rt.flush("s1", None), steve_core::Flushed::Held);
+        assert_eq!(rt.release("s1").unwrap(), steve_core::Released::Gone);
     }
 
     /// B5: a session that can never run on the Node stays where it is, and says why (what it is
@@ -2714,21 +2298,27 @@ mod routed_tests {
             let dir = tempfile::tempdir().unwrap();
             let rt = with_node(dir.path());
             exec(&rt.store, &sql);
-            let r = rt.refusal("s1");
+            let r = rt.never_movable("s1");
             assert!(r.as_deref().is_some_and(|r| r.contains(why)), "{sql}: {r:?}");
-            assert!(rt.adopt("s1").is_none(), "{sql}");
+            assert!(rt.adopt_as("s1", false).is_none(), "{sql}");
             assert!(!bound(&rt), "{sql}");
+            // a message to it says why it cannot run
+            if let Err(e) = rt.prompt("s1", "还在吗", "me", &[]) {
+                assert!(e.to_string().contains(why), "{sql}: {e}");
+            } else {
+                panic!("{sql}: a message to it ran");
+            }
         }
         // an ended session is not one to retire (a message revives it, and it moves then)
         let dir = tempfile::tempdir().unwrap();
         let rt = with_node(dir.path());
         exec(&rt.store, "UPDATE sessions SET status='ended'");
-        assert_eq!(rt.refusal("s1"), None);
+        assert_eq!(rt.never_movable("s1"), None);
         exec(&rt.store, "UPDATE sessions SET status='idle'");
         // unreadable: maybe only for now
         exec(&rt.store, "ALTER TABLE items RENAME TO items_gone");
-        assert_eq!(rt.refusal("s1"), None);
-        assert!(rt.adopt("s1").is_none());
+        assert_eq!(rt.never_movable("s1"), None);
+        assert!(rt.adopt_as("s1", false).is_none());
     }
 }
 
