@@ -101,6 +101,12 @@ pub enum PlacementError {
     /// A directory of the Hub's own device under none of the local Node's roots (D11: only
     /// configured roots, no "anywhere under ~").
     Outside,
+    /// A remote Node that takes only its owner's own work, and this may be someone else's
+    /// ([`super::node_binding::remote_refusal`]).
+    NotOwners {
+        device: String,
+        why: super::node_binding::RemoteRefusal,
+    },
     Store(StoreError),
 }
 
@@ -115,6 +121,11 @@ impl std::fmt::Display for PlacementError {
             Self::NotFound(Kind::KbSource) => steve_i18n::t!("hub.not_found.kb_source"),
             Self::NoWorkspace => steve_i18n::t!("hub.workspaces.no_workspace"),
             Self::Outside => steve_i18n::t!("hub.workspaces.outside"),
+            Self::NotOwners { device, why } => steve_i18n::t!(
+                "hub.node.remote.refused",
+                node = device.as_str(),
+                why = why.why()
+            ),
             Self::Store(e) => return write!(f, "{e}"),
         };
         f.write_str(&text)
@@ -179,7 +190,7 @@ impl Workspaces {
 
     /// `at` on the Node of a device: the local one for `hub` (and its node id `local`), else a
     /// paired, active and linked remote Node that may get `workspace`'s work
-    /// ([`super::node_binding::node_takes`]: paired by an owner of the workspace).
+    /// ([`super::node_binding::remote_refusal`]: paired by the workspace's owner, its only member).
     fn on(&self, device: &str, at: At, workspace: &str) -> Result<Placement, PlacementError> {
         let offline = || PlacementError::Offline {
             device: device.into(),
@@ -199,11 +210,21 @@ impl Workspaces {
         let (Some(fleet), Ok(id)) = (&self.fleet, NodeId::new(device)) else {
             return Err(offline());
         };
-        let takes = self
+        let refusal = self
             .store
-            .reader(|c| super::node_binding::node_takes(c, id.as_str(), workspace))?;
+            .reader(|c| super::node_binding::remote_refusal(c, id.as_str(), workspace))?;
+        match refusal {
+            None => {}
+            Some(super::node_binding::RemoteRefusal::Inactive) => return Err(offline()),
+            Some(why) => {
+                return Err(PlacementError::NotOwners {
+                    device: device.into(),
+                    why,
+                });
+            }
+        }
         let remote = fleet.remote(&id);
-        if !takes || remote.generation().is_none() {
+        if remote.generation().is_none() {
             return Err(offline());
         }
         let runtime = fleet.start(&id).ok_or_else(offline)?;
@@ -368,6 +389,7 @@ impl steve_knowledge::sources::folder_node::FolderPlaces for KbFolders {
             ) => Err(Unplaced::Nowhere),
             Err(PlacementError::LocalOff) => Ok(None),
             Err(PlacementError::Offline { .. }) => Err(Unplaced::Offline),
+            Err(e @ PlacementError::NotOwners { .. }) => Err(Unplaced::Failed(e.to_string())),
             Err(PlacementError::Store(e)) => Err(Unplaced::Failed(e.to_string())),
         }
     }
@@ -579,6 +601,7 @@ mod tests {
         std::fs::create_dir_all(&extra[0]).unwrap();
         let node = Arc::new(
             steve_node::LocalNode::open(steve_node::NodeConfig {
+                ceiling: steve_node::PolicyCeiling::unlimited(),
                 node: NodeId::new("local").unwrap(),
                 home: dir.path().join("node"),
                 acp: steve_acp::AcpConfig {
@@ -709,6 +732,7 @@ mod tests {
         exec(
             &t.store,
             "INSERT INTO users(id,workspace_id,subject,name,role,created) VALUES ('u','default','sub_u','u','owner',1);
+             INSERT INTO workspace_members(workspace_id,user_id,role,created) VALUES ('default','u','owner',1);
              INSERT INTO nodes(node_id,owner,name,pubkey,fingerprint,state,created) VALUES ('n_far','u','far',zeroblob(32),'ff','active',1);",
         );
         let local = t.ws.placement_of(Subject::Project("p1")).unwrap();
@@ -1019,7 +1043,7 @@ mod tests {
         exec(
             &t.store,
             "INSERT INTO users(id,workspace_id,subject,name,role,created) VALUES ('u','default','sub_u','u','owner',1),('m','default','sub_m','m','member',1);
-             INSERT INTO workspace_members(workspace_id,user_id,role,created) VALUES ('default','u','owner',1),('default','m','member',1);
+             INSERT INTO workspace_members(workspace_id,user_id,role,created) VALUES ('default','u','owner',1);
              INSERT INTO nodes(node_id,owner,name,pubkey,fingerprint,state,created) VALUES ('n_u','u','u',zeroblob(32),'fu','active',1),('n_m','m','m',zeroblob(32),'fm','active',1);
 ",
         );
@@ -1035,15 +1059,46 @@ mod tests {
             let p = ws.placement_of(what).unwrap();
             assert_eq!(p.node_id.as_str(), "n_u");
         }
-        // a Node a plain member paired is offline for it, linked and active as it is
+        // a Node someone else paired takes none of it, linked and active as it is
         for what in [Subject::Project("pm"), Subject::Item("im")] {
             let e = ws.placement_of(what).err().unwrap();
             assert!(
-                matches!(e, PlacementError::Offline { .. }),
+                matches!(
+                    e,
+                    PlacementError::NotOwners {
+                        why: super::super::node_binding::RemoteRefusal::NotOwner,
+                        ..
+                    }
+                ),
                 "{what:?}: {e:?}"
             );
         }
-        // and so is the owner's once paused
+        // H1: with another member in the workspace a run may be theirs, so not even the owner's
+        exec(
+            &t.store,
+            "INSERT INTO workspace_members(workspace_id,user_id,role,created) VALUES ('default','m','member',2);",
+        );
+        let e = ws.placement_of(Subject::Project("pu")).err().unwrap();
+        assert!(
+            matches!(
+                e,
+                PlacementError::NotOwners {
+                    why: super::super::node_binding::RemoteRefusal::Shared,
+                    ..
+                }
+            ),
+            "{e:?}"
+        );
+        let text = steve_i18n::scope(steve_i18n::EN, async { e.to_string() }).await;
+        assert!(
+            text.contains("n_u") && text.contains("other members"),
+            "{text}"
+        );
+        let text = steve_i18n::scope(steve_i18n::ZH_CN, async { e.to_string() }).await;
+        assert!(text.contains("n_u") && text.contains("其他成员"), "{text}");
+        exec(&t.store, "DELETE FROM workspace_members WHERE user_id='m'");
+        assert!(ws.placement_of(Subject::Project("pu")).is_ok());
+        // and the owner's is offline once paused
         exec(
             &t.store,
             "UPDATE nodes SET state='paused' WHERE node_id='n_u'",

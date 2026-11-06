@@ -194,8 +194,10 @@ impl Hub {
         .await
     }
 
-    /// A new identity paired and confirmed by `user`: its node id.
+    /// A new identity paired and confirmed by `user`: its node id. `user` owns the default
+    /// workspace alone (a remote Node takes only its owner's own work, H1).
     pub async fn paired(&self, user: &str) -> (Identity, NodeId) {
+        self.owns_default(user);
         let id = Identity::generate().unwrap();
         let code = self.code(user).await;
         let (s, v) = self.claim(&code, &id).await;
@@ -206,6 +208,23 @@ impl Hub {
             .await;
         assert_eq!(s, 200);
         (id, NodeId::new(node).unwrap())
+    }
+
+    /// `user` is an owner of the default workspace.
+    pub fn owns_default(&self, user: &str) {
+        self.store
+            .transaction::<_, StoreError>(|tx| {
+                tx.execute(
+                    "INSERT OR IGNORE INTO users(id,workspace_id,subject,name,role,created) VALUES (?1,'default',?1,?1,'owner',1)",
+                    [user],
+                )?;
+                tx.execute(
+                    "INSERT OR IGNORE INTO workspace_members(workspace_id,user_id,role,created) VALUES ('default',?1,'owner',1)",
+                    [user],
+                )?;
+                Ok(())
+            })
+            .unwrap();
     }
 
     pub fn session(&self, id: &str) {

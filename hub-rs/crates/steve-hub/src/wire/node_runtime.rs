@@ -36,6 +36,7 @@ use steve_store::runtime::{self as rt, ReceiptState, StreamKey};
 use steve_store::{FileRef, Store, StoreError, Tx};
 
 mod config;
+mod cost;
 mod heads;
 // the job half of the coordinator lives next to it (wire/node_jobs.rs), with its fields in reach
 mod ledger;
@@ -46,6 +47,8 @@ mod recover;
 mod workspace;
 
 pub use config::{ConfigChange, Configured};
+pub use cost::CostCaps;
+pub(crate) use cost::tokens as usage_tokens;
 pub use heads::{
     CaughtUp, NodeSnapshot, Pull, Receive, ReplayCheck, catch_up_streams, read_snapshot,
 };
@@ -187,6 +190,8 @@ pub struct NodeRuntime {
     apply_wait_ms: AtomicU64,
     /// What a remote Node's replayed batches pass before the inbox ([`Self::over_link`]).
     replay_check: OnceLock<ReplayCheck>,
+    /// What the Node's usage reports may add to a session's cost ([`Self::set_cost_caps`]).
+    cost_caps: Mutex<CostCaps>,
     /// The largest replay page the Node's transport carries (unbounded in process).
     largest_replay: AtomicU32,
     /// Turn ends settled outside the apply worker (a local cancel), told by it after the commit.
@@ -338,6 +343,7 @@ impl NodeRuntime {
             lagging: Mutex::new(HashMap::new()),
             apply_wait_ms: AtomicU64::new(heads::APPLY_WAIT.as_millis() as u64),
             replay_check: OnceLock::new(),
+            cost_caps: Mutex::new(CostCaps::default()),
             largest_replay: AtomicU32::new(u32::MAX),
             ended_later: Mutex::new(vec![]),
             settled_later: Mutex::new(vec![]),
@@ -364,6 +370,56 @@ impl NodeRuntime {
         self.largest_replay.store(largest, Ordering::Relaxed);
     }
 
+    /// Whether the Node is remote, behind a link ([`Self::over_link`]).
+    pub fn is_remote(&self) -> bool {
+        self.replay_check.get().is_some()
+    }
+
+    /// H1: a remote Node takes only its owner's own work until runs there are sandboxed
+    /// ([`super::node_binding::remote_refusal`]): refused (a conflict saying why, in the current
+    /// language) when `workspace`'s work may be someone else's. A Node paused or revoked is left
+    /// to what pausing does (its work waits). The local Node takes everything.
+    fn owners_work_in(&self, c: &rusqlite::Connection, workspace: &str) -> Result<(), StoreError> {
+        use super::node_binding::{RemoteRefusal, remote_refusal};
+        if !self.is_remote() {
+            return Ok(());
+        }
+        match remote_refusal(c, self.node_id.as_str(), workspace)? {
+            None | Some(RemoteRefusal::Inactive) => Ok(()),
+            Some(r) => {
+                let why = steve_i18n::t!(
+                    "hub.node.remote.refused",
+                    node = self.node_id.as_str(),
+                    why = r.why()
+                );
+                tracing::warn!(node = %self.node_id, workspace, refusal = ?r, "remote node refused: not its owner's work");
+                Err(StoreError::Conflict(why))
+            }
+        }
+    }
+
+    /// [`Self::owners_work_in`] for the workspace of `session`.
+    fn session_owners_work_in(
+        &self,
+        c: &rusqlite::Connection,
+        session: &str,
+    ) -> Result<(), StoreError> {
+        if !self.is_remote() {
+            return Ok(());
+        }
+        let ws: Option<String> = c
+            .query_row(
+                "SELECT workspace_id FROM sessions WHERE id=?",
+                [session],
+                |r| r.get(0),
+            )
+            .optional()?;
+        match ws {
+            Some(w) => self.owners_work_in(c, &w),
+            None => Err(conflict(format!("no session {session}"))),
+        }
+    }
+
     /// How long reconcile waits for the Node's heads to be applied before it holds the sessions
     /// of the streams still behind and goes on ([`heads::APPLY_WAIT`] unless set).
     pub fn set_apply_wait(&self, d: Duration) {
@@ -379,6 +435,13 @@ impl NodeRuntime {
     pub fn set_turn_limit(&self, ms: i64) {
         self.turn_limit
             .store(ms.max(1), std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// What one usage report and one attempt may add to a session's cost at most
+    /// (`STEVE_NODE_COST_REPORT_MAX`, `STEVE_NODE_COST_ATTEMPT_MAX`); a report past them adds
+    /// nothing.
+    pub fn set_cost_caps(&self, caps: CostCaps) {
+        *self.cost_caps.lock().unwrap() = caps;
     }
 
     /// An open session idle for `ms` (nothing running, queued or waiting on a card) is let go;
@@ -641,6 +704,7 @@ impl NodeRuntime {
             resume: adopted.clone().flatten(),
         };
         let fresh = self.tx(|tx| {
+            self.session_owners_work_in(tx, &b.session)?;
             let fresh = rt::bind_session_in(
                 tx,
                 &rt::SessionBinding {
@@ -1171,6 +1235,8 @@ impl NodeRuntime {
         if p != Planned::Created {
             return Ok(p);
         }
+        // a member joined the workspace since the session was bound, say: no new turn there
+        self.session_owners_work_in(tx, session)?;
         let turn = uid("t");
         let msgs = rt::claim_in(tx, session, &turn, now())?;
         if msgs.is_empty() {
@@ -2931,27 +2997,12 @@ impl NodeRuntime {
         let mut out = vec![];
         match &ev.body {
             EventBody::Usage { report } if report.scope != UsageScope::Background => {
-                let cost = report
-                    .cost
-                    .as_ref()
-                    .and_then(|m| m.decimal.parse::<f64>().ok());
-                let delta = match cost {
-                    Some(c) if report.measurement == Measurement::Cumulative => {
-                        let before = earlier_cost_in(tx, &self.node_id, ev, &report.meter_epoch)?;
-                        Some(match before {
-                            Some(b) if b <= c => c - b,
-                            // a lower total: the harness counted from zero again
-                            _ => c,
-                        })
-                    }
-                    Some(c) => Some(c),
-                    None => None,
-                };
+                let delta = self.cost_in(tx, ev, report)?;
                 tx.execute(
                     "UPDATE sessions SET used = COALESCE(?, used), size = COALESCE(?, size), cost = CASE WHEN ? IS NULL THEN cost ELSE COALESCE(cost, 0) + ? END, updated = ? WHERE id = ?",
                     rusqlite::params![
-                        report.context_used.map(|x| x as i64),
-                        report.context_limit.map(|x| x as i64),
+                        report.context_used.and_then(cost::context),
+                        report.context_limit.and_then(cost::context),
                         delta,
                         delta,
                         now(),
@@ -3065,6 +3116,54 @@ impl NodeRuntime {
         Ok(out)
     }
 
+    /// What usage report `report` (of `ev`, being applied) adds to its session's cost: checked as
+    /// [`cost::Meter`] checks it, after the reports of the same attempt applied before it (their
+    /// caps hold across them). `None`: nothing.
+    fn cost_in(
+        &self,
+        tx: &Tx,
+        ev: &NodeEvent,
+        report: &UsageReport,
+    ) -> Result<Option<f64>, StoreError> {
+        let mut meter = cost::Meter::new(*self.cost_caps.lock().unwrap());
+        if let Subject::Execution(x) = &ev.subject
+            && let Some(session) = exec_session(x)
+        {
+            let earlier: Vec<String> = {
+                let mut st = tx.prepare_cached(
+                    "SELECT payload FROM node_event_inbox WHERE node_id=? AND applied=1 AND json_extract(payload,'$.body.type')='usage'
+                      AND json_extract(payload,'$.subject.attempt')=? AND json_extract(payload,'$.subject.session')=?
+                      AND NOT (stream=? AND epoch=? AND seq=?) ORDER BY stream, seq",
+                )?;
+                st.query_map(
+                    rusqlite::params![
+                        self.node_id.as_str(),
+                        x.attempt().as_str(),
+                        session,
+                        ev.cursor.stream.as_str(),
+                        ev.cursor.epoch.as_str(),
+                        ev.cursor.seq as i64
+                    ],
+                    |r| r.get::<_, String>(0),
+                )?
+                .collect::<Result<Vec<_>, _>>()?
+            };
+            for r in earlier {
+                let Ok(e) = serde_json::from_str::<NodeEvent>(&r) else {
+                    continue;
+                };
+                if let EventBody::Usage { report } = &e.body {
+                    meter.add(report, || {
+                        cost::earlier_cost_in(tx, &self.node_id, &e, &report.meter_epoch)
+                    })?;
+                }
+            }
+        }
+        meter.add(report, || {
+            cost::earlier_cost_in(tx, &self.node_id, ev, &report.meter_epoch)
+        })
+    }
+
     /// What one attempt did, for its statistics row: from the Node's own events of it.
     fn attempt_facts(&self, session: &str, attempt: &str) -> AttemptFacts {
         self.store
@@ -3093,33 +3192,16 @@ impl NodeRuntime {
         };
         let mut f = AttemptFacts::default();
         let mut tools: std::collections::HashMap<String, ToolView> = Default::default();
-        // the cumulative cost per harness process: what it stood at before this attempt, then now
-        let mut last: std::collections::HashMap<String, f64> = Default::default();
+        let mut meter = cost::Meter::new(*self.cost_caps.lock().unwrap());
         for r in rows {
             let Ok(ev) = serde_json::from_str::<NodeEvent>(&r) else {
                 continue;
             };
             if let EventBody::Usage { report } = &ev.body
-                && report.scope != UsageScope::Background
-                && let Some(c) = report
-                    .cost
-                    .as_ref()
-                    .and_then(|m| m.decimal.parse::<f64>().ok())
+                && let Some(delta) = meter.add(report, || {
+                    cost::earlier_cost_in(conn, &self.node_id, &ev, &report.meter_epoch)
+                })?
             {
-                let delta = if report.measurement == Measurement::Cumulative {
-                    let epoch = report.meter_epoch.to_string();
-                    let before = match last.get(&epoch) {
-                        Some(b) => Some(*b),
-                        None => earlier_cost_in(conn, &self.node_id, &ev, &report.meter_epoch)?,
-                    };
-                    last.insert(epoch, c);
-                    match before {
-                        Some(b) if b <= c => c - b,
-                        _ => c,
-                    }
-                } else {
-                    c
-                };
                 f.cost = Some(f.cost.unwrap_or(0.0) + delta);
             }
             match ev.body {
@@ -3475,34 +3557,6 @@ enum After {
     Cost {
         session: String,
     },
-}
-
-/// The cumulative cost the same harness process reported last before `ev` in its session.
-fn earlier_cost_in(
-    tx: &rusqlite::Connection,
-    node: &NodeId,
-    ev: &NodeEvent,
-    epoch: &Epoch,
-) -> Result<Option<f64>, StoreError> {
-    let r: Option<String> = match tx.query_row(
-        "SELECT json_extract(payload,'$.body.report.cost.decimal') FROM node_event_inbox
-           WHERE node_id=? AND stream=? AND epoch=? AND seq<? AND json_extract(payload,'$.body.type')='usage'
-             AND json_extract(payload,'$.body.report.meter_epoch')=? AND json_extract(payload,'$.body.report.cost') IS NOT NULL
-           ORDER BY seq DESC LIMIT 1",
-        rusqlite::params![
-            node.as_str(),
-            ev.cursor.stream.as_str(),
-            ev.cursor.epoch.as_str(),
-            ev.cursor.seq as i64,
-            epoch.as_str()
-        ],
-        |r| r.get(0),
-    ) {
-        Ok(x) => x,
-        Err(rusqlite::Error::QueryReturnedNoRows) => None,
-        Err(e) => return Err(e.into()),
-    };
-    Ok(r.and_then(|d| d.parse().ok()))
 }
 
 /// A permission card made while applying, for the business side (YOLO) after the commit.

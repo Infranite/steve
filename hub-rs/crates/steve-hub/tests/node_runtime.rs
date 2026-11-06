@@ -818,6 +818,59 @@ async fn usage_and_tools_reach_the_session_and_the_attempts_statistics() {
     assert!((f.cost.unwrap() - 0.8).abs() < 1e-9);
 }
 
+/// M3: what a Node reports as cost is checked before it reaches the session. NaN, inf, negative
+/// and non-decimal figures add nothing (they could clear or lower the cost), a running total that
+/// went down adds nothing, a jump past the per-report cap or past the attempt's cap is refused,
+/// and context sizes too big to be real are ignored. So the cost only ever goes up, within caps.
+#[tokio::test]
+async fn bad_cost_reports_never_clear_lower_or_inflate_the_cost() {
+    let h = hub();
+    h.rt.set_cost_caps(steve_hub::wire::node_runtime::CostCaps::new(5.0, 6.0));
+    h.bind();
+    h.rt.prompt(S, "hello", "user", &[]).unwrap();
+    until("started", || h.methods().contains(&"start_turn")).await;
+    let exec = h.attempts()[0].clone();
+    let sub = || Subject::Execution(exec.clone());
+    let cost = || h.q::<Option<f64>>(&format!("SELECT cost FROM sessions WHERE id='{S}'"));
+    h.node.emit(sub(), usage("u1", "1")).await.unwrap();
+    for (i, bad) in [
+        "NaN", "inf", "-inf", "-1000", "-1e300", "1e300", "0x10", " 2",
+    ]
+    .iter()
+    .enumerate()
+    {
+        h.node
+            .emit(sub(), usage(&format!("bad{i}"), bad))
+            .await
+            .unwrap();
+    }
+    // lower than the running total: nothing comes off
+    h.node.emit(sub(), usage("u2", "0.5")).await.unwrap();
+    // a jump of 10 is past one report's cap: refused, and the total moves on from it
+    h.node.emit(sub(), usage("u3", "11")).await.unwrap();
+    h.node.emit(sub(), usage("u4", "13")).await.unwrap();
+    // 1 + 2 so far; 3.5 more would pass the attempt's 6
+    h.node.emit(sub(), usage("u5", "16.5")).await.unwrap();
+    let mut huge = usage("u6", "13.5");
+    if let EventBody::Usage { report } = &mut huge {
+        report.context_used = Some(u64::MAX);
+        report.context_limit = Some(u64::MAX);
+    }
+    h.node.emit(sub(), huge).await.unwrap();
+    h.node.finish(&exec, build::done()).await.unwrap();
+    until("turn end", || !h.ends().is_empty()).await;
+    let c = cost().expect("never cleared");
+    assert!((c - 3.0).abs() < 1e-9, "1, then 2 (11 to 13): {c}");
+    let used: i64 = h.q(&format!("SELECT used FROM sessions WHERE id='{S}'"));
+    assert_eq!(used, 1000, "an impossible context size is ignored");
+    let f = h.ends.2.lock().unwrap()[0].clone();
+    assert!(
+        (f.cost.unwrap() - 3.0).abs() < 1e-9,
+        "the statistics see the same: {:?}",
+        f.cost
+    );
+}
+
 impl H {
     /// Runs one turn to its end, leaving the session ready.
     async fn one_turn(&self, text: &str) {

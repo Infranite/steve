@@ -872,6 +872,7 @@ mod on_node {
         pub fn open(project: &std::path::Path) -> Arc<LocalCmd> {
             let home = tempfile::tempdir().unwrap();
             let node = LocalNode::open(NodeConfig {
+                ceiling: steve_node::PolicyCeiling::unlimited(),
                 node: NodeId::new("local").unwrap(),
                 home: home.path().join("node"),
                 acp: steve_acp::AcpConfig {

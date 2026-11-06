@@ -569,6 +569,31 @@ impl RoutedRuntime {
         let (Some(f), Some(target)) = (&self.fleet, &self.bind_remote) else {
             return false;
         };
+        // H1: a remote Node runs only its owner's own work until runs there are sandboxed
+        let refusal = self
+            .store
+            .sessions()
+            .get(session_id)
+            .ok()
+            .flatten()
+            .map(|s| {
+                self.store.reader(|c| {
+                    super::node_binding::remote_refusal(c, target.as_str(), &s.workspace_id)
+                })
+            });
+        match refusal {
+            Some(Ok(None)) => {}
+            Some(Ok(Some(r))) => {
+                let why = steve_i18n::t!(
+                    "hub.node.remote.refused",
+                    node = target.as_str(),
+                    why = r.why()
+                );
+                tracing::info!("{session_id}: not bound to the remote Node: {why}");
+                return false;
+            }
+            _ => return false,
+        }
         let auto = f.speaks(target, steve_node_api::AUTO_MODE);
         let perm = self.perm_mode(session_id);
         let Some(b) = super::node_binding::remote_binding_for(
@@ -2523,6 +2548,7 @@ mod prepared_dir_tests {
         let projects = dir.path().join("projects");
         std::fs::create_dir_all(projects.join("p1")).unwrap();
         let node = steve_node::LocalNode::open(steve_node::NodeConfig {
+            ceiling: steve_node::PolicyCeiling::unlimited(),
             node: NodeId::new("local").unwrap(),
             home: dir.path().join("node"),
             acp: steve_acp::AcpConfig {

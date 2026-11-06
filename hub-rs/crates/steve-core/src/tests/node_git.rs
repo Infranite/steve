@@ -68,6 +68,7 @@ impl OnNode {
         let home = tempfile::tempdir().unwrap();
         let root = k.home().to_path_buf();
         let cfg = steve_node::NodeConfig {
+            ceiling: steve_node::PolicyCeiling::unlimited(),
             node: NodeId::new("local").unwrap(),
             home: home.path().join("node"),
             acp: steve_acp::AcpConfig {

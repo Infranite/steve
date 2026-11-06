@@ -73,6 +73,7 @@ impl LocalNode {
                 .accept("start_job", &c, |_| Ok(Decided::accepted()))
                 .map(|(r, _)| r);
         }
+        self.0.cfg.ceiling.check(&spec.run.policy)?;
         let plan = self.research_plan(spec)?;
         let jobs = self.0.cfg.capacity.jobs;
         let (r, fresh) = self.accept("start_job", &c, |t| {
