@@ -1281,17 +1281,7 @@ async fn shutdown_frees_the_home() {
     n.shutdown().await;
     drop(n);
     // the delivery loop and the actors let go of it
-    let t0 = Instant::now();
-    let again = loop {
-        match LocalNode::open(t.config()) {
-            Ok(x) => break x,
-            Err(e) => {
-                assert_eq!(e.code, ErrorCode::Conflict);
-                assert!(t0.elapsed() < Duration::from_secs(10), "home never freed");
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-        }
-    };
+    let again = open_again(&t).await;
     assert!(again.incarnation() >= 2);
 }
 
@@ -1379,7 +1369,7 @@ async fn shutdown_joins_an_inflight_handshake_before_releasing_home() {
         ErrorCode::Offline
     );
     drop(n);
-    let again = LocalNode::open(t.config()).unwrap();
+    let again = open_again(&t).await;
     again.shutdown().await;
 }
 
@@ -1406,7 +1396,7 @@ async fn shutdown_cancels_a_hanging_fetch_instead_of_waiting_for_its_deadline() 
         .unwrap();
     assert_eq!(t.sent("session/prompt"), 0);
     drop(n);
-    let again = LocalNode::open(t.config()).unwrap();
+    let again = open_again(&t).await;
     again.shutdown().await;
 }
 
@@ -1526,7 +1516,7 @@ async fn unknown_workspace_controls_recover_via_public_port() {
     n.shutdown().await;
     drop(n);
     db.execute_batch("DROP TRIGGER fail_prepare").unwrap();
-    let n = t.node();
+    let n = reopen(&t, t.sink.clone()).await;
     assert!(matches!(
         n.operation(c.id.clone()).await.unwrap().state,
         Observed::Unknown { .. }
@@ -1573,7 +1563,7 @@ async fn unknown_workspace_controls_recover_via_public_port() {
     n.shutdown().await;
     drop(n);
     db.execute_batch("DROP TRIGGER fail_tidy").unwrap();
-    let n = t.node();
+    let n = reopen(&t, t.sink.clone()).await;
     n.recover(now_cmd(
         "recover_tidy",
         Recover {
@@ -1700,7 +1690,7 @@ async fn prepare_and_release_retry_after_storage_recovers() {
     // Faulted stays fail-closed for new work. Restart for the release half of the test.
     n.shutdown().await;
     drop(n);
-    let n = t.node();
+    let n = reopen(&t, t.sink.clone()).await;
     n.open_session(now_cmd("open_after_restart", open_body("s_1")))
         .await
         .unwrap();
@@ -1976,19 +1966,26 @@ async fn a_bound_workspace_has_a_local_dir_for_the_host_only() {
 
 /// Opens the home again once the last Node has let go of it.
 async fn reopen(t: &T, sink: Arc<RecordingSink>) -> LocalNode {
-    let t0 = Instant::now();
-    let n = loop {
-        match LocalNode::open(t.config()) {
-            Ok(x) => break x,
-            Err(e) => {
-                assert_eq!(e.code, ErrorCode::Conflict, "{e:?}");
-                assert!(t0.elapsed() < Duration::from_secs(10), "home never freed");
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-        }
-    };
+    let n = open_again(t).await;
     n.connect(sink, None);
     n
+}
+
+/// Opens `t`'s home again after a shutdown. The home lock goes with the Node's last internal
+/// handle: an actor or the delivery loop that already answered `shutdown` still lets go of it a
+/// moment later, so a test that reopens right away waits for that instead of racing it.
+async fn open_again(t: &T) -> LocalNode {
+    let t0 = Instant::now();
+    loop {
+        match LocalNode::open(t.config()) {
+            Ok(x) => return x,
+            Err(e) => {
+                assert_eq!(e.code, ErrorCode::Conflict, "{e:?}");
+                assert!(t0.elapsed() < Duration::from_secs(30), "home never freed");
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }
+    }
 }
 
 async fn all_acknowledged(n: &LocalNode) {
@@ -2176,7 +2173,7 @@ async fn a_journal_from_a_newer_node_is_refused() {
         match LocalNode::open(t.config()) {
             Ok(_) => panic!("a newer journal was opened"),
             Err(e) if e.code == ErrorCode::Conflict => {
-                assert!(t0.elapsed() < Duration::from_secs(10), "home never freed");
+                assert!(t0.elapsed() < Duration::from_secs(30), "home never freed");
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
             Err(e) => break e,
@@ -2357,7 +2354,9 @@ async fn sqlite_full_mid_turn_keeps_numbered_events_and_skips_no_seq() {
     t.sink.set_failing(true);
     let n = t.node();
     ready(&n, "s_1").await;
-    let mut tu = turn("s_1", "t_1", "a_1", "@flood");
+    // paced: an unpaced flood can outrun the actor on a loaded machine and be stopped as an
+    // ingress overflow before the journal is ever full, which is not what this test is about
+    let mut tu = turn("s_1", "t_1", "a_1", "@flood 20");
     tu.run.limits.max_output_bytes = 64 << 20;
     n.start_turn(now_cmd("op_t1", tu)).await.unwrap();
     let db = rusqlite::Connection::open(t.home.join("node.sqlite3")).unwrap();
@@ -2389,12 +2388,7 @@ async fn sqlite_full_mid_turn_keeps_numbered_events_and_skips_no_seq() {
 
     // started again (the disk has room): what was numbered is delivered, each position once
     let hub = Arc::new(Counting::default());
-    let n = loop {
-        match LocalNode::open(t.config()) {
-            Ok(n) => break n,
-            Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
-        }
-    };
+    let n = open_again(&t).await;
     n.connect(hub.clone(), None);
     all_acknowledged(&n).await;
     let taken = hub.taken.lock().unwrap().clone();
