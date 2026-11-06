@@ -180,12 +180,32 @@ fn boosted(c: &Candidate, about: &[ObjRef], q: &Query) -> f64 {
     s
 }
 
-/// Searches the knowledge base for `q.viewer`. Empty or unsearchable text gives no hits.
+/// The note that goes with hits found without the meaning search (the store's semantic pass
+/// failed): in contexts, search answers and drafts, so nobody takes a thin answer for the whole.
+pub const SEMANTIC_DOWN_NOTE: &str = "（语义检索暂时不可用，这次只按关键词查找，结果可能不全。）";
+
+/// What [`retrieve_all`] found.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Retrieved {
+    pub hits: Vec<Hit>,
+    /// The semantic pass failed (the store is down or was skipped after a failure): `hits` come
+    /// from the keyword passes only.
+    pub semantic_down: bool,
+}
+
+/// Searches the knowledge base for `q.viewer`. Empty or unsearchable text gives no hits. The hits
+/// of [`retrieve_all`], for callers that do not show [`Retrieved::semantic_down`].
 pub fn retrieve(c: &Connection, q: &Query) -> Result<Vec<Hit>> {
+    retrieve_all(c, q).map(|r| r.hits)
+}
+
+/// [`retrieve`], and whether the semantic pass failed. A failed semantic pass does not fail the
+/// search: the keyword passes of the Hub's own index still answer.
+pub fn retrieve_all(c: &Connection, q: &Query) -> Result<Retrieved> {
     let k = q.k.clamp(1, MAX_K);
     let text = q.text.trim();
     if text.is_empty() {
-        return Ok(Vec::new());
+        return Ok(Retrieved::default());
     }
     let scope = Scope::for_viewer(c, q.viewer, q.purpose, q.kinds)?;
     let found = |pass| -> Result<Vec<Candidate>> {
@@ -196,7 +216,17 @@ pub fn retrieve(c: &Connection, q: &Query) -> Result<Vec<Hit>> {
             .filter(|x| scope.admits(x))
             .collect())
     };
-    let mut tiers = vec![found(Pass::Strict)?, found(Pass::Semantic)?];
+    let strict = found(Pass::Strict)?;
+    let mut semantic_down = false;
+    let semantic = found(Pass::Semantic).unwrap_or_else(|e| {
+        tracing::warn!(
+            store = q.store.id(),
+            "semantic search failed, keywords only: {e}"
+        );
+        semantic_down = true;
+        Vec::new()
+    });
+    let mut tiers = vec![strict, semantic];
     let docs: HashSet<&str> = tiers.iter().flatten().map(|x| x.obj_id.as_str()).collect();
     if docs.len() < FALLBACK_BELOW {
         tiers.push(found(Pass::Relaxed)?);
@@ -259,7 +289,10 @@ pub fn retrieve(c: &Connection, q: &Query) -> Result<Vec<Hit>> {
             break;
         }
     }
-    Ok(hits)
+    Ok(Retrieved {
+        hits,
+        semantic_down,
+    })
 }
 
 /// The confirmed rules and preferences about any of `anchors`, newest first, independent of a

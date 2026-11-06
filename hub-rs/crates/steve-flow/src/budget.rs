@@ -1,7 +1,8 @@
 //! Per-run budgets. A run's cost is the report's model cost, or for `item*` runs the
 //! sum of the `sessions.cost` of the items linked `from` it. Over the limit: the item is paused and a
-//! `fail` decision about the `flow_run` asks “continue once” (the limit doubles) or “stop”. One
-//! decision per limit: only exceeding the doubled limit opens another.
+//! `fail` decision about the `flow_run` asks “continue once” (the limit becomes the larger of twice
+//! the limit and twice what was spent, so one answer covers a run that overshot by far) or “stop”.
+//! One decision per limit: only exceeding the raised limit opens another.
 
 use std::sync::Arc;
 
@@ -141,7 +142,12 @@ fn account(cx: &FlowCx, session_id: &str) -> FlowResult<Option<(String, String, 
     })
 }
 
-/// The `flow_run` decision handler. `continue_once` doubles the run's limit and queues the resume
+/// The limit after `continue_once`: `max(limit × 2, cost × 2)`.
+pub fn raised_limit(limit: f64, cost: f64) -> f64 {
+    (limit * 2.0).max(cost * 2.0)
+}
+
+/// The `flow_run` decision handler. `continue_once` raises the run's limit ([`raised_limit`]) and queues the resume
 /// (steve-core can only be called after this transaction commits); `stop` leaves the item paused.
 /// `retry` (after a restart interrupted an effectful step, [`crate::engine::recover`]) continues the
 /// run from that step; `drop` leaves it failed.
@@ -162,7 +168,7 @@ impl DecisionHandler for FlowRunDecisions {
         match cx.choice {
             CONTINUE_ONCE => {
                 let limit = limit_of(&run);
-                run.context[LIMIT] = json!(limit * 2.0);
+                run.context[LIMIT] = json!(raised_limit(limit, run.cost));
                 runs::save(tx, &run)?;
                 if let Some(item) = &d.item_id {
                     let _ = self.followups.send(Followup::Resume {

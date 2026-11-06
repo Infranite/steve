@@ -151,6 +151,141 @@ impl Graph {
     }
 }
 
+/// A mismatch between a node's branches and its edges. Not an error: the graph still saves and
+/// runs, but an event can end where you did not expect.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BranchWarning {
+    pub node: String,
+    /// The edge's or branch's label.
+    pub label: String,
+    /// `edge`: an edge whose label is none of the node's branches (never taken: strong);
+    /// `branch`: a branch with no edge (the run ends there: weak).
+    pub kind: &'static str,
+    pub strong: bool,
+    /// In the request's language.
+    pub text: String,
+}
+
+fn str_items(v: &Value) -> Vec<String> {
+    v.as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The branches a node can name, when they are set in its config (`None`: it names none, or takes
+/// them from its edges).
+pub fn branches_of(n: &Node) -> Option<Vec<String>> {
+    let cfg = &n.config;
+    let mut out = match n.kind.as_str() {
+        "filter" => {
+            let mut v: Vec<String> = cfg["rules"]
+                .as_array()
+                .map(|rs| {
+                    rs.iter()
+                        .filter_map(|r| r["label"].as_str())
+                        .map(str::trim)
+                        .filter(|l| !l.is_empty())
+                        .map(String::from)
+                        .collect()
+                })
+                .unwrap_or_default();
+            if let Some(e) = cfg["else_label"]
+                .as_str()
+                .map(str::trim)
+                .filter(|e| !e.is_empty())
+            {
+                v.push(e.to_string());
+            }
+            v
+        }
+        "approve" => str_items(&cfg["options"]),
+        "bot" => str_items(&cfg["branches"]),
+        _ => return None,
+    };
+    if out.is_empty() {
+        return None;
+    }
+    let mut seen = HashSet::new();
+    out.retain(|b| seen.insert(b.clone()));
+    Some(out)
+}
+
+/// The branch/edge mismatches of `g` (strong ones first).
+pub fn branch_warnings(g: &Graph) -> Vec<BranchWarning> {
+    let mut strong = Vec::new();
+    let mut weak = Vec::new();
+    for n in &g.nodes {
+        let fail_label = match n.on_fail() {
+            OnFail::Branch(l) => Some(l),
+            _ => None,
+        };
+        if let Some(bs) = branches_of(n) {
+            let mut seen = HashSet::new();
+            for e in g.outs(&n.id) {
+                if e.label.is_empty()
+                    || bs.contains(&e.label)
+                    || fail_label.as_deref() == Some(e.label.as_str())
+                    || !seen.insert(e.label.clone())
+                {
+                    continue;
+                }
+                strong.push(BranchWarning {
+                    node: n.id.clone(),
+                    label: e.label.clone(),
+                    kind: "edge",
+                    strong: true,
+                    text: steve_i18n::t!(
+                        "flow.graph.edge_no_branch",
+                        node = n.name(),
+                        label = e.label,
+                        branches = bs.join("、")
+                    ),
+                });
+            }
+            for b in &bs {
+                if !g.outs(&n.id).any(|e| &e.label == b) {
+                    weak.push(BranchWarning {
+                        node: n.id.clone(),
+                        label: b.clone(),
+                        kind: "branch",
+                        strong: false,
+                        text: steve_i18n::t!(
+                            "flow.graph.branch_no_edge",
+                            node = n.name(),
+                            label = b
+                        ),
+                    });
+                }
+            }
+        }
+        if n.kind == "wait"
+            && let Some(t) = n.config["timeout_label"]
+                .as_str()
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+            && n.config.get("timeout").is_some_and(|v| !v.is_null())
+            && !g.outs(&n.id).any(|e| e.label == t)
+        {
+            weak.push(BranchWarning {
+                node: n.id.clone(),
+                label: t.to_string(),
+                kind: "branch",
+                strong: false,
+                text: steve_i18n::t!("flow.graph.branch_no_edge", node = n.name(), label = t),
+            });
+        }
+    }
+    strong.extend(weak);
+    strong
+}
+
 /// Is this a valid node id?
 pub fn valid_id(id: &str) -> bool {
     id_re().is_match(id)
@@ -196,8 +331,8 @@ pub fn rules() -> Vec<Rule> {
             "kind 只能是下面列出的节点种类，config 要符合该种类的规则",
         ),
         Rule::new(
-            &[],
-            "filter、table、bot、approve 的出边 label 要和它们的分支名一致",
+            &["flow.graph.edge_no_branch", "flow.graph.branch_no_edge"],
+            "filter、table、bot、approve 的出边 label 要和它们的分支名一致，每个分支都要有同名的出边（wait 的 timeout_label 也是）",
         ),
         Rule::new(
             &["flow.graph.bad_on_fail"],

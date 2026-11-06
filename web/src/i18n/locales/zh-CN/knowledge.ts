@@ -35,6 +35,7 @@ export default {
     noneSub: "知识库里没有和“{{q}}”相关的内容。",
     results: "搜索结果",
     count_other: "{{count}} 条结果 · {{ms}} ms",
+    keywordsOnly: "语义检索暂时不可用，这次只按关键词查找，结果可能不全。",
   },
   mems: {
     added: "已记下",

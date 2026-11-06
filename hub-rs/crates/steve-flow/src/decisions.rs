@@ -68,7 +68,13 @@ impl DecisionHandler for FlowStepDecisions {
         }
         engine::release_held_outcome(&mut run);
         let resume = if matcher["kind"] == "gate" {
-            json!({ "gate": cx.choice })
+            if cx.choice == engine::GATE_ALWAYS {
+                // runs now, and from now on for this version of the flow
+                engine::write_gate_grants(tx, &run, &matcher, cx.actor, &d.id, steve_store::now())?;
+                json!({ "gate": GATE_YES })
+            } else {
+                json!({ "gate": cx.choice })
+            }
         } else {
             run.context["approved_by"] = json!(node);
             json!({ "output": { "choice": cx.choice, "text": cx.text }, "branch": cx.choice })

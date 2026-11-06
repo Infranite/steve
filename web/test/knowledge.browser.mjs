@@ -28,6 +28,8 @@ const run = async ({ width, height, scheme }) => {
     if (u.pathname === '/api/kb/mems' && method === 'POST') { const b = route.request().postDataJSON(); added.push(b); data = mem('n' + added.length, b.kind, b.text) }
     else if (u.pathname === '/api/kb/mems') data = mems
     else if (u.pathname === '/api/kb/candidates') data = candidates
+    // OpenViking down: the keyword passes answer, and say so
+    else if (u.pathname === '/api/kb/search') data = { hits: u.searchParams.get('q') === '续签' ? [{ n: 1, type: 'chunk', id: 'doc1', seq: 0, title: '合同', heading: null, text: 'Acme 的合同每年三月续签', label: '笔记', level: 'conclusion', href: '#/knowledge/doc/doc1' }] : [], took_ms: 3, semantic_down: true }
     return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(data) })
   })
   const fits = async () => assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, `overflow at ${width}px`)
@@ -55,6 +57,14 @@ const run = async ({ width, height, scheme }) => {
     assert.match(await page.locator('[data-candidate="c1"] [data-cand-why]').innerText(), /为什么值得保留：以后设计异常通知/)
     assert.equal(await page.locator('[data-cand-yes]').first().innerText(), '保存')
     await fits(); await shot('kb-candidates')
+    // search while the meaning search is down: the hits come with the note, and so does "nothing found"
+    await page.locator('[data-kb-search]').fill('续签'); await page.locator('[data-kb-search]').press('Enter')
+    await page.locator('[data-hit="doc1"]').waitFor()
+    assert.match(await page.locator('[data-kb-keywords-only]').innerText(), /只按关键词/)
+    await page.locator('[data-kb-search]').fill('没有的东西'); await page.locator('[data-kb-search]').press('Enter')
+    await page.getByText('没有找到').waitFor()
+    assert.equal(await page.locator('[data-kb-keywords-only]').count(), 1)
+    await fits(); await shot('kb-search-keywords-only')
     // the 待处理 card: the question names the record; an old decision still reads
     await page.goto(base + '/test/fixtures/knowledge.html?inbox'); await page.locator('[data-fixture-cards]').waitFor()
     assert.deepEqual(await page.locator('[data-card-ask]').allInnerTexts(), ['存为长期记忆吗？', '记住这条吗？'])

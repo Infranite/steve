@@ -32,6 +32,7 @@ export default {
     results: "Search results",
     count_one: "{{count}} result · {{ms}} ms",
     count_other: "{{count}} results · {{ms}} ms",
+    keywordsOnly: "Meaning search is unavailable right now, so this search used keywords only and may miss results.",
   },
   mems: {
     added: "Saved",

@@ -1,11 +1,12 @@
 /* #/auto — 自动化: the chain (accounts → flows → signals → schedules), the flow list, schedules and event sources
  * (prototype AutomationView). Routes: #/auto/rules, #/auto/schedules, #/auto/sources, #/auto/rule/:id, #/auto/source/:adapter */
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import { Trans } from "react-i18next"
 import { ArrowRightIcon, ChevronRightIcon, PlusIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
 import { Switch } from "@/components/ui/switch"
-import { Page, Group, Row, Segmented, Meta, Empty, StatusDot, go } from "@/ui"
+import { Page, Group, Row, Segmented, Meta, Empty, StatusDot, SectionLabel, go } from "@/ui"
 import { toast } from "@/store"
 import { Unwired } from "@/unwired"
 import { flowApi, useLoad, errText, sourceLabel, type FlowSummary, type Load } from "@/api/flow"
@@ -57,6 +58,7 @@ export function AutomationView({ tab }: { tab: Tab }) {
         ))}
       </nav>
       {tab === "rules" && <FlowList L={flows} onNew={() => setDialog("rule")} />}
+      {tab === "rules" && <AllowPrivate />}
       {tab === "schedules" && <Schedules L={sch} onNew={() => setDialog("schedule")} />}
       {tab === "sources" && <SourceList />}
     </Page>
@@ -105,4 +107,24 @@ function SourceList() {
       : <Empty title={t("auto:sources.emptyTitle")} sub={t("auto:sources.emptySub")} />}
     <div className="mt-2 px-1 type-footnote text-muted-foreground"><Trans t={t} i18nKey="auto:sources.footer" components={{ integrations: <a href="#/integrations" className="text-blue hover:underline" />, channels: <a href="#/channels" className="text-blue hover:underline" /> }} /></div>
   </>)
+}
+
+/* the hosts http steps may reach on internal addresses (http_allow_private): only you write it, here */
+function AllowPrivate() {
+  const t = useT()
+  const [v, setV] = useState<string | null>(null), [busy, setBusy] = useState(false)
+  useEffect(() => { flowApi.allowPrivate().then((x) => setV(x.hosts.join(", ")), () => setV(null)) }, [])
+  if (v === null) return null
+  const save = async () => {
+    setBusy(true)
+    try { const x = await flowApi.setAllowPrivate(v.split(/[\s,\uff0c]+/).filter(Boolean)); setV(x.hosts.join(", ")); toast(t("auto:allowPrivate.saved")) } catch (e) { toast(errText(e)) } finally { setBusy(false) }
+  }
+  return (
+    <section className="mt-8" data-allow-private>
+      <SectionLabel>{t("auto:allowPrivate.title")}</SectionLabel>
+      <div className="flex gap-2"><Input className="rounded-lg" value={v} placeholder={t("auto:allowPrivate.placeholder")} onChange={(e) => setV(e.target.value)} aria-label={t("auto:allowPrivate.title")} />
+        <Button variant="outline" disabled={busy} onClick={() => void save()} data-allow-private-save>{t("auto:allowPrivate.save")}</Button></div>
+      <p className="mt-1.5 px-1 type-footnote text-muted-foreground">{t("auto:allowPrivate.sub")}</p>
+    </section>
+  )
 }

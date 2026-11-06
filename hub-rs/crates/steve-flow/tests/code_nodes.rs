@@ -389,7 +389,7 @@ fn grant(e: &FlowEnv, flow: &str, capability: &str, rtype: &str, rid: &str) {
     e.env
         .store()
         .with_conn(|c| Ok(c.execute(
-            "INSERT INTO grants (id, workspace_id, subject_type, subject_id, capability, resource_type, resource_id, until, created_by, created) VALUES (?, ?, 'flow', ?, ?, ?, ?, ?, ?, 1)",
+            "INSERT INTO grants (id, workspace_id, subject_type, subject_id, capability, resource_type, resource_id, scope, until, created_by, created) VALUES (?, ?, 'flow', ?, ?, ?, ?, json_object('flow_version', 1), ?, ?, 1)",
             params![steve_store::uid("gr"), WS, flow, capability, rtype, rid, i64::MAX, ME],
         )?))
         .unwrap();
@@ -607,7 +607,7 @@ async fn secrets_are_injected_but_never_stored_or_logged() {
     e.env
         .store()
         .with_conn(|c| Ok(c.execute(
-            "INSERT INTO grants (id, workspace_id, subject_type, subject_id, capability, resource_type, resource_id, until, created_by, created) VALUES ('gr_s', ?, 'flow', ?, 'secret.use', 'vault_item', ?, ?, ?, 1)",
+            "INSERT INTO grants (id, workspace_id, subject_type, subject_id, capability, resource_type, resource_id, scope, until, created_by, created) VALUES ('gr_s', ?, 'flow', ?, 'secret.use', 'vault_item', ?, json_object('flow_version', 1), ?, ?, 1)",
             params![WS, f, item, i64::MAX, ME],
         )?))
         .unwrap();
@@ -625,7 +625,7 @@ async fn secrets_are_injected_but_never_stored_or_logged() {
     e.env
         .store()
         .with_conn(|c| Ok(c.execute(
-            "INSERT INTO grants (id, workspace_id, subject_type, subject_id, capability, resource_type, resource_id, until, created_by, created) VALUES ('gr_r', ?, 'flow', ?, 'secret.use', 'vault_item', ?, ?, ?, 1)",
+            "INSERT INTO grants (id, workspace_id, subject_type, subject_id, capability, resource_type, resource_id, scope, until, created_by, created) VALUES ('gr_r', ?, 'flow', ?, 'secret.use', 'vault_item', ?, json_object('flow_version', 1), ?, ?, 1)",
             params![WS, f3, item, i64::MAX, ME],
         )?))
         .unwrap();
@@ -1110,4 +1110,265 @@ mod on_node {
             assert_eq!(says.1.load(Ordering::SeqCst), 1);
         }
     }
+}
+
+/// The options of an open decision.
+fn options_of(e: &FlowEnv, id: &str) -> Vec<String> {
+    let o: Option<String> = q(e, "SELECT options FROM decisions WHERE id = ?", [id]);
+    serde_json::from_str(&o.unwrap_or_default()).unwrap_or_default()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn always_on_the_gate_grants_the_current_version_only() {
+    let Env { e, work, .. } = env();
+    let graph = |text: &str| {
+        one_node(
+            "cmd",
+            "写下名字",
+            json!({"command": format!("printf {text} >> out.txt"), "project_id": "prj_t", "timeout_s": 10}),
+        )
+    };
+    let f = create_flow(&e, "每日记录", graph("a")).await;
+    let run = start(&e, &f, json!({})).await;
+    assert_eq!(settled(&e, &run).await, "waiting");
+    let (dec, _, _) = open_gate(&e, &run).expect("an approval");
+    assert_eq!(
+        options_of(&e, &dec),
+        vec!["执行", steve_flow::engine::GATE_ALWAYS, "不执行"]
+    );
+    answer(&e, &dec, steve_flow::engine::GATE_ALWAYS).await;
+    assert_eq!(settled(&e, &run).await, "done");
+    // the grant: this flow, cmd.run on the project, version 1, from this decision
+    let (cap, rid, ver, by): (String, String, i64, String) = e
+        .env
+        .store()
+        .with_conn(|c| {
+            Ok(c.query_row(
+                "SELECT capability, resource_id, json_extract(scope, '$.flow_version'), decision_id FROM grants WHERE subject_type = 'flow' AND subject_id = ?",
+                [&f],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )?)
+        })
+        .unwrap();
+    assert_eq!((cap.as_str(), rid.as_str(), ver), ("cmd.run", "prj_t", 1));
+    assert_eq!(by, dec);
+
+    // the next run of the same version runs unattended
+    let run = start(&e, &f, json!({})).await;
+    assert_eq!(settled(&e, &run).await, "done");
+    assert!(open_gate(&e, &run).is_none());
+    assert_eq!(
+        std::fs::read_to_string(work.path().join("out.txt")).unwrap(),
+        "aa"
+    );
+
+    // an edit is a new version: the grant no longer covers it
+    let (st, v) = api(
+        &e,
+        "PUT",
+        &format!("/flows/{f}"),
+        Some(json!({ "graph": graph("b") })),
+    )
+    .await;
+    assert_eq!(st, 200, "{v}");
+    let run = start(&e, &f, json!({})).await;
+    assert_eq!(settled(&e, &run).await, "waiting");
+    assert!(open_gate(&e, &run).is_some());
+    assert_eq!(
+        std::fs::read_to_string(work.path().join("out.txt")).unwrap(),
+        "aa"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn http_with_a_templated_host_offers_no_grant() {
+    let Env { e, .. } = env();
+    let f = create_flow(
+        &e,
+        "转发",
+        one_node(
+            "http",
+            "发出去",
+            json!({"method": "POST", "url": "{{input.url}}", "effect": true}),
+        ),
+    )
+    .await;
+    let run = start(&e, &f, json!({"url": "http://api.test:1/claims"})).await;
+    assert_eq!(settled(&e, &run).await, "waiting");
+    let (dec, _, _) = open_gate(&e, &run).expect("an approval");
+    assert_eq!(options_of(&e, &dec), vec!["执行", "不执行"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn secrets_always_grants_normal_items_never_high_ones() {
+    let Env { e, item, vault, .. } = env();
+    let (port, got) = server().await;
+    let cfg = |item: &str| {
+        json!({
+            "url": format!("http://api.test:{port}/echo"),
+            "headers": {"Authorization": format!("Bearer {{{{secrets.{item}.令牌}}}}")},
+        })
+    };
+    let f = create_flow(&e, "查报销", one_node("http", "查询报销单", cfg(&item))).await;
+    let run = start(&e, &f, json!({})).await;
+    assert_eq!(settled(&e, &run).await, "waiting");
+    let (dec, _, _) = open_gate(&e, &run).expect("an approval");
+    assert_eq!(
+        options_of(&e, &dec),
+        vec!["执行", steve_flow::engine::GATE_ALWAYS, "不执行"]
+    );
+    answer(&e, &dec, steve_flow::engine::GATE_ALWAYS).await;
+    assert_eq!(settled(&e, &run).await, "done");
+    let run2 = start(&e, &f, json!({})).await;
+    assert_eq!(settled(&e, &run2).await, "done");
+    assert!(open_gate(&e, &run2).is_none());
+    assert_eq!(got.lock().unwrap().len(), 2);
+
+    // a high item: approve each time, no grant offered
+    let shared = vault
+        .list_vaults(WS, ME)
+        .unwrap()
+        .into_iter()
+        .find(|v| v.scope == "shared")
+        .unwrap()
+        .id;
+    let high = vault
+        .create_item(
+            WS,
+            ME,
+            NewItem {
+                vault_id: shared,
+                template: "api_credential".into(),
+                title: "要紧的令牌".into(),
+                site: Some("api.test".into()),
+                account_id: None,
+                sensitivity: Some("high".into()),
+                fields: vec![NewField {
+                    label: "令牌".into(),
+                    kind: "password".into(),
+                    secret: false,
+                    value: Zeroizing::new(TOKEN.into()),
+                }],
+            },
+        )
+        .unwrap()
+        .id;
+    let f2 = create_flow(&e, "要紧", one_node("http", "查询报销单", cfg(&high))).await;
+    let run = start(&e, &f2, json!({})).await;
+    assert_eq!(settled(&e, &run).await, "waiting");
+    let (dec, _, _) = open_gate(&e, &run).expect("an approval");
+    assert_eq!(options_of(&e, &dec), vec!["执行", "不执行"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_approve_node_on_the_path_releases_the_secrets() {
+    let Env { e, item, .. } = env();
+    let (port, got) = server().await;
+    let graph = json!({
+        "nodes": [
+            {"id": "t", "kind": "trigger", "config": {"source": "manual"}},
+            {"id": "a", "kind": "approve", "title": "要查吗", "config": {"question": "要查吗？", "options": ["查", "不查"]}},
+            {"id": "n", "kind": "http", "title": "查询报销单", "config": {
+                "url": format!("http://api.test:{port}/echo"),
+                "headers": {"Authorization": format!("Bearer {{{{secrets.{item}.令牌}}}}")},
+            }}
+        ],
+        "edges": [{"from": "t", "to": "a"}, {"from": "a", "to": "n", "label": "查"}]
+    });
+    let f = create_flow(&e, "查报销", graph).await;
+    let run = start(&e, &f, json!({})).await;
+    assert_eq!(settled(&e, &run).await, "waiting");
+    let dec: String = q(
+        &e,
+        "SELECT id FROM decisions WHERE subject_type = 'flow_step' AND subject_id = ? AND status = 'open'",
+        [format!("{run}:a")],
+    );
+    answer(&e, &dec, "查").await;
+    assert_eq!(settled(&e, &run).await, "done");
+    assert!(
+        open_gate(&e, &run).is_none(),
+        "no second card for the secret"
+    );
+    assert_eq!(got.lock().unwrap().len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn allow_private_is_a_setting_only_the_owner_writes() {
+    let Env { e, .. } = env();
+    let (port, got) = server().await;
+    // the env put api.test and other.test in; the setting reads back sorted
+    let (st, v) = api(&e, "GET", "/flow-settings/allow-private", None).await;
+    assert_eq!(
+        (st, v["hosts"].clone()),
+        (200, json!(["api.test", "other.test"]))
+    );
+    // the owner takes api.test out: the same request is now refused
+    let (st, v) = api(
+        &e,
+        "PUT",
+        "/flow-settings/allow-private",
+        Some(json!({"hosts": [" Other.Test. ", "other.test", ""]})),
+    )
+    .await;
+    assert_eq!(
+        (st, v["hosts"].clone()),
+        (200, json!(["other.test"])),
+        "{v}"
+    );
+    let f = create_flow(
+        &e,
+        "内网",
+        one_node(
+            "http",
+            "查询",
+            json!({"url": format!("http://api.test:{port}/echo")}),
+        ),
+    )
+    .await;
+    let run = start(&e, &f, json!({})).await;
+    assert_eq!(settled(&e, &run).await, "failed");
+    assert!(
+        step(&e, &run)
+            .2
+            .unwrap_or_default()
+            .contains("允许访问的内网主机"),
+        "{:?}",
+        step(&e, &run)
+    );
+    assert!(got.lock().unwrap().is_empty());
+    // back in: it goes through
+    let (st, _) = api(
+        &e,
+        "PUT",
+        "/flow-settings/allow-private",
+        Some(json!({"hosts": ["api.test"]})),
+    )
+    .await;
+    assert_eq!(st, 200);
+    let run = start(&e, &f, json!({})).await;
+    assert_eq!(settled(&e, &run).await, "done");
+    // a bad host, and a member who is not the owner
+    let (st, _) = api(
+        &e,
+        "PUT",
+        "/flow-settings/allow-private",
+        Some(json!({"hosts": ["http://x/"]})),
+    )
+    .await;
+    assert_eq!(st, 400);
+    let (st, _) = call(
+        &e.router(),
+        Some(&caller(WS, steve_modules::testkit::OTHER)),
+        "PUT",
+        "/flow-settings/allow-private",
+        Some(&json!({"hosts": ["nas.local"]})),
+    )
+    .await;
+    assert_eq!(st, 403);
+    let n: i64 = q(
+        &e,
+        "SELECT count(*) FROM audit WHERE action = 'flow.allow_private'",
+        [],
+    );
+    assert_eq!(n, 2);
 }

@@ -16,8 +16,19 @@ use crate::cron::{CronExpr, DEFAULT_TZ, parse_tz};
 use crate::policy::{MissedPolicy, OverlapPolicy};
 use crate::runs;
 
-/// `budget_usd` of a new schedule.
+/// `budget_usd` of a new `report` or `propose` schedule (one model call, or a proposal).
 pub const DEFAULT_BUDGET_USD: f64 = 1.0;
+/// `budget_usd` of a new `item` or `item_auto` schedule: a coding agent's run costs several
+/// dollars (about $9 on average), so $1 would stop ordinary runs.
+pub const DEFAULT_ITEM_BUDGET_USD: f64 = 20.0;
+
+/// `budget_usd` of a new schedule in `mode`.
+pub fn default_budget_for(mode: Mode) -> f64 {
+    match mode {
+        Mode::ItemAuto | Mode::Item => DEFAULT_ITEM_BUDGET_USD,
+        Mode::Propose | Mode::Report => DEFAULT_BUDGET_USD,
+    }
+}
 /// Upper bound of `budget_usd`.
 pub const MAX_BUDGET_USD: f64 = 50.0;
 

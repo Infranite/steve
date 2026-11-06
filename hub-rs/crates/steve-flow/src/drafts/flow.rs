@@ -584,6 +584,22 @@ impl DraftTarget for FlowTarget {
             match check_graph(c, &cx, &viewer.ws, &edit.graph.to_value()) {
                 Ok(g) => {
                     plan.changes.extend(edit.changes);
+                    // branch/edge mismatches this edit brings in: said, not refused
+                    let before = crate::graph::branch_warnings(
+                        &Graph::from_value(&f.graph).unwrap_or_default(),
+                    );
+                    for w in crate::graph::branch_warnings(&g) {
+                        if !before
+                            .iter()
+                            .any(|b| (&b.node, &b.label, b.kind) == (&w.node, &w.label, w.kind))
+                        {
+                            plan.changes.push(Change::new(
+                                steve_i18n::t!("flow.draft.warning"),
+                                "—",
+                                w.text,
+                            ));
+                        }
+                    }
                     plan.ops.push(json!({
                         "op": "flow.save", "id": f.id, "graph": g.to_value(), "note": NOTE,
                     }));
