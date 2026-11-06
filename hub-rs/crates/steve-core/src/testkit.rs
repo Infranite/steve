@@ -60,6 +60,10 @@ pub struct FakeState {
     /// The next `stop` comes too late: the turn it names ended just before and took the queue as
     /// its follow-up (a new attempt), so the stop reaches nothing.
     pub follow_up_before_stop: bool,
+    /// The adapter pid [`AgentRuntime::agent_pid`] gives a session (YOLO's `ps` root).
+    pub agent_pids: HashMap<String, u32>,
+    /// How often [`AgentRuntime::agent_pid`] was asked.
+    pub pid_asks: usize,
 }
 
 /// acp.ts in miniature: turns are tracked, prompts queue behind a running turn or the hold, and a test
@@ -262,6 +266,11 @@ impl AgentRuntime for FakeRuntime {
         } else {
             Configured::Applied
         })
+    }
+    fn agent_pid(&self, sid: &str) -> Option<u32> {
+        let mut st = self.st();
+        st.pid_asks += 1;
+        st.agent_pids.get(sid).copied()
     }
     fn is_holding(&self) -> bool {
         self.st().holding

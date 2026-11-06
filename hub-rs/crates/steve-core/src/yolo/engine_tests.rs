@@ -729,3 +729,263 @@ fn a_node_card_from_before_a_restart_is_left_alone() {
     assert!(t.actions(&d).is_empty());
     assert!(t.kit.rt.st().answered.is_empty());
 }
+
+/// A Node far away (N0e-E11c): it answers every git question about the items it holds with the
+/// same facts, and counts the questions.
+struct Remote {
+    items: std::collections::HashSet<String>,
+    dirty: bool,
+    ahead: u32,
+    asked: std::sync::Mutex<Vec<crate::node_git::Ask>>,
+    offline: bool,
+}
+
+#[async_trait::async_trait]
+impl crate::node_git::NodeGit for Remote {
+    fn on_node(&self, item: &str) -> bool {
+        self.items.contains(item)
+    }
+    async fn facts(
+        &self,
+        _item: &str,
+        q: crate::node_git::Ask,
+    ) -> steve_node_api::ApiResult<steve_node_api::GitFacts> {
+        use steve_node_api as na;
+        self.asked.lock().unwrap().push(q.clone());
+        if self.offline {
+            return Err(na::ApiError::new(na::ErrorCode::Offline, "设备离线"));
+        }
+        Ok(na::GitFacts {
+            revision: na::Revision::new("g1").unwrap(),
+            head: "c0ffee0000000000000000000000000000000000".into(),
+            branch: Some("steve/x".into()),
+            dirty: self.dirty,
+            refs: q
+                .refs
+                .iter()
+                .map(|r| (r.clone(), (r == "main").then(|| "base".to_string())))
+                .collect(),
+            ranges: q
+                .ranges
+                .iter()
+                .map(|(from, to)| na::RangeFacts {
+                    from: from.clone(),
+                    to: to.clone(),
+                    merge_base: None,
+                    ahead: self.ahead,
+                    behind: 0,
+                    overlap: vec![],
+                    conflicts: vec![],
+                })
+                .collect(),
+            reads: vec![],
+        })
+    }
+    async fn apply(
+        &self,
+        _item: &str,
+        _operation: &str,
+        _subject: &str,
+        _on: &steve_node_api::GitFacts,
+        _action: steve_node_api::GitAction,
+    ) -> crate::node_git::Applied {
+        crate::node_git::Applied::Unknown("not here".into())
+    }
+}
+
+/// An item on a remote Node whose `cwd` is a checkout on the Hub that git there would call dirty
+/// and not ahead: what YOLO decides on is what the Node says.
+fn remote_item(t: &T, remote: Remote) -> (String, String, Arc<Remote>) {
+    let id = t.kit.item("run", "执行", None);
+    let r = crate::git::tests::repo(&t.kit.home().join(&id));
+    std::fs::write(r.join("dirty.txt"), "x").unwrap();
+    let c = r.to_string_lossy().to_string();
+    t.kit
+        .db()
+        .item_patch(&id, crate::patch![cwd: c.as_str(), branch: "steve/x"])
+        .unwrap();
+    let s = t.kit.session(&id, "idle");
+    let mut remote = remote;
+    remote.items.insert(id.clone());
+    let remote = Arc::new(remote);
+    t.kit.core.set_node_git(remote.clone());
+    (id, s, remote)
+}
+
+fn far(dirty: bool, ahead: u32, offline: bool) -> Remote {
+    Remote {
+        items: Default::default(),
+        dirty,
+        ahead,
+        asked: Default::default(),
+        offline,
+    }
+}
+
+fn accept_card(t: &T, item: &str, sid: &str) -> String {
+    t.card(
+        item,
+        sid,
+        "accept",
+        "item",
+        "做完了，请验收",
+        "改好了\n\n检查：✓ cargo test",
+        &["pass", "rework"],
+    )
+}
+
+#[test]
+fn an_acceptance_on_a_remote_node_reads_its_branch_there_and_no_git_here() {
+    let t = t();
+    let (item, sid, remote) = remote_item(&t, far(false, 2, false));
+    let d = accept_card(&t, &item, &sid);
+    let g = t
+        .engine
+        .gather(&t.decision(&d), &Policy::default())
+        .unwrap();
+    let judge::Subject::Accept(a) = &g.facts.subject else {
+        panic!("{:?}", g.facts.subject)
+    };
+    // the Hub's checkout is dirty and has nothing new: the Node's word is clean and ahead
+    assert_eq!(a.branch, Some((true, true)));
+    assert_eq!(
+        g.progress["head"],
+        "c0ffee0000000000000000000000000000000000"
+    );
+    let asked = remote.asked.lock().unwrap().clone();
+    assert_eq!(asked.len(), 2, "{asked:?}");
+    assert_eq!(asked[0].refs, vec!["main", "master"]);
+    // only the base the Node has is compared
+    assert_eq!(
+        asked[1].ranges,
+        vec![("main".to_string(), "HEAD".to_string())]
+    );
+    assert!(asked.iter().all(|q| !q.fetch));
+}
+
+#[test]
+fn a_dirty_branch_on_the_node_is_left_for_you_and_an_offline_one_too() {
+    let t = t();
+    let (item, sid, _) = remote_item(&t, far(true, 2, false));
+    let d = accept_card(&t, &item, &sid);
+    let g = t
+        .engine
+        .gather(&t.decision(&d), &Policy::default())
+        .unwrap();
+    let judge::Subject::Accept(a) = &g.facts.subject else {
+        panic!()
+    };
+    assert_eq!(a.branch, Some((false, true)));
+
+    let t = super::engine_tests::t();
+    let (item, sid, remote) = remote_item(&t, far(false, 2, true));
+    let d = accept_card(&t, &item, &sid);
+    let g = t
+        .engine
+        .gather(&t.decision(&d), &Policy::default())
+        .unwrap();
+    let judge::Subject::Accept(a) = &g.facts.subject else {
+        panic!()
+    };
+    // can't tell: never clean and ahead, and no head to call progress
+    assert_eq!(a.branch, Some((false, false)));
+    assert!(g.progress["head"].is_null());
+    assert_eq!(remote.asked.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn other_cards_of_a_node_item_ask_only_for_its_head() {
+    let t = t();
+    let (item, sid, remote) = remote_item(&t, far(false, 2, false));
+    let d = t.card(
+        &item,
+        &sid,
+        "fail",
+        "item",
+        "Agent 停下来了",
+        "",
+        &["continue"],
+    );
+    let g = t
+        .engine
+        .gather(&t.decision(&d), &Policy::default())
+        .unwrap();
+    assert_eq!(
+        g.progress["head"],
+        "c0ffee0000000000000000000000000000000000"
+    );
+    let asked = remote.asked.lock().unwrap().clone();
+    assert_eq!(asked.len(), 1, "no range for a head: {asked:?}");
+}
+
+#[test]
+fn a_kill_on_a_node_item_never_reads_the_hubs_process_table() {
+    let t = t();
+    let (item, sid, _) = remote_item(&t, far(false, 0, false));
+    let mut child = std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .unwrap();
+    let pid = child.id();
+    // the Hub's runtime would name this process's own pid as the adapter: a `ps` here would find
+    // the child among its descendants
+    t.kit
+        .rt
+        .st()
+        .agent_pids
+        .insert(sid.clone(), std::process::id());
+    let input = ToolInput {
+        raw: json!({"command": format!("kill {pid}")}),
+        kind: Some("execute".into()),
+        locations: vec![],
+        own_dir: None,
+        own_pids: None,
+    };
+    let d = t.permission(&item, &sid, input);
+    let g = t
+        .engine
+        .gather(&t.decision(&d), &Policy::default())
+        .unwrap();
+    let _ = child.kill();
+    let _ = child.wait();
+    let judge::Subject::Tool(tool) = &g.facts.subject else {
+        panic!("{:?}", g.facts.subject)
+    };
+    assert!(tool.own_pids.is_empty(), "{:?}", tool.own_pids);
+    assert_eq!(t.kit.rt.st().pid_asks, 0);
+}
+
+#[test]
+fn a_kill_on_a_hub_item_still_reads_the_hubs_process_table() {
+    let t = t();
+    let (item, sid, _) = t.item();
+    let mut child = std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .unwrap();
+    let pid = child.id();
+    t.kit
+        .rt
+        .st()
+        .agent_pids
+        .insert(sid.clone(), std::process::id());
+    let input = ToolInput {
+        raw: json!({"command": format!("kill {pid}")}),
+        kind: Some("execute".into()),
+        locations: vec![],
+        own_dir: None,
+        own_pids: None,
+    };
+    let d = t.permission(&item, &sid, input);
+    let g = t
+        .engine
+        .gather(&t.decision(&d), &Policy::default())
+        .unwrap();
+    let _ = child.kill();
+    let _ = child.wait();
+    let judge::Subject::Tool(tool) = &g.facts.subject else {
+        panic!()
+    };
+    assert!(tool.own_pids.contains(&pid), "{:?}", tool.own_pids);
+    assert_eq!(t.kit.rt.st().pid_asks, 1);
+}
