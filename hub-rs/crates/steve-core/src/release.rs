@@ -187,15 +187,17 @@ impl Tx<'_> {
         let Some(p) = self.db().project(i.project_id.as_deref())? else {
             return Ok(false);
         };
-        if p.device_id != HUB_DEVICE {
-            /* its paths name the other device's files: git here can't tell; the release request is refused */
-            return Ok(false);
-        }
         if self.git_on_node(&i.id) {
-            /* as its Node says in the facts this section decides on; none is can't tell */
+            /* as its Node says in the facts this section decides on (on whichever device it is); none
+            is can't tell */
             let branch = branch.to_string();
             return Ok(matches!(self.git_take(i), Some(Ok(Some(s)))
                 if s.want.branch.as_deref() == Some(branch.as_str()) && s.changes == Some(false)));
+        }
+        if p.device_id != HUB_DEVICE {
+            /* no Node for it and its paths name the other device's files: git here can't tell; the
+            release request is refused */
+            return Ok(false);
         }
         let wt = i
             .cwd

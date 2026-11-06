@@ -572,3 +572,48 @@ fn yolo_reads_an_items_branch_on_its_node_as_the_hubs_git_would() {
     g(&wt, &["reset", "-q", "--hard", "main"]);
     assert_eq!(look().0, Some((true, false)));
 }
+
+/// A project on another device whose item's git is on that device's Node: with nothing on the
+/// branch, the Node says so and publishing asks for no release (which the Hub would refuse there).
+#[test]
+fn nothing_to_release_on_another_devices_node_asks_for_no_release() {
+    let k = Kit::new();
+    let port = OnNode::new(&k);
+    let r = repo(k.home());
+    let p = release_project(&k, &r);
+    k.db()
+        .exec(
+            "UPDATE projects SET device_id = 'mac-2' WHERE id = ?",
+            &[&p],
+        )
+        .unwrap();
+    let i = k.item("run", "交付与验收", Some(&p));
+    let (name, wt) = branch_with(&r, &k.core.config().worktrees, &i, "b.txt", "b\n");
+    g(&wt, &["reset", "-q", "--hard", "main"]);
+    k.db()
+        .item_patch(
+            &i,
+            patch![cwd: wt.to_string_lossy().to_string(), branch: name.as_str()],
+        )
+        .unwrap();
+    let sid = k.session(&i, "idle");
+    port.put(&i);
+    let s = k.db().session(&sid).unwrap().unwrap();
+    /* one gathering through its Node, then the section that decides on it */
+    let item = k.db().item(&i).unwrap().unwrap();
+    k.core.tx().git_gather(&item);
+    assert!(k.wait(|| k.core.tx().git_seen(&i).is_some()));
+    let mut t = k.core.tx();
+    assert!(
+        t.nothing_to_release(&item).unwrap(),
+        "its Node says: nothing"
+    );
+    let e = t.tool_publish(&s, &name, "说明").unwrap_err().to_string();
+    drop(t);
+    assert!(e.starts_with("没有需要发布的改动，不用发布"), "{e}");
+    let kinds = k.open_kinds(&i);
+    assert!(
+        !kinds.iter().any(|k| k == "approve" || k == "fail"),
+        "{kinds:?}"
+    );
+}
