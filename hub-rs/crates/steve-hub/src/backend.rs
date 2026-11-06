@@ -865,9 +865,10 @@ pub trait Domain: Send + Sync + 'static {
         }
         self.say(ws, user, text, files, mentions).await
     }
-    /// A message the paste guard caught: stored replaced, answered with `guard::REPLY`, not routed.
-    async fn say_guarded(&self, ws: &str, stored: &str) -> BResult<()> {
-        todo_backend!("say_guarded")
+    /// The paste guard's note under a message whose secret was replaced before it was routed
+    /// (`guard::ROUTED`, linking to the vault).
+    async fn say_guard_note(&self, ws: &str) -> BResult<()> {
+        todo_backend!("say_guard_note")
     }
     async fn stop(&self, ws: &str) -> BResult<bool> {
         todo_backend!("stop")

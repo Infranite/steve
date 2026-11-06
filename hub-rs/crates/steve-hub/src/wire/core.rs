@@ -1685,13 +1685,12 @@ impl Domain for CoreDomain {
         })
         .await
     }
-    async fn say_guarded(&self, ws: &str, stored: &str) -> BResult<()> {
-        let (c, ws, stored) = (self.core.clone(), ws.to_string(), stored.to_string());
+    async fn say_guard_note(&self, ws: &str) -> BResult<()> {
+        let (c, ws) = (self.core.clone(), ws.to_string());
         blocking(move || {
-            c.say_guarded(
+            c.say_note(
                 &ws,
-                &stored,
-                steve_vault::guard::REPLY,
+                steve_vault::guard::ROUTED,
                 steve_vault::guard::REPLY_HREF,
             )
             .map(|_| ())

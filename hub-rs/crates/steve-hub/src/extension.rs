@@ -618,6 +618,7 @@ pub async fn run(asm: Assembly) -> anyhow::Result<()> {
         tokio::spawn(job);
     }
     crate::upgrades::spawn_auto_check((*cfg).clone());
+    crate::upgrades::signing::spawn_migrate(cfg.home.clone());
     let app = crate::app::app(st.clone(), w.auth, w.mcp, w.module_routes, w.root_routes);
     let listener = tokio::net::TcpListener::bind((cfg.listen.host.as_str(), cfg.listen.port))
         .await

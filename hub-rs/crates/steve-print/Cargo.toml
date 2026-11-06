@@ -11,6 +11,7 @@ base64 = "=0.23.1"
 serde_json = { version = "=1.0.154", features = ["preserve_order"] }
 sha2 = "=0.11.1"
 steve-node-api = { path = "../steve-node-api" }
+steve-vault = { path = "../steve-vault" }
 tokio = { version = "=1.54.1", features = ["rt", "macros", "process", "time", "fs", "io-util"] }
 tracing = "=0.1.44"
 uuid = { version = "=1.29.0", features = ["v4"] }

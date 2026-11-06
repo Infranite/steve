@@ -161,11 +161,19 @@ impl Conn {
             .process_group(0)
             // last line of defence if the runtime is dropped without shutdown()
             .kill_on_drop(true);
-        for key in [
-            "STEVE_UPGRADE_CONTROL_TOKEN",
-            "STEVE_SUPERVISOR_PID",
-            "STEVE_UPGRADE_ID",
-        ] {
+        // the upgrade channel, the key store and the secret files are the Hub's alone
+        let given = sp
+            .env
+            .iter()
+            .map(|(k, _)| std::ffi::OsString::from(k))
+            .filter(|k| {
+                k.to_str()
+                    .is_some_and(steve_vault::harness::hub_private_env)
+            });
+        for key in steve_vault::harness::hub_private_vars()
+            .into_iter()
+            .chain(given)
+        {
             cmd.env_remove(key);
         }
         let mut child = cmd
@@ -490,6 +498,34 @@ mod control_tests {
             args: vec!["-c".into(), "test -z \"$STEVE_UPGRADE_CONTROL_TOKEN$STEVE_SUPERVISOR_PID$STEVE_UPGRADE_ID\" && touch clean".into()],
             cwd: dir.path().into(),
             env: ["STEVE_UPGRADE_CONTROL_TOKEN", "STEVE_SUPERVISOR_PID", "STEVE_UPGRADE_ID"].into_iter().map(|k|(k.into(), "synthetic".into())).collect(),
+            log_tag: "test".into(),
+        };
+        let conn = Conn::spawn(sp, |_, _| {}, || {}).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), conn.wait_exit())
+            .await
+            .unwrap();
+        assert!(dir.path().join("clean").exists());
+    }
+
+    #[tokio::test]
+    async fn adapters_never_receive_vault_or_secret_file_environment() {
+        let dir = tempfile::tempdir().unwrap();
+        let sp = Spawn {
+            program: "/bin/sh".into(),
+            args: vec![
+                "-c".into(),
+                "test -z \"$STEVE_OIDC_CLIENT_SECRET_FILE$STEVE_VAULT_KEYSTORE$OPENVIKING_KEY_FILE\" && test \"$KEEP\" = 1 && touch clean".into(),
+            ],
+            cwd: dir.path().into(),
+            env: [
+                ("STEVE_OIDC_CLIENT_SECRET_FILE", "/x/secrets/oidc"),
+                ("STEVE_VAULT_KEYSTORE", "keychain"),
+                ("OPENVIKING_KEY_FILE", "/x/secrets/ov"),
+                ("KEEP", "1"),
+            ]
+            .into_iter()
+            .map(|(k, v)| (k.into(), v.into()))
+            .collect(),
             log_tag: "test".into(),
         };
         let conn = Conn::spawn(sp, |_, _| {}, || {}).unwrap();

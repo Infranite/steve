@@ -23,8 +23,10 @@ use regex::Regex;
 
 /// What a hit is replaced with before storing or routing the text, verbatim.
 pub const REPLACEMENT: &str = "［已拦下的机密］";
-/// Steve's fixed answer when a message was intercepted, verbatim.
+/// Steve's fixed answer when a text with a secret in it was refused (a config draft), verbatim.
 pub const REPLY: &str = "看起来你发了一个密码或令牌，我没有记下它。请在保险箱里新建条目保存。";
+/// Steve's note under a conversation message whose secret was replaced before it went on, verbatim.
+pub const ROUTED: &str = "看起来你发了一个密码或令牌：我把它换成了［已拦下的机密］再处理，原文没有记下。要保存它，请在保险箱里新建条目。";
 /// Where [`REPLY`] links to.
 pub const REPLY_HREF: &str = "#/vault";
 
@@ -102,7 +104,29 @@ fn luhn(digits: &[u8]) -> bool {
 
 fn is_card(s: &str) -> bool {
     let digits: Vec<u8> = s.bytes().filter(u8::is_ascii_digit).collect();
-    (13..=19).contains(&digits.len()) && luhn(&digits)
+    (13..=19).contains(&digits.len()) && luhn(&digits) && !is_epoch_ms(s)
+}
+
+/// 13 digits in one run from `15…` to `19…`: a Unix time in milliseconds (2017–2033), as logs and
+/// JSON print them, not a card number.
+fn is_epoch_ms(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() == 13
+        && b.iter().all(u8::is_ascii_digit)
+        && b[0] == b'1'
+        && (b'5'..=b'9').contains(&b[1])
+}
+
+/// A value after “password:” that only names where the secret comes from: `${DB_PASSWORD}`,
+/// `$PASS`, `<your password>`, `{{ secret }}`, `%PASS%`, `/run/secrets/db`, `********`, `xxxxxx`.
+fn is_placeholder(v: &str) -> bool {
+    v.starts_with('$')
+        || v.starts_with('<')
+        || v.starts_with('/')
+        || v.starts_with("{{")
+        || v.starts_with('%')
+        || v.chars().all(|c| c == '*')
+        || v.chars().all(|c| c == 'x' || c == 'X')
 }
 
 /// Every secret-looking span of `text`, sorted, overlaps merged.
@@ -122,7 +146,9 @@ pub fn scan(text: &str) -> Vec<Span> {
         add(m.range(), "private_key");
     }
     for c in SAID.captures_iter(text) {
-        if let Some(m) = c.get(1).or_else(|| c.get(2)) {
+        if let Some(m) = c.get(1).or_else(|| c.get(2))
+            && !is_placeholder(m.as_str())
+        {
             add(m.range(), "said");
         }
     }
@@ -165,8 +191,8 @@ pub fn redact(text: &str) -> Option<String> {
 pub struct Intercepted {
     /// The text to store and route: the original, or with the hits replaced.
     pub text: String,
-    /// Something was replaced: store `text`, don't run the normal reply, answer [`REPLY`] (link
-    /// [`REPLY_HREF`]).
+    /// Something was replaced. The conversation stores and routes `text` and adds [`ROUTED`] (link
+    /// [`REPLY_HREF`]); a config draft is refused with [`REPLY`].
     pub blocked: bool,
 }
 
@@ -256,9 +282,33 @@ mod tests {
             "订单号 2026110100012345",
             "sk-learn 和 ghp 都不是令牌",
             "密码是 abc",
+            // Unix times in milliseconds (a log line, JSON) that happen to pass the Luhn check
+            "ts=1793963352744 done",
+            r#"{"started_at_ms": 1762409600008}"#,
+            // placeholders that only say where the secret comes from
+            "password: ${DB_PASSWORD}",
+            "PASSWORD=$PGPASSWORD",
+            "password: <your-password>",
+            "password={{ vault.db }}",
+            "password: %DB_PASS%",
+            "password_file 密码：/run/secrets/db_password",
+            "password: ********",
+            "密码是 xxxxxx",
         ] {
             assert_eq!(redact(s), None, "{s}");
         }
+    }
+
+    #[test]
+    fn real_values_next_to_the_exclusions_are_still_caught() {
+        // a 19-digit UnionPay number starting 62, a 13-digit card not shaped like a timestamp
+        assert_eq!(r("卡号 6212345678901234569"), "卡号 ［已拦下的机密］");
+        assert!(luhn(b"6212345678901234569") && luhn(b"1793963352744"));
+        assert_eq!(r("4222222222222"), "［已拦下的机密］");
+        // a timestamp written in groups is no timestamp
+        assert!(!is_epoch_ms("1793 9633 5274 7"));
+        // a value that merely contains a placeholder sign
+        assert_eq!(r("password: a$b<c/d!"), "password: ［已拦下的机密］");
     }
 
     #[test]

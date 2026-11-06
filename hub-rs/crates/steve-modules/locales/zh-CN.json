@@ -50,6 +50,7 @@
   "modules.vault.already_initialized": "保险箱已经启用过了",
   "modules.vault.key_exists": "钥匙串里已经有另一把同名的主密钥，没有覆盖它",
   "modules.vault.rotating": "主密钥正在轮换，请稍后再试",
+  "modules.vault.rotate_unreadable": "有 %{n} 个条目的数据密钥打不开，没有轮换主密钥",
   "modules.vault.bad_recovery_code": "恢复码不对",
   "modules.vault.locked": "保险箱暂时打不开：Mac mini 的钥匙串被锁了",
   "modules.vault.key_missing": "保险箱暂时打不开：钥匙串里没有主密钥，请用恢复码恢复",

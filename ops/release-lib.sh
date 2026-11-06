@@ -88,3 +88,53 @@ web_restore() { # webroot previous-raw-symlink-target
   [[ -d $resolved ]] || return 1
   web_switch_target "$root" "$target"
 }
+
+# ── the signing keychain (ops/sign-setup.sh) ──
+# Its password never goes on a command line: `ps` shows those to every process of the user, agents included.
+# `security -i` reads the command from stdin instead (print is a builtin: no process carries it either). The keychain
+# is unlocked only around the codesign that needs it and locked again after, failed or not: left unlocked, it lets
+# any process sign a binary as the Hub, and steve-keyhelper hands the vault's keys to that binary. It also locks
+# itself after 5 idle minutes and on sleep, should a run die in between.
+SIGN_PASS_ACCOUNT=steve/signing/keychain-pass
+kc_security() { # security -i command line (with a password in it) → security's status
+  print -r -- "$1" | security -i
+}
+kc_quotable() { # password keychain: what a `security -i` line can carry (no quoting inside it)
+  [[ -n $1 && $1 != *[[:space:]\"\'\\]* && $2 != *[\"\\$'\n']* ]] && return 0
+  print -u2 -r -- "   the signing keychain's password or path has a space, quote or backslash: not passed to security"
+  return 1
+}
+kc_unlock() { # keychain password
+  kc_quotable "$2" "$1" || return 1
+  kc_security "unlock-keychain -p $2 \"$1\"" || return 1
+  security set-keychain-settings -l -u -t 300 "$1"
+}
+kc_lock() { # keychain
+  security lock-keychain "$1" || print -u2 -r -- "   could not lock $1 again"
+}
+kc_sign() { # keychain password command…: runs the command with the keychain unlocked, then locks it whatever happened
+  local kc=$1 pass=$2 rc=0
+  shift 2
+  kc_unlock $kc "$pass" || { print -u2 -r -- "   cannot unlock $kc"; return 1 }
+  "$@" || rc=$?
+  kc_lock $kc
+  return $rc
+}
+# The keychain's password: signing/keychain-pass until the Hub moves it into the login keychain (through
+# steve-keyhelper, hub-rs upgrades/signing.rs), then that entry. Only the signed Hub reads the entry unasked; anyone
+# else meets a macOS prompt, so only a run from a terminal asks for it (the Hub's one-click upgrade gets it from the
+# Hub instead). "Always Allow" on that prompt would let every process read it unasked: allow it once.
+sign_pass() { # keychain → the password on stdout
+  local f=${1:h}/keychain-pass b64
+  if [[ -f $f ]]; then print -r -- "$(<$f)"; return 0; fi
+  if [[ ! -t 0 ]]; then
+    print -u2 -r -- "   the signing keychain's password is in the login keychain, and only a run from a terminal asks macOS for it: upgrade from Steve's settings, or run this in Terminal"
+    return 1
+  fi
+  print -u2 -r -- "   macOS asks for the login keychain item $SIGN_PASS_ACCOUNT: click 允许 (Allow), never 始终允许 (Always Allow), which would let every process read it unasked"
+  b64=$(security find-generic-password -s ${STEVE_KEYHELPER_SERVICE:-io.github.infranite.steve.vault} -a $SIGN_PASS_ACCOUNT -w 2>/dev/null) || {
+    print -u2 -r -- "   the signing keychain's password did not open (the prompt was refused)"
+    return 1
+  }
+  print -r -- $b64 | base64 -D | od -An -v -tx1 | tr -d ' \n'
+}

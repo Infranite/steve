@@ -1023,11 +1023,8 @@ async fn attempt(
         .kill_on_drop(true);
     #[cfg(unix)]
     cmd.process_group(0);
-    for key in [
-        "STEVE_UPGRADE_CONTROL_TOKEN",
-        "STEVE_SUPERVISOR_PID",
-        "STEVE_UPGRADE_ID",
-    ] {
+    // the upgrade channel, the key store and the secret files are the Hub's alone
+    for key in steve_vault::harness::hub_private_vars() {
         cmd.env_remove(key);
     }
     let (mut child, _group) = ctx
