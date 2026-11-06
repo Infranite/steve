@@ -28,7 +28,8 @@ impl Extension for FeishuBot {
                 app.clone(),
             )
             .adapter(app.clone())
-            .profiles(app),
+            .profiles(app.clone())
+            .media(Arc::new(feishu::FeishuMedia::new(app.id()))),
         )
     }
 
@@ -58,9 +59,9 @@ impl Extension for FeishuBot {
     }
 }
 
-/// `feishu.self`: you on Feishu (F6), one provider for connections, the device flow, sending as
-/// you (C6), looking people up as you (first, before the bot), and one self poller per connection
-/// with `msg.receive`.
+/// `feishu.self`: you on Feishu (F6), one provider for connections, the device flow, acting as
+/// you (C6: sending, reactions, recalling what you sent), looking people up as you (first, before
+/// the bot), the media of your messages, and one self poller per connection with `msg.receive`.
 pub(crate) struct FeishuSelf;
 
 impl Extension for FeishuSelf {
@@ -81,8 +82,9 @@ impl Extension for FeishuSelf {
                     .receive(Receive::Poll, Some("msg.receive")),
                 user.clone(),
             )
-            .as_user(user.clone())
-            .profiles(user.clone()),
+            .act_as_user(user.clone())
+            .profiles(user.clone())
+            .media(Arc::new(feishu::FeishuMedia::new(user.id()))),
         )?;
         d.feishu_user = Some(user);
         Ok(())

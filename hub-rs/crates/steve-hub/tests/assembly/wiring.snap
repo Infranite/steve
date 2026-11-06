@@ -241,6 +241,8 @@ jobs 14
 lifecycle feishu_app
 lifecycle feishu_user
 mail imap
+media feishu_app
+media feishu_user
 profiles feishu_app
 profiles feishu_user
 provider feishu_app {"id":"feishu_app","system":"feishu_app","name":"飞书应用机器人","auth":"credential","caps":["msg.receive","msg.send","directory.read","events"],"device":false,"fields":[{"key":"app_id","label":"App ID","secret":false,"required":true,"type":"text","hint":"开发者后台 → 凭证与基础信息"},{"key":"app_secret","label":"App Secret","secret":true,"required":true,"type":"password"},{"key":"verification_token","label":"Verification Token","secret":true,"required":false,"type":"password","hint":"只有用 webhook 接收事件时需要；长连接不需要"},{"key":"encrypt_key","label":"Encrypt Key","secret":true,"required":false,"type":"password","hint":"只有用 webhook 接收事件时需要；长连接不需要"},{"key":"domain","label":"域名","secret":false,"required":true,"type":"select","default":"feishu","hint":"feishu = 飞书，lark = Lark"}]}

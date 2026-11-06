@@ -93,6 +93,9 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/040.sql"),
     // 41: an extension adapter's own poll cursors (`chan_cursors.token`).
     include_str!("../migrations/041.sql"),
+    // 42: the connection a message was sent through, the provider's create time of a send, and
+    // the remote's delivery ids per connection (`chan_message_seen`).
+    include_str!("../migrations/042.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).

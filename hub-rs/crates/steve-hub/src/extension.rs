@@ -24,8 +24,9 @@ use std::sync::Arc;
 use anyhow::Context;
 use axum::Router;
 use serde_json::Value;
-use steve_channels::adapters::feishu::{FeishuUser, SendAsUser};
-use steve_channels::ext::{ChannelDecl, ChannelSide, ConnectionHook, Queries};
+use steve_channels::adapters::feishu::FeishuUser;
+use steve_channels::channel::ActAsUser;
+use steve_channels::ext::{ChannelDecl, ChannelSide, ConnectionHook, MediaFetch, Queries};
 use steve_channels::{ChannelAdapter, MessageSink, ProfileAdapter};
 use steve_modules::Modules;
 use steve_modules::accounts::connections::{ConnectionProvider, Connections};
@@ -199,7 +200,8 @@ impl Assembly {
             providers: Vec::new(),
             channel_adapters: Vec::new(),
             profiles: Vec::new(),
-            as_user: Vec::new(),
+            act_as_user: Vec::new(),
+            media: Vec::new(),
             mail: Vec::new(),
             event_sources: Vec::new(),
             feishu_user: None,
@@ -308,7 +310,8 @@ pub struct Declare<'a> {
     pub(crate) providers: Vec<Arc<dyn ConnectionProvider>>,
     pub(crate) channel_adapters: Vec<Arc<dyn ChannelAdapter>>,
     pub(crate) profiles: Vec<Arc<dyn ProfileAdapter>>,
-    pub(crate) as_user: Vec<(String, Arc<dyn SendAsUser>)>,
+    pub(crate) act_as_user: Vec<Arc<dyn ActAsUser>>,
+    pub(crate) media: Vec<Arc<dyn MediaFetch>>,
     pub(crate) mail: Vec<Arc<dyn steve_mail::MailAdapter>>,
     pub(crate) event_sources: Vec<Arc<dyn steve_flow::EventAdapter>>,
     /// The built-in `feishu.self` provider, for the channels routes and the Feishu runtime.
@@ -330,7 +333,7 @@ impl Declare<'_> {
     }
 
     /// A channel-side adapter: its provider goes to `Connections`, its other views to
-    /// `Channels` and the outbox.
+    /// `Channels` (channel adapter, profiles, media) and the outbox (acting as you).
     pub fn channel(&mut self, side: ChannelSide) -> Result<(), ExtensionError> {
         side.check().map_err(ExtensionError::new)?;
         let id = side.decl.adapter.clone();
@@ -339,9 +342,8 @@ impl Declare<'_> {
         self.providers.push(side.provider);
         self.channel_adapters.extend(side.adapter);
         self.profiles.extend(side.profiles);
-        if let Some(a) = side.as_user {
-            self.as_user.push((id, a));
-        }
+        self.act_as_user.extend(side.act_as_user);
+        self.media.extend(side.media);
         Ok(())
     }
 

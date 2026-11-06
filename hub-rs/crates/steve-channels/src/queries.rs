@@ -110,42 +110,48 @@ impl ConnQueries {
             return Ok(None);
         }
         self.channels.store().reader(|c| -> ChannelResult<_> {
-            Ok(c.query_row(
-                "SELECT s.external_id, m.external_id, m.created, m.text, m.thread_key, a.system_id, a.handle
-                   FROM chan_messages m JOIN spaces s ON s.id = m.space_id
-                   LEFT JOIN accounts a ON a.id = m.sender_account_id
-                  WHERE s.workspace_id = ?1 AND s.external_id = ?2 AND m.external_id = ?3
-                  ORDER BY m.created, m.id LIMIT 1",
-                params![self.ws, space_ext, ext],
-                |r| {
-                    let system: Option<String> = r.get(5)?;
-                    let handle: Option<String> = r.get(6)?;
-                    Ok(MessageRef {
-                        space_ext_id: r.get(0)?,
-                        ext_id: r.get(1)?,
-                        created: r.get(2)?,
-                        // a stored provider id comes with the provider's time
-                        created_exact: true,
-                        sender: system.zip(handle).map(|(s, h)| HandleRef::new(s, h)),
-                        text: r.get(3)?,
-                        thread_key: r.get(4)?,
-                        source_id: None,
-                    })
-                },
-            )
-            .optional()?)
+            let id: Option<String> = c
+                .query_row(
+                    "SELECT m.id FROM chan_messages m JOIN spaces s ON s.id = m.space_id
+                      WHERE s.workspace_id = ?1 AND s.external_id = ?2 AND m.external_id = ?3
+                      ORDER BY m.created, m.id LIMIT 1",
+                    params![self.ws, space_ext, ext],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            match id {
+                Some(id) => crate::messages::message_ref(c, &id, &self.conn),
+                None => Ok(None),
+            }
         })
     }
 
-    /// Stored message of space `space_ext` delivered with remote id `source_id` on this
-    /// connection. Delivery ids are not stored yet: always `None` for now.
+    /// Stored message of space `space_ext` that this connection delivered, or sent, with remote
+    /// id `source_id`.
     pub fn message_ref_by_source(
         &self,
         space_ext: &str,
         source_id: &str,
     ) -> ChannelResult<Option<MessageRef>> {
-        let _ = (space_ext, source_id);
-        Ok(None)
+        if source_id.is_empty() {
+            return Ok(None);
+        }
+        self.channels.store().reader(|c| -> ChannelResult<_> {
+            let id: Option<String> = c
+                .query_row(
+                    "SELECT m.id FROM chan_message_seen x JOIN chan_messages m ON m.id = x.message_id
+                       JOIN spaces s ON s.id = m.space_id
+                      WHERE x.connection_id = ?1 AND x.source_id = ?2 AND s.workspace_id = ?3
+                        AND s.external_id = ?4",
+                    params![self.conn, source_id, self.ws, space_ext],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            match id {
+                Some(id) => crate::messages::message_ref(c, &id, &self.conn),
+                None => Ok(None),
+            }
+        })
     }
 
     /// This connection's cursor for `container` (a space, a thread, a feed: the adapter's name).

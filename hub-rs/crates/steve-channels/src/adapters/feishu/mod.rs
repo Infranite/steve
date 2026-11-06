@@ -37,12 +37,13 @@ pub mod user_oauth;
 pub mod verify;
 pub mod ws;
 
-pub use as_user::{SendAsUser, SentAsUser, UserMessage};
+pub use as_user::{SentAsUser, UserMessage};
 pub use auth::{DeviceFlows, FeishuApp, FeishuUser, device_routes};
 pub use chats::{BotChat, parse_chat_event, sync_bot_chats};
 pub use client::{Domain, FeishuClient, FeishuEnv, FeishuError, TokenSource, VerifyTokens};
 pub use directory::FeishuDirectory;
 pub use hooks::{BotHook, SelfPollHook};
+pub use resource::FeishuMedia;
 pub use self_poll::{RoundReport, SelfPoller, SelfPollers};
 pub use send::{Sent, at_handle, reply_in_thread};
 pub use user_oauth::{FeishuIds, SelfClaims, identify_sender, user_routes};

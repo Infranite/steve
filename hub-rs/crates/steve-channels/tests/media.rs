@@ -14,9 +14,9 @@ use axum::http::{HeaderMap, Request, header};
 use rusqlite::OptionalExtension;
 use serde_json::{Value, json};
 use steve_channels::Channels;
-use steve_channels::adapters::feishu::FeishuApp;
 use steve_channels::adapters::feishu::inbound::LongConnection;
 use steve_channels::adapters::feishu::ws::WsState;
+use steve_channels::adapters::feishu::{FeishuApp, FeishuMedia};
 use steve_channels::fake::feishu::model::Resource;
 use steve_channels::fake::feishu::{Endpoint, FakeFeishu, WsClientConfig, fixture, ids};
 use steve_flow::testkit::FakeCore;
@@ -78,6 +78,7 @@ async fn setup() -> H {
         .build(env.modules.clone(), Arc::new(LinearExecutor));
     let ch = Channels::builder(env.modules.clone(), conns.clone(), Arc::new(flow))
         .adapter(app)
+        .media(Arc::new(FeishuMedia::new("feishu_app")))
         .build();
     let capi: Router = connections::routes(conns).with_state(env.modules.clone());
     let body = json!({

@@ -25,7 +25,7 @@ use async_trait::async_trait;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 
-use crate::channel::ReactionKind;
+use crate::channel::{MessageRef, ReactionKind};
 use crate::{ChannelResult, Channels, messages};
 
 /// How long one provider call may take before it is given up on.
@@ -48,7 +48,7 @@ pub trait Reactor: Send + Sync {
         ch: &Channels,
         ws: &str,
         conn: &str,
-        ext_msg_id: &str,
+        msg: &MessageRef,
         kind: ReactionKind,
     ) -> Result<Added, String>;
 
@@ -58,7 +58,7 @@ pub trait Reactor: Send + Sync {
         ch: &Channels,
         ws: &str,
         conn: &str,
-        ext_msg_id: &str,
+        msg: &MessageRef,
         reaction_id: &str,
         as_user: bool,
     ) -> Result<(), String>;
@@ -88,10 +88,11 @@ impl Reactor for AdapterReactor {
         ch: &Channels,
         ws: &str,
         conn: &str,
-        ext_msg_id: &str,
+        msg: &MessageRef,
         kind: ReactionKind,
     ) -> Result<Added, String> {
         let adapter = adapter_of(ch, ws, conn)?;
+        let ext_msg_id = msg.id().ok_or_else(|| "这条消息没有消息 id".to_string())?;
         let a = ch
             .adapter(&adapter)
             .ok_or_else(|| "这个渠道不支持表情回复".to_string())?;
@@ -118,11 +119,12 @@ impl Reactor for AdapterReactor {
         ch: &Channels,
         ws: &str,
         conn: &str,
-        ext_msg_id: &str,
+        msg: &MessageRef,
         reaction_id: &str,
         _as_user: bool,
     ) -> Result<(), String> {
         let adapter = adapter_of(ch, ws, conn)?;
+        let ext_msg_id = msg.id().ok_or_else(|| "这条消息没有消息 id".to_string())?;
         let a = ch
             .adapter(&adapter)
             .ok_or_else(|| "这个渠道不支持表情回复".to_string())?;
@@ -213,6 +215,8 @@ struct Target {
     conn: String,
     space: String,
     ext: String,
+    /// The message as the voice's adapter acts on it.
+    msg: MessageRef,
 }
 
 /// The message reacts as the space's voice (the identity that answers there,
@@ -228,6 +232,7 @@ fn target(c: &Connection, message_id: &str) -> ChannelResult<Option<Target>> {
                 conn: r.get(1)?,
                 space: r.get(2)?,
                 ext: r.get(3)?,
+                msg: MessageRef::platform("", ""),
             })
         },
     )
@@ -236,6 +241,10 @@ fn target(c: &Connection, message_id: &str) -> ChannelResult<Option<Target>> {
     let Some(mut t) = t else { return Ok(None) };
     if let Some(v) = crate::spaces::voice(c, &t.space)? {
         t.conn = v;
+    }
+    match crate::messages::message_ref(c, message_id, &t.conn)? {
+        Some(m) => t.msg = m,
+        None => return Ok(None),
     }
     Ok(Some(t))
 }
@@ -317,7 +326,7 @@ impl Channels {
     async fn ack_provider(&self, message_id: &str, t: &Target) -> ChannelResult<()> {
         let added = timed(
             self.reactor()
-                .add(self, &t.ws, &t.conn, &t.ext, ReactionKind::Ack),
+                .add(self, &t.ws, &t.conn, &t.msg, ReactionKind::Ack),
         )
         .await;
         if let Err(e) = &added {
@@ -374,7 +383,7 @@ impl Channels {
             && let Err(e) =
                 timed(
                     self.reactor()
-                        .remove(self, &t.ws, &t.conn, &t.ext, rid, row.as_user),
+                        .remove(self, &t.ws, &t.conn, &t.msg, rid, row.as_user),
                 )
                 .await
         {
@@ -387,7 +396,7 @@ impl Channels {
             Finish::Clear => None,
         };
         let added = match kind {
-            Some(k) => Some(timed(self.reactor().add(self, &t.ws, &t.conn, &t.ext, k)).await),
+            Some(k) => Some(timed(self.reactor().add(self, &t.ws, &t.conn, &t.msg, k)).await),
             None => None,
         };
         let (id, emoji, as_user) = match &added {

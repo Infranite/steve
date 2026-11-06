@@ -372,6 +372,42 @@ pub fn get(c: &Connection, id: &str) -> ChannelResult<Option<ChanMessage>> {
     }
 }
 
+/// Stored message `id` as an adapter needs it to act on it again (recall, reactions), for
+/// connection `conn`: the delivery id is the one that connection knows it by.
+pub(crate) fn message_ref(
+    c: &Connection,
+    id: &str,
+    conn: &str,
+) -> ChannelResult<Option<crate::channel::MessageRef>> {
+    Ok(c.query_row(
+        "SELECT s.external_id, m.external_id, coalesce(m.ext_created, m.created),
+                m.direction = 'in' OR m.ext_created IS NOT NULL, a.system_id, a.handle, m.text,
+                m.thread_key,
+                (SELECT x.source_id FROM chan_message_seen x WHERE x.message_id = m.id AND x.connection_id = ?2)
+           FROM chan_messages m JOIN spaces s ON s.id = m.space_id
+           LEFT JOIN accounts a ON a.id = m.sender_account_id
+          WHERE m.id = ?1",
+        params![id, conn],
+        |r| {
+            let system: Option<String> = r.get(4)?;
+            let handle: Option<String> = r.get(5)?;
+            Ok(crate::channel::MessageRef {
+                space_ext_id: r.get(0)?,
+                ext_id: r.get::<_, Option<String>>(1)?.filter(|x| !x.is_empty()),
+                created: r.get(2)?,
+                created_exact: r.get(3)?,
+                sender: system
+                    .zip(handle)
+                    .map(|(s, h)| crate::channel::HandleRef::new(s, h)),
+                text: r.get(6)?,
+                thread_key: r.get(7)?,
+                source_id: r.get(8)?,
+            })
+        },
+    )
+    .optional()?)
+}
+
 /// The outbound message's basis (C5), for the interfaces only you see; attachments in their public
 /// form (no provider keys; `url` or `unavailable`) and an old card / post read again from its raw
 /// event ([`crate::media::present`]).
