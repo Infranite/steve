@@ -21,8 +21,8 @@ use super::cx::{
 use super::oauth::{self, DevicePoll, TokenSet, pkce_challenge, random_token};
 use super::pending::{Device, DeviceStatus, Devices, Flow, PendingStates};
 use super::provider::{
-    AccountInfo, AuthKind, ConnectionProvider, FieldDef, Health, Owner, PAIR_KEY, Paired,
-    ProviderError, StewardHint, TokenKind,
+    AccountInfo, AuthKind, CONFIG_VERSION_KEY, ConnectionProvider, FieldDef, Health, Owner,
+    PAIR_KEY, Paired, ProviderError, StewardHint, TokenKind,
 };
 use super::repo::{self, ConnRow, HealthState};
 use crate::accounts::claim::claim_self;
@@ -354,6 +354,34 @@ fn not_configured(spec_name: &str) -> VaultError {
         provider = spec_name
     ))
     .into()
+}
+
+/// Sets (`Some`) or removes (`None`) one key of an object `config`.
+fn put_key(config: &mut Value, key: &str, v: Option<Value>) {
+    if let Some(o) = config.as_object_mut() {
+        match v {
+            Some(v) => {
+                o.insert(key.into(), v);
+            }
+            None => {
+                o.remove(key);
+            }
+        }
+    }
+}
+
+/// The [`ConnectionProvider::config_version`] a connection's `config` was stored under (absent: 1).
+fn stored_version(config: &Value) -> u64 {
+    config
+        .get(CONFIG_VERSION_KEY)
+        .and_then(Value::as_u64)
+        .unwrap_or(1)
+}
+
+/// What [`CONFIG_VERSION_KEY`] holds for `version` (nothing for 1, so a provider that never bumps
+/// stores what it always did).
+fn version_value(version: u32) -> Option<Value> {
+    (version != 1).then(|| json!(version))
 }
 
 fn merge(into: &mut Value, from: &Value) {
@@ -1238,8 +1266,6 @@ impl Connections {
         let h = normalize(&system, &u.info.handle).ok_or_else(|| {
             ApiError::rule(steve_i18n::t!("modules.connections.verify_no_account"))
         })?;
-        // the pair again, in the commit: it may have gone since the flow started
-        self.check_pair(tx, viewer, p, &mut u.config, Some(&u.id), true)?;
         // your own identity, proven by the provider: a contact a channel made for it joins “我” first
         if u.reauth_of.is_none() && u.info.owner == Owner::Me && p.claims_self() {
             self.claim_into_me(tx, viewer, actor, &system.id, &u.info)?;
@@ -1327,6 +1353,23 @@ impl Connections {
             ))
             .into());
         }
+        // the pair again, in the commit: it may have gone since the flow started. A connection that
+        // is there keeps the pair it has now, not the copy its flow took at the start (a re-pair
+        // made meanwhile stands): on a re-authorization the row's pair alone, on a new connect onto
+        // it the flow's only when the row has none.
+        let this = existing.as_ref().map_or(u.id.clone(), |c| c.id.clone());
+        let mut auto = true;
+        if let Some(c) = &existing {
+            let current = c.config.get(PAIR_KEY).filter(|v| !v.is_null()).cloned();
+            if current.is_some() || u.reauth_of.is_some() {
+                put_key(&mut u.config, PAIR_KEY, current);
+                // a pair dropped meanwhile is not picked again (unless it is required)
+                auto = p.pairing().is_some_and(|x| x.required);
+            }
+        }
+        self.check_pair(tx, viewer, p, &mut u.config, Some(&this), auto)?;
+        let pair = u.config.get(PAIR_KEY).cloned();
+        let version = version_value(p.config_version());
         let available = p.available_caps(&u.scopes);
         let pick = |req: &Option<Vec<String>>, current: &[String]| -> Vec<String> {
             match req {
@@ -1345,6 +1388,9 @@ impl Connections {
         };
         let mut config = u.config.clone();
         merge(&mut config, &u.info.config);
+        // the checked pair and the current version, whatever the merges brought
+        put_key(&mut config, PAIR_KEY, pair.clone());
+        put_key(&mut config, CONFIG_VERSION_KEY, version.clone());
         let health = HealthState {
             last_ok: now,
             expires_at: u.expires_at,
@@ -1375,6 +1421,8 @@ impl Connections {
                 c.caps = pick(&u.caps, &c.caps);
                 c.granted_scopes = u.scopes.clone();
                 merge(&mut c.config, &config);
+                put_key(&mut c.config, PAIR_KEY, pair);
+                put_key(&mut c.config, CONFIG_VERSION_KEY, version);
                 c.health = health;
                 repo::update(tx, &c, now)?;
                 self.settle_decision(tx, ws, &c.id, json!({"reauthorized": true}))?;
@@ -1773,8 +1821,11 @@ impl Connections {
     // ------------------------------------------------------------ credential form
 
     /// The config of a connect path, before anything is stored or verified: drops `api_base`
-    /// outside tests (adapters only honour it there) and checks the pair ([`Self::check_pair`],
-    /// picking the only candidate when none is named). `this`: the connection being re-authorized.
+    /// outside tests (adapters only honour it there) and the stored version
+    /// ([`CONFIG_VERSION_KEY`], the framework's), runs the provider's
+    /// [`ConnectionProvider::check_config`] (`400` when it refuses) and checks the pair
+    /// ([`Self::check_pair`], picking the only candidate when none is named). `this`: the
+    /// connection being re-authorized.
     fn clean_config(
         &self,
         who: &Caller,
@@ -1785,11 +1836,26 @@ impl Connections {
         if !config.is_object() {
             config = Value::Object(Map::new());
         }
-        if !self.0.cfg.allow_api_base
-            && let Some(o) = config.as_object_mut()
-        {
-            o.remove("api_base");
+        if let Some(o) = config.as_object_mut() {
+            if !self.0.cfg.allow_api_base {
+                o.remove("api_base");
+            }
+            o.remove(CONFIG_VERSION_KEY);
         }
+        p.check_config(
+            &StartCx {
+                conns: self,
+                ws: &who.ws,
+                config: &config,
+            },
+            &config,
+        )
+        .map_err(|e| {
+            VaultError::from(ApiError::rule(steve_i18n::t!(
+                "modules.connections.config_rejected",
+                error = e
+            )))
+        })?;
         let viewer = self.viewer(who)?;
         self.0
             .m
@@ -2293,6 +2359,38 @@ impl Connections {
         if r.is_err() {
             tracing::error!("could not update connection config");
         }
+    }
+
+    /// Marks `reauth` every connection stored under another [`ConnectionProvider::config_version`]
+    /// than its provider's now ([`CONFIG_VERSION_KEY`]; a provider replaced under the same id, or
+    /// a new stored shape), with the provider's question; what runs for it stops. Run at startup,
+    /// before connections run. Returns how many were marked.
+    pub fn check_versions(&self) -> VaultResult<usize> {
+        let now = self.now();
+        self.0.m.store.transaction(|tx| {
+            let mut n = 0;
+            for mut r in repo::authorized(tx)? {
+                let Some(p) = self.provider(&r.adapter) else {
+                    continue;
+                };
+                let (stored, current) = (stored_version(&r.config), p.config_version());
+                if stored == u64::from(current) {
+                    continue;
+                }
+                tracing::info!(connection = %r.id, adapter = %r.adapter, stored, current, "connection stored under another config version: needs a new authorization");
+                r.status = "reauth".into();
+                r.health.last_error = steve_i18n::t!("modules.connections.config_version");
+                r.health.error_at = now;
+                repo::set_health(tx, &r.id, &r.status, &r.health, now)?;
+                self.open_reauth(tx, &r)?;
+                tx.publish(ChangeEvent::Connection {
+                    id: r.id.clone(),
+                    ws: r.workspace_id.clone(),
+                });
+                n += 1;
+            }
+            Ok::<_, VaultError>(n)
+        })
     }
 
     fn record_sync(&self, ws: &str, id: &str, h: &Health) -> VaultResult<()> {

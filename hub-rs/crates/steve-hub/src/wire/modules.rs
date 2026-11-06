@@ -418,6 +418,11 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
         conns = conns.provider(p.clone());
     }
     let conns = conns.build();
+    // a connection stored under another shape than its provider's now waits for a new
+    // authorization instead of running on it
+    if conns.check_versions().is_err() {
+        tracing::error!("could not check the stored connection versions");
+    }
     let gh = steve_github::GitHub::new(conns.clone(), gh_env);
     gh_slot.bind(&gh);
     if let Some(n) = git_nodes {
