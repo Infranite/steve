@@ -336,7 +336,7 @@ export default {
     fetchError: "没取到最新状态，以上是上次同步的结果：{{error}}",
     mergeTitle: "合并方式 · {{value}}",
     checksTitle: "托管方要求的检查 · {{value}}",
-    checksNote: "Steve 合并时不另跑检查：每一项交付时已过了自己的构建，发布 tag 时 CI 会再跑一遍。",
+    checksNote: "Steve 合并时不另跑检查：每一项交付时已过了自己的构建，合并后推到 main 的 CI 通过了才会打发布 tag。",
     unsure: "不确定",
     none: "没有",
     shipTitle: "发布方式 · {{value}}",

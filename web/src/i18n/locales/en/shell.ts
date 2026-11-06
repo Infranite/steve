@@ -350,7 +350,7 @@ export default {
     fetchError: "Couldn't fetch the latest state; this is from the last sync: {{error}}",
     mergeTitle: "Merge · {{value}}",
     checksTitle: "Checks the host requires · {{value}}",
-    checksNote: "Steve runs no checks of its own when merging: each item passed its own build when it was delivered, and CI runs again when the release tag is pushed.",
+    checksNote: "Steve runs no checks of its own when merging: each item passed its own build when it was delivered, and the release tag is cut only once CI has passed on the merged main.",
     unsure: "unsure",
     none: "none",
     shipTitle: "Release · {{value}}",
