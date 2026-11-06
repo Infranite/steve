@@ -349,3 +349,42 @@ async fn dm_external_bots_and_own_messages() {
     assert_eq!(r, &vec![json!(h.bot_acc), json!(LABEL_OWN)]);
     lc.stop().await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_bot_run_reports_the_connection_healthy_once_connected() {
+    use steve_channels::adapters::feishu::BotHook;
+    use steve_channels::ext::ChannelDecl;
+    use steve_channels::lifecycle::ConnectionRuntime;
+    use steve_modules::accounts::connections::Health;
+
+    let h = setup().await;
+    let status = |h: &H| q(h, "SELECT status FROM connections WHERE id = ?", &h.con)[0][0].clone();
+    // failed starts before (the vault not readable at boot): reported, `error`
+    let cx = h.ch.connections().cx(WS, &h.con).expect("cx");
+    for _ in 0..3 {
+        cx.report(Health::Failed("vault locked".into())).await;
+    }
+    assert_eq!(status(&h), json!("error"));
+    // a run that gets its long connection up clears it
+    let rt = ConnectionRuntime::builder(h.ch.clone())
+        .hook(
+            "feishu_app",
+            Some(ChannelDecl::new("feishu_app")),
+            Arc::new(BotHook::new(h.ch.clone())),
+        )
+        .build();
+    let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    drop(rt.start(rx));
+    let t0 = std::time::Instant::now();
+    while status(&h) != json!("ok") {
+        assert!(t0.elapsed() < T, "still {}", status(&h));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let fails = q(
+        &h,
+        "SELECT json_extract(health, '$.fails') FROM connections WHERE id = ?",
+        &h.con,
+    );
+    assert_eq!(fails[0][0], json!(0));
+    rt.shutdown().await;
+}

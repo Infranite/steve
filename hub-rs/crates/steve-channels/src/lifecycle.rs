@@ -13,7 +13,9 @@
 //!   connection and wants it again, or the fingerprint changed. An `Err` or a panic is retried with
 //!   a backoff (5 s doubling to 5 min) while the connection is wanted, and reported to the
 //!   connection's health (`ProviderError::Auth` → `reauth`, anything else a failure). What a run
-//!   that was stopped returns is dropped.
+//!   that was stopped returns is dropped, and so is the failure of a run the connection has moved
+//!   past before its event arrived (a new credential, not wanted any more): the connection is read
+//!   again and the run follows what it is now.
 //! - An event on a connection also re-evaluates the connections paired with it
 //!   (`config.app_connection`, [`PAIR_KEY`]).
 //! - Before a run, the connection gets its `channel_settings` in the adapter's declared mode.
@@ -562,6 +564,8 @@ struct Current {
     stop: CancellationToken,
     task: JoinHandle<Result<(), AdapterError>>,
     cx: ConnCx,
+    /// The credential item the run started with.
+    credential: Option<String>,
     started: Instant,
 }
 
@@ -649,6 +653,13 @@ async fn supervise(inner: Arc<Inner>, id: String, mut rx: watch::Receiver<Option
                 };
                 match failed {
                     None => done = Some(c.fp),
+                    Some(_) if superseded(&inner, &id, &c) => {
+                        // the connection changed under the run (a credential replaced and the old
+                        // one destroyed) before its event got here: not the connection's failure.
+                        // Follow what it is now.
+                        tracing::info!(conn = id, "connection runtime: run of a changed connection ended");
+                        ConnectionRuntime { inner: inner.clone() }.evaluate(&id);
+                    }
                     Some(h) => {
                         tracing::warn!(conn = id, "connection runtime: run failed: {h:?}");
                         c.cx.report(h).await;
@@ -659,6 +670,27 @@ async fn supervise(inner: Arc<Inner>, id: String, mut rx: watch::Receiver<Option
             }
             _ = sleep_until(retry_at), if retry_at.is_some() => {}
         }
+    }
+}
+
+/// Has connection `id` moved past run `c` (gone, not wanted, another fingerprint or credential)?
+/// Read from the database, ahead of the `connection` event that will say so.
+fn superseded(inner: &Arc<Inner>, id: &str, c: &Current) -> bool {
+    let rt = ConnectionRuntime {
+        inner: inner.clone(),
+    };
+    match rt.state(id) {
+        Ok(Some(s)) => match inner.hooks.get(&s.adapter) {
+            Some(reg) => {
+                s.credential != c.credential
+                    || !reg.hook.wants(&s)
+                    || reg.hook.fingerprint(&s) != c.fp
+            }
+            None => true,
+        },
+        Ok(None) => true,
+        // unreadable: report as usual
+        Err(_) => false,
     }
 }
 
@@ -693,6 +725,7 @@ fn start_run(inner: &Arc<Inner>, id: &str, fp: String, state: ConnState) -> Opti
         }
     }
     let stop = CancellationToken::new();
+    let credential = state.credential.clone();
     let run = ConnRun {
         cx: cx.clone(),
         inbound: ConnSink::new(inner.channels.clone(), &state.ws, id, stop.clone()),
@@ -709,14 +742,27 @@ fn start_run(inner: &Arc<Inner>, id: &str, fp: String, state: ConnState) -> Opti
         stop,
         task,
         cx,
+        credential,
         started: Instant::now(),
     })
 }
 
-/// Cancels a run and waits for it, aborting it after `grace`. Its result is dropped.
+/// Cancels a run and waits for it, aborting it after `grace`, or after [`Timing::shutdown_grace`]
+/// once the runtime shuts down meanwhile. Its result is dropped.
 async fn stop_run(inner: &Inner, id: &str, mut c: Current, grace: Duration) {
     c.stop.cancel();
-    if tokio::time::timeout(grace, &mut c.task).await.is_err() {
+    let mut deadline = Instant::now() + grace;
+    let mut capped = false;
+    let stopped = loop {
+        tokio::select! {
+            r = tokio::time::timeout_at(deadline, &mut c.task) => break r.is_ok(),
+            _ = inner.shutdown.cancelled(), if !capped => {
+                capped = true;
+                deadline = deadline.min(Instant::now() + inner.timing.shutdown_grace);
+            }
+        }
+    };
+    if !stopped {
         tracing::warn!(
             conn = id,
             "connection runtime: run did not stop in time, aborted"
