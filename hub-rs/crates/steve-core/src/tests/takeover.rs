@@ -949,8 +949,16 @@ fn a_goal_that_asks_for_an_actual_operation_needs_one_in_the_delivery() {
     stop(&k, &x.session, "合并了，tag 推了。");
     assert!(k.wait(|| !steve_lines(&k, &x.item).is_empty()));
     assert_eq!(k.phase(&x.item), "active");
-    let p = k.rt.prompts_of(&x.session).pop().unwrap();
-    assert!(p.contains("还要求实际操作验证"), "{p}");
+    // the timeline line comes first, the prompt to the agent a moment later
+    assert!(
+        k.wait(|| k
+            .rt
+            .prompts_of(&x.session)
+            .last()
+            .is_some_and(|p| p.contains("还要求实际操作验证"))),
+        "{:?}",
+        k.rt.prompts_of(&x.session).last()
+    );
 }
 
 /// An item whose goal asks for the build to pass, delivered in a project with `rule` on `url`,
@@ -968,8 +976,12 @@ fn stopped_after_merging(rule: &str, url: &str, tag: Option<&str>) -> (Kit, Remo
     k.rt.end_turn(&k.core, &x.session, "end_turn", None);
     k.core.tx().lc_invalidate(&x.item, "有新的交付").unwrap();
     merge_and_tag(&x, tag);
+    let before = k.rt.prompts_of(&x.session).len();
     stop(&k, &x.session, "合并了。");
-    assert!(k.wait(|| !steve_lines(&k, &x.item).is_empty()));
+    // the timeline line comes first, the prompt to the agent a moment later: wait for both
+    assert!(k.wait(|| {
+        !steve_lines(&k, &x.item).is_empty() && k.rt.prompts_of(&x.session).len() > before
+    }));
     (k, x)
 }
 
