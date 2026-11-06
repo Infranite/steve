@@ -186,6 +186,7 @@ fn spawn_mode(h: &Home, mode: Option<&str>, extra: &[(&str, &str)]) -> Hub {
         .env_remove("STEVE_NODE_JOBS")
         .env_remove("STEVE_NODE_TURN_LIMIT_MS")
         .env_remove("STEVE_IDLE_RELEASE_MS")
+        .env_remove("STEVE_LEGACY_MOVE_EVERY_MS")
         .env_remove("STEVE_NO_RESUME")
         .env_remove("STEVE_UPGRADE_ID")
         .env_remove("CLAUDE_CONFIG_DIR")
@@ -1559,6 +1560,101 @@ async fn legacy_sessions_move_to_the_node_at_boot() {
     assert_eq!(h.got("parked-a-B7"), 0);
     assert_eq!(h.got("off-new-B7"), 0);
     assert_eq!(h.spawns(), spawns, "no harness on the Hub");
+}
+
+/// B7: a session the boot pass could not move yet (here: a resume handle no Node takes, mended
+/// afterwards) moves at a later pass and sends what it has queued then, not only at the next
+/// message; a turn the restart cut in a session that can never move ends with a failure card on
+/// its item, never left looking like work in progress.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_legacy_session_left_at_boot_moves_later_and_sends_its_queue() {
+    let h = Home::new();
+    let env = [
+        ("STEVE_TAKEOVER_CONTINUES", "0"),
+        ("STEVE_LEGACY_MOVE_EVERY_MS", "300"),
+    ];
+    let mut hub = spawn_mode(&h, None, &env);
+    serving(&h).await;
+    let c = Client::login(&h).await;
+    let (_, state) = c.call("GET", "/api/state", None).await;
+    let bot = state["bots"]
+        .as_array()
+        .and_then(|bs| bs.iter().find(|b| b["harness"] == "claude-code"))
+        .and_then(|b| b["id"].as_str())
+        .expect("a claude-code bot")
+        .to_string();
+    hub.kill();
+    drop(hub);
+    {
+        let db = rusqlite::Connection::open(h.steve().join("data/steve.sqlite3")).expect("db");
+        db.busy_timeout(Duration::from_secs(5)).expect("timeout");
+        let d = h.steve().join("scratch").join("ST-96");
+        std::fs::create_dir_all(&d).expect("scratch");
+        let (l, gone) = (d.display().to_string(), "/nonexistent-steve-b7/cut");
+        db.execute_batch(&format!(
+            "INSERT INTO items(id,workspace_id,no,title,status,stage,bot_id,created,updated) VALUES
+               ('ST-96','default',96,'旧事项己','run','执行','{bot}',1,1),
+               ('ST-97','default',97,'旧事项庚','run','执行','{bot}',1,1);
+             INSERT INTO sessions(id,workspace_id,item_id,no,bot_id,harness,cwd,status,acp_session_id,title,created,updated) VALUES
+               ('ses_legacy_l','default','ST-96',1,'{bot}','claude-code','{l}','idle','bad handle','己',1,1),
+               ('ses_legacy_x','default','ST-97',1,'{bot}','claude-code','{gone}','running','acp-legacy-x','庚',1,1);
+             INSERT INTO session_dispatch(id,session_id,text,via,created,files,state,updated) VALUES
+               ('q-l1','ses_legacy_l','旧会话己-已领取 @say later-l-B7','me',2,NULL,'claimed',2);"
+        ))
+        .expect("fixture");
+    }
+    let _hub = spawn_mode(&h, None, &env);
+    serving(&h).await;
+    node_health_until(&h, 30, |n| n["reconciled"] == true).await;
+    // the cut turn that can never move: ended, its item carries a card
+    assert_eq!(
+        h.one("SELECT status FROM sessions WHERE id=?", "ses_legacy_x")
+            .as_deref(),
+        Some("ended")
+    );
+    assert_eq!(
+        h.count(
+            "SELECT COUNT(*) FROM decisions WHERE item_id=? AND kind='fail' AND status='open' AND instr(question,'工作目录已不存在')>0",
+            "ST-97"
+        ),
+        1,
+        "{}",
+        debug_session(&h, "ses_legacy_x")
+    );
+    // left at boot: bound to no Node, its message waits
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(
+        h.count(
+            "SELECT COUNT(*) FROM runtime_sessions WHERE session_id=?",
+            "ses_legacy_l"
+        ),
+        0,
+        "{}",
+        debug_session(&h, "ses_legacy_l")
+    );
+    assert_eq!(h.got("later-l-B7"), 0);
+    // mended: the next pass moves it and sends what waited, with no message of yours
+    {
+        let db = rusqlite::Connection::open(h.steve().join("data/steve.sqlite3")).expect("db");
+        db.busy_timeout(Duration::from_secs(5)).expect("timeout");
+        db.execute(
+            "UPDATE sessions SET acp_session_id='acp-legacy-l' WHERE id='ses_legacy_l'",
+            [],
+        )
+        .expect("mend");
+    }
+    assert!(
+        wait(30, || h.got("later-l-B7") == 1).await,
+        "moved later and sent: {}; log:\n{}",
+        debug_session(&h, "ses_legacy_l"),
+        hub_log(&h)
+    );
+    assert!(
+        h.lines()
+            .iter()
+            .any(|m| m["method"] == "session/load" && m["params"]["sessionId"] == "acp-legacy-l"),
+        "on its own conversation"
+    );
 }
 
 /// A 1×1 PNG (RGB, no filter), for the attachment case.

@@ -645,11 +645,22 @@ impl QueuedRepo<'_> {
     }
 
     /// Deletes one row of `session_id`'s queue and returns it; `None` when a turn already took it.
+    /// A message a runner had delivered (`resumed:<via>`, see [`Self::unwrap_resumed`]) stays.
     pub fn remove(&self, session_id: &str, id: &str) -> Result<Option<Queued>> {
+        self.remove_where(session_id, id, "AND via NOT GLOB 'resumed:*'")
+    }
+
+    /// [`Self::remove`], a delivered (`resumed:<via>`) row included: for a session nothing will
+    /// ever run again, whose whole queue goes with it.
+    pub fn remove_any(&self, session_id: &str, id: &str) -> Result<Option<Queued>> {
+        self.remove_where(session_id, id, "")
+    }
+
+    fn remove_where(&self, session_id: &str, id: &str, guard: &str) -> Result<Option<Queued>> {
         self.0.write(|w| {
             let q = one(
                 w.c,
-                "DELETE FROM queued WHERE id = ? AND session_id = ? AND via NOT GLOB 'resumed:*' RETURNING *",
+                &format!("DELETE FROM queued WHERE id = ? AND session_id = ? {guard} RETURNING *"),
                 [id, session_id],
                 Queued::from_row,
             )?;

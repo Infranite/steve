@@ -746,7 +746,7 @@ impl RoutedRuntime {
 }
 
 /// How often sessions the legacy runner left are looked at again after boot.
-const MOVE_EVERY: Duration = Duration::from_secs(300);
+pub(crate) const MOVE_EVERY: Duration = Duration::from_secs(300);
 
 /// What one [`move_legacy`] pass did.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -819,6 +819,13 @@ pub fn move_legacy(routed: &RoutedRuntime, core: &Core, before: Option<i64>) -> 
                     Ok(false) => {}
                     Err(e) => tracing::error!("{sid} moved to the Node: {e}"),
                 }
+                // after boot nothing else sends what it has queued (at boot, `ready` does once
+                // the listener is up): it opens now if something waits
+                if before.is_some()
+                    && let Err(e) = core.flush_moved(&sid)
+                {
+                    tracing::error!("{sid} moved to the Node, its queue: {e}");
+                }
             }
             Err(Some(why)) => {
                 let note = steve_i18n::stored(|| steve_i18n::t!("hub.node.retired", why = why));
@@ -841,11 +848,12 @@ pub fn move_legacy(routed: &RoutedRuntime, core: &Core, before: Option<i64>) -> 
     m
 }
 
-/// [`move_legacy`] again every [`MOVE_EVERY`] for sessions from before `boot` that the boot pass
-/// left (the Node was stopped then, a row could not be read).
-pub async fn move_legacy_later(routed: Arc<RoutedRuntime>, core: Core, boot: i64) {
+/// [`move_legacy`] again `every` ([`MOVE_EVERY`]) for sessions from before `boot` that the boot
+/// pass left (the Node was stopped then, a row could not be read, a bind failed); what a moved one
+/// has queued goes at once.
+pub async fn move_legacy_later(routed: Arc<RoutedRuntime>, core: Core, boot: i64, every: Duration) {
     loop {
-        tokio::time::sleep(MOVE_EVERY).await;
+        tokio::time::sleep(every).await;
         let (r, c) = (routed.clone(), core.clone());
         if let Ok(m) = blocking(move || Ok(move_legacy(&r, &c, Some(boot)))).await
             && (m.adopted > 0 || m.ended > 0)

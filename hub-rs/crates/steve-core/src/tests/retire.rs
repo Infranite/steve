@@ -56,6 +56,19 @@ fn an_idle_session_is_retired_once_with_why() {
     assert!(!k.core.retire_session("no-such", "x").unwrap());
 }
 
+/// The first turn ends; the card its plain stop left is answered, so the item waits on nobody.
+fn idle(k: &Kit, sid: &str) {
+    k.rt.end_turn(&k.core, sid, "end_turn", None);
+    let item = k.db().session(sid).unwrap().unwrap().item_id.unwrap();
+    for d in k.db().decisions_of_item(&item).unwrap() {
+        if d.status == "open" {
+            k.db()
+                .decision_resolve(&d.id, serde_json::json!({}), "answered", None)
+                .unwrap();
+        }
+    }
+}
+
 fn kinds(k: &Kit, sid: &str, kind: &str) -> usize {
     k.db()
         .events_after(sid, 0)
@@ -182,4 +195,120 @@ fn a_new_session_no_backend_takes_is_refused_visibly() {
     let fails = k.open_fails(&i.id);
     assert_eq!(fails.len(), 1, "one card: {fails:?}");
     assert!(fails[0].contains("本机 Node 已关闭"), "{fails:?}");
+}
+
+/// B7: a session that can never run again loses all of its queue, the messages the old runner
+/// had delivered (`resumed:`, returned to the queue at boot) included, and the note counts them.
+#[test]
+fn a_session_nothing_will_run_again_drops_what_the_old_runner_had_delivered_too() {
+    let k = Kit::new();
+    let sid = started(&k);
+    k.rt.end_turn(&k.core, &sid, "end_turn", None);
+    k.db()
+        .store()
+        .with_conn(|c| {
+            Ok(c.execute(
+                "INSERT INTO queued(id,session_id,text,via,created) VALUES ('q-r',?1,'已送出','resumed:me',1)",
+                [&sid],
+            )?)
+        })
+        .unwrap();
+    k.db()
+        .store()
+        .queued()
+        .add_unless_waiting(&sid, "等着", "me", &[])
+        .unwrap();
+    assert_eq!(k.db().queued(&sid).unwrap().len(), 2);
+    assert!(k.core.end_unmovable(&sid, "不能再运行").unwrap());
+    assert!(
+        k.db().queued(&sid).unwrap().is_empty(),
+        "nothing left behind"
+    );
+    assert_eq!(kinds(&k, &sid, "queued_removed"), 2, "each one said");
+    let last = retired(&k, &sid).pop().unwrap();
+    assert!(
+        last.starts_with("不能再运行") && last.contains('2'),
+        "{last}"
+    );
+}
+
+/// B7: a turn the restart cut in a session that can never run again is not left looking like
+/// work in progress: it is said, and its item gets a failure card with why.
+#[test]
+fn a_cut_turn_nothing_will_run_again_gets_a_card() {
+    for (status, intent) in [("running", false), ("starting", false), ("idle", true)] {
+        let k = Kit::new();
+        let sid = started(&k);
+        idle(&k, &sid);
+        let item = k.db().session(&sid).unwrap().unwrap().item_id.unwrap();
+        // as the old Hub left it when its stop cut the turn
+        k.db()
+            .store()
+            .with_conn(|c| {
+                c.execute("UPDATE sessions SET status=?2 WHERE id=?1", [&sid, status])?;
+                if intent {
+                    c.execute(
+                        "INSERT INTO session_resume(session_id,created) VALUES (?1,1)",
+                        [&sid],
+                    )?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        assert!(
+            k.core.end_unmovable(&sid, "不能再运行").unwrap(),
+            "{status}"
+        );
+        assert_eq!(k.db().session(&sid).unwrap().unwrap().status, "ended");
+        let cards: Vec<_> = k
+            .db()
+            .decisions_of_item(&item)
+            .unwrap()
+            .into_iter()
+            .filter(|d| d.status == "open" && d.kind == "fail")
+            .collect();
+        assert_eq!(cards.len(), 1, "{status}: {cards:?}");
+        assert!(
+            cards[0].question.starts_with("Hub 重启时这个会话正在运行")
+                && cards[0].question.contains("不能再运行"),
+            "{}",
+            cards[0].question
+        );
+        assert!(
+            k.db()
+                .store()
+                .queued()
+                .resume_created(&sid)
+                .unwrap()
+                .is_none(),
+            "the intent is dropped"
+        );
+        assert_eq!(kinds(&k, &sid, "queued_removed"), 0);
+    }
+}
+
+/// B7: a session moved to a Node after boot (the later pass) sends what it has queued at once,
+/// the old runner's returned messages included; behind an upgrade's hold it waits for the lift.
+#[test]
+fn a_session_moved_after_boot_sends_its_queue() {
+    let k = Kit::new();
+    let sid = started(&k);
+    idle(&k, &sid);
+    k.db()
+        .store()
+        .queued()
+        .add_unless_waiting(&sid, "等着", "me", &[])
+        .unwrap();
+    k.db().store().maintenance_set(true).unwrap();
+    k.core.flush_moved(&sid).unwrap();
+    assert_eq!(k.db().queued(&sid).unwrap().len(), 1, "held");
+    assert!(!k.core.is_busy(&sid));
+    k.db().store().maintenance_set(false).unwrap();
+    k.core.flush_moved(&sid).unwrap();
+    assert!(k.db().queued(&sid).unwrap().is_empty(), "sent");
+    assert!(k.core.is_busy(&sid), "a turn runs it");
+    // nothing queued: nothing happens
+    k.rt.end_turn(&k.core, &sid, "end_turn", None);
+    k.core.flush_moved(&sid).unwrap();
+    assert!(!k.core.is_busy(&sid));
 }

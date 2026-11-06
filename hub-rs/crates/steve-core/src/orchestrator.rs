@@ -658,7 +658,9 @@ impl Core {
     }
     /// [`Self::retire_session`] for a session nothing will ever run again (one boot could not move
     /// off the legacy runner, B7): its queued messages go with it whatever its directory, each one
-    /// said, since nothing would ever flush them.
+    /// said, since nothing would ever flush them (messages the old runner had delivered too). A
+    /// turn the restart cut in it is said as not continued, with a failure card (and why) where
+    /// its item still runs.
     pub fn end_unmovable(&self, session_id: &str, note: &str) -> Result<bool> {
         self.tx().retire_session(session_id, note, true)
     }
@@ -705,6 +707,16 @@ impl Core {
         if !self.store().store().maintenance() {
             self.lane_recover();
         }
+    }
+    /// What a session moved to a Node after boot (B7's later pass) has queued goes now, as
+    /// [`Self::ready`] sends what the sessions moved at boot have: nothing else would (a moved
+    /// session opens only once something is flushed to it). Not behind an upgrade's hold (lifting
+    /// it flushes), nor on a copy of the real database.
+    pub fn flush_moved(&self, session_id: &str) -> Result<()> {
+        if self.store().store().maintenance() || self.config().no_resume {
+            return Ok(());
+        }
+        self.tx().flush_held(session_id)
     }
     /// Hold new turns for an upgrade drain, or stop holding for it (a release's hold stays).
     pub fn maintenance_hold(&self, on: bool) -> Result<()> {
@@ -3535,10 +3547,22 @@ impl Tx<'_> {
         if !queued.is_empty() && !drop_queue && cwd_usable(Path::new(&s.cwd)) {
             return Ok(false);
         }
+        // a turn the restart cut that nothing will ever continue: said, with a failure card
+        // where its item still runs (it would otherwise look at work with no session for good)
+        let store = self.db().store().clone();
+        if drop_queue
+            && (s.status == "running"
+                || s.status == "starting"
+                || store.queued().resume_created(sid)?.is_some())
+        {
+            self.not_continued_for(&s, Some(note))?;
+            store.queued().resume_done(sid)?;
+        }
         self.end_and_release(sid)?;
         let mut dropped = 0;
         for q in queued {
-            if let Some(q) = self.db().queue_remove(sid, &q.id)? {
+            // all of it, messages the old runner had delivered (`resumed:`) too: nothing sends them
+            if let Some(q) = self.db().queue_remove_any(sid, &q.id)? {
                 self.db().event_add(
                     sid,
                     "queued_removed",
@@ -3858,6 +3882,11 @@ impl Tx<'_> {
     /// The turn of `s` a restart cut, which nothing continues: said in its conversation (and, for
     /// an item still at work, as a failure card), the session idle again.
     fn not_continued(&mut self, s: &Session) -> Result<()> {
+        self.not_continued_for(s, None)
+    }
+
+    /// [`Self::not_continued`]; `why` (stored text), when given, follows on the failure card.
+    fn not_continued_for(&mut self, s: &Session, why: Option<&str>) -> Result<()> {
         let item = match s.item_id.as_deref() {
             Some(i) => self.db().item(i)?,
             None => None,
@@ -3883,7 +3912,10 @@ impl Tx<'_> {
         self.db()
             .event_add(&s.id, "system", json!({"text": text}))?;
         if let (Some(i), true) = (&item, fail) {
-            self.fail(&i.id, INTERRUPTED)?;
+            match why {
+                Some(why) => self.fail(&i.id, &format!("{INTERRUPTED}。{why}"))?,
+                None => self.fail(&i.id, INTERRUPTED)?,
+            }
         }
         Ok(())
     }
@@ -3993,16 +4025,26 @@ impl Tx<'_> {
     /// Prompts held for a restart or a release, or queued behind a turn it cut off, go now (unless the item waits on the user).
     pub(crate) fn flush_queued(&mut self) -> Result<()> {
         for id in self.db().sessions_with_queue()? {
-            let Some(s) = self.db().session(&id)? else {
-                continue;
-            };
-            if !cwd_usable(Path::new(&s.cwd)) {
-                tracing::warn!("not flushing {id}: cwd {} unusable", s.cwd);
-                continue;
-            }
-            if !self.waits_on_user(s.item_id.as_deref())? {
-                self.rt().flush(&id, None);
-            }
+            self.flush_held(&id)?;
+        }
+        Ok(())
+    }
+
+    /// What `sid` has queued goes now, unless its directory is unusable or its item waits on the
+    /// user ([`Self::flush_queued`] for one session).
+    pub(crate) fn flush_held(&mut self, sid: &str) -> Result<()> {
+        let Some(s) = self.db().session(sid)? else {
+            return Ok(());
+        };
+        if s.status == "ended" || self.db().queued(sid)?.is_empty() {
+            return Ok(());
+        }
+        if !cwd_usable(Path::new(&s.cwd)) {
+            tracing::warn!("not flushing {sid}: cwd {} unusable", s.cwd);
+            return Ok(());
+        }
+        if !self.waits_on_user(s.item_id.as_deref())? {
+            self.rt().flush(sid, None);
         }
         Ok(())
     }

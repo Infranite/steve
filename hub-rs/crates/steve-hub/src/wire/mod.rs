@@ -319,6 +319,15 @@ fn node_jobs(vars: &Vars) -> NodeJobs {
     j
 }
 
+/// How often sessions the boot pass left are looked at again (`STEVE_LEGACY_MOVE_EVERY_MS`, for
+/// tests); default 5 min.
+fn move_every(vars: &Vars) -> std::time::Duration {
+    vars("STEVE_LEGACY_MOVE_EVERY_MS")
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|ms| *ms > 0)
+        .map_or(core::MOVE_EVERY, std::time::Duration::from_millis)
+}
+
 /// An attempt's deadline when set (`STEVE_NODE_TURN_LIMIT_MS`, for tests); default 6 h.
 fn turn_limit(vars: &Vars) -> Option<i64> {
     vars("STEVE_NODE_TURN_LIMIT_MS").and_then(|v| v.trim().parse::<i64>().ok())
@@ -550,6 +559,7 @@ pub fn wire_assembly(
             routed.clone(),
             core.clone(),
             steve_store::now(),
+            move_every(&vars),
         )));
     }
     /* an item bound to a Node has its git read there (N0e-E11b); without any Node, nothing changes */
