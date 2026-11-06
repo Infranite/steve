@@ -37,6 +37,7 @@ Results: $STEVE_HOME/logs/release/local-<version>-<time>.json.
 """
 import argparse
 import base64
+import contextlib
 import fcntl
 import hashlib
 import json
@@ -175,6 +176,13 @@ def signing_password(ident, from_stdin=False):
     file = HOME / "signing/keychain-pass"
     if file.exists():
         return file.read_text().strip()
+    # only the signed Hub reads the entry unasked; anyone else meets a macOS prompt, which only a person at a
+    # terminal should see (a Hub-run or agent-run build would block on it, or teach the user to click it away)
+    if not sys.stdin.isatty():
+        raise Refused(f"the signing keychain's password is in the login keychain ({SIGNING_ACCOUNT}), and only a run "
+                      "from a terminal asks macOS for it: upgrade from Steve's settings, or run this in Terminal")
+    log(f"macOS asks for the login keychain item {SIGNING_ACCOUNT}: click 允许 (Allow), never 始终允许 (Always Allow), "
+        "which would let every process read it unasked")
     got = subprocess.run(["security", "find-generic-password", "-s", ident["vault_service"], "-a", SIGNING_ACCOUNT, "-w"],
                          capture_output=True, text=True)
     if got.returncode != 0:
@@ -184,6 +192,39 @@ def signing_password(ident, from_stdin=False):
         return base64.b64decode(got.stdout.strip(), validate=True).hex()
     except ValueError:
         raise Refused(f"the keychain entry {SIGNING_ACCOUNT} is not a signing password")
+
+def quotable(password, keychain):
+    """What a `security -i` line can carry: no quoting inside it."""
+    if not password or any(c.isspace() or c in "\"'\\" for c in password) or any(c in "\"\\\n" for c in str(keychain)):
+        raise Refused("the signing keychain's password or path has a space, quote or backslash: not passed to security")
+
+
+@contextlib.contextmanager
+def keychain_unlocked(keychain, password):
+    """The signing keychain, unlocked for the block and locked again after it, failed or not: left unlocked, it lets
+    any process sign a binary as the Hub (and steve-keyhelper hands that binary the vault's keys). The password goes
+    to `security -i` on stdin, never on a command line (`ps` shows those to every process of the user). The keychain
+    also locks itself after 5 idle minutes and on sleep, should this process die inside the block."""
+    quotable(password, keychain)
+    unlocked = subprocess.run(["security", "-i"], input=f'unlock-keychain -p {password} "{keychain}"\n',
+                              capture_output=True, text=True)
+    if unlocked.returncode != 0:
+        raise Refused("the signing keychain did not unlock")
+    try:
+        subprocess.run(["security", "set-keychain-settings", "-l", "-u", "-t", "300", str(keychain)], capture_output=True)
+        yield
+    finally:
+        if subprocess.run(["security", "lock-keychain", str(keychain)], capture_output=True).returncode != 0:
+            log(f"could not lock {keychain} again")
+
+
+def sign(binary, keychain, password, identifier):
+    """codesign `binary` as `identifier` with the signing keychain unlocked only meanwhile."""
+    with keychain_unlocked(keychain, password):
+        subprocess.run(["codesign", "--force", "--sign", "Steve Hub", "--identifier", identifier,
+                        "--keychain", str(keychain), str(binary)], check=True)
+    subprocess.run(["codesign", "--verify", "--strict", str(binary)], check=True)
+
 
 def build(args):
     ident = identity()
@@ -205,6 +246,7 @@ def build(args):
     # the keychain's password: from the Hub over stdin (the one-click upgrade), else signing/keychain-pass, else the
     # key store entry the Hub moved it into (a macOS prompt: only the signed Hub reads it unasked)
     password = signing_password(ident, from_stdin=args.keychain_pass_stdin)
+    quotable(password, keychain)
     log(f"build {version} from {commit} into {candidate}")
     candidate.mkdir(parents=True)
     try:
@@ -227,13 +269,8 @@ def build(args):
         binary = candidate / "bin/steve-hub"
         binary.parent.mkdir(exist_ok=True)
         shutil.copy2(target_dir / "release/steve-hub", binary)
-        unlocked = subprocess.run(["security", "unlock-keychain", "-p", password, str(keychain)], capture_output=True)
+        sign(binary, keychain, password, ident["hub_identifier"])
         del password
-        if unlocked.returncode != 0:
-            raise Refused("the signing keychain did not unlock")
-        subprocess.run(["codesign", "--force", "--sign", "Steve Hub", "--identifier", ident["hub_identifier"],
-                        "--keychain", str(keychain), str(binary)], check=True)
-        subprocess.run(["codesign", "--verify", "--strict", str(binary)], check=True)
         info = build_info(binary)
         if info.get("version") != version or info.get("commit") != commit:
             raise Refused(f"--build-info says {info}, expected {version} {commit}")

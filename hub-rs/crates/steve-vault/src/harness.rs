@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 /// The parts of `STEVE_HOME` no agent reads, relative to it. A trailing `/` is a directory (all of it),
 /// a trailing `*` a name prefix.
-pub const PROTECTED: [&str; 11] = [
+pub const PROTECTED: [&str; 13] = [
     "signing/",
     "secrets/",
     "backups/",
@@ -17,6 +17,9 @@ pub const PROTECTED: [&str; 11] = [
     "steve.db*",
     "data/steve.sqlite3*",
     "data/files/",
+    // raw mail (steve-mail: `data/mail/<ws>/…/<id>.eml`) and the Hub's state per paired Node
+    "data/mail/",
+    "data/nodes/",
     "data/node/node.sqlite3*",
     "data/node/secrets/",
     "data/node/push/",
@@ -66,8 +69,9 @@ fn real(steve_home: &Path) -> PathBuf {
 }
 
 /// Claude Code permission rules (`permissions.deny`) for [`PROTECTED`] under `steve_home`. Deny rules
-/// hold in every permission mode, `bypassPermissions` included, and Claude Code checks the paths a
-/// Bash command reads (`cat`, `cd … && cat`) against the Read rules too.
+/// hold in every permission mode, `bypassPermissions` included, but only for Claude Code's own file
+/// tools (Read, Edit, Write, Grep, Glob …): a program a Bash command runs (`python3 -c`, `sqlite3`,
+/// `tar`) is not bound by them. Keeping those out needs an OS sandbox (`sandbox-exec`), not rules.
 pub fn claude_deny_rules(steve_home: &Path) -> Vec<String> {
     let mut roots = vec![steve_home.to_path_buf()];
     let r = real(steve_home);
@@ -180,6 +184,11 @@ mod tests {
             rules
                 .contains(&"Read(//nonexistent-steve-home/.steve/data/steve.sqlite3*)".to_string())
         );
+        // raw mail and the Hub's per-Node state are the owner's too
+        for dir in ["data/mail", "data/nodes", "data/files", "data/node/secrets"] {
+            let want = format!("Read(//nonexistent-steve-home/.steve/{dir}/**)");
+            assert!(rules.contains(&want), "{want}");
+        }
         // the agents' own working directories stay readable
         for r in &rules {
             for own in [

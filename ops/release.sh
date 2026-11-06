@@ -167,18 +167,10 @@ export STEVE_KEYHELPER_HUB_IDENTIFIER=$SIGN_IDENT
 export STEVE_KEYHELPER_IDENTIFIER=${STEVE_KEYHELPER_IDENTIFIER:-io.github.infranite.steve.keyhelper}
 export STEVE_KEYHELPER_SERVICE=${STEVE_KEYHELPER_SERVICE:-io.github.infranite.steve.vault}
 SIGN_KC=${STEVE_SIGN_KEYCHAIN:-$HOME_DIR/signing/steve-signing.keychain-db}
-# The signing keychain's password: signing/keychain-pass until the Hub moves it into the login keychain (through
-# steve-keyhelper, hub-rs upgrades/signing.rs), then that entry: only the signed Hub reads it unasked, so here macOS
-# asks first.
-sign_pass() {
-  if [[ -f ${SIGN_KC:h}/keychain-pass ]]; then print -r -- "$(<${SIGN_KC:h}/keychain-pass)"; return 0; fi
-  local b64
-  b64=$(security find-generic-password -s $STEVE_KEYHELPER_SERVICE -a steve/signing/keychain-pass -w 2>/dev/null) || {
-    print -u2 -r -- "   the signing keychain password is in the login keychain and did not open (allow the prompt, or upgrade from Steve's settings)"
-    return 1
-  }
-  print -r -- $b64 | base64 -D | od -An -v -tx1 | tr -d ' \n'
-}
+# The signing keychain's password (sign_pass, release-lib.sh): read once per run, kept in this shell only (not
+# exported), so a manual run in a terminal meets the macOS prompt at most once.
+SIGN_PASS=""
+signing_pass() { [[ -n $SIGN_PASS ]] || SIGN_PASS=$(sign_pass $SIGN_KC) }
 sign_hub() {
   local bin=$1 req
   # code signing and the keychain ACL are macOS only; other systems keep the vault key elsewhere
@@ -191,9 +183,8 @@ sign_hub() {
     print -r -- "   no signing keychain at $SIGN_KC: an ad-hoc signed Hub can't read the vault (run ops/sign-setup.sh)"
     return 1
   fi
-  local pass; pass=$(sign_pass) || return 1
-  security unlock-keychain -p "$pass" $SIGN_KC || { print -r -- "   cannot unlock $SIGN_KC"; return 1 }
-  run codesign -f -s "$SIGN_ID" --keychain $SIGN_KC -i $SIGN_IDENT $bin || { print -r -- "   codesign failed"; return 1 }
+  signing_pass || return 1
+  kc_sign $SIGN_KC "$SIGN_PASS" run codesign -f -s "$SIGN_ID" --keychain $SIGN_KC -i $SIGN_IDENT $bin || { print -r -- "   codesign failed"; return 1 }
   req=$(codesign -d -r- $bin 2>&1 | grep '^designated')
   [[ $req == *"identifier \"$SIGN_IDENT\""*"certificate leaf"* ]] || { print -r -- "   unexpected signature: $req"; return 1 }
   print -r -- "   signed: $req"
@@ -225,9 +216,8 @@ keyhelper_install() { # release dir
   if [[ -x $bin && $want == $have ]]; then print -r -- "   steve-keyhelper unchanged ($want)"; return 0; fi
   ( cd $dir/hub-rs && export CARGO_TERM_COLOR=never CARGO_TERM_PROGRESS_WHEN=never && run $CARGO build --release --locked -p steve-keyhelper --target-dir $CARGO_TARGET ) || return 1
   mkdir -p $HOME_DIR/bin && cp -p $CARGO_TARGET/release/steve-keyhelper $bin.new || return 1
-  local pass; pass=$(sign_pass) || return 1
-  security unlock-keychain -p "$pass" $SIGN_KC || return 1
-  run codesign -f -s "$SIGN_ID" --keychain $SIGN_KC -i $STEVE_KEYHELPER_IDENTIFIER $bin.new || return 1
+  signing_pass || return 1
+  kc_sign $SIGN_KC "$SIGN_PASS" run codesign -f -s "$SIGN_ID" --keychain $SIGN_KC -i $STEVE_KEYHELPER_IDENTIFIER $bin.new || return 1
   if [[ -x $bin ]]; then
     print -r -- "   migrating the vault keys from the installed steve-keyhelper"
     $bin.new migrate-from $bin || { print -r -- "   migration failed: keeping the installed helper"; rm -f $bin.new; return 1 }

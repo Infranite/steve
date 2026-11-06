@@ -474,10 +474,12 @@ pub(crate) fn mode(harness: &str, p: PermissionMode) -> Option<String> {
     }
 }
 
-/// The `_meta` of `session/new|load` for `harness`: Claude Code is told to deny reads and edits of
-/// the Hub's secret files under `steve_home` in every permission mode. Codex gets none: a Codex
-/// permission profile with deny entries replaces the adapter's modes, and a command the user
-/// approved would then still run in the sandbox.
+/// The `_meta` of `session/new|load` for `harness`: Claude Code is told to deny its file tools the
+/// Hub's secret files under `steve_home` in every permission mode (a program its Bash runs is not
+/// bound by that). Codex gets none yet: codex-acp's `session/set_mode` replaces the permission
+/// profile with the mode's built-in one, so deny entries do not survive it; and once a profile has
+/// deny-read entries, codex-core keeps a command the user approved to run outside the sandbox inside
+/// it (`sandbox_permissions_preserving_denied_reads`), so Ask mode could no longer write anything.
 pub(crate) fn harness_meta(harness: &str, steve_home: &Path) -> Option<Value> {
     (harness == "claude-code").then(|| {
         json!({ "claudeCode": { "options": {

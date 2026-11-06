@@ -152,12 +152,126 @@ class SigningPassword(unittest.TestCase):
         b64 = base64.b64encode(bytes.fromhex(pw)).decode()
         args = self.home / "args"
         self.security(f'echo "$@" > {args}\necho {b64}\n')
-        self.assertEqual(self.m.signing_password(self.ident), pw)
-        self.assertEqual(args.read_text().split(),
-                         ["find-generic-password", "-s", "test.steve.vault", "-a", "steve/signing/keychain-pass", "-w"])
-        self.security("exit 44\n")
-        with self.assertRaises(self.m.Refused):
-            self.m.signing_password(self.ident)
+        old, sys.stdin = sys.stdin, Tty()
+        try:
+            self.assertEqual(self.m.signing_password(self.ident), pw)
+            self.assertEqual(args.read_text().split(),
+                             ["find-generic-password", "-s", "test.steve.vault", "-a", "steve/signing/keychain-pass", "-w"])
+            self.security("exit 44\n")
+            with self.assertRaises(self.m.Refused):
+                self.m.signing_password(self.ident)
+        finally:
+            sys.stdin = old
+
+    def test_without_a_terminal_the_keychain_entry_is_not_asked_for(self):
+        # the Hub's release job, an agent's shell: no macOS prompt to block on, or to click away with "Always Allow"
+        import io
+        args = self.home / "args"
+        self.security(f'echo "$@" > {args}\necho AAAA\n')
+        old, sys.stdin = sys.stdin, io.StringIO("")
+        try:
+            with self.assertRaisesRegex(self.m.Refused, "terminal"):
+                self.m.signing_password(self.ident)
+        finally:
+            sys.stdin = old
+        self.assertFalse(args.exists(), "security was not run")
+
+
+class Tty:
+    """A stdin that is a terminal."""
+
+    def isatty(self):
+        return True
+
+
+class SigningKeychain(unittest.TestCase):
+    """The signing keychain around codesign: unlocked with the password on stdin, never on a command line, and locked
+    again after, also when codesign fails. `security` and `codesign` are fakes on PATH that log their arguments."""
+
+    PW = "0123456789abcdef" * 4
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.home = pathlib.Path(self.tmp.name)
+        self.bin = self.home / "bin"
+        self.bin.mkdir()
+        self.log = self.home / "calls"
+        self.kc = self.home / "signing dir/steve-signing.keychain-db"
+        self.path = os.environ.get("PATH", "")
+        os.environ["PATH"] = f"{self.bin}:{self.path}"
+        self.fake("security", f'echo "security $*" >> "{self.log}"\n'
+                              f'[ "$1" = -i ] && sed "s/^/  stdin: /" >> "{self.log}"\nexit 0\n')
+        self.codesign(0)
+
+    def tearDown(self):
+        os.environ["PATH"] = self.path
+        self.tmp.cleanup()
+
+    def fake(self, name, body):
+        f = self.bin / name
+        f.write_text("#!/bin/sh\n" + body)
+        f.chmod(0o755)
+
+    def codesign(self, rc):
+        self.fake("codesign", f'echo "codesign $*" >> "{self.log}"\nexit {rc}\n')
+
+    def calls(self):
+        return self.log.read_text().splitlines()
+
+    def assert_locked_after_signing(self, calls):
+        unlock = calls.index("security -i")
+        self.assertEqual(calls[unlock + 1], f'  stdin: unlock-keychain -p {self.PW} "{self.kc}"')
+        sign = next(i for i, c in enumerate(calls) if c.startswith("codesign --force") or c.startswith("codesign -f"))
+        lock = calls.index(f"security lock-keychain {self.kc}")
+        self.assertLess(unlock, sign)
+        self.assertLess(sign, lock)
+        self.assertIn(f"security set-keychain-settings -l -u -t 300 {self.kc}", calls, "it also locks itself")
+        for c in calls:
+            if not c.startswith("  stdin:"):
+                self.assertNotIn(self.PW, c, "the password is on no command line")
+
+    def test_build_locks_the_keychain_after_codesign(self):
+        m = Journal.module(self)
+        m.sign(self.home / "steve-hub", self.kc, self.PW, "test.hub")
+        self.assert_locked_after_signing(self.calls())
+
+    def test_a_failed_codesign_still_locks_it(self):
+        m = Journal.module(self)
+        self.codesign(1)
+        with self.assertRaises(subprocess.CalledProcessError):
+            m.sign(self.home / "steve-hub", self.kc, self.PW, "test.hub")
+        self.assert_locked_after_signing(self.calls())
+
+    def test_a_password_security_can_not_take_is_refused(self):
+        m = Journal.module(self)
+        with self.assertRaises(m.Refused):
+            m.sign(self.home / "steve-hub", self.kc, "two words", "test.hub")
+        self.assertFalse(self.log.exists(), "nothing was run")
+
+    def zsh(self, script, stdin=subprocess.DEVNULL):
+        env = dict(os.environ, STEVE_KEYHELPER_SERVICE="test.steve.vault")
+        return subprocess.run(["zsh", "-c", f'source "{OPS}/release-lib.sh"\n{script}'], env=env, stdin=stdin,
+                              capture_output=True, text=True, timeout=30)
+
+    def test_release_sh_locks_the_keychain_after_codesign(self):
+        # ops/release.sh and ops/sign-setup.sh sign through release-lib.sh's kc_sign
+        for rc in (0, 1):
+            self.log.unlink(missing_ok=True)
+            self.codesign(rc)
+            r = self.zsh(f'kc_sign "{self.kc}" {self.PW} codesign -f -s "Steve Hub" x; print -r -- "rc=$?"')
+            self.assertIn(f"rc={rc}", r.stdout, r.stderr)
+            self.assert_locked_after_signing(self.calls())
+
+    def test_release_sh_asks_for_the_keychain_entry_only_from_a_terminal(self):
+        r = self.zsh(f'sign_pass "{self.kc}" || print -r -- refused')
+        self.assertIn("refused", r.stdout)
+        self.assertIn("terminal", r.stderr)
+        self.assertFalse(self.log.exists(), "security was not run")
+        # a password not moved yet still comes from the file
+        self.kc.parent.mkdir()
+        (self.kc.parent / "keychain-pass").write_text(self.PW + "\n")
+        r = self.zsh(f'sign_pass "{self.kc}"')
+        self.assertEqual(r.stdout.strip(), self.PW)
 
 
 if __name__ == "__main__":
