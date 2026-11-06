@@ -952,21 +952,22 @@ async fn connections_passkeys_and_github_are_mounted() {
     let (_, adapters) = c.call("GET", "/api/connections/adapters", None, None).await;
     // the GitHub App connects through its manifest flow, so only the token form is listed
     assert!(adapters.to_string().contains("github_pat"), "{adapters}");
-    // 接入: every registered adapter under its provider, the planned ones marked, no connection yet
+    // 接入: every registered adapter under its provider, no provider without one, no connection yet
     let (s, ig) = c
         .call("GET", "/api/connections/integrations", None, None)
         .await;
     assert_eq!(s, 200, "{ig}");
     let ps = ig["providers"].as_array().expect("providers");
     let ids: Vec<_> = ps.iter().filter_map(|p| p["id"].as_str()).collect();
-    assert_eq!(ids, ["feishu", "github", "mail", "slack", "gcal"], "{ig}");
+    assert_eq!(ids, ["feishu", "github", "mail"], "{ig}");
     let status = |id: &str| {
         ps.iter()
             .find(|p| p["id"] == id)
             .map(|p| p["status"].clone())
     };
     assert_eq!(status("feishu"), Some(json!("supported")));
-    assert_eq!(status("slack"), Some(json!("planned")));
+    assert_eq!(status("mail"), Some(json!("supported")));
+    assert!(ps.iter().all(|p| p.get("planned").is_none()), "{ig}");
     let feishu = &ps[0];
     let adapters: Vec<_> = feishu["adapters"]
         .as_array()

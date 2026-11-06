@@ -13,11 +13,17 @@
 //! - what `apply` starts after the commit ([`AfterCommit`]) is not covered: a consumer that needs it to
 //!   survive a crash stores it as state its own recovery picks up (a flow run left `running`).
 //!
-//! The lease (`outbox_leases`) only says who runs it now: claimed for [`LEASE_MS`], re-checked before
-//! the receipt commits (fencing), and holding attempts, the last error and the back-off. A
-//! [`ConsumeError::Reject`] or [`MAX_ATTEMPTS`] failures make it dead: never retried by itself and never
-//! removed by [`prune`]; a person decides. Rows are scoped: the receipt carries the event's workspace,
-//! and consumers check that the objects they touch belong to it.
+//! The attempt row (`outbox_leases`) holds attempts, the last error, the back-off and since when the
+//! delivery has been failing. A [`ConsumeError::Reject`] makes it dead at once; [`ConsumeError::Retry`]
+//! failures only once they have lasted [`DEAD_AFTER_MS`] (a Wi‑Fi drop or a short GitHub outage must
+//! not lose an effect for good). Dead is never retried by itself and never removed by [`prune`]; a
+//! person looks at it ([`dead`]) and sends it again ([`revive`]). Rows are scoped: the receipt carries
+//! the event's workspace, and consumers check that the objects they touch belong to it.
+//!
+//! One Hub process owns the database, so there is no lease ownership or fencing: two passes of the
+//! same consumer must not run at once (the Hub runs one dispatcher job, [`Dispatcher::pump`] is not
+//! re-entrant). Were they to overlap, the receipt still keeps `apply` to once; only `effect` would run
+//! twice, which it must tolerate anyway. Several Hubs on one database would need the lease back.
 //!
 //! A consumer receives the events created after its first registration ([`Dispatcher::register`],
 //! `since_seq`); history is replayed only by an explicit backfill. Register before anything can emit.
@@ -30,9 +36,10 @@ use serde_json::Value;
 
 use crate::{Result, Store, StoreError, Tx, uid};
 
-/// How long a claimed delivery stays with its dispatcher before another may take it over.
-pub const LEASE_MS: i64 = 60_000;
-/// Failed attempts after which a delivery is retained as dead for investigation.
+/// How long [`ConsumeError::Retry`] failures may last before the delivery is dead.
+pub const DEAD_AFTER_MS: i64 = 24 * 3_600_000;
+/// Attempts after which other retry loops that borrow [`backoff`] give up (GitHub's effects and
+/// webhook deliveries); the outbox itself dies by time ([`DEAD_AFTER_MS`]).
 pub const MAX_ATTEMPTS: i64 = 8;
 /// Deliveries claimed per consumer and pass.
 pub const BATCH: usize = 50;
@@ -77,7 +84,7 @@ pub fn emit(tx: &Tx, ws: &str, topic: &str, version: i64, payload: &Value) -> Re
 /// Why a delivery did not go through.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConsumeError {
-    /// Transient: tried again after a back-off, dead after [`MAX_ATTEMPTS`].
+    /// Transient: tried again after a back-off, dead once failing for [`DEAD_AFTER_MS`].
     Retry(String),
     /// Never valid (malformed, another workspace's object): dead at once.
     Reject(String),
@@ -150,44 +157,55 @@ pub trait Consumer: Send + Sync {
     }
 }
 
-/// The due deliveries of consumer `?1` (topic `?2`) at `?3` for dispatcher `?4`: not received, not dead,
-/// not backing off, not leased to another dispatcher; `?5` binds the caller's LIMIT.
+/// The due deliveries of consumer `?1` (topic `?2`) at `?3`: not received, not dead, not backing off;
+/// `?4` binds the caller's LIMIT.
 const DUE: &str = "SELECT e.seq, e.id, e.workspace_id, e.topic, e.version, e.payload, e.created
        FROM outbox_events e JOIN outbox_consumers k ON k.id = ?1 AND k.enabled = 1
       WHERE e.topic = ?2 AND e.seq > k.since_seq
         AND NOT EXISTS (SELECT 1 FROM outbox_receipts r WHERE r.event_seq = e.seq AND r.consumer_id = ?1)
         AND NOT EXISTS (SELECT 1 FROM outbox_leases l WHERE l.event_seq = e.seq AND l.consumer_id = ?1
-                          AND (l.dead = 1 OR l.next_at > ?3 OR (l.lease_until > ?3 AND l.owner IS NOT ?4)))
-        AND ?5 = ?5
+                          AND (l.dead = 1 OR l.next_at > ?3))
+        AND ?4 = ?4
       ORDER BY e.seq";
 
 /// What one [`Dispatcher::pump`] did.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Pumped {
     pub done: usize,
     pub retried: usize,
     pub dead: usize,
-    /// Claimed, but another dispatcher held it by the time it would commit.
-    pub fenced: usize,
+    /// The consumers (in a workspace) that had no dead delivery before this pass and have one now:
+    /// what the owner hears about once, until [`revive`] clears them.
+    pub newly_dead: Vec<DeadGroup>,
 }
 
 impl Pumped {
     pub fn any(&self) -> bool {
-        self.done + self.retried + self.dead + self.fenced > 0
+        self.done + self.retried + self.dead > 0
     }
 }
 
-/// Delivers events to consumers. One per process; `owner` tells its leases apart from another
-/// process's during a release switch.
+/// Dead deliveries of one consumer (in one workspace, for a notice; over all of them, for the view).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DeadGroup {
+    pub consumer: String,
+    pub topic: String,
+    /// `None` when grouped over every workspace.
+    pub workspace_id: Option<String>,
+    pub count: i64,
+    pub last_error: Option<String>,
+    /// When the newest of them was given up on.
+    pub updated: i64,
+}
+
+/// Delivers events to consumers. One per process, and one pass at a time (see the module docs).
 pub struct Dispatcher {
-    owner: String,
     consumers: Vec<Arc<dyn Consumer>>,
 }
 
 enum Failed {
     Store(StoreError),
     Consume(ConsumeError),
-    Fenced,
 }
 
 impl From<StoreError> for Failed {
@@ -198,14 +216,7 @@ impl From<StoreError> for Failed {
 
 impl Dispatcher {
     pub fn new(consumers: Vec<Arc<dyn Consumer>>) -> Self {
-        Self {
-            owner: uid("disp"),
-            consumers,
-        }
-    }
-
-    pub fn owner(&self) -> &str {
-        &self.owner
+        Self { consumers }
     }
 
     pub fn consumers(&self) -> impl Iterator<Item = &dyn Consumer> {
@@ -254,7 +265,7 @@ impl Dispatcher {
         })
     }
 
-    /// One pass: every consumer, up to [`BATCH`] due deliveries each.
+    /// One pass: every consumer, up to [`BATCH`] due deliveries each. Never two at once.
     pub fn pump(&self, store: &Store, now: i64) -> Result<Pumped> {
         let Some(_activity) = store.try_activity("outbox") else {
             return Ok(Pumped::default());
@@ -268,37 +279,30 @@ impl Dispatcher {
         Ok(out)
     }
 
-    /// Leases the due deliveries of `c`: not received, not dead, not backing off, not leased to
-    /// another dispatcher.
+    /// Takes the due deliveries of `c` (not received, not dead, not backing off) and counts the
+    /// attempt before it is made, so one cut short by a crash still counts.
     fn claim(&self, store: &Store, c: &dyn Consumer, now: i64) -> Result<Vec<Event>> {
         // idle passes stay off the write lock: a pooled read first, the claim re-checks under the lock
         let due = store.reader(|r| -> Result<bool> {
             let mut st = r.prepare_cached(&format!("SELECT EXISTS ({DUE} LIMIT 1)"))?;
-            Ok(
-                st.query_row(params![c.id(), c.topic(), now, self.owner, 1_i64], |r| {
-                    r.get(0)
-                })?,
-            )
+            Ok(st.query_row(params![c.id(), c.topic(), now, 1_i64], |r| r.get(0))?)
         })?;
         if !due {
             return Ok(Vec::new());
         }
         store.transaction(|tx| {
             let evs = {
-                let mut st = tx.prepare_cached(&format!("{DUE} LIMIT ?5"))?;
-                st.query_map(
-                    params![c.id(), c.topic(), now, self.owner, BATCH as i64],
-                    event_row,
-                )?
-                .collect::<rusqlite::Result<Vec<_>>>()?
+                let mut st = tx.prepare_cached(&format!("{DUE} LIMIT ?4"))?;
+                st.query_map(params![c.id(), c.topic(), now, BATCH as i64], event_row)?
+                    .collect::<rusqlite::Result<Vec<_>>>()?
             };
             for e in &evs {
                 tx.execute(
-                    "INSERT INTO outbox_leases (event_seq, consumer_id, owner, lease_until, attempts, updated)
-                     VALUES (?1, ?2, ?3, ?4, 1, ?5)
+                    "INSERT INTO outbox_leases (event_seq, consumer_id, attempts, updated)
+                     VALUES (?1, ?2, 1, ?3)
                      ON CONFLICT (event_seq, consumer_id) DO UPDATE
-                       SET owner = ?3, lease_until = ?4, attempts = attempts + 1, updated = ?5",
-                    params![e.seq, c.id(), self.owner, now + LEASE_MS, now],
+                       SET attempts = attempts + 1, updated = ?3",
+                    params![e.seq, c.id(), now],
                 )?;
             }
             Ok(evs)
@@ -317,19 +321,6 @@ impl Dispatcher {
             return self.failed(store, c, ev, e, now, out);
         }
         let done = store.transaction(|tx| -> std::result::Result<Option<AfterCommit>, Failed> {
-            // fencing: the lease must still be ours (a slow pass loses it to another dispatcher)
-            let mine: Option<String> = tx
-                .query_row(
-                    "SELECT owner FROM outbox_leases WHERE event_seq = ? AND consumer_id = ?",
-                    params![ev.seq, c.id()],
-                    |r| r.get(0),
-                )
-                .optional()
-                .map_err(StoreError::from)?
-                .flatten();
-            if mine.as_deref() != Some(self.owner.as_str()) {
-                return Err(Failed::Fenced);
-            }
             let fresh = tx
                 .execute(
                     "INSERT OR IGNORE INTO outbox_receipts (event_seq, consumer_id, workspace_id, done, outcome) VALUES (?, ?, ?, ?, '')",
@@ -363,10 +354,6 @@ impl Dispatcher {
                 }
                 Ok(())
             }
-            Err(Failed::Fenced) => {
-                out.fenced += 1;
-                Ok(())
-            }
             Err(Failed::Consume(e)) => self.failed(store, c, ev, e, now, out),
             Err(Failed::Store(e)) => {
                 self.failed(store, c, ev, ConsumeError::Retry(e.to_string()), now, out)
@@ -374,7 +361,7 @@ impl Dispatcher {
         }
     }
 
-    /// Records a failed attempt: back off, or dead.
+    /// Records a failed attempt: back off, or dead (a rejection, or failing for [`DEAD_AFTER_MS`]).
     fn failed(
         &self,
         store: &Store,
@@ -388,30 +375,46 @@ impl Dispatcher {
             ConsumeError::Reject(m) => (true, m.clone()),
             ConsumeError::Retry(m) => (false, m.clone()),
         };
-        let dead = store.transaction(|tx| -> Result<bool> {
-            let attempts: i64 = tx
+        let (dead, first) = store.transaction(|tx| -> Result<(bool, bool)> {
+            let row: Option<(i64, Option<i64>)> = tx
                 .query_row(
-                    "SELECT attempts FROM outbox_leases WHERE event_seq = ? AND consumer_id = ? AND owner IS ?",
-                    params![ev.seq, c.id(), self.owner],
-                    |r| r.get(0),
+                    "SELECT attempts, failing_since FROM outbox_leases WHERE event_seq = ? AND consumer_id = ?",
+                    params![ev.seq, c.id()],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
                 )
-                .optional()?
-                .unwrap_or(0);
-            if attempts == 0 {
-                // the lease went to another dispatcher meanwhile; it reports its own outcome
-                return Ok(false);
-            }
-            let dead = reject || attempts >= MAX_ATTEMPTS;
-            let next = now + backoff(attempts);
+                .optional()?;
+            let (attempts, since) = row.unwrap_or((1, None));
+            let since = since.unwrap_or(now);
+            let dead = reject || now - since >= DEAD_AFTER_MS;
+            // the first dead delivery of this consumer in this workspace since the last revive
+            let first = dead
+                && !tx.query_row(
+                    "SELECT EXISTS (SELECT 1 FROM outbox_leases l JOIN outbox_events e ON e.seq = l.event_seq
+                      WHERE l.consumer_id = ? AND l.dead = 1 AND e.workspace_id = ? AND l.event_seq <> ?)",
+                    params![c.id(), ev.workspace_id, ev.seq],
+                    |r| r.get::<_, bool>(0),
+                )?;
             tx.execute(
-                "UPDATE outbox_leases SET owner = NULL, lease_until = 0, last_error = ?, next_at = ?, dead = ?, updated = ?
-                  WHERE event_seq = ? AND consumer_id = ?",
-                params![msg, next, dead, now, ev.seq, c.id()],
+                "INSERT INTO outbox_leases (event_seq, consumer_id, attempts, last_error, next_at, dead, failing_since, updated)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                 ON CONFLICT (event_seq, consumer_id) DO UPDATE
+                   SET last_error = ?4, next_at = ?5, dead = ?6, failing_since = ?7, updated = ?8",
+                params![ev.seq, c.id(), attempts, msg, now + backoff(attempts), dead, since, now],
             )?;
-            Ok(dead)
+            Ok((dead, first))
         })?;
         if dead {
             out.dead += 1;
+            if first {
+                out.newly_dead.push(DeadGroup {
+                    consumer: c.id().into(),
+                    topic: c.topic().into(),
+                    workspace_id: Some(ev.workspace_id.clone()),
+                    count: 1,
+                    last_error: Some(msg.clone()),
+                    updated: now,
+                });
+            }
             tracing::error!(consumer = c.id(), event = %ev.id, "outbox delivery dead: {msg}");
         } else {
             out.retried += 1;
@@ -472,8 +475,48 @@ pub fn stats(c: &Connection) -> Result<Stats> {
     })
 }
 
-/// Deletes events older than `keep_ms` that every registered consumer of their topic (paused ones
-/// included) has a receipt for, with those receipts. Owed, leased or dead deliveries are never removed.
+/// The dead deliveries, one group per consumer over every workspace, newest first.
+pub fn dead(c: &Connection) -> Result<Vec<DeadGroup>> {
+    let mut st = c.prepare_cached(
+        "SELECT l.consumer_id, coalesce(k.topic, ''), count(*), max(l.updated),
+                (SELECT x.last_error FROM outbox_leases x WHERE x.consumer_id = l.consumer_id AND x.dead = 1
+                  ORDER BY x.updated DESC, x.event_seq DESC LIMIT 1)
+           FROM outbox_leases l LEFT JOIN outbox_consumers k ON k.id = l.consumer_id
+          WHERE l.dead = 1
+          GROUP BY l.consumer_id
+          ORDER BY max(l.updated) DESC",
+    )?;
+    let rows = st
+        .query_map([], |r| {
+            Ok(DeadGroup {
+                consumer: r.get(0)?,
+                topic: r.get(1)?,
+                workspace_id: None,
+                count: r.get(2)?,
+                updated: r.get(3)?,
+                last_error: r.get(4)?,
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(rows)
+}
+
+/// Sends the dead deliveries (of `consumer`, or all) again: attempts and the failure clock start
+/// over, so a delivery that keeps failing has another [`DEAD_AFTER_MS`]. Returns how many.
+pub fn revive(store: &Store, consumer: Option<&str>) -> Result<usize> {
+    let n = store.transaction(|tx| -> Result<usize> {
+        Ok(tx.execute(
+            "UPDATE outbox_leases SET dead = 0, attempts = 0, next_at = 0, failing_since = NULL, updated = ?1
+              WHERE dead = 1 AND (?2 IS NULL OR consumer_id = ?2)",
+            params![crate::now(), consumer],
+        )?)
+    })?;
+    if n > 0 {
+        store.outbox_wake().notify_one();
+    }
+    Ok(n)
+}
+
 /// Whether consumer `id` was ever registered (and not unregistered).
 pub fn is_registered(c: &Connection, id: &str) -> Result<bool> {
     Ok(c.query_row(
@@ -494,6 +537,8 @@ pub fn unregister(store: &Store, id: &str) -> Result<()> {
     })
 }
 
+/// Deletes events older than `keep_ms` that every registered consumer of their topic (paused ones
+/// included) has a receipt for, with those receipts. Owed, failing or dead deliveries are never removed.
 pub fn prune(store: &Store, now: i64, keep_ms: i64) -> Result<usize> {
     // an event is done when no registered consumer of its topic still owes it and nothing is leased
     const DONE: &str = "e.created < ?1

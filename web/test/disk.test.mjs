@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { bytes, diskRows, entryState, pressureText, reclaimText } from "../src/disk.ts"
+import { bytes, diskRows, entryState, pressureText, reclaimText, scratchRows } from "../src/disk.ts"
 
 const GB = 2 ** 30
 const policy = { floor: 20 * GB, low: 60 * GB, idle_ms: 24 * 3_600_000 }
@@ -44,4 +44,19 @@ test("the reclaim toast says what was freed, removed and kept", () => {
     "释放了 12 GB，删除了 1 个工作区（分支都保留），1 个按规则保留",
   )
   assert.equal(reclaimText({ skipped: false, free_before: 0, free_after: 0, freed: [], removed: [], kept: [] }), "没有可回收的缓存")
+})
+
+test("scratch directories of items without a project are listed apart; ended ones count as reclaimable under pressure", () => {
+  const s = (item, o = {}) => entry(item, { branch: null, path: `/h/scratch/${item}`, ...o })
+  const r = report({ scratch: [
+    s("ST-54", { phase: "closed", status: "done", bytes: 3.2 * GB, cache_bytes: 2 * GB, caches: ["node_modules"] }),
+    s("ST-60", { bytes: 0.5 * GB, cache_bytes: 0.25 * GB }),
+    s("ST-61", { exists: false, bytes: 0, cache_bytes: 0 }),
+  ] })
+  const d = scratchRows(r)
+  assert.deepEqual(d.rows.map(e => e.item), ["ST-54", "ST-60"])
+  assert.equal(d.total, 3.7 * GB)
+  assert.equal(d.cache, 2.25 * GB)
+  assert.equal(d.ended, 2 * GB, "only the ended item's caches")
+  assert.deepEqual(scratchRows(report()).rows, [], "a Hub without the field")
 })

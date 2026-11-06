@@ -301,7 +301,7 @@ const ALLOWED: &[Entry] = &[
     e(Fs, "steve-hub/src/api/files.rs", 1, Hub, "a blob download"),
     e(Fs, "steve-hub/src/app.rs", 1, Hub, "the upgrade control token"),
     e(Fs, "steve-hub/src/config.rs", 3, Hub, "the Hub's dirs and key files"),
-    e(Fs, "steve-hub/src/files.rs", 2, Hub, "the blob store"),
+    e(Fs, "steve-hub/src/files.rs", 5, Hub, "the blob store (atomic temp file + rename)"),
     e(Fs, "steve-hub/src/system.rs", 1, Hub, "host facts (/proc/meminfo)"),
     e(Fs, "steve-hub/src/upgrades/client.rs", 6, Hub, "the upgrader"),
     e(Fs, "steve-hub/src/upgrades/mod.rs", 11, Hub, "the upgrader"),

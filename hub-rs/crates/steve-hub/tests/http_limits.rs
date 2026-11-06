@@ -187,3 +187,70 @@ async fn bodies_are_limited_except_uploads() {
         .expect("send");
     assert_eq!(r.status().as_u16(), 400);
 }
+
+/// Every file under `dir`, recursively.
+fn files_under(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut out = vec![];
+    let mut todo = vec![dir.to_path_buf()];
+    while let Some(d) = todo.pop() {
+        for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                todo.push(p);
+            } else {
+                out.push(p);
+            }
+        }
+    }
+    out
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_blob_is_written_whole_and_a_truncated_copy_is_repaired_on_the_next_upload() {
+    let e = start().await;
+    let upload = || async {
+        let mut form = b"--XB\r\nContent-Disposition: form-data; name=\"file\"; filename=\"notes.txt\"\r\nContent-Type: text/plain\r\n\r\n".to_vec();
+        form.extend_from_slice("第一行\nsecond line\n".repeat(200).as_bytes());
+        form.extend_from_slice(b"\r\n--XB--\r\n");
+        let r = e
+            .post("/api/files")
+            .header("content-type", "multipart/form-data; boundary=XB")
+            .body(form)
+            .send()
+            .await
+            .expect("send");
+        assert_eq!(r.status().as_u16(), 200);
+        let v: serde_json::Value = r.json().await.expect("json");
+        v["id"].as_str().expect("id").to_string()
+    };
+    let size = "第一行\nsecond line\n".repeat(200).len() as u64;
+    let id = upload().await;
+    let root = e._home.path().join("steve/data/files");
+    let all = files_under(&root);
+    assert_eq!(all.len(), 1, "one blob, no temporary file left: {all:?}");
+    let blob = all[0].clone();
+    assert!(blob.ends_with(&id), "{blob:?}");
+    assert_eq!(std::fs::metadata(&blob).unwrap().len(), size);
+    // a copy cut short (a power loss before writes were atomic): the same upload repairs it
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&blob)
+        .unwrap()
+        .set_len(10)
+        .unwrap();
+    assert_eq!(upload().await, id, "still deduplicated");
+    assert_eq!(
+        std::fs::metadata(&blob).unwrap().len(),
+        size,
+        "written again"
+    );
+    assert_eq!(files_under(&root).len(), 1);
+    // an intact copy is left alone
+    let before = std::fs::metadata(&blob).unwrap().modified().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    assert_eq!(upload().await, id);
+    assert_eq!(
+        std::fs::metadata(&blob).unwrap().modified().unwrap(),
+        before
+    );
+}

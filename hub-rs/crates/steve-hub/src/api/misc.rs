@@ -1091,13 +1091,14 @@ pub async fn system_models(
 
 /// Paths and sizes on this machine are the instance manager's.
 fn instance_owner(c: &Ctx) -> Result<(), ApiError> {
+    owner_or(c, || steve_i18n::t!("hub.workspaces.owner_only"))
+}
+
+fn owner_or(c: &Ctx, why: impl FnOnce() -> String) -> Result<(), ApiError> {
     if c.user.get("role").and_then(Value::as_str) == Some("owner") {
         Ok(())
     } else {
-        Err(ApiError::Json(
-            403,
-            steve_i18n::t!("hub.workspaces.owner_only"),
-        ))
+        Err(ApiError::Json(403, why()))
     }
 }
 
@@ -1118,6 +1119,56 @@ pub async fn system_workspaces_reclaim(
 ) -> ApiResult {
     instance_owner(&c)?;
     ok(st.domain.reclaim_workspaces().await?)
+}
+
+/// The outbox's store: only a Hub with its modules wired has one.
+fn outbox_store(st: &AppState) -> Result<steve_store::Store, ApiError> {
+    st.modules
+        .as_ref()
+        .map(|m| m.store.clone())
+        .ok_or_else(|| ApiError::not_found(steve_i18n::t!("hub.outbox.none")))
+}
+
+/// `GET /api/system/outbox`: what the outbox still owes, and the dead deliveries grouped by consumer.
+pub async fn system_outbox(State(st): State<AppState>, Extension(c): Extension<Ctx>) -> ApiResult {
+    owner_or(&c, || steve_i18n::t!("hub.outbox.owner_only"))?;
+    let store = outbox_store(&st)?;
+    let (stats, dead) = tokio::task::spawn_blocking(move || {
+        Ok::<_, steve_store::StoreError>((
+            store.reader(steve_store::outbox::stats)?,
+            store.reader(steve_store::outbox::dead)?,
+        ))
+    })
+    .await
+    .map_err(|e| ApiError::internal(e.to_string()))?
+    .map_err(|e| ApiError::internal(e.to_string()))?;
+    ok(
+        json!({ "pending": stats.pending, "dead": stats.dead, "oldest": stats.oldest, "groups": dead }),
+    )
+}
+
+/// `POST /api/system/outbox/revive` `{consumer?}`: the dead deliveries (of one consumer, or all) are
+/// tried again, with a fresh day before they can be given up on again.
+pub async fn system_outbox_revive(
+    State(st): State<AppState>,
+    Extension(c): Extension<Ctx>,
+    b: Bytes,
+) -> ApiResult {
+    owner_or(&c, || steve_i18n::t!("hub.outbox.owner_only"))?;
+    let store = outbox_store(&st)?;
+    let v = if b.is_empty() { json!({}) } else { body(&b)? };
+    let consumer = match v.get("consumer") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(s)) if !s.is_empty() => Some(s.clone()),
+        Some(_) => return Err(ApiError::Invalid(vec!["consumer".into()])),
+    };
+    let n = tokio::task::spawn_blocking(move || {
+        steve_store::outbox::revive(&store, consumer.as_deref())
+    })
+    .await
+    .map_err(|e| ApiError::internal(e.to_string()))?
+    .map_err(|e| ApiError::internal(e.to_string()))?;
+    ok(json!({ "revived": n }))
 }
 
 // ── devices ──

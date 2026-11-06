@@ -1,6 +1,8 @@
-//! Hourly chores (housekeeping.ts): archive finished items after the workspace's archive period. Giving
-//! back finished items' worktrees moved to the workspace watcher (`workspace`), which also deletes their
-//! caches outside the lock and leaves worktrees alone while a process runs in them.
+//! Hourly chores (housekeeping.ts): archive finished items after the workspace's archive period, and
+//! compact the session logs of archived items once they have been archived for the workspace's
+//! `keepSess` (the default, 永久, keeps them whole). Giving back finished items' worktrees moved to the
+//! workspace watcher (`workspace`), which also deletes their caches outside the lock and leaves worktrees
+//! alone while a process runs in them.
 
 use crate::Core;
 use crate::error::Result;
@@ -12,7 +14,24 @@ use std::time::Duration;
 impl Core {
     /// One pass over every workspace.
     pub fn housekeeping(&self) -> Result<()> {
+        let compact = self.archive_pass()?;
+        /* compacting rewrites whole logs: outside the core's lock, one session at a time */
+        for sid in compact {
+            match self.store().store().events().compact(&sid) {
+                Ok(n) if n > 0 => {
+                    tracing::info!(session = %sid, events = n, "compacted an archived session")
+                }
+                Ok(_) => {}
+                Err(e) => tracing::error!(session = %sid, "compact session {e}"),
+            }
+        }
+        Ok(())
+    }
+
+    /// Archives what is due and returns the sessions due for compaction (under the lock).
+    fn archive_pass(&self) -> Result<Vec<String>> {
         let t = self.tx();
+        let mut compact: Vec<String> = vec![];
         for ws in t.db().workspace_ids()? {
             let days: i64 = t.db().setting(&ws, "archDays", "30")?.parse().unwrap_or(0);
             let before = now() - days * 24 * 3_600_000;
@@ -44,8 +63,22 @@ impl Core {
                 let one = (archived.len() == 1).then(|| archived[0].as_str());
                 crate::notify::notify(t.db(), &ws, "archive", "info", &text, one)?;
             }
+            let Some(keep) = keep_sessions_ms(&t.db().setting(&ws, "keepSess", "永久")?) else {
+                continue;
+            };
+            let before = now() - keep;
+            for i in t.db().items_all(&ws)? {
+                if !i.archived || !i.is_finished() || i.updated >= before {
+                    continue;
+                }
+                for s in t.db().sessions_of_item(&i.id)? {
+                    if !t.busy(&s.id) && !t.db().store().events().compacted(&s.id)? {
+                        compact.push(s.id);
+                    }
+                }
+            }
         }
-        Ok(())
+        Ok(compact)
     }
 
     /// At boot, then every hour. Runs forever.
@@ -61,5 +94,16 @@ impl Core {
                 Ok(Ok(())) => {}
             }
         }
+    }
+}
+
+/// How long an archived item's sessions keep their whole event log (`keepSess`: 90 天, 1 年); `None`
+/// (永久, the default, or anything else) keeps it for good.
+pub(crate) fn keep_sessions_ms(v: &str) -> Option<i64> {
+    const DAY: i64 = 24 * 3_600_000;
+    match v.trim() {
+        "90 天" => Some(90 * DAY),
+        "1 年" => Some(365 * DAY),
+        _ => None,
     }
 }

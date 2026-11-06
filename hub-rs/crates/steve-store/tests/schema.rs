@@ -97,14 +97,17 @@ fn fresh_database_is_ts_schema_plus_module_migrations() {
     for t in STUBS {
         only.execute_batch(&format!("CREATE TABLE {t} (id TEXT PRIMARY KEY, workspace_id TEXT, object_type TEXT, object_id TEXT, subject_type TEXT, subject_id TEXT, item_id TEXT, no INTEGER, created INTEGER, session_id TEXT)")).unwrap();
     }
-    // 018's backfill and 019's space merge read these TS tables (and change nothing on empty ones)
+    // 018's backfill and 019's space merge read these TS tables, 044 resets keepSess in settings (and change nothing on empty ones)
     const READ_STUBS: [(&str, &str); 7] = [
         ("revisions", "object_type TEXT, object_id TEXT"),
         (
             "audit",
             "workspace_id TEXT, ts INTEGER, actor TEXT, action TEXT, target TEXT, detail TEXT",
         ),
-        ("settings", "workspace_id TEXT, key TEXT, value TEXT"),
+        (
+            "settings",
+            "workspace_id TEXT, key TEXT, value TEXT, updated INTEGER",
+        ),
         (
             "bots",
             "id TEXT PRIMARY KEY, workspace_id TEXT, deleted INTEGER",
@@ -167,8 +170,8 @@ fn fresh_database_is_ts_schema_plus_module_migrations() {
 
 #[test]
 fn migrations_are_the_ts_strings() {
-    assert_eq!(db::MIGRATIONS.len(), 43);
-    assert_eq!(db::SCHEMA_VERSION, 43);
+    assert_eq!(db::MIGRATIONS.len(), 44);
+    assert_eq!(db::SCHEMA_VERSION, 44);
     assert!(db::MIGRATIONS[0].starts_with("\n  CREATE TABLE workspaces (id TEXT PRIMARY KEY, name TEXT NOT NULL, created INTEGER NOT NULL);"));
     assert!(
         db::MIGRATIONS[1]

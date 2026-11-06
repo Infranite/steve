@@ -68,7 +68,7 @@ fn at_version(v: usize) -> (tempfile::TempDir, std::path::PathBuf) {
 
 #[test]
 fn schema_version_is_23() {
-    assert_eq!(db::SCHEMA_VERSION, 43);
+    assert_eq!(db::SCHEMA_VERSION, 44);
 }
 
 #[test]
@@ -439,4 +439,50 @@ fn migration_43_keeps_content_keys_of_messages() {
         count(&c, "SELECT v FROM schema_version"),
         db::SCHEMA_VERSION
     );
+}
+
+#[test]
+fn migration_44_adds_the_failure_clock_and_the_compaction_table() {
+    let (_dir, path) = at_version(43);
+    let c = Connection::open(&path).unwrap();
+    /* keepSess chosen while it did nothing must not start compacting after the upgrade */
+    c.execute_batch(
+        "INSERT INTO workspaces (id, name, created) VALUES ('w2', 'w2', 1), ('w3', 'w3', 1);
+         INSERT INTO settings (workspace_id, key, value, updated) VALUES
+           ('default', 'keepSess', '\"90 天\"', 1), ('w2', 'keepSess', '\"1 年\"', 1),
+           ('w3', 'keepSess', '\"永久\"', 1), ('default', 'keepRaw', '\"30\"', 1);",
+    )
+    .unwrap();
+    db::migrate(&c).unwrap();
+    assert_eq!(
+        count(
+            &c,
+            "SELECT count(*) FROM settings WHERE key = 'keepSess' AND value = '\"永久\"'"
+        ),
+        3
+    );
+    assert_eq!(
+        count(
+            &c,
+            "SELECT count(*) FROM settings WHERE key = 'keepSess' AND updated = 1"
+        ),
+        1,
+        "an untouched 永久 keeps its timestamp"
+    );
+    assert_eq!(
+        count(
+            &c,
+            "SELECT count(*) FROM settings WHERE key = 'keepRaw' AND value = '\"30\"'"
+        ),
+        1
+    );
+    let col = |t: &str, n: &str| {
+        count(
+            &c,
+            &format!("SELECT count(*) FROM pragma_table_info('{t}') WHERE name = '{n}'"),
+        )
+    };
+    assert_eq!(col("outbox_leases", "failing_since"), 1);
+    assert!(has_table(&c, "session_compactions"));
+    assert_eq!(count(&c, "SELECT v FROM schema_version"), 44);
 }

@@ -36,7 +36,7 @@ pub static SETTINGS: LazyLock<Value> = LazyLock::new(|| {
         { "key": "reduceMotion", "label": "减弱动态效果", "values": ["开", "关"], "def": "关", "live": true },
       ],
       "data": [
-        { "key": "keepSess", "label": "会话记录保留", "values": ["90 天", "1 年", "永久"], "def": "永久", "live": false },
+        { "key": "keepSess", "label": "会话记录保留", "values": ["90 天", "1 年", "永久"], "def": "永久", "live": true },
         // signals (S1 `steve_flow::retention::keep_raw_setting`) and mail (E1 `keepMail`), as steve-hub's settings.rs serves them
         { "key": "keepRaw", "label": "事件与消息原文保留", "values": ["7", "30", "90"], "def": "7", "live": true, "labels": { "7": "7 天", "30": "30 天", "90": "90 天" } },
         { "key": "keepMail", "label": "本地邮件正文保留", "values": ["30", "90", "365"], "def": "90", "live": true, "labels": { "30": "30 天", "90": "90 天", "365": "1 年" } },

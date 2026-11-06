@@ -62,6 +62,8 @@
   "hub.models.source_claude_picker": "Claude Code's model picker (~/.claude/settings.json)",
   "hub.models.recent_unlisted": "Used recently, not in the list",
   "hub.workspaces.owner_only": "Only the instance admin can view and reclaim workspaces",
+  "hub.outbox.owner_only": "Only the instance admin can view and resend background deliveries",
+  "hub.outbox.none": "This Hub has no background deliveries",
   "hub.prices.sync_off": "Price sync is off (STEVE_PRICE_CATALOG_URL=off)",
   "hub.prices.syncing": "Syncing, one moment",
   "hub.prices.sync_failed": "%{error}; keeping the prices from the last sync",

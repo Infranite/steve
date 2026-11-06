@@ -326,3 +326,55 @@ fn standalone_database_snapshot_contains_every_payload() {
         data
     );
 }
+
+#[test]
+fn compaction_drops_images_and_big_outputs_and_their_payloads_once() {
+    let t = fresh();
+    let s = &t.store;
+    let id = session(s);
+    let big = format!("{}{}", "a".repeat(5000), "b".repeat(200_000));
+    s.events()
+        .add(
+            &id,
+            "tool_call_update",
+            json!({"rawOutput": big, "status": "completed"}),
+        )
+        .unwrap();
+    s.events()
+        .add(&id, "user", json!({"text": "截图", "images": [{"type": "image", "data": "QUJD".repeat(1000), "mimeType": "image/png"}]}))
+        .unwrap();
+    s.events()
+        .add(&id, "agent_message_chunk", json!({"text": "完成了"}))
+        .unwrap();
+    assert!(count(s, "event_payloads") >= 1);
+    assert!(!s.events().compacted(&id).unwrap());
+    assert_eq!(s.events().compact(&id).unwrap(), 2);
+    assert!(s.events().compacted(&id).unwrap());
+    assert_eq!(
+        count(s, "event_payloads"),
+        0,
+        "the big output's payload went with its last ref"
+    );
+    assert_eq!(count(s, "event_payload_refs"), 0);
+    let ev = s.events().after(&id, 0, 10).unwrap();
+    let out = ev[0].data["rawOutput"].as_str().unwrap();
+    assert!(
+        out.starts_with(&"a".repeat(4000)) && out.ends_with(&"b".repeat(2000)),
+        "{}",
+        out.len()
+    );
+    assert!(out.len() < 7000);
+    assert_eq!(ev[0].data["status"], "completed");
+    assert_eq!(ev[1].data["images"][0]["type"], "image");
+    assert!(ev[1].data["images"][0].get("data").is_none());
+    assert_eq!(ev[1].data["text"], "截图");
+    assert_eq!(
+        ev[2].data["text"], "完成了",
+        "conversation text is untouched"
+    );
+    assert_eq!(
+        s.events().compact(&id).unwrap(),
+        0,
+        "a second pass changes nothing"
+    );
+}

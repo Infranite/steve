@@ -287,6 +287,9 @@ impl Sessions<'_> {
 
 pub struct Events<'a>(&'a Store);
 
+/// Events [`Events::compact`] reads and rewrites per transaction.
+const COMPACT_PAGE: i64 = 200;
+
 fn event_row(r: &rusqlite::Row) -> rusqlite::Result<Event> {
     Ok(Event {
         seq: r.get(0)?,
@@ -426,6 +429,80 @@ impl Events<'_> {
                 if bytes >= max_bytes { break; }
             }
             Ok(())
+        })
+    }
+
+    /// Compacts the event log of session `session_id` ([`crate::compact`]: images to placeholders, a
+    /// tool's big outputs to head and tail) and marks it compacted, in pages of [`COMPACT_PAGE`] events,
+    /// each its own transaction. Lossy, and only for archived items whose workspace asked for it. Returns
+    /// the events changed.
+    pub fn compact(&self, session_id: &str) -> Result<usize> {
+        let mut after = 0;
+        let mut changed = 0;
+        loop {
+            let page: Vec<Event> = self.0.read(|c| {
+                let tx = c.unchecked_transaction()?;
+                let mut events: Vec<Event> = all(
+                    &tx,
+                    "SELECT seq, ts, kind, data FROM events WHERE session_id = ? AND seq > ? ORDER BY seq LIMIT ?",
+                    params![session_id, after, COMPACT_PAGE],
+                    event_row,
+                )?;
+                for e in &mut events {
+                    hydrate_event(&tx, session_id, e)?;
+                }
+                tx.commit()?;
+                Ok(events)
+            })?;
+            let Some(last) = page.last().map(|e| e.seq) else {
+                break;
+            };
+            after = last;
+            let mut todo = vec![];
+            for mut e in page {
+                if crate::compact::compact(&e.kind, &mut e.data) {
+                    let (stored, payloads) = crate::event_payload::split(&e.kind, &e.data)?;
+                    todo.push((e.seq, to_json(&stored)?, payloads));
+                }
+            }
+            if todo.is_empty() {
+                continue;
+            }
+            changed += todo.len();
+            self.0.write(|w| {
+                let tx = w.tx()?;
+                for (seq, data, payloads) in &todo {
+                    // the refs go first: the trigger drops a payload no other event points at
+                    tx.run("DELETE FROM event_payload_refs WHERE event_seq = ?", [seq])?;
+                    tx.run(
+                        "UPDATE events SET data = ? WHERE seq = ? AND session_id = ?",
+                        params![data, seq, session_id],
+                    )?;
+                    crate::event_payload::save(&tx, session_id, *seq, payloads)?;
+                }
+                tx.commit()?;
+                Ok(())
+            })?;
+        }
+        self.0.write(|w| {
+            w.c.run(
+                "INSERT INTO session_compactions (session_id, events, at) VALUES (?1, ?2, ?3)
+                 ON CONFLICT (session_id) DO UPDATE SET events = events + ?2, at = ?3",
+                params![session_id, changed as i64, now()],
+            )?;
+            Ok(())
+        })?;
+        Ok(changed)
+    }
+
+    /// Whether session `session_id` was compacted already.
+    pub fn compacted(&self, session_id: &str) -> Result<bool> {
+        self.0.read(|c| {
+            exists(
+                c,
+                "SELECT 1 FROM session_compactions WHERE session_id = ?",
+                [session_id],
+            )
         })
     }
 

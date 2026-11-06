@@ -149,50 +149,8 @@ impl Integration {
     }
 }
 
-/// A provider Steve knows about but has no adapter for yet, or an adapter of a known provider that
-/// is not built yet (Gmail and Outlook sign-in for mail). Only what the specs plan.
-struct Planned {
-    provider: &'static str,
-    provider_name: &'static str,
-    /// The planned way in, as the dialog would name it.
-    name: &'static str,
-    areas: &'static [&'static str],
-    note: &'static str,
-}
-
-const PLANNED: &[Planned] = &[
-    Planned {
-        provider: "mail",
-        provider_name: "邮箱",
-        name: "Gmail（Google 账号登录）",
-        areas: &["mail"],
-        note: "现在可以用 IMAP 和应用专用密码接入 Gmail",
-    },
-    Planned {
-        provider: "mail",
-        provider_name: "邮箱",
-        name: "Outlook（微软账号登录）",
-        areas: &["mail"],
-        note: "现在可以用 IMAP 接入",
-    },
-    Planned {
-        provider: "slack",
-        provider_name: "Slack",
-        name: "Slack",
-        areas: &["channel"],
-        note: "",
-    },
-    Planned {
-        provider: "gcal",
-        provider_name: "Google 日历",
-        name: "Google 日历",
-        areas: &["calendar"],
-        note: "",
-    },
-];
-
 /// Display order of the known providers; others follow in registration order.
-const ORDER: [&str; 5] = ["feishu", "github", "mail", "slack", "gcal"];
+const ORDER: [&str; 3] = ["feishu", "github", "mail"];
 
 // ---------------------------------------------------------------- shapes
 
@@ -232,31 +190,13 @@ fn area_label(id: &str) -> String {
     }
 }
 
-/// A [`PLANNED`] text in the request's language (the table holds the zh-CN one).
-fn planned_text(zh: &str) -> String {
-    use steve_i18n::t;
-    match zh {
-        "邮箱" => t!("modules.integration.planned.mailbox"),
-        "Gmail（Google 账号登录）" => t!("modules.integration.planned.gmail"),
-        "现在可以用 IMAP 和应用专用密码接入 Gmail" => {
-            t!("modules.integration.planned.gmail_note")
-        }
-        "Outlook（微软账号登录）" => t!("modules.integration.planned.outlook"),
-        "现在可以用 IMAP 接入" => t!("modules.integration.planned.outlook_note"),
-        "Google 日历" => t!("modules.integration.planned.gcal"),
-        x => x.to_string(),
-    }
-}
-
 #[derive(Debug, Clone, Serialize)]
 pub struct ProviderOut {
     pub id: String,
     pub name: String,
-    /// `supported` (this Hub has an adapter) or `planned` (即将支持).
+    /// `supported`: this Hub has an adapter (only those are listed).
     pub status: &'static str,
     pub adapters: Vec<AdapterInfo>,
-    /// Ways in that are planned but not built.
-    pub planned: Vec<PlannedOut>,
     /// Every area of the provider: `supported` when an adapter offers it today, else `planned`.
     pub areas: Vec<ProviderArea>,
     pub connections: Vec<ConnectionInfo>,
@@ -266,14 +206,6 @@ pub struct ProviderOut {
 pub struct ProviderArea {
     pub area: String,
     pub state: &'static str,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct PlannedOut {
-    pub name: String,
-    pub areas: Vec<&'static str>,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub note: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -537,8 +469,8 @@ pub fn cap_state(
 }
 
 impl Connections {
-    /// `GET /connections/integrations`: the providers with their adapters, planned ways in, and
-    /// the caller's connections with the state of every area.
+    /// `GET /connections/integrations`: the providers with their adapters, and the caller's
+    /// connections with the state of every area.
     pub fn integrations(&self, who: &Caller) -> VaultResult<IntegrationsOut> {
         let rows = self.visible(who)?;
         let mut providers: Vec<ProviderOut> = Vec::new();
@@ -549,9 +481,8 @@ impl Connections {
             providers.push(ProviderOut {
                 id: id.into(),
                 name: name.into(),
-                status: "planned",
+                status: "supported",
                 adapters: Vec::new(),
-                planned: Vec::new(),
                 areas: Vec::new(),
                 connections: Vec::new(),
             });
@@ -560,9 +491,7 @@ impl Connections {
         for p in self.providers() {
             let i = p.integration();
             let k = slot(&mut providers, &i.provider, &i.provider_name);
-            let out = &mut providers[k];
-            out.status = "supported";
-            out.adapters.push(AdapterInfo {
+            providers[k].adapters.push(AdapterInfo {
                 id: p.id().into(),
                 name: p.name().into(),
                 identity: i.identity.clone(),
@@ -572,14 +501,6 @@ impl Connections {
                 capabilities: i.capabilities,
                 pairing: p.pairing(),
                 channel: self.channel_summary(p.id()).cloned(),
-            });
-        }
-        for x in PLANNED {
-            let k = slot(&mut providers, x.provider, &planned_text(x.provider_name));
-            providers[k].planned.push(PlannedOut {
-                name: planned_text(x.name),
-                areas: x.areas.to_vec(),
-                note: planned_text(x.note),
             });
         }
         let mut grouped = Vec::new();
@@ -630,11 +551,6 @@ impl Connections {
             for a in &p.adapters {
                 for c in &a.capabilities {
                     add(&c.area, !c.planned);
-                }
-            }
-            for x in &p.planned {
-                for a in &x.areas {
-                    add(a, false);
                 }
             }
             let rank = |id: &str| {

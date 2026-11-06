@@ -1540,6 +1540,64 @@ fn housekeeping_archives_old_finished_items() {
     assert!(!k.db().item(&fresh).unwrap().unwrap().archived);
 }
 
+/// Audit #62: an archived item's session log is compacted only once it has been archived for keepSess,
+/// and never under the default 永久.
+#[test]
+fn housekeeping_compacts_archived_sessions_only_per_keep_sess() {
+    let k = Kit::new();
+    let item = k.item("done", "收尾", None);
+    let s = k
+        .db()
+        .session_create(&steve_store::NewSession {
+            workspace_id: WS.into(),
+            item_id: Some(item.clone()),
+            harness: "fake".into(),
+            cwd: "/tmp".into(),
+            token: "t".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    let shot = json!({"text": "截图", "images": [{"type": "image", "data": "QUJD".repeat(100), "mimeType": "image/png"}]});
+    k.db().event_add(&s.id, "user", shot).unwrap();
+    let image = |k: &Kit| {
+        k.db().store().events().after(&s.id, 0, 10).unwrap()[0].data["images"][0]
+            .get("data")
+            .is_some()
+    };
+    let age = |k: &Kit, days: i64| {
+        k.db()
+            .exec(
+                "UPDATE items SET archived = 1, updated = ? WHERE id = ?",
+                &[
+                    &(now() - days * 24 * 3_600_000) as &dyn rusqlite::ToSql,
+                    &item,
+                ],
+            )
+            .unwrap();
+    };
+    age(&k, 400);
+    k.core.housekeeping().unwrap();
+    assert!(image(&k), "永久 (the default) keeps everything");
+    k.db()
+        .settings_set(
+            WS,
+            &json!({"keepSess": "1 年"}).as_object().unwrap().clone(),
+            "me",
+        )
+        .unwrap();
+    age(&k, 200);
+    k.core.housekeeping().unwrap();
+    assert!(image(&k), "archived for less than a year");
+    age(&k, 400);
+    k.core.housekeeping().unwrap();
+    assert!(!image(&k), "compacted");
+    assert!(k.db().store().events().compacted(&s.id).unwrap());
+    assert_eq!(
+        k.db().store().events().after(&s.id, 0, 10).unwrap()[0].data["text"],
+        "截图"
+    );
+}
+
 #[test]
 fn seed_registers_steves_own_repo_once() {
     let k = Kit::with(|c| c.steve_repo = std::path::PathBuf::from("/nonexistent"));
