@@ -15,6 +15,7 @@ use crate::runs::{self, RunRow};
 use crate::schedules::{self, Schedule};
 use crate::{FlowCx, FlowResult, digest};
 use steve_modules::Tier;
+use steve_modules::outbound::quote_untrusted;
 
 /// What one action did.
 #[derive(Debug, Clone, PartialEq)]
@@ -623,19 +624,29 @@ pub async fn item_create_event(cx: &mut RunCx<'_>, cfg: &Value, input: &Value) -
     } else {
         cut(&title, 80)
     };
+    let src = ev["source"].as_str().unwrap_or("manual");
+    // what an outside event brings (its text, the values a goal template pulls from it) goes between
+    // the untrusted-data markers; the goal the user wrote, and a manual or scheduled run, stay theirs
+    let outside = crate::signals::external_source(src);
+    let quote = |t: String| {
+        if outside && !t.trim().is_empty() {
+            quote_untrusted(&t)
+        } else {
+            t
+        }
+    };
     let goal = cfg["goal"]
         .as_str()
-        .map(|g| cx.render(g, input))
+        .map(|g| cx.render_with(g, input, quote))
         .filter(|g| !g.trim().is_empty())
         .unwrap_or_else(|| {
             let text = event_text(&ev);
-            if text.is_empty() {
+            quote(if text.is_empty() {
                 summary.clone()
             } else {
                 format!("{summary}\n\n{text}")
-            }
+            })
         });
-    let src = ev["source"].as_str().unwrap_or("manual");
     let propose = cfg["mode"] == "propose";
     let req = ItemRequest {
         ws: ws.clone(),

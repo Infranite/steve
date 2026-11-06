@@ -358,6 +358,9 @@ pub struct Ask {
     pub count: u32,
     /// The normalised question (kept in the ledger to spot a repeat).
     pub key: String,
+    /// The item runs with full access: the agent acts on an answer without the tool guard, so every
+    /// outward word counts, not only going live and mail.
+    pub full: bool,
 }
 
 /// Rebase conflicts handed back before YOLO leaves the next release card to you.
@@ -841,8 +844,8 @@ fn table(f: &Facts, p: &Policy, env: &Env) -> Verdict {
             .delay(p.release_delay_s)
             .undo(Undo::Rollback)
         }
-        Subject::Stall(s) => stall(s, p, env),
-        Subject::Ask(a) => ask(a, p, env),
+        Subject::Stall(s) => stall(s, p),
+        Subject::Ask(a) => ask(a, p),
         Subject::ProposeDeps => {
             if !p.propose {
                 return decline("propose.off", "设置里没有让 YOLO 开始事项");
@@ -912,7 +915,7 @@ fn accept(a: &Accept, p: &Policy) -> Verdict {
         .checks(checks)
 }
 
-fn stall(s: &Stall, p: &Policy, env: &Env) -> Verdict {
+fn stall(s: &Stall, p: &Policy) -> Verdict {
     if !p.continue_stalls {
         return decline("continue.off", "设置里没有让 YOLO 让它继续");
     }
@@ -929,7 +932,7 @@ fn stall(s: &Stall, p: &Policy, env: &Env) -> Verdict {
         StallCause::Stopped => {
             if let Some(q) = &s.asked {
                 // it stopped on a question: answer it the way `steve_ask` is answered
-                return match ask(q, p, env) {
+                return match ask(q, p) {
                     Verdict::Auto { text, reason, .. } => {
                         auto("continue", "continue.stall", reason).text(text.unwrap_or_default())
                     }
@@ -986,7 +989,7 @@ fn stall(s: &Stall, p: &Policy, env: &Env) -> Verdict {
     }
 }
 
-fn ask(a: &Ask, p: &Policy, env: &Env) -> Verdict {
+fn ask(a: &Ask, p: &Policy) -> Verdict {
     if !p.answer_asks {
         return decline("ask.off", "设置里没有让 YOLO 代答");
     }
@@ -1007,11 +1010,11 @@ fn ask(a: &Ask, p: &Policy, env: &Env) -> Verdict {
         return decline("ask.unsure", "YOLO 没替你答：拿不准");
     };
     let checks = json!({ "question": a.key, "answer": ans, "recommended": a.recommended });
-    if limits::money_or_outside_words(&ans.answer, env).is_some()
+    if limits::money_or_outside_words(&ans.answer, a.full).is_some()
         || ans
             .option
             .as_deref()
-            .is_some_and(|o| limits::money_or_outside_words(o, env).is_some())
+            .is_some_and(|o| limits::money_or_outside_words(o, a.full).is_some())
     {
         return decline("ask.limit", "答案涉及硬限制");
     }
@@ -1036,7 +1039,7 @@ fn ask(a: &Ask, p: &Policy, env: &Env) -> Verdict {
         Some(rec)
             if !objected
                 && !rec.trim().is_empty()
-                && limits::money_or_outside_words(rec, env).is_none() =>
+                && limits::money_or_outside_words(rec, a.full).is_none() =>
         {
             let why = a.why.clone().unwrap_or_else(|| "Agent 的推荐".into());
             auto(rec, "ask.recommended", format!("选了 Agent 推荐的：{why}"))

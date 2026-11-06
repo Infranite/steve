@@ -31,6 +31,21 @@ pub fn strip_ai_prefix(text: &str) -> &str {
     t
 }
 
+/// Opens text somebody other than the user wrote, carried into an agent's goal (a mail, an issue,
+/// other people's messages in a group).
+pub const UNTRUSTED_OPEN: &str = "<<<外部内容开始>>>";
+/// Closes it.
+pub const UNTRUSTED_CLOSE: &str = "<<<外部内容结束>>>";
+
+/// `text` between [`UNTRUSTED_OPEN`] and [`UNTRUSTED_CLOSE`], on lines of their own; markers inside
+/// the text are defused first, so it cannot close the quote itself.
+pub fn quote_untrusted(text: &str) -> String {
+    let t = text
+        .replace(UNTRUSTED_OPEN, "<外部内容开始>")
+        .replace(UNTRUSTED_CLOSE, "<外部内容结束>");
+    format!("{UNTRUSTED_OPEN}\n{t}\n{UNTRUSTED_CLOSE}")
+}
+
 /// The settled decision's `result` says YOLO answered it (`decided_by: "yolo"`).
 pub fn decided_by_yolo(result: &serde_json::Value) -> bool {
     result.get("decided_by").and_then(serde_json::Value::as_str) == Some(YOLO_ACTOR)

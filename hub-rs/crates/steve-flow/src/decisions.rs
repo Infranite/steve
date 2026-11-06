@@ -218,7 +218,14 @@ pub async fn to_item(cx: &FlowCx, ws: &str, event_id: &str) -> FlowResult<String
             text.chars().take(4000).collect::<String>()
         )
     };
-    let label = crate::signals::source_label(ev["source"].as_str().unwrap_or("")).to_string();
+    let src = ev["source"].as_str().unwrap_or("");
+    // the event's own text came from outside: the agent reads it as data
+    let goal = if crate::signals::external_source(src) && !goal.trim().is_empty() {
+        steve_modules::outbound::quote_untrusted(&goal)
+    } else {
+        goal
+    };
+    let label = crate::signals::source_label(src).to_string();
     let item = cx
         .core
         .create_item(ItemRequest {

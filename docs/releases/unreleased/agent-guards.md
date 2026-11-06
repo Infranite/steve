@@ -1,0 +1,8 @@
+- 完全放开下，Agent 的命令仍然不先问你，但 Steve 会检查 Agent 报告的每个工具调用：推送（git push）、用 gh 改 GitHub、用 lark-cli 或 sendmail、mail、osascript 等以你的名义发消息、碰 ~/.steve、8440 端口或 launchd、用 pkill/killall，会立刻停下这一轮，在会话里记一笔并通知你，Agent 下次收到消息时也会知道原因。这是事后拦截：那条命令可能已经开始执行，Agent 没报告或藏在脚本文件里的命令看不出来。YOLO 打开但没完全放开时，Agent 没先请求权限就直接执行的命令也按同样的底线检查。不论用哪种 Agent 都一样。完全放开的确认对话框改成只写实际做得到的事，也写明做不到的。
+- YOLO 不再替你批准 lark-cli、sendmail、mail、msmtp、osascript：它们会以你本人的身份发消息或邮件，即使你把它们加进了额外程序，也一律留给你。
+- YOLO 打开时，这些命令留给你确认：带对外字眼的内联代码（python3 -c、node -e 等）、含 system()、管道或写文件的 awk 程序、通过管道喂给 python3、node 等解释器的程序（包括 here-document）、git bisect run、npx 运行常见构建工具以外的包（别的 scope 下同名的包也算）、带查询参数或路径很长的网页抓取。ps、pgrep、lsof、喂给 cat 等读取命令的 here-document，以及 git tag、git worktree list、git cherry-pick 等本地 git 命令，现在可以直接替你批准。
+- Agent 的进程不再继承 GH_TOKEN、GITHUB_TOKEN 和 SSH agent（SSH_AUTH_SOCK），不论 YOLO 开没开。交付时的推送由 Steve 用保险箱里的凭据完成，不受影响；Agent 自己运行需要 SSH 的 git 命令（例如 git fetch 一个 SSH 地址的远端）会失败。
+- 有自己工作区（worktree 或临时目录）的事项，不开 YOLO 时 Agent 改文件也不再逐个文件问你。
+- YOLO 打开但没完全放开时，Agent 问“要不要删掉旧测试文件”“日志发到 stderr 还是 stdout”这类普通编码问题，YOLO 可以替你回答；涉及上线、推送、发布、发邮件的问题仍然留给你。完全放开时所有对外字眼都留给你。
+- 从邮件、GitHub issue 建的事项，Agent 会把内容当作别人写的不可信数据，不会因为里面的指令去推送、发消息或读密钥。流程从外部事件（邮件、消息、GitHub、Webhook 等）建的事项，事件带来的内容同样被当作不可信数据；你在流程里自己写的目标，以及手动、定时流程建的事项，仍然算你的要求。群聊里建的事项，你自己发的消息仍然算你的要求，只有之前的对话和别人发的消息被当作不可信数据。
+- 修复：事项分支名以“-”开头时，查看输出文档不会把它当成 git 的参数。

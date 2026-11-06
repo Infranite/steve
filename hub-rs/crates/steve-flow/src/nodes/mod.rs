@@ -147,6 +147,11 @@ impl RunCx<'_> {
         expr::render(tpl, &self.scope(input))
     }
 
+    /// [`Self::render`], each expanded value passed through `wrap`.
+    pub fn render_with(&self, tpl: &str, input: &Value, wrap: impl Fn(String) -> String) -> String {
+        expr::render_with(tpl, &self.scope(input), wrap)
+    }
+
     pub fn render_value(&self, v: &Value, input: &Value) -> Value {
         expr::render_value(v, &self.scope(input))
     }
