@@ -8,6 +8,7 @@
 //!    by the mail signature) → a new unconfirmed contact plus a merge proposal, never a silent merge;
 //! 4. otherwise a new unconfirmed contact, working at the domain's organization when there is one.
 
+use rusqlite::OptionalExtension;
 use serde::Serialize;
 use serde_json::json;
 use steve_store::base::links::{self, NewLink};
@@ -563,6 +564,98 @@ fn new_contact(
     )?;
     party_event(tx, ws, &p.id);
     Ok(p)
+}
+
+/// A contact seen for the first time that looks like you, `me` (a user's “我”): opens a merge
+/// proposal of `party` into `me` (the `party_merge` decision), never merges by itself. It looks
+/// like you when one of `handles` is an email that is an alias of `me` or the user's own email, or
+/// when its `name` is your name or one of your aliases and one of its emails is in a domain one of
+/// your email accounts uses. Only an unconfirmed, active contact is proposed; a pair rejected
+/// before is not proposed again. Returns the proposal id.
+pub fn propose_if_me(
+    tx: &Tx,
+    ws: &str,
+    me: &str,
+    party: &str,
+    account: &str,
+    name: Option<&str>,
+    handles: &[&str],
+) -> ApiResult<Option<String>> {
+    let (Some(me), Some(from)) = (people::get(tx, me)?, current_party(tx, party)?) else {
+        return Ok(None);
+    };
+    if !me.is_me()
+        || from.id == me.id
+        || from.status != "active"
+        || from.contact_kind.as_deref() != Some("unconfirmed")
+    {
+        return Ok(None);
+    }
+    let Some(a) = repo::get(tx, account)? else {
+        return Ok(None);
+    };
+    let emails: Vec<String> = handles
+        .iter()
+        .map(|h| h.trim().to_lowercase())
+        .filter(|h| {
+            h.split_once('@')
+                .is_some_and(|(l, d)| !l.is_empty() && d.contains('.'))
+        })
+        .collect();
+    if emails.is_empty() {
+        return Ok(None);
+    }
+    let user_email: Option<String> = tx
+        .query_row(
+            "SELECT email FROM users WHERE id = ?",
+            [me.user_id.as_deref().unwrap_or_default()],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten()
+        .map(|e| e.trim().to_lowercase());
+    let aliases: Vec<String> = me.aliases.iter().map(|x| x.trim().to_lowercase()).collect();
+    let reason = if let Some(e) = emails
+        .iter()
+        .find(|e| aliases.contains(e) || user_email.as_ref() == Some(*e))
+    {
+        Some(format!("邮箱 {e} 是「{}」用过的邮箱", me.name))
+    } else {
+        let key = name.map(|n| n.trim().to_lowercase()).unwrap_or_default();
+        let same_name = key.chars().count() >= 2
+            && (me.name.trim().to_lowercase() == key || aliases.contains(&key));
+        let mut domains: Vec<String> = Vec::new();
+        if same_name {
+            let mut st = tx.prepare_cached(
+                "WITH RECURSIVE ids(id) AS (SELECT ?2 UNION SELECT p.id FROM parties p JOIN ids ON p.merged_into = ids.id)
+                 SELECT a.handle FROM accounts a WHERE a.workspace_id = ?1 AND a.family = 'email' AND a.party_id IN (SELECT id FROM ids)",
+            )?;
+            for h in st.query_map(rusqlite::params![ws, me.id], |r| r.get::<_, String>(0))? {
+                if let Some((_, d)) = h?.trim().to_lowercase().split_once('@') {
+                    domains.push(d.to_string());
+                }
+            }
+            if let Some(d) = user_email.as_ref().and_then(|e| e.split_once('@')) {
+                domains.push(d.1.to_string());
+            }
+        }
+        emails
+            .iter()
+            .filter_map(|e| e.split_once('@'))
+            .find(|(_, d)| domains.iter().any(|x| x == d))
+            .map(|(_, d)| {
+                format!(
+                    "{} 和「{}」同名，邮箱域名 {d} 也是「{}」在用的",
+                    name.unwrap_or("").trim(),
+                    me.name,
+                    me.name
+                )
+            })
+    };
+    match reason {
+        Some(r) => propose(tx, ws, &from, &me, &a, &r),
+        None => Ok(None),
+    }
 }
 
 /// Writes the merge proposal and opens its decision; the `party_merge` handler (P4)

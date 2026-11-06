@@ -99,6 +99,9 @@ pub const MIGRATIONS: &[&str] = &[
     // 43: the content key of a message (matching copies without a provider id) and the connection
     // that supplied a copy without one.
     include_str!("../migrations/043.sql"),
+    // 44: the inbound watermark: when a connection was last turned on, how late a channel message
+    // may arrive, the history counts, and which messages were only recorded as history.
+    include_str!("../migrations/044.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).

@@ -557,6 +557,10 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
     for m in &declared.media {
         channels = channels.media(m.clone());
     }
+    // how an agent reads each adapter's conversations on demand (`steve_im_read`)
+    for h in &declared.history {
+        channels = channels.history(h.clone());
+    }
     // how each channel side's messages are told apart (provider ids, time precision, senders)
     for d in declared.decls() {
         channels = channels.decl(d.clone());

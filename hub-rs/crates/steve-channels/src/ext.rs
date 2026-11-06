@@ -14,6 +14,7 @@ use steve_modules::accounts::connections::ConnectionProvider;
 use crate::channel::{ActAsUser, ChannelAdapter, ChannelFeatures, ProfileAdapter};
 
 pub use crate::channel::{ActTarget, MessageRef, SendKey, Sent};
+pub use crate::history::HistoryRead;
 pub use crate::lifecycle::{ConnRun, ConnSink, ConnState, ConnectionHook};
 pub use crate::media::{MediaError, MediaFetch};
 pub use crate::queries::{ConnQueries, Queries};
@@ -163,6 +164,9 @@ pub struct ChannelSide {
     pub profiles: Option<Arc<dyn ProfileAdapter>>,
     /// Fetching the images and files of messages its connections received.
     pub media: Option<Arc<dyn MediaFetch>>,
+    /// Reading a conversation's history when an agent asks (`steve_im_read`). Optional: without
+    /// it the agent reads the messages the Hub stored.
+    pub history: Option<Arc<dyn HistoryRead>>,
 }
 
 impl ChannelSide {
@@ -174,6 +178,7 @@ impl ChannelSide {
             act_as_user: None,
             profiles: None,
             media: None,
+            history: None,
         }
     }
 
@@ -194,6 +199,11 @@ impl ChannelSide {
 
     pub fn media(mut self, m: Arc<dyn MediaFetch>) -> Self {
         self.media = Some(m);
+        self
+    }
+
+    pub fn history(mut self, h: Arc<dyn HistoryRead>) -> Self {
+        self.history = Some(h);
         self
     }
 
@@ -226,6 +236,10 @@ impl ChannelSide {
                 self.act_as_user.as_ref().map(|a| a.adapter_id()),
             ),
             ("media view", self.media.as_ref().map(|m| m.adapter_id())),
+            (
+                "history view",
+                self.history.as_ref().map(|h| h.adapter_id()),
+            ),
         ];
         for (what, id) in views {
             if let Some(id) = id
@@ -355,10 +369,16 @@ mod tests {
             .profiles(app.clone());
         assert_eq!(ok.check(), Ok(()));
         let user = Arc::new(FeishuEnv::from_env(|_| None).user_provider(Domain::Feishu));
-        let wrong = ChannelSide::new(app_decl(), app.clone()).profiles(user);
+        let wrong = ChannelSide::new(app_decl(), app.clone()).profiles(user.clone());
         assert_eq!(
             wrong.check(),
             Err("profile adapter feishu_user declared for adapter feishu_app".into())
+        );
+        // the history view too
+        let wrong = ChannelSide::new(app_decl(), app.clone()).history(user);
+        assert_eq!(
+            wrong.check(),
+            Err("history view feishu_user declared for adapter feishu_app".into())
         );
         let unnamed = ChannelSide::new(ChannelDecl::new(""), app.clone());
         assert!(unnamed.check().is_err());

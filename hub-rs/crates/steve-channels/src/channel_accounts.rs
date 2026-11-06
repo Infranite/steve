@@ -89,6 +89,11 @@ pub struct AccountOut {
     pub self_built: Option<bool>,
     pub permissions_checked_at: Option<i64>,
     pub revision: i64,
+    /// How late a message may arrive and still be acted on, in minutes.
+    pub late_minutes: i64,
+    /// Messages only recorded as history: `{before, late, at}` (written before the connection was
+    /// on, arrived too late, the last one's time).
+    pub history: Value,
 }
 
 /// `system` and `provider` of an adapter: its provider's integration (the adapters of one provider
@@ -247,6 +252,18 @@ pub fn out(
         params![ws, conn],
         |r| r.get(0),
     )?;
+    let (late_ms, before, late, at): (Option<i64>, i64, i64, Option<i64>) = c
+        .query_row(
+            "SELECT late_ms, history_before, history_late, history_at FROM channel_settings WHERE connection_id = ?",
+            [conn],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .optional()?
+        .unwrap_or((None, 0, 0, None));
+    let late_minutes = late_ms
+        .filter(|l| crate::inbound::LATE_MS.contains(l))
+        .unwrap_or(crate::inbound::DEFAULT_LATE_MS)
+        / 60_000;
     let (system, provider) = provider_of(ch, &f.adapter);
     let platform_name = match mode {
         Mode::Bot => format!("{}（应用机器人）", f.name),
@@ -294,6 +311,8 @@ pub fn out(
             .get("permissions_checked_at")
             .and_then(Value::as_i64),
         revision,
+        late_minutes,
+        history: json!({"before": before, "late": late, "at": at}),
     })
 }
 
@@ -359,6 +378,8 @@ pub struct ChannelPatch {
     pub rules: Option<Value>,
     pub trigger: Option<TriggerPatch>,
     pub persona_id: Option<String>,
+    /// How late a message may arrive and still be acted on, in minutes (1 … 10080; default 30).
+    pub late_minutes: Option<i64>,
 }
 
 /// `trigger` of [`ChannelPatch`]: only the keys given change.
@@ -393,6 +414,12 @@ impl ChannelPatch {
         if let Some(p) = &self.persona_id {
             c.len("persona_id", p, 1, 100);
         }
+        if let Some(m) = self.late_minutes {
+            c.that(
+                "late_minutes",
+                crate::inbound::LATE_MS.contains(&m.saturating_mul(60_000)),
+            );
+        }
         if let Some(t) = &self.trigger {
             if let Some(w) = &t.words {
                 c.that("trigger.words", w.len() <= 10);
@@ -413,6 +440,7 @@ impl ChannelPatch {
             ("rules", self.rules.is_some()),
             ("trigger", self.trigger.is_some()),
             ("persona_id", self.persona_id.is_some()),
+            ("late_minutes", self.late_minutes.is_some()),
         ]
         .into_iter()
         .filter_map(|(k, on)| on.then_some(k))
@@ -545,6 +573,12 @@ pub fn patch(
             conn
         ],
     )?;
+    if let Some(m) = p.late_minutes {
+        tx.execute(
+            "UPDATE channel_settings SET late_ms = ? WHERE connection_id = ?",
+            params![m * 60_000, conn],
+        )?;
+    }
     let snap = |persona: &Option<String>, duty: &str, rules: &Value, trigger: &Value| json!({"persona_id": persona, "duty": duty, "rules": rules, "trigger": trigger});
     base::revision(
         tx,

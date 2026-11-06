@@ -158,6 +158,14 @@ pub fn update(c: &Connection, r: &ConnRow, now: i64) -> Result<()> {
     Ok(())
 }
 
+/// The connection was turned on again (connected again, resumed, a capability added) at `now`:
+/// what it receives from before then is history (`connections.enabled_at`, migration 44).
+pub fn set_enabled_at(c: &Connection, id: &str, now: i64) -> Result<()> {
+    c.prepare_cached("UPDATE connections SET enabled_at = ? WHERE id = ?")?
+        .execute(params![now, id])?;
+    Ok(())
+}
+
 /// `config` only, for what an adapter learned while working (a permission a call was refused
 /// for): no revision bump, the row didn't change by anyone's hand — and nothing that watches
 /// [`change_signature`] runs again because of it.

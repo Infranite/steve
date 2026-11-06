@@ -54,6 +54,7 @@ struct Inner {
     gens: crate::conversations::Generations,
     profiles: BTreeMap<String, Arc<dyn ProfileAdapter>>,
     media: BTreeMap<String, Arc<dyn MediaFetch>>,
+    history: BTreeMap<String, Arc<dyn crate::history::HistoryRead>>,
     decls: BTreeMap<String, ChannelDecl>,
     party_hooks: Vec<Arc<dyn PartyHooks>>,
     names: Names,
@@ -82,6 +83,7 @@ pub struct ChannelsBuilder {
     thread: Option<Arc<dyn Thread>>,
     profiles: BTreeMap<String, Arc<dyn ProfileAdapter>>,
     media: BTreeMap<String, Arc<dyn MediaFetch>>,
+    history: BTreeMap<String, Arc<dyn crate::history::HistoryRead>>,
     decls: BTreeMap<String, ChannelDecl>,
     party_hooks: Vec<Arc<dyn PartyHooks>>,
 }
@@ -91,6 +93,13 @@ impl ChannelsBuilder {
     /// `connections.adapter` it serves: Feishu's bot and you.
     pub fn profiles(mut self, a: Arc<dyn ProfileAdapter>) -> Self {
         self.profiles.insert(a.adapter_id().to_string(), a);
+        self
+    }
+
+    /// Registers the history view of a channel side under the `connections.adapter` it serves:
+    /// how an agent's `steve_im_read` reads its conversations ([`crate::history`]).
+    pub fn history(mut self, h: Arc<dyn crate::history::HistoryRead>) -> Self {
+        self.history.insert(h.adapter_id().to_string(), h);
         self
     }
 
@@ -192,6 +201,7 @@ impl ChannelsBuilder {
             gens: Default::default(),
             profiles: self.profiles,
             media: self.media,
+            history: self.history,
             decls: self.decls,
             party_hooks: self.party_hooks,
             names: Names::default(),
@@ -220,6 +230,7 @@ impl Channels {
             thread: None,
             profiles: BTreeMap::new(),
             media: BTreeMap::new(),
+            history: BTreeMap::new(),
             decls: BTreeMap::new(),
             party_hooks: vec![Arc::new(steve_modules::accounts::AccountHooks)],
         }
@@ -330,6 +341,11 @@ impl Channels {
             }
         }
         out
+    }
+
+    /// The history views, by `connections.adapter`.
+    pub(crate) fn history_views(&self) -> &BTreeMap<String, Arc<dyn crate::history::HistoryRead>> {
+        &self.0.history
     }
 
     /// The media view for `connections.adapter = id`.

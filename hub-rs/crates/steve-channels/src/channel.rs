@@ -537,6 +537,10 @@ pub struct InboundMessage {
     /// stored with this id, and acts on the message again through it
     /// ([`MessageRef::source_id`]).
     pub source_id: Option<String>,
+    /// Unix ms at the provider of the message's last edit, when it was edited and the remote says
+    /// so: how late it arrived is counted from there ([`crate::inbound::history_of`]), not from
+    /// [`Self::created`].
+    pub edited: Option<i64>,
 }
 
 impl InboundMessage {
@@ -565,6 +569,7 @@ impl InboundMessage {
             via: None,
             raw: Value::Null,
             source_id: None,
+            edited: None,
         }
     }
 
@@ -586,6 +591,12 @@ impl InboundMessage {
     pub fn source_id(mut self, id: impl Into<String>) -> Self {
         let id = id.into();
         self.source_id = (!id.trim().is_empty()).then_some(id);
+        self
+    }
+
+    /// When the message was last edited at the provider (unix ms; [`Self::edited`]).
+    pub fn edited(mut self, at: i64) -> Self {
+        self.edited = Some(at);
         self
     }
 
