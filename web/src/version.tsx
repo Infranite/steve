@@ -1,6 +1,6 @@
 import { HubError, Unauthenticated } from "@/api"
 import { useEffect, useRef, useState } from "react"
-import { updates, updateActive, updateKey, repairKey, sameReleaseVersion, updatePhaseLabel, type UpdateBackup, type UpdateState, type UpdateOperation } from "@/updates"
+import { readableVersion, updates, updateActive, updateKey, repairKey, sameReleaseVersion, updatePhaseLabel, type UpdateBackup, type UpdateState, type UpdateOperation } from "@/updates"
 import { enableOneClick, installLabel, stageIndex, upgradeGuide, upgradeStages, verifyUpgrade, type Health, type Install } from "@/upgrade-guide"
 import { CheckIcon, CircleAlertIcon, CopyIcon, LoaderCircleIcon, RefreshCwIcon } from "lucide-react"
 import { Markdown } from "@/components/markdown"
@@ -12,12 +12,6 @@ import { cn } from "cn"
 import { LOADED_WEB_VERSION, st, toast, useStore } from "@/store"
 import { useT } from "@/i18n"
 import { date } from "@/i18n/format"
-
-/** Release builds are named `YYYYMMDD-HHMMSS-<commit>`; anything else (dev, a hand-set STEVE_VERSION) is shown as is. */
-export function readableVersion(v: string): { when?: string; commit?: string; raw: string } {
-  const m = /^(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})\d{2}-([0-9a-f]{6,40})(.*)$/i.exec(v)
-  return m ? { when: `${m[1]}-${m[2]}-${m[3]} ${m[4]}:${m[5]}`, commit: m[6].slice(0, 8) + m[7], raw: v } : { raw: v }
-}
 
 function VersionValue({ v, label }: { v: string; label: string }) {
   const t = useT()

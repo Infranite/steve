@@ -231,6 +231,9 @@ export default {
     searchTip: "搜索 ⌘K",
     appearance: "外观",
     webUpdate: "前端有更新 · 查看",
+    /* ST-21: this page's frontend and the Hub's backend, at a glance */
+    versions: "前端 {{web}} · 后端 {{hub}}",
+    versionUnknown: "…",
   },
   /* the composer's slash commands: the zh-CN name is also the token the Hub reads ("/汇报") */
   cmd: {

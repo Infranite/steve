@@ -226,6 +226,8 @@ export default {
     searchTip: "Search ⌘K",
     appearance: "Appearance",
     webUpdate: "Web update available · View",
+    versions: "Frontend {{web}} · Backend {{hub}}",
+    versionUnknown: "…",
   },
   cmd: {
     newItem: "New item",
