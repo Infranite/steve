@@ -1,17 +1,11 @@
 <div align="center">
 
-# Steve
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/art/banner-zh-dark.svg">
+  <img src="docs/assets/art/banner-zh.svg" alt="Steve：一句话交代，交付回来" width="100%">
+</picture>
 
-**自托管的助理工作台：一句话交代，交付回来。**
-
-像对一位靠谱的同事那样跟 Steve 说话。能答的它直接答，需要查的它就地查，<br>
-真正的活交给 Claude Code、Codex 这样的编码智能体去做。每个事项它都盯到底，只在关键处来问你。
-
-[![Release](https://img.shields.io/github/v/release/Infranite/steve?sort=semver&label=release&color=111)](https://github.com/Infranite/steve/releases)
-[![License: MIT](https://img.shields.io/badge/license-MIT-111)](LICENSE)
-[![Rust](https://img.shields.io/badge/hub-Rust-111?logo=rust)](hub-rs)
-[![React](https://img.shields.io/badge/web-React-111?logo=react)](web)
-[![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Linux-111)](#环境要求)
+[![Release](https://img.shields.io/github/v/release/Infranite/steve?sort=semver&style=for-the-badge&label=release&color=7aa7c7)](https://github.com/Infranite/steve/releases) [![License: MIT](https://img.shields.io/badge/license-MIT-8c7ae6?style=for-the-badge)](LICENSE) [![Rust](https://img.shields.io/badge/hub-Rust-5fb39a?style=for-the-badge&logo=rust&logoColor=white)](hub-rs) [![React](https://img.shields.io/badge/web-React-7aa7c7?style=for-the-badge&logo=react&logoColor=white)](web) [![Platforms](https://img.shields.io/badge/macOS%20%7C%20Linux-self--hosted-8c7ae6?style=for-the-badge)](#环境要求)
 
 [English](README.md) · 简体中文
 
@@ -41,33 +35,71 @@ Steve 是智能体之上的那一层。它跑在你自己的机器上，掌握�
 
 所有东西都在你自己的设施上：一个 Rust 可执行文件、一个 SQLite 数据库和一个加密保险箱。
 
-## 看一眼
+## 从一句话到交付
 
-<table>
-<tr>
-<td width="50%"><img src="docs/assets/screenshots/inbox.webp" alt="待处理"><br><b>待处理</b>：要验收的交付、要批准的推送、要回答的问题，都在一处。</td>
-<td width="50%"><img src="docs/assets/screenshots/item.webp" alt="事项"><br><b>事项</b>：目标、所处阶段、计划、附带检查记录的交付，以及由谁在做。</td>
-</tr>
-<tr>
-<td><img src="docs/assets/screenshots/session.webp" alt="智能体会话"><br><b>智能体会话</b>：改了哪些文件、用了哪些工具、花费和上下文，以及在 harness 里恢复会话的一行命令。</td>
-<td><img src="docs/assets/screenshots/items.webp" alt="事项列表"><br><b>事项列表</b>：哪些在等你、哪些在跑、哪些刚交付。</td>
-</tr>
-</table>
+<div align="center">
 
-<sub>截图来自一个演示工作区：真实的 Hub 和 Web 界面，智能体按脚本运行。</sub>
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/art/flow-zh-dark.svg">
+  <img src="docs/assets/art/flow-zh.svg" alt="你说一句话，Steve 判断，建成事项，Bot 开工，带检查记录交付，验收，经合并通道合并，发布" width="100%">
+</picture>
+
+</div>
+
+每条消息走同一条流水线：Steve 判断这是什么，合适的 Bot 在自己的 worktree 里把事做完，你只在关键处出手。打开 YOLO 后，例行的环节 Steve 也替你处理。
 
 ## 设计原则
 
 有几条原则贯穿整个代码库，正因为有它们，才敢把真实的工作交给 Steve 自己跑。
 
-| 原则 | 落到实处是什么样 |
-|---|---|
-| **代码说了算** | 模型只提建议，由经过测试的规则做决定。路由护栏防止一个问题被悄悄做成事项。计划步骤没走完，交付会被拒绝。“完成”可能要求构建、部署或真实操作的证据。 |
-| **任何事都不做两遍** | 智能体工具都是“发出即结束本回合”，内存里没有在等的东西。外部操作带稳定的 id。流程每一步先落库再往下走。崩溃后，结果不确定的执行标记为“待对账”，绝不盲目重跑。 |
-| **自主，但有硬边界** | YOLO 只决定留在本机、能撤销的事。钱、高敏感密钥、推送、发布、以你的身份说话，不管怎么设置都碰不到。出问题时熔断器会让它停下。 |
-| **智能体用密钥，但看不到密钥** | Steve 带着密钥替智能体执行命令，智能体只拿到脱敏后的输出。脱敏器还能识别 base64、URL、十六进制和 JSON 转义后的副本。 |
-| **默认考虑披露** | 每条知识都有级别：公开、可转述结论、仅用于推理、不可使用。消息发出前要先过规则检查，再由另一个模型复核。 |
-| **每个改动都能撤销** | 用对话改的配置、对自动化的纠正、联系人合并、YOLO 的决定，都以变更集的形式回来，可以撤销。 |
+<table>
+<tr>
+<td width="33%" valign="top">
+
+#### ⚖️ 代码说了算
+
+模型只提建议，由经过测试的规则做决定。路由护栏防止一个问题被悄悄做成事项。计划步骤没走完，交付会被拒绝。“完成”可能要求构建、部署或真实操作的证据。
+
+</td>
+<td width="33%" valign="top">
+
+#### 🔁 任何事都不做两遍
+
+智能体工具都是“发出即结束本回合”，内存里没有在等的东西。外部操作带稳定的 id。流程每一步先落库再往下走。崩溃后，结果不确定的执行标记为“待对账”，绝不盲目重跑。
+
+</td>
+<td width="33%" valign="top">
+
+#### 🛑 自主，但有硬边界
+
+YOLO 只决定留在本机、能撤销的事。钱、高敏感密钥、推送、发布、以你的身份说话，不管怎么设置都碰不到。出问题时熔断器会让它停下。
+
+</td>
+</tr>
+<tr>
+<td width="33%" valign="top">
+
+#### 🗝️ 智能体用密钥，但看不到密钥
+
+Steve 带着密钥替智能体执行命令，智能体只拿到脱敏后的输出。脱敏器还能识别 base64、URL、十六进制和 JSON 转义后的副本。
+
+</td>
+<td width="33%" valign="top">
+
+#### 🙊 默认考虑披露
+
+每条知识都有级别：公开、可转述结论、仅用于推理、不可使用。消息发出前要先过规则检查，再由另一个模型复核。
+
+</td>
+<td width="33%" valign="top">
+
+#### ↩️ 每个改动都能撤销
+
+用对话改的配置、对自动化的纠正、联系人合并、YOLO 的决定，都以变更集的形式回来，可以撤销。
+
+</td>
+</tr>
+</table>
 
 ## 功能
 
@@ -92,6 +124,14 @@ Steve 是智能体之上的那一层。它跑在你自己的机器上，掌握�
 - **每个会话一个消息队列**：排队中的消息可以编辑、撤回，可以“立即发送”去打断并引导当前回合，也可以发到新会话。重启前刚送达的消息回来时会标注“先核对，别重做”。
 - **Worktree 和磁盘**：每个事项在自己的 worktree 里，分支是 `steve/<id>`。事项关闭或闲置时归还构建缓存，剩余空间低于下限时不再新建 worktree，删除过程能扛住崩溃。
 
+<table>
+<tr>
+<td width="50%"><img src="docs/assets/screenshots/item.webp" alt="事项：目标、阶段、计划，以及带检查记录的交付"><br><sub><b>事项</b>：目标、阶段、计划，以及带检查记录的交付</sub></td>
+<td width="50%"><img src="docs/assets/screenshots/graph.webp" alt="关系图：运行、交接、依赖和派生"><br><sub><b>关系图</b>：运行、交接、依赖和派生</sub></td>
+</tr>
+</table>
+
+
 ### 🤖 一组 Bot
 
 - **Bot** 各有自己的 harness（Claude Code 或 Codex）、模型和思考强度、职责、人设、规范、权限模式、验收方式和默认项目。用一句话描述，Steve 就能帮你起草一个 Bot。
@@ -100,6 +140,9 @@ Steve 是智能体之上的那一层。它跑在你自己的机器上，掌握�
 - **按用途选模型**：路由、对话、调研、标题、提取、YOLO、起草、流程和邮件各有自己的模型，配有备用模型链和思考强度。价格每天从 Models.dev 同步，历史估算沿用当天的价格。
 - **对 harness 友好**：权限提示只答“这一次”，从不往你的 harness 设置里写“始终允许”。从不改你的 Codex 配置。任何会话都给出在 harness 里恢复的命令，也能导入你本机的 Claude Code 和 Codex 历史。
 
+<p align="center"><img src="docs/assets/screenshots/session.webp" alt="智能体会话：改动的文件、工具、花费和上下文，以及在 harness 里恢复的命令" width="85%"><br><sub><b>智能体会话</b>：改动的文件、工具、花费和上下文，以及在 harness 里恢复的命令</sub></p>
+
+
 ### 🟢 YOLO：能自己走，也刹得住
 
 - **它能决定的**：事项目录内的工具权限、本地审批、按检查结果验收、让卡住的智能体继续、回答智能体的提问（只在有把握时）、启动依赖已完成的事项、发布你自己的 Steve（有频率限制）。
@@ -107,6 +150,9 @@ Steve 是智能体之上的那一层。它跑在你自己的机器上，掌握�
 - **Shell 守卫**：默认拒绝，用自己的 POSIX shell 解析器。`eval`、`sh -c`、`sudo` 和命令替换一律拒绝，`kill` 只能杀智能体自己启动的进程。
 - **倒计时和熔断**：你在的时候它会等，并给出“现在就做”和“我来决定”两个按钮。连续失败、连续被撤销，或者它批准的发布出了问题，整个工作区的 YOLO 都会暂停。
 - **记录和撤销**：每个决定按时段和事项记录，附带花费。撤销有五种：撤销决定、回滚发布、撤回消息、重新回答、暂停事项。
+
+<p align="center"><img src="docs/assets/screenshots/inbox.webp" alt="待处理：验收、审批和提问都在一处；例行的那些交给 YOLO" width="85%"><br><sub><b>待处理</b>：验收、审批和提问都在一处；例行的那些交给 YOLO</sub></p>
+
 
 ### 🚚 交付：合并通道与发布
 
@@ -144,12 +190,23 @@ Steve 是智能体之上的那一层。它跑在你自己的机器上，掌握�
 - **信号与纠正**：进来的事件会去重、成组。点一下（提醒我 / 忽略 / 建事项），就会应用纠正、往流程里插一个例外过滤、记下这条规则，整个改动都能撤销。
 - **用中文写定时**（“每个工作日 9 点”），处理夏令时，可设补跑策略和重叠保护。
 
+<p align="center">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/screenshots/flow-dark.webp">
+  <img src="docs/assets/screenshots/flow.webp" alt="画布上的邮件分诊流程：通知类在调用模型之前就被过滤掉，剩下的由 Bot 节点分流" width="100%">
+</picture>
+<br><sub>画布上的<b>邮件分诊</b>流程：通知类在调用模型之前就被过滤掉，剩下的由 Bot 节点分流</sub>
+</p>
+
+
 ### 📊 统计与平台
 
 - **统计**：token（含缓存和推理）、缓存命中率、估算花费与 harness 自报的对比、缓存省下的钱、事项吞吐、前置 / 周期 / 等待时间、一次通过率和返工。可以按项目、Bot、模型和来源筛选。
 - **工作区与登录**：OIDC（PKCE）登录。工作区是数据边界，各有自己的事项前缀。
 - **处处实时**：一条 SSE 流，游标可续传；手机页面回到前台时立刻重连。
 - **运维**：原地升级（带备份和回滚）、每日校验备份、带签名的 macOS 版本（重建后仍能读取保险箱密钥）、<kbd>⌘</kbd> <kbd>K</kbd> 命令面板、浅色 / 深色主题，以及中英文界面。
+
+<sub>截图来自一个演示工作区：真实的 Hub 和 Web 界面，智能体按脚本运行。</sub>
 
 ## 扩展 Steve
 
