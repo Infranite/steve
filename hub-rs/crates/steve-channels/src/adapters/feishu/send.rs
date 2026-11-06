@@ -9,8 +9,8 @@
 //! - `uuid` = the outbound `cm_…` (one is made up when absent): Feishu drops a repeat within an
 //!   hour, so the rate-limit retries ([`ratelimit::with_retries`], at most
 //!   [`ratelimit::SEND_RETRIES`]) and C6's own retries cannot double-send;
-//! - recall: `DELETE im/v1/messages/{id}` (the bot can only recall its own; the tenant sets how
-//!   long).
+//! - recall: `DELETE im/v1/messages/{id}` (the bot can only recall its own, you yours with the
+//!   user token; the tenant sets how long).
 
 use reqwest::Method;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -254,8 +254,17 @@ pub async fn remove_reaction_with(
 
 /// Recalls a message the bot sent.
 pub async fn recall(cx: &ConnCx, ext_msg_id: &str) -> Result<(), FeishuError> {
+    recall_with(&FeishuClient::for_cx(cx), cx, ext_msg_id).await
+}
+
+/// `DELETE im/v1/messages/{id}` through `client` with `cx`'s token: the bot's, or your user token
+/// for what you sent ([`super::as_user`]). Only the sender can recall a message.
+pub async fn recall_with(
+    client: &FeishuClient,
+    cx: &ConnCx,
+    ext_msg_id: &str,
+) -> Result<(), FeishuError> {
     let path = format!("/open-apis/im/v1/messages/{}", path_id(ext_msg_id)?);
-    let client = FeishuClient::for_cx(cx);
     ratelimit::with_retries(ratelimit::SEND_RETRIES, || {
         client.request(cx, Method::DELETE, &path, &[], None)
     })

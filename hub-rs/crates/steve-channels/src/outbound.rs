@@ -26,7 +26,7 @@
 //! registry.decision(steve_channels::respond::SUBJECT_MESSAGE, link.handler());   // before Modules
 //! let late = steve_channels::flow_actions::LateChannels::new();
 //! let outbox = Arc::new(steve_channels::outbound::Outbox::new(link.clone())
-//!     .as_user(steve_channels::adapters::feishu::auth::USER_ADAPTER, feishu_user.clone()));
+//!     .act_as_user(feishu_user.clone()));
 //! registry.item_hooks(Box::new(steve_channels::outbound::ReturnToSource::new(outbox.clone(), late.clone())));
 //! let replies = Arc::new(steve_channels::Replies::new().outbound(outbox.clone()));
 //! // … Channels::builder(…).responder(replies.clone()).build(); late.set(&channels);
@@ -52,10 +52,11 @@ use steve_modules::{ApiError, ApiResult, Clock, SystemClock, Tier};
 use steve_store::base::{self, DecisionKind, mems};
 use steve_store::{Decision, Item, NewDecision, Tx, uid};
 
-use crate::adapters::feishu::as_user::{SendAsUser, UserMessage};
 use crate::adapters::feishu::send::{at_handle, reply_in_thread};
 use crate::basis::{self, NewBasis, Rewrite};
-use crate::channel::{OutContent, SendTarget, SpaceKind};
+use crate::channel::{
+    ActAsUser, ActTarget, MessageRef, OutContent, SendKey, SendTarget, Sent, SpaceKind,
+};
 use crate::compose::PinnedModel;
 use crate::deliver::{Auth, Delivered, Generation, OutRequest, OutTarget, Outbound, Purpose};
 use crate::disclosure::{self, MAX_REWRITES, NoSecrets, SecretScan};
@@ -641,36 +642,29 @@ fn completes(p: Purpose) -> bool {
 /// What [`Outbox::send`] did.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SendOutcome {
-    Sent {
-        external_id: String,
-    },
+    /// Out; `external_id` is the provider's message id when it gave one.
+    Sent { external_id: Option<String> },
     /// The authorization did not hold: back to a draft with its approval.
-    Drafted {
-        decision_id: String,
-    },
+    Drafted { decision_id: String },
     /// A secret value: `blocked`, a `fail` decision with “discard”.
-    Blocked {
-        decision_id: String,
-    },
+    Blocked { decision_id: String },
     /// The provider failed: `failed`, a `fail` decision (retry / discard).
-    Failed {
-        error: String,
-        decision_id: String,
-    },
+    Failed { error: String, decision_id: String },
     /// Sent without an answer: `unknown`, it may be out (sent again under the same dedupe key
     /// while the provider drops repeats, else you are asked).
-    Unknown {
-        error: String,
-    },
+    Unknown { error: String },
     /// Not pending, already claimed, gone, or waiting for its connection.
     Skipped,
 }
+
+/// An `unknown` message: its id, the dedupe window of the side it went out on, its first try.
+type Unknown = (String, Option<Duration>, Option<i64>);
 
 /// C6's outbound. Share one `Arc<Outbox>` between [`crate::Replies::outbound`], the queue and the
 /// item hook.
 pub struct Outbox {
     link: OutLink,
-    as_user: BTreeMap<String, Arc<dyn SendAsUser>>,
+    as_user: BTreeMap<String, Arc<dyn ActAsUser>>,
     secrets: Arc<dyn SecretScan>,
     pinned: Option<Arc<dyn PinnedModel>>,
 }
@@ -685,10 +679,28 @@ impl Outbox {
         }
     }
 
-    /// Sends as you on connections of `adapter` (`feishu_user`) through F6's [`SendAsUser`].
-    pub fn as_user(mut self, adapter: &str, s: Arc<dyn SendAsUser>) -> Self {
-        self.as_user.insert(adapter.into(), s);
+    /// Acts as you (sends, reacts, recalls) on your own connections (`Mode::Own`) of the adapter
+    /// `a` serves ([`ActAsUser::adapter_id`]).
+    pub fn act_as_user(mut self, a: Arc<dyn ActAsUser>) -> Self {
+        self.as_user.insert(a.adapter_id().to_string(), a);
         self
+    }
+
+    /// How long the provider drops a repeat of a send through connection `conn` (of `adapter`):
+    /// as you on your own account, as the connection's account otherwise.
+    fn send_dedup(
+        &self,
+        ch: &Channels,
+        c: &Connection,
+        ws: &str,
+        conn: &str,
+        adapter: &str,
+    ) -> Option<Duration> {
+        let own = bindings::connection_account(c, ws, conn).is_ok_and(|(_, m)| m == Mode::Own);
+        match (own, self.as_user.get(adapter)) {
+            (true, Some(u)) => u.send_dedup(),
+            _ => ch.adapter(adapter).and_then(|a| a.send_dedup()),
+        }
     }
 
     /// The adapters it sends as you on.
@@ -1041,16 +1053,15 @@ impl Outbox {
             // tried before: again only while the provider drops repeats
             let tried = send_state::get(tx, &row.id)?.and_then(|s| s.first_at);
             if let Some(first) = tried {
-                let adapter: Option<String> = tx
+                let adapter: Option<(String, String)> = tx
                     .query_row(
-                        "SELECT c.adapter FROM spaces s JOIN connections c ON c.id = s.connection_id WHERE s.id = ?",
+                        "SELECT c.id, c.adapter FROM spaces s JOIN connections c ON c.id = s.connection_id WHERE s.id = ?",
                         [&row.space_id],
-                        |r| r.get(0),
+                        |r| Ok((r.get(0)?, r.get(1)?)),
                     )
                     .optional()?;
                 let window = adapter
-                    .and_then(|a| ch.adapter(&a))
-                    .and_then(|a| a.send_dedup())
+                    .and_then(|(conn, a)| self.send_dedup(ch, tx, &row.ws, &conn, &a))
                     .map(|d| d.as_millis() as i64);
                 if !window.is_some_and(|w| now < first + w) {
                     tx.execute(
@@ -1252,16 +1263,26 @@ impl Outbox {
             .store()
             .transaction(|tx| send_state::attempt(tx, &row.id, auth, &text, &at, now))?;
         let in_thread = reply_in_thread(kind, row.thread_key.as_deref());
-        let sent: Result<String, ProviderError> = match (mode, self.as_user.get(&adapter)) {
+        let sent: Result<Sent, ProviderError> = match (mode, self.as_user.get(&adapter)) {
             (Mode::Own, Some(u)) => {
-                let mut m = UserMessage::text(text.clone());
-                m.uuid = Some(row.id.clone());
-                match &row.reply_to {
-                    Some(r) => u.reply_as_user(&cx, r, &m, in_thread).await,
-                    None => u.send_as_user(&cx, &space.external_id, &m).await,
-                }
-                .map(|s| s.message_id)
-                .map_err(ProviderError::from)
+                let to = match &row.reply_to {
+                    Some(r) => {
+                        let to = ch
+                            .store()
+                            .reader(|c| replied_ref(c, &row.space_id, &space.connection_id, r))
+                            .unwrap_or_else(|_| MessageRef::platform(&space.external_id, r));
+                        ActTarget::Reply { to, in_thread }
+                    }
+                    None => ActTarget::Space {
+                        ext_id: space.external_id.clone(),
+                    },
+                };
+                let mut content = OutContent::text(text.clone());
+                content.uuid = Some(row.id.clone());
+                content.space_ext_id = Some(space.external_id.clone());
+                u.send(&cx, &to, &content, &SendKey(row.id.clone()))
+                    .await
+                    .map_err(provider_error)
             }
             _ => match ch.adapter(&adapter) {
                 Some(a) => {
@@ -1278,25 +1299,44 @@ impl Outbox {
                     content.uuid = Some(row.id.clone());
                     content.at = at;
                     content.space_ext_id = Some(space.external_id.clone());
-                    a.send(&cx, &to, &content).await.map_err(|e| match e {
-                        AdapterError::Provider(p) => p,
-                        e => ProviderError::Rejected(e.to_string()),
-                    })
+                    a.send(&cx, &to, &content)
+                        .await
+                        .map(Sent::id)
+                        .map_err(provider_error)
                 }
                 None => Err(ProviderError::Rejected("这个渠道还不能发送消息".into())),
             },
         };
         match sent {
-            Ok(ext) => {
+            Ok(out) => {
                 let now = ch.now();
+                let ext = out.ext_id.clone().filter(|x| !x.is_empty());
                 let ours = ch.store().transaction(|tx| -> ChannelResult<bool> {
+                    // `sent_via`: recalled through the same connection later, whatever the space's
+                    // voice is by then
                     if tx.execute(
-                        "UPDATE chan_messages SET status = 'sent', external_id = ?, text = ?, sent = ?
+                        "UPDATE chan_messages SET status = 'sent', external_id = ?, text = ?, sent = ?,
+                                sent_via = ?, ext_created = ?, thread_key = coalesce(thread_key, ?)
                           WHERE id = ? AND status = 'pending' AND sent = ?",
-                        params![ext, text, now, row.id, claim],
+                        params![
+                            ext,
+                            text,
+                            now,
+                            space.connection_id,
+                            out.created,
+                            out.thread_key,
+                            row.id,
+                            claim
+                        ],
                     )? == 0
                     {
                         return Ok(false);
+                    }
+                    if let Some(src) = out.source_id.as_deref().filter(|s| !s.is_empty()) {
+                        tx.execute(
+                            "INSERT OR IGNORE INTO chan_message_seen (connection_id, source_id, message_id) VALUES (?, ?, ?)",
+                            params![space.connection_id, src, row.id],
+                        )?;
                     }
                     send_state::forget(tx, &row.id)?;
                     base::audit(
@@ -1580,9 +1620,9 @@ impl Outbox {
     /// counted from the first try) sent again as they were, so a repeat is dropped; after it, or
     /// without one, you are asked whether it went out ([`UNKNOWN_OPTIONS`]), once.
     async fn settle_unknown(&self, ch: &Channels, now: i64) -> usize {
-        let rows = ch.store().reader(|c| -> ChannelResult<Vec<(String, String, Option<i64>)>> {
+        let rows = ch.store().reader(|c| -> ChannelResult<Vec<Unknown>> {
             let mut st = c.prepare_cached(
-                "SELECT m.id, c.adapter, s.first_at FROM chan_messages m
+                "SELECT m.id, m.workspace_id, c.id, c.adapter, s.first_at FROM chan_messages m
                    JOIN spaces sp ON sp.id = m.space_id JOIN connections c ON c.id = sp.connection_id
                    LEFT JOIN chan_send_state s ON s.message_id = m.id
                   WHERE m.direction = 'out' AND m.status = 'unknown'
@@ -1591,9 +1631,22 @@ impl Outbox {
                   ORDER BY m.created LIMIT 50",
             )?;
             let v = st
-                .query_map([SUBJECT_MESSAGE], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .query_map([SUBJECT_MESSAGE], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
+                        r.get::<_, Option<i64>>(4)?,
+                    ))
+                })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
-            Ok(v)
+            Ok(v
+                .into_iter()
+                .map(|(m, ws, conn, adapter, first)| {
+                    (m, self.send_dedup(ch, c, &ws, &conn, &adapter), first)
+                })
+                .collect())
         });
         let rows = match rows {
             Ok(r) => r,
@@ -1603,11 +1656,8 @@ impl Outbox {
             }
         };
         let mut n = 0;
-        for (m, adapter, first_at) in rows {
-            let window = ch
-                .adapter(&adapter)
-                .and_then(|a| a.send_dedup())
-                .map(|d| d.as_millis() as i64);
+        for (m, window, first_at) in rows {
+            let window = window.map(|d| d.as_millis() as i64);
             let st = ch.store().reader(|c| send_state::get(c, &m)).ok().flatten();
             let resend = match (window, first_at, &st) {
                 (Some(w), Some(t), Some(_)) => now < t + w,
@@ -1780,8 +1830,10 @@ impl Outbox {
         })
     }
 
-    /// Recalls a sent message (`POST /chan-messages/:id/recall`): `400 这个渠道不支持撤回` when the
-    /// adapter can't.
+    /// Recalls a sent message (`POST /chan-messages/:id/recall`) through the connection it went out
+    /// on (`sent_via`; the space's voice for messages sent before it was recorded): as you when it
+    /// was sent as you, as the connection's account otherwise. `400 这个渠道不支持撤回` when that
+    /// side can't.
     pub async fn recall(
         &self,
         ch: &Channels,
@@ -1789,43 +1841,64 @@ impl Outbox {
         actor: &str,
         id: &str,
     ) -> ChannelResult<()> {
-        let (row, space, adapter) = ch.store().reader(|c| -> ChannelResult<_> {
+        let (row, conn, adapter, mode, msg) = ch.store().reader(|c| -> ChannelResult<_> {
             let row = out_row(c, id)?
                 .filter(|r| r.ws == ws)
                 .ok_or_else(|| ApiError::not_found("消息"))?;
             let space =
                 spaces::get(c, &row.space_id)?.ok_or_else(|| ApiError::not_found("空间"))?;
-            let adapter: String = c.query_row(
-                "SELECT adapter FROM connections WHERE id = ?",
-                [&space.connection_id],
-                |r| r.get(0),
-            )?;
-            Ok((row, space, adapter))
-        })?;
-        let a = ch
-            .adapter(&adapter)
-            .filter(|a| a.features().recall)
-            .ok_or_else(|| ApiError::rule(steve_i18n::t!("channels.error.no_recall")))?;
-        if row.status != "sent" {
-            return Err(ApiError::conflict(steve_i18n::t!(
-                "channels.error.not_sent"
-            )));
-        }
-        let ext: Option<String> = ch.store().reader(|c| {
-            c.query_row(
-                "SELECT external_id FROM chan_messages WHERE id = ?",
+            let via: Option<String> = c.query_row(
+                "SELECT sent_via FROM chan_messages WHERE id = ?",
                 [id],
                 |r| r.get(0),
-            )
-            .map_err(steve_store::StoreError::from)
+            )?;
+            let conn = via.filter(|v| !v.is_empty()).unwrap_or(space.connection_id);
+            let adapter: String = c
+                .query_row(
+                    "SELECT adapter FROM connections WHERE id = ? AND workspace_id = ?",
+                    params![conn, ws],
+                    |r| r.get(0),
+                )
+                .optional()?
+                .unwrap_or_default();
+            let mode = bindings::connection_account(c, ws, &conn)
+                .map(|(_, m)| m)
+                .unwrap_or(Mode::Bot);
+            let msg = crate::messages::message_ref(c, id, &conn)?
+                .ok_or_else(|| ApiError::not_found("消息"))?;
+            Ok((row, conn, adapter, mode, msg))
         })?;
-        let ext =
-            ext.ok_or_else(|| ApiError::conflict(steve_i18n::t!("channels.error.not_sent")))?;
+        let no_recall = || ApiError::rule(steve_i18n::t!("channels.error.no_recall"));
+        let not_sent = || ApiError::conflict(steve_i18n::t!("channels.error.not_sent"));
+        let recaller = match (mode, self.as_user.get(&adapter)) {
+            (Mode::Own, Some(u)) if u.supports_recall() => Recaller::AsUser(u.clone()),
+            (Mode::Own, Some(_)) => return Err(no_recall()),
+            _ => Recaller::Adapter(
+                ch.adapter(&adapter)
+                    .filter(|a| a.features().recall)
+                    .ok_or_else(no_recall)?,
+            ),
+        };
+        if row.status != "sent" {
+            return Err(not_sent());
+        }
         let cx = ch
             .connections()
-            .cx_for(ws, &space.connection_id, None)
+            .cx_for(ws, &conn, None)
             .map_err(|e| ApiError::rule(e.to_string()))?;
-        a.recall(&cx, &ext).await.map_err(|e| {
+        let done = match recaller {
+            Recaller::AsUser(u) => {
+                if msg.ext_id.is_none() && msg.source_id.is_none() {
+                    return Err(not_sent());
+                }
+                u.recall(&cx, &msg).await
+            }
+            Recaller::Adapter(a) => {
+                let ext = msg.ext_id.clone().ok_or_else(not_sent)?;
+                a.recall(&cx, &ext).await
+            }
+        };
+        done.map_err(|e| {
             ApiError::rule(steve_i18n::t!("channels.error.recall_failed", error = e))
         })?;
         ch.store().transaction(|tx| -> ChannelResult<()> {
@@ -1837,6 +1910,47 @@ impl Outbox {
             messages::event(tx, ws, &row.space_id, id);
             Ok(())
         })
+    }
+}
+
+/// Who recalls a message: you, or the connection's account through its channel adapter.
+enum Recaller {
+    AsUser(Arc<dyn ActAsUser>),
+    Adapter(Arc<dyn crate::ChannelAdapter>),
+}
+
+/// An adapter's failure as the provider error the send path records.
+fn provider_error(e: AdapterError) -> ProviderError {
+    match e {
+        AdapterError::Provider(p) => p,
+        e => ProviderError::Rejected(e.to_string()),
+    }
+}
+
+/// The message a reply as you answers (`ext` in space `space`), as the adapter of connection
+/// `conn` acts on it; only its ids when it is not stored.
+fn replied_ref(c: &Connection, space: &str, conn: &str, ext: &str) -> ChannelResult<MessageRef> {
+    let id: Option<String> = c
+        .query_row(
+            "SELECT id FROM chan_messages WHERE space_id = ? AND external_id = ? ORDER BY direction = 'in' DESC, created LIMIT 1",
+            params![space, ext],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let stored = match id {
+        Some(id) => crate::messages::message_ref(c, &id, conn)?,
+        None => None,
+    };
+    match stored {
+        Some(m) => Ok(m),
+        None => {
+            let space_ext: String = c.query_row(
+                "SELECT external_id FROM spaces WHERE id = ?",
+                [space],
+                |r| r.get(0),
+            )?;
+            Ok(MessageRef::platform(space_ext, ext))
+        }
     }
 }
 
@@ -2191,7 +2305,7 @@ impl crate::reactions::Reactor for Outbox {
         ch: &Channels,
         ws: &str,
         conn: &str,
-        ext_msg_id: &str,
+        msg: &MessageRef,
         kind: crate::channel::ReactionKind,
     ) -> Result<crate::reactions::Added, String> {
         let adapter = crate::reactions::adapter_of(ch, ws, conn)?;
@@ -2201,20 +2315,19 @@ impl crate::reactions::Reactor for Outbox {
                     .connections()
                     .cx_for(ws, conn, None)
                     .map_err(|e| e.to_string())?;
-                let emoji = crate::adapters::feishu::send::emoji_type(kind);
                 let id = u
-                    .react_as_user(&cx, ext_msg_id, emoji)
+                    .add_reaction(&cx, msg, kind)
                     .await
                     .map_err(|e| e.to_string())?;
                 Ok(crate::reactions::Added {
                     reaction_id: id,
-                    emoji: emoji.into(),
+                    emoji: u.reaction_emoji(kind).into(),
                     as_user: true,
                 })
             }
             None => {
                 crate::reactions::AdapterReactor
-                    .add(ch, ws, conn, ext_msg_id, kind)
+                    .add(ch, ws, conn, msg, kind)
                     .await
             }
         }
@@ -2225,7 +2338,7 @@ impl crate::reactions::Reactor for Outbox {
         ch: &Channels,
         ws: &str,
         conn: &str,
-        ext_msg_id: &str,
+        msg: &MessageRef,
         reaction_id: &str,
         as_user: bool,
     ) -> Result<(), String> {
@@ -2236,13 +2349,13 @@ impl crate::reactions::Reactor for Outbox {
                     .connections()
                     .cx_for(ws, conn, None)
                     .map_err(|e| e.to_string())?;
-                u.unreact_as_user(&cx, ext_msg_id, reaction_id)
+                u.remove_reaction(&cx, msg, reaction_id)
                     .await
                     .map_err(|e| e.to_string())
             }
             _ => {
                 crate::reactions::AdapterReactor
-                    .remove(ch, ws, conn, ext_msg_id, reaction_id, as_user)
+                    .remove(ch, ws, conn, msg, reaction_id, as_user)
                     .await
             }
         }

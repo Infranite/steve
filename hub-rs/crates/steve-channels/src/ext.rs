@@ -11,10 +11,11 @@ use std::sync::Arc;
 use serde::Serialize;
 use steve_modules::accounts::connections::ConnectionProvider;
 
-use crate::adapters::feishu::SendAsUser;
-use crate::channel::{ChannelAdapter, ProfileAdapter};
+use crate::channel::{ActAsUser, ChannelAdapter, ProfileAdapter};
 
+pub use crate::channel::{ActTarget, MessageRef, SendKey, Sent};
 pub use crate::lifecycle::{ConnRun, ConnSink, ConnState, ConnectionHook};
+pub use crate::media::{MediaError, MediaFetch};
 pub use crate::queries::{ConnQueries, Queries};
 pub use crate::spaces::Mode;
 pub use steve_modules::accounts::connections::{PAIR_KEY, Paired, Pairing};
@@ -83,10 +84,12 @@ pub struct ChannelSide {
     pub provider: Arc<dyn ConnectionProvider>,
     /// Bot-style: long connection or webhook, sending as the connection's own identity.
     pub adapter: Option<Arc<dyn ChannelAdapter>>,
-    /// Sending, replying and reacting as you (the outbox's `Mode::Own`).
-    pub as_user: Option<Arc<dyn SendAsUser>>,
+    /// Sending, replying, reacting and recalling as you (the outbox's `Mode::Own`).
+    pub act_as_user: Option<Arc<dyn ActAsUser>>,
     /// Looking people up on the platform.
     pub profiles: Option<Arc<dyn ProfileAdapter>>,
+    /// Fetching the images and files of messages its connections received.
+    pub media: Option<Arc<dyn MediaFetch>>,
 }
 
 impl ChannelSide {
@@ -95,8 +98,9 @@ impl ChannelSide {
             decl,
             provider,
             adapter: None,
-            as_user: None,
+            act_as_user: None,
             profiles: None,
+            media: None,
         }
     }
 
@@ -105,8 +109,8 @@ impl ChannelSide {
         self
     }
 
-    pub fn as_user(mut self, a: Arc<dyn SendAsUser>) -> Self {
-        self.as_user = Some(a);
+    pub fn act_as_user(mut self, a: Arc<dyn ActAsUser>) -> Self {
+        self.act_as_user = Some(a);
         self
     }
 
@@ -115,7 +119,16 @@ impl ChannelSide {
         self
     }
 
-    /// Every view answers to `decl.adapter`; the first one that does not, otherwise.
+    pub fn media(mut self, m: Arc<dyn MediaFetch>) -> Self {
+        self.media = Some(m);
+        self
+    }
+
+    /// The declaration holds, or the first rule it breaks:
+    /// - every view answers to `decl.adapter`;
+    /// - acting as you is for your own account: `act_as_user` ⇒ [`Mode::Own`], and [`Mode::Own`] ⇒
+    ///   `act_as_user` and the provider offers `msg.send_as_user`;
+    /// - `receive_cap` is one of the provider's capabilities.
     pub fn check(&self) -> Result<(), String> {
         let want = self.decl.adapter.as_str();
         if want.is_empty() {
@@ -128,6 +141,11 @@ impl ChannelSide {
                 "profile adapter",
                 self.profiles.as_ref().map(|p| p.adapter_id()),
             ),
+            (
+                "act-as-user view",
+                self.act_as_user.as_ref().map(|a| a.adapter_id()),
+            ),
+            ("media view", self.media.as_ref().map(|m| m.adapter_id())),
         ];
         for (what, id) in views {
             if let Some(id) = id
@@ -135,6 +153,30 @@ impl ChannelSide {
             {
                 return Err(format!("{what} {id} declared for adapter {want}"));
             }
+        }
+        match (self.decl.mode, self.act_as_user.is_some()) {
+            (Mode::Bot, true) => {
+                return Err(format!(
+                    "adapter {want} acts as the user but is not declared Mode::Own"
+                ));
+            }
+            (Mode::Own, false) => {
+                return Err(format!(
+                    "adapter {want} is declared Mode::Own without an act-as-user view"
+                ));
+            }
+            _ => {}
+        }
+        if self.decl.mode == Mode::Own
+            && !self
+                .provider
+                .caps()
+                .contains(&crate::spaces::SEND_AS_USER_CAP)
+        {
+            return Err(format!(
+                "adapter {want} is declared Mode::Own but its provider has no {} capability",
+                crate::spaces::SEND_AS_USER_CAP
+            ));
         }
         if let Some(cap) = &self.decl.receive_cap
             && !self.provider.caps().contains(&cap.as_str())
@@ -169,6 +211,78 @@ mod tests {
         assert!(unnamed.check().is_err());
     }
 
+    /// Acts as you on `.0` and never sends.
+    struct Silent(&'static str);
+
+    #[async_trait::async_trait]
+    impl ActAsUser for Silent {
+        fn adapter_id(&self) -> &str {
+            self.0
+        }
+
+        async fn send(
+            &self,
+            _: &steve_modules::accounts::connections::ConnCx,
+            _: &ActTarget,
+            _: &crate::channel::OutContent,
+            _: &SendKey,
+        ) -> Result<Sent, steve_flow::AdapterError> {
+            Err(steve_modules::accounts::connections::ProviderError::Unsupported.into())
+        }
+    }
+
+    #[test]
+    fn acting_as_you_goes_with_your_own_account() {
+        let user = Arc::new(FeishuEnv::from_env(|_| None).user_provider(Domain::Feishu));
+        let own = || ChannelDecl::new("feishu_user").mode(Mode::Own);
+        let side = ChannelSide::new(own(), user.clone())
+            .act_as_user(user.clone())
+            .profiles(user.clone())
+            .media(Arc::new(crate::adapters::feishu::FeishuMedia::new(
+                "feishu_user",
+            )));
+        assert_eq!(side.check(), Ok(()));
+        // your own account without acting as you, or acting as you on a bot side
+        assert_eq!(
+            ChannelSide::new(own(), user.clone()).check(),
+            Err("adapter feishu_user is declared Mode::Own without an act-as-user view".into())
+        );
+        assert_eq!(
+            ChannelSide::new(ChannelDecl::new("feishu_user"), user.clone())
+                .act_as_user(user.clone())
+                .check(),
+            Err("adapter feishu_user acts as the user but is not declared Mode::Own".into())
+        );
+        // the views answer to the declared adapter
+        let app = Arc::new(FeishuApp::new());
+        assert_eq!(
+            ChannelSide::new(ChannelDecl::new("feishu_app"), app.clone())
+                .media(Arc::new(crate::adapters::feishu::FeishuMedia::new(
+                    "feishu_user"
+                )))
+                .check(),
+            Err("media view feishu_user declared for adapter feishu_app".into())
+        );
+        // a provider that cannot send as you
+        assert_eq!(
+            ChannelSide::new(ChannelDecl::new("feishu_app").mode(Mode::Own), app.clone())
+                .act_as_user(Arc::new(Silent("feishu_app")))
+                .check(),
+            Err(
+                "adapter feishu_app is declared Mode::Own but its provider has no msg.send_as_user capability"
+                    .into()
+            )
+        );
+        // the built-in bot passes as it is (its features say `as_user`, it is not Mode::Own)
+        assert_eq!(
+            ChannelSide::new(ChannelDecl::new("feishu_app"), app.clone())
+                .adapter(app.clone())
+                .profiles(app)
+                .check(),
+            Ok(())
+        );
+    }
+
     #[test]
     fn the_receive_capability_is_one_of_the_providers() {
         let user = Arc::new(FeishuEnv::from_env(|_| None).user_provider(Domain::Feishu));
@@ -176,7 +290,12 @@ mod tests {
             .mode(Mode::Own)
             .receive(Receive::Poll, Some("msg.receive"));
         assert_eq!(polls.receive, Receive::Poll);
-        assert_eq!(ChannelSide::new(polls, user.clone()).check(), Ok(()));
+        assert_eq!(
+            ChannelSide::new(polls, user.clone())
+                .act_as_user(user.clone())
+                .check(),
+            Ok(())
+        );
         let wrong = ChannelDecl::new("feishu_user").receive(Receive::Poll, Some("mail.read"));
         assert_eq!(
             ChannelSide::new(wrong, user).check(),

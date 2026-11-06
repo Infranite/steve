@@ -4,7 +4,8 @@
 //! holds it, one entry per line:
 //!
 //! - `provider <id> <adapter as GET /connections/adapters lists it>`, `channel <id>`,
-//!   `profiles <id>`, `as_user <id>`, `mail <id>`, `event_source <id>`, `lifecycle <adapter>` (a
+//!   `profiles <id>`, `media <id>` (fetching message media), `as_user <id>` (acting as you),
+//!   `mail <id>`, `event_source <id>`, `lifecycle <adapter>` (a
 //!   connection hook), `jobs <n>`;
 //! - `api <METHOD> <path>` and `root <METHOD> <path>`, path parameters written as `x`.
 //!
@@ -117,6 +118,12 @@ fn registrations(w: &steve_hub::wire::Wired) -> BTreeSet<String> {
             .profile_adapter_ids()
             .into_iter()
             .map(|id| format!("profiles {id}")),
+    );
+    out.extend(
+        channels
+            .media_adapter_ids()
+            .into_iter()
+            .map(|id| format!("media {id}")),
     );
     out.extend(
         w.tools

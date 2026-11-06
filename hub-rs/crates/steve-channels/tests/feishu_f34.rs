@@ -72,6 +72,9 @@ async fn setup() -> H {
         .build(env.modules.clone(), Arc::new(LinearExecutor));
     let ch = Channels::builder(env.modules.clone(), conns.clone(), Arc::new(flow))
         .adapter(app.clone())
+        .media(Arc::new(
+            steve_channels::adapters::feishu::FeishuMedia::new("feishu_app"),
+        ))
         .build();
 
     let api: Router = connections::routes(conns).with_state(env.modules.clone());

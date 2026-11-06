@@ -3,15 +3,18 @@
 //! token, your user token on a self connection), to the connection's own API base, no redirects (the
 //! shared client follows none), the body read in chunks and dropped past `max_bytes`.
 //!
-//! Only [`crate::media`] calls this, with a key and type it read from the stored message.
+//! Only [`crate::media`] calls this, through [`FeishuMedia`], with a key and type it read from the
+//! stored message.
 
+use async_trait::async_trait;
 use reqwest::StatusCode;
 use serde_json::Value;
 use steve_modules::accounts::connections::ConnCx;
 
 use super::client::{self, FeishuClient, TokenSource};
 use super::ratelimit::Limiter;
-use crate::media::MediaError;
+use crate::channel::MessageRef;
+use crate::media::{MediaError, MediaFetch};
 
 /// Resource downloads per second of one connection (message-resource/get: 50/s, 1000/min).
 pub const PER_SEC: u32 = 50;
@@ -20,6 +23,53 @@ const ENVELOPE_MAX: u64 = 64 * 1024;
 
 /// The answer's headers must come within this (the whole fetch has the caller's limit).
 const CONNECT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The media view of a Feishu connection side (the bot's or yours): downloads a message's
+/// resources as the connection, and reads a message stored before cards and post media were read
+/// again from its raw event.
+#[derive(Debug, Clone)]
+pub struct FeishuMedia {
+    adapter: String,
+}
+
+impl FeishuMedia {
+    /// For connections of `adapter` (`feishu_app` or `feishu_user`).
+    pub fn new(adapter: impl Into<String>) -> Self {
+        Self {
+            adapter: adapter.into(),
+        }
+    }
+}
+
+#[async_trait]
+impl MediaFetch for FeishuMedia {
+    fn adapter_id(&self) -> &str {
+        &self.adapter
+    }
+
+    async fn download(
+        &self,
+        cx: &ConnCx,
+        msg: &MessageRef,
+        key: &str,
+        image: bool,
+        max: usize,
+    ) -> Result<Vec<u8>, MediaError> {
+        let ext = msg.id().ok_or(MediaError::NoKey)?;
+        download(cx, ext, key, image, max as u64).await
+    }
+
+    /// Only a raw event of this very message (its `message_id`).
+    fn reparse(&self, msg: &MessageRef, raw: &Value) -> Option<(String, Vec<Value>)> {
+        let raw_id = raw["event"]["message"]["message_id"]
+            .as_str()
+            .or(raw["message_id"].as_str());
+        if raw_id.is_none() || raw_id != msg.id() {
+            return None;
+        }
+        super::inbound::reparse(raw)
+    }
+}
 
 /// The bytes of `key` in message `ext_msg_id`; `image` picks `type=image`, else `type=file`.
 pub async fn download(

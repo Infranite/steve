@@ -7,19 +7,71 @@
 //! - [`fetch_for_viewer`] (the `GET /chan-messages/:id/resources/:n` route) and [`fetch_bound`]
 //!   (the agent's composer): one resource, located only through the stored message — its
 //!   workspace, space, provider message id and the key recorded at index `n` — fetched as the
-//!   connection that received it, bounded in size, time and concurrency.
+//!   connection that received it through its adapter's [`MediaFetch`], bounded in size, time and
+//!   concurrency.
 //! - [`with_unread_note`]: what the agent is told about attachments it cannot read.
 
-use std::collections::HashMap;
-use std::sync::{Arc, LazyLock, Mutex};
+use std::collections::{BTreeMap, HashMap};
+use std::sync::{Arc, LazyLock, Mutex, RwLock};
 use std::time::Duration;
 
+use async_trait::async_trait;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
+use steve_modules::accounts::connections::ConnCx;
 use steve_store::base::Viewer;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
+use crate::channel::MessageRef;
 use crate::{Channels, spaces};
+
+/// The media view of a channel side: fetching a stored message's resources (images, files) as the
+/// connection that received it. Registered with [`crate::ChannelsBuilder::media`] under the
+/// `connections.adapter` it serves; the Hub calls only the view of that adapter.
+#[async_trait]
+pub trait MediaFetch: Send + Sync {
+    /// The `connections.adapter` it serves.
+    fn adapter_id(&self) -> &str;
+
+    /// The bytes of resource `key` of message `msg` (`image`: an image, else a file), at most
+    /// `max` bytes: past it, [`MediaError::TooLarge`].
+    async fn download(
+        &self,
+        cx: &ConnCx,
+        msg: &MessageRef,
+        key: &str,
+        image: bool,
+        max: usize,
+    ) -> Result<Vec<u8>, MediaError>;
+
+    /// A message stored before its attachments were read fully, read again from the remote's raw
+    /// payload kept for it: `(text, attachments)`. `None`: keep it as stored. Nothing is fetched.
+    fn reparse(&self, msg: &MessageRef, raw: &Value) -> Option<(String, Vec<Value>)> {
+        let _ = (msg, raw);
+        None
+    }
+}
+
+/// The media views of the channels built in this process, for what shows a stored message without
+/// a [`Channels`] at hand ([`present`]); fetching uses the [`Channels`]' own.
+static VIEWS: LazyLock<RwLock<BTreeMap<String, Arc<dyn MediaFetch>>>> =
+    LazyLock::new(|| RwLock::new(BTreeMap::new()));
+
+/// Makes `m` known to [`present`] (done when [`Channels`] are built).
+pub(crate) fn publish(m: &Arc<dyn MediaFetch>) {
+    VIEWS
+        .write()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(m.adapter_id().to_string(), m.clone());
+}
+
+fn view(adapter: &str) -> Option<Arc<dyn MediaFetch>> {
+    VIEWS
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(adapter)
+        .cloned()
+}
 
 /// The size ceiling of one resource (the web's preview has the same).
 pub const MAX_BYTES: u64 = 25 * 1024 * 1024;
@@ -77,6 +129,7 @@ pub struct Fetched {
 
 /// Why a resource cannot be had. `reason()` is the contract's `Reason`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum MediaError {
     #[error("没有这个附件")]
     NotFound,
@@ -174,12 +227,32 @@ struct Row {
     text: Option<String>,
     attachments: Value,
     purged: Option<i64>,
+    created: i64,
+    thread_key: Option<String>,
+    space_ext: String,
+}
+
+impl Row {
+    /// The message as its adapter's [`MediaFetch`] sees it.
+    fn message_ref(&self) -> MessageRef {
+        MessageRef {
+            space_ext_id: self.space_ext.clone(),
+            ext_id: self.external_id.clone(),
+            created: self.created,
+            created_exact: self.direction == "in",
+            sender: None,
+            text: self.text.clone(),
+            thread_key: self.thread_key.clone(),
+            source_id: None,
+        }
+    }
 }
 
 fn load(c: &Connection, id: &str) -> rusqlite::Result<Option<Row>> {
     c.query_row(
-        "SELECT id, workspace_id, space_id, direction, status, external_id, event_id, text, attachments, purged
-           FROM chan_messages WHERE id = ?",
+        "SELECT m.id, m.workspace_id, m.space_id, m.direction, m.status, m.external_id, m.event_id, m.text,
+                m.attachments, m.purged, m.created, m.thread_key, coalesce(s.external_id, '')
+           FROM chan_messages m LEFT JOIN spaces s ON s.id = m.space_id WHERE m.id = ?",
         [id],
         |r| {
             Ok(Row {
@@ -196,6 +269,9 @@ fn load(c: &Connection, id: &str) -> rusqlite::Result<Option<Row>> {
                     .and_then(|s| serde_json::from_str(&s).ok())
                     .unwrap_or_else(|| json!([])),
                 purged: r.get(9)?,
+                created: r.get(10)?,
+                thread_key: r.get(11)?,
+                space_ext: r.get(12)?,
             })
         },
     )
@@ -223,10 +299,11 @@ fn legacy_attachments(a: &Value) -> bool {
 /// The message as it reads now: `(text, attachments)`. An inbound message stored before cards and
 /// post media were read is read again from its own raw event, when the event is still kept for
 /// exactly this message (same workspace, space, message, provider message id) and nothing was
-/// purged. Nothing is written, nothing replayed, nothing fetched.
+/// purged, by the [`MediaFetch`] of the connection's adapter. Nothing is written, nothing
+/// replayed, nothing fetched.
 fn effective(c: &Connection, r: &Row) -> (Option<String>, Value) {
     let unchanged = (r.text.clone(), r.attachments.clone());
-    let (Some(text), Some(ev), Some(ext)) = (&r.text, &r.event_id, &r.external_id) else {
+    let (Some(text), Some(ev)) = (&r.text, &r.event_id) else {
         return unchanged;
     };
     if r.direction != "in"
@@ -250,14 +327,10 @@ fn effective(c: &Connection, r: &Row) -> (Option<String>, Value) {
     let Some(payload) = payload.and_then(|p| serde_json::from_str::<Value>(&p).ok()) else {
         return unchanged;
     };
-    let raw = &payload["raw"];
-    let raw_id = raw["event"]["message"]["message_id"]
-        .as_str()
-        .or(raw["message_id"].as_str());
-    if raw_id != Some(ext.as_str()) {
+    let Some(m) = connection_of(c, r).and_then(|(_, a)| view(&a)) else {
         return unchanged;
-    }
-    match crate::adapters::feishu::inbound::reparse(raw) {
+    };
+    match m.reparse(&r.message_ref(), &payload["raw"]) {
         Some((t, atts)) => (Some(t), Value::Array(atts)),
         None => unchanged,
     }
@@ -300,8 +373,7 @@ fn connection_of(c: &Connection, r: &Row) -> Option<(String, String)> {
 }
 
 fn supported(adapter: &str) -> bool {
-    use crate::adapters::feishu::auth::{APP_ADAPTER, USER_ADAPTER};
-    adapter == APP_ADAPTER || adapter == USER_ADAPTER
+    view(adapter).is_some()
 }
 
 /// Why entry `a` of message `r` cannot be fetched, if it cannot (connection aside).
@@ -505,7 +577,7 @@ struct Plan {
     conn: String,
     adapter: String,
     ws: String,
-    ext: String,
+    msg: MessageRef,
     key: String,
     kind: ResourceKind,
     name: Option<String>,
@@ -530,7 +602,6 @@ fn plan(c: &Connection, r: &Row, index: usize) -> Result<Plan, MediaError> {
     if let Some(e) = blocked(r, a) {
         return Err(e);
     }
-    let ext = r.external_id.clone().ok_or(MediaError::NoKey)?;
     let (conn, adapter) = connection_of(c, r).ok_or(MediaError::Disconnected)?;
     if !supported(&adapter) {
         return Err(MediaError::Unsupported);
@@ -540,7 +611,7 @@ fn plan(c: &Connection, r: &Row, index: usize) -> Result<Plan, MediaError> {
         conn,
         adapter,
         ws: r.ws.clone(),
-        ext,
+        msg: r.message_ref(),
         key: a["key"].as_str().unwrap_or_default().to_string(),
         kind: if a["type"] == "image" {
             ResourceKind::Image
@@ -621,17 +692,18 @@ async fn run(
     let p = check()?;
     let max = limits.max_bytes.min(MAX_BYTES);
     let go = async {
+        let m = ch.media(&p.adapter).ok_or(MediaError::Unsupported)?;
         let _slot = slot(&p.conn).await?;
         let cx = ch
             .connections()
             .cx(&p.ws, &p.conn)
             .map_err(|_| MediaError::Disconnected)?;
-        crate::adapters::feishu::resource::download(
+        m.download(
             &cx,
-            &p.ext,
+            &p.msg,
             &p.key,
             p.kind == ResourceKind::Image,
-            max,
+            usize::try_from(max).unwrap_or(usize::MAX),
         )
         .await
     };

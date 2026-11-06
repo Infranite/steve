@@ -232,6 +232,144 @@ impl MessageRef {
     }
 }
 
+/// The emoji shown for a reaction kind when an adapter names none of its own.
+pub fn default_emoji(kind: ReactionKind) -> &'static str {
+    match kind {
+        ReactionKind::Ack => "👀",
+        ReactionKind::Done => "✅",
+        ReactionKind::Failed => "❌",
+    }
+}
+
+/// The idempotency key of one outbound message: derived from the Hub's outbound row id, the same
+/// for every retry of that message and never reused for another.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SendKey(pub String);
+
+/// Where a message sent as you goes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ActTarget {
+    /// A new message in the space.
+    Space { ext_id: String },
+    /// A reply to a stored message, in its thread when `in_thread`.
+    Reply { to: MessageRef, in_thread: bool },
+}
+
+/// What a send as you returned. Build it with [`Sent::id`] or [`Sent::without_id`] and the
+/// setters, so fields added later don't break adapters.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub struct Sent {
+    /// The provider's message id, when it gives one.
+    pub ext_id: Option<String>,
+    /// The provider's create time (Unix ms), when it gives one.
+    pub created: Option<i64>,
+    /// The thread the message landed in, when the provider says.
+    pub thread_key: Option<String>,
+    /// The remote's delivery id of the send, when it has one: kept on the message so it can be
+    /// acted on again (recall, reactions, media) without a provider message id.
+    pub source_id: Option<String>,
+}
+
+impl Sent {
+    /// Sent, with the provider's message id.
+    pub fn id(ext_id: impl Into<String>) -> Self {
+        Self {
+            ext_id: Some(ext_id.into()),
+            ..Self::default()
+        }
+    }
+
+    /// Sent; the provider gave no message id.
+    pub fn without_id() -> Self {
+        Self::default()
+    }
+
+    pub fn created(mut self, ms: i64) -> Self {
+        self.created = Some(ms);
+        self
+    }
+
+    pub fn thread_key(mut self, k: impl Into<String>) -> Self {
+        self.thread_key = Some(k.into());
+        self
+    }
+
+    pub fn source_id(mut self, id: impl Into<String>) -> Self {
+        self.source_id = Some(id.into());
+        self
+    }
+}
+
+/// Acting as you on a connection of your own account (`Mode::Own`): sending and replying, and,
+/// when supported, reactions and recalling what was sent as you. Only the outbox calls it, after
+/// your approval or your own trigger words; nothing here decides to send.
+#[async_trait]
+pub trait ActAsUser: Send + Sync {
+    /// The `connections.adapter` it serves.
+    fn adapter_id(&self) -> &str;
+
+    /// Sends `content` as you. `key` is stable for one outbound message across every retry; the
+    /// remote side may dedupe on it. Returns the provider's message id and create time (ms) when
+    /// it knows them.
+    async fn send(
+        &self,
+        cx: &ConnCx,
+        to: &ActTarget,
+        content: &OutContent,
+        key: &SendKey,
+    ) -> Result<Sent, AdapterError>;
+
+    /// How long the provider drops a repeat of a send with the same `key`: within it, a send whose
+    /// answer was lost may be sent again as is. `None`: no such guarantee.
+    fn send_dedup(&self) -> Option<std::time::Duration> {
+        None
+    }
+
+    /// Whether [`ActAsUser::add_reaction`] and [`ActAsUser::remove_reaction`] work.
+    fn supports_reactions(&self) -> bool {
+        false
+    }
+
+    /// The provider's emoji for a reaction kind (shown in the UI next to the message).
+    fn reaction_emoji(&self, kind: ReactionKind) -> &'static str {
+        default_emoji(kind)
+    }
+
+    /// Puts a reaction on a message as you; returns the provider's reaction id.
+    async fn add_reaction(
+        &self,
+        cx: &ConnCx,
+        msg: &MessageRef,
+        kind: ReactionKind,
+    ) -> Result<String, AdapterError> {
+        let _ = (cx, msg, kind);
+        Err(ProviderError::Unsupported.into())
+    }
+
+    /// Takes your reaction off again.
+    async fn remove_reaction(
+        &self,
+        cx: &ConnCx,
+        msg: &MessageRef,
+        reaction_id: &str,
+    ) -> Result<(), AdapterError> {
+        let _ = (cx, msg, reaction_id);
+        Err(ProviderError::Unsupported.into())
+    }
+
+    /// Whether [`ActAsUser::recall`] works.
+    fn supports_recall(&self) -> bool {
+        false
+    }
+
+    /// Recalls a message sent as you.
+    async fn recall(&self, cx: &ConnCx, msg: &MessageRef) -> Result<(), AdapterError> {
+        let _ = (cx, msg);
+        Err(ProviderError::Unsupported.into())
+    }
+}
+
 /// A change of a space or its members, as an adapter saw it (Feishu `im.chat.member.*`,
 /// `im.chat.updated_v1`, `im.chat.disbanded_v1`). [`crate::Channels::on_space_event`]
 /// applies it.
@@ -436,11 +574,7 @@ pub trait ChannelAdapter: ConnectionProvider {
 
     /// The provider's emoji for a reaction kind (shown in the UI next to the message).
     fn reaction_emoji(&self, kind: ReactionKind) -> &'static str {
-        match kind {
-            ReactionKind::Ack => "👀",
-            ReactionKind::Done => "✅",
-            ReactionKind::Failed => "❌",
-        }
+        default_emoji(kind)
     }
 
     /// Puts a reaction on a message as the connection's account; returns the provider's reaction

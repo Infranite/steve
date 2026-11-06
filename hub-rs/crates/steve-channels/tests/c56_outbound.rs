@@ -14,7 +14,7 @@ use axum::Router;
 use serde_json::{Value, json};
 use std::sync::Mutex;
 use steve_channels::Outbound;
-use steve_channels::adapters::feishu::{FeishuError, SendAsUser, SentAsUser, UserMessage};
+use steve_channels::channel::{ActAsUser, ActTarget, MessageRef, OutContent, SendKey, Sent};
 use steve_channels::compose::H_SAFETY;
 use steve_channels::deliver::{Auth, Delivered, Generation, OutRequest, OutTarget, Purpose};
 use steve_channels::disclosure::{CHECK_HEAD, Disclosure, REWRITE_HEAD};
@@ -30,6 +30,7 @@ use steve_channels::{
     By, Channels, Inbound, InboundMessage, Mention, Next, Replies, SendTarget, SpaceKind, api,
     bindings, spaces,
 };
+use steve_flow::AdapterError;
 use steve_flow::graph::{Graph, Node};
 use steve_flow::nodes::action::Action;
 use steve_flow::runs::{self, NewRun};
@@ -223,7 +224,7 @@ async fn setup() -> H {
     setup_with(None).await
 }
 
-async fn setup_with(as_user: Option<Arc<dyn SendAsUser>>) -> H {
+async fn setup_with(as_user: Option<Arc<dyn ActAsUser>>) -> H {
     let core = Arc::new(FakeCore::default());
     let flow_setup = FlowSetup::new(core.clone());
     let disclosure = Disclosure::with_models(Vec::new());
@@ -265,7 +266,7 @@ async fn setup_with(as_user: Option<Arc<dyn SendAsUser>>) -> H {
     .build();
     let mut outbox = Outbox::new(link);
     if let Some(u) = as_user {
-        outbox = outbox.as_user(FakeChannel::ID, u);
+        outbox = outbox.act_as_user(u);
     }
     let outbox = Arc::new(outbox);
     let replies = Arc::new(Replies::new().outbound(outbox.clone()));
@@ -1654,58 +1655,47 @@ async fn a_handoff_can_become_a_draft_reply() {
     assert_eq!(sent(&h)[1].1, "我晚点回你");
 }
 
-/// Records what would have been sent as you (F6's seam), without a network.
+/// Records what would have been sent and recalled as you, without a network.
 #[derive(Default)]
-struct AsUser(Mutex<Vec<UserCall>>);
+struct AsUser(Mutex<Vec<UserCall>>, Mutex<Vec<MessageRef>>);
 
 /// `(chat or message, text, uuid, in_thread)`.
 type UserCall = (String, String, Option<String>, bool);
 
 #[async_trait::async_trait]
-impl SendAsUser for AsUser {
-    async fn send_as_user(
-        &self,
-        _: &ConnCx,
-        chat: &str,
-        m: &UserMessage,
-    ) -> Result<SentAsUser, FeishuError> {
-        self.0.lock().unwrap().push((
-            chat.into(),
-            m.content["text"].as_str().unwrap_or("").into(),
-            m.uuid.clone(),
-            false,
-        ));
-        Ok(SentAsUser {
-            message_id: "om_u1".into(),
-            chat_id: chat.into(),
-            create_time: None,
-            thread_id: None,
-            uuid: m.uuid.clone().unwrap_or_default(),
-            retried: false,
-        })
+impl ActAsUser for AsUser {
+    fn adapter_id(&self) -> &str {
+        FakeChannel::ID
     }
 
-    async fn reply_as_user(
+    async fn send(
         &self,
         _: &ConnCx,
-        message_id: &str,
-        m: &UserMessage,
-        in_thread: bool,
-    ) -> Result<SentAsUser, FeishuError> {
-        self.0.lock().unwrap().push((
-            message_id.into(),
-            m.content["text"].as_str().unwrap_or("").into(),
-            m.uuid.clone(),
-            in_thread,
-        ));
-        Ok(SentAsUser {
-            message_id: "om_u2".into(),
-            chat_id: String::new(),
-            create_time: None,
-            thread_id: None,
-            uuid: m.uuid.clone().unwrap_or_default(),
-            retried: false,
-        })
+        to: &ActTarget,
+        content: &OutContent,
+        key: &SendKey,
+    ) -> Result<Sent, AdapterError> {
+        let (at, in_thread, id) = match to {
+            ActTarget::Space { ext_id } => (ext_id.clone(), false, "om_u1"),
+            ActTarget::Reply { to, in_thread } => {
+                (to.id().unwrap_or_default().to_string(), *in_thread, "om_u2")
+            }
+        };
+        assert_eq!(content.uuid.as_deref(), Some(key.0.as_str()));
+        self.0
+            .lock()
+            .unwrap()
+            .push((at, content.text.clone(), Some(key.0.clone()), in_thread));
+        Ok(Sent::id(id).created(1_700_000_000_000))
+    }
+
+    fn supports_recall(&self) -> bool {
+        true
+    }
+
+    async fn recall(&self, _: &ConnCx, msg: &MessageRef) -> Result<(), AdapterError> {
+        self.1.lock().unwrap().push(msg.clone());
+        Ok(())
     }
 }
 
@@ -1739,6 +1729,118 @@ async fn your_own_messages_go_out_with_your_user_token_once_approved() {
         )[0],
         "om_u2"
     );
+}
+
+/// Your own account, approved and sent as you: the message is out as `om_u2`.
+async fn sent_as_you(h: &H) -> String {
+    checks_pass(h);
+    h.env.gateway.script(H_SAFETY, REPLY);
+    let me = h.me.clone();
+    let r = push(h, &me, msg("C_DEV", "d1", "ulilei", "@你 在吗", true))
+        .await
+        .response
+        .unwrap();
+    let m = r.out_message_id.unwrap();
+    decide(h, &r.decision_id.unwrap(), "yes", "在的").unwrap();
+    h.env.clock.advance(11_000);
+    assert_eq!(h.outbox.send_due(&h.ch).await, 1);
+    assert_eq!(status(h, &m), "sent");
+    m
+}
+
+/// A message sent as you is recalled as you through the connection it went out on, even once the
+/// space's voice is a bot; a message sent before that was recorded goes through the voice.
+#[tokio::test(flavor = "multi_thread")]
+async fn what_went_out_as_you_is_recalled_as_you_whatever_the_voice_is_now() {
+    let u = Arc::new(AsUser::default());
+    let h = setup_with(Some(u.clone())).await;
+    let m = sent_as_you(&h).await;
+    assert_eq!(
+        row(
+            &h,
+            "SELECT sent_via, ext_created FROM chan_messages WHERE id = ?",
+            &[&m]
+        ),
+        vec![json!(h.me), json!(1_700_000_000_000i64)]
+    );
+    // a bot identity joins the space and becomes its voice
+    let space = row(&h, "SELECT space_id FROM chan_messages WHERE id = ?", &[&m])[0]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let now = h.ch.now();
+    h.env
+        .store()
+        .transaction(|tx| -> ApiResult<()> {
+            spaces::see(tx, WS, &space, &h.oncall, now)?;
+            spaces::set_voice(tx, WS, &space, Some(&h.oncall), now)?;
+            Ok(())
+        })
+        .expect("voice");
+    assert_eq!(
+        h.env
+            .store()
+            .reader(|c| spaces::voice(c, &space))
+            .unwrap()
+            .as_deref(),
+        Some(h.oncall.as_str())
+    );
+
+    h.outbox.recall(&h.ch, WS, ME, &m).await.expect("recalled");
+    let calls = u.1.lock().unwrap().clone();
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert_eq!(calls[0].id(), Some("om_u2"));
+    assert_eq!(calls[0].space_ext_id, "C_DEV");
+    assert_eq!(calls[0].created, 1_700_000_000_000);
+    assert!(calls[0].created_exact);
+    assert!(h.fake.recalled.lock().unwrap().is_empty(), "not as the bot");
+    assert_eq!(status(&h, &m), "recalled");
+
+    // sent before the connection was recorded: through the space's voice, the bot
+    exec(
+        &h,
+        &format!("UPDATE chan_messages SET status = 'sent', sent_via = NULL WHERE id = '{m}'"),
+    );
+    h.outbox.recall(&h.ch, WS, ME, &m).await.expect("recalled");
+    assert_eq!(*h.fake.recalled.lock().unwrap(), vec!["om_u2".to_string()]);
+    assert_eq!(u.1.lock().unwrap().len(), 1);
+}
+
+/// Acting as you without recalling: `这个渠道不支持撤回`, nothing called.
+#[tokio::test(flavor = "multi_thread")]
+async fn recalling_as_you_needs_a_side_that_can() {
+    struct SendOnly(AsUser);
+
+    #[async_trait::async_trait]
+    impl ActAsUser for SendOnly {
+        fn adapter_id(&self) -> &str {
+            self.0.adapter_id()
+        }
+
+        async fn send(
+            &self,
+            cx: &ConnCx,
+            to: &ActTarget,
+            content: &OutContent,
+            key: &SendKey,
+        ) -> Result<Sent, AdapterError> {
+            self.0.send(cx, to, content, key).await
+        }
+    }
+
+    let h = setup_with(Some(Arc::new(SendOnly(AsUser::default())))).await;
+    let m = sent_as_you(&h).await;
+    let e = h
+        .outbox
+        .recall(&h.ch, WS, ME, &m)
+        .await
+        .expect_err("no recall");
+    assert!(
+        matches!(&e, ApiError::Rule(t) if t == steve_channels::outbound::ERR_NO_RECALL),
+        "{e:?}"
+    );
+    assert!(h.fake.recalled.lock().unwrap().is_empty());
+    assert_eq!(status(&h, &m), "sent");
 }
 
 /// YOLO: a message in your own name that YOLO approved goes out with

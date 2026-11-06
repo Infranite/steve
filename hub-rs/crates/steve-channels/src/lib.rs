@@ -42,7 +42,7 @@
 //! registry.decision(steve_channels::respond::SUBJECT_MESSAGE, link.handler());
 //! let late = steve_channels::flow_actions::LateChannels::new();
 //! let outbox = Arc::new(steve_channels::Outbox::new(link.clone())
-//!     .as_user(steve_channels::adapters::feishu::auth::USER_ADAPTER, feishu_user.clone()));
+//!     .act_as_user(feishu_user.clone()));                              // ActAsUser: send, react, recall as you
 //! registry.item_hooks(Box::new(steve_channels::outbound::ReturnToSource::new(outbox.clone(), late.clone())));
 //! // … modules = Modules::new(store, gateway, registry) …
 //! disclosure.bind(modules.store.clone(), modules.gateway.clone());
@@ -57,6 +57,7 @@
 //! let sink: Arc<dyn steve_flow::EventSink> = Arc::new(flow.clone());     // S1
 //! let channels = steve_channels::Channels::builder(modules.clone(), conns.clone(), sink)
 //!     .adapter(feishu.clone())
+//!     .media(Arc::new(steve_channels::adapters::feishu::FeishuMedia::new("feishu_app")))
 //!     .flow(flow.clone())               // C3: to-flow validates against the registered node kinds
 //!     .guard(vault_guard.clone())       // C3: `guard::scan` before the `intent` judgement
 //!     .responder(replies.clone())       // C4 + C6
@@ -139,9 +140,10 @@ pub mod spaces;
 pub mod usage;
 
 pub use channel::{
-    ChannelAdapter, ChannelFeatures, HandleRef, InboundMessage, MemberInfo, Mention, MessageRef,
-    OutContent, Profile, ProfileAdapter, ProfileAnswer, ProfileQuery, PushOutcome, ReactionKind,
-    SendTarget, Sender, SpaceEvent, SpaceInfo, SpaceKind, TenantInfo,
+    ActAsUser, ActTarget, ChannelAdapter, ChannelFeatures, HandleRef, InboundMessage, MemberInfo,
+    Mention, MessageRef, OutContent, Profile, ProfileAdapter, ProfileAnswer, ProfileQuery,
+    PushOutcome, ReactionKind, SendKey, SendTarget, Sender, Sent, SpaceEvent, SpaceInfo, SpaceKind,
+    TenantInfo,
 };
 pub use deliver::{Auth, Delivered, DraftOnly, OutRequest, OutTarget, Outbound};
 pub use disclosure::Disclosure;

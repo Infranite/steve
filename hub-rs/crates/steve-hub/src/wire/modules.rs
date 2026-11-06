@@ -363,8 +363,8 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
     registry.decision(steve_channels::respond::SUBJECT_MESSAGE, out_link.handler());
     let late = steve_channels::flow_actions::LateChannels::new();
     let mut outbox = steve_channels::Outbox::new(out_link.clone());
-    for (adapter, s) in &declared.as_user {
-        outbox = outbox.as_user(adapter, s.clone());
+    for a in &declared.act_as_user {
+        outbox = outbox.act_as_user(a.clone());
     }
     let outbox = Arc::new(outbox.secrets(Arc::new(hp::RedactorScan)));
     registry.item_hooks(Box::new(steve_channels::outbound::ReturnToSource::new(
@@ -527,6 +527,10 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
     // rule, not the order they come in)
     for p in &declared.profiles {
         channels = channels.profiles(p.clone());
+    }
+    // how the images and files of each adapter's messages are fetched
+    for m in &declared.media {
+        channels = channels.media(m.clone());
     }
     let channels = channels
         .party_hooks(ports.hooks.clone())

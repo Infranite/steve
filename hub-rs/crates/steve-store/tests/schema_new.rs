@@ -68,7 +68,7 @@ fn at_version(v: usize) -> (tempfile::TempDir, std::path::PathBuf) {
 
 #[test]
 fn schema_version_is_23() {
-    assert_eq!(db::SCHEMA_VERSION, 41);
+    assert_eq!(db::SCHEMA_VERSION, 42);
 }
 
 #[test]
@@ -371,4 +371,38 @@ fn migration_20_reactions_after_19() {
     c.execute_batch(db::MIGRATIONS[19]).unwrap();
     assert!(has_table(&c, "chan_reactions"));
     assert!(has_table(&c, "space_prefs"));
+}
+
+#[test]
+fn migration_42_records_how_a_message_was_sent() {
+    let (_dir, path) = at_version(41);
+    let c = Connection::open(&path).unwrap();
+    c.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+    assert!(!columns(&c, "chan_messages").contains(&"sent_via".to_string()));
+    assert!(!has_table(&c, "chan_message_seen"));
+    db::migrate(&c).unwrap();
+    let cols = columns(&c, "chan_messages");
+    assert!(cols.contains(&"sent_via".to_string()), "{cols:?}");
+    assert!(cols.contains(&"ext_created".to_string()), "{cols:?}");
+    assert_eq!(
+        columns(&c, "chan_message_seen"),
+        ["connection_id", "source_id", "message_id"]
+    );
+    // a delivery id goes with its message
+    c.execute_batch(
+        "INSERT INTO spaces (id, workspace_id, system_id, kind, external_id, name, created, updated)
+           VALUES ('sp1', 'default', 'feishu', 'group', 'oc_1', '群', 1, 1);
+         INSERT INTO chan_messages (id, workspace_id, space_id, direction, status, text, created)
+           VALUES ('cm1', 'default', 'sp1', 'out', 'sent', 'hi', 1);
+         INSERT INTO chan_message_seen (connection_id, source_id, message_id) VALUES ('con1', 'ev1', 'cm1');
+         DELETE FROM chan_messages WHERE id = 'cm1';",
+    )
+    .unwrap();
+    assert_eq!(count(&c, "SELECT count(*) FROM chan_message_seen"), 0);
+    // opening again runs nothing twice
+    db::migrate(&c).unwrap();
+    assert_eq!(
+        count(&c, "SELECT v FROM schema_version"),
+        db::SCHEMA_VERSION
+    );
 }

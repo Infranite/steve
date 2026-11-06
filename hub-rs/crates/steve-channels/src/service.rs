@@ -16,6 +16,7 @@ use crate::ChannelResult;
 use crate::channel::{ChannelAdapter, InboundMessage, ProfileAdapter, SpaceEvent};
 use crate::conversations::Thread;
 use crate::inbound::Inbound;
+use crate::media::MediaFetch;
 use crate::membership::SpaceChange;
 use crate::names::Names;
 use crate::reactions::{AdapterReactor, Locks, Reactor};
@@ -51,6 +52,7 @@ struct Inner {
     locks: Locks,
     gens: crate::conversations::Generations,
     profiles: BTreeMap<String, Arc<dyn ProfileAdapter>>,
+    media: BTreeMap<String, Arc<dyn MediaFetch>>,
     party_hooks: Vec<Arc<dyn PartyHooks>>,
     names: Names,
     /// Where replies' knowledge is searched (the Hub sets the workspace's store; SQLite until then).
@@ -77,6 +79,7 @@ pub struct ChannelsBuilder {
     reactor: Arc<dyn Reactor>,
     thread: Option<Arc<dyn Thread>>,
     profiles: BTreeMap<String, Arc<dyn ProfileAdapter>>,
+    media: BTreeMap<String, Arc<dyn MediaFetch>>,
     party_hooks: Vec<Arc<dyn PartyHooks>>,
 }
 
@@ -85,6 +88,13 @@ impl ChannelsBuilder {
     /// `connections.adapter` it serves: Feishu's bot and you.
     pub fn profiles(mut self, a: Arc<dyn ProfileAdapter>) -> Self {
         self.profiles.insert(a.adapter_id().to_string(), a);
+        self
+    }
+
+    /// Registers the media view of a channel side under the `connections.adapter` it serves: how
+    /// the resources of messages its connections received are fetched.
+    pub fn media(mut self, m: Arc<dyn MediaFetch>) -> Self {
+        self.media.insert(m.adapter_id().to_string(), m);
         self
     }
 
@@ -148,6 +158,9 @@ impl ChannelsBuilder {
     }
 
     pub fn build(self) -> Channels {
+        for m in self.media.values() {
+            crate::media::publish(m);
+        }
         Channels(Arc::new(Inner {
             modules: self.modules,
             conns: self.conns,
@@ -162,6 +175,7 @@ impl ChannelsBuilder {
             locks: Locks::default(),
             gens: Default::default(),
             profiles: self.profiles,
+            media: self.media,
             party_hooks: self.party_hooks,
             names: Names::default(),
             knowledge: std::sync::OnceLock::new(),
@@ -188,6 +202,7 @@ impl Channels {
             reactor: Arc::new(AdapterReactor),
             thread: None,
             profiles: BTreeMap::new(),
+            media: BTreeMap::new(),
             party_hooks: vec![Arc::new(steve_modules::accounts::AccountHooks)],
         }
     }
@@ -283,6 +298,16 @@ impl Channels {
     /// The adapters that can look people up.
     pub fn profile_adapter_ids(&self) -> Vec<String> {
         self.0.profiles.keys().cloned().collect()
+    }
+
+    /// The media view for `connections.adapter = id`.
+    pub fn media(&self, id: &str) -> Option<Arc<dyn MediaFetch>> {
+        self.0.media.get(id).cloned()
+    }
+
+    /// The adapters whose messages' resources can be fetched.
+    pub fn media_adapter_ids(&self) -> Vec<String> {
+        self.0.media.keys().cloned().collect()
     }
 
     pub(crate) fn party_hooks(&self) -> &[Arc<dyn PartyHooks>] {
