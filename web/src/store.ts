@@ -9,6 +9,7 @@ import { promptNeedle, withDecisionNotes } from "./decision-notes"
 import { blockSlots, type FeedRow } from "./feed-order"
 import { api, cursorOf, setPageWorkspace, stream, Unauthenticated, type State, type RItem, type RItemDetail, type RSession, type RDecision, type RBot, type REvent, type RProject, type Proposal, type LocalSession, type HubEvent, type RNotice } from "./api"
 import { cue } from "./bus"
+import { newClientId } from "./composer-draft"
 import { elapsed, pastTime, span } from "./i18n/format"
 import i18n, { t } from "./i18n"
 import type { StateUpdate, RFile, PlanStep, RHold, RQueued, RKindReview, SuggestChoice, A2uiRecord, A2uiSubmit, RAnnotation } from "./api"
@@ -732,13 +733,14 @@ export function stageOf(i: Item): string {
 /** how long the conversation keeps talking to an item after the last message sent to it (§5.3) */
 const FOCUS_MS = 10 * 60_000
 const ITEM_REF = /^#([A-Z]{1,6}-\d+)\b/
-export async function chatSend(v: string, files: string[] = [], refs: RFile[] = [], mentions: { kind: "party" | "bot"; id: string }[] = []) {
+/** `clientId`: the send idempotency key (the composer's draft keeps one across retries; a button sends a new one) */
+export async function chatSend(v: string, files: string[] = [], refs: RFile[] = [], mentions: { kind: "party" | "bot"; id: string }[] = [], clientId = newClientId()) {
   /* a quote of an item's message, or the focus bar, sends straight to that item; `#ST-n` does too and starts the focus */
   const quoted = st.quote ? st.thread.find((m) => m.id === st.quote) ?? knownMsgs.get(st.quote) : undefined
   const focus = st.focus && st.focus.until > Date.now() ? st.focus.item : undefined
   const item = quoted?.item ?? (quoted ? undefined : focus)
   const toItem = item ?? ITEM_REF.exec(v)?.[1]
-  const to = { item, reply_to: quoted?.id }
+  const to = { item, reply_to: quoted?.id, client_id: clientId }
   st.quote = null; st.focus = toItem ? { item: toItem, until: Date.now() + FOCUS_MS } : st.focus
   /* Steve is on a turn: the message waits in the queue above the composer and goes when the turn ends (the Hub decides) */
   if (chatBusy()) {
@@ -904,8 +906,9 @@ export async function dismiss(id: string, decision?: string) {
 export function undoDecision(n: number) { const d = st.done[n]; if (!d?.canUndo) return; void call(api.undo(d.decision), t("core:toast.undoneToPending", { id: d.id })) }
 
 /* ───────── actions: items ───────── */
-export async function newItem(goal: string, bot?: string, project?: string | null, mode: "start" | "propose" = "start") {
-  const r = await call(api.newItem({ goal, bot, project, mode })); return r?.id
+/** `clientId`: the same for every retry of one unchanged form, so a retry does not make a second item */
+export async function newItem(goal: string, bot?: string, project?: string | null, mode: "start" | "propose" = "start", clientId = newClientId()) {
+  const r = await call(api.newItem({ goal, bot, project, mode, client_id: clientId })); return r?.id
 }
 export async function supp(id: string, v: string, target: "auto" | "steer" | "new", files: string[] = []) {
   const msg = t(target === "steer" ? "core:toast.steered" : target === "new" ? "core:toast.newSession" : active(it(id))?.st === "run" ? "core:toast.queuedForTurn" : "core:toast.delivered")

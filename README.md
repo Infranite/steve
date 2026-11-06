@@ -315,7 +315,7 @@ Steve reads its settings from the environment. For a service, put them in `$STEV
 | Variable | Purpose |
 |---|---|
 | `STEVE_HOME` | Data directory (default `~/.steve`) |
-| `STEVE_HOST`, `STEVE_PORT` | Listen address (default `127.0.0.1:8440`) |
+| `STEVE_HOST`, `STEVE_PORT` | Listen addresses, comma-separated, on one port (default `127.0.0.1:8440`); for a proxy on another machine add the address it reaches, e.g. `127.0.0.1,100.64.0.2`. `0.0.0.0`/`::` is refused unless `STEVE_ALLOW_ANY_HOST=1` |
 | `STEVE_WEB_DIR` | The built web UI the Hub serves |
 | `STEVE_PUBLIC_URL` | A URL your integrations can reach, only needed for callbacks. No shared hosted endpoint is provided. |
 | `STEVE_OIDC_ISSUER`, `STEVE_OIDC_CLIENT_ID`, `STEVE_OIDC_CLIENT_SECRET_FILE` | Sign-in through your OIDC provider |

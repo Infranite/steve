@@ -620,18 +620,19 @@ pub async fn run(asm: Assembly) -> anyhow::Result<()> {
     crate::upgrades::spawn_auto_check((*cfg).clone());
     crate::upgrades::signing::spawn_migrate(cfg.home.clone());
     let app = crate::app::app(st.clone(), w.auth, w.mcp, w.module_routes, w.root_routes);
-    let listener = tokio::net::TcpListener::bind((cfg.listen.host.as_str(), cfg.listen.port))
-        .await
-        .with_context(|| format!("listen on {}:{}", cfg.listen.host, cfg.listen.port))?;
+    let listeners = cfg.listen.bind().await?;
+    if cfg.listen.any() {
+        tracing::warn!(
+            "STEVE_HOST includes a wildcard address: the Hub is reachable from every network \
+             this machine is on; list the addresses you need instead"
+        );
+    }
     // recovery trouble is reported (`/healthz`.recovery), never a reason not to serve
     if let Err(e) = st.domain.ready().await {
         tracing::error!("recovery after start: {e}");
         crate::recovery::failed(&e.to_string());
     }
-    println!(
-        "steve hub {} on http://{}:{}",
-        cfg.version, cfg.listen.host, cfg.listen.port
-    );
+    println!("steve hub {} on {}", cfg.version, cfg.listen.urls());
 
     // SIGINT/SIGTERM: stop the adapters and exit at once; in-flight turns are not drained (as in TS)
     let domain = st.domain.clone();
@@ -655,13 +656,22 @@ pub async fn run(asm: Assembly) -> anyhow::Result<()> {
     // a Node's link is one of these connections: little unsent data in the kernel lets a
     // permission answer overtake file chunks (steve_node_wire::sock)
     use axum::serve::ListenerExt as _;
-    let listener =
-        listener.tap_io(|tcp: &mut tokio::net::TcpStream| steve_node_wire::sock::low_water(tcp));
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .await?;
+    let mut servers = tokio::task::JoinSet::new();
+    for listener in listeners {
+        let app = app.clone();
+        let listener = listener
+            .tap_io(|tcp: &mut tokio::net::TcpStream| steve_node_wire::sock::low_water(tcp));
+        servers.spawn(async move {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+        });
+    }
+    while let Some(r) = servers.join_next().await {
+        r??;
+    }
     Ok(())
 }
 

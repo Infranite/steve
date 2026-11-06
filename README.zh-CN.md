@@ -315,7 +315,7 @@ Steve 从环境变量读取配置。作为服务运行时写在 `$STEVE_HOME/ste
 | 变量 | 作用 |
 |---|---|
 | `STEVE_HOME` | 数据目录（默认 `~/.steve`） |
-| `STEVE_HOST`、`STEVE_PORT` | 监听地址（默认 `127.0.0.1:8440`） |
+| `STEVE_HOST`、`STEVE_PORT` | 监听地址，可用逗号分隔多个，共用一个端口（默认 `127.0.0.1:8440`）；反向代理在另一台机器上时，加上它访问的地址，例如 `127.0.0.1,100.64.0.2`。`0.0.0.0`/`::` 会被拒绝，除非设置 `STEVE_ALLOW_ANY_HOST=1` |
 | `STEVE_WEB_DIR` | Hub 提供的 Web 构建产物 |
 | `STEVE_PUBLIC_URL` | 集成回调能访问到的地址，只在需要回调时设置。不提供共享的托管地址。 |
 | `STEVE_OIDC_ISSUER`、`STEVE_OIDC_CLIENT_ID`、`STEVE_OIDC_CLIENT_SECRET_FILE` | 通过你的 OIDC 服务登录 |

@@ -155,7 +155,7 @@ export const api = {
   state: () => { let c: string | null = null; return req<State>("GET", "/state", undefined, (r) => { c = r.headers.get("x-steve-cursor") }).then((s) => { if (c) stateCursors.set(s, c); return s }) },
   me: () => get<{ user: { id: string; name: string; email: string | null; role: string }; version: string; web_version: string }>("/me"),
   switchWs: (id: string) => post(`/workspaces/${id}/switch`), newWs: (p: { name: string; description?: string; item_prefix?: string }) => post<RWorkspace>("/workspaces", p), patchWs: (id: string, p: Partial<RWorkspace>) => patch(`/workspaces/${id}`, p),
-  say: (text: string, files: string[] = [], mentions: { kind: "party" | "bot"; id: string }[] = [], to: { item?: string; reply_to?: string } = {}) => post("/thread", { text, files, ...(mentions.length ? { mentions } : {}), ...(to.item ? { item: to.item } : {}), ...(to.reply_to ? { reply_to: to.reply_to } : {}) }),
+  say: (text: string, files: string[] = [], mentions: { kind: "party" | "bot"; id: string }[] = [], to: { item?: string; reply_to?: string; client_id?: string } = {}) => post("/thread", { text, files, ...(mentions.length ? { mentions } : {}), ...(to.item ? { item: to.item } : {}), ...(to.reply_to ? { reply_to: to.reply_to } : {}), ...(to.client_id ? { client_id: to.client_id } : {}) }),
   stop: () => post("/thread/stop"),
   /* a message said while Steve was on a turn waits for it; until then it can be changed or withdrawn (409 once it went) */
   threadQueuedEdit: (msg: string, text: string) => patch<{ ok: boolean }>(`/thread/queued/${msg}`, { text }),
@@ -178,7 +178,7 @@ export const api = {
   annRemove: (id: string, ann: string) => del<{ ok: boolean }>(`/items/${encodeURIComponent(id)}/annotations/${encodeURIComponent(ann)}`),
   /* one send per key: the same key again (a second click, a retry) is answered `again` and sends nothing */
   annSend: (id: string, ids: string[], key: string) => post<{ ok: boolean; again: boolean; pending?: boolean; sent: number; timeline_id?: number | null; warning?: string }>(`/items/${encodeURIComponent(id)}/annotations/send`, { ids, key }),
-  newItem: (p: { goal: string; bot?: string; project?: string | null; mode?: "start" | "propose" }) => post<RItem>("/items", p),
+  newItem: (p: { goal: string; bot?: string; project?: string | null; mode?: "start" | "propose"; client_id?: string }) => post<RItem>("/items", p),
   itemAction: (id: string, action: string) => post(`/items/${id}/actions`, { action }), bulk: (ids: string[], op: string) => post<{ n: number }>("/items/bulk", { ids, op }),
   goal: (id: string, text: string) => post(`/items/${id}/goal`, { text }),
   patchItem: (id: string, p: Partial<{ title: string; priority: string; due: string | null; star: boolean; accept_mode: string; project_id: string | null; tags: string[] }>) => patch(`/items/${id}`, p),

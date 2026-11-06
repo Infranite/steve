@@ -19,7 +19,7 @@ import { Spinner } from "@/components/ui/spinner"
 import { Switch } from "@/components/ui/switch"
 import { Textarea } from "@/components/ui/textarea"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
-import { draftKey } from "@/composer-draft"
+import { draftKey, newClientId } from "@/composer-draft"
 import { GitHubMoreRow } from "@/github/index"
 import { SessionKnowledge } from "@/knowledge/parts"
 import { lazyView } from "@/lazy"
@@ -233,10 +233,17 @@ export function ForkDialog({ k, at }: { k: string; at: number }) {
 export function NewItemDialog({ project: pre }: { project?: string } = {}) {
   const t = useT()
   const [g, setG] = useState(""), [mode, setMode] = useState<"start" | "propose">("start"), [bot, setBot] = useState("auto"), [proj, setProj] = useState(pre ?? "auto"), [busy, setBusy] = useState(false)
+  /* one send idempotency key while the form stays the same: a retry after a lost answer makes no second item */
+  const sendKey = useRef<{ form: string; id: string } | null>(null)
+  const clientId = () => {
+    const form = JSON.stringify([g.trim(), bot, proj, mode])
+    if (sendKey.current?.form !== form) sendKey.current = { form, id: newClientId() }
+    return sendKey.current.id
+  }
   return (
     <Modal open title={t("views:newItem.title")} desc={t("views:newItem.desc")}
       footer={<><Button variant="outline" onClick={closeSheet}>{t("common:action.cancel")}</Button><Button data-testid="new-go" disabled={!g.trim() || busy} onClick={async () => {
-        setBusy(true); const id = await newItem(g.trim(), bot === "auto" ? undefined : bot, proj === "auto" ? undefined : proj === "none" ? null : proj, mode)
+        setBusy(true); const id = await newItem(g.trim(), bot === "auto" ? undefined : bot, proj === "auto" ? undefined : proj === "none" ? null : proj, mode, clientId())
         setBusy(false); if (id) { closeSheet(); go("#/items/" + id) } }}>{busy && <Spinner className="size-3.5" />}{t("views:newItem.create")}</Button></>}>
       <FieldGroup className="gap-4">
         <Field><FieldLabel htmlFor="new-goal">{t("views:newItem.goal")}</FieldLabel><Textarea id="new-goal" autoFocus className="min-h-24 rounded-lg" placeholder={t("views:newItem.goalPlaceholder")} value={g} onChange={(e) => setG(e.target.value)} /></Field>

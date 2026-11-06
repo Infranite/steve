@@ -54,10 +54,12 @@ authRoutes.get("/callback", async (c) => {
     const cl = t.claims()!
     const id = login(String(cl.sub), String(cl.name ?? cl.preferred_username ?? cl.email ?? "我"), cl.email ? String(cl.email) : null)
     if (!id) return c.text("这个账号还没有被邀请使用 Steve", 403)
-    startSession(c, id); return c.redirect(l.back.startsWith("/") ? l.back : "/")
+    startSession(c, id); return c.redirect(isLocalPath(l.back) ? l.back : "/")
   } catch (e) { console.error("oidc callback", (e as Error).message); return c.text("登录失败", 400) }
 })
 authRoutes.post("/logout", (c) => { const t = getCookie(c, SESSION); if (t) authSessions.drop(t); deleteCookie(c, SESSION, { path: "/" }); return c.json({ ok: true }) })
+/** one leading "/", not "//" or "/\\" (both mean another host), no control characters */
+export const isLocalPath = (b: string) => /^\/(?![/\\])/.test(b) && !/[\u0000-\u001f\u007f-\u009f]/.test(b)
 /* development: loopback-only one-click login, disabled unless STEVE_DEV_LOGIN=1 */
 authRoutes.get("/dev", (c) => {
   const ip = (c.env as any)?.incoming?.socket?.remoteAddress ?? ""

@@ -344,6 +344,7 @@ pub async fn thread_say(
     let mentions = k.raw("mentions").cloned();
     let item = k.opt_str("item", Str::len(1, 40));
     let reply_to = k.opt_str("reply_to", Str::len(1, 80));
+    let client_id = k.opt_str("client_id", Str::len(1, 80));
     k.finish()?;
     // `@` mentions (contacts P3): checked like the module does before anything happens
     let mut checked = Vec::new();
@@ -358,17 +359,27 @@ pub async fn thread_say(
         }
         checked = ms;
     }
-    // V4 paste guard: a password or token is replaced before the message is stored or routed; the
-    // rest of it goes on as usual, with Steve's note on where to keep the secret
-    let guarded = steve_vault::guard::intercept(&text);
-    let refs = super::files::refs(&st, &c.ws, files).await?;
-    st.domain
-        .say_to(&c.ws, &c.me, &guarded.text, refs, checked, item, reply_to)
+    // a retry of the same draft (`client_id`) answers like the first send and sends nothing; the
+    // send runs on even if this request goes away, so it needs its own state
+    let (st2, c2) = (st.clone(), c.clone());
+    let v = st
+        .dedupe
+        .once(&c.ws, &c.me, "thread", client_id, move || async move {
+            let (st, c) = (st2, c2);
+            // V4 paste guard: a password or token is replaced before the message is stored or
+            // routed; the rest of it goes on as usual, with Steve's note on where to keep the secret
+            let guarded = steve_vault::guard::intercept(&text);
+            let refs = super::files::refs(&st, &c.ws, files).await?;
+            st.domain
+                .say_to(&c.ws, &c.me, &guarded.text, refs, checked, item, reply_to)
+                .await?;
+            if guarded.blocked {
+                st.domain.say_guard_note(&c.ws).await?;
+            }
+            Ok::<_, ApiError>(json!({ "ok": true }))
+        })
         .await?;
-    if guarded.blocked {
-        st.domain.say_guard_note(&c.ws).await?;
-    }
-    ok_true()
+    ok(v)
 }
 
 pub async fn thread_stop(State(st): State<AppState>, Extension(c): Extension<Ctx>) -> ApiResult {
