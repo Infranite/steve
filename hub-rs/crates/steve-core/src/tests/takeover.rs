@@ -833,7 +833,13 @@ fn another_project_is_not_checked_against_this_instance() {
     assert!(line.contains("check it there"), "{line}");
     merge_and_tag(&x, Some("v1.0.0"));
     k.core.tx().st.probed.clear();
-    // the remote is looked at in the background; a tick after it answered closes the item
+    // the remote is looked at in the background; once the release is seen there and the agent's
+    // turn has ended, a tick closes the item
+    assert!(k.wait(|| {
+        let _ = k.core.lifecycle_tick();
+        !op_states(&k, &x.item).is_empty() && op_states(&k, &x.item)[0].1 == "succeeded"
+    }));
+    k.rt.end_turn(&k.core, &x.session, "end_turn", None);
     assert!(
         k.wait(|| {
             let _ = k.core.lifecycle_tick();
