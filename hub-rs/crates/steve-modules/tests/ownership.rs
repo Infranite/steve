@@ -10,7 +10,7 @@ use steve_modules::changes as records;
 use steve_modules::contacts::mcp::{self, McpCx};
 use steve_modules::contacts::{self, changes, merge};
 use steve_modules::testkit::{ME, TestEnv, WS, call, caller};
-use steve_modules::{Caller, Registry, decisions};
+use steve_modules::{Caller, Registry};
 use steve_store::base::Viewer;
 
 fn env() -> TestEnv {
@@ -388,36 +388,33 @@ async fn bots_seen_in_chat_cards_tools_and_chat_proposals() {
         card(&t)
     );
 
-    // chat: “这是张三的机器人” → a proposal and its card
+    // chat: “这是张三的机器人” → recorded at once (no card), one changeset to undo
     let out = tool(
         &t,
         "steve_steward_propose",
         json!({ "object": "告警小助手", "person": "张三", "basis": "群里说这是张三的机器人" }),
     )
     .expect("propose");
-    assert_eq!(out, "Saved as a proposal; the user will confirm it.");
-    assert!(rows(&t).contains(&format!("party {bot} {zhang} owner chat proposed")));
+    assert_eq!(out, contacts::ownership_mcp::RECORDED);
+    assert!(rows(&t).contains(&format!("party {bot} {zhang} owner chat confirmed")));
+    let open: i64 = t
+        .store()
+        .with_conn(|c| {
+            Ok(c.query_row(
+                "SELECT count(*) FROM decisions WHERE subject_type = 'steward' AND status = 'open'",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .expect("decisions");
+    assert_eq!(open, 0, "no confirm card");
     let again = tool(
         &t,
         "steve_steward_propose",
         json!({ "object": bot, "person": zhang }),
     )
     .expect("again");
-    assert!(again.starts_with("Already proposed"), "{again}");
-    let d: String = t
-        .store()
-        .with_conn(|c| {
-            Ok(c.query_row(
-                "SELECT id FROM decisions WHERE subject_type = 'steward' AND status = 'open'",
-                [],
-                |r| r.get(0),
-            )?)
-        })
-        .expect("decision");
-    decisions::dispatch(&t.modules, &me(), &d, "yes", "")
-        .expect("ours")
-        .expect("resolved");
-    assert!(rows(&t).contains(&format!("party {bot} {zhang} owner chat confirmed")));
+    assert!(again.starts_with("Already recorded"), "{again}");
     assert!(card(&t).contains("负责人 张三"), "{}", card(&t));
 
     // whois: account → bot party → 负责人
@@ -461,23 +458,21 @@ async fn bots_seen_in_chat_cards_tools_and_chat_proposals() {
         "{f}"
     );
 
-    // undoing the answer makes it a proposal again; “no” drops it, undo puts it back
-    decisions::undo(&t.modules, &d, ME, |d| {
-        d.status == "resolved" && !d.undo.is_null()
-    })
-    .expect("ours")
-    .expect("undone");
-    assert!(rows(&t).contains(&format!("party {bot} {zhang} owner chat proposed")));
-    decisions::dispatch(&t.modules, &me(), &d, "no", "")
+    // the user takes it back within 24 hours: the changeset undoes it
+    let cs: String = t
+        .store()
+        .with_conn(|c| {
+            Ok(c.query_row(
+                "SELECT id FROM changesets WHERE origin = 'steve' AND status = 'applied' ORDER BY created DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .expect("changeset");
+    records::undo(&t.modules, &me(), &cs)
         .expect("ours")
-        .expect("resolved");
+        .expect("undone");
     assert!(!rows(&t).iter().any(|x| x.contains(&bot)));
-    decisions::undo(&t.modules, &d, ME, |d| {
-        d.status == "resolved" && !d.undo.is_null()
-    })
-    .expect("ours")
-    .expect("undone");
-    assert!(rows(&t).contains(&format!("party {bot} {zhang} owner chat proposed")));
 
     // bad arguments
     let e = tool(
