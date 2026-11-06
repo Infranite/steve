@@ -428,6 +428,8 @@ function itemOf(i: RItem): Item {
 }
 /** every message of the conversation this page has seen, older ones included (thread/history.ts loads those) */
 export const knownMsgs = new Map<string, Msg>()
+/* A rerun keeps the question's origin: replies already on screen cannot finish its new draft. */
+let priorDraftReplies = new Set<string>(), nextDraft = true
 export function msgOf(m: State["thread"][number]): Msg {
   const x = m.meta ?? {}
   /* one drafted change (`proposal`) or several (`proposals`); `cfg_state` is what became of each */
@@ -475,7 +477,7 @@ function build() {
   /* after a reload, whether Steve is still on a turn (afterwards the steve.thinking events say so) */
   if (!st.ready && s.thinking) st.thinking = true
   if (st.draft) {
-    const at = s.thread.findIndex((m) => m.id === st.draft!.mid), reply = at < 0 ? undefined : s.thread.slice(at + 1).find((m) => m.author === "steve")
+    const reply = s.thread.findLast((m) => m.author === "steve" && m.meta?.origin === st.draft!.mid && !priorDraftReplies.has(m.id))
     if (reply) { st.drafted = reply.id; st.draft = null }
   }
   /* a research run's answer is stored: its live line goes, and the thinking line with it */
@@ -503,9 +505,10 @@ let inflight: Promise<void> | null = null, again = false
 export function refresh(): Promise<void> {
   if (inflight) { again = true; return inflight.then(() => inflight ?? undefined) } // resolve after the follow-up, so callers see state newer than their action
   inflight = (async () => {
-    /* asked after Steve stopped, the state has the reply (stored before steve.thinking went off): the draft has served */
-    const settled = !st.thinking, epoch = scopeEpoch
-    try { const state = await api.state(); if (epoch !== scopeEpoch) return; raw.state = state; watermark = cursorOf(state) ?? watermark; setPageWorkspace(state.workspace?.id ?? ""); st.login = null; st.error = ""; build(); if (settled && st.draft) { st.draft = null; build() } emit() }
+    /* A stopped turn can leave no reply after a restart. Only retire the same untouched draft;
+     * another turn or a chunk received during this request is newer than this state snapshot. */
+    const settled = !st.thinking ? st.draft : null, epoch = scopeEpoch
+    try { const state = await api.state(); if (epoch !== scopeEpoch) return; raw.state = state; watermark = cursorOf(state) ?? watermark; setPageWorkspace(state.workspace?.id ?? ""); st.login = null; st.error = ""; build(); if (settled && st.draft === settled && !st.thinking && !state.thinking) { st.draft = null; build() } emit() }
     catch (e) { if (epoch !== scopeEpoch) return; if (e instanceof Unauthenticated) st.login = e.login ?? "/auth/login"; else st.error = (e as Error).message; emit() }
     finally { inflight = null; if (again) { again = false; void refresh() } }
   })()
@@ -639,7 +642,13 @@ function onHub(e: HubEvent | ModuleEvent) {
   e = e as HubEvent
   if (e.type === "workspace") { void resync(); return }
   if (e.type === "release.hold") { st.hold = e.hold; emit(); return }
-  if (e.type === "steve.draft") { st.draft = { mid: e.mid, thought: e.thought, text: e.text }; if (!st.thread.some((m) => m.k === "thinking")) st.thread.push({ k: "thinking" }); drawDraft(); return }
+  if (e.type === "steve.draft") {
+    if (nextDraft || st.draft?.mid !== e.mid) priorDraftReplies = new Set([...st.thread, ...knownMsgs.values()].filter((m) => m.k === "steve" && m.origin === e.mid && m.id).map((m) => m.id!))
+    nextDraft = false
+    st.draft = { mid: e.mid, thought: e.thought, text: e.text }
+    if (!st.thread.some((m) => m.k === "thinking")) st.thread.push({ k: "thinking" })
+    drawDraft(); return
+  }
   if (e.type === "steve.tool") {
     if (st.live?.run !== e.run) st.live = { mid: e.mid, run: e.run, t0: Date.now(), tools: [] }
     st.live.tools.push({ name: e.name, brief: e.brief, ok: e.ok })
@@ -647,7 +656,7 @@ function onHub(e: HubEvent | ModuleEvent) {
     drawDraft(); return
   }
   if (e.type === "thread.run") { soon(); return }
-  if (e.type === "steve.thinking") { st.thinking = e.on; st.phase = e.on ? e.phase ?? "" : ""; cue(e.on ? "think" : "reply"); build(); emit(); if (!e.on) soon(); return }
+  if (e.type === "steve.thinking") { if (e.on && !st.thinking) nextDraft = true; st.thinking = e.on; st.phase = e.on ? e.phase ?? "" : ""; cue(e.on ? "think" : "reply"); build(); emit(); if (!e.on) soon(); return }
   if (e.type === "event") {
     const xs = raw.events.get(e.session_id)
     if (["turn_end", "user", "permission", "system"].includes(e.kind)) soon()

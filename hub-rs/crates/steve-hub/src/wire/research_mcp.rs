@@ -318,6 +318,77 @@ fn text_result(id: &Value, out: Result<String, String>) -> Response {
     }
 }
 
+/// The same read-only allowlist for HTTP MCP and authenticated Node research jobs.
+/// Callers establish the live run identity; audience checks are repeated inside every tool.
+pub async fn call(
+    x: &Extra,
+    run: &ThreadRun,
+    name: &str,
+    args: &Value,
+    owner: &str,
+) -> Result<String, String> {
+    let ws = run.workspace_id.clone();
+    match name {
+        steve_knowledge::tools::SEARCH | steve_knowledge::tools::READ => {
+            // A user's view only when only the owner reads the answer.
+            let (store, origin) = (x.store.clone(), run.message_id.clone());
+            let own = tokio::task::spawn_blocking(move || own_reader(&store, &origin))
+                .await
+                .map_err(|e| e.to_string())??;
+            let user = if own {
+                run.user_id.clone().unwrap_or_else(|| owner.into())
+            } else {
+                String::new()
+            };
+            let cx = steve_modules::contacts::mcp::McpCx {
+                ws,
+                user,
+                bot_id: "steve".into(),
+                item_id: None,
+                session_id: None,
+            };
+            steve_knowledge::tools::call(&x.modules, &x.kb, &cx, name, args).await
+        }
+        ITEMS_SEARCH => {
+            let (store, q) = (
+                x.store.clone(),
+                args["query"].as_str().unwrap_or("").to_string(),
+            );
+            let origin = run.message_id.clone();
+            tokio::task::spawn_blocking(move || {
+                items_search(&store, &ws, &ItemScope::of(&store, &origin)?, &q)
+            })
+            .await
+            .unwrap_or_else(|e| Err(e.to_string()))
+        }
+        ITEM_READ => {
+            let (store, i) = (
+                x.store.clone(),
+                args["id"].as_str().unwrap_or("").to_string(),
+            );
+            let origin = run.message_id.clone();
+            tokio::task::spawn_blocking(move || {
+                item_read(&store, &ws, &ItemScope::of(&store, &origin)?, &i)
+            })
+            .await
+            .unwrap_or_else(|e| Err(e.to_string()))
+        }
+        SESSIONS_LIST => {
+            let (store, all) = (x.store.clone(), args["all"].as_bool().unwrap_or(false));
+            let origin = run.message_id.clone();
+            tokio::task::spawn_blocking(move || {
+                if !own_reader(&store, &origin)? {
+                    return Err(REFUSED.to_string());
+                }
+                sessions_list(&store, &ws, all)
+            })
+            .await
+            .unwrap_or_else(|e| Err(e.to_string()))
+        }
+        _ => Err(REFUSED.into()),
+    }
+}
+
 /// One JSON-RPC message from a research run.
 pub async fn handle(x: &Extra, run: ThreadRun, msg: Value, owner: String) -> Response {
     let id = msg.get("id").cloned().unwrap_or(Value::Null);
@@ -346,62 +417,7 @@ pub async fn handle(x: &Extra, run: ThreadRun, msg: Value, owner: String) -> Res
                 .pointer("/params/arguments")
                 .cloned()
                 .unwrap_or_else(|| json!({}));
-            let ws = run.workspace_id.clone();
-            let out = match name.as_str() {
-                steve_knowledge::tools::SEARCH | steve_knowledge::tools::READ => {
-                    // a user's view only when only the owner reads the answer; with anyone else
-                    // listening, what the whole workspace may see (no one's private knowledge)
-                    let (store, origin) = (x.store.clone(), run.message_id.clone());
-                    let own = tokio::task::spawn_blocking(move || own_reader(&store, &origin))
-                        .await
-                        .unwrap_or_else(|e| Err(e.to_string()));
-                    let user = match own {
-                        Ok(true) => run.user_id.clone().unwrap_or(owner),
-                        Ok(false) => String::new(),
-                        Err(e) => return text_result(&id, Err(e)),
-                    };
-                    let cx = steve_modules::contacts::mcp::McpCx {
-                        ws,
-                        user,
-                        bot_id: "steve".into(),
-                        item_id: None,
-                        session_id: None,
-                    };
-                    steve_knowledge::tools::call(&x.modules, &x.kb, &cx, &name, &args).await
-                }
-                ITEMS_SEARCH => {
-                    let (store, q) = (x.store.clone(), args["query"].as_str().unwrap_or("").to_string());
-                    let origin = run.message_id.clone();
-                    tokio::task::spawn_blocking(move || {
-                        items_search(&store, &ws, &ItemScope::of(&store, &origin)?, &q)
-                    })
-                        .await
-                        .unwrap_or_else(|e| Err(e.to_string()))
-                }
-                ITEM_READ => {
-                    let (store, i) = (x.store.clone(), args["id"].as_str().unwrap_or("").to_string());
-                    let origin = run.message_id.clone();
-                    tokio::task::spawn_blocking(move || {
-                        item_read(&store, &ws, &ItemScope::of(&store, &origin)?, &i)
-                    })
-                        .await
-                        .unwrap_or_else(|e| Err(e.to_string()))
-                }
-                SESSIONS_LIST => {
-                    let (store, all) = (x.store.clone(), args["all"].as_bool().unwrap_or(false));
-                    let origin = run.message_id.clone();
-                    tokio::task::spawn_blocking(move || {
-                        // your agents' sessions are yours: not for a run answering someone else
-                        if !own_reader(&store, &origin)? {
-                            return Err(REFUSED.to_string());
-                        }
-                        sessions_list(&store, &ws, all)
-                    })
-                    .await
-                    .unwrap_or_else(|e| Err(e.to_string()))
-                }
-                _ => Err(REFUSED.into()),
-            };
+            let out = call(x, &run, &name, &args, &owner).await;
             text_result(&id, out)
         }
         _ => (

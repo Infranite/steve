@@ -41,6 +41,8 @@ mod heads;
 mod ledger;
 #[path = "node_jobs.rs"]
 mod node_jobs;
+#[path = "node_research.rs"]
+mod node_research;
 mod perm;
 mod recover;
 mod workspace;
@@ -53,6 +55,7 @@ pub use ledger::LedgerEntry;
 #[cfg(test)]
 pub(crate) use ledger::PUSH_DEADLINE;
 pub use node_jobs::NodePrint;
+pub use node_research::NodeResearch;
 pub use workspace::WorkspaceFact;
 
 /// Retries of a turn after a passing failure (gateway 5xx) with no tool run, and their waits.

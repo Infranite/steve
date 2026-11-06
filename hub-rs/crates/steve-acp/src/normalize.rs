@@ -188,6 +188,56 @@ impl Normalizer {
         self.close()
     }
 
+    /// Final token accounting from `session/prompt`, distinct from usage_update's context meter.
+    pub fn prompt_response(&mut self, response: &Value) -> Vec<Fact> {
+        let tokens = |u: &Value| Tokens {
+            input: u.get("inputTokens").and_then(Value::as_u64),
+            output: u.get("outputTokens").and_then(Value::as_u64),
+            cache_read: u
+                .get("cachedReadTokens")
+                .or_else(|| u.get("cachedInputTokens"))
+                .and_then(Value::as_u64),
+            cache_write: u.get("cachedWriteTokens").and_then(Value::as_u64),
+            reasoning: u.get("reasoningTokens").and_then(Value::as_u64),
+        };
+        let mut rows = vec![];
+        if let Some(u) = response.get("usage").filter(|u| u.is_object()) {
+            rows.push((None, UsageScope::Main, tokens(u)));
+        }
+        if let Some(models) = response
+            .pointer("/_meta/quota/model_usage")
+            .and_then(Value::as_array)
+        {
+            for model in models {
+                if let Some(count) = model.get("token_count") {
+                    rows.push((
+                        model.get("model").and_then(Value::as_str).map(String::from),
+                        UsageScope::All,
+                        tokens(count),
+                    ));
+                }
+            }
+        }
+        rows.into_iter()
+            .map(|(model, scope, tokens)| {
+                self.reports += 1;
+                Fact::Event(EventBody::Usage {
+                    report: UsageReport {
+                        report_id: format!("{}.u{}", self.prefix, self.reports),
+                        model,
+                        meter_epoch: self.meter.clone(),
+                        scope,
+                        measurement: Measurement::Final,
+                        tokens,
+                        context_used: None,
+                        context_limit: None,
+                        cost: None,
+                    },
+                })
+            })
+            .collect()
+    }
+
     fn close(&mut self) -> Vec<Fact> {
         match self.open.take() {
             Some(o) => vec![Fact::Event(EventBody::MessageCompleted {

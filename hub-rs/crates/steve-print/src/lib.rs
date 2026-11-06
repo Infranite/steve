@@ -126,6 +126,8 @@ pub struct Reply {
 /// Why a run gave no answer.
 #[derive(Debug)]
 pub enum PrintError {
+    /// The accepted run's output/ingress budget was exhausted.
+    OutputLimit,
     /// Still running after the timeout; the process is killed.
     Timeout(Duration),
     /// Exited unsuccessfully without a result; its stderr, trimmed.

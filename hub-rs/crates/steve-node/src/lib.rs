@@ -11,6 +11,7 @@
 //! happens to it ([`ExecutionControl::abandon`]), and nothing is freed before its processes are
 //! confirmed gone ([`procs`]).
 
+mod acp_job;
 mod actor;
 mod exec;
 pub mod git;
@@ -1932,7 +1933,9 @@ impl JobExecutor for LocalNode {
         if let JobWork::Research(_) = &c.body.work {
             return self.start_research(c).await;
         }
-        if self.0.cfg.capacity.jobs == 0 || self.0.cfg.jobs.names().is_empty() {
+        if self.0.cfg.capacity.jobs == 0
+            || (self.0.cfg.jobs.names().is_empty() && self.0.cfg.acp.adapters.is_empty())
+        {
             return Err(ApiError::new(
                 ErrorCode::Unsupported,
                 "this node runs no jobs",
@@ -1945,7 +1948,9 @@ impl JobExecutor for LocalNode {
         let (r, fresh) = self.accept("start_job", &c, |t| {
             let j = &c.body;
             j.check()?;
-            if self.0.cfg.jobs.executable(&j.run.choice.harness).is_none() {
+            if !self.0.cfg.acp.adapters.contains_key(&j.run.choice.harness)
+                && self.0.cfg.jobs.executable(&j.run.choice.harness).is_none()
+            {
                 return Err(ApiError::new(
                     ErrorCode::Unsupported,
                     format!("no harness {} runs jobs on this node", j.run.choice.harness),
@@ -3214,7 +3219,7 @@ impl Discovery for LocalNode {
                     name: h.clone(),
                     version: p.version,
                     sessions: true,
-                    jobs: false,
+                    jobs: self.0.cfg.capacity.jobs > 0,
                     models: p.models,
                     resume: true,
                     cancel: true,
@@ -3224,7 +3229,7 @@ impl Discovery for LocalNode {
                 }
             })
             .collect();
-        // think jobs, for the harnesses with a print-mode CLI here
+        // Legacy CLI-only hosts may also run think jobs.
         if self.0.cfg.capacity.jobs > 0 {
             for name in self.0.cfg.jobs.names() {
                 match harnesses.iter_mut().find(|h| h.name == name) {

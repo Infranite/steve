@@ -1,4 +1,4 @@
-//! Steve's think calls as jobs on the local Node (N0d-7, `STEVE_NODE_JOBS=think`).
+//! Steve's think calls as streaming ACP jobs on the local Node.
 //!
 //! The Hub keeps everything that is policy: core's [`steve_core::Fallback`] chooses the models
 //! (设置 · 模型), tries them in turn, counts attempts and failures and books the statistics rows.
@@ -31,8 +31,101 @@ use super::*;
 pub(super) enum News {
     /// The whole text of the model's current message, each time it grew.
     Text(String),
+    Tool(ToolView),
     Usage(UsageReport),
     End(Completion),
+}
+
+/// Convert one attempt's meter reports into accounting rows. A cumulative snapshot replaces
+/// earlier figures, and a final figure replaces deltas field by field (missing is unknown,
+/// not zero). Report ids remain the replay boundary.
+pub(super) fn normalized_usage(
+    reports: impl IntoIterator<Item = UsageReport>,
+    fallback_model: &str,
+) -> Vec<UsageReport> {
+    fn add(a: Option<u64>, b: Option<u64>) -> Option<u64> {
+        match (a, b) {
+            (Some(a), Some(b)) => Some(a.saturating_add(b)),
+            (a, b) => a.or(b),
+        }
+    }
+    let mut seen = HashSet::new();
+    let mut totals: Vec<UsageReport> = vec![];
+    for mut report in reports {
+        if !seen.insert(report.report_id.clone()) {
+            continue;
+        }
+        if report.model.as_deref().is_none_or(str::is_empty) {
+            report.model = Some(fallback_model.to_string());
+        }
+        let Some(total) = totals.iter_mut().find(|t| {
+            t.meter_epoch == report.meter_epoch
+                && t.model == report.model
+                && t.scope == report.scope
+        }) else {
+            totals.push(report);
+            continue;
+        };
+        if total.measurement == Measurement::Final && report.measurement != Measurement::Final {
+            continue;
+        }
+        let delta = report.measurement == Measurement::Delta;
+        let merge = |a, b| if delta { add(a, b) } else { b.or(a) };
+        total.tokens = Tokens {
+            input: merge(total.tokens.input, report.tokens.input),
+            output: merge(total.tokens.output, report.tokens.output),
+            cache_read: merge(total.tokens.cache_read, report.tokens.cache_read),
+            cache_write: merge(total.tokens.cache_write, report.tokens.cache_write),
+            reasoning: merge(total.tokens.reasoning, report.tokens.reasoning),
+        };
+        if let Some(cost) = report.cost {
+            total.cost = Some(if delta {
+                match total
+                    .cost
+                    .as_ref()
+                    .filter(|old| old.currency == cost.currency)
+                {
+                    Some(old) => Money {
+                        decimal: (steve_print::cost_f64(old).unwrap_or(0.0)
+                            + steve_print::cost_f64(&cost).unwrap_or(0.0))
+                        .to_string(),
+                        currency: cost.currency,
+                    },
+                    None => cost,
+                }
+            } else {
+                cost
+            });
+        }
+        total.context_used = report.context_used.or(total.context_used);
+        total.context_limit = report.context_limit.or(total.context_limit);
+        total.measurement = report.measurement;
+        total.report_id = report.report_id;
+    }
+    // `all` already includes the main loop. Keep a main-only dollar figure if no all figure
+    // reported dollars, but never count the main tokens twice.
+    let all_epochs: HashSet<_> = totals
+        .iter()
+        .filter(|r| r.scope == UsageScope::All)
+        .map(|r| r.meter_epoch.clone())
+        .collect();
+    let priced_epochs: HashSet<_> = totals
+        .iter()
+        .filter(|r| r.scope == UsageScope::All && r.cost.is_some())
+        .map(|r| r.meter_epoch.clone())
+        .collect();
+    totals.retain_mut(|r| {
+        if r.scope == UsageScope::Main && all_epochs.contains(&r.meter_epoch) {
+            r.tokens = Tokens::default();
+            if priced_epochs.contains(&r.meter_epoch) {
+                r.cost = None;
+            }
+            r.cost.is_some()
+        } else {
+            true
+        }
+    });
+    totals
 }
 
 /// The callers waiting on their job attempts in this process, by attempt.
@@ -47,7 +140,7 @@ struct Waiter {
 }
 
 impl Waiters {
-    fn add(&self, attempt: &str) -> mpsc::UnboundedReceiver<News> {
+    pub(super) fn add(&self, attempt: &str) -> mpsc::UnboundedReceiver<News> {
         let (tx, rx) = mpsc::unbounded_channel();
         self.0.lock().unwrap().insert(
             attempt.to_string(),
@@ -64,7 +157,7 @@ impl Waiters {
         self.0.lock().unwrap().remove(attempt);
     }
 
-    fn has(&self, attempt: &str) -> bool {
+    pub(super) fn has(&self, attempt: &str) -> bool {
         self.0.lock().unwrap().contains_key(attempt)
     }
 
@@ -207,7 +300,10 @@ impl NodeRuntime {
                 policy: ExecutionPolicy {
                     revision: idv("think")?,
                     permissions: PermissionMode::Ask,
-                    sandbox: SandboxRequirement::None,
+                    sandbox: SandboxRequirement::AllowFallback {
+                        preferred: vec!["fs-readonly".into()],
+                        acceptable: vec![],
+                    },
                     readable: vec![],
                     network: NetworkScope::Unrestricted,
                     tools: idv("hub")?,
@@ -314,6 +410,9 @@ impl NodeRuntime {
             EventBody::Usage { report } => self
                 .jobs
                 .tell(attempt, |_| Some(News::Usage(report.clone()))),
+            EventBody::ToolChanged { tool } => {
+                self.jobs.tell(attempt, |_| Some(News::Tool(tool.clone())))
+            }
             EventBody::AttemptEnded { completion } => self.job_ended_in(tx, attempt, completion)?,
             _ => {}
         }
@@ -678,10 +777,10 @@ pub struct NodePrint {
 }
 
 /// Stops its attempt unless disarmed, and forgets its waiter either way.
-struct Waiting {
-    runtime: Arc<NodeRuntime>,
-    attempt: String,
-    armed: bool,
+pub(super) struct Waiting {
+    pub(super) runtime: Arc<NodeRuntime>,
+    pub(super) attempt: String,
+    pub(super) armed: bool,
 }
 
 impl Drop for Waiting {
@@ -704,6 +803,15 @@ impl Drop for Waiting {
 /// caller sees the very error the in-process run gives.
 fn print_error(c: &Completion, timeout: Duration) -> steve_print::PrintError {
     use steve_print::PrintError as P;
+    if c.error
+        .as_ref()
+        .is_some_and(|e| e.code == ErrorCode::Exhausted)
+        && c.error
+            .as_ref()
+            .is_some_and(|e| e.safe_detail == "the output limit was reached")
+    {
+        return P::OutputLimit;
+    }
     let detail = c
         .error
         .as_ref()
@@ -772,7 +880,6 @@ impl OneModel for NodePrint {
             Err(e) => return fail(format!("Node 没能接下这次判断：{e}")),
         }
         let mut usage: Vec<UsageReport> = vec![];
-        let mut ids = HashSet::new();
         let mut shown: Option<String> = None;
         // the Hub's own timer, as the in-process run's: the Node's deadline is the same moment
         let timer = tokio::time::sleep(call.timeout);
@@ -789,10 +896,9 @@ impl OneModel for NodePrint {
                         }
                     }
                     Some(News::Usage(r)) => {
-                        if ids.insert(r.report_id.clone()) {
-                            usage.push(r);
-                        }
+                        usage.push(r);
                     }
+                    Some(News::Tool(_)) => {}
                     Some(News::End(c)) => break c,
                     None => return fail("Node 没有回报这次判断的结果".into()),
                 },
@@ -801,7 +907,7 @@ impl OneModel for NodePrint {
                     return Tried::of(
                         steve_print::Ran {
                             reply: Err(steve_print::PrintError::Timeout(call.timeout)),
-                            usage: vec![],
+                            usage: normalized_usage(usage, model),
                         },
                         call.codex,
                     );
@@ -810,6 +916,7 @@ impl OneModel for NodePrint {
         };
         waiting.armed = false;
         drop(waiting);
+        let usage = normalized_usage(usage, model);
         let reply = if end.outcome == Outcome::Succeeded {
             let text = end
                 .result
@@ -834,5 +941,96 @@ impl OneModel for NodePrint {
             Err(print_error(&end, call.timeout))
         };
         Tried::of(steve_print::Ran { reply, usage }, call.codex)
+    }
+}
+
+#[cfg(test)]
+mod usage_tests {
+    use super::*;
+
+    fn report(
+        id: &str,
+        measurement: Measurement,
+        output: Option<u64>,
+        cost: Option<&str>,
+    ) -> UsageReport {
+        UsageReport {
+            report_id: id.into(),
+            model: None,
+            meter_epoch: Epoch::new("meter").unwrap(),
+            scope: UsageScope::Main,
+            measurement,
+            tokens: Tokens {
+                output,
+                ..Default::default()
+            },
+            context_used: None,
+            context_limit: None,
+            cost: cost.map(|decimal| Money {
+                decimal: decimal.into(),
+                currency: "USD".into(),
+            }),
+        }
+    }
+
+    #[test]
+    fn cumulative_cost_is_replaced_and_final_tokens_keep_that_cost() {
+        let end = report("end", Measurement::Final, Some(20), None);
+        let rows = normalized_usage(
+            [
+                report("one", Measurement::Cumulative, None, Some("0.1")),
+                report("two", Measurement::Cumulative, None, Some("0.2")),
+                end.clone(),
+                end,
+                report("stale", Measurement::Cumulative, Some(2), Some("0.1")),
+            ],
+            "model",
+        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].model.as_deref(), Some("model"));
+        assert_eq!(rows[0].tokens.output, Some(20));
+        assert_eq!(rows[0].cost.as_ref().unwrap().decimal, "0.2");
+    }
+
+    #[test]
+    fn deltas_add_but_final_usage_replaces_them_and_other_epochs_remain() {
+        let mut restart = report("restart", Measurement::Final, Some(3), Some("0.03"));
+        restart.meter_epoch = Epoch::new("next").unwrap();
+        let rows = normalized_usage(
+            [
+                report("d1", Measurement::Delta, Some(4), Some("0.1")),
+                report("d2", Measurement::Delta, Some(6), Some("0.2")),
+                report("f", Measurement::Final, Some(12), Some("0.25")),
+                restart,
+            ],
+            "model",
+        );
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].tokens.output, Some(12));
+        assert_eq!(rows[0].cost.as_ref().unwrap().decimal, "0.25");
+        assert_eq!(rows[1].tokens.output, Some(3));
+        let deltas = normalized_usage(
+            [
+                report("d1", Measurement::Delta, Some(4), None),
+                report("d2", Measurement::Delta, Some(6), None),
+            ],
+            "model",
+        );
+        assert_eq!(deltas[0].tokens.output, Some(10));
+    }
+
+    #[test]
+    fn all_scope_does_not_double_the_main_loop() {
+        let mut all = report("all", Measurement::Final, Some(25), None);
+        all.scope = UsageScope::All;
+        let rows = normalized_usage(
+            [
+                report("main", Measurement::Final, Some(20), Some("0.2")),
+                all,
+            ],
+            "model",
+        );
+        assert_eq!(rows.iter().filter_map(|r| r.tokens.output).sum::<u64>(), 25);
+        assert_eq!(rows.iter().filter_map(|r| r.cost.as_ref()).count(), 1);
     }
 }

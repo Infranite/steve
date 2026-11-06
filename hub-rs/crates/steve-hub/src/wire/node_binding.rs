@@ -721,6 +721,7 @@ mod host_tests {
             runtime: rt,
             tools,
             node,
+            ..
         } = super::super::node_runtime(
             &cfg,
             &store,
@@ -807,6 +808,7 @@ mod host_tests {
             runtime: rt,
             tools,
             node,
+            ..
         } = super::super::node_runtime(
             &cfg,
             &store,
