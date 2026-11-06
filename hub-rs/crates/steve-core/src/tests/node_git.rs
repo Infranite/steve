@@ -617,3 +617,60 @@ fn nothing_to_release_on_another_devices_node_asks_for_no_release() {
         "{kinds:?}"
     );
 }
+
+/* ── what the goal asks to be shown (ST-57), for an item whose git is on a Node ── */
+
+#[test]
+fn a_goal_on_a_node_waits_for_its_build_and_for_this_instance_like_any_other() {
+    use super::takeover::{blockers, merge_and_tag, op_states, remote_for};
+    let k = Kit::with(|c| {
+        c.steve_repo = c.home.join("repo");
+        c.version = "0.0.1".into();
+    });
+    let port = OnNode::new(&k);
+    let x = remote_for(
+        &k,
+        crate::upstream::DONE_TAG,
+        false,
+        Some("确认构建通过，并在本机生效"),
+    );
+    port.put(&x.item);
+    k.core.resolve(&x.decision, "pass", "", "me").unwrap();
+    merge_and_tag(&x, Some("v1.5.0"));
+    // the remote is looked at through the Node; the tag's build and this instance are still open
+    k.core.tx().st.probed.clear();
+    assert!(
+        k.wait(|| {
+            let _ = k.core.lifecycle_tick();
+            op_states(&k, &x.item).len() == 2
+        }),
+        "{:?} {:?} {:?}",
+        k.status(&x.item),
+        op_states(&k, &x.item),
+        k.timeline_texts(&x.item)
+    );
+    k.rt.end_turn(&k.core, &x.session, "end_turn", None);
+    assert!(k.wait(|| {
+        let _ = k.core.lifecycle_tick();
+        blockers(&k, &x.item).len() == 2
+    }));
+    assert_eq!(k.phase(&x.item), "closing");
+    assert_eq!(
+        blockers(&k, &x.item),
+        [
+            "正在结束：等 Release 构建（v1.5.0）成功",
+            "正在结束：等本机运行包含 v1.5.0 的版本"
+        ]
+    );
+    let t = k.timeline_texts(&x.item);
+    assert!(
+        t.iter()
+            .any(|l| l.contains("开始跟踪 v1.5.0 的 Release 构建；事项目标要求构建通过")),
+        "{t:?}"
+    );
+    assert!(
+        t.iter()
+            .any(|l| l.starts_with("事项目标要求在本机生效：本机现在运行 0.0.1")),
+        "{t:?}"
+    );
+}

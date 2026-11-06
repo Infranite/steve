@@ -31,6 +31,7 @@ pub mod notify;
 mod occupancy;
 mod orchestrator;
 pub mod outbox_work;
+pub mod proof;
 pub mod release;
 pub mod repo;
 pub mod runtime;

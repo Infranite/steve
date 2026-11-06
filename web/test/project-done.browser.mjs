@@ -18,7 +18,7 @@ try {
     assert.match(await row.innerText(), /验收后在本机发布上线才结束/)
     await row.locator('[data-select="proj-done"]').click()
     await page.getByRole("option", { name: "PR 合并并推送 tag" }).click()
-    await page.waitForFunction(() => document.querySelector("[data-proj-done]")?.textContent?.includes("构建另行跟踪"))
+    await page.waitForFunction(() => document.querySelector("[data-proj-done]")?.textContent?.includes("等构建成功才结束"))
     const calls = await page.evaluate(() => window.__calls)
     assert.deepEqual(calls.at(-1), { id: "prj_1", body: { release: { kind: "script", cmd: "/Users/example/.steve/current/ops/release.sh", done_when: "tag" } } })
     assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "the row never widens the page")

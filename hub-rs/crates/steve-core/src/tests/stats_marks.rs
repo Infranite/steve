@@ -129,6 +129,7 @@ fn auto_delivery_is_marked_auto() {
     let ok = Check {
         name: "tests".into(),
         passed: true,
+        operated: false,
     };
     k.core.tool_deliver(&s, "ok", &[], &[ok], &[]).unwrap();
     assert_eq!(of_kind(&k, &x.id, "deliver"), [(Some("auto".into()), None)]);

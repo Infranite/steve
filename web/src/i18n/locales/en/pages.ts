@@ -408,7 +408,7 @@ export default {
     releaseWith: "After acceptance you can request a release: ",
     releaseNone: "No release action set; an item ends once accepted",
     doneWhen: "Done when",
-    doneRemote: "Wraps up after checking the remote; builds are tracked separately",
+    doneRemote: "Wraps up after checking the remote; an item whose goal asks for a passing build ends once the build passes",
     doneLocal: "Ends only after releasing on this machine following acceptance",
     optLocal: "Released on this machine",
     optMerge: "PR merged",

@@ -887,6 +887,7 @@ impl Tx<'_> {
             lines.push("- steve_request_approval: before anything with outside effects (deploy, release, push, send, pay, delete). After calling it, end your turn.".into());
             lines.push("- steve_deliver: when the goal is met, with a Chinese summary, the outputs (branch, commits, files) and the checks you actually ran. Tick off finished plan steps with steve_update first; list in `unfinished` the steps you deliberately left open. A delivery with other open steps is refused. Then end your turn.".into());
         }
+        let proof = self.proof_line(item)?;
         if p.as_ref().is_some_and(|p| p.release.is_some())
             && item.branch.as_deref().is_some_and(|b| !b.is_empty())
         {
@@ -905,15 +906,22 @@ impl Tx<'_> {
                 .filter(|r| *r == crate::upstream::DONE_MERGE || *r == crate::upstream::DONE_TAG)
             {
                 lines.push(format!(
-                    "- Done in this project means: {}. Once the user accepted your delivery, that is all that is left; a CI or Release build it starts is followed by Steve on its own — do not wait for it, end your turn. Steve checks the remote itself; never merge, tag or push again what already is there.",
+                    "- Done in this project means: {}. Once the user accepted your delivery, that is all that is left{}; a CI or Release build it starts is followed by Steve on its own — do not wait for it, end your turn. Steve checks the remote itself; never merge, tag or push again what already is there.",
                     if rule == crate::upstream::DONE_TAG {
                         "your commits are merged into the remote's default branch (the PR is merged) and a tag containing them is pushed"
                     } else {
                         "your commits are merged into the remote's default branch (the PR is merged)"
+                    },
+                    if proof.is_some() {
+                        " unless this item's goal asks for more (below)"
+                    } else {
+                        ""
                     }
                 ));
             }
         }
+        /* what the item's own goal asks to be shown before it closes (ST-57) */
+        lines.extend(proof);
         lines.push("Do the work yourself; do not stop to ask for confirmation you don't need. Reply to the user in Chinese.".into());
         lines.retain(|l| !l.is_empty());
         Ok(lines.join("\n"))
@@ -1424,6 +1432,10 @@ impl Tx<'_> {
                 open.join("; ")
             )));
         }
+        /* the goal asks for an actual operation: a delivery shows one (ST-57) */
+        if let Some(why) = self.proof_refused(&item, checks)? {
+            return Err(msg(why));
+        }
         /* a new delivery also replaces an older one still waiting for acceptance */
         supersede(
             self.db(),
@@ -1459,7 +1471,7 @@ impl Tx<'_> {
                 "\n\n检查：{}",
                 checks
                     .iter()
-                    .map(|c| format!("{} {}", if c.passed { "✓" } else { "✗" }, c.name))
+                    .map(crate::proof::check_line)
                     .collect::<Vec<_>>()
                     .join("；")
             )
@@ -1468,10 +1480,7 @@ impl Tx<'_> {
             .timeline_add(item_id, &Self::by(s), "sys", "交付，等你验收", Some(&s.id))?;
         /* the acceptance policy: automatic needs evidence (checks, all passed) and nothing left open;
          * without it a human decides. Waived records that nobody confirmed. */
-        let evidence: Vec<String> = checks
-            .iter()
-            .map(|c| format!("{} {}", if c.passed { "✓" } else { "✗" }, c.name))
-            .collect();
+        let evidence: Vec<String> = checks.iter().map(crate::proof::check_line).collect();
         let policy = match self.accept_of(&item)?.as_str() {
             "waived" => crate::cycle::Policy::Waived,
             "auto" if !checks.is_empty() && checks.iter().all(|c| c.passed) && left.is_empty() => {
@@ -3132,9 +3141,9 @@ impl Tx<'_> {
                     actor,
                     crate::cycle::Policy::Human,
                     true,
-                    "你标记了完成",
+                    crate::proof::MARKED,
                     None,
-                    vec!["你标记了完成".into()],
+                    vec![crate::proof::MARKED.into()],
                 )?;
                 return Ok(self.db().item(id)?.unwrap_or(i));
             }

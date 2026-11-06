@@ -400,7 +400,7 @@ export default {
     releaseWith: "验收通过后可以申请发布：",
     releaseNone: "没有配置发布动作；事项验收后就结束",
     doneWhen: "完成标准",
-    doneRemote: "核对远端后自动收尾，构建另行跟踪",
+    doneRemote: "核对远端后自动收尾；目标要求构建通过的事项，等构建成功才结束",
     doneLocal: "验收后在本机发布上线才结束",
     optLocal: "本机发布上线",
     optMerge: "PR 合并",

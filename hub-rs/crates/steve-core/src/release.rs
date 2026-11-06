@@ -24,7 +24,7 @@ use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 /// The Hub's own device (`projects.device_id`), the only one a release script runs for.
-const HUB_DEVICE: &str = "hub";
+pub(crate) const HUB_DEVICE: &str = "hub";
 
 /// The outcome of an approved release whose script is running.
 const RELEASING: &str = "releasing";
