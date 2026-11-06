@@ -701,7 +701,8 @@ async fn feishu_app_credential_and_user_oauth_with_single_use_refresh() {
         (400, Some("参数不对：fields.app_secret"))
     );
 
-    // the user's own token, with the app's id and secret as OAuth client
+    // the user's own token, with the app's id and secret as OAuth client; without a pair named, the
+    // only app connection there is gets picked
     let (s, v, _) = send(
         &h.api,
         Some(&me),
@@ -711,10 +712,18 @@ async fn feishu_app_credential_and_user_oauth_with_single_use_refresh() {
         None,
     )
     .await;
-    assert_eq!(
-        (s, v["error"].as_str()),
-        (400, Some("还没有配置 飞书 的 OAuth 应用"))
-    );
+    assert_eq!(s, 200, "{v}");
+    // a pair the provider does not take, and one that is not there
+    let (s, v, _) = send(
+        &h.api,
+        Some(&me),
+        "POST",
+        "/connections/oauth/start",
+        Some(json!({"adapter": "feishu_user", "config": {"app_connection": "con_nope"}})),
+        None,
+    )
+    .await;
+    assert_eq!(s, 404, "{v}");
     let loc = oauth_round_trip(
         &h,
         &me,

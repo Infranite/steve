@@ -30,10 +30,10 @@ use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
 use steve_flow::{ActorRef, Ingested, RawEvent};
 use steve_modules::ApiError;
-use steve_modules::accounts::{ExtraHandle, Hints, Identified, identify};
+use steve_modules::accounts::{AnyHandle, ExtraHandle, Hints, Identified, identify_any};
 use steve_store::Tx;
 
-use crate::channel::{HandleRef, InboundMessage, MemberInfo, SpaceInfo, SpaceKind};
+use crate::channel::{HandleRef, InboundMessage, MemberInfo, Sender, SpaceInfo, SpaceKind};
 use crate::respond::{self, Plan, Response};
 use crate::rules::{self, ContextLine, Facts, GatewayJudge};
 use crate::spaces::{self, Attention, Mode, NewSpace};
@@ -165,28 +165,58 @@ pub(crate) fn identify_handle_as(
     label: &str,
     bot: bool,
 ) -> Option<Identified> {
+    identify_with_aliases(tx, ws, conn, actor, h, &[], name, label, bot)
+}
+
+/// [`identify_handle_as`] for a sender known by more handles ([`crate::channel::Sender::aliases`]):
+/// an existing contact holding the primary handle or any alias is the sender, and the handles it did
+/// not have yet are attached to it; with none, a new contact gets them all.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn identify_with_aliases(
+    tx: &Tx,
+    ws: &str,
+    conn: &str,
+    actor: &str,
+    h: &HandleRef,
+    aliases: &[HandleRef],
+    name: Option<&str>,
+    label: &str,
+    bot: bool,
+) -> Option<Identified> {
     if h.handle.trim().is_empty() {
         return None;
     }
     if tx.execute_batch("SAVEPOINT chan_identify").is_err() {
         return None;
     }
-    let hints = Hints {
-        display_name: name.map(String::from),
-        extra: h
-            .extra
+    // handles valid only under this connection (Feishu `open_id`)
+    let extra_of = |h: &HandleRef| -> Vec<ExtraHandle> {
+        h.extra
             .iter()
             .map(|x| ExtraHandle {
                 handle: x.clone(),
                 connection_id: Some(conn.into()),
             })
-            .collect(),
+            .collect()
+    };
+    let hints = Hints {
+        display_name: name.map(String::from),
+        extra: extra_of(h),
         source: Some("channel".into()),
         source_label: Some(label.chars().take(60).collect()),
         kind: bot.then(|| "bot".to_string()),
         ..Hints::default()
     };
-    match identify(tx, ws, actor, &h.system, &h.handle, &hints) {
+    let aliases: Vec<AnyHandle> = aliases
+        .iter()
+        .filter(|a| !a.handle.trim().is_empty())
+        .map(|a| AnyHandle {
+            system: a.system.clone(),
+            handle: a.handle.clone(),
+            extra: extra_of(a),
+        })
+        .collect();
+    match identify_any(tx, ws, actor, &h.system, &h.handle, &aliases, &hints) {
         Ok(id) => {
             let _ = tx.execute_batch("RELEASE chan_identify");
             Some(id)
@@ -203,9 +233,10 @@ pub(crate) fn identify_handle_as(
     }
 }
 
-/// Is any of these handles known already (so the sender's name need not be looked up)?
-fn handle_known(c: &rusqlite::Connection, ws: &str, h: &HandleRef) -> ChannelResult<bool> {
-    for x in std::iter::once(&h.handle).chain(h.extra.iter()) {
+/// Is any of the sender's handles known already (so its name need not be looked up)?
+fn handle_known(c: &rusqlite::Connection, ws: &str, sender: &Sender) -> ChannelResult<bool> {
+    let all = std::iter::once(&sender.handle).chain(sender.aliases.iter());
+    for x in all.flat_map(|h| std::iter::once(&h.handle).chain(h.extra.iter())) {
         let hit: bool = c.query_row(
             "SELECT EXISTS (SELECT 1 FROM account_handles WHERE workspace_id = ? AND handle = ?)",
             params![ws, x.trim()],
@@ -279,7 +310,7 @@ impl Channels {
         let (existing, known) = store.reader(|c| -> ChannelResult<_> {
             Ok((
                 spaces::find(c, ws, conn, &msg.space_ext_id)?,
-                handle_known(c, ws, &msg.sender.handle)?,
+                handle_known(c, ws, &msg.sender)?,
             ))
         })?;
 
@@ -553,12 +584,13 @@ impl Channels {
         }
 
         // 1. the sender
-        let sender = identify_handle_as(
+        let sender = identify_with_aliases(
             tx,
             ws,
             conn,
             actor,
             &msg.sender.handle,
+            &msg.sender.aliases,
             sender_name,
             &label,
             msg.sender.is_bot,

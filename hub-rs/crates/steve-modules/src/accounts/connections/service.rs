@@ -21,15 +21,18 @@ use super::cx::{
 use super::oauth::{self, DevicePoll, TokenSet, pkce_challenge, random_token};
 use super::pending::{Device, DeviceStatus, Devices, Flow, PendingStates};
 use super::provider::{
-    AccountInfo, AuthKind, ConnectionProvider, FieldDef, Health, Owner, ProviderError, StewardHint,
-    TokenKind,
+    AccountInfo, AuthKind, ConnectionProvider, FieldDef, Health, Owner, PAIR_KEY, Paired,
+    ProviderError, StewardHint, TokenKind,
 };
 use super::repo::{self, ConnRow, HealthState};
+use crate::accounts::claim::claim_self;
+use crate::accounts::identify::{Attach, attach_handle};
 use crate::accounts::repo as arepo;
 use crate::accounts::service::{
     self as asvc, Record, current_party, default_label, may_connect, normalize, own_account,
     own_system,
 };
+use crate::contacts::PartyHooks;
 use crate::contacts::repo as people;
 use crate::contacts::stewards;
 use crate::vault::{Vault, VaultError, VaultResult};
@@ -197,6 +200,7 @@ pub struct ConnectionsBuilder {
     cfg: ConnectionsConfig,
     providers: BTreeMap<String, Arc<dyn ConnectionProvider>>,
     usage: Vec<Arc<dyn ConnectionUsage>>,
+    party_hooks: Vec<Arc<dyn PartyHooks>>,
 }
 
 impl ConnectionsBuilder {
@@ -215,6 +219,13 @@ impl ConnectionsBuilder {
         self
     }
 
+    /// The contacts hooks a claim into “我” runs ([`ConnectionProvider::claims_self`]: accounts and
+    /// channel members move along with the merged contact). Default: the accounts module's alone.
+    pub fn party_hooks(mut self, h: Vec<Arc<dyn PartyHooks>>) -> Self {
+        self.party_hooks = h;
+        self
+    }
+
     pub fn build(self) -> Connections {
         // a connect timeout only: what a whole request may take is each caller's (Feishu sets its
         // own; GitHub `api::REQUEST_TIMEOUT`), so a long download is not cut by a default
@@ -230,6 +241,7 @@ impl ConnectionsBuilder {
             cfg: self.cfg,
             providers: self.providers,
             usage: self.usage,
+            party_hooks: self.party_hooks,
             flows: PendingStates::default(),
             devices: Devices::default(),
             locks: Mutex::new(HashMap::new()),
@@ -246,6 +258,7 @@ struct Inner {
     cfg: ConnectionsConfig,
     providers: BTreeMap<String, Arc<dyn ConnectionProvider>>,
     usage: Vec<Arc<dyn ConnectionUsage>>,
+    party_hooks: Vec<Arc<dyn PartyHooks>>,
     flows: PendingStates<Flow>,
     devices: Devices,
     /// One refresh/mint at a time per connection.
@@ -447,6 +460,7 @@ impl Connections {
             cfg,
             providers: BTreeMap::new(),
             usage: Vec::new(),
+            party_hooks: crate::accounts::ports().hooks,
         }
     }
 
@@ -650,6 +664,12 @@ impl Connections {
     }
 
     fn cx_of(&self, r: &ConnRow) -> ConnCx {
+        let paired = self
+            .paired(&r.workspace_id, &r.adapter, &r.config)
+            .unwrap_or_else(|e| {
+                tracing::warn!(connection = %r.id, "connection pair not read: {e}");
+                None
+            });
         ConnCx {
             conns: self.clone(),
             ws: r.workspace_id.clone(),
@@ -658,8 +678,198 @@ impl Connections {
             item: r.credential_item.clone(),
             config: r.config.clone(),
             scopes: r.granted_scopes.clone(),
+            paired,
             pending: false,
         }
+    }
+
+    // ------------------------------------------------------------ pairing
+
+    /// The connection a connection of `adapter` with `config` is paired with, as it is now: its
+    /// provider pairs ([`ConnectionProvider::pairing`]), `config.app_connection` ([`PAIR_KEY`]) names
+    /// a connection of `ws` of one of the adapters it pairs with. `ok`: that one is usable (`ok` or
+    /// `error`).
+    pub fn paired(&self, ws: &str, adapter: &str, config: &Value) -> VaultResult<Option<Paired>> {
+        let Some(pairing) = self.provider(adapter).and_then(|p| p.pairing()) else {
+            return Ok(None);
+        };
+        let Some(with) = config.get(PAIR_KEY).and_then(Value::as_str) else {
+            return Ok(None);
+        };
+        let row = self.0.m.store.reader(|c| repo::get(c, with))?;
+        Ok(row
+            .filter(|r| r.workspace_id == ws && pairing.with.contains(&r.adapter))
+            .map(|r| Paired {
+                ok: matches!(r.status.as_str(), "ok" | "error"),
+                id: r.id,
+                adapter: r.adapter,
+            }))
+    }
+
+    /// Checks (and completes) the pair in `config` of a connection of `p` being connected, re-paired
+    /// or re-authorized by `viewer` (`this`: its id, when it has one):
+    /// - a provider that does not pair takes no [`PAIR_KEY`] (`400`);
+    /// - a pair must be a connection the viewer can see in the same workspace, not revoked, of an
+    ///   adapter the provider pairs with, and not the connection itself;
+    /// - without one, the only candidate is picked when `auto` (exactly one visible connection of
+    ///   those adapters); a required pair that cannot be found refuses.
+    fn check_pair(
+        &self,
+        c: &rusqlite::Connection,
+        viewer: &Viewer,
+        p: &dyn ConnectionProvider,
+        config: &mut Value,
+        this: Option<&str>,
+        auto: bool,
+    ) -> VaultResult<Option<Paired>> {
+        let Some(o) = config.as_object_mut() else {
+            return Ok(None);
+        };
+        let named = match o.get(PAIR_KEY) {
+            None | Some(Value::Null) => None,
+            Some(Value::String(x)) if x.trim().is_empty() => None,
+            Some(Value::String(x)) => Some(x.trim().to_string()),
+            Some(_) => return Err(ApiError::invalid(PAIR_KEY).into()),
+        };
+        let Some(pairing) = p.pairing() else {
+            if named.is_some() {
+                return Err(
+                    ApiError::rule(steve_i18n::t!("modules.connections.pair.not_paired")).into(),
+                );
+            }
+            o.remove(PAIR_KEY);
+            return Ok(None);
+        };
+        let row = match named {
+            Some(id) => {
+                let r = self.own(c, viewer, &id)?;
+                if !pairing.with.contains(&r.adapter) || this == Some(r.id.as_str()) {
+                    let name = self
+                        .provider(&r.adapter)
+                        .map(|x| x.name().to_string())
+                        .unwrap_or_else(|| r.adapter.clone());
+                    return Err(ApiError::rule(steve_i18n::t!(
+                        "modules.connections.pair.wrong",
+                        name = name
+                    ))
+                    .into());
+                }
+                if r.status == "revoked" {
+                    return Err(ApiError::conflict(steve_i18n::t!(
+                        "modules.connections.pair.revoked"
+                    ))
+                    .into());
+                }
+                Some(r)
+            }
+            None if auto => {
+                let mut found = Vec::new();
+                for r in repo::list(c, &viewer.ws)? {
+                    if pairing.with.contains(&r.adapter)
+                        && r.status != "revoked"
+                        && this != Some(r.id.as_str())
+                        && self.own(c, viewer, &r.id).is_ok()
+                    {
+                        found.push(r);
+                    }
+                }
+                match found.len() {
+                    1 => found.pop(),
+                    0 => None,
+                    _ if pairing.required => {
+                        return Err(ApiError::rule(steve_i18n::t!(
+                            "modules.connections.pair.choose"
+                        ))
+                        .into());
+                    }
+                    _ => None,
+                }
+            }
+            None => None,
+        };
+        match row {
+            Some(r) => {
+                o.insert(PAIR_KEY.into(), Value::String(r.id.clone()));
+                Ok(Some(Paired {
+                    ok: matches!(r.status.as_str(), "ok" | "error"),
+                    id: r.id,
+                    adapter: r.adapter,
+                }))
+            }
+            None if pairing.required => {
+                let names = pairing
+                    .with
+                    .iter()
+                    .map(|a| {
+                        self.provider(a)
+                            .map(|x| x.name().to_string())
+                            .unwrap_or_else(|| a.clone())
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" / ");
+                Err(ApiError::rule(steve_i18n::t!(
+                    "modules.connections.pair.needed",
+                    names = names
+                ))
+                .into())
+            }
+            None => {
+                o.remove(PAIR_KEY);
+                Ok(None)
+            }
+        }
+    }
+
+    /// `PATCH /connections/:id {app_connection}`: pairs the connection with another one (the same
+    /// checks as connecting), or unpairs it (`None`; refused when its pair is required). Emits a
+    /// connection event, so what runs for it follows the new pair.
+    pub fn set_pairing(
+        &self,
+        who: &Caller,
+        id: &str,
+        to: Option<&str>,
+    ) -> VaultResult<ConnectionOut> {
+        let viewer = self.viewer(who)?;
+        let now = self.now();
+        let r = self.0.m.store.transaction(|tx| {
+            let mut r = self.own(tx, &viewer, id)?;
+            let p = self.provider_or_404(&r.adapter)?;
+            if p.pairing().is_none() {
+                return Err(
+                    ApiError::rule(steve_i18n::t!("modules.connections.pair.not_paired")).into(),
+                );
+            }
+            if r.status == "revoked" {
+                return Err(
+                    ApiError::conflict(steve_i18n::t!("modules.connections.revoked")).into(),
+                );
+            }
+            let mut config = r.config.clone();
+            if !config.is_object() {
+                config = Value::Object(Map::new());
+            }
+            config[PAIR_KEY] = to.map_or(Value::Null, |t| Value::String(t.to_string()));
+            self.check_pair(tx, &viewer, p.as_ref(), &mut config, Some(&r.id), false)?;
+            if config.get(PAIR_KEY) != r.config.get(PAIR_KEY) {
+                r.config = config;
+                repo::update(tx, &r, now)?;
+                base::audit(
+                    tx,
+                    &viewer.ws,
+                    &who.me,
+                    "connection.pair",
+                    &r.id,
+                    &json!({"adapter": r.adapter, PAIR_KEY: r.config.get(PAIR_KEY)}),
+                )?;
+                tx.publish(ChangeEvent::Connection {
+                    id: r.id.clone(),
+                    ws: viewer.ws.clone(),
+                });
+            }
+            Ok::<_, VaultError>(r)
+        })?;
+        self.forget_tokens(&r.id);
+        Ok(self.out(&r))
     }
 
     pub fn usage(&self, who: &Caller, id: &str) -> VaultResult<Usage> {
@@ -713,6 +923,7 @@ impl Connections {
                     .create_credential(&w.ws, &w.me, &title, None, secrets)
             })
             .await?;
+        let paired = self.paired(&who.ws, adapter, &config).unwrap_or(None);
         let cx = ConnCx {
             conns: self.clone(),
             ws: who.ws.clone(),
@@ -721,6 +932,7 @@ impl Connections {
             item: Some(item.clone()),
             config: config.clone(),
             scopes: scopes.clone(),
+            paired,
             pending: true,
         };
         let info = match p.verify(&cx).await {
@@ -842,7 +1054,8 @@ impl Connections {
         G: FnOnce(&Tx, &Connected) -> VaultResult<()> + Send + 'static,
     {
         let p = self.provider_or_404(adapter)?;
-        let config = self.clean_config(config);
+        let config = self.clean_config(who, p.as_ref(), config, None)?;
+        let paired = self.paired(&who.ws, adapter, &config).unwrap_or(None);
         let cx = ConnCx {
             conns: self.clone(),
             ws: who.ws.clone(),
@@ -851,6 +1064,7 @@ impl Connections {
             item: Some(item.to_string()),
             config: config.clone(),
             scopes: scopes.clone(),
+            paired,
             pending: true,
         };
         let info = match p.verify(&cx).await {
@@ -1016,7 +1230,7 @@ impl Connections {
         viewer: &Viewer,
         actor: &str,
         p: &dyn ConnectionProvider,
-        u: Upsert,
+        mut u: Upsert,
     ) -> VaultResult<(Connected, Option<String>)> {
         let ws = viewer.ws.as_str();
         let now = self.now();
@@ -1024,6 +1238,12 @@ impl Connections {
         let h = normalize(&system, &u.info.handle).ok_or_else(|| {
             ApiError::rule(steve_i18n::t!("modules.connections.verify_no_account"))
         })?;
+        // the pair again, in the commit: it may have gone since the flow started
+        self.check_pair(tx, viewer, p, &mut u.config, Some(&u.id), true)?;
+        // your own identity, proven by the provider: a contact a channel made for it joins “我” first
+        if u.reauth_of.is_none() && u.info.owner == Owner::Me && p.claims_self() {
+            self.claim_into_me(tx, viewer, actor, &system.id, &u.info)?;
+        }
         let known = arepo::by_handle(tx, ws, &system.family, &h.handle)?;
         let owner = match &u.info.owner {
             Owner::Me => people::me_of(tx, ws, actor)?,
@@ -1227,6 +1447,24 @@ impl Connections {
                 )?;
             }
         }
+        // the same identity in other systems: the owner's accounts too, when nobody holds them
+        for (sys, handle) in &u.info.aliases {
+            attach_handle(
+                tx,
+                ws,
+                actor,
+                &account.party_id,
+                sys,
+                handle,
+                &[],
+                &Attach {
+                    kind: &u.info.kind,
+                    display_name: &u.info.display_name,
+                    source: "connect",
+                    source_label: default_label("connect"),
+                },
+            )?;
+        }
         tx.publish(ChangeEvent::Connection {
             id: done.connection_id.clone(),
             ws: ws.into(),
@@ -1236,6 +1474,43 @@ impl Connections {
             ws: ws.into(),
         });
         Ok((done, old))
+    }
+
+    /// [`claim_self`] of a verified identity for `actor`'s “我”: the primary and extra handles in
+    /// the provider's system, then each alias in its own. In a savepoint: a merge that fails is
+    /// undone and only logged (the connect then says who holds the account).
+    fn claim_into_me(
+        &self,
+        tx: &Tx,
+        viewer: &Viewer,
+        actor: &str,
+        system: &str,
+        info: &AccountInfo,
+    ) -> VaultResult<()> {
+        let Some(me) = people::me_of(tx, &viewer.ws, actor)? else {
+            return Ok(());
+        };
+        tx.execute_batch("SAVEPOINT conn_claim")
+            .map_err(steve_store::StoreError::from)?;
+        let run = || -> crate::ApiResult<Vec<String>> {
+            let hooks = &self.0.party_hooks;
+            let mut handles: Vec<&str> = vec![info.handle.as_str()];
+            handles.extend(info.extra_handles.iter().map(String::as_str));
+            let mut merged = claim_self(tx, hooks, viewer, actor, &me, system, &handles)?;
+            for (sys, h) in &info.aliases {
+                merged.extend(claim_self(tx, hooks, viewer, actor, &me, sys, &[h])?);
+            }
+            Ok(merged)
+        };
+        match run() {
+            Ok(_) => tx.execute_batch("RELEASE conn_claim"),
+            Err(e) => {
+                tracing::warn!(error = %e, "connection: could not merge your contact into 我");
+                tx.execute_batch("ROLLBACK TO conn_claim; RELEASE conn_claim")
+            }
+        }
+        .map_err(steve_store::StoreError::from)?;
+        Ok(())
     }
 
     /// Settles the open `reauth` decision of a connection, if any.
@@ -1264,7 +1539,7 @@ impl Connections {
             (AuthKind::OAuth, Some(s)) => s.clone(),
             _ => return Err(ApiError::invalid("adapter").into()),
         };
-        let config = self.clean_config(config);
+        let config = self.clean_config(who, p.as_ref(), config, reauth_of.as_deref())?;
         let spec = with_extra_scopes(spec, &config);
         let client = p
             .oauth_client(&StartCx {
@@ -1410,7 +1685,7 @@ impl Connections {
             }
             _ => return Err(ApiError::invalid("adapter").into()),
         };
-        let config = self.clean_config(config);
+        let config = self.clean_config(who, p.as_ref(), config, None)?;
         let client = p
             .oauth_client(&StartCx {
                 conns: self,
@@ -1497,8 +1772,16 @@ impl Connections {
 
     // ------------------------------------------------------------ credential form
 
-    /// Drops `api_base` from user-supplied config outside tests (adapters only honour it there).
-    fn clean_config(&self, mut config: Value) -> Value {
+    /// The config of a connect path, before anything is stored or verified: drops `api_base`
+    /// outside tests (adapters only honour it there) and checks the pair ([`Self::check_pair`],
+    /// picking the only candidate when none is named). `this`: the connection being re-authorized.
+    fn clean_config(
+        &self,
+        who: &Caller,
+        p: &dyn ConnectionProvider,
+        mut config: Value,
+        this: Option<&str>,
+    ) -> VaultResult<Value> {
         if !config.is_object() {
             config = Value::Object(Map::new());
         }
@@ -1507,7 +1790,12 @@ impl Connections {
         {
             o.remove("api_base");
         }
-        config
+        let viewer = self.viewer(who)?;
+        self.0
+            .m
+            .store
+            .reader(|c| self.check_pair(c, &viewer, p, &mut config, this, true))?;
+        Ok(config)
     }
 
     /// Splits a form into vault secrets and plain config by the provider's [`FieldDef`]s. Values
@@ -1559,7 +1847,7 @@ impl Connections {
         if p.auth() != AuthKind::Credential {
             return Err(ApiError::invalid("adapter").into());
         }
-        let mut config = self.clean_config(config);
+        let mut config = self.clean_config(who, p.as_ref(), config, None)?;
         let secrets = Self::split_fields(p.as_ref(), fields, &mut config)?;
         let done = self
             .connect(who, adapter, secrets, config, Vec::new(), None, None)
@@ -1581,7 +1869,7 @@ impl Connections {
         if !matches!(p.auth(), AuthKind::Credential | AuthKind::Managed) {
             return Err(ApiError::rule(steve_i18n::t!("modules.connections.needs_reauth")).into());
         }
-        let mut config = r.config.clone();
+        let mut config = self.clean_config(who, p.as_ref(), r.config.clone(), Some(&r.id))?;
         let secrets = Self::split_fields(p.as_ref(), fields, &mut config)?;
         self.connect(
             who,

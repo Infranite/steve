@@ -9,7 +9,7 @@ use serde_json::Value;
 use zeroize::Zeroizing;
 
 use super::oauth::{OAuthClient, OAuthSpec};
-use super::provider::{Health, ProviderError};
+use super::provider::{Health, Paired, ProviderError};
 use super::service::Connections;
 use crate::vault::VaultError;
 use crate::vault::items::Credential;
@@ -60,6 +60,8 @@ pub struct ConnCx {
     pub(crate) item: Option<String>,
     pub(crate) config: Value,
     pub(crate) scopes: Vec<String>,
+    /// The connection it is paired with ([`super::ConnectionProvider::pairing`]), when it was made.
+    pub(crate) paired: Option<Paired>,
     /// Not in `connections` yet (verify during connect): health reports are dropped.
     pub(crate) pending: bool,
 }
@@ -92,6 +94,12 @@ impl ConnCx {
     /// A string from `config`.
     pub fn config_str(&self, key: &str) -> Option<&str> {
         self.config.get(key).and_then(Value::as_str)
+    }
+    /// The connection this one is paired with (`config.app_connection`), as it was when this
+    /// context was made: its id, adapter and whether it is usable. A provider that attests who an
+    /// account is ([`super::ConnectionProvider::claims_self`]) may ask it.
+    pub fn paired(&self) -> Option<&Paired> {
+        self.paired.as_ref()
     }
     /// The scopes the provider granted.
     pub fn scopes(&self) -> &[String] {

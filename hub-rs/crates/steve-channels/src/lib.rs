@@ -81,7 +81,7 @@
 //! steve_channels::space_decisions::register(&mut registry);          // the “新群” card (subject_type space)
 //! // Connections::builder(..).usage(Arc::new(steve_channels::usage::ChannelUsage)): spaces count,
 //! // disconnect: spaces kept as left, their settings, channel_settings and chan_cursors deleted
-//! api_router.merge(steve_channels::channels_api::routes(channels.clone(), Some(feishu_user.clone())));
+//! api_router.merge(steve_channels::channels_api::routes(channels.clone()));
 //! // long connections + self pollers, started at boot and whenever a connection changes
 //! // (connected, re-authorized, resumed → start, plus sync_bot_chats for a bot; paused, reauth,
 //! // disconnected → stop). No hook in Connections is needed: it publishes `connection` events.

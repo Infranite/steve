@@ -54,17 +54,14 @@ async fn setup_with(world: World) -> H {
     vault.init(WS, OTHER).ok();
     let cfg = ConnectionsConfig::new(vec![ORIGIN.into()], true, |_| None);
     // every endpoint of the user provider on the fake (never the real hosts)
-    let user = Arc::new(
-        FeishuUser::with_base(fake.base_url())
-            .with_party_hooks(steve_modules::accounts::ports().hooks),
-    );
+    let user = Arc::new(FeishuUser::with_base(fake.base_url()));
     let conns = Connections::builder(env.modules.clone(), vault.clone(), cfg)
         .provider(Arc::new(FeishuApp::new()))
         .provider(user.clone())
         .build();
     let api = connections::routes(conns.clone())
         .merge(device_routes(DeviceFlows::new(conns.clone(), user.clone())))
-        .merge(user_routes(conns.clone(), user.claims().clone()))
+        .merge(user_routes(conns.clone()))
         .with_state(env.modules.clone());
     let cb = connections::callback_routes(conns.clone()).with_state(env.modules.clone());
     H {
@@ -241,7 +238,7 @@ async fn oauth_first_then_the_bot_finds_you_on_me() {
         a,
         vec![json!(ids::OWNER.union_id), json!("feishu"), json!(me)]
     );
-    // the spent ticket is not kept in the connection's config
+    // nothing of the start flow but the pair is kept in the connection's config
     let cfg: Value = serde_json::from_str(&s(&row(
         &h,
         "SELECT config FROM connections WHERE id = ?",
@@ -450,8 +447,8 @@ async fn bot_first_then_device_code_merges_too() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn without_a_ticket_or_for_a_confirmed_contact_nothing_is_merged() {
-    // the generic start route carries no ticket: no merge, the connect says who holds the account
+async fn the_generic_start_route_merges_too_but_never_a_confirmed_contact() {
+    // the framework claims on every way in: the generic start route merges like the F6 one
     let h = setup().await;
     let bot = connect_bot(&h).await;
     let first = bot_sees(&h, &bot, &owner_ids());
@@ -459,20 +456,23 @@ async fn without_a_ticket_or_for_a_confirmed_contact_nothing_is_merged() {
         &h,
         &caller(WS, ME),
         "/connections/oauth/start",
-        json!({"adapter": "feishu_user", "config": {"app_connection": bot, "self_claim": "scl_forged"}}),
+        json!({"adapter": "feishu_user", "config": {"app_connection": bot}}),
     )
     .await;
-    assert!(loc.starts_with("/#/accounts?error="), "{loc}");
+    assert_eq!(loc, format!("/#/accounts/{}", first.account_id));
     assert_eq!(
         s(&row(
             &h,
             "SELECT status FROM parties WHERE id = ?",
             &first.party_id
         )[0]),
-        "active"
+        "merged"
     );
 
     // a contact someone confirmed by hand is never merged automatically
+    let h = setup().await;
+    let bot = connect_bot(&h).await;
+    let first = bot_sees(&h, &bot, &owner_ids());
     h.env
         .store()
         .transaction(|tx| {

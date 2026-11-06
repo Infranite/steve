@@ -411,7 +411,9 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
         mail_cfg.clone(),
     )))
     // spaces outlive their connection (kept as left; their settings and cursors go)
-    .usage(Arc::new(steve_channels::usage::ChannelUsage));
+    .usage(Arc::new(steve_channels::usage::ChannelUsage))
+    // a claim into 我 moves the merged contact's accounts and channel members along
+    .party_hooks(ports.hooks.clone());
     for p in &declared.providers {
         conns = conns.provider(p.clone());
     }
@@ -574,10 +576,7 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
         .merge(steve_github::issues::routes(gh.clone()))
         .merge(steve_mail::api::routes(mail.clone()))
         .merge(steve_channels::api::routes(channels.clone()))
-        .merge(steve_channels::channels_api::routes(
-            channels.clone(),
-            declared.feishu_user.clone(),
-        ))
+        .merge(steve_channels::channels_api::routes(channels.clone()))
         .merge(super::chan::routes(channels.clone(), outbox.clone()));
     let crate::extension::StartedAll {
         routes,

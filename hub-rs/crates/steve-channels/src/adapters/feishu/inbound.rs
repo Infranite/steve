@@ -433,6 +433,7 @@ pub fn parse_receive(env: &Value, bot_open_id: &str) -> Result<Option<InboundMes
             handle,
             display_name: None,
             is_bot: is_app,
+            aliases: Vec::new(),
             external: !tenant.is_empty() && !stk.is_empty() && tenant != stk,
         },
         text,
