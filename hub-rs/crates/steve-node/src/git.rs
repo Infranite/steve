@@ -455,7 +455,7 @@ pub(crate) fn facts(dir: &Path, q: &GitQuery) -> ApiResult<GitFacts> {
         return Err(bad("too many questions at once"));
     }
     let (head, branch, revision) = state(dir)?;
-    let dirty = !status(dir)?.is_empty();
+    let dirty = !q.no_status && !status(dir)?.is_empty();
     let mut refs = vec![];
     for r in &q.refs {
         refs.push((r.clone(), resolve(dir, r)?));

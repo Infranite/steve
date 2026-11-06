@@ -471,6 +471,10 @@ impl GitHub {
                     Some(Err(push::PushError::Lost)) => {
                         self.landed(&conn, &r, &branch, &sha).await?;
                     }
+                    // it may still land: this run's end is unknown, the next one asks again
+                    Some(Err(e @ push::PushError::Running)) => {
+                        return Err(Fail::unknown(e.to_string()));
+                    }
                     Some(Err(e)) => return Err(e.to_string().into()),
                     None => {
                         let cwd = cwd.ok_or("事项没有工作目录".to_string())?;

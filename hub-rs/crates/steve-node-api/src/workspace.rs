@@ -74,6 +74,11 @@ pub struct GitQuery {
     /// Further reads, answered in [`GitFacts::reads`] in the same order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reads: Vec<GitRead>,
+    /// Leave the worktree's status out: [`GitFacts::dirty`] is then `false` without being read
+    /// (a full `git status` is the slow part of a query that only asks for refs or reads). A
+    /// Node that does not know the field reads it anyway.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_status: bool,
 }
 
 /// A commit range: `from..to`, or everything reachable from `to` when `from` is `None`.

@@ -50,6 +50,10 @@ pub enum PushError {
     /// and is never pushed again; what the remote branch is says.
     #[error("推送的结果未知，不会再推送一次")]
     Lost,
+    /// A push through a Node that has not ended yet (still on its way, or still running there):
+    /// asked again later, never compared with GitHub while it may still land.
+    #[error("推送还没有结束，稍后再看")]
+    Running,
 }
 
 /// A push through a Node ([`GitNodes::push`]).
@@ -80,9 +84,9 @@ pub trait GitNodes: Send + Sync {
     async fn head_of(&self, item: &str, branch: &str) -> Option<Result<String, PushError>>;
     /// Pushes the item's branch; the pushed sha.
     async fn push(&self, p: &NodePush<'_>) -> Option<Result<String, PushError>>;
-    /// `owner/name` of the project directory's `origin`, when it is a GitHub repository (`None`
-    /// on any problem).
-    async fn origin(&self, project: &str) -> Option<Option<String>>;
+    /// For each of `projects`, in order: `owner/name` of the project directory's `origin`, when it
+    /// is a GitHub repository (`None` on any problem).
+    async fn origins(&self, projects: &[String]) -> Option<Vec<Option<String>>>;
 }
 
 /// One push.

@@ -127,12 +127,17 @@ fn moved_meanwhile(l: &LedgerEntry) -> bool {
 }
 
 impl GitPush {
-    /// The Node and place of `what`; `None`: the local Node is off.
+    /// The local roots made current: a directory made a moment ago may not be among them yet.
+    async fn refresh(&self) -> Result<(), PushError> {
+        let w = self.workspaces.clone();
+        tokio::task::spawn_blocking(move || w.refresh_roots())
+            .await
+            .map_err(node_error)?
+            .map_err(node_error)
+    }
+
+    /// The Node and place of `what` (the roots refreshed before); `None`: the local Node is off.
     fn placed(&self, what: Subject<'_>) -> Option<Result<Placement, PushError>> {
-        // a directory made a moment ago may not be among the local roots yet
-        if let Err(e) = self.workspaces.refresh_roots() {
-            return Some(Err(node_error(e)));
-        }
         match self.workspaces.placement_of(what) {
             Err(PlacementError::LocalOff) => None,
             Err(e) => Some(Err(node_error(e))),
@@ -154,10 +159,14 @@ impl GitPush {
     }
 
     async fn item(&self, item: &str) -> Option<Result<(Placement, WorkspaceRef), PushError>> {
+        let refreshed = self.refresh().await;
         let p = match self.placed(Subject::Item(item))? {
             Ok(p) => p,
             Err(e) => return Some(Err(e)),
         };
+        if let Err(e) = refreshed {
+            return Some(Err(e));
+        }
         let w = Self::workspace(&p, |dir| format!("item:{item}:{}", dir_digest(dir))).await;
         Some(w.map(|w| (p, w)))
     }
@@ -173,6 +182,8 @@ impl GitPush {
             refs,
             ranges: vec![],
             fetch: false,
+            // nothing here reads `dirty`, and a full status is the slow part
+            no_status: true,
             reads,
         })
         .await
@@ -310,11 +321,18 @@ impl GitPush {
         );
     }
 
-    /// The settled entry of `op`; its secret is over then.
+    /// The settled entry of `op`; its secret is over then. Not settled within the wait (still in
+    /// the outbox, or still running on the Node, whose deadline starts when it takes it): it may
+    /// still land, so it is [`PushError::Running`], never lost (nothing compares it with GitHub
+    /// yet); asked again, the ledger's entry is waited for again.
     async fn wait(&self, placed: &Placement, op: &str) -> Result<LedgerEntry, PushError> {
         let l = self.settled(&placed.runtime, op).await;
         self.secrets.end(op);
-        l.ok_or(PushError::Lost)
+        match l {
+            Some(l) => Ok(l),
+            None if matches!(placed.runtime.ledger(op), Ok(None)) => Err(PushError::Lost),
+            None => Err(PushError::Running),
+        }
     }
 
     async fn result(
@@ -446,10 +464,23 @@ impl GitNodes for GitPush {
         Some(self.push_on(&placed, &w, p).await)
     }
 
-    async fn origin(&self, project: &str) -> Option<Option<String>> {
+    async fn origins(&self, projects: &[String]) -> Option<Vec<Option<String>>> {
+        use futures::StreamExt as _;
+        // once for the whole list
+        let refreshed = self.refresh().await.is_ok();
+        let asks: Vec<_> = projects.iter().map(|p| self.origin(p, refreshed)).collect();
+        let found: Vec<Option<Option<String>>> =
+            futures::stream::iter(asks).buffered(4).collect().await;
+        found.into_iter().collect()
+    }
+}
+
+impl GitPush {
+    /// `owner/name` of `project`'s `origin` on its Node; `None`: the local Node is off.
+    async fn origin(&self, project: &str, refreshed: bool) -> Option<Option<String>> {
         let placed = match self.placed(Subject::Project(project))? {
-            Ok(p) => p,
-            Err(_) => return Some(None),
+            Ok(p) if refreshed => p,
+            _ => return Some(None),
         };
         let Ok(w) = Self::workspace(&placed, |dir| resource_of(project, dir)).await else {
             return Some(None);
@@ -699,7 +730,10 @@ mod tests {
             t.git.head_of(ITEM, "steve/none").await.unwrap(),
             Err(PushError::NoBranch("steve/none".into()))
         );
-        assert_eq!(t.git.origin("p1").await, Some(Some("o/r".into())));
+        assert_eq!(
+            t.git.origins(&["p1".into(), "p2".into()]).await,
+            Some(vec![Some("o/r".into()), None])
+        );
 
         let url = t.url();
         assert_eq!(
@@ -824,6 +858,39 @@ mod tests {
         assert_eq!(t.pushes(), 1);
     }
 
+    /// The Node took the push late (it sat in the outbox), so its own deadline ends after the
+    /// Hub's wait: still running then, it is not lost (nothing compares it with GitHub while it
+    /// may land). Asked again, its end is waited for again, and it is never sent twice.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_push_still_running_when_the_wait_ends_is_not_lost() {
+        let t = hub();
+        t.node.set_push_timeout(Duration::from_secs(3));
+        let (port, seen) = hanging();
+        let url = format!("http://127.0.0.1:{port}/o/r.git");
+        let tip = t.tip();
+        let short = Arc::new(GitPush {
+            workspaces: t.git.workspaces.clone(),
+            secrets: t.git.secrets.clone(),
+            answer_wait: Duration::from_millis(500),
+        });
+        assert_eq!(
+            short.push(&spec("dec_r", &url, &tip)).await.unwrap(),
+            Err(PushError::Running)
+        );
+        let l = t.runtime.ledger(&op_of("dec_r", 0)).unwrap().unwrap();
+        assert!(!l.is_settled(), "{}", l.state);
+        // the next run: the Node's deadline ends it, and only then is it lost
+        assert_eq!(
+            t.git.push(&spec("dec_r", &url, &tip)).await.unwrap(),
+            Err(PushError::Lost)
+        );
+        let l = t.runtime.ledger(&op_of("dec_r", 0)).unwrap().unwrap();
+        assert_eq!(l.state, "finished");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(*seen.lock().unwrap(), 1);
+        assert_eq!(t.pushes(), 1);
+    }
+
     /// Runs in a child process (see the test below): a Hub whose push hangs when it is killed.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn child_push_crash() {
@@ -853,10 +920,9 @@ mod tests {
         tokio::time::sleep(Duration::from_secs(120)).await;
     }
 
-    /// The Hub (and its local Node with it) is killed while a push hangs. After the restart it is
-    /// unknown: asked again it is stopped, never sent again, and lost (GitHub's branch decides).
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_push_lost_in_a_crash_is_never_pushed_again() {
+    /// A Hub killed while its push hangs (in a child process): its root, and how many pushes
+    /// reached the remote.
+    async fn crashed_push() -> (tempfile::TempDir, u16, Arc<Mutex<usize>>) {
         let tmp = tempfile::tempdir().unwrap();
         let (port, seen) = hanging();
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
@@ -881,7 +947,14 @@ mod tests {
         }
         child.kill().unwrap();
         child.wait().unwrap();
+        (tmp, port, seen)
+    }
 
+    /// The Hub (and its local Node with it) is killed while a push hangs. After the restart it is
+    /// unknown: asked again it is stopped, never sent again, and lost (GitHub's branch decides).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_push_lost_in_a_crash_is_never_pushed_again() {
+        let (tmp, port, seen) = crashed_push().await;
         let t = hub_at(tmp.path());
         let url = format!("http://127.0.0.1:{port}/o/r.git");
         let tip = t.tip();
@@ -898,6 +971,41 @@ mod tests {
             );
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(*seen.lock().unwrap(), 1, "pushed once");
+        assert_eq!(t.pushes(), 1);
+    }
+
+    /// Lost in a crash and never asked about again (what it was for does not run again): past
+    /// its deadline the ledger's sweep stops it all the same, and it is not sent again.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_push_lost_in_a_crash_is_stopped_past_its_deadline() {
+        let (tmp, port, seen) = crashed_push().await;
+        let t = hub_at(tmp.path());
+        let op = op_of("dec_c", 0);
+        let t0 = Instant::now();
+        while t.runtime.ledger(&op).unwrap().unwrap().state != "unknown" {
+            assert!(t0.elapsed() < Duration::from_secs(30), "reconciled");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        // not before its deadline
+        assert_eq!(t.runtime.recover_lost_execs(steve_store::now()).unwrap(), 0);
+        let later = steve_store::now() + super::super::node_runtime::PUSH_DEADLINE;
+        assert_eq!(t.runtime.recover_lost_execs(later).unwrap(), 1);
+        while t.runtime.ledger(&op).unwrap().unwrap().state != "finished" {
+            assert!(
+                t0.elapsed() < Duration::from_secs(30),
+                "the lost push is stopped"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        // asked after all: lost, not sent again
+        let url = format!("http://127.0.0.1:{port}/o/r.git");
+        let tip = t.tip();
+        assert_eq!(
+            t.git.push(&spec("dec_c", &url, &tip)).await.unwrap(),
+            Err(PushError::Lost)
+        );
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert_eq!(*seen.lock().unwrap(), 1, "pushed once");
         assert_eq!(t.pushes(), 1);

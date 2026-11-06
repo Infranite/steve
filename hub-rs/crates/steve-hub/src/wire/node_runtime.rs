@@ -46,6 +46,8 @@ pub use heads::{
     CaughtUp, NodeSnapshot, Pull, Receive, ReplayCheck, catch_up_streams, read_snapshot,
 };
 pub use ledger::LedgerEntry;
+#[cfg(test)]
+pub(crate) use ledger::PUSH_DEADLINE;
 
 /// Retries of a turn after a passing failure (gateway 5xx) with no tool run, and their waits.
 const RETRY_DELAYS_MS: [i64; 2] = [20_000, 60_000];

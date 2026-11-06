@@ -332,23 +332,18 @@ impl GitHub {
         let (rows, repos) = repos;
         let mut suggestions = Vec::new();
         if !projects.is_empty() {
-            let remotes = match self.git_nodes() {
-                // each project's directory read on its Node
-                Some(n) => {
-                    let mut out = vec![];
-                    for (id, path) in projects {
-                        let r = match n.origin(&id).await {
-                            Some(r) => r,
-                            None => tokio::task::spawn_blocking(move || project_remote(&path))
-                                .await
-                                .unwrap_or_default(),
-                        };
-                        if let Some(r) = r {
-                            out.push((id, r));
-                        }
-                    }
-                    out
-                }
+            let ids: Vec<String> = projects.iter().map(|(id, _)| id.clone()).collect();
+            // each project's directory read on its Node; the Hub's own git with the local Node off
+            let on_nodes = match self.git_nodes() {
+                Some(n) => n.origins(&ids).await,
+                None => None,
+            };
+            let remotes: Vec<(String, String)> = match on_nodes {
+                Some(found) => ids
+                    .into_iter()
+                    .zip(found)
+                    .filter_map(|(id, r)| r.map(|r| (id, r)))
+                    .collect(),
                 None => tokio::task::spawn_blocking(move || {
                     projects
                         .into_iter()

@@ -160,6 +160,7 @@ fn the_new_types_survive_the_wire() {
         refs: vec!["HEAD".into()],
         ranges: vec![],
         fetch: false,
+        no_status: false,
         reads: reads.clone(),
     });
     let commit = CommitInfo {
@@ -411,6 +412,7 @@ fn git_query(w: WorkspaceRef) -> GitQuery {
         refs: vec![],
         ranges: vec![],
         fetch: false,
+        no_status: false,
         reads: vec![],
     }
 }

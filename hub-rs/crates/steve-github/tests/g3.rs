@@ -1062,6 +1062,8 @@ struct LostPush {
     land: Option<std::path::PathBuf>,
     work: std::path::PathBuf,
     pushes: std::sync::atomic::AtomicUsize,
+    /// How many times it answers [`push::PushError::Running`] first (not ended yet).
+    running: std::sync::atomic::AtomicUsize,
 }
 
 #[async_trait::async_trait]
@@ -1088,6 +1090,11 @@ impl steve_github::push::GitNodes for LostPush {
         self.pushes
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         assert_eq!((p.branch, p.full_name), (BRANCH, REPO));
+        use std::sync::atomic::Ordering::SeqCst;
+        if self.running.load(SeqCst) > 0 {
+            self.running.fetch_sub(1, SeqCst);
+            return Some(Err(steve_github::push::PushError::Running));
+        }
         if let Some(bare) = &self.land {
             git(
                 &self.work,
@@ -1096,7 +1103,7 @@ impl steve_github::push::GitNodes for LostPush {
         }
         Some(Err(steve_github::push::PushError::Lost))
     }
-    async fn origin(&self, _project: &str) -> Option<Option<String>> {
+    async fn origins(&self, _projects: &[String]) -> Option<Vec<Option<String>>> {
         None
     }
 }
@@ -1110,6 +1117,7 @@ async fn a_lost_push_that_landed_opens_the_pr() {
         land: Some(h.fake.bare_remote(REPO).expect("bare")),
         work: h.work.path().to_path_buf(),
         pushes: Default::default(),
+        running: Default::default(),
     });
     h.gh.set_git_nodes(nodes.clone());
     let id = item(&h, 1, Some(BRANCH));
@@ -1133,6 +1141,7 @@ async fn a_lost_push_that_did_not_land_is_not_pushed_again() {
         land: None,
         work: h.work.path().to_path_buf(),
         pushes: Default::default(),
+        running: Default::default(),
     });
     h.gh.set_git_nodes(nodes.clone());
     let id = item(&h, 1, Some(BRANCH));
@@ -1153,4 +1162,42 @@ async fn a_lost_push_that_did_not_land_is_not_pushed_again() {
         "{:?}",
         h.core.calls()
     );
+}
+
+/// A push the Node has not ended when the Hub stops waiting ([`push::PushError::Running`]) is
+/// not compared with GitHub yet (it may still land): the run's end is unknown, and the next run
+/// asks the Node again, which then says it may have landed; it did, and the PR is opened.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_push_still_running_is_asked_again_not_compared() {
+    let h = setup().await;
+    let nodes = Arc::new(LostPush {
+        land: Some(h.fake.bare_remote(REPO).expect("bare")),
+        work: h.work.path().to_path_buf(),
+        pushes: Default::default(),
+        running: 1.into(),
+    });
+    h.gh.set_git_nodes(nodes.clone());
+    let id = item(&h, 1, Some(BRANCH));
+    assert!(accepted(&h, &id).await);
+    let (dec, _, _) = open_decision(&h, accept::PR_OPEN).expect("asked");
+    answer(&h, &dec, "yes", "fix: 保留 return_to\n登录后回到原页面。")
+        .await
+        .expect("yes");
+    assert_eq!(effect(&h, &dec).0, "unknown");
+    assert_eq!(h.fake.pulls_of(REPO, BRANCH), 0);
+    assert!(
+        !h.core
+            .calls()
+            .iter()
+            .any(|c| matches!(c, CoreCall::Fail { .. })),
+        "{:?}",
+        h.core.calls()
+    );
+    h.env.clock.advance(steve_store::outbox::backoff(1) + 1);
+    h.gh.settle().await;
+    let sha = git(h.work.path(), &["rev-parse", BRANCH]);
+    assert_eq!(pushed(&h).as_deref(), Some(sha.as_str()));
+    assert_eq!(nodes.pushes.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert_eq!(effect(&h, &dec).0, "done");
+    assert_eq!(h.fake.pulls_of(REPO, BRANCH), 1);
 }

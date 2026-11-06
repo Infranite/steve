@@ -16,6 +16,10 @@ use serde::Serialize;
 /// The methods that go through the ledger.
 pub(super) const LEDGER_METHODS: [&str; 2] = ["exec", "git_apply"];
 
+/// How long a push may run on a Node (the Node's own deadline, counted there from when it took
+/// it): an unknown one written longer ago than this is past it.
+pub(crate) const PUSH_DEADLINE: i64 = 5 * 60 * 1000;
+
 /// What a ledger operation may be for.
 const SUBJECTS: [&str; 4] = ["flow_run:", "vault_use:", "push:", "lane:"];
 
@@ -170,16 +174,19 @@ impl NodeRuntime {
         Ok(planned)
     }
 
-    /// Ledger `exec`s the Node can no longer tell the end of (a restart cut them off) whose
-    /// deadline has passed: each gets a recover, so its process group does not outlive the
-    /// deadline the command was given and its workspace can be tidied. How many were planned.
-    pub(super) fn recover_lost_execs(&self, now: i64) -> Result<usize, StoreError> {
+    /// Ledger `exec`s and pushes (`git_apply`) the Node can no longer tell the end of (a restart
+    /// cut them off) whose deadline has passed: each gets a recover, so its process group does not
+    /// outlive the deadline the command was given and its workspace can be tidied, whether or not
+    /// what it was for asks about it again. A push's deadline is [`PUSH_DEADLINE`] after it was
+    /// written (the Node's starts later, when it takes it). How many were planned.
+    pub(crate) fn recover_lost_execs(&self, now: i64) -> Result<usize, StoreError> {
         let due: Vec<String> = self.store.reader(|c| {
             let mut st = c.prepare(
-                "SELECT operation_id FROM node_commands WHERE node_id=? AND method='exec' AND state='unknown'
-                   AND COALESCE(json_extract(request,'$.body.limits.deadline'), 0) <= ?",
+                "SELECT operation_id FROM node_commands WHERE node_id=?1 AND state='unknown'
+                   AND ((method='exec' AND COALESCE(json_extract(request,'$.body.limits.deadline'), 0) <= ?2)
+                        OR (method='git_apply' AND created + ?3 <= ?2))",
             )?;
-            st.query_map(rusqlite::params![self.node_id.as_str(), now], |r| {
+            st.query_map(rusqlite::params![self.node_id.as_str(), now, PUSH_DEADLINE], |r| {
                 r.get::<_, String>(0)
             })?
             .collect::<Result<Vec<_>, _>>()

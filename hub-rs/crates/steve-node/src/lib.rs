@@ -1414,6 +1414,7 @@ impl LocalNode {
                                 refs: vec![],
                                 ranges: vec![],
                                 fetch: false,
+                                no_status: false,
                                 reads: vec![],
                             },
                         )

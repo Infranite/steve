@@ -189,6 +189,7 @@ fn query(w: &WorkspaceRef) -> GitQuery {
         refs: vec![],
         ranges: vec![],
         fetch: false,
+        no_status: false,
         reads: vec![],
     }
 }
@@ -336,6 +337,16 @@ async fn facts_of_a_workspace() {
         .unwrap();
     assert_ne!(g.revision, f.revision, "a branch moved");
     assert!(g.dirty);
+    // the status left out: not read, the rest the same
+    let quick = n
+        .git_facts(GitQuery {
+            no_status: true,
+            ..query(&w)
+        })
+        .await
+        .unwrap();
+    assert!(!quick.dirty);
+    assert_eq!((&quick.revision, &quick.head), (&g.revision, &g.head));
     let r = &g.ranges[0];
     assert_eq!((r.ahead, r.behind), (1, 1));
     assert_eq!(r.overlap, vec![RelPath::new("b.txt").unwrap()]);
