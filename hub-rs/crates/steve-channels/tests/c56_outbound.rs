@@ -793,12 +793,13 @@ async fn a_failed_rewrite_becomes_a_draft_even_with_a_grant() {
     let plan = recorded(&h, &h.oncall.clone(), "C_OPS", "o1", "ulilei", "预算").await;
     exec(
         &h,
-        "INSERT INTO grants (id, workspace_id, subject_type, subject_id, capability, resource_type, resource_id, until, created_by, created)
-         VALUES ('gr_1', 'default', 'flow', 'flw_x', 'msg.send', 'space', '*', 99999999999999, 'usr_dev', 1);",
+        "INSERT INTO grants (id, workspace_id, subject_type, subject_id, capability, resource_type, resource_id, scope, until, created_by, created)
+         VALUES ('gr_1', 'default', 'flow', 'flw_x', 'msg.send', 'space', '*', json_object('flow_version', 1), 99999999999999, 'usr_dev', 1);",
     );
     let auth = Auth::Grant {
         flow_id: "flw_x".into(),
         run_id: "run_x".into(),
+        flow_version: 1,
     };
     let d = h
         .outbox
@@ -1460,8 +1461,8 @@ async fn an_approved_flow_step_is_the_only_approval() {
     exec(
         &h,
         &format!(
-            "INSERT INTO grants (id, workspace_id, subject_type, subject_id, capability, resource_type, resource_id, until, created_by, created)
-             VALUES ('gr_1', 'default', 'flow', 'flw_test', 'msg.send', 'space', '{}', 99999999999999, 'usr_dev', 1);",
+            "INSERT INTO grants (id, workspace_id, subject_type, subject_id, capability, resource_type, resource_id, scope, until, created_by, created)
+             VALUES ('gr_1', 'default', 'flow', 'flw_test', 'msg.send', 'space', '{}', json_object('flow_version', 1), 99999999999999, 'usr_dev', 1);",
             plan.space_id
         ),
     );
@@ -1485,8 +1486,8 @@ async fn an_approved_flow_step_is_the_only_approval() {
     exec(
         &h,
         &format!(
-            "INSERT INTO grants (id, workspace_id, subject_type, subject_id, capability, resource_type, resource_id, until, created_by, created)
-             VALUES ('gr_2', 'default', 'flow', 'flw_test', 'msg.send', 'space', '{}', 99999999999999, 'usr_dev', 1);",
+            "INSERT INTO grants (id, workspace_id, subject_type, subject_id, capability, resource_type, resource_id, scope, until, created_by, created)
+             VALUES ('gr_2', 'default', 'flow', 'flw_test', 'msg.send', 'space', '{}', json_object('flow_version', 1), 99999999999999, 'usr_dev', 1);",
             mine.space_id
         ),
     );
@@ -1545,14 +1546,15 @@ async fn nothing_reaches_the_adapter_without_a_valid_authorization() {
     // an expired / revoked grant, or none
     exec(
         &h,
-        "INSERT INTO grants (id, workspace_id, subject_type, subject_id, capability, resource_type, resource_id, until, created_by, created, revoked)
-         VALUES ('gr_old', 'default', 'flow', 'flw_old', 'msg.send', 'space', '*', 2, 'usr_dev', 1, NULL),
-                ('gr_rev', 'default', 'flow', 'flw_rev', 'msg.send', 'space', '*', 99999999999999, 'usr_dev', 1, 5);",
+        "INSERT INTO grants (id, workspace_id, subject_type, subject_id, capability, resource_type, resource_id, scope, until, created_by, created, revoked)
+         VALUES ('gr_old', 'default', 'flow', 'flw_old', 'msg.send', 'space', '*', json_object('flow_version', 1), 2, 'usr_dev', 1, NULL),
+                ('gr_rev', 'default', 'flow', 'flw_rev', 'msg.send', 'space', '*', json_object('flow_version', 1), 99999999999999, 'usr_dev', 1, 5);",
     );
     for f in ["flw_old", "flw_rev", "flw_none"] {
         let a = Auth::Grant {
             flow_id: f.into(),
             run_id: "r".into(),
+            flow_version: 1,
         };
         let d = h
             .outbox
@@ -1587,8 +1589,8 @@ async fn nothing_reaches_the_adapter_without_a_valid_authorization() {
     let li = recorded(&h, &h.me.clone(), "D_LI", "m1", "ulilei", "/bot 发给大家").await;
     exec(
         &h,
-        "INSERT INTO grants (id, workspace_id, subject_type, subject_id, capability, resource_type, resource_id, until, created_by, created)
-         VALUES ('gr_me', 'default', 'flow', 'flw_me', 'msg.send', 'space', '*', 99999999999999, 'usr_dev', 1);",
+        "INSERT INTO grants (id, workspace_id, subject_type, subject_id, capability, resource_type, resource_id, scope, until, created_by, created)
+         VALUES ('gr_me', 'default', 'flow', 'flw_me', 'msg.send', 'space', '*', json_object('flow_version', 1), 99999999999999, 'usr_dev', 1);",
     );
     for a in [
         Auth::Trigger {
@@ -1597,6 +1599,7 @@ async fn nothing_reaches_the_adapter_without_a_valid_authorization() {
         Auth::Grant {
             flow_id: "flw_me".into(),
             run_id: "r".into(),
+            flow_version: 1,
         },
         rule(&li),
         Auth::None,

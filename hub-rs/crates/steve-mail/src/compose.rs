@@ -7,7 +7,9 @@ use std::time::Duration;
 
 use serde::Deserialize;
 use serde_json::Value;
-use steve_knowledge::{Hit, Purpose, Query, anchor_mems, record_use, retrieve};
+use steve_knowledge::{
+    Hit, Purpose, Query, SEMANTIC_DOWN_NOTE, anchor_mems, record_use, retrieve_all,
+};
 use steve_modules::contacts::{cards, people_repo};
 use steve_modules::outbound::{self, Audience, CheckCx, KnowledgeUse};
 use steve_modules::{ApiError, Caller, Tier};
@@ -175,6 +177,18 @@ fn level_label(h: &Hit) -> &'static str {
     steve_knowledge::context::level_label(h.level)
 }
 
+/// The knowledge layer, with [`SEMANTIC_DOWN_NOTE`] when it was found by keywords only.
+fn with_down_note(knowledge: String, semantic_down: bool) -> String {
+    if !semantic_down {
+        return knowledge;
+    }
+    if knowledge.is_empty() {
+        SEMANTIC_DOWN_NOTE.to_string()
+    } else {
+        format!("{knowledge}\n{SEMANTIC_DOWN_NOTE}")
+    }
+}
+
 fn render_hits(hits: &[Hit]) -> String {
     if hits.is_empty() {
         return String::new();
@@ -318,7 +332,9 @@ impl Mail {
             rq.anchors = &anchors;
             rq.k = DRAFT_K;
             rq.now = now;
-            for h in retrieve(c, &rq)? {
+            let found = retrieve_all(c, &rq)?;
+            let semantic_down = found.semantic_down;
+            for h in found.hits {
                 if !hits
                     .iter()
                     .any(|x| x.obj_type == h.obj_type && x.obj_id == h.obj_id && x.seq == h.seq)
@@ -360,7 +376,7 @@ impl Mail {
                     signature: st.signature,
                     cards: cards_text,
                     items,
-                    knowledge: render_hits(&hits),
+                    knowledge: with_down_note(render_hits(&hits), semantic_down),
                     context: blocks.join("\n\n---\n\n"),
                     replying_to: line_of(&orig).replace('\n', "；"),
                     instruction: q.instruction.clone().unwrap_or_default(),

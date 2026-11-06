@@ -154,6 +154,9 @@ pub(crate) struct State {
     /// The periodic closing check is running: what it asks of a Node is no new event, so it
     /// doesn't outdate a gathering of the same facts already running (`node_git`).
     git_polling: bool,
+    /// The periodic closing check is running: it fingerprints a worktree only when nothing else
+    /// holds the closing (`cycle.rs`).
+    lc_ticking: bool,
 }
 
 /// One critical section: the core plus the held state lock.

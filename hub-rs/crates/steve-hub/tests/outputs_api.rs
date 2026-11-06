@@ -407,3 +407,77 @@ async fn an_output_on_a_device_that_is_not_there_says_device_offline() {
     let _ = std::fs::remove_file(&f.tmp);
     let _ = &e.home;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_large_recording_plays_by_range_and_only_images_and_office_say_large() {
+    let f = fixture();
+    let e = start().await;
+    outputs(&e, &f).await;
+    // sparse files over the inline limit (64 MiB): nothing is written to disk
+    let big = 65 * 1024 * 1024u64;
+    for rel in ["media/long.mov", "media/long.png", "media/long.docx"] {
+        let file = std::fs::File::create(f.repo.join(rel)).unwrap();
+        file.set_len(big).unwrap();
+    }
+    let c = rusqlite::Connection::open(&e.db).unwrap();
+    for (id, loc) in [
+        ("mov", "media/long.mov"),
+        ("png", "media/long.png"),
+        ("bigdoc", "media/long.docx"),
+    ] {
+        c.execute(
+            "INSERT INTO artifacts(id,item_id,kind,title,location,created) VALUES(?,'i1','文件','x',?,1)",
+            [id, loc],
+        )
+        .unwrap();
+    }
+    let large = |v: &Value| v["large"].as_bool();
+    let (_, v) = e
+        .call("GET", "/api/items/i1/artifacts/mov/preview", None)
+        .await;
+    assert_eq!(
+        (v["type"].as_str(), large(&v)),
+        (Some("video"), Some(false)),
+        "{v}"
+    );
+    let (_, v) = e
+        .call("GET", "/api/items/i1/artifacts/png/preview", None)
+        .await;
+    assert_eq!(
+        (v["type"].as_str(), large(&v)),
+        (Some("image"), Some(true)),
+        "{v}"
+    );
+    let (_, v) = e
+        .call("GET", "/api/items/i1/artifacts/bigdoc/preview", None)
+        .await;
+    assert_eq!(
+        (v["type"].as_str(), large(&v)),
+        (Some("office"), Some(true)),
+        "{v}"
+    );
+    // the recording plays: a span of it, then the whole of it (no 413)
+    let (s, h, b) = e
+        .raw("/api/items/i1/artifacts/mov/raw", Some("bytes=0-9"))
+        .await;
+    assert_eq!(s, 206);
+    assert_eq!(b.len(), 10);
+    assert!(
+        h.contains(&("content-range".into(), format!("bytes 0-9/{big}"))),
+        "{h:?}"
+    );
+    let r = e
+        .http
+        .get(format!(
+            "{}/api/items/i1/artifacts/mov/raw?download=1",
+            e.base
+        ))
+        .header("cookie", &e.cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 200);
+    assert_eq!(r.content_length(), Some(big));
+    drop(r);
+    let _ = std::fs::remove_file(&f.tmp);
+}

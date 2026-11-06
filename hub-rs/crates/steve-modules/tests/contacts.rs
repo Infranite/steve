@@ -722,10 +722,26 @@ async fn delete_contact_drops_attrs_and_memories_keeps_links() {
             )?)
         })
         .unwrap();
+    let detail = serde_json::from_str::<Value>(&detail).unwrap();
     assert_eq!(
-        serde_json::from_str::<Value>(&detail).unwrap(),
-        json!({"type": "contact", "attrs": 1, "mems": 1, "teams": 1})
+        (
+            &detail["type"],
+            &detail["attrs"],
+            &detail["mems"],
+            &detail["teams"]
+        ),
+        (&json!("contact"), &json!(1), &json!(1), &json!(1))
     );
+    // the rows deleted for good, as they were: enough to put them back by hand
+    let d = &detail["deleted"];
+    assert_eq!(d["attr_values"].as_array().unwrap().len(), 1, "{d}");
+    assert_eq!(d["attr_values"][0]["party_id"], cid.as_str());
+    assert!(d["attr_values"][0]["value"].is_string(), "{d}");
+    assert_eq!(d["mems"].as_array().unwrap().len(), 1, "{d}");
+    assert!(d["mems"][0]["text"].is_string(), "{d}");
+    assert_eq!(d["mem_about"][0]["mem_id"], d["mems"][0]["id"]);
+    assert_eq!(d["team_members"].as_array().unwrap().len(), 1, "{d}");
+    assert_eq!(d["team_members"][0]["contact_id"], cid.as_str());
     let (s, b) = req(&r, &me(), "GET", &format!("/contacts/{cid}"), None).await;
     assert_eq!((s, b), (404, err("没有这个联系人")));
     let (s, _) = req(&r, &me(), "DELETE", &format!("/contacts/{cid}"), None).await;

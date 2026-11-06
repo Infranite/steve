@@ -211,48 +211,36 @@ impl HubFiles for NodeFiles {
         if offset > artifact.size {
             return Err(ApiError::new(ErrorCode::Invalid, "offset past EOF"));
         }
-        let root = self.data_dir.join("files");
-        let components = [
-            row.workspace_id.clone(),
-            row.sha256[..2].to_string(),
-            row.id.clone(),
-        ];
+        // data/files/<workspace>/<sha256[..2]>/<id>: every part was checked above to be one plain path
+        // component, so the path stays under data/files by construction
+        let path = self
+            .data_dir
+            .join("files")
+            .join(&row.workspace_id)
+            .join(&row.sha256[..2])
+            .join(&row.id);
         let size = artifact.size;
-        // Blocking IO stays outside core/store locks. A local blob must remain under data/files;
-        // O_NOFOLLOW prevents a final-component symlink swap between checking and opening.
+        // Blocking IO stays outside core/store locks. O_NOFOLLOW: the blob itself is never a link
+        // (swapped in between checking and opening); O_NONBLOCK: a FIFO put in its place can't hang the
+        // open. What was opened must still be a file of the granted size.
         tokio::task::spawn_blocking(move || {
             use std::io::{Read, Seek, SeekFrom};
-            use std::os::{
-                fd::{AsRawFd, FromRawFd},
-                unix::fs::OpenOptionsExt,
-            };
-            let mut file = std::fs::OpenOptions::new()
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut file = match std::fs::OpenOptions::new()
                 .read(true)
-                .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY | libc::O_CLOEXEC)
-                .open(root)
-                .map_err(internal)?;
-            // Walk with directory handles: no ancestor symlink can escape after validation.
-            for (i, part) in components.iter().enumerate() {
-                let part = std::ffi::CString::new(part.as_str()).map_err(internal)?;
-                let flags = libc::O_RDONLY
-                    | libc::O_NOFOLLOW
-                    | libc::O_CLOEXEC
-                    | libc::O_NONBLOCK
-                    | if i < 2 { libc::O_DIRECTORY } else { 0 };
-                let fd = unsafe { libc::openat(file.as_raw_fd(), part.as_ptr(), flags) };
-                if fd < 0 {
-                    let e = std::io::Error::last_os_error();
-                    // the blob is gone from the Hub: it will not come back by asking again
-                    if e.kind() == std::io::ErrorKind::NotFound {
-                        return Err(ApiError::new(
-                            ErrorCode::Conflict,
-                            "artifact missing on the hub",
-                        ));
-                    }
-                    return Err(internal(e));
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+                .open(&path)
+            {
+                Ok(f) => f,
+                // the blob is gone from the Hub: it will not come back by asking again
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    return Err(ApiError::new(
+                        ErrorCode::Conflict,
+                        "artifact missing on the hub",
+                    ));
                 }
-                file = unsafe { std::fs::File::from_raw_fd(fd) };
-            }
+                Err(e) => return Err(internal(e)),
+            };
             let meta = file.metadata().map_err(internal)?;
             if !meta.is_file() || meta.len() != size {
                 return Err(ApiError::new(ErrorCode::Conflict, "artifact size changed"));
@@ -471,6 +459,18 @@ mod tests {
         std::fs::remove_file(path.join(&f.id)).unwrap();
         std::os::unix::fs::symlink("/etc/hosts", path.join(&f.id)).unwrap();
         assert!(files.fetch(access.clone(), id.clone(), 0, 1).await.is_err());
+        // a FIFO in its place neither hangs the read nor passes for the file
+        std::fs::remove_file(path.join(&f.id)).unwrap();
+        let fifo = std::ffi::CString::new(path.join(&f.id).to_string_lossy().as_bytes()).unwrap();
+        // SAFETY: mkfifo(3) on a path in the test's own temp dir
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        let r = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            files.fetch(access.clone(), id.clone(), 0, 1),
+        )
+        .await
+        .expect("the open does not wait for a writer");
+        assert_eq!(r.unwrap_err().code, ErrorCode::Conflict);
         // gone from the Hub (its blob, then its row): a conflict, which the Node does not retry
         std::fs::remove_file(path.join(&f.id)).unwrap();
         let e = files

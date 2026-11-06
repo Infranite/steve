@@ -33,6 +33,9 @@ const FIND_PARALLEL: usize = 8;
 pub const WRITE_TIMEOUT: Duration = Duration::from_secs(120);
 /// Below this cosine similarity a chunk is not about the query.
 pub const MIN_SCORE: f64 = 0.5;
+/// After a failed search, searches skip the server for this long (they answer "unavailable" at
+/// once, and retrieval goes on with the keyword passes) instead of each waiting out a timeout.
+pub const SKIP_AFTER_FAILURE: Duration = Duration::from_secs(45);
 
 /// Where the server is and who Steve is to it.
 #[derive(Debug, Clone)]
@@ -50,6 +53,8 @@ pub struct OpenViking {
     cfg: OpenVikingConfig,
     search: ureq::Agent,
     write: ureq::Agent,
+    /// Searches skip the server until then ([`SKIP_AFTER_FAILURE`]).
+    skip_until: std::sync::Mutex<Option<std::time::Instant>>,
 }
 
 fn agent(timeout: Duration) -> ureq::Agent {
@@ -92,7 +97,19 @@ impl OpenViking {
             cfg,
             search: agent(SEARCH_TIMEOUT),
             write: agent(WRITE_TIMEOUT),
+            skip_until: std::sync::Mutex::new(None),
         })
+    }
+
+    /// Whether a search failed less than [`SKIP_AFTER_FAILURE`] ago.
+    pub fn skipping(&self) -> bool {
+        let g = self.skip_until.lock().unwrap_or_else(|e| e.into_inner());
+        g.is_some_and(|t| std::time::Instant::now() < t)
+    }
+
+    fn failed(&self) {
+        *self.skip_until.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some(std::time::Instant::now() + SKIP_AFTER_FAILURE);
     }
 
     fn post(
@@ -256,6 +273,9 @@ impl KnowledgeStore for OpenViking {
         if pass != Pass::Semantic || text.trim().is_empty() {
             return Ok(Vec::new());
         }
+        if self.skipping() {
+            return Err(unavailable(self.id(), "刚才失败过，暂时跳过"));
+        }
         let mut subjects = vec![vec![tag("vis", "workspace")]];
         if !scope.workspace_only {
             subjects.push(vec![tag("by", &scope.user)]);
@@ -279,6 +299,9 @@ impl KnowledgeStore for OpenViking {
             });
         }
         let mut best: HashMap<(String, String, i64), f64> = HashMap::new();
+        if results.iter().any(|r| r.is_err()) {
+            self.failed();
+        }
         for found in results {
             let found = found.map_err(|e| unavailable(self.id(), e))?;
             for (uri, score) in found {

@@ -21,8 +21,8 @@ use serde_json::{Value, json};
 use steve_node_api as na;
 
 use super::{
-    DIFF_MAX, Found, LIST_MAX, Out, RAW_MAX, TEXT_MAX, branch, commit, first_word, git_doc,
-    home_tilde, is_hash, media, plain, text_value,
+    DIFF_MAX, Found, LIST_MAX, Out, TEXT_MAX, branch, commit, first_word, git_doc, home_tilde,
+    is_hash, media, plain, text_value,
 };
 use crate::api::blocking;
 use crate::api::projects::{normalize, offline, placement_error};
@@ -729,7 +729,7 @@ async fn node_file(a: &Addr, e: &Entry) -> Result<Value, ApiError> {
     let name = a.name();
     let mut v = match media(&name) {
         (Some(form), mime) => {
-            json!({ "type": form, "name": name, "mime": mime, "large": e.size > RAW_MAX })
+            json!({ "type": form, "name": name, "mime": mime, "large": super::large(form, e.size) })
         }
         (None, _) => {
             // a file that went or changed meanwhile reads as empty, as on the Hub's disk

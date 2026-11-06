@@ -77,7 +77,8 @@ pub struct TurnFinish {
     pub ended: i64,
     /// Local day of `ended`.
     pub day: String,
-    /// The model the turn's counters are booked under in `stat_daily` (normally the first usage row's).
+    /// The model the turn's counters are booked under in `stat_daily` (normally the first usage row's);
+    /// kept on the turn (`agent_turns.model`) so a rebuild books it under the same one.
     pub model: String,
     /// end_turn | cancelled | max_tokens | refusal | error | interrupted
     pub stop_reason: Option<String>,
@@ -311,8 +312,8 @@ fn finish_in(c: &Connection, f: &TurnFinish) -> Result<Option<String>> {
     let Some(t) = t else { return Ok(None) };
     let kinds = to_json(&f.tool_kinds)?;
     c.run(
-        "UPDATE agent_turns SET ended = ?, stop_reason = ?, error = ?, transient = ?, tools = ?, tool_errors = ?, tool_kinds = ?, permissions = ? WHERE id = ?",
-        params![f.ended, f.stop_reason, f.error, f.transient, f.tools, f.tool_errors, kinds, f.permissions, f.turn_id],
+        "UPDATE agent_turns SET ended = ?, stop_reason = ?, error = ?, transient = ?, tools = ?, tool_errors = ?, tool_kinds = ?, permissions = ?, model = ? WHERE id = ?",
+        params![f.ended, f.stop_reason, f.error, f.transient, f.tools, f.tool_errors, kinds, f.permissions, f.model, f.turn_id],
     )?;
     let reason = f.stop_reason.as_deref();
     let key = Key {

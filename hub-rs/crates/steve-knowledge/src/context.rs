@@ -20,7 +20,9 @@ use steve_store::base::{Level, ObjRef, Viewer};
 use steve_store::{Item, Store};
 
 use crate::cite;
-use crate::retrieve::{Hit, Purpose, Query, anchor_mems, record_use, retrieve};
+use crate::retrieve::{
+    Hit, Purpose, Query, Retrieved, SEMANTIC_DOWN_NOTE, anchor_mems, record_use, retrieve_all,
+};
 use crate::state::{Guard, Knowledge};
 
 /// Retrieved hits per scene.
@@ -192,6 +194,8 @@ pub struct SessionCtx {
     pub query: String,
     pub hits: Vec<Hit>,
     pub cards: Vec<ContactCard>,
+    /// The hits were found by keywords only ([`Retrieved::semantic_down`]); `text` says so.
+    pub semantic_down: bool,
 }
 
 /// Layers 6 and 7 for an Agent session on `item`: the cards of the item's people, the rules
@@ -222,8 +226,14 @@ pub fn session_context(
     q.anchors = &anchors;
     q.k = SESSION_K;
     q.now = now;
-    let found = retrieve(c, &q)?;
-    let mut hits = merge(rules, found);
+    let found = retrieve_all(c, &q)?;
+    let semantic_down = found.semantic_down;
+    let mut hits = merge(rules, found.hits);
+    let note = if semantic_down {
+        SEMANTIC_DOWN_NOTE
+    } else {
+        ""
+    };
 
     let cards_text = contacts::cards::render(&cards);
     let cards_block = if cards_text.is_empty() {
@@ -235,6 +245,7 @@ pub fn session_context(
         [
             cards_block.clone(),
             render_snippets(SESSION_HEAD, SESSION_RULES, "K", hits),
+            note.to_string(),
         ]
         .into_iter()
         .filter(|b| !b.is_empty())
@@ -254,6 +265,7 @@ pub fn session_context(
         query,
         hits,
         cards,
+        semantic_down,
     })
 }
 
@@ -301,13 +313,22 @@ pub fn chat_context(
     let mut q = Query::new(kb.store(), viewer, &query, Purpose::Chat);
     q.k = CHAT_K;
     q.now = now;
-    let hits = merge(rules, retrieve(c, &q)?);
-    if hits.is_empty() {
+    let found = retrieve_all(c, &q)?;
+    let hits = merge(rules, found.hits);
+    if hits.is_empty() && !found.semantic_down {
         return Ok(None);
+    }
+    // keywords only: said even when nothing was found, so “no knowledge” is not taken as the whole
+    let mut text = render_snippets(CHAT_HEAD, CHAT_RULES, "", &hits);
+    if found.semantic_down {
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        text.push_str(SEMANTIC_DOWN_NOTE);
     }
     Ok(Some(ChatKnowledge {
         ctx: ChatCtx {
-            text: render_snippets(CHAT_HEAD, CHAT_RULES, "", &hits),
+            text,
             cites: hits.iter().map(cite_of).collect(),
         },
         query,
@@ -344,7 +365,7 @@ pub fn reply_hits(
     recent: &[String],
     anchors: &[ObjRef],
     now: i64,
-) -> ApiResult<Vec<Hit>> {
+) -> ApiResult<Retrieved> {
     let start = recent.len().saturating_sub(3);
     let mut text = message.to_string();
     for r in &recent[start..] {
@@ -356,7 +377,7 @@ pub fn reply_hits(
     q.anchors = anchors;
     q.k = REPLY_K;
     q.now = now;
-    Ok(retrieve(c, &q)?)
+    Ok(retrieve_all(c, &q)?)
 }
 
 // ---------------------------------------------------------------- the B1 provider

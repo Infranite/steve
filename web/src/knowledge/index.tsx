@@ -94,19 +94,21 @@ const LevelTag = ({ l }: { l: string }) => <span className="inline-flex shrink-0
 
 function SearchTab({ q }: { q: string }) {
   const t = useT()
-  const [res, setRes] = useState<{ q: string; hits: Hit[]; ms: number } | null>(null), [err, setErr] = useState("")
+  const [res, setRes] = useState<{ q: string; hits: Hit[]; ms: number; down: boolean } | null>(null), [err, setErr] = useState("")
   useEffect(() => {
     if (!q) { setRes(null); return }
     let on = true; setErr("")
-    kb.search(q).then((x) => on && setRes({ q, hits: x.hits, ms: x.took_ms }), (e) => on && setErr(errMsg(e)))
+    kb.search(q).then((x) => on && setRes({ q, hits: x.hits, ms: x.took_ms, down: !!x.semantic_down }), (e) => on && setErr(errMsg(e)))
     return () => { on = false }
   }, [q])
   if (!q) return <Empty icon={<SearchIcon />} title={t("knowledge:search.idleTitle")} sub={t("knowledge:search.idleSub")} />
   if (err) return <Empty title={t("knowledge:search.failed")} sub={err} />
   if (!res || res.q !== q) return <div className="flex justify-center py-12" role="status" aria-label={t("knowledge:search.searching")}><Spinner className="size-5 text-muted-foreground" /></div>
-  if (!res.hits.length) return <Empty title={t("knowledge:search.noneTitle")} sub={t("knowledge:search.noneSub", { q })} />
+  /* the meaning search was down: the hits are from keywords only, and the page says so */
+  const down = res.down && <p className="px-1 pb-2 type-footnote text-muted-foreground" role="note" data-kb-keywords-only>{t("knowledge:search.keywordsOnly")}</p>
+  if (!res.hits.length) return <>{down}<Empty title={t("knowledge:search.noneTitle")} sub={t("knowledge:search.noneSub", { q })} /></>
   return (
-    <section aria-label={t("knowledge:search.results")}><SectionLabel>{t("knowledge:search.count", { count: res.hits.length, ms: res.ms })}</SectionLabel>
+    <section aria-label={t("knowledge:search.results")}>{down}<SectionLabel>{t("knowledge:search.count", { count: res.hits.length, ms: res.ms })}</SectionLabel>
       <Group>{res.hits.map((h) => (
         <Row key={h.type + h.id + h.seq} onClick={() => go(h.href)} data-hit={h.id}
           title={<span className="flex min-w-0 items-baseline gap-2"><span className="min-w-0 truncate"><Highlight text={h.title} q={q} />{h.heading ? <span className="text-muted-foreground"> · <Highlight text={h.heading} q={q} /></span> : null}</span></span>}

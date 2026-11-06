@@ -31,6 +31,8 @@ const run = async ({ width, height, scheme }) => {
     else if (u.pathname === '/api/kb/candidates') data = candidates
     else if (u.pathname === '/api/kb/candidates/expired') data = restored.length ? [] : expired
     else if (u.pathname.endsWith('/restore') && method === 'POST') { restored.push(u.pathname); data = { ok: true } }
+    // OpenViking down: the keyword passes answer, and say so
+    else if (u.pathname === '/api/kb/search') data = { hits: u.searchParams.get('q') === '续签' ? [{ n: 1, type: 'chunk', id: 'doc1', seq: 0, title: '合同', heading: null, text: 'Acme 的合同每年三月续签', label: '笔记', level: 'conclusion', href: '#/knowledge/doc/doc1' }] : [], took_ms: 3, semantic_down: true }
     return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(data) })
   })
   const fits = async () => assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, `overflow at ${width}px`)
@@ -63,6 +65,14 @@ const run = async ({ width, height, scheme }) => {
     await page.locator('[data-cand-expired-row="x1"] [data-cand-restore]').click()
     await page.waitForFunction(() => !document.querySelector('[data-cand-expired]'))
     assert.deepEqual(restored.splice(0), ['/api/kb/candidates/x1/restore'])
+    // search while the meaning search is down: the hits come with the note, and so does "nothing found"
+    await page.locator('[data-kb-search]').fill('续签'); await page.locator('[data-kb-search]').press('Enter')
+    await page.locator('[data-hit="doc1"]').waitFor()
+    assert.match(await page.locator('[data-kb-keywords-only]').innerText(), /只按关键词/)
+    await page.locator('[data-kb-search]').fill('没有的东西'); await page.locator('[data-kb-search]').press('Enter')
+    await page.getByText('没有找到').waitFor()
+    assert.equal(await page.locator('[data-kb-keywords-only]').count(), 1)
+    await fits(); await shot('kb-search-keywords-only')
     // the link from 待处理 opens 待确认 directly
     await page.goto(base + '/test/fixtures/knowledge.html?via=link#/knowledge?tab=pending'); await page.locator('[data-kb-tab="待确认"] [data-candidate="c1"]').waitFor()
     // the 待处理 card: the question names the record; an old decision still reads

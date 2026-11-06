@@ -68,7 +68,7 @@ fn at_version(v: usize) -> (tempfile::TempDir, std::path::PathBuf) {
 
 #[test]
 fn schema_version_is_23() {
-    assert_eq!(db::SCHEMA_VERSION, 47);
+    assert_eq!(db::SCHEMA_VERSION, 48);
 }
 
 #[test]
@@ -516,4 +516,32 @@ fn migration_45_adds_the_failure_clock_and_the_compaction_table() {
     assert!(has_table(&c, "session_compactions"));
     assert_eq!(col("session_compactions", "upto"), 1);
     assert_eq!(count(&c, "SELECT v FROM schema_version"), db::SCHEMA_VERSION);
+}
+
+#[test]
+fn migration_48_adds_the_model_of_a_turn() {
+    let (_dir, path) = at_version(47);
+    let c = Connection::open(&path).unwrap();
+    assert!(!columns(&c, "agent_turns").contains(&"model".to_string()));
+    c.execute_batch(
+        "INSERT INTO agent_turns (id, workspace_id, session_id, harness, user_seq, attempt, started, ended)
+         VALUES ('tn_old', 'default', 'ses_1', 'claude-code', 1, 0, 1, 2);",
+    )
+    .unwrap();
+    db::migrate(&c).unwrap();
+    assert!(columns(&c, "agent_turns").contains(&"model".to_string()));
+    // a turn ended before keeps no model: it is attributed as before
+    let m: Option<String> = c
+        .query_row(
+            "SELECT model FROM agent_turns WHERE id = 'tn_old'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(m, None);
+    db::migrate(&c).unwrap();
+    assert_eq!(
+        count(&c, "SELECT v FROM schema_version"),
+        db::SCHEMA_VERSION
+    );
 }

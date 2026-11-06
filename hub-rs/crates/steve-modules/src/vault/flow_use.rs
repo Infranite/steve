@@ -20,6 +20,8 @@ use crate::ApiError;
 pub struct FlowSecretRequest<'a> {
     pub ws: &'a str,
     pub flow_id: &'a str,
+    /// The run's flow version: only a grant written for this version counts.
+    pub flow_version: i64,
     /// `flows.created_by`: personal items are usable only by their owner's flows.
     pub flow_owner: &'a str,
     pub run_id: &'a str,
@@ -53,6 +55,8 @@ pub struct FlowSecretCheck {
     pub grant_id: Option<String>,
     /// A grant covers it or you approved the step.
     pub allowed: bool,
+    /// A flow grant may cover it at all (never for `high` items and bank cards).
+    pub grantable: bool,
 }
 
 impl Vault {
@@ -69,12 +73,14 @@ impl Vault {
             if !visible {
                 return Err(ApiError::not_found("条目").into());
             }
-            let grant_id: Option<String> = if grantable(&item) {
+            let can_grant = grantable(&item);
+            let grant_id: Option<String> = if can_grant {
                 c.query_row(
                     "SELECT id FROM grants WHERE workspace_id = ? AND subject_type = 'flow' AND subject_id = ?
                        AND capability = 'secret.use' AND resource_type = 'vault_item' AND resource_id = ?
-                       AND revoked IS NULL AND until > ? ORDER BY until DESC, id LIMIT 1",
-                    params![r.ws, r.flow_id, item.id, at],
+                       AND revoked IS NULL AND until > ? AND json_extract(scope, '$.flow_version') = ?
+                     ORDER BY until DESC, id LIMIT 1",
+                    params![r.ws, r.flow_id, item.id, at, r.flow_version],
                     |x| x.get(0),
                 )
                 .optional()?
@@ -85,6 +91,7 @@ impl Vault {
                 title: item.title,
                 allowed: grant_id.is_some() || r.approved,
                 grant_id,
+                grantable: can_grant,
             })
         })
     }

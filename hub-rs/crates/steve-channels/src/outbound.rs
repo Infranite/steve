@@ -898,10 +898,16 @@ pub fn verify(
                 _ => false,
             }
         }
-        Auth::Grant { flow_id, .. } => c.query_row(
+        // only a grant for the flow version the run is running
+        Auth::Grant {
+            flow_id,
+            flow_version,
+            ..
+        } => c.query_row(
             "SELECT EXISTS (SELECT 1 FROM grants WHERE workspace_id = ? AND subject_type = 'flow' AND subject_id = ?
-                AND capability = ? AND resource_type = 'space' AND resource_id IN (?, '*') AND revoked IS NULL AND until > ?)",
-            params![row.ws, flow_id, crate::flow_actions::CAPABILITY, space.id, now],
+                AND capability = ? AND resource_type = 'space' AND resource_id IN (?, '*') AND revoked IS NULL AND until > ?
+                AND json_extract(scope, '$.flow_version') = ?)",
+            params![row.ws, flow_id, crate::flow_actions::CAPABILITY, space.id, now, flow_version],
             |r| r.get(0),
         )?,
         Auth::Step { run_id, node_id, gate } => match steve_flow::runs::get(c, run_id) {

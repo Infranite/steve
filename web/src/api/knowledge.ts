@@ -29,7 +29,7 @@ const get = <T>(p: string) => req<T>("GET", p)
 const enc = encodeURIComponent
 
 export const kb = {
-  search: (q: string, limit = 20) => get<{ hits: Hit[]; took_ms: number }>("/kb/search" + qs({ q, limit })),
+  search: (q: string, limit = 20) => get<{ hits: Hit[]; took_ms: number; semantic_down?: boolean }>("/kb/search" + qs({ q, limit })),
   sources: () => get<KbSource[]>("/kb/sources"),
   addFolder: (p: { name: string; path: string; include?: string[]; exclude?: string[]; visibility?: string; level?: Level }) => req<KbSource>("POST", "/kb/sources", { kind: "folder", ...p }),
   patchSource: (id: string, p: Partial<{ name: string; paused: boolean; visibility: string; level: Level; include: string[]; exclude: string[] }>) => req<KbSource>("PATCH", "/kb/sources/" + enc(id), p),

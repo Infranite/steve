@@ -104,9 +104,15 @@ fn an_edit_that_keeps_the_status_still_voids_the_frozen_result() {
     );
     std::fs::write(wt.join("x.txt"), "second\n").unwrap();
     k.core.resolve(&d, "pass", "", "me").unwrap();
-    // the agent was asked to publish: its turn holds the gate, its end finds the change
-    assert_eq!(k.phase(&x.id), "closing");
-    k.rt.end_turn(&k.core, &x.session, "end_turn", None);
+    // the change is found before anything starts on the acceptance: nothing is asked to publish
+    // a result that is not what was accepted
+    let ops = k
+        .db()
+        .store()
+        .items()
+        .operations(&x.id, k.db().item(&x.id).unwrap().unwrap().cycle)
+        .unwrap();
+    assert!(ops.is_empty(), "{ops:?}");
     let i = k.db().item(&x.id).unwrap().unwrap();
     assert_eq!(
         i.phase, "active",
@@ -115,6 +121,43 @@ fn an_edit_that_keeps_the_status_still_voids_the_frozen_result() {
     assert_eq!(i.revision, rev);
     assert!(i.now.starts_with("收尾作废"), "{}", i.now);
     assert_eq!(done_events(&k, &x.id), 0);
+}
+
+#[test]
+fn the_tick_does_not_fingerprint_while_the_acceptance_is_still_open() {
+    let k = Kit::new();
+    let (x, wt) = delivered_in_git(&k, true);
+    std::fs::write(wt.join("x.txt"), "first\n").unwrap();
+    k.core.tx().lc_invalidate(&x.id, "有新的交付").unwrap();
+    let d = k.decision(
+        &x.id,
+        Some(&x.session),
+        "accept",
+        "item",
+        &["pass", "rework"],
+    );
+    k.core
+        .tx()
+        .lc_request_complete(
+            &x.id,
+            "dev",
+            cycle::Policy::Human,
+            false,
+            "交付",
+            Some(d.clone()),
+            vec![],
+        )
+        .unwrap();
+    k.rt.end_turn(&k.core, &x.session, "end_turn", None);
+    std::fs::write(wt.join("x.txt"), "second\n").unwrap();
+    // the acceptance holds the closing anyway: the tick leaves the worktree alone
+    k.core.tx().lc_tick().unwrap();
+    assert_eq!(k.phase(&x.id), "closing");
+    // the answer that would clear it looks, and finds the change
+    k.core.resolve(&d, "pass", "", "me").unwrap();
+    let i = k.db().item(&x.id).unwrap().unwrap();
+    assert_eq!(i.phase, "active");
+    assert!(i.now.starts_with("收尾作废"), "{}", i.now);
 }
 
 #[test]
