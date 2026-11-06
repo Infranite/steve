@@ -106,6 +106,7 @@ pub mod conversations;
 pub mod deliver;
 pub mod disclosure;
 pub mod drafts;
+pub mod ext;
 #[cfg(feature = "fake")]
 pub mod fake;
 pub mod flow_actions;

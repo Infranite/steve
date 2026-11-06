@@ -1,0 +1,516 @@
+//! The public extension entry: an [`Assembly`] of [`Extension`]s, each handing the Hub its
+//! connection and channel-side adapters, routes and background jobs. The `steve-hub` binary runs
+//! [`Assembly::builtin`]; another binary can depend on these crates and run its own assembly:
+//!
+//! ```no_run
+//! # async fn f() -> anyhow::Result<()> {
+//! let asm = steve_hub::Assembly::builtin().without("feishu.self")?;
+//! steve_hub::run(asm).await
+//! # }
+//! ```
+//!
+//! Extensions are linked at compile time. Every conflict (an extension or adapter id twice, an
+//! [`Extension::api`] other than [`EXTENSION_API`], overlapping routes) stops the Hub at startup
+//! with the extension's id. These are messages for whoever assembles the Hub, in the language of
+//! the Hub's other startup errors.
+
+mod builtin;
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::net::SocketAddr;
+use std::panic::AssertUnwindSafe;
+use std::sync::Arc;
+
+use anyhow::Context;
+use axum::Router;
+use serde_json::Value;
+use steve_channels::adapters::feishu::{FeishuUser, SendAsUser};
+use steve_channels::ext::ChannelSide;
+use steve_channels::{ChannelAdapter, MessageSink, ProfileAdapter};
+use steve_modules::Modules;
+use steve_modules::accounts::connections::{ConnectionProvider, Connections};
+use steve_modules::contacts::PartyHooks;
+
+use crate::bus::Bus;
+use crate::config::Config;
+pub use crate::wire::Vars;
+pub use crate::wire::modules::Job;
+
+/// The extension API this Hub is built with; raised only on an incompatible change.
+pub const EXTENSION_API: u32 = 1;
+
+/// Why an assembly was refused, with the extension it is about once the Hub knows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtensionError {
+    extension: Option<String>,
+    msg: String,
+}
+
+impl ExtensionError {
+    pub fn new(msg: impl Into<String>) -> Self {
+        Self {
+            extension: None,
+            msg: msg.into(),
+        }
+    }
+
+    /// The extension it is about.
+    pub fn extension(&self) -> Option<&str> {
+        self.extension.as_deref()
+    }
+
+    pub fn message(&self) -> &str {
+        &self.msg
+    }
+
+    fn of(mut self, ext: &str) -> Self {
+        self.extension.get_or_insert_with(|| ext.to_string());
+        self
+    }
+}
+
+impl std::fmt::Display for ExtensionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.extension {
+            Some(e) => write!(f, "extension {e}: {}", self.msg),
+            None => f.write_str(&self.msg),
+        }
+    }
+}
+
+impl std::error::Error for ExtensionError {}
+
+/// A set of adapters registered with the Hub.
+pub trait Extension: Send + Sync + 'static {
+    /// Stable and unique: `feishu.self`, `example.self`.
+    fn id(&self) -> &str;
+    /// The [`EXTENSION_API`] it was compiled against; the Hub refuses to start on a mismatch.
+    fn api(&self) -> u32 {
+        EXTENSION_API
+    }
+    /// Step one, before `Modules`, `Connections` and `Channels` are built: hand over the adapters.
+    /// No network access.
+    fn declare(&self, d: &mut Declare<'_>) -> Result<(), ExtensionError>;
+    /// Step two, once `Channels` is built: routes and background jobs.
+    fn start(&self, _s: &Started) -> Result<Mounted, ExtensionError> {
+        Ok(Mounted::default())
+    }
+}
+
+struct Entry {
+    ext: Arc<dyn Extension>,
+    /// Built in: its routes keep their paths. Any other extension's are under
+    /// `/channels/ext/{id}`.
+    builtin: bool,
+}
+
+/// The ordered extensions a Hub runs with.
+pub struct Assembly {
+    list: Vec<Entry>,
+}
+
+impl Assembly {
+    /// What the `steve-hub` binary registers: `feishu.bot`, `feishu.self`, `mail.imap`, `github`.
+    pub fn builtin() -> Self {
+        let list: Vec<Arc<dyn Extension>> = vec![
+            Arc::new(builtin::FeishuBot),
+            Arc::new(builtin::FeishuSelf),
+            Arc::new(builtin::MailImap),
+            Arc::new(builtin::GitHub),
+        ];
+        Self {
+            list: list
+                .into_iter()
+                .map(|ext| Entry { ext, builtin: true })
+                .collect(),
+        }
+    }
+
+    pub fn empty() -> Self {
+        Self { list: Vec::new() }
+    }
+
+    pub fn with(mut self, e: impl Extension) -> Self {
+        self.list.push(Entry {
+            ext: Arc::new(e),
+            builtin: false,
+        });
+        self
+    }
+
+    /// Without the extension `id`; an id not in the assembly is an error.
+    pub fn without(mut self, id: &str) -> Result<Self, ExtensionError> {
+        let before = self.list.len();
+        self.list.retain(|e| e.ext.id() != id);
+        if self.list.len() == before {
+            return Err(ExtensionError::new("not in the assembly").of(id));
+        }
+        Ok(self)
+    }
+
+    pub fn ids(&self) -> Vec<&str> {
+        self.list.iter().map(|e| e.ext.id()).collect()
+    }
+
+    /// Unique ids and the API version, before anything is built.
+    pub(crate) fn check(&self) -> Result<(), ExtensionError> {
+        let mut seen = BTreeSet::new();
+        for e in &self.list {
+            let id = e.ext.id();
+            if id.is_empty() {
+                return Err(ExtensionError::new("an extension without an id"));
+            }
+            // it is part of the path of its routes
+            if !id
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"._-".contains(&b))
+            {
+                return Err(ExtensionError::new(
+                    "an id is lowercase letters, digits, '.', '_' and '-'",
+                )
+                .of(id));
+            }
+            if !seen.insert(id) {
+                return Err(ExtensionError::new("registered twice").of(id));
+            }
+            if e.ext.api() != EXTENSION_API {
+                return Err(ExtensionError::new(format!(
+                    "built for extension API {}, this Hub has {EXTENSION_API}",
+                    e.ext.api()
+                ))
+                .of(id));
+            }
+        }
+        Ok(())
+    }
+
+    /// Step one for every extension, in order.
+    pub(crate) fn declare<'a>(
+        &self,
+        vars: &'a Vars,
+        party_hooks: Vec<Arc<dyn PartyHooks>>,
+    ) -> Result<Declare<'a>, ExtensionError> {
+        let mut d = Declare {
+            vars,
+            party_hooks,
+            ext: String::new(),
+            owners: BTreeMap::new(),
+            providers: Vec::new(),
+            channel_adapters: Vec::new(),
+            profiles: Vec::new(),
+            as_user: Vec::new(),
+            mail: Vec::new(),
+            event_sources: Vec::new(),
+            feishu_user: None,
+        };
+        for e in &self.list {
+            let id = e.ext.id();
+            d.ext = id.to_string();
+            e.ext.declare(&mut d).map_err(|err| err.of(id))?;
+        }
+        Ok(d)
+    }
+
+    /// Step two for every extension: their routes merged into `routes` (an overlap names the
+    /// extension) and their jobs.
+    pub(crate) fn start(
+        &self,
+        s: &Started,
+        mut routes: Router<Modules>,
+    ) -> Result<(Router<Modules>, Vec<Job>), ExtensionError> {
+        let mut jobs = Vec::new();
+        for e in &self.list {
+            let id = e.ext.id();
+            let m = e.ext.start(s).map_err(|err| err.of(id))?;
+            jobs.extend(m.jobs);
+            let mine = if e.builtin {
+                m.api_routes
+            } else if m.api_routes.has_routes() {
+                Router::new().nest(&format!("/channels/ext/{id}"), m.api_routes)
+            } else {
+                continue;
+            };
+            routes = merge_routes(routes, mine).map_err(|e| e.of(id))?;
+        }
+        Ok((routes, jobs))
+    }
+}
+
+/// `routes` with `mine` merged in. axum refuses an overlapping route by panicking; this turns it
+/// into an error.
+fn merge_routes(
+    routes: Router<Modules>,
+    mine: Router<Modules>,
+) -> Result<Router<Modules>, ExtensionError> {
+    std::panic::catch_unwind(AssertUnwindSafe(move || routes.merge(mine))).map_err(|p| {
+        let why = p
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| p.downcast_ref::<&str>().copied())
+            .unwrap_or("overlapping routes");
+        ExtensionError::new(format!("routes: {why}"))
+    })
+}
+
+/// What step one collects. Each adapter id may be registered once across the whole assembly.
+pub struct Declare<'a> {
+    /// Environment variables (a map in tests).
+    pub vars: &'a Vars,
+    /// The hooks to run when contacts are merged.
+    pub party_hooks: Vec<Arc<dyn PartyHooks>>,
+    ext: String,
+    /// Adapter id → the extension that registered it.
+    owners: BTreeMap<String, String>,
+    pub(crate) providers: Vec<Arc<dyn ConnectionProvider>>,
+    pub(crate) channel_adapters: Vec<Arc<dyn ChannelAdapter>>,
+    pub(crate) profiles: Vec<Arc<dyn ProfileAdapter>>,
+    pub(crate) as_user: Vec<(String, Arc<dyn SendAsUser>)>,
+    pub(crate) mail: Vec<Arc<dyn steve_mail::MailAdapter>>,
+    pub(crate) event_sources: Vec<Arc<dyn steve_flow::EventAdapter>>,
+    /// The built-in `feishu.self` provider, for the channels routes and the Feishu runtime.
+    pub(crate) feishu_user: Option<Arc<FeishuUser>>,
+}
+
+impl Declare<'_> {
+    fn claim(&mut self, adapter: &str) -> Result<(), ExtensionError> {
+        if adapter.is_empty() {
+            return Err(ExtensionError::new("an adapter without an id"));
+        }
+        if let Some(owner) = self.owners.get(adapter) {
+            return Err(ExtensionError::new(format!(
+                "adapter {adapter} is already registered by {owner}"
+            )));
+        }
+        self.owners.insert(adapter.to_string(), self.ext.clone());
+        Ok(())
+    }
+
+    /// A channel-side adapter: its provider goes to `Connections`, its other views to
+    /// `Channels` and the outbox.
+    pub fn channel(&mut self, side: ChannelSide) -> Result<(), ExtensionError> {
+        side.check().map_err(ExtensionError::new)?;
+        let id = side.decl.adapter;
+        self.claim(&id)?;
+        self.providers.push(side.provider);
+        self.channel_adapters.extend(side.adapter);
+        self.profiles.extend(side.profiles);
+        if let Some(a) = side.as_user {
+            self.as_user.push((id, a));
+        }
+        Ok(())
+    }
+
+    /// An adapter with a connection and no channel side.
+    pub fn provider(&mut self, p: Arc<dyn ConnectionProvider>) -> Result<(), ExtensionError> {
+        self.claim(p.id())?;
+        self.providers.push(p);
+        Ok(())
+    }
+
+    /// A mailbox adapter: a provider for `Connections` and an adapter for the mail module.
+    pub fn mail(&mut self, a: Arc<dyn steve_mail::MailAdapter>) -> Result<(), ExtensionError> {
+        self.claim(a.id())?;
+        self.providers.push(a.clone());
+        self.mail.push(a);
+        Ok(())
+    }
+
+    /// An event source for flows, for an adapter already registered by this or an earlier
+    /// extension.
+    pub fn event_source(
+        &mut self,
+        a: Arc<dyn steve_flow::EventAdapter>,
+    ) -> Result<(), ExtensionError> {
+        let id = a.id();
+        if !self.owners.contains_key(id) {
+            return Err(ExtensionError::new(format!(
+                "event source {id} without a registered adapter"
+            )));
+        }
+        if self.event_sources.iter().any(|e| e.id() == id) {
+            return Err(ExtensionError::new(format!(
+                "event source {id} is registered twice"
+            )));
+        }
+        self.event_sources.push(a);
+        Ok(())
+    }
+}
+
+/// Subscribing to the Hub's bus; publishing is not offered.
+#[derive(Clone)]
+pub struct BusTap(Bus);
+
+impl BusTap {
+    /// The events whose `type` is one of `types`.
+    pub fn tap(&self, types: &[&str]) -> tokio::sync::mpsc::UnboundedReceiver<Value> {
+        self.0.tap(types)
+    }
+}
+
+/// What step two gets: the built services. `Channels` itself and the store's write transactions
+/// are not part of it; inbound messages go through `inbound`.
+pub struct Started {
+    pub modules: Modules,
+    pub connections: Connections,
+    /// The channels' inbound entry point.
+    pub inbound: Arc<dyn MessageSink>,
+    pub bus: BusTap,
+    /// Environment variables (a map in tests).
+    pub vars: Vars,
+    pub(crate) channels: steve_channels::Channels,
+    pub(crate) feishu_user: Option<Arc<FeishuUser>>,
+}
+
+impl Started {
+    pub(crate) fn new(
+        channels: &steve_channels::Channels,
+        bus: &Bus,
+        vars: &Vars,
+        feishu_user: Option<Arc<FeishuUser>>,
+    ) -> Self {
+        Self {
+            modules: channels.modules().clone(),
+            connections: channels.connections().clone(),
+            inbound: Arc::new(channels.clone()),
+            bus: BusTap(bus.clone()),
+            vars: vars.clone(),
+            channels: channels.clone(),
+            feishu_user,
+        }
+    }
+}
+
+/// What step two hands back.
+#[derive(Default)]
+pub struct Mounted {
+    /// Merged under `/api` behind `require_user` and the `Caller` layer (an extension that is not
+    /// built in: under `/api/channels/ext/{id}`).
+    pub api_routes: Router<Modules>,
+    pub jobs: Vec<Job>,
+}
+
+/// Runs the Hub with `asm`: the whole of the `steve-hub` binary.
+pub async fn run(asm: Assembly) -> anyhow::Result<()> {
+    if std::env::args().any(|arg| arg == "--build-info") {
+        println!(
+            "{}",
+            serde_json::json!({"version":option_env!("STEVE_BUILD_VERSION"),"commit":option_env!("STEVE_BUILD_COMMIT"),"target":env!("STEVE_BUILD_TARGET"),"schema":steve_store::db::SCHEMA_VERSION})
+        );
+        return Ok(());
+    }
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_env("STEVE_LOG")
+                .unwrap_or_else(|_| "info".into()),
+        )
+        .with_target(false)
+        .init();
+
+    crate::wire::tune_sqlite();
+    let cfg = Arc::new(Config::from_env()?);
+    if std::env::args().any(|arg| arg == "--supervise") {
+        return crate::upgrades::supervise((*cfg).clone()).await;
+    }
+    let _instance_lock = crate::upgrades::instance_lock(&cfg)?;
+    let supervised_domain: Arc<std::sync::Mutex<Option<Arc<dyn crate::backend::Domain>>>> =
+        Arc::new(std::sync::Mutex::new(None));
+    if std::env::var("STEVE_MANAGED").as_deref() == Ok("1") {
+        let expected: i32 = std::env::var("STEVE_SUPERVISOR_PID")
+            .context("managed child needs supervisor PID")?
+            .parse()?;
+        anyhow::ensure!(
+            expected > 1 && unsafe { libc::getppid() } == expected,
+            "managed child lost its supervisor before boot"
+        );
+        let domain = supervised_domain.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                if unsafe { libc::getppid() } != expected {
+                    let domain = domain.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                    if let Some(domain) = domain {
+                        let _ = tokio::time::timeout(
+                            std::time::Duration::from_secs(15),
+                            domain.shutdown(),
+                        )
+                        .await;
+                    }
+                    crate::upgrades::exit_orphaned_managed_hub();
+                }
+            }
+        });
+    }
+    crate::upgrades::startup_gate(&cfg).await?;
+    let bus = Bus::new();
+    let w =
+        crate::wire::wire_assembly(&cfg, &bus, Arc::new(|k: &str| std::env::var(k).ok()), &asm)?;
+    *supervised_domain.lock().unwrap_or_else(|e| e.into_inner()) = Some(w.domain.clone());
+    let st = crate::api::AppState::new(cfg.clone(), w.backend, w.domain, bus)
+        .with_modules(w.modules)
+        .with_nodes(w.nodes)
+        .with_node(w.node)
+        .with_workspaces(Some(w.workspaces));
+    crate::app::boot(&st).await?;
+
+    for job in w.jobs {
+        tokio::spawn(job);
+    }
+    let app = crate::app::app(st.clone(), w.auth, w.mcp, w.module_routes, w.root_routes);
+    let listener = tokio::net::TcpListener::bind((cfg.listen.host.as_str(), cfg.listen.port))
+        .await
+        .with_context(|| format!("listen on {}:{}", cfg.listen.host, cfg.listen.port))?;
+    // recovery trouble is reported (`/healthz`.recovery), never a reason not to serve
+    if let Err(e) = st.domain.ready().await {
+        tracing::error!("recovery after start: {e}");
+        crate::recovery::failed(&e.to_string());
+    }
+    println!(
+        "steve hub {} on http://{}:{}",
+        cfg.version, cfg.listen.host, cfg.listen.port
+    );
+
+    // SIGINT/SIGTERM: stop the adapters and exit at once; in-flight turns are not drained (as in TS)
+    let domain = st.domain.clone();
+    tokio::spawn(async move {
+        let mut term =
+            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!("signal handler: {e}");
+                    return;
+                }
+            };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = term.recv() => {}
+        }
+        domain.shutdown().await;
+        std::process::exit(0);
+    });
+
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn overlapping_routes_are_an_error_not_a_panic() {
+        let one = || Router::<Modules>::new().route("/a", axum::routing::get(|| async { "a" }));
+        let merged = merge_routes(
+            one(),
+            Router::new().route("/b", axum::routing::get(|| async { "b" })),
+        );
+        assert!(merged.is_ok());
+        let e = merge_routes(one(), one()).expect_err("overlap");
+        assert!(e.message().starts_with("routes: "), "{e}");
+        assert!(e.message().contains("/a"), "{e}");
+    }
+}

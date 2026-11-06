@@ -240,3 +240,184 @@ async fn the_built_in_wiring_matches_the_snapshot() {
         "the wiring differs from the snapshot; missing {missing:?}, extra {extra:?}"
     );
 }
+
+// ------------------------------------------------------------------------------- assemblies
+
+use steve_hub::Assembly;
+use steve_hub::extension::{Declare, EXTENSION_API, Extension, ExtensionError, Mounted, Started};
+
+/// A test extension: what it declares and mounts is chosen per test.
+#[derive(Default)]
+struct Probe {
+    id: &'static str,
+    api: Option<u32>,
+    /// Registers GitHub's token adapter under its own id.
+    github_pat: bool,
+    /// A channel side whose declared adapter id is not its provider's.
+    mismatched_side: bool,
+    /// A flow event source with no adapter registered for it.
+    stray_source: bool,
+    /// `GET /hello` among its routes, and one job.
+    hello: bool,
+}
+
+impl Extension for Probe {
+    fn id(&self) -> &str {
+        self.id
+    }
+    fn api(&self) -> u32 {
+        self.api.unwrap_or(EXTENSION_API)
+    }
+    fn declare(&self, d: &mut Declare<'_>) -> Result<(), ExtensionError> {
+        let pat = Arc::new(steve_github::GitHubPat::new("http://127.0.0.1:9"));
+        if self.github_pat {
+            d.provider(pat.clone())?;
+        }
+        if self.mismatched_side {
+            use steve_channels::ext::{ChannelDecl, ChannelSide};
+            d.channel(ChannelSide::new(ChannelDecl::new("probe_self"), pat))?;
+        }
+        if self.stray_source {
+            let src = steve_hub::wire::signals::GithubSource(Arc::new(steve_github::GitHubApp));
+            d.event_source(Arc::new(src))?;
+        }
+        Ok(())
+    }
+    fn start(&self, _: &Started) -> Result<Mounted, ExtensionError> {
+        let mut m = Mounted::default();
+        if self.hello {
+            m.api_routes = Router::new().route("/hello", axum::routing::get(|| async { "hi" }));
+            m.jobs.push(Box::pin(async {}));
+        }
+        Ok(m)
+    }
+}
+
+fn probe(id: &'static str) -> Probe {
+    Probe {
+        id,
+        ..Default::default()
+    }
+}
+
+fn wire_err(asm: Assembly) -> String {
+    let h = home();
+    match steve_hub::wire::wire_assembly(&h.cfg, &Bus::new(), h.vars.clone(), &asm) {
+        Ok(_) => panic!("assembly accepted"),
+        Err(e) => e.to_string(),
+    }
+}
+
+#[test]
+fn builtin_ids_and_without() {
+    assert_eq!(
+        Assembly::builtin().ids(),
+        ["feishu.bot", "feishu.self", "mail.imap", "github"]
+    );
+    let asm = Assembly::builtin()
+        .without("feishu.self")
+        .expect("known id");
+    assert_eq!(asm.ids(), ["feishu.bot", "mail.imap", "github"]);
+    let e = Assembly::builtin()
+        .without("nope")
+        .err()
+        .expect("unknown id");
+    assert_eq!(e.extension(), Some("nope"));
+    assert_eq!(e.to_string(), "extension nope: not in the assembly");
+}
+
+#[tokio::test]
+async fn conflicts_are_refused_at_startup_with_the_extension_id() {
+    let e = wire_err(Assembly::builtin().with(probe("github")));
+    assert!(e.contains("extension github: registered twice"), "{e}");
+    let e = wire_err(Assembly::builtin().with(Probe {
+        api: Some(EXTENSION_API + 1),
+        ..probe("probe")
+    }));
+    assert!(
+        e.contains("extension probe: built for extension API 2, this Hub has 1"),
+        "{e}"
+    );
+    let e = wire_err(Assembly::empty().with(probe("Probe/1")));
+    assert!(e.contains("extension Probe/1: an id is lowercase"), "{e}");
+    let e = wire_err(Assembly::builtin().with(Probe {
+        github_pat: true,
+        ..probe("probe")
+    }));
+    assert!(
+        e.contains("extension probe: adapter github_pat is already registered by github"),
+        "{e}"
+    );
+    let e = wire_err(Assembly::empty().with(Probe {
+        mismatched_side: true,
+        ..probe("probe")
+    }));
+    assert!(
+        e.contains("extension probe: provider github_pat declared for adapter probe_self"),
+        "{e}"
+    );
+    let e = wire_err(Assembly::empty().with(Probe {
+        stray_source: true,
+        ..probe("probe")
+    }));
+    assert!(
+        e.contains("extension probe: event source github_app without a registered adapter"),
+        "{e}"
+    );
+}
+
+#[tokio::test]
+async fn an_assembly_registers_only_its_extensions() {
+    let h = home();
+    let asm = Assembly::builtin()
+        .without("feishu.self")
+        .expect("known id")
+        .with(Probe {
+            hello: true,
+            ..probe("probe")
+        });
+    let w =
+        steve_hub::wire::wire_assembly(&h.cfg, &Bus::new(), h.vars.clone(), &asm).expect("wire");
+    let channels = &w.seams.channels;
+    assert_eq!(
+        channels.connections().provider_ids(),
+        ["feishu_app", "github_app", "github_pat", "imap"]
+    );
+    assert_eq!(channels.profile_adapter_ids(), ["feishu_app"]);
+    assert!(w.tools.outbox.as_user_ids().is_empty());
+    // the built-in 14 and the probe's
+    assert_eq!(w.jobs.len(), 15);
+    // the device flow and the OAuth start of you on Feishu went with it; the bot's stayed, and
+    // another extension's routes are under its own prefix
+    let paths: BTreeSet<String> = [
+        "/channels/feishu/device/start",
+        "/channels/feishu/user/oauth/start",
+        "/channels/feishu/registrations",
+        "/channels/ext/probe/hello",
+        "/hello",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect();
+    let got = matched(w.module_routes, &paths).await;
+    let want: BTreeSet<String> = [
+        "POST /channels/feishu/registrations",
+        "GET /channels/ext/probe/hello",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect();
+    assert_eq!(got, want);
+}
+
+#[tokio::test]
+async fn an_empty_assembly_still_wires_the_hub() {
+    let h = home();
+    let w = steve_hub::wire::wire_assembly(&h.cfg, &Bus::new(), h.vars.clone(), &Assembly::empty())
+        .expect("wire");
+    assert!(w.seams.channels.connections().provider_ids().is_empty());
+    assert!(w.tools.mail.adapter_ids().is_empty());
+    assert!(w.seams.flow.events.all().is_empty());
+    // the built-in extensions' two (registrations resumed, the Feishu runtime) are gone
+    assert_eq!(w.jobs.len(), 12);
+}

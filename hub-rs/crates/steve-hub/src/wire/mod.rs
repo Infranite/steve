@@ -389,9 +389,21 @@ pub fn wire(cfg: &Arc<Config>, bus: &Bus) -> Result<Wired, BackendError> {
     wire_with(cfg, bus, Arc::new(|k: &str| std::env::var(k).ok()))
 }
 
-/// Opens the database (`cfg.db_path()`, migrations) with the store's change events going to `bus`, and
-/// builds the runner, the core, `/auth` and `/mcp` on it. Must run inside the tokio runtime.
+/// [`wire_assembly`] with the built-in extensions.
 pub fn wire_with(cfg: &Arc<Config>, bus: &Bus, vars: Vars) -> Result<Wired, BackendError> {
+    wire_assembly(cfg, bus, vars, &crate::extension::Assembly::builtin())
+}
+
+/// Opens the database (`cfg.db_path()`, migrations) with the store's change events going to `bus`, and
+/// builds the runner, the core, `/auth` and `/mcp` on it, with the adapters of `asm`. Must run
+/// inside the tokio runtime.
+pub fn wire_assembly(
+    cfg: &Arc<Config>,
+    bus: &Bus,
+    vars: Vars,
+    asm: &crate::extension::Assembly,
+) -> Result<Wired, BackendError> {
+    asm.check().map_err(|e| BackendError::msg(e.to_string()))?;
     let db = steve_store::Store::open(cfg.db_path(), store::BusPublisher(bus.clone()))
         .map_err(|e| BackendError::msg(format!("open {}: {e}", cfg.db_path().display())))?;
     let lookup = db.clone();
@@ -542,6 +554,7 @@ pub fn wire_with(cfg: &Arc<Config>, bus: &Bus, vars: Vars) -> Result<Wired, Back
         vars: &vars,
         yolo_forced,
         openviking: cfg.openviking.clone(),
+        assembly: asm,
         workspaces: node_host.as_ref().map(|_| workspaces.clone()),
         // with the local Node on, `cmd` steps run on the Node that holds the project
         cmd_node: node_host.as_ref().map(|_| {
