@@ -189,6 +189,45 @@ fn status_in(i: &Item, xs: &[&str]) -> bool {
     xs.contains(&i.status.as_str())
 }
 
+/// Whether the project's release goes through its target's merge lane (`steve_publish` enqueues it there):
+/// finished by its completion rule, and the lane can release it that way — merged is released (no command
+/// of the project's own), or the repository cuts its own tagged releases (ops/cut-release.py, the one the
+/// lane runs in its batch: the same file, not one that only looks like it).
+pub(crate) fn lane_releases(p: &crate::repo::Project) -> bool {
+    let Some(r) = p.release.as_ref() else {
+        return false;
+    };
+    let cmd = r.cmd.trim();
+    let cut = Path::new(&p.path).join("ops/cut-release.py");
+    match r.done_when.as_deref() {
+        Some(steve_store::DONE_MERGE) => cmd.is_empty(),
+        Some(steve_store::DONE_TAG) => {
+            let same = |c: &str| {
+                Path::new(&p.path)
+                    .join(c)
+                    .canonicalize()
+                    .ok()
+                    .zip(cut.canonicalize().ok())
+                    .is_some_and(|(a, b)| a == b)
+            };
+            cut.is_file() && (cmd.is_empty() || same(cmd))
+        }
+        _ => false,
+    }
+}
+
+/// What the agent hears when only the release is left: publish, which for a lane project hands the branch
+/// to the merge lane (Steve merges, checks and releases it; the agent pushes, merges and tags nothing).
+pub(crate) fn publish_text(lane: bool, branch: &str) -> String {
+    if lane {
+        format!(
+            "确认改动都已提交到 {branch} 后，用 steve_publish 把它交给合并通道：Steve 会和同一目标的其他改动一起合并、等检查通过、发布。不要自己推送、开 PR、合并或打 tag。"
+        )
+    } else {
+        format!("确认改动都已提交到 {branch} 后，用 steve_publish 请求发布。")
+    }
+}
+
 /// An item patch from a stored undo record (`{status, now, stage, plan}`).
 fn undo_patch(u: &Value) -> Map<String, Value> {
     let mut p = Map::new();
@@ -220,17 +259,14 @@ impl Core {
         let repo = t.cfg().steve_repo.to_string_lossy().to_string();
         let mut steve_project = db.project_by_path(WS, &repo)?;
         if steve_project.is_none() && Path::new(&repo).join(".git").exists() {
-            // A managed bundle is upgraded through steve_upgrade, not the source deploy script.
+            // A managed bundle is upgraded through steve_upgrade. A source checkout releases the way the
+            // repository does: through the merge lane, which runs its own ops/cut-release.py (merged, then
+            // a pushed tag is done); no command of the project's own (ops/release.sh is not run).
             let release = (std::env::var("STEVE_MANAGED").as_deref() != Ok("1")).then(|| {
                 crate::repo::Release {
                     kind: "script".into(),
-                    cmd: t
-                        .cfg()
-                        .home
-                        .join("current/ops/release.sh")
-                        .to_string_lossy()
-                        .into(),
-                    done_when: None,
+                    cmd: String::new(),
+                    done_when: Some(crate::upstream::DONE_TAG.into()),
                 }
             });
             steve_project = Some(db.project_create(
@@ -923,7 +959,9 @@ impl Tx<'_> {
             let mut l = String::from(
                 "- steve_publish: only when the item changed code (commits on your branch), after the user has accepted the item and asked for it to go live. Commit everything on your branch first. Then end your turn. If you changed nothing (an explanation, a review, an answer), don't call it: accepting the item finishes it.",
             );
-            if yolo && p.as_ref().is_some_and(|p| self.c.yolo_releases_itself(p)) {
+            if p.as_ref().is_some_and(lane_releases) {
+                l.push_str(" In this project it hands your branch to the merge lane: Steve merges it with the other changes for the same target, waits for the checks and releases. Do not push, open a PR, merge or tag yourself.");
+            } else if yolo && p.as_ref().is_some_and(|p| self.c.yolo_releases_itself(p)) {
                 l.push_str(crate::yolo::agent::PUBLISH);
             }
             lines.push(l);
@@ -1610,28 +1648,8 @@ impl Tx<'_> {
             return self.publish_nothing(&item, s);
         }
         /* a project finished by its completion rule merges through its target's lane (one card per batch
-         * there, not one release card per item here), when the lane can release it that way: merged is
-         * released, or the repository cuts its own tagged releases (ops/cut-release.py) */
-        let rule = p.release.as_ref().and_then(|r| r.done_when.as_deref());
-        let cmd = p.release.as_ref().map(|r| r.cmd.trim()).unwrap_or_default();
-        let cut = Path::new(&p.path).join("ops/cut-release.py");
-        /* the lane runs no release command of the project's own: one it would skip keeps the old path */
-        let lane_can = match rule {
-            Some(steve_store::DONE_MERGE) => cmd.is_empty(),
-            /* the repository's own cut-release, the one the lane runs in its batch: the same file, not
-             * one that only looks like it */
-            Some(steve_store::DONE_TAG) => {
-                let same = |c: &str| {
-                    let c = Path::new(&p.path).join(c);
-                    c.canonicalize()
-                        .ok()
-                        .zip(cut.canonicalize().ok())
-                        .is_some_and(|(a, b)| a == b)
-                };
-                cut.is_file() && (cmd.is_empty() || same(cmd))
-            }
-            _ => false,
-        };
+         * there, not one release card per item here), when the lane can release it that way */
+        let lane_can = lane_releases(&p);
         if lane_can {
             let req = self.c.lane_enqueue_item(&item, &p.path)?;
             let where_ = req
@@ -1916,14 +1934,18 @@ impl Tx<'_> {
 
     pub(crate) fn await_release(&mut self, item_id: &str, to: &To) -> Result<()> {
         let i = self.item(item_id)?;
+        let lane = self
+            .db()
+            .project(i.project_id.as_deref())?
+            .is_some_and(|p| lane_releases(&p));
         self.db()
             .item_patch(item_id, patch![stage: "收尾", now: "等待发布"])?;
         settle(self.db(), item_id)?;
         self.send(
             to,
             &format!(
-                "验收通过。确认改动都已提交到 {} 后，用 steve_publish 请求发布。如果用户说过不发布，不用再问，直接结束这一回合，Steve 会请用户确认。",
-                i.branch.unwrap_or_default()
+                "验收通过。{}如果用户说过不发布，不用再问，直接结束这一回合，Steve 会请用户确认。",
+                publish_text(lane, i.branch.as_deref().unwrap_or_default())
             ),
         )
     }
@@ -2445,9 +2467,13 @@ impl Tx<'_> {
                         let publish = before.phase == crate::cycle::CLOSING
                             && self.lc_open_op(&i, crate::cycle::OP_RELEASE)?.is_some();
                         let next = if publish {
+                            let lane = self
+                                .db()
+                                .project(before.project_id.as_deref())?
+                                .is_some_and(|p| lane_releases(&p));
                             format!(
-                                "验收已经通过，只差发布。确认改动都已提交到 {} 后，用 steve_publish 请求发布。",
-                                before.branch.as_deref().unwrap_or_default()
+                                "验收已经通过，只差发布。{}",
+                                publish_text(lane, before.branch.as_deref().unwrap_or_default())
                             )
                         } else {
                             "请继续。完成后用 steve_deliver 交付；需要决定时用 steve_ask。".into()

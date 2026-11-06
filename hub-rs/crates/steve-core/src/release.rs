@@ -1130,6 +1130,7 @@ fn item_project_script(t: &Tx, project: &Option<String>) -> Result<String> {
         .project(project.as_deref())?
         .and_then(|p| p.release)
         .map(|r| r.cmd)
+        .filter(|c| !c.trim().is_empty())
         .unwrap_or_else(|| "没有配置".into()))
 }
 

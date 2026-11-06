@@ -1,0 +1,67 @@
+name: CI
+# The tests, before a version exists: on every pull request (Linux) and every push to main (Linux and
+# macOS). ops/cut-release.py tags only a main whose run of this workflow passed, so a red test costs a
+# rerun or a fix, never a version number. The Release workflow (on the tag) builds, packages and publishes.
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+concurrency:
+  # a newer push to the same pull request replaces its run; every main commit keeps its own
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-22.04"]' || '["ubuntu-22.04","macos-15"]') }}
+    runs-on: ${{ matrix.runner }}
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '14.0'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.13'
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+          cache: npm
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec
+        with:
+          toolchain: 1.99.1
+      - name: Install Linux test prerequisites
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install --no-install-recommends -y zsh
+      - name: Verify public boundary
+        run: |
+          python3 scripts/check-public-boundary.py --strict
+          python3 scripts/test-public-boundary.py
+          python3 scripts/test-package-release.py
+      - name: Release scripts
+        run: |
+          python3 ops/test-schema-gate.py
+          python3 ops/test-local-release-journal.py
+          python3 ops/test-local-release-prune.py
+          python3 ops/test-cut-release.py
+          python3 -m py_compile ops/local-release.py ops/test-local-release.py
+          bash ops/check-migration-lock.sh
+          python3 scripts/test-nextest-summary.py
+      - run: npm ci
+      - run: npm run check && npm run test:web && npm run build:web
+      - uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
+        with:
+          tool: cargo-nextest@0.9.151
+      # One process per test. A test that fails and then passes on a retry passes and is listed in the
+      # job summary; a test that fails all three tries fails the run.
+      - name: Rust tests
+        id: rust-tests
+        run: cargo nextest run --locked --manifest-path hub-rs/Cargo.toml --workspace --profile ci --retries 2 --no-fail-fast
+      - name: Rust doctests
+        run: cargo test --locked --manifest-path hub-rs/Cargo.toml --workspace --doc
+      - name: Rust tests that passed only on retry
+        if: ${{ !cancelled() && steps.rust-tests.outcome != 'skipped' }}
+        run: python3 scripts/nextest-summary.py hub-rs/target/nextest/ci/junit.xml

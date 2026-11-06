@@ -1,0 +1,3 @@
+- 本机发布（一键升级和 `ops/local-release.py deploy`）在新版本健康之后会清理旧文件：发布前的数据库备份保留最新 8 个（连同 -shm/-wal），release 目录保留当前、上一个和最新 3 个；pre-rust、pre-purge、pre-takeover、每日备份和 failed-probe 不动。部署没成功时什么都不删。想现在就清理一次，运行 `ops/local-release.py prune`（先加 `--dry-run` 看会删哪些）。
+- 测试改在打 tag 之前跑：每个 PR（Linux）和每次推到 main（Linux 和 macOS）都跑完整测试。`ops/cut-release.py cut` 只给 CI 通过的 main 打 tag，CI 还在跑就等它，失败或没跑就拒绝，并给出重跑失败任务的命令 `gh run rerun <id> --failed`；`--skip-ci` 可以明确跳过。打 tag 后的 Release 构建只负责构建、打包和发布，偶发失败时在同一个 tag 上重跑即可，不用再发一个新版本。
+- Steve 自己的项目不再用本机的 `release.sh` 发布，改走合并通道：`steve_publish` 把分支交给合并通道，Steve 合并、等检查通过、用仓库自己的 `cut-release.py` 发布，合并并打 tag 后事项完成。已有的 Steve 项目会自动迁移（手改过的发布命令不动）；给 Agent 的发布提示也改成指向合并通道，不再让它自己推送或打 tag。

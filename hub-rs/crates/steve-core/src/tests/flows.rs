@@ -1549,9 +1549,15 @@ fn seed_registers_steves_own_repo_once() {
     let k = Kit::with(|c| c.steve_repo = r.clone());
     let ps = k.db().projects(WS).unwrap();
     assert_eq!(ps.len(), 1);
+    // released through the merge lane (the repository's ops/cut-release.py), never ops/release.sh here
+    let rel = ps[0].release.as_ref().unwrap();
     assert_eq!(
-        ps[0].release.as_ref().unwrap().cmd,
-        k.home().join("current/ops/release.sh").to_string_lossy()
+        (
+            rel.kind.as_str(),
+            rel.cmd.as_str(),
+            rel.done_when.as_deref()
+        ),
+        ("script", "", Some(crate::upstream::DONE_TAG))
     );
     assert_eq!(
         k.db()

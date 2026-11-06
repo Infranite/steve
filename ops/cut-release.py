@@ -2,7 +2,7 @@
 """Cut a release: the version is chosen here, at release time, never ahead on a branch.
 
   cut-release.py next [--minor]                    the version the next release gets
-  cut-release.py cut [--minor | --version X.Y.Z] [--branch B] [--dry-run]
+  cut-release.py cut [--minor | --version X.Y.Z] [--branch B] [--dry-run] [--ci-wait S | --skip-ci]
   cut-release.py lint [--base REF]                 a branch carries release-note fragments only
 
 Release notes are fragments: each change adds `docs/releases/unreleased/<name>.md` (its item, e.g.
@@ -13,6 +13,12 @@ in the order they arrived on the branch into `docs/releases/X.Y.Z.md`, removes t
 `vX.Y.Z` and pushes the commit and the tag together (`--atomic`): both land or neither does. When
 someone else pushed or released first, it starts again from the new state, a few times at most.
 
+Only a tested commit is tagged: `cut` first asks GitHub (`gh`) for the CI workflow's run (`.github/workflows/
+ci.yml`) on the branch head it is about to release. It waits while that run is queued or running (up to
+`--ci-wait` seconds, default 45 minutes), and refuses when it failed or there is none, naming the run and how to
+run its failed jobs again (`gh run rerun <id> --failed`) when it was only a flake. `--skip-ci` releases without
+that check, on purpose (it says so). `--dry-run` does not ask.
+
 A `docs/releases/X.Y.Z.md` for a version no tag has yet (written ahead the old way) is taken as the
 first fragment of that release.
 
@@ -22,11 +28,13 @@ version before the release does, and two branches picking the same one is how re
 Talks to `origin`; "can't reach it" is an error, never "there are no tags".
 """
 import argparse
+import json
 import os
 import re
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 NOTES = "docs/releases"
@@ -35,6 +43,10 @@ VERSION_RE = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
 NOTES_RE = re.compile(r"^docs/releases/\d+\.\d+\.\d+\.md$")
 ATTEMPTS = 3
 NET_TIMEOUT = 60
+CI_WORKFLOW = "ci.yml"
+CI_WAIT = 45 * 60
+CI_POLL = 30
+CI_APPEAR = 180  # a push's run shows up within seconds; one that never does is no run
 
 
 class Refused(Exception):
@@ -86,6 +98,70 @@ def default_branch(repo):
     raise Refused("origin has no default branch (origin/HEAD, main, master)")
 
 
+def gh(*args, cwd):
+    """`gh` in the repository: `{owner}/{repo}` is its GitHub remote (or GH_REPO)."""
+    try:
+        r = subprocess.run(["gh", *args], cwd=str(cwd), capture_output=True, text=True, timeout=NET_TIMEOUT,
+                           env=dict(os.environ, GH_PROMPT_DISABLED="1", NO_COLOR="1"))
+    except FileNotFoundError:
+        raise Refused("can't check CI: no `gh` on PATH (install and log in, or --skip-ci to release untested)")
+    except subprocess.TimeoutExpired:
+        raise Refused(f"gh {args[0]} timed out after {NET_TIMEOUT}s")
+    if r.returncode != 0:
+        raise Refused(f"can't read CI from GitHub: gh {' '.join(args[:2])}: {(r.stderr or r.stdout).strip()[:300]}")
+    return r.stdout
+
+
+def ci_run(repo, sha):
+    """The newest run of the CI workflow on `sha`, or None."""
+    out = gh("api", f"repos/{{owner}}/{{repo}}/actions/workflows/{CI_WORKFLOW}/runs?head_sha={sha}&per_page=20",
+             cwd=repo)
+    try:
+        runs = json.loads(out).get("workflow_runs") or []
+    except (ValueError, AttributeError):
+        raise Refused(f"can't read CI from GitHub: unexpected answer {out.strip()[:200]!r}")
+    runs = [r for r in runs if r.get("head_sha") == sha]
+    return max(runs, key=lambda r: (r.get("run_number") or 0, r.get("id") or 0), default=None)
+
+
+def rerun_hint(run):
+    return (f"If it was a flake, run its failed jobs again: gh run rerun {run.get('id')} --failed "
+            f"(then cut again once it passes); otherwise fix it on main.")
+
+
+def ci_gate(repo, sha, wait):
+    """Return once the CI workflow passed on `sha`; refuse when it failed, is missing, or still runs after
+    `wait` seconds."""
+    short = sha[:7]
+    start = time.monotonic()
+    said = None
+    while True:
+        run = ci_run(repo, sha)
+        waited = time.monotonic() - start
+        if run is None:
+            if waited >= min(wait, CI_APPEAR):
+                raise Refused(f"CI ({CI_WORKFLOW}) has no run on {short}: only a tested commit is released "
+                              f"(push it to the branch and wait for CI, or --skip-ci to release untested)")
+            state = "no run yet"
+        elif run.get("status") == "completed":
+            conclusion = run.get("conclusion")
+            if conclusion == "success":
+                print(f"CI passed on {short}: {run.get('html_url', run.get('id'))}", file=sys.stderr)
+                return run
+            raise Refused(f"CI ({CI_WORKFLOW}) {conclusion} on {short}: {run.get('html_url', run.get('id'))}. "
+                          + rerun_hint(run))
+        else:
+            state = run.get("status") or "pending"
+        if waited >= wait:
+            where = f": {run.get('html_url', run.get('id'))}" if run else ""
+            raise Refused(f"CI ({CI_WORKFLOW}) on {short} is still {state} after {int(waited)}s{where}; "
+                          f"cut again once it has passed")
+        if state != said:
+            print(f"waiting for CI on {short} ({state})", file=sys.stderr)
+            said = state
+        time.sleep(CI_POLL)
+
+
 def fragments(wt, version):
     """(path, text) in the order they arrived on the branch, then by name."""
     found = []
@@ -121,9 +197,10 @@ def assemble(version, parts):
     return out
 
 
-def cut_once(repo, branch, version_arg, minor, dry):
+def cut_once(repo, branch, version_arg, minor, dry, ci_wait=CI_WAIT):
     if git("fetch", "--quiet", "--tags", "origin", cwd=repo, check=False, timeout=NET_TIMEOUT).returncode != 0:
         raise Refused("can't fetch origin")
+    head = git("rev-parse", f"refs/remotes/origin/{branch}^{{commit}}", cwd=repo).stdout.strip()
     version = version_arg or next_version(repo, minor)
     if tuple(int(x) for x in version.split(".")) in remote_versions(repo):
         if not version_arg:
@@ -131,7 +208,7 @@ def cut_once(repo, branch, version_arg, minor, dry):
         raise Refused(f"v{version} is already on origin")
     with tempfile.TemporaryDirectory(prefix="steve-cut-") as tmp:
         wt = Path(tmp, "wt")
-        git("worktree", "add", "--quiet", "--detach", str(wt), f"refs/remotes/origin/{branch}", cwd=repo)
+        git("worktree", "add", "--quiet", "--detach", str(wt), head, cwd=repo)
         try:
             parts = fragments(wt, version)
             if not parts:
@@ -141,6 +218,8 @@ def cut_once(repo, branch, version_arg, minor, dry):
             if dry:
                 print(text, end="")
                 return version
+            if ci_wait is not None:
+                ci_gate(repo, head, ci_wait)
             for p, _ in parts:
                 if p != f"{NOTES}/{version}.md":
                     git("rm", "--quiet", "--", p, cwd=wt)
@@ -193,10 +272,11 @@ def landed(repo, branch, version, wt):
     return refs.get(f"refs/tags/v{version}") == tag and refs.get(f"refs/heads/{branch}") == head
 
 
-def cut(repo, branch, version_arg, minor, dry):
+def cut(repo, branch, version_arg, minor, dry, ci_wait=CI_WAIT):
+    """`ci_wait` None: no CI check (--skip-ci)."""
     for attempt in range(1, ATTEMPTS + 1):
         try:
-            return cut_once(repo, branch, version_arg, minor, dry)
+            return cut_once(repo, branch, version_arg, minor, dry, ci_wait)
         except Raced as e:
             if version_arg or attempt == ATTEMPTS:
                 raise Refused(f"origin moved while releasing: {e}")
@@ -226,6 +306,10 @@ def main():
     g.add_argument("--version")
     c.add_argument("--branch")
     c.add_argument("--dry-run", action="store_true")
+    ci = c.add_mutually_exclusive_group()
+    ci.add_argument("--ci-wait", type=int, default=CI_WAIT, metavar="S",
+                    help=f"how long to wait for CI on the branch head (default {CI_WAIT}s)")
+    ci.add_argument("--skip-ci", action="store_true", help="release without checking CI (untested)")
     l = sub.add_parser("lint")
     l.add_argument("--base")
     a = ap.parse_args()
@@ -236,9 +320,15 @@ def main():
         elif a.cmd == "cut":
             if a.version and not re.fullmatch(r"\d+\.\d+\.\d+", a.version):
                 raise Refused(f"--version {a.version}: X.Y.Z")
-            v = cut(repo, a.branch or default_branch(repo), a.version, a.minor, a.dry_run)
+            if a.skip_ci and not a.dry_run:
+                print("warning: --skip-ci: releasing without checking CI", file=sys.stderr)
+            v = cut(repo, a.branch or default_branch(repo), a.version, a.minor, a.dry_run,
+                    None if a.skip_ci else max(a.ci_wait, 0))
             if not a.dry_run:
                 print(f"released v{v}")
+                print(f"The Release build of v{v} runs on GitHub now. If it fails on a flake, do not cut another "
+                      f"version: gh run rerun <run id> --failed (gh run list --workflow release.yml --branch v{v}) "
+                      f"runs it again on the same tag.", file=sys.stderr)
         else:
             lint(repo, a.base)
     except Refused as e:

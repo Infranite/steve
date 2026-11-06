@@ -18,7 +18,11 @@ fn run(dir: &Path, args: &[&str]) -> String {
 
 /// An origin with main, the project's clone, and an item worktree with one commit on `branch`.
 fn repos(k: &Kit, branch: &str) -> (PathBuf, PathBuf, PathBuf) {
-    let root = k.home().join("lane-repos");
+    repos_in(&k.home().join("lane-repos"), branch)
+}
+
+fn repos_in(root: &Path, branch: &str) -> (PathBuf, PathBuf, PathBuf) {
+    let root = root.to_path_buf();
     std::fs::create_dir_all(&root).unwrap();
     let (origin, clone) = (root.join("origin.git"), root.join("clone"));
     run(
@@ -152,6 +156,59 @@ fn an_item_released_through_its_lane_merges_after_one_card_for_the_batch() {
     assert!(t.iter().any(|x| x.contains("进入合并通道")), "{t:?}");
     assert!(t.iter().any(|x| x.contains("MQ-1 已合并到 main")), "{t:?}");
     assert!(t.iter().any(|x| x.contains("合并即发布")), "{t:?}");
+}
+
+#[test]
+fn steves_own_seeded_project_publishes_through_its_lane_and_says_so() {
+    let t = tempfile::tempdir().unwrap();
+    let branch = "steve/st-9";
+    let (_origin, clone, wt) = repos_in(t.path(), branch);
+    std::fs::create_dir_all(clone.join("ops")).unwrap();
+    std::fs::write(clone.join("ops/cut-release.py"), "#!/usr/bin/env python3\n").unwrap();
+    let k = Kit::with(|c| c.steve_repo = clone.clone());
+    let p = k
+        .db()
+        .project_by_path(WS, &clone.to_string_lossy())
+        .unwrap()
+        .expect("the seed registered Steve's own project");
+    assert!(crate::orchestrator::lane_releases(&p), "{:?}", p.release);
+    let i = k.item("run", "收尾", Some(&p.id));
+    k.db()
+        .item_patch(
+            &i,
+            patch![branch: branch, cwd: wt.to_string_lossy().as_ref()],
+        )
+        .unwrap();
+    let sid = k.session(&i, "idle");
+    // only the release left: the agent is told to hand the branch to the lane, not to push or tag
+    k.core.tx().await_release_for(&i).unwrap();
+    let told = k.rt.prompts_of(&sid).last().cloned().unwrap_or_default();
+    assert!(
+        told.starts_with(
+            "验收通过。确认改动都已提交到 steve/st-9 后，用 steve_publish 把它交给合并通道"
+        ) && told.contains("不要自己推送"),
+        "{told}"
+    );
+    let s = k.db().session(&sid).unwrap().unwrap();
+    k.core.tool_publish(&s, branch, "改了 a").unwrap();
+    assert!(
+        k.db()
+            .store()
+            .reader(|c| lanes::request_of_item(c, &i))
+            .unwrap()
+            .is_some(),
+        "in the lane"
+    );
+    assert_eq!(
+        k.db()
+            .decisions_of_item(&i)
+            .unwrap()
+            .iter()
+            .filter(|d| d.subject_type == "release")
+            .count(),
+        0,
+        "no release card running ops/release.sh"
+    );
 }
 
 #[test]
