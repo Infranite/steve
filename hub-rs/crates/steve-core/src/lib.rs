@@ -151,6 +151,9 @@ pub(crate) struct State {
     git_proofs: HashMap<String, Vec<node_git::PendingProof>>,
     /// Critical sections entered so far (facts taken in one may be read again in the same one).
     tx_seq: u64,
+    /// The periodic closing check is running: what it asks of a Node is no new event, so it
+    /// doesn't outdate a gathering of the same facts already running (`node_git`).
+    git_polling: bool,
 }
 
 /// One critical section: the core plus the held state lock.

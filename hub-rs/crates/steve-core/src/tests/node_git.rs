@@ -29,6 +29,8 @@ struct OnNode {
     items: Mutex<HashSet<String>>,
     workspaces: Mutex<HashMap<String, WorkspaceRef>>,
     offline: AtomicBool,
+    /// How long each read takes.
+    slow: Mutex<Duration>,
     /// Runs once, right before the next apply (something moves meanwhile).
     before_apply: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     applies: Mutex<Vec<String>>,
@@ -105,6 +107,7 @@ impl OnNode {
             items: Default::default(),
             workspaces: Default::default(),
             offline: AtomicBool::new(false),
+            slow: Mutex::new(Duration::ZERO),
             before_apply: Mutex::new(None),
             applies: Mutex::new(vec![]),
         });
@@ -173,6 +176,8 @@ impl NodeGit for OnNode {
 
     async fn facts(&self, item: &str, q: Ask) -> ApiResult<GitFacts> {
         self.offline()?;
+        let slow = *self.slow.lock().unwrap();
+        tokio::time::sleep(slow).await;
         let w = self.workspace(item).await?;
         let node = self.node.clone();
         self.rt
@@ -327,6 +332,28 @@ fn an_unreachable_node_during_the_check_is_unknown_not_changed() {
     assert!(k.wait(|| k.phase(&i) == "active"));
 }
 
+#[test]
+fn a_gathering_slower_than_the_periodic_check_still_decides() {
+    let k = Kit::new();
+    let port = OnNode::new(&k);
+    let (i, wt) = delivered_on_node(&k, &port);
+    assert!(k.wait(|| !closing(&k, &i).print_pending));
+    /* each read takes longer than the time between two checks */
+    *port.slow.lock().unwrap() = Duration::from_millis(300);
+    std::fs::write(wt.join("c.txt"), "c\n").unwrap();
+    assert!(!k.core.tx().lc_try_close(&i).unwrap());
+    let mut moved = false;
+    for _ in 0..100 {
+        k.core.tx().lc_tick().unwrap();
+        if k.phase(&i) == "active" {
+            moved = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(moved, "the change is seen while the check keeps polling");
+}
+
 /// A release project for `r`, its script waiting for `$STEVE_HOME/go`.
 fn release_project(k: &Kit, r: &Path) -> String {
     let script = k.home().join("release.sh");
@@ -426,4 +453,66 @@ fn head_moving_between_the_facts_and_the_rebase_refuses_it_and_nothing_is_releas
             .any(|t| t == &format!("已把 {name} rebase 到最新的 main"))
     );
     assert_eq!(port.applies.lock().unwrap().len(), 2);
+}
+
+#[test]
+fn an_accepted_delivery_on_a_node_in_a_release_project_waits_for_its_release() {
+    let k = Kit::new();
+    let port = OnNode::new(&k);
+    let r = repo(k.home());
+    let p = release_project(&k, &r);
+    let i = k.item("run", "交付与验收", Some(&p));
+    let (name, wt) = branch_with(&r, &k.core.config().worktrees, &i, "b.txt", "b\n");
+    k.db()
+        .item_patch(
+            &i,
+            patch![cwd: wt.to_string_lossy().to_string(), branch: name.as_str()],
+        )
+        .unwrap();
+    let s = k.session(&i, "idle");
+    port.put(&i);
+    /* accepted at once, frozen before its Node's facts came */
+    k.core
+        .tx()
+        .lc_request_complete(
+            &i,
+            "dev",
+            crate::cycle::Policy::Automatic,
+            true,
+            "交付",
+            None,
+            vec![],
+        )
+        .unwrap();
+    assert!(closing(&k, &i).print_pending);
+    assert!(k.wait(|| k.phase(&i) != "closing" || !closing(&k, &i).print_pending));
+    assert_eq!(
+        k.phase(&i),
+        "closing",
+        "not completed on the facts of the first look"
+    );
+    let released = || {
+        k.db()
+            .store()
+            .items()
+            .operations(&i, k.db().item(&i).unwrap().unwrap().cycle)
+            .unwrap()
+            .into_iter()
+            .any(|o| o.kind == crate::cycle::OP_RELEASE && o.required && o.status == "pending")
+    };
+    assert!(k.wait(released), "the release is required");
+    for _ in 0..3 {
+        k.core.tx().lc_tick().unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert_eq!(
+        k.phase(&i),
+        "closing",
+        "never completed without its release"
+    );
+    assert!(
+        k.user_texts(&s).iter().any(|t| t.contains("steve_publish")),
+        "the release is asked for: {:?}",
+        k.user_texts(&s)
+    );
 }

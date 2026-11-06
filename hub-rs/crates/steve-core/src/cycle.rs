@@ -837,9 +837,20 @@ impl Tx<'_> {
             self.db()
                 .store()
                 .transaction(|tx| steve_store::lifecycle_write_in(tx, item_id, &w))?;
+            /* those facts were gathered with nothing frozen to compare against or to look for in a
+             * release: nothing is decided on them, the next gathering asks with what is frozen now
+             * and checks the closing again */
+            let i = self.item(item_id)?;
+            self.git_gather(&i);
+            return Ok(false);
         }
         if c.kind == COMPLETE && c.accepted {
             self.lc_accepted(item_id)?;
+            /* the requirements were decided on the same facts as the gate below, or the closing holds
+             * until facts for what is asked now are here */
+            if node && self.git_take(&self.item(item_id)?).is_none() {
+                return Ok(false);
+            }
         }
         /* the worktree is fingerprinted once (it runs `git add --all` over all of it), for the gate and
          * for saying what moved */
@@ -1096,13 +1107,16 @@ impl Tx<'_> {
     /// Checks every item waiting to close (boot after recovery, the periodic tick).
     pub(crate) fn lc_tick(&mut self) -> Result<usize> {
         let mut n = 0;
-        for id in self.db().store().items().closing_ids()? {
+        let ids = self.db().store().items().closing_ids()?;
+        self.st.git_polling = true;
+        for id in ids {
             match self.lc_try_close(&id) {
                 Ok(true) => n += 1,
                 Ok(false) => {}
                 Err(e) => tracing::warn!(item = %id, "closing check: {e}"),
             }
         }
+        self.st.git_polling = false;
         Ok(n)
     }
 

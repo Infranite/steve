@@ -7,7 +7,8 @@
 //! gathering and goes on as if it can't tell yet: the closing holds (an unreachable Node is
 //! unknown, never "changed"), nothing is released. The facts come back through
 //! [`Core::git_arrived`], which checks the closing again. A gathering asked for while one runs is
-//! run again after it, so facts that come back are never older than the last ask.
+//! run again after it, so facts that come back are never older than the last ask; the periodic
+//! closing check asking for the same facts again is no such ask.
 //!
 //! Without the port ([`Core::set_node_git`]), or for an item the port says is not on a Node, every
 //! read is the Hub's own git in `items.cwd`, as before.
@@ -113,9 +114,9 @@ pub(crate) struct Slot {
     fresh: bool,
     /// The critical section that took them (it may read them again).
     taken_in: u64,
-    /// Asks so far, and the ask the running gathering serves.
+    /// Asks so far, and the running gathering: the ask it serves, since when, what it asks.
     asked: u64,
-    running: Option<(u64, i64)>,
+    running: Option<(u64, i64, Want)>,
 }
 
 /// A release report whose proof waits for the item's facts (`release.rs` `report_release`).
@@ -687,15 +688,22 @@ impl Tx<'_> {
         };
         let want = self.git_want(i);
         let t = now();
+        let polling = self.st.git_polling;
         let s = self.st.git.entry(i.id.clone()).or_default();
-        s.asked += 1;
-        if s.running
-            .is_some_and(|(_, since)| t - since < GATHER_STUCK_MS)
+        if let Some((_, since, serves)) = &s.running
+            && t - since < GATHER_STUCK_MS
         {
+            /* the periodic check asking for the same facts again is no reason to outdate them
+             * (else a gathering slower than its period never comes back fresh); anything else
+             * runs again after it */
+            if !(polling && *serves == want) {
+                s.asked += 1;
+            }
             return;
         }
+        s.asked += 1;
         let ask = s.asked;
-        s.running = Some((ask, t));
+        s.running = Some((ask, t, want.clone()));
         let (core, item) = (self.c.clone(), i.id.clone());
         detach(move || {
             let got = block_on(async {
