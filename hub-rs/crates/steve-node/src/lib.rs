@@ -1269,6 +1269,16 @@ impl LocalNode {
         Ok(())
     }
 
+    /// The facts a decision on the workspace at `dir` is checked against (HEAD, branch, tree).
+    async fn facts_now(&self, dir: &Path) -> ApiResult<GitFacts> {
+        let commands = workspace::Commands {
+            inner: self.0.clone(),
+            op: read_op(&self.0)?,
+        };
+        let dir = dir.to_path_buf();
+        blocking(move || git::now(&commands, &dir)).await
+    }
+
     fn repo_lock(&self, repo: &Path) -> Arc<tokio::sync::Mutex<()>> {
         self.0
             .repos
@@ -1384,6 +1394,13 @@ async fn deliver_loop(inner: std::sync::Weak<Inner>) {
             }
         }
     }
+}
+
+/// The id a git read runs under (its own, never an operation's).
+fn read_op(inner: &Inner) -> ApiResult<OperationId> {
+    static READS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = READS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    id(format!("git-read-{}-{n}", inner.incarnation))
 }
 
 fn unsupported<T>(what: &str) -> ApiResult<T> {
@@ -2367,18 +2384,92 @@ impl WorkspaceExecutor for LocalNode {
     /// The read kinds of git in a workspace (show, log, diff), its HEAD, branch and refs. Each
     /// git runs through the workspace pipe under a read id of its own.
     async fn git_facts(&self, q: GitQuery) -> ApiResult<GitFacts> {
-        static READS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         self.mine(&q.workspace)?;
         let dir = workspace_dir(&self.0, &q.workspace)?;
-        let n = READS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let commands = workspace::Commands {
             inner: self.0.clone(),
-            op: id(format!("git-read-{}-{n}", self.0.incarnation))?,
+            op: read_op(&self.0)?,
         };
         blocking(move || git::facts(&commands, &dir, &q)).await
     }
-    async fn git_apply(&self, _c: Command<GitApply>) -> ApiResult<Receipt> {
-        unsupported("git")
+    /// A rebase (merges and pushes are not done here yet). Refused `stale` when the workspace's
+    /// facts moved off the ones it was decided on, checked before it is accepted and again under
+    /// the repository's lock before git runs; then finished with the new facts, or failed: a
+    /// conflict backed out (`conflict`, the paths), uncommitted tracked changes (`busy`), or what
+    /// git said.
+    async fn git_apply(&self, c: Command<GitApply>) -> ApiResult<Receipt> {
+        self.mine(&c.body.workspace)?;
+        let GitAction::Rebase { onto } = c.body.action.clone() else {
+            return unsupported("git merge and push");
+        };
+        let w = c.body.workspace.clone();
+        let known = self.0.j.read(|t| t.op(&c.id))?.is_some();
+        let dir = workspace_dir(&self.0, &w)?;
+        let row = self
+            .0
+            .j
+            .read(|t| t.workspace(&w.id))?
+            .ok_or_else(|| ApiError::new(ErrorCode::Invalid, "no such workspace"))?;
+        if !known {
+            let now = self.facts_now(&dir).await?;
+            if now.revision != c.body.expected || now.head != c.body.expected_head {
+                return Err(ApiError::new(ErrorCode::Stale, "changed since").on(&c.id));
+            }
+        }
+        let resource = row.resource.clone();
+        let (r, fresh) = self.accept("git_apply", &c, |t| {
+            Self::workspace_free(t, &resource)?;
+            let mut d = Decided::accepted();
+            d.workspace = Some(w.clone());
+            Ok(d)
+        })?;
+        if !fresh {
+            return Ok(r);
+        }
+        let me = self.clone();
+        let op = c.id.clone();
+        let (expected, expected_head) = (c.body.expected.clone(), c.body.expected_head.clone());
+        self.spawn_owned(async move {
+            let lock = me.repo_lock(Path::new(row.repo.as_deref().unwrap_or(&row.path)));
+            let _g = lock.lock().await;
+            let commands = workspace::Commands {
+                inner: me.0.clone(),
+                op: op.clone(),
+            };
+            let d = dir.clone();
+            let done = tokio::task::spawn_blocking(move || {
+                git::rebase(&commands, &d, &onto, &expected, &expected_head)
+            })
+            .await
+            .map_err(internal)
+            .and_then(|r| r);
+            if me
+                .0
+                .j
+                .read(|t| t.proc_of(&workspace::control_session(&op)))
+                .map_or(true, |p| p.is_some())
+            {
+                return me
+                    .complete(
+                        &op,
+                        Observed::Unknown {
+                            reason: "git process not confirmed stopped".into(),
+                        },
+                        |_| Ok(()),
+                    )
+                    .await;
+            }
+            let state = match done {
+                Ok(facts) => Observed::Finished {
+                    outcome: Outcome::Succeeded,
+                    result: Some(OperationResult::Git(facts)),
+                    error: None,
+                },
+                Err(e) => failed(e),
+            };
+            me.complete(&op, state, |_| Ok(())).await;
+        });
+        Ok(r)
     }
     async fn exec(&self, _c: Command<ExecSpec>) -> ApiResult<Receipt> {
         unsupported("exec")

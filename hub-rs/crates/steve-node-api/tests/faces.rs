@@ -154,6 +154,21 @@ fn the_new_types_survive_the_wire() {
         GitRead::Status,
         GitRead::Fingerprint,
         GitRead::TrackedIgnored { rel: rel("target") },
+        GitRead::ChangedPaths {
+            from: "t1".into(),
+            to: "t2".into(),
+            max: 10,
+        },
+        GitRead::Landed {
+            commit: "c".into(),
+            onto: "origin/main".into(),
+        },
+        GitRead::RemoteTags {
+            remote: "origin".into(),
+        },
+        GitRead::RemoteUrl {
+            remote: "origin".into(),
+        },
     ];
     roundtrip(&GitQuery {
         workspace: w.clone(),
@@ -199,12 +214,37 @@ fn the_new_types_survive_the_wire() {
                 code: " M".into(),
             }],
         },
-        GitAnswer::Fingerprint { tree: "t1".into() },
+        GitAnswer::Fingerprint {
+            tree: "t1".into(),
+            own: None,
+        },
+        GitAnswer::Fingerprint {
+            tree: "t1".into(),
+            own: Some(OwnChange {
+                base: "b".into(),
+                patch: "-".into(),
+            }),
+        },
+        GitAnswer::ChangedPaths {
+            paths: vec!["a.rs".into()],
+            truncated: false,
+        },
+        GitAnswer::Landed { commit: None },
+        GitAnswer::Landed {
+            commit: Some("c".into()),
+        },
+        GitAnswer::RemoteTags {
+            tags: vec![("v1".into(), "c".into())],
+        },
+        GitAnswer::RemoteUrl { url: None },
         GitAnswer::TrackedIgnored {
             ignored: true,
             tracked: false,
         },
     ];
+    for a in &answers {
+        roundtrip(a);
+    }
     let mut f = facts("abc");
     f.reads = reads
         .into_iter()

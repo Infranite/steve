@@ -1,6 +1,8 @@
 //! [`steve_node_api::WorkspaceExecutor::git_facts`] on this machine: what git says in a workspace,
 //! read through the workspace's [`Commands`] pipe (registered, bounded by its deadline, never a
-//! lazy fetch). Only fixed read commands; a ref or revision never becomes an option.
+//! lazy fetch). Only fixed read commands; a ref or revision never becomes an option. A fetch (and
+//! `RemoteTags`) talks to the remote under [`NET_DEADLINE`]; a range's `overlap` and `conflicts`
+//! are not computed here yet (empty).
 
 use std::path::Path;
 
@@ -14,6 +16,22 @@ use crate::workspace::{Commands, Failed};
 const OUT_CAP: usize = 8 << 20;
 /// Bytes of a patch read past `max`, so the cut is made after git's leading blank line is trimmed.
 const SLACK: usize = 4096;
+/// What a patch fed to `patch-id` may be (a branch's whole upstream log, for `Landed`).
+const PATCH_CAP: usize = 64 << 20;
+/// How long a fetch or `ls-remote` may take.
+pub(crate) const NET_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
+/// How long one local read may take.
+const READ_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The refs a branch may have started from, most authoritative first (as the Hub's own git has
+/// always looked for them).
+const BASES: &[&str] = &[
+    "refs/remotes/origin/HEAD",
+    "refs/remotes/origin/main",
+    "refs/remotes/origin/master",
+    "refs/heads/main",
+    "refs/heads/master",
+];
 
 fn invalid(what: impl Into<String>) -> ApiError {
     ApiError::new(ErrorCode::Invalid, what)
@@ -79,6 +97,178 @@ impl Git<'_> {
     fn must(&self, r: &str) -> ApiResult<String> {
         self.commit(r)?
             .ok_or_else(|| invalid(format!("no such revision: {r}")))
+    }
+    /// A git that answers with its exit status (`merge-base --is-ancestor`): 0 yes, 1 no, anything
+    /// else an error, never a no.
+    fn test(&self, args: &[&str]) -> ApiResult<bool> {
+        let r = self.ran(args, &[], &[], 64 * 1024, READ_DEADLINE)?;
+        match r.code {
+            Some(0) => Ok(true),
+            Some(1) => Ok(false),
+            _ => Err(invalid(r.stderr)),
+        }
+    }
+    /// One git under the pipe as it ran; only a git that did not finish is an error (`internal`).
+    fn ran(
+        &self,
+        args: &[&str],
+        env: &[(&str, &str)],
+        input: &[u8],
+        cap: usize,
+        deadline: std::time::Duration,
+    ) -> ApiResult<crate::workspace::Ran> {
+        let r = self
+            .c
+            .read_with(self.dir, args, env, input, cap, deadline)
+            .map_err(|f| ApiError::new(ErrorCode::Internal, String::from(f)))?;
+        if r.code.is_none() {
+            return Err(ApiError::new(
+                ErrorCode::Internal,
+                "git cancelled or timed out",
+            ));
+        }
+        Ok(r)
+    }
+    /// The merge base of two commits: `None` when they share no history.
+    fn merge_base(&self, a: &str, b: &str) -> ApiResult<Option<String>> {
+        let r = self.ran(&["merge-base", a, b], &[], &[], 64 * 1024, READ_DEADLINE)?;
+        match r.code {
+            Some(0) => Ok(Some(text(&r.stdout))),
+            Some(1) if r.stderr.is_empty() => Ok(None),
+            _ => Err(invalid(r.stderr)),
+        }
+    }
+    fn count(&self, span: &str) -> ApiResult<u32> {
+        self.line(&["rev-list", "--count", span])?
+            .parse()
+            .map_err(|_| invalid("rev-list printed no count"))
+    }
+    /// `(patch id, commit)` of each commit (or the one diff) `args` prints, through
+    /// `patch-id --stable`; empty when there is no change. A patch past [`PATCH_CAP`] is an error:
+    /// part of it would give another id.
+    fn patch_ids(&self, args: &[&str]) -> ApiResult<Vec<(String, String)>> {
+        let src = self.ran(args, &[], &[], PATCH_CAP, READ_DEADLINE)?;
+        if src.code != Some(0) {
+            return Err(invalid(src.stderr));
+        }
+        if src.truncated {
+            return Err(invalid("the patch is too big to compare"));
+        }
+        let ids = self.ran(
+            &["patch-id", "--stable"],
+            &[],
+            &src.stdout,
+            1 << 20,
+            READ_DEADLINE,
+        )?;
+        if ids.code != Some(0) {
+            return Err(invalid(ids.stderr));
+        }
+        Ok(String::from_utf8_lossy(&ids.stdout)
+            .lines()
+            .filter_map(|l| {
+                let mut p = l.split_whitespace();
+                Some((p.next()?.to_string(), p.next()?.to_string()))
+            })
+            .collect())
+    }
+    /// Where `head`'s branch left the line it came from: its merge base with the nearest of the
+    /// default branches there are.
+    fn base_of(&self, head: &str) -> ApiResult<Option<String>> {
+        let mut refs = vec![];
+        for r in BASES {
+            if self.commit(r)?.is_some() {
+                refs.push(*r);
+            }
+        }
+        if refs.is_empty() {
+            return Ok(None);
+        }
+        let mut args = vec!["merge-base", head];
+        args.extend(refs);
+        Ok(self.may(&args)?.filter(|b| !b.is_empty()))
+    }
+    /// The tree the working directory would commit as, untracked files included, through a
+    /// throwaway index (the workspace's own index is never touched), and the own change in it.
+    fn fingerprint(&self, head: &str) -> ApiResult<GitAnswer> {
+        let index = std::env::temp_dir().join(format!(
+            "steve-node-fingerprint-{}-{}",
+            std::process::id(),
+            FINGERPRINTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let out = self.tree_with(&index);
+        let _ = std::fs::remove_file(&index);
+        let tree = out?;
+        let own = match self.base_of(head)? {
+            Some(base) => {
+                let patch = self
+                    .patch_ids(&["diff-tree", "-p", "--no-color", &base, &tree])?
+                    .into_iter()
+                    .next()
+                    .map(|(p, _)| p)
+                    .unwrap_or_else(|| "-".into());
+                Some(OwnChange { base, patch })
+            }
+            None => None,
+        };
+        Ok(GitAnswer::Fingerprint { tree, own })
+    }
+    fn tree_with(&self, index: &Path) -> ApiResult<String> {
+        let ix = index.to_string_lossy().to_string();
+        let env = [("GIT_INDEX_FILE", ix.as_str())];
+        let step = |args: &[&str]| -> ApiResult<String> {
+            let r = self.ran(args, &env, &[], 64 * 1024, READ_DEADLINE)?;
+            match r.code {
+                Some(0) => Ok(text(&r.stdout)),
+                _ => Err(invalid(r.stderr)),
+            }
+        };
+        // start from the workspace's index (its stat cache keeps this fast), then take in the tree
+        let real = self.may(&["rev-parse", "--path-format=absolute", "--git-path", "index"])?;
+        match real.filter(|r| Path::new(r).exists()) {
+            Some(r) => {
+                std::fs::copy(&r, index)
+                    .map_err(|e| ApiError::new(ErrorCode::Internal, e.to_string()))?;
+            }
+            None => {
+                step(&["read-tree", "HEAD"])?;
+            }
+        }
+        step(&["add", "--all"])?;
+        step(&["write-tree"])
+    }
+    /// The commit on `up` that brought `head`'s change in (the Hub's `upstream::presence`).
+    fn landed(&self, head: &str, up: &str) -> ApiResult<Option<String>> {
+        if self.test(&["merge-base", "--is-ancestor", head, up])? {
+            return Ok(Some(head.into()));
+        }
+        // no shared history: it can't be on `up`
+        let Some(mb) = self.merge_base(head, up)? else {
+            return Ok(None);
+        };
+        let range = format!("{mb}..{up}");
+        let upstream = self.patch_ids(&["log", "--no-merges", "-p", "--no-color", &range])?;
+        let find = |pid: &str| {
+            upstream
+                .iter()
+                .find(|(p, _)| p == pid)
+                .map(|(_, c)| c.clone())
+        };
+        let cherry = self.line(&["cherry", up, head])?;
+        if !cherry.is_empty() && cherry.lines().all(|l| l.starts_with('-')) {
+            let tip = self.patch_ids(&["show", "-p", "--no-color", "--format=commit %H", head])?;
+            if let Some(c) = tip.first().and_then(|(p, _)| find(p)) {
+                return Ok(Some(c));
+            }
+        }
+        // squash merge: one upstream commit with the whole change
+        let all = self.patch_ids(&["diff-tree", "-p", "--no-color", &mb, head])?;
+        Ok(all.first().and_then(|(p, _)| find(p)))
+    }
+    /// The working tree's changes, as `status --porcelain -z` lists them.
+    fn status(&self) -> ApiResult<Vec<StatusEntry>> {
+        let (out, _) = self.out(&["status", "--porcelain", "-z"], OUT_CAP)?;
+        Ok(porcelain(&out))
     }
     /// Stat and patch of `cmd … spec` (`show --format= <sha>`, `diff <a>...<b>`) with paths as they
     /// are (`docs/对话.md`), the patch cut at `max`.
@@ -217,12 +407,88 @@ impl Git<'_> {
                     },
                 )
             }
-            _ => {
+            GitRead::IsAncestor { ancestor, of } => {
+                let a = self.must(ancestor)?;
+                let of = self.must(of)?;
+                let yes = self.test(&["merge-base", "--is-ancestor", &a, &of])?;
+                (of, GitAnswer::IsAncestor { yes })
+            }
+            GitRead::Status => (
+                self.must("HEAD")?,
+                GitAnswer::Status {
+                    entries: self.status()?,
+                },
+            ),
+            GitRead::Fingerprint => {
+                let head = self.must("HEAD")?;
+                let a = self.fingerprint(&head)?;
+                (head, a)
+            }
+            GitRead::ChangedPaths { from, to, max } => {
+                let (from, to) = (rev(from)?, rev(to)?);
+                let (out, more) = self.out(&["diff", "--name-only", "-z", from, to], OUT_CAP)?;
+                let mut paths: Vec<String> = out
+                    .split(|b| *b == 0)
+                    .filter(|p| !p.is_empty())
+                    .map(|p| String::from_utf8_lossy(p).to_string())
+                    .collect();
+                let truncated = more || paths.len() > *max as usize;
+                paths.truncate(*max as usize);
+                (to.to_string(), GitAnswer::ChangedPaths { paths, truncated })
+            }
+            GitRead::Landed { commit, onto } => {
+                let commit = self.must(commit)?;
+                let up = self.must(onto)?;
+                let landed = self.landed(&commit, &up)?;
+                (up, GitAnswer::Landed { commit: landed })
+            }
+            GitRead::RemoteTags { remote } => {
+                let remote = rev(remote)?;
+                let r = self.ran(
+                    &["ls-remote", "--tags", remote],
+                    &[],
+                    &[],
+                    OUT_CAP,
+                    NET_DEADLINE,
+                )?;
+                if r.code != Some(0) {
+                    return Err(invalid(r.stderr));
+                }
+                (
+                    String::new(),
+                    GitAnswer::RemoteTags {
+                        tags: remote_tags(&String::from_utf8_lossy(&r.stdout)),
+                    },
+                )
+            }
+            GitRead::RemoteUrl { remote } => {
+                let key = format!("remote.{}.url", rev(remote)?);
+                let url = self
+                    .may(&["config", "--get", &key])?
+                    .map(|u| no_credentials(&u));
+                (String::new(), GitAnswer::RemoteUrl { url })
+            }
+            GitRead::TrackedIgnored { .. } => {
                 return Err(ApiError::new(
                     ErrorCode::Unsupported,
                     "this git read is not served here yet",
                 ));
             }
+        })
+    }
+
+    /// What `from..to` holds each way, and where they met.
+    fn range(&self, from: &str, to: &str) -> ApiResult<RangeFacts> {
+        let a = self.must(from)?;
+        let b = self.must(to)?;
+        Ok(RangeFacts {
+            merge_base: self.merge_base(&a, &b)?,
+            ahead: self.count(&format!("{a}..{b}"))?,
+            behind: self.count(&format!("{b}..{a}"))?,
+            from: a,
+            to: b,
+            overlap: vec![],
+            conflicts: vec![],
         })
     }
 }
@@ -235,31 +501,94 @@ fn not_found() -> GitAnswer {
     }
 }
 
-/// The facts `q` asks for in the checkout at `dir`. A fetch and ranges are not served yet
-/// (`unsupported`), nor are the working-tree reads. A `dir` that is no checkout with a commit, or a
-/// read git refuses, is `invalid`; git not finishing (its deadline) is `internal`.
-pub(crate) fn facts(c: &Commands, dir: &Path, q: &GitQuery) -> ApiResult<GitFacts> {
-    if q.fetch || !q.ranges.is_empty() {
-        return Err(ApiError::new(
-            ErrorCode::Unsupported,
-            "fetch and ranges are not served here yet",
-        ));
+static FINGERPRINTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// `status --porcelain -z` as entries: a rename's or copy's old path (the field after it) is
+/// skipped, a directory's trailing `/` dropped; a path that is no relative path is left out.
+fn porcelain(out: &[u8]) -> Vec<StatusEntry> {
+    let mut entries = vec![];
+    let mut fields = out.split(|b| *b == 0).filter(|f| !f.is_empty());
+    while let Some(f) = fields.next() {
+        if f.len() < 4 {
+            continue;
+        }
+        let code = String::from_utf8_lossy(&f[..2]).to_string();
+        let path = String::from_utf8_lossy(&f[3..]);
+        if code.contains('R') || code.contains('C') {
+            fields.next();
+        }
+        if let Ok(path) = RelPath::new(path.trim_end_matches('/')) {
+            entries.push(StatusEntry { path, code });
+        }
     }
-    let g = Git { c, dir };
-    let head = g
-        .commit("HEAD")?
-        .ok_or_else(|| invalid("not a git checkout with a commit"))?;
-    let branch = g
-        .may(&["symbolic-ref", "--short", "-q", "HEAD"])?
-        .filter(|b| !b.is_empty());
-    // a preview reads no working tree: no untracked-file scan for it
-    let status = match q.heads_only {
-        true => vec![],
-        false => g.out(&["status", "--porcelain", "-z"], OUT_CAP)?.0,
+    entries
+}
+
+/// `ls-remote --tags` as `(name, commit)`: the peeled line (`^{}`) of an annotated tag names its
+/// commit.
+fn remote_tags(out: &str) -> Vec<(String, String)> {
+    let mut tags: Vec<(String, String)> = vec![];
+    for l in out.lines() {
+        let Some((sha, r)) = l.split_once('\t') else {
+            continue;
+        };
+        let Some(name) = r.strip_prefix("refs/tags/") else {
+            continue;
+        };
+        let (name, peeled) = match name.strip_suffix("^{}") {
+            Some(n) => (n, true),
+            None => (name, false),
+        };
+        match tags.iter_mut().find(|(n, _)| n == name) {
+            Some(t) if peeled => t.1 = sha.into(),
+            Some(_) => {}
+            None => tags.push((name.into(), sha.into())),
+        }
+    }
+    tags
+}
+
+/// A remote URL without what may be a credential in it (`https://user:token@host/…`).
+fn no_credentials(url: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return url.to_string();
     };
+    let (auth, path) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
+    match auth.rsplit_once('@') {
+        Some((_, host)) => format!("{scheme}://{host}{path}"),
+        None => url.to_string(),
+    }
+}
+
+/// The facts `q` asks for in the checkout at `dir`, after fetching `origin` (with its tags) when it
+/// asks for that. A `dir` that is no checkout with a commit, or a read git refuses, is `invalid`; a
+/// fetch the remote refuses is `invalid` with git's words; git not finishing (its deadline) is
+/// `internal`.
+pub(crate) fn facts(c: &Commands, dir: &Path, q: &GitQuery) -> ApiResult<GitFacts> {
+    let g = Git { c, dir };
+    if q.fetch {
+        let r = c
+            .write_with(
+                dir,
+                &["fetch", "--quiet", "--tags", "origin"],
+                &[],
+                NET_DEADLINE,
+            )
+            .map_err(|f| ApiError::new(ErrorCode::Internal, String::from(f)))?;
+        match r.code {
+            Some(0) => {}
+            Some(_) => return Err(invalid(format!("fetch: {}", r.stderr))),
+            None => return Err(ApiError::new(ErrorCode::Internal, "fetch timed out")),
+        }
+    }
+    let (head, branch, status, revision) = observe(&g, q.heads_only)?;
     let mut refs = vec![];
     for r in &q.refs {
         refs.push((r.clone(), g.commit(r)?));
+    }
+    let mut ranges = vec![];
+    for (from, to) in &q.ranges {
+        ranges.push(g.range(from, to)?);
     }
     let mut reads = vec![];
     for r in &q.reads {
@@ -270,24 +599,128 @@ pub(crate) fn facts(c: &Commands, dir: &Path, q: &GitQuery) -> ApiResult<GitFact
             answer,
         });
     }
-    // what a decision made on these facts checks again: HEAD, the branch and the working tree
-    let mut h = sha2::Sha256::new();
-    h.update(head.as_bytes());
-    h.update([0]);
-    h.update(branch.as_deref().unwrap_or_default().as_bytes());
-    h.update([0]);
-    h.update(&status);
-    let kind = if q.heads_only { "h" } else { "g" };
-    let revision = Revision::new(format!("{kind}{}", &hex::encode(h.finalize())[..32]))
-        .map_err(|e| ApiError::new(ErrorCode::Internal, e.to_string()))?;
     Ok(GitFacts {
         revision,
         head,
         branch,
         dirty: !status.is_empty(),
         refs,
-        ranges: vec![],
+        ranges,
         reads,
+    })
+}
+
+/// HEAD, the branch, the working tree's status and the revision they make (what a decision made
+/// on them checks again).
+fn observe(g: &Git, heads_only: bool) -> ApiResult<(String, Option<String>, Vec<u8>, Revision)> {
+    let head = g
+        .commit("HEAD")?
+        .ok_or_else(|| invalid("not a git checkout with a commit"))?;
+    let branch = g
+        .may(&["symbolic-ref", "--short", "-q", "HEAD"])?
+        .filter(|b| !b.is_empty());
+    // a preview reads no working tree: no untracked-file scan for it
+    let status = match heads_only {
+        true => vec![],
+        false => g.out(&["status", "--porcelain", "-z"], OUT_CAP)?.0,
+    };
+    let mut h = sha2::Sha256::new();
+    h.update(head.as_bytes());
+    h.update([0]);
+    h.update(branch.as_deref().unwrap_or_default().as_bytes());
+    h.update([0]);
+    h.update(&status);
+    let kind = if heads_only { "h" } else { "g" };
+    let revision = Revision::new(format!("{kind}{}", &hex::encode(h.finalize())[..32]))
+        .map_err(|e| ApiError::new(ErrorCode::Internal, e.to_string()))?;
+    Ok((head, branch, status, revision))
+}
+
+/// The facts of the checkout at `dir` with nothing asked beyond them (what an apply checks).
+pub(crate) fn now(c: &Commands, dir: &Path) -> ApiResult<GitFacts> {
+    let (head, branch, status, revision) = observe(&Git { c, dir }, false)?;
+    Ok(GitFacts {
+        revision,
+        head,
+        branch,
+        dirty: !status.is_empty(),
+        refs: vec![],
+        ranges: vec![],
+        reads: vec![],
+    })
+}
+
+/// How long a rebase may take (its hooks included).
+const REBASE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Rebases the branch checked out at `dir` onto `onto`, if the checkout is still at `expected`
+/// and `expected_head` (`stale` otherwise). Uncommitted changes to tracked files are `busy`; a
+/// conflict is backed out and is `conflict` with the paths, one per line; `onto` already under
+/// HEAD changes nothing. The facts after it.
+pub(crate) fn rebase(
+    c: &Commands,
+    dir: &Path,
+    onto: &str,
+    expected: &Revision,
+    expected_head: &str,
+) -> ApiResult<GitFacts> {
+    let g = Git { c, dir };
+    let before = now(c, dir)?;
+    if before.revision != *expected || before.head != expected_head {
+        return Err(ApiError::new(ErrorCode::Stale, "changed since"));
+    }
+    let onto = g.must(onto)?;
+    let tracked = text(
+        &g.out(&["status", "--porcelain", "--untracked-files=no"], OUT_CAP)?
+            .0,
+    );
+    if !tracked.is_empty() {
+        let lines: Vec<&str> = tracked.lines().take(10).collect();
+        return Err(ApiError::new(ErrorCode::Busy, lines.join("\n")));
+    }
+    if g.test(&["merge-base", "--is-ancestor", &onto, "HEAD"])? {
+        return Ok(before);
+    }
+    let pipe = |f| ApiError::new(ErrorCode::Internal, String::from(f));
+    let r = c
+        .write_with(dir, &["rebase", &onto], &[], REBASE_DEADLINE)
+        .map_err(pipe)?;
+    if r.code == Some(0) {
+        return now(c, dir);
+    }
+    let files = c
+        .write_with(
+            dir,
+            &["diff", "--name-only", "--diff-filter=U"],
+            &[],
+            READ_DEADLINE,
+        )
+        .map(|r| text(&r.stdout))
+        .unwrap_or_default();
+    let abort = c
+        .write_with(dir, &["rebase", "--abort"], &[], READ_DEADLINE)
+        .map_err(pipe)?;
+    if abort.code != Some(0)
+        && g.may(&[
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-path",
+            "rebase-merge",
+        ])?
+        .is_some_and(|p| Path::new(&p).exists())
+    {
+        return Err(ApiError::new(
+            ErrorCode::Internal,
+            format!("the rebase could not be backed out: {}", abort.stderr),
+        ));
+    }
+    Err(match (r.code, files.is_empty()) {
+        (None, _) => ApiError::new(
+            ErrorCode::Internal,
+            "the rebase timed out and was backed out",
+        ),
+        (_, false) => ApiError::new(ErrorCode::Conflict, files),
+        (_, true) => invalid(r.stderr),
     })
 }
 
@@ -302,6 +735,36 @@ mod tests {
         for bad in ["", "-n", "--output=/tmp/x", "a b", "a\0b"] {
             assert_eq!(rev(bad).unwrap_err().code, ErrorCode::Invalid, "{bad:?}");
         }
+    }
+
+    #[test]
+    fn a_remote_url_never_carries_a_credential() {
+        assert_eq!(
+            no_credentials("https://x:tok@github.com/o/r.git"),
+            "https://github.com/o/r.git"
+        );
+        assert_eq!(no_credentials("ssh://git@host:22/o/r"), "ssh://host:22/o/r");
+        assert_eq!(
+            no_credentials("git@github.com:o/r.git"),
+            "git@github.com:o/r.git"
+        );
+        assert_eq!(no_credentials("/tmp/origin.git"), "/tmp/origin.git");
+    }
+
+    #[test]
+    fn porcelain_entries_skip_a_rename_source_and_a_trailing_slash() {
+        let e = porcelain(b" M a.rs\0R  new.rs\0old.rs\0?? dir/\0");
+        let got: Vec<(&str, &str)> = e
+            .iter()
+            .map(|e| (e.code.as_str(), e.path.as_str()))
+            .collect();
+        assert_eq!(got, [(" M", "a.rs"), ("R ", "new.rs"), ("??", "dir")]);
+    }
+
+    #[test]
+    fn remote_tags_take_the_peeled_commit() {
+        let t = remote_tags("a1\trefs/tags/v1\nb2\trefs/tags/v2\nc3\trefs/tags/v2^{}\n");
+        assert_eq!(t, [("v1".into(), "a1".into()), ("v2".into(), "c3".into())]);
     }
 
     #[test]

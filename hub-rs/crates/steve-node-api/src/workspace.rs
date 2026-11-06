@@ -116,6 +116,17 @@ pub enum GitRead {
     Fingerprint,
     /// Whether `rel` is ignored, and whether anything under it is tracked.
     TrackedIgnored { rel: RelPath },
+    /// The paths that differ between two trees or commits (`diff --name-only`), at most `max`.
+    ChangedPaths { from: String, to: String, max: u32 },
+    /// The commit on `onto` that brought `commit`'s change in: `commit` itself when it is on
+    /// `onto`, the rebased copy of its last commit, or a squash of all of its own. What the Node
+    /// has locally (fetch first).
+    Landed { commit: String, onto: String },
+    /// The tags `remote` has and the commits they point at (annotated tags peeled), as the remote
+    /// says (`ls-remote`): a network call, under the fetch deadline.
+    RemoteTags { remote: String },
+    /// The URL `remote` is configured with (`insteadOf` not applied), never with credentials.
+    RemoteUrl { remote: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -176,11 +187,41 @@ pub enum GitAnswer {
     },
     Fingerprint {
         tree: String,
+        /// The item's own change in that tree: where its branch left the default branch (the
+        /// nearest of the remote's and the local one) and the patch id of the diff from there
+        /// (`-` for none). The same change rebased keeps its patch id. `None`: no such base.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        own: Option<OwnChange>,
     },
     TrackedIgnored {
         ignored: bool,
         tracked: bool,
     },
+    ChangedPaths {
+        paths: Vec<String>,
+        truncated: bool,
+    },
+    /// `commit: None`: the change is not on `onto`.
+    Landed {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        commit: Option<String>,
+    },
+    /// `(name, commit)` pairs, in the remote's order.
+    RemoteTags {
+        tags: Vec<(String, String)>,
+    },
+    /// `None`: no such remote.
+    RemoteUrl {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        url: Option<String>,
+    },
+}
+
+/// See [`GitAnswer::Fingerprint`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OwnChange {
+    pub base: String,
+    pub patch: String,
 }
 
 /// A read with its answer and the commit it was answered at: the resolved `rev` of a `Show`, the
@@ -228,9 +269,10 @@ pub struct GitFacts {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum GitAction {
-    Rebase {
-        onto: String,
-    },
+    /// Rebases the branch checked out in the workspace onto `onto`. On a conflict the Node aborts
+    /// the rebase (the worktree as before) and the operation fails with `conflict`, its detail the
+    /// conflicting paths one per line; uncommitted changes to tracked files fail it with `busy`.
+    Rebase { onto: String },
     /// Merges `commit` into HEAD. On a conflict the Node aborts the merge when
     /// `back_out_on_conflict` (the worktree as before, the answer a `conflict`), or leaves it in
     /// progress for the session to resolve.

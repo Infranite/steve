@@ -381,6 +381,21 @@ async fn every_new_kind_crosses_the_wire_unchanged() {
         GitRead::Status,
         GitRead::Fingerprint,
         GitRead::TrackedIgnored { rel: rel("target") },
+        GitRead::ChangedPaths {
+            from: "t1".into(),
+            to: "t2".into(),
+            max: 10,
+        },
+        GitRead::Landed {
+            commit: "c".into(),
+            onto: "origin/main".into(),
+        },
+        GitRead::RemoteTags {
+            remote: "origin".into(),
+        },
+        GitRead::RemoteUrl {
+            remote: "origin".into(),
+        },
     ] {
         crosses(&c, r).await;
     }
@@ -415,7 +430,29 @@ async fn every_new_kind_crosses_the_wire_unchanged() {
         },
         GitAnswer::IsAncestor { yes: false },
         GitAnswer::Status { entries: vec![] },
-        GitAnswer::Fingerprint { tree: "t".into() },
+        GitAnswer::Fingerprint {
+            tree: "t".into(),
+            own: None,
+        },
+        GitAnswer::Fingerprint {
+            tree: "t".into(),
+            own: Some(OwnChange {
+                base: "b".into(),
+                patch: "-".into(),
+            }),
+        },
+        GitAnswer::ChangedPaths {
+            paths: vec!["a.rs".into()],
+            truncated: false,
+        },
+        GitAnswer::Landed { commit: None },
+        GitAnswer::Landed {
+            commit: Some("c".into()),
+        },
+        GitAnswer::RemoteTags {
+            tags: vec![("v1".into(), "c".into())],
+        },
+        GitAnswer::RemoteUrl { url: None },
         GitAnswer::TrackedIgnored {
             ignored: false,
             tracked: true,

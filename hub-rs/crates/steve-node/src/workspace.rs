@@ -123,6 +123,42 @@ impl Commands {
         self.run(dir, args, &READ_ENV, cap)
     }
 
+    /// A git that only reads, as [`Commands::read`], with more environment (`GIT_INDEX_FILE` for a
+    /// throwaway index), `input` on its stdin and its own deadline: its exit code (`None`: it did
+    /// not finish), stdout and whether it was cut, and stderr. Only a failure of the pipe is an
+    /// error.
+    pub(crate) fn read_with(
+        &self,
+        dir: &Path,
+        args: &[&str],
+        env: &[(&str, &str)],
+        input: &[u8],
+        cap: usize,
+        deadline: std::time::Duration,
+    ) -> Result<Ran, Failed> {
+        let mut all: Vec<(&str, &str)> = vec![
+            ("GIT_OPTIONAL_LOCKS", "0"),
+            ("GIT_NO_LAZY_FETCH", "1"),
+            ("GIT_TERMINAL_PROMPT", "0"),
+        ];
+        all.extend_from_slice(env);
+        self.run_full(dir, args, &all, input, cap, deadline)
+    }
+
+    /// A git that changes the repository (a rebase, its abort, a fetch), under the pipe with the
+    /// deadline given: as [`Commands::read_with`] without the read-only environment.
+    pub(crate) fn write_with(
+        &self,
+        dir: &Path,
+        args: &[&str],
+        env: &[(&str, &str)],
+        deadline: std::time::Duration,
+    ) -> Result<Ran, Failed> {
+        let mut all: Vec<(&str, &str)> = vec![("GIT_TERMINAL_PROMPT", "0"), ("GIT_EDITOR", "true")];
+        all.extend_from_slice(env);
+        self.run_full(dir, args, &all, &[], 1 << 20, deadline)
+    }
+
     /// `git args` in `dir` under the pipe: stdout (the first `cap` bytes, the rest drained and
     /// dropped) and whether it was cut; a failure is its stderr.
     fn run(
@@ -132,6 +168,23 @@ impl Commands {
         env: &[(&str, &str)],
         cap: usize,
     ) -> Result<(Vec<u8>, bool), Failed> {
+        let r = self.run_full(dir, args, env, &[], cap, DEADLINE)?;
+        match r.code {
+            Some(0) => Ok((r.stdout, r.truncated)),
+            Some(_) => Err(Failed::Git(r.stderr)),
+            None => Err(Failed::Pipe("git cancelled or timed out".into())),
+        }
+    }
+
+    fn run_full(
+        &self,
+        dir: &Path,
+        args: &[&str],
+        env: &[(&str, &str)],
+        input: &[u8],
+        cap: usize,
+        limit: std::time::Duration,
+    ) -> Result<Ran, Failed> {
         use std::io::{Read, Write};
         use std::os::{fd::AsRawFd, unix::process::CommandExt};
         use std::process::Stdio;
@@ -172,9 +225,16 @@ impl Commands {
             let _ = child.wait();
             return Err(Failed::Pipe(e.to_string()));
         }
-        let mut input = child.stdin.take().expect("pipe");
-        let sent = input.write_all(b"go\n");
-        drop(input);
+        let mut pipe = child.stdin.take().expect("pipe");
+        let sent = pipe.write_all(b"go\n");
+        // what git reads comes after the go line, written on a thread of its own so a git that
+        // writes as it reads never waits on this one
+        let feeding = (sent.is_ok() && !input.is_empty()).then(|| {
+            let data = input.to_vec();
+            std::thread::spawn(move || {
+                let _ = pipe.write_all(&data);
+            })
+        });
         let mut out = child.stdout.take().expect("pipe");
         let mut err = child.stderr.take().expect("pipe");
         for fd in [out.as_raw_fd(), err.as_raw_fd()] {
@@ -193,7 +253,7 @@ impl Commands {
                 ));
             }
         }
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let deadline = std::time::Instant::now() + limit;
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let mut truncated = false;
@@ -248,14 +308,28 @@ impl Commands {
             .j
             .tx(|t| t.drop_proc(&session, pid))
             .map_err(|e| Failed::Pipe(e.to_string()))?;
-        match status {
-            Some(status) if status.success() => Ok((stdout, truncated)),
-            Some(_) => Err(Failed::Git(
-                String::from_utf8_lossy(&stderr).trim().to_string(),
-            )),
-            None => Err(Failed::Pipe("git cancelled or timed out".into())),
+        if let Some(f) = feeding {
+            let _ = f.join();
         }
+        Ok(Ran {
+            code: status.map(|s| s.code().unwrap_or(-1)),
+            stdout,
+            truncated,
+            stderr: String::from_utf8_lossy(&stderr).trim().to_string(),
+        })
     }
+}
+
+/// How long a git under the pipe may take, unless its caller says otherwise.
+const DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// What one git under the pipe did.
+pub(crate) struct Ran {
+    /// `None`: it did not finish (cancelled, past its deadline).
+    pub code: Option<i32>,
+    pub stdout: Vec<u8>,
+    pub truncated: bool,
+    pub stderr: String,
 }
 
 /// A worktree of `repo` at `path` on `branch` (created from `base`, else HEAD, when new). One that
