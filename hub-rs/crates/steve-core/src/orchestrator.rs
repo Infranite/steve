@@ -1746,9 +1746,11 @@ impl Tx<'_> {
         };
         let mark = self.st.pending.remove(&session.id).map(|(m, _)| m);
         /* the turn answered something forwarded from the conversation: its reply goes back there */
+        let mut answered_you = false;
         if t.stop_reason != "cancelled"
             && let Some(r) = self.c.forwarded_take(item_id)
         {
+            answered_you = true;
             let last = self.last_agent_text(&session.id)?;
             if !last.is_empty() {
                 flow_quiet(
@@ -1798,7 +1800,12 @@ impl Tx<'_> {
                 };
                 let why = format!("Agent 停下来了，没有交付也没有提问{tail}");
                 /* Steve looks first: done by the project's rule, or worth another go */
-                let stop = crate::takeover::Stop::Stopped { why, last };
+                let stop = crate::takeover::Stop::Stopped {
+                    why,
+                    whole: self.last_agent_text_up_to(&session.id, crate::takeover::WHOLE_CHARS)?,
+                    last,
+                    answered_you,
+                };
                 match self.takeover(item_id, &session.id, stop)? {
                     Some(why) => why,
                     None => return Ok(()),
@@ -1809,6 +1816,11 @@ impl Tx<'_> {
     }
 
     pub(crate) fn last_agent_text(&self, sid: &str) -> Result<String> {
+        self.last_agent_text_up_to(sid, 400)
+    }
+
+    /// The agent's last words, at least `n` characters of them when there are.
+    pub(crate) fn last_agent_text_up_to(&self, sid: &str, n: usize) -> Result<String> {
         let evs = self.db().events_after(sid, 0)?;
         let mut tail: Vec<String> = vec![];
         let mut len = 0;
@@ -1817,7 +1829,7 @@ impl Tx<'_> {
             .rev()
             .filter_map(|e| steve_transcript::assistant_text(&e.kind, &e.data))
         {
-            if len >= 400 {
+            if len >= n {
                 break;
             }
             let t = t.to_string();

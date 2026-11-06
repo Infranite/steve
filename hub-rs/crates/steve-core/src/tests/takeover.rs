@@ -128,6 +128,65 @@ fn a_question_in_plain_words_is_for_you() {
     assert!(steve_lines(&k, &item).is_empty());
 }
 
+/// ST-49: the agent stopped to lay out a plan for you (a heading says so), far above its last words.
+#[test]
+fn a_plan_it_stopped_to_report_is_for_you() {
+    let k = kit(2);
+    let (item, sid) = started(&k);
+    let filler = "这一段是背景说明。".repeat(80);
+    stop(
+        &k,
+        &sid,
+        &format!("## 方案\n1. 先把分支推到 GitHub\n2. 开 PR 等 CI\n\n{filler}\n以上。"),
+    );
+    assert_eq!(k.open_fails(&item).len(), 1);
+    assert!(steve_lines(&k, &item).is_empty(), "not continued");
+}
+
+/// ST-54: the agent stopped with a list of things for you to confirm.
+#[test]
+fn something_it_stopped_for_you_to_confirm_is_for_you() {
+    let k = kit(2);
+    let (item, sid) = started(&k);
+    stop(
+        &k,
+        &sid,
+        "改好了一半。\n\n**待确认**\n- 旧接口是否直接删掉\n- 迁移要不要保留回退",
+    );
+    assert_eq!(k.open_fails(&item).len(), 1);
+    assert!(steve_lines(&k, &item).is_empty());
+}
+
+/// You asked the item something from the conversation: its answer ends the turn on purpose.
+#[test]
+fn an_answer_to_what_you_asked_from_the_conversation_is_not_continued() {
+    let k = kit(2);
+    let (item, sid) = started(&k);
+    // the first turn was cut short by you: the session waits, nothing open
+    k.rt.end_turn(&k.core, &sid, "cancelled", None);
+    k.core
+        .forward(&item, "现在进展到哪了？", &[], "m_1")
+        .unwrap();
+    assert!(
+        k.rt.prompts_of(&sid)
+            .iter()
+            .any(|p| p.contains("现在进展到哪了"))
+    );
+    stop(&k, &sid, "测试都过了，还差文档。");
+    assert!(steve_lines(&k, &item).is_empty(), "not continued");
+    assert_eq!(k.open_fails(&item).len(), 1);
+}
+
+#[test]
+fn only_a_heading_counts_as_a_report() {
+    use crate::takeover::stopped_to_report;
+    assert!(stopped_to_report("## 方案\n1. x"));
+    assert!(stopped_to_report("前面\n**待你确认**\n- x"));
+    assert!(stopped_to_report("修复方案：\n- x"));
+    assert!(!stopped_to_report("方案已经实现了，正在跑测试。"));
+    assert!(!stopped_to_report("## 测试结果\n全部通过"));
+}
+
 #[test]
 fn an_idle_session_is_continued_but_one_you_interrupted_is_not() {
     let k = kit(2);
