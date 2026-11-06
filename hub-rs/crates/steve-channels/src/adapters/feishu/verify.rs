@@ -5,7 +5,7 @@
 use serde::Serialize;
 use serde_json::{Value, json};
 use steve_modules::accounts::connections::{
-    AccountInfo, ConnCx, Owner, ProviderError, StewardHint,
+    AccountInfo, ConnCx, Integration, Owner, ProviderError, StewardHint,
 };
 
 use super::client::{
@@ -253,13 +253,29 @@ pub fn note_refused(
     changed
 }
 
-/// [`note_refused`] on the connection of `cx` (bot or you), written through the connections
+/// The permission table of a Feishu identity, by what its provider says it is (the integration's
+/// provider and identity), whatever adapter id serves it: the bot's or yours; `None` for anything
+/// that is not a Feishu identity.
+pub fn table_of(i: &Integration) -> Option<&'static [Permission]> {
+    if i.provider != super::auth::PROVIDER {
+        return None;
+    }
+    match i.identity.as_str() {
+        "bot" => Some(BOT_PERMISSIONS),
+        "self" => Some(USER_PERMISSIONS),
+        _ => None,
+    }
+}
+
+/// [`note_refused`] on the connection of `cx` (bot or you, its table by [`table_of`]), written through the connections
 /// framework (no-op while the connection is still being created).
 pub async fn record_refused(cx: &ConnCx, scopes: &[String], help_url: Option<&str>) {
-    let table = match cx.adapter() {
-        super::auth::APP_ADAPTER => BOT_PERMISSIONS,
-        super::auth::USER_ADAPTER => USER_PERMISSIONS,
-        _ => return,
+    let Some(table) = cx
+        .connections()
+        .provider(cx.adapter())
+        .and_then(|p| table_of(&p.integration()))
+    else {
+        return;
     };
     let (scopes, url) = (scopes.to_vec(), help_url.map(String::from));
     let now = cx.connections().modules().clock.now();
@@ -698,6 +714,24 @@ pub async fn verify_user(cx: &ConnCx, client: &FeishuClient) -> Result<AccountIn
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_table_follows_the_identity_not_the_adapter_id() {
+        use super::super::auth::{app_integration, user_integration};
+        let scopes = |t: Option<&'static [Permission]>| {
+            t.map(|t| t.iter().map(|p| p.scope).collect::<Vec<_>>())
+        };
+        let of = |t: &'static [Permission]| Some(t.iter().map(|p| p.scope).collect::<Vec<_>>());
+        assert_eq!(scopes(table_of(&app_integration())), of(BOT_PERMISSIONS));
+        assert_eq!(scopes(table_of(&user_integration())), of(USER_PERMISSIONS));
+        // another provider's identity has no Feishu table
+        let mut other = user_integration();
+        other.provider = "mail".into();
+        assert!(table_of(&other).is_none());
+        let mut app = app_integration();
+        app.identity = "account".into();
+        assert!(table_of(&app).is_none());
+    }
 
     #[test]
     fn user_scopes_are_flagged() {
