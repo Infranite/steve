@@ -468,6 +468,10 @@ impl Connections {
     pub fn provider(&self, id: &str) -> Option<Arc<dyn ConnectionProvider>> {
         self.0.providers.get(id).cloned()
     }
+    /// Every registered provider id, managed ones included.
+    pub fn provider_ids(&self) -> Vec<String> {
+        self.0.providers.keys().cloned().collect()
+    }
     fn provider_or_404(&self, id: &str) -> VaultResult<Arc<dyn ConnectionProvider>> {
         self.provider(id)
             .ok_or_else(|| ApiError::not_found("接入方式").into())
