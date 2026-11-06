@@ -691,6 +691,11 @@ impl Outbox {
         self
     }
 
+    /// The adapters it sends as you on.
+    pub fn as_user_ids(&self) -> Vec<String> {
+        self.as_user.keys().cloned().collect()
+    }
+
     /// The redactor's registered values (checked again on the final text).
     pub fn secrets(mut self, s: Arc<dyn SecretScan>) -> Self {
         self.secrets = s;

@@ -239,6 +239,10 @@ impl Mail {
     pub fn adapter(&self, id: &str) -> Option<Arc<dyn MailAdapter>> {
         self.0.adapters.get(id).cloned()
     }
+    /// The registered adapter ids.
+    pub fn adapter_ids(&self) -> Vec<String> {
+        self.0.adapters.keys().cloned().collect()
+    }
     fn now(&self) -> i64 {
         self.0.m.clock.now()
     }
