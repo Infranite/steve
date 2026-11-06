@@ -1269,9 +1269,13 @@ async fn a_job_stops_at_its_output_cap() {
     assert_eq!(c.stop_reason, "max_output");
     assert_eq!(c.error.unwrap().code, ErrorCode::Exhausted);
     assert_eq!(c.job.unwrap().end, JobEnd::Stopped);
-    // stopped as it wrote, perhaps before it started its child
+    // stopped as it wrote, perhaps before it started its child or wrote its pid (the file made,
+    // still empty)
     until("the harness's child is gone", || {
-        !pid.exists() || !alive(pid_of(&pid))
+        std::fs::read_to_string(&pid)
+            .ok()
+            .and_then(|p| p.trim().parse().ok())
+            .is_none_or(|p| !alive(p))
     })
     .await;
     n.shutdown().await;
