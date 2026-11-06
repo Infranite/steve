@@ -107,6 +107,8 @@ export default {
     updateView: "Upgrade",
     undo: "Undo",
     undone: "Undone",
+    undoneKept: "Undone; {{fields}} changed again since and keeps its current value",
+    fieldSep: ", ",
     applied: "Applied",
     withdrawn: "Withdrawn",
     withdrawnToComposer: "Withdrawn and put back in the composer",

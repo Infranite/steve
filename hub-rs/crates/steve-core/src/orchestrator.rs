@@ -2254,6 +2254,15 @@ impl Tx<'_> {
                         self.lc_accept(&i, crate::cycle::Policy::Human, Some("你验收通过"));
                     self.st.release_with_accept = None;
                     accepted?;
+                    /* the card's answer says whether the release started with it */
+                    if text == ACCEPT_AND_RELEASE
+                        && self.st.releasing.as_ref().is_some_and(|r| r.item == i)
+                    {
+                        self.db()
+                            .store()
+                            .decisions()
+                            .merge_result(id, &json!({"release": "started"}))?;
+                    }
                     if text == "no-release"
                         && let Some(op) = self.lc_open_op(&i, crate::cycle::OP_RELEASE)?
                     {

@@ -434,7 +434,13 @@ impl Core {
                     .sum::<usize>(),
             })
         })?;
-        let (text, meta) = config_reply(ask, &ds);
+        /* the L0 ones apply right away: their cards say 已应用 and offer the undo */
+        let applied = if ask {
+            vec![]
+        } else {
+            self.config_auto_apply(ws, user, &ds).await
+        };
+        let (text, meta) = config_reply(ask, &ds, &applied);
         reply(&text, None, meta);
         Ok(Logged { item: None })
     }
@@ -678,8 +684,12 @@ fn listed(d: &crate::changes::Drafted) -> String {
 }
 
 /// The reply to a configuration request: the drafted cards (`meta.proposal`, or `meta.proposals` when
-/// there are several), and how the rest is set now.
-fn config_reply(ask: bool, ds: &[crate::changes::Drafted]) -> (String, Option<Value>) {
+/// there are several; those `applied` already marked so in `meta.cfg_state`), and how the rest is set now.
+fn config_reply(
+    ask: bool,
+    ds: &[crate::changes::Drafted],
+    applied: &[String],
+) -> (String, Option<Value>) {
     if ask {
         let parts: Vec<String> = ds
             .iter()
@@ -709,30 +719,61 @@ fn config_reply(ask: bool, ds: &[crate::changes::Drafted]) -> (String, Option<Va
             }
         })
         .collect();
-    let head = match drafted.as_slice() {
+    let is_applied = |p: &Value| {
+        p["id"]
+            .as_str()
+            .is_some_and(|id| applied.iter().any(|a| a == id))
+    };
+    let titled = |pred: &dyn Fn(&Value) -> bool| -> Vec<&str> {
+        ds.iter()
+            .filter(|d| d.proposal.as_ref().is_some_and(pred))
+            .map(|d| d.title.as_str())
+            .collect()
+    };
+    let (done, todo) = (titled(&is_applied), titled(&|p| !is_applied(p)));
+    let done_text = match done.as_slice() {
         [] => String::new(),
-        [_] => {
-            let t = ds
-                .iter()
-                .find(|d| d.proposal.is_some())
-                .map(|d| d.title.as_str())
-                .unwrap_or_default();
-            format!("这是配置改动，我起草好了，确认后应用到「{t}」：")
-        }
+        [t] => format!("已经改好了「{t}」，不对的话在卡片上撤销："),
+        many => format!(
+            "已经改好了 {} 处（{}），不对的话在卡片上撤销：",
+            many.len(),
+            many.iter()
+                .map(|t| format!("「{t}」"))
+                .collect::<Vec<_>>()
+                .join("")
+        ),
+    };
+    let todo_text = match todo.as_slice() {
+        [] => String::new(),
+        [t] if done.is_empty() => format!("这是配置改动，我起草好了，确认后应用到「{t}」："),
+        [t] => format!("「{t}」的改动起草好了，确认后应用："),
         many => format!(
             "这是配置改动，我起草好了 {} 处，确认后分别应用：",
             many.len()
         ),
     };
+    let head = [done_text, todo_text]
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
     let text = std::iter::once(head)
         .chain(unchanged)
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>()
         .join("\n\n");
-    let meta = match drafted.as_slice() {
+    let mut meta = match drafted.as_slice() {
         [] => None,
         [p] => Some(json!({"proposal": p})),
         many => Some(json!({"proposals": many})),
     };
+    if let Some(m) = meta.as_mut().filter(|_| !applied.is_empty()) {
+        m["cfg_state"] = Value::Object(
+            applied
+                .iter()
+                .map(|id| (id.clone(), json!("applied")))
+                .collect(),
+        );
+    }
     (text, meta)
 }

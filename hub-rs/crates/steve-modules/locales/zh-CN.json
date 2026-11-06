@@ -95,6 +95,7 @@
   "modules.contacts_draft.title.profile": "%{name} 的资料",
   "modules.contacts_draft.title.new_team": "新虚拟团队",
   "modules.contacts_draft.title.team": "团队「%{name}」",
+  "modules.contacts_draft.label.note": "备注",
   "modules.contacts_draft.label.name": "名字",
   "modules.contacts_draft.label.aliases": "别名",
   "modules.contacts_draft.label.rels": "和你的关系",

@@ -122,6 +122,8 @@ export default {
     updateView: "去升级",
     undo: "撤销",
     undone: "已撤销",
+    undoneKept: "已撤销；{{fields}}之后又改过，保留现在的值",
+    fieldSep: "、",
     applied: "已应用",
     withdrawn: "已撤回",
     withdrawnToComposer: "已撤回，放回输入框了",

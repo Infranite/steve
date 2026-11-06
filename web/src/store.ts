@@ -448,7 +448,11 @@ export function proposalOf(p: Proposal, state: "draft" | "applied" | "dropped" =
   if (cur) { if (!cur.touched || state === cur.state) { cur.state = state; cur.touched = false } return cur }
   const x: any = { title: p.title, target: p.title, href: p.href, changes: p.changes, state, id: p.id, touched: false }
   const set = (s: typeof state) => { x.state = s; x.touched = true; emit() }
-  x.undo = async () => { if (await call(api.undoConfig(p.id), t("core:toast.undone"))) set("draft") }
+  /* a field changed again since this change keeps its value: the Hub names it (`kept`) */
+  x.undo = async () => {
+    const r = await call(api.undoConfig(p.id) as Promise<{ kept?: string[] }>); if (!r) return
+    toast(r.kept?.length ? t("core:toast.undoneKept", { fields: r.kept.join(t("core:toast.fieldSep")) }) : t("core:toast.undone")); set("draft")
+  }
   x.apply = async () => { const r = await call(api.apply(p.id)); if (r) { set("applied"); toast(t("core:toast.applied"), { action: { label: t("core:toast.undo"), onClick: () => void x.undo() } }) } }
   x.drop = async () => { if (await call(api.dropConfig(p.id))) set("dropped") }
   proposals.set(p.id, x); return x
@@ -881,11 +885,11 @@ export async function decide(id: string, c: string, text?: string, decision?: st
     if (c === "pass" && w.type === "accept" && releaseAhead(i) && i) {
       /* the Hub finishes an item with nothing on its branch right away: say so instead of waiting for a release;
        * 验收并发布 starts it on the Hub unless the branch moved or a release runs (then the agent asks for it) */
-      if (!(await call(api.decide(w.decision, c, text)))) return
+      const d = await call(api.decide(w.decision, c, text)); if (!d) return
       cue("success")
       const after = await api.item(i.id).catch(() => null)
       toast(after?.status === "done" ? (text === "no-release" ? t("core:decided.acceptedNoRelease") : t("core:decided.acceptedNothingToRelease"))
-        : after?.now === "正在发布" ? t("core:decided.acceptedReleasing") : t("core:decided.acceptedAwaitRelease"))
+        : d.result?.release === "started" ? t("core:decided.acceptedReleasing") : t("core:decided.acceptedAwaitRelease"))
       return
     }
     const result = await call(api.decide(w.decision, c, text), decidedText(w, c, i?.b ?? null))

@@ -1079,6 +1079,10 @@ fn accept_and_release_starts_the_release_without_a_round_of_the_agent() {
     assert_eq!(r.result["approved"], true);
     assert_eq!(r.result["with_accept"], true);
     assert_eq!(r.result["outcome"], "releasing");
+    assert_eq!(
+        k.db().decision(&d).unwrap().unwrap().result["release"],
+        "started"
+    );
     let frozen = crate::cycle::closing_of(&k.db().item(&x.id).unwrap().unwrap())
         .unwrap()
         .fingerprint;

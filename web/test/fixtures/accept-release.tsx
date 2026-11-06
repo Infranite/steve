@@ -14,7 +14,7 @@ st.ready = true
 st.projects = [p]
 st.items = [i]
 const calls: unknown[] = ((window as any).__calls = [])
-api.decide = async (id, choice, text) => { calls.push({ id, choice, text }); return { id, status: "resolved", result: { choice } } as any }
+api.decide = async (id, choice, text) => { calls.push({ id, choice, text }); return { id, status: "resolved", result: text === "release" ? { choice, release: "started" } : { choice } } as any }
 /* what the item reads after the answer: releasing, or (`__done`) finished without a release */
 api.item = async () => ((window as any).__done ? { ...i, status: "done", now: "完成" } : { ...i, status: "wait", now: "正在发布" }) as any
 function App() { useStore(); return <main className="mx-auto max-w-[640px] px-4 py-6"><DecisionCard i={st.items[0] ?? i} /><Toaster /></main> }
