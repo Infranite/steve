@@ -244,6 +244,8 @@
   "modules.connections.pair.revoked": "The connection to pair with has been disconnected",
   "modules.connections.pair.needed": "Connect %{names} first, then this connection",
   "modules.connections.pair.choose": "More than one connection can be paired with this one; choose one",
+  "modules.connections.config_version": "The way this connection is set up has changed; authorize it again",
+  "modules.connections.config_rejected": "The connection settings are not valid: %{error}",
   "modules.vault.grant_high": "Top-secret items can't be granted, you approve every use",
   "modules.vault.command_secret_node": "The command contains something that looks like a secret. This conversation's commands are recorded as they are on the device that runs them, so don't write a secret into the command; inject it with env or stdin instead",
   "modules.vault.cwd_outside": "The directory isn't in this conversation's workspace",

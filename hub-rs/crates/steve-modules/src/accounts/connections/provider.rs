@@ -31,6 +31,10 @@ pub const CAPS: [&str; 12] = [
 /// with the bot connection of the same app).
 pub const PAIR_KEY: &str = "app_connection";
 
+/// The `config` key holding the [`ConnectionProvider::config_version`] a connection was stored
+/// under (absent: 1). Set by the framework only; a request's own value is dropped.
+pub const CONFIG_VERSION_KEY: &str = "_v";
+
 /// Which connections a provider's connections pair with ([`ConnectionProvider::pairing`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Pairing {
@@ -424,6 +428,15 @@ pub trait ConnectionProvider: Send + Sync + 'static {
         None
     }
 
+    /// The `config` of every connect path (create, the OAuth and device starts, a new credential,
+    /// a re-authorization, a bind), before anything is verified or stored. Validate what the
+    /// provider will reach with it: endpoints (scheme, a host allowlist from [`StartCx::var`], no
+    /// userinfo or secrets in the query). `Err` refuses the request (`400`). Default: accepted.
+    fn check_config(&self, cx: &StartCx<'_>, config: &Value) -> Result<(), ProviderError> {
+        let _ = (cx, config);
+        Ok(())
+    }
+
     /// Whether a verified connection may claim contacts into “我”: before its account is attached,
     /// an unconfirmed contact already holding its primary handle (or an extra handle, or an alias)
     /// is merged into the connecting user's “我”. Default: a `self` identity
@@ -432,6 +445,14 @@ pub trait ConnectionProvider: Send + Sync + 'static {
     /// [`AccountInfo::handle`] itself (from its paired connection, [`ConnCx::paired`]).
     fn claims_self(&self) -> bool {
         self.auth() == AuthKind::OAuth && self.integration().identity == "self"
+    }
+
+    /// The shape of what this provider stores (config and credential). Bump it when that shape
+    /// changes, or when a provider replaces another under the same id: a connection stored under
+    /// another version ([`CONFIG_VERSION_KEY`], absent = 1) is marked `reauth` at startup, with
+    /// [`Self::reauth_question`], and a new authorization stores the current one. Default: 1.
+    fn config_version(&self) -> u32 {
+        1
     }
 
     /// Revokes at the provider on disconnect (best effort). Default: RFC 7009 at the spec's

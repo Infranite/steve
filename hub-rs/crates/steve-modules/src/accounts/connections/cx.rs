@@ -181,4 +181,12 @@ impl StartCx<'_> {
     pub fn connections(&self) -> &Connections {
         self.conns
     }
+
+    /// A variable of the Hub's environment (what [`ConnectionProvider::check_config`] allows, for
+    /// example an endpoint host list).
+    ///
+    /// [`ConnectionProvider::check_config`]: super::ConnectionProvider::check_config
+    pub fn var(&self, key: &str) -> Option<String> {
+        self.conns.env(key)
+    }
 }

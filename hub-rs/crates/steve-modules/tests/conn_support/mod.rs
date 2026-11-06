@@ -472,6 +472,7 @@ pub fn setup(ps: Vec<Arc<dyn ConnectionProvider>>) -> H {
         "STEVE_OAUTH_GOOGLE_CLIENT_SECRET" => Some(GOOGLE_SECRET.into()),
         "STEVE_OAUTH_MICROSOFT_CLIENT_ID" => Some(MS_ID.into()),
         "STEVE_OAUTH_MICROSOFT_CLIENT_SECRET" => Some(MS_SECRET.into()),
+        "STEVE_TEST_ENDPOINT_HOSTS" => Some("chat.example.com".into()),
         _ => None,
     });
     let mut b = Connections::builder(env.modules.clone(), vault.clone(), cfg);
