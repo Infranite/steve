@@ -211,3 +211,58 @@ async fn an_old_message_is_read_again_by_the_view_of_its_adapter() {
         .expect("text");
     assert_eq!(text, "[图片]");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_resource_is_fetched_only_by_the_adapter_its_key_belongs_to() {
+    let h = setup();
+    let msg = received(
+        &h,
+        "m_3",
+        "看图",
+        vec![json!({"type": "image", "key": "img_3", "source": "message"})],
+        false,
+    )
+    .await;
+    // stored with the adapter its key belongs to; never shown
+    let stored: String = h
+        .env
+        .store()
+        .reader(|c| {
+            Ok::<_, steve_store::StoreError>(c.query_row(
+                "SELECT attachments FROM chan_messages WHERE id = ?",
+                [&msg],
+                |r| r.get(0),
+            )?)
+        })
+        .expect("attachments");
+    let stored: Value = serde_json::from_str(&stored).expect("json");
+    assert_eq!(stored[0]["adapter"], FakeChannel::ID);
+    let shown = h
+        .env
+        .store()
+        .reader(|c| Ok::<_, steve_store::StoreError>(media::present(c, &msg)))
+        .expect("present")
+        .expect("stored");
+    assert!(shown.1[0].get("adapter").is_none(), "{}", shown.1);
+
+    // a key of another adapter (a copy merged from another side): no connection of it is left, so
+    // it is not handed to this adapter's view
+    sql(
+        &h,
+        &format!(
+            "UPDATE chan_messages SET attachments = json_set(attachments, '$[0].adapter', 'other_side') WHERE id = '{msg}'"
+        ),
+    );
+    let e = media::fetch_for_viewer(&h.ch, &Viewer::bare(WS, ME), &msg, 0, Limits::default())
+        .await
+        .expect_err("not this adapter's key");
+    assert_eq!(e, MediaError::Disconnected);
+    assert!(h.media.0.lock().unwrap().is_empty());
+    let shown = h
+        .env
+        .store()
+        .reader(|c| Ok::<_, steve_store::StoreError>(media::present(c, &msg)))
+        .expect("present")
+        .expect("stored");
+    assert_eq!(shown.1[0]["unavailable"], MediaError::Disconnected.reason());
+}
