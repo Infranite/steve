@@ -930,6 +930,7 @@ fn every_row_of_the_table() {
                 repeated,
                 count: 0,
                 key: "用 a 还是 b".into(),
+                full: false,
             }),
         )
     };
@@ -1526,6 +1527,7 @@ fn delays_texts_and_undo() {
             repeated: false,
             count: 0,
             key: String::new(),
+            full: false,
         }),
     );
     let Verdict::Auto {

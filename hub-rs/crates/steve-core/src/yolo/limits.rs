@@ -3,7 +3,8 @@
 //!
 //! 1. money: bank cards, an over-budget flow, payment words anywhere in the card or command;
 //! 2. `high` vault items;
-//! 3. speaking as the user, unless the outbound path marks the message `[AI] ` and the disclosure check passed;
+//! 3. speaking as the user, unless the outbound path marks the message `[AI] ` and the disclosure check passed
+//!    (a program that sends as the user from the agent's shell — `lark-cli`, `sendmail`, `osascript`… — never is);
 //! 4. deleting, moving or writing outside the item's own directory; touching `STEVE_HOME`, port 8440, launchd;
 //! 5. pushing to a remote or publishing (only the user's own Steve deployment is exempt);
 //! 6. outbound content the disclosure check judged Leak or Blocked.
@@ -57,11 +58,27 @@ static MONEY: LazyLock<Regex> = LazyLock::new(|| {
 static GIT_CHECKOUT: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\bgit(\s+-\S+(\s+\S+)?)*\s+checkout\b").expect("valid regex")
 });
-/// What `steve_request_approval` must not be about.
+/// What `steve_request_approval` must not be about; under full access also what a question or an
+/// answer must not be about (nothing checks what the agent then does with the answer).
 static OUTWARD: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)推送|发布|发送|付款|删除|部署|生产|上线|\bpush\b|\bpublish|\bdeploy|\brelease\b|\bsend\b|\bprod(uction)?\b|\bdelete\b|\bemail\b|\bupload\b")
         .expect("valid regex")
 });
+/// What a question or an answer must not be about while YOLO is on without full access: only going
+/// live and mail. Whatever the agent does with the answer still meets the tool guard and these limits.
+static OUTWARD_ASK: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)推送|发布|部署|上线|发送邮件|发邮件|\bpush\b|\bpublish|\bdeploy|\bsend\s+(an?\s+)?e-?mail")
+        .expect("valid regex")
+});
+
+/// The outward words of a question or answer: [`OUTWARD_ASK`], or [`OUTWARD`] under full access.
+fn outward_ask(text: &str, full: bool) -> Option<regex::Match<'_>> {
+    if full {
+        OUTWARD.find(text)
+    } else {
+        OUTWARD_ASK.find(text)
+    }
+}
 static LAUNCHD: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)launchctl|launchd|LaunchAgents|LaunchDaemons").expect("valid regex")
 });
@@ -119,9 +136,8 @@ fn ask(f: &Facts, a: &super::judge::Ask) -> Option<Limit> {
             return Some(Limit::new(1, format!("涉及付款（{w}）")));
         }
     }
-    OUTWARD
-        .find(&f.question)
-        .or_else(|| OUTWARD.find(&a.key))
+    outward_ask(&f.question, a.full)
+        .or_else(|| outward_ask(&a.key, a.full))
         .map(|m| Limit::new(5, format!("问题涉及对外或不可撤回的动作（{}）", m.as_str())))
 }
 
@@ -130,9 +146,10 @@ fn money(text: &str) -> Option<String> {
     MONEY.find(&t).map(|m| m.as_str().to_string())
 }
 
-/// Payment words, or an answer that walks outside (used on model answers before they reach a session).
-pub fn money_or_outside_words(text: &str, _env: &Env) -> Option<String> {
-    money(text).or_else(|| OUTWARD.find(text).map(|m| m.as_str().to_string()))
+/// Payment words, or an answer that walks outside (used on model answers before they reach a session);
+/// `full`: the session runs with full access, where the whole [`OUTWARD`] list counts.
+pub fn money_or_outside_words(text: &str, full: bool) -> Option<String> {
+    money(text).or_else(|| outward_ask(text, full).map(|m| m.as_str().to_string()))
 }
 
 /// What a `steve_request_approval` text gives away about leaving the worktree; `None` reads as local.
@@ -493,6 +510,12 @@ static STEVE_NAMED: LazyLock<Regex> = LazyLock::new(|| {
 /// Relative paths (`.steve/qa` inside the item's own directory) are left to the path checks, which
 /// resolve them.
 fn text_limits(text: &str, pl: &Places) -> Option<Limit> {
+    steve_text(text, pl, true)
+}
+
+/// [`text_limits`]; `release`: Steve's release script counts too (full access leaves it out: a
+/// project's own `release.sh` is not Steve's, and the dialog promises only the rest).
+fn steve_text(text: &str, pl: &Places, release: bool) -> Option<Limit> {
     let mut t = text.to_string();
     // the item's own directory may sit under STEVE_HOME; naming it is fine
     if let Some(c) = &pl.cwd {
@@ -508,7 +531,7 @@ fn text_limits(text: &str, pl: &Places) -> Option<Limit> {
     if let Some(m) = LAUNCHD.find(&t) {
         return Some(Limit::new(4, format!("碰到 launchd（{}）", m.as_str())));
     }
-    if t.contains("release.sh") {
+    if release && t.contains("release.sh") {
         return Some(Limit::new(4, "Steve 的发布脚本"));
     }
     if STEVE_NAMED.is_match(&t)
@@ -574,6 +597,19 @@ fn parsed(p: &Parsed, pl: &Places, branch: Option<&str>, depth: u8) -> Option<Li
         let Some(a) = shell::argv(&c.words) else {
             continue;
         };
+        // a here-document fed to a shell is a script of its own
+        if let Some(body) = &c.stdin
+            && SHELLS.contains(&a.program.as_str())
+        {
+            match shell::parse(body) {
+                Ok(n) => {
+                    if let Some(l) = parsed(&n, pl, branch, depth + 1) {
+                        return Some(l);
+                    }
+                }
+                Err(_) => return Some(Limit::new(4, "喂给 shell 的 here-document 看不清")),
+            }
+        }
         if let Some(l) = program(&a, c.expands, pl, branch, depth) {
             return Some(l);
         }
@@ -673,6 +709,24 @@ const DELETERS: &[&str] = &[
     "rm", "rmdir", "unlink", "shred", "srm", "trash", "truncate", "touch", "mkdir", "tee",
 ];
 const SHELLS: &[&str] = &["sh", "bash", "zsh", "dash", "fish", "ksh", "csh", "tcsh"];
+/// Programs that send messages or mail as the user with the user's own credentials: nothing marks
+/// what they send `[AI] ` and no disclosure check reads it.
+pub(crate) const AS_USER: &[&str] = &[
+    "lark-cli",
+    "sendmail",
+    "mail",
+    "mailx",
+    "msmtp",
+    "mutt",
+    "neomutt",
+    "osascript",
+];
+
+fn as_user(p: &str) -> Option<Limit> {
+    AS_USER
+        .contains(&p)
+        .then(|| Limit::new(3, format!("{p} 会以你本人的身份发消息或邮件")))
+}
 
 fn program(a: &Argv, expands: bool, pl: &Places, branch: Option<&str>, depth: u8) -> Option<Limit> {
     let p = a.program.as_str();
@@ -693,6 +747,9 @@ fn program(a: &Argv, expands: bool, pl: &Places, branch: Option<&str>, depth: u8
     let all_inside = |list: Vec<&String>| list.into_iter().find_map(|w| pl.remove_target(w));
     let all_writable = |list: Vec<&String>| list.into_iter().find_map(|w| pl.write_target(w));
 
+    if let Some(l) = as_user(p) {
+        return Some(l);
+    }
     if REMOTE_SHELLS.contains(&p) {
         return push("连到远端主机");
     }
@@ -1395,6 +1452,164 @@ fn find(args: &[String], pl: &Places, branch: Option<&str>, depth: u8) -> Option
     None
 }
 
+// ── full access ──
+
+/// The floor under 完全放开 (full access), where the harness asks nothing: a tool call the Hub sees
+/// starting (ACP `tool_call`: its kind, `rawInput` and locations, whichever harness sent it) that is
+/// one of these stops the turn. Only what the confirmation dialog promises: speaking as the user
+/// through a program of theirs (rule 3), pushing or changing GitHub (rule 5), touching
+/// `STEVE_HOME` outside the item's own directory, port 8440, launchd or Steve's release script, and
+/// `pkill`/`killall` (rule 4). Writing anywhere else is what full access gives.
+pub fn full_access(t: &Tool, env: &Env) -> Option<Limit> {
+    let mut pl = Places::new(t.cwd.as_deref(), env);
+    if let Some(base) = tool_base(t, &pl) {
+        pl.base = base;
+    }
+    for p in tool_paths(t) {
+        if let Some(rp) = pl.resolve(&p)
+            && pl.in_steve(&rp)
+        {
+            return Some(Limit::new(4, format!("碰到 STEVE_HOME：{p}")));
+        }
+    }
+    if tool_kind(t) != "execute" {
+        return None;
+    }
+    let cmd = tool_command(t)?;
+    if let Some(l) = steve_text(&cmd, &pl, false) {
+        return Some(l);
+    }
+    match shell::parse(&cmd) {
+        Ok(p) => full_parsed(&p, &pl, 0),
+        Err(_) => None,
+    }
+}
+
+fn full_parsed(p: &Parsed, pl: &Places, depth: u8) -> Option<Limit> {
+    if depth > MAX_DEPTH {
+        return None;
+    }
+    for c in &p.cmds {
+        for w in c.words.iter().chain(&c.writes) {
+            if (w.contains('/') || w.starts_with('~'))
+                && let Some(rp) = pl.resolve(w)
+                && pl.in_steve(&rp)
+            {
+                return Some(Limit::new(4, format!("碰到 STEVE_HOME：{w}")));
+            }
+        }
+        if let Some(body) = &c.stdin
+            && let Ok(n) = shell::parse(body)
+            && shell::argv(&c.words).is_some_and(|a| SHELLS.contains(&a.program.as_str()))
+            && let Some(l) = full_parsed(&n, pl, depth + 1)
+        {
+            return Some(l);
+        }
+        let Some(a) = shell::argv(&c.words) else {
+            continue;
+        };
+        if let Some(l) = full_program(&a, pl, depth) {
+            return Some(l);
+        }
+        for n in shell::nested(&a.args) {
+            if let Some(l) = full_parsed(&n, pl, depth + 1) {
+                return Some(l);
+            }
+        }
+    }
+    None
+}
+
+fn full_program(a: &Argv, pl: &Places, depth: u8) -> Option<Limit> {
+    let p = a.program.as_str();
+    let args = &a.args;
+    if let Some(l) = as_user(p) {
+        return Some(l);
+    }
+    let sub =
+        |words: Vec<String>| shell::argv(&words).and_then(|a| full_program(&a, pl, depth + 1));
+    match p {
+        "pkill" | "killall" => Some(Limit::new(4, format!("{p} 会按名字停掉别人的进程"))),
+        "gh" => gh(args),
+        "git" => full_git(args),
+        "npx" | "bunx" | "pnpx" | "uvx" | "pipx" => {
+            sub(operands(args).iter().map(|s| s.to_string()).collect())
+        }
+        "npm" | "pnpm" | "yarn" | "bun"
+            if matches!(
+                operands(args).first().map(|s| s.as_str()),
+                Some("exec" | "dlx" | "x")
+            ) =>
+        {
+            sub(operands(args)
+                .iter()
+                .skip(1)
+                .map(|s| s.to_string())
+                .collect())
+        }
+        "find" => {
+            let mut i = 0;
+            while i < args.len() {
+                if matches!(args[i].as_str(), "-exec" | "-execdir" | "-ok" | "-okdir") {
+                    let end = args[i + 1..]
+                        .iter()
+                        .position(|x| x == ";" || x == "+")
+                        .map_or(args.len(), |e| i + 1 + e);
+                    if let Some(l) = sub(args[i + 1..end].to_vec()) {
+                        return Some(l);
+                    }
+                    i = end;
+                }
+                i += 1;
+            }
+            None
+        }
+        "eval" | "source" | "." => shell::parse(&args.join(" "))
+            .ok()
+            .and_then(|n| full_parsed(&n, pl, depth + 1)),
+        _ if SHELLS.contains(&p) => {
+            let i = args.iter().position(|x| shell::is_dash_c(x))?;
+            let n = shell::parse(args.get(i + 1)?).ok()?;
+            full_parsed(&n, pl, depth + 1)
+        }
+        _ => None,
+    }
+}
+
+/// git under full access: only what reaches a remote (a push, a mail, an alias that may be one).
+fn full_git(args: &[String]) -> Option<Limit> {
+    let mut i = 0;
+    while let Some(x) = args.get(i) {
+        match x.as_str() {
+            "-C" | "--git-dir" | "--work-tree" | "--namespace" => i += 2,
+            "-c" => {
+                let kv = args.get(i + 1).map(String::as_str).unwrap_or("");
+                if risky_git_config(kv) {
+                    return Some(Limit::new(5, format!("git -c {kv} 可能把命令变成推送")));
+                }
+                i += 2;
+            }
+            s if s.starts_with('-') => i += 1,
+            _ => break,
+        }
+    }
+    let sub = args.get(i).map(String::as_str).unwrap_or("");
+    let rest = &args[(i + 1).min(args.len())..];
+    match sub {
+        "push" | "send-email" => Some(Limit::new(5, format!("git {sub}"))),
+        "lfs" if rest.first().is_some_and(|r| r == "push") => Some(Limit::new(5, "git lfs push")),
+        "svn" if rest.first().is_some_and(|r| r == "dcommit") => {
+            Some(Limit::new(5, "git svn dcommit"))
+        }
+        "" => None,
+        s if !GIT_KNOWN.contains(&s) => Some(Limit::new(
+            5,
+            format!("不认识的 git 子命令 {s}（可能是推送的别名）"),
+        )),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1426,5 +1641,38 @@ mod tests {
             canonical(&root.join("new/../../x")),
             root.parent().unwrap().join("x")
         );
+    }
+
+    /// #37: with YOLO on, a question about deleting a test file or sending a log line is an ordinary
+    /// coding question; going live and mail still stay with the user. Under full access the whole
+    /// list counts, since nothing checks what the agent does with the answer.
+    #[test]
+    fn questions_meet_the_short_outward_list_unless_full_access() {
+        for q in [
+            "要删除旧的测试文件吗？",
+            "send the log line to stderr or stdout?",
+            "production 配置用哪个默认值？",
+            "upload 组件要不要拆开？",
+        ] {
+            assert!(money_or_outside_words(q, false).is_none(), "{q}");
+            assert!(
+                money_or_outside_words(q, true).is_some(),
+                "{q} under full access"
+            );
+        }
+        for q in [
+            "可以推送到 main 吗？",
+            "现在部署吗？",
+            "要上线吗？",
+            "Should I push the branch?",
+            "publish the crate?",
+            "deploy now?",
+            "要不要发送邮件通知他们？",
+            "send an email to the team?",
+            "要付款吗？",
+        ] {
+            assert!(money_or_outside_words(q, false).is_some(), "{q}");
+            assert!(money_or_outside_words(q, true).is_some(), "{q}");
+        }
     }
 }

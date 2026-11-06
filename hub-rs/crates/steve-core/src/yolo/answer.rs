@@ -224,6 +224,11 @@ impl Engine {
             Some(i) => self.ask_history(&d.workspace_id, &i.id, &d.id, &key)?,
             None => (false, 0),
         };
+        let full = item.is_some_and(|i| {
+            self.yolo()
+                .effective(&d.workspace_id, Some(&i.id))
+                .is_ok_and(|e| e.full)
+        });
         let mut a = Ask {
             recommended,
             why,
@@ -231,11 +236,12 @@ impl Engine {
             repeated,
             count,
             key,
+            full,
         };
-        let limited = super::limits::money_or_outside_words(question, self.yolo().env()).is_some()
-            || a.recommended.as_deref().is_some_and(|r| {
-                super::limits::money_or_outside_words(r, self.yolo().env()).is_some()
-            });
+        let limited = super::limits::money_or_outside_words(question, full).is_some()
+            || a.recommended
+                .as_deref()
+                .is_some_and(|r| super::limits::money_or_outside_words(r, full).is_some());
         if consult && !a.repeated && a.count < ASK_PER_ITEM && !limited {
             a.answer = self.model_answer(d, item, question, options, &a, cache_key)?;
         }

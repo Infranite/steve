@@ -397,7 +397,13 @@ pub(crate) fn locate(o: &Out, sub: Option<&str>) -> Result<Found, String> {
 /// The document `loc` as the item's branch, else HEAD, has it in the item's git repository.
 fn git_doc(o: &Out, loc: &str) -> Option<Found> {
     let g = git_dir(o)?;
-    let revs = o.branch.iter().cloned().chain(["HEAD".to_string()]);
+    // a rev that starts with `-` would be read as an option of `git show` (as in `branch`)
+    let revs = o
+        .branch
+        .iter()
+        .filter(|b| !b.is_empty() && !b.starts_with('-'))
+        .cloned()
+        .chain(["HEAD".to_string()]);
     for rev in revs {
         if let Ok(t) = git(&g, &["show", &format!("{rev}:{loc}")]) {
             return Some(Found::Git(rev, loc.to_string(), t));
@@ -986,5 +992,24 @@ mod tests {
         assert_eq!(byte_range("bytes=8-100", 10), Some((8, 9)));
         assert_eq!(byte_range("bytes=11-12", 10), None);
         assert_eq!(byte_range("bytes=0-1,3-4", 10), None);
+    }
+
+    /// A branch that reads as an option never reaches `git show`: the document comes from HEAD and
+    /// no file is written by `--output`.
+    #[test]
+    fn git_doc_skips_a_branch_that_starts_with_a_dash() {
+        let root = tempfile::tempdir().unwrap();
+        let r = repo(root.path());
+        let target = root.path().join("written");
+        let mut o = out("file", "a", Some("a.txt"), &r, Some(&r));
+        o.branch = Some(format!("--output={}", target.display()));
+        match git_doc(&o, "a.txt") {
+            Some(Found::Git(rev, _, text)) => {
+                assert_eq!(rev, "HEAD");
+                assert_eq!(text.trim_end(), "a");
+            }
+            _ => panic!("read from HEAD"),
+        }
+        assert!(!target.exists());
     }
 }

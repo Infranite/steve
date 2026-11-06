@@ -1,6 +1,7 @@
 //! A small POSIX-shell reader for the tool guard and the hard limits: enough to split a command line into
 //! simple commands, words and redirections, and to notice the constructs whose effect cannot be read off
-//! the text (command substitution, `eval`, here-documents…). It never runs anything.
+//! the text (command substitution, `eval`, here-strings…). It never runs anything. A here-document's
+//! body is read as the command's standard input ([`Simple::stdin`]).
 //!
 //! It errs on the side of seeing too much: an operator inside a quoted argument is not a separator, but
 //! [`nested`] lets callers parse quoted arguments as commands of their own (`sh -c '…'`, `find -exec`).
@@ -13,6 +14,8 @@ pub struct Simple {
     pub writes: Vec<String>,
     /// Words that contained an unquoted or double-quoted `$` (their value is not known here).
     pub expands: bool,
+    /// The body of a here-document (`<<EOF` … `EOF`) fed to the command, as written.
+    pub stdin: Option<String>,
 }
 
 /// What [`parse`] found.
@@ -20,7 +23,7 @@ pub struct Simple {
 pub struct Parsed {
     pub cmds: Vec<Simple>,
     /// Constructs the guard never lets through, in the order found: `$(…)`, backquotes, `<(…)`, a
-    /// subshell, a here-document, a background `&`.
+    /// subshell, a here-string, a background `&`.
     pub opaque: Vec<&'static str>,
 }
 
@@ -38,6 +41,9 @@ struct Builder {
     redirect: bool,
     /// A redirection without a target was seen.
     dangling: bool,
+    /// Here-documents whose body starts at the next newline: (command index, delimiter, delimiter
+    /// quoted, `<<-`).
+    heredocs: Vec<(usize, String, bool, bool)>,
 }
 
 impl Builder {
@@ -163,6 +169,11 @@ pub fn parse(src: &str) -> Result<Parsed, ParseError> {
                 continue;
             }
             ' ' | '\t' | '\r' => b.end_word(),
+            '\n' if !b.heredocs.is_empty() => {
+                b.end_cmd();
+                i = heredoc_bodies(&mut b, &cs, i + 1)?;
+                continue;
+            }
             '\n' | ';' => b.end_cmd(),
             '&' => {
                 if cs.get(i + 1) == Some(&'&') {
@@ -209,10 +220,39 @@ pub fn parse(src: &str) -> Result<Parsed, ParseError> {
                 }
                 if c == '<' {
                     if cs.get(i + 1) == Some(&'<') {
-                        b.flag("<<");
-                        // the here-document body follows on the next lines; nothing after it is read
-                        b.end_cmd();
-                        return Ok(b.out);
+                        if cs.get(i + 2) == Some(&'<') {
+                            // a here-string: its word is the input, expanded or not
+                            b.flag("<<<");
+                            b.end_cmd();
+                            return Ok(b.out);
+                        }
+                        i += 2;
+                        let strip = cs.get(i) == Some(&'-');
+                        if strip {
+                            i += 1;
+                        }
+                        while matches!(cs.get(i), Some(' ' | '\t')) {
+                            i += 1;
+                        }
+                        let mut delim = String::new();
+                        let mut quoted = false;
+                        while let Some(&ch) = cs.get(i) {
+                            if " \t\n;&|()<>".contains(ch) {
+                                break;
+                            }
+                            if matches!(ch, '\'' | '"' | '\\') {
+                                quoted = true;
+                            } else {
+                                delim.push(ch);
+                            }
+                            i += 1;
+                        }
+                        if delim.is_empty() {
+                            return Err(ParseError("here-document 缺少结束标记"));
+                        }
+                        // the command it feeds is the one being read now
+                        b.heredocs.push((b.out.cmds.len(), delim, quoted, strip));
+                        continue;
                     }
                     // input redirection: the next word is read, not written
                     i += 1;
@@ -249,10 +289,55 @@ pub fn parse(src: &str) -> Result<Parsed, ParseError> {
         i += 1;
     }
     b.end_cmd();
+    if !b.heredocs.is_empty() {
+        return Err(ParseError("here-document 没有结束"));
+    }
     if b.dangling {
         return Err(ParseError("重定向缺少目标"));
     }
     Ok(b.out)
+}
+
+/// Reads the bodies of the pending here-documents from `i` (the start of the line after their
+/// command), each up to its delimiter line; the index after the last one. An unquoted delimiter
+/// lets the shell expand the body: a command substitution there is opaque.
+fn heredoc_bodies(b: &mut Builder, cs: &[char], mut i: usize) -> Result<usize, ParseError> {
+    for (idx, delim, quoted, strip) in std::mem::take(&mut b.heredocs) {
+        let mut body = String::new();
+        loop {
+            if i >= cs.len() {
+                return Err(ParseError("here-document 没有结束"));
+            }
+            let end = cs[i..]
+                .iter()
+                .position(|&c| c == '\n')
+                .map_or(cs.len(), |e| i + e);
+            let line: String = cs[i..end].iter().collect();
+            i = (end + 1).min(cs.len() + 1);
+            let shown = if strip {
+                line.trim_start_matches('\t')
+            } else {
+                line.as_str()
+            };
+            if shown == delim {
+                break;
+            }
+            body.push_str(shown);
+            body.push('\n');
+        }
+        if !quoted {
+            if body.contains("$(") {
+                b.flag("$(…)");
+            }
+            if body.contains('`') {
+                b.flag("`…`");
+            }
+        }
+        if let Some(c) = b.out.cmds.get_mut(idx) {
+            c.stdin = Some(body);
+        }
+    }
+    Ok(i.min(cs.len()))
 }
 
 /// Shell keywords and wrappers that run the rest of the words as a command.
@@ -460,7 +545,10 @@ mod tests {
         assert_eq!(parse("echo `whoami`").unwrap().opaque, vec!["`…`"]);
         assert_eq!(parse("diff <(ls a) <(ls b)").unwrap().opaque[0], "<(…)");
         assert_eq!(parse("(cd .. && rm x)").unwrap().opaque, vec!["(…)"]);
-        assert_eq!(parse("cat <<EOF\nhi\nEOF").unwrap().opaque, vec!["<<"]);
+        let p = parse("cat <<EOF\nhi\nEOF").unwrap();
+        assert!(p.opaque.is_empty(), "{p:?}");
+        assert_eq!(p.cmds[0].stdin.as_deref(), Some("hi\n"));
+        assert_eq!(parse("cat <<< hi").unwrap().opaque, vec!["<<<"]);
         assert_eq!(parse("sleep 1 &").unwrap().opaque, vec!["&"]);
         assert!(parse("echo $HOME").unwrap().cmds[0].expands);
         assert!(!parse("echo '$HOME'").unwrap().cmds[0].expands);

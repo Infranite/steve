@@ -99,6 +99,18 @@ pub struct Conn {
     exited: watch::Receiver<bool>,
 }
 
+/// What an agent's harness never inherits from the Hub: the user's GitHub tokens and SSH agent,
+/// with which its shell could push or call GitHub as the user without going through Steve. The
+/// adapter outlives a YOLO switch, so they are left out whatever YOLO says; Steve's own pushes take
+/// their credential from the vault. `gh`'s own login (its keyring) is not touched.
+pub const AGENT_ENV_DROPPED: [&str; 5] = [
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "GH_ENTERPRISE_TOKEN",
+    "GITHUB_ENTERPRISE_TOKEN",
+    "SSH_AUTH_SOCK",
+];
+
 impl Conn {
     /// Spawns the adapter in its own process group, so that killing the group also takes down the
     /// harness it launches (claude under claude-agent-acp).
@@ -165,7 +177,10 @@ impl Conn {
             "STEVE_UPGRADE_CONTROL_TOKEN",
             "STEVE_SUPERVISOR_PID",
             "STEVE_UPGRADE_ID",
-        ] {
+        ]
+        .into_iter()
+        .chain(AGENT_ENV_DROPPED)
+        {
             cmd.env_remove(key);
         }
         let mut child = cmd

@@ -144,6 +144,12 @@ pub trait NodeDomain: Send + Sync + 'static {
     fn permission_asked(&self, session: &str, decision: &str, request: &PermissionRequest) {
         let _ = (session, decision, request);
     }
+    /// A harness tool call of a session's turn was seen (committed), as it starts or changes: under
+    /// full access no permission request comes for it, so this is where the Hub looks at it. Must
+    /// return promptly.
+    fn tool_seen(&self, session: &str, tool: &ToolView) {
+        let _ = (session, tool);
+    }
     /// A workspace prepare or tidy is over (committed). Must return promptly and never call back
     /// into the coordinator synchronously.
     fn workspace_changed(&self, fact: WorkspaceFact) {
@@ -2895,6 +2901,7 @@ impl NodeRuntime {
                         .attempt_finished(&session, &attempt, &completion, &facts, at);
                 }
                 After::Cost { session } => self.domain.cost_changed(&session),
+                After::Tool { session, tool } => self.domain.tool_seen(&session, &tool),
             }
         }
     }
@@ -2965,6 +2972,15 @@ impl NodeRuntime {
                 if delta.is_some_and(|d| d > 0.0) {
                     out.push(After::Cost { session });
                 }
+            }
+            EventBody::ToolChanged { tool }
+                if tool.origin == ToolOrigin::Harness
+                    && matches!(ev.subject, Subject::Execution(ExecutionRef::Turn { .. })) =>
+            {
+                out.push(After::Tool {
+                    session,
+                    tool: Box::new(tool.clone()),
+                });
             }
             EventBody::SessionChanged { view } => {
                 // the Node's revision of the session, kept here (the inbox it came in is pruned)
@@ -3474,6 +3490,10 @@ enum After {
     },
     Cost {
         session: String,
+    },
+    Tool {
+        session: String,
+        tool: Box<ToolView>,
     },
 }
 

@@ -394,6 +394,27 @@ pub fn shown(path: &str, root: &Path) -> String {
     }
 }
 
+/// A command as one shell line: a shell string as it is, an argv with each word quoted.
+fn command_line(c: &CommandFact) -> String {
+    match c {
+        CommandFact::Shell(s) => s.clone(),
+        CommandFact::Argv(a) => a
+            .iter()
+            .map(|w| {
+                let plain = !w.is_empty()
+                    && w.chars()
+                        .all(|c| c.is_ascii_alphanumeric() || "-_./=:,+@%^".contains(c));
+                if plain {
+                    w.clone()
+                } else {
+                    format!("'{}'", w.replace('\'', "'\\''"))
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" "),
+    }
+}
+
 fn command_of(input: &Value) -> Option<CommandFact> {
     match input.get("command")? {
         Value::String(s) => Some(CommandFact::Shell(s.clone())),
@@ -543,7 +564,12 @@ impl ToolFact {
                     cwd: None,
                     network: NetworkScope::Unrestricted,
                 }),
-                _ => Some(Action::Unknown {
+                // its command line as written (argv words quoted), what the Hub's full-access
+                // watch reads; the directory it runs in is the harness's own
+                (Some(c), _) => Some(Action::Unknown {
+                    summary: command_line(c),
+                }),
+                (None, _) => Some(Action::Unknown {
                     summary: "command needs Node binding".into(),
                 }),
             }
@@ -843,6 +869,26 @@ mod tests {
             &events(n.finish())[0],
             EventBody::MessageCompleted { .. }
         ));
+    }
+
+    /// Codex runs `["/bin/zsh", "-lc", script]` in a directory of its own: the view carries the
+    /// whole command line, what the Hub's full-access watch reads.
+    #[test]
+    fn an_argv_command_keeps_its_command_line_in_the_view() {
+        let mut n = n();
+        let e = events(n.update(
+            &json!({"sessionUpdate": "tool_call", "toolCallId": "c9", "kind": "execute",
+            "status": "in_progress", "title": "git push",
+            "rawInput": {"command": ["/bin/zsh", "-lc", "git push origin main"], "cwd": "/w/sub"}}),
+        ));
+        let EventBody::ToolChanged { tool } = &e[0] else {
+            panic!("{e:?}")
+        };
+        assert!(
+            matches!(&tool.action, Some(Action::Unknown { summary }) if summary == "/bin/zsh -lc 'git push origin main'"),
+            "{:?}",
+            tool.action
+        );
     }
 
     #[test]
