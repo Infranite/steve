@@ -14,6 +14,7 @@ pub mod blob;
 pub mod common;
 pub mod discovery;
 pub mod events;
+pub mod glob;
 pub mod ids;
 pub mod ports;
 pub mod run;

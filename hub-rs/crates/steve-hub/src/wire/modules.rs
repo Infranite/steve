@@ -226,6 +226,9 @@ pub struct Env<'a> {
     pub yolo_forced: Option<steve_core::yolo::Forced>,
     /// The OpenViking server knowledge is stored in (`None`: the Hub's own index only).
     pub openviking: Option<steve_knowledge::openviking::OpenVikingConfig>,
+    /// The router, when the local Node is on: knowledge folders are then scanned and read by
+    /// their Node (`None`: on the Hub, as before).
+    pub workspaces: Option<Arc<super::workspaces::Workspaces>>,
 }
 
 /// Registers every module, builds [`Modules`] and the flow context, and collects the routes.
@@ -241,6 +244,7 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
         vars,
         yolo_forced,
         openviking,
+        workspaces,
     } = env;
     use super::ports::{self as hp, VaultGuard};
     let guard = Arc::new(VaultGuard);
@@ -270,6 +274,9 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
     steve_core::yolo::draft::register(&mut registry, yolo_forced);
     // knowledge (K1–K5): candidate decisions, item documents on finish, prompt context, drafts
     let kb = knowledge(steve_home, data_dir, bus, guard.clone());
+    if let Some(w) = workspaces {
+        kb.set_folder_places(Arc::new(super::workspaces::KbFolders(w)));
+    }
     // one knowledge store for every reader (knowledge tools, prompt context, mail and channel replies)
     // OpenViking (user decision 2026-11-04): keywords from the Hub's index, meaning from it; the
     // index is mirrored to it through the outbox (`kb.openviking`)

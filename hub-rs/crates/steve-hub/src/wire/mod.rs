@@ -454,6 +454,7 @@ pub fn wire_with(cfg: &Arc<Config>, bus: &Bus, vars: Vars) -> Result<Wired, Back
         vars: &vars,
         yolo_forced,
         openviking: cfg.openviking.clone(),
+        workspaces: node_host.as_ref().map(|_| workspaces.clone()),
     })?;
     let _ = host.flow.set(built.flow.clone());
     let yolo = steve_core::yolo::Yolo::new(

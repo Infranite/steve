@@ -11,6 +11,8 @@ steve-modules = { path = "../steve-modules" }
 # the paste guard behind `TokenGuard`
 steve-vault = { path = "../steve-vault" }
 steve-i18n = { path = "../steve-i18n" }
+# the scan patterns (`steve_node_api::glob`), shared with the Node that scans
+steve-node-api = { path = "../steve-node-api" }
 rust-i18n = "=4.2.4"
 async-trait = "=0.1.92"
 chrono = { version = "=0.4.45", default-features = false, features = ["clock"] }
@@ -34,6 +36,8 @@ ureq = { version = "=3.5.1", default-features = false, features = ["json"] }
 zip = { version = "=9.2.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 [dev-dependencies]
+# FakeNode, for the folder source through a Node
+steve-node-api = { path = "../steve-node-api", features = ["testkit"] }
 tempfile = "=3.27.0"
 tokio = { version = "=1.54.1", features = ["rt", "rt-multi-thread", "sync", "time", "macros", "net"] }
 # the fake OpenViking server of tests/openviking.rs

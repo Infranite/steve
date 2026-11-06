@@ -263,6 +263,7 @@ fn the_new_types_survive_the_wire() {
             size: 11,
             version: Revision::new("r1").unwrap(),
             too_big: true,
+            mtime: None,
         }],
         next: None,
         complete: false,
@@ -621,6 +622,53 @@ async fn scan_pages_share_one_manifest_and_only_a_clean_end_is_complete() {
             .await
             .unwrap_err()
             .code,
+        ErrorCode::Invalid
+    );
+    // a cursor of one scan does not page another
+    let other = pages[0].next.clone();
+    assert_eq!(
+        n.scan_page(
+            OperationId::new("op_s2").unwrap(),
+            PageRequest {
+                cursor: other,
+                limit: 2
+            }
+        )
+        .await
+        .unwrap_err()
+        .code,
+        ErrorCode::Invalid
+    );
+    // include and exclude patterns are the glob's; a bad one is refused
+    n.put_file("notes", "d/x.txt", b"x");
+    n.put_file("notes", "d/x.png", b"x");
+    n.put_file("notes", ".obsidian/w.md", b"x");
+    let only = scan_all(
+        &n,
+        "op_s5",
+        ScanSpec {
+            include: vec!["**/*.txt".into(), "**/*.png".into()],
+            exclude: vec!["**/*.png".into()],
+            ..spec(ScanLimits::default())
+        },
+        10,
+    )
+    .await;
+    let names: Vec<_> = only[0].entries.iter().map(|e| e.path.as_str()).collect();
+    assert_eq!(names, ["d/x.txt"]);
+    let dflt = scan_all(&n, "op_s6", spec(ScanLimits::default()), 100).await;
+    let names: Vec<_> = dflt[0].entries.iter().map(|e| e.path.as_str()).collect();
+    assert!(names.contains(&"d/x.txt") && names.contains(&"d/0.md"));
+    assert!(
+        !names.contains(&"d/x.png") && !names.contains(&".obsidian/w.md"),
+        "the default include, never a dot directory: {names:?}"
+    );
+    let bad = ScanSpec {
+        include: vec!["../*.md".into()],
+        ..spec(ScanLimits::default())
+    };
+    assert_eq!(
+        n.scan(cmd("op_s7", bad)).await.unwrap_err().code,
         ErrorCode::Invalid
     );
 }

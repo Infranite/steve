@@ -280,6 +280,12 @@ pub enum Loaded {
     Failed(String),
     /// The document's origin is gone (`status=deleted`, index rows removed).
     Gone,
+    /// Not read this time (the device holding it is offline, or the file changed while it was
+    /// read): the document and its index rows stay as they are, and it is read again: `now`
+    /// queues it at once, otherwise its source's next scan does.
+    Retry {
+        now: bool,
+    },
 }
 
 /// Reads the text of documents of some source kinds. Runs on the async runtime, off the write lock.
@@ -383,6 +389,7 @@ pub async fn run_batch(m: &Modules, kb: &Knowledge, ids: &[String]) -> Result<()
     let done = blocking(move || {
         store.transaction(|tx| {
             let mut done = Vec::new();
+            let mut again = Vec::new();
             for (doc, src, loaded) in &work {
                 // Re-read: the document may have changed while its text was loading.
                 let Some(doc) = repo::doc(tx, &doc.id)? else {
@@ -431,15 +438,27 @@ pub async fn run_batch(m: &Modules, kb: &Knowledge, ids: &[String]) -> Result<()
                         remove(tx, "chunk", &doc.id)?;
                         repo::set_doc_indexed(tx, &doc.id, "", 0, "deleted", None, now)?;
                     }
+                    Loaded::Retry { now: at_once } => {
+                        // the next scan takes it for changed, whatever it finds
+                        repo::forget_seen(tx, &doc.id)?;
+                        if *at_once {
+                            again.push(doc.id.clone());
+                        }
+                        continue;
+                    }
                 }
                 done.push((doc.workspace_id.clone(), doc.id.clone()));
             }
-            Ok::<_, steve_store::StoreError>(done)
+            Ok::<_, steve_store::StoreError>((done, again))
         })
     })
     .await?;
+    let (done, again) = done;
     for (ws, id) in done {
         kb.notify(&ws, &id);
+    }
+    for id in again {
+        kb.enqueue(&id);
     }
     Ok(())
 }

@@ -348,6 +348,10 @@ pub struct FileInfo {
     pub size: u64,
     /// Changes when the file does (mtime + size, or a hash).
     pub version: Revision,
+    /// When it was last modified, as the Node's filesystem says (what a knowledge folder compares
+    /// with size to tell a changed file). `None`: the Node does not say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mtime: Option<Timestamp>,
     /// Over the scan's `max_file_bytes`: listed, so it is not taken for gone, but not to be read.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub too_big: bool,
@@ -376,8 +380,10 @@ pub struct FileRead {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScanSpec {
     pub root: RootPath,
+    /// Files to list ([`crate::glob`]); empty is [`crate::glob::DEFAULT_INCLUDE`].
     #[serde(default)]
     pub include: Vec<String>,
+    /// Files and directories to leave out ([`crate::glob::Rules::skips_dir`]).
     #[serde(default)]
     pub exclude: Vec<String>,
     #[serde(default)]

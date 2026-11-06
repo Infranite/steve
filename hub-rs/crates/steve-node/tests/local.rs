@@ -2569,4 +2569,534 @@ async fn a_worktree_goes_where_it_is_named_above_the_disk_floor_and_comes_back_a
             "{rel}: {e:?}"
         );
     }
+// ── the files face: scans, listings, reads ──
+
+/// `t` with a read-only root `kb` at `<root>/kb` besides `work`.
+fn with_kb(t: &T, n: &LocalNode) -> PathBuf {
+    let kb = t.root.join("kb");
+    std::fs::create_dir_all(&kb).unwrap();
+    let mut roots = t.config().roots;
+    roots.push(Root {
+        id: RootId::new("kb").unwrap(),
+        path: kb.clone(),
+        display: "~/kb".into(),
+        access: RootAccess::ReadOnly,
+    });
+    n.set_roots(roots);
+    kb.canonicalize().unwrap()
+}
+
+fn put(root: &Path, rel: &str, bytes: &[u8]) {
+    let f = root.join(rel);
+    std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+    std::fs::write(f, bytes).unwrap();
+}
+
+fn kb_at(rel: &str) -> RootPath {
+    RootPath {
+        root: RootId::new("kb").unwrap(),
+        rel: RelPath::new(rel).unwrap(),
+    }
+}
+
+fn kb_scan(rel: &str, exclude: &[&str], limits: ScanLimits) -> ScanSpec {
+    ScanSpec {
+        root: kb_at(rel),
+        include: vec![],
+        exclude: exclude.iter().map(|s| s.to_string()).collect(),
+        limits,
+    }
+}
+
+/// Scans and reads every page, `limit` entries at a time.
+async fn scan_all(n: &LocalNode, op: &str, spec: ScanSpec, limit: u32) -> Vec<ScanPage> {
+    n.scan(now_cmd(op, spec)).await.unwrap();
+    let s = finished(n, op).await;
+    assert!(ok(&s), "{s:?}");
+    let scan = OperationId::new(op).unwrap();
+    let mut pages: Vec<ScanPage> = vec![];
+    let mut cursor = None;
+    loop {
+        let p = n
+            .scan_page(scan.clone(), PageRequest { cursor, limit })
+            .await
+            .unwrap();
+        assert!(p.is_consistent(), "{p:?}");
+        cursor = p.next.clone();
+        pages.push(p);
+        if cursor.is_none() {
+            return pages;
+        }
+    }
+}
+
+fn entries(pages: &[ScanPage]) -> Vec<FileInfo> {
+    pages.iter().flat_map(|p| p.entries.clone()).collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_scan_sees_what_the_knowledge_walk_sees() {
+    use steve_knowledge::scan;
+    let t = T::new(&[]);
+    let n = t.node();
+    let kb = with_kb(&t, &n);
+    for p in [
+        "b.md",
+        "a.md",
+        "notes.txt",
+        "sub/c.md",
+        "sub/deep/d.markdown",
+        "sub/img.png",
+        ".obsidian/x.md",
+        ".hidden/y.md",
+        "node_modules/z.md",
+        "skip/w.md",
+        "草稿/想法.md",
+    ] {
+        put(&kb, p, p.as_bytes());
+    }
+    put(
+        &kb,
+        "big.md",
+        &vec![b'a'; scan::MAX_FILE_BYTES as usize + 1],
+    );
+    put(&t.root, "outside/s.md", b"secret");
+    let ln = |to: &Path, at: &str| std::os::unix::fs::symlink(to, kb.join(at)).unwrap();
+    ln(&kb.join("a.md"), "linked.md");
+    ln(&t.root.join("outside/s.md"), "out.md");
+    ln(&t.root.join("outside"), "out-dir");
+    ln(&kb.join("sub"), "sub-link");
+    ln(&kb.join("missing.md"), "dangling.md");
+
+    let rules = scan::Rules::new(vec![], vec!["skip/**".into()]);
+    let w = scan::walk(&kb, &rules).unwrap();
+    let pages = scan_all(
+        &n,
+        "op_scan",
+        kb_scan("", &["skip/**"], ScanLimits::default()),
+        3,
+    )
+    .await;
+    assert!(pages.len() > 2, "read in pages");
+    assert!(pages.iter().all(|p| p.manifest == pages[0].manifest));
+
+    // the same files, sizes and times, in the same order
+    let mut walked: Vec<(String, u64, i64, bool)> = w
+        .files
+        .iter()
+        .map(|e| (e.rel.clone(), e.size, e.mtime, false))
+        .chain(
+            w.too_big
+                .iter()
+                .map(|e| (e.rel.clone(), e.size, e.mtime, true)),
+        )
+        .collect();
+    let mut scanned: Vec<(String, u64, i64, bool)> = entries(&pages)
+        .into_iter()
+        .map(|f| {
+            (
+                f.path.as_str().to_string(),
+                f.size,
+                f.mtime.unwrap().0,
+                f.too_big,
+            )
+        })
+        .collect();
+    walked.sort();
+    scanned.sort();
+    assert_eq!(scanned, walked);
+    assert!(scanned.iter().any(|e| e.0 == "linked.md"));
+    assert!(scanned.iter().all(|e| !e.0.starts_with("sub-link")));
+    // what it held back, and complete as the walk is
+    let last = pages.last().unwrap();
+    let held: Vec<(String, HeldWhy)> = last
+        .issues
+        .iter()
+        .filter_map(|i| match i {
+            ScanIssue::Held { path, why } => Some((path.as_str().to_string(), *why)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(held, [("out.md".to_string(), HeldWhy::Outside)]);
+    assert_eq!(w.held, [("out.md".to_string(), scan::Held::Outside)]);
+    assert_eq!(last.complete, w.complete());
+    assert!(last.complete);
+
+    // a directory below the root: the same files, their paths still relative to the root
+    let sub = scan_all(&n, "op_sub", kb_scan("sub", &[], ScanLimits::default()), 10).await;
+    let names: Vec<String> = entries(&sub)
+        .iter()
+        .map(|f| f.path.as_str().to_string())
+        .collect();
+    assert_eq!(names, ["sub/c.md", "sub/deep/d.markdown"]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_scan_keeps_its_manifest_while_files_change() {
+    let t = T::new(&[]);
+    let n = t.node();
+    let kb = with_kb(&t, &n);
+    for i in 0..6 {
+        put(&kb, &format!("d/{i}.md"), b"x");
+    }
+    let scan = OperationId::new("op_s1").unwrap();
+    let c = now_cmd("op_s1", kb_scan("", &[], ScanLimits::default()));
+    n.scan(c.clone()).await.unwrap();
+    assert!(ok(&finished(&n, "op_s1").await));
+    let first = n.scan_page(scan.clone(), page(2)).await.unwrap();
+    // the tree changes between pages
+    put(&kb, "d/new.md", b"new");
+    put(&kb, "d/5.md", b"changed");
+    std::fs::remove_file(kb.join("d/0.md")).unwrap();
+    let mut pages = vec![first];
+    while let Some(cursor) = pages.last().unwrap().next.clone() {
+        let p = n
+            .scan_page(
+                scan.clone(),
+                PageRequest {
+                    cursor: Some(cursor),
+                    limit: 2,
+                },
+            )
+            .await
+            .unwrap();
+        pages.push(p);
+    }
+    assert!(pages.iter().all(|p| p.manifest == pages[0].manifest));
+    let names: Vec<String> = entries(&pages)
+        .iter()
+        .map(|f| f.path.as_str().to_string())
+        .collect();
+    assert_eq!(
+        names,
+        ["d/0.md", "d/1.md", "d/2.md", "d/3.md", "d/4.md", "d/5.md"]
+    );
+    // the first page read again is the same page
+    assert_eq!(n.scan_page(scan.clone(), page(2)).await.unwrap(), pages[0]);
+    // a new scan sees the new tree, under another manifest
+    let again = scan_all(&n, "op_s2", kb_scan("", &[], ScanLimits::default()), 100).await;
+    assert_ne!(again[0].manifest, pages[0].manifest);
+    assert_eq!(entries(&again).len(), 6);
+    // a cursor of one scan does not page another; an unknown scan is invalid
+    let e = n
+        .scan_page(
+            OperationId::new("op_s2").unwrap(),
+            PageRequest {
+                cursor: pages[0].next.clone(),
+                limit: 2,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::Invalid);
+    let e = n
+        .scan_page(OperationId::new("op_nope").unwrap(), page(1))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::Invalid);
+    // a resend is the same scan
+    n.scan(c).await.unwrap();
+    assert_eq!(n.scan_page(scan, page(2)).await.unwrap(), pages[0]);
+}
+
+/// More scans than a few at once, all accepted before any is read and paged in turns: none pushes
+/// another's manifest out while it is read.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn many_scans_paged_at_once_all_finish() {
+    let t = T::new(&[]);
+    let n = t.node();
+    let kb = with_kb(&t, &n);
+    for i in 0..5 {
+        put(&kb, &format!("d/{i}.md"), b"x");
+    }
+    let ops: Vec<String> = (0..12).map(|i| format!("op_many{i}")).collect();
+    for op in &ops {
+        n.scan(now_cmd(op, kb_scan("", &[], ScanLimits::default())))
+            .await
+            .unwrap();
+    }
+    for op in &ops {
+        assert!(ok(&finished(&n, op).await));
+    }
+    let mut cursors: Vec<Option<Cursor>> = vec![None; ops.len()];
+    let mut seen = vec![0usize; ops.len()];
+    let mut done = vec![false; ops.len()];
+    while done.iter().any(|d| !d) {
+        for (i, op) in ops.iter().enumerate() {
+            if done[i] {
+                continue;
+            }
+            let p = n
+                .scan_page(
+                    OperationId::new(op).unwrap(),
+                    PageRequest {
+                        cursor: cursors[i].clone(),
+                        limit: 1,
+                    },
+                )
+                .await
+                .unwrap();
+            seen[i] += p.entries.len();
+            cursors[i] = p.next.clone();
+            done[i] = p.next.is_none();
+        }
+    }
+    assert!(seen.iter().all(|n| *n == 5), "{seen:?}");
+}
+
+fn page(limit: u32) -> PageRequest {
+    PageRequest {
+        cursor: None,
+        limit,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_scan_that_may_hide_files_is_never_complete() {
+    use std::os::unix::fs::PermissionsExt;
+    let t = T::new(&[]);
+    let n = t.node();
+    let kb = with_kb(&t, &n);
+    for p in ["a.md", "b.md", "c.md", "locked/x.md"] {
+        put(&kb, p, b"x");
+    }
+    // over the file limit: cut, the count said
+    let limits = ScanLimits {
+        max_files: 2,
+        max_file_bytes: 1024,
+    };
+    let over = scan_all(&n, "op_over", kb_scan("", &["locked/**"], limits), 10).await;
+    let last = over.last().unwrap();
+    assert_eq!(entries(&over).len(), 2);
+    assert!(!last.complete);
+    assert_eq!(last.issues, [ScanIssue::OverLimit { count: 1 }]);
+
+    // an unreadable directory
+    let locked = kb.join("locked");
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let readable = std::fs::read_dir(&locked).is_ok(); // root ignores the mode
+    let pages = scan_all(&n, "op_locked", kb_scan("", &[], ScanLimits::default()), 10).await;
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    if readable {
+        return;
+    }
+    let last = pages.last().unwrap();
+    assert_eq!(entries(&pages).len(), 3);
+    assert!(!last.complete);
+    assert_eq!(
+        last.issues,
+        [ScanIssue::Unreadable {
+            path: Some(RelPath::new("locked").unwrap())
+        }]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reads_stay_inside_their_root_and_see_a_changed_file() {
+    let t = T::new(&[]);
+    let n = t.node();
+    let kb = with_kb(&t, &n);
+    put(&kb, "a.md", b"hello world");
+    put(&t.root, "outside/s.md", b"secret");
+    std::os::unix::fs::symlink(t.root.join("outside/s.md"), kb.join("out.md")).unwrap();
+    std::os::unix::fs::symlink(t.root.join("outside"), kb.join("out-dir")).unwrap();
+    let read = |path: FileAddress, expected: Option<Revision>, offset: u64, max: u32| FileRead {
+        path,
+        expected,
+        offset,
+        max,
+    };
+    // in chunks, to the end
+    let mut got = vec![];
+    let mut offset = 0;
+    loop {
+        let c = n
+            .read_file(read(FileAddress::Root(kb_at("a.md")), None, offset, 4))
+            .await
+            .unwrap();
+        assert_eq!(c.offset, offset);
+        assert!(c.bytes.len() <= 4);
+        offset += c.bytes.len() as u64;
+        got.extend(c.bytes);
+        if c.eof {
+            break;
+        }
+    }
+    assert_eq!(got, b"hello world");
+    // a read asks for no more than a frame carries
+    put(&kb, "big.md", &vec![b'a'; 1 << 20]);
+    let c = n
+        .read_file(read(FileAddress::Root(kb_at("big.md")), None, 0, u32::MAX))
+        .await
+        .unwrap();
+    assert!(c.bytes.len() < 1 << 20 && !c.eof);
+
+    // nothing outside the root: a link out, through a linked directory, another root, `..`
+    for rel in ["out.md", "out-dir/s.md"] {
+        let e = n
+            .read_file(read(FileAddress::Root(kb_at(rel)), None, 0, 100))
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, ErrorCode::Denied, "{rel}");
+    }
+    let e = n
+        .read_file(read(
+            FileAddress::Root(RootPath {
+                root: RootId::new("elsewhere").unwrap(),
+                rel: RelPath::new("a.md").unwrap(),
+            }),
+            None,
+            0,
+            100,
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::Denied);
+    assert!(RelPath::new("../outside/s.md").is_err());
+    assert!(RelPath::new("/etc/passwd").is_err());
+    let forged = serde_json::json!({
+        "path": {"in": "root", "root": "kb", "rel": "../outside/s.md"},
+        "offset": 0, "max": 100,
+    });
+    assert!(serde_json::from_value::<FileRead>(forged).is_err());
+
+    // a version from a scan: read as long as the file is as it was, then a conflict
+    let pages = scan_all(&n, "op_scan", kb_scan("", &[], ScanLimits::default()), 10).await;
+    let a = entries(&pages)
+        .into_iter()
+        .find(|f| f.path.as_str() == "a.md")
+        .unwrap();
+    let c = n
+        .read_file(read(
+            FileAddress::Root(kb_at("a.md")),
+            Some(a.version.clone()),
+            0,
+            100,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(c.bytes, b"hello world");
+    std::thread::sleep(Duration::from_millis(5));
+    put(&kb, "a.md", b"hello again");
+    let e = n
+        .read_file(read(
+            FileAddress::Root(kb_at("a.md")),
+            Some(a.version),
+            0,
+            100,
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::Conflict);
+
+    // in a workspace: the same rules
+    put(&t.root, "work/proj/src/lib.rs", b"fn main() {}");
+    std::os::unix::fs::symlink(t.root.join("outside/s.md"), t.root.join("work/proj/leak")).unwrap();
+    n.prepare_workspace(now_cmd("op_prep", prepare_proj()))
+        .await
+        .unwrap();
+    assert!(ok(&finished(&n, "op_prep").await));
+    let in_ws = |rel: &str| {
+        FileAddress::Workspace(PathRef {
+            workspace: ws(),
+            rel: RelPath::new(rel).unwrap(),
+        })
+    };
+    let c = n
+        .read_file(read(in_ws("src/lib.rs"), None, 0, 100))
+        .await
+        .unwrap();
+    assert_eq!(c.bytes, b"fn main() {}");
+    let e = n
+        .read_file(read(in_ws("leak"), None, 0, 100))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::Denied);
+    let listed = n
+        .list_dir(
+            PathRef {
+                workspace: ws(),
+                rel: RelPath::new("").unwrap(),
+            },
+            page(100),
+        )
+        .await
+        .unwrap();
+    let names: Vec<&str> = listed.items.iter().map(|f| f.path.as_str()).collect();
+    assert_eq!(names, ["src"], "a link out is not listed");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn listings_page_and_do_not_follow_linked_directories() {
+    let t = T::new(&[]);
+    let n = t.node();
+    let kb = with_kb(&t, &n);
+    for p in ["a.md", "b/c.md", "d/e.md"] {
+        put(&kb, p, b"x");
+    }
+    std::os::unix::fs::symlink(kb.join("b"), kb.join("b-link")).unwrap();
+    std::os::unix::fs::symlink(kb.join("a.md"), kb.join("a-link.md")).unwrap();
+    let mut all = vec![];
+    let mut cursor = None;
+    loop {
+        let p = n
+            .list_root(kb_at(""), PageRequest { cursor, limit: 1 })
+            .await
+            .unwrap();
+        assert!(p.items.len() <= 1);
+        all.extend(p.items);
+        cursor = p.next;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    let shown: Vec<(&str, bool)> = all.iter().map(|f| (f.path.as_str(), f.is_dir)).collect();
+    assert_eq!(
+        shown,
+        [
+            ("a-link.md", false),
+            ("a.md", false),
+            ("b", true),
+            ("d", true)
+        ]
+    );
+    let below = n.list_root(kb_at("b"), page(10)).await.unwrap();
+    let names: Vec<&str> = below.items.iter().map(|f| f.path.as_str()).collect();
+    assert_eq!(names, ["b/c.md"]);
+    // a directory that is not there
+    let e = n.list_root(kb_at("nope"), page(10)).await.unwrap_err();
+    assert_eq!(e.code, ErrorCode::Invalid);
+    // a read-only root is listed, read and scanned, but a bad pattern is refused
+    let bad = ScanSpec {
+        include: vec!["../*.md".into()],
+        ..kb_scan("", &[], ScanLimits::default())
+    };
+    let e = n.scan(now_cmd("op_bad", bad)).await.unwrap_err();
+    assert_eq!(e.code, ErrorCode::Invalid);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_scan_read_after_a_restart_is_scanned_again() {
+    let t = T::new(&[]);
+    put(&t.root, "work/notes/a.md", b"x");
+    let n = t.node();
+    let spec = ScanSpec {
+        root: RootPath {
+            root: RootId::new("work").unwrap(),
+            rel: RelPath::new("notes").unwrap(),
+        },
+        include: vec![],
+        exclude: vec![],
+        limits: ScanLimits::default(),
+    };
+    let pages = scan_all(&n, "op_scan", spec, 10).await;
+    assert_eq!(entries(&pages).len(), 1);
+    n.shutdown().await;
+    drop(n);
+    let n = reopen(&t, t.sink.clone()).await;
+    let e = n
+        .scan_page(OperationId::new("op_scan").unwrap(), page(10))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::Expired);
 }

@@ -15,6 +15,7 @@ mod actor;
 pub mod history;
 mod journal;
 mod procs;
+mod scan;
 mod tools;
 pub mod workspace;
 
@@ -168,6 +169,8 @@ pub(crate) struct Inner {
     /// Workspace work on one repository goes one at a time.
     repos: Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>,
     snapshots: Mutex<HashMap<u64, Snapshot>>,
+    /// The manifests of finished scans, read page by page, gone after a restart.
+    scans: Mutex<scan::Scans>,
     cache_n: AtomicU64,
     tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     /// Where the harnesses' history is and which binaries a probe asks; none until the host turns
@@ -1000,6 +1003,7 @@ impl LocalNode {
             tools_url: Mutex::new(None),
             repos: Mutex::new(HashMap::new()),
             snapshots: Mutex::new(HashMap::new()),
+            scans: Mutex::new(scan::Scans::default()),
             cache_n: AtomicU64::new(0),
             tasks: Mutex::new(Vec::new()),
         })))
@@ -2438,20 +2442,191 @@ impl WorkspaceExecutor for LocalNode {
     async fn exec(&self, _c: Command<ExecSpec>) -> ApiResult<Receipt> {
         unsupported("exec")
     }
-    async fn list_dir(&self, _p: PathRef, _page: PageRequest) -> ApiResult<Page<FileInfo>> {
-        unsupported("files")
+    /// What is right in a directory of a workspace.
+    async fn list_dir(&self, p: PathRef, page: PageRequest) -> ApiResult<Page<FileInfo>> {
+        self.mine(&p.workspace)?;
+        let base = workspace_dir(&self.0, &p.workspace)?;
+        let items = blocking(move || {
+            let dir = scan::inside(&base, &p.rel)?;
+            scan::list(&dir, p.rel.as_str(), &base).map_err(not_listed)
+        })
+        .await?;
+        scan::list_page(items, &page)
     }
-    async fn list_root(&self, _at: RootPath, _page: PageRequest) -> ApiResult<Page<FileInfo>> {
-        unsupported("files")
+
+    /// What is right in a directory under an allowed root (read-only roots too).
+    async fn list_root(&self, at: RootPath, page: PageRequest) -> ApiResult<Page<FileInfo>> {
+        let roots = self.0.roots();
+        let items = blocking(move || {
+            let dir = workspace::resolve(&roots, &at, false)?;
+            let base = workspace::resolve(&roots, &root_of(&at), false)?;
+            scan::list(&dir, at.rel.as_str(), &base).map_err(not_listed)
+        })
+        .await?;
+        scan::list_page(items, &page)
     }
-    async fn read_file(&self, _q: FileRead) -> ApiResult<ReadChunk> {
-        unsupported("files")
+
+    /// A bounded chunk of a file in a workspace or under a root. The root (or the workspace) is
+    /// checked on every call, after resolving links: nothing outside it is read.
+    async fn read_file(&self, q: FileRead) -> ApiResult<ReadChunk> {
+        enum At {
+            Workspace(PathBuf, RelPath),
+            Root(Arc<Vec<Root>>, RootPath),
+        }
+        let at = match &q.path {
+            FileAddress::Workspace(p) => {
+                self.mine(&p.workspace)?;
+                At::Workspace(workspace_dir(&self.0, &p.workspace)?, p.rel.clone())
+            }
+            FileAddress::Root(at) => At::Root(self.0.roots(), at.clone()),
+        };
+        // resolved, checked and opened in one go; the opened file is checked again (`scan::read`)
+        blocking(move || {
+            let (base, real) = match at {
+                At::Workspace(base, rel) => {
+                    let real = scan::inside(&base, &rel)?;
+                    (base, real)
+                }
+                At::Root(roots, at) => (
+                    workspace::resolve(&roots, &root_of(&at), false)?,
+                    workspace::resolve(&roots, &at, false)?,
+                ),
+            };
+            scan::read(&base, &real, q.expected.as_ref(), q.offset, q.max)
+        })
+        .await
     }
-    async fn scan(&self, _c: Command<ScanSpec>) -> ApiResult<Receipt> {
-        unsupported("scan")
+
+    /// Accepted now; finished once the tree is walked, its manifest kept for [`Self::scan_page`]
+    /// (until a restart: then scan again). `busy` while too many scans are being read: one being
+    /// read is never dropped for a new one.
+    async fn scan(&self, c: Command<ScanSpec>) -> ApiResult<Receipt> {
+        let spec = c.body.clone();
+        if spec
+            .include
+            .iter()
+            .chain(&spec.exclude)
+            .any(|p| !steve_node_api::glob::valid_pattern(p))
+        {
+            return Err(ApiError::new(ErrorCode::Invalid, "a scan pattern"));
+        }
+        if spec.limits.max_files > scan::MAX_SCAN_FILES {
+            return Err(ApiError::new(
+                ErrorCode::Invalid,
+                "too many files for one scan",
+            ));
+        }
+        let roots = self.0.roots();
+        // a place among the kept scans, taken for a new scan only (a resend is answered as it was)
+        let mut place: Option<ScanPlace> = None;
+        let (r, fresh) = self.accept("scan", &c, |_| {
+            if !workspace::resolve(&roots, &spec.root, false)?.is_dir() {
+                return Err(ApiError::new(ErrorCode::Invalid, "not a directory"));
+            }
+            if place.is_none() {
+                place = Some(ScanPlace::take(&self.0)?);
+            }
+            Ok(Decided::accepted())
+        })?;
+        if !fresh || r.state.is_finished() {
+            return Ok(r);
+        }
+        let me = self.clone();
+        let op = c.id.clone();
+        self.spawn_owned(async move {
+            let place = place;
+            let inner = me.0.clone();
+            let walked = blocking(move || {
+                // the roots as they are now: one taken away since is not walked
+                let dir = workspace::resolve(&inner.roots(), &spec.root, false)?;
+                let rules = steve_node_api::glob::Rules::new(spec.include, spec.exclude);
+                let stop = || inner.closed.load(Ordering::SeqCst);
+                scan::walk(&dir, spec.root.rel.as_str(), &rules, spec.limits, &stop)
+                    .map_err(not_listed)
+            })
+            .await;
+            drop(place);
+            let state = match walked.and_then(|m| {
+                let now = std::time::Instant::now();
+                me.0.scans.lock().unwrap().keep(op.clone(), m, now)
+            }) {
+                Ok(()) => {
+                    Decided::done(OperationResult::Pages {
+                        operation: op.clone(),
+                    })
+                    .state
+                }
+                Err(e) => failed(e),
+            };
+            me.complete(&op, state, |_| Ok(())).await;
+        });
+        Ok(r)
     }
-    async fn scan_page(&self, _s: OperationId, _p: PageRequest) -> ApiResult<ScanPage> {
-        unsupported("scan")
+
+    async fn scan_page(&self, s: OperationId, page: PageRequest) -> ApiResult<ScanPage> {
+        let m = (self.0.scans.lock().unwrap()).get(&s, std::time::Instant::now());
+        if let Some(m) = m {
+            let p = scan::page(&m, &s, &page)?;
+            if p.next.is_none() {
+                self.0.scans.lock().unwrap().read_out(&s);
+            }
+            return Ok(p);
+        }
+        match self.0.j.read(|t| t.op(&s))? {
+            Some(o) if o.method == "scan" && o.receipt.state.is_finished() => Err(ApiError::new(
+                ErrorCode::Expired,
+                "this scan's manifest is gone: scan again",
+            )
+            .on(&s)),
+            Some(o)
+                if o.method == "scan" && matches!(o.receipt.state, Observed::Unknown { .. }) =>
+            {
+                Err(ApiError::new(ErrorCode::Expired, "this scan was cut short: scan again").on(&s))
+            }
+            Some(o) if o.method == "scan" => {
+                Err(ApiError::new(ErrorCode::Busy, "still scanning").on(&s))
+            }
+            _ => Err(ApiError::new(ErrorCode::Invalid, "no such scan").on(&s)),
+        }
+    }
+}
+
+/// A scan's place among the kept scans while it walks: given back when dropped.
+struct ScanPlace(Arc<Inner>);
+
+impl ScanPlace {
+    fn take(inner: &Arc<Inner>) -> ApiResult<ScanPlace> {
+        let now = std::time::Instant::now();
+        inner.scans.lock().unwrap().reserve(now)?;
+        Ok(ScanPlace(inner.clone()))
+    }
+}
+
+impl Drop for ScanPlace {
+    fn drop(&mut self) {
+        self.0.scans.lock().unwrap().release();
+    }
+}
+
+/// Filesystem work off the async threads.
+async fn blocking<T: Send + 'static>(
+    f: impl FnOnce() -> ApiResult<T> + Send + 'static,
+) -> ApiResult<T> {
+    tokio::task::spawn_blocking(f).await.map_err(internal)?
+}
+
+fn not_listed(e: std::io::Error) -> ApiError {
+    ApiError::new(
+        ErrorCode::Invalid,
+        format!("cannot list the directory: {e}"),
+    )
+}
+
+/// The root of `at` itself.
+fn root_of(at: &RootPath) -> RootPath {
+    RootPath {
+        root: at.root.clone(),
+        rel: RelPath::new("").expect("the empty path"),
     }
 }
 

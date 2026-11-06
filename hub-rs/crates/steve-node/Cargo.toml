@@ -23,6 +23,8 @@ uuid = { version = "=1.29.0", features = ["v4"] }
 
 [dev-dependencies]
 steve-node-api = { path = "../steve-node-api", features = ["testkit"] }
+# scan parity: the Node's scan against the knowledge folder's walk
+steve-knowledge = { path = "../steve-knowledge" }
 async-trait = "=0.1.92"
 tempfile = "=3.27.0"
 tokio = { version = "=1.54.1", features = ["rt-multi-thread", "macros", "time", "sync"] }
