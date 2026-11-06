@@ -144,9 +144,9 @@ pub trait NodeDomain: Send + Sync + 'static {
     fn permission_asked(&self, session: &str, decision: &str, request: &PermissionRequest) {
         let _ = (session, decision, request);
     }
-    /// A harness tool call of a session's turn was seen (committed), as it starts or changes: under
-    /// full access no permission request comes for it, so this is where the Hub looks at it. Must
-    /// return promptly.
+    /// A harness tool call of a session's turn was seen (committed), as it starts or changes: a
+    /// call no permission request came for (any under full access, one a harness ran without
+    /// asking) is looked at here. Must return promptly.
     fn tool_seen(&self, session: &str, tool: &ToolView) {
         let _ = (session, tool);
     }

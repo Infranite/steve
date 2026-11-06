@@ -539,7 +539,7 @@ fn the_full_access_floor() {
         ("bash <<'EOF'\ngit push\nEOF", 5),
         ("find . -name x -exec git push \\;", 5),
     ] {
-        let l = limits::full_access(&sh(c), &pl.env);
+        let l = limits::floor(&sh(c), &pl.env);
         assert_eq!(l.as_ref().map(|l| l.n), Some(n), "{c}: {l:?}");
     }
     // full access gives the rest: writing outside, deleting, own processes, local git, reads
@@ -553,15 +553,15 @@ fn the_full_access_floor() {
         "cat {cwd}/.steve/qa/ST-21/a.log",
         "./scripts/release.sh --dry-run",
     ] {
-        let l = limits::full_access(&sh(c), &pl.env);
+        let l = limits::floor(&sh(c), &pl.env);
         assert!(l.is_none(), "{c}: {l:?}");
     }
     // an edit or a read is judged by its path only
     let edit = |p: &str| tool("edit", json!({}), vec![pl.fill(p)]);
     assert_eq!(
-        limits::full_access(&edit("{steve}/web/index.html"), &pl.env).map(|l| l.n),
+        limits::floor(&edit("{steve}/web/index.html"), &pl.env).map(|l| l.n),
         Some(4)
     );
-    assert!(limits::full_access(&edit("{home}/notes.md"), &pl.env).is_none());
-    assert!(limits::full_access(&edit("{cwd}/src/a.rs"), &pl.env).is_none());
+    assert!(limits::floor(&edit("{home}/notes.md"), &pl.env).is_none());
+    assert!(limits::floor(&edit("{cwd}/src/a.rs"), &pl.env).is_none());
 }

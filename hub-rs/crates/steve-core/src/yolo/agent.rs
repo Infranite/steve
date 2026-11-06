@@ -25,7 +25,7 @@ pub const DELIVER: &str = "- steve_deliver: when the goal is met and your checks
 pub const PUBLISH: &str = " In YOLO mode Steve approves releases of this project by itself and rolls back if the health check fails.";
 
 /// Under 完全放开 (full access): the harness asks nothing. Steve still stops the turn when it sees a
-/// tool call cross [`super::limits::full_access`]; the agent is told so, and what else to mind.
+/// tool call cross [`super::limits::floor`]; the agent is told so, and what else to mind.
 pub fn full_lines(steve_home: &str) -> Vec<String> {
     vec![
         "- Full access is on: your tools run without permission prompts. You act as the user on this machine, so stay careful:".into(),
@@ -111,8 +111,10 @@ pub(crate) struct Sessions {
     /// The mode switch failed (a store error, say): the next sync tries it again, whatever the
     /// note did meanwhile. Apart from `told`, so a retry never makes a note again.
     mode_pending: Mutex<HashSet<String>>,
-    /// Tool calls (`session`, call id) under full access that stopped their turn already.
+    /// Tool calls (`session`, call id) that stopped their turn already.
     stopped: Mutex<HashSet<(String, String)>>,
+    /// Tool calls (`session`, call id) the harness asked permission for: the guard judged them.
+    asked: Mutex<HashSet<(String, String)>>,
     /// Why Steve stopped the session's last turn, for the agent's next message.
     stop_notes: Mutex<HashMap<String, String>>,
 }
@@ -141,6 +143,17 @@ impl Sessions {
     }
     fn take_stop_note(&self, sid: &str) -> Option<String> {
         lock(&self.stop_notes).remove(sid)
+    }
+    fn asked(&self, sid: &str, call: &str) {
+        lock(&self.asked).insert((sid.into(), call.into()));
+    }
+    fn was_asked(&self, sid: &str, call: &str) -> bool {
+        lock(&self.asked).contains(&(sid.to_string(), call.to_string()))
+    }
+    /// The turn of `sid` is over: its calls are not seen again.
+    fn turn_over(&self, sid: &str) {
+        lock(&self.asked).retain(|(s, _)| s != sid);
+        lock(&self.stopped).retain(|(s, _)| s != sid);
     }
     /// Records the level; the level the session was told before when it differs (unknown = off,
     /// the protocol of a session started before YOLO).
@@ -241,33 +254,53 @@ impl Core {
         out
     }
 
-    /// Session `session` works on an item under full access now (a cheap look before its tool
-    /// calls are read).
-    pub fn yolo_full_session(&self, session: &str) -> bool {
-        self.yolo().is_some() && self.full_access_item(session).is_some()
+    /// YOLO applies to the item session `session` works on (a cheap look before its tool calls
+    /// are read): false with YOLO off, for a read-only session or without YOLO wired.
+    pub fn yolo_watches(&self, session: &str) -> bool {
+        self.yolo().is_some() && self.watched_item(session).is_some()
     }
 
-    fn full_access_item(&self, session: &str) -> Option<Item> {
+    fn watched_item(&self, session: &str) -> Option<(Item, Level)> {
         let s = self.store().session(session).ok().flatten()?;
         let item = self.store().item(s.item_id.as_deref()?).ok().flatten()?;
-        (s.readonly == 0 && self.yolo_level(&item) == Level::Full).then_some(item)
+        let level = self.yolo_level(&item);
+        (s.readonly == 0 && level != Level::Off).then_some((item, level))
     }
 
-    /// Under full access, a tool call session `session` was seen starting (`call`: its id, `title`:
-    /// what it shows; `input`: its ACP kind, raw input and locations, as its executor reported them).
-    /// One that crosses [`super::limits::full_access`] stops the turn: the user is told, and the
-    /// agent hears why with its next message. True when it stopped the turn. Nothing happens below
-    /// full access (every call there reaches the guard as a permission request) or without YOLO.
-    pub fn yolo_full_seen(
+    /// The harness asked permission for call `call` of `session` (a `session/request_permission`
+    /// the Node forwarded): the guard judges it, so [`Self::yolo_seen`] leaves it alone.
+    pub fn yolo_asked(&self, session: &str, call: &str) {
+        self.0.yolo_sessions.asked(session, call);
+    }
+
+    /// The turn of `session` is over (what [`Self::yolo_asked`] and the stops kept goes).
+    pub fn yolo_turn_over(&self, session: &str) {
+        self.0.yolo_sessions.turn_over(session);
+    }
+
+    /// A harness tool call of `session` as its ACP `tool_call` updates report it (`call`: its id,
+    /// `title`: what it shows, `pending`: it has not started yet; `input`: its kind, raw input and
+    /// locations), whichever harness sent it. The floor ([`super::limits::floor`]) holds for every
+    /// call the harness did not ask permission for: under full access because the harness asks
+    /// nothing, with YOLO on because a harness may run a call without asking (one that ignores the
+    /// permission mode). With YOLO on a pending call is left until it starts, since the harness may
+    /// still ask, and then the guard has it. One that crosses the floor stops the turn: the user is
+    /// told, and the agent hears why with its next message. True when it stopped the turn. Nothing
+    /// happens with YOLO off.
+    pub fn yolo_seen(
         &self,
         session: &str,
         call: &str,
         title: &str,
+        pending: bool,
         input: super::ToolInput,
     ) -> bool {
-        let (Some(y), Some(item)) = (self.yolo(), self.full_access_item(session)) else {
+        let (Some(y), Some((item, level))) = (self.yolo(), self.watched_item(session)) else {
             return false;
         };
+        if self.0.yolo_sessions.was_asked(session, call) || (pending && level != Level::Full) {
+            return false;
+        }
         let own = y.own_dir(item.cwd.as_deref());
         let tool = super::judge::Tool {
             kind: input.kind,
@@ -285,29 +318,29 @@ impl Core {
             branch: item.branch.clone(),
             own_pids: input.own_pids.unwrap_or_default(),
         };
-        let Some(limit) = super::limits::full_access(&tool, y.env()) else {
+        let Some(limit) = super::limits::floor(&tool, y.env()) else {
             return false;
         };
         let note = format!(
-            "（Steve 停下了你上一轮：完全放开下也不做这件事——{}（{}）。不要再试；需要的话用 steve_request_approval 交给用户。）",
+            "（Steve 停下了你上一轮：没有经过用户确认就做了这件事——{}（{}）。不要再试；需要的话用 steve_request_approval 交给用户。）",
             limit.what, title
         );
         if !self.0.yolo_sessions.stop_once(session, call, note) {
             return false;
         }
-        tracing::warn!(session, call, rule = %limit.rule(), "full access: stopping the turn");
+        tracing::warn!(session, call, rule = %limit.rule(), "yolo floor: stopping the turn");
         if let Err(e) = self.0.runtime.cancel(session) {
-            tracing::error!(session, "full access: stop the turn: {e}");
+            tracing::error!(session, "yolo floor: stop the turn: {e}");
         }
         let text = format!(
-            "完全放开下 Agent 要做的事碰到底线，Steve 停下了这一轮：{}（{}）。这条命令可能已经开始执行。",
+            "Agent 没有先请求权限就要做碰到底线的事，Steve 停下了这一轮：{}（{}）。这条命令可能已经开始执行。",
             limit.what, title
         );
         if let Err(e) =
             self.store()
                 .event_add(session, "system", serde_json::json!({ "text": text }))
         {
-            tracing::error!(session, "full access: system entry: {e}");
+            tracing::error!(session, "yolo floor: system entry: {e}");
         }
         if let Err(e) = crate::notify::notify(
             self.store(),
@@ -317,7 +350,7 @@ impl Core {
             &text,
             Some(&item.id),
         ) {
-            tracing::error!(session, "full access: notice: {e}");
+            tracing::error!(session, "yolo floor: notice: {e}");
         }
         true
     }

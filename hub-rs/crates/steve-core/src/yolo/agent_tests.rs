@@ -424,10 +424,10 @@ fn an_own_directory_widens_default_without_yolo_too() {
 }
 
 /// U2: under full access the harness asks nothing; a tool call the Hub sees that crosses the floor
-/// stops the turn, tells the user and, with its next message, the agent. Once per call; below full
-/// access nothing happens (the guard gets those calls as permission requests).
+/// stops the turn, tells the user and, with its next message, the agent. Once per call. With YOLO
+/// on the floor holds for a call the harness ran without asking; one it asked about is the guard's.
 #[test]
-fn full_access_stops_the_turn_at_the_floor() {
+fn the_floor_stops_a_turn_nobody_was_asked_about() {
     let k = Kit::new();
     let y = yolo(&k);
     full(&y);
@@ -443,17 +443,18 @@ fn full_access_stops_the_turn_at_the_floor() {
         raw: serde_json::json!({ "command": "cargo test > /tmp/x.log" }),
         ..push()
     };
-    assert!(k.core.yolo_full_session(&sid));
-    assert!(!k.core.yolo_full_seen(&sid, "c0", "cargo test", fine));
+    assert!(k.core.yolo_watches(&sid));
+    assert!(!k.core.yolo_seen(&sid, "c0", "cargo test", false, fine));
     assert!(k.rt.st().cancelled.is_empty());
-    assert!(k.core.yolo_full_seen(&sid, "c1", "git push", push()));
+    // under full access even before it starts
+    assert!(k.core.yolo_seen(&sid, "c1", "git push", true, push()));
     assert_eq!(
         k.rt.st().cancelled,
         vec![sid.clone()],
         "the turn is stopped"
     );
     // the same call again (its next update): nothing more
-    assert!(!k.core.yolo_full_seen(&sid, "c1", "git push", push()));
+    assert!(!k.core.yolo_seen(&sid, "c1", "git push", false, push()));
     assert_eq!(k.rt.st().cancelled.len(), 1);
     let n = k.core.notifications(WS).unwrap();
     assert!(
@@ -465,9 +466,23 @@ fn full_access_stops_the_turn_at_the_floor() {
     let next = say(&k, &sid, "继续");
     assert!(next.starts_with("（Steve 停下了你上一轮"), "{next}");
     assert!(next.ends_with("\n\n继续"), "{next}");
-    // plain YOLO: the call came as a permission request, nothing to watch here
+    // plain YOLO: a call the harness asked about is the guard's, a pending one may still ask
     y.put_scope(WS, "me", "item", &item, &serde_json::json!({"mode": "on"}))
         .unwrap();
-    assert!(!k.core.yolo_full_session(&sid));
-    assert!(!k.core.yolo_full_seen(&sid, "c2", "git push", push()));
+    assert!(k.core.yolo_watches(&sid));
+    k.core.yolo_asked(&sid, "c2");
+    assert!(!k.core.yolo_seen(&sid, "c2", "git push", false, push()));
+    assert!(!k.core.yolo_seen(&sid, "c3", "git push", true, push()));
+    assert_eq!(k.rt.st().cancelled.len(), 1);
+    // …one it ran without asking meets the floor, as under full access
+    assert!(k.core.yolo_seen(&sid, "c3", "git push", false, push()));
+    assert_eq!(k.rt.st().cancelled.len(), 2);
+    // a new turn: what the last one kept is gone
+    k.core.yolo_turn_over(&sid);
+    assert!(k.core.yolo_seen(&sid, "c2", "git push", false, push()));
+    // YOLO off: nothing is watched
+    y.put_scope(WS, "me", "item", &item, &serde_json::json!({"mode": "off"}))
+        .unwrap();
+    assert!(!k.core.yolo_watches(&sid));
+    assert!(!k.core.yolo_seen(&sid, "c4", "git push", false, push()));
 }

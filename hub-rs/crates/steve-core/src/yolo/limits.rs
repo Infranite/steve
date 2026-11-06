@@ -1452,15 +1452,16 @@ fn find(args: &[String], pl: &Places, branch: Option<&str>, depth: u8) -> Option
     None
 }
 
-// ── full access ──
+// ── the floor: calls nobody was asked about ──
 
-/// The floor under 完全放开 (full access), where the harness asks nothing: a tool call the Hub sees
-/// starting (ACP `tool_call`: its kind, `rawInput` and locations, whichever harness sent it) that is
-/// one of these stops the turn. Only what the confirmation dialog promises: speaking as the user
+/// The floor for a tool call no permission request came for (under 完全放开, full access, the
+/// harness asks nothing; with YOLO on a harness may still run a call without asking): a tool call
+/// the Hub sees (ACP `tool_call`: its kind, `rawInput` and locations, whichever harness sent it)
+/// that is one of these stops the turn. Only what the confirmation dialog promises: speaking as the user
 /// through a program of theirs (rule 3), pushing or changing GitHub (rule 5), touching
-/// `STEVE_HOME` outside the item's own directory, port 8440, launchd or Steve's release script, and
-/// `pkill`/`killall` (rule 4). Writing anywhere else is what full access gives.
-pub fn full_access(t: &Tool, env: &Env) -> Option<Limit> {
+/// `STEVE_HOME` outside the item's own directory, port 8440 or launchd, and `pkill`/`killall`
+/// (rule 4). Writing anywhere else is left to the harness and, below full access, its own mode.
+pub fn floor(t: &Tool, env: &Env) -> Option<Limit> {
     let mut pl = Places::new(t.cwd.as_deref(), env);
     if let Some(base) = tool_base(t, &pl) {
         pl.base = base;

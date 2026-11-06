@@ -255,7 +255,7 @@ pub(crate) fn yolo_input(
     }
 }
 
-/// What YOLO's full-access watch reads of a tool call a Node reported ([`steve_node_api::ToolView`]):
+/// What YOLO's floor reads of a tool call a Node reported ([`steve_node_api::ToolView`]):
 /// the command of an `exec` (a command with its own directory or an argv comes as the action's
 /// summary), the path of an edit, delete, move or read (its target: relative to the workspace, or
 /// absolute outside it), the URL of a fetch. `None`: nothing to read there.
@@ -271,7 +271,8 @@ pub(crate) fn seen_input(
         _ => p.to_string(),
     };
     let (kind, raw, locations) = match (t.category, &t.action) {
-        (ToolCategory::Exec, Some(Action::Exec { command, .. }))
+        // a shell command whatever kind the harness gave it; an argv only as an `execute`
+        (_, Some(Action::Exec { command, .. }))
         | (ToolCategory::Exec, Some(Action::Unknown { summary: command })) => {
             let mut raw = serde_json::json!({ "command": command });
             if let Some(r) = root {
@@ -312,7 +313,7 @@ pub(crate) fn seen_input(
 /// Turn ends of Node sessions reach the core the same way the ACP runner's do.
 impl super::node_runtime::NodeDomain for HubHost {
     fn tool_seen(&self, session: &str, tool: &steve_node_api::ToolView) {
-        // under full access no permission request comes: the floor is checked on what was seen
+        // the floor on what the harness reported, for calls no permission request came for
         let (Some(core), Some(_)) = (self.core.get().cloned(), self.yolo.get()) else {
             return;
         };
@@ -320,7 +321,7 @@ impl super::node_runtime::NodeDomain for HubHost {
         let local = self.local_node.get().cloned();
         let (sid, tool) = (session.to_string(), tool.clone());
         let work = move || {
-            if !core.yolo_full_session(&sid) {
+            if !core.yolo_watches(&sid) {
                 return;
             }
             let bound = store
@@ -332,7 +333,8 @@ impl super::node_runtime::NodeDomain for HubHost {
                 .as_ref()
                 .and_then(|w| prepared_dir(&store, local.as_deref(), w));
             if let Some(input) = seen_input(bound.as_ref(), dir.as_ref(), &tool) {
-                core.yolo_full_seen(&sid, tool.id.as_str(), &tool.title, input);
+                let pending = tool.phase == steve_node_api::ToolPhase::Pending;
+                core.yolo_seen(&sid, tool.id.as_str(), &tool.title, pending, input);
             }
         };
         match tokio::runtime::Handle::try_current() {
@@ -479,7 +481,11 @@ impl super::node_runtime::NodeDomain for HubHost {
         decision: &str,
         request: &steve_node_api::PermissionRequest,
     ) {
-        let _ = (session, request);
+        // the guard judges this call: the floor on seen calls leaves it alone (recorded before
+        // the call's later updates are looked at, which come after this in the Node's order)
+        if let Some(core) = self.core.get() {
+            core.yolo_asked(session, request.invocation.as_str());
+        }
         // its tool input was armed before the commit (permission_arming)
         let Some(engine) = self.yolo.get().cloned() else {
             return;
@@ -502,6 +508,7 @@ impl super::node_runtime::NodeDomain for HubHost {
         error: Option<String>,
     ) {
         let Some(core) = self.core.get() else { return };
+        core.yolo_turn_over(session);
         let t = steve_core::TurnEnd {
             session_id: session.into(),
             attempt: attempt.map(String::from),
@@ -2484,8 +2491,8 @@ mod yolo_input_tests {
         }
     }
 
-    /// What the full-access watch reads of a tool call it saw: a shell line (Claude's), an argv
-    /// line (Codex's, carried as the summary), an edit's path under the Node's directory.
+    /// What the floor reads of a tool call it saw: a shell line, an argv line (carried as the
+    /// summary), an edit's path under the Node's directory.
     #[test]
     fn a_seen_tool_call_reads_as_a_tool_input() {
         use super::seen_input;
