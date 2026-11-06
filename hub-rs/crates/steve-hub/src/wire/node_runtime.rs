@@ -1131,7 +1131,14 @@ impl NodeRuntime {
                 now(),
             )?;
             for f in &m.files {
-                prompt.push(file_part(tx, f)?);
+                match file_part(tx, f)? {
+                    Some(p) => prompt.push(p),
+                    // the file is gone from the Hub (its row too): the message goes without it,
+                    // as on the legacy runner, instead of staying queued for good
+                    None => {
+                        tracing::warn!("{session}: attachment {} is gone; sent without it", f.id)
+                    }
+                }
             }
         }
         self.attempt_in(tx, session, &turn, 0, prompt)?;
@@ -3539,14 +3546,19 @@ fn message_event(text: &str, via: &str, files: &[FileRef]) -> Value {
     v
 }
 
-/// An attachment for the Node to fetch from the Hub by hash.
-fn file_part(tx: &Tx, f: &FileRef) -> Result<Part, StoreError> {
-    let (sha, size, mime): (String, i64, String) = tx.query_row(
-        "SELECT sha256, size, mime FROM files WHERE id=?",
-        [&f.id],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-    )?;
-    Ok(Part::File {
+/// An attachment for the Node to fetch from the Hub by hash (none when the Hub has no such file).
+fn file_part(tx: &Tx, f: &FileRef) -> Result<Option<Part>, StoreError> {
+    let Some((sha, size, mime)) = tx
+        .query_row(
+            "SELECT sha256, size, mime FROM files WHERE id=?",
+            [&f.id],
+            |r| Ok::<(String, i64, String), _>((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(Part::File {
         artifact: ArtifactRef {
             id: idv(f.id.clone())?,
             sha256: idv(if sha.starts_with("sha256:") {
@@ -3558,7 +3570,7 @@ fn file_part(tx: &Tx, f: &FileRef) -> Result<Part, StoreError> {
             mime,
         },
         name: f.name.clone(),
-    })
+    }))
 }
 
 fn receipt_state(s: &Observed) -> (ReceiptState, bool) {
