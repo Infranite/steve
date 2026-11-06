@@ -348,7 +348,10 @@ async fn facts_of_a_workspace() {
         .unwrap();
     assert!(!quick.dirty);
     assert_eq!(quick.head, g.head);
-    assert_ne!(quick.revision, g.revision, "never equal to one with the tree in it");
+    assert_ne!(
+        quick.revision, g.revision,
+        "never equal to one with the tree in it"
+    );
     assert!(quick.revision.as_str().starts_with('h'));
     let r = &g.ranges[0];
     assert_eq!((r.ahead, r.behind), (1, 1));

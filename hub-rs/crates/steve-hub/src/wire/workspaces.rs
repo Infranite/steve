@@ -364,12 +364,8 @@ impl steve_knowledge::sources::folder_node::FolderPlaces for KbFolders {
             })),
             Ok(_)
             | Err(
-                PlacementError::NotFound(_)
-                | PlacementError::NoWorkspace
-                | PlacementError::Outside,
-            ) => {
-                Err(Unplaced::Nowhere)
-            }
+                PlacementError::NotFound(_) | PlacementError::NoWorkspace | PlacementError::Outside,
+            ) => Err(Unplaced::Nowhere),
             Err(PlacementError::LocalOff) => Ok(None),
             Err(PlacementError::Offline { .. }) => Err(Unplaced::Offline),
             Err(PlacementError::Store(e)) => Err(Unplaced::Failed(e.to_string())),

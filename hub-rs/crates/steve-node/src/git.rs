@@ -936,7 +936,6 @@ fn read(dir: &Path, args: &[&str]) -> ApiResult<Out> {
     })
 }
 
-
 /// Branch names a push takes: `steve/st-12` and the like (as the Hub's own push did).
 pub(crate) fn branch_ok(b: &str) -> bool {
     !b.is_empty()
@@ -962,7 +961,6 @@ fn remote_ok(r: &str) -> bool {
 fn sha_ok(s: &str) -> bool {
     (s.len() == 40 || s.len() == 64) && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
-
 
 /// The test guard's flag, as the Hub reads it: on only for `1`.
 fn forbid_real_hosts() -> bool {

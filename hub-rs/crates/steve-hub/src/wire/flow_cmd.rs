@@ -200,9 +200,7 @@ impl CmdNode for FlowCmd {
             Err(PlacementError::LocalOff) => return CmdRan::Legacy,
             Err(PlacementError::Offline { .. }) => return CmdRan::Offline,
             Err(
-                PlacementError::NotFound(_)
-                | PlacementError::NoWorkspace
-                | PlacementError::Outside,
+                PlacementError::NotFound(_) | PlacementError::NoWorkspace | PlacementError::Outside,
             ) => {
                 return CmdRan::NoProject;
             }
