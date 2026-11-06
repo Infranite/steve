@@ -29,7 +29,7 @@ import { ItemPeopleProp } from "@/people/item-people"
 import { QueuedComment, queuedComments, queueNote, QueueStrip } from "@/queue"
 import { NativeIdLine, ResumeCard } from "@/resume"
 import { ItemStatsRows, SessionStats } from "@/stats/drill"
-import { ACC, accKey, accOf, active, addDep, archive, bulk, closeRel, deleteItem, depsOpen, doFork, gBuild, gComps, hm, importSessions, interrupt, it, itemThread, link, loadEvents, loadItem, loadLocalSessions, markDone, newItem, patchItem, pending, pendingCards, reassign, rmDep, saveGoal, sessPatch, sessRemove, sessSend, setAcc, setSt, setTags, setKind, kindOf, kindTags, isKind, DOMAIN_CATS, snoozed, st, stageOf, star, supp, tag, threadFollow, tm, toast, undoDecision, unsnooze, WT, type Item, type PlanRound, type Reply } from "@/store"
+import { ACC, accKey, accOf, active, addDep, archive, bulk, closeRel, deleteItem, depsOpen, doFork, gBuild, gComps, hm, importSessions, interrupt, it, itemThread, link, loadEvents, loadItem, loadLocalSessions, markDone, newItem, patchItem, pending, pendingCards, memCards, reassign, rmDep, saveGoal, sessPatch, sessRemove, sessSend, setAcc, setSt, setTags, setKind, kindOf, kindTags, isKind, DOMAIN_CATS, snoozed, st, stageOf, star, supp, tag, threadFollow, tm, toast, undoDecision, unsnooze, WT, type Item, type PlanRound, type Reply } from "@/store"
 import { BotAvatar, BotName, Chips, closeSheet, Composer, DecisionCard, Empty, go, Group, ItemNo, KindTag, Meta, openSheet, Page, RelNote, ReplyBlock, Row, RunBar, SectionLabel, Segmented, SessionBlock, Status, StatusDot, Tags, ThemeSwitch, Transcript, type ComposerHandle } from "@/ui"
 import { ChoiceCards, dueLabel, ItemRow, PlanBar, ProjectChip, Select, selected } from "@/view-shared"
 import { choiceText, YoloItemSwitch, YoloMark } from "@/yolo/badges"
@@ -61,7 +61,7 @@ let ibTab: "pending" | "done" = "pending"; let ibType = "all"
 export function InboxView() {
   const t = useT()
   const [, f] = useState(0); const r = () => f((x) => x + 1)
-  const p = pendingCards(), sz = snoozed()
+  const p = pendingCards(), sz = snoozed(), mems = memCards().length
   const types = ["accept", "approve", "ask", "propose", "fail", "confirm"] as const
   const typeKeys = ["all", ...types.filter((ty) => p.some((c) => c.w.type === ty))]
   const typeLabel = (k: string) => (k === "all" ? t("views:inbox.all") : WT[k])
@@ -72,7 +72,9 @@ export function InboxView() {
       {ibTab === "pending" && <>
         {yoloState(st.yolo) === "paused" && <RunState className="mb-6 rounded-lg bg-destructive/5 px-3 py-2" />}
         {p.length > 0 && <Chips className="mb-6" value={typeLabel(typeKeys.includes(ibType) ? ibType : "all")} onChange={(v) => { ibType = typeKeys.find((k) => typeLabel(k) === v) ?? "all"; r() }} options={typeKeys.map(typeLabel)} />}
-        {p.length === 0 && <Empty title={t("views:inbox.emptyTitle")} sub={t("views:inbox.emptySub")} />}
+        {p.length === 0 && !mems && <Empty title={t("views:inbox.emptyTitle")} sub={t("views:inbox.emptySub")} />}
+        {mems > 0 && <button type="button" onClick={() => go("#/knowledge?tab=pending")} className="mb-6 flex w-full items-center gap-2.5 rounded-xl border px-3 py-2.5 text-left type-callout transition-colors hover:bg-accent" data-inbox-mems>
+          <BookOpenIcon className="size-4 shrink-0 text-muted-foreground" strokeWidth={1.75} /><span className="min-w-0 flex-1">{t("views:inbox.mems", { count: mems })}</span><ChevronRightIcon className="size-4 shrink-0 text-muted-foreground" /></button>}
         <div className="flex flex-col gap-8">
           {types.map((ty) => {
             const g = xs.filter((c) => c.w.type === ty)

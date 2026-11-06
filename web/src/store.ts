@@ -706,8 +706,13 @@ export function start() {
 /* ───────── selectors ───────── */
 export const it = (id: string) => st.items.find((x) => x.id === id)!
 export const pending = () => st.items.filter((i) => (i.st === "wait" || i.st === "prop" || !!i.wait) && !!i.wait && !i.snooze && !i.arch)
-/** every open card, several per item when it has more than one */
-export const pendingCards = (): Orphan[] => [...pending().flatMap((i) => i.waits.map((w) => ({ i, w }))), ...st.orphans]
+const allCards = (): Orphan[] => [...pending().flatMap((i) => i.waits.map((w) => ({ i, w }))), ...st.orphans]
+/** a memory to confirm: it blocks nothing, so it is counted on one line of 待处理, not shown as a card */
+export const isMemCard = (w: Wait) => w.type === "confirm" && w.subject === "mem"
+/** every open card that holds work, several per item when it has more than one */
+export const pendingCards = (): Orphan[] => allCards().filter((c) => !isMemCard(c.w))
+/** the memories waiting to be confirmed (their batch page is 知识 › 待确认) */
+export const memCards = (): Orphan[] => allCards().filter((c) => isMemCard(c.w))
 /** the open cards a session is waiting on, with or without an item */
 export const sessionCards = (sid: string): Orphan[] => [...st.items.flatMap((i) => i.waits.filter((w) => w.session === sid).map((w) => ({ i, w }))), ...st.orphans.filter((o) => o.w.session === sid)]
 /** "" is the stand-in id of a card without an item */

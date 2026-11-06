@@ -145,7 +145,11 @@ export default {
     evidence: "Original words: {{evidence}}",
     supersedes: "Replaces: {{text}}",
     no: "Don't save",
-    footer: "Only used once confirmed; anything left for 30 days expires. If it's just a request for this item, a restated goal or one-off feedback, choose “Don't save”. The item record keeps it.",
+    expired_one: "Expired · {{count}}",
+    expired_other: "Expired · {{count}}",
+    restore: "Restore",
+    restored: "Restored; you can confirm it again",
+    footer: "Only used once confirmed; anything left for 30 days expires (expired ones can be restored below). What you explicitly tell Steve to remember (“记住”, “以后”) in the conversation is saved right away. If it's just a request for this item, a restated goal or one-off feedback, choose “Don't save”. The item record keeps it.",
   },
   doc: {
     title: "Document",
