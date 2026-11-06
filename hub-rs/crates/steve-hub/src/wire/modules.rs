@@ -226,6 +226,8 @@ pub struct Env<'a> {
     pub yolo_forced: Option<steve_core::yolo::Forced>,
     /// The OpenViking server knowledge is stored in (`None`: the Hub's own index only).
     pub openviking: Option<steve_knowledge::openviking::OpenVikingConfig>,
+    /// The extensions whose adapters, routes and jobs are registered.
+    pub assembly: &'a crate::extension::Assembly,
     /// The router, when the local Node is on: knowledge folders are then scanned and read by
     /// their Node (`None`: on the Hub, as before).
     pub workspaces: Option<Arc<super::workspaces::Workspaces>>,
@@ -251,6 +253,7 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
         vars,
         yolo_forced,
         openviking,
+        assembly,
         workspaces,
         cmd_node,
         use_nodes,
@@ -340,34 +343,28 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
     // C8: the `space`, `persona` and `channel` draft targets; capi: the “新群” card
     steve_channels::drafts::register(&mut registry, Arc::new(steve_modules::SystemClock));
     steve_channels::space_decisions::register(&mut registry);
-    // Feishu: the test base and host guard first (STEVE_FEISHU_API_BASE, STEVE_FORBID_REAL_HOSTS),
-    // then the providers; you on Feishu (F6) is one provider for connections, device flow and C6
-    use steve_channels::adapters::feishu::{self, Domain, FeishuApp};
-    let fenv = feishu::FeishuEnv::from_env(|k| vars(k));
-    fenv.install();
-    let feishu_user = Arc::new(
-        fenv.user_provider(Domain::Feishu)
-            .with_party_hooks(ports.hooks.clone()),
-    );
-    // the bot's app created from Steve (PersonalAgent registration): the real hosts, or the fake a
-    // test home points STEVE_FEISHU_API_BASE at
-    let reg_bases = match &fenv.api_base {
-        Some(b) => feishu::app_registration::Bases::fake(b),
-        None => feishu::app_registration::Bases::real(),
-    };
+    // Feishu: the test base and host guard (STEVE_FEISHU_API_BASE, STEVE_FORBID_REAL_HOSTS),
+    // whichever extensions are assembled (the directory sync below talks to Feishu too)
+    use steve_channels::adapters::feishu;
+    feishu::FeishuEnv::from_env(|k| vars(k)).install();
+    // the extensions' adapters (built in: Feishu as the bot and as you, IMAP, GitHub); nothing
+    // here talks to a provider
+    let declared = assembly
+        .declare(vars, ports.hooks.clone())
+        .map_err(|e| BackendError::msg(e.to_string()))?;
     // C5/C6: the disclosure check (B1's outbound check), the `chan_message` approvals, the outbox
-    // (sends as you through the user provider), back to the source when an item is done
+    // (sends as you through the declared adapters), back to the source when an item is done
     let disclosure = steve_channels::Disclosure::new();
     disclosure.secrets(Arc::new(hp::RedactorScan));
     registry.outbound_check(Box::new(disclosure.clone()));
     let out_link = steve_channels::OutLink::new();
     registry.decision(steve_channels::respond::SUBJECT_MESSAGE, out_link.handler());
     let late = steve_channels::flow_actions::LateChannels::new();
-    let outbox = Arc::new(
-        steve_channels::Outbox::new(out_link.clone())
-            .as_user(feishu::auth::USER_ADAPTER, feishu_user.clone())
-            .secrets(Arc::new(hp::RedactorScan)),
-    );
+    let mut outbox = steve_channels::Outbox::new(out_link.clone());
+    for (adapter, s) in &declared.as_user {
+        outbox = outbox.as_user(adapter, s.clone());
+    }
+    let outbox = Arc::new(outbox.secrets(Arc::new(hp::RedactorScan)));
     registry.item_hooks(Box::new(steve_channels::outbound::ReturnToSource::new(
         outbox.clone(),
         late.clone(),
@@ -391,17 +388,15 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
     let passkeys = steve_modules::vault::webauthn::Passkeys::new(store.clone(), public_urls);
     let vault_items =
         steve_modules::vault::items::routes(vault.clone(), Arc::new(passkeys.clone()));
-    // One Connections for every adapter: GitHub (G1), Feishu bot and user (F1/F6), IMAP (E1).
-    // Nothing here talks to a provider: long connections, pollers and mail runners only start for
-    // connections that exist.
+    // One Connections for every declared adapter (built in: GitHub (G1), Feishu bot and user
+    // (F1/F6), IMAP (E1)). Nothing here talks to a provider: long connections, pollers and mail
+    // runners only start for connections that exist.
     use steve_modules::accounts::connections::{self, Connections, ConnectionsConfig};
     let mail_cfg = steve_mail::MailConfig::from_env(|k| vars(k))
         .map_err(|e| BackendError::msg(format!("mail config: {e}")))?;
-    let imap = Arc::new(steve_mail::ImapAdapter::new(mail_cfg.clone()));
-    let feishu_app = Arc::new(FeishuApp::new());
-    // one GitHub env for the module and both adapters (`github_pat` honours STEVE_GITHUB_API_BASE)
+    // the same GitHub env as the `github` extension's adapters (`github_pat` honours
+    // STEVE_GITHUB_API_BASE)
     let gh_env = steve_github::GitHubEnv::from_env(|k| vars(k));
-    let github = steve_github::providers_for(&gh_env);
     let mut conns = Connections::builder(
         modules.clone(),
         vault.clone(),
@@ -410,15 +405,12 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
             move |k| vars(k)
         }),
     )
-    .provider(feishu_app.clone())
-    .provider(feishu_user.clone())
-    .provider(imap.clone())
     .usage(Arc::new(steve_mail::usage::MailUsage::new(
         mail_cfg.clone(),
     )))
     // spaces outlive their connection (kept as left; their settings and cursors go)
     .usage(Arc::new(steve_channels::usage::ChannelUsage));
-    for p in &github {
+    for p in &declared.providers {
         conns = conns.provider(p.clone());
     }
     let conns = conns.build();
@@ -433,8 +425,11 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
     // E1/E3/E4/E5: mail, before the flow (its triage actions hold it); events bound after
     let mail_events = steve_mail::flow_events::FlowEvents::new();
     let notices = super::signals::Notices { bus: bus.clone() };
-    let mail = steve_mail::Mail::builder(modules.clone(), conns.clone(), mail_cfg)
-        .adapter(imap)
+    let mut mail = steve_mail::Mail::builder(modules.clone(), conns.clone(), mail_cfg);
+    for a in &declared.mail {
+        mail = mail.adapter(a.clone());
+    }
+    let mail = mail
         .events(Arc::new(mail_events.clone()))
         .notify(Arc::new(notices.clone()))
         .drafts(draft_link)
@@ -466,8 +461,8 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
         .node(Arc::new(steve_flow::nodes::bot::BotNode::new(
             guard.clone(),
         )));
-    for p in github {
-        setup = setup.event_adapter(Arc::new(super::signals::GithubSource(p)));
+    for a in &declared.event_sources {
+        setup = setup.event_adapter(a.clone());
     }
     // C4: replies (sent through C6's outbox) and the `reply_as` / `send_to_space` actions
     let replies = Arc::new(
@@ -522,11 +517,16 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
     drop(directory.spawn());
     // connected, re-verified, a permission granted: sync the address book again soon
     drop(directory.spawn_watch(bus.tap(&["connection"])));
-    let channels = steve_channels::Channels::builder(modules.clone(), conns.clone(), sink)
-        .adapter(feishu_app.clone())
-        // names of the people met: you first, then the bot (domain-model.md §2)
-        .profiles(feishu_user.clone())
-        .profiles(feishu_app)
+    let mut channels = steve_channels::Channels::builder(modules.clone(), conns.clone(), sink);
+    for a in &declared.channel_adapters {
+        channels = channels.adapter(a.clone());
+    }
+    // the identities that look people up, keyed by adapter (which goes first is the names'
+    // rule, not the order they come in)
+    for p in &declared.profiles {
+        channels = channels.profiles(p.clone());
+    }
+    let channels = channels
         .party_hooks(ports.hooks.clone())
         .flow(flow.clone())
         .guard(guard.clone())
@@ -552,7 +552,9 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
         .timelines
         .push(Arc::new(steve_mail::timeline::MailTimeline));
 
-    let registrations = feishu::app_registration::Registrations::new(conns.clone(), reg_bases);
+    // the extensions' step two: their routes (merged with the modules' below) and jobs
+    let started =
+        crate::extension::Started::new(&channels, bus, vars, declared.feishu_user.clone());
     let routes = Router::new()
         .merge(steve_knowledge::routes(kb.clone()))
         .merge(steve_modules::contacts::routes(ports))
@@ -568,18 +570,13 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
         .merge(steve_channels::api::routes(channels.clone()))
         .merge(steve_channels::channels_api::routes(
             channels.clone(),
-            Some(feishu_user.clone()),
+            declared.feishu_user.clone(),
         ))
-        .merge(super::chan::routes(channels.clone(), outbox.clone()))
-        .merge(feishu::device_routes(feishu::DeviceFlows::new(
-            conns.clone(),
-            feishu_user.clone(),
-        )))
-        .merge(feishu::app_registration::routes(registrations.clone()))
-        .merge(feishu::user_routes(
-            conns.clone(),
-            feishu_user.claims().clone(),
-        ))
+        .merge(super::chan::routes(channels.clone(), outbox.clone()));
+    let (routes, ext_jobs) = assembly
+        .start(&started, routes)
+        .map_err(|e| BackendError::msg(e.to_string()))?;
+    let routes = routes
         .with_state(modules.clone())
         .merge(steve_modules::vault::routes(vault.clone()))
         .merge(steve_modules::vault::use_api::routes(vault))
@@ -631,15 +628,10 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
         Box::pin(steve_flow::Poller::new(flow.clone()).run()),
         Box::pin(steve_flow::retention::run(flow.clone())),
         Box::pin(steve_channels::messages::retention(modules.clone())),
-        // app registrations a stop interrupted: polled until their own deadline, checks resumed
-        Box::pin(async move {
-            match registrations.resume() {
-                Ok(n) if n > 0 => tracing::info!("feishu app registrations resumed: {n}"),
-                Ok(_) => {}
-                Err(e) => tracing::error!("feishu app registrations not resumed: {e}"),
-            }
-        }),
     ];
+    // the extensions' (built in: Feishu app registrations resumed, the Feishu long connections
+    // and self pollers)
+    jobs.extend(ext_jobs);
     let seams = Seams {
         flow: flow.clone(),
         github: gh_sink,
@@ -655,18 +647,7 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
         channels: channels.clone(),
         outbox: outbox.clone(),
     };
-    // Feishu (capi): one long connection per bot connection and one self poller per user
-    // connection that exist (none on a fresh STEVE_HOME), started and stopped as connections
-    // change; new mailboxes get the triage template
-    let rt = feishu::FeishuRuntime::new(channels.clone(), Some(feishu_user));
-    let feishu_changes = bus.tap(&["connection"]);
-    jobs.push(Box::pin(async move {
-        let n = rt.start_all().await;
-        if n > 0 {
-            tracing::info!("feishu: {n} long connections / pollers started");
-        }
-        let _ = rt.spawn_watch(feishu_changes).await;
-    }));
+    // new mailboxes get the triage template
     jobs.push(Box::pin(super::signals::watch_mailboxes(
         bus.tap(&["connection"]),
         flow.clone(),
