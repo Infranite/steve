@@ -2,6 +2,8 @@
 // $FAKE_ACP_LOG as JSON (plus a "spawn" line with argv/env). Directives in a prompt run in order:
 //   @sleep <ms>            the turn takes that long (session/cancel ends it early → "cancelled")
 //   @say <text>            agent_message_chunk
+//   @flood [ms]            2000 chunks of 4 KiB at once; with ms, a pause of ms after every 8 (a fast
+//                          harness a reader keeps up with, instead of one that overruns it)
 //   @usage <used> <size> <cost> [model] [origin]   usage_update (model → _meta._claude/model)
 //   @tally <in> <out> <cacheRead> <cacheWrite>   the response's `usage` (also on a cancel)
 //   @quota <model>:<in>:<out>:<cr>:<cw>,…        the response's `_meta.quota.model_usage`
@@ -46,7 +48,10 @@ async function turn(text) {
     const a = arg.trim()
     if (cmd === "sleep" && (await sleep(Number(a) || 1000))) return { ...out, stopReason: "cancelled" }
     if (cmd === "say") say(a)
-    if (cmd === "flood") for (let i = 0; i < 2000; i++) say("x".repeat(4096))
+    if (cmd === "flood") for (let i = 0; i < 2000; i++) {
+      say("x".repeat(4096))
+      if (a && i % 8 === 7 && (await sleep(Number(a)))) return { ...out, stopReason: "cancelled" }
+    }
     if (cmd === "bigreply") out.padding = "x".repeat(2 << 20)
     if (cmd === "bigperm") await ask("session/request_permission", {sessionId: sid, options, toolCall: {toolCallId:"large", rawInput:{data:"x".repeat(2 << 20)}}})
     if (cmd === "usage") {
