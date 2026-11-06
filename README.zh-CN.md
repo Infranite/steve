@@ -17,6 +17,13 @@
 
 [功能](#功能) · [工作原理](#工作原理) · [快速开始](#快速开始) · [部署](docs/deployment.md) · [参与贡献](CONTRIBUTING.md)
 
+<br>
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/screenshots/chat-dark.webp">
+  <img src="docs/assets/screenshots/chat.webp" alt="Steve 主线对话：一条调研回答附带建议事项，右侧是等你处理的事项" width="100%">
+</picture>
+
 </div>
 
 ---
@@ -33,6 +40,21 @@ Steve 是智能体之上的那一层。它跑在你自己的机器上，掌握�
 - **把你的世界接进来**：飞书、邮件、GitHub、联系人和知识库都在同一个工作区，智能体干活时有真实的上下文。
 
 所有东西都在你自己的设施上：一个 Rust 可执行文件、一个 SQLite 数据库和一个加密保险箱。
+
+## 看一眼
+
+<table>
+<tr>
+<td width="50%"><img src="docs/assets/screenshots/inbox.webp" alt="待处理"><br><b>待处理</b>：要验收的交付、要批准的推送、要回答的问题，都在一处。</td>
+<td width="50%"><img src="docs/assets/screenshots/item.webp" alt="事项"><br><b>事项</b>：目标、所处阶段、计划、附带检查记录的交付，以及由谁在做。</td>
+</tr>
+<tr>
+<td><img src="docs/assets/screenshots/session.webp" alt="智能体会话"><br><b>智能体会话</b>：改了哪些文件、用了哪些工具、花费和上下文，以及在 harness 里恢复会话的一行命令。</td>
+<td><img src="docs/assets/screenshots/items.webp" alt="事项列表"><br><b>事项列表</b>：哪些在等你、哪些在跑、哪些刚交付。</td>
+</tr>
+</table>
+
+<sub>截图来自一个演示工作区：真实的 Hub 和 Web 界面，智能体按脚本运行。</sub>
 
 ## 功能
 
