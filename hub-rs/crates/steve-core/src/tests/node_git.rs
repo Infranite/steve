@@ -622,7 +622,7 @@ fn nothing_to_release_on_another_devices_node_asks_for_no_release() {
 
 #[test]
 fn a_goal_on_a_node_waits_for_its_build_and_for_this_instance_like_any_other() {
-    use super::takeover::{blockers, merge_and_tag, op_states, remote_for};
+    use super::takeover::{blockers, merge_and_tag, op_states, remote_for, told_what_is_missing};
     let k = Kit::with(|c| {
         c.steve_repo = c.home.join("repo");
         c.version = "0.0.1".into();
@@ -636,9 +636,10 @@ fn a_goal_on_a_node_waits_for_its_build_and_for_this_instance_like_any_other() {
     );
     port.put(&x.item);
     k.core.resolve(&x.decision, "pass", "", "me").unwrap();
+    told_what_is_missing(&k, &x);
     merge_and_tag(&x, Some("v1.5.0"));
     // the remote is looked at through the Node; the tag's build and this instance are still open
-    k.core.tx().st.probed.clear();
+    k.core.tx().forget_probe(&x.item);
     assert!(
         k.wait(|| {
             let _ = k.core.lifecycle_tick();

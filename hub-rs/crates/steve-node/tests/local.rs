@@ -2350,12 +2350,18 @@ impl EventSink for Counting {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sqlite_full_mid_turn_keeps_numbered_events_and_skips_no_seq() {
-    let t = T::new(&[]);
+    // gated: a flood that outruns the actor (one synchronous journal write per chunk, slow on a
+    // loaded machine) by a full ingress queue is stopped as an ingress overflow before the journal
+    // is ever full, which is not what this test is about. A pause alone does not bound that on a
+    // slow enough disk; the adapter sends a chunk only once fewer than `AHEAD` are not yet journaled.
+    const AHEAD: i64 = 24;
+    let gate_dir = tempfile::tempdir().unwrap();
+    let gate = gate_dir.path().join("flood-gate");
+    std::fs::write(&gate, AHEAD.to_string()).unwrap();
+    let t = T::new(&[("FAKE_ACP_FLOOD_GATE", gate.to_str().unwrap())]);
     t.sink.set_failing(true);
     let n = t.node();
     ready(&n, "s_1").await;
-    // paced: an unpaced flood can outrun the actor on a loaded machine and be stopped as an
-    // ingress overflow before the journal is ever full, which is not what this test is about
     let mut tu = turn("s_1", "t_1", "a_1", "@flood 20");
     tu.run.limits.max_output_bytes = 64 << 20;
     n.start_turn(now_cmd("op_t1", tu)).await.unwrap();
@@ -2364,9 +2370,16 @@ async fn sqlite_full_mid_turn_keeps_numbered_events_and_skips_no_seq() {
         db.query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))
             .unwrap()
     };
-    t.until("output journaled", |_| count() > 100).await;
-    // the disk is full: the next page the journal needs is refused (SQLITE_FULL)
+    t.until("output journaled", |_| {
+        let c = count();
+        // the gate follows what is journaled (a few events are not chunks: fewer still are ahead)
+        std::fs::write(&gate, (c + AHEAD).to_string()).unwrap();
+        c > 100
+    })
+    .await;
+    // the disk is full: the next page the journal needs is refused (SQLITE_FULL); the flood goes on
     n.cap_journal_pages(0).unwrap();
+    std::fs::write(&gate, "2000").unwrap();
     tokio::time::sleep(Duration::from_millis(500)).await;
     n.shutdown().await;
     drop(n);

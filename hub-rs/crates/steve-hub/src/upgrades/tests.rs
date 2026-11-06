@@ -461,6 +461,8 @@ fn status_names_the_backup_a_failed_upgrade_recovers_from() {
 
 /// A local_release install as `ops/local-release.py` leaves it: the signing identity and keychain files and
 /// a checkout. The runner job is recorded, never started.
+/// A Hub ready for a one-click local build. Only on macOS: elsewhere `runner::local_missing` names
+/// the platform, so the tests that use this are ignored there.
 fn local(home: &Path, repo: &Path, api_base: String) -> (Updates, Arc<Mutex<Vec<Operation>>>) {
     fs::create_dir_all(home.join("signing")).unwrap();
     fs::write(
@@ -527,6 +529,10 @@ fn release_server_app(base: &str) -> axum::Router {
 }
 
 #[tokio::test]
+#[cfg_attr(
+    not(target_os = "macos"),
+    ignore = "a local_release upgrade needs macOS (codesign, launchd)"
+)]
 async fn local_release_upgrades_only_to_a_newer_stable_tag_one_at_a_time_outside_the_hub() {
     let home = tempfile::tempdir().unwrap();
     let repo = tempfile::tempdir().unwrap();
@@ -628,6 +634,10 @@ async fn local_release_upgrades_only_to_a_newer_stable_tag_one_at_a_time_outside
 }
 
 #[test]
+#[cfg_attr(
+    not(target_os = "macos"),
+    ignore = "a local_release upgrade needs macOS (codesign, launchd)"
+)]
 fn a_release_script_or_local_release_running_refuses_a_local_upgrade() {
     let home = tempfile::tempdir().unwrap();
     let repo = tempfile::tempdir().unwrap();
@@ -771,6 +781,10 @@ fn runner_op(u: &Updates, key: &str, commit: &str, python: &str) -> Operation {
 }
 
 #[test]
+#[cfg_attr(
+    not(target_os = "macos"),
+    ignore = "a local_release upgrade needs macOS (codesign, launchd)"
+)]
 fn the_runner_builds_the_tagged_commit_with_its_own_scripts_and_reports_each_result() {
     let Some(python) = python() else {
         eprintln!("no python with tarfile.data_filter: skipped");
