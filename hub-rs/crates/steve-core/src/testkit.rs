@@ -495,9 +495,10 @@ impl Kit {
     pub fn home(&self) -> &std::path::Path {
         self.dir.path()
     }
-    /// Wait (≤3 s) until `f` holds.
+    /// Wait (≤15 s) until `f` holds. Returns as soon as it does; the bound only matters on a loaded
+    /// machine (CI runs the whole workspace on a few cores), and no test waits for something not to happen.
     pub fn wait(&self, f: impl Fn() -> bool) -> bool {
-        for _ in 0..300 {
+        for _ in 0..1500 {
             if f() {
                 return true;
             }
