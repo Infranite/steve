@@ -13,7 +13,7 @@ use rusqlite::Connection;
 use serde_json::{Value, json};
 use steve_flow::flows::{self, NewFlow};
 use steve_flow::nodes::action::ItemLink;
-use steve_flow::nodes::{NodeOutcome, RunCx};
+use steve_flow::nodes::{NodeOutcome, Rule, RunCx};
 use steve_flow::{Action, ActorRef, FlowCx, FlowResult, ItemFinder, RawEvent};
 use steve_modules::ApiError;
 use steve_store::base::ObjRef;
@@ -74,6 +74,8 @@ impl ItemFinder for GhPrFinder {
 /// S2's `item.link` plus `by:"gh_pr"` (see the module docs).
 pub struct GhItemLink;
 
+const GH_PR_FALLBACK: &str = "by 为 gh_pr 时 fallback 只能是 none";
+
 /// The supplement for a PR whose checks failed.
 pub fn check_failed_text(payload: &Value) -> String {
     let names: Vec<&str> = payload["failed"]
@@ -98,8 +100,16 @@ impl Action for GhItemLink {
         }
         match cfg["fallback"].as_str().unwrap_or("none") {
             "none" => Ok(()),
-            _ => Err("by 为 gh_pr 时 fallback 只能是 none".into()),
+            _ => Err(GH_PR_FALLBACK.into()),
         }
+    }
+    fn rules(&self) -> Vec<Rule> {
+        let mut v = ItemLink.rules();
+        v.push(Rule::new(
+            &[],
+            format!("by 也可以是 {BY}（按 PR 找事项），这时 {GH_PR_FALLBACK}"),
+        ));
+        v
     }
     fn outcome(&self) -> Option<&'static str> {
         Some("linked")

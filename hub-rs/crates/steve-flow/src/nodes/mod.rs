@@ -156,6 +156,29 @@ impl RunCx<'_> {
     }
 }
 
+/// A constraint the validator enforces, as Steve's draft prompt states it (model-facing, zh-CN).
+/// `keys` are the validator's messages it covers: a test checks that every message a validator can
+/// give is covered by some rule, so the prompt and the validator cannot drift apart.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Rule {
+    pub keys: &'static [&'static str],
+    pub text: String,
+}
+
+impl Rule {
+    pub fn new(keys: &'static [&'static str], text: impl Into<String>) -> Self {
+        Self {
+            keys,
+            text: text.into(),
+        }
+    }
+}
+
+/// `a、b、c` of allowed values, for rule texts.
+pub fn one_of(values: &[&str]) -> String {
+    values.join("、")
+}
+
 /// One kind of node.
 #[async_trait]
 pub trait NodeKind: Send + Sync {
@@ -184,6 +207,17 @@ pub trait NodeKind: Send + Sync {
 
     /// Checks the node's `config`; the error is Chinese and goes into the `400` as it is.
     fn validate(&self, cfg: &Value) -> Result<(), String>;
+
+    /// What [`NodeKind::validate`] enforces, for the draft prompt (built from the same constants).
+    fn rules(&self) -> Vec<Rule> {
+        Vec::new()
+    }
+
+    /// The rules that apply to this `config` (the `action` node: only its action's).
+    fn rules_for(&self, cfg: &Value) -> Vec<Rule> {
+        let _ = cfg;
+        self.rules()
+    }
 
     async fn run(&self, cx: &mut RunCx<'_>, cfg: &Value, input: &Value) -> NodeOutcome;
 

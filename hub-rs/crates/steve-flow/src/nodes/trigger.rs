@@ -5,10 +5,17 @@
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
-use super::{NodeKind, NodeOutcome, RunCx, opt_str, str_list};
+use super::{NodeKind, NodeOutcome, Rule, RunCx, one_of, opt_str, str_list};
 use crate::cron::{CronExpr, parse_tz};
 
 pub struct Trigger;
+
+/// `missed` of time triggers.
+pub const MISSED: [&str; 2] = ["catch_up_once", "skip"];
+/// The list fields and their length limit.
+const LISTS: [&str; 4] = ["types", "connections", "scopes", "spaces"];
+const LIST_MAX: usize = 50;
+const SOURCE_MAX: usize = 40;
 
 /// `flow_triggers.kind` of a trigger config.
 pub fn index_kind(cfg: &Value) -> &'static str {
@@ -27,17 +34,38 @@ impl NodeKind for Trigger {
         "trigger"
     }
 
+    fn rules(&self) -> Vec<Rule> {
+        vec![
+            Rule::new(
+                &["flow.node.trigger_source", "flow.node.trigger_source_long"],
+                format!("source 必填，最多 {SOURCE_MAX} 字"),
+            ),
+            Rule::new(
+                &["flow.node.trigger_list_max"],
+                format!("{} 是文字列表，每个最多 {LIST_MAX} 项", LISTS.join("、")),
+            ),
+            Rule::new(
+                &["flow.node.trigger_cron", "flow.node.trigger_tz"],
+                "source 为 time 时要有 5 段的 cron（如 \"0 9 * * 1-5\"），tz 是 IANA 时区名（如 Asia/Shanghai）",
+            ),
+            Rule::new(
+                &["flow.node.trigger_missed"],
+                format!("missed 只能是 {}", one_of(&MISSED)),
+            ),
+        ]
+    }
+
     fn validate(&self, cfg: &Value) -> Result<(), String> {
         let source = opt_str(cfg, "source")?.unwrap_or("").trim();
         if source.is_empty() {
             return Err(steve_i18n::t!("flow.node.trigger_source"));
         }
-        if source.chars().count() > 40 {
+        if source.chars().count() > SOURCE_MAX {
             return Err(steve_i18n::t!("flow.node.trigger_source_long"));
         }
-        for k in ["types", "connections", "scopes", "spaces"] {
+        for k in LISTS {
             let xs = str_list(cfg, k)?;
-            if xs.len() > 50 {
+            if xs.len() > LIST_MAX {
                 return Err(steve_i18n::t!("flow.node.trigger_list_max", key = k));
             }
         }
@@ -49,8 +77,7 @@ impl NodeKind for Trigger {
             }
         }
         if let Some(m) = opt_str(cfg, "missed")?
-            && m != "catch_up_once"
-            && m != "skip"
+            && !MISSED.contains(&m)
         {
             return Err(steve_i18n::t!("flow.node.trigger_missed"));
         }

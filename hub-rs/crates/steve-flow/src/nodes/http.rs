@@ -35,7 +35,9 @@ use steve_modules::vault::redact::Redactor;
 use steve_store::NewDecision;
 use zeroize::Zeroizing;
 
-use super::{Effects, Grant, NodeKind, NodeOutcome, RunCx, WaitSpec, opt_str, req_str};
+use super::{
+    Effects, Grant, NodeKind, NodeOutcome, Rule, RunCx, WaitSpec, one_of, opt_str, req_str,
+};
 use crate::engine::{GATE_NO, GATE_YES};
 
 /// The setting with the hosts exempt from the internal-address check.
@@ -44,7 +46,7 @@ pub const ALLOW_PRIVATE: &str = "http_allow_private";
 pub const BODY_CAP: usize = 64 * 1024;
 pub const TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_REDIRECTS: usize = 5;
-const METHODS: [&str; 6] = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"];
+pub const METHODS: [&str; 6] = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"];
 const URL_MAX: usize = 2000;
 
 pub const GET_ONLY: &str = "没有副作用的请求只能用 GET；要 POST 等请把「有副作用」打开";
@@ -536,6 +538,40 @@ impl NodeKind for Http {
             .collect::<Vec<_>>()
             .join("、");
         Some(format!("会用到机密：{names}"))
+    }
+
+    fn rules(&self) -> Vec<Rule> {
+        vec![
+            Rule::new(
+                &["flow.node.http_method"],
+                format!("method 只能是 {}（大写）", one_of(&METHODS)),
+            ),
+            Rule::new(
+                &["flow.node.http_effect", "flow.node.get_only"],
+                "effect 只能是 true 或 false；不是 GET 的请求必须 effect=true",
+            ),
+            Rule::new(
+                &[
+                    "flow.node.missing_url",
+                    "flow.node.too_long_url",
+                    "flow.node.http_url",
+                    "flow.node.http_scheme",
+                ],
+                format!("url 必填，最多 {URL_MAX} 字，是 http 或 https 的完整网址"),
+            ),
+            Rule::new(
+                &[
+                    "flow.node.headers",
+                    "flow.node.header_name",
+                    "flow.node.header_value",
+                ],
+                "headers 是 {\"名字\": \"文字值\"}",
+            ),
+            Rule::new(
+                &["flow.node.secrets_place", "flow.node.secret_form"],
+                "机密只能写在 headers 和 body 里，写成 {{secrets.<条目 id>.<字段>}}",
+            ),
+        ]
     }
 
     fn validate(&self, cfg: &Value) -> Result<(), String> {

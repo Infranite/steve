@@ -284,7 +284,8 @@ use async_trait::async_trait;
 use steve_store::NewDecision;
 
 use super::{
-    DRY_EFFECT, DRY_WRITE, Grant, NodeKind, NodeOutcome, RunCx, opt_str, req_str, skipped,
+    DRY_EFFECT, DRY_WRITE, Grant, NodeKind, NodeOutcome, Rule, RunCx, one_of, opt_str, req_str,
+    skipped,
 };
 use crate::signals::source_label;
 
@@ -305,6 +306,12 @@ pub trait Action: Send + Sync {
     }
 
     fn validate(&self, cfg: &Value) -> Result<(), String>;
+
+    /// What [`Action::validate`] enforces, for the draft prompt. Default: the built-in action of the
+    /// same name's (so wrappers and replacements keep them).
+    fn rules(&self) -> Vec<Rule> {
+        builtin_rules(self.name())
+    }
 
     /// The event outcome it leads to (for dry runs, which do not run it).
     fn outcome(&self) -> Option<&'static str> {
@@ -339,6 +346,69 @@ impl Actions {
     pub fn get(&self, name: &str) -> Option<&Arc<dyn Action>> {
         self.0.get(name)
     }
+
+    /// The names, sorted.
+    pub fn names(&self) -> Vec<&str> {
+        let mut v: Vec<&str> = self.0.keys().map(String::as_str).collect();
+        v.sort_unstable();
+        v
+    }
+}
+
+/// `mode` of `item.create` (absent: `start`).
+pub const ITEM_MODES: [&str; 2] = ["start", "propose"];
+/// `accept` of `item.create` (absent: `inherit`, the Bot's or project's acceptance).
+pub const ITEM_ACCEPTS: [&str; 2] = ["auto", "inherit"];
+/// `fallback` of `item.link` (absent: `none`).
+pub const LINK_FALLBACKS: [&str; 2] = ["create", "none"];
+const NOTIFY_MAX: usize = 500;
+
+fn item_rules() -> Vec<Rule> {
+    vec![
+        Rule::new(
+            &["flow.node.item_mode"],
+            format!("mode 只能是 {}（不填是 start）", one_of(&ITEM_MODES)),
+        ),
+        Rule::new(
+            &["flow.node.item_accept"],
+            format!(
+                "accept 只能是 {}（不填是 inherit，沿用 Bot 或项目的验收方式），没有别的验收方式，拿不准就不填",
+                one_of(&ITEM_ACCEPTS)
+            ),
+        ),
+        Rule::new(
+            &["flow.node.text_list_only", "flow.node.text_only"],
+            "bot、project、title、goal 是文字，tags 是文字列表；bot 只能是下面列出的 Bot id",
+        ),
+    ]
+}
+
+/// The rules of the built-in actions, by name.
+pub fn builtin_rules(name: &str) -> Vec<Rule> {
+    match name {
+        "item.create" => item_rules(),
+        "item.link" => vec![
+            Rule::new(
+                &["flow.node.link_by"],
+                format!("by 只能是 {}", one_of(&crate::link::METHODS)),
+            ),
+            Rule::new(
+                &["flow.node.link_fallback"],
+                format!(
+                    "fallback 只能是 {}（不填是 none），create 时 mode、accept 等同 item.create 的规则",
+                    one_of(&LINK_FALLBACKS)
+                ),
+            ),
+        ],
+        "notify" => vec![Rule::new(
+            &["flow.node.missing_reminder", "flow.node.too_long_reminder"],
+            format!("text 必填，最多 {NOTIFY_MAX} 字"),
+        )],
+        "ignore" => vec![Rule::new(&[], "reason 是文字")],
+        "digest" => vec![Rule::new(&[], "text 是文字，可以不填")],
+        "report" => vec![Rule::new(&[], "what 是文字")],
+        _ => Vec::new(),
+    }
 }
 
 /// The `action` node.
@@ -353,6 +423,24 @@ impl ActionNode {
 
     fn of(&self, cfg: &Value) -> Option<&Arc<dyn Action>> {
         self.actions.get(cfg["action"].as_str().unwrap_or(""))
+    }
+
+    fn name_rule(&self) -> Rule {
+        Rule::new(
+            &["flow.node.action_missing", "flow.node.action_unknown"],
+            format!("action 必填，只能是 {}", one_of(&self.actions.names())),
+        )
+    }
+
+    /// One action's rules, each prefixed with its name.
+    fn action_rules(&self, name: &str) -> Vec<Rule> {
+        let Some(a) = self.actions.get(name) else {
+            return Vec::new();
+        };
+        a.rules()
+            .into_iter()
+            .map(|r| Rule::new(r.keys, format!("{name} 的 {}", r.text)))
+            .collect()
     }
 }
 
@@ -369,6 +457,22 @@ impl NodeKind for ActionNode {
 
     fn grant(&self, cfg: &Value) -> Option<Grant> {
         self.of(cfg).and_then(|a| a.grant(cfg))
+    }
+
+    fn rules(&self) -> Vec<Rule> {
+        let mut v = vec![self.name_rule()];
+        for name in self.actions.names() {
+            v.extend(self.action_rules(name));
+        }
+        v
+    }
+
+    fn rules_for(&self, cfg: &Value) -> Vec<Rule> {
+        let mut v = vec![self.name_rule()];
+        if let Some(name) = cfg["action"].as_str() {
+            v.extend(self.action_rules(name));
+        }
+        v
     }
 
     fn validate(&self, cfg: &Value) -> Result<(), String> {
@@ -437,13 +541,11 @@ fn is_schedule(cx: &RunCx<'_>) -> bool {
 }
 
 fn check_mode(cfg: &Value) -> Result<(), String> {
-    match opt_str(cfg, "mode")?.unwrap_or("start") {
-        "start" | "propose" => {}
-        _ => return Err(steve_i18n::t!("flow.node.item_mode")),
+    if !ITEM_MODES.contains(&opt_str(cfg, "mode")?.unwrap_or("start")) {
+        return Err(steve_i18n::t!("flow.node.item_mode"));
     }
-    match opt_str(cfg, "accept")?.unwrap_or("inherit") {
-        "auto" | "inherit" => {}
-        _ => return Err(steve_i18n::t!("flow.node.item_accept")),
+    if !ITEM_ACCEPTS.contains(&opt_str(cfg, "accept")?.unwrap_or("inherit")) {
+        return Err(steve_i18n::t!("flow.node.item_accept"));
     }
     for k in ["bot", "project", "title", "goal"] {
         opt_str(cfg, k)?;
@@ -633,7 +735,7 @@ impl Action for ItemLink {
         }
         match opt_str(cfg, "fallback")?.unwrap_or("none") {
             "create" => check_mode(cfg),
-            "none" => Ok(()),
+            f if LINK_FALLBACKS.contains(&f) => Ok(()),
             _ => Err(steve_i18n::t!("flow.node.link_fallback")),
         }
     }
@@ -707,7 +809,7 @@ impl Action for Notify {
         "notify"
     }
     fn validate(&self, cfg: &Value) -> Result<(), String> {
-        crate::expr::check_template(req_str(cfg, "text", super::Required::Reminder, 500)?)
+        crate::expr::check_template(req_str(cfg, "text", super::Required::Reminder, NOTIFY_MAX)?)
     }
     fn outcome(&self) -> Option<&'static str> {
         Some("need")

@@ -534,3 +534,281 @@ async fn edit_draft_returns_a_graph_without_saving() {
     .await;
     assert_eq!((st, v["error"].as_str().unwrap()), (400, "图的格式不对"));
 }
+
+// ---------- drafts the validator used to refuse (shapes of real model answers) ----------
+
+async fn draft_with(e: &FlowEnv, answer: Value, text: &str) -> Value {
+    e.env.gateway.reply(answer.to_string());
+    let (st, v) = api(
+        e,
+        WS,
+        "POST",
+        "/flows/draft",
+        Some(json!({"source": "github", "text": text})),
+    )
+    .await;
+    assert_eq!(st, 200, "{v}");
+    // repaired on the first answer: no second round with the model
+    assert_eq!(e.env.gateway.calls.lock().unwrap().len(), 1);
+    v
+}
+
+fn node<'a>(v: &'a Value, id: &str) -> &'a Value {
+    v["graph"]["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["id"] == id)
+        .unwrap()
+}
+
+#[tokio::test]
+async fn draft_renames_reserved_bot_fields() {
+    let e = env();
+    let answer = json!({
+        "name": "acme-web PR 检查失败处理",
+        "description": "lint 交给前端修，测试失败先判断是不是偶发",
+        "graph": {
+            "nodes": [
+                {"id": "t", "kind": "trigger", "title": "GitHub · PR 检查失败", "config": {"source": "github", "types": ["github.check_failed"], "scopes": ["acme/acme-web"]}},
+                {"id": "kind", "kind": "bot", "title": "判断失败类型", "config": {"instruction": "是 lint/格式问题还是测试失败", "branches": ["lint", "测试失败"]}},
+                {"id": "fix", "kind": "action", "title": "交给前端 Bot 修", "config": {"action": "item.create", "mode": "start", "bot": "ops", "title": "修 lint：{{event.summary}}"}},
+                {"id": "flaky", "kind": "bot", "title": "判断测试是否偶发", "config": {"bot_id": "ops", "instruction": "看日志判断是不是偶发失败，并给出分支名", "branches": ["偶发", "不是偶发"], "fields": ["branch", "reason"]}},
+                {"id": "rerun", "kind": "http", "title": "重跑检查", "config": {"method": "POST", "url": "https://api.github.com/repos/acme/acme-web/actions/runs/{{event.payload.run_id}}/rerun", "effect": true}},
+                {"id": "item", "kind": "action", "title": "建事项给前端 Bot", "config": {"action": "item.create", "bot": "ops", "title": "测试失败：{{steps.flaky.branch}}", "goal": "{{steps.flaky.reason}}"}},
+                {"id": "tell", "kind": "action", "title": "群里通知我", "config": {"action": "notify", "text": "{{steps.flaky.branch}} 的测试失败了：{{steps.flaky.fields.reason}}"}},
+                {"id": "ok", "kind": "approve", "title": "要在 PR 里留言吗", "config": {"question": "在 PR 里留言说明？", "options": ["留言", "不用"]}},
+                {"id": "say", "kind": "http", "title": "在 PR 里留言", "config": {"method": "POST", "url": "https://api.github.com/repos/acme/acme-web/issues/{{event.payload.number}}/comments", "effect": true, "body": {"body": "{{steps.flaky.reason}}"}}}
+            ],
+            "edges": [
+                {"from": "t", "to": "kind"},
+                {"from": "kind", "to": "fix", "label": "lint"},
+                {"from": "kind", "to": "flaky", "label": "测试失败"},
+                {"from": "flaky", "to": "rerun", "label": "偶发"},
+                {"from": "flaky", "to": "item", "label": "不是偶发"},
+                {"from": "item", "to": "tell"},
+                {"from": "tell", "to": "ok"},
+                {"from": "ok", "to": "say", "label": "留言"}
+            ]
+        }
+    });
+    let v = draft_with(
+        &e,
+        answer,
+        "GitHub 上 acme-web 的 PR 检查失败时：如果是 lint 或格式问题，交给前端 Bot 修；如果是测试失败，先让 Bot 判断是不是偶发，偶发就重跑，不是就建事项给前端 Bot，并在群里通知我；需要我批准后才在 PR 里留言。",
+    )
+    .await;
+    assert_eq!(
+        node(&v, "flaky")["config"]["fields"],
+        json!(["branch_name", "reason_text"])
+    );
+    assert_eq!(
+        node(&v, "item")["config"]["title"],
+        "测试失败：{{steps.flaky.branch_name}}"
+    );
+    assert_eq!(
+        node(&v, "item")["config"]["goal"],
+        "{{steps.flaky.reason_text}}"
+    );
+    assert_eq!(
+        node(&v, "tell")["config"]["text"],
+        "{{steps.flaky.branch_name}} 的测试失败了：{{steps.flaky.fields.reason_text}}"
+    );
+    assert_eq!(
+        node(&v, "say")["config"]["body"]["body"],
+        "{{steps.flaky.reason_text}}"
+    );
+    assert_eq!(
+        v["draft_notes"],
+        json!([
+            "「判断测试是否偶发」：字段名 branch 是保留的，改成了 branch_name",
+            "「判断测试是否偶发」：字段名 reason 是保留的，改成了 reason_text"
+        ])
+    );
+    assert!(
+        node(&v, "flaky")["note"]
+            .as_str()
+            .unwrap()
+            .starts_with("Steve 起草时改过：字段名 branch 是保留的"),
+        "{v}"
+    );
+    // the stored flow is the repaired one
+    let (st, f) = api(
+        &e,
+        WS,
+        "GET",
+        &format!("/flows/{}", v["id"].as_str().unwrap()),
+        None,
+    )
+    .await;
+    assert_eq!(st, 200, "{f}");
+    assert_eq!(
+        node(&f, "flaky")["config"]["fields"],
+        json!(["branch_name", "reason_text"])
+    );
+    // the prompt told the model both constraints
+    let p = e.env.gateway.last_prompt().unwrap();
+    assert!(p.contains("fields 不能叫 branch、reason"), "{p}");
+    assert!(
+        p.contains("item.create 的 accept 只能是 auto、inherit"),
+        "{p}"
+    );
+}
+
+#[tokio::test]
+async fn draft_maps_an_unknown_acceptance_to_inherit() {
+    let e = env();
+    let answer = json!({
+        "name": "PR 检查失败分诊",
+        "description": "偶发的记一笔，真失败的建事项",
+        "graph": {
+            "nodes": [
+                {"id": "t", "kind": "trigger", "title": "GitHub · 检查失败", "config": {"source": "github", "types": ["github.check_failed"]}},
+                {"id": "why", "kind": "bot", "title": "看一下失败原因", "config": {"instruction": "偶发还是真的失败", "branches": ["偶发", "真的失败"], "fields": ["summary"]}},
+                {"id": "note", "kind": "action", "title": "记一笔", "config": {"action": "digest", "text": "偶发失败：{{event.summary}}"}},
+                {"id": "item", "kind": "action", "title": "建事项交给前端 Bot", "config": {"action": "item.create", "mode": "start", "bot": "frontend", "accept": "manual", "title": "{{steps.why.summary}}"}},
+                {"id": "ok", "kind": "approve", "title": "等你批准", "config": {"question": "在 PR 里留言说明？", "options": ["留言", "不用"]}},
+                {"id": "say", "kind": "http", "title": "在 PR 里留言", "config": {"method": "POST", "url": "https://api.github.com/repos/acme/acme-web/issues/{{event.payload.number}}/comments", "body": {"body": "{{steps.why.reason}}"}}}
+            ],
+            "edges": [
+                {"from": "t", "to": "why"},
+                {"from": "why", "to": "note", "label": "偶发"},
+                {"from": "why", "to": "item", "label": "真的失败"},
+                {"from": "item", "to": "ok"},
+                {"from": "ok", "to": "say", "label": "留言"}
+            ]
+        }
+    });
+    let v = draft_with(
+        &e,
+        answer,
+        "acme-web 的 PR 检查失败时，让 Bot 看一下失败原因：偶发失败就记一笔；真的失败就建事项交给前端 Bot，并等我批准后在 PR 里留言说明。",
+    )
+    .await;
+    let item = node(&v, "item");
+    assert_eq!(item["config"]["accept"], "inherit");
+    assert!(item["config"].get("bot").is_none(), "{item}");
+    assert_eq!(node(&v, "say")["config"]["effect"], true);
+    let notes: Vec<&str> = v["draft_notes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| n.as_str().unwrap())
+        .collect();
+    assert_eq!(
+        notes,
+        [
+            "「建事项交给前端 Bot」：验收方式「manual」不支持，改成了 inherit（沿用 Bot 或项目的验收方式）",
+            "「建事项交给前端 Bot」：没有 Bot「frontend」，改成交给默认的 Bot",
+            "「在 PR 里留言」：POST 请求会改动外部系统，标成了有副作用（运行前要审批）"
+        ]
+    );
+    assert!(
+        item["note"]
+            .as_str()
+            .unwrap()
+            .starts_with("Steve 起草时改过：验收方式「manual」不支持")
+    );
+}
+
+#[tokio::test]
+async fn draft_maps_acceptance_in_a_short_triage() {
+    let e = env();
+    let answer = json!({
+        "name": "PR 检查失败分诊",
+        "description": "偶发忽略，真失败建事项",
+        "graph": {
+            "nodes": [
+                {"id": "t", "kind": "trigger", "title": "GitHub · 检查失败", "config": {"types": ["github.check_failed"]}},
+                {"id": "b", "kind": "bot", "title": "判断失败类型", "config": {"instruction": "偶发还是真失败", "branches": ["偶发", "真失败"]}},
+                {"id": "i", "kind": "action", "title": "忽略", "config": {"action": "ignore", "reason": "偶发"}},
+                {"id": "a", "kind": "action", "title": "建事项交给前端 Bot", "config": {"action": "item.create", "bot": "ops", "accept": "review"}}
+            ],
+            "edges": [
+                {"from": "t", "to": "b"}, {"from": "b", "to": "i", "label": "偶发"}, {"from": "b", "to": "a", "label": "真失败"}
+            ]
+        }
+    });
+    let v = draft_with(
+        &e,
+        answer,
+        "PR 检查失败时，让 Bot 判断失败类型，偶发的忽略，真失败的建事项交给前端 Bot。",
+    )
+    .await;
+    assert_eq!(node(&v, "a")["config"]["accept"], "inherit");
+    assert_eq!(node(&v, "a")["config"]["bot"], "ops");
+    assert_eq!(v["draft_notes"].as_array().unwrap().len(), 1);
+    assert_eq!(v["graph"]["nodes"][0]["config"]["source"], "github");
+}
+
+#[tokio::test]
+async fn draft_retry_names_the_node_its_config_and_the_rules() {
+    let e = env();
+    let mut bad = drafted();
+    bad["graph"]["nodes"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"id": "w", "kind": "wait", "title": "等一会", "config": {"mode": "sleep", "delay": "1h"}}));
+    bad["graph"]["edges"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"from": "i", "to": "w"}));
+    e.env.gateway.reply(bad.to_string());
+    e.env.gateway.reply(drafted().to_string());
+    let (st, v) = api(
+        &e,
+        WS,
+        "POST",
+        "/flows/draft",
+        Some(json!({"source": "github", "text": "检查失败就建事项"})),
+    )
+    .await;
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["draft_notes"], json!([]));
+    let p = e.env.gateway.last_prompt().unwrap();
+    assert!(
+        p.contains("没有通过检查：节点「等一会」：mode 只能是 delay、until 或 event"),
+        "{p}"
+    );
+    assert!(
+        p.contains("- 节点 id「w」（wait，「等一会」）：mode 只能是 delay、until 或 event"),
+        "{p}"
+    );
+    assert!(
+        p.contains("它现在的 config：{\"mode\":\"sleep\",\"delay\":\"1h\"}"),
+        "{p}"
+    );
+    assert!(
+        p.contains("wait 的规则：mode 只能是 delay、until、event"),
+        "{p}"
+    );
+}
+
+#[tokio::test]
+async fn edit_draft_repairs_and_returns_the_notes() {
+    let e = env();
+    let id = flow(&e, triage(bot_cfg())).await;
+    let mut edited = triage(bot_cfg());
+    edited["nodes"][1]["config"]["fields"] = json!(["draft", "reason"]);
+    e.env
+        .gateway
+        .reply(json!({"graph": edited, "note": "加了理由字段"}).to_string());
+    let (st, v) = api(
+        &e,
+        WS,
+        "POST",
+        &format!("/flows/{id}/edit-draft"),
+        Some(json!({"text": "再提取一下理由", "graph": triage(bot_cfg())})),
+    )
+    .await;
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["note"], "加了理由字段");
+    assert_eq!(
+        v["graph"]["nodes"][1]["config"]["fields"],
+        json!(["draft", "reason_text"])
+    );
+    assert_eq!(
+        v["draft_notes"],
+        json!(["「邮件 Bot 判断」：字段名 reason 是保留的，改成了 reason_text"])
+    );
+}

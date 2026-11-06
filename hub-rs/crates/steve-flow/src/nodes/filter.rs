@@ -5,7 +5,7 @@
 use async_trait::async_trait;
 use serde_json::Value;
 
-use super::{NodeKind, NodeOutcome, RunCx, opt_str};
+use super::{NodeKind, NodeOutcome, Rule, RunCx, opt_str};
 use crate::expr;
 
 pub struct Filter;
@@ -16,6 +16,23 @@ pub const MAX_RULES: usize = 20;
 impl NodeKind for Filter {
     fn kind(&self) -> &'static str {
         "filter"
+    }
+
+    fn rules(&self) -> Vec<Rule> {
+        vec![
+            Rule::new(
+                &[
+                    "flow.node.filter_rules",
+                    "flow.node.filter_max",
+                    "flow.node.filter_label",
+                ],
+                format!("rules 是列表，最多 {MAX_RULES} 条，每条都要有非空的 label"),
+            ),
+            Rule::new(
+                &["flow.node.filter_rule"],
+                "when 是条件表达式：路径（event.payload.x、steps.<id>.x）配 == != < <= > >= contains matches in，用 and or not 组合，文字加引号",
+            ),
+        ]
     }
 
     fn validate(&self, cfg: &Value) -> Result<(), String> {
