@@ -87,7 +87,10 @@ async fn setup() -> H {
     let flow = flow_setup
         .connections(conns.clone())
         .build(env.modules.clone(), Arc::new(LinearExecutor));
+    // the built-in sides as the Hub declares them
     let ch = Channels::builder(env.modules.clone(), conns.clone(), Arc::new(flow))
+        .decl(steve_channels::adapters::feishu::app_decl(&app))
+        .decl(steve_channels::adapters::feishu::user_decl())
         .adapter(app)
         .build();
     let api = connections::routes(conns.clone())
@@ -479,13 +482,14 @@ async fn your_own_account_has_a_trigger_and_no_persona() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn post_channels_for_you_needs_a_bot_and_checks_the_body() {
+async fn post_channels_for_you_needs_an_app_and_checks_the_body() {
     let h = setup().await;
     let (st, v) = h
         .call("POST", "/channels", Some(json!({"adapter": "feishu_user"})))
         .await;
+    // the same answer as the generic OAuth start: without a bot to pair with, no OAuth app
     assert_eq!(st, 400, "{v}");
-    assert_eq!(v["error"], "先接入飞书应用机器人，再授权你本人");
+    assert_eq!(v["error"], "还没有配置 飞书 的 OAuth 应用");
     let (st, _) = h
         .call("POST", "/channels", Some(json!({"adapter": "slack"})))
         .await;

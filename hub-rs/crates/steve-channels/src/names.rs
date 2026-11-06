@@ -219,9 +219,15 @@ fn incomplete(c: &Connection, ws: &str, party: &str) -> ChannelResult<bool> {
 }
 
 /// `SELECT … WHERE` the account or person still needs something: no name, unconfirmed, or — for
-/// Feishu people due for a check ([`steve_modules::contacts::profile::due`]) — a missing
+/// people a registered profile view looks up, due for a check
+/// ([`steve_modules::contacts::profile::due`]) — a missing
 /// organization, title or email (at most [`MAX_PROFILE_CHECKS`]).
-fn candidates(c: &Connection, ws: &str, now: i64) -> ChannelResult<Vec<Candidate>> {
+fn candidates(
+    c: &Connection,
+    ws: &str,
+    now: i64,
+    lookups: &[String],
+) -> ChannelResult<Vec<Candidate>> {
     let mut st = c.prepare(
         "SELECT a.id, a.party_id, p.created_by, a.system_id, a.handle, a.display_name, p.name, p.contact_kind
            FROM accounts a JOIN parties p ON p.id = a.party_id
@@ -252,7 +258,7 @@ fn candidates(c: &Connection, ws: &str, now: i64) -> ChannelResult<Vec<Candidate
         let party_named = !raw(&pname);
         let unconfirmed = kind.as_deref() == Some("unconfirmed");
         if account_named && party_named && !unconfirmed {
-            if system != "feishu"
+            if !lookups.contains(&system)
                 || checks >= MAX_PROFILE_CHECKS
                 || !steve_modules::contacts::profile::due(c, &acc, now)?
                 || !incomplete(c, ws, &party)?
@@ -647,9 +653,10 @@ impl Channels {
         let now = self.now();
         // The big reads (whole-workspace scans of messages and payloads) run off the runtime.
         let w = ws.to_string();
+        let lookups = self.profile_systems();
         let cands = self
             .modules()
-            .blocking(move |m| m.store.reader(|c| candidates(c, &w, now)))
+            .blocking(move |m| m.store.reader(|c| candidates(c, &w, now, &lookups)))
             .await?;
         rep.candidates = cands.len();
 
@@ -1212,7 +1219,8 @@ impl Channels {
     /// Accounts of people that still have no name.
     fn count_nameless(&self, ws: &str) -> ChannelResult<usize> {
         let now = self.now();
-        let cands = self.store().reader(|c| candidates(c, ws, now))?;
+        let lookups = self.profile_systems();
+        let cands = self.store().reader(|c| candidates(c, ws, now, &lookups))?;
         Ok(cands.iter().filter(|c| !c.named).count())
     }
 }

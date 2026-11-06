@@ -130,6 +130,8 @@ async fn setup() -> H {
     let ch = Channels::builder(env.modules.clone(), conns.clone(), sink.clone())
         .adapter(app.clone())
         .profiles(user.clone())
+        .decl(steve_channels::adapters::feishu::user_decl())
+        .decl(steve_channels::adapters::feishu::app_decl(&app))
         .profiles(app)
         .build();
 

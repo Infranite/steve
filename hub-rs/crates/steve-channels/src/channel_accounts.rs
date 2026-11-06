@@ -12,7 +12,7 @@ use steve_modules::{ApiError, Check};
 use steve_store::base::{self, Viewer};
 use steve_store::{ChangeEvent, Tx};
 
-use crate::adapters::feishu::auth::{APP_ADAPTER, USER_ADAPTER};
+use crate::adapters::feishu;
 use crate::bindings::{self, PersonaRef};
 use crate::channel::ChannelFeatures;
 use crate::spaces::{self, Mode};
@@ -33,7 +33,7 @@ pub struct ProviderOut {
     pub system: String,
     pub name: String,
     pub features: ChannelFeatures,
-    /// The Hub has an adapter for it (the Feishu bot app registered with [`Channels`]).
+    /// The Hub has a channel adapter for it (the Feishu bot app registered with [`Channels`]).
     pub adapter_installed: bool,
 }
 
@@ -44,7 +44,7 @@ pub struct ProviderOut {
 pub struct AccountOut {
     pub connection_id: String,
     pub account_id: String,
-    /// `connections.adapter` (`feishu_app` | `feishu_user`).
+    /// `connections.adapter` (`feishu_app`, `feishu_user`, an extension's).
     pub adapter: String,
     pub system: String,
     pub provider: String,
@@ -69,60 +69,67 @@ pub struct AccountOut {
     pub revision: i64,
 }
 
-/// `system` and `provider` of an adapter: both Feishu connections are “飞书 / Lark”.
+/// `system` and `provider` of an adapter: its provider's integration (the adapters of one provider
+/// are listed together; both Feishu connections are “飞书 / Lark”).
 fn provider_of(ch: &Channels, adapter: &str) -> (String, String) {
-    if adapter == APP_ADAPTER || adapter == USER_ADAPTER || adapter.starts_with("feishu") {
-        return ("feishu".into(), "飞书 / Lark".into());
-    }
     match ch.connections().provider(adapter) {
-        Some(p) => (p.system().to_string(), p.name().to_string()),
+        Some(p) => {
+            let i = p.integration();
+            (i.provider, i.provider_name)
+        }
         None => (adapter.to_string(), adapter.to_string()),
     }
 }
 
-/// What a channel account can do: its channel adapter's features; your own Feishu account sends as
-/// you, replies in threads and recalls its own messages, but has no cards, buttons or edits.
+/// What a channel account can do: what its side declares ([`crate::ext::ChannelDecl::features`]),
+/// else its channel adapter's features (your own Feishu account sends as you, replies in threads,
+/// reacts and recalls its own messages, but has no cards, buttons or edits).
 fn features_of(ch: &Channels, adapter: &str) -> ChannelFeatures {
-    if let Some(a) = ch.adapter(adapter) {
-        return a.features();
+    if let Some(d) = ch.decl(adapter) {
+        return d.features;
     }
-    if adapter == USER_ADAPTER {
-        return ChannelFeatures {
-            multi_bot: false,
-            as_user: true,
-            cards: false,
-            buttons: false,
-            thread_reply: true,
-            edit: false,
-            recall: true,
-            members: false,
-            // `/bot` on your own account: the reactions are yours (as_user)
-            reactions: true,
-        };
-    }
-    ChannelFeatures::default()
+    ch.adapter(adapter)
+        .map(|a| a.features())
+        .unwrap_or_default()
 }
 
-/// The channel providers: Feishu always (installed or not), plus any other registered adapter.
+/// The channel providers: Feishu always (installed or not), then every provider with a declared
+/// channel side or a channel adapter. A provider is installed when one of its sides has a channel
+/// adapter and a connection provider; its features are that side's.
 pub fn providers(ch: &Channels) -> Vec<ProviderOut> {
     let mut out = vec![ProviderOut {
-        system: "feishu".into(),
-        name: "飞书 / Lark".into(),
-        features: features_of(ch, APP_ADAPTER),
-        adapter_installed: ch.adapter(APP_ADAPTER).is_some()
-            && ch.connections().provider(APP_ADAPTER).is_some(),
+        system: feishu::auth::PROVIDER.into(),
+        name: feishu::auth::PROVIDER_NAME.into(),
+        features: ChannelFeatures::default(),
+        adapter_installed: false,
     }];
+    let mut ids: Vec<String> = ch.decls().map(|d| d.adapter.clone()).collect();
     for a in ch.adapters() {
-        let (system, name) = provider_of(ch, a.id());
-        if out.iter().any(|p| p.system == system) {
-            continue;
+        if !ids.iter().any(|x| x == a.id()) {
+            ids.push(a.id().to_string());
         }
-        out.push(ProviderOut {
-            system,
-            name,
-            features: a.features(),
-            adapter_installed: true,
-        });
+    }
+    for id in ids {
+        let (system, name) = provider_of(ch, &id);
+        let k = match out.iter().position(|p| p.system == system) {
+            Some(k) => k,
+            None => {
+                out.push(ProviderOut {
+                    system,
+                    name,
+                    features: ChannelFeatures::default(),
+                    adapter_installed: false,
+                });
+                out.len() - 1
+            }
+        };
+        if !out[k].adapter_installed
+            && ch.adapter(&id).is_some()
+            && ch.connections().provider(&id).is_some()
+        {
+            out[k].features = features_of(ch, &id);
+            out[k].adapter_installed = true;
+        }
     }
     out
 }
@@ -552,18 +559,19 @@ impl spaces::ChannelSettings {
     }
 }
 
-/// After `POST /channels` made a bot connection: its `channel_settings(mode=bot)`, the default
-/// persona bound (when given; else the account speaks as the default persona “Steve”), audit
-/// `channel.create`, SSE `channel`.
-pub fn created_bot(
+/// After `POST /channels` made a connection from a credential form: its
+/// `channel_settings(mode)`, the default persona bound (a bot's, when given; else the account
+/// speaks as the default persona “Steve”), audit `channel.create`, SSE `channel`.
+pub fn created(
     tx: &Tx,
     viewer: &Viewer,
     conn: &str,
+    mode: Mode,
     persona: Option<&str>,
     now: i64,
 ) -> ChannelResult<()> {
     let ws = &viewer.ws;
-    spaces::ensure_channel_settings(tx, ws, conn, Mode::Bot, now)?;
+    spaces::ensure_channel_settings(tx, ws, conn, mode, now)?;
     if let Some(p) = persona {
         bindings::set_account_default(tx, viewer, conn, p, now)?;
     }
@@ -573,7 +581,7 @@ pub fn created_bot(
         &viewer.user,
         "channel.create",
         conn,
-        &json!({"mode": "bot", "persona_id": persona}),
+        &json!({"mode": mode.code(), "persona_id": persona}),
     )?;
     tx.publish(ChangeEvent::Channel {
         id: conn.into(),

@@ -171,6 +171,12 @@ impl ChannelsBuilder {
         for m in self.media.values() {
             crate::media::publish(m);
         }
+        // who can look people up, for the contact pages' “can be looked up” (by declared system)
+        for id in self.profiles.keys() {
+            if let Some(d) = self.decls.get(id) {
+                steve_modules::contacts::profile::register_lookup(id, &d.handle_system);
+            }
+        }
         Channels(Arc::new(Inner {
             modules: self.modules,
             conns: self.conns,
@@ -310,6 +316,20 @@ impl Channels {
     /// The adapters that can look people up.
     pub fn profile_adapter_ids(&self) -> Vec<String> {
         self.0.profiles.keys().cloned().collect()
+    }
+
+    /// The systems whose people a registered profile view looks up (its side's declared
+    /// `handle_system`).
+    pub fn profile_systems(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for id in self.0.profiles.keys() {
+            if let Some(d) = self.0.decls.get(id)
+                && !out.contains(&d.handle_system)
+            {
+                out.push(d.handle_system.clone());
+            }
+        }
+        out
     }
 
     /// The media view for `connections.adapter = id`.

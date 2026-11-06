@@ -13,7 +13,6 @@
   "channels.error.trigger_word": "A trigger word starts with / and uses only English letters, digits and underscores: %{word}",
   "channels.error.cleanup_confirm": "Cleanup needs confirmation: send confirm: true with the request",
   "channels.error.cleanup_changed": "The related decisions have changed; preview again and confirm the cleanup",
-  "channels.error.app_bot_first": "Connect a Feishu app bot first, then authorize yourself",
   "channels.error.default_persona_kept": "The default persona can't be deleted",
   "channels.error.task_failed": "The task failed",
   "channels.error.device_flow": "Feishu device-code sign-in didn't start: %{error}",

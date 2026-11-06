@@ -1,12 +1,10 @@
 //! The extensions of the `steve-hub` binary: Feishu as the bot and as you, IMAP mailboxes,
 //! GitHub. They register the same objects the Hub created inline before the extension entry.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
-use steve_channels::ChannelAdapter;
-use steve_channels::adapters::feishu::{self, Domain, FeishuApp, FeishuEnv};
-use steve_channels::channel::ChannelFeatures;
-use steve_channels::ext::{ChannelDecl, ChannelSide, MessageIds, Mode, Receive, StartMethod};
+use steve_channels::adapters::feishu::{self, Domain, FeishuApp, FeishuEnv, FeishuUser};
+use steve_channels::ext::ChannelSide;
 use steve_modules::accounts::connections::ConnectionProvider;
 
 use super::{Declare, Extension, ExtensionError, Job, Mounted, Started};
@@ -23,20 +21,10 @@ impl Extension for FeishuBot {
     fn declare(&self, d: &mut Declare<'_>) -> Result<(), ExtensionError> {
         let app = Arc::new(FeishuApp::new());
         d.channel(
-            ChannelSide::new(
-                ChannelDecl::new(app.id())
-                    .handle_system(feishu::auth::USER_SYSTEM)
-                    .mode(Mode::Bot)
-                    .features(app.features())
-                    .receive(Receive::LongConnection, None)
-                    .message_ids(MessageIds::Platform)
-                    .created_precision_ms(1)
-                    .start(StartMethod::Form),
-                app.clone(),
-            )
-            .adapter(app.clone())
-            .profiles(app.clone())
-            .media(Arc::new(feishu::FeishuMedia::new(app.id()))),
+            ChannelSide::new(feishu::app_decl(&app), app.clone())
+                .adapter(app.clone())
+                .profiles(app.clone())
+                .media(Arc::new(feishu::FeishuMedia::new(app.id()))),
         )
     }
 
@@ -69,7 +57,11 @@ impl Extension for FeishuBot {
 /// `feishu.self`: you on Feishu (F6), one provider for connections, the device flow, acting as
 /// you (C6: sending, reactions, recalling what you sent), looking people up as you (first, before
 /// the bot), the media of your messages, and one self poller per connection with `msg.receive`.
-pub(crate) struct FeishuSelf;
+#[derive(Default)]
+pub(crate) struct FeishuSelf {
+    /// The provider its last declaration registered, for its routes and its pollers.
+    user: Mutex<Option<Arc<FeishuUser>>>,
+}
 
 impl Extension for FeishuSelf {
     fn id(&self) -> &str {
@@ -79,35 +71,21 @@ impl Extension for FeishuSelf {
     fn declare(&self, d: &mut Declare<'_>) -> Result<(), ExtensionError> {
         let user = Arc::new(FeishuEnv::from_env(|k| (d.vars)(k)).user_provider(Domain::Feishu));
         d.channel(
-            ChannelSide::new(
-                ChannelDecl::new(user.id())
-                    .handle_system(feishu::auth::USER_SYSTEM)
-                    .mode(Mode::Own)
-                    .features(ChannelFeatures {
-                        as_user: true,
-                        thread_reply: true,
-                        recall: true,
-                        reactions: true,
-                        ..ChannelFeatures::default()
-                    })
-                    .receive(Receive::Poll, Some("msg.receive"))
-                    .message_ids(MessageIds::Platform)
-                    .created_precision_ms(1)
-                    .start(StartMethod::OAuth)
-                    .start(StartMethod::Device),
-                user.clone(),
-            )
-            .act_as_user(user.clone())
-            .profiles(user.clone())
-            .media(Arc::new(feishu::FeishuMedia::new(user.id()))),
+            ChannelSide::new(feishu::user_decl(), user.clone())
+                .act_as_user(user.clone())
+                .profiles(user.clone())
+                .media(Arc::new(feishu::FeishuMedia::new(user.id()))),
         )?;
-        d.feishu_user = Some(user);
+        // the one its start goes with (an assembly wired again declares again)
+        *self.user.lock().unwrap_or_else(|e| e.into_inner()) = Some(user);
         Ok(())
     }
 
     fn start(&self, s: &Started) -> Result<Mounted, ExtensionError> {
-        let user = s
-            .feishu_user
+        let user = self
+            .user
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
             .clone()
             .ok_or_else(|| ExtensionError::new("started without its declared provider"))?;
         let api_routes = feishu::device_routes(feishu::DeviceFlows::new(
