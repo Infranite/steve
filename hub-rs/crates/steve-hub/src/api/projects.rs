@@ -517,6 +517,58 @@ fn lane_target(path: &str) -> Result<steve_core::lane::target::Target, ApiError>
     steve_core::lane::target::target_of(lane_dir(path)?, None).map_err(ApiError::bad_request)
 }
 
+/// The lane as workspace `ws` may see it: a lane is one per target, shared by every workspace whose
+/// projects merge into it, so another workspace's requests are only counted (`others` on each unit,
+/// `queued_others`), never named. Whether any of them is in the lane.
+fn lane_for_ws(lane: Option<Value>, ws: &str) -> (Option<Value>, bool) {
+    let Some(mut v) = lane else {
+        return (None, false);
+    };
+    let mut shared = false;
+    let mut mine = |list: &mut Value| -> usize {
+        let Some(a) = list.as_array_mut() else {
+            return 0;
+        };
+        let before = a.len();
+        a.retain(|r| r["workspace_id"].as_str() == Some(ws));
+        for r in a.iter_mut() {
+            if let Some(o) = r.as_object_mut() {
+                o.remove("workspace_id");
+            }
+        }
+        let others = before - a.len();
+        shared |= others > 0;
+        others
+    };
+    for unit in ["running", "collecting"] {
+        if v[unit].is_object() {
+            let others = mine(&mut v[unit]["members"]) + mine(&mut v[unit]["deferred"]);
+            v[unit]["others"] = json!(others);
+        }
+    }
+    let others = mine(&mut v["queued"]);
+    v["queued_others"] = json!(others);
+    (Some(v), shared)
+}
+
+/// Refused when the lane of (`upstream`, `branch`) holds another workspace's requests: its limits
+/// and "merge now" would change when those merge.
+async fn lane_unshared(
+    st: &AppState,
+    ws: &str,
+    upstream: &str,
+    branch: &str,
+) -> Result<(), ApiError> {
+    let (_, shared) = lane_for_ws(st.domain.lane_view(upstream, branch).await?, ws);
+    if shared {
+        return Err(ApiError::Json(
+            409,
+            steve_i18n::t!("hub.project.lane_shared"),
+        ));
+    }
+    Ok(())
+}
+
 /// `GET /api/projects/:id/lane`: what Steve recognizes about the target the project merges into (a
 /// read-only profile with its evidence), and the lane itself: your limits, the unit in flight, the batch
 /// collecting. Fetches first; a fetch that fails is said and the profile
@@ -542,7 +594,7 @@ pub async fn lane(
         js::string(&v["target"]["upstream"]),
         js::string(&v["target"]["branch"]),
     );
-    v["lane"] = json!(st.domain.lane_view(&up, &br).await?);
+    v["lane"] = json!(lane_for_ws(st.domain.lane_view(&up, &br).await?, &c.ws).0);
     ok(v)
 }
 
@@ -582,6 +634,7 @@ pub async fn lane_policy(
     k.finish()?;
     let (path, _) = lane_project(&st, &c, id).await?;
     let t = blocking(move || lane_target(&path)).await?;
+    lane_unshared(&st, &c.ws, &t.upstream, &t.branch).await?;
     let lane = st
         .domain
         .lane_policy(
@@ -591,7 +644,7 @@ pub async fn lane_policy(
             members.map(|m| m as i64),
         )
         .await?;
-    ok(json!({ "lane": lane }))
+    ok(json!({ "lane": lane_for_ws(lane, &c.ws).0 }))
 }
 
 /// `POST /api/projects/:id/lane/now`: merge and release now. The lane's collecting batch closes at
@@ -604,9 +657,10 @@ pub async fn lane_now(
 ) -> ApiResult {
     let (path, _) = lane_project(&st, &c, id).await?;
     let t = blocking(move || lane_target(&path)).await?;
+    lane_unshared(&st, &c.ws, &t.upstream, &t.branch).await?;
     let closed = st.domain.lane_now(&t.upstream, &t.branch).await?;
     let lane = st.domain.lane_view(&t.upstream, &t.branch).await?;
-    ok(json!({ "closed": closed, "lane": lane }))
+    ok(json!({ "closed": closed, "lane": lane_for_ws(lane, &c.ws).0 }))
 }
 
 /// What `describe` shows the model: the file list and the start of the usual readme files.

@@ -228,9 +228,15 @@ impl Core {
             return;
         };
         if let Some(why) = self.host_refuses(&row) {
-            let reqs = s
-                .reader(|c| store::merging(c, lane, unit))
-                .unwrap_or_default();
+            // shut first: a request arriving while `gh` was asked (or while these leave) would
+            // otherwise join a unit that gets no card and never empties
+            let reqs = match store::shut(s, lane, unit) {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(lane, unit, "lane: shut: {e}");
+                    return;
+                }
+            };
             for r in &reqs {
                 self.lane_refused(lane, unit, r, &why);
             }

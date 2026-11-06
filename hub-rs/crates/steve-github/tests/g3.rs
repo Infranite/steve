@@ -1278,6 +1278,43 @@ async fn open_pr_on_a_public_repo_still_asks() {
     assert_eq!(pull_posts(&h), 0);
 }
 
+/// A repo made public on GitHub after it was linked still says private in Steve's row: GitHub is
+/// asked at acceptance, the card comes back, and the row learns the new visibility.
+#[tokio::test(flavor = "multi_thread")]
+async fn open_pr_on_a_repo_made_public_since_linking_asks() {
+    let h = setup().await;
+    open_pr_on_accept(&h).await;
+    h.fake.set_private(REPO, false);
+    let id = item(&h, 1, Some(BRANCH));
+    assert!(accepted(&h, &id).await);
+    let (_, question, _) = open_decision(&h, accept::PR_OPEN).expect("asked");
+    assert!(question.contains("公开仓库"), "{question}");
+    h.gh.settle().await;
+    assert_eq!(pushed(&h), None);
+    assert_eq!(pull_posts(&h), 0);
+    assert_eq!(q(&h, "SELECT private FROM gh_repos", &[]), json!(0));
+}
+
+/// GitHub not answering the visibility question is not "private": the card comes back.
+#[tokio::test(flavor = "multi_thread")]
+async fn open_pr_when_visibility_cannot_be_read_asks() {
+    let h = setup().await;
+    open_pr_on_accept(&h).await;
+    h.fake.fail_next_on(
+        &format!("/repos/{REPO}"),
+        steve_github::fake::Fault::Status {
+            status: 404,
+            message: "Not Found".into(),
+        },
+    );
+    let id = item(&h, 1, Some(BRANCH));
+    assert!(accepted(&h, &id).await);
+    let (_, question, _) = open_decision(&h, accept::PR_OPEN).expect("asked");
+    assert!(question.contains("公开仓库"), "{question}");
+    h.gh.settle().await;
+    assert_eq!(pushed(&h), None);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn open_pr_with_a_secret_in_the_commits_still_asks() {
     let h = setup().await;

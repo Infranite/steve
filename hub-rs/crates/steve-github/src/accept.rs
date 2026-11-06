@@ -388,7 +388,9 @@ impl GitHub {
         branch: &str,
         cwd: Option<&str>,
     ) -> Result<String, String> {
-        if !r.private {
+        // the stored flag is from when the repo was linked: GitHub is asked now, and anything but
+        // a clear "private" asks
+        if !r.private || !self.still_private(r).await {
             return Err("公开仓库：推送后收不回，开 PR 前要你确认".into());
         }
         if branch == r.default_branch || !push::branch_ok(branch) {
@@ -425,6 +427,36 @@ impl GitHub {
             )),
             Err(e) => Err(format!("泄露检查没做成（{e}），开 PR 前要你确认")),
         }
+    }
+
+    /// Whether GitHub says `r` is private right now (any error or missing flag is "no"). A change
+    /// is written back to the repo row.
+    async fn still_private(&self, r: &RepoRow) -> bool {
+        let path = format!("/repos/{}", r.full_name);
+        let now = match self.conn(&r.workspace_id, &r.connection_id) {
+            Ok(conn) => match conn.get(&path).await {
+                Ok(v) => v["private"].as_bool(),
+                Err(e) => {
+                    tracing::warn!(repo = %r.full_name, error = %e, "github: visibility not read");
+                    None
+                }
+            },
+            Err(e) => {
+                tracing::warn!(repo = %r.full_name, error = %e, "github: no connection to read visibility");
+                None
+            }
+        };
+        if let Some(private) = now.filter(|p| *p != r.private) {
+            let at = self.now();
+            let w = self.store().transaction(|tx| {
+                repo::set_private(tx, &r.id, private, at)?;
+                Ok::<_, ApiError>(())
+            });
+            if let Err(e) = w {
+                tracing::warn!(repo = %r.full_name, error = %e, "github: visibility not written");
+            }
+        }
+        now == Some(true)
     }
 
     /// After a `gh_pr_open` answer: `yes` pushes the branch and opens the PR; `no` finishes the

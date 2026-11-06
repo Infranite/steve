@@ -365,6 +365,15 @@ pub fn approved(store: &Store, lane: &str, unit: u64) -> Result<(), StoreError> 
     store.transaction(|tx| apply_in(tx, lane, Event::Approved { unit }).map(|_| ()))
 }
 
+/// Unit `unit` of `lane` will not merge as it is (its target refuses it): nothing joins it any more,
+/// in the same transaction that reads what it holds. Those requests (each still has to leave).
+pub fn shut(store: &Store, lane: &str, unit: u64) -> Result<Vec<LaneRequest>, StoreError> {
+    store.transaction(|tx| {
+        apply_in(tx, lane, Event::Approved { unit })?;
+        merging(tx, lane, unit)
+    })
+}
+
 /// "Merge and release now" on `lane`: its collecting batch closes at once. Whether there was one
 /// to close, and the work that leaves.
 pub fn now(store: &Store, lane: &str) -> Result<(bool, Vec<Work>), StoreError> {
@@ -398,7 +407,8 @@ pub fn set_policy(
 }
 
 /// What the project page shows of the lane of (`upstream`, `branch`): its limits (yours and the
-/// defaults), the unit in flight and the batch collecting, each with its requests. `None`: no
+/// defaults), the unit in flight and the batch collecting, each with its requests (with the workspace
+/// each is from: lanes are shared, the caller shows only its own). `None`: no
 /// request ever went into it and no limit was set.
 pub fn view(
     store: &Store,
@@ -418,7 +428,10 @@ pub fn view(
         let named = |ids: &[String]| -> Vec<serde_json::Value> {
             ids.iter()
                 .filter_map(|id| reqs.iter().find(|r| &r.id == id))
-                .map(|r| json!({"id": r.id, "item_id": r.item_id, "branch": r.branch, "label": label(r)}))
+                .map(|r| json!({
+                    "id": r.id, "item_id": r.item_id, "branch": r.branch, "label": label(r),
+                    "workspace_id": r.workspace_id.as_deref().unwrap_or(steve_store::WS),
+                }))
                 .collect()
         };
         let unit = |u: &super::batch::Unit| {
@@ -570,6 +583,38 @@ mod tests {
         // the lane is free again: the next request goes straight through
         let (_, w) = request(&s, "u", "main", &req("ST-2")).unwrap();
         assert!(matches!(&w[..], [Work::Merge { unit: 2, .. }]));
+    }
+
+    /// A unit its target refuses is shut before its members leave: a request arriving meanwhile
+    /// does not join it (it would stay there, with no card, holding the lane), and once the last
+    /// member left the unit is over and the newcomer's batch goes on.
+    #[test]
+    fn a_refused_unit_takes_no_one_while_its_members_leave() {
+        let (_d, s) = store();
+        let (a, _) = request(&s, "u", "main", &req("ST-1")).unwrap();
+        let (b, _) = request(&s, "u", "main", &req("ST-2")).unwrap();
+        assert_eq!(state(&s, &b.id), ("merging".into(), Some(1), None));
+        let held = shut(&s, &a.lane_id, 1).unwrap();
+        assert_eq!(
+            held.iter().map(|r| r.id.clone()).collect::<Vec<_>>(),
+            [a.id.clone(), b.id.clone()]
+        );
+        // arrives between the read and the members leaving
+        let (c, w) = request(&s, "u", "main", &req("ST-3")).unwrap();
+        assert!(w.is_empty());
+        assert_eq!(state(&s, &c.id), ("collecting".into(), Some(2), None));
+        assert!(left(&s, &a.lane_id, 1, &a.id, "规则").unwrap().is_empty());
+        left(&s, &a.lane_id, 1, &b.id, "规则").unwrap();
+        let units = s.reader(|cx| lanes::units_of(cx, &a.lane_id)).unwrap();
+        assert_eq!(
+            units
+                .iter()
+                .find(|u| u.no == 1)
+                .map(|u| (u.state.as_str(), u.outcome.as_deref())),
+            Some(("done", Some("emptied")))
+        );
+        let v = view(&s, "u", "main").unwrap().unwrap();
+        assert!(v["running"].is_null(), "{v}");
     }
 
     fn card(s: &Store, lane: &str, unit: u64) -> steve_store::Decision {

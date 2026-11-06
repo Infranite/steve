@@ -139,7 +139,7 @@ fn available_of(v: &Value) -> Option<Available> {
         owner: owner.into(),
         name: name.into(),
         full_name: full.into(),
-        private: v["private"].as_bool().unwrap_or(true),
+        private: v["private"].as_bool().unwrap_or(false),
         default_branch: v["default_branch"].as_str().unwrap_or("main").into(),
     })
 }

@@ -50,6 +50,7 @@
   "hub.project.already_project": "This directory is already a project",
   "hub.project.no_release": "This project has no release method, so there is nothing to set a done condition on",
   "hub.project.lane_remote": "Merge lanes can be shown only for projects on this machine; this project is on another device",
+  "hub.project.lane_shared": "This merge lane also holds merges from other workspaces; its settings and merge-now cannot be changed from here",
   "hub.project.lanes_git_only": "Only git projects have merge lanes",
   "hub.project.project_dir_missing": "Project directory doesn't exist: %{path}",
   "hub.session.imported_readonly": "Imported conversations are read-only",
