@@ -552,7 +552,7 @@ pub fn wire_assembly(
         let ws = workspaces.clone();
         adapter = adapter.on_node(research::NodeResearch {
             runtime: h.runtime.clone(),
-            roots: Arc::new(move || ws.local_roots().unwrap_or_default()),
+            roots: Arc::new(move || ws.local_roots().map_err(|e| e.to_string())),
         });
     }
     core.set_researcher(Arc::new(adapter));

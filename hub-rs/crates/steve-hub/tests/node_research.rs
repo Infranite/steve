@@ -234,9 +234,11 @@ struct Hub {
     store: Store,
     adapter: Arc<ResearchAdapter>,
     // the coordinator the Node's sink reaches (held weakly there)
-    _rt: Option<Arc<NodeRuntime>>,
+    rt: Option<Arc<NodeRuntime>>,
     tools: Option<Arc<NodeTools>>,
     data: PathBuf,
+    /// What the adapter is told the local Node's roots are (a test may break them).
+    roots: Arc<Mutex<Result<Vec<steve_node::Root>, String>>>,
 }
 
 impl Hub {
@@ -262,9 +264,10 @@ impl Hub {
             return Hub {
                 store,
                 adapter: Arc::new(adapter),
-                _rt: None,
+                rt: None,
                 tools: None,
                 data,
+                roots: Arc::new(Mutex::new(Ok(vec![]))),
             };
         }
         let roots = vec![steve_node::Root {
@@ -319,16 +322,19 @@ impl Hub {
         node.connect_tools(tools.clone()).await.unwrap();
         rt.start();
         until("reconciled", || rt.is_reconciled()).await;
+        let told = Arc::new(Mutex::new(Ok(roots)));
+        let now = told.clone();
         let adapter = adapter.on_node(NodeResearch {
             runtime: rt.clone(),
-            roots: Arc::new(move || roots.clone()),
+            roots: Arc::new(move || now.lock().unwrap().clone()),
         });
         Hub {
             store,
             adapter: Arc::new(adapter),
-            _rt: Some(rt),
+            rt: Some(rt),
             tools: Some(tools),
             data,
+            roots: told,
         }
     }
 
@@ -793,4 +799,90 @@ async fn research_tools_answer_only_a_running_research_job() {
     );
     stop.store(true, Ordering::SeqCst);
     assert_eq!(run.await.unwrap().end, RunEnd::Stopped);
+}
+
+/// A setting without a wall time gives the job a deadline that never ends a live run (in process
+/// such a run has no wall limit): not the old 6 h backstop the Node reported as the time budget.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn no_wall_time_is_no_deadline_on_the_node() {
+    let w = World::new();
+    let node = Hub::new(&w, "node", true, 3).await;
+    let t0 = steve_store::now();
+    let out = node
+        .adapter
+        .research(
+            request(&w, "tr_w", "default", "add 怎么工作？"),
+            &Seen::default(),
+        )
+        .await;
+    assert_eq!(out.end, RunEnd::Done, "{out:?}");
+    let deadline = q::<i64>(
+        &node.store,
+        "SELECT json_extract(spec, '$.run.limits.deadline') FROM runtime_job_attempts",
+    );
+    let far = i64::try_from(steve_hub::wire::research::NO_WALL_LIMIT.as_millis()).unwrap();
+    assert!(
+        deadline >= t0 + far,
+        "deadline {deadline} is {} ms away",
+        deadline - t0
+    );
+}
+
+/// A run whose project is under none of the Node's roots, or whose roots cannot be read, goes in
+/// process (it still answers), counted where `/healthz` shows it; a run under the roots is not.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_fallback_in_process_is_counted() {
+    let w = World::new();
+    let node = Hub::new(&w, "node", true, 3).await;
+    let rt = node.rt.clone().unwrap();
+    let health = || steve_hub::wire::node_runtime::health(&node.store, Some(&rt), false).unwrap();
+    assert_eq!(health()["research_fallbacks"], 0);
+
+    // under the roots: on the Node, nothing counted
+    let out = node
+        .adapter
+        .research(
+            request(&w, "tr_1", "default", "add 怎么工作？"),
+            &Seen::default(),
+        )
+        .await;
+    assert_eq!(out.end, RunEnd::Done, "{out:?}");
+    assert_eq!(rt.research_fallbacks(), 0);
+
+    // a project outside every root: in process, counted (a follow-up: the stand-in reads nothing)
+    let outside = w.root.join("elsewhere");
+    std::fs::create_dir_all(&outside).unwrap();
+    let mut r = request(&w, "tr_2", "default", "然后呢？");
+    for p in r.project.iter_mut().chain(r.readable.iter_mut()) {
+        p.path = outside.display().to_string();
+    }
+    r.resume = Some(ResumeFrom {
+        run: "tr_1".into(),
+        claude_session: "sess-1".into(),
+        model: "m1".into(),
+        prior_answer: "add 什么都不做。".into(),
+    });
+    let out = node.adapter.research(r, &Seen::default()).await;
+    assert_eq!(out.end, RunEnd::Done, "{out:?}");
+    assert_eq!(rt.research_fallbacks(), 1);
+    assert_eq!(
+        q::<i64>(
+            &node.store,
+            "SELECT COUNT(*) FROM runtime_jobs WHERE thread_run_id='tr_2'"
+        ),
+        0
+    );
+
+    // the roots cannot be read: in process too, counted, not hidden as "no roots"
+    *node.roots.lock().unwrap() = Err("store: locked".into());
+    let out = node
+        .adapter
+        .research(
+            request(&w, "tr_3", "default", "add 怎么工作？"),
+            &Seen::default(),
+        )
+        .await;
+    assert_eq!(out.end, RunEnd::Done, "{out:?}");
+    assert_eq!(rt.research_fallbacks(), 2);
+    assert_eq!(health()["research_fallbacks"], 2);
 }

@@ -21,15 +21,18 @@ use steve_research as r;
 
 use super::node_runtime::{News, NodeRuntime, ResearchAttempt, ResearchFile};
 
-/// How long a run on the Node may take when the setting names no wall time: the turn limit. Only a
-/// backstop (the Node needs a deadline); the idle detector ends a stuck run long before.
-const NODE_DEADLINE: Duration = Duration::from_secs(6 * 3600);
+/// The deadline of a run on the Node when the setting names no wall time. The Node needs one, but
+/// such a run has no wall limit in process (a conversation is not cut off), so it is far enough
+/// never to end a live run; the idle detector and the turn and tool limits end a stuck one.
+/// (Bounded so the harness's own clock can add it.)
+pub const NO_WALL_LIMIT: Duration = Duration::from_secs(365 * 24 * 3600);
 
 /// Research on the local Node's jobs.
 pub struct NodeResearch {
     pub runtime: Arc<NodeRuntime>,
-    /// The local Node's roots now: a run's directories are named under them.
-    pub roots: Arc<dyn Fn() -> Vec<steve_node::Root> + Send + Sync>,
+    /// The local Node's roots now: a run's directories are named under them. An error (the store,
+    /// the placement) is logged and the run goes in process, counted as a fallback.
+    pub roots: Arc<dyn Fn() -> Result<Vec<steve_node::Root>, String> + Send + Sync>,
 }
 
 pub struct ResearchAdapter {
@@ -368,7 +371,8 @@ impl ResearchAdapter {
 
     /// A run as jobs on the local Node: admitted here, its attempts planned here
     /// ([`r::plan`]) and tried in order ([`r::drive`]), one job per attempt. A run whose
-    /// directories are under none of the Node's roots runs in process.
+    /// directories are under none of the Node's roots (or whose roots cannot be read) runs in
+    /// process, logged and counted ([`NodeRuntime::research_fallbacks`], in `/healthz`).
     async fn on_local_node(
         &self,
         node: &NodeResearch,
@@ -387,7 +391,15 @@ impl ResearchAdapter {
             }
         };
         let req = self.request(q);
-        let roots = (node.roots)();
+        let needs_roots = req.cwd.is_some() || !req.add_dirs.is_empty();
+        let roots = if needs_roots {
+            (node.roots)().unwrap_or_else(|e| {
+                tracing::error!(run = %q.run, "research: the local Node's roots: {e}");
+                vec![]
+            })
+        } else {
+            vec![]
+        };
         let place = |p: &Path| super::workspaces::within(&roots, p);
         let cwd = req.cwd.as_deref().map(place);
         let readable: Vec<_> = req.add_dirs.iter().map(|p| place(p)).collect();
@@ -396,13 +408,14 @@ impl ResearchAdapter {
                 run = %q.run,
                 "research: a directory is under none of the local Node's roots; it runs in process"
             );
+            node.runtime.research_fell_back();
             let out = self.in_process(q, sink).await;
             drop(slot);
             return out;
         }
         let budget = req.budget.unwrap_or(cfg.budget);
         let deadline = steve_store::now()
-            + i64::try_from(budget.hard.unwrap_or(NODE_DEADLINE).as_millis())
+            + i64::try_from(budget.hard.unwrap_or(NO_WALL_LIMIT).as_millis())
                 .unwrap_or(i64::MAX / 2);
         // the guarantee a research job asks the Node's sandbox for (sandbox-exec, files read-only)
         let fs = || vec!["fs-readonly".to_string()];

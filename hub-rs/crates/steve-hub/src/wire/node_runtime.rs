@@ -218,6 +218,9 @@ pub struct NodeRuntime {
     /// New sessions left on the legacy runner since boot although this Node was on (no binding
     /// could be planned, or the bind failed): `/healthz` shows them, so they don't hide.
     fallbacks: std::sync::atomic::AtomicU64,
+    /// Research runs that went in process since boot although research runs on this Node (a
+    /// directory under none of its roots, or the roots unreadable): `/healthz` shows them too.
+    research_fallbacks: AtomicU64,
     /// The callers waiting on think jobs of this Node ([`NodePrint`]).
     jobs: node_jobs::Waiters,
 }
@@ -339,6 +342,7 @@ impl NodeRuntime {
             turn_limit: std::sync::atomic::AtomicI64::new(TURN_LIMIT_MS),
             idle_release: std::sync::atomic::AtomicI64::new(IDLE_RELEASE_MS),
             fallbacks: std::sync::atomic::AtomicU64::new(0),
+            research_fallbacks: AtomicU64::new(0),
             jobs: node_jobs::Waiters::default(),
         })
     }
@@ -393,6 +397,16 @@ impl NodeRuntime {
     /// How many new sessions [`Self::fell_back`] since boot.
     pub fn fallbacks(&self) -> u64 {
         self.fallbacks.load(Ordering::Relaxed)
+    }
+
+    /// A research run went in process although research runs on this Node.
+    pub fn research_fell_back(&self) {
+        self.research_fallbacks.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// How many research runs [`Self::research_fell_back`] since boot.
+    pub fn research_fallbacks(&self) -> u64 {
+        self.research_fallbacks.load(Ordering::Relaxed)
     }
 
     /// An error if [`Self::stop`] was called.
@@ -3664,7 +3678,8 @@ fn system_in(tx: &Tx, session: &str, text: &str) -> Result<(), StoreError> {
 ///   claimed or submitted dispatch, a pending resume). Removing the runner needs both at 0.
 ///
 /// `fallbacks` (since boot) counts new sessions left on the legacy runner although the local Node
-/// was on. Public: no reason text, ids or paths, only states and counts.
+/// was on; `research_fallbacks` (since boot) research runs that went in process although research
+/// runs on the local Node. Public: no reason text, ids or paths, only states and counts.
 pub fn health(
     store: &Store,
     local: Option<&NodeRuntime>,
@@ -3710,6 +3725,7 @@ pub fn health(
         "stopped": local.is_some_and(|n| n.is_stopped()),
         "holding": local.is_some_and(|n| n.is_holding()),
         "fallbacks": local.map_or(0, |n| n.fallbacks()),
+        "research_fallbacks": local.map_or(0, |n| n.research_fallbacks()),
         "sessions": sessions,
         "open": open,
         "running": running,
