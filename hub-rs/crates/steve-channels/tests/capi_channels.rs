@@ -311,6 +311,27 @@ async fn bot_account_through_post_channels() {
     assert_eq!(v["providers"][0]["adapter_installed"], true);
     assert_eq!(v["accounts"].as_array().map(Vec::len), Some(1));
     assert_eq!(v["accounts"][0]["connection_id"], con);
+    // the declared sides, and how the account's messages come in
+    let sides: Vec<_> = v["providers"][0]["sides"]
+        .as_array()
+        .expect("sides")
+        .iter()
+        .map(|d| {
+            (
+                d["adapter"].clone(),
+                d["mode"].clone(),
+                d["receive"].clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        sides,
+        [
+            (json!("feishu_app"), json!("bot"), json!("long_connection")),
+            (json!("feishu_user"), json!("self"), json!("poll")),
+        ]
+    );
+    assert_eq!(v["accounts"][0]["receive"], "long_connection");
 
     // PATCH: duty, rules, another persona — one revision, audited
     let per2 = h.new_persona("小运二号").await;

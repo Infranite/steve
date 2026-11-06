@@ -155,6 +155,10 @@ pub struct ConnectionOut {
     pub available_caps: Vec<String>,
     pub health: HealthOut,
     pub last_sync: Option<i64>,
+    /// The Hub has an adapter for it. A connection whose adapter is not installed (an extension
+    /// left out of the assembly) is listed and can be disconnected; it is not tested, refreshed or
+    /// re-authorized until the adapter is back, and its spaces, messages and contacts stay.
+    pub installed: bool,
 }
 
 /// `GET /connections/adapters`.
@@ -201,6 +205,7 @@ pub struct ConnectionsBuilder {
     providers: BTreeMap<String, Arc<dyn ConnectionProvider>>,
     usage: Vec<Arc<dyn ConnectionUsage>>,
     party_hooks: Vec<Arc<dyn PartyHooks>>,
+    channels: BTreeMap<String, Value>,
 }
 
 impl ConnectionsBuilder {
@@ -226,6 +231,14 @@ impl ConnectionsBuilder {
         self
     }
 
+    /// What the channel side of `adapter` declares, as the 接入 page reads it (mode, features,
+    /// how messages come in, how a connection is made): `channel` of its entry in
+    /// `GET /connections/integrations`.
+    pub fn channel(mut self, adapter: &str, summary: Value) -> Self {
+        self.channels.insert(adapter.to_string(), summary);
+        self
+    }
+
     pub fn build(self) -> Connections {
         // a connect timeout only: what a whole request may take is each caller's (Feishu sets its
         // own; GitHub `api::REQUEST_TIMEOUT`), so a long download is not cut by a default
@@ -242,6 +255,7 @@ impl ConnectionsBuilder {
             providers: self.providers,
             usage: self.usage,
             party_hooks: self.party_hooks,
+            channels: self.channels,
             flows: PendingStates::default(),
             devices: Devices::default(),
             locks: Mutex::new(HashMap::new()),
@@ -259,6 +273,8 @@ struct Inner {
     providers: BTreeMap<String, Arc<dyn ConnectionProvider>>,
     usage: Vec<Arc<dyn ConnectionUsage>>,
     party_hooks: Vec<Arc<dyn PartyHooks>>,
+    /// The declared channel sides' summaries, by adapter ([`ConnectionsBuilder::channel`]).
+    channels: BTreeMap<String, Value>,
     flows: PendingStates<Flow>,
     devices: Devices,
     /// One refresh/mint at a time per connection.
@@ -489,6 +505,7 @@ impl Connections {
             providers: BTreeMap::new(),
             usage: Vec::new(),
             party_hooks: crate::accounts::ports().hooks,
+            channels: BTreeMap::new(),
         }
     }
 
@@ -586,7 +603,13 @@ impl Connections {
                 error_at: r.health.error_at,
             },
             last_sync: r.last_sync,
+            installed: self.provider(&r.adapter).is_some(),
         }
+    }
+
+    /// The declared summary of the channel side serving `adapter`, when there is one.
+    pub fn channel_summary(&self, adapter: &str) -> Option<&Value> {
+        self.0.channels.get(adapter)
     }
 
     fn viewer(&self, who: &Caller) -> VaultResult<Viewer> {
@@ -2483,7 +2506,14 @@ impl Connections {
     pub async fn test(&self, who: &Caller, id: &str) -> VaultResult<ConnectionOut> {
         let viewer = self.viewer(who)?;
         let r = self.0.m.store.reader(|c| self.own(c, &viewer, id))?;
-        if let Some(p) = self.provider(&r.adapter) {
+        let Some(p) = self.provider(&r.adapter) else {
+            return Err(ApiError::rule(steve_i18n::t!(
+                "modules.connections.not_installed",
+                adapter = r.adapter.as_str()
+            ))
+            .into());
+        };
+        {
             let cx = self.cx_of(&r);
             let h = p.health(&cx).await;
             if h == Health::Ok

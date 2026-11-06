@@ -15,6 +15,7 @@ use steve_store::{ChangeEvent, Tx};
 use crate::adapters::feishu;
 use crate::bindings::{self, PersonaRef};
 use crate::channel::ChannelFeatures;
+use crate::ext::{ChannelDecl, Receive};
 use crate::spaces::{self, Mode};
 use crate::{ChannelResult, Channels};
 
@@ -35,6 +36,25 @@ pub struct ProviderOut {
     pub features: ChannelFeatures,
     /// The Hub has a channel adapter for it (the Feishu bot app registered with [`Channels`]).
     pub adapter_installed: bool,
+    /// The declared channel sides of the provider ([`decl_summary`]).
+    pub sides: Vec<Value>,
+}
+
+/// What a channel side declares, as the API shows it (`GET /channels` `providers[].sides`,
+/// `GET /connections/integrations` `adapters[].channel`): `{adapter, handle_system, mode,
+/// features, receive, receive_cap, message_ids, created_precision_ms, start}`.
+pub fn decl_summary(d: &ChannelDecl) -> Value {
+    json!({
+        "adapter": d.adapter,
+        "handle_system": d.handle_system,
+        "mode": d.mode,
+        "features": d.features,
+        "receive": d.receive,
+        "receive_cap": d.receive_cap,
+        "message_ids": d.message_ids,
+        "created_precision_ms": d.created_precision_ms,
+        "start": d.start,
+    })
 }
 
 /// The `ChannelAccount` shape, plus the connection's permission check (`verify`):
@@ -60,6 +80,8 @@ pub struct AccountOut {
     /// Only your own accounts; `null` for bots.
     pub trigger: Option<Value>,
     pub features: ChannelFeatures,
+    /// How its messages come in, as its side declares (`null` without a declaration).
+    pub receive: Option<Receive>,
     /// Active spaces of this account.
     pub spaces: i64,
     pub permissions: Option<Value>,
@@ -102,6 +124,7 @@ pub fn providers(ch: &Channels) -> Vec<ProviderOut> {
         name: feishu::auth::PROVIDER_NAME.into(),
         features: ChannelFeatures::default(),
         adapter_installed: false,
+        sides: Vec::new(),
     }];
     let mut ids: Vec<String> = ch.decls().map(|d| d.adapter.clone()).collect();
     for a in ch.adapters() {
@@ -119,10 +142,14 @@ pub fn providers(ch: &Channels) -> Vec<ProviderOut> {
                     name,
                     features: ChannelFeatures::default(),
                     adapter_installed: false,
+                    sides: Vec::new(),
                 });
                 out.len() - 1
             }
         };
+        if let Some(d) = ch.decl(&id) {
+            out[k].sides.push(decl_summary(d));
+        }
         if !out[k].adapter_installed
             && ch.adapter(&id).is_some()
             && ch.connections().provider(&id).is_some()
@@ -257,6 +284,7 @@ pub fn out(
         rules,
         trigger,
         features: features_of(ch, &f.adapter),
+        receive: ch.decl(&f.adapter).map(|d| d.receive),
         spaces,
         permissions,
         missing_permissions,

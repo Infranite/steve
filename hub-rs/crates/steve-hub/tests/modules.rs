@@ -975,6 +975,20 @@ async fn connections_passkeys_and_github_are_mounted() {
         .filter_map(|a| a["id"].as_str())
         .collect();
     assert_eq!(adapters, ["feishu_app", "feishu_user"]);
+    // each with what its channel side declares and whom it pairs with
+    let user = &feishu["adapters"][1];
+    assert_eq!(user["identity"], "self");
+    assert_eq!(user["pairing"]["with"], json!(["feishu_app"]));
+    assert_eq!(user["channel"]["mode"], "self");
+    assert_eq!(user["channel"]["receive"], "poll");
+    assert_eq!(
+        user["channel"]["start"],
+        json!([{"kind": "oauth"}, {"kind": "device"}])
+    );
+    let app = &feishu["adapters"][0];
+    assert_eq!(app["channel"]["receive"], "long_connection");
+    assert_eq!(app["channel"]["start"], json!([{"kind": "form"}]));
+    assert_eq!(app["pairing"], Value::Null);
     assert!(
         feishu["areas"]
             .to_string()

@@ -17,7 +17,9 @@ export type RAccount = {
   connection: RConnBrief | null; vault_items: { id: string; title: string }[]; revision: number
 }
 export type ConnStatus = "ok" | "reauth" | "error" | "paused" | "revoked"
-export type RConnection = { id: string; account_id: string; adapter: string; auth: "oauth" | "credential" | "none"; status: ConnStatus; caps: string[]; available_caps: string[]; health: { last_ok: number; last_error: string; error_at: number }; last_sync: number | null }
+export type RConnection = { id: string; account_id: string; adapter: string; auth: "oauth" | "credential" | "none"; status: ConnStatus; caps: string[]; available_caps: string[]; health: { last_ok: number; last_error: string; error_at: number }; last_sync: number | null
+  /** the Hub has its adapter (absent on older Hubs: installed) */
+  installed?: boolean }
 export type RFieldDef = { key: string; label: string; secret: boolean; required: boolean; type: "text" | "password" | "number" | "select"; default?: string; hint?: string }
 export type RAdapter = { id: string; system: string; name: string; auth: "oauth" | "credential" | "managed" | "none"; caps: string[]; device: boolean; fields?: RFieldDef[] }
 export type RMatchRule = { id: string; family: string; kind: string; config: { same_org_only: boolean; exclude: string[]; min_len: number }; enabled: boolean; updated: number }
@@ -72,3 +74,6 @@ export const kindLabel = (k: string) => KIND_LABEL[k] ?? k
 export const CONN_STATUS: Record<ConnStatus, [string, string]> = lazy({
   ok: () => [t("api:connStatus.ok"), "done"], reauth: () => [t("api:connStatus.reauth"), "wait"], error: () => [t("api:connStatus.error"), "fail"], paused: () => [t("api:connStatus.paused"), "pause"], revoked: () => [t("api:connStatus.revoked"), "drop"],
 })
+/** a connection's status label and dot; 适配器未安装 when the Hub doesn't have its adapter */
+export const connStatusOf = (c: { status: ConnStatus | string; installed?: boolean }): [string, string] =>
+  c.installed === false ? [t("api:connStatus.notInstalled"), "fail"] : CONN_STATUS[c.status as ConnStatus] ?? [c.status, "idle"]

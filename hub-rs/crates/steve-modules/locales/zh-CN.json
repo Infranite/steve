@@ -239,6 +239,7 @@
   "modules.connections.no_device_flow": "%{provider} 不支持设备码登录",
   "modules.connections.needs_reauth": "这个连接要重新授权，不能直接填凭据",
   "modules.connections.revoked": "这个连接已经断开了",
+  "modules.connections.not_installed": "适配器未安装（%{adapter}）：装回这个适配器后才能测试和重新授权；可以先断开",
   "modules.connections.pair.not_paired": "这种连接不和别的连接配对",
   "modules.connections.pair.wrong": "「%{name}」不能和这个连接配对",
   "modules.connections.pair.revoked": "要配对的连接已经断开了",

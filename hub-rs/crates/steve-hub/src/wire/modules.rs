@@ -428,6 +428,13 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
     for p in &declared.providers {
         conns = conns.provider(p.clone());
     }
+    // what each channel side declares, for the 接入 page
+    for d in declared.decls() {
+        conns = conns.channel(
+            &d.adapter,
+            steve_channels::channel_accounts::decl_summary(d),
+        );
+    }
     let conns = conns.build();
     // a connection stored under another shape than its provider's now waits for a new
     // authorization instead of running on it

@@ -13,6 +13,7 @@ import { t as tr, useT } from "@/i18n"
 import { useLoad } from "@/accounts/load"
 import { CONN_STATUS } from "@/api/accounts"
 import { ConnectDialog } from "@/accounts/dialogs"
+import { botAdapterIds } from "@/integrations/sides"
 import { integrationsApi, areaLabel, asAdapter, installationsOf, type IAdapter, type IInstallation, type IProvider, type Integrations } from "@/api/integrations"
 import { channelsApi } from "@/api/channels"
 import { cleanupApi, type Leftover } from "@/api/cleanup"
@@ -126,7 +127,8 @@ function ProviderView({ p, x, reload }: { p: IProvider; x: Integrations; reload:
   // the identities' defaults (rules, /bot, persona) and their groups; absent on a Hub without 渠道
   const C = useLoad(() => (p.connections.some((c) => c.capabilities.some((a) => a.area === "channel" && a.state !== "planned")) ? channelsApi.accounts() : Promise.resolve([])), [p.id, p.connections.length], ["connection", "space", "channel"])
   const chans = C.s === "ok" ? C.data : null
-  const bots = p.connections.filter((c) => c.adapter === "feishu_app").map((c) => {
+  const botIds = botAdapterIds(p.adapters), selfIds = p.adapters.filter((a) => a.identity === "self").map((a) => a.id)
+  const bots = p.connections.filter((c) => botIds.includes(c.adapter)).map((c) => {
     const raw = c.detail && "domain" in c.detail ? c.detail.domain : undefined
     const domain: "feishu" | "lark" | undefined = raw === "lark" ? "lark" : raw === "feishu" ? "feishu" : undefined
     return { id: c.id, name: c.name || c.handle, domain }
@@ -142,7 +144,7 @@ function ProviderView({ p, x, reload }: { p: IProvider; x: Integrations; reload:
             <div className="flex flex-col gap-6">{insts.map((i) => <InstallationCard key={i.id} inst={i} p={p} chans={chans} onChange={reload} />)}</div></section>
           : <section><SectionLabel>{t("integrations:page.connectedSection", { n: 0 })}</SectionLabel><Hint data-not-connected>{t("integrations:page.notConnectedHint", { name: p.name })}</Hint></section>}
         {!planned && <Leftovers p={p} />}
-        {p.id === "feishu" ? <FeishuGuide adapters={p.adapters} bots={bots} selfDone={p.connections.some((c) => c.adapter === "feishu_user")} callbackUrls={x.callback_urls} />
+        {p.id === "feishu" ? <FeishuGuide adapters={p.adapters} bots={bots} selfDone={p.connections.some((c) => selfIds.includes(c.adapter))} callbackUrls={x.callback_urls} />
           : !planned && <WaysIn p={p} onConnect={setDlg} />}
         {!insts.length && <section><SectionLabel>{t("integrations:page.whatItDoes")}</SectionLabel>
           <Group>{[...p.areas].sort((x, y) => +(x.state === "planned") - +(y.state === "planned")).map((a) => <Row key={a.area} title={areaLabel(a.area)} sub={areaNote(p, a.area)} data-area={a.area} data-area-state={a.state}>
