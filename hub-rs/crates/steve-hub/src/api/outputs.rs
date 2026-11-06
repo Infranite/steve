@@ -19,6 +19,8 @@ use crate::config::home_dir;
 use crate::error::{ApiError, json_response};
 use crate::files::disposition;
 
+mod node;
+
 /// Text shown inline; longer files are cut and say so.
 const TEXT_MAX: usize = 512 * 1024;
 /// A diff beyond this is cut.
@@ -28,6 +30,7 @@ const RAW_MAX: u64 = 64 * 1024 * 1024;
 const LIST_MAX: usize = 500;
 
 /// One output with what is needed to find it.
+#[derive(Clone)]
 pub(crate) struct Out {
     pub kind: String,
     pub title: String,
@@ -39,54 +42,74 @@ pub(crate) struct Out {
     pub roots: Vec<PathBuf>,
 }
 
-async fn load(st: &AppState, ws: &str, id: &str, art: &str) -> Result<Out, ApiError> {
-    let (ws, id, art, cfg) = (
+/// The temp directories an output may be in: the Hub's own.
+fn temp_dirs() -> Vec<PathBuf> {
+    vec![std::env::temp_dir(), "/tmp".into()]
+}
+
+/// The output, and where its Node reads it ([`node::view`]); no view: the Hub reads its own disk.
+async fn load(
+    st: &AppState,
+    ws: &str,
+    id: &str,
+    art: &str,
+) -> Result<(Out, Option<node::View>), ApiError> {
+    let (ws, item, art, cfg) = (
         ws.to_string(),
         id.to_string(),
         art.to_string(),
         st.cfg.clone(),
     );
-    st.read(move |r| {
-        let i = own(r.item_get(&id)?, &ws, Noun::Item)?;
-        let a = r
-            .artifacts_list(&id)?
-            .into_iter()
-            .find(|a| str_of(a, "id") == art)
-            .ok_or_else(|| BackendError::not_found(steve_i18n::t!("hub.not_found.output")))?;
-        let opt = |o: &crate::backend::Obj, k: &str| {
-            o.get(k)
-                .and_then(Value::as_str)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
-        };
-        let project = match opt(&i, "project_id") {
-            Some(p) => r
-                .project_get(&p)?
-                .filter(|p| p.get("workspace_id").and_then(Value::as_str) == Some(ws.as_str()))
+    let id = item.clone();
+    let (o, project) = st
+        .read(move |r| {
+            let i = own(r.item_get(&id)?, &ws, Noun::Item)?;
+            let a = r
+                .artifacts_list(&id)?
+                .into_iter()
+                .find(|a| str_of(a, "id") == art)
+                .ok_or_else(|| BackendError::not_found(steve_i18n::t!("hub.not_found.output")))?;
+            let opt = |o: &crate::backend::Obj, k: &str| {
+                o.get(k)
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+            };
+            let row = match opt(&i, "project_id") {
+                Some(p) => r
+                    .project_get(&p)?
+                    .filter(|p| p.get("workspace_id").and_then(Value::as_str) == Some(ws.as_str())),
+                None => None,
+            };
+            let project_id = row.as_ref().and_then(|p| opt(p, "id"));
+            let project = row
                 .and_then(|p| opt(&p, "path"))
-                .map(|p| PathBuf::from(super::projects::expand(&p))),
-            None => None,
-        };
-        let cwd = opt(&i, "cwd").map(PathBuf::from);
-        let mut roots: Vec<PathBuf> = [cwd.clone(), project.clone()]
-            .into_iter()
-            .flatten()
-            .collect();
-        roots.push(cfg.worktrees.join(&id));
-        roots.push(cfg.scratch.join(&id));
-        roots.push(std::env::temp_dir());
-        roots.push("/tmp".into());
-        Ok(Out {
-            kind: str_of(&a, "kind"),
-            title: str_of(&a, "title"),
-            loc: opt(&a, "location"),
-            cwd,
-            project,
-            branch: opt(&i, "branch"),
-            roots,
+                .map(|p| PathBuf::from(super::projects::expand(&p)));
+            let cwd = opt(&i, "cwd").map(PathBuf::from);
+            let mut roots: Vec<PathBuf> = [cwd.clone(), project.clone()]
+                .into_iter()
+                .flatten()
+                .collect();
+            roots.push(cfg.worktrees.join(&id));
+            roots.push(cfg.scratch.join(&id));
+            roots.extend(temp_dirs());
+            let o = Out {
+                kind: str_of(&a, "kind"),
+                title: str_of(&a, "title"),
+                loc: opt(&a, "location"),
+                cwd,
+                project,
+                branch: opt(&i, "branch"),
+                roots,
+            };
+            Ok((o, project_id))
         })
-    })
-    .await
+        .await?;
+    let v = match st.workspaces.clone() {
+        Some(ws) => node::view(ws, item, project, &o, temp_dirs()).await?,
+        None => None,
+    };
+    Ok((o, v))
 }
 
 pub async fn preview(
@@ -95,8 +118,18 @@ pub async fn preview(
     Path((id, art)): Path<(String, String)>,
     Query(q): Query<HashMap<String, String>>,
 ) -> ApiResult {
-    let o = load(&st, &c.ws, &id, &art).await?;
-    ok(blocking(move || Ok(describe(&o, q.get("path").map(String::as_str)))).await?)
+    let (o, v) = load(&st, &c.ws, &id, &art).await?;
+    let sub = q.get("path").cloned();
+    match v {
+        None => ok(blocking(move || Ok(describe(&o, sub.as_deref()))).await?),
+        Some(v) => ok(node::describe(o, v, sub).await?),
+    }
+}
+
+/// Where the bytes of a raw output come from.
+enum Src {
+    Disk(PathBuf),
+    Node(node::Addr, node::Entry),
 }
 
 pub async fn raw(
@@ -106,31 +139,55 @@ pub async fn raw(
     Query(q): Query<HashMap<String, String>>,
     headers: HeaderMap,
 ) -> ApiResult {
-    let o = load(&st, &c.ws, &id, &art).await?;
+    let (o, v) = load(&st, &c.ws, &id, &art).await?;
     let sub = q.get("path").cloned();
-    let p = blocking(move || match locate(&o, sub.as_deref()) {
-        Ok(Found::Disk(p, _)) if p.is_file() => Ok(p),
-        Ok(_) => Err(ApiError::not_found(steve_i18n::t!("hub.output.not_a_file"))),
-        Err(e) => Err(ApiError::not_found(e)),
-    })
-    .await?;
-    let size = tokio::fs::metadata(&p).await.map(|m| m.len()).unwrap_or(0);
+    fn not_a_file() -> ApiError {
+        ApiError::not_found(steve_i18n::t!("hub.output.not_a_file"))
+    }
+    fn on_disk(f: Result<Found, String>) -> Result<PathBuf, ApiError> {
+        match f {
+            Ok(Found::Disk(p, _)) if p.is_file() => Ok(p),
+            Ok(_) => Err(not_a_file()),
+            Err(e) => Err(ApiError::not_found(e)),
+        }
+    }
+    let src = match &v {
+        None => Src::Disk(blocking(move || on_disk(locate(&o, sub.as_deref()))).await?),
+        Some(v) => match node::locate(&o, v, sub.as_deref()).await {
+            Ok(node::Located::Node(a, e)) if !e.is_dir() => Src::Node(a, e),
+            Ok(node::Located::Disk(f)) => Src::Disk(blocking(move || on_disk(Ok(f))).await?),
+            Ok(_) => return Err(not_a_file()),
+            Err(node::Fail::Missing(r)) => return Err(ApiError::not_found(r)),
+            Err(node::Fail::Api(e)) => return Err(e),
+        },
+    };
+    let (size, name) = match &src {
+        Src::Disk(p) => (
+            tokio::fs::metadata(p).await.map(|m| m.len()).unwrap_or(0),
+            p.file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+        ),
+        Src::Node(a, e) => (e.size(), a.name()),
+    };
     if size > RAW_MAX {
         return Err(ApiError::Json(
             413,
             steve_i18n::t!("hub.output.too_large", size = human(size)),
         ));
     }
-    let Ok(file) = tokio::fs::File::open(&p).await else {
-        return Ok(json_response(
-            404,
-            &json!({ "error": steve_i18n::t!("hub.output.file_gone") }),
-        ));
+    let file = match &src {
+        Src::Disk(p) => match tokio::fs::File::open(p).await {
+            Ok(f) => Some(f),
+            Err(_) => {
+                return Ok(json_response(
+                    404,
+                    &json!({ "error": steve_i18n::t!("hub.output.file_gone") }),
+                ));
+            }
+        },
+        Src::Node(..) => None,
     };
-    let name = p
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
     let (form, mime) = media(&name);
     let inline = form.is_some() && q.get("download").map(String::as_str) != Some("1");
     let total = size as usize;
@@ -144,11 +201,18 @@ pub async fn raw(
         None => (200, (0, total), None),
     };
     // only the requested span is read, as it is sent
-    let Ok(body) = stream_file(file, start as u64, len as u64).await else {
-        return Ok(json_response(
-            404,
-            &json!({ "error": steve_i18n::t!("hub.output.file_gone") }),
-        ));
+    let body = match (src, file) {
+        (Src::Node(a, e), _) => node::stream(a, &e, start as u64, len as u64),
+        (Src::Disk(_), Some(file)) => match stream_file(file, start as u64, len as u64).await {
+            Ok(body) => body,
+            Err(_) => {
+                return Ok(json_response(
+                    404,
+                    &json!({ "error": steve_i18n::t!("hub.output.file_gone") }),
+                ));
+            }
+        },
+        (Src::Disk(_), None) => unreachable!("opened above"),
     };
     let mut res = Response::new(body);
     *res.status_mut() = axum::http::StatusCode::from_u16(status).unwrap_or_default();
@@ -234,17 +298,27 @@ pub(crate) fn describe(o: &Out, sub: Option<&str>) -> Value {
         }
     }
     match locate(o, sub) {
-        Ok(Found::Disk(p, shown)) if p.is_dir() => dir(&p, &shown),
-        Ok(Found::Disk(p, shown)) => file(&p, &shown),
-        Ok(Found::Git(rev, rel, text)) => {
-            let name = rel.rsplit('/').next().unwrap_or(&rel).to_string();
-            let mut v = text_value(&name, text.as_bytes());
-            v["path"] = json!(rel);
-            v["from"] = json!(format!("git {rev}"));
-            v
-        }
+        Ok(f) => shown(f),
         Err(e) => json!({ "type": "missing", "reason": e }),
     }
+}
+
+/// The preview of what [`locate`] found.
+fn shown(f: Found) -> Value {
+    match f {
+        Found::Disk(p, shown) if p.is_dir() => dir(&p, &shown),
+        Found::Disk(p, shown) => file(&p, &shown),
+        Found::Git(rev, rel, text) => from_git(&rev, &rel, &text),
+    }
+}
+
+/// A document git still has at `rev`.
+fn from_git(rev: &str, rel: &str, text: &str) -> Value {
+    let name = rel.rsplit('/').next().unwrap_or(rel).to_string();
+    let mut v = text_value(&name, text.as_bytes());
+    v["path"] = json!(rel);
+    v["from"] = json!(format!("git {rev}"));
+    v
 }
 
 pub(crate) enum Found {
@@ -290,14 +364,9 @@ pub(crate) fn locate(o: &Out, sub: Option<&str>) -> Result<Found, String> {
         if !abs
             && sub.is_none()
             && plain(&loc).is_some()
-            && let Some(g) = git_dir(o)
+            && let Some(g) = git_doc(o, &loc)
         {
-            let revs = o.branch.iter().cloned().chain(["HEAD".to_string()]);
-            for rev in revs {
-                if let Ok(t) = git(&g, &["show", &format!("{rev}:{loc}")]) {
-                    return Ok(Found::Git(rev, loc.clone(), t));
-                }
-            }
+            return Ok(g);
         }
         return Err(steve_i18n::t!("hub.output.cleaned_up", loc = loc));
     };
@@ -323,6 +392,18 @@ pub(crate) fn locate(o: &Out, sub: Option<&str>) -> Result<Found, String> {
             ))
         }
     }
+}
+
+/// The document `loc` as the item's branch, else HEAD, has it in the item's git repository.
+fn git_doc(o: &Out, loc: &str) -> Option<Found> {
+    let g = git_dir(o)?;
+    let revs = o.branch.iter().cloned().chain(["HEAD".to_string()]);
+    for rev in revs {
+        if let Ok(t) = git(&g, &["show", &format!("{rev}:{loc}")]) {
+            return Some(Found::Git(rev, loc.to_string(), t));
+        }
+    }
+    None
 }
 
 fn home_tilde(p: &FsPath) -> String {
@@ -701,11 +782,11 @@ mod tests {
         assert_eq!(&read(9, 1).await[..], b"9");
     }
 
-    fn g(dir: &FsPath, args: &[&str]) -> String {
+    pub(super) fn g(dir: &FsPath, args: &[&str]) -> String {
         git(dir, args).unwrap_or_else(|e| panic!("git {args:?}: {e}"))
     }
     /// A repo on main with one commit.
-    fn repo(root: &FsPath) -> PathBuf {
+    pub(super) fn repo(root: &FsPath) -> PathBuf {
         let r = root.join("repo");
         std::fs::create_dir_all(&r).unwrap();
         g(&r, &["init", "-q", "-b", "main"]);
@@ -718,7 +799,7 @@ mod tests {
         r
     }
 
-    fn out(
+    pub(super) fn out(
         kind: &str,
         title: &str,
         loc: Option<&str>,

@@ -44,6 +44,22 @@ pub fn binding_for(
     perm: Option<&str>,
     allows: &dyn Fn(&RootPath) -> bool,
 ) -> Option<Binding> {
+    binding_with(store, session, perm, allows, None)
+}
+
+/// [`binding_for`] on a Node that makes the items' worktrees (`worktrees`: Steve's worktrees
+/// directory, one of its roots). An item of a git project working on its own worktree there
+/// (`<worktrees>/<item id>` on its branch, made or not yet) gets a worktree plan at that very place:
+/// the Node makes it, adopts one that is there already only if it is that worktree, and makes it
+/// again after a tidy. An item whose workspace the Node first prepared as an existing directory
+/// keeps that plan (the same resource is never prepared otherwise).
+pub fn binding_with(
+    store: &Store,
+    session: &str,
+    perm: Option<&str>,
+    allows: &dyn Fn(&RootPath) -> bool,
+    worktrees: Option<&Path>,
+) -> Option<Binding> {
     let s = store.sessions().get(session).ok()??;
     if s.status == "ended" || s.readonly != 0 || s.device_id != "hub" || s.source != "Steve" {
         return None;
@@ -75,6 +91,7 @@ pub fn binding_for(
     } else {
         item.cwd.as_deref().filter(|p| !p.is_empty())
     };
+    let resource = format!("item:{}", item.id);
     let prepare = if let Some(cwd) = cwd {
         // Never replace a legacy workspace containing user changes with a fresh worktree.
         let path = Path::new(cwd);
@@ -88,7 +105,11 @@ pub fn binding_for(
         } else {
             at(cwd)?
         };
-        PrepareKind::Existing { dir }
+        let existing = PrepareKind::Existing { dir };
+        match worktrees.and_then(|w| item_worktree(store, &item, &s.workspace_id, path, w)) {
+            Some(wt) if prepared_as(store, &resource).is_none_or(|k| k != existing) => wt,
+            _ => existing,
+        }
     } else if let Some(pid) = &item.project_id {
         let p = store.projects().get(pid).ok()??;
         if p.workspace_id != s.workspace_id || p.device_id != "hub" || p.archived {
@@ -99,6 +120,13 @@ pub fn binding_for(
                 repository: at(&p.path)?,
                 branch: format!("steve/{}", item.id.to_lowercase()),
                 base: None,
+                at: match worktrees {
+                    Some(w) => Some(RootPath {
+                        root: root_id(w)?,
+                        rel: RelPath::new(item.id.clone()).ok()?,
+                    }),
+                    None => None,
+                },
             }
         } else {
             PrepareKind::Existing { dir: at(&p.path)? }
@@ -116,7 +144,7 @@ pub fn binding_for(
     }
     Some(Binding {
         session: s.id,
-        resource: format!("item:{}", item.id),
+        resource,
         prepare,
         choice: HarnessChoice {
             harness: s.harness,
@@ -133,6 +161,60 @@ pub fn binding_for(
             tools: GrantId::new("hub").ok()?,
         },
     })
+}
+
+/// The worktree plan of an item working at `cwd` when that is its own worktree in `worktrees`
+/// (`<worktrees>/<item id>`, on its branch, of its git project on the Hub's device).
+fn item_worktree(
+    store: &Store,
+    item: &steve_store::Item,
+    workspace: &str,
+    cwd: &Path,
+    worktrees: &Path,
+) -> Option<PrepareKind> {
+    let branch = item.branch.as_deref().filter(|b| !b.is_empty())?;
+    if cwd != worktrees.join(&item.id) {
+        return None;
+    }
+    let p = store.projects().get(item.project_id.as_deref()?).ok()??;
+    if p.workspace_id != workspace
+        || p.device_id != "hub"
+        || p.archived
+        || p.kind != "git"
+        || !p.worktree
+    {
+        return None;
+    }
+    Some(PrepareKind::Worktree {
+        repository: at(&p.path)?,
+        branch: branch.to_string(),
+        base: None,
+        at: Some(RootPath {
+            root: root_id(worktrees)?,
+            rel: RelPath::new(item.id.clone()).ok()?,
+        }),
+    })
+}
+
+/// How the local Node last prepared `resource`, as the Hub asked it (`None`: never).
+fn prepared_as(store: &Store, resource: &str) -> Option<PrepareKind> {
+    let request: String = store
+        .reader(|c| {
+            use rusqlite::OptionalExtension;
+            Ok::<_, StoreError>(
+                c.query_row(
+                    "SELECT request FROM node_commands WHERE node_id='local' AND method='prepare_workspace'
+                      AND json_extract(request,'$.body.resource')=? ORDER BY rowid DESC LIMIT 1",
+                    [resource],
+                    |r| r.get(0),
+                )
+                .optional()?,
+            )
+        })
+        .ok()??;
+    serde_json::from_str::<Command<Prepare>>(&request)
+        .ok()
+        .map(|c| c.body.kind)
 }
 
 /// The binding of a new session to the paired remote Node `node` (`STEVE_NODE_BIND`), or `None`
@@ -293,6 +375,48 @@ mod tests {
             })
             .unwrap();
         assert!(binding_for(&h.store, "s1", None, &|_| true).is_none());
+    }
+
+    /// An item the Node first prepared as an existing directory keeps that plan, also once its
+    /// worktree is gone: the core makes it before such a session is bound (only a worktree plan
+    /// is one the Node makes).
+    #[tokio::test]
+    async fn an_item_first_prepared_as_existing_keeps_it_with_its_worktree_gone() {
+        let h = fixture(vec![]).await;
+        let project = h.dir.path().join("project");
+        let worktrees = h.dir.path().join("worktrees");
+        let cwd = worktrees.join("i1");
+        h.store.transaction::<_,StoreError>(|tx|{
+            tx.execute("INSERT INTO projects(id,workspace_id,name,path,kind,worktree,created,updated) VALUES('p1','default','project',?,'git',1,1,1)",[project.to_str().unwrap()])?;
+            tx.execute("UPDATE items SET project_id='p1', branch='steve/i1', cwd=?1 WHERE id='i1'",[cwd.to_str().unwrap()])?;
+            tx.execute("UPDATE sessions SET cwd=? WHERE id='s1'",[cwd.to_str().unwrap()])?;
+            Ok(())
+        }).unwrap();
+        let plan = || binding_with(&h.store, "s1", None, &|_| true, Some(&worktrees)).unwrap();
+        assert!(matches!(plan().prepare, PrepareKind::Worktree { .. }));
+        let existing = PrepareKind::Existing {
+            dir: RootPath {
+                root: root_id(&worktrees).unwrap(),
+                rel: RelPath::new("i1").unwrap(),
+            },
+        };
+        let c = Command {
+            id: OperationId::new("op_prep_s0").unwrap(),
+            issued_at: Timestamp(1),
+            accept_before: Timestamp(2),
+            grant: GrantId::new("hub").unwrap(),
+            body: Prepare {
+                resource: "item:i1".into(),
+                kind: existing.clone(),
+            },
+        };
+        let req = serde_json::to_string(&c).unwrap();
+        h.store.transaction::<_,StoreError>(|tx|{
+            tx.execute("INSERT INTO node_commands(operation_id,node_id,method,request,digest,state,created,updated) VALUES('op_prep_s0','local','prepare_workspace',?,'d','finished',1,1)",[req])?;
+            Ok(())
+        }).unwrap();
+        assert!(!cwd.exists());
+        assert_eq!(plan().prepare, existing);
     }
 }
 
@@ -556,15 +680,32 @@ mod host_tests {
         let off: Vars = Arc::new(|_| None);
         let mut jobs = vec![];
         assert!(
-            super::super::node_runtime(&cfg, &store, Arc::new(Ends), &off, &mut jobs)
-                .unwrap()
-                .is_none()
+            super::super::node_runtime(
+                &cfg,
+                &store,
+                Arc::new(Ends),
+                &off,
+                &super::super::node_secrets::NodeSecrets::new(),
+                &mut jobs
+            )
+            .unwrap()
+            .is_none()
         );
         assert!(jobs.is_empty());
         assert!(!cfg.data_dir.join("node").exists());
         let on: Vars = Arc::new(|k| (k == "STEVE_NODE_MODE").then(|| "local".into()));
         cfg.no_resume = true;
-        assert!(super::super::node_runtime(&cfg, &store, Arc::new(Ends), &on, &mut jobs).is_err());
+        assert!(
+            super::super::node_runtime(
+                &cfg,
+                &store,
+                Arc::new(Ends),
+                &on,
+                &super::super::node_secrets::NodeSecrets::new(),
+                &mut jobs
+            )
+            .is_err()
+        );
         cfg.no_resume = false;
         let fake = Path::new(env!("CARGO_MANIFEST_DIR")).join("../steve-acp/tests/fake-acp.js");
         cfg.adapters = std::collections::BTreeMap::from([(
@@ -580,9 +721,16 @@ mod host_tests {
             runtime: rt,
             tools,
             node,
-        } = super::super::node_runtime(&cfg, &store, Arc::new(Ends), &on, &mut jobs)
-            .unwrap()
-            .unwrap();
+        } = super::super::node_runtime(
+            &cfg,
+            &store,
+            Arc::new(Ends),
+            &on,
+            &super::super::node_secrets::NodeSecrets::new(),
+            &mut jobs,
+        )
+        .unwrap()
+        .unwrap();
         tools.install(Arc::new(NoTools)).unwrap();
         for job in jobs {
             job.await;
@@ -659,9 +807,16 @@ mod host_tests {
             runtime: rt,
             tools,
             node,
-        } = super::super::node_runtime(&cfg, &store, Arc::new(Ends), &on, &mut jobs)
-            .unwrap()
-            .unwrap();
+        } = super::super::node_runtime(
+            &cfg,
+            &store,
+            Arc::new(Ends),
+            &on,
+            &super::super::node_secrets::NodeSecrets::new(),
+            &mut jobs,
+        )
+        .unwrap()
+        .unwrap();
         tools.install(Arc::new(NoTools)).unwrap();
         for job in jobs {
             job.await;
@@ -695,6 +850,7 @@ mod host_tests {
                 None,
                 vec![],
             ),
+            worktrees: None,
         };
         let bound = |sid: &str| -> i64 {
             store

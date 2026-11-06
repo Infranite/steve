@@ -6,10 +6,13 @@
 //!   the changed ones through [`index::run_batch`] (which compares `sha256` after reading);
 //! - [`FolderLoader`]: reads one file for the index, re-checking that it is still inside the root;
 //! - [`spawn_scans`]: the `kb.folder_scan` job, started by the integrator;
+//! - through a Node when the Hub wires one ([`super::folder_node`]): the Node walks and reads, the
+//!   rest stays here;
 //! - the source writes (`POST/PATCH/DELETE /kb/sources`, `POST /kb/sources/:id/sync`).
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use rusqlite::{Connection, OptionalExtension};
@@ -24,6 +27,7 @@ use crate::index::{self, BATCH, BoxFuture, DocLoader, Loaded};
 use crate::repo::{self, DocRow, NewDoc, SourceRow};
 use crate::scan::{self, MAX_FILE_BYTES, Rules};
 use crate::service;
+use crate::sources::folder_node::{self, NodeFolders, NodeRead};
 use crate::sources::{is_builtin, source_json};
 use crate::state::Knowledge;
 
@@ -263,8 +267,10 @@ fn read_inside(root: &Path, rel: &str) -> Read {
     }
 }
 
-/// Reads folder files for the index queue.
-pub struct FolderLoader;
+/// Reads folder files for the index queue (through the folder's Node when one is wired).
+pub struct FolderLoader {
+    pub(crate) nodes: Arc<NodeFolders>,
+}
 
 impl DocLoader for FolderLoader {
     fn kinds(&self) -> &[&str] {
@@ -280,6 +286,15 @@ impl DocLoader for FolderLoader {
         let rel = doc.r#ref.clone();
         let mime = doc.mime.clone();
         Box::pin(async move {
+            match self.nodes.load(&source.id, &doc.id, &rel).await {
+                NodeRead::Hub => {}
+                NodeRead::Bytes(b) => return load_bytes(format_of(&mime, &rel, &b), b).await,
+                NodeRead::Gone => return Loaded::Gone,
+                NodeRead::TooBig => return Loaded::Skipped(TOO_BIG.into()),
+                NodeRead::Refused(why) => return Loaded::Failed(why.into()),
+                NodeRead::Changed => return Loaded::Retry { now: true },
+                NodeRead::Offline | NodeRead::Unsettled => return Loaded::Retry { now: false },
+            }
             let Some(root) = root else {
                 return Loaded::Failed("这个来源没有设置文件夹".into());
             };
@@ -464,17 +479,44 @@ async fn run(
 ) -> std::result::Result<(SyncReport, Value), String> {
     let root = folder_root(src).ok_or("这个来源没有设置文件夹")?;
     let rules = rules_of(src);
+    let place = match kb.folder_nodes().places() {
+        Some(p) => p
+            .place(&src.id, true)
+            .await
+            .map_err(|u| folder_node::unplaced(&u))?,
+        None => None,
+    };
     let policy = kb.folder_policy().clone();
+    let walk_here = place.is_none();
     let walked = tokio::task::spawn_blocking(move || {
         // The stored path was canonical and allowed; it must still be both (a link may have moved).
         let c = check_path(&policy, &root.to_string_lossy()).map_err(|r| refusal(&r))?;
         if c != root {
             return Err("文件夹的位置变了（路径经过的链接指向了别处），请重新添加".to_string());
         }
-        scan::walk(&root, &rules).map_err(|e| format!("文件夹读不出来：{e}"))
+        if !walk_here {
+            return Ok(None);
+        }
+        scan::walk(&root, &rules)
+            .map(Some)
+            .map_err(|e| format!("文件夹读不出来：{e}"))
     })
     .await
     .map_err(|_| "扫描文件夹时出错".to_string())??;
+    // through the Node: every page read, or nothing is touched
+    let (walked, versions) = match (walked, place) {
+        (Some(w), _) => (w, None),
+        (None, Some(place)) => {
+            let s = folder_node::scan(
+                &place,
+                str_list(&src.config, "include"),
+                str_list(&src.config, "exclude"),
+            )
+            .await?;
+            (s.walk, Some(s.versions))
+        }
+        (None, None) => return Err("扫描文件夹时出错".to_string()),
+    };
 
     let now = m.clock.now();
     let mut rep = SyncReport {
@@ -494,6 +536,14 @@ async fn run(
     .await
     .map_err(|e| format!("同步失败：{e}"))?;
     rep.changed = changed.len();
+    if let Some(versions) = versions {
+        kb.folder_nodes().remember(
+            changed
+                .iter()
+                .filter_map(|(id, rel)| Some((id.clone(), versions.get(rel)?.clone()))),
+        );
+    }
+    let changed: Vec<String> = changed.into_iter().map(|(id, _)| id).collect();
     for batch in changed.chunks(BATCH) {
         index::run_batch(m, kb, batch)
             .await
@@ -520,20 +570,21 @@ async fn run(
 }
 
 /// Brings the documents in line with the walk: new files inserted, files whose `(mtime, size)`
-/// changed reactivated, vanished files `deleted` (index rows removed). Returns the ids to index.
+/// changed reactivated, vanished files `deleted` (index rows removed). Returns the ids to index,
+/// with their paths.
 ///
 /// Only a complete walk deletes: when part of the folder was not seen (an unreadable
 /// directory, over the file limit), a missing file is no proof it is gone, so its document is
 /// `kept`. Paths the walk saw but could not read (`held`) are never deleted: a link out of the
-/// folder fails its document with [`OUTSIDE`] (chunks removed, as the loader does), an
-/// unreadable path keeps its document as it is.
+/// folder fails its document with [`OUTSIDE`] (chunks removed, as the loader does), one the
+/// Node refuses with [`folder_node::DENIED`], an unreadable path keeps its document as it is.
 fn reconcile(
     tx: &Tx,
     src: &SourceRow,
     w: &scan::Walk,
     now: i64,
     rep: &mut SyncReport,
-) -> Result<Vec<String>> {
+) -> Result<Vec<(String, String)>> {
     if repo::source(tx, &src.id)?.is_none() {
         return Ok(Vec::new()); // deleted meanwhile
     }
@@ -581,7 +632,7 @@ fn reconcile(
         seen.insert(&e.rel);
         let (id, moved) = upsert(e)?;
         if moved {
-            changed.push(id);
+            changed.push((id, e.rel.clone()));
         }
     }
     for e in &w.too_big {
@@ -595,10 +646,15 @@ fn reconcile(
     for (rel, d) in &existing {
         if !seen.contains(rel.as_str()) && d.status != "deleted" {
             let why = held.get(rel.as_str()).copied();
-            if why == Some(scan::Held::Outside)
-                && (d.status != "failed" || d.error.as_deref() != Some(OUTSIDE))
+            let fails = match why {
+                Some(scan::Held::Outside) => Some(OUTSIDE),
+                Some(scan::Held::Denied) => Some(folder_node::DENIED),
+                _ => None,
+            };
+            if let Some(error) = fails
+                && (d.status != "failed" || d.error.as_deref() != Some(error))
             {
-                index::fail_doc(tx, d, "failed", OUTSIDE, now)?;
+                index::fail_doc(tx, d, "failed", error, now)?;
             }
             if !w.complete() || why.is_some() {
                 rep.kept += 1;

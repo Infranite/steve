@@ -12,6 +12,9 @@
 //! ([`Workspaces::refresh_roots`]), so a new project needs no restart (only configured roots,
 //! D11: no "anywhere under ~").
 //!
+//! An item's git (the closing gate, the release, the completion probe) is read in its bound
+//! workspace through [`super::item_git::ItemGit`] (N0e-E11b).
+//!
 //! Workspace operations that change things go through the ledger
 //! ([`super::node_runtime::NodeRuntime::submit`]) of [`Placement::runtime`].
 
@@ -95,6 +98,9 @@ pub enum PlacementError {
     NotFound(Kind),
     /// It has no files anywhere yet (an item with no project, cwd or bound session).
     NoWorkspace,
+    /// A directory of the Hub's own device under none of the local Node's roots (D11: only
+    /// configured roots, no "anywhere under ~").
+    Outside,
     Store(StoreError),
 }
 
@@ -108,6 +114,7 @@ impl std::fmt::Display for PlacementError {
             Self::NotFound(Kind::Session) => steve_i18n::t!("hub.not_found.session"),
             Self::NotFound(Kind::KbSource) => steve_i18n::t!("hub.not_found.kb_source"),
             Self::NoWorkspace => steve_i18n::t!("hub.workspaces.no_workspace"),
+            Self::Outside => steve_i18n::t!("hub.workspaces.outside"),
             Self::Store(e) => return write!(f, "{e}"),
         };
         f.write_str(&text)
@@ -208,6 +215,56 @@ impl Workspaces {
         })
     }
 
+    /// The local Node's roots as the Hub configures them now (what [`Workspaces::refresh_roots`]
+    /// gives it). [`PlacementError::LocalOff`] without a local Node.
+    pub fn local_roots(&self) -> Result<Vec<steve_node::Root>, PlacementError> {
+        if self.local.is_none() {
+            return Err(PlacementError::LocalOff);
+        }
+        Ok(super::node_binding::roots(&self.store, &self.extra)?)
+    }
+
+    /// An absolute directory of the Hub's own device (a project's path being chosen) on the local
+    /// Node: under the deepest of [`Workspaces::local_roots`] that holds it, else
+    /// [`PlacementError::Outside`]. The Node checks the path itself (links included) when asked.
+    pub fn hub_path(&self, path: &Path) -> Result<Placement, PlacementError> {
+        let roots = self.local_roots()?;
+        let at = within(&roots, path).ok_or(PlacementError::Outside)?;
+        self.on(HUB_DEVICE, At::Root(at), "")
+    }
+
+    /// Whether an item's git is in a workspace on a Node: its latest session is bound to one, on
+    /// the local Node while it is on here or on a paired remote Node (reachable or not). A store
+    /// read only.
+    pub fn item_on_node(&self, item: &str) -> bool {
+        let bound = self.store.reader(|c| {
+            let latest: Option<String> = c
+                .query_row(
+                    "SELECT s.id FROM sessions s JOIN runtime_sessions r ON r.session_id=s.id
+                      WHERE s.item_id=? ORDER BY s.created DESC, s.rowid DESC LIMIT 1",
+                    [item],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            match latest {
+                Some(s) => bound_in(c, &s),
+                None => Ok(None),
+            }
+        });
+        match bound {
+            Ok(Some(Place::Bound(node, _))) => {
+                self.is_local(&node)
+                    || (node != HUB_DEVICE && node != "local" && self.fleet.is_some())
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether `p` is on the local Node (the Hub's own machine).
+    pub fn is_local_placement(&self, p: &Placement) -> bool {
+        self.is_local(p.node_id.as_str())
+    }
+
     fn is_local(&self, node: &str) -> bool {
         self.local
             .as_ref()
@@ -268,6 +325,75 @@ impl Workspaces {
             }
         }
     }
+}
+
+/// The knowledge folder sources' view of the router (N0e-E4): their Node scans and reads them.
+/// Wired only with the local Node on; a folder there is a read-only root.
+pub struct KbFolders(pub Arc<Workspaces>);
+
+#[async_trait::async_trait]
+impl steve_knowledge::sources::folder_node::FolderPlaces for KbFolders {
+    async fn place(
+        &self,
+        source: &str,
+        scanning: bool,
+    ) -> Result<
+        Option<steve_knowledge::sources::folder_node::FolderPlace>,
+        steve_knowledge::sources::folder_node::Unplaced,
+    > {
+        use steve_knowledge::sources::folder_node::{FolderPlace, Unplaced};
+        let (w, id) = (self.0.clone(), source.to_string());
+        // a folder just added is a root once the roots are built again; the scan needs it now
+        let placed = tokio::task::spawn_blocking(move || {
+            if scanning {
+                w.refresh_roots()?;
+            }
+            w.placement_of(Subject::KbSource(&id))
+        })
+        .await
+        .map_err(|e| Unplaced::Failed(e.to_string()))?;
+        match placed {
+            Ok(Placement {
+                node,
+                at: At::Root(root),
+                ..
+            }) => Ok(Some(FolderPlace {
+                files: node.clone(),
+                control: node,
+                root,
+            })),
+            Ok(_)
+            | Err(
+                PlacementError::NotFound(_) | PlacementError::NoWorkspace | PlacementError::Outside,
+            ) => Err(Unplaced::Nowhere),
+            Err(PlacementError::LocalOff) => Ok(None),
+            Err(PlacementError::Offline { .. }) => Err(Unplaced::Offline),
+            Err(PlacementError::Store(e)) => Err(Unplaced::Failed(e.to_string())),
+        }
+    }
+}
+
+/// `path` (absolute, normalized) as a place under the deepest root that holds it; the match is by
+/// whole path components, made on the names alone.
+pub(crate) fn within(roots: &[steve_node::Root], path: &Path) -> Option<RootPath> {
+    roots
+        .iter()
+        .filter_map(|r| {
+            let rest = path.strip_prefix(&r.path).ok()?;
+            let rel = rest
+                .components()
+                .map(|c| c.as_os_str().to_str())
+                .collect::<Option<Vec<_>>>()?
+                .join("/");
+            Some((r.path.components().count(), r.id.clone(), rel))
+        })
+        .max_by_key(|(depth, ..)| *depth)
+        .and_then(|(_, root, rel)| {
+            Some(RootPath {
+                root,
+                rel: RelPath::new(rel).ok()?,
+            })
+        })
 }
 
 enum Found {
@@ -444,6 +570,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path().join("hub.sqlite3"), steve_store::NoPublisher).unwrap();
         store.ensure_workspace().unwrap();
+        local_in(dir, store, remote)
+    }
+
+    /// [`local`] over `store`.
+    fn local_in(dir: tempfile::TempDir, store: Store, remote: bool) -> T {
         let extra = vec![dir.path().join("scratch")];
         std::fs::create_dir_all(&extra[0]).unwrap();
         let node = Arc::new(
@@ -468,6 +599,7 @@ mod tests {
                     execs: 0,
                 },
                 storage: Default::default(),
+                jobs: Default::default(),
             })
             .unwrap(),
         );
@@ -528,6 +660,44 @@ mod tests {
         .await
     }
 
+    #[test]
+    fn a_hub_path_is_under_the_deepest_root_that_holds_it() {
+        let root = |p: &str| steve_node::Root {
+            id: root_id(Path::new(p)).unwrap(),
+            display: "local workspace".into(),
+            path: PathBuf::from(p),
+            access: RootAccess::ReadWrite,
+        };
+        let roots = [root("/w/code"), root("/w/code/app")];
+        let at = within(&roots, Path::new("/w/code/app/src/x")).unwrap();
+        assert_eq!(at.root, roots[1].id);
+        assert_eq!(at.rel.as_str(), "src/x");
+        let at = within(&roots, Path::new("/w/code")).unwrap();
+        assert_eq!((at.root, at.rel.as_str()), (roots[0].id.clone(), ""));
+        // whole components only: /w/codex is not under /w/code
+        assert!(within(&roots, Path::new("/w/codex")).is_none());
+        assert!(within(&roots, Path::new("/w")).is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_new_projects_directory_is_read_only_under_the_local_roots() {
+        let t = local(false);
+        let p = t.dir.path().join("proj");
+        std::fs::create_dir_all(p.join("sub")).unwrap();
+        project(&t, "p1", "hub", p.to_str().unwrap());
+        let at = root_of(&t.ws.hub_path(&p.join("sub")).unwrap());
+        assert_eq!(at.root, root_id(&p).unwrap());
+        assert_eq!(at.rel.as_str(), "sub");
+        // not configured: no root, whatever is on the disk (no "anywhere under ~")
+        assert!(matches!(
+            t.ws.hub_path(t.dir.path()),
+            Err(PlacementError::Outside)
+        ));
+        // without the local Node the Hub reads its own disk
+        let off = Workspaces::new(t.store.clone(), None, None, vec![]);
+        assert!(matches!(off.hub_path(&p), Err(PlacementError::LocalOff)));
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_hub_device_is_the_local_node_and_any_other_is_offline() {
         let t = local(true);
@@ -568,6 +738,111 @@ mod tests {
             off.placement_of(Subject::Project("p1")),
             Err(PlacementError::LocalOff)
         ));
+    }
+
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let o = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "git {args:?}");
+        String::from_utf8_lossy(&o.stdout).trim().to_string()
+    }
+
+    /// N0e-E11b: an item's git is on its Node once a session of it is bound there; its facts are
+    /// read and a rebase applied in that workspace, the rebase through the ledger.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_items_git_is_read_and_rebased_on_its_node_once_bound() {
+        use steve_core::node_git::{Applied, Ask, NodeGit};
+        let t = local(false);
+        let cwd = t.dir.path().join("wt");
+        std::fs::create_dir_all(&cwd).unwrap();
+        for a in [
+            &["init", "-q", "-b", "main"][..],
+            &["config", "user.name", "t"],
+            &["config", "user.email", "t@example.com"],
+            &["commit", "-q", "--allow-empty", "-m", "a"],
+            &["checkout", "-q", "-b", "steve/i1"],
+            &["commit", "-q", "--allow-empty", "-m", "b"],
+            &["checkout", "-q", "main"],
+            &["commit", "-q", "--allow-empty", "-m", "c"],
+            &["checkout", "-q", "steve/i1"],
+        ] {
+            git(&cwd, a);
+        }
+        exec(
+            &t.store,
+            &format!(
+                "INSERT INTO items(id,workspace_id,no,title,status,stage,cwd,created,updated) VALUES ('i1','default',1,'t','run','执行','{c}',1,1);
+                 INSERT INTO sessions(id,workspace_id,item_id,harness,cwd,status,created,updated) VALUES ('s1','default','i1','claude-code','{c}','active',1,1);",
+                c = cwd.display(),
+            ),
+        );
+        t.ws.refresh_roots().unwrap();
+        let g = super::super::item_git::ItemGit::new(t.ws.clone());
+        // a legacy cwd: the Hub's own git, as before
+        assert!(!g.on_node("i1"));
+        let at = root_of(&t.ws.placement_of(Subject::Item("i1")).unwrap());
+        let r = prepare(&t.node, "op_i1", at).await.unwrap();
+        let w = loop {
+            match t.node.operation(r.operation.clone()).await.unwrap().state {
+                Observed::Finished {
+                    result: Some(OperationResult::Workspace(v)),
+                    ..
+                } => break v.workspace,
+                _ => tokio::time::sleep(Duration::from_millis(10)).await,
+            }
+        };
+        exec(
+            &t.store,
+            &format!(
+                "INSERT INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,updated) VALUES ('s1','local','{}','s1','r','ready',0);",
+                serde_json::to_string(&w).unwrap()
+            ),
+        );
+        assert!(g.on_node("i1"));
+        let f = g
+            .facts(
+                "i1",
+                Ask {
+                    reads: vec![GitRead::IsAncestor {
+                        ancestor: "main".into(),
+                        of: "HEAD".into(),
+                    }],
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(f.branch.as_deref(), Some("steve/i1"));
+        assert_eq!(f.reads[0].answer, GitAnswer::IsAncestor { yes: false });
+        let rt = t.ws.placement_of(Subject::Item("i1")).unwrap().runtime;
+        t.node.connect(
+            Arc::new(super::super::node_runtime::Sink(Arc::downgrade(&rt))),
+            None,
+        );
+        rt.start();
+        let rebase = || GitAction::Rebase {
+            onto: "main".into(),
+        };
+        let done = g.apply("i1", "rebase-d1", "release:i1", &f, rebase()).await;
+        let Applied::Done(after) = done else {
+            panic!("not rebased: {done:?}")
+        };
+        assert_eq!(git(&cwd, &["rev-parse", "HEAD"]), after.head);
+        git(&cwd, &["merge-base", "--is-ancestor", "main", "HEAD"]);
+        // on facts that moved since: refused, nothing done
+        let again = g.apply("i1", "rebase-d2", "release:i1", &f, rebase()).await;
+        let Applied::Failed(e) = again else {
+            panic!("applied on old facts: {again:?}")
+        };
+        assert_eq!(e.code, ErrorCode::Stale);
+        assert_eq!(git(&cwd, &["rev-parse", "HEAD"]), after.head);
+        // the local Node off: the Hub's own git again
+        let off = Workspaces::new(t.store.clone(), None, None, vec![]);
+        assert!(!super::super::item_git::ItemGit::new(off).on_node("i1"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -777,5 +1052,78 @@ mod tests {
             ws.placement_of(Subject::Project("pu")),
             Err(PlacementError::Offline { .. })
         ));
+    }
+
+    /// N0e-E4: with the local Node on, a knowledge folder is scanned and read by it (a read-only
+    /// root), and the Hub's index follows as it does without it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_knowledge_folder_is_scanned_and_read_by_the_local_node() {
+        use steve_knowledge::sources::folder::{self, FolderPolicy, SourceBody};
+        let env = steve_modules::testkit::TestEnv::new(|_| {});
+        let t = local_in(tempfile::tempdir().unwrap(), env.store().clone(), false);
+        let home = t.dir.path().canonicalize().unwrap().join("home");
+        let wiki = home.join("wiki");
+        std::fs::create_dir_all(wiki.join("sub")).unwrap();
+        std::fs::create_dir_all(home.join(".steve")).unwrap();
+        std::fs::write(wiki.join("a.md"), "# 甲\n苹果").unwrap();
+        std::fs::write(wiki.join("sub/b.md"), "---\ntitle: 香蕉页\n---\n香蕉").unwrap();
+        let kb = steve_knowledge::Knowledge::bare();
+        assert!(kb.set_folder_policy(FolderPolicy::new(&home, home.join(".steve"))));
+        assert!(kb.set_folder_places(Arc::new(KbFolders(t.ws.clone()))));
+        let m = &env.modules;
+        let who =
+            steve_modules::testkit::caller(steve_modules::testkit::WS, steve_modules::testkit::ME);
+        let src = folder::create(
+            m,
+            &kb,
+            &who,
+            SourceBody {
+                kind: "folder".into(),
+                name: "Wiki".into(),
+                path: wiki.to_string_lossy().into(),
+                include: None,
+                exclude: None,
+                visibility: None,
+                level: None,
+            },
+        )
+        .unwrap();
+        // no restart, no follow job here: the scan builds the roots it needs
+        let r = folder::sync_now(m, &kb, &src.id).await.unwrap().unwrap();
+        assert_eq!((r.files, r.changed, r.deleted), (2, 2, 0), "{r:?}");
+        let snap = t
+            .node
+            .snapshot(PageRequest {
+                cursor: None,
+                limit: 100,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            snap.entries.iter().filter(|e| e.method == "scan").count(),
+            1,
+            "scanned by the Node"
+        );
+        let docs = || {
+            let mut d = env
+                .store()
+                .reader(|c| steve_knowledge::repo::docs_of_source(c, &src.id))
+                .unwrap();
+            d.sort_by(|a, b| a.r#ref.cmp(&b.r#ref));
+            d
+        };
+        let d = docs();
+        assert_eq!(
+            d.iter()
+                .map(|d| (d.r#ref.as_str(), d.status.as_str(), d.title.as_str()))
+                .collect::<Vec<_>>(),
+            [("a.md", "active", "a"), ("sub/b.md", "active", "香蕉页")]
+        );
+        assert!(d.iter().all(|d| d.indexed.is_some() && d.chunks > 0));
+
+        std::fs::remove_file(wiki.join("a.md")).unwrap();
+        let r = folder::sync_now(m, &kb, &src.id).await.unwrap().unwrap();
+        assert_eq!(r.deleted, 1, "{r:?}");
+        assert_eq!(docs()[0].status, "deleted");
     }
 }

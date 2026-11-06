@@ -147,8 +147,9 @@ impl Tried {
         }
     }
 
-    /// A [`steve_print`] run in the gateway's terms: its error in Steve's words, its usage as rows.
-    fn of(ran: steve_print::Ran, codex: bool) -> Tried {
+    /// A [`steve_print`] run in the gateway's terms: its error in Steve's words, its usage as rows
+    /// (`codex`: the run was Codex's). A run elsewhere (a Node job) is put back into these terms too.
+    pub fn of(ran: steve_print::Ran, codex: bool) -> Tried {
         Tried {
             reply: ran
                 .reply

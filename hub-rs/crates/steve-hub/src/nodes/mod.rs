@@ -70,6 +70,9 @@ pub struct NodeService {
     /// Taken while a link is checked against the store and installed, and while the owner's
     /// revoke/pause/resume acts on the live link: one cannot slip between the other's steps.
     pub(crate) links: tokio::sync::Mutex<()>,
+    /// Vault uses' values for the commands given to each Node (set once at boot; without it a
+    /// Node's `secret.take` is `unsupported`).
+    pub secrets: std::sync::OnceLock<Arc<crate::wire::node_secrets::NodeSecrets>>,
 }
 
 const HUB_ID_KEY: &str = "node.hub_id";
@@ -112,6 +115,7 @@ impl NodeService {
             fleet,
             limiter: pairing::Limiter::default(),
             links: tokio::sync::Mutex::new(()),
+            secrets: std::sync::OnceLock::new(),
         }))
     }
 }

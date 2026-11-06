@@ -1,5 +1,6 @@
 //! The Hub's ledger of workspace operations that change things and must not run twice: a command
-//! run (`exec`) and a git action (`git_apply`: a merge, a rebase, a push). Each one is written to
+//! run (`exec`), a git action (`git_apply`: a merge, a rebase, a push) and giving a worktree back
+//! (`tidy_workspace`). Each one is written to
 //! `node_commands` with what it is for (its subject, kept in the stored request: D10, no
 //! migration) before it is sent, and goes out through the coordinator's sender like every other
 //! command.
@@ -14,10 +15,21 @@ use super::*;
 use serde::Serialize;
 
 /// The methods that go through the ledger.
-pub(super) const LEDGER_METHODS: [&str; 2] = ["exec", "git_apply"];
+pub(super) const LEDGER_METHODS: [&str; 3] = ["exec", "git_apply", "tidy_workspace"];
 
-/// What a ledger operation may be for.
-const SUBJECTS: [&str; 4] = ["flow_run:", "vault_use:", "push:", "lane:"];
+/// How long a push may run on a Node (the Node's own deadline, counted there from when it took
+/// it): an unknown one written longer ago than this is past it.
+pub(crate) const PUSH_DEADLINE: i64 = 5 * 60 * 1000;
+
+/// What a ledger operation may be for (`release:<item>`: the rebase before an item's release).
+const SUBJECTS: [&str; 6] = [
+    "flow_run:",
+    "vault_use:",
+    "push:",
+    "lane:",
+    "tidy:",
+    "release:",
+];
 
 fn valid_subject(s: &str) -> bool {
     SUBJECTS
@@ -144,6 +156,68 @@ impl NodeRuntime {
         })
     }
 
+    /// `op`, a ledger `exec` or push the Node can no longer tell the end of, stopped now rather
+    /// than at its deadline (you asked for what it was for to run again, or a push is compared): a recover stops what is left of
+    /// it and it ends interrupted. True: it is not unknown any more, or a recover of it is on its
+    /// way or was planned now.
+    pub fn stop_lost(&self, op: &str) -> Result<bool, StoreError> {
+        self.running()?;
+        let planned = self.tx(|tx| {
+            if self.recover_exec_in(tx, op, "a step whose command was lost is run again")? {
+                return Ok(true);
+            }
+            let state: Option<String> = tx
+                .query_row(
+                    "SELECT state FROM node_commands WHERE operation_id=? AND node_id=?",
+                    [op, self.node_id.as_str()],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if state.as_deref() != Some("unknown") {
+                return Ok(true);
+            }
+            self.retiring_in(tx, op, true)
+        })?;
+        self.wake_send.notify_one();
+        Ok(planned)
+    }
+
+    /// Ledger `exec`s and pushes (`git_apply`) the Node can no longer tell the end of (a restart
+    /// cut them off) whose deadline has passed: each gets a recover, so its process group does not
+    /// outlive the deadline the command was given and its workspace can be tidied, whether or not
+    /// what it was for asks about it again. A push's deadline is [`PUSH_DEADLINE`] after it was
+    /// written (the Node's starts later, when it takes it). How many were planned.
+    pub(crate) fn recover_lost_execs(&self, now: i64) -> Result<usize, StoreError> {
+        let due: Vec<String> = self.store.reader(|c| {
+            let mut st = c.prepare(
+                "SELECT operation_id FROM node_commands WHERE node_id=?1 AND state='unknown'
+                   AND ((method='exec' AND COALESCE(json_extract(request,'$.body.limits.deadline'), 0) <= ?2)
+                        OR (method='git_apply' AND created + ?3 <= ?2))",
+            )?;
+            st.query_map(rusqlite::params![self.node_id.as_str(), now, PUSH_DEADLINE], |r| {
+                r.get::<_, String>(0)
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+        })?;
+        let mut n = 0;
+        for op in due {
+            if self.tx(|tx| {
+                self.recover_exec_in(
+                    tx,
+                    &op,
+                    "a command whose outcome is unknown, past its deadline",
+                )
+            })? {
+                n += 1;
+            }
+        }
+        if n > 0 {
+            self.wake_send.notify_one();
+        }
+        Ok(n)
+    }
+
     /// Sends a ledger operation. One that may have been sent before is asked about instead: the
     /// Node's receipt if it has one, `unknown` if it has none (it is never run a second time).
     pub(super) async fn send_ledger(&self, l: &rt::CommandLease) -> ApiResult<Receipt> {
@@ -168,6 +242,7 @@ impl NodeRuntime {
         match l.method.as_str() {
             "exec" => self.node.exec(parse(&l.request)?).await,
             "git_apply" => self.node.git_apply(parse(&l.request)?).await,
+            "tidy_workspace" => self.node.tidy_workspace(parse(&l.request)?).await,
             other => Err(ApiError::new(
                 ErrorCode::Unsupported,
                 format!("{other} is not a ledger operation"),
@@ -182,10 +257,17 @@ mod tests {
 
     #[test]
     fn subjects_name_what_the_operation_is_for() {
-        for s in ["flow_run:r1", "vault_use:u1", "push:i1", "lane:l1:u2"] {
+        for s in [
+            "flow_run:r1",
+            "vault_use:u1",
+            "push:i1",
+            "lane:l1:u2",
+            "tidy:i1",
+            "release:i1",
+        ] {
             assert!(valid_subject(s), "{s}");
         }
-        for s in ["", "flow_run:", "push", "other:x", "session:s1"] {
+        for s in ["", "flow_run:", "push", "other:x", "session:s1", "release:"] {
             assert!(!valid_subject(s), "{s}");
         }
     }

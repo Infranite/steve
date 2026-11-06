@@ -20,6 +20,13 @@
 //!
 //! Nothing here holds a value except [`SecretUses::execute`], between decrypting and the end of the
 //! run.
+//!
+//! On a Node (N0e-E7, with [`SecretUses::set_nodes`]): when [`UseNodes::place`] says the session
+//! works on a Node, the command runs there instead, in the session's workspace (`cwd` relative to
+//! it), and the Node takes each value from the Hub when it starts ([`UseValues`]: decrypted then,
+//! once, and registered with the session redactor). A Node that may not write files (any but the
+//! Hub's own machine) gets no `files`: the request is refused before anything is asked or run.
+//! Without one, or for a session the Hub runs itself, nothing changes.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -68,6 +75,115 @@ const COMMAND_MAX: usize = 8000;
 #[async_trait]
 pub trait SessionSink: Send + Sync {
     async fn send(&self, ws: &str, item_id: Option<&str>, session_id: Option<&str>, text: &str);
+}
+
+/// Where a session's secret uses run when it works on a Node (N0e-E7). The integrator implements
+/// it on its Nodes.
+#[async_trait]
+pub trait UseNodes: Send + Sync {
+    /// The Node `session` (of `ws`) works on. `Ok(None)`: the Hub runs its commands itself, as
+    /// before. An error (the device is offline) is the request's answer.
+    async fn place(&self, ws: &str, session: &str) -> VaultResult<Option<NodePlace>>;
+    /// Runs `u` there. The Node takes the values from `values`, one field at a time.
+    async fn run(&self, u: NodeUse, values: Arc<dyn UseValues>) -> RunOutput;
+}
+
+/// Whether `command` holds a secret written into it (the paste guard's hits, but a `$VAR` after
+/// `password=` is a reference, not a value). A Node keeps the command it runs as it is (the Hub's
+/// ledger, the Node's journal), so such a command is not run on one.
+pub fn pasted_secret(command: &str) -> bool {
+    steve_vault::guard::scan(command)
+        .iter()
+        .any(|s| !(s.kind == "said" && command[s.range()].starts_with('$')))
+}
+
+/// The Node a session works on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodePlace {
+    /// `secret_uses.device_id`.
+    pub device: String,
+    /// It may get a value as a temp file (`files`): only the Hub's own machine's Node.
+    pub files: bool,
+}
+
+/// One use to run on a Node. Holds no value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodeUse {
+    pub use_id: String,
+    pub ws: String,
+    pub session: String,
+    /// Inside the session's workspace, `/`-separated, never `..` (`None`: the workspace itself).
+    pub cwd: Option<String>,
+    pub command: String,
+    pub injections: Vec<Injection>,
+    pub timeout: Duration,
+}
+
+/// The values of one use, for its Node: a field's value, decrypted when the Node takes it.
+pub trait UseValues: Send + Sync {
+    /// Blocking (it reads the store). Only the use's own fields.
+    fn value(&self, label: &str) -> VaultResult<super::secret::SecretBytes>;
+}
+
+/// The values of one approved use (`labels` of `item`), registered with the session redactor as
+/// they are taken.
+struct Values {
+    vault: Vault,
+    ws: String,
+    item: String,
+    session: Option<String>,
+    labels: Vec<String>,
+}
+
+impl UseValues for Values {
+    fn value(&self, label: &str) -> VaultResult<super::secret::SecretBytes> {
+        if !self.labels.iter().any(|l| l == label) {
+            return Err(ApiError::not_found("字段").into());
+        }
+        let mut v = self
+            .vault
+            .injection_values(&self.ws, &self.item, &[label.to_string()])?;
+        let (_, value) = v
+            .pop()
+            .ok_or_else(|| VaultError::internal("no value for a field"))?;
+        if let Some(s) = &self.session {
+            steve_vault::redact::register(s, label, value.expose());
+        }
+        Ok(value)
+    }
+}
+
+/// `cwd` of a request for a session on a Node, relative to its workspace: a relative path without
+/// `..`, or an absolute one inside the session's own directory `workdir`.
+fn node_cwd(workdir: &str, cwd: Option<&str>) -> VaultResult<Option<String>> {
+    let outside =
+        || -> VaultError { ApiError::rule(steve_i18n::t!("modules.vault.cwd_outside")).into() };
+    let Some(c) = cwd.map(str::trim).filter(|c| !c.is_empty()) else {
+        return Ok(None);
+    };
+    let rel = if c.starts_with('/') {
+        let base = workdir.trim_end_matches('/');
+        if base.is_empty() || !workdir.starts_with('/') {
+            return Err(outside());
+        }
+        match c.strip_prefix(base) {
+            Some("") => "",
+            Some(rest) if rest.starts_with('/') => rest,
+            _ => return Err(outside()),
+        }
+    } else {
+        c
+    };
+    let mut parts = Vec::new();
+    for p in rel.split('/') {
+        match p {
+            "" | "." => {}
+            ".." => return Err(outside()),
+            p if p.contains('\\') || p.contains('\0') => return Err(outside()),
+            p => parts.push(p),
+        }
+    }
+    Ok((!parts.is_empty()).then(|| parts.join("/")))
 }
 
 /// The message after a denial, verbatim.
@@ -147,6 +263,8 @@ struct Pending {
     session_id: Option<String>,
     scope: Value,
     spec: RunSpec,
+    /// It runs on the session's Node, in this directory of its workspace.
+    node: Option<Option<String>>,
 }
 
 impl Pending {
@@ -175,6 +293,7 @@ struct Inner {
     home: PathBuf,
     sink: Arc<dyn SessionSink>,
     pending: Mutex<HashMap<String, Pending>>,
+    nodes: std::sync::OnceLock<Arc<dyn UseNodes>>,
     jobs: mpsc::UnboundedSender<Job>,
     rx: Mutex<Option<mpsc::UnboundedReceiver<Job>>>,
 }
@@ -237,6 +356,7 @@ impl SecretUses {
             home: home.into(),
             sink,
             pending: Mutex::default(),
+            nodes: std::sync::OnceLock::new(),
             jobs: tx,
             rx: Mutex::new(Some(rx)),
         }))
@@ -244,6 +364,11 @@ impl SecretUses {
 
     pub fn vault(&self) -> &Vault {
         &self.0.vault
+    }
+
+    /// Runs the uses of sessions that work on a Node there ([`UseNodes`]). Set once, at startup.
+    pub fn set_nodes(&self, nodes: Arc<dyn UseNodes>) {
+        let _ = self.0.nodes.set(nodes);
     }
 
     /// The handler to register: `registry.decision(use::SUBJECT, uses.decision_handler())`.
@@ -357,9 +482,17 @@ impl SecretUses {
 
     /// `steve_secret_use`: runs now under a grant, or opens a decision.
     pub async fn request(&self, cx: &UseCx, r: UseRequest) -> VaultResult<UseOutcome> {
+        let place = match (self.0.nodes.get(), cx.session_id.as_deref()) {
+            (Some(n), Some(s)) => n.place(&cx.ws, s).await?,
+            _ => None,
+        };
         let me = self.clone();
         let cx2 = cx.clone();
-        let prepared = self.0.vault.blocking(move |_| me.prepare(&cx2, &r)).await?;
+        let prepared = self
+            .0
+            .vault
+            .blocking(move |_| me.prepare(&cx2, &r, place.as_ref()))
+            .await?;
         match prepared {
             Prepared::Asked {
                 use_id,
@@ -375,7 +508,12 @@ impl SecretUses {
         }
     }
 
-    fn prepare(&self, cx: &UseCx, r: &UseRequest) -> VaultResult<Prepared> {
+    fn prepare(
+        &self,
+        cx: &UseCx,
+        r: &UseRequest,
+        place: Option<&NodePlace>,
+    ) -> VaultResult<Prepared> {
         let mut chk = crate::Check::new();
         chk.len("purpose", r.purpose.trim(), 1, PURPOSE_MAX).len(
             "command",
@@ -451,7 +589,28 @@ impl SecretUses {
             )
             .into());
         }
-        let cwd = resolve_cwd(Path::new(&workdir), r.cwd.as_deref())?;
+        // on a Node the directory is checked there, inside the session's workspace
+        let (cwd, node) = match place {
+            None => (resolve_cwd(Path::new(&workdir), r.cwd.as_deref())?, None),
+            Some(p) => {
+                // the Node keeps the command as it is: a token in it would be stored
+                if pasted_secret(&r.command) {
+                    return Err(ApiError::rule(steve_i18n::t!(
+                        "modules.vault.command_secret_node"
+                    ))
+                    .into());
+                }
+                if !p.files && injections.iter().any(|i| i.how == How::File) {
+                    return Err(ApiError::rule(steve_i18n::t!("modules.vault.files_remote")).into());
+                }
+                let rel = node_cwd(&workdir, r.cwd.as_deref())?;
+                let shown = match &rel {
+                    Some(rel) => Path::new(&workdir).join(rel),
+                    None => PathBuf::from(&workdir),
+                };
+                (shown, Some(rel))
+            }
+        };
         let secs = r
             .timeout_s
             .filter(|t| t.is_finite() && *t > 0.0)
@@ -478,6 +637,7 @@ impl SecretUses {
                 injections,
                 timeout: Duration::from_secs(secs),
             },
+            node,
         };
         // a token pasted into the command itself is not stored
         let shown = steve_vault::guard::redact(&r.command).unwrap_or_else(|| r.command.clone());
@@ -496,7 +656,7 @@ impl SecretUses {
             fields: pending.labels(),
             decision_id: None,
             grant_id: None,
-            device_id: "hub".into(),
+            device_id: place.map_or_else(|| "hub".into(), |p| p.device.clone()),
             status: "pending".into(),
             exit_code: None,
             created: at,
@@ -586,6 +746,26 @@ impl SecretUses {
     /// Decrypts, runs, registers the values with the session redactor, records the result. The
     /// values exist only inside this call.
     async fn execute(&self, use_id: &str, p: &Pending) -> RunOutput {
+        if let (Some(cwd), Some(nodes)) = (&p.node, self.0.nodes.get()) {
+            let values = Arc::new(Values {
+                vault: self.0.vault.clone(),
+                ws: p.ws.clone(),
+                item: p.item_id.clone(),
+                session: p.session_id.clone(),
+                labels: p.labels(),
+            });
+            let u = NodeUse {
+                use_id: use_id.to_string(),
+                ws: p.ws.clone(),
+                session: p.session_id.clone().unwrap_or_default(),
+                cwd: cwd.clone(),
+                command: p.spec.command.clone(),
+                injections: p.spec.injections.clone(),
+                timeout: p.spec.timeout,
+            };
+            let out = nodes.run(u, values).await;
+            return self.record(use_id, out).await;
+        }
         let (ws, item, labels) = (p.ws.clone(), p.item_id.clone(), p.labels());
         let values = self
             .0
@@ -610,6 +790,11 @@ impl SecretUses {
                 error: Some(e.to_string()),
             },
         };
+        self.record(use_id, out).await
+    }
+
+    /// Records how a use ran.
+    async fn record(&self, use_id: &str, out: RunOutput) -> RunOutput {
         let (id, o) = (use_id.to_string(), out.clone());
         let recorded = self
             .0

@@ -95,8 +95,8 @@ pub struct HubHost {
     /// The YOLO executor: gets the full input of each tool permission request, and answers it once
     /// the runner waits for it (set once the core exists).
     pub yolo: OnceLock<steve_core::yolo::Engine>,
-    /// The local Node (`STEVE_NODE_MODE=local`), so YOLO can judge its requests against the bound
-    /// workspace's real directory. Unset (a remote Node, or none): YOLO asks.
+    /// The local Node (`STEVE_NODE_MODE=local`): YOLO judges its requests against the directory
+    /// its prepare reported ([`prepared_dir`]). Unset (a remote Node, or none): YOLO asks.
     pub local_node: OnceLock<std::sync::Arc<steve_node::LocalNode>>,
     /// The first `user` event of the turn being started, for `agent_turns.user_seq`.
     pub user_seqs: super::acp_stats::UserSeqs,
@@ -589,6 +589,70 @@ impl steve_core::AgentRuntime for AcpRuntime {
     }
 }
 
+/// The directory on this machine of a workspace the local Node (`local`) prepared, from the
+/// [`steve_node_api::WorkspaceView`] its finished prepare returned to the Hub's ledger: on the
+/// Hub's own machine its display is the path, `~` for the home. Owned unless it was an existing
+/// directory the Node adopted. `None` for another Node's workspace (its display is no address
+/// here), one never prepared, one that is no directory now, and one the Node no longer stands
+/// behind there ([`steve_node::LocalNode::holds`]: tidied or forgotten, or an adopted directory
+/// whose root was taken away). A store read and the local Node's own journal: never a command.
+pub(crate) fn prepared_dir(
+    store: &Store,
+    local: Option<&steve_node::LocalNode>,
+    w: &steve_node_api::WorkspaceRef,
+) -> Option<steve_node::LocalDir> {
+    use steve_node_api::{Command, Observed, OperationResult, Prepare, PrepareKind, Receipt};
+    let local = local.filter(|n| steve_node_api::Node::id(*n) == &w.node)?;
+    let rows: Vec<(String, String)> = store
+        .reader(|c| {
+            let mut st = c.prepare_cached(
+                "SELECT request, receipt FROM node_commands
+                  WHERE node_id=? AND method='prepare_workspace' AND state='finished'
+                    AND receipt IS NOT NULL
+                  ORDER BY updated DESC, rowid DESC",
+            )?;
+            let rows = st
+                .query_map([w.node.as_str()], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok::<_, steve_store::StoreError>(rows)
+        })
+        .ok()?;
+    let (kind, view) = rows.into_iter().find_map(|(request, receipt)| {
+        let receipt: Value = serde_json::from_str(&receipt).ok()?;
+        let r: Receipt = serde_json::from_value(receipt.get("payload")?.clone()).ok()?;
+        let Observed::Finished {
+            result: Some(OperationResult::Workspace(v)),
+            ..
+        } = r.state
+        else {
+            return None;
+        };
+        if v.workspace != *w {
+            return None;
+        }
+        let c: Command<Prepare> = serde_json::from_str(&request).ok()?;
+        Some((c.body.kind, v))
+    })?;
+    let home = std::env::var("HOME").ok();
+    let path = std::fs::canonicalize(display_path(&view.display, home.as_deref())?).ok()?;
+    (path.is_dir() && local.holds(w, &path)).then_some(steve_node::LocalDir {
+        path,
+        owned: !matches!(kind, PrepareKind::Existing { .. }),
+    })
+}
+
+/// The absolute path a local Node's display stands for (`~` is `home`, as the Node writes it).
+fn display_path(display: &str, home: Option<&str>) -> Option<PathBuf> {
+    let path = match display.strip_prefix('~') {
+        Some(rest) if rest.is_empty() || rest.starts_with('/') => {
+            PathBuf::from(format!("{}{rest}", home.filter(|h| !h.is_empty())?))
+        }
+        Some(_) => return None,
+        None => PathBuf::from(display),
+    };
+    path.is_absolute().then_some(path)
+}
+
 /// What YOLO's tool guard reads of a Node's permission request: the action as Steve states it,
 /// its paths under the bound workspace's real directory on this machine (`dir`, from the local
 /// Node), the Node-reported processes of the harness. A path into another workspace, or any path
@@ -666,6 +730,56 @@ pub(crate) fn yolo_input(
 
 /// Turn ends of Node sessions reach the core the same way the ACP runner's do.
 impl super::node_runtime::NodeDomain for HubHost {
+    fn workspace_changed(&self, fact: super::node_runtime::WorkspaceFact) {
+        use super::node_runtime::WorkspaceFact;
+        let Some(core) = self.core.get().cloned() else {
+            return;
+        };
+        // where a worktree the local Node made is on this machine (a remote Node's never is)
+        let dir = match &fact {
+            WorkspaceFact::Prepared { view, .. } if view.branch.is_some() => {
+                match self
+                    .local_node
+                    .get()
+                    .and_then(|n| n.local_dir(&view.workspace))
+                {
+                    Some(d) => Some(d.path),
+                    None => return,
+                }
+            }
+            WorkspaceFact::Prepared { .. } => return,
+            _ => None,
+        };
+        let run = move || {
+            let r = match fact {
+                WorkspaceFact::Prepared { session, view } => {
+                    let path = dir.unwrap_or_default();
+                    core.workspace_ready(&session, &path.to_string_lossy(), view.branch.as_deref())
+                }
+                WorkspaceFact::PrepareFailed { session, error } => core.workspace_failed(
+                    &session,
+                    error
+                        .as_ref()
+                        .is_some_and(|e| e.code == steve_node_api::ErrorCode::Exhausted),
+                    error.as_ref().map_or("", |e| e.safe_detail.as_str()),
+                ),
+                WorkspaceFact::Tidied { item, removed, .. } => {
+                    core.workspace_tidied(&item, removed)
+                }
+            };
+            if let Err(e) = r {
+                tracing::error!("workspace fact: {e}");
+            }
+        };
+        match tokio::runtime::Handle::try_current() {
+            Ok(h) => {
+                h.spawn_blocking(run);
+            }
+            Err(_) => {
+                std::thread::spawn(run);
+            }
+        }
+    }
     fn attempt_started(
         &self,
         session: &str,
@@ -736,9 +850,11 @@ impl super::node_runtime::NodeDomain for HubHost {
             .ok()
             .flatten()
             .and_then(|w| serde_json::from_str::<steve_node_api::WorkspaceRef>(&w).ok());
+        // where the Node said it prepared it (N0e-E11c): a directory here only on the local Node
+        let local = self.local_node.get().map(|n| &**n);
         let dir = bound
             .as_ref()
-            .and_then(|w| self.local_node.get()?.local_dir(w));
+            .and_then(|w| prepared_dir(&self.store, local, w));
         engine.stash(decision, yolo_input(bound.as_ref(), dir.as_ref(), request));
         // the Node waits for the answer from the moment it asked
         engine.arm(decision);
@@ -802,6 +918,9 @@ pub struct RoutedRuntime {
     pub host: Arc<HubHost>,
     /// The local Node's roots, built again before a session is bound to it.
     pub workspaces: Arc<super::workspaces::Workspaces>,
+    /// Steve's worktrees directory, where the local Node makes the items' worktrees (set with the
+    /// local Node; unset, the core makes them as before).
+    pub worktrees: Option<std::path::PathBuf>,
 }
 
 /// Whether boot recovery leaves `session` to a Node that is not enabled here: only when its
@@ -948,7 +1067,58 @@ impl RoutedRuntime {
     }
 }
 
+impl RoutedRuntime {
+    /// The binding `session_id` gets on the local Node, planned only (nothing bound or written).
+    fn local_binding(&self, session_id: &str) -> Option<super::node_runtime::Binding> {
+        // a project added a moment ago is a root before its first session is prepared
+        if let Err(e) = self.workspaces.refresh_roots() {
+            tracing::error!("local Node roots before binding {session_id}: {e}");
+        }
+        let perm = self.perm_mode(session_id);
+        let local = self.host.local_node.get();
+        let allows = |at: &steve_node_api::RootPath| local.is_some_and(|l| l.allows(at));
+        super::node_binding::binding_with(
+            &self.store,
+            session_id,
+            perm.as_deref(),
+            &allows,
+            self.worktrees.as_deref(),
+        )
+    }
+}
+
 impl steve_core::AgentRuntime for RoutedRuntime {
+    fn makes_worktrees(&self) -> bool {
+        self.node.is_some() && self.worktrees.is_some()
+    }
+    /// Only the local Node makes worktrees; a remote one takes no item of a project.
+    fn would_make_workspace(&self, session_id: &str) -> bool {
+        self.makes_worktrees()
+            && self
+                .local_binding(session_id)
+                .is_some_and(|b| matches!(b.prepare, steve_node_api::PrepareKind::Worktree { .. }))
+    }
+    fn makes_workspace(&self, session_id: &str) -> bool {
+        let Some(n) = &self.node else { return false };
+        n.makes_workspace(session_id).unwrap_or_else(|e| {
+            tracing::error!("workspace of {session_id}: {e}");
+            false
+        })
+    }
+    fn tidy(&self, session_id: &str, keep_branch: bool) -> steve_core::Result<bool> {
+        let Some(n) = &self.node else {
+            return Ok(false);
+        };
+        let Some(item) = self
+            .store
+            .sessions()
+            .get(session_id)?
+            .and_then(|s| s.item_id)
+        else {
+            return Ok(false);
+        };
+        Ok(n.tidy_workspace(&item, keep_branch)?)
+    }
     /// A new session is bound to the remote Node named by `STEVE_NODE_BIND` when it can run there;
     /// otherwise, with the local Node enabled here, to it when its binding can be planned
     /// (otherwise, e.g. a permission mode the Node path cannot express, a directory outside its
@@ -961,14 +1131,7 @@ impl steve_core::AgentRuntime for RoutedRuntime {
             return;
         }
         let Some(n) = &self.node else { return };
-        // a project added a moment ago is a root before its first session is prepared
-        if let Err(e) = self.workspaces.refresh_roots() {
-            tracing::error!("local Node roots before binding {session_id}: {e}");
-        }
-        let perm = self.perm_mode(session_id);
-        let local = self.host.local_node.get();
-        let allows = |at: &steve_node_api::RootPath| local.is_some_and(|l| l.allows(at));
-        match super::node_binding::binding_for(&self.store, session_id, perm.as_deref(), &allows) {
+        match self.local_binding(session_id) {
             Some(b) => {
                 if let Err(e) = n.bind_after(&b, after) {
                     n.fell_back();
@@ -2088,6 +2251,7 @@ mod routed_tests {
                 vec![],
             ),
             store,
+            worktrees: None,
         }
     }
 
@@ -2338,6 +2502,294 @@ mod yolo_input_tests {
         assert!(
             !matches!(guard::check(&tool, &[], &env), guard::Guard::Allow { .. }),
             "asked"
+        );
+    }
+}
+
+/// N0e-E11c: YOLO's directory of a local Node's workspace comes from the view its prepare
+/// returned to the ledger, never from the Node's own bookkeeping or the session's cwd.
+#[cfg(test)]
+mod prepared_dir_tests {
+    use super::{display_path, prepared_dir, yolo_input};
+    use std::path::{Path, PathBuf};
+    use std::time::Duration;
+    use steve_node_api::testkit::build;
+    use steve_node_api::*;
+    use steve_store::runtime::{self as rt, ReceiptState};
+    use steve_store::{NoPublisher, Store, StoreError};
+
+    struct T {
+        dir: tempfile::TempDir,
+        store: Store,
+        node: steve_node::LocalNode,
+    }
+
+    fn t() -> T {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("hub.sqlite3"), NoPublisher).unwrap();
+        let projects = dir.path().join("projects");
+        std::fs::create_dir_all(projects.join("p1")).unwrap();
+        let node = steve_node::LocalNode::open(steve_node::NodeConfig {
+            node: NodeId::new("local").unwrap(),
+            home: dir.path().join("node"),
+            acp: steve_acp::AcpConfig {
+                adapters: Default::default(),
+                node: "node".into(),
+                claude_executable: "/usr/bin/false".into(),
+                steve_home: dir.path().join("steve"),
+                codex_home: dir.path().join("codex"),
+                user_home: dir.path().to_path_buf(),
+                version: "test".into(),
+                idle_release: Duration::from_secs(600),
+                retry_delays: vec![],
+            },
+            roots: vec![steve_node::Root {
+                id: RootId::new("projects").unwrap(),
+                path: std::fs::canonicalize(&projects).unwrap(),
+                display: "projects".into(),
+                access: RootAccess::ReadWrite,
+            }],
+            capacity: Capacity {
+                sessions: 0,
+                jobs: 0,
+                execs: 0,
+            },
+            storage: Default::default(),
+            jobs: Default::default(),
+        })
+        .unwrap();
+        T { dir, store, node }
+    }
+
+    /// Prepares `kind` on the Node and books it in the ledger the way the coordinator does: the
+    /// command, then its finished receipt.
+    async fn prepare(t: &T, op: &str, kind: PrepareKind) -> WorkspaceView {
+        let c = Command {
+            id: OperationId::new(op).unwrap(),
+            issued_at: Timestamp(steve_store::now()),
+            accept_before: Timestamp(steve_store::now() + 60_000),
+            grant: GrantId::new("hub").unwrap(),
+            body: Prepare {
+                resource: format!("item:{op}"),
+                kind,
+            },
+        };
+        let r = t.node.prepare_workspace(c.clone()).await.unwrap();
+        let receipt = loop {
+            let r = t.node.operation(r.operation.clone()).await.unwrap();
+            if r.state.is_finished() {
+                break r;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        let Observed::Finished {
+            result: Some(OperationResult::Workspace(v)),
+            ..
+        } = receipt.state.clone()
+        else {
+            panic!("{:?}", receipt.state)
+        };
+        let request = serde_json::to_value(&c).unwrap();
+        t.store
+            .transaction::<_, StoreError>(|tx| {
+                rt::insert_command_in(
+                    tx,
+                    &rt::NewCommand {
+                        operation: op,
+                        node: "local",
+                        method: "prepare_workspace",
+                        request: &request,
+                        digest: "d",
+                        target_attempt: None,
+                        dependency: None,
+                    },
+                    1,
+                )?;
+                rt::merge_receipt_in(
+                    tx,
+                    op,
+                    ReceiptState::Finished,
+                    true,
+                    &serde_json::to_value(&receipt).unwrap(),
+                    2,
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        v
+    }
+
+    fn local() -> NodeId {
+        NodeId::new("local").unwrap()
+    }
+
+    fn write(w: &WorkspaceRef, rel: &str) -> PermissionRequest {
+        let exec = ExecutionRef::Turn {
+            session: SessionId::new("s1").unwrap(),
+            turn: TurnId::new("t1").unwrap(),
+            attempt: AttemptId::new("a1").unwrap(),
+        };
+        let mut r = build::permission("p1", exec, "x");
+        r.action = Action::Write {
+            paths: vec![PathRef {
+                workspace: w.clone(),
+                rel: RelPath::new(rel).unwrap(),
+            }],
+            change_summary: "edit".into(),
+            change: None,
+        };
+        r
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_scratch_workspace_is_owned_and_its_paths_are_not_the_sessions_cwd() {
+        let t = t();
+        let v = prepare(&t, "op_s", PrepareKind::Scratch).await;
+        let dir = prepared_dir(&t.store, Some(&t.node), &v.workspace).expect("a directory");
+        assert!(dir.owned);
+        assert!(
+            dir.path
+                .starts_with(std::fs::canonicalize(t.dir.path()).unwrap())
+        );
+        // the session's cwd is somewhere else entirely: the guard sees the workspace's paths
+        let cwd = t.dir.path().join("projects/p1");
+        assert!(!dir.path.starts_with(&cwd));
+        let input = yolo_input(
+            Some(&v.workspace),
+            Some(&dir),
+            &write(&v.workspace, "src/x.rs"),
+        );
+        assert_eq!(input.own_dir.as_deref(), Some(dir.path.as_path()));
+        assert_eq!(
+            input.locations,
+            vec![dir.path.join("src/x.rs").to_string_lossy().to_string()]
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_adopted_directory_is_not_owned() {
+        let t = t();
+        let v = prepare(
+            &t,
+            "op_e",
+            PrepareKind::Existing {
+                dir: RootPath {
+                    root: RootId::new("projects").unwrap(),
+                    rel: RelPath::new("p1").unwrap(),
+                },
+            },
+        )
+        .await;
+        let dir = prepared_dir(&t.store, Some(&t.node), &v.workspace).expect("a directory");
+        assert!(!dir.owned);
+        assert_eq!(
+            dir.path,
+            std::fs::canonicalize(t.dir.path().join("projects/p1")).unwrap()
+        );
+        let input = yolo_input(Some(&v.workspace), Some(&dir), &write(&v.workspace, "a"));
+        assert_eq!(input.own_dir, None, "the item's cwd rule decides");
+        // gone now: nothing to judge against
+        std::fs::remove_dir_all(t.dir.path().join("projects/p1")).unwrap();
+        assert!(prepared_dir(&t.store, Some(&t.node), &v.workspace).is_none());
+    }
+
+    fn adopt() -> PrepareKind {
+        PrepareKind::Existing {
+            dir: RootPath {
+                root: RootId::new("projects").unwrap(),
+                rel: RelPath::new("p1").unwrap(),
+            },
+        }
+    }
+
+    /// The adopted directory stays on disk once its root is taken away (D11): YOLO has no
+    /// directory for it, and the guard asks instead of judging paths under it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_adopted_directory_whose_root_is_gone_has_no_directory_here() {
+        let t = t();
+        let v = prepare(&t, "op_e", adopt()).await;
+        assert!(prepared_dir(&t.store, Some(&t.node), &v.workspace).is_some());
+        t.node.set_roots(vec![]);
+        assert!(t.dir.path().join("projects/p1").is_dir());
+        let dir = prepared_dir(&t.store, Some(&t.node), &v.workspace);
+        assert!(dir.is_none(), "{dir:?}");
+        let input = yolo_input(
+            Some(&v.workspace),
+            dir.as_ref(),
+            &write(&v.workspace, "src/x.rs"),
+        );
+        assert_eq!(input.kind.as_deref(), Some("other"));
+        assert!(input.locations.is_empty());
+    }
+
+    /// A workspace the Node tidied (its journal forgot it) has no directory here, though the
+    /// adopted directory is still there and the ledger still has its prepare.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_tidied_workspace_has_no_directory_here() {
+        let t = t();
+        let v = prepare(&t, "op_e", adopt()).await;
+        let c = Command {
+            id: OperationId::new("op_t").unwrap(),
+            issued_at: Timestamp(steve_store::now()),
+            accept_before: Timestamp(steve_store::now() + 60_000),
+            grant: GrantId::new("hub").unwrap(),
+            body: Tidy {
+                workspace: v.workspace.clone(),
+                expected: v.revision.clone(),
+                keep_branch: true,
+            },
+        };
+        let r = t.node.tidy_workspace(c).await.unwrap();
+        let done = loop {
+            let r = t.node.operation(r.operation.clone()).await.unwrap();
+            if r.state.is_finished() {
+                break r;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        assert!(
+            matches!(done.state, Observed::Finished { error: None, .. }),
+            "{:?}",
+            done.state
+        );
+        assert!(t.dir.path().join("projects/p1").is_dir());
+        assert!(prepared_dir(&t.store, Some(&t.node), &v.workspace).is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn another_nodes_or_an_unprepared_workspace_has_no_directory_here() {
+        let t = t();
+        let v = prepare(&t, "op_s", PrepareKind::Scratch).await;
+        // the local Node is off here: even its own workspace is not judged by path
+        assert!(prepared_dir(&t.store, None, &v.workspace).is_none());
+        let remote = WorkspaceRef {
+            node: NodeId::new("n_far").unwrap(),
+            id: v.workspace.id.clone(),
+        };
+        assert!(prepared_dir(&t.store, Some(&t.node), &remote).is_none());
+        let unknown = WorkspaceRef {
+            node: local(),
+            id: WorkspaceId::new("w_none").unwrap(),
+        };
+        assert!(prepared_dir(&t.store, Some(&t.node), &unknown).is_none());
+    }
+
+    #[test]
+    fn a_display_stands_for_a_path_only_when_it_is_one() {
+        assert_eq!(
+            display_path("~/code/x", Some("/srv/u")),
+            Some(PathBuf::from("/srv/u/code/x"))
+        );
+        assert_eq!(
+            display_path("~", Some("/srv/u")),
+            Some(PathBuf::from("/srv/u"))
+        );
+        assert_eq!(display_path("~other/x", Some("/srv/u")), None);
+        assert_eq!(display_path("~/x", None), None);
+        assert_eq!(display_path("code/x", Some("/srv/u")), None);
+        assert_eq!(
+            display_path("/srv/x", None).as_deref(),
+            Some(Path::new("/srv/x"))
         );
     }
 }

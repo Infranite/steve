@@ -106,11 +106,15 @@ async fn fixture(n: &FakeNode) {
             directory: Some("~/code/app".into()),
             updated: Timestamp(5),
             version: Revision::new("h1").unwrap(),
+            size: None,
         },
         HistoryLocation {
             source,
             display: "~/.claude/projects/app/abc.jsonl".into(),
             resume: Some(ResumeHandle::new("abc").unwrap()),
+            updated: None,
+            recorded_id: None,
+            recorded_cwd: None,
         },
     );
     n.prepare_workspace(cmd("op_w", prepare("item:ST-1")))
@@ -164,6 +168,7 @@ async fn faces(n: Arc<dyn Node>) -> Vec<String> {
             ranges: vec![],
             fetch: false,
             reads: vec![GitRead::Status],
+            heads_only: false,
         })
         .await,
     ));
@@ -380,6 +385,21 @@ async fn every_new_kind_crosses_the_wire_unchanged() {
         GitRead::Status,
         GitRead::Fingerprint,
         GitRead::TrackedIgnored { rel: rel("target") },
+        GitRead::ChangedPaths {
+            from: "t1".into(),
+            to: "t2".into(),
+            max: 10,
+        },
+        GitRead::Landed {
+            commit: "c".into(),
+            onto: "origin/main".into(),
+        },
+        GitRead::RemoteTags {
+            remote: "origin".into(),
+        },
+        GitRead::RemoteUrl {
+            remote: "origin".into(),
+        },
     ] {
         crosses(&c, r).await;
     }
@@ -388,6 +408,7 @@ async fn every_new_kind_crosses_the_wire_unchanged() {
         subject: "s".into(),
         author: "a".into(),
         time: Timestamp(9),
+        abbrev: None,
         body: None,
     };
     for a in [
@@ -413,7 +434,29 @@ async fn every_new_kind_crosses_the_wire_unchanged() {
         },
         GitAnswer::IsAncestor { yes: false },
         GitAnswer::Status { entries: vec![] },
-        GitAnswer::Fingerprint { tree: "t".into() },
+        GitAnswer::Fingerprint {
+            tree: "t".into(),
+            own: None,
+        },
+        GitAnswer::Fingerprint {
+            tree: "t".into(),
+            own: Some(OwnChange {
+                base: "b".into(),
+                patch: "-".into(),
+            }),
+        },
+        GitAnswer::ChangedPaths {
+            paths: vec!["a.rs".into()],
+            truncated: false,
+        },
+        GitAnswer::Landed { commit: None },
+        GitAnswer::Landed {
+            commit: Some("c".into()),
+        },
+        GitAnswer::RemoteTags {
+            tags: vec![("v1".into(), "c".into())],
+        },
+        GitAnswer::RemoteUrl { url: None },
         GitAnswer::TrackedIgnored {
             ignored: false,
             tracked: true,
@@ -478,6 +521,9 @@ async fn every_new_kind_crosses_the_wire_unchanged() {
             source: history_ref("cc:abc"),
             display: "d".into(),
             resume: None,
+            updated: None,
+            recorded_id: None,
+            recorded_cwd: None,
         },
     )
     .await;
@@ -572,6 +618,7 @@ async fn an_older_peer_is_never_sent_what_it_would_ignore() {
         ranges: vec![],
         fetch: false,
         reads,
+        heads_only: false,
     };
     let raw = hub
         .call(
@@ -712,6 +759,7 @@ async fn an_answer_of_a_newer_kind_is_uncertain_not_unsupported() {
             ranges: vec![],
             fetch: false,
             reads: vec![GitRead::Status],
+            heads_only: false,
         })
         .await
         .unwrap_err();

@@ -21,12 +21,16 @@ pub enum PrepareKind {
     Existing { dir: RootPath },
     /// A fresh scratch directory owned by the Node.
     Scratch,
-    /// A worktree of `repository` on `branch` (created from `base` when the branch is new).
+    /// A worktree of `repository` on `branch` (created from `base` when the branch is new), at
+    /// `at` when given (a directory that need not exist yet, under a read-write root; one that is
+    /// there already is adopted only if it is that worktree), else where the Node keeps its own.
     Worktree {
         repository: RootPath,
         branch: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         base: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at: Option<RootPath>,
     },
 }
 
@@ -74,6 +78,13 @@ pub struct GitQuery {
     /// Further reads, answered in [`GitFacts::reads`] in the same order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reads: Vec<GitRead>,
+    /// Leave the working tree out: no status scan, `dirty` is false and the revision is HEAD and
+    /// the branch only (never equal to one with the tree in it). For reads that never look at the
+    /// tree, such as a preview of a commit or a branch. A Node that does not know it scans as
+    /// before (a fuller revision, never a wrong one). A full `git status` is the slow part of a query
+    /// that only asks for refs or reads.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub heads_only: bool,
 }
 
 /// A commit range: `from..to`, or everything reachable from `to` when `from` is `None`.
@@ -90,6 +101,7 @@ pub struct RevRange {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum GitRead {
     /// A file at `rev` (`rev:path`), or with no path the commit itself (message, stat and patch).
+    /// A `rev` that names no commit answers a `Blob` with `found: false`, with or without a path.
     Show {
         rev: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -109,6 +121,17 @@ pub enum GitRead {
     Fingerprint,
     /// Whether `rel` is ignored, and whether anything under it is tracked.
     TrackedIgnored { rel: RelPath },
+    /// The paths that differ between two trees or commits (`diff --name-only`), at most `max`.
+    ChangedPaths { from: String, to: String, max: u32 },
+    /// The commit on `onto` that brought `commit`'s change in: `commit` itself when it is on
+    /// `onto`, the rebased copy of its last commit, or a squash of all of its own. What the Node
+    /// has locally (fetch first).
+    Landed { commit: String, onto: String },
+    /// The tags `remote` has and the commits they point at (annotated tags peeled), as the remote
+    /// says (`ls-remote`): a network call, under the fetch deadline.
+    RemoteTags { remote: String },
+    /// The URL `remote` is configured with (`insteadOf` not applied), never with credentials.
+    RemoteUrl { remote: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -117,6 +140,10 @@ pub struct CommitInfo {
     pub subject: String,
     pub author: String,
     pub time: Timestamp,
+    /// The hash as git abbreviates it in this repository (`%h`: its length grows with the
+    /// repository and follows `core.abbrev`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub abbrev: Option<String>,
     /// The full message, for a single commit's `Show`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
@@ -133,7 +160,8 @@ pub struct StatusEntry {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum GitAnswer {
-    /// `Show` with a path. A missing file at that revision is `found: false`.
+    /// `Show` with a path: a missing file at that revision is `found: false`. Also `Show` without
+    /// a path of a revision that names no commit.
     Blob {
         found: bool,
         #[serde(with = "crate::blob::hexbytes")]
@@ -164,11 +192,41 @@ pub enum GitAnswer {
     },
     Fingerprint {
         tree: String,
+        /// The item's own change in that tree: where its branch left the default branch (the
+        /// nearest of the remote's and the local one) and the patch id of the diff from there
+        /// (`-` for none). The same change rebased keeps its patch id. `None`: no such base.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        own: Option<OwnChange>,
     },
     TrackedIgnored {
         ignored: bool,
         tracked: bool,
     },
+    ChangedPaths {
+        paths: Vec<String>,
+        truncated: bool,
+    },
+    /// `commit: None`: the change is not on `onto`.
+    Landed {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        commit: Option<String>,
+    },
+    /// `(name, commit)` pairs, in the remote's order.
+    RemoteTags {
+        tags: Vec<(String, String)>,
+    },
+    /// `None`: no such remote.
+    RemoteUrl {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        url: Option<String>,
+    },
+}
+
+/// See [`GitAnswer::Fingerprint`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OwnChange {
+    pub base: String,
+    pub patch: String,
 }
 
 /// A read with its answer and the commit it was answered at: the resolved `rev` of a `Show`, the
@@ -186,7 +244,9 @@ pub struct RangeFacts {
     pub to: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merge_base: Option<String>,
+    /// Commits of `to` that `from` lacks (`from..to`).
     pub ahead: u32,
+    /// Commits of `from` that `to` lacks (`to..from`).
     pub behind: u32,
     /// Files both sides touched (for the merge lane's overlap check).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -199,6 +259,7 @@ pub struct RangeFacts {
 /// What git says, with the revision it was observed at (an apply checks it again).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GitFacts {
+    /// Changes whenever HEAD or any ref (branches, remote-tracking refs, tags) moves.
     pub revision: Revision,
     pub head: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -216,9 +277,10 @@ pub struct GitFacts {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum GitAction {
-    Rebase {
-        onto: String,
-    },
+    /// Rebases the branch checked out in the workspace onto `onto`. On a conflict the Node aborts
+    /// the rebase (the worktree as before) and the operation fails with `conflict`, its detail the
+    /// conflicting paths one per line; uncommitted changes to tracked files fail it with `busy`.
+    Rebase { onto: String },
     /// Merges `commit` into HEAD. On a conflict the Node aborts the merge when
     /// `back_out_on_conflict` (the worktree as before, the answer a `conflict`), or leaves it in
     /// progress for the session to resolve.
@@ -231,7 +293,11 @@ pub enum GitAction {
         back_out_on_conflict: bool,
     },
     /// Pushes the local `branch` (which must be at `expected_local`) to the same branch at `url`.
-    /// `expected_remote` is the remote ref's sha the push may replace (`None`: it must not exist).
+    /// `expected_remote` is the remote ref's sha the push may replace, whatever it is (a lease);
+    /// `None` is a plain push, which the remote takes as a new branch or a fast-forward only. The
+    /// push runs from a throwaway repository that borrows the workspace's objects, with no system
+    /// or global git config: the workspace's own config (hooks, `insteadOf`, credential helpers)
+    /// plays no part.
     Push {
         remote: String,
         branch: String,
@@ -292,7 +358,7 @@ pub enum SecretDelivery {
 }
 
 /// The bytes of a secret on their way to the one operation that uses them. Never printed: `Debug`
-/// shows its length only.
+/// shows its length only; wiped on drop.
 #[derive(PartialEq, Eq, Serialize, Deserialize)]
 pub struct SecretBytes(#[serde(with = "crate::blob::hexbytes")] Vec<u8>);
 
@@ -302,6 +368,13 @@ impl SecretBytes {
     }
     pub fn expose(&self) -> &[u8] {
         &self.0
+    }
+}
+
+/// The bytes are wiped when it goes.
+impl Drop for SecretBytes {
+    fn drop(&mut self) {
+        zeroize::Zeroize::zeroize(&mut self.0);
     }
 }
 
@@ -344,6 +417,10 @@ pub struct FileInfo {
     pub size: u64,
     /// Changes when the file does (mtime + size, or a hash).
     pub version: Revision,
+    /// When it was last modified, as the Node's filesystem says (what a knowledge folder compares
+    /// with size to tell a changed file). `None`: the Node does not say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mtime: Option<Timestamp>,
     /// Over the scan's `max_file_bytes`: listed, so it is not taken for gone, but not to be read.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub too_big: bool,
@@ -372,8 +449,10 @@ pub struct FileRead {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScanSpec {
     pub root: RootPath,
+    /// Files to list ([`crate::glob`]); empty is [`crate::glob::DEFAULT_INCLUDE`].
     #[serde(default)]
     pub include: Vec<String>,
+    /// Files and directories to leave out ([`crate::glob::Rules::skips_dir`]).
     #[serde(default)]
     pub exclude: Vec<String>,
     #[serde(default)]
@@ -462,4 +541,31 @@ impl ScanPage {
     pub fn is_consistent(&self) -> bool {
         !self.complete || (self.next.is_none() && !self.issues.iter().any(ScanIssue::hides_files))
     }
+}
+
+/// `owner/name` of a GitHub remote URL (https, `git@github.com:`, `ssh://`, `git://`), lowercased;
+/// `None` for anything else.
+pub fn github_repo(url: &str) -> Option<String> {
+    let u = url.trim();
+    let rest = u
+        .strip_prefix("https://github.com/")
+        .or_else(|| u.strip_prefix("http://github.com/"))
+        .or_else(|| u.strip_prefix("git@github.com:"))
+        .or_else(|| u.strip_prefix("ssh://git@github.com/"))
+        .or_else(|| u.strip_prefix("git://github.com/"))
+        .or_else(|| {
+            // https://user@github.com/o/r
+            u.strip_prefix("https://")
+                .and_then(|r| r.split_once('@'))
+                .and_then(|(_, r)| r.strip_prefix("github.com/"))
+        })?;
+    let rest = rest.trim_end_matches('/');
+    let rest = rest.strip_suffix(".git").unwrap_or(rest);
+    let (o, n) = rest.split_once('/')?;
+    let ok = |s: &str| {
+        !s.is_empty()
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+    };
+    (ok(o) && ok(n) && !n.contains('/')).then(|| format!("{o}/{n}").to_lowercase())
 }

@@ -60,6 +60,23 @@ pub struct FakeState {
     /// The next `stop` comes too late: the turn it names ended just before and took the queue as
     /// its follow-up (a new attempt), so the stop reaches nothing.
     pub follow_up_before_stop: bool,
+    /// The backend makes items' worktrees ([`AgentRuntime::makes_worktrees`]).
+    pub makes_worktrees: bool,
+    /// `created` binds the session where its worktree is made (else it stays with the core).
+    pub binds_worktrees: bool,
+    /// `created` binds the session to a directory it only opens (its item was first prepared
+    /// there as an existing directory): it makes no worktree.
+    pub binds_existing: bool,
+    /// Per `created` that bound a session: whether its directory was there by then.
+    pub bound_with_dir: Vec<bool>,
+    /// Sessions whose worktree the backend makes ([`AgentRuntime::makes_workspace`]).
+    pub node_made: HashSet<String>,
+    /// `tidy` calls: (session, keep_branch).
+    pub tidies: Vec<(String, bool)>,
+    /// The adapter pid [`AgentRuntime::agent_pid`] gives a session (YOLO's `ps` root).
+    pub agent_pids: HashMap<String, u32>,
+    /// How often [`AgentRuntime::agent_pid`] was asked.
+    pub pid_asks: usize,
 }
 
 /// acp.ts in miniature: turns are tracked, prompts queue behind a running turn or the hold, and a test
@@ -220,9 +237,39 @@ impl AgentRuntime for FakeRuntime {
         self.st().turning.contains(sid)
     }
     fn created(&self, sid: &str, after: Option<&str>) {
-        self.st()
-            .created
-            .push((sid.into(), after.map(String::from)));
+        let mut st = self.st();
+        st.created.push((sid.into(), after.map(String::from)));
+        if st.makes_worktrees && st.binds_worktrees {
+            if st.binds_existing {
+                let there = self
+                    .store
+                    .session(sid)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|s| std::path::Path::new(&s.cwd).exists());
+                st.bound_with_dir.push(there);
+            } else {
+                st.node_made.insert(sid.into());
+            }
+        }
+    }
+    fn makes_worktrees(&self) -> bool {
+        self.st().makes_worktrees
+    }
+    fn would_make_workspace(&self, _sid: &str) -> bool {
+        let st = self.st();
+        st.makes_worktrees && st.binds_worktrees && !st.binds_existing
+    }
+    fn makes_workspace(&self, sid: &str) -> bool {
+        self.st().node_made.contains(sid)
+    }
+    fn tidy(&self, sid: &str, keep_branch: bool) -> Result<bool> {
+        let mut st = self.st();
+        if !st.node_made.contains(sid) {
+            return Ok(false);
+        }
+        st.tidies.push((sid.into(), keep_branch));
+        Ok(true)
     }
     fn release(&self, sid: &str) -> Result<Released> {
         let mut st = self.st();
@@ -262,6 +309,11 @@ impl AgentRuntime for FakeRuntime {
         } else {
             Configured::Applied
         })
+    }
+    fn agent_pid(&self, sid: &str) -> Option<u32> {
+        let mut st = self.st();
+        st.pid_asks += 1;
+        st.agent_pids.get(sid).copied()
     }
     fn is_holding(&self) -> bool {
         self.st().holding

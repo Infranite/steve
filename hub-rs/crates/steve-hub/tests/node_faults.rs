@@ -460,6 +460,7 @@ impl Rig {
                 }),
                 ..Storage::default()
             },
+            jobs: Default::default(),
         }
     }
 

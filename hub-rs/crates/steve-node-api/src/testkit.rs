@@ -1792,6 +1792,12 @@ impl WorkspaceExecutor for FakeNode {
             {
                 return Err(ApiError::new(ErrorCode::Denied, "a readonly root"));
             }
+            if let PrepareKind::Worktree { at: Some(at), .. } = &c.body.kind
+                && !st.roots.is_empty()
+                && Self::root_access(st, &at.root)? == RootAccess::ReadOnly
+            {
+                return Err(ApiError::new(ErrorCode::Denied, "a readonly root"));
+            }
             let spec = digest_of(&c.body.kind)?;
             let wid: WorkspaceId = id(derived_id("w", &c.body.resource));
             let view = match st.workspaces.get(&wid) {
@@ -2028,6 +2034,7 @@ impl WorkspaceExecutor for FakeNode {
                     size: f.bytes.len() as u64,
                     version: f.version.clone(),
                     too_big: false,
+                    mtime: None,
                 }
             } else {
                 FileInfo {
@@ -2036,6 +2043,7 @@ impl WorkspaceExecutor for FakeNode {
                     size: 0,
                     version: id("dir"),
                     too_big: false,
+                    mtime: None,
                 }
             };
             items.insert(path, info);
@@ -2064,27 +2072,44 @@ impl WorkspaceExecutor for FakeNode {
             eof: to == f.bytes.len(),
         })
     }
-    /// Lists every file below the root at once (a snapshot read page by page). Include and exclude
-    /// patterns are not simulated.
+    /// Lists every wanted file below the root at once (a snapshot read page by page), with the
+    /// include and exclude patterns of [`crate::glob`] (matched below the scanned directory).
     async fn scan(&self, c: Command<ScanSpec>) -> ApiResult<Receipt> {
-        if !c.body.include.is_empty() || !c.body.exclude.is_empty() {
-            return unsupported("scan patterns");
+        if c.body
+            .include
+            .iter()
+            .chain(&c.body.exclude)
+            .any(|p| !crate::glob::valid_pattern(p))
+        {
+            return Err(ApiError::new(ErrorCode::Invalid, "a scan pattern"));
         }
         self.accept("scan", &c, |st| {
             let spec = &c.body;
             Self::root_access(st, &spec.root.root)?;
+            let rules = crate::glob::Rules::new(spec.include.clone(), spec.exclude.clone());
+            // a file under a directory the scan does not enter is not seen
+            let entered = |rel: &str| {
+                let dirs: Vec<&str> = rel.split('/').collect();
+                (1..dirs.len()).all(|n| {
+                    !crate::glob::never_entered(dirs[n - 1])
+                        && !rules.skips_dir(&dirs[..n].join("/"))
+                })
+            };
             let mut entries: Vec<FileInfo> = st
                 .files
                 .iter()
-                .filter(|((root, rel), _)| {
-                    *root == spec.root.root && below(&spec.root.rel, rel).is_some()
+                .filter(|((root, _), _)| *root == spec.root.root)
+                .filter_map(|((_, rel), f)| {
+                    let rest = below(&spec.root.rel, rel).filter(|r| !r.is_empty())?;
+                    (entered(rest) && rules.wants_file(rest)).then_some((rel, f))
                 })
-                .map(|((_, rel), f)| FileInfo {
+                .map(|(rel, f)| FileInfo {
                     path: rel.clone(),
                     is_dir: false,
                     size: f.bytes.len() as u64,
                     version: f.version.clone(),
                     too_big: f.bytes.len() as u64 > spec.limits.max_file_bytes,
+                    mtime: None,
                 })
                 .collect();
             let mut issues = st
@@ -2120,7 +2145,21 @@ impl WorkspaceExecutor for FakeNode {
         let Some(s) = st.scans.get(&scan) else {
             return Err(ApiError::new(ErrorCode::Invalid, "no such scan").on(&scan));
         };
-        let (entries, next) = page_of(&s.entries, &page)?;
+        // cursors name their scan: one from another scan is refused
+        let d = digest_of(&scan)?;
+        let tag = &d.as_str()[7..15];
+        let from = match &page.cursor {
+            None => 0,
+            Some(c) => c
+                .as_str()
+                .strip_prefix(&format!("s{tag}."))
+                .and_then(|n| n.parse::<usize>().ok())
+                .filter(|n| *n <= s.entries.len())
+                .ok_or_else(|| ApiError::new(ErrorCode::Invalid, "not a cursor of this scan"))?,
+        };
+        let to = (from + page.limit.max(1) as usize).min(s.entries.len());
+        let entries = s.entries[from..to].to_vec();
+        let next = (to < s.entries.len()).then(|| id(format!("s{tag}.{to}")));
         let last = next.is_none();
         Ok(ScanPage {
             scan,

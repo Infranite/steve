@@ -154,28 +154,7 @@ impl AvailableCache {
 
 /// `owner/name` of a GitHub remote URL (https, `git@github.com:`, `ssh://`), lowercased.
 pub fn parse_remote(url: &str) -> Option<String> {
-    let u = url.trim();
-    let rest = u
-        .strip_prefix("https://github.com/")
-        .or_else(|| u.strip_prefix("http://github.com/"))
-        .or_else(|| u.strip_prefix("git@github.com:"))
-        .or_else(|| u.strip_prefix("ssh://git@github.com/"))
-        .or_else(|| u.strip_prefix("git://github.com/"))
-        .or_else(|| {
-            // https://user@github.com/o/r
-            u.strip_prefix("https://")
-                .and_then(|r| r.split_once('@'))
-                .and_then(|(_, r)| r.strip_prefix("github.com/"))
-        })?;
-    let rest = rest.trim_end_matches('/');
-    let rest = rest.strip_suffix(".git").unwrap_or(rest);
-    let (o, n) = rest.split_once('/')?;
-    let ok = |s: &str| {
-        !s.is_empty()
-            && s.chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
-    };
-    (ok(o) && ok(n) && !n.contains('/')).then(|| format!("{o}/{n}").to_lowercase())
+    steve_node_api::github_repo(url)
 }
 
 /// `git -C <path> remote get-url origin`, parsed. `None` on any problem.
@@ -353,14 +332,27 @@ impl GitHub {
         let (rows, repos) = repos;
         let mut suggestions = Vec::new();
         if !projects.is_empty() {
-            let remotes = tokio::task::spawn_blocking(move || {
-                projects
+            let ids: Vec<String> = projects.iter().map(|(id, _)| id.clone()).collect();
+            // each project's directory read on its Node; the Hub's own git with the local Node off
+            let on_nodes = match self.git_nodes() {
+                Some(n) => n.origins(&ids).await,
+                None => None,
+            };
+            let remotes: Vec<(String, String)> = match on_nodes {
+                Some(found) => ids
                     .into_iter()
-                    .filter_map(|(id, path)| project_remote(&path).map(|r| (id, r)))
-                    .collect::<Vec<_>>()
-            })
-            .await
-            .unwrap_or_default();
+                    .zip(found)
+                    .filter_map(|(id, r)| r.map(|r| (id, r)))
+                    .collect(),
+                None => tokio::task::spawn_blocking(move || {
+                    projects
+                        .into_iter()
+                        .filter_map(|(id, path)| project_remote(&path).map(|r| (id, r)))
+                        .collect::<Vec<_>>()
+                })
+                .await
+                .unwrap_or_default(),
+            };
             if !remotes.is_empty() {
                 for c in &conns {
                     let Ok(list) = self.available(&ws, &c.id, false).await else {

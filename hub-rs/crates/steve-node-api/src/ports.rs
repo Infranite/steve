@@ -96,7 +96,8 @@ pub trait Discovery: Send + Sync {
     async fn history(&self, page: PageRequest) -> ApiResult<Page<HistoryEntry>>;
     async fn import_history(&self, c: Command<HistoryImport>) -> ApiResult<Receipt>;
     async fn import_page(&self, import: OperationId, page: PageRequest) -> ApiResult<ImportedPage>;
-    /// Where an entry of [`Discovery::history`] is. A key the Node did not list is `invalid`.
+    /// Where an entry of [`Discovery::history`] (or `session:<id>`, a harness session) is. A key
+    /// the Node did not list is `invalid`.
     async fn locate(&self, source: HistoryRef) -> ApiResult<HistoryLocation>;
 }
 

@@ -13,6 +13,7 @@ use tokio::sync::mpsc;
 use crate::index::DocLoader;
 use crate::repo::DocRow;
 use crate::sources::folder::FolderPolicy;
+use crate::sources::folder_node::{FolderPlaces, NodeFolders};
 
 /// What every secret found in indexed text is replaced with.
 pub const REDACTED: &str = "［已拦下的机密］";
@@ -87,6 +88,8 @@ pub struct Inner {
     pub(crate) loaders: Vec<Arc<dyn DocLoader>>,
     pub(crate) queue: OnceLock<mpsc::UnboundedSender<String>>,
     folder_policy: OnceLock<FolderPolicy>,
+    /// The folder sources' Node side ([`Knowledge::set_folder_places`]).
+    folder_nodes: Arc<NodeFolders>,
     /// Folder sources to scan soon (see [`Knowledge::request_scan`]).
     scan_requests: Mutex<Vec<String>>,
     pub(crate) scan_wake: tokio::sync::Notify,
@@ -113,7 +116,13 @@ impl Knowledge {
         mut loaders: Vec<Arc<dyn DocLoader>>,
     ) -> Self {
         loaders.insert(0, Arc::new(crate::notes::NotesLoader));
-        loaders.insert(1, Arc::new(crate::sources::folder::FolderLoader));
+        let folder_nodes = Arc::new(NodeFolders::default());
+        loaders.insert(
+            1,
+            Arc::new(crate::sources::folder::FolderLoader {
+                nodes: folder_nodes.clone(),
+            }),
+        );
         Self(Arc::new(Inner {
             guard,
             store: OnceLock::new(),
@@ -121,6 +130,7 @@ impl Knowledge {
             loaders,
             queue: OnceLock::new(),
             folder_policy: OnceLock::new(),
+            folder_nodes,
             scan_requests: Mutex::new(Vec::new()),
             scan_wake: tokio::sync::Notify::new(),
         }))
@@ -177,6 +187,16 @@ impl Knowledge {
 
     pub fn folder_policy(&self) -> &FolderPolicy {
         self.folder_policy.get_or_init(FolderPolicy::from_env)
+    }
+
+    /// Reads folder sources through the Hub's router from now on: their Node scans and reads
+    /// (wired only when the Hub's local Node is on). `false` if already set.
+    pub fn set_folder_places(&self, p: Arc<dyn FolderPlaces>) -> bool {
+        self.folder_nodes.set(p)
+    }
+
+    pub(crate) fn folder_nodes(&self) -> &NodeFolders {
+        &self.folder_nodes
     }
 
     pub(crate) fn loader(&self, kind: &str, doc: &DocRow) -> Option<&Arc<dyn DocLoader>> {

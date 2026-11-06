@@ -66,7 +66,8 @@ async fn main() -> anyhow::Result<()> {
     let st = AppState::new(cfg.clone(), w.backend, w.domain, bus)
         .with_modules(w.modules)
         .with_nodes(w.nodes)
-        .with_node(w.node);
+        .with_node(w.node)
+        .with_workspaces(Some(w.workspaces));
     steve_hub::app::boot(&st).await?;
 
     for job in w.jobs {

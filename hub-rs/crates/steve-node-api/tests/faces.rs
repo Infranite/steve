@@ -154,6 +154,21 @@ fn the_new_types_survive_the_wire() {
         GitRead::Status,
         GitRead::Fingerprint,
         GitRead::TrackedIgnored { rel: rel("target") },
+        GitRead::ChangedPaths {
+            from: "t1".into(),
+            to: "t2".into(),
+            max: 10,
+        },
+        GitRead::Landed {
+            commit: "c".into(),
+            onto: "origin/main".into(),
+        },
+        GitRead::RemoteTags {
+            remote: "origin".into(),
+        },
+        GitRead::RemoteUrl {
+            remote: "origin".into(),
+        },
     ];
     roundtrip(&GitQuery {
         workspace: w.clone(),
@@ -161,12 +176,14 @@ fn the_new_types_survive_the_wire() {
         ranges: vec![],
         fetch: false,
         reads: reads.clone(),
+        heads_only: false,
     });
     let commit = CommitInfo {
         sha: "abc".into(),
         subject: "修复".into(),
         author: "Lee".into(),
         time: Timestamp(1),
+        abbrev: None,
         body: Some("修复\n\n细节".into()),
     };
     let answers = vec![
@@ -197,12 +214,37 @@ fn the_new_types_survive_the_wire() {
                 code: " M".into(),
             }],
         },
-        GitAnswer::Fingerprint { tree: "t1".into() },
+        GitAnswer::Fingerprint {
+            tree: "t1".into(),
+            own: None,
+        },
+        GitAnswer::Fingerprint {
+            tree: "t1".into(),
+            own: Some(OwnChange {
+                base: "b".into(),
+                patch: "-".into(),
+            }),
+        },
+        GitAnswer::ChangedPaths {
+            paths: vec!["a.rs".into()],
+            truncated: false,
+        },
+        GitAnswer::Landed { commit: None },
+        GitAnswer::Landed {
+            commit: Some("c".into()),
+        },
+        GitAnswer::RemoteTags {
+            tags: vec![("v1".into(), "c".into())],
+        },
+        GitAnswer::RemoteUrl { url: None },
         GitAnswer::TrackedIgnored {
             ignored: true,
             tracked: false,
         },
     ];
+    for a in &answers {
+        roundtrip(a);
+    }
     let mut f = facts("abc");
     f.reads = reads
         .into_iter()
@@ -263,6 +305,7 @@ fn the_new_types_survive_the_wire() {
             size: 11,
             version: Revision::new("r1").unwrap(),
             too_big: true,
+            mtime: None,
         }],
         next: None,
         complete: false,
@@ -295,6 +338,9 @@ fn the_new_types_survive_the_wire() {
         },
         display: "~/.claude/projects/x/abc.jsonl".into(),
         resume: Some(ResumeHandle::new("abc").unwrap()),
+        updated: None,
+        recorded_id: None,
+        recorded_cwd: None,
     });
     let s = SecretBytes::new(b"hunter2".to_vec());
     let back: SecretBytes = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
@@ -353,6 +399,7 @@ async fn a_readonly_root_refuses_prepare_exec_and_git_apply() {
             repository: at("notes", "repo"),
             branch: "steve/b".into(),
             base: None,
+            at: None,
         },
     };
     assert_eq!(
@@ -412,6 +459,7 @@ fn git_query(w: WorkspaceRef) -> GitQuery {
         ranges: vec![],
         fetch: false,
         reads: vec![],
+        heads_only: false,
     }
 }
 
@@ -617,6 +665,53 @@ async fn scan_pages_share_one_manifest_and_only_a_clean_end_is_complete() {
             .await
             .unwrap_err()
             .code,
+        ErrorCode::Invalid
+    );
+    // a cursor of one scan does not page another
+    let other = pages[0].next.clone();
+    assert_eq!(
+        n.scan_page(
+            OperationId::new("op_s2").unwrap(),
+            PageRequest {
+                cursor: other,
+                limit: 2
+            }
+        )
+        .await
+        .unwrap_err()
+        .code,
+        ErrorCode::Invalid
+    );
+    // include and exclude patterns are the glob's; a bad one is refused
+    n.put_file("notes", "d/x.txt", b"x");
+    n.put_file("notes", "d/x.png", b"x");
+    n.put_file("notes", ".obsidian/w.md", b"x");
+    let only = scan_all(
+        &n,
+        "op_s5",
+        ScanSpec {
+            include: vec!["**/*.txt".into(), "**/*.png".into()],
+            exclude: vec!["**/*.png".into()],
+            ..spec(ScanLimits::default())
+        },
+        10,
+    )
+    .await;
+    let names: Vec<_> = only[0].entries.iter().map(|e| e.path.as_str()).collect();
+    assert_eq!(names, ["d/x.txt"]);
+    let dflt = scan_all(&n, "op_s6", spec(ScanLimits::default()), 100).await;
+    let names: Vec<_> = dflt[0].entries.iter().map(|e| e.path.as_str()).collect();
+    assert!(names.contains(&"d/x.txt") && names.contains(&"d/0.md"));
+    assert!(
+        !names.contains(&"d/x.png") && !names.contains(&".obsidian/w.md"),
+        "the default include, never a dot directory: {names:?}"
+    );
+    let bad = ScanSpec {
+        include: vec!["../*.md".into()],
+        ..spec(ScanLimits::default())
+    };
+    assert_eq!(
+        n.scan(cmd("op_s7", bad)).await.unwrap_err().code,
         ErrorCode::Invalid
     );
 }
@@ -935,11 +1030,15 @@ async fn only_a_listed_history_is_located() {
             directory: Some("~/code/app".into()),
             updated: Timestamp(5),
             version: Revision::new("h1").unwrap(),
+            size: None,
         },
         HistoryLocation {
             source: source.clone(),
             display: "~/.claude/projects/app/abc.jsonl".into(),
             resume: Some(ResumeHandle::new("abc").unwrap()),
+            updated: None,
+            recorded_id: None,
+            recorded_cwd: None,
         },
     );
     assert_eq!(n.history(page(10)).await.unwrap().items.len(), 1);

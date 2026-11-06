@@ -3,6 +3,10 @@
 //!
 //! Hand-off: the script builds first, then asks this Hub over loopback (with a one-off token) to drain — no new
 //! turns, new prompts queue — and polls until the running turns have ended (bounded by the script), then restarts.
+//!
+//! The script is a Hub-host operation: it runs on the Hub's own machine, outlives the Hub and restarts it, so
+//! only a project on the Hub's device (`projects.device_id = "hub"`) can release or roll back. A project on a
+//! remote Node is refused before anything runs; an in-process Node dies with the Hub, so it can't host it either.
 
 use crate::cycle::{Closing, OP_RELEASE, fingerprint_head};
 use crate::error::Result;
@@ -18,6 +22,9 @@ use serde::Serialize;
 use serde_json::{Map, Value, json};
 use std::path::Path;
 use std::time::{Duration, SystemTime};
+
+/// The Hub's own device (`projects.device_id`), the only one a release script runs for.
+const HUB_DEVICE: &str = "hub";
 
 /// The outcome of an approved release whose script is running.
 const RELEASING: &str = "releasing";
@@ -173,13 +180,25 @@ pub(crate) const NOTHING_TO_RELEASE: &str = "没有需要发布的改动";
 impl Tx<'_> {
     /// An item in a release project whose branch has no commits beyond main and a clean worktree (or neither
     /// exists): accepting it finishes it, there is nothing to publish. False whenever git can't tell.
-    pub(crate) fn nothing_to_release(&self, i: &Item) -> Result<bool> {
+    pub(crate) fn nothing_to_release(&mut self, i: &Item) -> Result<bool> {
         let Some(branch) = i.branch.as_deref().filter(|b| !b.is_empty()) else {
             return Ok(false);
         };
         let Some(p) = self.db().project(i.project_id.as_deref())? else {
             return Ok(false);
         };
+        if self.git_on_node(&i.id) {
+            /* as its Node says in the facts this section decides on (on whichever device it is); none
+            is can't tell */
+            let branch = branch.to_string();
+            return Ok(matches!(self.git_take(i), Some(Ok(Some(s)))
+                if s.want.branch.as_deref() == Some(branch.as_str()) && s.changes == Some(false)));
+        }
+        if p.device_id != HUB_DEVICE {
+            /* no Node for it and its paths name the other device's files: git here can't tell; the
+            release request is refused */
+            return Ok(false);
+        }
         let wt = i
             .cwd
             .as_deref()
@@ -198,6 +217,26 @@ impl Tx<'_> {
         let Some(i) = self.db().item(item_id)? else {
             return Ok(true);
         };
+        /* a project on another device: its cwd is that device's, the Hub touches no git here and
+        start_release refuses it */
+        if self
+            .db()
+            .project(i.project_id.as_deref())?
+            .is_some_and(|p| p.device_id != HUB_DEVICE)
+        {
+            return Ok(true);
+        }
+        if self.git_on_node(item_id) {
+            if i.branch.as_deref() != Some(branch) {
+                return Ok(true);
+            }
+            /* on its Node, off the lock: the release starts when the rebase comes back done */
+            let Some(d) = self.open_release(item_id)? else {
+                return Ok(false);
+            };
+            self.rebase_on_node(item_id, branch, to, &d.id);
+            return Ok(false);
+        }
         let Some(cwd) = i
             .cwd
             .as_deref()
@@ -208,7 +247,42 @@ impl Tx<'_> {
         if i.branch.as_deref() != Some(branch) {
             return Ok(true);
         }
-        let (m, note, now_text, reason) = match git::rebase_onto(Path::new(cwd), "main") {
+        self.rebase_outcome(
+            item_id,
+            branch,
+            to,
+            git::rebase_onto(Path::new(cwd), "main"),
+        )
+    }
+
+    /// A rebase on the item's Node came back. The release starts (`true`) only if it went through
+    /// and the item still waits for the release it was for: the same branch, its approval still
+    /// open, no release running.
+    pub(crate) fn rebased(
+        &mut self,
+        item_id: &str,
+        branch: &str,
+        to: &To,
+        r: Rebase,
+    ) -> Result<bool> {
+        let Some(i) = self.db().item(item_id)? else {
+            return Ok(false);
+        };
+        if i.branch.as_deref() != Some(branch)
+            || self
+                .open_release(item_id)?
+                .is_none_or(|d| d.result.get("outcome").is_some())
+            || self.st.releasing.is_some()
+        {
+            return Ok(false);
+        }
+        self.rebase_outcome(item_id, branch, to, r)
+    }
+
+    /// What a rebase before a release means: on any problem the agent is sent back and nothing is
+    /// released (`false`).
+    fn rebase_outcome(&mut self, item_id: &str, branch: &str, to: &To, r: Rebase) -> Result<bool> {
+        let (m, note, now_text, reason) = match r {
             Rebase::Ok { moved } => {
                 if moved {
                     self.db().timeline_add(
@@ -359,6 +433,20 @@ impl Tx<'_> {
             return Ok(());
         };
         let p = self.db().project(item.project_id.as_deref())?;
+        /* before the script lookup: its path names a file on the other device, not on this one */
+        if let Some(device) = p
+            .as_ref()
+            .map(|p| p.device_id.as_str())
+            .filter(|d| *d != HUB_DEVICE)
+        {
+            return self.refuse_release(
+                item_id,
+                &format!("项目在设备 {device} 上，发布脚本只能在 Hub 所在的设备上运行"),
+                &format!(
+                    "这个项目在设备 {device} 上；发布脚本只能在 Hub 所在的设备上运行，无法发布"
+                ),
+            );
+        }
         let script = p
             .as_ref()
             .and_then(|p| p.release.as_ref())
@@ -482,6 +570,16 @@ impl Tx<'_> {
         }
         let item = self.item(item_id)?;
         let p = self.db().project(item.project_id.as_deref())?;
+        if let Some(device) = p
+            .as_ref()
+            .map(|p| p.device_id.as_str())
+            .filter(|d| *d != HUB_DEVICE)
+        {
+            return Err(crate::error::msg(steve_i18n::t!(
+                "core.release.remote_rollback",
+                device = device
+            )));
+        }
         let script = p
             .as_ref()
             .and_then(|p| p.release.as_ref())
@@ -874,19 +972,38 @@ impl Tx<'_> {
                         evidence: json!({"commit": r.get("commit")}),
                         ..op.clone()
                     };
-                    if release_contains(i, &attempt, head.as_deref()) {
-                        self.lc_op_set(
-                            &op.id,
-                            "succeeded",
-                            json!({"version": version, "commit": r.get("commit"), "kind": kind}),
-                        )?;
-                    } else {
-                        self.lc_op_set(
-                            &op.id,
-                            "pending",
-                            json!({"last_failure": "发布的版本不包含验收的结果"}),
-                        )?;
-                        self.fail(&i.id, "发布的版本不包含验收的结果，需要重新发布")?;
+                    match self.release_holds(i, &attempt, head.as_deref()) {
+                        Some(true) => {
+                            self.lc_op_set(
+                                &op.id,
+                                "succeeded",
+                                json!({"version": version, "commit": r.get("commit"), "kind": kind}),
+                            )?;
+                        }
+                        Some(false) => {
+                            self.lc_op_set(
+                                &op.id,
+                                "pending",
+                                json!({"last_failure": "发布的版本不包含验收的结果"}),
+                            )?;
+                            self.fail(&i.id, "发布的版本不包含验收的结果，需要重新发布")?;
+                        }
+                        None => {
+                            /* its Node says once its facts are here (`node_git`) */
+                            self.st.git_proofs.entry(i.id.clone()).or_default().push(
+                                crate::node_git::PendingProof {
+                                    op: op.id.clone(),
+                                    head: head.clone().unwrap_or_default(),
+                                    commit: attempt.evidence["commit"]
+                                        .as_str()
+                                        .unwrap_or_default()
+                                        .into(),
+                                    version: json!(version),
+                                    kind: json!(kind),
+                                },
+                            );
+                            self.git_gather(i);
+                        }
                     }
                 }
             } else if abandoned {
@@ -1077,6 +1194,29 @@ pub(crate) fn release_contains(
 }
 
 impl Tx<'_> {
+    /// [`release_contains`] for the item where its git is: on a Node as its facts say (`None`:
+    /// they don't say yet).
+    pub(crate) fn release_holds(
+        &self,
+        i: &Item,
+        op: &steve_store::ItemOperation,
+        head: Option<&str>,
+    ) -> Option<bool> {
+        if !self.git_on_node(&i.id) {
+            return Some(release_contains(i, op, head));
+        }
+        let Some(head) = head.filter(|h| !h.is_empty()) else {
+            return Some(true);
+        };
+        let Some(commit) = op.evidence["commit"].as_str().filter(|c| !c.is_empty()) else {
+            return Some(false);
+        };
+        if commit.starts_with(head) || head.starts_with(commit) {
+            return Some(true);
+        }
+        self.git_contains(&i.id, head, commit)
+    }
+
     /// The release adapter of the closing gate. A release project: the accepted result must be live. Satisfied by a release of this cycle whose
     /// commit contains the frozen `HEAD` (the agent may have released it already); otherwise a pending
     /// requirement, and the agent is asked to publish. A branch with nothing to release is not proof of
@@ -1091,6 +1231,11 @@ impl Tx<'_> {
         if let Some(rule) = self.done_rule(i)? {
             return self.contract_requirement(i, &rule);
         }
+        /* on a Node: what it shipped and what there is to ship are its facts; none yet holds this
+         * until they are here (the gathering checks the closing again) */
+        if self.git_on_node(&i.id) && !matches!(self.git_take(i), Some(Ok(_))) {
+            return Ok(());
+        }
         let head = c.fingerprint.as_deref().map(fingerprint_head);
         let proof = self
             .db()
@@ -1101,7 +1246,7 @@ impl Tx<'_> {
             .find(|o| {
                 o.kind == OP_RELEASE
                     && o.status == "succeeded"
-                    && crate::release::release_contains(i, o, head)
+                    && self.release_holds(i, o, head) == Some(true)
             });
         let key = format!("{}:{}:{}", OP_RELEASE, i.cycle, i.revision);
         match proof {

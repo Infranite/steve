@@ -12,14 +12,21 @@
 //! confirmed gone ([`procs`]).
 
 mod actor;
+mod exec;
+pub mod git;
+pub mod history;
+mod job;
 mod journal;
 mod procs;
+mod research;
+mod scan;
+mod secrets;
 mod tools;
 pub mod workspace;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -31,6 +38,7 @@ use steve_node_api::*;
 use tokio::sync::mpsc;
 
 use actor::{Actor, Msg};
+pub use job::JobHarnesses;
 use journal::{Journal, Op, SessionRow, Tx, WorkspaceRow, internal};
 pub use workspace::Root;
 
@@ -44,6 +52,8 @@ pub struct NodeConfig {
     pub roots: Vec<Root>,
     pub capacity: Capacity,
     pub storage: Storage,
+    /// The CLIs think jobs run with (none: no harness runs jobs, whatever `capacity.jobs` says).
+    pub jobs: JobHarnesses,
 }
 
 /// How much disk the journal may take. The limit is the quota, or less when the filesystem of the
@@ -61,6 +71,13 @@ pub struct Storage {
     /// Tests: the filesystem's free bytes, instead of asking it.
     #[doc(hidden)]
     pub free_space: Option<Arc<dyn Fn() -> u64 + Send + Sync>>,
+    /// Below this many free bytes where a worktree goes, no worktree on a new branch is made
+    /// (`exhausted`, "disk low"); one on a branch that is there already (its work coming back)
+    /// still is. 0: no floor.
+    pub worktree_floor: u64,
+    /// Tests: the free bytes where worktrees go, instead of asking the filesystem.
+    #[doc(hidden)]
+    pub worktree_free: Option<Arc<dyn Fn() -> u64 + Send + Sync>>,
 }
 
 impl Default for Storage {
@@ -70,6 +87,8 @@ impl Default for Storage {
             reserve: 512 << 20,
             low_water: 80,
             free_space: None,
+            worktree_floor: 0,
+            worktree_free: None,
         }
     }
 }
@@ -142,6 +161,8 @@ pub(crate) struct Inner {
     actors: Mutex<HashMap<SessionId, mpsc::UnboundedSender<Msg>>>,
     sink: Mutex<Option<Arc<dyn EventSink>>>,
     files: Mutex<Option<Arc<dyn HubFiles>>>,
+    /// Where a command's secrets come from (the Hub).
+    secrets: Mutex<Option<Arc<dyn HubSecrets>>>,
     wake: tokio::sync::Notify,
     delivering: AtomicBool,
     closed: AtomicBool,
@@ -158,8 +179,23 @@ pub(crate) struct Inner {
     /// Workspace work on one repository goes one at a time.
     repos: Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>,
     snapshots: Mutex<HashMap<u64, Snapshot>>,
+    /// The manifests of finished scans, read page by page, gone after a restart.
+    scans: Mutex<scan::Scans>,
+    /// The running jobs' cancel signals, by operation.
+    job_stops: Mutex<HashMap<OperationId, Arc<tokio::sync::Notify>>>,
     cache_n: AtomicU64,
+    /// Commands ([`exec`]) and pushes running now, against `capacity.execs`.
+    execs: AtomicUsize,
+    /// How long a push may take (ms).
+    push_timeout: AtomicU64,
     tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    /// Where the harnesses' history is and which binaries a probe asks; none until the host turns
+    /// discovery on ([`LocalNode::set_discovery`]): history is then `unsupported` and a probe runs
+    /// no harness binary.
+    discovery: std::sync::RwLock<Option<Arc<history::DiscoveryConfig>>>,
+    probes: history::Probes,
+    imports: history::Imports,
+    research: research::Research,
 }
 
 impl Inner {
@@ -396,7 +432,11 @@ pub(crate) async fn prompt(
 
 /// An attachment's bytes, from the cache (checked) or the Hub (for this execution; size, progress
 /// and hash checked; written to a file of its own, then published whole).
-async fn fetch(inner: &Arc<Inner>, exec: &ExecutionRef, a: &ArtifactRef) -> ApiResult<PathBuf> {
+pub(crate) async fn fetch(
+    inner: &Arc<Inner>,
+    exec: &ExecutionRef,
+    a: &ArtifactRef,
+) -> ApiResult<PathBuf> {
     use sha2::Digest as _;
     let internal = |e: std::io::Error| ApiError::new(ErrorCode::Internal, e.to_string());
     let dir = inner.cfg.home.join("blobs");
@@ -950,6 +990,10 @@ impl LocalNode {
         std::fs::create_dir_all(&cfg.home)
             .map_err(|e| ApiError::new(ErrorCode::Internal, format!("node home: {e}")))?;
         let lock = HomeLock::take(&cfg.home)?;
+        // a command's secret files a crash left behind
+        secrets::cleanup(&cfg.home);
+        // and the throwaway repositories of pushes
+        git::cleanup(&cfg.home);
         let (j, incarnation) = Journal::open(&cfg.home.join("node.sqlite3"))?;
         // a group of the old incarnation that is surely gone holds nothing
         j.tx(|t| {
@@ -962,6 +1006,9 @@ impl LocalNode {
         })?;
         Ok(LocalNode(Arc::new_cyclic(|weak| Inner {
             roots: std::sync::RwLock::new(Arc::new(cfg.roots.clone())),
+            discovery: std::sync::RwLock::new(None),
+            probes: Default::default(),
+            imports: Default::default(),
             cfg,
             j,
             incarnation,
@@ -970,6 +1017,7 @@ impl LocalNode {
             actors: Mutex::new(HashMap::new()),
             sink: Mutex::new(None),
             files: Mutex::new(None),
+            secrets: Mutex::new(None),
             wake: tokio::sync::Notify::new(),
             delivering: AtomicBool::new(false),
             closed: AtomicBool::new(false),
@@ -981,8 +1029,13 @@ impl LocalNode {
             tools_url: Mutex::new(None),
             repos: Mutex::new(HashMap::new()),
             snapshots: Mutex::new(HashMap::new()),
+            scans: Mutex::new(scan::Scans::default()),
+            job_stops: Mutex::new(HashMap::new()),
             cache_n: AtomicU64::new(0),
+            execs: AtomicUsize::new(0),
+            push_timeout: AtomicU64::new(git::PUSH_TIMEOUT.as_millis() as u64),
             tasks: Mutex::new(Vec::new()),
+            research: Default::default(),
         })))
     }
 
@@ -1005,6 +1058,12 @@ impl LocalNode {
             self.spawn_owned(deliver_loop(Arc::downgrade(&self.0)));
         }
         self.0.wake.notify_one();
+    }
+
+    /// Where commands' secrets come from ([`HubSecrets`], bound to this Node). Without it a command
+    /// that needs one fails without running.
+    pub fn connect_secrets(&self, secrets: Arc<dyn HubSecrets>) {
+        *self.0.secrets.lock().unwrap() = Some(secrets);
     }
 
     /// Serve Steve's tools to this Node's harnesses, answered by `hub`. Sessions started after this
@@ -1039,13 +1098,15 @@ impl LocalNode {
         self.0.wake.notify_one();
     }
 
-    fn spawn_owned(&self, work: impl std::future::Future<Output = ()> + Send + 'static) {
+    /// False: the Node is shutting down and `work` was not started.
+    fn spawn_owned(&self, work: impl std::future::Future<Output = ()> + Send + 'static) -> bool {
         let mut tasks = self.0.tasks.lock().unwrap();
         if self.0.closed.load(Ordering::SeqCst) {
-            return;
+            return false;
         }
         tasks.retain(|task| !task.is_finished());
         tasks.push(tokio::spawn(work));
+        true
     }
 
     fn actor(&self, session: &SessionId) -> mpsc::UnboundedSender<Msg> {
@@ -1063,10 +1124,11 @@ impl LocalNode {
         tx
     }
 
-    /// Host bridge for a Node on the Hub's own machine: where `w` is, so the Hub can judge a
-    /// permission request against the real directory. Not on the [`Node`] trait and never sent over
-    /// the transport: a remote Node has none, and the Hub then asks. `None` when the workspace is
-    /// another Node's, unknown, gone or no longer inside the roots.
+    /// Host bridge for a Node on the Hub's own machine: where `w` is, checked against the roots
+    /// now. Not on the [`Node`] trait and never sent over the transport. The Hub no longer reads it
+    /// (N0e-E11c: YOLO takes the directory from the workspace view the prepare returned); kept for
+    /// tests and host tools. `None` when the workspace is another Node's, unknown, gone or no
+    /// longer inside the roots.
     pub fn local_dir(&self, w: &WorkspaceRef) -> Option<LocalDir> {
         self.mine(w).ok()?;
         let row = self.0.j.read(|t| t.workspace(&w.id)).ok()??;
@@ -1076,6 +1138,25 @@ impl LocalNode {
             path,
             owned: !existing,
         })
+    }
+
+    /// Host bridge for a Node on the Hub's own machine: whether `path` (where the Hub's ledger
+    /// says `w` was prepared) is still `w`'s directory now. The Node's journal still has `w`, at
+    /// that same directory, and the roots check it passes when it is used holds now: an adopted
+    /// directory is still inside a read-write root. Not on the [`Node`] trait and never sent over
+    /// the transport.
+    pub fn holds(&self, w: &WorkspaceRef, path: &Path) -> bool {
+        if self.mine(w).is_err() {
+            return false;
+        }
+        let Ok(Some(row)) = self.0.j.read(|t| t.workspace(&w.id)) else {
+            return false;
+        };
+        let existing = matches!(row.kind, PrepareKind::Existing { .. });
+        let Ok(real) = workspace::still_valid(path, &self.0.roots(), existing) else {
+            return false;
+        };
+        Path::new(&row.path).canonicalize().is_ok_and(|p| p == real)
     }
 
     /// Host bridge: whether a prepare of `at` would pass the roots check now (a read-write root
@@ -1091,6 +1172,31 @@ impl LocalNode {
     /// command; a workspace prepared under a root that is gone now is refused when it is used.
     pub fn set_roots(&self, roots: Vec<Root>) {
         *self.0.roots.write().unwrap() = Arc::new(roots);
+    }
+
+    /// Host bridge, like [`Self::set_roots`]: where this machine's harnesses keep their history and
+    /// which binaries a probe asks, as the Hub on the same machine configures its own harnesses.
+    /// Off until set: a Node nobody turned discovery on for (the `steve-node` binary on a paired
+    /// device) lists, reads and locates no history and runs no harness binary to probe.
+    pub fn set_discovery(&self, d: history::DiscoveryConfig) {
+        *self.0.discovery.write().unwrap() = Some(Arc::new(d));
+    }
+
+    fn discovery(&self) -> ApiResult<Arc<history::DiscoveryConfig>> {
+        self.0
+            .discovery
+            .read()
+            .unwrap()
+            .clone()
+            .map_or_else(|| unsupported("history"), Ok)
+    }
+
+    /// Tests: how long a push may take before its process group is killed (5 minutes).
+    #[doc(hidden)]
+    pub fn set_push_timeout(&self, d: Duration) {
+        self.0
+            .push_timeout
+            .store(d.as_millis() as u64, Ordering::SeqCst);
     }
 
     fn mine(&self, w: &WorkspaceRef) -> ApiResult<()> {
@@ -1264,6 +1370,36 @@ impl LocalNode {
         Ok(())
     }
 
+    /// The disk floor for a worktree at `path`: the floor and how to read the free bytes there
+    /// (`None`: no floor).
+    fn worktree_floor(&self, path: &Path) -> Option<(u64, workspace::FreeBytes)> {
+        let s = &self.0.cfg.storage;
+        if s.worktree_floor == 0 {
+            return None;
+        }
+        let free: workspace::FreeBytes = match &s.worktree_free {
+            Some(f) => {
+                let f = f.clone();
+                Box::new(move || Some(f()))
+            }
+            None => {
+                let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
+                Box::new(move || journal::free_bytes(&dir))
+            }
+        };
+        Some((s.worktree_floor, free))
+    }
+
+    /// The facts a decision on the workspace at `dir` is checked against (HEAD, branch, tree).
+    async fn facts_now(&self, dir: &Path) -> ApiResult<GitFacts> {
+        let commands = workspace::Commands {
+            inner: self.0.clone(),
+            op: read_op(&self.0)?,
+        };
+        let dir = dir.to_path_buf();
+        blocking(move || git::now(&commands, &dir)).await
+    }
+
     fn repo_lock(&self, repo: &Path) -> Arc<tokio::sync::Mutex<()>> {
         self.0
             .repos
@@ -1313,6 +1449,172 @@ impl LocalNode {
             } else {
                 return;
             }
+        }
+    }
+}
+
+impl LocalNode {
+    /// A push ([`git`]): refused before it is accepted when its preconditions do not hold (the
+    /// remote, the branch at `expected_local`, HEAD and the revision the Hub saw), checked again
+    /// right before it runs; then a command in a throwaway repository like [`Self::exec`], with
+    /// its credential taken once. Succeeded: git took it (its facts after). Failed: git refused
+    /// it (its complaint, masked). Timed out, interrupted or unknown: it may have landed, and it
+    /// is never pushed again.
+    async fn push_apply(&self, c: Command<GitApply>) -> ApiResult<Receipt> {
+        if self.0.cfg.capacity.execs == 0 {
+            return unsupported("push");
+        }
+        git::check_push_shape(&c.body.action).map_err(|e| e.on(&c.id))?;
+        // a resend of one it has is answered by its receipt, whatever git says now
+        let known = self.0.j.read(|t| t.op(&c.id))?.is_some();
+        if !known {
+            let dir = workspace_dir(&self.0, &c.body.workspace)?;
+            let body = c.body.clone();
+            let commands = workspace::Commands {
+                inner: self.0.clone(),
+                op: read_op(&self.0)?,
+            };
+            blocking(move || git::check_push(&commands, &dir, &body))
+                .await
+                .map_err(|e| e.on(&c.id))?;
+        }
+        let w = c.body.workspace.clone();
+        let mut dir = PathBuf::new();
+        let mut counted = false;
+        let accepted = self.accept("git_apply", &c, |t| {
+            let row = t
+                .workspace(&w.id)?
+                .ok_or_else(|| ApiError::new(ErrorCode::Invalid, "no such workspace"))?;
+            Self::workspace_free(t, &row.resource)?;
+            let existing = matches!(row.kind, PrepareKind::Existing { .. });
+            dir = workspace::still_valid(Path::new(&row.path), &self.0.roots(), existing)?;
+            if self.0.execs.fetch_add(1, Ordering::SeqCst) >= self.0.cfg.capacity.execs as usize {
+                self.0.execs.fetch_sub(1, Ordering::SeqCst);
+                return Err(ApiError::new(ErrorCode::Exhausted, "no command capacity"));
+            }
+            counted = true;
+            let mut d = Decided::accepted();
+            d.workspace = Some(w.clone());
+            Ok(d)
+        });
+        let r = match accepted {
+            Ok((r, true)) => r,
+            other => {
+                if counted {
+                    self.0.execs.fetch_sub(1, Ordering::SeqCst);
+                }
+                return other.map(|(r, _)| r);
+            }
+        };
+        let me = self.clone();
+        let op = c.id.clone();
+        let apply = c.body.clone();
+        let deadline = now() + self.0.push_timeout.load(Ordering::SeqCst) as i64;
+        let spawned = self.spawn_owned(async move {
+            let state = me.push(&op, dir, apply, deadline).await;
+            me.complete(&op, state, |_| Ok(())).await;
+            me.0.execs.fetch_sub(1, Ordering::SeqCst);
+        });
+        if !spawned {
+            // shutting down: it never starts, and the restart reports it unknown
+            self.0.execs.fetch_sub(1, Ordering::SeqCst);
+        }
+        Ok(r)
+    }
+
+    /// Runs an accepted push to its end ([`WorkspaceExecutor::git_apply`]).
+    async fn push(
+        &self,
+        op: &OperationId,
+        dir: PathBuf,
+        apply: GitApply,
+        deadline: i64,
+    ) -> Observed {
+        let not_run = |code, m: String| failed(ApiError::new(code, m));
+        let auth = match &apply.action {
+            GitAction::Push { auth, .. } => auth.clone(),
+            _ => return not_run(ErrorCode::Unsupported, "not a push".into()),
+        };
+        let checked = match read_op(&self.0) {
+            Ok(op) => {
+                let commands = workspace::Commands {
+                    inner: self.0.clone(),
+                    op,
+                };
+                let (dir, apply) = (dir.clone(), apply.clone());
+                blocking(move || git::check_push(&commands, &dir, &apply)).await
+            }
+            Err(e) => Err(e),
+        };
+        let plan = match checked {
+            Ok(p) => p,
+            Err(e) => return failed(e),
+        };
+        // taken now, under this operation, once: a resend was answered by its receipt
+        let (header, mask) = match &auth {
+            None => (None, None),
+            Some(r) => {
+                let hub = self.0.secrets.lock().unwrap().clone();
+                match secrets::header(hub, op, r).await {
+                    Ok((h, m)) => (Some(h), Some(m)),
+                    Err(e) => return not_run(ErrorCode::Denied, format!("not pushed: {e}")),
+                }
+            }
+        };
+        debug_assert_eq!(plan.header.is_some(), header.is_some());
+        let inner = self.0.clone();
+        let op2 = op.clone();
+        let ran = tokio::task::spawn_blocking(move || {
+            let bare = git::bare(&inner.cfg.home, &op2, &plan)?;
+            let run = git::push_run(&bare, &plan, header, mask, deadline);
+            let ran = exec::run(&inner, &op2, &run);
+            // the repository goes once git (and all it started) is done
+            if !ran.as_ref().is_ok_and(|r| r.gone) {
+                std::mem::forget(bare);
+            }
+            ran
+        })
+        .await
+        .map_err(|e| e.to_string())
+        .and_then(|r| r);
+        match ran {
+            Err(e) => not_run(ErrorCode::Internal, format!("the push did not start: {e}")),
+            Ok(ran) if !ran.gone => Observed::Unknown {
+                reason: "the push's processes were not confirmed gone".into(),
+            },
+            Ok(ran) => match ran.ended {
+                exec::Ended::Exited(Some(0)) => {
+                    let after = self.facts_now(&dir).await;
+                    Observed::Finished {
+                        outcome: Outcome::Succeeded,
+                        result: Some(match after {
+                            Ok(f) => OperationResult::Git(f),
+                            _ => OperationResult::Unit,
+                        }),
+                        error: None,
+                    }
+                }
+                exec::Ended::Exited(_) => failed(ApiError::new(
+                    ErrorCode::Denied,
+                    format!("git push: {}", git::complaint(&ran.stderr)),
+                )),
+                exec::Ended::TimedOut => Observed::Finished {
+                    outcome: Outcome::TimedOut,
+                    result: None,
+                    error: Some(ApiError::new(
+                        ErrorCode::OutcomeUnknown,
+                        "the push did not end in time: it may have landed",
+                    )),
+                },
+                exec::Ended::Stopped => Observed::Finished {
+                    outcome: Outcome::Interrupted,
+                    result: None,
+                    error: Some(ApiError::new(
+                        ErrorCode::OutcomeUnknown,
+                        "the push was stopped: it may have landed",
+                    )),
+                },
+            },
         }
     }
 }
@@ -1379,6 +1681,13 @@ async fn deliver_loop(inner: std::sync::Weak<Inner>) {
             }
         }
     }
+}
+
+/// The id a git read runs under (its own, never an operation's).
+fn read_op(inner: &Inner) -> ApiResult<OperationId> {
+    static READS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = READS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    id(format!("git-read-{}-{n}", inner.incarnation))
 }
 
 fn unsupported<T>(what: &str) -> ApiResult<T> {
@@ -1617,8 +1926,77 @@ impl SessionExecutor for LocalNode {
 
 #[async_trait]
 impl JobExecutor for LocalNode {
-    async fn start_job(&self, _c: Command<JobSpec>) -> ApiResult<Receipt> {
-        unsupported("jobs")
+    /// Accepted running; a think job runs its one model in a scratch directory of its own and
+    /// ends with its answer; a research job is [`Self::start_research`]'s.
+    async fn start_job(&self, c: Command<JobSpec>) -> ApiResult<Receipt> {
+        if let JobWork::Research(_) = &c.body.work {
+            return self.start_research(c).await;
+        }
+        if self.0.cfg.capacity.jobs == 0 || self.0.cfg.jobs.names().is_empty() {
+            return Err(ApiError::new(
+                ErrorCode::Unsupported,
+                "this node runs no jobs",
+            ));
+        }
+        let exec = ExecutionRef::Job {
+            job: c.body.job.clone(),
+            attempt: c.body.run.attempt.clone(),
+        };
+        let (r, fresh) = self.accept("start_job", &c, |t| {
+            let j = &c.body;
+            j.check()?;
+            if self.0.cfg.jobs.executable(&j.run.choice.harness).is_none() {
+                return Err(ApiError::new(
+                    ErrorCode::Unsupported,
+                    format!("no harness {} runs jobs on this node", j.run.choice.harness),
+                ));
+            }
+            Self::check_policy(&j.run.policy)?;
+            Self::check_limits(&j.run.limits)?;
+            if t.unacked_bytes()? > self.0.cfg.storage.quota {
+                return Err(ApiError::new(
+                    ErrorCode::Exhausted,
+                    "the hub has not taken this node's events: no new work until it does",
+                ));
+            }
+            let running = t
+                .ops()?
+                .into_iter()
+                .filter(|(_, o)| o.method == "start_job" && !o.receipt.state.is_finished())
+                .count() as u32;
+            if running >= self.0.cfg.capacity.jobs {
+                return Err(ApiError::new(ErrorCode::Exhausted, "no job capacity"));
+            }
+            if t.attempt(&j.run.attempt)?.is_some() {
+                return Err(ApiError::new(
+                    ErrorCode::Conflict,
+                    "this attempt already ran under another operation",
+                ));
+            }
+            t.take_attempt(&exec, &c.id)?;
+            Ok(Decided {
+                state: Observed::Running,
+                execution: Some(exec.clone()),
+                workspace: None,
+                session: None,
+                events: vec![(Subject::Execution(exec.clone()), EventBody::AttemptStarted)],
+            })
+        })?;
+        if fresh {
+            let stop = Arc::new(tokio::sync::Notify::new());
+            self.0
+                .job_stops
+                .lock()
+                .unwrap()
+                .insert(c.id.clone(), stop.clone());
+            let inner = self.0.clone();
+            let (op, spec) = (c.id.clone(), c.body.clone());
+            self.spawn_owned(async move {
+                job::run(inner.clone(), op.clone(), spec, stop).await;
+                inner.job_stops.lock().unwrap().remove(&op);
+            });
+        }
+        Ok(r)
     }
 }
 
@@ -1649,16 +2027,20 @@ impl ExecutionControl for LocalNode {
         })?;
         if fresh && let Some(s) = session {
             let _ = self.actor(&s).send(Msg::Cancel { target });
+        } else if fresh && let Some(stop) = self.0.job_stops.lock().unwrap().get(&target) {
+            stop.notify_one();
         }
         Ok(r)
     }
 
     /// Accepted now; finished once the execution's processes are confirmed gone: it then ends as
-    /// interrupted and its session is free to be opened again. One abandon per target; only
+    /// interrupted and its session (or its job's slot) is free again. One abandon per target; only
     /// executions are abandoned (other unknown operations are found out otherwise).
     async fn abandon(&self, c: Command<Abandon>) -> ApiResult<Receipt> {
         let target = c.body.target.clone();
         let mut session = None;
+        let mut job = None;
+        let mut research = false;
         let (r, fresh) = self.accept("abandon", &c, |t| {
             let op = t
                 .op(&target)?
@@ -1669,12 +2051,22 @@ impl ExecutionControl for LocalNode {
                     "only an unknown execution is abandoned (cancel a live one)",
                 ));
             }
-            let Some(ExecutionRef::Turn { session: s, .. }) = &op.execution else {
-                return Err(ApiError::new(
-                    ErrorCode::Unsupported,
-                    "only an execution is abandoned",
-                ));
-            };
+            match &op.execution {
+                Some(ExecutionRef::Turn { session: s, .. }) => session = Some(s.clone()),
+                Some(ExecutionRef::Job { attempt, .. }) => {
+                    job = Some(job::group_key(attempt));
+                    // every end of a research attempt carries its report
+                    research = t.spec(&target)?.is_some_and(|b| {
+                        b.pointer("/work/kind").and_then(Value::as_str) == Some("research")
+                    });
+                }
+                None => {
+                    return Err(ApiError::new(
+                        ErrorCode::Unsupported,
+                        "only an execution is abandoned",
+                    ));
+                }
+            }
             if t.reservation(&format!("abandon:{target}"))?.is_some() {
                 return Err(ApiError::new(
                     ErrorCode::Conflict,
@@ -1682,20 +2074,25 @@ impl ExecutionControl for LocalNode {
                 ));
             }
             t.reserve(&format!("abandon:{target}"), &c.id)?;
-            session = Some(s.clone());
             Ok(Decided::accepted())
         })?;
-        if fresh && let Some(s) = session {
+        if fresh && (session.is_some() || job.is_some()) {
             let me = self.clone();
             let op = c.id.clone();
             self.spawn_owned(async move {
-                let (tx, rx) = tokio::sync::oneshot::channel();
-                let _ = me.actor(&s).send(Msg::Stop {
-                    op: None,
-                    abandon: true,
-                    done: Some(tx),
-                });
-                let stopped = rx.await.unwrap_or(procs::Stopped::Uncertain);
+                let stopped = match (&session, &job) {
+                    (Some(s), _) => {
+                        let (tx, rx) = tokio::sync::oneshot::channel();
+                        let _ = me.actor(s).send(Msg::Stop {
+                            op: None,
+                            abandon: true,
+                            done: Some(tx),
+                        });
+                        rx.await.unwrap_or(procs::Stopped::Uncertain)
+                    }
+                    (None, Some(key)) => job::stop_group(&me.0, key).await,
+                    (None, None) => procs::Stopped::Uncertain,
+                };
                 let key = format!("abandon:{target}");
                 if !stopped.gone() {
                     return me
@@ -1723,7 +2120,12 @@ impl ExecutionControl for LocalNode {
                         continuation: None,
                         transient: false,
                         acted: true,
-                        job: None,
+                        job: research.then(|| JobReport {
+                            end: JobEnd::Stopped,
+                            turns: 0,
+                            files_read: vec![],
+                            sandboxed: false,
+                        }),
                     };
                     // only if it still is the unknown one this was for
                     if !matches!(o.receipt.state, Observed::Unknown { .. }) {
@@ -1758,7 +2160,13 @@ impl ExecutionControl for LocalNode {
                             )],
                         )?;
                     }
-                    if let Some(mut row) = t.session(&s)?
+                    if let Some(exec) = &o.execution
+                        && job.is_some()
+                    {
+                        inner.tools.revoke_job(exec);
+                    }
+                    if let Some(s) = &session
+                        && let Some(mut row) = t.session(s)?
                         && row.view.active == o.execution
                     {
                         row.view.phase = SessionPhase::Released;
@@ -2053,8 +2461,11 @@ impl WorkspaceExecutor for LocalNode {
                 PrepareKind::Existing { dir } => {
                     workspace::resolve(&self.0.roots(), dir, true)?;
                 }
-                PrepareKind::Worktree { repository, .. } => {
+                PrepareKind::Worktree { repository, at, .. } => {
                     workspace::resolve(&self.0.roots(), repository, true)?;
+                    if let Some(at) = at {
+                        workspace::target(&self.0.roots(), at)?;
+                    }
                 }
                 PrepareKind::Scratch => {}
             }
@@ -2084,30 +2495,41 @@ impl WorkspaceExecutor for LocalNode {
                     repository,
                     branch,
                     base,
-                } => match workspace::resolve(&me.0.roots(), repository, true) {
-                    Ok(repo) => {
-                        let lock = me.repo_lock(&repo);
-                        let _g = lock.lock().await;
-                        let p = home.join("worktrees").join(&name);
-                        let (r2, p2, b2, base2) =
-                            (repo.clone(), p.clone(), branch.clone(), base.clone());
-                        let commands = workspace::Commands {
-                            inner: me.0.clone(),
-                            op: op.clone(),
-                        };
-                        tokio::task::spawn_blocking(move || {
-                            workspace::add_worktree(&commands, &r2, &p2, &b2, base2.as_deref())
-                        })
-                        .await
-                        .map_err(|e| e.to_string())
-                        .and_then(|r| r)
-                        .map(|_| (p, Some(repo), Some(branch.clone())))
-                        .map_err(|e| {
-                            ApiError::new(ErrorCode::Invalid, format!("git worktree: {e}"))
-                        })
+                    at,
+                } => {
+                    let place = match at {
+                        Some(at) => workspace::target(&me.0.roots(), at),
+                        None => Ok(home.join("worktrees").join(&name)),
+                    };
+                    match (workspace::resolve(&me.0.roots(), repository, true), place) {
+                        (Ok(repo), Ok(p)) => {
+                            let lock = me.repo_lock(&repo);
+                            let _g = lock.lock().await;
+                            let (r2, p2, b2, base2) =
+                                (repo.clone(), p.clone(), branch.clone(), base.clone());
+                            let commands = workspace::Commands {
+                                inner: me.0.clone(),
+                                op: op.clone(),
+                            };
+                            let floor = me.worktree_floor(&p);
+                            tokio::task::spawn_blocking(move || {
+                                workspace::add_worktree_above(
+                                    &commands,
+                                    &r2,
+                                    &p2,
+                                    &b2,
+                                    base2.as_deref(),
+                                    floor,
+                                )
+                            })
+                            .await
+                            .map_err(|e| ApiError::new(ErrorCode::Internal, e.to_string()))
+                            .and_then(|r| r)
+                            .map(|_| (p, Some(repo), Some(branch.clone())))
+                        }
+                        (Err(e), _) | (_, Err(e)) => Err(e),
                     }
-                    Err(e) => Err(e),
-                },
+                }
             };
             let resource = body.resource.clone();
             if me
@@ -2220,6 +2642,12 @@ impl WorkspaceExecutor for LocalNode {
             Self::workspace_free(t, &row.resource)?;
             if row.view.revision != c.body.expected {
                 return Err(ApiError::new(ErrorCode::Conflict, "changed since"));
+            }
+            if t.open_execs_in(&w)? > 0 {
+                return Err(ApiError::new(
+                    ErrorCode::Busy,
+                    "a command runs in it or is unknown: recover it first",
+                ));
             }
             for s in t.sessions_in(&w)? {
                 Self::idle(t, &s)?;
@@ -2359,54 +2787,463 @@ impl WorkspaceExecutor for LocalNode {
         Ok(r)
     }
 
-    async fn git_facts(&self, _q: GitQuery) -> ApiResult<GitFacts> {
-        unsupported("git")
+    /// The read kinds of git in a workspace (show, log, diff), its HEAD, branch and refs. Each
+    /// git runs through the workspace pipe under a read id of its own.
+    async fn git_facts(&self, q: GitQuery) -> ApiResult<GitFacts> {
+        self.mine(&q.workspace)?;
+        let dir = workspace_dir(&self.0, &q.workspace)?;
+        let commands = workspace::Commands {
+            inner: self.0.clone(),
+            op: read_op(&self.0)?,
+        };
+        blocking(move || git::facts(&commands, &dir, &q)).await
     }
-    async fn git_apply(&self, _c: Command<GitApply>) -> ApiResult<Receipt> {
-        unsupported("git")
+
+    /// A rebase, or a push ([`Self::push_apply`]); a merge is not done here yet. A rebase is
+    /// refused `stale` when the workspace's facts moved off the ones it was decided on, checked
+    /// before it is accepted and again under the repository's lock before git runs; then finished
+    /// with the new facts, or failed: a conflict backed out (`conflict`, the paths), uncommitted
+    /// tracked changes (`busy`), or what git said.
+    async fn git_apply(&self, c: Command<GitApply>) -> ApiResult<Receipt> {
+        self.mine(&c.body.workspace)?;
+        if matches!(c.body.action, GitAction::Push { .. }) {
+            return self.push_apply(c).await;
+        }
+        let GitAction::Rebase { onto } = c.body.action.clone() else {
+            return unsupported("git merge");
+        };
+        let w = c.body.workspace.clone();
+        let known = self.0.j.read(|t| t.op(&c.id))?.is_some();
+        let dir = workspace_dir(&self.0, &w)?;
+        let row = self
+            .0
+            .j
+            .read(|t| t.workspace(&w.id))?
+            .ok_or_else(|| ApiError::new(ErrorCode::Invalid, "no such workspace"))?;
+        if !known {
+            let now = self.facts_now(&dir).await?;
+            if now.revision != c.body.expected || now.head != c.body.expected_head {
+                return Err(ApiError::new(ErrorCode::Stale, "changed since").on(&c.id));
+            }
+        }
+        let resource = row.resource.clone();
+        let (r, fresh) = self.accept("git_apply", &c, |t| {
+            Self::workspace_free(t, &resource)?;
+            let mut d = Decided::accepted();
+            d.workspace = Some(w.clone());
+            Ok(d)
+        })?;
+        if !fresh {
+            return Ok(r);
+        }
+        let me = self.clone();
+        let op = c.id.clone();
+        let (expected, expected_head) = (c.body.expected.clone(), c.body.expected_head.clone());
+        self.spawn_owned(async move {
+            let lock = me.repo_lock(Path::new(row.repo.as_deref().unwrap_or(&row.path)));
+            let _g = lock.lock().await;
+            let commands = workspace::Commands {
+                inner: me.0.clone(),
+                op: op.clone(),
+            };
+            let d = dir.clone();
+            let done = tokio::task::spawn_blocking(move || {
+                git::rebase(&commands, &d, &onto, &expected, &expected_head)
+            })
+            .await
+            .map_err(internal)
+            .and_then(|r| r);
+            if me
+                .0
+                .j
+                .read(|t| t.proc_of(&workspace::control_session(&op)))
+                .map_or(true, |p| p.is_some())
+            {
+                return me
+                    .complete(
+                        &op,
+                        Observed::Unknown {
+                            reason: "git process not confirmed stopped".into(),
+                        },
+                        |_| Ok(()),
+                    )
+                    .await;
+            }
+            let state = match done {
+                Ok(facts) => Observed::Finished {
+                    outcome: Outcome::Succeeded,
+                    result: Some(OperationResult::Git(facts)),
+                    error: None,
+                },
+                Err(e) => failed(e),
+            };
+            me.complete(&op, state, |_| Ok(())).await;
+        });
+        Ok(r)
     }
-    async fn exec(&self, _c: Command<ExecSpec>) -> ApiResult<Receipt> {
-        unsupported("exec")
+    /// Accepted now (the workspace still valid, a command slot free); finished once the command
+    /// ended and its whole process group is confirmed gone, with its exit code and bounded output
+    /// ([`exec`]). Any exit code is `succeeded` (the command ran to its end); the deadline is
+    /// `timed_out`. A group that could not be confirmed gone leaves it `unknown`, and so does a
+    /// restart while it ran: it is never run again (recover stops what is left).
+    async fn exec(&self, c: Command<ExecSpec>) -> ApiResult<Receipt> {
+        self.mine(&c.body.workspace)?;
+        if self.0.cfg.capacity.execs == 0 {
+            return unsupported("commands");
+        }
+        secrets::check(&c.body.secrets, &c.body.env).map_err(|e| e.on(&c.id))?;
+        Self::check_policy(&c.body.policy)?;
+        Self::check_limits(&c.body.limits)?;
+        if c.body.command.trim().is_empty() || c.body.command.contains('\0') {
+            return Err(ApiError::new(ErrorCode::Invalid, "no command").on(&c.id));
+        }
+        if c.body
+            .env
+            .iter()
+            .any(|(k, v)| k.is_empty() || k.contains('=') || k.contains('\0') || v.contains('\0'))
+        {
+            return Err(ApiError::new(ErrorCode::Invalid, "a bad environment variable").on(&c.id));
+        }
+        let w = c.body.workspace.clone();
+        let mut dir = PathBuf::new();
+        let mut counted = false;
+        let accepted = self.accept("exec", &c, |t| {
+            let row = t
+                .workspace(&w.id)?
+                .ok_or_else(|| ApiError::new(ErrorCode::Invalid, "no such workspace"))?;
+            Self::workspace_free(t, &row.resource)?;
+            let existing = matches!(row.kind, PrepareKind::Existing { .. });
+            let base = workspace::still_valid(Path::new(&row.path), &self.0.roots(), existing)?;
+            dir = match &c.body.cwd {
+                None => base,
+                Some(rel) => workspace::below(&base, rel)?,
+            };
+            if self.0.execs.fetch_add(1, Ordering::SeqCst) >= self.0.cfg.capacity.execs as usize {
+                self.0.execs.fetch_sub(1, Ordering::SeqCst);
+                return Err(ApiError::new(ErrorCode::Exhausted, "no command capacity"));
+            }
+            counted = true;
+            let mut d = Decided::accepted();
+            d.workspace = Some(w.clone());
+            Ok(d)
+        });
+        let r = match accepted {
+            Ok((r, true)) => r,
+            other => {
+                if counted {
+                    self.0.execs.fetch_sub(1, Ordering::SeqCst);
+                }
+                return other.map(|(r, _)| r);
+            }
+        };
+        let me = self.clone();
+        let op = c.id.clone();
+        let mut run = exec::Run {
+            dir,
+            command: c.body.command.clone(),
+            env: c.body.env.clone(),
+            deadline: c.body.limits.deadline.0,
+            cap: (c.body.limits.max_output_bytes as usize).min(1 << 20),
+            secret_env: vec![],
+            stdin: None,
+            mask: None,
+        };
+        let refs = c.body.secrets.clone();
+        let spawned = self.spawn_owned(async move {
+            let inner = me.0.clone();
+            let op2 = op.clone();
+            // taken now, under this operation, once: a resend was answered by its receipt above
+            let hub = me.0.secrets.lock().unwrap().clone();
+            let ran = match secrets::take(hub, &me.0.cfg.home, &op, &refs).await {
+                Err(e) => Err(e),
+                Ok(given) => {
+                    run.secret_env = given.env;
+                    run.stdin = given.stdin;
+                    run.mask = given.mask;
+                    let temp = given.temp;
+                    tokio::task::spawn_blocking(move || {
+                        let ran = exec::run(&inner, &op2, &run);
+                        // the files go once the command (and its whole group) is done
+                        drop(temp);
+                        ran
+                    })
+                    .await
+                    .map_err(|e| e.to_string())
+                    .and_then(|r| r)
+                }
+            };
+            let state = match ran {
+                Err(e) => failed(ApiError::new(
+                    ErrorCode::Invalid,
+                    format!("the command did not start: {e}"),
+                )),
+                Ok(ran) if !ran.gone => Observed::Unknown {
+                    reason: "the command's processes were not confirmed gone".into(),
+                },
+                Ok(ran) => {
+                    let (outcome, exit_code) = match ran.ended {
+                        exec::Ended::Exited(code) => (Outcome::Succeeded, code),
+                        exec::Ended::TimedOut => (Outcome::TimedOut, None),
+                        exec::Ended::Stopped => (Outcome::Interrupted, None),
+                    };
+                    Observed::Finished {
+                        outcome,
+                        result: Some(OperationResult::Exec(ExecResult {
+                            exit_code,
+                            stdout: ran.stdout,
+                            stderr: ran.stderr,
+                            truncated: ran.truncated,
+                        })),
+                        error: None,
+                    }
+                }
+            };
+            me.complete(&op, state, |_| Ok(())).await;
+            me.0.execs.fetch_sub(1, Ordering::SeqCst);
+        });
+        if !spawned {
+            // shutting down: it never starts, and the restart reports it unknown
+            self.0.execs.fetch_sub(1, Ordering::SeqCst);
+        }
+        Ok(r)
     }
-    async fn list_dir(&self, _p: PathRef, _page: PageRequest) -> ApiResult<Page<FileInfo>> {
-        unsupported("files")
+    /// What is right in a directory of a workspace.
+    async fn list_dir(&self, p: PathRef, page: PageRequest) -> ApiResult<Page<FileInfo>> {
+        self.mine(&p.workspace)?;
+        let base = workspace_dir(&self.0, &p.workspace)?;
+        let items = blocking(move || {
+            let dir = scan::inside(&base, &p.rel)?;
+            scan::list(&dir, p.rel.as_str(), &base).map_err(not_listed)
+        })
+        .await?;
+        scan::list_page(items, &page)
     }
-    async fn list_root(&self, _at: RootPath, _page: PageRequest) -> ApiResult<Page<FileInfo>> {
-        unsupported("files")
+
+    /// What is right in a directory under an allowed root (read-only roots too).
+    async fn list_root(&self, at: RootPath, page: PageRequest) -> ApiResult<Page<FileInfo>> {
+        let roots = self.0.roots();
+        let items = blocking(move || {
+            let dir = workspace::resolve(&roots, &at, false)?;
+            let base = workspace::resolve(&roots, &root_of(&at), false)?;
+            scan::list(&dir, at.rel.as_str(), &base).map_err(not_listed)
+        })
+        .await?;
+        scan::list_page(items, &page)
     }
-    async fn read_file(&self, _q: FileRead) -> ApiResult<ReadChunk> {
-        unsupported("files")
+
+    /// A bounded chunk of a file in a workspace or under a root. The root (or the workspace) is
+    /// checked on every call, after resolving links: nothing outside it is read.
+    async fn read_file(&self, q: FileRead) -> ApiResult<ReadChunk> {
+        enum At {
+            Workspace(PathBuf, RelPath),
+            Root(Arc<Vec<Root>>, RootPath),
+        }
+        let at = match &q.path {
+            FileAddress::Workspace(p) => {
+                self.mine(&p.workspace)?;
+                At::Workspace(workspace_dir(&self.0, &p.workspace)?, p.rel.clone())
+            }
+            FileAddress::Root(at) => At::Root(self.0.roots(), at.clone()),
+        };
+        // resolved, checked and opened in one go; the opened file is checked again (`scan::read`)
+        blocking(move || {
+            let (base, real) = match at {
+                At::Workspace(base, rel) => {
+                    let real = scan::inside(&base, &rel)?;
+                    (base, real)
+                }
+                At::Root(roots, at) => (
+                    workspace::resolve(&roots, &root_of(&at), false)?,
+                    workspace::resolve(&roots, &at, false)?,
+                ),
+            };
+            scan::read(&base, &real, q.expected.as_ref(), q.offset, q.max)
+        })
+        .await
     }
-    async fn scan(&self, _c: Command<ScanSpec>) -> ApiResult<Receipt> {
-        unsupported("scan")
+
+    /// Accepted now; finished once the tree is walked, its manifest kept for [`Self::scan_page`]
+    /// (until a restart: then scan again). `busy` while too many scans are being read: one being
+    /// read is never dropped for a new one.
+    async fn scan(&self, c: Command<ScanSpec>) -> ApiResult<Receipt> {
+        let spec = c.body.clone();
+        if spec
+            .include
+            .iter()
+            .chain(&spec.exclude)
+            .any(|p| !steve_node_api::glob::valid_pattern(p))
+        {
+            return Err(ApiError::new(ErrorCode::Invalid, "a scan pattern"));
+        }
+        if spec.limits.max_files > scan::MAX_SCAN_FILES {
+            return Err(ApiError::new(
+                ErrorCode::Invalid,
+                "too many files for one scan",
+            ));
+        }
+        let roots = self.0.roots();
+        // a place among the kept scans, taken for a new scan only (a resend is answered as it was)
+        let mut place: Option<ScanPlace> = None;
+        let (r, fresh) = self.accept("scan", &c, |_| {
+            if !workspace::resolve(&roots, &spec.root, false)?.is_dir() {
+                return Err(ApiError::new(ErrorCode::Invalid, "not a directory"));
+            }
+            if place.is_none() {
+                place = Some(ScanPlace::take(&self.0)?);
+            }
+            Ok(Decided::accepted())
+        })?;
+        if !fresh || r.state.is_finished() {
+            return Ok(r);
+        }
+        let me = self.clone();
+        let op = c.id.clone();
+        self.spawn_owned(async move {
+            let place = place;
+            let inner = me.0.clone();
+            let walked = blocking(move || {
+                // the roots as they are now: one taken away since is not walked
+                let dir = workspace::resolve(&inner.roots(), &spec.root, false)?;
+                let rules = steve_node_api::glob::Rules::new(spec.include, spec.exclude);
+                let stop = || inner.closed.load(Ordering::SeqCst);
+                scan::walk(&dir, spec.root.rel.as_str(), &rules, spec.limits, &stop)
+                    .map_err(not_listed)
+            })
+            .await;
+            drop(place);
+            let state = match walked.and_then(|m| {
+                let now = std::time::Instant::now();
+                me.0.scans.lock().unwrap().keep(op.clone(), m, now)
+            }) {
+                Ok(()) => {
+                    Decided::done(OperationResult::Pages {
+                        operation: op.clone(),
+                    })
+                    .state
+                }
+                Err(e) => failed(e),
+            };
+            me.complete(&op, state, |_| Ok(())).await;
+        });
+        Ok(r)
     }
-    async fn scan_page(&self, _s: OperationId, _p: PageRequest) -> ApiResult<ScanPage> {
-        unsupported("scan")
+
+    async fn scan_page(&self, s: OperationId, page: PageRequest) -> ApiResult<ScanPage> {
+        let m = (self.0.scans.lock().unwrap()).get(&s, std::time::Instant::now());
+        if let Some(m) = m {
+            let p = scan::page(&m, &s, &page)?;
+            if p.next.is_none() {
+                self.0.scans.lock().unwrap().read_out(&s);
+            }
+            return Ok(p);
+        }
+        match self.0.j.read(|t| t.op(&s))? {
+            Some(o) if o.method == "scan" && o.receipt.state.is_finished() => Err(ApiError::new(
+                ErrorCode::Expired,
+                "this scan's manifest is gone: scan again",
+            )
+            .on(&s)),
+            Some(o)
+                if o.method == "scan" && matches!(o.receipt.state, Observed::Unknown { .. }) =>
+            {
+                Err(ApiError::new(ErrorCode::Expired, "this scan was cut short: scan again").on(&s))
+            }
+            Some(o) if o.method == "scan" => {
+                Err(ApiError::new(ErrorCode::Busy, "still scanning").on(&s))
+            }
+            _ => Err(ApiError::new(ErrorCode::Invalid, "no such scan").on(&s)),
+        }
+    }
+}
+
+/// A scan's place among the kept scans while it walks: given back when dropped.
+struct ScanPlace(Arc<Inner>);
+
+impl ScanPlace {
+    fn take(inner: &Arc<Inner>) -> ApiResult<ScanPlace> {
+        let now = std::time::Instant::now();
+        inner.scans.lock().unwrap().reserve(now)?;
+        Ok(ScanPlace(inner.clone()))
+    }
+}
+
+impl Drop for ScanPlace {
+    fn drop(&mut self) {
+        self.0.scans.lock().unwrap().release();
+    }
+}
+
+/// Filesystem work off the async threads.
+async fn blocking<T: Send + 'static>(
+    f: impl FnOnce() -> ApiResult<T> + Send + 'static,
+) -> ApiResult<T> {
+    tokio::task::spawn_blocking(f).await.map_err(internal)?
+}
+
+fn not_listed(e: std::io::Error) -> ApiError {
+    ApiError::new(
+        ErrorCode::Invalid,
+        format!("cannot list the directory: {e}"),
+    )
+}
+
+/// The root of `at` itself.
+fn root_of(at: &RootPath) -> RootPath {
+    RootPath {
+        root: at.root.clone(),
+        rel: RelPath::new("").expect("the empty path"),
     }
 }
 
 #[async_trait]
 impl Discovery for LocalNode {
-    async fn probe(&self, _fresh: bool) -> ApiResult<Capabilities> {
+    async fn probe(&self, fresh: bool) -> ApiResult<Capabilities> {
+        let probed = match self.discovery() {
+            Ok(d) => self.0.probes.get(&d, fresh).await,
+            Err(_) => Default::default(),
+        };
         let mut harnesses: Vec<HarnessCapability> = self
             .0
             .cfg
             .acp
             .adapters
             .keys()
-            .map(|h| HarnessCapability {
-                name: h.clone(),
-                version: String::new(),
-                sessions: true,
-                jobs: false,
-                models: vec![],
-                resume: true,
-                cancel: true,
-                permissions: true,
-                images: true,
-                enforcement: vec![],
+            .map(|h| {
+                let p = probed.get(h).cloned().unwrap_or_default();
+                HarnessCapability {
+                    name: h.clone(),
+                    version: p.version,
+                    sessions: true,
+                    jobs: false,
+                    models: p.models,
+                    resume: true,
+                    cancel: true,
+                    permissions: true,
+                    images: true,
+                    enforcement: vec![],
+                }
             })
             .collect();
+        // think jobs, for the harnesses with a print-mode CLI here
+        if self.0.cfg.capacity.jobs > 0 {
+            for name in self.0.cfg.jobs.names() {
+                match harnesses.iter_mut().find(|h| h.name == name) {
+                    Some(h) => h.jobs = true,
+                    None => harnesses.push(HarnessCapability {
+                        name: name.into(),
+                        version: String::new(),
+                        sessions: false,
+                        jobs: true,
+                        models: vec![],
+                        resume: false,
+                        cancel: true,
+                        permissions: false,
+                        images: true,
+                        enforcement: vec![],
+                    }),
+                }
+            }
+        }
         harnesses.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(Capabilities {
             node: self.0.cfg.node.clone(),
@@ -2424,20 +3261,97 @@ impl Discovery for LocalNode {
                 })
                 .collect(),
             capacity: self.0.cfg.capacity.clone(),
-            features: vec![],
+            // a command's secret as a temp file on this machine
+            features: vec![FEATURE_SECRET_FILE.into()],
         })
     }
-    async fn history(&self, _p: PageRequest) -> ApiResult<Page<HistoryEntry>> {
-        unsupported("history")
+    /// Newest first; the cursor is the position in that order.
+    async fn history(&self, p: PageRequest) -> ApiResult<Page<HistoryEntry>> {
+        let d = self.discovery()?;
+        let from = match &p.cursor {
+            None => 0,
+            Some(c) => c
+                .as_str()
+                .parse::<usize>()
+                .map_err(|_| ApiError::new(ErrorCode::Invalid, "bad cursor"))?,
+        };
+        let limit = p.limit.clamp(1, 500) as usize;
+        let all = tokio::task::spawn_blocking(move || history::candidates(&d.homes, from + limit))
+            .await
+            .map_err(|e| ApiError::new(ErrorCode::Internal, format!("history: {e}")))?;
+        let full = all.len() == from + limit;
+        let items: Vec<HistoryEntry> = all.iter().skip(from).map(|s| s.entry()).collect();
+        let next = full.then(|| Cursor::new((from + limit).to_string()).expect("a number"));
+        Ok(Page { items, next })
     }
-    async fn import_history(&self, _c: Command<HistoryImport>) -> ApiResult<Receipt> {
-        unsupported("history")
+    /// Reads a transcript the Node lists (a key it did not list is `invalid`, whatever path it
+    /// names) at the version the Hub saw (else `stale`), and keeps its events to be read page by
+    /// page. Nothing is journaled: the files stay the harness's.
+    async fn import_history(&self, c: Command<HistoryImport>) -> ApiResult<Receipt> {
+        let d = self.discovery()?;
+        c.check_window()?;
+        let digest = c.digest("import_history")?;
+        let done = |op: &OperationId| Receipt {
+            operation: op.clone(),
+            state: Observed::Finished {
+                outcome: Outcome::Succeeded,
+                result: Some(OperationResult::Pages {
+                    operation: op.clone(),
+                }),
+                error: None,
+            },
+        };
+        if self.0.imports.seen(&c.id, &digest)? {
+            return Ok(done(&c.id));
+        }
+        let (op, source, expected) = (c.id.clone(), c.body.source.clone(), c.body.expected);
+        let events = tokio::task::spawn_blocking(move || {
+            let h = &d.homes;
+            let harness_of_key = match source.key.get(..3) {
+                Some("cc:") => history::CLAUDE_CODE,
+                Some("cx:") => history::CODEX,
+                _ => "",
+            };
+            if harness_of_key != source.harness || !history::listed(h, &source.key) {
+                return Err(ApiError::new(
+                    ErrorCode::Invalid,
+                    "not a history this node lists",
+                ));
+            }
+            match history::read(&h.steve_home, &source.key) {
+                history::Read::Missing => {
+                    Err(ApiError::new(ErrorCode::Stale, "the transcript is gone"))
+                }
+                history::Read::Unreadable => Err(ApiError::new(
+                    ErrorCode::Invalid,
+                    "the transcript is unreadable",
+                )),
+                history::Read::Ready { peek, rows, .. } => {
+                    if peek.version() != expected {
+                        return Err(ApiError::new(
+                            ErrorCode::Stale,
+                            "the transcript changed since it was listed",
+                        ));
+                    }
+                    Ok(history::events(&op, &peek.cwd, &rows, now()))
+                }
+            }
+        })
+        .await
+        .map_err(|e| ApiError::new(ErrorCode::Internal, format!("import: {e}")))?
+        .map_err(|e| e.on(&c.id))?;
+        self.0.imports.keep(c.id.clone(), digest, events);
+        Ok(done(&c.id))
     }
-    async fn import_page(&self, _i: OperationId, _p: PageRequest) -> ApiResult<ImportedPage> {
-        unsupported("history")
+    async fn import_page(&self, i: OperationId, p: PageRequest) -> ApiResult<ImportedPage> {
+        self.discovery()?;
+        self.0.imports.page(&i, &p)
     }
-    async fn locate(&self, _source: HistoryRef) -> ApiResult<HistoryLocation> {
-        unsupported("history")
+    async fn locate(&self, source: HistoryRef) -> ApiResult<HistoryLocation> {
+        let d = self.discovery()?;
+        tokio::task::spawn_blocking(move || history::locate(&d.homes, &source))
+            .await
+            .map_err(|e| ApiError::new(ErrorCode::Internal, format!("locate: {e}")))?
     }
 }
 

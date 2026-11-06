@@ -259,13 +259,17 @@ pub async fn to_item(cx: &FlowCx, ws: &str, event_id: &str) -> FlowResult<String
 }
 
 /// `retry` of an interrupted run: it goes on from the step it stopped at (your answer is the
-/// approval for that step).
+/// approval for that step). The step is counted as run again (`context.reruns.<node>`): an effect
+/// that keys its operation on the run and the step (a `cmd` on a Node) runs anew, not the
+/// interrupted one's answer.
 pub(crate) fn retry(tx: &Tx, run: &mut runs::RunRow) -> FlowResult<()> {
     if run.status != "failed" || run.cursor.is_none() {
         return Err(ApiError::conflict(steve_i18n::t!("flow.decision.no_retry")));
     }
     let cur = run.cursor.clone().unwrap_or_default();
     run.context["approved"][&cur] = json!(true);
+    let reruns = run.context["reruns"][&cur].as_u64().unwrap_or(0);
+    run.context["reruns"][&cur] = json!(reruns + 1);
     if run
         .context
         .get("resume")

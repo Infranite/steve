@@ -86,6 +86,7 @@ impl T {
                 execs: 0,
             },
             storage: Storage::default(),
+            jobs: Default::default(),
         }
     }
 
@@ -1769,6 +1770,7 @@ async fn worktree_git_is_registered_before_effects_and_reaped_after() {
             },
             branch: "topic".into(),
             base: None,
+            at: None,
         },
     };
     n.prepare_workspace(now_cmd("git_rejected", prepare.clone()))
@@ -2383,4 +2385,1150 @@ async fn acknowledged_bodies_go_but_an_unknown_prepare_keeps_its_own_for_recover
     all_acknowledged(&n).await;
     assert!(spec_ops(&db).is_empty(), "{:?}", spec_ops(&db));
     n.shutdown().await;
+}
+
+fn git(dir: &Path, args: &[&str]) -> String {
+    let o = std::process::Command::new("git")
+        .current_dir(dir)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "git {args:?}: {o:?}");
+    String::from_utf8_lossy(&o.stdout).trim().to_string()
+}
+
+fn worktree_at(resource: &str, branch: &str, rel: &str) -> Prepare {
+    Prepare {
+        resource: resource.into(),
+        kind: PrepareKind::Worktree {
+            repository: RootPath {
+                root: RootId::new("work").unwrap(),
+                rel: RelPath::new("repo").unwrap(),
+            },
+            branch: branch.into(),
+            base: None,
+            at: Some(RootPath {
+                root: RootId::new("work").unwrap(),
+                rel: RelPath::new(rel).unwrap(),
+            }),
+        },
+    }
+}
+
+fn view_of(s: &Observed) -> WorkspaceView {
+    match s {
+        Observed::Finished {
+            result: Some(OperationResult::Workspace(v)),
+            ..
+        } => v.clone(),
+        other => panic!("no workspace: {other:?}"),
+    }
+}
+
+/// N0e-E11a: an item's worktree goes where the Hub names it, below the disk floor only when its
+/// branch is there already, is adopted only when it is that worktree, and comes back after a tidy.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_worktree_goes_where_it_is_named_above_the_disk_floor_and_comes_back_after_a_tidy() {
+    let t = T::new(&[]);
+    let repo = t.root.join("work/repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-q", "-b", "main"]);
+    git(&repo, &["config", "user.email", "t@t"]);
+    git(&repo, &["config", "user.name", "t"]);
+    git(&repo, &["config", "commit.gpgsign", "false"]);
+    std::fs::write(repo.join("a.txt"), "a\n").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "a"]);
+    std::fs::create_dir_all(t.root.join("work/wt")).unwrap();
+    let free = Arc::new(AtomicU64::new(0));
+    let mut cfg = t.config();
+    cfg.storage.worktree_floor = 1 << 30;
+    cfg.storage.worktree_free = Some({
+        let free = free.clone();
+        Arc::new(move || free.load(Ordering::SeqCst))
+    });
+    let n = LocalNode::open(cfg).unwrap();
+    n.connect(t.sink.clone(), None);
+    let wt = t.root.join("work/wt/ST-1");
+
+    // a new branch below the floor: refused as out of room, nothing made
+    n.prepare_workspace(now_cmd(
+        "op_w1",
+        worktree_at("item:ST-1", "steve/st-1", "wt/ST-1"),
+    ))
+    .await
+    .unwrap();
+    match finished(&n, "op_w1").await {
+        Observed::Finished {
+            outcome: Outcome::Failed,
+            error: Some(e),
+            ..
+        } => assert_eq!(e.code, ErrorCode::Exhausted, "{e:?}"),
+        other => panic!("{other:?}"),
+    }
+    assert!(!wt.exists());
+
+    // room again: made right there, on its branch
+    free.store(2 << 30, Ordering::SeqCst);
+    n.prepare_workspace(now_cmd(
+        "op_w2",
+        worktree_at("item:ST-1", "steve/st-1", "wt/ST-1"),
+    ))
+    .await
+    .unwrap();
+    let v = view_of(&finished(&n, "op_w2").await);
+    assert_eq!(v.branch.as_deref(), Some("steve/st-1"));
+    assert_eq!(
+        git(&wt, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        "steve/st-1"
+    );
+    assert_eq!(
+        n.local_dir(&v.workspace).unwrap().path,
+        wt.canonicalize().unwrap()
+    );
+
+    // a stale tidy is refused; the current one removes it and keeps the branch
+    let stale = Tidy {
+        workspace: v.workspace.clone(),
+        expected: Revision::new("r_old").unwrap(),
+        keep_branch: true,
+    };
+    let e = n.tidy_workspace(now_cmd("op_t0", stale)).await.unwrap_err();
+    assert_eq!(e.code, ErrorCode::Conflict);
+    assert!(wt.exists());
+    let tidy = Tidy {
+        workspace: v.workspace.clone(),
+        expected: v.revision.clone(),
+        keep_branch: true,
+    };
+    n.tidy_workspace(now_cmd("op_t1", tidy)).await.unwrap();
+    assert!(ok(&finished(&n, "op_t1").await));
+    assert!(!wt.exists());
+    git(&repo, &["rev-parse", "--verify", "steve/st-1"]);
+
+    // its branch is there: it comes back below the floor too (its sources, megabytes)
+    free.store(0, Ordering::SeqCst);
+    n.prepare_workspace(now_cmd(
+        "op_w3",
+        worktree_at("item:ST-1", "steve/st-1", "wt/ST-1"),
+    ))
+    .await
+    .unwrap();
+    assert!(ok(&finished(&n, "op_w3").await));
+    assert_eq!(
+        git(&wt, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        "steve/st-1"
+    );
+    free.store(2 << 30, Ordering::SeqCst);
+
+    // one made before (by git, as the Hub did) is adopted; a plain directory is never replaced
+    git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "steve/st-2",
+            &t.root.join("work/wt/ST-2").to_string_lossy(),
+        ],
+    );
+    n.prepare_workspace(now_cmd(
+        "op_w4",
+        worktree_at("item:ST-2", "steve/st-2", "wt/ST-2"),
+    ))
+    .await
+    .unwrap();
+    assert!(ok(&finished(&n, "op_w4").await));
+    std::fs::create_dir_all(t.root.join("work/wt/ST-3")).unwrap();
+    std::fs::write(t.root.join("work/wt/ST-3/mine.txt"), "x").unwrap();
+    n.prepare_workspace(now_cmd(
+        "op_w5",
+        worktree_at("item:ST-3", "steve/st-3", "wt/ST-3"),
+    ))
+    .await
+    .unwrap();
+    assert!(!ok(&finished(&n, "op_w5").await));
+    assert!(t.root.join("work/wt/ST-3/mine.txt").exists());
+
+    // never outside the roots: a symlink out, a missing parent, the root itself
+    std::os::unix::fs::symlink(t.root.join("elsewhere"), t.root.join("work/wt/out")).unwrap();
+    std::fs::create_dir_all(t.root.join("elsewhere")).unwrap();
+    for (op, rel) in [
+        ("op_x1", "wt/out"),
+        ("op_x2", "nowhere/ST-4"),
+        ("op_x3", ""),
+    ] {
+        let e = n
+            .prepare_workspace(now_cmd(
+                op,
+                worktree_at(&format!("item:{op}"), "steve/x", rel),
+            ))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(e.code, ErrorCode::Denied | ErrorCode::Invalid),
+            "{rel}: {e:?}"
+        );
+    }
+}
+
+// ── the files face: scans, listings, reads ──
+
+/// `t` with a read-only root `kb` at `<root>/kb` besides `work`.
+fn with_kb(t: &T, n: &LocalNode) -> PathBuf {
+    let kb = t.root.join("kb");
+    std::fs::create_dir_all(&kb).unwrap();
+    let mut roots = t.config().roots;
+    roots.push(Root {
+        id: RootId::new("kb").unwrap(),
+        path: kb.clone(),
+        display: "~/kb".into(),
+        access: RootAccess::ReadOnly,
+    });
+    n.set_roots(roots);
+    kb.canonicalize().unwrap()
+}
+
+fn put(root: &Path, rel: &str, bytes: &[u8]) {
+    let f = root.join(rel);
+    std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+    std::fs::write(f, bytes).unwrap();
+}
+
+fn kb_at(rel: &str) -> RootPath {
+    RootPath {
+        root: RootId::new("kb").unwrap(),
+        rel: RelPath::new(rel).unwrap(),
+    }
+}
+
+fn kb_scan(rel: &str, exclude: &[&str], limits: ScanLimits) -> ScanSpec {
+    ScanSpec {
+        root: kb_at(rel),
+        include: vec![],
+        exclude: exclude.iter().map(|s| s.to_string()).collect(),
+        limits,
+    }
+}
+
+/// Scans and reads every page, `limit` entries at a time.
+async fn scan_all(n: &LocalNode, op: &str, spec: ScanSpec, limit: u32) -> Vec<ScanPage> {
+    n.scan(now_cmd(op, spec)).await.unwrap();
+    let s = finished(n, op).await;
+    assert!(ok(&s), "{s:?}");
+    let scan = OperationId::new(op).unwrap();
+    let mut pages: Vec<ScanPage> = vec![];
+    let mut cursor = None;
+    loop {
+        let p = n
+            .scan_page(scan.clone(), PageRequest { cursor, limit })
+            .await
+            .unwrap();
+        assert!(p.is_consistent(), "{p:?}");
+        cursor = p.next.clone();
+        pages.push(p);
+        if cursor.is_none() {
+            return pages;
+        }
+    }
+}
+
+fn entries(pages: &[ScanPage]) -> Vec<FileInfo> {
+    pages.iter().flat_map(|p| p.entries.clone()).collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_scan_sees_what_the_knowledge_walk_sees() {
+    use steve_knowledge::scan;
+    let t = T::new(&[]);
+    let n = t.node();
+    let kb = with_kb(&t, &n);
+    for p in [
+        "b.md",
+        "a.md",
+        "notes.txt",
+        "sub/c.md",
+        "sub/deep/d.markdown",
+        "sub/img.png",
+        ".obsidian/x.md",
+        ".hidden/y.md",
+        "node_modules/z.md",
+        "skip/w.md",
+        "草稿/想法.md",
+    ] {
+        put(&kb, p, p.as_bytes());
+    }
+    put(
+        &kb,
+        "big.md",
+        &vec![b'a'; scan::MAX_FILE_BYTES as usize + 1],
+    );
+    put(&t.root, "outside/s.md", b"secret");
+    let ln = |to: &Path, at: &str| std::os::unix::fs::symlink(to, kb.join(at)).unwrap();
+    ln(&kb.join("a.md"), "linked.md");
+    ln(&t.root.join("outside/s.md"), "out.md");
+    ln(&t.root.join("outside"), "out-dir");
+    ln(&kb.join("sub"), "sub-link");
+    ln(&kb.join("missing.md"), "dangling.md");
+
+    let rules = scan::Rules::new(vec![], vec!["skip/**".into()]);
+    let w = scan::walk(&kb, &rules).unwrap();
+    let pages = scan_all(
+        &n,
+        "op_scan",
+        kb_scan("", &["skip/**"], ScanLimits::default()),
+        3,
+    )
+    .await;
+    assert!(pages.len() > 2, "read in pages");
+    assert!(pages.iter().all(|p| p.manifest == pages[0].manifest));
+
+    // the same files, sizes and times, in the same order
+    let mut walked: Vec<(String, u64, i64, bool)> = w
+        .files
+        .iter()
+        .map(|e| (e.rel.clone(), e.size, e.mtime, false))
+        .chain(
+            w.too_big
+                .iter()
+                .map(|e| (e.rel.clone(), e.size, e.mtime, true)),
+        )
+        .collect();
+    let mut scanned: Vec<(String, u64, i64, bool)> = entries(&pages)
+        .into_iter()
+        .map(|f| {
+            (
+                f.path.as_str().to_string(),
+                f.size,
+                f.mtime.unwrap().0,
+                f.too_big,
+            )
+        })
+        .collect();
+    walked.sort();
+    scanned.sort();
+    assert_eq!(scanned, walked);
+    assert!(scanned.iter().any(|e| e.0 == "linked.md"));
+    assert!(scanned.iter().all(|e| !e.0.starts_with("sub-link")));
+    // what it held back, and complete as the walk is
+    let last = pages.last().unwrap();
+    let held: Vec<(String, HeldWhy)> = last
+        .issues
+        .iter()
+        .filter_map(|i| match i {
+            ScanIssue::Held { path, why } => Some((path.as_str().to_string(), *why)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(held, [("out.md".to_string(), HeldWhy::Outside)]);
+    assert_eq!(w.held, [("out.md".to_string(), scan::Held::Outside)]);
+    assert_eq!(last.complete, w.complete());
+    assert!(last.complete);
+
+    // a directory below the root: the same files, their paths still relative to the root
+    let sub = scan_all(&n, "op_sub", kb_scan("sub", &[], ScanLimits::default()), 10).await;
+    let names: Vec<String> = entries(&sub)
+        .iter()
+        .map(|f| f.path.as_str().to_string())
+        .collect();
+    assert_eq!(names, ["sub/c.md", "sub/deep/d.markdown"]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_scan_keeps_its_manifest_while_files_change() {
+    let t = T::new(&[]);
+    let n = t.node();
+    let kb = with_kb(&t, &n);
+    for i in 0..6 {
+        put(&kb, &format!("d/{i}.md"), b"x");
+    }
+    let scan = OperationId::new("op_s1").unwrap();
+    let c = now_cmd("op_s1", kb_scan("", &[], ScanLimits::default()));
+    n.scan(c.clone()).await.unwrap();
+    assert!(ok(&finished(&n, "op_s1").await));
+    let first = n.scan_page(scan.clone(), page(2)).await.unwrap();
+    // the tree changes between pages
+    put(&kb, "d/new.md", b"new");
+    put(&kb, "d/5.md", b"changed");
+    std::fs::remove_file(kb.join("d/0.md")).unwrap();
+    let mut pages = vec![first];
+    while let Some(cursor) = pages.last().unwrap().next.clone() {
+        let p = n
+            .scan_page(
+                scan.clone(),
+                PageRequest {
+                    cursor: Some(cursor),
+                    limit: 2,
+                },
+            )
+            .await
+            .unwrap();
+        pages.push(p);
+    }
+    assert!(pages.iter().all(|p| p.manifest == pages[0].manifest));
+    let names: Vec<String> = entries(&pages)
+        .iter()
+        .map(|f| f.path.as_str().to_string())
+        .collect();
+    assert_eq!(
+        names,
+        ["d/0.md", "d/1.md", "d/2.md", "d/3.md", "d/4.md", "d/5.md"]
+    );
+    // the first page read again is the same page
+    assert_eq!(n.scan_page(scan.clone(), page(2)).await.unwrap(), pages[0]);
+    // a new scan sees the new tree, under another manifest
+    let again = scan_all(&n, "op_s2", kb_scan("", &[], ScanLimits::default()), 100).await;
+    assert_ne!(again[0].manifest, pages[0].manifest);
+    assert_eq!(entries(&again).len(), 6);
+    // a cursor of one scan does not page another; an unknown scan is invalid
+    let e = n
+        .scan_page(
+            OperationId::new("op_s2").unwrap(),
+            PageRequest {
+                cursor: pages[0].next.clone(),
+                limit: 2,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::Invalid);
+    let e = n
+        .scan_page(OperationId::new("op_nope").unwrap(), page(1))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::Invalid);
+    // a resend is the same scan
+    n.scan(c).await.unwrap();
+    assert_eq!(n.scan_page(scan, page(2)).await.unwrap(), pages[0]);
+}
+
+/// More scans than a few at once, all accepted before any is read and paged in turns: none pushes
+/// another's manifest out while it is read.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn many_scans_paged_at_once_all_finish() {
+    let t = T::new(&[]);
+    let n = t.node();
+    let kb = with_kb(&t, &n);
+    for i in 0..5 {
+        put(&kb, &format!("d/{i}.md"), b"x");
+    }
+    let ops: Vec<String> = (0..12).map(|i| format!("op_many{i}")).collect();
+    for op in &ops {
+        n.scan(now_cmd(op, kb_scan("", &[], ScanLimits::default())))
+            .await
+            .unwrap();
+    }
+    for op in &ops {
+        assert!(ok(&finished(&n, op).await));
+    }
+    let mut cursors: Vec<Option<Cursor>> = vec![None; ops.len()];
+    let mut seen = vec![0usize; ops.len()];
+    let mut done = vec![false; ops.len()];
+    while done.iter().any(|d| !d) {
+        for (i, op) in ops.iter().enumerate() {
+            if done[i] {
+                continue;
+            }
+            let p = n
+                .scan_page(
+                    OperationId::new(op).unwrap(),
+                    PageRequest {
+                        cursor: cursors[i].clone(),
+                        limit: 1,
+                    },
+                )
+                .await
+                .unwrap();
+            seen[i] += p.entries.len();
+            cursors[i] = p.next.clone();
+            done[i] = p.next.is_none();
+        }
+    }
+    assert!(seen.iter().all(|n| *n == 5), "{seen:?}");
+}
+
+fn page(limit: u32) -> PageRequest {
+    PageRequest {
+        cursor: None,
+        limit,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_scan_that_may_hide_files_is_never_complete() {
+    use std::os::unix::fs::PermissionsExt;
+    let t = T::new(&[]);
+    let n = t.node();
+    let kb = with_kb(&t, &n);
+    for p in ["a.md", "b.md", "c.md", "locked/x.md"] {
+        put(&kb, p, b"x");
+    }
+    // over the file limit: cut, the count said
+    let limits = ScanLimits {
+        max_files: 2,
+        max_file_bytes: 1024,
+    };
+    let over = scan_all(&n, "op_over", kb_scan("", &["locked/**"], limits), 10).await;
+    let last = over.last().unwrap();
+    assert_eq!(entries(&over).len(), 2);
+    assert!(!last.complete);
+    assert_eq!(last.issues, [ScanIssue::OverLimit { count: 1 }]);
+
+    // an unreadable directory
+    let locked = kb.join("locked");
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let readable = std::fs::read_dir(&locked).is_ok(); // root ignores the mode
+    let pages = scan_all(&n, "op_locked", kb_scan("", &[], ScanLimits::default()), 10).await;
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    if readable {
+        return;
+    }
+    let last = pages.last().unwrap();
+    assert_eq!(entries(&pages).len(), 3);
+    assert!(!last.complete);
+    assert_eq!(
+        last.issues,
+        [ScanIssue::Unreadable {
+            path: Some(RelPath::new("locked").unwrap())
+        }]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reads_stay_inside_their_root_and_see_a_changed_file() {
+    let t = T::new(&[]);
+    let n = t.node();
+    let kb = with_kb(&t, &n);
+    put(&kb, "a.md", b"hello world");
+    put(&t.root, "outside/s.md", b"secret");
+    std::os::unix::fs::symlink(t.root.join("outside/s.md"), kb.join("out.md")).unwrap();
+    std::os::unix::fs::symlink(t.root.join("outside"), kb.join("out-dir")).unwrap();
+    let read = |path: FileAddress, expected: Option<Revision>, offset: u64, max: u32| FileRead {
+        path,
+        expected,
+        offset,
+        max,
+    };
+    // in chunks, to the end
+    let mut got = vec![];
+    let mut offset = 0;
+    loop {
+        let c = n
+            .read_file(read(FileAddress::Root(kb_at("a.md")), None, offset, 4))
+            .await
+            .unwrap();
+        assert_eq!(c.offset, offset);
+        assert!(c.bytes.len() <= 4);
+        offset += c.bytes.len() as u64;
+        got.extend(c.bytes);
+        if c.eof {
+            break;
+        }
+    }
+    assert_eq!(got, b"hello world");
+    // a read asks for no more than a frame carries
+    put(&kb, "big.md", &vec![b'a'; 1 << 20]);
+    let c = n
+        .read_file(read(FileAddress::Root(kb_at("big.md")), None, 0, u32::MAX))
+        .await
+        .unwrap();
+    assert!(c.bytes.len() < 1 << 20 && !c.eof);
+
+    // nothing outside the root: a link out, through a linked directory, another root, `..`
+    for rel in ["out.md", "out-dir/s.md"] {
+        let e = n
+            .read_file(read(FileAddress::Root(kb_at(rel)), None, 0, 100))
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, ErrorCode::Denied, "{rel}");
+    }
+    let e = n
+        .read_file(read(
+            FileAddress::Root(RootPath {
+                root: RootId::new("elsewhere").unwrap(),
+                rel: RelPath::new("a.md").unwrap(),
+            }),
+            None,
+            0,
+            100,
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::Denied);
+    assert!(RelPath::new("../outside/s.md").is_err());
+    assert!(RelPath::new("/etc/passwd").is_err());
+    let forged = serde_json::json!({
+        "path": {"in": "root", "root": "kb", "rel": "../outside/s.md"},
+        "offset": 0, "max": 100,
+    });
+    assert!(serde_json::from_value::<FileRead>(forged).is_err());
+
+    // a version from a scan: read as long as the file is as it was, then a conflict
+    let pages = scan_all(&n, "op_scan", kb_scan("", &[], ScanLimits::default()), 10).await;
+    let a = entries(&pages)
+        .into_iter()
+        .find(|f| f.path.as_str() == "a.md")
+        .unwrap();
+    let c = n
+        .read_file(read(
+            FileAddress::Root(kb_at("a.md")),
+            Some(a.version.clone()),
+            0,
+            100,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(c.bytes, b"hello world");
+    std::thread::sleep(Duration::from_millis(5));
+    put(&kb, "a.md", b"hello again");
+    let e = n
+        .read_file(read(
+            FileAddress::Root(kb_at("a.md")),
+            Some(a.version),
+            0,
+            100,
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::Conflict);
+
+    // in a workspace: the same rules
+    put(&t.root, "work/proj/src/lib.rs", b"fn main() {}");
+    std::os::unix::fs::symlink(t.root.join("outside/s.md"), t.root.join("work/proj/leak")).unwrap();
+    n.prepare_workspace(now_cmd("op_prep", prepare_proj()))
+        .await
+        .unwrap();
+    assert!(ok(&finished(&n, "op_prep").await));
+    let in_ws = |rel: &str| {
+        FileAddress::Workspace(PathRef {
+            workspace: ws(),
+            rel: RelPath::new(rel).unwrap(),
+        })
+    };
+    let c = n
+        .read_file(read(in_ws("src/lib.rs"), None, 0, 100))
+        .await
+        .unwrap();
+    assert_eq!(c.bytes, b"fn main() {}");
+    let e = n
+        .read_file(read(in_ws("leak"), None, 0, 100))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::Denied);
+    let listed = n
+        .list_dir(
+            PathRef {
+                workspace: ws(),
+                rel: RelPath::new("").unwrap(),
+            },
+            page(100),
+        )
+        .await
+        .unwrap();
+    let names: Vec<&str> = listed.items.iter().map(|f| f.path.as_str()).collect();
+    assert_eq!(names, ["src"], "a link out is not listed");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn listings_page_and_do_not_follow_linked_directories() {
+    let t = T::new(&[]);
+    let n = t.node();
+    let kb = with_kb(&t, &n);
+    for p in ["a.md", "b/c.md", "d/e.md"] {
+        put(&kb, p, b"x");
+    }
+    std::os::unix::fs::symlink(kb.join("b"), kb.join("b-link")).unwrap();
+    std::os::unix::fs::symlink(kb.join("a.md"), kb.join("a-link.md")).unwrap();
+    let mut all = vec![];
+    let mut cursor = None;
+    loop {
+        let p = n
+            .list_root(kb_at(""), PageRequest { cursor, limit: 1 })
+            .await
+            .unwrap();
+        assert!(p.items.len() <= 1);
+        all.extend(p.items);
+        cursor = p.next;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    let shown: Vec<(&str, bool)> = all.iter().map(|f| (f.path.as_str(), f.is_dir)).collect();
+    assert_eq!(
+        shown,
+        [
+            ("a-link.md", false),
+            ("a.md", false),
+            ("b", true),
+            ("d", true)
+        ]
+    );
+    let below = n.list_root(kb_at("b"), page(10)).await.unwrap();
+    let names: Vec<&str> = below.items.iter().map(|f| f.path.as_str()).collect();
+    assert_eq!(names, ["b/c.md"]);
+    // a directory that is not there
+    let e = n.list_root(kb_at("nope"), page(10)).await.unwrap_err();
+    assert_eq!(e.code, ErrorCode::Invalid);
+    // a read-only root is listed, read and scanned, but a bad pattern is refused
+    let bad = ScanSpec {
+        include: vec!["../*.md".into()],
+        ..kb_scan("", &[], ScanLimits::default())
+    };
+    let e = n.scan(now_cmd("op_bad", bad)).await.unwrap_err();
+    assert_eq!(e.code, ErrorCode::Invalid);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_scan_read_after_a_restart_is_scanned_again() {
+    let t = T::new(&[]);
+    put(&t.root, "work/notes/a.md", b"x");
+    let n = t.node();
+    let spec = ScanSpec {
+        root: RootPath {
+            root: RootId::new("work").unwrap(),
+            rel: RelPath::new("notes").unwrap(),
+        },
+        include: vec![],
+        exclude: vec![],
+        limits: ScanLimits::default(),
+    };
+    let pages = scan_all(&n, "op_scan", spec, 10).await;
+    assert_eq!(entries(&pages).len(), 1);
+    n.shutdown().await;
+    drop(n);
+    let n = reopen(&t, t.sink.clone()).await;
+    let e = n
+        .scan_page(OperationId::new("op_scan").unwrap(), page(10))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::Expired);
+}
+
+fn git_in(dir: &Path, args: &[&str]) -> String {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .env("GIT_AUTHOR_NAME", "t")
+        .env("GIT_AUTHOR_EMAIL", "t@example.com")
+        .env("GIT_COMMITTER_NAME", "t")
+        .env("GIT_COMMITTER_EMAIL", "t@example.com")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "git {args:?}");
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn git_facts_reads_files_commits_logs_and_diffs_of_a_workspace() {
+    let t = T::new(&[]);
+    let repo = t.root.join("work/proj");
+    git_in(&repo, &["init", "-q", "-b", "main"]);
+    put(&t.root, "work/proj/a.txt", b"a\n");
+    git_in(&repo, &["add", "."]);
+    git_in(&repo, &["commit", "-q", "-m", "a"]);
+    git_in(&repo, &["checkout", "-q", "-b", "steve/st-1"]);
+    put(
+        &t.root,
+        "work/proj/docs/方案.md",
+        b"# \xe6\x96\xb9\xe6\xa1\x88\n",
+    );
+    git_in(&repo, &["add", "."]);
+    git_in(&repo, &["commit", "-q", "-m", "加方案"]);
+    let tip = git_in(&repo, &["rev-parse", "HEAD"]);
+    git_in(&repo, &["checkout", "-q", "main"]);
+    let n = t.node();
+    n.prepare_workspace(now_cmd("op_prep", prepare_proj()))
+        .await
+        .unwrap();
+    assert!(ok(&finished(&n, "op_prep").await));
+
+    let range = |from: Option<&str>, to: &str| RevRange {
+        from: from.map(str::to_string),
+        to: to.into(),
+    };
+    let reads = vec![
+        GitRead::Show {
+            rev: "steve/st-1".into(),
+            path: Some(RelPath::new("docs/方案.md").unwrap()),
+            max: 1000,
+        },
+        GitRead::Show {
+            rev: "main".into(),
+            path: Some(RelPath::new("docs/方案.md").unwrap()),
+            max: 1000,
+        },
+        GitRead::Show {
+            rev: tip[..7].into(),
+            path: None,
+            max: 1000,
+        },
+        GitRead::Log {
+            range: range(Some("main"), "steve/st-1"),
+            max: 200,
+        },
+        GitRead::Diff {
+            range: range(Some("main"), "steve/st-1"),
+            max: 20,
+        },
+    ];
+    let f = n
+        .git_facts(GitQuery {
+            workspace: ws(),
+            refs: vec!["refs/heads/main".into(), "refs/heads/gone".into()],
+            ranges: vec![],
+            fetch: false,
+            reads: reads.clone(),
+            heads_only: false,
+        })
+        .await
+        .unwrap();
+    assert_eq!(f.branch.as_deref(), Some("main"));
+    assert!(!f.dirty);
+    assert_eq!(f.refs[0].1.as_deref(), Some(f.head.as_str()));
+    assert_eq!(f.refs[1].1, None);
+    let a: Vec<&GitAnswer> = f.reads.iter().map(|r| &r.answer).collect();
+    assert_eq!(f.reads[0].observed, tip);
+    assert!(
+        matches!(a[0], GitAnswer::Blob { found: true, bytes, truncated: false } if bytes == "# 方案\n".as_bytes()),
+        "{:?}",
+        a[0]
+    );
+    assert!(matches!(a[1], GitAnswer::Blob { found: false, .. }));
+    let GitAnswer::Commit {
+        commit,
+        stat,
+        patch,
+        truncated,
+    } = a[2]
+    else {
+        panic!("{:?}", a[2])
+    };
+    assert_eq!(commit.sha, tip);
+    assert_eq!(commit.subject, "加方案");
+    assert_eq!(commit.body.as_deref().map(str::trim), Some("加方案"));
+    assert!(stat.contains("docs/方案.md"), "{stat}");
+    assert!(patch.contains("diff --git a/docs/方案.md"), "{patch}");
+    assert!(!truncated);
+    let GitAnswer::Log { commits, truncated } = a[3] else {
+        panic!("{:?}", a[3])
+    };
+    assert_eq!((commits.len(), *truncated), (1, false));
+    assert_eq!(commits[0].subject, "加方案");
+    assert_eq!(commits[0].abbrev.as_deref(), Some(&tip[..7]));
+    let GitAnswer::Diff {
+        stat,
+        patch,
+        truncated,
+    } = a[4]
+    else {
+        panic!("{:?}", a[4])
+    };
+    assert!(stat.contains("docs/方案.md"));
+    assert!(patch.len() <= 20 && *truncated, "{patch}");
+
+    // a revision is never an option; a changed tree is another revision
+    let q = |rev: &str| GitQuery {
+        workspace: ws(),
+        refs: vec![],
+        ranges: vec![],
+        fetch: false,
+        reads: vec![GitRead::Show {
+            rev: rev.into(),
+            path: None,
+            max: 10,
+        }],
+        heads_only: false,
+    };
+    assert_eq!(
+        n.git_facts(q("--output=x")).await.unwrap_err().code,
+        ErrorCode::Invalid
+    );
+    // a revision that names no commit is an answer, not a failure (the checkout is there)
+    let none = n.git_facts(q("1234567")).await.unwrap();
+    assert!(
+        matches!(&none.reads[0].answer, GitAnswer::Blob { found: false, .. }),
+        "{:?}",
+        none.reads
+    );
+    put(&t.root, "work/proj/new.txt", b"x");
+    let g = n.git_facts(q("HEAD")).await.unwrap();
+    assert!(g.dirty);
+    assert_ne!(g.revision, f.revision);
+    // heads only: no tree scan, a revision of another kind than one with the tree in it
+    let h = n
+        .git_facts(GitQuery {
+            heads_only: true,
+            ..q("HEAD")
+        })
+        .await
+        .unwrap();
+    assert!(!h.dirty);
+    assert_eq!(h.head, g.head);
+    assert_ne!(h.revision, g.revision);
+    // the hash as git abbreviates it here, which follows core.abbrev
+    git_in(&repo, &["config", "core.abbrev", "10"]);
+    let h = n
+        .git_facts(GitQuery {
+            heads_only: true,
+            ..q("HEAD")
+        })
+        .await
+        .unwrap();
+    let GitAnswer::Commit { commit, .. } = &h.reads[0].answer else {
+        panic!("{:?}", h.reads)
+    };
+    assert_eq!(commit.abbrev.as_deref(), Some(&commit.sha[..10]));
+    assert!(!repo.join("x").exists());
+}
+
+/// A repository at `work/proj` on `main` with `a.txt`, a branch `steve/st-1` with one commit of
+/// its own checked out, an identity for commits the Node makes, and the Node's workspace on it.
+async fn branch_repo(t: &T) -> (LocalNode, PathBuf) {
+    let repo = t.root.join("work/proj");
+    git_in(&repo, &["init", "-q", "-b", "main"]);
+    git_in(&repo, &["config", "user.name", "t"]);
+    git_in(&repo, &["config", "user.email", "t@example.com"]);
+    put(&t.root, "work/proj/a.txt", b"a\n");
+    git_in(&repo, &["add", "."]);
+    git_in(&repo, &["commit", "-q", "-m", "a"]);
+    git_in(&repo, &["checkout", "-q", "-b", "steve/st-1"]);
+    put(&t.root, "work/proj/b.txt", b"b\n");
+    git_in(&repo, &["add", "."]);
+    git_in(&repo, &["commit", "-q", "-m", "b"]);
+    let n = t.node();
+    n.prepare_workspace(now_cmd("op_prep", prepare_proj()))
+        .await
+        .unwrap();
+    assert!(ok(&finished(&n, "op_prep").await));
+    (n, repo)
+}
+
+fn query(reads: Vec<GitRead>) -> GitQuery {
+    GitQuery {
+        workspace: ws(),
+        refs: vec![],
+        ranges: vec![],
+        fetch: false,
+        reads,
+        heads_only: false,
+    }
+}
+
+#[tokio::test]
+async fn git_facts_answer_the_tree_its_own_change_ranges_and_where_it_landed() {
+    let t = T::new(&[]);
+    let (n, repo) = branch_repo(&t).await;
+    let main = git_in(&repo, &["rev-parse", "main"]);
+    put(&t.root, "work/proj/new.txt", b"n\n");
+    let mut q = query(vec![
+        GitRead::Status,
+        GitRead::Fingerprint,
+        GitRead::IsAncestor {
+            ancestor: "main".into(),
+            of: "HEAD".into(),
+        },
+        GitRead::ChangedPaths {
+            from: "main".into(),
+            to: "HEAD".into(),
+            max: 10,
+        },
+        GitRead::Landed {
+            commit: "HEAD".into(),
+            onto: "main".into(),
+        },
+        GitRead::RemoteUrl {
+            remote: "origin".into(),
+        },
+    ]);
+    q.ranges = vec![("main".into(), "HEAD".into())];
+    let f = n.git_facts(q.clone()).await.unwrap();
+    assert_eq!(f.ranges[0].ahead, 1);
+    assert_eq!(f.ranges[0].behind, 0);
+    assert_eq!(f.ranges[0].merge_base.as_deref(), Some(main.as_str()));
+    let a: Vec<&GitAnswer> = f.reads.iter().map(|r| &r.answer).collect();
+    let GitAnswer::Status { entries } = a[0] else {
+        panic!("{:?}", a[0])
+    };
+    assert_eq!(entries[0].code, "??");
+    assert_eq!(entries[0].path.as_str(), "new.txt");
+    let GitAnswer::Fingerprint {
+        tree,
+        own: Some(own),
+    } = a[1]
+    else {
+        panic!("{:?}", a[1])
+    };
+    assert_eq!(own.base, main);
+    assert_ne!(own.patch, "-");
+    // the untracked file is in the tree; the workspace's own index is untouched
+    let listed = git_in(&repo, &["ls-tree", "--name-only", tree]);
+    assert!(listed.lines().any(|l| l == "new.txt"), "{listed}");
+    assert!(git_in(&repo, &["status", "--porcelain"]).contains("?? new.txt"));
+    assert_eq!(a[2], &GitAnswer::IsAncestor { yes: true });
+    assert_eq!(
+        a[3],
+        &GitAnswer::ChangedPaths {
+            paths: vec!["b.txt".into()],
+            truncated: false
+        }
+    );
+    assert_eq!(a[4], &GitAnswer::Landed { commit: None });
+    assert_eq!(a[5], &GitAnswer::RemoteUrl { url: None });
+
+    // squashed onto main, the change has landed there; the URL comes without its credential
+    git_in(&repo, &["checkout", "-q", "main"]);
+    git_in(&repo, &["merge", "-q", "--squash", "steve/st-1"]);
+    git_in(&repo, &["commit", "-q", "-m", "squash"]);
+    let squash = git_in(&repo, &["rev-parse", "HEAD"]);
+    git_in(&repo, &["checkout", "-q", "steve/st-1"]);
+    git_in(
+        &repo,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://u:secret@example.com/o/r.git",
+        ],
+    );
+    let f = n.git_facts(q).await.unwrap();
+    assert_eq!(
+        f.reads[4].answer,
+        GitAnswer::Landed {
+            commit: Some(squash)
+        }
+    );
+    assert_eq!(
+        f.reads[5].answer,
+        GitAnswer::RemoteUrl {
+            url: Some("https://example.com/o/r.git".into())
+        }
+    );
+}
+
+#[tokio::test]
+async fn a_fetch_and_the_remotes_tags_come_from_origin() {
+    let t = T::new(&[]);
+    let (n, repo) = branch_repo(&t).await;
+    let origin = t.root.join("origin.git");
+    git_in(&t.root, &["init", "-q", "--bare", origin.to_str().unwrap()]);
+    git_in(
+        &repo,
+        &["remote", "add", "origin", origin.to_str().unwrap()],
+    );
+    git_in(&repo, &["push", "-q", "origin", "main"]);
+    git_in(&repo, &["tag", "-a", "-m", "v", "v1.0.0", "main"]);
+    git_in(&repo, &["push", "-q", "origin", "v1.0.0"]);
+    git_in(&repo, &["tag", "local-only", "main"]);
+    let main = git_in(&repo, &["rev-parse", "main"]);
+    let mut q = query(vec![GitRead::RemoteTags {
+        remote: "origin".into(),
+    }]);
+    q.fetch = true;
+    q.refs = vec!["refs/remotes/origin/main".into()];
+    let f = n.git_facts(q).await.unwrap();
+    assert_eq!(f.refs[0].1.as_deref(), Some(main.as_str()));
+    assert_eq!(
+        f.reads[0].answer,
+        GitAnswer::RemoteTags {
+            tags: vec![("v1.0.0".into(), main)]
+        }
+    );
+    // a remote that is not there: the fetch says so, nothing else is answered
+    git_in(
+        &repo,
+        &["remote", "set-url", "origin", "/nonexistent/x.git"],
+    );
+    let mut q = query(vec![]);
+    q.fetch = true;
+    assert_eq!(n.git_facts(q).await.unwrap_err().code, ErrorCode::Invalid);
+}
+
+fn rebase_onto(f: &GitFacts, onto: &str) -> GitApply {
+    GitApply {
+        workspace: ws(),
+        expected: f.revision.clone(),
+        expected_head: f.head.clone(),
+        action: GitAction::Rebase { onto: onto.into() },
+    }
+}
+
+#[tokio::test]
+async fn a_rebase_applies_only_on_the_facts_it_was_decided_on() {
+    let t = T::new(&[]);
+    let (n, repo) = branch_repo(&t).await;
+    git_in(&repo, &["checkout", "-q", "main"]);
+    put(&t.root, "work/proj/c.txt", b"c\n");
+    git_in(&repo, &["add", "."]);
+    git_in(&repo, &["commit", "-q", "-m", "c"]);
+    git_in(&repo, &["checkout", "-q", "steve/st-1"]);
+    let f = n.git_facts(query(vec![])).await.unwrap();
+
+    // HEAD moved since the facts: refused, nothing done
+    put(&t.root, "work/proj/b.txt", b"b2\n");
+    git_in(&repo, &["commit", "-q", "-am", "b2"]);
+    let moved = git_in(&repo, &["rev-parse", "HEAD"]);
+    let e = n
+        .git_apply(now_cmd("op_rb1", rebase_onto(&f, "main")))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::Stale);
+    assert_eq!(git_in(&repo, &["rev-parse", "HEAD"]), moved);
+
+    // on the facts as they are: rebased, the new facts in the result; the same command again is
+    // the same answer, not a second rebase
+    let f = n.git_facts(query(vec![])).await.unwrap();
+    let rb2 = now_cmd("op_rb2", rebase_onto(&f, "main"));
+    n.git_apply(rb2.clone()).await.unwrap();
+    let Observed::Finished {
+        outcome: Outcome::Succeeded,
+        result: Some(OperationResult::Git(after)),
+        ..
+    } = finished(&n, "op_rb2").await
+    else {
+        panic!("not rebased")
+    };
+    assert_ne!(after.head, f.head);
+    assert_eq!(git_in(&repo, &["rev-parse", "HEAD"]), after.head);
+    git_in(&repo, &["merge-base", "--is-ancestor", "main", "HEAD"]);
+    let again = n.git_apply(rb2).await.unwrap();
+    assert!(again.state.is_finished());
+    assert_eq!(git_in(&repo, &["rev-parse", "HEAD"]), after.head);
+
+    // a conflict is backed out and named
+    git_in(&repo, &["checkout", "-q", "main"]);
+    put(&t.root, "work/proj/b.txt", b"main\n");
+    git_in(&repo, &["add", "."]);
+    git_in(&repo, &["commit", "-q", "-m", "main b"]);
+    git_in(&repo, &["checkout", "-q", "steve/st-1"]);
+    let f = n.git_facts(query(vec![])).await.unwrap();
+    n.git_apply(now_cmd("op_rb3", rebase_onto(&f, "main")))
+        .await
+        .unwrap();
+    let Observed::Finished {
+        outcome: Outcome::Failed,
+        error: Some(e),
+        ..
+    } = finished(&n, "op_rb3").await
+    else {
+        panic!("a conflict rebased")
+    };
+    assert_eq!(
+        (e.code, e.safe_detail.as_str()),
+        (ErrorCode::Conflict, "b.txt")
+    );
+    assert_eq!(git_in(&repo, &["rev-parse", "HEAD"]), f.head);
+    assert_eq!(git_in(&repo, &["status", "--porcelain"]), "");
+
+    // uncommitted tracked changes: not touched
+    put(&t.root, "work/proj/b.txt", b"dirty\n");
+    let f = n.git_facts(query(vec![])).await.unwrap();
+    n.git_apply(now_cmd("op_rb4", rebase_onto(&f, "main")))
+        .await
+        .unwrap();
+    let Observed::Finished { error: Some(e), .. } = finished(&n, "op_rb4").await else {
+        panic!("a dirty tree rebased")
+    };
+    assert_eq!(e.code, ErrorCode::Busy);
+    assert_eq!(std::fs::read(repo.join("b.txt")).unwrap(), b"dirty\n");
 }

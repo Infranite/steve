@@ -16,6 +16,7 @@ mod models;
 mod module_undo;
 mod modules;
 mod new_cycle;
+mod node_git;
 mod outbox;
 mod queued;
 mod release_cleanup;
@@ -28,6 +29,7 @@ mod supersede;
 mod takeover;
 mod thread;
 mod workspace;
+mod worktrees;
 
 use crate::repo::{NewDecision, NewItem, NewSession, Release, WS};
 use crate::testkit::Kit;

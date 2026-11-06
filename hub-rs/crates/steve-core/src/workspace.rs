@@ -471,17 +471,28 @@ impl Core {
         if free >= pol.floor {
             return Ok(());
         }
+        Err(crate::error::msg(self.disk_low(free)))
+    }
+
+    /// Why no new worktree is made with `free` bytes left (below the floor), and a pass starts
+    /// giving space back.
+    pub(crate) fn disk_low(&self, free: u64) -> String {
         let c = self.clone();
         crate::detach(move || {
             if let Err(e) = c.reclaim_workspaces() {
                 tracing::error!("reclaim {e}");
             }
         });
-        Err(crate::error::msg(steve_i18n::t!(
+        steve_i18n::t!(
             "core.workspace.disk_low",
             free = human(free),
-            floor = human(pol.floor)
-        )))
+            floor = human(self.config().disk.floor)
+        )
+    }
+
+    /// The free bytes where worktrees go, if they can be told.
+    pub(crate) fn worktrees_free(&self) -> Option<u64> {
+        space(&self.config().worktrees).map(|s| s.0)
     }
 
     /// Deletes what is in the trash on a thread of its own, unless a pass is already running (it takes

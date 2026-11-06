@@ -2,7 +2,10 @@
 //! images as `-i` files.
 
 use crate::usage::codex_usage;
-use crate::{GATEWAY_SYSTEM, Image, OnText, PrintError, PrintRun, Ran, Reply, ToolMode, command};
+use crate::{
+    GATEWAY_SYSTEM, Hooks, Image, PrintError, PrintRun, Ran, Reply, Stderr, ToolMode, command,
+    read_to_exit, untracked,
+};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -206,8 +209,8 @@ pub async fn instructions_file(cwd: &Path, head: &str) -> std::io::Result<PathBu
 
 /// One `codex exec` run ([`codex_args`]) with the message on stdin. Codex reports whole messages, not
 /// deltas: `on_text` hears each message when it is complete.
-pub(crate) async fn run(run: &PrintRun<'_>, on_text: Option<OnText<'_>>) -> Ran {
-    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
+pub(crate) async fn run(run: &PrintRun<'_>, hooks: Hooks<'_>) -> Ran {
+    use tokio::io::AsyncWriteExt;
     let tools = run.tools == ToolMode::ReadOnly;
     let (instructions, input) = if tools {
         let input = match run.head {
@@ -230,7 +233,7 @@ pub(crate) async fn run(run: &PrintRun<'_>, on_text: Option<OnText<'_>>) -> Ran 
             Err(e) => return Ran::failed(PrintError::Io(e)),
         }
     };
-    let mut cmd = command(run.executable, run.cwd);
+    let mut cmd = command(run.executable, run.cwd, hooks.spawned.is_some());
     cmd.args(codex_args(
         run.cwd,
         run.model,
@@ -246,29 +249,31 @@ pub(crate) async fn run(run: &PrintRun<'_>, on_text: Option<OnText<'_>>) -> Ran 
         Ok(c) => c,
         Err(e) => return Ran::failed(PrintError::Io(e)),
     };
-    let (Some(mut stdin), Some(stdout), Some(mut stderr)) =
+    if !hooks.spawned(&child) {
+        let _ = child.kill().await;
+        return Ran::failed(untracked());
+    }
+    let (Some(mut stdin), Some(stdout), Some(stderr)) =
         (child.stdin.take(), child.stdout.take(), child.stderr.take())
     else {
         return Ran::failed(PrintError::NoOutput);
     };
-    let err = tokio::spawn(async move {
-        let mut s = String::new();
-        let _ = stderr.read_to_string(&mut s).await;
-        s
-    });
+    let err = Stderr::read(stderr);
     let read = async {
         stdin.write_all(input.as_bytes()).await?;
         drop(stdin);
-        let mut lines = tokio::io::BufReader::new(stdout).lines();
         let mut s = CodexStreamed::default();
-        while let Some(l) = lines.next_line().await? {
-            if s.line(&l)
-                && let Some(f) = on_text
+        // every message comes whole: each one is a new message
+        let mut message = 0;
+        let status = read_to_exit(stdout, &mut child, hooks.spawned.is_some(), |l| {
+            if s.line(l)
+                && let Some(f) = hooks.text
             {
-                f(&s.text);
+                message += 1;
+                f(message, &s.text);
             }
-        }
-        let status = child.wait().await?;
+        })
+        .await?;
         Ok::<_, std::io::Error>((s, status))
     };
     let (s, status) = match tokio::time::timeout(run.timeout, read).await {
@@ -277,7 +282,7 @@ pub(crate) async fn run(run: &PrintRun<'_>, on_text: Option<OnText<'_>>) -> Ran 
         Ok(Ok(x)) => x,
     };
     if s.usage.is_none() && s.error.is_none() && !status.success() {
-        let e = err.await.unwrap_or_default();
+        let e = err.after_exit(hooks.spawned.is_some()).await;
         return Ran::failed(PrintError::Failed(e.trim().to_string()));
     }
     s.ran(run.model)

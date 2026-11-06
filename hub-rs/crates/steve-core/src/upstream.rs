@@ -4,7 +4,7 @@
 //! default branch, and a pushed tag that contains it).
 //!
 //! [`own_change`] and [`describe_change`] are local and run inside the critical section like the rest of
-//! the git work. [`probe`] talks to the remote (fetch, `ls-remote`) with a deadline and must never run
+//! the git work (for an item on a Node, `node_git` asks its Node the same off the lock). [`probe`] talks to the remote (fetch, `ls-remote`) with a deadline and must never run
 //! under the core's lock: callers run it on a thread of its own and come back with the result.
 
 use std::path::Path;
@@ -118,24 +118,44 @@ pub fn parse(f: &str) -> Print<'_> {
 /// What changed between two fingerprints of the worktree, in words for the timeline and the agent:
 /// the files of the item's own change that differ, and whether the branch moved onto a new base.
 pub fn describe_change(dir: &Path, frozen: &str, now: &str) -> String {
-    let (a, b) = (parse(frozen), parse(now));
-    let names = |args: &[&str]| -> Vec<String> {
-        git(dir, args)
+    describe_with(frozen, now, |from, to| {
+        git(dir, &["diff", "--name-only", from, to])
             .map(|s| s.lines().map(String::from).collect())
             .unwrap_or_default()
-    };
+    })
+}
+
+/// The pairs of trees (or commits) [`describe_with`] compares, for `frozen` and `now`.
+pub(crate) fn describe_pairs(frozen: &str, now: &str) -> Vec<(String, String)> {
+    let (a, b) = (parse(frozen), parse(now));
+    let mut v = vec![(a.tree.to_string(), b.tree.to_string())];
+    if let (Some((ba, _)), Some((bb, _))) = (a.own, b.own) {
+        v.push((ba.to_string(), a.tree.to_string()));
+        v.push((bb.to_string(), b.tree.to_string()));
+    }
+    v
+}
+
+/// [`describe_change`] with the files that differ between two trees given by `names` (empty when
+/// it can't tell).
+pub(crate) fn describe_with(
+    frozen: &str,
+    now: &str,
+    names: impl Fn(&str, &str) -> Vec<String>,
+) -> String {
+    let (a, b) = (parse(frozen), parse(now));
     let mut parts = vec![];
     if let (Some((ba, _)), Some((bb, _))) = (a.own, b.own)
         && ba != bb
     {
         parts.push("分支换到了新的基线".to_string());
     }
-    let changed = names(&["diff", "--name-only", a.tree, b.tree]);
+    let changed = names(a.tree, b.tree);
     /* only what the item itself touches, then or now: a new base brings other people's files along */
     let own: Vec<String> = match (a.own, b.own) {
         (Some((ba, _)), Some((bb, _))) => {
-            let mut v = names(&["diff", "--name-only", ba, a.tree]);
-            v.extend(names(&["diff", "--name-only", bb, b.tree]));
+            let mut v = names(ba, a.tree);
+            v.extend(names(bb, b.tree));
             v
         }
         _ => changed.clone(),
