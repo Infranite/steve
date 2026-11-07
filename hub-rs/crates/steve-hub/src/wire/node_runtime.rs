@@ -865,7 +865,7 @@ impl NodeRuntime {
         let today = if self.is_remote() {
             None
         } else {
-            match self.store.reader(|c| super::node_binding::root_paths_in(c)) {
+            match self.store.reader(super::node_binding::root_paths_in) {
                 Ok((rw, ro)) => {
                     let extra = self.configured_roots.get().cloned().unwrap_or_default();
                     Some(rw.into_iter().chain(ro).chain(extra).collect::<Vec<_>>())

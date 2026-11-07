@@ -445,7 +445,7 @@ pub(crate) fn root_paths_in(
 /// project added after boot binds without a restart and an archived one is refused (with the
 /// directories of its items and their sessions).
 pub(crate) fn roots(store: &Store, extra: &[PathBuf]) -> Result<Vec<steve_node::Root>, StoreError> {
-    let (rw, ro) = store.reader(|c| root_paths_in(c))?;
+    let (rw, ro) = store.reader(root_paths_in)?;
     let mut rw: Vec<PathBuf> = rw.into_iter().map(PathBuf::from).collect();
     rw.extend(extra.iter().cloned());
     rw.sort();
